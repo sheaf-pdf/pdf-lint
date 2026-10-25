@@ -1,0 +1,107 @@
+name: Release
+
+# On a version tag: an archive for each platform, each holding pdf-lint
+# and the qpdf it decodes with (release/qpdf.sh), each checked to run as
+# it's unpacked (release/smoke.sh); then a draft GitHub release with them,
+# to look over and publish by hand. Run by hand, it builds and checks the
+# archives without drafting a release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  archive:
+    name: Archive for ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static, so that the archive needs no more of the system than
+          # qpdf's Linux build does: glibc 2.34.
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          # Arm runners are free for public repositories.
+          - platform: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - platform: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          # Built on Apple silicon, and checked under Rosetta.
+          - platform: macos-x86_64
+            os: macos-15
+            target: x86_64-apple-darwin
+          - platform: windows-x86_64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Check the tag is the crate's version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pdf-lint/Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "The tag is $GITHUB_REF_NAME, and pdf-lint's version $version" >&2
+            exit 1
+          fi
+      - name: Install Rosetta
+        if: matrix.platform == 'macos-x86_64'
+        run: sudo softwareupdate --install-rosetta --agree-to-license
+      - name: Build
+        run: cargo build --release --locked -p pdf-lint --target ${{ matrix.target }}
+      - name: Archive, and check it runs
+        run: >-
+          release/dist.sh ${{ matrix.platform }}
+          target/${{ matrix.target }}/release/pdf-lint${{ runner.os == 'Windows' && '.exe' || '' }}
+          dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    name: Draft the release
+    needs: archive
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Draft a release with the archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          Each archive holds `pdf-lint` and, in `qpdf/`, the qpdf it decodes with: qpdf 12.4.2, from qpdf's official release, with the notices and licenses that go with it (`qpdf/NOTICE.md`). Unpack it anywhere, keeping `qpdf/` beside the binary. The Linux archives need glibc 2.34 or later. Beside each archive, its SHA-256.
+
+          The Arlington PDF Model it checks against is embedded: its NOTICE.txt is `ARLINGTON-NOTICE.txt`, and what the embedded copy corrects and adds, where the model contradicts ISO 32000-2 or lacks what a reference defines, is `ARLINGTON-CORRECTIONS.tsv` and `ARLINGTON-ADDITIONS/`. `pdf-lint --version` says the model's commit and hash.
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "pdf-lint ${GITHUB_REF_NAME#v}" --notes-file notes.md

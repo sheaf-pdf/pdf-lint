@@ -1,0 +1,39 @@
+# The fuzz targets, in cargo-fuzz's layout, outside the workspace: they
+# build on nightly with libFuzzer. Locally, `just fuzz tokenize` or
+# `just fuzz check`, or:
+#
+#   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
+#
+# `tokenize` calls `pdf_tokenizer::fuzz::tokenize`, which a stable unit test
+# (`random_inputs_keep_every_promise`) runs too; `check` calls
+# `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
+# unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
+# on mutated seeds.
+[package]
+name = "pdf-tokenizer-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pdf-lint = { path = "../crates/pdf-lint" }
+pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
+
+[[bin]]
+name = "tokenize"
+path = "fuzz_targets/tokenize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "check"
+path = "fuzz_targets/check.rs"
+test = false
+doc = false
+bench = false

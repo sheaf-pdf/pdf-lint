@@ -1,0 +1,26 @@
+[package]
+name = "pdf-lint"
+version = "0.1.0"
+edition = "2024"
+# For let-chains and `as_chunks`.
+rust-version = "1.88"
+# As the model it embeds and the parts adapted from TestGrammar are.
+license = "Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "Checks PDF files against the Arlington PDF Model"
+keywords = ["pdf", "lint", "validation", "arlington", "iso-32000"]
+categories = ["command-line-utilities", "development-tools::testing"]
+# Only what users need. The model is embedded, and `cargo install` has no
+# checkout to read it from.
+include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md", "/LICENSE-APACHE"]
+# crates.io follows the first GitHub release, and pdf-tokenizer goes first.
+publish = false
+
+[dependencies]
+anyhow = "1"
+pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
+
+[lints.rust]
+unsafe_code = "forbid"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

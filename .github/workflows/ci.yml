@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Each step runs a recipe from the justfile, so `just ci` locally checks the
+# same things.
+jobs:
+  check:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: extractions/setup-just@v4
+      # The checker's tests decode through qpdf: the one the release
+      # archives bundle, at its pinned version.
+      - name: Install qpdf
+        run: |
+          release/qpdf.sh linux-x86_64 "$RUNNER_TEMP/qpdf"
+          echo "PDF_LINT_QPDF=$RUNNER_TEMP/qpdf/bin/qpdf" >> "$GITHUB_ENV"
+      - name: Check formatting
+        run: just fmt
+      - name: Clippy
+        run: just clippy
+      - name: Test (including doctests)
+        run: just test
+      - name: Build documentation
+        run: just doc
+
+  # The release archive for Linux x86_64, as the release workflow builds
+  # each platform's, checked to run as it's unpacked.
+  dist:
+    name: Release archive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: extractions/setup-just@v4
+      - name: Build and check the archive
+        run: just dist
+
+  # The tokenizer's own promises: no std or alloc, and its oldest Rust.
+  # Neither job needs qpdf, and neither ever will.
+  tokenizer-no-std:
+    name: Tokenizer without std or alloc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+      - uses: extractions/setup-just@v4
+      - name: Build for thumbv6m-none-eabi
+        run: just tokenizer-no-std
+
+  tokenizer-msrv:
+    name: Tokenizer on its minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in crates/pdf-tokenizer/Cargo.toml,
+      # which `just tokenizer-msrv` reads.
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just tokenizer-msrv

@@ -1,0 +1,20 @@
+[package]
+name = "pdf-tokenizer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "A lossless, zero-copy PDF tokenizer that never rejects and never repairs"
+keywords = ["pdf", "lexer", "tokenizer", "no-std"]
+categories = ["parser-implementations", "no-std::no-alloc"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

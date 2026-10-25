@@ -1,0 +1,7 @@
+target
+corpus
+artifacts
+coverage
+
+# What `just fuzz check` writes for the fuzzer to begin from.
+seeds

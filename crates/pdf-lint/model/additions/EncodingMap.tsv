@@ -1,0 +1,2 @@
+Key	Type	SinceVersion	DeprecatedIn	Required	IndirectReference	Inheritable	DefaultValue	PossibleValues	SpecialCase	Link	Note
+*	dictionary	1.0		FALSE	FALSE	FALSE				[Encoding]	pdf-lint: the Encoding resource is a dictionary of named encodings (Adobe PDF Reference 1.0, 6.8.3, which Resource/Encoding cites), as Font's is of fonts; as Acrobat writes one in a form's DR (PDF Reference 1.7, implementation note 113)

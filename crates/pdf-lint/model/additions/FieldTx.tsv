@@ -1,0 +1,2 @@
+Key	Type	SinceVersion	DeprecatedIn	Required	IndirectReference	Inheritable	DefaultValue	PossibleValues	SpecialCase	Link	Note
+DR	dictionary	1.2	1.5	FALSE	FALSE	TRUE				[Resource]	pdf-lint: PDF Reference 1.4 Table 8.51, in fields containing variable text (there Required; inheritable, but never implemented, so not required here, the form's DR its document-wide default); obsolete from PDF 1.5 (PDF Reference 1.7, implementation note 118)

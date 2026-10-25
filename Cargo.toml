@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+# pdf-tokenizer inherits nothing from here, so it can move to a repository
+# of its own unchanged.
+members = ["crates/pdf-tokenizer", "crates/pdf-lint"]
+# fuzz/ builds on nightly, with libFuzzer.
+exclude = ["fuzz"]
