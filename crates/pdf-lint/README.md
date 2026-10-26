@@ -114,7 +114,7 @@ Each [release](https://github.com/sheaf-pdf/pdf-lint/releases) has an archive fo
 
 The Linux binary is static, and qpdf's needs glibc 2.34 or later; Windows needs Windows 10 or later. On macOS, an archive a browser downloaded is quarantined, and its binaries won't run unsigned until `xattr -dr com.apple.quarantine` clears the folder; one fetched with `curl` or `gh release download` isn't.
 
-From source, `cargo install --path crates/pdf-lint` builds the binary, which then runs the qpdf on the `PATH`: install qpdf 11.9 or later beside it, or name one with `--qpdf` or `PDF_LINT_QPDF`. `just dist` builds this platform's archive, as the release workflow builds each, and `release/qpdf.sh` lays out the pinned qpdf alone.
+From source, `cargo install pdf-lint` builds the binary from crates.io, with Rust 1.88 or later, and `cargo install --path crates/pdf-lint` from a checkout. Either runs the qpdf on the `PATH`: install qpdf 11.9 or later beside it, or name one with `--qpdf` or `PDF_LINT_QPDF`. `just dist` builds this platform's archive, as the release workflow builds each, and `release/qpdf.sh` lays out the pinned qpdf alone.
 
 ## Readers
 

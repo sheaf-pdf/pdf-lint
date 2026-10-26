@@ -1,6 +1,8 @@
 name: Release
 
-# On a version tag: an archive for each platform, each holding pdf-lint
+# On a version tag of pdf-lint's (each crate's tags are its name, -v and
+# its version: pdf-lint-v0.1.0, and pdf-tokenizer-v0.1.0, which starts
+# nothing here): an archive for each platform, each holding pdf-lint
 # and the qpdf it decodes with (release/qpdf.sh), each checked to run as
 # it's unpacked (release/smoke.sh); then a draft GitHub release with them,
 # to look over and publish by hand. Run by hand, it builds and checks the
@@ -8,7 +10,7 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["pdf-lint-v*"]
   workflow_dispatch:
 
 permissions:
@@ -58,7 +60,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pdf-lint/Cargo.toml | head -n 1)
-          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+          if [ "$GITHUB_REF_NAME" != "pdf-lint-v$version" ]; then
             echo "The tag is $GITHUB_REF_NAME, and pdf-lint's version $version" >&2
             exit 1
           fi
@@ -104,4 +106,4 @@ jobs:
           EOF
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-            --title "pdf-lint ${GITHUB_REF_NAME#v}" --notes-file notes.md
+            --title "pdf-lint ${GITHUB_REF_NAME#pdf-lint-v}" --notes-file notes.md

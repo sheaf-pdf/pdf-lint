@@ -13,8 +13,6 @@ categories = ["command-line-utilities", "development-tools::testing"]
 # Only what users need. The model is embedded, and `cargo install` has no
 # checkout to read it from.
 include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md", "/LICENSE-APACHE"]
-# crates.io follows the first GitHub release, and pdf-tokenizer goes first.
-publish = false
 
 [dependencies]
 anyhow = "1"
