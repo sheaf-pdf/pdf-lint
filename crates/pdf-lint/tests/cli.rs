@@ -812,6 +812,24 @@ fn a_report_no_one_reads_stops_without_a_panic() {
 }
 
 #[test]
+fn the_version_or_usage_no_one_reads_exits_0_without_a_panic() {
+    for flag in ["--version", "--help"] {
+        // The pipe's reader gone before a line is written, as with `head`
+        // given a wrong option.
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let out = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
+            .arg(flag)
+            .stdout(writer)
+            .output()
+            .unwrap();
+        let stderr = text(&out.stderr);
+        assert!(!stderr.contains("panicked"), "{flag}: {stderr}");
+        assert_eq!(out.status.code(), Some(0), "{flag}: {stderr}");
+    }
+}
+
+#[test]
 fn json_reports_a_line_for_each_file() {
     let faulty = file(&[
         CATALOG,

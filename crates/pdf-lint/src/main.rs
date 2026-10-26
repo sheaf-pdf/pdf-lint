@@ -215,26 +215,26 @@ fn args() -> Result<Option<Args>> {
         };
         match word.to_str() {
             Some("--version" | "-V") => {
-                println!("pdf-lint {}", env!("CARGO_PKG_VERSION"));
                 let hash = pdf_lint::grammar().hash();
                 let n = pdf_lint::grammar::corrections().len();
                 let m = pdf_lint::grammar::additions().len();
-                println!(
-                    "Arlington PDF Model {}, {n} cells corrected and {m} rows added (xxh64 {hash:016x})",
-                    pdf_lint::COMMIT
-                );
                 let qpdf = match bundled_unless_named() {
                     Some(program) => Qpdf::new("").program(program),
                     None => Qpdf::new(""),
                 };
-                match qpdf.ready() {
-                    Ok(version) => println!("{version} ({})", qpdf.program_path().display()),
-                    Err(why) => println!("no qpdf to decode with: {why}"),
-                }
+                let qpdf = match qpdf.ready() {
+                    Ok(version) => format!("{version} ({})", qpdf.program_path().display()),
+                    Err(why) => format!("no qpdf to decode with: {why}"),
+                };
+                print(&format!(
+                    "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (xxh64 {hash:016x})\n{qpdf}\n",
+                    env!("CARGO_PKG_VERSION"),
+                    pdf_lint::COMMIT
+                ));
                 return Ok(None);
             }
             Some("--help" | "-h") => {
-                println!("{USAGE}");
+                print(&format!("{USAGE}\n"));
                 return Ok(None);
             }
             Some("--hold") => args.hold = Some(value(&mut words, "--hold")?),
@@ -324,6 +324,12 @@ fn args() -> Result<Option<Args>> {
         bail!("--last-update and --baseline: the update's baseline is the revision before it");
     }
     Ok(Some(args))
+}
+
+/// `text` on stdout, as much as is read of it: no one reading any more,
+/// as when it's piped to `head`, isn't an error.
+fn print(text: &str) {
+    let _ = io::stdout().lock().write_all(text.as_bytes());
 }
 
 fn run() -> Result<ExitCode> {

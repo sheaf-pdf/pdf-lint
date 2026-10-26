@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: `--version` or `--help` piped to a reader that stops,** as `head`, panicked when the pipe closed. Now it stops quietly and exits 0, as a report already did.
+
 ## 0.1.0 (2026-10-25)
 
 - **The model.** The Arlington PDF Model's `tsv/latest` at `d148fee`, embedded by `build.rs`; `grammar()` reads it once, `Grammar::load` a newer checkout.
