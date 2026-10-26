@@ -53,6 +53,7 @@ test-oldest-qpdf:
         echo "be5eeaf0032a86b573680cb12eb8499b74172d0af1b23a7d0a3648b01708569d  $work/$zip" \
             | sha256sum --check --quiet
         rm -rf "$dir"
+        mkdir -p "$dir"
         unzip -q "$work/$zip" -d "$dir"
     fi
     PDF_LINT_QPDF="$dir/bin/qpdf" cargo test --locked -p pdf-lint
