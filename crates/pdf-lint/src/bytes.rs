@@ -1286,16 +1286,46 @@ impl<'a> Reader<'a> {
             }
             before = [before[1], Some(token)];
         }
+        // The last trailer, with what it lacks of the document's entries
+        // from those before it, newest first: a linearized file's last
+        // may have only /Size, its first page's the rest.
+        let mut found: Option<Object> = None;
+        let mut taken = Vec::new();
         for at in trailers.into_iter().rev() {
-            if let Ok(object) = self.value(&mut Tokenizer::at(self.file, at), Place::FILE, 0)
-                && object.as_dict().is_some()
-            {
-                return Trailer {
-                    stream: None,
-                    object,
-                    unwritten: Some(why),
-                };
+            let Ok(object) = self.value(&mut Tokenizer::at(self.file, at), Place::FILE, 0) else {
+                continue;
+            };
+            let Value::Dict(earlier) = object.value.clone() else {
+                continue;
+            };
+            let Some(Object {
+                value: Value::Dict(last),
+                ..
+            }) = &mut found
+            else {
+                found = Some(object);
+                continue;
+            };
+            for key in [&b"Root"[..], b"Encrypt", b"ID", b"Info"] {
+                if let (false, Some(entry)) = (last.has(key), earlier.entry(key)) {
+                    last.push_entry(entry.clone());
+                    taken.push(format!("/{}", String::from_utf8_lossy(key)));
+                }
             }
+        }
+        if let Some(object) = found {
+            if !taken.is_empty() {
+                let message = format!(
+                    "the last trailer lacks {}, which it's given from an earlier one",
+                    taken.join(", ")
+                );
+                self.warn(None, object.at, message);
+            }
+            return Trailer {
+                stream: None,
+                object,
+                unwritten: Some(why),
+            };
         }
         let mut offsets: Vec<(usize, ObjectId)> = (self.entries.iter())
             .filter_map(|(&n, &(g, entry))| match entry {
@@ -2889,6 +2919,29 @@ mod tests {
         let doc = read(&file);
         assert_eq!(doc.trailer.unwritten.as_deref(), Some("no startxref"));
         assert_eq!(doc.trailer.stream, Some((6, 0)));
+    }
+
+    #[test]
+    fn a_scanned_files_last_trailer_takes_what_it_lacks_from_an_earlier_one() {
+        // As a linearized file's: the first page's trailer has /Root and
+        // /ID, the last only /Size; and startxref misses.
+        let mut file = write::file("1.7", &clean(), root(), Xref::Table);
+        let at = rfind(&file, b"startxref").unwrap();
+        file.truncate(at);
+        file.extend_from_slice(b"trailer\n<< /Size 6 /Root 9 0 R >>\ntrailer\n<< /Size 6 >>\nstartxref\n999999\n%%EOF\n");
+        let doc = read(&file);
+        let root = doc.trailer.dict().get(b"Root").and_then(|r| match r.value {
+            Value::Ref(id) => Some(id),
+            _ => None,
+        });
+        // The newest earlier trailer's /Root, said.
+        assert_eq!(root, Some((9, 0)));
+        let message = "the last trailer lacks /Root, which it's given from an earlier one";
+        assert!(
+            doc.warnings.iter().any(|w| w.message == message),
+            "{:?}",
+            doc.warnings
+        );
     }
 
     #[test]
