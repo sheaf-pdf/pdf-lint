@@ -1,11 +1,27 @@
 //! LZW's and Flate's predictors (ISO 32000-2, 7.4.4.4), undone.
 
-use crate::{Fault, Layout, Out, Predictor};
+use crate::{Fault, Filter, Layout, Out, Predictor};
+
+/// The limit on what `filter` gives its predictor, for a `limit` on what
+/// the predictor gives: a PNG predictor's tags besides, one a row.
+pub(crate) fn before(limit: usize, filter: &Filter) -> usize {
+    let (Filter::Lzw { predictor, .. } | Filter::Flate { predictor }) = filter else {
+        return limit;
+    };
+    match predictor {
+        Predictor::Png(layout) => match Rows::of(*layout) {
+            Some(rows) => limit.saturating_add(limit / rows.len + 1),
+            None => limit,
+        },
+        _ => limit,
+    }
+}
 
 /// `data` with `predictor` undone, row by row, in place, so that it takes
 /// no memory but `data`'s; a last row that's short is read with zeros for
-/// what it lacks, as qpdf reads it.
-pub(crate) fn undo(mut data: Vec<u8>, predictor: Predictor, out: &mut Out) {
+/// what it lacks, as qpdf reads it, unless the data was `cut` off by a
+/// fault, when it isn't read.
+pub(crate) fn undo(mut data: Vec<u8>, predictor: Predictor, cut: bool, out: &mut Out) {
     let (layout, png) = match predictor {
         Predictor::None => {
             out.data = data;
@@ -20,7 +36,10 @@ pub(crate) fn undo(mut data: Vec<u8>, predictor: Predictor, out: &mut Out) {
     };
     // PNG's rows begin with a byte saying how they're predicted.
     let stride = rows.len.saturating_add(usize::from(png));
-    let count = data.len().div_ceil(stride);
+    let count = match cut {
+        true => data.len() / stride,
+        false => data.len().div_ceil(stride),
+    };
     // As many rows as the limit allows.
     let undone = count.min(out.limit / rows.len);
     if undone < count {
@@ -135,7 +154,7 @@ fn undo_tiff(row: &mut [u8], layout: Layout) {
         bits => {
             let bits = bits as usize;
             let mask = (1u8 << bits) - 1;
-            let samples = colors * layout.columns as usize;
+            let samples = colors.saturating_mul(layout.columns as usize);
             // Sample `i`'s byte, and its shift from the byte's low end.
             let at = |i: usize| (i * bits / 8, 8 - bits - i * bits % 8);
             for i in colors..samples {
@@ -252,15 +271,31 @@ mod tests {
     }
 
     #[test]
-    fn the_limit_keeps_the_rows_it_allows() {
-        // The limit is on what Flate gives the predictor too, tags and
-        // all: two rows of three bytes.
+    fn the_limit_is_on_what_the_predictor_gives_tags_aside() {
         let png = Predictor::Png(layout(1, 8, 2));
+        let flate = [Filter::Flate { predictor: png }];
         let compressed =
             miniz_oxide::deflate::compress_to_vec_zlib(&[1, 1, 1, 2, 1, 1, 0, 9, 9], 6);
-        let error = decode(&compressed, &[Filter::Flate { predictor: png }], 6).unwrap_err();
+        assert_eq!(decode(&compressed, &flate, 6).unwrap(), [1, 2, 2, 3, 9, 9]);
+        // Two rows of two bytes, no more.
+        let error = decode(&compressed, &flate, 5).unwrap_err();
         assert_eq!(error.data, [1, 2, 2, 3]);
         assert_eq!(error.faults, [(0, Fault::Limit)]);
+    }
+
+    #[test]
+    fn a_row_a_fault_cut_off_isnt_read() {
+        // Seven bytes in a stored block, then a block of the reserved
+        // type: the third row, cut off, isn't read as a short one.
+        let mut data = vec![0x78, 0x01, 0x00, 7, 0, !7, 0xff, 1, 1, 1, 2, 1, 1, 0];
+        data.push(0x07);
+        let png = Predictor::Png(layout(1, 8, 2));
+        let error = decode(&data, &[Filter::Flate { predictor: png }], 100).unwrap_err();
+        assert_eq!(error.data, [1, 2, 2, 3]);
+        assert!(
+            matches!(error.faults[..], [(0, Fault::Corrupt { .. })]),
+            "{error:?}"
+        );
     }
 
     #[test]

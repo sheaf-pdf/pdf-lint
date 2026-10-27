@@ -82,7 +82,7 @@ impl Bits<'_> {
     /// The next `width` bits, unless the data ends first.
     fn read(&mut self, width: u32) -> Option<u16> {
         let end = self.at + width as usize;
-        if end > self.data.len() * 8 {
+        if end.div_ceil(8) > self.data.len() {
             return None;
         }
         let code = (self.at..end).fold(0, |code, i| {

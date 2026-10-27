@@ -7,7 +7,7 @@ It's made for a checker as much as a reader. Data that breaks a rule still decod
 ## What it promises
 
 - **Every fault said, what decoded kept.** `decode` gives the data, or an `Error` with both what decoded and each `Fault`, with the filter it's in: a byte a filter doesn't take, a missing end-of-data marker, an LZW code not in the table, corrupt or truncated deflate data, a checksum that doesn't match, a PNG row tag that isn't one, a short last row. Each fault's documentation says whether the filter stopped there, keeping what it decoded before, or read on.
-- **A limit on what comes out.** No filter's output is over the limit the caller gives, an LZW or Flate filter's before its predictor included, so a small stream can't decode into more memory than the caller allows: a filter holds its input and its output, and nothing the size of either besides. Data of just the limit's length decodes whole.
+- **A limit on what comes out.** No filter's output is over the limit the caller gives (an LZW or Flate filter's before its predictor is allowed a PNG predictor's tag a row besides), so a small stream can't decode into more memory than the caller allows: a filter holds its input and its output, whose buffer grows by doubling. Data of just the limit's length decodes whole.
 - **Parameters, not dictionaries.** A `Filter` says what its `/DecodeParms` do. Reading them from a stream's dictionary is the caller's, so it works with any object model.
 - **The same result every time,** with nothing but the input deciding it: no I/O, no global state.
 
@@ -43,7 +43,7 @@ assert_eq!(error.data, b"Hello"); // read without its `>`
 
 ## How it reads what the spec leaves open
 
-Where ISO 32000-2 doesn't say how to read a fault, it's read as qpdf reads it: a PNG row whose tag isn't 0 to 4 as predicted by nothing; a short last row with zeros for what it lacks; zlib data whose checksum doesn't match, or that ends early, as far as it decompressed. Where a fault stops a filter, what decoded before it is kept, which qpdf, giving the data undecoded instead, doesn't keep.
+Where ISO 32000-2 doesn't say how to read a fault, it's read as qpdf reads it: a PNG row whose tag isn't 0 to 4 as predicted by nothing; a short last row with zeros for what it lacks (but a row a fault cut off isn't read); zlib data whose checksum doesn't match, or that ends early, as far as it decompressed. Where a fault stops a filter, what decoded before it is kept, which qpdf, giving the data undecoded instead, doesn't keep.
 
 Where qpdf departs from the spec, it follows the spec: `ASCIIHexDecode` and `ASCII85Decode` ignore PDF's white-space (NUL among it, vertical tab not); a run-length of 128 ends the data; TIFF's predictor takes 1, 2, 4, 8 or 16 bits a sample.
 

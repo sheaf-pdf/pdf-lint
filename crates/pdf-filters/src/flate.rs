@@ -19,7 +19,7 @@ pub(crate) fn decode(data: &[u8], out: &mut Out) {
     // Grown as it fills, to a byte past the limit, so that data of just
     // the limit's length decompresses whole; what's written is the front.
     let most = out.limit.saturating_add(1);
-    let mut buffer = vec![0; data.len().saturating_mul(4).max(64).min(most)];
+    let mut buffer = vec![0; data.len().max(64).min(most)];
     let (mut read, mut written) = (0, 0);
     let mut fault = loop {
         let (status, used, made) =
@@ -36,8 +36,14 @@ pub(crate) fn decode(data: &[u8], out: &mut Out) {
                 break Some(Fault::Truncated);
             }
             TINFLStatus::Adler32Mismatch => break Some(Fault::Checksum),
-            // Failed, BadParam, and whatever a later version adds.
-            _ => break Some(Fault::Corrupt { at: read }),
+            // Failed, BadParam, and whatever a later version adds; the
+            // decompressor takes a byte at a time, so the fault's in the
+            // last it took.
+            _ => {
+                break Some(Fault::Corrupt {
+                    at: read.saturating_sub(1),
+                });
+            }
         }
     };
     if written > out.limit {

@@ -13,7 +13,7 @@
 //!   doesn't keep.
 //! - **A limit on what comes out** of each filter, so what a small stream
 //!   decodes into is the caller's to bound: a filter holds its input and
-//!   its output, and nothing the size of either besides.
+//!   its output, whose buffer grows by doubling.
 //! - **Parameters, not dictionaries.** A [`Filter`] says what its
 //!   `/DecodeParms` do; reading them from a dictionary is the caller's, so
 //!   it works with any object model.
@@ -133,7 +133,8 @@ pub enum Fault {
     /// decoded.
     NoEnd,
     /// `~` at `at`, in `ASCII85Decode`, not followed by `>`. It stopped
-    /// there, without what was decoded of the group it's in.
+    /// there: followed by something else, without what was decoded of the
+    /// group it's in; at the data's end, with it.
     BrokenEnd {
         /// Where, in the filter's input.
         at: usize,
@@ -173,7 +174,8 @@ pub enum Fault {
     Header,
     /// Deflate data that isn't, at byte `at`. It stopped there.
     Corrupt {
-        /// Where, in the filter's input, as near as can be told.
+        /// Where, in the filter's input, as near as can be told: the last
+        /// byte the decompressor took.
         at: usize,
     },
     /// The data ends inside what it's decoding: a deflate stream before
@@ -192,8 +194,9 @@ pub enum Fault {
         /// Its first byte.
         tag: u8,
     },
-    /// The predicted data's last row short by `missing` bytes. It didn't
-    /// stop: the row is read with zeros for them.
+    /// The predicted data's last row short by `missing` bytes, when it
+    /// ends there, or ends early. It didn't stop: the row is read with
+    /// zeros for them. A row a fault cut off before is left out.
     PartialRow {
         /// How many bytes the row lacks.
         missing: usize,
@@ -255,9 +258,11 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// `data` decoded by `filters` in their order, as a stream's `/Filter`
-/// lists them, no filter's output over `limit` bytes: an LZW or Flate
-/// filter's before its predictor too, PNG's tags and all. With no
-/// filters, it's `data`.
+/// lists them, no filter's output over `limit` bytes; an LZW or Flate
+/// filter's before its predictor is allowed a PNG predictor's tag a row
+/// besides. With no filters, it's `data`. The limit bounds what's
+/// allocated, so it should be one that can be: a short last row is read
+/// with zeros up to it.
 pub fn decode(data: &[u8], filters: &[Filter], limit: usize) -> Result<Vec<u8>, Error> {
     let mut faults = Vec::new();
     let mut decoded = None;
@@ -268,7 +273,7 @@ pub fn decode(data: &[u8], filters: &[Filter], limit: usize) -> Result<Vec<u8>, 
             decoded = Some(Vec::new());
             continue;
         }
-        let mut out = Out::new(limit);
+        let mut out = Out::new(predictor::before(limit, filter));
         let predictor = match *filter {
             Filter::AsciiHex => {
                 hex::decode(input, &mut out);
@@ -296,7 +301,19 @@ pub fn decode(data: &[u8], filters: &[Filter], limit: usize) -> Result<Vec<u8>, 
         };
         if predictor != Predictor::None {
             let predicted = std::mem::take(&mut out.data);
-            predictor::undo(predicted, predictor, &mut out);
+            // Data a fault stopped mid-row ends in a row cut off, not
+            // short: it isn't read.
+            let cut = (out.faults.iter()).any(|f| {
+                matches!(
+                    f,
+                    Fault::Limit
+                        | Fault::Corrupt { .. }
+                        | Fault::Code { .. }
+                        | Fault::TableFull { .. }
+                )
+            });
+            out.limit = limit;
+            predictor::undo(predicted, predictor, cut, &mut out);
         }
         faults.extend(out.faults.into_iter().map(|fault| (i, fault)));
         decoded = Some(out.data);

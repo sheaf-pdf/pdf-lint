@@ -32,8 +32,8 @@ pub fn filters(data: &[u8]) {
         // Places in the first filter's input, which is the input.
         if filter == 0 {
             match fault {
-                Fault::Corrupt { at } => assert!(at <= input.len()),
                 Fault::Byte { at, .. }
+                | Fault::Corrupt { at }
                 | Fault::BrokenEnd { at }
                 | Fault::InGroup { at }
                 | Fault::Overflow { at }
