@@ -652,6 +652,12 @@ mod tests {
         let out = dir.join("compressed.pdf");
         let qpdf = qpdf(&plain);
         let mut command = Command::new(&qpdf.program);
+        // An /ID from the content, not the clock, so that a run can't
+        // draw one that begins FE FF, which qpdf reads as UTF-16 text;
+        // qpdf can't for a file it encrypts.
+        if !args.contains(&"--encrypt") {
+            command.arg("--deterministic-id");
+        }
         command.args(args).arg(&plain).arg(&out);
         let status = command.status().unwrap();
         assert!(matches!(status.code(), Some(0 | 3)), "qpdf {args:?} failed");
