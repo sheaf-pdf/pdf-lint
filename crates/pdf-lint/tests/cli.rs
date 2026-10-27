@@ -1,7 +1,7 @@
 //! The command line, run as a user runs it.
 
-use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
 
 // The crate's own reader of JSON, to read the JSON report back with.
 #[path = "../src/json.rs"]
@@ -452,6 +452,50 @@ fn a_file_that_needs_qpdf_without_one_is_unread_and_says_why() {
     // --qpdf names the one that isn't found.
     let (_, _, err) = without(&["--qpdf", "/nonexistent/other", &packed]);
     assert!(err.contains("/nonexistent/other isn't found"), "{err}");
+}
+
+#[test]
+fn a_file_of_dash_is_standard_input() {
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Rotate (abc) >>";
+    let plain = written("stdin-plain.pdf", &file(&[CATALOG, PAGES, page]));
+    let plain = plain.to_str().unwrap();
+    let packed = packed(Path::new(plain), "stdin-packed.pdf");
+    let piped = |path: &str, args: &[&str]| {
+        let child = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
+            .args(args)
+            .stdin(std::fs::File::open(path).unwrap())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let id = child.id();
+        let out = child.wait_with_output().unwrap();
+        // The copy qpdf reads it from is gone.
+        let spool = std::env::temp_dir().join(format!("pdf-lint-{id}-0.pdf"));
+        assert!(!spool.exists(), "{}", spool.display());
+        out
+    };
+    // In plain view, and in object streams, which qpdf decodes from a
+    // copy: each checked as by its path, and named -.
+    for path in [plain, &packed] {
+        let by_path = text(&run(&[path]).stdout);
+        let out = piped(path, &["-"]);
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        assert_eq!(text(&out.stdout), by_path.replacen(path, "-", 1));
+    }
+    // Among files, in its place.
+    let out = piped(&packed, &[plain, "-", plain]);
+    let named: Vec<String> = (text(&out.stdout).lines())
+        .filter_map(|line| line.split_once(": PDF ").map(|(name, _)| name.to_string()))
+        .collect();
+    assert_eq!(named, [plain, "-", plain]);
+    // Once.
+    let out = piped(plain, &["-", "-"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        "pdf-lint: - more than once: standard input is read once\n"
+    );
 }
 
 #[cfg(unix)]

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **A FILE of `-` is standard input,** so a file can be piped in without writing it first. It's named `-` in the report and in an allowance, and can be given once. qpdf reads only files, so it decodes one from a copy in the temporary folder that only its owner can read, removed once it's checked.
 - **Fixed: `--version` or `--help` piped to a reader that stops,** as `head`, panicked when the pipe closed. Now it stops quietly and exits 0, as a report already did.
 
 ## 0.1.0 (2026-10-25)

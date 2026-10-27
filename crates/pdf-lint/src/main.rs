@@ -4,7 +4,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::num::NonZero;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -25,9 +25,10 @@ const USAGE: &str = "\
 usage: pdf-lint [OPTIONS] FILE...
 
 Checks each FILE against the Arlington PDF Model, reading it from its
-bytes, and prints each finding with the bytes it's at. What's compressed
-or encrypted, qpdf decodes: object streams, cross-reference streams and
-strings. Without qpdf 11.9 or later, a file that has any isn't checked.
+bytes, and prints each finding with the bytes it's at; a FILE of - is
+standard input. What's compressed or encrypted, qpdf decodes: object
+streams, cross-reference streams and strings. Without qpdf 11.9 or
+later, a file that has any isn't checked.
 
   --hold <FILE>   hold only the objects FILE names, a line each:
                   `12 0 built` or `3 0 merged`
@@ -296,12 +297,18 @@ fn args() -> Result<Option<Args>> {
             Some("--deprecations") => args.deprecations = true,
             Some("--last-update") => args.last_update = true,
             Some("--full") => args.full = true,
-            Some(flag) if flag.starts_with('-') => bail!("{flag}: no such option\n\n{USAGE}"),
+            Some(flag) if flag.starts_with('-') && flag != "-" => {
+                bail!("{flag}: no such option\n\n{USAGE}")
+            }
             _ => args.files.push(PathBuf::from(word)),
         }
     }
     if args.files.is_empty() {
         bail!("no file\n\n{USAGE}");
+    }
+    let stdins = (args.files.iter()).filter(|path| *path == Path::new("-"));
+    if stdins.count() > 1 {
+        bail!("- more than once: standard input is read once");
     }
     if args.hold.is_some() && args.built {
         bail!("--hold and --built: a hold file says how each object was made");
@@ -488,6 +495,40 @@ fn qpdf(path: &Path, args: &Args) -> Qpdf {
     qpdf
 }
 
+/// Standard input's bytes in a file of their own, for qpdf, which reads
+/// only files: removed when it's dropped.
+struct Spool(PathBuf);
+
+impl Spool {
+    fn new(data: &[u8]) -> io::Result<Spool> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // The file's bytes, so its reader's alone.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut n = 0;
+        loop {
+            let name = format!("pdf-lint-{}-{n}.pdf", std::process::id());
+            let path = std::env::temp_dir().join(name);
+            match options.open(&path) {
+                Ok(mut file) => {
+                    let spool = Spool(path);
+                    file.write_all(data)?;
+                    return Ok(spool);
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < 100 => n += 1,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl Drop for Spool {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// qpdf as a file is read with: run only when it's ready
 /// ([`Qpdf::ready`]), and noting whether the reader asked it for anything.
 struct Decoder<'a> {
@@ -603,11 +644,26 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
         model,
     } = setup;
     let name = path.display().to_string();
-    let data = match std::fs::read(path) {
+    let stdin = path == Path::new("-");
+    let data = match stdin {
+        true => {
+            let mut data = Vec::new();
+            io::stdin().lock().read_to_end(&mut data).map(|_| data)
+        }
+        false => std::fs::read(path),
+    };
+    let data = match data {
         Ok(data) => data,
         Err(e) => return unread(path, &e.to_string(), args.json),
     };
-    let qpdf = qpdf(path, args);
+    let spool = match stdin.then(|| Spool::new(&data)).transpose() {
+        Ok(spool) => spool,
+        Err(e) => {
+            let why = format!("standard input doesn't copy to a file for qpdf: {e}");
+            return unread(path, &why, args.json);
+        }
+    };
+    let qpdf = qpdf(spool.as_ref().map_or(path, |s| &s.0), args);
     let decoder = Decoder::new(&qpdf);
     let doc = bytes::read_with(&data, &decoder);
     if let Some(why) = decoder.unready() {
