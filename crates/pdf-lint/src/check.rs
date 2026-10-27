@@ -299,6 +299,7 @@ impl Exempt {
 
 /// What a finding breaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum Rule {
     /// A value of none of the types its row allows at the file's version.
     Type,

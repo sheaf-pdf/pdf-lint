@@ -83,7 +83,9 @@ impl Trailer {
 }
 
 /// A file read whole: its objects, trailer, header version and warnings.
+/// A reader outside the crate starts from [`Document::new`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Document {
     /// Each object its cross-references list, or why it doesn't read.
     pub objects: BTreeMap<ObjectId, Result<Object, String>>,
