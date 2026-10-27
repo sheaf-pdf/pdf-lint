@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **A typed password's byte forms.** `passwords` gives the bytes a password typed as text may have been set as, for `Handler::open` to try: as typed, in UTF-8, which revisions 5 and 6 take; then, for revisions 2 to 4, in PDFDocEncoding, WinAnsiEncoding and MacRomanEncoding (Annex D), each where every character has a byte, as qpdf tries them; none twice. It's pdf-lint's `text::passwords`, moved here unchanged, so that any reader with a password prompt has it.
+
 ## 0.1.0 (unreleased)
 
 - **The handler.** `Handler::open` takes a `Dictionary`, the encryption dictionary's values typed, the file's first `/ID` element and passwords, and opens it by the first that's the owner's or the user's (or the empty password, given none): revisions 2 to 4 (Algorithms 2 to 7), 5 (Adobe's Extension Level 3) and 6 (Algorithms 2.A, 2.B, 11, 12), with `/Perms` checked (Algorithm 13). Short `/O` and `/U` are filled out with zeros, revision 5's and 6's long ones cut short, a `/V 2` key's `/Length` taken in 40 to 128 bits, as qpdf reads them; refused, saying why, are another handler, a version or revision it hasn't, `/O` or `/U` missing or too long, and no password that opens it.

@@ -8,6 +8,10 @@
 //! - **Every revision of the standard handler:** 2 to 4 (RC4, and AES-128
 //!   in version 4), 5 (Adobe's Extension Level 3, AES-256) and 6 (ISO
 //!   32000-2, AES-256), the owner's password or the user's.
+//! - **A typed password's byte forms for each revision:** [`passwords`]
+//!   gives it in UTF-8, which revisions 5 and 6 take, and in the
+//!   single-byte encodings 2 to 4's may have been set in, for
+//!   [`Handler::open`] to try.
 //! - **Every fault said, what decrypted kept,** as a checker wants it: AES
 //!   ciphertext too short, a part block past the whole ones, padding that
 //!   isn't, a crypt filter's method that isn't one, `/Perms` that doesn't
@@ -29,6 +33,7 @@ mod aes;
 pub mod fuzz;
 mod handler;
 mod md5;
+mod password;
 mod rc4;
 mod sha2;
 #[cfg(test)]
@@ -41,6 +46,7 @@ pub mod writer;
 use std::fmt;
 
 pub use handler::{Handler, Method};
+pub use password::passwords;
 
 /// An encryption dictionary's values, as the standard security handler
 /// takes them (ISO 32000-2, Tables 20 and 21).

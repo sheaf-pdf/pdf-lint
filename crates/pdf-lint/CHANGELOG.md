@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`text::passwords` is pdf-crypt's.** The byte forms of a typed password, which `--password` tries, are pdf-crypt's `passwords` now, re-exported at the same path; what they are is unchanged. A test holds the PDFDocEncoding table pdf-crypt encodes them by to the one `text::decode` reads with, character by character.
+
 ## 0.2.0 (unreleased)
 
 - **Breaking, the library: qpdf is gone from it.** `Qpdf`, the `Decode` trait, `Written`, `read_with` and `qpdf::OLDEST` are no longer public (the tests keep them, to set the reader beside qpdf), and nothing shipped reads `PDF_LINT_QPDF`. `bytes::read_from(file, section)` takes no decoder; `read` and `read_from` open an encrypted file with the empty password, `read_opened` and `read_from_opened` with the passwords given. `Encryption` is `#[non_exhaustive]`. `Str::Text` stays, for a `Source` that reads through another tool.
