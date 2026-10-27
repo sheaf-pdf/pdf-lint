@@ -12,6 +12,7 @@ use crate::check::{Exempt, Hold, Made, Options, UnlistedIn, check};
 use crate::object::{ObjectId, Span};
 use crate::source::{Document, Source};
 use crate::version::Version;
+use pdf_crypt::writer::{Kind, Settings};
 
 /// The fuzz target's body: `data`'s first two bytes choose how the file
 /// after them is held and checked ([`setting`]), and the rest is the file.
@@ -191,6 +192,12 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
             "encrypted",
             file(&encrypted, &format!("/Encrypt 4 0 R /ID [{id} {id}]")).0,
         ),
+        ("encrypted-rc4-40", opens(Kind::Rc4By40, false)),
+        ("encrypted-rc4-128", opens(Kind::Rc4By128, false)),
+        ("encrypted-aes-128", opens(Kind::Aes128, false)),
+        ("encrypted-aes-256-r5", opens(Kind::Aes256R5, false)),
+        ("encrypted-aes-256", opens(Kind::Aes256, false)),
+        ("encrypted-own-crypt", opens(Kind::Aes128, true)),
     ];
     for (_, seed) in &mut seeds {
         seed.splice(0..0, [0, 0]);
@@ -357,6 +364,102 @@ fn object_streams(flate: bool) -> Vec<u8> {
     out
 }
 
+/// A file encrypted as `kind` with the empty user password, so that it
+/// opens: its catalog's /Lang encrypted, its page tree and page in an
+/// object stream compressed and encrypted, by the file's crypt filter for
+/// streams or, with `own`, by its own /Crypt filter (/StmF /Identity).
+fn opens(kind: Kind, own: bool) -> Vec<u8> {
+    let id = b"0123456789abcdef";
+    let settings = Settings {
+        kind,
+        user: b"",
+        owner: b"owner",
+        p: -4,
+        id,
+        encrypt_metadata: true,
+    };
+    let values = pdf_crypt::writer::dictionary(&settings);
+    let handler = pdf_crypt::Handler::open(&values, id, &[]).expect("the writer's opens");
+    let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let lang =
+        pdf_crypt::writer::encrypt_string(&handler, (1, 0), b"en", [1; 16]).unwrap_or_default();
+    let objects = "2 0 3 42 << /Type /Pages /Kids [3 0 R] /Count 1 >>\n\
+                   << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [<< /Type /Annot /Subtype /Text /Rect [0 0 9 9] /Contents (In plain view) >>] >>";
+    let first = objects.find("<<").unwrap_or(0);
+    let deflated = crate::write::zlib(objects.as_bytes());
+    let crypt = own.then(|| handler.named(b"StdCF"));
+    let data =
+        pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &deflated, crypt.as_ref(), [4; 16])
+            .unwrap_or_default();
+    let filter = match own {
+        true => "/Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /StdCF >> null]",
+        false => "/Filter /FlateDecode",
+    };
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let one = out.len();
+    out.extend_from_slice(
+        format!(
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Lang <{}> >>\nendobj\n",
+            hex(&lang)
+        )
+        .as_bytes(),
+    );
+    let four = out.len();
+    let dict = format!(
+        "<< /Type /ObjStm /N 2 /First {first} {filter} /Length {} >>",
+        data.len()
+    );
+    out.extend_from_slice(format!("4 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&data);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    let five = out.len();
+    let row = |kind: u8, field: usize, index: u8| {
+        let [high, low] = u16::try_from(field).unwrap_or(0).to_be_bytes();
+        [kind, high, low, index]
+    };
+    let rows = [
+        row(0, 0, 255),
+        row(1, one, 0),
+        row(2, 4, 0),
+        row(2, 4, 1),
+        row(1, four, 0),
+        row(1, five, 0),
+    ]
+    .concat();
+    let mut entries = format!("/Filter /Standard /V {} /R {} /P -4", values.v, values.r);
+    if let Some(length) = values.length {
+        entries.push_str(&format!(" /Length {length}"));
+    }
+    let strings = [
+        ("O", &values.o),
+        ("U", &values.u),
+        ("OE", &values.oe),
+        ("UE", &values.ue),
+        ("Perms", &values.perms),
+    ];
+    for (name, value) in strings {
+        if let Some(value) = value {
+            entries.push_str(&format!(" /{name} <{}>", hex(value)));
+        }
+    }
+    if let Some(filter) = values.crypt_filters.first() {
+        let method = String::from_utf8_lossy(filter.method.as_deref().unwrap_or_default());
+        let streams = if own { "/Identity" } else { "/StdCF" };
+        entries.push_str(&format!(
+            " /CF << /StdCF << /CFM /{method} >> >> /StmF {streams} /StrF /StdCF"
+        ));
+    }
+    let dict = format!(
+        "<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R /Encrypt << {entries} >> /ID [<{0}> <{0}>] /Length {1} >>",
+        hex(id),
+        rows.len()
+    );
+    out.extend_from_slice(format!("5 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes());
+    out
+}
+
 /// A file and an incremental update of it, which rewrites its page and
 /// adds an annotation.
 fn update() -> Vec<u8> {
@@ -415,6 +518,26 @@ mod tests {
             let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
             assert!(report.objects() > 3, "{name}: {report}");
             check_file(&seed);
+        }
+        // Those that open, open, and their object stream reads.
+        for (name, seed) in seeds()
+            .into_iter()
+            .filter(|(n, _)| n.starts_with("encrypted-"))
+        {
+            let doc = bytes::read(&seed[2..]);
+            let opened = crate::source::Encryption::Opened { owner: false };
+            assert_eq!(doc.encryption, opened, "{name}");
+            assert_eq!(
+                doc.get((3, 0)).map(|o| o.at.and_then(|at| at.stream)),
+                Ok(Some((4, 0))),
+                "{name}"
+            );
+            let lang = doc
+                .get((1, 0))
+                .ok()
+                .and_then(|o| o.as_dict()?.get(b"Lang").cloned());
+            let en = crate::object::Value::String(crate::object::Str::Bytes(b"en".to_vec()));
+            assert_eq!(lang.map(|l| l.value), Some(en), "{name}");
         }
         let update = &seeds().into_iter().find(|(n, _)| *n == "update").unwrap().1;
         assert!(
