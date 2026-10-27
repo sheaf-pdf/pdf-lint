@@ -162,6 +162,8 @@ Checked, the two readings give the same findings but for those causes, and for o
 
 The comparison found three faults in the bytes reader, now fixed: a table's row with a number out of range lost the whole table (it's read as free, and the rest read); `/Encrypt null` was taken as encrypted; and a cross-reference stream decoded by its number could be another object's.
 
+Another ignored test, `a_corpus_decodes_alike_through_qpdf`, sets the reader's decoding beside qpdf's: every stream with filters the reader decodes, decoded both ways (qpdf at `--decode-level=specialized`, so RunLength too) byte for byte, and the object streams' data and objects as the reader reads them and as it reads them asking qpdf. Each difference is sorted into a kind the test explains, and it fails on one it can't: the same bytes, the reader saying a fault qpdf passes over; data a fault stopped, which qpdf gives undecoded and the reader decodes as far as the fault; a stream qpdf finds by its number and the reader by its place, which an update can make two (the test asks qpdf for the raw bytes it read to tell); the reader's limit. A test of hand-made streams pins where the two part on purpose, as qpdf departs from the spec: a run-length of 128 ends the data, NUL is white-space between hex digits, TIFF's samples are 1, 2, 4, 8 or 16 bits.
+
 ### How qpdf and lopdf map onto it
 
 `Qpdf::read` is the `Source` through qpdf. lopdf won't be shipped. It's here to show what implementing the trait for a Rust reader takes.

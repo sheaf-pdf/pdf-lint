@@ -39,6 +39,8 @@ pub struct Qpdf {
     file: PathBuf,
     password: Option<String>,
     timeout: Duration,
+    /// The `--decode-level` its streams are decoded at.
+    level: &'static str,
 }
 
 impl Qpdf {
@@ -51,6 +53,27 @@ impl Qpdf {
             file: file.into(),
             password: None,
             timeout: Duration::from_secs(60),
+            level: "generalized",
+        }
+    }
+
+    /// Decoding at `--decode-level=specialized`, RunLength too, as the
+    /// tests do to set its decoding beside the reader's.
+    #[cfg(test)]
+    pub(crate) fn specialized(self) -> Qpdf {
+        Qpdf {
+            level: "specialized",
+            ..self
+        }
+    }
+
+    /// Not decoding at all (`--decode-level=none`): a stream's data as
+    /// qpdf reads it from the file, for the tests to see which it read.
+    #[cfg(test)]
+    pub(crate) fn undecoding(self) -> Qpdf {
+        Qpdf {
+            level: "none",
+            ..self
         }
     }
 
@@ -179,10 +202,10 @@ impl Qpdf {
                 "--json=2",
                 "--json-key=qpdf",
                 &format!("--json-stream-data={data}"),
-                "--decode-level=generalized",
             ]
             .map(String::from),
         );
+        args.push(format!("--decode-level={}", self.level));
         args.extend(ids.iter().map(|(n, g)| format!("--json-object={n},{g}")));
         args.push(self.file.display().to_string());
         args
@@ -299,7 +322,10 @@ impl Decode for Qpdf {
     fn decode(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Vec<u8>, String>> {
         let mut decoded = BTreeMap::new();
         self.objects_of("inline", ids, |id, object| {
-            decoded.insert(id, object.and_then(|o| stream_data(o, id)));
+            decoded.insert(
+                id,
+                object.and_then(|o| stream_data(o, id, self.level != "none")),
+            );
         });
         decoded
     }
@@ -369,12 +395,15 @@ fn alone(stream: Written) -> Vec<u8> {
 }
 
 /// The decoded data of `object`, stream `id` in qpdf's JSON.
-fn stream_data(object: &Json, (n, g): ObjectId) -> Result<Vec<u8>, String> {
+fn stream_data(object: &Json, (n, g): ObjectId, decoding: bool) -> Result<Vec<u8>, String> {
     let stream = object
         .get("stream")
         .ok_or_else(|| format!("{n} {g} R isn't a stream"))?;
-    // qpdf leaves out the filters it decoded: any left, it couldn't.
-    if let Some(filter) = stream.get("dict").and_then(|d| d.get("/Filter")) {
+    // qpdf leaves out the filters it decoded: any left, it couldn't, when
+    // it was asked to.
+    if let Some(filter) = stream.get("dict").and_then(|d| d.get("/Filter"))
+        && decoding
+    {
         return Err(format!("qpdf doesn't decode its filters ({filter:?})"));
     }
     let data = (stream.get("data").and_then(Json::as_str))
@@ -1251,23 +1280,7 @@ qpdf: operation succeeded with warnings\n";
 
         use crate::check::Rule;
 
-        let dir = std::env::var_os("PDF_LINT_CORPUS").expect("PDF_LINT_CORPUS names a folder");
-        let mut folders = vec![PathBuf::from(dir)];
-        let mut files = Vec::new();
-        while let Some(folder) = folders.pop() {
-            for entry in std::fs::read_dir(&folder).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    folders.push(path);
-                } else if path
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
-                {
-                    files.push(path);
-                }
-            }
-        }
-        files.sort();
+        let files = corpus();
         /// Each kind's count, and its first examples.
         type Kinds = BTreeMap<String, (usize, Vec<String>)>;
         let add = |kinds: &mut Kinds, kind: String, example: String| {
@@ -1386,5 +1399,452 @@ qpdf: operation succeeded with warnings\n";
                 println!("    {example}");
             }
         }
+    }
+
+    /// Streams written by hand, decoded by the reader and by qpdf (at
+    /// `specialized`): alike, but where the reader says a fault qpdf
+    /// passes over, and where qpdf departs from the spec.
+    #[test]
+    fn hand_made_streams_decode_as_through_qpdf_but_where_it_departs_from_the_spec() {
+        /// How the reader's decoding should stand to qpdf's.
+        #[derive(Debug, PartialEq)]
+        enum Expect {
+            /// The same bytes, and no fault.
+            Alike,
+            /// The same bytes, and the reader says this fault.
+            AlikeBut(&'static str),
+            /// The reader stops where the spec says, qpdf reads on.
+            Shorter,
+            /// qpdf gives it undecoded; the reader decodes it.
+            QpdfRefuses,
+            /// The reader doesn't decode it; qpdf does.
+            ReaderRefuses,
+        }
+        use Expect::*;
+        let text = b"BT /F1 12 Tf (stream data) Tj ET\n".repeat(20);
+        let hex = |data: &[u8]| -> Vec<u8> {
+            data.iter()
+                .flat_map(|b| format!("{b:02x}").into_bytes())
+                .collect()
+        };
+        let ended = |data: &[u8]| [data, b">"].concat();
+        let mut damaged = write::zlib(&text);
+        *damaged.last_mut().unwrap() ^= 1;
+        // Rows of four, each by a tag of its own, 0 to 4.
+        let rows: Vec<u8> = (0..40u8)
+            .flat_map(|i| [i % 5, i, i.wrapping_mul(7), 200, i ^ 0x55])
+            .collect();
+        let png = dict! { "Predictor" => 12, "Columns" => 4 };
+        // Sixteen rows of four pixels of three samples.
+        let tiff = dict! { "Predictor" => 2, "Colors" => 3, "Columns" => 4 };
+        let tiff3 = dict! { "Predictor" => 2, "BitsPerComponent" => 3 };
+        let identity = dict! { "Name" => "Identity" };
+        let crypt: Vec<Object> = vec![identity.into(), Object::null()];
+        let crypted: Vec<Object> = vec![Object::from("Crypt"), Object::from("FlateDecode")];
+        let cases: Vec<(&str, Dict, Vec<u8>, Expect)> = vec![
+            (
+                "ASCIIHex",
+                dict! { "Filter" => "ASCIIHexDecode" },
+                ended(&hex(&text)),
+                Alike,
+            ),
+            (
+                "ASCII85",
+                dict! { "Filter" => "ASCII85Decode" },
+                write::ascii85(&text),
+                Alike,
+            ),
+            (
+                "LZW",
+                dict! { "Filter" => "LZWDecode" },
+                write::lzw(&text),
+                Alike,
+            ),
+            (
+                "RunLength",
+                dict! { "Filter" => "RunLengthDecode" },
+                write::run_length(&text),
+                Alike,
+            ),
+            (
+                "Flate",
+                dict! { "Filter" => "FlateDecode" },
+                write::zlib(&text),
+                Alike,
+            ),
+            ("Fl", dict! { "Filter" => "Fl" }, write::zlib(&text), Alike),
+            (
+                "PNG",
+                dict! { "Filter" => "FlateDecode", "DecodeParms" => png },
+                write::zlib(&rows),
+                Alike,
+            ),
+            (
+                "TIFF",
+                dict! { "Filter" => "FlateDecode", "DecodeParms" => tiff },
+                write::zlib(&rows[..192]),
+                Alike,
+            ),
+            (
+                "Crypt",
+                dict! { "Filter" => crypted, "DecodeParms" => crypt },
+                write::zlib(&text),
+                Alike,
+            ),
+            (
+                "checksum",
+                dict! { "Filter" => "FlateDecode" },
+                damaged,
+                AlikeBut("Checksum"),
+            ),
+            (
+                "no >",
+                dict! { "Filter" => "ASCIIHexDecode" },
+                hex(&text),
+                AlikeBut("NoEnd"),
+            ),
+            // ISO 32000-2, 7.4.5: 128 is the end; qpdf reads on past it.
+            (
+                "past 128",
+                dict! { "Filter" => "RunLengthDecode" },
+                [&write::run_length(&text)[..], b"\x02abc\x80"].concat(),
+                Shorter,
+            ),
+            // 7.2.3: NUL is white-space, which qpdf takes as a fault.
+            (
+                "NUL",
+                dict! { "Filter" => "ASCIIHexDecode" },
+                ended(&[&b"41\x00"[..], &hex(&text)].concat()),
+                QpdfRefuses,
+            ),
+            // 7.4.4.4: TIFF's samples are 1, 2, 4, 8 or 16 bits.
+            (
+                "3 bits",
+                dict! { "Filter" => "FlateDecode", "DecodeParms" => tiff3 },
+                write::zlib(&rows),
+                ReaderRefuses,
+            ),
+        ];
+        let dir = scratch("hand-made");
+        let path = dir.join("streams.pdf");
+        let mut objects = clean();
+        let first = 10;
+        for (i, (_, dict, data, _)) in cases.iter().enumerate() {
+            objects.push((first + i as u32, Body::stream(dict.clone(), data)));
+        }
+        let root = dict! { "Root" => Object::reference(1) };
+        std::fs::write(&path, write::file("1.7", &objects, root, Xref::Table)).unwrap();
+        let data = std::fs::read(&path).unwrap();
+        let doc = bytes::read(&data);
+        let ids: Vec<ObjectId> = (0..cases.len()).map(|i| (first + i as u32, 0)).collect();
+        let theirs = Qpdf::new(&path).specialized().decode(&ids);
+        for (i, (name, _, _, expect)) in cases.iter().enumerate() {
+            let id = ids[i];
+            let object = doc.objects[&id].as_ref().unwrap();
+            let Value::Stream(stream) = &object.value else {
+                panic!("{name}")
+            };
+            let at = stream.data.unwrap();
+            let written = &data[at.start..at.end];
+            let theirs = &theirs[&id];
+            let got = match crate::filter::filters(&stream.dict, Some(&|_| None)) {
+                Err(_) => match theirs {
+                    Ok(_) => ReaderRefuses,
+                    Err(why) => panic!("{name}: neither decodes: {why}"),
+                },
+                Ok(filters) => {
+                    let (mine, faults) = match pdf_filters::decode(written, &filters, bytes::STREAM)
+                    {
+                        Ok(data) => (data, Vec::new()),
+                        Err(e) => (e.data, e.faults),
+                    };
+                    match (theirs, &faults[..]) {
+                        (Ok(t), []) if *t == mine => Alike,
+                        (Ok(t), [(_, fault)]) if *t == mine => {
+                            let kind = format!("{fault:?}");
+                            AlikeBut(if kind.starts_with("Checksum") {
+                                "Checksum"
+                            } else if kind.starts_with("NoEnd") {
+                                "NoEnd"
+                            } else {
+                                "other"
+                            })
+                        }
+                        (Ok(t), []) if t.starts_with(&mine) && t.len() > mine.len() => Shorter,
+                        (Err(why), []) if why.contains("doesn't decode its filters") => QpdfRefuses,
+                        (theirs, faults) => {
+                            panic!("{name}: qpdf {theirs:?}, the reader's faults {faults:?}")
+                        }
+                    }
+                }
+            };
+            assert_eq!(&got, expect, "{name}");
+        }
+    }
+
+    /// The PDF files under `PDF_LINT_CORPUS`, sorted.
+    fn corpus() -> Vec<PathBuf> {
+        let dir = std::env::var_os("PDF_LINT_CORPUS").expect("PDF_LINT_CORPUS names a folder");
+        let mut folders = vec![PathBuf::from(dir)];
+        let mut files = Vec::new();
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    folders.push(path);
+                } else if (path.extension()).is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// A difference between decoding through the reader and through qpdf
+    /// that's understood, as `kind` names it, and why it's no fault of
+    /// the reader's.
+    fn explained(kind: &str) -> Option<&'static str> {
+        let stopping = [
+            "Byte",
+            "BrokenEnd",
+            "InGroup",
+            "Code",
+            "TableFull",
+            "Header",
+            "Corrupt",
+            "Truncated",
+            "Limit",
+        ];
+        let faults = kind
+            .rsplit_once("faults: ")
+            .map_or("", |(_, faults)| faults);
+        let stopped = stopping.iter().any(|f| faults.contains(f));
+        match kind {
+            _ if kind.starts_with("qpdf doesn't read the stream the reader does") => Some(
+                "qpdf finds a stream by its number, which an update can give another, reads one of a file it reconstructed, or refuses the whole file; the reader decodes the bytes it reads",
+            ),
+            _ if kind.starts_with("a stream decodes alike") => Some(
+                "the same bytes: the reader says what qpdf reads without a word (no end marker, a checksum that doesn't match, an unknown row tag, a short row, data that ends early)",
+            ),
+            _ if kind.starts_with("qpdf leaves a stream undecoded") && stopped => Some(
+                "a fault stopped a filter: qpdf gives the data undecoded, the reader what decoded before the fault",
+            ),
+            _ if kind
+                .starts_with("a stream decodes otherwise (the reader's is a prefix of qpdf's)")
+                && faults.contains("Limit") =>
+            {
+                Some("the reader stops at its limit, 256 MiB a stream")
+            }
+            _ if kind.starts_with("qpdf can't decode a stream") && faults == "Limit" => Some(
+                "a predictor's rows too long to hold: qpdf exits for the overflow, the reader stops at its limit",
+            ),
+            _ => None,
+        }
+    }
+
+    /// Every stream with filters the reader decodes, in each file of a
+    /// folder (`PDF_LINT_CORPUS`), decoded by the reader and by qpdf (at
+    /// `specialized`, RunLength too), byte for byte; and the object
+    /// streams' data and objects as the reader reads them and as it reads
+    /// them asking qpdf. Each difference is counted by its kind, with
+    /// examples, and each kind must be one [`explained`] knows. A file that
+    /// encrypts is left out: its streams are qpdf's to decrypt. With
+    /// `PDF_LINT_ORACLE_DUMP` naming a folder, each stream that differs is
+    /// written there as written, as the reader decodes it and as qpdf does.
+    #[test]
+    #[ignore = "needs PDF_LINT_CORPUS, a folder of PDF files, and qpdf"]
+    fn a_corpus_decodes_alike_through_qpdf() {
+        use std::sync::Mutex;
+
+        use pdf_filters::Fault;
+
+        let files = corpus();
+        type Kinds = BTreeMap<String, (usize, Vec<String>)>;
+        #[derive(Default)]
+        struct Tally {
+            files: usize,
+            encrypted: usize,
+            streams: usize,
+            alike: usize,
+            kinds: Kinds,
+        }
+        let tally = Mutex::new(Tally::default());
+        let next = AtomicUsize::new(0);
+        let start = Instant::now();
+        let dump = std::env::var_os("PDF_LINT_ORACLE_DUMP").map(PathBuf::from);
+        // A fault's kind, without its fields.
+        let kind = |fault: &Fault| {
+            let named = format!("{fault:?}");
+            named
+                .split([' ', '{'])
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let faults = |faults: &[(usize, Fault)]| {
+            let mut kinds: Vec<String> = faults.iter().map(|(_, f)| kind(f)).collect();
+            kinds.sort();
+            kinds.dedup();
+            match kinds.is_empty() {
+                true => "none".to_string(),
+                false => kinds.join(", "),
+            }
+        };
+        // How the reader's data stands to qpdf's.
+        let relation = |ours: &[u8], theirs: &[u8]| match () {
+            _ if theirs.starts_with(ours) => "the reader's is a prefix of qpdf's",
+            _ if ours.starts_with(theirs) => "qpdf's is a prefix of the reader's",
+            _ => "neither is a prefix of the other",
+        };
+        thread::scope(|scope| {
+            for _ in 0..thread::available_parallelism().map_or(1, |n| n.get()) {
+                scope.spawn(|| {
+                    while let Some(path) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                        let data = std::fs::read(path).unwrap();
+                        let ours = bytes::read(&data);
+                        let encrypted = (ours.trailer.dict().get(b"Encrypt")).is_some_and(|e| !e.is_null());
+                        if encrypted {
+                            let mut tally = tally.lock().unwrap();
+                            tally.files += 1;
+                            tally.encrypted += 1;
+                            continue;
+                        }
+                        let qpdf = Qpdf::new(path).specialized();
+                        let mut found: Vec<(String, String)> = Vec::new();
+                        // The reader's own streams, and their objects, read
+                        // asking qpdf.
+                        let through = bytes::read_through(&data, &qpdf);
+                        let ids: std::collections::BTreeSet<&ObjectId> = ours.decoded.keys().chain(through.decoded.keys()).collect();
+                        for id in ids {
+                            let kind = match (ours.decoded.get(id), through.decoded.get(id)) {
+                                (Some(a), Some(b)) if a == b => continue,
+                                (Some(a), Some(b)) => format!("an object stream decodes otherwise: {}", relation(a, b)),
+                                (Some(_), None) => "an object stream only the reader decodes".to_string(),
+                                (None, _) => "an object stream only qpdf decodes".to_string(),
+                            };
+                            found.push((kind, format!("{} {} R", id.0, id.1)));
+                        }
+                        for (id, object) in &ours.objects {
+                            let kind = match (object, through.objects.get(id)) {
+                                (Ok(a), Some(Ok(b))) if a == b => continue,
+                                (Err(_), Some(Err(_)) | None) => continue,
+                                (Ok(_), Some(Ok(_))) => "an object reads otherwise",
+                                (Ok(_), Some(Err(_)) | None) => "an object only the reader reads",
+                                (Err(_), Some(Ok(_))) => "an object only qpdf's decoding reads",
+                            };
+                            found.push((kind.to_string(), format!("{} {} R", id.0, id.1)));
+                        }
+                        // Every stream with filters it decodes.
+                        let resolve = |id| ours.objects.get(&id)?.as_ref().ok();
+                        let streams: Vec<(ObjectId, Vec<pdf_filters::Filter>, &[u8])> = (ours.objects.iter())
+                            .filter_map(|(&id, object)| {
+                                let Value::Stream(stream) = &object.as_ref().ok()?.value else {
+                                    return None;
+                                };
+                                let at = stream.data.filter(|at| at.stream.is_none())?;
+                                let filters = crate::filter::filters(&stream.dict, Some(&resolve)).ok()?;
+                                (!filters.is_empty()).then(|| (id, filters, &data[at.start..at.end]))
+                            })
+                            .collect();
+                        let ids: Vec<ObjectId> = streams.iter().map(|&(id, _, _)| id).collect();
+                        let mut theirs = qpdf.decode(&ids);
+                        let mut alike = 0;
+                        // Each that differs, its kind as far as the data
+                        // tells; whether qpdf read the same bytes is asked
+                        // after, of those.
+                        let mut differing: Vec<(ObjectId, String, bool)> = Vec::new();
+                        for (id, filters, written) in &streams {
+                            let (mine, mine_faults) = match pdf_filters::decode(written, filters, bytes::STREAM) {
+                                Ok(data) => (data, Vec::new()),
+                                Err(e) => (e.data, e.faults),
+                            };
+                            let mut faults = faults(&mine_faults);
+                            if mine_faults.iter().any(|(i, _)| *i > 0) {
+                                faults = format!("{faults} (in a later filter)");
+                            }
+                            let theirs = theirs.remove(id);
+                            if let Some(dir) = &dump
+                                && !matches!(&theirs, Some(Ok(t)) if *t == mine && mine_faults.is_empty())
+                            {
+                                let file = |what: &str| dir.join(format!("{name}-{}-{}.{what}", id.0, id.1));
+                                std::fs::write(file("raw"), written).unwrap();
+                                std::fs::write(file("ours"), &mine).unwrap();
+                                let qpdf = match &theirs {
+                                    Some(Ok(t)) => t.clone(),
+                                    Some(Err(why)) => format!("ERR {why}").into_bytes(),
+                                    None => b"NONE".to_vec(),
+                                };
+                                std::fs::write(file("qpdf"), qpdf).unwrap();
+                            }
+                            // Whether it matters which bytes qpdf read.
+                            let (kind, which) = match theirs {
+                                Some(Ok(t)) if t == mine && mine_faults.is_empty() => {
+                                    alike += 1;
+                                    continue;
+                                }
+                                Some(Ok(t)) if t == mine => (format!("a stream decodes alike, the reader's faults: {faults}"), false),
+                                Some(Ok(t)) => (
+                                    format!("a stream decodes otherwise ({}), the reader's faults: {faults}", relation(&mine, &t)),
+                                    true,
+                                ),
+                                Some(Err(why)) if why.contains("doesn't decode its filters") => {
+                                    (format!("qpdf leaves a stream undecoded, the reader's faults: {faults}"), true)
+                                }
+                                Some(Err(_)) | None => (format!("qpdf can't decode a stream, the reader's faults: {faults}"), true),
+                            };
+                            differing.push((*id, kind, which));
+                        }
+                        let asked: Vec<ObjectId> = (differing.iter()).filter(|d| d.2).map(|d| d.0).collect();
+                        let read = Qpdf::new(path).undecoding().decode(&asked);
+                        for (id, kind, which) in differing {
+                            let written = streams.iter().find(|s| s.0 == id).map(|s| s.2);
+                            let same = matches!(read.get(&id), Some(Ok(raw)) if Some(&raw[..]) == written);
+                            let kind = match which && !same {
+                                true => format!("qpdf doesn't read the stream the reader does: {kind}"),
+                                false => kind,
+                            };
+                            found.push((kind, format!("{} {} R", id.0, id.1)));
+                        }
+                        let mut tally = tally.lock().unwrap();
+                        tally.files += 1;
+                        tally.streams += streams.len();
+                        tally.alike += alike;
+                        for (kind, example) in found {
+                            let (n, examples) = tally.kinds.entry(kind).or_default();
+                            *n += 1;
+                            if examples.len() < 5 {
+                                examples.push(format!("{name}: {example}"));
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        let tally = tally.into_inner().unwrap();
+        println!(
+            "{} files ({} encrypted, left out) in {:.0?}: {} streams with filters the reader decodes, {} alike",
+            tally.files,
+            tally.encrypted,
+            start.elapsed(),
+            tally.streams,
+            tally.alike
+        );
+        let mut unexplained = Vec::new();
+        for (kind, (n, examples)) in &tally.kinds {
+            let why = explained(kind);
+            println!(
+                "{n:>8}  {kind}{}",
+                why.map_or(String::new(), |why| format!(": {why}"))
+            );
+            for example in examples {
+                println!("            e.g. {example}");
+            }
+            if why.is_none() {
+                unexplained.push(kind.clone());
+            }
+        }
+        assert!(unexplained.is_empty(), "unexplained: {unexplained:#?}");
     }
 }

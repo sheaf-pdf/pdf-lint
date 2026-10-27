@@ -2999,57 +2999,6 @@ mod tests {
         assert!(why.contains("nothing decodes that"), "{why}");
     }
 
-    /// `data` as ASCII85, groups of zeros as `z`.
-    fn ascii85(data: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        for group in data.chunks(4) {
-            let mut four = [0u8; 4];
-            four[..group.len()].copy_from_slice(group);
-            let value = u32::from_be_bytes(four);
-            if value == 0 && group.len() == 4 {
-                out.push(b'z');
-                continue;
-            }
-            let digits: Vec<u8> = (0..5)
-                .rev()
-                .map(|i| (value / 85u32.pow(i) % 85) as u8 + b'!')
-                .collect();
-            out.extend_from_slice(&digits[..group.len() + 1]);
-        }
-        out.extend_from_slice(b"~>");
-        out
-    }
-
-    /// `data` as LZW codes, each byte its own 9-bit code, the table
-    /// cleared before it widens.
-    fn lzw(data: &[u8]) -> Vec<u8> {
-        let mut codes = vec![256u16];
-        for (i, &byte) in data.iter().enumerate() {
-            if i > 0 && i % 250 == 0 {
-                codes.push(256);
-            }
-            codes.push(u16::from(byte));
-        }
-        codes.push(257);
-        let bits: Vec<bool> = (codes.iter())
-            .flat_map(|&code| (0..9).rev().map(move |i| code >> i & 1 == 1))
-            .collect();
-        (bits.chunks(8))
-            .map(|byte| (0..8).fold(0, |b, i| b << 1 | u8::from(byte.get(i) == Some(&true))))
-            .collect()
-    }
-
-    /// `data` as runs to copy, ended by 128.
-    fn run_length(data: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        for run in data.chunks(128) {
-            out.push((run.len() - 1) as u8);
-            out.extend_from_slice(run);
-        }
-        out.push(128);
-        out
-    }
-
     #[test]
     fn an_object_stream_decodes_through_each_filter_without_a_decoder() {
         let (objects, _) = objects_2_and_3();
@@ -3060,17 +3009,17 @@ mod tests {
         let cases = [
             (" /Filter /FlateDecode", write::zlib(&objects)),
             (" /Filter /Fl", write::zlib(&objects)),
-            (" /Filter /LZWDecode", lzw(&objects)),
+            (" /Filter /LZWDecode", write::lzw(&objects)),
             (
                 " /Filter /LZW /DecodeParms << /EarlyChange 1 >>",
-                lzw(&objects),
+                write::lzw(&objects),
             ),
             (" /Filter /ASCIIHexDecode", hex(&objects)),
             (" /Filter /AHx", hex(&objects)),
-            (" /Filter /ASCII85Decode", ascii85(&objects)),
-            (" /Filter /A85", ascii85(&objects)),
-            (" /Filter /RunLengthDecode", run_length(&objects)),
-            (" /Filter /RL", run_length(&objects)),
+            (" /Filter /ASCII85Decode", write::ascii85(&objects)),
+            (" /Filter /A85", write::ascii85(&objects)),
+            (" /Filter /RunLengthDecode", write::run_length(&objects)),
+            (" /Filter /RL", write::run_length(&objects)),
             (
                 " /Filter [/AHx /Fl] /DecodeParms [null null]",
                 hex(&write::zlib(&objects)),
