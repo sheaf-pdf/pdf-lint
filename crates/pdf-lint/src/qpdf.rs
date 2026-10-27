@@ -187,6 +187,7 @@ impl Qpdf {
             size: (std::fs::metadata(&self.file).ok()).and_then(|m| usize::try_from(m.len()).ok()),
             hex: None,
             metadata: None,
+            encryption: Default::default(),
         })
     }
 
@@ -705,35 +706,95 @@ mod tests {
         assert_eq!(through.objects, doc.objects);
     }
 
+    /// A decoder that mustn't be asked anything: neither to decode nor for
+    /// plaintext.
+    struct Unaskable;
+
+    impl Decode for Unaskable {
+        fn decode(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Vec<u8>, String>> {
+            panic!("asked to decode {ids:?}")
+        }
+
+        fn plaintext(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Object, String>> {
+            panic!("asked for the plaintext of {ids:?}")
+        }
+    }
+
     #[test]
-    fn an_encrypted_files_object_streams_decrypt_through_qpdf() {
-        let path = rewritten(
-            "encrypted",
-            &[
-                "--object-streams=generate",
-                "--encrypt",
-                "",
-                "owner",
-                "256",
-                "--",
-            ],
-        );
-        let data = std::fs::read(&path).unwrap();
-        let doc = bytes::read_with(&data, &qpdf(&path));
-        assert_eq!(doc.trailer.unwritten, None);
-        let annot = (doc.objects.values().flatten())
-            .find(|o| {
-                o.as_dict()
-                    .is_some_and(|d| d.get(b"Subtype").and_then(Object::as_name) == Some(b"Text"))
-            })
-            .expect("the annotation reads");
-        assert!(annot.at.unwrap().stream.is_some(), "in an object stream");
-        let contents = annot.as_dict().unwrap().get(b"Contents").unwrap();
-        assert_eq!(
-            contents.value,
-            Value::String(Str::Bytes(b"A note".to_vec())),
-            "plaintext"
-        );
+    fn an_encrypted_files_object_streams_decrypt_by_the_reader_as_through_qpdf() {
+        let kinds: [(&str, &[&str]); 5] = [
+            (
+                "rc4-40",
+                &["--allow-weak-crypto", "--encrypt", "", "owner", "40", "--"],
+            ),
+            (
+                "rc4-128",
+                &[
+                    "--allow-weak-crypto",
+                    "--encrypt",
+                    "",
+                    "owner",
+                    "128",
+                    "--use-aes=n",
+                    "--",
+                ],
+            ),
+            (
+                "aes-128",
+                &["--encrypt", "", "owner", "128", "--use-aes=y", "--"],
+            ),
+            (
+                "aes-256-r5",
+                &["--encrypt", "", "owner", "256", "--force-R5", "--"],
+            ),
+            ("aes-256", &["--encrypt", "", "owner", "256", "--"]),
+        ];
+        for (kind, encrypt) in kinds {
+            let args: Vec<&str> = ["--object-streams=generate"]
+                .into_iter()
+                .chain(encrypt.iter().copied())
+                .collect();
+            let path = rewritten(&format!("encrypted-{kind}"), &args);
+            let data = std::fs::read(&path).unwrap();
+            // The reader alone, by the empty user password and by the
+            // owner's.
+            let doc = bytes::read_with(&data, &Unaskable);
+            assert_eq!(
+                doc.encryption,
+                crate::Encryption::Opened { owner: false },
+                "{kind}"
+            );
+            assert!(doc.warnings.is_empty(), "{kind}: {:?}", doc.warnings);
+            assert_eq!(doc.trailer.unwritten, None, "{kind}");
+            let annot = (doc.objects.values().flatten())
+                .find(|o| {
+                    o.as_dict().is_some_and(|d| {
+                        d.get(b"Subtype").and_then(Object::as_name) == Some(b"Text")
+                    })
+                })
+                .unwrap_or_else(|| panic!("{kind}: the annotation reads"));
+            assert!(
+                annot.at.unwrap().stream.is_some(),
+                "{kind}: in an object stream"
+            );
+            let contents = annot.as_dict().unwrap().get(b"Contents").unwrap();
+            assert_eq!(
+                contents.value,
+                Value::String(Str::Bytes(b"A note".to_vec())),
+                "{kind}"
+            );
+            let owned = bytes::read_opened(&data, &[b"owner"]);
+            assert_eq!(
+                owned.encryption,
+                crate::Encryption::Opened { owner: true },
+                "{kind}"
+            );
+            assert_eq!(owned.decoded, doc.decoded, "{kind}");
+            // Through qpdf, the object streams' data the same, byte for byte.
+            let through = bytes::read_through(&data, &qpdf(&path));
+            assert!(!through.decoded.is_empty(), "{kind}");
+            assert_eq!(through.decoded, doc.decoded, "{kind}");
+        }
     }
 
     #[test]
@@ -1225,7 +1286,7 @@ qpdf: operation succeeded with warnings\n";
     }
 
     #[test]
-    fn an_encrypted_files_strings_in_plain_view_decrypt_through_qpdf() {
+    fn an_encrypted_files_strings_in_plain_view_decrypt_to_their_bytes_and_through_qpdf() {
         let path = rewritten(
             "plain-view",
             &[
@@ -1238,19 +1299,32 @@ qpdf: operation succeeded with warnings\n";
             ],
         );
         let data = std::fs::read(&path).unwrap();
-        let doc = bytes::read_with(&data, &qpdf(&path));
+        let contents = |doc: &Document| {
+            let annot = (doc.objects.values().flatten())
+                .find(|o| {
+                    o.as_dict().is_some_and(|d| {
+                        d.get(b"Subtype").and_then(Object::as_name) == Some(b"Text")
+                    })
+                })
+                .expect("the annotation reads");
+            annot.as_dict().unwrap().get(b"Contents").unwrap().clone()
+        };
+        // Decrypted by the reader, its bytes; through qpdf, as qpdf's JSON
+        // gives it, text, its encoding unsaid.
+        let through = bytes::read_through(&data, &qpdf(&path));
+        assert!(through.warnings.is_empty(), "{:?}", through.warnings);
+        assert_eq!(
+            contents(&through).value,
+            Value::String(Str::Text("A note".to_string()))
+        );
+        let doc = bytes::read_opened(&data, &[]);
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
-        let annot = (doc.objects.values().flatten())
-            .find(|o| {
-                o.as_dict()
-                    .is_some_and(|d| d.get(b"Subtype").and_then(Object::as_name) == Some(b"Text"))
-            })
-            .expect("the annotation reads");
-        let contents = annot.as_dict().unwrap().get(b"Contents").unwrap();
+        assert_eq!(doc.encryption, crate::Encryption::Opened { owner: false });
+        let contents = contents(&doc);
         assert_eq!(
             contents.value,
-            Value::String(Str::Text("A note".to_string())),
-            "plaintext, as qpdf gives it"
+            Value::String(Str::Bytes(b"A note".to_vec())),
+            "its bytes"
         );
         let at = contents.at.unwrap();
         assert_eq!(at.stream, None, "in plain view");
@@ -1258,11 +1332,17 @@ qpdf: operation succeeded with warnings\n";
             !data[at.start..at.end].windows(6).any(|w| w == b"A note"),
             "placed on its ciphertext"
         );
-        // Without a decoder, it stays ciphertext.
-        let doc = bytes::read(&data);
+        // A password that doesn't open it, though its user password is
+        // empty, is all that's tried: it's locked, and the string stays
+        // ciphertext, where it is.
+        let doc = bytes::read_opened(&data, &[b"wrong"]);
+        assert_eq!(doc.encryption, crate::Encryption::Locked);
         let annot = (doc.objects.values().flatten())
-            .find(|o| o.at.is_some_and(|a| a.start == annot.at.unwrap().start))
-            .unwrap();
+            .find(|o| {
+                o.as_dict()
+                    .is_some_and(|d| d.get(b"Contents").is_some_and(|c| c.at == Some(at)))
+            })
+            .expect("the annotation reads");
         let contents = annot.as_dict().unwrap().get(b"Contents").unwrap();
         assert!(matches!(contents.value, Value::String(Str::Encrypted(_))));
     }

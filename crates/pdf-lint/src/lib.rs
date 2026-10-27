@@ -39,7 +39,7 @@ pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, gramm
 pub use object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
 pub use predicate::{Cx, Gate, Reference, Since, Truth};
 pub use qpdf::Qpdf;
-pub use source::{Document, Source, Trailer, Update, Warning};
+pub use source::{Document, Encryption, Source, Trailer, Update, Warning};
 pub use version::Version;
 
 /// The upstream commit the embedded model is (`model/SOURCE.md`).

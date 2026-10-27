@@ -609,14 +609,17 @@ fn a_dictionary_the_standard_handler_doesnt_take_is_refused() {
     );
     assert!(refused(|d| d.v = 3).contains("/V 3 /R 3"));
     assert!(refused(|d| d.r = 7).contains("/V 2 /R 7"));
-    assert!(refused(|d| d.o = None).ends_with("no /O"));
-    assert!(refused(|d| (d.u, d.p) = (None, None)).ends_with("no /U, /P"));
+    assert_eq!(refused(|d| d.o = None), "its /O isn't a string");
+    assert_eq!(
+        refused(|d| (d.u, d.p) = (None, None)),
+        "its /U isn't a string, /P isn't an integer"
+    );
     assert!(refused(|d| d.u.as_mut().unwrap().extend([0; 8])).contains("over 32 bytes"));
     // Of /V 5, /OE, /UE and /Perms too, as qpdf must have them.
     let mut aes = vectors()[6].dictionary.clone();
     aes.perms = None;
     match Handler::open(&aes, b"id", &[]) {
-        Err(Refused::Unsupported(why)) => assert!(why.ends_with("no /Perms"), "{why}"),
+        Err(Refused::Unsupported(why)) => assert_eq!(why, "its /Perms isn't a string"),
         other => panic!("{other:?}"),
     }
     // Short ones, empty ones too, are filled out, as qpdf fills them.

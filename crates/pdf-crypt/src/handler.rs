@@ -325,7 +325,7 @@ pub(crate) struct File<'a> {
 impl<'a> File<'a> {
     /// `dictionary`'s values, unless they're not ones the standard
     /// security handler takes: `/O`, `/U` and `/P` it must have, and of
-    /// `/V` 5 `/OE`, `/UE` and `/Perms`, as qpdf must. Short ones are
+    /// `/V` 5 `/OE`, `/UE` and `/Perms`, of their types, as qpdf must. Short ones are
     /// filled out with zeros, as qpdf does, and `/V` 5's long ones cut
     /// short.
     pub(crate) fn of(dictionary: &Dictionary, id: &'a [u8]) -> Result<File<'a>, Refused> {
@@ -345,24 +345,21 @@ impl<'a> File<'a> {
                 )));
             }
         }
-        let mut missing = vec![
-            ("/O", dictionary.o.is_some()),
-            ("/U", dictionary.u.is_some()),
-            ("/P", dictionary.p.is_some()),
+        let mut values = vec![
+            ("/O isn't a string", dictionary.o.is_some()),
+            ("/U isn't a string", dictionary.u.is_some()),
+            ("/P isn't an integer", dictionary.p.is_some()),
         ];
         if v == 5 {
-            missing.push(("/OE", dictionary.oe.is_some()));
-            missing.push(("/UE", dictionary.ue.is_some()));
-            missing.push(("/Perms", dictionary.perms.is_some()));
+            values.push(("/OE isn't a string", dictionary.oe.is_some()));
+            values.push(("/UE isn't a string", dictionary.ue.is_some()));
+            values.push(("/Perms isn't a string", dictionary.perms.is_some()));
         }
-        let missing: Vec<&str> = (missing.into_iter())
-            .filter_map(|(name, has)| (!has).then_some(name))
+        let wrong: Vec<&str> = (values.into_iter())
+            .filter_map(|(wrong, has)| (!has).then_some(wrong))
             .collect();
-        if !missing.is_empty() {
-            return Err(Refused::Unsupported(format!(
-                "it has no {}",
-                missing.join(", ")
-            )));
+        if !wrong.is_empty() {
+            return Err(Refused::Unsupported(format!("its {}", wrong.join(", "))));
         }
         let fill = |value: &Option<Vec<u8>>, len: usize| {
             let value = value.as_deref().unwrap_or_default();

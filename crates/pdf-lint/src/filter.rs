@@ -79,6 +79,33 @@ pub(crate) fn filters<'a>(dict: &'a Dict, resolve: Resolve<'_, 'a>) -> Result<Ve
     Ok(filters)
 }
 
+/// The name of the crypt filter a stream's own `/Crypt` filter names, when
+/// its `/Filter` has one: its parameters' `/Name`, `/Identity` by default
+/// (ISO 32000-2, Table 14).
+pub(crate) fn crypt_filter<'a>(dict: &'a Dict, resolve: Resolve<'_, 'a>) -> Option<Vec<u8>> {
+    let names: Vec<Option<&[u8]>> = match resolved(dict.get(b"Filter")?, resolve).ok()??.value {
+        Value::Name(ref name) => vec![Some(&name[..])],
+        Value::Array(ref array) => (array.iter())
+            .map(|o| {
+                resolved(o, resolve)
+                    .ok()
+                    .flatten()
+                    .and_then(Object::as_name)
+            })
+            .collect(),
+        _ => return None,
+    };
+    let at = names.iter().position(|n| *n == Some(&b"Crypt"[..]))?;
+    let parms = parameters(dict, names.len(), resolve).ok()?;
+    let name = (parms.get(at).copied().flatten()).and_then(|p| match &p.value {
+        Value::Dict(d) => resolved(d.get(b"Name")?, resolve)
+            .ok()?
+            .and_then(Object::as_name),
+        _ => None,
+    });
+    Some(name.unwrap_or(b"Identity").to_vec())
+}
+
 /// `o`, or what it refers to: references followed, as many as a chain of
 /// them may take; none for a null, or a reference to no object.
 fn resolved<'a>(mut o: &'a Object, resolve: Resolve<'_, 'a>) -> Result<Option<&'a Object>, String> {

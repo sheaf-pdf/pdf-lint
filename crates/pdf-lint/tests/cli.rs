@@ -405,9 +405,15 @@ fn packed(plain: &std::path::Path, name: &str) -> String {
 }
 
 /// [`packed`]'s file, encrypted (AES-256, with no user password), which
-/// only qpdf decrypts.
+/// the reader opens.
 fn encrypted(plain: &std::path::Path, name: &str) -> String {
     rewritten(plain, name, &["--encrypt", "", "owner", "256", "--"])
+}
+
+/// [`encrypted`]'s, but with a user password, `user`, so that the reader
+/// opens it only given one.
+fn locked(plain: &std::path::Path, name: &str) -> String {
+    rewritten(plain, name, &["--encrypt", "user", "owner", "256", "--"])
 }
 
 fn rewritten(plain: &std::path::Path, name: &str, args: &[&str]) -> String {
@@ -506,7 +512,8 @@ fn a_file_that_encrypts_without_qpdf_is_unread_and_says_why() {
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
     let plain = written("unready-plain.pdf", &file(&[CATALOG, PAGES, page]));
     let packed = packed(&plain, "unready-packed.pdf");
-    let encrypted = encrypted(&plain, "unready-encrypted.pdf");
+    let opened = encrypted(&plain, "unready-encrypted.pdf");
+    let encrypted = locked(&plain, "unready-locked.pdf");
     let without = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
             .args(args)
@@ -521,8 +528,14 @@ fn a_file_that_encrypts_without_qpdf_is_unread_and_says_why() {
     assert_eq!(code, Some(0), "{err}");
     let (code, _, err) = without(&[&packed]);
     assert_eq!(code, Some(0), "{err}");
-    // One that encrypts is unread, in a line that says why, rather than
-    // checked with what's encrypted missing.
+    // Nor one that encrypts that the reader opens, as by its empty user
+    // password: it's checked (qpdf writes /R 6 in a PDF 1.7 file, which the
+    // model finds).
+    let (code, out, err) = without(&[&opened]);
+    assert_eq!((code, err.as_str()), (Some(1), ""), "{out}");
+    assert!(out.contains("EncryptionStandard/R"), "{out}");
+    // One that encrypts that it doesn't open is unread, in a line that says
+    // why, rather than checked with what's encrypted missing.
     let packed = encrypted;
     let why = "it's encrypted, and qpdf decrypts it, but /nonexistent/qpdf isn't found: install qpdf 11.9 or later, or name one with --qpdf";
     let (code, out, err) = without(&[&packed]);
@@ -599,7 +612,7 @@ fn a_qpdf_older_than_11_9_is_refused_for_a_file_that_needs_it() {
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
     let plain = written("old-plain.pdf", &file(&[CATALOG, PAGES, page]));
     let packed = packed(&plain, "old-packed.pdf");
-    let encrypted = encrypted(&plain, "old-encrypted.pdf");
+    let encrypted = locked(&plain, "old-locked.pdf");
     let old = plain.with_file_name("qpdf-11.8");
     std::fs::write(&old, "#!/bin/sh\necho 'qpdf version 11.8.0'\n").unwrap();
     std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();

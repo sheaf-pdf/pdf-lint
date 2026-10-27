@@ -93,6 +93,28 @@ pub struct Document {
     /// The data of the catalog's metadata stream, as written, when it's in
     /// plain view: unfiltered, and not encrypted ([`Source::metadata`]).
     pub metadata: Option<Vec<u8>>,
+    /// Whether the file is encrypted, and if it is, whether it opened.
+    pub encryption: Encryption,
+}
+
+/// Whether a file is encrypted (its trailer's `/Encrypt`), and if it is,
+/// whether the reader opened it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Encryption {
+    /// It isn't.
+    #[default]
+    None,
+    /// It is, and a password it was given opened it, the owner's or the
+    /// user's: its strings and object streams are decrypted.
+    Opened {
+        /// Whether by the owner's password.
+        owner: bool,
+    },
+    /// It is, and no password it was given opens it.
+    Locked,
+    /// It is, by a security handler the reader can't open, and why: its
+    /// strings stay ciphertext, and its object streams aren't read.
+    Unsupported(String),
 }
 
 /// A file's newest incremental update.
@@ -123,6 +145,7 @@ impl Document {
             size: None,
             hex: None,
             metadata: None,
+            encryption: Encryption::None,
         }
     }
 

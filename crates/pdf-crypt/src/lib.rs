@@ -88,8 +88,8 @@ pub struct CryptFilter {
 pub enum Refused {
     /// The dictionary isn't one the standard security handler takes, and
     /// why: another handler, a version or revision it hasn't, `/O`, `/U`
-    /// or `/P` missing (`/OE`, `/UE` or `/Perms` of `/V` 5), `/O` or `/U`
-    /// too long.
+    /// or `/P` (`/OE`, `/UE` or `/Perms` of `/V` 5) missing or not of its
+    /// type, `/O` or `/U` too long.
     Unsupported(String),
     /// None of the passwords opens it.
     Password,

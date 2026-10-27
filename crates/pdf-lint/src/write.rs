@@ -182,6 +182,100 @@ pub(crate) fn inflated(zlib: &[u8]) -> Vec<u8> {
     pdf_filters::decode(zlib, &[flate], usize::MAX).unwrap_or_else(|e| e.data)
 }
 
+/// A file of these objects, as [`file`] writes it with a table, encrypted
+/// as `settings` say, by pdf-crypt's writer: each string, and each
+/// stream's data, of each object but a signature's `/Contents`, under an
+/// encryption dictionary that's the next object, with the trailer's `/ID`
+/// the settings' and `trailer`'s entries.
+pub(crate) fn encrypted(
+    settings: &pdf_crypt::writer::Settings,
+    objects: &[(u32, Body)],
+    trailer: Dict,
+) -> Vec<u8> {
+    use pdf_crypt::writer;
+    let values = writer::dictionary(settings);
+    let handler = pdf_crypt::Handler::open(&values, settings.id, &[settings.user])
+        .expect("the writer's opens");
+    fn strings(o: &mut Object, encrypt: &mut dyn FnMut(&[u8]) -> Vec<u8>) {
+        match &mut o.value {
+            Value::String(Str::Bytes(bytes)) => *bytes = encrypt(bytes),
+            Value::Array(a) => a.iter_mut().for_each(|o| strings(o, encrypt)),
+            Value::Dict(d) | Value::Stream(crate::object::Stream { dict: d, .. }) => {
+                let signature = d.has(b"ByteRange");
+                for entry in d.entries_mut() {
+                    if !(signature && entry.key == b"Contents") {
+                        strings(&mut entry.value, encrypt);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut written = Vec::new();
+    for (n, body) in objects {
+        let id = (*n, 0);
+        let iv = [*n as u8; 16];
+        let mut encrypt = |bytes: &[u8]| {
+            writer::encrypt_string(&handler, id, bytes, iv).expect("the writer's own method")
+        };
+        written.push((
+            *n,
+            match body {
+                Body::Object(object) => {
+                    let mut object = object.clone();
+                    strings(&mut object, &mut encrypt);
+                    Body::Object(object)
+                }
+                Body::Stream(dict, data) => {
+                    let mut dict: Object = dict.clone().into();
+                    strings(&mut dict, &mut encrypt);
+                    let Value::Dict(dict) = dict.value else {
+                        unreachable!()
+                    };
+                    let data = writer::encrypt_stream(&handler, id, data, None, iv)
+                        .expect("the writer's own method");
+                    Body::Stream(dict, data)
+                }
+            },
+        ));
+    }
+    let own = objects.iter().map(|(n, _)| *n).max().unwrap_or(0) + 1;
+    let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec())));
+    let value = |bytes: &Option<Vec<u8>>| s(bytes.as_deref().expect("the writer's own value"));
+    let mut dict = crate::dict! {
+        "Filter" => "Standard",
+        "V" => values.v,
+        "R" => values.r,
+        "O" => value(&values.o),
+        "U" => value(&values.u),
+        "P" => values.p.expect("the writer's own value"),
+    };
+    if let Some(length) = values.length {
+        dict.set("Length", length);
+    }
+    if values.v >= 5 {
+        dict.set("OE", value(&values.oe));
+        dict.set("UE", value(&values.ue));
+        dict.set("Perms", value(&values.perms));
+    }
+    if let Some(encrypt_metadata) = values.encrypt_metadata {
+        dict.set("EncryptMetadata", encrypt_metadata);
+    }
+    if let Some(filter) = values.crypt_filters.first() {
+        let method =
+            String::from_utf8_lossy(filter.method.as_deref().unwrap_or_default()).into_owned();
+        let std_cf = crate::dict! { "CFM" => method.as_str(), "AuthEvent" => "DocOpen" };
+        dict.set("CF", crate::dict! { "StdCF" => std_cf });
+        dict.set("StmF", "StdCF");
+        dict.set("StrF", "StdCF");
+    }
+    written.push((own, Body::Object(dict.into())));
+    let mut trailer = trailer;
+    trailer.set("Encrypt", Object::reference(own));
+    trailer.set("ID", vec![s(settings.id), s(settings.id)]);
+    file("1.7", &written, trailer, Xref::Table)
+}
+
 /// A file of these objects, each written between its `n 0 obj` and
 /// `endobj` as given, with a table and `trailer` as written. The bodies
 /// may be anything at all.
