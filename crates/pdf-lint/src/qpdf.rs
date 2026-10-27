@@ -1343,7 +1343,7 @@ qpdf: operation succeeded with warnings\n";
             )
             .as_bytes(),
         );
-        let updated = path.with_file_name("updated.pdf");
+        let updated = scratch("reused").join("updated.pdf");
         std::fs::write(&updated, &data).unwrap();
         let qpdf = qpdf(&updated);
         assert_eq!(
