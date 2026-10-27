@@ -1,12 +1,13 @@
 //! A stream's `/Filter` and `/DecodeParms`, read as [`pdf_filters`]
 //! takes them. They're read as qpdf reads them (ISO 32000-2, 7.4, leaves
 //! much open): `/Fl`, `/LZW`, `/AHx`, `/A85` and `/RL`, the inline image
-//! abbreviations, name filters on any stream; `/Crypt` with the identity
-//! filter is no filter; `/DecodeParms` that isn't an array is every
-//! filter's, and an empty array none; a filter that takes no parameters
-//! given some, or parameters that aren't a filter's, isn't decoded. Where
-//! qpdf departs from the spec, the spec: TIFF's predictor takes 1, 2, 4, 8
-//! or 16 bits a sample.
+//! abbreviations, name filters on any stream; `/Crypt` is no filter, as
+//! the streams the reader decodes aren't encrypted; `/DecodeParms` that
+//! isn't an array is every filter's, and an empty array none; a filter
+//! that takes no parameters given some, or parameters that aren't a
+//! filter's, isn't decoded; a reference to no object is null (7.3.10).
+//! Where qpdf departs from the spec, the spec: TIFF's predictor takes 1,
+//! 2, 4, 8 or 16 bits a sample.
 
 use pdf_filters::{Filter, Layout, Predictor};
 
@@ -15,25 +16,29 @@ use crate::object::{Dict, Object, ObjectId, Value};
 /// The most filters a stream may list, as qpdf allows.
 pub const FILTERS: usize = 25;
 
-/// The filters `dict`'s `/Filter` and `/DecodeParms` give, in order, with
-/// `resolve` giving the object a reference refers to (none when it
-/// can't): none for no `/Filter`, a null, or an empty array; or why the
-/// reader doesn't decode them.
-pub(crate) fn filters<'a>(
-    dict: &'a Dict,
-    resolve: &dyn Fn(ObjectId) -> Option<&'a Object>,
-) -> Result<Vec<Filter>, String> {
-    let names: Vec<&[u8]> = match dict.get(b"Filter") {
-        None => Vec::new(),
-        Some(filter) => match resolved(filter, resolve).map(|o| &o.value) {
-            None => return Err("its /Filter refers to no object it can read".to_string()),
-            Some(Value::Null) => Vec::new(),
-            Some(Value::Name(name)) => vec![&name[..]],
-            Some(Value::Array(array)) => (array.iter())
-                .map(|o| resolved(o, resolve).and_then(Object::as_name))
-                .collect::<Option<_>>()
+/// What follows a reference to the object it refers to, none for no
+/// object; or none where references aren't followed, as in a
+/// cross-reference stream's dictionary, whose values are direct (ISO
+/// 32000-2, 7.5.8.2).
+pub(crate) type Resolve<'r, 'a> = Option<&'r dyn Fn(ObjectId) -> Option<&'a Object>>;
+
+/// The filters `dict`'s `/Filter` and `/DecodeParms` give, in order,
+/// references followed by `resolve`: none for no `/Filter`, a null, or an
+/// empty array; or why the reader doesn't decode them.
+pub(crate) fn filters<'a>(dict: &'a Dict, resolve: Resolve<'_, 'a>) -> Result<Vec<Filter>, String> {
+    let names: Vec<&[u8]> = match dict
+        .get(b"Filter")
+        .map(|o| resolved(o, resolve))
+        .transpose()?
+    {
+        None | Some(None) => Vec::new(),
+        Some(Some(filter)) => match &filter.value {
+            Value::Name(name) => vec![&name[..]],
+            Value::Array(array) => (array.iter())
+                .map(|o| Ok(resolved(o, resolve)?.and_then(Object::as_name)))
+                .collect::<Result<Option<_>, String>>()?
                 .ok_or("its /Filter's array isn't names")?,
-            Some(_) => return Err("its /Filter is neither a name nor an array".to_string()),
+            _ => return Err("its /Filter is neither a name nor an array".to_string()),
         },
     };
     if names.len() > FILTERS {
@@ -52,27 +57,22 @@ pub(crate) fn filters<'a>(
                 "its /DecodeParms gives /{shown} parameters, which it takes none of"
             )),
         };
+        let named = |why: String| format!("/{shown}'s {why}");
         filters.push(match name {
             b"FlateDecode" | b"Fl" => Filter::Flate {
-                predictor: predictor(parms, resolve).map_err(|why| format!("/{shown}'s {why}"))?,
+                predictor: predictor(parms, resolve).map_err(named)?,
             },
             b"LZWDecode" | b"LZW" => Filter::Lzw {
-                early_change: early_change(parms, resolve)
-                    .map_err(|why| format!("/{shown}'s {why}"))?,
-                predictor: predictor(parms, resolve).map_err(|why| format!("/{shown}'s {why}"))?,
+                early_change: early_change(parms, resolve).map_err(named)?,
+                predictor: predictor(parms, resolve).map_err(named)?,
             },
             b"ASCIIHexDecode" | b"AHx" => none(Filter::AsciiHex)?,
             b"ASCII85Decode" | b"A85" => none(Filter::Ascii85)?,
             b"RunLengthDecode" | b"RL" => none(Filter::RunLength)?,
-            b"Crypt" => match crypt_filter(parms, resolve) {
-                Some(b"Identity") | None => continue,
-                Some(other) => {
-                    let other = String::from_utf8_lossy(other);
-                    return Err(format!(
-                        "its /Crypt filter is /{other}, which needs decrypting"
-                    ));
-                }
-            },
+            b"Crypt" => {
+                crypt(parms, resolve).map_err(named)?;
+                continue;
+            }
             _ => return Err(format!("its filter /{shown} isn't one the reader decodes")),
         });
     }
@@ -80,18 +80,22 @@ pub(crate) fn filters<'a>(
 }
 
 /// `o`, or what it refers to: references followed, as many as a chain of
-/// them may take, unless one can't be.
-fn resolved<'a>(
-    mut o: &'a Object,
-    resolve: &dyn Fn(ObjectId) -> Option<&'a Object>,
-) -> Option<&'a Object> {
+/// them may take; none for a null, or a reference to no object.
+fn resolved<'a>(mut o: &'a Object, resolve: Resolve<'_, 'a>) -> Result<Option<&'a Object>, String> {
     for _ in 0..8 {
-        match o.value {
-            Value::Ref(id) => o = resolve(id)?,
-            _ => return Some(o),
+        match (&o.value, resolve) {
+            (Value::Ref(_), None) => {
+                return Err("its /Filter or /DecodeParms holds a reference, which a cross-reference stream's may not".to_string());
+            }
+            (Value::Ref(id), Some(resolve)) => match resolve(*id) {
+                Some(to) => o = to,
+                None => return Ok(None),
+            },
+            (Value::Null, _) => return Ok(None),
+            _ => return Ok(Some(o)),
         }
     }
-    None
+    Ok(None)
 }
 
 /// Each of `count` filters' parameters, none for a null: `/DecodeParms`'
@@ -99,14 +103,14 @@ fn resolved<'a>(
 fn parameters<'a>(
     dict: &'a Dict,
     count: usize,
-    resolve: &dyn Fn(ObjectId) -> Option<&'a Object>,
+    resolve: Resolve<'_, 'a>,
 ) -> Result<Vec<Option<&'a Object>>, String> {
     let Some(parms) = dict.get(b"DecodeParms") else {
         return Ok(vec![None; count]);
     };
-    let not_null = |o: Option<&'a Object>| o.filter(|o| !matches!(o.value, Value::Null));
-    let parms =
-        resolved(parms, resolve).ok_or("its /DecodeParms refers to no object it can read")?;
+    let Some(parms) = resolved(parms, resolve)? else {
+        return Ok(vec![None; count]);
+    };
     Ok(match &parms.value {
         Value::Array(array) if array.is_empty() || count == 0 => vec![None; count],
         Value::Array(array) if array.len() != count => {
@@ -115,33 +119,29 @@ fn parameters<'a>(
                 array.len()
             ));
         }
-        Value::Array(array) => array
-            .iter()
-            .map(|o| not_null(resolved(o, resolve)))
-            .collect(),
-        _ => vec![not_null(Some(parms)); count],
+        Value::Array(array) => (array.iter())
+            .map(|o| resolved(o, resolve))
+            .collect::<Result<_, _>>()?,
+        _ => vec![Some(parms); count],
     })
 }
 
 /// A parameter of `parms` that's an integer, resolved; none when it's
-/// absent or `parms` isn't a dictionary.
+/// absent or null, or `parms` isn't a dictionary.
 fn integer<'a>(
     parms: Option<&'a Object>,
     key: &str,
-    resolve: &dyn Fn(ObjectId) -> Option<&'a Object>,
+    resolve: Resolve<'_, 'a>,
 ) -> Result<Option<i64>, String> {
     let Some(Value::Dict(dict)) = parms.map(|o| &o.value) else {
         return Ok(None);
     };
-    match dict.get(key.as_bytes()).map(|o| resolved(o, resolve)) {
-        None
-        | Some(Some(Object {
-            value: Value::Null, ..
-        })) => Ok(None),
-        Some(Some(Object {
-            value: Value::Integer(n),
-            ..
-        })) => Ok(Some(*n)),
+    let Some(value) = dict.get(key.as_bytes()) else {
+        return Ok(None);
+    };
+    match resolved(value, resolve)?.map(|o| &o.value) {
+        None => Ok(None),
+        Some(Value::Integer(n)) => Ok(Some(*n)),
         Some(_) => Err(format!("/{key} isn't an integer")),
     }
 }
@@ -149,27 +149,28 @@ fn integer<'a>(
 /// What an LZW or Flate filter's `/Predictor`, `/Colors`,
 /// `/BitsPerComponent` and `/Columns` say, with the spec's defaults; a
 /// parameters value that isn't a dictionary, the defaults all, as in
-/// qpdf.
-fn predictor<'a>(
-    parms: Option<&'a Object>,
-    resolve: &dyn Fn(ObjectId) -> Option<&'a Object>,
-) -> Result<Predictor, String> {
-    let count = |key: &str, default: u32| -> Result<u32, String> {
-        match integer(parms, key, resolve)? {
+/// qpdf. The layout's values are integers, and with a predictor, a
+/// layout.
+fn predictor<'a>(parms: Option<&'a Object>, resolve: Resolve<'_, 'a>) -> Result<Predictor, String> {
+    let colors = integer(parms, "Colors", resolve)?;
+    let bits = integer(parms, "BitsPerComponent", resolve)?;
+    let columns = integer(parms, "Columns", resolve)?;
+    let png = match integer(parms, "Predictor", resolve)? {
+        None | Some(1) => return Ok(Predictor::None),
+        Some(2) => false,
+        Some(10..=15) => true,
+        Some(n) => return Err(format!("/Predictor is {n}, not 1, 2 or 10 to 15")),
+    };
+    let count = |key: &str, value: Option<i64>, default: u32| -> Result<u32, String> {
+        match value {
             None => Ok(default),
             Some(n) => u32::try_from(n).map_err(|_| format!("/{key} is {n}, not a count")),
         }
     };
     let layout = Layout {
-        colors: count("Colors", 1)?,
-        bits_per_component: count("BitsPerComponent", 8)?,
-        columns: count("Columns", 1)?,
-    };
-    let predictor = match integer(parms, "Predictor", resolve)? {
-        None | Some(1) => return Ok(Predictor::None),
-        Some(2) => Predictor::Tiff(layout),
-        Some(10..=15) => Predictor::Png(layout),
-        Some(n) => return Err(format!("/Predictor is {n}, not 1, 2 or 10 to 15")),
+        colors: count("Colors", colors, 1)?,
+        bits_per_component: count("BitsPerComponent", bits, 8)?,
+        columns: count("Columns", columns, 1)?,
     };
     if layout.colors == 0 || layout.columns == 0 {
         return Err("/Colors or /Columns is 0".to_string());
@@ -178,14 +179,14 @@ fn predictor<'a>(
         let bits = layout.bits_per_component;
         return Err(format!("/BitsPerComponent is {bits}, not 1, 2, 4, 8 or 16"));
     }
-    Ok(predictor)
+    Ok(match png {
+        true => Predictor::Png(layout),
+        false => Predictor::Tiff(layout),
+    })
 }
 
 /// An LZW filter's `/EarlyChange`: 1 by default, and 0 or 1.
-fn early_change<'a>(
-    parms: Option<&'a Object>,
-    resolve: &dyn Fn(ObjectId) -> Option<&'a Object>,
-) -> Result<bool, String> {
+fn early_change<'a>(parms: Option<&'a Object>, resolve: Resolve<'_, 'a>) -> Result<bool, String> {
     match integer(parms, "EarlyChange", resolve)? {
         None | Some(1) => Ok(true),
         Some(0) => Ok(false),
@@ -193,15 +194,28 @@ fn early_change<'a>(
     }
 }
 
-/// A `/Crypt` filter's `/Name`, when its parameters give one.
-fn crypt_filter<'a>(
-    parms: Option<&'a Object>,
-    resolve: &dyn Fn(ObjectId) -> Option<&'a Object>,
-) -> Option<&'a [u8]> {
-    let Some(Value::Dict(dict)) = parms.map(|o| &o.value) else {
-        return None;
+/// Whether a `/Crypt` filter's parameters are ones qpdf takes: none, or
+/// a dictionary of `/Name` and `/Type /CryptFilterDecodeParms`, others
+/// null.
+fn crypt<'a>(parms: Option<&'a Object>, resolve: Resolve<'_, 'a>) -> Result<(), String> {
+    let Some(parms) = parms else {
+        return Ok(());
     };
-    resolved(dict.get(b"Name")?, resolve).and_then(Object::as_name)
+    let Value::Dict(dict) = &parms.value else {
+        return Err("parameters aren't a dictionary".to_string());
+    };
+    for (key, value) in dict.iter() {
+        let value = resolved(value, resolve)?;
+        let taken = match key {
+            b"Name" => true,
+            b"Type" => value.is_none_or(|v| v.as_name() == Some(b"CryptFilterDecodeParms")),
+            _ => value.is_none(),
+        };
+        if !taken {
+            return Err(format!("parameters have /{}", String::from_utf8_lossy(key)));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -211,8 +225,9 @@ mod tests {
     use super::*;
     use crate::dict;
 
+    /// `dict`'s filters, a reference to no object.
     fn read(dict: &Dict) -> Result<Vec<Filter>, String> {
-        filters(dict, &|_| None)
+        filters(dict, Some(&|_| None))
     }
 
     fn names(names: &[&str]) -> Object {
@@ -364,12 +379,19 @@ mod tests {
         for (parms, why) in bad {
             assert_eq!(with(parms).unwrap_err(), why);
         }
-        // Without a predictor, a layout that isn't one doesn't matter.
+        // Without a predictor, a layout that isn't one doesn't matter, but
+        // its values must be integers, as in qpdf.
         let lzw = Filter::Lzw {
             early_change: true,
             predictor: Predictor::None,
         };
         assert_eq!(with(dict! { "BitsPerComponent" => 3 }), Ok(vec![lzw]));
+        assert_eq!(
+            with(dict! { "Columns" => -1, "Colors" => 5_000_000_000i64 }),
+            Ok(vec![lzw])
+        );
+        let why = with(dict! { "Columns" => "many" }).unwrap_err();
+        assert_eq!(why, "/LZW's /Columns isn't an integer");
     }
 
     #[test]
@@ -379,9 +401,18 @@ mod tests {
         let dict = dict! { "Filter" => names(&["Crypt", "Fl"]), "DecodeParms" => parms };
         assert_eq!(read(&dict), Ok(vec![FLATE]));
         assert_eq!(read(&dict! { "Filter" => "Crypt" }), Ok(vec![]));
+        // Whatever its crypt filter: the streams the reader decodes aren't
+        // encrypted. But parameters qpdf doesn't take, it doesn't.
         let other = dict! { "Filter" => "Crypt", "DecodeParms" => dict! { "Name" => "StdCF" } };
-        let why = read(&other).unwrap_err();
-        assert_eq!(why, "its /Crypt filter is /StdCF, which needs decrypting");
+        assert_eq!(read(&other), Ok(vec![]));
+        let odd =
+            dict! { "Filter" => "Crypt", "DecodeParms" => dict! { "Name" => "StdCF", "X" => 1 } };
+        assert_eq!(read(&odd).unwrap_err(), "/Crypt's parameters have /X");
+        let typed = dict! { "Type" => "CryptFilterDecodeParms", "X" => Object::null() };
+        assert_eq!(
+            read(&dict! { "Filter" => "Crypt", "DecodeParms" => typed }),
+            Ok(vec![])
+        );
     }
 
     #[test]
@@ -398,9 +429,19 @@ mod tests {
         let flate = Filter::Flate {
             predictor: png(1, 8, 4),
         };
-        assert_eq!(filters(&dict, &resolve), Ok(vec![flate]));
+        assert_eq!(filters(&dict, Some(&resolve)), Ok(vec![flate]));
+        // A reference to no object is null (ISO 32000-2, 7.3.10).
         let dict = dict! { "Filter" => Object::reference(6) };
-        let why = filters(&dict, &resolve).unwrap_err();
-        assert_eq!(why, "its /Filter refers to no object it can read");
+        assert_eq!(filters(&dict, Some(&resolve)), Ok(vec![]));
+        let dict =
+            dict! { "Filter" => Object::reference(7), "DecodeParms" => Object::reference(6) };
+        assert_eq!(filters(&dict, Some(&resolve)), Ok(vec![FLATE]));
+        // Where references aren't followed, as in a cross-reference
+        // stream's dictionary, one isn't read.
+        let why = filters(&dict, None).unwrap_err();
+        assert_eq!(
+            why,
+            "its /Filter or /DecodeParms holds a reference, which a cross-reference stream's may not"
+        );
     }
 }

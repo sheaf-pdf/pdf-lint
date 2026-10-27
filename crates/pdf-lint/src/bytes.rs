@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use pdf_tokenizer::decode::How;
 use pdf_tokenizer::{Kind, Token, Tokenizer, is_delimiter, is_white_space};
 
-use pdf_filters::{Fault, Filter};
+use pdf_filters::{Fault, Filter, Layout, Predictor};
 
 use crate::filter;
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
@@ -43,8 +43,9 @@ pub const STREAM: usize = 256 << 20;
 #[cfg(fuzzing)]
 pub const STREAM: usize = 1 << 20;
 
-/// How many bytes the streams the reader decodes in a file may decode to
-/// in all; more is cut off.
+/// How many bytes the streams the reader decodes in a reading of a file
+/// may decode to in all; more is cut off. (`--last-update` reads a file
+/// twice, as of its newest section and as of the one before.)
 #[cfg(not(fuzzing))]
 pub const BUDGET: usize = 1 << 30;
 #[cfg(fuzzing)]
@@ -143,7 +144,14 @@ pub fn read_from(file: &[u8], decoder: &dyn Decode, section: usize) -> Document 
 /// the two side by side.
 #[cfg(test)]
 pub(crate) fn read_through(file: &[u8], decoder: &dyn Decode) -> Document {
-    read_as(file, Some(decoder), None, false)
+    read_as(file, Some(decoder), None, false, (STREAM, BUDGET))
+}
+
+/// The file `file` is, a stream decoding to at most `stream` bytes and
+/// the file's to `budget` in all: for the tests of the limits.
+#[cfg(test)]
+pub(crate) fn read_limited(file: &[u8], stream: usize, budget: usize) -> Document {
+    read_as(file, None, None, true, (stream, budget))
 }
 
 fn read_with_or_without(
@@ -151,7 +159,7 @@ fn read_with_or_without(
     decoder: Option<&dyn Decode>,
     section: Option<usize>,
 ) -> Document {
-    read_as(file, decoder, section, true)
+    read_as(file, decoder, section, true, (STREAM, BUDGET))
 }
 
 fn read_as(
@@ -159,11 +167,14 @@ fn read_as(
     decoder: Option<&dyn Decode>,
     section: Option<usize>,
     native: bool,
+    (stream, budget): (usize, usize),
 ) -> Document {
     let mut reader = Reader {
         file,
         native,
-        budget: BUDGET,
+        stream,
+        budget,
+        cut: HashSet::new(),
         decoder,
         warnings: Vec::new(),
         entries: BTreeMap::new(),
@@ -251,8 +262,12 @@ struct Reader<'a> {
     /// Whether it decodes streams itself, as it does but in the tests that
     /// make it ask the decoder.
     native: bool,
+    /// How many bytes a stream it decodes may decode to.
+    stream: usize,
     /// How many bytes the streams it decodes may still decode to.
     budget: usize,
+    /// The object streams whose data a fault cut off.
+    cut: HashSet<ObjectId>,
     decoder: Option<&'a dyn Decode>,
     warnings: Vec<Warning>,
     /// The newest entry for each object number, with its generation.
@@ -332,6 +347,42 @@ fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).rposition(|w| w == needle)
 }
 
+/// Whether `fault` stopped its filter, cutting the data off.
+fn stops(fault: &Fault) -> bool {
+    matches!(
+        fault,
+        Fault::Byte { .. }
+            | Fault::BrokenEnd { .. }
+            | Fault::InGroup { .. }
+            | Fault::Code { .. }
+            | Fault::TableFull { .. }
+            | Fault::Header
+            | Fault::Corrupt { .. }
+            | Fault::Truncated
+            | Fault::Limit
+    )
+}
+
+/// The bytes of a row of the predictor among `filters`, 1 without one.
+fn predictor_row(filters: &[Filter]) -> usize {
+    let layout = |filter: &Filter| match filter {
+        Filter::Lzw { predictor, .. } | Filter::Flate { predictor } => match predictor {
+            Predictor::Tiff(layout) | Predictor::Png(layout) => Some(*layout),
+            Predictor::None => None,
+        },
+        _ => None,
+    };
+    let bits = |l: Layout| {
+        (u64::from(l.colors).saturating_mul(u64::from(l.bits_per_component)))
+            .saturating_mul(u64::from(l.columns))
+    };
+    (filters.iter().filter_map(layout))
+        .map(|l| usize::try_from(bits(l).div_ceil(8)).unwrap_or(usize::MAX))
+        .max()
+        .unwrap_or(1)
+        .max(1)
+}
+
 /// Where `fault` is in its filter's input, when it says.
 fn place(fault: &Fault) -> Option<usize> {
     match *fault {
@@ -386,7 +437,7 @@ impl<'a> Reader<'a> {
         filters: &[Filter],
         limit: usize,
     ) -> (Vec<u8>, Vec<(usize, Fault)>) {
-        let limit = limit.min(STREAM).min(self.budget);
+        let limit = limit.min(self.stream).min(self.budget);
         let (decoded, faults) = match pdf_filters::decode(data, filters, limit) {
             Ok(decoded) => (decoded, Vec::new()),
             Err(error) => (error.data, error.faults),
@@ -436,15 +487,24 @@ impl<'a> Reader<'a> {
         let Value::Stream(stream) = &object.value else {
             return Err("it isn't a stream".to_string());
         };
+        // Not decoded, and so not counted against the budget, unless it's
+        // an object stream: its header says why it's not.
+        if stream.dict.get(b"Type").and_then(Object::as_name) != Some(b"ObjStm") {
+            return Ok(Vec::new());
+        }
         let data = (stream.data)
             .filter(|at| at.stream.is_none())
             .and_then(|at| self.file.get(at.start..at.end))
             .unwrap_or_default();
-        let filters = filter::filters(&stream.dict, &|id| objects.get(&id)?.as_ref().ok())?;
+        let resolve = |id| objects.get(&id)?.as_ref().ok();
+        let filters = filter::filters(&stream.dict, Some(&resolve))?;
         if filters.is_empty() {
             return Ok(data.to_vec());
         }
         let (decoded, faults) = self.decode_stream(data, &filters, STREAM);
+        if faults.iter().any(|(_, fault)| stops(fault)) {
+            self.cut.insert(id);
+        }
         self.faulted(id, stream.data, &filters, faults);
         Ok(decoded)
     }
@@ -868,20 +928,31 @@ impl<'a> Reader<'a> {
             // values are direct (7.5.8.2). What runs past its rows, which
             // aren't read, isn't decoded.
             true => {
-                let filters = filter::filters(dict, &|_| None)
+                let filters = filter::filters(dict, None)
                     .map_err(|why| format!("its cross-reference stream doesn't decode: {why}"))?;
                 match filters.is_empty() {
                     true => written,
                     false => {
-                        let limit = rows_size.map_or(STREAM, |size| size.saturating_add(1));
+                        // A predictor's rows are read whole: its rows, and
+                        // one of the predictor's past them.
+                        let limit = rows_size
+                            .map_or(STREAM, |size| size.saturating_add(predictor_row(&filters)));
                         let (decoded, mut faults) = self.decode_stream(written, &filters, limit);
                         // Data that runs past its rows is cut off there,
                         // as data that's not filtered is read only so far:
                         // with its rows whole, the limit cut only what's
-                        // past them.
-                        let whole = |size| decoded.len() >= size;
-                        if rows_size.is_some_and(whole) {
-                            faults.retain(|(_, fault)| *fault != Fault::Limit);
+                        // past them, and a predictor row past them isn't
+                        // read.
+                        if let Some(size) = rows_size.filter(|&size| decoded.len() >= size) {
+                            let row = predictor_row(&filters);
+                            faults.retain(|(_, fault)| match *fault {
+                                Fault::Limit => false,
+                                Fault::RowTag { row: i, .. } => i.saturating_mul(row) < size,
+                                Fault::PartialRow { .. } => {
+                                    decoded.len().saturating_sub(row) < size
+                                }
+                                _ => true,
+                            });
                         }
                         self.faulted(id, stream.data, &filters, faults);
                         again = decoded;
@@ -931,8 +1002,29 @@ impl<'a> Reader<'a> {
         let field = |bytes: &[u8]| bytes.iter().fold(0u64, |n, &b| (n << 8) | u64::from(b));
         let mut rows = data.chunks_exact(row.max(1));
         let mut entries = BTreeMap::new();
+        // As in qpdf, no object numbered past a third of the file's length:
+        // each takes three bytes at least.
+        let most = u32::try_from(self.file.len() / 3).unwrap_or(u32::MAX);
+        let mut past = 0usize;
         for (start, count) in index {
+            let fit = match start > most {
+                true => 0,
+                false => count.min(most - start + 1),
+            };
+            let skip = usize::try_from(count - fit).unwrap_or(usize::MAX);
+            if skip > 0 {
+                past = past.saturating_add(skip);
+            }
             for i in 0..count {
+                if i == fit {
+                    if rows.len() < skip {
+                        return Err("its data ends before its /Index does".to_string());
+                    }
+                    if skip > 0 {
+                        rows.nth(skip - 1);
+                    }
+                    break;
+                }
                 let bytes = rows.next().ok_or("its data ends before its /Index does")?;
                 let (one, rest) = bytes.split_at(widths[0]);
                 let (two, three) = rest.split_at(widths[1]);
@@ -959,6 +1051,12 @@ impl<'a> Reader<'a> {
                 };
                 entries.entry(n).or_insert(entry);
             }
+        }
+        if past > 0 {
+            let message = format!(
+                "its rows list {past} objects numbered past {most}, a third of the file's length, which aren't read"
+            );
+            self.warn(Some(id), object.at, message);
         }
         // It lists itself, at the offset it's at (ISO 32000-2, 7.5.8.2).
         let listed = matches!(
@@ -1316,8 +1414,25 @@ impl<'a> Reader<'a> {
             ciphertext: false,
         };
         let object = self.value(&mut Tokenizer::at(&data, offset), place, 0);
+        // One that runs to where a fault cut the data off may be cut short,
+        // when it's a value nothing closes: a number, a name, a keyword.
+        let open = |o: &Object| {
+            !matches!(
+                o.value,
+                Value::String(_) | Value::Array(_) | Value::Dict(_) | Value::Stream(_)
+            )
+        };
+        let cut = self.cut.contains(&stream)
+            && (object.as_ref())
+                .is_ok_and(|o| open(o) && o.at.is_some_and(|at| at.end == data.len()));
         self.decoded.insert(stream, data);
-        object
+        match cut {
+            true => Err(format!(
+                "it runs to where a fault cut object stream {} 0 R's data off, so it may be cut short",
+                stream.0
+            )),
+            false => object,
+        }
     }
 
     /// The indirect object at `offset`: `n g obj`, a value (a dictionary
@@ -1775,7 +1890,9 @@ mod tests {
         Reader {
             file,
             native: true,
+            stream: STREAM,
             budget: BUDGET,
+            cut: HashSet::new(),
             decoder: None,
             warnings: Vec::new(),
             entries: BTreeMap::new(),
@@ -2722,7 +2839,7 @@ mod tests {
     /// file is, and the object stream's data is junk a decoder replaces,
     /// as given.
     fn compressed(encrypted: bool) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
-        let (file, mut decoded) = streams(encrypted, true, b"", false);
+        let (file, mut decoded) = streams(encrypted, true, b"", None);
         decoded.remove(&(5, 0));
         if !encrypted {
             decoded.clear();
@@ -2733,19 +2850,19 @@ mod tests {
     /// [`compressed`]'s file with both streams' data junk, which only a
     /// decoder asked for every stream ([`read_through`]) decodes, as given.
     fn junk(encrypted: bool) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
-        streams(encrypted, false, b"", false)
+        streams(encrypted, false, b"", None)
     }
 
     /// The file [`compressed`] and [`junk`] write, its streams' data zlib
     /// data when `real` (but an encrypted file's object stream), else
     /// junk, the cross-reference stream's rows followed by `past`, and
-    /// with `png`, each row's PNG tag before it (none); and what each
-    /// decodes to.
+    /// with `png`, PNG-predicted (by none) in rows of that many columns,
+    /// the last filled out with zeros; and what each decodes to.
     fn streams(
         encrypted: bool,
         real: bool,
         past: &[u8],
-        png: bool,
+        png: Option<usize>,
     ) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
         let (objects, first) = objects_2_and_3();
         let mut file = b"%PDF-1.7\n".to_vec();
@@ -2777,15 +2894,16 @@ mod tests {
             xref_row(1, five, 0),
         ]
         .concat();
-        let written = [&rows[..], past].concat();
-        let (written, parms) = match png {
-            true => (
-                (written.chunks(4))
+        let mut written = [&rows[..], past].concat();
+        let parms = match png {
+            Some(columns) => {
+                written.resize(written.len().div_ceil(columns) * columns, 0);
+                written = (written.chunks(columns))
                     .flat_map(|row| [&[0][..], row].concat())
-                    .collect(),
-                " /DecodeParms << /Predictor 12 /Columns 4 >>",
-            ),
-            false => (written, ""),
+                    .collect();
+                format!(" /DecodeParms << /Predictor 12 /Columns {columns} >>")
+            }
+            None => String::new(),
         };
         let data = match real {
             true => write::zlib(&written),
@@ -3033,12 +3151,144 @@ mod tests {
         );
         // A cross-reference stream whose data runs past its rows, as data
         // that's not filtered may: no fault, its rows PNG-predicted or not.
-        for png in [false, true] {
+        for png in [None, Some(4)] {
             let (file, _) = streams(false, true, &[0; 40], png);
             let doc = read(&file);
-            assert!(doc.warnings.is_empty(), "{png}: {:?}", doc.warnings);
+            assert!(doc.warnings.is_empty(), "{png:?}: {:?}", doc.warnings);
             assert!(doc.get((3, 0)).is_ok());
         }
+    }
+
+    #[test]
+    fn a_cross_reference_streams_predictor_rows_needn_t_divide_its_rows() {
+        // Six rows of four bytes in predictor rows of seven, the last
+        // filled out: read whole, with or without data past them.
+        for past in [&[][..], &[0; 40]] {
+            let (file, _) = streams(false, true, past, Some(7));
+            let doc = read(&file);
+            assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+            assert_eq!(doc.trailer.unwritten, None);
+            assert!(doc.get((3, 0)).is_ok());
+        }
+    }
+
+    #[test]
+    fn objects_past_where_a_fault_cut_an_object_stream_off_dont_read() {
+        // Its stored block cut short, inside object 3: object 2 reads.
+        let (objects, _) = objects_2_and_3();
+        let zlib = write::zlib(&objects);
+        let cut = &zlib[..zlib.len() - 20];
+        let doc = read(&filtered(false, " /Filter /FlateDecode", cut));
+        assert!(doc.get((2, 0)).is_ok());
+        assert!(doc.get((3, 0)).is_err());
+        let truncated = (doc.warnings.iter()).any(|w| w.message.ends_with("the data ends early"));
+        assert!(truncated, "{:?}", doc.warnings);
+    }
+
+    #[test]
+    fn a_number_where_a_fault_cut_an_object_stream_off_doesnt_read() {
+        // Object 3 is 12345, cut off at 123.
+        let objects = b"2 0 3 6 << >>\n12345";
+        let zlib = write::zlib(objects);
+        let cut = &zlib[..zlib.len() - 6];
+        let stream = format!(
+            "<< /Type /ObjStm /N 2 /First 8 /Filter /FlateDecode /Length {} >>",
+            cut.len()
+        );
+        let mut file = b"%PDF-1.7\n".to_vec();
+        let one = file.len();
+        file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let four = file.len();
+        file.extend_from_slice(format!("4 0 obj\n{stream}\nstream\n").as_bytes());
+        file.extend_from_slice(cut);
+        file.extend_from_slice(b"\nendstream\nendobj\n");
+        let five = file.len();
+        let rows = [
+            xref_row(0, 0, 255),
+            xref_row(1, one, 0),
+            xref_row(2, 4, 0),
+            xref_row(2, 4, 1),
+            xref_row(1, four, 0),
+            xref_row(1, five, 0),
+        ]
+        .concat();
+        file.extend_from_slice(
+            format!(
+                "5 0 obj\n<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R /Length {} >>\nstream\n",
+                rows.len()
+            )
+            .as_bytes(),
+        );
+        file.extend_from_slice(&rows);
+        file.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes(),
+        );
+        let doc = read(&file);
+        assert_eq!(doc.decoded[&(4, 0)], b"2 0 3 6 << >>\n123");
+        let why = doc.get((3, 0)).unwrap_err();
+        assert!(why.contains("so it may be cut short"), "{why}");
+        assert!(doc.get((2, 0)).is_ok());
+    }
+
+    #[test]
+    fn a_stream_decodes_to_its_limit_and_a_file_to_its_budget() {
+        let (file, _) = compressed(false);
+        let (objects, _) = objects_2_and_3();
+        // The budget is the file's: the cross-reference stream's 24 bytes
+        // of rows first, then 40 for the object stream.
+        for (stream, budget) in [(40, BUDGET), (STREAM, 24 + 40)] {
+            let doc = read_limited(&file, stream, budget);
+            assert_eq!(doc.decoded[&(4, 0)], objects[..40], "{stream} {budget}");
+            let over =
+                (doc.warnings.iter()).any(|w| w.message.ends_with("its output is over the limit"));
+            assert!(over, "{:?}", doc.warnings);
+            assert!(doc.get((3, 0)).is_err());
+        }
+    }
+
+    #[test]
+    fn a_cross_reference_stream_numbers_no_object_past_a_third_of_the_file() {
+        let (file, _) = streams(false, true, &[1, 0, 9, 0, 1, 0, 9, 0], None);
+        let from = b"/Size 6 /W";
+        let to = b"/Size 6 /Index [0 6 900000 2] /W";
+        let at = find(&file, from).unwrap();
+        let file = [&file[..at], &to[..], &file[at + from.len()..]].concat();
+        let doc = read(&file);
+        let most = file.len() / 3;
+        let message = format!(
+            "its rows list 2 objects numbered past {most}, a third of the file's length, which aren't read"
+        );
+        assert!(
+            doc.warnings.iter().any(|w| w.message == message),
+            "{:?}",
+            doc.warnings
+        );
+        assert!(doc.get((3, 0)).is_ok());
+        assert!(!doc.ids().contains(&(900_000, 0)));
+    }
+
+    #[test]
+    fn the_revision_before_an_update_decodes_its_streams_itself() {
+        let (mut file, _) = compressed(false);
+        let five = find(&file, b"5 0 obj").unwrap();
+        let one = file.len();
+        file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Lang (fr) >>\nendobj\n");
+        let xref = file.len();
+        file.extend_from_slice(
+            format!("xref\n1 1\n{one:010} 00000 n \ntrailer\n<< /Size 6 /Root 1 0 R /Prev {five} >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        struct Unasked;
+        impl Decode for Unasked {
+            fn decode(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Vec<u8>, String>> {
+                panic!("asked to decode {ids:?}")
+            }
+        }
+        let doc = read_with(&file, &Unasked);
+        let update = doc.update.clone().expect("an update");
+        assert_eq!(update.previous, five);
+        let before = read_from(&file, &Unasked, update.previous);
+        assert!(before.warnings.is_empty(), "{:?}", before.warnings);
+        assert!(before.get((2, 0)).is_ok() && before.get((3, 0)).is_ok());
     }
 
     #[test]
