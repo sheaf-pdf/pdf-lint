@@ -38,9 +38,7 @@ just clippy   # or one at a time
 
 `just ci` also needs the `thumbv6m-none-eabi` target and Rust 1.85
 installed, for the tokenizer's no-std build and the minimum Rust of the
-tokenizer, the filters and pdf-crypt. Its
-`just test-oldest-qpdf` runs the checker's tests against the oldest qpdf
-it decodes with, 11.9.0, which it fetches for Linux x86_64.
+tokenizer, the filters and pdf-crypt.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz primitives`, `just
 fuzz crypt` and `just fuzz check` fuzz the tokenizer, the filters,

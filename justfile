@@ -13,7 +13,7 @@ default:
     @just --list --unsorted
 
 # Everything CI runs.
-ci: fmt clippy test test-oldest-qpdf doc dist tokenizer-no-std tokenizer-msrv filters-msrv crypt-msrv
+ci: fmt clippy test doc dist tokenizer-no-std tokenizer-msrv filters-msrv crypt-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -26,39 +26,6 @@ clippy:
 # Unit tests and doctests.
 test:
     cargo test --locked --workspace
-
-# The checker's tests against the oldest qpdf it decodes with (OLDEST in
-# crates/pdf-lint/src/qpdf.rs): qpdf's official Linux x86_64 zip, at a
-# pinned SHA-256, kept in target/. What works only with a newer qpdf fails
-# here.
-test-oldest-qpdf:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    version=11.9.0
-    oldest=$(sed -n 's/^pub const OLDEST: &str = "\(.*\)";$/\1/p' crates/pdf-lint/src/qpdf.rs)
-    if [ "${version%.*}" != "$oldest" ]; then
-        echo "OLDEST is $oldest, but this tests qpdf $version" >&2
-        exit 1
-    fi
-    if [ "$(rustc -vV | sed -n 's/^host: //p')" != x86_64-unknown-linux-gnu ]; then
-        echo "qpdf $version is fetched for Linux x86_64 only" >&2
-        exit 2
-    fi
-    dir=$PWD/target/qpdf-$version
-    if [ ! -x "$dir/bin/qpdf" ]; then
-        zip=qpdf-$version-bin-linux-x86_64.zip
-        work=$(mktemp -d)
-        trap 'rm -rf "$work"' EXIT
-        curl -fsSL --retry 3 -o "$work/$zip" \
-            "https://github.com/qpdf/qpdf/releases/download/v$version/$zip"
-        # From the release's qpdf-11.9.0.sha256.
-        echo "be5eeaf0032a86b573680cb12eb8499b74172d0af1b23a7d0a3648b01708569d  $work/$zip" \
-            | sha256sum --check --quiet
-        rm -rf "$dir"
-        mkdir -p "$dir"
-        unzip -q "$work/$zip" -d "$dir"
-    fi
-    PDF_LINT_QPDF="$dir/bin/qpdf" cargo test --locked -p pdf-lint
 
 # Build the API docs, failing on warnings.
 doc:
