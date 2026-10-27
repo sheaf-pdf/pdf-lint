@@ -13,7 +13,7 @@ default:
     @just --list --unsorted
 
 # Everything CI runs.
-ci: fmt clippy test doc fuzzing dist tokenizer-no-std tokenizer-msrv filters-msrv crypt-msrv
+ci: fmt clippy test test-qpdf doc fuzzing dist tokenizer-no-std tokenizer-msrv filters-msrv crypt-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -27,11 +27,40 @@ clippy:
 test:
     cargo test --locked --workspace
 
+# qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
+# pinned SHA-256 (from the release's qpdf-12.4.2.sha256), kept in target/.
+_qpdf:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version=12.4.2
+    if [ "$(rustc -vV | sed -n 's/^host: //p')" != x86_64-unknown-linux-gnu ]; then
+        echo "qpdf $version is fetched for Linux x86_64 only: name another in PDF_LINT_QPDF" >&2
+        exit 2
+    fi
+    dir=$PWD/target/qpdf-$version
+    if [ ! -x "$dir/bin/qpdf" ]; then
+        zip=qpdf-$version-bin-linux-x86_64.zip
+        work=$(mktemp -d)
+        trap 'rm -rf "$work"' EXIT
+        curl -fsSL --retry 3 -o "$work/$zip" \
+            "https://github.com/qpdf/qpdf/releases/download/v$version/$zip"
+        echo "db367d897829f22c4198ce1094143c9d467bd6ee7dfabc44ba6f02056b24f8b1  $work/$zip" \
+            | sha256sum --check --quiet
+        rm -rf "$dir"
+        mkdir -p "$dir"
+        unzip -q "$work/$zip" -d "$dir"
+    fi
+
+# The tests that set the reader beside qpdf, which `just test` leaves out
+# as ignored, against the pinned qpdf (the corpus tests aside).
+test-qpdf: _qpdf
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
+
 # Write the files qpdf makes from the tests' clean file anew, into
 # crates/pdf-lint/tests/files, which the tests read: only when the clean
-# file or the kinds change. Needs qpdf: PDF_LINT_QPDF, else the PATH's.
-fixtures:
-    cargo test --locked -p pdf-lint --lib qpdf::tests::the_fixtures_are_written -- --ignored --exact
+# file or the kinds change.
+fixtures: _qpdf
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --lib qpdf::tests::the_fixtures_are_written -- --ignored --exact
 
 # Build the fuzz targets as cargo-fuzz does (`--cfg fuzzing`), on stable,
 # so that what only they compile, the fuzz module and the test writer,

@@ -555,7 +555,9 @@ mod tests {
     use crate::write::{self, Body, Xref};
 
     /// qpdf, which these tests need: `PDF_LINT_QPDF`, else `qpdf` on the
-    /// `PATH`. Its absence fails them, rather than passing them unrun.
+    /// `PATH`. They're ignored, so that `cargo test` needs no qpdf, and run
+    /// by `just test-qpdf` against the pinned one; its absence then fails
+    /// them, rather than passing them unrun.
     fn qpdf(file: &Path) -> Qpdf {
         let qpdf = Qpdf::new(file);
         if let Err(why) = qpdf.version() {
@@ -739,6 +741,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
     fn a_compressed_file_reads_without_qpdf_as_through_it_and_checks_clean() {
         let path = fixture("qpdf-compressed");
         let data = std::fs::read(&path).unwrap();
@@ -792,6 +795,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
     fn an_encrypted_files_object_streams_decrypt_by_the_reader_as_through_qpdf() {
         let kinds = [
             "qpdf-rc4-40",
@@ -845,6 +849,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
     fn a_qpdf_that_cant_run_says_why_for_every_stream() {
         let decoded = Qpdf::new("x.pdf")
             .program("/nonexistent/qpdf")
@@ -1139,6 +1144,7 @@ qpdf: operation succeeded with warnings\n";
     }
 
     #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
     fn a_file_reads_through_qpdf_alone_as_through_its_bytes() {
         for test in [
             "qpdf-plain",
@@ -1170,6 +1176,7 @@ qpdf: operation succeeded with warnings\n";
     }
 
     #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
     fn what_qpdf_keeps_and_loses_reading_alone() {
         let dir = scratch("loses");
         let path = dir.join("odd.pdf");
@@ -1228,6 +1235,7 @@ qpdf: operation succeeded with warnings\n";
     }
 
     #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
     fn a_cross_reference_stream_whose_number_an_update_reuses_decodes_from_its_bytes() {
         let path = fixture("qpdf-compressed");
         let mut data = std::fs::read(&path).unwrap();
@@ -1280,6 +1288,7 @@ qpdf: operation succeeded with warnings\n";
     }
 
     #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
     fn an_encrypted_files_strings_in_plain_view_decrypt_to_their_bytes_and_through_qpdf() {
         let path = fixture("qpdf-aes-256-unpacked");
         let data = std::fs::read(&path).unwrap();
@@ -1469,6 +1478,7 @@ qpdf: operation succeeded with warnings\n";
     /// `specialized`): alike, but where the reader says a fault qpdf
     /// passes over, and where qpdf departs from the spec.
     #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
     fn hand_made_streams_decode_as_through_qpdf_but_where_it_departs_from_the_spec() {
         /// How the reader's decoding should stand to qpdf's.
         #[derive(Debug, PartialEq)]

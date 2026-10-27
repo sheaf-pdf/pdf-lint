@@ -27,12 +27,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: extractions/setup-just@v4
-      # The checker's tests decode through qpdf: the one the release
-      # archives bundle, at its pinned version.
-      - name: Install qpdf
-        run: |
-          release/qpdf.sh linux-x86_64 "$RUNNER_TEMP/qpdf"
-          echo "PDF_LINT_QPDF=$RUNNER_TEMP/qpdf/bin/qpdf" >> "$GITHUB_ENV"
       - name: Check formatting
         run: just fmt
       - name: Clippy
@@ -41,6 +35,10 @@ jobs:
         run: just fuzzing
       - name: Test (including doctests)
         run: just test
+      # The tests that set the reader beside qpdf, the oracle, against
+      # the qpdf the recipe fetches at its pinned version.
+      - name: Test against qpdf
+        run: just test-qpdf
       - name: Build documentation
         run: just doc
 
