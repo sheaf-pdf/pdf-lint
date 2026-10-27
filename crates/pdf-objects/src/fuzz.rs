@@ -17,7 +17,7 @@ pub struct Kept {
     pub hex: Vec<Span>,
 }
 
-impl Sink for Kept {
+impl Sink<'_> for Kept {
     fn fault(&mut self, at: Span, fault: Fault<'_>) {
         self.faults.push((at, fault.to_string()));
     }
@@ -55,7 +55,8 @@ enum Length {
 /// file's, its strings ciphertext or not; a stream's data by a length they
 /// give, when it holds, else up to `endstream`. Read twice, and through
 /// `()`, it's the same each time; every span and fault is inside the input
-/// and inside what holds it; strings are ciphertext exactly when asked.
+/// and inside what holds it; strings are ciphertext exactly when asked; a
+/// value or a header that fails leaves the parser where it was.
 /// Panics on a broken promise.
 pub fn parse(data: &[u8]) {
     let (how, input) = chosen(data);
@@ -87,9 +88,19 @@ pub fn parse(data: &[u8]) {
         }
         Err(error) => {
             assert!(!error.to_string().is_empty());
+            if !how.indirect {
+                assert_eq!(
+                    offset, how.offset,
+                    "a value that fails leaves the parser where it was"
+                );
+            }
             if let Error::Header { at } = error {
                 assert!(how.indirect);
                 assert_eq!(at, how.offset, "the header looked for where it was given");
+                assert_eq!(
+                    offset, how.offset,
+                    "a header that fails leaves the parser where it was"
+                );
             }
         }
     }
@@ -129,7 +140,7 @@ fn chosen(data: &[u8]) -> (How, &[u8]) {
 
 /// What reading `input` as `how` says: the object or the error, and where
 /// the parser ended.
-fn read(input: &[u8], how: How, sink: &mut impl Sink) -> (Result<Object, Error>, usize) {
+fn read<'a>(input: &'a [u8], how: How, sink: &mut impl Sink<'a>) -> (Result<Object, Error>, usize) {
     let mut parser = Parser::at(input, how.offset).ciphertext(how.ciphertext);
     if let Some(stream) = how.stream {
         parser = parser.in_stream(stream);

@@ -390,7 +390,7 @@ struct Warned<'r> {
     object: Option<ObjectId>,
 }
 
-impl Sink for Warned<'_> {
+impl Sink<'_> for Warned<'_> {
     fn fault(&mut self, at: Span, fault: parse::Fault<'_>) {
         self.warnings.push(Warning {
             object: self.object,

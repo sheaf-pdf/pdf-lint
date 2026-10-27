@@ -23,10 +23,12 @@ use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
 pub const NESTING: usize = 256;
 
 /// Where a parser says what it read past, and where it read hex strings:
-/// a checker keeps them; `()` drops them.
-pub trait Sink {
+/// a checker keeps them; `()` drops them. A fault borrows from `'a`, the
+/// data the parser reads, so a sink can keep it as it is. A sink borrowed,
+/// `&mut S` or `&mut dyn Sink`, is a sink too.
+pub trait Sink<'a> {
     /// A fault at `at`, which the parser read past.
-    fn fault(&mut self, at: Span, fault: Fault<'_>);
+    fn fault(&mut self, at: Span, fault: Fault<'a>);
 
     /// A string written as a hex string, at `at`. By default, nothing.
     fn hex(&mut self, at: Span) {
@@ -35,8 +37,19 @@ pub trait Sink {
 }
 
 /// Drops every fault, and every hex string's place.
-impl Sink for () {
+impl Sink<'_> for () {
     fn fault(&mut self, _: Span, _: Fault<'_>) {}
+}
+
+/// Tells the sink it borrows.
+impl<'a, S: Sink<'a> + ?Sized> Sink<'a> for &mut S {
+    fn fault(&mut self, at: Span, fault: Fault<'a>) {
+        (**self).fault(at, fault);
+    }
+
+    fn hex(&mut self, at: Span) {
+        (**self).hex(at);
+    }
 }
 
 /// What the parser read past: the value is read, as readers read it, and
@@ -107,8 +120,9 @@ impl fmt::Display for Fault<'_> {
     }
 }
 
-/// What stops the parser reading a value. Each byte it names is in the
-/// data the parser reads.
+/// What stops the parser reading a value. Each offset it names is in the
+/// data the parser reads, but [`Error::Header`]'s, as the parser was given
+/// it, and [`Error::Extent`]'s, as its caller gave them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
@@ -231,7 +245,7 @@ impl fmt::Display for Error {
                 end,
             } => write!(
                 f,
-                "{n} {g} obj's stream can't have bytes {start}..{end} as its data: they don't start where its data does, or run past what's read"
+                "{n} {g} obj's stream can't have bytes {start}..{end} as its data: they don't start where its data does, end before they start, run past what's read, or are in other data"
             ),
         }
     }
@@ -243,11 +257,12 @@ impl std::error::Error for Error {}
 /// object stream's decoded data, from an offset on. Its strings are read
 /// as their bytes, or as ciphertext ([`Parser::ciphertext`]), and its
 /// spans are in the file, or in an object stream's data
-/// ([`Parser::in_stream`]).
+/// ([`Parser::in_stream`]). A call that fails leaves the parser where it
+/// was, though it has said the faults it read past before the error.
 #[derive(Debug, Clone)]
 pub struct Parser<'a> {
     data: &'a [u8],
-    /// Where it reads next: as it was given until it reads, past the
+    /// Where it reads next: as it was given until a call reads, past the
     /// data's end too.
     offset: usize,
     /// The object stream whose decoded data `data` is, for its spans.
@@ -289,17 +304,18 @@ impl<'a> Parser<'a> {
     }
 
     /// Where it reads next: past what it has read, or where it was made
-    /// at, as given, when it has read nothing.
+    /// at, as given, when it has read nothing. A call that fails leaves it
+    /// where it was.
     pub fn offset(&self) -> usize {
         self.offset
     }
 
     /// The next value.
-    pub fn value(&mut self, sink: &mut impl Sink) -> Result<Object, Error> {
+    pub fn value(&mut self, sink: &mut (impl Sink<'a> + ?Sized)) -> Result<Object, Error> {
         let mut t = Tokenizer::at(self.data, self.offset);
-        let value = self.read(&mut t, sink, 0);
+        let value = self.read(&mut t, sink, 0)?;
         self.offset = t.offset();
-        value
+        Ok(value)
     }
 
     /// An indirect object's header, `n g obj` (ISO 32000-2, 7.3.10): its
@@ -316,32 +332,36 @@ impl<'a> Parser<'a> {
             let generation = u16::try_from(g.integer().ok()?).ok()?;
             is_keyword(Some(&obj), b"obj").then_some((number, generation))
         };
-        let id = header(&mut t);
+        let id = header(&mut t).ok_or(Error::Header { at: offset })?;
         self.offset = t.offset();
-        id.ok_or(Error::Header { at: offset })
+        Ok(id)
     }
 
     /// Object `id`'s value, after its header: a value, said when `endobj`
     /// doesn't follow it; or a dictionary with `stream` after it, read
     /// through `stream`'s end of line, said when it isn't CR LF or LF, to
     /// where its data starts.
-    pub fn body(&mut self, id: ObjectId, sink: &mut impl Sink) -> Result<Body<'a>, Error> {
+    pub fn body(
+        &mut self,
+        id: ObjectId,
+        sink: &mut (impl Sink<'a> + ?Sized),
+    ) -> Result<Body<'a>, Error> {
         let mut t = Tokenizer::at(self.data, self.offset);
-        let body = self.read_body(&mut t, id, sink);
+        let body = self.read_body(&mut t, id, sink)?;
         self.offset = t.offset();
-        body
+        Ok(body)
     }
 
     /// The stream `head` began, its data `data`, which its caller chose:
     /// one of [`StreamHead::declared`] and [`StreamHead::scanned`]; then
     /// `endstream`, and `endobj`, said when it doesn't follow. Data that
-    /// doesn't start where the stream's does, runs past what the parser
-    /// reads, or is in other data, is an error.
+    /// doesn't start where the stream's does, ends before it starts, runs
+    /// past what the parser reads, or is in other data, is an error.
     pub fn stream(
         &mut self,
         head: StreamHead<'a>,
         data: Span,
-        sink: &mut impl Sink,
+        sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Result<Object, Error> {
         let StreamHead {
             id,
@@ -363,8 +383,8 @@ impl<'a> Parser<'a> {
         }
         let mut t = Tokenizer::at(self.data, data.end);
         let end = significant(&mut t).filter(|token| is_keyword(Some(token), b"endstream"));
-        self.offset = t.offset();
         let end = end.ok_or(Error::Endstream { id })?;
+        self.offset = t.offset();
         let from = dict_at.map_or(start, |at| at.start);
         let object = Object {
             value: Value::Stream(Stream {
@@ -386,7 +406,7 @@ impl<'a> Parser<'a> {
         &self,
         t: &mut Tokenizer<'a>,
         id: ObjectId,
-        sink: &mut impl Sink,
+        sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Result<Body<'a>, Error> {
         let value = self.read(t, sink, 0)?;
         let mut after = t.clone();
@@ -423,7 +443,13 @@ impl<'a> Parser<'a> {
 
     /// Says object `id`, `object`, has no `endobj` when `t` doesn't go on
     /// with it.
-    fn endobj(&self, t: &Tokenizer<'a>, id: ObjectId, object: &Object, sink: &mut impl Sink) {
+    fn endobj(
+        &self,
+        t: &Tokenizer<'a>,
+        id: ObjectId,
+        object: &Object,
+        sink: &mut (impl Sink<'a> + ?Sized),
+    ) {
         if !is_keyword(significant(&mut t.clone()).as_ref(), b"endobj") {
             // Every value the parser reads is placed.
             if let Some(at) = object.at {
@@ -436,7 +462,7 @@ impl<'a> Parser<'a> {
     fn read(
         &self,
         t: &mut Tokenizer<'a>,
-        sink: &mut impl Sink,
+        sink: &mut (impl Sink<'a> + ?Sized),
         depth: usize,
     ) -> Result<Object, Error> {
         if depth > self.nesting {
@@ -573,7 +599,7 @@ impl<'a> Parser<'a> {
     /// has a `#` without two hex digits after it, or `#00`, NUL, which a
     /// name can't hold (ISO 32000-2, 7.3.5), readers reading each their own
     /// way.
-    fn name(&self, token: &Token<'a>, sink: &mut impl Sink) -> Vec<u8> {
+    fn name(&self, token: &Token<'a>, sink: &mut (impl Sink<'a> + ?Sized)) -> Vec<u8> {
         let hows: Vec<How> = (token.pieces().into_iter().flatten())
             .map(|piece| piece.how)
             .filter(|how| matches!(how, How::StrayHash | How::NulEscape))
@@ -845,13 +871,24 @@ mod tests {
             error(b"1 0 obj << >> stream\nabc").to_string(),
             "1 0 obj's stream has no endstream"
         );
-        let astray = |head: &StreamHead| Span::new(None, head.start() + 1, head.start() + 2);
+        // Data a stream can't have: after where its data starts, ending
+        // before it starts, past the input, and in another stream's data.
+        let input = b"7 2 obj << >> stream\nabc endstream";
+        let astray: [fn(&StreamHead) -> Span; 4] = [
+            |head| Span::new(None, head.start() + 1, head.start() + 2),
+            |head| Span::new(None, head.start(), head.start() - 1),
+            |head| Span::new(None, head.start(), head.start() + 99),
+            |head| Span::new(Some((9, 0)), head.start(), head.start() + 3),
+        ];
+        let said: Vec<String> = (astray.into_iter())
+            .map(|astray| indirect(input, astray).0.unwrap_err().to_string())
+            .collect();
+        let why = "they don't start where its data does, end before they start, run past what's read, or are in other data";
         assert_eq!(
-            indirect(b"7 2 obj << >> stream\nabc endstream", astray)
-                .0
-                .unwrap_err()
-                .to_string(),
-            "7 2 obj's stream can't have bytes 22..23 as its data: they don't start where its data does, or run past what's read"
+            said,
+            ["22..23", "21..20", "21..120", "21..24"].map(|bytes| format!(
+                "7 2 obj's stream can't have bytes {bytes} as its data: {why}"
+            ))
         );
     }
 
@@ -866,10 +903,71 @@ mod tests {
         assert_eq!(error, Error::Header { at: 10_000 });
         assert_eq!(error.to_string(), "no `n g obj` at byte 10000");
         assert_eq!(Parser::at(data, 10_000).value(&mut ()), Err(Error::End));
+        // A call that fails leaves the offset where it was, here as given,
+        // so the next error names it too.
+        assert_eq!(parser.offset(), 10_000);
+        assert_eq!(parser.header(), Err(Error::Header { at: 10_000 }));
+        assert_eq!(parser.value(&mut ()), Err(Error::End));
+        assert_eq!(parser.offset(), 10_000);
         // From its start, it reads.
         let mut parser = Parser::at(data, 0);
         assert_eq!(parser.header(), Ok((1, 0)));
         assert_eq!(parser.offset(), 7);
+    }
+
+    /// A call that fails, having read some of the data, leaves the parser
+    /// where it was, and one that reads moves it on.
+    #[test]
+    fn a_call_that_fails_leaves_the_parser_where_it_was() {
+        let data = b"1 0 R [1 2 3 /x";
+        let mut parser = Parser::at(data, 0);
+        assert_eq!(parser.header(), Err(Error::Header { at: 0 }));
+        assert_eq!(parser.offset(), 0);
+        assert_eq!(parser.value(&mut ()).unwrap().value, Value::Ref((1, 0)));
+        assert_eq!(parser.offset(), 5);
+        assert_eq!(parser.value(&mut ()), Err(Error::Array { at: 6 }));
+        assert_eq!(parser.offset(), 5);
+        // A stream with no `endstream`, after its body read.
+        let data = b"1 0 obj << >> stream\nabc";
+        let mut parser = Parser::at(data, 0);
+        let id = parser.header().unwrap();
+        let Ok(Body::Stream(head)) = parser.body(id, &mut ()) else {
+            panic!("a stream");
+        };
+        let start = parser.offset();
+        let data = head.scanned();
+        assert_eq!(
+            parser.stream(head, data, &mut ()),
+            Err(Error::Endstream { id })
+        );
+        assert_eq!(parser.offset(), start);
+    }
+
+    /// A sink can keep each fault as the parser gave it, borrowing the
+    /// data, and a sink borrowed, `dyn` too, is one.
+    #[test]
+    fn a_sink_keeps_faults_as_they_are_or_through_a_borrow() {
+        struct Typed<'a>(Vec<Fault<'a>>);
+        impl<'a> Sink<'a> for Typed<'a> {
+            fn fault(&mut self, _: Span, fault: Fault<'a>) {
+                self.0.push(fault);
+            }
+        }
+        let data = b"[/A#zz 99999999999999999999]".to_vec();
+        let mut typed = Typed(Vec::new());
+        Parser::at(&data, 0).value(&mut typed).unwrap();
+        let written = &data[1..6];
+        let name = Fault::Name {
+            written,
+            stray: true,
+            nul: false,
+        };
+        assert_eq!(typed.0, [name, Fault::IntegerOverflow]);
+        let mut kept = Kept::default();
+        let sink: &mut dyn Sink = &mut kept;
+        Parser::at(&data, 0).value(sink).unwrap();
+        Parser::at(&data, 0).value(&mut &mut *sink).unwrap();
+        assert_eq!(kept.faults.len(), 4);
     }
 
     /// Every value, at every depth, and every key, is placed in the file,

@@ -29,6 +29,7 @@ pub enum Encoding {
 
 /// Where a text string departs from the spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Quirk {
     /// It starts `FF FE`, UTF-16LE's mark, which PDF doesn't have: it's
     /// read as PDFDocEncoding, `ÿþ` and on, where PDFium reads UTF-16LE.

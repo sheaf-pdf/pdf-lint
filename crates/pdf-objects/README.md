@@ -48,7 +48,7 @@ use pdf_objects::{Span, Value};
 
 // A checker's sink keeps each fault; `()` would drop them.
 struct Said(Vec<String>);
-impl Sink for Said {
+impl Sink<'_> for Said {
     fn fault(&mut self, _at: Span, fault: Fault<'_>) {
         self.0.push(fault.to_string());
     }
