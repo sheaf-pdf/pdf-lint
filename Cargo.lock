@@ -170,6 +170,9 @@ dependencies = [
 [[package]]
 name = "pdf-objects"
 version = "0.1.0"
+dependencies = [
+ "pdf-tokenizer",
+]
 
 [[package]]
 name = "pdf-tokenizer"

@@ -283,7 +283,7 @@ impl Exempt {
                     _ => {}
                 }
             }
-            let name = crate::bytes::decoded(&token);
+            let name: Vec<u8> = token.pieces().into_iter().flat_map(|p| p.bytes()).collect();
             if name.is_empty() {
                 bail!("line {line_number}: an empty name");
             }

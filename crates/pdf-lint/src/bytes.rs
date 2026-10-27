@@ -1,11 +1,11 @@
-//! A reader of a file's bytes, on [`pdf_tokenizer`]: every value, key and
-//! stream's data with where it was written ([`Span`]), dictionaries as
-//! written with any key written twice, and every choice it had to make a
-//! [`Warning`]. It reads the header, `startxref`, the cross-reference
-//! tables and streams along their `/Prev` chain, and each object at the
-//! offset they give, a stream's data by its `/Length` when that ends at
-//! `endstream`. Where the sections don't read, it finds the objects by
-//! scanning the file, and says so.
+//! A reader of a file's bytes, on [`pdf_tokenizer`] and pdf-objects'
+//! [`Parser`]: every value, key and stream's data with where it was
+//! written ([`Span`]), dictionaries as written with any key written twice,
+//! and every choice it had to make a [`Warning`]. It reads the header,
+//! `startxref`, the cross-reference tables and streams along their `/Prev`
+//! chain, and each object at the offset they give, a stream's data by its
+//! `/Length` when that ends at `endstream`. Where the sections don't read,
+//! it finds the objects by scanning the file, and says so.
 //!
 //! It decodes cross-reference streams and object streams from their own
 //! data, through [`pdf_filters`]: a stream up to [`STREAM`] bytes, and a
@@ -20,19 +20,20 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use pdf_tokenizer::decode::How;
 use pdf_tokenizer::{Kind, Token, Tokenizer, is_delimiter, is_white_space};
 
 use pdf_crypt::{Handler, Method};
 use pdf_filters::{Fault, Filter, Layout, Predictor};
+use pdf_objects::parse::{self, Body, Parser, Sink};
 
 use crate::filter;
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
 use crate::source::{Document, Encryption, Trailer, Update, Warning};
 use crate::version::Version;
 
-/// How deeply arrays and dictionaries may nest in an object.
-pub const NESTING: usize = 256;
+// How deeply arrays and dictionaries may nest in an object is the
+// parser's, pdf-objects'.
+pub use pdf_objects::parse::NESTING;
 
 /// How many cross-reference sections the `/Prev` chain may have.
 pub const SECTIONS: usize = 1024;
@@ -381,25 +382,25 @@ struct Reader<'a> {
     hex: BTreeSet<Span>,
 }
 
-/// Where a value is read: in which indirect object, in the file or an
-/// object stream's decoded data, and whether its strings are ciphertext.
-#[derive(Debug, Clone, Copy)]
-struct Place {
+/// The reader's warnings, on object `object` (none, a trailer), and where
+/// its hex strings are: where the parser's faults go.
+struct Warned<'r> {
+    warnings: &'r mut Vec<Warning>,
+    hex: &'r mut BTreeSet<Span>,
     object: Option<ObjectId>,
-    stream: Option<ObjectId>,
-    ciphertext: bool,
 }
 
-impl Place {
-    /// In the file, in no object: a trailer.
-    const FILE: Place = Place {
-        object: None,
-        stream: None,
-        ciphertext: false,
-    };
+impl Sink for Warned<'_> {
+    fn fault(&mut self, at: Span, fault: parse::Fault<'_>) {
+        self.warnings.push(Warning {
+            object: self.object,
+            at: Some(at),
+            message: fault.to_string(),
+        });
+    }
 
-    fn span(&self, start: usize, end: usize) -> Span {
-        Span::new(self.stream, start, end)
+    fn hex(&mut self, at: Span) {
+        self.hex.insert(at);
     }
 }
 
@@ -415,7 +416,7 @@ struct Section {
 }
 
 fn span(start: usize, end: usize) -> Span {
-    Place::FILE.span(start, end)
+    Span::new(None, start, end)
 }
 
 /// The next token that isn't white-space or a comment.
@@ -520,6 +521,16 @@ impl<'a> Reader<'a> {
             at,
             message,
         });
+    }
+
+    /// Where the parser's faults go, when it reads object `object` (none, a
+    /// trailer).
+    fn warned(&mut self, object: Option<ObjectId>) -> Warned<'_> {
+        Warned {
+            warnings: &mut self.warnings,
+            hex: &mut self.hex,
+            object,
+        }
     }
 
     /// Stream `id`'s data, written at `at`, decoded by `filters`, as much
@@ -652,34 +663,6 @@ impl<'a> Reader<'a> {
     /// Whether object `id`'s strings are ciphertext.
     fn ciphertext(&self, id: ObjectId) -> bool {
         (self.encrypted.as_ref()).is_some_and(|plain| !plain.contains(&id))
-    }
-
-    /// A name's bytes, its escapes decoded; and at `place`, a warning of a
-    /// `#` without two hex digits after it, or of `#00`, NUL, which a name
-    /// can't hold (ISO 32000-2, 7.3.5), readers reading each their own way.
-    fn name(&mut self, token: &Token, place: Place) -> Vec<u8> {
-        let hows: Vec<How> = (token.pieces().into_iter().flatten())
-            .map(|piece| piece.how)
-            .filter(|how| matches!(how, How::StrayHash | How::NulEscape))
-            .collect();
-        if !hows.is_empty() {
-            let written = String::from_utf8_lossy(&token.bytes[..token.bytes.len().min(40)]);
-            let what = match (
-                hows.contains(&How::StrayHash),
-                hows.contains(&How::NulEscape),
-            ) {
-                (true, true) => "a # without two hex digits after it, and #00, NUL",
-                (true, false) => "a # without two hex digits after it",
-                _ => "#00, NUL, which a name can't hold",
-            };
-            let message = format!("the name {written} has {what}, which readers read differently");
-            self.warn(
-                place.object,
-                Some(place.span(token.start, token.end())),
-                message,
-            );
-        }
-        decoded(token)
     }
 
     /// Whether the file ends as ISO 32000-2 7.5.5 has it, its last line
@@ -969,7 +952,9 @@ impl<'a> Reader<'a> {
             );
             self.warn(None, Some(at), message);
         }
-        let trailer = self.value(t, Place::FILE, 0)?;
+        let trailer = (Parser::at(self.file, t.offset()))
+            .value(&mut self.warned(None))
+            .map_err(|e| e.to_string())?;
         let Some(dict) = trailer.as_dict() else {
             return Err("the trailer isn't a dictionary".to_string());
         };
@@ -1293,7 +1278,7 @@ impl<'a> Reader<'a> {
         let mut found: Option<Object> = None;
         let mut taken = Vec::new();
         for at in trailers.into_iter().rev() {
-            let Ok(object) = self.value(&mut Tokenizer::at(self.file, at), Place::FILE, 0) else {
+            let Ok(object) = Parser::at(self.file, at).value(&mut self.warned(None)) else {
                 continue;
             };
             let Value::Dict(earlier) = object.value.clone() else {
@@ -1744,17 +1729,14 @@ impl<'a> Reader<'a> {
                 stream.0, id.0
             ));
         }
-        // Taken out while it's read, as `value` borrows the reader, and put
-        // back.
+        // Taken out while it's read, as its warnings borrow the reader, and
+        // put back.
         let Some(data) = self.decoded.get_mut(&stream).map(std::mem::take) else {
             return Err(format!("object stream {} 0 R has no data", stream.0));
         };
-        let place = Place {
-            object: Some(id),
-            stream: Some(stream),
-            ciphertext: false,
-        };
-        let object = self.value(&mut Tokenizer::at(&data, offset), place, 0);
+        let object = (Parser::at(&data, offset).in_stream(stream))
+            .value(&mut self.warned(Some(id)))
+            .map_err(|e| e.to_string());
         // One that runs to where a fault cut the data off may be cut short,
         // when it's a value nothing closes: a number, a name, a keyword.
         let open = |o: &Object| {
@@ -1777,22 +1759,16 @@ impl<'a> Reader<'a> {
     }
 
     /// The indirect object at `offset`: `n g obj`, a value (a dictionary
-    /// with its stream), `endobj`. When `expected`, it must be that one.
+    /// with its stream), `endobj`. When `expected`, it must be that one. A
+    /// stream's data is as long as its `/Length` says when that ends at
+    /// `endstream`, else up to `endstream`.
     fn indirect(
         &mut self,
         offset: usize,
         expected: Option<ObjectId>,
     ) -> Result<(ObjectId, Object), String> {
-        let mut t = Tokenizer::at(self.file, offset);
-        let header = |t: &mut Tokenizer<'a>| {
-            let n = significant(t).filter(|n| n.kind == Kind::Integer)?;
-            let g = significant(t).filter(|g| g.kind == Kind::Integer)?;
-            let obj = significant(t)?;
-            let number = u32::try_from(n.integer().ok()?).ok()?;
-            let generation = u16::try_from(g.integer().ok()?).ok()?;
-            is_keyword(Some(&obj), b"obj").then_some((number, generation))
-        };
-        let id = header(&mut t).ok_or_else(|| format!("no `n g obj` at byte {offset}"))?;
+        let mut parser = Parser::at(self.file, offset);
+        let id = parser.header().map_err(|e| e.to_string())?;
         if let Some(expected) = expected
             && expected != id
         {
@@ -1801,84 +1777,31 @@ impl<'a> Reader<'a> {
                 id.0, id.1, expected.0, expected.1
             ));
         }
-        let place = Place {
-            object: Some(id),
-            stream: None,
-            ciphertext: self.ciphertext(id),
-        };
-        let value = self.value(&mut t, place, 0)?;
-        let mut after = t.clone();
-        let next = significant(&mut after);
-        let object = match (value.value, next) {
-            (Value::Dict(dict), Some(keyword)) if is_keyword(Some(&keyword), b"stream") => {
-                t = after;
-                let keyword = span(keyword.start, keyword.end());
-                self.stream(&mut t, id, dict, value.at, keyword)?
-            }
-            (other, _) => Object {
-                value: other,
-                at: value.at,
-            },
-        };
-        if !is_keyword(significant(&mut t.clone()).as_ref(), b"endobj") {
-            let message = format!("{} {} obj has no endobj", id.0, id.1);
-            self.warn(Some(id), object.at, message);
-        }
-        Ok((id, object))
-    }
-
-    /// The stream after `dict`, whose `stream` keyword, written at
-    /// `keyword`, `t` has just read: an end of line, data as long as its
-    /// `/Length` says when that ends at `endstream`, else up to
-    /// `endstream`, and `endstream`.
-    fn stream(
-        &mut self,
-        t: &mut Tokenizer<'a>,
-        id: ObjectId,
-        dict: Dict,
-        dict_at: Option<Span>,
-        keyword: Span,
-    ) -> Result<Object, String> {
-        match t.eol() {
-            None => {
-                let message = "no end of line after `stream`".to_string();
-                self.warn(Some(id), Some(keyword), message);
-            }
-            Some(eol) if eol.bytes == b"\r" => {
-                let message = "a lone CR after `stream`, where ISO 32000-2 wants CR LF or LF";
-                self.warn(
-                    Some(id),
-                    Some(span(eol.start, eol.end())),
-                    message.to_string(),
-                );
-            }
-            Some(_) => {}
-        }
-        let start = t.offset();
-        let length = self.length(&dict, id);
-        let data = match length.filter(|&len| self.ends_at(start, len)) {
-            Some(len) => t.data(len),
-            None => {
-                let message = match length {
-                    Some(len) => format!("its /Length, {len}, doesn't end at endstream"),
-                    None => "it has no /Length that reads".to_string(),
+        let mut parser = parser.ciphertext(self.ciphertext(id));
+        let body = parser.body(id, &mut self.warned(Some(id)));
+        let object = match body.map_err(|e| e.to_string())? {
+            Body::Object(object) => object,
+            Body::Stream(head) => {
+                let length = self.length(head.dict(), id);
+                let data = match length.and_then(|len| head.declared(len)) {
+                    Some(data) => data,
+                    None => {
+                        let message = match length {
+                            Some(len) => format!("its /Length, {len}, doesn't end at endstream"),
+                            None => "it has no /Length that reads".to_string(),
+                        };
+                        let at = (head.dict().get(b"Length"))
+                            .and_then(|l| l.at)
+                            .unwrap_or(head.keyword());
+                        self.warn(Some(id), Some(at), message);
+                        head.scanned()
+                    }
                 };
-                let at = dict.get(b"Length").and_then(|l| l.at).unwrap_or(keyword);
-                self.warn(Some(id), Some(at), message);
-                t.data_until(b"endstream")
+                (parser.stream(head, data, &mut self.warned(Some(id))))
+                    .map_err(|e| e.to_string())?
             }
         };
-        let end = significant(t)
-            .filter(|token| is_keyword(Some(token), b"endstream"))
-            .ok_or_else(|| format!("{} {} obj's stream has no endstream", id.0, id.1))?;
-        let from = dict_at.map_or(start, |at| at.start);
-        Ok(Object {
-            value: Value::Stream(Stream {
-                dict,
-                data: Some(span(data.start, data.end())),
-            }),
-            at: Some(span(from, end.end())),
-        })
+        Ok((id, object))
     }
 
     /// A stream's `/Length`: an integer, or a reference to one written in
@@ -1899,169 +1822,6 @@ impl<'a> Reader<'a> {
             _ => return None,
         };
         usize::try_from(n).ok()
-    }
-
-    /// Whether `len` bytes from `start` end where `endstream` comes, past
-    /// white-space.
-    fn ends_at(&self, start: usize, len: usize) -> bool {
-        let Some(end) = start.checked_add(len).filter(|&end| end <= self.file.len()) else {
-            return false;
-        };
-        is_keyword(
-            significant(&mut Tokenizer::at(self.file, end)).as_ref(),
-            b"endstream",
-        )
-    }
-
-    /// The value `t` goes on with, read at `place`, nested `depth` deep.
-    fn value<'t>(
-        &mut self,
-        t: &mut Tokenizer<'t>,
-        place: Place,
-        depth: usize,
-    ) -> Result<Object, String> {
-        if depth > NESTING {
-            return Err(format!(
-                "arrays and dictionaries nested deeper than {NESTING}"
-            ));
-        }
-        let token = significant(t).ok_or("the data ends where a value should be")?;
-        let at = Some(place.span(token.start, token.end()));
-        let value = match token.kind {
-            Kind::Integer => {
-                let mut look = t.clone();
-                let generation = significant(&mut look).filter(|g| g.kind == Kind::Integer);
-                let r = significant(&mut look).filter(|r| is_keyword(Some(r), b"R"));
-                if let (Some(g), Some(r)) = (generation, r) {
-                    let number = token.integer().ok().and_then(|n| u32::try_from(n).ok());
-                    let generation = g.integer().ok().and_then(|g| u16::try_from(g).ok());
-                    let (Some(number), Some(generation)) = (number, generation) else {
-                        return Err(format!(
-                            "a reference at byte {}, {} {} R, numbers no object",
-                            token.start,
-                            String::from_utf8_lossy(token.bytes),
-                            String::from_utf8_lossy(g.bytes)
-                        ));
-                    };
-                    *t = look;
-                    return Ok(Object {
-                        value: Value::Ref((number, generation)),
-                        at: Some(place.span(token.start, r.end())),
-                    });
-                }
-                match token.integer() {
-                    Ok(n) => Value::Integer(n),
-                    Err(_) => {
-                        let message = "an integer outside 64 bits, read as the nearest that fits";
-                        self.warn(place.object, at, message.to_string());
-                        Value::Integer(if token.bytes.starts_with(b"-") {
-                            i64::MIN
-                        } else {
-                            i64::MAX
-                        })
-                    }
-                }
-            }
-            Kind::Real => match token.number() {
-                Ok(r) => Value::Real(r),
-                Err(_) => {
-                    let message = "a real too large for 64 bits, read as the largest";
-                    self.warn(place.object, at, message.to_string());
-                    Value::Real(if token.bytes.starts_with(b"-") {
-                        f64::MIN
-                    } else {
-                        f64::MAX
-                    })
-                }
-            },
-            Kind::Name => Value::Name(self.name(&token, place)),
-            Kind::String { closed: true } | Kind::HexString { closed: true } => {
-                if matches!(token.kind, Kind::HexString { .. }) {
-                    self.hex.insert(place.span(token.start, token.end()));
-                }
-                let bytes = decoded(&token);
-                Value::String(if place.ciphertext {
-                    Str::Encrypted(bytes)
-                } else {
-                    Str::Bytes(bytes)
-                })
-            }
-            Kind::String { closed: false } | Kind::HexString { closed: false } => {
-                return Err(format!("a string at byte {} that doesn't end", token.start));
-            }
-            Kind::ArrayOpen => {
-                let mut array = Vec::new();
-                loop {
-                    let mut look = t.clone();
-                    match significant(&mut look) {
-                        Some(close) if close.kind == Kind::ArrayClose => {
-                            *t = look;
-                            return Ok(Object {
-                                value: Value::Array(array),
-                                at: Some(place.span(token.start, close.end())),
-                            });
-                        }
-                        Some(_) => array.push(self.value(t, place, depth + 1)?),
-                        None => {
-                            return Err(format!(
-                                "an array at byte {} that doesn't end",
-                                token.start
-                            ));
-                        }
-                    }
-                }
-            }
-            Kind::DictOpen => {
-                let mut dict = Dict::new();
-                loop {
-                    let key = significant(t).ok_or_else(|| {
-                        format!("a dictionary at byte {} that doesn't end", token.start)
-                    })?;
-                    match key.kind {
-                        Kind::DictClose => {
-                            return Ok(Object {
-                                value: Value::Dict(dict),
-                                at: Some(place.span(token.start, key.end())),
-                            });
-                        }
-                        Kind::Name => {
-                            let value = self.value(t, place, depth + 1)?;
-                            dict.push_entry(Entry {
-                                key: self.name(&key, place),
-                                key_at: Some(place.span(key.start, key.end())),
-                                value,
-                            });
-                        }
-                        _ => {
-                            return Err(format!(
-                                "a dictionary's key at byte {} isn't a name",
-                                key.start
-                            ));
-                        }
-                    }
-                }
-            }
-            Kind::Keyword => match token.bytes {
-                b"true" => Value::Bool(true),
-                b"false" => Value::Bool(false),
-                b"null" => Value::Null,
-                word => {
-                    return Err(format!(
-                        "`{}` at byte {}, where a value should be",
-                        String::from_utf8_lossy(&word[..word.len().min(32)]),
-                        token.start
-                    ));
-                }
-            },
-            _ => {
-                return Err(format!(
-                    "{:?} at byte {}, where a value should be",
-                    String::from_utf8_lossy(token.bytes),
-                    token.start
-                ));
-            }
-        };
-        Ok(Object { value, at })
     }
 }
 
@@ -2248,20 +2008,6 @@ fn row_shape(file: &[u8], row: usize) -> Result<(), &'static str> {
     }
 }
 
-/// A name's or string's value, its escapes decoded, in a buffer of its
-/// exact length; nothing for any other token.
-pub(crate) fn decoded(token: &Token) -> Vec<u8> {
-    if let Some(value) = token.verbatim() {
-        return value.to_vec();
-    }
-    let Some(pieces) = token.pieces() else {
-        return Vec::new();
-    };
-    let mut value = Vec::with_capacity(pieces.clone().bytes().count());
-    value.extend(pieces.bytes());
-    value
-}
-
 /// An offset an integer gives.
 fn offset_of(o: &Object) -> Option<usize> {
     usize::try_from(o.as_integer()?).ok()
@@ -2273,32 +2019,6 @@ mod tests {
     use crate::dict;
     use crate::source::Source;
     use crate::write::{self, Body, Xref};
-
-    fn reader(file: &[u8]) -> Reader<'_> {
-        Reader {
-            file,
-            passwords: Vec::new(),
-            handler: None,
-            encryption: Encryption::None,
-            native: true,
-            stream: STREAM,
-            budget: BUDGET,
-            listable: listable(file.len()),
-            cut: HashSet::new(),
-            decoder: None,
-            warnings: Vec::new(),
-            entries: BTreeMap::new(),
-            encrypted: None,
-            dictionaries: HashSet::new(),
-            plain_strings: false,
-            plain_metadata: false,
-            encrypts: false,
-            resolving: false,
-            decoded: BTreeMap::new(),
-            update: None,
-            hex: BTreeSet::new(),
-        }
-    }
 
     /// `o` with every place it was written left out.
     fn plain(o: &Object) -> Object {
@@ -2380,9 +2100,7 @@ mod tests {
         // Read again from the file cut at the value's end: a place that
         // ends short leaves it unfinished.
         let cut = &file[..at.end];
-        let again = reader(cut)
-            .value(&mut Tokenizer::at(cut, at.start), Place::FILE, 0)
-            .unwrap();
+        let again = Parser::at(cut, at.start).value(&mut ()).unwrap();
         match &o.value {
             Value::Stream(s) => {
                 let dict = same(&Object::new(Value::Dict(s.dict.clone())));

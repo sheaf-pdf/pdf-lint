@@ -18,10 +18,19 @@
 //!   string departs from the spec, said.
 //! - **Versions** ([`Version`]), read from a header's or a catalog's text,
 //!   in order.
+//! - **A parser** ([`parse`]), on pdf-tokenizer: a value, or an indirect
+//!   object, from a file's bytes or an object stream's decoded data, each
+//!   value placed; what it reads past said to a [`parse::Sink`], which `()`
+//!   drops; and a stream's two extents, by its `/Length` and up to
+//!   `endstream`, both given, for the caller to choose its data from.
 //!
 //! [`dict!`] builds a dictionary from keys and values.
 
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzz;
 pub mod object;
+pub mod parse;
 pub mod text;
 pub mod version;
 

@@ -24,7 +24,7 @@ decrypts what's encrypted itself.
 | [pdf-tokenizer](crates/pdf-tokenizer) | A lossless, zero-copy PDF tokenizer, with no dependencies and needing neither `std` nor `alloc` |
 | [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept |
 | [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler, decrypting on RustCrypto's primitives, every fault said |
-| [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, each value with where it was written, and text strings decoded by the spec |
+| [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, and their parser: each value with where it was written, every fault said, and text strings decoded by the spec |
 
 ## Development
 
@@ -41,9 +41,10 @@ just clippy   # or one at a time
 installed, for the tokenizer's no-std build and the minimum Rust of the
 tokenizer, the filters, pdf-crypt and pdf-objects.
 
-`just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt` and `just
-fuzz check` fuzz the tokenizer, the filters, pdf-crypt's handler, and the
-reader and checker, on nightly with
+`just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
+objects` and `just fuzz check` fuzz the tokenizer, the filters,
+pdf-crypt's handler, pdf-objects' parser, and the reader and checker, on
+nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
 says for how many seconds (60 by default).
 

@@ -225,6 +225,9 @@ dependencies = [
 [[package]]
 name = "pdf-objects"
 version = "0.1.0"
+dependencies = [
+ "pdf-tokenizer",
+]
 
 [[package]]
 name = "pdf-tokenizer"
@@ -238,6 +241,7 @@ dependencies = [
  "pdf-crypt",
  "pdf-filters",
  "pdf-lint",
+ "pdf-objects",
  "pdf-tokenizer",
 ]
 
