@@ -101,7 +101,7 @@ crypt-msrv:
 
 # Fuzz a target for a while, on nightly with cargo-fuzz: `tokenize`, the
 # tokenizer; `filters`, the filters; `primitives`, pdf-crypt's beside
-# RustCrypto's; or `check`, the reader and the checker, which begins from
+# RustCrypto's; `crypt`, its security handler; or `check`, the reader and the checker, which begins from
 # the seeds pdf-lint's fuzz module makes. cargo-fuzz otherwise builds for the
 # target it was itself built for, which may be musl, where the sanitizer
 # can't run.
@@ -119,13 +119,16 @@ fuzz target="tokenize" seconds="60":
     primitives)
         cargo +nightly fuzz run --target "$host" primitives -- -max_total_time={{ seconds }} -timeout=10
         ;;
+    crypt)
+        cargo +nightly fuzz run --target "$host" crypt -- -max_total_time={{ seconds }} -timeout=10 -len_control=0
+        ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/check
         cargo +nightly fuzz run --target "$host" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters, primitives or check" >&2
+        echo "just fuzz: tokenize, filters, primitives, crypt or check" >&2
         exit 2
         ;;
     esac

@@ -5,3 +5,9 @@ resolver = "3"
 members = ["crates/pdf-tokenizer", "crates/pdf-filters", "crates/pdf-crypt", "crates/pdf-lint"]
 # fuzz/ builds on nightly, with libFuzzer.
 exclude = ["fuzz"]
+
+# pdf-crypt's revision 6 hash runs thousands of AES blocks for a password;
+# built optimized in tests too, which then take a second, not a quarter of
+# a minute. A profile here changes no crate as it's published.
+[profile.dev.package.pdf-crypt]
+opt-level = 3

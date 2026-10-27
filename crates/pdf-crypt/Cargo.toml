@@ -13,6 +13,11 @@ include = ["/src", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
 
 [dependencies]
 
+[features]
+# Encrypting as the handler decrypts, with salts and IVs given, not random:
+# for writing test files, not for a writer to protect a document with.
+writer = []
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"

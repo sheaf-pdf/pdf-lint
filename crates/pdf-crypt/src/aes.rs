@@ -33,13 +33,34 @@ const INVERSE: [u8; 256] = {
     inverse
 };
 
+/// Each byte times `by` in AES's field, for the columns' mixing.
+const fn table(by: u8) -> [u8; 256] {
+    let mut table = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        table[i] = times(i as u8, by);
+        i += 1;
+    }
+    table
+}
+
+/// The multiples mixing and unmixing the columns take.
+const TIMES: [[u8; 256]; 6] = [
+    table(2),
+    table(3),
+    table(9),
+    table(11),
+    table(13),
+    table(14),
+];
+
 /// A key expanded into its rounds' keys: 11 for AES-128, 15 for AES-256.
 pub(crate) struct Aes {
     rounds: Vec<[u8; 16]>,
 }
 
 /// `a` times `b` in AES's field, GF(2⁸) by x⁸ + x⁴ + x³ + x + 1.
-fn times(mut a: u8, mut b: u8) -> u8 {
+const fn times(mut a: u8, mut b: u8) -> u8 {
     let mut product = 0;
     while b != 0 {
         if b & 1 != 0 {
@@ -108,7 +129,7 @@ impl Aes {
             }
             shift(block, |r| r);
             if round != last {
-                mix(block, [2, 3, 1, 1]);
+                mix(block);
             }
             add(block, &self.rounds[round]);
         }
@@ -125,7 +146,7 @@ impl Aes {
             }
             add(block, &self.rounds[round]);
             if round != 0 {
-                mix(block, [14, 11, 13, 9]);
+                unmix(block);
             }
         }
     }
@@ -180,13 +201,28 @@ fn shift(block: &mut [u8; 16], by: impl Fn(usize) -> usize) {
     }
 }
 
-/// Each column multiplied by the circulant matrix of `row`.
-fn mix(block: &mut [u8; 16], row: [u8; 4]) {
+/// Each column multiplied by the matrix of rows 2 3 1 1 rotated.
+fn mix(block: &mut [u8; 16]) {
+    let [two, three, ..] = &TIMES;
     for column in block.chunks_exact_mut(4) {
-        let c = [column[0], column[1], column[2], column[3]];
-        for (r, out) in column.iter_mut().enumerate() {
-            *out = (0..4).fold(0, |x, i| x ^ times(row[(4 + i - r) % 4], c[i]));
-        }
+        let [a, b, c, d] = [column[0], column[1], column[2], column[3]].map(usize::from);
+        column[0] = two[a] ^ three[b] ^ c as u8 ^ d as u8;
+        column[1] = a as u8 ^ two[b] ^ three[c] ^ d as u8;
+        column[2] = a as u8 ^ b as u8 ^ two[c] ^ three[d];
+        column[3] = three[a] ^ b as u8 ^ c as u8 ^ two[d];
+    }
+}
+
+/// Each column multiplied by the matrix of rows 14 11 13 9 rotated, the
+/// inverse of [`mix`]'s.
+fn unmix(block: &mut [u8; 16]) {
+    let [_, _, nine, eleven, thirteen, fourteen] = &TIMES;
+    for column in block.chunks_exact_mut(4) {
+        let [a, b, c, d] = [column[0], column[1], column[2], column[3]].map(usize::from);
+        column[0] = fourteen[a] ^ eleven[b] ^ thirteen[c] ^ nine[d];
+        column[1] = nine[a] ^ fourteen[b] ^ eleven[c] ^ thirteen[d];
+        column[2] = thirteen[a] ^ nine[b] ^ fourteen[c] ^ eleven[d];
+        column[3] = eleven[a] ^ thirteen[b] ^ nine[c] ^ fourteen[d];
     }
 }
 
