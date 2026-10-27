@@ -25,7 +25,8 @@ pub mod qpdf;
 pub mod source;
 pub mod text;
 pub mod version;
-#[cfg(test)]
+#[cfg(any(test, fuzzing))]
+#[cfg_attr(fuzzing, allow(dead_code))]
 pub(crate) mod write;
 mod xxh64;
 

@@ -184,6 +184,8 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         ("form", file(&form, "").0),
         ("structure", file(&structure, "").0),
         ("xref-stream", xref_stream()),
+        ("object-streams", object_streams(true)),
+        ("object-streams-lzw", object_streams(false)),
         ("update", update()),
         (
             "encrypted",
@@ -276,6 +278,82 @@ fn xref_stream() -> Vec<u8> {
     out.extend_from_slice(format!("{n} 0 obj\n{dict}\nstream\n").as_bytes());
     out.extend_from_slice(&rows);
     out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{at}\n%%EOF\n").as_bytes());
+    out
+}
+
+/// A file whose page tree, page, font and annotations are in an object
+/// stream, and whose cross-reference stream is PNG-predicted: with
+/// `flate`, both compressed (the object stream with dynamic Huffman
+/// codes), else the object stream through LZW and hex, the
+/// cross-reference stream as it is.
+fn object_streams(flate: bool) -> Vec<u8> {
+    // The object stream's data, its header and five objects, as Python's
+    // zlib.compress gives it at level 9.
+    const DEFLATED: &[u8] = b"\x78\xda\x7d\x50\x4d\x6b\xc3\x30\x0c\xbd\xef\x57\xbc\xe3\x7a\x72\xec\xa4\x29\x85\x12\x68\x0b\x63\x63\xec\x83\x76\xb7\xb0\x83\xdb\x6a\x5b\x46\x63\x77\xb6\x33\xba\x7f\x3f\x29\x61\xb0\x5c\x0a\x0f\x23\xc9\x7a\xef\x49\x32\xc8\x90\xa3\x30\x98\x42\x4f\xe7\x28\x61\x74\x81\x19\xf2\xbc\xc0\x62\x01\xf5\xf2\x73\x22\xa8\x67\xfb\x4e\x11\xea\xbe\x39\x44\xd4\x39\x33\x36\xaf\x50\x6b\xdf\xb9\x04\x8d\xaa\xba\x1a\x77\xca\x1b\x88\xff\x8c\x74\x42\x3d\xd0\xa1\xb1\x2b\x7f\x46\x9d\x71\xa1\xd4\x06\xb3\xb9\x61\x81\x0d\x45\xdf\x85\x3d\x2b\x0b\xff\xc6\x33\xa3\x0f\x34\xcf\x22\xc4\xaa\x12\xa8\xa5\x73\x3e\xb1\x6f\xd9\x17\x67\x83\xfb\xc8\xb4\xa7\xaa\x6d\xb7\x4b\x7d\x2a\x45\x0d\xb5\xb2\x91\x86\x9f\x5b\x3a\x7e\x53\x6a\xf6\x76\x4c\xeb\x85\xff\xf3\xe8\x9c\x64\xaa\x7d\x42\xad\x33\x30\x72\x41\xbf\xaa\x4b\xbc\x50\xc4\xf5\x12\xcc\x21\x34\x0e\xd6\xc1\xef\x3e\xa5\x39\xa6\x40\xb6\x9d\x40\x3d\x9d\xc8\xe1\xcd\x1e\x23\x8b\x3d\xda\x96\x84\xd8\xb6\x72\x89\x8b\xbe\xdb\xaf\x8e\xef\xf5\xe7\x5c\x64\x60\xcc\x05\xe2\xcc\xa3\xf0\xc6\x12\xde\xad\x87\x03\x6a\x8e\x57\x3e\x1c\x28\x0c\xb9\x19\x0f\xc8\xda\x1f\x14\x26\x62\xf9\x0b\x2a\x30\x86\x09";
+    let (data, filter) = match flate {
+        true => (DEFLATED.to_vec(), "/FlateDecode"),
+        false => {
+            let objects = crate::write::inflated(DEFLATED);
+            let hex: String = crate::write::lzw(&objects)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            (
+                format!("{hex}>").into_bytes(),
+                "[/ASCIIHexDecode /LZWDecode]",
+            )
+        }
+    };
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let one = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    let four = out.len();
+    let dict = format!(
+        "<< /Type /ObjStm /N 5 /First 27 /Filter {filter} /Length {} >>",
+        data.len()
+    );
+    out.extend_from_slice(format!("4 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&data);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    let eight = out.len();
+    let row = |kind: u8, field: usize, index: u8| {
+        let [high, low] = u16::try_from(field).unwrap_or(0).to_be_bytes();
+        [kind, high, low, index]
+    };
+    let rows = [
+        row(0, 0, 255),
+        row(1, one, 0),
+        row(2, 4, 0),
+        row(2, 4, 1),
+        row(1, four, 0),
+        row(2, 4, 2),
+        row(2, 4, 3),
+        row(2, 4, 4),
+        row(1, eight, 0),
+    ];
+    // Each row by PNG's Up: its difference from the row above.
+    let mut above = [0u8; 4];
+    let mut predicted = Vec::new();
+    for row in rows {
+        predicted.push(2);
+        predicted.extend(row.iter().zip(above).map(|(b, a)| b.wrapping_sub(a)));
+        above = row;
+    }
+    let (rows, filter) = match flate {
+        true => (crate::write::zlib(&predicted), " /Filter /FlateDecode"),
+        false => (rows.concat(), ""),
+    };
+    let parms = match flate {
+        true => " /DecodeParms << /Predictor 12 /Columns 4 >>",
+        false => "",
+    };
+    let dict = format!(
+        "<< /Type /XRef /Size 9 /W [1 2 1] /Root 1 0 R{filter}{parms} /Length {} >>",
+        rows.len()
+    );
+    out.extend_from_slice(format!("8 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{eight}\n%%EOF\n").as_bytes());
     out
 }
 

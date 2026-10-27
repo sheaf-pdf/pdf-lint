@@ -173,6 +173,15 @@ pub(crate) fn run_length(data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `zlib` data decompressed, for a seed written from data compressed
+/// beforehand.
+pub(crate) fn inflated(zlib: &[u8]) -> Vec<u8> {
+    let flate = pdf_filters::Filter::Flate {
+        predictor: pdf_filters::Predictor::None,
+    };
+    pdf_filters::decode(zlib, &[flate], usize::MAX).unwrap_or_else(|e| e.data)
+}
+
 /// A file of these objects, each written between its `n 0 obj` and
 /// `endobj` as given, with a table and `trailer` as written. The bodies
 /// may be anything at all.
