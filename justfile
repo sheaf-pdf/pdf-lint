@@ -27,6 +27,12 @@ clippy:
 test:
     cargo test --locked --workspace
 
+# Write the files qpdf makes from the tests' clean file anew, into
+# crates/pdf-lint/tests/files, which the tests read: only when the clean
+# file or the kinds change. Needs qpdf: PDF_LINT_QPDF, else the PATH's.
+fixtures:
+    cargo test --locked -p pdf-lint --lib qpdf::tests::the_fixtures_are_written -- --ignored --exact
+
 # Build the API docs, failing on warnings.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps

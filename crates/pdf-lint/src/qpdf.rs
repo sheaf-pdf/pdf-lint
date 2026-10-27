@@ -641,6 +641,103 @@ mod tests {
         ]
     }
 
+    /// The files qpdf wrote from [`clean`], committed in `tests/files` so
+    /// that what's read from them needs no qpdf, nor a run's random /ID:
+    /// each name, and qpdf's arguments.
+    const FIXTURES: [(&str, &[&str]); 8] = [
+        ("qpdf-plain", &["--object-streams=disable"]),
+        ("qpdf-compressed", &["--object-streams=generate"]),
+        (
+            "qpdf-rc4-40",
+            &[
+                "--object-streams=generate",
+                "--allow-weak-crypto",
+                "--encrypt",
+                "",
+                "owner",
+                "40",
+                "--",
+            ],
+        ),
+        (
+            "qpdf-rc4-128",
+            &[
+                "--object-streams=generate",
+                "--allow-weak-crypto",
+                "--encrypt",
+                "",
+                "owner",
+                "128",
+                "--use-aes=n",
+                "--",
+            ],
+        ),
+        (
+            "qpdf-aes-128",
+            &[
+                "--object-streams=generate",
+                "--encrypt",
+                "",
+                "owner",
+                "128",
+                "--use-aes=y",
+                "--",
+            ],
+        ),
+        (
+            "qpdf-aes-256-r5",
+            &[
+                "--object-streams=generate",
+                "--encrypt",
+                "",
+                "owner",
+                "256",
+                "--force-R5",
+                "--",
+            ],
+        ),
+        (
+            "qpdf-aes-256",
+            &[
+                "--object-streams=generate",
+                "--encrypt",
+                "",
+                "owner",
+                "256",
+                "--",
+            ],
+        ),
+        (
+            "qpdf-aes-256-unpacked",
+            &[
+                "--object-streams=disable",
+                "--encrypt",
+                "",
+                "owner",
+                "256",
+                "--",
+            ],
+        ),
+    ];
+
+    /// A committed fixture's path, by name.
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/files")
+            .join(format!("{name}.pdf"))
+    }
+
+    /// The fixtures written anew by the qpdf `PDF_LINT_QPDF` names, else
+    /// the PATH's, as `just fixtures` does: only when [`clean`] or the
+    /// kinds change.
+    #[test]
+    #[ignore = "needs qpdf; writes the committed fixtures anew"]
+    fn the_fixtures_are_written() {
+        for (name, args) in FIXTURES {
+            std::fs::copy(rewritten(name, args), fixture(name)).unwrap();
+        }
+    }
+
     /// The clean file, written, then rewritten by qpdf with `args`; with
     /// `--object-streams=generate`, its dictionaries in object streams, and
     /// a cross-reference stream, compressed.
@@ -675,7 +772,7 @@ mod tests {
 
     #[test]
     fn a_compressed_file_reads_without_qpdf_as_through_it_and_checks_clean() {
-        let path = rewritten("compressed", &["--object-streams=generate"]);
+        let path = fixture("qpdf-compressed");
         let data = std::fs::read(&path).unwrap();
         let doc = bytes::read_with(&data, &Unasked);
         assert_eq!(doc.trailer.unwritten, None);
@@ -728,39 +825,15 @@ mod tests {
 
     #[test]
     fn an_encrypted_files_object_streams_decrypt_by_the_reader_as_through_qpdf() {
-        let kinds: [(&str, &[&str]); 5] = [
-            (
-                "rc4-40",
-                &["--allow-weak-crypto", "--encrypt", "", "owner", "40", "--"],
-            ),
-            (
-                "rc4-128",
-                &[
-                    "--allow-weak-crypto",
-                    "--encrypt",
-                    "",
-                    "owner",
-                    "128",
-                    "--use-aes=n",
-                    "--",
-                ],
-            ),
-            (
-                "aes-128",
-                &["--encrypt", "", "owner", "128", "--use-aes=y", "--"],
-            ),
-            (
-                "aes-256-r5",
-                &["--encrypt", "", "owner", "256", "--force-R5", "--"],
-            ),
-            ("aes-256", &["--encrypt", "", "owner", "256", "--"]),
+        let kinds = [
+            "qpdf-rc4-40",
+            "qpdf-rc4-128",
+            "qpdf-aes-128",
+            "qpdf-aes-256-r5",
+            "qpdf-aes-256",
         ];
-        for (kind, encrypt) in kinds {
-            let args: Vec<&str> = ["--object-streams=generate"]
-                .into_iter()
-                .chain(encrypt.iter().copied())
-                .collect();
-            let path = rewritten(&format!("encrypted-{kind}"), &args);
+        for kind in kinds {
+            let path = fixture(kind);
             let data = std::fs::read(&path).unwrap();
             // The reader alone, by the empty user password and by the
             // owner's.
@@ -1145,20 +1218,13 @@ qpdf: operation succeeded with warnings\n";
 
     #[test]
     fn a_file_reads_through_qpdf_alone_as_through_its_bytes() {
-        let encrypt = ["--encrypt", "", "owner", "256", "--"];
-        for (test, args) in [
-            ("alike-plain", vec!["--object-streams=disable"]),
-            ("alike-compressed", vec!["--object-streams=generate"]),
-            (
-                "alike-encrypted",
-                [&["--object-streams=generate"][..], &encrypt].concat(),
-            ),
-            (
-                "alike-encrypted-plain",
-                [&["--object-streams=disable"][..], &encrypt].concat(),
-            ),
+        for test in [
+            "qpdf-plain",
+            "qpdf-compressed",
+            "qpdf-aes-256",
+            "qpdf-aes-256-unpacked",
         ] {
-            let path = rewritten(test, &args);
+            let path = fixture(test);
             let data = std::fs::read(&path).unwrap();
             let qpdf = qpdf(&path);
             let bytes = bytes::read_with(&data, &qpdf);
@@ -1241,7 +1307,7 @@ qpdf: operation succeeded with warnings\n";
 
     #[test]
     fn a_cross_reference_stream_whose_number_an_update_reuses_decodes_from_its_bytes() {
-        let path = rewritten("reused", &["--object-streams=generate"]);
+        let path = fixture("qpdf-compressed");
         let mut data = std::fs::read(&path).unwrap();
         let old = bytes::read(&data);
         let (x, _) = old.trailer.stream.expect("a cross-reference stream");
@@ -1293,17 +1359,7 @@ qpdf: operation succeeded with warnings\n";
 
     #[test]
     fn an_encrypted_files_strings_in_plain_view_decrypt_to_their_bytes_and_through_qpdf() {
-        let path = rewritten(
-            "plain-view",
-            &[
-                "--object-streams=disable",
-                "--encrypt",
-                "",
-                "owner",
-                "256",
-                "--",
-            ],
-        );
+        let path = fixture("qpdf-aes-256-unpacked");
         let data = std::fs::read(&path).unwrap();
         let contents = |doc: &Document| {
             let annot = (doc.objects.values().flatten())

@@ -5,3 +5,6 @@ crates/pdf-lint/model/** -text
 # Shell scripts run under bash on every runner, Windows too, where a CR
 # would break them.
 *.sh text eol=lf
+
+# PDF files are bytes: a checkout mustn't touch their line endings.
+*.pdf binary
