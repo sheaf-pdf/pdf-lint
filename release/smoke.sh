@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # Checks a release folder runs as it's unpacked: pdf-lint says what it is,
 # and reads files another writer made by itself, one compressed into object
-# streams and one encrypted (the tests' fixtures, which qpdf wrote).
+# streams and one encrypted (the tests' fixtures, which qpdf wrote); on
+# Windows, without the Visual C++ runtime's DLL.
 #
 #   release/smoke.sh <folder>
 set -euo pipefail
 
 dir=${1:?a release folder}
 files=$(cd "$(dirname "$0")/../crates/pdf-lint/tests/files" && pwd)
+
+if [ -f "$dir/pdf-lint.exe" ] && grep -a -q -i 'vcruntime140' "$dir/pdf-lint.exe"; then
+    echo "smoke.sh: pdf-lint.exe needs VCRUNTIME140.dll: build it with +crt-static" >&2
+    exit 1
+fi
 
 version=$("$dir/pdf-lint" --version)
 echo "$version"

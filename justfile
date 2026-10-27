@@ -87,8 +87,13 @@ dist:
     x86_64-pc-windows-msvc) platform=windows-x86_64 target=x86_64-pc-windows-msvc ;;
     *) echo "no release archive for this platform" >&2; exit 2 ;;
     esac
+    exe=
+    if [ "$platform" = windows-x86_64 ]; then
+        exe=.exe
+        export RUSTFLAGS="-C target-feature=+crt-static"
+    fi
     cargo build --release --locked -p pdf-lint --target "$target"
-    release/dist.sh "$platform" "target/$target/release/pdf-lint$(rustc --print cfg | grep -q 'target_os="windows"' && echo .exe)" dist
+    release/dist.sh "$platform" "$target" "target/$target/release/pdf-lint$exe" dist
 
 # Build the tokenizer for a target with neither std nor alloc, which must
 # be installed (`rustup target add thumbv6m-none-eabi`): it needs only core.

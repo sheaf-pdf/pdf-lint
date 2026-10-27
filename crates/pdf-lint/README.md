@@ -110,9 +110,9 @@ A file that can't be read is a line of `pdf_lint`, `model`, its `file` and the `
 
 ## Installing
 
-Each [release](https://github.com/sheaf-pdf/pdf-lint/releases) has an archive for Linux (x86_64 and aarch64), macOS (Apple silicon and Intel) and Windows (x64): `pdf-lint`, which decodes and decrypts by itself, needing nothing beside it, and the Arlington model's notices. Unpack it anywhere. (0.1's archives held qpdf too, in `qpdf/`, which it decrypted with.)
+Each [release](https://github.com/sheaf-pdf/pdf-lint/releases) has an archive for Linux (x86_64 and aarch64), macOS (Apple silicon and Intel) and Windows (x64): `pdf-lint`, which decodes and decrypts by itself, needing nothing beside it, the Arlington model's notices, and the notices of what's compiled in. Unpack it anywhere. (0.1's archives held qpdf too, in `qpdf/`, which it decrypted with.)
 
-The Linux binary is static, needing nothing of the system; Windows needs Windows 10 or later. On macOS, an archive a browser downloaded is quarantined, and its binaries won't run unsigned until `xattr -dr com.apple.quarantine` clears the folder; one fetched with `curl` or `gh release download` isn't.
+The Linux binary is static, needing nothing of the system; the Windows binary has the C runtime linked in, so it needs Windows 10 or later and no Visual C++ Redistributable (one `cargo install` builds links it dynamically, unless `RUSTFLAGS` has `-C target-feature=+crt-static`). On macOS, an archive a browser downloaded is quarantined, and its binaries won't run unsigned until `xattr -dr com.apple.quarantine` clears the folder; one fetched with `curl` or `gh release download` isn't.
 
 From source, `cargo install pdf-lint` builds the binary from crates.io, with Rust 1.88 or later, and `cargo install --path crates/pdf-lint` from a checkout; neither needs qpdf. `just dist` builds this platform's archive, as the release workflow builds each.
 
@@ -208,4 +208,4 @@ The model's `tsv/latest` is embedded at a pinned upstream commit, which `--versi
 
 Licensed under the Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)).
 
-The Arlington model's files, embedded from `model/`, are Apache-2.0 too, with upstream's LICENSE and NOTICE.txt beside them; a release archive carries the NOTICE.txt as `ARLINGTON-NOTICE.txt`, and what the embedded copy changes and adds as `ARLINGTON-CORRECTIONS.tsv` and `ARLINGTON-ADDITIONS/`. Parts of the checker are adapted from TestGrammar (Apache-2.0, Copyright 2020-2022 PDF Association), and a header in `src/check.rs` names them.
+The Arlington model's files, embedded from `model/`, are Apache-2.0 too, with upstream's LICENSE and NOTICE.txt beside them; a release archive carries the NOTICE.txt as `ARLINGTON-NOTICE.txt`, and what the embedded copy changes and adds as `ARLINGTON-CORRECTIONS.tsv` and `ARLINGTON-ADDITIONS/`. What's compiled into the archive's binary has its notices beside it: `THIRD-PARTY-NOTICES.txt`, each crate with its licence and its package's licence files, written for each platform from `Cargo.lock`; `RUST-NOTICES.html`, the Rust standard library's; and on Linux, `MUSL-COPYRIGHT`, the C library's, linked in statically. Parts of the checker are adapted from TestGrammar (Apache-2.0, Copyright 2020-2022 PDF Association), and a header in `src/check.rs` names them.

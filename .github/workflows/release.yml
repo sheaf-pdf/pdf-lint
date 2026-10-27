@@ -67,10 +67,14 @@ jobs:
         if: matrix.platform == 'macos-x86_64'
         run: sudo softwareupdate --install-rosetta --agree-to-license
       - name: Build
+        # The C runtime linked in on Windows, so the binary needs no Visual
+        # C++ Redistributable (the README says it's the archive's).
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
         run: cargo build --release --locked -p pdf-lint --target ${{ matrix.target }}
       - name: Archive, and check it runs
         run: >-
-          release/dist.sh ${{ matrix.platform }}
+          release/dist.sh ${{ matrix.platform }} ${{ matrix.target }}
           target/${{ matrix.target }}/release/pdf-lint${{ runner.os == 'Windows' && '.exe' || '' }}
           dist
       - uses: actions/upload-artifact@v7
@@ -100,6 +104,8 @@ jobs:
         run: |
           cat > notes.md <<'EOF'
           Each archive holds `pdf-lint`, which decodes and decrypts by itself, needing nothing beside it: unpack it anywhere. The Linux binaries are static. Beside each archive, its SHA-256.
+
+          What's compiled in, each crate and its licence, the Rust standard library and, on Linux, musl, has its notices in `THIRD-PARTY-NOTICES.txt`, `RUST-NOTICES.html` and `MUSL-COPYRIGHT`.
 
           The Arlington PDF Model it checks against is embedded: its NOTICE.txt is `ARLINGTON-NOTICE.txt`, and what the embedded copy corrects and adds, where the model contradicts ISO 32000-2 or lacks what a reference defines, is `ARLINGTON-CORRECTIONS.tsv` and `ARLINGTON-ADDITIONS/`. `pdf-lint --version` says the model's commit and hash.
           EOF

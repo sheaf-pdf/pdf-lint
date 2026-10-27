@@ -48,7 +48,8 @@ says for how many seconds (60 by default).
 
 ## License
 
-pdf-tokenizer and pdf-filters are licensed under either of Apache
-License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT license
-([LICENSE-MIT](LICENSE-MIT)) at your option. pdf-lint is licensed under
-the Apache License, Version 2.0, as is the Arlington model it embeds.
+pdf-tokenizer, pdf-filters and pdf-crypt are licensed under either of
+Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT
+license ([LICENSE-MIT](LICENSE-MIT)) at your option. pdf-lint is
+licensed under the Apache License, Version 2.0, as is the Arlington
+model it embeds.
