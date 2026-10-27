@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (unreleased)
 
 - **Breaking, the library: qpdf is gone from it.** `Qpdf`, the `Decode` trait, `Written`, `read_with` and `qpdf::OLDEST` are no longer public (the tests keep them, to set the reader beside qpdf), and nothing shipped reads `PDF_LINT_QPDF`. `bytes::read_from(file, section)` takes no decoder; `read` and `read_from` open an encrypted file with the empty password, `read_opened` and `read_from_opened` with the passwords given. `Encryption` is `#[non_exhaustive]`. `Str::Text` stays, for a `Source` that reads through another tool.
 - **Breaking, the library: room to grow.** `Document`, `Finding`, `Warning`, `Report` and `Span` are `#[non_exhaustive]`, so a field can come without a breaking release, and `Rule`, so a rule can: outside the crate, a reader starts a `Document` by `Document::new` and makes a `Span` by `Span::new` and a `Warning` by `Warning::new`, a `Report` starts from `Report::default()`, a `Finding` is only the checker's to make, a pattern that names their fields ends in `..`, and a match on `Rule` needs `_`. `Document::encryption` is a new field (below), which a 0.1 reader building a `Document` whole has to fill.
