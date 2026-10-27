@@ -8,7 +8,7 @@ The PDF Association's Arlington PDF Model: the grammar of PDF's objects
 - Taken: `LICENSE`, `NOTICE.txt`, `tsv/latest/*.tsv` (613 files, 493,082 bytes): one grammar for every PDF version, whose SinceVersion and DeprecatedIn columns and version predicates say which version each key, type and value belongs to
 - Left out: `tsv/1.0` to `tsv/2.0` (the same grammar cut per version), `TestGrammar`, `scripts`, `gcxml`, `xml`, `Jupyter`, `3dvisualize`, `resources`, the docs (`README.md`, `INTERNAL_GRAMMAR.md` and the rest) and the spreadsheets
 - License: Apache-2.0, as `LICENSE` and `NOTICE.txt` say (`CITATION.cff` too). `NOTICE.txt` puts the repository's other documentation under CC-BY-4.0: none of it is here
-- Used by: `pdf-arlington`, whose `build.rs` embeds every table in the library, so `cargo install` needs no checkout; and through it `pdf-lint`, whose `--model <DIR>` checks against a newer `tsv/latest` checkout instead
+- Used by: `pdf-arlington`, whose `build.rs` embeds every table in the library, so nothing built on it needs a checkout; and through it `pdf-lint`, whose `--model <DIR>` checks against a newer `tsv/latest` checkout instead
 
 The files are as the tarball has them, byte for byte (`.gitattributes`
 keeps every checkout from changing their line ends).
@@ -33,9 +33,10 @@ and stops the build when a corrected cell isn't as the line says
 upstream has it, or upstream has an added row's key, or a table of an
 added table's name, itself. So the embedded model's hash
 (`Grammar::hash`) is of the corrected and added tables, not upstream's
-at the same commit; `--model` reads a checkout as it is; and a release
-archive carries them as `ARLINGTON-CORRECTIONS.tsv` and
-`ARLINGTON-ADDITIONS/`. Each goes once upstream fixes the model.
+at the same commit; `Grammar::load` (pdf-lint's `--model`) reads a
+checkout as it is; and a release archive carries them as
+`ARLINGTON-CORRECTIONS.tsv` and `ARLINGTON-ADDITIONS/`. Each goes once
+upstream fixes the model.
 
 To update: fetch a newer commit the same way, into a scratch directory;
 replace `LICENSE`, `NOTICE.txt` and `tsv/latest` with its own; build, and

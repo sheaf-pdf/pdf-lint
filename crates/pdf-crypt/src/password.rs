@@ -22,10 +22,10 @@ pub fn passwords(password: &str) -> Vec<Vec<u8>> {
 /// A PDFDocEncoding byte's character (ISO 32000-2, Annex D): Latin-1's,
 /// but for the accents at 0x18–0x1F and the punctuation, ligatures and
 /// letters at 0x80–0xA0; none for the three it leaves undefined. The table
-/// is the one PDFium and qpdf share, which differ only on 0xAD. pdf-lint
-/// decodes text strings by the same table, kept here too so that this
-/// crate needs RustCrypto's alone; a test of pdf-lint's holds the two to
-/// agreeing.
+/// is the one PDFium and qpdf share, which differ only on 0xAD. pdf-objects
+/// decodes text strings by the same table (`text::pdf_doc_char`), kept here
+/// too so that this crate needs RustCrypto's alone; a test of pdf-lint's,
+/// which has both, holds the two to agreeing.
 fn pdf_doc_char(b: u8) -> Option<char> {
     const ACCENTS: [char; 8] = ['˘', 'ˇ', 'ˆ', '˙', '˝', '˛', '˚', '˜'];
     const HIGH: [char; 33] = [
