@@ -144,14 +144,21 @@ pub fn read_from(file: &[u8], decoder: &dyn Decode, section: usize) -> Document 
 /// the two side by side.
 #[cfg(test)]
 pub(crate) fn read_through(file: &[u8], decoder: &dyn Decode) -> Document {
-    read_as(file, Some(decoder), None, false, (STREAM, BUDGET))
+    read_as(file, Some(decoder), None, false, (STREAM, BUDGET, None))
 }
 
 /// The file `file` is, a stream decoding to at most `stream` bytes and
 /// the file's to `budget` in all: for the tests of the limits.
 #[cfg(test)]
 pub(crate) fn read_limited(file: &[u8], stream: usize, budget: usize) -> Document {
-    read_as(file, None, None, true, (stream, budget))
+    read_as(file, None, None, true, (stream, budget, None))
+}
+
+/// The file `file` is, reading no more than `entries` cross-reference
+/// entries: for the tests of that limit.
+#[cfg(test)]
+pub(crate) fn read_listing(file: &[u8], entries: usize) -> Document {
+    read_as(file, None, None, true, (STREAM, BUDGET, Some(entries)))
 }
 
 fn read_with_or_without(
@@ -159,7 +166,7 @@ fn read_with_or_without(
     decoder: Option<&dyn Decode>,
     section: Option<usize>,
 ) -> Document {
-    read_as(file, decoder, section, true, (STREAM, BUDGET))
+    read_as(file, decoder, section, true, (STREAM, BUDGET, None))
 }
 
 fn read_as(
@@ -167,13 +174,14 @@ fn read_as(
     decoder: Option<&dyn Decode>,
     section: Option<usize>,
     native: bool,
-    (stream, budget): (usize, usize),
+    (stream, budget, entries): (usize, usize, Option<usize>),
 ) -> Document {
     let mut reader = Reader {
         file,
         native,
         stream,
         budget,
+        listable: entries.unwrap_or_else(|| listable(file.len())),
         cut: HashSet::new(),
         decoder,
         warnings: Vec::new(),
@@ -266,6 +274,8 @@ struct Reader<'a> {
     stream: usize,
     /// How many bytes the streams it decodes may still decode to.
     budget: usize,
+    /// How many cross-reference entries it reads ([`listable`]).
+    listable: usize,
     /// The object streams whose data a fault cut off.
     cut: HashSet<ObjectId>,
     decoder: Option<&'a dyn Decode>,
@@ -345,6 +355,13 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).rposition(|w| w == needle)
+}
+
+/// How many cross-reference entries the reader reads of a file `len`
+/// bytes long: as many as its bytes, or 2²⁰, whichever is more. Objects
+/// can be numbered sparsely, so not their numbers but their count.
+fn listable(len: usize) -> usize {
+    len.max(1 << 20)
 }
 
 /// Whether `fault` stopped its filter, cutting the data off.
@@ -713,8 +730,22 @@ impl<'a> Reader<'a> {
                     .collect();
                 self.update = Some(Update { objects, previous });
             }
+            let most = self.listable;
+            let mut past = 0usize;
             for (n, entry) in entries {
-                self.entries.entry(n).or_insert(entry);
+                match self.entries.len() < most || self.entries.contains_key(&n) {
+                    true => {
+                        self.entries.entry(n).or_insert(entry);
+                    }
+                    false => past += 1,
+                }
+            }
+            if past > 0 {
+                let message = format!(
+                    "the cross-reference sections list {past} objects past the first {most}, as many as the reader reads of a file of {} bytes, which aren't read",
+                    self.file.len()
+                );
+                self.warn(None, None, message);
             }
             trailer.get_or_insert(section.trailer);
         }
@@ -1002,19 +1033,16 @@ impl<'a> Reader<'a> {
         let field = |bytes: &[u8]| bytes.iter().fold(0u64, |n, &b| (n << 8) | u64::from(b));
         let mut rows = data.chunks_exact(row.max(1));
         let mut entries = BTreeMap::new();
-        // As in qpdf, no object numbered past a third of the file's length:
-        // each takes three bytes at least.
-        let most = u32::try_from(self.file.len() / 3).unwrap_or(u32::MAX);
+        // No more entries than [`listable`] allows, so that a small stream
+        // can't list hundreds of millions.
+        let most = self.listable;
+        let mut left = u32::try_from(most).unwrap_or(u32::MAX);
         let mut past = 0usize;
         for (start, count) in index {
-            let fit = match start > most {
-                true => 0,
-                false => count.min(most - start + 1),
-            };
+            let fit = count.min(left);
+            left -= fit;
             let skip = usize::try_from(count - fit).unwrap_or(usize::MAX);
-            if skip > 0 {
-                past = past.saturating_add(skip);
-            }
+            past = past.saturating_add(skip);
             for i in 0..count {
                 if i == fit {
                     if rows.len() < skip {
@@ -1054,7 +1082,8 @@ impl<'a> Reader<'a> {
         }
         if past > 0 {
             let message = format!(
-                "its rows list {past} objects numbered past {most}, a third of the file's length, which aren't read"
+                "its rows list {past} entries past the first {most}, as many as the reader reads of a file of {} bytes, which aren't read",
+                self.file.len()
             );
             self.warn(Some(id), object.at, message);
         }
@@ -1892,6 +1921,7 @@ mod tests {
             native: true,
             stream: STREAM,
             budget: BUDGET,
+            listable: listable(file.len()),
             cut: HashSet::new(),
             decoder: None,
             warnings: Vec::new(),
@@ -3196,16 +3226,23 @@ mod tests {
     }
 
     #[test]
-    fn a_cross_reference_stream_numbers_no_object_past_a_third_of_the_file() {
+    fn objects_may_be_numbered_sparsely_but_not_listed_without_end() {
+        // Two more objects, numbered 900000 and 900001, in a file of a few
+        // hundred bytes (in use at byte 9, where neither is): listed.
         let (file, _) = streams(false, true, &[1, 0, 9, 0, 1, 0, 9, 0], None);
         let from = b"/Size 6 /W";
         let to = b"/Size 6 /Index [0 6 900000 2] /W";
         let at = find(&file, from).unwrap();
         let file = [&file[..at], &to[..], &file[at + from.len()..]].concat();
         let doc = read(&file);
-        let most = file.len() / 3;
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.get((3, 0)).is_ok());
+        assert!(doc.ids().contains(&(900_000, 0)) && doc.ids().contains(&(900_001, 0)));
+        // Reading no more than six entries, the two aren't, and it says so.
+        let doc = read_listing(&file, 6);
         let message = format!(
-            "its rows list 2 objects numbered past {most}, a third of the file's length, which aren't read"
+            "its rows list 2 entries past the first 6, as many as the reader reads of a file of {} bytes, which aren't read",
+            file.len()
         );
         assert!(
             doc.warnings.iter().any(|w| w.message == message),
