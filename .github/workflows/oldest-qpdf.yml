@@ -5,8 +5,11 @@ name: Oldest qpdf
 # works only with a newer qpdf fails here. `just test-oldest-qpdf` runs the
 # same locally.
 
+# Pushes to main, and pull requests: a push to a pull request's branch
+# runs once, not once as a push and again as the pull request.
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
