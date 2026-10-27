@@ -2,7 +2,7 @@
 
 Checks PDF files against the [Arlington PDF Model](https://github.com/pdf-association/arlington-pdf-model), the PDF Association's machine-readable grammar of ISO 32000-2: for every object, which keys it may have, their types, which are required, the values they may take, and the PDF version each came in or was deprecated in.
 
-It's a command line and a library. It reads a file from its bytes, through [pdf-tokenizer](../pdf-tokenizer), so every finding says which bytes it's about. It decodes object streams and cross-reference streams itself, through [pdf-filters](../pdf-filters), and reads their objects from the decoded data, placed in it. What's encrypted, qpdf decrypts for it: an encrypted file's object streams, and the plaintext of the strings in plain view, each placed on its ciphertext.
+It's a command line and a library. It reads a file from its bytes, through [pdf-tokenizer](../pdf-tokenizer), so every finding says which bytes it's about. It decodes object streams and cross-reference streams itself, through [pdf-filters](../pdf-filters), and reads their objects from the decoded data, placed in it. What's encrypted it decrypts itself, through [pdf-crypt](../pdf-crypt), by the password it's given: an encrypted file's object streams, before they're decoded, and its strings where they are.
 
 ## What it checks
 
@@ -85,17 +85,17 @@ pdf-lint [OPTIONS] FILE...
                   table, key, rule, file, version and reason, tab apart
   --full          print the whole report: tables, checks not made, keys
                   the model doesn't list
-  --qpdf <PATH>   the qpdf to decode with (by default PDF_LINT_QPDF,
-                  else the one bundled beside it, else qpdf on the PATH)
-  --password <PW> the files' password, user or owner, when it isn't empty
+  --password <PW> the files' password, user or owner, when it isn't empty:
+                  tried as UTF-8, then in PDFDocEncoding, WinAnsiEncoding
+                  and MacRomanEncoding
   --jobs <N>      check N files at once (by default, as many as there are
                   CPUs); the report is in the files' order all the same
   --format <F>    text (the default), or json: a line of JSON for each file
-  --version       print the version, the model's commit, corrections,
-                  additions and hash, and the qpdf it decodes with
+  --version       print the version, and the model's commit, corrections,
+                  additions and hash
 ```
 
-It exits 0 when every file is clean, 1 when there are findings, and 2 when a file can't be read or the command line is wrong; a file that can't be read doesn't stop the others being checked. An encrypted file that won't open with the password given, none or `--password`'s, is one that can't be read, and says so: nothing in it decodes, so what its object streams hold would be missing. So is a file that encrypts when there's no qpdf 11.9 or later to decrypt it: the qpdf it would run isn't found, doesn't run, or is older. Any other file needs no qpdf. A FILE of `-` is standard input, named `-` in the report and in an allowance; qpdf, which reads only files, is given a copy in the temporary folder that only its owner can read, removed once it's checked. A finding in an object stream is printed with its bytes from the stream's decoded data. With `--pdf-version`, the summary says the version a file was checked as beside its own, and an allowance's version is matched against the one it was checked as.
+It exits 0 when every file is clean, 1 when there are findings, and 2 when a file can't be read or the command line is wrong; a file that can't be read doesn't stop the others being checked. An encrypted file that won't open with the password given, none or `--password`'s, is one that can't be read, and says so: what its object streams hold would be missing, and its strings ciphertext. `--password` is tried as the owner's and the user's, as typed (UTF-8, which revisions 5 and 6 take), then in each single-byte encoding that has every character of it, as a writer may have set it for revisions 2 to 4; the empty password isn't tried once one is given. A file that encrypts only its embedded files (its strings and streams `/Identity`) needs none. One whose security handler the reader can't open (the public-key handler, or a dictionary the standard handler doesn't take) is checked with its strings ciphertext and its object streams unread, a `reader` finding saying why. A FILE of `-` is standard input, named `-` in the report and in an allowance. A finding in an object stream is printed with its bytes from the stream's decoded data. With `--pdf-version`, the summary says the version a file was checked as beside its own, and an allowance's version is matched against the one it was checked as.
 
 With `--format json`, each file's report is a line of JSON. Every line says which version of pdf-lint wrote it and against which model, so a report can always be read against what made it. It has:
 
@@ -110,11 +110,11 @@ A file that can't be read is a line of `pdf_lint`, `model`, its `file` and the `
 
 ## Installing
 
-Each [release](https://github.com/sheaf-pdf/pdf-lint/releases) has an archive for Linux (x86_64 and aarch64), macOS (Apple silicon and Intel) and Windows (x64): `pdf-lint`, and beside it in `qpdf/` the qpdf it decrypts with, from qpdf's official release at a pinned version and checksum, with the notices and licenses that go with it (`qpdf/NOTICE.md`). Unpack it anywhere, and keep `qpdf/` beside the binary: that's where it looks, when neither `--qpdf` nor `PDF_LINT_QPDF` names another. `pdf-lint --version` says which qpdf it found, or why it can't decode with it.
+Each [release](https://github.com/sheaf-pdf/pdf-lint/releases) has an archive for Linux (x86_64 and aarch64), macOS (Apple silicon and Intel) and Windows (x64): `pdf-lint`, and beside it in `qpdf/` the qpdf it decrypts with, from qpdf's official release at a pinned version and checksum, with the notices and licenses that go with it (`qpdf/NOTICE.md`). Unpack it anywhere.
 
 The Linux binary is static, and qpdf's needs glibc 2.34 or later; Windows needs Windows 10 or later. On macOS, an archive a browser downloaded is quarantined, and its binaries won't run unsigned until `xattr -dr com.apple.quarantine` clears the folder; one fetched with `curl` or `gh release download` isn't.
 
-From source, `cargo install pdf-lint` builds the binary from crates.io, with Rust 1.88 or later, and `cargo install --path crates/pdf-lint` from a checkout. For an encrypted file, either runs the qpdf on the `PATH`: install qpdf 11.9 or later beside it, or name one with `--qpdf` or `PDF_LINT_QPDF`. `just dist` builds this platform's archive, as the release workflow builds each, and `release/qpdf.sh` lays out the pinned qpdf alone.
+From source, `cargo install pdf-lint` builds the binary from crates.io, with Rust 1.88 or later, and `cargo install --path crates/pdf-lint` from a checkout. `just dist` builds this platform's archive, as the release workflow builds each, and `release/qpdf.sh` lays out the pinned qpdf alone.
 
 ## Readers
 

@@ -15,15 +15,15 @@ pdf-lint --baseline in.pdf out.pdf   # findings in.pdf didn't already have
 pdf-lint --hold objects.txt out.pdf  # the objects your tool says it wrote
 ```
 
-It reads each file from its bytes, and decodes what's compressed itself;
-what's encrypted, qpdf decrypts. Each release archive bundles the qpdf
-it's tested against.
+It reads each file from its bytes, and decodes what's compressed and
+decrypts what's encrypted itself.
 
 | Crate | What |
 |---|---|
 | [pdf-lint](crates/pdf-lint) | The checker, a command line and a library. Its README has the rules, the options, the JSON format and how to install it |
 | [pdf-tokenizer](crates/pdf-tokenizer) | A lossless, zero-copy PDF tokenizer, with no dependencies and needing neither `std` nor `alloc` |
 | [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept |
+| [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler, decrypting, with its own primitives, every fault said |
 
 ## Development
 
@@ -37,13 +37,15 @@ just clippy   # or one at a time
 ```
 
 `just ci` also needs the `thumbv6m-none-eabi` target and Rust 1.85
-installed, for the tokenizer's no-std build and the tokenizer's and the
-filters' minimum Rust. Its
+installed, for the tokenizer's no-std build and the minimum Rust of the
+tokenizer, the filters and pdf-crypt. Its
 `just test-oldest-qpdf` runs the checker's tests against the oldest qpdf
 it decodes with, 11.9.0, which it fetches for Linux x86_64.
 
-`just fuzz tokenize`, `just fuzz filters` and `just fuzz check` fuzz the
-tokenizer, the filters, and the reader and checker, on nightly with
+`just fuzz tokenize`, `just fuzz filters`, `just fuzz primitives`, `just
+fuzz crypt` and `just fuzz check` fuzz the tokenizer, the filters,
+pdf-crypt's primitives (against RustCrypto's) and its handler, and the
+reader and checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
 says for how many seconds (60 by default).
 

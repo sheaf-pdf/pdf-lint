@@ -112,6 +112,10 @@ pub enum Encryption {
     },
     /// It is, and no password it was given opens it.
     Locked,
+    /// It is, and no password it was given opens it, but its strings and
+    /// streams aren't encrypted (`/StrF` and `/StmF` `/Identity`, as when
+    /// only embedded files are, `/AuthEvent /EFOpen`): it reads whole.
+    Plain,
     /// It is, by a security handler the reader can't open, and why: its
     /// strings stay ciphertext, and its object streams aren't read.
     Unsupported(String),

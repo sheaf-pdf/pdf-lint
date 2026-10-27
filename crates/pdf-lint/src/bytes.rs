@@ -1431,6 +1431,15 @@ impl<'a> Reader<'a> {
                 self.handler = Some(handler);
                 Encryption::Opened { owner }
             }
+            // Nothing it reads is encrypted, but embedded files: no matter.
+            Err(pdf_crypt::Refused::Password)
+                if values.v >= 4
+                    && [&values.stm_f, &values.str_f]
+                        .iter()
+                        .all(|f| f.as_deref().is_none_or(|f| f == b"Identity")) =>
+            {
+                Encryption::Plain
+            }
             Err(pdf_crypt::Refused::Password) => Encryption::Locked,
             Err(pdf_crypt::Refused::Unsupported(why)) => Encryption::Unsupported(why),
         }
@@ -1468,9 +1477,11 @@ impl<'a> Reader<'a> {
             }
         }
         let streams: BTreeSet<u32> = compressed.iter().map(|&(_, stream, _)| stream).collect();
-        // In a file that doesn't encrypt, each decoded from its own data;
-        // in one that does, asked of the decoder.
-        let native = self.native && (!self.encrypts || self.handler.is_some());
+        // In a file that doesn't encrypt, or whose handler opened, or whose
+        // streams aren't encrypted, each decoded from its own data; else
+        // asked of the decoder.
+        let plain = self.encryption == Encryption::Plain;
+        let native = self.native && (!self.encrypts || self.handler.is_some() || plain);
         let mut decoded = match native {
             true => (streams.iter())
                 .filter_map(|&n| {
@@ -3714,6 +3725,46 @@ mod tests {
             .unwrap()
             .clone();
         assert!(matches!(lang.value, Value::String(Str::Encrypted(_))));
+    }
+
+    #[test]
+    fn a_file_whose_strings_and_streams_arent_encrypted_reads_whole_without_its_password() {
+        // Only embedded files are encrypted (/StmF and /StrF /Identity):
+        // its object stream and strings are plain, its password no matter.
+        let kind = pdf_crypt::writer::Kind::Aes128;
+        let values = pdf_crypt::writer::dictionary(&settings(kind, b"user"));
+        let hex = |b: &Option<Vec<u8>>| -> String {
+            b.as_ref()
+                .unwrap()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        let encrypt = format!(
+            "/Root 1 0 R /Encrypt << /Filter /Standard /V 4 /R 4 /Length 128 /P -4 /O <{}> /U <{}> \
+             /CF << /StdCF << /CFM /AESV2 /AuthEvent /EFOpen >> >> /StmF /Identity /StrF /Identity /EFF /StdCF >> \
+             /ID [(0123456789abcdef) (0123456789abcdef)]",
+            hex(&values.o),
+            hex(&values.u)
+        );
+        let (objects, _) = objects_2_and_3();
+        let file = filtered(false, "", &objects);
+        let at = find(&file, b"/Root 1 0 R").unwrap();
+        let file = [&file[..at], encrypt.as_bytes(), &file[at + 11..]].concat();
+        for passwords in [&[][..], &[&b"wrong"[..]]] {
+            let doc = read_opened(&file, passwords);
+            assert_eq!(doc.encryption, Encryption::Plain);
+            assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+            assert_eq!(doc.get((2, 0)).unwrap().at.unwrap().stream, Some((4, 0)));
+            let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
+            assert_eq!(
+                lang.unwrap().value,
+                Value::String(Str::Bytes(b"en".to_vec()))
+            );
+        }
+        // Its password opens it all the same.
+        let doc = read_opened(&file, &[b"user"]);
+        assert_eq!(doc.encryption, Encryption::Opened { owner: false });
     }
 
     #[test]

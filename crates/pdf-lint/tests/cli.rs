@@ -1,7 +1,10 @@
 //! The command line, run as a user runs it.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+
+use pdf_crypt::writer::{self, Kind, Settings};
+use pdf_crypt::{Dictionary, Handler};
 
 // The crate's own reader of JSON, to read the JSON report back with.
 #[path = "../src/json.rs"]
@@ -39,11 +42,15 @@ fn written(name: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
+/// pdf-lint, with no qpdf it could find: it reads every file itself.
+fn pdf_lint() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pdf-lint"));
+    command.env("PDF_LINT_QPDF", "/nonexistent/qpdf");
+    command
+}
+
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
-        .args(args)
-        .output()
-        .unwrap()
+    pdf_lint().args(args).output().unwrap()
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -320,75 +327,118 @@ fn extensions_name_what_a_file_is_checked_under_besides_what_it_declares() {
     }
 }
 
+/// An encrypted file's first `/ID` element, which its key is made with.
+const ID: &[u8] = b"0123456789abcdef";
+
+/// What the writer encrypts `kind` with, `user` the user's password.
+fn settings(kind: Kind, user: &[u8]) -> Settings<'_> {
+    Settings {
+        kind,
+        user,
+        owner: b"owner",
+        p: -4,
+        id: ID,
+        encrypt_metadata: true,
+    }
+}
+
+/// [`in_an_object_stream`]'s file, encrypted as `kind` with `user` for the
+/// user's password and `owner` for the owner's: its object stream's data
+/// encrypted, the encryption dictionary and `/ID` in its trailer.
+fn crypted(kind: Kind, user: &[u8]) -> Vec<u8> {
+    let dictionary = writer::dictionary(&settings(kind, user));
+    let handler = Handler::open(&dictionary, ID, &[user]).unwrap();
+    let (objects, _) = object_stream_objects();
+    let data = writer::encrypt_stream(&handler, (4, 0), &objects, None, [4; 16]).unwrap();
+    in_an_object_stream_under("", &data, &encryption(&dictionary))
+}
+
+/// A trailer's `/Encrypt`, `dictionary`, and its `/ID`.
+fn encryption(dictionary: &Dictionary) -> String {
+    let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let d = dictionary;
+    let mut entries = format!(
+        "/Filter /Standard /V {} /R {} /P {}",
+        d.v,
+        d.r,
+        d.p.unwrap()
+    );
+    if let Some(length) = d.length {
+        entries.push_str(&format!(" /Length {length}"));
+    }
+    let strings = [
+        ("O", &d.o),
+        ("U", &d.u),
+        ("OE", &d.oe),
+        ("UE", &d.ue),
+        ("Perms", &d.perms),
+    ];
+    for (name, value) in strings {
+        if let Some(value) = value {
+            entries.push_str(&format!(" /{name} <{}>", hex(value)));
+        }
+    }
+    if let Some(encrypt_metadata) = d.encrypt_metadata {
+        entries.push_str(&format!(" /EncryptMetadata {encrypt_metadata}"));
+    }
+    if let Some(filter) = d.crypt_filters.first() {
+        let method = String::from_utf8_lossy(filter.method.as_deref().unwrap());
+        let length = if method == "AESV3" { 32 } else { 16 };
+        entries.push_str(&format!(
+            " /CF << /StdCF << /CFM /{method} /Length {length} >> >> /StmF /StdCF /StrF /StdCF"
+        ));
+    }
+    format!(" /Encrypt << {entries} >> /ID [<{0}> <{0}>]", hex(ID))
+}
+
 #[test]
-fn a_file_that_wont_open_with_the_password_given_is_unread_and_says_why() {
-    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
-    let plain = written("password-plain.pdf", &file(&[CATALOG, PAGES, page]));
-    // Encrypted by the qpdf pdf-lint decodes with (AES-128, as PDF 1.7
-    // has it), its objects in object streams, which nothing decodes without
-    // the password.
-    let qpdf = std::env::var_os("PDF_LINT_QPDF").unwrap_or_else(|| "qpdf".into());
-    let encrypted = |name: &str, user: &str| {
-        let out = plain.with_file_name(name);
-        let status = Command::new(&qpdf)
-            .args([
-                "--object-streams=generate",
-                "--encrypt",
-                user,
-                "owner",
-                "128",
-                "--use-aes=y",
-                "--",
-            ])
-            .arg(&plain)
-            .arg(&out)
-            .status()
-            .unwrap();
-        assert!(matches!(status.code(), Some(0 | 3)), "qpdf: {status}");
-        out.to_str().unwrap().to_string()
-    };
-    let locked = encrypted("password-locked.pdf", "user");
-    let open = encrypted("password-open.pdf", "");
+fn an_encrypted_file_is_read_by_the_password_it_needs_and_unread_without_it() {
+    let locked = written("password-locked.pdf", &crypted(Kind::Aes256, b"user"));
+    let locked = locked.to_str().unwrap();
+    let open = written("password-open.pdf", &crypted(Kind::Aes128, b""));
+    let open = open.to_str().unwrap();
     let said = |args: &[&str]| {
         let out = run(args);
-        (out.status.code(), text(&out.stderr))
+        (out.status.code(), text(&out.stdout), text(&out.stderr))
     };
-    let (code, err) = said(&[&locked]);
+    let (code, _, err) = said(&[locked]);
     assert_eq!(code, Some(2), "{err}");
-    assert!(
-        err.contains("it needs a password: give it with --password"),
-        "{err}"
+    assert_eq!(
+        err,
+        format!("{locked}: it needs a password: give it with --password\n")
     );
-    let (code, err) = said(&["--password", "wrong", &locked]);
+    let (code, _, err) = said(&["--password", "wrong", locked]);
     assert_eq!(code, Some(2), "{err}");
     assert!(
         err.contains("the password --password gives doesn't open it"),
         "{err}"
     );
-    // The user's or the owner's opens it, and what its object streams
-    // hold is there, nothing unresolved (though qpdf writes AES-128's /OE
-    // and /UE empty, a finding of their own); and one with no user
-    // password opens without, but not with a wrong one.
-    let opens = |args: &[&str]| {
-        let out = run(args);
-        let stdout = text(&out.stdout);
-        let read = out.status.code() != Some(2) && stdout.contains(" objects checked");
-        read && !stdout.contains("unresolved:")
-    };
+    // The user's or the owner's opens it, and what its object stream holds
+    // is there, nothing unresolved: checked, its findings on revision 6's
+    // values in a PDF 1.7 file.
     for password in ["user", "owner"] {
-        assert!(opens(&["--password", password, &locked]), "{password}");
+        let (code, out, err) = said(&["--password", password, locked]);
+        assert_eq!((code, err.as_str()), (Some(1), ""), "{password}: {out}");
+        assert!(out.contains("EncryptionStandard/R"), "{out}");
+        assert!(!out.contains("unresolved"), "{out}");
     }
-    assert!(opens(&[&open]));
-    assert_eq!(said(&["--password", "wrong", &open]).0, Some(2));
-    // A baseline that won't open is refused.
-    let (code, err) = said(&["--baseline", &locked, &open]);
+    // One with no user password opens without one, but not with a wrong
+    // one, as the empty password isn't tried once one's given.
+    let (code, out, _) = said(&[open]);
+    assert_eq!(code, Some(0), "{out}");
+    assert_eq!(said(&["--password", "wrong", open]).0, Some(2));
+    // A baseline that won't open is refused; given its password, it reads.
+    let (code, _, err) = said(&["--baseline", locked, open]);
     assert_eq!(code, Some(2), "{err}");
     assert!(
         err.contains("--baseline ") && err.contains("needs a password"),
         "{err}"
     );
+    let (code, out, _) = said(&["--password", "user", "--baseline", locked, locked]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("0 findings, 4 carried"), "{out}");
     // The JSON report says why, as for any file that isn't read.
-    let out = run(&["--format", "json", &locked]);
+    let out = run(&["--format", "json", locked]);
     let line = json::parse(&out.stdout).unwrap();
     assert_eq!(
         line.get("error").cloned(),
@@ -398,36 +448,48 @@ fn a_file_that_wont_open_with_the_password_given_is_unread_and_says_why() {
     );
 }
 
-/// `plain` rewritten by qpdf with its objects in object streams, which
-/// the reader decodes itself, as `name`.
-fn packed(plain: &std::path::Path, name: &str) -> String {
-    rewritten(plain, name, &[])
+#[test]
+fn a_password_is_tried_as_utf_8_and_in_each_single_byte_encoding() {
+    // café, as each kind's writer may have set it: in PDFDocEncoding
+    // (WinAnsiEncoding's alike), in MacRomanEncoding, and in UTF-8.
+    let kinds = [
+        (Kind::Rc4By128, &b"caf\xE9"[..]),
+        (Kind::Aes128, b"caf\x8E"),
+        (Kind::Aes256, "café".as_bytes()),
+    ];
+    for (kind, user) in kinds {
+        let path = written("password-cafe.pdf", &crypted(kind, user));
+        let out = run(&["--password", "café", path.to_str().unwrap()]);
+        assert_ne!(
+            out.status.code(),
+            Some(2),
+            "{kind:?}: {}",
+            text(&out.stderr)
+        );
+        let out = run(&["--password", "cafe", path.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(2), "{kind:?}");
+    }
 }
 
-/// [`packed`]'s file, encrypted (AES-256, with no user password), which
-/// the reader opens.
-fn encrypted(plain: &std::path::Path, name: &str) -> String {
-    rewritten(plain, name, &["--encrypt", "", "owner", "256", "--"])
-}
-
-/// [`encrypted`]'s, but with a user password, `user`, so that the reader
-/// opens it only given one.
-fn locked(plain: &std::path::Path, name: &str) -> String {
-    rewritten(plain, name, &["--encrypt", "user", "owner", "256", "--"])
-}
-
-fn rewritten(plain: &std::path::Path, name: &str, args: &[&str]) -> String {
-    let qpdf = std::env::var_os("PDF_LINT_QPDF").unwrap_or_else(|| "qpdf".into());
-    let out = plain.with_file_name(name);
-    let status = Command::new(&qpdf)
-        .arg("--object-streams=generate")
-        .args(args)
-        .arg(plain)
-        .arg(&out)
-        .status()
-        .unwrap();
-    assert!(matches!(status.code(), Some(0 | 3)), "qpdf: {status}");
-    out.to_str().unwrap().to_string()
+#[test]
+fn an_encrypted_files_last_update_is_read_with_its_password() {
+    let base = crypted(Kind::Aes128, b"user");
+    let trailer = encryption(&writer::dictionary(&settings(Kind::Aes128, b"user")));
+    // The update rewrites the page, which the object stream held, with a
+    // /Rotate that isn't a number.
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Rotate /B >>";
+    let update = updated_under(&base, &[(3, page)], &trailer);
+    let path = written("updated-encrypted.pdf", &update);
+    let path = path.to_str().unwrap();
+    let out = run(&["--last-update", "--password", "user", path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let findings: Vec<_> = stdout.lines().filter(|l| l.starts_with("- ")).collect();
+    assert_eq!(findings.len(), 1, "{stdout}");
+    assert!(findings[0].contains("PageObject/Rotate"), "{stdout}");
+    let out = run(&["--last-update", path]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("it needs a password"));
 }
 
 /// What [`in_an_object_stream`]'s object stream holds, a catalog, page
@@ -447,6 +509,11 @@ fn object_stream_objects() -> (Vec<u8>, usize) {
 /// A file whose objects are in object stream 4, its data `data` under
 /// `filter`, with a cross-reference stream.
 fn in_an_object_stream(filter: &str, data: &[u8]) -> Vec<u8> {
+    in_an_object_stream_under(filter, data, "")
+}
+
+/// [`in_an_object_stream`]'s file, its trailer given `trailer`'s entries.
+fn in_an_object_stream_under(filter: &str, data: &[u8], trailer: &str) -> Vec<u8> {
     let (_, first) = object_stream_objects();
     let mut out = b"%PDF-1.7\n".to_vec();
     let four = out.len();
@@ -472,7 +539,7 @@ fn in_an_object_stream(filter: &str, data: &[u8]) -> Vec<u8> {
     ]
     .concat();
     let dict = format!(
-        "<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R /Length {} >>",
+        "<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R{trailer} /Length {} >>",
         rows.len()
     );
     out.extend_from_slice(format!("5 0 obj\n{dict}\nstream\n").as_bytes());
@@ -508,87 +575,41 @@ fn a_fault_in_a_streams_data_is_a_finding() {
 }
 
 #[test]
-fn a_file_that_encrypts_without_qpdf_is_unread_and_says_why() {
-    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
-    let plain = written("unready-plain.pdf", &file(&[CATALOG, PAGES, page]));
-    let packed = packed(&plain, "unready-packed.pdf");
-    let opened = encrypted(&plain, "unready-encrypted.pdf");
-    let encrypted = locked(&plain, "unready-locked.pdf");
-    let without = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
-            .args(args)
-            .env("PDF_LINT_QPDF", "/nonexistent/qpdf")
-            .output()
-            .unwrap();
-        (out.status.code(), text(&out.stdout), text(&out.stderr))
-    };
-    // A file all in plain view needs no qpdf, nor one in object streams,
-    // which the reader decodes itself.
-    let (code, _, err) = without(&[plain.to_str().unwrap()]);
-    assert_eq!(code, Some(0), "{err}");
-    let (code, _, err) = without(&[&packed]);
-    assert_eq!(code, Some(0), "{err}");
-    // Nor one that encrypts that the reader opens, as by its empty user
-    // password: it's checked (qpdf writes /R 6 in a PDF 1.7 file, which the
-    // model finds).
-    let (code, out, err) = without(&[&opened]);
-    assert_eq!((code, err.as_str()), (Some(1), ""), "{out}");
-    assert!(out.contains("EncryptionStandard/R"), "{out}");
-    // One that encrypts that it doesn't open is unread, in a line that says
-    // why, rather than checked with what's encrypted missing.
-    let packed = encrypted;
-    let why = "it's encrypted, and qpdf decrypts it, but /nonexistent/qpdf isn't found: install qpdf 11.9 or later, or name one with --qpdf";
-    let (code, out, err) = without(&[&packed]);
-    assert_eq!(code, Some(2), "{out}");
-    assert_eq!(err, format!("{packed}: {why}\n"));
-    assert_eq!(out, "");
-    // As the JSON report says, and for a baseline.
-    let (_, out, _) = without(&["--format", "json", &packed]);
-    let line = json::parse(out.as_bytes()).unwrap();
-    assert_eq!(
-        line.get("error").cloned(),
-        Some(json::Json::String(why.to_string()))
-    );
-    let (code, _, err) = without(&["--baseline", &packed, plain.to_str().unwrap()]);
-    assert_eq!(code, Some(2), "{err}");
-    assert!(
-        err.contains(&format!("--baseline {packed}: {why}")),
-        "{err}"
-    );
-    // --qpdf names the one that isn't found.
-    let (_, _, err) = without(&["--qpdf", "/nonexistent/other", &packed]);
-    assert!(err.contains("/nonexistent/other isn't found"), "{err}");
-}
-
-#[test]
 fn a_file_of_dash_is_standard_input() {
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Rotate (abc) >>";
     let plain = written("stdin-plain.pdf", &file(&[CATALOG, PAGES, page]));
     let plain = plain.to_str().unwrap();
-    let packed = packed(Path::new(plain), "stdin-packed.pdf");
-    let encrypted = encrypted(Path::new(plain), "stdin-encrypted.pdf");
+    let (objects, _) = object_stream_objects();
+    let packed = written("stdin-packed.pdf", &in_an_object_stream("", &objects));
+    let packed = packed.to_str().unwrap().to_string();
+    let encrypted = written("stdin-encrypted.pdf", &crypted(Kind::Aes256, b""));
+    let encrypted = encrypted.to_str().unwrap().to_string();
     let piped = |path: &str, args: &[&str]| {
-        let child = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
+        let child = pdf_lint()
             .args(args)
             .stdin(std::fs::File::open(path).unwrap())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let id = child.id();
-        let out = child.wait_with_output().unwrap();
-        // The copy qpdf reads it from is gone.
-        let spool = std::env::temp_dir().join(format!("pdf-lint-{id}-0.pdf"));
-        assert!(!spool.exists(), "{}", spool.display());
-        out
+        child.wait_with_output().unwrap()
     };
-    // In plain view, in object streams, and encrypted, which qpdf
-    // decrypts from a copy: each checked as by its path, and named -.
+    // In plain view, in object streams, and encrypted: each checked as by
+    // its path, and named -.
     for path in [plain, &packed, &encrypted] {
-        let by_path = text(&run(&[path]).stdout);
+        let by_path = run(&[path]);
+        assert!(text(&by_path.stdout).contains(" objects checked"), "{path}");
         let out = piped(path, &["-"]);
-        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-        assert_eq!(text(&out.stdout), by_path.replacen(path, "-", 1));
+        assert_eq!(
+            out.status.code(),
+            by_path.status.code(),
+            "{}",
+            text(&out.stderr)
+        );
+        assert_eq!(
+            text(&out.stdout),
+            text(&by_path.stdout).replacen(path, "-", 1)
+        );
     }
     // Among files, in its place.
     let out = piped(&packed, &[plain, "-", plain]);
@@ -603,37 +624,6 @@ fn a_file_of_dash_is_standard_input() {
         text(&out.stderr),
         "pdf-lint: - more than once: standard input is read once\n"
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_qpdf_older_than_11_9_is_refused_for_a_file_that_needs_it() {
-    use std::os::unix::fs::PermissionsExt;
-    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
-    let plain = written("old-plain.pdf", &file(&[CATALOG, PAGES, page]));
-    let packed = packed(&plain, "old-packed.pdf");
-    let encrypted = locked(&plain, "old-locked.pdf");
-    let old = plain.with_file_name("qpdf-11.8");
-    std::fs::write(&old, "#!/bin/sh\necho 'qpdf version 11.8.0'\n").unwrap();
-    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let with_old = |file: &str| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_pdf-lint"));
-        command.arg("--qpdf").arg(&old).arg(file);
-        output_when_free(&mut command)
-    };
-    let out = with_old(&encrypted);
-    assert_eq!(out.status.code(), Some(2));
-    let refused = format!(
-        "but {} is version 11.8.0, older than 11.9: install qpdf 11.9 or later",
-        old.display()
-    );
-    assert!(
-        text(&out.stderr).contains(&refused),
-        "{}",
-        text(&out.stderr)
-    );
-    assert_eq!(with_old(plain.to_str().unwrap()).status.code(), Some(0));
-    assert_eq!(with_old(&packed).status.code(), Some(0));
 }
 
 #[test]
@@ -950,7 +940,7 @@ fn a_report_no_one_reads_stops_without_a_panic() {
     let path = written("unread.pdf", &file(&big));
     let path = path.to_str().unwrap();
     // Far more than a pipe holds, with the pipe's reader gone.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
+    let mut child = pdf_lint()
         .args(["--jobs", "2"])
         .args([path; 20])
         .stdout(std::process::Stdio::piped())
@@ -971,11 +961,7 @@ fn the_version_or_usage_no_one_reads_exits_0_without_a_panic() {
         // given a wrong option.
         let (reader, writer) = std::io::pipe().unwrap();
         drop(reader);
-        let out = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
-            .arg(flag)
-            .stdout(writer)
-            .output()
-            .unwrap();
+        let out = pdf_lint().arg(flag).stdout(writer).output().unwrap();
         let stderr = text(&out.stderr);
         assert!(!stderr.contains("panicked"), "{flag}: {stderr}");
         assert_eq!(out.status.code(), Some(0), "{flag}: {stderr}");
@@ -1080,6 +1066,11 @@ fn json_reports_a_line_for_each_file() {
 /// `file` with an incremental update appended: these objects' bodies, by
 /// number, and a table listing them.
 fn updated(file: &[u8], objects: &[(u32, &str)]) -> Vec<u8> {
+    updated_under(file, objects, "")
+}
+
+/// [`updated`]'s file, the update's trailer given `trailer`'s entries.
+fn updated_under(file: &[u8], objects: &[(u32, &str)], trailer: &str) -> Vec<u8> {
     let text = String::from_utf8_lossy(file);
     let previous = text.rsplit("startxref").next().unwrap();
     let previous: usize = previous.split_whitespace().next().unwrap().parse().unwrap();
@@ -1094,7 +1085,7 @@ fn updated(file: &[u8], objects: &[(u32, &str)]) -> Vec<u8> {
     out.extend_from_slice(rows.as_bytes());
     out.extend_from_slice(
         format!(
-            "trailer\n<< /Size {size} /Root 1 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n"
+            "trailer\n<< /Size {size} /Root 1 0 R{trailer} /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n"
         )
         .as_bytes(),
     );
@@ -1222,52 +1213,4 @@ fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
         path.to_str().unwrap(),
     ]);
     assert_eq!(out.status.code(), Some(2));
-}
-
-/// `command`'s output, tried again while the program is busy: another
-/// test's process, forked while it was being written, holds it open until
-/// it runs its own program (ETXTBSY).
-#[cfg(unix)]
-fn output_when_free(command: &mut Command) -> Output {
-    loop {
-        match command.output() {
-            Err(e) if e.raw_os_error() == Some(26) => {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            }
-            other => return other.unwrap(),
-        }
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn the_qpdf_bundled_beside_the_binary_is_found_unless_one_is_named() {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = std::env::temp_dir().join(format!("pdf-lint-cli-{}-bundled", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let binary = dir.join("pdf-lint");
-    std::fs::copy(env!("CARGO_BIN_EXE_pdf-lint"), &binary).unwrap();
-    let qpdf = dir.join("qpdf").join("bin").join("qpdf");
-    std::fs::create_dir_all(qpdf.parent().unwrap()).unwrap();
-    std::fs::write(&qpdf, "#!/bin/sh\necho 'qpdf version 99.0.0'\n").unwrap();
-    std::fs::set_permissions(&qpdf, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let version = |named: Option<&str>| {
-        let mut command = Command::new(&binary);
-        command.arg("--version").env_remove("PDF_LINT_QPDF");
-        if let Some(named) = named {
-            command.env("PDF_LINT_QPDF", named);
-        }
-        text(&output_when_free(&mut command).stdout)
-    };
-    let bundled = version(None);
-    assert!(
-        bundled.contains(&format!("qpdf version 99.0.0 ({})", qpdf.display())),
-        "{bundled}"
-    );
-    let named = version(Some("/nonexistent/qpdf"));
-    assert!(
-        named.contains("no qpdf to decode with: /nonexistent/qpdf isn't found"),
-        "{named}"
-    );
 }
