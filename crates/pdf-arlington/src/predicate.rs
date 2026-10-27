@@ -11,9 +11,9 @@
 //! [`SUPPORTED`] are the functions evaluated, all INTERNAL_GRAMMAR.md's
 //! but `fn:IsFullyQualifiedFieldName`, which the embedded model's
 //! corrections call. Any other comes to [`Truth::Unknown`], named: never
-//! guessed. The checker counts a check an
-//! unknown predicate stands in the way of as not made. Arithmetic is
-//! evaluated on numbers, integers kept integers.
+//! guessed, so that a checker can count a check an unknown predicate
+//! stands in the way of as not made. Arithmetic is evaluated on numbers,
+//! integers kept integers.
 //!
 //! A key the object lacks, or has null, is indeterminable, but for a
 //! SpecialCase's or PossibleValues' `@Key` with a DefaultValue, which
@@ -51,7 +51,7 @@ use crate::grammar::{At, Table, Wrap, WrapFn, split, version};
 /// every hide action naming a field below the top. The embedded model's
 /// corrections put `fn:IsFullyQualifiedFieldName` in its place, which
 /// this crate defines, not INTERNAL_GRAMMAR.md.
-pub const SUPPORTED: [&str; 34] = [
+pub const SUPPORTED: &[&str] = &[
     "fn:AlwaysUnencrypted",
     "fn:ArrayLength",
     "fn:ArraySortAscending",
@@ -129,6 +129,7 @@ const OR: &str = " || ";
 
 /// A predicate, or a part of one.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Expr {
     /// `fn:Name(a,b)`: the function, `fn:` and all, and its arguments,
     /// none, one or two.
@@ -234,7 +235,11 @@ pub enum Truth {
 /// What a predicate is evaluated in: the row's place, the walk's way to
 /// it, and the file.
 pub struct Cx<'a> {
-    /// The dictionary, array or stream the row's value is in.
+    /// The dictionary, array or stream the row's value is in. An indirect
+    /// object is the one `resolve` gives, not a copy:
+    /// `fn:ImageIsStructContentItem` and `fn:PageContainsStructContentItems`
+    /// know the objects the structure tree points at by where `resolve`
+    /// keeps them, and a copy is elsewhere.
     pub container: &'a Object,
     /// Where in it: the key or element the row matched, which `@*` and
     /// `@1*` read.
@@ -273,26 +278,49 @@ pub struct Cx<'a> {
     pub extensions: &'a BTreeSet<String>,
 }
 
+/// Its parts but `resolve` and `hex`, closures, which can't be shown.
+impl fmt::Debug for Cx<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Cx")
+            .field("container", &self.container)
+            .field("at", &self.at)
+            .field("parents", &self.parents)
+            .field("trailer", &self.trailer)
+            .field("version", &self.version)
+            .field("defaults", &self.defaults.map(|table| &table.name))
+            .field("size", &self.size)
+            .field("trees", &self.trees)
+            .field("structure", &self.structure)
+            .field("fields", &self.fields)
+            .field("extensions", &self.extensions)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The interactive form's fields' fully qualified names, read once a file.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Fields(RefCell<Option<Rc<Names>>>);
 
 /// Fields' fully qualified names, as text, and whether they're all of
 /// them: every field read, and every partial name a string whose text
 /// the reader gave.
+#[derive(Debug)]
 struct Names {
     names: HashSet<String>,
     whole: bool,
 }
 
-/// The structure tree's content items, read once a file.
-#[derive(Default)]
+/// The structure tree's content items, read once a file. It knows the
+/// objects it found by where `resolve` keeps them, so it serves one file,
+/// while its objects are kept.
+#[derive(Debug, Default)]
 pub struct Structure(RefCell<Option<Rc<Items>>>);
 
 /// What the structure tree says of its content items (ISO 32000-2,
 /// 14.7.5): the objects its object references (OBJR) point at, the pages
 /// its marked-content items are on, and whether each is all of them,
 /// every node read and every item placed.
+#[derive(Debug)]
 struct Items {
     objects: HashSet<usize>,
     pages: HashSet<usize>,
@@ -300,12 +328,15 @@ struct Items {
     whole_pages: bool,
 }
 
-/// The keys of a file's name trees, read once each, by the tree's root.
-#[derive(Default)]
+/// The keys of a file's name trees, read once each, by where `resolve`
+/// keeps the tree's root: so it serves one file, while its objects are
+/// kept.
+#[derive(Debug, Default)]
 pub struct Trees(RefCell<HashMap<usize, Rc<Tree>>>);
 
 /// A name tree's keys, and whether they're all of them: every node read,
 /// and every key a string whose bytes the reader gave.
+#[derive(Debug)]
 struct Tree {
     keys: HashSet<Vec<u8>>,
     whole: bool,
@@ -2054,7 +2085,7 @@ mod tests {
             }
         }
         assert_eq!(census.values().sum::<usize>(), written);
-        for name in SUPPORTED {
+        for &name in SUPPORTED {
             assert!(
                 census.contains_key(name),
                 "{name} is supported but the model has none"

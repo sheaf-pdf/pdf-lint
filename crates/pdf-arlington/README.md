@@ -18,9 +18,9 @@ It's made for a checker. A predicate that can't be told comes to `Unknown`, sayi
 ```rust
 use std::collections::BTreeSet;
 
+use pdf_arlington::pdf_objects::{Dict, Object, ObjectId, Version, dict};
 use pdf_arlington::predicate::{self, Fields, Structure, Trees};
 use pdf_arlington::{At, Cx, Truth, grammar};
-use pdf_objects::{Dict, Object, ObjectId, Version, dict};
 
 // The embedded model's row for a page's /Rotate: an integer since PDF
 // 1.0, whose possible values are the multiples of 90.

@@ -94,7 +94,7 @@ pub mod extension {
     /// pdf-arlington's [`declared`](pdf_arlington::extension::declared)
     /// reads them.
     pub fn declared(source: &dyn Source) -> BTreeSet<String> {
-        let resolve = |id| source.get(id).ok();
+        let resolve = |id| source.get(id).ok().cloned();
         let root = source.trailer().dict().get(b"Root");
         pdf_arlington::extension::declared(root, source.metadata(), &resolve)
     }

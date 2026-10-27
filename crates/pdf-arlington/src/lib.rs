@@ -27,6 +27,10 @@ pub mod grammar;
 pub mod predicate;
 mod xxh64;
 
+/// pdf-objects, whose objects and versions this crate's functions take:
+/// named through it, they're the version this crate is built with.
+pub use pdf_objects;
+
 pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, grammar, use_model};
 pub use predicate::{Cx, Gate, Reference, Since, Truth};
 

@@ -15,7 +15,7 @@ use crate::grammar::{WrapFn, grammar};
 /// dictionary entries give as `/ExtensionLevel` under `/ISO_` (ISO 32000-2,
 /// 7.12.3): ISO 21812-1 (print product metadata), ISO 19593-1
 /// (processing steps), and the technical specifications.
-pub const ISO: [(&str, i64); 8] = [
+pub const ISO: &[(&str, i64)] = &[
     ("ISO_19593", 19593),
     ("ISO_21812", 21812),
     ("ISO_TS_24064", 24064),
@@ -29,7 +29,8 @@ pub const ISO: [(&str, i64); 8] = [
 /// The extensions a file declares, as the model names them, from `root`,
 /// its trailer's `/Root` as written, and `metadata`, the data of its
 /// catalog's metadata stream (ISO 32000-2, 14.3.2); `resolve` gives the
-/// object a reference names:
+/// object a reference names, as its own, so a reader needn't keep what
+/// it reads:
 ///
 /// - `ADBE_Extn3`, from an `/ADBE` entry at `/BaseVersion /1.7` and an
 ///   `/ExtensionLevel` of 3 or more, Adobe's levels each having those
@@ -42,17 +43,17 @@ pub const ISO: [(&str, i64); 8] = [
 /// An entry may be one developer extensions dictionary or, from PDF 2.0,
 /// an array of them. Metadata a reader doesn't have in plain view, given
 /// as none, declares nothing.
-pub fn declared<'a>(
-    root: Option<&'a Object>,
+pub fn declared(
+    root: Option<&Object>,
     metadata: Option<&[u8]>,
-    resolve: &dyn Fn(ObjectId) -> Option<&'a Object>,
+    resolve: &dyn Fn(ObjectId) -> Option<Object>,
 ) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let get = |o: &Object| -> Option<Object> {
         let mut o = o.clone();
         for _ in 0..8 {
             match o.value {
-                Value::Ref(id) => o = resolve(id)?.clone(),
+                Value::Ref(id) => o = resolve(id)?,
                 _ => return Some(o),
             }
         }
@@ -203,7 +204,7 @@ mod tests {
     }
 
     fn names(file: &File) -> Vec<String> {
-        let resolve = |id: ObjectId| file.objects.get(&id);
+        let resolve = |id: ObjectId| file.objects.get(&id).cloned();
         (declared(Some(&file.root), file.metadata.as_deref(), &resolve).into_iter()).collect()
     }
 

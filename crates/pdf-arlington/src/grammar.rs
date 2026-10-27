@@ -7,6 +7,7 @@
 //! checker's to say.
 
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -87,6 +88,17 @@ pub struct Grammar {
     tables: BTreeMap<String, Table>,
     /// Its tables' files' XXH64 ([`Grammar::hash`]).
     hash: u64,
+}
+
+/// How many tables it has, and its hash: each [`Table`] shows its own
+/// rows.
+impl fmt::Debug for Grammar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Grammar")
+            .field("tables", &self.tables.len())
+            .field("hash", &format_args!("{:016x}", self.hash))
+            .finish_non_exhaustive()
+    }
 }
 
 /// One object's table: `Catalog`, `AnnotSquare`, `ArrayOfAnnots`.
