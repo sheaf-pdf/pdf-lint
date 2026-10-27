@@ -201,7 +201,10 @@ pub(crate) fn encrypted(
             Value::String(Str::Bytes(bytes)) => *bytes = encrypt(bytes),
             Value::Array(a) => a.iter_mut().for_each(|o| strings(o, encrypt)),
             Value::Dict(d) | Value::Stream(crate::object::Stream { dict: d, .. }) => {
-                let signature = d.has(b"ByteRange");
+                // A signature's /Contents, as the reader takes one.
+                let typed = (d.get(b"Type"))
+                    .is_none_or(|t| matches!(t.as_name(), Some(b"Sig" | b"DocTimeStamp")));
+                let signature = d.has(b"ByteRange") && typed;
                 for entry in d.entries_mut() {
                     if !(signature && entry.key == b"Contents") {
                         strings(&mut entry.value, encrypt);

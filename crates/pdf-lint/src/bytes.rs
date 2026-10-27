@@ -3979,6 +3979,73 @@ mod tests {
     }
 
     #[test]
+    fn a_trailer_without_an_id_makes_the_key_without_one_and_says_so() {
+        let root = dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes128;
+        let settings = pdf_crypt::writer::Settings {
+            id: b"",
+            ..settings(kind, b"")
+        };
+        let file = write::encrypted(&settings, &to_encrypt(&[]), root);
+        // Its /ID, of empty strings, blanked out, so that nothing moves.
+        let at = find(&file, b"/ID [() ()]").unwrap();
+        let mut file = file;
+        file[at..at + 11].fill(b' ');
+        let doc = read_opened(&file, &[]);
+        assert_eq!(doc.encryption, Encryption::Opened { owner: false });
+        let message = "its trailer's /ID has no string first, so its key is made without one";
+        let warnings: Vec<_> = doc.warnings.iter().map(|w| w.message.as_str()).collect();
+        assert_eq!(warnings, [message]);
+        let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
+        assert_eq!(
+            lang.unwrap().value,
+            Value::String(Str::Bytes(b"en".to_vec()))
+        );
+    }
+
+    #[test]
+    fn a_signatures_contents_isnt_decrypted_whatever_its_type() {
+        let root = dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes256;
+        let der = vec![0x30, 0x82, 0x00, 0x01];
+        let signature = |typed: Option<&str>| {
+            let mut d = dict! {
+                "Filter" => "Adobe.PPKLite",
+                "ByteRange" => vec![Object::from(0), Object::from(1), Object::from(2), Object::from(3)],
+                "Contents" => Object::new(Value::String(Str::Bytes(der.clone()))),
+            };
+            if let Some(typed) = typed {
+                d.set("Type", typed);
+            }
+            d
+        };
+        let objects = [
+            (
+                1,
+                dict! { "Type" => "Catalog", "Pages" => Object::reference(2) }.into(),
+            ),
+            (
+                2,
+                dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into(),
+            ),
+            (3, signature(None).into()),
+            (4, signature(Some("DocTimeStamp")).into()),
+            // Another type's /Contents is encrypted, and decrypted.
+            (5, signature(Some("Annot")).into()),
+        ];
+        let file = write::encrypted(&settings(kind, b""), &objects, root);
+        let doc = read_opened(&file, &[]);
+        for n in [3, 4, 5] {
+            let contents = doc.get((n, 0)).unwrap().as_dict().unwrap().get(b"Contents");
+            assert_eq!(
+                contents.unwrap().value,
+                Value::String(Str::Bytes(der.clone())),
+                "{n}"
+            );
+        }
+    }
+
+    #[test]
     fn an_earlier_updates_encryption_dictionary_isnt_decrypted_either() {
         let root = || dict! { "Root" => Object::reference(1) };
         let kind = pdf_crypt::writer::Kind::Aes128;
