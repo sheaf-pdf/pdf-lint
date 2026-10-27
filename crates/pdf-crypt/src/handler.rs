@@ -4,6 +4,7 @@
 //! Adobe's Extension Level 3 has it, as qpdf reads it.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use crate::aes::Aes;
 use crate::md5::md5;
@@ -20,6 +21,7 @@ pub(crate) const PADDING: [u8; 32] = [
 
 /// How a string or a stream is encrypted.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Method {
     /// Not at all: `/Identity`, or a crypt filter without `/CFM`.
     Identity,
@@ -38,8 +40,9 @@ pub enum Method {
 }
 
 /// A file's security handler, opened: its key, and how its strings and
-/// streams are encrypted.
-#[derive(Clone, Debug)]
+/// streams are encrypted. The key stays in it: nothing gives it out, its
+/// `Debug` neither.
+#[derive(Clone)]
 pub struct Handler {
     key: Vec<u8>,
     v: i64,
@@ -49,6 +52,20 @@ pub struct Handler {
     filters: BTreeMap<Vec<u8>, Method>,
     encrypt_metadata: bool,
     faults: Vec<Fault>,
+}
+
+impl fmt::Debug for Handler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Handler")
+            .field("v", &self.v)
+            .field("owner", &self.owner)
+            .field("strings", &self.strings)
+            .field("streams", &self.streams)
+            .field("filters", &self.filters)
+            .field("encrypt_metadata", &self.encrypt_metadata)
+            .field("faults", &self.faults)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Handler {
@@ -109,8 +126,10 @@ impl Handler {
         self.owner
     }
 
-    /// The file's key.
-    pub fn key(&self) -> &[u8] {
+    /// The file's key, for the tests: never public, as each object's key
+    /// follows from it.
+    #[cfg(test)]
+    pub(crate) fn key(&self) -> &[u8] {
         &self.key
     }
 

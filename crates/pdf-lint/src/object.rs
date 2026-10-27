@@ -12,11 +12,20 @@ pub type ObjectId = (u32, u16);
 /// Where a value was written: a run of the file's bytes, or of an object
 /// stream's decoded data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct Span {
     /// The object stream whose decoded data it's in; none for the file.
     pub stream: Option<ObjectId>,
     pub start: usize,
     pub end: usize,
+}
+
+impl Span {
+    /// Bytes `start..end` of the file, or of object stream `stream`'s
+    /// decoded data.
+    pub const fn new(stream: Option<ObjectId>, start: usize, end: usize) -> Span {
+        Span { stream, start, end }
+    }
 }
 
 /// A value, and where it was written.

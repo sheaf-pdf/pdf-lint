@@ -54,12 +54,24 @@ pub struct Trailer {
 
 /// Something a reader had to choose how to read.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Warning {
     /// The object it's in, when it's in one.
     pub object: Option<ObjectId>,
     /// Where, when the reader knows.
     pub at: Option<Span>,
     pub message: String,
+}
+
+impl Warning {
+    /// `message`, of object `object` at `at`.
+    pub fn new(object: Option<ObjectId>, at: Option<Span>, message: String) -> Warning {
+        Warning {
+            object,
+            at,
+            message,
+        }
+    }
 }
 
 impl Trailer {

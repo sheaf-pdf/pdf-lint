@@ -1531,6 +1531,7 @@ impl<'a> Reader<'a> {
             Err(_) if self.plain_strings && plain_streams => Encryption::Plain,
             Err(pdf_crypt::Refused::Password) => Encryption::Locked,
             Err(pdf_crypt::Refused::Unsupported(why)) => Encryption::Unsupported(why),
+            Err(refused) => Encryption::Unsupported(refused.to_string()),
         }
     }
 

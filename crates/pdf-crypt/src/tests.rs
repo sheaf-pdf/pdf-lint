@@ -320,6 +320,16 @@ fn files_qpdf_encrypted_open_by_either_password_with_qpdfs_key() {
 }
 
 #[test]
+fn its_debug_leaves_the_key_out() {
+    for v in &vectors() {
+        let handler = Handler::open(&v.dictionary, v.id, &[v.user]).unwrap();
+        let shown = format!("{handler:?}");
+        assert!(!shown.contains(&format!("{:?}", handler.key())), "{shown}");
+        assert!(!shown.contains("key"), "{shown}");
+    }
+}
+
+#[test]
 fn the_first_password_that_opens_it_does() {
     let v = &vectors()[6];
     let handler = Handler::open(&v.dictionary, v.id, &[b"wrong", v.user, v.owner]).unwrap();

@@ -12,6 +12,8 @@
 //!   ciphertext too short, a part block past the whole ones, padding that
 //!   isn't, a crypt filter's method that isn't one, `/Perms` that doesn't
 //!   match or doesn't confirm the key.
+//! - **Keys kept in:** a [`Handler`] decrypts with the file's key and
+//!   each object's, and gives out neither, its `Debug` included.
 //! - **RustCrypto's primitives:** MD5 (`md-5`), SHA-256, SHA-384 and
 //!   SHA-512 (`sha2`), RC4 (`rc4`), and AES-128 and AES-256 (`aes`, in CBC
 //!   by `cbc`).
@@ -85,6 +87,7 @@ pub struct CryptFilter {
 
 /// Why a handler doesn't open.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Refused {
     /// The dictionary isn't one the standard security handler takes, and
     /// why: another handler, a version or revision it hasn't, `/O`, `/U`

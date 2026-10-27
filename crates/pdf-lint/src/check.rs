@@ -355,6 +355,7 @@ pub enum Rule {
 
 /// A rule a held object breaks.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Finding {
     /// The indirect object it's in: none for a table's trailer, or the
     /// file as a whole.
@@ -422,6 +423,7 @@ pub struct Unchecked {
 
 /// What a check of a file found in its held objects.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Report {
     pub findings: Vec<Finding>,
     /// Held objects checked, by table; tree nodes as `name-tree` and
