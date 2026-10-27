@@ -51,18 +51,25 @@ pub fn handler(data: &[u8]) {
     let head = take(8);
     let field = |at: usize| usize::from(head[at] % 64);
     let methods = ["V2", "AESV2", "AESV3", "None", "Odd"];
+    // A field of the length `head[at]` chooses, or past 60, none at all.
+    let mut string = |at: usize| {
+        let value = take(field(at));
+        (field(at) <= 60).then_some(value)
+    };
     let dictionary = Dictionary {
         filter: b"Standard".to_vec(),
         v: i64::from(head[0] % 6),
         // Revision 6 runs thousands of AES blocks a password: rare.
         r: i64::from(head[1] % 7).min(if head[1] == 255 { 6 } else { 5 }),
         length: Some(i64::from(head[2]) * 2),
-        o: take(field(3)),
-        u: take(field(4)),
-        oe: take(field(5)),
-        ue: take(field(6)),
-        perms: take(field(7)),
-        p: i64::from(i32::from_le_bytes([head[2], head[3], head[4], head[5]])),
+        o: string(3),
+        u: string(4),
+        oe: string(5),
+        ue: string(6),
+        perms: string(7),
+        p: (head[5] != 0x7f).then_some(i64::from(i32::from_le_bytes([
+            head[2], head[3], head[4], head[5],
+        ]))),
         encrypt_metadata: Some(head[6] & 1 == 0),
         crypt_filters: vec![CryptFilter {
             name: b"StdCF".to_vec(),

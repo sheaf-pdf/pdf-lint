@@ -53,7 +53,8 @@ impl Handler {
     /// The handler `dictionary` describes, for the file whose first `/ID`
     /// element is `id`, opened by the first of `passwords` that opens it,
     /// each tried as the owner's and then the user's; with none, the empty
-    /// password.
+    /// password. Of revision 5 or 6, the first whose key `/Perms` confirms,
+    /// else the first whose key it doesn't ([`Fault::Unconfirmed`]).
     pub fn open(
         dictionary: &Dictionary,
         id: &[u8],
@@ -65,14 +66,27 @@ impl Handler {
             true => &empty[..],
             false => passwords,
         };
-        let mut faults = Vec::new();
-        let opened = passwords.iter().find_map(|password| {
-            if let Some(key) = file.owner(password, &mut faults) {
-                return Some((key, true));
+        let mut unconfirmed = None;
+        let mut opened = None;
+        'passwords: for password in passwords {
+            for owner in [true, false] {
+                let key = match owner {
+                    true => file.owner(password),
+                    false => file.user(password),
+                };
+                match key {
+                    Some((key, Some(Fault::Unconfirmed))) => {
+                        unconfirmed.get_or_insert((key, owner, Some(Fault::Unconfirmed)));
+                    }
+                    Some((key, fault)) => {
+                        opened = Some((key, owner, fault));
+                        break 'passwords;
+                    }
+                    None => {}
+                }
             }
-            file.user(password, &mut faults).map(|key| (key, false))
-        });
-        let Some((key, owner)) = opened else {
+        }
+        let Some((key, owner, fault)) = opened.or(unconfirmed) else {
             return Err(Refused::Password);
         };
         let (strings, streams, filters) = methods(dictionary, file.v);
@@ -84,7 +98,7 @@ impl Handler {
             streams,
             filters,
             encrypt_metadata: file.encrypt_metadata,
-            faults,
+            faults: fault.into_iter().collect(),
         })
     }
 
@@ -115,16 +129,19 @@ impl Handler {
     }
 
     /// What was wrong with the dictionary though it opened: `/Perms` that
-    /// doesn't match, as a file of revision 5 or 6 can have.
+    /// doesn't match or doesn't confirm the key, as a file of revision 5 or
+    /// 6 can have.
     pub fn faults(&self) -> &[Fault] {
         &self.faults
     }
 
     /// How a stream whose own `/Crypt` filter is named `name` is
     /// encrypted: `/Identity` by name, else the dictionary's crypt filter
-    /// of that name.
+    /// of that name. Below `/V` 4, which has no crypt filters, as streams
+    /// are, whatever the name.
     pub fn named(&self, name: &[u8]) -> Method {
         match name {
+            _ if self.v < 4 => self.streams.clone(),
             b"Identity" => Method::Identity,
             _ => (self.filters.iter())
                 .find(|(n, _)| n == name)
@@ -134,7 +151,7 @@ impl Handler {
 
     /// The string `data` of object `id`, decrypted.
     pub fn decrypt_string(&self, id: (u32, u16), data: &[u8]) -> Result<Vec<u8>, Error> {
-        self.decrypt(&self.strings, id, data)
+        self.decrypt(&self.strings, id, data, false)
     }
 
     /// The data of stream `id`, decrypted: by its own `/Crypt` filter's
@@ -146,11 +163,12 @@ impl Handler {
         data: &[u8],
         crypt: Option<&Method>,
     ) -> Result<Vec<u8>, Error> {
-        self.decrypt(crypt.unwrap_or(&self.streams), id, data)
+        self.decrypt(crypt.unwrap_or(&self.streams), id, data, true)
     }
 
     /// `data` of object `id` encrypted by `method`, AES's from `iv`, for
-    /// the writer.
+    /// the writer; or [`Fault::Key`], when it's AES that the file's key
+    /// isn't for.
     #[cfg(any(test, feature = "writer"))]
     pub(crate) fn encrypt(
         &self,
@@ -158,23 +176,29 @@ impl Handler {
         id: (u32, u16),
         data: &[u8],
         iv: [u8; 16],
-    ) -> Vec<u8> {
-        let aes = |key: &[u8]| {
+    ) -> Result<Vec<u8>, Fault> {
+        let aes = || {
+            let cipher = self.cipher(method, id)?;
             let pad = 16 - data.len() % 16;
             let padded = [data, &vec![pad as u8; pad]].concat();
-            let cipher = Aes::new(key).expect("a key of 16 or 32 bytes");
-            [&iv[..], &cipher.encrypt_cbc(iv, &padded)].concat()
+            Ok([&iv[..], &cipher.encrypt_cbc(iv, &padded)].concat())
         };
         match method {
-            Method::Identity | Method::None | Method::Unknown(_) => data.to_vec(),
-            Method::Rc4 => rc4(&self.object_key(id, false), data),
-            Method::Aes128 => aes(&self.object_key(id, true)),
-            Method::Aes256 => aes(&self.key),
+            Method::Identity | Method::None | Method::Unknown(_) => Ok(data.to_vec()),
+            Method::Rc4 => Ok(rc4(&self.object_key(id, false), data)),
+            Method::Aes128 | Method::Aes256 => aes(),
         }
     }
 
-    /// `data` of object `id` decrypted by `method`.
-    fn decrypt(&self, method: &Method, id: (u32, u16), data: &[u8]) -> Result<Vec<u8>, Error> {
+    /// `data` of object `id` decrypted by `method`, a stream's when
+    /// `stream`.
+    fn decrypt(
+        &self,
+        method: &Method,
+        id: (u32, u16),
+        data: &[u8],
+        stream: bool,
+    ) -> Result<Vec<u8>, Error> {
         match method {
             Method::Identity | Method::None => Ok(data.to_vec()),
             Method::Unknown(name) => Err(Error {
@@ -184,9 +208,22 @@ impl Handler {
                 },
             }),
             Method::Rc4 => Ok(rc4(&self.object_key(id, false), data)),
-            Method::Aes128 => aes(&self.object_key(id, true), data),
-            Method::Aes256 => aes(&self.key, data),
+            Method::Aes128 | Method::Aes256 => aes(|| self.cipher(method, id), data, stream),
         }
+    }
+
+    /// AES by `method`'s key for object `id`: AES-128's the object's (the
+    /// file's from revision 5), AES-256's the file's, of `/V` 5 only; or
+    /// [`Fault::Key`], when that isn't a key of AES's length.
+    fn cipher(&self, method: &Method, id: (u32, u16)) -> Result<Aes, Fault> {
+        let key = match method {
+            Method::Aes256 if self.v < 5 => None,
+            Method::Aes256 => Aes::new(&self.key),
+            _ => Aes::new(&self.object_key(id, true)),
+        };
+        key.ok_or(Fault::Key {
+            len: self.key.len(),
+        })
     }
 
     /// Object `id`'s key (Algorithm 1): the file's key, its number and
@@ -206,50 +243,59 @@ impl Handler {
     }
 }
 
-/// AES-CBC ciphertext `data` decrypted: its first 16 bytes the IV, its
-/// padding taken off. Empty, it's empty; without a whole block past the
-/// IV, it stays ciphertext; white-space past its whole blocks, as a stream
-/// whose `/Length` was recovered has, is left off, and another part block
-/// too, said; padding that isn't, kept, said.
-fn aes(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
+/// AES-CBC ciphertext `data` decrypted by `cipher`: its first 16 bytes
+/// the IV, its padding taken off. Empty, it's empty. A stream's trailing
+/// white-space, as one whose `/Length` was recovered has, is left off as
+/// far as its whole blocks need (all of it, when that's all there is).
+/// Shorter than an IV, it stays ciphertext; just an IV, it's empty; said.
+/// A part block past the whole ones is left off, and the padding kept,
+/// said; padding that isn't, kept, said.
+fn aes(
+    cipher: impl FnOnce() -> Result<Aes, Fault>,
+    data: &[u8],
+    stream: bool,
+) -> Result<Vec<u8>, Error> {
+    let len = data.len();
+    let mut data = data;
+    if stream {
+        let content = (data.iter())
+            .rposition(|b| !b" \t\r\n\x0c\0".contains(b))
+            .map_or(0, |at| at + 1);
+        let whole = content.div_ceil(16) * 16;
+        data = &data[..if whole <= len { whole } else { content }];
+    }
     if data.is_empty() {
         return Ok(Vec::new());
     }
-    let mut data = data;
-    while data.len() % 16 != 0 && data.last().is_some_and(|b| b" \t\r\n\x0c\0".contains(b)) {
-        data = &data[..data.len() - 1];
-    }
-    if data.len() < 32 {
+    if data.len() < 16 {
         return Err(Error {
             data: None,
-            fault: Fault::Short { len: data.len() },
+            fault: Fault::Short { len },
         });
     }
+    let cipher = cipher().map_err(|fault| Error { data: None, fault })?;
     let extra = data.len() % 16;
     let whole = &data[..data.len() - extra];
-    // A crypt filter's AES with a key of another length, as AESV3 in a file
-    // whose key is RC4's is.
-    let Some(cipher) = Aes::new(key) else {
-        return Err(Error {
-            data: None,
-            fault: Fault::Key { len: key.len() },
-        });
-    };
     let iv: [u8; 16] = whole[..16].try_into().expect("a block");
     let mut plain = cipher.decrypt_cbc(iv, &whole[16..]);
-    let pad = usize::from(*plain.last().expect("a block"));
-    let padded = (1..=16).contains(&pad)
-        && plain[plain.len() - pad..]
-            .iter()
-            .all(|&b| usize::from(b) == pad);
-    let fault = match (extra, padded) {
-        (0, true) => None,
-        (0, false) => Some(Fault::Padding),
+    let fault = match (extra, plain.last()) {
+        (0, None) => Some(Fault::Short { len }),
+        (0, Some(&pad)) => {
+            let pad = usize::from(pad);
+            let padded = (1..=16).contains(&pad)
+                && plain[plain.len() - pad..]
+                    .iter()
+                    .all(|&b| usize::from(b) == pad);
+            match padded {
+                true => {
+                    plain.truncate(plain.len() - pad);
+                    None
+                }
+                false => Some(Fault::Padding),
+            }
+        }
         (extra, _) => Some(Fault::PartBlock { extra }),
     };
-    if padded {
-        plain.truncate(plain.len() - pad);
-    }
     match fault {
         None => Ok(plain),
         Some(fault) => Err(Error {
@@ -278,8 +324,10 @@ pub(crate) struct File<'a> {
 
 impl<'a> File<'a> {
     /// `dictionary`'s values, unless they're not ones the standard
-    /// security handler takes. Short ones are filled out with zeros, as
-    /// qpdf does, and revision 5's and 6's long ones cut short.
+    /// security handler takes: `/O`, `/U` and `/P` it must have, and of
+    /// `/V` 5 `/OE`, `/UE` and `/Perms`, as qpdf must. Short ones are
+    /// filled out with zeros, as qpdf does, and `/V` 5's long ones cut
+    /// short.
     pub(crate) fn of(dictionary: &Dictionary, id: &'a [u8]) -> Result<File<'a>, Refused> {
         let refuse = |why: &str| Err(Refused::Unsupported(why.to_string()));
         if dictionary.filter != b"Standard" {
@@ -297,17 +345,35 @@ impl<'a> File<'a> {
                 )));
             }
         }
-        if dictionary.o.is_empty() || dictionary.u.is_empty() {
-            return refuse("it has no /O or /U");
+        let mut missing = vec![
+            ("/O", dictionary.o.is_some()),
+            ("/U", dictionary.u.is_some()),
+            ("/P", dictionary.p.is_some()),
+        ];
+        if v == 5 {
+            missing.push(("/OE", dictionary.oe.is_some()));
+            missing.push(("/UE", dictionary.ue.is_some()));
+            missing.push(("/Perms", dictionary.perms.is_some()));
         }
-        let fill = |value: &[u8], len: usize| {
+        let missing: Vec<&str> = (missing.into_iter())
+            .filter_map(|(name, has)| (!has).then_some(name))
+            .collect();
+        if !missing.is_empty() {
+            return Err(Refused::Unsupported(format!(
+                "it has no {}",
+                missing.join(", ")
+            )));
+        }
+        let fill = |value: &Option<Vec<u8>>, len: usize| {
+            let value = value.as_deref().unwrap_or_default();
             let mut value = value[..value.len().min(len)].to_vec();
             value.resize(len, 0);
             value
         };
+        let too_long = |value: &Option<Vec<u8>>| value.as_ref().is_some_and(|v| v.len() > 32);
         let (o, u) = match v {
             5 => (fill(&dictionary.o, 48), fill(&dictionary.u, 48)),
-            _ if dictionary.o.len() > 32 || dictionary.u.len() > 32 => {
+            _ if too_long(&dictionary.o) || too_long(&dictionary.u) => {
                 return refuse("its /O or /U is over 32 bytes");
             }
             _ => (fill(&dictionary.o, 32), fill(&dictionary.u, 32)),
@@ -330,18 +396,20 @@ impl<'a> File<'a> {
             oe: fill(&dictionary.oe, 32),
             ue: fill(&dictionary.ue, 32),
             perms: fill(&dictionary.perms, 16),
-            p: dictionary.p as u32,
+            p: dictionary.p.unwrap_or_default() as u32,
             id,
             encrypt_metadata: v < 4 || dictionary.encrypt_metadata.unwrap_or(true),
         })
     }
 
-    /// The file's key, when `password` is the user's.
-    fn user(&self, password: &[u8], faults: &mut Vec<Fault>) -> Option<Vec<u8>> {
+    /// The file's key, when `password` is the user's, and what's wrong
+    /// with `/Perms` by it.
+    fn user(&self, password: &[u8]) -> Option<(Vec<u8>, Option<Fault>)> {
         match self.r {
             2..=4 => {
                 let key = self.key(password);
-                (self.u_value(&key)[..self.compared()] == self.u[..self.compared()]).then_some(key)
+                (self.u_value(&key)[..self.compared()] == self.u[..self.compared()])
+                    .then_some((key, None))
             }
             _ => {
                 let password = &password[..password.len().min(127)];
@@ -349,13 +417,14 @@ impl<'a> File<'a> {
                     return None;
                 }
                 let intermediate = self.hash(password, &self.u[40..48], b"");
-                Some(self.unwrapped(&intermediate, &self.ue, faults))
+                Some(self.unwrapped(&intermediate, &self.ue))
             }
         }
     }
 
-    /// The file's key, when `password` is the owner's.
-    fn owner(&self, password: &[u8], faults: &mut Vec<Fault>) -> Option<Vec<u8>> {
+    /// The file's key, when `password` is the owner's, and what's wrong
+    /// with `/Perms` by it.
+    fn owner(&self, password: &[u8]) -> Option<(Vec<u8>, Option<Fault>)> {
         match self.r {
             // Algorithm 7: the owner's key decrypts /O to the user's
             // password, padded, which opens the file as the user's does.
@@ -367,7 +436,8 @@ impl<'a> File<'a> {
                     user = rc4(&round, &user);
                 }
                 let key = self.key(&user);
-                (self.u_value(&key)[..self.compared()] == self.u[..self.compared()]).then_some(key)
+                (self.u_value(&key)[..self.compared()] == self.u[..self.compared()])
+                    .then_some((key, None))
             }
             _ => {
                 let password = &password[..password.len().min(127)];
@@ -375,16 +445,16 @@ impl<'a> File<'a> {
                     return None;
                 }
                 let intermediate = self.hash(password, &self.o[40..48], &self.u[..48]);
-                Some(self.unwrapped(&intermediate, &self.oe, faults))
+                Some(self.unwrapped(&intermediate, &self.oe))
             }
         }
     }
 
     /// How many bytes of /U a password's own is compared with: 16 from
-    /// revision 3, else the key's, as qpdf compares.
+    /// revision 3 (Algorithm 7), else all 32 (Algorithm 6).
     fn compared(&self) -> usize {
         match self.r {
-            2 => self.n,
+            2 => 32,
             _ => 16,
         }
     }
@@ -456,18 +526,22 @@ impl<'a> File<'a> {
 
     /// The file's key, `wrapped` (/OE or /UE) by AES-256 in CBC from a zero
     /// IV, with no padding, under `intermediate`; and /Perms checked
-    /// against it.
-    fn unwrapped(&self, intermediate: &[u8], wrapped: &[u8], faults: &mut Vec<Fault>) -> Vec<u8> {
+    /// against it: [`Fault::Unconfirmed`] without `adb`, else
+    /// [`Fault::Perms`] when its /P or /EncryptMetadata isn't the
+    /// dictionary's.
+    fn unwrapped(&self, intermediate: &[u8], wrapped: &[u8]) -> (Vec<u8>, Option<Fault>) {
         let cipher = Aes::new(&intermediate[..32]).expect("32 bytes");
         let key = cipher.decrypt_cbc([0; 16], wrapped);
         let mut perms: [u8; 16] = self.perms.clone().try_into().expect("16 bytes");
         Aes::new(&key).expect("32 bytes").decrypt(&mut perms);
         let metadata = if self.encrypt_metadata { b'T' } else { b'F' };
-        let expected = [&self.p.to_le_bytes()[..], &[0xff; 4], &[metadata], b"adb"].concat();
-        if perms[..12] != expected[..] && !faults.contains(&Fault::Perms) {
-            faults.push(Fault::Perms);
-        }
-        key
+        let expected = [&self.p.to_le_bytes()[..], &[0xff; 4], &[metadata]].concat();
+        let fault = match (&perms[9..12], &perms[..9]) {
+            (b"adb", values) if values == expected => None,
+            (b"adb", _) => Some(Fault::Perms),
+            _ => Some(Fault::Unconfirmed),
+        };
+        (key, fault)
     }
 }
 

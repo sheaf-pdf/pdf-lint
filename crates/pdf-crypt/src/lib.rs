@@ -11,7 +11,7 @@
 //! - **Every fault said, what decrypted kept,** as a checker wants it: AES
 //!   ciphertext too short, a part block past the whole ones, padding that
 //!   isn't, a crypt filter's method that isn't one, `/Perms` that doesn't
-//!   match.
+//!   match or doesn't confirm the key.
 //! - **Its own primitives,** needing nothing else: MD5, SHA-256, SHA-384
 //!   and SHA-512, RC4, and AES-128 and AES-256, each checked against its
 //!   standard's test vectors and against RustCrypto's.
@@ -52,18 +52,18 @@ pub struct Dictionary {
     pub r: i64,
     /// `/Length`, in bits, of a dictionary of `/V` 2.
     pub length: Option<i64>,
-    /// `/O`.
-    pub o: Vec<u8>,
-    /// `/U`.
-    pub u: Vec<u8>,
-    /// `/OE`, of revision 5 or 6.
-    pub oe: Vec<u8>,
-    /// `/UE`, of revision 5 or 6.
-    pub ue: Vec<u8>,
-    /// `/Perms`, of revision 5 or 6.
-    pub perms: Vec<u8>,
-    /// `/P`.
-    pub p: i64,
+    /// `/O`, when it's a string.
+    pub o: Option<Vec<u8>>,
+    /// `/U`, when it's a string.
+    pub u: Option<Vec<u8>>,
+    /// `/OE`, of `/V` 5, when it's a string.
+    pub oe: Option<Vec<u8>>,
+    /// `/UE`, of `/V` 5, when it's a string.
+    pub ue: Option<Vec<u8>>,
+    /// `/Perms`, of `/V` 5, when it's a string.
+    pub perms: Option<Vec<u8>>,
+    /// `/P`, when it's an integer.
+    pub p: Option<i64>,
     /// `/EncryptMetadata`, when it's a boolean; it counts from `/V` 4.
     pub encrypt_metadata: Option<bool>,
     /// `/CF`'s crypt filters.
@@ -87,8 +87,9 @@ pub struct CryptFilter {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refused {
     /// The dictionary isn't one the standard security handler takes, and
-    /// why: another handler, a version or revision it hasn't, `/O` or `/U`
-    /// missing or too long.
+    /// why: another handler, a version or revision it hasn't, `/O`, `/U`
+    /// or `/P` missing (`/OE`, `/UE` or `/Perms` of `/V` 5), `/O` or `/U`
+    /// too long.
     Unsupported(String),
     /// None of the passwords opens it.
     Password,
@@ -110,14 +111,17 @@ impl std::error::Error for Refused {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Fault {
-    /// AES ciphertext of `len` bytes, with no whole block past its IV.
-    /// Nothing decrypted: it stays ciphertext.
+    /// AES ciphertext of `len` bytes, with no whole block past its IV:
+    /// shorter than an IV, nothing decrypted, it stays ciphertext; just an
+    /// IV, it decrypts to nothing.
     Short {
         /// Its length.
         len: usize,
     },
-    /// AES ciphertext with `extra` bytes past its whole blocks, which
-    /// aren't white-space. The whole blocks decrypted, the rest left off.
+    /// AES ciphertext with `extra` bytes past its whole blocks (a
+    /// stream's white-space past them aside). The whole blocks decrypted
+    /// and kept, padding and all, as the last needn't be the plaintext's
+    /// last; the rest left off.
     PartBlock {
         /// How many.
         extra: usize,
@@ -131,17 +135,22 @@ pub enum Fault {
         /// The name.
         name: String,
     },
-    /// A crypt filter's AES, given the file's key of `len` bytes, neither
-    /// 16 nor 32, as `/AESV3` is in a file whose key is RC4's. Nothing
-    /// decrypted.
+    /// A crypt filter's AES that the file's key of `len` bytes isn't for:
+    /// `/AESV3` below `/V` 5, `/AESV2` in a file whose key is RC4's of
+    /// under 128 bits. Nothing decrypted.
     Key {
         /// The key's length.
         len: usize,
     },
-    /// `/Perms`, decrypted, isn't `/P`, `/EncryptMetadata` and `adb` as
-    /// revisions 5 and 6 write it (Algorithm 13). The file opens all the
-    /// same.
+    /// `/Perms`, decrypted, confirms the key (`adb`, Algorithm 13) but
+    /// isn't `/P` and `/EncryptMetadata` as revisions 5 and 6 write it.
+    /// The file opens all the same.
     Perms,
+    /// `/Perms` doesn't decrypt to `adb` by the key the password unwrapped
+    /// from `/OE` or `/UE`: one of them is wrong, and nothing says which.
+    /// The file opens by that key, when no other password or route gives
+    /// one `/Perms` confirms, but what it decrypts may not be plaintext.
+    Unconfirmed,
 }
 
 impl fmt::Display for Fault {
@@ -161,9 +170,13 @@ impl fmt::Display for Fault {
             }
             Fault::Key { len } => write!(
                 f,
-                "its crypt filter's AES has the file's key of {len} bytes"
+                "its crypt filter's AES isn't for the file's key of {len} bytes"
             ),
             Fault::Perms => write!(f, "its /Perms doesn't match its /P and /EncryptMetadata"),
+            Fault::Unconfirmed => write!(
+                f,
+                "its /Perms doesn't confirm the key its /OE or /UE unwraps to"
+            ),
         }
     }
 }

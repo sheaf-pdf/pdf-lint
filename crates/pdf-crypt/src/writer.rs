@@ -7,7 +7,7 @@ use crate::aes::Aes;
 use crate::handler::{File, Handler, Method, hash};
 use crate::rc4::rc4;
 use crate::sha2::sha256;
-use crate::{CryptFilter, Dictionary};
+use crate::{CryptFilter, Dictionary, Fault};
 
 /// The kind of encryption to write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,7 +65,7 @@ pub fn dictionary(settings: &Settings) -> Dictionary {
         v,
         r,
         length,
-        p,
+        p: Some(p),
         encrypt_metadata: (v >= 4).then_some(encrypt_metadata),
         ..Dictionary::default()
     };
@@ -80,8 +80,8 @@ pub fn dictionary(settings: &Settings) -> Dictionary {
     match r {
         2..=4 => {
             // Algorithm 3: /O, the user's password encrypted by the owner's.
-            dictionary.o = vec![0; 32];
-            dictionary.u = vec![0; 32];
+            dictionary.o = Some(vec![0; 32]);
+            dictionary.u = Some(vec![0; 32]);
             let file = File::of(&dictionary, id).expect("a dictionary the handler takes");
             let owner_key = file.owner_key(if owner.is_empty() { user } else { owner });
             let mut o = File::padded(user);
@@ -89,12 +89,12 @@ pub fn dictionary(settings: &Settings) -> Dictionary {
                 let round: Vec<u8> = owner_key.iter().map(|k| k ^ i as u8).collect();
                 o = rc4(&round, &o);
             }
-            dictionary.o = o;
+            dictionary.o = Some(o);
             // Algorithms 4 and 5: /U, from the file's key.
             let file = File::of(&dictionary, id).expect("a dictionary the handler takes");
             let mut u = file.u_value(&file.key(user));
             u.resize(32, 0);
-            dictionary.u = u;
+            dictionary.u = Some(u);
         }
         _ => {
             // Algorithms 8, 9 and 10, with salts and a key from what's given.
@@ -109,11 +109,11 @@ pub fn dictionary(settings: &Settings) -> Dictionary {
             let user = &user[..user.len().min(127)];
             let owner = &owner[..owner.len().min(127)];
             let (uv, uk, ov, ok) = (salt(1), salt(2), salt(3), salt(4));
-            dictionary.u = [hash(r, user, &uv, b""), uv, uk.clone()].concat();
-            dictionary.ue = wrap(&hash(r, user, &uk, b""));
-            let u48 = dictionary.u[..48].to_vec();
-            dictionary.o = [hash(r, owner, &ov, &u48), ov, ok.clone()].concat();
-            dictionary.oe = wrap(&hash(r, owner, &ok, &u48));
+            let u = [hash(r, user, &uv, b""), uv, uk.clone()].concat();
+            dictionary.ue = Some(wrap(&hash(r, user, &uk, b"")));
+            dictionary.o = Some([hash(r, owner, &ov, &u), ov, ok.clone()].concat());
+            dictionary.oe = Some(wrap(&hash(r, owner, &ok, &u)));
+            dictionary.u = Some(u);
             let metadata = if encrypt_metadata { b'T' } else { b'F' };
             let mut perms: [u8; 16] = [
                 &(p as u32).to_le_bytes()[..],
@@ -126,25 +126,32 @@ pub fn dictionary(settings: &Settings) -> Dictionary {
             .try_into()
             .expect("16 bytes");
             Aes::new(&key).expect("32 bytes").encrypt(&mut perms);
-            dictionary.perms = perms.to_vec();
+            dictionary.perms = Some(perms.to_vec());
         }
     }
     dictionary
 }
 
-/// String `data` of object `id` encrypted by `handler`, AES's from `iv`.
-pub fn encrypt_string(handler: &Handler, id: (u32, u16), data: &[u8], iv: [u8; 16]) -> Vec<u8> {
+/// String `data` of object `id` encrypted by `handler`, AES's from `iv`;
+/// or [`Fault::Key`], when it's AES that the file's key isn't for.
+pub fn encrypt_string(
+    handler: &Handler,
+    id: (u32, u16),
+    data: &[u8],
+    iv: [u8; 16],
+) -> Result<Vec<u8>, Fault> {
     handler.encrypt(handler.strings(), id, data, iv)
 }
 
 /// Stream `id`'s `data` encrypted by `handler`, by `crypt` when it names
-/// the stream's own crypt filter's method, AES's from `iv`.
+/// the stream's own crypt filter's method, AES's from `iv`; or
+/// [`Fault::Key`], when it's AES that the file's key isn't for.
 pub fn encrypt_stream(
     handler: &Handler,
     id: (u32, u16),
     data: &[u8],
     crypt: Option<&Method>,
     iv: [u8; 16],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, Fault> {
     handler.encrypt(crypt.unwrap_or(handler.streams()), id, data, iv)
 }
