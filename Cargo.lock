@@ -24,6 +24,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-crypt"
+version = "0.1.0"
+
+[[package]]
 name = "pdf-filters"
 version = "0.1.0"
 dependencies = [

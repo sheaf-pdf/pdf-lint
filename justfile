@@ -1,18 +1,19 @@
 # Development tasks. CI runs these same recipes, so a local `just ci` checks
 # what CI checks.
 
-# The oldest Rust pdf-tokenizer and pdf-filters support, from their
+# The oldest Rust pdf-tokenizer, pdf-filters and pdf-crypt support, from their
 # Cargo.toml. Only the libraries promise one: the checker ships as a binary
 # built with stable Rust.
 tokenizer_msrv := `grep -m1 '^rust-version' crates/pdf-tokenizer/Cargo.toml | cut -d'"' -f2`
 filters_msrv := `grep -m1 '^rust-version' crates/pdf-filters/Cargo.toml | cut -d'"' -f2`
+crypt_msrv := `grep -m1 '^rust-version' crates/pdf-crypt/Cargo.toml | cut -d'"' -f2`
 
 # List the recipes.
 default:
     @just --list --unsorted
 
 # Everything CI runs.
-ci: fmt clippy test test-oldest-qpdf doc dist tokenizer-no-std tokenizer-msrv filters-msrv
+ci: fmt clippy test test-oldest-qpdf doc dist tokenizer-no-std tokenizer-msrv filters-msrv crypt-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -94,9 +95,14 @@ tokenizer-msrv:
 filters-msrv:
     cargo +{{ filters_msrv }} test --locked -p pdf-filters
 
+# Test pdf-crypt on its oldest supported Rust, which must be installed.
+crypt-msrv:
+    cargo +{{ crypt_msrv }} test --locked -p pdf-crypt
+
 # Fuzz a target for a while, on nightly with cargo-fuzz: `tokenize`, the
-# tokenizer; `filters`, the filters; or `check`, the reader and the checker,
-# which begins from the seeds pdf-lint's fuzz module makes. cargo-fuzz otherwise builds for the
+# tokenizer; `filters`, the filters; `primitives`, pdf-crypt's beside
+# RustCrypto's; or `check`, the reader and the checker, which begins from
+# the seeds pdf-lint's fuzz module makes. cargo-fuzz otherwise builds for the
 # target it was itself built for, which may be musl, where the sanitizer
 # can't run.
 fuzz target="tokenize" seconds="60":
@@ -110,13 +116,16 @@ fuzz target="tokenize" seconds="60":
     filters)
         cargo +nightly fuzz run --target "$host" filters -- -max_total_time={{ seconds }} -timeout=10
         ;;
+    primitives)
+        cargo +nightly fuzz run --target "$host" primitives -- -max_total_time={{ seconds }} -timeout=10
+        ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/check
         cargo +nightly fuzz run --target "$host" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters or check" >&2
+        echo "just fuzz: tokenize, filters, primitives or check" >&2
         exit 2
         ;;
     esac

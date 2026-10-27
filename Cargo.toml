@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-# pdf-tokenizer and pdf-filters inherit nothing from here, so either can
-# move to a repository of its own unchanged.
-members = ["crates/pdf-tokenizer", "crates/pdf-filters", "crates/pdf-lint"]
+# pdf-tokenizer, pdf-filters and pdf-crypt inherit nothing from here, so
+# each can move to a repository of its own unchanged.
+members = ["crates/pdf-tokenizer", "crates/pdf-filters", "crates/pdf-crypt", "crates/pdf-lint"]
 # fuzz/ builds on nightly, with libFuzzer.
 exclude = ["fuzz"]
