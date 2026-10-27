@@ -424,6 +424,83 @@ fn rewritten(plain: &std::path::Path, name: &str, args: &[&str]) -> String {
     out.to_str().unwrap().to_string()
 }
 
+/// What [`in_an_object_stream`]'s object stream holds, a catalog, page
+/// tree and page after their header, and where the first object begins.
+fn object_stream_objects() -> (Vec<u8>, usize) {
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let (mut header, mut body) = (String::new(), String::new());
+    for (n, object) in [CATALOG, PAGES, page].iter().enumerate() {
+        header.push_str(&format!("{} {} ", n + 1, body.len()));
+        body.push_str(object);
+        body.push('\n');
+    }
+    let first = header.len();
+    (format!("{header}{body}").into_bytes(), first)
+}
+
+/// A file whose objects are in object stream 4, its data `data` under
+/// `filter`, with a cross-reference stream.
+fn in_an_object_stream(filter: &str, data: &[u8]) -> Vec<u8> {
+    let (_, first) = object_stream_objects();
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let four = out.len();
+    let dict = format!(
+        "<< /Type /ObjStm /N 3 /First {first}{filter} /Length {} >>",
+        data.len()
+    );
+    out.extend_from_slice(format!("4 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(data);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    let five = out.len();
+    let row = |kind: u8, field: usize, index: u8| {
+        let [high, low] = (field as u16).to_be_bytes();
+        [kind, high, low, index]
+    };
+    let rows = [
+        row(0, 0, 255),
+        row(2, 4, 0),
+        row(2, 4, 1),
+        row(2, 4, 2),
+        row(1, four, 0),
+        row(1, five, 0),
+    ]
+    .concat();
+    let dict = format!(
+        "<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R /Length {} >>",
+        rows.len()
+    );
+    out.extend_from_slice(format!("5 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes());
+    out
+}
+
+#[test]
+fn a_fault_in_a_streams_data_is_a_finding() {
+    let (objects, _) = object_stream_objects();
+    let hex: String = objects.iter().map(|b| format!("{b:02x}")).collect();
+    let clean = written(
+        "hex-clean.pdf",
+        &in_an_object_stream(" /Filter /AHx", format!("{hex}>").as_bytes()),
+    );
+    let out = run(&[clean.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    // Without its `>`, which qpdf reads without a word: everything reads,
+    // and the fault is the reader's finding, at the data.
+    let faulted = written(
+        "hex-no-end.pdf",
+        &in_an_object_stream(" /Filter /AHx", hex.as_bytes()),
+    );
+    let out = run(&[faulted.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(
+        stdout.contains("- reader: -/- at -, in 4 0 R (merged): its data doesn't decode cleanly through /ASCIIHexDecode: no end-of-data marker"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("objects checked, 1 findings"), "{stdout}");
+}
+
 #[test]
 fn a_file_that_encrypts_without_qpdf_is_unread_and_says_why() {
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";

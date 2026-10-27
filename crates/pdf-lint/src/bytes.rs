@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use pdf_tokenizer::decode::How;
 use pdf_tokenizer::{Kind, Token, Tokenizer, is_delimiter, is_white_space};
 
-use pdf_filters::Filter;
+use pdf_filters::{Fault, Filter};
 
 use crate::filter;
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
@@ -332,6 +332,32 @@ fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).rposition(|w| w == needle)
 }
 
+/// Where `fault` is in its filter's input, when it says.
+fn place(fault: &Fault) -> Option<usize> {
+    match *fault {
+        Fault::Byte { at, .. }
+        | Fault::BrokenEnd { at }
+        | Fault::InGroup { at }
+        | Fault::Overflow { at }
+        | Fault::LoneByte { at }
+        | Fault::Code { at }
+        | Fault::TableFull { at }
+        | Fault::Corrupt { at } => Some(at),
+        _ => None,
+    }
+}
+
+/// `filter`'s name, unabbreviated.
+fn filter_name(filter: &Filter) -> &'static str {
+    match filter {
+        Filter::AsciiHex => "ASCIIHexDecode",
+        Filter::Ascii85 => "ASCII85Decode",
+        Filter::Lzw { .. } => "LZWDecode",
+        Filter::Flate { .. } => "FlateDecode",
+        Filter::RunLength => "RunLengthDecode",
+    }
+}
+
 /// A stream's filters, as written, when it has any.
 fn filters(o: &Object) -> Option<String> {
     let filter = o.as_dict()?.get(b"Filter")?;
@@ -350,23 +376,60 @@ impl<'a> Reader<'a> {
         });
     }
 
-    /// `data` decoded by `filters`, as much as `limit`, [`STREAM`] and
-    /// what's left of the file's [`BUDGET`] allow: what decoded, however
-    /// far it went.
-    fn decode_stream(&mut self, data: &[u8], filters: &[Filter], limit: usize) -> Vec<u8> {
+    /// Stream `id`'s data, written at `at`, decoded by `filters`, as much
+    /// as `limit`, [`STREAM`] and what's left of the file's [`BUDGET`]
+    /// allow: what decoded, however far it went, and the faults on the
+    /// way, each in its filter.
+    fn decode_stream(
+        &mut self,
+        data: &[u8],
+        filters: &[Filter],
+        limit: usize,
+    ) -> (Vec<u8>, Vec<(usize, Fault)>) {
         let limit = limit.min(STREAM).min(self.budget);
-        let decoded = match pdf_filters::decode(data, filters, limit) {
-            Ok(decoded) => decoded,
-            Err(error) => error.data,
+        let (decoded, faults) = match pdf_filters::decode(data, filters, limit) {
+            Ok(decoded) => (decoded, Vec::new()),
+            Err(error) => (error.data, error.faults),
         };
         self.budget -= decoded.len();
-        decoded
+        (decoded, faults)
     }
 
-    /// Object stream `object`'s data, decoded from its own, its filters'
+    /// A warning on stream `id` for each of `faults` in its `filters`: at
+    /// the fault's bytes, when it has a place in the data as written
+    /// (`data`, in the file), else at the data.
+    fn faulted(
+        &mut self,
+        id: ObjectId,
+        data: Option<Span>,
+        filters: &[Filter],
+        faults: Vec<(usize, Fault)>,
+    ) {
+        for (i, fault) in faults {
+            let at = match (i, place(&fault), data) {
+                (0, Some(at), Some(data)) => Some(span(data.start + at, data.start + at + 1)),
+                _ => data,
+            };
+            let name = filter_name(&filters[i]);
+            let message = format!("its data doesn't decode cleanly through /{name}: {fault}");
+            let warning = Warning {
+                object: Some(id),
+                at,
+                message,
+            };
+            // A stream two sections name, as a hybrid file's `/XRefStm`
+            // can be, is decoded for each, and said once.
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+    }
+
+    /// Object stream `id`'s data, decoded from its own, its filters'
     /// values followed where they're references to `objects`.
     fn object_stream(
         &mut self,
+        id: ObjectId,
         object: &Object,
         objects: &BTreeMap<ObjectId, Result<Object, String>>,
     ) -> Result<Vec<u8>, String> {
@@ -378,10 +441,12 @@ impl<'a> Reader<'a> {
             .and_then(|at| self.file.get(at.start..at.end))
             .unwrap_or_default();
         let filters = filter::filters(&stream.dict, &|id| objects.get(&id)?.as_ref().ok())?;
-        Ok(match filters.is_empty() {
-            true => data.to_vec(),
-            false => self.decode_stream(data, &filters, STREAM),
-        })
+        if filters.is_empty() {
+            return Ok(data.to_vec());
+        }
+        let (decoded, faults) = self.decode_stream(data, &filters, STREAM);
+        self.faulted(id, stream.data, &filters, faults);
+        Ok(decoded)
     }
 
     /// What the decoder makes of `ids`; nothing without one.
@@ -809,7 +874,17 @@ impl<'a> Reader<'a> {
                     true => written,
                     false => {
                         let limit = rows_size.map_or(STREAM, |size| size.saturating_add(1));
-                        again = self.decode_stream(written, &filters, limit);
+                        let (decoded, mut faults) = self.decode_stream(written, &filters, limit);
+                        // Data that runs past its rows is cut off there,
+                        // as data that's not filtered is read only so far:
+                        // with its rows whole, the limit cut only what's
+                        // past them.
+                        let whole = |size| decoded.len() >= size;
+                        if rows_size.is_some_and(whole) {
+                            faults.retain(|(_, fault)| *fault != Fault::Limit);
+                        }
+                        self.faulted(id, stream.data, &filters, faults);
+                        again = decoded;
                         &again
                     }
                 }
@@ -1086,7 +1161,7 @@ impl<'a> Reader<'a> {
             true => (streams.iter())
                 .filter_map(|&n| {
                     let object = objects.get(&(n, 0))?.as_ref().ok()?;
-                    Some(((n, 0), self.object_stream(object, &objects)))
+                    Some(((n, 0), self.object_stream((n, 0), object, &objects)))
                 })
                 .collect(),
             false => {
@@ -2647,7 +2722,7 @@ mod tests {
     /// file is, and the object stream's data is junk a decoder replaces,
     /// as given.
     fn compressed(encrypted: bool) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
-        let (file, mut decoded) = streams(encrypted, true);
+        let (file, mut decoded) = streams(encrypted, true, b"", false);
         decoded.remove(&(5, 0));
         if !encrypted {
             decoded.clear();
@@ -2658,13 +2733,20 @@ mod tests {
     /// [`compressed`]'s file with both streams' data junk, which only a
     /// decoder asked for every stream ([`read_through`]) decodes, as given.
     fn junk(encrypted: bool) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
-        streams(encrypted, false)
+        streams(encrypted, false, b"", false)
     }
 
     /// The file [`compressed`] and [`junk`] write, its streams' data zlib
     /// data when `real` (but an encrypted file's object stream), else
-    /// junk; and what each decodes to.
-    fn streams(encrypted: bool, real: bool) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
+    /// junk, the cross-reference stream's rows followed by `past`, and
+    /// with `png`, each row's PNG tag before it (none); and what each
+    /// decodes to.
+    fn streams(
+        encrypted: bool,
+        real: bool,
+        past: &[u8],
+        png: bool,
+    ) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
         let (objects, first) = objects_2_and_3();
         let mut file = b"%PDF-1.7\n".to_vec();
         let one = file.len();
@@ -2695,12 +2777,22 @@ mod tests {
             xref_row(1, five, 0),
         ]
         .concat();
+        let written = [&rows[..], past].concat();
+        let (written, parms) = match png {
+            true => (
+                (written.chunks(4))
+                    .flat_map(|row| [&[0][..], row].concat())
+                    .collect(),
+                " /DecodeParms << /Predictor 12 /Columns 4 >>",
+            ),
+            false => (written, ""),
+        };
         let data = match real {
-            true => write::zlib(&rows),
+            true => write::zlib(&written),
             false => b"JUNK".to_vec(),
         };
         file.extend_from_slice(
-            format!("5 0 obj\n<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R{encrypt} /Filter /FlateDecode /Length {} >>\nstream\n", data.len())
+            format!("5 0 obj\n<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R{encrypt} /Filter /FlateDecode{parms} /Length {} >>\nstream\n", data.len())
                 .as_bytes(),
         );
         file.extend_from_slice(&data);
@@ -2886,6 +2978,66 @@ mod tests {
                 doc.get((2, 0)).is_ok() && doc.get((3, 0)).is_ok(),
                 "{filter}"
             );
+        }
+    }
+
+    #[test]
+    fn a_streams_faults_are_warnings_on_it_at_their_bytes() {
+        let (objects, _) = objects_2_and_3();
+        let hex: Vec<u8> = (objects.iter())
+            .flat_map(|b| format!("{b:02x}").into_bytes())
+            .collect();
+        let warned = |filter: &str, data: &[u8]| {
+            let file = filtered(false, filter, data);
+            let doc = read(&file);
+            assert!(
+                doc.get((2, 0)).is_ok() && doc.get((3, 0)).is_ok(),
+                "{filter}: what decoded reads"
+            );
+            let [warning] = &doc.warnings[..] else {
+                panic!("{filter}: {:?}", doc.warnings);
+            };
+            assert_eq!(warning.object, Some((4, 0)), "{filter}");
+            let at = warning.at.unwrap();
+            (warning.message.clone(), file[at.start..at.end].to_vec())
+        };
+        // A fault with a place in the data as written: its byte.
+        let (message, at) = warned(" /Filter /AHx", &[&hex[..], b"zz>"].concat());
+        let n = hex.len();
+        let expected = format!(
+            "its data doesn't decode cleanly through /ASCIIHexDecode: byte 0x7a at {n} isn't one it takes"
+        );
+        assert_eq!((message, at), (expected, b"z".to_vec()));
+        // One without: the data.
+        let (message, at) = warned(" /Filter /AHx", &hex);
+        let expected =
+            "its data doesn't decode cleanly through /ASCIIHexDecode: no end-of-data marker";
+        assert_eq!((message.as_str(), at), (expected, hex.clone()));
+        // One in a filter after the first, whose input isn't in the file:
+        // the data. The checksum's last byte gone, everything decoded.
+        let zlib = write::zlib(&objects);
+        let cut: Vec<u8> = (zlib[..zlib.len() - 1].iter())
+            .flat_map(|b| format!("{b:02x}").into_bytes())
+            .collect();
+        let data = [&cut[..], b">"].concat();
+        let (message, at) = warned(" /Filter [/AHx /Fl]", &data);
+        let expected = "its data doesn't decode cleanly through /FlateDecode: the data ends early";
+        assert_eq!((message.as_str(), at), (expected, data.clone()));
+        // A checksum that doesn't match.
+        let mut zlib = zlib;
+        *zlib.last_mut().unwrap() ^= 1;
+        let (message, _) = warned(" /Filter /FlateDecode", &zlib);
+        assert_eq!(
+            message,
+            "its data doesn't decode cleanly through /FlateDecode: the Adler-32 checksum doesn't match"
+        );
+        // A cross-reference stream whose data runs past its rows, as data
+        // that's not filtered may: no fault, its rows PNG-predicted or not.
+        for png in [false, true] {
+            let (file, _) = streams(false, true, &[0; 40], png);
+            let doc = read(&file);
+            assert!(doc.warnings.is_empty(), "{png}: {:?}", doc.warnings);
+            assert!(doc.get((3, 0)).is_ok());
         }
     }
 
