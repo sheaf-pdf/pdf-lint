@@ -2,7 +2,7 @@
 
 Checks PDF files against the [Arlington PDF Model](https://github.com/pdf-association/arlington-pdf-model), the PDF Association's machine-readable grammar of ISO 32000-2: for every object, which keys it may have, their types, which are required, the values they may take, and the PDF version each came in or was deprecated in.
 
-It's a command line and a library. It reads a file from its bytes, through [pdf-tokenizer](../pdf-tokenizer), so every finding says which bytes it's about. What's compressed, object streams and cross-reference streams, qpdf decodes for it, decrypting them in an encrypted file; their objects are read from the decoded data, and placed in it. In an encrypted file, qpdf gives the plaintext of the strings in plain view too, each placed on its ciphertext.
+It's a command line and a library. It reads a file from its bytes, through [pdf-tokenizer](../pdf-tokenizer), so every finding says which bytes it's about. It decodes object streams and cross-reference streams itself, through [pdf-filters](../pdf-filters), and reads their objects from the decoded data, placed in it. What's encrypted it decrypts itself, through [pdf-crypt](../pdf-crypt), by the password it's given: an encrypted file's object streams, before they're decoded, and its strings where they are.
 
 ## What it checks
 
@@ -85,17 +85,17 @@ pdf-lint [OPTIONS] FILE...
                   table, key, rule, file, version and reason, tab apart
   --full          print the whole report: tables, checks not made, keys
                   the model doesn't list
-  --qpdf <PATH>   the qpdf to decode with (by default PDF_LINT_QPDF,
-                  else the one bundled beside it, else qpdf on the PATH)
-  --password <PW> the files' password, user or owner, when it isn't empty
+  --password <PW> the files' password, user or owner, when it isn't empty:
+                  tried as UTF-8, then in PDFDocEncoding, WinAnsiEncoding
+                  and MacRomanEncoding
   --jobs <N>      check N files at once (by default, as many as there are
                   CPUs); the report is in the files' order all the same
   --format <F>    text (the default), or json: a line of JSON for each file
-  --version       print the version, the model's commit, corrections,
-                  additions and hash, and the qpdf it decodes with
+  --version       print the version, and the model's commit, corrections,
+                  additions and hash
 ```
 
-It exits 0 when every file is clean, 1 when there are findings, and 2 when a file can't be read or the command line is wrong; a file that can't be read doesn't stop the others being checked. An encrypted file that won't open with the password given, none or `--password`'s, is one that can't be read, and says so: nothing in it decodes, so what its object streams hold would be missing. So is a file with anything compressed or encrypted when there's no qpdf 11.9 or later to decode it: the qpdf it would run isn't found, doesn't run, or is older. A file all in plain view needs no qpdf. A FILE of `-` is standard input, named `-` in the report and in an allowance; qpdf, which reads only files, decodes it from a copy in the temporary folder that only its owner can read, removed once it's checked. A finding in an object stream is printed with its bytes from the stream's decoded data. With `--pdf-version`, the summary says the version a file was checked as beside its own, and an allowance's version is matched against the one it was checked as.
+It exits 0 when every file is clean, 1 when there are findings, and 2 when a file can't be read or the command line is wrong; a file that can't be read doesn't stop the others being checked. An encrypted file that won't open with the password given, none or `--password`'s, is one that can't be read, and says so: what its object streams hold would be missing, and its strings ciphertext. `--password` is tried as the owner's and the user's, as typed (UTF-8, which revisions 5 and 6 take), then in each single-byte encoding that has every character of it, as a writer may have set it for revisions 2 to 4; the empty password isn't tried once one is given. A file that encrypts only its embedded files (its strings and streams `/Identity`) needs none. One whose security handler the reader can't open (the public-key handler, or a dictionary the standard handler doesn't take) is checked with its strings ciphertext and its object streams unread, a `reader` finding saying why. A FILE of `-` is standard input, named `-` in the report and in an allowance. A finding in an object stream is printed with its bytes from the stream's decoded data. With `--pdf-version`, the summary says the version a file was checked as beside its own, and an allowance's version is matched against the one it was checked as.
 
 With `--format json`, each file's report is a line of JSON. Every line says which version of pdf-lint wrote it and against which model, so a report can always be read against what made it. It has:
 
@@ -110,11 +110,11 @@ A file that can't be read is a line of `pdf_lint`, `model`, its `file` and the `
 
 ## Installing
 
-Each [release](https://github.com/sheaf-pdf/pdf-lint/releases) has an archive for Linux (x86_64 and aarch64), macOS (Apple silicon and Intel) and Windows (x64): `pdf-lint`, and beside it in `qpdf/` the qpdf it decodes with, from qpdf's official release at a pinned version and checksum, with the notices and licenses that go with it (`qpdf/NOTICE.md`). Unpack it anywhere, and keep `qpdf/` beside the binary: that's where it looks, when neither `--qpdf` nor `PDF_LINT_QPDF` names another. `pdf-lint --version` says which qpdf it found, or why it can't decode with it.
+Each [release](https://github.com/sheaf-pdf/pdf-lint/releases) has an archive for Linux (x86_64 and aarch64), macOS (Apple silicon and Intel) and Windows (x64): `pdf-lint`, which decodes and decrypts by itself, needing nothing beside it, the Arlington model's notices, and the notices of what's compiled in. Unpack it anywhere. (0.1's archives held qpdf too, in `qpdf/`, which it decrypted with.)
 
-The Linux binary is static, and qpdf's needs glibc 2.34 or later; Windows needs Windows 10 or later. On macOS, an archive a browser downloaded is quarantined, and its binaries won't run unsigned until `xattr -dr com.apple.quarantine` clears the folder; one fetched with `curl` or `gh release download` isn't.
+The Linux binary is static, needing nothing of the system; the Windows binary has the C runtime linked in, so it needs Windows 10 or later and no Visual C++ Redistributable (one `cargo install` builds links it dynamically, unless `RUSTFLAGS` has `-C target-feature=+crt-static`). On macOS, an archive a browser downloaded is quarantined, and its binaries won't run unsigned until `xattr -dr com.apple.quarantine` clears the folder; one fetched with `curl` or `gh release download` isn't.
 
-From source, `cargo install pdf-lint` builds the binary from crates.io, with Rust 1.88 or later, and `cargo install --path crates/pdf-lint` from a checkout. Either runs the qpdf on the `PATH`: install qpdf 11.9 or later beside it, or name one with `--qpdf` or `PDF_LINT_QPDF`. `just dist` builds this platform's archive, as the release workflow builds each, and `release/qpdf.sh` lays out the pinned qpdf alone.
+From source, `cargo install pdf-lint` builds the binary from crates.io, with Rust 1.88 or later, and `cargo install --path crates/pdf-lint` from a checkout; neither needs qpdf. `just dist` builds this platform's archive, as the release workflow builds each.
 
 ## Readers
 
@@ -142,13 +142,13 @@ An `Object` is a `Value` and where it was written, a `Span`, when the reader kno
 
 **`bytes::read`** reads a file from its bytes: the header, `startxref`, the cross-reference tables and streams along their `/Prev` chain, and each object at its offset, a stream's data by its `/Length` when that ends at `endstream`. Where the sections don't read, it finds the objects by scanning, and the trailer says so.
 
-**`bytes::read_with`** takes a `Decode` besides, for what isn't in plain view. It asks three times at most: for the compressed cross-reference streams' rows, for the objects of the object streams that are compressed or in a file that encrypts (another's are in plain view), and in an encrypted file for the plaintext of the objects whose strings are in plain view. The objects it reads from an object stream are placed in its decoded data (`Span::stream`), which the `Document` keeps; a string's plaintext is placed on its ciphertext. A decoder finds a stream by its number, which a later update can give another object, so decoded rows that aren't the size the stream's `/W` and `/Index` make are taken as another object's, and the stream is decoded again from its own bytes (`Decode::decode_written`); so is an object stream the decoder can't decode, in a file that isn't encrypted, as when qpdf refuses the file.
+**`bytes::read`** decodes cross-reference streams and object streams from their own data through pdf-filters. Their `/Filter` and `/DecodeParms` are read as qpdf reads them: the abbreviations `/Fl`, `/AHx`, `/A85`, `/LZW` and `/RL` on any stream, `/Crypt` as no filter (decrypting comes before the filters, by its `/Name`), a parameters dictionary that isn't in an array every filter's, a reference to no object as null. A stream decodes to at most `bytes::STREAM` bytes (256 MiB), and the streams of a reading of a file to `bytes::BUDGET` (1 GiB) in all; and it reads no more cross-reference entries than the file has bytes, or 2²⁰ if that's more: objects may be numbered sparsely, but a small stream can't list hundreds of millions. A filter it doesn't decode, or parameters it doesn't take, leave the stream undecoded, saying why; data a fault stopped is read as far as it decoded, but for a number, name or keyword the cut ends, which may be cut short. Each fault is a warning on the stream, so a `reader` finding: at the byte where the first filter met it, else at the stream's data. The objects it reads from an object stream are placed in its decoded data (`Span::stream`), which the `Document` keeps.
 
-**`Qpdf`** is that decoder: one qpdf run for each ask, its JSON read leniently, as qpdf writes a real such as `+.5` into it unchanged, and a stream decoded from its bytes through a file of its own. It decrypts as it decodes. A string in plain view comes back as qpdf's JSON gives it: bytes, or text (`Str::Text`), whose encoding qpdf doesn't say. `Qpdf::ready` says whether it can decode at all: its version, or why not, which is that it isn't found, doesn't run, or is older than qpdf 11.9: before it, qpdf writes a name that isn't UTF-8 into its JSON as the name's bytes, which isn't JSON. One that can't says why for each object asked for, and the command line then leaves the file unread.
-
-**`Qpdf::read`** reads a whole file through qpdf alone: a second `Source`, without spans, to set beside the bytes reader.
+**`bytes::read_opened`** opens an encrypted file with the passwords it's given, each tried as the owner's and then the user's (none, the empty password), through pdf-crypt's standard security handler, revisions 2 to 6: its object streams are decrypted before they're decoded, and its strings decrypted where they are, their bytes exact, but a signature's `/Contents` (a dictionary with `/ByteRange` and a string `/Contents`, of `/Type /Sig`, `/DocTimeStamp` or none), which isn't encrypted, and the encryption dictionary's, any trailer's `/Encrypt`. A string or stream that doesn't decrypt cleanly is a warning, once an object and a fault; `/Perms` that doesn't match, or doesn't confirm the key, is one on the encryption dictionary. `Document::encryption` says whether the file is encrypted, and whether it opened, by the owner's password or the user's, or is locked (no password it was given opens it), or has a handler it can't open, and why: then its strings stay ciphertext and its object streams aren't read. Or it's plain: no password opened it, or the reader can't open its handler, but its strings and streams aren't encrypted (`/StrF` and `/StmF` `/Identity`, as when only its embedded files are), so it reads whole, but for an object stream whose own `/Crypt` filter encrypts it, which isn't read, saying why. `bytes::read` is `read_opened` with no password, so the empty one. **`bytes::read_from`** reads the file as of a cross-reference section, along its `/Prev` chain as if it were the newest, so that what later updates wrote isn't in it, as `--last-update` reads an update's revision before; `bytes::read_from_opened` is `read_from` by passwords.
 
 ### Two readers, set side by side
+
+The tests set the reader beside qpdf, as an oracle, through a decoder and a second `Source` of their own that aren't shipped: qpdf run as a process, its JSON read leniently (qpdf writes a real such as `+.5` into it unchanged). The reader can be made to ask it for every stream it would decode itself, and its object streams' data and objects are then compared byte for byte; and qpdf reads a whole file alone, without spans, a string it reads as text coming back as `Str::Text`, whose encoding qpdf doesn't say. They run against qpdf-written files committed in `tests/files`, which a test reads with pdf-lint alone too, and, ignored, against a folder of files (`PDF_LINT_CORPUS`).
 
 Set side by side, the two readings agree on nearly every object, and every difference has a cause:
 
@@ -160,9 +160,13 @@ Checked, the two readings give the same findings but for those causes, and for o
 
 The comparison found three faults in the bytes reader, now fixed: a table's row with a number out of range lost the whole table (it's read as free, and the rest read); `/Encrypt null` was taken as encrypted; and a cross-reference stream decoded by its number could be another object's.
 
+Another ignored test, `a_corpus_decodes_alike_through_qpdf`, sets the reader's decoding beside qpdf's: every stream with filters the reader decodes, decoded both ways (qpdf at `--decode-level=specialized`, so RunLength too) byte for byte, and the object streams' data and objects as the reader reads them and as it reads them asking qpdf. Each difference is sorted into a kind the test explains, and it fails on one it can't: the same bytes, the reader saying a fault qpdf passes over; data a fault stopped, which qpdf gives undecoded and the reader decodes as far as the fault; a stream qpdf finds by its number and the reader by its place, which an update can make two (the test asks qpdf for the raw bytes it read to tell); the reader's limit. A test of hand-made streams pins where the two part on purpose, as qpdf departs from the spec: a run-length of 128 ends the data, NUL is white-space between hex digits, TIFF's samples are 1, 2, 4, 8 or 16 bits.
+
+A third, `a_corpus_decrypts_alike_through_qpdf`, sets the reader's decryption beside qpdf's in every encrypted file of a folder, opened with the empty password or one the test suites use: whether it opens, is locked, or has a handler that can't, against qpdf's `--requires-password`; and every stream decrypted both ways, byte for byte, and decoded. Each difference is again sorted into a kind it explains: a string or stream that's just an IV, a part block, a `/Crypt` filter without `/Name` (the spec's `/Identity`, which qpdf decrypts by `/StmF`), a file qpdf refuses whole.
+
 ### How qpdf and lopdf map onto it
 
-`Qpdf::read` is the `Source` through qpdf. lopdf won't be shipped. It's here to show what implementing the trait for a Rust reader takes.
+The tests' qpdf reader is the `Source` through qpdf. lopdf won't be shipped. It's here to show what implementing the trait for a Rust reader takes.
 
 | `Source` | qpdf 12, as a subprocess | lopdf 0.46 |
 |---|---|---|
@@ -204,4 +208,4 @@ The model's `tsv/latest` is embedded at a pinned upstream commit, which `--versi
 
 Licensed under the Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)).
 
-The Arlington model's files, embedded from `model/`, are Apache-2.0 too, with upstream's LICENSE and NOTICE.txt beside them; a release archive carries the NOTICE.txt as `ARLINGTON-NOTICE.txt`, and what the embedded copy changes and adds as `ARLINGTON-CORRECTIONS.tsv` and `ARLINGTON-ADDITIONS/`. Parts of the checker are adapted from TestGrammar (Apache-2.0, Copyright 2020-2022 PDF Association), and a header in `src/check.rs` names them.
+The Arlington model's files, embedded from `model/`, are Apache-2.0 too, with upstream's LICENSE and NOTICE.txt beside them; a release archive carries the NOTICE.txt as `ARLINGTON-NOTICE.txt`, and what the embedded copy changes and adds as `ARLINGTON-CORRECTIONS.tsv` and `ARLINGTON-ADDITIONS/`. What's compiled into the archive's binary has its notices beside it: `THIRD-PARTY-NOTICES.txt`, each crate with its licence and its package's licence files, written for each platform from `Cargo.lock`; `RUST-NOTICES.html`, the Rust standard library's; and on Linux, `MUSL-COPYRIGHT`, the C library's, linked in statically. Parts of the checker are adapted from TestGrammar (Apache-2.0, Copyright 2020-2022 PDF Association), and a header in `src/check.rs` names them.

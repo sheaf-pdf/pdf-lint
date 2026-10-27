@@ -2,9 +2,9 @@ name: Release
 
 # On a version tag of pdf-lint's (each crate's tags are its name, -v and
 # its version: pdf-lint-v0.1.0, and pdf-tokenizer-v0.1.0, which starts
-# nothing here): an archive for each platform, each holding pdf-lint
-# and the qpdf it decodes with (release/qpdf.sh), each checked to run as
-# it's unpacked (release/smoke.sh); then a draft GitHub release with them,
+# nothing here): an archive for each platform, each holding pdf-lint and
+# the notices of what it embeds, each checked to run as it's unpacked
+# (release/smoke.sh); then a draft GitHub release with them,
 # to look over and publish by hand. Run by hand, it builds and checks the
 # archives without drafting a release.
 
@@ -27,8 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Static, so that the archive needs no more of the system than
-          # qpdf's Linux build does: glibc 2.34.
+          # Static, so that the binary needs nothing of the system.
           - platform: linux-x86_64
             os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
@@ -68,10 +67,14 @@ jobs:
         if: matrix.platform == 'macos-x86_64'
         run: sudo softwareupdate --install-rosetta --agree-to-license
       - name: Build
+        # The C runtime linked in on Windows, so the binary needs no Visual
+        # C++ Redistributable (the README says it's the archive's).
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
         run: cargo build --release --locked -p pdf-lint --target ${{ matrix.target }}
       - name: Archive, and check it runs
         run: >-
-          release/dist.sh ${{ matrix.platform }}
+          release/dist.sh ${{ matrix.platform }} ${{ matrix.target }}
           target/${{ matrix.target }}/release/pdf-lint${{ runner.os == 'Windows' && '.exe' || '' }}
           dist
       - uses: actions/upload-artifact@v7
@@ -100,7 +103,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cat > notes.md <<'EOF'
-          Each archive holds `pdf-lint` and, in `qpdf/`, the qpdf it decodes with: qpdf 12.4.2, from qpdf's official release, with the notices and licenses that go with it (`qpdf/NOTICE.md`). Unpack it anywhere, keeping `qpdf/` beside the binary. The Linux archives need glibc 2.34 or later. Beside each archive, its SHA-256.
+          Each archive holds `pdf-lint`, which decodes and decrypts by itself, needing nothing beside it: unpack it anywhere. The Linux binaries are static. Beside each archive, its SHA-256.
+
+          What's compiled in, each crate and its licence, the Rust standard library and, on Linux, musl, has its notices in `THIRD-PARTY-NOTICES.txt`, `RUST-NOTICES.html` and `MUSL-COPYRIGHT`.
 
           The Arlington PDF Model it checks against is embedded: its NOTICE.txt is `ARLINGTON-NOTICE.txt`, and what the embedded copy corrects and adds, where the model contradicts ISO 32000-2 or lacks what a reference defines, is `ARLINGTON-CORRECTIONS.tsv` and `ARLINGTON-ADDITIONS/`. `pdf-lint --version` says the model's commit and hash.
           EOF

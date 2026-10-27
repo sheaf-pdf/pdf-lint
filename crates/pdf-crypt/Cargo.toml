@@ -1,0 +1,32 @@
+[package]
+name = "pdf-crypt"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "PDF's standard security handler, decrypting, with every fault said"
+keywords = ["pdf", "decryption", "rc4", "aes"]
+categories = ["cryptography", "parser-implementations"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+
+[dependencies]
+# RustCrypto's, the primitives under the handler, without what it doesn't
+# use (padding schemes, OIDs).
+aes = "0.9"
+cbc = { version = "0.2", default-features = false }
+md-5 = { version = "0.11", default-features = false }
+rc4 = "0.2"
+sha2 = { version = "0.11", default-features = false }
+
+[features]
+# Encrypting as the handler decrypts, with salts and IVs given, not random:
+# for writing test files, not for a writer to protect a document with.
+writer = []
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

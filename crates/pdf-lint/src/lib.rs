@@ -14,17 +14,23 @@ pub mod allowance;
 pub mod bytes;
 pub mod check;
 pub mod extension;
+mod filter;
 #[cfg(any(test, fuzzing))]
 pub mod fuzz;
 pub mod grammar;
+#[cfg(test)]
 mod json;
 pub mod object;
 pub mod predicate;
-pub mod qpdf;
+// qpdf, the tests' oracle: a second reader, and a decoder to set the
+// reader's decoding beside.
+#[cfg(test)]
+pub(crate) mod qpdf;
 pub mod source;
 pub mod text;
 pub mod version;
-#[cfg(test)]
+#[cfg(any(test, fuzzing))]
+#[cfg_attr(fuzzing, allow(dead_code))]
 pub(crate) mod write;
 mod xxh64;
 
@@ -36,8 +42,7 @@ pub use check::{
 pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, grammar, use_model};
 pub use object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
 pub use predicate::{Cx, Gate, Reference, Since, Truth};
-pub use qpdf::Qpdf;
-pub use source::{Document, Source, Trailer, Update, Warning};
+pub use source::{Document, Encryption, Source, Trailer, Update, Warning};
 pub use version::Version;
 
 /// The upstream commit the embedded model is (`model/SOURCE.md`).

@@ -1,0 +1,22 @@
+[package]
+name = "pdf-filters"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "PDF's standard stream filters, decoded, with every fault said and what decoded kept"
+keywords = ["pdf", "flate", "lzw", "ascii85", "decompression"]
+categories = ["compression", "encoding"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+
+[dependencies]
+miniz_oxide = "0.9"
+pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

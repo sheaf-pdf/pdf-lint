@@ -1,7 +1,6 @@
 //! The command line: each file read from its bytes and checked against the
 //! Arlington PDF Model, each finding printed with the bytes it's at.
 
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::{self, Read as _, Write as _};
@@ -10,15 +9,13 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 
 use anyhow::{Context, Result, bail};
-use pdf_lint::bytes::{Decode, Written};
 use pdf_lint::{
-    Allowances, Class, Document, Exempt, Finding, Grammar, Hold, Made, Object, ObjectId, Options,
-    Qpdf, Report, Source, Span, Stream, UnlistedIn, Value, Version, bytes, check, file_version,
-    use_model,
+    Allowances, Class, Document, Encryption, Exempt, Finding, Grammar, Hold, Made, Options, Report,
+    Span, UnlistedIn, Version, bytes, check, file_version, text, use_model,
 };
 
 const USAGE: &str = "\
@@ -26,9 +23,8 @@ usage: pdf-lint [OPTIONS] FILE...
 
 Checks each FILE against the Arlington PDF Model, reading it from its
 bytes, and prints each finding with the bytes it's at; a FILE of - is
-standard input. What's compressed or encrypted, qpdf decodes: object
-streams, cross-reference streams and strings. Without qpdf 11.9 or
-later, a file that has any isn't checked.
+standard input. It decodes object streams and cross-reference streams,
+and decrypts what's encrypted, itself.
 
   --hold <FILE>   hold only the objects FILE names, a line each:
                   `12 0 built` or `3 0 merged`
@@ -74,16 +70,15 @@ later, a file that has any isn't checked.
                   a version, as the file is checked as
   --full          print the whole report: tables, checks not made, keys
                   the model doesn't list
-  --qpdf <PATH>   the qpdf to decode with (by default PDF_LINT_QPDF,
-                  else the one bundled beside this program, in
-                  qpdf/bin, else qpdf on the PATH)
-  --password <PW> the files' password, user or owner, when it isn't empty
+  --password <PW> the files' password, user or owner, when it isn't empty:
+                  tried as UTF-8, then in PDFDocEncoding, WinAnsiEncoding
+                  and MacRomanEncoding
   --jobs <N>      check N files at once (by default, as many as there are
                   CPUs); the report is in the files' order all the same
   --format <F>    text (the default), or json: a line of JSON for each
                   file, with its findings and the whole report's counts
-  --version       print the version, the model's commit, corrections,
-                  additions and hash, and the qpdf it decodes with
+  --version       print the version, and the model's commit, corrections,
+                  additions and hash
   -h, --help      print this
 
 It exits 0 when every file is clean, 1 when there are findings, and 2
@@ -110,7 +105,6 @@ struct Args {
     named: BTreeSet<String>,
     allow: Option<PathBuf>,
     full: bool,
-    qpdf: Option<PathBuf>,
     password: Option<String>,
     jobs: Option<NonZero<usize>>,
     json: bool,
@@ -119,6 +113,9 @@ struct Args {
 /// What every file is checked with.
 struct Setup {
     args: Args,
+    /// `--password`'s, as UTF-8 and in each single-byte encoding that has
+    /// it ([`text::passwords`]); none without it.
+    passwords: Vec<Vec<u8>>,
     hold: Hold,
     exempt: Vec<Exempt>,
     allow: Option<Allowances>,
@@ -201,7 +198,6 @@ fn args() -> Result<Option<Args>> {
         named: BTreeSet::new(),
         allow: None,
         full: false,
-        qpdf: None,
         password: None,
         jobs: None,
         json: false,
@@ -219,16 +215,8 @@ fn args() -> Result<Option<Args>> {
                 let hash = pdf_lint::grammar().hash();
                 let n = pdf_lint::grammar::corrections().len();
                 let m = pdf_lint::grammar::additions().len();
-                let qpdf = match bundled_unless_named() {
-                    Some(program) => Qpdf::new("").program(program),
-                    None => Qpdf::new(""),
-                };
-                let qpdf = match qpdf.ready() {
-                    Ok(version) => format!("{version} ({})", qpdf.program_path().display()),
-                    Err(why) => format!("no qpdf to decode with: {why}"),
-                };
                 print(&format!(
-                    "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (xxh64 {hash:016x})\n{qpdf}\n",
+                    "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (xxh64 {hash:016x})\n",
                     env!("CARGO_PKG_VERSION"),
                     pdf_lint::COMMIT
                 ));
@@ -243,7 +231,6 @@ fn args() -> Result<Option<Args>> {
             Some("--allow") => args.allow = Some(value(&mut words, "--allow")?),
             Some("--model") => args.model = Some(value(&mut words, "--model")?),
             Some("--baseline") => args.baseline = Some(value(&mut words, "--baseline")?),
-            Some("--qpdf") => args.qpdf = Some(value(&mut words, "--qpdf")?),
             Some("--password") => {
                 let password = words.next().context("--password takes a password")?;
                 let password = password
@@ -379,17 +366,13 @@ fn run() -> Result<ExitCode> {
         None => Vec::new(),
     };
     let allow = args.allow.as_deref().map(Allowances::read).transpose()?;
+    let passwords = (args.password.as_deref()).map_or_else(Vec::new, text::passwords);
     let baseline = match &args.baseline {
         Some(path) => {
             let data =
                 std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let qpdf = qpdf(path, &args);
-            let decoder = Decoder::new(&qpdf);
-            let doc = bytes::read_with(&data, &decoder);
-            if let Some(why) = decoder.unready() {
-                bail!("--baseline {}: {why}", path.display());
-            }
-            if let Some(why) = locked(&doc, &qpdf, args.password.is_some()) {
+            let doc = bytes::read_opened(&data, &slices(&passwords));
+            if let Some(why) = locked(&doc, args.password.is_some()) {
                 bail!("--baseline {}: {why}", path.display());
             }
             let reports = Mutex::new(BTreeMap::new());
@@ -406,6 +389,7 @@ fn run() -> Result<ExitCode> {
     let model = format!("{:016x}", pdf_lint::grammar().hash());
     let setup = Setup {
         args,
+        passwords,
         hold,
         exempt,
         allow,
@@ -483,160 +467,27 @@ fn checked_in_order(setup: &Setup, mut report: impl FnMut(Checked) -> bool) {
     });
 }
 
-/// qpdf for `path`, as the command line has it.
-fn qpdf(path: &Path, args: &Args) -> Qpdf {
-    let mut qpdf = Qpdf::new(path);
-    if let Some(program) = args.qpdf.clone().or_else(bundled_unless_named) {
-        qpdf = qpdf.program(program);
-    }
-    if let Some(password) = &args.password {
-        qpdf = qpdf.password(password);
-    }
-    qpdf
+/// `passwords` as the reader takes them.
+fn slices(passwords: &[Vec<u8>]) -> Vec<&[u8]> {
+    passwords.iter().map(Vec::as_slice).collect()
 }
 
-/// Standard input's bytes in a file of their own, for qpdf, which reads
-/// only files: removed when it's dropped.
-struct Spool(PathBuf);
-
-impl Spool {
-    fn new(data: &[u8]) -> io::Result<Spool> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        // The file's bytes, so its reader's alone.
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut n = 0;
-        loop {
-            let name = format!("pdf-lint-{}-{n}.pdf", std::process::id());
-            let path = std::env::temp_dir().join(name);
-            match options.open(&path) {
-                Ok(mut file) => {
-                    let spool = Spool(path);
-                    file.write_all(data)?;
-                    return Ok(spool);
-                }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < 100 => n += 1,
-                Err(e) => return Err(e),
-            }
-        }
-    }
-}
-
-impl Drop for Spool {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// qpdf as a file is read with: run only when it's ready
-/// ([`Qpdf::ready`]), and noting whether the reader asked it for anything.
-struct Decoder<'a> {
-    qpdf: &'a Qpdf,
-    asked: Cell<bool>,
-}
-
-impl<'a> Decoder<'a> {
-    fn new(qpdf: &'a Qpdf) -> Decoder<'a> {
-        Decoder {
-            qpdf,
-            asked: Cell::new(false),
-        }
-    }
-
-    /// Why the file isn't checked, when the reader asked qpdf for anything
-    /// and it isn't ready: what it asked for is missing.
-    fn unready(&self) -> Option<String> {
-        if !self.asked.get() {
-            return None;
-        }
-        let why = ready(self.qpdf).as_ref().err()?;
-        Some(format!(
-            "it needs qpdf to decode what's compressed or encrypted in it, and {why}: install qpdf {} or later, or name one with --qpdf",
-            pdf_lint::qpdf::OLDEST
-        ))
-    }
-
-    /// Whether qpdf is ready, noting that it was asked for something.
-    fn ready(&self) -> Result<(), String> {
-        self.asked.set(true);
-        ready(self.qpdf).as_ref().map(drop).map_err(String::clone)
-    }
-}
-
-impl Decode for Decoder<'_> {
-    fn decode(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Vec<u8>, String>> {
-        match self.ready() {
-            Ok(()) => self.qpdf.decode(ids),
-            Err(why) => ids.iter().map(|&id| (id, Err(why.clone()))).collect(),
-        }
-    }
-
-    fn plaintext(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Object, String>> {
-        match self.ready() {
-            Ok(()) => self.qpdf.plaintext(ids),
-            Err(why) => ids.iter().map(|&id| (id, Err(why.clone()))).collect(),
-        }
-    }
-
-    fn decode_written(&self, stream: Written) -> Result<Vec<u8>, String> {
-        self.ready()?;
-        self.qpdf.decode_written(stream)
-    }
-}
-
-/// [`Qpdf::ready`] for the qpdf the command line has, which every file is
-/// decoded with: asked once, when a file first needs it.
-fn ready(qpdf: &Qpdf) -> &'static Result<String, String> {
-    static READY: OnceLock<Result<String, String>> = OnceLock::new();
-    READY.get_or_init(|| qpdf.ready())
-}
-
-/// Why `doc`, read through `qpdf`, isn't checked, when it's encrypted
-/// and won't open with the password given (`password` says whether one
-/// was): nothing in it decodes, so what's in its object streams would be
-/// missing, and its strings ciphertext.
-fn locked(doc: &Document, qpdf: &Qpdf, password: bool) -> Option<&'static str> {
-    let encrypted = match &doc.trailer().object.value {
-        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
-            d.get(b"Encrypt").is_some_and(|e| !e.is_null())
-        }
-        _ => false,
-    };
-    // A qpdf that can't say is no reason not to check what reads.
-    if !encrypted || !qpdf.locked().unwrap_or(false) {
-        return None;
-    }
-    Some(match password {
+/// Why `doc` isn't checked, when it's encrypted and no password it was
+/// given opens it (`password` says whether one was), though it encrypts
+/// its strings or streams: what's in its object streams would be missing,
+/// and its strings ciphertext.
+fn locked(doc: &Document, password: bool) -> Option<&'static str> {
+    (doc.encryption == Encryption::Locked).then_some(match password {
         false => "it needs a password: give it with --password",
         true => "the password --password gives doesn't open it",
     })
-}
-
-/// The qpdf to run when the command line names none: the one bundled
-/// beside this program, unless `PDF_LINT_QPDF` names one, which
-/// [`Qpdf::new`] takes, as it takes qpdf on the `PATH` failing both.
-fn bundled_unless_named() -> Option<PathBuf> {
-    bundled().filter(|_| std::env::var_os("PDF_LINT_QPDF").is_none())
-}
-
-/// The qpdf a release archive bundles beside this program, in `qpdf/bin`,
-/// when there's one.
-fn bundled() -> Option<PathBuf> {
-    static BUNDLED: OnceLock<Option<PathBuf>> = OnceLock::new();
-    let find = || {
-        let exe = std::env::current_exe().ok()?;
-        let qpdf = (exe.parent()?.join("qpdf").join("bin"))
-            .join(format!("qpdf{}", std::env::consts::EXE_SUFFIX));
-        qpdf.is_file().then_some(qpdf)
-    };
-    BUNDLED.get_or_init(find).clone()
 }
 
 /// One file read and checked, with what's to print about it.
 fn check_file(path: &Path, setup: &Setup) -> Checked {
     let Setup {
         args,
+        passwords,
         hold,
         exempt,
         allow,
@@ -656,20 +507,8 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
         Ok(data) => data,
         Err(e) => return unread(path, &e.to_string(), args.json),
     };
-    let spool = match stdin.then(|| Spool::new(&data)).transpose() {
-        Ok(spool) => spool,
-        Err(e) => {
-            let why = format!("standard input doesn't copy to a file for qpdf: {e}");
-            return unread(path, &why, args.json);
-        }
-    };
-    let qpdf = qpdf(spool.as_ref().map_or(path, |s| &s.0), args);
-    let decoder = Decoder::new(&qpdf);
-    let doc = bytes::read_with(&data, &decoder);
-    if let Some(why) = decoder.unready() {
-        return unread(path, &why, args.json);
-    }
-    if let Some(why) = locked(&doc, &qpdf, args.password.is_some()) {
+    let doc = bytes::read_opened(&data, &slices(passwords));
+    if let Some(why) = locked(&doc, args.password.is_some()) {
         return unread(path, why, args.json);
     }
     let version = file_version(&doc);
@@ -698,10 +537,7 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             return unread(path, why, args.json);
         }
         (true, Some(update)) => {
-            let previous = bytes::read_from(&data, &decoder, update.previous);
-            if let Some(why) = decoder.unready() {
-                return unread(path, &why, args.json);
-            }
+            let previous = bytes::read_from_opened(&data, &slices(passwords), update.previous);
             let made = |id| match previous.objects.contains_key(id) {
                 true => Made::Merged,
                 false => Made::Built,

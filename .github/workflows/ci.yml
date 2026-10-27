@@ -1,7 +1,10 @@
 name: CI
 
+# Pushes to main, and pull requests: a push to a pull request's branch
+# runs once, not once as a push and again as the pull request.
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -24,18 +27,18 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: extractions/setup-just@v4
-      # The checker's tests decode through qpdf: the one the release
-      # archives bundle, at its pinned version.
-      - name: Install qpdf
-        run: |
-          release/qpdf.sh linux-x86_64 "$RUNNER_TEMP/qpdf"
-          echo "PDF_LINT_QPDF=$RUNNER_TEMP/qpdf/bin/qpdf" >> "$GITHUB_ENV"
       - name: Check formatting
         run: just fmt
       - name: Clippy
         run: just clippy
+      - name: Build the fuzz targets
+        run: just fuzzing
       - name: Test (including doctests)
         run: just test
+      # The tests that set the reader beside qpdf, the oracle, against
+      # the qpdf the recipe fetches at its pinned version.
+      - name: Test against qpdf
+        run: just test-qpdf
       - name: Build documentation
         run: just doc
 
@@ -84,3 +87,31 @@ jobs:
       - uses: extractions/setup-just@v4
       - name: Test
         run: just tokenizer-msrv
+
+  filters-msrv:
+    name: Filters on their minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in crates/pdf-filters/Cargo.toml,
+      # which `just filters-msrv` reads.
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just filters-msrv
+
+  crypt-msrv:
+    name: Crypt on its minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in crates/pdf-crypt/Cargo.toml,
+      # which `just crypt-msrv` reads.
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just crypt-msrv

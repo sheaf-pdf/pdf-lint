@@ -7,23 +7,28 @@
 //! `endstream`. Where the sections don't read, it finds the objects by
 //! scanning the file, and says so.
 //!
-//! What it can't read in plain view, a compressed cross-reference stream's
-//! rows and a compressed or encrypted object stream's objects, a
-//! [`Decode`] decodes for it:
-//! [`Qpdf`](crate::qpdf::Qpdf), or anything else that can. An object read
-//! from an object stream is placed in the stream's decoded data
-//! ([`Span::stream`]), which the [`Document`] keeps. Without one, those
-//! objects are ones it can't read. It doesn't decrypt: an encrypted file's
-//! strings outside object streams are [`Str::Encrypted`], unless the
-//! decoder gives their plaintext, which is placed where each string was.
+//! It decodes cross-reference streams and object streams from their own
+//! data, through [`pdf_filters`]: a stream up to [`STREAM`] bytes, and a
+//! reading's [`BUDGET`] in all. An encrypted file it opens with the
+//! passwords it's given ([`read_opened`]) through [`pdf_crypt`]'s standard
+//! security handler: its object streams decrypted before they're decoded,
+//! its strings decrypted where they are, a signature's `/Contents` left as
+//! it is. An encrypted file it doesn't open ([`Document::encryption`]) has
+//! its strings [`Str::Encrypted`], and its object streams unread, saying
+//! why. An object read from an object stream is placed in the stream's
+//! decoded data ([`Span::stream`]), which the [`Document`] keeps.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use pdf_tokenizer::decode::How;
 use pdf_tokenizer::{Kind, Token, Tokenizer, is_delimiter, is_white_space};
 
+use pdf_crypt::{Handler, Method};
+use pdf_filters::{Fault, Filter, Layout, Predictor};
+
+use crate::filter;
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
-use crate::source::{Document, Trailer, Update, Warning};
+use crate::source::{Document, Encryption, Trailer, Update, Warning};
 use crate::version::Version;
 
 /// How deeply arrays and dictionaries may nest in an object.
@@ -31,6 +36,21 @@ pub const NESTING: usize = 256;
 
 /// How many cross-reference sections the `/Prev` chain may have.
 pub const SECTIONS: usize = 1024;
+
+/// How many bytes a stream the reader decodes may decode to; more is cut
+/// off there.
+#[cfg(not(fuzzing))]
+pub const STREAM: usize = 256 << 20;
+#[cfg(fuzzing)]
+pub const STREAM: usize = 1 << 20;
+
+/// How many bytes the streams the reader decodes in a reading of a file
+/// may decode to in all; more is cut off. (`--last-update` reads a file
+/// twice, as of its newest section and as of the one before.)
+#[cfg(not(fuzzing))]
+pub const BUDGET: usize = 1 << 30;
+#[cfg(fuzzing)]
+pub const BUDGET: usize = 4 << 20;
 
 /// What a cross-reference section says of an object number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,12 +68,11 @@ pub enum XrefEntry {
     Free,
 }
 
-/// What decodes what the reader can't read in plain view: a compressed
-/// cross-reference stream, a compressed or encrypted object stream, an
-/// encrypted file's strings.
-/// The reader asks three times at most: for the cross-reference streams,
-/// then for the object streams, then for the plaintext.
-pub trait Decode {
+/// What decodes what the reader can't: the object streams and strings of
+/// an encrypted file it doesn't open. The reader asks twice at most: for
+/// the object streams, then for the plaintext. Only the tests give one,
+/// qpdf, to set the reader's decoding beside.
+pub(crate) trait Decode {
     /// The data of each stream in `ids`, decoded (decompressed, and in an
     /// encrypted file decrypted), or why it can't be.
     fn decode(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Vec<u8>, String>>;
@@ -71,9 +90,9 @@ pub trait Decode {
     /// [`Decode::decode`] couldn't decode it by its number: a later update
     /// can give the number to another object, and a decoder that finds
     /// streams by number then finds that one; or the decoder can't read
-    /// the file. It's a cross-reference stream, which is never encrypted,
-    /// or an object stream in a file that isn't. The reader asks once for
-    /// each such stream. By default, it can't be.
+    /// the file. The reader asks it only when it's made to ask the decoder
+    /// for every stream, as the tests do to set the two side by side. By
+    /// default, it can't be.
     fn decode_written(&self, stream: Written) -> Result<Vec<u8>, String> {
         let _ = stream;
         Err("nothing decodes a stream from its bytes".to_string())
@@ -83,10 +102,11 @@ pub trait Decode {
 /// A stream as written: its `/Filter`'s and `/DecodeParms`'s values and its
 /// data, each its bytes in the file.
 #[derive(Debug, Clone, Copy)]
-pub struct Written<'a> {
-    pub filter: &'a [u8],
-    pub parms: Option<&'a [u8]>,
-    pub data: &'a [u8],
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct Written<'a> {
+    pub(crate) filter: &'a [u8],
+    pub(crate) parms: Option<&'a [u8]>,
+    pub(crate) data: &'a [u8],
 }
 
 /// Decoded data given beforehand, by stream.
@@ -104,22 +124,75 @@ impl Decode for BTreeMap<ObjectId, Vec<u8>> {
     }
 }
 
-/// The file `file` is, read from what's in plain view.
+/// The file `file` is, opened, when it's encrypted, by the empty password,
+/// as [`read_opened`] opens it given none.
 pub fn read(file: &[u8]) -> Document {
     read_with_or_without(file, None, None)
 }
 
+/// The file `file` is, opened, when it's encrypted, by the first of
+/// `passwords` that opens it, each tried as the owner's and then the
+/// user's (none, the empty password).
+pub fn read_opened(file: &[u8], passwords: &[&[u8]]) -> Document {
+    read_as(file, None, None, true, (STREAM, BUDGET, None), passwords)
+}
+
+/// The file as of the cross-reference section at byte `section`, as
+/// [`read_from`] reads it, opened as [`read_opened`] opens it: an
+/// update's [`Update::previous`] by its password.
+pub fn read_from_opened(file: &[u8], passwords: &[&[u8]], section: usize) -> Document {
+    read_as(
+        file,
+        None,
+        Some(section),
+        true,
+        (STREAM, BUDGET, None),
+        passwords,
+    )
+}
+
 /// The file `file` is, with `decoder` decoding what isn't in plain view.
-pub fn read_with(file: &[u8], decoder: &dyn Decode) -> Document {
+#[cfg(test)]
+pub(crate) fn read_with(file: &[u8], decoder: &dyn Decode) -> Document {
     read_with_or_without(file, Some(decoder), None)
 }
 
 /// The file as of the cross-reference section at byte `section`: read from
-/// there along its `/Prev` chain, as if it were the newest, so that
-/// what later updates wrote isn't in it. For an update's
-/// [`Update::previous`], that's the revision it updates.
-pub fn read_from(file: &[u8], decoder: &dyn Decode, section: usize) -> Document {
-    read_with_or_without(file, Some(decoder), Some(section))
+/// there along its `/Prev` chain, as if it were the newest, so that what
+/// later updates wrote isn't in it, opened, when it's encrypted, by the
+/// empty password. For an update's [`Update::previous`], that's the
+/// revision it updates.
+pub fn read_from(file: &[u8], section: usize) -> Document {
+    read_with_or_without(file, None, Some(section))
+}
+
+/// The file `file` is, with `decoder` asked for every stream the reader
+/// would decode itself, as it was before it did: for the tests that set
+/// the two side by side.
+#[cfg(test)]
+pub(crate) fn read_through(file: &[u8], decoder: &dyn Decode) -> Document {
+    read_as(
+        file,
+        Some(decoder),
+        None,
+        false,
+        (STREAM, BUDGET, None),
+        &[],
+    )
+}
+
+/// The file `file` is, a stream decoding to at most `stream` bytes and
+/// the file's to `budget` in all: for the tests of the limits.
+#[cfg(test)]
+pub(crate) fn read_limited(file: &[u8], stream: usize, budget: usize) -> Document {
+    read_as(file, None, None, true, (stream, budget, None), &[])
+}
+
+/// The file `file` is, reading no more than `entries` cross-reference
+/// entries: for the tests of that limit.
+#[cfg(test)]
+pub(crate) fn read_listing(file: &[u8], entries: usize) -> Document {
+    read_as(file, None, None, true, (STREAM, BUDGET, Some(entries)), &[])
 }
 
 fn read_with_or_without(
@@ -127,12 +200,54 @@ fn read_with_or_without(
     decoder: Option<&dyn Decode>,
     section: Option<usize>,
 ) -> Document {
+    read_as(file, decoder, section, true, (STREAM, BUDGET, None), &[])
+}
+
+fn read_as(
+    file: &[u8],
+    decoder: Option<&dyn Decode>,
+    section: Option<usize>,
+    native: bool,
+    limits: (usize, usize, Option<usize>),
+    passwords: &[&[u8]],
+) -> Document {
+    reading(file, decoder, section, native, limits, passwords).0
+}
+
+/// [`read_opened`]'s reading, and the security handler it opened the file
+/// with, for the oracle to decrypt each stream as the reader would.
+#[cfg(test)]
+pub(crate) fn read_opened_by(file: &[u8], passwords: &[&[u8]]) -> (Document, Option<Handler>) {
+    reading(file, None, None, true, (STREAM, BUDGET, None), passwords)
+}
+
+/// [`read_as`]'s reading, and the security handler it opened the file
+/// with.
+fn reading(
+    file: &[u8],
+    decoder: Option<&dyn Decode>,
+    section: Option<usize>,
+    native: bool,
+    (stream, budget, entries): (usize, usize, Option<usize>),
+    passwords: &[&[u8]],
+) -> (Document, Option<Handler>) {
     let mut reader = Reader {
         file,
+        native,
+        passwords: passwords.iter().map(|p| p.to_vec()).collect(),
+        handler: None,
+        encryption: Encryption::None,
+        stream,
+        budget,
+        listable: entries.unwrap_or_else(|| listable(file.len())),
+        cut: HashSet::new(),
         decoder,
         warnings: Vec::new(),
         entries: BTreeMap::new(),
         encrypted: None,
+        dictionaries: HashSet::new(),
+        plain_strings: false,
+        plain_metadata: false,
         encrypts: false,
         resolving: false,
         decoded: BTreeMap::new(),
@@ -153,9 +268,16 @@ fn read_with_or_without(
     }
     reader.encryption(&trailer);
     let mut objects = reader.objects();
-    reader.decrypt(&mut objects);
-    let metadata = metadata(file, &trailer, &objects, reader.encrypts);
-    Document {
+    match (&reader.handler, reader.native) {
+        (Some(_), true) => reader.decrypt_strings(&mut objects),
+        _ => reader.decrypt(&mut objects),
+    }
+    // Metadata that isn't encrypted is in plain view: in a file that
+    // doesn't encrypt, or by `/EncryptMetadata false`, which counts from
+    // version 4, whether the handler opens or not.
+    let plain_metadata = !reader.encrypts || reader.plain_metadata;
+    let metadata = metadata(file, &trailer, &objects, !plain_metadata);
+    let document = Document {
         objects,
         trailer,
         header,
@@ -165,17 +287,19 @@ fn read_with_or_without(
         size: Some(file.len()),
         hex: Some(reader.hex),
         metadata,
-    }
+        encryption: reader.encryption,
+    };
+    (document, reader.handler)
 }
 
 /// The data of the catalog's metadata stream (ISO 32000-2, 14.3.2), as
-/// written in `file`, when it's in plain view: unfiltered, and, in a file
-/// that `encrypts`, not encrypted (`/EncryptMetadata false`).
+/// written in `file`, when it's in plain view: unfiltered, and not
+/// `encrypted`.
 fn metadata(
     file: &[u8],
     trailer: &Trailer,
     objects: &BTreeMap<ObjectId, Result<Object, String>>,
-    encrypts: bool,
+    encrypted: bool,
 ) -> Option<Vec<u8>> {
     /// `o` with its references followed, as many as an object's way to
     /// the catalog may take.
@@ -196,12 +320,8 @@ fn metadata(
         _ => None,
     };
     let trailer = trailer.dict();
-    if encrypts {
-        let encrypt = dict(trailer.get(b"Encrypt")?)?;
-        let plain = (encrypt.get(b"EncryptMetadata")).and_then(|o| get(objects, o));
-        if !plain.is_some_and(|o| matches!(o.value, Value::Bool(false))) {
-            return None;
-        }
+    if encrypted {
+        return None;
     }
     let catalog = dict(trailer.get(b"Root")?)?;
     let Value::Stream(stream) = &get(objects, catalog.get(b"Metadata")?)?.value else {
@@ -213,6 +333,23 @@ fn metadata(
 
 struct Reader<'a> {
     file: &'a [u8],
+    /// The passwords to open an encrypted file with.
+    passwords: Vec<Vec<u8>>,
+    /// The security handler of an encrypted file it opened.
+    handler: Option<Handler>,
+    /// Whether the file is encrypted, and if it is, whether it opened.
+    encryption: Encryption,
+    /// Whether it decodes streams itself, as it does but in the tests that
+    /// make it ask the decoder.
+    native: bool,
+    /// How many bytes a stream it decodes may decode to.
+    stream: usize,
+    /// How many bytes the streams it decodes may still decode to.
+    budget: usize,
+    /// How many cross-reference entries it reads ([`listable`]).
+    listable: usize,
+    /// The object streams whose data a fault cut off.
+    cut: HashSet<ObjectId>,
     decoder: Option<&'a dyn Decode>,
     warnings: Vec<Warning>,
     /// The newest entry for each object number, with its generation.
@@ -220,6 +357,16 @@ struct Reader<'a> {
     /// In an encrypted file whose strings are encrypted, the objects whose
     /// strings aren't: the encryption dictionary's.
     encrypted: Option<HashSet<ObjectId>>,
+    /// The objects the sections' trailers name as `/Encrypt`, and those its
+    /// values refer to: an earlier update's encryption dictionary's strings
+    /// aren't encrypted either.
+    dictionaries: HashSet<ObjectId>,
+    /// Whether an encrypted file's strings aren't, by its handler's
+    /// `/StrF`, or its dictionary's when it doesn't open.
+    plain_strings: bool,
+    /// Whether an encrypted file's metadata stream isn't, by
+    /// `/EncryptMetadata false` of a dictionary of `/V` 4 or later.
+    plain_metadata: bool,
     /// Whether the file has an encryption dictionary, so that its streams
     /// may be encrypted, whatever its strings are.
     encrypts: bool,
@@ -292,6 +439,75 @@ fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).rposition(|w| w == needle)
 }
 
+/// How many cross-reference entries the reader reads of a file `len`
+/// bytes long: as many as its bytes, or 2²⁰, whichever is more. Objects
+/// can be numbered sparsely, so not their numbers but their count.
+fn listable(len: usize) -> usize {
+    len.max(1 << 20)
+}
+
+/// Whether `fault` stopped its filter, cutting the data off.
+fn stops(fault: &Fault) -> bool {
+    matches!(
+        fault,
+        Fault::Byte { .. }
+            | Fault::BrokenEnd { .. }
+            | Fault::InGroup { .. }
+            | Fault::Code { .. }
+            | Fault::TableFull { .. }
+            | Fault::Header
+            | Fault::Corrupt { .. }
+            | Fault::Truncated
+            | Fault::Limit
+    )
+}
+
+/// The bytes of a row of the predictor among `filters`, 1 without one.
+fn predictor_row(filters: &[Filter]) -> usize {
+    let layout = |filter: &Filter| match filter {
+        Filter::Lzw { predictor, .. } | Filter::Flate { predictor } => match predictor {
+            Predictor::Tiff(layout) | Predictor::Png(layout) => Some(*layout),
+            Predictor::None => None,
+        },
+        _ => None,
+    };
+    let bits = |l: Layout| {
+        (u64::from(l.colors).saturating_mul(u64::from(l.bits_per_component)))
+            .saturating_mul(u64::from(l.columns))
+    };
+    (filters.iter().filter_map(layout))
+        .map(|l| usize::try_from(bits(l).div_ceil(8)).unwrap_or(usize::MAX))
+        .max()
+        .unwrap_or(1)
+        .max(1)
+}
+
+/// Where `fault` is in its filter's input, when it says.
+fn place(fault: &Fault) -> Option<usize> {
+    match *fault {
+        Fault::Byte { at, .. }
+        | Fault::BrokenEnd { at }
+        | Fault::InGroup { at }
+        | Fault::Overflow { at }
+        | Fault::LoneByte { at }
+        | Fault::Code { at }
+        | Fault::TableFull { at }
+        | Fault::Corrupt { at } => Some(at),
+        _ => None,
+    }
+}
+
+/// `filter`'s name, unabbreviated.
+fn filter_name(filter: &Filter) -> &'static str {
+    match filter {
+        Filter::AsciiHex => "ASCIIHexDecode",
+        Filter::Ascii85 => "ASCII85Decode",
+        Filter::Lzw { .. } => "LZWDecode",
+        Filter::Flate { .. } => "FlateDecode",
+        Filter::RunLength => "RunLengthDecode",
+    }
+}
+
 /// A stream's filters, as written, when it has any.
 fn filters(o: &Object) -> Option<String> {
     let filter = o.as_dict()?.get(b"Filter")?;
@@ -308,6 +524,125 @@ impl<'a> Reader<'a> {
             at,
             message,
         });
+    }
+
+    /// Stream `id`'s data, written at `at`, decoded by `filters`, as much
+    /// as `limit`, [`STREAM`] and what's left of the file's [`BUDGET`]
+    /// allow: what decoded, however far it went, and the faults on the
+    /// way, each in its filter.
+    fn decode_stream(
+        &mut self,
+        data: &[u8],
+        filters: &[Filter],
+        limit: usize,
+    ) -> (Vec<u8>, Vec<(usize, Fault)>) {
+        let limit = limit.min(self.stream).min(self.budget);
+        let (decoded, faults) = match pdf_filters::decode(data, filters, limit) {
+            Ok(decoded) => (decoded, Vec::new()),
+            Err(error) => (error.data, error.faults),
+        };
+        self.budget -= decoded.len();
+        (decoded, faults)
+    }
+
+    /// A warning on stream `id` for each of `faults` in its `filters`: at
+    /// the fault's bytes, when it has a place in the data as written
+    /// (`data`, in the file), else at the data.
+    fn faulted(
+        &mut self,
+        id: ObjectId,
+        data: Option<Span>,
+        written: Option<Span>,
+        filters: &[Filter],
+        faults: Vec<(usize, Fault)>,
+    ) {
+        for (i, fault) in faults {
+            let at = match (i, place(&fault), written) {
+                (0, Some(at), Some(written)) => {
+                    Some(span(written.start + at, written.start + at + 1))
+                }
+                _ => data,
+            };
+            let name = filter_name(&filters[i]);
+            let message = format!("its data doesn't decode cleanly through /{name}: {fault}");
+            let warning = Warning {
+                object: Some(id),
+                at,
+                message,
+            };
+            // A stream two sections name, as a hybrid file's `/XRefStm`
+            // can be, is decoded for each, and said once.
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+    }
+
+    /// Object stream `id`'s data, decoded from its own, its filters'
+    /// values followed where they're references to `objects`.
+    fn object_stream(
+        &mut self,
+        id: ObjectId,
+        object: &Object,
+        objects: &BTreeMap<ObjectId, Result<Object, String>>,
+    ) -> Result<Vec<u8>, String> {
+        let Value::Stream(stream) = &object.value else {
+            return Err("it isn't a stream".to_string());
+        };
+        // Not decoded, and so not counted against the budget, unless it's
+        // an object stream: its header says why it's not.
+        if stream.dict.get(b"Type").and_then(Object::as_name) != Some(b"ObjStm") {
+            return Ok(Vec::new());
+        }
+        let data = (stream.data)
+            .filter(|at| at.stream.is_none())
+            .and_then(|at| self.file.get(at.start..at.end))
+            .unwrap_or_default();
+        let resolve = |id| objects.get(&id)?.as_ref().ok();
+        let filters = filter::filters(&stream.dict, Some(&resolve))?;
+        // In an encrypted file, decrypted first: by its own crypt filter
+        // when it names one, else as the file's streams are. In one no
+        // password opened whose streams aren't encrypted, its own crypt
+        // filter may yet encrypt it.
+        let crypt = filter::crypt_filter(&stream.dict, Some(&resolve));
+        if self.handler.is_none()
+            && self.encrypts
+            && let Some(name) = crypt.as_deref().filter(|&name| name != b"Identity")
+        {
+            let name = String::from_utf8_lossy(name);
+            return Err(format!(
+                "its own /Crypt filter, /{name}, encrypts it, and no password the reader was given opens the file"
+            ));
+        }
+        let decrypted = (self.handler.as_ref()).map(|handler| {
+            let method = crypt.map(|name| handler.named(&name));
+            handler.decrypt_stream(id, data, method.as_ref())
+        });
+        let (data, exact) = match decrypted {
+            None => (data.to_vec(), true),
+            Some(Ok(plain)) => (plain, false),
+            Some(Err(error)) => {
+                let fault = error.fault;
+                let message = format!("its data doesn't decrypt cleanly: {fault}");
+                self.warn(Some(id), stream.data, message);
+                match error.data {
+                    Some(plain) => (plain, false),
+                    None => return Err(format!("its data doesn't decrypt: {fault}")),
+                }
+            }
+        };
+        if filters.is_empty() {
+            return Ok(data);
+        }
+        let (decoded, faults) = self.decode_stream(&data, &filters, STREAM);
+        if faults.iter().any(|(_, fault)| stops(fault)) {
+            self.cut.insert(id);
+        }
+        // A fault's place is in the data as written only when it wasn't
+        // decrypted first.
+        let at = stream.data.filter(|_| exact);
+        self.faulted(id, stream.data, at, &filters, faults);
+        Ok(decoded)
     }
 
     /// What the decoder makes of `ids`; nothing without one.
@@ -464,10 +799,15 @@ impl<'a> Reader<'a> {
                 }
             };
             next = section.prev;
+            if let Some(Value::Ref(id)) = section.trailer.dict().get(b"Encrypt").map(|o| &o.value) {
+                self.dictionaries.insert(*id);
+            }
             sections.push(section);
             offsets.push(offset);
         }
+        // Asked of the decoder only when the reader is made to.
         let compressed: Vec<ObjectId> = (sections.iter())
+            .filter(|_| !self.native)
             .filter_map(|s| s.stream.as_ref())
             .filter(|(_, _, stream)| filters(stream).is_some())
             .map(|(_, id, _)| *id)
@@ -512,8 +852,22 @@ impl<'a> Reader<'a> {
                     .collect();
                 self.update = Some(Update { objects, previous });
             }
+            let most = self.listable;
+            let mut past = 0usize;
             for (n, entry) in entries {
-                self.entries.entry(n).or_insert(entry);
+                match self.entries.len() < most || self.entries.contains_key(&n) {
+                    true => {
+                        self.entries.entry(n).or_insert(entry);
+                    }
+                    false => past += 1,
+                }
+            }
+            if past > 0 {
+                let message = format!(
+                    "the cross-reference sections list {past} objects past the first {most}, as many as the reader reads of a file of {} bytes, which aren't read",
+                    self.file.len()
+                );
+                self.warn(None, None, message);
             }
             trailer.get_or_insert(section.trailer);
         }
@@ -666,9 +1020,10 @@ impl<'a> Reader<'a> {
     }
 
     /// The rows of cross-reference stream `id`, written at `offset`, read
-    /// by its `/W` and `/Index` (ISO 32000-2, 7.5.8): from its data in plain
-    /// view, or decoded, as `decoded` has it. A section's `own` stream
-    /// lists itself; a hybrid table's `/XRefStm` is listed by the table.
+    /// by its `/W` and `/Index` (ISO 32000-2, 7.5.8): from its data, decoded
+    /// from its own (or, when the reader is made to ask the decoder, as
+    /// `decoded` has it). A section's `own` stream lists itself; a hybrid
+    /// table's `/XRefStm` is listed by the table.
     fn rows(
         &mut self,
         offset: usize,
@@ -684,16 +1039,6 @@ impl<'a> Reader<'a> {
         let written = (stream.data)
             .and_then(|at| self.file.get(at.start..at.end))
             .unwrap_or_default();
-        let decoded = match (filters(object), decoded) {
-            (None, _) => Ok(written),
-            (Some(_), Some(Ok(data))) => Ok(&data[..]),
-            (Some(filter), Some(Err(why))) => Err(format!(
-                "its cross-reference stream ({filter}) doesn't decode: {why}"
-            )),
-            (Some(filter), None) => Err(format!(
-                "its cross-reference stream is compressed ({filter}), and nothing decodes it"
-            )),
-        };
         let widths: Option<Vec<usize>> = match dict.get(b"W").map(|w| &w.value) {
             Some(Value::Array(w)) if w.len() == 3 => (w.iter())
                 .map(|n| {
@@ -724,42 +1069,112 @@ impl<'a> Reader<'a> {
             )],
         };
         let row = widths.iter().sum::<usize>();
-        // A decoder finds a stream by its number, which a later update can
-        // give another object; then the data it gives isn't the size this
-        // stream's rows are, and it's decoded from its bytes instead.
         let rows_size = (index.iter())
             .try_fold(0usize, |size, &(_, count)| {
                 size.checked_add(usize::try_from(count).ok()?)
             })
             .and_then(|count| count.checked_mul(row));
-        let (n, g) = id;
-        let decoded = decoded.and_then(|data| match filters(object) {
-            Some(_) if rows_size != Some(data.len()) => Err(format!(
-                "decoded, it's {} bytes, not the {} its /W and /Index make: the decoder may have decoded another object {n} {g} R",
-                data.len(),
-                rows_size.map_or("many".to_string(), |size| size.to_string()),
-            )),
-            _ => Ok(data),
-        });
         let again;
-        let data: &[u8] = match decoded {
-            Ok(data) => data,
-            Err(why) => {
-                again = (self.decoder)
-                    .zip(self.written(dict, written))
-                    .and_then(|(decoder, stream)| decoder.decode_written(stream).ok())
-                    // Its own data, which may run on past its rows, as
-                    // data that's not compressed may.
-                    .filter(|data| rows_size.is_some_and(|size| data.len() >= size))
-                    .ok_or(why)?;
-                &again
+        let data: &[u8] = match self.native {
+            // From its own data, in any file: a cross-reference stream is
+            // never encrypted (ISO 32000-2, 7.5.8.1), and its dictionary's
+            // values are direct (7.5.8.2). What runs past its rows, which
+            // aren't read, isn't decoded.
+            true => {
+                let filters = filter::filters(dict, None)
+                    .map_err(|why| format!("its cross-reference stream doesn't decode: {why}"))?;
+                match filters.is_empty() {
+                    true => written,
+                    false => {
+                        // A predictor's rows are read whole: its rows, and
+                        // one of the predictor's past them.
+                        let limit = rows_size
+                            .map_or(STREAM, |size| size.saturating_add(predictor_row(&filters)));
+                        let (decoded, mut faults) = self.decode_stream(written, &filters, limit);
+                        // Data that runs past its rows is cut off there,
+                        // as data that's not filtered is read only so far:
+                        // with its rows whole, the limit cut only what's
+                        // past them, and a predictor row past them isn't
+                        // read.
+                        if let Some(size) = rows_size.filter(|&size| decoded.len() >= size) {
+                            let row = predictor_row(&filters);
+                            faults.retain(|(_, fault)| match *fault {
+                                Fault::Limit => false,
+                                Fault::RowTag { row: i, .. } => i.saturating_mul(row) < size,
+                                Fault::PartialRow { .. } => {
+                                    decoded.len().saturating_sub(row) < size
+                                }
+                                _ => true,
+                            });
+                        }
+                        self.faulted(id, stream.data, stream.data, &filters, faults);
+                        again = decoded;
+                        &again
+                    }
+                }
+            }
+            false => {
+                let decoded = match (filters(object), decoded) {
+                    (None, _) => Ok(written),
+                    (Some(_), Some(Ok(data))) => Ok(&data[..]),
+                    (Some(filter), Some(Err(why))) => Err(format!(
+                        "its cross-reference stream ({filter}) doesn't decode: {why}"
+                    )),
+                    (Some(filter), None) => Err(format!(
+                        "its cross-reference stream is compressed ({filter}), and nothing decodes it"
+                    )),
+                };
+                // A decoder finds a stream by its number, which a later
+                // update can give another object; then the data it gives
+                // isn't the size this stream's rows are, and it's decoded
+                // from its bytes instead.
+                let (n, g) = id;
+                let decoded = decoded.and_then(|data| match filters(object) {
+                    Some(_) if rows_size != Some(data.len()) => Err(format!(
+                        "decoded, it's {} bytes, not the {} its /W and /Index make: the decoder may have decoded another object {n} {g} R",
+                        data.len(),
+                        rows_size.map_or("many".to_string(), |size| size.to_string()),
+                    )),
+                    _ => Ok(data),
+                });
+                match decoded {
+                    Ok(data) => data,
+                    Err(why) => {
+                        again = (self.decoder)
+                            .zip(self.written(dict, written))
+                            .and_then(|(decoder, stream)| decoder.decode_written(stream).ok())
+                            // Its own data, which may run on past its
+                            // rows, as data that's not compressed may.
+                            .filter(|data| rows_size.is_some_and(|size| data.len() >= size))
+                            .ok_or(why)?;
+                        &again
+                    }
+                }
             }
         };
         let field = |bytes: &[u8]| bytes.iter().fold(0u64, |n, &b| (n << 8) | u64::from(b));
         let mut rows = data.chunks_exact(row.max(1));
         let mut entries = BTreeMap::new();
+        // No more entries than [`listable`] allows, so that a small stream
+        // can't list hundreds of millions.
+        let most = self.listable;
+        let mut left = u32::try_from(most).unwrap_or(u32::MAX);
+        let mut past = 0usize;
         for (start, count) in index {
+            let fit = count.min(left);
+            left -= fit;
+            let skip = usize::try_from(count - fit).unwrap_or(usize::MAX);
+            past = past.saturating_add(skip);
             for i in 0..count {
+                if i == fit {
+                    if rows.len() < skip {
+                        return Err("its data ends before its /Index does".to_string());
+                    }
+                    if skip > 0 {
+                        rows.nth(skip - 1);
+                    }
+                    break;
+                }
                 let bytes = rows.next().ok_or("its data ends before its /Index does")?;
                 let (one, rest) = bytes.split_at(widths[0]);
                 let (two, three) = rest.split_at(widths[1]);
@@ -786,6 +1201,13 @@ impl<'a> Reader<'a> {
                 };
                 entries.entry(n).or_insert(entry);
             }
+        }
+        if past > 0 {
+            let message = format!(
+                "its rows list {past} entries past the first {most}, as many as the reader reads of a file of {} bytes, which aren't read",
+                self.file.len()
+            );
+            self.warn(Some(id), object.at, message);
         }
         // It lists itself, at the offset it's at (ISO 32000-2, 7.5.8.2).
         let listed = matches!(
@@ -869,16 +1291,46 @@ impl<'a> Reader<'a> {
             }
             before = [before[1], Some(token)];
         }
+        // The last trailer, with what it lacks of the document's entries
+        // from those before it, newest first: a linearized file's last
+        // may have only /Size, its first page's the rest.
+        let mut found: Option<Object> = None;
+        let mut taken = Vec::new();
         for at in trailers.into_iter().rev() {
-            if let Ok(object) = self.value(&mut Tokenizer::at(self.file, at), Place::FILE, 0)
-                && object.as_dict().is_some()
-            {
-                return Trailer {
-                    stream: None,
-                    object,
-                    unwritten: Some(why),
-                };
+            let Ok(object) = self.value(&mut Tokenizer::at(self.file, at), Place::FILE, 0) else {
+                continue;
+            };
+            let Value::Dict(earlier) = object.value.clone() else {
+                continue;
+            };
+            let Some(Object {
+                value: Value::Dict(last),
+                ..
+            }) = &mut found
+            else {
+                found = Some(object);
+                continue;
+            };
+            for key in [&b"Root"[..], b"Encrypt", b"ID", b"Info"] {
+                if let (false, Some(entry)) = (last.has(key), earlier.entry(key)) {
+                    last.push_entry(entry.clone());
+                    taken.push(format!("/{}", String::from_utf8_lossy(key)));
+                }
             }
+        }
+        if let Some(object) = found {
+            if !taken.is_empty() {
+                let message = format!(
+                    "the last trailer lacks {}, which it's given from an earlier one",
+                    taken.join(", ")
+                );
+                self.warn(None, object.at, message);
+            }
+            return Trailer {
+                stream: None,
+                object,
+                unwritten: Some(why),
+            };
         }
         let mut offsets: Vec<(usize, ObjectId)> = (self.entries.iter())
             .filter_map(|(&n, &(g, entry))| match entry {
@@ -909,23 +1361,30 @@ impl<'a> Reader<'a> {
     /// `/Encrypt`: they are unless its crypt filter for strings is
     /// `/Identity`, which a version 4 or later dictionary has by default
     /// (ISO 32000-2, 7.6.5). The encryption dictionary's own strings never
-    /// are, nor those in object streams, which are encrypted whole.
+    /// are, an earlier update's either, nor those in object streams, which
+    /// are encrypted whole.
     fn encryption(&mut self, trailer: &Trailer) {
         let Some(encrypt) = trailer.dict().get(b"Encrypt") else {
             return;
         };
-        let (dict, own) = match &encrypt.value {
+        let (dict, own, why) = match &encrypt.value {
             // A null is no entry, and so is a reference to no object (ISO
             // 32000-2, 7.3.9 and 7.3.10).
             Value::Null => return,
             Value::Ref(id) => match self.entries.get(&id.0) {
                 Some(&(_, XrefEntry::InUse { offset, .. })) => {
                     match self.indirect(offset, Some(*id)) {
-                        Ok((_, object)) => (object.as_dict().cloned(), Some(*id)),
-                        Err(_) => (None, Some(*id)),
+                        Ok((_, object)) => {
+                            (object.as_dict().cloned(), Some(*id), "isn't a dictionary")
+                        }
+                        Err(_) => (None, Some(*id), "doesn't read"),
                     }
                 }
-                Some((_, XrefEntry::Compressed { .. })) => (None, Some(*id)),
+                Some((_, XrefEntry::Compressed { .. })) => (
+                    None,
+                    Some(*id),
+                    "is in an object stream, which it can't be (ISO 32000-2, 7.5.7)",
+                ),
                 None | Some((_, XrefEntry::Free)) => {
                     let (n, g) = id;
                     let message = format!(
@@ -935,18 +1394,145 @@ impl<'a> Reader<'a> {
                     return;
                 }
             },
-            Value::Dict(dict) => (Some(dict.clone()), None),
-            _ => (None, None),
+            Value::Dict(dict) => (Some(dict.clone()), None, ""),
+            _ => (None, None, "isn't a dictionary"),
         };
         self.encrypts = true;
-        if let Some(dict) = &dict {
-            let version = dict.get(b"V").and_then(Object::as_integer).unwrap_or(0);
-            let filter = dict.get(b"StrF").and_then(Object::as_name);
-            if version >= 4 && filter.is_none_or(|f| f == b"Identity") {
-                return;
+        self.encryption = match &dict {
+            None => Encryption::Unsupported(format!("its /Encrypt {why}")),
+            Some(dict) => self.open(dict, trailer, own),
+        };
+        // On the trailer, whose /Encrypt it's about.
+        if let Encryption::Unsupported(why) = &self.encryption {
+            let strings = match self.plain_strings {
+                true => "",
+                false => "its strings stay ciphertext, and ",
+            };
+            let message = format!(
+                "its security handler doesn't open: {why}; {strings}its object streams aren't read"
+            );
+            self.warn(None, encrypt.at, message);
+        }
+        if self.plain_strings {
+            return;
+        }
+        let earlier = std::mem::take(&mut self.dictionaries);
+        self.encrypted = Some(own.into_iter().chain(earlier).collect());
+    }
+
+    /// The security handler of encryption dictionary `dict` (object `own`,
+    /// when it's indirect), opened by the reader's passwords, as far as it
+    /// opens; its values followed where they're references, which are its
+    /// own, so not encrypted. Whether its strings and metadata are plain
+    /// is set by it.
+    fn open(&mut self, dict: &Dict, trailer: &Trailer, own: Option<ObjectId>) -> Encryption {
+        let mut get = |o: Option<&Object>| -> Option<Object> {
+            let o = o?;
+            match &o.value {
+                Value::Ref(id) => match self.entries.get(&id.0) {
+                    Some(&(_, XrefEntry::InUse { offset, .. })) => {
+                        self.dictionaries.insert(*id);
+                        self.indirect(offset, Some(*id)).ok().map(|(_, o)| o)
+                    }
+                    _ => None,
+                },
+                _ => Some(o.clone()),
+            }
+        };
+        let bytes = |o: Option<Object>| match o.map(|o| o.value) {
+            Some(Value::String(s)) => Some(s.as_bytes().map(<[u8]>::to_vec).unwrap_or_default()),
+            _ => None,
+        };
+        let name = |o: Option<Object>| o.and_then(|o| o.as_name().map(<[u8]>::to_vec));
+        let integer = |o: Option<Object>| o.and_then(|o| o.as_integer());
+        let mut crypt_filters = Vec::new();
+        if let Some(Value::Dict(filters)) = get(dict.get(b"CF")).map(|o| o.value) {
+            for (name, filter) in filters.iter() {
+                let method = match get(Some(filter)).map(|o| o.value) {
+                    Some(Value::Dict(filter)) => (get(filter.get(b"CFM")).as_ref())
+                        .and_then(Object::as_name)
+                        .map(<[u8]>::to_vec),
+                    _ => None,
+                };
+                crypt_filters.push(pdf_crypt::CryptFilter {
+                    name: name.to_vec(),
+                    method,
+                });
             }
         }
-        self.encrypted = Some(own.into_iter().collect());
+        let values = pdf_crypt::Dictionary {
+            filter: name(get(dict.get(b"Filter"))).unwrap_or_default(),
+            v: integer(get(dict.get(b"V"))).unwrap_or(0),
+            r: integer(get(dict.get(b"R"))).unwrap_or(0),
+            length: integer(get(dict.get(b"Length"))),
+            o: bytes(get(dict.get(b"O"))),
+            u: bytes(get(dict.get(b"U"))),
+            oe: bytes(get(dict.get(b"OE"))),
+            ue: bytes(get(dict.get(b"UE"))),
+            perms: bytes(get(dict.get(b"Perms"))),
+            p: integer(get(dict.get(b"P"))),
+            encrypt_metadata: match get(dict.get(b"EncryptMetadata")).map(|o| o.value) {
+                Some(Value::Bool(b)) => Some(b),
+                _ => None,
+            },
+            crypt_filters,
+            stm_f: name(get(dict.get(b"StmF"))),
+            str_f: name(get(dict.get(b"StrF"))),
+        };
+        // The file's first /ID element, as qpdf takes it: empty, said once
+        // the standard handler takes the dictionary, when it isn't a string.
+        let id = match get(trailer.dict().get(b"ID")).map(|o| o.value) {
+            Some(Value::Array(id)) => match id.first().map(|o| &o.value) {
+                Some(Value::String(s)) => s.as_bytes().map(<[u8]>::to_vec),
+                _ => None,
+            },
+            _ => None,
+        };
+        let no_id = id.is_none();
+        let passwords: Vec<&[u8]> = self.passwords.iter().map(Vec::as_slice).collect();
+        let opened = Handler::open(&values, id.as_deref().unwrap_or_default(), &passwords);
+        if no_id && !matches!(opened, Err(pdf_crypt::Refused::Unsupported(_))) {
+            let at = trailer.dict().get(b"ID").and_then(|o| o.at);
+            let message = "its trailer's /ID has no string first, so its key is made without one";
+            self.warn(None, at, message.to_string());
+        }
+        self.plain_strings = match &opened {
+            Ok(handler) => matches!(handler.strings(), Method::Identity | Method::None),
+            Err(_) => values.v >= 4 && (values.str_f.as_deref()).is_none_or(|f| f == b"Identity"),
+        };
+        // Neither, when no crypt filter encrypts them (from /V 4), whatever
+        // the handler.
+        let identity = |f: &Option<Vec<u8>>| f.as_deref().is_none_or(|f| f == b"Identity");
+        let plain_streams = match &opened {
+            Ok(handler) => matches!(handler.streams(), Method::Identity | Method::None),
+            Err(_) => values.v >= 4 && identity(&values.stm_f),
+        };
+        self.plain_metadata = plain_streams
+            || match &opened {
+                Ok(handler) => !handler.encrypts_metadata(),
+                Err(_) => values.v >= 4 && values.encrypt_metadata == Some(false),
+            };
+        match opened {
+            Ok(handler) => {
+                for fault in handler.faults() {
+                    self.warn(
+                        own,
+                        None,
+                        format!("its encryption dictionary isn't right: {fault}"),
+                    );
+                }
+                let owner = handler.owner();
+                self.handler = Some(handler);
+                Encryption::Opened { owner }
+            }
+            // Its strings and streams aren't encrypted, as when only its
+            // embedded files are: what handler it is, or the password, no
+            // matter (but a stream's own crypt filter).
+            Err(_) if self.plain_strings && plain_streams => Encryption::Plain,
+            Err(pdf_crypt::Refused::Password) => Encryption::Locked,
+            Err(pdf_crypt::Refused::Unsupported(why)) => Encryption::Unsupported(why),
+            Err(refused) => Encryption::Unsupported(refused.to_string()),
+        }
     }
 
     /// Every object the entries list: each in use read at its offset, then
@@ -981,26 +1567,42 @@ impl<'a> Reader<'a> {
             }
         }
         let streams: BTreeSet<u32> = compressed.iter().map(|&(_, stream, _)| stream).collect();
-        // An object stream without filters, in a file that doesn't
-        // encrypt, is in plain view: its data is as written.
-        let plain: BTreeMap<u32, Vec<u8>> = (streams.iter())
-            .filter(|_| !self.encrypts)
-            .filter_map(|&n| {
-                let object = objects.get(&(n, 0))?.as_ref().ok()?;
-                let Value::Stream(stream) = &object.value else {
-                    return None;
-                };
-                let at = stream.data.filter(|at| at.stream.is_none())?;
-                let data = self.file.get(at.start..at.end)?;
-                filters(object).is_none().then(|| (n, data.to_vec()))
-            })
-            .collect();
-        let ids: Vec<ObjectId> = (streams.iter())
-            .filter(|n| !plain.contains_key(n))
-            .map(|&n| (n, 0))
-            .collect();
-        let mut decoded = self.decode(&ids);
-        decoded.extend(plain.into_iter().map(|(n, data)| ((n, 0), Ok(data))));
+        // In a file that doesn't encrypt, or whose handler opened, or whose
+        // streams aren't encrypted, each decoded from its own data; else
+        // asked of the decoder.
+        let plain = self.encryption == Encryption::Plain;
+        let native = self.native && (!self.encrypts || self.handler.is_some() || plain);
+        let mut decoded = match native {
+            true => (streams.iter())
+                .filter_map(|&n| {
+                    let object = objects.get(&(n, 0))?.as_ref().ok()?;
+                    Some(((n, 0), self.object_stream((n, 0), object, &objects)))
+                })
+                .collect(),
+            false => {
+                // An object stream without filters, in a file that doesn't
+                // encrypt, is in plain view: its data is as written.
+                let plain: BTreeMap<u32, Vec<u8>> = (streams.iter())
+                    .filter(|_| !self.encrypts)
+                    .filter_map(|&n| {
+                        let object = objects.get(&(n, 0))?.as_ref().ok()?;
+                        let Value::Stream(stream) = &object.value else {
+                            return None;
+                        };
+                        let at = stream.data.filter(|at| at.stream.is_none())?;
+                        let data = self.file.get(at.start..at.end)?;
+                        filters(object).is_none().then(|| (n, data.to_vec()))
+                    })
+                    .collect();
+                let ids: Vec<ObjectId> = (streams.iter())
+                    .filter(|n| !plain.contains_key(n))
+                    .map(|&n| (n, 0))
+                    .collect();
+                let mut decoded = self.decode(&ids);
+                decoded.extend(plain.into_iter().map(|(n, data)| ((n, 0), Ok(data))));
+                decoded
+            }
+        };
         let mut headers: BTreeMap<u32, Result<Vec<(u32, usize)>, String>> = BTreeMap::new();
         for &stream in &streams {
             let id = (stream, 0);
@@ -1015,12 +1617,12 @@ impl<'a> Reader<'a> {
                             "it's in object stream {stream} 0 R, and nothing decodes that"
                         )),
                     };
-                    // In a file that isn't encrypted, a stream the decoder
-                    // can't decode by its number, or decodes as another
-                    // object's, is decoded from its bytes.
+                    // Asked of the decoder in a file that isn't encrypted,
+                    // a stream it can't decode by its number, or decodes as
+                    // another object's, is decoded from its bytes.
                     let decoded = by_number.or_else(|why| {
                         (self.decoder)
-                            .filter(|_| !self.encrypts)
+                            .filter(|_| !self.encrypts && !native)
                             .zip(self.written_stream(object))
                             .and_then(|(decoder, written)| decoder.decode_written(written).ok())
                             .and_then(|data| {
@@ -1049,6 +1651,34 @@ impl<'a> Reader<'a> {
             objects.insert(id, object);
         }
         objects
+    }
+
+    /// In an encrypted file it opened, the strings in plain view decrypted,
+    /// each where it is, but a signature's `/Contents`, which isn't
+    /// encrypted; one that doesn't decrypt cleanly said, once an object and
+    /// a fault.
+    fn decrypt_strings(&mut self, objects: &mut BTreeMap<ObjectId, Result<Object, String>>) {
+        let Some(handler) = self.handler.take() else {
+            return;
+        };
+        for (&id, object) in objects.iter_mut() {
+            let Ok(object) = object else {
+                continue;
+            };
+            if ciphertexts(&object.value) == 0 {
+                continue;
+            }
+            let mut faults: BTreeMap<String, (usize, Option<Span>)> = BTreeMap::new();
+            plaintext(object, id, &handler, &mut faults);
+            for (fault, (count, at)) in faults {
+                let message = match count {
+                    1 => format!("a string of it doesn't decrypt cleanly: {fault}"),
+                    n => format!("{n} of its strings don't decrypt cleanly: {fault}"),
+                };
+                self.warn(Some(id), at, message);
+            }
+        }
+        self.handler = Some(handler);
     }
 
     /// In an encrypted file, the strings in plain view decrypted: the
@@ -1118,15 +1748,36 @@ impl<'a> Reader<'a> {
                 stream.0, id.0
             ));
         }
-        let data = &self.decoded[&stream];
-        // Copied, as `value` borrows the reader while it reads.
-        let data = data.clone();
+        // Taken out while it's read, as `value` borrows the reader, and put
+        // back.
+        let Some(data) = self.decoded.get_mut(&stream).map(std::mem::take) else {
+            return Err(format!("object stream {} 0 R has no data", stream.0));
+        };
         let place = Place {
             object: Some(id),
             stream: Some(stream),
             ciphertext: false,
         };
-        self.value(&mut Tokenizer::at(&data, offset), place, 0)
+        let object = self.value(&mut Tokenizer::at(&data, offset), place, 0);
+        // One that runs to where a fault cut the data off may be cut short,
+        // when it's a value nothing closes: a number, a name, a keyword.
+        let open = |o: &Object| {
+            !matches!(
+                o.value,
+                Value::String(_) | Value::Array(_) | Value::Dict(_) | Value::Stream(_)
+            )
+        };
+        let cut = self.cut.contains(&stream)
+            && (object.as_ref())
+                .is_ok_and(|o| open(o) && o.at.is_some_and(|at| at.end == data.len()));
+        self.decoded.insert(stream, data);
+        match cut {
+            true => Err(format!(
+                "it runs to where a fault cut object stream {} 0 R's data off, so it may be cut short",
+                stream.0
+            )),
+            false => object,
+        }
     }
 
     /// The indirect object at `offset`: `n g obj`, a value (a dictionary
@@ -1467,6 +2118,53 @@ fn is_xref_stream(o: &Object) -> bool {
     matches!(&o.value, Value::Stream(s) if s.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef"))
 }
 
+/// `o`'s ciphertext strings, of object `id`, decrypted by `handler`, each
+/// where it is; a signature's `/Contents` (a dictionary with `/ByteRange`
+/// and a string `/Contents`, of `/Type /Sig`, `/DocTimeStamp` or none)
+/// taken as plain, as it isn't encrypted (ISO 32000-2, 7.6.2). Each fault
+/// counted in `faults`, with where it was first.
+fn plaintext(
+    o: &mut Object,
+    id: ObjectId,
+    handler: &Handler,
+    faults: &mut BTreeMap<String, (usize, Option<Span>)>,
+) {
+    let at = o.at;
+    match &mut o.value {
+        Value::String(s) => {
+            if let Str::Encrypted(bytes) = s {
+                match handler.decrypt_string(id, bytes) {
+                    Ok(plain) => *s = Str::Bytes(plain),
+                    Err(error) => {
+                        faults.entry(error.fault.to_string()).or_insert((0, at)).0 += 1;
+                        if let Some(plain) = error.data {
+                            *s = Str::Bytes(plain);
+                        }
+                    }
+                }
+            }
+        }
+        Value::Array(a) => {
+            for o in a {
+                plaintext(o, id, handler, faults);
+            }
+        }
+        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
+            let contents = matches!(d.get(b"Contents").map(|c| &c.value), Some(Value::String(_)));
+            let typed = (d.get(b"Type"))
+                .is_none_or(|t| matches!(t.as_name(), Some(b"Sig" | b"DocTimeStamp")));
+            let signature = d.has(b"ByteRange") && contents && typed;
+            for entry in d.entries_mut() {
+                match signature && entry.key == b"Contents" {
+                    true => plain_strings(&mut entry.value),
+                    false => plaintext(&mut entry.value, id, handler, faults),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// `o` with each string in it taken as plain, not ciphertext.
 fn plain_strings(o: &mut Object) {
     let mut stack = vec![o];
@@ -1583,10 +2281,21 @@ mod tests {
     fn reader(file: &[u8]) -> Reader<'_> {
         Reader {
             file,
+            passwords: Vec::new(),
+            handler: None,
+            encryption: Encryption::None,
+            native: true,
+            stream: STREAM,
+            budget: BUDGET,
+            listable: listable(file.len()),
+            cut: HashSet::new(),
             decoder: None,
             warnings: Vec::new(),
             entries: BTreeMap::new(),
             encrypted: None,
+            dictionaries: HashSet::new(),
+            plain_strings: false,
+            plain_metadata: false,
             encrypts: false,
             resolving: false,
             decoded: BTreeMap::new(),
@@ -1916,7 +2625,7 @@ mod tests {
         let update = doc.update.expect("an update");
         assert_eq!(update.objects, BTreeSet::from([(2, 0)]));
         assert_eq!(update.previous, prev);
-        let before = read_from(&file, &BTreeMap::new(), update.previous);
+        let before = read_from(&file, update.previous);
         assert!(before.warnings.is_empty(), "{:?}", before.warnings);
         assert_eq!(before.ids(), [(1, 0), (2, 0), (3, 0)]);
         let a = before.get((2, 0)).unwrap().as_dict().unwrap().get(b"A");
@@ -2116,7 +2825,7 @@ mod tests {
         // A previous revision's end isn't the file's: an update's isn't asked.
         let (file, _) = updated_with_padding();
         assert!(
-            read_from(&file, &BTreeMap::new(), startxref_of_first(&file))
+            read_from(&file, startxref_of_first(&file))
                 .warnings
                 .iter()
                 .all(|w| !w.message.contains("%%EOF"))
@@ -2216,6 +2925,29 @@ mod tests {
         let doc = read(&file);
         assert_eq!(doc.trailer.unwritten.as_deref(), Some("no startxref"));
         assert_eq!(doc.trailer.stream, Some((6, 0)));
+    }
+
+    #[test]
+    fn a_scanned_files_last_trailer_takes_what_it_lacks_from_an_earlier_one() {
+        // As a linearized file's: the first page's trailer has /Root and
+        // /ID, the last only /Size; and startxref misses.
+        let mut file = write::file("1.7", &clean(), root(), Xref::Table);
+        let at = rfind(&file, b"startxref").unwrap();
+        file.truncate(at);
+        file.extend_from_slice(b"trailer\n<< /Size 6 /Root 9 0 R >>\ntrailer\n<< /Size 6 >>\nstartxref\n999999\n%%EOF\n");
+        let doc = read(&file);
+        let root = doc.trailer.dict().get(b"Root").and_then(|r| match r.value {
+            Value::Ref(id) => Some(id),
+            _ => None,
+        });
+        // The newest earlier trailer's /Root, said.
+        assert_eq!(root, Some((9, 0)));
+        let message = "the last trailer lacks /Root, which it's given from an earlier one";
+        assert!(
+            doc.warnings.iter().any(|w| w.message == message),
+            "{:?}",
+            doc.warnings
+        );
     }
 
     #[test]
@@ -2448,8 +3180,7 @@ mod tests {
         for (i, path) in files.iter().enumerate() {
             let data = std::fs::read(path).unwrap();
             let start = Instant::now();
-            let qpdf = crate::qpdf::Qpdf::new(path);
-            let doc = match std::panic::catch_unwind(|| read_with(&data, &qpdf)) {
+            let doc = match std::panic::catch_unwind(|| read_opened(&data, &[])) {
                 Ok(doc) => doc,
                 Err(_) => panic!("{} panicked", path.display()),
             };
@@ -2524,30 +3255,57 @@ mod tests {
     }
 
     /// A file whose cross-reference stream and object stream are both
-    /// compressed, their data junk a decoder replaces: objects 2 and 3 are
-    /// in object stream 4, and the cross-reference stream is 5. With
-    /// `encrypted`, the trailer says the file is.
+    /// compressed: objects 2 and 3 are in object stream 4, and the
+    /// cross-reference stream is 5. With `encrypted`, the trailer says the
+    /// file is, and the object stream's data is junk a decoder replaces,
+    /// as given.
     fn compressed(encrypted: bool) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
+        let (file, mut decoded) = streams(encrypted, true, b"", None);
+        decoded.remove(&(5, 0));
+        if !encrypted {
+            decoded.clear();
+        }
+        (file, decoded)
+    }
+
+    /// [`compressed`]'s file with both streams' data junk, which only a
+    /// decoder asked for every stream ([`read_through`]) decodes, as given.
+    fn junk(encrypted: bool) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
+        streams(encrypted, false, b"", None)
+    }
+
+    /// The file [`compressed`] and [`junk`] write, its streams' data zlib
+    /// data when `real` (but an encrypted file's object stream), else
+    /// junk, the cross-reference stream's rows followed by `past`, and
+    /// with `png`, PNG-predicted (by none) in rows of that many columns,
+    /// the last filled out with zeros; and what each decodes to.
+    fn streams(
+        encrypted: bool,
+        real: bool,
+        past: &[u8],
+        png: Option<usize>,
+    ) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
         let (objects, first) = objects_2_and_3();
         let mut file = b"%PDF-1.7\n".to_vec();
         let one = file.len();
         file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Lang (en) >>\nendobj\n");
         let four = file.len();
+        let data = match real && !encrypted {
+            true => write::zlib(&objects),
+            false => b"OBJS".to_vec(),
+        };
         file.extend_from_slice(
-            format!("4 0 obj\n<< /Type /ObjStm /N 2 /First {first} /Filter /FlateDecode /Length 4 >>\nstream\nOBJS\nendstream\nendobj\n")
+            format!("4 0 obj\n<< /Type /ObjStm /N 2 /First {first} /Filter /FlateDecode /Length {} >>\nstream\n", data.len())
                 .as_bytes(),
         );
+        file.extend_from_slice(&data);
+        file.extend_from_slice(b"\nendstream\nendobj\n");
         let five = file.len();
         let encrypt = if encrypted {
             " /Encrypt << /Filter /Standard /V 2 >>"
         } else {
             ""
         };
-        file.extend_from_slice(
-            format!("5 0 obj\n<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R{encrypt} /Filter /FlateDecode /Length 4 >>\nstream\nJUNK\nendstream\nendobj\n")
-                .as_bytes(),
-        );
-        file.extend_from_slice(format!("startxref\n{five}\n%%EOF\n").as_bytes());
         let rows = [
             xref_row(0, 0, 255),
             xref_row(1, one, 0),
@@ -2557,6 +3315,29 @@ mod tests {
             xref_row(1, five, 0),
         ]
         .concat();
+        let mut written = [&rows[..], past].concat();
+        let parms = match png {
+            Some(columns) => {
+                written.resize(written.len().div_ceil(columns) * columns, 0);
+                written = (written.chunks(columns))
+                    .flat_map(|row| [&[0][..], row].concat())
+                    .collect();
+                format!(" /DecodeParms << /Predictor 12 /Columns {columns} >>")
+            }
+            None => String::new(),
+        };
+        let data = match real {
+            true => write::zlib(&written),
+            false => b"JUNK".to_vec(),
+        };
+        file.extend_from_slice(
+            format!("5 0 obj\n<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R{encrypt} /Filter /FlateDecode{parms} /Length {} >>\nstream\n", data.len())
+                .as_bytes(),
+        );
+        file.extend_from_slice(&data);
+        file.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes(),
+        );
         let decoded = BTreeMap::from([((5, 0), rows), ((4, 0), objects)]);
         (file, decoded)
     }
@@ -2565,17 +3346,24 @@ mod tests {
     /// trailer that the file is: [`compressed`]'s objects, with neither
     /// stream filtered.
     fn unfiltered(encrypted: bool) -> Vec<u8> {
-        let (objects, first) = objects_2_and_3();
+        let (objects, _) = objects_2_and_3();
+        filtered(encrypted, "", &objects)
+    }
+
+    /// [`unfiltered`]'s file, its object stream's dictionary given
+    /// `filter`'s entries, and its data `data`.
+    fn filtered(encrypted: bool, filter: &str, data: &[u8]) -> Vec<u8> {
+        let (_, first) = objects_2_and_3();
         let mut file = b"%PDF-1.7\n".to_vec();
         let one = file.len();
         file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Lang (en) >>\nendobj\n");
         let four = file.len();
-        let length = objects.len();
+        let length = data.len();
         file.extend_from_slice(
-            format!("4 0 obj\n<< /Type /ObjStm /N 2 /First {first} /Length {length} >>\nstream\n")
+            format!("4 0 obj\n<< /Type /ObjStm /N 2 /First {first}{filter} /Length {length} >>\nstream\n")
                 .as_bytes(),
         );
-        file.extend_from_slice(&objects);
+        file.extend_from_slice(data);
         file.extend_from_slice(b"\nendstream\nendobj\n");
         let five = file.len();
         let rows = [
@@ -2633,9 +3421,763 @@ mod tests {
     }
 
     #[test]
+    fn an_object_stream_decodes_through_each_filter_without_a_decoder() {
+        let (objects, _) = objects_2_and_3();
+        let hex = |data: &[u8]| {
+            let digits: String = data.iter().map(|b| format!("{b:02x} ")).collect();
+            format!("{digits}>").into_bytes()
+        };
+        let cases = [
+            (" /Filter /FlateDecode", write::zlib(&objects)),
+            (" /Filter /Fl", write::zlib(&objects)),
+            (" /Filter /LZWDecode", write::lzw(&objects)),
+            (
+                " /Filter /LZW /DecodeParms << /EarlyChange 1 >>",
+                write::lzw(&objects),
+            ),
+            (" /Filter /ASCIIHexDecode", hex(&objects)),
+            (" /Filter /AHx", hex(&objects)),
+            (" /Filter /ASCII85Decode", write::ascii85(&objects)),
+            (" /Filter /A85", write::ascii85(&objects)),
+            (" /Filter /RunLengthDecode", write::run_length(&objects)),
+            (" /Filter /RL", write::run_length(&objects)),
+            (
+                " /Filter [/AHx /Fl] /DecodeParms [null null]",
+                hex(&write::zlib(&objects)),
+            ),
+            (
+                " /Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /Identity >> null]",
+                write::zlib(&objects),
+            ),
+            (" /Filter []", objects.clone()),
+            (" /Filter null", objects.clone()),
+        ];
+        struct Unasked;
+        impl Decode for Unasked {
+            fn decode(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Vec<u8>, String>> {
+                panic!("asked to decode {ids:?}")
+            }
+        }
+        for (filter, data) in cases {
+            let doc = read_with(&filtered(false, filter, &data), &Unasked);
+            assert!(doc.warnings.is_empty(), "{filter}: {:?}", doc.warnings);
+            assert_eq!(doc.decoded[&(4, 0)], objects, "{filter}");
+            assert!(
+                doc.get((2, 0)).is_ok() && doc.get((3, 0)).is_ok(),
+                "{filter}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_streams_faults_are_warnings_on_it_at_their_bytes() {
+        let (objects, _) = objects_2_and_3();
+        let hex: Vec<u8> = (objects.iter())
+            .flat_map(|b| format!("{b:02x}").into_bytes())
+            .collect();
+        let warned = |filter: &str, data: &[u8]| {
+            let file = filtered(false, filter, data);
+            let doc = read(&file);
+            assert!(
+                doc.get((2, 0)).is_ok() && doc.get((3, 0)).is_ok(),
+                "{filter}: what decoded reads"
+            );
+            let [warning] = &doc.warnings[..] else {
+                panic!("{filter}: {:?}", doc.warnings);
+            };
+            assert_eq!(warning.object, Some((4, 0)), "{filter}");
+            let at = warning.at.unwrap();
+            (warning.message.clone(), file[at.start..at.end].to_vec())
+        };
+        // A fault with a place in the data as written: its byte.
+        let (message, at) = warned(" /Filter /AHx", &[&hex[..], b"zz>"].concat());
+        let n = hex.len();
+        let expected = format!(
+            "its data doesn't decode cleanly through /ASCIIHexDecode: byte 0x7a at {n} isn't one it takes"
+        );
+        assert_eq!((message, at), (expected, b"z".to_vec()));
+        // One without: the data.
+        let (message, at) = warned(" /Filter /AHx", &hex);
+        let expected =
+            "its data doesn't decode cleanly through /ASCIIHexDecode: no end-of-data marker";
+        assert_eq!((message.as_str(), at), (expected, hex.clone()));
+        // One in a filter after the first, whose input isn't in the file:
+        // the data. The checksum's last byte gone, everything decoded.
+        let zlib = write::zlib(&objects);
+        let cut: Vec<u8> = (zlib[..zlib.len() - 1].iter())
+            .flat_map(|b| format!("{b:02x}").into_bytes())
+            .collect();
+        let data = [&cut[..], b">"].concat();
+        let (message, at) = warned(" /Filter [/AHx /Fl]", &data);
+        let expected = "its data doesn't decode cleanly through /FlateDecode: the data ends early";
+        assert_eq!((message.as_str(), at), (expected, data.clone()));
+        // A checksum that doesn't match.
+        let mut zlib = zlib;
+        *zlib.last_mut().unwrap() ^= 1;
+        let (message, _) = warned(" /Filter /FlateDecode", &zlib);
+        assert_eq!(
+            message,
+            "its data doesn't decode cleanly through /FlateDecode: the Adler-32 checksum doesn't match"
+        );
+        // A cross-reference stream whose data runs past its rows, as data
+        // that's not filtered may: no fault, its rows PNG-predicted or not.
+        for png in [None, Some(4)] {
+            let (file, _) = streams(false, true, &[0; 40], png);
+            let doc = read(&file);
+            assert!(doc.warnings.is_empty(), "{png:?}: {:?}", doc.warnings);
+            assert!(doc.get((3, 0)).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_cross_reference_streams_predictor_rows_needn_t_divide_its_rows() {
+        // Six rows of four bytes in predictor rows of seven, the last
+        // filled out: read whole, with or without data past them.
+        for past in [&[][..], &[0; 40]] {
+            let (file, _) = streams(false, true, past, Some(7));
+            let doc = read(&file);
+            assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+            assert_eq!(doc.trailer.unwritten, None);
+            assert!(doc.get((3, 0)).is_ok());
+        }
+    }
+
+    #[test]
+    fn objects_past_where_a_fault_cut_an_object_stream_off_dont_read() {
+        // Its stored block cut short, inside object 3: object 2 reads.
+        let (objects, _) = objects_2_and_3();
+        let zlib = write::zlib(&objects);
+        let cut = &zlib[..zlib.len() - 20];
+        let doc = read(&filtered(false, " /Filter /FlateDecode", cut));
+        assert!(doc.get((2, 0)).is_ok());
+        assert!(doc.get((3, 0)).is_err());
+        let truncated = (doc.warnings.iter()).any(|w| w.message.ends_with("the data ends early"));
+        assert!(truncated, "{:?}", doc.warnings);
+    }
+
+    #[test]
+    fn a_number_where_a_fault_cut_an_object_stream_off_doesnt_read() {
+        // Object 3 is 12345, cut off at 123.
+        let objects = b"2 0 3 6 << >>\n12345";
+        let zlib = write::zlib(objects);
+        let cut = &zlib[..zlib.len() - 6];
+        let stream = format!(
+            "<< /Type /ObjStm /N 2 /First 8 /Filter /FlateDecode /Length {} >>",
+            cut.len()
+        );
+        let mut file = b"%PDF-1.7\n".to_vec();
+        let one = file.len();
+        file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let four = file.len();
+        file.extend_from_slice(format!("4 0 obj\n{stream}\nstream\n").as_bytes());
+        file.extend_from_slice(cut);
+        file.extend_from_slice(b"\nendstream\nendobj\n");
+        let five = file.len();
+        let rows = [
+            xref_row(0, 0, 255),
+            xref_row(1, one, 0),
+            xref_row(2, 4, 0),
+            xref_row(2, 4, 1),
+            xref_row(1, four, 0),
+            xref_row(1, five, 0),
+        ]
+        .concat();
+        file.extend_from_slice(
+            format!(
+                "5 0 obj\n<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R /Length {} >>\nstream\n",
+                rows.len()
+            )
+            .as_bytes(),
+        );
+        file.extend_from_slice(&rows);
+        file.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes(),
+        );
+        let doc = read(&file);
+        assert_eq!(doc.decoded[&(4, 0)], b"2 0 3 6 << >>\n123");
+        let why = doc.get((3, 0)).unwrap_err();
+        assert!(why.contains("so it may be cut short"), "{why}");
+        assert!(doc.get((2, 0)).is_ok());
+    }
+
+    #[test]
+    fn a_stream_decodes_to_its_limit_and_a_file_to_its_budget() {
+        let (file, _) = compressed(false);
+        let (objects, _) = objects_2_and_3();
+        // The budget is the file's: the cross-reference stream's 24 bytes
+        // of rows first, then 40 for the object stream.
+        for (stream, budget) in [(40, BUDGET), (STREAM, 24 + 40)] {
+            let doc = read_limited(&file, stream, budget);
+            assert_eq!(doc.decoded[&(4, 0)], objects[..40], "{stream} {budget}");
+            let over =
+                (doc.warnings.iter()).any(|w| w.message.ends_with("its output is over the limit"));
+            assert!(over, "{:?}", doc.warnings);
+            assert!(doc.get((3, 0)).is_err());
+        }
+    }
+
+    #[test]
+    fn objects_may_be_numbered_sparsely_but_not_listed_without_end() {
+        // Two more objects, numbered 900000 and 900001, in a file of a few
+        // hundred bytes (in use at byte 9, where neither is): listed.
+        let (file, _) = streams(false, true, &[1, 0, 9, 0, 1, 0, 9, 0], None);
+        let from = b"/Size 6 /W";
+        let to = b"/Size 6 /Index [0 6 900000 2] /W";
+        let at = find(&file, from).unwrap();
+        let file = [&file[..at], &to[..], &file[at + from.len()..]].concat();
+        let doc = read(&file);
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.get((3, 0)).is_ok());
+        assert!(doc.ids().contains(&(900_000, 0)) && doc.ids().contains(&(900_001, 0)));
+        // Reading no more than six entries, the two aren't, and it says so.
+        let doc = read_listing(&file, 6);
+        let message = format!(
+            "its rows list 2 entries past the first 6, as many as the reader reads of a file of {} bytes, which aren't read",
+            file.len()
+        );
+        assert!(
+            doc.warnings.iter().any(|w| w.message == message),
+            "{:?}",
+            doc.warnings
+        );
+        assert!(doc.get((3, 0)).is_ok());
+        assert!(!doc.ids().contains(&(900_000, 0)));
+    }
+
+    #[test]
+    fn the_revision_before_an_update_decodes_its_streams_itself() {
+        let (mut file, _) = compressed(false);
+        let five = find(&file, b"5 0 obj").unwrap();
+        let one = file.len();
+        file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Lang (fr) >>\nendobj\n");
+        let xref = file.len();
+        file.extend_from_slice(
+            format!("xref\n1 1\n{one:010} 00000 n \ntrailer\n<< /Size 6 /Root 1 0 R /Prev {five} >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        struct Unasked;
+        impl Decode for Unasked {
+            fn decode(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Vec<u8>, String>> {
+                panic!("asked to decode {ids:?}")
+            }
+        }
+        let doc = read_with(&file, &Unasked);
+        let update = doc.update.clone().expect("an update");
+        assert_eq!(update.previous, five);
+        let before = read_from(&file, update.previous);
+        assert!(before.warnings.is_empty(), "{:?}", before.warnings);
+        assert!(before.get((2, 0)).is_ok() && before.get((3, 0)).is_ok());
+    }
+
+    /// A catalog with a language, a page with a note, a signature, and
+    /// `extra` strings of the note's object as written, to be encrypted.
+    fn to_encrypt(extra: &[&[u8]]) -> Vec<(u32, Body)> {
+        let mut note = dict! {
+            "Type" => "Annot",
+            "Subtype" => "Text",
+            "Rect" => vec![Object::from(0), Object::from(0), Object::from(9), Object::from(9)],
+            "Contents" => Object::string("A note"),
+        };
+        if !extra.is_empty() {
+            let raw: Vec<Object> = (extra.iter())
+                .map(|b| Object::new(Value::String(Str::Encrypted(b.to_vec()))))
+                .collect();
+            note.set("Raw", raw);
+        }
+        let signature = dict! {
+            "Type" => "Sig",
+            "Filter" => "Adobe.PPKLite",
+            "ByteRange" => vec![Object::from(0), Object::from(1), Object::from(2), Object::from(3)],
+            "Contents" => Object::new(Value::String(Str::Bytes(vec![0x30, 0x82, 0x00, 0x01]))),
+        };
+        vec![
+            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Lang" => Object::string("en") }.into()),
+            (2, dict! { "Type" => "Pages", "Kids" => vec![Object::reference(3)], "Count" => 1 }.into()),
+            (3, dict! { "Type" => "Page", "Parent" => Object::reference(2), "Annots" => vec![Object::reference(4)] }.into()),
+            (4, note.into()),
+            (5, signature.into()),
+        ]
+    }
+
+    fn settings(
+        kind: pdf_crypt::writer::Kind,
+        user: &'static [u8],
+    ) -> pdf_crypt::writer::Settings<'static> {
+        pdf_crypt::writer::Settings {
+            kind,
+            user,
+            owner: b"owner",
+            p: -4,
+            id: b"0123456789abcdef",
+            encrypt_metadata: true,
+        }
+    }
+
+    const KINDS: [pdf_crypt::writer::Kind; 5] = [
+        pdf_crypt::writer::Kind::Rc4By40,
+        pdf_crypt::writer::Kind::Rc4By128,
+        pdf_crypt::writer::Kind::Aes128,
+        pdf_crypt::writer::Kind::Aes256R5,
+        pdf_crypt::writer::Kind::Aes256,
+    ];
+
+    #[test]
+    fn each_kind_of_encryption_decrypts_its_strings_where_they_are() {
+        let root = || dict! { "Root" => Object::reference(1) };
+        for kind in KINDS {
+            let file = write::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
+            for (password, owner) in [(&b"user"[..], false), (b"owner", true)] {
+                let doc = read_opened(&file, &[password]);
+                assert_eq!(doc.encryption, Encryption::Opened { owner }, "{kind:?}");
+                assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+                let get = |n: u32, key: &[u8]| {
+                    doc.get((n, 0))
+                        .unwrap()
+                        .as_dict()
+                        .unwrap()
+                        .get(key)
+                        .unwrap()
+                        .clone()
+                };
+                let lang = get(1, b"Lang");
+                assert_eq!(
+                    lang.value,
+                    Value::String(Str::Bytes(b"en".to_vec())),
+                    "{kind:?}"
+                );
+                // Where the string is written, as ciphertext.
+                let at = lang.at.unwrap();
+                assert!(
+                    matches!(file[at.start], b'(' | b'<')
+                        && !file[at.start..at.end].starts_with(b"(en)"),
+                    "{kind:?}"
+                );
+                assert_eq!(
+                    get(4, b"Contents").value,
+                    Value::String(Str::Bytes(b"A note".to_vec())),
+                    "{kind:?}"
+                );
+                // A signature's /Contents isn't encrypted, so not decrypted.
+                assert_eq!(
+                    get(5, b"Contents").value,
+                    Value::String(Str::Bytes(vec![0x30, 0x82, 0x00, 0x01])),
+                    "{kind:?}"
+                );
+            }
+        }
+    }
+
+    /// A decoder that mustn't be asked anything.
+    struct Unaskable;
+
+    impl Decode for Unaskable {
+        fn decode(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Vec<u8>, String>> {
+            panic!("asked to decode {ids:?}")
+        }
+
+        fn plaintext(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Object, String>> {
+            panic!("asked for the plaintext of {ids:?}")
+        }
+    }
+
+    #[test]
+    fn a_decoder_isnt_asked_of_a_file_the_reader_opens_but_when_its_made_to() {
+        let root = dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes256;
+        let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root);
+        let doc = read_with(&file, &Unaskable);
+        assert_eq!(doc.encryption, Encryption::Opened { owner: false });
+        let decoder = Plain(BTreeMap::new(), std::cell::Cell::new(0));
+        read_through(&file, &decoder);
+        assert_eq!(decoder.1.get(), 1, "asked for the plaintext");
+    }
+
+    #[test]
+    fn a_password_that_doesnt_open_it_leaves_it_locked_and_its_strings_ciphertext() {
+        let root = dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes128;
+        let file = write::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root);
+        for passwords in [&[][..], &[&b"wrong"[..]]] {
+            let doc = read_opened(&file, passwords);
+            assert_eq!(doc.encryption, Encryption::Locked);
+            let lang = doc
+                .get((1, 0))
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .get(b"Lang")
+                .unwrap()
+                .clone();
+            assert!(matches!(lang.value, Value::String(Str::Encrypted(_))));
+        }
+    }
+
+    #[test]
+    fn a_handler_the_reader_cant_open_leaves_its_strings_ciphertext_and_says_why() {
+        let root = dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes128;
+        let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root);
+        // Another handler's name, of the same length, so nothing moves.
+        let at = find(&file, b"/Standard").unwrap();
+        let file = [&file[..at], b"/Standarx", &file[at + 9..]].concat();
+        let doc = read_opened(&file, &[]);
+        let why = "its security handler is /Standarx, not /Standard";
+        assert_eq!(doc.encryption, Encryption::Unsupported(why.to_string()));
+        let message = format!(
+            "its security handler doesn't open: {why}; its strings stay ciphertext, and its object streams aren't read"
+        );
+        assert!(
+            doc.warnings.iter().any(|w| w.message == message),
+            "{:?}",
+            doc.warnings
+        );
+        let lang = doc
+            .get((1, 0))
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"Lang")
+            .unwrap()
+            .clone();
+        assert!(matches!(lang.value, Value::String(Str::Encrypted(_))));
+    }
+
+    #[test]
+    fn a_file_whose_strings_and_streams_arent_encrypted_reads_whole_without_its_password() {
+        // Only embedded files are encrypted (/StmF and /StrF /Identity):
+        // its object stream and strings are plain, its password no matter.
+        let kind = pdf_crypt::writer::Kind::Aes128;
+        let values = pdf_crypt::writer::dictionary(&settings(kind, b"user"));
+        let hex = |b: &Option<Vec<u8>>| -> String {
+            b.as_ref()
+                .unwrap()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        let encrypt = format!(
+            "/Root 1 0 R /Encrypt << /Filter /Standard /V 4 /R 4 /Length 128 /P -4 /O <{}> /U <{}> \
+             /CF << /StdCF << /CFM /AESV2 /AuthEvent /EFOpen >> >> /StmF /Identity /StrF /Identity /EFF /StdCF >> \
+             /ID [(0123456789abcdef) (0123456789abcdef)]",
+            hex(&values.o),
+            hex(&values.u)
+        );
+        let (objects, _) = objects_2_and_3();
+        let file = filtered(false, "", &objects);
+        let at = find(&file, b"/Root 1 0 R").unwrap();
+        let file = [&file[..at], encrypt.as_bytes(), &file[at + 11..]].concat();
+        for passwords in [&[][..], &[&b"wrong"[..]]] {
+            let doc = read_opened(&file, passwords);
+            assert_eq!(doc.encryption, Encryption::Plain);
+            assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+            assert_eq!(doc.get((2, 0)).unwrap().at.unwrap().stream, Some((4, 0)));
+            let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
+            assert_eq!(
+                lang.unwrap().value,
+                Value::String(Str::Bytes(b"en".to_vec()))
+            );
+        }
+        // Its password opens it all the same.
+        let doc = read_opened(&file, &[b"user"]);
+        assert_eq!(doc.encryption, Encryption::Opened { owner: false });
+        // But an object stream whose own crypt filter encrypts it doesn't
+        // read without it.
+        let file = filtered(
+            false,
+            " /Filter /Crypt /DecodeParms << /Name /StdCF >>",
+            &objects,
+        );
+        let at = find(&file, b"/Root 1 0 R").unwrap();
+        let file = [&file[..at], encrypt.as_bytes(), &file[at + 11..]].concat();
+        let doc = read_opened(&file, &[]);
+        assert_eq!(doc.encryption, Encryption::Plain);
+        let why = doc.get((2, 0)).unwrap_err();
+        assert!(
+            why.contains("its own /Crypt filter, /StdCF, encrypts it"),
+            "{why}"
+        );
+        // A handler the reader can't open, whose crypt filters encrypt
+        // neither strings nor streams: the same.
+        let other = encrypt.replace("/Filter /Standard", "/Filter /Adobe.PubSec");
+        let file = filtered(false, "", &objects);
+        let at = find(&file, b"/Root 1 0 R").unwrap();
+        let file = [&file[..at], other.as_bytes(), &file[at + 11..]].concat();
+        let doc = read_opened(&file, &[]);
+        assert_eq!(doc.encryption, Encryption::Plain);
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert!(doc.get((2, 0)).is_ok());
+    }
+
+    /// `file`, written by [`write::encrypted`] with its encryption
+    /// dictionary 6 0 R, and an update that writes the dictionary again
+    /// with `from` in it made `to`, and `extra` objects.
+    fn encryption_updated(file: &[u8], from: &str, to: &str, extra: &[(u32, &str)]) -> Vec<u8> {
+        let start = find(file, b"6 0 obj").unwrap();
+        let end = start + find(&file[start..], b"endobj").unwrap();
+        let own = String::from_utf8_lossy(&file[start + 7..end]).into_owned();
+        assert!(own.contains(from), "{own}");
+        let own = own.replacen(from, to, 1);
+        let prev = startxref(file);
+        let mut file = file.to_vec();
+        let mut rows = String::from("xref\n");
+        let objects = [&[(6, own.as_str())][..], extra].concat();
+        for (n, body) in objects {
+            rows.push_str(&format!("{n} 1\n{:010} 00000 n \n", file.len()));
+            file.extend_from_slice(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+        }
+        let xref = file.len();
+        file.extend_from_slice(rows.as_bytes());
+        file.extend_from_slice(
+            format!(
+                "trailer\n<< /Size 10 /Root 1 0 R /Encrypt 6 0 R /ID [(0123456789abcdef) (0123456789abcdef)] /Prev {prev} >>\nstartxref\n{xref}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        file
+    }
+
+    #[test]
+    fn an_encryption_dictionarys_values_by_reference_decrypt_as_written_in_it() {
+        let root = || dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes128;
+        let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+        let filter = "<< /CFM /AESV2 /AuthEvent /DocOpen >>";
+        let cases = [
+            (
+                "/StdCF << /CFM /AESV2 /AuthEvent /DocOpen >>",
+                "/StdCF 8 0 R",
+                vec![(8, filter)],
+            ),
+            ("/StrF /StdCF", "/StrF 9 0 R", vec![(9, "/StdCF")]),
+        ];
+        for (from, to, extra) in cases {
+            let file = encryption_updated(&file, from, to, &extra);
+            let doc = read_opened(&file, &[]);
+            assert_eq!(doc.encryption, Encryption::Opened { owner: false }, "{to}");
+            assert!(doc.warnings.is_empty(), "{to}: {:?}", doc.warnings);
+            let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
+            assert_eq!(
+                lang.unwrap().value,
+                Value::String(Str::Bytes(b"en".to_vec())),
+                "{to}"
+            );
+            // What its values refer to is its own, not encrypted.
+            let (n, _) = extra[0];
+            assert!(doc.get((n, 0)).is_ok(), "{to}");
+        }
+    }
+
+    #[test]
+    fn metadata_not_encrypted_is_in_plain_view_whether_the_file_opens_or_not() {
+        let root = dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes128;
+        let settings = pdf_crypt::writer::Settings {
+            encrypt_metadata: false,
+            ..settings(kind, b"user")
+        };
+        let xmp = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>";
+        let metadata = dict! { "Type" => "Metadata", "Subtype" => "XML" };
+        let objects = [
+            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
+            (2, dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into()),
+            (3, Body::stream(metadata, xmp)),
+        ];
+        let file = write::encrypted(&settings, &objects, root);
+        for passwords in [&[][..], &[&b"user"[..]]] {
+            let doc = read_opened(&file, passwords);
+            assert_eq!(
+                doc.metadata.as_deref(),
+                Some(&xmp[..]),
+                "{:?}",
+                doc.encryption
+            );
+        }
+    }
+
+    #[test]
+    fn an_encrypted_object_stream_is_decrypted_and_decoded_without_the_decoder() {
+        let kind = pdf_crypt::writer::Kind::Aes256;
+        let values = pdf_crypt::writer::dictionary(&settings(kind, b"user"));
+        let handler = Handler::open(&values, b"0123456789abcdef", &[b"user"]).unwrap();
+        let (objects, _) = objects_2_and_3();
+        let data = write::zlib(&objects);
+        let data =
+            pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &data, None, [4; 16]).unwrap();
+        let hex = |b: &Option<Vec<u8>>| -> String {
+            b.as_ref()
+                .unwrap()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        let encrypt = format!(
+            "/Root 1 0 R /Encrypt << /Filter /Standard /V 5 /R 6 /Length 256 /P -4 /O <{}> /U <{}> /OE <{}> /UE <{}> /Perms <{}> \
+             /CF << /StdCF << /CFM /AESV3 >> >> /StmF /StdCF /StrF /Identity >> \
+             /ID [(0123456789abcdef) (0123456789abcdef)]",
+            hex(&values.o),
+            hex(&values.u),
+            hex(&values.oe),
+            hex(&values.ue),
+            hex(&values.perms)
+        );
+        let file = filtered(false, " /Filter /FlateDecode", &data);
+        let at = find(&file, b"/Root 1 0 R").unwrap();
+        let file = [&file[..at], encrypt.as_bytes(), &file[at + 11..]].concat();
+        let doc = read_as(
+            &file,
+            Some(&Unaskable),
+            None,
+            true,
+            (STREAM, BUDGET, None),
+            &[b"user"],
+        );
+        assert_eq!(doc.encryption, Encryption::Opened { owner: false });
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert_eq!(doc.decoded[&(4, 0)], objects);
+        assert_eq!(doc.get((2, 0)).unwrap().at.unwrap().stream, Some((4, 0)));
+    }
+
+    #[test]
+    fn a_trailer_without_an_id_makes_the_key_without_one_and_says_so() {
+        let root = dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes128;
+        let settings = pdf_crypt::writer::Settings {
+            id: b"",
+            ..settings(kind, b"")
+        };
+        let file = write::encrypted(&settings, &to_encrypt(&[]), root);
+        // Its /ID, of empty strings, blanked out, so that nothing moves.
+        let at = find(&file, b"/ID [() ()]").unwrap();
+        let mut file = file;
+        file[at..at + 11].fill(b' ');
+        let doc = read_opened(&file, &[]);
+        assert_eq!(doc.encryption, Encryption::Opened { owner: false });
+        let message = "its trailer's /ID has no string first, so its key is made without one";
+        let warnings: Vec<_> = doc.warnings.iter().map(|w| w.message.as_str()).collect();
+        assert_eq!(warnings, [message]);
+        let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
+        assert_eq!(
+            lang.unwrap().value,
+            Value::String(Str::Bytes(b"en".to_vec()))
+        );
+    }
+
+    #[test]
+    fn a_signatures_contents_isnt_decrypted_whatever_its_type() {
+        let root = dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes256;
+        let der = vec![0x30, 0x82, 0x00, 0x01];
+        let signature = |typed: Option<&str>| {
+            let mut d = dict! {
+                "Filter" => "Adobe.PPKLite",
+                "ByteRange" => vec![Object::from(0), Object::from(1), Object::from(2), Object::from(3)],
+                "Contents" => Object::new(Value::String(Str::Bytes(der.clone()))),
+            };
+            if let Some(typed) = typed {
+                d.set("Type", typed);
+            }
+            d
+        };
+        let objects = [
+            (
+                1,
+                dict! { "Type" => "Catalog", "Pages" => Object::reference(2) }.into(),
+            ),
+            (
+                2,
+                dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into(),
+            ),
+            (3, signature(None).into()),
+            (4, signature(Some("DocTimeStamp")).into()),
+            // Another type's /Contents is encrypted, and decrypted.
+            (5, signature(Some("Annot")).into()),
+        ];
+        let file = write::encrypted(&settings(kind, b""), &objects, root);
+        let doc = read_opened(&file, &[]);
+        for n in [3, 4, 5] {
+            let contents = doc.get((n, 0)).unwrap().as_dict().unwrap().get(b"Contents");
+            assert_eq!(
+                contents.unwrap().value,
+                Value::String(Str::Bytes(der.clone())),
+                "{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_earlier_updates_encryption_dictionary_isnt_decrypted_either() {
+        let root = || dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes128;
+        let mut file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+        // An update that writes the encryption dictionary, 6 0 R, again as
+        // 7 0 R, its trailer naming that: the first trailer still names 6.
+        let start = find(&file, b"6 0 obj").unwrap();
+        let end = start + find(&file[start..], b"endobj").unwrap();
+        let own = file[start + 7..end].to_vec();
+        let prev = startxref(&file);
+        let seven = file.len();
+        file.extend_from_slice(&[&b"7 0 obj"[..], &own, b"endobj\n"].concat());
+        let xref = file.len();
+        file.extend_from_slice(
+            format!(
+                "xref\n7 1\n{seven:010} 00000 n \ntrailer\n<< /Size 8 /Root 1 0 R /Encrypt 7 0 R \
+                 /ID [(0123456789abcdef) (0123456789abcdef)] /Prev {prev} >>\nstartxref\n{xref}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        let doc = read_opened(&file, &[]);
+        assert_eq!(doc.encryption, Encryption::Opened { owner: false });
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        let written = pdf_crypt::writer::dictionary(&settings(kind, b"")).o;
+        for n in [6, 7] {
+            let dict = doc.get((n, 0)).unwrap().as_dict().unwrap().clone();
+            let o = &dict.get(b"O").unwrap().value;
+            assert_eq!(
+                o,
+                &Value::String(Str::Bytes(written.clone().unwrap())),
+                "{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn strings_that_dont_decrypt_cleanly_are_said_once_an_object_and_a_fault() {
+        let root = dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes128;
+        // Two strings too short for AES, as written, of five bytes and
+        // seven: the same fault, said once.
+        let file = write::encrypted(
+            &settings(kind, b""),
+            &to_encrypt(&[b"short", b"longer!"]),
+            root,
+        );
+        let doc = read_opened(&file, &[]);
+        let messages: Vec<_> = doc
+            .warnings
+            .iter()
+            .map(|w| (w.object, w.message.as_str()))
+            .collect();
+        assert_eq!(
+            messages,
+            [(
+                Some((4, 0)),
+                "2 of its strings don't decrypt cleanly: its AES ciphertext has no whole block past its IV"
+            )]
+        );
+        let note = doc.get((4, 0)).unwrap().as_dict().unwrap().clone();
+        assert_eq!(
+            note.get(b"Contents").unwrap().value,
+            Value::String(Str::Bytes(b"A note".to_vec()))
+        );
+        let raw = note.get(b"Raw").unwrap();
+        assert!(
+            matches!(&raw.value, Value::Array(a) if matches!(a[0].value, Value::String(Str::Encrypted(_))))
+        );
+    }
+
+    #[test]
     fn objects_in_an_object_stream_read_from_its_decoded_data() {
-        let (file, decoded) = compressed(false);
-        let doc = read_with(&file, &decoded);
+        let (file, _) = compressed(false);
+        let doc = read(&file);
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(doc.trailer.unwritten, None);
         assert_eq!(doc.trailer.stream, Some((5, 0)));
@@ -2668,20 +4210,37 @@ mod tests {
     }
 
     #[test]
-    fn without_its_decoded_data_an_object_stream_says_why() {
-        let (file, mut decoded) = compressed(false);
-        // No decoder: the newest section's rows don't read, so the file is
-        // scanned, and the compressed objects aren't found.
-        let doc = read(&file);
+    fn a_stream_that_doesnt_decode_says_why() {
+        // A filter the reader doesn't decode, on the object stream, and on
+        // the cross-reference stream, whose rows don't read, so the file
+        // is scanned, and the compressed objects aren't found.
+        let (file, _) = compressed(false);
+        let image = |file: &[u8], from: usize| {
+            let at = from + find(&file[from..], b"/FlateDecode").unwrap();
+            [&file[..at], b"/JBIG2Decode", &file[at + 12..]].concat()
+        };
+        let doc = read(&image(&file, find(&file, b"4 0 obj").unwrap()));
+        let why = doc.get((2, 0)).unwrap_err();
+        assert!(
+            why.contains("its object stream 4 0 R doesn't decode: its filter /JBIG2Decode isn't one the reader decodes"),
+            "{why}"
+        );
+        assert!(doc.get((1, 0)).is_ok());
+        let doc = read(&image(&file, find(&file, b"5 0 obj").unwrap()));
         let why = doc.trailer.unwritten.as_deref().unwrap();
         assert!(
-            why.contains("compressed (/FlateDecode), and nothing decodes it"),
+            why.contains("its cross-reference stream doesn't decode: its filter /JBIG2Decode"),
             "{why}"
         );
         assert!(doc.get((2, 0)).is_err());
-        // The rows but not the object stream's data.
+        // An encrypted file's object streams, without a decoder.
+        let (file, _) = compressed(true);
+        let why = read(&file).get((2, 0)).unwrap_err();
+        assert!(why.contains("nothing decodes that"), "{why}");
+        // Asked of a decoder: the rows but not the object stream's data.
+        let (file, mut decoded) = junk(false);
         decoded.remove(&(4, 0));
-        let doc = read_with(&file, &decoded);
+        let doc = read_through(&file, &decoded);
         let why = doc.get((2, 0)).unwrap_err();
         assert!(
             why.contains("its object stream 4 0 R doesn't decode: no data for 4 0 R"),
@@ -2689,10 +4248,10 @@ mod tests {
         );
         assert!(doc.get((1, 0)).is_ok());
         // A header that names another object.
-        let (file, mut decoded) = compressed(false);
+        let (file, mut decoded) = junk(false);
         let objects = decoded.get_mut(&(4, 0)).unwrap();
         objects[0] = b'7';
-        let doc = read_with(&file, &decoded);
+        let doc = read_through(&file, &decoded);
         let why = doc.get((2, 0)).unwrap_err();
         assert!(
             why.contains("object 0 of object stream 4 0 R is 7, not 2"),
@@ -2706,8 +4265,7 @@ mod tests {
     /// overrides.
     #[test]
     fn a_hybrid_files_stream_lists_what_its_table_leaves_free() {
-        let (file, decoded) = compressed(false);
-        let objects = decoded[&(4, 0)].clone();
+        let (file, _) = compressed(false);
         let mut file = file[..find(&file, b"5 0 obj").unwrap()].to_vec();
         let one = find(&file, b"1 0 obj").unwrap();
         let four = find(&file, b"4 0 obj").unwrap();
@@ -2731,7 +4289,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let doc = read_with(&file, &BTreeMap::from([((4, 0), objects)]));
+        let doc = read(&file);
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(doc.trailer.stream, None, "the table's trailer");
         assert!(doc.get((1, 0)).is_ok(), "the table's row, not the stream's");
@@ -2750,16 +4308,26 @@ mod tests {
     }
 
     #[test]
-    fn a_decoder_is_asked_twice_at_most() {
+    fn a_decoder_is_asked_only_for_an_encrypted_files_object_streams() {
+        // Not in a file that doesn't encrypt.
         let (file, decoded) = compressed(false);
         let counted = Counted(decoded, std::cell::Cell::new(0));
         let doc = read_with(&file, &counted);
         assert!(doc.get((3, 0)).is_ok());
-        assert_eq!(
-            counted.1.get(),
-            2,
-            "the cross-reference streams, then the object streams"
-        );
+        assert_eq!(counted.1.get(), 0);
+        // In one that does, once, for the object streams.
+        let (file, decoded) = compressed(true);
+        let counted = Counted(decoded, std::cell::Cell::new(0));
+        let doc = read_with(&file, &counted);
+        assert!(doc.get((3, 0)).is_ok());
+        assert_eq!(counted.1.get(), 1);
+        // Asked for every stream, twice: the cross-reference streams, then
+        // the object streams.
+        let (file, decoded) = junk(false);
+        let counted = Counted(decoded, std::cell::Cell::new(0));
+        let doc = read_through(&file, &counted);
+        assert!(doc.get((3, 0)).is_ok());
+        assert_eq!(counted.1.get(), 2);
         // A file with nothing compressed asks nothing.
         let plain = write::file("1.7", &clean(), root(), Xref::Table);
         let counted = Counted(BTreeMap::new(), std::cell::Cell::new(0));
@@ -2821,19 +4389,20 @@ mod tests {
 
     #[test]
     fn a_cross_reference_stream_whose_number_finds_another_is_decoded_from_its_bytes() {
-        let (file, decoded) = compressed(false);
+        // As the reader asks a decoder for every stream when it's made to.
+        let (file, decoded) = junk(false);
         let rows = decoded[&(5, 0)].clone();
-        let doc = read_with(&file, &Renumbered(decoded.clone(), rows.clone()));
+        let doc = read_through(&file, &Renumbered(decoded.clone(), rows.clone()));
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(doc.trailer.unwritten, None);
         assert!(doc.get((3, 0)).is_ok());
         // What it decodes from the bytes may run on past the rows, but not
         // end before them; then the reader says why it decoded it so.
         let longer = [&rows[..], b"more"].concat();
-        let doc = read_with(&file, &Renumbered(decoded.clone(), longer));
+        let doc = read_through(&file, &Renumbered(decoded.clone(), longer));
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert!(doc.get((3, 0)).is_ok());
-        let short = read_with(&file, &Renumbered(decoded.clone(), rows[..20].to_vec()));
+        let short = read_through(&file, &Renumbered(decoded.clone(), rows[..20].to_vec()));
         let why = short.trailer.unwritten.unwrap();
         assert!(why.contains("32 bytes, not the 24"), "{why}");
 
@@ -2845,7 +4414,7 @@ mod tests {
                 self.0.decode(ids)
             }
         }
-        let doc = read_with(&file, &ByNumber(Renumbered(decoded, rows)));
+        let doc = read_through(&file, &ByNumber(Renumbered(decoded, rows)));
         let why = doc.trailer.unwritten.unwrap();
         assert!(
             why.contains("32 bytes, not the 24") && why.contains("another object 5 0 R"),
@@ -2875,16 +4444,17 @@ mod tests {
 
     #[test]
     fn streams_a_decoder_cant_decode_by_number_are_decoded_from_their_bytes_unless_encrypted() {
-        let (file, decoded) = compressed(false);
-        let doc = read_with(&file, &Refused(decoded));
+        // As the reader asks a decoder for every stream when it's made to.
+        let (file, decoded) = junk(false);
+        let doc = read_through(&file, &Refused(decoded));
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(doc.trailer.unwritten, None);
         assert!(doc.get((2, 0)).is_ok() && doc.get((3, 0)).is_ok());
 
         // An encrypted file's object streams are encrypted: its
         // cross-reference stream, never.
-        let (file, decoded) = compressed(true);
-        let doc = read_with(&file, &Refused(decoded));
+        let (file, decoded) = junk(true);
+        let doc = read_through(&file, &Refused(decoded));
         assert_eq!(doc.trailer.unwritten, None, "the rows, from their bytes");
         let why = doc.get((3, 0)).unwrap_err();
         assert!(
@@ -2988,19 +4558,27 @@ mod tests {
         assert_eq!(
             warnings,
             [
+                // Its dictionary, which has no /R, isn't the standard
+                // handler's, so the decoder is asked, as before.
+                "its security handler doesn't open: it's /V 2 /R 0, which the standard security handler isn't; its strings stay ciphertext, and its object streams aren't read",
                 "2 of 1 0 R's strings stay ciphertext: the decoder reads the object otherwise",
                 "one object's strings stay ciphertext: a wrong password",
             ]
         );
 
-        // A decoder that doesn't decrypt leaves them, without a word.
+        // A decoder that doesn't decrypt leaves them, without a word of its
+        // own: only the handler's.
         let doc = read_with(&file, &BTreeMap::new());
         let catalog = doc.get((1, 0)).unwrap().as_dict().unwrap();
         assert_eq!(
             catalog.get(b"Lang").unwrap().value,
             Value::String(Str::Encrypted(b"xx".to_vec()))
         );
-        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        let warnings: Vec<_> = doc.warnings.iter().map(|w| w.message.as_str()).collect();
+        assert!(
+            matches!(warnings[..], [w] if w.starts_with("its security handler doesn't open")),
+            "{warnings:?}"
+        );
         // Nor is a file that isn't encrypted asked about.
         let decoder = Plain(BTreeMap::new(), std::cell::Cell::new(0));
         read_with(

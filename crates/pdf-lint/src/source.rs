@@ -54,12 +54,24 @@ pub struct Trailer {
 
 /// Something a reader had to choose how to read.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Warning {
     /// The object it's in, when it's in one.
     pub object: Option<ObjectId>,
     /// Where, when the reader knows.
     pub at: Option<Span>,
     pub message: String,
+}
+
+impl Warning {
+    /// `message`, of object `object` at `at`.
+    pub fn new(object: Option<ObjectId>, at: Option<Span>, message: String) -> Warning {
+        Warning {
+            object,
+            at,
+            message,
+        }
+    }
 }
 
 impl Trailer {
@@ -71,7 +83,9 @@ impl Trailer {
 }
 
 /// A file read whole: its objects, trailer, header version and warnings.
+/// A reader outside the crate starts from [`Document::new`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Document {
     /// Each object its cross-references list, or why it doesn't read.
     pub objects: BTreeMap<ObjectId, Result<Object, String>>,
@@ -88,11 +102,41 @@ pub struct Document {
     /// The file's length in bytes, when the reader knows it.
     pub size: Option<usize>,
     /// Where the strings written as hex strings are, when the reader
-    /// knows: a reader of the bytes does, and qpdf's JSON doesn't say.
+    /// knows: a reader of the bytes does; one through another tool's JSON
+    /// may not.
     pub hex: Option<BTreeSet<Span>>,
     /// The data of the catalog's metadata stream, as written, when it's in
     /// plain view: unfiltered, and not encrypted ([`Source::metadata`]).
     pub metadata: Option<Vec<u8>>,
+    /// Whether the file is encrypted, and if it is, whether it opened.
+    pub encryption: Encryption,
+}
+
+/// Whether a file is encrypted (its trailer's `/Encrypt`), and if it is,
+/// whether the reader opened it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Encryption {
+    /// It isn't.
+    #[default]
+    None,
+    /// It is, and a password it was given opened it, the owner's or the
+    /// user's: its strings and object streams are decrypted.
+    Opened {
+        /// Whether by the owner's password.
+        owner: bool,
+    },
+    /// It is, and no password it was given opens it.
+    Locked,
+    /// It is, and no password it was given opens it (or its handler is
+    /// one the reader can't open), but its strings and streams aren't
+    /// encrypted (`/StrF` and `/StmF` `/Identity`, as when only embedded
+    /// files are, `/AuthEvent /EFOpen`): it reads whole, but for an object
+    /// stream whose own `/Crypt` filter encrypts it.
+    Plain,
+    /// It is, by a security handler the reader can't open, and why: its
+    /// strings stay ciphertext, and its object streams aren't read.
+    Unsupported(String),
 }
 
 /// A file's newest incremental update.
@@ -123,6 +167,7 @@ impl Document {
             size: None,
             hex: None,
             metadata: None,
+            encryption: Encryption::None,
         }
     }
 

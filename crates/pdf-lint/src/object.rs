@@ -12,6 +12,7 @@ pub type ObjectId = (u32, u16);
 /// Where a value was written: a run of the file's bytes, or of an object
 /// stream's decoded data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct Span {
     /// The object stream whose decoded data it's in; none for the file.
     pub stream: Option<ObjectId>,
@@ -19,12 +20,21 @@ pub struct Span {
     pub end: usize,
 }
 
+impl Span {
+    /// Bytes `start..end` of the file, or of object stream `stream`'s
+    /// decoded data.
+    pub const fn new(stream: Option<ObjectId>, start: usize, end: usize) -> Span {
+        Span { stream, start, end }
+    }
+}
+
 /// A value, and where it was written.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Object {
     pub value: Value,
     /// Where it was written, when the reader knows: a reader of the file's
-    /// bytes always does, and qpdf's JSON never says.
+    /// bytes always does, and one through another tool's JSON, as the
+    /// tests' qpdf, may not.
     pub at: Option<Span>,
 }
 
@@ -50,9 +60,11 @@ pub enum Str {
     /// Its bytes, its escapes decoded (and decrypted, in an encrypted
     /// file).
     Bytes(Vec<u8>),
-    /// Text a reader decoded without saying from which encoding, as
-    /// qpdf's JSON gives a string it reads as text: what depends on the
-    /// bytes, such as whether they're ASCII, can't be told.
+    /// Text a reader decoded without saying from which encoding, as a
+    /// reader through another tool's JSON may give a string it reads as
+    /// text (the tests' qpdf does): what depends on the bytes, such as
+    /// whether they're ASCII, can't be told. The bytes reader never gives
+    /// it.
     Text(String),
     /// Ciphertext as written, in an encrypted file its reader doesn't
     /// decrypt: what depends on its value can't be told.

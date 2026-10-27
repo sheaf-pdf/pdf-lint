@@ -5,13 +5,14 @@
 //! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`, with
 //! [`seeds`], files for the fuzzer to begin from.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::bytes;
 use crate::check::{Exempt, Hold, Made, Options, UnlistedIn, check};
-use crate::object::{ObjectId, Span};
+use crate::object::Span;
 use crate::source::{Document, Source};
 use crate::version::Version;
+use pdf_crypt::writer::{Kind, Settings};
 
 /// The fuzz target's body: `data`'s first two bytes choose how the file
 /// after them is held and checked ([`setting`]), and the rest is the file.
@@ -39,8 +40,7 @@ pub fn check_file(data: &[u8]) {
     let _ = report.to_string();
     let _ = report.objects();
     if let Some(update) = &doc.update {
-        let none: BTreeMap<ObjectId, Vec<u8>> = BTreeMap::new();
-        let previous = bytes::read_from(file, &none, update.previous);
+        let previous = bytes::read_from(file, update.previous);
         let options = Options {
             paths: true,
             ..options
@@ -184,11 +184,19 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         ("form", file(&form, "").0),
         ("structure", file(&structure, "").0),
         ("xref-stream", xref_stream()),
+        ("object-streams", object_streams(true)),
+        ("object-streams-lzw", object_streams(false)),
         ("update", update()),
         (
             "encrypted",
             file(&encrypted, &format!("/Encrypt 4 0 R /ID [{id} {id}]")).0,
         ),
+        ("encrypted-rc4-40", opens(Kind::Rc4By40, false)),
+        ("encrypted-rc4-128", opens(Kind::Rc4By128, false)),
+        ("encrypted-aes-128", opens(Kind::Aes128, false)),
+        ("encrypted-aes-256-r5", opens(Kind::Aes256R5, false)),
+        ("encrypted-aes-256", opens(Kind::Aes256, false)),
+        ("encrypted-own-crypt", opens(Kind::Aes128, true)),
     ];
     for (_, seed) in &mut seeds {
         seed.splice(0..0, [0, 0]);
@@ -279,6 +287,178 @@ fn xref_stream() -> Vec<u8> {
     out
 }
 
+/// A file whose page tree, page, font and annotations are in an object
+/// stream, and whose cross-reference stream is PNG-predicted: with
+/// `flate`, both compressed (the object stream with dynamic Huffman
+/// codes), else the object stream through LZW and hex, the
+/// cross-reference stream as it is.
+fn object_streams(flate: bool) -> Vec<u8> {
+    // The object stream's data, its header and five objects, as Python's
+    // zlib.compress gives it at level 9.
+    const DEFLATED: &[u8] = b"\x78\xda\x7d\x50\x4d\x6b\xc3\x30\x0c\xbd\xef\x57\xbc\xe3\x7a\x72\xec\xa4\x29\x85\x12\x68\x0b\x63\x63\xec\x83\x76\xb7\xb0\x83\xdb\x6a\x5b\x46\x63\x77\xb6\x33\xba\x7f\x3f\x29\x61\xb0\x5c\x0a\x0f\x23\xc9\x7a\xef\x49\x32\xc8\x90\xa3\x30\x98\x42\x4f\xe7\x28\x61\x74\x81\x19\xf2\xbc\xc0\x62\x01\xf5\xf2\x73\x22\xa8\x67\xfb\x4e\x11\xea\xbe\x39\x44\xd4\x39\x33\x36\xaf\x50\x6b\xdf\xb9\x04\x8d\xaa\xba\x1a\x77\xca\x1b\x88\xff\x8c\x74\x42\x3d\xd0\xa1\xb1\x2b\x7f\x46\x9d\x71\xa1\xd4\x06\xb3\xb9\x61\x81\x0d\x45\xdf\x85\x3d\x2b\x0b\xff\xc6\x33\xa3\x0f\x34\xcf\x22\xc4\xaa\x12\xa8\xa5\x73\x3e\xb1\x6f\xd9\x17\x67\x83\xfb\xc8\xb4\xa7\xaa\x6d\xb7\x4b\x7d\x2a\x45\x0d\xb5\xb2\x91\x86\x9f\x5b\x3a\x7e\x53\x6a\xf6\x76\x4c\xeb\x85\xff\xf3\xe8\x9c\x64\xaa\x7d\x42\xad\x33\x30\x72\x41\xbf\xaa\x4b\xbc\x50\xc4\xf5\x12\xcc\x21\x34\x0e\xd6\xc1\xef\x3e\xa5\x39\xa6\x40\xb6\x9d\x40\x3d\x9d\xc8\xe1\xcd\x1e\x23\x8b\x3d\xda\x96\x84\xd8\xb6\x72\x89\x8b\xbe\xdb\xaf\x8e\xef\xf5\xe7\x5c\x64\x60\xcc\x05\xe2\xcc\xa3\xf0\xc6\x12\xde\xad\x87\x03\x6a\x8e\x57\x3e\x1c\x28\x0c\xb9\x19\x0f\xc8\xda\x1f\x14\x26\x62\xf9\x0b\x2a\x30\x86\x09";
+    let (data, filter) = match flate {
+        true => (DEFLATED.to_vec(), "/FlateDecode"),
+        false => {
+            let objects = crate::write::inflated(DEFLATED);
+            let hex: String = crate::write::lzw(&objects)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            (
+                format!("{hex}>").into_bytes(),
+                "[/ASCIIHexDecode /LZWDecode]",
+            )
+        }
+    };
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let one = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    let four = out.len();
+    let dict = format!(
+        "<< /Type /ObjStm /N 5 /First 27 /Filter {filter} /Length {} >>",
+        data.len()
+    );
+    out.extend_from_slice(format!("4 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&data);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    let eight = out.len();
+    let row = |kind: u8, field: usize, index: u8| {
+        let [high, low] = u16::try_from(field).unwrap_or(0).to_be_bytes();
+        [kind, high, low, index]
+    };
+    let rows = [
+        row(0, 0, 255),
+        row(1, one, 0),
+        row(2, 4, 0),
+        row(2, 4, 1),
+        row(1, four, 0),
+        row(2, 4, 2),
+        row(2, 4, 3),
+        row(2, 4, 4),
+        row(1, eight, 0),
+    ];
+    // Each row by PNG's Up: its difference from the row above.
+    let mut above = [0u8; 4];
+    let mut predicted = Vec::new();
+    for row in rows {
+        predicted.push(2);
+        predicted.extend(row.iter().zip(above).map(|(b, a)| b.wrapping_sub(a)));
+        above = row;
+    }
+    let (rows, filter) = match flate {
+        true => (crate::write::zlib(&predicted), " /Filter /FlateDecode"),
+        false => (rows.concat(), ""),
+    };
+    let parms = match flate {
+        true => " /DecodeParms << /Predictor 12 /Columns 4 >>",
+        false => "",
+    };
+    let dict = format!(
+        "<< /Type /XRef /Size 9 /W [1 2 1] /Root 1 0 R{filter}{parms} /Length {} >>",
+        rows.len()
+    );
+    out.extend_from_slice(format!("8 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{eight}\n%%EOF\n").as_bytes());
+    out
+}
+
+/// A file encrypted as `kind` with the empty user password, so that it
+/// opens: its catalog's /Lang encrypted, its page tree and page in an
+/// object stream compressed and encrypted, by the file's crypt filter for
+/// streams or, with `own`, by its own /Crypt filter (/StmF /Identity).
+fn opens(kind: Kind, own: bool) -> Vec<u8> {
+    let id = b"0123456789abcdef";
+    let settings = Settings {
+        kind,
+        user: b"",
+        owner: b"owner",
+        p: -4,
+        id,
+        encrypt_metadata: true,
+    };
+    let values = pdf_crypt::writer::dictionary(&settings);
+    let handler = pdf_crypt::Handler::open(&values, id, &[]).expect("the writer's opens");
+    let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let lang =
+        pdf_crypt::writer::encrypt_string(&handler, (1, 0), b"en", [1; 16]).unwrap_or_default();
+    let objects = "2 0 3 42 << /Type /Pages /Kids [3 0 R] /Count 1 >>\n\
+                   << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [<< /Type /Annot /Subtype /Text /Rect [0 0 9 9] /Contents (In plain view) >>] >>";
+    let first = objects.find("<<").unwrap_or(0);
+    let deflated = crate::write::zlib(objects.as_bytes());
+    let crypt = own.then(|| handler.named(b"StdCF"));
+    let data =
+        pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &deflated, crypt.as_ref(), [4; 16])
+            .unwrap_or_default();
+    let filter = match own {
+        true => "/Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /StdCF >> null]",
+        false => "/Filter /FlateDecode",
+    };
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let one = out.len();
+    out.extend_from_slice(
+        format!(
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Lang <{}> >>\nendobj\n",
+            hex(&lang)
+        )
+        .as_bytes(),
+    );
+    let four = out.len();
+    let dict = format!(
+        "<< /Type /ObjStm /N 2 /First {first} {filter} /Length {} >>",
+        data.len()
+    );
+    out.extend_from_slice(format!("4 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&data);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    let five = out.len();
+    let row = |kind: u8, field: usize, index: u8| {
+        let [high, low] = u16::try_from(field).unwrap_or(0).to_be_bytes();
+        [kind, high, low, index]
+    };
+    let rows = [
+        row(0, 0, 255),
+        row(1, one, 0),
+        row(2, 4, 0),
+        row(2, 4, 1),
+        row(1, four, 0),
+        row(1, five, 0),
+    ]
+    .concat();
+    let mut entries = format!("/Filter /Standard /V {} /R {} /P -4", values.v, values.r);
+    if let Some(length) = values.length {
+        entries.push_str(&format!(" /Length {length}"));
+    }
+    let strings = [
+        ("O", &values.o),
+        ("U", &values.u),
+        ("OE", &values.oe),
+        ("UE", &values.ue),
+        ("Perms", &values.perms),
+    ];
+    for (name, value) in strings {
+        if let Some(value) = value {
+            entries.push_str(&format!(" /{name} <{}>", hex(value)));
+        }
+    }
+    if let Some(filter) = values.crypt_filters.first() {
+        let method = String::from_utf8_lossy(filter.method.as_deref().unwrap_or_default());
+        let streams = if own { "/Identity" } else { "/StdCF" };
+        entries.push_str(&format!(
+            " /CF << /StdCF << /CFM /{method} >> >> /StmF {streams} /StrF /StdCF"
+        ));
+    }
+    let dict = format!(
+        "<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R /Encrypt << {entries} >> /ID [<{0}> <{0}>] /Length {1} >>",
+        hex(id),
+        rows.len()
+    );
+    out.extend_from_slice(format!("5 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes());
+    out
+}
+
 /// A file and an incremental update of it, which rewrites its page and
 /// adds an annotation.
 fn update() -> Vec<u8> {
@@ -337,6 +517,26 @@ mod tests {
             let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
             assert!(report.objects() > 3, "{name}: {report}");
             check_file(&seed);
+        }
+        // Those that open, open, and their object stream reads.
+        for (name, seed) in seeds()
+            .into_iter()
+            .filter(|(n, _)| n.starts_with("encrypted-"))
+        {
+            let doc = bytes::read(&seed[2..]);
+            let opened = crate::source::Encryption::Opened { owner: false };
+            assert_eq!(doc.encryption, opened, "{name}");
+            assert_eq!(
+                doc.get((3, 0)).map(|o| o.at.and_then(|at| at.stream)),
+                Ok(Some((4, 0))),
+                "{name}"
+            );
+            let lang = doc
+                .get((1, 0))
+                .ok()
+                .and_then(|o| o.as_dict()?.get(b"Lang").cloned());
+            let en = crate::object::Value::String(crate::object::Str::Bytes(b"en".to_vec()));
+            assert_eq!(lang.map(|l| l.value), Some(en), "{name}");
         }
         let update = &seeds().into_iter().find(|(n, _)| *n == "update").unwrap().1;
         assert!(

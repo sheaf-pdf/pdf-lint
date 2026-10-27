@@ -1,6 +1,6 @@
 [package]
 name = "pdf-lint"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # For let-chains and `as_chunks`.
 rust-version = "1.88"
@@ -16,7 +16,13 @@ include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md", "/LICEN
 
 [dependencies]
 anyhow = "1"
+pdf-crypt = { path = "../pdf-crypt", version = "0.1" }
+pdf-filters = { path = "../pdf-filters", version = "0.1" }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
+
+[dev-dependencies]
+# The tests' encrypted files.
+pdf-crypt = { path = "../pdf-crypt", features = ["writer"] }
 
 [lints.rust]
 unsafe_code = "forbid"

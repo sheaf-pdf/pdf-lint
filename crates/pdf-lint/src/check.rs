@@ -299,6 +299,7 @@ impl Exempt {
 
 /// What a finding breaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum Rule {
     /// A value of none of the types its row allows at the file's version.
     Type,
@@ -355,6 +356,7 @@ pub enum Rule {
 
 /// A rule a held object breaks.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Finding {
     /// The indirect object it's in: none for a table's trailer, or the
     /// file as a whole.
@@ -422,6 +424,7 @@ pub struct Unchecked {
 
 /// What a check of a file found in its held objects.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Report {
     pub findings: Vec<Finding>,
     /// Held objects checked, by table; tree nodes as `name-tree` and
@@ -5340,8 +5343,8 @@ mod tests {
         );
     }
 
-    /// Every PDF under `PDF_LINT_CORPUS` read, qpdf decoding what's
-    /// compressed, and checked, every object held as merged: no panic, and
+    /// Every PDF under `PDF_LINT_CORPUS` read, opened when it's encrypted
+    /// by the empty password, and checked, every object held as merged: no panic, and
     /// every finding's place inside its file or its decoded data.
     #[test]
     #[ignore = "needs PDF_LINT_CORPUS, a folder of PDF files"]
@@ -5372,9 +5375,8 @@ mod tests {
         let start = Instant::now();
         for path in &files {
             let data = std::fs::read(path).unwrap();
-            let doc =
-                std::panic::catch_unwind(|| bytes::read_with(&data, &crate::qpdf::Qpdf::new(path)))
-                    .unwrap_or_else(|_| panic!("{} panicked reading", path.display()));
+            let doc = std::panic::catch_unwind(|| bytes::read_opened(&data, &[]))
+                .unwrap_or_else(|_| panic!("{} panicked reading", path.display()));
             let report = std::panic::catch_unwind(|| {
                 check(&doc, &Hold::All(Made::Merged), &Options::default())
             })
