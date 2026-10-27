@@ -72,8 +72,8 @@ fuzzing:
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
 
-# Build this platform's release archive in dist/, with the qpdf it bundles,
-# and check it runs as it's unpacked, as the release workflow does each
+# Build this platform's release archive in dist/, and check it runs as
+# it's unpacked, as the release workflow does each
 # platform's. On Linux the binary is static, for musl, whose target must be
 # installed (`rustup target add x86_64-unknown-linux-musl`).
 dist:

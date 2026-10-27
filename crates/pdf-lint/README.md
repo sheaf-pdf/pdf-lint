@@ -110,11 +110,11 @@ A file that can't be read is a line of `pdf_lint`, `model`, its `file` and the `
 
 ## Installing
 
-Each [release](https://github.com/sheaf-pdf/pdf-lint/releases) has an archive for Linux (x86_64 and aarch64), macOS (Apple silicon and Intel) and Windows (x64): `pdf-lint`, and beside it in `qpdf/` qpdf, from qpdf's official release at a pinned version and checksum, with the notices and licenses that go with it (`qpdf/NOTICE.md`). Unpack it anywhere.
+Each [release](https://github.com/sheaf-pdf/pdf-lint/releases) has an archive for Linux (x86_64 and aarch64), macOS (Apple silicon and Intel) and Windows (x64): `pdf-lint`, which decodes and decrypts by itself, needing nothing beside it, and the Arlington model's notices. Unpack it anywhere. (0.1's archives held qpdf too, in `qpdf/`, which it decrypted with.)
 
-The Linux binary is static, and qpdf's needs glibc 2.34 or later; Windows needs Windows 10 or later. On macOS, an archive a browser downloaded is quarantined, and its binaries won't run unsigned until `xattr -dr com.apple.quarantine` clears the folder; one fetched with `curl` or `gh release download` isn't.
+The Linux binary is static, needing nothing of the system; Windows needs Windows 10 or later. On macOS, an archive a browser downloaded is quarantined, and its binaries won't run unsigned until `xattr -dr com.apple.quarantine` clears the folder; one fetched with `curl` or `gh release download` isn't.
 
-From source, `cargo install pdf-lint` builds the binary from crates.io, with Rust 1.88 or later, and `cargo install --path crates/pdf-lint` from a checkout. `just dist` builds this platform's archive, as the release workflow builds each, and `release/qpdf.sh` lays out the pinned qpdf alone.
+From source, `cargo install pdf-lint` builds the binary from crates.io, with Rust 1.88 or later, and `cargo install --path crates/pdf-lint` from a checkout; neither needs qpdf. `just dist` builds this platform's archive, as the release workflow builds each.
 
 ## Readers
 
