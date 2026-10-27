@@ -6,8 +6,24 @@ members = ["crates/pdf-tokenizer", "crates/pdf-filters", "crates/pdf-crypt", "cr
 # fuzz/ builds on nightly, with libFuzzer.
 exclude = ["fuzz"]
 
-# pdf-crypt's revision 6 hash runs thousands of AES blocks for a password;
-# built optimized in tests too, which then take a second, not a quarter of
-# a minute. A profile here changes no crate as it's published.
+# pdf-crypt's revision 6 hash runs thousands of AES blocks and SHA-2
+# digests for a password; it and the RustCrypto crates under it built
+# optimized in tests too, which then take a fraction of a second, not
+# seconds. A profile here changes no crate as it's published.
 [profile.dev.package.pdf-crypt]
+opt-level = 3
+
+[profile.dev.package.aes]
+opt-level = 3
+
+[profile.dev.package.cbc]
+opt-level = 3
+
+[profile.dev.package.md-5]
+opt-level = 3
+
+[profile.dev.package.rc4]
+opt-level = 3
+
+[profile.dev.package.sha2]
 opt-level = 3

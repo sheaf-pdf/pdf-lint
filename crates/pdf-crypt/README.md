@@ -1,6 +1,6 @@
 # pdf-crypt
 
-PDF's standard security handler, decrypting, in one small Rust crate that depends on nothing: a file's key from its encryption dictionary and a password, and its strings and streams decrypted with it (ISO 32000-2, §7.6).
+PDF's standard security handler, decrypting, in one small Rust crate on RustCrypto's primitives: a file's key from its encryption dictionary and a password, and its strings and streams decrypted with it (ISO 32000-2, §7.6).
 
 It's made for a reader that checks files as much as for one that shows them. Ciphertext that isn't what the handler wrote still decrypts as far as it can, and every fault is said.
 
@@ -10,7 +10,7 @@ It's made for a reader that checks files as much as for one that shows them. Cip
 - **Values, not dictionaries.** A `Dictionary` is the encryption dictionary's values, typed; reading them from a file is the caller's, so it works with any object model. One without `/O`, `/U` or `/P` of its type (or of version 5, `/OE`, `/UE` or `/Perms`) is refused, saying so; short values are filled out with zeros, and version 5's long ones cut short, as qpdf reads them.
 - **Crypt filters** by name and method (`/CF`, `/StmF`, `/StrF`, a stream's own `/Crypt`): `/Identity`, `/None`, `/V2`, `/AESV2`, `/AESV3`, and one that isn't, said.
 - **Every fault said, what decrypted kept:** AES ciphertext with no whole block past its IV (shorter than an IV, it stays ciphertext), a part block past the whole ones, padding that isn't, a crypt filter's method that isn't one, AES that the file's key isn't for, and `/Perms` that doesn't match or doesn't confirm the key (the file opens all the same, by another password's key when one is confirmed).
-- **Its own primitives,** needing nothing else: MD5, SHA-256, SHA-384, SHA-512, RC4, AES-128 and AES-256, checked against each standard's examples, against Python's hashlib at the lengths where padding changes, and against RustCrypto's by a fuzz target outside the crate.
+- **RustCrypto's primitives,** not its own: MD5 (`md-5`), SHA-256, SHA-384 and SHA-512 (`sha2`), RC4 (`rc4`), and AES-128 and AES-256 (`aes`, in CBC by `cbc`).
 
 ```rust
 use pdf_crypt::{Handler, Refused};

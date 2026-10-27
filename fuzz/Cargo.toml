@@ -7,8 +7,7 @@
 # `tokenize` calls `pdf_tokenizer::fuzz::tokenize`, which a stable unit test
 # (`random_inputs_keep_every_promise`) runs too; `filters` calls
 # `pdf_filters::fuzz::filters`, which two stable unit tests run on random
-# and damaged inputs; `primitives` sets pdf-crypt's MD5, SHA-2, RC4 and AES
-# beside RustCrypto's, which only this crate depends on; `crypt` calls
+# and damaged inputs; `crypt` calls
 # `pdf_crypt::fuzz::handler`, which a stable unit test runs; `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
@@ -24,15 +23,11 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-aes = "0.8"
 libfuzzer-sys = "0.4"
-md-5 = "0.10"
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
 pdf-filters = { path = "../crates/pdf-filters" }
 pdf-lint = { path = "../crates/pdf-lint" }
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
-rc4 = "0.1"
-sha2 = "0.10"
 
 [[bin]]
 name = "tokenize"
@@ -44,13 +39,6 @@ bench = false
 [[bin]]
 name = "filters"
 path = "fuzz_targets/filters.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "primitives"
-path = "fuzz_targets/primitives.rs"
 test = false
 doc = false
 bench = false

@@ -12,9 +12,9 @@
 //!   ciphertext too short, a part block past the whole ones, padding that
 //!   isn't, a crypt filter's method that isn't one, `/Perms` that doesn't
 //!   match or doesn't confirm the key.
-//! - **Its own primitives,** needing nothing else: MD5, SHA-256, SHA-384
-//!   and SHA-512, RC4, and AES-128 and AES-256, each checked against its
-//!   standard's test vectors and against RustCrypto's.
+//! - **RustCrypto's primitives:** MD5 (`md-5`), SHA-256, SHA-384 and
+//!   SHA-512 (`sha2`), RC4 (`rc4`), and AES-128 and AES-256 (`aes`, in CBC
+//!   by `cbc`).
 //!
 //! Decrypting is a step before the filters (pdf-filters decodes those),
 //! and which strings and streams aren't encrypted at all, the encryption
