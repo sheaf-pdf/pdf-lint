@@ -859,10 +859,7 @@ enum Values {
 /// Where an entry's key and value were written, the two together.
 fn entry_at(entry: &Entry) -> Option<Span> {
     match (entry.key_at, entry.value.at) {
-        (Some(key), Some(value)) => Some(Span {
-            end: value.end,
-            ..key
-        }),
+        (Some(key), Some(value)) => Some(Span::new(key.stream, key.start, value.end)),
         (key, value) => value.or(key),
     }
 }
@@ -2914,11 +2911,13 @@ impl fmt::Display for Finding {
                 stream: None,
                 start,
                 end,
+                ..
             }) => write!(f, " [bytes {start}..{end}]"),
             Some(Span {
                 stream: Some((n, g)),
                 start,
                 end,
+                ..
             }) => write!(f, " [bytes {start}..{end} of {n} {g} R's data]"),
             None => Ok(()),
         }

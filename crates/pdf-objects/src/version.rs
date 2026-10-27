@@ -5,11 +5,14 @@ use std::fmt;
 /// A PDF version: `1.7`, `2.0`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Version {
+    /// The number before the point.
     pub major: u8,
+    /// The number after it.
     pub minor: u8,
 }
 
 impl Version {
+    /// Version `major.minor`.
     pub const fn new(major: u8, minor: u8) -> Version {
         Version { major, minor }
     }

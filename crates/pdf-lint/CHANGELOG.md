@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **The objects are pdf-objects'.** `object`, `text` and `version`, and `dict!`, are the new pdf-objects crate's, re-exported at the same paths and at the root as before; what they are is unchanged, and a `Span` is made by `Span::new` as in 0.2.0. pdf-objects is MIT OR Apache-2.0 and builds with Rust 1.85, so a reader of its own can use the types without pdf-lint.
 - **`text::passwords` is pdf-crypt's.** The byte forms of a typed password, which `--password` tries, are pdf-crypt's `passwords` now, re-exported at the same path; what they are is unchanged. A test holds the PDFDocEncoding table pdf-crypt encodes them by to the one `text::decode` reads with, character by character.
 
 ## 0.2.0 (unreleased)

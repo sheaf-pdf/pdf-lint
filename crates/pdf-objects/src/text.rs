@@ -8,8 +8,11 @@
 /// spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Text {
+    /// The text, U+FFFD where a character doesn't decode.
     pub text: String,
+    /// The encoding its byte order mark says.
     pub encoding: Encoding,
+    /// Where it departs from the spec, in order.
     pub quirks: Vec<Quirk>,
 }
 
@@ -46,12 +49,12 @@ pub fn decode(bytes: &[u8]) -> Text {
     let mut quirks = Vec::new();
     let (text, encoding) = match bytes {
         [0xFE, 0xFF, rest @ ..] => {
-            let (pairs, odd) = rest.as_chunks::<2>();
-            if !odd.is_empty() {
+            let pairs = rest.chunks_exact(2);
+            if !pairs.remainder().is_empty() {
                 quirks.push(Quirk::OddByte);
             }
-            let units = pairs.iter().map(|&pair| u16::from_be_bytes(pair));
             let mut text = String::with_capacity(pairs.len());
+            let units = pairs.map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
             for unit in char::decode_utf16(units) {
                 text.push(unit.unwrap_or_else(|_| {
                     quirks.push(Quirk::LoneSurrogate);
@@ -106,10 +109,6 @@ pub fn pdf_doc_char(b: u8) -> Option<char> {
         _ => Some(char::from(b)),
     }
 }
-
-// A typed password's byte forms, in PDFDocEncoding among others, are
-// pdf-crypt's, beside the security handler they open.
-pub use pdf_crypt::passwords;
 
 #[cfg(test)]
 mod tests {
@@ -171,26 +170,5 @@ mod tests {
         assert_eq!(pdf_doc_char(0xA0), Some('€'));
         assert_eq!(pdf_doc_char(0xFF), Some('ÿ'));
         assert_eq!(pdf_doc_char(0x09), Some('\t'));
-    }
-
-    /// `passwords` encodes by this table exactly, though pdf-crypt keeps a
-    /// copy of its own. With `Ł` after it, 0x95 in PDFDocEncoding and in
-    /// neither WinAnsiEncoding nor MacRomanEncoding, a character a byte
-    /// decodes to has its UTF-8 and that byte's form, no more; the Latin-1
-    /// characters at the three bytes the table leaves undefined have their
-    /// UTF-8 alone.
-    #[test]
-    fn passwords_encode_by_this_table() {
-        for b in 0..=255 {
-            if let Some(c) = pdf_doc_char(b) {
-                let typed = format!("{c}Ł");
-                let want = [typed.as_bytes().to_vec(), vec![b, 0x95]];
-                assert_eq!(passwords(&typed), want, "{b:#x}");
-            }
-        }
-        for c in ['\u{7F}', '\u{9F}', '\u{AD}'] {
-            let typed = format!("{c}Ł");
-            assert_eq!(passwords(&typed), [typed.as_bytes().to_vec()], "{c:?}");
-        }
     }
 }

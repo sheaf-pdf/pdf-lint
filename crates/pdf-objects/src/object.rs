@@ -16,7 +16,9 @@ pub type ObjectId = (u32, u16);
 pub struct Span {
     /// The object stream whose decoded data it's in; none for the file.
     pub stream: Option<ObjectId>,
+    /// The offset of its first byte.
     pub start: usize,
+    /// The offset just past its last byte.
     pub end: usize,
 }
 
@@ -31,26 +33,36 @@ impl Span {
 /// A value, and where it was written.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Object {
+    /// The value itself.
     pub value: Value,
     /// Where it was written, when the reader knows: a reader of the file's
-    /// bytes always does, and one through another tool's JSON, as the
-    /// tests' qpdf, may not.
+    /// bytes always does, and one through another tool's JSON, as qpdf's,
+    /// may not.
     pub at: Option<Span>,
 }
 
 /// PDF's objects (ISO 32000-2, 7.3).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
+    /// The null object.
     Null,
+    /// `true` or `false`.
     Bool(bool),
+    /// An integer.
     Integer(i64),
+    /// A real number.
     Real(f64),
     /// A name's bytes, its `#xx` escapes decoded.
     Name(Vec<u8>),
+    /// A string, literal or hex.
     String(Str),
+    /// An array: its elements, in order.
     Array(Vec<Object>),
+    /// A dictionary.
     Dict(Dict),
+    /// A stream: its dictionary, and where its data is.
     Stream(Stream),
+    /// A reference to an indirect object, `n g R`.
     Ref(ObjectId),
 }
 
@@ -62,9 +74,9 @@ pub enum Str {
     Bytes(Vec<u8>),
     /// Text a reader decoded without saying from which encoding, as a
     /// reader through another tool's JSON may give a string it reads as
-    /// text (the tests' qpdf does): what depends on the bytes, such as
-    /// whether they're ASCII, can't be told. The bytes reader never gives
-    /// it.
+    /// text (one through qpdf's does): what depends on the bytes, such as
+    /// whether they're ASCII, can't be told. A reader of the file's bytes
+    /// never gives it.
     Text(String),
     /// Ciphertext as written, in an encrypted file its reader doesn't
     /// decrypt: what depends on its value can't be told.
@@ -85,22 +97,26 @@ pub struct Entry {
     pub key: Vec<u8>,
     /// Where the key was written, when the reader knows.
     pub key_at: Option<Span>,
+    /// The key's value.
     pub value: Object,
 }
 
 /// A stream: its dictionary, and where its data is.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Stream {
+    /// Its dictionary.
     pub dict: Dict,
     /// Where its data was written, when the reader knows.
     pub data: Option<Span>,
 }
 
 impl Object {
+    /// `value`, not placed.
     pub fn new(value: Value) -> Object {
         Object { value, at: None }
     }
 
+    /// The null object, not placed.
     pub fn null() -> Object {
         Object::new(Value::Null)
     }
@@ -133,6 +149,7 @@ impl Object {
         }
     }
 
+    /// A name's bytes.
     pub fn as_name(&self) -> Option<&[u8]> {
         match &self.value {
             Value::Name(name) => Some(name),
@@ -140,6 +157,7 @@ impl Object {
         }
     }
 
+    /// An integer's value.
     pub fn as_integer(&self) -> Option<i64> {
         match self.value {
             Value::Integer(i) => Some(i),
@@ -164,6 +182,7 @@ impl Object {
         }
     }
 
+    /// The object a reference names.
     pub fn as_reference(&self) -> Option<ObjectId> {
         match self.value {
             Value::Ref(id) => Some(id),
@@ -171,6 +190,7 @@ impl Object {
         }
     }
 
+    /// Whether it's the null object.
     pub fn is_null(&self) -> bool {
         matches!(self.value, Value::Null)
     }
@@ -202,6 +222,7 @@ impl Dict {
         entries: Vec::new(),
     };
 
+    /// A dictionary with no entries.
     pub fn new() -> Dict {
         Dict::default()
     }
@@ -258,6 +279,7 @@ impl Dict {
         self.entries.len() - self.shadowed().len()
     }
 
+    /// Whether it has no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -271,6 +293,7 @@ impl Dict {
         });
     }
 
+    /// Adds `entry` after the others, whether or not its key has one.
     pub fn push_entry(&mut self, entry: Entry) {
         self.entries.push(entry);
     }

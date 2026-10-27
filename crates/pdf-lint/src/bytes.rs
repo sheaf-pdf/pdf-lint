@@ -399,11 +399,7 @@ impl Place {
     };
 
     fn span(&self, start: usize, end: usize) -> Span {
-        Span {
-            stream: self.stream,
-            start,
-            end,
-        }
+        Span::new(self.stream, start, end)
     }
 }
 

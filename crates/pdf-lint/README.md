@@ -138,7 +138,7 @@ pub trait Source {
 
 Its other methods are for what a reader may know, and default to nothing: the file's size (`fn:FileSize`), whether a string was written as hex (`fn:IsHexString`), and the catalog's XMP metadata, when it's in plain view (the extensions a file declares).
 
-An `Object` is a `Value` and where it was written, a `Span`, when the reader knows. A `Dict` keeps its entries as written, in order and with any key written twice, and each key's `Span` too. A string is `Str::Bytes`; or `Str::Text`, text a reader decoded without saying from which encoding; or `Str::Encrypted`, ciphertext a reader didn't decrypt. Where a reader loses something, the checker counts what depends on it as not checked. `Document` is a `Source` read whole, which readers fill and tests build.
+The objects are the [pdf-objects](../pdf-objects) crate's types, which pdf-lint re-exports as its `object`, `text` and `version` modules and at its root: an `Object` is a `Value` and where it was written, a `Span`, when the reader knows. A `Dict` keeps its entries as written, in order and with any key written twice, and each key's `Span` too. A string is `Str::Bytes`; or `Str::Text`, text a reader decoded without saying from which encoding; or `Str::Encrypted`, ciphertext a reader didn't decrypt. Where a reader loses something, the checker counts what depends on it as not checked. `Document` is a `Source` read whole, which readers fill and tests build.
 
 **`bytes::read`** reads a file from its bytes: the header, `startxref`, the cross-reference tables and streams along their `/Prev` chain, and each object at its offset, a stream's data by its `/Length` when that ends at `endstream`. Where the sections don't read, it finds the objects by scanning, and the trailer says so.
 

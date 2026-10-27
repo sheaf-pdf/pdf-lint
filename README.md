@@ -24,6 +24,7 @@ decrypts what's encrypted itself.
 | [pdf-tokenizer](crates/pdf-tokenizer) | A lossless, zero-copy PDF tokenizer, with no dependencies and needing neither `std` nor `alloc` |
 | [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept |
 | [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler, decrypting on RustCrypto's primitives, every fault said |
+| [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, each value with where it was written, and text strings decoded by the spec |
 
 ## Development
 
@@ -38,7 +39,7 @@ just clippy   # or one at a time
 
 `just ci` also needs the `thumbv6m-none-eabi` target and Rust 1.85
 installed, for the tokenizer's no-std build and the minimum Rust of the
-tokenizer, the filters and pdf-crypt.
+tokenizer, the filters, pdf-crypt and pdf-objects.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt` and `just
 fuzz check` fuzz the tokenizer, the filters, pdf-crypt's handler, and the
@@ -48,8 +49,8 @@ says for how many seconds (60 by default).
 
 ## License
 
-pdf-tokenizer, pdf-filters and pdf-crypt are licensed under either of
-Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT
-license ([LICENSE-MIT](LICENSE-MIT)) at your option. pdf-lint is
+pdf-tokenizer, pdf-filters, pdf-crypt and pdf-objects are licensed under
+either of Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+or MIT license ([LICENSE-MIT](LICENSE-MIT)) at your option. pdf-lint is
 licensed under the Apache License, Version 2.0, as is the Arlington
 model it embeds.

@@ -2806,11 +2806,7 @@ mod tests {
     #[test]
     fn functions_read_the_rows_own_string() {
         let mut file = bare();
-        let at = Span {
-            stream: None,
-            start: 10,
-            end: 16,
-        };
+        let at = Span::new(None, 10, 16);
         let row = |value: Value| {
             let mut o = Object::new(value);
             o.at = Some(at);
