@@ -11,8 +11,8 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use pdf_objects::Version;
 
-use crate::version::Version;
 use crate::xxh64::xxh64;
 
 pub(crate) mod model {
@@ -25,6 +25,7 @@ pub(crate) mod model {
 /// `upstream` any more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Correction {
+    /// The table's name.
     pub table: &'static str,
     /// The row's key.
     pub key: &'static str,
@@ -32,6 +33,7 @@ pub struct Correction {
     pub column: &'static str,
     /// The cell as upstream has it.
     pub upstream: &'static str,
+    /// The cell as corrected.
     pub corrected: &'static str,
     /// Why, with the clause of ISO 32000-2 it follows.
     pub reason: &'static str,
@@ -49,6 +51,7 @@ pub fn corrections() -> &'static [Correction] {
 /// has the table, or the table's row, itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Addition {
+    /// The table's name.
     pub table: &'static str,
     /// The row's key.
     pub key: &'static str,
@@ -91,6 +94,7 @@ pub struct Grammar {
 pub struct Table {
     /// Its file's name less `.tsv`, which links name it by.
     pub name: String,
+    /// Its rows, in its file's order.
     pub rows: Vec<Row>,
     /// The first of its repeating rows (`0*`, `1*`: INTERNAL_GRAMMAR.md,
     /// "Column 1 - Key"), which is also the first array element they
@@ -102,7 +106,9 @@ pub struct Table {
 /// element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum At<'a> {
+    /// Under a dictionary's key.
     Key(&'a [u8]),
+    /// An array's element, by its index.
     Index(usize),
 }
 
@@ -127,6 +133,8 @@ pub struct Row {
     /// `fn:MustBeDirect` or `fn:MustBeIndirect` predicate. A cell with one
     /// value, unbracketed, says it for every type.
     pub indirect_reference: Vec<String>,
+    /// Inheritable: whether the object may take it from those above it, as
+    /// a page from the page tree, a field from the field tree.
     pub inheritable: bool,
     /// As the cell has it: the checker reads no defaults.
     pub default_value: String,
@@ -138,6 +146,7 @@ pub struct Row {
     /// Per type, the tables its value may be, each maybe wrapped; none
     /// for a simple type.
     pub link: Vec<Vec<Wrapped<String>>>,
+    /// Its Note, as written: prose.
     pub note: String,
 }
 
@@ -146,23 +155,41 @@ pub struct Row {
 /// string, a rectangle an array of four numbers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ArlType {
+    /// `array`.
     Array,
+    /// `bitmask`: an integer whose bits are flags.
     Bitmask,
+    /// `boolean`.
     Boolean,
+    /// `date`: a string that's a date (ISO 32000-2, 7.9.4).
     Date,
+    /// `dictionary`.
     Dictionary,
+    /// `integer`.
     Integer,
+    /// `matrix`: an array of six numbers (ISO 32000-2, 8.3.4).
     Matrix,
+    /// `name`.
     Name,
+    /// `name-tree`: a dictionary, a name tree's root (ISO 32000-2, 7.9.6).
     NameTree,
+    /// `null`.
     Null,
+    /// `number`: an integer or a real.
     Number,
+    /// `number-tree`: a dictionary, a number tree's root (ISO 32000-2, 7.9.7).
     NumberTree,
+    /// `rectangle`: an array of four numbers (ISO 32000-2, 7.9.5).
     Rectangle,
+    /// `stream`.
     Stream,
+    /// `string`: any string.
     String,
+    /// `string-ascii`: a string of printable ASCII.
     StringAscii,
+    /// `string-byte`: a string of bytes.
     StringByte,
+    /// `string-text`: a text string (ISO 32000-2, 7.9.2.2).
     StringText,
 }
 
@@ -171,13 +198,16 @@ pub enum ArlType {
 /// `X` in `IsPDFVersion` of `1.7` and `Extension` of `ADBE_Extn3`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wrapped<T> {
+    /// The version predicates around it, outermost first.
     pub wraps: Vec<Wrap>,
+    /// The item inside them.
     pub item: T,
 }
 
 /// A version predicate around an item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wrap {
+    /// Which predicate it is.
     pub func: WrapFn,
     /// Its first argument: a version (`1.5`, which [`version`] reads), or
     /// for `Extension` the extension's name.
@@ -188,10 +218,15 @@ pub struct Wrap {
 /// 11 - Link" allows around a link, which wrap types and values too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WrapFn {
+    /// `fn:SinceVersion(v,X)`: `X` from version `v` on.
     SinceVersion,
+    /// `fn:BeforeVersion(v,X)`: `X` before version `v`.
     BeforeVersion,
+    /// `fn:IsPDFVersion(v,X)`: `X` at version `v` only.
     IsPDFVersion,
+    /// `fn:Deprecated(v,X)`: `X`, deprecated from version `v` on.
     Deprecated,
+    /// `fn:Extension(e,X)`: `X` under the extension `e`.
     Extension,
 }
 
@@ -289,8 +324,8 @@ impl Grammar {
     /// in a `tsv/latest` folder: `for f in $(LC_ALL=C ls *.tsv); do printf
     /// '%s\n' "$f"; cat "$f"; done | xxhsum -H1`. The embedded model's is
     /// of its tables with the [`corrections`] made and the [`additions`]
-    /// added, so it isn't upstream's at the same commit, which `--model`
-    /// reads as it is.
+    /// added, so it isn't upstream's at the same commit, which
+    /// [`Grammar::load`] reads as it is.
     pub fn hash(&self) -> u64 {
         self.hash
     }
@@ -558,6 +593,7 @@ impl ArlType {
 }
 
 impl WrapFn {
+    /// All 5, in the order [`WrapFn`] lists them.
     pub const ALL: [WrapFn; 5] = [
         WrapFn::SinceVersion,
         WrapFn::BeforeVersion,
@@ -629,10 +665,10 @@ fn unwrap(mut item: &str) -> Result<(Vec<Wrap>, &str)> {
         item = inner;
     }
     let name = item.strip_prefix("fn:").and_then(|f| f.split_once('('));
-    if let Some((name, _)) = name
-        && WrapFn::ALL.into_iter().any(|f| f.name() == name)
-    {
-        bail!("{item:?}: a version predicate that doesn't read");
+    if let Some((name, _)) = name {
+        if WrapFn::ALL.into_iter().any(|f| f.name() == name) {
+            bail!("{item:?}: a version predicate that doesn't read");
+        }
     }
     Ok((wraps, item))
 }

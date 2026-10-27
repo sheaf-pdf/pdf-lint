@@ -1,20 +1,21 @@
 # Development tasks. CI runs these same recipes, so a local `just ci` checks
 # what CI checks.
 
-# The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt and pdf-objects
-# support, from their Cargo.toml. Only the libraries promise one: the
-# checker ships as a binary built with stable Rust.
+# The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects and
+# pdf-arlington support, from their Cargo.toml. Only the libraries promise
+# one: the checker ships as a binary built with stable Rust.
 tokenizer_msrv := `grep -m1 '^rust-version' crates/pdf-tokenizer/Cargo.toml | cut -d'"' -f2`
 filters_msrv := `grep -m1 '^rust-version' crates/pdf-filters/Cargo.toml | cut -d'"' -f2`
 crypt_msrv := `grep -m1 '^rust-version' crates/pdf-crypt/Cargo.toml | cut -d'"' -f2`
 objects_msrv := `grep -m1 '^rust-version' crates/pdf-objects/Cargo.toml | cut -d'"' -f2`
+arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
 
 # List the recipes.
 default:
     @just --list --unsorted
 
 # Everything CI runs.
-ci: fmt clippy test test-qpdf doc fuzzing dist tokenizer-no-std tokenizer-msrv filters-msrv crypt-msrv objects-msrv
+ci: fmt clippy test test-qpdf doc fuzzing dist tokenizer-no-std tokenizer-msrv filters-msrv crypt-msrv objects-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -116,6 +117,10 @@ crypt-msrv:
 # Test pdf-objects on its oldest supported Rust, which must be installed.
 objects-msrv:
     cargo +{{ objects_msrv }} test --locked -p pdf-objects
+
+# Test pdf-arlington on its oldest supported Rust, which must be installed.
+arlington-msrv:
+    cargo +{{ arlington_msrv }} test --locked -p pdf-arlington
 
 # Fuzz a target for a while, on nightly with cargo-fuzz: `tokenize`, the
 # tokenizer; `filters`, the filters; `crypt`, pdf-crypt's security

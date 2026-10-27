@@ -7,9 +7,9 @@
 
 use std::collections::BTreeSet;
 
+use pdf_objects::{Dict, Object, ObjectId, Value};
+
 use crate::grammar::{WrapFn, grammar};
-use crate::object::{Dict, Object, Value};
-use crate::source::Source;
 
 /// The model's extensions that ISO publishes, by the number its extensions
 /// dictionary entries give as `/ExtensionLevel` under `/ISO_` (ISO 32000-2,
@@ -26,7 +26,10 @@ pub const ISO: [(&str, i64); 8] = [
     ("ISO_TS_32007", 32007),
 ];
 
-/// The extensions `source` declares, as the model names them:
+/// The extensions a file declares, as the model names them, from `root`,
+/// its trailer's `/Root` as written, and `metadata`, the data of its
+/// catalog's metadata stream (ISO 32000-2, 14.3.2); `resolve` gives the
+/// object a reference names:
 ///
 /// - `ADBE_Extn3`, from an `/ADBE` entry at `/BaseVersion /1.7` and an
 ///   `/ExtensionLevel` of 3 or more, Adobe's levels each having those
@@ -37,23 +40,25 @@ pub const ISO: [(&str, i64); 8] = [
 ///   and `PDF_VT2` (PDF/VT-2), from its `pdfvtid:GTS_PDFVTVersion`.
 ///
 /// An entry may be one developer extensions dictionary or, from PDF 2.0,
-/// an array of them. Metadata the reader doesn't have in plain view
-/// ([`Source::metadata`]) declares nothing.
-pub fn declared(source: &dyn Source) -> BTreeSet<String> {
+/// an array of them. Metadata a reader doesn't have in plain view, given
+/// as none, declares nothing.
+pub fn declared<'a>(
+    root: Option<&'a Object>,
+    metadata: Option<&[u8]>,
+    resolve: &dyn Fn(ObjectId) -> Option<&'a Object>,
+) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let get = |o: &Object| -> Option<Object> {
         let mut o = o.clone();
         for _ in 0..8 {
             match o.value {
-                Value::Ref(id) => o = source.get(id).ok()?.clone(),
+                Value::Ref(id) => o = resolve(id)?.clone(),
                 _ => return Some(o),
             }
         }
         None
     };
-    let catalog = (source.trailer().dict().get(b"Root"))
-        .and_then(get)
-        .and_then(|o| o.as_dict().cloned());
+    let catalog = root.and_then(get).and_then(|o| o.as_dict().cloned());
     let extensions = (catalog.as_ref())
         .and_then(|c| c.get(b"Extensions"))
         .and_then(get)
@@ -88,7 +93,7 @@ pub fn declared(source: &dyn Source) -> BTreeSet<String> {
             }
         }
     }
-    if let Some(xmp) = source.metadata() {
+    if let Some(xmp) = metadata {
         if property(xmp, b"pdfaid:part").as_deref() == Some(&b"3"[..]) {
             names.insert("ISO_19005_3".to_string());
         }
@@ -170,25 +175,36 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::dict;
-    use crate::source::Document;
-    use crate::version::Version;
+    use std::collections::BTreeMap;
 
-    /// A document whose catalog has `extensions`, and `xmp` as metadata.
-    fn declaring(extensions: Option<Dict>, xmp: Option<&str>) -> Document {
-        let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
+    use pdf_objects::dict;
+
+    use super::*;
+
+    /// A file's objects, its trailer's `/Root` and its metadata.
+    struct File {
+        objects: BTreeMap<ObjectId, Object>,
+        root: Object,
+        metadata: Option<Vec<u8>>,
+    }
+
+    /// A file whose catalog, object 1, has `extensions`, and `xmp` as
+    /// metadata.
+    fn declaring(extensions: Option<Dict>, xmp: Option<&str>) -> File {
         let mut catalog = dict! { "Type" => "Catalog" };
         if let Some(extensions) = extensions {
             catalog.set("Extensions", extensions);
         }
-        doc.insert(1, catalog);
-        doc.metadata = xmp.map(|x| x.as_bytes().to_vec());
-        doc
+        File {
+            objects: BTreeMap::from([((1, 0), catalog.into())]),
+            root: Object::reference(1),
+            metadata: xmp.map(|x| x.as_bytes().to_vec()),
+        }
     }
 
-    fn names(doc: &Document) -> Vec<String> {
-        declared(doc).into_iter().collect()
+    fn names(file: &File) -> Vec<String> {
+        let resolve = |id: ObjectId| file.objects.get(&id);
+        (declared(Some(&file.root), file.metadata.as_deref(), &resolve).into_iter()).collect()
     }
 
     fn developer(base: &str, level: i64) -> Object {

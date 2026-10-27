@@ -780,7 +780,8 @@ fn model_checks_against_another_checkout() {
     let path = path.to_str().unwrap();
     // A copy of the embedded model, where /OutputIntents came in on a
     // page with 1.4, not 2.0; and one without the trailer's table.
-    let embedded = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("model/tsv/latest");
+    let embedded =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../pdf-arlington/model/tsv/latest");
     let copy = |name: &str, change: &dyn Fn(&str, String) -> Option<String>| {
         let dir = std::env::temp_dir().join(format!("pdf-lint-cli-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

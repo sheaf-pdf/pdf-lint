@@ -5,8 +5,8 @@
 // `Walk::array_rows` (from `CParsePDF::parse_object`'s order), `is_date`
 // (from `is_valid_pdf_date_string`) and `Class::of` (from
 // `is_second_class_pdf_name` and `is_third_class_pdf_name`). Each one's
-// doc says how it differs from TestGrammar. The license and NOTICE.txt are
-// in model/.
+// doc says how it differs from TestGrammar. The license is LICENSE-APACHE,
+// and upstream's NOTICE.txt is ARLINGTON-NOTICE.txt, beside it.
 
 //! The walk: from the trailer as the file writes it, every object it
 //! reaches, each checked against the table it's reached as. Links are
@@ -1607,7 +1607,7 @@ impl<'a> Walk<'a> {
     /// How well `object` fits `table`, lower better (like golf): ported
     /// from `CParsePDF::recommended_link_for_object` in TestGrammar's
     /// `src/ParseObjects.cpp`, Copyright 2020-2022 PDF Association, Inc.,
-    /// Apache-2.0 (the embedded model's NOTICE.txt), its weights kept. Each
+    /// Apache-2.0 (`ARLINGTON-NOTICE.txt`), its weights kept. Each
     /// row's entry scores: a disambiguating key's (`Type`, `Subtype`, `S`,
     /// `Parent`, `TransformMethod`) value of an allowed type and value -80,
     /// an array's first element's -60 required or -20, another's -10

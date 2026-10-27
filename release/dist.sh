@@ -2,8 +2,9 @@
 # Builds the release archive for one platform: the binary, the README,
 # changelog and license, and the NOTICE.txt of the Arlington model it
 # embeds, with the cells it corrects in it and the rows it adds
-# (model/corrections.tsv, model/additions); the notices of what's
-# compiled in (below); checks it runs (release/smoke.sh); and packs it.
+# (pdf-arlington's model/corrections.tsv and model/additions); the
+# notices of what's compiled in (below); checks it runs
+# (release/smoke.sh); and packs it.
 # The layout, pdf-lint-<version>-<platform>/pdf-lint[.exe] and a .sha256
 # beside the archive, is what setup-pdf-lint unpacks: keep it.
 #
@@ -21,6 +22,7 @@ binary=${3:?a binary}
 out=${4:?a folder}
 here=$(cd "$(dirname "$0")" && pwd)
 crate=$(dirname "$here")/crates/pdf-lint
+model=$(dirname "$here")/crates/pdf-arlington/model
 
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$crate/Cargo.toml" | head -n 1)
 name=pdf-lint-$version-$platform
@@ -30,9 +32,9 @@ rm -rf "${out:?}/$name"
 mkdir "$out/$name"
 cp "$binary" "$out/$name/"
 cp "$crate/README.md" "$crate/CHANGELOG.md" "$crate/LICENSE-APACHE" "$out/$name/"
-cp "$crate/model/NOTICE.txt" "$out/$name/ARLINGTON-NOTICE.txt"
-cp "$crate/model/corrections.tsv" "$out/$name/ARLINGTON-CORRECTIONS.tsv"
-cp -r "$crate/model/additions" "$out/$name/ARLINGTON-ADDITIONS"
+cp "$model/NOTICE.txt" "$out/$name/ARLINGTON-NOTICE.txt"
+cp "$model/corrections.tsv" "$out/$name/ARLINGTON-CORRECTIONS.tsv"
+cp -r "$model/additions" "$out/$name/ARLINGTON-ADDITIONS"
 
 # Paths as bash takes them, on Windows too.
 unix() {
@@ -74,7 +76,7 @@ cargo fetch --locked --target "$target" --quiet
 registry=$(unix "${CARGO_HOME:-$HOME/.cargo}")/registry/src
 crates=$(cargo tree --locked -e normal --target "$target" -p pdf-lint --prefix none \
     --format '{p}|{l}' | sed 's/ (\*)$//' | sort -u |
-    grep -vE '^(pdf-lint|pdf-tokenizer|pdf-filters|pdf-crypt|pdf-objects) v')
+    grep -vE '^(pdf-lint|pdf-tokenizer|pdf-filters|pdf-crypt|pdf-objects|pdf-arlington) v')
 texts=$(mktemp)
 table=
 while IFS='|' read -r package licence; do
@@ -103,7 +105,8 @@ pdf-lint $version for $platform
 
 What's compiled into the binary besides this workspace's own crates
 (pdf-tokenizer, pdf-filters, pdf-crypt and pdf-objects, MIT OR
-Apache-2.0):
+Apache-2.0; pdf-arlington, Apache-2.0, with the Arlington model, whose
+NOTICE.txt is ARLINGTON-NOTICE.txt):
 
 - These crates from crates.io, each under the licence it names. Each
   offers the Apache License 2.0, whose text is LICENSE-APACHE beside

@@ -40,10 +40,9 @@ use std::fmt;
 use std::rc::Rc;
 
 use anyhow::{Context, Result, bail, ensure};
+use pdf_objects::{Dict, Object, ObjectId, Span, Str, Value, Version};
 
 use crate::grammar::{At, Table, Wrap, WrapFn, split, version};
-use crate::object::{Dict, Object, ObjectId, Span, Str, Value};
-use crate::version::Version;
 
 /// The functions [`required`], [`holds`] and [`reference()`] evaluate;
 /// `fn:RequiredValue` through [`required_value`]. Not `fn:IsFieldName`:
@@ -51,7 +50,7 @@ use crate::version::Version;
 /// which ISO 32000-2 makes a fully qualified one, so that it would fail
 /// every hide action naming a field below the top. The embedded model's
 /// corrections put `fn:IsFullyQualifiedFieldName` in its place, which
-/// pdf-lint defines, not INTERNAL_GRAMMAR.md.
+/// this crate defines, not INTERNAL_GRAMMAR.md.
 pub const SUPPORTED: [&str; 34] = [
     "fn:AlwaysUnencrypted",
     "fn:ArrayLength",
@@ -123,7 +122,7 @@ const TREE_NODES: usize = 100_000;
 
 /// How near two numbers are equal: TestGrammar's `ArlNumberTolerance`,
 /// half the fifth digit old PDF specifications recommended.
-pub(crate) const TOLERANCE: f64 = 0.000005;
+pub const TOLERANCE: f64 = 0.000005;
 
 const AND: &str = " && ";
 const OR: &str = " || ";
@@ -148,32 +147,45 @@ pub enum Expr {
     /// A key, a path, or the value at one: `Key`, `A::B`, `@Key`, `*`. A
     /// bare word compared with a value is a name (`@Type==Template`).
     Path(Path),
+    /// An integer: `3`, `-1`.
     Int(i64),
     /// A real as written: `1.5` is also a PDF version.
     Real(String),
     /// `'text'`.
     Str(String),
+    /// `true` or `false`.
     Bool(bool),
+    /// `null`.
     Null,
 }
 
 /// A comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cmp {
+    /// `==`.
     Eq,
+    /// `!=`.
     Ne,
+    /// `<`.
     Lt,
+    /// `<=`.
     Le,
+    /// `>`.
     Gt,
+    /// `>=`.
     Ge,
 }
 
 /// An arithmetic operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arith {
+    /// `+`.
     Add,
+    /// `-`.
     Sub,
+    /// `*`.
     Mul,
+    /// `mod`, the remainder.
     Mod,
 }
 
@@ -182,6 +194,7 @@ pub enum Arith {
 /// predicates").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Path {
+    /// Where it starts.
     pub base: Base,
     /// The keys and indices it goes through. `*` (or a repeating row's
     /// `1*`) first is the row's own value, as in `@*`; `*` last after
@@ -208,7 +221,9 @@ pub enum Base {
 /// What a predicate comes to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Truth {
+    /// It holds.
     True,
+    /// It doesn't.
     False,
     /// It can't be told, for the first thing in the way: a function the
     /// evaluator doesn't support (`fn:BitsClear`), or a value it can't read
@@ -315,7 +330,7 @@ pub enum Since {
     /// In this version.
     In(Version),
     /// With this extension, and in no version, the file not being checked
-    /// under it ([`crate::Report::extensions`]).
+    /// under it (not among the extensions [`since`] is given).
     Extension(String),
     /// A cell the reader doesn't read.
     Unknown(String),
@@ -325,10 +340,13 @@ pub enum Since {
 /// it at a file's version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
+    /// Allowed at the file's version, under its extensions.
     Allowed,
     /// Allowed, and deprecated from this version, which the file's is at
     /// or past.
     AllowedDeprecated(Version),
+    /// Not at the file's version, or not under its extensions: as if the
+    /// model hadn't it.
     Excluded,
 }
 
@@ -754,7 +772,7 @@ fn bits(f: &str, low: &Expr, high: &Expr, cx: &Cx) -> Tri {
     };
     let value = u32::try_from(value)
         .ok()
-        .or_else(|| i32::try_from(value).ok().map(i32::cast_unsigned));
+        .or_else(|| i32::try_from(value).ok().map(|v| v as u32));
     let Some(value) = value else {
         return Tri::Is(false);
     };
@@ -1236,7 +1254,7 @@ fn name_tree<'a>(root: &'a Object, cx: &Cx<'a>) -> Tree {
 
 /// Whether the string at `p` is the fully qualified name of a field of
 /// the file's interactive form (`fn:IsFullyQualifiedFieldName`, which
-/// pdf-lint defines for a hide action's `/T`, ISO 32000-2 12.6.4: "the
+/// this crate defines for a hide action's `/T`, ISO 32000-2 12.6.4: "the
 /// fully qualified field name of an interactive form field"), as text,
 /// however each is encoded. A value that isn't a string isn't what the
 /// function asks of, and can't be told; nor can one whose text the
@@ -1616,6 +1634,7 @@ impl Cmp {
     /// Every comparison, the longer of those that start alike first.
     const ALL: [Cmp; 6] = [Cmp::Eq, Cmp::Ne, Cmp::Le, Cmp::Ge, Cmp::Lt, Cmp::Gt];
 
+    /// As the model writes it: `==`, `<=`.
     pub fn symbol(self) -> &'static str {
         match self {
             Cmp::Eq => "==",
@@ -1878,11 +1897,11 @@ fn word(word: &str) -> Result<Expr> {
 fn path(text: &str) -> Result<Path> {
     let mut keys: Vec<&str> = text.split("::").collect();
     let mut value = false;
-    if let Some(last) = keys.last_mut()
-        && let Some(key) = last.strip_prefix('@')
-    {
-        *last = key;
-        value = true;
+    if let Some(last) = keys.last_mut() {
+        if let Some(key) = last.strip_prefix('@') {
+            *last = key;
+            value = true;
+        }
     }
     let parents = keys.iter().take_while(|&&k| k == "parent").count();
     let (base, skip) = match keys[0] {
@@ -1926,10 +1945,10 @@ mod tests {
 
     use std::collections::BTreeMap;
 
+    use pdf_objects::{Dict, dict};
+
     use super::*;
-    use crate::dict;
     use crate::grammar::{self, Row, grammar, model, split};
-    use crate::object::Dict;
 
     /// A version the model names.
     fn v(text: &str) -> Version {

@@ -1,0 +1,22 @@
+[package]
+name = "pdf-arlington"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+# As the model it embeds is.
+license = "Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "The Arlington PDF Model, embedded: its tables read, and the predicates in their cells evaluated over pdf-objects' objects"
+keywords = ["pdf", "arlington", "grammar", "validation", "iso-32000"]
+categories = ["parser-implementations", "development-tools::testing"]
+# Only what users need. The model is embedded, and `cargo install` has no
+# checkout to read it from.
+include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md", "/LICENSE-APACHE"]
+
+[dependencies]
+anyhow = "1"
+pdf-objects = { path = "../pdf-objects", version = "0.1" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
