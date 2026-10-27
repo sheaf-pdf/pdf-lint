@@ -156,14 +156,13 @@ pub enum Fault {
 impl fmt::Display for Fault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Fault::Short { len } => write!(
-                f,
-                "its AES ciphertext is {len} bytes, no whole block past the IV"
-            ),
-            Fault::PartBlock { extra } => write!(
-                f,
-                "its AES ciphertext has {extra} bytes past its whole blocks"
-            ),
+            Fault::Short { .. } => write!(f, "its AES ciphertext has no whole block past its IV"),
+            Fault::PartBlock { .. } => {
+                write!(
+                    f,
+                    "its AES ciphertext has a part block past its whole blocks"
+                )
+            }
             Fault::Padding => write!(f, "its AES plaintext isn't padded"),
             Fault::Method { name } => {
                 write!(f, "its crypt filter's method or name, /{name}, isn't one")

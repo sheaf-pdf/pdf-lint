@@ -346,10 +346,14 @@ fn settings(kind: Kind, user: &[u8]) -> Settings<'_> {
 /// user's password and `owner` for the owner's: its object stream's data
 /// encrypted, the encryption dictionary and `/ID` in its trailer.
 fn crypted(kind: Kind, user: &[u8]) -> Vec<u8> {
+    crypted_with(kind, user, &object_stream_objects().0)
+}
+
+/// [`crypted`]'s file, its object stream holding `objects`.
+fn crypted_with(kind: Kind, user: &[u8], objects: &[u8]) -> Vec<u8> {
     let dictionary = writer::dictionary(&settings(kind, user));
     let handler = Handler::open(&dictionary, ID, &[user]).unwrap();
-    let (objects, _) = object_stream_objects();
-    let data = writer::encrypt_stream(&handler, (4, 0), &objects, None, [4; 16]).unwrap();
+    let data = writer::encrypt_stream(&handler, (4, 0), objects, None, [4; 16]).unwrap();
     in_an_object_stream_under("", &data, &encryption(&dictionary))
 }
 
@@ -473,20 +477,28 @@ fn a_password_is_tried_as_utf_8_and_in_each_single_byte_encoding() {
 
 #[test]
 fn an_encrypted_files_last_update_is_read_with_its_password() {
-    let base = crypted(Kind::Aes128, b"user");
-    let trailer = encryption(&writer::dictionary(&settings(Kind::Aes128, b"user")));
-    // The update rewrites the page, which the object stream held, with a
-    // /Rotate that isn't a number.
+    // The page, in the object stream, has a /Rotate that isn't a number,
+    // which the update, rewriting it as it was, carries: so the revision
+    // before it must open too.
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Rotate /B >>";
+    let base = crypted_with(Kind::Aes128, b"user", &object_stream_with(page).0);
+    let trailer = encryption(&writer::dictionary(&settings(Kind::Aes128, b"user")));
     let update = updated_under(&base, &[(3, page)], &trailer);
     let path = written("updated-encrypted.pdf", &update);
     let path = path.to_str().unwrap();
     let out = run(&["--last-update", "--password", "user", path]);
     let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 findings, 1 carried"), "{stdout}");
+    // A new finding is the update's.
+    let rotated = page.replace("/Rotate /B", "/Rotate /C /UserUnit /D");
+    let update = updated_under(&base, &[(3, rotated.as_str())], &trailer);
+    let rotated = written("updated-encrypted-2.pdf", &update);
+    let rotated = rotated.to_str().unwrap();
+    let out = run(&["--last-update", "--password", "user", rotated]);
+    let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{stdout}");
-    let findings: Vec<_> = stdout.lines().filter(|l| l.starts_with("- ")).collect();
-    assert_eq!(findings.len(), 1, "{stdout}");
-    assert!(findings[0].contains("PageObject/Rotate"), "{stdout}");
+    assert!(stdout.contains("PageObject/UserUnit"), "{stdout}");
     let out = run(&["--last-update", path]);
     assert_eq!(out.status.code(), Some(2));
     assert!(text(&out.stderr).contains("it needs a password"));
@@ -495,7 +507,12 @@ fn an_encrypted_files_last_update_is_read_with_its_password() {
 /// What [`in_an_object_stream`]'s object stream holds, a catalog, page
 /// tree and page after their header, and where the first object begins.
 fn object_stream_objects() -> (Vec<u8>, usize) {
-    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    object_stream_with("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>")
+}
+
+/// [`object_stream_objects`], the page `page`: the first object begins
+/// where it does, the page last.
+fn object_stream_with(page: &str) -> (Vec<u8>, usize) {
     let (mut header, mut body) = (String::new(), String::new());
     for (n, object) in [CATALOG, PAGES, page].iter().enumerate() {
         header.push_str(&format!("{} {} ", n + 1, body.len()));

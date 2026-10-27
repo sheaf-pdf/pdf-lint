@@ -1927,4 +1927,350 @@ qpdf: operation succeeded with warnings\n";
         }
         assert!(unexplained.is_empty(), "unexplained: {unexplained:#?}");
     }
+
+    /// The passwords the test suites' encrypted files are opened with, as
+    /// their tests give them.
+    const PASSWORDS: [&str; 26] = [
+        "user",
+        "owner",
+        "z",
+        "u",
+        "quack",
+        "asdfqwer",
+        "π",
+        "ʬ",
+        "Á•Ž€π🥔",
+        "Á•Ž€",
+        "y",
+        "x",
+        "user3",
+        "owner3",
+        "pass",
+        "khoai",
+        "attachment",
+        "623",
+        "19723102477",
+        "secret",
+        "usersecret",
+        "ownersecret",
+        "test",
+        "password",
+        "foo",
+        "a",
+    ];
+
+    /// A difference between decrypting through the reader and through
+    /// qpdf that's understood, as `kind` names it, and why it's no fault of
+    /// the reader's.
+    fn decryption_explained(kind: &str) -> Option<&'static str> {
+        match kind {
+            _ if kind.contains("in a file qpdf refuses") => Some(
+                "qpdf refuses the whole file (a page tree without /Kids), and so gives none of its streams",
+            ),
+            _ if kind.starts_with("verdicts differ: the reader: plain; qpdf: locked") => Some(
+                "nothing the reader reads is encrypted (/StmF and /StrF /Identity, as when only embedded files are), so it reads whole without the password, which qpdf asks for",
+            ),
+            _ if kind.starts_with("verdicts differ: the reader: opens; qpdf: can't open (root of pages tree has no /Kids array)") => Some(
+                "qpdf refuses the whole file for its page tree; the reader opens it",
+            ),
+            "verdicts differ: the reader: can't open (its /Encrypt doesn't read); qpdf: opens" => Some(
+                "junk before %PDF, which qpdf shifts every offset for and the reader doesn't yet: no object reads, the encryption dictionary first",
+            ),
+            _ if kind.starts_with("decrypted, ") && kind.contains("by a /Crypt filter that names none") => Some(
+                "qpdf decrypts what isn't encrypted (see below), and what it gives doesn't decode",
+            ),
+            _ if kind.starts_with("decrypted, ") => explained(&kind["decrypted, ".len()..]),
+            _ if kind.contains("by a /Crypt filter that names none") => Some(
+                "a /Crypt filter without /Name is /Identity (ISO 32000-2, Table 14), and the data plain (XMP, zlib): qpdf takes a /Name only from parameters of /Type /CryptFilterDecodeParms or in an array, and else decrypts by /StmF",
+            ),
+            "decrypts alike, the reader's fault: Short { len: 16 }" => Some(
+                "just an IV: both decrypt it to nothing; the reader says it lacks the padding AES-CBC always writes",
+            ),
+            _ if kind.starts_with("decrypts otherwise (the reader's is a prefix of qpdf's), the reader's fault: PartBlock") => Some(
+                "a part block past the whole blocks: the reader leaves it off, qpdf pads it with zeros and decrypts it",
+            ),
+            _ => None,
+        }
+    }
+
+    /// Every encrypted PDF under `PDF_LINT_CORPUS`, opened by the reader
+    /// with the empty password and by qpdf: whether it opens, is locked, or
+    /// has a handler that can't open, the reader's verdict against qpdf's
+    /// `--requires-password`; and in each the reader opens, every stream's
+    /// data decrypted as the reader decrypts (its handler, a stream's own
+    /// `/Crypt`, a cross-reference stream not, a metadata stream not under
+    /// `/EncryptMetadata false`) against qpdf's (`undecoding`), and those
+    /// with filters the reader decodes, decrypted and decoded, against
+    /// qpdf's at `specialized`. Each difference counted by its kind, with
+    /// examples, and each kind must be one [`decryption_explained`] knows.
+    #[test]
+    #[ignore = "needs PDF_LINT_CORPUS, a folder of PDF files, and qpdf"]
+    fn a_corpus_decrypts_alike_through_qpdf() {
+        use std::sync::Mutex;
+
+        let files = corpus();
+        type Kinds = BTreeMap<String, (usize, Vec<String>)>;
+        #[derive(Default)]
+        struct Tally {
+            files: usize,
+            encrypted: usize,
+            verdicts: BTreeMap<String, usize>,
+            streams: usize,
+            alike: usize,
+            decoded: usize,
+            decoded_alike: usize,
+            kinds: Kinds,
+        }
+        let tally = Mutex::new(Tally::default());
+        let next = AtomicUsize::new(0);
+        let start = Instant::now();
+        let dump = std::env::var_os("PDF_LINT_ORACLE_DUMP").map(PathBuf::from);
+        let relation = |ours: &[u8], theirs: &[u8]| match () {
+            _ if theirs.starts_with(ours) => "the reader's is a prefix of qpdf's",
+            _ if ours.starts_with(theirs) => "qpdf's is a prefix of the reader's",
+            _ => "neither is a prefix of the other",
+        };
+        thread::scope(|scope| {
+            for _ in 0..thread::available_parallelism().map_or(1, |n| n.get()) {
+                scope.spawn(|| {
+                    while let Some(path) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                        let data = std::fs::read(path).unwrap();
+                        let (ours, handler) = bytes::read_opened_by(&data, &[]);
+                        if ours.encryption == crate::Encryption::None {
+                            tally.lock().unwrap().files += 1;
+                            continue;
+                        }
+                        // Locked, by the first password the test suites use
+                        // that opens it for qpdf, if one does, given to the
+                        // reader as the command line gives it.
+                        let password = (ours.encryption == crate::Encryption::Locked)
+                            .then(|| PASSWORDS.iter().find(|p| Qpdf::new(path).password(**p).locked() == Ok(false)))
+                            .flatten();
+                        let (ours, handler) = match password {
+                            Some(password) => {
+                                let passwords = text::passwords(password);
+                                let passwords: Vec<&[u8]> = passwords.iter().map(Vec::as_slice).collect();
+                                bytes::read_opened_by(&data, &passwords)
+                            }
+                            None => (ours, handler),
+                        };
+                        let qpdf = match password {
+                            Some(password) => Qpdf::new(path).password(*password),
+                            None => Qpdf::new(path),
+                        };
+                        let mut found: Vec<(String, String)> = Vec::new();
+                        // The verdicts.
+                        let mut args = vec!["--requires-password".to_string(), path.display().to_string()];
+                        if let Some(password) = password {
+                            args.insert(0, format!("--password={password}"));
+                        }
+                        let theirs = match qpdf.exec(&args) {
+                            Ok(ran) => match ran.code {
+                                Some(0) => "locked".to_string(),
+                                Some(3) => "opens".to_string(),
+                                Some(2) if ran.stderr.is_empty() => "isn't encrypted".to_string(),
+                                _ => {
+                                    // Its error, after any warnings, without
+                                    // the file's name.
+                                    let stderr = String::from_utf8_lossy(&ran.stderr);
+                                    let why = stderr.lines().rfind(|l| !l.is_empty()).unwrap_or_default();
+                                    let why = why.rsplit_once("): ").map_or(why, |(_, w)| w);
+                                    let why = why.rsplit_once(".pdf: ").map_or(why, |(_, w)| w);
+                                    format!("can't open ({why})")
+                                }
+                            },
+                            Err(why) => format!("doesn't run ({why})"),
+                        };
+                        let (mine, why) = match &ours.encryption {
+                            crate::Encryption::Opened { .. } => ("opens", String::new()),
+                            crate::Encryption::Locked => ("locked", String::new()),
+                            crate::Encryption::Plain => ("plain", String::new()),
+                            crate::Encryption::Unsupported(why) => ("can't open", why.clone()),
+                            crate::Encryption::None => unreachable!(),
+                        };
+                        let by = if password.is_some() { " by a password" } else { "" };
+                        let verdict = format!("the reader: {mine}{by}; qpdf: {theirs}");
+                        if !theirs.starts_with(mine) {
+                            let why = if why.is_empty() { String::new() } else { format!(" ({why})") };
+                            let verdict = format!("the reader: {mine}{why}; qpdf: {theirs}");
+                            found.push((format!("verdicts differ: {verdict}"), String::new()));
+                        }
+                        // What qpdf gives of a file it refuses is nothing.
+                        let refused = if theirs.starts_with("can't open") { ", in a file qpdf refuses" } else { "" };
+                        // Each stream, decrypted.
+                        let mut streams = 0;
+                        let mut alike = 0;
+                        let (mut decoded, mut decoded_alike) = (0, 0);
+                        if let Some(handler) = &handler {
+                            let resolve = |id| ours.objects.get(&id)?.as_ref().ok();
+                            // The document's metadata stream, the catalog's,
+                            // which /EncryptMetadata false leaves plain.
+                            let catalog = ours.trailer.dict().get(b"Root").and_then(|r| match r.value {
+                                Value::Ref(id) => resolve(id),
+                                _ => None,
+                            });
+                            let metadata = catalog
+                                .and_then(Object::as_dict)
+                                .and_then(|c| c.get(b"Metadata"))
+                                .and_then(|m| match m.value {
+                                    Value::Ref(id) => Some(id),
+                                    _ => None,
+                                });
+                            // Each stream: decrypted, its filters, and whether
+                            // a /Crypt filter of its names none.
+                            type Decrypted = (ObjectId, Result<Vec<u8>, pdf_crypt::Error>, Vec<pdf_filters::Filter>, bool);
+                            let mine: Vec<Decrypted> = (ours.objects.iter())
+                                .filter_map(|(&id, object)| {
+                                    let Value::Stream(stream) = &object.as_ref().ok()?.value else {
+                                        return None;
+                                    };
+                                    let at = stream.data.filter(|at| at.stream.is_none())?;
+                                    let written = &data[at.start..at.end];
+                                    let typed = stream.dict.get(b"Type").and_then(Object::as_name);
+                                    let plain = typed == Some(b"XRef")
+                                        || (Some(id) == metadata && !handler.encrypts_metadata());
+                                    let crypt = crate::filter::crypt_filter(&stream.dict, Some(&resolve));
+                                    // A /Crypt filter that names no crypt
+                                    // filter, so /Identity.
+                                    let named = match stream.dict.get(b"DecodeParms").map(|p| &p.value) {
+                                        Some(Value::Dict(d)) => d.has(b"Name"),
+                                        Some(Value::Array(a)) => {
+                                            a.iter().any(|p| matches!(&p.value, Value::Dict(d) if d.has(b"Name")))
+                                        }
+                                        _ => false,
+                                    };
+                                    let unnamed = crypt.is_some() && !named;
+                                    let decrypted = match plain {
+                                        true => Ok(written.to_vec()),
+                                        false => {
+                                            let method = crypt.map(|name| handler.named(&name));
+                                            handler.decrypt_stream(id, written, method.as_ref())
+                                        }
+                                    };
+                                    let filters = crate::filter::filters(&stream.dict, Some(&resolve)).unwrap_or_default();
+                                    Some((id, decrypted, filters, unnamed))
+                                })
+                                .collect();
+                            let ids: Vec<ObjectId> = mine.iter().map(|(id, ..)| *id).collect();
+                            let mut raw = qpdf.clone().undecoding().decode(&ids);
+                            let with_filters: Vec<ObjectId> = (mine.iter())
+                                .filter(|(_, _, filters, _)| !filters.is_empty())
+                                .map(|(id, ..)| *id)
+                                .collect();
+                            let mut specialized = qpdf.clone().specialized().decode(&with_filters);
+                            for (id, decrypted, filters, unnamed) in mine {
+                                streams += 1;
+                                let example = format!("{} {} R", id.0, id.1);
+                                let (plain, fault) = match decrypted {
+                                    Ok(plain) => (Some(plain), String::new()),
+                                    Err(e) => (e.data, format!(", the reader's fault: {:?}", e.fault)),
+                                };
+                                let by = if unnamed { ", by a /Crypt filter that names none" } else { "" };
+                                let by = format!("{by}{refused}");
+                                let theirs = raw.remove(&id);
+                                if let Some(dir) = &dump
+                                    && !matches!((&plain, &theirs), (Some(p), Some(Ok(t))) if p == t)
+                                {
+                                    let file = |what: &str| dir.join(format!("{name}-{}-{}.{what}", id.0, id.1));
+                                    std::fs::write(file("ours"), plain.as_deref().unwrap_or(b"NONE")).unwrap();
+                                    let qpdf = match &theirs {
+                                        Some(Ok(t)) => t.clone(),
+                                        Some(Err(why)) => format!("ERR {why}").into_bytes(),
+                                        None => b"NONE".to_vec(),
+                                    };
+                                    std::fs::write(file("qpdf"), qpdf).unwrap();
+                                }
+                                match (&plain, &theirs) {
+                                    (Some(p), Some(Ok(t))) if p == t && fault.is_empty() => alike += 1,
+                                    (Some(p), Some(Ok(t))) if p == t => found.push((format!("decrypts alike{fault}"), example.clone())),
+                                    (Some(p), Some(Ok(t))) => found.push((format!("decrypts otherwise ({}){fault}{by}", relation(p, t)), example.clone())),
+                                    (None, Some(Ok(_))) => found.push((format!("only qpdf decrypts{fault}{by}"), example.clone())),
+                                    (_, Some(Err(_)) | None) => found.push((format!("qpdf gives no data{fault}{by}"), example.clone())),
+                                }
+                                if filters.is_empty() {
+                                    continue;
+                                }
+                                decoded += 1;
+                                let Some(plain) = plain else { continue };
+                                let (mine, mine_faults) = match pdf_filters::decode(&plain, &filters, bytes::STREAM) {
+                                    Ok(data) => (data, Vec::new()),
+                                    Err(e) => (e.data, e.faults),
+                                };
+                                // As the decoding oracle names them.
+                                let mut kinds: Vec<String> = (mine_faults.iter())
+                                    .map(|(_, f)| format!("{f:?}").split([' ', '{']).next().unwrap_or_default().to_string())
+                                    .collect();
+                                kinds.sort();
+                                kinds.dedup();
+                                let faults = if kinds.is_empty() { "none".to_string() } else { kinds.join(", ") };
+                                let unnamed = match (unnamed, refused.is_empty()) {
+                                    (true, _) => " (by a /Crypt filter that names none)",
+                                    (false, false) => " (in a file qpdf refuses)",
+                                    (false, true) => "",
+                                };
+                                let kind = match specialized.remove(&id) {
+                                    Some(Ok(t)) if t == mine && mine_faults.is_empty() => {
+                                        decoded_alike += 1;
+                                        continue;
+                                    }
+                                    Some(Ok(t)) if t == mine => format!("a stream decodes alike, the reader's faults: {faults}"),
+                                    Some(Ok(t)) => format!("a stream decodes otherwise ({}){unnamed}, the reader's faults: {faults}", relation(&mine, &t)),
+                                    Some(Err(why)) if why.contains("doesn't decode its filters") => {
+                                        format!("qpdf leaves a stream undecoded{unnamed}, the reader's faults: {faults}")
+                                    }
+                                    Some(Err(_)) | None => format!("qpdf can't decode a stream{unnamed}, the reader's faults: {faults}"),
+                                };
+                                found.push((format!("decrypted, {kind}"), example));
+                            }
+                        }
+                        let mut tally = tally.lock().unwrap();
+                        tally.files += 1;
+                        tally.encrypted += 1;
+                        *tally.verdicts.entry(verdict).or_default() += 1;
+                        tally.streams += streams;
+                        tally.alike += alike;
+                        tally.decoded += decoded;
+                        tally.decoded_alike += decoded_alike;
+                        for (kind, example) in found {
+                            let (n, examples) = tally.kinds.entry(kind).or_default();
+                            *n += 1;
+                            if examples.len() < 5 {
+                                examples.push(format!("{name}: {example}"));
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        let tally = tally.into_inner().unwrap();
+        println!(
+            "{} files, {} encrypted, in {:.0?}: {} streams in those the reader opens, {} decrypted alike; {} with filters, {} decoded alike",
+            tally.files,
+            tally.encrypted,
+            start.elapsed(),
+            tally.streams,
+            tally.alike,
+            tally.decoded,
+            tally.decoded_alike
+        );
+        for (verdict, n) in &tally.verdicts {
+            println!("{n:>8}  {verdict}");
+        }
+        let mut unexplained = Vec::new();
+        for (kind, (n, examples)) in &tally.kinds {
+            let why = decryption_explained(kind);
+            println!(
+                "{n:>8}  {kind}{}",
+                why.map_or(String::new(), |why| format!(": {why}"))
+            );
+            for example in examples {
+                println!("            e.g. {example}");
+            }
+            if why.is_none() {
+                unexplained.push(kind.clone());
+            }
+        }
+        assert!(unexplained.is_empty(), "unexplained: {unexplained:#?}");
+    }
 }

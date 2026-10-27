@@ -227,13 +227,18 @@ pub(crate) fn encrypted(
                     Body::Object(object)
                 }
                 Body::Stream(dict, data) => {
+                    // Metadata under /EncryptMetadata false isn't encrypted.
+                    let metadata = dict.get(b"Type").and_then(Object::as_name) == Some(b"Metadata");
                     let mut dict: Object = dict.clone().into();
                     strings(&mut dict, &mut encrypt);
                     let Value::Dict(dict) = dict.value else {
                         unreachable!()
                     };
-                    let data = writer::encrypt_stream(&handler, id, data, None, iv)
-                        .expect("the writer's own method");
+                    let data = match metadata && !handler.encrypts_metadata() {
+                        true => data.clone(),
+                        false => writer::encrypt_stream(&handler, id, data, None, iv)
+                            .expect("the writer's own method"),
+                    };
                     Body::Stream(dict, data)
                 }
             },

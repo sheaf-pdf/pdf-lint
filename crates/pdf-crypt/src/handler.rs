@@ -3,6 +3,8 @@
 //! decrypted with it. Revision 5, which ISO 32000-2 leaves out, is read as
 //! Adobe's Extension Level 3 has it, as qpdf reads it.
 
+use std::collections::BTreeMap;
+
 use crate::aes::Aes;
 use crate::md5::md5;
 use crate::rc4::rc4;
@@ -44,7 +46,7 @@ pub struct Handler {
     owner: bool,
     strings: Method,
     streams: Method,
-    filters: Vec<(Vec<u8>, Method)>,
+    filters: BTreeMap<Vec<u8>, Method>,
     encrypt_metadata: bool,
     faults: Vec<Fault>,
 }
@@ -143,9 +145,8 @@ impl Handler {
         match name {
             _ if self.v < 4 => self.streams.clone(),
             b"Identity" => Method::Identity,
-            _ => (self.filters.iter())
-                .find(|(n, _)| n == name)
-                .map_or_else(|| Method::Unknown(name.to_vec()), |(_, m)| m.clone()),
+            _ => (self.filters.get(name))
+                .map_or_else(|| Method::Unknown(name.to_vec()), Method::clone),
         }
     }
 
@@ -573,30 +574,29 @@ pub(crate) fn hash(r: i64, password: &[u8], salt: &[u8], udata: &[u8]) -> Vec<u8
     k
 }
 
-/// How strings and streams are encrypted, and the crypt filters by name,
-/// for a dictionary of version `v`.
-fn methods(dictionary: &Dictionary, v: i64) -> (Method, Method, Vec<(Vec<u8>, Method)>) {
+/// How strings and streams are encrypted, and the crypt filters by name
+/// (the first of a name), for a dictionary of version `v`.
+fn methods(dictionary: &Dictionary, v: i64) -> (Method, Method, BTreeMap<Vec<u8>, Method>) {
     if v < 4 {
-        return (Method::Rc4, Method::Rc4, Vec::new());
+        return (Method::Rc4, Method::Rc4, BTreeMap::new());
     }
-    let filters: Vec<(Vec<u8>, Method)> = (dictionary.crypt_filters.iter())
-        .map(|CryptFilter { name, method, .. }| {
-            let method = match method.as_deref() {
-                None => Method::Identity,
-                Some(b"None") => Method::None,
-                Some(b"V2") => Method::Rc4,
-                Some(b"AESV2") => Method::Aes128,
-                Some(b"AESV3") => Method::Aes256,
-                Some(other) => Method::Unknown(other.to_vec()),
-            };
-            (name.clone(), method)
-        })
-        .collect();
+    let mut filters = BTreeMap::new();
+    for CryptFilter { name, method } in &dictionary.crypt_filters {
+        let method = match method.as_deref() {
+            None => Method::Identity,
+            Some(b"None") => Method::None,
+            Some(b"V2") => Method::Rc4,
+            Some(b"AESV2") => Method::Aes128,
+            Some(b"AESV3") => Method::Aes256,
+            Some(other) => Method::Unknown(other.to_vec()),
+        };
+        filters.entry(name.clone()).or_insert(method);
+    }
     let by = |name: &Option<Vec<u8>>| match name.as_deref() {
         None | Some(b"Identity") => Method::Identity,
-        Some(name) => (filters.iter())
-            .find(|(n, _)| n == name)
-            .map_or_else(|| Method::Unknown(name.to_vec()), |(_, m)| m.clone()),
+        Some(name) => {
+            (filters.get(name)).map_or_else(|| Method::Unknown(name.to_vec()), Method::clone)
+        }
     };
     (by(&dictionary.str_f), by(&dictionary.stm_f), filters)
 }
