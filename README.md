@@ -15,8 +15,9 @@ pdf-lint --baseline in.pdf out.pdf   # findings in.pdf didn't already have
 pdf-lint --hold objects.txt out.pdf  # the objects your tool says it wrote
 ```
 
-It reads each file from its bytes, and has qpdf decode what's compressed
-or encrypted. Each release archive bundles the qpdf it's tested against.
+It reads each file from its bytes, and decodes what's compressed itself;
+what's encrypted, qpdf decrypts. Each release archive bundles the qpdf
+it's tested against.
 
 | Crate | What |
 |---|---|

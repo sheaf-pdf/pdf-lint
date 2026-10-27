@@ -399,12 +399,23 @@ fn a_file_that_wont_open_with_the_password_given_is_unread_and_says_why() {
 }
 
 /// `plain` rewritten by qpdf with its objects in object streams, which
-/// only qpdf decodes, as `name`.
+/// the reader decodes itself, as `name`.
 fn packed(plain: &std::path::Path, name: &str) -> String {
+    rewritten(plain, name, &[])
+}
+
+/// [`packed`]'s file, encrypted (AES-256, with no user password), which
+/// only qpdf decrypts.
+fn encrypted(plain: &std::path::Path, name: &str) -> String {
+    rewritten(plain, name, &["--encrypt", "", "owner", "256", "--"])
+}
+
+fn rewritten(plain: &std::path::Path, name: &str, args: &[&str]) -> String {
     let qpdf = std::env::var_os("PDF_LINT_QPDF").unwrap_or_else(|| "qpdf".into());
     let out = plain.with_file_name(name);
     let status = Command::new(&qpdf)
         .arg("--object-streams=generate")
+        .args(args)
         .arg(plain)
         .arg(&out)
         .status()
@@ -414,10 +425,11 @@ fn packed(plain: &std::path::Path, name: &str) -> String {
 }
 
 #[test]
-fn a_file_that_needs_qpdf_without_one_is_unread_and_says_why() {
+fn a_file_that_encrypts_without_qpdf_is_unread_and_says_why() {
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
     let plain = written("unready-plain.pdf", &file(&[CATALOG, PAGES, page]));
     let packed = packed(&plain, "unready-packed.pdf");
+    let encrypted = encrypted(&plain, "unready-encrypted.pdf");
     let without = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
             .args(args)
@@ -426,12 +438,16 @@ fn a_file_that_needs_qpdf_without_one_is_unread_and_says_why() {
             .unwrap();
         (out.status.code(), text(&out.stdout), text(&out.stderr))
     };
-    // A file all in plain view needs no qpdf.
+    // A file all in plain view needs no qpdf, nor one in object streams,
+    // which the reader decodes itself.
     let (code, _, err) = without(&[plain.to_str().unwrap()]);
     assert_eq!(code, Some(0), "{err}");
-    // One whose objects are in object streams is unread, in a line that
-    // says why, rather than checked with them missing.
-    let why = "it needs qpdf to decode what's compressed or encrypted in it, and /nonexistent/qpdf isn't found: install qpdf 11.9 or later, or name one with --qpdf";
+    let (code, _, err) = without(&[&packed]);
+    assert_eq!(code, Some(0), "{err}");
+    // One that encrypts is unread, in a line that says why, rather than
+    // checked with what's encrypted missing.
+    let packed = encrypted;
+    let why = "it's encrypted, and qpdf decrypts it, but /nonexistent/qpdf isn't found: install qpdf 11.9 or later, or name one with --qpdf";
     let (code, out, err) = without(&[&packed]);
     assert_eq!(code, Some(2), "{out}");
     assert_eq!(err, format!("{packed}: {why}\n"));
@@ -460,6 +476,7 @@ fn a_file_of_dash_is_standard_input() {
     let plain = written("stdin-plain.pdf", &file(&[CATALOG, PAGES, page]));
     let plain = plain.to_str().unwrap();
     let packed = packed(Path::new(plain), "stdin-packed.pdf");
+    let encrypted = encrypted(Path::new(plain), "stdin-encrypted.pdf");
     let piped = |path: &str, args: &[&str]| {
         let child = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
             .args(args)
@@ -475,9 +492,9 @@ fn a_file_of_dash_is_standard_input() {
         assert!(!spool.exists(), "{}", spool.display());
         out
     };
-    // In plain view, and in object streams, which qpdf decodes from a
-    // copy: each checked as by its path, and named -.
-    for path in [plain, &packed] {
+    // In plain view, in object streams, and encrypted, which qpdf
+    // decrypts from a copy: each checked as by its path, and named -.
+    for path in [plain, &packed, &encrypted] {
         let by_path = text(&run(&[path]).stdout);
         let out = piped(path, &["-"]);
         assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
@@ -505,6 +522,7 @@ fn a_qpdf_older_than_11_9_is_refused_for_a_file_that_needs_it() {
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
     let plain = written("old-plain.pdf", &file(&[CATALOG, PAGES, page]));
     let packed = packed(&plain, "old-packed.pdf");
+    let encrypted = encrypted(&plain, "old-encrypted.pdf");
     let old = plain.with_file_name("qpdf-11.8");
     std::fs::write(&old, "#!/bin/sh\necho 'qpdf version 11.8.0'\n").unwrap();
     std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -513,10 +531,10 @@ fn a_qpdf_older_than_11_9_is_refused_for_a_file_that_needs_it() {
         command.arg("--qpdf").arg(&old).arg(file);
         output_when_free(&mut command)
     };
-    let out = with_old(&packed);
+    let out = with_old(&encrypted);
     assert_eq!(out.status.code(), Some(2));
     let refused = format!(
-        "and {} is version 11.8.0, older than 11.9: install qpdf 11.9 or later",
+        "but {} is version 11.8.0, older than 11.9: install qpdf 11.9 or later",
         old.display()
     );
     assert!(
@@ -525,6 +543,7 @@ fn a_qpdf_older_than_11_9_is_refused_for_a_file_that_needs_it() {
         text(&out.stderr)
     );
     assert_eq!(with_old(plain.to_str().unwrap()).status.code(), Some(0));
+    assert_eq!(with_old(&packed).status.code(), Some(0));
 }
 
 #[test]

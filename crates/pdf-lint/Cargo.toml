@@ -16,6 +16,7 @@ include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md", "/LICEN
 
 [dependencies]
 anyhow = "1"
+pdf-filters = { path = "../pdf-filters", version = "0.1" }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
 
 [lints.rust]

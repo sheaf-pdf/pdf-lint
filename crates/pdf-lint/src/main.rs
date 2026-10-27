@@ -26,9 +26,9 @@ usage: pdf-lint [OPTIONS] FILE...
 
 Checks each FILE against the Arlington PDF Model, reading it from its
 bytes, and prints each finding with the bytes it's at; a FILE of - is
-standard input. What's compressed or encrypted, qpdf decodes: object
-streams, cross-reference streams and strings. Without qpdf 11.9 or
-later, a file that has any isn't checked.
+standard input. It decodes object streams and cross-reference streams
+itself; what's encrypted, qpdf decrypts: without qpdf 11.9 or later, a
+file that encrypts isn't checked.
 
   --hold <FILE>   hold only the objects FILE names, a line each:
                   `12 0 built` or `3 0 merged`
@@ -544,15 +544,16 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// Why the file isn't checked, when the reader asked qpdf for anything
-    /// and it isn't ready: what it asked for is missing.
+    /// Why the file isn't checked, when the reader asked qpdf for anything,
+    /// as it does only of a file that encrypts, and it isn't ready: what it
+    /// asked for is missing.
     fn unready(&self) -> Option<String> {
         if !self.asked.get() {
             return None;
         }
         let why = ready(self.qpdf).as_ref().err()?;
         Some(format!(
-            "it needs qpdf to decode what's compressed or encrypted in it, and {why}: install qpdf {} or later, or name one with --qpdf",
+            "it's encrypted, and qpdf decrypts it, but {why}: install qpdf {} or later, or name one with --qpdf",
             pdf_lint::qpdf::OLDEST
         ))
     }

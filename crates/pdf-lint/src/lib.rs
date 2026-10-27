@@ -14,6 +14,7 @@ pub mod allowance;
 pub mod bytes;
 pub mod check;
 pub mod extension;
+mod filter;
 #[cfg(any(test, fuzzing))]
 pub mod fuzz;
 pub mod grammar;

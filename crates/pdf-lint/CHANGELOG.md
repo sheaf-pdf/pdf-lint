@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **The reader decodes for itself.** `bytes::read` decodes cross-reference streams, and object streams in a file that doesn't encrypt, through the new pdf-filters crate: ASCIIHex, ASCII85, LZW, Flate and RunLength, with their predictors, `/Filter` and `/DecodeParms` read as qpdf reads them (abbreviations, `/Crypt` with the identity filter, one parameters dictionary for every filter, `/Filter null` or `[]` as none). So such a file needs no qpdf: `read_with` asks its `Decode` only for an encrypted file's object streams and strings, twice at most, and the command line refuses a file for want of qpdf only when it encrypts. A stream decodes to at most 256 MiB, and a file's streams to 1 GiB in all (`bytes::STREAM`, `bytes::BUDGET`).
+- **What reads that didn't.** Data a fault stopped, which qpdf gives back undecoded, is read as far as it decoded, so the objects in it that it reaches are checked. An object stream filtered with RunLength, which qpdf's default decode level leaves alone, decodes. With `--last-update`, the revision before decodes its streams from its own bytes, as the reader finds them there.
+- **Messages.** A stream that doesn't decode says why in the reader's words (`its filter /JBIG2Decode isn't one the reader decodes`, `its /DecodeParms has 2 entries for 1 filters`), where it said qpdf didn't decode it or that nothing did; the command line's refusal says the file is encrypted, and qpdf decrypts it.
+- **Faster object streams.** An object read from an object stream no longer copies the stream's whole data first.
 - **A FILE of `-` is standard input,** so a file can be piped in without writing it first. It's named `-` in the report and in an allowance, and can be given once. qpdf reads only files, so it decodes one from a copy in the temporary folder that only its owner can read, removed once it's checked.
 - **Fixed: `--version` or `--help` piped to a reader that stops,** as `head`, panicked when the pipe closed. Now it stops quietly and exits 0, as a report already did.
 

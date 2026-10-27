@@ -7,21 +7,25 @@
 //! `endstream`. Where the sections don't read, it finds the objects by
 //! scanning the file, and says so.
 //!
-//! What it can't read in plain view, a compressed cross-reference stream's
-//! rows and a compressed or encrypted object stream's objects, a
-//! [`Decode`] decodes for it:
+//! It decodes cross-reference streams, and in a file that doesn't encrypt
+//! object streams, from their own data, through [`pdf_filters`]: a stream
+//! up to [`STREAM`] bytes, and a file's [`BUDGET`] in all. What it can't,
+//! an encrypted file's object streams, a [`Decode`] decodes for it:
 //! [`Qpdf`](crate::qpdf::Qpdf), or anything else that can. An object read
 //! from an object stream is placed in the stream's decoded data
-//! ([`Span::stream`]), which the [`Document`] keeps. Without one, those
-//! objects are ones it can't read. It doesn't decrypt: an encrypted file's
-//! strings outside object streams are [`Str::Encrypted`], unless the
-//! decoder gives their plaintext, which is placed where each string was.
+//! ([`Span::stream`]), which the [`Document`] keeps. It doesn't decrypt:
+//! an encrypted file's strings outside object streams are
+//! [`Str::Encrypted`], unless the decoder gives their plaintext, which is
+//! placed where each string was.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use pdf_tokenizer::decode::How;
 use pdf_tokenizer::{Kind, Token, Tokenizer, is_delimiter, is_white_space};
 
+use pdf_filters::Filter;
+
+use crate::filter;
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
 use crate::source::{Document, Trailer, Update, Warning};
 use crate::version::Version;
@@ -31,6 +35,20 @@ pub const NESTING: usize = 256;
 
 /// How many cross-reference sections the `/Prev` chain may have.
 pub const SECTIONS: usize = 1024;
+
+/// How many bytes a stream the reader decodes may decode to; more is cut
+/// off there.
+#[cfg(not(fuzzing))]
+pub const STREAM: usize = 256 << 20;
+#[cfg(fuzzing)]
+pub const STREAM: usize = 1 << 20;
+
+/// How many bytes the streams the reader decodes in a file may decode to
+/// in all; more is cut off.
+#[cfg(not(fuzzing))]
+pub const BUDGET: usize = 1 << 30;
+#[cfg(fuzzing)]
+pub const BUDGET: usize = 4 << 20;
 
 /// What a cross-reference section says of an object number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,11 +66,9 @@ pub enum XrefEntry {
     Free,
 }
 
-/// What decodes what the reader can't read in plain view: a compressed
-/// cross-reference stream, a compressed or encrypted object stream, an
-/// encrypted file's strings.
-/// The reader asks three times at most: for the cross-reference streams,
-/// then for the object streams, then for the plaintext.
+/// What decodes what the reader can't: an encrypted file's object streams
+/// and strings. The reader asks twice at most: for the object streams,
+/// then for the plaintext.
 pub trait Decode {
     /// The data of each stream in `ids`, decoded (decompressed, and in an
     /// encrypted file decrypted), or why it can't be.
@@ -71,9 +87,9 @@ pub trait Decode {
     /// [`Decode::decode`] couldn't decode it by its number: a later update
     /// can give the number to another object, and a decoder that finds
     /// streams by number then finds that one; or the decoder can't read
-    /// the file. It's a cross-reference stream, which is never encrypted,
-    /// or an object stream in a file that isn't. The reader asks once for
-    /// each such stream. By default, it can't be.
+    /// the file. The reader asks it only when it's made to ask the decoder
+    /// for every stream, as the tests do to set the two side by side. By
+    /// default, it can't be.
     fn decode_written(&self, stream: Written) -> Result<Vec<u8>, String> {
         let _ = stream;
         Err("nothing decodes a stream from its bytes".to_string())
@@ -122,13 +138,32 @@ pub fn read_from(file: &[u8], decoder: &dyn Decode, section: usize) -> Document 
     read_with_or_without(file, Some(decoder), Some(section))
 }
 
+/// The file `file` is, with `decoder` asked for every stream the reader
+/// would decode itself, as it was before it did: for the tests that set
+/// the two side by side.
+#[cfg(test)]
+pub(crate) fn read_through(file: &[u8], decoder: &dyn Decode) -> Document {
+    read_as(file, Some(decoder), None, false)
+}
+
 fn read_with_or_without(
     file: &[u8],
     decoder: Option<&dyn Decode>,
     section: Option<usize>,
 ) -> Document {
+    read_as(file, decoder, section, true)
+}
+
+fn read_as(
+    file: &[u8],
+    decoder: Option<&dyn Decode>,
+    section: Option<usize>,
+    native: bool,
+) -> Document {
     let mut reader = Reader {
         file,
+        native,
+        budget: BUDGET,
         decoder,
         warnings: Vec::new(),
         entries: BTreeMap::new(),
@@ -213,6 +248,11 @@ fn metadata(
 
 struct Reader<'a> {
     file: &'a [u8],
+    /// Whether it decodes streams itself, as it does but in the tests that
+    /// make it ask the decoder.
+    native: bool,
+    /// How many bytes the streams it decodes may still decode to.
+    budget: usize,
     decoder: Option<&'a dyn Decode>,
     warnings: Vec<Warning>,
     /// The newest entry for each object number, with its generation.
@@ -308,6 +348,40 @@ impl<'a> Reader<'a> {
             at,
             message,
         });
+    }
+
+    /// `data` decoded by `filters`, as much as `limit`, [`STREAM`] and
+    /// what's left of the file's [`BUDGET`] allow: what decoded, however
+    /// far it went.
+    fn decode_stream(&mut self, data: &[u8], filters: &[Filter], limit: usize) -> Vec<u8> {
+        let limit = limit.min(STREAM).min(self.budget);
+        let decoded = match pdf_filters::decode(data, filters, limit) {
+            Ok(decoded) => decoded,
+            Err(error) => error.data,
+        };
+        self.budget -= decoded.len();
+        decoded
+    }
+
+    /// Object stream `object`'s data, decoded from its own, its filters'
+    /// values followed where they're references to `objects`.
+    fn object_stream(
+        &mut self,
+        object: &Object,
+        objects: &BTreeMap<ObjectId, Result<Object, String>>,
+    ) -> Result<Vec<u8>, String> {
+        let Value::Stream(stream) = &object.value else {
+            return Err("it isn't a stream".to_string());
+        };
+        let data = (stream.data)
+            .filter(|at| at.stream.is_none())
+            .and_then(|at| self.file.get(at.start..at.end))
+            .unwrap_or_default();
+        let filters = filter::filters(&stream.dict, &|id| objects.get(&id)?.as_ref().ok())?;
+        Ok(match filters.is_empty() {
+            true => data.to_vec(),
+            false => self.decode_stream(data, &filters, STREAM),
+        })
     }
 
     /// What the decoder makes of `ids`; nothing without one.
@@ -467,7 +541,9 @@ impl<'a> Reader<'a> {
             sections.push(section);
             offsets.push(offset);
         }
+        // Asked of the decoder only when the reader is made to.
         let compressed: Vec<ObjectId> = (sections.iter())
+            .filter(|_| !self.native)
             .filter_map(|s| s.stream.as_ref())
             .filter(|(_, _, stream)| filters(stream).is_some())
             .map(|(_, id, _)| *id)
@@ -666,9 +742,10 @@ impl<'a> Reader<'a> {
     }
 
     /// The rows of cross-reference stream `id`, written at `offset`, read
-    /// by its `/W` and `/Index` (ISO 32000-2, 7.5.8): from its data in plain
-    /// view, or decoded, as `decoded` has it. A section's `own` stream
-    /// lists itself; a hybrid table's `/XRefStm` is listed by the table.
+    /// by its `/W` and `/Index` (ISO 32000-2, 7.5.8): from its data, decoded
+    /// from its own (or, when the reader is made to ask the decoder, as
+    /// `decoded` has it). A section's `own` stream lists itself; a hybrid
+    /// table's `/XRefStm` is listed by the table.
     fn rows(
         &mut self,
         offset: usize,
@@ -684,16 +761,6 @@ impl<'a> Reader<'a> {
         let written = (stream.data)
             .and_then(|at| self.file.get(at.start..at.end))
             .unwrap_or_default();
-        let decoded = match (filters(object), decoded) {
-            (None, _) => Ok(written),
-            (Some(_), Some(Ok(data))) => Ok(&data[..]),
-            (Some(filter), Some(Err(why))) => Err(format!(
-                "its cross-reference stream ({filter}) doesn't decode: {why}"
-            )),
-            (Some(filter), None) => Err(format!(
-                "its cross-reference stream is compressed ({filter}), and nothing decodes it"
-            )),
-        };
         let widths: Option<Vec<usize>> = match dict.get(b"W").map(|w| &w.value) {
             Some(Value::Array(w)) if w.len() == 3 => (w.iter())
                 .map(|n| {
@@ -724,35 +791,66 @@ impl<'a> Reader<'a> {
             )],
         };
         let row = widths.iter().sum::<usize>();
-        // A decoder finds a stream by its number, which a later update can
-        // give another object; then the data it gives isn't the size this
-        // stream's rows are, and it's decoded from its bytes instead.
         let rows_size = (index.iter())
             .try_fold(0usize, |size, &(_, count)| {
                 size.checked_add(usize::try_from(count).ok()?)
             })
             .and_then(|count| count.checked_mul(row));
-        let (n, g) = id;
-        let decoded = decoded.and_then(|data| match filters(object) {
-            Some(_) if rows_size != Some(data.len()) => Err(format!(
-                "decoded, it's {} bytes, not the {} its /W and /Index make: the decoder may have decoded another object {n} {g} R",
-                data.len(),
-                rows_size.map_or("many".to_string(), |size| size.to_string()),
-            )),
-            _ => Ok(data),
-        });
         let again;
-        let data: &[u8] = match decoded {
-            Ok(data) => data,
-            Err(why) => {
-                again = (self.decoder)
-                    .zip(self.written(dict, written))
-                    .and_then(|(decoder, stream)| decoder.decode_written(stream).ok())
-                    // Its own data, which may run on past its rows, as
-                    // data that's not compressed may.
-                    .filter(|data| rows_size.is_some_and(|size| data.len() >= size))
-                    .ok_or(why)?;
-                &again
+        let data: &[u8] = match self.native {
+            // From its own data, in any file: a cross-reference stream is
+            // never encrypted (ISO 32000-2, 7.5.8.1), and its dictionary's
+            // values are direct (7.5.8.2). What runs past its rows, which
+            // aren't read, isn't decoded.
+            true => {
+                let filters = filter::filters(dict, &|_| None)
+                    .map_err(|why| format!("its cross-reference stream doesn't decode: {why}"))?;
+                match filters.is_empty() {
+                    true => written,
+                    false => {
+                        let limit = rows_size.map_or(STREAM, |size| size.saturating_add(1));
+                        again = self.decode_stream(written, &filters, limit);
+                        &again
+                    }
+                }
+            }
+            false => {
+                let decoded = match (filters(object), decoded) {
+                    (None, _) => Ok(written),
+                    (Some(_), Some(Ok(data))) => Ok(&data[..]),
+                    (Some(filter), Some(Err(why))) => Err(format!(
+                        "its cross-reference stream ({filter}) doesn't decode: {why}"
+                    )),
+                    (Some(filter), None) => Err(format!(
+                        "its cross-reference stream is compressed ({filter}), and nothing decodes it"
+                    )),
+                };
+                // A decoder finds a stream by its number, which a later
+                // update can give another object; then the data it gives
+                // isn't the size this stream's rows are, and it's decoded
+                // from its bytes instead.
+                let (n, g) = id;
+                let decoded = decoded.and_then(|data| match filters(object) {
+                    Some(_) if rows_size != Some(data.len()) => Err(format!(
+                        "decoded, it's {} bytes, not the {} its /W and /Index make: the decoder may have decoded another object {n} {g} R",
+                        data.len(),
+                        rows_size.map_or("many".to_string(), |size| size.to_string()),
+                    )),
+                    _ => Ok(data),
+                });
+                match decoded {
+                    Ok(data) => data,
+                    Err(why) => {
+                        again = (self.decoder)
+                            .zip(self.written(dict, written))
+                            .and_then(|(decoder, stream)| decoder.decode_written(stream).ok())
+                            // Its own data, which may run on past its
+                            // rows, as data that's not compressed may.
+                            .filter(|data| rows_size.is_some_and(|size| data.len() >= size))
+                            .ok_or(why)?;
+                        &again
+                    }
+                }
             }
         };
         let field = |bytes: &[u8]| bytes.iter().fold(0u64, |n, &b| (n << 8) | u64::from(b));
@@ -981,26 +1079,40 @@ impl<'a> Reader<'a> {
             }
         }
         let streams: BTreeSet<u32> = compressed.iter().map(|&(_, stream, _)| stream).collect();
-        // An object stream without filters, in a file that doesn't
-        // encrypt, is in plain view: its data is as written.
-        let plain: BTreeMap<u32, Vec<u8>> = (streams.iter())
-            .filter(|_| !self.encrypts)
-            .filter_map(|&n| {
-                let object = objects.get(&(n, 0))?.as_ref().ok()?;
-                let Value::Stream(stream) = &object.value else {
-                    return None;
-                };
-                let at = stream.data.filter(|at| at.stream.is_none())?;
-                let data = self.file.get(at.start..at.end)?;
-                filters(object).is_none().then(|| (n, data.to_vec()))
-            })
-            .collect();
-        let ids: Vec<ObjectId> = (streams.iter())
-            .filter(|n| !plain.contains_key(n))
-            .map(|&n| (n, 0))
-            .collect();
-        let mut decoded = self.decode(&ids);
-        decoded.extend(plain.into_iter().map(|(n, data)| ((n, 0), Ok(data))));
+        // In a file that doesn't encrypt, each decoded from its own data;
+        // in one that does, asked of the decoder.
+        let native = self.native && !self.encrypts;
+        let mut decoded = match native {
+            true => (streams.iter())
+                .filter_map(|&n| {
+                    let object = objects.get(&(n, 0))?.as_ref().ok()?;
+                    Some(((n, 0), self.object_stream(object, &objects)))
+                })
+                .collect(),
+            false => {
+                // An object stream without filters, in a file that doesn't
+                // encrypt, is in plain view: its data is as written.
+                let plain: BTreeMap<u32, Vec<u8>> = (streams.iter())
+                    .filter(|_| !self.encrypts)
+                    .filter_map(|&n| {
+                        let object = objects.get(&(n, 0))?.as_ref().ok()?;
+                        let Value::Stream(stream) = &object.value else {
+                            return None;
+                        };
+                        let at = stream.data.filter(|at| at.stream.is_none())?;
+                        let data = self.file.get(at.start..at.end)?;
+                        filters(object).is_none().then(|| (n, data.to_vec()))
+                    })
+                    .collect();
+                let ids: Vec<ObjectId> = (streams.iter())
+                    .filter(|n| !plain.contains_key(n))
+                    .map(|&n| (n, 0))
+                    .collect();
+                let mut decoded = self.decode(&ids);
+                decoded.extend(plain.into_iter().map(|(n, data)| ((n, 0), Ok(data))));
+                decoded
+            }
+        };
         let mut headers: BTreeMap<u32, Result<Vec<(u32, usize)>, String>> = BTreeMap::new();
         for &stream in &streams {
             let id = (stream, 0);
@@ -1015,12 +1127,12 @@ impl<'a> Reader<'a> {
                             "it's in object stream {stream} 0 R, and nothing decodes that"
                         )),
                     };
-                    // In a file that isn't encrypted, a stream the decoder
-                    // can't decode by its number, or decodes as another
-                    // object's, is decoded from its bytes.
+                    // Asked of the decoder in a file that isn't encrypted,
+                    // a stream it can't decode by its number, or decodes as
+                    // another object's, is decoded from its bytes.
                     let decoded = by_number.or_else(|why| {
                         (self.decoder)
-                            .filter(|_| !self.encrypts)
+                            .filter(|_| !self.encrypts && !native)
                             .zip(self.written_stream(object))
                             .and_then(|(decoder, written)| decoder.decode_written(written).ok())
                             .and_then(|data| {
@@ -1118,15 +1230,19 @@ impl<'a> Reader<'a> {
                 stream.0, id.0
             ));
         }
-        let data = &self.decoded[&stream];
-        // Copied, as `value` borrows the reader while it reads.
-        let data = data.clone();
+        // Taken out while it's read, as `value` borrows the reader, and put
+        // back.
+        let Some(data) = self.decoded.get_mut(&stream).map(std::mem::take) else {
+            return Err(format!("object stream {} 0 R has no data", stream.0));
+        };
         let place = Place {
             object: Some(id),
             stream: Some(stream),
             ciphertext: false,
         };
-        self.value(&mut Tokenizer::at(&data, offset), place, 0)
+        let object = self.value(&mut Tokenizer::at(&data, offset), place, 0);
+        self.decoded.insert(stream, data);
+        object
     }
 
     /// The indirect object at `offset`: `n g obj`, a value (a dictionary
@@ -1583,6 +1699,8 @@ mod tests {
     fn reader(file: &[u8]) -> Reader<'_> {
         Reader {
             file,
+            native: true,
+            budget: BUDGET,
             decoder: None,
             warnings: Vec::new(),
             entries: BTreeMap::new(),
@@ -2524,30 +2642,50 @@ mod tests {
     }
 
     /// A file whose cross-reference stream and object stream are both
-    /// compressed, their data junk a decoder replaces: objects 2 and 3 are
-    /// in object stream 4, and the cross-reference stream is 5. With
-    /// `encrypted`, the trailer says the file is.
+    /// compressed: objects 2 and 3 are in object stream 4, and the
+    /// cross-reference stream is 5. With `encrypted`, the trailer says the
+    /// file is, and the object stream's data is junk a decoder replaces,
+    /// as given.
     fn compressed(encrypted: bool) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
+        let (file, mut decoded) = streams(encrypted, true);
+        decoded.remove(&(5, 0));
+        if !encrypted {
+            decoded.clear();
+        }
+        (file, decoded)
+    }
+
+    /// [`compressed`]'s file with both streams' data junk, which only a
+    /// decoder asked for every stream ([`read_through`]) decodes, as given.
+    fn junk(encrypted: bool) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
+        streams(encrypted, false)
+    }
+
+    /// The file [`compressed`] and [`junk`] write, its streams' data zlib
+    /// data when `real` (but an encrypted file's object stream), else
+    /// junk; and what each decodes to.
+    fn streams(encrypted: bool, real: bool) -> (Vec<u8>, BTreeMap<ObjectId, Vec<u8>>) {
         let (objects, first) = objects_2_and_3();
         let mut file = b"%PDF-1.7\n".to_vec();
         let one = file.len();
         file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Lang (en) >>\nendobj\n");
         let four = file.len();
+        let data = match real && !encrypted {
+            true => write::zlib(&objects),
+            false => b"OBJS".to_vec(),
+        };
         file.extend_from_slice(
-            format!("4 0 obj\n<< /Type /ObjStm /N 2 /First {first} /Filter /FlateDecode /Length 4 >>\nstream\nOBJS\nendstream\nendobj\n")
+            format!("4 0 obj\n<< /Type /ObjStm /N 2 /First {first} /Filter /FlateDecode /Length {} >>\nstream\n", data.len())
                 .as_bytes(),
         );
+        file.extend_from_slice(&data);
+        file.extend_from_slice(b"\nendstream\nendobj\n");
         let five = file.len();
         let encrypt = if encrypted {
             " /Encrypt << /Filter /Standard /V 2 >>"
         } else {
             ""
         };
-        file.extend_from_slice(
-            format!("5 0 obj\n<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R{encrypt} /Filter /FlateDecode /Length 4 >>\nstream\nJUNK\nendstream\nendobj\n")
-                .as_bytes(),
-        );
-        file.extend_from_slice(format!("startxref\n{five}\n%%EOF\n").as_bytes());
         let rows = [
             xref_row(0, 0, 255),
             xref_row(1, one, 0),
@@ -2557,6 +2695,18 @@ mod tests {
             xref_row(1, five, 0),
         ]
         .concat();
+        let data = match real {
+            true => write::zlib(&rows),
+            false => b"JUNK".to_vec(),
+        };
+        file.extend_from_slice(
+            format!("5 0 obj\n<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R{encrypt} /Filter /FlateDecode /Length {} >>\nstream\n", data.len())
+                .as_bytes(),
+        );
+        file.extend_from_slice(&data);
+        file.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes(),
+        );
         let decoded = BTreeMap::from([((5, 0), rows), ((4, 0), objects)]);
         (file, decoded)
     }
@@ -2565,17 +2715,24 @@ mod tests {
     /// trailer that the file is: [`compressed`]'s objects, with neither
     /// stream filtered.
     fn unfiltered(encrypted: bool) -> Vec<u8> {
-        let (objects, first) = objects_2_and_3();
+        let (objects, _) = objects_2_and_3();
+        filtered(encrypted, "", &objects)
+    }
+
+    /// [`unfiltered`]'s file, its object stream's dictionary given
+    /// `filter`'s entries, and its data `data`.
+    fn filtered(encrypted: bool, filter: &str, data: &[u8]) -> Vec<u8> {
+        let (_, first) = objects_2_and_3();
         let mut file = b"%PDF-1.7\n".to_vec();
         let one = file.len();
         file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Lang (en) >>\nendobj\n");
         let four = file.len();
-        let length = objects.len();
+        let length = data.len();
         file.extend_from_slice(
-            format!("4 0 obj\n<< /Type /ObjStm /N 2 /First {first} /Length {length} >>\nstream\n")
+            format!("4 0 obj\n<< /Type /ObjStm /N 2 /First {first}{filter} /Length {length} >>\nstream\n")
                 .as_bytes(),
         );
-        file.extend_from_slice(&objects);
+        file.extend_from_slice(data);
         file.extend_from_slice(b"\nendstream\nendobj\n");
         let five = file.len();
         let rows = [
@@ -2632,10 +2789,110 @@ mod tests {
         assert!(why.contains("nothing decodes that"), "{why}");
     }
 
+    /// `data` as ASCII85, groups of zeros as `z`.
+    fn ascii85(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for group in data.chunks(4) {
+            let mut four = [0u8; 4];
+            four[..group.len()].copy_from_slice(group);
+            let value = u32::from_be_bytes(four);
+            if value == 0 && group.len() == 4 {
+                out.push(b'z');
+                continue;
+            }
+            let digits: Vec<u8> = (0..5)
+                .rev()
+                .map(|i| (value / 85u32.pow(i) % 85) as u8 + b'!')
+                .collect();
+            out.extend_from_slice(&digits[..group.len() + 1]);
+        }
+        out.extend_from_slice(b"~>");
+        out
+    }
+
+    /// `data` as LZW codes, each byte its own 9-bit code, the table
+    /// cleared before it widens.
+    fn lzw(data: &[u8]) -> Vec<u8> {
+        let mut codes = vec![256u16];
+        for (i, &byte) in data.iter().enumerate() {
+            if i > 0 && i % 250 == 0 {
+                codes.push(256);
+            }
+            codes.push(u16::from(byte));
+        }
+        codes.push(257);
+        let bits: Vec<bool> = (codes.iter())
+            .flat_map(|&code| (0..9).rev().map(move |i| code >> i & 1 == 1))
+            .collect();
+        (bits.chunks(8))
+            .map(|byte| (0..8).fold(0, |b, i| b << 1 | u8::from(byte.get(i) == Some(&true))))
+            .collect()
+    }
+
+    /// `data` as runs to copy, ended by 128.
+    fn run_length(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for run in data.chunks(128) {
+            out.push((run.len() - 1) as u8);
+            out.extend_from_slice(run);
+        }
+        out.push(128);
+        out
+    }
+
+    #[test]
+    fn an_object_stream_decodes_through_each_filter_without_a_decoder() {
+        let (objects, _) = objects_2_and_3();
+        let hex = |data: &[u8]| {
+            let digits: String = data.iter().map(|b| format!("{b:02x} ")).collect();
+            format!("{digits}>").into_bytes()
+        };
+        let cases = [
+            (" /Filter /FlateDecode", write::zlib(&objects)),
+            (" /Filter /Fl", write::zlib(&objects)),
+            (" /Filter /LZWDecode", lzw(&objects)),
+            (
+                " /Filter /LZW /DecodeParms << /EarlyChange 1 >>",
+                lzw(&objects),
+            ),
+            (" /Filter /ASCIIHexDecode", hex(&objects)),
+            (" /Filter /AHx", hex(&objects)),
+            (" /Filter /ASCII85Decode", ascii85(&objects)),
+            (" /Filter /A85", ascii85(&objects)),
+            (" /Filter /RunLengthDecode", run_length(&objects)),
+            (" /Filter /RL", run_length(&objects)),
+            (
+                " /Filter [/AHx /Fl] /DecodeParms [null null]",
+                hex(&write::zlib(&objects)),
+            ),
+            (
+                " /Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /Identity >> null]",
+                write::zlib(&objects),
+            ),
+            (" /Filter []", objects.clone()),
+            (" /Filter null", objects.clone()),
+        ];
+        struct Unasked;
+        impl Decode for Unasked {
+            fn decode(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Vec<u8>, String>> {
+                panic!("asked to decode {ids:?}")
+            }
+        }
+        for (filter, data) in cases {
+            let doc = read_with(&filtered(false, filter, &data), &Unasked);
+            assert!(doc.warnings.is_empty(), "{filter}: {:?}", doc.warnings);
+            assert_eq!(doc.decoded[&(4, 0)], objects, "{filter}");
+            assert!(
+                doc.get((2, 0)).is_ok() && doc.get((3, 0)).is_ok(),
+                "{filter}"
+            );
+        }
+    }
+
     #[test]
     fn objects_in_an_object_stream_read_from_its_decoded_data() {
-        let (file, decoded) = compressed(false);
-        let doc = read_with(&file, &decoded);
+        let (file, _) = compressed(false);
+        let doc = read(&file);
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(doc.trailer.unwritten, None);
         assert_eq!(doc.trailer.stream, Some((5, 0)));
@@ -2668,20 +2925,37 @@ mod tests {
     }
 
     #[test]
-    fn without_its_decoded_data_an_object_stream_says_why() {
-        let (file, mut decoded) = compressed(false);
-        // No decoder: the newest section's rows don't read, so the file is
-        // scanned, and the compressed objects aren't found.
-        let doc = read(&file);
+    fn a_stream_that_doesnt_decode_says_why() {
+        // A filter the reader doesn't decode, on the object stream, and on
+        // the cross-reference stream, whose rows don't read, so the file
+        // is scanned, and the compressed objects aren't found.
+        let (file, _) = compressed(false);
+        let image = |file: &[u8], from: usize| {
+            let at = from + find(&file[from..], b"/FlateDecode").unwrap();
+            [&file[..at], b"/JBIG2Decode", &file[at + 12..]].concat()
+        };
+        let doc = read(&image(&file, find(&file, b"4 0 obj").unwrap()));
+        let why = doc.get((2, 0)).unwrap_err();
+        assert!(
+            why.contains("its object stream 4 0 R doesn't decode: its filter /JBIG2Decode isn't one the reader decodes"),
+            "{why}"
+        );
+        assert!(doc.get((1, 0)).is_ok());
+        let doc = read(&image(&file, find(&file, b"5 0 obj").unwrap()));
         let why = doc.trailer.unwritten.as_deref().unwrap();
         assert!(
-            why.contains("compressed (/FlateDecode), and nothing decodes it"),
+            why.contains("its cross-reference stream doesn't decode: its filter /JBIG2Decode"),
             "{why}"
         );
         assert!(doc.get((2, 0)).is_err());
-        // The rows but not the object stream's data.
+        // An encrypted file's object streams, without a decoder.
+        let (file, _) = compressed(true);
+        let why = read(&file).get((2, 0)).unwrap_err();
+        assert!(why.contains("nothing decodes that"), "{why}");
+        // Asked of a decoder: the rows but not the object stream's data.
+        let (file, mut decoded) = junk(false);
         decoded.remove(&(4, 0));
-        let doc = read_with(&file, &decoded);
+        let doc = read_through(&file, &decoded);
         let why = doc.get((2, 0)).unwrap_err();
         assert!(
             why.contains("its object stream 4 0 R doesn't decode: no data for 4 0 R"),
@@ -2689,10 +2963,10 @@ mod tests {
         );
         assert!(doc.get((1, 0)).is_ok());
         // A header that names another object.
-        let (file, mut decoded) = compressed(false);
+        let (file, mut decoded) = junk(false);
         let objects = decoded.get_mut(&(4, 0)).unwrap();
         objects[0] = b'7';
-        let doc = read_with(&file, &decoded);
+        let doc = read_through(&file, &decoded);
         let why = doc.get((2, 0)).unwrap_err();
         assert!(
             why.contains("object 0 of object stream 4 0 R is 7, not 2"),
@@ -2706,8 +2980,7 @@ mod tests {
     /// overrides.
     #[test]
     fn a_hybrid_files_stream_lists_what_its_table_leaves_free() {
-        let (file, decoded) = compressed(false);
-        let objects = decoded[&(4, 0)].clone();
+        let (file, _) = compressed(false);
         let mut file = file[..find(&file, b"5 0 obj").unwrap()].to_vec();
         let one = find(&file, b"1 0 obj").unwrap();
         let four = find(&file, b"4 0 obj").unwrap();
@@ -2731,7 +3004,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let doc = read_with(&file, &BTreeMap::from([((4, 0), objects)]));
+        let doc = read(&file);
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(doc.trailer.stream, None, "the table's trailer");
         assert!(doc.get((1, 0)).is_ok(), "the table's row, not the stream's");
@@ -2750,16 +3023,26 @@ mod tests {
     }
 
     #[test]
-    fn a_decoder_is_asked_twice_at_most() {
+    fn a_decoder_is_asked_only_for_an_encrypted_files_object_streams() {
+        // Not in a file that doesn't encrypt.
         let (file, decoded) = compressed(false);
         let counted = Counted(decoded, std::cell::Cell::new(0));
         let doc = read_with(&file, &counted);
         assert!(doc.get((3, 0)).is_ok());
-        assert_eq!(
-            counted.1.get(),
-            2,
-            "the cross-reference streams, then the object streams"
-        );
+        assert_eq!(counted.1.get(), 0);
+        // In one that does, once, for the object streams.
+        let (file, decoded) = compressed(true);
+        let counted = Counted(decoded, std::cell::Cell::new(0));
+        let doc = read_with(&file, &counted);
+        assert!(doc.get((3, 0)).is_ok());
+        assert_eq!(counted.1.get(), 1);
+        // Asked for every stream, twice: the cross-reference streams, then
+        // the object streams.
+        let (file, decoded) = junk(false);
+        let counted = Counted(decoded, std::cell::Cell::new(0));
+        let doc = read_through(&file, &counted);
+        assert!(doc.get((3, 0)).is_ok());
+        assert_eq!(counted.1.get(), 2);
         // A file with nothing compressed asks nothing.
         let plain = write::file("1.7", &clean(), root(), Xref::Table);
         let counted = Counted(BTreeMap::new(), std::cell::Cell::new(0));
@@ -2821,19 +3104,20 @@ mod tests {
 
     #[test]
     fn a_cross_reference_stream_whose_number_finds_another_is_decoded_from_its_bytes() {
-        let (file, decoded) = compressed(false);
+        // As the reader asks a decoder for every stream when it's made to.
+        let (file, decoded) = junk(false);
         let rows = decoded[&(5, 0)].clone();
-        let doc = read_with(&file, &Renumbered(decoded.clone(), rows.clone()));
+        let doc = read_through(&file, &Renumbered(decoded.clone(), rows.clone()));
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(doc.trailer.unwritten, None);
         assert!(doc.get((3, 0)).is_ok());
         // What it decodes from the bytes may run on past the rows, but not
         // end before them; then the reader says why it decoded it so.
         let longer = [&rows[..], b"more"].concat();
-        let doc = read_with(&file, &Renumbered(decoded.clone(), longer));
+        let doc = read_through(&file, &Renumbered(decoded.clone(), longer));
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert!(doc.get((3, 0)).is_ok());
-        let short = read_with(&file, &Renumbered(decoded.clone(), rows[..20].to_vec()));
+        let short = read_through(&file, &Renumbered(decoded.clone(), rows[..20].to_vec()));
         let why = short.trailer.unwritten.unwrap();
         assert!(why.contains("32 bytes, not the 24"), "{why}");
 
@@ -2845,7 +3129,7 @@ mod tests {
                 self.0.decode(ids)
             }
         }
-        let doc = read_with(&file, &ByNumber(Renumbered(decoded, rows)));
+        let doc = read_through(&file, &ByNumber(Renumbered(decoded, rows)));
         let why = doc.trailer.unwritten.unwrap();
         assert!(
             why.contains("32 bytes, not the 24") && why.contains("another object 5 0 R"),
@@ -2875,16 +3159,17 @@ mod tests {
 
     #[test]
     fn streams_a_decoder_cant_decode_by_number_are_decoded_from_their_bytes_unless_encrypted() {
-        let (file, decoded) = compressed(false);
-        let doc = read_with(&file, &Refused(decoded));
+        // As the reader asks a decoder for every stream when it's made to.
+        let (file, decoded) = junk(false);
+        let doc = read_through(&file, &Refused(decoded));
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(doc.trailer.unwritten, None);
         assert!(doc.get((2, 0)).is_ok() && doc.get((3, 0)).is_ok());
 
         // An encrypted file's object streams are encrypted: its
         // cross-reference stream, never.
-        let (file, decoded) = compressed(true);
-        let doc = read_with(&file, &Refused(decoded));
+        let (file, decoded) = junk(true);
+        let doc = read_through(&file, &Refused(decoded));
         assert_eq!(doc.trailer.unwritten, None, "the rows, from their bytes");
         let why = doc.get((3, 0)).unwrap_err();
         assert!(

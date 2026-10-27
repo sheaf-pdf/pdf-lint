@@ -628,11 +628,20 @@ mod tests {
         out
     }
 
+    /// A decoder that mustn't be asked.
+    struct Unasked;
+
+    impl Decode for Unasked {
+        fn decode(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Vec<u8>, String>> {
+            panic!("asked to decode {ids:?}")
+        }
+    }
+
     #[test]
-    fn a_compressed_file_reads_through_qpdf_and_checks_clean() {
+    fn a_compressed_file_reads_without_qpdf_as_through_it_and_checks_clean() {
         let path = rewritten("compressed", &["--object-streams=generate"]);
         let data = std::fs::read(&path).unwrap();
-        let doc = bytes::read_with(&data, &qpdf(&path));
+        let doc = bytes::read_with(&data, &Unasked);
         assert_eq!(doc.trailer.unwritten, None);
         assert!(doc.trailer.stream.is_some(), "a cross-reference stream");
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
@@ -659,14 +668,12 @@ mod tests {
         assert_eq!(report.findings, [], "{report}");
         assert_eq!(report.checked.get("AnnotText"), Some(&1), "{report}");
 
-        // Without a decoder, the objects in object streams aren't read.
-        let doc = bytes::read(&data);
-        assert!(
-            doc.trailer
-                .unwritten
-                .as_deref()
-                .is_some_and(|why| why.contains("nothing decodes"))
-        );
+        // Through qpdf, asked for every stream, alike: the same streams'
+        // data, and the same objects read from them.
+        let through = bytes::read_through(&data, &qpdf(&path));
+        assert!(through.warnings.is_empty(), "{:?}", through.warnings);
+        assert_eq!(through.decoded, doc.decoded);
+        assert_eq!(through.objects, doc.objects);
     }
 
     #[test]

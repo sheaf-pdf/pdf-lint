@@ -99,6 +99,29 @@ pub(crate) fn file(version: &str, objects: &[(u32, Body)], trailer: Dict, kind: 
     out
 }
 
+/// `data` as zlib data (RFC 1950) in deflate's stored blocks, not
+/// compressed: for a `/FlateDecode` stream without a compressor.
+pub(crate) fn zlib(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    let mut blocks = data.chunks(usize::from(u16::MAX)).peekable();
+    if data.is_empty() {
+        out.extend([1, 0, 0, 0xff, 0xff]);
+    }
+    while let Some(block) = blocks.next() {
+        let len = block.len() as u16;
+        out.push(u8::from(blocks.peek().is_none()));
+        out.extend(len.to_le_bytes());
+        out.extend((!len).to_le_bytes());
+        out.extend_from_slice(block);
+    }
+    let (a, b) = (data.iter()).fold((1u32, 0u32), |(a, b), &byte| {
+        let a = (a + u32::from(byte)) % 65_521;
+        (a, (b + a) % 65_521)
+    });
+    out.extend((b << 16 | a).to_be_bytes());
+    out
+}
+
 /// A file of these objects, each written between its `n 0 obj` and
 /// `endobj` as given, with a table and `trailer` as written. The bodies
 /// may be anything at all.
@@ -231,4 +254,18 @@ fn string(out: &mut Vec<u8>, bytes: &[u8]) {
         }
     }
     out.push(b')');
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn zlib_data_in_stored_blocks_decompresses() {
+        let flate = [pdf_filters::Filter::Flate {
+            predictor: pdf_filters::Predictor::None,
+        }];
+        for data in [&b""[..], b"stored", &[7; 200_000]] {
+            let decoded = pdf_filters::decode(&super::zlib(data), &flate, 1 << 20);
+            assert_eq!(decoded.as_deref(), Ok(data));
+        }
+    }
 }

@@ -36,6 +36,7 @@ name = "pdf-lint"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pdf-filters",
  "pdf-tokenizer",
 ]
 
