@@ -5,11 +5,11 @@
 //! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`, with
 //! [`seeds`], files for the fuzzer to begin from.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::bytes;
 use crate::check::{Exempt, Hold, Made, Options, UnlistedIn, check};
-use crate::object::{ObjectId, Span};
+use crate::object::Span;
 use crate::source::{Document, Source};
 use crate::version::Version;
 use pdf_crypt::writer::{Kind, Settings};
@@ -40,8 +40,7 @@ pub fn check_file(data: &[u8]) {
     let _ = report.to_string();
     let _ = report.objects();
     if let Some(update) = &doc.update {
-        let none: BTreeMap<ObjectId, Vec<u8>> = BTreeMap::new();
-        let previous = bytes::read_from(file, &none, update.previous);
+        let previous = bytes::read_from(file, update.previous);
         let options = Options {
             paths: true,
             ..options

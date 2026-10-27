@@ -37,6 +37,8 @@ jobs:
         run: just fmt
       - name: Clippy
         run: just clippy
+      - name: Build the fuzz targets
+        run: just fuzzing
       - name: Test (including doctests)
         run: just test
       - name: Build documentation

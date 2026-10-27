@@ -14,10 +14,9 @@
 //! security handler: its object streams decrypted before they're decoded,
 //! its strings decrypted where they are, a signature's `/Contents` left as
 //! it is. An encrypted file it doesn't open ([`Document::encryption`]) has
-//! its strings [`Str::Encrypted`], and its object streams asked of a
-//! [`Decode`], when it's given one. An object read from an object stream is
-//! placed in the stream's decoded data ([`Span::stream`]), which the
-//! [`Document`] keeps.
+//! its strings [`Str::Encrypted`], and its object streams unread, saying
+//! why. An object read from an object stream is placed in the stream's
+//! decoded data ([`Span::stream`]), which the [`Document`] keeps.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -71,8 +70,9 @@ pub enum XrefEntry {
 
 /// What decodes what the reader can't: the object streams and strings of
 /// an encrypted file it doesn't open. The reader asks twice at most: for
-/// the object streams, then for the plaintext.
-pub trait Decode {
+/// the object streams, then for the plaintext. Only the tests give one,
+/// qpdf, to set the reader's decoding beside.
+pub(crate) trait Decode {
     /// The data of each stream in `ids`, decoded (decompressed, and in an
     /// encrypted file decrypted), or why it can't be.
     fn decode(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Vec<u8>, String>>;
@@ -102,10 +102,11 @@ pub trait Decode {
 /// A stream as written: its `/Filter`'s and `/DecodeParms`'s values and its
 /// data, each its bytes in the file.
 #[derive(Debug, Clone, Copy)]
-pub struct Written<'a> {
-    pub filter: &'a [u8],
-    pub parms: Option<&'a [u8]>,
-    pub data: &'a [u8],
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct Written<'a> {
+    pub(crate) filter: &'a [u8],
+    pub(crate) parms: Option<&'a [u8]>,
+    pub(crate) data: &'a [u8],
 }
 
 /// Decoded data given beforehand, by stream.
@@ -123,7 +124,8 @@ impl Decode for BTreeMap<ObjectId, Vec<u8>> {
     }
 }
 
-/// The file `file` is, read from what's in plain view.
+/// The file `file` is, opened, when it's encrypted, by the empty password,
+/// as [`read_opened`] opens it given none.
 pub fn read(file: &[u8]) -> Document {
     read_with_or_without(file, None, None)
 }
@@ -136,7 +138,8 @@ pub fn read_opened(file: &[u8], passwords: &[&[u8]]) -> Document {
 }
 
 /// The file as of the cross-reference section at byte `section`, as
-/// [`read_from`] reads it, opened as [`read_opened`] opens it.
+/// [`read_from`] reads it, opened as [`read_opened`] opens it: an
+/// update's [`Update::previous`] by its password.
 pub fn read_from_opened(file: &[u8], passwords: &[&[u8]], section: usize) -> Document {
     read_as(
         file,
@@ -149,16 +152,18 @@ pub fn read_from_opened(file: &[u8], passwords: &[&[u8]], section: usize) -> Doc
 }
 
 /// The file `file` is, with `decoder` decoding what isn't in plain view.
-pub fn read_with(file: &[u8], decoder: &dyn Decode) -> Document {
+#[cfg(test)]
+pub(crate) fn read_with(file: &[u8], decoder: &dyn Decode) -> Document {
     read_with_or_without(file, Some(decoder), None)
 }
 
 /// The file as of the cross-reference section at byte `section`: read from
-/// there along its `/Prev` chain, as if it were the newest, so that
-/// what later updates wrote isn't in it. For an update's
-/// [`Update::previous`], that's the revision it updates.
-pub fn read_from(file: &[u8], decoder: &dyn Decode, section: usize) -> Document {
-    read_with_or_without(file, Some(decoder), Some(section))
+/// there along its `/Prev` chain, as if it were the newest, so that what
+/// later updates wrote isn't in it, opened, when it's encrypted, by the
+/// empty password. For an update's [`Update::previous`], that's the
+/// revision it updates.
+pub fn read_from(file: &[u8], section: usize) -> Document {
+    read_with_or_without(file, None, Some(section))
 }
 
 /// The file `file` is, with `decoder` asked for every stream the reader
@@ -2619,7 +2624,7 @@ mod tests {
         let update = doc.update.expect("an update");
         assert_eq!(update.objects, BTreeSet::from([(2, 0)]));
         assert_eq!(update.previous, prev);
-        let before = read_from(&file, &BTreeMap::new(), update.previous);
+        let before = read_from(&file, update.previous);
         assert!(before.warnings.is_empty(), "{:?}", before.warnings);
         assert_eq!(before.ids(), [(1, 0), (2, 0), (3, 0)]);
         let a = before.get((2, 0)).unwrap().as_dict().unwrap().get(b"A");
@@ -2819,7 +2824,7 @@ mod tests {
         // A previous revision's end isn't the file's: an update's isn't asked.
         let (file, _) = updated_with_padding();
         assert!(
-            read_from(&file, &BTreeMap::new(), startxref_of_first(&file))
+            read_from(&file, startxref_of_first(&file))
                 .warnings
                 .iter()
                 .all(|w| !w.message.contains("%%EOF"))
@@ -3174,8 +3179,7 @@ mod tests {
         for (i, path) in files.iter().enumerate() {
             let data = std::fs::read(path).unwrap();
             let start = Instant::now();
-            let qpdf = crate::qpdf::Qpdf::new(path);
-            let doc = match std::panic::catch_unwind(|| read_with(&data, &qpdf)) {
+            let doc = match std::panic::catch_unwind(|| read_opened(&data, &[])) {
                 Ok(doc) => doc,
                 Err(_) => panic!("{} panicked", path.display()),
             };
@@ -3658,7 +3662,7 @@ mod tests {
         let doc = read_with(&file, &Unasked);
         let update = doc.update.clone().expect("an update");
         assert_eq!(update.previous, five);
-        let before = read_from(&file, &Unasked, update.previous);
+        let before = read_from(&file, update.previous);
         assert!(before.warnings.is_empty(), "{:?}", before.warnings);
         assert!(before.get((2, 0)).is_ok() && before.get((3, 0)).is_ok());
     }

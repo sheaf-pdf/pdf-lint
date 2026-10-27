@@ -24,7 +24,8 @@ pub struct Span {
 pub struct Object {
     pub value: Value,
     /// Where it was written, when the reader knows: a reader of the file's
-    /// bytes always does, and qpdf's JSON never says.
+    /// bytes always does, and one through another tool's JSON, as the
+    /// tests' qpdf, may not.
     pub at: Option<Span>,
 }
 
@@ -50,9 +51,11 @@ pub enum Str {
     /// Its bytes, its escapes decoded (and decrypted, in an encrypted
     /// file).
     Bytes(Vec<u8>),
-    /// Text a reader decoded without saying from which encoding, as
-    /// qpdf's JSON gives a string it reads as text: what depends on the
-    /// bytes, such as whether they're ASCII, can't be told.
+    /// Text a reader decoded without saying from which encoding, as a
+    /// reader through another tool's JSON may give a string it reads as
+    /// text (the tests' qpdf does): what depends on the bytes, such as
+    /// whether they're ASCII, can't be told. The bytes reader never gives
+    /// it.
     Text(String),
     /// Ciphertext as written, in an encrypted file its reader doesn't
     /// decrypt: what depends on its value can't be told.

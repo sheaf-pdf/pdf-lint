@@ -1,6 +1,7 @@
-//! qpdf, run as a process, decoding what the bytes reader can't read in
-//! plain view ([`Decode`]): a compressed cross-reference stream's rows, an
-//! object stream's objects, and in an encrypted file the strings' plaintext.
+//! qpdf, the tests' oracle, run as a process: decoding what the bytes
+//! reader is made to ask of it ([`Decode`]), a compressed cross-reference
+//! stream's rows, an object stream's objects, and in an encrypted file the
+//! strings' plaintext, to set beside the reader's own decoding.
 //! A run decodes every stream it's asked for, through its JSON
 //! (`--json-stream-data=inline --decode-level=generalized`), decrypted when
 //! the file is encrypted. [`Qpdf::read`] reads a whole file through qpdf
@@ -25,12 +26,6 @@ use crate::version::Version;
 /// How many objects one run is asked for by number: past it, a command line
 /// grows long.
 const PER_RUN: usize = 4096;
-
-/// The oldest qpdf it decodes with. 11.0 is the first to write the JSON
-/// it's read through (`--json=2`), but until 11.9 a name that isn't UTF-8
-/// is written into it as its bytes, which isn't JSON, and nothing of that
-/// run reads.
-pub const OLDEST: &str = "11.9";
 
 /// qpdf, to decode one file's streams.
 #[derive(Debug, Clone)]
@@ -94,11 +89,6 @@ impl Qpdf {
         }
     }
 
-    /// The program it runs.
-    pub fn program_path(&self) -> &Path {
-        &self.program
-    }
-
     /// How long a run may take before it's stopped.
     pub fn timeout(self, timeout: Duration) -> Qpdf {
         Qpdf { timeout, ..self }
@@ -128,21 +118,6 @@ impl Qpdf {
         let (out, _) = self.run(&["--version".to_string()])?;
         let text = String::from_utf8_lossy(&out);
         Ok(text.lines().next().unwrap_or_default().to_string())
-    }
-
-    /// qpdf's version, as [`Qpdf::version`] says it, when it can decode;
-    /// else why it can't: it doesn't run, or it's older than [`OLDEST`]. A
-    /// version that doesn't read as one is taken as it is.
-    pub fn ready(&self) -> Result<String, String> {
-        let version = self.version()?;
-        let number = version.strip_prefix("qpdf version ");
-        match number.and_then(|n| Some((n, release(n)?))) {
-            Some((number, at)) if Some(at) < release(OLDEST) => Err(format!(
-                "{} is version {number}, older than {OLDEST}",
-                self.program.display()
-            )),
-            _ => Ok(version),
-        }
     }
 
     /// The file as qpdf reads it, through its JSON
@@ -301,13 +276,6 @@ struct Ran {
     code: Option<i32>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-}
-
-/// A version's release, `(11, 9)` of `11.9.0`: none when it doesn't begin
-/// with two numbers.
-fn release(version: &str) -> Option<(u32, u32)> {
-    let mut numbers = version.split('.').map(|n| n.parse::<u32>().ok());
-    Some((numbers.next()??, numbers.next()??))
 }
 
 /// That `program` exited with `code`, and the last line of what it said,
@@ -891,52 +859,6 @@ mod tests {
         let qpdf = qpdf(Path::new("/nonexistent/file.pdf"));
         let why = qpdf.decode(&[(1, 0)]).remove(&(1, 0)).unwrap().unwrap_err();
         assert!(why.contains("exited with 2"), "{why}");
-    }
-
-    #[test]
-    fn a_qpdf_is_ready_when_it_runs_and_is_11_9_or_later() {
-        let version = qpdf(Path::new("x.pdf")).ready().unwrap();
-        assert!(version.starts_with("qpdf version "), "{version}");
-        let missing = Qpdf::new("x.pdf").program("/nonexistent/qpdf").ready();
-        assert_eq!(missing, Err("/nonexistent/qpdf isn't found".to_string()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_qpdf_older_than_11_9_isnt_ready() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = scratch("old");
-        let said = |version: &str| {
-            let program = dir.join(format!("qpdf-{version}"));
-            let script = format!("#!/bin/sh\necho 'qpdf version {version}'\n");
-            std::fs::write(&program, script).unwrap();
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let qpdf = Qpdf::new("x.pdf").program(&program);
-            // Refused a moment while another test's fork holds it open, as
-            // a_qpdf_that_hangs_is_stopped says.
-            loop {
-                match qpdf.ready() {
-                    Err(why) if why.contains("Text file busy") => {
-                        thread::sleep(Duration::from_millis(10))
-                    }
-                    said => {
-                        return said
-                            .map_err(|why| why.replace(&program.display().to_string(), "qpdf"));
-                    }
-                }
-            }
-        };
-        for old in ["10.6.3", "11.8.0"] {
-            assert_eq!(
-                said(old),
-                Err(format!("qpdf is version {old}, older than 11.9"))
-            );
-        }
-        for new in ["11.9.0", "11.10.1", "12.0.0"] {
-            assert_eq!(said(new), Ok(format!("qpdf version {new}")));
-        }
-        // What doesn't read as a version is taken as it is.
-        assert_eq!(said("next"), Ok("qpdf version next".to_string()));
     }
 
     #[cfg(unix)]

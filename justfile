@@ -13,7 +13,7 @@ default:
     @just --list --unsorted
 
 # Everything CI runs.
-ci: fmt clippy test doc dist tokenizer-no-std tokenizer-msrv filters-msrv crypt-msrv
+ci: fmt clippy test doc fuzzing dist tokenizer-no-std tokenizer-msrv filters-msrv crypt-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -32,6 +32,12 @@ test:
 # file or the kinds change. Needs qpdf: PDF_LINT_QPDF, else the PATH's.
 fixtures:
     cargo test --locked -p pdf-lint --lib qpdf::tests::the_fixtures_are_written -- --ignored --exact
+
+# Build the fuzz targets as cargo-fuzz does (`--cfg fuzzing`), on stable,
+# so that what only they compile, the fuzz module and the test writer,
+# can't break unseen.
+fuzzing:
+    RUSTFLAGS="--cfg fuzzing" cargo check --locked --manifest-path fuzz/Cargo.toml --target-dir target/fuzzing
 
 # Build the API docs, failing on warnings.
 doc:

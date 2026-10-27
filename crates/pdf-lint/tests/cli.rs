@@ -42,11 +42,9 @@ fn written(name: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
-/// pdf-lint, with no qpdf it could find: it reads every file itself.
+/// pdf-lint.
 fn pdf_lint() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pdf-lint"));
-    command.env("PDF_LINT_QPDF", "/nonexistent/qpdf");
-    command
+    Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
 }
 
 fn run(args: &[&str]) -> Output {

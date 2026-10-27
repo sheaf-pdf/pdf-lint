@@ -5340,8 +5340,8 @@ mod tests {
         );
     }
 
-    /// Every PDF under `PDF_LINT_CORPUS` read, qpdf decoding what's
-    /// compressed, and checked, every object held as merged: no panic, and
+    /// Every PDF under `PDF_LINT_CORPUS` read, opened when it's encrypted
+    /// by the empty password, and checked, every object held as merged: no panic, and
     /// every finding's place inside its file or its decoded data.
     #[test]
     #[ignore = "needs PDF_LINT_CORPUS, a folder of PDF files"]
@@ -5372,9 +5372,8 @@ mod tests {
         let start = Instant::now();
         for path in &files {
             let data = std::fs::read(path).unwrap();
-            let doc =
-                std::panic::catch_unwind(|| bytes::read_with(&data, &crate::qpdf::Qpdf::new(path)))
-                    .unwrap_or_else(|_| panic!("{} panicked reading", path.display()));
+            let doc = std::panic::catch_unwind(|| bytes::read_opened(&data, &[]))
+                .unwrap_or_else(|_| panic!("{} panicked reading", path.display()));
             let report = std::panic::catch_unwind(|| {
                 check(&doc, &Hold::All(Made::Merged), &Options::default())
             })

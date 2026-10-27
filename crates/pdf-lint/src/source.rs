@@ -88,7 +88,8 @@ pub struct Document {
     /// The file's length in bytes, when the reader knows it.
     pub size: Option<usize>,
     /// Where the strings written as hex strings are, when the reader
-    /// knows: a reader of the bytes does, and qpdf's JSON doesn't say.
+    /// knows: a reader of the bytes does; one through another tool's JSON
+    /// may not.
     pub hex: Option<BTreeSet<Span>>,
     /// The data of the catalog's metadata stream, as written, when it's in
     /// plain view: unfiltered, and not encrypted ([`Source::metadata`]).
@@ -100,6 +101,7 @@ pub struct Document {
 /// Whether a file is encrypted (its trailer's `/Encrypt`), and if it is,
 /// whether the reader opened it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Encryption {
     /// It isn't.
     #[default]
