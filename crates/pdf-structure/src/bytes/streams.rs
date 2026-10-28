@@ -213,6 +213,59 @@ fn metadata_not_encrypted_is_handed_out_as_written_whether_the_file_opens_or_not
     }
 }
 
+/// The catalog's metadata stream under `/EncryptMetadata false` whose own
+/// `/Crypt` filter names one that encrypts it is refused, whether the file
+/// opens or not: it's neither handed out as written, where it's
+/// ciphertext, nor decrypted by its own. One whose own is `/Identity` is
+/// handed out as written.
+#[test]
+fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_refused() {
+    let xmp = b"<?xpacket begin?><x:xmpmeta/><?xpacket end?>";
+    let crypt = |name: &str| dict! { "Name" => name };
+    let objects = |metadata: Dict| {
+        [
+            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
+            (2, dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into()),
+            (3, Body::stream(metadata, xmp)),
+        ]
+    };
+    let settings = pdf_crypt::writer::Settings {
+        encrypt_metadata: false,
+        ..settings(Kind::Aes128, b"user")
+    };
+    // Without `/Type /Metadata`, the writer encrypts it, by `/StmF`, which
+    // is `/StdCF`, the crypt filter it names.
+    let own = dict! { "Subtype" => "XML", "Filter" => "Crypt", "DecodeParms" => crypt("StdCF") };
+    let file = write::encrypted(&settings, &objects(own), root());
+    assert!(find(&file, xmp).is_none(), "written encrypted");
+    for passwords in [&[][..], &[&b"user"[..]]] {
+        let reading = open(&file, passwords, &Options::DEFAULT);
+        let data = reading.data((3, 0));
+        assert!(
+            matches!(data, Err(Error::Encrypted)),
+            "{passwords:?}: {data:?}"
+        );
+        let decoded = reading.decoded((3, 0));
+        assert!(matches!(decoded, Err(Error::Encrypted)), "{passwords:?}");
+        assert_eq!(reading.metadata().unwrap(), None, "{passwords:?}");
+    }
+    // With `/Type /Metadata`, the writer leaves it as written.
+    let identity = dict! {
+        "Type" => "Metadata",
+        "Subtype" => "XML",
+        "Filter" => "Crypt",
+        "DecodeParms" => crypt("Identity"),
+    };
+    let file = write::encrypted(&settings, &objects(identity), root());
+    for passwords in [&[][..], &[&b"user"[..]]] {
+        let reading = open(&file, passwords, &Options::DEFAULT);
+        let data = reading.data((3, 0)).unwrap();
+        assert!(matches!(data, Cow::Borrowed(_)), "{passwords:?}");
+        assert_eq!(data, &xmp[..], "{passwords:?}");
+        assert_eq!(reading.decoded((3, 0)).unwrap(), xmp, "{passwords:?}");
+    }
+}
+
 /// In a file no password it's given opens, a stream's data is refused, its
 /// password needed, decoded too; what isn't a stream, or isn't in the
 /// file, says so.

@@ -101,6 +101,9 @@
 //!     false`, is handed out as written, whether the file opens or not, as
 //!     the [`Document`]'s metadata is (7.6.4.2 and 14.3.2). Held by
 //!     `metadata_not_encrypted_is_handed_out_as_written_whether_the_file_opens_or_not`.
+//!     But where its own `/Crypt` filter names one that encrypts it, it's
+//!     refused, decrypted by that or not ([`Error::Encrypted`]). Held by
+//!     `metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_refused`.
 //!   - **In a file no password opened,** each is refused, as it may be
 //!     ciphertext ([`Error::Locked`]); but in one whose streams aren't
 //!     encrypted ([`Encryption::Plain`]), handed out as written, unless the
@@ -1566,16 +1569,19 @@ impl Reader {
     /// followed through what's read and kept. Left as written: in a file
     /// that doesn't encrypt; a cross-reference stream's (7.5.8.2); the
     /// catalog's metadata stream's under `/EncryptMetadata false` (7.6.4.2
-    /// and 14.3.2), whether the file opens or not; and in a file no
-    /// password opened whose streams aren't encrypted
-    /// ([`Encryption::Plain`]), every stream's but one whose own crypt
-    /// filter encrypts it. Refused where it may be ciphertext the reader
-    /// doesn't decrypt: in a file no password opened, every other stream's
-    /// ([`Error::Locked`]); in a file whose handler it can't open, every
-    /// stream's ([`Error::Unsupported`]); an embedded file's, in a file
-    /// whose encryption dictionary has an `/EFF` ([`Error::EmbeddedFile`]);
-    /// and one the encryption dictionary refers to, whose strings are left
-    /// as written ([`Error::Encrypted`]).
+    /// and 14.3.2), whether the file opens or not, but where its own crypt
+    /// filter encrypts it; and in a file no password opened whose streams
+    /// aren't encrypted ([`Encryption::Plain`]), every stream's but one
+    /// whose own crypt filter encrypts it. Refused where it may be
+    /// ciphertext the reader doesn't decrypt: in a file no password opened,
+    /// every other stream's ([`Error::Locked`]); in a file whose handler it
+    /// can't open, every stream's ([`Error::Unsupported`]); an embedded
+    /// file's, in a file whose encryption dictionary has an `/EFF`
+    /// ([`Error::EmbeddedFile`]); one the encryption dictionary refers to,
+    /// whose strings are left as written, and the catalog's metadata
+    /// stream's under `/EncryptMetadata false` whose own crypt filter
+    /// encrypts it, which the reader neither decrypts nor leaves
+    /// ([`Error::Encrypted`]).
     fn crypt<'f, F: Bytes<'f>>(
         &'f self,
         file: F,
@@ -1588,17 +1594,6 @@ impl Reader {
         if self.dictionaries.contains(&id) {
             return Ok(Err(Error::Encrypted));
         }
-        if self.unencrypted_metadata {
-            let get = |id| Ok(self.get(file, id)?.ok());
-            if metadata_stream(&self.trailer, &get)? == Some(id) {
-                return Ok(Ok(Crypt::Written));
-            }
-        }
-        if self.embedded_files
-            && dict.get(b"Type").and_then(Object::as_name) == Some(b"EmbeddedFile")
-        {
-            return Ok(Err(Error::EmbeddedFile));
-        }
         let failed = Cell::new(None);
         let resolve = |id| match self.get(file, id) {
             Ok(object) => object.ok(),
@@ -1610,6 +1605,21 @@ impl Reader {
         let crypt = filter::crypt_filter(dict, Some(&resolve));
         if let Some(error) = failed.into_inner() {
             return Err(error);
+        }
+        if self.unencrypted_metadata {
+            let get = |id| Ok(self.get(file, id)?.ok());
+            if metadata_stream(&self.trailer, &get)? == Some(id) {
+                // Its own crypt filter may encrypt it all the same.
+                return Ok(match crypt.as_deref() {
+                    Some(name) if name != b"Identity" => Err(Error::Encrypted),
+                    _ => Ok(Crypt::Written),
+                });
+            }
+        }
+        if self.embedded_files
+            && dict.get(b"Type").and_then(Object::as_name) == Some(b"EmbeddedFile")
+        {
+            return Ok(Err(Error::EmbeddedFile));
         }
         Ok(match (&self.handler, &self.encryption) {
             (Some(handler), _) => {

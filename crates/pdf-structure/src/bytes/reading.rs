@@ -148,8 +148,10 @@ pub enum Error {
     /// The file is encrypted, and its bytes aren't handed out as written,
     /// where they could be ciphertext: at a span in the file
     /// ([`Reading::bytes`]), or a stream's data that the reader doesn't
-    /// decrypt, as it doesn't the strings of the objects the encryption
-    /// dictionary refers to, which it's among ([`Reading::data`]).
+    /// decrypt ([`Reading::data`]): a stream among the objects the
+    /// encryption dictionary refers to, whose strings it doesn't decrypt
+    /// either, or the catalog's metadata stream under `/EncryptMetadata
+    /// false` whose own crypt filter encrypts it.
     #[error("the file is encrypted, and its bytes aren't handed out as written")]
     Encrypted,
     /// No bytes the reading has are at `span`: it runs past the file, or
@@ -556,8 +558,10 @@ impl<S: ByteSource> Reading<S> {
     /// reader can't open ([`Error::Unsupported`]); an embedded file's in a
     /// file whose encryption dictionary has an `/EFF`
     /// ([`Error::EmbeddedFile`]); and a stream's that the encryption
-    /// dictionary refers to ([`Error::Encrypted`]). Data that doesn't
-    /// decrypt cleanly is an error holding what did ([`Error::Decrypt`]).
+    /// dictionary refers to, or the catalog's metadata stream's under
+    /// `/EncryptMetadata false` that its own crypt filter encrypts
+    /// ([`Error::Encrypted`]). Data that doesn't decrypt cleanly is an error
+    /// holding what did ([`Error::Decrypt`]).
     pub fn data(&self, id: ObjectId) -> Result<Cow<'_, [u8]>, Error> {
         let data = match self.source.whole() {
             Some(file) => {
