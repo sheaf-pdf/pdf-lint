@@ -11,7 +11,7 @@ keywords = ["pdf", "arlington", "grammar", "validation", "iso-32000"]
 categories = ["parser-implementations", "development-tools::testing"]
 # Only what users need. The model is embedded, and a dependent's build has
 # no checkout to read it from.
-include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md", "/LICENSE-APACHE"]
+include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 anyhow = "1"

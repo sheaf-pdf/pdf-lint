@@ -9,7 +9,7 @@ description = "PDF's objects as written, their parser and their writer: owned va
 keywords = ["pdf", "objects", "pdfdocencoding", "iso-32000"]
 categories = ["data-structures", "encoding", "parser-implementations"]
 # Only what users need, so local tooling files can't end up in the package.
-include = ["/src", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }

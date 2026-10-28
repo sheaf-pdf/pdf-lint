@@ -52,4 +52,4 @@ assert_eq!(Handler::open(&dictionary, settings.id, &[b"wrong"]).unwrap_err(), Re
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT license ([LICENSE-MIT](LICENSE-MIT)) at your option.
+Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE)) or MIT license ([LICENSE-MIT](../../LICENSE-MIT)) at your option.

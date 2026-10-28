@@ -125,20 +125,3 @@ pub mod extension {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    /// ARLINGTON-NOTICE.txt, which the package carries for the parts of the
-    /// checker adapted from TestGrammar, is upstream's NOTICE.txt as
-    /// pdf-arlington's model has it, byte for byte.
-    #[test]
-    fn the_arlington_notice_is_the_models() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let notice = std::fs::read(dir.join("ARLINGTON-NOTICE.txt")).unwrap();
-        let model = std::fs::read(dir.join("../pdf-arlington/model/NOTICE.txt")).unwrap();
-        assert!(
-            notice == model,
-            "crates/pdf-lint/ARLINGTON-NOTICE.txt isn't pdf-arlington's model/NOTICE.txt: copy it again"
-        );
-    }
-}

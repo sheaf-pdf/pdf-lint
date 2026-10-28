@@ -21,8 +21,9 @@ target=${2:?a target}
 binary=${3:?a binary}
 out=${4:?a folder}
 here=$(cd "$(dirname "$0")" && pwd)
-crate=$(dirname "$here")/crates/pdf-lint
-model=$(dirname "$here")/crates/pdf-arlington/model
+root=$(dirname "$here")
+crate=$root/crates/pdf-lint
+model=$root/crates/pdf-arlington/model
 
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$crate/Cargo.toml" | head -n 1)
 name=pdf-lint-$version-$platform
@@ -31,7 +32,7 @@ mkdir -p "$out"
 rm -rf "${out:?}/$name"
 mkdir "$out/$name"
 cp "$binary" "$out/$name/"
-cp "$crate/README.md" "$crate/CHANGELOG.md" "$crate/LICENSE-APACHE" "$out/$name/"
+cp "$crate/README.md" "$crate/CHANGELOG.md" "$root/LICENSE-APACHE" "$out/$name/"
 cp "$model/NOTICE.txt" "$out/$name/ARLINGTON-NOTICE.txt"
 cp "$model/corrections.tsv" "$out/$name/ARLINGTON-CORRECTIONS.tsv"
 cp -r "$model/additions" "$out/$name/ARLINGTON-ADDITIONS"

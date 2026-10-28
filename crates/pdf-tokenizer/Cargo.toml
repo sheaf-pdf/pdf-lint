@@ -9,7 +9,7 @@ description = "A lossless, zero-copy PDF tokenizer that never rejects and never 
 keywords = ["pdf", "lexer", "tokenizer", "no-std"]
 categories = ["parser-implementations", "no-std::no-alloc"]
 # Only what users need, so local tooling files can't end up in the package.
-include = ["/src", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 

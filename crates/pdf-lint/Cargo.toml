@@ -10,9 +10,9 @@ repository = "https://github.com/sheaf-pdf/pdf-lint"
 description = "Checks PDF files against the Arlington PDF Model"
 keywords = ["pdf", "lint", "validation", "arlington", "iso-32000"]
 categories = ["command-line-utilities", "development-tools::testing"]
-# Only what users need, and the Arlington model's NOTICE.txt, which the
-# parts adapted from TestGrammar carry. The model is pdf-arlington's.
-include = ["/src", "/README.md", "/CHANGELOG.md", "/LICENSE-APACHE", "/ARLINGTON-NOTICE.txt"]
+# Only what users need. The model is pdf-arlington's, and so is its
+# NOTICE.txt, which the parts adapted from TestGrammar carry.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 anyhow = "1"

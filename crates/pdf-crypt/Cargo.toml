@@ -9,7 +9,7 @@ description = "PDF's standard security handler, decrypting, with every fault sai
 keywords = ["pdf", "decryption", "rc4", "aes"]
 categories = ["cryptography", "parser-implementations"]
 # Only what users need, so local tooling files can't end up in the package.
-include = ["/src", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 # RustCrypto's, the primitives under the handler, without what it doesn't

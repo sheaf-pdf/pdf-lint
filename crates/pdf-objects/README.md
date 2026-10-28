@@ -122,4 +122,4 @@ assert_eq!(out, b"<</Type/Annot/Rect[0 0 20 10]/Contents(new)>>");
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT license ([LICENSE-MIT](LICENSE-MIT)) at your option.
+Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE)) or MIT license ([LICENSE-MIT](../../LICENSE-MIT)) at your option.

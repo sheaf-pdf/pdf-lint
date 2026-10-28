@@ -57,4 +57,4 @@ assert_eq!(holds(&dict! { "Type" => "Page", "Rotate" => 45 }.into()), Truth::Fal
 
 ## License
 
-Licensed under the Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), as the model is. Upstream's files in `model/` are its tables, `tsv/latest`, and its `LICENSE` and `NOTICE.txt`; `corrections.tsv`, `additions/` and `SOURCE.md` beside them are this crate's, under the same licence.
+Licensed under the Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE)), as the model is. Upstream's files in `model/` are its tables, `tsv/latest`, and its `LICENSE` and `NOTICE.txt`; `corrections.tsv`, `additions/` and `SOURCE.md` beside them are this crate's, under the same licence.
