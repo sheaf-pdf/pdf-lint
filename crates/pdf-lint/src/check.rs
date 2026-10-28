@@ -5,8 +5,17 @@
 // `Walk::array_rows` (from `CParsePDF::parse_object`'s order), `is_date`
 // (from `is_valid_pdf_date_string`) and `Class::of` (from
 // `is_second_class_pdf_name` and `is_third_class_pdf_name`). Each one's
-// doc says how it differs from TestGrammar. Upstream's NOTICE.txt is
-// pdf-arlington's `model/NOTICE.txt`.
+// doc says how it differs from TestGrammar. The notices of upstream's
+// NOTICE.txt (pdf-arlington's `model/NOTICE.txt`) that pertain to them:
+//
+//     Copyright 2020 PDF Association, Inc. https://www.pdfa.org
+//
+//     This material is based upon work supported by the Defense Advanced
+//     Research Projects Agency (DARPA) under Contract No. HR001119C0079.
+//     Any opinions, findings and conclusions or recommendations expressed
+//     in this material are those of the author(s) and do not necessarily
+//     reflect the views of the Defense Advanced Research Projects Agency
+//     (DARPA). Approved for public release.
 
 //! The walk: from the trailer as the file writes it, every object it
 //! reaches, each checked against the table it's reached as. Links are

@@ -11,7 +11,8 @@ description = "Checks PDF files against the Arlington PDF Model"
 keywords = ["pdf", "lint", "validation", "arlington", "iso-32000"]
 categories = ["command-line-utilities", "development-tools::testing"]
 # Only what users need. The model is pdf-arlington's, and so is its
-# NOTICE.txt, which the parts adapted from TestGrammar carry.
+# NOTICE.txt, whose notices src/check.rs's header carries for the parts
+# adapted from TestGrammar.
 include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
