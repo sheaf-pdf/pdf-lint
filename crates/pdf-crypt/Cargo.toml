@@ -20,6 +20,8 @@ md-5 = { version = "0.11", default-features = false }
 rc4 = "0.2"
 sha2 = { version = "0.11", default-features = false }
 
+thiserror = "2"
+
 [features]
 # Encrypting as the handler decrypts, with salts and IVs given, not random:
 # for writing test files, not for a writer to protect a document with.

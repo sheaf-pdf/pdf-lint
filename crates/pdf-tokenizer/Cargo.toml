@@ -12,6 +12,8 @@ categories = ["parser-implementations", "no-std::no-alloc"]
 include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
+# Without std, as the tokenizer needs only core.
+thiserror = { version = "2", default-features = false }
 
 [lints.rust]
 unsafe_code = "forbid"

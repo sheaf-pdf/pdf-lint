@@ -20,14 +20,16 @@
 //! [`decode`]: a name's or a string's bytes, as [`Piece`](decode::Piece)s
 //! that say how each was written, or a number.
 //!
-//! It follows ISO 32000-2's lexical conventions (7.2) and has no
-//! dependencies. It needs only `core` and never allocates, so whatever the
-//! input, tokenizing and decoding it can't allocate memory or do I/O: a
-//! file it reads, untrusted, can't make it use memory. A build for a
-//! target with neither `std` nor `alloc` checks it. A value's bytes come
-//! as an iterator ([`Pieces::bytes`](decode::Pieces::bytes)), to collect
-//! as the caller likes, or as written, borrowed, when nothing in it needs
-//! decoding ([`Token::verbatim`]).
+//! It follows ISO 32000-2's lexical conventions (7.2). It needs only
+//! `core` and never allocates, so whatever the input, tokenizing and
+//! decoding it can't allocate memory or do I/O: a file it reads,
+//! untrusted, can't make it use memory. Its one dependency, thiserror,
+//! which derives [`NumberError`](decode::NumberError)'s traits, is built
+//! without `std`. A build against `core` alone, for a target with neither
+//! `std` nor `alloc`, checks it. A value's bytes come as an iterator
+//! ([`Pieces::bytes`](decode::Pieces::bytes)), to collect as the caller
+//! likes, or as written, borrowed, when nothing in it needs decoding
+//! ([`Token::verbatim`]).
 //!
 //! ```
 //! use pdf_tokenizer::{Kind, Tokenizer};

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **thiserror, without `std`.** `NumberError`'s `Display` and `Error` are derived with thiserror 2, built with its default features off, each text as before; `NumberError` is still exhaustive. It's the crate's one dependency, and it still needs only `core`: CI builds it against `core` alone (`-Z build-std=core`), for a target with neither `std` nor `alloc`. Building it now builds thiserror's derive, and the crates under it (`syn`, `quote`, `proc-macro2`, `unicode-ident`), for the host.
+
 ## 0.1.0 (2026-10-25)
 
 - **The tokenizer.** `Tokenizer::new` and `Tokenizer::at` iterate a byte slice's `Token`s (kind, offset, and bytes as written) from any offset, losslessly: the tokens join back into the input. `offset()` says where the next token starts (not `position()`, which on a `&mut Tokenizer` would be `Iterator::position`). Kinds follow ISO 32000-2's lexical conventions, and a run of regular bytes is a number only when it's written as one.

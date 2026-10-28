@@ -1,6 +1,6 @@
 # pdf-tokenizer
 
-A lossless, zero-copy tokenizer for PDF syntax, in one small Rust crate with no dependencies that needs neither `std` nor `alloc`, and never allocates.
+A lossless, zero-copy tokenizer for PDF syntax, in one small Rust crate that needs neither `std` nor `alloc`, and never allocates.
 
 It splits bytes into tokens and decides nothing else. What an object is, what's valid, and how to recover a damaged file are left to the layers above it, so a strict validator and a forgiving reader can share it, each with its own policy. Decoding a token into what it stands for is a separate step that hides nothing.
 
@@ -13,7 +13,7 @@ Every promise below is checked on every token by the tests, a fuzz target, and t
 - **Zero-copy.** A token is a kind, an offset, and its bytes as written, borrowed from your input. Nothing is allocated, copied or decoded.
 - **From any offset.** Start where a cross-reference entry points, in the middle of a file, or at the start of a content stream. The tokenizer carries nothing from one token to the next, so started at any token, it yields that token.
 - **No grammar.** `obj`, `R`, `stream`, `xref`, `trailer`, `true` and `null` are keywords like any other, and `3 0 R` is three tokens with spaces between them. Joining tokens into references, objects or cross-reference sections is the next layer's work.
-- **No allocation, no I/O.** It needs only `core`, so whatever an untrusted file holds, tokenizing and decoding it can't allocate memory or touch the system. CI checks this by building it for a target with neither `std` nor `alloc`. A value's bytes come as an iterator, to collect however you like, or borrowed as written when there's nothing to decode.
+- **No allocation, no I/O.** It needs only `core`, so whatever an untrusted file holds, tokenizing and decoding it can't allocate memory or touch the system; its one dependency, thiserror, which derives its error type's traits, is built without `std`. CI checks this by building it against `core` alone (`-Z build-std=core`), for a target with neither `std` nor `alloc`. A value's bytes come as an iterator, to collect however you like, or borrowed as written when there's nothing to decode.
 
 It follows the lexical conventions of ISO 32000-2 (§7.2): its white-space characters, its delimiters, and its regular characters. A run of regular characters is a number only when it's written as one, so `1e5` and `--5` are keywords.
 

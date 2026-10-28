@@ -29,7 +29,6 @@
 //! aren't known or that's still ciphertext, and a stream whose data isn't
 //! in memory, which [`indirect_stream`] writes from data given apart.
 
-use std::fmt;
 use std::io::Write as _;
 
 use crate::object::{Dict, Entry, Form, Object, ObjectId, Str, Value};
@@ -61,16 +60,18 @@ const REGULAR: [bool; 256] = {
 };
 
 /// Why the writer wrote nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// A real that's NaN or an infinity, which no reader can read back.
+    #[error("a real that isn't a finite number{}", in_object(.id))]
     NonFinite {
         /// The indirect object it's in, when that's known.
         id: Option<ObjectId>,
     },
     /// Arrays and dictionaries nested deeper than a parser reads them under
     /// [`Limits::DEFAULT`], so what's written reads back.
+    #[error("arrays and dictionaries nested deeper than {limit}{}", in_object(.id))]
     Nested {
         /// The indirect object they're in, when that's known.
         id: Option<ObjectId>,
@@ -78,6 +79,7 @@ pub enum Error {
         limit: usize,
     },
     /// A string read as text, whose bytes aren't known ([`Str::Text`]).
+    #[error("a string read as text, whose bytes aren't known{}", in_object(.id))]
     Text {
         /// The indirect object it's in, when that's known.
         id: Option<ObjectId>,
@@ -85,6 +87,7 @@ pub enum Error {
     /// A string that's still ciphertext ([`Str::Encrypted`]), which is
     /// right to write only under the key, and the number and generation,
     /// it was encrypted with.
+    #[error("a string that's still ciphertext{}", in_object(.id))]
     Encrypted {
         /// The indirect object it's in, when that's known.
         id: Option<ObjectId>,
@@ -92,6 +95,7 @@ pub enum Error {
     /// A stream whose data isn't in memory, as
     /// [`Data::Bytes`](crate::Data::Bytes): [`indirect_stream`] writes one
     /// from data given apart.
+    #[error("a stream whose data isn't in memory{}", in_object(.id))]
     Data {
         /// The indirect object it's in, when that's known.
         id: Option<ObjectId>,
@@ -114,34 +118,6 @@ impl Error {
         }
     }
 }
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::NonFinite { id } => {
-                write!(f, "a real that isn't a finite number{}", in_object(id))
-            }
-            Error::Nested { id, limit } => write!(
-                f,
-                "arrays and dictionaries nested deeper than {limit}{}",
-                in_object(id)
-            ),
-            Error::Text { id } => write!(
-                f,
-                "a string read as text, whose bytes aren't known{}",
-                in_object(id)
-            ),
-            Error::Encrypted { id } => {
-                write!(f, "a string that's still ciphertext{}", in_object(id))
-            }
-            Error::Data { id } => {
-                write!(f, "a stream whose data isn't in memory{}", in_object(id))
-            }
-        }
-    }
-}
-
-impl std::error::Error for Error {}
 
 /// " in object n g", when `id` is known, for an error's text.
 fn in_object(id: &Option<ObjectId>) -> String {

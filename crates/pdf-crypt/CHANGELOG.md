@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **A typed password's byte forms.** `passwords` gives the bytes a password typed as text may have been set as, for `Handler::open` to try: as typed, in UTF-8, which revisions 5 and 6 take; then, for revisions 2 to 4, in PDFDocEncoding, WinAnsiEncoding and MacRomanEncoding (Annex D), each where every character has a byte, as qpdf tries them; none twice. It's pdf-lint's `text::passwords`, moved here unchanged, so that any reader with a password prompt has it.
+- **Errors derived with thiserror.** `Refused`, `Fault` and `Error` derive `Display` and `std::error::Error`, each text as before; `Fault` is a `std::error::Error` now too, and `Error` still says its fault's text, with no `source`.
 
 ## 0.1.0 (unreleased)
 

@@ -12,7 +12,7 @@
 //! ([`StreamHead::scanned`]); and [`Parser::stream`] the rest of the
 //! stream, after the extent the caller chose.
 
-use std::fmt;
+use std::borrow::Cow;
 
 use pdf_tokenizer::decode::How;
 use pdf_tokenizer::{Kind, Token, Tokenizer};
@@ -87,16 +87,23 @@ impl<'a, S: Sink<'a> + ?Sized> Sink<'a> for &mut S {
 
 /// What the parser read past: the value is read, as readers read it, and
 /// the fault said.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault<'a> {
     /// An integer outside 64 bits, read as the nearest that fits.
+    #[error("an integer outside 64 bits, read as the nearest that fits")]
     IntegerOverflow,
     /// A real too large for 64 bits, read as the largest.
+    #[error("a real too large for 64 bits, read as the largest")]
     RealOverflow,
     /// A name with a `#` without two hex digits after it, or with `#00`,
     /// NUL, which a name can't hold (ISO 32000-2, 7.3.5), readers reading
     /// each their own way: read with the `#` as itself, and `#00` as NUL.
+    #[error(
+        "the name {written} has {what}, which readers read differently",
+        written = first_40(.written),
+        what = name_fault(*.stray, *.nul)
+    )]
     Name {
         /// The name as written, its `/` first.
         written: &'a [u8],
@@ -106,61 +113,43 @@ pub enum Fault<'a> {
         nul: bool,
     },
     /// No end of line after a stream's `stream` keyword.
+    #[error("no end of line after `stream`")]
     NoEol,
     /// A lone CR after a stream's `stream` keyword, where ISO 32000-2 wants
     /// CR LF or LF (7.3.8.1).
+    #[error("a lone CR after `stream`, where ISO 32000-2 wants CR LF or LF")]
     LoneCr,
     /// No `endobj` after an indirect object.
+    #[error("{n} {g} obj has no endobj", n = .id.0, g = .id.1)]
     NoEndobj {
         /// The object.
         id: ObjectId,
     },
 }
 
-impl fmt::Display for Fault<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Fault::IntegerOverflow => {
-                write!(
-                    f,
-                    "an integer outside 64 bits, read as the nearest that fits"
-                )
-            }
-            Fault::RealOverflow => write!(f, "a real too large for 64 bits, read as the largest"),
-            Fault::Name {
-                written,
-                stray,
-                nul,
-            } => {
-                let written = String::from_utf8_lossy(&written[..written.len().min(40)]);
-                let what = match (stray, nul) {
-                    (true, true) => "a # without two hex digits after it, and #00, NUL",
-                    (true, false) => "a # without two hex digits after it",
-                    _ => "#00, NUL, which a name can't hold",
-                };
-                write!(
-                    f,
-                    "the name {written} has {what}, which readers read differently"
-                )
-            }
-            Fault::NoEol => write!(f, "no end of line after `stream`"),
-            Fault::LoneCr => write!(
-                f,
-                "a lone CR after `stream`, where ISO 32000-2 wants CR LF or LF"
-            ),
-            Fault::NoEndobj { id: (n, g) } => write!(f, "{n} {g} obj has no endobj"),
-        }
+/// A name's first 40 bytes, for [`Fault::Name`]'s text.
+fn first_40(written: &[u8]) -> Cow<'_, str> {
+    String::from_utf8_lossy(&written[..written.len().min(40)])
+}
+
+/// What's wrong with a name, for [`Fault::Name`]'s text.
+fn name_fault(stray: bool, nul: bool) -> &'static str {
+    match (stray, nul) {
+        (true, true) => "a # without two hex digits after it, and #00, NUL",
+        (true, false) => "a # without two hex digits after it",
+        _ => "#00, NUL, which a name can't hold",
     }
 }
 
 /// What stops the parser reading a value. Each offset it names is in the
 /// data the parser reads, but [`Error::Header`]'s, as the parser was given
 /// it, and [`Error::Extent`]'s, as its caller gave them.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// A value nested deeper in arrays and dictionaries than the parser
     /// allows, [`Limits::nesting`] ([`NESTING`] by default).
+    #[error("arrays and dictionaries nested deeper than {limit}")]
     Nested {
         /// How deeply they may nest.
         limit: usize,
@@ -170,6 +159,7 @@ pub enum Error {
     /// More values in one call than the parser allows, [`Limits::values`]:
     /// the value, an array's elements, a dictionary's keys and values, and
     /// theirs.
+    #[error("more than {limit} values in one object, one more at byte {at}")]
     Values {
         /// How many one call may read.
         limit: usize,
@@ -177,9 +167,15 @@ pub enum Error {
         at: usize,
     },
     /// The data ends where a value should be.
+    #[error("the data ends where a value should be")]
     End,
     /// A reference, `n g R`, whose number doesn't fit 32 bits or whose
     /// generation doesn't fit 16, which numbers no object.
+    #[error(
+        "a reference at byte {at}, {} {} R, numbers no object",
+        lossy(.number),
+        lossy(.generation)
+    )]
     Reference {
         /// Where it starts.
         at: usize,
@@ -189,27 +185,32 @@ pub enum Error {
         generation: Vec<u8>,
     },
     /// A string, literal or hex, that doesn't end.
+    #[error("a string at byte {at} that doesn't end")]
     String {
         /// Where it starts.
         at: usize,
     },
     /// An array that doesn't end.
+    #[error("an array at byte {at} that doesn't end")]
     Array {
         /// Where it starts.
         at: usize,
     },
     /// A dictionary that doesn't end.
+    #[error("a dictionary at byte {at} that doesn't end")]
     Dict {
         /// Where it starts.
         at: usize,
     },
     /// A dictionary's key that isn't a name.
+    #[error("a dictionary's key at byte {at} isn't a name")]
     Key {
         /// Where the key is.
         at: usize,
     },
     /// A keyword other than `true`, `false` and `null` where a value
     /// should be.
+    #[error("`{}` at byte {at}, where a value should be", lossy(.word))]
     Keyword {
         /// Where it is.
         at: usize,
@@ -218,6 +219,7 @@ pub enum Error {
     },
     /// Another token where a value should be: a `]`, `>>`, `{` or `}`, or a
     /// `)` or `>` that closes nothing.
+    #[error("{:?} at byte {at}, where a value should be", lossy(.bytes))]
     Token {
         /// Where it is.
         at: usize,
@@ -225,6 +227,7 @@ pub enum Error {
         bytes: Vec<u8>,
     },
     /// No `n g obj`, an indirect object's header.
+    #[error("no `n g obj` at byte {at}")]
     Header {
         /// Where it was looked for: where the parser was, as it was given
         /// when it had read nothing, past the data's end too, where a
@@ -232,6 +235,7 @@ pub enum Error {
         at: usize,
     },
     /// A stream with no `endstream` after its data.
+    #[error("{n} {g} obj's stream has no endstream", n = .id.0, g = .id.1)]
     Endstream {
         /// The object.
         id: ObjectId,
@@ -239,6 +243,11 @@ pub enum Error {
     /// A stream given data it can't have: bytes that don't start where its
     /// data does, end before they start, run past what the parser reads,
     /// or are in other data.
+    #[error(
+        "{n} {g} obj's stream can't have bytes {start}..{end} as its data: they don't start where its data does, end before they start, run past what's read, or are in other data",
+        n = .id.0,
+        g = .id.1
+    )]
     Extent {
         /// The object.
         id: ObjectId,
@@ -249,57 +258,10 @@ pub enum Error {
     },
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let lossy = String::from_utf8_lossy;
-        match self {
-            Error::Nested { limit, .. } => {
-                write!(f, "arrays and dictionaries nested deeper than {limit}")
-            }
-            Error::Values { limit, at } => write!(
-                f,
-                "more than {limit} values in one object, one more at byte {at}"
-            ),
-            Error::End => write!(f, "the data ends where a value should be"),
-            Error::Reference {
-                at,
-                number,
-                generation,
-            } => write!(
-                f,
-                "a reference at byte {at}, {} {} R, numbers no object",
-                lossy(number),
-                lossy(generation)
-            ),
-            Error::String { at } => write!(f, "a string at byte {at} that doesn't end"),
-            Error::Array { at } => write!(f, "an array at byte {at} that doesn't end"),
-            Error::Dict { at } => write!(f, "a dictionary at byte {at} that doesn't end"),
-            Error::Key { at } => write!(f, "a dictionary's key at byte {at} isn't a name"),
-            Error::Keyword { at, word } => {
-                write!(f, "`{}` at byte {at}, where a value should be", lossy(word))
-            }
-            Error::Token { at, bytes } => {
-                write!(
-                    f,
-                    "{:?} at byte {at}, where a value should be",
-                    lossy(bytes)
-                )
-            }
-            Error::Header { at } => write!(f, "no `n g obj` at byte {at}"),
-            Error::Endstream { id: (n, g) } => write!(f, "{n} {g} obj's stream has no endstream"),
-            Error::Extent {
-                id: (n, g),
-                start,
-                end,
-            } => write!(
-                f,
-                "{n} {g} obj's stream can't have bytes {start}..{end} as its data: they don't start where its data does, end before they start, run past what's read, or are in other data"
-            ),
-        }
-    }
+/// Bytes, lossily as text, for [`Error`]'s text.
+fn lossy(bytes: &[u8]) -> Cow<'_, str> {
+    String::from_utf8_lossy(bytes)
 }
-
-impl std::error::Error for Error {}
 
 /// Reads values, or an indirect object, from data, a file's bytes or an
 /// object stream's decoded data, from an offset on. Its strings are read

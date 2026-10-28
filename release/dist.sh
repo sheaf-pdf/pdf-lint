@@ -71,11 +71,12 @@ linux-*)
 esac
 
 # The crates compiled in for the target, as Cargo.lock has them, so the
-# list can't drift; then each one's licence files as its package has
-# them, each text once.
+# list can't drift: not a proc-macro crate, or what only it depends on,
+# which runs while building and isn't compiled in. Then each one's
+# licence files as its package has them, each text once.
 cargo fetch --locked --target "$target" --quiet
 registry=$(unix "${CARGO_HOME:-$HOME/.cargo}")/registry/src
-crates=$(cargo tree --locked -e normal --target "$target" -p pdf-lint --prefix none \
+crates=$(cargo tree --locked -e normal,no-proc-macro --target "$target" -p pdf-lint --prefix none \
     --format '{p}|{l}' | sed 's/ (\*)$//' | sort -u |
     grep -vE '^(pdf-lint|pdf-tokenizer|pdf-filters|pdf-crypt|pdf-objects|pdf-arlington) v')
 texts=$(mktemp)

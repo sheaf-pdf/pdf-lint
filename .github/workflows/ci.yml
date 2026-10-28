@@ -58,10 +58,10 @@ jobs:
       - name: Build and check the archive
         run: just dist
 
-  # The tokenizer's own promises: no std or alloc, and its oldest Rust.
-  # Neither job needs qpdf, and neither ever will.
+  # The tokenizer's own promises: no std, no alloc, and its oldest Rust.
+  # None of these jobs needs qpdf, and none ever will.
   tokenizer-no-std:
-    name: Tokenizer without std or alloc
+    name: Tokenizer without std
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -73,6 +73,22 @@ jobs:
       - uses: extractions/setup-just@v4
       - name: Build for thumbv6m-none-eabi
         run: just tokenizer-no-std
+
+  # thumbv6m-none-eabi ships alloc, so a build against core alone, built
+  # from source, is what shows the tokenizer needs nothing more.
+  tokenizer-core-only:
+    name: Tokenizer on core alone
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: extractions/setup-just@v4
+      - name: Build against core alone for thumbv6m-none-eabi
+        run: just tokenizer-core-only
 
   tokenizer-msrv:
     name: Tokenizer on its minimum Rust

@@ -21,7 +21,7 @@ decrypts what's encrypted itself.
 | Crate | What |
 |---|---|
 | [pdf-lint](crates/pdf-lint) | The checker, a command line and a library. Its README has the rules, the options, the JSON format and how to install it |
-| [pdf-tokenizer](crates/pdf-tokenizer) | A lossless, zero-copy PDF tokenizer, with no dependencies and needing neither `std` nor `alloc` |
+| [pdf-tokenizer](crates/pdf-tokenizer) | A lossless, zero-copy PDF tokenizer, needing neither `std` nor `alloc` |
 | [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept |
 | [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler, decrypting on RustCrypto's primitives, every fault said |
 | [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, their parser and their writer: each value with where it was written, every fault said, and text strings decoded by the spec |
@@ -38,9 +38,10 @@ just ci       # run everything CI runs
 just clippy   # or one at a time
 ```
 
-`just ci` also needs the `thumbv6m-none-eabi` target and Rust 1.85
-installed, for the tokenizer's no-std build and the minimum Rust of the
-tokenizer, the filters, pdf-crypt, pdf-objects and pdf-arlington.
+`just ci` also needs the `thumbv6m-none-eabi` target, nightly Rust with
+its `rust-src` component, and Rust 1.85 installed: for the tokenizer's
+no-std build, its build against `core` alone, and the minimum Rust of
+the tokenizer, the filters, pdf-crypt, pdf-objects and pdf-arlington.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
 objects` and `just fuzz check` fuzz the tokenizer, the filters,

@@ -322,26 +322,17 @@ fn digit(b: u8) -> u8 {
 }
 
 /// Why a token isn't the number asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum NumberError {
     /// It isn't written as one.
+    #[error("not a number")]
     NotANumber,
     /// It's written as one, but too large: an integer outside `i64`, or a
     /// number too large for a finite `f64`. Readers differ here: qpdf
     /// reads the whole object holding it as null.
+    #[error("a number too large to hold")]
     Overflow,
 }
-
-impl fmt::Display for NumberError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            NumberError::NotANumber => "not a number",
-            NumberError::Overflow => "a number too large to hold",
-        })
-    }
-}
-
-impl core::error::Error for NumberError {}
 
 /// The integer `bytes` are written as: digits, with an optional sign (ISO
 /// 32000-2, 7.3.3).

@@ -15,7 +15,7 @@ default:
     @just --list --unsorted
 
 # Everything CI runs.
-ci: fmt clippy test test-qpdf doc fuzzing dist tokenizer-no-std tokenizer-msrv filters-msrv crypt-msrv objects-msrv arlington-msrv
+ci: fmt clippy test test-qpdf doc fuzzing dist tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -97,10 +97,17 @@ dist:
     cargo build --release --locked -p pdf-lint --target "$target"
     release/dist.sh "$platform" "$target" "target/$target/release/pdf-lint$exe" dist
 
-# Build the tokenizer for a target with neither std nor alloc, which must
-# be installed (`rustup target add thumbv6m-none-eabi`): it needs only core.
+# Build the tokenizer for a target without std, which must be installed
+# (`rustup target add thumbv6m-none-eabi`).
 tokenizer-no-std:
     cargo build --locked -p pdf-tokenizer --target thumbv6m-none-eabi
+
+# Build the tokenizer against core alone, built from source on nightly,
+# whose rust-src must be installed (`rustup component add rust-src
+# --toolchain nightly`): the target ships alloc beside core, so only this
+# build shows the tokenizer needs neither std nor alloc.
+tokenizer-core-only:
+    cargo +nightly build --locked -p pdf-tokenizer --target thumbv6m-none-eabi -Z build-std=core
 
 # Test the tokenizer on its oldest supported Rust, which must be installed.
 tokenizer-msrv:

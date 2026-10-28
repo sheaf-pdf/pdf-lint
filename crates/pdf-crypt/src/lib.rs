@@ -43,8 +43,6 @@ mod vectors;
 #[cfg(any(test, feature = "writer"))]
 pub mod writer;
 
-use std::fmt;
-
 pub use handler::{Handler, Method};
 pub use password::passwords;
 
@@ -92,37 +90,29 @@ pub struct CryptFilter {
 }
 
 /// Why a handler doesn't open.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Refused {
     /// The dictionary isn't one the standard security handler takes, and
     /// why: another handler, a version or revision it hasn't, `/O`, `/U`
     /// or `/P` (`/OE`, `/UE` or `/Perms` of `/V` 5) missing or not of its
     /// type, `/O` or `/U` too long.
+    #[error("{0}")]
     Unsupported(String),
     /// None of the passwords opens it.
+    #[error("the password doesn't open it")]
     Password,
 }
 
-impl fmt::Display for Refused {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Refused::Unsupported(why) => write!(f, "{why}"),
-            Refused::Password => write!(f, "the password doesn't open it"),
-        }
-    }
-}
-
-impl std::error::Error for Refused {}
-
 /// What's wrong with a string's or stream's ciphertext, or the
 /// dictionary.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
     /// AES ciphertext of `len` bytes, with no whole block past its IV:
     /// shorter than an IV, nothing decrypted, it stays ciphertext; just an
     /// IV, it decrypts to nothing.
+    #[error("its AES ciphertext has no whole block past its IV")]
     Short {
         /// Its length.
         len: usize,
@@ -131,15 +121,18 @@ pub enum Fault {
     /// stream's white-space past them aside). The whole blocks decrypted
     /// and kept, padding and all, as the last needn't be the plaintext's
     /// last; the rest left off.
+    #[error("its AES ciphertext has a part block past its whole blocks")]
     PartBlock {
         /// How many.
         extra: usize,
     },
     /// AES plaintext whose last block isn't padded as AES-CBC pads it
     /// (RFC 8018, 6.1.1). Decrypted, the block kept whole.
+    #[error("its AES plaintext isn't padded")]
     Padding,
     /// A crypt filter's method that isn't one, or a crypt filter the
     /// dictionary hasn't, named `name`. Nothing decrypted.
+    #[error("its crypt filter's method or name, /{name}, isn't one")]
     Method {
         /// The name.
         name: String,
@@ -147,6 +140,7 @@ pub enum Fault {
     /// A crypt filter's AES that the file's key of `len` bytes isn't for:
     /// `/AESV3` below `/V` 5, `/AESV2` in a file whose key is RC4's of
     /// under 128 bits. Nothing decrypted.
+    #[error("its crypt filter's AES isn't for the file's key of {len} bytes")]
     Key {
         /// The key's length.
         len: usize,
@@ -154,58 +148,26 @@ pub enum Fault {
     /// `/Perms`, decrypted, confirms the key (`adb`, Algorithm 13) but
     /// isn't `/P` and `/EncryptMetadata` as revisions 5 and 6 write it.
     /// The file opens all the same.
+    #[error("its /Perms doesn't match its /P and /EncryptMetadata")]
     Perms,
     /// `/Perms` doesn't decrypt to `adb` by the key the password unwrapped
     /// from `/OE` or `/UE`: one of them is wrong, and nothing says which.
     /// The file opens by that key, when no other password or route gives
     /// one `/Perms` confirms, but what it decrypts may not be plaintext.
+    #[error("its /Perms doesn't confirm the key its /OE or /UE unwraps to")]
     Unconfirmed,
-}
-
-impl fmt::Display for Fault {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Fault::Short { .. } => write!(f, "its AES ciphertext has no whole block past its IV"),
-            Fault::PartBlock { .. } => {
-                write!(
-                    f,
-                    "its AES ciphertext has a part block past its whole blocks"
-                )
-            }
-            Fault::Padding => write!(f, "its AES plaintext isn't padded"),
-            Fault::Method { name } => {
-                write!(f, "its crypt filter's method or name, /{name}, isn't one")
-            }
-            Fault::Key { len } => write!(
-                f,
-                "its crypt filter's AES isn't for the file's key of {len} bytes"
-            ),
-            Fault::Perms => write!(f, "its /Perms doesn't match its /P and /EncryptMetadata"),
-            Fault::Unconfirmed => write!(
-                f,
-                "its /Perms doesn't confirm the key its /OE or /UE unwraps to"
-            ),
-        }
-    }
 }
 
 /// Ciphertext that didn't decrypt cleanly: what decrypted, if anything,
 /// and why it's not clean.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{fault}")]
 pub struct Error {
     /// What decrypted, or none when nothing did and the ciphertext stays.
     pub data: Option<Vec<u8>>,
     /// Why.
     pub fault: Fault,
 }
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.fault)
-    }
-}
-
-impl std::error::Error for Error {}
 
 /// The README's examples, run as doctests.
 #[cfg(all(doctest, feature = "writer"))]

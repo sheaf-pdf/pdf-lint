@@ -115,13 +115,14 @@ impl Default for Layout {
 /// What's wrong with a filter's data, or its parameters. Each says
 /// whether the filter stopped there: when it didn't, what it gave is the
 /// whole of what a reader reads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
     /// A byte the filter doesn't take, at `at` in its input: in
     /// `ASCIIHexDecode` one that's neither a hex digit, white-space nor
     /// `>`, and in `ASCII85Decode` one that's neither `!` to `u`, `z`,
     /// white-space nor `~`. It stopped there.
+    #[error("byte {byte:#04x} at {at} isn't one it takes")]
     Byte {
         /// Where, in the filter's input.
         at: usize,
@@ -131,39 +132,46 @@ pub enum Fault {
     /// The data ends without its end-of-data marker: `>`, `~>`, an LZW
     /// code of 257, or a run-length of 128. It didn't stop: everything was
     /// decoded.
+    #[error("no end-of-data marker")]
     NoEnd,
     /// `~` at `at`, in `ASCII85Decode`, not followed by `>`. It stopped
     /// there: followed by something else, without what was decoded of the
     /// group it's in; at the data's end, with it.
+    #[error("`~` at {at} isn't followed by `>`")]
     BrokenEnd {
         /// Where, in the filter's input.
         at: usize,
     },
     /// `z` at `at`, in `ASCII85Decode`, inside a group. It stopped there.
+    #[error("`z` at {at} is inside a group")]
     InGroup {
         /// Where, in the filter's input.
         at: usize,
     },
     /// A group at `at`, in `ASCII85Decode`, whose value is over 2³² − 1.
     /// It didn't stop: the group is read as its value's low 32 bits.
+    #[error("the group at {at} is over 2^32 - 1")]
     Overflow {
         /// Where the group begins, in the filter's input.
         at: usize,
     },
     /// A last group at `at`, in `ASCII85Decode`, of one character, which
     /// is no bytes. It didn't stop.
+    #[error("the last group, at {at}, is one character")]
     LoneByte {
         /// Where, in the filter's input.
         at: usize,
     },
     /// An LZW code at byte `at` that isn't in the table yet. It stopped
     /// there.
+    #[error("the code at byte {at} isn't in the table")]
     Code {
         /// The byte the code begins in, in the filter's input.
         at: usize,
     },
     /// The LZW table full, 4,096 entries, at byte `at`, with no clear code
     /// to empty it. It stopped there.
+    #[error("the table is full at byte {at}")]
     TableFull {
         /// The byte the code that would add to it begins in, in the
         /// filter's input.
@@ -171,8 +179,10 @@ pub enum Fault {
     },
     /// The data doesn't begin with a zlib header for deflate data without a
     /// preset dictionary. It stopped there, with nothing decoded.
+    #[error("no zlib header")]
     Header,
     /// Deflate data that isn't, at byte `at`. It stopped there.
+    #[error("the deflate data is corrupt at byte {at}")]
     Corrupt {
         /// Where, in the filter's input, as near as can be told: the last
         /// byte the decompressor took.
@@ -181,13 +191,16 @@ pub enum Fault {
     /// The data ends inside what it's decoding: a deflate stream before
     /// its end, a run-length's run. It stopped there, with what was
     /// decoded before.
+    #[error("the data ends early")]
     Truncated,
     /// The zlib data's Adler-32 checksum isn't its decompressed data's. It
     /// didn't stop: everything was decoded, and readers read it so.
+    #[error("the Adler-32 checksum doesn't match")]
     Checksum,
     /// A PNG-predicted row, the `row`th from 0, whose first byte, `tag`,
     /// isn't 0 to 4. It didn't stop: the row is read as predicted by
     /// nothing.
+    #[error("row {row}'s first byte is {tag}, not 0 to 4")]
     RowTag {
         /// Which row, from 0.
         row: usize,
@@ -197,43 +210,23 @@ pub enum Fault {
     /// The predicted data's last row short by `missing` bytes, when it
     /// ends there, or ends early. It didn't stop: the row is read with
     /// zeros for them. A row a fault cut off before is left out.
+    #[error("the last row is {missing} bytes short")]
     PartialRow {
         /// How many bytes the row lacks.
         missing: usize,
     },
     /// A predictor's [`Layout`] that isn't one: no colors or columns, or
     /// bits a sample other than 1, 2, 4, 8 or 16. Nothing was decoded.
+    #[error("its predictor's parameters aren't ones it takes")]
     Parameters,
     /// The filter's output over the limit. It stopped there, with as much
     /// as the limit allows.
+    #[error("its output is over the limit")]
     Limit,
 }
 
-impl fmt::Display for Fault {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Fault::Byte { at, byte } => write!(f, "byte {byte:#04x} at {at} isn't one it takes"),
-            Fault::NoEnd => write!(f, "no end-of-data marker"),
-            Fault::BrokenEnd { at } => write!(f, "`~` at {at} isn't followed by `>`"),
-            Fault::InGroup { at } => write!(f, "`z` at {at} is inside a group"),
-            Fault::Overflow { at } => write!(f, "the group at {at} is over 2^32 - 1"),
-            Fault::LoneByte { at } => write!(f, "the last group, at {at}, is one character"),
-            Fault::Code { at } => write!(f, "the code at byte {at} isn't in the table"),
-            Fault::TableFull { at } => write!(f, "the table is full at byte {at}"),
-            Fault::Header => write!(f, "no zlib header"),
-            Fault::Corrupt { at } => write!(f, "the deflate data is corrupt at byte {at}"),
-            Fault::Truncated => write!(f, "the data ends early"),
-            Fault::Checksum => write!(f, "the Adler-32 checksum doesn't match"),
-            Fault::RowTag { row, tag } => write!(f, "row {row}'s first byte is {tag}, not 0 to 4"),
-            Fault::PartialRow { missing } => write!(f, "the last row is {missing} bytes short"),
-            Fault::Parameters => write!(f, "its predictor's parameters aren't ones it takes"),
-            Fault::Limit => write!(f, "its output is over the limit"),
-        }
-    }
-}
-
 /// Data that didn't decode cleanly: what decoded, and why it's not clean.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub struct Error {
     /// What decoded, through every filter: each given what the one before
     /// it gave, however far that went.
@@ -254,8 +247,6 @@ impl fmt::Display for Error {
         Ok(())
     }
 }
-
-impl std::error::Error for Error {}
 
 /// `data` decoded by `filters` in their order, as a stream's `/Filter`
 /// lists them, no filter's output over `limit` bytes; an LZW or Flate
