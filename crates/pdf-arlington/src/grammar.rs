@@ -275,9 +275,9 @@ pub enum Error {
     /// A table breaks a rule of the model's files.
     #[error("{file}: {}{error}", on_line(.line))]
     Table {
-        /// What the error calls the table's file: its path, or for the
-        /// embedded model its name (`Catalog.tsv`).
-        file: String,
+        /// The table's file: its path, or for the embedded model its name
+        /// (`Catalog.tsv`).
+        file: PathBuf,
         /// The line it's broken on, the header being line 1, when it's a
         /// line's rule.
         line: Option<usize>,
@@ -402,7 +402,7 @@ pub enum TableError {
 /// file, and its text.
 struct File<'a> {
     name: String,
-    label: String,
+    label: PathBuf,
     text: std::borrow::Cow<'a, str>,
 }
 
@@ -416,7 +416,7 @@ impl Grammar {
         EMBEDDED.get_or_init(|| {
             Grammar::from_files(model::TABLES.iter().map(|&(name, text)| File {
                 name: name.to_string(),
-                label: format!("{name}.tsv"),
+                label: format!("{name}.tsv").into(),
                 text: text.into(),
             }))
             .unwrap_or_else(|e| panic!("the Arlington model doesn't read: {e}"))
@@ -450,7 +450,7 @@ impl Grammar {
             })?;
             files.push(File {
                 name: name.to_string(),
-                label: path.display().to_string(),
+                label: path.clone(),
                 text: text.into(),
             });
         }
@@ -1156,7 +1156,7 @@ mod tests {
             let broken = format!("{catalog}{row}\n");
             let files = model::TABLES.iter().map(|&(name, text)| File {
                 name: name.to_string(),
-                label: format!("{name}.tsv"),
+                label: format!("{name}.tsv").into(),
                 text: if name == "Catalog" {
                     broken.as_str()
                 } else {
@@ -1194,7 +1194,7 @@ mod tests {
     fn one_table(text: &str) -> Option<String> {
         let file = File {
             name: "T".to_string(),
-            label: "T.tsv".to_string(),
+            label: "T.tsv".into(),
             text: text.into(),
         };
         Grammar::from_files([file]).err().map(|e| format!("{e:#}"))

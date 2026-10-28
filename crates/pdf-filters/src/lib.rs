@@ -416,10 +416,7 @@ mod tests {
         // checksum's last byte gone.
         let error = decode(&hex.as_bytes()[..hex.len() - 2], &chain, 100).unwrap_err();
         assert_eq!(error.data, b"chained");
-        assert_eq!(
-            error.faults,
-            [(0, super::Fault::NoEnd), (1, super::Fault::Truncated)]
-        );
+        assert_eq!(error.faults, [(0, Fault::NoEnd), (1, Fault::Truncated)]);
     }
 
     /// Each fault says what's wrong, word for word.

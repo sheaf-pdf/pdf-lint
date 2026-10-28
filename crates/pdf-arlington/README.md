@@ -31,11 +31,10 @@ assert_eq!(multiple, "fn:Eval((@Rotate mod 90)==0)");
 // That predicate, evaluated on a page where the row sits. The file the
 // page is in, and what a reference resolves to (here, nothing), are the
 // caller's to give: once a file, every row it has evaluated in it.
-let holds = |page: &Object| {
-    let trailer = Dict::new();
-    let file = FileCx::new(&trailer, Version::new(2, 0), &|_: ObjectId| None);
-    predicate::holds_fully(multiple, &file.at(page, At::Key(b"Rotate")))
-};
+let trailer = Dict::new();
+let resolve = |_: ObjectId| None;
+let file = FileCx::new(&trailer, Version::new(2, 0), &resolve);
+let holds = |page: &Object| predicate::holds_fully(multiple, &file.at(page, At::Key(b"Rotate")));
 assert_eq!(holds(&dict! { "Type" => "Page", "Rotate" => 180 }.into()), Truth::True);
 assert_eq!(holds(&dict! { "Type" => "Page", "Rotate" => 45 }.into()), Truth::False);
 ```

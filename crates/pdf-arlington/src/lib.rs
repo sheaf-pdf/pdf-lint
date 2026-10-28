@@ -21,8 +21,9 @@
 //! - **The predicates** ([`predicate`]): the language in the cells parsed,
 //!   and evaluated on an object where it sits ([`Cx`], a row of a file's
 //!   [`FileCx`]), what can't be told said so, never guessed.
-//! - **Extensions** ([`extension`]): those a file declares, from its
-//!   catalog and its XMP metadata, and those the model names.
+//! - **Extensions:** those a file declares, from its catalog and its XMP
+//!   metadata ([`extension`]), and those a model names
+//!   ([`Grammar::extensions`]).
 
 pub mod extension;
 pub mod grammar;

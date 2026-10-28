@@ -293,6 +293,7 @@ impl<'a> FileCx<'a> {
     }
 
     /// The file's length in bytes, when the reader knows (`fn:FileSize`).
+    #[must_use = "it gives the FileCx back, with the length"]
     pub fn size(mut self, size: Option<usize>) -> FileCx<'a> {
         self.size = size;
         self
@@ -300,6 +301,7 @@ impl<'a> FileCx<'a> {
 
     /// The extensions it's checked under, as the model names them
     /// (`fn:Extension`).
+    #[must_use = "it gives the FileCx back, with the extensions"]
     pub fn extensions(mut self, extensions: &'a BTreeSet<String>) -> FileCx<'a> {
         self.extensions = extensions;
         self
@@ -358,6 +360,7 @@ pub struct Cx<'c, 'a> {
 impl<'c, 'a> Cx<'c, 'a> {
     /// The objects the walk came through to the container, nearest first
     /// (`parent::`).
+    #[must_use = "a Cx is a copy: it gives a new one, with the parents"]
     pub fn parents(mut self, parents: &'c [&'c Object]) -> Cx<'c, 'a> {
         self.parents = parents;
         self
@@ -366,6 +369,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// The container's table, whose DefaultValues stand in for a key the
     /// container lacks or has null, read as `@Key` (`@ImageMask`): given
     /// for SpecialCase and PossibleValues, none for the other columns.
+    #[must_use = "a Cx is a copy: it gives a new one, with the defaults"]
     pub fn defaults(mut self, table: Option<&'c Table>) -> Cx<'c, 'a> {
         self.defaults = table;
         self
@@ -378,6 +382,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// memory, or edited, which has no span, is still known, and one whose
     /// bytes are another object's too, as an object stream's header can
     /// start two of its objects at one offset, is told apart from it.
+    #[must_use = "a Cx is a copy: it gives a new one, with the number"]
     pub fn id(mut self, id: ObjectId) -> Cx<'c, 'a> {
         self.id = Some(id);
         self
@@ -822,7 +827,8 @@ pub fn parse(text: &str) -> Result<Expr, Error> {
 }
 
 /// Why a predicate doesn't parse ([`parse`]): each says the predicate as
-/// written, then what stopped the parser and where, a byte offset in it.
+/// written, then what stopped the parser, and where when the parser knows:
+/// a byte offset in it, or the text it stopped at.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -1264,7 +1270,7 @@ fn deref<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Option<&'c Object> {
     None
 }
 
-/// How the object `o` comes to, its references followed as [`deref`]
+/// How the object `o` comes to, its references followed as [`deref()`]
 /// follows them, is [`Known`]: by where it was written, and the number of
 /// the last of them, none when `o` is written directly.
 fn deref_known<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Option<Known> {
@@ -1548,7 +1554,7 @@ fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
 
 /// The number of the object at the end of `p` when its own entry, the
 /// last on the way, is a reference: the last of the references that
-/// entry starts, as [`deref`] follows them, never one followed before it.
+/// entry starts, as [`deref()`] follows them, never one followed before it.
 /// None when the entry is written directly, `p` names none (the container
 /// itself, or a parent), or doesn't reach one.
 fn entry_id(p: &Path, cx: &Cx) -> Option<ObjectId> {
