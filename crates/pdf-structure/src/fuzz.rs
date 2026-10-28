@@ -1,63 +1,139 @@
 //! What the fuzz target checks, which a unit test checks too: on any
 //! bytes, a file is read without a panic, in the same way twice, with
-//! every place the reading gives inside what was read; and so are its
-//! revision before an incremental update, and the file opened by an
-//! owner's password. It's compiled only for tests and under cargo-fuzz's
-//! `--cfg fuzzing`, and only reads.
+//! every place the reading gives inside what was read; read on demand, in
+//! an order the input chooses, it's the whole read, so long as no stream
+//! either decodes reaches the budget; and so are its revision before an
+//! incremental update, and the file opened by an owner's password. It
+//! reads under small limits, so that a run tries more inputs. It's
+//! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`, and
+//! only reads.
 
 use pdf_objects::object::{ObjectId, Span, Value};
 
-use crate::bytes;
+use crate::bytes::{Options, Reading, Whole, XrefEntry};
 use crate::source::Document;
 
 /// The owner's password the fuzz target opens a file by, when its input
 /// says to: the one the unit test's encrypted files are written with.
 const OWNER: &[u8] = b"owner";
 
+/// The limits the fuzz target reads under: a stream decodes to at most
+/// 1 MiB, and a reading's streams to 4 MiB, so that a run tries more
+/// inputs.
+pub fn options() -> Options {
+    let mut options = Options::DEFAULT;
+    options.limits.stream = 1 << 20;
+    options.limits.budget = 4 << 20;
+    options
+}
+
 /// The fuzz target's body: `data`'s first two bytes choose how the file
-/// after them is read, and the rest is the file. Read by [`bytes::read`],
-/// it's the same twice, and every place the reading gives is inside what
-/// was read: each object's, each value's and key's in it, each stream's
-/// data's, the trailer's and each warning's, in the file or in the
-/// decoded data of the object stream it names, which the reading keeps.
-/// When the file has an incremental update, so is the revision before it
-/// ([`bytes::read_from`]); and with the choice's lowest bit set, so is the
-/// file opened by the owner's password `owner` ([`bytes::read_opened`]),
+/// after them is read, and the rest is the file. Read whole under
+/// [`options`], it's the same twice, and every place the reading gives is
+/// inside what was read: each object's, each value's and key's in it, each
+/// stream's data's, the trailer's and each warning's, in the file or in
+/// the decoded data of the object stream it names, which the reading
+/// keeps. Read on demand, its objects asked for in an order the choice's
+/// next bits give, some read unkept first, each the object and record it's
+/// kept as, it's the whole read, when neither reading's decoding reached
+/// the budget. When the file has an incremental update, so is the
+/// revision before it ([`Options::section`]); and with the choice's
+/// lowest bit set, so is the file opened by the owner's password `owner`,
 /// and its revision before an update. Panics on a broken promise.
 pub fn read_file(data: &[u8]) {
     let (choice, file) = match data {
         [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
         _ => (0, data),
     };
-    alike(file, |section| match section {
-        None => bytes::read(file),
-        Some(section) => bytes::read_from(file, section),
-    });
+    alike(file, &[], choice);
     if choice & 1 != 0 {
-        let passwords = &[OWNER];
-        alike(file, |section| match section {
-            None => bytes::read_opened(file, passwords),
-            Some(section) => bytes::read_from_opened(file, passwords, section),
-        });
+        alike(file, &[OWNER], choice);
     }
 }
 
-/// `read` of the whole file (`None`) twice, the same each time, every
-/// place it gives inside `file`'s bytes or what it decoded; and when the
-/// file has an update, the same of the revision before it (`Some` of where
-/// that revision's section starts).
-fn alike(file: &[u8], read: impl Fn(Option<usize>) -> Document) {
-    let doc = read(None);
-    assert_eq!(doc, read(None), "a reading is the same twice");
-    within(file, &doc);
+/// `file` read whole under [`options`], opened by `passwords`, as of the
+/// section at `section` when there's one.
+fn whole(file: &[u8], passwords: &[&[u8]], section: Option<usize>) -> Whole {
+    let mut options = options();
+    options.section = section;
+    Reading::in_memory(file, passwords, &options, true, None).whole(None)
+}
+
+/// The file read whole twice, the same each time, every place it gives
+/// inside `file`'s bytes or what it decoded, and read on demand in the
+/// order `choice` gives, the same; and when the file has an update, the
+/// same of the revision before it.
+fn alike(file: &[u8], passwords: &[&[u8]], choice: u16) {
+    let read = whole(file, passwords, None);
+    let doc = &read.document;
+    assert_eq!(
+        *doc,
+        whole(file, passwords, None).document,
+        "a reading is the same twice"
+    );
+    within(file, doc);
+    on_demand(file, passwords, None, &read, choice);
     if let Some(update) = &doc.update {
-        let previous = read(Some(update.previous));
+        let section = Some(update.previous);
+        let previous = whole(file, passwords, section);
         assert_eq!(
-            previous,
-            read(Some(update.previous)),
+            previous.document,
+            whole(file, passwords, section).document,
             "the revision before an update reads the same twice"
         );
-        within(file, &previous);
+        within(file, &previous.document);
+        on_demand(file, passwords, section, &previous, choice);
+    }
+}
+
+/// The file, as of `section`, opened by `passwords`, read on demand: its
+/// objects asked for in the order `choice`'s bits from the second give (by
+/// number, from the last, from the middle out, or the objects in object
+/// streams first), every third read unkept first, which gives the object
+/// and record it's then kept as; then read whole, it's `whole`'s, when
+/// neither reached the budget.
+fn on_demand(file: &[u8], passwords: &[&[u8]], section: Option<usize>, whole: &Whole, choice: u16) {
+    let mut options = options();
+    options.section = section;
+    let reading = Reading::in_memory(file, passwords, &options, true, None);
+    let mut ids: Vec<ObjectId> = reading.ids().collect();
+    match (choice >> 1) & 3 {
+        0 => {}
+        1 => ids.reverse(),
+        2 => {
+            let half = ids.len() / 2;
+            ids.rotate_left(half);
+        }
+        _ => {
+            let members: Vec<u32> = (reading.entries())
+                .filter(|(_, _, entry)| matches!(entry, XrefEntry::Compressed { .. }))
+                .map(|(n, _, _)| n)
+                .collect();
+            ids.sort_by_key(|id| members.binary_search(&id.0).is_err());
+        }
+    }
+    for (i, &id) in ids.iter().enumerate() {
+        let unkept = (i % 3 == 0).then(|| reading.object_unkept(id));
+        let got = reading.get(id);
+        if let Some(unkept) = unkept {
+            match (unkept, got) {
+                (Ok((object, record)), Ok(kept)) => {
+                    assert_eq!(object, *kept, "{id:?} read unkept is the object kept");
+                    assert_eq!(Some(&record), reading.record(id), "{id:?}'s record");
+                }
+                (Err(unkept), Err(kept)) => {
+                    assert_eq!(unkept.to_string(), kept.to_string(), "{id:?}'s failure");
+                }
+                (unkept, got) => panic!("{id:?} read unkept as {unkept:?}, and kept as {got:?}"),
+            }
+        }
+    }
+    let lazily = reading.whole(None);
+    if !whole.reached && !lazily.reached {
+        assert_eq!(
+            lazily.document, whole.document,
+            "a reading on demand is the whole read"
+        );
     }
 }
 
@@ -120,6 +196,7 @@ mod tests {
     use pdf_objects::object::{Dict, Object};
 
     use super::*;
+    use crate::bytes;
     use crate::source::{Encryption, Source};
     use crate::write::{self, Body, Xref};
 

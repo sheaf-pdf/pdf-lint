@@ -1,6 +1,7 @@
 //! A file as a reader read it: a [`Source`], which any reader can
 //! implement, and [`Document`], an owned one that readers fill and tests
-//! build.
+//! build; and what the bytes reader records of where it read each object
+//! ([`Record`]) and of the file as written ([`Facts`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -121,6 +122,101 @@ pub struct Document {
     pub metadata: Option<Vec<u8>>,
     /// Whether the file is encrypted, and if it is, whether it opened.
     pub encryption: Encryption,
+    /// Where each object that reads was read from, by the bytes reader;
+    /// none from another.
+    pub records: BTreeMap<ObjectId, Record>,
+    /// What the file's cross-reference sections and header say of it, as
+    /// written, by the bytes reader; the defaults from another.
+    pub facts: Facts,
+}
+
+/// Where an object was read from, which the bytes reader records when it
+/// first reads it ([`crate::bytes::Reading::record`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Record {
+    /// Where it was found.
+    pub origin: Origin,
+    /// Its bytes: from its `n g obj` to past its `endobj`, or to where it
+    /// ends without one; or, for an object in an object stream, its value
+    /// in the stream's decoded data.
+    pub extent: Span,
+    /// Whether `endobj` follows it. An object in an object stream has none.
+    pub endobj: bool,
+    /// A stream's data, as it was read: none for an object that isn't a
+    /// stream.
+    pub data: Option<Extent>,
+}
+
+/// Where an object was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Origin {
+    /// At the offset a cross-reference section gives.
+    File,
+    /// At an offset found by scanning the file, as its sections don't read
+    /// ([`Trailer::unwritten`]).
+    Recovered,
+    /// In object stream `stream`'s decoded data, the `index`th of its
+    /// objects (ISO 32000-2, 7.5.7).
+    Stream {
+        /// The object stream.
+        stream: ObjectId,
+        /// Which of the stream's objects it is, from 0.
+        index: u32,
+    },
+}
+
+/// Which bytes a stream's data is, and how the reader chose them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Extent {
+    /// Where the data is, as the stream's [`Data::At`](pdf_objects::object::Data::At) has it.
+    pub at: Span,
+    /// Whether it's as long as the stream's `/Length` says, which ended at
+    /// `endstream`; else it runs up to `endstream`, found by scanning.
+    pub declared: bool,
+    /// Whether the stream's `/Length` is a reference to another object.
+    pub indirect_length: bool,
+}
+
+/// What a file's header and cross-reference sections say of it, as
+/// written. Whether its sections read is [`Trailer::unwritten`]'s being
+/// none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Facts {
+    /// Where `%PDF-` starts, when the file has it within its first 1024
+    /// bytes.
+    pub header: Option<usize>,
+    /// The newest cross-reference section read: where it starts, and how
+    /// it's written; none when the file was scanned.
+    pub newest: Option<(usize, XrefKind)>,
+    /// How many cross-reference sections were read along `/Prev`: none
+    /// when the file was scanned.
+    pub sections: usize,
+    /// Whether a section is a hybrid file's: a table whose trailer gives a
+    /// cross-reference stream's offset by `/XRefStm` (ISO 32000-2, 7.5.8.4).
+    pub hybrid: bool,
+    /// The largest number of a cross-reference stream read.
+    pub max_stream: Option<u32>,
+    /// Whether a linearization holds (ISO 32000-2, Annex F): the file's
+    /// first object, whole within the 1024 bytes after where `%PDF-`
+    /// starts, is a dictionary whose `/Linearized` is 1 (or a real whose
+    /// floor is 1, as qpdf reads it) and whose `/L`, a direct integer, is
+    /// the file's length counted from there. An update appended after it,
+    /// which changes the length, voids it. Its hint tables aren't read.
+    pub linearized: bool,
+}
+
+/// How a cross-reference section is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum XrefKind {
+    /// A table, after `xref` (ISO 32000-2, 7.5.4).
+    Table,
+    /// A cross-reference stream (7.5.8).
+    Stream,
 }
 
 /// Whether a file is encrypted (its trailer's `/Encrypt`), and if it is,
@@ -298,6 +394,8 @@ impl Document {
             size: None,
             metadata: None,
             encryption: Encryption::None,
+            records: BTreeMap::new(),
+            facts: Facts::default(),
         }
     }
 
@@ -467,5 +565,7 @@ mod tests {
         shared::<Update>();
         shared::<Encryption>();
         shared::<Unread>();
+        shared::<Record>();
+        shared::<Facts>();
     }
 }

@@ -10,13 +10,18 @@
 //!   read ([`Unread`]); the [`Trailer`], and why it isn't the newest
 //!   section's when it isn't; the header's version; and the file's newest
 //!   incremental [`Update`].
+//! - **Or read on demand:** a [`Reading`], opened, then each object read
+//!   when it's first asked for, kept or not, from any thread, each object
+//!   stream decoded once; read whole, it's the [`Document`], by the same
+//!   code. Where each object was read from is a [`Record`], and what the
+//!   file's header and sections say of it, as written, its [`Facts`].
 //! - **Every choice said:** what the reader had to choose how to read is a
 //!   [`Warning`], with its object and where.
 //! - **Object streams and cross-reference streams decoded** from their own
 //!   data, through pdf-filters, under limits on what a stream and a
-//!   reading decode to ([`bytes::STREAM`], [`bytes::BUDGET`]); the objects
-//!   read from an object stream placed in its decoded data, which the
-//!   [`Document`] keeps.
+//!   reading decode to, which a caller sets ([`Limits`], in [`Options`]);
+//!   the objects read from an object stream placed in its decoded data,
+//!   which the [`Document`] keeps.
 //! - **Encrypted files opened** with the passwords given
 //!   ([`bytes::read_opened`]), through pdf-crypt's standard security
 //!   handler: object streams decrypted before they're decoded, strings
@@ -46,8 +51,12 @@ pub mod source;
 #[doc(hidden)]
 pub mod write;
 
+pub use bytes::{ByteSource, Limits, Options, Reading};
 pub use pdf_objects;
-pub use source::{Document, Encryption, Source, Trailer, Unread, Update, Warning};
+pub use source::{
+    Document, Encryption, Extent, Facts, Origin, Record, Source, Trailer, Unread, Update, Warning,
+    XrefKind,
+};
 
 /// The README's examples, run as doctests.
 #[cfg(doctest)]

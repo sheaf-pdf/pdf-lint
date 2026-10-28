@@ -163,6 +163,8 @@ impl Qpdf {
             size: (std::fs::metadata(&self.file).ok()).and_then(|m| usize::try_from(m.len()).ok()),
             metadata: None,
             encryption: Default::default(),
+            records: BTreeMap::new(),
+            facts: Default::default(),
         })
     }
 

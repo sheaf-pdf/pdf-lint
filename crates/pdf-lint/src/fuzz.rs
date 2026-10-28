@@ -1,7 +1,8 @@
 //! What the fuzz target checks, which a unit test checks too: on any
 //! bytes, a file is read and checked without a panic, in the same way
 //! twice, with every finding's bytes inside what was read; and set against
-//! its previous revision, when it has an incremental update. It's
+//! its previous revision, when it has an incremental update. It reads
+//! under small limits ([`options`]), so that a run tries more inputs. It's
 //! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`, with
 //! [`seeds`], files for the fuzzer to begin from.
 
@@ -14,14 +15,34 @@ use crate::source::{Document, Source};
 use crate::version::Version;
 use pdf_crypt::writer::{Kind, Settings};
 
+/// The limits the fuzz target reads under: a stream decodes to at most
+/// 1 MiB, and a reading's streams to 4 MiB.
+pub fn options() -> bytes::Options {
+    let mut options = bytes::Options::DEFAULT;
+    options.limits.stream = 1 << 20;
+    options.limits.budget = 4 << 20;
+    options
+}
+
+/// `file` read whole under [`options`], as of the cross-reference section
+/// at `section` when there's one.
+fn read(file: &[u8], section: Option<usize>) -> Document {
+    let mut options = options();
+    options.section = section;
+    bytes::Reading::open(file, &[], &options)
+        .and_then(bytes::Reading::into_document)
+        .expect("a file in memory reads")
+}
+
 /// The fuzz target's body: `data`'s first two bytes choose how the file
-/// after them is held and checked ([`setting`]), and the rest is the file.
+/// after them is held and checked ([`setting`]), and the rest is the file,
+/// read under [`options`].
 pub fn check_file(data: &[u8]) {
     let (choice, file) = match data {
         [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
         _ => (0, data),
     };
-    let doc = bytes::read(file);
+    let doc = read(file, None);
     let (hold, options) = setting(choice, &doc);
     let report = check(&doc, &hold, &options);
     assert_eq!(
@@ -40,7 +61,7 @@ pub fn check_file(data: &[u8]) {
     let _ = report.to_string();
     let _ = report.objects();
     if let Some(update) = &doc.update {
-        let previous = bytes::read_from(file, update.previous);
+        let previous = read(file, Some(update.previous));
         let options = Options {
             paths: true,
             ..options
