@@ -868,6 +868,8 @@ mod tests {
         shared::<Span>();
         shared::<crate::parse::Limits>();
         shared::<crate::parse::Parser<'_>>();
+        shared::<crate::parse::StreamHead<'_>>();
+        shared::<crate::parse::Body<'_>>();
         shared::<crate::parse::Error>();
         shared::<crate::serialize::Error>();
     }

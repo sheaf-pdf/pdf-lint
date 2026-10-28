@@ -26,7 +26,7 @@
 //! faults only once it doesn't come back short.
 
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use pdf_tokenizer::decode::How;
 use pdf_tokenizer::{Kind, Token, Tokenizer};
@@ -446,7 +446,7 @@ impl<'a> Parser<'a> {
         sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Result<Object, Error> {
         let mut call = Call::of(self.data);
-        call.touched = head.touched.get();
+        call.touched = head.touched.load(Ordering::Relaxed);
         let stream = self.read_stream(head, data, &mut call, sink);
         self.settled(&call)?;
         let (object, offset) = stream?;
@@ -555,7 +555,7 @@ impl<'a> Parser<'a> {
                     data: self.data,
                     base: self.base,
                     stream: self.stream,
-                    touched: Cell::new(false),
+                    touched: AtomicBool::new(false),
                 }));
             }
             (other, _) => {
@@ -787,8 +787,8 @@ pub enum Body<'a> {
 ///
 /// It's one parse's, borrowing the data the parser reads, and it remembers
 /// when an extent ran to the end of a window ([`Parser::window`]) for
-/// [`Parser::stream`], in a [`Cell`]: so it's `Send`, but not `Sync`.
-#[derive(Debug, Clone)]
+/// [`Parser::stream`].
+#[derive(Debug)]
 pub struct StreamHead<'a> {
     id: ObjectId,
     dict: Dict,
@@ -802,8 +802,25 @@ pub struct StreamHead<'a> {
     base: usize,
     stream: Option<ObjectId>,
     /// Whether an extent ran to `data`'s end, where more of the file could
-    /// change it.
-    touched: Cell<bool>,
+    /// change it: an atomic, so that a head can be shared, though nothing
+    /// orders it with anything else.
+    touched: AtomicBool,
+}
+
+impl Clone for StreamHead<'_> {
+    fn clone(&self) -> Self {
+        StreamHead {
+            id: self.id,
+            dict: self.dict.clone(),
+            dict_at: self.dict_at,
+            keyword: self.keyword,
+            start: self.start,
+            data: self.data,
+            base: self.base,
+            stream: self.stream,
+            touched: AtomicBool::new(self.touched.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl StreamHead<'_> {
@@ -828,13 +845,13 @@ impl StreamHead<'_> {
     pub fn declared(&self, length: usize) -> Option<Span> {
         let end = self.start.checked_add(length)?;
         if end > self.data.len() {
-            self.touched.set(true);
+            self.touched.store(true, Ordering::Relaxed);
             return None;
         }
         let mut call = Call::of(self.data);
         let after = call.significant(&mut Tokenizer::at(self.data, end));
         if call.touched {
-            self.touched.set(true);
+            self.touched.store(true, Ordering::Relaxed);
         }
         is_keyword(after.as_ref(), b"endstream").then(|| self.span(self.start, end))
     }
@@ -844,7 +861,7 @@ impl StreamHead<'_> {
     pub fn scanned(&self) -> Span {
         let data = Tokenizer::at(self.data, self.start).data_until(b"endstream");
         if data.end() == self.data.len() {
-            self.touched.set(true);
+            self.touched.store(true, Ordering::Relaxed);
         }
         self.span(data.start, data.end())
     }
