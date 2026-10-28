@@ -54,48 +54,75 @@ The library has the rest: `Report::since` matches by number and `Report::by_path
 ## The command line
 
 ```text
-pdf-lint [OPTIONS] FILE...
+Checks each FILE against the Arlington PDF Model, reading it from its
+bytes, and prints each finding with the bytes it's at. It decodes object
+streams and cross-reference streams, and decrypts what's encrypted,
+itself.
 
-  --hold <FILE>   hold only the objects FILE names: `12 0 built`, `3 0 merged`
-  --built         hold every object as built (by default, as merged)
-  --exempt <FILE> keys a built object may have though the model doesn't
-                  list them: `/MyKey`, or `/My*` for every key it begins
-  --unlisted <W>  which held objects a key the model doesn't list is a
-                  finding in: built (the default), all, or never
-  --deprecations  find what the version checked at deprecates (by
-                  default, counted only)
-  --extensions <E>
-                  check each FILE under these extensions too: the
-                  model's names for them, a comma between
-  --last-update   hold only what the newest incremental update wrote, and
-                  leave out what a rewritten object already had before it
-  --baseline <FILE>
-                  leave out the findings FILE, the file each was written
-                  from, already had: by object for an update of it, by
-                  path for a rewrite
-  --pdf-version <V>
-                  check each FILE as PDF V, 1.0 to 1.7 or 2.0, and what
-                  it's set against as V too
-  --model <DIR>   check against DIR, a checkout of the model's
-                  tsv/latest as it is, not the embedded one, which has
-                  corrections and additions
-  --one-table     check each object as one table, as TestGrammar does
-                  (by default, a field merged with its widget as both)
-  --allow <TSV>   leave out the findings TSV allows: a # header, then
-                  table, key, rule, file, version and reason, tab apart
-  --full          print the whole report: tables, checks not made, keys
-                  the model doesn't list
-  --password <PW> the files' password, user or owner, when it isn't empty:
-                  tried as UTF-8, then in PDFDocEncoding, WinAnsiEncoding
-                  and MacRomanEncoding
-  --jobs <N>      check N files at once (by default, as many as there are
-                  CPUs); the report is in the files' order all the same
-  --format <F>    text (the default), or json: a line of JSON for each file
-  --version       print the version, and the model's commit, corrections,
-                  additions and hash
+Usage: pdf-lint [OPTIONS] <FILE>...
+
+Arguments:
+  <FILE>...  a file to check; - is standard input
+
+Options:
+      --hold <FILE>      hold only the objects FILE names, a line each:
+                         `12 0 built` or `3 0 merged`
+      --built            hold every object as built, so that a key the model
+                         doesn't list is a finding (by default, as merged)
+      --exempt <FILE>    keys a built object may have though the model doesn't
+                         list them, a name a line: `/MyKey`, or `/My*` for every
+                         key it begins
+      --unlisted <W>     which held objects a key the model doesn't list is a
+                         finding in: built (the default), all, or never; it's
+                         counted in any
+      --deprecations     find what the version checked at deprecates: a key, a
+                         type or a value (by default, counted only)
+      --extensions <E>   check each FILE under these extensions too, besides
+                         those it declares: the model's names for them, a comma
+                         between (Malforms,AAPL)
+      --last-update      hold only the objects the newest incremental update
+                         wrote: those it rewrote as merged, new ones as built;
+                         and leave out what a rewritten object, or the trailer,
+                         already had in the revision it updates
+      --baseline <FILE>  leave out the findings FILE, the file each FILE was
+                         written from, already had: an incremental update of it
+                         object by object, a rewrite of it by where each finding
+                         is, or, where FILE has nothing there, anywhere in it
+      --pdf-version <V>  check each FILE as PDF V, 1.0 to 1.7 or 2.0, not as
+                         the version its header and catalog give, and what it's
+                         set against, a baseline or the revision before an
+                         update, as V too
+      --model <DIR>      check against the tables in DIR, a checkout of the
+                         Arlington model's tsv/latest, as they are, not the
+                         embedded ones, whose cells that contradict ISO 32000-2
+                         are corrected
+      --one-table        check each object as one table, as TestGrammar does:
+                         a field and its widget merged in one dictionary as
+                         one of the two (by default, as both), and a key
+                         unlisted by the first table that reaches an object
+                         though another that does lists it
+      --allow <TSV>      leave out the findings TSV allows: a # header, then
+                         table, key, rule, file, version and reason, tab apart;
+                         a version, as the file is checked as
+      --full             print the whole report: tables, checks not made, keys
+                         the model doesn't list
+      --password <PW>    the files' password, user or owner, when it isn't
+                         empty: tried as UTF-8, then in PDFDocEncoding,
+                         WinAnsiEncoding and MacRomanEncoding
+      --jobs <N>         check N files at once (by default, as many as there
+                         are CPUs); the report is in the files' order all the
+                         same
+      --format <F>       text (the default), or json: a line of JSON for each
+                         file, with its findings and the whole report's counts
+  -V, --version          print the version, and the model's commit,
+                         corrections, additions and hash
+  -h, --help             print this
+
+It exits 0 when every file is clean, 1 when there are findings, and 2
+when a file can't be read or the command line is wrong.
 ```
 
-It exits 0 when every file is clean, 1 when there are findings, and 2 when a file can't be read or the command line is wrong; a file that can't be read doesn't stop the others being checked. An encrypted file that won't open with the password given, none or `--password`'s, is one that can't be read, and says so: what its object streams hold would be missing, and its strings ciphertext. `--password` is tried as the owner's and the user's, as typed (UTF-8, which revisions 5 and 6 take), then in each single-byte encoding that has every character of it, as a writer may have set it for revisions 2 to 4; the empty password isn't tried once one is given. A file that encrypts only its embedded files (its strings and streams `/Identity`) needs none. One whose security handler the reader can't open (the public-key handler, or a dictionary the standard handler doesn't take) is checked with its strings ciphertext and its object streams unread, a `reader` finding saying why. A FILE of `-` is standard input, named `-` in the report and in an allowance. A finding in an object stream is printed with its bytes from the stream's decoded data. With `--pdf-version`, the summary says the version a file was checked as beside its own, and an allowance's version is matched against the one it was checked as.
+A file that can't be read doesn't stop the others being checked. An encrypted file that won't open with the password given, none or `--password`'s, is one that can't be read, and says so: what its object streams hold would be missing, and its strings ciphertext. `--password` is tried as the owner's and the user's, as typed (UTF-8, which revisions 5 and 6 take), then in each single-byte encoding that has every character of it, as a writer may have set it for revisions 2 to 4; the empty password isn't tried once one is given. A file that encrypts only its embedded files (its strings and streams `/Identity`) needs none. One whose security handler the reader can't open (the public-key handler, or a dictionary the standard handler doesn't take) is checked with its strings ciphertext and its object streams unread, a `reader` finding saying why. A FILE of `-` is standard input, named `-` in the report and in an allowance. A finding in an object stream is printed with its bytes from the stream's decoded data. With `--pdf-version`, the summary says the version a file was checked as beside its own, and an allowance's version is matched against the one it was checked as.
 
 With `--format json`, each file's report is a line of JSON. Every line says which version of pdf-lint wrote it and against which model, so a report can always be read against what made it. It has:
 

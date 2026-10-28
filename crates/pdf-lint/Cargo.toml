@@ -18,6 +18,10 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 [dependencies]
 # The command line's, main.rs's alone: the library's errors are its own.
 anyhow = "1"
+# The command line's too: its arguments, their errors and the help, plain,
+# without colour and without wrapping, so nothing asks the terminal; the
+# help's lines are broken by hand.
+clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
 pdf-arlington = { path = "../pdf-arlington", version = "0.1" }
 pdf-crypt = { path = "../pdf-crypt", version = "0.1" }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }

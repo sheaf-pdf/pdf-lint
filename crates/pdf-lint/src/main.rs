@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 
 use anyhow::{Context, Result, bail};
+use clap::builder::{OsStringValueParser, TypedValueParser};
+use clap::error::ErrorKind;
+use clap::{ArgAction, CommandFactory, Parser};
 use pdf_lint::{
     Allowances, Class, Document, Encryption, Exempt, Finding, Grammar, Hold, Made, Options, Report,
     Span, UnlistedIn, Version, bytes, check, file_version, text, use_model,
@@ -20,74 +23,231 @@ use pdf_lint::{
 use serde::Serialize;
 use serde_json::ser::{CharEscape, CompactFormatter, Formatter};
 
-const USAGE: &str = "\
-usage: pdf-lint [OPTIONS] FILE...
-
+/// What `--help` says before the usage. clap wraps nothing, so this and
+/// each option's help are broken by hand, within 80 columns.
+const ABOUT: &str = "\
 Checks each FILE against the Arlington PDF Model, reading it from its
-bytes, and prints each finding with the bytes it's at; a FILE of - is
-standard input. It decodes object streams and cross-reference streams,
-and decrypts what's encrypted, itself.
+bytes, and prints each finding with the bytes it's at. It decodes object
+streams and cross-reference streams, and decrypts what's encrypted,
+itself.";
 
-  --hold <FILE>   hold only the objects FILE names, a line each:
-                  `12 0 built` or `3 0 merged`
-  --built         hold every object as built, so that a key the model
-                  doesn't list is a finding (by default, as merged)
-  --exempt <FILE> keys a built object may have though the model doesn't
-                  list them, a name a line: `/MyKey`, or `/My*` for every
-                  key it begins
-  --unlisted <W>  which held objects a key the model doesn't list is a
-                  finding in: built (the default), all, or never; it's
-                  counted in any
-  --deprecations  find what the version checked at deprecates: a key, a
-                  type or a value (by default, counted only)
-  --extensions <E>
-                  check each FILE under these extensions too, besides
-                  those it declares: the model's names for them, a comma
-                  between (Malforms,AAPL)
-  --last-update   hold only the objects the newest incremental update
-                  wrote: those it rewrote as merged, new ones as built;
-                  and leave out what a rewritten object, or the trailer,
-                  already had in the revision it updates
-  --baseline <FILE>
-                  leave out the findings FILE, the file each FILE was
-                  written from, already had: an incremental update of it
-                  object by object, a rewrite of it by where each finding
-                  is, or, where FILE has nothing there, anywhere in it
-  --pdf-version <V>
-                  check each FILE as PDF V, 1.0 to 1.7 or 2.0, not as
-                  the version its header and catalog give, and what it's
-                  set against, a baseline or the revision before an
-                  update, as V too
-  --model <DIR>   check against the tables in DIR, a checkout of the
-                  Arlington model's tsv/latest, as they are, not the
-                  embedded ones, whose cells that contradict ISO 32000-2
-                  are corrected
-  --one-table     check each object as one table, as TestGrammar does:
-                  a field and its widget merged in one dictionary as
-                  one of the two (by default, as both), and a key
-                  unlisted by the first table that reaches an object
-                  though another that does lists it
-  --allow <TSV>   leave out the findings TSV allows: a # header, then
-                  table, key, rule, file, version and reason, tab apart;
-                  a version, as the file is checked as
-  --full          print the whole report: tables, checks not made, keys
-                  the model doesn't list
-  --password <PW> the files' password, user or owner, when it isn't empty:
-                  tried as UTF-8, then in PDFDocEncoding, WinAnsiEncoding
-                  and MacRomanEncoding
-  --jobs <N>      check N files at once (by default, as many as there are
-                  CPUs); the report is in the files' order all the same
-  --format <F>    text (the default), or json: a line of JSON for each
-                  file, with its findings and the whole report's counts
-  --version       print the version, and the model's commit, corrections,
-                  additions and hash
-  -h, --help      print this
-
+/// What `--help` says after the options.
+const EXITS: &str = "\
 It exits 0 when every file is clean, 1 when there are findings, and 2
 when a file can't be read or the command line is wrong.";
 
 /// How many bytes of a finding's place its line shows.
 const SHOWN: usize = 96;
+
+/// The command line as clap reads it: each option takes the next word as
+/// its value, whatever it begins with, the last of one given twice wins,
+/// and files go anywhere among the options.
+#[derive(Parser)]
+#[command(
+    name = "pdf-lint",
+    bin_name = "pdf-lint",
+    version,
+    about = ABOUT,
+    after_help = EXITS,
+    disable_help_flag = true,
+    disable_version_flag = true,
+    args_override_self = true,
+    arg_required_else_help = true
+)]
+struct Cli {
+    #[arg(
+        value_name = "FILE",
+        required = true,
+        value_parser = path(),
+        help = "a file to check; - is standard input"
+    )]
+    files: Vec<PathBuf>,
+    #[arg(
+        long,
+        value_name = "FILE",
+        allow_hyphen_values = true,
+        value_parser = path(),
+        help = "hold only the objects FILE names, a line each:\n\
+                `12 0 built` or `3 0 merged`"
+    )]
+    hold: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "hold every object as built, so that a key the model\n\
+                doesn't list is a finding (by default, as merged)"
+    )]
+    built: bool,
+    #[arg(
+        long,
+        value_name = "FILE",
+        allow_hyphen_values = true,
+        value_parser = path(),
+        help = "keys a built object may have though the model doesn't\n\
+                list them, a name a line: `/MyKey`, or `/My*` for every\n\
+                key it begins"
+    )]
+    exempt: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "W",
+        allow_hyphen_values = true,
+        value_parser = unlisted,
+        help = "which held objects a key the model doesn't list is a\n\
+                finding in: built (the default), all, or never; it's\n\
+                counted in any"
+    )]
+    unlisted: Option<UnlistedIn>,
+    #[arg(
+        long,
+        help = "find what the version checked at deprecates: a key, a\n\
+                type or a value (by default, counted only)"
+    )]
+    deprecations: bool,
+    #[arg(
+        long,
+        value_name = "E",
+        allow_hyphen_values = true,
+        help = "check each FILE under these extensions too, besides\n\
+                those it declares: the model's names for them, a comma\n\
+                between (Malforms,AAPL)"
+    )]
+    extensions: Option<String>,
+    #[arg(
+        long,
+        help = "hold only the objects the newest incremental update\n\
+                wrote: those it rewrote as merged, new ones as built;\n\
+                and leave out what a rewritten object, or the trailer,\n\
+                already had in the revision it updates"
+    )]
+    last_update: bool,
+    #[arg(
+        long,
+        value_name = "FILE",
+        allow_hyphen_values = true,
+        value_parser = path(),
+        help = "leave out the findings FILE, the file each FILE was\n\
+                written from, already had: an incremental update of it\n\
+                object by object, a rewrite of it by where each finding\n\
+                is, or, where FILE has nothing there, anywhere in it"
+    )]
+    baseline: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "V",
+        allow_hyphen_values = true,
+        value_parser = pdf_version,
+        help = "check each FILE as PDF V, 1.0 to 1.7 or 2.0, not as\n\
+                the version its header and catalog give, and what it's\n\
+                set against, a baseline or the revision before an\n\
+                update, as V too"
+    )]
+    pdf_version: Option<Version>,
+    #[arg(
+        long,
+        value_name = "DIR",
+        allow_hyphen_values = true,
+        value_parser = path(),
+        help = "check against the tables in DIR, a checkout of the\n\
+                Arlington model's tsv/latest, as they are, not the\n\
+                embedded ones, whose cells that contradict ISO 32000-2\n\
+                are corrected"
+    )]
+    model: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "check each object as one table, as TestGrammar does:\n\
+                a field and its widget merged in one dictionary as\n\
+                one of the two (by default, as both), and a key\n\
+                unlisted by the first table that reaches an object\n\
+                though another that does lists it"
+    )]
+    one_table: bool,
+    #[arg(
+        long,
+        value_name = "TSV",
+        allow_hyphen_values = true,
+        value_parser = path(),
+        help = "leave out the findings TSV allows: a # header, then\n\
+                table, key, rule, file, version and reason, tab apart;\n\
+                a version, as the file is checked as"
+    )]
+    allow: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "print the whole report: tables, checks not made, keys\n\
+                the model doesn't list"
+    )]
+    full: bool,
+    #[arg(
+        long,
+        value_name = "PW",
+        allow_hyphen_values = true,
+        help = "the files' password, user or owner, when it isn't\n\
+                empty: tried as UTF-8, then in PDFDocEncoding,\n\
+                WinAnsiEncoding and MacRomanEncoding"
+    )]
+    password: Option<String>,
+    #[arg(
+        long,
+        value_name = "N",
+        allow_hyphen_values = true,
+        value_parser = jobs,
+        help = "check N files at once (by default, as many as there\n\
+                are CPUs); the report is in the files' order all the\n\
+                same"
+    )]
+    jobs: Option<NonZero<usize>>,
+    #[arg(
+        long,
+        value_name = "F",
+        allow_hyphen_values = true,
+        value_parser = json_format,
+        help = "text (the default), or json: a line of JSON for each\n\
+                file, with its findings and the whole report's counts"
+    )]
+    format: Option<bool>,
+    // Stops the parse where it's met; `main` prints the version.
+    #[arg(
+        short = 'V',
+        long,
+        action = ArgAction::Version,
+        help = "print the version, and the model's commit,\n\
+                corrections, additions and hash"
+    )]
+    version: (),
+    #[arg(short = 'h', long, action = ArgAction::Help, help = "print this")]
+    help: (),
+}
+
+/// A path as it's given, any bytes: an empty word too, which is then a
+/// file that can't be read, where clap's own parser of paths refuses it.
+fn path() -> impl TypedValueParser<Value = PathBuf> {
+    OsStringValueParser::new().map(PathBuf::from)
+}
+
+/// `--jobs`' number.
+fn jobs(n: &str) -> Result<NonZero<usize>, &'static str> {
+    n.parse().map_err(|_| "not a number above 0")
+}
+
+/// `--pdf-version`'s version, which reads no model.
+fn pdf_version(v: &str) -> Result<Version, &'static str> {
+    pdf_lint::grammar::version(v).ok_or("not a PDF version, 1.0 to 1.7 or 2.0")
+}
+
+/// `--unlisted`'s objects.
+fn unlisted(w: &str) -> Result<UnlistedIn, &'static str> {
+    UnlistedIn::named(w).ok_or("built, all or never")
+}
+
+/// `--format`'s: whether it's json, not text.
+fn json_format(f: &str) -> Result<bool, &'static str> {
+    match f {
+        "text" => Ok(false),
+        "json" => Ok(true),
+        _ => Err("text or json"),
+    }
+}
 
 struct Args {
     files: Vec<PathBuf>,
@@ -172,7 +332,22 @@ struct Checked {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let args = match args() {
+        Ok(args) => args,
+        // clap stops where `--version` is met, and its version is printed
+        // here, with the model's.
+        Err(e) if e.kind() == ErrorKind::DisplayVersion => {
+            print(&version());
+            return ExitCode::SUCCESS;
+        }
+        // The help, on stdout, or what's wrong with the command line, on
+        // stderr; a closed pipe isn't an error either.
+        Err(e) => {
+            let _ = e.print();
+            return ExitCode::from(if e.use_stderr() { 2 } else { 0 });
+        }
+    };
+    match run(args) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("pdf-lint: {e:#}");
@@ -181,145 +356,84 @@ fn main() -> ExitCode {
     }
 }
 
-/// The command line's arguments; none when it asked only for the version
-/// or the usage, which are printed.
-fn args() -> Result<Option<Args>> {
-    let mut args = Args {
-        files: Vec::new(),
-        hold: None,
-        built: false,
-        exempt: None,
-        last_update: false,
-        baseline: None,
-        pdf_version: None,
-        model: None,
-        one_table: false,
-        unlisted: UnlistedIn::Built,
-        deprecations: false,
-        extensions: Vec::new(),
-        named: BTreeSet::new(),
-        allow: None,
-        full: false,
-        password: None,
-        jobs: None,
-        json: false,
-    };
-    let mut words = std::env::args_os().skip(1);
-    while let Some(word) = words.next() {
-        let value = |words: &mut dyn Iterator<Item = std::ffi::OsString>, flag: &str| {
-            words
-                .next()
-                .map(PathBuf::from)
-                .with_context(|| format!("{flag} takes a file"))
-        };
-        match word.to_str() {
-            Some("--version" | "-V") => {
-                let hash = pdf_lint::grammar().hash();
-                let n = pdf_lint::grammar::corrections().len();
-                let m = pdf_lint::grammar::additions().len();
-                print(&format!(
-                    "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (xxh64 {hash:016x})\n",
-                    env!("CARGO_PKG_VERSION"),
-                    pdf_lint::COMMIT
-                ));
-                return Ok(None);
-            }
-            Some("--help" | "-h") => {
-                print(&format!("{USAGE}\n"));
-                return Ok(None);
-            }
-            Some("--hold") => args.hold = Some(value(&mut words, "--hold")?),
-            Some("--exempt") => args.exempt = Some(value(&mut words, "--exempt")?),
-            Some("--allow") => args.allow = Some(value(&mut words, "--allow")?),
-            Some("--model") => args.model = Some(value(&mut words, "--model")?),
-            Some("--baseline") => args.baseline = Some(value(&mut words, "--baseline")?),
-            Some("--password") => {
-                let password = words.next().context("--password takes a password")?;
-                let password = password
-                    .into_string()
-                    .map_err(|_| anyhow::anyhow!("--password: not UTF-8"))?;
-                args.password = Some(password);
-            }
-            Some("--jobs") => {
-                let n = words.next().context("--jobs takes a number")?;
-                let n = (n.to_str().and_then(|n| n.parse().ok()))
-                    .with_context(|| format!("--jobs {}: not a number above 0", n.display()))?;
-                args.jobs = Some(n);
-            }
-            Some("--pdf-version") => {
-                let v = words.next().context("--pdf-version takes a version")?;
-                let version =
-                    (v.to_str().and_then(pdf_lint::grammar::version)).with_context(|| {
-                        format!(
-                            "--pdf-version {}: not a PDF version, 1.0 to 1.7 or 2.0",
-                            v.display()
-                        )
-                    })?;
-                args.pdf_version = Some(version);
-            }
-            Some("--unlisted") => {
-                let w = words
-                    .next()
-                    .context("--unlisted takes built, all or never")?;
-                args.unlisted = (w.to_str().and_then(UnlistedIn::named))
-                    .with_context(|| format!("--unlisted {}: built, all or never", w.display()))?;
-            }
-            Some("--extensions") => {
-                let names = words.next().context("--extensions takes names")?;
-                let names = (names.to_str())
-                    .context("--extensions: not UTF-8")?
-                    .split(',')
-                    .map(|name| name.trim().to_string())
-                    .collect();
-                args.extensions = names;
-            }
-            Some("--format") => {
-                let format = words.next().context("--format takes text or json")?;
-                args.json = match format.to_str() {
-                    Some("text") => false,
-                    Some("json") => true,
-                    _ => bail!("--format {}: text or json", format.display()),
-                };
-            }
-            Some("--built") => args.built = true,
-            Some("--one-table") => args.one_table = true,
-            Some("--deprecations") => args.deprecations = true,
-            Some("--last-update") => args.last_update = true,
-            Some("--full") => args.full = true,
-            Some(flag) if flag.starts_with('-') && flag != "-" => {
-                bail!("{flag}: no such option\n\n{USAGE}")
-            }
-            _ => args.files.push(PathBuf::from(word)),
-        }
-    }
-    if args.files.is_empty() {
-        bail!("no file\n\n{USAGE}");
-    }
-    let stdins = (args.files.iter()).filter(|path| *path == Path::new("-"));
+/// The command line's arguments, as clap reads them and then as only this
+/// can check them: an error is clap's, as are `--help` and `--version`,
+/// which stop the parse where they're met.
+fn args() -> Result<Args, clap::Error> {
+    let cli = Cli::try_parse()?;
+    let refused = |reason: &str| Cli::command().error(ErrorKind::ArgumentConflict, reason);
+    let stdins = (cli.files.iter()).filter(|path| *path == Path::new("-"));
     if stdins.count() > 1 {
-        bail!("- more than once: standard input is read once");
+        return Err(refused("- more than once: standard input is read once"));
     }
-    if args.hold.is_some() && args.built {
-        bail!("--hold and --built: a hold file says how each object was made");
+    if cli.hold.is_some() && cli.built {
+        return Err(refused(
+            "--hold and --built: a hold file says how each object was made",
+        ));
     }
-    if args.last_update && (args.hold.is_some() || args.built) {
-        bail!("--last-update holds what the update wrote, with neither --hold nor --built");
+    if cli.last_update && (cli.hold.is_some() || cli.built) {
+        return Err(refused(
+            "--last-update holds what the update wrote, with neither --hold nor --built",
+        ));
     }
-    let built = args.hold.is_some() || args.built || args.last_update;
-    match args.unlisted {
-        _ if args.exempt.is_none() => {}
+    let built = cli.hold.is_some() || cli.built || cli.last_update;
+    let unlisted = cli.unlisted.unwrap_or(UnlistedIn::Built);
+    match unlisted {
+        _ if cli.exempt.is_none() => {}
         UnlistedIn::Never => {
-            bail!("--exempt and --unlisted never: no key the model doesn't list is a finding")
+            return Err(refused(
+                "--exempt and --unlisted never: no key the model doesn't list is a finding",
+            ));
         }
-        UnlistedIn::Built if !built => bail!(
-            "--exempt: a key the model doesn't list is a finding only in a built object, which takes --built, --hold or --last-update (or in any, with --unlisted all)"
-        ),
+        UnlistedIn::Built if !built => {
+            return Err(refused(
+                "--exempt: a key the model doesn't list is a finding only in a built object, which takes --built, --hold or --last-update (or in any, with --unlisted all)",
+            ));
+        }
         UnlistedIn::Built | UnlistedIn::All => {}
     }
-    if args.last_update && args.baseline.is_some() {
-        bail!("--last-update and --baseline: the update's baseline is the revision before it");
+    if cli.last_update && cli.baseline.is_some() {
+        return Err(refused(
+            "--last-update and --baseline: the update's baseline is the revision before it",
+        ));
     }
-    Ok(Some(args))
+    let extensions = (cli.extensions.iter())
+        .flat_map(|names| names.split(','))
+        .map(|name| name.trim().to_string())
+        .collect();
+    Ok(Args {
+        files: cli.files,
+        hold: cli.hold,
+        built: cli.built,
+        exempt: cli.exempt,
+        last_update: cli.last_update,
+        baseline: cli.baseline,
+        pdf_version: cli.pdf_version,
+        model: cli.model,
+        one_table: cli.one_table,
+        unlisted,
+        deprecations: cli.deprecations,
+        extensions,
+        named: BTreeSet::new(),
+        allow: cli.allow,
+        full: cli.full,
+        password: cli.password,
+        jobs: cli.jobs,
+        json: cli.format.unwrap_or(false),
+    })
+}
+
+/// What `--version` prints: pdf-lint's version, then the embedded model's
+/// commit, its corrections and additions, and its hash.
+fn version() -> String {
+    let hash = pdf_lint::grammar().hash();
+    let n = pdf_lint::grammar::corrections().len();
+    let m = pdf_lint::grammar::additions().len();
+    format!(
+        "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (xxh64 {hash:016x})\n",
+        env!("CARGO_PKG_VERSION"),
+        pdf_lint::COMMIT
+    )
 }
 
 /// `text` on stdout, as much as is read of it: no one reading any more,
@@ -328,10 +442,7 @@ fn print(text: &str) {
     let _ = io::stdout().lock().write_all(text.as_bytes());
 }
 
-fn run() -> Result<ExitCode> {
-    let Some(mut args) = args()? else {
-        return Ok(ExitCode::SUCCESS);
-    };
+fn run(mut args: Args) -> Result<ExitCode> {
     // First, before an allowance's table, or anything else, reads it.
     if let Some(dir) = &args.model {
         let model = Grammar::load(dir).with_context(|| format!("--model {}", dir.display()))?;

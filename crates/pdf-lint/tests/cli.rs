@@ -285,20 +285,17 @@ fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
 
     // Exempting keys where none is a finding is refused, and so is a
     // setting it hasn't.
-    for (args, why) in [
-        (
-            &["--unlisted", "never", "--built", "--exempt", exempt, path][..],
-            "--exempt and --unlisted never",
-        ),
-        (
-            &["--unlisted", "some", path][..],
-            "--unlisted some: built, all or never",
-        ),
-    ] {
-        let out = run(args);
-        assert_eq!(out.status.code(), Some(2));
-        assert!(text(&out.stderr).contains(why), "{}", text(&out.stderr));
-    }
+    let out = run(&["--unlisted", "never", "--built", "--exempt", exempt, path]);
+    assert_eq!(out.status.code(), Some(2));
+    let why = "--exempt and --unlisted never";
+    assert!(text(&out.stderr).contains(why), "{}", text(&out.stderr));
+    let out = run(&["--unlisted", "some", path]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        "error: invalid value 'some' for '--unlisted <W>': built, all or never\n\n\
+         For more information, try '--help'.\n"
+    );
 }
 
 #[test]
@@ -660,7 +657,9 @@ fn a_file_of_dash_is_standard_input() {
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(
         text(&out.stderr),
-        "pdf-lint: - more than once: standard input is read once\n"
+        "error: - more than once: standard input is read once\n\n\
+         Usage: pdf-lint [OPTIONS] <FILE>...\n\n\
+         For more information, try '--help'.\n"
     );
 }
 
@@ -793,8 +792,14 @@ fn pdf_version_checks_a_file_as_another_version() {
     for v in ["1.8", "2", "two"] {
         let out = run(&["--pdf-version", v, path]);
         assert_eq!(out.status.code(), Some(2));
-        let why = format!("--pdf-version {v}: not a PDF version, 1.0 to 1.7 or 2.0");
-        assert!(text(&out.stderr).contains(&why), "{}", text(&out.stderr));
+        assert_eq!(
+            text(&out.stderr),
+            format!(
+                "error: invalid value '{v}' for '--pdf-version <V>': \
+                 not a PDF version, 1.0 to 1.7 or 2.0\n\n\
+                 For more information, try '--help'.\n"
+            )
+        );
     }
 }
 
@@ -1021,7 +1026,13 @@ fn a_file_that_cant_be_read_or_a_wrong_command_line_exits_2() {
     assert_eq!(out.status.code(), Some(2));
     let out = run(&["--bogus"]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(text(&out.stderr).contains("--bogus: no such option"));
+    assert_eq!(
+        text(&out.stderr),
+        "error: unexpected argument '--bogus' found\n\n  \
+         tip: to pass '--bogus' as a value, use '-- --bogus'\n\n\
+         Usage: pdf-lint [OPTIONS] <FILE>...\n\n\
+         For more information, try '--help'.\n"
+    );
     let out = run(&[]);
     assert_eq!(out.status.code(), Some(2));
     let out = run(&["--version"]);
@@ -1123,6 +1134,384 @@ fn the_version_or_usage_no_one_reads_exits_0_without_a_panic() {
         let stderr = text(&out.stderr);
         assert!(!stderr.contains("panicked"), "{flag}: {stderr}");
         assert_eq!(out.status.code(), Some(0), "{flag}: {stderr}");
+    }
+}
+
+/// What clap ends each argument error with.
+const MORE: &str = "For more information, try '--help'.\n";
+
+/// What clap prints between an argument error and [`MORE`] when it gives
+/// the usage, as it does for an argument it doesn't know, a value that
+/// isn't UTF-8, and pdf-lint's own checks.
+const USAGE: &str = "Usage: pdf-lint [OPTIONS] <FILE>...\n\n";
+
+#[test]
+fn an_options_value_is_the_next_word_whatever_it_begins_with() {
+    let dir = folder();
+    // A password beginning with `-`.
+    let locked = written(&dir, "dash-password.pdf", &crypted(Kind::Aes256, b"-pw"));
+    let locked = locked.to_str().unwrap();
+    let out = run(&["--password", "-pw", locked]);
+    assert!(
+        text(&out.stdout).contains(" objects checked"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = run(&["--password", "-x", locked]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{locked}: the password --password gives doesn't open it\n")
+    );
+
+    // A hold file named `-`, which is a file there, not standard input,
+    // and one named as an option is: each holds the page as built, where
+    // its key the model doesn't list is a finding.
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Contnets 1 >>";
+    written(&dir, "held.pdf", &file(&[CATALOG, PAGES, page]));
+    for name in ["-", "--built"] {
+        written(&dir, name, b"3 0 built\n");
+        let out = (pdf_lint().current_dir(dir.path()))
+            .args(["--hold", name, "held.pdf"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{name}: {}", text(&out.stderr));
+        assert!(
+            text(&out.stdout).contains("- unlisted: PageObject/Contnets"),
+            "{name}: {}",
+            text(&out.stdout)
+        );
+    }
+}
+
+#[test]
+fn an_option_given_twice_takes_the_last() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Contnets 1 >>";
+    let path = written(&dir, "twice.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = path.to_str().unwrap();
+    let out = run(&["--format", "json", "--format", "text", path]);
+    assert!(
+        text(&out.stdout).starts_with(&format!("{path}: PDF 1.7, ")),
+        "{}",
+        text(&out.stdout)
+    );
+    let out = run(&["--format", "text", "--format", "json", path]);
+    assert!(json::parse(&out.stdout).is_ok(), "{}", text(&out.stdout));
+    // The page is merged, so its unlisted key is a finding with `all` alone.
+    let out = run(&["--unlisted", "all", "--unlisted", "built", path]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    let out = run(&["--unlisted", "built", "--unlisted", "all", path]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let out = run(&["--pdf-version", "2.0", "--pdf-version", "1.4", path]);
+    assert!(
+        text(&out.stdout).contains(", checked as 1.4, "),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn files_and_options_go_in_any_order() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1] /Resources << >> >>";
+    let first = written(&dir, "order-first.pdf", &file(&[CATALOG, PAGES, page]));
+    let second = written(&dir, "order-second.pdf", &file(&[CATALOG, PAGES, page]));
+    let (first, second) = (first.to_str().unwrap(), second.to_str().unwrap());
+    let before = run(&[first, second, "--format", "json", "--jobs", "1"]);
+    let lines = text(&before.stdout);
+    assert_eq!(lines.lines().count(), 2, "{lines}");
+    assert!(lines.contains(first) && lines.contains(second), "{lines}");
+    for args in [
+        &[first, "--format", "json", second, "--jobs", "1"][..],
+        &["--format", "json", first, "--jobs", "1", second][..],
+        &["--format", "json", "--jobs", "1", first, second][..],
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), before.status.code(), "{args:?}");
+        assert_eq!(text(&out.stdout), lines, "{args:?}");
+    }
+}
+
+#[test]
+fn an_option_takes_its_value_after_an_equals_sign_too() {
+    let dir = folder();
+    let locked = written(&dir, "equals.pdf", &crypted(Kind::Aes256, b"-pw"));
+    let locked = locked.to_str().unwrap();
+    let spaced = run(&["--password", "-pw", "--format", "json", locked]);
+    let equals = run(&["--password=-pw", "--format=json", locked]);
+    assert_eq!(equals.status.code(), spaced.status.code());
+    assert_eq!(text(&equals.stdout), text(&spaced.stdout));
+    assert!(
+        json::parse(&equals.stdout).is_ok(),
+        "{}",
+        text(&equals.stderr)
+    );
+}
+
+#[test]
+fn a_file_beginning_with_a_dash_follows_two_dashes() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    written(&dir, "-x.pdf", &file(&[CATALOG, PAGES, page]));
+    let lint = |args: &[&str]| {
+        (pdf_lint().current_dir(dir.path()))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = lint(&["--", "-x.pdf"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "-x.pdf: PDF 1.7, 6 objects checked, 0 findings\n"
+    );
+    // Before them, it's an option there's none of.
+    let out = lint(&["-x.pdf"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).starts_with("error: unexpected argument '-x' found\n"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn the_version_is_two_lines_naming_the_model() {
+    let hash = pdf_lint::grammar().hash();
+    let n = pdf_lint::grammar::corrections().len();
+    let m = pdf_lint::grammar::additions().len();
+    let version = format!(
+        "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (xxh64 {hash:016x})\n",
+        env!("CARGO_PKG_VERSION"),
+        pdf_lint::COMMIT
+    );
+    // Where it's met, the rest unread: a file before it, and a word after
+    // it that's no option. The model is the embedded one, `--model`'s
+    // unread.
+    for args in [
+        &["--version"][..],
+        &["-V"],
+        &["a.pdf", "--version"],
+        &["--version", "--bogus"],
+        &["--model", "/nonexistent", "-V"],
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert_eq!(text(&out.stdout), version, "{args:?}");
+        assert_eq!(text(&out.stderr), "", "{args:?}");
+    }
+}
+
+#[test]
+fn an_empty_word_is_a_file_that_cant_be_read() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let path = written(&dir, "empty-word.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = path.to_str().unwrap();
+    let missing = std::fs::read("").unwrap_err();
+    // As a FILE, it's said, and the others are still checked.
+    let out = run(&["", path]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stdout),
+        format!("{path}: PDF 1.7, 6 objects checked, 0 findings\n")
+    );
+    assert_eq!(text(&out.stderr), format!(": {missing}\n"));
+    // As an option's file, it's read and fails, as any file that isn't.
+    let out = run(&["--hold", "", path]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(
+        text(&out.stderr),
+        format!("pdf-lint: reading : {missing}\n")
+    );
+}
+
+#[test]
+fn each_argument_error_exits_2_as_clap_says_it() {
+    let refused = |value: &str, arg: &str, why: &str| {
+        format!("error: invalid value '{value}' for '{arg}': {why}\n\n{MORE}")
+    };
+    let missing = |arg: &str| {
+        format!("error: a value is required for '{arg}' but none was supplied\n\n{MORE}")
+    };
+    let unknown = |arg: &str| {
+        format!(
+            "error: unexpected argument '{arg}' found\n\n  \
+             tip: to pass '{arg}' as a value, use '-- {arg}'\n\n{USAGE}{MORE}"
+        )
+    };
+    let ours = |why: &str| format!("error: {why}\n\n{USAGE}{MORE}");
+    let jobs = "not a number above 0";
+    let pdf_version = "not a PDF version, 1.0 to 1.7 or 2.0";
+    let mut cases: Vec<(Vec<&str>, String)> = vec![
+        (vec!["--bogus", "a.pdf"], unknown("--bogus")),
+        (vec!["-x", "a.pdf"], unknown("-x")),
+        (vec!["--bogus", "--version"], unknown("--bogus")),
+        (
+            vec!["--jobs", "0", "a.pdf"],
+            refused("0", "--jobs <N>", jobs),
+        ),
+        (
+            vec!["--jobs", "x", "a.pdf"],
+            refused("x", "--jobs <N>", jobs),
+        ),
+        (
+            vec!["--jobs", "-1", "a.pdf"],
+            refused("-1", "--jobs <N>", jobs),
+        ),
+        (
+            vec!["--jobs", "0", "--help"],
+            refused("0", "--jobs <N>", jobs),
+        ),
+        (
+            vec!["--pdf-version", "1.8", "a.pdf"],
+            refused("1.8", "--pdf-version <V>", pdf_version),
+        ),
+        (
+            vec!["--unlisted", "some", "a.pdf"],
+            refused("some", "--unlisted <W>", "built, all or never"),
+        ),
+        (
+            vec!["--format", "yaml", "a.pdf"],
+            refused("yaml", "--format <F>", "text or json"),
+        ),
+        (
+            vec!["--full=x", "a.pdf"],
+            format!(
+                "error: unexpected value 'x' for '--full' found; no more were expected\n\n\
+                 Usage: pdf-lint --full <FILE>...\n\n{MORE}"
+            ),
+        ),
+        (
+            vec!["--full"],
+            format!(
+                "error: the following required arguments were not provided:\n  <FILE>...\n\n\
+                 Usage: pdf-lint --full <FILE>...\n\n{MORE}"
+            ),
+        ),
+        (
+            vec!["--hol", "h", "a.pdf"],
+            format!(
+                "error: unexpected argument '--hol' found\n\n  \
+                 tip: a similar argument exists: '--hold'\n\n\
+                 Usage: pdf-lint --hold <FILE> <FILE>...\n\n{MORE}"
+            ),
+        ),
+        (
+            vec!["-", "-"],
+            ours("- more than once: standard input is read once"),
+        ),
+        (
+            vec!["--hold", "h", "--built", "a.pdf"],
+            ours("--hold and --built: a hold file says how each object was made"),
+        ),
+        (
+            vec!["--last-update", "--hold", "h", "a.pdf"],
+            ours("--last-update holds what the update wrote, with neither --hold nor --built"),
+        ),
+        (
+            vec!["--last-update", "--built", "a.pdf"],
+            ours("--last-update holds what the update wrote, with neither --hold nor --built"),
+        ),
+        (
+            vec!["--exempt", "e", "--unlisted", "never", "--built", "a.pdf"],
+            ours("--exempt and --unlisted never: no key the model doesn't list is a finding"),
+        ),
+        (
+            vec!["--exempt", "e", "a.pdf"],
+            ours(
+                "--exempt: a key the model doesn't list is a finding only in a built object, \
+                 which takes --built, --hold or --last-update (or in any, with --unlisted all)",
+            ),
+        ),
+        (
+            vec!["--last-update", "--baseline", "b", "a.pdf"],
+            ours("--last-update and --baseline: the update's baseline is the revision before it"),
+        ),
+    ];
+    for (flag, value) in [
+        ("--hold", "FILE"),
+        ("--exempt", "FILE"),
+        ("--allow", "TSV"),
+        ("--model", "DIR"),
+        ("--baseline", "FILE"),
+        ("--password", "PW"),
+        ("--jobs", "N"),
+        ("--pdf-version", "V"),
+        ("--unlisted", "W"),
+        ("--extensions", "E"),
+        ("--format", "F"),
+    ] {
+        cases.push((vec!["a.pdf", flag], missing(&format!("{flag} <{value}>"))));
+    }
+    for (args, stderr) in &cases {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert_eq!(text(&out.stdout), "", "{args:?}");
+        assert_eq!(text(&out.stderr), *stderr, "{args:?}");
+    }
+
+    // No arguments at all: the help, on stderr.
+    let out = run(&[]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(text(&out.stderr), text(&run(&["--help"]).stdout));
+
+    // A value that isn't UTF-8, for an option that takes text, a number or
+    // a word; and a word beginning with `-` that isn't, which is no option.
+    // On Unix alone, where an argument is any bytes.
+    #[cfg(unix)]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let utf8 =
+            format!("error: invalid UTF-8 was detected in one or more arguments\n\n{USAGE}{MORE}");
+        let options = [
+            "--password",
+            "--extensions",
+            "--jobs",
+            "--pdf-version",
+            "--unlisted",
+            "--format",
+        ];
+        for flag in options {
+            let out = (pdf_lint().arg(flag))
+                .arg(OsStr::from_bytes(b"\xff"))
+                .arg("a.pdf")
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(2), "{flag}");
+            assert_eq!(text(&out.stderr), utf8, "{flag}");
+        }
+        let out = (pdf_lint().arg(OsStr::from_bytes(b"-\xff")))
+            .arg("a.pdf")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(text(&out.stderr), unknown("-\u{fffd}"));
+    }
+}
+
+/// The README's command line is what `--help` prints, and `-h`, within 80
+/// columns.
+#[test]
+fn the_readme_shows_the_help() {
+    let readme = include_str!("../README.md");
+    let (_, after) = readme
+        .split_once("## The command line\n\n```text\n")
+        .unwrap();
+    let (help, _) = after.split_once("```\n").unwrap();
+    for flag in ["--help", "-h"] {
+        let out = run(&[flag]);
+        assert_eq!(out.status.code(), Some(0), "{flag}");
+        assert_eq!(text(&out.stdout), help, "{flag}");
+        assert_eq!(text(&out.stderr), "", "{flag}");
+    }
+    for line in help.lines() {
+        assert!(line.chars().count() <= 80, "{line}");
     }
 }
 
