@@ -110,8 +110,9 @@ dist:
     release/dist.sh "$platform" "$target" "target/$target/release/pdf-lint$exe" dist
 
 # Lint pdf-structure, its tests too, for Windows, whose reads of a file by
-# position and whose file identity are code of its own; and its library
-# for a target whose `usize` is 32 bits and which has no files
+# position are code of its own, and whose file identity is same-file's,
+# through winapi-util: the only build of that code; and its library for a
+# target whose `usize` is 32 bits and which has no files
 # (wasm32-unknown-unknown). Both targets must be installed (`rustup target
 # add x86_64-pc-windows-gnu wasm32-unknown-unknown`); every other recipe
 # builds for this platform alone.
