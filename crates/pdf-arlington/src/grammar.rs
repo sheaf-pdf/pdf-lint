@@ -11,7 +11,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail};
 use pdf_objects::Version;
 
 use crate::xxh64::xxh64;
@@ -253,13 +253,18 @@ struct File<'a> {
 impl Grammar {
     /// The model this crate embeds: upstream's `tsv/latest` at
     /// [`COMMIT`](crate::COMMIT), with the [`corrections`] made and the
-    /// [`additions`] added.
-    pub fn embedded() -> Result<Grammar> {
-        Grammar::from_files(model::TABLES.iter().map(|&(name, text)| File {
-            name: name.to_string(),
-            label: format!("{name}.tsv"),
-            text: text.into(),
-        }))
+    /// [`additions`] added, read the first time it's asked for. Panics,
+    /// naming the file and line, when it doesn't read, which its tests
+    /// rule out.
+    pub fn embedded() -> &'static Grammar {
+        EMBEDDED.get_or_init(|| {
+            Grammar::from_files(model::TABLES.iter().map(|&(name, text)| File {
+                name: name.to_string(),
+                label: format!("{name}.tsv"),
+                text: text.into(),
+            }))
+            .unwrap_or_else(|e| panic!("the Arlington model doesn't read: {e:#}"))
+        })
     }
 
     /// The tables in `dir`, a `.tsv` file each: a checkout of upstream's
@@ -353,45 +358,8 @@ impl Grammar {
     }
 }
 
-/// The model every check reads.
-static GRAMMAR: OnceLock<Grammar> = OnceLock::new();
-
-/// The tables the checker reads by name, which a model must have: the
-/// trailer's two, and those it checks a metadata stream and associated
-/// files as where the model has no row for them.
-pub const NAMED: [&str; 4] = [
-    "FileTrailer",
-    "XRefStream",
-    "Metadata",
-    "ArrayOfFileSpecifications",
-];
-
-/// The model every check reads: the one [`use_model`] chose, else the
-/// embedded one ([`Grammar::embedded`]), read once. Panics, naming the
-/// file and line, when the embedded one doesn't read, which its tests
-/// rule out.
-pub fn grammar() -> &'static Grammar {
-    GRAMMAR.get_or_init(|| {
-        Grammar::embedded().unwrap_or_else(|e| panic!("the Arlington model doesn't read: {e:#}"))
-    })
-}
-
-/// Makes `model` the one every check reads, in place of the embedded
-/// one: a newer checkout of upstream's `tsv/latest`, read with
-/// [`Grammar::load`]. Before anything has read the model, and once. An
-/// error says when something has, or when `model` lacks a table the
-/// checker reads by name ([`NAMED`]).
-pub fn use_model(model: Grammar) -> Result<()> {
-    for name in NAMED {
-        ensure!(
-            model.table(name).is_some(),
-            "it has no {name} table, which the checker reads by name"
-        );
-    }
-    GRAMMAR
-        .set(model)
-        .map_err(|_| anyhow!("the model is chosen already: something has read it"))
-}
+/// The embedded model, read once ([`Grammar::embedded`]).
+static EMBEDDED: OnceLock<Grammar> = OnceLock::new();
 
 impl Table {
     /// The table in `text`, a TSV file's whole: upstream's header, then a
@@ -765,7 +733,7 @@ mod tests {
 
     #[test]
     fn every_table_reads() {
-        let g = grammar();
+        let g = Grammar::embedded();
         let added: BTreeSet<&str> = (additions().iter())
             .filter(|a| a.table_added)
             .map(|a| a.table)
@@ -860,7 +828,7 @@ mod tests {
             assert_eq!(rest, want, "{name}");
         }
         let loaded = Grammar::load(&dir().join("tsv/latest")).unwrap();
-        assert_ne!(loaded.hash(), grammar().hash());
+        assert_ne!(loaded.hash(), Grammar::embedded().hash());
     }
 
     /// The model's hashes, as xxHash 0.8.2's reference computes them (the
@@ -872,7 +840,8 @@ mod tests {
     fn the_models_hashes_are_the_references() {
         let upstream = Grammar::load(&dir().join("tsv/latest")).unwrap();
         assert_eq!(format!("{:016x}", upstream.hash()), "c2bdcab22f823d8d");
-        assert_eq!(format!("{:016x}", grammar().hash()), "fc22d1fadc1fd269");
+        let embedded = Grammar::embedded();
+        assert_eq!(format!("{:016x}", embedded.hash()), "fc22d1fadc1fd269");
     }
 
     #[test]
@@ -883,7 +852,7 @@ mod tests {
 
     #[test]
     fn rows_are_found_by_key_index_repeat_or_wildcard() {
-        let g = grammar();
+        let g = Grammar::embedded();
         let key = |table: &str, at: At| g.table(table).unwrap().row(at).map(|r| r.key.as_str());
         assert_eq!(key("Catalog", At::Key(b"Pages")), Some("Pages"));
         assert_eq!(
@@ -904,7 +873,7 @@ mod tests {
 
     #[test]
     fn version_predicates_come_off_types_values_and_links() {
-        let g = grammar();
+        let g = Grammar::embedded();
         let row = |table: &str, key: &[u8]| g.table(table).unwrap().row(At::Key(key)).unwrap();
         let wrap = |func, arg: &str| Wrap {
             func,

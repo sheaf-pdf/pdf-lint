@@ -8,8 +8,10 @@
 //! required, the values it may take and the tables its value links to. The
 //! tables' layout is upstream's README.md, "TSV Data Overview"; the rules
 //! for each column are INTERNAL_GRAMMAR.md's "TSV file rules" and "TSV Data
-//! Fields", from "Column 1 - Key" to "Column 11 - Link". [`grammar()`]
-//! reads them.
+//! Fields", from "Column 1 - Key" to "Column 11 - Link".
+//! [`Grammar::embedded`] reads them, once. A checkout [`Grammar::load`]
+//! reads is the caller's to hold: this crate chooses no model for its
+//! callers.
 //!
 //! - **The tables** ([`grammar`](mod@grammar)): each row's cells read,
 //!   its types, items and links split out and the version predicates
@@ -31,7 +33,7 @@ mod xxh64;
 /// named through it, they're the version this crate is built with.
 pub use pdf_objects;
 
-pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, grammar, use_model};
+pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped};
 pub use predicate::{Cx, Gate, Reference, Since, Truth};
 
 /// The upstream commit the embedded model is (`model/SOURCE.md`).

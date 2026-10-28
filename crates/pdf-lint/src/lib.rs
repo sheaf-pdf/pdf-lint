@@ -32,16 +32,70 @@ pub use check::{
     Class, Exempt, Finding, Hold, Made, Options, Report, Rule, Unchecked, Unlisted, UnlistedIn,
     check, file_version,
 };
-pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, use_model};
+// `grammar` is the module and the function both.
+pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, grammar, use_model};
 pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
 // The model, its tables and predicates, and the commit it's at, are
-// pdf-arlington's; `grammar` is the module and the function both.
-pub use pdf_arlington::{COMMIT, grammar, predicate};
+// pdf-arlington's; which model every check reads is this crate's.
+pub use pdf_arlington::{COMMIT, predicate};
 // The objects, `dict!` and versions are pdf-objects'.
 pub use pdf_objects::{dict, object, version};
 pub use predicate::{Cx, Gate, Reference, Since, Truth};
 pub use source::{Document, Encryption, Source, Trailer, Update, Warning};
 pub use version::Version;
+
+/// The model's tables, pdf-arlington's [`grammar`](pdf_arlington::grammar)
+/// module, and which model every check reads: the embedded one, or one
+/// [`use_model`] chose.
+pub mod grammar {
+    use std::sync::OnceLock;
+
+    use anyhow::{Result, anyhow, ensure};
+
+    pub use pdf_arlington::grammar::*;
+
+    /// The model [`use_model`] chose; none once anything has read the
+    /// embedded one instead.
+    static CHOSEN: OnceLock<Option<Grammar>> = OnceLock::new();
+
+    /// The tables the checker reads by name, which a model must have: the
+    /// trailer's two, and those it checks a metadata stream and associated
+    /// files as where the model has no row for them.
+    pub const NAMED: [&str; 4] = [
+        "FileTrailer",
+        "XRefStream",
+        "Metadata",
+        "ArrayOfFileSpecifications",
+    ];
+
+    /// The model every check reads: the one [`use_model`] chose, else the
+    /// embedded one ([`Grammar::embedded`]), read once. Panics, naming the
+    /// file and line, when the embedded one doesn't read, which its tests
+    /// rule out.
+    pub fn grammar() -> &'static Grammar {
+        CHOSEN
+            .get_or_init(|| None)
+            .as_ref()
+            .unwrap_or_else(Grammar::embedded)
+    }
+
+    /// Makes `model` the one every check reads, in place of the embedded
+    /// one: a newer checkout of upstream's `tsv/latest`, read with
+    /// [`Grammar::load`]. Before anything has read the model, and once. An
+    /// error says when something has, or when `model` lacks a table the
+    /// checker reads by name ([`NAMED`]).
+    pub fn use_model(model: Grammar) -> Result<()> {
+        for name in NAMED {
+            ensure!(
+                model.table(name).is_some(),
+                "it has no {name} table, which the checker reads by name"
+            );
+        }
+        CHOSEN
+            .set(Some(model))
+            .map_err(|_| anyhow!("the model is chosen already: something has read it"))
+    }
+}
 
 /// Text strings, pdf-objects' [`text`](pdf_objects::text), and a typed
 /// password's byte forms, pdf-crypt's [`passwords`](pdf_crypt::passwords).
@@ -80,14 +134,23 @@ pub mod text {
 }
 
 /// The extensions a file declares, read from a [`Source`]
-/// ([`declared`](extension::declared)), and those the model names:
-/// pdf-arlington's [`extension`](pdf_arlington::extension).
+/// ([`declared`](extension::declared)), and those the model names
+/// ([`named`](extension::named)): pdf-arlington's
+/// [`extension`](pdf_arlington::extension).
 pub mod extension {
     use std::collections::BTreeSet;
 
-    pub use pdf_arlington::extension::{ISO, named};
+    pub use pdf_arlington::extension::ISO;
 
     use crate::source::Source;
+
+    /// Every extension the model names, in its cells and around its
+    /// types, values and links: what a file can be checked under. It's
+    /// [`Grammar::extensions`](crate::Grammar::extensions) of the model
+    /// every check reads, [`grammar()`](crate::grammar()).
+    pub fn named() -> BTreeSet<String> {
+        crate::grammar().extensions()
+    }
 
     /// The extensions `source` declares, as the model names them, from its
     /// trailer's `/Root` and its metadata ([`Source::metadata`]), as

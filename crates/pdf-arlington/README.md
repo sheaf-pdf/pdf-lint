@@ -6,12 +6,12 @@ It's made for a checker. A predicate that can't be told comes to `Unknown`, sayi
 
 ## What it does
 
-- **The model, embedded.** Upstream's `tsv/latest` at a pinned commit (`COMMIT`; `model/SOURCE.md` says from where), so nothing needs a checkout: a TSV table per object, a row per key or array element, saying its types, the PDF version it came in and any it was deprecated in, whether it's required, the values it may take and the tables its value links to. `grammar()` reads it once.
+- **The model, embedded.** Upstream's `tsv/latest` at a pinned commit (`COMMIT`; `model/SOURCE.md` says from where), so nothing needs a checkout: a TSV table per object, a row per key or array element, saying its types, the PDF version it came in and any it was deprecated in, whether it's required, the values it may take and the tables its value links to. `Grammar::embedded()` reads it once, the first time it's asked for.
 - **Corrected where it contradicts the spec.** The embedded copy has the cells corrected where the model contradicts ISO 32000-2 or the reference it cites (`model/corrections.tsv`, `grammar::corrections`), and the rows and tables added that a reference defines and the model lacks (`model/additions`, in upstream's format, `grammar::additions`), each with why. The files in `model/tsv/latest` stay upstream's, byte for byte, and the build stops when upstream has changed a corrected cell or has an added row itself.
-- **A checkout instead.** `Grammar::load` reads a `tsv/latest` folder whole, upstream's own or a newer one, an error naming the file and line of a row that doesn't read; `use_model` makes it the model `grammar()` gives. `Grammar::hash` names a model by its tables' bytes (XXH64), so two are alike when it is.
+- **A checkout instead.** `Grammar::load` reads a `tsv/latest` folder whole, upstream's own or a newer one, an error naming the file and line of a row that doesn't read; the caller holds the model it gives, as nothing in the crate chooses one. `Grammar::hash` names a model by its tables' bytes (XXH64), so two are alike when it is.
 - **Each row's cells read.** A `Row` has upstream's 12 columns, the Type cell split into its types (`ArlType`), a cell with an item per type into those items, and the version predicates around a type, a value or a link taken off and kept beside it (`Wrapped`).
 - **The predicates evaluated.** `predicate::parse` reads the language in the cells (INTERNAL_GRAMMAR.md's "Validation of predicates"): `fn:` functions, `&&` and `||`, comparisons, arithmetic, and keys, values and paths from the object, its parents or the trailer. `required`, `holds`, `reference` and the rest evaluate a cell on an object where it sits: a `Cx` gives the object, the way to it, the trailer and the file's version, and resolves a reference through a closure, so any reader's objects can be checked. The 34 functions of `SUPPORTED` are evaluated; any other comes to `Truth::Unknown`, named.
-- **Versions and extensions.** `since` reads when a key came in, `gate` what the version predicates around a type, value or link make of it at a file's version; `extension::declared` gives the extensions a file declares, from its catalog and its XMP metadata, and `extension::named` every one the model names.
+- **Versions and extensions.** `since` reads when a key came in, `gate` what the version predicates around a type, value or link make of it at a file's version; `extension::declared` gives the extensions a file declares, from its catalog and its XMP metadata, and `Grammar::extensions` every one a model names.
 
 ## An example
 
@@ -20,11 +20,12 @@ use std::collections::BTreeSet;
 
 use pdf_arlington::pdf_objects::{Dict, Object, ObjectId, Version, dict};
 use pdf_arlington::predicate::{self, Fields, Structure, Trees};
-use pdf_arlington::{At, Cx, Truth, grammar};
+use pdf_arlington::{At, Cx, Grammar, Truth};
 
 // The embedded model's row for a page's /Rotate: an integer since PDF
 // 1.0, whose possible values are the multiples of 90.
-let row = grammar().table("PageObject").and_then(|t| t.row(At::Key(b"Rotate"))).unwrap();
+let table = Grammar::embedded().table("PageObject").unwrap();
+let row = table.row(At::Key(b"Rotate")).unwrap();
 assert_eq!((row.r#type[0].item.name(), row.since_version.as_str()), ("integer", "1.0"));
 let multiple = &row.possible_values[0][0].item;
 assert_eq!(multiple, "fn:Eval((@Rotate mod 90)==0)");

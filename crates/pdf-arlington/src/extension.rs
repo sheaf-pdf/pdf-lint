@@ -3,13 +3,14 @@
 //! extensions dictionary (ISO 32000-2, 7.12), and the subsets its XMP
 //! metadata says it conforms to. The checker holds a file to what's under
 //! the extensions it declares, as TestGrammar does to those named with its
-//! `--extensions`; it can't tell any other.
+//! `--extensions`; it can't tell any other. Those a model names are
+//! [`Grammar::extensions`].
 
 use std::collections::BTreeSet;
 
 use pdf_objects::{Dict, Object, ObjectId, Value};
 
-use crate::grammar::{WrapFn, grammar};
+use crate::grammar::{Grammar, WrapFn};
 
 /// The model's extensions that ISO publishes, by the number its extensions
 /// dictionary entries give as `/ExtensionLevel` under `/ISO_` (ISO 32000-2,
@@ -105,30 +106,33 @@ pub fn declared(
     names
 }
 
-/// Every extension the model names, in its cells (`fn:Extension(X`) and
-/// around its types, values and links: what a file can be checked under.
-pub fn named() -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for table in grammar().tables() {
-        for row in &table.rows {
-            let values = row.possible_values.iter().flatten();
-            let cells = [&row.since_version, &row.required]
-                .into_iter()
-                .chain(&row.special_case)
-                .chain(&row.indirect_reference)
-                .chain(values.clone().map(|value| &value.item));
-            for cell in cells {
-                names.extend(called(cell));
-            }
-            let wraps = (row.r#type.iter().flat_map(|t| &t.wraps))
-                .chain(row.link.iter().flatten().flat_map(|l| &l.wraps))
-                .chain(values.flat_map(|v| &v.wraps));
-            for wrap in wraps.filter(|w| w.func == WrapFn::Extension) {
-                names.insert(wrap.arg.clone());
+impl Grammar {
+    /// Every extension the model names, in its cells (`fn:Extension(X`)
+    /// and around its types, values and links: what a file can be checked
+    /// under.
+    pub fn extensions(&self) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for table in self.tables() {
+            for row in &table.rows {
+                let values = row.possible_values.iter().flatten();
+                let cells = [&row.since_version, &row.required]
+                    .into_iter()
+                    .chain(&row.special_case)
+                    .chain(&row.indirect_reference)
+                    .chain(values.clone().map(|value| &value.item));
+                for cell in cells {
+                    names.extend(called(cell));
+                }
+                let wraps = (row.r#type.iter().flat_map(|t| &t.wraps))
+                    .chain(row.link.iter().flatten().flat_map(|l| &l.wraps))
+                    .chain(values.flat_map(|v| &v.wraps));
+                for wrap in wraps.filter(|w| w.func == WrapFn::Extension) {
+                    names.insert(wrap.arg.clone());
+                }
             }
         }
+        names
     }
-    names
 }
 
 /// The extensions `text` calls `fn:Extension` of.
@@ -255,7 +259,7 @@ mod tests {
         let written: BTreeSet<String> = (crate::grammar::model::TABLES.iter())
             .flat_map(|&(_, text)| called(text))
             .collect();
-        assert_eq!(named(), written);
+        assert_eq!(Grammar::embedded().extensions(), written);
         // ISO's, but PDF/A-3's, declared in XMP metadata, by number.
         let iso: BTreeSet<String> = (written.into_iter())
             .filter(|n| n.starts_with("ISO_") && n != "ISO_19005_3")

@@ -1978,7 +1978,7 @@ mod tests {
     use pdf_objects::{Dict, dict};
 
     use super::*;
-    use crate::grammar::{self, Row, grammar, model, split};
+    use crate::grammar::{self, Grammar, Row, model, split};
 
     /// A version the model names.
     fn v(text: &str) -> Version {
@@ -2113,7 +2113,7 @@ mod tests {
     fn every_since_required_and_indirect_reference_cell_has_a_form_its_reader_reads() {
         let mut since_in = BTreeMap::new();
         let mut extensions = 0;
-        for table in grammar().tables() {
+        for table in Grammar::embedded().tables() {
             for row in &table.rows {
                 let at = format!("{}:{}", table.name, row.line);
                 match since(&row.since_version, &none()) {
@@ -2228,7 +2228,8 @@ mod tests {
 
     /// The model's row `key` of `table`.
     fn row(table: &str, key: &[u8]) -> &'static Row {
-        grammar().table(table).unwrap().row(At::Key(key)).unwrap()
+        let table = Grammar::embedded().table(table).unwrap();
+        table.row(At::Key(key)).unwrap()
     }
 
     /// `text` held of `container` at `version` in `file`.
@@ -2290,10 +2291,8 @@ mod tests {
 
         // An annotation's color has a third element if it has a second: an
         // array's element by its index.
-        let second = &(grammar().table("ArrayOf_4NumbersColorAnnotation").unwrap())
-            .row(At::Index(1))
-            .unwrap()
-            .special_case[0];
+        let colors = Grammar::embedded().table("ArrayOf_4NumbersColorAnnotation");
+        let second = &colors.unwrap().row(At::Index(1)).unwrap().special_case[0];
         for (color, met) in [(vec![0, 1], Truth::False), (vec![0, 1, 0], Truth::True)] {
             let color = integers(color);
             let is = file.eval(&color, At::Index(1), &[], "1.7", |cx| holds(second, cx));
@@ -2579,7 +2578,7 @@ mod tests {
             Gate::AllowedDeprecated(v("1.4"))
         );
         // An extension's link, at its version or not, is no version's.
-        let annots = grammar()
+        let annots = Grammar::embedded()
             .table("ArrayOfAnnots")
             .unwrap()
             .row(At::Index(0))
@@ -3245,7 +3244,7 @@ mod tests {
     #[test]
     fn a_special_cases_absent_key_takes_its_default() {
         let file = bare();
-        let table = |name: &str| grammar().table(name).unwrap();
+        let table = |name: &str| Grammar::embedded().table(name).unwrap();
         let special = |table: Option<&Table>, container: &Object, text: &str| {
             file.eval_with(table, container, At::Key(b"X"), &[], "1.7", |cx| {
                 holds(text, cx)
