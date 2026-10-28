@@ -603,4 +603,43 @@ mod tests {
         assert_eq!(doc.metadata.as_deref(), Some(&b"hello"[..]));
         assert_eq!(doc, read(&file));
     }
+
+    /// A stream's data, and its filters' values by reference, read by
+    /// position: where a read of them fails, the call fails, and asked
+    /// again it reads them; the reading is the whole read.
+    #[test]
+    fn a_streams_data_that_fails_to_read_is_given_when_asked_again() {
+        let data = write::zlib(b"hello");
+        let stream = [
+            format!("<< /Filter 3 0 R /Length {} >>\nstream\n", data.len()).as_bytes(),
+            &data,
+            b"\nendstream",
+        ]
+        .concat();
+        let file = write::assembled(
+            "1.7",
+            &[
+                (1, &b"<< /Type /Catalog >>"[..]),
+                (2, &stream),
+                (3, b"/FlateDecode"),
+            ],
+            "<< /Size 4 /Root 1 0 R >>",
+        );
+        let at = find(&file, &data).unwrap();
+        let filter = find(&file, b"3 0 obj").unwrap();
+        for bound in [true, false] {
+            let source = Failing::new(&file, 4096);
+            let reading = open(&source, &[], &Options::DEFAULT, bound).unwrap();
+            source.fail_at(at);
+            assert!(failed_at(reading.data((2, 0)).unwrap_err(), at));
+            assert_eq!(reading.data((2, 0)).unwrap(), data);
+            source.fail_at(at);
+            assert!(failed_at(reading.decoded((2, 0)).unwrap_err(), at));
+            source.fail_at(filter);
+            assert!(failed_at(reading.decoded((2, 0)).unwrap_err(), filter));
+            assert!(source.failed());
+            assert_eq!(reading.decoded((2, 0)).unwrap(), b"hello");
+            assert_eq!(reading.into_document().unwrap(), read(&file));
+        }
+    }
 }

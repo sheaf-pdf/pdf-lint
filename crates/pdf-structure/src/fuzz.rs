@@ -3,8 +3,9 @@
 //! every place the reading gives inside what was read; read on demand, in
 //! an order the input chooses, it's the whole read, so long as no stream
 //! either decodes reaches the budget; read by position, a window at a time
-//! from a first window the input chooses, it's the whole read; and so are
-//! its revision before an incremental update, and the file opened by an
+//! from a first window the input chooses, it's the whole read, and each
+//! stream's data and decoded data are as in memory; and so are its
+//! revision before an incremental update, and the file opened by an
 //! owner's password. It reads under small limits, so that a run tries more
 //! inputs. It's compiled only for tests and under cargo-fuzz's `--cfg
 //! fuzzing`, and only reads.
@@ -101,8 +102,9 @@ pub fn open<S: ByteSource>(
 /// kept as, it's the whole read, when neither reading's decoding reached
 /// the budget. Read by position, through [`Counted`], its first window and
 /// whether an object's reaches the next listed offset as the choice's
-/// bits from the fourth give, it's the whole read. When the file has an
-/// incremental update, so is the revision before it ([`Options::section`]);
+/// bits from the fourth give, it's the whole read, and each stream's data
+/// and decoded data are as in memory. When the file has an incremental
+/// update, so is the revision before it ([`Options::section`]);
 /// and with the choice's lowest bit set, so is the file opened by the
 /// owner's password `owner`, and its revision before an update. Panics on
 /// a broken promise.
@@ -140,6 +142,7 @@ fn alike(file: &[u8], passwords: &[&[u8]], choice: u16) {
     within(file, doc);
     on_demand(file, passwords, None, &read, choice);
     by_position(file, passwords, None, doc, choice);
+    streams(file, passwords, choice);
     if let Some(update) = &doc.update {
         let section = Some(update.previous);
         let previous = whole(file, passwords, section);
@@ -175,6 +178,38 @@ fn by_position(
         .and_then(|reading| reading.into_document());
     let read = read.expect("bytes in memory are read by position without fail");
     assert_eq!(read, *doc, "a reading by position is the whole read");
+}
+
+/// The file, opened by `passwords`, in memory and read by position through
+/// [`Counted`] as [`by_position`] reads it: each object's data, and its
+/// data decoded, the same each way, or the same error; the data, where
+/// it's borrowed, a borrow of the file's bytes.
+fn streams(file: &[u8], passwords: &[&[u8]], choice: u16) {
+    let options = options();
+    let reading = Reading::in_memory(file, passwords, &options, true, None);
+    let first = 1 + usize::from((choice >> 4) & 63);
+    let source = Counted::new(file, first);
+    let by_position = open(&source, passwords, &options, choice & 8 != 0)
+        .expect("bytes in memory are read by position without fail");
+    for id in reading.ids() {
+        let data = reading.data(id);
+        if let Ok(Cow::Borrowed(data)) = &data {
+            let within = file.as_ptr_range();
+            assert!(
+                data.is_empty() || within.contains(&data.as_ptr()),
+                "{id:?}'s data is borrowed from elsewhere"
+            );
+        }
+        let read = by_position.data(id);
+        assert_eq!(
+            format!("{data:?}"),
+            format!("{read:?}"),
+            "{id:?}'s data by position"
+        );
+        let decoded = format!("{:?}", reading.decoded(id));
+        let read = format!("{:?}", by_position.decoded(id));
+        assert_eq!(decoded, read, "{id:?} decoded by position");
+    }
 }
 
 /// The file, as of `section`, opened by `passwords`, read on demand: its

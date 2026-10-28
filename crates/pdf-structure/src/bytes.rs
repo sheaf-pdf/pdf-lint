@@ -33,7 +33,9 @@
 //! ([`Document::encryption`]) has its strings [`Str::Encrypted`], and its
 //! object streams unread, saying why. An object read from an object stream
 //! is placed in the stream's decoded data ([`Span::stream`]), which the
-//! [`Document`] keeps.
+//! [`Document`] keeps. A reading hands out any stream's data when it's
+//! asked for, decrypted as an object stream's is ([`Reading::data`]), and
+//! decoded through its filters ([`Reading::decoded`]).
 //!
 //! **What's encrypted.** In an encrypted file it opens, what the reader
 //! decrypts and what it leaves as written, each with the clause of
@@ -76,14 +78,47 @@
 //!   `an_encrypted_object_stream_is_decrypted_and_decoded_without_the_decoder`
 //!   and `a_file_whose_strings_and_streams_arent_encrypted_reads_whole_without_its_password`.
 //! - **A cross-reference stream's data** is read as written, never
-//!   decrypted (7.5.8.2), and **no other stream's data is read:** it stays
-//!   where it was written
+//!   decrypted (7.5.8.2), and **no other stream's data is read** as the
+//!   file is read: it stays where it was written
 //!   ([`Data::At`](pdf_objects::object::Data::At)), encrypted. Held by
 //!   `a_cross_reference_streams_strings_are_read_as_written_in_a_file_that_opens`
 //!   and `a_streams_dictionary_strings_decrypt_but_its_data_is_left_as_written`.
 //!   A reading hands out no bytes of an encrypted file as written
 //!   ([`Reading::bytes`]), so they can't pass for plaintext. Held by
 //!   `an_encrypted_readings_bytes_are_refused_but_its_object_streams`.
+//! - **A stream's data handed out** ([`Reading::data`], and decoded,
+//!   [`Reading::decoded`]) is decrypted as an object stream's is: by the
+//!   stream's own `/Crypt` filter when it has one, else as `/StmF` says
+//!   (7.6.6). Data that doesn't decrypt cleanly is an error holding what
+//!   did ([`Error::Decrypt`]). Held by
+//!   `each_kind_of_encryption_hands_out_each_streams_data_decrypted`,
+//!   `a_streams_own_crypt_filter_says_how_its_data_is_handed_out` and
+//!   `a_streams_data_that_doesnt_decrypt_cleanly_is_an_error_holding_what_did`.
+//!   But for these:
+//!   - **A cross-reference stream's** is handed out as written (7.5.8.2).
+//!     Held by `a_cross_reference_streams_data_is_handed_out_as_written`.
+//!   - **The catalog's metadata stream's,** under `/EncryptMetadata
+//!     false`, is handed out as written, whether the file opens or not, as
+//!     the [`Document`]'s metadata is (7.6.4.2 and 14.3.2). Held by
+//!     `metadata_not_encrypted_is_handed_out_as_written_whether_the_file_opens_or_not`.
+//!   - **In a file no password opened,** each is refused, as it may be
+//!     ciphertext ([`Error::Locked`]); but in one whose streams aren't
+//!     encrypted ([`Encryption::Plain`]), handed out as written, unless the
+//!     stream's own `/Crypt` filter encrypts it. Held by
+//!     `a_locked_files_streams_are_refused` and
+//!     `a_plain_files_streams_are_handed_out_as_written_but_one_its_own_crypt_filter_encrypts`.
+//!   - **In a file whose security handler the reader can't open,** each is
+//!     refused ([`Error::Unsupported`]). Held by
+//!     `an_unsupported_handlers_streams_are_refused`.
+//!   - **An embedded file's** (`/Type /EmbeddedFile`), in a file whose
+//!     encryption dictionary has an `/EFF`, the crypt filter embedded files
+//!     are encrypted by, is refused, as the reader doesn't apply it
+//!     ([`Error::EmbeddedFile`]; 7.6.6 and Table 20). Held by
+//!     `an_embedded_files_data_under_eff_is_refused`.
+//!   - **A stream the encryption dictionary refers to,** among the objects
+//!     whose strings are left as written, is refused
+//!     ([`Error::Encrypted`]). Held by
+//!     `a_stream_the_encryption_dictionary_refers_to_is_refused`.
 //! - **`/Identity`:** strings are left as written when `/StrF` is
 //!   `/Identity`, as it is by default from `/V` 4, and object streams'
 //!   data when `/StmF` is (7.6.6 and Table 20). A file whose strings and
@@ -415,6 +450,52 @@ pub(crate) struct Whole {
 /// doesn't read.
 type Get<'g, 'o, E> = &'g dyn Fn(ObjectId) -> Result<Option<&'o Object>, E>;
 
+/// `o` with its references followed, as many as an object's way to the
+/// catalog may take.
+fn follow<'o, E>(get: Get<'_, 'o, E>, mut o: &'o Object) -> Result<Option<&'o Object>, E> {
+    for _ in 0..8 {
+        match o.value() {
+            Value::Ref(id) => match get(*id)? {
+                Some(to) => o = to,
+                None => return Ok(None),
+            },
+            _ => return Ok(Some(o)),
+        }
+    }
+    Ok(None)
+}
+
+/// Which object the catalog's metadata stream is (ISO 32000-2, 14.3.2):
+/// the last the references from the catalog's `/Metadata` lead to, followed
+/// as [`metadata`] follows them, when it's a stream. `get` gives the object
+/// a reference refers to.
+fn metadata_stream<'o, E>(
+    trailer: &'o Trailer,
+    get: Get<'_, 'o, E>,
+) -> Result<Option<ObjectId>, E> {
+    let Some(root) = trailer.dict().get(b"Root") else {
+        return Ok(None);
+    };
+    let Some(Value::Dict(catalog)) = follow(get, root)?.map(Object::value) else {
+        return Ok(None);
+    };
+    let Some(mut o) = catalog.get(b"Metadata") else {
+        return Ok(None);
+    };
+    let mut last = None;
+    for _ in 0..8 {
+        match o.value() {
+            Value::Ref(id) => match get(*id)? {
+                Some(to) => (o, last) = (to, Some(*id)),
+                None => return Ok(None),
+            },
+            Value::Stream(_) => return Ok(last),
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
 /// The data of the catalog's metadata stream (ISO 32000-2, 14.3.2), as
 /// written in `file`, when it's in plain view: unfiltered, and not
 /// `encrypted`. `get` gives the object a reference refers to.
@@ -424,20 +505,6 @@ fn metadata<'f, 'o, F: Bytes<'f>>(
     get: Get<'_, 'o, F::Error>,
     encrypted: bool,
 ) -> Result<Option<Cow<'f, [u8]>>, F::Error> {
-    /// `o` with its references followed, as many as an object's way to
-    /// the catalog may take.
-    fn follow<'o, E>(get: Get<'_, 'o, E>, mut o: &'o Object) -> Result<Option<&'o Object>, E> {
-        for _ in 0..8 {
-            match o.value() {
-                Value::Ref(id) => match get(*id)? {
-                    Some(to) => o = to,
-                    None => return Ok(None),
-                },
-                _ => return Ok(Some(o)),
-            }
-        }
-        Ok(None)
-    }
     let dict = |o| -> Result<_, F::Error> {
         Ok(match follow(get, o)?.map(Object::value) {
             Some(Value::Dict(d)) => Some(d),
@@ -505,7 +572,8 @@ struct Reader {
     encrypted: Option<HashSet<ObjectId>>,
     /// The objects the sections' trailers name as `/Encrypt`, and those its
     /// values refer to: an earlier update's encryption dictionary's strings
-    /// aren't encrypted either.
+    /// aren't encrypted either. Kept, as a stream among them isn't handed
+    /// out ([`Reading::data`]).
     dictionaries: HashSet<ObjectId>,
     /// Whether an encrypted file's strings aren't, by its handler's
     /// `/StrF`, or its dictionary's when it doesn't open.
@@ -513,6 +581,13 @@ struct Reader {
     /// Whether an encrypted file's metadata stream isn't, by
     /// `/EncryptMetadata false` of a dictionary of `/V` 4 or later.
     plain_metadata: bool,
+    /// Whether an encrypted file's metadata stream is left as written by
+    /// `/EncryptMetadata false` itself, whatever its streams are.
+    unencrypted_metadata: bool,
+    /// Whether an encrypted file's dictionary has an `/EFF`, the crypt
+    /// filter its embedded files are encrypted by, which the reader doesn't
+    /// apply.
+    embedded_files: bool,
     /// Whether the file has an encryption dictionary, so that its streams
     /// may be encrypted, whatever its strings are.
     encrypts: bool,
@@ -614,6 +689,15 @@ type Indirect = Result<(ObjectId, Object, Record), Unread>;
 
 /// What reading an object in use gave, when an entry in use lists it.
 type InUse<'r> = Option<Result<&'r Object, &'r Unread>>;
+
+/// How a stream's data is handed out ([`Reading::data`]).
+enum Crypt<'h> {
+    /// As written.
+    Written,
+    /// Decrypted by the file's handler: by its own crypt filter's method
+    /// when it has one, else as the file's streams are.
+    Decrypted(&'h Handler, Option<Method>),
+}
 
 /// What's at the offset `startxref` or a `/Prev` gives.
 enum At {
@@ -783,6 +867,8 @@ impl Reader {
             dictionaries: HashSet::new(),
             plain_strings: false,
             plain_metadata: false,
+            unencrypted_metadata: false,
+            embedded_files: false,
             encrypts: false,
             budget: AtomicUsize::new(limits.budget),
             reached: AtomicBool::new(false),
@@ -1471,6 +1557,72 @@ impl Reader {
         let at = stream.data.at().filter(|_| exact);
         self.faulted(cx, id, stream.data.at(), at, &filters, faults);
         Ok(decoded)
+    }
+
+    /// How the data of stream `id`, whose dictionary is `dict`, is handed
+    /// out ([`Reading::data`]), by the rule its object streams are decrypted
+    /// by: by the stream's own `/Crypt` filter when it has one, else as the
+    /// file's streams are (ISO 32000-2, 7.6.6), its filters' values
+    /// followed through what's read and kept. Left as written: in a file
+    /// that doesn't encrypt; a cross-reference stream's (7.5.8.2); the
+    /// catalog's metadata stream's under `/EncryptMetadata false` (7.6.4.2
+    /// and 14.3.2), whether the file opens or not; and in a file no
+    /// password opened whose streams aren't encrypted
+    /// ([`Encryption::Plain`]), every stream's but one whose own crypt
+    /// filter encrypts it. Refused where it may be ciphertext the reader
+    /// doesn't decrypt: in a file no password opened, every other stream's
+    /// ([`Error::Locked`]); in a file whose handler it can't open, every
+    /// stream's ([`Error::Unsupported`]); an embedded file's, in a file
+    /// whose encryption dictionary has an `/EFF` ([`Error::EmbeddedFile`]);
+    /// and one the encryption dictionary refers to, whose strings are left
+    /// as written ([`Error::Encrypted`]).
+    fn crypt<'f, F: Bytes<'f>>(
+        &'f self,
+        file: F,
+        id: ObjectId,
+        dict: &Dict,
+    ) -> Result<Result<Crypt<'f>, Error>, F::Error> {
+        if !self.encrypts || is_xref(dict) {
+            return Ok(Ok(Crypt::Written));
+        }
+        if self.dictionaries.contains(&id) {
+            return Ok(Err(Error::Encrypted));
+        }
+        if self.unencrypted_metadata {
+            let get = |id| Ok(self.get(file, id)?.ok());
+            if metadata_stream(&self.trailer, &get)? == Some(id) {
+                return Ok(Ok(Crypt::Written));
+            }
+        }
+        if self.embedded_files
+            && dict.get(b"Type").and_then(Object::as_name) == Some(b"EmbeddedFile")
+        {
+            return Ok(Err(Error::EmbeddedFile));
+        }
+        let failed = Cell::new(None);
+        let resolve = |id| match self.get(file, id) {
+            Ok(object) => object.ok(),
+            Err(error) => {
+                failed.set(Some(error));
+                None
+            }
+        };
+        let crypt = filter::crypt_filter(dict, Some(&resolve));
+        if let Some(error) = failed.into_inner() {
+            return Err(error);
+        }
+        Ok(match (&self.handler, &self.encryption) {
+            (Some(handler), _) => {
+                let method = crypt.map(|name| handler.named(&name));
+                Ok(Crypt::Decrypted(handler, method))
+            }
+            (None, Encryption::Plain) => match crypt.as_deref() {
+                Some(name) if name != b"Identity" => Err(Error::Locked),
+                _ => Ok(Crypt::Written),
+            },
+            (None, Encryption::Unsupported(_)) => Err(Error::Unsupported),
+            (None, _) => Err(Error::Locked),
+        })
     }
 
     /// Whether object `id`'s strings are ciphertext.
@@ -2418,11 +2570,11 @@ impl Reader {
             );
             cx.warn(None, encrypt.at, message);
         }
+        self.dictionaries.extend(own);
         if self.plain_strings {
             return Ok(());
         }
-        let earlier = std::mem::take(&mut self.dictionaries);
-        self.encrypted = Some(own.into_iter().chain(earlier).collect());
+        self.encrypted = Some(self.dictionaries.clone());
         Ok(())
     }
 
@@ -2521,11 +2673,13 @@ impl Reader {
             Ok(handler) => matches!(handler.streams(), Method::Identity | Method::None),
             Err(_) => values.v >= 4 && identity(&values.stm_f),
         };
-        self.plain_metadata = plain_streams
-            || match &opened {
-                Ok(handler) => !handler.encrypts_metadata(),
-                Err(_) => values.v >= 4 && values.encrypt_metadata == Some(false),
-            };
+        self.unencrypted_metadata = match &opened {
+            Ok(handler) => !handler.encrypts_metadata(),
+            Err(_) => values.v >= 4 && values.encrypt_metadata == Some(false),
+        };
+        self.plain_metadata = plain_streams || self.unencrypted_metadata;
+        // Said as written: a null is no entry (ISO 32000-2, 7.3.9).
+        self.embedded_files = (dict.get(b"EFF")).is_some_and(|o| !matches!(o.value(), Value::Null));
         Ok(match opened {
             Ok(handler) => {
                 for fault in handler.faults() {
@@ -2782,7 +2936,12 @@ fn object_stream_header(object: &Object, data: &[u8]) -> Result<Vec<(u32, usize)
 
 /// Whether `o` is a cross-reference stream.
 fn is_xref_stream(o: &Object) -> bool {
-    matches!(o.value(), Value::Stream(s) if s.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef"))
+    matches!(o.value(), Value::Stream(s) if is_xref(&s.dict))
+}
+
+/// Whether `dict` is a cross-reference stream's.
+fn is_xref(dict: &Dict) -> bool {
+    dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef")
 }
 
 /// In an encrypted file it opened, object `id`'s strings in plain view
@@ -3050,6 +3209,8 @@ fn holds_linearization<'f, F: Bytes<'f>>(
 
 #[cfg(test)]
 mod lazy;
+#[cfg(test)]
+mod streams;
 #[cfg(test)]
 mod words;
 
@@ -4689,7 +4850,12 @@ mod tests {
     /// `file`, written by [`write::encrypted`] with its encryption
     /// dictionary 6 0 R, and an update that writes the dictionary again
     /// with `from` in it made `to`, and `extra` objects.
-    fn encryption_updated(file: &[u8], from: &str, to: &str, extra: &[(u32, &str)]) -> Vec<u8> {
+    pub(super) fn encryption_updated(
+        file: &[u8],
+        from: &str,
+        to: &str,
+        extra: &[(u32, &str)],
+    ) -> Vec<u8> {
         let start = find(file, b"6 0 obj").unwrap();
         let end = start + find(&file[start..], b"endobj").unwrap();
         let own = String::from_utf8_lossy(&file[start + 7..end]).into_owned();

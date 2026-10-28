@@ -17,7 +17,11 @@ use crate::write::{self, Xref};
 const QUICK: Duration = Duration::from_secs(5);
 
 /// `file` opened on demand under `options`, by `passwords`.
-fn open<'f>(file: &'f [u8], passwords: &[&[u8]], options: &Options) -> Reading<&'f [u8]> {
+pub(super) fn open<'f>(
+    file: &'f [u8],
+    passwords: &[&[u8]],
+    options: &Options,
+) -> Reading<&'f [u8]> {
     Reading::open(file, passwords, options).unwrap()
 }
 
@@ -27,12 +31,12 @@ fn whole(file: &[u8], passwords: &[&[u8]], options: &Options) -> Whole {
 }
 
 /// `bytes` as hex digits.
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `file` with its trailer's `/Root 1 0 R` followed by `entries`.
-fn with_trailer(file: &[u8], entries: &str) -> Vec<u8> {
+pub(super) fn with_trailer(file: &[u8], entries: &str) -> Vec<u8> {
     let at = find(file, b"/Root 1 0 R").unwrap() + b"/Root 1 0 R".len();
     [&file[..at], entries.as_bytes(), &file[at..]].concat()
 }
@@ -41,7 +45,7 @@ fn with_trailer(file: &[u8], entries: &str) -> Vec<u8> {
 /// file encrypted by AES-256 with the user's password `user`, its strings
 /// and streams by `/StdCF`; and the object stream's data, zlib, encrypted
 /// so.
-fn encrypted_objects(filter: &str, data: Option<&[u8]>) -> Vec<u8> {
+pub(super) fn encrypted_objects(filter: &str, data: Option<&[u8]>) -> Vec<u8> {
     let values = pdf_crypt::writer::dictionary(&settings(pdf_crypt::writer::Kind::Aes256, b"user"));
     let handler = Handler::open(&values, b"0123456789abcdef", &[b"user"]).unwrap();
     let (objects, _) = objects_2_and_3();
@@ -70,14 +74,20 @@ fn encrypted_objects(filter: &str, data: Option<&[u8]>) -> Vec<u8> {
 /// [`unfiltered`]'s file, encrypted, but only its embedded files: its
 /// strings and streams `/Identity`, its `/EFF` a crypt filter of its own,
 /// which no password it's given opens ([`Encryption::Plain`]).
-fn attachments_only() -> Vec<u8> {
+pub(super) fn attachments_only() -> Vec<u8> {
+    only_attachments_encrypted(&unfiltered(false))
+}
+
+/// `file`, whose trailer has `/Root 1 0 R`, encrypted as
+/// [`attachments_only`]'s is.
+pub(super) fn only_attachments_encrypted(file: &[u8]) -> Vec<u8> {
     let zeros = hex(&[0; 32]);
     let encrypt = format!(
         " /Encrypt << /Filter /Standard /V 4 /R 4 /Length 128 /P -4 /O <{zeros}> /U <{zeros}> \
          /CF << /StdCF << /CFM /AESV2 /AuthEvent /EFOpen >> >> /StmF /Identity /StrF /Identity /EFF /StdCF >> \
          /ID [(0123456789abcdef) (0123456789abcdef)]"
     );
-    with_trailer(&unfiltered(false), &encrypt)
+    with_trailer(file, &encrypt)
 }
 
 /// A file whose last object, 4, is `3` without its `endobj`, which object

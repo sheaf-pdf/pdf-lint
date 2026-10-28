@@ -2,17 +2,19 @@
 //! on any thread; or read whole, into a [`Document`].
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::fmt;
 use std::io;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pdf_objects::object::{Object, ObjectId, Span};
+use pdf_objects::object::{Object, ObjectId, Span, Stream, Value};
 use pdf_objects::version::Version;
 
 use super::window::{ByPosition, Bytes, InMemory};
-use super::{Decode, Options, Reader, Whole, XrefEntry};
+use super::{Crypt, Decode, Options, Reader, Unfiltered, Whole, XrefEntry, is_xref};
+use crate::filter;
 use crate::source::{Document, Encryption, Facts, Record, Trailer, Unread, Update, Warning};
 
 /// A file's bytes, which a [`Reading`] reads. Bytes in memory give all of
@@ -144,7 +146,10 @@ pub enum Error {
     #[error("the file doesn't read: {0}")]
     Io(io::Error),
     /// The file is encrypted, and its bytes aren't handed out as written,
-    /// where they could be ciphertext.
+    /// where they could be ciphertext: at a span in the file
+    /// ([`Reading::bytes`]), or a stream's data that the reader doesn't
+    /// decrypt, as it doesn't the strings of the objects the encryption
+    /// dictionary refers to, which it's among ([`Reading::data`]).
     #[error("the file is encrypted, and its bytes aren't handed out as written")]
     Encrypted,
     /// No bytes the reading has are at `span`: it runs past the file, or
@@ -155,7 +160,51 @@ pub enum Error {
         /// Where the bytes were asked for.
         span: Span,
     },
+    /// Object `id`, whose data was asked for, isn't a stream.
+    #[error("{} {} R isn't a stream", .id.0, .id.1)]
+    NotAStream {
+        /// The object.
+        id: ObjectId,
+    },
+    /// The file is encrypted, and no password the reader was given opens
+    /// it, so a stream's data, which may be ciphertext, isn't handed out:
+    /// its password is needed. In a file whose streams aren't encrypted
+    /// ([`Encryption::Plain`]), only a stream's whose own `/Crypt` filter
+    /// encrypts it.
+    #[error("the file is encrypted, and no password the reader was given opens it")]
+    Locked,
+    /// The stream is an embedded file's (`/Type /EmbeddedFile`), in a file
+    /// whose encryption dictionary says by its `/EFF` how embedded files are
+    /// encrypted, which the reader doesn't apply.
+    #[error(
+        "it's an embedded file, encrypted as the file's /EFF says, which the reader doesn't decrypt"
+    )]
+    EmbeddedFile,
+    /// The file is encrypted by a security handler the reader can't open
+    /// ([`Encryption::Unsupported`]), so a stream's data, which may be
+    /// ciphertext, isn't handed out.
+    #[error("the file is encrypted by a security handler the reader can't open")]
+    Unsupported,
+    /// The stream's `/Filter` or `/DecodeParms` are ones the reader doesn't
+    /// take.
+    #[error("{0}")]
+    Filters(Unfiltered),
+    /// The stream's data doesn't decrypt cleanly: pdf-crypt's error, which
+    /// holds what decrypted, if anything did.
+    #[error("its data doesn't decrypt cleanly: {0}")]
+    Decrypt(pdf_crypt::Error),
+    /// The stream's data doesn't decode cleanly through its filters:
+    /// pdf-filters' error, which holds what decoded, however far that went,
+    /// and each fault. A stream that decodes past
+    /// [`Limits::stream`](super::Limits::stream) is cut off there, with
+    /// [`Fault::Limit`](pdf_filters::Fault::Limit) among them.
+    #[error("its data doesn't decode cleanly: {0}")]
+    Decode(pdf_filters::Error),
 }
+
+/// A stream, and its data as [`Reading::data`] hands it out; or why it
+/// doesn't.
+type Handed<'f> = Result<(&'f Stream, Cow<'f, [u8]>), Error>;
 
 /// [`Error::Outside`]'s text.
 fn outside(span: &Span) -> String {
@@ -181,7 +230,9 @@ fn outside(span: &Span) -> String {
 /// [`Reading::object_unkept`] reads one without keeping it. An object in an
 /// object stream is read from the stream's decoded data, the stream decoded
 /// and kept the first time an object in it is read, once, whichever thread
-/// asks.
+/// asks. [`Reading::data`] gives a stream's data, decrypted in an encrypted
+/// file it opened, and [`Reading::decoded`] that through its filters, each
+/// read when it's asked for, and not kept.
 ///
 /// Read in any order, on any threads, then made a [`Document`], a reading
 /// is the whole read, the same objects, warnings in the same order and the
@@ -457,10 +508,23 @@ impl<S: ByteSource> Reading<S> {
         file: F,
         span: Span,
     ) -> Result<Result<Cow<'f, [u8]>, Error>, F::Error> {
+        match span.stream {
+            None if self.reader.encrypts => Ok(Err(Error::Encrypted)),
+            _ => self.written_in(file, span),
+        }
+    }
+
+    /// The bytes at `span` as written: in the file, or in the decoded data
+    /// of the object stream it names, which is decoded and kept when it
+    /// isn't yet; of `file`.
+    fn written_in<'f, F: Bytes<'f>>(
+        &'f self,
+        file: F,
+        span: Span,
+    ) -> Result<Result<Cow<'f, [u8]>, Error>, F::Error> {
         let range = span.start..span.end;
         let outside = Error::Outside { span };
         Ok(match span.stream {
-            None if self.reader.encrypts => Err(Error::Encrypted),
             None => file.get(range)?.ok_or(outside),
             Some((stream, 0)) => match self.reader.container(file, stream)? {
                 None => Err(outside),
@@ -470,6 +534,128 @@ impl<S: ByteSource> Reading<S> {
                 },
             },
             Some(_) => Err(outside),
+        })
+    }
+
+    /// The data of stream `id`, as written, filters and all; in an
+    /// encrypted file, decrypted as the reader decrypts an object stream's:
+    /// by the stream's own `/Crypt` filter when it has one, else as the
+    /// encryption dictionary's `/StmF` says (ISO 32000-2, 7.6.6). The stream
+    /// is read and kept, as [`Reading::get`] keeps it, but not its data,
+    /// which is read each time it's asked for, borrowed from a source in
+    /// memory where nothing's decrypted.
+    ///
+    /// Left as written, as the reader leaves them: a cross-reference
+    /// stream's, which is never encrypted (7.5.8.2), and the catalog's
+    /// metadata stream's under `/EncryptMetadata false`, whether the file
+    /// opens or not, as [`Document::metadata`] has it. Refused, where it may
+    /// be ciphertext the reader doesn't decrypt: in a file no password
+    /// opened ([`Error::Locked`]), but one whose streams aren't encrypted
+    /// ([`Encryption::Plain`]), whose data is as written but a stream's that
+    /// its own crypt filter encrypts; in a file whose security handler the
+    /// reader can't open ([`Error::Unsupported`]); an embedded file's in a
+    /// file whose encryption dictionary has an `/EFF`
+    /// ([`Error::EmbeddedFile`]); and a stream's that the encryption
+    /// dictionary refers to ([`Error::Encrypted`]). Data that doesn't
+    /// decrypt cleanly is an error holding what did ([`Error::Decrypt`]).
+    pub fn data(&self, id: ObjectId) -> Result<Cow<'_, [u8]>, Error> {
+        let data = match self.source.whole() {
+            Some(file) => {
+                let Ok(data) = self.data_in(InMemory(file), id);
+                data
+            }
+            None => self.data_in(self.by_position(), id).map_err(Error::Io)?,
+        };
+        data.map(|(_, data)| data)
+    }
+
+    /// The data of stream `id` decoded: [`Reading::data`] through the
+    /// stream's filters, by pdf-filters, its `/Filter` and `/DecodeParms`
+    /// read as the reader reads an object stream's (references followed
+    /// through what's read and kept, but in a cross-reference stream's,
+    /// whose values are direct), up to [`Limits::stream`](super::Limits::stream)
+    /// bytes; a stream without filters is its data. What's decoded isn't
+    /// kept, nor counted against the reading's budget, which is for what
+    /// the reading keeps. Data that doesn't decode cleanly is an error
+    /// holding what did, a stream cut off at the limit among them
+    /// ([`Error::Decode`]).
+    pub fn decoded(&self, id: ObjectId) -> Result<Vec<u8>, Error> {
+        match self.source.whole() {
+            Some(file) => {
+                let Ok(decoded) = self.decoded_in(InMemory(file), id);
+                decoded
+            }
+            None => self.decoded_in(self.by_position(), id).map_err(Error::Io)?,
+        }
+    }
+
+    /// Stream `id`, and its data, as [`Reading::data`] gives it, of `file`.
+    fn data_in<'f, F: Bytes<'f>>(&'f self, file: F, id: ObjectId) -> Result<Handed<'f>, F::Error> {
+        let reader = &self.reader;
+        let stream = match reader.get(file, id)? {
+            Ok(object) => match object.value() {
+                Value::Stream(stream) => stream,
+                _ => return Ok(Err(Error::NotAStream { id })),
+            },
+            Err(why) => return Ok(Err(Error::Unread(why))),
+        };
+        let crypt = match reader.crypt(file, id, &stream.dict)? {
+            Ok(crypt) => crypt,
+            Err(error) => return Ok(Err(error)),
+        };
+        let written = match stream.data.at() {
+            Some(at) => match self.written_in(file, at)? {
+                Ok(written) => written,
+                Err(error) => return Ok(Err(error)),
+            },
+            // The bytes it holds, where it isn't placed: never a stream the
+            // reader read.
+            None => Cow::Borrowed(stream.data.bytes().unwrap_or_default()),
+        };
+        Ok(match crypt {
+            Crypt::Written => Ok((stream, written)),
+            Crypt::Decrypted(handler, method) => {
+                match handler.decrypt_stream(id, &written, method.as_ref()) {
+                    Ok(plain) => Ok((stream, Cow::Owned(plain))),
+                    Err(error) => Err(Error::Decrypt(error)),
+                }
+            }
+        })
+    }
+
+    /// [`Reading::decoded`], of `file`.
+    fn decoded_in<'f, F: Bytes<'f>>(
+        &'f self,
+        file: F,
+        id: ObjectId,
+    ) -> Result<Result<Vec<u8>, Error>, F::Error> {
+        let (stream, data) = match self.data_in(file, id)? {
+            Ok(read) => read,
+            Err(error) => return Ok(Err(error)),
+        };
+        let reader = &self.reader;
+        let failed = Cell::new(None);
+        let resolve = |id| match reader.get(file, id) {
+            Ok(object) => object.ok(),
+            Err(error) => {
+                failed.set(Some(error));
+                None
+            }
+        };
+        // A cross-reference stream's values are direct (ISO 32000-2,
+        // 7.5.8.2), so its references aren't followed, as the file is read.
+        let filters = match is_xref(&stream.dict) {
+            true => filter::filters(&stream.dict, None),
+            false => filter::filters(&stream.dict, Some(&resolve)),
+        };
+        if let Some(error) = failed.into_inner() {
+            return Err(error);
+        }
+        Ok(match filters {
+            Ok(filters) => {
+                pdf_filters::decode(&data, &filters, reader.limits.stream).map_err(Error::Decode)
+            }
+            Err(why) => Err(Error::Filters(why)),
         })
     }
 
