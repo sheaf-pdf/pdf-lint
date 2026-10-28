@@ -277,7 +277,10 @@ fn on_demand(name: &str, file: &[u8], passwords: &[&[u8]], options: &Options) ->
         }
         assert_eq!(lazily.document, *doc, "{name}, {order}");
         assert_eq!(warnings, doc.warnings, "{name}, {order}");
-        assert_eq!(records, doc.records, "{name}, {order}");
+        let held: BTreeMap<ObjectId, Record> = (doc.records())
+            .map(|(id, record)| (id, record.clone()))
+            .collect();
+        assert_eq!(records, held, "{name}, {order}");
         assert_eq!(metadata, doc.metadata, "{name}, {order}");
         compared += 1;
     }
@@ -343,7 +346,7 @@ fn a_source_behind_a_box_or_shared_reads_as_it_does() {
     assert!(reading.source().whole().is_some());
     let id = reading.id();
     let read = reading.into_document().unwrap();
-    assert!(read.records.values().all(|record| record.source == id));
+    assert!(read.records().all(|(_, record)| record.source == id));
     assert_eq!(read, doc);
     let reading = Reading::open(Arc::clone(&shared), &[], &Options::DEFAULT).unwrap();
     assert!(Arc::ptr_eq(&reading.into_source(), &shared));
@@ -538,28 +541,28 @@ fn an_objects_record_says_whether_endobj_follows_it() {
     );
     let doc = read(&file);
     let extent = |n: u32| {
-        let at = doc.records[&(n, 0)].at;
+        let at = doc.record((n, 0)).unwrap().at;
         &file[at.start..at.end]
     };
-    assert!(doc.records[&(1, 0)].endobj);
+    assert!(doc.record((1, 0)).unwrap().endobj);
     assert_eq!(extent(1), b"1 0 obj\n<< /Type /Catalog >>\nendobj");
-    assert!(!doc.records[&(2, 0)].endobj);
+    assert!(!doc.record((2, 0)).unwrap().endobj);
     assert_eq!(extent(2), b"2 0 obj\n<< /A 1 >>");
-    assert_eq!(doc.records[&(1, 0)].origin, Origin::File);
-    let data = |n: u32| doc.records[&(n, 0)].data.unwrap();
+    assert_eq!(doc.record((1, 0)).unwrap().origin, Origin::File);
+    let data = |n: u32| doc.record((n, 0)).unwrap().data.unwrap();
     assert!(data(3).declared && data(3).indirect_length);
     assert_eq!(&file[data(3).at.start..data(3).at.end], b"abc");
     assert!(!data(5).declared && !data(5).indirect_length);
     assert_eq!(&file[data(5).at.start..data(5).at.end], b"abcdef\n");
     assert!(extent(5).ends_with(b"endstream\nendobj"));
-    assert_eq!(doc.records[&(4, 0)].data, None);
+    assert_eq!(doc.record((4, 0)).unwrap().data, None);
 
     // Scanned, each is recovered.
     let mut scanned = file.clone();
     scanned.truncate(rfind(&file, b"startxref").unwrap());
     let doc = read(&scanned);
     assert!(doc.trailer.unwritten.is_some());
-    assert!(doc.records.values().all(|r| r.origin == Origin::Recovered));
+    assert!(doc.records().all(|(_, r)| r.origin == Origin::Recovered));
 }
 
 /// The budget is spent in the order streams are decoded: read whole, by

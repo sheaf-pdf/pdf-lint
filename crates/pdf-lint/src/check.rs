@@ -4477,8 +4477,10 @@ mod tests {
             (found, unchecked)
         };
         let placed = content(&doc);
-        for object in doc.objects.values_mut().flatten() {
-            object.at = None;
+        for id in doc.ids() {
+            if let Some(object) = doc.get_mut(id) {
+                object.at = None;
+            }
         }
         assert_eq!(content(&doc), placed);
         assert_eq!(

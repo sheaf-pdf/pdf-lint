@@ -21,7 +21,7 @@ use pdf_objects::version::Version;
 
 use crate::bytes::{Decode, Written};
 use crate::json::{self, Json};
-use crate::source::{Document, Trailer, Unread, Warning};
+use crate::source::{Document, Held, Trailer, Unread, Warning};
 
 /// How many objects one run is asked for by number: past it, a command line
 /// grows long.
@@ -145,26 +145,20 @@ impl Qpdf {
             if key == "trailer" {
                 trailer = Some(indirect(value)?);
             } else if let Some(id) = key.strip_prefix("obj:").and_then(reference) {
-                objects.insert(id, indirect(value).map_err(Unread::Other));
+                let object = indirect(value).map(|object| (object, None));
+                objects.insert(id, object.map_err(Unread::Other));
             } else {
                 return Err(format!("qpdf's JSON has {key:?} among its objects"));
             }
         }
         let trailer = trailer.ok_or("qpdf's JSON has no trailer")?;
         let warnings = warnings(&err, &self.file);
-        Ok(Document {
-            trailer: trailer_of(trailer, &objects, &warnings),
-            objects,
-            header,
-            warnings,
-            decoded: BTreeMap::new(),
-            update: None,
-            size: (std::fs::metadata(&self.file).ok()).and_then(|m| usize::try_from(m.len()).ok()),
-            metadata: None,
-            encryption: Default::default(),
-            records: BTreeMap::new(),
-            facts: Default::default(),
-        })
+        let trailer = trailer_of(trailer, &objects, &warnings);
+        let mut doc = Document::read(objects, trailer);
+        doc.header = header;
+        doc.warnings = warnings;
+        doc.size = (std::fs::metadata(&self.file).ok()).and_then(|m| usize::try_from(m.len()).ok());
+        Ok(doc)
     }
 
     /// `file`, the file's bytes, read by the bytes reader with qpdf
@@ -492,14 +486,14 @@ fn unhex(hex: &str) -> Result<Vec<u8>, String> {
 /// writes it, when qpdf reconstructed the cross-references.
 fn trailer_of(
     trailer: Object,
-    objects: &BTreeMap<ObjectId, Result<Object, Unread>>,
+    objects: &BTreeMap<ObjectId, Held>,
     warnings: &[Warning],
 ) -> Trailer {
     let unwritten = (warnings.iter())
         .find(|w| w.message.contains("reconstruct"))
         .map(|w| format!("qpdf read the file otherwise: {}", w.message));
     let stream = (objects.iter()).find_map(|(&id, object)| {
-        let s = object.as_ref().ok()?.as_stream()?;
+        let s = object.as_ref().ok()?.0.as_stream()?;
         let xref = s.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef");
         (xref && Some(&s.dict) == trailer.as_dict()).then(|| (id, s.clone()))
     });
@@ -558,6 +552,7 @@ mod tests {
 
     use super::*;
     use crate::bytes;
+    use crate::source::Source;
     use crate::write::{self, Body, Xref};
 
     /// qpdf, which these tests need: `PDF_LINT_QPDF`, else `qpdf` on the
@@ -760,10 +755,8 @@ mod tests {
         assert!(doc.trailer.stream.is_some(), "a cross-reference stream");
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         let mut in_streams = 0;
-        for (id, object) in &doc.objects {
-            let object = object
-                .as_ref()
-                .unwrap_or_else(|why| panic!("{id:?}: {why}"));
+        assert_eq!(doc.unread().next(), None);
+        for (id, object) in doc.objects() {
             let at = object.at.unwrap();
             if let Some(stream) = at.stream {
                 in_streams += 1;
@@ -784,7 +777,8 @@ mod tests {
         let through = bytes::read_through(&data, &qpdf(&path));
         assert!(through.warnings.is_empty(), "{:?}", through.warnings);
         assert_eq!(through.decoded, doc.decoded);
-        assert_eq!(through.objects, doc.objects);
+        assert!(through.objects().eq(doc.objects()));
+        assert!(through.unread().eq(doc.unread()));
     }
 
     /// A decoder that mustn't be asked anything: neither to decode nor for
@@ -824,7 +818,7 @@ mod tests {
             );
             assert!(doc.warnings.is_empty(), "{kind}: {:?}", doc.warnings);
             assert_eq!(doc.trailer.unwritten, None, "{kind}");
-            let annot = (doc.objects.values().flatten())
+            let annot = (doc.objects().map(|(_, o)| o))
                 .find(|o| {
                     o.as_dict().is_some_and(|d| {
                         d.get(b"Subtype").and_then(Object::as_name) == Some(b"Text")
@@ -1116,10 +1110,7 @@ qpdf: operation succeeded with warnings\n";
     fn differences(a: &Document, b: &Document) -> Vec<(String, String)> {
         let nothing = |o: &Object| match o.value() {
             Value::Null => true,
-            Value::Ref(id) => match a.objects.get(id) {
-                None | Some(Err(_)) => true,
-                Some(Ok(o)) => o.is_null(),
-            },
+            Value::Ref(id) => a.get(*id).map_or(true, Object::is_null),
             _ => false,
         };
         let is_xref = |o: &Object| match o.value() {
@@ -1128,9 +1119,9 @@ qpdf: operation succeeded with warnings\n";
         };
         let mut found: Vec<(String, String)> = Vec::new();
         let mut push = |kind: &str, d: String| found.push((kind.to_string(), d));
-        for (id, x) in &a.objects {
+        for id in a.ids() {
             let (n, g) = id;
-            match (x, b.objects.get(id)) {
+            match (a.get(id), b.contains(id).then(|| b.get(id))) {
                 (_, None) => push("only the bytes list it", format!("{n} {g} R")),
                 (Ok(x), Some(Ok(y))) => {
                     if let Some((kind, d)) = difference(x, y, &format!("{n} {g} R"), &nothing) {
@@ -1151,9 +1142,9 @@ qpdf: operation succeeded with warnings\n";
                 (Err(_), Some(Err(_))) => {}
             }
         }
-        for (id, y) in (b.objects.iter()).filter(|(id, _)| !a.objects.contains_key(id)) {
+        for id in b.ids().into_iter().filter(|&id| !a.contains(id)) {
             let (n, g) = id;
-            let kind = match y {
+            let kind = match b.get(id) {
                 Ok(y) if is_xref(y) => "only qpdf lists it: a cross-reference stream",
                 Ok(y) if y.is_null() => "only qpdf lists it, as null",
                 _ => "only qpdf lists it",
@@ -1192,7 +1183,7 @@ qpdf: operation succeeded with warnings\n";
             assert!(alone.warnings.is_empty(), "{test}: {:?}", alone.warnings);
             assert_eq!(alone.trailer.unwritten, None, "{test}");
             assert!(
-                (alone.objects.values().flatten()).all(|o| o.at.is_none()),
+                alone.objects().all(|(_, o)| o.at.is_none()),
                 "{test}: qpdf says nowhere"
             );
         }
@@ -1212,7 +1203,7 @@ qpdf: operation succeeded with warnings\n";
         );
         std::fs::write(&path, &file).unwrap();
         let alone = qpdf(&path).read().unwrap();
-        let catalog = alone.objects[&(1, 0)].as_ref().unwrap().as_dict().unwrap();
+        let catalog = alone.get((1, 0)).unwrap().as_dict().unwrap();
         assert!(catalog.has(b"Odd Name") && catalog.has(b"Bin\xFFx"));
         assert_eq!(
             catalog.entries().iter().filter(|e| e.key == b"Dup").count(),
@@ -1254,7 +1245,7 @@ qpdf: operation succeeded with warnings\n";
         std::fs::write(&damaged, &broken).unwrap();
         let alone = qpdf(&damaged).read().unwrap();
         assert!(alone.trailer.unwritten.is_some(), "{:?}", alone.warnings);
-        assert!(alone.objects.contains_key(&(1, 0)));
+        assert!(alone.contains((1, 0)));
     }
 
     #[test]
@@ -1317,7 +1308,7 @@ qpdf: operation succeeded with warnings\n";
         let path = fixture("qpdf-aes-256-unpacked");
         let data = std::fs::read(&path).unwrap();
         let contents = |doc: &Document| {
-            let annot = (doc.objects.values().flatten())
+            let annot = (doc.objects().map(|(_, o)| o))
                 .find(|o| {
                     o.as_dict().is_some_and(|d| {
                         d.get(b"Subtype").and_then(Object::as_name) == Some(b"Text")
@@ -1354,7 +1345,7 @@ qpdf: operation succeeded with warnings\n";
         // ciphertext, where it is.
         let doc = bytes::read_opened(&data, &[b"wrong"]);
         assert_eq!(doc.encryption, crate::Encryption::Locked);
-        let annot = (doc.objects.values().flatten())
+        let annot = (doc.objects().map(|(_, o)| o))
             .find(|o| {
                 o.as_dict()
                     .is_some_and(|d| d.get(b"Contents").is_some_and(|c| c.at == Some(at)))
@@ -1430,7 +1421,7 @@ qpdf: operation succeeded with warnings\n";
                             }
                         }
                         let mut tally = tally.lock().unwrap();
-                        tally.objects += bytes.objects.len();
+                        tally.objects += bytes.ids().len();
                         tally.files_differing += usize::from(!found.is_empty());
                         for (kind, d) in found {
                             add(&mut tally.differences, kind, format!("{name}: {d}"));
@@ -1596,7 +1587,7 @@ qpdf: operation succeeded with warnings\n";
         let theirs = Qpdf::new(&path).specialized().decode(&ids);
         for (i, (name, _, _, expect)) in cases.iter().enumerate() {
             let id = ids[i];
-            let object = doc.objects[&id].as_ref().unwrap();
+            let object = doc.get(id).unwrap();
             let Value::Stream(stream) = object.value() else {
                 panic!("{name}")
             };
@@ -1782,8 +1773,8 @@ qpdf: operation succeeded with warnings\n";
                             };
                             found.push((kind, format!("{} {} R", id.0, id.1)));
                         }
-                        for (id, object) in &ours.objects {
-                            let kind = match (object, through.objects.get(id)) {
+                        for id in ours.ids() {
+                            let kind = match (ours.get(id), through.contains(id).then(|| through.get(id))) {
                                 (Ok(a), Some(Ok(b))) if a == b => continue,
                                 (Err(_), Some(Err(_)) | None) => continue,
                                 (Ok(_), Some(Ok(_))) => "an object reads otherwise",
@@ -1793,10 +1784,10 @@ qpdf: operation succeeded with warnings\n";
                             found.push((kind.to_string(), format!("{} {} R", id.0, id.1)));
                         }
                         // Every stream with filters it decodes.
-                        let resolve = |id| ours.objects.get(&id)?.as_ref().ok();
-                        let streams: Vec<(ObjectId, Vec<pdf_filters::Filter>, &[u8])> = (ours.objects.iter())
-                            .filter_map(|(&id, object)| {
-                                let Value::Stream(stream) = object.as_ref().ok()?.value() else {
+                        let resolve = |id| ours.get(id).ok();
+                        let streams: Vec<(ObjectId, Vec<pdf_filters::Filter>, &[u8])> = (ours.objects())
+                            .filter_map(|(id, object)| {
+                                let Value::Stream(stream) = object.value() else {
                                     return None;
                                 };
                                 let at = stream.data.at().filter(|at| at.stream.is_none())?;
@@ -2079,7 +2070,7 @@ qpdf: operation succeeded with warnings\n";
                         let mut alike = 0;
                         let (mut decoded, mut decoded_alike) = (0, 0);
                         if let Some(handler) = &handler {
-                            let resolve = |id| ours.objects.get(&id)?.as_ref().ok();
+                            let resolve = |id| ours.get(id).ok();
                             // The document's metadata stream, the catalog's,
                             // which /EncryptMetadata false leaves plain.
                             let catalog = ours.trailer.dict().get(b"Root").and_then(|r| match *r.value() {
@@ -2096,9 +2087,9 @@ qpdf: operation succeeded with warnings\n";
                             // Each stream: decrypted, its filters, and whether
                             // a /Crypt filter of its names none.
                             type Decrypted = (ObjectId, Result<Vec<u8>, pdf_crypt::Error>, Vec<pdf_filters::Filter>, bool);
-                            let mine: Vec<Decrypted> = (ours.objects.iter())
-                                .filter_map(|(&id, object)| {
-                                    let Value::Stream(stream) = object.as_ref().ok()?.value() else {
+                            let mine: Vec<Decrypted> = (ours.objects())
+                                .filter_map(|(id, object)| {
+                                    let Value::Stream(stream) = object.value() else {
                                         return None;
                                     };
                                     let at = stream.data.at().filter(|at| at.stream.is_none())?;

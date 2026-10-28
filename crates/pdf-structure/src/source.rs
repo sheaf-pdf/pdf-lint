@@ -4,6 +4,7 @@
 //! ([`Record`]) and of the file as written ([`Facts`]).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::RangeBounds;
 
 use pdf_objects::Resolve;
 use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
@@ -98,11 +99,17 @@ impl Trailer {
 
 /// A file read whole: its objects, trailer, header version and warnings.
 /// A reader outside the crate starts from [`Document::new`].
+///
+/// Each object is kept with the [`Record`] of where it was read, while
+/// it's as read: an object put in ([`Document::set`]) has none, and one
+/// taken to edit ([`Document::get_mut`]) loses it, so a record is always
+/// of the object beside it.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Document {
-    /// Each object its cross-references list, or why it doesn't read.
-    pub objects: BTreeMap<ObjectId, Result<Object, Unread>>,
+    /// Each object its cross-references list, with where it was read while
+    /// it's as read, or why it doesn't read.
+    objects: BTreeMap<ObjectId, Held>,
     /// The trailer.
     pub trailer: Trailer,
     /// The version in the header.
@@ -110,7 +117,9 @@ pub struct Document {
     /// What the reader had to choose how to read, in the order it chose.
     pub warnings: Vec<Warning>,
     /// The object streams' decoded data, by stream, which the objects
-    /// read from them are placed in ([`Span::stream`]).
+    /// read from them are placed in ([`Span::stream`]). The record of an
+    /// object read from one names its bytes here, so it says where the
+    /// object was read only while this is as read.
     pub decoded: BTreeMap<ObjectId, Vec<u8>>,
     /// The file's newest incremental update, when the reader read its
     /// cross-reference sections and the newest follows one written before
@@ -123,9 +132,6 @@ pub struct Document {
     pub metadata: Option<Vec<u8>>,
     /// Whether the file is encrypted, and if it is, whether it opened.
     pub encryption: Encryption,
-    /// Where each object that reads was read from, by the bytes reader;
-    /// none from another.
-    pub records: BTreeMap<ObjectId, Record>,
     /// What the file's cross-reference sections and header say of it, as
     /// written, by the bytes reader; the defaults from another.
     pub facts: Facts,
@@ -133,10 +139,11 @@ pub struct Document {
 
 /// Where an object was read from, which the bytes reader records when it
 /// first reads it ([`crate::bytes::Reading::record`]), in the reading it
-/// read it in. Two records are equal when they say the same of where
-/// their objects were read, whichever readings they're of, so that two
-/// readings of one file are equal; [`Record::source`] tells the readings
-/// apart.
+/// read it in; a [`Document`] keeps it with the object while the object
+/// is as read ([`Document::record`]). Two records are equal when they say
+/// the same of where their objects were read, whichever readings they're
+/// of, so that two readings of one file are equal; [`Record::source`]
+/// tells the readings apart.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Record {
@@ -286,7 +293,7 @@ pub struct Update {
 }
 
 /// Why an object doesn't read: what [`Source::get`] gives in its place,
-/// and [`Document::objects`] holds. Each is one of the bytes reader's
+/// and [`Document::unread`] gives. Each is one of the bytes reader's
 /// reasons ([`crate::bytes`]), or another reader's words.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -419,6 +426,11 @@ impl Update {
     }
 }
 
+/// What a [`Document`] holds of an object its cross-references list: the
+/// object, with the record of where it was read while it's as read, none
+/// for one put in or taken to edit; or why it doesn't read.
+pub(crate) type Held = Result<(Object, Option<Record>), Unread>;
+
 impl Document {
     /// A document with no objects yet, under `trailer`, its header at
     /// `version`: where a reader outside the crate starts, filling in what
@@ -452,14 +464,105 @@ impl Document {
             size: None,
             metadata: None,
             encryption: Encryption::None,
-            records: BTreeMap::new(),
             facts: Facts::default(),
         }
     }
 
-    /// Adds object `n`, generation 0.
+    /// What a reader read: `objects`, each with the record of where it was
+    /// read, under `trailer`; the rest as [`Document::new`] leaves it, and
+    /// no header, for the reader to fill in.
+    pub(crate) fn read(objects: BTreeMap<ObjectId, Held>, trailer: Trailer) -> Document {
+        Document {
+            objects,
+            trailer,
+            header: None,
+            warnings: Vec::new(),
+            decoded: BTreeMap::new(),
+            update: None,
+            size: None,
+            metadata: None,
+            encryption: Encryption::None,
+            facts: Facts::default(),
+        }
+    }
+
+    /// Adds object `n`, generation 0, with no record: [`Document::set`]
+    /// at `(n, 0)`.
     pub fn insert(&mut self, n: u32, object: impl Into<Object>) {
-        self.objects.insert((n, 0), Ok(object.into()));
+        self.set((n, 0), object);
+    }
+
+    /// Whether it lists object `id`, whether it reads or not.
+    pub fn contains(&self, id: ObjectId) -> bool {
+        self.objects.contains_key(&id)
+    }
+
+    /// Each object that reads, by number.
+    pub fn objects(&self) -> impl DoubleEndedIterator<Item = (ObjectId, &Object)> {
+        (self.objects.iter()).filter_map(|(&id, held)| Some((id, &held.as_ref().ok()?.0)))
+    }
+
+    /// Each object that reads whose id is in `range`, by number: a
+    /// number's every generation, `n`'s, is `(n, 0)..=(n, u16::MAX)`.
+    ///
+    /// # Panics
+    ///
+    /// When `range` starts after it ends, or starts and ends at one id it
+    /// leaves out, as [`BTreeMap::range`] does.
+    pub fn range(
+        &self,
+        range: impl RangeBounds<ObjectId>,
+    ) -> impl DoubleEndedIterator<Item = (ObjectId, &Object)> {
+        (self.objects.range(range)).filter_map(|(&id, held)| Some((id, &held.as_ref().ok()?.0)))
+    }
+
+    /// Each object it lists that doesn't read, by number, with why.
+    pub fn unread(&self) -> impl DoubleEndedIterator<Item = (ObjectId, &Unread)> {
+        (self.objects.iter()).filter_map(|(&id, held)| Some((id, held.as_ref().err()?)))
+    }
+
+    /// Where object `id` was read from, while it's as read: none for an
+    /// object put in by [`Document::set`] or taken to edit by
+    /// [`Document::get_mut`], one a reader other than the bytes reader
+    /// read, or one that doesn't read.
+    pub fn record(&self, id: ObjectId) -> Option<&Record> {
+        self.objects.get(&id)?.as_ref().ok()?.1.as_ref()
+    }
+
+    /// Each object's record, by number: each [`Document::record`] gives.
+    pub fn records(&self) -> impl DoubleEndedIterator<Item = (ObjectId, &Record)> {
+        (self.objects.iter()).filter_map(|(&id, held)| Some((id, held.as_ref().ok()?.1.as_ref()?)))
+    }
+
+    /// Puts `object` at `id`, with no record, as it wasn't read: gives the
+    /// object it replaces, when one that read was there.
+    pub fn set(&mut self, id: ObjectId, object: impl Into<Object>) -> Option<Object> {
+        let was = self.objects.insert(id, Ok((object.into(), None)));
+        was?.ok().map(|(object, _)| object)
+    }
+
+    /// Puts why object `id` doesn't read at `id`, as a reader outside the
+    /// crate does for an object it lists that doesn't read: gives the
+    /// object it replaces, when one that read was there.
+    pub fn set_unread(&mut self, id: ObjectId, why: Unread) -> Option<Object> {
+        let was = self.objects.insert(id, Err(why));
+        was?.ok().map(|(object, _)| object)
+    }
+
+    /// Removes object `id`, whether it reads or not, its record with it:
+    /// gives the object, when it read.
+    pub fn remove(&mut self, id: ObjectId) -> Option<Object> {
+        self.objects.remove(&id)?.ok().map(|(object, _)| object)
+    }
+
+    /// Object `id`, to edit, when it reads. Its record is dropped, as what
+    /// the object is then is the caller's: a record says the object is as
+    /// it was read, which a `&mut` can replace whole without an edit that
+    /// drops its span.
+    pub fn get_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
+        let (object, record) = self.objects.get_mut(&id)?.as_mut().ok()?;
+        *record = None;
+        Some(object)
     }
 }
 
@@ -470,7 +573,7 @@ impl Source for Document {
 
     fn get(&self, id: ObjectId) -> Result<&Object, Unread> {
         match self.objects.get(&id) {
-            Some(Ok(object)) => Ok(object),
+            Some(Ok((object, _))) => Ok(object),
             Some(Err(why)) => Err(why.clone()),
             None => Err(Unread::Missing { id }),
         }
@@ -502,7 +605,7 @@ impl Source for Document {
 impl<'o> Resolve<'o> for &'o Document {
     fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
         let doc: &'o Document = self;
-        doc.objects.get(&id)?.as_ref().ok()
+        Some(&doc.objects.get(&id)?.as_ref().ok()?.0)
     }
 }
 
@@ -517,7 +620,7 @@ mod tests {
         let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
         doc.insert(1, dict! { "Type" => "Catalog" });
         let why = Unread::Other("it doesn't parse".to_string());
-        doc.objects.insert((2, 0), Err(why.clone()));
+        doc.set_unread((2, 0), why.clone());
         assert_eq!(doc.ids(), [(1, 0), (2, 0)]);
         assert!(doc.get((1, 0)).is_ok_and(|o| o.as_dict().is_some()));
         assert_eq!(doc.get((2, 0)), Err(why));
@@ -537,12 +640,202 @@ mod tests {
         let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
         doc.insert(1, dict! { "Type" => "Catalog" });
         let why = Unread::Other("it doesn't parse".to_string());
-        doc.objects.insert((2, 0), Err(why));
+        doc.set_unread((2, 0), why);
         let resolve = &doc;
         let catalog = resolve.resolve((1, 0)).unwrap();
         assert!(std::ptr::eq(catalog, doc.get((1, 0)).unwrap()));
         assert_eq!(resolve.resolve((2, 0)), None);
         assert_eq!(resolve.resolve((3, 0)), None);
+    }
+
+    /// A document's objects by number, in order and in a range of ids,
+    /// beside those that don't read; what it lists, read or not, by `ids`
+    /// and `contains`.
+    #[test]
+    fn a_documents_objects_are_read_by_number_in_order_and_in_a_range() {
+        let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
+        assert!(doc.ids().is_empty());
+        assert_eq!(doc.objects().next(), None);
+        doc.insert(1, dict! { "Type" => "Catalog" });
+        doc.insert(2, 2);
+        doc.insert(5, 5);
+        doc.set((6, 2), "Six");
+        doc.insert(7, 7);
+        let why = Unread::Other("it doesn't parse".to_string());
+        doc.set_unread((3, 0), why.clone());
+        fn ids<'o>(objects: impl Iterator<Item = (ObjectId, &'o Object)>) -> Vec<ObjectId> {
+            objects.map(|(id, _)| id).collect()
+        }
+
+        assert_eq!(doc.ids(), [(1, 0), (2, 0), (3, 0), (5, 0), (6, 2), (7, 0)]);
+        assert_eq!(doc.ids().len(), 6);
+        assert!(doc.contains((3, 0)) && doc.contains((6, 2)));
+        assert!(!doc.contains((4, 0)) && !doc.contains((6, 0)));
+        assert_eq!(ids(doc.objects()), [(1, 0), (2, 0), (5, 0), (6, 2), (7, 0)]);
+        assert!(
+            doc.objects()
+                .all(|(id, o)| std::ptr::eq(o, doc.get(id).unwrap()))
+        );
+        assert_eq!(ids(doc.objects().rev()).first(), Some(&(7, 0)));
+        assert_eq!(doc.unread().collect::<Vec<_>>(), [((3, 0), &why)]);
+        assert_eq!(doc.get((3, 0)), Err(why));
+        assert_eq!(doc.get((4, 0)), Err(Unread::Missing { id: (4, 0) }));
+
+        // Ranges as a caller asks them: between two ids, up to one, from
+        // one, and a number's every generation.
+        assert_eq!(ids(doc.range((2, 0)..(6, 0))), [(2, 0), (5, 0)]);
+        assert_eq!(ids(doc.range(..(5, 0))), [(1, 0), (2, 0)]);
+        assert_eq!(ids(doc.range((5, 0)..)), [(5, 0), (6, 2), (7, 0)]);
+        assert_eq!(ids(doc.range((6, 0)..=(6, u16::MAX))), [(6, 2)]);
+        assert_eq!(ids(doc.range((3, 0)..=(4, 0))), []);
+        assert_eq!(ids(doc.range(..(5, 0)).rev()).first(), Some(&(2, 0)));
+    }
+
+    /// A record is always of the object beside it: an object put in has
+    /// none, one replaced, removed or taken to edit loses its own, one
+    /// that doesn't read has none, and the rest keep theirs, each still
+    /// where its object was written; a clone keeps them all.
+    #[test]
+    fn each_write_keeps_the_records_true() {
+        let file = crate::write::assembled(
+            "1.7",
+            &[
+                (1, &b"<< /Type /Catalog >>"[..]),
+                (2, b"<< /A 1 >>"),
+                (3, b"<< /Length 3 >>\nstream\nabc\nendstream"),
+                (4, b"42"),
+                (5, b"(five)"),
+                (6, b"<< /Six 6 >>"),
+                (7, b"<< /A >> >>"),
+            ],
+            "<< /Size 8 /Root 1 0 R >>",
+        );
+        let read = crate::bytes::read(&file);
+        // Each record says where its object was written.
+        let true_to_the_file = |doc: &Document| {
+            for (id, record) in doc.records() {
+                let written = &file[record.at.start..record.at.end];
+                let header = format!("{} {} obj", id.0, id.1);
+                assert!(written.starts_with(header.as_bytes()), "{id:?}");
+                assert_eq!(
+                    doc.get(id).unwrap().at.map(|at| at.end <= record.at.end),
+                    Some(true)
+                );
+            }
+        };
+        let ids = |doc: &Document| -> Vec<ObjectId> { doc.records().map(|(id, _)| id).collect() };
+        assert_eq!(
+            read.unread().map(|(id, _)| id).collect::<Vec<_>>(),
+            [(7, 0)]
+        );
+        let reads: Vec<ObjectId> = read.objects().map(|(id, _)| id).collect();
+        assert_eq!(ids(&read), reads);
+        assert_eq!(read.record((7, 0)), None);
+        true_to_the_file(&read);
+
+        // A clone keeps every record, its reading's id too.
+        let mut doc = read.clone();
+        assert_eq!(doc, read);
+        assert!(doc.records().eq(read.records()));
+        assert!((doc.records().zip(read.records())).all(|((_, a), (_, b))| a.source == b.source));
+
+        // Put in: no record, giving back what it replaces where that read.
+        let catalog = read.get((1, 0)).unwrap().clone();
+        assert_eq!(
+            doc.set((1, 0), dict! { "Type" => "Catalog" }),
+            Some(catalog)
+        );
+        assert_eq!(doc.record((1, 0)), None);
+        assert_eq!(doc.set((8, 0), 8), None);
+        doc.insert(9, 9);
+        assert_eq!((doc.record((8, 0)), doc.record((9, 0))), (None, None));
+        assert_eq!(doc.set((7, 0), 7), None, "an object that didn't read");
+        assert_eq!(doc.record((7, 0)), None);
+
+        // Why one doesn't read: no record, giving back what read there.
+        let why = Unread::Other("set aside".to_string());
+        let two = read.get((2, 0)).unwrap().clone();
+        assert_eq!(doc.set_unread((2, 0), why.clone()), Some(two));
+        assert_eq!(doc.record((2, 0)), None);
+        assert_eq!(doc.get((2, 0)), Err(why.clone()));
+        assert_eq!(doc.set_unread((10, 0), why.clone()), None);
+
+        // Removed: the object, its record with it; one that doesn't read,
+        // nothing, and it's gone too.
+        let stream = read.get((3, 0)).unwrap().clone();
+        assert_eq!(doc.remove((3, 0)), Some(stream));
+        assert!(!doc.contains((3, 0)) && doc.record((3, 0)).is_none());
+        assert_eq!(doc.remove((10, 0)), None);
+        assert!(!doc.contains((10, 0)));
+        assert_eq!(doc.remove((3, 0)), None);
+
+        // Taken to edit, the record goes though nothing changes, as a
+        // `&mut` could have replaced the object whole; one that doesn't
+        // read, or isn't listed, isn't given.
+        let four = read.get((4, 0)).unwrap().clone();
+        assert_eq!(doc.get_mut((4, 0)), Some(&mut four.clone()));
+        assert_eq!(doc.get((4, 0)), Ok(&four));
+        assert_eq!(doc.record((4, 0)), None);
+        assert_eq!(doc.get_mut((2, 0)), None);
+        assert_eq!(doc.get((2, 0)), Err(why));
+        assert_eq!(doc.get_mut((11, 0)), None);
+        assert!(!doc.contains((11, 0)));
+
+        // What wasn't written to keeps its record, true to the file; and
+        // a document whose records went isn't the one read.
+        assert_eq!(ids(&doc), [(5, 0), (6, 0)]);
+        assert_eq!(doc.record((5, 0)), read.record((5, 0)));
+        true_to_the_file(&doc);
+        let mut edited = read.clone();
+        assert!(edited.get_mut((5, 0)).is_some());
+        assert!(edited.objects().eq(read.objects()));
+        assert_ne!(edited, read);
+
+        // Every object taken to edit, as a map's values would be: none
+        // keeps a record.
+        for id in edited.ids() {
+            if let Some(object) = edited.get_mut(id) {
+                object.at = None;
+            }
+        }
+        assert_eq!(edited.records().next(), None);
+        assert_eq!(edited.objects().count(), reads.len());
+    }
+
+    /// A document's header version, where the file's newest
+    /// cross-reference section starts and how it's written, and whether
+    /// the file is encrypted and opened.
+    #[test]
+    fn a_document_says_its_version_newest_section_and_encryption() {
+        let startxref = |file: &[u8]| -> usize {
+            let at = file.windows(9).rposition(|w| w == b"startxref").unwrap() + 9;
+            let digits: Vec<u8> = (file[at..].iter())
+                .skip_while(|b| b.is_ascii_whitespace())
+                .take_while(|b| b.is_ascii_digit())
+                .copied()
+                .collect();
+            String::from_utf8(digits).unwrap().parse().unwrap()
+        };
+        let file = crate::write::assembled(
+            "1.6",
+            &[(1, &b"<< /Type /Catalog >>"[..])],
+            "<< /Size 2 /Root 1 0 R >>",
+        );
+        let doc = crate::bytes::read(&file);
+        assert_eq!(doc.header, Some(Version::new(1, 6)));
+        let newest = Some((startxref(&file), XrefKind::Table));
+        assert_eq!(doc.facts.newest, newest);
+        assert_eq!(doc.encryption, Encryption::None);
+
+        // qpdf's file, its dictionaries in object streams, encrypted with
+        // AES-256 and opened by its empty user password.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/files/qpdf-aes-256.pdf");
+        let file = std::fs::read(path).unwrap();
+        let doc = crate::bytes::read(&file);
+        assert_eq!(doc.header, Some(Version::new(1, 7)));
+        assert_eq!(doc.facts.newest, Some((startxref(&file), XrefKind::Stream)));
+        assert_ne!(doc.encryption, Encryption::None);
+        assert_eq!(doc.encryption, Encryption::opened(false));
     }
 
     /// Each reason an object doesn't read says it as the reader's text

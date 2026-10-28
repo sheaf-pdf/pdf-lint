@@ -169,8 +169,8 @@ use pdf_objects::version::Version;
 use crate::filter;
 pub use crate::filter::Unfiltered;
 use crate::source::{
-    DataExtent, Document, Encryption, Facts, Origin, Record, Trailer, Unread, Update, Warning,
-    XrefKind,
+    DataExtent, Document, Encryption, Facts, Held, Origin, Record, Trailer, Unread, Update,
+    Warning, XrefKind,
 };
 
 mod file;
@@ -1372,7 +1372,6 @@ impl Reader {
             ..
         } = self;
         let mut objects = BTreeMap::new();
-        let mut records = BTreeMap::new();
         let (mut read, mut members, mut decrypted) = (Vec::new(), Vec::new(), Vec::new());
         for (&(n, (generation, entry)), slot) in entries.iter().zip(slots.into_vec()) {
             let Some(got) = slot.into_inner() else {
@@ -1394,11 +1393,7 @@ impl Reader {
                     (n, 0)
                 }
             };
-            let object = object.map(|(object, record)| {
-                records.insert(id, record);
-                object
-            });
-            objects.insert(id, object);
+            objects.insert(id, object.map(|(object, record)| (object, Some(record))));
         }
         let mut warnings = opened;
         warnings.extend(read);
@@ -1422,21 +1417,17 @@ impl Reader {
         if !natively {
             decrypt(decoder, encrypted.is_some(), &mut objects, &mut warnings);
         }
-        let get = |id| Ok(objects.get(&id).and_then(|o| o.as_ref().ok()));
+        let get = |id| Ok(objects.get(&id).and_then(|o| Some(&o.as_ref().ok()?.0)));
         let metadata = metadata(file, &trailer, &get, !plain_metadata)?.map(Cow::into_owned);
-        let document = Document {
-            objects,
-            trailer,
-            header: version,
-            warnings,
-            decoded,
-            update,
-            size: Some(file.len()),
-            metadata,
-            encryption,
-            records,
-            facts,
-        };
+        let mut document = Document::read(objects, trailer);
+        document.header = version;
+        document.warnings = warnings;
+        document.decoded = decoded;
+        document.update = update;
+        document.size = Some(file.len());
+        document.metadata = metadata;
+        document.encryption = encryption;
+        document.facts = facts;
         Ok(Whole {
             document,
             handler,
@@ -3007,14 +2998,14 @@ fn decrypt_strings(handler: &Handler, id: ObjectId, object: &mut Object) -> Vec<
 fn decrypt(
     decoder: Option<&dyn Decode>,
     encrypted: bool,
-    objects: &mut BTreeMap<ObjectId, Result<Object, Unread>>,
+    objects: &mut BTreeMap<ObjectId, Held>,
     warnings: &mut Vec<Warning>,
 ) {
     let Some(decoder) = decoder.filter(|_| encrypted) else {
         return;
     };
     let ids: Vec<ObjectId> = (objects.iter())
-        .filter(|(_, o)| o.as_ref().is_ok_and(|o| ciphertexts(o.value()) > 0))
+        .filter(|(_, o)| o.as_ref().is_ok_and(|(o, _)| ciphertexts(o.value()) > 0))
         .map(|(&id, _)| id)
         .collect();
     if ids.is_empty() {
@@ -3022,7 +3013,7 @@ fn decrypt(
     }
     let mut why_not: BTreeMap<String, usize> = BTreeMap::new();
     for (id, plain) in decoder.plaintext(&ids) {
-        let Some(Ok(object)) = objects.get_mut(&id) else {
+        let Some(Ok((object, _))) = objects.get_mut(&id) else {
             continue;
         };
         match plain {
@@ -4173,22 +4164,20 @@ mod tests {
                 None => written += 1,
                 Some(why) => *unwritten.entry(class(why)).or_insert(0) += 1,
             }
-            for object in doc.objects.values() {
-                match object {
-                    Ok(object) => {
-                        ok += 1;
-                        if i % 50 == 0 {
-                            // In the file, or in an object stream's data.
-                            let within = match object.at.and_then(|at| at.stream) {
-                                Some(stream) => &doc.decoded[&stream][..],
-                                None => &data[..],
-                            };
-                            let encrypted = doc.trailer.dict().has(b"Encrypt");
-                            placed_as(within, object, !encrypted);
-                        }
-                    }
-                    Err(why) => *bad.entry(class(&why.to_string())).or_insert(0usize) += 1,
+            for (_, object) in doc.objects() {
+                ok += 1;
+                if i % 50 == 0 {
+                    // In the file, or in an object stream's data.
+                    let within = match object.at.and_then(|at| at.stream) {
+                        Some(stream) => &doc.decoded[&stream][..],
+                        None => &data[..],
+                    };
+                    let encrypted = doc.trailer.dict().has(b"Encrypt");
+                    placed_as(within, object, !encrypted);
                 }
+            }
+            for (_, why) in doc.unread() {
+                *bad.entry(class(&why.to_string())).or_insert(0usize) += 1;
             }
             for w in &doc.warnings {
                 let cut: String = w
@@ -5902,7 +5891,7 @@ mod tests {
     #[test]
     fn any_bytes_read_without_a_panic() {
         let inside = |file: &[u8], doc: &Document| {
-            for object in doc.objects.values().flatten() {
+            for (_, object) in doc.objects() {
                 let at = object.at.unwrap();
                 assert!(at.start <= at.end && at.end <= file.len());
             }

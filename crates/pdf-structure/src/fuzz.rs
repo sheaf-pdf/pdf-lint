@@ -278,7 +278,7 @@ fn within(file: &[u8], doc: &Document) {
             "{at:?}, in {of:?}, is out of what was read"
         );
     };
-    let objects = (doc.objects.iter()).filter_map(|(id, o)| Some((Some(*id), o.as_ref().ok()?)));
+    let objects = doc.objects().map(|(id, o)| (Some(id), o));
     let trailer = (doc.trailer.stream, &doc.trailer.object);
     for (of, object) in objects.chain([trailer]) {
         let mut stack = vec![object];

@@ -6,10 +6,10 @@
 //! says so.
 //!
 //! - **What it read, in one value:** a [`Document`], a [`Source`] read
-//!   whole: each object its cross-references list, or why it doesn't
-//!   read ([`Unread`]); the [`Trailer`], and why it isn't the newest
-//!   section's when it isn't; the header's version; and the file's newest
-//!   incremental [`Update`].
+//!   whole: each object its cross-references list, kept with where it was
+//!   read while it's as read, or why it doesn't read ([`Unread`]); the
+//!   [`Trailer`], and why it isn't the newest section's when it isn't;
+//!   the header's version; and the file's newest incremental [`Update`].
 //! - **Or read on demand:** a [`Reading`], opened, then each object read
 //!   when it's first asked for, kept or not, from any thread, each object
 //!   stream decoded once; read whole, it's the [`Document`], by the same

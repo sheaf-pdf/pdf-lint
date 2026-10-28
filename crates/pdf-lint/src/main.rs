@@ -700,11 +700,11 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
         }
         (true, Some(update)) => {
             let previous = bytes::read_from_opened(&data, &slices(passwords), update.previous);
-            let made = |id| match previous.objects.contains_key(id) {
+            let made = |id| match previous.contains(id) {
                 true => Made::Merged,
                 false => Made::Built,
             };
-            let hold = Hold::Only(update.objects.iter().map(|id| (*id, made(id))).collect());
+            let hold = Hold::Only(update.objects.iter().map(|&id| (id, made(id))).collect());
             let at_version = against(args, Some(checked_as));
             let before = check(&previous, &Hold::All(Made::Merged), &at_version);
             let report = check(&doc, &hold, &options);

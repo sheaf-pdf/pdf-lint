@@ -30,7 +30,7 @@ fn fixture(name: &str) -> PathBuf {
 
 /// The text annotation, which every fixture has, with its `/Contents`.
 fn annotation(doc: &Document) -> &Object {
-    (doc.objects.values().flatten())
+    (doc.objects().map(|(_, o)| o))
         .find(|o| {
             o.as_dict()
                 .is_some_and(|d| d.get(b"Subtype").and_then(Object::as_name) == Some(b"Text"))
@@ -50,7 +50,7 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
         assert!(opened, "{name}: {:?}", doc.encryption);
         assert_eq!(doc.trailer.unwritten, None, "{name}");
         assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
-        assert!(doc.objects.values().all(Result::is_ok), "{name}");
+        assert_eq!(doc.unread().next(), None, "{name}");
         let annotation = annotation(&doc);
         assert_eq!(
             annotation.at.unwrap().stream.is_some(),
@@ -81,7 +81,8 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
             let owned = read_opened(&data, &[b"owner"]);
             let opened = matches!(owned.encryption, Encryption::Opened { owner: true, .. });
             assert!(opened, "{name}: {:?}", owned.encryption);
-            assert_eq!(owned.objects, doc.objects, "{name}");
+            assert!(owned.objects().eq(doc.objects()), "{name}");
+            assert!(owned.unread().eq(doc.unread()), "{name}");
         }
     }
 }
