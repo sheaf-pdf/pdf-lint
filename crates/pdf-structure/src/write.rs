@@ -1,14 +1,15 @@
-//! Writing objects as PDF syntax, for the tests: whole files with a
-//! cross-reference table or an uncompressed cross-reference stream, and
-//! files assembled from objects' bytes as written by hand.
+//! Writing objects as PDF syntax, for tests (this crate's, and, behind the
+//! `fixtures` feature, other crates'): whole files with a cross-reference
+//! table or an uncompressed cross-reference stream, and files assembled
+//! from objects' bytes as written by hand.
 
 use std::fmt::Write as _;
 
-use crate::object::{Dict, Object, Str, Value};
+use pdf_objects::object::{Dict, Object, Str, Value};
 
 /// The kind of cross-reference section a file is written with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Xref {
+pub enum Xref {
     Table,
     Stream,
 }
@@ -16,13 +17,13 @@ pub(crate) enum Xref {
 /// An indirect object to write: a value, or a stream's dictionary and
 /// data.
 #[derive(Debug, Clone)]
-pub(crate) enum Body {
+pub enum Body {
     Object(Object),
     Stream(Dict, Vec<u8>),
 }
 
 impl Body {
-    pub(crate) fn stream(dict: Dict, data: &[u8]) -> Body {
+    pub fn stream(dict: Dict, data: &[u8]) -> Body {
         Body::Stream(dict, data.to_vec())
     }
 }
@@ -42,7 +43,7 @@ impl From<Dict> for Body {
 /// `objects`, each object `n` generation 0, written as a file at
 /// `version` with a section of `kind`, under `trailer`, which is given
 /// `/Size` (and for a stream, `/Type /XRef` and `/W`).
-pub(crate) fn file(version: &str, objects: &[(u32, Body)], trailer: Dict, kind: Xref) -> Vec<u8> {
+pub fn file(version: &str, objects: &[(u32, Body)], trailer: Dict, kind: Xref) -> Vec<u8> {
     let mut out = format!("%PDF-{version}\n").into_bytes();
     out.extend_from_slice(b"%\xE2\xE3\xCF\xD3\n");
     let mut offsets = Vec::new();
@@ -101,7 +102,7 @@ pub(crate) fn file(version: &str, objects: &[(u32, Body)], trailer: Dict, kind: 
 
 /// `data` as zlib data (RFC 1950) in deflate's stored blocks, not
 /// compressed: for a `/FlateDecode` stream without a compressor.
-pub(crate) fn zlib(data: &[u8]) -> Vec<u8> {
+pub fn zlib(data: &[u8]) -> Vec<u8> {
     let mut out = vec![0x78, 0x01];
     let mut blocks = data.chunks(usize::from(u16::MAX)).peekable();
     if data.is_empty() {
@@ -123,7 +124,7 @@ pub(crate) fn zlib(data: &[u8]) -> Vec<u8> {
 }
 
 /// `data` as ASCII85, groups of zeros as `z`.
-pub(crate) fn ascii85(data: &[u8]) -> Vec<u8> {
+pub fn ascii85(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     for group in data.chunks(4) {
         let mut four = [0u8; 4];
@@ -145,7 +146,7 @@ pub(crate) fn ascii85(data: &[u8]) -> Vec<u8> {
 
 /// `data` as LZW codes, each byte its own 9-bit code, the table
 /// cleared before it widens.
-pub(crate) fn lzw(data: &[u8]) -> Vec<u8> {
+pub fn lzw(data: &[u8]) -> Vec<u8> {
     let mut codes = vec![256u16];
     for (i, &byte) in data.iter().enumerate() {
         if i > 0 && i % 250 == 0 {
@@ -163,7 +164,7 @@ pub(crate) fn lzw(data: &[u8]) -> Vec<u8> {
 }
 
 /// `data` as runs to copy, ended by 128.
-pub(crate) fn run_length(data: &[u8]) -> Vec<u8> {
+pub fn run_length(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     for run in data.chunks(128) {
         out.push((run.len() - 1) as u8);
@@ -175,7 +176,7 @@ pub(crate) fn run_length(data: &[u8]) -> Vec<u8> {
 
 /// `zlib` data decompressed, for a seed written from data compressed
 /// beforehand.
-pub(crate) fn inflated(zlib: &[u8]) -> Vec<u8> {
+pub fn inflated(zlib: &[u8]) -> Vec<u8> {
     let flate = pdf_filters::Filter::Flate {
         predictor: pdf_filters::Predictor::None,
     };
@@ -187,7 +188,8 @@ pub(crate) fn inflated(zlib: &[u8]) -> Vec<u8> {
 /// stream's data, of each object but a signature's `/Contents`, under an
 /// encryption dictionary that's the next object, with the trailer's `/ID`
 /// the settings' and `trailer`'s entries.
-pub(crate) fn encrypted(
+#[cfg(any(test, feature = "fixtures"))]
+pub fn encrypted(
     settings: &pdf_crypt::writer::Settings,
     objects: &[(u32, Body)],
     trailer: Dict,
@@ -253,7 +255,7 @@ pub(crate) fn encrypted(
     let own = objects.iter().map(|(n, _)| *n).max().unwrap_or(0) + 1;
     let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));
     let value = |bytes: &Option<Vec<u8>>| s(bytes.as_deref().expect("the writer's own value"));
-    let mut dict = crate::dict! {
+    let mut dict = pdf_objects::dict! {
         "Filter" => "Standard",
         "V" => values.v,
         "R" => values.r,
@@ -275,8 +277,8 @@ pub(crate) fn encrypted(
     if let Some(filter) = values.crypt_filters.first() {
         let method =
             String::from_utf8_lossy(filter.method.as_deref().unwrap_or_default()).into_owned();
-        let std_cf = crate::dict! { "CFM" => method.as_str(), "AuthEvent" => "DocOpen" };
-        dict.set("CF", crate::dict! { "StdCF" => std_cf });
+        let std_cf = pdf_objects::dict! { "CFM" => method.as_str(), "AuthEvent" => "DocOpen" };
+        dict.set("CF", pdf_objects::dict! { "StdCF" => std_cf });
         dict.set("StmF", "StdCF");
         dict.set("StrF", "StdCF");
     }
@@ -290,7 +292,7 @@ pub(crate) fn encrypted(
 /// A file of these objects, each written between its `n 0 obj` and
 /// `endobj` as given, with a table and `trailer` as written. The bodies
 /// may be anything at all.
-pub(crate) fn assembled(version: &str, objects: &[(u32, &[u8])], trailer: &str) -> Vec<u8> {
+pub fn assembled(version: &str, objects: &[(u32, &[u8])], trailer: &str) -> Vec<u8> {
     let mut out = format!("%PDF-{version}\n").into_bytes();
     let mut offsets = Vec::new();
     for (n, body) in objects {
@@ -347,7 +349,7 @@ fn indirect(out: &mut Vec<u8>, n: u32, body: &Body) {
 }
 
 /// `o` as PDF syntax.
-pub(crate) fn value(out: &mut Vec<u8>, o: &Object) {
+pub fn value(out: &mut Vec<u8>, o: &Object) {
     match o.value() {
         Value::Null => out.extend_from_slice(b"null"),
         Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),

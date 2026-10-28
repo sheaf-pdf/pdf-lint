@@ -10,8 +10,7 @@
 //! 2, 4, 8 or 16 bits a sample.
 
 use pdf_filters::{Filter, Layout, Predictor};
-
-use crate::object::{Dict, Object, ObjectId, Value};
+use pdf_objects::object::{Dict, Object, ObjectId, Value};
 
 /// The most filters a stream may list, as qpdf allows.
 pub const FILTERS: usize = 25;
@@ -249,8 +248,9 @@ fn crypt<'a>(parms: Option<&'a Object>, resolve: Resolve<'_, 'a>) -> Result<(), 
 mod tests {
     use std::collections::BTreeMap;
 
+    use pdf_objects::dict;
+
     use super::*;
-    use crate::dict;
 
     /// `dict`'s filters, a reference to no object.
     fn read(dict: &Dict) -> Result<Vec<Filter>, String> {

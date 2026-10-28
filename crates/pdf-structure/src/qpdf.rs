@@ -17,11 +17,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
+use pdf_objects::version::Version;
+
 use crate::bytes::{Decode, Written};
 use crate::json::{self, Json};
-use crate::object::{Data, Dict, Object, ObjectId, Str, Value};
 use crate::source::{Document, Trailer, Warning};
-use crate::version::Version;
 
 /// How many objects one run is asked for by number: past it, a command line
 /// grows long.
@@ -163,6 +164,13 @@ impl Qpdf {
             metadata: None,
             encryption: Default::default(),
         })
+    }
+
+    /// `file`, the file's bytes, read by the bytes reader with qpdf
+    /// decoding what the reader can't: the object streams and strings of an
+    /// encrypted file it doesn't open.
+    pub fn decoding(&self, file: &[u8]) -> Document {
+        crate::bytes::read_with(file, self)
     }
 
     /// The arguments for qpdf's JSON of the objects `ids`, all of them when
@@ -369,10 +377,10 @@ fn stream_data(object: &Json, (n, g): ObjectId, decoding: bool) -> Result<Vec<u8
         .ok_or_else(|| format!("{n} {g} R isn't a stream"))?;
     // qpdf leaves out the filters it decoded: any left, it couldn't, when
     // it was asked to.
-    if let Some(filter) = stream.get("dict").and_then(|d| d.get("/Filter"))
-        && decoding
-    {
-        return Err(format!("qpdf doesn't decode its filters ({filter:?})"));
+    if let Some(filter) = stream.get("dict").and_then(|d| d.get("/Filter")) {
+        if decoding {
+            return Err(format!("qpdf doesn't decode its filters ({filter:?})"));
+        }
     }
     let data = (stream.get("data").and_then(Json::as_str))
         .ok_or_else(|| format!("qpdf gives no data for {n} {g} R"))?;
@@ -539,12 +547,12 @@ fn warnings(stderr: &[u8], file: &Path) -> Vec<Warning> {
 mod tests {
     use std::path::Path;
 
+    use pdf_objects::dict;
+    use pdf_objects::object::{Data, Form, Object, Str, Value};
+    use pdf_objects::text;
+
     use super::*;
     use crate::bytes;
-    use crate::check::{Finding, Hold, Made, Options, check};
-    use crate::dict;
-    use crate::object::{Form, Object, Str, Value};
-    use crate::text;
     use crate::write::{self, Body, Xref};
 
     /// qpdf, which these tests need: `PDF_LINT_QPDF`, else `qpdf` on the
@@ -566,7 +574,8 @@ mod tests {
         dir
     }
 
-    /// A clean file, as the checker's tests have it.
+    /// A clean file: a catalog, its page tree and page, and a text
+    /// annotation with its appearance stream.
     fn clean() -> Vec<(u32, Body)> {
         let r = Object::reference;
         let form = dict! {
@@ -735,7 +744,7 @@ mod tests {
 
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
-    fn a_compressed_file_reads_without_qpdf_as_through_it_and_checks_clean() {
+    fn a_compressed_file_reads_without_qpdf_as_through_it() {
         let path = fixture("qpdf-compressed");
         let data = std::fs::read(&path).unwrap();
         let doc = bytes::read_with(&data, &Unasked);
@@ -761,9 +770,6 @@ mod tests {
             in_streams >= 4,
             "the dictionaries are in object streams: {in_streams}"
         );
-        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
-        assert_eq!(report.findings, [], "{report}");
-        assert_eq!(report.checked.get("AnnotText"), Some(&1), "{report}");
 
         // Through qpdf, asked for every stream, alike: the same streams'
         // data, and the same objects read from them.
@@ -1158,14 +1164,6 @@ qpdf: operation succeeded with warnings\n";
                 (alone.objects.values().flatten()).all(|o| o.at.is_none()),
                 "{test}: qpdf says nowhere"
             );
-            // Checked, the two read alike, but for where.
-            let findings = |doc: &Document| {
-                let report = check(doc, &Hold::All(Made::Merged), &Options::default());
-                (report.findings.into_iter())
-                    .map(|f| Finding { at: None, ..f })
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(findings(&bytes), findings(&alone), "{test}");
         }
     }
 
@@ -1339,16 +1337,12 @@ qpdf: operation succeeded with warnings\n";
 
     /// Every PDF under `PDF_LINT_CORPUS` read from its bytes, qpdf
     /// decoding, and through qpdf alone, and the differences counted by what
-    /// they're of, with examples; and the findings one reading gives and the
-    /// other doesn't, but for where and for what only the bytes can show
-    /// (`duplicate` and `reader`).
+    /// they're of, with examples.
     #[test]
     #[ignore = "needs PDF_LINT_CORPUS, a folder of PDF files, and qpdf"]
     fn a_corpus_reads_alike_through_qpdf_alone() {
         use std::sync::Mutex;
         use std::sync::atomic::{AtomicUsize, Ordering};
-
-        use crate::check::Rule;
 
         let files = corpus();
         /// Each kind's count, and its first examples.
@@ -1364,26 +1358,11 @@ qpdf: operation succeeded with warnings\n";
         struct Tally {
             objects: usize,
             files_differing: usize,
-            findings_differing: usize,
             differences: Kinds,
-            findings: Kinds,
         }
         let tally = Mutex::new(Tally::default());
         let next = AtomicUsize::new(0);
         let start = Instant::now();
-        let like = |f: &Finding| {
-            let object = f
-                .object
-                .map_or("the trailer".to_string(), |(n, g)| format!("{n} {g} R"));
-            format!("{} {}/{} in {object}", f.rule, f.table, f.key)
-        };
-        let findings = |doc: &Document| {
-            let report = check(doc, &Hold::All(Made::Merged), &Options::default());
-            (report.findings.into_iter())
-                .filter(|f| !matches!(f.rule, Rule::Duplicate | Rule::Reader))
-                .map(|f| Finding { at: None, ..f })
-                .collect::<Vec<_>>()
-        };
         thread::scope(|scope| {
             for _ in 0..thread::available_parallelism().map_or(1, |n| n.get()) {
                 scope.spawn(|| {
@@ -1400,10 +1379,10 @@ qpdf: operation succeeded with warnings\n";
                         if let Some(why) = &bytes.trailer.unwritten {
                             found.push(("the bytes reader scanned".to_string(), why.clone()));
                         }
-                        if let Ok(a) = &alone
-                            && let Some(why) = &a.trailer.unwritten
-                        {
-                            found.push(("qpdf reconstructed".to_string(), why.clone()));
+                        if let Ok(a) = &alone {
+                            if let Some(why) = &a.trailer.unwritten {
+                                found.push(("qpdf reconstructed".to_string(), why.clone()));
+                            }
                         }
                         // Where either repaired the file, each its own way,
                         // their differences are apart.
@@ -1418,36 +1397,11 @@ qpdf: operation succeeded with warnings\n";
                                 }
                             }
                         }
-                        // The findings one reading gives and the other
-                        // doesn't, as many times as it gives them: by object,
-                        // table, key and rule, as the path an object is first
-                        // reached by follows the order of keys, which qpdf
-                        // sorts, and a value prints as its reader gives it.
-                        let mut only = Vec::new();
-                        if let Ok(a) = &alone {
-                            let mut count: BTreeMap<String, (isize, Rule)> = BTreeMap::new();
-                            for f in findings(&bytes) {
-                                count.entry(like(&f)).or_insert((0, f.rule)).0 += 1;
-                            }
-                            for f in findings(a) {
-                                count.entry(like(&f)).or_insert((0, f.rule)).0 -= 1;
-                            }
-                            for (f, (n, rule)) in count {
-                                let side = if n > 0 { "the bytes" } else { "qpdf" };
-                                for _ in 0..n.unsigned_abs() {
-                                    only.push((format!("{rule} only through {side}"), f.clone()));
-                                }
-                            }
-                        }
                         let mut tally = tally.lock().unwrap();
                         tally.objects += bytes.objects.len();
                         tally.files_differing += usize::from(!found.is_empty());
-                        tally.findings_differing += usize::from(!only.is_empty());
                         for (kind, d) in found {
                             add(&mut tally.differences, kind, format!("{name}: {d}"));
-                        }
-                        for (kind, f) in only {
-                            add(&mut tally.findings, kind, format!("{name}: {f}"));
                         }
                     }
                 });
@@ -1455,14 +1409,13 @@ qpdf: operation succeeded with warnings\n";
         });
         let tally = tally.into_inner().unwrap();
         println!(
-            "{} files in {:.1} s, {} objects: {} files read otherwise, {} with other findings",
+            "{} files in {:.1} s, {} objects: {} files read otherwise",
             files.len(),
             start.elapsed().as_secs_f64(),
             tally.objects,
             tally.files_differing,
-            tally.findings_differing,
         );
-        for (kind, (n, examples)) in tally.differences.iter().chain(&tally.findings) {
+        for (kind, (n, examples)) in &tally.differences {
             println!("{kind}: {n}");
             for example in examples {
                 let example: String = example.chars().take(300).collect();
@@ -1836,18 +1789,18 @@ qpdf: operation succeeded with warnings\n";
                                 faults = format!("{faults} (in a later filter)");
                             }
                             let theirs = theirs.remove(id);
-                            if let Some(dir) = &dump
-                                && !matches!(&theirs, Some(Ok(t)) if *t == mine && mine_faults.is_empty())
-                            {
-                                let file = |what: &str| dir.join(format!("{name}-{}-{}.{what}", id.0, id.1));
-                                std::fs::write(file("raw"), written).unwrap();
-                                std::fs::write(file("ours"), &mine).unwrap();
-                                let qpdf = match &theirs {
-                                    Some(Ok(t)) => t.clone(),
-                                    Some(Err(why)) => format!("ERR {why}").into_bytes(),
-                                    None => b"NONE".to_vec(),
-                                };
-                                std::fs::write(file("qpdf"), qpdf).unwrap();
+                            if let Some(dir) = &dump {
+                                if !matches!(&theirs, Some(Ok(t)) if *t == mine && mine_faults.is_empty()) {
+                                    let file = |what: &str| dir.join(format!("{name}-{}-{}.{what}", id.0, id.1));
+                                    std::fs::write(file("raw"), written).unwrap();
+                                    std::fs::write(file("ours"), &mine).unwrap();
+                                    let qpdf = match &theirs {
+                                        Some(Ok(t)) => t.clone(),
+                                        Some(Err(why)) => format!("ERR {why}").into_bytes(),
+                                        None => b"NONE".to_vec(),
+                                    };
+                                    std::fs::write(file("qpdf"), qpdf).unwrap();
+                                }
                             }
                             // Whether it matters which bytes qpdf read.
                             let (kind, which) = match theirs {
@@ -2040,7 +1993,7 @@ qpdf: operation succeeded with warnings\n";
                             .flatten();
                         let (ours, handler) = match password {
                             Some(password) => {
-                                let passwords = text::passwords(password);
+                                let passwords = pdf_crypt::passwords(password);
                                 let passwords: Vec<&[u8]> = passwords.iter().map(Vec::as_slice).collect();
                                 bytes::read_opened_by(&data, &passwords)
                             }
@@ -2160,17 +2113,17 @@ qpdf: operation succeeded with warnings\n";
                                 let by = if unnamed { ", by a /Crypt filter that names none" } else { "" };
                                 let by = format!("{by}{refused}");
                                 let theirs = raw.remove(&id);
-                                if let Some(dir) = &dump
-                                    && !matches!((&plain, &theirs), (Some(p), Some(Ok(t))) if p == t)
-                                {
-                                    let file = |what: &str| dir.join(format!("{name}-{}-{}.{what}", id.0, id.1));
-                                    std::fs::write(file("ours"), plain.as_deref().unwrap_or(b"NONE")).unwrap();
-                                    let qpdf = match &theirs {
-                                        Some(Ok(t)) => t.clone(),
-                                        Some(Err(why)) => format!("ERR {why}").into_bytes(),
-                                        None => b"NONE".to_vec(),
-                                    };
-                                    std::fs::write(file("qpdf"), qpdf).unwrap();
+                                if let Some(dir) = &dump {
+                                    if !matches!((&plain, &theirs), (Some(p), Some(Ok(t))) if p == t) {
+                                        let file = |what: &str| dir.join(format!("{name}-{}-{}.{what}", id.0, id.1));
+                                        std::fs::write(file("ours"), plain.as_deref().unwrap_or(b"NONE")).unwrap();
+                                        let qpdf = match &theirs {
+                                            Some(Ok(t)) => t.clone(),
+                                            Some(Err(why)) => format!("ERR {why}").into_bytes(),
+                                            None => b"NONE".to_vec(),
+                                        };
+                                        std::fs::write(file("qpdf"), qpdf).unwrap();
+                                    }
                                 }
                                 match (&plain, &theirs) {
                                     (Some(p), Some(Ok(t))) if p == t && fault.is_empty() => alike += 1,

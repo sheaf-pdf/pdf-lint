@@ -1,6 +1,6 @@
 //! Files another writer made, qpdf, read and checked by pdf-lint alone:
-//! each as committed in `tests/files`, written once from a clean file
-//! (qpdf.rs's `the_fixtures_are_written`).
+//! each as committed in pdf-structure's `tests/files`, written once from a
+//! clean file (its qpdf.rs's `the_fixtures_are_written`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,7 +24,7 @@ const FIXTURES: [(&str, bool, bool); 8] = [
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/files")
+        .join("../pdf-structure/tests/files")
         .join(format!("{name}.pdf"))
 }
 
@@ -87,6 +87,17 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
             assert_eq!(owned.objects, doc.objects, "{name}");
         }
     }
+}
+
+/// The file whose dictionaries are in object streams, read by the reader
+/// alone, checks clean, its text annotation checked once.
+#[test]
+fn the_compressed_file_checks_clean() {
+    let data = std::fs::read(fixture("qpdf-compressed")).unwrap();
+    let doc = read_opened(&data, &[]);
+    let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+    assert_eq!(report.findings, [], "{report}");
+    assert_eq!(report.checked.get("AnnotText"), Some(&1), "{report}");
 }
 
 #[test]

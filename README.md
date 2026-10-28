@@ -25,6 +25,7 @@ decrypts what's encrypted itself.
 | [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept |
 | [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler, decrypting on RustCrypto's primitives, every fault said |
 | [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, their parser and their writer: each value with where it was written, every fault said, and text strings decoded by the spec |
+| [pdf-structure](crates/pdf-structure) | PDF's file structure, read: the header, cross-reference tables and streams along `/Prev`, object streams and recovery by scanning, each object through pdf-objects' parser, decrypted through pdf-crypt and decoded through pdf-filters, every choice it made said |
 | [pdf-arlington](crates/pdf-arlington) | The Arlington PDF Model, embedded: its tables read, and the predicates in their cells evaluated over pdf-objects' objects |
 
 ## Development
@@ -41,7 +42,8 @@ just clippy   # or one at a time
 `just ci` also needs the `thumbv6m-none-eabi` target, nightly Rust with
 its `rust-src` component, and Rust 1.85 installed: for the tokenizer's
 no-std build, its build against `core` alone, and the minimum Rust of
-the tokenizer, the filters, pdf-crypt, pdf-objects and pdf-arlington.
+the tokenizer, the filters, pdf-crypt, pdf-objects, pdf-structure and
+pdf-arlington.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
 objects` and `just fuzz check` fuzz the tokenizer, the filters,
@@ -52,8 +54,9 @@ says for how many seconds (60 by default).
 
 ## License
 
-pdf-tokenizer, pdf-filters, pdf-crypt and pdf-objects are licensed under
-either of Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-or MIT license ([LICENSE-MIT](LICENSE-MIT)) at your option. pdf-lint and
-pdf-arlington are licensed under the Apache License, Version 2.0, as is
-the Arlington model pdf-arlington embeds.
+pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects and pdf-structure are
+licensed under either of Apache License, Version 2.0
+([LICENSE-APACHE](LICENSE-APACHE)) or MIT license
+([LICENSE-MIT](LICENSE-MIT)) at your option. pdf-lint and pdf-arlington
+are licensed under the Apache License, Version 2.0, as is the Arlington
+model pdf-arlington embeds.

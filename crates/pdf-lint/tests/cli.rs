@@ -6,8 +6,8 @@ use std::process::{Command, Output, Stdio};
 use pdf_crypt::writer::{self, Kind, Settings};
 use pdf_crypt::{Dictionary, Handler};
 
-// The crate's own reader of JSON, to read the JSON report back with.
-#[path = "../src/json.rs"]
+// pdf-structure's reader of qpdf's JSON, to read the JSON report back with.
+#[path = "../../pdf-structure/src/json.rs"]
 #[allow(dead_code)]
 mod json;
 

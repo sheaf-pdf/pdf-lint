@@ -1,0 +1,34 @@
+[package]
+name = "pdf-structure"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "PDF's file structure, read: the header, cross-reference sections along /Prev, object streams, recovery by scanning, decrypting and decoding, every choice said"
+keywords = ["pdf", "parser", "xref", "object-streams", "iso-32000"]
+categories = ["parser-implementations"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+pdf-crypt = { path = "../pdf-crypt", version = "0.1" }
+pdf-filters = { path = "../pdf-filters", version = "0.1" }
+pdf-objects = { path = "../pdf-objects", version = "0.1" }
+pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
+
+[features]
+# Files built in code, and qpdf as a second reader, for other crates' tests:
+# hidden, not for a user. Its encrypted files need pdf-crypt's writer.
+fixtures = ["pdf-crypt/writer"]
+
+[dev-dependencies]
+# The tests' encrypted files.
+pdf-crypt = { path = "../pdf-crypt", version = "0.1", features = ["writer"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which shrinks the reader's limits
+# and compiles the test writer.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

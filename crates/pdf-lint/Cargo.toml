@@ -20,14 +20,16 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 anyhow = "1"
 pdf-arlington = { path = "../pdf-arlington", version = "0.1" }
 pdf-crypt = { path = "../pdf-crypt", version = "0.1" }
-pdf-filters = { path = "../pdf-filters", version = "0.1" }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
+pdf-structure = { path = "../pdf-structure", version = "0.1" }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
 thiserror = "2"
 
 [dev-dependencies]
 # The tests' encrypted files.
 pdf-crypt = { path = "../pdf-crypt", features = ["writer"] }
+# The tests' file writer, and qpdf as a second reader.
+pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
 
 [lints.rust]
 unsafe_code = "forbid"

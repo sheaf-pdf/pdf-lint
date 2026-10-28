@@ -228,8 +228,8 @@ dependencies = [
  "anyhow",
  "pdf-arlington",
  "pdf-crypt",
- "pdf-filters",
  "pdf-objects",
+ "pdf-structure",
  "pdf-tokenizer",
  "thiserror",
 ]
@@ -240,6 +240,16 @@ version = "0.1.0"
 dependencies = [
  "pdf-tokenizer",
  "thiserror",
+]
+
+[[package]]
+name = "pdf-structure"
+version = "0.1.0"
+dependencies = [
+ "pdf-crypt",
+ "pdf-filters",
+ "pdf-objects",
+ "pdf-tokenizer",
 ]
 
 [[package]]

@@ -3115,11 +3115,12 @@ mod tests {
     //! TestGrammar chooses them; only held objects found in; and every walk
     //! bounded, on cycles and on deep nesting.
 
+    use pdf_structure::write::{self, Body, Xref};
+
     use super::*;
     use crate::bytes;
     use crate::dict;
     use crate::source::Document;
-    use crate::write::{self, Body, Xref};
 
     /// `objects`, the catalog object 1, written at `version` with a
     /// section of `kind`.

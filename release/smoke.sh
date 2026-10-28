@@ -8,7 +8,7 @@
 set -euo pipefail
 
 dir=${1:?a release folder}
-files=$(cd "$(dirname "$0")/../crates/pdf-lint/tests/files" && pwd)
+files=$(cd "$(dirname "$0")/../crates/pdf-structure/tests/files" && pwd)
 
 if [ -f "$dir/pdf-lint.exe" ] && grep -a -q -i 'vcruntime140' "$dir/pdf-lint.exe"; then
     echo "smoke.sh: pdf-lint.exe needs VCRUNTIME140.dll: build it with +crt-static" >&2

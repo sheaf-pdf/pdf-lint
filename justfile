@@ -1,13 +1,15 @@
 # Development tasks. CI runs these same recipes, so a local `just ci` checks
 # what CI checks.
 
-# The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects and
-# pdf-arlington support, from their Cargo.toml. Only the libraries promise
-# one: the checker ships as a binary built with stable Rust.
+# The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects,
+# pdf-structure and pdf-arlington support, from their Cargo.toml. Only the
+# libraries promise one: the checker ships as a binary built with stable
+# Rust.
 tokenizer_msrv := `grep -m1 '^rust-version' crates/pdf-tokenizer/Cargo.toml | cut -d'"' -f2`
 filters_msrv := `grep -m1 '^rust-version' crates/pdf-filters/Cargo.toml | cut -d'"' -f2`
 crypt_msrv := `grep -m1 '^rust-version' crates/pdf-crypt/Cargo.toml | cut -d'"' -f2`
 objects_msrv := `grep -m1 '^rust-version' crates/pdf-objects/Cargo.toml | cut -d'"' -f2`
+structure_msrv := `grep -m1 '^rust-version' crates/pdf-structure/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
 
 # List the recipes.
@@ -15,7 +17,7 @@ default:
     @just --list --unsorted
 
 # Everything CI runs.
-ci: fmt clippy test test-qpdf doc fuzzing dist tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv arlington-msrv
+ci: fmt clippy test test-qpdf doc fuzzing dist tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -53,16 +55,18 @@ _qpdf:
         unzip -q "$work/$zip" -d "$dir"
     fi
 
-# The tests that set the reader beside qpdf, which `just test` leaves out
-# as ignored, against the pinned qpdf (the corpus tests aside).
+# The tests that set the reader beside qpdf, pdf-structure's and then the
+# checker's in pdf-lint, which `just test` leaves out as ignored, against
+# the pinned qpdf (the corpus tests aside).
 test-qpdf: _qpdf
-    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_
 
 # Write the files qpdf makes from the tests' clean file anew, into
-# crates/pdf-lint/tests/files, which the tests read: only when the clean
-# file or the kinds change.
+# crates/pdf-structure/tests/files, which the tests read: only when the
+# clean file or the kinds change.
 fixtures: _qpdf
-    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --lib qpdf::tests::the_fixtures_are_written -- --ignored --exact
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests::the_fixtures_are_written -- --ignored --exact
 
 # Build the fuzz targets as cargo-fuzz does (`--cfg fuzzing`), on stable,
 # so that what only they compile, the fuzz module and the test writer,
@@ -124,6 +128,10 @@ crypt-msrv:
 # Test pdf-objects on its oldest supported Rust, which must be installed.
 objects-msrv:
     cargo +{{ objects_msrv }} test --locked -p pdf-objects
+
+# Test pdf-structure on its oldest supported Rust, which must be installed.
+structure-msrv:
+    cargo +{{ structure_msrv }} test --locked -p pdf-structure
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:

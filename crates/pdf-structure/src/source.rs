@@ -1,11 +1,11 @@
-//! What the checker reads a file through: a [`Source`], which any reader
-//! can implement, and [`Document`], an owned one that readers can fill
-//! and tests can build.
+//! A file as a reader read it: a [`Source`], which any reader can
+//! implement, and [`Document`], an owned one that readers fill and tests
+//! build.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::object::{Dict, Object, ObjectId, Span, Value};
-use crate::version::Version;
+use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
+use pdf_objects::version::Version;
 
 /// A file, as a reader read it.
 pub trait Source {
@@ -54,6 +54,7 @@ pub struct Warning {
     pub object: Option<ObjectId>,
     /// Where, when the reader knows.
     pub at: Option<Span>,
+    /// What it says.
     pub message: String,
 }
 
@@ -83,8 +84,11 @@ impl Trailer {
 pub struct Document {
     /// Each object its cross-references list, or why it doesn't read.
     pub objects: BTreeMap<ObjectId, Result<Object, String>>,
+    /// The trailer.
     pub trailer: Trailer,
+    /// The version in the header.
     pub header: Option<Version>,
+    /// What the reader had to choose how to read, in the order it chose.
     pub warnings: Vec<Warning>,
     /// The object streams' decoded data, by stream, which the objects
     /// read from them are placed in ([`Span::stream`]).
@@ -202,8 +206,9 @@ impl Source for Document {
 
 #[cfg(test)]
 mod tests {
+    use pdf_objects::dict;
+
     use super::*;
-    use crate::dict;
 
     #[test]
     fn a_document_gives_what_it_holds() {
@@ -217,5 +222,16 @@ mod tests {
         assert_eq!(doc.get((3, 0)), Err("3 0 R isn't in the file".to_string()));
         assert!(doc.trailer().dict().has(b"Root"));
         assert_eq!(doc.header_version(), Some(Version::new(1, 7)));
+    }
+
+    /// What a reading gives can be shared across threads.
+    #[test]
+    fn a_reading_is_send_and_sync() {
+        fn shared<T: Send + Sync>() {}
+        shared::<Document>();
+        shared::<Trailer>();
+        shared::<Warning>();
+        shared::<Update>();
+        shared::<Encryption>();
     }
 }

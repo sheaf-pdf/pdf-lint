@@ -146,6 +146,20 @@ jobs:
       - name: Test
         run: just objects-msrv
 
+  structure-msrv:
+    name: Structure on its minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in crates/pdf-structure/Cargo.toml,
+      # which `just structure-msrv` reads.
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just structure-msrv
+
   arlington-msrv:
     name: Arlington on its minimum Rust
     runs-on: ubuntu-latest

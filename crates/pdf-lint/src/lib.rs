@@ -11,21 +11,9 @@
 //! "Column 1 - Key" to "Column 11 - Link". [`grammar()`] reads them.
 
 pub mod allowance;
-pub mod bytes;
 pub mod check;
-mod filter;
 #[cfg(any(test, fuzzing))]
 pub mod fuzz;
-#[cfg(test)]
-mod json;
-// qpdf, the tests' oracle: a second reader, and a decoder to set the
-// reader's decoding beside.
-#[cfg(test)]
-pub(crate) mod qpdf;
-pub mod source;
-#[cfg(any(test, fuzzing))]
-#[cfg_attr(fuzzing, allow(dead_code))]
-pub(crate) mod write;
 
 pub use allowance::{Allowance, AllowanceError, Allowances};
 pub use check::{
@@ -40,6 +28,8 @@ pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, V
 pub use pdf_arlington::{COMMIT, predicate};
 // The objects, `dict!` and versions are pdf-objects'.
 pub use pdf_objects::{dict, object, version};
+// The reader, and what it reads a file into, are pdf-structure's.
+pub use pdf_structure::{bytes, source};
 pub use predicate::{Cx, FileCx, Gate, Reference, Since, Truth};
 pub use source::{Document, Encryption, Source, Trailer, Update, Warning};
 pub use version::Version;

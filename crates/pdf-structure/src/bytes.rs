@@ -24,12 +24,12 @@ use pdf_tokenizer::{Kind, Token, Tokenizer, is_delimiter, is_white_space};
 
 use pdf_crypt::{Handler, Method};
 use pdf_filters::{Fault, Filter, Layout, Predictor};
+use pdf_objects::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use pdf_objects::parse::{self, Body, Parser, Sink};
+use pdf_objects::version::Version;
 
 use crate::filter;
-use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::source::{Document, Encryption, Trailer, Update, Warning};
-use crate::version::Version;
 
 // How deeply arrays and dictionaries may nest in an object is the
 // parser's, pdf-objects'.
@@ -42,6 +42,7 @@ pub const SECTIONS: usize = 1024;
 /// off there.
 #[cfg(not(fuzzing))]
 pub const STREAM: usize = 256 << 20;
+/// The same, smaller under cargo-fuzz, so that a run tries more inputs.
 #[cfg(fuzzing)]
 pub const STREAM: usize = 1 << 20;
 
@@ -50,6 +51,7 @@ pub const STREAM: usize = 1 << 20;
 /// twice, as of its newest section and as of the one before.)
 #[cfg(not(fuzzing))]
 pub const BUDGET: usize = 1 << 30;
+/// The same, smaller under cargo-fuzz, so that a run tries more inputs.
 #[cfg(fuzzing)]
 pub const BUDGET: usize = 4 << 20;
 
@@ -58,14 +60,19 @@ pub const BUDGET: usize = 4 << 20;
 pub enum XrefEntry {
     /// In use, written at `offset`.
     InUse {
+        /// Where its `n g obj` starts.
         offset: usize,
+        /// Its generation number.
         generation: u16,
     },
     /// The `index`th object of object stream `stream`.
     Compressed {
+        /// The object stream's number.
         stream: u32,
+        /// Which of the stream's objects it is, from 0.
         index: u32,
     },
+    /// Free: the number isn't in use.
     Free,
 }
 
@@ -153,7 +160,7 @@ pub fn read_from_opened(file: &[u8], passwords: &[&[u8]], section: usize) -> Doc
 }
 
 /// The file `file` is, with `decoder` decoding what isn't in plain view.
-#[cfg(test)]
+#[cfg(any(test, feature = "fixtures"))]
 pub(crate) fn read_with(file: &[u8], decoder: &dyn Decode) -> Document {
     read_with_or_without(file, Some(decoder), None)
 }
@@ -602,14 +609,13 @@ impl<'a> Reader<'a> {
         // password opened whose streams aren't encrypted, its own crypt
         // filter may yet encrypt it.
         let crypt = filter::crypt_filter(&stream.dict, Some(&resolve));
-        if self.handler.is_none()
-            && self.encrypts
-            && let Some(name) = crypt.as_deref().filter(|&name| name != b"Identity")
-        {
-            let name = String::from_utf8_lossy(name);
-            return Err(format!(
-                "its own /Crypt filter, /{name}, encrypts it, and no password the reader was given opens the file"
-            ));
+        if self.handler.is_none() && self.encrypts {
+            if let Some(name) = crypt.as_deref().filter(|&name| name != b"Identity") {
+                let name = String::from_utf8_lossy(name);
+                return Err(format!(
+                    "its own /Crypt filter, /{name}, encrypts it, and no password the reader was given opens the file"
+                ));
+            }
         }
         let decrypted = (self.handler.as_ref()).map(|handler| {
             let method = crypt.map(|name| handler.named(&name));
@@ -812,15 +818,14 @@ impl<'a> Reader<'a> {
             }
             // An update is written after the section it follows: a
             // linearized file's first section, before its other, isn't one.
-            if let [newest, previous, ..] = offsets[..]
-                && i == 0
-                && newest > previous
-            {
-                let objects = (entries.iter())
-                    .filter(|&(&n, (_, entry))| n != 0 && *entry != XrefEntry::Free)
-                    .map(|(&n, &(generation, _))| (n, generation))
-                    .collect();
-                self.update = Some(Update { objects, previous });
+            if let [newest, previous, ..] = offsets[..] {
+                if i == 0 && newest > previous {
+                    let objects = (entries.iter())
+                        .filter(|&(&n, (_, entry))| n != 0 && *entry != XrefEntry::Free)
+                        .map(|(&n, &(generation, _))| (n, generation))
+                        .collect();
+                    self.update = Some(Update { objects, previous });
+                }
             }
             let most = self.listable;
             let mut past = 0usize;
@@ -1239,19 +1244,19 @@ impl<'a> Reader<'a> {
             match token.kind {
                 Kind::Space | Kind::Comment => continue,
                 Kind::Keyword if token.bytes == b"obj" => {
-                    if let [Some(n), Some(g)] = before
-                        && n.kind == Kind::Integer
-                        && g.kind == Kind::Integer
-                        && let (Some(number), Some(generation)) = (
-                            n.integer().ok().and_then(|n| u32::try_from(n).ok()),
-                            g.integer().ok().and_then(|g| u16::try_from(g).ok()),
-                        )
-                    {
-                        let offset = n.start;
-                        self.entries.insert(
-                            number,
-                            (generation, XrefEntry::InUse { offset, generation }),
-                        );
+                    if let [Some(n), Some(g)] = before {
+                        if n.kind == Kind::Integer && g.kind == Kind::Integer {
+                            if let (Some(number), Some(generation)) = (
+                                n.integer().ok().and_then(|n| u32::try_from(n).ok()),
+                                g.integer().ok().and_then(|g| u16::try_from(g).ok()),
+                            ) {
+                                let offset = n.start;
+                                self.entries.insert(
+                                    number,
+                                    (generation, XrefEntry::InUse { offset, generation }),
+                                );
+                            }
+                        }
                     }
                 }
                 Kind::Keyword if token.bytes == b"stream" => {
@@ -1315,14 +1320,14 @@ impl<'a> Reader<'a> {
             .collect();
         offsets.sort();
         for (offset, id) in offsets.into_iter().rev() {
-            if let Ok((_, object)) = self.indirect(offset, Some(id))
-                && is_xref_stream(&object)
-            {
-                return Trailer {
-                    stream: Some(id),
-                    object,
-                    unwritten: Some(why),
-                };
+            if let Ok((_, object)) = self.indirect(offset, Some(id)) {
+                if is_xref_stream(&object) {
+                    return Trailer {
+                        stream: Some(id),
+                        object,
+                        unwritten: Some(why),
+                    };
+                }
             }
         }
         Trailer {
@@ -1763,13 +1768,13 @@ impl<'a> Reader<'a> {
     ) -> Result<(ObjectId, Object), String> {
         let mut parser = Parser::at(self.file, offset);
         let id = parser.header().map_err(|e| e.to_string())?;
-        if let Some(expected) = expected
-            && expected != id
-        {
-            return Err(format!(
-                "byte {offset} holds {} {} obj, where the cross-references put {} {} R",
-                id.0, id.1, expected.0, expected.1
-            ));
+        if let Some(expected) = expected {
+            if expected != id {
+                return Err(format!(
+                    "byte {offset} holds {} {} obj, where the cross-references put {} {} R",
+                    id.0, id.1, expected.0, expected.1
+                ));
+            }
         }
         let mut parser = parser.ciphertext(self.ciphertext(id));
         let body = parser.body(id, &mut self.warned(Some(id)));
@@ -2019,9 +2024,10 @@ fn offset_of(o: &Object) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use pdf_objects::dict;
+    use pdf_objects::object::Form;
+
     use super::*;
-    use crate::dict;
-    use crate::object::Form;
     use crate::source::Source;
     use crate::write::{self, Body, Xref};
 
@@ -3931,17 +3937,6 @@ mod tests {
             *page.as_dict().unwrap().get(b"Parent").unwrap().value(),
             Value::Ref((2, 0))
         );
-        let report = crate::check::check(
-            &doc,
-            &crate::check::Hold::All(crate::check::Made::Merged),
-            &Default::default(),
-        );
-        let rules: Vec<_> = report
-            .findings
-            .iter()
-            .map(|f| (f.rule, f.key.as_str()))
-            .collect();
-        assert_eq!(rules, [], "{report}");
     }
 
     #[test]
