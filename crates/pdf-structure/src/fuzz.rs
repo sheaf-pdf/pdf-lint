@@ -15,17 +15,15 @@ use crate::source::Document;
 const OWNER: &[u8] = b"owner";
 
 /// The fuzz target's body: `data`'s first two bytes choose how the file
-/// after them is read, as pdf-lint's `check` target's choose how it's
-/// checked, so that the two begin from the same seeds; the rest is the
-/// file. Read by [`bytes::read`], it's the same twice, and every place the
-/// reading gives is inside what was read: each object's, each value's and
-/// key's in it, each stream's data's, the trailer's and each warning's, in
-/// the file or in the decoded data of the object stream it names, which
-/// the reading keeps. When the file has an incremental update, so is the
-/// revision before it ([`bytes::read_from`]); and with the choice's
-/// lowest bit set, so is the file opened by the owner's password `owner`
-/// ([`bytes::read_opened`]), and its revision before an update. Panics on
-/// a broken promise.
+/// after them is read, and the rest is the file. Read by [`bytes::read`],
+/// it's the same twice, and every place the reading gives is inside what
+/// was read: each object's, each value's and key's in it, each stream's
+/// data's, the trailer's and each warning's, in the file or in the
+/// decoded data of the object stream it names, which the reading keeps.
+/// When the file has an incremental update, so is the revision before it
+/// ([`bytes::read_from`]); and with the choice's lowest bit set, so is the
+/// file opened by the owner's password `owner` ([`bytes::read_opened`]),
+/// and its revision before an update. Panics on a broken promise.
 pub fn read_file(data: &[u8]) {
     let (choice, file) = match data {
         [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),

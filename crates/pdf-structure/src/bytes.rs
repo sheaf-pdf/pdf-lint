@@ -18,11 +18,9 @@
 //! why. An object read from an object stream is placed in the stream's
 //! decoded data ([`Span::stream`]), which the [`Document`] keeps.
 //!
-//! # What's encrypted
-//!
-//! In an encrypted file it opens, what the reader decrypts and what it
-//! leaves as written, each with the clause of ISO 32000-2 that says so
-//! and the tests that hold it:
+//! **What's encrypted.** In an encrypted file it opens, what the reader
+//! decrypts and what it leaves as written, each with the clause of
+//! ISO 32000-2 that says so and the tests that hold it:
 //!
 //! - **Every string of an object read at its offset** is decrypted with
 //!   the object's key, made from its number and generation, and stays
@@ -122,8 +120,8 @@ pub const STREAM: usize = 256 << 20;
 pub const STREAM: usize = 1 << 20;
 
 /// How many bytes the streams the reader decodes in a reading of a file
-/// may decode to in all; more is cut off. (`--last-update` reads a file
-/// twice, as of its newest section and as of the one before.)
+/// may decode to in all; more is cut off. (The file read again as of an
+/// earlier section, by [`read_from`], is a reading of its own.)
 #[cfg(not(fuzzing))]
 pub const BUDGET: usize = 1 << 30;
 /// The same, smaller under cargo-fuzz, so that a run tries more inputs.
@@ -215,7 +213,9 @@ pub fn read(file: &[u8]) -> Document {
 
 /// The file `file` is, opened, when it's encrypted, by the first of
 /// `passwords` that opens it, each tried as the owner's and then the
-/// user's (none, the empty password).
+/// user's (none, the empty password). Each is tried as the bytes given;
+/// pdf-crypt's `passwords` gives the bytes a password typed as text may
+/// have been set as.
 pub fn read_opened(file: &[u8], passwords: &[&[u8]]) -> Document {
     read_as(file, None, None, true, (STREAM, BUDGET, None), passwords)
 }

@@ -1,7 +1,7 @@
 # The fuzz targets, in cargo-fuzz's layout, outside the workspace: they
 # build on nightly with libFuzzer. Locally, `just fuzz tokenize`,
-# `just fuzz filters`, `just fuzz objects`, `just fuzz structure` or
-# `just fuzz check`, or:
+# `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
+# `just fuzz structure` or `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
