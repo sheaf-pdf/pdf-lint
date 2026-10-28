@@ -23,9 +23,12 @@ ci: fmt clippy test test-qpdf doc fuzzing dist tokenizer-no-std tokenizer-core-o
 fmt:
     cargo fmt --all -- --check
 
-# Lint every crate, with its tests and binaries.
+# Lint every crate, with its tests and binaries; then the libraries and the
+# binary as they're built for use, without the features only their tests
+# turn on.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
+    cargo clippy --locked --workspace --lib --bins -- -D warnings
 
 # Unit tests and doctests.
 test:
@@ -70,12 +73,17 @@ fixtures: _qpdf
 
 # Build the fuzz targets as cargo-fuzz does (`--cfg fuzzing`), on stable,
 # so that what only they compile, the fuzz module and the test writer,
-# can't break unseen.
+# can't break unseen; and lint the libraries so with no feature, as a crate
+# that depends on one and fuzzes itself builds them. pdf-lint's fuzz body
+# needs the test writers the fuzz crate turns on, so only that build has it.
 fuzzing:
     RUSTFLAGS="--cfg fuzzing" cargo check --locked --manifest-path fuzz/Cargo.toml --target-dir target/fuzzing
+    RUSTFLAGS="--cfg fuzzing" cargo clippy --locked --workspace --exclude pdf-lint --lib --target-dir target/fuzzing -- -D warnings
 
-# Build the API docs, failing on warnings.
+# Build the API docs, failing on warnings: with every feature on, then
+# with none, as they're published.
 doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
 
 # Build this platform's release archive in dist/, and check it runs as

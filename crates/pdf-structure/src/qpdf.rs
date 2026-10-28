@@ -1,5 +1,5 @@
 //! qpdf, the tests' oracle, run as a process: decoding what the bytes
-//! reader is made to ask of it ([`Decode`]), a compressed cross-reference
+//! reader is made to ask of it (`Decode`), a compressed cross-reference
 //! stream's rows, an object stream's objects, and in an encrypted file the
 //! strings' plaintext, to set beside the reader's own decoding.
 //! A run decodes every stream it's asked for, through its JSON
