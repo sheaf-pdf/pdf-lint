@@ -237,6 +237,12 @@ pub enum Truth {
 /// checked under; and what the predicates read once a file (its name
 /// trees' keys, its structure tree's content items, its form's fields'
 /// names), kept inside it. [`FileCx::at`] makes a row's [`Cx`] from it.
+///
+/// Those it keeps know an object by where it was written and by its
+/// number, so the spans of the objects it's given, and of those `resolve`
+/// gives, are places in one file's bytes: an object copied from another
+/// file keeps the span it had there, which can be another object's here,
+/// so a copy is given its number, or its span is dropped.
 pub struct FileCx<'a> {
     /// The trailer as written (`trailer::`).
     trailer: &'a Dict,
@@ -367,9 +373,11 @@ impl<'c, 'a> Cx<'c, 'a> {
 
     /// The number of the indirect object the container is, not one it's
     /// written inside: `fn:ImageIsStructContentItem` and
-    /// `fn:PageContainsStructContentItems` know it by that as well as by
-    /// where it was written, so that one built in memory, or edited, which
-    /// has no span, is still known.
+    /// `fn:PageContainsStructContentItems` know it by that alone, where
+    /// without one they know it by where it was written. So one built in
+    /// memory, or edited, which has no span, is still known, and one whose
+    /// bytes are another object's too, as an object stream's header can
+    /// start two of its objects at one offset, is told apart from it.
     pub fn id(mut self, id: ObjectId) -> Cx<'c, 'a> {
         self.id = Some(id);
         self
@@ -378,10 +386,9 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// The dictionary, array or stream the row's value is in.
     /// `fn:ImageIsStructContentItem` and `fn:PageContainsStructContentItems`
     /// know it as the objects the structure tree points at are known: by
-    /// where it was written, its span, which no other object of the file
-    /// shares, and by its number when [`Cx::id`] gives it; not by where
-    /// it's kept, so a copy is known as the object it copies while it has
-    /// its span or its number.
+    /// its number when [`Cx::id`] gives it, and else by where it was
+    /// written, its span; not by where it's kept, so a copy is known as the
+    /// object it copies while it has its span or its number.
     pub fn container(&self) -> &'c Object {
         self.container
     }
@@ -435,18 +442,17 @@ struct Items {
 }
 
 /// The objects content items of one kind name, each as it's [`Known`],
-/// and whether they're all of them: every node read and every item
-/// placed.
+/// and whether they're all of them.
 #[derive(Debug)]
 struct Objects {
+    /// The numbers of those named by reference.
+    ids: HashSet<ObjectId>,
     /// Where they were written, those the reader placed.
     spans: HashSet<Span>,
-    /// Their numbers, those named by reference.
-    ids: HashSet<ObjectId>,
-    /// Whether one has a span and whether it has a number, each pair
-    /// once: what an object none of them is can be told apart from them
-    /// by.
-    kinds: Vec<(bool, bool)>,
+    /// Whether one the reader didn't place.
+    unplaced: bool,
+    /// Whether they're all of them: every node read, and every item's
+    /// object found.
     whole: bool,
 }
 
@@ -454,66 +460,67 @@ impl Objects {
     /// None yet, and all of them.
     fn new() -> Objects {
         Objects {
-            spans: HashSet::new(),
             ids: HashSet::new(),
-            kinds: Vec::new(),
+            spans: HashSet::new(),
+            unplaced: false,
             whole: true,
         }
     }
 
     /// One more, as it's known.
     fn insert(&mut self, object: Known) {
-        self.spans.extend(object.at);
         self.ids.extend(object.id);
-        let kind = (object.at.is_some(), object.id.is_some());
-        if !self.kinds.contains(&kind) {
-            self.kinds.push(kind);
+        match object.at {
+            Some(at) => {
+                self.spans.insert(at);
+            }
+            None => self.unplaced = true,
         }
     }
 
-    /// Whether `object` is one of them: it is when its span or its number
-    /// is one's; it isn't when each is told apart from it, by a span or a
-    /// number the two both have; else it can't be told, none.
+    /// Whether `object` is one of them. An indirect object, by its number
+    /// alone: it is when one has that number, and else isn't, as one
+    /// written directly never is an indirect object. Without a number, by
+    /// where it was written: it is when one was written there; it isn't
+    /// when there are none, or it and each of them were placed, elsewhere;
+    /// else it can't be told, none.
     fn has(&self, object: Known) -> Option<bool> {
-        let at = object.at.is_some_and(|at| self.spans.contains(&at));
-        if at || object.id.is_some_and(|id| self.ids.contains(&id)) {
-            return Some(true);
+        if let Some(id) = object.id {
+            return Some(self.ids.contains(&id));
         }
-        let apart =
-            |(at, id): (bool, bool)| (at && object.at.is_some()) || (id && object.id.is_some());
-        self.kinds.iter().all(|&kind| apart(kind)).then_some(false)
+        let none = self.ids.is_empty() && self.spans.is_empty() && !self.unplaced;
+        match object.at {
+            Some(at) if self.spans.contains(&at) => Some(true),
+            Some(_) if !self.unplaced => Some(false),
+            _ => none.then_some(false),
+        }
     }
 }
 
-/// An object as the structure tree's content items know it: by where it
-/// was written, which no other object of the file shares (an object
-/// stream's member's span names its stream), and by its number when it's
+/// An object as the structure tree's content items and the name trees'
+/// roots are known: by where it was written, and by its number when it's
 /// an indirect object. Either may be unknown: an object built in memory,
-/// or edited, has no span, and one written directly, no number. Not by
-/// where it's kept, which a lazy reader needn't keep the same.
-#[derive(Debug, Clone, Copy)]
+/// or edited, has no span, and one written directly, no number. Two
+/// objects of a file never share a number, but may share a span, as an
+/// object stream's header can start two of its objects at one offset, or
+/// one inside another; so where there's a number, it says. Not by where
+/// it's kept, which a lazy reader needn't keep the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Known {
     at: Option<Span>,
     id: Option<ObjectId>,
 }
 
-/// The keys of a file's name trees, read once each, by the tree's root as
-/// [`Root`] knows it: so it serves one file. A root it can't know is read
-/// each time it's asked of.
-#[derive(Debug, Default)]
-struct Trees(RefCell<HashMap<Root, Rc<Tree>>>);
-
-/// A name tree's root, the object its own entry comes to: known by where
-/// it was written, which no other value of the file shares; or, written
-/// nowhere the reader says, by the number of the object its entry's
-/// references end at ([`entry_id`]). Not by where it's kept: a root in a
+/// The keys of a file's name trees, read once each, by the tree's root,
+/// the object its own entry comes to, as it's [`Known`]: where it was
+/// written and the number of the object its entry's references end at
+/// ([`entry_id`]), both, so that two roots written at one span are kept
+/// apart by their numbers; so it serves one file. A root known by neither
+/// is read each time it's asked of. Not by where it's kept: a root in a
 /// container given for a row may be dropped after it, and another root
 /// take its place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Root {
-    At(Span),
-    Id(ObjectId),
-}
+#[derive(Debug, Default)]
+struct Trees(RefCell<HashMap<Known, Rc<Tree>>>);
 
 /// A name tree's keys, and whether they're all of them: every node read,
 /// and every key a string whose bytes the reader gave.
@@ -1517,12 +1524,13 @@ fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
         Ok(None) => return Tri::Is(false),
         Err(why) => return Tri::Unknown(why),
     };
-    let known = match root.at {
-        Some(at) => Some(Root::At(at)),
-        None => entry_id(tree, cx).map(Root::Id),
+    let known = Known {
+        at: root.at,
+        id: entry_id(tree, cx),
     };
     let tree = match known {
-        Some(known) => {
+        Known { at: None, id: None } => Rc::new(name_tree(root, cx)),
+        known => {
             let kept = cx.file.trees.0.borrow().get(&known).cloned();
             kept.unwrap_or_else(|| {
                 let read = Rc::new(name_tree(root, cx));
@@ -1530,7 +1538,6 @@ fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
                 read
             })
         }
-        None => Rc::new(name_tree(root, cx)),
     };
     match (tree.keys.contains(key), tree.whole) {
         (true, _) => Tri::Is(true),
@@ -1729,8 +1736,9 @@ fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
 
 /// Whether the row's container is one of `found`, the objects the
 /// structure tree points at or the pages it puts marked content on,
-/// known by its span and the number [`Cx::id`] gives: false when each is
-/// told apart from it and they're all there are, else unknown.
+/// known by the number [`Cx::id`] gives, else by its span
+/// ([`Objects::has`]): false when each is told apart from it and they're
+/// all there are, else unknown.
 fn content_item(f: &str, found: &Objects, cx: &Cx) -> Tri {
     let container = Known {
         at: cx.container.at,
@@ -3388,7 +3396,8 @@ mod tests {
     fn a_name_tree_is_read_once_for_every_row_of_a_file() {
         // The catalog's /Dests, by reference, over a kid by reference,
         // which only reading the tree resolves: each row's own path
-        // resolves the catalog and the root.
+        // resolves the catalog and the root, and again for the number its
+        // entry ends at.
         let catalog =
             dict! { "Type" => "Catalog", "Names" => dict! { "Dests" => Object::reference(2) } };
         let root = dict! { "Kids" => vec![Object::reference(3)] };
@@ -3407,7 +3416,7 @@ mod tests {
         let (t, f) = (Truth::True, Truth::False);
         assert_eq!(said, [t.clone(), t.clone(), f.clone(), t.clone(), t, f]);
         assert_eq!(resolved[&(3, 0)], 1, "the kid, read once");
-        assert_eq!(resolved[&(2, 0)], 6, "the root, once a row");
+        assert_eq!(resolved[&(2, 0)], 12, "the root, twice a row");
     }
 
     #[test]
@@ -3488,6 +3497,34 @@ mod tests {
             let dests = vec![t.clone(), f.clone()];
             assert_eq!(said, [dests.clone(), vec![f, t], dests], "placed: {placed}");
         }
+    }
+
+    #[test]
+    fn two_name_trees_written_at_one_span_are_told_apart_by_their_numbers() {
+        // /Dests, 2, and /EmbeddedFiles, 3, copied from two files, each
+        // keeping where it was written in its own: the same span.
+        let names =
+            dict! { "Dests" => Object::reference(2), "EmbeddedFiles" => Object::reference(3) };
+        let catalog = dict! { "Type" => "Catalog", "Names" => names };
+        let file = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [
+                (1, Object::from(catalog)),
+                (2, leaf(&["d"]).at(written(20))),
+                (3, leaf(&["e"]).at(written(20))),
+            ],
+        );
+        let (said, _) = file.counted("1.7", |file| {
+            let tree = |name: &str| format!("trailer::Catalog::Names::{name}");
+            [
+                in_tree(file, &tree("Dests"), &["d", "e"]),
+                in_tree(file, &tree("EmbeddedFiles"), &["d", "e"]),
+                in_tree(file, &tree("Dests"), &["d", "e"]),
+            ]
+        });
+        let (t, f) = (Truth::True, Truth::False);
+        let dests = vec![t.clone(), f.clone()];
+        assert_eq!(said, [dests.clone(), vec![f, t], dests]);
     }
 
     #[test]
@@ -3783,15 +3820,17 @@ mod tests {
         assert_eq!(item_in(&direct, &inline, None, images), t);
         assert_eq!(item_in(&direct, &image().at(written(60)), None, images), f);
 
-        // An item the reader didn't place, written directly, is known by
-        // neither: any container could be it, though no other item is.
+        // An item the reader didn't place, written directly: never an
+        // indirect object, so not image 6; a container nothing identifies
+        // could be it, though no other item is.
         let lost = tagged(
             Object::reference(2),
             image(),
             [(2, page().at(written(20))), (6, image().at(written(60)))],
         );
         let six = object(&lost, 6);
-        assert_eq!(item_in(&lost, &six, Some((6, 0)), images), unknown_image);
+        assert_eq!(item_in(&lost, &six, Some((6, 0)), images), f);
+        assert_eq!(item_in(&lost, &image(), None, images), unknown_image);
         assert_eq!(item_in(&lost, &page(), Some((2, 0)), pages), t);
 
         // Named through a chain of references, 7 to 6: by the last, the
@@ -3803,6 +3842,34 @@ mod tests {
         );
         assert_eq!(item_in(&chain, &image(), Some((6, 0)), images), t);
         assert_eq!(item_in(&chain, &image(), Some((7, 0)), images), f);
+
+        // Pages 3 and 4, which an object stream's header starts at one
+        // offset, and the tree names 4: one span, told apart by their
+        // numbers; given none, 3 is known by its span alone, 4's.
+        let at = Span::new(Some((9, 0)), 8, 80);
+        let twins = tagged(
+            Object::reference(4),
+            Object::reference(6),
+            [(3, page().at(at)), (4, page().at(at)), (6, image())],
+        );
+        assert_eq!(item_in(&twins, &object(&twins, 4), Some((4, 0)), pages), t);
+        assert_eq!(item_in(&twins, &object(&twins, 3), Some((3, 0)), pages), f);
+        assert_eq!(item_in(&twins, &page(), Some((3, 0)), pages), f);
+        assert_eq!(item_in(&twins, &object(&twins, 3), None, pages), t);
+
+        // The element's /Pg written directly, at bytes where an object
+        // stream's header starts page 3 too: one span, but a value written
+        // directly is never page 3.
+        let inside = tagged(
+            page().at(at),
+            Object::reference(6),
+            [(3, page().at(at)), (6, image())],
+        );
+        assert_eq!(
+            item_in(&inside, &object(&inside, 3), Some((3, 0)), pages),
+            f
+        );
+        assert_eq!(item_in(&inside, &page().at(at), None, pages), t);
     }
 
     #[test]
@@ -3825,11 +3892,13 @@ mod tests {
         assert_eq!(item_in(&placed, &inline, None, pages), Truth::True);
         let two = placed.objects.get(&(2, 0)).unwrap();
         assert_eq!(item_in(&placed, two, Some((2, 0)), pages), Truth::False);
-        // Not placed, it's known by neither, and page 2 could be it.
+        // Not placed, it's known by neither, but written directly, it isn't
+        // page 2; a page nothing identifies could be it.
         let unplaced = file(&page());
         let two = unplaced.objects.get(&(2, 0)).unwrap();
+        assert_eq!(item_in(&unplaced, two, Some((2, 0)), pages), Truth::False);
         assert_eq!(
-            item_in(&unplaced, two, Some((2, 0)), pages),
+            item_in(&unplaced, &page(), None, pages),
             unknown("fn:PageContainsStructContentItems")
         );
     }

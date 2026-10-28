@@ -4342,6 +4342,74 @@ mod tests {
         );
     }
 
+    /// Two objects an object stream's header starts at one offset, page 3
+    /// in the page tree and 4, which a structure element's `/Pg` names:
+    /// read from the same bytes, they have one span, and their numbers
+    /// tell them apart, so only 4 needs a `/StructParents`.
+    #[test]
+    fn objects_an_object_stream_starts_at_one_offset_are_told_apart_by_their_numbers() {
+        let page = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>";
+        let data = [b"3 0 4 0 ".as_slice(), page].concat();
+        let head = format!(
+            "<< /Type /ObjStm /N 2 /First 8 /Length {} >>\nstream\n",
+            data.len()
+        );
+        let objects: [(u32, Vec<u8>); 5] = [
+            (
+                1,
+                b"<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 5 0 R >>".to_vec(),
+            ),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (5, b"<< /Type /StructTreeRoot /K 6 0 R >>".to_vec()),
+            (
+                6,
+                b"<< /Type /StructElem /S /P /P 5 0 R /Pg 4 0 R /K 0 >>".to_vec(),
+            ),
+            (10, [head.as_bytes(), &data, b"\nendstream"].concat()),
+        ];
+        let mut file = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+        // Each object's cross-reference entry: its type, and two fields.
+        let mut rows = [(0u8, 0usize, 0u16); 12];
+        rows[0] = (0, 0, 65535);
+        for (n, body) in &objects {
+            rows[*n as usize] = (1, file.len(), 0);
+            file.extend_from_slice(format!("{n} 0 obj\n").as_bytes());
+            file.extend_from_slice(body);
+            file.extend_from_slice(b"\nendobj\n");
+        }
+        (rows[3], rows[4]) = ((2, 10, 0), (2, 10, 1));
+        let xref = file.len();
+        rows[11] = (1, xref, 0);
+        let rows: Vec<u8> = (rows.iter())
+            .flat_map(|&(kind, field, index)| {
+                let field = u32::try_from(field).unwrap().to_be_bytes();
+                [&[kind][..], &field, &index.to_be_bytes()].concat()
+            })
+            .collect();
+        let dict = format!(
+            "11 0 obj\n<< /Type /XRef /Size 12 /W [1 4 2] /Root 1 0 R /Length {} >>\nstream\n",
+            rows.len()
+        );
+        file.extend_from_slice(dict.as_bytes());
+        file.extend_from_slice(&rows);
+        file.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        let doc = bytes::read(&file);
+        assert_eq!(doc.get((3, 0)).unwrap().at, doc.get((4, 0)).unwrap().at);
+        let report = check(&doc, &Hold::All(Made::Built), &Options::default());
+        assert_eq!(report.checked.get("PageObject"), Some(&2), "{report}");
+        let parents: Vec<_> = (found(&report).into_iter())
+            .filter(|f| f.2 == "StructParents")
+            .map(|f| (f.0, f.1, f.3))
+            .collect();
+        assert_eq!(
+            parents,
+            [(Some(4), "PageObject", Rule::Missing)],
+            "{report}"
+        );
+    }
+
     /// A reader that doesn't say where its objects were written: the
     /// structure tree's content items, and the pages and images checked,
     /// are known by their numbers.
