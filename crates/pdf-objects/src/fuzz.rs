@@ -56,12 +56,13 @@ enum Length {
 /// are ciphertext exactly when asked, and each has the form its first byte
 /// writes; a value, a header or a body that fails leaves the parser where
 /// it was; and under small limits, a read that reaches them fails saying
-/// so, and one that doesn't is the read without them. What's read, the
-/// writer writes, and it reads back as the same value and writes as the
-/// same bytes again ([`round_trip`]), but for a ciphertext read's object
-/// holding a string: the writer refuses it whole, writing nothing, and
-/// writes it with its strings taken as their bytes, which read back as
-/// plain.
+/// which, where a value starts that the read without them takes past
+/// them, or fails after, and one that doesn't is the read without them.
+/// What's read, the writer writes, and it reads back as the same value and
+/// writes as the same bytes again ([`round_trip`]), but for a ciphertext
+/// read's object holding a string: the writer refuses it whole, writing
+/// nothing, and writes it with its strings taken as their bytes, which
+/// read back as plain.
 /// Panics on a broken promise.
 pub fn parse(data: &[u8]) {
     let (how, input) = chosen(data);
@@ -169,21 +170,75 @@ fn chosen(data: &[u8]) -> (How, &[u8]) {
 }
 
 /// Checks `small`, what reading `input` as `how` said under its small
-/// limits: a read that reached them fails saying which, and one that
-/// didn't is what the default limits read.
+/// limits, against what the default limits read: a read that reached them
+/// fails saying which, where a value starts, and the default's object
+/// holds a value past that limit, or the default's read fails, after; and
+/// a read that didn't reach them is the default's.
 fn limited(input: &[u8], how: How, small: &(Result<Object, Error>, usize)) {
-    match small.0 {
-        Err(Error::Nested { limit }) => assert_eq!(limit, how.limits.nesting),
-        Err(Error::Values { limit }) => assert_eq!(limit, how.limits.values),
-        _ => {
-            let how = How {
-                limits: Limits::DEFAULT,
-                ..how
-            };
-            let full = read(input, how, &mut ());
-            assert_eq!(*small, full, "read as without limits it doesn't reach");
+    let limits = how.limits;
+    let how = How {
+        limits: Limits::DEFAULT,
+        ..how
+    };
+    let full = read(input, how, &mut ());
+    let (at, past) = match small.0 {
+        Err(Error::Nested { limit, at }) => {
+            assert_eq!(limit, limits.nesting);
+            (at, full.0.as_ref().map(|o| deepest(o) > limit))
         }
+        Err(Error::Values { limit, at }) => {
+            assert_eq!(limit, limits.values);
+            (at, full.0.as_ref().map(|o| count(o) > limit))
+        }
+        _ => {
+            assert_eq!(*small, full, "read as without limits it doesn't reach");
+            return;
+        }
+    };
+    assert!(
+        past.unwrap_or(true),
+        "read without limits, it doesn't pass them"
+    );
+    // Read from where it starts, what reached a limit is a value, or one
+    // that fails after its first token: never the error of a token that
+    // can't start one.
+    assert!(at < input.len(), "{at}");
+    let there = Parser::at(input, at).value(&mut ());
+    let not_a_value = matches!(
+        there,
+        Err(Error::Token { at: a, .. } | Error::Keyword { at: a, .. } | Error::String { at: a })
+            if a == at
+    );
+    assert!(
+        !not_a_value,
+        "a limit reached at {at}, not a value: {there:?}"
+    );
+}
+
+/// How many values a parser reads for `o`: it, and each element, key and
+/// dictionary value, at every depth; a stream's are its dictionary's.
+fn count(o: &Object) -> usize {
+    1 + match o.value() {
+        Value::Array(a) => a.iter().map(count).sum(),
+        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
+            d.entries().iter().map(|e| 1 + count(&e.value)).sum()
+        }
+        _ => 0,
     }
+}
+
+/// How deep `o`'s deepest value is nested in it: 0 for `o` itself, one
+/// more for each array or dictionary around it, a stream's dictionary as
+/// one.
+fn deepest(o: &Object) -> usize {
+    let inside = match o.value() {
+        Value::Array(a) => a.iter().map(deepest).max(),
+        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
+            d.entries().iter().map(|e| deepest(&e.value)).max()
+        }
+        _ => None,
+    };
+    inside.map_or(0, |d| d + 1)
 }
 
 /// What reading `input` as `how` says: the object or the error, and where

@@ -1150,7 +1150,10 @@ mod tests {
                 let text = [open, &out, close].concat();
                 let mut parser = Parser::at(&text, 0);
                 let refused = parser.value(&mut ());
-                assert_eq!(refused, Err(crate::parse::Error::Nested { limit }));
+                let Err(crate::parse::Error::Nested { limit: refused, .. }) = refused else {
+                    panic!("read past the limit: {refused:?}");
+                };
+                assert_eq!(refused, limit);
                 assert_eq!(parser.offset(), 0);
             }
         }

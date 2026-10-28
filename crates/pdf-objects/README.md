@@ -82,7 +82,7 @@ use pdf_objects::Limits;
 let mut limits = Limits::DEFAULT;
 limits.nesting = 2;
 let mut parser = Parser::at(b"[[[1]]]", 0).limits(limits);
-assert_eq!(parser.value(&mut ()), Err(Error::Nested { limit: 2 }));
+assert_eq!(parser.value(&mut ()), Err(Error::Nested { limit: 2, at: 3 }));
 // A call that fails leaves the parser where it was.
 assert_eq!(parser.offset(), 0);
 ```
