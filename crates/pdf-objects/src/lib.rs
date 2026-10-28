@@ -35,10 +35,11 @@
 //!   caps on how deeply values nest and how many one call reads
 //!   ([`Limits`]).
 //! - **A writer** ([`serialize`]): a value as PDF syntax, or as an
-//!   indirect object, which the parser reads back as the same value: a
-//!   real in its shortest form, names and strings byte by byte, a
-//!   dictionary's every entry; and what it can't write as the value
-//!   refused, with nothing written.
+//!   indirect object, which the parser reads back as the same value,
+//!   under limits that take in its count of values, and a stream as an
+//!   indirect object: a real in its shortest form, names and strings byte
+//!   by byte, a dictionary's every entry; and what it can't write as the
+//!   value refused, with nothing written.
 //!
 //! [`dict!`] builds a dictionary from keys and values.
 

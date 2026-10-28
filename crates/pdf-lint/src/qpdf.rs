@@ -968,10 +968,9 @@ qpdf: operation succeeded with warnings\n";
     /// What reading through qpdf alone loses: where anything was written,
     /// any key written twice, which encoding a text string had, and whether
     /// a string was written literal or hex. `a` with these left out, as `b`
-    /// has them, compared with `b`: the first
-    /// difference, what kind it is and where, or none. `nothing` says
-    /// whether a value of `a` is null, or a reference to no object, which
-    /// qpdf reads as null.
+    /// has them, compared with `b`: the first difference, what kind it is
+    /// and where, or none. `nothing` says whether a value of `a` is null,
+    /// or a reference to no object, which qpdf reads as null.
     fn difference(
         a: &Object,
         b: &Object,

@@ -1,6 +1,9 @@
 //! The writer: values as PDF syntax (ISO 32000-2, 7.3), as a direct
 //! object, or as an indirect object's `n g obj` to `endobj`, which the
-//! parser ([`parse`](crate::parse)) reads back as the same value.
+//! parser ([`parse`](crate::parse)) reads back as the same value, under
+//! limits that take in its count of values. The writer keeps to
+//! [`Limits::DEFAULT`]'s nesting, but not to its 2^25 values, which a
+//! value in memory may pass.
 //!
 //! - **Reals** in their shortest form that reads back as the same f64,
 //!   past i64's range too, never with an exponent; a magnitude past Annex
@@ -12,8 +15,9 @@
 //!   key (7.3.7): [`Dict::remove_duplicates`] leaves each key's last.
 //! - **Streams** with their data as it is, and its length as their
 //!   `/Length`, in place of each `/Length` entry or after the others. A
-//!   stream inside another value is written there, though no reader reads
-//!   it back: a stream is an indirect object (7.3.8).
+//!   stream reads back only as an indirect object, as it is one (7.3.8):
+//!   one written alone by [`write()`], or inside another value, is
+//!   written all the same, though no reader reads it back as a stream.
 //!
 //! Numbers, names and strings are written byte by byte rather than through
 //! `write!`, which a writer of thousands of objects pays for at every one;
@@ -139,13 +143,16 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// " in object n g", when `id` is known, for an error's text.
 fn in_object(id: &Option<ObjectId>) -> String {
     id.map(|(n, g)| format!(" in object {n} {g}"))
         .unwrap_or_default()
 }
 
 /// `obj` as a direct object. What can't be written as the value is
-/// refused ([`Error`]), and then nothing is written.
+/// refused ([`Error`]), and then nothing is written. A stream is written
+/// as one, though a parser reads it back only as an indirect object
+/// ([`indirect`]).
 pub fn write(out: &mut Vec<u8>, obj: &Object) -> Result<(), Error> {
     let start = out.len();
     value(out, obj, 0).inspect_err(|_| out.truncate(start))
@@ -174,6 +181,14 @@ pub fn indirect(out: &mut Vec<u8>, id: ObjectId, obj: &Object) -> Result<usize, 
 /// as [`Data::Bytes`](crate::Data::Bytes), given apart, without copying
 /// it there. Its `/Length` is `data`'s length. Refused as [`write()`]
 /// refuses, the error naming `id`.
+///
+/// `data` is written as it is, so it's the stream's data only when it's
+/// encoded by the filters `dict` names and, in an encrypted file,
+/// encrypted as object `id`'s. A reader's [`Data::At`](crate::Data::At)
+/// names data as it was read: encoded by the filters the stream had then,
+/// and in an encrypted file ciphertext, right to write only under the key,
+/// and the number and generation, it was encrypted with, as a string's is
+/// ([`Error::Encrypted`]).
 pub fn indirect_stream(
     out: &mut Vec<u8>,
     id: ObjectId,
@@ -198,7 +213,8 @@ pub fn indirect_stream(
 /// `x` in its shortest form that reads back as the same f64, never with
 /// an exponent and always with a point, so an integral real reads back
 /// as a real. Magnitudes past `MAX_REAL`, 3.4e38, are clamped to it, and
-/// those under `MIN_REAL`, 1.175e-38, written as 0, as is -0.
+/// those under `MIN_REAL`, 1.175e-38, written as 0, as is -0. NaN and the
+/// infinities are refused ([`Error::NonFinite`]), and nothing is written.
 pub fn real(out: &mut Vec<u8>, x: f64) -> Result<(), Error> {
     if !x.is_finite() {
         return Err(Error::NonFinite { id: None });

@@ -356,11 +356,11 @@ fn rewrite(input: &[u8], how: How, object: &Object) {
 /// there's one, as the same value as the writer writes it
 /// ([`as_written`]), places aside, the parser saying only that a name
 /// holds NUL, `#00`, for each name that does; and that the value read back
-/// is written as the same bytes again. What it wrote.
+/// is written as the same bytes again. Panics when any of that fails, or
+/// the writer refuses `object`; else gives what it wrote.
 ///
 /// A stream's dictionary without a `/Length` is written with one, two
 /// values more, one deeper, which the limits read back take in.
-/// Panics otherwise, and when the writer refuses `object`.
 pub fn round_trip(
     object: &Object,
     id: Option<ObjectId>,
@@ -442,7 +442,7 @@ fn write(
 /// smallest, 1.175e-38; and a stream's `/Length` its data's length, in
 /// each of its entries, or after the others. A stream's data must be
 /// [`Data::Bytes`], as [`unplace`] makes it.
-pub fn as_written(o: &mut Object) {
+fn as_written(o: &mut Object) {
     match o.value_mut() {
         Value::Real(x) => {
             if x.abs() > 3.4e38 {

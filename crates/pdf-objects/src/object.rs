@@ -38,6 +38,11 @@ impl Span {
 /// drops its span: reaching a value inside another goes through each
 /// value that holds it, so their spans go too, and a value no edit
 /// reached keeps its own.
+///
+/// Two are equal when their values are and they were written at the same
+/// place, as [`Value`]'s equality takes in places too: a value read, with
+/// its span and a string's form, isn't equal to the same value built,
+/// which has neither, as `5` read from a file isn't `Object::from(5)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Object {
     value: Value,
@@ -45,13 +50,18 @@ pub struct Object {
     /// it since: a reader of the file's bytes always does, and one through
     /// another tool's JSON, as qpdf's, may not. A value changed in place
     /// has none, nor has anything that holds it, as they may no longer be
-    /// what those bytes say, so a writer writes them anew; one no edit
-    /// touched keeps its own. A real's spelling, `1.50` or `.5`, is in the
-    /// bytes it names.
+    /// what those bytes say; one no edit touched keeps its own, so a
+    /// writer of a file may copy it as it was written. This crate's writer,
+    /// [`serialize`](crate::serialize), writes every value anew. A real's
+    /// spelling, `1.50` or `.5`, is in the bytes it names.
     pub at: Option<Span>,
 }
 
 /// PDF's objects (ISO 32000-2, 7.3).
+///
+/// Two are equal when they're the same kind and what they hold is equal,
+/// places too: each value's span inside them, a string's form, and a
+/// dictionary's entries in order, with their keys' spans.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// The null object.
@@ -107,7 +117,9 @@ pub enum Form {
 
 /// A dictionary: its entries as written, in order. Lookups take a key's
 /// last entry, as readers do; [`Dict::duplicates`] gives the others. A
-/// lookup allocates nothing for a dictionary of up to 32 entries.
+/// lookup allocates nothing for a dictionary of up to 32 entries. Two are
+/// equal when their entries are, in the same order, with their keys' spans
+/// and their values' places.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Dict {
     entries: Vec<Entry>,
@@ -118,7 +130,9 @@ pub struct Dict {
 pub struct Entry {
     /// The key's bytes, its `#xx` escapes decoded.
     pub key: Vec<u8>,
-    /// Where the key was written, when the reader knows.
+    /// Where the key was written, when the reader knows. A key changed in
+    /// place keeps it, naming the bytes of the key it was, so whatever
+    /// changes one clears it.
     pub key_at: Option<Span>,
     /// The key's value.
     pub value: Object,
@@ -133,7 +147,9 @@ pub struct Stream {
     /// Its dictionary.
     pub dict: Dict,
     /// Its data: where it was written, or its bytes. An edit of the
-    /// dictionary leaves it as it is, as the data didn't change.
+    /// dictionary leaves it as it is, as the data didn't change: data a
+    /// reader placed stays encoded by the filters the stream was read
+    /// with, whatever its `/Filter` and `/DecodeParms` become.
     pub data: Data,
 }
 
@@ -141,12 +157,11 @@ pub struct Stream {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Data {
-    /// Where it was written, as written: encoded by the stream's filters,
-    /// and encrypted in an encrypted file. A reader's.
+    /// Where it was written, as written: encoded by the filters the stream
+    /// was read with, and encrypted in an encrypted file. A reader's.
     At(Span),
     /// Its bytes, in memory: encoded by the stream's filters, if it has
-    /// any, and written as they are
-    /// ([`serialize`](crate::serialize)).
+    /// any, and written as they are ([`serialize`](crate::serialize)).
     Bytes(Vec<u8>),
     /// Neither: a reader that doesn't say where, as one through another
     /// tool's JSON may not, or a stream built without its data.
@@ -170,7 +185,11 @@ impl Object {
         Object::new(Value::Ref((n, 0)))
     }
 
-    /// A string of `text`'s bytes, its form not chosen.
+    /// A string of `text`'s bytes, UTF-8 with no byte order mark, its form
+    /// not chosen. Read as a text string (ISO 32000-2, 7.9.2.2), bytes
+    /// with no mark are PDFDocEncoding, so it reads back as `text` only
+    /// when that's ASCII, but for 0x18–0x1F and 0x7F: `é` reads back as
+    /// `Ã©`.
     pub fn string(text: &str) -> Object {
         Object::new(Value::String(Str::Bytes(text.as_bytes().to_vec()), None))
     }
@@ -220,7 +239,10 @@ impl Object {
 
     /// Its value, to change into what the same bytes stand for, as a
     /// reader does when it decrypts a string it read: its span is kept.
-    /// Any other change is an edit, through [`Object::value_mut`].
+    /// Any other change is an edit, through [`Object::value_mut`]. A
+    /// writer that copies a value by its span trusts this: a value changed
+    /// through it into what its bytes don't stand for is copied as those
+    /// bytes, the change lost.
     pub fn as_written_mut(&mut self) -> &mut Value {
         &mut self.value
     }
@@ -304,7 +326,8 @@ impl Object {
 
     /// A dictionary, or a stream's dictionary, to change: an edit, as
     /// through [`Object::value_mut`], when it's either. A stream's data
-    /// keeps where it was written.
+    /// keeps where it was written, encoded by the filters it was read
+    /// with, whatever its `/Filter` and `/DecodeParms` become.
     pub fn as_dict_mut(&mut self) -> Option<&mut Dict> {
         match &mut self.value {
             Value::Dict(dict) | Value::Stream(Stream { dict, .. }) => {
@@ -316,7 +339,8 @@ impl Object {
     }
 
     /// A stream, to change: an edit, as through [`Object::value_mut`],
-    /// when it's a stream.
+    /// when it's a stream. Its data keeps where it was written, until it's
+    /// replaced, as [`Object::as_dict_mut`] says.
     pub fn as_stream_mut(&mut self) -> Option<&mut Stream> {
         match &mut self.value {
             Value::Stream(stream) => {
@@ -479,7 +503,8 @@ impl Dict {
         &self.entries
     }
 
-    /// Every entry as written, to change.
+    /// Every entry as written, to change. A key changed keeps its
+    /// `key_at`, which names the key it was, until the caller clears it.
     pub fn entries_mut(&mut self) -> impl Iterator<Item = &mut Entry> {
         self.entries.iter_mut()
     }
