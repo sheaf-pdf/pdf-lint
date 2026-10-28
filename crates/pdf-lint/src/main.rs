@@ -17,6 +17,8 @@ use pdf_lint::{
     Allowances, Class, Document, Encryption, Exempt, Finding, Grammar, Hold, Made, Options, Report,
     Span, UnlistedIn, Version, bytes, check, file_version, text, use_model,
 };
+use serde::Serialize;
+use serde_json::ser::{CharEscape, CompactFormatter, Formatter};
 
 const USAGE: &str = "\
 usage: pdf-lint [OPTIONS] FILE...
@@ -560,23 +562,27 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
         .collect();
     let allowed = kept.len() - shown.len();
     if args.json {
-        return Checked {
-            out: json(
-                &name,
-                version,
-                checked_as,
-                args.one_table,
-                args.unlisted,
-                args.deprecations,
-                model,
-                &report,
-                &shown,
-                allowed,
-                carried,
-            ),
-            err: String::new(),
-            findings: shown.len(),
-            unread: false,
+        let line = json(
+            &name,
+            version,
+            checked_as,
+            args.one_table,
+            args.unlisted,
+            args.deprecations,
+            model,
+            &report,
+            &shown,
+            allowed,
+            carried,
+        );
+        return match line {
+            Ok(out) => Checked {
+                out,
+                err: String::new(),
+                findings: shown.len(),
+                unread: false,
+            },
+            Err(e) => unread(path, &format!("{e:#}"), true),
         };
     }
     let objects = report.objects();
@@ -652,32 +658,33 @@ fn against(args: &Args, version: Option<Version>) -> Options {
 /// the model's hash, as every line has them.
 fn unread(path: &Path, why: &str, json: bool) -> Checked {
     let name = path.display().to_string();
+    let mut err = format!("{name}: {why}\n");
     let out = match json {
-        true => format!(
-            "{{\"pdf_lint\":\"{}\",\"model\":\"{:016x}\",\"file\":{},\"error\":{}}}\n",
-            env!("CARGO_PKG_VERSION"),
-            pdf_lint::grammar().hash(),
-            string(&name),
-            string(why)
-        ),
+        true => {
+            let model = format!("{:016x}", pdf_lint::grammar().hash());
+            let unread = Unread {
+                pdf_lint: env!("CARGO_PKG_VERSION"),
+                model: &model,
+                file: &name,
+                error: why,
+            };
+            // It can't fail, as `line` says; if it did, that's said too.
+            line(&unread).unwrap_or_else(|e| {
+                let _ = writeln!(err, "{name}: {e:#}");
+                String::new()
+            })
+        }
         false => String::new(),
     };
     Checked {
         out,
-        err: format!("{name}: {why}\n"),
+        err,
         findings: 0,
         unread: true,
     }
 }
 
-/// One file's report as a line of JSON: the version of pdf-lint that
-/// wrote it, the file's version, the version it was
-/// checked as, whether as one table an object (`--one-table`), which held
-/// objects a key the model doesn't list is a finding in (`--unlisted`),
-/// whether deprecations are findings (`--deprecations`), the extensions
-/// it was checked under, and the model's hash, `model`; its findings, each with where its bytes are; how
-/// many were left out as carried and as allowed; and the counts `--full`
-/// prints.
+/// One file's report as a line of JSON, a [`Line`].
 #[allow(clippy::too_many_arguments)]
 fn json(
     name: &str,
@@ -691,132 +698,208 @@ fn json(
     shown: &[&Finding],
     allowed: usize,
     carried: usize,
-) -> String {
-    let id = |(n, g): (u32, u16)| format!("[{n},{g}]");
-    let mut out = String::new();
-    let objects = report.objects();
-    let _ = write!(
-        out,
-        "{{\"pdf_lint\":\"{}\",\"file\":{},\"version\":\"{version}\",\"checked_as\":\"{checked_as}\",\"one_table\":{one_table},\"unlisted_in\":\"{}\",\"deprecations\":{deprecations},\"extensions\":[{}],\"model\":\"{model}\",\"objects\":{objects},\"keys\":{},\"findings\":[",
-        env!("CARGO_PKG_VERSION"),
-        string(name),
-        unlisted.name(),
-        (report.extensions.iter())
-            .map(|name| string(name))
-            .collect::<Vec<_>>()
-            .join(","),
-        report.keys
-    );
-    for (i, f) in shown.iter().enumerate() {
-        let at = match f.at {
-            Some(at) => format!(
-                "{{\"stream\":{},\"start\":{},\"end\":{}}}",
-                at.stream.map_or("null".to_string(), id),
-                at.start,
-                at.end
-            ),
-            None => "null".to_string(),
-        };
-        let _ = write!(
-            out,
-            "{}{{\"rule\":\"{}\",\"table\":{},\"key\":{},\"path\":{},\"object\":{},\"made\":\"{}\",\"value\":{},\"at\":{at}}}",
-            if i == 0 { "" } else { "," },
-            f.rule,
-            string(&f.table),
-            string(&f.key),
-            string(&f.path),
-            f.object.map_or("null".to_string(), id),
-            f.made.name(),
-            string(&f.value),
-        );
-    }
-    let _ = write!(
-        out,
-        "],\"carried\":{carried},\"allowed\":{allowed},\"tables\":{{"
-    );
-    for (i, (table, n)) in report.checked.iter().enumerate() {
-        let _ = write!(
-            out,
-            "{}{}:{n}",
-            if i == 0 { "" } else { "," },
-            string(table)
-        );
-    }
-    out.push_str("},\"not_checked\":[");
-    for (i, (u, n)) in report.unchecked.iter().enumerate() {
-        let _ = write!(
-            out,
-            "{}{{\"column\":{},\"why\":{},\"table\":{},\"key\":{},\"count\":{n}}}",
-            if i == 0 { "" } else { "," },
-            string(u.column),
-            string(&u.why),
-            string(&u.table),
-            string(&u.key),
-        );
-    }
-    out.push_str("],\"unlisted\":[");
-    for (i, (u, n)) in report.unlisted.iter().enumerate() {
-        let class = match &u.class {
-            Class::Second => "\"second\"".to_string(),
-            Class::Third => "\"third\"".to_string(),
-            Class::Other => "\"other\"".to_string(),
-            Class::Extension(name) => format!("\"extension\",\"extension\":{}", string(name)),
-        };
-        let _ = write!(
-            out,
-            "{}{{\"table\":{},\"key\":{},\"class\":{class},\"count\":{n}}}",
-            if i == 0 { "" } else { "," },
-            string(&u.table),
-            string(&u.key),
-        );
-    }
-    out.push_str("],\"deprecated\":[");
-    for (i, ((table, key), n)) in report.deprecated.iter().enumerate() {
-        let _ = write!(
-            out,
-            "{}{{\"table\":{},\"key\":{},\"count\":{n}}}",
-            if i == 0 { "" } else { "," },
-            string(table),
-            string(key),
-        );
-    }
-    out.push_str("],\"ignored\":[");
-    for (i, ((table, key), n)) in report.ignored.iter().enumerate() {
-        let _ = write!(
-            out,
-            "{}{{\"table\":{},\"key\":{},\"count\":{n}}}",
-            if i == 0 { "" } else { "," },
-            string(table),
-            string(key),
-        );
-    }
-    let _ = writeln!(
-        out,
-        "],\"no_table\":{},\"ties\":{},\"truncated\":{},\"two_contexts\":{},\"two_tables\":{}}}",
-        report.no_table, report.ties, report.truncated, report.two_contexts, report.two_tables
-    );
-    out
+) -> Result<String> {
+    line(&Line {
+        pdf_lint: env!("CARGO_PKG_VERSION"),
+        file: name,
+        version: version.to_string(),
+        checked_as: checked_as.to_string(),
+        one_table,
+        unlisted_in: unlisted.name(),
+        deprecations,
+        extensions: &report.extensions,
+        model,
+        objects: report.objects(),
+        keys: report.keys,
+        findings: (shown.iter())
+            .map(|f| Found {
+                rule: f.rule.name(),
+                table: &f.table,
+                key: &f.key,
+                path: &f.path,
+                object: f.object,
+                made: f.made.name(),
+                value: &f.value,
+                at: f.at.map(|at| At {
+                    stream: at.stream,
+                    start: at.start,
+                    end: at.end,
+                }),
+            })
+            .collect(),
+        carried,
+        allowed,
+        tables: &report.checked,
+        not_checked: (report.unchecked.iter())
+            .map(|(u, &count)| NotChecked {
+                column: u.column,
+                why: &u.why,
+                table: &u.table,
+                key: &u.key,
+                count,
+            })
+            .collect(),
+        unlisted: (report.unlisted.iter())
+            .map(|(u, &count)| {
+                let (class, extension) = match &u.class {
+                    Class::Second => ("second", None),
+                    Class::Third => ("third", None),
+                    Class::Other => ("other", None),
+                    Class::Extension(name) => ("extension", Some(name.as_str())),
+                };
+                Unlisted {
+                    table: &u.table,
+                    key: &u.key,
+                    class,
+                    extension,
+                    count,
+                }
+            })
+            .collect(),
+        deprecated: (report.deprecated.iter())
+            .map(|((table, key), &count)| Count { table, key, count })
+            .collect(),
+        ignored: (report.ignored.iter())
+            .map(|((table, key), &count)| Count { table, key, count })
+            .collect(),
+        no_table: report.no_table,
+        ties: report.ties,
+        truncated: report.truncated,
+        two_contexts: report.two_contexts,
+        two_tables: report.two_tables,
+    })
 }
 
-/// `s` as a JSON string.
-fn string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if u32::from(c) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", u32::from(c));
-            }
-            c => out.push(c),
+/// One file's report, as a line of JSON: the version of pdf-lint that
+/// wrote it, the file's version, the version it was checked as, whether as
+/// one table an object (`--one-table`), which held objects a key the model
+/// doesn't list is a finding in (`--unlisted`), whether deprecations are
+/// findings (`--deprecations`), the extensions it was checked under, and
+/// the model's hash, `model`; its findings, each with where its bytes are;
+/// how many were left out as carried and as allowed; and the counts
+/// `--full` prints. The fields are in the order the line has them.
+#[derive(Serialize)]
+struct Line<'a> {
+    pdf_lint: &'a str,
+    /// The file as the text report names it, a byte that isn't UTF-8 as
+    /// U+FFFD; not a `Path`, which serde writes only when it's UTF-8.
+    file: &'a str,
+    version: String,
+    checked_as: String,
+    one_table: bool,
+    unlisted_in: &'a str,
+    deprecations: bool,
+    extensions: &'a BTreeSet<String>,
+    model: &'a str,
+    objects: usize,
+    keys: usize,
+    findings: Vec<Found<'a>>,
+    carried: usize,
+    allowed: usize,
+    /// How many objects were checked as each table, by its name.
+    tables: &'a BTreeMap<String, usize>,
+    not_checked: Vec<NotChecked<'a>>,
+    unlisted: Vec<Unlisted<'a>>,
+    deprecated: Vec<Count<'a>>,
+    ignored: Vec<Count<'a>>,
+    no_table: usize,
+    ties: usize,
+    truncated: usize,
+    two_contexts: usize,
+    two_tables: usize,
+}
+
+/// A finding, with where its bytes are; its object is `[n,g]`, or null
+/// for the trailer.
+#[derive(Serialize)]
+struct Found<'a> {
+    rule: &'a str,
+    table: &'a str,
+    key: &'a str,
+    path: &'a str,
+    object: Option<(u32, u16)>,
+    made: &'a str,
+    value: &'a str,
+    at: Option<At>,
+}
+
+/// Where a finding's bytes are: in the file, or in the decoded data of the
+/// object stream `stream`, `[n,g]`.
+#[derive(Serialize)]
+struct At {
+    stream: Option<(u32, u16)>,
+    start: usize,
+    end: usize,
+}
+
+/// A key the model doesn't list, and how many times: `extension` names the
+/// extension when that's its class, and isn't written otherwise.
+#[derive(Serialize)]
+struct Unlisted<'a> {
+    table: &'a str,
+    key: &'a str,
+    class: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extension: Option<&'a str>,
+    count: usize,
+}
+
+/// A key, by table, and how many times: one deprecated, or ignored.
+#[derive(Serialize)]
+struct Count<'a> {
+    table: &'a str,
+    key: &'a str,
+    count: usize,
+}
+
+/// A check not made, why, where, and how many times.
+#[derive(Serialize)]
+struct NotChecked<'a> {
+    column: &'a str,
+    why: &'a str,
+    table: &'a str,
+    key: &'a str,
+    count: usize,
+}
+
+/// The line of a file that couldn't be read or checked.
+#[derive(Serialize)]
+struct Unread<'a> {
+    pdf_lint: &'a str,
+    model: &'a str,
+    file: &'a str,
+    error: &'a str,
+}
+
+/// `value` as a line of JSON, written by [`Reports`]. Into a `Vec`, and
+/// with strings alone for keys, it can't fail.
+fn line(value: &impl Serialize) -> Result<String> {
+    let mut out = Vec::new();
+    let mut json = serde_json::Serializer::with_formatter(&mut out, Reports);
+    value.serialize(&mut json)?;
+    out.push(b'\n');
+    Ok(String::from_utf8(out)?)
+}
+
+/// How the reports are written: serde_json's compact JSON, but for
+/// backspace and form feed, which serde_json writes `\b` and `\f`. Here
+/// they're `\u0008` and `\u000c`, as every other character below U+0020
+/// is but tab, line feed and carriage return, in lowercase (RFC 8259, 7,
+/// allows either), so that a report is the bytes it's always been.
+struct Reports;
+
+impl Formatter for Reports {
+    fn write_char_escape<W: ?Sized + io::Write>(
+        &mut self,
+        writer: &mut W,
+        escape: CharEscape,
+    ) -> io::Result<()> {
+        match escape {
+            CharEscape::Backspace => writer.write_all(b"\\u0008"),
+            CharEscape::FormFeed => writer.write_all(b"\\u000c"),
+            escape => CompactFormatter.write_char_escape(writer, escape),
         }
     }
-    out.push('"');
-    out
 }
 
 /// The bytes at `at`, the first [`SHOWN`] of them, printable ASCII as it is

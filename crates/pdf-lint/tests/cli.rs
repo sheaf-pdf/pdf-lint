@@ -1222,6 +1222,72 @@ fn json_reports_a_line_for_each_file() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// A file's name in the JSON report, held byte for byte as it's always been
+/// written: `"` and `\` after a backslash; tab, line feed and carriage
+/// return as `\t`, `\n` and `\r`, and every other control character as
+/// `\u00xx`, lowercase, backspace and form feed too; and the rest as it is,
+/// U+007F and beyond, a byte that isn't UTF-8 as U+FFFD, as the text report
+/// names it. On Unix alone: an argument can't hold a NUL, and a Windows
+/// name can't hold most of these.
+#[cfg(unix)]
+#[test]
+fn json_strings_are_escaped_as_they_were() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = folder();
+    let mut name: Vec<u8> = (0x01..=0x1F).collect();
+    name.extend_from_slice("\"\\\u{7f}é€🥔".as_bytes());
+    name.push(0xFF);
+    let escaped = concat!(
+        r#""file":"\u0001\u0002\u0003\u0004\u0005\u0006\u0007\u0008\t\n\u000b"#,
+        r#"\u000c\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017"#,
+        r#"\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f\"\\"#,
+        "\u{7f}é€🥔\u{fffd}",
+    );
+    let lint = |name: &[u8]| {
+        (pdf_lint().current_dir(dir.path()))
+            .args(["--format", "json"])
+            .arg(OsStr::from_bytes(name))
+            .output()
+            .unwrap()
+    };
+
+    // A file that doesn't exist: the line saying it can't be read.
+    let out = lint(&name);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let model = format!("{:016x}", pdf_lint::grammar().hash());
+    let version = env!("CARGO_PKG_VERSION");
+    let line =
+        format!("{{\"pdf_lint\":\"{version}\",\"model\":\"{model}\",{escaped}\",\"error\":\"");
+    assert!(
+        out.stdout.starts_with(line.as_bytes()) && out.stdout.ends_with(b"\"}\n"),
+        "{}",
+        text(&out.stdout)
+    );
+
+    // A file that does: its report. macOS's file systems refuse a name
+    // that isn't UTF-8.
+    if cfg!(target_os = "linux") {
+        let pdf = [&name[..], b".pdf"].concat();
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+        std::fs::write(
+            dir.path().join(OsStr::from_bytes(&pdf)),
+            file(&[CATALOG, PAGES, page]),
+        )
+        .unwrap();
+        let out = lint(&pdf);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let line = format!("{{\"pdf_lint\":\"{version}\",{escaped}.pdf\",\"version\":\"1.7\",");
+        assert!(
+            out.stdout.starts_with(line.as_bytes()) && out.stdout.ends_with(b"}\n"),
+            "{}",
+            text(&out.stdout)
+        );
+        assert_eq!(out.stdout.iter().filter(|&&b| b == b'\n').count(), 1);
+    }
+}
+
 /// `file` with an incremental update appended: these objects' bodies, by
 /// number, and a table listing them.
 fn updated(file: &[u8], objects: &[(u32, &str)]) -> Vec<u8> {
