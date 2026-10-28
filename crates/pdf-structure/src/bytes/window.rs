@@ -388,6 +388,29 @@ mod tests {
         assert_eq!(reading.into_document().unwrap(), read_opened(&file, &[]));
     }
 
+    /// A file whose first object is an array of a million values: opened
+    /// by position, it reads only the head of that object, which can't be a
+    /// linearization's dictionary, not all of it.
+    #[test]
+    fn opening_by_position_reads_little_of_a_large_first_object() {
+        let mut array = b"[".to_vec();
+        for i in 0..1 << 20 {
+            array.extend_from_slice(format!("{} ", i % 1000).as_bytes());
+        }
+        array.push(b']');
+        let file = write::assembled(
+            "1.7",
+            &[(1, &array[..]), (2, b"<< /Type /Catalog >>")],
+            "<< /Size 3 /Root 2 0 R >>",
+        );
+        let source = Counted::new(&file, 4096);
+        let reading = Reading::open(&source, &[], &Options::DEFAULT).unwrap();
+        assert!(reading.trailer().unwritten.is_none());
+        assert!(!reading.facts().linearized);
+        let opened = source.read();
+        assert!(opened <= 5 * 4096, "{opened} bytes read to open it");
+    }
+
     /// Bytes in memory read by position, which fail the next read that
     /// starts at a chosen byte, once, and record where each read starts.
     struct Failing<'a> {
@@ -472,8 +495,10 @@ mod tests {
 
     /// `file` opened by position through `source` and read on demand: the
     /// read of object `id` fails when the read at `at` does, keeps nothing
-    /// (no warning, no object, no record, no object stream decoded), and
-    /// asked again it reads; and the reading is the whole read.
+    /// of it (no warning, no record of it, no object stream decoded), and
+    /// asked again it reads; and the reading is the whole read. What it
+    /// read whole on the way is kept, which in these files warns of
+    /// nothing.
     fn fails_and_reads_again(file: &[u8], id: ObjectId, at: usize) {
         for bound in [true, false] {
             let source = Failing::new(file, 1);
@@ -532,6 +557,68 @@ mod tests {
         let at = find(&file, b"4 0 obj").unwrap();
         let at = at + find(&file[at..], b"stream\n").unwrap() + b"stream\n".len();
         fails_and_reads_again(&file, (3, 0), at);
+    }
+
+    /// An object in an object stream whose data fails to read: the object
+    /// stream's own object, read whole on the way, is kept, with what the
+    /// reader warned of as it read it, as a read of it would keep it; the
+    /// object isn't, and the object stream isn't decoded. Asked again, it
+    /// reads, and the reading is the whole read.
+    #[test]
+    fn an_object_stream_read_on_the_way_to_data_that_fails_to_read_is_kept() {
+        let (objects, first) = objects_2_and_3();
+        let mut file = b"%PDF-1.7\n".to_vec();
+        let one = file.len();
+        file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let four = file.len();
+        // Without its `endobj`, which the reader warns of.
+        let dict = format!(
+            "<< /Type /ObjStm /N 2 /First {first} /Length {} >>",
+            objects.len()
+        );
+        file.extend_from_slice(format!("4 0 obj\n{dict}\nstream\n").as_bytes());
+        let at = file.len();
+        file.extend_from_slice(&objects);
+        file.extend_from_slice(b"\nendstream\n");
+        let five = file.len();
+        let rows = [
+            xref_row(0, 0, 255),
+            xref_row(1, one, 0),
+            xref_row(2, 4, 0),
+            xref_row(2, 4, 1),
+            xref_row(1, four, 0),
+            xref_row(1, five, 0),
+        ]
+        .concat();
+        let dict = format!(
+            "<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R /Length {} >>",
+            rows.len()
+        );
+        file.extend_from_slice(format!("5 0 obj\n{dict}\nstream\n").as_bytes());
+        file.extend_from_slice(&rows);
+        file.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes(),
+        );
+        let whole = read(&file);
+        for bound in [true, false] {
+            let source = Failing::new(&file, 1);
+            let reading = open(&source, &[], &Options::DEFAULT, bound).unwrap();
+            assert!(reading.warnings().is_empty(), "{bound}");
+            source.fail_at(at);
+            assert!(failed_at(reading.get((3, 0)).unwrap_err(), at), "{bound}");
+            assert!(source.failed(), "{bound}");
+            let warnings = reading.warnings();
+            let [warning] = &warnings[..] else {
+                panic!("{bound}: {warnings:?}");
+            };
+            assert_eq!(warning.object, Some((4, 0)), "{bound}");
+            assert_eq!(warning.message, "4 0 obj has no endobj", "{bound}");
+            assert!(reading.record((4, 0)).is_some(), "{bound}");
+            assert!(reading.record((3, 0)).is_none(), "{bound}");
+            assert!((reading.reader.containers.values()).all(|c| c.get().is_none()));
+            assert_eq!(reading.get((3, 0)).unwrap(), whole.get((3, 0)).unwrap());
+            assert_eq!(reading.into_document().unwrap(), whole, "{bound}");
+        }
     }
 
     /// [`super::super::tests::filtered`]'s file, its object stream's

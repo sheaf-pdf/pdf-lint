@@ -841,6 +841,11 @@ fn a_linearization_holds_while_its_length_is_the_files() {
             false,
         ),
         (
+            "a stream's dictionary",
+            edited(">>\nendobj", ">>\nstream"),
+            false,
+        ),
+        (
             "ending at byte 1024",
             linearized(&comment(1024 - end)),
             true,

@@ -141,8 +141,11 @@ pub enum Error {
     /// The object doesn't read, and why, which the reading keeps with it.
     #[error("{0}")]
     Unread(Unread),
-    /// The source didn't give the bytes asked of it: nothing read is kept,
-    /// so the call reads again when it's asked again.
+    /// The source didn't give the bytes asked of it: nothing of what the
+    /// call was reading is kept, so it reads again when it's asked again.
+    /// An object it read whole on the way is kept, as [`Reading::get`]
+    /// keeps it: the object stream an object is in, and the objects its
+    /// filters refer to.
     #[error("the file doesn't read: {0}")]
     Io(io::Error),
     /// The file is encrypted, and its bytes aren't handed out as written,
@@ -251,8 +254,8 @@ fn outside(span: &Span) -> String {
 /// The header is read from the file's start, `startxref` and the last
 /// `%%EOF` back from its end, and each section at its offset; a file whose
 /// sections don't read is read whole, to be scanned. Where the source
-/// fails ([`Error::Io`]), nothing read is kept, and a call asked again
-/// reads again.
+/// fails ([`Error::Io`]), the call keeps nothing of what it was reading,
+/// but an object it read whole on the way, and asked again it reads again.
 ///
 /// ```
 /// use pdf_structure::bytes::{Options, Reading};

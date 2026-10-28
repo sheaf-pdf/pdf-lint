@@ -1100,7 +1100,9 @@ impl Reader {
 
     /// Object stream `stream`, which the entries put objects in, decoded
     /// the first time it's asked for. A read the file stops decodes
-    /// nothing, and keeps nothing of it.
+    /// nothing, and keeps nothing of it but the objects it read whole on
+    /// the way, the stream's own and those its filters refer to, kept as
+    /// any read of them keeps them.
     fn container<'f, F: Bytes<'f>>(
         &self,
         file: F,
@@ -3186,34 +3188,51 @@ fn offset_of(o: &Object) -> Option<usize> {
 /// header. A first object that doesn't end within those bytes (qpdf asks
 /// only that it start there: Annex F has it all within them), a
 /// `/Linearized` of another value or type, or an `/L` that's missing,
-/// indirect, a real or another length, says it doesn't.
+/// indirect, a real or another length, says it doesn't; and so does a
+/// stream's dictionary.
+///
+/// Its dictionary is read from those bytes and one more, which settles a
+/// token that ends at the last of them, so that a large first object costs
+/// no more; what follows it, to tell a stream, is read from where it ends.
 fn holds_linearization<'f, F: Bytes<'f>>(
     file: F,
     header: usize,
     limits: parse::Limits,
 ) -> Result<bool, F::Error> {
     let length = file.len() - header;
-    file.read_from(&mut Cx::default(), header, 0, |w, _| {
-        let mut parser = w.parser(header).limits(limits);
-        let Ok(id) = w.parsed(parser.header()) else {
-            return Ok(false);
-        };
-        let Ok(Body::Object(first)) = w.parsed(parser.body(id, &mut ())) else {
-            return Ok(false);
-        };
-        let within = first
-            .at
-            .is_some_and(|at| at.end <= header.saturating_add(1024));
-        let Some(dict) = first.as_dict().filter(|_| within) else {
-            return Ok(false);
-        };
-        let version = match dict.get(b"Linearized").map(Object::value) {
-            Some(&Value::Integer(v)) => v == 1,
-            Some(&Value::Real(v)) => v.floor() == 1.0,
-            _ => false,
-        };
-        Ok(version
-            && matches!(dict.get(b"L").map(Object::value), Some(&Value::Integer(l)) if usize::try_from(l) == Ok(length)))
+    let end = header.saturating_add(1025).min(file.len());
+    let Some(head) = file.get(header..end)? else {
+        return Ok(false);
+    };
+    let mut parser = (Parser::at(&head, 0).window(header, end == file.len())).limits(limits);
+    if parser.header().is_err() {
+        return Ok(false);
+    }
+    // A dictionary that doesn't end within the bytes read runs past the
+    // 1024, and so does one the window cuts short.
+    let Ok(first) = parser.value(&mut ()) else {
+        return Ok(false);
+    };
+    let within = first
+        .at
+        .is_some_and(|at| at.end <= header.saturating_add(1024));
+    let Some(dict) = first.as_dict().filter(|_| within) else {
+        return Ok(false);
+    };
+    let version = match dict.get(b"Linearized").map(Object::value) {
+        Some(&Value::Integer(v)) => v == 1,
+        Some(&Value::Real(v)) => v.floor() == 1.0,
+        _ => false,
+    };
+    let l = matches!(dict.get(b"L").map(Object::value), Some(&Value::Integer(l)) if usize::try_from(l) == Ok(length));
+    if !(version && l) {
+        return Ok(false);
+    }
+    // A stream's dictionary when `stream` follows it.
+    let after = parser.offset();
+    file.read_from(&mut Cx::default(), after, 0, |w, _| {
+        let next = w.significant(&mut w.tokenizer(after));
+        Ok(!is_keyword(next.as_ref(), b"stream"))
     })
 }
 
