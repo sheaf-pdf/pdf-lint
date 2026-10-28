@@ -582,6 +582,10 @@ mod tests {
             assert_eq!(out, b"%PDF-1.7\n", "nothing written");
         }
         assert_eq!(
+            Error::NonFinite { id: None }.to_string(),
+            "a real that isn't a finite number"
+        );
+        assert_eq!(
             Error::NonFinite { id: Some((7, 0)) }.to_string(),
             "a real that isn't a finite number in object 7 0"
         );

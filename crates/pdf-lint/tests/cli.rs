@@ -876,6 +876,111 @@ fn model_checks_against_another_checkout() {
     );
 }
 
+/// A model that doesn't load, or that lacks a table the checker reads by
+/// name, is said word for word after `--model` and its folder.
+#[test]
+fn a_model_refused_is_said_word_for_word() {
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let path = written("model-refused.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = path.to_str().unwrap();
+    let refused = |dir: &str| {
+        let out = run(&["--model", dir, path]);
+        assert_eq!(out.status.code(), Some(2), "{}", text(&out.stdout));
+        text(&out.stderr)
+    };
+    let missing = "/nonexistent/tsv";
+    let why = std::fs::read_dir(missing).unwrap_err();
+    assert_eq!(
+        refused(missing),
+        format!("pdf-lint: --model {missing}: reading {missing}: {why}\n")
+    );
+    // A folder of one table, `T.tsv`, of this row.
+    let one = |name: &str, row: &str| {
+        let dir = std::env::temp_dir().join(format!("pdf-lint-cli-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let header = pdf_lint::grammar::HEADER.join("\t");
+        std::fs::write(dir.join("T.tsv"), format!("{header}\n{row}\n")).unwrap();
+        dir
+    };
+    let broken = one("model-broken", "Rotate\tinteger");
+    let table = broken.join("T.tsv");
+    let broken = broken.to_str().unwrap();
+    assert_eq!(
+        refused(broken),
+        format!(
+            "pdf-lint: --model {broken}: {}: line 2: 2 fields, not 12\n",
+            table.display()
+        )
+    );
+    let row = "Rotate\tinteger\t1.0\t\tFALSE\tFALSE\tTRUE\t0\t\t\t\t";
+    let lacking = one("model-lacking", row);
+    let lacking = lacking.to_str().unwrap();
+    assert_eq!(
+        refused(lacking),
+        format!(
+            "pdf-lint: --model {lacking}: it has no FileTrailer table, which the checker reads by name\n"
+        )
+    );
+}
+
+/// A hold, exempt or allowances file that can't be read, or that has a
+/// line that doesn't read, is said word for word: what std said reading
+/// it, or the line, after its path.
+#[test]
+fn a_hold_exempt_or_allowances_file_refused_is_said_word_for_word() {
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let path = written("files-refused.pdf", &file(&[CATALOG, PAGES, page]));
+    let missing = path.with_file_name("files-refused-missing.txt");
+    let why = std::fs::read_to_string(&missing).unwrap_err();
+    let missing = missing.to_str().unwrap();
+    let path = path.to_str().unwrap();
+    let refused = |args: &[&str]| {
+        let out = run(&[args, &[path]].concat());
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            text(&out.stdout)
+        );
+        text(&out.stderr)
+    };
+    assert_eq!(
+        refused(&["--hold", missing]),
+        format!("pdf-lint: reading {missing}: {why}\n")
+    );
+    assert_eq!(
+        refused(&["--built", "--exempt", missing]),
+        format!("pdf-lint: reading {missing}: {why}\n")
+    );
+    assert_eq!(
+        refused(&["--allow", missing]),
+        format!("pdf-lint: reading {missing}: {why}\n")
+    );
+
+    let hold = written("files-refused-hold.txt", b"# held\n4 x built\n");
+    let hold = hold.to_str().unwrap();
+    let generation = "x".parse::<u16>().unwrap_err();
+    assert_eq!(
+        refused(&["--hold", hold]),
+        format!("pdf-lint: {hold}: line 2: \"x\" isn't a generation: {generation}\n")
+    );
+    let exempt = written("files-refused-exempt.txt", b"/Writer\nMine\n");
+    let exempt = exempt.to_str().unwrap();
+    assert_eq!(
+        refused(&["--built", "--exempt", exempt]),
+        format!("pdf-lint: {exempt}: line 2: \"Mine\" isn't a name, as /MyKey, or /My*\n")
+    );
+    let allow = written(
+        "files-refused-allow.tsv",
+        b"# Held.\nFieldTx\tDA\tmissing\t*\t*\t\n",
+    );
+    let allow = allow.to_str().unwrap();
+    assert_eq!(
+        refused(&["--allow", allow]),
+        format!("pdf-lint: {allow}: line 2: no reason\n")
+    );
+}
+
 #[test]
 fn a_file_that_cant_be_read_or_a_wrong_command_line_exits_2() {
     let out = run(&["/nonexistent/file.pdf"]);

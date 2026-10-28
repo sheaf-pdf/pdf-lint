@@ -1018,4 +1018,153 @@ mod tests {
             );
         }
     }
+
+    /// A page's `Rotate` as a row's text, with `changed` cells (by
+    /// [`HEADER`]'s names) in place of its own.
+    fn rotate(changed: &[(&str, &str)]) -> String {
+        let mut cells = [
+            "Rotate", "integer", "1.0", "", "FALSE", "FALSE", "TRUE", "0", "", "", "", "",
+        ];
+        for &(column, cell) in changed {
+            cells[HEADER.iter().position(|h| *h == column).unwrap()] = cell;
+        }
+        cells.join("\t")
+    }
+
+    /// What a model of one table, `T`, whose file `T.tsv` is `text`, says
+    /// when it doesn't read; none when it does.
+    fn one_table(text: &str) -> Option<String> {
+        let file = File {
+            name: "T".to_string(),
+            label: "T.tsv".to_string(),
+            text: text.into(),
+        };
+        Grammar::from_files([file]).err().map(|e| format!("{e:#}"))
+    }
+
+    /// Each rule a table breaks is said word for word, after its file and,
+    /// for a rule of a line, the line.
+    #[test]
+    fn each_rule_a_table_breaks_is_said_word_for_word() {
+        let header = HEADER.join("\t");
+        let table = |rows: &[&str]| format!("{header}\n{}\n", rows.join("\n"));
+        let row = rotate(&[]);
+        assert_eq!(one_table(&table(&[&row])), None);
+        let cell = |column, cell| table(&[&rotate(&[(column, cell)])]);
+        let short: Vec<&str> = row.split('\t').take(11).collect();
+        let cases = [
+            (
+                format!("{header}\n{row}"),
+                "T.tsv: its last line isn't ended",
+            ),
+            (
+                format!("{header}\r\n{row}\r\n"),
+                "T.tsv: line 1: CRLF line ends (.gitattributes keeps the model's bytes as they are)",
+            ),
+            (
+                format!("Key\tType\n{row}\n"),
+                "T.tsv: line 1: not upstream's header",
+            ),
+            (
+                table(&[&row, &row]),
+                "T.tsv: line 3: a second row for Rotate",
+            ),
+            (format!("{header}\n"), "T.tsv: no rows"),
+            (
+                table(&[&rotate(&[("Key", "0*")]), &row]),
+                "T.tsv: line 3: repeating rows come last, numbered from the element they start at",
+            ),
+            (
+                table(&[&rotate(&[("Type", "dictionary"), ("Link", "[Nonesuch]")])]),
+                "T.tsv: line 2: links to Nonesuch, which has no table",
+            ),
+            (
+                table(&[&short.join("\t")]),
+                "T.tsv: line 2: 11 fields, not 12",
+            ),
+            (cell("Type", ""), "T.tsv: line 2: no Type"),
+            (
+                cell("Type", "fn:SinceVersion(9.9,integer)"),
+                "T.tsv: line 2: \"fn:SinceVersion(9.9,integer)\": a version predicate that doesn't read",
+            ),
+            (
+                cell("Type", "int"),
+                "T.tsv: line 2: Type \"int\" isn't one of Arlington's",
+            ),
+            (
+                cell("Inheritable", "MAYBE"),
+                "T.tsv: line 2: Inheritable is \"MAYBE\", not TRUE or FALSE",
+            ),
+            (
+                cell("PossibleValues", "0"),
+                "T.tsv: line 2: PossibleValues: \"0\" isn't one bracketed item",
+            ),
+            (
+                cell("PossibleValues", "[0];[90]"),
+                "T.tsv: line 2: PossibleValues has 2 items for 1 types",
+            ),
+            (
+                cell("PossibleValues", "[0,,90]"),
+                "T.tsv: line 2: \"0,,90\" has an empty item",
+            ),
+            (
+                cell("PossibleValues", "[0)]"),
+                "T.tsv: line 2: \"[0)]\": a ) out of place",
+            ),
+            (
+                cell("PossibleValues", "[0"),
+                "T.tsv: line 2: \"[0\": a bracket, parenthesis or quote left open",
+            ),
+        ];
+        for (text, said) in cases {
+            assert_eq!(one_table(&text).as_deref(), Some(said), "{text:?}");
+        }
+    }
+
+    /// A folder that doesn't load says why, word for word: what std said
+    /// reading it or a table, after the path; or the rule, after a table's
+    /// path.
+    #[test]
+    fn a_folder_that_doesnt_load_says_why() {
+        let dir = std::env::temp_dir().join(format!("pdf-arlington-load-{}", std::process::id()));
+        let folder = |name: &str| {
+            let folder = dir.join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            folder
+        };
+        let said = |dir: &Path| match Grammar::load(dir) {
+            Ok(_) => panic!("{} loaded", dir.display()),
+            Err(e) => format!("{e:#}"),
+        };
+        let missing = dir.join("missing");
+        let why = std::fs::read_dir(&missing).unwrap_err();
+        assert_eq!(
+            said(&missing),
+            format!("reading {}: {why}", missing.display())
+        );
+        let empty = folder("empty");
+        std::fs::write(empty.join("README.md"), "no tables\n").unwrap();
+        assert_eq!(said(&empty), format!("{} has no tables", empty.display()));
+        let binary = folder("binary");
+        let table = binary.join("T.tsv");
+        std::fs::write(&table, b"\xff\n").unwrap();
+        let why = std::fs::read_to_string(&table).unwrap_err();
+        assert_eq!(said(&binary), format!("reading {}: {why}", table.display()));
+        let broken = folder("broken");
+        let table = broken.join("T.tsv");
+        std::fs::write(&table, format!("{}\n", HEADER.join("\t"))).unwrap();
+        assert_eq!(said(&broken), format!("{}: no rows", table.display()));
+        // A name that isn't UTF-8, where the file system takes one.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let named = folder("named");
+            let table = named.join(std::ffi::OsStr::from_bytes(b"\xff.tsv"));
+            std::fs::write(&table, "").unwrap();
+            assert_eq!(
+                said(&named),
+                format!("{}: not a UTF-8 name", table.display())
+            );
+        }
+    }
 }

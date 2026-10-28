@@ -268,4 +268,83 @@ mod tests {
         };
         assert!(format!("{e:#}").contains("line 1: no # header"), "{e:#}");
     }
+
+    /// Each line that doesn't read is said word for word: its number and
+    /// the rule it breaks.
+    #[test]
+    fn each_line_that_doesnt_read_says_why() {
+        let header = "# Held for the test.\n";
+        let row = "FieldTx\tDA\tmissing\t*\t*\ta reason\n";
+        let cases = [
+            (row.to_string(), "line 1: no # header"),
+            (
+                format!("{header}{row}# late\n"),
+                "line 3: a # line among the rows",
+            ),
+            (
+                format!("{header}FieldTx\tDA\tmissing\t*\ta reason\n"),
+                "line 2: 5 fields, not 6: table, key, rule, file, version, reason",
+            ),
+            (
+                format!("{header}Nope\tDA\tmissing\t*\t*\ta reason\n"),
+                "line 2: \"Nope\" isn't a table of the model's",
+            ),
+            (
+                format!("{header}FieldTx\t\tmissing\t*\t*\ta reason\n"),
+                "line 2: no key",
+            ),
+            (
+                format!("{header}FieldTx\tDA\tbogus\t*\t*\ta reason\n"),
+                "line 2: \"bogus\" isn't a rule",
+            ),
+            (
+                format!("{header}FieldTx\tDA\tmissing\t\t*\ta reason\n"),
+                "line 2: no file (`*` for any)",
+            ),
+            (
+                format!("{header}FieldTx\tDA\tmissing\t*\t2\ta reason\n"),
+                "line 2: \"2\" isn't a version (`*` for any)",
+            ),
+            (
+                format!("{header}FieldTx\tDA\tmissing\t*\t*\t \n"),
+                "line 2: no reason",
+            ),
+            (
+                format!("{header}{row}{row}"),
+                "line 3: FieldTx/DA missing in * from * is on line 2 already",
+            ),
+            (
+                format!(
+                    "{header}FieldTx\tV\ttype\tforms/a.pdf\t2.0\ta\n\
+                     FieldTx\tV\ttype\tforms/a.pdf\t2.0\tb\n"
+                ),
+                "line 3: FieldTx/V type in forms/a.pdf from 2.0 is on line 2 already",
+            ),
+        ];
+        for (text, said) in cases {
+            let e = Allowances::parse(&text).unwrap_err();
+            assert_eq!(format!("{e:#}"), said, "{text:?}");
+        }
+    }
+
+    /// A file that doesn't read is said after its path: what std said
+    /// reading it, or the line that doesn't read.
+    #[test]
+    fn a_file_that_doesnt_read_says_its_path() {
+        let dir = std::env::temp_dir().join(format!("pdf-lint-allowance-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let said = |path: &Path| format!("{:#}", Allowances::read(path).unwrap_err());
+        let missing = dir.join("missing.tsv");
+        let why = std::fs::read_to_string(&missing).unwrap_err();
+        assert_eq!(
+            said(&missing),
+            format!("reading {}: {why}", missing.display())
+        );
+        let reasonless = dir.join("reasonless.tsv");
+        std::fs::write(&reasonless, "# Held.\nFieldTx\tDA\tmissing\t*\t*\t\n").unwrap();
+        assert_eq!(
+            said(&reasonless),
+            format!("{}: line 2: no reason", reasonless.display())
+        );
+    }
 }

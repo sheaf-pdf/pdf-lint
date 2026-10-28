@@ -125,3 +125,39 @@ pub mod extension {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use crate::{Grammar, grammar, use_model};
+
+    /// A model that lacks a table the checker reads by name is refused,
+    /// and the refusal names the table, word for word.
+    #[test]
+    fn a_model_without_a_table_the_checker_reads_by_name_is_refused() {
+        let dir = std::env::temp_dir().join(format!("pdf-lint-model-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let header = grammar::HEADER.join("\t");
+        let row = "Rotate\tinteger\t1.0\t\tFALSE\tFALSE\tTRUE\t0\t\t\t\t";
+        std::fs::write(dir.join("T.tsv"), format!("{header}\n{row}\n")).unwrap();
+        let e = use_model(Grammar::load(&dir).unwrap()).unwrap_err();
+        assert_eq!(
+            format!("{e:#}"),
+            "it has no FileTrailer table, which the checker reads by name"
+        );
+    }
+
+    /// Once anything has read the model, none is chosen, and that's said
+    /// word for word.
+    #[test]
+    fn a_model_is_chosen_before_anything_reads_one_or_not_at_all() {
+        grammar();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pdf-arlington/model/tsv/latest");
+        let e = use_model(Grammar::load(&dir).unwrap()).unwrap_err();
+        assert_eq!(
+            format!("{e:#}"),
+            "the model is chosen already: something has read it"
+        );
+    }
+}

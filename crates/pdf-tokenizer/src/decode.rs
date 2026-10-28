@@ -677,6 +677,17 @@ mod tests {
         assert_eq!(token(b"/Name").number(), Err(NumberError::NotANumber));
     }
 
+    /// Each error says what the bytes aren't, word for word.
+    #[test]
+    fn each_number_error_says_what_it_is() {
+        use std::string::ToString;
+        assert_eq!(NumberError::NotANumber.to_string(), "not a number");
+        assert_eq!(
+            NumberError::Overflow.to_string(),
+            "a number too large to hold"
+        );
+    }
+
     #[test]
     fn only_names_and_strings_have_pieces() {
         assert!(token(b"obj").pieces().is_none());

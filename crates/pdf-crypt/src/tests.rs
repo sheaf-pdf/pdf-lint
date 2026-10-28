@@ -639,3 +639,52 @@ fn a_dictionary_the_standard_handler_doesnt_take_is_refused() {
         assert!(Handler::open(&short, b"id", &[]).is_err_and(|e| e == Refused::Password));
     }
 }
+
+/// Each refusal and fault says why, word for word, and an error says its
+/// fault.
+#[test]
+fn each_refusal_and_fault_says_why() {
+    let why = Refused::Unsupported("its /O isn't a string".to_string());
+    assert_eq!(why.to_string(), "its /O isn't a string");
+    assert_eq!(
+        Refused::Password.to_string(),
+        "the password doesn't open it"
+    );
+    let cases = [
+        (
+            Fault::Short { len: 10 },
+            "its AES ciphertext has no whole block past its IV",
+        ),
+        (
+            Fault::PartBlock { extra: 2 },
+            "its AES ciphertext has a part block past its whole blocks",
+        ),
+        (Fault::Padding, "its AES plaintext isn't padded"),
+        (
+            Fault::Method {
+                name: "ROT13".to_string(),
+            },
+            "its crypt filter's method or name, /ROT13, isn't one",
+        ),
+        (
+            Fault::Key { len: 5 },
+            "its crypt filter's AES isn't for the file's key of 5 bytes",
+        ),
+        (
+            Fault::Perms,
+            "its /Perms doesn't match its /P and /EncryptMetadata",
+        ),
+        (
+            Fault::Unconfirmed,
+            "its /Perms doesn't confirm the key its /OE or /UE unwraps to",
+        ),
+    ];
+    for (fault, said) in cases {
+        assert_eq!(fault.to_string(), said, "{fault:?}");
+    }
+    let error = Error {
+        data: Some(b"kept".to_vec()),
+        fault: Fault::Padding,
+    };
+    assert_eq!(error.to_string(), "its AES plaintext isn't padded");
+}

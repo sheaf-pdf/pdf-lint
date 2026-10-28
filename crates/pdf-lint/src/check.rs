@@ -5463,6 +5463,81 @@ mod tests {
         }
     }
 
+    /// A hold file's line that doesn't read is said word for word: its
+    /// number and why, a number's or a generation's after what std said
+    /// parsing it.
+    #[test]
+    fn a_hold_files_line_that_doesnt_read_says_why() {
+        let number = |text: &str| text.parse::<u32>().unwrap_err();
+        let generation = |text: &str| text.parse::<u16>().unwrap_err();
+        let cases = [
+            (
+                "# held\n\n4 0",
+                "line 3: not a number, a generation and built or merged".to_string(),
+            ),
+            (
+                "x 0 built",
+                format!("line 1: \"x\" isn't an object number: {}", number("x")),
+            ),
+            (
+                "99999999999 0 built",
+                format!(
+                    "line 1: \"99999999999\" isn't an object number: {}",
+                    number("99999999999")
+                ),
+            ),
+            (
+                "4 y built",
+                format!("line 1: \"y\" isn't a generation: {}", generation("y")),
+            ),
+            (
+                "4 70000 built",
+                format!(
+                    "line 1: \"70000\" isn't a generation: {}",
+                    generation("70000")
+                ),
+            ),
+            (
+                "4 0 made",
+                "line 1: \"made\" isn't built or merged".to_string(),
+            ),
+            (
+                "4 0 built\n4 0 merged",
+                "line 2: 4 0 is held a second time".to_string(),
+            ),
+        ];
+        for (text, said) in cases {
+            let e = Hold::parse(text).unwrap_err();
+            assert_eq!(format!("{e:#}"), said, "{text:?}");
+        }
+    }
+
+    /// An exempt file's line that doesn't read is said word for word: its
+    /// number, the line as written, and why.
+    #[test]
+    fn an_exempt_files_line_that_doesnt_read_says_why() {
+        let cases = [
+            (
+                "# mine\n\nWriterAnnot",
+                "line 3: \"WriterAnnot\" isn't a name, as /MyKey, or /My*",
+            ),
+            (
+                "/A#G1",
+                "line 1: \"/A#G1\" has a # without two hex digits after it",
+            ),
+            (
+                "/A#00",
+                "line 1: \"/A#00\" has #00, which a name may not hold",
+            ),
+            ("/", "line 1: an empty name"),
+            ("/A\n/A", "line 2: \"/A\" is exempt a second time"),
+        ];
+        for (text, said) in cases {
+            let e = Exempt::parse(text).unwrap_err();
+            assert_eq!(format!("{e:#}"), said, "{text:?}");
+        }
+    }
+
     /// The bytes each finding says it's at, as text.
     fn bytes_at<'a>(bytes: &'a [u8], finding: &Finding) -> &'a str {
         let at = finding

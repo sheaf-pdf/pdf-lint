@@ -3434,6 +3434,63 @@ mod tests {
         }
     }
 
+    /// A predicate that doesn't parse says so word for word: the predicate,
+    /// then what stopped it and where.
+    #[test]
+    fn a_predicate_that_doesnt_parse_says_where_and_why() {
+        let nested = format!("{}fn:IsPresent(X){}", "fn:Not(".repeat(40), ")".repeat(40));
+        let range = "99999999999999999999".parse::<i64>().unwrap_err();
+        let cases = [
+            (
+                "fn:Not(a,b,c)",
+                r#""fn:Not(a,b,c)": ")" expected at 10, not ",c)""#.to_string(),
+            ),
+            (
+                "(@A==1) && (@B==2) || (@C==3)",
+                r#""(@A==1) && (@B==2) || (@C==3)": && and || mixed without brackets at 18"#
+                    .to_string(),
+            ),
+            (&nested, format!("{nested:?}: nested deeper than 32 at 224")),
+            (
+                "@A=='open",
+                r#""@A=='open": a string left open"#.to_string(),
+            ),
+            ("@A==''", r#""@A==''": an empty string at 5"#.to_string()),
+            (
+                "@A==)",
+                r#""@A==)": a term expected at 4, not ")""#.to_string(),
+            ),
+            (
+                "fn:eval(@A==1)",
+                r#""fn:eval(@A==1)": fn: and a CamelCase name expected at 3"#.to_string(),
+            ),
+            (
+                "@A==99999999999999999999",
+                format!(
+                    r#""@A==99999999999999999999": 99999999999999999999 is out of range: {range}"#
+                ),
+            ),
+            (
+                "fn:IsPresent(trailer)",
+                r#""fn:IsPresent(trailer)": "trailer": a path to nothing"#.to_string(),
+            ),
+            (
+                "fn:IsPresent(A:B)",
+                r#""fn:IsPresent(A:B)": "A:B": "A:B" isn't a key"#.to_string(),
+            ),
+            (
+                "fn:IsPresent(A)x",
+                r#""fn:IsPresent(A)x": "x" after a whole predicate"#.to_string(),
+            ),
+        ];
+        for (text, said) in cases {
+            let Err(e) = parse(text) else {
+                panic!("{text:?} parsed");
+            };
+            assert_eq!(format!("{e:#}"), said);
+        }
+    }
+
     #[test]
     fn a_simple_fonts_widths_are_required_but_of_the_standard_14_before_2_0() {
         let file = bare();

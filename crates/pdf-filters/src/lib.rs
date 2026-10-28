@@ -388,7 +388,7 @@ fn whole(taken: usize, n: usize) -> Result<(), ()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Filter, Layout, Predictor, decode};
+    use super::{Error, Fault, Filter, Layout, Predictor, decode};
 
     #[test]
     fn nothing_decodes_to_nothing_whatever_the_filters() {
@@ -428,6 +428,71 @@ mod tests {
         assert_eq!(
             error.faults,
             [(0, super::Fault::NoEnd), (1, super::Fault::Truncated)]
+        );
+    }
+
+    /// Each fault says what's wrong, word for word.
+    #[test]
+    fn each_fault_says_whats_wrong() {
+        let cases = [
+            (
+                Fault::Byte { at: 3, byte: b'z' },
+                "byte 0x7a at 3 isn't one it takes",
+            ),
+            (Fault::NoEnd, "no end-of-data marker"),
+            (Fault::BrokenEnd { at: 4 }, "`~` at 4 isn't followed by `>`"),
+            (Fault::InGroup { at: 5 }, "`z` at 5 is inside a group"),
+            (Fault::Overflow { at: 6 }, "the group at 6 is over 2^32 - 1"),
+            (
+                Fault::LoneByte { at: 7 },
+                "the last group, at 7, is one character",
+            ),
+            (
+                Fault::Code { at: 8 },
+                "the code at byte 8 isn't in the table",
+            ),
+            (Fault::TableFull { at: 9 }, "the table is full at byte 9"),
+            (Fault::Header, "no zlib header"),
+            (
+                Fault::Corrupt { at: 10 },
+                "the deflate data is corrupt at byte 10",
+            ),
+            (Fault::Truncated, "the data ends early"),
+            (Fault::Checksum, "the Adler-32 checksum doesn't match"),
+            (
+                Fault::RowTag { row: 2, tag: 9 },
+                "row 2's first byte is 9, not 0 to 4",
+            ),
+            (
+                Fault::PartialRow { missing: 3 },
+                "the last row is 3 bytes short",
+            ),
+            (
+                Fault::Parameters,
+                "its predictor's parameters aren't ones it takes",
+            ),
+            (Fault::Limit, "its output is over the limit"),
+        ];
+        for (fault, said) in cases {
+            assert_eq!(fault.to_string(), said, "{fault:?}");
+        }
+    }
+
+    /// An error says each fault after its filter's index, in the list's
+    /// order.
+    #[test]
+    fn an_error_says_each_fault_with_its_filter() {
+        let error = |faults| Error {
+            data: Vec::new(),
+            faults,
+        };
+        assert_eq!(
+            error(vec![(0, Fault::NoEnd)]).to_string(),
+            "filter 0: no end-of-data marker"
+        );
+        assert_eq!(
+            error(vec![(0, Fault::NoEnd), (1, Fault::Truncated)]).to_string(),
+            "filter 0: no end-of-data marker; filter 1: the data ends early"
         );
     }
 }
