@@ -18,8 +18,9 @@ pdf-objects = { path = "../pdf-objects", version = "0.1" }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
 
 [features]
-# Files built in code, and qpdf as a second reader, for other crates' tests:
-# hidden, not for a user. Its encrypted files need pdf-crypt's writer.
+# Files built in code, and qpdf as a second reader, for other crates' tests
+# and fuzz targets: hidden, not for a user. Its encrypted files need
+# pdf-crypt's writer.
 fixtures = ["pdf-crypt/writer"]
 
 [dev-dependencies]
@@ -30,5 +31,5 @@ pdf-crypt = { path = "../pdf-crypt", version = "0.1", features = ["writer"] }
 unsafe_code = "forbid"
 missing_docs = "warn"
 # cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module and
-# the test writer, and shrinks the reader's limits.
+# shrinks the reader's limits.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

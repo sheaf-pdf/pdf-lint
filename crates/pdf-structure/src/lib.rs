@@ -40,9 +40,9 @@ mod json;
 #[doc(hidden)]
 pub mod qpdf;
 pub mod source;
-// The tests' file writer; for other crates' tests too, with `fixtures`,
-// and for a fuzz body's seeds.
-#[cfg(any(test, fuzzing, feature = "fixtures"))]
+// The tests' file writer; for other crates' tests and fuzz bodies too,
+// with `fixtures`.
+#[cfg(any(test, feature = "fixtures"))]
 #[doc(hidden)]
 pub mod write;
 

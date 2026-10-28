@@ -188,7 +188,6 @@ pub fn inflated(zlib: &[u8]) -> Vec<u8> {
 /// stream's data, of each object but a signature's `/Contents`, under an
 /// encryption dictionary that's the next object, with the trailer's `/ID`
 /// the settings' and `trailer`'s entries.
-#[cfg(any(test, feature = "fixtures"))]
 pub fn encrypted(
     settings: &pdf_crypt::writer::Settings,
     objects: &[(u32, Body)],

@@ -35,7 +35,7 @@ pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
 pdf-filters = { path = "../crates/pdf-filters" }
 pdf-lint = { path = "../crates/pdf-lint" }
 pdf-objects = { path = "../crates/pdf-objects" }
-pdf-structure = { path = "../crates/pdf-structure" }
+pdf-structure = { path = "../crates/pdf-structure", features = ["fixtures"] }
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 
 [[bin]]
