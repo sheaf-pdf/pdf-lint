@@ -16,9 +16,9 @@
 //!   code. Any stream's data is handed out when it's asked for, decrypted
 //!   in an encrypted file, and decoded. Its bytes are in memory, or a file
 //!   is read by position, a window at a time ([`FileBytes`]), whose
-//!   [`Identity`] tells whether it's changed. Where each object was read
-//!   from is a [`Record`], and what the file's header and sections say of
-//!   it, as written, its [`Facts`].
+//!   [`Identity`], holding the file open, tells whether it's changed.
+//!   Where each object was read from is a [`Record`], and what the file's
+//!   header and sections say of it, as written, its [`Facts`].
 //! - **Every choice said:** what the reader had to choose how to read is a
 //!   [`Warning`], with its object and where.
 //! - **Object streams and cross-reference streams decoded** from their own

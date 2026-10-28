@@ -1,75 +1,86 @@
 //! A file read by position ([`FileBytes`]), and what tells whether it's
 //! the file it was ([`Identity`]).
 
-use std::fs::Metadata;
 use std::io;
 use std::path::Path;
+#[cfg(any(unix, windows))]
+use std::sync::Arc;
 use std::time::SystemTime;
 
+#[cfg(any(unix, windows))]
+use same_file::Handle;
+
 /// What tells a file from another, or from itself changed, without reading
-/// it: its length and modification time; on Unix its device and inode; on
-/// Windows its creation time. Taken by one `stat` of the file, it's opaque
-/// and compared whole.
+/// it: the file itself, by a handle it holds open, its device and inode on
+/// Unix and its volume serial number and file index on Windows; and its
+/// length and modification time. It's opaque and compared whole, and a
+/// clone holds the same handle.
 ///
 /// It tells a file changed in place by a write that changes its length or
 /// its modification time; not one that keeps both, as a write within the
 /// file system's grain of time can, or one that sets the time back. And it
 /// tells a file replaced by another, as a save by a new file renamed into
-/// its place is, by another inode on Unix. Not by its change time, which
-/// Unix sets on a file replaced so as it's unlinked, though what's held
-/// open of it reads as it did. On Windows, std gives no file ID, and NTFS
-/// gives a file made where one was deleted, within 15 seconds, the old
-/// one's creation time, so a file replaced so, of the same length and
-/// modification time, isn't told there. Nothing in it is read again unless
-/// it's asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// its place is, or one removed and another made at its path, by another
+/// inode on Unix and another file index on Windows: held open, the file's
+/// can't be another file's while the identity lives, as it could once the
+/// file was gone. Not by its change time, which Unix sets on a file
+/// replaced so as it's unlinked, though what's held open of it reads as it
+/// did. On ReFS a file index of 64 bits needn't be unique, which the length
+/// and time narrow. Elsewhere than Unix and Windows it's the length and
+/// modification time alone, and holds nothing open. Nothing in it is read
+/// again unless it's asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     len: u64,
     modified: Option<SystemTime>,
-    #[cfg(unix)]
-    unix: (u64, u64),
-    #[cfg(windows)]
-    created: u64,
+    #[cfg(any(unix, windows))]
+    file: Arc<Handle>,
 }
 
 impl Identity {
     /// The identity of the file at `path`, as it is now: to tell, before
     /// writing to the path, whether it's still the file a reading opened
-    /// ([`FileBytes::identity`]).
+    /// ([`FileBytes::identity`]). On Unix and Windows it opens the file to
+    /// read and holds it open while it lives, so it needs leave to read the
+    /// file, where its length and time alone need none, and a FIFO's open
+    /// waits for a writer. On Windows, what it holds open still lets others
+    /// write the file, rename it and remove it.
     pub fn of(path: impl AsRef<Path>) -> io::Result<Identity> {
-        std::fs::metadata(path).map(|metadata| Identity::given(&metadata))
+        #[cfg(any(unix, windows))]
+        let identity = Identity::held(Arc::new(Handle::from_path(path)?))?;
+        #[cfg(not(any(unix, windows)))]
+        let identity = {
+            let metadata = std::fs::metadata(path)?;
+            Identity {
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+            }
+        };
+        Ok(identity)
     }
 
-    /// The identity `metadata` gives.
-    fn given(metadata: &Metadata) -> Identity {
-        #[cfg(unix)]
-        let unix = {
-            use std::os::unix::fs::MetadataExt;
-            (metadata.dev(), metadata.ino())
-        };
-        #[cfg(windows)]
-        let created = std::os::windows::fs::MetadataExt::creation_time(metadata);
-        Identity {
+    /// The identity of the file `file` holds open, its length and
+    /// modification time as they are now.
+    #[cfg(any(unix, windows))]
+    fn held(file: Arc<Handle>) -> io::Result<Identity> {
+        let metadata = file.as_file().metadata()?;
+        Ok(Identity {
             len: metadata.len(),
             modified: metadata.modified().ok(),
-            #[cfg(unix)]
-            unix,
-            #[cfg(windows)]
-            created,
-        }
+            file,
+        })
     }
 }
 
 /// A file read by position, a window at a time from where a read starts
 /// (`pread`), never whole but where the reader needs it whole: a file
 /// whose cross-reference sections don't read, scanned for its objects. Its
-/// length and [`Identity`] are taken as it's made, by one `stat` of the
-/// file; a file that changes after is read as it then is, which
-/// [`FileBytes::unchanged`] tells.
+/// length and [`Identity`] are taken as it's made, and it reads through
+/// the handle its identity holds; a file that changes after is read as it
+/// then is, which [`FileBytes::unchanged`] tells.
 #[cfg(any(unix, windows))]
 #[derive(Debug)]
 pub struct FileBytes {
-    file: std::fs::File,
     len: usize,
     identity: Identity,
 }
@@ -82,32 +93,31 @@ impl FileBytes {
     /// `file`, as long as it is now, read by position. A file longer than
     /// the target addresses (past 4 GiB on 32 bits) isn't read.
     pub fn new(file: std::fs::File) -> io::Result<FileBytes> {
-        let metadata = file.metadata()?;
-        let len = usize::try_from(metadata.len()).map_err(|_| {
+        let identity = Identity::held(Arc::new(Handle::from_file(file)?))?;
+        let len = usize::try_from(identity.len).map_err(|_| {
             let message = format!(
                 "the file's {} bytes are more than this target addresses",
-                metadata.len()
+                identity.len
             );
             io::Error::new(io::ErrorKind::FileTooLarge, message)
         })?;
-        Ok(FileBytes {
-            file,
-            len,
-            identity: Identity::given(&metadata),
-        })
+        Ok(FileBytes { len, identity })
     }
 
-    /// The file's identity as it was made.
-    pub fn identity(&self) -> Identity {
-        self.identity
+    /// The file's identity as it was made. It holds the file open, and so
+    /// does a clone of it kept after this is dropped.
+    pub fn identity(&self) -> &Identity {
+        &self.identity
     }
 
     /// Whether the file, the one it holds open, is as it was made: its
-    /// identity the same. A file changed in place isn't; one another
-    /// replaced at its path still is, as reads go on reading the one it
-    /// holds, which [`Identity::of`] the path tells.
+    /// length and modification time the same. A file changed in place
+    /// isn't; one another replaced at its path still is, as reads go on
+    /// reading the one it holds, which [`Identity::of`] the path tells.
     pub fn unchanged(&self) -> io::Result<bool> {
-        Ok(Identity::given(&self.file.metadata()?) == self.identity)
+        let metadata = self.identity.file.as_file().metadata()?;
+        let now = (metadata.len(), metadata.modified().ok());
+        Ok(now == (self.identity.len, self.identity.modified))
     }
 }
 
@@ -120,7 +130,7 @@ impl super::ByteSource for FileBytes {
     fn read_at(&self, range: std::ops::Range<usize>) -> io::Result<std::borrow::Cow<'_, [u8]>> {
         let mut bytes = vec![0; range.len()];
         let offset = u64::try_from(range.start).map_err(io::Error::other)?;
-        read_exact_at(&self.file, &mut bytes, offset)?;
+        read_exact_at(self.identity.file.as_file(), &mut bytes, offset)?;
         Ok(std::borrow::Cow::Owned(bytes))
     }
 
@@ -222,11 +232,11 @@ mod tests {
         let temp = Temp::new("appended", b"%PDF-1.7\n");
         let file = temp.open();
         assert!(file.unchanged().unwrap());
-        assert_eq!(Identity::of(&temp.0).unwrap(), file.identity());
+        assert_eq!(&Identity::of(&temp.0).unwrap(), file.identity());
         let mut appending = OpenOptions::new().append(true).open(&temp.0).unwrap();
         appending.write_all(b"%").unwrap();
         assert!(!file.unchanged().unwrap());
-        assert_ne!(Identity::of(&temp.0).unwrap(), file.identity());
+        assert_ne!(&Identity::of(&temp.0).unwrap(), file.identity());
 
         let temp = Temp::new("rewritten", b"%PDF-1.7\n");
         let file = temp.open();
@@ -236,7 +246,7 @@ mod tests {
         writing.set_modified(apart).unwrap();
         assert_eq!(fs::metadata(&temp.0).unwrap().len(), 9);
         assert!(!file.unchanged().unwrap());
-        assert_ne!(Identity::of(&temp.0).unwrap(), file.identity());
+        assert_ne!(&Identity::of(&temp.0).unwrap(), file.identity());
 
         let temp = Temp::new("replaced", b"%PDF-1.7\n");
         let file = temp.open();
@@ -245,6 +255,40 @@ mod tests {
         fs::rename(&other, &temp.0).unwrap();
         assert!(file.unchanged().unwrap());
         assert_eq!(file.read_at(0..9).unwrap(), &b"%PDF-1.7\n"[..]);
-        assert_ne!(Identity::of(&temp.0).unwrap(), file.identity());
+        assert_ne!(&Identity::of(&temp.0).unwrap(), file.identity());
+    }
+
+    /// An identity holds its file open: one kept from a `FileBytes` since
+    /// dropped, and one of the path, aren't another file's, made at the
+    /// path once the first is removed, of the same length and modification
+    /// time; and each one's handle reads the first file's bytes still.
+    /// Where the temp folder's file system gives a removed file's inode to
+    /// the next file made, as ext4 does, only the hold tells the two apart.
+    /// On tmpfs, which doesn't, they differ held or not, so the test can't
+    /// show an inode reused there: what's read through the handle shows the
+    /// hold.
+    #[test]
+    fn an_identity_holds_its_file() {
+        let temp = Temp::new("held", b"%PDF-1.7\n");
+        let file = temp.open();
+        let kept = file.identity().clone();
+        drop(file);
+        let taken = Identity::of(&temp.0).unwrap();
+        assert_eq!(taken, kept);
+        let modified = fs::metadata(&temp.0).unwrap().modified().unwrap();
+        fs::remove_file(&temp.0).unwrap();
+        let mut other = File::create(&temp.0).unwrap();
+        other.write_all(b"%PDF-2.0\n").unwrap();
+        other.set_modified(modified).unwrap();
+        drop(other);
+        let now = Identity::of(&temp.0).unwrap();
+        assert_eq!((now.len, now.modified), (kept.len, kept.modified));
+        assert_ne!(now, kept);
+        assert_ne!(now, taken);
+        for identity in [&kept, &taken] {
+            let mut bytes = [0; 9];
+            read_exact_at(identity.file.as_file(), &mut bytes, 0).unwrap();
+            assert_eq!(&bytes, b"%PDF-1.7\n");
+        }
     }
 }

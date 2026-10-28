@@ -20,6 +20,11 @@ pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
 tempfile = { version = "3", optional = true }
 thiserror = "2"
 
+# A file's identity, by a handle held open (`bytes::Identity`): its device
+# and inode on Unix, its volume serial number and file index on Windows.
+[target.'cfg(any(unix, windows))'.dependencies]
+same-file = "1"
+
 [features]
 # Files built in code, and qpdf as a second reader, for other crates' tests
 # and fuzz targets: hidden, not for a user. Its encrypted files need
