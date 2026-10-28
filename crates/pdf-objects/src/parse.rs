@@ -757,6 +757,11 @@ impl<'a> Parser<'a> {
     /// name can't hold (ISO 32000-2, 7.3.5), readers reading each their own
     /// way.
     fn name(&self, token: &Token<'a>, sink: &mut (impl Sink<'a> + ?Sized)) -> Vec<u8> {
+        // Only a `#` starts an escape or a fault: without one, a name is the
+        // regular bytes after its `/`, as written.
+        if !token.bytes.contains(&b'#') {
+            return token.bytes.get(1..).unwrap_or_default().to_vec();
+        }
         let hows: Vec<How> = (token.pieces().into_iter().flatten())
             .map(|piece| piece.how)
             .filter(|how| matches!(how, How::StrayHash | How::NulEscape))
@@ -1063,6 +1068,33 @@ mod tests {
             ["1 0 obj has no endobj"]
         );
         assert!(faults(b"1 0 obj << >>stream\r\nxy\nendstream endobj").is_empty());
+    }
+
+    /// A name without `#` reads as its pieces decode it, its bytes after
+    /// the `/`, with no fault: each regular byte but `#` alone, all of them
+    /// together, and the empty name, as a value and as a key.
+    #[test]
+    fn a_name_without_a_hash_is_its_bytes_as_written() {
+        let regular: Vec<u8> = (0..=u8::MAX)
+            .filter(|&b| pdf_tokenizer::is_regular(b) && b != b'#')
+            .collect();
+        let mut names: Vec<Vec<u8>> = regular.iter().map(|&b| vec![b'/', b]).collect();
+        names.push(b"/".to_vec());
+        names.push([&b"/"[..], &regular].concat());
+        for written in names {
+            let pieces = pdf_tokenizer::decode::name(&written);
+            assert!(pieces.clone().quirks().is_empty(), "{written:?}");
+            let meant: Vec<u8> = pieces.bytes().collect();
+            assert_eq!(meant, written[1..], "{written:?}");
+            let (value, kept) = self::value(&written);
+            assert_eq!(*value.unwrap().value(), Value::Name(meant.clone()));
+            assert!(kept.faults.is_empty(), "{written:?}");
+            let (dict, kept) = self::value(&[&b"<<"[..], &written, b" 1>>"].concat());
+            let dict = dict.unwrap();
+            let keys: Vec<&[u8]> = dict.as_dict().unwrap().iter().map(|(k, _)| k).collect();
+            assert_eq!(keys, [&meant[..]], "{written:?}");
+            assert!(kept.faults.is_empty(), "{written:?}");
+        }
     }
 
     /// Each error says what pdf-lint's reader said, word for word.
