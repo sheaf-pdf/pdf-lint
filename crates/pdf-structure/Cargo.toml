@@ -25,6 +25,11 @@ thiserror = "2"
 [target.'cfg(any(unix, windows))'.dependencies]
 same-file = "1"
 
+# On Unix, `Identity::of` opens a file without waiting (`O_NONBLOCK`), as a
+# FIFO put at its path would have it wait for a writer.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 # Files built in code, and qpdf as a second reader, for other crates' tests
 # and fuzz targets: hidden, not for a user. Its encrypted files need

@@ -41,20 +41,37 @@ impl Identity {
     /// The identity of the file at `path`, as it is now: to tell, before
     /// writing to the path, whether it's still the file a reading opened
     /// ([`FileBytes::identity`]). On Unix and Windows it opens the file to
-    /// read and holds it open while it lives, so it needs leave to read the
-    /// file, where its length and time alone need none, and a FIFO's open
-    /// waits for a writer. On Windows, what it holds open still lets others
-    /// write the file, rename it and remove it.
+    /// read, without waiting, and holds it open while it lives, so it needs
+    /// leave to read the file, where its length and time alone need none.
+    /// A path that's neither a file nor a folder, a FIFO, a socket or a
+    /// device, is refused (`InvalidInput`), never opened: opening a FIFO
+    /// would wait for a writer, and a device's opening can do what the
+    /// device does. One that becomes such a thing as it's opened is opened
+    /// without waiting, then refused. On Windows, what it holds open still
+    /// lets others write the file, rename it and remove it.
     pub fn of(path: impl AsRef<Path>) -> io::Result<Identity> {
+        let path = path.as_ref();
+        let metadata = std::fs::metadata(path)?;
+        plain(&metadata)?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let file = (std::fs::OpenOptions::new().read(true))
+                .custom_flags(libc::O_NONBLOCK)
+                .open(path)?;
+            Handle::from_file(file)?
+        };
+        #[cfg(windows)]
+        let file = Handle::from_path(path)?;
         #[cfg(any(unix, windows))]
-        let identity = Identity::held(Arc::new(Handle::from_path(path)?))?;
-        #[cfg(not(any(unix, windows)))]
         let identity = {
-            let metadata = std::fs::metadata(path)?;
-            Identity {
-                len: metadata.len(),
-                modified: metadata.modified().ok(),
-            }
+            plain(&file.as_file().metadata()?)?;
+            Identity::held(Arc::new(file))?
+        };
+        #[cfg(not(any(unix, windows)))]
+        let identity = Identity {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
         };
         Ok(identity)
     }
@@ -70,6 +87,32 @@ impl Identity {
             file,
         })
     }
+}
+
+/// Nothing, where `metadata` is a file's or a folder's; else an error
+/// saying it's neither, and on Unix what it is.
+fn plain(metadata: &std::fs::Metadata) -> io::Result<()> {
+    let kind = metadata.file_type();
+    if kind.is_file() || kind.is_dir() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    let what = {
+        use std::os::unix::fs::FileTypeExt;
+        if kind.is_fifo() {
+            ": a FIFO"
+        } else if kind.is_socket() {
+            ": a socket"
+        } else if kind.is_block_device() || kind.is_char_device() {
+            ": a device"
+        } else {
+            ""
+        }
+    };
+    #[cfg(not(unix))]
+    let what = "";
+    let message = format!("neither a file nor a folder{what}");
+    Err(io::Error::new(io::ErrorKind::InvalidInput, message))
 }
 
 /// A file read by position, a window at a time from where a read starts
@@ -289,6 +332,44 @@ mod tests {
             let mut bytes = [0; 9];
             read_exact_at(identity.file.as_file(), &mut bytes, 0).unwrap();
             assert_eq!(&bytes, b"%PDF-1.7\n");
+        }
+    }
+
+    /// The identity of a folder is taken, but not of a FIFO, whose opening
+    /// would wait for a writer, nor of a socket: each is refused at once,
+    /// saying what it is. Each is asked on a thread of its own, so that one
+    /// that waits fails the test rather than hanging it.
+    #[cfg(unix)]
+    #[test]
+    fn an_identity_is_of_a_file_or_a_folder() {
+        use std::os::unix::net::UnixListener;
+        use std::process::Command;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let temp = Temp::new("special", b"%PDF-1.7\n");
+        let folder = temp.1.path();
+        assert_eq!(Identity::of(folder).unwrap(), Identity::of(folder).unwrap());
+        let fifo = folder.join("fifo");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let socket = folder.join("socket");
+        let _listening = UnixListener::bind(&socket).unwrap();
+        for (path, what) in [(fifo, "a FIFO"), (socket, "a socket")] {
+            let (send, receive) = mpsc::channel();
+            thread::spawn(move || {
+                let got = Identity::of(&path).map_err(|e| (e.kind(), e.to_string()));
+                send.send(got.map(drop)).unwrap();
+            });
+            let got = (receive.recv_timeout(Duration::from_secs(10)))
+                .unwrap_or_else(|_| panic!("{what}: still waiting after 10 s"));
+            let message = format!("neither a file nor a folder: {what}");
+            assert_eq!(got, Err((io::ErrorKind::InvalidInput, message)));
         }
     }
 }

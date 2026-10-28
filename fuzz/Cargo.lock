@@ -347,6 +347,7 @@ dependencies = [
 name = "pdf-structure"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "pdf-crypt",
  "pdf-filters",
  "pdf-objects",
