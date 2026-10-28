@@ -468,16 +468,18 @@ mod tests {
     /// reading it, or the line that doesn't read.
     #[test]
     fn a_file_that_doesnt_read_says_its_path() {
-        let dir = std::env::temp_dir().join(format!("pdf-lint-allowance-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("pdf-lint-allowance-")
+            .tempdir()
+            .unwrap();
         let said = |path: &Path| format!("{:#}", Allowances::read(path).unwrap_err());
-        let missing = dir.join("missing.tsv");
+        let missing = dir.path().join("missing.tsv");
         let why = std::fs::read_to_string(&missing).unwrap_err();
         assert_eq!(
             said(&missing),
             format!("reading {}: {why}", missing.display())
         );
-        let reasonless = dir.join("reasonless.tsv");
+        let reasonless = dir.path().join("reasonless.tsv");
         std::fs::write(&reasonless, "# Held.\nFieldTx\tDA\tmissing\t*\t*\t\n").unwrap();
         assert_eq!(
             said(&reasonless),

@@ -201,12 +201,14 @@ mod tests {
     /// and the refusal names the table, word for word.
     #[test]
     fn a_model_without_a_table_the_checker_reads_by_name_is_refused() {
-        let dir = std::env::temp_dir().join(format!("pdf-lint-model-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("pdf-lint-model-")
+            .tempdir()
+            .unwrap();
         let header = grammar::HEADER.join("\t");
         let row = "Rotate\tinteger\t1.0\t\tFALSE\tFALSE\tTRUE\t0\t\t\t\t";
-        std::fs::write(dir.join("T.tsv"), format!("{header}\n{row}\n")).unwrap();
-        let e = use_model(Grammar::load(&dir).unwrap()).unwrap_err();
+        std::fs::write(dir.path().join("T.tsv"), format!("{header}\n{row}\n")).unwrap();
+        let e = use_model(Grammar::load(dir.path()).unwrap()).unwrap_err();
         assert_eq!(
             format!("{e:#}"),
             "it has no FileTrailer table, which the checker reads by name"

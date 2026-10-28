@@ -16,17 +16,22 @@ pdf-crypt = { path = "../pdf-crypt", version = "0.1" }
 pdf-filters = { path = "../pdf-filters", version = "0.1" }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
+# The file `fixtures` hands qpdf a stream in.
+tempfile = { version = "3", optional = true }
 thiserror = "2"
 
 [features]
 # Files built in code, and qpdf as a second reader, for other crates' tests
 # and fuzz targets: hidden, not for a user. Its encrypted files need
-# pdf-crypt's writer.
-fixtures = ["pdf-crypt/writer"]
+# pdf-crypt's writer; the file it hands qpdf a stream in, tempfile, which
+# makes it in the temp folder and removes it after.
+fixtures = ["pdf-crypt/writer", "dep:tempfile"]
 
 [dev-dependencies]
 # The tests' encrypted files.
 pdf-crypt = { path = "../pdf-crypt", version = "0.1", features = ["writer"] }
+# The tests' folders of their own, removed after.
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "forbid"

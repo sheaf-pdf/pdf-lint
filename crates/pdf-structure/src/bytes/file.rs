@@ -161,31 +161,30 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
+    use tempfile::TempDir;
+
     use super::super::tests::{clean, root};
     use super::super::{ByteSource, Options, Reading, read};
     use super::*;
     use crate::write::{self, Xref};
 
-    /// A file of the test's own in the temp folder, removed when it's
-    /// dropped.
-    struct Temp(PathBuf);
+    /// A file of the test's own, in a folder of its own in the temp
+    /// folder, removed with the file when it's dropped.
+    struct Temp(PathBuf, TempDir);
 
     impl Temp {
         fn new(test: &str, bytes: &[u8]) -> Temp {
-            let name = format!("pdf-structure-{}-{test}.pdf", std::process::id());
-            let path = std::env::temp_dir().join(name);
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("pdf-structure-{test}-"))
+                .tempdir()
+                .unwrap();
+            let path = dir.path().join(format!("{test}.pdf"));
             fs::write(&path, bytes).unwrap();
-            Temp(path)
+            Temp(path, dir)
         }
 
         fn open(&self) -> FileBytes {
             FileBytes::new(File::open(&self.0).unwrap()).unwrap()
-        }
-    }
-
-    impl Drop for Temp {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
         }
     }
 
@@ -241,8 +240,9 @@ mod tests {
 
         let temp = Temp::new("replaced", b"%PDF-1.7\n");
         let file = temp.open();
-        let other = Temp::new("replacing", b"%PDF-2.0\n");
-        fs::rename(&other.0, &temp.0).unwrap();
+        let other = temp.1.path().join("replacing.pdf");
+        fs::write(&other, b"%PDF-2.0\n").unwrap();
+        fs::rename(&other, &temp.0).unwrap();
         assert!(file.unchanged().unwrap());
         assert_eq!(file.read_at(0..9).unwrap(), &b"%PDF-1.7\n"[..]);
         assert_ne!(Identity::of(&temp.0).unwrap(), file.identity());

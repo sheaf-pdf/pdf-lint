@@ -30,6 +30,8 @@ thiserror = "2"
 pdf-crypt = { path = "../pdf-crypt", features = ["writer"] }
 # The tests' file writer, and qpdf as a second reader.
 pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
+# The tests' folders of their own, removed after.
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "forbid"

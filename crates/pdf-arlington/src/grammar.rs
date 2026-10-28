@@ -1284,9 +1284,12 @@ mod tests {
     /// path.
     #[test]
     fn a_folder_that_doesnt_load_says_why() {
-        let dir = std::env::temp_dir().join(format!("pdf-arlington-load-{}", std::process::id()));
+        let dir = tempfile::Builder::new()
+            .prefix("pdf-arlington-load-")
+            .tempdir()
+            .unwrap();
         let folder = |name: &str| {
-            let folder = dir.join(name);
+            let folder = dir.path().join(name);
             std::fs::create_dir_all(&folder).unwrap();
             folder
         };
@@ -1294,7 +1297,7 @@ mod tests {
             Ok(_) => panic!("{} loaded", dir.display()),
             Err(e) => format!("{e:#}"),
         };
-        let missing = dir.join("missing");
+        let missing = dir.path().join("missing");
         let why = std::fs::read_dir(&missing).unwrap_err();
         assert_eq!(
             said(&missing),

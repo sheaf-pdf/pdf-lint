@@ -5,6 +5,7 @@ use std::process::{Command, Output, Stdio};
 
 use pdf_crypt::writer::{self, Kind, Settings};
 use pdf_crypt::{Dictionary, Handler};
+use tempfile::TempDir;
 
 // pdf-structure's reader of qpdf's JSON, to read the JSON report back with.
 #[path = "../../pdf-structure/src/json.rs"]
@@ -33,11 +34,17 @@ fn file(objects: &[&str]) -> Vec<u8> {
     out
 }
 
-/// `bytes` written to a file of the test's own, named `name`.
-fn written(name: &str, bytes: &[u8]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pdf-lint-cli-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(name);
+/// A folder of the test's own, removed when it's dropped.
+fn folder() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("pdf-lint-cli-")
+        .tempdir()
+        .unwrap()
+}
+
+/// `bytes` written to a file in the test's folder, `dir`, named `name`.
+fn written(dir: &TempDir, name: &str, bytes: &[u8]) -> PathBuf {
+    let path = dir.path().join(name);
     std::fs::write(&path, bytes).unwrap();
     path
 }
@@ -60,12 +67,13 @@ const PAGES: &str = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
 
 #[test]
 fn a_clean_file_exits_0() {
+    let dir = folder();
     let clean = file(&[
         CATALOG,
         PAGES,
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>",
     ]);
-    let path = written("clean.pdf", &clean);
+    let path = written(&dir, "clean.pdf", &clean);
     let out = run(&[path.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
     assert!(
@@ -77,12 +85,13 @@ fn a_clean_file_exits_0() {
 
 #[test]
 fn a_finding_is_printed_with_its_bytes_and_exits_1() {
+    let dir = folder();
     let faulty = file(&[
         CATALOG,
         PAGES,
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1] /Resources << >> >>",
     ]);
-    let path = written("faulty.pdf", &faulty);
+    let path = written(&dir, "faulty.pdf", &faulty);
     let out = run(&[path.to_str().unwrap()]);
     let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{stdout}");
@@ -91,6 +100,7 @@ fn a_finding_is_printed_with_its_bytes_and_exits_1() {
 
     // Allowed, it's left out.
     let allow = written(
+        &dir,
         "allow.tsv",
         b"# test\nPageObject\tMediaBox\ttype\t*\t*\tthe test's\n",
     );
@@ -105,22 +115,24 @@ fn a_finding_is_printed_with_its_bytes_and_exits_1() {
 
 #[test]
 fn a_hold_file_holds_only_what_it_names() {
+    let dir = folder();
     let faulty = file(&[
         CATALOG,
         PAGES,
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1] /Resources << >> >>",
     ]);
-    let path = written("held.pdf", &faulty);
-    let hold = written("hold.txt", b"# the catalog alone\n1 0 built\n");
+    let path = written(&dir, "held.pdf", &faulty);
+    let hold = written(&dir, "hold.txt", b"# the catalog alone\n1 0 built\n");
     let out = run(&["--hold", hold.to_str().unwrap(), path.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
 }
 
 #[test]
 fn exempt_keys_are_no_findings_in_a_built_object() {
+    let dir = folder();
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> \
                 /WriterPage 1 /WriterMark 2 /Contnets 3 >>";
-    let path = written("exempt.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = written(&dir, "exempt.pdf", &file(&[CATALOG, PAGES, page]));
     let path = path.to_str().unwrap();
     let unlisted = |args: &[&str]| {
         let out = run(args);
@@ -140,7 +152,7 @@ fn exempt_keys_are_no_findings_in_a_built_object() {
             "PageObject/Contnets"
         ]
     );
-    let one = written("exempt-one.txt", b"# the writer's\n/WriterPage\n");
+    let one = written(&dir, "exempt-one.txt", b"# the writer's\n/WriterPage\n");
     let one = one.to_str().unwrap();
     assert_eq!(
         unlisted(&["--built", "--exempt", one, path]),
@@ -148,13 +160,13 @@ fn exempt_keys_are_no_findings_in_a_built_object() {
     );
     // Every key a name begins; and with a hold file, or in what the last
     // update wrote, the built objects.
-    let prefix = written("exempt-prefix.txt", b"/Writer*\n");
+    let prefix = written(&dir, "exempt-prefix.txt", b"/Writer*\n");
     let prefix = prefix.to_str().unwrap();
     assert_eq!(
         unlisted(&["--built", "--exempt", prefix, path]),
         ["PageObject/Contnets"]
     );
-    let hold = written("exempt-hold.txt", b"3 0 built\n");
+    let hold = written(&dir, "exempt-hold.txt", b"3 0 built\n");
     let hold = hold.to_str().unwrap();
     assert_eq!(
         unlisted(&["--hold", hold, "--exempt", prefix, path]),
@@ -163,7 +175,7 @@ fn exempt_keys_are_no_findings_in_a_built_object() {
     let note = "<< /Type /Annot /Subtype /Text /Rect [0 0 1 1] /WriterNote 1 /Contnets 2 >>";
     let page = page.replace("/Resources", "/Annots [4 0 R] /Resources");
     let update = updated(&file(&[CATALOG, PAGES, &page]), &[(3, &page), (4, note)]);
-    let update = written("exempt-update.pdf", &update);
+    let update = written(&dir, "exempt-update.pdf", &update);
     let update = update.to_str().unwrap();
     assert_eq!(
         unlisted(&["--last-update", "--exempt", prefix, update]),
@@ -179,7 +191,7 @@ fn exempt_keys_are_no_findings_in_a_built_object() {
         "{}",
         text(&out.stderr)
     );
-    let bad = written("exempt-bad.txt", b"/Writer\nMine\n");
+    let bad = written(&dir, "exempt-bad.txt", b"/Writer\nMine\n");
     let out = run(&["--built", "--exempt", bad.to_str().unwrap(), path]);
     assert_eq!(out.status.code(), Some(2));
     assert!(
@@ -191,10 +203,12 @@ fn exempt_keys_are_no_findings_in_a_built_object() {
 
 #[test]
 fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
+    let dir = folder();
     let page = |keys: &str| {
         format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> {keys} >>")
     };
     let path = written(
+        &dir,
         "unlisted.pdf",
         &file(&[CATALOG, PAGES, &page("/Contnets 3 /WriterMark 1")]),
     );
@@ -219,7 +233,7 @@ fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
     assert_eq!(unlisted(&["--built", "--unlisted", "never", path]), none);
     assert_eq!(unlisted(&["--built", "--unlisted", "built", path]).1, both);
     // A writer's own key exempt, merged objects and all.
-    let exempt = written("unlisted-exempt.txt", b"/WriterMark\n");
+    let exempt = written(&dir, "unlisted-exempt.txt", b"/WriterMark\n");
     let exempt = exempt.to_str().unwrap();
     assert_eq!(
         unlisted(&["--unlisted", "all", "--exempt", exempt, path]).1,
@@ -229,6 +243,7 @@ fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
     // A rewrite, set against what it was written from, carries the key
     // the page had there, and finds the one the writer added.
     let rewrite = written(
+        &dir,
         "unlisted-rewrite.pdf",
         &file(&[
             CATALOG,
@@ -248,7 +263,7 @@ fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
         &file(&[CATALOG, PAGES, &page("/Contnets 3")]),
         &[(3, &page("/Contnets 3 /Rotat 9"))],
     );
-    let update = written("unlisted-update.pdf", &update);
+    let update = written(&dir, "unlisted-update.pdf", &update);
     let out = run(&[
         "--unlisted",
         "all",
@@ -288,9 +303,10 @@ fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
 
 #[test]
 fn extensions_name_what_a_file_is_checked_under_besides_what_it_declares() {
+    let dir = folder();
     // A page's /Tabs /A, which PDF 1.7 has only under Adobe's level 3.
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Tabs /A >>";
-    let path = written("extensions.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = written(&dir, "extensions.pdf", &file(&[CATALOG, PAGES, page]));
     let path = path.to_str().unwrap();
     let out = run(&[path]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
@@ -395,9 +411,10 @@ fn encryption(dictionary: &Dictionary) -> String {
 
 #[test]
 fn an_encrypted_file_is_read_by_the_password_it_needs_and_unread_without_it() {
-    let locked = written("password-locked.pdf", &crypted(Kind::Aes256, b"user"));
+    let dir = folder();
+    let locked = written(&dir, "password-locked.pdf", &crypted(Kind::Aes256, b"user"));
     let locked = locked.to_str().unwrap();
-    let open = written("password-open.pdf", &crypted(Kind::Aes128, b""));
+    let open = written(&dir, "password-open.pdf", &crypted(Kind::Aes128, b""));
     let open = open.to_str().unwrap();
     let said = |args: &[&str]| {
         let out = run(args);
@@ -452,6 +469,7 @@ fn an_encrypted_file_is_read_by_the_password_it_needs_and_unread_without_it() {
 
 #[test]
 fn a_password_is_tried_as_utf_8_and_in_each_single_byte_encoding() {
+    let dir = folder();
     // café, as each kind's writer may have set it: in PDFDocEncoding
     // (WinAnsiEncoding's alike), in MacRomanEncoding, and in UTF-8.
     let kinds = [
@@ -460,7 +478,7 @@ fn a_password_is_tried_as_utf_8_and_in_each_single_byte_encoding() {
         (Kind::Aes256, "café".as_bytes()),
     ];
     for (kind, user) in kinds {
-        let path = written("password-cafe.pdf", &crypted(kind, user));
+        let path = written(&dir, "password-cafe.pdf", &crypted(kind, user));
         let out = run(&["--password", "café", path.to_str().unwrap()]);
         assert_ne!(
             out.status.code(),
@@ -475,6 +493,7 @@ fn a_password_is_tried_as_utf_8_and_in_each_single_byte_encoding() {
 
 #[test]
 fn an_encrypted_files_last_update_is_read_with_its_password() {
+    let dir = folder();
     // The page, in the object stream, has a /Rotate that isn't a number,
     // which the update, rewriting it as it was, carries: so the revision
     // before it must open too.
@@ -482,7 +501,7 @@ fn an_encrypted_files_last_update_is_read_with_its_password() {
     let base = crypted_with(Kind::Aes128, b"user", &object_stream_with(page).0);
     let trailer = encryption(&writer::dictionary(&settings(Kind::Aes128, b"user")));
     let update = updated_under(&base, &[(3, page)], &trailer);
-    let path = written("updated-encrypted.pdf", &update);
+    let path = written(&dir, "updated-encrypted.pdf", &update);
     let path = path.to_str().unwrap();
     let out = run(&["--last-update", "--password", "user", path]);
     let stdout = text(&out.stdout);
@@ -491,7 +510,7 @@ fn an_encrypted_files_last_update_is_read_with_its_password() {
     // A new finding is the update's.
     let rotated = page.replace("/Rotate /B", "/Rotate /C /UserUnit /D");
     let update = updated_under(&base, &[(3, rotated.as_str())], &trailer);
-    let rotated = written("updated-encrypted-2.pdf", &update);
+    let rotated = written(&dir, "updated-encrypted-2.pdf", &update);
     let rotated = rotated.to_str().unwrap();
     let out = run(&["--last-update", "--password", "user", rotated]);
     let stdout = text(&out.stdout);
@@ -565,9 +584,11 @@ fn in_an_object_stream_under(filter: &str, data: &[u8], trailer: &str) -> Vec<u8
 
 #[test]
 fn a_fault_in_a_streams_data_is_a_finding() {
+    let dir = folder();
     let (objects, _) = object_stream_objects();
     let hex: String = objects.iter().map(|b| format!("{b:02x}")).collect();
     let clean = written(
+        &dir,
         "hex-clean.pdf",
         &in_an_object_stream(" /Filter /AHx", format!("{hex}>").as_bytes()),
     );
@@ -576,6 +597,7 @@ fn a_fault_in_a_streams_data_is_a_finding() {
     // Without its `>`, which qpdf reads without a word: everything reads,
     // and the fault is the reader's finding, at the data.
     let faulted = written(
+        &dir,
         "hex-no-end.pdf",
         &in_an_object_stream(" /Filter /AHx", hex.as_bytes()),
     );
@@ -591,13 +613,14 @@ fn a_fault_in_a_streams_data_is_a_finding() {
 
 #[test]
 fn a_file_of_dash_is_standard_input() {
+    let dir = folder();
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Rotate (abc) >>";
-    let plain = written("stdin-plain.pdf", &file(&[CATALOG, PAGES, page]));
+    let plain = written(&dir, "stdin-plain.pdf", &file(&[CATALOG, PAGES, page]));
     let plain = plain.to_str().unwrap();
     let (objects, _) = object_stream_objects();
-    let packed = written("stdin-packed.pdf", &in_an_object_stream("", &objects));
+    let packed = written(&dir, "stdin-packed.pdf", &in_an_object_stream("", &objects));
     let packed = packed.to_str().unwrap().to_string();
-    let encrypted = written("stdin-encrypted.pdf", &crypted(Kind::Aes256, b""));
+    let encrypted = written(&dir, "stdin-encrypted.pdf", &crypted(Kind::Aes256, b""));
     let encrypted = encrypted.to_str().unwrap().to_string();
     let piped = |path: &str, args: &[&str]| {
         let child = pdf_lint()
@@ -643,13 +666,14 @@ fn a_file_of_dash_is_standard_input() {
 
 #[test]
 fn one_table_checks_a_field_merged_with_its_widget_as_the_widget_alone() {
+    let dir = folder();
     let catalog = "<< /Type /Catalog /Pages 2 0 R \
                    /AcroForm << /Fields [4 0 R] /DA (/Helv 0 Tf 0 g) >> >>";
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> \
                 /Annots [4 0 R] >>";
     let field = "<< /Type /Annot /Subtype /Widget /Rect [0 0 1 1] /P 3 0 R \
                  /FT /Tx /T (name) /MaxLen 5 >>";
-    let path = written("one-table.pdf", &file(&[catalog, PAGES, page, field]));
+    let path = written(&dir, "one-table.pdf", &file(&[catalog, PAGES, page, field]));
     let path = path.to_str().unwrap();
     let out = run(&["--built", path]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
@@ -686,11 +710,12 @@ fn one_table_checks_a_field_merged_with_its_widget_as_the_widget_alone() {
 
 #[test]
 fn pdf_version_checks_a_file_as_another_version() {
+    let dir = folder();
     // /OutputIntents came in on a page with 2.0, and /ProcSet went.
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] \
                 /Resources << /ProcSet [/PDF] >> /OutputIntents [] >>";
     let original = file(&[CATALOG, PAGES, page]);
-    let path = written("version.pdf", &original);
+    let path = written(&dir, "version.pdf", &original);
     let path = path.to_str().unwrap();
     let found = |args: &[&str]| {
         let out = run(args);
@@ -731,12 +756,13 @@ fn pdf_version_checks_a_file_as_another_version() {
     let (summary, _) = found(&[&v2[..], &["--baseline", path, path]].concat());
     assert!(summary.ends_with("0 findings, 3 carried"), "{summary}");
     let update = updated(&original, &[(3, page)]);
-    let update = written("version-update.pdf", &update);
+    let update = written(&dir, "version-update.pdf", &update);
     let update = update.to_str().unwrap();
     let (summary, _) = found(&[&v2[..], &["--last-update", update]].concat());
     assert!(summary.ends_with("0 findings, 3 carried"), "{summary}");
     // An allowance's version is the one the file is checked as.
     let allow = written(
+        &dir,
         "version-allow.tsv",
         b"# test\nResource\tProcSet\tdeprecated\t*\t2.0\tthe test's\n",
     );
@@ -774,16 +800,17 @@ fn pdf_version_checks_a_file_as_another_version() {
 
 #[test]
 fn model_checks_against_another_checkout() {
+    let dir = folder();
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> \
                 /OutputIntents [] >>";
-    let path = written("model.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = written(&dir, "model.pdf", &file(&[CATALOG, PAGES, page]));
     let path = path.to_str().unwrap();
     // A copy of the embedded model, where /OutputIntents came in on a
     // page with 1.4, not 2.0; and one without the trailer's table.
     let embedded =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../pdf-arlington/model/tsv/latest");
     let copy = |name: &str, change: &dyn Fn(&str, String) -> Option<String>| {
-        let dir = std::env::temp_dir().join(format!("pdf-lint-cli-{}-{name}", std::process::id()));
+        let dir = dir.path().join(name);
         std::fs::create_dir_all(&dir).unwrap();
         for entry in std::fs::read_dir(&embedded).unwrap() {
             let from = entry.unwrap().path();
@@ -848,7 +875,11 @@ fn model_checks_against_another_checkout() {
                 /Annots [4 0 R] >>";
     let checkbox = "<< /Type /Annot /Subtype /Widget /Rect [0 0 1 1] /P 3 0 R \
                     /FT /Btn /T (box) >>";
-    let form = written("model-form.pdf", &file(&[catalog, PAGES, page, checkbox]));
+    let form = written(
+        &dir,
+        "model-form.pdf",
+        &file(&[catalog, PAGES, page, checkbox]),
+    );
     let form = form.to_str().unwrap();
     let out = run(&[form]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
@@ -880,8 +911,9 @@ fn model_checks_against_another_checkout() {
 /// name, is said word for word after `--model` and its folder.
 #[test]
 fn a_model_refused_is_said_word_for_word() {
+    let dir = folder();
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
-    let path = written("model-refused.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = written(&dir, "model-refused.pdf", &file(&[CATALOG, PAGES, page]));
     let path = path.to_str().unwrap();
     let refused = |dir: &str| {
         let out = run(&["--model", dir, path]);
@@ -896,7 +928,7 @@ fn a_model_refused_is_said_word_for_word() {
     );
     // A folder of one table, `T.tsv`, of this row.
     let one = |name: &str, row: &str| {
-        let dir = std::env::temp_dir().join(format!("pdf-lint-cli-{}-{name}", std::process::id()));
+        let dir = dir.path().join(name);
         std::fs::create_dir_all(&dir).unwrap();
         let header = pdf_lint::grammar::HEADER.join("\t");
         std::fs::write(dir.join("T.tsv"), format!("{header}\n{row}\n")).unwrap();
@@ -928,8 +960,9 @@ fn a_model_refused_is_said_word_for_word() {
 /// it, or the line, after its path.
 #[test]
 fn a_hold_exempt_or_allowances_file_refused_is_said_word_for_word() {
+    let dir = folder();
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
-    let path = written("files-refused.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = written(&dir, "files-refused.pdf", &file(&[CATALOG, PAGES, page]));
     let missing = path.with_file_name("files-refused-missing.txt");
     let why = std::fs::read_to_string(&missing).unwrap_err();
     let missing = missing.to_str().unwrap();
@@ -957,20 +990,21 @@ fn a_hold_exempt_or_allowances_file_refused_is_said_word_for_word() {
         format!("pdf-lint: reading {missing}: {why}\n")
     );
 
-    let hold = written("files-refused-hold.txt", b"# held\n4 x built\n");
+    let hold = written(&dir, "files-refused-hold.txt", b"# held\n4 x built\n");
     let hold = hold.to_str().unwrap();
     let generation = "x".parse::<u16>().unwrap_err();
     assert_eq!(
         refused(&["--hold", hold]),
         format!("pdf-lint: {hold}: line 2: \"x\" isn't a generation: {generation}\n")
     );
-    let exempt = written("files-refused-exempt.txt", b"/Writer\nMine\n");
+    let exempt = written(&dir, "files-refused-exempt.txt", b"/Writer\nMine\n");
     let exempt = exempt.to_str().unwrap();
     assert_eq!(
         refused(&["--built", "--exempt", exempt]),
         format!("pdf-lint: {exempt}: line 2: \"Mine\" isn't a name, as /MyKey, or /My*\n")
     );
     let allow = written(
+        &dir,
         "files-refused-allow.tsv",
         b"# Held.\nFieldTx\tDA\tmissing\t*\t*\t\n",
     );
@@ -997,16 +1031,18 @@ fn a_file_that_cant_be_read_or_a_wrong_command_line_exits_2() {
 
 #[test]
 fn files_checked_at_once_are_reported_in_order() {
+    let dir = folder();
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
     let faulty = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1] /Resources << >> >>";
     // The first file takes the longest, so it's checked last of all.
     let filler = format!("[{}]", ["1"; 50].join(" "));
     let mut big = vec![CATALOG, PAGES, page];
     big.extend(std::iter::repeat_n(filler.as_str(), 2000));
-    let mut paths = vec![written("order-big.pdf", &file(&big))];
+    let mut paths = vec![written(&dir, "order-big.pdf", &file(&big))];
     for i in 0..8 {
         let third = if i % 2 == 0 { page } else { faulty };
         paths.push(written(
+            &dir,
             &format!("order-{i}.pdf"),
             &file(&[CATALOG, PAGES, third]),
         ));
@@ -1055,10 +1091,11 @@ fn files_checked_at_once_are_reported_in_order() {
 
 #[test]
 fn a_report_no_one_reads_stops_without_a_panic() {
+    let dir = folder();
     let filler = format!("[{}]", ["1"; 50].join(" "));
     let mut big = vec![CATALOG, PAGES];
     big.extend(std::iter::repeat_n(filler.as_str(), 2000));
-    let path = written("unread.pdf", &file(&big));
+    let path = written(&dir, "unread.pdf", &file(&big));
     let path = path.to_str().unwrap();
     // Far more than a pipe holds, with the pipe's reader gone.
     let mut child = pdf_lint()
@@ -1091,6 +1128,7 @@ fn the_version_or_usage_no_one_reads_exits_0_without_a_panic() {
 
 #[test]
 fn json_reports_a_line_for_each_file() {
+    let dir = folder();
     let faulty = file(&[
         CATALOG,
         PAGES,
@@ -1098,7 +1136,7 @@ fn json_reports_a_line_for_each_file() {
         // A link's /Border, which readers ignore beside a /BS.
         "<< /Type /Annot /Subtype /Link /Rect [0 0 1 1] /Border [0 0 1] /BS << >> >>",
     ]);
-    let path = written("json.pdf", &faulty);
+    let path = written(&dir, "json.pdf", &faulty);
     let out = run(&[
         "--format",
         "json",
@@ -1166,7 +1204,7 @@ fn json_reports_a_line_for_each_file() {
                    /ADBE << /BaseVersion /1.7 /ExtensionLevel 8 >> \
                    /ESIC << /BaseVersion /1.7 /ExtensionLevel 1 >> >> >>";
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
-    let declaring = written("json-extensions.pdf", &file(&[catalog, PAGES, page]));
+    let declaring = written(&dir, "json-extensions.pdf", &file(&[catalog, PAGES, page]));
     let out = run(&["--format", "json", declaring.to_str().unwrap()]);
     let declared = json::parse(&out.stdout).unwrap();
     assert_eq!(
@@ -1215,6 +1253,7 @@ fn updated_under(file: &[u8], objects: &[(u32, &str)], trailer: &str) -> Vec<u8>
 
 #[test]
 fn the_last_update_answers_for_what_it_wrote() {
+    let dir = folder();
     // A, in the page as first written.
     let original = file(&[
         CATALOG,
@@ -1233,7 +1272,7 @@ fn the_last_update_answers_for_what_it_wrote() {
             (4, "<< /Type /Annot /Subtype /Text /Rect (C) >>"),
         ],
     );
-    let path = written("updated.pdf", &update);
+    let path = written(&dir, "updated.pdf", &update);
     let out = run(&["--last-update", path.to_str().unwrap()]);
     let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{stdout}");
@@ -1250,7 +1289,7 @@ fn the_last_update_answers_for_what_it_wrote() {
     assert!(stdout.contains("1 carried"), "{stdout}");
 
     // A file of one revision has no update to answer for.
-    let path = written("one-revision.pdf", &original);
+    let path = written(&dir, "one-revision.pdf", &original);
     let out = run(&["--last-update", path.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2));
     assert!(
@@ -1264,6 +1303,7 @@ fn the_last_update_answers_for_what_it_wrote() {
 
 #[test]
 fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
+    let dir = folder();
     let faulty = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1] /Resources << >> >>";
     let clean = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
     // A baseline whose first page has a fault, A, and its second none.
@@ -1273,7 +1313,7 @@ fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
         faulty,
         clean,
     ]);
-    let base = written("baseline.pdf", &baseline);
+    let base = written(&dir, "baseline.pdf", &baseline);
 
     // An incremental update of it is set against it object by object: it
     // puts the first page second, where it keeps A, and adds B; and a new
@@ -1289,7 +1329,7 @@ fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
             (5, "<< /Type /Annot /Subtype /Text /Rect (C) >>"),
         ],
     );
-    let path = written("baseline-updated.pdf", &update);
+    let path = written(&dir, "baseline-updated.pdf", &update);
     let out = run(&["--baseline", base.to_str().unwrap(), path.to_str().unwrap()]);
     let stdout = text(&out.stdout);
     let findings: Vec<_> = stdout.lines().filter(|l| l.starts_with("- ")).collect();
@@ -1309,7 +1349,7 @@ fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
         faulty,
         faulty,
     ]);
-    let path = written("baseline-rewritten.pdf", &rewrite);
+    let path = written(&dir, "baseline-rewritten.pdf", &rewrite);
     let out = run(&["--baseline", base.to_str().unwrap(), path.to_str().unwrap()]);
     let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{stdout}");

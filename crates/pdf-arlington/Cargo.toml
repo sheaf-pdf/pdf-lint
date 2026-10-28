@@ -17,6 +17,10 @@ include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md"]
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
 thiserror = "2"
 
+[dev-dependencies]
+# The tests' folders of their own, removed after.
+tempfile = "3"
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"

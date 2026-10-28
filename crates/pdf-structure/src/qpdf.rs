@@ -10,10 +10,9 @@
 //! it, which isn't JSON.
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -316,23 +315,25 @@ impl Decode for Qpdf {
         plain
     }
 
-    /// Through a file of its own, holding the stream alone, as object 3.
+    /// Through a file of its own, holding the stream alone, as object 3: a
+    /// new file in the temp folder, removed after.
     fn decode_written(&self, stream: Written) -> Result<Vec<u8>, String> {
-        static FILES: AtomicUsize = AtomicUsize::new(0);
-        let name = format!(
-            "pdf-lint-{}-{}.pdf",
-            std::process::id(),
-            FILES.fetch_add(1, Ordering::Relaxed)
-        );
-        let path = std::env::temp_dir().join(name);
-        std::fs::write(&path, alone(stream)).map_err(|e| format!("{}: {e}", path.display()))?;
+        // tempfile's error says the path it tried.
+        let mut file = tempfile::Builder::new()
+            .prefix("pdf-lint-")
+            .suffix(".pdf")
+            .tempfile()
+            .map_err(|e| e.to_string())?;
+        let path = file.path().to_path_buf();
+        (file.as_file_mut().write_all(&alone(stream)))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         let qpdf = Qpdf {
-            file: path.clone(),
+            file: path,
             password: None,
             ..self.clone()
         };
         let decoded = qpdf.decode(&[(3, 0)]).remove(&(3, 0));
-        let _ = std::fs::remove_file(&path);
+        drop(file);
         decoded.unwrap_or_else(|| Err("qpdf gives nothing".to_string()))
     }
 }
@@ -548,10 +549,12 @@ fn warnings(stderr: &[u8], file: &Path) -> Vec<Warning> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use pdf_objects::dict;
     use pdf_objects::object::{Data, Form, Object, Str, Value};
     use pdf_objects::text;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::bytes;
@@ -569,11 +572,12 @@ mod tests {
         qpdf
     }
 
-    /// A scratch folder of the test's own.
-    fn scratch(test: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pdf-lint-qpdf-{}-{test}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A scratch folder of the test's own, removed when it's dropped.
+    fn scratch(test: &str) -> TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("pdf-lint-qpdf-{test}-"))
+            .tempdir()
+            .unwrap()
     }
 
     /// A clean file: a catalog, its page tree and page, and a text
@@ -708,19 +712,21 @@ mod tests {
     #[ignore = "needs qpdf; writes the committed fixtures anew"]
     fn the_fixtures_are_written() {
         for (name, args) in FIXTURES {
-            std::fs::copy(rewritten(name, args), fixture(name)).unwrap();
+            let (_dir, rewritten) = rewritten(name, args);
+            std::fs::copy(rewritten, fixture(name)).unwrap();
         }
     }
 
     /// The clean file, written, then rewritten by qpdf with `args`; with
     /// `--object-streams=generate`, its dictionaries in object streams, and
-    /// a cross-reference stream, compressed.
-    fn rewritten(test: &str, args: &[&str]) -> PathBuf {
+    /// a cross-reference stream, compressed: its path, in the test's folder,
+    /// which is removed when it's dropped.
+    fn rewritten(test: &str, args: &[&str]) -> (TempDir, PathBuf) {
         let dir = scratch(test);
-        let plain = dir.join("plain.pdf");
+        let plain = dir.path().join("plain.pdf");
         let root = dict! { "Root" => Object::reference(1) };
         std::fs::write(&plain, write::file("1.7", &clean(), root, Xref::Table)).unwrap();
-        let out = dir.join("compressed.pdf");
+        let out = dir.path().join("compressed.pdf");
         let qpdf = qpdf(&plain);
         let mut command = Command::new(&qpdf.program);
         // An /ID from the content, not the clock, so that a run can't
@@ -732,7 +738,7 @@ mod tests {
         command.args(args).arg(&plain).arg(&out);
         let status = command.status().unwrap();
         assert!(matches!(status.code(), Some(0 | 3)), "qpdf {args:?} failed");
-        out
+        (dir, out)
     }
 
     /// A decoder that mustn't be asked.
@@ -872,7 +878,7 @@ mod tests {
     fn a_qpdf_that_hangs_is_stopped() {
         use std::os::unix::fs::PermissionsExt;
         let dir = scratch("hangs");
-        let program = dir.join("hang.sh");
+        let program = dir.path().join("hang.sh");
         std::fs::write(&program, "#!/bin/sh\nsleep 10\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let qpdf = Qpdf::new("x.pdf")
@@ -1173,7 +1179,7 @@ qpdf: operation succeeded with warnings\n";
     #[ignore = "needs qpdf: just test-qpdf"]
     fn what_qpdf_keeps_and_loses_reading_alone() {
         let dir = scratch("loses");
-        let path = dir.join("odd.pdf");
+        let path = dir.path().join("odd.pdf");
         let catalog = b"<< /Type /Catalog /Pages 2 0 R /Odd#20Name 1 /Bin#FFx 2 /Dup 1 /Dup 2 /Utf16 <FEFF00410042> /Real +.5 >>";
         let pages = b"<< /Type /Pages /Kids [] /Count 0 >>";
         let file = write::assembled(
@@ -1206,13 +1212,13 @@ qpdf: operation succeeded with warnings\n";
         assert_eq!(differences(&bytes, &alone), []);
 
         // A file qpdf can't read at all says why.
-        let unreadable = dir.join("unreadable.pdf");
+        let unreadable = dir.path().join("unreadable.pdf");
         std::fs::write(&unreadable, b"not a PDF").unwrap();
         let why = qpdf(&unreadable).read().unwrap_err();
         assert!(why.contains("exited with 2"), "{why}");
 
         // Nor what qpdf reconstructs is as the file writes it.
-        let damaged = dir.join("damaged.pdf");
+        let damaged = dir.path().join("damaged.pdf");
         let mut broken = write::file(
             "1.7",
             &clean(),
@@ -1267,7 +1273,8 @@ qpdf: operation succeeded with warnings\n";
             )
             .as_bytes(),
         );
-        let updated = scratch("reused").join("updated.pdf");
+        let dir = scratch("reused");
+        let updated = dir.path().join("updated.pdf");
         std::fs::write(&updated, &data).unwrap();
         let qpdf = qpdf(&updated);
         assert_eq!(
@@ -1552,7 +1559,7 @@ qpdf: operation succeeded with warnings\n";
             ),
         ];
         let dir = scratch("hand-made");
-        let path = dir.join("streams.pdf");
+        let path = dir.path().join("streams.pdf");
         let mut objects = clean();
         let first = 10;
         for (i, (_, dict, data, _)) in cases.iter().enumerate() {

@@ -118,7 +118,7 @@ assert_eq!(doc.trailer.unwritten.as_deref(), Some("no startxref"));
 ## What isn't here
 
 - **Warnings turned off, or typed.** Each warning is text (`Warning::message`), made as the reader meets what it says and kept with the object it's in for as long as the reading is; a clean object costs nothing, but a caller can't turn them off.
-- **Writing.** It reads only. The `fixtures` feature writes files from objects, and runs qpdf (the program `PDF_LINT_QPDF` names, else `qpdf` on the `PATH`) as a second reader, hidden from the docs: for this workspace's tests and fuzz targets, not for a user. Without it, nothing runs a program or reads `PDF_LINT_QPDF`.
+- **Writing.** It reads only. The `fixtures` feature writes files from objects, and runs qpdf (the program `PDF_LINT_QPDF` names, else `qpdf` on the `PATH`) as a second reader, hidden from the docs: for this workspace's tests and fuzz targets, not for a user. A stream qpdf decodes alone is handed to it in a file of its own, which tempfile makes in the temp folder and removes after. Without it, nothing runs a program, reads `PDF_LINT_QPDF` or writes a file.
 
 ## License
 
