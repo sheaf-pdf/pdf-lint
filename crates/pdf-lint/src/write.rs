@@ -197,20 +197,23 @@ pub(crate) fn encrypted(
     let handler = pdf_crypt::Handler::open(&values, settings.id, &[settings.user])
         .expect("the writer's opens");
     fn strings(o: &mut Object, encrypt: &mut dyn FnMut(&[u8]) -> Vec<u8>) {
+        // A dictionary's values, or a stream's dictionary's.
+        let mut entries = |d: &mut Dict| {
+            // A signature's /Contents, as the reader takes one.
+            let typed = (d.get(b"Type"))
+                .is_none_or(|t| matches!(t.as_name(), Some(b"Sig" | b"DocTimeStamp")));
+            let signature = d.has(b"ByteRange") && typed;
+            for entry in d.entries_mut() {
+                if !(signature && entry.key == b"Contents") {
+                    strings(&mut entry.value, encrypt);
+                }
+            }
+        };
         match o.value_mut() {
             Value::String(Str::Bytes(bytes), _) => *bytes = encrypt(bytes),
             Value::Array(a) => a.iter_mut().for_each(|o| strings(o, encrypt)),
-            Value::Dict(d) | Value::Stream(crate::object::Stream { dict: d, .. }) => {
-                // A signature's /Contents, as the reader takes one.
-                let typed = (d.get(b"Type"))
-                    .is_none_or(|t| matches!(t.as_name(), Some(b"Sig" | b"DocTimeStamp")));
-                let signature = d.has(b"ByteRange") && typed;
-                for entry in d.entries_mut() {
-                    if !(signature && entry.key == b"Contents") {
-                        strings(&mut entry.value, encrypt);
-                    }
-                }
-            }
+            Value::Dict(d) => entries(d),
+            Value::Stream(s) => entries(&mut s.dict),
             _ => {}
         }
     }

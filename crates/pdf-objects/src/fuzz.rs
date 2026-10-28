@@ -218,11 +218,11 @@ fn limited(input: &[u8], how: How, small: &(Result<Object, Error>, usize)) {
 /// How many values a parser reads for `o`: it, and each element, key and
 /// dictionary value, at every depth; a stream's are its dictionary's.
 fn count(o: &Object) -> usize {
+    let entries = |d: &Dict| -> usize { d.entries().iter().map(|e| 1 + count(&e.value)).sum() };
     1 + match o.value() {
         Value::Array(a) => a.iter().map(count).sum(),
-        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
-            d.entries().iter().map(|e| 1 + count(&e.value)).sum()
-        }
+        Value::Dict(d) => entries(d),
+        Value::Stream(s) => entries(&s.dict),
         _ => 0,
     }
 }
@@ -231,11 +231,11 @@ fn count(o: &Object) -> usize {
 /// more for each array or dictionary around it, a stream's dictionary as
 /// one.
 fn deepest(o: &Object) -> usize {
+    let entries = |d: &Dict| d.entries().iter().map(|e| deepest(&e.value)).max();
     let inside = match o.value() {
         Value::Array(a) => a.iter().map(deepest).max(),
-        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
-            d.entries().iter().map(|e| deepest(&e.value)).max()
-        }
+        Value::Dict(d) => entries(d),
+        Value::Stream(s) => entries(&s.dict),
         _ => None,
     };
     inside.map_or(0, |d| d + 1)
@@ -423,10 +423,10 @@ fn write(
     id: Option<ObjectId>,
     data: &[u8],
 ) -> Result<(), serialize::Error> {
-    match (id, object.value()) {
+    match (id, object.as_stream()) {
         (
             Some(id),
-            Value::Stream(Stream {
+            Some(Stream {
                 dict,
                 data: Data::At(at),
             }),
@@ -480,6 +480,7 @@ fn as_written(o: &mut Object) {
 /// and its place, as a reader that decrypted it would hold it: how many
 /// strings `o` holds.
 fn plain(o: &mut Object) -> usize {
+    let entries = |d: &mut Dict| -> usize { d.entries_mut().map(|e| plain(&mut e.value)).sum() };
     match o.as_written_mut() {
         Value::String(s, _) => {
             if let Str::Encrypted(bytes) = s {
@@ -488,9 +489,8 @@ fn plain(o: &mut Object) -> usize {
             1
         }
         Value::Array(a) => a.iter_mut().map(plain).sum(),
-        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
-            d.entries_mut().map(|e| plain(&mut e.value)).sum()
-        }
+        Value::Dict(d) => entries(d),
+        Value::Stream(s) => entries(&mut s.dict),
         _ => 0,
     }
 }
@@ -525,7 +525,8 @@ fn nul_names(o: &Object) -> usize {
     match o.value() {
         Value::Name(name) => usize::from(name.contains(&0)),
         Value::Array(a) => a.iter().map(nul_names).sum(),
-        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => entries(d),
+        Value::Dict(d) => entries(d),
+        Value::Stream(s) => entries(&s.dict),
         _ => 0,
     }
 }

@@ -442,10 +442,10 @@ impl<'a> Parser<'a> {
         let end = end.ok_or(Error::Endstream { id })?;
         self.offset = t.offset();
         let from = dict_at.map_or(start, |at| at.start);
-        let object = Object::new(Value::Stream(Stream {
+        let object = Object::from(Stream {
             dict,
             data: Data::At(data),
-        }))
+        })
         .at(self.span(from, end.end()));
         self.endobj(&t, id, &object, sink);
         Ok(object)

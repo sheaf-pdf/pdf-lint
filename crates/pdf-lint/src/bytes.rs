@@ -27,7 +27,7 @@ use pdf_filters::{Fault, Filter, Layout, Predictor};
 use pdf_objects::parse::{self, Body, Parser, Sink};
 
 use crate::filter;
-use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
+use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::source::{Document, Encryption, Trailer, Update, Warning};
 use crate::version::Version;
 
@@ -1880,6 +1880,22 @@ fn plaintext(
     faults: &mut BTreeMap<String, (usize, Option<Span>)>,
 ) {
     let at = o.at;
+    // A dictionary's values, or a stream's dictionary's.
+    let mut entries = |d: &mut Dict| {
+        let contents = matches!(
+            d.get(b"Contents").map(|c| c.value()),
+            Some(Value::String(..))
+        );
+        let typed =
+            (d.get(b"Type")).is_none_or(|t| matches!(t.as_name(), Some(b"Sig" | b"DocTimeStamp")));
+        let signature = d.has(b"ByteRange") && contents && typed;
+        for entry in d.entries_mut() {
+            match signature && entry.key == b"Contents" {
+                true => plain_strings(&mut entry.value),
+                false => plaintext(&mut entry.value, id, handler, faults),
+            }
+        }
+    };
     match o.as_written_mut() {
         Value::String(s, _) => {
             if let Str::Encrypted(bytes) = s {
@@ -1899,21 +1915,8 @@ fn plaintext(
                 plaintext(o, id, handler, faults);
             }
         }
-        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
-            let contents = matches!(
-                d.get(b"Contents").map(|c| c.value()),
-                Some(Value::String(..))
-            );
-            let typed = (d.get(b"Type"))
-                .is_none_or(|t| matches!(t.as_name(), Some(b"Sig" | b"DocTimeStamp")));
-            let signature = d.has(b"ByteRange") && contents && typed;
-            for entry in d.entries_mut() {
-                match signature && entry.key == b"Contents" {
-                    true => plain_strings(&mut entry.value),
-                    false => plaintext(&mut entry.value, id, handler, faults),
-                }
-            }
-        }
+        Value::Dict(d) => entries(d),
+        Value::Stream(s) => entries(&mut s.dict),
         _ => {}
     }
 }
@@ -1929,9 +1932,8 @@ fn plain_strings(o: &mut Object) {
                 }
             }
             Value::Array(a) => stack.extend(a.iter_mut()),
-            Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
-                stack.extend(d.entries_mut().map(|entry| &mut entry.value));
-            }
+            Value::Dict(d) => stack.extend(d.entries_mut().map(|entry| &mut entry.value)),
+            Value::Stream(s) => stack.extend(s.dict.entries_mut().map(|entry| &mut entry.value)),
             _ => {}
         }
     }
@@ -1939,14 +1941,17 @@ fn plain_strings(o: &mut Object) {
 
 /// How many strings in `value` are ciphertext.
 fn ciphertexts(value: &Value) -> usize {
+    let entries = |d: &Dict| -> usize {
+        d.entries()
+            .iter()
+            .map(|e| ciphertexts(e.value.value()))
+            .sum()
+    };
     match value {
         Value::String(Str::Encrypted(_), _) => 1,
         Value::Array(a) => a.iter().map(|o| ciphertexts(o.value())).sum(),
-        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => d
-            .entries()
-            .iter()
-            .map(|e| ciphertexts(e.value.value()))
-            .sum(),
+        Value::Dict(d) => entries(d),
+        Value::Stream(s) => entries(&s.dict),
         _ => 0,
     }
 }
@@ -1956,6 +1961,18 @@ fn ciphertexts(value: &Value) -> usize {
 /// place, which stay ciphertext. Of a key written twice, only the last
 /// entry has a place in `plain`, as a reader keeps only that.
 fn decrypted(object: &mut Object, plain: &Object) -> usize {
+    // Two dictionaries' entries, or two streams' dictionaries'.
+    let entries = |d: &mut Dict, p: &Dict| -> usize {
+        let mut placed = HashSet::new();
+        let mut entries: Vec<&mut Entry> = d.entries_mut().collect();
+        entries.reverse();
+        (entries.into_iter())
+            .map(|entry| match p.get(&entry.key) {
+                Some(p) if placed.insert(entry.key.clone()) => decrypted(&mut entry.value, p),
+                _ => ciphertexts(entry.value.value()),
+            })
+            .sum()
+    };
     match (object.as_written_mut(), plain.value()) {
         (
             Value::String(s @ Str::Encrypted(_), _),
@@ -1967,18 +1984,8 @@ fn decrypted(object: &mut Object, plain: &Object) -> usize {
         (Value::Array(a), Value::Array(p)) if a.len() == p.len() => {
             a.iter_mut().zip(p).map(|(a, p)| decrypted(a, p)).sum()
         }
-        (Value::Dict(d), Value::Dict(p))
-        | (Value::Stream(Stream { dict: d, .. }), Value::Stream(Stream { dict: p, .. })) => {
-            let mut placed = HashSet::new();
-            let mut entries: Vec<&mut Entry> = d.entries_mut().collect();
-            entries.reverse();
-            (entries.into_iter())
-                .map(|entry| match p.get(&entry.key) {
-                    Some(p) if placed.insert(entry.key.clone()) => decrypted(&mut entry.value, p),
-                    _ => ciphertexts(entry.value.value()),
-                })
-                .sum()
-        }
+        (Value::Dict(d), Value::Dict(p)) => entries(d, p),
+        (Value::Stream(d), Value::Stream(p)) => entries(&mut d.dict, &p.dict),
         (value, _) => ciphertexts(value),
     }
 }
@@ -2065,8 +2072,11 @@ mod tests {
                     match o.value_mut() {
                         Value::String(s, _) => *s = Str::Bytes(Vec::new()),
                         Value::Array(a) => stack.extend(a.iter_mut()),
-                        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
+                        Value::Dict(d) => {
                             stack.extend(d.entries_mut().map(|entry| &mut entry.value));
+                        }
+                        Value::Stream(s) => {
+                            stack.extend(s.dict.entries_mut().map(|entry| &mut entry.value));
                         }
                         _ => {}
                     }
@@ -2120,17 +2130,19 @@ mod tests {
                 );
             }
         }
+        let entries = |d: &Dict| {
+            for entry in d.entries() {
+                let key_at = entry
+                    .key_at
+                    .expect("a key from the file says where it was written");
+                assert_eq!(file[key_at.start], b'/');
+                placed_as(file, &entry.value, strings);
+            }
+        };
         match o.value() {
             Value::Array(a) => a.iter().for_each(|e| placed_as(file, e, strings)),
-            Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
-                for entry in d.entries() {
-                    let key_at = entry
-                        .key_at
-                        .expect("a key from the file says where it was written");
-                    assert_eq!(file[key_at.start], b'/');
-                    placed_as(file, &entry.value, strings);
-                }
-            }
+            Value::Dict(d) => entries(d),
+            Value::Stream(s) => entries(&s.dict),
             _ => {}
         }
     }

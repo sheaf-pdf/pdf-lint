@@ -82,7 +82,7 @@ use std::fmt::{self, Write as _};
 use std::rc::Rc;
 
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
-use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
+use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::predicate::{
     self, Cx, Fields, Gate, Reference, Since, Structure, TOLERANCE, Trees, Truth,
 };
@@ -898,50 +898,45 @@ impl<'a> Walk<'a> {
             }
         }
         let parents = v.trail.parents();
-        match v.object.value() {
-            Value::Dict(dict) | Value::Stream(Stream { dict, .. }) => {
-                for entry in dict.last_entries() {
-                    let at = At::Key(&entry.key);
-                    let row = v.table.row(at);
-                    let also = also.as_ref().map(|also| (also, also.table.row(at)));
-                    let (raw, written) = (&entry.value, entry_at(entry));
-                    self.entry(&v, at, row, raw, written, made, &parents, also);
+        if let Some(dict) = v.object.as_dict() {
+            for entry in dict.last_entries() {
+                let at = At::Key(&entry.key);
+                let row = v.table.row(at);
+                let also = also.as_ref().map(|also| (also, also.table.row(at)));
+                let (raw, written) = (&entry.value, entry_at(entry));
+                self.entry(&v, at, row, raw, written, made, &parents, also);
+            }
+            if let Some(made) = made {
+                for twice in dict.duplicates() {
+                    let key = String::from_utf8_lossy(&twice.key).into_owned();
+                    let value = format!("{} (its key written again later)", render(&twice.value));
+                    let table = &v.table.name;
+                    self.find(
+                        &v,
+                        made,
+                        Rule::Duplicate,
+                        table,
+                        &key,
+                        value,
+                        entry_at(twice),
+                    );
                 }
-                if let Some(made) = made {
-                    for twice in dict.duplicates() {
-                        let key = String::from_utf8_lossy(&twice.key).into_owned();
-                        let value =
-                            format!("{} (its key written again later)", render(&twice.value));
-                        let table = &v.table.name;
-                        self.find(
-                            &v,
-                            made,
-                            Rule::Duplicate,
-                            table,
-                            &key,
-                            value,
-                            entry_at(twice),
-                        );
-                    }
-                    let first = self.report.findings.len();
-                    self.required_keys(&v, dict, made, &parents);
-                    if let Some(also) = &also {
-                        self.required_keys(also, dict, made, &parents);
-                        self.once(first);
-                    }
+                let first = self.report.findings.len();
+                self.required_keys(&v, dict, made, &parents);
+                if let Some(also) = &also {
+                    self.required_keys(also, dict, made, &parents);
+                    self.once(first);
                 }
             }
-            Value::Array(array) => {
-                let rows = self.array_rows(v.table, array);
-                for (i, (value, row)) in array.iter().zip(rows).enumerate() {
-                    let at = At::Index(i);
-                    self.entry(&v, at, row, value, value.at, made, &parents, None);
-                }
-                if let Some(made) = made {
-                    self.required_elements(&v, array.len(), made, &parents);
-                }
+        } else if let Value::Array(array) = v.object.value() {
+            let rows = self.array_rows(v.table, array);
+            for (i, (value, row)) in array.iter().zip(rows).enumerate() {
+                let at = At::Index(i);
+                self.entry(&v, at, row, value, value.at, made, &parents, None);
             }
-            _ => {}
+            if let Some(made) = made {
+                self.required_elements(&v, array.len(), made, &parents);
+            }
         }
     }
 
@@ -1634,7 +1629,8 @@ impl<'a> Walk<'a> {
     fn score(&self, object: &'a Object, table: &'static Table, parents: &[&'a Object]) -> i32 {
         let rows = &table.rows;
         let (dict, array) = match object.value() {
-            Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => (Some(d), None),
+            Value::Dict(d) => (Some(d), None),
+            Value::Stream(s) => (Some(&s.dict), None),
             Value::Array(a) => (None, Some(a)),
             _ => return 0,
         };
@@ -2350,16 +2346,17 @@ impl<'a> Walk<'a> {
         }
         let mut among = HashMap::new();
         for &(_, _, object) in &left {
-            let entries: Vec<(String, &Object)> = match object.value() {
-                Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => (d.iter())
+            let entries: Vec<(String, &Object)> = if let Some(d) = object.as_dict() {
+                (d.iter())
                     .map(|(k, v)| (String::from_utf8_lossy(k).into_owned(), v))
-                    .collect(),
-                Value::Array(a) => a
-                    .iter()
+                    .collect()
+            } else if let Some(a) = object.as_array() {
+                a.iter()
                     .enumerate()
                     .map(|(i, v)| (i.to_string(), v))
-                    .collect(),
-                _ => Vec::new(),
+                    .collect()
+            } else {
+                Vec::new()
             };
             for (key, value) in entries {
                 each_reference(value, |to| {
@@ -2628,9 +2625,8 @@ pub(crate) fn each_reference(o: &Object, mut f: impl FnMut(ObjectId)) {
             Value::Ref(id) => f(*id),
             _ if depth >= NESTING => {}
             Value::Array(a) => stack.extend(a.iter().map(|e| (e, depth + 1))),
-            Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
-                stack.extend(d.iter().map(|(_, v)| (v, depth + 1)))
-            }
+            Value::Dict(d) => stack.extend(d.iter().map(|(_, v)| (v, depth + 1))),
+            Value::Stream(s) => stack.extend(s.dict.iter().map(|(_, v)| (v, depth + 1))),
             _ => {}
         }
     }

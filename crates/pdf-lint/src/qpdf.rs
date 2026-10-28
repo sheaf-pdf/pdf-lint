@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::bytes::{Decode, Written};
 use crate::json::{self, Json};
-use crate::object::{Data, Dict, Object, ObjectId, Str, Stream, Value};
+use crate::object::{Data, Dict, Object, ObjectId, Str, Value};
 use crate::source::{Document, Trailer, Warning};
 use crate::version::Version;
 
@@ -495,7 +495,7 @@ fn trailer_of(
     match stream {
         Some((id, s)) => Trailer {
             stream: Some(id),
-            object: Object::new(Value::Stream(s)),
+            object: Object::from(s),
             unwritten,
         },
         None => Trailer {
@@ -1001,6 +1001,44 @@ qpdf: operation succeeded with warnings\n";
                 format!("{at}: {:?} and {:?}", a.value(), b.value()),
             ))
         };
+        // Two dictionaries, or two streams' dictionaries.
+        let dicts = |x: &Dict, y: &Dict| {
+            let keys = |d: &Dict| {
+                d.iter()
+                    .map(|(k, _)| k.to_vec())
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            let name = |k: &Vec<u8>| format!("/{}", String::from_utf8_lossy(k));
+            let (only_x, only_y): (Vec<_>, Vec<_>) = (
+                keys(x).difference(&keys(y)).cloned().collect(),
+                keys(y).difference(&keys(x)).cloned().collect(),
+            );
+            if only_y.is_empty()
+                && !only_x.is_empty()
+                && only_x.iter().all(|k| x.get(k).is_some_and(nothing))
+            {
+                return Some((
+                    "keys qpdf leaves out, whose values are null or refer to no object".to_string(),
+                    format!(
+                        "{at}: {}",
+                        only_x.iter().map(name).collect::<Vec<_>>().join(" ")
+                    ),
+                ));
+            }
+            if !only_x.is_empty() || !only_y.is_empty() {
+                let names = |keys: &[Vec<u8>]| keys.iter().map(name).collect::<Vec<_>>().join(" ");
+                let kind = format!(
+                    "keys only the bytes give [{}], only qpdf [{}]",
+                    names(&only_x),
+                    names(&only_y)
+                );
+                return Some((kind, at.to_string()));
+            }
+            (x.last_entries()).find_map(|e| {
+                let name = String::from_utf8_lossy(&e.key);
+                difference(&e.value, y.get(&e.key)?, &format!("{at}/{name}"), nothing)
+            })
+        };
         match (a.value(), b.value()) {
             (Value::String(Str::Bytes(x), _), Value::String(Str::Text(y), _)) => {
                 if &text::decode(x).text == y {
@@ -1030,46 +1068,8 @@ qpdf: operation succeeded with warnings\n";
                 (x.iter().zip(y).enumerate())
                     .find_map(|(i, (x, y))| difference(x, y, &format!("{at}[{i}]"), nothing))
             }
-            (Value::Dict(x), Value::Dict(y))
-            | (Value::Stream(Stream { dict: x, .. }), Value::Stream(Stream { dict: y, .. })) => {
-                let keys = |d: &Dict| {
-                    d.iter()
-                        .map(|(k, _)| k.to_vec())
-                        .collect::<std::collections::BTreeSet<_>>()
-                };
-                let name = |k: &Vec<u8>| format!("/{}", String::from_utf8_lossy(k));
-                let (only_x, only_y): (Vec<_>, Vec<_>) = (
-                    keys(x).difference(&keys(y)).cloned().collect(),
-                    keys(y).difference(&keys(x)).cloned().collect(),
-                );
-                if only_y.is_empty()
-                    && !only_x.is_empty()
-                    && only_x.iter().all(|k| x.get(k).is_some_and(nothing))
-                {
-                    return Some((
-                        "keys qpdf leaves out, whose values are null or refer to no object"
-                            .to_string(),
-                        format!(
-                            "{at}: {}",
-                            only_x.iter().map(name).collect::<Vec<_>>().join(" ")
-                        ),
-                    ));
-                }
-                if !only_x.is_empty() || !only_y.is_empty() {
-                    let names =
-                        |keys: &[Vec<u8>]| keys.iter().map(name).collect::<Vec<_>>().join(" ");
-                    let kind = format!(
-                        "keys only the bytes give [{}], only qpdf [{}]",
-                        names(&only_x),
-                        names(&only_y)
-                    );
-                    return Some((kind, at.to_string()));
-                }
-                (x.last_entries()).find_map(|e| {
-                    let name = String::from_utf8_lossy(&e.key);
-                    difference(&e.value, y.get(&e.key)?, &format!("{at}/{name}"), nothing)
-                })
-            }
+            (Value::Dict(x), Value::Dict(y)) => dicts(x, y),
+            (Value::Stream(x), Value::Stream(y)) => dicts(&x.dict, &y.dict),
             (x, y) => (x != y).then(differ).flatten(),
         }
     }

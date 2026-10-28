@@ -83,8 +83,9 @@ pub enum Value {
     Array(Vec<Object>),
     /// A dictionary.
     Dict(Dict),
-    /// A stream: its dictionary, and its data.
-    Stream(Stream),
+    /// A stream: its dictionary, and its data, boxed, so that a value of
+    /// any other kind isn't a stream's size.
+    Stream(Box<Stream>),
     /// A reference to an indirect object, `n g R`.
     Ref(ObjectId),
 }
@@ -206,10 +207,10 @@ impl Object {
 
     /// A stream of `dict`, whose data isn't placed.
     pub fn stream(dict: Dict) -> Object {
-        Object::new(Value::Stream(Stream {
+        Object::new(Value::Stream(Box::new(Stream {
             dict,
             data: Data::Unplaced,
-        }))
+        })))
     }
 
     /// The same value, written at `at`.
@@ -299,7 +300,8 @@ impl Object {
     /// A dictionary, or a stream's dictionary.
     pub fn as_dict(&self) -> Option<&Dict> {
         match &self.value {
-            Value::Dict(dict) | Value::Stream(Stream { dict, .. }) => Some(dict),
+            Value::Dict(dict) => Some(dict),
+            Value::Stream(stream) => Some(&stream.dict),
             _ => None,
         }
     }
@@ -329,13 +331,13 @@ impl Object {
     /// keeps where it was written, encoded by the filters it was read
     /// with, whatever its `/Filter` and `/DecodeParms` become.
     pub fn as_dict_mut(&mut self) -> Option<&mut Dict> {
-        match &mut self.value {
-            Value::Dict(dict) | Value::Stream(Stream { dict, .. }) => {
-                self.at = None;
-                Some(dict)
-            }
-            _ => None,
-        }
+        let dict = match &mut self.value {
+            Value::Dict(dict) => dict,
+            Value::Stream(stream) => &mut stream.dict,
+            _ => return None,
+        };
+        self.at = None;
+        Some(dict)
     }
 
     /// A stream, to change: an edit, as through [`Object::value_mut`],
@@ -784,7 +786,7 @@ impl From<Dict> for Object {
 
 impl From<Stream> for Object {
     fn from(stream: Stream) -> Object {
-        Object::new(Value::Stream(stream))
+        Object::new(Value::Stream(Box::new(stream)))
     }
 }
 
@@ -1158,7 +1160,10 @@ mod tests {
         assert_eq!(array.as_array().map(<[Object]>::len), Some(2));
         let dict = Object::new(Value::Dict(dict! { "Type" => "Page" }));
         assert!(dict.as_dict().is_some_and(|d| d.has_type(b"Page")));
-        let stream = Object::new(Value::Stream(Stream::new(Dict::new(), b"x".to_vec())));
+        let stream = Object::new(Value::Stream(Box::new(Stream::new(
+            Dict::new(),
+            b"x".to_vec(),
+        ))));
         assert_eq!(
             stream.as_stream().and_then(|s| s.data.bytes()),
             Some(&b"x"[..])
