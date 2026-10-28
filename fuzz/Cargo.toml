@@ -1,6 +1,7 @@
 # The fuzz targets, in cargo-fuzz's layout, outside the workspace: they
 # build on nightly with libFuzzer. Locally, `just fuzz tokenize`,
-# `just fuzz filters`, `just fuzz objects` or `just fuzz check`, or:
+# `just fuzz filters`, `just fuzz objects`, `just fuzz structure` or
+# `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
@@ -11,7 +12,10 @@
 # `pdf_crypt::fuzz::handler`, which a stable unit test runs; `objects`
 # calls `pdf_objects::fuzz::parse`, the parser, and the writer on what it
 # read, which a stable unit test (`random_fragments_keep_every_promise`)
-# runs; `check` calls
+# runs; `structure` calls `pdf_structure::fuzz::read_file`, the reader,
+# which a stable unit test
+# (`mutated_files_read_within_their_bytes_the_same_twice`) runs on mutated
+# files; `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
 # on mutated seeds.
@@ -31,6 +35,7 @@ pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
 pdf-filters = { path = "../crates/pdf-filters" }
 pdf-lint = { path = "../crates/pdf-lint" }
 pdf-objects = { path = "../crates/pdf-objects" }
+pdf-structure = { path = "../crates/pdf-structure" }
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 
 [[bin]]
@@ -57,6 +62,13 @@ bench = false
 [[bin]]
 name = "objects"
 path = "fuzz_targets/objects.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "structure"
+path = "fuzz_targets/structure.rs"
 test = false
 doc = false
 bench = false

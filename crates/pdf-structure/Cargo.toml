@@ -29,6 +29,6 @@ pdf-crypt = { path = "../pdf-crypt", version = "0.1", features = ["writer"] }
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
-# cargo-fuzz builds with --cfg fuzzing, which shrinks the reader's limits
-# and compiles the test writer.
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module and
+# the test writer, and shrinks the reader's limits.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

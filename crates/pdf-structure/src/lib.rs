@@ -29,6 +29,9 @@
 
 pub mod bytes;
 mod filter;
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzz;
 #[cfg(any(test, feature = "fixtures"))]
 mod json;
 // qpdf, the tests' oracle: a second reader, and a decoder to set the

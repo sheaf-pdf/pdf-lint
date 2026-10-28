@@ -46,9 +46,9 @@ the tokenizer, the filters, pdf-crypt, pdf-objects, pdf-structure and
 pdf-arlington.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
-objects` and `just fuzz check` fuzz the tokenizer, the filters,
-pdf-crypt's handler, pdf-objects' parser and writer, and the reader and
-checker, on nightly with
+objects`, `just fuzz structure` and `just fuzz check` fuzz the tokenizer,
+the filters, pdf-crypt's handler, pdf-objects' parser and writer,
+pdf-structure's reader, and the reader and checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
 says for how many seconds (60 by default).
 
