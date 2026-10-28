@@ -28,8 +28,9 @@ pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, V
 pub use pdf_arlington::{COMMIT, predicate};
 // The objects, `dict!` and versions are pdf-objects'.
 pub use pdf_objects::{dict, object, version};
-// The reader, and what it reads a file into, are pdf-structure's.
-pub use pdf_structure::{bytes, source};
+// The reader, and what it reads a file into, are pdf-structure's; the
+// error a stream's data that doesn't decode cleanly gives is pdf-filters'.
+pub use pdf_structure::{bytes, pdf_filters, source};
 pub use predicate::{Cx, FileCx, Gate, Reference, Since, Truth};
 pub use source::{Document, Encryption, Source, Trailer, Update, Warning};
 pub use version::Version;

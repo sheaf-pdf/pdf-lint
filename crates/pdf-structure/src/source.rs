@@ -9,7 +9,7 @@ use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
 use pdf_objects::parse;
 use pdf_objects::version::Version;
 
-use crate::bytes::{Undecoded, Unlisted};
+use crate::bytes::{SourceId, Undecoded, Unindexed};
 
 /// A file, as a reader read it.
 pub trait Source {
@@ -131,22 +131,43 @@ pub struct Document {
 }
 
 /// Where an object was read from, which the bytes reader records when it
-/// first reads it ([`crate::bytes::Reading::record`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// first reads it ([`crate::bytes::Reading::record`]), in the reading it
+/// read it in. Two records are equal when they say the same of where
+/// their objects were read, whichever readings they're of, so that two
+/// readings of one file are equal; [`Record::source`] tells the readings
+/// apart.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Record {
+    /// The reading it was read in, whose file its places are in.
+    pub source: SourceId,
     /// Where it was found.
     pub origin: Origin,
     /// Its bytes: from its `n g obj` to past its `endobj`, or to where it
     /// ends without one; or, for an object in an object stream, its value
     /// in the stream's decoded data.
-    pub extent: Span,
+    pub at: Span,
     /// Whether `endobj` follows it. An object in an object stream has none.
     pub endobj: bool,
     /// A stream's data, as it was read: none for an object that isn't a
     /// stream.
-    pub data: Option<Extent>,
+    pub data: Option<DataExtent>,
 }
+
+impl PartialEq for Record {
+    fn eq(&self, other: &Record) -> bool {
+        let Record {
+            source: _,
+            origin,
+            at,
+            endobj,
+            data,
+        } = self;
+        (origin, at, endobj, data) == (&other.origin, &other.at, &other.endobj, &other.data)
+    }
+}
+
+impl Eq for Record {}
 
 /// Where an object was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,8 +181,8 @@ pub enum Origin {
     /// In object stream `stream`'s decoded data, the `index`th of its
     /// objects (ISO 32000-2, 7.5.7).
     Stream {
-        /// The object stream.
-        stream: ObjectId,
+        /// The object stream's number: its generation is 0 (7.5.8.3).
+        stream: u32,
         /// Which of the stream's objects it is, from 0.
         index: u32,
     },
@@ -170,8 +191,9 @@ pub enum Origin {
 /// Which bytes a stream's data is, and how the reader chose them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Extent {
-    /// Where the data is, as the stream's [`Data::At`](pdf_objects::object::Data::At) has it.
+pub struct DataExtent {
+    /// Where the data is, as the stream's
+    /// [`Data::At`](pdf_objects::object::Data::At) has it.
     pub at: Span,
     /// Whether it's as long as the stream's `/Length` says, which ended at
     /// `endstream`; else it runs up to `endstream`, found by scanning.
@@ -187,18 +209,20 @@ pub struct Extent {
 #[non_exhaustive]
 pub struct Facts {
     /// Where `%PDF-` starts, when the file has it within its first 1024
-    /// bytes.
-    pub header: Option<usize>,
+    /// bytes: what's before it is junk some writers put first.
+    pub header_offset: Option<usize>,
     /// The newest cross-reference section read: where it starts, and how
     /// it's written; none when the file was scanned.
     pub newest: Option<(usize, XrefKind)>,
-    /// How many cross-reference sections were read along `/Prev`: none
-    /// when the file was scanned.
+    /// How many cross-reference sections were read along `/Prev`: 0 when
+    /// the file was scanned.
     pub sections: usize,
     /// Whether a section is a hybrid file's: a table whose trailer gives a
     /// cross-reference stream's offset by `/XRefStm` (ISO 32000-2, 7.5.8.4).
     pub hybrid: bool,
-    /// The largest number of a cross-reference stream read.
+    /// The largest number of a cross-reference stream read: an update
+    /// written after the file numbers its objects above it, as well as
+    /// above the trailer's `/Size`.
     pub max_stream: Option<u32>,
     /// Whether a linearization holds (ISO 32000-2, Annex F): the file's
     /// first object, whole within the 1024 bytes after where `%PDF-`
@@ -228,7 +252,8 @@ pub enum Encryption {
     #[default]
     None,
     /// It is, and a password it was given opened it, the owner's or the
-    /// user's: its strings and object streams are decrypted.
+    /// user's: its strings and object streams are decrypted. A reader
+    /// outside the crate makes it by [`Encryption::opened`].
     #[non_exhaustive]
     Opened {
         /// Whether by the owner's password.
@@ -247,7 +272,8 @@ pub enum Encryption {
     Unsupported(String),
 }
 
-/// A file's newest incremental update.
+/// A file's newest incremental update. A reader outside the crate makes
+/// one by [`Update::new`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Update {
@@ -327,7 +353,7 @@ pub enum Unread {
         /// The object stream's number.
         stream: u32,
         /// Why its header doesn't say.
-        why: Unlisted,
+        why: Unindexed,
     },
     /// Its cross-references put it at `index` in object stream `stream`,
     /// whose header lists fewer objects.
@@ -376,9 +402,40 @@ pub enum Unread {
     Other(String),
 }
 
+impl Encryption {
+    /// [`Encryption::Opened`]: by the owner's password when `owner`, else
+    /// by the user's.
+    pub fn opened(owner: bool) -> Encryption {
+        Encryption::Opened { owner }
+    }
+}
+
+impl Update {
+    /// The update whose cross-reference section lists `objects` in use,
+    /// after the section that starts at `previous`.
+    pub fn new(objects: BTreeSet<ObjectId>, previous: usize) -> Update {
+        Update { objects, previous }
+    }
+}
+
 impl Document {
     /// A document with no objects yet, under `trailer`, its header at
-    /// `version`.
+    /// `version`: where a reader outside the crate starts, filling in what
+    /// it read.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    ///
+    /// use pdf_structure::pdf_objects::{dict, object::Object, version::Version};
+    /// use pdf_structure::{Document, Encryption, Source, Update};
+    ///
+    /// let trailer = dict! { "Root" => Object::reference(1) };
+    /// let mut doc = Document::new(Version::new(1, 7), trailer);
+    /// doc.insert(1, dict! { "Type" => "Catalog" });
+    /// doc.update = Some(Update::new(BTreeSet::from([(1, 0)]), 9));
+    /// doc.encryption = Encryption::opened(false);
+    /// assert!(doc.get((1, 0)).is_ok());
+    /// ```
     pub fn new(version: Version, trailer: Dict) -> Document {
         Document {
             objects: BTreeMap::new(),
@@ -514,7 +571,7 @@ mod tests {
             (
                 Unread::ContainerHeader {
                     stream,
-                    why: Unlisted::Counts,
+                    why: Unindexed::Counts,
                 },
                 "its /N or /First isn't a count".to_string(),
             ),

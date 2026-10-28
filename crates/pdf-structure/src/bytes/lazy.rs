@@ -320,12 +320,40 @@ fn a_reading_is_send_and_sync_over_each_source() {
     shared::<Reading<Vec<u8>>>();
     shared::<Reading<Arc<[u8]>>>();
     shared::<Reading<&Vec<u8>>>();
+    shared::<Reading<Box<[u8]>>>();
+    shared::<Reading<Box<dyn ByteSource>>>();
+    shared::<Reading<Arc<dyn ByteSource>>>();
     #[cfg(any(unix, windows))]
     shared::<Reading<FileBytes>>();
     shared::<Identity>();
     shared::<SourceId>();
     shared::<Error>();
     shared::<Options>();
+}
+
+/// A source behind a box, or shared, or chosen as the program runs
+/// (`dyn ByteSource`), reads as the source does, in memory or by position;
+/// and the source a reading reads is handed back.
+#[test]
+fn a_source_behind_a_box_or_shared_reads_as_it_does() {
+    let file = write::file("1.7", &clean(), root(), Xref::Stream);
+    let doc = read(&file);
+    let shared: Arc<dyn ByteSource> = Arc::new(file.clone());
+    let reading = Reading::open(Arc::clone(&shared), &[], &Options::DEFAULT).unwrap();
+    assert!(reading.source().whole().is_some());
+    let id = reading.id();
+    let read = reading.into_document().unwrap();
+    assert!(read.records.values().all(|record| record.source == id));
+    assert_eq!(read, doc);
+    let reading = Reading::open(Arc::clone(&shared), &[], &Options::DEFAULT).unwrap();
+    assert!(Arc::ptr_eq(&reading.into_source(), &shared));
+    let boxed: Box<dyn ByteSource + '_> = Box::new(crate::fuzz::Counted::new(&file, 7));
+    let reading = Reading::open(boxed, &[], &Options::DEFAULT).unwrap();
+    assert!(reading.source().whole().is_none(), "read by position");
+    assert_eq!(reading.into_document().unwrap(), doc);
+    let boxed: Box<[u8]> = file.clone().into_boxed_slice();
+    let reading = Reading::open(boxed, &[], &Options::DEFAULT).unwrap();
+    assert_eq!(reading.into_document().unwrap(), doc);
 }
 
 /// Each source in memory reads alike, and each reading is a source of
@@ -353,7 +381,15 @@ fn each_source_in_memory_reads_alike() {
         open(&file, &[], &Options::DEFAULT),
         open(&file, &[], &Options::DEFAULT),
     );
-    assert_ne!(one.source(), two.source());
+    assert_ne!(one.id(), two.id());
+    // Each record holds its reading's id, and two readings' records of one
+    // object are equal all the same.
+    one.get((1, 0)).unwrap();
+    two.get((1, 0)).unwrap();
+    let (first, second) = (one.record((1, 0)).unwrap(), two.record((1, 0)).unwrap());
+    assert_eq!((first.source, second.source), (one.id(), two.id()));
+    assert_eq!(first, second);
+    assert_eq!(one.object_unkept((2, 0)).unwrap().1.source, one.id());
     assert_eq!(one.size(), file.len());
     assert_eq!(one.header_version(), doc.header);
     assert_eq!(*one.trailer(), doc.trailer);
@@ -414,11 +450,11 @@ fn an_object_in_an_object_stream_is_read_before_the_others_in_it() {
     assert_eq!(page.at.unwrap().stream, Some((4, 0)));
     let record = reading.record((3, 0)).unwrap();
     let origin = Origin::Stream {
-        stream: (4, 0),
+        stream: 4,
         index: 1,
     };
     assert_eq!(record.origin, origin);
-    assert_eq!(Some(record.extent), page.at);
+    assert_eq!(Some(record.at), page.at);
     assert!(!record.endobj && record.data.is_none());
     assert!(
         reading.record((4, 0)).is_some(),
@@ -502,7 +538,7 @@ fn an_objects_record_says_whether_endobj_follows_it() {
     );
     let doc = read(&file);
     let extent = |n: u32| {
-        let at = doc.records[&(n, 0)].extent;
+        let at = doc.records[&(n, 0)].at;
         &file[at.start..at.end]
     };
     assert!(doc.records[&(1, 0)].endobj);

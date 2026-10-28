@@ -387,22 +387,25 @@ fn each_reason_an_object_stream_doesnt_read_is_said_as_it_was() {
         assert_eq!(undecoded.to_string(), said, "{undecoded:?}");
     }
     let unlisted = [
-        (Unlisted::NotAStream, "it isn't a stream".to_string()),
+        (Unindexed::NotAStream, "it isn't a stream".to_string()),
         (
-            Unlisted::NotAnObjectStream,
+            Unindexed::NotAnObjectStream,
             "it isn't /Type /ObjStm".to_string(),
         ),
         (
-            Unlisted::Counts,
+            Unindexed::Counts,
             "its /N or /First isn't a count".to_string(),
         ),
         (
-            Unlisted::Pairs { pairs, count },
+            Unindexed::Pairs { pairs, count },
             format!("its header has {} of its {count} pairs", pairs),
         ),
-        (Unlisted::Number, "its header numbers no object".to_string()),
         (
-            Unlisted::Offset,
+            Unindexed::Number,
+            "its header numbers no object".to_string(),
+        ),
+        (
+            Unindexed::Offset,
             "its header gives an offset that isn't one".to_string(),
         ),
     ];

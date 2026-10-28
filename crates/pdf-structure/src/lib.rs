@@ -34,7 +34,9 @@
 //! - **A revision before an update** read as the file was then
 //!   ([`bytes::read_from`]).
 //!
-//! The objects are pdf-objects' types, re-exported as [`pdf_objects`].
+//! The objects are pdf-objects' types, re-exported as [`pdf_objects`];
+//! and a stream that doesn't decode cleanly says so in pdf-filters' error,
+//! re-exported as [`pdf_filters`], whose faults say why.
 
 pub mod bytes;
 mod filter;
@@ -57,11 +59,12 @@ pub mod write;
 
 #[cfg(any(unix, windows))]
 pub use bytes::FileBytes;
-pub use bytes::{ByteSource, Identity, Limits, Options, Reading};
+pub use bytes::{ByteSource, Error, Identity, Limits, Options, Reading, SourceId};
+pub use pdf_filters;
 pub use pdf_objects;
 pub use source::{
-    Document, Encryption, Extent, Facts, Origin, Record, Source, Trailer, Unread, Update, Warning,
-    XrefKind,
+    DataExtent, Document, Encryption, Facts, Origin, Record, Source, Trailer, Unread, Update,
+    Warning, XrefKind,
 };
 
 /// The README's examples, run as doctests.

@@ -8,7 +8,7 @@
 //! it finds the objects by scanning the file, and says so. An object that
 //! doesn't read says why ([`Unread`]): it doesn't parse, its offset holds
 //! another, or the object stream it's in doesn't decode ([`Undecoded`],
-//! its filters [`Unfiltered`]) or doesn't say where it is ([`Unlisted`]).
+//! its filters [`Unfiltered`]) or doesn't say where it is ([`Unindexed`]).
 //!
 //! A file is read one way, by a [`Reading`]: opened, its header,
 //! cross-reference sections and trailer read and its security handler
@@ -169,7 +169,8 @@ use pdf_objects::version::Version;
 use crate::filter;
 pub use crate::filter::Unfiltered;
 use crate::source::{
-    Document, Encryption, Extent, Facts, Origin, Record, Trailer, Unread, Update, Warning, XrefKind,
+    DataExtent, Document, Encryption, Facts, Origin, Record, Trailer, Unread, Update, Warning,
+    XrefKind,
 };
 
 mod file;
@@ -250,7 +251,9 @@ pub enum Undecoded {
     /// Its data doesn't decrypt, and nothing of it did.
     #[error("its data doesn't decrypt: {0}")]
     Decrypt(pdf_crypt::Fault),
-    /// Another decoder's words, where one decodes for the reader.
+    /// Another decoder's words, where one decodes for the reader: only the
+    /// tests' qpdf, behind the hidden `fixtures` feature, does. A reading
+    /// never gives it.
     #[error("{0}")]
     Other(String),
 }
@@ -259,7 +262,7 @@ pub enum Undecoded {
 /// 32000-2, 7.5.7), for each object in it ([`Unread::ContainerHeader`]).
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum Unlisted {
+pub enum Unindexed {
     /// The object its number names isn't a stream.
     #[error("it isn't a stream")]
     NotAStream,
@@ -540,6 +543,8 @@ fn metadata<'f, 'o, F: Bytes<'f>>(
 /// kept in its slot, with its warnings, and each object stream it decodes
 /// under its own lock.
 struct Reader {
+    /// Which reading it is, which each record it makes holds.
+    id: SourceId,
     /// What it reads under.
     limits: Limits,
     /// Whether it decodes streams itself, as it does but in the tests that
@@ -853,6 +858,7 @@ impl Reader {
     ) -> Result<Reader, F::Error> {
         let limits = options.limits;
         let mut reader = Reader {
+            id: SourceId::next(),
             limits,
             native,
             listable: limits.entries.unwrap_or_else(|| listable(file.len())),
@@ -912,7 +918,7 @@ impl Reader {
                 cx.warn(None, None, message.to_string());
             }
         }
-        reader.facts.linearized = match reader.facts.header {
+        reader.facts.linearized = match reader.facts.header_offset {
             Some(at) => holds_linearization(file, at, limits.parser)?,
             None => false,
         };
@@ -1743,7 +1749,7 @@ impl Reader {
             Ok(Some((at, version)))
         })?;
         let (at, version) = header.unzip();
-        self.facts.header = at;
+        self.facts.header_offset = at;
         Ok(version.flatten())
     }
 
@@ -1936,7 +1942,7 @@ impl Reader {
         self.entries = entries.into_iter().collect();
         self.offsets = starts.into();
         self.facts = Facts {
-            header: self.facts.header,
+            header_offset: self.facts.header_offset,
             ..facts
         };
         Ok(Ok(trailer))
@@ -2757,13 +2763,11 @@ impl Reader {
             return Err(Unread::Cut { stream });
         }
         // Every value the parser reads is placed.
-        let extent = (object.at).unwrap_or(Span::new(Some((stream, 0)), offset, offset));
+        let at = (object.at).unwrap_or(Span::new(Some((stream, 0)), offset, offset));
         let record = Record {
-            origin: Origin::Stream {
-                stream: (stream, 0),
-                index,
-            },
-            extent,
+            source: self.id,
+            origin: Origin::Stream { stream, index },
+            at,
             endobj: false,
             data: None,
         };
@@ -2843,7 +2847,7 @@ impl Reader {
                         head.scanned()
                     }
                 };
-                let extent = Extent {
+                let extent = DataExtent {
                     at: data,
                     declared: declared.is_some(),
                     indirect_length: (head.dict().get(b"Length"))
@@ -2862,8 +2866,9 @@ impl Reader {
         let start = (w.significant(&mut w.tokenizer(offset))).map_or(offset, |n| w.place(n.start));
         let end = endobj.as_ref().map_or(end, |token| w.place(token.end()));
         let record = Record {
+            source: self.id,
             origin: Origin::File,
-            extent: span(start, end),
+            at: span(start, end),
             endobj: endobj.is_some(),
             data,
         };
@@ -2906,10 +2911,10 @@ impl Reader {
 /// number and where it starts, from the stream's `/First` (ISO 32000-2,
 /// 7.5.7). It's read as far as its `/N` says, and no further than the
 /// data holds pairs of integers.
-fn object_stream_header(object: &Object, data: &[u8]) -> Result<Vec<(u32, usize)>, Unlisted> {
-    let dict = object.as_dict().ok_or(Unlisted::NotAStream)?;
+fn object_stream_header(object: &Object, data: &[u8]) -> Result<Vec<(u32, usize)>, Unindexed> {
+    let dict = object.as_dict().ok_or(Unindexed::NotAStream)?;
     if dict.get(b"Type").and_then(Object::as_name) != Some(b"ObjStm") {
-        return Err(Unlisted::NotAnObjectStream);
+        return Err(Unindexed::NotAnObjectStream);
     }
     let count = dict
         .get(b"N")
@@ -2920,7 +2925,7 @@ fn object_stream_header(object: &Object, data: &[u8]) -> Result<Vec<(u32, usize)
         .and_then(Object::as_integer)
         .and_then(|n| usize::try_from(n).ok());
     let (Some(count), Some(first)) = (count, first) else {
-        return Err(Unlisted::Counts);
+        return Err(Unindexed::Counts);
     };
     let mut t = Tokenizer::new(data.get(..first.min(data.len())).unwrap_or_default());
     let mut header = Vec::new();
@@ -2931,16 +2936,16 @@ fn object_stream_header(object: &Object, data: &[u8]) -> Result<Vec<(u32, usize)
                 .and_then(|token| token.integer().ok())
         };
         let (Some(number), Some(offset)) = (integer(&mut t), integer(&mut t)) else {
-            return Err(Unlisted::Pairs {
+            return Err(Unindexed::Pairs {
                 pairs: header.len(),
                 count,
             });
         };
-        let number = u32::try_from(number).map_err(|_| Unlisted::Number)?;
+        let number = u32::try_from(number).map_err(|_| Unindexed::Number)?;
         let offset = usize::try_from(offset)
             .ok()
             .and_then(|offset| offset.checked_add(first))
-            .ok_or(Unlisted::Offset)?;
+            .ok_or(Unindexed::Offset)?;
         header.push((number, offset));
     }
     Ok(header)

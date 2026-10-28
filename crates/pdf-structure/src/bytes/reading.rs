@@ -19,11 +19,14 @@ use crate::source::{Document, Encryption, Facts, Record, Trailer, Unread, Update
 
 /// A file's bytes, which a [`Reading`] reads. Bytes in memory give all of
 /// them ([`ByteSource::whole`]): the slices, vectors and shared slices of
-/// bytes do, and so does a reference to a source. A source that doesn't
-/// hold them in memory is read by position, a window at a time from where
-/// a read starts, at first [`ByteSource::first_window`] bytes, twice as
-/// many each time what's read runs to the window's end, where more of the
-/// file could change it: [`FileBytes`](super::FileBytes) reads a file so.
+/// bytes do. A reference to a source, a box of one and one shared
+/// ([`Arc`]) read as the source does, so that a source can be shared with
+/// a reading, or chosen as the program runs (`Arc<dyn ByteSource>`). A
+/// source that doesn't hold them in memory is read by position, a window
+/// at a time from where a read starts, at first
+/// [`ByteSource::first_window`] bytes, twice as many each time what's read
+/// runs to the window's end, where more of the file could change it:
+/// [`FileBytes`](super::FileBytes) reads a file so.
 pub trait ByteSource: Send + Sync {
     /// How many bytes it has.
     fn len(&self) -> usize;
@@ -88,47 +91,41 @@ impl ByteSource for Vec<u8> {
     }
 }
 
-impl ByteSource for Arc<[u8]> {
-    fn len(&self) -> usize {
-        <[u8]>::len(self)
-    }
+/// A source behind a pointer, `$t<S>`, reads as `S` does.
+macro_rules! forward {
+    ($($t:ty),*) => {$(
+        impl<S: ByteSource + ?Sized> ByteSource for $t {
+            fn len(&self) -> usize {
+                (**self).len()
+            }
 
-    fn whole(&self) -> Option<&[u8]> {
-        Some(self)
-    }
+            fn whole(&self) -> Option<&[u8]> {
+                (**self).whole()
+            }
 
-    fn read_at(&self, range: Range<usize>) -> io::Result<Cow<'_, [u8]>> {
-        within(self, range)
-    }
+            fn read_at(&self, range: Range<usize>) -> io::Result<Cow<'_, [u8]>> {
+                (**self).read_at(range)
+            }
+
+            fn first_window(&self) -> usize {
+                (**self).first_window()
+            }
+        }
+    )*};
 }
 
-impl<S: ByteSource + ?Sized> ByteSource for &S {
-    fn len(&self) -> usize {
-        (**self).len()
-    }
+forward!(&S, Box<S>, Arc<S>);
 
-    fn whole(&self) -> Option<&[u8]> {
-        (**self).whole()
-    }
-
-    fn read_at(&self, range: Range<usize>) -> io::Result<Cow<'_, [u8]>> {
-        (**self).read_at(range)
-    }
-
-    fn first_window(&self) -> usize {
-        (**self).first_window()
-    }
-}
-
-/// Which reading a [`Record`] is of: each reading has its own, unique in
-/// the process, so a span is known for the file it's in. Two readings of
-/// one file have two.
+/// Which reading a [`Record`] is of ([`Record::source`]): each reading has
+/// its own, unique in the process, which each record it makes holds, so
+/// that the places a record gives are known for the file they're in. Two
+/// readings of one file have two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceId(u64);
 
 impl SourceId {
     /// One no reading has had.
-    fn next() -> SourceId {
+    pub(super) fn next() -> SourceId {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         SourceId(NEXT.fetch_add(1, Ordering::Relaxed))
     }
@@ -272,7 +269,6 @@ fn outside(span: &Span) -> String {
 pub struct Reading<S> {
     source: S,
     pub(super) reader: Reader,
-    id: SourceId,
     /// Whether an object read by position is first given a window to a
     /// byte past the next listed offset: always, but where the tests and
     /// the fuzz target read without, so that a small first window reaches
@@ -283,7 +279,7 @@ pub struct Reading<S> {
 impl<S> fmt::Debug for Reading<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Reading")
-            .field("source", &self.id)
+            .field("id", &self.reader.id)
             .field("trailer", &self.reader.trailer)
             .field("encryption", &self.reader.encryption)
             .finish_non_exhaustive()
@@ -305,7 +301,6 @@ impl<'a> Reading<&'a [u8]> {
         Reading {
             reader,
             source: file,
-            id: SourceId::next(),
             bound: true,
         }
     }
@@ -351,7 +346,6 @@ impl<S: ByteSource> Reading<S> {
         Ok(Reading {
             source,
             reader,
-            id: SourceId::next(),
             bound,
         })
     }
@@ -666,9 +660,20 @@ impl<S: ByteSource> Reading<S> {
         })
     }
 
-    /// Which reading this is, which its records are of.
-    pub fn source(&self) -> SourceId {
-        self.id
+    /// Which reading this is, which each of its records holds.
+    pub fn id(&self) -> SourceId {
+        self.reader.id
+    }
+
+    /// The source it reads: to ask it, say, whether its file has changed
+    /// ([`FileBytes::unchanged`](super::FileBytes::unchanged)).
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
+    /// The source it read, the reading dropped.
+    pub fn into_source(self) -> S {
+        self.source
     }
 
     /// Every object its cross-references list read, those not read yet as
@@ -677,27 +682,21 @@ impl<S: ByteSource> Reading<S> {
     /// only when the source doesn't give the bytes asked of it
     /// ([`Error::Io`]).
     pub fn into_document(self) -> Result<Document, Error> {
-        Ok(self.read_whole(None)?.document)
-    }
-
-    /// The reading read whole, with `decoder` asked for what the reader
-    /// doesn't decode or decrypt itself.
-    pub(crate) fn read_whole(self, decoder: Option<&dyn Decode>) -> Result<Whole, Error> {
         let Reading {
             source,
             reader,
             bound,
-            ..
         } = self;
-        match source.whole() {
+        let whole = match source.whole() {
             Some(file) => {
-                let Ok(whole) = reader.whole(InMemory(file), decoder);
-                Ok(whole)
+                let Ok(whole) = reader.whole(InMemory(file), None);
+                whole
             }
             None => {
                 let file = ByPosition::new(&source, bound);
-                reader.whole(file, decoder).map_err(Error::Io)
+                reader.whole(file, None).map_err(Error::Io)?
             }
-        }
+        };
+        Ok(whole.document)
     }
 }
