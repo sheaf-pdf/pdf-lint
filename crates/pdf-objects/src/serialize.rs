@@ -830,6 +830,289 @@ mod tests {
         );
     }
 
+    /// Random numbers, by xorshift from a seed, as the fuzz tests have them.
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, below: usize) -> usize {
+            (self.next() % below as u64) as usize
+        }
+
+        /// At most `most` bytes of any value, half of them those a name or
+        /// a string writes otherwise than as itself.
+        fn bytes(&mut self, most: usize) -> Vec<u8> {
+            const SPECIAL: &[u8] = b"\\()\r\n\t #/%<>[]{}\x00\x7f\x80\xff";
+            (0..self.below(most + 1))
+                .map(|_| match self.below(2) {
+                    0 => SPECIAL[self.below(SPECIAL.len())],
+                    _ => self.next() as u8,
+                })
+                .collect()
+        }
+
+        fn integer(&mut self) -> i64 {
+            match self.below(4) {
+                0 => [0, 1, -1, i64::MAX, i64::MIN, i64::MIN + 1][self.below(6)],
+                1 => self.below(2000) as i64 - 1000,
+                _ => self.next() as i64,
+            }
+        }
+
+        /// Any finite real: Annex C's bounds and either side of them, ones
+        /// past i64's range, decimals, and any bits that are finite.
+        fn real(&mut self) -> f64 {
+            let bounds = [3.4e38f64, 1.175e-38];
+            match self.below(4) {
+                0 => {
+                    let x = bounds[self.below(2)];
+                    let x = match self.below(3) {
+                        0 => f64::from_bits(x.to_bits() - 1),
+                        1 => x,
+                        _ => f64::from_bits(x.to_bits() + 1),
+                    };
+                    [x, -x][self.below(2)]
+                }
+                1 => [
+                    0.0,
+                    -0.0,
+                    f64::MAX,
+                    f64::MIN,
+                    f64::MIN_POSITIVE,
+                    5e-324,
+                    1e19,
+                    0.1,
+                ][self.below(8)],
+                2 => self.integer() as f64 / 10f64.powi(self.below(8) as i32),
+                _ => loop {
+                    let x = f64::from_bits(self.next());
+                    if x.is_finite() {
+                        break x;
+                    }
+                },
+            }
+        }
+
+        /// A value of no more than `*budget` values, of which it takes
+        /// its own, nested no more than `depth` deeper.
+        fn value(&mut self, budget: &mut usize, depth: usize) -> Object {
+            *budget = budget.saturating_sub(1);
+            let kinds = if *budget > 0 && depth > 0 { 9 } else { 7 };
+            match self.below(kinds) {
+                0 => match self.below(3) {
+                    0 => Object::null(),
+                    n => Object::from(n == 1),
+                },
+                1 => Object::from(self.integer()),
+                2 => Object::from(self.real()),
+                3 => Object::new(Value::Name(self.bytes(12))),
+                4 => {
+                    let form = [None, Some(Form::Literal), Some(Form::Hex)][self.below(3)];
+                    Object::new(Value::String(Str::Bytes(self.bytes(24)), form))
+                }
+                5 => {
+                    let n = [0, 1, u32::MAX, self.next() as u32][self.below(4)];
+                    let g = [0, 1, u16::MAX, self.next() as u16][self.below(4)];
+                    Object::from((n, g))
+                }
+                6 => Object::from(Vec::new()),
+                7 => Object::from(self.array(budget, depth - 1)),
+                _ => Object::from(self.dict(budget, depth - 1)),
+            }
+        }
+
+        /// An array of values no more than `depth` deeper.
+        fn array(&mut self, budget: &mut usize, depth: usize) -> Vec<Object> {
+            (0..self.below(8))
+                .map(|_| self.value(budget, depth))
+                .collect()
+        }
+
+        /// A dictionary of values no more than `depth` deeper, now and then
+        /// with a key written twice, or `/Length`.
+        fn dict(&mut self, budget: &mut usize, depth: usize) -> Dict {
+            let mut d = Dict::new();
+            for _ in 0..self.below(8) {
+                let key = match (self.below(6), d.entries().last()) {
+                    (0, Some(entry)) => entry.key.clone(),
+                    (1, _) => b"Length".to_vec(),
+                    _ => self.bytes(8),
+                };
+                d.push(key, self.value(budget, depth));
+            }
+            d
+        }
+
+        /// A value nested as deep as a parser reads it, `depth` deep
+        /// already, each level an array or a dictionary, beside a few
+        /// values more.
+        fn deep(&mut self, depth: usize) -> Object {
+            let mut inner = match self.below(3) {
+                0 => Object::from(Vec::new()),
+                1 => Object::from(Dict::new()),
+                _ => self.value(&mut 1, 0),
+            };
+            for _ in depth..Limits::DEFAULT.nesting {
+                let beside = self.value(&mut 1, 0);
+                inner = match self.below(2) {
+                    0 => Object::from(vec![beside, inner]),
+                    _ => Object::from(dict! { "A" => beside, "B" => inner }),
+                };
+            }
+            inner
+        }
+
+        /// A stream of up to 64 bytes, `endstream` among them now and then,
+        /// its dictionary's values as deep as a parser reads them when
+        /// `deep`.
+        fn stream(&mut self, budget: &mut usize, deep: bool) -> Object {
+            let mut data = self.bytes(64);
+            if self.below(4) == 0 {
+                data.extend_from_slice(b"\nendstream\n");
+            }
+            let mut dict = self.dict(budget, 3);
+            if deep {
+                dict.push("Deep", self.deep(1));
+            }
+            Object::from(Stream {
+                dict,
+                data: Data::Bytes(data),
+            })
+        }
+
+        /// A value of a few hundred values at most, one in a hundred
+        /// nested as deep as a parser reads it; one in eight a stream,
+        /// three a dictionary and two an array.
+        fn object(&mut self) -> Object {
+            let deep = self.below(100) == 0;
+            let most = self.below(300);
+            let mut budget = 1 + self.below(1 + most);
+            match (self.below(8), deep) {
+                (0, _) => self.stream(&mut budget, deep),
+                (_, true) => self.deep(0),
+                (1..=3, _) => Object::from(self.dict(&mut budget, 5)),
+                (4 | 5, _) => Object::from(self.array(&mut budget, 5)),
+                _ => self.value(&mut budget, 6),
+            }
+        }
+
+        fn id(&mut self) -> ObjectId {
+            (self.next() as u32, self.next() as u16)
+        }
+    }
+
+    /// Any value the writer writes reads back as the same value as it was
+    /// written, places aside: a string with no form as a literal one, a real
+    /// as the writer clamps it, and a stream's `/Length` its data's; and
+    /// written again, it's the same bytes. Values, and streams, as indirect
+    /// objects, which is how a stream is read; values as direct objects too.
+    #[test]
+    fn values_written_read_back_as_written_and_write_the_same_bytes_again() {
+        let mut random = Random(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..20_000 {
+            let object = random.object();
+            let id = random.id();
+            fuzz::round_trip(&object, Some(id), &[], None, Limits::DEFAULT);
+            if object.as_stream().is_none() {
+                fuzz::round_trip(&object, None, &[], None, Limits::DEFAULT);
+            }
+        }
+    }
+
+    /// How many values `o` holds that hold none: its numbers, names and
+    /// the like, and its empty arrays and dictionaries; a stream's are its
+    /// dictionary's, but in a `/Length`, whose value isn't written.
+    fn leaves(o: &Object) -> usize {
+        match o.value() {
+            Value::Array(a) if !a.is_empty() => a.iter().map(leaves).sum(),
+            Value::Dict(d) if !d.is_empty() => d.entries().iter().map(|e| leaves(&e.value)).sum(),
+            Value::Stream(s) => (s.dict.entries().iter())
+                .filter(|e| e.key != b"Length")
+                .map(|e| leaves(&e.value))
+                .sum(),
+            _ => 1,
+        }
+    }
+
+    /// `o` with `string` in place of its leaf `*n`, counting from 0 as
+    /// [`leaves`] counts them.
+    fn plant(o: &mut Object, n: &mut usize, string: &Value) {
+        match o.value_mut() {
+            Value::Array(a) if !a.is_empty() => a.iter_mut().for_each(|e| plant(e, n, string)),
+            Value::Dict(d) if !d.is_empty() => {
+                d.entries_mut().for_each(|e| plant(&mut e.value, n, string));
+            }
+            Value::Stream(s) => (s.dict.entries_mut())
+                .filter(|e| e.key != b"Length")
+                .for_each(|e| plant(&mut e.value, n, string)),
+            leaf => {
+                if *n == 0 {
+                    *leaf = string.clone();
+                }
+                // Past 0, it never comes to 0 again.
+                *n = n.wrapping_sub(1);
+            }
+        }
+    }
+
+    /// `object` with `string` in place of one of its leaves, chosen by
+    /// `random`, or in the dictionary of a stream that has none.
+    fn planted(random: &mut Random, object: &Object, string: Str) -> Object {
+        let mut object = object.clone();
+        let string = Value::String(string, [None, Some(Form::Hex)][random.below(2)]);
+        match leaves(&object) {
+            0 => match object.as_stream_mut() {
+                Some(s) => s.dict.push("S", Object::new(string)),
+                None => unreachable!("only a stream holds no leaf"),
+            },
+            n => plant(&mut object, &mut random.below(n), &string),
+        }
+        object
+    }
+
+    /// Random values, each holding a string read as text in place of one
+    /// of its values, are refused, and nothing is written: through
+    /// `write`, `indirect`, and for a stream, `indirect_stream`.
+    #[test]
+    fn values_holding_text_are_refused_wherever_it_is() {
+        refused_wherever(Str::Text("text".to_string()), |id| Error::Text { id });
+    }
+
+    /// Random values, each holding ciphertext in place of one of its
+    /// values, are refused, and nothing is written: through `write`,
+    /// `indirect`, and for a stream, `indirect_stream`.
+    #[test]
+    fn values_holding_ciphertext_are_refused_wherever_it_is() {
+        let ciphertext = Str::Encrypted(b"\x8f\x02".to_vec());
+        refused_wherever(ciphertext, |id| Error::Encrypted { id });
+    }
+
+    /// Random values with `string` planted in each, refused as `error`
+    /// says.
+    fn refused_wherever(string: Str, error: fn(Option<ObjectId>) -> Error) {
+        let mut random = Random(0x2545_f491_4f6c_dd1d);
+        for _ in 0..2_000 {
+            let object = random.object();
+            let object = planted(&mut random, &object, string.clone());
+            let id = random.id();
+            let mut out = b"%PDF-1.7\n".to_vec();
+            assert_eq!(write(&mut out, &object), Err(error(None)), "{object:?}");
+            assert_eq!(indirect(&mut out, id, &object), Err(error(Some(id))));
+            if let Some(s) = object.as_stream() {
+                let data = s.data.bytes().unwrap();
+                let apart = indirect_stream(&mut out, id, &s.dict, data);
+                assert_eq!(apart, Err(error(Some(id))));
+            }
+            assert_eq!(out, b"%PDF-1.7\n", "nothing written");
+        }
+    }
+
     /// The writer writes values nested as deep as a parser reads them under
     /// the default limits, which reads them back, and refuses one deeper,
     /// as the parser does.

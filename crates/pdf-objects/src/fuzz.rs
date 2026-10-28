@@ -1,11 +1,12 @@
 //! What the fuzz target checks, which a unit test checks too: the promises
-//! the parser makes, on any input. It's compiled only for tests and under
-//! cargo-fuzz's `--cfg fuzzing`.
+//! the parser makes, on any input, and the writer's on what it read. It's
+//! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use pdf_tokenizer::{Kind, Tokenizer};
 
-use crate::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Value};
-use crate::parse::{Body, Error, Fault, Parser, Sink};
+use crate::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value};
+use crate::parse::{Body, Error, Fault, Limits, Parser, Sink};
+use crate::serialize;
 
 /// What a sink was told: each fault, where it is and what it says.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -32,6 +33,8 @@ struct How {
     length: Length,
     /// Whether to give a stream data that isn't its own too.
     astray: bool,
+    /// The limits read under: the default, or small ones.
+    limits: Limits,
 }
 
 /// A stream's `/Length`: as given, or the scanned extent's and this more
@@ -46,11 +49,19 @@ enum Length {
 /// input after its first five bytes, as they choose: from an offset in it
 /// (past its end, now and then), in an object stream's data or the
 /// file's, its strings ciphertext or not; a stream's data by a length they
-/// give, when it holds, else up to `endstream`. Read twice, and through
-/// `()`, it's the same each time; every span and fault is inside the input
-/// and inside what holds it; strings are ciphertext exactly when asked,
-/// and each has the form its first byte writes; a value or a header that
-/// fails leaves the parser where it was.
+/// give, when it holds, else up to `endstream`; under the default limits,
+/// or small ones the two bytes after them give (nesting below 8, values
+/// below 64). Read twice, and through `()`, it's the same each time; every
+/// span and fault is inside the input and inside what holds it; strings
+/// are ciphertext exactly when asked, and each has the form its first byte
+/// writes; a value, a header or a body that fails leaves the parser where
+/// it was; and under small limits, a read that reaches them fails saying
+/// so, and one that doesn't is the read without them. What's read, the
+/// writer writes, and it reads back as the same value and writes as the
+/// same bytes again ([`round_trip`]), but for a ciphertext read's object
+/// holding a string: the writer refuses it whole, writing nothing, and
+/// writes it with its strings taken as their bytes, which read back as
+/// plain.
 /// Panics on a broken promise.
 pub fn parse(data: &[u8]) {
     let (how, input) = chosen(data);
@@ -60,6 +71,9 @@ pub fn parse(data: &[u8]) {
     assert_eq!(first, read(input, how, &mut again), "the same twice");
     assert_eq!(kept, again, "said the same twice");
     assert_eq!(first, read(input, how, &mut ()), "the same through ()");
+    if how.limits != Limits::DEFAULT {
+        limited(input, how, &first);
+    }
     let (result, offset) = first;
     assert!(offset <= input.len().max(how.offset), "{offset}");
     let inside = |at: Span| at.stream == how.stream && at.start <= at.end && at.end <= input.len();
@@ -73,6 +87,7 @@ pub fn parse(data: &[u8]) {
                 assert!(within(at, whole), "a fault in its object: {at:?}");
             }
             placed(input, &object, whole, how);
+            rewrite(input, how, &object);
         }
         Err(error) => {
             assert!(!error.to_string().is_empty());
@@ -82,21 +97,36 @@ pub fn parse(data: &[u8]) {
                     "a value that fails leaves the parser where it was"
                 );
             }
-            if let Error::Header { at } = error {
-                assert!(how.indirect);
-                assert_eq!(at, how.offset, "the header looked for where it was given");
-                assert_eq!(
-                    offset, how.offset,
-                    "a header that fails leaves the parser where it was"
-                );
+            match error {
+                Error::Header { at } => {
+                    assert!(how.indirect);
+                    assert_eq!(at, how.offset, "the header looked for where it was given");
+                    assert_eq!(
+                        offset, how.offset,
+                        "a header that fails leaves the parser where it was"
+                    );
+                }
+                // The stream's own, after its body.
+                Error::Endstream { .. } | Error::Extent { .. } => {}
+                _ if how.indirect => {
+                    let mut parser = Parser::at(input, how.offset);
+                    assert!(parser.header().is_ok());
+                    assert_eq!(
+                        offset,
+                        parser.offset(),
+                        "a body that fails leaves the parser after the header"
+                    );
+                }
+                _ => {}
             }
         }
     }
 }
 
-/// How `data`'s first five bytes say to read the rest, and the rest.
+/// How `data`'s first five bytes say to read the rest, and the rest: with
+/// flag 0x20 and two bytes after the five, small limits, from those two.
 fn chosen(data: &[u8]) -> (How, &[u8]) {
-    let [a, b, flags, c, d, input @ ..] = data else {
+    let [a, b, flags, c, d, rest @ ..] = data else {
         let how = How {
             offset: 0,
             stream: None,
@@ -104,8 +134,19 @@ fn chosen(data: &[u8]) -> (How, &[u8]) {
             indirect: false,
             length: Length::Given(0),
             astray: false,
+            limits: Limits::DEFAULT,
         };
         return (how, data);
+    };
+    let (limits, input) = match rest {
+        [nesting, values, input @ ..] if flags & 0x20 != 0 => {
+            let limits = Limits {
+                nesting: usize::from(nesting % 8),
+                values: usize::from(values % 64),
+            };
+            (limits, input)
+        }
+        _ => (Limits::DEFAULT, rest),
     };
     let seed = usize::from(u16::from_le_bytes([*a, *b]));
     let offset = match flags & 0x40 {
@@ -122,14 +163,35 @@ fn chosen(data: &[u8]) -> (How, &[u8]) {
             _ => Length::Scanned(i16::from_le_bytes([*c, *d])),
         },
         astray: flags & 0x10 != 0,
+        limits,
     };
     (how, input)
+}
+
+/// Checks `small`, what reading `input` as `how` said under its small
+/// limits: a read that reached them fails saying which, and one that
+/// didn't is what the default limits read.
+fn limited(input: &[u8], how: How, small: &(Result<Object, Error>, usize)) {
+    match small.0 {
+        Err(Error::Nested { limit }) => assert_eq!(limit, how.limits.nesting),
+        Err(Error::Values { limit }) => assert_eq!(limit, how.limits.values),
+        _ => {
+            let how = How {
+                limits: Limits::DEFAULT,
+                ..how
+            };
+            let full = read(input, how, &mut ());
+            assert_eq!(*small, full, "read as without limits it doesn't reach");
+        }
+    }
 }
 
 /// What reading `input` as `how` says: the object or the error, and where
 /// the parser ended.
 fn read<'a>(input: &'a [u8], how: How, sink: &mut impl Sink<'a>) -> (Result<Object, Error>, usize) {
-    let mut parser = Parser::at(input, how.offset).ciphertext(how.ciphertext);
+    let mut parser = (Parser::at(input, how.offset))
+        .ciphertext(how.ciphertext)
+        .limits(how.limits);
     if let Some(stream) = how.stream {
         parser = parser.in_stream(stream);
     }
@@ -207,6 +269,212 @@ fn unplace_entries(d: &mut Dict, data: &[u8]) {
     }
 }
 
+/// Checks that `object`, read from `input` as `how` says, is written, and
+/// reads back the same way under the same limits ([`round_trip`]). A
+/// ciphertext read's object holding a string is refused whole, nothing
+/// written, then written with its strings taken as their bytes, and read
+/// back as plain.
+fn rewrite(input: &[u8], how: How, object: &Object) {
+    let id = match how.indirect {
+        true => Some(Parser::at(input, how.offset).header().expect("its header")),
+        false => None,
+    };
+    let mut object = object.clone();
+    if how.ciphertext {
+        let mut out = b"%PDF-".to_vec();
+        let written = write(&mut out, &object, id, input);
+        match plain(&mut object) {
+            0 => assert!(written.is_ok(), "{written:?}"),
+            _ => {
+                assert_eq!(written, Err(serialize::Error::Encrypted { id }));
+                assert_eq!(out, b"%PDF-", "nothing written");
+            }
+        }
+    }
+    round_trip(&object, id, input, how.stream, how.limits);
+}
+
+/// Checks that the writer writes `object`, as indirect object `id` when
+/// there's one, else as a value, a stream's data from `data` when it's
+/// where it was written there; that what it wrote reads back, read as a
+/// parser under `limits` reads it, in object stream `stream`'s data when
+/// there's one, as the same value as the writer writes it
+/// ([`as_written`]), places aside, the parser saying only that a name
+/// holds NUL, `#00`, for each name that does; and that the value read back
+/// is written as the same bytes again. What it wrote.
+///
+/// A stream's dictionary without a `/Length` is written with one, two
+/// values more, one deeper, which the limits read back take in.
+/// Panics otherwise, and when the writer refuses `object`.
+pub fn round_trip(
+    object: &Object,
+    id: Option<ObjectId>,
+    data: &[u8],
+    stream: Option<ObjectId>,
+    limits: Limits,
+) -> Vec<u8> {
+    let mut written = Vec::new();
+    if let Err(e) = write(&mut written, object, id, data) {
+        panic!("the writer refused {object:?}: {e}");
+    }
+    let mut want = object.clone();
+    unplace(&mut want, data);
+    as_written(&mut want);
+    let mut limits = limits;
+    if object.as_stream().is_some_and(|s| !s.dict.has(b"Length")) {
+        limits.values = limits.values.saturating_add(2);
+        limits.nesting = limits.nesting.max(1);
+    }
+    let mut parser = Parser::at(&written, 0).limits(limits);
+    if let Some(stream) = stream {
+        parser = parser.in_stream(stream);
+    }
+    let text = String::from_utf8_lossy(&written);
+    let mut nul = Nul::default();
+    // What's read back, and what follows it.
+    let (back, after) = match id {
+        Some(id) => {
+            assert_eq!(parser.header(), Ok(id));
+            let back = parser.body(id, &mut nul).and_then(|body| match body {
+                Body::Object(object) => Ok(object),
+                Body::Stream(head) => {
+                    let length = head.dict().get(b"Length").and_then(Object::as_integer);
+                    let length = usize::try_from(length.expect("an integer /Length")).unwrap();
+                    let data = head.declared(length).expect("endstream after its /Length");
+                    parser.stream(head, data, &mut nul)
+                }
+            });
+            (back, &b"\nendobj\n"[..])
+        }
+        None => (parser.value(&mut nul), &b""[..]),
+    };
+    let mut back = back.unwrap_or_else(|e| panic!("{e}, reading back {text:?}"));
+    assert!(written[parser.offset()..] == *after, "{text:?}");
+    unplace(&mut back, &written);
+    assert_eq!(back, want, "read back from {text:?}");
+    assert_eq!(nul.0, nul_names(&want), "a fault but for a name's NUL");
+    let mut again = Vec::new();
+    write(&mut again, &back, id, &[]).expect("what's read back writes");
+    assert_eq!(again, written, "written again, the same bytes");
+    written
+}
+
+/// `object` written to `out`, as [`round_trip`] writes it: a stream whose
+/// data is where it was written in `data` through
+/// [`serialize::indirect_stream`].
+fn write(
+    out: &mut Vec<u8>,
+    object: &Object,
+    id: Option<ObjectId>,
+    data: &[u8],
+) -> Result<(), serialize::Error> {
+    match (id, object.value()) {
+        (
+            Some(id),
+            Value::Stream(Stream {
+                dict,
+                data: Data::At(at),
+            }),
+        ) => serialize::indirect_stream(out, id, dict, &data[at.start..at.end]).map(drop),
+        (Some(id), _) => serialize::indirect(out, id, object).map(drop),
+        (None, _) => serialize::write(out, object),
+    }
+}
+
+/// What the parser reads back of what the writer wrote of `o`, its places
+/// aside: a string with no form as a literal one; a real as the writer
+/// clamps it, to Annex C's magnitudes, its largest 3.4e38, and 0 under its
+/// smallest, 1.175e-38; and a stream's `/Length` its data's length, in
+/// each of its entries, or after the others. A stream's data must be
+/// [`Data::Bytes`], as [`unplace`] makes it.
+pub fn as_written(o: &mut Object) {
+    match o.value_mut() {
+        Value::Real(x) => {
+            if x.abs() > 3.4e38 {
+                *x = 3.4e38f64.copysign(*x);
+            } else if x.abs() < 1.175e-38 {
+                *x = 0.0;
+            }
+        }
+        Value::String(_, form) => {
+            form.get_or_insert(Form::Literal);
+        }
+        Value::Array(a) => a.iter_mut().for_each(as_written),
+        Value::Dict(d) => d.entries_mut().for_each(|e| as_written(&mut e.value)),
+        Value::Stream(s) => {
+            let length = s.data.bytes().expect("a stream's data in memory").len() as i64;
+            let mut has = false;
+            for entry in s.dict.entries_mut() {
+                match entry.key == b"Length" {
+                    true => {
+                        entry.value = Object::from(length);
+                        has = true;
+                    }
+                    false => as_written(&mut entry.value),
+                }
+            }
+            if !has {
+                s.dict.push("Length", length);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Takes the ciphertext in `o` as its bytes, each string keeping its form
+/// and its place, as a reader that decrypted it would hold it: how many
+/// strings `o` holds.
+fn plain(o: &mut Object) -> usize {
+    match o.as_written_mut() {
+        Value::String(s, _) => {
+            if let Str::Encrypted(bytes) = s {
+                *s = Str::Bytes(std::mem::take(bytes));
+            }
+            1
+        }
+        Value::Array(a) => a.iter_mut().map(plain).sum(),
+        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
+            d.entries_mut().map(|e| plain(&mut e.value)).sum()
+        }
+        _ => 0,
+    }
+}
+
+/// A sink for what the parser says of the writer's bytes, which can only
+/// be that a name holds NUL, written `#00`: how many times.
+#[derive(Default)]
+struct Nul(usize);
+
+impl Sink<'_> for Nul {
+    fn fault(&mut self, at: Span, fault: Fault<'_>) {
+        let nul = matches!(
+            fault,
+            Fault::Name {
+                stray: false,
+                nul: true,
+                ..
+            }
+        );
+        assert!(nul, "{fault} at {at:?}, in what the writer wrote");
+        self.0 += 1;
+    }
+}
+
+/// How many names in `o` hold NUL, its keys among them.
+fn nul_names(o: &Object) -> usize {
+    let entries = |d: &Dict| -> usize {
+        (d.entries().iter())
+            .map(|e| usize::from(e.key.contains(&0)) + nul_names(&e.value))
+            .sum()
+    };
+    match o.value() {
+        Value::Name(name) => usize::from(name.contains(&0)),
+        Value::Array(a) => a.iter().map(nul_names).sum(),
+        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => entries(d),
+        _ => 0,
+    }
+}
+
 /// Whether `inner` is inside `outer`.
 fn within(inner: Span, outer: Span) -> bool {
     inner.stream == outer.stream && outer.start <= inner.start && inner.end <= outer.end
@@ -262,7 +530,8 @@ mod tests {
     use super::parse;
 
     /// Inputs made of the fragments of objects, after five bytes that
-    /// choose how they're read, run through the fuzz target's body.
+    /// choose how they're read (and two that give small limits, when they
+    /// choose those), run through the fuzz target's body.
     #[test]
     fn random_fragments_keep_every_promise() {
         const FRAGMENTS: &[&[u8]] = &[
@@ -328,6 +597,14 @@ mod tests {
             }
             if random(8) != 0 {
                 input[2] &= !0x40;
+            }
+            // A quarter under small limits, from the two bytes after the
+            // five.
+            if random(2) == 0 {
+                input[2] &= !0x20;
+            }
+            if input[2] & 0x20 != 0 {
+                input.extend_from_slice(&[random(256) as u8, random(256) as u8]);
             }
             // Half the indirect objects begin as one does, and half of those
             // as a stream; half the lengths from the scanned extent are its.

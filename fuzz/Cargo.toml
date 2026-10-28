@@ -9,8 +9,9 @@
 # `pdf_filters::fuzz::filters`, which two stable unit tests run on random
 # and damaged inputs; `crypt` calls
 # `pdf_crypt::fuzz::handler`, which a stable unit test runs; `objects`
-# calls `pdf_objects::fuzz::parse`, the parser, which a stable unit test
-# (`random_fragments_keep_every_promise`) runs; `check` calls
+# calls `pdf_objects::fuzz::parse`, the parser, and the writer on what it
+# read, which a stable unit test (`random_fragments_keep_every_promise`)
+# runs; `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
 # on mutated seeds.

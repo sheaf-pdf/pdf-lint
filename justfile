@@ -124,8 +124,9 @@ arlington-msrv:
 
 # Fuzz a target for a while, on nightly with cargo-fuzz: `tokenize`, the
 # tokenizer; `filters`, the filters; `crypt`, pdf-crypt's security
-# handler; `objects`, pdf-objects' parser; or `check`, the reader and the
-# checker, which begins from the seeds pdf-lint's fuzz module makes.
+# handler; `objects`, pdf-objects' parser, and its writer on what it
+# read; or `check`, the reader and the checker, which begins from the
+# seeds pdf-lint's fuzz module makes.
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.
 fuzz target="tokenize" seconds="60":
