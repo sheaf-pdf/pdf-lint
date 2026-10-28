@@ -388,10 +388,7 @@ fn indirect(json: &Json) -> Result<Object, String> {
     let dict = (json.get("stream").and_then(|s| s.get("dict")))
         .ok_or("an object of qpdf's JSON that's neither a value nor a stream")?;
     match object(dict)?.into_value() {
-        Value::Dict(dict) => Ok(Object::new(Value::Stream(Stream {
-            dict,
-            data: Data::Unplaced,
-        }))),
+        Value::Dict(dict) => Ok(Object::stream(dict)),
         _ => Err("a stream of qpdf's JSON whose dictionary isn't one".to_string()),
     }
 }

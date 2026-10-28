@@ -2014,7 +2014,7 @@ fn offset_of(o: &Object) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::dict;
-    use crate::object::{Data, Form};
+    use crate::object::Form;
     use crate::source::Source;
     use crate::write::{self, Body, Xref};
 
@@ -2025,10 +2025,7 @@ mod tests {
             Value::String(s, _) => Value::String(s.clone(), None),
             Value::Array(a) => Value::Array(a.iter().map(plain).collect()),
             Value::Dict(d) => Value::Dict(plain_dict(d)),
-            Value::Stream(s) => Value::Stream(Stream {
-                dict: plain_dict(&s.dict),
-                data: Data::Unplaced,
-            }),
+            Value::Stream(s) => Object::stream(plain_dict(&s.dict)).into_value(),
             other => other.clone(),
         })
     }

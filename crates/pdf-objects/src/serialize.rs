@@ -8,7 +8,8 @@
 //! - **Names and strings** byte by byte, a string in its [`Form`], or
 //!   literal when it has none.
 //! - **Dictionaries** with every entry, in order, a key written twice
-//!   included.
+//!   included, though ISO 32000-2 has a dictionary hold one entry for a
+//!   key (7.3.7): [`Dict::remove_duplicates`] leaves each key's last.
 //! - **Streams** with their data as it is, and its length as their
 //!   `/Length`, in place of each `/Length` entry or after the others. A
 //!   stream inside another value is written there, though no reader reads

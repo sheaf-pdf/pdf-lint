@@ -124,8 +124,11 @@ pub struct Entry {
     pub value: Object,
 }
 
-/// A stream: its dictionary, and its data.
+/// A stream: its dictionary, and its data. Outside this crate it's made
+/// by [`Stream::new`], from its bytes, or [`Object::stream`], or from
+/// `Stream::default()` with its fields set, as more may come.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct Stream {
     /// Its dictionary.
     pub dict: Dict,
@@ -523,6 +526,20 @@ impl Dict {
         self.entries.retain(|entry| entry.key != key);
         Some(value)
     }
+
+    /// Removes the entries a later one with the same key overrides
+    /// ([`Dict::duplicates`]), the others kept in order: each key's last
+    /// is left, as ISO 32000-2 has a dictionary hold one entry for a key
+    /// (7.3.7).
+    pub fn remove_duplicates(&mut self) {
+        let shadowed = Shadowed::of(&self.entries);
+        let mut index = 0;
+        self.entries.retain(|_| {
+            let kept = !shadowed.contains(index);
+            index += 1;
+            kept
+        });
+    }
 }
 
 /// How many entries a dictionary may have for its lookups to find the ones
@@ -783,6 +800,48 @@ mod tests {
         d.set("C", 5);
         assert_eq!(d.len(), 3);
         assert!(!d.has(b"D"));
+    }
+
+    /// A dictionary without its overridden entries keeps each key's last,
+    /// in order, and is written with each key once; with few entries or
+    /// many.
+    #[test]
+    fn remove_duplicates_keeps_each_keys_last_entry() {
+        let mut d = dict! { "A" => 1, "B" => 2, "A" => 3, "C" => 4, "B" => 5 };
+        d.remove_duplicates();
+        let entries: Vec<_> = (d.entries().iter())
+            .map(|e| (e.key.as_slice(), e.value.as_integer()))
+            .collect();
+        let last = [(&b"A"[..], Some(3)), (b"C", Some(4)), (b"B", Some(5))];
+        assert_eq!(entries, last);
+        let mut out = Vec::new();
+        crate::serialize::write(&mut out, &Object::from(d)).unwrap();
+        assert_eq!(out, b"<</A 3/C 4/B 5>>");
+        let mut many: Dict = (0..40).map(|i| (format!("K{}", i % 20), i)).collect();
+        many.remove_duplicates();
+        assert_eq!((many.entries().len(), many.len()), (20, 20));
+        assert_eq!(many.duplicates().count(), 0);
+        assert_eq!(many.get(b"K0").and_then(Object::as_integer), Some(20));
+        assert_eq!(many.entries()[0].key, b"K0");
+    }
+
+    /// The objects, and what reads and writes them, can be shared across
+    /// threads.
+    #[test]
+    fn the_types_are_send_and_sync() {
+        fn shared<T: Send + Sync>() {}
+        shared::<Object>();
+        shared::<Value>();
+        shared::<Str>();
+        shared::<Dict>();
+        shared::<Entry>();
+        shared::<Iter<'_>>();
+        shared::<Stream>();
+        shared::<Data>();
+        shared::<Span>();
+        shared::<crate::parse::Limits>();
+        shared::<crate::parse::Error>();
+        shared::<crate::serialize::Error>();
     }
 
     #[test]
