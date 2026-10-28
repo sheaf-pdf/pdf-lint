@@ -1165,11 +1165,12 @@ fn an_options_value_is_the_next_word_whatever_it_begins_with() {
     );
 
     // A hold file named `-`, which is a file there, not standard input,
-    // and one named as an option is: each holds the page as built, where
-    // its key the model doesn't list is a finding.
+    // and ones named as an option is, or as `-h` and `-V` together aren't:
+    // each holds the page as built, where its key the model doesn't list
+    // is a finding.
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Contnets 1 >>";
     written(&dir, "held.pdf", &file(&[CATALOG, PAGES, page]));
-    for name in ["-", "--built"] {
+    for name in ["-", "--built", "-hV"] {
         written(&dir, name, b"3 0 built\n");
         let out = (pdf_lint().current_dir(dir.path()))
             .args(["--hold", name, "held.pdf"])
@@ -1343,12 +1344,24 @@ fn each_argument_error_exits_2_as_clap_says_it() {
         )
     };
     let ours = |why: &str| format!("error: {why}\n\n{USAGE}{MORE}");
+    let alone = |word: &str| {
+        format!(
+            "error: unexpected argument '{word}' found: -h and -V each stand alone\n\n\
+             {USAGE}{MORE}"
+        )
+    };
     let jobs = "not a number above 0";
     let pdf_version = "not a PDF version, 1.0 to 1.7 or 2.0";
     let mut cases: Vec<(Vec<&str>, String)> = vec![
         (vec!["--bogus", "a.pdf"], unknown("--bogus")),
         (vec!["-x", "a.pdf"], unknown("-x")),
         (vec!["--bogus", "--version"], unknown("--bogus")),
+        // `-h` or `-V` with more after it in the same word, which clap
+        // would take for the flag, `-hold` for the help.
+        (vec!["-hold", "h", "a.pdf"], alone("-hold")),
+        (vec!["a.pdf", "-Vx"], alone("-Vx")),
+        (vec!["-hV"], alone("-hV")),
+        (vec!["-V=x", "a.pdf"], alone("-V=x")),
         (
             vec!["--jobs", "0", "a.pdf"],
             refused("0", "--jobs <N>", jobs),

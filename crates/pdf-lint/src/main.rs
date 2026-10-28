@@ -2,6 +2,7 @@
 //! Arlington PDF Model, each finding printed with the bytes it's at.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::{self, Read as _, Write as _};
 use std::num::NonZero;
@@ -358,9 +359,24 @@ fn main() -> ExitCode {
 
 /// The command line's arguments, as clap reads them and then as only this
 /// can check them: an error is clap's, as are `--help` and `--version`,
-/// which stop the parse where they're met.
+/// which stop the parse where they're met. But `-h` or `-V` with more after
+/// it in the same word, which clap takes for the flag, is no option.
 fn args() -> Result<Args, clap::Error> {
-    let cli = Cli::try_parse()?;
+    let cli = match Cli::try_parse() {
+        Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
+            return Err(match joined(&Cli::command(), std::env::args_os()) {
+                Some(word) => Cli::command().error(
+                    ErrorKind::UnknownArgument,
+                    format!(
+                        "unexpected argument '{}' found: -h and -V each stand alone",
+                        word.to_string_lossy()
+                    ),
+                ),
+                None => e,
+            });
+        }
+        parsed => parsed?,
+    };
     let refused = |reason: &str| Cli::command().error(ErrorKind::ArgumentConflict, reason);
     let stdins = (cli.files.iter()).filter(|path| *path == Path::new("-"));
     if stdins.count() > 1 {
@@ -421,6 +437,39 @@ fn args() -> Result<Args, clap::Error> {
         jobs: cli.jobs,
         json: cli.format.unwrap_or(false),
     })
+}
+
+/// The word that stopped clap at `--help` or `--version`, when it's `-h` or
+/// `-V` with more after it, as `-hold` is: clap acts on the flag as soon as
+/// it reads it, before what follows in the same word, and so would print
+/// the help and exit 0. As `command` reads `words` (the program's name,
+/// then its arguments), it's the first word that's neither an option's
+/// value nor a file, as any other short word is an error before it.
+fn joined(command: &clap::Command, words: impl IntoIterator<Item = OsString>) -> Option<OsString> {
+    let mut words = words.into_iter().skip(1);
+    while let Some(word) = words.next() {
+        let bytes = word.as_encoded_bytes();
+        if bytes == b"--" {
+            return None;
+        }
+        if let Some(long) = bytes.strip_prefix(b"--") {
+            if long == b"help" || long == b"version" {
+                return None;
+            }
+            // Its value is the next word, whatever it begins with, but
+            // after an `=` it's this one's.
+            let valued = command.get_arguments().any(|arg| {
+                arg.get_long().is_some_and(|name| name.as_bytes() == long)
+                    && arg.get_action().takes_values()
+            });
+            if valued {
+                words.next();
+            }
+        } else if bytes.len() > 1 && bytes[0] == b'-' {
+            return (bytes.len() > 2).then_some(word);
+        }
+    }
+    None
 }
 
 /// What `--version` prints: pdf-lint's version, then the embedded model's
