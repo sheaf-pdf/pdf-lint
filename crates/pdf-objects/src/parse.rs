@@ -11,8 +11,22 @@
 //! the caller resolves ([`StreamHead::declared`]) and up to `endstream`
 //! ([`StreamHead::scanned`]); and [`Parser::stream`] the rest of the
 //! stream, after the extent the caller chose.
+//!
+//! A reader that reads a file by position gives the parser a window of it
+//! ([`Parser::window`]): the bytes it has read from an offset on, where
+//! they start in the file, and whether they end it. Spans, offsets and
+//! errors are then the file's. In a window that ends before the file
+//! does, a call whose read reaches the window's end is [`Error::Short`],
+//! as more of the file could change what it reads (pdf-tokenizer's "A
+//! slice of a file"), and the caller reads again with more; read so, it
+//! reads as it would with the whole file. A call that comes back short
+//! may have told its sink of faults that more of the file shows aren't,
+//! an `endobj` cut short among them, and the call that reads tells it
+//! again of those that are: a caller reading in windows keeps a call's
+//! faults only once it doesn't come back short.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 
 use pdf_tokenizer::decode::How;
 use pdf_tokenizer::{Kind, Token, Tokenizer};
@@ -141,9 +155,11 @@ fn name_fault(stray: bool, nul: bool) -> &'static str {
     }
 }
 
-/// What stops the parser reading a value. Each offset it names is in the
-/// data the parser reads, but [`Error::Header`]'s, as the parser was given
-/// it, and [`Error::Extent`]'s, as its caller gave them.
+/// What stops the parser reading a value. Each offset it names counts
+/// where its spans do, in the file, a window's base and all
+/// ([`Parser::window`]), or in an object stream's data: [`Error::Header`]'s
+/// where the parser was, as it was given, and [`Error::Extent`]'s as its
+/// caller gave them.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -256,6 +272,16 @@ pub enum Error {
         /// Where the data given ends.
         end: usize,
     },
+    /// The read reached the end of a window that isn't the file's last
+    /// ([`Parser::window`]), where more of the file could change what it
+    /// reads: a token reaching it, none before it where one was looked
+    /// for, or a stream's data running to it. The caller reads again with
+    /// more.
+    #[error("the data ends at byte {at}, where more of the file could change what's read")]
+    Short {
+        /// Where the window ends, in the file.
+        at: usize,
+    },
 }
 
 /// Bytes, lossily as text, for [`Error`]'s text.
@@ -263,19 +289,24 @@ fn lossy(bytes: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(bytes)
 }
 
-/// Reads values, or an indirect object, from data, a file's bytes or an
-/// object stream's decoded data, from an offset on. Its strings are read
-/// as their bytes, or as ciphertext ([`Parser::ciphertext`]), and its
-/// spans are in the file, or in an object stream's data
-/// ([`Parser::in_stream`]). It reads under [`Limits`]
-/// ([`Parser::limits`]). A call that fails leaves the parser where it
-/// was, though it has said the faults it read past before the error.
+/// Reads values, or an indirect object, from data, a file's bytes, a
+/// window of them ([`Parser::window`]), or an object stream's decoded
+/// data, from an offset on. Its strings are read as their bytes, or as
+/// ciphertext ([`Parser::ciphertext`]), and its spans are in the file, or
+/// in an object stream's data ([`Parser::in_stream`]). It reads under
+/// [`Limits`] ([`Parser::limits`]). A call that fails leaves the parser
+/// where it was, though it has said the faults it read past before the
+/// error.
 #[derive(Debug, Clone)]
 pub struct Parser<'a> {
     data: &'a [u8],
-    /// Where it reads next: as it was given until a call reads, past the
-    /// data's end too.
+    /// Where it reads next, in `data`: as it was given until a call reads,
+    /// past the data's end too.
     offset: usize,
+    /// Where `data` starts in the file, which its spans count from.
+    base: usize,
+    /// Whether `data` ends the file.
+    last: bool,
     /// The object stream whose decoded data `data` is, for its spans.
     stream: Option<ObjectId>,
     /// Whether its strings are read as ciphertext.
@@ -287,15 +318,37 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     /// A parser of `data`, reading from `offset`. Past the data's end
     /// there's nothing to read, and the offset is kept as it's given, which
-    /// [`Error::Header`] names: a cross-reference can point there.
+    /// [`Error::Header`] names: a cross-reference can point there. The data
+    /// is read whole, as a window that starts the file and ends it.
     pub fn at(data: &'a [u8], offset: usize) -> Parser<'a> {
         Parser {
             data,
             offset,
+            base: 0,
+            last: true,
             stream: None,
             ciphertext: false,
             limits: Limits::DEFAULT,
         }
+    }
+
+    /// The parser, its data being a window of a file: bytes `base..base +
+    /// data.len()`, which its spans, [`offset`](Self::offset) and every
+    /// [`Error`]'s place then count in. The offset it was made at counts
+    /// in the data, so `Parser::at(window, i).window(base, last)` reads
+    /// from byte `base + i` of the file. `last` when the window ends the
+    /// file.
+    ///
+    /// In a window that isn't the file's last, a call that reads a token
+    /// reaching the window's end, or finds none where it looks for one, is
+    /// [`Error::Short`], whatever else it would have said, since more of
+    /// the file could change what it reads; so is [`Parser::stream`] when
+    /// its data, or the extents the caller was given
+    /// ([`StreamHead::declared`], [`StreamHead::scanned`]), ran to it. Read
+    /// again in a window with more, or the file's last, a call reads as it
+    /// would with the whole file.
+    pub fn window(self, base: usize, last: bool) -> Parser<'a> {
+        Parser { base, last, ..self }
     }
 
     /// The parser, its data being object stream `stream`'s decoded data,
@@ -321,17 +374,20 @@ impl<'a> Parser<'a> {
         Parser { limits, ..self }
     }
 
-    /// Where it reads next: past what it has read, or where it was made
-    /// at, as given, when it has read nothing. A call that fails leaves it
-    /// where it was.
+    /// Where it reads next, counted as its spans are, from a window's base:
+    /// past what it has read, or where it was made at, as given, when it
+    /// has read nothing. A call that fails leaves it where it was.
     pub fn offset(&self) -> usize {
-        self.offset
+        self.place(self.offset)
     }
 
     /// The next value.
     pub fn value(&mut self, sink: &mut (impl Sink<'a> + ?Sized)) -> Result<Object, Error> {
+        let mut call = Call::of(self.data);
         let mut t = Tokenizer::at(self.data, self.offset);
-        let value = self.read(&mut t, sink, 0, &mut 0)?;
+        let value = self.read(&mut t, &mut call, sink, 0);
+        self.settled(&call)?;
+        let value = value?;
         self.offset = t.offset();
         Ok(value)
     }
@@ -341,16 +397,21 @@ impl<'a> Parser<'a> {
     /// was given when it has read nothing.
     pub fn header(&mut self) -> Result<ObjectId, Error> {
         let offset = self.offset;
+        let mut call = Call::of(self.data);
         let mut t = Tokenizer::at(self.data, offset);
-        let header = |t: &mut Tokenizer<'a>| {
-            let n = significant(t).filter(|n| n.kind == Kind::Integer)?;
-            let g = significant(t).filter(|g| g.kind == Kind::Integer)?;
-            let obj = significant(t)?;
+        let mut header = |t: &mut Tokenizer<'a>| {
+            let n = call.significant(t).filter(|n| n.kind == Kind::Integer)?;
+            let g = call.significant(t).filter(|g| g.kind == Kind::Integer)?;
+            let obj = call.significant(t)?;
             let number = u32::try_from(n.integer().ok()?).ok()?;
             let generation = u16::try_from(g.integer().ok()?).ok()?;
             is_keyword(Some(&obj), b"obj").then_some((number, generation))
         };
-        let id = header(&mut t).ok_or(Error::Header { at: offset })?;
+        let id = header(&mut t).ok_or(Error::Header {
+            at: self.place(offset),
+        });
+        self.settled(&call)?;
+        let id = id?;
         self.offset = t.offset();
         Ok(id)
     }
@@ -364,8 +425,11 @@ impl<'a> Parser<'a> {
         id: ObjectId,
         sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Result<Body<'a>, Error> {
+        let mut call = Call::of(self.data);
         let mut t = Tokenizer::at(self.data, self.offset);
-        let body = self.read_body(&mut t, id, sink)?;
+        let body = self.read_body(&mut t, &mut call, id, sink);
+        self.settled(&call)?;
+        let body = body?;
         self.offset = t.offset();
         Ok(body)
     }
@@ -381,6 +445,45 @@ impl<'a> Parser<'a> {
         data: Span,
         sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Result<Object, Error> {
+        let mut call = Call::of(self.data);
+        call.touched = head.touched.get();
+        let stream = self.read_stream(head, data, &mut call, sink);
+        self.settled(&call)?;
+        let (object, offset) = stream?;
+        self.offset = offset;
+        Ok(object)
+    }
+
+    /// Offset `at` of the data, counted where spans are: from the window's
+    /// base, in the file.
+    fn place(&self, at: usize) -> usize {
+        self.base.saturating_add(at)
+    }
+
+    /// Bytes `start..end` of the data, as a span.
+    fn span(&self, start: usize, end: usize) -> Span {
+        Span::new(self.stream, self.place(start), self.place(end))
+    }
+
+    /// [`Error::Short`] when a call reached the end of a window that isn't
+    /// the file's last, whatever it read.
+    fn settled(&self, call: &Call) -> Result<(), Error> {
+        match call.touched && !self.last {
+            true => Err(Error::Short {
+                at: self.place(self.data.len()),
+            }),
+            false => Ok(()),
+        }
+    }
+
+    /// [`Parser::stream`], to where it leaves the parser.
+    fn read_stream(
+        &self,
+        head: StreamHead<'a>,
+        data: Span,
+        call: &mut Call,
+        sink: &mut (impl Sink<'a> + ?Sized),
+    ) -> Result<(Object, usize), Error> {
         let StreamHead {
             id,
             dict,
@@ -388,51 +491,55 @@ impl<'a> Parser<'a> {
             start,
             ..
         } = head;
-        let within = data.stream == self.stream
-            && data.start == start
-            && data.start <= data.end
-            && data.end <= self.data.len();
-        if !within {
-            return Err(Error::Extent {
-                id,
-                start: data.start,
-                end: data.end,
-            });
+        let start = self.place(start);
+        let extent = Error::Extent {
+            id,
+            start: data.start,
+            end: data.end,
+        };
+        if data.stream != self.stream || data.start != start || data.start > data.end {
+            return Err(extent);
         }
-        let mut t = Tokenizer::at(self.data, data.end);
-        let end = significant(&mut t).filter(|token| is_keyword(Some(token), b"endstream"));
-        let end = end.ok_or(Error::Endstream { id })?;
-        self.offset = t.offset();
+        // Past the window's end, more of the file could hold it.
+        let end = data.end - self.base;
+        if end > self.data.len() {
+            call.touched = true;
+            return Err(extent);
+        }
+        let mut t = Tokenizer::at(self.data, end);
+        let endstream = call.significant(&mut t);
+        let endstream = (endstream.filter(|token| is_keyword(Some(token), b"endstream")))
+            .ok_or(Error::Endstream { id })?;
         let from = dict_at.map_or(start, |at| at.start);
+        let at = Span::new(self.stream, from, self.place(endstream.end()));
         let object = Object::from(Stream {
             dict,
             data: Data::At(data),
         })
-        .at(self.span(from, end.end()));
-        self.endobj(&t, id, &object, sink);
-        Ok(object)
-    }
-
-    fn span(&self, start: usize, end: usize) -> Span {
-        Span::new(self.stream, start, end)
+        .at(at);
+        self.endobj(&t, call, id, &object, sink);
+        Ok((object, t.offset()))
     }
 
     /// [`Parser::body`], from `t`.
     fn read_body(
         &self,
         t: &mut Tokenizer<'a>,
+        call: &mut Call,
         id: ObjectId,
         sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Result<Body<'a>, Error> {
-        let value = self.read(t, sink, 0, &mut 0)?;
+        let value = self.read(t, call, sink, 0)?;
         let at = value.at;
         let mut after = t.clone();
-        let next = significant(&mut after);
+        let next = call.significant(&mut after);
         let object = match (value.into_value(), next) {
             (Value::Dict(dict), Some(keyword)) if is_keyword(Some(&keyword), b"stream") => {
                 *t = after;
                 let keyword = self.span(keyword.start, keyword.end());
-                match t.eol() {
+                let eol = t.eol();
+                call.note(t);
+                match eol {
                     None => sink.fault(keyword, Fault::NoEol),
                     Some(eol) if eol.bytes == b"\r" => {
                         sink.fault(self.span(eol.start, eol.end()), Fault::LoneCr);
@@ -446,7 +553,9 @@ impl<'a> Parser<'a> {
                     keyword,
                     start: t.offset(),
                     data: self.data,
+                    base: self.base,
                     stream: self.stream,
+                    touched: Cell::new(false),
                 }));
             }
             (other, _) => {
@@ -455,7 +564,7 @@ impl<'a> Parser<'a> {
                 object
             }
         };
-        self.endobj(t, id, &object, sink);
+        self.endobj(t, call, id, &object, sink);
         Ok(Body::Object(object))
     }
 
@@ -464,11 +573,12 @@ impl<'a> Parser<'a> {
     fn endobj(
         &self,
         t: &Tokenizer<'a>,
+        call: &mut Call,
         id: ObjectId,
         object: &Object,
         sink: &mut (impl Sink<'a> + ?Sized),
     ) {
-        if !is_keyword(significant(&mut t.clone()).as_ref(), b"endobj") {
+        if !is_keyword(call.significant(&mut t.clone()).as_ref(), b"endobj") {
             // Every value the parser reads is placed.
             if let Some(at) = object.at {
                 sink.fault(at, Fault::NoEndobj { id });
@@ -476,39 +586,42 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// The value `t` goes on with, nested `depth` deep, after `values`
-    /// values the call has read.
+    /// The value `t` goes on with, nested `depth` deep, in `call`.
     fn read(
         &self,
         t: &mut Tokenizer<'a>,
+        call: &mut Call,
         sink: &mut (impl Sink<'a> + ?Sized),
         depth: usize,
-        values: &mut usize,
     ) -> Result<Object, Error> {
-        let token = significant(t).ok_or(Error::End)?;
+        let token = call.significant(t).ok_or(Error::End)?;
         // Only a value reaches a limit: a token that can't start one is
         // the error it is, below, as it is without them.
         if starts_value(&token) {
             if depth > self.limits.nesting {
                 return Err(Error::Nested {
                     limit: self.limits.nesting,
-                    at: token.start,
+                    at: self.place(token.start),
                 });
             }
-            self.count(values, token.start)?;
+            self.count(call, token.start)?;
         }
         let at = self.span(token.start, token.end());
         let value = match token.kind {
             Kind::Integer => {
                 let mut look = t.clone();
-                let generation = significant(&mut look).filter(|g| g.kind == Kind::Integer);
-                let r = significant(&mut look).filter(|r| is_keyword(Some(r), b"R"));
+                let generation = call
+                    .significant(&mut look)
+                    .filter(|g| g.kind == Kind::Integer);
+                let r = call
+                    .significant(&mut look)
+                    .filter(|r| is_keyword(Some(r), b"R"));
                 if let (Some(g), Some(r)) = (generation, r) {
                     let number = token.integer().ok().and_then(|n| u32::try_from(n).ok());
                     let generation = g.integer().ok().and_then(|g| u16::try_from(g).ok());
                     let (Some(number), Some(generation)) = (number, generation) else {
                         return Err(Error::Reference {
-                            at: token.start,
+                            at: self.place(token.start),
                             number: token.bytes.to_vec(),
                             generation: g.bytes.to_vec(),
                         });
@@ -554,42 +667,54 @@ impl<'a> Parser<'a> {
                 Value::String(s, Some(form))
             }
             Kind::String { closed: false } | Kind::HexString { closed: false } => {
-                return Err(Error::String { at: token.start });
+                return Err(Error::String {
+                    at: self.place(token.start),
+                });
             }
             Kind::ArrayOpen => {
                 let mut array = Vec::new();
                 loop {
                     let mut look = t.clone();
-                    match significant(&mut look) {
+                    match call.significant(&mut look) {
                         Some(close) if close.kind == Kind::ArrayClose => {
                             *t = look;
                             let at = self.span(token.start, close.end());
                             return Ok(Object::new(Value::Array(array)).at(at));
                         }
-                        Some(_) => array.push(self.read(t, sink, depth + 1, values)?),
-                        None => return Err(Error::Array { at: token.start }),
+                        Some(_) => array.push(self.read(t, call, sink, depth + 1)?),
+                        None => {
+                            return Err(Error::Array {
+                                at: self.place(token.start),
+                            });
+                        }
                     }
                 }
             }
             Kind::DictOpen => {
                 let mut dict = Dict::new();
                 loop {
-                    let key = significant(t).ok_or(Error::Dict { at: token.start })?;
+                    let key = call.significant(t).ok_or(Error::Dict {
+                        at: self.place(token.start),
+                    })?;
                     match key.kind {
                         Kind::DictClose => {
                             let at = self.span(token.start, key.end());
                             return Ok(Object::new(Value::Dict(dict)).at(at));
                         }
                         Kind::Name => {
-                            self.count(values, key.start)?;
-                            let value = self.read(t, sink, depth + 1, values)?;
+                            self.count(call, key.start)?;
+                            let value = self.read(t, call, sink, depth + 1)?;
                             dict.push_entry(Entry {
                                 key: self.name(&key, sink),
                                 key_at: Some(self.span(key.start, key.end())),
                                 value,
                             });
                         }
-                        _ => return Err(Error::Key { at: key.start }),
+                        _ => {
+                            return Err(Error::Key {
+                                at: self.place(key.start),
+                            });
+                        }
                     }
                 }
             }
@@ -599,14 +724,14 @@ impl<'a> Parser<'a> {
                 b"null" => Value::Null,
                 word => {
                     return Err(Error::Keyword {
-                        at: token.start,
+                        at: self.place(token.start),
                         word: word[..word.len().min(32)].to_vec(),
                     });
                 }
             },
             _ => {
                 return Err(Error::Token {
-                    at: token.start,
+                    at: self.place(token.start),
                     bytes: token.bytes.to_vec(),
                 });
             }
@@ -614,14 +739,14 @@ impl<'a> Parser<'a> {
         Ok(Object::new(value).at(at))
     }
 
-    /// One more value read in the call, starting at `at`, `values`
-    /// counting them: an error past the limit.
-    fn count(&self, values: &mut usize, at: usize) -> Result<(), Error> {
-        *values += 1;
-        match *values > self.limits.values {
+    /// One more value read in `call`, starting at offset `at` of the data:
+    /// an error past the limit.
+    fn count(&self, call: &mut Call, at: usize) -> Result<(), Error> {
+        call.values += 1;
+        match call.values > self.limits.values {
             true => Err(Error::Values {
                 limit: self.limits.values,
-                at,
+                at: self.place(at),
             }),
             false => Ok(()),
         }
@@ -659,16 +784,26 @@ pub enum Body<'a> {
 
 /// A stream read to where its data starts: its dictionary, and both
 /// extents its data may have, neither resolved nor chosen.
+///
+/// It's one parse's, borrowing the data the parser reads, and it remembers
+/// when an extent ran to the end of a window ([`Parser::window`]) for
+/// [`Parser::stream`], in a [`Cell`]: so it's `Send`, but not `Sync`.
 #[derive(Debug, Clone)]
 pub struct StreamHead<'a> {
     id: ObjectId,
     dict: Dict,
     dict_at: Option<Span>,
     keyword: Span,
+    /// Where its data starts, in `data`.
     start: usize,
     /// What the parser reads, for the extents.
     data: &'a [u8],
+    /// Where `data` starts in the file.
+    base: usize,
     stream: Option<ObjectId>,
+    /// Whether an extent ran to `data`'s end, where more of the file could
+    /// change it.
+    touched: Cell<bool>,
 }
 
 impl StreamHead<'_> {
@@ -682,30 +817,79 @@ impl StreamHead<'_> {
         self.keyword
     }
 
-    /// Where its data starts: after `stream` and its end of line.
+    /// Where its data starts: after `stream` and its end of line, counted
+    /// as its spans are.
     pub fn start(&self) -> usize {
-        self.start
+        self.base.saturating_add(self.start)
     }
 
     /// Its data by a `/Length` of `length`: that many bytes from where it
     /// starts, when `endstream` follows them, past white-space; else none.
     pub fn declared(&self, length: usize) -> Option<Span> {
-        let end = (self.start.checked_add(length)).filter(|&end| end <= self.data.len())?;
-        let after = significant(&mut Tokenizer::at(self.data, end));
-        is_keyword(after.as_ref(), b"endstream").then(|| Span::new(self.stream, self.start, end))
+        let end = self.start.checked_add(length)?;
+        if end > self.data.len() {
+            self.touched.set(true);
+            return None;
+        }
+        let mut call = Call::of(self.data);
+        let after = call.significant(&mut Tokenizer::at(self.data, end));
+        if call.touched {
+            self.touched.set(true);
+        }
+        is_keyword(after.as_ref(), b"endstream").then(|| self.span(self.start, end))
     }
 
     /// Its data up to the first `endstream`, found by scanning, wherever
     /// it is; or to the end of what the parser reads, when none comes.
     pub fn scanned(&self) -> Span {
         let data = Tokenizer::at(self.data, self.start).data_until(b"endstream");
-        Span::new(self.stream, data.start, data.end())
+        if data.end() == self.data.len() {
+            self.touched.set(true);
+        }
+        self.span(data.start, data.end())
+    }
+
+    /// Bytes `start..end` of the data, as a span.
+    fn span(&self, start: usize, end: usize) -> Span {
+        let place = |at: usize| self.base.saturating_add(at);
+        Span::new(self.stream, place(start), place(end))
     }
 }
 
-/// The next token that isn't white-space or a comment.
-fn significant<'t>(t: &mut Tokenizer<'t>) -> Option<Token<'t>> {
-    t.find(|token| !matches!(token.kind, Kind::Space | Kind::Comment))
+/// What one call has read: how many values, for [`Limits::values`], and
+/// whether it reached the end of its data, where in a window more of the
+/// file could change what it reads (a token that reaches it, or none where
+/// one was looked for). Each call makes its own, passed to what it calls,
+/// so that a parser keeps nothing of it, and stays `Sync`.
+struct Call {
+    values: usize,
+    /// The data's length.
+    end: usize,
+    touched: bool,
+}
+
+impl Call {
+    /// None yet, in `data`.
+    fn of(data: &[u8]) -> Call {
+        Call {
+            values: 0,
+            end: data.len(),
+            touched: false,
+        }
+    }
+
+    /// Notes whether `t`, over the data, has reached its end.
+    fn note(&mut self, t: &Tokenizer<'_>) {
+        self.touched |= t.offset() >= self.end;
+    }
+
+    /// The next token that isn't white-space or a comment, noting when it
+    /// reaches the data's end, or none comes before it.
+    fn significant<'t>(&mut self, t: &mut Tokenizer<'t>) -> Option<Token<'t>> {
+        let token = t.find(|token| !matches!(token.kind, Kind::Space | Kind::Comment));
+        self.note(t);
+        token
+    }
 }
 
 /// Whether `token` starts a value: a number, a name, a string that ends,
@@ -1337,5 +1521,172 @@ mod tests {
         let at = o.unwrap().at.unwrap();
         assert_eq!(bytes(input, at), b"<< /Length 16 >> stream\nab endstream");
         assert_eq!(kept.faults, [(at, "1 0 obj has no endobj".to_string())]);
+    }
+    /// A window of a file reads as the file does from where the window
+    /// starts, each place in the file: its values' spans, the parser's
+    /// offset, its errors' places and a stream's extents. The offset the
+    /// parser is made at counts in the window. `Parser::at` reads its data
+    /// as a whole file, a window that starts it and ends it.
+    #[test]
+    fn a_window_places_what_it_reads_in_the_file() {
+        let file = b"%x\n<< /A [1 (x)] /B 2 0 R >> 9 [1 2";
+        let mut whole = Parser::at(file, 3);
+        let mut window = Parser::at(&file[3..], 0).window(3, true);
+        assert_eq!(window.offset(), 3);
+        for _ in 0..3 {
+            let mut kept = (Kept::default(), Kept::default());
+            assert_eq!(window.value(&mut kept.0), whole.value(&mut kept.1));
+            assert_eq!(window.offset(), whole.offset());
+            assert_eq!(kept.0, kept.1);
+        }
+        let array = found(file, b"[1 2").start;
+        assert_eq!(window.value(&mut ()), Err(Error::Array { at: array }));
+        let mut at = Parser::at(file, 3).window(0, true);
+        assert_eq!(at.value(&mut ()), Parser::at(file, 3).value(&mut ()));
+        // A header looked for past the window's end, where it was given.
+        let error = Parser::at(b"", 5).window(100, true).header();
+        assert_eq!(error, Err(Error::Header { at: 105 }));
+        // A stream's extents, and the stream, in the file.
+        let file = b"xx\n4 0 obj << /Length 2 >> stream\nab\nendstream endobj";
+        let mut parser = Parser::at(&file[3..], 0).window(3, true);
+        let id = parser.header().unwrap();
+        let Ok(Body::Stream(head)) = parser.body(id, &mut ()) else {
+            panic!("a stream");
+        };
+        let ab = found(file, b"ab");
+        assert_eq!((head.start(), parser.offset()), (ab.start, ab.start));
+        assert_eq!(bytes(file, head.keyword()), b"stream");
+        assert_eq!(head.declared(2), Some(ab));
+        assert_eq!(bytes(file, head.scanned()), b"ab\n");
+        let o = parser.stream(head, ab, &mut ()).unwrap();
+        assert_eq!(bytes(file, o.at.unwrap()), &file[11..file.len() - 7]);
+        assert_eq!(o.as_stream().unwrap().data, Data::At(ab));
+        assert_eq!(parser.offset(), file.len() - 7);
+    }
+
+    /// In a window that isn't the file's last, a call whose read reaches
+    /// its end is short, where more of the file could change what it
+    /// reads: `12 0 R` cut after `0`, and after `R` where `RG` follows, a
+    /// string, an array and a dictionary cut, `endobj` cut, the CR of the CR LF after `stream`,
+    /// and a stream whose `/Length` runs past the window, though `endstream`
+    /// is scanned inside it; and a read that stops before the end says what
+    /// the whole file does.
+    #[test]
+    fn a_window_short_of_the_files_end_is_short_where_more_could_change_it() {
+        const BASE: usize = 1_000_000;
+        let cut = |file: &'static [u8], before: &[u8]| {
+            let end = found(file, before).start;
+            (Parser::at(&file[..end], 0).window(BASE, false), BASE + end)
+        };
+        let values: [(&[u8], &[u8]); 6] = [
+            (b"[12 0 R]", b" R]"),
+            (b"12 0 RG", b"G"),
+            (b"(ab) ", b") "),
+            (b"[1 2] ", b"] "),
+            (b"<< /A 1 >> ", b"> "),
+            (b"1 ", b" "),
+        ];
+        for (file, before) in values {
+            let (mut window, end) = cut(file, before);
+            assert_eq!(window.value(&mut ()), Err(Error::Short { at: end }));
+            assert_eq!(window.offset(), BASE, "left where it was");
+            assert!(Parser::at(file, 0).value(&mut ()).is_ok());
+        }
+        assert_eq!(
+            Error::Short { at: 7 }.to_string(),
+            "the data ends at byte 7, where more of the file could change what's read"
+        );
+        // An error before the end is the whole file's.
+        let (mut window, _) = cut(b"[1 endobj 2 3", b"3");
+        let error = Error::Keyword {
+            at: BASE + 3,
+            word: b"endobj".to_vec(),
+        };
+        assert_eq!(window.value(&mut ()), Err(error));
+        // `endobj` cut: short, though it said there was none.
+        let (mut window, _) = cut(b"1 0 obj 7 endobj\n", b"bj\n");
+        let id = window.header().unwrap();
+        let mut kept = Kept::default();
+        assert!(matches!(
+            window.body(id, &mut kept),
+            Err(Error::Short { .. })
+        ));
+        assert_eq!(kept.faults.len(), 1);
+        // The CR of a CR LF: short, though it said a lone CR.
+        let file = b"1 0 obj << >> stream\r\nxy\nendstream endobj";
+        let (mut window, _) = cut(file, b"\nxy");
+        let id = window.header().unwrap();
+        let mut kept = Kept::default();
+        assert!(matches!(
+            window.body(id, &mut kept),
+            Err(Error::Short { .. })
+        ));
+        assert_eq!(kept.faults.len(), 1);
+        let (_, kept) = indirect(file, StreamHead::scanned);
+        assert!(kept.faults.is_empty());
+        // A `/Length` past the window: none by it, and a shorter extent
+        // scanned, which the stream after would take, `endstream` and what
+        // follows it read; but it's short, as the head remembers.
+        let file = b"1 0 obj << /Length 17 >> stream\nab endstream cd \nendstream endobj";
+        let (mut window, end) = cut(file, b"\nendstream endobj");
+        let id = window.header().unwrap();
+        let Ok(Body::Stream(head)) = window.body(id, &mut ()) else {
+            panic!("a stream");
+        };
+        assert_eq!(head.declared(17), None);
+        let scanned = head.scanned();
+        assert_eq!(scanned.end - scanned.start, 3);
+        let stream = window.stream(head, scanned, &mut ());
+        assert_eq!(stream, Err(Error::Short { at: end }));
+        // The same window as the file's last reads as a file that ends
+        // there: by the scanned extent, `endobj` said to be missing.
+        let (window, _) = cut(file, b"\nendstream endobj");
+        let mut last = window.window(BASE, true);
+        let id = last.header().unwrap();
+        let Ok(Body::Stream(head)) = last.body(id, &mut ()) else {
+            panic!("a stream");
+        };
+        assert_eq!(head.declared(17), None);
+        let scanned = head.scanned();
+        let mut kept = Kept::default();
+        assert!(last.stream(head, scanned, &mut kept).is_ok());
+        assert_eq!(kept.faults.len(), 1);
+        // Whole, it has its `/Length`'s.
+        let (o, kept) = indirect(file, |head| head.declared(17).unwrap());
+        assert!(o.is_ok() && kept.faults.is_empty());
+    }
+
+    /// Each of the tests' inputs read in every window, cut at every byte,
+    /// from bytes 0 and 1,000,000 of a file: short, or as the whole input
+    /// reads, every place moved by where the window starts.
+    #[test]
+    fn every_window_of_the_tests_inputs_is_short_or_reads_as_the_whole() {
+        let inputs: [(&[u8], u16); 12] = [
+            (b"%x\n<< /A [1 (x) /N] /B 2 0 R /C << /D true >> >> 9", 0),
+            (b"[12 0 R] (ab) <41 42> [1 2] << /A 1 >> 1 ", 0),
+            (b"12 0 RG ", 0),
+            (b"[1 endobj 2 3", 0),
+            (b"1 0 obj 7 endobj\n", 0),
+            (b"5 0 obj << >> stray", 0),
+            (b"1 0 obj << >> stream\r\nxy\nendstream endobj\n", 2),
+            (b"1 0 obj << >>stream\rxy\nendstream\nendobj", 2),
+            (
+                b"4 0 obj\n<< /Length 6 >>\nstream\r\nabcdef\nendstream\nendobj ",
+                6,
+            ),
+            (
+                b"1 0 obj << /Length 16 >> stream\nab endstream cd\nendstream endobj\n",
+                16,
+            ),
+            (
+                b"1 0 obj << /Length 17 >> stream\nab endstream cd \nendstream endobj\n",
+                17,
+            ),
+            (b"[/A#zz 99999999999999999999 -1.5e3]", 0),
+        ];
+        for (input, length) in inputs {
+            let read = crate::fuzz::every_window(input, length);
+            assert!(read > 0, "{}", String::from_utf8_lossy(input));
+        }
     }
 }

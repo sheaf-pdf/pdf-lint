@@ -28,8 +28,9 @@
 //! - **Versions** ([`Version`]), read from a header's or a catalog's text,
 //!   in order.
 //! - **A parser** ([`parse`]), on pdf-tokenizer: a value, or an indirect
-//!   object, from a file's bytes or an object stream's decoded data, each
-//!   value placed; what it reads past said to a [`parse::Sink`], which `()`
+//!   object, from a file's bytes, a window of them that says when more of
+//!   the file could change what it read ([`parse::Parser::window`]), or an
+//!   object stream's decoded data, each value placed; what it reads past said to a [`parse::Sink`], which `()`
 //!   drops; a stream's two extents, by its `/Length` and up to
 //!   `endstream`, both given, for the caller to choose its data from; and
 //!   caps on how deeply values nest and how many one call reads

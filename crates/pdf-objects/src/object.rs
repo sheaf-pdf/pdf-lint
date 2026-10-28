@@ -867,6 +867,7 @@ mod tests {
         shared::<Data>();
         shared::<Span>();
         shared::<crate::parse::Limits>();
+        shared::<crate::parse::Parser<'_>>();
         shared::<crate::parse::Error>();
         shared::<crate::serialize::Error>();
     }

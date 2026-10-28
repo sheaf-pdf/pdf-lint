@@ -35,6 +35,16 @@ struct How {
     astray: bool,
     /// The limits read under: the default, or small ones.
     limits: Limits,
+    /// A window to read the input in too.
+    window: Option<Window>,
+}
+
+/// A window of a file to read the input in, as a reader by position
+/// does: cut at `cut`, from byte `base` of the file.
+#[derive(Debug, Clone, Copy)]
+struct Window {
+    cut: usize,
+    base: usize,
 }
 
 /// A stream's `/Length`: as given, or the scanned extent's and this more
@@ -62,7 +72,10 @@ enum Length {
 /// writes as the same bytes again ([`round_trip`]), but for a ciphertext
 /// read's object holding a string: the writer refuses it whole, writing
 /// nothing, and writes it with its strings taken as their bytes, which
-/// read back as plain.
+/// read back as plain. With flag 0x80 and two bytes after the five (and
+/// the limits' two), it's read as a window of a file too, from byte 0 or
+/// 1,000,000, cut where those two bytes choose ([`windowed`]): what isn't
+/// [`Error::Short`] reads as the whole input does.
 /// Panics on a broken promise.
 pub fn parse(data: &[u8]) {
     let (how, input) = chosen(data);
@@ -74,6 +87,9 @@ pub fn parse(data: &[u8]) {
     assert_eq!(first, read(input, how, &mut ()), "the same through ()");
     if how.limits != Limits::DEFAULT {
         limited(input, how, &first);
+    }
+    if let Some(window) = how.window {
+        windowed(input, how, window, &first, &kept);
     }
     let (result, offset) = first;
     assert!(offset <= input.len().max(how.offset), "{offset}");
@@ -125,7 +141,9 @@ pub fn parse(data: &[u8]) {
 }
 
 /// How `data`'s first five bytes say to read the rest, and the rest: with
-/// flag 0x20 and two bytes after the five, small limits, from those two.
+/// flag 0x20 and two bytes after the five, small limits, from those two;
+/// with flag 0x80 and two bytes after those, a window too, cut no nearer
+/// than the offset read from, from byte 0 or 1,000,000.
 fn chosen(data: &[u8]) -> (How, &[u8]) {
     let [a, b, flags, c, d, rest @ ..] = data else {
         let how = How {
@@ -136,24 +154,37 @@ fn chosen(data: &[u8]) -> (How, &[u8]) {
             length: Length::Given(0),
             astray: false,
             limits: Limits::DEFAULT,
+            window: None,
         };
         return (how, data);
     };
-    let (limits, input) = match rest {
-        [nesting, values, input @ ..] if flags & 0x20 != 0 => {
+    let (limits, rest) = match rest {
+        [nesting, values, rest @ ..] if flags & 0x20 != 0 => {
             let limits = Limits {
                 nesting: usize::from(nesting % 8),
                 values: usize::from(values % 64),
             };
-            (limits, input)
+            (limits, rest)
         }
         _ => (Limits::DEFAULT, rest),
+    };
+    let (window, input) = match rest {
+        [e, f, input @ ..] if flags & 0x80 != 0 => (Some(u16::from_le_bytes([*e, *f])), input),
+        _ => (None, rest),
     };
     let seed = usize::from(u16::from_le_bytes([*a, *b]));
     let offset = match flags & 0x40 {
         0 => seed % (input.len() + 1),
         _ => input.len() + seed,
     };
+    let window = window.map(|seed| {
+        let seed = usize::from(seed);
+        let from = offset.min(input.len());
+        Window {
+            cut: from + (seed >> 1) % (input.len() - from + 1),
+            base: (seed & 1) * 1_000_000,
+        }
+    });
     let how = How {
         offset,
         stream: (flags & 1 != 0).then_some((u32::from(*c), 0)),
@@ -165,6 +196,7 @@ fn chosen(data: &[u8]) -> (How, &[u8]) {
         },
         astray: flags & 0x10 != 0,
         limits,
+        window,
     };
     (how, input)
 }
@@ -244,7 +276,20 @@ fn deepest(o: &Object) -> usize {
 /// What reading `input` as `how` says: the object or the error, and where
 /// the parser ended.
 fn read<'a>(input: &'a [u8], how: How, sink: &mut impl Sink<'a>) -> (Result<Object, Error>, usize) {
+    read_in(input, 0, true, how, sink)
+}
+
+/// [`read`], `input` being a window of a file from byte `base`, which
+/// ends the file when `last`.
+fn read_in<'a>(
+    input: &'a [u8],
+    base: usize,
+    last: bool,
+    how: How,
+    sink: &mut impl Sink<'a>,
+) -> (Result<Object, Error>, usize) {
     let mut parser = (Parser::at(input, how.offset))
+        .window(base, last)
         .ciphertext(how.ciphertext)
         .limits(how.limits);
     if let Some(stream) = how.stream {
@@ -259,13 +304,14 @@ fn read<'a>(input: &'a [u8], how: How, sink: &mut impl Sink<'a>) -> (Result<Obje
         Body::Stream(head) => {
             let start = head.start();
             let keyword = head.keyword();
-            assert!(keyword.end <= start && start <= input.len());
+            assert!(keyword.end <= start && start - base <= input.len());
             let scanned = head.scanned();
             assert_eq!((scanned.stream, scanned.start), (how.stream, start));
             let marker = &b"endstream"[..];
-            let data = &input[scanned.start..scanned.end];
+            let data = &input[scanned.start - base..scanned.end - base];
             assert!(!data.windows(marker.len()).any(|w| w == marker));
-            assert!(scanned.end == input.len() || input[scanned.end..].starts_with(marker));
+            let after = &input[scanned.end - base..];
+            assert!(after.is_empty() || after.starts_with(marker));
             let length = match how.length {
                 Length::Given(length) => usize::from(length),
                 Length::Scanned(more) => {
@@ -278,7 +324,7 @@ fn read<'a>(input: &'a [u8], how: How, sink: &mut impl Sink<'a>) -> (Result<Obje
                     (declared.start, declared.end - declared.start),
                     (start, length)
                 );
-                let after = Tokenizer::at(input, declared.end)
+                let after = Tokenizer::at(input, declared.end - base)
                     .find(|t| !matches!(t.kind, Kind::Space | Kind::Comment));
                 assert!(after.is_some_and(|t| t.bytes == marker));
             }
@@ -286,7 +332,11 @@ fn read<'a>(input: &'a [u8], how: How, sink: &mut impl Sink<'a>) -> (Result<Obje
             if how.astray {
                 let astray = Span::new(how.stream, data.start + 1, data.end);
                 let refused = parser.clone().stream(head.clone(), astray, &mut ());
-                assert!(matches!(refused, Err(Error::Extent { .. })), "{refused:?}");
+                let short = !last && matches!(refused, Err(Error::Short { .. }));
+                assert!(
+                    short || matches!(refused, Err(Error::Extent { .. })),
+                    "{refused:?}"
+                );
             }
             let object = parser.stream(head, data, sink)?;
             let Value::Stream(stream) = object.value() else {
@@ -297,6 +347,167 @@ fn read<'a>(input: &'a [u8], how: How, sink: &mut impl Sink<'a>) -> (Result<Obje
         }
     });
     (object, parser.offset())
+}
+
+/// Checks that `input`, read as `how` in a window of a file from byte
+/// `window.base`, reads as the whole input did, `whole` saying `said`,
+/// every place `window.base` on (value, spans, faults, error, and where
+/// the parser ended): whole, as the file's last window; and cut at
+/// `window.cut`, as a window that isn't, but where it's [`Error::Short`],
+/// at the cut. Whether the cut read was short.
+fn windowed(
+    input: &[u8],
+    how: How,
+    window: Window,
+    whole: &(Result<Object, Error>, usize),
+    said: &Kept,
+) -> bool {
+    let Window { cut, base } = window;
+    let want = (
+        whole
+            .0
+            .clone()
+            .map(|o| shifted(o, base))
+            .map_err(|e| shifted_error(e, base)),
+        whole.1 + base,
+    );
+    let said: Vec<(Span, String)> = (said.faults.iter())
+        .map(|(at, said)| (shifted_span(*at, base), said.clone()))
+        .collect();
+    let mut kept = Kept::default();
+    let last = read_in(input, base, true, how, &mut kept);
+    assert_eq!(last, want, "the file's last window reads as the whole");
+    assert_eq!(kept.faults, said, "said as the whole");
+    let mut kept = Kept::default();
+    let read = read_in(&input[..cut], base, false, how, &mut kept);
+    if let Err(Error::Short { at }) = read.0 {
+        assert_eq!(at, base + cut, "short where the window ends");
+        return true;
+    }
+    assert_eq!(read, want, "cut at {cut}, it reads as the whole");
+    assert_eq!(kept.faults, said, "cut at {cut}, said as the whole");
+    false
+}
+
+/// Checks `input`'s every window ([`windowed`]): read from its start as a
+/// value, and as an indirect object, a stream's data by a `/Length` of
+/// `length` and by its scanned extent, in the file and in an object
+/// stream's data; cut at every byte, from bytes 0 and 1,000,000 of a
+/// file. How many of the cut windows weren't [`Error::Short`].
+pub fn every_window(input: &[u8], length: u16) -> usize {
+    let how = How {
+        offset: 0,
+        stream: None,
+        ciphertext: false,
+        indirect: false,
+        length: Length::Given(length),
+        astray: true,
+        limits: Limits::DEFAULT,
+        window: None,
+    };
+    let mut read = 0;
+    for stream in [None, Some((7, 0))] {
+        for (indirect, length) in [
+            (false, how.length),
+            (true, how.length),
+            (true, Length::Scanned(0)),
+        ] {
+            let how = How {
+                stream,
+                indirect,
+                length,
+                ..how
+            };
+            let mut said = Kept::default();
+            let whole = self::read(input, how, &mut said);
+            for cut in 0..=input.len() {
+                for base in [0, 1_000_000] {
+                    let short = windowed(input, how, Window { cut, base }, &whole, &said);
+                    read += usize::from(!short);
+                }
+            }
+        }
+    }
+    read
+}
+
+/// `o`, its places shifted `base` on.
+fn shifted(mut o: Object, base: usize) -> Object {
+    shift(&mut o, base);
+    o
+}
+
+/// Shifts every place in `o` `base` on: its span, its values' and keys',
+/// and a stream's data's, as a window there places them. It isn't an
+/// edit, so it keeps them.
+fn shift(o: &mut Object, base: usize) {
+    o.at = o.at.map(|at| shifted_span(at, base));
+    let entries = |d: &mut Dict| {
+        for entry in d.entries_mut() {
+            entry.key_at = entry.key_at.map(|at| shifted_span(at, base));
+            shift(&mut entry.value, base);
+        }
+    };
+    match o.as_written_mut() {
+        Value::Array(a) => a.iter_mut().for_each(|e| shift(e, base)),
+        Value::Dict(d) => entries(d),
+        Value::Stream(s) => {
+            if let Data::At(at) = &mut s.data {
+                *at = shifted_span(*at, base);
+            }
+            entries(&mut s.dict);
+        }
+        _ => {}
+    }
+}
+
+/// `at`, shifted `base` on.
+fn shifted_span(at: Span, base: usize) -> Span {
+    Span::new(at.stream, at.start + base, at.end + base)
+}
+
+/// `error`, each offset it names shifted `base` on.
+fn shifted_error(error: Error, base: usize) -> Error {
+    match error {
+        Error::Nested { limit, at } => Error::Nested {
+            limit,
+            at: at + base,
+        },
+        Error::Values { limit, at } => Error::Values {
+            limit,
+            at: at + base,
+        },
+        Error::End => Error::End,
+        Error::Reference {
+            at,
+            number,
+            generation,
+        } => Error::Reference {
+            at: at + base,
+            number,
+            generation,
+        },
+        Error::String { at } => Error::String { at: at + base },
+        Error::Array { at } => Error::Array { at: at + base },
+        Error::Dict { at } => Error::Dict { at: at + base },
+        Error::Key { at } => Error::Key { at: at + base },
+        Error::Keyword { at, word } => Error::Keyword {
+            at: at + base,
+            word,
+        },
+        Error::Token { at, bytes } => Error::Token {
+            at: at + base,
+            bytes,
+        },
+        Error::Header { at } => Error::Header { at: at + base },
+        Error::Endstream { id } => Error::Endstream { id },
+        Error::Extent { id, start, end } => Error::Extent {
+            id,
+            start: start + base,
+            end: end + base,
+        },
+        Error::Short { at } => Error::Short { at: at + base },
+    }
 }
 
 /// Takes every place out of `o`, its values' spans and its keys', and
@@ -583,67 +794,75 @@ fn placed(input: &[u8], o: &Object, outer: Span, how: How) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{every_window, parse};
 
-    /// Inputs made of the fragments of objects, after five bytes that
-    /// choose how they're read (and two that give small limits, when they
-    /// choose those), run through the fuzz target's body.
-    #[test]
-    fn random_fragments_keep_every_promise() {
-        const FRAGMENTS: &[&[u8]] = &[
-            b"1 0 obj",
-            b"2 0 R",
-            b"obj",
-            b"endobj",
-            b"stream\r\n",
-            b"stream\n",
-            b"stream\r",
-            b"stream",
-            b"endstream",
-            b"<< /Length 3 >>\nstream\r\n",
-            b"<<>>stream\n",
-            b"endstream\nendobj",
-            b"<<",
-            b">>",
-            b"[",
-            b"]",
-            b"(",
-            b")",
-            b"<",
-            b">",
-            b"<4142>",
-            b"(a\\)b)",
-            b"/",
-            b"/Length",
-            b"/A#4a",
-            b"/N#00",
-            b"/B#z",
-            b"#",
-            b" ",
-            b"\r",
-            b"\n",
-            b"%",
-            b"0",
-            b"7",
-            b"-",
-            b".",
-            b"R",
-            b"true",
-            b"null",
-            b"stray",
-            b"{",
-            b"\x80",
-            // Numbers too large for an integer and for an f64.
-            b"99999999999999999999",
-            &[b'9'; 320],
-        ];
+    /// Fragments of objects, where they begin and end.
+    const FRAGMENTS: &[&[u8]] = &[
+        b"1 0 obj",
+        b"2 0 R",
+        b"obj",
+        b"endobj",
+        b"stream\r\n",
+        b"stream\n",
+        b"stream\r",
+        b"stream",
+        b"endstream",
+        b"<< /Length 3 >>\nstream\r\n",
+        b"<<>>stream\n",
+        b"endstream\nendobj",
+        b"<<",
+        b">>",
+        b"[",
+        b"]",
+        b"(",
+        b")",
+        b"<",
+        b">",
+        b"<4142>",
+        b"(a\\)b)",
+        b"/",
+        b"/Length",
+        b"/A#4a",
+        b"/N#00",
+        b"/B#z",
+        b"#",
+        b" ",
+        b"\r",
+        b"\n",
+        b"%",
+        b"0",
+        b"7",
+        b"-",
+        b".",
+        b"R",
+        b"true",
+        b"null",
+        b"stray",
+        b"{",
+        b"\x80",
+        // Numbers too large for an integer and for an f64.
+        b"99999999999999999999",
+        &[b'9'; 320],
+    ];
+
+    /// Numbers below what each call is given, the same each run.
+    fn randoms() -> impl FnMut(usize) -> usize {
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
-        let mut random = move |below: usize| {
+        move |below: usize| {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
             (state % below as u64) as usize
-        };
+        }
+    }
+
+    /// Inputs made of the fragments of objects, after five bytes that
+    /// choose how they're read (and two that give small limits, and two
+    /// that give a window, when they choose those), run through the fuzz
+    /// target's body.
+    #[test]
+    fn random_fragments_keep_every_promise() {
+        let mut random = randoms();
         for _ in 0..20_000 {
             let mut input: Vec<u8> = (0..5).map(|_| random(256) as u8).collect();
             // Mostly from the first byte, and an offset past the end only
@@ -660,6 +879,10 @@ mod tests {
                 input[2] &= !0x20;
             }
             if input[2] & 0x20 != 0 {
+                input.extend_from_slice(&[random(256) as u8, random(256) as u8]);
+            }
+            // Half in a window too, from the two bytes after those.
+            if input[2] & 0x80 != 0 {
                 input.extend_from_slice(&[random(256) as u8, random(256) as u8]);
             }
             // Half the indirect objects begin as one does, and half of those
@@ -679,5 +902,30 @@ mod tests {
             }
             parse(&input);
         }
+    }
+    /// Inputs made of the fragments of objects, read from their start in
+    /// every window ([`every_window`]): cut at every byte, from bytes 0
+    /// and 1,000,000 of a file, each is short or reads as the whole input
+    /// does, and some cuts read.
+    #[test]
+    fn random_fragments_in_every_window_read_as_the_whole_or_are_short() {
+        let mut random = randoms();
+        let (mut cuts, mut read) = (0, 0);
+        for _ in 0..500 {
+            let mut input = Vec::new();
+            if random(2) == 0 {
+                input.extend_from_slice(b"1 0 obj ");
+                if random(2) == 0 {
+                    input.extend_from_slice(b"<< /Length 3 >>\nstream\r\n");
+                }
+            }
+            // Short of the last fragment, 320 nines, for every cut's sake.
+            for _ in 0..random(12) + 1 {
+                input.extend_from_slice(FRAGMENTS[random(FRAGMENTS.len() - 1)]);
+            }
+            read += every_window(&input, 3);
+            cuts += 12 * (input.len() + 1);
+        }
+        assert!(read > cuts / 4, "{read} of {cuts} read");
     }
 }
