@@ -873,6 +873,29 @@ mod tests {
         assert!(why.contains("exited with 2"), "{why}");
     }
 
+    /// A stream qpdf decodes through a file of its own, made in the temp
+    /// folder and removed after, as the comparisons over a folder of files
+    /// have it decode one: hex digits to their bytes, and a Flate stream
+    /// that isn't zlib qpdf's refusal.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn a_stream_decodes_through_a_file_of_its_own() {
+        let qpdf = qpdf(Path::new("x.pdf"));
+        let hex = Written {
+            filter: b"/ASCIIHexDecode",
+            parms: None,
+            data: b"3132 33>",
+        };
+        assert_eq!(qpdf.decode_written(hex), Ok(b"123".to_vec()));
+        let flate = Written {
+            filter: b"/FlateDecode",
+            parms: None,
+            data: b"not zlib",
+        };
+        let why = qpdf.decode_written(flate).unwrap_err();
+        assert!(why.contains("qpdf doesn't decode"), "{why}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_qpdf_that_hangs_is_stopped() {

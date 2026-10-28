@@ -5,12 +5,8 @@ use std::process::{Command, Output, Stdio};
 
 use pdf_crypt::writer::{self, Kind, Settings};
 use pdf_crypt::{Dictionary, Handler};
+use serde_json::{Value, json};
 use tempfile::TempDir;
-
-// pdf-structure's reader of qpdf's JSON, to read the JSON report back with.
-#[path = "../../pdf-structure/src/json.rs"]
-#[allow(dead_code)]
-mod json;
 
 /// A file of these objects' bodies, with a table, written by hand.
 fn file(objects: &[&str]) -> Vec<u8> {
@@ -64,6 +60,14 @@ fn text(bytes: &[u8]) -> String {
 
 const CATALOG: &str = "<< /Type /Catalog /Pages 2 0 R >>";
 const PAGES: &str = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
+
+/// What clap ends each argument error with.
+const MORE: &str = "For more information, try '--help'.\n";
+
+/// What clap prints between an argument error and [`MORE`] when it gives
+/// the usage, as it does for an argument it doesn't know, a value that
+/// isn't UTF-8, and pdf-lint's own checks.
+const USAGE: &str = "Usage: pdf-lint [OPTIONS] <FILE>...\n\n";
 
 #[test]
 fn a_clean_file_exits_0() {
@@ -277,11 +281,8 @@ fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
 
     // The JSON says which.
     let out = run(&["--format", "json", "--unlisted", "all", path]);
-    let report = json::parse(&out.stdout).unwrap();
-    assert_eq!(
-        report.get("unlisted_in").cloned(),
-        Some(json::Json::String("all".to_string()))
-    );
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report.get("unlisted_in"), Some(&json!("all")));
 
     // Exempting keys where none is a finding is refused, and so is a
     // setting it hasn't.
@@ -293,8 +294,7 @@ fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(
         text(&out.stderr),
-        "error: invalid value 'some' for '--unlisted <W>': built, all or never\n\n\
-         For more information, try '--help'.\n"
+        format!("error: invalid value 'some' for '--unlisted <W>': built, all or never\n\n{MORE}")
     );
 }
 
@@ -319,10 +319,10 @@ fn extensions_name_what_a_file_is_checked_under_besides_what_it_declares() {
         "json",
         path,
     ]);
-    let report = json::parse(&out.stdout).unwrap();
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
-        report.get("extensions").cloned(),
-        Some(json::parse(br#"["ADBE_Extn3","Malforms"]"#).unwrap())
+        report.get("extensions"),
+        Some(&json!(["ADBE_Extn3", "Malforms"]))
     );
     // A name the model hasn't is refused, with those it has; and so is
     // `*`, as no file is every extension at once.
@@ -455,12 +455,10 @@ fn an_encrypted_file_is_read_by_the_password_it_needs_and_unread_without_it() {
     assert!(out.contains("0 findings, 4 carried"), "{out}");
     // The JSON report says why, as for any file that isn't read.
     let out = run(&["--format", "json", locked]);
-    let line = json::parse(&out.stdout).unwrap();
+    let line: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
-        line.get("error").cloned(),
-        Some(json::Json::String(
-            "it needs a password: give it with --password".to_string()
-        ))
+        line.get("error"),
+        Some(&json!("it needs a password: give it with --password"))
     );
 }
 
@@ -657,9 +655,7 @@ fn a_file_of_dash_is_standard_input() {
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(
         text(&out.stderr),
-        "error: - more than once: standard input is read once\n\n\
-         Usage: pdf-lint [OPTIONS] <FILE>...\n\n\
-         For more information, try '--help'.\n"
+        format!("error: - more than once: standard input is read once\n\n{USAGE}{MORE}")
     );
 }
 
@@ -690,20 +686,17 @@ fn one_table_checks_a_field_merged_with_its_widget_as_the_widget_alone() {
     assert_eq!(out.status.code(), Some(1));
 
     for (args, one_table, two_tables) in [
-        (&["--format", "json", path][..], "false", "1"),
-        (&["--format", "json", "--one-table", path][..], "true", "0"),
+        (&["--format", "json", path][..], json!(false), json!(1)),
+        (
+            &["--format", "json", "--one-table", path][..],
+            json!(true),
+            json!(0),
+        ),
     ] {
         let out = run(args);
-        let report = json::parse(&out.stdout).unwrap();
-        let field = |key: &str| report.get(key).cloned().unwrap();
-        assert_eq!(
-            field("one_table"),
-            json::parse(one_table.as_bytes()).unwrap()
-        );
-        assert_eq!(
-            field("two_tables"),
-            json::parse(two_tables.as_bytes()).unwrap()
-        );
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report.get("one_table"), Some(&one_table));
+        assert_eq!(report.get("two_tables"), Some(&two_tables));
     }
 }
 
@@ -775,19 +768,14 @@ fn pdf_version_checks_a_file_as_another_version() {
         stdout.contains(r#""version":"1.7","checked_as":"2.0","#),
         "{stdout}"
     );
-    let report = json::parse(&out.stdout).unwrap();
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report.get("deprecations"), Some(&json!(false)));
     assert_eq!(
-        report.get("deprecations").cloned(),
-        Some(json::Json::Bool(false))
-    );
-    assert_eq!(
-        report.get("deprecated").cloned(),
-        Some(
-            json::parse(
-                br#"[{"table":"ArrayOfNamesForProcSet","key":"0","count":1},{"table":"Resource","key":"ProcSet","count":1}]"#
-            )
-            .unwrap()
-        )
+        report.get("deprecated"),
+        Some(&json!([
+            {"table": "ArrayOfNamesForProcSet", "key": "0", "count": 1},
+            {"table": "Resource", "key": "ProcSet", "count": 1}
+        ]))
     );
     for v in ["1.8", "2", "two"] {
         let out = run(&["--pdf-version", v, path]);
@@ -796,8 +784,7 @@ fn pdf_version_checks_a_file_as_another_version() {
             text(&out.stderr),
             format!(
                 "error: invalid value '{v}' for '--pdf-version <V>': \
-                 not a PDF version, 1.0 to 1.7 or 2.0\n\n\
-                 For more information, try '--help'.\n"
+                 not a PDF version, 1.0 to 1.7 or 2.0\n\n{MORE}"
             )
         );
     }
@@ -856,13 +843,13 @@ fn model_checks_against_another_checkout() {
     // corrected, and the earlier one's another again.
     let model = |args: &[&str], path: &str| {
         let args = [args, &["--format", "json", path]].concat();
-        let report = json::parse(text(&run(&args).stdout).trim().as_bytes()).unwrap();
+        let report: Value = serde_json::from_slice(&run(&args).stdout).unwrap();
         report.get("model").cloned().unwrap()
     };
     let upstream = copy("model-upstream", &|_, text| Some(text));
     let upstream = upstream.to_str().unwrap();
     let embedded = model(&[], path);
-    let hash = |h: &str| json::Json::String(h.to_string());
+    let hash = |h: &str| json!(h);
     assert_eq!(embedded, hash("fc22d1fadc1fd269"));
     assert_eq!(
         model(&["--model", upstream], path),
@@ -1028,10 +1015,10 @@ fn a_file_that_cant_be_read_or_a_wrong_command_line_exits_2() {
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(
         text(&out.stderr),
-        "error: unexpected argument '--bogus' found\n\n  \
-         tip: to pass '--bogus' as a value, use '-- --bogus'\n\n\
-         Usage: pdf-lint [OPTIONS] <FILE>...\n\n\
-         For more information, try '--help'.\n"
+        format!(
+            "error: unexpected argument '--bogus' found\n\n  \
+             tip: to pass '--bogus' as a value, use '-- --bogus'\n\n{USAGE}{MORE}"
+        )
     );
     let out = run(&[]);
     assert_eq!(out.status.code(), Some(2));
@@ -1137,14 +1124,6 @@ fn the_version_or_usage_no_one_reads_exits_0_without_a_panic() {
     }
 }
 
-/// What clap ends each argument error with.
-const MORE: &str = "For more information, try '--help'.\n";
-
-/// What clap prints between an argument error and [`MORE`] when it gives
-/// the usage, as it does for an argument it doesn't know, a value that
-/// isn't UTF-8, and pdf-lint's own checks.
-const USAGE: &str = "Usage: pdf-lint [OPTIONS] <FILE>...\n\n";
-
 #[test]
 fn an_options_value_is_the_next_word_whatever_it_begins_with() {
     let dir = folder();
@@ -1198,7 +1177,8 @@ fn an_option_given_twice_takes_the_last() {
         text(&out.stdout)
     );
     let out = run(&["--format", "text", "--format", "json", path]);
-    assert!(json::parse(&out.stdout).is_ok(), "{}", text(&out.stdout));
+    let report = serde_json::from_slice::<Value>(&out.stdout);
+    assert!(report.is_ok(), "{}", text(&out.stdout));
     // The page is merged, so its unlisted key is a finding with `all` alone.
     let out = run(&["--unlisted", "all", "--unlisted", "built", path]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
@@ -1244,7 +1224,7 @@ fn an_option_takes_its_value_after_an_equals_sign_too() {
     assert_eq!(equals.status.code(), spaced.status.code());
     assert_eq!(text(&equals.stdout), text(&spaced.stdout));
     assert!(
-        json::parse(&equals.stdout).is_ok(),
+        serde_json::from_slice::<Value>(&equals.stdout).is_ok(),
         "{}",
         text(&equals.stderr)
     );
@@ -1512,7 +1492,8 @@ fn each_argument_error_exits_2_as_clap_says_it() {
 /// columns.
 #[test]
 fn the_readme_shows_the_help() {
-    let readme = include_str!("../README.md");
+    // As checked out, whatever its line endings.
+    let readme = include_str!("../README.md").replace("\r\n", "\n");
     let (_, after) = readme
         .split_once("## The command line\n\n```text\n")
         .unwrap();
@@ -1549,32 +1530,21 @@ fn json_reports_a_line_for_each_file() {
     let stdout = text(&out.stdout);
     let lines: Vec<_> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "{stdout}");
-    let report = json::parse(lines[0].as_bytes()).unwrap_or_else(|e| panic!("{e}: {}", lines[0]));
-    let field = |j: &json::Json, key: &str| j.get(key).cloned().unwrap_or_else(|| panic!("{key}"));
-    assert_eq!(
-        field(&report, "file"),
-        json::Json::String(path.display().to_string())
-    );
-    assert_eq!(
-        field(&report, "version"),
-        json::Json::String("1.7".to_string())
-    );
+    let report: Value =
+        serde_json::from_str(lines[0]).unwrap_or_else(|e| panic!("{e}: {}", lines[0]));
+    let field = |j: &Value, key: &str| j.get(key).cloned().unwrap_or_else(|| panic!("{key}"));
+    assert_eq!(field(&report, "file"), json!(path.display().to_string()));
+    assert_eq!(field(&report, "version"), json!("1.7"));
     let model = format!("{:016x}", pdf_lint::grammar().hash());
-    assert_eq!(field(&report, "model"), json::Json::String(model));
+    assert_eq!(field(&report, "model"), json!(model));
     assert_eq!(
         field(&report, "ignored"),
-        json::parse(br#"[{"table":"AnnotLink","key":"Border","count":1}]"#).unwrap()
+        json!([{"table": "AnnotLink", "key": "Border", "count": 1}])
     );
-    let finding = field(&report, "findings").at(0).cloned().unwrap();
-    assert_eq!(
-        field(&finding, "rule"),
-        json::Json::String("type".to_string())
-    );
-    assert_eq!(
-        field(&finding, "key"),
-        json::Json::String("MediaBox".to_string())
-    );
-    assert_eq!(field(&finding, "object"), json::parse(b"[3,0]").unwrap());
+    let finding = field(&report, "findings").get(0).cloned().unwrap();
+    assert_eq!(field(&finding, "rule"), json!("type"));
+    assert_eq!(field(&finding, "key"), json!("MediaBox"));
+    assert_eq!(field(&finding, "object"), json!([3, 0]));
     let value = field(&finding, "value");
     assert!(
         value
@@ -1584,37 +1554,34 @@ fn json_reports_a_line_for_each_file() {
     );
     let at = field(&finding, "at");
     let number = |key: &str| match field(&at, key) {
-        json::Json::Number(n) => n.parse::<usize>().unwrap(),
+        Value::Number(n) => usize::try_from(n.as_u64().unwrap()).unwrap(),
         other => panic!("{other:?}"),
     };
-    assert_eq!(field(&at, "stream"), json::Json::Null);
+    assert_eq!(field(&at, "stream"), Value::Null);
     assert_eq!(
         &faulty[number("start")..number("end")],
         b"/MediaBox (q\"\\\\\t)"
     );
-    assert!(matches!(field(&report, "tables"), json::Json::Object(_)));
+    assert!(matches!(field(&report, "tables"), Value::Object(_)));
 
-    let unread = json::parse(lines[1].as_bytes()).unwrap();
-    assert_eq!(
-        field(&unread, "file"),
-        json::Json::String("/nonexistent/file.pdf".to_string())
-    );
+    let unread: Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(field(&unread, "file"), json!("/nonexistent/file.pdf"));
     // The extensions it was checked under: none it declares; and those of
     // a catalog that declares Adobe's level 8 and ETSI's.
-    assert_eq!(field(&report, "extensions"), json::parse(b"[]").unwrap());
+    assert_eq!(field(&report, "extensions"), json!([]));
     let catalog = "<< /Type /Catalog /Pages 2 0 R /Extensions << \
                    /ADBE << /BaseVersion /1.7 /ExtensionLevel 8 >> \
                    /ESIC << /BaseVersion /1.7 /ExtensionLevel 1 >> >> >>";
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
     let declaring = written(&dir, "json-extensions.pdf", &file(&[catalog, PAGES, page]));
     let out = run(&["--format", "json", declaring.to_str().unwrap()]);
-    let declared = json::parse(&out.stdout).unwrap();
+    let declared: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         field(&declared, "extensions"),
-        json::parse(br#"["ADBE_Extn3","ETSI_PAdES"]"#).unwrap()
+        json!(["ADBE_Extn3", "ETSI_PAdES"])
     );
     // Each line says which pdf-lint wrote it.
-    let version = json::Json::String(env!("CARGO_PKG_VERSION").to_string());
+    let version = json!(env!("CARGO_PKG_VERSION"));
     assert_eq!(field(&report, "pdf_lint"), version);
     assert_eq!(field(&unread, "pdf_lint"), version);
     assert_eq!(field(&unread, "model"), field(&report, "model"));
