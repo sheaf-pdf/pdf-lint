@@ -65,6 +65,7 @@ assert_eq!(doc.trailer.unwritten.as_deref(), Some("no startxref"));
 
 - **Reading lazily.** A file is read whole, every object and every object stream at once.
 - **Typed errors.** Why an object doesn't read, or a file can't be opened, is said as text.
+- **Limits a caller sets.** The limits above are the crate's own constants, the same for every reading, but smaller in any build under cargo-fuzz (`--cfg fuzzing`), a dependant's too: a stream decodes to at most 1 MiB there, and a reading's streams to 4 MiB, so that a fuzz run tries more inputs.
 - **Writing.** It reads only. The `fixtures` feature writes files from objects, and runs qpdf (the program `PDF_LINT_QPDF` names, else `qpdf` on the `PATH`) as a second reader, hidden from the docs: for this workspace's tests and fuzz targets, not for a user. Without it, nothing runs a program or reads `PDF_LINT_QPDF`.
 
 ## License
