@@ -40,7 +40,7 @@ pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, V
 pub use pdf_arlington::{COMMIT, predicate};
 // The objects, `dict!` and versions are pdf-objects'.
 pub use pdf_objects::{dict, object, version};
-pub use predicate::{Cx, Gate, Reference, Since, Truth};
+pub use predicate::{Cx, FileCx, Gate, Reference, Since, Truth};
 pub use source::{Document, Encryption, Source, Trailer, Update, Warning};
 pub use version::Version;
 

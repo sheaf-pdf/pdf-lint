@@ -84,9 +84,7 @@ use std::rc::Rc;
 
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
-use crate::predicate::{
-    self, Cx, Fields, Gate, Reference, Since, Structure, TOLERANCE, Trees, Truth,
-};
+use crate::predicate::{self, Cx, FileCx, Gate, Reference, Since, TOLERANCE, Truth};
 use crate::source::{Source, Warning};
 use crate::text;
 use crate::version::Version;
@@ -625,6 +623,11 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     let mut extensions = crate::extension::declared(source);
     extensions.extend(options.extensions.iter().cloned());
     let checked_under = extensions.clone();
+    // What every predicate of the file is evaluated in, once.
+    let resolve = |id: ObjectId| source.get(id).ok();
+    let file = FileCx::new(trailer, version, &resolve)
+        .size(source.size())
+        .extensions(&extensions);
     let mut walk = Walk {
         source,
         trailer,
@@ -641,7 +644,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         under_unlisted: HashSet::new(),
         one_table: options.one_table,
         unlisted_findings: options.unlisted,
-        extensions,
+        extensions: &extensions,
         deprecations: options.deprecations,
         field_keys: match options.one_table {
             true => Vec::new(),
@@ -650,9 +653,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         also_of: HashMap::new(),
         again: HashMap::new(),
         unlisted_in: Vec::new(),
-        trees: Trees::default(),
-        structure: Structure::default(),
-        fields: Fields::default(),
+        file,
         report: Report {
             findings,
             trailer: id,
@@ -859,7 +860,7 @@ struct Walk<'a> {
     /// [`Options::deprecations`].
     deprecations: bool,
     /// [`Report::extensions`].
-    extensions: BTreeSet<String>,
+    extensions: &'a BTreeSet<String>,
     /// The keys only field tables list, not the widget's: a widget with
     /// one of them, or `/T`, is a field too.
     field_keys: Vec<&'static [u8]>,
@@ -871,11 +872,10 @@ struct Walk<'a> {
     /// Each held indirect object's own keys found unlisted: the object,
     /// the key, its count, and its finding, if one was made.
     unlisted_in: Vec<(ObjectId, Vec<u8>, Unlisted, Option<usize>)>,
-    /// The name trees' keys, the structure tree's content items and the
-    /// form's fields' names, as predicates read them.
-    trees: Trees,
-    structure: Structure,
-    fields: Fields,
+    /// What the predicates are evaluated in: the file's parts, and the name
+    /// trees' keys, the structure tree's content items and the form's
+    /// fields' names, as they read them.
+    file: FileCx<'a>,
     report: Report,
 }
 
@@ -1130,9 +1130,9 @@ impl<'a> Walk<'a> {
                 return;
             }
         };
-        let (row, extension) = walked(v.table, row, &self.extensions);
+        let (row, extension) = walked(v.table, row, self.extensions);
         let also = (also)
-            .and_then(|(also, row)| Some((also, walked(also.table, row, &self.extensions).0?)));
+            .and_then(|(also, row)| Some((also, walked(also.table, row, self.extensions).0?)));
         let (v, row, also) = match (row, also) {
             (Some(row), also) => (v, row, also),
             (None, Some((other, row))) => (other, row, None),
@@ -1335,7 +1335,7 @@ impl<'a> Walk<'a> {
         value: &Object,
         written: Option<Span>,
     ) {
-        match predicate::since(&row.since_version, &self.extensions) {
+        match predicate::since(&row.since_version, self.extensions) {
             Since::In(since) if since > self.version => {
                 let value = format!("{} (since {since})", render(value));
                 self.find(v, made, Rule::TooNew, &v.table.name, key, value, written);
@@ -1480,7 +1480,7 @@ impl<'a> Walk<'a> {
                 .expect("the loader checks that every link names a table")
         };
         let allowed: Vec<&Table> = (links.iter())
-            .filter(|l| predicate::gate(&l.wraps, self.version, &self.extensions) != Gate::Excluded)
+            .filter(|l| predicate::gate(&l.wraps, self.version, self.extensions) != Gate::Excluded)
             .map(table)
             .collect();
         if allowed.is_empty() {
@@ -2094,7 +2094,7 @@ impl<'a> Walk<'a> {
     /// SinceVersion, nor an extension's key (TestGrammar's
     /// `IsValidForPDFVersion`); else as its Required cell says.
     fn required(&self, row: &Row, cx: &Cx) -> Truth {
-        match predicate::since(&row.since_version, &self.extensions) {
+        match predicate::since(&row.since_version, self.extensions) {
             Since::In(v) if self.version >= v => predicate::required(&row.required, cx),
             _ => Truth::False,
         }
@@ -2173,7 +2173,7 @@ impl<'a> Walk<'a> {
             if !self.matches(value, ty.item) {
                 continue;
             }
-            match predicate::gate(&ty.wraps, self.version, &self.extensions) {
+            match predicate::gate(&ty.wraps, self.version, self.extensions) {
                 Gate::Allowed => return Typed::Is(i, None),
                 Gate::AllowedDeprecated(from) => {
                     deprecated.get_or_insert(Typed::Is(i, Some(from)));
@@ -2251,7 +2251,7 @@ impl<'a> Walk<'a> {
         let (mut listed, mut met, mut unknown) = (Vec::new(), None, None);
         let mut required = None;
         for item in items {
-            let gate = predicate::gate(&item.wraps, self.version, &self.extensions);
+            let gate = predicate::gate(&item.wraps, self.version, self.extensions);
             if gate == Gate::Excluded {
                 continue;
             }
@@ -2305,21 +2305,8 @@ impl<'a> Walk<'a> {
         defaults: Option<&'static Table>,
         f: impl FnOnce(&Cx) -> R,
     ) -> R {
-        let resolve = |id: ObjectId| self.source.get(id).ok();
-        f(&Cx {
-            container,
-            at,
-            parents,
-            trailer: self.trailer,
-            resolve: &resolve,
-            version: self.version,
-            defaults,
-            size: self.source.size(),
-            trees: &self.trees,
-            structure: &self.structure,
-            fields: &self.fields,
-            extensions: &self.extensions,
-        })
+        let row = self.file.at(container, at).parents(parents);
+        f(&row.defaults(defaults))
     }
 
     /// `raw` with its references followed, at most [`REFERENCES`]: the
@@ -2411,7 +2398,7 @@ impl<'a> Walk<'a> {
                 continue;
             };
             let at = At::Key(&key);
-            if !(again.iter()).any(|t| walked(t, t.row(at), &self.extensions).0.is_some()) {
+            if !(again.iter()).any(|t| walked(t, t.row(at), self.extensions).0.is_some()) {
                 continue;
             }
             if let Some(n) = self.report.unlisted.get_mut(&unlisted) {

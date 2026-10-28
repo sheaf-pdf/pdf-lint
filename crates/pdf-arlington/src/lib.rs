@@ -19,8 +19,8 @@
 //!   corrects and the rows it adds, or a checkout of upstream's
 //!   `tsv/latest` read whole.
 //! - **The predicates** ([`predicate`]): the language in the cells parsed,
-//!   and evaluated on an object where it sits ([`Cx`]), what can't be told
-//!   said so, never guessed.
+//!   and evaluated on an object where it sits ([`Cx`], a row of a file's
+//!   [`FileCx`]), what can't be told said so, never guessed.
 //! - **Extensions** ([`extension`]): those a file declares, from its
 //!   catalog and its XMP metadata, and those the model names.
 
@@ -34,7 +34,7 @@ mod xxh64;
 pub use pdf_objects;
 
 pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped};
-pub use predicate::{Cx, Gate, Reference, Since, Truth};
+pub use predicate::{Cx, FileCx, Gate, Reference, Since, Truth};
 
 /// The upstream commit the embedded model is (`model/SOURCE.md`).
 pub const COMMIT: &str = "d148fee5a0cb6dcacadf58c09ed842e32847024d";

@@ -40,7 +40,7 @@ use std::fmt;
 use std::num::ParseIntError;
 use std::rc::Rc;
 
-use pdf_objects::{Dict, Form, Object, ObjectId, Str, Value, Version};
+use pdf_objects::{Dict, Form, Object, ObjectId, Span, Str, Value, Version};
 
 use crate::grammar::{At, Table, Wrap, WrapFn, split, version};
 
@@ -232,71 +232,166 @@ pub enum Truth {
     Unknown(String),
 }
 
+/// What every row of one file is evaluated in: the trailer, the version,
+/// how a reference resolves, the file's length and the extensions it's
+/// checked under; and what the predicates read once a file (its name
+/// trees' keys, its structure tree's content items, its form's fields'
+/// names), kept inside it. [`FileCx::at`] makes a row's [`Cx`] from it.
+pub struct FileCx<'a> {
+    /// The trailer as written (`trailer::`).
+    trailer: &'a Dict,
+    /// The file's version: its header's, or its catalog's `/Version` when
+    /// later.
+    version: Version,
+    /// An indirect object; none for one the file hasn't, which is null
+    /// (ISO 32000-2, 7.3.10).
+    resolve: &'a dyn Fn(ObjectId) -> Option<&'a Object>,
+    /// The file's length in bytes, when the reader knows (`fn:FileSize`).
+    size: Option<usize>,
+    /// The extensions the file is checked under, as the model names them
+    /// (`fn:Extension`).
+    extensions: &'a BTreeSet<String>,
+    /// The file's name trees' keys, as `fn:InNameTree` reads them: each
+    /// tree once.
+    trees: Trees,
+    /// The structure tree's content items, as `fn:ImageIsStructContentItem`
+    /// and `fn:PageContainsStructContentItems` read them: once.
+    structure: Structure,
+    /// The form's fields' fully qualified names, as
+    /// `fn:IsFullyQualifiedFieldName` reads them: once.
+    fields: Fields,
+}
+
+/// The extensions a file is checked under when [`FileCx::extensions`]
+/// gives none.
+static NO_EXTENSIONS: BTreeSet<String> = BTreeSet::new();
+
+impl<'a> FileCx<'a> {
+    /// A file of `trailer` at `version`, whose references `resolve` gives
+    /// the objects of; of no known length, checked under no extension.
+    pub fn new(
+        trailer: &'a Dict,
+        version: Version,
+        resolve: &'a dyn Fn(ObjectId) -> Option<&'a Object>,
+    ) -> FileCx<'a> {
+        FileCx {
+            trailer,
+            version,
+            resolve,
+            size: None,
+            extensions: &NO_EXTENSIONS,
+            trees: Trees::default(),
+            structure: Structure::default(),
+            fields: Fields::default(),
+        }
+    }
+
+    /// The file's length in bytes, when the reader knows (`fn:FileSize`).
+    pub fn size(mut self, size: Option<usize>) -> FileCx<'a> {
+        self.size = size;
+        self
+    }
+
+    /// The extensions it's checked under, as the model names them
+    /// (`fn:Extension`).
+    pub fn extensions(mut self, extensions: &'a BTreeSet<String>) -> FileCx<'a> {
+        self.extensions = extensions;
+        self
+    }
+
+    /// The row at `at` in `container`, the dictionary, array or stream its
+    /// value is in: reached through no parents, with no defaults, until
+    /// [`Cx::parents`] and [`Cx::defaults`] say.
+    pub fn at<'c>(&'c self, container: &'c Object, at: At<'c>) -> Cx<'c, 'a> {
+        Cx {
+            file: self,
+            container,
+            at,
+            parents: &[],
+            defaults: None,
+        }
+    }
+}
+
+/// Its parts but `resolve`, a closure, which can't be shown.
+impl fmt::Debug for FileCx<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileCx")
+            .field("trailer", &self.trailer)
+            .field("version", &self.version)
+            .field("size", &self.size)
+            .field("extensions", &self.extensions)
+            .field("trees", &self.trees)
+            .field("structure", &self.structure)
+            .field("fields", &self.fields)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What a predicate is evaluated in: the row's place, the walk's way to
-/// it, and the file.
-pub struct Cx<'a> {
+/// it, and its file's [`FileCx`], which makes it ([`FileCx::at`]). Small,
+/// and made for each row.
+#[derive(Clone, Copy)]
+pub struct Cx<'c, 'a> {
+    /// The file.
+    file: &'c FileCx<'a>,
+    /// The dictionary, array or stream the row's value is in.
+    container: &'c Object,
+    /// Where in it: the key or element the row matched.
+    at: At<'c>,
+    /// The objects the walk came through to `container`, nearest first.
+    parents: &'c [&'c Object],
+    /// The container's table, for its DefaultValues.
+    defaults: Option<&'c Table>,
+}
+
+impl<'c, 'a> Cx<'c, 'a> {
+    /// The objects the walk came through to the container, nearest first
+    /// (`parent::`).
+    pub fn parents(mut self, parents: &'c [&'c Object]) -> Cx<'c, 'a> {
+        self.parents = parents;
+        self
+    }
+
+    /// The container's table, whose DefaultValues stand in for a key the
+    /// container lacks or has null, read as `@Key` (`@ImageMask`): given
+    /// for SpecialCase and PossibleValues, none for the other columns.
+    pub fn defaults(mut self, table: Option<&'c Table>) -> Cx<'c, 'a> {
+        self.defaults = table;
+        self
+    }
+
     /// The dictionary, array or stream the row's value is in. An indirect
     /// object is the one `resolve` gives, not a copy:
     /// `fn:ImageIsStructContentItem` and `fn:PageContainsStructContentItems`
     /// know the objects the structure tree points at by where `resolve`
     /// keeps them, and a copy is elsewhere.
-    pub container: &'a Object,
-    /// Where in it: the key or element the row matched, which `@*` and
-    /// `@1*` read.
-    pub at: At<'a>,
-    /// The objects the walk came through to `container`, nearest first
-    /// (`parent::`).
-    pub parents: &'a [&'a Object],
-    /// The trailer as written (`trailer::`).
-    pub trailer: &'a Dict,
-    /// An indirect object; none for one the file hasn't, which is null
-    /// (ISO 32000-2, 7.3.10).
-    pub resolve: &'a dyn Fn(ObjectId) -> Option<&'a Object>,
-    /// The file's version: its header's, or its catalog's `/Version` when
-    /// later.
-    pub version: Version,
-    /// The container's table, whose DefaultValues stand in for a key the
-    /// container lacks or has null, read as `@Key` (`@ImageMask`): set
-    /// for SpecialCase and PossibleValues, none for the other columns.
-    pub defaults: Option<&'a Table>,
-    /// The file's length in bytes, when the reader knows (`fn:FileSize`).
-    pub size: Option<usize>,
-    /// The file's name trees' keys, as `fn:InNameTree` reads them: each
-    /// tree once.
-    pub trees: &'a Trees,
-    /// The structure tree's content items, as `fn:ImageIsStructContentItem`
-    /// and `fn:PageContainsStructContentItems` read them: once.
-    pub structure: &'a Structure,
-    /// The form's fields' fully qualified names, as
-    /// `fn:IsFullyQualifiedFieldName` reads them: once.
-    pub fields: &'a Fields,
-    /// The extensions the file is checked under, as the model names them
-    /// (`fn:Extension`).
-    pub extensions: &'a BTreeSet<String>,
+    pub fn container(&self) -> &'c Object {
+        self.container
+    }
+
+    /// Where in the container the row is: the key or element it matched,
+    /// which `@*` and `@1*` read.
+    pub fn at(&self) -> At<'c> {
+        self.at
+    }
 }
 
-/// Its parts but `resolve`, a closure, which can't be shown.
-impl fmt::Debug for Cx<'_> {
+/// Its row's parts, and the defaults' table by name; not its file.
+impl fmt::Debug for Cx<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cx")
             .field("container", &self.container)
             .field("at", &self.at)
             .field("parents", &self.parents)
-            .field("trailer", &self.trailer)
-            .field("version", &self.version)
             .field("defaults", &self.defaults.map(|table| &table.name))
-            .field("size", &self.size)
-            .field("trees", &self.trees)
-            .field("structure", &self.structure)
-            .field("fields", &self.fields)
-            .field("extensions", &self.extensions)
             .finish_non_exhaustive()
     }
 }
 
 /// The interactive form's fields' fully qualified names, read once a file.
 #[derive(Debug, Default)]
-pub struct Fields(RefCell<Option<Rc<Names>>>);
+struct Fields(RefCell<Option<Rc<Names>>>);
 
 /// Fields' fully qualified names, as text, and whether they're all of
 /// them: every field read, and every partial name a string whose text
@@ -311,7 +406,7 @@ struct Names {
 /// objects it found by where `resolve` keeps them, so it serves one file,
 /// while its objects are kept.
 #[derive(Debug, Default)]
-pub struct Structure(RefCell<Option<Rc<Items>>>);
+struct Structure(RefCell<Option<Rc<Items>>>);
 
 /// What the structure tree says of its content items (ISO 32000-2,
 /// 14.7.5): the objects its object references (OBJR) point at, the pages
@@ -325,11 +420,23 @@ struct Items {
     whole_pages: bool,
 }
 
-/// The keys of a file's name trees, read once each, by where `resolve`
-/// keeps the tree's root: so it serves one file, while its objects are
-/// kept.
+/// The keys of a file's name trees, read once each, by the tree's root as
+/// [`Root`] knows it: so it serves one file. A root it can't know is read
+/// each time it's asked of.
 #[derive(Debug, Default)]
-pub struct Trees(RefCell<HashMap<usize, Rc<Tree>>>);
+struct Trees(RefCell<HashMap<Root, Rc<Tree>>>);
+
+/// A name tree's root, the object its own entry comes to: known by where
+/// it was written, which no other value of the file shares; or, written
+/// nowhere the reader says, by the number of the object its entry's
+/// references end at ([`entry_id`]). Not by where it's kept: a root in a
+/// container given for a row may be dropped after it, and another root
+/// take its place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Root {
+    At(Span),
+    Id(ObjectId),
+}
 
 /// A name tree's keys, and whether they're all of them: every node read,
 /// and every key a string whose bytes the reader gave.
@@ -580,9 +687,9 @@ fn note(e: &Expr, cx: &Cx) -> Option<Tri> {
         (g @ ("fn:SinceVersion" | "fn:BeforeVersion" | "fn:IsPDFVersion"), [v, inner]) => {
             let v = version_of(v)?;
             let applies = match g {
-                "fn:SinceVersion" => cx.version >= v,
-                "fn:BeforeVersion" => cx.version < v,
-                _ => cx.version == v,
+                "fn:SinceVersion" => cx.file.version >= v,
+                "fn:BeforeVersion" => cx.file.version < v,
+                _ => cx.file.version == v,
             };
             let ignored = note(inner, cx)?;
             Some(if applies { ignored } else { Tri::Vacant })
@@ -820,9 +927,9 @@ fn call(f: &str, args: &[Expr], cx: &Cx) -> Tri {
         // statement under it applies; under another, false, and the
         // statement applies nowhere (TestGrammar without the extension in
         // its `--extensions`).
-        ("fn:Extension", [Expr::Path(name)]) => Tri::Is(cx.extensions.contains(&name.text)),
+        ("fn:Extension", [Expr::Path(name)]) => Tri::Is(cx.file.extensions.contains(&name.text)),
         ("fn:Extension", [Expr::Path(name), statement]) => {
-            match cx.extensions.contains(&name.text) {
+            match cx.file.extensions.contains(&name.text) {
                 true => truth(statement, cx),
                 false => Tri::Vacant,
             }
@@ -930,8 +1037,8 @@ fn at_version(
         return Tri::Unknown(f.to_string());
     };
     match statement {
-        [] => Tri::Is(applies(cx.version, v)),
-        [statement] if applies(cx.version, v) => truth(statement, cx),
+        [] => Tri::Is(applies(cx.file.version, v)),
+        [statement] if applies(cx.file.version, v) => truth(statement, cx),
         [_] => Tri::Vacant,
         _ => Tri::Unknown(f.to_string()),
     }
@@ -987,7 +1094,7 @@ fn present(p: &Path, cx: &Cx) -> Tri {
 /// The object at the end of `keys` from `p`'s base: none when one of them
 /// isn't there; an error, `p` as written, for a `*` past the start, which
 /// only presence reads, and for a step that can't be told ([`step`]).
-fn walk<'a>(p: &Path, keys: &[String], cx: &Cx<'a>) -> Result<Option<&'a Object>, String> {
+fn walk<'c>(p: &Path, keys: &[String], cx: &Cx<'c, '_>) -> Result<Option<&'c Object>, String> {
     let (mut at, keys) = match (p.base, keys) {
         (Base::Here, [first, rest @ ..]) if wild(first) => {
             (value_at(cx.container, cx.at, cx), rest)
@@ -995,7 +1102,7 @@ fn walk<'a>(p: &Path, keys: &[String], cx: &Cx<'a>) -> Result<Option<&'a Object>
         (Base::Here, _) => (Some(cx.container), keys),
         (Base::Parent(n), _) => (parent(n, keys, cx), keys),
         (Base::Trailer, [first, rest @ ..]) => {
-            let entry = cx.trailer.get(first.as_bytes());
+            let entry = cx.file.trailer.get(first.as_bytes());
             (entry.and_then(|o| deref(o, cx)), rest)
         }
         (Base::Trailer, []) => return Err(p.text.clone()),
@@ -1020,7 +1127,7 @@ fn walk<'a>(p: &Path, keys: &[String], cx: &Cx<'a>) -> Result<Option<&'a Object>
 /// element's (ISO 32000-2, 14.7.5.3: "the page on which the object is
 /// shown, if not the structure element's /Pg"), while a DeviceN
 /// colourspace's attributes' `parent::1` indexes the array itself.
-fn parent<'a>(n: usize, keys: &[String], cx: &Cx<'a>) -> Option<&'a Object> {
+fn parent<'c>(n: usize, keys: &[String], cx: &Cx<'c, '_>) -> Option<&'c Object> {
     let mut at = n.checked_sub(1)?;
     let by_key = keys
         .first()
@@ -1040,7 +1147,7 @@ fn wild(key: &str) -> bool {
 /// when `o` is null or hasn't it. A name into an array, or any key into a
 /// value that isn't an array, a dictionary or a stream, can't be told
 /// (INTERNAL_GRAMMAR.md, "Parameters to predicates"): itself none.
-fn step<'a>(o: &'a Object, key: &str, cx: &Cx<'a>) -> Option<Option<&'a Object>> {
+fn step<'c>(o: &'c Object, key: &str, cx: &Cx<'c, '_>) -> Option<Option<&'c Object>> {
     let at = match deref(o, cx).map(|o| o.value()) {
         None => return Some(None),
         Some(Value::Array(_)) => At::Index(key.parse().ok()?),
@@ -1051,23 +1158,27 @@ fn step<'a>(o: &'a Object, key: &str, cx: &Cx<'a>) -> Option<Option<&'a Object>>
 }
 
 /// `o`'s entry at `at`, a stream's from its dictionary; none for null.
-fn value_at<'a>(o: &'a Object, at: At, cx: &Cx<'a>) -> Option<&'a Object> {
-    let entry = match (deref(o, cx)?.value(), at) {
+fn value_at<'c>(o: &'c Object, at: At, cx: &Cx<'c, '_>) -> Option<&'c Object> {
+    deref(entry(o, at, cx)?, cx)
+}
+
+/// `o`'s entry at `at` as written, its references not followed.
+fn entry<'c>(o: &'c Object, at: At, cx: &Cx<'c, '_>) -> Option<&'c Object> {
+    match (deref(o, cx)?.value(), at) {
         (Value::Dict(d), At::Key(key)) => d.get(key),
         (Value::Stream(s), At::Key(key)) => s.dict.get(key),
         (Value::Array(a), At::Index(i)) => a.get(i),
         _ => None,
-    }?;
-    deref(entry, cx)
+    }
 }
 
 /// `o` with its references followed, at most [`HOPS`]: none for null, or
 /// for a reference to an object the file hasn't, which is null (ISO
 /// 32000-2, 7.3.10).
-fn deref<'a>(mut o: &'a Object, cx: &Cx<'a>) -> Option<&'a Object> {
+fn deref<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Option<&'c Object> {
     for _ in 0..HOPS {
         match o.value() {
-            Value::Ref(id) => o = (cx.resolve)(*id)?,
+            Value::Ref(id) => o = (cx.file.resolve)(*id)?,
             Value::Null => return None,
             _ => return Some(o),
         }
@@ -1076,7 +1187,7 @@ fn deref<'a>(mut o: &'a Object, cx: &Cx<'a>) -> Option<&'a Object> {
 }
 
 /// Whether `o` is a dictionary or array with an entry that isn't null.
-fn has_entry<'a>(o: &'a Object, cx: &Cx<'a>) -> bool {
+fn has_entry<'c>(o: &'c Object, cx: &Cx<'c, '_>) -> bool {
     match o.value() {
         Value::Dict(d) => d.iter().any(|(_, v)| deref(v, cx).is_some()),
         Value::Array(a) => a.iter().any(|v| deref(v, cx).is_some()),
@@ -1167,7 +1278,7 @@ fn operand(e: &Expr, cx: &Cx) -> Result<Scalar, String> {
             }
             ("fn:ArrayLength", [k]) => array(k, cx).map(|a| Scalar::Int(a.len() as i64)),
             ("fn:StringLength", [k]) => string_length(k, cx),
-            ("fn:FileSize", []) => (cx.size)
+            ("fn:FileSize", []) => (cx.file.size)
                 .and_then(|n| i64::try_from(n).ok())
                 .map(Scalar::Int)
                 .ok_or_else(|| f.clone()),
@@ -1202,7 +1313,7 @@ fn rect(k: &Expr, cx: &Cx) -> Result<[f64; 4], String> {
 }
 
 /// The array at `k`, a key or path.
-fn array<'a>(k: &Expr, cx: &Cx<'a>) -> Result<&'a [Object], String> {
+fn array<'c>(k: &Expr, cx: &Cx<'c, '_>) -> Result<&'c [Object], String> {
     match k {
         Expr::Path(p) if !p.value => match walk(p, &p.keys, cx)?.map(|o| o.value()) {
             Some(Value::Array(a)) => Ok(a),
@@ -1317,13 +1428,21 @@ fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
         Ok(None) => return Tri::Is(false),
         Err(why) => return Tri::Unknown(why),
     };
-    let address = std::ptr::from_ref(root) as usize;
-    let known = cx.trees.0.borrow().get(&address).cloned();
-    let tree = known.unwrap_or_else(|| {
-        let read = Rc::new(name_tree(root, cx));
-        cx.trees.0.borrow_mut().insert(address, Rc::clone(&read));
-        read
-    });
+    let known = match root.at {
+        Some(at) => Some(Root::At(at)),
+        None => entry_id(tree, cx).map(Root::Id),
+    };
+    let tree = match known {
+        Some(known) => {
+            let kept = cx.file.trees.0.borrow().get(&known).cloned();
+            kept.unwrap_or_else(|| {
+                let read = Rc::new(name_tree(root, cx));
+                cx.file.trees.0.borrow_mut().insert(known, Rc::clone(&read));
+                read
+            })
+        }
+        None => Rc::new(name_tree(root, cx)),
+    };
     match (tree.keys.contains(key), tree.whole) {
         (true, _) => Tri::Is(true),
         (false, true) => Tri::Is(false),
@@ -1331,10 +1450,47 @@ fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
     }
 }
 
+/// The number of the object at the end of `p` when its own entry, the
+/// last on the way, is a reference: the last of the references that
+/// entry starts, as [`deref`] follows them, never one followed before it.
+/// None when the entry is written directly, `p` names none (the container
+/// itself, or a parent), or doesn't reach one.
+fn entry_id(p: &Path, cx: &Cx) -> Option<ObjectId> {
+    let (last, before) = p.keys.split_last()?;
+    let raw = match (p.base, before) {
+        (Base::Here, []) if wild(last) => entry(cx.container, cx.at, cx),
+        (Base::Trailer, []) => cx.file.trailer.get(last.as_bytes()),
+        _ => {
+            // What holds the entry, as [`walk`] reaches it: a parent by the
+            // whole path, whose first key says which.
+            let holder = match (p.base, before) {
+                (Base::Parent(n), []) => parent(n, &p.keys, cx),
+                _ => walk(p, before, cx).ok().flatten(),
+            }?;
+            let at = match deref(holder, cx)?.value() {
+                Value::Array(_) => At::Index(last.parse().ok()?),
+                _ => At::Key(last.as_bytes()),
+            };
+            entry(holder, at, cx)
+        }
+    }?;
+    let (mut o, mut id) = (raw, None);
+    for _ in 0..HOPS {
+        match o.value() {
+            Value::Ref(to) => {
+                id = Some(*to);
+                o = (cx.file.resolve)(*to)?;
+            }
+            _ => return id,
+        }
+    }
+    None
+}
+
 /// The keys of the name tree at `root` (ISO 32000-2, 7.9.6): each node's
 /// `/Names` pairs' first, through its `/Kids`, each node once, as deep and
 /// as many as [`TREE_DEPTH`] and [`TREE_NODES`] let.
-fn name_tree<'a>(root: &'a Object, cx: &Cx<'a>) -> Tree {
+fn name_tree<'c>(root: &'c Object, cx: &Cx<'c, '_>) -> Tree {
     let mut tree = Tree {
         keys: HashSet::new(),
         whole: true,
@@ -1402,10 +1558,10 @@ fn field_name(f: &str, p: &Path, cx: &Cx) -> Tri {
         Ok(None) => return Tri::Unknown(p.text.clone()),
         Err(why) => return Tri::Unknown(why),
     };
-    let known = cx.fields.0.borrow().clone();
+    let known = cx.file.fields.0.borrow().clone();
     let fields = known.unwrap_or_else(|| {
         let read = Rc::new(field_names(cx));
-        *cx.fields.0.borrow_mut() = Some(Rc::clone(&read));
+        *cx.file.fields.0.borrow_mut() = Some(Rc::clone(&read));
         read
     });
     match (fields.names.contains(&name), fields.whole) {
@@ -1422,12 +1578,12 @@ fn field_name(f: &str, p: &Path, cx: &Cx) -> Tri {
 /// of the same underlying field"), and one at the top without it, none.
 /// Each node once, as deep and as many as [`TREE_DEPTH`] and
 /// [`TREE_NODES`] let.
-fn field_names<'a>(cx: &Cx<'a>) -> Names {
+fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
     let mut names = Names {
         names: HashSet::new(),
         whole: true,
     };
-    let fields = (cx.trailer.get(b"Root").and_then(|o| deref(o, cx)))
+    let fields = (cx.file.trailer.get(b"Root").and_then(|o| deref(o, cx)))
         .and_then(|catalog| value_at(catalog, At::Key(b"AcroForm"), cx))
         .and_then(|form| value_at(form, At::Key(b"Fields"), cx));
     let Some(fields) = fields else {
@@ -1435,7 +1591,7 @@ fn field_names<'a>(cx: &Cx<'a>) -> Names {
     };
     let mut seen = HashSet::new();
     // Each node, its parent's name, and its depth.
-    let mut nodes: Vec<(&'a Object, Option<Rc<str>>, usize)> = vec![(fields, None, 0)];
+    let mut nodes: Vec<(&'c Object, Option<Rc<str>>, usize)> = vec![(fields, None, 0)];
     while let Some((node, parent, depth)) = nodes.pop() {
         if depth > TREE_DEPTH || seen.len() >= TREE_NODES {
             names.whole = false;
@@ -1509,10 +1665,10 @@ fn content_item(f: &str, found: &HashSet<usize>, whole: bool, cx: &Cx) -> Tri {
 /// The structure tree's content items ([`Items`]), read the first time
 /// they're asked for.
 fn items(cx: &Cx) -> Rc<Items> {
-    let known = cx.structure.0.borrow().clone();
+    let known = cx.file.structure.0.borrow().clone();
     known.unwrap_or_else(|| {
         let read = Rc::new(structure(cx));
-        *cx.structure.0.borrow_mut() = Some(Rc::clone(&read));
+        *cx.file.structure.0.borrow_mut() = Some(Rc::clone(&read));
         read
     })
 }
@@ -1526,7 +1682,7 @@ fn items(cx: &Cx) -> Rc<Items> {
 /// (OBJR, to their `/Obj`). An MCR or OBJR is told by its `/Type`, or
 /// without one by its `/MCID` or `/Obj` where an element would have `/S`.
 /// A file without a structure tree has no content items.
-fn structure<'a>(cx: &Cx<'a>) -> Items {
+fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
     let mut items = Items {
         objects: HashSet::new(),
         pages: HashSet::new(),
@@ -1534,14 +1690,14 @@ fn structure<'a>(cx: &Cx<'a>) -> Items {
         whole_pages: true,
     };
     let address = |o: &Object| std::ptr::from_ref(o) as usize;
-    let Some(root) = (cx.trailer.get(b"Root").and_then(|o| deref(o, cx)))
+    let Some(root) = (cx.file.trailer.get(b"Root").and_then(|o| deref(o, cx)))
         .and_then(|catalog| value_at(catalog, At::Key(b"StructTreeRoot"), cx))
     else {
         return items;
     };
     let mut seen = HashSet::new();
     // Each node, the page of the element it's a kid of, and its depth.
-    let mut nodes: Vec<(&'a Object, Option<usize>, usize)> = Vec::new();
+    let mut nodes: Vec<(&'c Object, Option<usize>, usize)> = Vec::new();
     if let Some(kids) = value_at(root, At::Key(b"K"), cx) {
         nodes.push((kids, None, 0));
     }
@@ -2336,23 +2492,32 @@ mod tests {
             f: impl FnOnce(&Cx) -> T,
         ) -> T {
             let resolve = |id: ObjectId| self.objects.get(&id);
-            let trees = Trees::default();
-            let structure = Structure::default();
-            let fields = Fields::default();
-            f(&Cx {
-                container,
-                at,
-                parents,
-                trailer: &self.trailer,
-                resolve: &resolve,
-                version: v(version),
-                defaults,
-                size: self.size,
-                trees: &trees,
-                structure: &structure,
-                fields: &fields,
-                extensions: &self.extensions,
-            })
+            let file = FileCx::new(&self.trailer, v(version), &resolve)
+                .size(self.size)
+                .extensions(&self.extensions);
+            f(&file.at(container, at).parents(parents).defaults(defaults))
+        }
+
+        /// What `f` says over one [`FileCx`] of this file at `version`,
+        /// every row it makes reading the same; and how many times each
+        /// object was resolved.
+        fn counted<T>(
+            &self,
+            version: &str,
+            f: impl FnOnce(&FileCx) -> T,
+        ) -> (T, BTreeMap<ObjectId, usize>) {
+            let resolved = RefCell::new(BTreeMap::new());
+            let said = {
+                let resolve = |id: ObjectId| {
+                    *resolved.borrow_mut().entry(id).or_insert(0) += 1;
+                    self.objects.get(&id)
+                };
+                let file = FileCx::new(&self.trailer, v(version), &resolve)
+                    .size(self.size)
+                    .extensions(&self.extensions);
+                f(&file)
+            };
+            (said, resolved.into_inner())
         }
     }
 
@@ -3120,36 +3285,186 @@ mod tests {
         );
     }
 
+    /// Bytes `n` of the file: where a value was written.
+    fn written(n: usize) -> Span {
+        Span::new(None, n, n + 1)
+    }
+
+    /// A name tree's leaf of `keys`.
+    fn leaf(keys: &[&str]) -> Object {
+        let names: Vec<Object> = (keys.iter())
+            .flat_map(|k| [Object::string(k), Object::from(0)])
+            .collect();
+        dict! { "Names" => names }.into()
+    }
+
+    /// Whether each of `keys`, a row of a container of its own made for
+    /// it, is in the name tree at `tree`, over `file`.
+    fn in_tree(file: &FileCx, tree: &str, keys: &[&str]) -> Vec<Truth> {
+        let text = format!("fn:InNameTree({tree})");
+        (keys.iter())
+            .map(|key| {
+                let container = Object::from(dict! { "X" => Object::string(key) });
+                holds(&text, &file.at(&container, At::Key(b"X")))
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_name_trees_keys_are_read_once() {
-        let file = bare();
-        let names = vec![
-            Object::new(Value::String(Str::Bytes(b"a".to_vec()), None)),
-            Object::from(0),
-        ];
-        let tree = Object::from(dict! { "Names" => names });
-        let trees = Trees::default();
-        let resolve = |id: ObjectId| file.objects.get(&id);
-        let x = Object::from(
-            dict! { "T" => tree, "X" => Object::new(Value::String(Str::Bytes(b"a".to_vec()), None)) },
+    fn a_name_tree_is_read_once_for_every_row_of_a_file() {
+        // The catalog's /Dests, by reference, over a kid by reference,
+        // which only reading the tree resolves: each row's own path
+        // resolves the catalog and the root.
+        let catalog =
+            dict! { "Type" => "Catalog", "Names" => dict! { "Dests" => Object::reference(2) } };
+        let root = dict! { "Kids" => vec![Object::reference(3)] };
+        let file = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [
+                (1, Object::from(catalog).at(written(10))),
+                (2, Object::from(root).at(written(20))),
+                (3, leaf(&["a", "b"]).at(written(30))),
+            ],
         );
-        let cx = Cx {
-            container: &x,
-            at: At::Key(b"X"),
-            parents: &[],
-            trailer: &file.trailer,
-            resolve: &resolve,
-            version: v("1.7"),
-            defaults: None,
-            size: None,
-            trees: &trees,
-            structure: &Structure::default(),
-            fields: &Fields::default(),
-            extensions: &none(),
+        let tree = "trailer::Catalog::Names::Dests";
+        let (said, resolved) = file.counted("1.7", |file| {
+            in_tree(file, tree, &["a", "b", "c", "a", "b", "c"])
+        });
+        let (t, f) = (Truth::True, Truth::False);
+        assert_eq!(said, [t.clone(), t.clone(), f.clone(), t.clone(), t, f]);
+        assert_eq!(resolved[&(3, 0)], 1, "the kid, read once");
+        assert_eq!(resolved[&(2, 0)], 6, "the root, once a row");
+    }
+
+    #[test]
+    fn a_name_tree_is_kept_by_where_its_root_was_written_or_its_number() {
+        // A root over a kid by reference, 3, which only reading the tree
+        // resolves: the catalog's /Dests, written directly or by
+        // reference, to 2; placed or not.
+        let root = || Object::from(dict! { "Kids" => vec![Object::reference(3)] });
+        let file = |dests: Object, two: Option<Object>| {
+            let catalog = dict! { "Type" => "Catalog", "Names" => dict! { "Dests" => dests } };
+            let mut objects = vec![(1, Object::from(catalog)), (3, leaf(&["a"]))];
+            objects.extend(two.map(|two| (2, two)));
+            File::new(dict! { "Root" => Object::reference(1) }, objects)
         };
-        assert_eq!(holds("fn:InNameTree(T)", &cx), Truth::True);
-        assert_eq!(holds("fn:InNameTree(T)", &cx), Truth::True);
-        assert_eq!(trees.0.borrow().len(), 1);
+        // The answers, each the same; and how often the kid is read.
+        let reads = |file: &File| {
+            let (said, resolved) = file.counted("1.7", |file| {
+                in_tree(
+                    file,
+                    "trailer::Catalog::Names::Dests",
+                    &["a", "c", "a", "c"],
+                )
+            });
+            let (t, f) = (Truth::True, Truth::False);
+            assert_eq!(said, [t.clone(), f.clone(), t, f]);
+            resolved[&(3, 0)]
+        };
+        // Where it was written, directly or by reference.
+        assert_eq!(reads(&file(root().at(written(20)), None)), 1);
+        let two = Some(root().at(written(20)));
+        assert_eq!(reads(&file(Object::reference(2), two)), 1);
+        // Not placed: by its number.
+        assert_eq!(reads(&file(Object::reference(2), Some(root()))), 1);
+        // Neither: read for each row.
+        assert_eq!(reads(&file(root(), None)), 4);
+
+        // A container's own, built in memory: read for each row; placed,
+        // once.
+        for (root, reads) in [(root(), 4), (root().at(written(40)), 1)] {
+            let file = file(Object::null(), None);
+            let ((), resolved) = file.counted("1.7", |file| {
+                for (key, holds_it) in [("a", true), ("c", false), ("a", true), ("c", false)] {
+                    let container =
+                        Object::from(dict! { "T" => root.clone(), "X" => Object::string(key) });
+                    let said = holds("fn:InNameTree(T)", &file.at(&container, At::Key(b"X")));
+                    assert_eq!(said == Truth::True, holds_it, "{key}");
+                }
+            });
+            assert_eq!(resolved[&(3, 0)], reads);
+        }
+    }
+
+    #[test]
+    fn two_name_trees_written_directly_in_one_catalog_each_hold_their_own_keys() {
+        // /Dests and /EmbeddedFiles, each written directly in the
+        // catalog's /Names, itself direct: no reference names either but
+        // the catalog's, which names both.
+        for placed in [true, false] {
+            let (mut dests, mut files) = (leaf(&["d"]), leaf(&["e"]));
+            if placed {
+                (dests, files) = (dests.at(written(20)), files.at(written(30)));
+            }
+            let names = dict! { "Dests" => dests, "EmbeddedFiles" => files };
+            let catalog = dict! { "Type" => "Catalog", "Names" => names };
+            let file = File::new(
+                dict! { "Root" => Object::reference(1) },
+                [(1, Object::from(catalog).at(written(10)))],
+            );
+            let (said, _) = file.counted("1.7", |file| {
+                let tree = |name: &str| format!("trailer::Catalog::Names::{name}");
+                [
+                    in_tree(file, &tree("Dests"), &["d", "e"]),
+                    in_tree(file, &tree("EmbeddedFiles"), &["d", "e"]),
+                    in_tree(file, &tree("Dests"), &["d", "e"]),
+                ]
+            });
+            let (t, f) = (Truth::True, Truth::False);
+            let dests = vec![t.clone(), f.clone()];
+            assert_eq!(said, [dests.clone(), vec![f, t], dests], "placed: {placed}");
+        }
+    }
+
+    #[test]
+    fn rows_of_containers_made_and_dropped_in_turn_read_their_own_trees() {
+        // One file; containers made for a row and dropped after it, each
+        // with a tree of its own written directly under the same key, and
+        // a row of its own key and of the one before's.
+        let file = bare();
+        let key = |i: usize| Object::string(&format!("k{i}"));
+        let tree = |i: usize, placed: bool| {
+            let tree = Object::from(dict! { "Names" => vec![key(i), Object::from(0)] });
+            match placed {
+                true => tree.at(written(100 + 10 * i)),
+                false => tree,
+            }
+        };
+        let rows = |file: &FileCx, container: &Object| {
+            let row = |at: &[u8]| holds("fn:InNameTree(T)", &file.at(container, At::Key(at)));
+            (row(b"X"), row(b"Y"))
+        };
+        let own = vec![(Truth::True, Truth::False); 8];
+        for placed in [true, false] {
+            let (said, _) = file.counted("1.7", |file| {
+                (1..9)
+                    .map(|i| {
+                        let container =
+                            dict! { "T" => tree(i, placed), "X" => key(i), "Y" => key(i - 1) };
+                        rows(file, &container.into())
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(said, own, "placed: {placed}");
+            // One container, its tree replaced in turn: each kept where the
+            // one before it was.
+            let (said, _) = file.counted("1.7", |file| {
+                let mut container = Object::from(dict! { "T" => Object::null() });
+                let mut kept = None;
+                (1..9)
+                    .map(|i| {
+                        let dict = container.as_dict_mut().unwrap();
+                        dict.set("T", tree(i, placed));
+                        dict.set("X", key(i));
+                        dict.set("Y", key(i - 1));
+                        let at = std::ptr::from_ref(dict.get(b"T").unwrap());
+                        assert_eq!(*kept.get_or_insert(at), at, "kept in the same place");
+                        rows(file, &container)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(said, own, "placed: {placed}, in turn in one container");
+        }
     }
 
     #[test]
