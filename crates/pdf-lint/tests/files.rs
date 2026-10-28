@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pdf_lint::bytes::read_opened;
-use pdf_lint::{Document, Encryption, Hold, Made, Object, Options, Str, Value, check};
+use pdf_lint::{Document, Encryption, Form, Hold, Made, Object, Options, Str, Value, check};
 
 /// Each fixture's name, whether its dictionaries are in object streams,
 /// and whether it's encrypted, with the empty user password and `owner`
@@ -58,9 +58,15 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
             "{name}: in an object stream or not"
         );
         let contents = annotation.as_dict().unwrap().get(b"Contents").unwrap();
+        // As qpdf wrote it: literal, but ciphertext outside an object
+        // stream, which it writes as a hex string.
+        let form = match encrypted && !packed {
+            true => Form::Hex,
+            false => Form::Literal,
+        };
         assert_eq!(
             contents.value,
-            Value::String(Str::Bytes(b"A note".to_vec())),
+            Value::String(Str::Bytes(b"A note".to_vec()), Some(form)),
             "{name}"
         );
         // Clean, but for what the model finds of the encryption itself

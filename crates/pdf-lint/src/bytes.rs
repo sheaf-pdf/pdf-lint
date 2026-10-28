@@ -253,7 +253,6 @@ fn reading(
         resolving: false,
         decoded: BTreeMap::new(),
         update: None,
-        hex: BTreeSet::new(),
     };
     let header = reader.header();
     let sections = match section {
@@ -286,7 +285,6 @@ fn reading(
         decoded: reader.decoded,
         update: reader.update,
         size: Some(file.len()),
-        hex: Some(reader.hex),
         metadata,
         encryption: reader.encryption,
     };
@@ -378,15 +376,12 @@ struct Reader<'a> {
     decoded: BTreeMap<ObjectId, Vec<u8>>,
     /// The newest section, when it updates one written before it.
     update: Option<Update>,
-    /// Where the strings written as hex strings are.
-    hex: BTreeSet<Span>,
 }
 
-/// The reader's warnings, on object `object` (none, a trailer), and where
-/// its hex strings are: where the parser's faults go.
+/// The reader's warnings, on object `object` (none, a trailer): where the
+/// parser's faults go.
 struct Warned<'r> {
     warnings: &'r mut Vec<Warning>,
-    hex: &'r mut BTreeSet<Span>,
     object: Option<ObjectId>,
 }
 
@@ -397,10 +392,6 @@ impl Sink<'_> for Warned<'_> {
             at: Some(at),
             message: fault.to_string(),
         });
-    }
-
-    fn hex(&mut self, at: Span) {
-        self.hex.insert(at);
     }
 }
 
@@ -528,7 +519,6 @@ impl<'a> Reader<'a> {
     fn warned(&mut self, object: Option<ObjectId>) -> Warned<'_> {
         Warned {
             warnings: &mut self.warnings,
-            hex: &mut self.hex,
             object,
         }
     }
@@ -1421,7 +1411,7 @@ impl<'a> Reader<'a> {
             }
         };
         let bytes = |o: Option<Object>| match o.map(|o| o.value) {
-            Some(Value::String(s)) => Some(s.as_bytes().map(<[u8]>::to_vec).unwrap_or_default()),
+            Some(Value::String(s, _)) => Some(s.as_bytes().map(<[u8]>::to_vec).unwrap_or_default()),
             _ => None,
         };
         let name = |o: Option<Object>| o.and_then(|o| o.as_name().map(<[u8]>::to_vec));
@@ -1464,7 +1454,7 @@ impl<'a> Reader<'a> {
         // the standard handler takes the dictionary, when it isn't a string.
         let id = match get(trailer.dict().get(b"ID")).map(|o| o.value) {
             Some(Value::Array(id)) => match id.first().map(|o| &o.value) {
-                Some(Value::String(s)) => s.as_bytes().map(<[u8]>::to_vec),
+                Some(Value::String(s, _)) => s.as_bytes().map(<[u8]>::to_vec),
                 _ => None,
             },
             _ => None,
@@ -1742,7 +1732,7 @@ impl<'a> Reader<'a> {
         let open = |o: &Object| {
             !matches!(
                 o.value,
-                Value::String(_) | Value::Array(_) | Value::Dict(_) | Value::Stream(_)
+                Value::String(..) | Value::Array(_) | Value::Dict(_) | Value::Stream(_)
             )
         };
         let cut = self.cut.contains(&stream)
@@ -1887,7 +1877,7 @@ fn plaintext(
 ) {
     let at = o.at;
     match &mut o.value {
-        Value::String(s) => {
+        Value::String(s, _) => {
             if let Str::Encrypted(bytes) = s {
                 match handler.decrypt_string(id, bytes) {
                     Ok(plain) => *s = Str::Bytes(plain),
@@ -1906,7 +1896,10 @@ fn plaintext(
             }
         }
         Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
-            let contents = matches!(d.get(b"Contents").map(|c| &c.value), Some(Value::String(_)));
+            let contents = matches!(
+                d.get(b"Contents").map(|c| &c.value),
+                Some(Value::String(..))
+            );
             let typed = (d.get(b"Type"))
                 .is_none_or(|t| matches!(t.as_name(), Some(b"Sig" | b"DocTimeStamp")));
             let signature = d.has(b"ByteRange") && contents && typed;
@@ -1926,7 +1919,7 @@ fn plain_strings(o: &mut Object) {
     let mut stack = vec![o];
     while let Some(o) = stack.pop() {
         match &mut o.value {
-            Value::String(s) => {
+            Value::String(s, _) => {
                 if let Str::Encrypted(bytes) = s {
                     *s = Str::Bytes(std::mem::take(bytes));
                 }
@@ -1943,7 +1936,7 @@ fn plain_strings(o: &mut Object) {
 /// How many strings in `value` are ciphertext.
 fn ciphertexts(value: &Value) -> usize {
     match value {
-        Value::String(Str::Encrypted(_)) => 1,
+        Value::String(Str::Encrypted(_), _) => 1,
         Value::Array(a) => a.iter().map(|o| ciphertexts(&o.value)).sum(),
         Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => d
             .entries()
@@ -1961,8 +1954,8 @@ fn ciphertexts(value: &Value) -> usize {
 fn decrypted(object: &mut Object, plain: &Object) -> usize {
     match (&mut object.value, &plain.value) {
         (
-            Value::String(s @ Str::Encrypted(_)),
-            Value::String(p @ (Str::Bytes(_) | Str::Text(_))),
+            Value::String(s @ Str::Encrypted(_), _),
+            Value::String(p @ (Str::Bytes(_) | Str::Text(_)), _),
         ) => {
             *s = p.clone();
             0
@@ -2017,12 +2010,15 @@ fn offset_of(o: &Object) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::dict;
+    use crate::object::Form;
     use crate::source::Source;
     use crate::write::{self, Body, Xref};
 
-    /// `o` with every place it was written left out.
+    /// `o` with every place it was written, and every string's form, left
+    /// out.
     fn plain(o: &Object) -> Object {
         Object::new(match &o.value {
+            Value::String(s, _) => Value::String(s.clone(), None),
             Value::Array(a) => Value::Array(a.iter().map(plain).collect()),
             Value::Dict(d) => Value::Dict(plain_dict(d)),
             Value::Stream(s) => Value::Stream(Stream {
@@ -2066,7 +2062,7 @@ mod tests {
                 let mut stack = vec![&mut o];
                 while let Some(o) = stack.pop() {
                     match &mut o.value {
-                        Value::String(s) => *s = Str::Bytes(Vec::new()),
+                        Value::String(s, _) => *s = Str::Bytes(Vec::new()),
                         Value::Array(a) => stack.extend(a.iter_mut()),
                         Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
                             stack.extend(d.entries_mut().map(|entry| &mut entry.value));
@@ -2093,7 +2089,9 @@ mod tests {
             Value::Dict(_) | Value::Stream(_) => assert!(written.starts_with(b"<<")),
             Value::Array(_) => assert!(ends(b"[", b"]")),
             Value::Name(_) => assert_eq!(first, b'/'),
-            Value::String(_) => assert!(ends(b"(", b")") || ends(b"<", b">")),
+            Value::String(_, Some(Form::Literal)) => assert!(ends(b"(", b")")),
+            Value::String(_, Some(Form::Hex)) => assert!(ends(b"<", b">")),
+            Value::String(_, None) => panic!("a string read from its bytes has its form"),
             Value::Ref(_) => assert_eq!(last, b'R'),
             _ => {}
         }
@@ -2707,7 +2705,7 @@ mod tests {
             .unwrap()
             .value
         {
-            Value::String(s) => s.clone(),
+            Value::String(s, _) => s.clone(),
             _ => panic!("not a string"),
         };
         let doc = encrypted("2");
@@ -2715,7 +2713,7 @@ mod tests {
         assert_eq!(string(&doc, 2, b"O"), Str::Bytes(b"owner".to_vec()));
         let id = doc.trailer.dict().get(b"ID").unwrap();
         assert!(
-            matches!(&id.value, Value::Array(a) if matches!(a[0].value, Value::String(Str::Bytes(_))))
+            matches!(&id.value, Value::Array(a) if matches!(a[0].value, Value::String(Str::Bytes(_), _)))
         );
         // A version 4 dictionary without /StrF leaves strings as they are.
         let doc = encrypted("4");
@@ -3393,7 +3391,7 @@ mod tests {
         };
         if !extra.is_empty() {
             let raw: Vec<Object> = (extra.iter())
-                .map(|b| Object::new(Value::String(Str::Encrypted(b.to_vec()))))
+                .map(|b| Object::new(Value::String(Str::Encrypted(b.to_vec()), None)))
                 .collect();
             note.set("Raw", raw);
         }
@@ -3401,7 +3399,7 @@ mod tests {
             "Type" => "Sig",
             "Filter" => "Adobe.PPKLite",
             "ByteRange" => vec![Object::from(0), Object::from(1), Object::from(2), Object::from(3)],
-            "Contents" => Object::new(Value::String(Str::Bytes(vec![0x30, 0x82, 0x00, 0x01]))),
+            "Contents" => Object::new(Value::String(Str::Bytes(vec![0x30, 0x82, 0x00, 0x01]), None)),
         };
         vec![
             (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Lang" => Object::string("en") }.into()),
@@ -3455,7 +3453,7 @@ mod tests {
                 let lang = get(1, b"Lang");
                 assert_eq!(
                     lang.value,
-                    Value::String(Str::Bytes(b"en".to_vec())),
+                    Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
                     "{kind:?}"
                 );
                 // Where the string is written, as ciphertext.
@@ -3467,13 +3465,16 @@ mod tests {
                 );
                 assert_eq!(
                     get(4, b"Contents").value,
-                    Value::String(Str::Bytes(b"A note".to_vec())),
+                    Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal)),
                     "{kind:?}"
                 );
                 // A signature's /Contents isn't encrypted, so not decrypted.
                 assert_eq!(
                     get(5, b"Contents").value,
-                    Value::String(Str::Bytes(vec![0x30, 0x82, 0x00, 0x01])),
+                    Value::String(
+                        Str::Bytes(vec![0x30, 0x82, 0x00, 0x01]),
+                        Some(Form::Literal)
+                    ),
                     "{kind:?}"
                 );
             }
@@ -3521,7 +3522,7 @@ mod tests {
                 .get(b"Lang")
                 .unwrap()
                 .clone();
-            assert!(matches!(lang.value, Value::String(Str::Encrypted(_))));
+            assert!(matches!(lang.value, Value::String(Str::Encrypted(_), _)));
         }
     }
 
@@ -3552,7 +3553,7 @@ mod tests {
             .get(b"Lang")
             .unwrap()
             .clone();
-        assert!(matches!(lang.value, Value::String(Str::Encrypted(_))));
+        assert!(matches!(lang.value, Value::String(Str::Encrypted(_), _)));
     }
 
     #[test]
@@ -3587,7 +3588,7 @@ mod tests {
             let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
             assert_eq!(
                 lang.unwrap().value,
-                Value::String(Str::Bytes(b"en".to_vec()))
+                Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal))
             );
         }
         // Its password opens it all the same.
@@ -3671,7 +3672,7 @@ mod tests {
             let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
             assert_eq!(
                 lang.unwrap().value,
-                Value::String(Str::Bytes(b"en".to_vec())),
+                Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
                 "{to}"
             );
             // What its values refer to is its own, not encrypted.
@@ -3771,7 +3772,7 @@ mod tests {
         let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
         assert_eq!(
             lang.unwrap().value,
-            Value::String(Str::Bytes(b"en".to_vec()))
+            Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal))
         );
     }
 
@@ -3784,7 +3785,7 @@ mod tests {
             let mut d = dict! {
                 "Filter" => "Adobe.PPKLite",
                 "ByteRange" => vec![Object::from(0), Object::from(1), Object::from(2), Object::from(3)],
-                "Contents" => Object::new(Value::String(Str::Bytes(der.clone()))),
+                "Contents" => Object::new(Value::String(Str::Bytes(der.clone()), None)),
             };
             if let Some(typed) = typed {
                 d.set("Type", typed);
@@ -3811,7 +3812,7 @@ mod tests {
             let contents = doc.get((n, 0)).unwrap().as_dict().unwrap().get(b"Contents");
             assert_eq!(
                 contents.unwrap().value,
-                Value::String(Str::Bytes(der.clone())),
+                Value::String(Str::Bytes(der.clone()), Some(Form::Literal)),
                 "{n}"
             );
         }
@@ -3847,7 +3848,7 @@ mod tests {
             let o = &dict.get(b"O").unwrap().value;
             assert_eq!(
                 o,
-                &Value::String(Str::Bytes(written.clone().unwrap())),
+                &Value::String(Str::Bytes(written.clone().unwrap()), Some(Form::Literal)),
                 "{n}"
             );
         }
@@ -3880,11 +3881,11 @@ mod tests {
         let note = doc.get((4, 0)).unwrap().as_dict().unwrap().clone();
         assert_eq!(
             note.get(b"Contents").unwrap().value,
-            Value::String(Str::Bytes(b"A note".to_vec()))
+            Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal))
         );
         let raw = note.get(b"Raw").unwrap();
         assert!(
-            matches!(&raw.value, Value::Array(a) if matches!(a[0].value, Value::String(Str::Encrypted(_))))
+            matches!(&raw.value, Value::Array(a) if matches!(a[0].value, Value::String(Str::Encrypted(_), _)))
         );
     }
 
@@ -4062,7 +4063,7 @@ mod tests {
             .unwrap()
             .value
         {
-            Value::String(s) => s.clone(),
+            Value::String(s, _) => s.clone(),
             other => panic!("{other:?}"),
         };
         assert_eq!(
@@ -4234,7 +4235,10 @@ mod tests {
         );
         let catalog = doc.get((1, 0)).unwrap().as_dict().unwrap();
         let lang = catalog.get(b"Lang").unwrap();
-        assert_eq!(lang.value, Value::String(Str::Bytes(b"en".to_vec())));
+        assert_eq!(
+            lang.value,
+            Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal))
+        );
         let at = lang.at.unwrap();
         assert_eq!(
             &file[at.start..at.end],
@@ -4248,8 +4252,8 @@ mod tests {
         assert_eq!(
             dup,
             [
-                Value::String(Str::Encrypted(b"aa".to_vec())),
-                Value::String(Str::Bytes(b"BB".to_vec()))
+                Value::String(Str::Encrypted(b"aa".to_vec()), Some(Form::Literal)),
+                Value::String(Str::Bytes(b"BB".to_vec()), Some(Form::Literal))
             ],
             "only the last entry has a place in the plaintext"
         );
@@ -4258,15 +4262,16 @@ mod tests {
         let short = plain(catalog.get(b"Short").unwrap());
         assert_eq!(
             short,
-            Object::from(vec![Object::new(Value::String(Str::Encrypted(
-                b"s1".to_vec()
-            )))]),
+            Object::from(vec![Object::new(Value::String(
+                Str::Encrypted(b"s1".to_vec()),
+                None
+            ))]),
             "an array of another length has no places"
         );
         let t = doc.get((3, 0)).unwrap().as_dict().unwrap().get(b"T");
         assert_eq!(
             t.unwrap().value,
-            Value::String(Str::Encrypted(b"tt".to_vec()))
+            Value::String(Str::Encrypted(b"tt".to_vec()), Some(Form::Literal))
         );
         let warnings: Vec<_> = doc.warnings.iter().map(|w| w.message.as_str()).collect();
         assert_eq!(
@@ -4286,7 +4291,7 @@ mod tests {
         let catalog = doc.get((1, 0)).unwrap().as_dict().unwrap();
         assert_eq!(
             catalog.get(b"Lang").unwrap().value,
-            Value::String(Str::Encrypted(b"xx".to_vec()))
+            Value::String(Str::Encrypted(b"xx".to_vec()), Some(Form::Literal))
         );
         let warnings: Vec<_> = doc.warnings.iter().map(|w| w.message.as_str()).collect();
         assert!(

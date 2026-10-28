@@ -54,8 +54,9 @@ pub enum Value {
     Real(f64),
     /// A name's bytes, its `#xx` escapes decoded.
     Name(Vec<u8>),
-    /// A string, literal or hex.
-    String(Str),
+    /// A string, and its form when it was written or chosen: none for one
+    /// built without choosing, or read by a reader that doesn't say.
+    String(Str, Option<Form>),
     /// An array: its elements, in order.
     Array(Vec<Object>),
     /// A dictionary.
@@ -81,6 +82,15 @@ pub enum Str {
     /// Ciphertext as written, in an encrypted file its reader doesn't
     /// decrypt: what depends on its value can't be told.
     Encrypted(Vec<u8>),
+}
+
+/// How a string was written (ISO 32000-2, 7.3.4.2 and 7.3.4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Form {
+    /// A literal string, `(...)`.
+    Literal,
+    /// A hex string, `<...>`.
+    Hex,
 }
 
 /// A dictionary: its entries as written, in order. Lookups take a key's
@@ -126,14 +136,19 @@ impl Object {
         Object::new(Value::Ref((n, 0)))
     }
 
-    /// A string of `text`'s bytes.
+    /// A string of `text`'s bytes, its form not chosen.
     pub fn string(text: &str) -> Object {
-        Object::new(Value::String(Str::Bytes(text.as_bytes().to_vec())))
+        Object::new(Value::String(Str::Bytes(text.as_bytes().to_vec()), None))
     }
 
-    /// A string of `bytes`.
+    /// A string of `bytes`, its form not chosen.
     pub fn bytes(bytes: impl Into<Vec<u8>>) -> Object {
-        Object::new(Value::String(Str::Bytes(bytes.into())))
+        Object::new(Value::String(Str::Bytes(bytes.into()), None))
+    }
+
+    /// A string of `bytes`, written as a hex string.
+    pub fn hex(bytes: impl Into<Vec<u8>>) -> Object {
+        Object::new(Value::String(Str::Bytes(bytes.into()), Some(Form::Hex)))
     }
 
     /// A stream of `dict`, whose data isn't placed.
@@ -435,5 +450,10 @@ mod tests {
         };
         assert_eq!(Object::from(1).at(span).at, Some(span));
         assert_eq!(Str::Text("x".to_string()).as_bytes(), None);
+        let hex = Value::String(Str::Bytes(b"x".to_vec()), Some(Form::Hex));
+        assert_eq!(Object::hex(*b"x").value, hex);
+        let unchosen = Value::String(Str::Bytes(b"x".to_vec()), None);
+        assert_eq!(Object::bytes(*b"x").value, unchosen);
+        assert_eq!(Object::string("x").value, unchosen);
     }
 }

@@ -26,12 +26,6 @@ pub trait Source {
     fn size(&self) -> Option<usize> {
         None
     }
-    /// Whether the string written at `at` was written as a hex string,
-    /// `<...>`, when the reader knows.
-    fn hex(&self, at: Span) -> Option<bool> {
-        let _ = at;
-        None
-    }
     /// The data of the catalog's metadata stream (ISO 32000-2, 14.3.2), as
     /// written, when the reader has it in plain view.
     fn metadata(&self) -> Option<&[u8]> {
@@ -101,10 +95,6 @@ pub struct Document {
     pub update: Option<Update>,
     /// The file's length in bytes, when the reader knows it.
     pub size: Option<usize>,
-    /// Where the strings written as hex strings are, when the reader
-    /// knows: a reader of the bytes does; one through another tool's JSON
-    /// may not.
-    pub hex: Option<BTreeSet<Span>>,
     /// The data of the catalog's metadata stream, as written, when it's in
     /// plain view: unfiltered, and not encrypted ([`Source::metadata`]).
     pub metadata: Option<Vec<u8>>,
@@ -165,7 +155,6 @@ impl Document {
             decoded: BTreeMap::new(),
             update: None,
             size: None,
-            hex: None,
             metadata: None,
             encryption: Encryption::None,
         }
@@ -204,10 +193,6 @@ impl Source for Document {
 
     fn size(&self) -> Option<usize> {
         self.size
-    }
-
-    fn hex(&self, at: Span) -> Option<bool> {
-        self.hex.as_ref().map(|hex| hex.contains(&at))
     }
 
     fn metadata(&self) -> Option<&[u8]> {

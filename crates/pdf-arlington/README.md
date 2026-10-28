@@ -44,7 +44,6 @@ let holds = |page: &Object| {
         version: Version::new(2, 0),
         defaults: None,
         size: None,
-        hex: &|_| None,
         trees: &trees,
         structure: &structure,
         fields: &fields,

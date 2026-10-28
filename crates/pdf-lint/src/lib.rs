@@ -33,7 +33,7 @@ pub use check::{
     check, file_version,
 };
 pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, use_model};
-pub use object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
+pub use object::{Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
 // The model, its tables and predicates, and the commit it's at, are
 // pdf-arlington's; `grammar` is the module and the function both.
 pub use pdf_arlington::{COMMIT, grammar, predicate};

@@ -17,26 +17,21 @@ use std::fmt;
 use pdf_tokenizer::decode::How;
 use pdf_tokenizer::{Kind, Token, Tokenizer};
 
-use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
+use crate::object::{Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
 
 /// How deeply arrays and dictionaries may nest in an object.
 pub const NESTING: usize = 256;
 
-/// Where a parser says what it read past, and where it read hex strings:
-/// a checker keeps them; `()` drops them. A fault borrows from `'a`, the
-/// data the parser reads, so a sink can keep it as it is. A sink borrowed,
-/// `&mut S` or `&mut dyn Sink`, is a sink too.
+/// Where a parser says what it read past: a checker keeps it; `()` drops
+/// it. A fault borrows from `'a`, the data the parser reads, so a sink can
+/// keep it as it is. A sink borrowed, `&mut S` or `&mut dyn Sink`, is a
+/// sink too.
 pub trait Sink<'a> {
     /// A fault at `at`, which the parser read past.
     fn fault(&mut self, at: Span, fault: Fault<'a>);
-
-    /// A string written as a hex string, at `at`. By default, nothing.
-    fn hex(&mut self, at: Span) {
-        let _ = at;
-    }
 }
 
-/// Drops every fault, and every hex string's place.
+/// Drops every fault.
 impl Sink<'_> for () {
     fn fault(&mut self, _: Span, _: Fault<'_>) {}
 }
@@ -45,10 +40,6 @@ impl Sink<'_> for () {
 impl<'a, S: Sink<'a> + ?Sized> Sink<'a> for &mut S {
     fn fault(&mut self, at: Span, fault: Fault<'a>) {
         (**self).fault(at, fault);
-    }
-
-    fn hex(&mut self, at: Span) {
-        (**self).hex(at);
     }
 }
 
@@ -518,15 +509,16 @@ impl<'a> Parser<'a> {
             },
             Kind::Name => Value::Name(self.name(&token, sink)),
             Kind::String { closed: true } | Kind::HexString { closed: true } => {
-                if matches!(token.kind, Kind::HexString { .. }) {
-                    sink.hex(at);
-                }
+                let form = match token.kind {
+                    Kind::HexString { .. } => Form::Hex,
+                    _ => Form::Literal,
+                };
                 let bytes = decoded(&token);
-                Value::String(if self.ciphertext {
-                    Str::Encrypted(bytes)
-                } else {
-                    Str::Bytes(bytes)
-                })
+                let s = match self.ciphertext {
+                    true => Str::Encrypted(bytes),
+                    false => Str::Bytes(bytes),
+                };
+                Value::String(s, Some(form))
             }
             Kind::String { closed: false } | Kind::HexString { closed: false } => {
                 return Err(Error::String { at: token.start });
@@ -1005,20 +997,25 @@ mod tests {
         }
     }
 
-    /// Where strings were written as hex strings is told to the sink, and
-    /// nothing else is.
+    /// Each string keeps the form it was written in, hex or literal, at any
+    /// depth.
     #[test]
-    fn hex_strings_are_told_to_the_sink() {
-        let input = b"[<4142> (AB) < 41 42 > [<>]]";
-        let (value, kept) = value(input);
+    fn strings_keep_their_form() {
+        let (value, kept) = value(b"[<4142> (AB) < 41 42 > [<>]]");
         let Value::Array(a) = value.unwrap().value else {
             panic!("an array");
         };
-        let ab = Value::String(Str::Bytes(b"AB".to_vec()));
+        let string = |bytes: &[u8], form| Value::String(Str::Bytes(bytes.to_vec()), Some(form));
+        let ab = |form| string(b"AB", form);
         let values: Vec<&Value> = a.iter().map(|o| &o.value).collect();
-        assert_eq!(values[..3], [&ab, &ab, &ab]);
-        let hex: Vec<&[u8]> = kept.hex.iter().map(|&at| bytes(input, at)).collect();
-        assert_eq!(hex, [&b"<4142>"[..], b"< 41 42 >", b"<>"]);
+        assert_eq!(
+            values[..3],
+            [&ab(Form::Hex), &ab(Form::Literal), &ab(Form::Hex)]
+        );
+        let Value::Array(inner) = &a[3].value else {
+            panic!("an array");
+        };
+        assert_eq!(inner[0].value, string(b"", Form::Hex));
         assert!(kept.faults.is_empty());
     }
 
@@ -1033,15 +1030,15 @@ mod tests {
                 .value(&mut ())
                 .unwrap();
             let d = o.as_dict().unwrap();
-            let string = |bytes: &[u8]| match ciphertext {
-                true => Value::String(Str::Encrypted(bytes.to_vec())),
-                false => Value::String(Str::Bytes(bytes.to_vec())),
+            let string = |bytes: &[u8], form| match ciphertext {
+                true => Value::String(Str::Encrypted(bytes.to_vec()), Some(form)),
+                false => Value::String(Str::Bytes(bytes.to_vec()), Some(form)),
             };
-            assert_eq!(d.get(b"A").unwrap().value, string(b"x)"));
+            assert_eq!(d.get(b"A").unwrap().value, string(b"x)", Form::Literal));
             let Value::Array(b) = &d.get(b"B").unwrap().value else {
                 panic!("an array");
             };
-            assert_eq!(b[0].value, string(b"x"));
+            assert_eq!(b[0].value, string(b"x", Form::Hex));
             assert_eq!(d.get(b"N").unwrap().value, Value::Name(b"x".to_vec()));
         }
     }

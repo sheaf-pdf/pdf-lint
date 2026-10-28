@@ -160,7 +160,6 @@ impl Qpdf {
             decoded: BTreeMap::new(),
             update: None,
             size: (std::fs::metadata(&self.file).ok()).and_then(|m| usize::try_from(m.len()).ok()),
-            hex: None,
             metadata: None,
             encryption: Default::default(),
         })
@@ -405,9 +404,9 @@ fn object(json: &Json) -> Result<Object, String> {
         Json::Number(n) => Value::Integer(n.parse().map_err(|_| format!("{n} isn't an integer"))?),
         Json::String(s) => {
             if let Some(hex) = s.strip_prefix("b:") {
-                Value::String(Str::Bytes(unhex(hex)?))
+                Value::String(Str::Bytes(unhex(hex)?), None)
             } else if let Some(text) = s.strip_prefix("u:") {
-                Value::String(Str::Text(text.to_string()))
+                Value::String(Str::Text(text.to_string()), None)
             } else if let Some(id) = reference(s) {
                 Value::Ref(id)
             } else {
@@ -550,7 +549,7 @@ mod tests {
     use crate::bytes;
     use crate::check::{Finding, Hold, Made, Options, check};
     use crate::dict;
-    use crate::object::{Object, Str, Value};
+    use crate::object::{Form, Object, Str, Value};
     use crate::text;
     use crate::write::{self, Body, Xref};
 
@@ -831,7 +830,7 @@ mod tests {
             let contents = annot.as_dict().unwrap().get(b"Contents").unwrap();
             assert_eq!(
                 contents.value,
-                Value::String(Str::Bytes(b"A note".to_vec())),
+                Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal)),
                 "{kind}"
             );
             let owned = bytes::read_opened(&data, &[b"owner"]);
@@ -919,9 +918,9 @@ mod tests {
             ])
         );
         let text = &dict.get(b"Odd Name").unwrap().value;
-        assert_eq!(text, &Value::String(Str::Text("Café".to_string())));
+        assert_eq!(text, &Value::String(Str::Text("Café".to_string()), None));
         let bytes = &dict.get(b"Bytes").unwrap().value;
-        assert_eq!(bytes, &Value::String(Str::Bytes(vec![0, 0xFF, 0x10])));
+        assert_eq!(bytes, &Value::String(Str::Bytes(vec![0, 0xFF, 0x10]), None));
         assert_eq!(dict.get(b"Pages").unwrap().value, Value::Ref((2, 0)));
         let stream = indirect(&json::parse(br#"{"stream": {"dict": {"/Length": 5}}}"#).unwrap());
         let stream = stream.unwrap();
@@ -973,8 +972,9 @@ qpdf: operation succeeded with warnings\n";
     }
 
     /// What reading through qpdf alone loses: where anything was written,
-    /// any key written twice, and which encoding a text string had. `a` with
-    /// these left out, as `b` has them, compared with `b`: the first
+    /// any key written twice, which encoding a text string had, and whether
+    /// a string was written literal or hex. `a` with these left out, as `b`
+    /// has them, compared with `b`: the first
     /// difference, what kind it is and where, or none. `nothing` says
     /// whether a value of `a` is null, or a reference to no object, which
     /// qpdf reads as null.
@@ -990,9 +990,9 @@ qpdf: operation succeeded with warnings\n";
             Value::Integer(_) => "an integer",
             Value::Real(_) => "a real",
             Value::Name(_) => "a name",
-            Value::String(Str::Bytes(_)) => "bytes",
-            Value::String(Str::Text(_)) => "text",
-            Value::String(Str::Encrypted(_)) => "ciphertext",
+            Value::String(Str::Bytes(_), _) => "bytes",
+            Value::String(Str::Text(_), _) => "text",
+            Value::String(Str::Encrypted(_), _) => "ciphertext",
             Value::Array(_) => "an array",
             Value::Dict(_) => "a dictionary",
             Value::Stream(_) => "a stream",
@@ -1009,7 +1009,7 @@ qpdf: operation succeeded with warnings\n";
             ))
         };
         match (&a.value, &b.value) {
-            (Value::String(Str::Bytes(x)), Value::String(Str::Text(y))) => {
+            (Value::String(Str::Bytes(x), _), Value::String(Str::Text(y), _)) => {
                 if &text::decode(x).text == y {
                     None
                 } else if x.starts_with(&[0xFF, 0xFE]) {
@@ -1020,6 +1020,7 @@ qpdf: operation succeeded with warnings\n";
                     differ()
                 }
             }
+            (Value::String(x, _), Value::String(y, _)) => (x != y).then(differ).flatten(),
             (Value::Ref(_), Value::Null) if nothing(a) => {
                 explained("a reference to no object, which qpdf writes as null")
             }
@@ -1198,7 +1199,7 @@ qpdf: operation succeeded with warnings\n";
         assert_eq!(catalog.get(b"Dup").and_then(Object::as_integer), Some(2));
         assert_eq!(
             catalog.get(b"Utf16").unwrap().value,
-            Value::String(Str::Text("AB".to_string())),
+            Value::String(Str::Text("AB".to_string()), None),
             "text, its encoding lost"
         );
         assert_eq!(catalog.get(b"Real").and_then(Object::as_number), Some(0.5));
@@ -1308,7 +1309,7 @@ qpdf: operation succeeded with warnings\n";
         assert!(through.warnings.is_empty(), "{:?}", through.warnings);
         assert_eq!(
             contents(&through).value,
-            Value::String(Str::Text("A note".to_string()))
+            Value::String(Str::Text("A note".to_string()), Some(Form::Hex))
         );
         let doc = bytes::read_opened(&data, &[]);
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
@@ -1316,7 +1317,7 @@ qpdf: operation succeeded with warnings\n";
         let contents = contents(&doc);
         assert_eq!(
             contents.value,
-            Value::String(Str::Bytes(b"A note".to_vec())),
+            Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Hex)),
             "its bytes"
         );
         let at = contents.at.unwrap();
@@ -1337,7 +1338,10 @@ qpdf: operation succeeded with warnings\n";
             })
             .expect("the annotation reads");
         let contents = annot.as_dict().unwrap().get(b"Contents").unwrap();
-        assert!(matches!(contents.value, Value::String(Str::Encrypted(_))));
+        assert!(matches!(
+            contents.value,
+            Value::String(Str::Encrypted(_), _)
+        ));
     }
 
     /// Every PDF under `PDF_LINT_CORPUS` read from its bytes, qpdf

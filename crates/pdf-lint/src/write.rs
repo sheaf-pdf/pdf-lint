@@ -198,7 +198,7 @@ pub(crate) fn encrypted(
         .expect("the writer's opens");
     fn strings(o: &mut Object, encrypt: &mut dyn FnMut(&[u8]) -> Vec<u8>) {
         match &mut o.value {
-            Value::String(Str::Bytes(bytes)) => *bytes = encrypt(bytes),
+            Value::String(Str::Bytes(bytes), _) => *bytes = encrypt(bytes),
             Value::Array(a) => a.iter_mut().for_each(|o| strings(o, encrypt)),
             Value::Dict(d) | Value::Stream(crate::object::Stream { dict: d, .. }) => {
                 // A signature's /Contents, as the reader takes one.
@@ -248,7 +248,7 @@ pub(crate) fn encrypted(
         ));
     }
     let own = objects.iter().map(|(n, _)| *n).max().unwrap_or(0) + 1;
-    let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec())));
+    let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));
     let value = |bytes: &Option<Vec<u8>>| s(bytes.as_deref().expect("the writer's own value"));
     let mut dict = crate::dict! {
         "Filter" => "Standard",
@@ -357,8 +357,8 @@ pub(crate) fn value(out: &mut Vec<u8>, o: &Object) {
             out.extend_from_slice(text.as_bytes());
         }
         Value::Name(name) => self::name(out, name),
-        Value::String(Str::Bytes(bytes) | Str::Encrypted(bytes)) => string(out, bytes),
-        Value::String(Str::Text(text)) => {
+        Value::String(Str::Bytes(bytes) | Str::Encrypted(bytes), _) => string(out, bytes),
+        Value::String(Str::Text(text), _) => {
             let utf16: Vec<u8> = [0xFE, 0xFF]
                 .into_iter()
                 .chain(text.encode_utf16().flat_map(u16::to_be_bytes))

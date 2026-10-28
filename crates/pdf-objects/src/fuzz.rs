@@ -4,26 +4,19 @@
 
 use pdf_tokenizer::{Kind, Tokenizer};
 
-use crate::object::{Dict, Object, ObjectId, Span, Str, Value};
+use crate::object::{Dict, Form, Object, ObjectId, Span, Str, Value};
 use crate::parse::{Body, Error, Fault, Parser, Sink};
 
-/// What a sink was told: each fault, where it is and what it says, and
-/// where each hex string is.
+/// What a sink was told: each fault, where it is and what it says.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Kept {
     /// Each fault's place and text, in the order said.
     pub faults: Vec<(Span, String)>,
-    /// Each hex string's place, in the order read.
-    pub hex: Vec<Span>,
 }
 
 impl Sink<'_> for Kept {
     fn fault(&mut self, at: Span, fault: Fault<'_>) {
         self.faults.push((at, fault.to_string()));
-    }
-
-    fn hex(&mut self, at: Span) {
-        self.hex.push(at);
     }
 }
 
@@ -55,8 +48,9 @@ enum Length {
 /// file's, its strings ciphertext or not; a stream's data by a length they
 /// give, when it holds, else up to `endstream`. Read twice, and through
 /// `()`, it's the same each time; every span and fault is inside the input
-/// and inside what holds it; strings are ciphertext exactly when asked; a
-/// value or a header that fails leaves the parser where it was.
+/// and inside what holds it; strings are ciphertext exactly when asked,
+/// and each has the form its first byte writes; a value or a header that
+/// fails leaves the parser where it was.
 /// Panics on a broken promise.
 pub fn parse(data: &[u8]) {
     let (how, input) = chosen(data);
@@ -72,19 +66,13 @@ pub fn parse(data: &[u8]) {
     for &(at, _) in &kept.faults {
         assert!(inside(at), "a fault in the input: {at:?}");
     }
-    for &at in &kept.hex {
-        assert!(inside(at), "a hex string in the input: {at:?}");
-        assert_eq!(input[at.start], b'<');
-    }
     match result {
         Ok(object) => {
             let whole = object.at.expect("placed");
             for &(at, _) in &kept.faults {
                 assert!(within(at, whole), "a fault in its object: {at:?}");
             }
-            let mut hex = 0;
-            placed(input, &object, whole, how, &mut hex);
-            assert_eq!(hex, kept.hex.len(), "each hex string said once");
+            placed(input, &object, whole, how);
         }
         Err(error) => {
             assert!(!error.to_string().is_empty());
@@ -201,23 +189,26 @@ fn within(inner: Span, outer: Span) -> bool {
 
 /// Checks that `o` and every value in it are placed in `input` as `how`
 /// reads it, each inside what holds it, `outer`, and each string is
-/// ciphertext exactly when asked; counts the hex strings into `hex`.
-fn placed(input: &[u8], o: &Object, outer: Span, how: How, hex: &mut usize) {
+/// ciphertext exactly when asked, in the form its first byte writes.
+fn placed(input: &[u8], o: &Object, outer: Span, how: How) {
     let at = o.at.expect("every value placed");
     assert_eq!(at.stream, how.stream);
     assert!(at.start < at.end && at.end <= input.len(), "{at:?}");
     assert!(within(at, outer), "{at:?} in {outer:?}");
     let dict = match &o.value {
-        Value::String(s) => {
+        Value::String(s, form) => {
             assert_eq!(matches!(s, Str::Encrypted(_)), how.ciphertext, "{s:?}");
             assert!(!matches!(s, Str::Text(_)));
-            if input[at.start] == b'<' {
-                *hex += 1;
-            }
+            let written = match input[at.start] {
+                b'<' => Form::Hex,
+                b'(' => Form::Literal,
+                other => panic!("a string whose first byte is {other:#04x}"),
+            };
+            assert_eq!(*form, Some(written), "{at:?}");
             None
         }
         Value::Array(a) => {
-            a.iter().for_each(|e| placed(input, e, at, how, hex));
+            a.iter().for_each(|e| placed(input, e, at, how));
             None
         }
         Value::Dict(d) => Some(d),
@@ -237,7 +228,7 @@ fn placed(input: &[u8], o: &Object, outer: Span, how: How, hex: &mut usize) {
         assert_eq!(input[key.start], b'/');
         let value = entry.value.at.expect("every value placed");
         assert!(key.end <= value.start);
-        placed(input, &entry.value, at, how, hex);
+        placed(input, &entry.value, at, how);
     }
 }
 

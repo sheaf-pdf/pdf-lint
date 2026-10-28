@@ -40,7 +40,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use anyhow::{Context, Result, bail, ensure};
-use pdf_objects::{Dict, Object, ObjectId, Span, Str, Value, Version};
+use pdf_objects::{Dict, Form, Object, ObjectId, Str, Value, Version};
 
 use crate::grammar::{At, Table, Wrap, WrapFn, split, version};
 
@@ -261,9 +261,6 @@ pub struct Cx<'a> {
     pub defaults: Option<&'a Table>,
     /// The file's length in bytes, when the reader knows (`fn:FileSize`).
     pub size: Option<usize>,
-    /// Whether the string written at a span was written as a hex string,
-    /// when the reader knows (`fn:IsHexString`).
-    pub hex: &'a dyn Fn(Span) -> Option<bool>,
     /// The file's name trees' keys, as `fn:InNameTree` reads them: each
     /// tree once.
     pub trees: &'a Trees,
@@ -278,7 +275,7 @@ pub struct Cx<'a> {
     pub extensions: &'a BTreeSet<String>,
 }
 
-/// Its parts but `resolve` and `hex`, closures, which can't be shown.
+/// Its parts but `resolve`, a closure, which can't be shown.
 impl fmt::Debug for Cx<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cx")
@@ -1082,7 +1079,7 @@ fn scalar(o: &Object) -> Option<Scalar> {
         Value::Integer(i) => Scalar::Int(*i),
         Value::Real(r) => Scalar::Real(*r),
         Value::Name(name) => Scalar::Name(name.clone()),
-        Value::String(s) => Scalar::Str(s.text()?),
+        Value::String(s, _) => Scalar::Str(s.text()?),
         Value::Bool(b) => Scalar::Bool(*b),
         _ => return None,
     })
@@ -1115,8 +1112,8 @@ fn array<'a>(k: &Expr, cx: &Cx<'a>) -> Result<&'a [Object], String> {
 fn string_length(k: &Expr, cx: &Cx) -> Result<Scalar, String> {
     let p = named(k).ok_or_else(|| k.to_string())?;
     match walk(&p, &p.keys, cx)?.map(|o| &o.value) {
-        Some(Value::String(Str::Bytes(bytes))) => Ok(Scalar::Int(bytes.len() as i64)),
-        Some(Value::String(_)) => Err("the string's bytes".to_string()),
+        Some(Value::String(Str::Bytes(bytes), _)) => Ok(Scalar::Int(bytes.len() as i64)),
+        Some(Value::String(..)) => Err("the string's bytes".to_string()),
         _ => Err(p.text.clone()),
     }
 }
@@ -1178,23 +1175,21 @@ fn sorted(f: &str, k: &Expr, step: &Expr, cx: &Cx) -> Tri {
 /// decrypt, which can't be told; anything else isn't a string.
 fn unencrypted(f: &str, cx: &Cx) -> Tri {
     match value_at(cx.container, cx.at, cx).map(|o| &o.value) {
-        Some(Value::String(Str::Encrypted(_))) => Tri::Unknown("the string's bytes".to_string()),
-        Some(Value::String(_)) => Tri::Is(true),
+        Some(Value::String(Str::Encrypted(_), _)) => Tri::Unknown("the string's bytes".to_string()),
+        Some(Value::String(..)) => Tri::Is(true),
         Some(_) => Tri::Is(false),
         None => Tri::Unknown(f.to_string()),
     }
 }
 
 /// Whether the row's own value is a string written as a hex string
-/// (`fn:IsHexString`), as the reader says ([`Cx::hex`]).
+/// (`fn:IsHexString`), by its [`Form`]: unknown when it has none, as a
+/// string built without choosing, or read by a reader that doesn't say.
 fn hex(f: &str, cx: &Cx) -> Tri {
-    match value_at(cx.container, cx.at, cx) {
-        Some(o) if matches!(o.value, Value::String(_)) => match o.at.and_then(|at| (cx.hex)(at)) {
-            Some(hex) => Tri::Is(hex),
-            None => Tri::Unknown(f.to_string()),
-        },
+    match value_at(cx.container, cx.at, cx).map(|o| &o.value) {
+        Some(Value::String(_, Some(form))) => Tri::Is(*form == Form::Hex),
+        Some(Value::String(_, None)) | None => Tri::Unknown(f.to_string()),
         Some(_) => Tri::Is(false),
-        None => Tri::Unknown(f.to_string()),
     }
 }
 
@@ -1207,8 +1202,8 @@ fn hex(f: &str, cx: &Cx) -> Tri {
 fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
     let key = match value_at(cx.container, cx.at, cx).map(|o| &o.value) {
         None => return Tri::Is(false),
-        Some(Value::String(Str::Bytes(key))) => key,
-        Some(Value::String(_)) => return Tri::Unknown("the string's bytes".to_string()),
+        Some(Value::String(Str::Bytes(key), _)) => key,
+        Some(Value::String(..)) => return Tri::Unknown("the string's bytes".to_string()),
         Some(_) => return Tri::Unknown(f.to_string()),
     };
     let root = match walk(tree, &tree.keys, cx) {
@@ -1257,7 +1252,7 @@ fn name_tree<'a>(root: &'a Object, cx: &Cx<'a>) -> Tree {
             Some(Value::Array(names)) => {
                 for key in names.iter().step_by(2) {
                     match deref(key, cx).map(|o| &o.value) {
-                        Some(Value::String(Str::Bytes(key))) => {
+                        Some(Value::String(Str::Bytes(key), _)) => {
                             tree.keys.insert(key.clone());
                         }
                         _ => tree.whole = false,
@@ -1293,7 +1288,7 @@ fn name_tree<'a>(root: &'a Object, cx: &Cx<'a>) -> Tree {
 /// some of it doesn't read. A file without a form has no fields.
 fn field_name(f: &str, p: &Path, cx: &Cx) -> Tri {
     let name = match walk(p, &p.keys, cx).map(|o| o.map(|o| &o.value)) {
-        Ok(Some(Value::String(s))) => match s.text() {
+        Ok(Some(Value::String(s, _))) => match s.text() {
             Some(name) => name,
             None => return Tri::Unknown("the string's bytes".to_string()),
         },
@@ -1361,7 +1356,7 @@ fn field_names<'a>(cx: &Cx<'a>) -> Names {
         };
         let name = match field.get(b"T").and_then(|t| deref(t, cx)).map(|t| &t.value) {
             None => parent,
-            Some(Value::String(t)) => match t.text() {
+            Some(Value::String(t, _)) => match t.text() {
                 Some(t) => Some(match parent {
                     Some(parent) => format!("{parent}.{t}").into(),
                     None => t.into(),
@@ -2152,12 +2147,11 @@ mod tests {
     }
 
     /// The trailer and objects of a file, for predicates to read; its
-    /// length and its hex strings' places, when it says.
+    /// length, when it says.
     struct File {
         trailer: Dict,
         objects: BTreeMap<ObjectId, Object>,
         size: Option<usize>,
-        hex: Option<Vec<Span>>,
         /// The extensions it's checked under.
         extensions: BTreeSet<String>,
     }
@@ -2174,7 +2168,6 @@ mod tests {
                 trailer,
                 objects,
                 size: None,
-                hex: None,
                 extensions: BTreeSet::new(),
             }
         }
@@ -2203,7 +2196,6 @@ mod tests {
             f: impl FnOnce(&Cx) -> T,
         ) -> T {
             let resolve = |id: ObjectId| self.objects.get(&id);
-            let hex = |at: Span| self.hex.as_ref().map(|hex| hex.contains(&at));
             let trees = Trees::default();
             let structure = Structure::default();
             let fields = Fields::default();
@@ -2216,7 +2208,6 @@ mod tests {
                 version: v(version),
                 defaults,
                 size: self.size,
-                hex: &hex,
                 trees: &trees,
                 structure: &structure,
                 fields: &fields,
@@ -2766,12 +2757,12 @@ mod tests {
     #[test]
     fn functions_read_strings_arrays_and_the_file() {
         let mut file = bare();
-        let bytes = |b: &[u8]| Object::new(Value::String(Str::Bytes(b.to_vec())));
+        let bytes = |b: &[u8]| Object::new(Value::String(Str::Bytes(b.to_vec()), None));
         let x = Object::from(dict! {
             "ID" => vec![bytes(&[7; 16]), bytes(b"0123")],
             "Panose" => bytes(&[0; 12]),
-            "Text" => Object::new(Value::String(Str::Text("A".to_string()))),
-            "Cipher" => Object::new(Value::String(Str::Encrypted(vec![1, 2]))),
+            "Text" => Object::new(Value::String(Str::Text("A".to_string()), None)),
+            "Cipher" => Object::new(Value::String(Str::Encrypted(vec![1, 2]), None)),
             "N" => 1,
             "Prev" => 500,
             "Index" => integers([0, 3, 5, 1, 9, 2]),
@@ -2855,26 +2846,27 @@ mod tests {
 
     #[test]
     fn functions_read_the_rows_own_string() {
-        let mut file = bare();
-        let at = Span::new(None, 10, 16);
-        let row = |value: Value| {
-            let mut o = Object::new(value);
-            o.at = Some(at);
-            Object::from(dict! { "X" => o })
-        };
-        let string = row(Value::String(Str::Bytes(b"sig".to_vec())));
-        let cipher = row(Value::String(Str::Encrypted(b"sig".to_vec())));
+        let file = bare();
+        let row = |value: Value| Object::from(dict! { "X" => Object::new(value) });
+        let sig = |form| row(Value::String(Str::Bytes(b"sig".to_vec()), form));
+        let string = sig(None);
+        let cipher = row(Value::String(Str::Encrypted(b"sig".to_vec()), None));
         let number = row(Value::Integer(1));
         let is = |file: &File, x: &Object, text: &str| holds_in(file, x, "1.7", text);
-        // As written, the reader says.
+        // As written, when the reader says.
         assert_eq!(
             is(&file, &string, "fn:IsHexString()"),
             unknown("fn:IsHexString")
         );
-        file.hex = Some(vec![at]);
-        assert_eq!(is(&file, &string, "fn:IsHexString()"), Truth::True);
-        file.hex = Some(Vec::new());
-        assert_eq!(is(&file, &string, "fn:IsHexString()"), Truth::False);
+        let hex = sig(Some(Form::Hex));
+        assert_eq!(is(&file, &hex, "fn:IsHexString()"), Truth::True);
+        let literal = sig(Some(Form::Literal));
+        assert_eq!(is(&file, &literal, "fn:IsHexString()"), Truth::False);
+        let cipher_hex = row(Value::String(
+            Str::Encrypted(b"sig".to_vec()),
+            Some(Form::Hex),
+        ));
+        assert_eq!(is(&file, &cipher_hex, "fn:IsHexString()"), Truth::True);
         assert_eq!(is(&file, &number, "fn:IsHexString()"), Truth::False);
         // Unencrypted: any string as read, but ciphertext.
         assert_eq!(is(&file, &string, "fn:AlwaysUnencrypted()"), Truth::True);
@@ -2887,7 +2879,7 @@ mod tests {
 
     #[test]
     fn a_name_tree_and_a_key_map_hold_the_rows_name() {
-        let bytes = |b: &str| Object::new(Value::String(Str::Bytes(b.as_bytes().to_vec())));
+        let bytes = |b: &str| Object::new(Value::String(Str::Bytes(b.as_bytes().to_vec()), None));
         // A tree of two leaves under a root, one leaf indirect, and a
         // catalog's old-style /Dests.
         let leaf = |keys: &[&str]| {
@@ -2931,7 +2923,7 @@ mod tests {
             is(&file, &row(Object::from(1)), tree),
             unknown("fn:InNameTree")
         );
-        let text = Object::new(Value::String(Str::Text("a".to_string())));
+        let text = Object::new(Value::String(Str::Text("a".to_string()), None));
         assert_eq!(is(&file, &row(text), tree), unknown("the string's bytes"));
         // A tree that doesn't all read: what it's found to hold, it holds;
         // what it isn't can't be told.
@@ -2993,15 +2985,14 @@ mod tests {
     fn a_name_trees_keys_are_read_once() {
         let file = bare();
         let names = vec![
-            Object::new(Value::String(Str::Bytes(b"a".to_vec()))),
+            Object::new(Value::String(Str::Bytes(b"a".to_vec()), None)),
             Object::from(0),
         ];
         let tree = Object::from(dict! { "Names" => names });
         let trees = Trees::default();
         let resolve = |id: ObjectId| file.objects.get(&id);
-        let hex = |_: Span| None;
         let x = Object::from(
-            dict! { "T" => tree, "X" => Object::new(Value::String(Str::Bytes(b"a".to_vec()))) },
+            dict! { "T" => tree, "X" => Object::new(Value::String(Str::Bytes(b"a".to_vec()), None)) },
         );
         let cx = Cx {
             container: &x,
@@ -3012,7 +3003,6 @@ mod tests {
             version: v("1.7"),
             defaults: None,
             size: None,
-            hex: &hex,
             trees: &trees,
             structure: &Structure::default(),
             fields: &Fields::default(),
@@ -3062,7 +3052,7 @@ mod tests {
             is(&file, Object::from(1)),
             unknown("fn:IsFullyQualifiedFieldName")
         );
-        let cipher = Object::new(Value::String(Str::Encrypted(b"a".to_vec())));
+        let cipher = Object::new(Value::String(Str::Encrypted(b"a".to_vec()), None));
         assert_eq!(is(&file, cipher), unknown("the string's bytes"));
         // No form, no fields.
         assert_eq!(is(&bare(), text("a")), Truth::False);

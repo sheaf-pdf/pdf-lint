@@ -535,7 +535,10 @@ mod tests {
                 .get((1, 0))
                 .ok()
                 .and_then(|o| o.as_dict()?.get(b"Lang").cloned());
-            let en = crate::object::Value::String(crate::object::Str::Bytes(b"en".to_vec()));
+            let en = crate::object::Value::String(
+                crate::object::Str::Bytes(b"en".to_vec()),
+                Some(crate::object::Form::Hex),
+            );
             assert_eq!(lang.map(|l| l.value), Some(en), "{name}");
         }
         let update = &seeds().into_iter().find(|(n, _)| *n == "update").unwrap().1;

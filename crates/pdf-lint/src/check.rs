@@ -1823,7 +1823,7 @@ impl<'a> Walk<'a> {
                                 }
                             };
                             let label = match self.resolve(label).map(|(_, o)| &o.value) {
-                                Ok(Value::String(s)) if names => {
+                                Ok(Value::String(s, _)) if names => {
                                     s.text().unwrap_or_else(|| "…".to_string())
                                 }
                                 Ok(Value::Integer(n)) if !names => n.to_string(),
@@ -2089,13 +2089,13 @@ impl<'a> Walk<'a> {
             | (Value::Name(_), T::Name)
             | (Value::Null, T::Null)
             | (Value::Stream(_), T::Stream)
-            | (Value::String(_), T::String | T::StringByte | T::StringText)
+            | (Value::String(..), T::String | T::StringByte | T::StringText)
             | (Value::Array(_), T::Array)
             | (Value::Dict(_), T::Dictionary | T::NameTree | T::NumberTree) => true,
-            (Value::String(s), T::StringAscii) => {
+            (Value::String(s, _), T::StringAscii) => {
                 (s.as_bytes()).is_none_or(|b| b.iter().all(|b| (0x20..=0x7E).contains(b)))
             }
-            (Value::String(s), T::Date) => s.text().is_none_or(|t| is_date(&t)),
+            (Value::String(s, _), T::Date) => s.text().is_none_or(|t| is_date(&t)),
             (Value::Array(a), T::Rectangle) => self.numbers(a, 4),
             (Value::Array(a), T::Matrix) => self.numbers(a, 6),
             _ => false,
@@ -2130,7 +2130,7 @@ impl<'a> Walk<'a> {
         if items.is_empty() {
             return Values::Allowed;
         }
-        if matches!(value.value, Value::String(Str::Encrypted(_))) {
+        if matches!(value.value, Value::String(Str::Encrypted(_), _)) {
             return Values::Unknown("the string's bytes".to_string());
         }
         let (mut listed, mut met, mut unknown) = (Vec::new(), None, None);
@@ -2191,7 +2191,6 @@ impl<'a> Walk<'a> {
         f: impl FnOnce(&Cx) -> R,
     ) -> R {
         let resolve = |id: ObjectId| self.source.get(id).ok();
-        let hex = |at: Span| self.source.hex(at);
         f(&Cx {
             container,
             at,
@@ -2201,7 +2200,6 @@ impl<'a> Walk<'a> {
             version: self.version,
             defaults,
             size: self.source.size(),
-            hex: &hex,
             trees: &self.trees,
             structure: &self.structure,
             fields: &self.fields,
@@ -2473,9 +2471,9 @@ impl<'a> Trail<'a> {
 fn unknown_bytes(value: &Object, ty: ArlType) -> bool {
     matches!(
         (&value.value, ty),
-        (Value::String(Str::Text(_)), ArlType::StringAscii)
+        (Value::String(Str::Text(_), _), ArlType::StringAscii)
             | (
-                Value::String(Str::Encrypted(_)),
+                Value::String(Str::Encrypted(_), _),
                 ArlType::StringAscii | ArlType::Date
             )
     )
@@ -2607,7 +2605,7 @@ fn is_value(text: &str, value: &Object) -> bool {
             })
         }
         Value::Name(name) => text == "*" || name.as_slice() == text.as_bytes(),
-        Value::String(s) => {
+        Value::String(s, _) => {
             let quoted = text.strip_prefix('\'').and_then(|t| t.strip_suffix('\''));
             quoted.is_some_and(|quoted| s.text().as_deref() == Some(quoted))
         }
@@ -2746,7 +2744,7 @@ fn write_value(out: &mut String, o: &Object, depth: usize) {
             out.push('/');
             out.push_str(&String::from_utf8_lossy(&name[..name.len().min(TOKEN)]));
         }
-        Value::String(s) => {
+        Value::String(s, _) => {
             let text = match s {
                 Str::Bytes(bytes) => text::decode(&bytes[..bytes.len().min(TOKEN)]).text,
                 Str::Text(text) => text.chars().take(TOKEN).collect(),
@@ -5609,7 +5607,7 @@ mod tests {
                     "Parent" => r(2),
                     "MediaBox" => numbers(&[0, 0, 1, 1]),
                     "Resources" => dict! {},
-                    "LastModified" => Object::new(Value::String(date)),
+                    "LastModified" => Object::new(Value::String(date, None)),
                     "Annots" => vec![r(4)],
                 },
             );
@@ -5619,7 +5617,7 @@ mod tests {
                     "Type" => "Annot",
                     "Subtype" => "Link",
                     "Rect" => numbers(&[0, 0, 1, 1]),
-                    "A" => dict! { "S" => "URI", "URI" => Object::new(Value::String(uri)) },
+                    "A" => dict! { "S" => "URI", "URI" => Object::new(Value::String(uri, None)) },
                 },
             );
             check(&doc, &Hold::All(Made::Built), &Options::default())

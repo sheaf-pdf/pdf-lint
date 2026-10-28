@@ -136,9 +136,9 @@ pub trait Source {
 }
 ```
 
-Its other methods are for what a reader may know, and default to nothing: the file's size (`fn:FileSize`), whether a string was written as hex (`fn:IsHexString`), and the catalog's XMP metadata, when it's in plain view (the extensions a file declares).
+Its other methods are for what a reader may know, and default to nothing: the file's size (`fn:FileSize`), and the catalog's XMP metadata, when it's in plain view (the extensions a file declares).
 
-The objects are the [pdf-objects](../pdf-objects) crate's types, which pdf-lint re-exports as its `object`, `text` and `version` modules and at its root: an `Object` is a `Value` and where it was written, a `Span`, when the reader knows. A `Dict` keeps its entries as written, in order and with any key written twice, and each key's `Span` too. A string is `Str::Bytes`; or `Str::Text`, text a reader decoded without saying from which encoding; or `Str::Encrypted`, ciphertext a reader didn't decrypt. Where a reader loses something, the checker counts what depends on it as not checked. `Document` is a `Source` read whole, which readers fill and tests build.
+The objects are the [pdf-objects](../pdf-objects) crate's types, which pdf-lint re-exports as its `object`, `text` and `version` modules and at its root: an `Object` is a `Value` and where it was written, a `Span`, when the reader knows. A `Dict` keeps its entries as written, in order and with any key written twice, and each key's `Span` too. A string is `Str::Bytes`; or `Str::Text`, text a reader decoded without saying from which encoding; or `Str::Encrypted`, ciphertext a reader didn't decrypt. Beside it, a string keeps its `Form`, literal or hex, as written, when the reader says, which `fn:IsHexString` reads. Where a reader loses something, the checker counts what depends on it as not checked. `Document` is a `Source` read whole, which readers fill and tests build.
 
 **`bytes::read`** reads a file from its bytes: the header, `startxref`, the cross-reference tables and streams along their `/Prev` chain, and each object at its offset, through pdf-objects' parser, a stream's data by its `/Length` when that ends at `endstream`. Where the sections don't read, it finds the objects by scanning, and the trailer says so.
 
@@ -182,14 +182,14 @@ The tests' qpdf reader is the `Source` through qpdf. lopdf won't be shipped. It'
 | `Null`, `Bool`, `Integer` | `null`, `true` and `false`, an integer | `Null`, `Boolean`, `Integer(i64)` |
 | `Real` | A number with a point, read as text: the digits are kept, but `-.5` comes as `-0.5` | `Real(f32)`, widened, so `0.1` is no longer exactly `0.1` |
 | `Name` | `"/Name"`, `#xx` escapes decoded, or `"n:/Name"` with them, for a name that isn't UTF-8 | `Name(Vec<u8>)`, decoded |
-| `Str::Bytes` | `"b:"` and hex | `String(bytes, format)`, always |
+| `Str::Bytes` | `"b:"` and hex, the string's form unsaid | `String(bytes, format)`, always, its form the format |
 | `Str::Text` | `"u:"` and text: ASCII or UTF-16BE, without saying which | Never |
 | `Array` | An array | `Array` |
 | `Dict` | An object with its keys sorted. Of duplicate keys, the last is kept, with a warning | `Dictionary`, in written order. Of duplicate keys, the last is kept, silently |
 | `Stream` | `{"stream": {"dict": …}}`, as written, but a `/Length` qpdf recovered | `Stream`, but its `/Length` is rewritten as a direct integer when the file is read |
 | `Ref` | `"n g R"` | `Reference((n, g))` |
 
-What each loses, and the checker then can't see: for qpdf, which encoding a text string had, the order keys were written in, any key written twice, names' escapes, keys whose values are null or refer to no object, and where anything was written; for lopdf, a stream's `/Length` as written, the trailer's `/Encrypt`, structured warnings, reals' precision, and where anything was written. `bytes::read` loses none of it, for what's in plain view.
+What each loses, and the checker then can't see: for qpdf, which encoding a text string had, whether a string was written literal or hex, the order keys were written in, any key written twice, names' escapes, keys whose values are null or refer to no object, and where anything was written; for lopdf, a stream's `/Length` as written, the trailer's `/Encrypt`, structured warnings, reals' precision, and where anything was written. `bytes::read` loses none of it, for what's in plain view.
 
 ## The model
 
