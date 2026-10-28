@@ -2098,6 +2098,9 @@ fn offset_of(o: &Object) -> Option<usize> {
 }
 
 #[cfg(test)]
+mod words;
+
+#[cfg(test)]
 mod tests {
     use pdf_objects::dict;
     use pdf_objects::object::Form;
