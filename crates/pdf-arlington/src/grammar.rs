@@ -13,8 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use pdf_objects::Version;
-
-use crate::xxh64::xxh64;
+use twox_hash::XxHash64;
 
 pub(crate) mod model {
     include!(concat!(env!("OUT_DIR"), "/model.rs"));
@@ -470,7 +469,7 @@ impl Grammar {
             bytes.extend_from_slice(format!("{}.tsv\n", file.name).as_bytes());
             bytes.extend_from_slice(file.text.as_bytes());
         }
-        let hash = xxh64(&bytes, 0);
+        let hash = XxHash64::oneshot(0, &bytes);
         let mut tables = BTreeMap::new();
         let mut labels = BTreeMap::new();
         for file in files {
@@ -1031,6 +1030,63 @@ mod tests {
         assert_eq!(format!("{:016x}", upstream.hash()), "c2bdcab22f823d8d");
         let embedded = Grammar::embedded();
         assert_eq!(format!("{:016x}", embedded.hash()), "fc22d1fadc1fd269");
+    }
+
+    /// XXH64, by which [`Grammar::hash`] is computed, as xxHash's reference
+    /// has it. First as xxHash 0.8.2's `xxhash.h` has it, through each
+    /// path: under 32 bytes, stripes of 32, and tails of 8, 4 and 1. Then
+    /// xxHash 0.8.3's own sanity check (`cli/xsum_sanity_check.c`, its
+    /// `XSUM_XXH64_testdata`), over the buffer its `XSUM_fillTestBuffer`
+    /// makes: each byte the top 8 bits of a 64-bit number that starts at
+    /// 2654435761 and is multiplied by 11400714785074694797 from one byte
+    /// to the next.
+    #[test]
+    fn xxh64_is_as_the_reference_has_it() {
+        let xxh64 = |data: &[u8], seed| XxHash64::oneshot(seed, data);
+        let big: Vec<u8> = (0..1000u32).map(|i| (i * 7 + 3) as u8).collect();
+        let cases: [(&[u8], u64, u64); 12] = [
+            (b"", 0, 0xef46db3751d8e999),
+            (b"a", 0, 0xd24ec4f1a98c6e5b),
+            (b"abc", 0, 0x44bc2cf5ad770999),
+            (b"abc", 1, 0xbea9ca8199328908),
+            (&big[..31], 0, 0xa2aa5f33cc4a6119),
+            (&big[..32], 0, 0x23c3c17ef790fd97),
+            (&big[..33], 0, 0x50a7cfc7ba588784),
+            (&big[..63], 0, 0x5e3e54b431c7493c),
+            (&big[..64], 0, 0x0eb64b3ef6eeb01f),
+            (&big[..65], 0, 0xa383b724b2bd12f1),
+            (&big[..100], 0, 0xa61f8d4c170fe531),
+            (&big[..1000], 0, 0x5f235fa033f1a3fb),
+        ];
+        for (data, seed, want) in cases {
+            assert_eq!(xxh64(data, seed), want, "{} bytes, seed {seed}", data.len());
+        }
+        const PRIME32: u64 = 2654435761;
+        const PRIME64: u64 = 11400714785074694797;
+        let next = |n: &u64| Some(n.wrapping_mul(PRIME64));
+        let sanity: Vec<u8> = std::iter::successors(Some(PRIME32), next)
+            .map(|n| (n >> 56) as u8)
+            .take(222)
+            .collect();
+        let cases: [(usize, u64, u64); 9] = [
+            (0, 0, 0xef46db3751d8e999),
+            (0, PRIME32, 0xac75fda2929b17ef),
+            (1, 0, 0xe934a84adb052768),
+            (1, PRIME32, 0x5014607643a9b4c3),
+            (4, 0, 0x9136a0dca57457ee),
+            (14, 0, 0x8282dcc4994e35c8),
+            (14, PRIME32, 0xc3bd6bf63deb6df0),
+            (222, 0, 0xb641ae8cb691c174),
+            (222, PRIME32, 0x20cb8ab7ae10c14a),
+        ];
+        for (len, seed, want) in cases {
+            let data = &sanity[..len];
+            assert_eq!(
+                xxh64(data, seed),
+                want,
+                "the sanity check's {len} bytes, seed {seed}"
+            );
+        }
     }
 
     #[test]

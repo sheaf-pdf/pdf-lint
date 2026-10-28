@@ -28,7 +28,6 @@
 pub mod extension;
 pub mod grammar;
 pub mod predicate;
-mod xxh64;
 
 /// pdf-objects, whose objects and versions this crate's functions take:
 /// named through it, they're the version this crate is built with.

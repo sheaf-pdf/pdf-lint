@@ -110,9 +110,9 @@ What's compiled into the binary besides this workspace's own crates
 MIT OR Apache-2.0; pdf-arlington, Apache-2.0, with the Arlington model,
 whose NOTICE.txt is ARLINGTON-NOTICE.txt):
 
-- These crates from crates.io, each under the licence it names. Each
-  offers the Apache License 2.0, whose text is LICENSE-APACHE beside
-  this file; each package's licence files follow the list.
+- These crates from crates.io, each under the licence it names, its
+  package's licence files after the list; the Apache License 2.0, which
+  most offer, is LICENSE-APACHE beside this file.
 
 $table
 - The Rust standard library, and what it's built from: RUST-NOTICES.html.
