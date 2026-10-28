@@ -11,12 +11,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use pdf_objects::object::{Object, ObjectId, Span};
 use pdf_objects::version::Version;
 
+use super::window::{ByPosition, Bytes, InMemory};
 use super::{Decode, Options, Reader, Whole, XrefEntry};
 use crate::source::{Document, Encryption, Facts, Record, Trailer, Unread, Update, Warning};
 
 /// A file's bytes, which a [`Reading`] reads. Bytes in memory give all of
 /// them ([`ByteSource::whole`]): the slices, vectors and shared slices of
-/// bytes do, and so does a reference to a source.
+/// bytes do, and so does a reference to a source. A source that doesn't
+/// hold them in memory is read by position, a window at a time from where
+/// a read starts, at first [`ByteSource::first_window`] bytes, twice as
+/// many each time what's read runs to the window's end, where more of the
+/// file could change it: [`FileBytes`](super::FileBytes) reads a file so.
 pub trait ByteSource: Send + Sync {
     /// How many bytes it has.
     fn len(&self) -> usize;
@@ -33,8 +38,15 @@ pub trait ByteSource: Send + Sync {
         None
     }
 
-    /// The bytes in `range`, within `0..len()`.
+    /// The bytes in `range`, within `0..len()`: all of them, or an error.
     fn read_at(&self, range: Range<usize>) -> io::Result<Cow<'_, [u8]>>;
+
+    /// How many bytes a read at an offset reads first, when the source
+    /// doesn't hold its bytes in memory: 4096, by default. It changes only
+    /// what a read costs, never what it reads.
+    fn first_window(&self) -> usize {
+        4096
+    }
 }
 
 /// `bytes` in `range`, or an error when it runs past them.
@@ -99,6 +111,10 @@ impl<S: ByteSource + ?Sized> ByteSource for &S {
 
     fn read_at(&self, range: Range<usize>) -> io::Result<Cow<'_, [u8]>> {
         (**self).read_at(range)
+    }
+
+    fn first_window(&self) -> usize {
+        (**self).first_window()
     }
 }
 
@@ -174,6 +190,17 @@ fn outside(span: &Span) -> String {
 /// are decoded, so which stream it cuts depends on the order objects are
 /// asked for, where the whole read decodes them by number.
 ///
+/// A source that holds its bytes in memory ([`ByteSource::whole`]) is read
+/// as the whole read reads a file; one that doesn't is read by position, a
+/// window at a time, each read reading what it would of the whole file. An
+/// object's first window reaches a byte past the next offset the
+/// cross-references list, so that an object as it should be is one read.
+/// The header is read from the file's start, `startxref` and the last
+/// `%%EOF` back from its end, and each section at its offset; a file whose
+/// sections don't read is read whole, to be scanned. Where the source
+/// fails ([`Error::Io`]), nothing read is kept, and a call asked again
+/// reads again.
+///
 /// ```
 /// use pdf_structure::bytes::{Options, Reading};
 ///
@@ -188,11 +215,13 @@ fn outside(span: &Span) -> String {
 /// ```
 pub struct Reading<S> {
     source: S,
-    /// A source's bytes when it doesn't hold them in memory, read whole as
-    /// it's opened.
-    held: Option<Vec<u8>>,
     pub(super) reader: Reader,
     id: SourceId,
+    /// Whether an object read by position is first given a window to a
+    /// byte past the next listed offset: always, but where the tests and
+    /// the fuzz target read without, so that a small first window reaches
+    /// every read's windows.
+    bound: bool,
 }
 
 impl<S> fmt::Debug for Reading<S> {
@@ -216,12 +245,20 @@ impl<'a> Reading<&'a [u8]> {
         native: bool,
         decoder: Option<&dyn Decode>,
     ) -> Reading<&'a [u8]> {
+        let Ok(reader) = Reader::new(InMemory(file), passwords, options, native, decoder);
         Reading {
-            reader: Reader::new(file, passwords, options, native, decoder),
+            reader,
             source: file,
-            held: None,
             id: SourceId::next(),
+            bound: true,
         }
+    }
+
+    /// The reading read whole, with `decoder` asked for what the reader
+    /// doesn't decode or decrypt itself, which can't fail in memory.
+    pub(crate) fn whole(self, decoder: Option<&dyn Decode>) -> Whole {
+        let Ok(whole) = self.reader.whole(InMemory(self.source), decoder);
+        whole
     }
 }
 
@@ -234,30 +271,38 @@ impl<S: ByteSource> Reading<S> {
     /// passwords aren't kept. It fails only when the source doesn't give
     /// its bytes ([`Error::Io`]).
     pub fn open(source: S, passwords: &[&[u8]], options: &Options) -> Result<Reading<S>, Error> {
-        let held = match source.whole() {
-            Some(_) => None,
+        Reading::open_by(source, passwords, options, true)
+    }
+
+    /// [`Reading::open`], an object read by position first given a window
+    /// to a byte past the next listed offset when `bound`.
+    pub(crate) fn open_by(
+        source: S,
+        passwords: &[&[u8]],
+        options: &Options,
+        bound: bool,
+    ) -> Result<Reading<S>, Error> {
+        let reader = match source.whole() {
+            Some(file) => {
+                let Ok(reader) = Reader::new(InMemory(file), passwords, options, true, None);
+                reader
+            }
             None => {
-                let bytes = source.read_at(0..source.len()).map_err(Error::Io)?;
-                Some(bytes.into_owned())
+                let file = ByPosition::new(&source, bound);
+                Reader::new(file, passwords, options, true, None).map_err(Error::Io)?
             }
         };
-        let file = (held.as_deref())
-            .or_else(|| source.whole())
-            .unwrap_or_default();
-        let reader = Reader::new(file, passwords, options, true, None);
         Ok(Reading {
             source,
-            held,
             reader,
             id: SourceId::next(),
+            bound,
         })
     }
 
-    /// The file's bytes.
-    fn file(&self) -> &[u8] {
-        (self.held.as_deref())
-            .or_else(|| self.source.whole())
-            .unwrap_or_default()
+    /// The file read by position.
+    fn by_position(&self) -> ByPosition<'_> {
+        ByPosition::new(&self.source, self.bound)
     }
 
     /// Every object its cross-references list, by number: each in use, of
@@ -284,7 +329,14 @@ impl<S: ByteSource> Reading<S> {
     /// references, and its strings decrypted in an encrypted file that
     /// opened.
     pub fn get(&self, id: ObjectId) -> Result<&Object, Error> {
-        self.reader.get(self.file(), id).map_err(Error::Unread)
+        let got = match self.source.whole() {
+            Some(file) => {
+                let Ok(got) = self.reader.get(InMemory(file), id);
+                got
+            }
+            None => self.reader.get(self.by_position(), id).map_err(Error::Io)?,
+        };
+        got.map_err(Error::Unread)
     }
 
     /// Object `id`, as [`Reading::get`] gives it, and where it was read
@@ -297,9 +349,17 @@ impl<S: ByteSource> Reading<S> {
         let Some(i) = self.reader.listed(id) else {
             return Err(Error::Unread(Unread::Missing { id }));
         };
-        let object = match self.reader.slots[i].get() {
-            Some(read) => read.object.clone(),
-            None => self.reader.read(self.file(), i).object,
+        let object = match (self.reader.slots[i].get(), self.source.whole()) {
+            (Some(read), _) => read.object.clone(),
+            (None, Some(file)) => {
+                let Ok(read) = self.reader.read(InMemory(file), i);
+                read.object
+            }
+            (None, None) => {
+                (self.reader.read(self.by_position(), i))
+                    .map_err(Error::Io)?
+                    .object
+            }
         };
         object.map_err(Error::Unread)
     }
@@ -341,7 +401,7 @@ impl<S: ByteSource> Reading<S> {
 
     /// The file's length in bytes.
     pub fn size(&self) -> usize {
-        self.file().len()
+        self.source.len()
     }
 
     /// What the reader warned of in what it has read so far, in the order
@@ -359,11 +419,21 @@ impl<S: ByteSource> Reading<S> {
     /// [`Document::metadata`] has it. The objects on the way to it are read
     /// and kept.
     pub fn metadata(&self) -> Result<Option<Cow<'_, [u8]>>, Error> {
-        let (file, reader) = (self.file(), &self.reader);
+        match self.source.whole() {
+            Some(file) => {
+                let Ok(metadata) = self.metadata_in(InMemory(file));
+                Ok(metadata)
+            }
+            None => self.metadata_in(self.by_position()).map_err(Error::Io),
+        }
+    }
+
+    /// [`Reading::metadata`], of `file`.
+    fn metadata_in<'f, F: Bytes<'f>>(&'f self, file: F) -> Result<Option<Cow<'f, [u8]>>, F::Error> {
+        let reader = &self.reader;
         let plain = !reader.encrypts || reader.plain_metadata;
-        let get = |id| reader.get(file, id).ok();
-        let metadata = super::metadata(file, &reader.trailer, &get, !plain);
-        Ok(metadata.map(Cow::Borrowed))
+        let get = |id| Ok(reader.get(file, id)?.ok());
+        super::metadata(file, &reader.trailer, &get, !plain)
     }
 
     /// The bytes at `span`: in the file, or in the decoded data of the
@@ -372,22 +442,35 @@ impl<S: ByteSource> Reading<S> {
     /// be ciphertext, but for an object stream's decoded data, which is
     /// decrypted.
     pub fn bytes(&self, span: Span) -> Result<Cow<'_, [u8]>, Error> {
-        let file = self.file();
+        match self.source.whole() {
+            Some(file) => {
+                let Ok(bytes) = self.bytes_in(InMemory(file), span);
+                bytes
+            }
+            None => self.bytes_in(self.by_position(), span).map_err(Error::Io)?,
+        }
+    }
+
+    /// [`Reading::bytes`], of `file`.
+    fn bytes_in<'f, F: Bytes<'f>>(
+        &'f self,
+        file: F,
+        span: Span,
+    ) -> Result<Result<Cow<'f, [u8]>, Error>, F::Error> {
         let range = span.start..span.end;
         let outside = Error::Outside { span };
-        match span.stream {
+        Ok(match span.stream {
             None if self.reader.encrypts => Err(Error::Encrypted),
-            None => file.get(range).map(Cow::Borrowed).ok_or(outside),
-            Some((stream, 0)) => {
-                let container = (self.reader.container(file, stream)).ok_or(outside)?;
-                if let Err(why) = &container.header {
-                    return Err(Error::Unread(why.clone()));
-                }
-                let bytes = container.data.get(range);
-                bytes.map(Cow::Borrowed).ok_or(Error::Outside { span })
-            }
+            None => file.get(range)?.ok_or(outside),
+            Some((stream, 0)) => match self.reader.container(file, stream)? {
+                None => Err(outside),
+                Some(container) => match &container.header {
+                    Err(why) => Err(Error::Unread(why.clone())),
+                    Ok(_) => container.data.get(range).map(Cow::Borrowed).ok_or(outside),
+                },
+            },
             Some(_) => Err(outside),
-        }
+        })
     }
 
     /// Which reading this is, which its records are of.
@@ -401,21 +484,27 @@ impl<S: ByteSource> Reading<S> {
     /// only when the source doesn't give the bytes asked of it
     /// ([`Error::Io`]).
     pub fn into_document(self) -> Result<Document, Error> {
-        Ok(self.whole(None).document)
+        Ok(self.read_whole(None)?.document)
     }
 
     /// The reading read whole, with `decoder` asked for what the reader
     /// doesn't decode or decrypt itself.
-    pub(crate) fn whole(self, decoder: Option<&dyn Decode>) -> Whole {
+    pub(crate) fn read_whole(self, decoder: Option<&dyn Decode>) -> Result<Whole, Error> {
         let Reading {
             source,
-            held,
             reader,
+            bound,
             ..
         } = self;
-        let file = (held.as_deref())
-            .or_else(|| source.whole())
-            .unwrap_or_default();
-        reader.whole(file, decoder)
+        match source.whole() {
+            Some(file) => {
+                let Ok(whole) = reader.whole(InMemory(file), decoder);
+                Ok(whole)
+            }
+            None => {
+                let file = ByPosition::new(&source, bound);
+                reader.whole(file, decoder).map_err(Error::Io)
+            }
+        }
     }
 }

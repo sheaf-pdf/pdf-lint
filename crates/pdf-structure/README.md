@@ -7,7 +7,8 @@ It's made for a reader that checks files as much as for one that shows them. Whe
 ## What it does
 
 - **A file read whole** (`bytes::read`): the header, `startxref`, the cross-reference tables and streams along their `/Prev` chain, and each object at its offset, through pdf-objects' parser, a stream's data by its `/Length` when that ends at `endstream`. What it read is a `Document`: each object its cross-references list, or why it doesn't read; the trailer; the header's version; and the file's newest incremental update.
-- **Or read on demand** (`Reading`): opened, the header, sections and trailer read and an encrypted file's security handler opened with the passwords given, which aren't kept; then each object read when it's first asked for, kept (`get`) or not (`object_unkept`), and each object stream decoded once, when an object in it is first read, from any thread; and the bytes at a span (`Reading::bytes`), in the file or in an object stream's decoded data, but for an encrypted file's as written, which may be ciphertext. Read in any order and made a `Document`, a reading is the whole read, the same objects, warnings in the same order and the same decoded data, so long as no stream it decodes reaches the reading's budget, which is spent in the order streams are decoded. The whole read is every object read so, in order, by the same code. A reading holds its bytes as a `ByteSource`: a slice, a `Vec<u8>` or an `Arc<[u8]>`.
+- **Or read on demand** (`Reading`): opened, the header, sections and trailer read and an encrypted file's security handler opened with the passwords given, which aren't kept; then each object read when it's first asked for, kept (`get`) or not (`object_unkept`), and each object stream decoded once, when an object in it is first read, from any thread; and the bytes at a span (`Reading::bytes`), in the file or in an object stream's decoded data, but for an encrypted file's as written, which may be ciphertext. Read in any order and made a `Document`, a reading is the whole read, the same objects, warnings in the same order and the same decoded data, so long as no stream it decodes reaches the reading's budget, which is spent in the order streams are decoded. The whole read is every object read so, in order, by the same code. A reading holds its bytes as a `ByteSource`: a slice, a `Vec<u8>` or an `Arc<[u8]>` in memory; or a file read by position (`FileBytes`, on Unix and Windows), never whole but where the reader needs it whole, to scan a file whose sections don't read.
+- **A file read by position**, a window at a time: the header from the file's start, `startxref` and the last `%%EOF` back from its end, each section at its offset, and each object at its own, its first window reaching a byte past the next offset the cross-references list, so that an object as it should be is one read; a window doubled while what's read runs to its end where more of the file could change it, so that each read reads what it would of the whole file (pdf-objects' `Parser::window`). Any `ByteSource` that doesn't hold its bytes in memory is read so, from its `first_window`. Where the source fails, the call fails (`bytes::Error::Io`), and nothing read is kept, so asked again it reads again. A file's `Identity`, taken as it's opened by one `stat`, its length and modification time, and its device and inode on Unix or its creation time on Windows, tells whether the file held open has changed in place (`FileBytes::unchanged`), and whether another is at its path now (`Identity::of`).
 - **Where each object was read from** (`Record`): at the offset a section gives, at one the scan found, or in an object stream's decoded data, the `index`th of its objects; its bytes, from its `n g obj` to past its `endobj`, and whether `endobj` follows it; and a stream's data, and whether it was found by its `/Length`, and whether that's a reference. And what the header and sections say of the file as written (`Facts`): where `%PDF-` starts, the newest section's offset and kind, how many sections, whether one is a hybrid's, the largest cross-reference stream's number, and whether a linearization holds (ISO 32000-2, Annex F).
 - **Recovery by scanning.** Where the sections don't read, it finds the objects by scanning the file, and the trailer says why (`Trailer::unwritten`).
 - **Every choice said.** What the reader had to choose how to read is a `Warning`, with its object and where: a stream whose `/Length` doesn't end at `endstream`, an object without `endobj`, a cross-reference table whose rows aren't the 20 bytes the spec writes, a file whose last line isn't `%%EOF` alone, and what pdf-objects' parser reads past.
@@ -80,6 +81,28 @@ let doc = reading.into_document().unwrap();
 assert_eq!(doc, pdf_structure::bytes::read(file));
 ```
 
+A file on disk read by position, each object a window of it, and the file's identity, to tell whether it's changed since:
+
+```rust,no_run
+use std::fs::File;
+
+use pdf_structure::{FileBytes, Options, Reading};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let file = FileBytes::new(File::open("file.pdf")?)?;
+let identity = file.identity();
+let reading = Reading::open(file, &[], &Options::DEFAULT)?;
+let catalog = reading.trailer().dict().get(b"Root").and_then(|root| root.as_reference());
+if let Some(catalog) = catalog {
+    println!("{:?}", reading.get(catalog)?);
+}
+// Later, before writing to the path: is the file there the one read?
+let same = pdf_structure::Identity::of("file.pdf")? == identity;
+println!("the same file: {same}");
+# Ok(())
+# }
+```
+
 A file without `startxref` is scanned for its objects, and the trailer says so:
 
 ```rust
@@ -93,7 +116,6 @@ assert_eq!(doc.trailer.unwritten.as_deref(), Some("no startxref"));
 
 ## What isn't here
 
-- **A file read by position.** A reading's bytes are in memory; a `ByteSource` that doesn't hold them is read whole as it's opened.
 - **A stream's data.** A stream other than an object stream or a cross-reference stream is left where it was written (`Data::At`), not decrypted or decoded.
 - **Writing.** It reads only. The `fixtures` feature writes files from objects, and runs qpdf (the program `PDF_LINT_QPDF` names, else `qpdf` on the `PATH`) as a second reader, hidden from the docs: for this workspace's tests and fuzz targets, not for a user. Without it, nothing runs a program or reads `PDF_LINT_QPDF`.
 

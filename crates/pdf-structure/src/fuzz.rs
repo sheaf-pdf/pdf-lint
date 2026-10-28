@@ -2,15 +2,21 @@
 //! bytes, a file is read without a panic, in the same way twice, with
 //! every place the reading gives inside what was read; read on demand, in
 //! an order the input chooses, it's the whole read, so long as no stream
-//! either decodes reaches the budget; and so are its revision before an
-//! incremental update, and the file opened by an owner's password. It
-//! reads under small limits, so that a run tries more inputs. It's
-//! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`, and
-//! only reads.
+//! either decodes reaches the budget; read by position, a window at a time
+//! from a first window the input chooses, it's the whole read; and so are
+//! its revision before an incremental update, and the file opened by an
+//! owner's password. It reads under small limits, so that a run tries more
+//! inputs. It's compiled only for tests and under cargo-fuzz's `--cfg
+//! fuzzing`, and only reads.
+
+use std::borrow::Cow;
+use std::io;
+use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pdf_objects::object::{ObjectId, Span, Value};
 
-use crate::bytes::{Options, Reading, Whole, XrefEntry};
+use crate::bytes::{ByteSource, Error, Options, Reading, Whole, XrefEntry};
 use crate::source::Document;
 
 /// The owner's password the fuzz target opens a file by, when its input
@@ -27,6 +33,63 @@ pub fn options() -> Options {
     options
 }
 
+/// Bytes in memory, read a window at a time as a file is, by position,
+/// the first window `first` bytes: counting the bytes read.
+#[derive(Debug)]
+pub struct Counted<'a> {
+    bytes: &'a [u8],
+    first: usize,
+    read: AtomicUsize,
+}
+
+impl<'a> Counted<'a> {
+    /// `bytes`, read by position, `first` bytes first.
+    pub fn new(bytes: &'a [u8], first: usize) -> Counted<'a> {
+        Counted {
+            bytes,
+            first,
+            read: AtomicUsize::new(0),
+        }
+    }
+
+    /// How many bytes have been read.
+    pub fn read(&self) -> usize {
+        self.read.load(Ordering::Relaxed)
+    }
+}
+
+impl ByteSource for Counted<'_> {
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn read_at(&self, range: Range<usize>) -> io::Result<Cow<'_, [u8]>> {
+        self.read.fetch_add(range.len(), Ordering::Relaxed);
+        let (start, end) = (range.start, range.end);
+        self.bytes.get(range).map(Cow::Borrowed).ok_or_else(|| {
+            let message = format!("bytes {start}..{end} aren't within the file");
+            io::Error::new(io::ErrorKind::UnexpectedEof, message)
+        })
+    }
+
+    fn first_window(&self) -> usize {
+        self.first
+    }
+}
+
+/// `source` opened as [`Reading::open`] opens it, but that an object read
+/// by position is first given a window to a byte past the next offset the
+/// cross-references list only when `bound`: without, a small first window
+/// reaches every read's windows.
+pub fn open<S: ByteSource>(
+    source: S,
+    passwords: &[&[u8]],
+    options: &Options,
+    bound: bool,
+) -> Result<Reading<S>, Error> {
+    Reading::open_by(source, passwords, options, bound)
+}
+
 /// The fuzz target's body: `data`'s first two bytes choose how the file
 /// after them is read, and the rest is the file. Read whole under
 /// [`options`], it's the same twice, and every place the reading gives is
@@ -36,10 +99,13 @@ pub fn options() -> Options {
 /// keeps. Read on demand, its objects asked for in an order the choice's
 /// next bits give, some read unkept first, each the object and record it's
 /// kept as, it's the whole read, when neither reading's decoding reached
-/// the budget. When the file has an incremental update, so is the
-/// revision before it ([`Options::section`]); and with the choice's
-/// lowest bit set, so is the file opened by the owner's password `owner`,
-/// and its revision before an update. Panics on a broken promise.
+/// the budget. Read by position, through [`Counted`], its first window and
+/// whether an object's reaches the next listed offset as the choice's
+/// bits from the fourth give, it's the whole read. When the file has an
+/// incremental update, so is the revision before it ([`Options::section`]);
+/// and with the choice's lowest bit set, so is the file opened by the
+/// owner's password `owner`, and its revision before an update. Panics on
+/// a broken promise.
 pub fn read_file(data: &[u8]) {
     let (choice, file) = match data {
         [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
@@ -73,6 +139,7 @@ fn alike(file: &[u8], passwords: &[&[u8]], choice: u16) {
     );
     within(file, doc);
     on_demand(file, passwords, None, &read, choice);
+    by_position(file, passwords, None, doc, choice);
     if let Some(update) = &doc.update {
         let section = Some(update.previous);
         let previous = whole(file, passwords, section);
@@ -83,7 +150,31 @@ fn alike(file: &[u8], passwords: &[&[u8]], choice: u16) {
         );
         within(file, &previous.document);
         on_demand(file, passwords, section, &previous, choice);
+        by_position(file, passwords, section, &previous.document, choice);
     }
+}
+
+/// The file, as of `section`, opened by `passwords`, read by position
+/// through [`Counted`], its first window 1 to 64 bytes as `choice`'s bits
+/// from the fifth give, and an object's first window to the next listed
+/// offset when its fourth is set: read whole, it's `doc`, the whole read,
+/// which decodes its streams in the same order, so whether or not the
+/// budget is reached.
+fn by_position(
+    file: &[u8],
+    passwords: &[&[u8]],
+    section: Option<usize>,
+    doc: &Document,
+    choice: u16,
+) {
+    let mut options = options();
+    options.section = section;
+    let first = 1 + usize::from((choice >> 4) & 63);
+    let source = Counted::new(file, first);
+    let read = open(&source, passwords, &options, choice & 8 != 0)
+        .and_then(|reading| reading.into_document());
+    let read = read.expect("bytes in memory are read by position without fail");
+    assert_eq!(read, *doc, "a reading by position is the whole read");
 }
 
 /// The file, as of `section`, opened by `passwords`, read on demand: its

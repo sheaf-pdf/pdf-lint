@@ -82,7 +82,7 @@ fn attachments_only() -> Vec<u8> {
 
 /// A file whose last object, 4, is `3` without its `endobj`, which object
 /// 3's `/Length` refers to.
-fn length_by_reference() -> Vec<u8> {
+pub(super) fn length_by_reference() -> Vec<u8> {
     write::assembled(
         "1.7",
         &[
@@ -115,12 +115,12 @@ fn fixture(name: &str) -> Option<Vec<u8>> {
 }
 
 /// A test file: its name, its bytes, and the passwords it's read by.
-type Named = (String, Vec<u8>, Vec<&'static [u8]>);
+pub(super) type Named = (String, Vec<u8>, Vec<&'static [u8]>);
 
 /// The files the tests' writer makes, each kind bytes.rs's tests read, and
 /// the fixtures qpdf wrote, where they are: each named, with the passwords
 /// it's read by.
-fn files() -> Vec<Named> {
+pub(super) fn files() -> Vec<Named> {
     let none: Vec<&[u8]> = Vec::new();
     let both: Vec<&[u8]> = vec![b"user", b"owner"];
     let mut files = vec![
@@ -310,6 +310,9 @@ fn a_reading_is_send_and_sync_over_each_source() {
     shared::<Reading<Vec<u8>>>();
     shared::<Reading<Arc<[u8]>>>();
     shared::<Reading<&Vec<u8>>>();
+    #[cfg(any(unix, windows))]
+    shared::<Reading<FileBytes>>();
+    shared::<Identity>();
     shared::<SourceId>();
     shared::<Error>();
     shared::<Options>();

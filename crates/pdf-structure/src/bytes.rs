@@ -17,7 +17,11 @@
 //! is read so, in order, into a [`Document`] ([`read`],
 //! [`Reading::into_document`]); read on demand, on any thread, only what's
 //! asked for is. Each object read records where it was found
-//! ([`Record`]).
+//! ([`Record`]). Its bytes are in memory, or a file is read by position
+//! ([`FileBytes`], or any [`ByteSource`] that doesn't hold its bytes), a
+//! window at a time from where each read starts, larger while what's read
+//! runs to the window's end, so that each read reads what it would of the
+//! whole file.
 //!
 //! It decodes cross-reference streams and object streams from their own
 //! data, through [`pdf_filters`]: a stream up to [`Limits::stream`] bytes,
@@ -110,6 +114,8 @@
 //! as it's first read. Held by
 //! `a_reading_on_demand_is_the_whole_read_in_any_order_on_any_thread`.
 
+use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -128,11 +134,17 @@ use crate::source::{
     Document, Encryption, Extent, Facts, Origin, Record, Trailer, Unread, Update, Warning, XrefKind,
 };
 
+mod file;
 mod limits;
 mod reading;
+mod window;
 
+#[cfg(any(unix, windows))]
+pub use file::FileBytes;
+pub use file::Identity;
 pub use limits::{Limits, Options};
 pub use reading::{ByteSource, Error, Reading, SourceId};
+use window::{Bytes, InMemory, Window};
 
 // How deeply arrays and dictionaries may nest in an object is the
 // parser's, pdf-objects'.
@@ -398,43 +410,58 @@ pub(crate) struct Whole {
     pub(crate) reached: bool,
 }
 
+/// What a read of the objects on the way to the metadata gives: the object
+/// a reference refers to, none for no object that reads, or why the file
+/// doesn't read.
+type Get<'g, 'o, E> = &'g dyn Fn(ObjectId) -> Result<Option<&'o Object>, E>;
+
 /// The data of the catalog's metadata stream (ISO 32000-2, 14.3.2), as
 /// written in `file`, when it's in plain view: unfiltered, and not
 /// `encrypted`. `get` gives the object a reference refers to.
-fn metadata<'f, 'o>(
-    file: &'f [u8],
+fn metadata<'f, 'o, F: Bytes<'f>>(
+    file: F,
     trailer: &'o Trailer,
-    get: &dyn Fn(ObjectId) -> Option<&'o Object>,
+    get: Get<'_, 'o, F::Error>,
     encrypted: bool,
-) -> Option<&'f [u8]> {
+) -> Result<Option<Cow<'f, [u8]>>, F::Error> {
     /// `o` with its references followed, as many as an object's way to
     /// the catalog may take.
-    fn follow<'o>(
-        get: &dyn Fn(ObjectId) -> Option<&'o Object>,
-        mut o: &'o Object,
-    ) -> Option<&'o Object> {
+    fn follow<'o, E>(get: Get<'_, 'o, E>, mut o: &'o Object) -> Result<Option<&'o Object>, E> {
         for _ in 0..8 {
             match o.value() {
-                Value::Ref(id) => o = get(*id)?,
-                _ => return Some(o),
+                Value::Ref(id) => match get(*id)? {
+                    Some(to) => o = to,
+                    None => return Ok(None),
+                },
+                _ => return Ok(Some(o)),
             }
         }
-        None
+        Ok(None)
     }
-    let dict = |o| match follow(get, o)?.value() {
-        Value::Dict(d) => Some(d),
-        _ => None,
+    let dict = |o| -> Result<_, F::Error> {
+        Ok(match follow(get, o)?.map(Object::value) {
+            Some(Value::Dict(d)) => Some(d),
+            _ => None,
+        })
     };
     let trailer = trailer.dict();
     if encrypted {
-        return None;
+        return Ok(None);
     }
-    let catalog = dict(trailer.get(b"Root")?)?;
-    let Value::Stream(stream) = follow(get, catalog.get(b"Metadata")?)?.value() else {
-        return None;
+    let Some(catalog) = trailer.get(b"Root").map(dict).transpose()?.flatten() else {
+        return Ok(None);
     };
-    let at = (stream.data.at()).filter(|at| at.stream.is_none() && !stream.dict.has(b"Filter"))?;
-    file.get(at.start..at.end)
+    let Some(metadata) = catalog.get(b"Metadata") else {
+        return Ok(None);
+    };
+    let Some(Value::Stream(stream)) = follow(get, metadata)?.map(Object::value) else {
+        return Ok(None);
+    };
+    let at = (stream.data.at()).filter(|at| at.stream.is_none() && !stream.dict.has(b"Filter"));
+    match at {
+        Some(at) => file.get(at.start..at.end),
+        None => Ok(None),
+    }
 }
 
 /// What a reading knows once it's open, which each read of it shares. Its
@@ -465,6 +492,10 @@ struct Reader {
     /// The newest entry for each object number, with its generation, by
     /// number: as the sections give them, once they're read.
     entries: Box<[(u32, (u16, XrefEntry))]>,
+    /// Where each object in use and each cross-reference section the
+    /// sections list starts, in order, once they're read: for a file read
+    /// by position, where each object can end ([`Reader::bound`]).
+    offsets: Box<[usize]>,
     /// The security handler of an encrypted file it opened.
     handler: Option<Handler>,
     /// Whether the file is encrypted, and if it is, whether it opened.
@@ -573,12 +604,34 @@ impl Sink<'_> for Warned<'_> {
     }
 }
 
+/// A cross-reference section's entries, by number: each with its
+/// generation.
+type Rows = BTreeMap<u32, (u16, XrefEntry)>;
+
+/// An indirect object read at an offset: its number, it, and where it was
+/// read from; or why it doesn't read.
+type Indirect = Result<(ObjectId, Object, Record), Unread>;
+
+/// What reading an object in use gave, when an entry in use lists it.
+type InUse<'r> = Option<Result<&'r Object, &'r Unread>>;
+
+/// What's at the offset `startxref` or a `/Prev` gives.
+enum At {
+    /// A table, read but for its `/XRefStm`, and where that is; or why it
+    /// doesn't read.
+    Table(Result<(Box<Section>, Option<usize>), String>),
+    /// An object, which may be a cross-reference stream.
+    Stream,
+    /// Neither.
+    Neither,
+}
+
 /// A cross-reference section, read but for its stream's rows.
 struct Section {
     trailer: Trailer,
     prev: Option<usize>,
     /// A table's rows.
-    table: BTreeMap<u32, (u16, XrefEntry)>,
+    table: Rows,
     /// The cross-reference stream whose rows it has, at its offset: the
     /// section's own, or a hybrid table's `/XRefStm`.
     stream: Option<(usize, ObjectId, Object)>,
@@ -704,13 +757,13 @@ impl Reader {
     /// dictionary, its security handler opened with `passwords`, which
     /// aren't kept. `decoder` decodes the cross-reference streams the
     /// reader is made not to.
-    fn new(
-        file: &[u8],
+    fn new<'f, F: Bytes<'f>>(
+        file: F,
         passwords: &[&[u8]],
         options: &Options,
         native: bool,
         decoder: Option<&dyn Decode>,
-    ) -> Reader {
+    ) -> Result<Reader, F::Error> {
         let limits = options.limits;
         let mut reader = Reader {
             limits,
@@ -723,6 +776,7 @@ impl Reader {
             facts: Facts::default(),
             scanned: false,
             entries: Box::default(),
+            offsets: Box::default(),
             handler: None,
             encryption: Encryption::None,
             encrypted: None,
@@ -736,19 +790,32 @@ impl Reader {
             containers: BTreeMap::new(),
         };
         let mut cx = Cx::default();
-        reader.version = reader.header(file, &mut cx);
+        reader.version = reader.header(file, &mut cx)?;
         let sections = match options.section {
-            Some(section) => reader.sections_from(file, &mut cx, section, decoder),
-            None => reader.sections(file, &mut cx, decoder),
+            Some(section) => reader.sections_from(file, &mut cx, section, decoder)?,
+            None => reader.sections(file, &mut cx, decoder)?,
         };
         let trailer = match sections {
             Ok(trailer) => trailer,
-            Err(why) => reader.scan(file, &mut cx, why),
+            Err(why) => reader.scan(file, &mut cx, why)?,
         };
         if options.section.is_none() {
-            reader.end(file, &mut cx);
+            reader.end(file, &mut cx)?;
         }
-        reader.encryption(file, &mut cx, &trailer, passwords);
+        // Read by position, an object's first window reaches the next offset
+        // listed, an object's or a section's.
+        if file.bounded() {
+            let in_use = (reader.entries.iter()).filter_map(|&(_, (_, entry))| match entry {
+                XrefEntry::InUse { offset, .. } => Some(offset),
+                _ => None,
+            });
+            let mut offsets = std::mem::take(&mut reader.offsets).into_vec();
+            offsets.extend(in_use);
+            offsets.sort_unstable();
+            offsets.dedup();
+            reader.offsets = offsets.into();
+        }
+        reader.encryption(file, &mut cx, &trailer, passwords)?;
         if let Some((0, (_, entry))) = reader.entries.first() {
             if *entry != XrefEntry::Free {
                 let message =
@@ -756,8 +823,10 @@ impl Reader {
                 cx.warn(None, None, message.to_string());
             }
         }
-        reader.facts.linearized =
-            (reader.facts.header).is_some_and(|at| holds_linearization(file, at, limits.parser));
+        reader.facts.linearized = match reader.facts.header {
+            Some(at) => holds_linearization(file, at, limits.parser)?,
+            None => false,
+        };
         reader.slots = reader.entries.iter().map(|_| OnceLock::new()).collect();
         reader.containers = (reader.entries.iter())
             .filter_map(|&(_, (_, entry))| match entry {
@@ -767,7 +836,7 @@ impl Reader {
             .collect();
         reader.trailer = trailer;
         reader.opened = cx.warnings;
-        reader
+        Ok(reader)
     }
 
     /// Where object number `n`'s entry is among the entries.
@@ -792,25 +861,37 @@ impl Reader {
         }
     }
 
+    /// Where an object read by position at `offset` can end, at the most:
+    /// at the next offset the sections list, an object's or a section's, or
+    /// at the file's end, `len`. None when no offsets are listed, as in a
+    /// file in memory.
+    fn bound(&self, offset: usize, len: usize) -> Option<usize> {
+        if self.offsets.is_empty() {
+            return None;
+        }
+        let next = self.offsets.partition_point(|&next| next <= offset);
+        Some(self.offsets.get(next).map_or(len, |&next| next.min(len)))
+    }
+
     /// What reading entry `i`'s object gave: read, and kept, the first
     /// time it's asked for. Two threads may both read it; the first read
-    /// kept is the one each gets.
-    fn slot(&self, file: &[u8], i: usize) -> &Read {
+    /// kept is the one each gets. A read the file stops isn't kept.
+    fn slot<'f, F: Bytes<'f>>(&self, file: F, i: usize) -> Result<&Read, F::Error> {
         let slot = &self.slots[i];
         if let Some(read) = slot.get() {
-            return read;
+            return Ok(read);
         }
-        let read = self.read(file, i);
-        slot.get_or_init(|| Box::new(read))
+        let read = self.read(file, i)?;
+        Ok(slot.get_or_init(|| Box::new(read)))
     }
 
     /// Entry `i`'s object, read, and not kept: at its offset, or from its
     /// object stream's decoded data, which is.
-    fn read(&self, file: &[u8], i: usize) -> Read {
+    fn read<'f, F: Bytes<'f>>(&self, file: F, i: usize) -> Result<Read, F::Error> {
         let (n, (generation, entry)) = self.entries[i];
-        match entry {
-            XrefEntry::InUse { offset, .. } => self.read_at(file, (n, generation), offset),
-            XrefEntry::Compressed { stream, index } => self.read_in(file, (n, 0), stream, index),
+        Ok(match entry {
+            XrefEntry::InUse { offset, .. } => self.read_at(file, (n, generation), offset)?,
+            XrefEntry::Compressed { stream, index } => self.read_in(file, (n, 0), stream, index)?,
             XrefEntry::Free => Read {
                 object: Err(Unread::Missing {
                     id: (n, generation),
@@ -818,15 +899,20 @@ impl Reader {
                 warnings: Vec::new(),
                 decrypt: Vec::new(),
             },
-        }
+        })
     }
 
     /// Object `id`, read at `offset`, and in an encrypted file it opened, its
     /// strings decrypted.
-    fn read_at(&self, file: &[u8], id: ObjectId, offset: usize) -> Read {
+    fn read_at<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        id: ObjectId,
+        offset: usize,
+    ) -> Result<Read, F::Error> {
         let mut cx = Cx::default();
         let mut object =
-            self.indirect(file, &mut cx, offset, Some(id))
+            self.indirect(file, &mut cx, offset, Some(id))?
                 .map(|(_, mut o, mut record)| {
                     // A cross-reference stream is never encrypted (ISO 32000-2,
                     // 7.5.8.2).
@@ -842,38 +928,58 @@ impl Reader {
             (Some(handler), Ok((o, _))) if self.native => decrypt_strings(handler, id, o),
             _ => Vec::new(),
         };
-        Read {
+        Ok(Read {
             object,
             warnings: cx.warnings,
             decrypt,
-        }
+        })
     }
 
     /// Object `id`, the `index`th of object stream `stream`, read from the
     /// stream's decoded data, which is decoded the first time an object in
     /// it is read.
-    fn read_in(&self, file: &[u8], id: ObjectId, stream: u32, index: u32) -> Read {
+    fn read_in<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        id: ObjectId,
+        stream: u32,
+        index: u32,
+    ) -> Result<Read, F::Error> {
         let mut cx = Cx::default();
-        let object = match self.container(file, stream) {
+        let object = match self.container(file, stream)? {
             None => Err(Unread::ContainerMissing { stream }),
             Some(container) => match &container.header {
                 Err(why) => Err(why.clone()),
                 Ok(header) => self.in_stream(&mut cx, id, stream, header, index, container),
             },
         };
-        Read {
+        Ok(Read {
             object,
             warnings: cx.warnings,
             decrypt: Vec::new(),
-        }
+        })
     }
 
     /// Object `id`, when an entry in use lists it: what reading it gave.
-    fn in_use(&self, file: &[u8], id: ObjectId) -> Option<Result<&Object, &Unread>> {
+    fn in_use<'f, F: Bytes<'f>>(&self, file: F, id: ObjectId) -> Result<InUse<'_>, F::Error> {
+        let Some(i) = self.listed(id) else {
+            return Ok(None);
+        };
+        Ok(match self.entries[i].1 {
+            (_, XrefEntry::InUse { .. }) => {
+                Some((self.slot(file, i)?.object.as_ref()).map(|(object, _)| object))
+            }
+            _ => None,
+        })
+    }
+
+    /// Object `id`, when an entry in use lists it and it's read and kept:
+    /// what reading it gave. It reads nothing, so it can't fail.
+    fn kept(&self, id: ObjectId) -> InUse<'_> {
         let i = self.listed(id)?;
         match self.entries[i].1 {
             (_, XrefEntry::InUse { .. }) => {
-                Some((self.slot(file, i).object.as_ref()).map(|(object, _)| object))
+                Some((self.slots[i].get()?.object.as_ref()).map(|(object, _)| object))
             }
             _ => None,
         }
@@ -881,14 +987,18 @@ impl Reader {
 
     /// Object `id`, read the first time it's asked for; or why it doesn't
     /// read.
-    fn get(&self, file: &[u8], id: ObjectId) -> Result<&Object, Unread> {
+    fn get<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        id: ObjectId,
+    ) -> Result<Result<&Object, Unread>, F::Error> {
         let Some(i) = self.listed(id) else {
-            return Err(Unread::Missing { id });
+            return Ok(Err(Unread::Missing { id }));
         };
-        match &self.slot(file, i).object {
+        Ok(match &self.slot(file, i)?.object {
             Ok((object, _)) => Ok(object),
             Err(why) => Err(why.clone()),
-        }
+        })
     }
 
     /// Whether it decodes object streams itself: in a file that doesn't
@@ -900,36 +1010,67 @@ impl Reader {
     }
 
     /// Object stream `stream`, which the entries put objects in, decoded
-    /// the first time it's asked for.
-    fn container(&self, file: &[u8], stream: u32) -> Option<&Container> {
-        let lock = self.containers.get(&stream)?;
+    /// the first time it's asked for. A read the file stops decodes
+    /// nothing, and keeps nothing of it.
+    fn container<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        stream: u32,
+    ) -> Result<Option<&Container>, F::Error> {
+        let Some(lock) = self.containers.get(&stream) else {
+            return Ok(None);
+        };
         if let Some(container) = lock.get() {
-            return Some(container);
+            return Ok(Some(container));
         }
         // What a read can fail at is read before the lock, which a second
         // thread waits on rather than decode the stream twice: the object
-        // stream itself, and what its filters' values refer to.
-        let object = self.in_use(file, (stream, 0));
+        // stream itself, what its filters' values refer to, and its data.
+        let object = self.in_use(file, (stream, 0))?;
+        let mut data = None;
         if let Some(Ok(object)) = object.filter(|_| self.native_containers()) {
             if let Value::Stream(s) = object.value() {
-                let resolve = |id| self.in_use(file, id)?.ok();
+                let failed = Cell::new(None);
+                let resolve = |id| match self.in_use(file, id) {
+                    Ok(object) => object?.ok(),
+                    Err(error) => {
+                        failed.set(Some(error));
+                        None
+                    }
+                };
                 let _ = filter::filters(&s.dict, Some(&resolve));
                 let _ = filter::crypt_filter(&s.dict, Some(&resolve));
+                if let Some(error) = failed.into_inner() {
+                    return Err(error);
+                }
+                // Its data, which only an object stream's decode reads.
+                let at = (s.data.at()).filter(|at| at.stream.is_none());
+                if s.dict.get(b"Type").and_then(Object::as_name) == Some(b"ObjStm") {
+                    data = at
+                        .map(|at| file.get(at.start..at.end))
+                        .transpose()?
+                        .flatten();
+                }
             }
         }
-        let container = || Box::new(self.decode_container(file, stream, object, None, None));
-        Some(lock.get_or_init(container))
+        let data = data.unwrap_or_default();
+        let memory = file.memory();
+        let container =
+            || Box::new(self.decode_container(memory, stream, object, &data, None, None));
+        Ok(Some(lock.get_or_init(container)))
     }
 
     /// Object stream `stream`, its object `object` (none when no entry in
-    /// use lists it): decoded from its own data when it decodes them
-    /// itself, else as `given`, what the decoder made of it, and failing
-    /// that, in a file that doesn't encrypt, by `decoder` from its bytes.
+    /// use lists it) and its data, `data`: decoded from its own data when
+    /// it decodes them itself, else as `given`, what the decoder made of
+    /// it, and failing that, in a file in `memory` that doesn't encrypt, by
+    /// `decoder` from its bytes.
     fn decode_container(
         &self,
-        file: &[u8],
+        memory: Option<&[u8]>,
         stream: u32,
-        object: Option<Result<&Object, &Unread>>,
+        object: InUse<'_>,
+        data: &[u8],
         given: Option<Result<Vec<u8>, Undecoded>>,
         decoder: Option<&dyn Decode>,
     ) -> Container {
@@ -940,7 +1081,7 @@ impl Reader {
         let header = match object {
             Some(Ok(object)) => {
                 let decoded = match native {
-                    true => Some(self.object_stream(file, &mut cx, &mut cut, id, object)),
+                    true => Some(self.object_stream(&mut cx, &mut cut, id, object, data)),
                     false => given,
                 };
                 let by_number = match decoded {
@@ -956,7 +1097,7 @@ impl Reader {
                 by_number.or_else(|why| {
                     decoder
                         .filter(|_| !self.encrypts && !native)
-                        .zip(self.written_stream(file, object))
+                        .zip(memory.and_then(|file| self.written_stream(file, object)))
                         .and_then(|(decoder, written)| decoder.decode_written(written).ok())
                         .and_then(|data| Some((object_stream_header(object, &data).ok()?, data)))
                         .ok_or(why)
@@ -984,21 +1125,31 @@ impl Reader {
     /// it is when the reader asks the decoder: in plain view when it's in
     /// a file that doesn't encrypt and has no filters, else as `decoder`
     /// makes of it.
-    fn decode_containers(&self, file: &[u8], decoder: Option<&dyn Decode>) {
+    fn decode_containers<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        decoder: Option<&dyn Decode>,
+    ) -> Result<(), F::Error> {
         // An object stream without filters, in a file that doesn't
         // encrypt, is in plain view: its data is as written.
-        let plain: BTreeMap<u32, Vec<u8>> = (self.containers.keys())
-            .filter(|_| !self.encrypts)
-            .filter_map(|&n| {
-                let object = self.in_use(file, (n, 0))?.ok()?;
-                let Value::Stream(stream) = object.value() else {
-                    return None;
-                };
-                let at = stream.data.at().filter(|at| at.stream.is_none())?;
-                let data = file.get(at.start..at.end)?;
-                filters(object).is_none().then(|| (n, data.to_vec()))
-            })
-            .collect();
+        let mut plain: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+        for &n in self.containers.keys().filter(|_| !self.encrypts) {
+            let Some(Ok(object)) = self.in_use(file, (n, 0))? else {
+                continue;
+            };
+            let Value::Stream(stream) = object.value() else {
+                continue;
+            };
+            let Some(at) = stream.data.at().filter(|at| at.stream.is_none()) else {
+                continue;
+            };
+            let Some(data) = file.get(at.start..at.end)? else {
+                continue;
+            };
+            if filters(object).is_none() {
+                plain.insert(n, data.into_owned());
+            }
+        }
         let ids: Vec<ObjectId> = (self.containers.keys())
             .filter(|n| !plain.contains_key(n))
             .map(|&n| (n, 0))
@@ -1007,20 +1158,26 @@ impl Reader {
             .map(|(id, data)| (id, data.map_err(Undecoded::Other)))
             .collect();
         decoded.extend(plain.into_iter().map(|(n, data)| ((n, 0), Ok(data))));
+        let memory = file.memory();
         for (&stream, lock) in &self.containers {
-            let object = self.in_use(file, (stream, 0));
+            let object = self.in_use(file, (stream, 0))?;
             let given = decoded.remove(&(stream, 0));
             lock.get_or_init(|| {
-                Box::new(self.decode_container(file, stream, object, given, decoder))
+                Box::new(self.decode_container(memory, stream, object, &[], given, decoder))
             });
         }
+        Ok(())
     }
 
     /// Every object the entries list read, as the whole read reads them:
     /// each in use at its offset, by number; then each object stream the
     /// entries put objects in, by number, at once when the reader asks
     /// `decoder` for them; then each object in an object stream, by number.
-    fn read_all(&self, file: &[u8], decoder: Option<&dyn Decode>) {
+    fn read_all<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        decoder: Option<&dyn Decode>,
+    ) -> Result<(), F::Error> {
         let numbered = |i: usize| self.entries[i].0 != 0;
         let in_use =
             |i: &usize| numbered(*i) && matches!(self.entries[*i].1.1, XrefEntry::InUse { .. });
@@ -1028,19 +1185,20 @@ impl Reader {
             numbered(*i) && matches!(self.entries[*i].1.1, XrefEntry::Compressed { .. })
         };
         for i in (0..self.entries.len()).filter(in_use) {
-            self.slot(file, i);
+            self.slot(file, i)?;
         }
         match self.native_containers() {
             true => {
                 for &stream in self.containers.keys() {
-                    self.container(file, stream);
+                    self.container(file, stream)?;
                 }
             }
-            false => self.decode_containers(file, decoder),
+            false => self.decode_containers(file, decoder)?,
         }
         for i in (0..self.entries.len()).filter(member) {
-            self.slot(file, i);
+            self.slot(file, i)?;
         }
+        Ok(())
     }
 
     /// What it warned of in the objects it has read, as a whole read says
@@ -1077,8 +1235,12 @@ impl Reader {
     /// reader doesn't decode or decrypt itself, into a [`Document`]: each
     /// object moved out of its slot, and the warnings as
     /// [`Reader::warnings`] says them.
-    fn whole(self, file: &[u8], decoder: Option<&dyn Decode>) -> Whole {
-        self.read_all(file, decoder);
+    fn whole<'f, F: Bytes<'f>>(
+        self,
+        file: F,
+        decoder: Option<&dyn Decode>,
+    ) -> Result<Whole, F::Error> {
+        self.read_all(file, decoder)?;
         let reached = self.reached.load(Ordering::Relaxed);
         // Metadata that isn't encrypted is in plain view: in a file that
         // doesn't encrypt, or by `/EncryptMetadata false`, which counts from
@@ -1150,8 +1312,8 @@ impl Reader {
         if !natively {
             decrypt(decoder, encrypted.is_some(), &mut objects, &mut warnings);
         }
-        let get = |id| objects.get(&id)?.as_ref().ok();
-        let metadata = metadata(file, &trailer, &get, !plain_metadata).map(<[u8]>::to_vec);
+        let get = |id| Ok(objects.get(&id).and_then(|o| o.as_ref().ok()));
+        let metadata = metadata(file, &trailer, &get, !plain_metadata)?.map(Cow::into_owned);
         let document = Document {
             objects,
             trailer,
@@ -1165,11 +1327,11 @@ impl Reader {
             records,
             facts,
         };
-        Whole {
+        Ok(Whole {
             document,
             handler,
             reached,
-        }
+        })
     }
 
     /// Stream `id`'s data, written at `at`, decoded by `filters`, as much
@@ -1245,16 +1407,16 @@ impl Reader {
         }
     }
 
-    /// Object stream `id`'s data, decoded from its own, its filters'
-    /// values followed where they're references to objects in use; `cut`
-    /// set when a fault cut it off.
+    /// Object stream `id`'s data, decoded from its own, `data`, its
+    /// filters' values followed where they're references to objects in
+    /// use; `cut` set when a fault cut it off.
     fn object_stream(
         &self,
-        file: &[u8],
         cx: &mut Cx,
         cut: &mut bool,
         id: ObjectId,
         object: &Object,
+        data: &[u8],
     ) -> Result<Vec<u8>, Undecoded> {
         let Value::Stream(stream) = object.value() else {
             return Err(Undecoded::NotAStream);
@@ -1264,11 +1426,9 @@ impl Reader {
         if stream.dict.get(b"Type").and_then(Object::as_name) != Some(b"ObjStm") {
             return Ok(Vec::new());
         }
-        let data = (stream.data.at())
-            .filter(|at| at.stream.is_none())
-            .and_then(|at| file.get(at.start..at.end))
-            .unwrap_or_default();
-        let resolve = |id| self.in_use(file, id)?.ok();
+        // What its filters' values refer to is read and kept before its
+        // decode, which reads nothing.
+        let resolve = |id| self.kept(id)?.ok();
         let filters = filter::filters(&stream.dict, Some(&resolve)).map_err(Undecoded::Filters)?;
         // In an encrypted file, decrypted first: by its own crypt filter
         // when it names one, else as the file's streams are. In one no
@@ -1321,103 +1481,152 @@ impl Reader {
     /// Whether the file ends as ISO 32000-2 7.5.5 has it, its last line
     /// `%%EOF` alone; and, failing that, whether a `%%EOF` is within its last
     /// 1024 bytes, where readers look for one.
-    fn end(&mut self, file: &[u8], cx: &mut Cx) {
-        let eols = file
-            .iter()
-            .rev()
-            .take_while(|b| matches!(b, b'\r' | b'\n'))
-            .count();
-        let body = &file[..file.len() - eols];
-        let alone = |at: usize| at == 0 || matches!(body[at - 1], b'\r' | b'\n');
-        if body.ends_with(b"%%EOF") && alone(body.len() - 5) {
-            return;
-        }
-        let tail = file.len().saturating_sub(1024);
-        let (at, message) = match rfind(&file[tail..], b"%%EOF").map(|i| tail + i) {
-            Some(at) if at + 5 == body.len() => (
-                span(at, at + 5),
-                "the file's last %%EOF isn't on a line of its own".to_string(),
-            ),
-            Some(at) => (
-                span(at + 5, file.len()),
-                format!(
-                    "the file goes on for {} bytes after its last %%EOF",
-                    file.len() - at - 5
-                ),
-            ),
-            None => match rfind(file, b"%%EOF") {
-                Some(at) => (
+    ///
+    /// Read by position, its last bytes are read back from the end, as
+    /// far as its last `%%EOF` and the byte before it, and its last 1024.
+    fn end<'f, F: Bytes<'f>>(&mut self, file: F, cx: &mut Cx) -> Result<(), F::Error> {
+        let len = file.len();
+        let said = file.read_back(|w| {
+            // The window's bytes are the file's from `from` to its end.
+            let (bytes, from) = (w.bytes, w.base);
+            let eols = bytes
+                .iter()
+                .rev()
+                .take_while(|b| matches!(b, b'\r' | b'\n'))
+                .count();
+            let tail = len.saturating_sub(1024);
+            // The body's last bytes, `%%EOF` and the byte before it, and the
+            // file's last 1024, at the least.
+            if from > 0 && (eols + 6 > bytes.len() || from > tail) {
+                w.touch();
+                return None;
+            }
+            let body = &bytes[..bytes.len() - eols];
+            let alone = |at: usize| at == 0 || matches!(body[at - 1 - from], b'\r' | b'\n');
+            if body.ends_with(b"%%EOF") && alone(from + body.len() - 5) {
+                return None;
+            }
+            let body = from + body.len();
+            let said = match rfind(&bytes[tail - from..], b"%%EOF").map(|i| tail + i) {
+                Some(at) if at + 5 == body => (
                     span(at, at + 5),
+                    "the file's last %%EOF isn't on a line of its own".to_string(),
+                ),
+                Some(at) => (
+                    span(at + 5, len),
                     format!(
-                        "the file's last %%EOF is {} bytes from its end, past the 1024 readers look in",
-                        file.len() - at
+                        "the file goes on for {} bytes after its last %%EOF",
+                        len - at - 5
                     ),
                 ),
-                None => (
-                    span(file.len(), file.len()),
-                    "the file has no %%EOF".to_string(),
-                ),
-            },
-        };
-        cx.warn(None, Some(at), message);
+                None => match rfind(bytes, b"%%EOF").map(|i| from + i) {
+                    Some(at) => (
+                        span(at, at + 5),
+                        format!(
+                            "the file's last %%EOF is {} bytes from its end, past the 1024 readers look in",
+                            len - at
+                        ),
+                    ),
+                    // Before the window, a %%EOF may yet be.
+                    None if from > 0 => {
+                        w.touch();
+                        return None;
+                    }
+                    None => (span(len, len), "the file has no %%EOF".to_string()),
+                },
+            };
+            Some(said)
+        })?;
+        if let Some((at, message)) = said {
+            cx.warn(None, Some(at), message);
+        }
+        Ok(())
     }
 
     /// The version `%PDF-` gives, within the first 1024 bytes; where it
     /// starts, in the facts.
-    fn header(&mut self, file: &[u8], cx: &mut Cx) -> Option<Version> {
-        let head = &file[..file.len().min(1024)];
-        let Some(at) = find(head, b"%PDF-") else {
-            cx.warn(None, None, "no %PDF- header".to_string());
-            return None;
-        };
-        self.facts.header = Some(at);
-        if at > 0 {
-            let message = format!("%PDF- is at byte {at}, not the file's first");
-            cx.warn(None, Some(span(at, at + 5)), message);
-        }
-        let rest = &file[at + 5..];
-        let end = (rest.iter())
-            .position(|&b| is_white_space(b) || is_delimiter(b))
-            .unwrap_or(rest.len());
-        let version = Version::parse(&rest[..end]);
-        if version.is_none() {
-            let message = "the header's version doesn't read".to_string();
-            cx.warn(None, Some(span(at, at + 5 + end)), message);
-        }
-        version
+    fn header<'f, F: Bytes<'f>>(
+        &mut self,
+        file: F,
+        cx: &mut Cx,
+    ) -> Result<Option<Version>, F::Error> {
+        let header = file.read_from(cx, 0, 0, |w, cx| {
+            // The window's bytes are the file's from its start.
+            let file = w.bytes;
+            let head = &file[..file.len().min(1024)];
+            let Some(at) = find(head, b"%PDF-") else {
+                if head.len() < 1024 {
+                    w.touch();
+                }
+                cx.warn(None, None, "no %PDF- header".to_string());
+                return Ok(None);
+            };
+            if at > 0 {
+                let message = format!("%PDF- is at byte {at}, not the file's first");
+                cx.warn(None, Some(span(at, at + 5)), message);
+            }
+            let rest = &file[at + 5..];
+            let end = (rest.iter()).position(|&b| is_white_space(b) || is_delimiter(b));
+            let end = end.unwrap_or_else(|| {
+                w.touch();
+                rest.len()
+            });
+            let version = Version::parse(&rest[..end]);
+            if version.is_none() {
+                let message = "the header's version doesn't read".to_string();
+                cx.warn(None, Some(span(at, at + 5 + end)), message);
+            }
+            Ok(Some((at, version)))
+        })?;
+        let (at, version) = header.unzip();
+        self.facts.header = at;
+        Ok(version.flatten())
     }
 
     /// The sections from the last `startxref` along their `/Prev` chain,
     /// their entries the newest for each number; the newest's trailer.
     /// Compressed streams' rows are decoded together, once the chain is
     /// known: each stream's dictionary, `/Prev` and all, is in plain view.
-    fn sections(
+    ///
+    /// Read by position, `startxref` is looked for in the file's last
+    /// bytes, read back from its end until it's found.
+    fn sections<'f, F: Bytes<'f>>(
         &mut self,
-        file: &[u8],
+        file: F,
         cx: &mut Cx,
         decoder: Option<&dyn Decode>,
-    ) -> Result<Trailer, String> {
-        let at = rfind(file, b"startxref").ok_or("no startxref")?;
-        let mut t = Tokenizer::at(file, at);
-        if !is_keyword(t.next().as_ref(), b"startxref") {
-            return Err(format!("startxref at byte {at} is inside another word"));
+    ) -> Result<Result<Trailer, String>, F::Error> {
+        let offset = file.read_back(|w| {
+            // The window's bytes are the file's from `w.base` to its end.
+            let Some(i) = rfind(w.bytes, b"startxref") else {
+                w.touch();
+                return Err("no startxref".to_string());
+            };
+            let at = w.place(i);
+            let mut t = Tokenizer::at(w.bytes, i);
+            if !is_keyword(t.next().as_ref(), b"startxref") {
+                return Err(format!("startxref at byte {at} is inside another word"));
+            }
+            (significant(&mut t))
+                .filter(|token| token.kind == Kind::Integer)
+                .and_then(|token| usize::try_from(token.integer().ok()?).ok())
+                .ok_or_else(|| "startxref gives no offset".to_string())
+        })?;
+        match offset {
+            Ok(offset) => self.sections_from(file, cx, offset, decoder),
+            Err(why) => Ok(Err(why)),
         }
-        let offset = (significant(&mut t))
-            .filter(|token| token.kind == Kind::Integer)
-            .and_then(|token| usize::try_from(token.integer().ok()?).ok())
-            .ok_or("startxref gives no offset")?;
-        self.sections_from(file, cx, offset, decoder)
     }
 
     /// The sections from the one at `offset` along their `/Prev` chain, as
     /// [`Reader::sections`] reads them from `startxref`'s.
-    fn sections_from(
+    fn sections_from<'f, F: Bytes<'f>>(
         &mut self,
-        file: &[u8],
+        file: F,
         cx: &mut Cx,
         offset: usize,
         decoder: Option<&dyn Decode>,
-    ) -> Result<Trailer, String> {
+    ) -> Result<Result<Trailer, String>, F::Error> {
         let mut sections: Vec<Section> = Vec::new();
         let mut offsets = Vec::new();
         let mut seen = HashSet::new();
@@ -1436,9 +1645,9 @@ impl Reader {
                 cx.warn(None, None, message);
                 break;
             }
-            let section = match self.section(file, cx, offset) {
+            let section = match self.section(file, cx, offset)? {
                 Ok(section) => section,
-                Err(why) if sections.is_empty() => return Err(why),
+                Err(why) if sections.is_empty() => return Ok(Err(why)),
                 Err(why) => {
                     let message = format!("the section at byte {offset} doesn't read: {why}");
                     cx.warn(None, None, message);
@@ -1479,6 +1688,12 @@ impl Reader {
             .max();
         let mut entries = BTreeMap::new();
         let mut trailer = None;
+        // Where each section, and each stream a section's rows are in,
+        // starts.
+        let streams = sections.iter().filter_map(|s| s.stream.as_ref());
+        let starts: Vec<usize> = (offsets.iter().copied())
+            .chain(streams.map(|&(at, _, _)| at))
+            .collect();
         for (i, section) in sections.into_iter().enumerate() {
             let mut listed = section.table;
             if let Some((offset, id, stream)) = &section.stream {
@@ -1492,7 +1707,7 @@ impl Reader {
                     decoded.get(id),
                     !hybrid,
                     decoder,
-                ) {
+                )? {
                     // A section's own stream's rows are its entries.
                     Ok(rows) if listed.is_empty() => listed = rows,
                     // A hybrid file's stream lists what its table leaves free.
@@ -1504,7 +1719,7 @@ impl Reader {
                             }
                         }
                     }
-                    Err(why) if i == 0 && !hybrid => return Err(why),
+                    Err(why) if i == 0 && !hybrid => return Ok(Err(why)),
                     Err(why) => {
                         let what = if hybrid {
                             "its /XRefStm"
@@ -1551,27 +1766,63 @@ impl Reader {
             }
             trailer.get_or_insert(section.trailer);
         }
-        let trailer = trailer.ok_or_else(|| "no section".to_string())?;
+        let Some(trailer) = trailer else {
+            return Ok(Err("no section".to_string()));
+        };
         self.entries = entries.into_iter().collect();
+        self.offsets = starts.into();
         self.facts = Facts {
             header: self.facts.header,
             ..facts
         };
-        Ok(trailer)
+        Ok(Ok(trailer))
     }
 
     /// The section at `offset`: a table, or a cross-reference stream.
-    fn section(&mut self, file: &[u8], cx: &mut Cx, offset: usize) -> Result<Section, String> {
-        let mut t = Tokenizer::at(file, offset);
-        match significant(&mut t) {
-            Some(token) if is_keyword(Some(&token), b"xref") => self.table(file, cx, &mut t),
-            Some(token) if token.kind == Kind::Integer => {
-                let (id, object) = self.xref_stream(file, cx, offset)?;
+    fn section<'f, F: Bytes<'f>>(
+        &mut self,
+        file: F,
+        cx: &mut Cx,
+        offset: usize,
+    ) -> Result<Result<Section, String>, F::Error> {
+        // What's at the offset, read in its window: a table, its trailer
+        // and where its /XRefStm is, read whole.
+        let at = file.read_from(cx, offset, 0, |w, cx| {
+            let mut t = w.tokenizer(offset);
+            Ok(match w.significant(&mut t) {
+                Some(token) if is_keyword(Some(&token), b"xref") => {
+                    At::Table(self.table(w, cx, &mut t).map(|(s, at)| (Box::new(s), at)))
+                }
+                Some(token) if token.kind == Kind::Integer => At::Stream,
+                _ => At::Neither,
+            })
+        })?;
+        match at {
+            At::Table(Ok((mut section, xref_stm))) => {
+                if let Some(at) = xref_stm {
+                    section.stream = match self.xref_stream(file, cx, at)? {
+                        Ok((id, object)) => Some((at, id, object)),
+                        Err(why) => {
+                            let message =
+                                format!("its /XRefStm, at byte {at}, doesn't read: {why}");
+                            cx.warn(None, None, message);
+                            None
+                        }
+                    };
+                }
+                Ok(Ok(*section))
+            }
+            At::Table(Err(why)) => Ok(Err(why)),
+            At::Stream => {
+                let (id, object) = match self.xref_stream(file, cx, offset)? {
+                    Ok(stream) => stream,
+                    Err(why) => return Ok(Err(why)),
+                };
                 let prev = object
                     .as_dict()
                     .and_then(|d| d.get(b"Prev"))
                     .and_then(offset_of);
-                Ok(Section {
+                Ok(Ok(Section {
                     trailer: Trailer {
                         stream: Some(id),
                         object: object.clone(),
@@ -1581,24 +1832,24 @@ impl Reader {
                     table: BTreeMap::new(),
                     stream: Some((offset, id, object)),
                     hybrid: false,
-                })
+                }))
             }
-            _ => Err(format!(
+            At::Neither => Ok(Err(format!(
                 "byte {offset}, which startxref or /Prev gives, is at neither `xref` nor an object"
-            )),
+            ))),
         }
     }
 
-    /// A table's subsections, after `xref`, and its trailer; and a hybrid
-    /// file's `/XRefStm`.
-    fn table<'a>(
-        &mut self,
-        file: &'a [u8],
+    /// A table's subsections, after `xref`, and its trailer, in window
+    /// `w`; and where a hybrid file's `/XRefStm` is, which isn't read yet.
+    fn table<'w>(
+        &self,
+        w: &Window<'w>,
         cx: &mut Cx,
-        t: &mut Tokenizer<'a>,
-    ) -> Result<Section, String> {
-        let integer = |t: &mut Tokenizer<'a>| {
-            (significant(t))
+        t: &mut Tokenizer<'w>,
+    ) -> Result<(Section, Option<usize>), String> {
+        let integer = |t: &mut Tokenizer<'w>| {
+            (w.significant(t))
                 .filter(|token| token.kind == Kind::Integer)
                 .and_then(|token| token.integer().ok())
         };
@@ -1607,10 +1858,10 @@ impl Reader {
         let (mut rows, mut misshapen) = (0, 0);
         let mut first: Option<(u32, Span, &str)> = None;
         loop {
-            let at = t.offset();
-            match significant(&mut t.clone()) {
+            let at = w.place(t.offset());
+            match w.significant(&mut t.clone()) {
                 Some(token) if is_keyword(Some(&token), b"trailer") => {
-                    significant(t);
+                    w.significant(t);
                     break;
                 }
                 Some(token) if token.kind == Kind::Integer => {
@@ -1620,19 +1871,22 @@ impl Reader {
                         return Err(format!("a subsection's header at byte {at} doesn't read"));
                     };
                     for i in 0..count {
-                        let row = significant(&mut t.clone()).map_or(t.offset(), |t| t.start);
+                        let row = w
+                            .significant(&mut t.clone())
+                            .map_or(t.offset(), |t| t.start);
+                        let row = w.place(row);
                         let Some(n) = start.checked_add(i) else {
                             return Err(format!("the table's row at byte {row} numbers no object"));
                         };
                         rows += 1;
-                        if let Err(why) = row_shape(file, row) {
+                        if let Err(why) = w.row_shape(row) {
                             misshapen += 1;
-                            let end = (row + 20).min(file.len());
+                            let end = (row + 20).min(w.place(w.bytes.len()));
                             first.get_or_insert((n, span(row, end), why));
                         }
                         let offset = integer(t);
                         let generation = integer(t);
-                        let kind = significant(t);
+                        let kind = w.significant(t);
                         let (Some(offset), Some(generation), Some(kind @ (b"n" | b"f"))) =
                             (offset, generation, kind.as_ref().map(|k| k.bytes))
                         else {
@@ -1649,7 +1903,7 @@ impl Reader {
                                 let message = format!(
                                     "the table's row for object {n} gives a number out of range, and is read as free"
                                 );
-                                cx.warn(None, Some(span(row, t.offset())), message);
+                                cx.warn(None, Some(span(row, w.place(t.offset()))), message);
                                 (u16::MAX, XrefEntry::Free)
                             }
                         };
@@ -1665,26 +1919,15 @@ impl Reader {
             );
             cx.warn(None, Some(at), message);
         }
-        let trailer = (Parser::at(file, t.offset()).limits(self.limits.parser))
-            .value(&mut cx.warned(None))
-            .map_err(|e| e.to_string())?;
+        let trailer =
+            (w.parser(w.place(t.offset())).limits(self.limits.parser)).value(&mut cx.warned(None));
+        let trailer = w.parsed(trailer).map_err(|e| e.to_string())?;
         let Some(dict) = trailer.as_dict() else {
             return Err("the trailer isn't a dictionary".to_string());
         };
         let prev = dict.get(b"Prev").and_then(offset_of);
         let xref_stm = dict.get(b"XRefStm").and_then(offset_of);
-        let stream = match xref_stm {
-            Some(at) => match self.xref_stream(file, cx, at) {
-                Ok((id, object)) => Some((at, id, object)),
-                Err(why) => {
-                    let message = format!("its /XRefStm, at byte {at}, doesn't read: {why}");
-                    cx.warn(None, None, message);
-                    None
-                }
-            },
-            None => None,
-        };
-        Ok(Section {
+        let section = Section {
             trailer: Trailer {
                 stream: None,
                 object: trailer,
@@ -1692,32 +1935,36 @@ impl Reader {
             },
             prev,
             table: entries,
-            stream,
+            stream: None,
             hybrid: xref_stm.is_some(),
-        })
+        };
+        Ok((section, xref_stm))
     }
 
     /// The cross-reference stream at `offset`: a stream, `/Type /XRef`.
-    fn xref_stream(
+    fn xref_stream<'f, F: Bytes<'f>>(
         &self,
-        file: &[u8],
+        file: F,
         cx: &mut Cx,
         offset: usize,
-    ) -> Result<(ObjectId, Object), String> {
-        let (id, object, _) = (self.indirect(file, cx, offset, None)).map_err(|e| e.to_string())?;
+    ) -> Result<Result<(ObjectId, Object), String>, F::Error> {
+        let (id, object, _) = match self.indirect(file, cx, offset, None)? {
+            Ok(read) => read,
+            Err(why) => return Ok(Err(why.to_string())),
+        };
         let Value::Stream(stream) = object.value() else {
-            return Err(format!(
+            return Ok(Err(format!(
                 "{} {} R, at byte {offset}, isn't a stream",
                 id.0, id.1
-            ));
+            )));
         };
         if stream.dict.get(b"Type").and_then(Object::as_name) != Some(b"XRef") {
-            return Err(format!(
+            return Ok(Err(format!(
                 "{} {} R, at byte {offset}, isn't /Type /XRef",
                 id.0, id.1
-            ));
+            )));
         }
-        Ok((id, object))
+        Ok(Ok((id, object)))
     }
 
     /// The rows of cross-reference stream `id`, written at `offset`, read
@@ -1726,9 +1973,9 @@ impl Reader {
     /// `decoded` has it). A section's `own` stream lists itself; a hybrid
     /// table's `/XRefStm` is listed by the table.
     #[allow(clippy::too_many_arguments)]
-    fn rows(
+    fn rows<'f, F: Bytes<'f>>(
         &self,
-        file: &[u8],
+        file: F,
         cx: &mut Cx,
         offset: usize,
         id: ObjectId,
@@ -1736,14 +1983,37 @@ impl Reader {
         decoded: Option<&Result<Vec<u8>, String>>,
         own: bool,
         decoder: Option<&dyn Decode>,
-    ) -> Result<BTreeMap<u32, (u16, XrefEntry)>, String> {
+    ) -> Result<Result<Rows, String>, F::Error> {
+        let at = match object.value() {
+            Value::Stream(stream) => stream.data.at(),
+            _ => None,
+        };
+        let written = at.map(|at| file.get(at.start..at.end)).transpose()?;
+        let written = written.flatten().unwrap_or_default();
+        let rows = self.rows_of(
+            file, cx, offset, id, object, &written, decoded, own, decoder,
+        );
+        Ok(rows)
+    }
+
+    /// [`Reader::rows`], given the stream's data as `written`.
+    #[allow(clippy::too_many_arguments)]
+    fn rows_of<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        cx: &mut Cx,
+        offset: usize,
+        id: ObjectId,
+        object: &Object,
+        written: &[u8],
+        decoded: Option<&Result<Vec<u8>, String>>,
+        own: bool,
+        decoder: Option<&dyn Decode>,
+    ) -> Result<Rows, String> {
         let Value::Stream(stream) = object.value() else {
             return Err(format!("{} {} R isn't a stream", id.0, id.1));
         };
         let dict = &stream.dict;
-        let written = (stream.data.at())
-            .and_then(|at| file.get(at.start..at.end))
-            .unwrap_or_default();
         let widths: Option<Vec<usize>> = match dict.get(b"W").map(|w| w.value()) {
             Some(Value::Array(w)) if w.len() == 3 => (w.iter())
                 .map(|n| {
@@ -1846,8 +2116,9 @@ impl Reader {
                 match decoded {
                     Ok(data) => data,
                     Err(why) => {
+                        let file = file.memory();
                         again = decoder
-                            .zip(self.written(file, dict, written))
+                            .zip(file.and_then(|file| self.written(file, dict, written)))
                             .and_then(|(decoder, stream)| decoder.decode_written(stream).ok())
                             // Its own data, which may run on past its
                             // rows, as data that's not compressed may.
@@ -1963,7 +2234,20 @@ impl Reader {
     /// The objects found by scanning the file for `n g obj`, a later one
     /// of a number over an earlier, when the sections don't read; and the
     /// last `trailer` that reads, or else the last cross-reference stream.
-    fn scan(&mut self, file: &[u8], cx: &mut Cx, why: String) -> Trailer {
+    ///
+    /// Read by position, the file is read whole for it.
+    fn scan<'f, F: Bytes<'f>>(
+        &mut self,
+        file: F,
+        cx: &mut Cx,
+        why: String,
+    ) -> Result<Trailer, F::Error> {
+        let all = file.all()?;
+        Ok(self.scan_in(&all, cx, why))
+    }
+
+    /// [`Reader::scan`] of `file`, every byte.
+    fn scan_in(&mut self, file: &[u8], cx: &mut Cx, why: String) -> Trailer {
         let mut entries = BTreeMap::new();
         let mut t = Tokenizer::new(file);
         let mut before: [Option<Token>; 2] = [None, None];
@@ -2053,7 +2337,8 @@ impl Reader {
             .collect();
         offsets.sort();
         for (offset, id) in offsets.into_iter().rev() {
-            if let Ok((_, object, _)) = self.indirect(file, cx, offset, Some(id)) {
+            let Ok(read) = self.indirect(InMemory(file), cx, offset, Some(id));
+            if let Ok((_, object, _)) = read {
                 if is_xref_stream(&object) {
                     return Trailer {
                         stream: Some(id),
@@ -2077,17 +2362,23 @@ impl Reader {
     /// strings never are, an earlier update's either, nor those in object
     /// streams, which are encrypted whole. Its security handler is opened
     /// with `passwords`.
-    fn encryption(&mut self, file: &[u8], cx: &mut Cx, trailer: &Trailer, passwords: &[&[u8]]) {
+    fn encryption<'f, F: Bytes<'f>>(
+        &mut self,
+        file: F,
+        cx: &mut Cx,
+        trailer: &Trailer,
+        passwords: &[&[u8]],
+    ) -> Result<(), F::Error> {
         let Some(encrypt) = trailer.dict().get(b"Encrypt") else {
-            return;
+            return Ok(());
         };
         let (dict, own, why) = match encrypt.value() {
             // A null is no entry, and so is a reference to no object (ISO
             // 32000-2, 7.3.9 and 7.3.10).
-            Value::Null => return,
+            Value::Null => return Ok(()),
             Value::Ref(id) => match self.entry(id.0) {
                 Some(&(_, XrefEntry::InUse { offset, .. })) => {
-                    match self.indirect(file, cx, offset, Some(*id)) {
+                    match self.indirect(file, cx, offset, Some(*id))? {
                         Ok((_, object, _)) => {
                             (object.as_dict().cloned(), Some(*id), "isn't a dictionary")
                         }
@@ -2105,7 +2396,7 @@ impl Reader {
                         "the trailer's /Encrypt is {n} {g} R, which is no object, so the file is read as not encrypted"
                     );
                     cx.warn(None, encrypt.at, message);
-                    return;
+                    return Ok(());
                 }
             },
             Value::Dict(dict) => (Some(dict.clone()), None, ""),
@@ -2114,7 +2405,7 @@ impl Reader {
         self.encrypts = true;
         self.encryption = match &dict {
             None => Encryption::Unsupported(format!("its /Encrypt {why}")),
-            Some(dict) => self.open(file, cx, dict, trailer, own, passwords),
+            Some(dict) => self.open(file, cx, dict, trailer, own, passwords)?,
         };
         // On the trailer, whose /Encrypt it's about.
         if let Encryption::Unsupported(why) = &self.encryption {
@@ -2128,37 +2419,40 @@ impl Reader {
             cx.warn(None, encrypt.at, message);
         }
         if self.plain_strings {
-            return;
+            return Ok(());
         }
         let earlier = std::mem::take(&mut self.dictionaries);
         self.encrypted = Some(own.into_iter().chain(earlier).collect());
+        Ok(())
     }
 
     /// The security handler of encryption dictionary `dict` (object `own`,
     /// when it's indirect), opened by `passwords`, as far as it opens; its
     /// values followed where they're references, which are its own, so not
     /// encrypted. Whether its strings and metadata are plain is set by it.
-    fn open(
+    fn open<'f, F: Bytes<'f>>(
         &mut self,
-        file: &[u8],
+        file: F,
         cx: &mut Cx,
         dict: &Dict,
         trailer: &Trailer,
         own: Option<ObjectId>,
         passwords: &[&[u8]],
-    ) -> Encryption {
-        let mut get = |o: Option<&Object>| -> Option<Object> {
-            let o = o?;
-            match o.value() {
+    ) -> Result<Encryption, F::Error> {
+        let mut get = |o: Option<&Object>| -> Result<Option<Object>, F::Error> {
+            let Some(o) = o else {
+                return Ok(None);
+            };
+            Ok(match o.value() {
                 Value::Ref(id) => match self.entry(id.0) {
                     Some(&(_, XrefEntry::InUse { offset, .. })) => {
                         self.dictionaries.insert(*id);
-                        (self.indirect(file, cx, offset, Some(*id)).ok()).map(|(_, o, _)| o)
+                        (self.indirect(file, cx, offset, Some(*id))?.ok()).map(|(_, o, _)| o)
                     }
                     _ => None,
                 },
                 _ => Some(o.clone()),
-            }
+            })
         };
         let bytes = |o: Option<Object>| match o.map(|o| o.into_value()) {
             Some(Value::String(s, _)) => Some(s.as_bytes().map(<[u8]>::to_vec).unwrap_or_default()),
@@ -2167,10 +2461,10 @@ impl Reader {
         let name = |o: Option<Object>| o.and_then(|o| o.as_name().map(<[u8]>::to_vec));
         let integer = |o: Option<Object>| o.and_then(|o| o.as_integer());
         let mut crypt_filters = Vec::new();
-        if let Some(Value::Dict(filters)) = get(dict.get(b"CF")).map(|o| o.into_value()) {
+        if let Some(Value::Dict(filters)) = get(dict.get(b"CF"))?.map(|o| o.into_value()) {
             for (name, filter) in filters.iter() {
-                let method = match get(Some(filter)).map(|o| o.into_value()) {
-                    Some(Value::Dict(filter)) => (get(filter.get(b"CFM")).as_ref())
+                let method = match get(Some(filter))?.map(|o| o.into_value()) {
+                    Some(Value::Dict(filter)) => (get(filter.get(b"CFM"))?.as_ref())
                         .and_then(Object::as_name)
                         .map(<[u8]>::to_vec),
                     _ => None,
@@ -2182,27 +2476,27 @@ impl Reader {
             }
         }
         let values = pdf_crypt::Dictionary {
-            filter: name(get(dict.get(b"Filter"))).unwrap_or_default(),
-            v: integer(get(dict.get(b"V"))).unwrap_or(0),
-            r: integer(get(dict.get(b"R"))).unwrap_or(0),
-            length: integer(get(dict.get(b"Length"))),
-            o: bytes(get(dict.get(b"O"))),
-            u: bytes(get(dict.get(b"U"))),
-            oe: bytes(get(dict.get(b"OE"))),
-            ue: bytes(get(dict.get(b"UE"))),
-            perms: bytes(get(dict.get(b"Perms"))),
-            p: integer(get(dict.get(b"P"))),
-            encrypt_metadata: match get(dict.get(b"EncryptMetadata")).map(|o| o.into_value()) {
+            filter: name(get(dict.get(b"Filter"))?).unwrap_or_default(),
+            v: integer(get(dict.get(b"V"))?).unwrap_or(0),
+            r: integer(get(dict.get(b"R"))?).unwrap_or(0),
+            length: integer(get(dict.get(b"Length"))?),
+            o: bytes(get(dict.get(b"O"))?),
+            u: bytes(get(dict.get(b"U"))?),
+            oe: bytes(get(dict.get(b"OE"))?),
+            ue: bytes(get(dict.get(b"UE"))?),
+            perms: bytes(get(dict.get(b"Perms"))?),
+            p: integer(get(dict.get(b"P"))?),
+            encrypt_metadata: match get(dict.get(b"EncryptMetadata"))?.map(|o| o.into_value()) {
                 Some(Value::Bool(b)) => Some(b),
                 _ => None,
             },
             crypt_filters,
-            stm_f: name(get(dict.get(b"StmF"))),
-            str_f: name(get(dict.get(b"StrF"))),
+            stm_f: name(get(dict.get(b"StmF"))?),
+            str_f: name(get(dict.get(b"StrF"))?),
         };
         // The file's first /ID element, as qpdf takes it: empty, said once
         // the standard handler takes the dictionary, when it isn't a string.
-        let id = match get(trailer.dict().get(b"ID")).map(|o| o.into_value()) {
+        let id = match get(trailer.dict().get(b"ID"))?.map(|o| o.into_value()) {
             Some(Value::Array(id)) => match id.first().map(|o| o.value()) {
                 Some(Value::String(s, _)) => s.as_bytes().map(<[u8]>::to_vec),
                 _ => None,
@@ -2232,7 +2526,7 @@ impl Reader {
                 Ok(handler) => !handler.encrypts_metadata(),
                 Err(_) => values.v >= 4 && values.encrypt_metadata == Some(false),
             };
-        match opened {
+        Ok(match opened {
             Ok(handler) => {
                 for fault in handler.faults() {
                     cx.warn(
@@ -2252,7 +2546,7 @@ impl Reader {
             Err(pdf_crypt::Refused::Password) => Encryption::Locked,
             Err(pdf_crypt::Refused::Unsupported(why)) => Encryption::Unsupported(why),
             Err(refused) => Encryption::Unsupported(refused.to_string()),
-        }
+        })
     }
 
     /// Object `id`, the `index`th of object stream `stream`, whose header
@@ -2316,30 +2610,58 @@ impl Reader {
     /// `endstream`, else up to `endstream`. With it, where it was read
     /// from: from its `n` to past its `endobj`, the reader looking past the
     /// parser as the parser's own check for `endobj` looks.
-    fn indirect(
+    ///
+    /// Read by position, it's read in a window from `offset`, at first to
+    /// a byte past where it can end ([`Reader::bound`]), so that an object
+    /// as it should be is one read, and larger while what it reads runs to
+    /// the window's end.
+    fn indirect<'f, F: Bytes<'f>>(
         &self,
-        file: &[u8],
+        file: F,
         cx: &mut Cx,
         offset: usize,
         expected: Option<ObjectId>,
-    ) -> Result<(ObjectId, Object, Record), Unread> {
-        let mut parser = Parser::at(file, offset).limits(self.limits.parser);
-        let id = parser.header().map_err(Unread::Parse)?;
+    ) -> Result<Indirect, F::Error> {
+        let bound = self.bound(offset, file.len()).filter(|_| file.bounded());
+        let min = bound.map_or(0, |bound| bound.saturating_sub(offset).saturating_add(1));
+        file.read_from(cx, offset, min, |w, cx| {
+            self.indirect_in(file, w, cx, offset, expected)
+        })
+    }
+
+    /// [`Reader::indirect`], in window `w`.
+    fn indirect_in<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        w: &Window<'_>,
+        cx: &mut Cx,
+        offset: usize,
+        expected: Option<ObjectId>,
+    ) -> Result<Indirect, F::Error> {
+        let mut parser = w.parser(offset).limits(self.limits.parser);
+        let id = match w.parsed(parser.header()) {
+            Ok(id) => id,
+            Err(error) => return Ok(Err(Unread::Parse(error))),
+        };
         if let Some(expected) = expected {
             if expected != id {
-                return Err(Unread::Elsewhere {
+                return Ok(Err(Unread::Elsewhere {
                     offset,
                     found: id,
                     expected,
-                });
+                }));
             }
         }
         let mut parser = parser.ciphertext(self.ciphertext(id));
-        let body = parser.body(id, &mut cx.warned(Some(id)));
-        let (object, data) = match body.map_err(Unread::Parse)? {
+        let body = w.parsed(parser.body(id, &mut cx.warned(Some(id))));
+        let body = match body {
+            Ok(body) => body,
+            Err(error) => return Ok(Err(Unread::Parse(error))),
+        };
+        let (object, data) = match body {
             Body::Object(object) => (object, None),
             Body::Stream(head) => {
-                let length = self.length(file, cx, head.dict(), id);
+                let length = self.length(file, cx, head.dict(), id)?;
                 let declared = length.and_then(|len| head.declared(len));
                 let data = match declared {
                     Some(data) => data,
@@ -2361,41 +2683,56 @@ impl Reader {
                     indirect_length: (head.dict().get(b"Length"))
                         .is_some_and(|l| matches!(l.value(), Value::Ref(_))),
                 };
-                let object = parser.stream(head, data, &mut cx.warned(Some(id)));
-                (object.map_err(Unread::Parse)?, Some(extent))
+                let object = w.parsed(parser.stream(head, data, &mut cx.warned(Some(id))));
+                match object {
+                    Ok(object) => (object, Some(extent)),
+                    Err(error) => return Ok(Err(Unread::Parse(error))),
+                }
             }
         };
         let end = parser.offset();
-        let endobj = significant(&mut Tokenizer::at(file, end))
+        let endobj = (w.significant(&mut w.tokenizer(end)))
             .filter(|token| is_keyword(Some(token), b"endobj"));
-        let start = significant(&mut Tokenizer::at(file, offset)).map_or(offset, |n| n.start);
+        let start = (w.significant(&mut w.tokenizer(offset))).map_or(offset, |n| w.place(n.start));
+        let end = endobj.as_ref().map_or(end, |token| w.place(token.end()));
         let record = Record {
             origin: Origin::File,
-            extent: span(start, endobj.as_ref().map_or(end, Token::end)),
+            extent: span(start, end),
             endobj: endobj.is_some(),
             data,
         };
-        Ok((id, object, record))
+        Ok(Ok((id, object, record)))
     }
 
     /// A stream's `/Length`: an integer, or a reference to one written in
     /// plain view, read again for it, its faults the stream's.
-    fn length(&self, file: &[u8], cx: &mut Cx, dict: &Dict, id: ObjectId) -> Option<usize> {
-        let length = dict.get(b"Length")?;
+    fn length<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        cx: &mut Cx,
+        dict: &Dict,
+        id: ObjectId,
+    ) -> Result<Option<usize>, F::Error> {
+        let Some(length) = dict.get(b"Length") else {
+            return Ok(None);
+        };
         let n = match *length.value() {
             Value::Integer(n) => n,
             Value::Ref(to) if to != id && !cx.resolving => {
                 let Some(&(_, XrefEntry::InUse { offset, .. })) = self.entry(to.0) else {
-                    return None;
+                    return Ok(None);
                 };
                 cx.resolving = true;
                 let found = self.indirect(file, cx, offset, Some(to));
                 cx.resolving = false;
-                found.ok()?.1.as_integer()?
+                match found?.ok().and_then(|(_, o, _)| o.as_integer()) {
+                    Some(n) => n,
+                    None => return Ok(None),
+                }
             }
-            _ => return None,
+            _ => return Ok(None),
         };
-        usize::try_from(n).ok()
+        Ok(usize::try_from(n).ok())
     }
 }
 
@@ -2681,28 +3018,34 @@ fn offset_of(o: &Object) -> Option<usize> {
 /// only that it start there: Annex F has it all within them), a
 /// `/Linearized` of another value or type, or an `/L` that's missing,
 /// indirect, a real or another length, says it doesn't.
-fn holds_linearization(file: &[u8], header: usize, limits: parse::Limits) -> bool {
-    let mut parser = Parser::at(file, header).limits(limits);
-    let Ok(id) = parser.header() else {
-        return false;
-    };
-    let Ok(Body::Object(first)) = parser.body(id, &mut ()) else {
-        return false;
-    };
-    let within = first
-        .at
-        .is_some_and(|at| at.end <= header.saturating_add(1024));
-    let Some(dict) = first.as_dict().filter(|_| within) else {
-        return false;
-    };
-    let version = match dict.get(b"Linearized").map(Object::value) {
-        Some(&Value::Integer(v)) => v == 1,
-        Some(&Value::Real(v)) => v.floor() == 1.0,
-        _ => false,
-    };
+fn holds_linearization<'f, F: Bytes<'f>>(
+    file: F,
+    header: usize,
+    limits: parse::Limits,
+) -> Result<bool, F::Error> {
     let length = file.len() - header;
-    version
-        && matches!(dict.get(b"L").map(Object::value), Some(&Value::Integer(l)) if usize::try_from(l) == Ok(length))
+    file.read_from(&mut Cx::default(), header, 0, |w, _| {
+        let mut parser = w.parser(header).limits(limits);
+        let Ok(id) = w.parsed(parser.header()) else {
+            return Ok(false);
+        };
+        let Ok(Body::Object(first)) = w.parsed(parser.body(id, &mut ())) else {
+            return Ok(false);
+        };
+        let within = first
+            .at
+            .is_some_and(|at| at.end <= header.saturating_add(1024));
+        let Some(dict) = first.as_dict().filter(|_| within) else {
+            return Ok(false);
+        };
+        let version = match dict.get(b"Linearized").map(Object::value) {
+            Some(&Value::Integer(v)) => v == 1,
+            Some(&Value::Real(v)) => v.floor() == 1.0,
+            _ => false,
+        };
+        Ok(version
+            && matches!(dict.get(b"L").map(Object::value), Some(&Value::Integer(l)) if usize::try_from(l) == Ok(length)))
+    })
 }
 
 #[cfg(test)]

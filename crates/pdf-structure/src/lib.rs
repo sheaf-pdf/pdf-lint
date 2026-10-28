@@ -13,8 +13,11 @@
 //! - **Or read on demand:** a [`Reading`], opened, then each object read
 //!   when it's first asked for, kept or not, from any thread, each object
 //!   stream decoded once; read whole, it's the [`Document`], by the same
-//!   code. Where each object was read from is a [`Record`], and what the
-//!   file's header and sections say of it, as written, its [`Facts`].
+//!   code. Its bytes are in memory, or a file is read by position, a
+//!   window at a time ([`FileBytes`]), whose [`Identity`] tells whether
+//!   it's changed. Where each object was read from is a [`Record`], and
+//!   what the file's header and sections say of it, as written, its
+//!   [`Facts`].
 //! - **Every choice said:** what the reader had to choose how to read is a
 //!   [`Warning`], with its object and where.
 //! - **Object streams and cross-reference streams decoded** from their own
@@ -51,7 +54,9 @@ pub mod source;
 #[doc(hidden)]
 pub mod write;
 
-pub use bytes::{ByteSource, Limits, Options, Reading};
+#[cfg(any(unix, windows))]
+pub use bytes::FileBytes;
+pub use bytes::{ByteSource, Identity, Limits, Options, Reading};
 pub use pdf_objects;
 pub use source::{
     Document, Encryption, Extent, Facts, Origin, Record, Source, Trailer, Unread, Update, Warning,
