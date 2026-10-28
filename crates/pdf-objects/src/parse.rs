@@ -1539,6 +1539,7 @@ mod tests {
         assert_eq!(bytes(input, at), b"<< /Length 16 >> stream\nab endstream");
         assert_eq!(kept.faults, [(at, "1 0 obj has no endobj".to_string())]);
     }
+
     /// A window of a file reads as the file does from where the window
     /// starts, each place in the file: its values' spans, the parser's
     /// offset, its errors' places and a stream's extents. The offset the
@@ -1584,10 +1585,10 @@ mod tests {
     /// In a window that isn't the file's last, a call whose read reaches
     /// its end is short, where more of the file could change what it
     /// reads: `12 0 R` cut after `0`, and after `R` where `RG` follows, a
-    /// string, an array and a dictionary cut, `endobj` cut, the CR of the CR LF after `stream`,
-    /// and a stream whose `/Length` runs past the window, though `endstream`
-    /// is scanned inside it; and a read that stops before the end says what
-    /// the whole file does.
+    /// string, an array and a dictionary cut, `endobj` cut, the CR of the
+    /// CR LF after `stream`, and a stream whose `/Length` runs past the
+    /// window, though `endstream` is scanned inside it; and a read that
+    /// stops before the end says what the whole file does.
     #[test]
     fn a_window_short_of_the_files_end_is_short_where_more_could_change_it() {
         const BASE: usize = 1_000_000;

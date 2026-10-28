@@ -17,7 +17,7 @@ default:
     @just --list --unsorted
 
 # Everything CI runs.
-ci: fmt clippy test test-qpdf doc fuzzing dist tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv arlington-msrv
+ci: fmt clippy test test-qpdf doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -108,6 +108,16 @@ dist:
     fi
     cargo build --release --locked -p pdf-lint --target "$target"
     release/dist.sh "$platform" "$target" "target/$target/release/pdf-lint$exe" dist
+
+# Lint pdf-structure, its tests too, for Windows, whose reads of a file by
+# position and whose file identity are code of its own; and its library
+# for a target whose `usize` is 32 bits and which has no files
+# (wasm32-unknown-unknown). Both targets must be installed (`rustup target
+# add x86_64-pc-windows-gnu wasm32-unknown-unknown`); every other recipe
+# builds for this platform alone.
+structure-cross:
+    cargo clippy --locked -p pdf-structure --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+    cargo clippy --locked -p pdf-structure --lib --target wasm32-unknown-unknown -- -D warnings
 
 # Build the tokenizer for a target without std, which must be installed
 # (`rustup target add thumbv6m-none-eabi`).

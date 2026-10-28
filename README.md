@@ -39,11 +39,12 @@ just ci       # run everything CI runs
 just clippy   # or one at a time
 ```
 
-`just ci` also needs the `thumbv6m-none-eabi` target, nightly Rust with
-its `rust-src` component, and Rust 1.85 installed: for the tokenizer's
-no-std build, its build against `core` alone, and the minimum Rust of
-the tokenizer, the filters, pdf-crypt, pdf-objects, pdf-structure and
-pdf-arlington.
+`just ci` also needs the `thumbv6m-none-eabi`, `x86_64-pc-windows-gnu`
+and `wasm32-unknown-unknown` targets, nightly Rust with its `rust-src`
+component, and Rust 1.85 installed: for the tokenizer's no-std build,
+pdf-structure's lints for Windows and a 32-bit target, the tokenizer's
+build against `core` alone, and the minimum Rust of the tokenizer, the
+filters, pdf-crypt, pdf-objects, pdf-structure and pdf-arlington.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
 objects`, `just fuzz structure` and `just fuzz check` fuzz the tokenizer,

@@ -58,6 +58,23 @@ jobs:
       - name: Build and check the archive
         run: just dist
 
+  # pdf-structure for Windows and a 32-bit target without files, whose
+  # code of their own nothing else here builds.
+  structure-cross:
+    name: pdf-structure for Windows and wasm32
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-gnu, wasm32-unknown-unknown
+      - uses: extractions/setup-just@v4
+      - name: Lint for x86_64-pc-windows-gnu and wasm32-unknown-unknown
+        run: just structure-cross
+
   # The tokenizer's own promises: no std, no alloc, and its oldest Rust.
   # None of these jobs needs qpdf, and none ever will.
   tokenizer-no-std:

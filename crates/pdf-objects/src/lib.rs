@@ -30,11 +30,11 @@
 //! - **A parser** ([`parse`]), on pdf-tokenizer: a value, or an indirect
 //!   object, from a file's bytes, a window of them that says when more of
 //!   the file could change what it read ([`parse::Parser::window`]), or an
-//!   object stream's decoded data, each value placed; what it reads past said to a [`parse::Sink`], which `()`
-//!   drops; a stream's two extents, by its `/Length` and up to
-//!   `endstream`, both given, for the caller to choose its data from; and
-//!   caps on how deeply values nest and how many one call reads
-//!   ([`Limits`]).
+//!   object stream's decoded data, each value placed; what it reads past
+//!   said to a [`parse::Sink`], which `()` drops; a stream's two extents,
+//!   by its `/Length` and up to `endstream`, both given, for the caller to
+//!   choose its data from; and caps on how deeply values nest and how many
+//!   one call reads ([`Limits`]).
 //! - **A writer** ([`serialize`]): a value as PDF syntax, or as an
 //!   indirect object, which the parser reads back as the same value,
 //!   under limits that take in its count of values, and a stream as an

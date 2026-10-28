@@ -903,6 +903,7 @@ mod tests {
             parse(&input);
         }
     }
+
     /// Inputs made of the fragments of objects, read from their start in
     /// every window ([`every_window`]): cut at every byte, from bytes 0
     /// and 1,000,000 of a file, each is short or reads as the whole input
