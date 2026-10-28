@@ -32,7 +32,7 @@ pub(crate) fn filters<'a>(dict: &'a Dict, resolve: Resolve<'_, 'a>) -> Result<Ve
         .transpose()?
     {
         None | Some(None) => Vec::new(),
-        Some(Some(filter)) => match &filter.value {
+        Some(Some(filter)) => match filter.value() {
             Value::Name(name) => vec![&name[..]],
             Value::Array(array) => (array.iter())
                 .map(|o| Ok(resolved(o, resolve)?.and_then(Object::as_name)))
@@ -83,7 +83,7 @@ pub(crate) fn filters<'a>(dict: &'a Dict, resolve: Resolve<'_, 'a>) -> Result<Ve
 /// its `/Filter` has one: its parameters' `/Name`, `/Identity` by default
 /// (ISO 32000-2, Table 14).
 pub(crate) fn crypt_filter<'a>(dict: &'a Dict, resolve: Resolve<'_, 'a>) -> Option<Vec<u8>> {
-    let names: Vec<Option<&[u8]>> = match resolved(dict.get(b"Filter")?, resolve).ok()??.value {
+    let names: Vec<Option<&[u8]>> = match *resolved(dict.get(b"Filter")?, resolve).ok()??.value() {
         Value::Name(ref name) => vec![Some(&name[..])],
         Value::Array(ref array) => (array.iter())
             .map(|o| {
@@ -97,7 +97,7 @@ pub(crate) fn crypt_filter<'a>(dict: &'a Dict, resolve: Resolve<'_, 'a>) -> Opti
     };
     let at = names.iter().position(|n| *n == Some(&b"Crypt"[..]))?;
     let parms = parameters(dict, names.len(), resolve).ok()?;
-    let name = (parms.get(at).copied().flatten()).and_then(|p| match &p.value {
+    let name = (parms.get(at).copied().flatten()).and_then(|p| match p.value() {
         Value::Dict(d) => resolved(d.get(b"Name")?, resolve)
             .ok()?
             .and_then(Object::as_name),
@@ -110,7 +110,7 @@ pub(crate) fn crypt_filter<'a>(dict: &'a Dict, resolve: Resolve<'_, 'a>) -> Opti
 /// them may take; none for a null, or a reference to no object.
 fn resolved<'a>(mut o: &'a Object, resolve: Resolve<'_, 'a>) -> Result<Option<&'a Object>, String> {
     for _ in 0..8 {
-        match (&o.value, resolve) {
+        match (o.value(), resolve) {
             (Value::Ref(_), None) => {
                 return Err("its /Filter or /DecodeParms holds a reference, which a cross-reference stream's may not".to_string());
             }
@@ -138,7 +138,7 @@ fn parameters<'a>(
     let Some(parms) = resolved(parms, resolve)? else {
         return Ok(vec![None; count]);
     };
-    Ok(match &parms.value {
+    Ok(match parms.value() {
         Value::Array(array) if array.is_empty() || count == 0 => vec![None; count],
         Value::Array(array) if array.len() != count => {
             return Err(format!(
@@ -160,13 +160,13 @@ fn integer<'a>(
     key: &str,
     resolve: Resolve<'_, 'a>,
 ) -> Result<Option<i64>, String> {
-    let Some(Value::Dict(dict)) = parms.map(|o| &o.value) else {
+    let Some(Value::Dict(dict)) = parms.map(|o| o.value()) else {
         return Ok(None);
     };
     let Some(value) = dict.get(key.as_bytes()) else {
         return Ok(None);
     };
-    match resolved(value, resolve)?.map(|o| &o.value) {
+    match resolved(value, resolve)?.map(|o| o.value()) {
         None => Ok(None),
         Some(Value::Integer(n)) => Ok(Some(*n)),
         Some(_) => Err(format!("/{key} isn't an integer")),
@@ -228,7 +228,7 @@ fn crypt<'a>(parms: Option<&'a Object>, resolve: Resolve<'_, 'a>) -> Result<(), 
     let Some(parms) = parms else {
         return Ok(());
     };
-    let Value::Dict(dict) = &parms.value else {
+    let Value::Dict(dict) = parms.value() else {
         return Err("parameters aren't a dictionary".to_string());
     };
     for (key, value) in dict.iter() {

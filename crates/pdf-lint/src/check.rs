@@ -494,7 +494,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         });
     }
     let object = &written.object;
-    let (trailer, name) = match &object.value {
+    let (trailer, name) = match object.value() {
         Value::Stream(s) => (&s.dict, "XRefStream"),
         Value::Dict(d) => (d, "FileTrailer"),
         _ => (&Dict::EMPTY, "FileTrailer"),
@@ -898,7 +898,7 @@ impl<'a> Walk<'a> {
             }
         }
         let parents = v.trail.parents();
-        match &v.object.value {
+        match v.object.value() {
             Value::Dict(dict) | Value::Stream(Stream { dict, .. }) => {
                 for entry in dict.last_entries() {
                     let at = At::Key(&entry.key);
@@ -1026,7 +1026,7 @@ impl<'a> Walk<'a> {
                 // Metadata streams may be anywhere from PDF 1.4 (ISO 32000-2
                 // 14.3.2), and associated files from 2.0 (14.13), which
                 // TestGrammar checks as such where the model has no row.
-                let table = match (at, &value.value) {
+                let table = match (at, value.value()) {
                     (At::Key(b"Metadata"), Value::Stream(_)) => "Metadata",
                     (At::Key(b"AF"), Value::Array(_)) => "ArrayOfFileSpecifications",
                     _ => {
@@ -1052,7 +1052,7 @@ impl<'a> Walk<'a> {
         // A dictionary's null entry is no entry (ISO 32000-2, 7.3.7), unless
         // its row allows null.
         let null = |row: &Row| row.r#type.iter().any(|t| t.item == ArlType::Null);
-        if matches!((at, &value.value), (At::Key(_), Value::Null))
+        if matches!((at, value.value()), (At::Key(_), Value::Null))
             && !null(row)
             && also.is_none_or(|(_, row)| !null(row))
         {
@@ -1263,7 +1263,7 @@ impl<'a> Walk<'a> {
             let asked = self.with_cx(v.object, at, parents, None, |cx| {
                 predicate::reference(&row.indirect_reference[i], cx)
             });
-            let referenced = matches!(raw.value, Value::Ref(_));
+            let referenced = matches!(raw.value(), Value::Ref(_));
             match asked {
                 Reference::Indirect if !referenced && !value.is_null() => {
                     self.find(v, made, Rule::Indirect, table, &key, render(value), written);
@@ -1322,7 +1322,7 @@ impl<'a> Walk<'a> {
     /// Notes that `raw`, when it's a reference, was seen under `key` of
     /// an object walked as `table`.
     fn refer(&mut self, raw: &Object, table: &'static Table, key: String) {
-        if let Value::Ref(to) = raw.value {
+        if let Value::Ref(to) = *raw.value() {
             (self.referrers.entry(to)).or_insert_with(|| (table.name.as_str(), key));
         }
     }
@@ -1436,7 +1436,7 @@ impl<'a> Walk<'a> {
             self.waiting.remove(&id);
         }
         // Only a dictionary or stream is checked as two tables at once.
-        let dict = matches!(value.value, Value::Dict(_) | Value::Stream(_));
+        let dict = matches!(value.value(), Value::Dict(_) | Value::Stream(_));
         let also = match dict && !self.one_table && !universal(&table.name) {
             false => None,
             true => (self.choose(value, also, &up))
@@ -1511,7 +1511,7 @@ impl<'a> Walk<'a> {
         table: &'static Table,
         parents: &[&'a Object],
     ) -> Option<&'static Table> {
-        let Value::Dict(dict) = &object.value else {
+        let Value::Dict(dict) = object.value() else {
             return None;
         };
         if table.name == "AnnotWidget" {
@@ -1633,7 +1633,7 @@ impl<'a> Walk<'a> {
     /// can't be told counts as allowed.
     fn score(&self, object: &'a Object, table: &'static Table, parents: &[&'a Object]) -> i32 {
         let rows = &table.rows;
-        let (dict, array) = match &object.value {
+        let (dict, array) = match object.value() {
             Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => (Some(d), None),
             Value::Array(a) => (None, Some(a)),
             _ => return 0,
@@ -1759,7 +1759,7 @@ impl<'a> Walk<'a> {
                 }
                 self.reached.insert(n, Some(ty.name()));
             }
-            let Value::Dict(dict) = &node.value else {
+            let Value::Dict(dict) = node.value() else {
                 continue;
             };
             let here = Visit {
@@ -1811,7 +1811,7 @@ impl<'a> Walk<'a> {
             }
             if let Some(raw) = dict.get(entries) {
                 self.refer(raw, from.table, row.key.clone());
-                match self.resolve(raw).map(|(_, o)| &o.value) {
+                match self.resolve(raw).map(|(_, o)| o.value()) {
                     Ok(Value::Array(pairs)) => {
                         for (k, pair) in pairs.chunks(2).enumerate() {
                             let (label, value) = match pair {
@@ -1822,7 +1822,7 @@ impl<'a> Walk<'a> {
                                     continue;
                                 }
                             };
-                            let label = match self.resolve(label).map(|(_, o)| &o.value) {
+                            let label = match self.resolve(label).map(|(_, o)| o.value()) {
                                 Ok(Value::String(s, _)) if names => {
                                     s.text().unwrap_or_else(|| "…".to_string())
                                 }
@@ -1838,7 +1838,7 @@ impl<'a> Walk<'a> {
                             match self.resolve(value) {
                                 Ok((vid, v))
                                     if matches!(
-                                        v.value,
+                                        v.value(),
                                         Value::Dict(_) | Value::Stream(_) | Value::Array(_)
                                     ) =>
                                 {
@@ -1878,12 +1878,12 @@ impl<'a> Walk<'a> {
             }
             if let Some(raw) = dict.get(b"Kids") {
                 self.refer(raw, from.table, row.key.clone());
-                match self.resolve(raw).map(|(_, o)| &o.value) {
+                match self.resolve(raw).map(|(_, o)| o.value()) {
                     Ok(Value::Array(kids)) => {
                         for (i, kid) in kids.iter().enumerate() {
                             self.refer(kid, from.table, row.key.clone());
                             match self.resolve(kid) {
-                                Ok((kid_id, kid)) if matches!(kid.value, Value::Dict(_)) => {
+                                Ok((kid_id, kid)) if matches!(kid.value(), Value::Dict(_)) => {
                                     let depth = if kid_id.is_some() { 0 } else { depth + 1 };
                                     if depth <= NESTING {
                                         nodes.push((kid, kid_id, depth, false));
@@ -2024,7 +2024,7 @@ impl<'a> Walk<'a> {
         let mut at = dict;
         for _ in 0..PAGE_TREE_DEPTH {
             let (id, parent) = match at.get(b"Parent").map(|p| self.resolve(p)) {
-                Some(Ok((id, parent))) => match &parent.value {
+                Some(Ok((id, parent))) => match parent.value() {
                     Value::Dict(parent) => (id, parent),
                     _ => break,
                 },
@@ -2082,7 +2082,7 @@ impl<'a> Walk<'a> {
     /// is taken to be what it may be ([`unknown_bytes`]).
     fn matches(&self, o: &Object, ty: ArlType) -> bool {
         use ArlType as T;
-        match (&o.value, ty) {
+        match (o.value(), ty) {
             (Value::Integer(_), T::Integer | T::Bitmask | T::Number)
             | (Value::Real(_), T::Number)
             | (Value::Bool(_), T::Boolean)
@@ -2107,7 +2107,7 @@ impl<'a> Walk<'a> {
         a.len() == n
             && (a.iter()).all(|e| {
                 (self.resolve(e))
-                    .is_ok_and(|(_, o)| matches!(o.value, Value::Integer(_) | Value::Real(_)))
+                    .is_ok_and(|(_, o)| matches!(o.value(), Value::Integer(_) | Value::Real(_)))
             })
     }
 
@@ -2130,7 +2130,7 @@ impl<'a> Walk<'a> {
         if items.is_empty() {
             return Values::Allowed;
         }
-        if matches!(value.value, Value::String(Str::Encrypted(_), _)) {
+        if matches!(value.value(), Value::String(Str::Encrypted(_), _)) {
             return Values::Unknown("the string's bytes".to_string());
         }
         let (mut listed, mut met, mut unknown) = (Vec::new(), None, None);
@@ -2217,7 +2217,7 @@ impl<'a> Walk<'a> {
     {
         let (mut id, mut at) = (None, raw);
         for _ in 0..REFERENCES {
-            let Value::Ref(to) = at.value else {
+            let Value::Ref(to) = *at.value() else {
                 return Ok((id, at));
             };
             at = self.source.get(to).map_err(|_| to)?;
@@ -2350,7 +2350,7 @@ impl<'a> Walk<'a> {
         }
         let mut among = HashMap::new();
         for &(_, _, object) in &left {
-            let entries: Vec<(String, &Object)> = match &object.value {
+            let entries: Vec<(String, &Object)> = match object.value() {
                 Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => (d.iter())
                     .map(|(k, v)| (String::from_utf8_lossy(k).into_owned(), v))
                     .collect(),
@@ -2470,7 +2470,7 @@ impl<'a> Trail<'a> {
 /// read as text, and a string-ascii or date read as ciphertext.
 fn unknown_bytes(value: &Object, ty: ArlType) -> bool {
     matches!(
-        (&value.value, ty),
+        (value.value(), ty),
         (Value::String(Str::Text(_), _), ArlType::StringAscii)
             | (
                 Value::String(Str::Encrypted(_), _),
@@ -2483,7 +2483,7 @@ fn unknown_bytes(value: &Object, ty: ArlType) -> bool {
 /// reaches: an object stream, a cross-reference stream, a linearization
 /// dictionary.
 fn left_out(object: &Object) -> bool {
-    match &object.value {
+    match object.value() {
         Value::Stream(s) => {
             matches!(
                 s.dict.get(b"Type").and_then(Object::as_name),
@@ -2566,7 +2566,7 @@ fn fits(object: &Object, table: &Table) -> bool {
         !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())
     };
     let keyed = |row: &Row| row.key != "*" && !element(row);
-    match &object.value {
+    match object.value() {
         Value::Array(_) => !table.rows.iter().any(keyed),
         Value::Dict(_) | Value::Stream(_) => !table.rows.iter().any(element),
         _ => true,
@@ -2595,7 +2595,7 @@ fn at_text(at: At) -> String {
 /// brackets, its elements apart by spaces (an image mask's `[0 1]`). A
 /// null, a dictionary or a stream is any.
 fn is_value(text: &str, value: &Object) -> bool {
-    match &value.value {
+    match value.value() {
         Value::Array(elements) => {
             let inner = text.strip_prefix('[').and_then(|t| t.strip_suffix(']'));
             inner.is_some_and(|inner| {
@@ -2624,7 +2624,7 @@ fn is_value(text: &str, value: &Object) -> bool {
 pub(crate) fn each_reference(o: &Object, mut f: impl FnMut(ObjectId)) {
     let mut stack = vec![(o, 0)];
     while let Some((o, depth)) = stack.pop() {
-        match &o.value {
+        match o.value() {
             Value::Ref(id) => f(*id),
             _ if depth >= NESTING => {}
             Value::Array(a) => stack.extend(a.iter().map(|e| (e, depth + 1))),
@@ -2729,7 +2729,7 @@ fn render(o: &Object) -> String {
 }
 
 fn write_value(out: &mut String, o: &Object, depth: usize) {
-    match &o.value {
+    match o.value() {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => {
             let _ = write!(out, "{b}");
@@ -3107,10 +3107,10 @@ mod tests {
         f: impl FnOnce(&mut Dict),
     ) -> Vec<(u32, Body)> {
         match objects.iter_mut().find(|(m, _)| *m == n).map(|(_, b)| b) {
-            Some(Body::Object(Object {
-                value: Value::Dict(d),
-                ..
-            })) => f(d),
+            Some(Body::Object(o)) => match o.value_mut() {
+                Value::Dict(d) => f(d),
+                _ => panic!("no dictionary {n}"),
+            },
             Some(Body::Stream(d, _)) => f(d),
             _ => panic!("no dictionary {n}"),
         }
@@ -3349,7 +3349,9 @@ mod tests {
 
     #[test]
     fn a_required_key_absent_is_found_unless_inherited() {
-        let no_rect = changed(clean(), 4, |annot| annot.remove(b"Rect"));
+        let no_rect = changed(clean(), 4, |annot| {
+            annot.remove(b"Rect");
+        });
         assert_eq!(
             placeless(&checked(&no_rect)),
             [finding(
@@ -3362,7 +3364,9 @@ mod tests {
         );
 
         // A page's MediaBox is inheritable: its parent's will do.
-        let no_box = changed(clean(), 3, |page| page.remove(b"MediaBox"));
+        let no_box = changed(clean(), 3, |page| {
+            page.remove(b"MediaBox");
+        });
         assert_eq!(
             placeless(&checked(&no_box)),
             [finding(
@@ -3545,7 +3549,9 @@ mod tests {
         );
 
         // Reached as nothing else, it's checked as that table, last.
-        let alone = changed(tree, 3, |page| page.remove(b"Annots"));
+        let alone = changed(tree, 3, |page| {
+            page.remove(b"Annots");
+        });
         let report = checked(&alone);
         assert_eq!(report.findings, [], "{report}");
         assert_eq!(report.checked.get("AnnotText"), None, "{report}");
@@ -3846,7 +3852,9 @@ mod tests {
 
     #[test]
     fn only_held_objects_are_found_in_but_all_are_walked() {
-        let no_box = changed(clean(), 3, |page| page.remove(b"MediaBox"));
+        let no_box = changed(clean(), 3, |page| {
+            page.remove(b"MediaBox");
+        });
         let bytes = written("1.7", &no_box, Xref::Table);
         let all = checked_as(&bytes, &Hold::All(Made::Built));
         assert_eq!(all.findings.len(), 1, "{all}");
@@ -3976,7 +3984,9 @@ mod tests {
     #[test]
     fn every_walk_ends_on_cycles_and_deep_nesting() {
         // A /Parent cycle, up which the inheritable MediaBox is looked for.
-        let cycle = changed(clean(), 3, |page| page.remove(b"MediaBox"));
+        let cycle = changed(clean(), 3, |page| {
+            page.remove(b"MediaBox");
+        });
         let cycle = changed(cycle, 2, |pages| pages.set("Parent", r(3)));
         let report = checked(&cycle);
         let missing: Vec<_> = (found(&report).into_iter())
@@ -4912,7 +4922,9 @@ mod tests {
         );
         assert_eq!(report.ignored.get(&rt), None, "{report}");
         // Outside a reply, readers ignore it: no finding, and counted so.
-        let objects = changed(objects, 4, |annot| annot.remove(b"IRT"));
+        let objects = changed(objects, 4, |annot| {
+            annot.remove(b"IRT");
+        });
         let report = checked(&objects);
         assert_eq!(report.ignored.get(&rt), Some(&1), "{report}");
         assert!(!found(&report).iter().any(|f| f.2 == "RT"), "{report}");

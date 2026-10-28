@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::bytes::{Decode, Written};
 use crate::json::{self, Json};
-use crate::object::{Dict, Object, ObjectId, Str, Stream, Value};
+use crate::object::{Data, Dict, Object, ObjectId, Str, Stream, Value};
 use crate::source::{Document, Trailer, Warning};
 use crate::version::Version;
 
@@ -387,8 +387,11 @@ fn indirect(json: &Json) -> Result<Object, String> {
     }
     let dict = (json.get("stream").and_then(|s| s.get("dict")))
         .ok_or("an object of qpdf's JSON that's neither a value nor a stream")?;
-    match object(dict)?.value {
-        Value::Dict(dict) => Ok(Object::new(Value::Stream(Stream { dict, data: None }))),
+    match object(dict)?.into_value() {
+        Value::Dict(dict) => Ok(Object::new(Value::Stream(Stream {
+            dict,
+            data: Data::Unplaced,
+        }))),
         _ => Err("a stream of qpdf's JSON whose dictionary isn't one".to_string()),
     }
 }
@@ -487,16 +490,10 @@ fn trailer_of(
     let unwritten = (warnings.iter())
         .find(|w| w.message.contains("reconstruct"))
         .map(|w| format!("qpdf read the file otherwise: {}", w.message));
-    let stream = (objects.iter()).find_map(|(&id, object)| match object {
-        Ok(Object {
-            value: Value::Stream(s),
-            ..
-        }) if s.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef")
-            && Some(&s.dict) == trailer.as_dict() =>
-        {
-            Some((id, s.clone()))
-        }
-        _ => None,
+    let stream = (objects.iter()).find_map(|(&id, object)| {
+        let s = object.as_ref().ok()?.as_stream()?;
+        let xref = s.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef");
+        (xref && Some(&s.dict) == trailer.as_dict()).then(|| (id, s.clone()))
     });
     match stream {
         Some((id, s)) => Trailer {
@@ -829,7 +826,7 @@ mod tests {
             );
             let contents = annot.as_dict().unwrap().get(b"Contents").unwrap();
             assert_eq!(
-                contents.value,
+                *contents.value(),
                 Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal)),
                 "{kind}"
             );
@@ -908,7 +905,7 @@ mod tests {
             .get(b"Bin\xFFx")
             .expect("a name with its escape decoded");
         assert_eq!(
-            numbers.value,
+            *numbers.value(),
             Value::Array(vec![
                 Object::from(0.5),
                 Object::from(-0.25),
@@ -917,15 +914,15 @@ mod tests {
                 Object::from(true),
             ])
         );
-        let text = &dict.get(b"Odd Name").unwrap().value;
+        let text = dict.get(b"Odd Name").unwrap().value();
         assert_eq!(text, &Value::String(Str::Text("Café".to_string()), None));
-        let bytes = &dict.get(b"Bytes").unwrap().value;
+        let bytes = dict.get(b"Bytes").unwrap().value();
         assert_eq!(bytes, &Value::String(Str::Bytes(vec![0, 0xFF, 0x10]), None));
-        assert_eq!(dict.get(b"Pages").unwrap().value, Value::Ref((2, 0)));
+        assert_eq!(*dict.get(b"Pages").unwrap().value(), Value::Ref((2, 0)));
         let stream = indirect(&json::parse(br#"{"stream": {"dict": {"/Length": 5}}}"#).unwrap());
         let stream = stream.unwrap();
         assert!(
-            matches!(&stream.value, Value::Stream(s) if s.dict.get(b"Length").and_then(Object::as_integer) == Some(5) && s.data.is_none())
+            matches!(stream.value(), Value::Stream(s) if s.dict.get(b"Length").and_then(Object::as_integer) == Some(5) && s.data == Data::Unplaced)
         );
         for bad in [
             &br#"{"value": "no prefix"}"#[..],
@@ -999,16 +996,16 @@ qpdf: operation succeeded with warnings\n";
             Value::Ref(_) => "a reference",
         };
         let differ = || {
-            let kinds = format!("{} and {}", kind(&a.value), kind(&b.value));
-            Some((kinds, format!("{at}: {:?} and {:?}", a.value, b.value)))
+            let kinds = format!("{} and {}", kind(a.value()), kind(b.value()));
+            Some((kinds, format!("{at}: {:?} and {:?}", a.value(), b.value())))
         };
         let explained = |kind: &str| {
             Some((
                 kind.to_string(),
-                format!("{at}: {:?} and {:?}", a.value, b.value),
+                format!("{at}: {:?} and {:?}", a.value(), b.value()),
             ))
         };
-        match (&a.value, &b.value) {
+        match (a.value(), b.value()) {
             (Value::String(Str::Bytes(x), _), Value::String(Str::Text(y), _)) => {
                 if &text::decode(x).text == y {
                     None
@@ -1025,7 +1022,7 @@ qpdf: operation succeeded with warnings\n";
                 explained("a reference to no object, which qpdf writes as null")
             }
             (Value::Integer(_), Value::Integer(_))
-                if a.value != b.value && at.ends_with("/Length") =>
+                if a.value() != b.value() && at.ends_with("/Length") =>
             {
                 explained("a /Length qpdf recovered, which it writes for the one written")
             }
@@ -1084,7 +1081,7 @@ qpdf: operation succeeded with warnings\n";
     /// The differences between `a`, read from its bytes, and `b`, read
     /// through qpdf alone, each with what kind it is.
     fn differences(a: &Document, b: &Document) -> Vec<(String, String)> {
-        let nothing = |o: &Object| match &o.value {
+        let nothing = |o: &Object| match o.value() {
             Value::Null => true,
             Value::Ref(id) => match a.objects.get(id) {
                 None | Some(Err(_)) => true,
@@ -1092,7 +1089,7 @@ qpdf: operation succeeded with warnings\n";
             },
             _ => false,
         };
-        let is_xref = |o: &Object| match &o.value {
+        let is_xref = |o: &Object| match o.value() {
             Value::Stream(s) => s.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef"),
             _ => false,
         };
@@ -1198,7 +1195,7 @@ qpdf: operation succeeded with warnings\n";
         );
         assert_eq!(catalog.get(b"Dup").and_then(Object::as_integer), Some(2));
         assert_eq!(
-            catalog.get(b"Utf16").unwrap().value,
+            *catalog.get(b"Utf16").unwrap().value(),
             Value::String(Str::Text("AB".to_string()), None),
             "text, its encoding lost"
         );
@@ -1308,7 +1305,7 @@ qpdf: operation succeeded with warnings\n";
         let through = bytes::read_through(&data, &qpdf(&path));
         assert!(through.warnings.is_empty(), "{:?}", through.warnings);
         assert_eq!(
-            contents(&through).value,
+            *contents(&through).value(),
             Value::String(Str::Text("A note".to_string()), Some(Form::Hex))
         );
         let doc = bytes::read_opened(&data, &[]);
@@ -1316,7 +1313,7 @@ qpdf: operation succeeded with warnings\n";
         assert_eq!(doc.encryption, crate::Encryption::Opened { owner: false });
         let contents = contents(&doc);
         assert_eq!(
-            contents.value,
+            *contents.value(),
             Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Hex)),
             "its bytes"
         );
@@ -1339,7 +1336,7 @@ qpdf: operation succeeded with warnings\n";
             .expect("the annotation reads");
         let contents = annot.as_dict().unwrap().get(b"Contents").unwrap();
         assert!(matches!(
-            contents.value,
+            *contents.value(),
             Value::String(Str::Encrypted(_), _)
         ));
     }
@@ -1619,10 +1616,10 @@ qpdf: operation succeeded with warnings\n";
         for (i, (name, _, _, expect)) in cases.iter().enumerate() {
             let id = ids[i];
             let object = doc.objects[&id].as_ref().unwrap();
-            let Value::Stream(stream) = &object.value else {
+            let Value::Stream(stream) = object.value() else {
                 panic!("{name}")
             };
-            let at = stream.data.unwrap();
+            let at = stream.data.at().unwrap();
             let written = &data[at.start..at.end];
             let theirs = &theirs[&id];
             let got = match crate::filter::filters(&stream.dict, Some(&|_| None)) {
@@ -1818,10 +1815,10 @@ qpdf: operation succeeded with warnings\n";
                         let resolve = |id| ours.objects.get(&id)?.as_ref().ok();
                         let streams: Vec<(ObjectId, Vec<pdf_filters::Filter>, &[u8])> = (ours.objects.iter())
                             .filter_map(|(&id, object)| {
-                                let Value::Stream(stream) = &object.as_ref().ok()?.value else {
+                                let Value::Stream(stream) = object.as_ref().ok()?.value() else {
                                     return None;
                                 };
-                                let at = stream.data.filter(|at| at.stream.is_none())?;
+                                let at = stream.data.at().filter(|at| at.stream.is_none())?;
                                 let filters = crate::filter::filters(&stream.dict, Some(&resolve)).ok()?;
                                 (!filters.is_empty()).then(|| (id, filters, &data[at.start..at.end]))
                             })
@@ -2104,14 +2101,14 @@ qpdf: operation succeeded with warnings\n";
                             let resolve = |id| ours.objects.get(&id)?.as_ref().ok();
                             // The document's metadata stream, the catalog's,
                             // which /EncryptMetadata false leaves plain.
-                            let catalog = ours.trailer.dict().get(b"Root").and_then(|r| match r.value {
+                            let catalog = ours.trailer.dict().get(b"Root").and_then(|r| match *r.value() {
                                 Value::Ref(id) => resolve(id),
                                 _ => None,
                             });
                             let metadata = catalog
                                 .and_then(Object::as_dict)
                                 .and_then(|c| c.get(b"Metadata"))
-                                .and_then(|m| match m.value {
+                                .and_then(|m| match *m.value() {
                                     Value::Ref(id) => Some(id),
                                     _ => None,
                                 });
@@ -2120,10 +2117,10 @@ qpdf: operation succeeded with warnings\n";
                             type Decrypted = (ObjectId, Result<Vec<u8>, pdf_crypt::Error>, Vec<pdf_filters::Filter>, bool);
                             let mine: Vec<Decrypted> = (ours.objects.iter())
                                 .filter_map(|(&id, object)| {
-                                    let Value::Stream(stream) = &object.as_ref().ok()?.value else {
+                                    let Value::Stream(stream) = object.as_ref().ok()?.value() else {
                                         return None;
                                     };
-                                    let at = stream.data.filter(|at| at.stream.is_none())?;
+                                    let at = stream.data.at().filter(|at| at.stream.is_none())?;
                                     let written = &data[at.start..at.end];
                                     let typed = stream.dict.get(b"Type").and_then(Object::as_name);
                                     let plain = typed == Some(b"XRef")
@@ -2131,10 +2128,10 @@ qpdf: operation succeeded with warnings\n";
                                     let crypt = crate::filter::crypt_filter(&stream.dict, Some(&resolve));
                                     // A /Crypt filter that names no crypt
                                     // filter, so /Identity.
-                                    let named = match stream.dict.get(b"DecodeParms").map(|p| &p.value) {
+                                    let named = match stream.dict.get(b"DecodeParms").map(|p| p.value()) {
                                         Some(Value::Dict(d)) => d.has(b"Name"),
                                         Some(Value::Array(a)) => {
-                                            a.iter().any(|p| matches!(&p.value, Value::Dict(d) if d.has(b"Name")))
+                                            a.iter().any(|p| matches!(p.value(), Value::Dict(d) if d.has(b"Name")))
                                         }
                                         _ => false,
                                     };

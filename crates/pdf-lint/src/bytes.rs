@@ -307,14 +307,14 @@ fn metadata(
         mut o: &'a Object,
     ) -> Option<&'a Object> {
         for _ in 0..8 {
-            match &o.value {
+            match o.value() {
                 Value::Ref(id) => o = objects.get(id)?.as_ref().ok()?,
                 _ => return Some(o),
             }
         }
         None
     }
-    let dict = |o| match &get(objects, o)?.value {
+    let dict = |o| match get(objects, o)?.value() {
         Value::Dict(d) => Some(d),
         _ => None,
     };
@@ -323,10 +323,10 @@ fn metadata(
         return None;
     }
     let catalog = dict(trailer.get(b"Root")?)?;
-    let Value::Stream(stream) = &get(objects, catalog.get(b"Metadata")?)?.value else {
+    let Value::Stream(stream) = get(objects, catalog.get(b"Metadata")?)?.value() else {
         return None;
     };
-    let at = (stream.data).filter(|at| at.stream.is_none() && !stream.dict.has(b"Filter"))?;
+    let at = (stream.data.at()).filter(|at| at.stream.is_none() && !stream.dict.has(b"Filter"))?;
     file.get(at.start..at.end).map(<[u8]>::to_vec)
 }
 
@@ -499,7 +499,7 @@ fn filter_name(filter: &Filter) -> &'static str {
 /// A stream's filters, as written, when it has any.
 fn filters(o: &Object) -> Option<String> {
     let filter = o.as_dict()?.get(b"Filter")?;
-    Some(match &filter.value {
+    Some(match filter.value() {
         Value::Name(name) => format!("/{}", String::from_utf8_lossy(name)),
         _ => "filters".to_string(),
     })
@@ -583,7 +583,7 @@ impl<'a> Reader<'a> {
         object: &Object,
         objects: &BTreeMap<ObjectId, Result<Object, String>>,
     ) -> Result<Vec<u8>, String> {
-        let Value::Stream(stream) = &object.value else {
+        let Value::Stream(stream) = object.value() else {
             return Err("it isn't a stream".to_string());
         };
         // Not decoded, and so not counted against the budget, unless it's
@@ -591,7 +591,7 @@ impl<'a> Reader<'a> {
         if stream.dict.get(b"Type").and_then(Object::as_name) != Some(b"ObjStm") {
             return Ok(Vec::new());
         }
-        let data = (stream.data)
+        let data = (stream.data.at())
             .filter(|at| at.stream.is_none())
             .and_then(|at| self.file.get(at.start..at.end))
             .unwrap_or_default();
@@ -621,7 +621,7 @@ impl<'a> Reader<'a> {
             Some(Err(error)) => {
                 let fault = error.fault;
                 let message = format!("its data doesn't decrypt cleanly: {fault}");
-                self.warn(Some(id), stream.data, message);
+                self.warn(Some(id), stream.data.at(), message);
                 match error.data {
                     Some(plain) => (plain, false),
                     None => return Err(format!("its data doesn't decrypt: {fault}")),
@@ -637,8 +637,8 @@ impl<'a> Reader<'a> {
         }
         // A fault's place is in the data as written only when it wasn't
         // decrypted first.
-        let at = stream.data.filter(|_| exact);
-        self.faulted(id, stream.data, at, &filters, faults);
+        let at = stream.data.at().filter(|_| exact);
+        self.faulted(id, stream.data.at(), at, &filters, faults);
         Ok(decoded)
     }
 
@@ -768,7 +768,8 @@ impl<'a> Reader<'a> {
                 }
             };
             next = section.prev;
-            if let Some(Value::Ref(id)) = section.trailer.dict().get(b"Encrypt").map(|o| &o.value) {
+            let encrypt = section.trailer.dict().get(b"Encrypt");
+            if let Some(Value::Ref(id)) = encrypt.map(Object::value) {
                 self.dictionaries.insert(*id);
             }
             sections.push(section);
@@ -975,7 +976,7 @@ impl<'a> Reader<'a> {
     /// The cross-reference stream at `offset`: a stream, `/Type /XRef`.
     fn xref_stream(&mut self, offset: usize) -> Result<(ObjectId, Object), String> {
         let (id, object) = self.indirect(offset, None)?;
-        let Value::Stream(stream) = &object.value else {
+        let Value::Stream(stream) = object.value() else {
             return Err(format!(
                 "{} {} R, at byte {offset}, isn't a stream",
                 id.0, id.1
@@ -1003,14 +1004,14 @@ impl<'a> Reader<'a> {
         decoded: Option<&Result<Vec<u8>, String>>,
         own: bool,
     ) -> Result<BTreeMap<u32, (u16, XrefEntry)>, String> {
-        let Value::Stream(stream) = &object.value else {
+        let Value::Stream(stream) = object.value() else {
             return Err(format!("{} {} R isn't a stream", id.0, id.1));
         };
         let dict = &stream.dict;
-        let written = (stream.data)
+        let written = (stream.data.at())
             .and_then(|at| self.file.get(at.start..at.end))
             .unwrap_or_default();
-        let widths: Option<Vec<usize>> = match dict.get(b"W").map(|w| &w.value) {
+        let widths: Option<Vec<usize>> = match dict.get(b"W").map(|w| w.value()) {
             Some(Value::Array(w)) if w.len() == 3 => (w.iter())
                 .map(|n| {
                     n.as_integer()
@@ -1022,7 +1023,7 @@ impl<'a> Reader<'a> {
         };
         let widths = widths.ok_or("its /W isn't three widths of 8 bytes or fewer")?;
         let size = dict.get(b"Size").and_then(Object::as_integer);
-        let index: Vec<(u32, u32)> = match dict.get(b"Index").map(|i| &i.value) {
+        let index: Vec<(u32, u32)> = match dict.get(b"Index").map(|i| i.value()) {
             Some(Value::Array(index)) => (index.chunks(2))
                 .map(|pair| match pair {
                     [start, count] => Some((
@@ -1078,7 +1079,7 @@ impl<'a> Reader<'a> {
                                 _ => true,
                             });
                         }
-                        self.faulted(id, stream.data, stream.data, &filters, faults);
+                        self.faulted(id, stream.data.at(), stream.data.at(), &filters, faults);
                         again = decoded;
                         &again
                     }
@@ -1198,10 +1199,10 @@ impl<'a> Reader<'a> {
     /// Stream `object` as written, when it's a stream whose filters are
     /// written in its dictionary.
     fn written_stream(&self, object: &Object) -> Option<Written<'a>> {
-        let Value::Stream(stream) = &object.value else {
+        let Value::Stream(stream) = object.value() else {
             return None;
         };
-        let data = stream.data.and_then(|at| self.file.get(at.start..at.end))?;
+        let data = (stream.data.at()).and_then(|at| self.file.get(at.start..at.end))?;
         self.written(&stream.dict, data)
     }
 
@@ -1211,7 +1212,7 @@ impl<'a> Reader<'a> {
         let file = self.file;
         let as_written = |key: &[u8]| {
             let value = dict.get(key)?;
-            let at = value.at.filter(|_| !matches!(value.value, Value::Ref(_)))?;
+            let at = (value.at).filter(|_| !matches!(value.value(), Value::Ref(_)))?;
             file.get(at.start..at.end)
         };
         let filter = as_written(b"Filter")?;
@@ -1271,23 +1272,26 @@ impl<'a> Reader<'a> {
             let Ok(object) = Parser::at(self.file, at).value(&mut self.warned(None)) else {
                 continue;
             };
-            let Value::Dict(earlier) = object.value.clone() else {
+            let Value::Dict(earlier) = object.value().clone() else {
                 continue;
             };
-            let Some(Object {
-                value: Value::Dict(last),
-                ..
-            }) = &mut found
-            else {
+            let Some(trailer) = &mut found else {
                 found = Some(object);
                 continue;
             };
-            for key in [&b"Root"[..], b"Encrypt", b"ID", b"Info"] {
-                if let (false, Some(entry)) = (last.has(key), earlier.entry(key)) {
-                    last.push_entry(entry.clone());
-                    taken.push(format!("/{}", String::from_utf8_lossy(key)));
+            let at = trailer.at;
+            if let Value::Dict(last) = trailer.value_mut() {
+                for key in [&b"Root"[..], b"Encrypt", b"ID", b"Info"] {
+                    if let (false, Some(entry)) = (last.has(key), earlier.entry(key)) {
+                        last.push_entry(entry.clone());
+                        taken.push(format!("/{}", String::from_utf8_lossy(key)));
+                    }
                 }
             }
+            // An edit, which drops its span; but the trailer this makes
+            // stands where the last was written, which its warning, and
+            // what's reported of it, point at.
+            trailer.at = at;
         }
         if let Some(object) = found {
             if !taken.is_empty() {
@@ -1338,7 +1342,7 @@ impl<'a> Reader<'a> {
         let Some(encrypt) = trailer.dict().get(b"Encrypt") else {
             return;
         };
-        let (dict, own, why) = match &encrypt.value {
+        let (dict, own, why) = match encrypt.value() {
             // A null is no entry, and so is a reference to no object (ISO
             // 32000-2, 7.3.9 and 7.3.10).
             Value::Null => return,
@@ -1399,7 +1403,7 @@ impl<'a> Reader<'a> {
     fn open(&mut self, dict: &Dict, trailer: &Trailer, own: Option<ObjectId>) -> Encryption {
         let mut get = |o: Option<&Object>| -> Option<Object> {
             let o = o?;
-            match &o.value {
+            match o.value() {
                 Value::Ref(id) => match self.entries.get(&id.0) {
                     Some(&(_, XrefEntry::InUse { offset, .. })) => {
                         self.dictionaries.insert(*id);
@@ -1410,16 +1414,16 @@ impl<'a> Reader<'a> {
                 _ => Some(o.clone()),
             }
         };
-        let bytes = |o: Option<Object>| match o.map(|o| o.value) {
+        let bytes = |o: Option<Object>| match o.map(|o| o.into_value()) {
             Some(Value::String(s, _)) => Some(s.as_bytes().map(<[u8]>::to_vec).unwrap_or_default()),
             _ => None,
         };
         let name = |o: Option<Object>| o.and_then(|o| o.as_name().map(<[u8]>::to_vec));
         let integer = |o: Option<Object>| o.and_then(|o| o.as_integer());
         let mut crypt_filters = Vec::new();
-        if let Some(Value::Dict(filters)) = get(dict.get(b"CF")).map(|o| o.value) {
+        if let Some(Value::Dict(filters)) = get(dict.get(b"CF")).map(|o| o.into_value()) {
             for (name, filter) in filters.iter() {
-                let method = match get(Some(filter)).map(|o| o.value) {
+                let method = match get(Some(filter)).map(|o| o.into_value()) {
                     Some(Value::Dict(filter)) => (get(filter.get(b"CFM")).as_ref())
                         .and_then(Object::as_name)
                         .map(<[u8]>::to_vec),
@@ -1442,7 +1446,7 @@ impl<'a> Reader<'a> {
             ue: bytes(get(dict.get(b"UE"))),
             perms: bytes(get(dict.get(b"Perms"))),
             p: integer(get(dict.get(b"P"))),
-            encrypt_metadata: match get(dict.get(b"EncryptMetadata")).map(|o| o.value) {
+            encrypt_metadata: match get(dict.get(b"EncryptMetadata")).map(|o| o.into_value()) {
                 Some(Value::Bool(b)) => Some(b),
                 _ => None,
             },
@@ -1452,8 +1456,8 @@ impl<'a> Reader<'a> {
         };
         // The file's first /ID element, as qpdf takes it: empty, said once
         // the standard handler takes the dictionary, when it isn't a string.
-        let id = match get(trailer.dict().get(b"ID")).map(|o| o.value) {
-            Some(Value::Array(id)) => match id.first().map(|o| &o.value) {
+        let id = match get(trailer.dict().get(b"ID")).map(|o| o.into_value()) {
+            Some(Value::Array(id)) => match id.first().map(|o| o.value()) {
                 Some(Value::String(s, _)) => s.as_bytes().map(<[u8]>::to_vec),
                 _ => None,
             },
@@ -1557,10 +1561,10 @@ impl<'a> Reader<'a> {
                     .filter(|_| !self.encrypts)
                     .filter_map(|&n| {
                         let object = objects.get(&(n, 0))?.as_ref().ok()?;
-                        let Value::Stream(stream) = &object.value else {
+                        let Value::Stream(stream) = object.value() else {
                             return None;
                         };
-                        let at = stream.data.filter(|at| at.stream.is_none())?;
+                        let at = stream.data.at().filter(|at| at.stream.is_none())?;
                         let data = self.file.get(at.start..at.end)?;
                         filters(object).is_none().then(|| (n, data.to_vec()))
                     })
@@ -1636,7 +1640,7 @@ impl<'a> Reader<'a> {
             let Ok(object) = object else {
                 continue;
             };
-            if ciphertexts(&object.value) == 0 {
+            if ciphertexts(object.value()) == 0 {
                 continue;
             }
             let mut faults: BTreeMap<String, (usize, Option<Span>)> = BTreeMap::new();
@@ -1662,7 +1666,7 @@ impl<'a> Reader<'a> {
             return;
         };
         let ids: Vec<ObjectId> = (objects.iter())
-            .filter(|(_, o)| o.as_ref().is_ok_and(|o| ciphertexts(&o.value) > 0))
+            .filter(|(_, o)| o.as_ref().is_ok_and(|o| ciphertexts(o.value()) > 0))
             .map(|(&id, _)| id)
             .collect();
         if ids.is_empty() {
@@ -1731,7 +1735,7 @@ impl<'a> Reader<'a> {
         // when it's a value nothing closes: a number, a name, a keyword.
         let open = |o: &Object| {
             !matches!(
-                o.value,
+                o.value(),
                 Value::String(..) | Value::Array(_) | Value::Dict(_) | Value::Stream(_)
             )
         };
@@ -1798,7 +1802,7 @@ impl<'a> Reader<'a> {
     /// plain view.
     fn length(&mut self, dict: &Dict, id: ObjectId) -> Option<usize> {
         let length = dict.get(b"Length")?;
-        let n = match length.value {
+        let n = match *length.value() {
             Value::Integer(n) => n,
             Value::Ref(to) if to != id && !self.resolving => {
                 let Some(&(_, XrefEntry::InUse { offset, .. })) = self.entries.get(&to.0) else {
@@ -1861,7 +1865,7 @@ fn object_stream_header(object: &Object, data: &[u8]) -> Result<Vec<(u32, usize)
 
 /// Whether `o` is a cross-reference stream.
 fn is_xref_stream(o: &Object) -> bool {
-    matches!(&o.value, Value::Stream(s) if s.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef"))
+    matches!(o.value(), Value::Stream(s) if s.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef"))
 }
 
 /// `o`'s ciphertext strings, of object `id`, decrypted by `handler`, each
@@ -1876,7 +1880,7 @@ fn plaintext(
     faults: &mut BTreeMap<String, (usize, Option<Span>)>,
 ) {
     let at = o.at;
-    match &mut o.value {
+    match o.as_written_mut() {
         Value::String(s, _) => {
             if let Str::Encrypted(bytes) = s {
                 match handler.decrypt_string(id, bytes) {
@@ -1897,7 +1901,7 @@ fn plaintext(
         }
         Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
             let contents = matches!(
-                d.get(b"Contents").map(|c| &c.value),
+                d.get(b"Contents").map(|c| c.value()),
                 Some(Value::String(..))
             );
             let typed = (d.get(b"Type"))
@@ -1918,7 +1922,7 @@ fn plaintext(
 fn plain_strings(o: &mut Object) {
     let mut stack = vec![o];
     while let Some(o) = stack.pop() {
-        match &mut o.value {
+        match o.as_written_mut() {
             Value::String(s, _) => {
                 if let Str::Encrypted(bytes) = s {
                     *s = Str::Bytes(std::mem::take(bytes));
@@ -1937,11 +1941,11 @@ fn plain_strings(o: &mut Object) {
 fn ciphertexts(value: &Value) -> usize {
     match value {
         Value::String(Str::Encrypted(_), _) => 1,
-        Value::Array(a) => a.iter().map(|o| ciphertexts(&o.value)).sum(),
+        Value::Array(a) => a.iter().map(|o| ciphertexts(o.value())).sum(),
         Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => d
             .entries()
             .iter()
-            .map(|e| ciphertexts(&e.value.value))
+            .map(|e| ciphertexts(e.value.value()))
             .sum(),
         _ => 0,
     }
@@ -1952,7 +1956,7 @@ fn ciphertexts(value: &Value) -> usize {
 /// place, which stay ciphertext. Of a key written twice, only the last
 /// entry has a place in `plain`, as a reader keeps only that.
 fn decrypted(object: &mut Object, plain: &Object) -> usize {
-    match (&mut object.value, &plain.value) {
+    match (object.as_written_mut(), plain.value()) {
         (
             Value::String(s @ Str::Encrypted(_), _),
             Value::String(p @ (Str::Bytes(_) | Str::Text(_)), _),
@@ -1971,7 +1975,7 @@ fn decrypted(object: &mut Object, plain: &Object) -> usize {
             (entries.into_iter())
                 .map(|entry| match p.get(&entry.key) {
                     Some(p) if placed.insert(entry.key.clone()) => decrypted(&mut entry.value, p),
-                    _ => ciphertexts(&entry.value.value),
+                    _ => ciphertexts(entry.value.value()),
                 })
                 .sum()
         }
@@ -2010,20 +2014,20 @@ fn offset_of(o: &Object) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::dict;
-    use crate::object::Form;
+    use crate::object::{Data, Form};
     use crate::source::Source;
     use crate::write::{self, Body, Xref};
 
     /// `o` with every place it was written, and every string's form, left
     /// out.
     fn plain(o: &Object) -> Object {
-        Object::new(match &o.value {
+        Object::new(match o.value() {
             Value::String(s, _) => Value::String(s.clone(), None),
             Value::Array(a) => Value::Array(a.iter().map(plain).collect()),
             Value::Dict(d) => Value::Dict(plain_dict(d)),
             Value::Stream(s) => Value::Stream(Stream {
                 dict: plain_dict(&s.dict),
-                data: None,
+                data: Data::Unplaced,
             }),
             other => other.clone(),
         })
@@ -2061,7 +2065,7 @@ mod tests {
             if !strings {
                 let mut stack = vec![&mut o];
                 while let Some(o) = stack.pop() {
-                    match &mut o.value {
+                    match o.value_mut() {
                         Value::String(s, _) => *s = Str::Bytes(Vec::new()),
                         Value::Array(a) => stack.extend(a.iter_mut()),
                         Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
@@ -2085,7 +2089,7 @@ mod tests {
         );
         let ends =
             |open: &[u8], close: &[u8]| written.starts_with(open) && written.ends_with(close);
-        match &o.value {
+        match o.value() {
             Value::Dict(_) | Value::Stream(_) => assert!(written.starts_with(b"<<")),
             Value::Array(_) => assert!(ends(b"[", b"]")),
             Value::Name(_) => assert_eq!(first, b'/'),
@@ -2099,12 +2103,12 @@ mod tests {
         // ends short leaves it unfinished.
         let cut = &file[..at.end];
         let again = Parser::at(cut, at.start).value(&mut ()).unwrap();
-        match &o.value {
+        match o.value() {
             Value::Stream(s) => {
                 let dict = same(&Object::new(Value::Dict(s.dict.clone())));
                 assert_eq!(same(&again), dict);
                 assert!(file[at.start..at.end].ends_with(b"endstream"));
-                let data = s.data.expect("a stream says where its data is");
+                let data = s.data.at().expect("a stream says where its data is");
                 assert!(at.start < data.start && data.end < at.end);
             }
             _ => {
@@ -2119,7 +2123,7 @@ mod tests {
                 );
             }
         }
-        match &o.value {
+        match o.value() {
             Value::Array(a) => a.iter().for_each(|e| placed_as(file, e, strings)),
             Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
                 for entry in d.entries() {
@@ -2204,12 +2208,12 @@ mod tests {
                 match body {
                     Body::Object(o) => assert_eq!(plain(read), plain(&o)),
                     Body::Stream(mut d, data) => {
-                        let Value::Stream(s) = &read.value else {
+                        let Value::Stream(s) = read.value() else {
                             panic!("{n} 0 R isn't a stream");
                         };
                         d.set("Length", data.len() as i64);
                         assert_eq!(plain_dict(&s.dict), plain_dict(&d));
-                        let at = s.data.unwrap();
+                        let at = s.data.at().unwrap();
                         assert_eq!(&file[at.start..at.end], &data[..]);
                     }
                 }
@@ -2233,13 +2237,13 @@ mod tests {
         );
         let doc = read(&file);
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
-        let Value::Stream(s) = &doc.get((2, 0)).unwrap().value else {
+        let Value::Stream(s) = doc.get((2, 0)).unwrap().value() else {
             panic!("not a stream");
         };
-        let at = s.data.unwrap();
+        let at = s.data.at().unwrap();
         assert_eq!(&file[at.start..at.end], b"abcdef");
         assert_eq!(
-            s.dict.get(b"Length").unwrap().value,
+            *s.dict.get(b"Length").unwrap().value(),
             Value::Ref((3, 0)),
             "as written"
         );
@@ -2271,9 +2275,9 @@ mod tests {
             messages.contains(&"a lone CR after `stream`, where ISO 32000-2 wants CR LF or LF"),
             "{messages:?}"
         );
-        let data = |n: u32| match &doc.get((n, 0)).unwrap().value {
+        let data = |n: u32| match doc.get((n, 0)).unwrap().value() {
             Value::Stream(s) => {
-                let at = s.data.unwrap();
+                let at = s.data.at().unwrap();
                 file[at.start..at.end].to_vec()
             }
             _ => panic!("{n} 0 R isn't a stream"),
@@ -2648,10 +2652,11 @@ mod tests {
         file.truncate(at);
         file.extend_from_slice(b"trailer\n<< /Size 6 /Root 9 0 R >>\ntrailer\n<< /Size 6 >>\nstartxref\n999999\n%%EOF\n");
         let doc = read(&file);
-        let root = doc.trailer.dict().get(b"Root").and_then(|r| match r.value {
-            Value::Ref(id) => Some(id),
-            _ => None,
-        });
+        let root = doc
+            .trailer
+            .dict()
+            .get(b"Root")
+            .and_then(Object::as_reference);
         // The newest earlier trailer's /Root, said.
         assert_eq!(root, Some((9, 0)));
         let message = "the last trailer lacks /Root, which it's given from an earlier one";
@@ -2660,6 +2665,12 @@ mod tests {
             "{:?}",
             doc.warnings
         );
+        // Given what it lacks, it's still placed where the last trailer
+        // was written, and so is the warning.
+        let at = doc.trailer.object.at.expect("placed");
+        assert_eq!(&file[at.start..at.end], b"<< /Size 6 >>");
+        let warning = doc.warnings.iter().find(|w| w.message == message);
+        assert_eq!(warning.map(|w| w.at), Some(Some(at)));
     }
 
     #[test]
@@ -2696,14 +2707,14 @@ mod tests {
             );
             read(&file)
         };
-        let string = |doc: &Document, n: u32, key: &[u8]| match &doc
+        let string = |doc: &Document, n: u32, key: &[u8]| match doc
             .get((n, 0))
             .unwrap()
             .as_dict()
             .unwrap()
             .get(key)
             .unwrap()
-            .value
+            .value()
         {
             Value::String(s, _) => s.clone(),
             _ => panic!("not a string"),
@@ -2713,7 +2724,7 @@ mod tests {
         assert_eq!(string(&doc, 2, b"O"), Str::Bytes(b"owner".to_vec()));
         let id = doc.trailer.dict().get(b"ID").unwrap();
         assert!(
-            matches!(&id.value, Value::Array(a) if matches!(a[0].value, Value::String(Str::Bytes(_), _)))
+            matches!(id.value(), Value::Array(a) if matches!(a[0].value(), Value::String(Str::Bytes(_), _)))
         );
         // A version 4 dictionary without /StrF leaves strings as they are.
         let doc = encrypted("4");
@@ -2781,7 +2792,7 @@ mod tests {
             .unwrap()
             .get(b"Pages")
             .unwrap();
-        assert_eq!(pages.value, Value::Ref((2, 0)));
+        assert_eq!(*pages.value(), Value::Ref((2, 0)));
         let at = pages.at.unwrap();
         assert_eq!(&file[at.start..at.end], b"2 % a comment\n 0\r\nR");
     }
@@ -3452,7 +3463,7 @@ mod tests {
                 };
                 let lang = get(1, b"Lang");
                 assert_eq!(
-                    lang.value,
+                    *lang.value(),
                     Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
                     "{kind:?}"
                 );
@@ -3464,13 +3475,13 @@ mod tests {
                     "{kind:?}"
                 );
                 assert_eq!(
-                    get(4, b"Contents").value,
+                    *get(4, b"Contents").value(),
                     Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal)),
                     "{kind:?}"
                 );
                 // A signature's /Contents isn't encrypted, so not decrypted.
                 assert_eq!(
-                    get(5, b"Contents").value,
+                    *get(5, b"Contents").value(),
                     Value::String(
                         Str::Bytes(vec![0x30, 0x82, 0x00, 0x01]),
                         Some(Form::Literal)
@@ -3522,7 +3533,7 @@ mod tests {
                 .get(b"Lang")
                 .unwrap()
                 .clone();
-            assert!(matches!(lang.value, Value::String(Str::Encrypted(_), _)));
+            assert!(matches!(lang.value(), Value::String(Str::Encrypted(_), _)));
         }
     }
 
@@ -3553,7 +3564,7 @@ mod tests {
             .get(b"Lang")
             .unwrap()
             .clone();
-        assert!(matches!(lang.value, Value::String(Str::Encrypted(_), _)));
+        assert!(matches!(lang.value(), Value::String(Str::Encrypted(_), _)));
     }
 
     #[test]
@@ -3587,7 +3598,7 @@ mod tests {
             assert_eq!(doc.get((2, 0)).unwrap().at.unwrap().stream, Some((4, 0)));
             let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
             assert_eq!(
-                lang.unwrap().value,
+                *lang.unwrap().value(),
                 Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal))
             );
         }
@@ -3671,7 +3682,7 @@ mod tests {
             assert!(doc.warnings.is_empty(), "{to}: {:?}", doc.warnings);
             let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
             assert_eq!(
-                lang.unwrap().value,
+                *lang.unwrap().value(),
                 Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
                 "{to}"
             );
@@ -3771,7 +3782,7 @@ mod tests {
         assert_eq!(warnings, [message]);
         let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
         assert_eq!(
-            lang.unwrap().value,
+            *lang.unwrap().value(),
             Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal))
         );
     }
@@ -3811,7 +3822,7 @@ mod tests {
         for n in [3, 4, 5] {
             let contents = doc.get((n, 0)).unwrap().as_dict().unwrap().get(b"Contents");
             assert_eq!(
-                contents.unwrap().value,
+                *contents.unwrap().value(),
                 Value::String(Str::Bytes(der.clone()), Some(Form::Literal)),
                 "{n}"
             );
@@ -3845,7 +3856,7 @@ mod tests {
         let written = pdf_crypt::writer::dictionary(&settings(kind, b"")).o;
         for n in [6, 7] {
             let dict = doc.get((n, 0)).unwrap().as_dict().unwrap().clone();
-            let o = &dict.get(b"O").unwrap().value;
+            let o = dict.get(b"O").unwrap().value();
             assert_eq!(
                 o,
                 &Value::String(Str::Bytes(written.clone().unwrap()), Some(Form::Literal)),
@@ -3880,12 +3891,12 @@ mod tests {
         );
         let note = doc.get((4, 0)).unwrap().as_dict().unwrap().clone();
         assert_eq!(
-            note.get(b"Contents").unwrap().value,
+            *note.get(b"Contents").unwrap().value(),
             Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal))
         );
         let raw = note.get(b"Raw").unwrap();
         assert!(
-            matches!(&raw.value, Value::Array(a) if matches!(a[0].value, Value::String(Str::Encrypted(_), _)))
+            matches!(raw.value(), Value::Array(a) if matches!(a[0].value(), Value::String(Str::Encrypted(_), _)))
         );
     }
 
@@ -3908,7 +3919,7 @@ mod tests {
         assert_eq!(kids.key_at.unwrap().stream, Some((4, 0)), "its keys too");
         let page = doc.get((3, 0)).unwrap();
         assert_eq!(
-            page.as_dict().unwrap().get(b"Parent").unwrap().value,
+            *page.as_dict().unwrap().get(b"Parent").unwrap().value(),
             Value::Ref((2, 0))
         );
         let report = crate::check::check(
@@ -4054,14 +4065,14 @@ mod tests {
     fn an_encrypted_files_object_streams_hold_plain_strings() {
         let (file, decoded) = compressed(true);
         let doc = read_with(&file, &decoded);
-        let string = |n: u32, key: &[u8]| match &doc
+        let string = |n: u32, key: &[u8]| match doc
             .get((n, 0))
             .unwrap()
             .as_dict()
             .unwrap()
             .get(key)
             .unwrap()
-            .value
+            .value()
         {
             Value::String(s, _) => s.clone(),
             other => panic!("{other:?}"),
@@ -4236,7 +4247,7 @@ mod tests {
         let catalog = doc.get((1, 0)).unwrap().as_dict().unwrap();
         let lang = catalog.get(b"Lang").unwrap();
         assert_eq!(
-            lang.value,
+            *lang.value(),
             Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal))
         );
         let at = lang.at.unwrap();
@@ -4247,7 +4258,7 @@ mod tests {
         );
         let dup: Vec<_> = (catalog.entries().iter())
             .filter(|e| e.key == b"Dup")
-            .map(|e| e.value.value.clone())
+            .map(|e| e.value.value().clone())
             .collect();
         assert_eq!(
             dup,
@@ -4270,7 +4281,7 @@ mod tests {
         );
         let t = doc.get((3, 0)).unwrap().as_dict().unwrap().get(b"T");
         assert_eq!(
-            t.unwrap().value,
+            *t.unwrap().value(),
             Value::String(Str::Encrypted(b"tt".to_vec()), Some(Form::Literal))
         );
         let warnings: Vec<_> = doc.warnings.iter().map(|w| w.message.as_str()).collect();
@@ -4290,7 +4301,7 @@ mod tests {
         let doc = read_with(&file, &BTreeMap::new());
         let catalog = doc.get((1, 0)).unwrap().as_dict().unwrap();
         assert_eq!(
-            catalog.get(b"Lang").unwrap().value,
+            *catalog.get(b"Lang").unwrap().value(),
             Value::String(Str::Encrypted(b"xx".to_vec()), Some(Form::Literal))
         );
         let warnings: Vec<_> = doc.warnings.iter().map(|w| w.message.as_str()).collect();

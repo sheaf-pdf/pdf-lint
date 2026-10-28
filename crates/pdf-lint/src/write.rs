@@ -197,7 +197,7 @@ pub(crate) fn encrypted(
     let handler = pdf_crypt::Handler::open(&values, settings.id, &[settings.user])
         .expect("the writer's opens");
     fn strings(o: &mut Object, encrypt: &mut dyn FnMut(&[u8]) -> Vec<u8>) {
-        match &mut o.value {
+        match o.value_mut() {
             Value::String(Str::Bytes(bytes), _) => *bytes = encrypt(bytes),
             Value::Array(a) => a.iter_mut().for_each(|o| strings(o, encrypt)),
             Value::Dict(d) | Value::Stream(crate::object::Stream { dict: d, .. }) => {
@@ -234,7 +234,7 @@ pub(crate) fn encrypted(
                     let metadata = dict.get(b"Type").and_then(Object::as_name) == Some(b"Metadata");
                     let mut dict: Object = dict.clone().into();
                     strings(&mut dict, &mut encrypt);
-                    let Value::Dict(dict) = dict.value else {
+                    let Value::Dict(dict) = dict.into_value() else {
                         unreachable!()
                     };
                     let data = match metadata && !handler.encrypts_metadata() {
@@ -345,7 +345,7 @@ fn indirect(out: &mut Vec<u8>, n: u32, body: &Body) {
 
 /// `o` as PDF syntax.
 pub(crate) fn value(out: &mut Vec<u8>, o: &Object) {
-    match &o.value {
+    match o.value() {
         Value::Null => out.extend_from_slice(b"null"),
         Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
         Value::Integer(i) => out.extend_from_slice(i.to_string().as_bytes()),

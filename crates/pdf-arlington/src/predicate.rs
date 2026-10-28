@@ -919,7 +919,7 @@ fn parent<'a>(n: usize, keys: &[String], cx: &Cx<'a>) -> Option<&'a Object> {
     let by_key = keys
         .first()
         .is_some_and(|k| !wild(k) && k.parse::<usize>().is_err());
-    while by_key && matches!(cx.parents.get(at)?.value, Value::Array(_)) {
+    while by_key && matches!(cx.parents.get(at)?.value(), Value::Array(_)) {
         at += 1;
     }
     cx.parents.get(at).copied()
@@ -935,7 +935,7 @@ fn wild(key: &str) -> bool {
 /// value that isn't an array, a dictionary or a stream, can't be told
 /// (INTERNAL_GRAMMAR.md, "Parameters to predicates"): itself none.
 fn step<'a>(o: &'a Object, key: &str, cx: &Cx<'a>) -> Option<Option<&'a Object>> {
-    let at = match deref(o, cx).map(|o| &o.value) {
+    let at = match deref(o, cx).map(|o| o.value()) {
         None => return Some(None),
         Some(Value::Array(_)) => At::Index(key.parse().ok()?),
         Some(Value::Dict(_) | Value::Stream(_)) => At::Key(key.as_bytes()),
@@ -946,7 +946,7 @@ fn step<'a>(o: &'a Object, key: &str, cx: &Cx<'a>) -> Option<Option<&'a Object>>
 
 /// `o`'s entry at `at`, a stream's from its dictionary; none for null.
 fn value_at<'a>(o: &'a Object, at: At, cx: &Cx<'a>) -> Option<&'a Object> {
-    let entry = match (&deref(o, cx)?.value, at) {
+    let entry = match (deref(o, cx)?.value(), at) {
         (Value::Dict(d), At::Key(key)) => d.get(key),
         (Value::Stream(s), At::Key(key)) => s.dict.get(key),
         (Value::Array(a), At::Index(i)) => a.get(i),
@@ -960,7 +960,7 @@ fn value_at<'a>(o: &'a Object, at: At, cx: &Cx<'a>) -> Option<&'a Object> {
 /// 32000-2, 7.3.10).
 fn deref<'a>(mut o: &'a Object, cx: &Cx<'a>) -> Option<&'a Object> {
     for _ in 0..HOPS {
-        match &o.value {
+        match o.value() {
             Value::Ref(id) => o = (cx.resolve)(*id)?,
             Value::Null => return None,
             _ => return Some(o),
@@ -971,7 +971,7 @@ fn deref<'a>(mut o: &'a Object, cx: &Cx<'a>) -> Option<&'a Object> {
 
 /// Whether `o` is a dictionary or array with an entry that isn't null.
 fn has_entry<'a>(o: &'a Object, cx: &Cx<'a>) -> bool {
-    match &o.value {
+    match o.value() {
         Value::Dict(d) => d.iter().any(|(_, v)| deref(v, cx).is_some()),
         Value::Array(a) => a.iter().any(|v| deref(v, cx).is_some()),
         _ => false,
@@ -1075,7 +1075,7 @@ fn operand(e: &Expr, cx: &Cx) -> Result<Scalar, String> {
 /// `o` as a comparison reads it: none for an array, a dictionary or a
 /// stream.
 fn scalar(o: &Object) -> Option<Scalar> {
-    Some(match &o.value {
+    Some(match o.value() {
         Value::Integer(i) => Scalar::Int(*i),
         Value::Real(r) => Scalar::Real(*r),
         Value::Name(name) => Scalar::Name(name.clone()),
@@ -1098,7 +1098,7 @@ fn rect(k: &Expr, cx: &Cx) -> Result<[f64; 4], String> {
 /// The array at `k`, a key or path.
 fn array<'a>(k: &Expr, cx: &Cx<'a>) -> Result<&'a [Object], String> {
     match k {
-        Expr::Path(p) if !p.value => match walk(p, &p.keys, cx)?.map(|o| &o.value) {
+        Expr::Path(p) if !p.value => match walk(p, &p.keys, cx)?.map(|o| o.value()) {
             Some(Value::Array(a)) => Ok(a),
             _ => Err(p.text.clone()),
         },
@@ -1111,7 +1111,7 @@ fn array<'a>(k: &Expr, cx: &Cx<'a>) -> Result<&'a [Object], String> {
 /// stands in the way for a string whose bytes the reader didn't give.
 fn string_length(k: &Expr, cx: &Cx) -> Result<Scalar, String> {
     let p = named(k).ok_or_else(|| k.to_string())?;
-    match walk(&p, &p.keys, cx)?.map(|o| &o.value) {
+    match walk(&p, &p.keys, cx)?.map(|o| o.value()) {
         Some(Value::String(Str::Bytes(bytes), _)) => Ok(Scalar::Int(bytes.len() as i64)),
         Some(Value::String(..)) => Err("the string's bytes".to_string()),
         _ => Err(p.text.clone()),
@@ -1141,7 +1141,7 @@ fn contains(f: &str, k: &Expr, v: &Expr, cx: &Cx) -> Tri {
         Err(why) => return Tri::Unknown(why),
     };
     let held = |o: &Object| scalar(o).and_then(|s| equal(&s, &want)) == Some(true);
-    Tri::Is(match &found.value {
+    Tri::Is(match found.value() {
         Value::Array(a) => a.iter().any(|e| deref(e, cx).is_some_and(held)),
         _ => held(found),
     })
@@ -1174,7 +1174,7 @@ fn sorted(f: &str, k: &Expr, step: &Expr, cx: &Cx) -> Tri {
 /// string as read is as written, but ciphertext the reader didn't
 /// decrypt, which can't be told; anything else isn't a string.
 fn unencrypted(f: &str, cx: &Cx) -> Tri {
-    match value_at(cx.container, cx.at, cx).map(|o| &o.value) {
+    match value_at(cx.container, cx.at, cx).map(|o| o.value()) {
         Some(Value::String(Str::Encrypted(_), _)) => Tri::Unknown("the string's bytes".to_string()),
         Some(Value::String(..)) => Tri::Is(true),
         Some(_) => Tri::Is(false),
@@ -1186,7 +1186,7 @@ fn unencrypted(f: &str, cx: &Cx) -> Tri {
 /// (`fn:IsHexString`), by its [`Form`]: unknown when it has none, as a
 /// string built without choosing, or read by a reader that doesn't say.
 fn hex(f: &str, cx: &Cx) -> Tri {
-    match value_at(cx.container, cx.at, cx).map(|o| &o.value) {
+    match value_at(cx.container, cx.at, cx).map(|o| o.value()) {
         Some(Value::String(_, Some(form))) => Tri::Is(*form == Form::Hex),
         Some(Value::String(_, None)) | None => Tri::Unknown(f.to_string()),
         Some(_) => Tri::Is(false),
@@ -1200,7 +1200,7 @@ fn hex(f: &str, cx: &Cx) -> Tri {
 /// told; nor can one whose bytes the reader didn't give, or one the tree's
 /// readable keys don't hold when some of it doesn't read.
 fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
-    let key = match value_at(cx.container, cx.at, cx).map(|o| &o.value) {
+    let key = match value_at(cx.container, cx.at, cx).map(|o| o.value()) {
         None => return Tri::Is(false),
         Some(Value::String(Str::Bytes(key), _)) => key,
         Some(Value::String(..)) => return Tri::Unknown("the string's bytes".to_string()),
@@ -1243,15 +1243,15 @@ fn name_tree<'a>(root: &'a Object, cx: &Cx<'a>) -> Tree {
         if !seen.insert(std::ptr::from_ref(node) as usize) {
             continue;
         }
-        let Value::Dict(node) = &node.value else {
+        let Value::Dict(node) = node.value() else {
             tree.whole = false;
             continue;
         };
-        let array = |key: &[u8]| node.get(key).and_then(|o| deref(o, cx)).map(|o| &o.value);
+        let array = |key: &[u8]| node.get(key).and_then(|o| deref(o, cx)).map(|o| o.value());
         match array(b"Names") {
             Some(Value::Array(names)) => {
                 for key in names.iter().step_by(2) {
-                    match deref(key, cx).map(|o| &o.value) {
+                    match deref(key, cx).map(|o| o.value()) {
                         Some(Value::String(Str::Bytes(key), _)) => {
                             tree.keys.insert(key.clone());
                         }
@@ -1287,7 +1287,7 @@ fn name_tree<'a>(root: &'a Object, cx: &Cx<'a>) -> Tree {
 /// reader didn't give, or one the form's readable fields don't name when
 /// some of it doesn't read. A file without a form has no fields.
 fn field_name(f: &str, p: &Path, cx: &Cx) -> Tri {
-    let name = match walk(p, &p.keys, cx).map(|o| o.map(|o| &o.value)) {
+    let name = match walk(p, &p.keys, cx).map(|o| o.map(|o| o.value())) {
         Ok(Some(Value::String(s, _))) => match s.text() {
             Some(name) => name,
             None => return Tri::Unknown("the string's bytes".to_string()),
@@ -1338,7 +1338,7 @@ fn field_names<'a>(cx: &Cx<'a>) -> Names {
         if !seen.insert(std::ptr::from_ref(node) as usize) {
             continue;
         }
-        let field = match &node.value {
+        let field = match node.value() {
             Value::Array(kids) => {
                 for kid in kids {
                     match deref(kid, cx) {
@@ -1354,7 +1354,11 @@ fn field_names<'a>(cx: &Cx<'a>) -> Names {
                 continue;
             }
         };
-        let name = match field.get(b"T").and_then(|t| deref(t, cx)).map(|t| &t.value) {
+        let name = match field
+            .get(b"T")
+            .and_then(|t| deref(t, cx))
+            .map(|t| t.value())
+        {
             None => parent,
             Some(Value::String(t, _)) => match t.text() {
                 Some(t) => Some(match parent {
@@ -1441,7 +1445,7 @@ fn structure<'a>(cx: &Cx<'a>) -> Items {
             items.whole_pages = false;
             continue;
         }
-        match &node.value {
+        match node.value() {
             Value::Array(kids) => {
                 for kid in kids {
                     if let Some(kid) = deref(kid, cx) {
@@ -1496,12 +1500,12 @@ fn structure<'a>(cx: &Cx<'a>) -> Items {
 /// the catalog's `/Dests`): false when the row is absent, or the file has
 /// no such dictionary; and a row that isn't a name can't be told.
 fn in_key_map(f: &str, map: &Path, cx: &Cx) -> Tri {
-    let key = match value_at(cx.container, cx.at, cx).map(|o| &o.value) {
+    let key = match value_at(cx.container, cx.at, cx).map(|o| o.value()) {
         None => return Tri::Is(false),
         Some(Value::Name(key)) => key,
         Some(_) => return Tri::Unknown(f.to_string()),
     };
-    match walk(map, &map.keys, cx).map(|o| o.map(|o| &o.value)) {
+    match walk(map, &map.keys, cx).map(|o| o.map(|o| o.value())) {
         Ok(Some(Value::Dict(map))) => Tri::Is(map.get(key).and_then(|o| deref(o, cx)).is_some()),
         Ok(None) => Tri::Is(false),
         Ok(Some(_)) => Tri::Unknown(f.to_string()),
@@ -1520,7 +1524,7 @@ fn tagged(cx: &Cx) -> Tri {
         text: "trailer::Catalog::MarkInfo::@Marked".to_string(),
     };
     match walk(&marked, &marked.keys, cx) {
-        Ok(o) => Tri::Is(o.is_some_and(|o| matches!(o.value, Value::Bool(true)))),
+        Ok(o) => Tri::Is(o.is_some_and(|o| matches!(o.value(), Value::Bool(true)))),
         Err(why) => Tri::Unknown(why),
     }
 }

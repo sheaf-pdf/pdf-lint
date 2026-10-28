@@ -7,7 +7,9 @@ It's made for a reader that checks files as much as for one that shows them. Wha
 ## What it does
 
 - **Where each value was written.** An `Object` is a `Value` and its `Span`, when the reader knows: a run of the file's bytes, or of an object stream's decoded data (`Span::stream`).
-- **Dictionaries as written.** A `Dict` keeps its entries in order, a key written twice and each key's span among them. A lookup (`get`, `entry`, `iter`) takes a key's last entry, as readers do; `duplicates` gives the others, and `entries` every one.
+- **Dictionaries as written.** A `Dict` keeps its entries in order, a key written twice and each key's span among them. A lookup (`get`, `entry`, `iter`) takes a key's last entry, as readers do; `duplicates` gives the others, and `entries` every one. A lookup allocates nothing for a dictionary of up to 32 entries.
+- **Edits that say what they changed.** An `Object`'s value is read with `value`, and changed with `value_mut`, `as_dict_mut`, `as_array_mut` or `as_stream_mut`, each an edit, which drops its span. A value inside another is reached through each value that holds it, so their spans go too, and a value no edit reached keeps its own: what still has a span is still what its bytes say. `as_written_mut` keeps the span, for a reader changing a value into what the same bytes stand for, as decrypting a string does. A `Dict` is changed by `set`, `push`, `remove`, `get_mut` and `iter_mut`.
+- **A stream's data** is where it was written (`Data::At`), its bytes in memory (`Data::Bytes`; `Stream::new` and `set_bytes`, which set `/Length`), or neither (`Data::Unplaced`). An edit of its dictionary leaves its data as it was.
 - **Strings as their bytes.** A `Str` is `Bytes`, its escapes decoded; or `Text`, text a reader decoded without saying from which encoding; or `Encrypted`, ciphertext it didn't decrypt. Of those two, what depends on the bytes can't be told, and `as_bytes` gives none. Beside it, `Value::String` keeps the string's `Form`, `Literal` or `Hex`, as it was written; a string built without choosing one (`Object::bytes`, where `Object::hex` chooses hex), or read by a reader that doesn't say, has none.
 - **Text strings decoded by the spec.** `text::decode` reads UTF-16BE or UTF-8 after their byte order marks, and PDFDocEncoding (Annex D) without one, and says each `Quirk`, where the string departs from the spec: UTF-16LE's mark, which PDF doesn't have, an odd last byte, a lone surrogate, UTF-8 that isn't, a byte PDFDocEncoding leaves undefined.
 - **Versions.** A `Version` is read from a header's `%PDF-1.7` or a catalog's `/Version`, and versions order.
@@ -64,10 +66,34 @@ let length = head.dict().get(b"Length").and_then(|l| l.as_integer());
 let declared = length.and_then(|len| head.declared(usize::try_from(len).ok()?));
 let data = declared.unwrap_or_else(|| head.scanned());
 let stream = parser.stream(head, data, &mut said).unwrap();
-let Value::Stream(s) = &stream.value else { panic!() };
+let Value::Stream(s) = stream.value() else { panic!() };
 assert_eq!(&file[data.start..data.end], b"hello");
-assert_eq!(s.data, Some(data));
+assert_eq!(s.data.at(), Some(data));
 assert_eq!(said.0, ["the name /N#00 has #00, NUL, which a name can't hold, which readers read differently"]);
+```
+
+And an edit, which drops the span of what it changed and of what holds it, and leaves every other value's:
+
+```rust
+use pdf_objects::parse::Parser;
+use pdf_objects::Object;
+
+let file = b"<< /Type /Annot /Rect [0 0 10 10] /Contents (old) >>";
+let mut annot = Parser::at(file, 0).value(&mut ()).unwrap();
+let dict = annot.as_dict_mut().unwrap();
+dict.set("Contents", Object::string("new"));
+let rect = dict.get_mut(b"Rect").and_then(Object::as_array_mut).unwrap();
+rect[2] = Object::from(20);
+
+// The dictionary and its /Rect were edited, so they have no span now.
+assert_eq!(annot.at, None);
+let dict = annot.as_dict().unwrap();
+assert_eq!(dict.get(b"Rect").unwrap().at, None);
+// What no edit reached is still where it was written.
+let rect = dict.get(b"Rect").and_then(Object::as_array).unwrap();
+let zero = rect[0].at.unwrap();
+assert_eq!(&file[zero.start..zero.end], b"0");
+assert!(dict.get(b"Type").unwrap().at.is_some());
 ```
 
 ## What isn't here

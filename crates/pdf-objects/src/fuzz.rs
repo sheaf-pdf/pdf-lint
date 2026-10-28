@@ -4,7 +4,7 @@
 
 use pdf_tokenizer::{Kind, Tokenizer};
 
-use crate::object::{Dict, Form, Object, ObjectId, Span, Str, Value};
+use crate::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Value};
 use crate::parse::{Body, Error, Fault, Parser, Sink};
 
 /// What a sink was told: each fault, where it is and what it says.
@@ -172,10 +172,10 @@ fn read<'a>(input: &'a [u8], how: How, sink: &mut impl Sink<'a>) -> (Result<Obje
                 assert!(matches!(refused, Err(Error::Extent { .. })), "{refused:?}");
             }
             let object = parser.stream(head, data, sink)?;
-            let Value::Stream(stream) = &object.value else {
+            let Value::Stream(stream) = object.value() else {
                 panic!("a stream reads as one");
             };
-            assert_eq!(stream.data, Some(data));
+            assert_eq!(stream.data, Data::At(data));
             Ok(object)
         }
     });
@@ -195,7 +195,7 @@ fn placed(input: &[u8], o: &Object, outer: Span, how: How) {
     assert_eq!(at.stream, how.stream);
     assert!(at.start < at.end && at.end <= input.len(), "{at:?}");
     assert!(within(at, outer), "{at:?} in {outer:?}");
-    let dict = match &o.value {
+    let dict = match o.value() {
         Value::String(s, form) => {
             assert_eq!(matches!(s, Str::Encrypted(_)), how.ciphertext, "{s:?}");
             assert!(!matches!(s, Str::Text(_)));
@@ -213,7 +213,7 @@ fn placed(input: &[u8], o: &Object, outer: Span, how: How) {
         }
         Value::Dict(d) => Some(d),
         Value::Stream(s) => {
-            let data = s.data.expect("a stream's data placed");
+            let data = s.data.at().expect("a stream's data placed");
             assert!(
                 at.start < data.start && data.end < at.end,
                 "{data:?} in {at:?}"

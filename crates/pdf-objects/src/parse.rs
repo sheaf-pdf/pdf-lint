@@ -17,7 +17,7 @@ use std::fmt;
 use pdf_tokenizer::decode::How;
 use pdf_tokenizer::{Kind, Token, Tokenizer};
 
-use crate::object::{Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
+use crate::object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
 
 /// How deeply arrays and dictionaries may nest in an object.
 pub const NESTING: usize = 256;
@@ -377,13 +377,11 @@ impl<'a> Parser<'a> {
         let end = end.ok_or(Error::Endstream { id })?;
         self.offset = t.offset();
         let from = dict_at.map_or(start, |at| at.start);
-        let object = Object {
-            value: Value::Stream(Stream {
-                dict,
-                data: Some(data),
-            }),
-            at: Some(self.span(from, end.end())),
-        };
+        let object = Object::new(Value::Stream(Stream {
+            dict,
+            data: Data::At(data),
+        }))
+        .at(self.span(from, end.end()));
         self.endobj(&t, id, &object, sink);
         Ok(object)
     }
@@ -400,9 +398,10 @@ impl<'a> Parser<'a> {
         sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Result<Body<'a>, Error> {
         let value = self.read(t, sink, 0)?;
+        let at = value.at;
         let mut after = t.clone();
         let next = significant(&mut after);
-        let object = match (value.value, next) {
+        let object = match (value.into_value(), next) {
             (Value::Dict(dict), Some(keyword)) if is_keyword(Some(&keyword), b"stream") => {
                 *t = after;
                 let keyword = self.span(keyword.start, keyword.end());
@@ -416,17 +415,18 @@ impl<'a> Parser<'a> {
                 return Ok(Body::Stream(StreamHead {
                     id,
                     dict,
-                    dict_at: value.at,
+                    dict_at: at,
                     keyword,
                     start: t.offset(),
                     data: self.data,
                     stream: self.stream,
                 }));
             }
-            (other, _) => Object {
-                value: other,
-                at: value.at,
-            },
+            (other, _) => {
+                let mut object = Object::new(other);
+                object.at = at;
+                object
+            }
         };
         self.endobj(t, id, &object, sink);
         Ok(Body::Object(object))
@@ -479,10 +479,8 @@ impl<'a> Parser<'a> {
                         });
                     };
                     *t = look;
-                    return Ok(Object {
-                        value: Value::Ref((number, generation)),
-                        at: Some(self.span(token.start, r.end())),
-                    });
+                    let at = self.span(token.start, r.end());
+                    return Ok(Object::new(Value::Ref((number, generation))).at(at));
                 }
                 match token.integer() {
                     Ok(n) => Value::Integer(n),
@@ -530,10 +528,8 @@ impl<'a> Parser<'a> {
                     match significant(&mut look) {
                         Some(close) if close.kind == Kind::ArrayClose => {
                             *t = look;
-                            return Ok(Object {
-                                value: Value::Array(array),
-                                at: Some(self.span(token.start, close.end())),
-                            });
+                            let at = self.span(token.start, close.end());
+                            return Ok(Object::new(Value::Array(array)).at(at));
                         }
                         Some(_) => array.push(self.read(t, sink, depth + 1)?),
                         None => return Err(Error::Array { at: token.start }),
@@ -546,10 +542,8 @@ impl<'a> Parser<'a> {
                     let key = significant(t).ok_or(Error::Dict { at: token.start })?;
                     match key.kind {
                         Kind::DictClose => {
-                            return Ok(Object {
-                                value: Value::Dict(dict),
-                                at: Some(self.span(token.start, key.end())),
-                            });
+                            let at = self.span(token.start, key.end());
+                            return Ok(Object::new(Value::Dict(dict)).at(at));
                         }
                         Kind::Name => {
                             let value = self.read(t, sink, depth + 1)?;
@@ -581,10 +575,7 @@ impl<'a> Parser<'a> {
                 });
             }
         };
-        Ok(Object {
-            value,
-            at: Some(at),
-        })
+        Ok(Object::new(value).at(at))
     }
 
     /// A name's bytes, its escapes decoded; and a fault where it is when it
@@ -777,7 +768,7 @@ mod tests {
         }
         let real = format!("-{}.5", "9".repeat(320));
         let (value, kept) = self::value(real.as_bytes());
-        assert_eq!(value.unwrap().value, Value::Real(f64::MIN));
+        assert_eq!(*value.unwrap().value(), Value::Real(f64::MIN));
         assert_eq!(
             kept.faults,
             [(
@@ -786,10 +777,10 @@ mod tests {
             )]
         );
         let (value, _) = self::value(b"-99999999999999999999");
-        assert_eq!(value.unwrap().value, Value::Integer(i64::MIN));
+        assert_eq!(*value.unwrap().value(), Value::Integer(i64::MIN));
         // The name reads as written but for its well-formed escapes.
         let (value, _) = self::value(b"/A#zz#00#41");
-        assert_eq!(value.unwrap().value, Value::Name(b"A#zz\0A".to_vec()));
+        assert_eq!(*value.unwrap().value(), Value::Name(b"A#zz\0A".to_vec()));
 
         let faults = |input: &[u8]| {
             let (object, kept) = indirect(input, StreamHead::scanned);
@@ -915,7 +906,7 @@ mod tests {
         let mut parser = Parser::at(data, 0);
         assert_eq!(parser.header(), Err(Error::Header { at: 0 }));
         assert_eq!(parser.offset(), 0);
-        assert_eq!(parser.value(&mut ()).unwrap().value, Value::Ref((1, 0)));
+        assert_eq!(*parser.value(&mut ()).unwrap().value(), Value::Ref((1, 0)));
         assert_eq!(parser.offset(), 5);
         assert_eq!(parser.value(&mut ()), Err(Error::Array { at: 6 }));
         assert_eq!(parser.offset(), 5);
@@ -987,13 +978,13 @@ mod tests {
             assert_eq!(placed(b"A"), (&b"/A"[..], &b"[1 (x) /N]"[..]));
             assert_eq!(placed(b"B"), (&b"/B"[..], &b"2 0 R"[..]));
             assert_eq!(placed(b"C"), (&b"/C"[..], &b"<< /D true >>"[..]));
-            let Value::Array(a) = &d.get(b"A").unwrap().value else {
+            let Value::Array(a) = d.get(b"A").unwrap().value() else {
                 panic!("an array");
             };
             let each: Vec<&[u8]> = a.iter().map(|e| bytes(input, e.at.unwrap())).collect();
             assert_eq!(each, [&b"1"[..], b"(x)", b"/N"]);
             // The value after it, from where it ended.
-            assert_eq!(parser.value(&mut ()).unwrap().value, Value::Integer(9));
+            assert_eq!(*parser.value(&mut ()).unwrap().value(), Value::Integer(9));
         }
     }
 
@@ -1002,20 +993,20 @@ mod tests {
     #[test]
     fn strings_keep_their_form() {
         let (value, kept) = value(b"[<4142> (AB) < 41 42 > [<>]]");
-        let Value::Array(a) = value.unwrap().value else {
+        let Value::Array(a) = value.unwrap().into_value() else {
             panic!("an array");
         };
         let string = |bytes: &[u8], form| Value::String(Str::Bytes(bytes.to_vec()), Some(form));
         let ab = |form| string(b"AB", form);
-        let values: Vec<&Value> = a.iter().map(|o| &o.value).collect();
+        let values: Vec<&Value> = a.iter().map(|o| o.value()).collect();
         assert_eq!(
             values[..3],
             [&ab(Form::Hex), &ab(Form::Literal), &ab(Form::Hex)]
         );
-        let Value::Array(inner) = &a[3].value else {
+        let Value::Array(inner) = a[3].value() else {
             panic!("an array");
         };
-        assert_eq!(inner[0].value, string(b"", Form::Hex));
+        assert_eq!(*inner[0].value(), string(b"", Form::Hex));
         assert!(kept.faults.is_empty());
     }
 
@@ -1034,12 +1025,12 @@ mod tests {
                 true => Value::String(Str::Encrypted(bytes.to_vec()), Some(form)),
                 false => Value::String(Str::Bytes(bytes.to_vec()), Some(form)),
             };
-            assert_eq!(d.get(b"A").unwrap().value, string(b"x)", Form::Literal));
-            let Value::Array(b) = &d.get(b"B").unwrap().value else {
+            assert_eq!(*d.get(b"A").unwrap().value(), string(b"x)", Form::Literal));
+            let Value::Array(b) = d.get(b"B").unwrap().value() else {
                 panic!("an array");
             };
-            assert_eq!(b[0].value, string(b"x", Form::Hex));
-            assert_eq!(d.get(b"N").unwrap().value, Value::Name(b"x".to_vec()));
+            assert_eq!(*b[0].value(), string(b"x", Form::Hex));
+            assert_eq!(*d.get(b"N").unwrap().value(), Value::Name(b"x".to_vec()));
         }
     }
 
@@ -1112,10 +1103,10 @@ mod tests {
             let mut parser = parser.clone();
             let o = parser.stream(head.clone(), data, &mut kept).unwrap();
             assert!(kept.faults.is_empty());
-            let Value::Stream(s) = &o.value else {
+            let Value::Stream(s) = o.value() else {
                 panic!("a stream");
             };
-            assert_eq!(s.data, Some(data));
+            assert_eq!(s.data, Data::At(data));
             assert_eq!(s.dict, *head.dict());
             assert_eq!(
                 bytes(input, o.at.unwrap()),
@@ -1160,10 +1151,10 @@ mod tests {
         let o = o.unwrap();
         assert_eq!(o.at.unwrap().end, input.len() - 7);
         let (o, kept) = indirect(input, StreamHead::scanned);
-        let Value::Stream(s) = &o.as_ref().unwrap().value else {
+        let Value::Stream(s) = o.as_ref().unwrap().value() else {
             panic!("a stream");
         };
-        assert_eq!(bytes(input, s.data.unwrap()), b"ab ");
+        assert_eq!(bytes(input, s.data.at().unwrap()), b"ab ");
         let at = o.unwrap().at.unwrap();
         assert_eq!(bytes(input, at), b"<< /Length 16 >> stream\nab endstream");
         assert_eq!(kept.faults, [(at, "1 0 obj has no endobj".to_string())]);

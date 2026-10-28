@@ -65,7 +65,7 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
             false => Form::Literal,
         };
         assert_eq!(
-            contents.value,
+            *contents.value(),
             Value::String(Str::Bytes(b"A note".to_vec()), Some(form)),
             "{name}"
         );

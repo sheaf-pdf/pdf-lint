@@ -52,7 +52,7 @@ pub fn declared(
     let get = |o: &Object| -> Option<Object> {
         let mut o = o.clone();
         for _ in 0..8 {
-            match o.value {
+            match *o.value() {
                 Value::Ref(id) => o = resolve(id)?,
                 _ => return Some(o),
             }
@@ -65,7 +65,7 @@ pub fn declared(
         .and_then(get)
         .and_then(|o| o.as_dict().cloned());
     for (prefix, entry) in extensions.iter().flat_map(Dict::iter) {
-        let entries = match get(entry).map(|o| o.value) {
+        let entries = match get(entry).map(|o| o.into_value()) {
             Some(Value::Array(entries)) => entries.iter().filter_map(get).collect(),
             Some(value) => vec![Object::new(value)],
             None => Vec::new(),

@@ -539,7 +539,7 @@ mod tests {
                 crate::object::Str::Bytes(b"en".to_vec()),
                 Some(crate::object::Form::Hex),
             );
-            assert_eq!(lang.map(|l| l.value), Some(en), "{name}");
+            assert_eq!(lang.map(|l| l.into_value()), Some(en), "{name}");
         }
         let update = &seeds().into_iter().find(|(n, _)| *n == "update").unwrap().1;
         assert!(
