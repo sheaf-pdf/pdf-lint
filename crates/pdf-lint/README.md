@@ -141,7 +141,7 @@ Each [release](https://github.com/sheaf-pdf/pdf-lint/releases) has an archive fo
 
 The Linux binary is static, needing nothing of the system; the Windows binary has the C runtime linked in, so it needs Windows 10 or later and no Visual C++ Redistributable (one `cargo install` builds links it dynamically, unless `RUSTFLAGS` has `-C target-feature=+crt-static`). On macOS, an archive a browser downloaded is quarantined, and its binaries won't run unsigned until `xattr -dr com.apple.quarantine` clears the folder; one fetched with `curl` or `gh release download` isn't.
 
-From source, `cargo install pdf-lint` builds the binary from crates.io, with Rust 1.88 or later, and `cargo install --path crates/pdf-lint` from a checkout; neither needs qpdf. `just dist` builds this platform's archive, as the release workflow builds each.
+From source, `cargo install pdf-lint` builds the binary from crates.io, with Rust 1.88 or later, and `cargo install --path crates/pdf-lint` from a checkout; neither needs qpdf. `just dist` builds this platform's archive, as the release workflow builds each. A crate that uses the library alone can depend on it with `default-features = false`, leaving out the `cli` feature: the binary and what only it needs, clap, serde, serde_json and anyhow.
 
 ## Readers
 

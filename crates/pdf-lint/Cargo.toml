@@ -17,20 +17,40 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 # The command line's, main.rs's alone: the library's errors are its own.
-anyhow = "1"
+anyhow = { version = "1", optional = true }
 # The command line's too: its arguments, their errors and the help, plain,
 # without colour and without wrapping, so nothing asks the terminal; the
 # help's lines are broken by hand.
-clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
+clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"], optional = true }
 pdf-arlington = { path = "../pdf-arlington", version = "0.1" }
 pdf-crypt = { path = "../pdf-crypt", version = "0.1" }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
 pdf-structure = { path = "../pdf-structure", version = "0.1" }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
 # The command line's too: its JSON reports.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 thiserror = "2"
+
+[features]
+default = ["cli"]
+# The command line, and what only it depends on: a crate that uses the
+# library alone leaves them out with `default-features = false`.
+cli = ["dep:anyhow", "dep:clap", "dep:serde", "dep:serde_json"]
+
+[[bin]]
+name = "pdf-lint"
+path = "src/main.rs"
+required-features = ["cli"]
+
+# The tests that run the command line.
+[[test]]
+name = "cli"
+required-features = ["cli"]
+
+[[test]]
+name = "files"
+required-features = ["cli"]
 
 [dev-dependencies]
 # The tests' encrypted files.

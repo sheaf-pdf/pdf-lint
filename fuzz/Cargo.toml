@@ -33,7 +33,8 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
 pdf-filters = { path = "../crates/pdf-filters" }
-pdf-lint = { path = "../crates/pdf-lint" }
+# The library alone, without the command line's crates.
+pdf-lint = { path = "../crates/pdf-lint", default-features = false }
 pdf-objects = { path = "../crates/pdf-objects" }
 pdf-structure = { path = "../crates/pdf-structure", features = ["fixtures"] }
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
