@@ -19,8 +19,45 @@ use pdf_tokenizer::{Kind, Token, Tokenizer};
 
 use crate::object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
 
-/// How deeply arrays and dictionaries may nest in an object.
+/// How deeply arrays and dictionaries may nest in an object, unless a
+/// parser is given other [`Limits`]: [`Limits::DEFAULT`]'s `nesting`.
 pub const NESTING: usize = 256;
+
+/// The caps a parser reads under, so that what it reads can't make it
+/// recurse, or hold in memory, without end. A caller sets them on a copy
+/// of [`Limits::DEFAULT`] (`limits.nesting = 64`, say) and gives it to
+/// [`Parser::limits`]. The writer ([`serialize`](crate::serialize)) keeps
+/// to the default's nesting, so that what it writes, a parser reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Limits {
+    /// How deeply arrays and dictionaries may nest: a value inside this
+    /// many of them reads, and one inside more doesn't. [`NESTING`], 256,
+    /// by default.
+    pub nesting: usize,
+    /// How many values one call may read, in all: the value, an array's
+    /// elements, a dictionary's keys and values, and theirs. What a value
+    /// holds in memory grows with its count of values more than with its
+    /// bytes (an empty array is two bytes written, and tens in memory), so
+    /// this caps that. 2^25 by default.
+    pub values: usize,
+}
+
+impl Limits {
+    /// The limits a parser reads under unless it's given others: values
+    /// nested at most [`NESTING`] deep, and at most 2^25 of them in one
+    /// call.
+    pub const DEFAULT: Limits = Limits {
+        nesting: NESTING,
+        values: 1 << 25,
+    };
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits::DEFAULT
+    }
+}
 
 /// Where a parser says what it read past: a checker keeps it; `()` drops
 /// it. A fault borrows from `'a`, the data the parser reads, so a sink can
@@ -118,9 +155,16 @@ impl fmt::Display for Fault<'_> {
 #[non_exhaustive]
 pub enum Error {
     /// Arrays and dictionaries nested deeper than the parser allows,
-    /// [`NESTING`].
+    /// [`Limits::nesting`] ([`NESTING`] by default).
     Nested {
         /// How deeply they may nest.
+        limit: usize,
+    },
+    /// More values in one call than the parser allows, [`Limits::values`]:
+    /// the value, an array's elements, a dictionary's keys and values, and
+    /// theirs.
+    Values {
+        /// How many one call may read.
         limit: usize,
     },
     /// The data ends where a value should be.
@@ -203,6 +247,7 @@ impl fmt::Display for Error {
             Error::Nested { limit } => {
                 write!(f, "arrays and dictionaries nested deeper than {limit}")
             }
+            Error::Values { limit } => write!(f, "more than {limit} values in one object"),
             Error::End => write!(f, "the data ends where a value should be"),
             Error::Reference {
                 at,
@@ -248,7 +293,8 @@ impl std::error::Error for Error {}
 /// object stream's decoded data, from an offset on. Its strings are read
 /// as their bytes, or as ciphertext ([`Parser::ciphertext`]), and its
 /// spans are in the file, or in an object stream's data
-/// ([`Parser::in_stream`]). A call that fails leaves the parser where it
+/// ([`Parser::in_stream`]). It reads under [`Limits`]
+/// ([`Parser::limits`]). A call that fails leaves the parser where it
 /// was, though it has said the faults it read past before the error.
 #[derive(Debug, Clone)]
 pub struct Parser<'a> {
@@ -260,8 +306,8 @@ pub struct Parser<'a> {
     stream: Option<ObjectId>,
     /// Whether its strings are read as ciphertext.
     ciphertext: bool,
-    /// How deeply arrays and dictionaries may nest.
-    nesting: usize,
+    /// How deeply values may nest, and how many one call may read.
+    limits: Limits,
 }
 
 impl<'a> Parser<'a> {
@@ -274,7 +320,7 @@ impl<'a> Parser<'a> {
             offset,
             stream: None,
             ciphertext: false,
-            nesting: NESTING,
+            limits: Limits::DEFAULT,
         }
     }
 
@@ -294,6 +340,13 @@ impl<'a> Parser<'a> {
         Parser { ciphertext, ..self }
     }
 
+    /// The parser, reading under `limits`: values nested deeper than its
+    /// `nesting`, or more of them in one call than its `values`, are an
+    /// error ([`Error::Nested`], [`Error::Values`]).
+    pub fn limits(self, limits: Limits) -> Parser<'a> {
+        Parser { limits, ..self }
+    }
+
     /// Where it reads next: past what it has read, or where it was made
     /// at, as given, when it has read nothing. A call that fails leaves it
     /// where it was.
@@ -304,7 +357,7 @@ impl<'a> Parser<'a> {
     /// The next value.
     pub fn value(&mut self, sink: &mut (impl Sink<'a> + ?Sized)) -> Result<Object, Error> {
         let mut t = Tokenizer::at(self.data, self.offset);
-        let value = self.read(&mut t, sink, 0)?;
+        let value = self.read(&mut t, sink, 0, &mut 0)?;
         self.offset = t.offset();
         Ok(value)
     }
@@ -397,7 +450,7 @@ impl<'a> Parser<'a> {
         id: ObjectId,
         sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Result<Body<'a>, Error> {
-        let value = self.read(t, sink, 0)?;
+        let value = self.read(t, sink, 0, &mut 0)?;
         let at = value.at;
         let mut after = t.clone();
         let next = significant(&mut after);
@@ -449,19 +502,22 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// The value `t` goes on with, nested `depth` deep.
+    /// The value `t` goes on with, nested `depth` deep, after `values`
+    /// values the call has read.
     fn read(
         &self,
         t: &mut Tokenizer<'a>,
         sink: &mut (impl Sink<'a> + ?Sized),
         depth: usize,
+        values: &mut usize,
     ) -> Result<Object, Error> {
-        if depth > self.nesting {
+        if depth > self.limits.nesting {
             return Err(Error::Nested {
-                limit: self.nesting,
+                limit: self.limits.nesting,
             });
         }
         let token = significant(t).ok_or(Error::End)?;
+        self.count(values)?;
         let at = self.span(token.start, token.end());
         let value = match token.kind {
             Kind::Integer => {
@@ -531,7 +587,7 @@ impl<'a> Parser<'a> {
                             let at = self.span(token.start, close.end());
                             return Ok(Object::new(Value::Array(array)).at(at));
                         }
-                        Some(_) => array.push(self.read(t, sink, depth + 1)?),
+                        Some(_) => array.push(self.read(t, sink, depth + 1, values)?),
                         None => return Err(Error::Array { at: token.start }),
                     }
                 }
@@ -546,7 +602,8 @@ impl<'a> Parser<'a> {
                             return Ok(Object::new(Value::Dict(dict)).at(at));
                         }
                         Kind::Name => {
-                            let value = self.read(t, sink, depth + 1)?;
+                            self.count(values)?;
+                            let value = self.read(t, sink, depth + 1, values)?;
                             dict.push_entry(Entry {
                                 key: self.name(&key, sink),
                                 key_at: Some(self.span(key.start, key.end())),
@@ -576,6 +633,18 @@ impl<'a> Parser<'a> {
             }
         };
         Ok(Object::new(value).at(at))
+    }
+
+    /// One more value read in the call, `values` counting them: an error
+    /// past the limit.
+    fn count(&self, values: &mut usize) -> Result<(), Error> {
+        *values += 1;
+        match *values > self.limits.values {
+            true => Err(Error::Values {
+                limit: self.limits.values,
+            }),
+            false => Ok(()),
+        }
     }
 
     /// A name's bytes, its escapes decoded; and a fault where it is when it
@@ -1054,6 +1123,85 @@ mod tests {
                 value(input.as_bytes()).0,
                 Err(Error::Nested { limit: NESTING })
             );
+        }
+    }
+
+    /// The default limits are what a parser reads under unless it's given
+    /// others: values nested at most `NESTING` deep, and 2^25 of them.
+    #[test]
+    fn the_default_limits_nest_values_at_most_nesting_deep() {
+        assert_eq!(Limits::DEFAULT.nesting, NESTING);
+        assert_eq!(Limits::DEFAULT.values, 1 << 25);
+        assert_eq!(Limits::default(), Limits::DEFAULT);
+        assert_eq!(Parser::at(b"", 0).limits, Limits::DEFAULT);
+    }
+
+    /// A parser reads as many values in one call as its limits allow, its
+    /// keys among them, and refuses one more, leaving the parser where it
+    /// was; each call counts from none.
+    #[test]
+    fn values_are_capped_by_the_limits() {
+        let cases: [(&[u8], usize); 6] = [
+            (b"7", 1),
+            (b"1 0 R", 1),
+            (b"[1 2 3]", 4),
+            (b"[[] << >> ()]", 4),
+            (b"<< /A 1 /B [2] >>", 6),
+            (b"<< /A << /B 1 /B 2 >> >>", 7),
+        ];
+        for (input, values) in cases {
+            let data = [b"%x\n", input, b" 9"].concat();
+            let under = |values| Limits {
+                values,
+                ..Limits::DEFAULT
+            };
+            let mut parser = Parser::at(&data, 3).limits(under(values));
+            assert!(parser.value(&mut ()).is_ok(), "{values}");
+            assert_eq!(parser.offset(), data.len() - 2);
+            let mut parser = Parser::at(&data, 3).limits(under(values - 1));
+            let refused = parser.value(&mut ());
+            assert_eq!(refused, Err(Error::Values { limit: values - 1 }));
+            assert_eq!(parser.offset(), 3);
+            // An indirect object's body, as a value.
+            let data = [b"1 0 obj ", input, b" endobj"].concat();
+            for (values, reads) in [(values, true), (values - 1, false)] {
+                let mut parser = Parser::at(&data, 0).limits(under(values));
+                let id = parser.header().unwrap();
+                let after = parser.offset();
+                let body = parser.body(id, &mut ());
+                assert_eq!(body.is_ok(), reads, "{values}");
+                if !reads {
+                    assert!(matches!(body, Err(Error::Values { .. })));
+                    assert_eq!(parser.offset(), after);
+                }
+            }
+        }
+        // Each call counts from none.
+        let mut limits = Limits::DEFAULT;
+        limits.values = 2;
+        let mut parser = Parser::at(b"[1] [2]", 0).limits(limits);
+        assert!(parser.value(&mut ()).is_ok() && parser.value(&mut ()).is_ok());
+        assert_eq!(
+            Error::Values { limit: 2 }.to_string(),
+            "more than 2 values in one object"
+        );
+    }
+
+    /// A parser reads values nested as deep as its limits allow, and
+    /// refuses one deeper, leaving the parser where it was.
+    #[test]
+    fn nesting_is_capped_by_the_limits() {
+        for nesting in [0, 1, 7] {
+            let mut limits = Limits::DEFAULT;
+            limits.nesting = nesting;
+            let nested = |depth| format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+            let input = nested(nesting);
+            let mut parser = Parser::at(input.as_bytes(), 0).limits(limits);
+            assert!(parser.value(&mut ()).is_ok(), "{nesting}");
+            let input = nested(nesting + 1);
+            let mut parser = Parser::at(input.as_bytes(), 0).limits(limits);
+            assert_eq!(parser.value(&mut ()), Err(Error::Nested { limit: nesting }));
+            assert_eq!(parser.offset(), 0);
         }
     }
 

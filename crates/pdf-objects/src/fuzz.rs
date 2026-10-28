@@ -182,6 +182,31 @@ fn read<'a>(input: &'a [u8], how: How, sink: &mut impl Sink<'a>) -> (Result<Obje
     (object, parser.offset())
 }
 
+/// Takes every place out of `o`, its values' spans and its keys', and
+/// makes a stream's data the bytes of `data` it was read from, so that a
+/// value read compares with one built.
+pub fn unplace(o: &mut Object, data: &[u8]) {
+    match o.value_mut() {
+        Value::Array(a) => a.iter_mut().for_each(|e| unplace(e, data)),
+        Value::Dict(d) => unplace_entries(d, data),
+        Value::Stream(s) => {
+            if let Some(at) = s.data.at() {
+                s.data = Data::Bytes(data[at.start..at.end].to_vec());
+            }
+            unplace_entries(&mut s.dict, data);
+        }
+        _ => {}
+    }
+}
+
+/// [`unplace`] on each of `d`'s entries, its key's span too.
+fn unplace_entries(d: &mut Dict, data: &[u8]) {
+    for entry in d.entries_mut() {
+        entry.key_at = None;
+        unplace(&mut entry.value, data);
+    }
+}
+
 /// Whether `inner` is inside `outer`.
 fn within(inner: Span, outer: Span) -> bool {
     inner.stream == outer.stream && outer.start <= inner.start && inner.end <= outer.end

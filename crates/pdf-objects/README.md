@@ -1,8 +1,8 @@
 # pdf-objects
 
-PDF's objects, and their parser, in one small Rust crate on [pdf-tokenizer](https://crates.io/crates/pdf-tokenizer): owned, each value with where it was written, and each dictionary as written, in order and with any key written twice (ISO 32000-2, §7.3). And text strings, decoded by the spec (§7.9.2.2).
+PDF's objects, their parser and their writer, in one small Rust crate on [pdf-tokenizer](https://crates.io/crates/pdf-tokenizer): owned, each value with where it was written, and each dictionary as written, in order and with any key written twice (ISO 32000-2, §7.3). And text strings, decoded by the spec (§7.9.2.2).
 
-It's made for a reader that checks files as much as for one that shows them. What was written stays, so what reads the objects can point at the bytes a value came from, see a key written twice, and say where a string departs from the spec; and the parser says every fault it reads past.
+It's made for a reader that checks files as much as for one that shows or edits them. What was written stays, so what reads the objects can point at the bytes a value came from, see a key written twice, and say where a string departs from the spec; the parser says every fault it reads past; and the writer writes a value as the parser reads it back.
 
 ## What it does
 
@@ -13,8 +13,9 @@ It's made for a reader that checks files as much as for one that shows them. Wha
 - **Strings as their bytes.** A `Str` is `Bytes`, its escapes decoded; or `Text`, text a reader decoded without saying from which encoding; or `Encrypted`, ciphertext it didn't decrypt. Of those two, what depends on the bytes can't be told, and `as_bytes` gives none. Beside it, `Value::String` keeps the string's `Form`, `Literal` or `Hex`, as it was written; a string built without choosing one (`Object::bytes`, where `Object::hex` chooses hex), or read by a reader that doesn't say, has none.
 - **Text strings decoded by the spec.** `text::decode` reads UTF-16BE or UTF-8 after their byte order marks, and PDFDocEncoding (Annex D) without one, and says each `Quirk`, where the string departs from the spec: UTF-16LE's mark, which PDF doesn't have, an odd last byte, a lone surrogate, UTF-8 that isn't, a byte PDFDocEncoding leaves undefined.
 - **Versions.** A `Version` is read from a header's `%PDF-1.7` or a catalog's `/Version`, and versions order.
-- **A parser.** `parse::Parser` reads a value, or an indirect object, from a file's bytes or an object stream's decoded data, from any offset, each value placed and each string in its form. What it reads past, an integer too large or a name's stray `#`, say, is a `Fault`, which it tells a `Sink` as it reads: a checker keeps them, and `()` drops them. What stops a value, an array that doesn't end, say, is an `Error`, with where. Arrays and dictionaries nest at most `NESTING` (256) deep.
+- **A parser.** `parse::Parser` reads a value, or an indirect object, from a file's bytes or an object stream's decoded data, from any offset, each value placed and each string in its form. What it reads past, an integer too large or a name's stray `#`, say, is a `Fault`, which it tells a `Sink` as it reads: a checker keeps them, and `()` drops them. What stops a value, an array that doesn't end, say, is an `Error`, with where. It reads under `Limits`: arrays and dictionaries nested at most 256 deep (`NESTING`), and at most 2^25 values in one call, keys among them, unless it's given others, set on a copy of `Limits::DEFAULT`.
 - **A stream's two extents, the choice the caller's.** An indirect object is read in steps: `header`, `n g obj`; `body`, its value, or a stream's dictionary to where its data starts; and `stream`, the rest. A stream's data may be as long as its `/Length` says, when `endstream` follows it (`declared`), or run up to the first `endstream` (`scanned`), and readers choose differently, so the caller resolves the `/Length`, which may be a reference, and passes `stream` the one it chose.
+- **A writer.** `serialize::write` writes a value as PDF syntax, and `serialize::indirect` as an indirect object, `n g obj` to `endobj`, which the parser reads back as the same value: a real in its shortest form that reads back as the same f64, past i64's range too, never with an exponent, its magnitude clamped as Annex C has it; names and strings byte by byte, a string in its `Form`, or literal when it has none; a dictionary's every entry, in order, a key written twice included; and a stream's bytes as they are, their length its `/Length`. `indirect_stream` writes a stream whose data is given apart, such as one a reader placed (`Data::At`) in bytes the caller holds. What it can't write as the value it refuses, writing nothing: a real that isn't finite, values nested deeper than the parser reads them, a string read as text or still ciphertext, and a stream whose data isn't in memory.
 
 ## An example
 
@@ -72,11 +73,25 @@ assert_eq!(s.data.at(), Some(data));
 assert_eq!(said.0, ["the name /N#00 has #00, NUL, which a name can't hold, which readers read differently"]);
 ```
 
-And an edit, which drops the span of what it changed and of what holds it, and leaves every other value's:
+Limits are set on a copy of `Limits::DEFAULT`, as more of them may come:
+
+```rust
+use pdf_objects::parse::{Error, Parser};
+use pdf_objects::Limits;
+
+let mut limits = Limits::DEFAULT;
+limits.nesting = 2;
+let mut parser = Parser::at(b"[[[1]]]", 0).limits(limits);
+assert_eq!(parser.value(&mut ()), Err(Error::Nested { limit: 2 }));
+// A call that fails leaves the parser where it was.
+assert_eq!(parser.offset(), 0);
+```
+
+And an edit, which drops the span of what it changed and of what holds it, and leaves every other value's; then the value, written:
 
 ```rust
 use pdf_objects::parse::Parser;
-use pdf_objects::Object;
+use pdf_objects::{Object, serialize};
 
 let file = b"<< /Type /Annot /Rect [0 0 10 10] /Contents (old) >>";
 let mut annot = Parser::at(file, 0).value(&mut ()).unwrap();
@@ -94,11 +109,16 @@ let rect = dict.get(b"Rect").and_then(Object::as_array).unwrap();
 let zero = rect[0].at.unwrap();
 assert_eq!(&file[zero.start..zero.end], b"0");
 assert!(dict.get(b"Type").unwrap().at.is_some());
+
+// Written, the edit with it.
+let mut out = Vec::new();
+serialize::write(&mut out, &annot).unwrap();
+assert_eq!(out, b"<</Type/Annot/Rect[0 0 20 10]/Contents(new)>>");
 ```
 
 ## What isn't here
 
-- **A file's structure:** the cross-reference sections, the trailer, object streams, decrypting and decoding; and which of a stream's extents is its data. Those are a reader's, which places what it reads with `Span`s, and reads each object with the parser.
+- **A file's structure:** the cross-reference sections, the trailer and object streams, read or written; decrypting and decoding, encrypting and encoding; and which of a stream's extents is its data. Those are a reader's, which places what it reads with `Span`s and reads each object with the parser, and a writer's, which writes each object with this one.
 
 ## License
 

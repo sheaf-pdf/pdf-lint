@@ -1,6 +1,7 @@
-//! PDF's objects (ISO 32000-2, 7.3), as a reader read them: owned, each
-//! value with where it was written when the reader knows, and each
-//! dictionary as written, in order and with any key written twice.
+//! PDF's objects (ISO 32000-2, 7.3), as a reader read them, to edit and
+//! to write: owned, each value with where it was written when the reader
+//! knows, and each dictionary as written, in order and with any key
+//! written twice.
 //!
 //! - **Where each value was written:** an [`Object`] is a [`Value`] and
 //!   its [`Span`], a run of the file's bytes or of an object stream's
@@ -29,8 +30,15 @@
 //! - **A parser** ([`parse`]), on pdf-tokenizer: a value, or an indirect
 //!   object, from a file's bytes or an object stream's decoded data, each
 //!   value placed; what it reads past said to a [`parse::Sink`], which `()`
-//!   drops; and a stream's two extents, by its `/Length` and up to
-//!   `endstream`, both given, for the caller to choose its data from.
+//!   drops; a stream's two extents, by its `/Length` and up to
+//!   `endstream`, both given, for the caller to choose its data from; and
+//!   caps on how deeply values nest and how many one call reads
+//!   ([`Limits`]).
+//! - **A writer** ([`serialize`]): a value as PDF syntax, or as an
+//!   indirect object, which the parser reads back as the same value: a
+//!   real in its shortest form, names and strings byte by byte, a
+//!   dictionary's every entry; and what it can't write as the value
+//!   refused, with nothing written.
 //!
 //! [`dict!`] builds a dictionary from keys and values.
 
@@ -39,10 +47,12 @@
 pub mod fuzz;
 pub mod object;
 pub mod parse;
+pub mod serialize;
 pub mod text;
 pub mod version;
 
 pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
+pub use parse::Limits;
 pub use version::Version;
 
 /// The README's examples, run as doctests.

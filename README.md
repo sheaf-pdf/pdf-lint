@@ -24,7 +24,7 @@ decrypts what's encrypted itself.
 | [pdf-tokenizer](crates/pdf-tokenizer) | A lossless, zero-copy PDF tokenizer, with no dependencies and needing neither `std` nor `alloc` |
 | [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept |
 | [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler, decrypting on RustCrypto's primitives, every fault said |
-| [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, and their parser: each value with where it was written, every fault said, and text strings decoded by the spec |
+| [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, their parser and their writer: each value with where it was written, every fault said, and text strings decoded by the spec |
 | [pdf-arlington](crates/pdf-arlington) | The Arlington PDF Model, embedded: its tables read, and the predicates in their cells evaluated over pdf-objects' objects |
 
 ## Development

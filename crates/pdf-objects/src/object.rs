@@ -45,8 +45,9 @@ pub struct Object {
     /// it since: a reader of the file's bytes always does, and one through
     /// another tool's JSON, as qpdf's, may not. A value changed in place
     /// has none, nor has anything that holds it, as they may no longer be
-    /// what those bytes say; one no edit touched keeps its own. A real's
-    /// spelling, `1.50` or `.5`, is in the bytes it names.
+    /// what those bytes say, so a writer writes them anew; one no edit
+    /// touched keeps its own. A real's spelling, `1.50` or `.5`, is in the
+    /// bytes it names.
     pub at: Option<Span>,
 }
 
@@ -65,7 +66,8 @@ pub enum Value {
     /// A name's bytes, its `#xx` escapes decoded.
     Name(Vec<u8>),
     /// A string, and its form when it was written or chosen: none for one
-    /// built without choosing, or read by a reader that doesn't say.
+    /// built without choosing, or read by a reader that doesn't say, which
+    /// a writer writes as a literal string.
     String(Str, Option<Form>),
     /// An array: its elements, in order.
     Array(Vec<Object>),
@@ -140,7 +142,8 @@ pub enum Data {
     /// and encrypted in an encrypted file. A reader's.
     At(Span),
     /// Its bytes, in memory: encoded by the stream's filters, if it has
-    /// any.
+    /// any, and written as they are
+    /// ([`serialize`](crate::serialize)).
     Bytes(Vec<u8>),
     /// Neither: a reader that doesn't say where, as one through another
     /// tool's JSON may not, or a stream built without its data.
