@@ -901,6 +901,13 @@ struct Visit<'a> {
 }
 
 impl<'a> Visit<'a> {
+    /// The number of the indirect object it is, not one it's nested in:
+    /// its holder's when it's that object; none for a direct object, and
+    /// for a trailer that isn't a cross-reference stream.
+    fn id(&self) -> Option<ObjectId> {
+        self.holder.filter(|_| self.depth == 0)
+    }
+
     /// The same visit as `table`, with this one's table the other.
     fn as_(&self, table: &'static Table) -> Visit<'a> {
         Visit {
@@ -1374,7 +1381,7 @@ impl<'a> Walk<'a> {
         // "Column 6 - IndirectReference"), which the model asks of none
         // but under an extension (a test says so): unread.
         if !matches!(row.r#type[i].item, ArlType::NameTree | ArlType::NumberTree) {
-            let asked = self.with_cx(v.object, at, parents, None, |cx| {
+            let asked = self.with_cx((v.id(), v.object), at, parents, None, |cx| {
                 predicate::reference(&row.indirect_reference[i], cx)
             });
             let referenced = matches!(raw.value(), Value::Ref(_));
@@ -1389,7 +1396,7 @@ impl<'a> Walk<'a> {
                 _ => {}
             }
         }
-        match self.with_cx(v.object, at, parents, Some(v.table), |cx| {
+        match self.with_cx((v.id(), v.object), at, parents, Some(v.table), |cx| {
             self.values(row, i, value, cx)
         }) {
             Values::Allowed => {}
@@ -1409,12 +1416,13 @@ impl<'a> Walk<'a> {
         }
         let special = &row.special_case[i];
         if !special.is_empty() {
-            let (holds, ignored) = self.with_cx(v.object, at, parents, Some(v.table), |cx| {
-                (
-                    predicate::holds_fully(special, cx),
-                    predicate::ignored(special, cx),
-                )
-            });
+            let (holds, ignored) =
+                self.with_cx((v.id(), v.object), at, parents, Some(v.table), |cx| {
+                    (
+                        predicate::holds_fully(special, cx),
+                        predicate::ignored(special, cx),
+                    )
+                });
             if ignored == Some(Truth::True) {
                 *self
                     .report
@@ -1517,7 +1525,7 @@ impl<'a> Walk<'a> {
         let mut up = Vec::with_capacity(PARENTS);
         up.push(from.object);
         up.extend(parents.iter().take(PARENTS - 1));
-        let Some((table, tie)) = self.choose(value, links, &up) else {
+        let Some((table, tie)) = self.choose((id, value), links, &up) else {
             if held && id.is_none_or(|id| !self.reached.contains_key(&id)) {
                 self.report.no_table += 1;
             }
@@ -1553,10 +1561,10 @@ impl<'a> Walk<'a> {
         let dict = matches!(value.value(), Value::Dict(_) | Value::Stream(_));
         let also = match dict && !self.one_table && !universal(&table.name) {
             false => None,
-            true => (self.choose(value, also, &up))
+            true => (self.choose((id, value), also, &up))
                 .map(|(also, _)| also)
                 .filter(|also| also.name != table.name && !universal(&also.name))
-                .or_else(|| self.merged(value, table, &up)),
+                .or_else(|| self.merged((id, value), table, &up)),
         };
         if tie && held {
             self.report.ties += 1;
@@ -1618,10 +1626,11 @@ impl<'a> Walk<'a> {
     /// field table [`Walk::field_table`] says. A field whose `/Subtype` is
     /// `/Widget` is a widget too. The model's widget table lists the keys
     /// all fields have, but not a field type's (`/FT`, `/V`, `/DA`...); a
-    /// field's tables, none of a widget's.
+    /// field's tables, none of a widget's. `id` is the indirect object
+    /// `object` is, when it's one.
     fn merged(
         &self,
-        object: &'a Object,
+        (id, object): (Option<ObjectId>, &'a Object),
         table: &'static Table,
         parents: &[&'a Object],
     ) -> Option<&'static Table> {
@@ -1631,7 +1640,7 @@ impl<'a> Walk<'a> {
         if table.name == "AnnotWidget" {
             let field = self.present(dict.get(b"T"))
                 || (self.field_keys.iter()).any(|key| self.present(dict.get(key)));
-            return field.then(|| self.field_table(object, dict, parents));
+            return field.then(|| self.field_table((id, object), dict, parents));
         }
         let subtype = (dict.get(b"Subtype").and_then(|o| self.resolve(o).ok()))
             .and_then(|(_, o)| o.as_name());
@@ -1646,10 +1655,10 @@ impl<'a> Walk<'a> {
     /// type, `/FT`, says, and a button's flags, `/Ff` (ISO 32000-2 Tables
     /// 226 and 227: bit 17 a push button, else bit 16 a radio button, else
     /// a checkbox), each its own or inherited; else the field table it
-    /// fits best.
+    /// fits best. `id` is the indirect object it is, when it's one.
     fn field_table(
         &self,
-        object: &'a Object,
+        (id, object): (Option<ObjectId>, &'a Object),
         dict: &'a Dict,
         parents: &[&'a Object],
     ) -> &'static Table {
@@ -1676,7 +1685,7 @@ impl<'a> Walk<'a> {
             Some(name) => table(name),
             None => {
                 let fields: Vec<&'static Table> = FIELDS.into_iter().map(table).collect();
-                (self.choose(object, &fields, parents)).map_or(table("Field"), |(t, _)| t)
+                (self.choose((id, object), &fields, parents)).map_or(table("Field"), |(t, _)| t)
             }
         }
     }
@@ -1684,10 +1693,11 @@ impl<'a> Walk<'a> {
     /// The table of `links` that `object` fits best, and whether another
     /// fit as well, the first of them taken; none when there are none.
     /// TestGrammar's `recommended_link_for_object` (ParseObjects.cpp),
-    /// ported: see [`Walk::score`].
+    /// ported: see [`Walk::score`]. `id` is the indirect object `object`
+    /// is, when it's one.
     fn choose(
         &self,
-        object: &'a Object,
+        (id, object): (Option<ObjectId>, &'a Object),
         links: &[&'static Table],
         parents: &[&'a Object],
     ) -> Option<(&'static Table, bool)> {
@@ -1705,7 +1715,7 @@ impl<'a> Walk<'a> {
         let mut best: Option<(&'static Table, i32)> = None;
         let mut tie = false;
         for &table in links {
-            let score = self.score(object, table, parents);
+            let score = self.score((id, object), table, parents);
             match best {
                 Some((_, least)) if score > least => {}
                 Some((_, least)) if score == least => tie = true,
@@ -1745,7 +1755,12 @@ impl<'a> Walk<'a> {
     /// `/Ff` bits, which the model checks in SpecialCase, and would tie,
     /// the push button taken. Both are read as the rules read them: what
     /// can't be told counts as allowed.
-    fn score(&self, object: &'a Object, table: &'static Table, parents: &[&'a Object]) -> i32 {
+    fn score(
+        &self,
+        (id, object): (Option<ObjectId>, &'a Object),
+        table: &'static Table,
+        parents: &[&'a Object],
+    ) -> i32 {
         let rows = &table.rows;
         let (dict, array) = match object.value() {
             Value::Dict(d) => (Some(d), None),
@@ -1781,8 +1796,9 @@ impl<'a> Walk<'a> {
                 continue;
             };
             found += 1;
-            let required =
-                self.with_cx(object, at, parents, None, |cx| self.required(row, cx)) == Truth::True;
+            let required = self
+                .with_cx((id, object), at, parents, None, |cx| self.required(row, cx))
+                == Truth::True;
             let decisive = matches!(row.key.as_str(), "Type" | "Subtype" | "S");
             let first = array.is_some() && row.key == "0";
             let typed = row.r#type.iter().position(|t| {
@@ -1802,10 +1818,10 @@ impl<'a> Walk<'a> {
                 continue;
             };
             let special = &row.special_case[i];
-            let allowed = self.with_cx(object, at, parents, Some(table), |cx| {
+            let allowed = self.with_cx((id, object), at, parents, Some(table), |cx| {
                 !matches!(self.values(row, i, entry, cx), Values::Not(_))
             }) && (special.is_empty()
-                || self.with_cx(object, at, parents, Some(table), |cx| {
+                || self.with_cx((id, object), at, parents, Some(table), |cx| {
                     predicate::holds_fully(special, cx) != Truth::False
                 }));
             if allowed {
@@ -2041,7 +2057,7 @@ impl<'a> Walk<'a> {
             if row.key.ends_with('*') || self.present(dict.get(key)) {
                 continue;
             }
-            match self.with_cx(v.object, At::Key(key), parents, None, |cx| {
+            match self.with_cx((v.id(), v.object), At::Key(key), parents, None, |cx| {
                 self.required(row, cx)
             }) {
                 Truth::True if row.inheritable && self.inherited(dict, key) => {}
@@ -2076,7 +2092,7 @@ impl<'a> Walk<'a> {
             if i < n {
                 continue;
             }
-            match self.with_cx(v.object, At::Index(i), parents, None, |cx| {
+            match self.with_cx((v.id(), v.object), At::Index(i), parents, None, |cx| {
                 self.required(row, cx)
             }) {
                 Truth::True => {
@@ -2294,19 +2310,20 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// `f` of the predicates' view of the row at `at` in `container`,
-    /// with `defaults`, the container's table for a SpecialCase or
-    /// PossibleValues.
+    /// `f` of the predicates' view of the row at `at` in `container`, the
+    /// indirect object `id` when it's one, with `defaults`, the
+    /// container's table for a SpecialCase or PossibleValues.
     fn with_cx<R>(
         &self,
-        container: &Object,
+        (id, container): (Option<ObjectId>, &Object),
         at: At,
         parents: &[&Object],
         defaults: Option<&'static Table>,
         f: impl FnOnce(&Cx) -> R,
     ) -> R {
         let row = self.file.at(container, at).parents(parents);
-        f(&row.defaults(defaults))
+        let row = row.defaults(defaults);
+        f(&id.map_or(row, |id| row.id(id)))
     }
 
     /// `raw` with its references followed, at most [`REFERENCES`]: the
@@ -4294,6 +4311,94 @@ mod tests {
             ]
         );
         assert_eq!(tagged(true), []);
+    }
+
+    /// A page written directly in the page tree has no number of its own:
+    /// a content item on the node it's in isn't on it.
+    #[test]
+    fn a_page_written_directly_isnt_the_page_tree_node_its_in() {
+        let mut objects = clean();
+        let at = objects.iter().position(|(n, _)| *n == 3).unwrap();
+        let Body::Object(page) = objects.remove(at).1 else {
+            panic!("page 3 is a dictionary");
+        };
+        let objects = changed(objects, 2, |pages| pages.set("Kids", vec![page]));
+        let mut objects = changed(objects, 1, |catalog| catalog.set("StructTreeRoot", r(6)));
+        let element =
+            dict! { "Type" => "StructElem", "S" => "P", "P" => r(6), "Pg" => r(2), "K" => 0 };
+        objects.extend([
+            (6, dict! { "Type" => "StructTreeRoot", "K" => r(7) }.into()),
+            (7, element.into()),
+        ]);
+        let report = checked(&objects);
+        assert_eq!(report.checked.get("PageObject"), Some(&1), "{report}");
+        assert!(
+            !(found(&report).iter()).any(|f| f.2 == "StructParents"),
+            "{report}"
+        );
+        assert!(
+            !(report.unchecked.keys()).any(|u| u.key == "StructParents"),
+            "{report}"
+        );
+    }
+
+    /// A reader that doesn't say where its objects were written: the
+    /// structure tree's content items, and the pages and images checked,
+    /// are known by their numbers.
+    #[test]
+    fn content_items_are_known_by_their_numbers_where_nothing_is_placed() {
+        let objects = changed(clean(), 1, |catalog| catalog.set("StructTreeRoot", r(6)));
+        let mut objects = changed(objects, 3, |page| {
+            page.set("Resources", dict! { "XObject" => dict! { "Im" => r(8) } });
+        });
+        let image = dict! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => 1,
+            "Height" => 1,
+            "ColorSpace" => "DeviceGray",
+            "BitsPerComponent" => 8,
+        };
+        let reference = dict! { "Type" => "OBJR", "Obj" => r(8) };
+        objects.extend([
+            (6, dict! { "Type" => "StructTreeRoot", "K" => r(7) }.into()),
+            (
+                7,
+                dict! {
+                    "Type" => "StructElem",
+                    "S" => "Figure",
+                    "P" => r(6),
+                    "Pg" => r(3),
+                    "K" => vec![Object::from(0), Object::from(reference)],
+                }
+                .into(),
+            ),
+            (8, Body::stream(image, &[0])),
+        ]);
+        let mut doc = bytes::read(&written("1.7", &objects, Xref::Table));
+        let content = |doc: &Document| {
+            let report = check(doc, &Hold::All(Made::Built), &Options::default());
+            let found = (found(&report).into_iter())
+                .filter(|f| matches!(f.2, "StructParents" | "StructParent"))
+                .map(|f| (f.0, f.1.to_string(), f.3))
+                .collect::<Vec<_>>();
+            let unchecked = (report.unchecked.keys())
+                .filter(|u| u.column == "Required")
+                .count();
+            (found, unchecked)
+        };
+        let placed = content(&doc);
+        for object in doc.objects.values_mut().flatten() {
+            object.at = None;
+        }
+        assert_eq!(content(&doc), placed);
+        assert_eq!(
+            placed.0,
+            [
+                (Some(3), "PageObject".to_string(), Rule::Missing),
+                (Some(8), "XObjectImage".to_string(), Rule::Missing)
+            ]
+        );
     }
 
     /// A SpecialCase's or PossibleValues' `@Key` the object lacks takes the

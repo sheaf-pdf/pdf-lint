@@ -300,12 +300,14 @@ impl<'a> FileCx<'a> {
     }
 
     /// The row at `at` in `container`, the dictionary, array or stream its
-    /// value is in: reached through no parents, with no defaults, until
-    /// [`Cx::parents`] and [`Cx::defaults`] say.
+    /// value is in: reached through no parents, with no defaults, and of
+    /// no number, until [`Cx::parents`], [`Cx::defaults`] and [`Cx::id`]
+    /// say.
     pub fn at<'c>(&'c self, container: &'c Object, at: At<'c>) -> Cx<'c, 'a> {
         Cx {
             file: self,
             container,
+            id: None,
             at,
             parents: &[],
             defaults: None,
@@ -337,6 +339,8 @@ pub struct Cx<'c, 'a> {
     file: &'c FileCx<'a>,
     /// The dictionary, array or stream the row's value is in.
     container: &'c Object,
+    /// The indirect object the container is, when the caller says.
+    id: Option<ObjectId>,
     /// Where in it: the key or element the row matched.
     at: At<'c>,
     /// The objects the walk came through to `container`, nearest first.
@@ -361,11 +365,23 @@ impl<'c, 'a> Cx<'c, 'a> {
         self
     }
 
-    /// The dictionary, array or stream the row's value is in. An indirect
-    /// object is the one `resolve` gives, not a copy:
+    /// The number of the indirect object the container is, not one it's
+    /// written inside: `fn:ImageIsStructContentItem` and
+    /// `fn:PageContainsStructContentItems` know it by that as well as by
+    /// where it was written, so that one built in memory, or edited, which
+    /// has no span, is still known.
+    pub fn id(mut self, id: ObjectId) -> Cx<'c, 'a> {
+        self.id = Some(id);
+        self
+    }
+
+    /// The dictionary, array or stream the row's value is in.
     /// `fn:ImageIsStructContentItem` and `fn:PageContainsStructContentItems`
-    /// know the objects the structure tree points at by where `resolve`
-    /// keeps them, and a copy is elsewhere.
+    /// know it as the objects the structure tree points at are known: by
+    /// where it was written, its span, which no other object of the file
+    /// shares, and by its number when [`Cx::id`] gives it; not by where
+    /// it's kept, so a copy is known as the object it copies while it has
+    /// its span or its number.
     pub fn container(&self) -> &'c Object {
         self.container
     }
@@ -382,6 +398,7 @@ impl fmt::Debug for Cx<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cx")
             .field("container", &self.container)
+            .field("id", &self.id)
             .field("at", &self.at)
             .field("parents", &self.parents)
             .field("defaults", &self.defaults.map(|table| &table.name))
@@ -403,21 +420,81 @@ struct Names {
 }
 
 /// The structure tree's content items, read once a file. It knows the
-/// objects it found by where `resolve` keeps them, so it serves one file,
-/// while its objects are kept.
+/// objects it found by where they were written, or their numbers
+/// ([`Known`]), so it serves one file.
 #[derive(Debug, Default)]
 struct Structure(RefCell<Option<Rc<Items>>>);
 
 /// What the structure tree says of its content items (ISO 32000-2,
-/// 14.7.5): the objects its object references (OBJR) point at, the pages
-/// its marked-content items are on, and whether each is all of them,
-/// every node read and every item placed.
+/// 14.7.5): the objects its object references (OBJR) point at, and the
+/// pages its marked-content items are on.
 #[derive(Debug)]
 struct Items {
-    objects: HashSet<usize>,
-    pages: HashSet<usize>,
-    whole_objects: bool,
-    whole_pages: bool,
+    objects: Objects,
+    pages: Objects,
+}
+
+/// The objects content items of one kind name, each as it's [`Known`],
+/// and whether they're all of them: every node read and every item
+/// placed.
+#[derive(Debug)]
+struct Objects {
+    /// Where they were written, those the reader placed.
+    spans: HashSet<Span>,
+    /// Their numbers, those named by reference.
+    ids: HashSet<ObjectId>,
+    /// Whether one has a span and whether it has a number, each pair
+    /// once: what an object none of them is can be told apart from them
+    /// by.
+    kinds: Vec<(bool, bool)>,
+    whole: bool,
+}
+
+impl Objects {
+    /// None yet, and all of them.
+    fn new() -> Objects {
+        Objects {
+            spans: HashSet::new(),
+            ids: HashSet::new(),
+            kinds: Vec::new(),
+            whole: true,
+        }
+    }
+
+    /// One more, as it's known.
+    fn insert(&mut self, object: Known) {
+        self.spans.extend(object.at);
+        self.ids.extend(object.id);
+        let kind = (object.at.is_some(), object.id.is_some());
+        if !self.kinds.contains(&kind) {
+            self.kinds.push(kind);
+        }
+    }
+
+    /// Whether `object` is one of them: it is when its span or its number
+    /// is one's; it isn't when each is told apart from it, by a span or a
+    /// number the two both have; else it can't be told, none.
+    fn has(&self, object: Known) -> Option<bool> {
+        let at = object.at.is_some_and(|at| self.spans.contains(&at));
+        if at || object.id.is_some_and(|id| self.ids.contains(&id)) {
+            return Some(true);
+        }
+        let apart =
+            |(at, id): (bool, bool)| (at && object.at.is_some()) || (id && object.id.is_some());
+        self.kinds.iter().all(|&kind| apart(kind)).then_some(false)
+    }
+}
+
+/// An object as the structure tree's content items know it: by where it
+/// was written, which no other object of the file shares (an object
+/// stream's member's span names its stream), and by its number when it's
+/// an indirect object. Either may be unknown: an object built in memory,
+/// or edited, has no span, and one written directly, no number. Not by
+/// where it's kept, which a lazy reader needn't keep the same.
+#[derive(Debug, Clone, Copy)]
+struct Known {
+    at: Option<Span>,
+    id: Option<ObjectId>,
 }
 
 /// The keys of a file's name trees, read once each, by the tree's root as
@@ -965,14 +1042,8 @@ fn call(f: &str, args: &[Expr], cx: &Cx) -> Tri {
         ("fn:AlwaysUnencrypted", []) => unencrypted(f, cx),
         ("fn:IsHexString", []) => hex(f, cx),
         ("fn:InNameTree", [Expr::Path(tree)]) => in_name_tree(f, tree, cx),
-        ("fn:ImageIsStructContentItem", []) => {
-            let items = items(cx);
-            content_item(f, &items.objects, items.whole_objects, cx)
-        }
-        ("fn:PageContainsStructContentItems", []) => {
-            let items = items(cx);
-            content_item(f, &items.pages, items.whole_pages, cx)
-        }
+        ("fn:ImageIsStructContentItem", []) => content_item(f, &items(cx).objects, cx),
+        ("fn:PageContainsStructContentItems", []) => content_item(f, &items(cx).pages, cx),
         ("fn:InKeyMap", [Expr::Path(map)]) => in_key_map(f, map, cx),
         ("fn:IsFullyQualifiedFieldName", [Expr::Path(p)]) if p.value => field_name(f, p, cx),
         // A bit of the row's own value, or a run of them, clear or set.
@@ -1181,6 +1252,24 @@ fn deref<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Option<&'c Object> {
             Value::Ref(id) => o = (cx.file.resolve)(*id)?,
             Value::Null => return None,
             _ => return Some(o),
+        }
+    }
+    None
+}
+
+/// How the object `o` comes to, its references followed as [`deref`]
+/// follows them, is [`Known`]: by where it was written, and the number of
+/// the last of them, none when `o` is written directly.
+fn deref_known<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Option<Known> {
+    let mut id = None;
+    for _ in 0..HOPS {
+        match o.value() {
+            Value::Ref(to) => {
+                id = Some(*to);
+                o = (cx.file.resolve)(*to)?;
+            }
+            Value::Null => return None,
+            _ => return Some(Known { at: o.at, id }),
         }
     }
     None
@@ -1474,17 +1563,7 @@ fn entry_id(p: &Path, cx: &Cx) -> Option<ObjectId> {
             entry(holder, at, cx)
         }
     }?;
-    let (mut o, mut id) = (raw, None);
-    for _ in 0..HOPS {
-        match o.value() {
-            Value::Ref(to) => {
-                id = Some(*to);
-                o = (cx.file.resolve)(*to)?;
-            }
-            _ => return id,
-        }
-    }
-    None
+    deref_known(raw, cx)?.id
 }
 
 /// The keys of the name tree at `root` (ISO 32000-2, 7.9.6): each node's
@@ -1648,17 +1727,19 @@ fn field_names<'c>(cx: &Cx<'c, '_>) -> Names {
     names
 }
 
-/// Whether the row's container is one of `found`, an object the
-/// structure tree points at or a page it puts marked content on: false
-/// when it isn't and `whole` says they're all there are, else unknown.
-fn content_item(f: &str, found: &HashSet<usize>, whole: bool, cx: &Cx) -> Tri {
-    match (
-        found.contains(&(std::ptr::from_ref(cx.container) as usize)),
-        whole,
-    ) {
-        (true, _) => Tri::Is(true),
-        (false, true) => Tri::Is(false),
-        (false, false) => Tri::Unknown(f.to_string()),
+/// Whether the row's container is one of `found`, the objects the
+/// structure tree points at or the pages it puts marked content on,
+/// known by its span and the number [`Cx::id`] gives: false when each is
+/// told apart from it and they're all there are, else unknown.
+fn content_item(f: &str, found: &Objects, cx: &Cx) -> Tri {
+    let container = Known {
+        at: cx.container.at,
+        id: cx.id,
+    };
+    match (found.has(container), found.whole) {
+        (Some(true), _) => Tri::Is(true),
+        (Some(false), true) => Tri::Is(false),
+        (Some(false), false) | (None, _) => Tri::Unknown(f.to_string()),
     }
 }
 
@@ -1681,13 +1762,12 @@ fn items(cx: &Cx) -> Rc<Items> {
 /// form XObject's stream, `/Stm`, isn't on the page) and object references
 /// (OBJR, to their `/Obj`). An MCR or OBJR is told by its `/Type`, or
 /// without one by its `/MCID` or `/Obj` where an element would have `/S`.
-/// A file without a structure tree has no content items.
+/// Each page and object is [`Known`] as its entry, `/Pg` or `/Obj`, names
+/// it. A file without a structure tree has no content items.
 fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
     let mut items = Items {
-        objects: HashSet::new(),
-        pages: HashSet::new(),
-        whole_objects: true,
-        whole_pages: true,
+        objects: Objects::new(),
+        pages: Objects::new(),
     };
     let address = |o: &Object| std::ptr::from_ref(o) as usize;
     let Some(root) = (cx.file.trailer.get(b"Root").and_then(|o| deref(o, cx)))
@@ -1697,14 +1777,14 @@ fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
     };
     let mut seen = HashSet::new();
     // Each node, the page of the element it's a kid of, and its depth.
-    let mut nodes: Vec<(&'c Object, Option<usize>, usize)> = Vec::new();
+    let mut nodes: Vec<(&'c Object, Option<Known>, usize)> = Vec::new();
     if let Some(kids) = value_at(root, At::Key(b"K"), cx) {
         nodes.push((kids, None, 0));
     }
     while let Some((node, page, depth)) = nodes.pop() {
         if depth > TREE_DEPTH || seen.len() >= TREE_NODES {
-            items.whole_objects = false;
-            items.whole_pages = false;
+            items.objects.whole = false;
+            items.pages.whole = false;
             continue;
         }
         match node.value() {
@@ -1717,10 +1797,8 @@ fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
             }
             // A marked-content identifier, on the element's page.
             Value::Integer(_) => match page {
-                Some(page) => {
-                    items.pages.insert(page);
-                }
-                None => items.whole_pages = false,
+                Some(page) => items.pages.insert(page),
+                None => items.pages.whole = false,
             },
             Value::Dict(d) => {
                 if !seen.insert(address(node)) {
@@ -1728,24 +1806,20 @@ fn structure<'c>(cx: &Cx<'c, '_>) -> Items {
                 }
                 let name = |key: &[u8]| d.get(key).and_then(|o| deref(o, cx)?.as_name());
                 let has = |key: &[u8]| d.get(key).and_then(|o| deref(o, cx)).is_some();
-                let own_page = d.get(b"Pg").and_then(|o| deref(o, cx)).map(address);
+                let own_page = d.get(b"Pg").and_then(|o| deref_known(o, cx));
                 let element = !has(b"S");
                 if name(b"Type") == Some(b"MCR") || (element && has(b"MCID")) {
                     if has(b"Stm") {
                         continue;
                     }
                     match own_page.or(page) {
-                        Some(page) => {
-                            items.pages.insert(page);
-                        }
-                        None => items.whole_pages = false,
+                        Some(page) => items.pages.insert(page),
+                        None => items.pages.whole = false,
                     }
                 } else if name(b"Type") == Some(b"OBJR") || (element && has(b"Obj")) {
-                    match d.get(b"Obj").and_then(|o| deref(o, cx)) {
-                        Some(object) => {
-                            items.objects.insert(address(object));
-                        }
-                        None => items.whole_objects = false,
+                    match d.get(b"Obj").and_then(|o| deref_known(o, cx)) {
+                        Some(object) => items.objects.insert(object),
+                        None => items.objects.whole = false,
                     }
                 } else if let Some(kids) = d.get(b"K").and_then(|o| deref(o, cx)) {
                     nodes.push((kids, own_page, depth + 1));
@@ -3579,7 +3653,7 @@ mod tests {
         };
         let asks = |file: &File, n: u32, text: &str| {
             let container = file.objects.get(&(n, 0)).unwrap();
-            file.eval(container, At::Key(b"X"), &[], "1.7", |cx| holds(text, cx))
+            item_in(file, container, Some((n, 0)), text)
         };
         let pages = "fn:PageContainsStructContentItems()";
         let file = tree(Vec::new());
@@ -3609,6 +3683,173 @@ mod tests {
             [(1, catalog.into()), (2, page())],
         );
         assert_eq!(asks(&file, 2, pages), Truth::False);
+    }
+
+    /// `text`, a content item's function, held of `container` in `file`:
+    /// the indirect object `id`, when it's one.
+    fn item_in(file: &File, container: &Object, id: Option<ObjectId>, text: &str) -> Truth {
+        file.eval(container, At::Key(b"X"), &[], "1.7", |cx| match id {
+            Some(id) => holds(text, &cx.id(id)),
+            None => holds(text, cx),
+        })
+    }
+
+    /// A file of `objects` and a catalog, 1, whose structure tree's one
+    /// element puts marked content on its `/Pg`, `pg`, by an MCID, and
+    /// points at `obj`, an object reference's `/Obj`.
+    fn tagged(pg: Object, obj: Object, objects: impl IntoIterator<Item = (u32, Object)>) -> File {
+        let objr = Object::from(dict! { "Type" => "OBJR", "Obj" => obj });
+        let element = dict! { "S" => "P", "Pg" => pg, "K" => vec![Object::from(0), objr] };
+        let root = dict! { "Type" => "StructTreeRoot", "K" => element };
+        let catalog = dict! { "Type" => "Catalog", "StructTreeRoot" => root };
+        let mut all = vec![(1, Object::from(catalog))];
+        all.extend(objects);
+        File::new(dict! { "Root" => Object::reference(1) }, all)
+    }
+
+    #[test]
+    fn a_content_item_is_known_by_where_it_was_written_or_its_number() {
+        let page = || Object::from(dict! { "Type" => "Page" });
+        let image = || Object::from(dict! { "Subtype" => "Image" });
+        let (pages, images) = (
+            "fn:PageContainsStructContentItems()",
+            "fn:ImageIsStructContentItem()",
+        );
+        let unknown_page = unknown("fn:PageContainsStructContentItems");
+        let unknown_image = unknown("fn:ImageIsStructContentItem");
+        let (t, f) = (Truth::True, Truth::False);
+        // Pages 2 and 5 and an image, 6, placed or not; the tree names
+        // page 2 and the image by reference.
+        let file = |placed: bool| {
+            let at = |o: Object, n| if placed { o.at(written(n)) } else { o };
+            let objects = [
+                (2, at(page(), 20)),
+                (5, at(page(), 50)),
+                (6, at(image(), 60)),
+            ];
+            tagged(Object::reference(2), Object::reference(6), objects)
+        };
+        let object = |file: &File, n| file.objects.get(&(n, 0)).unwrap().clone();
+
+        // Placed: each item known by where it was written and its number.
+        let placed = file(true);
+        // By where: the object as resolved, or a copy that keeps its span,
+        // without its number.
+        assert_eq!(item_in(&placed, &object(&placed, 2), None, pages), t);
+        assert_eq!(item_in(&placed, &object(&placed, 6), None, images), t);
+        // By its number: an equal copy built in memory, which has no span,
+        // where its address said it wasn't.
+        assert_eq!(item_in(&placed, &page(), Some((2, 0)), pages), t);
+        assert_eq!(item_in(&placed, &image(), Some((6, 0)), images), t);
+        // Told apart by either: another page, as resolved or numbered.
+        assert_eq!(item_in(&placed, &object(&placed, 5), None, pages), f);
+        assert_eq!(item_in(&placed, &page(), Some((5, 0)), pages), f);
+        // A page written directly, elsewhere: no item's span is its.
+        assert_eq!(item_in(&placed, &page().at(written(90)), None, pages), f);
+        // An equal copy without its number: nothing tells it apart.
+        assert_eq!(item_in(&placed, &page(), None, pages), unknown_page);
+        assert_eq!(item_in(&placed, &image(), None, images), unknown_image);
+
+        // Not placed: each item known by its number alone.
+        let unplaced = file(false);
+        assert_eq!(item_in(&unplaced, &page(), Some((2, 0)), pages), t);
+        assert_eq!(item_in(&unplaced, &page(), Some((5, 0)), pages), f);
+        // Without its number, the object resolve gives can't be told: its
+        // address no longer says.
+        let two = object(&unplaced, 2);
+        assert_eq!(item_in(&unplaced, &two, None, pages), unknown_page);
+        // A page known by its span alone, beside items known by their
+        // numbers alone, can't be told apart from them either.
+        let direct = page().at(written(90));
+        assert_eq!(item_in(&unplaced, &direct, None, pages), unknown_page);
+
+        // Beside no content items, an object nothing identifies isn't one.
+        let catalog = dict! { "Type" => "Catalog" };
+        let bare = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [(1, catalog.into())],
+        );
+        assert_eq!(item_in(&bare, &page(), None, pages), f);
+        assert_eq!(item_in(&bare, &image(), None, images), f);
+
+        // An object an item names directly, placed: known by where it was
+        // written, which no number could say.
+        let inline = image().at(written(70));
+        let direct = tagged(
+            Object::reference(2),
+            inline.clone(),
+            [(2, page()), (6, image())],
+        );
+        assert_eq!(item_in(&direct, &inline, None, images), t);
+        assert_eq!(item_in(&direct, &image().at(written(60)), None, images), f);
+
+        // An item the reader didn't place, written directly, is known by
+        // neither: any container could be it, though no other item is.
+        let lost = tagged(
+            Object::reference(2),
+            image(),
+            [(2, page().at(written(20))), (6, image().at(written(60)))],
+        );
+        let six = object(&lost, 6);
+        assert_eq!(item_in(&lost, &six, Some((6, 0)), images), unknown_image);
+        assert_eq!(item_in(&lost, &page(), Some((2, 0)), pages), t);
+
+        // Named through a chain of references, 7 to 6: by the last, the
+        // object the image is, never one followed before it.
+        let chain = tagged(
+            Object::reference(2),
+            Object::reference(7),
+            [(2, page()), (6, image()), (7, Object::reference(6))],
+        );
+        assert_eq!(item_in(&chain, &image(), Some((6, 0)), images), t);
+        assert_eq!(item_in(&chain, &image(), Some((7, 0)), images), f);
+    }
+
+    #[test]
+    fn a_page_written_directly_as_an_elements_pg_is_known_by_where_it_was_written() {
+        // The element's /Pg is the page itself: its MCIDs are on that page,
+        // which only where it was written can name.
+        let page = || Object::from(dict! { "Type" => "Page" });
+        let pages = "fn:PageContainsStructContentItems()";
+        let image = Object::from(dict! { "Subtype" => "Image" });
+        let file = |pg: &Object| {
+            let objects = [
+                (2, page().at(written(20))),
+                (6, image.clone().at(written(60))),
+            ];
+            tagged(pg.clone(), Object::reference(6), objects)
+        };
+        // The page as the walk reaches it in the tree: the same span.
+        let inline = page().at(written(80));
+        let placed = file(&inline);
+        assert_eq!(item_in(&placed, &inline, None, pages), Truth::True);
+        let two = placed.objects.get(&(2, 0)).unwrap();
+        assert_eq!(item_in(&placed, two, Some((2, 0)), pages), Truth::False);
+        // Not placed, it's known by neither, and page 2 could be it.
+        let unplaced = file(&page());
+        let two = unplaced.objects.get(&(2, 0)).unwrap();
+        assert_eq!(
+            item_in(&unplaced, two, Some((2, 0)), pages),
+            unknown("fn:PageContainsStructContentItems")
+        );
+    }
+
+    #[test]
+    fn an_object_streams_member_isnt_what_the_file_has_at_its_offsets() {
+        // Image 6 is in object stream 9, at bytes 20 to 21 of its decoded
+        // data; an image written at bytes 20 to 21 of the file isn't it.
+        let images = "fn:ImageIsStructContentItem()";
+        let image = || Object::from(dict! { "Subtype" => "Image" });
+        let member = image().at(Span::new(Some((9, 0)), 20, 21));
+        let page = Object::from(dict! { "Type" => "Page" }).at(written(40));
+        let file = tagged(
+            Object::reference(2),
+            Object::reference(6),
+            [(2, page), (6, member.clone())],
+        );
+        assert_eq!(item_in(&file, &member, None, images), Truth::True);
+        let at_its_offsets = image().at(written(20));
+        assert_eq!(item_in(&file, &at_its_offsets, None, images), Truth::False);
     }
 
     #[test]
