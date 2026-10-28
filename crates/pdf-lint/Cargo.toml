@@ -15,12 +15,14 @@ categories = ["command-line-utilities", "development-tools::testing"]
 include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
+# The command line's, main.rs's alone: the library's errors are its own.
 anyhow = "1"
 pdf-arlington = { path = "../pdf-arlington", version = "0.1" }
 pdf-crypt = { path = "../pdf-crypt", version = "0.1" }
 pdf-filters = { path = "../pdf-filters", version = "0.1" }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
+thiserror = "2"
 
 [dev-dependencies]
 # The tests' encrypted files.

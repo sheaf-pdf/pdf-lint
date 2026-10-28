@@ -141,8 +141,8 @@ dependencies = [
 name = "pdf-arlington"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "pdf-objects",
+ "thiserror",
 ]
 
 [[package]]
@@ -176,6 +176,7 @@ dependencies = [
  "pdf-filters",
  "pdf-objects",
  "pdf-tokenizer",
+ "thiserror",
 ]
 
 [[package]]

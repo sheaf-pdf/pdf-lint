@@ -14,8 +14,8 @@ categories = ["parser-implementations", "development-tools::testing"]
 include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
-anyhow = "1"
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
+thiserror = "2"
 
 [lints.rust]
 unsafe_code = "forbid"

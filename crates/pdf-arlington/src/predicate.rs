@@ -37,9 +37,9 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::num::ParseIntError;
 use std::rc::Rc;
 
-use anyhow::{Context, Result, bail, ensure};
 use pdf_objects::{Dict, Form, Object, ObjectId, Str, Value, Version};
 
 use crate::grammar::{At, Table, Wrap, WrapFn, split, version};
@@ -612,20 +612,126 @@ fn unsupported(e: &Expr) -> Option<&str> {
     }
 }
 
-/// `text`, the whole of it, parsed.
-pub fn parse(text: &str) -> Result<Expr> {
+/// `text`, the whole of it, parsed. An [`Error`] says the predicate, then
+/// what stopped it and where.
+pub fn parse(text: &str) -> Result<Expr, Error> {
     let mut p = Parser {
         text,
         at: 0,
         depth: 0,
     };
-    let expr = p.expr().with_context(|| format!("{text:?}"))?;
-    ensure!(
-        p.at == text.len(),
-        "{text:?}: {:?} after a whole predicate",
-        p.rest()
-    );
+    let expr = p.expr()?;
+    if p.at != text.len() {
+        return Err(Error::After {
+            predicate: text.to_string(),
+            rest: p.rest().to_string(),
+        });
+    }
     Ok(expr)
+}
+
+/// Why a predicate doesn't parse ([`parse`]): each says the predicate as
+/// written, then what stopped the parser and where, a byte offset in it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// Text after a whole predicate.
+    #[error("{predicate:?}: {rest:?} after a whole predicate")]
+    After {
+        /// The predicate.
+        predicate: String,
+        /// The text after it.
+        rest: String,
+    },
+    /// Not the bracket a call or a group wants.
+    #[error("{predicate:?}: {token:?} expected at {at}, not {rest:?}")]
+    Expected {
+        /// The predicate.
+        predicate: String,
+        /// What was wanted: `(` or `)`.
+        token: &'static str,
+        /// Where.
+        at: usize,
+        /// The text from there.
+        rest: String,
+    },
+    /// `&&` and `||` joining one list, which takes brackets
+    /// (INTERNAL_GRAMMAR.md, "Validation of predicates").
+    #[error("{predicate:?}: && and || mixed without brackets at {at}")]
+    Mixed {
+        /// The predicate.
+        predicate: String,
+        /// Where the other one comes.
+        at: usize,
+    },
+    /// Terms nested deeper than the parser goes.
+    #[error("{predicate:?}: nested deeper than {DEPTH} at {at}")]
+    Nested {
+        /// The predicate.
+        predicate: String,
+        /// Where the term too deep starts.
+        at: usize,
+    },
+    /// A string that doesn't end.
+    #[error("{predicate:?}: a string left open")]
+    StringOpen {
+        /// The predicate.
+        predicate: String,
+    },
+    /// A string with nothing in it, which a predicate never has.
+    #[error("{predicate:?}: an empty string at {at}")]
+    EmptyString {
+        /// The predicate.
+        predicate: String,
+        /// Where its text would be, past the opening quote.
+        at: usize,
+    },
+    /// No term where one should be.
+    #[error("{predicate:?}: a term expected at {at}, not {rest:?}")]
+    Term {
+        /// The predicate.
+        predicate: String,
+        /// Where.
+        at: usize,
+        /// The text from there.
+        rest: String,
+    },
+    /// A `fn:` without a function's CamelCase name after it.
+    #[error("{predicate:?}: fn: and a CamelCase name expected at {at}")]
+    Call {
+        /// The predicate.
+        predicate: String,
+        /// Where the name should be.
+        at: usize,
+    },
+    /// An integer outside 64 bits.
+    #[error("{predicate:?}: {word} is out of range: {error}")]
+    Range {
+        /// The predicate.
+        predicate: String,
+        /// The integer, as written.
+        word: String,
+        /// Why, as std says.
+        error: ParseIntError,
+    },
+    /// A path that names no object: `trailer` alone.
+    #[error("{predicate:?}: {path:?}: a path to nothing")]
+    Nothing {
+        /// The predicate.
+        predicate: String,
+        /// The path, as written.
+        path: String,
+    },
+    /// A path through what isn't a key or an index.
+    #[error("{predicate:?}: {path:?}: {key:?} isn't a key")]
+    Key {
+        /// The predicate.
+        predicate: String,
+        /// The path, as written.
+        path: String,
+        /// What isn't a key.
+        key: String,
+    },
 }
 
 /// [`Truth`] as evaluation carries it, with one more: vacant, a statement
@@ -1778,19 +1884,21 @@ impl Parser<'_> {
             .find(|&op| self.rest().starts_with(symbol(op)))
     }
 
-    fn expect(&mut self, token: &str) -> Result<()> {
-        ensure!(
-            self.eat(token),
-            "{token:?} expected at {}, not {:?}",
-            self.at,
-            self.rest()
-        );
+    fn expect(&mut self, token: &'static str) -> Result<(), Error> {
+        if !self.eat(token) {
+            return Err(Error::Expected {
+                predicate: self.text.to_string(),
+                token,
+                at: self.at,
+                rest: self.rest().to_string(),
+            });
+        }
         Ok(())
     }
 
     /// Comparisons joined by `&&` or by `||`: mixing them takes brackets
     /// (INTERNAL_GRAMMAR.md, "Validation of predicates").
-    fn expr(&mut self) -> Result<Expr> {
+    fn expr(&mut self) -> Result<Expr, Error> {
         let first = self.comparison()?;
         let (op, other, joined): (_, _, fn(Vec<Expr>) -> Expr) = match self.rest() {
             rest if rest.starts_with(AND) => (AND, OR, Expr::And),
@@ -1801,16 +1909,17 @@ impl Parser<'_> {
         while self.eat(op) {
             items.push(self.comparison()?);
         }
-        ensure!(
-            !self.rest().starts_with(other),
-            "&& and || mixed without brackets at {}",
-            self.at
-        );
+        if self.rest().starts_with(other) {
+            return Err(Error::Mixed {
+                predicate: self.text.to_string(),
+                at: self.at,
+            });
+        }
         Ok(joined(items))
     }
 
     /// Arithmetic, maybe compared.
-    fn comparison(&mut self) -> Result<Expr> {
+    fn comparison(&mut self) -> Result<Expr, Error> {
         let left = self.arith()?;
         let Some(op) = self.peek(Cmp::ALL, Cmp::symbol) else {
             return Ok(left);
@@ -1821,7 +1930,7 @@ impl Parser<'_> {
     }
 
     /// Terms joined by arithmetic.
-    fn arith(&mut self) -> Result<Expr> {
+    fn arith(&mut self) -> Result<Expr, Error> {
         let first = self.term()?;
         let mut rest = Vec::new();
         while let Some(op) = self.peek(Arith::ALL, Arith::symbol) {
@@ -1837,19 +1946,20 @@ impl Parser<'_> {
 
     /// A bracketed expression, a call, a string or a word, inside no more
     /// than [`DEPTH`] others.
-    fn term(&mut self) -> Result<Expr> {
-        ensure!(
-            self.depth < DEPTH,
-            "nested deeper than {DEPTH} at {}",
-            self.at
-        );
+    fn term(&mut self) -> Result<Expr, Error> {
+        if self.depth >= DEPTH {
+            return Err(Error::Nested {
+                predicate: self.text.to_string(),
+                at: self.at,
+            });
+        }
         self.depth += 1;
         let term = self.term_within();
         self.depth -= 1;
         term
     }
 
-    fn term_within(&mut self) -> Result<Expr> {
+    fn term_within(&mut self) -> Result<Expr, Error> {
         if self.eat("(") {
             let inner = self.expr()?;
             self.expect(")")?;
@@ -1862,8 +1972,15 @@ impl Parser<'_> {
         if self.eat("'") {
             // Never empty, and without escapes (TestGrammar's `ArlString`).
             let rest = &text[self.at..];
-            let end = rest.find('\'').context("a string left open")?;
-            ensure!(end > 0, "an empty string at {}", self.at);
+            let end = rest.find('\'').ok_or_else(|| Error::StringOpen {
+                predicate: text.to_string(),
+            })?;
+            if end == 0 {
+                return Err(Error::EmptyString {
+                    predicate: text.to_string(),
+                    at: self.at,
+                });
+            }
             self.at += end + 1;
             return Ok(Expr::Str(rest[..end].to_string()));
         }
@@ -1871,23 +1988,30 @@ impl Parser<'_> {
         let len = rest
             .find(|c: char| !(c.is_ascii_alphanumeric() || "_.-*@:".contains(c)))
             .unwrap_or(rest.len());
-        ensure!(len > 0, "a term expected at {}, not {rest:?}", self.at);
+        if len == 0 {
+            return Err(Error::Term {
+                predicate: text.to_string(),
+                at: self.at,
+                rest: rest.to_string(),
+            });
+        }
         self.at += len;
-        word(&rest[..len])
+        word(text, &rest[..len])
     }
 
     /// `Name(...)`, after a call's `fn:`: none, one or two arguments
     /// (INTERNAL_GRAMMAR.md, "Validation of predicates").
-    fn call(&mut self) -> Result<Expr> {
+    fn call(&mut self) -> Result<Expr, Error> {
         let text = self.text;
         let rest = &text[self.at..];
         let len = (rest.find(|c: char| !c.is_ascii_alphanumeric())).unwrap_or(rest.len());
         let name = &rest[..len];
-        ensure!(
-            name.starts_with(|c: char| c.is_ascii_uppercase()),
-            "fn: and a CamelCase name expected at {}",
-            self.at
-        );
+        if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return Err(Error::Call {
+                predicate: text.to_string(),
+                at: self.at,
+            });
+        }
         self.at += len;
         self.expect("(")?;
         let mut args = Vec::new();
@@ -1902,8 +2026,9 @@ impl Parser<'_> {
     }
 }
 
-/// A word: `true`, `false` or `null`, an integer, a real, or else a path.
-fn word(word: &str) -> Result<Expr> {
+/// A word of `predicate`: `true`, `false` or `null`, an integer, a real,
+/// or else a path.
+fn word(predicate: &str, word: &str) -> Result<Expr, Error> {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let unsigned = word.strip_prefix('-').unwrap_or(word);
     let real = unsigned
@@ -1913,18 +2038,20 @@ fn word(word: &str) -> Result<Expr> {
         "true" => Expr::Bool(true),
         "false" => Expr::Bool(false),
         "null" => Expr::Null,
-        _ if digits(unsigned) => Expr::Int(
-            word.parse()
-                .with_context(|| format!("{word} is out of range"))?,
-        ),
+        _ if digits(unsigned) => Expr::Int(word.parse().map_err(|error| Error::Range {
+            predicate: predicate.to_string(),
+            word: word.to_string(),
+            error,
+        })?),
         _ if real => Expr::Real(word.to_string()),
-        _ => Expr::Path(path(word)?),
+        _ => Expr::Path(path(predicate, word)?),
     })
 }
 
-/// `A::B::@C` as a path: `parent::`s or a `trailer::` first, then keys,
-/// which only `parent` (the object itself) may go without.
-fn path(text: &str) -> Result<Path> {
+/// `A::B::@C`, a word of `predicate`, as a path: `parent::`s or a
+/// `trailer::` first, then keys, which only `parent` (the object itself)
+/// may go without.
+fn path(predicate: &str, text: &str) -> Result<Path, Error> {
     let mut keys: Vec<&str> = text.split("::").collect();
     let mut value = false;
     if let Some(last) = keys.last_mut() {
@@ -1944,9 +2071,18 @@ fn path(text: &str) -> Result<Path> {
         keys[0] = "Root".to_string();
     }
     let parent = matches!(base, Base::Parent(_));
-    ensure!(!keys.is_empty() || parent, "{text:?}: a path to nothing");
+    if keys.is_empty() && !parent {
+        return Err(Error::Nothing {
+            predicate: predicate.to_string(),
+            path: text.to_string(),
+        });
+    }
     if let Some(key) = keys.iter().find(|k| !key_like(k)) {
-        bail!("{text:?}: {key:?} isn't a key");
+        return Err(Error::Key {
+            predicate: predicate.to_string(),
+            path: text.to_string(),
+            key: key.clone(),
+        });
     }
     Ok(Path {
         base,

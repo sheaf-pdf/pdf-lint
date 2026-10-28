@@ -8,10 +8,10 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result, bail};
 use pdf_objects::Version;
 
 use crate::xxh64::xxh64;
@@ -242,6 +242,162 @@ pub enum WrapFn {
     Extension,
 }
 
+/// Why a model doesn't read ([`Grammar::load`]): its folder, or a table
+/// in it, can't be read, or a table breaks a rule of the model's files,
+/// said after the table's file and line. The std error under one is a
+/// field, said after `: `, not a source.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// The folder, or a table in it, can't be read.
+    #[error("reading {path}: {error}")]
+    Read {
+        /// The folder's path, or the table's.
+        path: PathBuf,
+        /// Why, as std says.
+        error: io::Error,
+    },
+    /// The folder reads, but an entry of it doesn't.
+    #[error("{0}")]
+    Entry(io::Error),
+    /// A table's file name isn't UTF-8, so it names no table.
+    #[error("{path}: not a UTF-8 name")]
+    Name {
+        /// The table's path.
+        path: PathBuf,
+    },
+    /// The folder has no `.tsv` file.
+    #[error("{dir} has no tables")]
+    Empty {
+        /// The folder's path.
+        dir: PathBuf,
+    },
+    /// A table breaks a rule of the model's files.
+    #[error("{file}: {}{error}", on_line(.line))]
+    Table {
+        /// What the error calls the table's file: its path, or for the
+        /// embedded model its name (`Catalog.tsv`).
+        file: String,
+        /// The line it's broken on, the header being line 1, when it's a
+        /// line's rule.
+        line: Option<usize>,
+        /// The rule.
+        error: TableError,
+    },
+}
+
+/// "line N: ", when `line` is known, for [`Error::Table`]'s text.
+fn on_line(line: &Option<usize>) -> String {
+    line.map(|n| format!("line {n}: ")).unwrap_or_default()
+}
+
+/// A rule of the model's files a table breaks (INTERNAL_GRAMMAR.md, "TSV
+/// file rules" and "TSV Data Fields"), as [`Error::Table`] says it, after
+/// the table's file and line.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum TableError {
+    /// The file's last line has no newline after it.
+    #[error("its last line isn't ended")]
+    Unended,
+    /// Its lines end in CR LF, where upstream's end in LF.
+    #[error("CRLF line ends (.gitattributes keeps the model's bytes as they are)")]
+    Crlf,
+    /// Its first line isn't [`HEADER`].
+    #[error("not upstream's header")]
+    Header,
+    /// A row for a key a row before it has.
+    #[error("a second row for {key}")]
+    SecondRow {
+        /// The key.
+        key: String,
+    },
+    /// No row after the header.
+    #[error("no rows")]
+    NoRows,
+    /// A repeating row before one that isn't, or numbered other than by
+    /// the element it starts at.
+    #[error("repeating rows come last, numbered from the element they start at")]
+    Repeating,
+    /// A link to a table the model hasn't.
+    #[error("links to {table}, which has no table")]
+    Link {
+        /// The table linked to.
+        table: String,
+    },
+    /// A row without upstream's 12 fields.
+    #[error("{count} fields, not 12")]
+    Fields {
+        /// How many it has.
+        count: usize,
+    },
+    /// A row whose Key, Type, SinceVersion, Required or
+    /// IndirectReference is empty.
+    #[error("no {column}")]
+    Missing {
+        /// The column, as [`HEADER`] names it.
+        column: &'static str,
+    },
+    /// An item whose version predicate around it doesn't read: one whose
+    /// version isn't one, say.
+    #[error("{item:?}: a version predicate that doesn't read")]
+    Wrap {
+        /// The item, as written.
+        item: String,
+    },
+    /// A type that isn't one of [`ArlType`]'s.
+    #[error("Type {name:?} isn't one of Arlington's")]
+    Type {
+        /// The type, as written.
+        name: String,
+    },
+    /// An Inheritable that's neither `TRUE` nor `FALSE`.
+    #[error("Inheritable is {cell:?}, not TRUE or FALSE")]
+    Inheritable {
+        /// The cell.
+        cell: String,
+    },
+    /// A cell with an item per type whose item isn't one bracketed item.
+    #[error("{column}: {group:?} isn't one bracketed item")]
+    Group {
+        /// The column, as [`HEADER`] names it.
+        column: &'static str,
+        /// The item, as written.
+        group: String,
+    },
+    /// A cell with an item per type whose items aren't as many as the
+    /// types.
+    #[error("{column} has {items} items for {types} types")]
+    Count {
+        /// The column, as [`HEADER`] names it.
+        column: &'static str,
+        /// How many items it has.
+        items: usize,
+        /// How many types the row has.
+        types: usize,
+    },
+    /// A type's list of values or links with an empty item.
+    #[error("{list:?} has an empty item")]
+    EmptyItem {
+        /// The list, as written.
+        list: String,
+    },
+    /// A `]` or `)` that closes nothing, or closes the other.
+    #[error("{text:?}: a {found} out of place")]
+    OutOfPlace {
+        /// What it's in, as written.
+        text: String,
+        /// The `]` or `)`.
+        found: char,
+    },
+    /// A bracket, parenthesis or quote that nothing closes.
+    #[error("{text:?}: a bracket, parenthesis or quote left open")]
+    Open {
+        /// What it's in, as written.
+        text: String,
+    },
+}
+
 /// A table's file, to read: the table's name, what an error calls the
 /// file, and its text.
 struct File<'a> {
@@ -263,18 +419,22 @@ impl Grammar {
                 label: format!("{name}.tsv"),
                 text: text.into(),
             }))
-            .unwrap_or_else(|e| panic!("the Arlington model doesn't read: {e:#}"))
+            .unwrap_or_else(|e| panic!("the Arlington model doesn't read: {e}"))
         })
     }
 
     /// The tables in `dir`, a `.tsv` file each: a checkout of upstream's
-    /// `tsv/latest`, newer than the embedded one, say. An error names the
-    /// file and line of a row that doesn't read, or that links to a table
-    /// `dir` doesn't have.
-    pub fn load(dir: &Path) -> Result<Grammar> {
+    /// `tsv/latest`, newer than the embedded one, say. An [`Error`] names
+    /// the file and line of a row that doesn't read, or that links to a
+    /// table `dir` doesn't have.
+    pub fn load(dir: &Path) -> Result<Grammar, Error> {
+        let entries = std::fs::read_dir(dir).map_err(|error| Error::Read {
+            path: dir.to_path_buf(),
+            error,
+        })?;
         let mut paths = Vec::new();
-        for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-            let path = entry?.path();
+        for entry in entries {
+            let path = entry.map_err(Error::Entry)?.path();
             if path.extension().is_some_and(|e| e == "tsv") {
                 paths.push(path);
             }
@@ -283,9 +443,11 @@ impl Grammar {
         let mut files = Vec::new();
         for path in &paths {
             let name = path.file_stem().and_then(|s| s.to_str());
-            let name = name.with_context(|| format!("{}: not a UTF-8 name", path.display()))?;
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("reading {}", path.display()))?;
+            let name = name.ok_or_else(|| Error::Name { path: path.clone() })?;
+            let text = std::fs::read_to_string(path).map_err(|error| Error::Read {
+                path: path.clone(),
+                error,
+            })?;
             files.push(File {
                 name: name.to_string(),
                 label: path.display().to_string(),
@@ -293,12 +455,14 @@ impl Grammar {
             });
         }
         if files.is_empty() {
-            bail!("{} has no tables", dir.display());
+            return Err(Error::Empty {
+                dir: dir.to_path_buf(),
+            });
         }
         Grammar::from_files(files)
     }
 
-    fn from_files<'a>(files: impl IntoIterator<Item = File<'a>>) -> Result<Grammar> {
+    fn from_files<'a>(files: impl IntoIterator<Item = File<'a>>) -> Result<Grammar, Error> {
         let mut files: Vec<File> = files.into_iter().collect();
         files.sort_by_cached_key(|file| format!("{}.tsv", file.name));
         let mut bytes = Vec::new();
@@ -310,7 +474,12 @@ impl Grammar {
         let mut tables = BTreeMap::new();
         let mut labels = BTreeMap::new();
         for file in files {
-            let table = Table::parse(&file.name, &file.text).with_context(|| file.label.clone())?;
+            let table =
+                Table::parse(&file.name, &file.text).map_err(|(line, error)| Error::Table {
+                    file: file.label.clone(),
+                    line,
+                    error,
+                })?;
             labels.insert(file.name.clone(), file.label);
             tables.insert(file.name, table);
         }
@@ -322,12 +491,13 @@ impl Grammar {
                     .flatten()
                     .find(|l| !tables.contains_key(&l.item))
                 {
-                    bail!(
-                        "{}: line {}: links to {}, which has no table",
-                        labels[&table.name],
-                        row.line,
-                        link.item
-                    );
+                    return Err(Error::Table {
+                        file: labels[&table.name].clone(),
+                        line: Some(row.line),
+                        error: TableError::Link {
+                            table: link.item.clone(),
+                        },
+                    });
                 }
             }
         }
@@ -363,31 +533,30 @@ static EMBEDDED: OnceLock<Grammar> = OnceLock::new();
 
 impl Table {
     /// The table in `text`, a TSV file's whole: upstream's header, then a
-    /// row a line, each line ended.
-    fn parse(name: &str, text: &str) -> Result<Table> {
-        let body = text
-            .strip_suffix('\n')
-            .context("its last line isn't ended")?;
+    /// row a line, each line ended. An error is the rule it breaks, with
+    /// the line when it's a line's.
+    fn parse(name: &str, text: &str) -> Result<Table, (Option<usize>, TableError)> {
+        let body = text.strip_suffix('\n').ok_or((None, TableError::Unended))?;
         let mut lines = body.split('\n');
         let header = lines.next().unwrap_or_default();
         if header.ends_with('\r') {
-            bail!("line 1: CRLF line ends (.gitattributes keeps the model's bytes as they are)");
+            return Err((Some(1), TableError::Crlf));
         }
         if header.split('\t').ne(HEADER) {
-            bail!("line 1: not upstream's header");
+            return Err((Some(1), TableError::Header));
         }
         let mut rows = Vec::new();
         let mut keys = HashSet::new();
         for (i, text) in lines.enumerate() {
             let line = i + 2;
-            let row = Row::parse(line, text).with_context(|| format!("line {line}"))?;
+            let row = Row::parse(line, text).map_err(|error| (Some(line), error))?;
             if !keys.insert(row.key.clone()) {
-                bail!("line {line}: a second row for {}", row.key);
+                return Err((Some(line), TableError::SecondRow { key: row.key }));
             }
             rows.push(row);
         }
         if rows.is_empty() {
-            bail!("no rows");
+            return Err((None, TableError::NoRows));
         }
         let repeats = rows
             .iter()
@@ -395,10 +564,7 @@ impl Table {
             .unwrap_or(rows.len());
         for (i, row) in rows.iter().enumerate().skip(repeats) {
             if row.key != format!("{i}*") {
-                bail!(
-                    "line {}: repeating rows come last, numbered from the element they start at",
-                    row.line
-                );
+                return Err((Some(row.line), TableError::Repeating));
             }
         }
         Ok(Table {
@@ -442,7 +608,7 @@ fn repeating(key: &str) -> bool {
 
 impl Row {
     /// The row on line `line`, from its text.
-    fn parse(line: usize, text: &str) -> Result<Row> {
+    fn parse(line: usize, text: &str) -> Result<Row, TableError> {
         let fields: Vec<&str> = text.split('\t').collect();
         let [
             key,
@@ -459,7 +625,9 @@ impl Row {
             note,
         ] = fields[..]
         else {
-            bail!("{} fields, not 12", fields.len());
+            return Err(TableError::Fields {
+                count: fields.len(),
+            });
         };
         for (column, cell) in [
             ("Key", key),
@@ -469,23 +637,28 @@ impl Row {
             ("IndirectReference", indirect),
         ] {
             if cell.is_empty() {
-                bail!("no {column}");
+                return Err(TableError::Missing { column });
             }
         }
         let r#type = split(ty, ';')?
             .into_iter()
             .map(|t| {
                 let (wraps, name) = unwrap(t)?;
-                let item = ArlType::named(name)
-                    .with_context(|| format!("Type {name:?} isn't one of Arlington's"))?;
+                let item = ArlType::named(name).ok_or_else(|| TableError::Type {
+                    name: name.to_string(),
+                })?;
                 Ok(Wrapped { wraps, item })
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
         let n = r#type.len();
         let inheritable = match inheritable {
             "TRUE" => true,
             "FALSE" => false,
-            other => bail!("Inheritable is {other:?}, not TRUE or FALSE"),
+            other => {
+                return Err(TableError::Inheritable {
+                    cell: other.to_string(),
+                });
+            }
         };
         let indirect_reference = if indirect.starts_with('[') {
             groups(indirect, n, "IndirectReference")?
@@ -511,9 +684,9 @@ impl Row {
             possible_values: possible_values
                 .into_iter()
                 .map(items)
-                .collect::<Result<_>>()?,
+                .collect::<Result<_, _>>()?,
             special_case: special_case.into_iter().map(str::to_string).collect(),
-            link: link.into_iter().map(items).collect::<Result<_>>()?,
+            link: link.into_iter().map(items).collect::<Result<_, _>>()?,
             note: note.to_string(),
         })
     }
@@ -597,7 +770,7 @@ impl WrapFn {
 /// A cell that holds an item per type, `[a,b];[];[c]`, as its `n` items
 /// with their brackets off (INTERNAL_GRAMMAR.md, "TSV Data Fields"); `n`
 /// empty ones for an empty cell.
-fn groups<'a>(cell: &'a str, n: usize, column: &str) -> Result<Vec<&'a str>> {
+fn groups<'a>(cell: &'a str, n: usize, column: &'static str) -> Result<Vec<&'a str>, TableError> {
     if cell.is_empty() {
         return Ok(vec![""; n]);
     }
@@ -607,18 +780,25 @@ fn groups<'a>(cell: &'a str, n: usize, column: &str) -> Result<Vec<&'a str>> {
             let inner = g.strip_prefix('[').and_then(|g| g.strip_suffix(']'));
             inner
                 .filter(|inner| balanced(inner))
-                .with_context(|| format!("{column}: {g:?} isn't one bracketed item"))
+                .ok_or_else(|| TableError::Group {
+                    column,
+                    group: g.to_string(),
+                })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     if groups.len() != n {
-        bail!("{column} has {} items for {n} types", groups.len());
+        return Err(TableError::Count {
+            column,
+            items: groups.len(),
+            types: n,
+        });
     }
     Ok(groups)
 }
 
 /// A type's list of values or links, `a,fn:SinceVersion(1.5,b)`, each
 /// unwrapped; none for an empty one.
-fn items(group: &str) -> Result<Vec<Wrapped<String>>> {
+fn items(group: &str) -> Result<Vec<Wrapped<String>>, TableError> {
     if group.is_empty() {
         return Ok(Vec::new());
     }
@@ -627,7 +807,9 @@ fn items(group: &str) -> Result<Vec<Wrapped<String>>> {
         .map(|item| {
             let (wraps, item) = unwrap(item)?;
             if item.is_empty() {
-                bail!("{group:?} has an empty item");
+                return Err(TableError::EmptyItem {
+                    list: group.to_string(),
+                });
             }
             let item = item.to_string();
             Ok(Wrapped { wraps, item })
@@ -638,7 +820,7 @@ fn items(group: &str) -> Result<Vec<Wrapped<String>>> {
 /// `item` with the version predicates around it taken off, outermost
 /// first; an error for one that doesn't read, a version that isn't one
 /// among them.
-fn unwrap(mut item: &str) -> Result<(Vec<Wrap>, &str)> {
+fn unwrap(mut item: &str) -> Result<(Vec<Wrap>, &str), TableError> {
     let mut wraps = Vec::new();
     while let Some((wrap, inner)) = wrapper(item) {
         wraps.push(wrap);
@@ -647,7 +829,9 @@ fn unwrap(mut item: &str) -> Result<(Vec<Wrap>, &str)> {
     let name = item.strip_prefix("fn:").and_then(|f| f.split_once('('));
     if let Some((name, _)) = name {
         if WrapFn::ALL.into_iter().any(|f| f.name() == name) {
-            bail!("{item:?}: a version predicate that doesn't read");
+            return Err(TableError::Wrap {
+                item: item.to_string(),
+            });
         }
     }
     Ok((wraps, item))
@@ -682,7 +866,7 @@ pub fn version(text: &str) -> Option<Version> {
 
 /// `s` split at each `sep` outside brackets, parentheses and single-quoted
 /// strings; an error when those don't pair up.
-pub(crate) fn split(s: &str, sep: char) -> Result<Vec<&str>> {
+pub(crate) fn split(s: &str, sep: char) -> Result<Vec<&str>, TableError> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut open = Vec::new();
@@ -695,7 +879,10 @@ pub(crate) fn split(s: &str, sep: char) -> Result<Vec<&str>> {
             '(' => open.push(')'),
             ']' | ')' => {
                 if open.pop() != Some(c) {
-                    bail!("{s:?}: a {c} out of place");
+                    return Err(TableError::OutOfPlace {
+                        text: s.to_string(),
+                        found: c,
+                    });
                 }
             }
             _ if c == sep && open.is_empty() => {
@@ -706,7 +893,9 @@ pub(crate) fn split(s: &str, sep: char) -> Result<Vec<&str>> {
         }
     }
     if quoted || !open.is_empty() {
-        bail!("{s:?}: a bracket, parenthesis or quote left open");
+        return Err(TableError::Open {
+            text: s.to_string(),
+        });
     }
     parts.push(&s[start..]);
     Ok(parts)

@@ -6,10 +6,10 @@
 //! can be told ([`Allowances::unused`]): each is known, and none is
 //! skipped in silence.
 
-use std::path::Path;
+use std::fmt;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-
-use anyhow::{Context, Result, bail, ensure};
 
 use crate::check::{Finding, Rule};
 use crate::grammar::grammar;
@@ -46,42 +46,165 @@ pub struct Allowance {
     pub reason: String,
 }
 
+/// Why an allowances file's text doesn't read ([`Allowances::parse`]):
+/// the rule a line breaks, after the line.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum AllowanceError {
+    /// The first line isn't a `#` line, so the file has no header.
+    #[error("line 1: no # header")]
+    Header,
+    /// A `#` line after the first row.
+    #[error("line {line}: a # line among the rows")]
+    Comment {
+        /// Its line.
+        line: usize,
+    },
+    /// A row without its six fields.
+    #[error("line {line}: {count} fields, not 6: table, key, rule, file, version, reason")]
+    Fields {
+        /// Its line.
+        line: usize,
+        /// How many it has.
+        count: usize,
+    },
+    /// A table the model hasn't, and not `-`.
+    #[error("line {line}: {table:?} isn't a table of the model's")]
+    Table {
+        /// Its line.
+        line: usize,
+        /// The table, as written.
+        table: String,
+    },
+    /// No key.
+    #[error("line {line}: no key")]
+    Key {
+        /// Its line.
+        line: usize,
+    },
+    /// A rule there isn't ([`Rule::named`]).
+    #[error("line {line}: {rule:?} isn't a rule")]
+    Rule {
+        /// Its line.
+        line: usize,
+        /// The rule, as written.
+        rule: String,
+    },
+    /// No file, not even `*`.
+    #[error("line {line}: no file (`*` for any)")]
+    File {
+        /// Its line.
+        line: usize,
+    },
+    /// A version that isn't one, and not `*`.
+    #[error("line {line}: {version:?} isn't a version (`*` for any)")]
+    Version {
+        /// Its line.
+        line: usize,
+        /// The version, as written.
+        version: String,
+    },
+    /// No reason.
+    #[error("line {line}: no reason")]
+    Reason {
+        /// Its line.
+        line: usize,
+    },
+    /// A second row for a table, key, rule, file and version.
+    #[error(
+        "line {line}: {table}/{key} {rule} in {} from {} is on line {first} already",
+        or_any(.file),
+        or_any(.from)
+    )]
+    Again {
+        /// Its line.
+        line: usize,
+        /// The table.
+        table: String,
+        /// The key.
+        key: String,
+        /// The rule.
+        rule: Rule,
+        /// The file, or none for any.
+        file: Option<String>,
+        /// The version, or none for any.
+        from: Option<Version>,
+        /// The line of the first row for them.
+        first: usize,
+    },
+}
+
+/// `value`, or `*` for any, for [`AllowanceError::Again`]'s text.
+fn or_any<T: fmt::Display>(value: &Option<T>) -> String {
+    value.as_ref().map_or("*".to_string(), T::to_string)
+}
+
+/// Why an allowances file doesn't read ([`Allowances::read`]): it can't be
+/// read, or a line of it doesn't, said after its path. The std error under
+/// one is a field, said after `: `, not a source.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ReadError {
+    /// The file can't be read.
+    #[error("reading {path}: {error}")]
+    Read {
+        /// Its path.
+        path: PathBuf,
+        /// Why, as std says.
+        error: io::Error,
+    },
+    /// A line of it doesn't read.
+    #[error("{path}: {error}")]
+    Parse {
+        /// Its path.
+        path: PathBuf,
+        /// The line, and why.
+        error: AllowanceError,
+    },
+}
+
 impl Allowances {
-    /// The allowances in the file `path`; an error names the file and, as
-    /// [`Allowances::parse`] does, the line.
-    pub fn read(path: &Path) -> Result<Allowances> {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        Allowances::parse(&text).with_context(|| path.display().to_string())
+    /// The allowances in the file `path`; a [`ReadError`] names the file
+    /// and, as [`Allowances::parse`] does, the line.
+    pub fn read(path: &Path) -> Result<Allowances, ReadError> {
+        let text = std::fs::read_to_string(path).map_err(|error| ReadError::Read {
+            path: path.to_path_buf(),
+            error,
+        })?;
+        Allowances::parse(&text).map_err(|error| ReadError::Parse {
+            path: path.to_path_buf(),
+            error,
+        })
     }
 
-    /// The allowances in `text`. An error names the line that doesn't
-    /// read: a row without its six fields, a table the model hasn't, a
-    /// rule there isn't, no file, a version that isn't one, no reason, or
-    /// a second row for a table, key, rule, file and version.
-    pub fn parse(text: &str) -> Result<Allowances> {
+    /// The allowances in `text`. An [`AllowanceError`] names the line that
+    /// doesn't read: a row without its six fields, a table the model
+    /// hasn't, a rule there isn't, no file, a version that isn't one, no
+    /// reason, or a second row for a table, key, rule, file and version.
+    pub fn parse(text: &str) -> Result<Allowances, AllowanceError> {
         let header = (text.lines())
             .take_while(|line| line.starts_with('#'))
             .count();
-        ensure!(header > 0, "line 1: no # header");
+        if header == 0 {
+            return Err(AllowanceError::Header);
+        }
         let mut list: Vec<Allowance> = Vec::new();
         for (i, text) in text.lines().enumerate().skip(header) {
             let line = i + 1;
-            ensure!(
-                !text.starts_with('#'),
-                "line {line}: a # line among the rows"
-            );
-            let allowance = Allowance::parse(line, text).with_context(|| format!("line {line}"))?;
+            if text.starts_with('#') {
+                return Err(AllowanceError::Comment { line });
+            }
+            let allowance = Allowance::parse(line, text)?;
             if let Some(first) = list.iter().find(|a| a.covers(&allowance)) {
-                bail!(
-                    "line {line}: {}/{} {} in {} from {} is on line {} already",
-                    allowance.table,
-                    allowance.key,
-                    allowance.rule,
-                    allowance.file.as_deref().unwrap_or("*"),
-                    allowance.from.map_or("*".to_string(), |v| v.to_string()),
-                    first.line
-                );
+                return Err(AllowanceError::Again {
+                    line,
+                    table: allowance.table,
+                    key: allowance.key,
+                    rule: allowance.rule,
+                    file: allowance.file,
+                    from: allowance.from,
+                    first: first.line,
+                });
             }
             list.push(allowance);
         }
@@ -126,29 +249,43 @@ impl Allowances {
 }
 
 impl Allowance {
-    fn parse(line: usize, text: &str) -> Result<Allowance> {
+    fn parse(line: usize, text: &str) -> Result<Allowance, AllowanceError> {
         let fields: Vec<&str> = text.split('\t').collect();
         let [table, key, rule, file, from, reason] = fields[..] else {
-            bail!(
-                "{} fields, not 6: table, key, rule, file, version, reason",
-                fields.len()
-            );
+            return Err(AllowanceError::Fields {
+                line,
+                count: fields.len(),
+            });
         };
-        ensure!(
-            table == "-" || grammar().table(table).is_some(),
-            "{table:?} isn't a table of the model's"
-        );
-        ensure!(!key.is_empty(), "no key");
-        let rule = Rule::named(rule).with_context(|| format!("{rule:?} isn't a rule"))?;
-        ensure!(!file.is_empty(), "no file (`*` for any)");
+        if table != "-" && grammar().table(table).is_none() {
+            return Err(AllowanceError::Table {
+                line,
+                table: table.to_string(),
+            });
+        }
+        if key.is_empty() {
+            return Err(AllowanceError::Key { line });
+        }
+        let rule = Rule::named(rule).ok_or_else(|| AllowanceError::Rule {
+            line,
+            rule: rule.to_string(),
+        })?;
+        if file.is_empty() {
+            return Err(AllowanceError::File { line });
+        }
+        let version = |from: &str| {
+            Version::parse(from.as_bytes()).ok_or_else(|| AllowanceError::Version {
+                line,
+                version: from.to_string(),
+            })
+        };
         let from = match from {
             "*" => None,
-            from => Some(
-                Version::parse(from.as_bytes())
-                    .with_context(|| format!("{from:?} isn't a version (`*` for any)"))?,
-            ),
+            from => Some(version(from)?),
         };
-        ensure!(!reason.trim().is_empty(), "no reason");
+        if reason.trim().is_empty() {
+            return Err(AllowanceError::Reason { line });
+        }
         Ok(Allowance {
             line,
             table: table.to_string(),

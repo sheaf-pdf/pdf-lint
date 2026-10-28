@@ -27,10 +27,10 @@ pub mod source;
 #[cfg_attr(fuzzing, allow(dead_code))]
 pub(crate) mod write;
 
-pub use allowance::{Allowance, Allowances};
+pub use allowance::{Allowance, AllowanceError, Allowances};
 pub use check::{
-    Class, Exempt, Finding, Hold, Made, Options, Report, Rule, Unchecked, Unlisted, UnlistedIn,
-    check, file_version,
+    Class, Exempt, ExemptError, Finding, Hold, HoldError, Made, Options, Report, Rule, Unchecked,
+    Unlisted, UnlistedIn, check, file_version,
 };
 // `grammar` is the module and the function both.
 pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, grammar, use_model};
@@ -49,8 +49,6 @@ pub use version::Version;
 /// [`use_model`] chose.
 pub mod grammar {
     use std::sync::OnceLock;
-
-    use anyhow::{Result, anyhow, ensure};
 
     pub use pdf_arlington::grammar::*;
 
@@ -81,19 +79,32 @@ pub mod grammar {
 
     /// Makes `model` the one every check reads, in place of the embedded
     /// one: a newer checkout of upstream's `tsv/latest`, read with
-    /// [`Grammar::load`]. Before anything has read the model, and once. An
-    /// error says when something has, or when `model` lacks a table the
-    /// checker reads by name ([`NAMED`]).
-    pub fn use_model(model: Grammar) -> Result<()> {
+    /// [`Grammar::load`]. Before anything has read the model, and once. A
+    /// [`Refused`] says when something has, or when `model` lacks a table
+    /// the checker reads by name ([`NAMED`]).
+    pub fn use_model(model: Grammar) -> Result<(), Refused> {
         for name in NAMED {
-            ensure!(
-                model.table(name).is_some(),
-                "it has no {name} table, which the checker reads by name"
-            );
+            if model.table(name).is_none() {
+                return Err(Refused::Lacks { table: name });
+            }
         }
-        CHOSEN
-            .set(Some(model))
-            .map_err(|_| anyhow!("the model is chosen already: something has read it"))
+        CHOSEN.set(Some(model)).map_err(|_| Refused::Chosen)
+    }
+
+    /// Why [`use_model`] doesn't take a model.
+    #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+    #[non_exhaustive]
+    pub enum Refused {
+        /// It lacks a table the checker reads by name ([`NAMED`]).
+        #[error("it has no {table} table, which the checker reads by name")]
+        Lacks {
+            /// The table.
+            table: &'static str,
+        },
+        /// Something has read the model already: the embedded one, or one
+        /// chosen before.
+        #[error("the model is chosen already: something has read it")]
+        Chosen,
     }
 }
 

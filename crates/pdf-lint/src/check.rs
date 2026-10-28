@@ -79,6 +79,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{self, Write as _};
+use std::num::ParseIntError;
 use std::rc::Rc;
 
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
@@ -136,10 +137,9 @@ pub enum Hold {
 impl Hold {
     /// The objects a hold file names: a line each, its object's number,
     /// generation and how it was made (`12 0 built`, `3 0 merged`), and
-    /// `#` lines and blank ones besides. An error names the line that
-    /// doesn't read, or that names an object a second time.
-    pub fn parse(text: &str) -> anyhow::Result<Hold> {
-        use anyhow::{Context, bail};
+    /// `#` lines and blank ones besides. A [`HoldError`] names the line
+    /// that doesn't read, or that names an object a second time.
+    pub fn parse(text: &str) -> Result<Hold, HoldError> {
         let mut objects = BTreeMap::new();
         for (i, line) in text.lines().enumerate() {
             let line_number = i + 1;
@@ -148,25 +148,87 @@ impl Hold {
                 [] => continue,
                 [first, ..] if first.starts_with('#') => continue,
                 [n, g, made] => (n, g, made),
-                _ => bail!("line {line_number}: not a number, a generation and built or merged"),
+                _ => return Err(HoldError::Words { line: line_number }),
             };
-            let n: u32 = n
-                .parse()
-                .with_context(|| format!("line {line_number}: {n:?} isn't an object number"))?;
-            let g: u16 = g
-                .parse()
-                .with_context(|| format!("line {line_number}: {g:?} isn't a generation"))?;
+            let n: u32 = n.parse().map_err(|error| HoldError::Number {
+                line: line_number,
+                number: n.to_string(),
+                error,
+            })?;
+            let g: u16 = g.parse().map_err(|error| HoldError::Generation {
+                line: line_number,
+                generation: g.to_string(),
+                error,
+            })?;
             let made = match made {
                 "built" => Made::Built,
                 "merged" => Made::Merged,
-                other => bail!("line {line_number}: {other:?} isn't built or merged"),
+                other => {
+                    return Err(HoldError::Made {
+                        line: line_number,
+                        made: other.to_string(),
+                    });
+                }
             };
             if objects.insert((n, g), made).is_some() {
-                bail!("line {line_number}: {n} {g} is held a second time");
+                return Err(HoldError::Again {
+                    line: line_number,
+                    id: (n, g),
+                });
             }
         }
         Ok(Hold::Only(objects))
     }
+}
+
+/// Why a hold file's text doesn't read ([`Hold::parse`]): the rule a line
+/// breaks, after the line. The std error under one is a field, said after
+/// `: `, not a source.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum HoldError {
+    /// A line of other than three words, neither blank nor a `#` line.
+    #[error("line {line}: not a number, a generation and built or merged")]
+    Words {
+        /// Its line.
+        line: usize,
+    },
+    /// An object number that isn't one: not digits, or over 32 bits.
+    #[error("line {line}: {number:?} isn't an object number: {error}")]
+    Number {
+        /// Its line.
+        line: usize,
+        /// The number, as written.
+        number: String,
+        /// Why, as std says.
+        error: ParseIntError,
+    },
+    /// A generation that isn't one: not digits, or over 16 bits.
+    #[error("line {line}: {generation:?} isn't a generation: {error}")]
+    Generation {
+        /// Its line.
+        line: usize,
+        /// The generation, as written.
+        generation: String,
+        /// Why, as std says.
+        error: ParseIntError,
+    },
+    /// A third word that's neither `built` nor `merged`.
+    #[error("line {line}: {made:?} isn't built or merged")]
+    Made {
+        /// Its line.
+        line: usize,
+        /// The word.
+        made: String,
+    },
+    /// An object a line before holds.
+    #[error("line {line}: {n} {g} is held a second time", n = .id.0, g = .id.1)]
+    Again {
+        /// Its line.
+        line: usize,
+        /// The object.
+        id: ObjectId,
+    },
 }
 
 /// What a check is told besides the file and what it holds.
@@ -248,10 +310,9 @@ impl Exempt {
     /// writes one, its `#xx` escapes decoded (`/MyKey`), or with a `*`
     /// after it for every key it begins (`/My*`; a name that ends in a
     /// star is written `/My#2A`); and `#` lines and blank ones besides.
-    /// An error names the line that doesn't read, or that names a key a
-    /// second time.
-    pub fn parse(text: &str) -> anyhow::Result<Vec<Exempt>> {
-        use anyhow::bail;
+    /// An [`ExemptError`] names the line that doesn't read, or that names
+    /// a key a second time.
+    pub fn parse(text: &str) -> Result<Vec<Exempt>, ExemptError> {
         use pdf_tokenizer::decode::How;
         use pdf_tokenizer::{Kind, Tokenizer};
         let mut keys = Vec::new();
@@ -268,33 +329,91 @@ impl Exempt {
             let tokens: Vec<_> = Tokenizer::new(written.as_bytes()).collect();
             let token = match tokens[..] {
                 [token] if matches!(token.kind, Kind::Name) => token,
-                _ => bail!("line {line_number}: {line:?} isn't a name, as /MyKey, or /My*"),
+                _ => {
+                    return Err(ExemptError::Name {
+                        line: line_number,
+                        written: line.to_string(),
+                    });
+                }
             };
             for piece in token.pieces().into_iter().flatten() {
                 match piece.how {
                     How::StrayHash => {
-                        bail!(
-                            "line {line_number}: {line:?} has a # without two hex digits after it"
-                        )
+                        return Err(ExemptError::Hash {
+                            line: line_number,
+                            written: line.to_string(),
+                        });
                     }
                     How::NulEscape => {
-                        bail!("line {line_number}: {line:?} has #00, which a name may not hold")
+                        return Err(ExemptError::Nul {
+                            line: line_number,
+                            written: line.to_string(),
+                        });
                     }
                     _ => {}
                 }
             }
             let name: Vec<u8> = token.pieces().into_iter().flat_map(|p| p.bytes()).collect();
             if name.is_empty() {
-                bail!("line {line_number}: an empty name");
+                return Err(ExemptError::Empty { line: line_number });
             }
             let key = Exempt { name, prefix };
             if keys.contains(&key) {
-                bail!("line {line_number}: {line:?} is exempt a second time");
+                return Err(ExemptError::Again {
+                    line: line_number,
+                    written: line.to_string(),
+                });
             }
             keys.push(key);
         }
         Ok(keys)
     }
+}
+
+/// Why an exempt file's text doesn't read ([`Exempt::parse`]): the rule a
+/// line breaks, after the line.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ExemptError {
+    /// A line that isn't a name, or a name and a `*`.
+    #[error("line {line}: {written:?} isn't a name, as /MyKey, or /My*")]
+    Name {
+        /// Its line.
+        line: usize,
+        /// The line as written, its white space at either end off.
+        written: String,
+    },
+    /// A name with a `#` without two hex digits after it.
+    #[error("line {line}: {written:?} has a # without two hex digits after it")]
+    Hash {
+        /// Its line.
+        line: usize,
+        /// The line as written, its white space at either end off.
+        written: String,
+    },
+    /// A name with `#00`, NUL, which a name may not hold (ISO 32000-2,
+    /// 7.3.5).
+    #[error("line {line}: {written:?} has #00, which a name may not hold")]
+    Nul {
+        /// Its line.
+        line: usize,
+        /// The line as written, its white space at either end off.
+        written: String,
+    },
+    /// A name of no bytes: `/`, or `/*`.
+    #[error("line {line}: an empty name")]
+    Empty {
+        /// Its line.
+        line: usize,
+    },
+    /// A key, or a prefix, a line before exempts.
+    #[error("line {line}: {written:?} is exempt a second time")]
+    Again {
+        /// Its line.
+        line: usize,
+        /// The line as written, its white space at either end off.
+        written: String,
+    },
 }
 
 /// What a finding breaks.
