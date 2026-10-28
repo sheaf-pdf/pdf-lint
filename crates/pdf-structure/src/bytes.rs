@@ -17,6 +17,81 @@
 //! its strings [`Str::Encrypted`], and its object streams unread, saying
 //! why. An object read from an object stream is placed in the stream's
 //! decoded data ([`Span::stream`]), which the [`Document`] keeps.
+//!
+//! # What's encrypted
+//!
+//! In an encrypted file it opens, what the reader decrypts and what it
+//! leaves as written, each with the clause of ISO 32000-2 that says so
+//! and the tests that hold it:
+//!
+//! - **Every string of an object read at its offset** is decrypted with
+//!   the object's key, made from its number and generation, and stays
+//!   where it was written; a stream's dictionary's strings too (7.6.2,
+//!   7.6.3). A string that doesn't decrypt cleanly is a warning, and what
+//!   decrypted is kept. Held by
+//!   `each_kind_of_encryption_decrypts_its_strings_where_they_are`,
+//!   `a_streams_dictionary_strings_decrypt_but_its_data_is_left_as_written`
+//!   and `strings_that_dont_decrypt_cleanly_are_said_once_an_object_and_a_fault`.
+//!   But for these, which are left as written:
+//!   - **The encryption dictionary's:** the trailer's `/Encrypt`, every
+//!     earlier cross-reference section's along `/Prev` (an earlier
+//!     update's dictionary), and the objects its entries refer to, where
+//!     the reader reads them to open the file (7.6.2). Held by
+//!     `an_encrypted_files_strings_are_ciphertext_but_its_encryption_dictionarys`,
+//!     `an_earlier_updates_encryption_dictionary_isnt_decrypted_either`
+//!     and `what_an_encryption_dictionarys_values_refer_to_is_read_as_written`.
+//!   - **A signature's `/Contents`,** in a dictionary with `/ByteRange` and
+//!     a string `/Contents` whose `/Type` is `/Sig`, `/DocTimeStamp` or
+//!     none (7.6.2). Held by
+//!     `a_signatures_contents_isnt_decrypted_whatever_its_type` and
+//!     `each_kind_of_encryption_decrypts_its_strings_where_they_are`.
+//!   - **A cross-reference stream's,** read as the trailer or as an object
+//!     (7.5.8.2). Held by
+//!     `a_cross_reference_streams_strings_are_read_as_written_in_a_file_that_opens`.
+//! - **An object in an object stream** isn't decrypted itself: it's read
+//!   from the stream's decrypted data, its strings as they are there
+//!   (7.5.7, 7.6.2). Held by
+//!   `an_object_streams_own_crypt_filter_says_how_its_data_decrypts` and
+//!   `an_encrypted_files_object_streams_decrypt_by_the_reader_as_through_qpdf`.
+//! - **An object stream's data** is decrypted before it's decoded: by the
+//!   stream's own `/Crypt` filter when it has one, the one its `/Name`
+//!   names (`/Identity` when it names none), else as the encryption
+//!   dictionary's `/StmF` says (7.6.6). Held by
+//!   `an_object_streams_own_crypt_filter_says_how_its_data_decrypts`,
+//!   `an_encrypted_object_stream_is_decrypted_and_decoded_without_the_decoder`
+//!   and `a_file_whose_strings_and_streams_arent_encrypted_reads_whole_without_its_password`.
+//! - **A cross-reference stream's data** is read as written, never
+//!   decrypted (7.5.8.2), and **no other stream's data is read:** it stays
+//!   where it was written
+//!   ([`Data::At`](pdf_objects::object::Data::At)), encrypted. Held by
+//!   `a_cross_reference_streams_strings_are_read_as_written_in_a_file_that_opens`
+//!   and `a_streams_dictionary_strings_decrypt_but_its_data_is_left_as_written`.
+//! - **`/Identity`:** strings are left as written when `/StrF` is
+//!   `/Identity`, as it is by default from `/V` 4, and object streams'
+//!   data when `/StmF` is (7.6.6 and Table 20). A file whose strings and
+//!   streams both are reads whole though no password it's given opens it
+//!   ([`Encryption::Plain`]), but for an object stream whose own `/Crypt`
+//!   filter encrypts it. Held by
+//!   `an_encrypted_files_strings_are_ciphertext_but_its_encryption_dictionarys`,
+//!   `an_encrypted_object_stream_is_decrypted_and_decoded_without_the_decoder`
+//!   and `a_file_whose_strings_and_streams_arent_encrypted_reads_whole_without_its_password`.
+//! - **Metadata under `/EncryptMetadata false`,** which counts from `/V`
+//!   4: the catalog's metadata stream's data is in plain view
+//!   ([`Document::metadata`]), whether the file opens or not, and its
+//!   dictionary's strings are decrypted as any object's are (7.6.4.2 and
+//!   14.3.2). Held by
+//!   `metadata_not_encrypted_is_in_plain_view_whether_the_file_opens_or_not`
+//!   and `metadata_not_encrypted_has_its_dictionarys_strings_decrypted_all_the_same`.
+//! - **The trailer** isn't an object: its strings, its `/ID` among them,
+//!   are read as written (7.5.5, 7.6.2). An object its `/ID` refers to,
+//!   though the `/ID` should be direct, is left as written too, as what
+//!   the encryption dictionary's entries refer to is. Held by
+//!   `the_trailers_id_is_read_as_written_in_a_file_that_opens`.
+//!
+//! In a file it doesn't open, the encryption dictionary's strings, a
+//! cross-reference stream's and the trailer's are read as written all the
+//! same. Held by
+//! `an_encrypted_files_strings_are_ciphertext_but_its_encryption_dictionarys`.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -1054,9 +1129,9 @@ impl<'a> Reader<'a> {
         let again;
         let data: &[u8] = match self.native {
             // From its own data, in any file: a cross-reference stream is
-            // never encrypted (ISO 32000-2, 7.5.8.1), and its dictionary's
-            // values are direct (7.5.8.2). What runs past its rows, which
-            // aren't read, isn't decoded.
+            // never encrypted, and its dictionary's values are direct (ISO
+            // 32000-2, 7.5.8.2). What runs past its rows, which aren't
+            // read, isn't decoded.
             true => {
                 let filters = filter::filters(dict, None)
                     .map_err(|why| format!("its cross-reference stream doesn't decode: {why}"))?;
@@ -1340,9 +1415,9 @@ impl<'a> Reader<'a> {
     /// Whether the file's strings are encrypted, from the trailer's
     /// `/Encrypt`: they are unless its crypt filter for strings is
     /// `/Identity`, which a version 4 or later dictionary has by default
-    /// (ISO 32000-2, 7.6.5). The encryption dictionary's own strings never
-    /// are, an earlier update's either, nor those in object streams, which
-    /// are encrypted whole.
+    /// (ISO 32000-2, 7.6.6 and Table 20). The encryption dictionary's own
+    /// strings never are, an earlier update's either, nor those in object
+    /// streams, which are encrypted whole.
     fn encryption(&mut self, trailer: &Trailer) {
         let Some(encrypt) = trailer.dict().get(b"Encrypt") else {
             return;
@@ -1535,7 +1610,7 @@ impl<'a> Reader<'a> {
                 XrefEntry::InUse { offset, .. } => {
                     let object = self.indirect(offset, Some(id)).map(|(_, mut o)| {
                         // A cross-reference stream is never encrypted (ISO
-                        // 32000-2, 7.5.8.1).
+                        // 32000-2, 7.5.8.2).
                         if self.encrypted.is_some() && is_xref_stream(&o) {
                             plain_strings(&mut o);
                         }
@@ -3708,6 +3783,42 @@ mod tests {
     }
 
     #[test]
+    fn what_an_encryption_dictionarys_values_refer_to_is_read_as_written() {
+        let root = || dict! { "Root" => Object::reference(1) };
+        for kind in KINDS {
+            let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+            // Its /O, a string, written again by reference to 8 0 R, which
+            // holds it as written in the dictionary.
+            let o = pdf_crypt::writer::dictionary(&settings(kind, b""))
+                .o
+                .unwrap();
+            let mut written = Vec::new();
+            write::value(&mut written, &Object::bytes(o.clone()));
+            let written = String::from_utf8(written).unwrap();
+            let from = format!("/O {written}");
+            let file = encryption_updated(&file, &from, "/O 8 0 R", &[(8, &written)]);
+            let doc = read_opened(&file, &[]);
+            assert_eq!(
+                doc.encryption,
+                Encryption::Opened { owner: false },
+                "{kind:?}"
+            );
+            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert_eq!(
+                plain(doc.get((8, 0)).unwrap()),
+                Object::bytes(o),
+                "{kind:?}"
+            );
+            let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
+            assert_eq!(
+                *lang.unwrap().value(),
+                Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
     fn metadata_not_encrypted_is_in_plain_view_whether_the_file_opens_or_not() {
         let root = dict! { "Root" => Object::reference(1) };
         let kind = pdf_crypt::writer::Kind::Aes128;
@@ -3730,6 +3841,46 @@ mod tests {
                 Some(&xmp[..]),
                 "{:?}",
                 doc.encryption
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_not_encrypted_has_its_dictionarys_strings_decrypted_all_the_same() {
+        let root = || dict! { "Root" => Object::reference(1) };
+        let xmp = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>";
+        let metadata =
+            dict! { "Type" => "Metadata", "Subtype" => "XML", "Mine" => Object::string("about") };
+        let objects = [
+            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
+            (2, dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into()),
+            (3, Body::stream(metadata, xmp)),
+        ];
+        // The kinds of /V 4 and 5, from which /EncryptMetadata counts.
+        let kinds = [
+            pdf_crypt::writer::Kind::Aes128,
+            pdf_crypt::writer::Kind::Aes256R5,
+            pdf_crypt::writer::Kind::Aes256,
+        ];
+        for kind in kinds {
+            let settings = pdf_crypt::writer::Settings {
+                encrypt_metadata: false,
+                ..settings(kind, b"")
+            };
+            let file = write::encrypted(&settings, &objects, root());
+            let doc = read_opened(&file, &[]);
+            assert_eq!(
+                doc.encryption,
+                Encryption::Opened { owner: false },
+                "{kind:?}"
+            );
+            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert_eq!(doc.metadata.as_deref(), Some(&xmp[..]), "{kind:?}");
+            let mine = doc.get((3, 0)).unwrap().as_dict().unwrap().get(b"Mine");
+            assert_eq!(
+                *mine.unwrap().value(),
+                Value::String(Str::Bytes(b"about".to_vec()), Some(Form::Literal)),
+                "{kind:?}"
             );
         }
     }
@@ -3778,6 +3929,79 @@ mod tests {
     }
 
     #[test]
+    fn an_object_streams_own_crypt_filter_says_how_its_data_decrypts() {
+        let kind = pdf_crypt::writer::Kind::Aes256;
+        let values = pdf_crypt::writer::dictionary(&settings(kind, b"user"));
+        let handler = Handler::open(&values, b"0123456789abcdef", &[b"user"]).unwrap();
+        let (objects, _) = objects_2_and_3();
+        let plain = write::zlib(&objects);
+        let encrypted =
+            pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &plain, None, [4; 16]).unwrap();
+        let hex = |b: &Option<Vec<u8>>| -> String {
+            b.as_ref()
+                .unwrap()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        // Its strings and streams both encrypted, by /StdCF.
+        let encrypt = format!(
+            "/Root 1 0 R /Encrypt << /Filter /Standard /V 5 /R 6 /Length 256 /P -4 /O <{}> /U <{}> /OE <{}> /UE <{}> /Perms <{}> \
+             /CF << /StdCF << /CFM /AESV3 >> >> /StmF /StdCF /StrF /StdCF >> \
+             /ID [(0123456789abcdef) (0123456789abcdef)]",
+            hex(&values.o),
+            hex(&values.u),
+            hex(&values.oe),
+            hex(&values.ue),
+            hex(&values.perms)
+        );
+        let cases = [
+            // No crypt filter of its own: as /StmF says.
+            (" /Filter /FlateDecode", &encrypted),
+            // Its own, by its name.
+            (
+                " /Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /StdCF >> null]",
+                &encrypted,
+            ),
+            // Its own, /Identity: not encrypted, though the file's streams
+            // are.
+            (
+                " /Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /Identity >> null]",
+                &plain,
+            ),
+            // Its own, naming none: /Identity.
+            (" /Filter [/Crypt /FlateDecode]", &plain),
+        ];
+        for (filter, data) in cases {
+            let mut file = filtered(false, filter, data);
+            // The catalog's string, written in plain view, blanked out, so
+            // that nothing moves.
+            let at = find(&file, b"/Lang (en)").unwrap();
+            file[at..at + 10].fill(b' ');
+            let at = find(&file, b"/Root 1 0 R").unwrap();
+            let file = [&file[..at], encrypt.as_bytes(), &file[at + 11..]].concat();
+            let doc = read_opened(&file, &[b"user"]);
+            assert_eq!(
+                doc.encryption,
+                Encryption::Opened { owner: false },
+                "{filter}"
+            );
+            assert!(doc.warnings.is_empty(), "{filter}: {:?}", doc.warnings);
+            assert_eq!(doc.decoded[&(4, 0)], objects, "{filter}");
+            // Its objects are read from its decrypted data, their strings
+            // as they are there, not decrypted again.
+            let pages = doc.get((2, 0)).unwrap();
+            assert_eq!(pages.at.unwrap().stream, Some((4, 0)), "{filter}");
+            let mine = pages.as_dict().unwrap().get(b"Mine");
+            assert_eq!(
+                *mine.unwrap().value(),
+                Value::String(Str::Bytes(b"plain".to_vec()), Some(Form::Literal)),
+                "{filter}"
+            );
+        }
+    }
+
+    #[test]
     fn a_trailer_without_an_id_makes_the_key_without_one_and_says_so() {
         let root = dict! { "Root" => Object::reference(1) };
         let kind = pdf_crypt::writer::Kind::Aes128;
@@ -3800,6 +4024,63 @@ mod tests {
             *lang.unwrap().value(),
             Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal))
         );
+    }
+
+    #[test]
+    fn the_trailers_id_is_read_as_written_in_a_file_that_opens() {
+        let id = &b"0123456789abcdef"[..];
+        let written = Object::from(vec![Object::bytes(id), Object::bytes(id)]);
+        let en = Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal));
+        let lang = |doc: &Document| {
+            let catalog = doc.get((1, 0)).unwrap().as_dict().unwrap().clone();
+            catalog.get(b"Lang").unwrap().value().clone()
+        };
+        for kind in KINDS {
+            let root = dict! { "Root" => Object::reference(1) };
+            let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root);
+            let doc = read_opened(&file, &[]);
+            assert_eq!(
+                doc.encryption,
+                Encryption::Opened { owner: false },
+                "{kind:?}"
+            );
+            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert_eq!(lang(&doc), en, "{kind:?}");
+            let trailer_id = doc.trailer.dict().get(b"ID").unwrap();
+            assert_eq!(plain(trailer_id), written, "{kind:?}");
+            let at = trailer_id.at.unwrap();
+            assert_eq!(
+                &file[at.start..at.end],
+                b"[(0123456789abcdef) (0123456789abcdef)]",
+                "{kind:?}"
+            );
+
+            // By reference, which it shouldn't be (ISO 32000-2, Table 15):
+            // an update whose trailer names 7 0 R, which holds it as
+            // written. The key is made from it, and it's read as written,
+            // as what the encryption dictionary's values refer to is.
+            let prev = startxref(&file);
+            let mut file = file;
+            let seven = file.len();
+            file.extend_from_slice(b"7 0 obj\n[(0123456789abcdef) (0123456789abcdef)]\nendobj\n");
+            let xref = file.len();
+            file.extend_from_slice(
+                format!(
+                    "xref\n7 1\n{seven:010} 00000 n \ntrailer\n<< /Size 8 /Root 1 0 R /Encrypt 6 0 R \
+                     /ID 7 0 R /Prev {prev} >>\nstartxref\n{xref}\n%%EOF\n"
+                )
+                .as_bytes(),
+            );
+            let doc = read_opened(&file, &[]);
+            assert_eq!(
+                doc.encryption,
+                Encryption::Opened { owner: false },
+                "{kind:?}"
+            );
+            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert_eq!(lang(&doc), en, "{kind:?}");
+            assert_eq!(plain(doc.get((7, 0)).unwrap()), written, "{kind:?}");
+        }
     }
 
     #[test]
@@ -3877,6 +4158,126 @@ mod tests {
                 &Value::String(Str::Bytes(written.clone().unwrap()), Some(Form::Literal)),
                 "{n}"
             );
+        }
+    }
+
+    #[test]
+    fn a_cross_reference_streams_strings_are_read_as_written_in_a_file_that_opens() {
+        let id = &b"0123456789abcdef"[..];
+        let written = Object::from(vec![Object::bytes(id), Object::bytes(id)]);
+        let root = || dict! { "Root" => Object::reference(1) };
+        for kind in KINDS {
+            let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+            // Its table and trailer written again as a cross-reference
+            // stream, 7 0 R: the table's rows, then its own, each a type,
+            // an offset and a generation, of 1, 4 and 2 bytes; and the
+            // trailer's entries, its /ID among them, in plain view.
+            let xref = startxref(&file);
+            let table = String::from_utf8(file[xref..].to_vec()).unwrap();
+            let mut rows = Vec::new();
+            let mut row = |kind: u8, offset: u32, generation: u16| {
+                rows.push(kind);
+                rows.extend_from_slice(&offset.to_be_bytes());
+                rows.extend_from_slice(&generation.to_be_bytes());
+            };
+            for line in table.lines().skip(2).take_while(|line| *line != "trailer") {
+                let in_use = u8::from(line.ends_with("n "));
+                row(
+                    in_use,
+                    line[..10].parse().unwrap(),
+                    line[11..16].parse().unwrap(),
+                );
+            }
+            row(1, u32::try_from(xref).unwrap(), 0);
+            let size = rows.len() / 7;
+            assert_eq!(size, 8, "{kind:?}");
+            let mut file = file[..xref].to_vec();
+            file.extend_from_slice(
+                format!(
+                    "7 0 obj\n<< /Type /XRef /Size {size} /W [1 4 2] /Root 1 0 R /Encrypt 6 0 R \
+                     /ID [(0123456789abcdef) (0123456789abcdef)] /Length {} >>\nstream\n",
+                    rows.len()
+                )
+                .as_bytes(),
+            );
+            file.extend_from_slice(&rows);
+            file.extend_from_slice(
+                format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+            );
+            let doc = read_opened(&file, &[]);
+            assert_eq!(
+                doc.encryption,
+                Encryption::Opened { owner: false },
+                "{kind:?}"
+            );
+            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            assert_eq!(doc.trailer.stream, Some((7, 0)), "{kind:?}");
+            // The file's strings are decrypted, but the cross-reference
+            // stream's are read as written, as the trailer and as an
+            // object.
+            let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
+            assert_eq!(
+                *lang.unwrap().value(),
+                Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
+                "{kind:?}"
+            );
+            let id = |o: &Object| o.as_dict().unwrap().get(b"ID").unwrap().clone();
+            assert_eq!(plain(&id(&doc.trailer.object)), written, "{kind:?}");
+            let object = id(doc.get((7, 0)).unwrap());
+            assert_eq!(plain(&object), written, "{kind:?}");
+            let at = object.at.unwrap();
+            assert_eq!(
+                &file[at.start..at.end],
+                b"[(0123456789abcdef) (0123456789abcdef)]",
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_streams_dictionary_strings_decrypt_but_its_data_is_left_as_written() {
+        let root = || dict! { "Root" => Object::reference(1) };
+        let drawn: &[u8] = b"0 0 m 9 9 l S";
+        let form = dict! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(9), Object::from(9)],
+            "Mine" => Object::string("on the form"),
+        };
+        let resources = dict! { "XObject" => dict! { "Fm" => Object::reference(4) } };
+        let objects = [
+            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2) }.into()),
+            (2, dict! { "Type" => "Pages", "Kids" => vec![Object::reference(3)], "Count" => 1 }.into()),
+            (3, dict! { "Type" => "Page", "Parent" => Object::reference(2), "Resources" => resources }.into()),
+            (4, Body::stream(form, drawn)),
+        ];
+        for kind in KINDS {
+            let file = write::encrypted(&settings(kind, b""), &objects, root());
+            let doc = read_opened(&file, &[]);
+            assert_eq!(
+                doc.encryption,
+                Encryption::Opened { owner: false },
+                "{kind:?}"
+            );
+            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            let Value::Stream(stream) = doc.get((4, 0)).unwrap().value() else {
+                panic!("{kind:?}: not a stream");
+            };
+            assert_eq!(
+                *stream.dict.get(b"Mine").unwrap().value(),
+                Value::String(Str::Bytes(b"on the form".to_vec()), Some(Form::Literal)),
+                "{kind:?}"
+            );
+            // Its data isn't read: it's where it was written, encrypted.
+            assert!(
+                matches!(stream.data, pdf_objects::object::Data::At(_)),
+                "{kind:?}"
+            );
+            let at = stream.data.at().unwrap();
+            assert_eq!(at.stream, None, "{kind:?}");
+            let data = &file[at.start..at.end];
+            assert!(!data.windows(drawn.len()).any(|w| w == drawn), "{kind:?}");
+            assert!(doc.decoded.is_empty(), "{kind:?}");
         }
     }
 

@@ -21,6 +21,7 @@
 //!   ([`bytes::read_opened`]), through pdf-crypt's standard security
 //!   handler: object streams decrypted before they're decoded, strings
 //!   decrypted where they are; [`Encryption`] says whether the file opened.
+//!   What's decrypted and what's left as written is listed in [`bytes`].
 //! - **A revision before an update** read as the file was then
 //!   ([`bytes::read_from`]).
 //!
