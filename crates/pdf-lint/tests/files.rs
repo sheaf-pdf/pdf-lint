@@ -44,10 +44,10 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
         let data = std::fs::read(fixture(name)).unwrap();
         let doc = read_opened(&data, &[]);
         let opened = match encrypted {
-            true => Encryption::Opened { owner: false },
-            false => Encryption::None,
+            true => matches!(doc.encryption, Encryption::Opened { owner: false, .. }),
+            false => doc.encryption == Encryption::None,
         };
-        assert_eq!(doc.encryption, opened, "{name}");
+        assert!(opened, "{name}: {:?}", doc.encryption);
         assert_eq!(doc.trailer.unwritten, None, "{name}");
         assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
         assert!(doc.objects.values().all(Result::is_ok), "{name}");
@@ -79,11 +79,8 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
         // The owner's password opens it too, to the same.
         if encrypted {
             let owned = read_opened(&data, &[b"owner"]);
-            assert_eq!(
-                owned.encryption,
-                Encryption::Opened { owner: true },
-                "{name}"
-            );
+            let opened = matches!(owned.encryption, Encryption::Opened { owner: true, .. });
+            assert!(opened, "{name}: {:?}", owned.encryption);
             assert_eq!(owned.objects, doc.objects, "{name}");
         }
     }

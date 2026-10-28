@@ -5,7 +5,10 @@
 //! `startxref`, the cross-reference tables and streams along their `/Prev`
 //! chain, and each object at the offset they give, a stream's data by its
 //! `/Length` when that ends at `endstream`. Where the sections don't read,
-//! it finds the objects by scanning the file, and says so.
+//! it finds the objects by scanning the file, and says so. An object that
+//! doesn't read says why ([`Unread`]): it doesn't parse, its offset holds
+//! another, or the object stream it's in doesn't decode ([`Undecoded`],
+//! its filters [`Unfiltered`]) or doesn't say where it is ([`Unlisted`]).
 //!
 //! It decodes cross-reference streams and object streams from their own
 //! data, through [`pdf_filters`]: a stream up to [`STREAM`] bytes, and a
@@ -102,7 +105,8 @@ use pdf_objects::parse::{self, Body, Parser, Sink};
 use pdf_objects::version::Version;
 
 use crate::filter;
-use crate::source::{Document, Encryption, Trailer, Update, Warning};
+pub use crate::filter::Unfiltered;
+use crate::source::{Document, Encryption, Trailer, Unread, Update, Warning};
 
 // How deeply arrays and dictionaries may nest in an object is the
 // parser's, pdf-objects'.
@@ -130,6 +134,7 @@ pub const BUDGET: usize = 4 << 20;
 
 /// What a cross-reference section says of an object number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum XrefEntry {
     /// In use, written at `offset`.
     InUse {
@@ -146,7 +151,68 @@ pub enum XrefEntry {
         index: u32,
     },
     /// Free: the number isn't in use.
+    #[non_exhaustive]
     Free,
+}
+
+/// Why an object stream's data doesn't decode, for each object in it
+/// ([`Unread::Container`]).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Undecoded {
+    /// The object its number names isn't a stream.
+    #[error("it isn't a stream")]
+    NotAStream,
+    /// Its `/Filter` or `/DecodeParms` are ones the reader doesn't take.
+    #[error("{0}")]
+    Filters(Unfiltered),
+    /// Its own `/Crypt` filter, named `filter`, encrypts it, in an
+    /// encrypted file that no password the reader was given opens: its
+    /// password is needed.
+    #[error(
+        "its own /Crypt filter, /{}, encrypts it, and no password the reader was given opens the file",
+        String::from_utf8_lossy(.filter)
+    )]
+    Encrypted {
+        /// The crypt filter's name.
+        filter: Vec<u8>,
+    },
+    /// Its data doesn't decrypt, and nothing of it did.
+    #[error("its data doesn't decrypt: {0}")]
+    Decrypt(pdf_crypt::Fault),
+    /// Another decoder's words, where one decodes for the reader.
+    #[error("{0}")]
+    Other(String),
+}
+
+/// Why an object stream's header doesn't say where its objects are (ISO
+/// 32000-2, 7.5.7), for each object in it ([`Unread::ContainerHeader`]).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Unlisted {
+    /// The object its number names isn't a stream.
+    #[error("it isn't a stream")]
+    NotAStream,
+    /// It isn't `/Type /ObjStm`.
+    #[error("it isn't /Type /ObjStm")]
+    NotAnObjectStream,
+    /// Its `/N` or `/First` isn't a count.
+    #[error("its /N or /First isn't a count")]
+    Counts,
+    /// Its header has fewer pairs of integers than its `/N` says.
+    #[error("its header has {pairs} of its {count} pairs")]
+    Pairs {
+        /// How many it has.
+        pairs: usize,
+        /// How many its `/N` says.
+        count: usize,
+    },
+    /// Its header gives a number that numbers no object.
+    #[error("its header numbers no object")]
+    Number,
+    /// Its header gives an offset that isn't one.
+    #[error("its header gives an offset that isn't one")]
+    Offset,
 }
 
 /// What decodes what the reader can't: the object streams and strings of
@@ -379,13 +445,13 @@ fn reading(
 fn metadata(
     file: &[u8],
     trailer: &Trailer,
-    objects: &BTreeMap<ObjectId, Result<Object, String>>,
+    objects: &BTreeMap<ObjectId, Result<Object, Unread>>,
     encrypted: bool,
 ) -> Option<Vec<u8>> {
     /// `o` with its references followed, as many as an object's way to
     /// the catalog may take.
     fn get<'a>(
-        objects: &'a BTreeMap<ObjectId, Result<Object, String>>,
+        objects: &'a BTreeMap<ObjectId, Result<Object, Unread>>,
         mut o: &'a Object,
     ) -> Option<&'a Object> {
         for _ in 0..8 {
@@ -663,10 +729,10 @@ impl<'a> Reader<'a> {
         &mut self,
         id: ObjectId,
         object: &Object,
-        objects: &BTreeMap<ObjectId, Result<Object, String>>,
-    ) -> Result<Vec<u8>, String> {
+        objects: &BTreeMap<ObjectId, Result<Object, Unread>>,
+    ) -> Result<Vec<u8>, Undecoded> {
         let Value::Stream(stream) = object.value() else {
-            return Err("it isn't a stream".to_string());
+            return Err(Undecoded::NotAStream);
         };
         // Not decoded, and so not counted against the budget, unless it's
         // an object stream: its header says why it's not.
@@ -678,7 +744,7 @@ impl<'a> Reader<'a> {
             .and_then(|at| self.file.get(at.start..at.end))
             .unwrap_or_default();
         let resolve = |id| objects.get(&id)?.as_ref().ok();
-        let filters = filter::filters(&stream.dict, Some(&resolve))?;
+        let filters = filter::filters(&stream.dict, Some(&resolve)).map_err(Undecoded::Filters)?;
         // In an encrypted file, decrypted first: by its own crypt filter
         // when it names one, else as the file's streams are. In one no
         // password opened whose streams aren't encrypted, its own crypt
@@ -686,10 +752,9 @@ impl<'a> Reader<'a> {
         let crypt = filter::crypt_filter(&stream.dict, Some(&resolve));
         if self.handler.is_none() && self.encrypts {
             if let Some(name) = crypt.as_deref().filter(|&name| name != b"Identity") {
-                let name = String::from_utf8_lossy(name);
-                return Err(format!(
-                    "its own /Crypt filter, /{name}, encrypts it, and no password the reader was given opens the file"
-                ));
+                return Err(Undecoded::Encrypted {
+                    filter: name.to_vec(),
+                });
             }
         }
         let decrypted = (self.handler.as_ref()).map(|handler| {
@@ -705,7 +770,7 @@ impl<'a> Reader<'a> {
                 self.warn(Some(id), stream.data.at(), message);
                 match error.data {
                     Some(plain) => (plain, false),
-                    None => return Err(format!("its data doesn't decrypt: {fault}")),
+                    None => return Err(Undecoded::Decrypt(fault)),
                 }
             }
         };
@@ -1055,7 +1120,7 @@ impl<'a> Reader<'a> {
 
     /// The cross-reference stream at `offset`: a stream, `/Type /XRef`.
     fn xref_stream(&mut self, offset: usize) -> Result<(ObjectId, Object), String> {
-        let (id, object) = self.indirect(offset, None)?;
+        let (id, object) = self.indirect(offset, None).map_err(|e| e.to_string())?;
         let Value::Stream(stream) = object.value() else {
             return Err(format!(
                 "{} {} R, at byte {offset}, isn't a stream",
@@ -1592,7 +1657,7 @@ impl<'a> Reader<'a> {
 
     /// Every object the entries list: each in use read at its offset, then
     /// each in an object stream from the stream's decoded data.
-    fn objects(&mut self) -> BTreeMap<ObjectId, Result<Object, String>> {
+    fn objects(&mut self) -> BTreeMap<ObjectId, Result<Object, Unread>> {
         let entries: Vec<(u32, (u16, XrefEntry))> =
             self.entries.iter().map(|(&n, &e)| (n, e)).collect();
         let mut objects = BTreeMap::new();
@@ -1627,7 +1692,7 @@ impl<'a> Reader<'a> {
         // asked of the decoder.
         let plain = self.encryption == Encryption::Plain;
         let native = self.native && (!self.encrypts || self.handler.is_some() || plain);
-        let mut decoded = match native {
+        let mut decoded: BTreeMap<ObjectId, Result<Vec<u8>, Undecoded>> = match native {
             true => (streams.iter())
                 .filter_map(|&n| {
                     let object = objects.get(&(n, 0))?.as_ref().ok()?;
@@ -1653,24 +1718,24 @@ impl<'a> Reader<'a> {
                     .filter(|n| !plain.contains_key(n))
                     .map(|&n| (n, 0))
                     .collect();
-                let mut decoded = self.decode(&ids);
+                let mut decoded: BTreeMap<_, _> = (self.decode(&ids).into_iter())
+                    .map(|(id, data)| (id, data.map_err(Undecoded::Other)))
+                    .collect();
                 decoded.extend(plain.into_iter().map(|(n, data)| ((n, 0), Ok(data))));
                 decoded
             }
         };
-        let mut headers: BTreeMap<u32, Result<Vec<(u32, usize)>, String>> = BTreeMap::new();
+        let mut headers: BTreeMap<u32, Result<Vec<(u32, usize)>, Unread>> = BTreeMap::new();
         for &stream in &streams {
             let id = (stream, 0);
             let header = match (objects.get(&id), decoded.remove(&id)) {
                 (Some(Ok(object)), decoded) => {
                     let by_number = match decoded {
-                        Some(Ok(data)) => object_stream_header(object, &data).map(|h| (h, data)),
-                        Some(Err(why)) => Err(format!(
-                            "its object stream {stream} 0 R doesn't decode: {why}"
-                        )),
-                        None => Err(format!(
-                            "it's in object stream {stream} 0 R, and nothing decodes that"
-                        )),
+                        Some(Ok(data)) => (object_stream_header(object, &data))
+                            .map(|h| (h, data))
+                            .map_err(|why| Unread::ContainerHeader { stream, why }),
+                        Some(Err(why)) => Err(Unread::Container { stream, why }),
+                        None => Err(Unread::Undecodable { stream }),
                     };
                     // Asked of the decoder in a file that isn't encrypted,
                     // a stream it can't decode by its number, or decodes as
@@ -1690,10 +1755,11 @@ impl<'a> Reader<'a> {
                         header
                     })
                 }
-                (Some(Err(why)), _) => Err(format!(
-                    "its object stream {stream} 0 R doesn't read: {why}"
-                )),
-                (None, _) => Err(format!("its object stream {stream} 0 R isn't in the file")),
+                (Some(Err(why)), _) => Err(Unread::ContainerUnread {
+                    stream,
+                    why: Box::new(why.clone()),
+                }),
+                (None, _) => Err(Unread::ContainerMissing { stream }),
             };
             headers.insert(stream, header);
         }
@@ -1712,7 +1778,7 @@ impl<'a> Reader<'a> {
     /// each where it is, but a signature's `/Contents`, which isn't
     /// encrypted; one that doesn't decrypt cleanly said, once an object and
     /// a fault.
-    fn decrypt_strings(&mut self, objects: &mut BTreeMap<ObjectId, Result<Object, String>>) {
+    fn decrypt_strings(&mut self, objects: &mut BTreeMap<ObjectId, Result<Object, Unread>>) {
         let Some(handler) = self.handler.take() else {
             return;
         };
@@ -1741,7 +1807,7 @@ impl<'a> Reader<'a> {
     /// replaced by the one where it is in the decoder's object. A string it
     /// can't place stays ciphertext, and so does one the decoder can't
     /// decrypt, and the reader says so.
-    fn decrypt(&mut self, objects: &mut BTreeMap<ObjectId, Result<Object, String>>) {
+    fn decrypt(&mut self, objects: &mut BTreeMap<ObjectId, Result<Object, Unread>>) {
         let Some(decoder) = self.decoder.filter(|_| self.encrypted.is_some()) else {
             return;
         };
@@ -1792,25 +1858,30 @@ impl<'a> Reader<'a> {
         stream: ObjectId,
         header: &[(u32, usize)],
         index: u32,
-    ) -> Result<Object, String> {
+    ) -> Result<Object, Unread> {
         let &(number, offset) = usize::try_from(index)
             .ok()
             .and_then(|i| header.get(i))
-            .ok_or_else(|| format!("object stream {} 0 R has no object {index}", stream.0))?;
+            .ok_or(Unread::NoIndex {
+                stream: stream.0,
+                index,
+            })?;
         if number != id.0 {
-            return Err(format!(
-                "object {index} of object stream {} 0 R is {number}, not {}",
-                stream.0, id.0
-            ));
+            return Err(Unread::Numbered {
+                stream: stream.0,
+                index,
+                number,
+                expected: id.0,
+            });
         }
         // Taken out while it's read, as its warnings borrow the reader, and
         // put back.
         let Some(data) = self.decoded.get_mut(&stream).map(std::mem::take) else {
-            return Err(format!("object stream {} 0 R has no data", stream.0));
+            return Err(Unread::NoData { stream: stream.0 });
         };
         let object = (Parser::at(&data, offset).in_stream(stream))
             .value(&mut self.warned(Some(id)))
-            .map_err(|e| e.to_string());
+            .map_err(Unread::Parse);
         // One that runs to where a fault cut the data off may be cut short,
         // when it's a value nothing closes: a number, a name, a keyword.
         let open = |o: &Object| {
@@ -1824,10 +1895,7 @@ impl<'a> Reader<'a> {
                 .is_ok_and(|o| open(o) && o.at.is_some_and(|at| at.end == data.len()));
         self.decoded.insert(stream, data);
         match cut {
-            true => Err(format!(
-                "it runs to where a fault cut object stream {} 0 R's data off, so it may be cut short",
-                stream.0
-            )),
+            true => Err(Unread::Cut { stream: stream.0 }),
             false => object,
         }
     }
@@ -1840,20 +1908,21 @@ impl<'a> Reader<'a> {
         &mut self,
         offset: usize,
         expected: Option<ObjectId>,
-    ) -> Result<(ObjectId, Object), String> {
+    ) -> Result<(ObjectId, Object), Unread> {
         let mut parser = Parser::at(self.file, offset);
-        let id = parser.header().map_err(|e| e.to_string())?;
+        let id = parser.header().map_err(Unread::Parse)?;
         if let Some(expected) = expected {
             if expected != id {
-                return Err(format!(
-                    "byte {offset} holds {} {} obj, where the cross-references put {} {} R",
-                    id.0, id.1, expected.0, expected.1
-                ));
+                return Err(Unread::Elsewhere {
+                    offset,
+                    found: id,
+                    expected,
+                });
             }
         }
         let mut parser = parser.ciphertext(self.ciphertext(id));
         let body = parser.body(id, &mut self.warned(Some(id)));
-        let object = match body.map_err(|e| e.to_string())? {
+        let object = match body.map_err(Unread::Parse)? {
             Body::Object(object) => object,
             Body::Stream(head) => {
                 let length = self.length(head.dict(), id);
@@ -1871,8 +1940,7 @@ impl<'a> Reader<'a> {
                         head.scanned()
                     }
                 };
-                (parser.stream(head, data, &mut self.warned(Some(id))))
-                    .map_err(|e| e.to_string())?
+                (parser.stream(head, data, &mut self.warned(Some(id)))).map_err(Unread::Parse)?
             }
         };
         Ok((id, object))
@@ -1903,10 +1971,10 @@ impl<'a> Reader<'a> {
 /// number and where it starts, from the stream's `/First` (ISO 32000-2,
 /// 7.5.7). It's read as far as its `/N` says, and no further than the
 /// data holds pairs of integers.
-fn object_stream_header(object: &Object, data: &[u8]) -> Result<Vec<(u32, usize)>, String> {
-    let dict = object.as_dict().ok_or("it isn't a stream")?;
+fn object_stream_header(object: &Object, data: &[u8]) -> Result<Vec<(u32, usize)>, Unlisted> {
+    let dict = object.as_dict().ok_or(Unlisted::NotAStream)?;
     if dict.get(b"Type").and_then(Object::as_name) != Some(b"ObjStm") {
-        return Err("it isn't /Type /ObjStm".to_string());
+        return Err(Unlisted::NotAnObjectStream);
     }
     let count = dict
         .get(b"N")
@@ -1917,7 +1985,7 @@ fn object_stream_header(object: &Object, data: &[u8]) -> Result<Vec<(u32, usize)
         .and_then(Object::as_integer)
         .and_then(|n| usize::try_from(n).ok());
     let (Some(count), Some(first)) = (count, first) else {
-        return Err("its /N or /First isn't a count".to_string());
+        return Err(Unlisted::Counts);
     };
     let mut t = Tokenizer::new(data.get(..first.min(data.len())).unwrap_or_default());
     let mut header = Vec::new();
@@ -1928,16 +1996,16 @@ fn object_stream_header(object: &Object, data: &[u8]) -> Result<Vec<(u32, usize)
                 .and_then(|token| token.integer().ok())
         };
         let (Some(number), Some(offset)) = (integer(&mut t), integer(&mut t)) else {
-            return Err(format!(
-                "its header has {} of its {count} pairs",
-                header.len()
-            ));
+            return Err(Unlisted::Pairs {
+                pairs: header.len(),
+                count,
+            });
         };
-        let number = u32::try_from(number).map_err(|_| "its header numbers no object")?;
+        let number = u32::try_from(number).map_err(|_| Unlisted::Number)?;
         let offset = usize::try_from(offset)
             .ok()
             .and_then(|offset| offset.checked_add(first))
-            .ok_or("its header gives an offset that isn't one")?;
+            .ok_or(Unlisted::Offset)?;
         header.push((number, offset));
     }
     Ok(header)
@@ -2908,7 +2976,12 @@ mod tests {
             "<< /Size 9 /Root 1 0 R >>",
         );
         let doc = read(&file);
-        let why = |n: u32| doc.get((n, 0)).err().unwrap_or_default();
+        let why = |n: u32| {
+            doc.get((n, 0))
+                .err()
+                .map(|why| why.to_string())
+                .unwrap_or_default()
+        };
         assert!(why(2).contains("isn't a name"), "{}", why(2));
         assert!(why(3).contains("isn't a name"), "{}", why(3));
         assert!(why(4).contains("`endobj`"), "{}", why(4));
@@ -2934,7 +3007,7 @@ mod tests {
         let at = find(&file, row.as_bytes()).unwrap();
         file[at..at + 10].copy_from_slice(format!("{one:010}").as_bytes());
         let doc = read(&file);
-        let why = doc.get((2, 0)).unwrap_err();
+        let why = doc.get((2, 0)).unwrap_err().to_string();
         assert!(
             why.contains("holds 1 0 obj, where the cross-references put 2 0 R"),
             "{why}"
@@ -3019,7 +3092,7 @@ mod tests {
                             placed_as(within, object, !encrypted);
                         }
                     }
-                    Err(why) => *bad.entry(class(why)).or_insert(0usize) += 1,
+                    Err(why) => *bad.entry(class(&why.to_string())).or_insert(0usize) += 1,
                 }
             }
             for w in &doc.warnings {
@@ -3232,7 +3305,7 @@ mod tests {
         assert!(read_with(&file, &Unasked).get((2, 0)).is_ok());
         // In a file that encrypts, its data is ciphertext, which only a
         // decoder decodes.
-        let why = read(&unfiltered(true)).get((2, 0)).unwrap_err();
+        let why = read(&unfiltered(true)).get((2, 0)).unwrap_err().to_string();
         assert!(why.contains("nothing decodes that"), "{why}");
     }
 
@@ -3411,7 +3484,7 @@ mod tests {
         );
         let doc = read(&file);
         assert_eq!(doc.decoded[&(4, 0)], b"2 0 3 6 << >>\n123");
-        let why = doc.get((3, 0)).unwrap_err();
+        let why = doc.get((3, 0)).unwrap_err().to_string();
         assert!(why.contains("so it may be cut short"), "{why}");
         assert!(doc.get((2, 0)).is_ok());
     }
@@ -3709,7 +3782,7 @@ mod tests {
         let file = [&file[..at], encrypt.as_bytes(), &file[at + 11..]].concat();
         let doc = read_opened(&file, &[]);
         assert_eq!(doc.encryption, Encryption::Plain);
-        let why = doc.get((2, 0)).unwrap_err();
+        let why = doc.get((2, 0)).unwrap_err().to_string();
         assert!(
             why.contains("its own /Crypt filter, /StdCF, encrypts it"),
             "{why}"
@@ -4354,7 +4427,7 @@ mod tests {
             [&file[..at], b"/JBIG2Decode", &file[at + 12..]].concat()
         };
         let doc = read(&image(&file, find(&file, b"4 0 obj").unwrap()));
-        let why = doc.get((2, 0)).unwrap_err();
+        let why = doc.get((2, 0)).unwrap_err().to_string();
         assert!(
             why.contains("its object stream 4 0 R doesn't decode: its filter /JBIG2Decode isn't one the reader decodes"),
             "{why}"
@@ -4369,13 +4442,13 @@ mod tests {
         assert!(doc.get((2, 0)).is_err());
         // An encrypted file's object streams, without a decoder.
         let (file, _) = compressed(true);
-        let why = read(&file).get((2, 0)).unwrap_err();
+        let why = read(&file).get((2, 0)).unwrap_err().to_string();
         assert!(why.contains("nothing decodes that"), "{why}");
         // Asked of a decoder: the rows but not the object stream's data.
         let (file, mut decoded) = junk(false);
         decoded.remove(&(4, 0));
         let doc = read_through(&file, &decoded);
-        let why = doc.get((2, 0)).unwrap_err();
+        let why = doc.get((2, 0)).unwrap_err().to_string();
         assert!(
             why.contains("its object stream 4 0 R doesn't decode: no data for 4 0 R"),
             "{why}"
@@ -4386,7 +4459,7 @@ mod tests {
         let objects = decoded.get_mut(&(4, 0)).unwrap();
         objects[0] = b'7';
         let doc = read_through(&file, &decoded);
-        let why = doc.get((2, 0)).unwrap_err();
+        let why = doc.get((2, 0)).unwrap_err().to_string();
         assert!(
             why.contains("object 0 of object stream 4 0 R is 7, not 2"),
             "{why}"
@@ -4590,7 +4663,7 @@ mod tests {
         let (file, decoded) = junk(true);
         let doc = read_through(&file, &Refused(decoded));
         assert_eq!(doc.trailer.unwritten, None, "the rows, from their bytes");
-        let why = doc.get((3, 0)).unwrap_err();
+        let why = doc.get((3, 0)).unwrap_err().to_string();
         assert!(
             why.contains("doesn't decode: qpdf refuses the file"),
             "{why}"

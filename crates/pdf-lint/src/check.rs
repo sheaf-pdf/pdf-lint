@@ -2471,7 +2471,7 @@ impl<'a> Walk<'a> {
                     table: "-".to_string(),
                     key: "-".to_string(),
                     rule: Rule::Unresolved,
-                    value: why,
+                    value: why.to_string(),
                     at: None,
                 }),
             }

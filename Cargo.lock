@@ -195,6 +195,7 @@ dependencies = [
  "pdf-filters",
  "pdf-objects",
  "pdf-tokenizer",
+ "thiserror",
 ]
 
 [[package]]

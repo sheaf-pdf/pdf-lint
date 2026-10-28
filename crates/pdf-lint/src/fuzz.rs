@@ -527,8 +527,11 @@ mod tests {
             .filter(|(n, _)| n.starts_with("encrypted-"))
         {
             let doc = bytes::read(&seed[2..]);
-            let opened = crate::source::Encryption::Opened { owner: false };
-            assert_eq!(doc.encryption, opened, "{name}");
+            let opened = matches!(
+                doc.encryption,
+                crate::source::Encryption::Opened { owner: false, .. }
+            );
+            assert!(opened, "{name}: {:?}", doc.encryption);
             assert_eq!(
                 doc.get((3, 0)).map(|o| o.at.and_then(|at| at.stream)),
                 Ok(Some((4, 0))),

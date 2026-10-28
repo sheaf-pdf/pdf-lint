@@ -22,7 +22,7 @@ use pdf_objects::version::Version;
 
 use crate::bytes::{Decode, Written};
 use crate::json::{self, Json};
-use crate::source::{Document, Trailer, Warning};
+use crate::source::{Document, Trailer, Unread, Warning};
 
 /// How many objects one run is asked for by number: past it, a command line
 /// grows long.
@@ -146,7 +146,7 @@ impl Qpdf {
             if key == "trailer" {
                 trailer = Some(indirect(value)?);
             } else if let Some(id) = key.strip_prefix("obj:").and_then(reference) {
-                objects.insert(id, indirect(value));
+                objects.insert(id, indirect(value).map_err(Unread::Other));
             } else {
                 return Err(format!("qpdf's JSON has {key:?} among its objects"));
             }
@@ -489,7 +489,7 @@ fn unhex(hex: &str) -> Result<Vec<u8>, String> {
 /// writes it, when qpdf reconstructed the cross-references.
 fn trailer_of(
     trailer: Object,
-    objects: &BTreeMap<ObjectId, Result<Object, String>>,
+    objects: &BTreeMap<ObjectId, Result<Object, Unread>>,
     warnings: &[Warning],
 ) -> Trailer {
     let unwritten = (warnings.iter())

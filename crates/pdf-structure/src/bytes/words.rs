@@ -347,3 +347,66 @@ fn a_decoder_that_decodes_nothing_from_its_bytes_says_so() {
         "nothing decodes a stream from its bytes"
     );
 }
+
+/// Each reason an object stream doesn't decode, or its header doesn't
+/// say where its objects are, says it as the reader's text for it did, by
+/// the same format string.
+#[test]
+fn each_reason_an_object_stream_doesnt_read_is_said_as_it_was() {
+    let name = b"StdCF";
+    let fault = pdf_crypt::Fault::Padding;
+    let unfiltered = Unfiltered::Filter;
+    let (pairs, count) = (1, 2);
+    let undecoded = [
+        (Undecoded::NotAStream, "it isn't a stream".to_string()),
+        (
+            Undecoded::Filters(unfiltered.clone()),
+            unfiltered.to_string(),
+        ),
+        (
+            Undecoded::Encrypted {
+                filter: name.to_vec(),
+            },
+            {
+                let name = String::from_utf8_lossy(name);
+                format!(
+                    "its own /Crypt filter, /{name}, encrypts it, and no password the reader was given opens the file"
+                )
+            },
+        ),
+        (
+            Undecoded::Decrypt(fault.clone()),
+            format!("its data doesn't decrypt: {fault}"),
+        ),
+        (
+            Undecoded::Other("no data for 4 0 R".to_string()),
+            "no data for 4 0 R".to_string(),
+        ),
+    ];
+    for (undecoded, said) in undecoded {
+        assert_eq!(undecoded.to_string(), said, "{undecoded:?}");
+    }
+    let unlisted = [
+        (Unlisted::NotAStream, "it isn't a stream".to_string()),
+        (
+            Unlisted::NotAnObjectStream,
+            "it isn't /Type /ObjStm".to_string(),
+        ),
+        (
+            Unlisted::Counts,
+            "its /N or /First isn't a count".to_string(),
+        ),
+        (
+            Unlisted::Pairs { pairs, count },
+            format!("its header has {} of its {count} pairs", pairs),
+        ),
+        (Unlisted::Number, "its header numbers no object".to_string()),
+        (
+            Unlisted::Offset,
+            "its header gives an offset that isn't one".to_string(),
+        ),
+    ];
+    for (unlisted, said) in unlisted {
+        assert_eq!(unlisted.to_string(), said, "{unlisted:?}");
+    }
+}

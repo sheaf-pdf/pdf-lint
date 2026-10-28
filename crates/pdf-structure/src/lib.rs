@@ -7,9 +7,9 @@
 //!
 //! - **What it read, in one value:** a [`Document`], a [`Source`] read
 //!   whole: each object its cross-references list, or why it doesn't
-//!   read; the [`Trailer`], and why it isn't the newest section's when it
-//!   isn't; the header's version; and the file's newest incremental
-//!   [`Update`].
+//!   read ([`Unread`]); the [`Trailer`], and why it isn't the newest
+//!   section's when it isn't; the header's version; and the file's newest
+//!   incremental [`Update`].
 //! - **Every choice said:** what the reader had to choose how to read is a
 //!   [`Warning`], with its object and where.
 //! - **Object streams and cross-reference streams decoded** from their own
@@ -47,7 +47,7 @@ pub mod source;
 pub mod write;
 
 pub use pdf_objects;
-pub use source::{Document, Encryption, Source, Trailer, Update, Warning};
+pub use source::{Document, Encryption, Source, Trailer, Unread, Update, Warning};
 
 /// The README's examples, run as doctests.
 #[cfg(doctest)]
