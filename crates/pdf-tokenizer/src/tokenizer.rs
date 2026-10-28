@@ -227,9 +227,14 @@ mod tests {
     const HEX: Kind = Kind::HexString { closed: true };
     const UNCLOSED_HEX: Kind = Kind::HexString { closed: false };
 
+    /// `input`'s tokens, each kind and its bytes, checked by the fuzz
+    /// target's body, whole and cut at every byte.
     fn tokens(input: &[u8]) -> Vec<(Kind, &[u8])> {
         let tokens: Vec<_> = Tokenizer::new(input).map(|t| (t.kind, t.bytes)).collect();
         fuzz::walk(input, 0);
+        for cut in 0..=input.len() {
+            fuzz::prefix(input, 0, cut);
+        }
         tokens
     }
 
@@ -459,6 +464,52 @@ mod tests {
         let mut tokens = Tokenizer::new(b"no marker");
         assert_eq!(tokens.data_until(b"endstream").bytes, b"no marker");
         assert_eq!(tokens.next(), None);
+    }
+
+    /// A slice of a file tokenizes as the whole file does but for its last
+    /// token, which reaches the slice's end: `12` of `123`, `<` of `<<`,
+    /// `>` of `>>`, a string cut short, white-space and a comment that go
+    /// on, `\r` of the `\r\n` after `stream`, and data cut before its
+    /// marker, or inside it.
+    #[test]
+    fn only_the_last_token_of_a_slice_can_come_out_otherwise() {
+        let file = b"[123] << /A (a b) >>  % c\nstream\r\nxy endstream";
+        let cases: [(usize, Kind, &[u8]); 9] = [
+            (3, Kind::Integer, b"12"),
+            (7, UNCLOSED_HEX, b"<"),
+            (15, UNCLOSED_STRING, b"(a "),
+            (19, Kind::Junk, b">"),
+            (21, Kind::Space, b" "),
+            (24, Kind::Comment, b"% "),
+            (33, Kind::Space, b"\r"),
+            (36, Kind::Data, b"xy"),
+            (42, Kind::Data, b"xy endst"),
+        ];
+        // The tokens, each stream's data taken as a reader might: an end
+        // of line, then up to `endstream`.
+        let read = |input: &'static [u8]| {
+            let mut tokens = Tokenizer::new(input);
+            let mut read = Vec::new();
+            while let Some(token) = tokens.next() {
+                read.push(token);
+                if token.bytes == b"stream" {
+                    read.extend(tokens.eol());
+                    if tokens.offset() < input.len() {
+                        read.push(tokens.data_until(b"endstream"));
+                    }
+                }
+            }
+            read
+        };
+        let whole = read(file);
+        for (cut, kind, bytes) in cases {
+            let part = read(&file[..cut]);
+            let (last, before) = part.split_last().unwrap();
+            assert_eq!(before, &whole[..before.len()], "{cut}");
+            assert_eq!((last.kind, last.bytes, last.end()), (kind, bytes, cut));
+            assert_ne!(whole[before.len()], *last, "{cut}");
+            fuzz::prefix(file, 0, cut);
+        }
     }
 
     #[test]

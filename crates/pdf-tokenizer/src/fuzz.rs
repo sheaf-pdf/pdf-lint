@@ -8,16 +8,66 @@ use crate::decode::{How, NumberError};
 use crate::{Kind, Token, Tokenizer, is_regular, is_white_space};
 
 /// The fuzz target's body: [`walk`]s the input after `data`'s first two
-/// bytes, from an offset those bytes choose.
+/// bytes, from an offset those bytes choose, and checks it cut short
+/// ([`prefix`]), from that offset, where the same bytes read the other way
+/// round choose.
 pub fn tokenize(data: &[u8]) {
-    let (offset, input) = match data {
+    let (offset, cut, input) = match data {
         [a, b, input @ ..] => {
             let seed = usize::from(u16::from_le_bytes([*a, *b]));
-            (seed % (input.len() + 1), input)
+            let offset = seed % (input.len() + 1);
+            let seed = usize::from(u16::from_be_bytes([*a, *b]));
+            (offset, offset + seed % (input.len() - offset + 1), input)
         }
-        _ => (0, data),
+        _ => (0, data.len(), data),
     };
     walk(input, offset);
+    prefix(input, offset, cut);
+}
+
+/// Checks the tokens of `input[..cut]` from `offset` against the whole
+/// input's, in lockstep, taking each stream's data as [`walk`] does: each
+/// that ends before the cut is the whole input's token at the same place,
+/// its kind and bytes; the last reaches the cut, starting where the whole
+/// input's token does; and none comes after it. Only a token that reaches
+/// the end of a slice can come out otherwise with more bytes after it.
+/// The cut is taken no nearer than `offset`, and no further than the
+/// input's end. Panics on a broken promise.
+pub fn prefix(input: &[u8], offset: usize, cut: usize) {
+    let offset = offset.min(input.len());
+    let cut = cut.clamp(offset, input.len());
+    let mut part = Tokenizer::at(&input[..cut], offset);
+    let mut whole = Tokenizer::at(input, offset);
+    // Whether the slice goes on after `token`, checked against `full`, the
+    // whole input's token at the same point.
+    let settled = |token: Token<'_>, full: Option<Token<'_>>| {
+        if token.end() < cut {
+            assert_eq!(Some(token), full, "settled by the bytes before the cut");
+            return true;
+        }
+        assert_eq!(token.end(), cut, "the last token reaches the cut");
+        assert_eq!(full.map(|f| f.start), Some(token.start));
+        false
+    };
+    while let Some(token) = part.next() {
+        if !settled(token, whole.next()) {
+            break;
+        }
+        if token.kind == Kind::Keyword && token.bytes == b"stream" {
+            let (eol, full) = (part.eol(), whole.eol());
+            match eol {
+                Some(eol) if !settled(eol, full) => break,
+                Some(_) => {}
+                None => assert_eq!(full, None, "no end of line before the cut"),
+            }
+            let data = part.data_until(b"endstream");
+            if !settled(data, Some(whole.data_until(b"endstream"))) {
+                break;
+            }
+        }
+    }
+    assert_eq!(part.offset(), cut, "the tokens reach the cut");
+    assert_eq!(part.next(), None, "nothing after the last");
 }
 
 /// Tokenizes `input` from `offset` to its end, taking each stream's data as

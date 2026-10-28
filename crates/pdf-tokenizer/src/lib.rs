@@ -15,6 +15,16 @@
 //!   where the data ends, by `/Length` or by scanning for `endstream` or
 //!   `EI` ([`Tokenizer::data`], [`Tokenizer::data_until`]). That's where
 //!   readers differ, so the choice is the caller's.
+//! - **A slice of a file:** the input may be as much of a file as a reader
+//!   has read. The tokenizer never rejects, so it closes whatever token
+//!   the slice ends in, and only a token that reaches the slice's end
+//!   (`token.end() == bytes.len()`) can come out otherwise with more bytes
+//!   after it: `12` of `123`, `>` of `>>`, a string cut short, white-space
+//!   that goes on, data that runs on to its marker. Every other token is
+//!   settled by the bytes inside the slice: it's the whole file's token at
+//!   the same place, as the tokenizer carries nothing from one token to
+//!   the next. A reader that meets a token at the end reads again with
+//!   more.
 //!
 //! Decoding a token into what it stands for is a separate step, in
 //! [`decode`]: a name's or a string's bytes, as [`Piece`](decode::Piece)s
@@ -70,15 +80,28 @@ mod tests {
 
     use crate::{Kind, Token, Tokenizer, fuzz};
 
-    #[test]
-    fn a_small_file_keeps_every_promise() {
-        let file = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+    const SMALL_FILE: &[u8] = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
         2 0 obj\n<</Type/Pages/Kids[3 0 R]/Count 1>>\nendobj\n\
         3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612.0 792] /Contents 4 0 R >>\nendobj\n\
         4 0 obj\n<< /Length 4 0 R >>\nstream\r\n\x00(\xff>)\nendstream\nendobj\n\
         xref\n0 5\n0000000000 65535 f \ntrailer\n<< /Size 5 /Root 1 0 R /ID [<a1b2><A1B2>] >>\n\
         startxref\n9\n%%EOF\n";
-        assert!(fuzz::walk(file, 0) > 100);
+
+    #[test]
+    fn a_small_file_keeps_every_promise() {
+        assert!(fuzz::walk(SMALL_FILE, 0) > 100);
+    }
+
+    /// The small file cut at every byte, read from its start and from
+    /// inside it: only the last token, which reaches the cut, can come out
+    /// otherwise than the whole file's.
+    #[test]
+    fn a_small_file_cut_anywhere_keeps_the_promise_for_a_slice() {
+        for offset in [0, 9, 200] {
+            for cut in 0..=SMALL_FILE.len() {
+                fuzz::prefix(SMALL_FILE, offset, cut);
+            }
+        }
     }
 
     /// Inputs made of the fragments where tokens begin and end, run through the

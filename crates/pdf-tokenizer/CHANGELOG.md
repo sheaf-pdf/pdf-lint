@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **A slice of a file.** The crate docs and the README say what a reader that has read only part of a file can count on: only a token that reaches the end of the slice can come out otherwise with more bytes after it, and every token before it is the whole file's. The fuzz target checks it, the input cut where it chooses and tokenized in lockstep with the whole, without allocating; so do the unit tests, at every cut of their inputs. Nothing in the API changes.
 - **thiserror, without `std`.** `NumberError`'s `Display` and `Error` are derived with thiserror 2, built with its default features off, each text as before; `NumberError` is still exhaustive. It's the crate's one dependency, and it still needs only `core`: CI builds it against `core` alone (`-Z build-std=core`), for a target with neither `std` nor `alloc`. Building it now builds thiserror's derive, and the crates under it (`syn`, `quote`, `proc-macro2`, `unicode-ident`), for the host.
 
 ## 0.1.0 (2026-10-25)
