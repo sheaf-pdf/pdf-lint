@@ -33,14 +33,14 @@
 //! fn:SinceVersion(1.7,Y)` is `Y` at 1.7 and asks nothing at 1.3. Each
 //! column's reader says what a vacant predicate comes to there.
 
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::num::ParseIntError;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use pdf_objects::{Dict, Form, Object, ObjectId, Span, Str, Value, Version};
+use pdf_objects::{Dict, Form, Object, ObjectId, Resolve, Span, Str, Value, Version};
 
 use crate::grammar::{At, Table, Wrap, WrapFn, split, version};
 
@@ -233,25 +233,31 @@ pub enum Truth {
 }
 
 /// What every row of one file is evaluated in: the trailer, the version,
-/// how a reference resolves, the file's length and the extensions it's
-/// checked under; and what the predicates read once a file (its name
-/// trees' keys, its structure tree's content items, its form's fields'
-/// names), kept inside it. [`FileCx::at`] makes a row's [`Cx`] from it.
+/// how a reference resolves (`R`, any [`Resolve`]), the file's length and
+/// the extensions it's checked under; and what the predicates read once a
+/// file (its name trees' keys, its structure tree's content items, its
+/// form's fields' names), kept inside it. [`FileCx::at`] makes a row's
+/// [`Cx`] from it. It's shared across threads when its resolver is `Sync`,
+/// each thread making its rows' [`Cx`]s there.
+///
+/// Its type names its resolver: `FileCx<'a>` is the default, a `&dyn Fn`,
+/// and one made from a closure is of the closure's type, so a `FileCx` to
+/// keep as the default is given that type before its setters (`let file:
+/// FileCx<'_> = FileCx::new(trailer, version, &resolve);`).
 ///
 /// Those it keeps know an object by where it was written and by its
-/// number, so the spans of the objects it's given, and of those `resolve`
-/// gives, are places in one file's bytes: an object copied from another
-/// file keeps the span it had there, which can be another object's here,
-/// so a copy is given its number, or its span is dropped.
-pub struct FileCx<'a> {
+/// number, so the spans of the objects it's given, and of those its
+/// resolver gives, are places in one file's bytes: an object copied from
+/// another file keeps the span it had there, which can be another object's
+/// here, so a copy is given its number, or its span is dropped. Over a
+/// document of several files' objects, then, its indirect objects are told
+/// apart by their numbers.
+pub struct FileCx<'a, R: ?Sized = &'a dyn Fn(ObjectId) -> Option<&'a Object>> {
     /// The trailer as written (`trailer::`).
     trailer: &'a Dict,
     /// The file's version: its header's, or its catalog's `/Version` when
     /// later.
     version: Version,
-    /// An indirect object; none for one the file hasn't, which is null
-    /// (ISO 32000-2, 7.3.10).
-    resolve: &'a dyn Fn(ObjectId) -> Option<&'a Object>,
     /// The file's length in bytes, when the reader knows (`fn:FileSize`).
     size: Option<usize>,
     /// The extensions the file is checked under, as the model names them
@@ -266,35 +272,35 @@ pub struct FileCx<'a> {
     /// The form's fields' fully qualified names, as
     /// `fn:IsFullyQualifiedFieldName` reads them: once.
     fields: Fields,
+    /// An indirect object; none for one the file hasn't, which is null
+    /// (ISO 32000-2, 7.3.10). Last, so that a `FileCx` of any resolver is
+    /// read through one of `dyn Resolve` ([`Cx`]'s).
+    resolve: R,
 }
 
 /// The extensions a file is checked under when [`FileCx::extensions`]
 /// gives none.
 static NO_EXTENSIONS: BTreeSet<String> = BTreeSet::new();
 
-impl<'a> FileCx<'a> {
+impl<'a, R: Resolve<'a>> FileCx<'a, R> {
     /// A file of `trailer` at `version`, whose references `resolve` gives
     /// the objects of; of no known length, checked under no extension.
-    pub fn new(
-        trailer: &'a Dict,
-        version: Version,
-        resolve: &'a dyn Fn(ObjectId) -> Option<&'a Object>,
-    ) -> FileCx<'a> {
+    pub fn new(trailer: &'a Dict, version: Version, resolve: R) -> FileCx<'a, R> {
         FileCx {
             trailer,
             version,
-            resolve,
             size: None,
             extensions: &NO_EXTENSIONS,
             trees: Trees::default(),
             structure: Structure::default(),
             fields: Fields::default(),
+            resolve,
         }
     }
 
     /// The file's length in bytes, when the reader knows (`fn:FileSize`).
     #[must_use = "it gives the FileCx back, with the length"]
-    pub fn size(mut self, size: Option<usize>) -> FileCx<'a> {
+    pub fn size(mut self, size: Option<usize>) -> FileCx<'a, R> {
         self.size = size;
         self
     }
@@ -302,7 +308,7 @@ impl<'a> FileCx<'a> {
     /// The extensions it's checked under, as the model names them
     /// (`fn:Extension`).
     #[must_use = "it gives the FileCx back, with the extensions"]
-    pub fn extensions(mut self, extensions: &'a BTreeSet<String>) -> FileCx<'a> {
+    pub fn extensions(mut self, extensions: &'a BTreeSet<String>) -> FileCx<'a, R> {
         self.extensions = extensions;
         self
     }
@@ -311,7 +317,10 @@ impl<'a> FileCx<'a> {
     /// value is in: reached through no parents, with no defaults, and of
     /// no number, until [`Cx::parents`], [`Cx::defaults`] and [`Cx::id`]
     /// say.
-    pub fn at<'c>(&'c self, container: &'c Object, at: At<'c>) -> Cx<'c, 'a> {
+    pub fn at<'c>(&'c self, container: &'c Object, at: At<'c>) -> Cx<'c, 'a>
+    where
+        R: 'c,
+    {
         Cx {
             file: self,
             container,
@@ -323,8 +332,8 @@ impl<'a> FileCx<'a> {
     }
 }
 
-/// Its parts but `resolve`, a closure, which can't be shown.
-impl fmt::Debug for FileCx<'_> {
+/// Its parts but its resolver, which needn't be one that can be shown.
+impl<R: ?Sized> fmt::Debug for FileCx<'_, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileCx")
             .field("trailer", &self.trailer)
@@ -343,8 +352,8 @@ impl fmt::Debug for FileCx<'_> {
 /// and made for each row.
 #[derive(Clone, Copy)]
 pub struct Cx<'c, 'a> {
-    /// The file.
-    file: &'c FileCx<'a>,
+    /// The file, its resolver whichever it is.
+    file: &'c FileCx<'a, dyn Resolve<'a> + 'c>,
     /// The dictionary, array or stream the row's value is in.
     container: &'c Object,
     /// The indirect object the container is, when the caller says.
@@ -420,7 +429,7 @@ impl fmt::Debug for Cx<'_, '_> {
 
 /// The interactive form's fields' fully qualified names, read once a file.
 #[derive(Debug, Default)]
-struct Fields(RefCell<Option<Rc<Names>>>);
+struct Fields(OnceLock<Names>);
 
 /// Fields' fully qualified names, as text, and whether they're all of
 /// them: every field read, and every partial name a string whose text
@@ -435,7 +444,7 @@ struct Names {
 /// objects it found by where they were written, or their numbers
 /// ([`Known`]), so it serves one file.
 #[derive(Debug, Default)]
-struct Structure(RefCell<Option<Rc<Items>>>);
+struct Structure(OnceLock<Items>);
 
 /// What the structure tree says of its content items (ISO 32000-2,
 /// 14.7.5): the objects its object references (OBJR) point at, and the
@@ -525,7 +534,15 @@ struct Known {
 /// container given for a row may be dropped after it, and another root
 /// take its place.
 #[derive(Debug, Default)]
-struct Trees(RefCell<HashMap<Known, Rc<Tree>>>);
+struct Trees(Mutex<HashMap<Known, Arc<Tree>>>);
+
+impl Trees {
+    /// The trees read so far. A map that a panic poisoned is read as it
+    /// is: a tree is stored whole, or not at all.
+    fn lock(&self) -> MutexGuard<'_, HashMap<Known, Arc<Tree>>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 /// A name tree's keys, and whether they're all of them: every node read,
 /// and every key a string whose bytes the reader gave.
@@ -1262,7 +1279,7 @@ fn entry<'c>(o: &'c Object, at: At, cx: &Cx<'c, '_>) -> Option<&'c Object> {
 fn deref<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Option<&'c Object> {
     for _ in 0..HOPS {
         match o.value() {
-            Value::Ref(id) => o = (cx.file.resolve)(*id)?,
+            Value::Ref(id) => o = cx.file.resolve.resolve(*id)?,
             Value::Null => return None,
             _ => return Some(o),
         }
@@ -1279,7 +1296,7 @@ fn deref_known<'c>(mut o: &'c Object, cx: &Cx<'c, '_>) -> Option<Known> {
         match o.value() {
             Value::Ref(to) => {
                 id = Some(*to);
-                o = (cx.file.resolve)(*to)?;
+                o = cx.file.resolve.resolve(*to)?;
             }
             Value::Null => return None,
             _ => return Some(Known { at: o.at, id }),
@@ -1534,14 +1551,15 @@ fn in_name_tree(f: &str, tree: &Path, cx: &Cx) -> Tri {
         at: root.at,
         id: entry_id(tree, cx),
     };
+    // Read with no lock held, as reading it resolves; two threads may
+    // both read it, and the first stored is kept.
     let tree = match known {
-        Known { at: None, id: None } => Rc::new(name_tree(root, cx)),
+        Known { at: None, id: None } => Arc::new(name_tree(root, cx)),
         known => {
-            let kept = cx.file.trees.0.borrow().get(&known).cloned();
+            let kept = cx.file.trees.lock().get(&known).cloned();
             kept.unwrap_or_else(|| {
-                let read = Rc::new(name_tree(root, cx));
-                cx.file.trees.0.borrow_mut().insert(known, Rc::clone(&read));
-                read
+                let read = Arc::new(name_tree(root, cx));
+                Arc::clone(cx.file.trees.lock().entry(known).or_insert(read))
             })
         }
     };
@@ -1650,12 +1668,14 @@ fn field_name(f: &str, p: &Path, cx: &Cx) -> Tri {
         Ok(None) => return Tri::Unknown(p.text.clone()),
         Err(why) => return Tri::Unknown(why),
     };
-    let known = cx.file.fields.0.borrow().clone();
-    let fields = known.unwrap_or_else(|| {
-        let read = Rc::new(field_names(cx));
-        *cx.file.fields.0.borrow_mut() = Some(Rc::clone(&read));
-        read
-    });
+    // Read outside the cell, as reading them resolves; the first kept.
+    let fields = match cx.file.fields.0.get() {
+        Some(fields) => fields,
+        None => {
+            let read = field_names(cx);
+            cx.file.fields.0.get_or_init(|| read)
+        }
+    };
     match (fields.names.contains(&name), fields.whole) {
         (true, _) => Tri::Is(true),
         (false, true) => Tri::Is(false),
@@ -1758,14 +1778,16 @@ fn content_item(f: &str, found: &Objects, cx: &Cx) -> Tri {
 }
 
 /// The structure tree's content items ([`Items`]), read the first time
-/// they're asked for.
-fn items(cx: &Cx) -> Rc<Items> {
-    let known = cx.file.structure.0.borrow().clone();
-    known.unwrap_or_else(|| {
-        let read = Rc::new(structure(cx));
-        *cx.file.structure.0.borrow_mut() = Some(Rc::clone(&read));
-        read
-    })
+/// they're asked for: outside the cell, as reading them resolves, the
+/// first kept.
+fn items<'c>(cx: &Cx<'c, '_>) -> &'c Items {
+    match cx.file.structure.0.get() {
+        Some(items) => items,
+        None => {
+            let read = structure(cx);
+            cx.file.structure.0.get_or_init(|| read)
+        }
+    }
 }
 
 /// The content items of the structure tree from the catalog's
@@ -2353,7 +2375,10 @@ mod tests {
     //! supported function means what INTERNAL_GRAMMAR.md says, on the
     //! model's own cells where it has them.
 
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::sync::Barrier;
+    use std::thread::ThreadId;
 
     use pdf_objects::{Dict, dict};
 
@@ -2600,9 +2625,8 @@ mod tests {
                     *resolved.borrow_mut().entry(id).or_insert(0) += 1;
                     self.objects.get(&id)
                 };
-                let file = FileCx::new(&self.trailer, v(version), &resolve)
-                    .size(self.size)
-                    .extensions(&self.extensions);
+                let file: FileCx<'_> = FileCx::new(&self.trailer, v(version), &resolve);
+                let file = file.size(self.size).extensions(&self.extensions);
                 f(&file)
             };
             (said, resolved.into_inner())
@@ -3925,6 +3949,180 @@ mod tests {
         assert_eq!(item_in(&file, &member, None, images), Truth::True);
         let at_its_offsets = image().at(written(20));
         assert_eq!(item_in(&file, &at_its_offsets, None, images), Truth::False);
+    }
+
+    /// A boxed resolver over `file`'s objects. Written in a `let`, its type
+    /// would need the objects' lifetime, which only a signature can name.
+    fn boxed<'f>(file: &'f File) -> Box<dyn Fn(ObjectId) -> Option<&'f Object> + 'f> {
+        Box::new(|id| file.objects.get(&id))
+    }
+
+    /// Whether `file`'s catalog, by reference, has `/X`, and has `/Y`.
+    fn present<'a, R: Resolve<'a>>(file: &FileCx<'a, R>) -> (Truth, Truth) {
+        let row = |text| holds(text, &file.at(&Object::null(), At::Key(b"X")));
+        let (x, y) = (
+            "fn:IsPresent(trailer::Catalog::X)",
+            "fn:IsPresent(trailer::Catalog::Y)",
+        );
+        (row(x), row(y))
+    }
+
+    #[test]
+    fn a_file_resolves_through_a_closure_a_dyn_fn_or_a_box() {
+        let catalog = dict! { "Type" => "Catalog", "X" => 7 };
+        let file = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [(1, catalog.into())],
+        );
+        let (t, f) = (Truth::True, Truth::False);
+        let resolve = |id: ObjectId| file.objects.get(&id);
+        let by_value = FileCx::new(&file.trailer, v("1.7"), resolve);
+        assert_eq!(present(&by_value), (t.clone(), f.clone()));
+        let by_reference = FileCx::new(&file.trailer, v("1.7"), &resolve);
+        assert_eq!(present(&by_reference), (t.clone(), f.clone()));
+        let dynamic: FileCx<'_> = FileCx::new(&file.trailer, v("1.7"), &resolve);
+        assert_eq!(present(&dynamic), (t.clone(), f.clone()));
+        let boxed = FileCx::new(&file.trailer, v("1.7"), boxed(&file));
+        assert_eq!(present(&boxed), (t, f));
+    }
+
+    #[test]
+    fn a_file_over_a_sync_resolver_is_send_and_sync() {
+        fn shared<T: Send + Sync>(_: &T) {}
+        let file = bare();
+        let resolve = |id: ObjectId| file.objects.get(&id);
+        shared(&FileCx::new(&file.trailer, v("1.7"), resolve));
+        shared(&FileCx::new(&file.trailer, v("1.7"), &resolve));
+    }
+
+    /// The rows a thread makes of `file`, each by [`FileCx::at`]: three keys
+    /// asked of the catalog's `/Dests` tree; an image and pages asked of
+    /// the structure tree's content items; and three names of the form's
+    /// fields.
+    fn rows<'a, R: Resolve<'a>>(
+        file: &FileCx<'a, R>,
+        objects: &BTreeMap<ObjectId, Object>,
+    ) -> Vec<Truth> {
+        let row = |text: &str, value: &str| {
+            let container = Object::from(dict! { "X" => Object::string(value) });
+            holds(text, &file.at(&container, At::Key(b"X")))
+        };
+        let item = |text: &str, n: u32| {
+            let container = &objects[&(n, 0)];
+            holds(text, &file.at(container, At::Key(b"X")).id((n, 0)))
+        };
+        let dests = "fn:InNameTree(trailer::Catalog::Names::Dests)";
+        let (images, pages) = (
+            "fn:ImageIsStructContentItem()",
+            "fn:PageContainsStructContentItems()",
+        );
+        let fqn = "fn:IsFullyQualifiedFieldName(@X)";
+        vec![
+            row(dests, "a"),
+            row(dests, "b"),
+            row(dests, "c"),
+            item(images, 6),
+            item(images, 5),
+            item(pages, 4),
+            item(pages, 5),
+            row(fqn, "a.b"),
+            row(fqn, "a"),
+            row(fqn, "b"),
+        ]
+    }
+
+    #[test]
+    fn one_file_shared_by_threads_reads_each_tree_at_most_once_a_thread() {
+        // A name tree over a kid, 3; a structure tree over an element, 8,
+        // which puts marked content on page 4 and points at image 6; and a
+        // form over a field, 9, with a kid, 10. Only reading its tree
+        // resolves each of 3, 8 and 10.
+        let names = dict! { "Dests" => Object::reference(2) };
+        let form = dict! { "Fields" => vec![Object::reference(9)] };
+        let catalog = dict! {
+            "Type" => "Catalog",
+            "Names" => names,
+            "StructTreeRoot" => Object::reference(7),
+            "AcroForm" => form,
+        };
+        let objr = Object::from(dict! { "Type" => "OBJR", "Obj" => Object::reference(6) });
+        let element =
+            dict! { "S" => "P", "Pg" => Object::reference(4), "K" => vec![Object::from(0), objr] };
+        let page = |n| Object::from(dict! { "Type" => "Page" }).at(written(n));
+        let image = Object::from(dict! { "Subtype" => "Image" }).at(written(60));
+        let root = dict! { "Type" => "StructTreeRoot", "K" => Object::reference(8) };
+        let a = dict! { "T" => Object::string("a"), "Kids" => vec![Object::reference(10)] };
+        let b = dict! { "T" => Object::string("b"), "Parent" => Object::reference(9) };
+        let file = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [
+                (1, Object::from(catalog)),
+                (2, dict! { "Kids" => vec![Object::reference(3)] }.into()),
+                (3, leaf(&["a", "b"])),
+                (4, page(40)),
+                (5, page(50)),
+                (6, image),
+                (7, root.into()),
+                (8, element.into()),
+                (9, a.into()),
+                (10, b.into()),
+            ],
+        );
+        // Each object resolved, counted by the thread that resolved it.
+        let counts = Mutex::new(HashMap::new());
+        let resolve = |id: ObjectId| {
+            let thread = std::thread::current().id();
+            *counts.lock().unwrap().entry((thread, id)).or_insert(0) += 1;
+            file.objects.get(&id)
+        };
+        let read = |counts: &HashMap<_, usize>, thread, id| counts.get(&(thread, id)).copied();
+        let kids = [(3, 0), (8, 0), (10, 0)];
+
+        // One thread alone: each tree read once.
+        let alone = rows(
+            &FileCx::new(&file.trailer, v("1.7"), &resolve),
+            &file.objects,
+        );
+        let (t, f) = (Truth::True, Truth::False);
+        let (dests, images, pages) = (
+            [t.clone(), t.clone(), f.clone()],
+            [t.clone(), f.clone()],
+            [t.clone(), f.clone()],
+        );
+        assert_eq!(
+            alone,
+            [&dests[..], &images, &pages, &[t.clone(), t, f]].concat()
+        );
+        let mut said = std::mem::take(&mut *counts.lock().unwrap());
+        let here = std::thread::current().id();
+        for id in kids {
+            assert_eq!(read(&said, here, id), Some(1), "{id:?}");
+        }
+
+        // Eight, sharing one FileCx: each makes its own rows and says what
+        // one alone does, and reads each tree at most once.
+        let shared = FileCx::new(&file.trailer, v("1.7"), &resolve);
+        let start = Barrier::new(8);
+        let threads: Vec<ThreadId> = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        assert_eq!(rows(&shared, &file.objects), alone);
+                        std::thread::current().id()
+                    })
+                })
+                .collect();
+            threads.into_iter().map(|t| t.join().unwrap()).collect()
+        });
+        said = counts.into_inner().unwrap();
+        for id in kids {
+            let each: Vec<usize> = (threads.iter())
+                .map(|&thread| read(&said, thread, id).unwrap_or(0))
+                .collect();
+            assert!(each.iter().all(|&n| n <= 1), "{id:?}: {each:?}");
+            assert!(each.contains(&1), "{id:?}: {each:?}");
+        }
     }
 
     #[test]

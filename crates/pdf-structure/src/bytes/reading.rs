@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use pdf_objects::Resolve;
 use pdf_objects::object::{Object, ObjectId, Span, Stream, Value};
 use pdf_objects::version::Version;
 
@@ -698,5 +699,23 @@ impl<S: ByteSource> Reading<S> {
             }
         };
         Ok(whole.document)
+    }
+}
+
+/// Its objects, as a reference resolves them: each read and kept the first
+/// time it's asked for, as [`Reading::get`] keeps it; none for one the file
+/// hasn't, one that doesn't read, or one whose bytes the source doesn't
+/// give, without why ([`Reading::get`] says). A read the source stops keeps
+/// nothing, so asked again it reads.
+impl<'o, S: ByteSource> Resolve<'o> for &'o Reading<S> {
+    fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+        let reading: &'o Reading<S> = self;
+        match reading.source.whole() {
+            Some(file) => {
+                let Ok(object) = reading.reader.resolve(InMemory(file), id);
+                object
+            }
+            None => (reading.reader.resolve(reading.by_position(), id)).unwrap_or(None),
+        }
     }
 }

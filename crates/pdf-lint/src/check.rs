@@ -91,6 +91,8 @@ use std::fmt::{self, Write as _};
 use std::num::ParseIntError;
 use std::rc::Rc;
 
+use pdf_objects::Resolve;
+
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::predicate::{self, Cx, FileCx, Gate, Reference, Since, TOLERANCE, Truth};
@@ -633,8 +635,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     extensions.extend(options.extensions.iter().cloned());
     let checked_under = extensions.clone();
     // What every predicate of the file is evaluated in, once.
-    let resolve = |id: ObjectId| source.get(id).ok();
-    let file = FileCx::new(trailer, version, &resolve)
+    let file = FileCx::new(trailer, version, Objects(source))
         .size(source.size())
         .extensions(&extensions);
     let mut walk = Walk {
@@ -836,6 +837,16 @@ pub fn file_version(source: &dyn Source) -> Version {
     header.max(catalog.unwrap_or(header))
 }
 
+/// A file's objects, as the predicates resolve a reference: an object that
+/// doesn't read is none, as one the file hasn't is.
+struct Objects<'a>(&'a dyn Source);
+
+impl<'a> Resolve<'a> for Objects<'a> {
+    fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
+        self.0.get(id).ok()
+    }
+}
+
 /// A walk of one file.
 struct Walk<'a> {
     source: &'a dyn Source,
@@ -884,7 +895,7 @@ struct Walk<'a> {
     /// What the predicates are evaluated in: the file's parts, and the name
     /// trees' keys, the structure tree's content items and the form's
     /// fields' names, as they read them.
-    file: FileCx<'a>,
+    file: FileCx<'a, Objects<'a>>,
     report: Report,
 }
 
@@ -6031,5 +6042,32 @@ mod tests {
         // Text is a date's text, which can be told.
         let report = link(bytes("https://x"), Str::Text("D:20261324".to_string()));
         assert_eq!(found(&report).len(), 1, "{report}");
+    }
+
+    /// Whether the catalog's page tree has kids, as `file` resolves them.
+    fn has_kids<'a, R: Resolve<'a>>(file: &FileCx<'a, R>) -> Truth {
+        let kids = "fn:IsPresent(trailer::Catalog::Pages::Kids)";
+        predicate::holds(kids, &file.at(&Object::null(), At::Key(b"X")))
+    }
+
+    /// One `FileCx` of a file goes across threads over its document or its
+    /// reading, each a `Sync` resolver, and resolves there as on one.
+    #[test]
+    fn a_file_over_a_document_or_a_reading_is_send_and_sync() {
+        fn shared<T: Send + Sync>(_: &T) {}
+        let file = written("1.7", &clean(), Xref::Table);
+        let doc = bytes::read(&file);
+        let reading = bytes::Reading::open(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let trailer = doc.trailer.dict();
+        let over_doc = FileCx::new(trailer, Version::new(1, 7), &doc);
+        let over_reading = FileCx::new(trailer, Version::new(1, 7), &reading);
+        shared(&over_doc);
+        shared(&over_reading);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| assert_eq!(has_kids(&over_doc), Truth::True));
+                scope.spawn(|| assert_eq!(has_kids(&over_reading), Truth::True));
+            }
+        });
     }
 }

@@ -1080,6 +1080,19 @@ impl Reader {
         }
     }
 
+    /// Object `id`, read the first time it's asked for, as [`Reader::get`]
+    /// reads it; none when it doesn't read, without why.
+    fn resolve<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        id: ObjectId,
+    ) -> Result<Option<&Object>, F::Error> {
+        let Some(i) = self.listed(id) else {
+            return Ok(None);
+        };
+        Ok((self.slot(file, i)?.object.as_ref().ok()).map(|(object, _)| object))
+    }
+
     /// Object `id`, read the first time it's asked for; or why it doesn't
     /// read.
     fn get<'f, F: Bytes<'f>>(

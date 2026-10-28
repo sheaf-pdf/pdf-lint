@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use pdf_objects::Resolve;
 use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
 use pdf_objects::parse;
 use pdf_objects::version::Version;
@@ -496,6 +497,15 @@ impl Source for Document {
     }
 }
 
+/// Its objects, as a reference resolves them: none for one it hasn't, or
+/// one that doesn't read, without why ([`Source::get`] says).
+impl<'o> Resolve<'o> for &'o Document {
+    fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+        let doc: &'o Document = self;
+        doc.objects.get(&id)?.as_ref().ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use pdf_objects::dict;
@@ -518,6 +528,21 @@ mod tests {
         );
         assert!(doc.trailer().dict().has(b"Root"));
         assert_eq!(doc.header_version(), Some(Version::new(1, 7)));
+    }
+
+    /// A reference resolves to an object that reads; to none where the
+    /// document has none, or one that doesn't read, as either is null.
+    #[test]
+    fn a_document_resolves_the_objects_that_read() {
+        let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
+        doc.insert(1, dict! { "Type" => "Catalog" });
+        let why = Unread::Other("it doesn't parse".to_string());
+        doc.objects.insert((2, 0), Err(why));
+        let resolve = &doc;
+        let catalog = resolve.resolve((1, 0)).unwrap();
+        assert!(std::ptr::eq(catalog, doc.get((1, 0)).unwrap()));
+        assert_eq!(resolve.resolve((2, 0)), None);
+        assert_eq!(resolve.resolve((3, 0)), None);
     }
 
     /// Each reason an object doesn't read says it as the reader's text

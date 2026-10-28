@@ -41,6 +41,10 @@
 //!   indirect object: a real in its shortest form, names and strings byte
 //!   by byte, a dictionary's every entry; and what it can't write as the
 //!   value refused, with nothing written.
+//! - **References resolved** ([`Resolve`]): what gives the indirect object
+//!   a reference names, a reader's or a document in memory, or any closure
+//!   from an [`ObjectId`] to an object, so that what follows references
+//!   reads through any of them.
 //!
 //! [`dict!`] builds a dictionary from keys and values.
 
@@ -57,7 +61,92 @@ pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, V
 pub use parse::Limits;
 pub use version::Version;
 
+/// What gives the indirect objects a value's references name: a file's,
+/// read or in memory. None for an object it hasn't, which a reference to it
+/// reads as: null (ISO 32000-2, 7.3.10).
+///
+/// The objects' lifetime is the trait's, not `&self`'s, so that a closure
+/// that gives borrows of its own is one: every `Fn(ObjectId) ->
+/// Option<&Object>` is, a `dyn Fn` and a reference or a box of one among
+/// them. A type that holds the objects implements it for a reference to
+/// itself.
+///
+/// ```
+/// use std::collections::BTreeMap;
+///
+/// use pdf_objects::{Object, ObjectId, Resolve};
+///
+/// // A closure over a file's objects.
+/// let objects = BTreeMap::from([((1, 0), Object::from(7))]);
+/// let resolve = |id: ObjectId| objects.get(&id);
+/// assert_eq!(resolve.resolve((1, 0)).and_then(Object::as_integer), Some(7));
+/// assert!(resolve.resolve((2, 0)).is_none());
+///
+/// // A type of its own, by reference.
+/// struct File(BTreeMap<ObjectId, Object>);
+/// impl<'o> Resolve<'o> for &'o File {
+///     fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+///         self.0.get(&id)
+///     }
+/// }
+/// let file = File(objects.clone());
+/// assert_eq!((&file).resolve((1, 0)), objects.get(&(1, 0)));
+/// ```
+pub trait Resolve<'o> {
+    /// Object `id`; none when there's none to give: the file hasn't it, or
+    /// it doesn't read.
+    fn resolve(&self, id: ObjectId) -> Option<&'o Object>;
+}
+
+/// A closure, or a function, from an object's number to the object.
+impl<'o, F: Fn(ObjectId) -> Option<&'o Object> + ?Sized> Resolve<'o> for F {
+    fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+        self(id)
+    }
+}
+
 /// The README's examples, run as doctests.
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    /// A boxed closure over `objects`. Written in a `let`, its type would
+    /// need the objects' lifetime, which only a signature can name.
+    fn boxed<'o>(
+        objects: &'o BTreeMap<ObjectId, Object>,
+    ) -> Box<dyn Fn(ObjectId) -> Option<&'o Object> + 'o> {
+        Box::new(|id| objects.get(&id))
+    }
+
+    /// Object 1 as `resolve` gives it, and whether it gives none for 2.
+    fn resolves<'o, R: Resolve<'o> + ?Sized>(resolve: &R) -> (Option<i64>, bool) {
+        let one = resolve.resolve((1, 0)).and_then(Object::as_integer);
+        (one, resolve.resolve((2, 0)).is_none())
+    }
+
+    /// No object at all.
+    fn nothing(_: ObjectId) -> Option<&'static Object> {
+        None
+    }
+
+    #[test]
+    fn a_closure_resolves_by_reference_as_a_dyn_fn_and_boxed() {
+        let objects = BTreeMap::from([((1, 0), Object::from(7))]);
+        let closure = |id: ObjectId| objects.get(&id);
+        assert_eq!(resolves(&closure), (Some(7), true));
+        assert_eq!(resolves(&&closure), (Some(7), true));
+        let dynamic = &closure as &dyn Fn(_) -> _;
+        assert_eq!(resolves(dynamic), (Some(7), true));
+        assert_eq!(resolves(&dynamic), (Some(7), true));
+        let boxed = boxed(&objects);
+        assert_eq!(resolves(&boxed), (Some(7), true));
+        assert_eq!(resolves(&*boxed), (Some(7), true));
+        assert_eq!(resolves(&nothing), (None, true));
+    }
+}

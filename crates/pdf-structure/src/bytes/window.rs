@@ -297,6 +297,7 @@ mod tests {
     use std::ops::Range;
     use std::sync::Mutex;
 
+    use pdf_objects::Resolve;
     use pdf_objects::object::ObjectId;
 
     use super::super::lazy::{files, length_by_reference};
@@ -519,6 +520,48 @@ mod tests {
             let doc = read(file);
             assert_eq!(reading.get(id).unwrap(), doc.get(id).unwrap());
             assert_eq!(reading.into_document().unwrap(), doc);
+        }
+    }
+
+    /// A reading resolves an object as it reads it, and keeps it, from bytes
+    /// in memory and by position; and to none for one the file hasn't, one
+    /// that doesn't read, or one whose read the source fails, which keeps
+    /// nothing, so that asked again it's the object.
+    #[test]
+    fn a_reading_resolves_what_reads_and_none_where_the_source_fails() {
+        let file = write::assembled(
+            "1.7",
+            &[
+                (1, b"<< /Type /Catalog >>"),
+                (2, b"[1 2 3]"),
+                (3, b"<< /A ]"),
+            ],
+            "<< /Size 4 /Root 1 0 R >>",
+        );
+        let doc = read(&file);
+        assert!(doc.get((3, 0)).is_err());
+        let in_memory = Reading::open(&file[..], &[], &Options::DEFAULT).unwrap();
+        let resolve = &in_memory;
+        assert_eq!(resolve.resolve((2, 0)), doc.get((2, 0)).ok());
+        assert!(in_memory.record((2, 0)).is_some());
+        assert_eq!(
+            (resolve.resolve((3, 0)), resolve.resolve((4, 0))),
+            (None, None)
+        );
+        let at = find(&file, b"2 0 obj").unwrap();
+        for bound in [true, false] {
+            let source = Failing::new(&file, 1);
+            let reading = open(&source, &[], &Options::DEFAULT, bound).unwrap();
+            let resolve = &reading;
+            source.fail_at(at);
+            assert_eq!(resolve.resolve((2, 0)), None, "{bound}");
+            assert!(source.failed(), "{bound}: no read at {at}");
+            assert!(reading.record((2, 0)).is_none(), "{bound}");
+            assert_eq!(resolve.resolve((2, 0)), doc.get((2, 0)).ok(), "{bound}");
+            assert!(reading.record((2, 0)).is_some(), "{bound}");
+            assert_eq!(resolve.resolve((3, 0)), None, "{bound}");
+            assert_eq!(resolve.resolve((4, 0)), None, "{bound}");
+            assert_eq!(reading.into_document().unwrap(), doc, "{bound}");
         }
     }
 
