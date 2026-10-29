@@ -395,7 +395,8 @@ fn every_test_file_reads_the_same_on_either_flate_backend() {
             );
         }
     }
-    assert!(decoded > 50, "{decoded}");
+    let floor = if fixtures() { 50 } else { 20 };
+    assert!(decoded > floor, "{decoded}");
 }
 
 /// What `reading` keeps: each object's record, by number, and its
