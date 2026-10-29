@@ -158,8 +158,10 @@ pub fn handler(data: &[u8]) {
 /// for text from `data`: its first byte the text's length, then the text
 /// (UTF-8, lossily), then what's drawn ([`Drawn`]). Panics on a broken
 /// promise: none should; each of the text's encodings is taken exactly
-/// when it's SASLprep's form and `Password::prepared` gives its bytes,
-/// else refused for its tag or its length; and prepared, the same draws
+/// when it's tagged SASLprep's and its bytes are a password prepared (the
+/// text's, where it prepares, or 3.2's form of it that prepares to
+/// itself), else refused for its tag, its length or its form; and
+/// prepared, the same draws
 /// give the same dictionary, of revision 6 with every permission, which
 /// opens by the text's encodings as the owner's, `/Perms` and
 /// `/EncryptMetadata` as asked, its handler and the one opened
@@ -174,20 +176,33 @@ fn created(data: &[u8], encrypt_metadata: bool) {
     for form in typed.encodings() {
         let created = Handler::create(&form, encrypt_metadata, &mut Drawn::over(draws));
         let bytes = form.as_bytes();
+        // Its bytes, as text, a password that prepares to them.
+        let itself = std::str::from_utf8(bytes).is_ok_and(|text| {
+            Password(text)
+                .prepared()
+                .is_ok_and(|p| p.as_bytes() == bytes)
+        });
         match created {
-            Ok(_) => assert!(
-                form.encoding() == Encoding::Saslprep
-                    && prepared.as_ref().is_ok_and(|p| p.as_bytes() == bytes),
-                "taken: prepared's"
-            ),
+            Ok(_) => {
+                assert!(
+                    form.encoding() == Encoding::Saslprep && itself,
+                    "taken: a password prepared"
+                );
+                if let Ok(prepared) = &prepared {
+                    assert_eq!(prepared.as_bytes(), bytes, "the text's, where it prepares");
+                }
+            }
             Err(why) => {
                 let expected = match (form.encoding(), bytes.len()) {
                     (Encoding::Saslprep, 0) => Unusable::Empty,
                     (Encoding::Saslprep, len @ 128..) => Unusable::TooLong { len },
-                    (Encoding::Saslprep, _) => panic!("a form of 1 to 127 bytes refused"),
+                    (Encoding::Saslprep, _) => {
+                        assert!(!itself, "a password prepared refused");
+                        Unusable::Unprepared(Encoding::Saslprep)
+                    }
                     (encoding, _) => Unusable::Unprepared(encoding),
                 };
-                assert_eq!(why, expected, "refused for its tag or length");
+                assert_eq!(why, expected, "refused for its tag, its length or its form");
             }
         }
     }
@@ -289,14 +304,21 @@ impl rand_core::TryCryptoRng for Drawn<'_> {}
 /// `data`, read as UTF-8 (lossily), as a character each two bytes (the
 /// Basic Multilingual Plane's) and as one each three (every plane's),
 /// given to `Password::encodings` and `Password::prepared`. Panics on a
-/// broken promise: none should; the forms are SASLprep's first where it
-/// isn't the text, then the text as typed, then single-byte forms of the
-/// text composed, a byte a character, none twice among those a revision
-/// takes first; prepared, the text is SASLprep's form, of 1 to 127 bytes
-/// and its own SASLprep, or it's refused for what the text is.
+/// broken promise: none should; the forms are SASLprep's by Unicode 3.2
+/// first where it isn't the text, then SASLprep's by a later Unicode
+/// (stringprep's) where it's neither, then the text as typed, then
+/// single-byte forms of the text composed, a byte a character, none twice
+/// among those a revision takes first; 3.2's form is there exactly where
+/// stringprep takes the text with Corrigendum #4's five characters mapped
+/// to their 3.2 decompositions and 3.2 assigned each of its characters,
+/// and has that form's characters, decomposed, in another order at most;
+/// prepared, the text is SASLprep's form by both, of 1 to 127 bytes and
+/// its own SASLprep by both, or it's refused for what the text is.
 pub fn password(data: &[u8]) {
+    use crate::password::{CORRIGENDUM_4, saslprep_32};
     use crate::{Encoding, Password, Unusable};
     use stringprep::saslprep;
+    use stringprep::tables::unassigned_code_point;
     use unicode_normalization::UnicodeNormalization;
     let lossy = String::from_utf8_lossy(data);
     let wide: String = (data.chunks_exact(2))
@@ -305,23 +327,51 @@ pub fn password(data: &[u8]) {
     let planes: String = (data.chunks_exact(3))
         .filter_map(|b| char::from_u32(u32::from_le_bytes([b[0], b[1], b[2], 0]) % 0x11_0000))
         .collect();
+    // Text decomposed, its characters in order.
+    let sorted = |text: &str| {
+        let mut chars: Vec<char> = text.nfd().collect();
+        chars.sort_unstable();
+        chars
+    };
     for text in [&lossy[..], &wide, &planes] {
         let typed = Password(text);
         let forms = typed.encodings();
         let form = |i: usize| (forms[i].encoding(), forms[i].as_bytes());
         let prepared = saslprep(text);
-        let first = match &prepared {
-            Ok(prepared) if prepared != text => {
-                assert_eq!(
-                    form(0),
-                    (Encoding::Saslprep, prepared.as_bytes()),
-                    "SASLprep's"
-                );
-                1
+        let unicode_32 = saslprep_32(text);
+        let mut first = 0;
+        if let Some(old) = unicode_32
+            .as_ref()
+            .filter(|old| old[..] != *text.as_bytes())
+        {
+            assert_eq!(form(0), (Encoding::Saslprep, &old[..]), "SASLprep's by 3.2");
+            first = 1;
+        }
+        if let Ok(new) = &prepared {
+            let other = unicode_32
+                .as_ref()
+                .is_none_or(|old| old[..] != *new.as_bytes());
+            if new != text && other {
+                let new = (Encoding::SaslprepCurrentUnicode, new.as_bytes());
+                assert_eq!(form(first), new, "SASLprep's by a later Unicode");
+                first += 1;
             }
-            _ => 0,
-        };
+        }
         assert_eq!(form(first), (Encoding::Utf8, text.as_bytes()), "as typed");
+        let mapped: String = (text.chars())
+            .map(|c| (CORRIGENDUM_4.iter().find(|&&(x, _)| x == c)).map_or(c, |&(_, old)| old))
+            .collect();
+        let of_mapped = saslprep(&mapped);
+        let assigned = !text.chars().any(unassigned_code_point);
+        assert_eq!(
+            unicode_32.is_some(),
+            of_mapped.is_ok() && assigned,
+            "3.2's where SASLprep takes it"
+        );
+        if let (Some(old), Ok(of_mapped)) = (&unicode_32, &of_mapped) {
+            let old = std::str::from_utf8(old).expect("UTF-8");
+            assert_eq!(sorted(old), sorted(of_mapped), "3.2's characters");
+        }
         let len = text.nfc().count();
         for (encoding, bytes) in (first + 1..forms.len()).map(form) {
             let single = [Encoding::PdfDoc, Encoding::WinAnsi, Encoding::MacRoman];
@@ -342,10 +392,21 @@ pub fn password(data: &[u8]) {
                 assert_eq!(encoded.encoding(), Encoding::Saslprep);
                 let bytes = encoded.as_bytes();
                 assert!((1..=127).contains(&bytes.len()), "1 to 127 bytes");
+                assert_eq!(
+                    unicode_32.as_ref().map(|old| &old[..]),
+                    Some(bytes),
+                    "3.2's"
+                );
                 let encoded = std::str::from_utf8(bytes).expect("UTF-8");
                 assert_eq!(prepared.as_deref().ok(), Some(encoded), "SASLprep's");
                 let again = saslprep(encoded);
                 assert_eq!(again.as_deref().ok(), Some(encoded), "its own SASLprep");
+                let again = saslprep_32(encoded);
+                assert_eq!(
+                    again.as_ref().map(|old| &old[..]),
+                    Some(bytes),
+                    "its own by 3.2"
+                );
             }
             Err(Unusable::Empty) => assert!(text.is_empty(), "empty"),
             Err(Unusable::Vanished) => {
@@ -359,10 +420,22 @@ pub fn password(data: &[u8]) {
                 assert_eq!(prepared.map(|p| p.len()).ok(), Some(len), "its length");
             }
             Err(Unusable::Prohibited(c)) => {
-                assert!(prepared.is_err() && text.contains(c), "prohibited");
-                assert!(saslprep(c.encode_utf8(&mut [0; 4])).is_err(), "alone too");
+                assert!(text.contains(c), "prohibited");
+                // Unassigned in 3.2, or refused, alone too.
+                let alone = saslprep(c.encode_utf8(&mut [0; 4])).is_err();
+                assert!(unassigned_code_point(c) || (prepared.is_err() && alone));
             }
             Err(Unusable::Bidi) => assert!(prepared.is_err(), "bidi"),
+            Err(Unusable::Ambiguous(c)) => {
+                assert!(text.contains(c), "ambiguous");
+                let new = prepared.as_deref().map(str::as_bytes).ok();
+                assert!(new.is_some_and(|new| (1..=127).contains(&new.len())));
+                assert_ne!(
+                    unicode_32.as_ref().map(|old| &old[..]),
+                    new,
+                    "the forms differ"
+                );
+            }
             Err(other) => panic!("{other:?}"),
         }
     }
@@ -390,7 +463,9 @@ mod tests {
 
     /// New files' dictionaries, as the fuzz body creates them now and then:
     /// for text whose SASLprep form is itself, isn't, is empty, is over 127
-    /// bytes, or that SASLprep refuses; and for random text; each with
+    /// bytes, or that SASLprep refuses; whose forms by Unicode 3.2 and by a
+    /// later Unicode differ, Corrigendum #4's way and #5's; and for random
+    /// text; each with
     /// draws, and with none but the counter's, each way of
     /// `/EncryptMetadata`.
     #[test]
@@ -404,7 +479,7 @@ mod tests {
         };
         let long = "\u{2168}".repeat(64);
         let random: Vec<u8> = (0..40).map(|_| next()).collect();
-        let texts: [&[u8]; 9] = [
+        let texts: [&[u8]; 11] = [
             b"user",
             "p\u{e4}ssw\u{f6}rd".as_bytes(),
             "\u{2168}".as_bytes(),
@@ -413,6 +488,8 @@ mod tests {
             long.as_bytes(),
             b"\x07",
             b"",
+            "Password\u{2F874}!".as_bytes(),
+            "\u{1100}\u{300}\u{1161}\u{323}".as_bytes(),
             &random,
         ];
         for text in texts {
@@ -458,6 +535,14 @@ mod tests {
             "e\u{301}",
             "\u{5D0}\u{FB44}",
             "\u{AD}",
+            // Corrigendum #4's, #3's, #5's, and a character 3.2 hadn't
+            // assigned that a later Unicode decomposes.
+            "Password\u{2F874}!",
+            "\u{F951}",
+            "\u{1100}\u{300}\u{1161}\u{323}",
+            "\u{AC00}\u{300}\u{323}",
+            "\u{B47}\u{300}\u{B3E}",
+            "\u{2090}",
         ] {
             password(text.as_bytes());
         }

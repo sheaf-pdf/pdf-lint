@@ -5149,6 +5149,52 @@ mod tests {
         }
     }
 
+    /// A revision 6 file whose user's password a writer set as SASLprep's
+    /// form by Unicode 3.2, the conforming one, or by a later Unicode,
+    /// where the two differ, opens by the password as typed, saying which
+    /// form did: Corrigendum #4's U+2F874, set as 3.2's U+5F33 or as the
+    /// correction's U+5F53; Corrigendum #5's U+1100 U+0300 U+1161 U+0323,
+    /// set as 3.2's U+AC00 U+0300 U+0323 or as the later Unicode leaves it,
+    /// the text as typed; and 3.2's form composed once, typed, a file set
+    /// with it composed again, as both have it. The owner's password is
+    /// another, so each opens as the user's, by the one password given.
+    #[test]
+    fn a_file_set_with_saslprep_by_either_unicode_opens_by_it_saying_which() {
+        use pdf_crypt::Encoding::{Saslprep, SaslprepCurrentUnicode, Utf8};
+
+        let kind = pdf_crypt::writer::Kind::Aes256;
+        let p1 = "\u{1100}\u{300}\u{1161}\u{323}";
+        let once = "\u{AC00}\u{300}\u{323}";
+        let cases = [
+            ("Password\u{2F874}!", "Password\u{5F33}!", (0, Saslprep)),
+            (
+                "Password\u{2F874}!",
+                "Password\u{5F53}!",
+                (0, SaslprepCurrentUnicode),
+            ),
+            (p1, once, (0, Saslprep)),
+            (p1, p1, (0, Utf8)),
+            (once, "\u{AC00}\u{323}\u{300}", (0, Saslprep)),
+        ];
+        for (typed, set, by) in cases {
+            let root = dict! { "Root" => Object::reference(1) };
+            let file = write::encrypted(&settings(kind, set.as_bytes()), &to_encrypt(&[]), root);
+            let doc = read_opened(&file, &[Password(typed)]);
+            let opened = Encryption::Opened {
+                owner: false,
+                by: Some(by),
+            };
+            assert_eq!(doc.encryption, opened, "{typed:?} {set:?}");
+            assert!(doc.warnings.is_empty(), "{typed:?}: {:?}", doc.warnings);
+        }
+        // The two forms of U+2F874 each open only the file set with it.
+        let set = "Password\u{5F53}!";
+        let root = dict! { "Root" => Object::reference(1) };
+        let file = write::encrypted(&settings(kind, set.as_bytes()), &to_encrypt(&[]), root);
+        let doc = read_opened(&file, &[Password("Password\u{5F33}!")]);
+        assert_eq!(doc.encryption, Encryption::Locked);
+    }
+
     /// Several passwords: every one's encodings that fit the file's
     /// revision are tried before any one's others, so in a file of revision
     /// 4 whose user's password is `IX`, Ⅸ, which opens it only by its

@@ -547,6 +547,86 @@ fn a_password_of_invisible_characters_opens_a_file_whose_password_is_empty() {
     );
 }
 
+/// A password whose SASLprep forms by Unicode 3.2 and by a later Unicode
+/// differ opens a revision 6 file set with either, saying which: 3.2's,
+/// the conforming one, tried first; the later Unicode's, a writer's that
+/// prepared it so, next; and as typed, where that's what the later
+/// Unicode's form is. Corrigendum #4's U+2F874, 3.2's U+5F33 and the
+/// correction's U+5F53; Corrigendum #5's U+1100 U+0300 U+1161 U+0323, 3.2's
+/// U+AC00 U+0300 U+0323 and the later Unicode's, the text as typed. A
+/// password whose forms agree opens a file set with 3.2's form of another.
+#[test]
+fn a_password_opens_a_file_set_with_saslprep_by_either_unicode_saying_which() {
+    use Encoding::{Saslprep, SaslprepCurrentUnicode, Utf8};
+    let id = b"0123456789abcdef";
+    let cases = [
+        ("Password\u{2F874}!", "Password\u{5F33}!", (0, Saslprep)),
+        (
+            "Password\u{2F874}!",
+            "Password\u{5F53}!",
+            (1, SaslprepCurrentUnicode),
+        ),
+        (
+            "\u{1100}\u{300}\u{1161}\u{323}",
+            "\u{AC00}\u{300}\u{323}",
+            (0, Saslprep),
+        ),
+        (
+            "\u{1100}\u{300}\u{1161}\u{323}",
+            "\u{1100}\u{300}\u{1161}\u{323}",
+            (1, Utf8),
+        ),
+        // 3.2's form composed once, typed: by both, composed again, its
+        // marks reordered; as typed, the file set with it.
+        (
+            "\u{AC00}\u{300}\u{323}",
+            "\u{AC00}\u{323}\u{300}",
+            (0, Saslprep),
+        ),
+        (
+            "\u{AC00}\u{300}\u{323}",
+            "\u{AC00}\u{300}\u{323}",
+            (1, Utf8),
+        ),
+    ];
+    for (typed, set, by) in cases {
+        for kind in [Kind::Aes256R5, Kind::Aes256] {
+            let dictionary = written(kind, set.as_bytes(), b"owner");
+            let forms = Password(typed).encodings();
+            let handler = Handler::open(&dictionary, id, &forms).unwrap();
+            assert_eq!(handler.opened_by(), Some(by), "{typed:?} {set:?} {kind:?}");
+            assert!(!handler.owner(), "{typed:?} {set:?} {kind:?}");
+        }
+    }
+    // The form a file isn't set with doesn't open it: U+5F53's file, by
+    // 3.2's form alone; U+5F33's, by the later Unicode's.
+    let forms = Password("Password\u{2F874}!").encodings();
+    for (set, other) in [("Password\u{5F53}!", 0), ("Password\u{5F33}!", 1)] {
+        let dictionary = written(Kind::Aes256, set.as_bytes(), b"owner");
+        let opened = Handler::open(&dictionary, id, &forms[other..=other]);
+        assert_eq!(opened.unwrap_err(), Refused::Password, "{set:?}");
+    }
+}
+
+/// A new file takes 3.2's SASLprep form of a password whose forms differ
+/// only where it's a password prepared itself, as U+5F33's is; not where
+/// it prepares to another, as 3.2's form of U+1100 U+0300 U+1161 U+0323
+/// does.
+#[test]
+fn a_new_file_takes_saslprep_by_3_2_of_another_password_only_prepared() {
+    let mut rng = ChaCha20Rng::seed_from_u64(32);
+    let c4 = Password("Password\u{2F874}!").encodings();
+    assert_eq!(c4[0].as_bytes(), "Password\u{5F33}!".as_bytes());
+    let (_, dictionary) = Handler::create(&c4[0], true, &mut rng).unwrap();
+    let typed = Password("Password\u{5F33}!").encodings();
+    let handler = Handler::open(&dictionary, b"", &typed).unwrap();
+    assert_eq!(handler.opened_by(), Some((0, Encoding::Utf8)));
+    let c5 = Password("\u{1100}\u{300}\u{1161}\u{323}").encodings();
+    assert_eq!(c5[0].encoding(), Encoding::Saslprep);
+    let refused = Handler::create(&c5[0], true, &mut rng).map(|_| ());
+    assert_eq!(refused, Err(Unusable::Unprepared(Encoding::Saslprep)));
+}
+
 /// é typed as e and U+0301 opens a revision 4 file whose password is é in
 /// PDFDocEncoding, as the single-byte encodings take the text composed;
 /// and a revision 6 file whose password is é in UTF-8, by its SASLprep

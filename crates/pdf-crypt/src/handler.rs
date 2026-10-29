@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 use crate::aes::Aes;
 use crate::hmac::HmacSha256;
 use crate::md5::md5;
+use crate::password::is_prepared;
 use crate::rc4::rc4;
 use crate::sha2::{sha256, sha384, sha512};
 use crate::{CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Refused, Unusable};
@@ -182,9 +183,11 @@ impl Handler {
     /// password unused and nothing drawn: one not tagged
     /// [`Encoding::Saslprep`] ([`Unusable::Unprepared`]); and one so tagged
     /// that's empty ([`Unusable::Empty`]) or over 127 bytes
-    /// ([`Unusable::TooLong`]), which a reader would cut, as SASLprep's
-    /// form [`Password::encodings`](crate::Password::encodings) tries can
-    /// be.
+    /// ([`Unusable::TooLong`]), which a reader would cut, or that isn't
+    /// its own prepared form ([`Unusable::Unprepared`]), as SASLprep's form
+    /// [`Password::encodings`](crate::Password::encodings) tries can be:
+    /// by Unicode 3.2, of a password whose form by a later Unicode is
+    /// another.
     pub fn create(
         password: &Encoded,
         encrypt_metadata: bool,
@@ -195,7 +198,7 @@ impl Handler {
             (Encoding::Saslprep, bytes) if bytes.len() > 127 => {
                 return Err(Unusable::TooLong { len: bytes.len() });
             }
-            (Encoding::Saslprep, bytes) => bytes,
+            (Encoding::Saslprep, bytes) if is_prepared(bytes) => bytes,
             (encoding, _) => return Err(Unusable::Unprepared(encoding)),
         };
         let mut key = Zeroizing::new(vec![0; 32]);

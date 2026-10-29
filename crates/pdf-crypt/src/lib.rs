@@ -11,12 +11,13 @@
 //!   32000-2, AES-256), the owner's password or the user's.
 //! - **A password as typed, and the bytes tried:** a [`Password`]'s text
 //!   [`encodings`](Password::encodings) are its SASLprep form (RFC 4013)
-//!   and UTF-8, which revisions 5 and 6 take, and the single-byte
-//!   encodings 2 to 4's may have been set in, each [`Encoded`] tagged with
-//!   its [`Encoding`]; [`Handler::open`] tries those that fit the file's
+//!   as of Unicode 3.2, and by a later Unicode where that's another, and
+//!   UTF-8, which revisions 5 and 6 take, and the single-byte encodings 2
+//!   to 4's may have been set in, each [`Encoded`] tagged with its
+//!   [`Encoding`]; [`Handler::open`] tries those that fit the file's
 //!   revision first, and says which opened it. A new file's password is
-//!   [`prepared`](Password::prepared), strictly: SASLprep's form, or why
-//!   it can't be one ([`Unusable`]).
+//!   [`prepared`](Password::prepared), strictly: SASLprep's form, the same
+//!   by both Unicodes, or why it can't be one ([`Unusable`]).
 //! - **A new file's encryption:** [`Handler::create`] makes a revision 6
 //!   dictionary (AES-256) for a prepared password, every permission
 //!   granted and the owner's password the user's, and the handler to
