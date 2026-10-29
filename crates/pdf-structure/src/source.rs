@@ -135,8 +135,10 @@ pub struct Document {
     /// the file's cross-references list, the trailer's `/Size` less one
     /// and every number put in since, never below 1; wider than a `u32`,
     /// so that one past 4,294,967,295 is too. From there on, it's that,
-    /// `PAST`, plus the last number handed out since, 0 for none, after
-    /// which the next one no entry holds is looked for.
+    /// `PAST`, plus the last number handed out since (or, where an object
+    /// put at the largest took it there, the number new ids would have
+    /// started after), 0 for none, after which the next one no entry holds
+    /// is looked for.
     next: u64,
     /// The trailer.
     pub trailer: Trailer,
@@ -611,9 +613,15 @@ impl Document {
         was?.ok().map(|(object, _)| object)
     }
 
-    /// New ids start past `n`, an entry's number, where they didn't.
+    /// New ids start past `n`, an entry's number, where they didn't. An
+    /// entry at 4,294,967,295, the largest, takes them past every number,
+    /// to be looked for above the number they'd have started after, so
+    /// that none handed out before is handed out again.
     fn past(&mut self, n: u32) {
-        self.next = self.next.max(u64::from(n) + 1);
+        self.next = match u32::try_from(self.next) {
+            Ok(next) if n == u32::MAX => PAST + u64::from(next - 1),
+            _ => self.next.max(u64::from(n) + 1),
+        };
     }
 
     /// Removes object `id`, whether it reads or not, its record with it:
@@ -641,15 +649,19 @@ impl Document {
     /// number the file's cross-references list (in use, in an object
     /// stream or free), its cross-reference streams' too, the trailer's
     /// `/Size` less one, and every number put in or handed out since, so
-    /// that each call gives another. Never object 0, which is always free.
+    /// that each call gives another until they go round past the largest
+    /// (below). Never object 0, which is always free.
     ///
     /// Once those reach 4,294,967,295, the largest number, as a file that
     /// lists it can, a new id is the next number above the last one handed
-    /// out that no entry holds, from 1 again after the largest: then it
-    /// may be one the file lists free, which an update writing it there
-    /// should know, as its object's generation is 0. There's always one,
-    /// as an object at every number would take more than 700 GB; were a
-    /// document to hold them, the new id would be 1, which it holds.
+    /// out that no entry holds (or, where an object put at the largest took
+    /// them there, above the number they'd have started after), from 1
+    /// again after the largest. Then it may be one the file lists free,
+    /// which an update writing it there should know, as its object's
+    /// generation is 0; and once they've gone round from 1, one handed out
+    /// before and not set since. There's always one, as an object at every
+    /// number would take more than 700 GB; were a document to hold them,
+    /// the new id would be 1, which it holds.
     pub fn new_id(&mut self) -> ObjectId {
         if let Ok(n) = u32::try_from(self.next) {
             self.next += 1;
@@ -697,7 +709,8 @@ impl Document {
     /// Has new ids start after `n`, or after the largest number an entry
     /// holds, where that's larger: never at a number held. Lowered, they
     /// may be numbers the file lists free, or numbers handed out before
-    /// and not set.
+    /// and not set. After 4,294,967,295, the largest, they're looked for
+    /// from 1 again, as [`Document::new_id`]'s are once they've gone round.
     pub fn set_max_id(&mut self, n: u32) {
         let held = self.objects.last_key_value().map(|(&(held, _), _)| held);
         self.next = u64::from(n.max(held.unwrap_or(0))) + 1;
@@ -1286,17 +1299,54 @@ mod tests {
     /// Once new ids reach 4,294,967,295, the largest number, as a file that
     /// lists it can, each is the next number above the last handed out that
     /// no entry holds, from 1 again after the largest, never 0: two in a
-    /// row differ, though neither is set.
+    /// row differ, though neither is set; and an object put at the largest
+    /// takes them there from where they'd have started.
     #[test]
     fn new_ids_past_the_largest_number_are_numbers_no_entry_holds() {
-        // Up to the largest, as any other; then from 1.
+        // Up to the largest, as any other; then from 1, round to one
+        // handed out before and not set.
         let mut doc = Document::new(Version::new(1, 7), Dict::new());
+        let first = doc.new_id();
         doc.set_max_id(u32::MAX - 2);
         assert_eq!(doc.new_id(), (u32::MAX - 1, 0));
         assert_eq!(doc.new_id(), (u32::MAX, 0));
         assert_eq!(doc.max_id(), u32::MAX);
         assert_eq!((doc.new_id(), doc.new_id()), ((1, 0), (2, 0)));
+        assert_eq!(first, (1, 0));
         assert_eq!(doc.max_id(), u32::MAX);
+
+        // An object put at the largest, read or not, takes them past every
+        // number, from where they'd have started: none handed out before is
+        // again, so one set at an id handed out before an object is added
+        // doesn't replace it; and none is a number a file lists free.
+        for unread in [false, true] {
+            let mut doc = Document::new(Version::new(1, 7), Dict::new());
+            let page = doc.new_id();
+            if unread {
+                doc.set_unread((u32::MAX, 0), Unread::Other("copied".to_string()));
+            } else {
+                doc.set((u32::MAX, 0), "Copied");
+            }
+            assert_eq!(doc.max_id(), u32::MAX);
+            let font = doc.add("Font");
+            assert_eq!((page, font), ((1, 0), (2, 0)), "{unread}");
+            assert_eq!(doc.set(page, "Page"), None, "{unread}");
+            let name = doc.get(font).ok().and_then(Object::as_name);
+            assert_eq!(name, Some(&b"Font"[..]), "{unread}");
+            assert_eq!(doc.new_id(), (3, 0), "{unread}");
+        }
+        let mut file = crate::write::assembled(
+            "1.7",
+            &[(1, &b"<< /Type /Catalog >>"[..]), (2, b"2"), (3, b"3")],
+            "<< /Size 4 /Root 1 0 R >>",
+        );
+        let row = format!("{:010} 00000 n", find(&file, b"2 0 obj"));
+        let at = find(&file, row.as_bytes());
+        file[at..at + row.len()].copy_from_slice(b"0000000000 00001 f");
+        let mut doc = crate::bytes::read(&file);
+        assert!(!doc.contains((2, 0)) && doc.contains((3, 0)));
+        doc.set((u32::MAX, 0), "Copied");
+        assert_eq!((doc.new_id(), doc.new_id()), ((4, 0), (5, 0)));
 
         // A /Size whose number less one is the largest.
         let size = dict! { "Size" => 1i64 << 32 };
