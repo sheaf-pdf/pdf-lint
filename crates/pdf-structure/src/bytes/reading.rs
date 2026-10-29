@@ -326,12 +326,14 @@ impl<S: ByteSource> Reading<S> {
     }
 
     /// The file `source` holds, opened as [`Reading::open`] opens it, but
-    /// its security handler by the first of `passwords` that opens it, in
-    /// the empty password's place: each in each of its encodings
-    /// ([`Password::encodings`]), tried as the owner's and then the user's,
-    /// those that fit the file's revision first (see pdf-crypt's
-    /// `Handler::open`), as [`read_opened`](super::read_opened) tries
-    /// them. Given none, the empty password. A wrong one leaves it
+    /// its security handler by `passwords`, in the empty password's place:
+    /// each in each of its encodings ([`Password::encodings`]), tried as the
+    /// owner's and then the user's, every password's that fit the file's
+    /// revision first, in the order given, then every password's others
+    /// (pdf-crypt's `Handler::open`, given them all), as
+    /// [`read_opened`](super::read_opened) tries them. So a later password
+    /// can open it before an earlier one that would open it only in an
+    /// encoding that doesn't fit. Given none, the empty password. A wrong one leaves it
     /// [`Encryption::Locked`], or [`Encryption::Plain`] where its strings
     /// and streams aren't encrypted, as no password would: the empty one
     /// isn't tried after it. Which opened it is
@@ -371,12 +373,12 @@ impl<S: ByteSource> Reading<S> {
         })
     }
 
-    /// The reading, an encrypted file no password opened, opened by the
-    /// first of `passwords` that opens its security handler, as
-    /// [`Reading::open_with`] would have opened it: those that fit the
-    /// file's revision first, each as the owner's and then the user's (see
-    /// pdf-crypt's `Handler::open`), and [`Encryption::Opened`]'s `by` its
-    /// index among `passwords`. Nothing of the file is read again: the
+    /// The reading, an encrypted file no password opened, opened by
+    /// `passwords`, as [`Reading::open_with`] would have opened it: those
+    /// that fit the file's revision first, in the order given, then the
+    /// rest, each as the owner's and then the user's (see pdf-crypt's
+    /// `Handler::open`), and [`Encryption::Opened`]'s `by` the index among
+    /// `passwords` of the one that opened it. Nothing of the file is read again: the
     /// reading kept its encryption dictionary's values and its first `/ID`
     /// element while no password had opened it. What it read and decoded
     /// is dropped, to be read again decrypted, and what it warned of is

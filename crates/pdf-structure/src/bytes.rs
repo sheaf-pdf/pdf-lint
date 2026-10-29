@@ -371,11 +371,14 @@ pub fn read(file: &[u8]) -> Document {
     read_as(file, None, true, &Options::DEFAULT, &[])
 }
 
-/// The file `file` is, opened, when it's encrypted, by the first of
-/// `passwords` that opens it, each in each of its encodings
-/// ([`Password::encodings`]) and tried as [`Reading::open_with`] tries
-/// them, in the empty password's place: none, the empty password. A wrong
-/// one leaves it [`Encryption::Locked`].
+/// The file `file` is, opened, when it's encrypted, by `passwords` in the
+/// empty password's place, as [`Reading::open_with`] opens it: each in
+/// each of its encodings ([`Password::encodings`]), every password's that
+/// fit the file's revision before any password's others, so a later
+/// password can open it before an earlier one that would open it only in
+/// an encoding that doesn't fit. Given none, the empty password. A wrong
+/// one leaves it [`Encryption::Locked`], or [`Encryption::Plain`] where its
+/// strings and streams aren't encrypted, as no password would.
 pub fn read_opened(file: &[u8], passwords: &[Password]) -> Document {
     read_as(file, None, true, &Options::DEFAULT, passwords)
 }
@@ -1129,13 +1132,12 @@ impl Reader {
             .collect();
     }
 
-    /// The file opened by the first of `passwords` that opens its security
-    /// handler, as [`Reader::open`] would have opened it, when no password
-    /// has: what it read and decoded is dropped, to be read again
-    /// decrypted, and its budget is what opening the file left. Opened, or
-    /// not encrypted, it's as it was. Refused, it's as it was too: by a
-    /// handler the reader can't open, or by passwords none of which opens
-    /// it.
+    /// The file opened by `passwords`, as [`Handler::open`] tries them,
+    /// when no password has, as [`Reader::open`] would have opened it: what
+    /// it read and decoded is dropped, to be read again decrypted, and its
+    /// budget is what opening the file left. Opened, or not encrypted, it's
+    /// as it was. Refused, it's as it was too: by a handler the reader
+    /// can't open, or by passwords none of which opens it.
     fn unlock(&mut self, passwords: &[Encoded]) -> Result<(), Refused> {
         if self.handler.is_some() || !self.encrypts {
             return Ok(());
@@ -2852,7 +2854,9 @@ impl Reader {
 
     /// The security handler of encryption dictionary `dict` (object `own`,
     /// when it's indirect), opened by `passwords`, each in each of its
-    /// encodings, as far as it opens; its values followed where they're
+    /// encodings, given to [`Handler::open`] at once, so every password's
+    /// that fit the revision are tried before any password's others, as far
+    /// as it opens; its values followed where they're
     /// references, which are its own, so not encrypted. Whether its strings
     /// and metadata are plain is set by it ([`Reader::settle`]); and, when
     /// no password opens it, what opening it takes is kept
@@ -5143,6 +5147,65 @@ mod tests {
             let doc = read_opened(&file, passwords);
             let encryption = &doc.encryption;
             assert_eq!(doc.metadata.as_deref(), Some(&xmp[..]), "{encryption:?}");
+        }
+    }
+
+    /// Several passwords: every one's encodings that fit the file's
+    /// revision are tried before any one's others, so in a file of revision
+    /// 4 whose user's password is `IX`, Ⅸ, which opens it only by its
+    /// SASLprep form, which revision 4 doesn't take, opens it alone, but
+    /// given before the owner's password, the owner's opens it, by its
+    /// UTF-8, which fits; given after it, the same. Two that open it in an
+    /// encoding that fits, the first given opens it.
+    #[test]
+    fn several_passwords_are_tried_in_their_encodings_that_fit_first() {
+        use pdf_crypt::Encoding;
+
+        let root = dict! { "Root" => Object::reference(1) };
+        let kind = pdf_crypt::writer::Kind::Aes128;
+        let file = write::encrypted(&settings(kind, b"IX"), &to_encrypt(&[]), root);
+        let ix = Password("\u{2168}");
+        let (ix_upper, owner) = (Password("IX"), Password("owner"));
+        let cases = [
+            ("Ⅸ", &[ix][..], false, (0, Encoding::Saslprep)),
+            ("Ⅸ, owner", &[ix, owner][..], true, (1, Encoding::Utf8)),
+            ("owner, Ⅸ", &[owner, ix][..], true, (0, Encoding::Utf8)),
+            (
+                "IX, owner",
+                &[ix_upper, owner][..],
+                false,
+                (0, Encoding::Utf8),
+            ),
+            (
+                "owner, IX",
+                &[owner, ix_upper][..],
+                true,
+                (0, Encoding::Utf8),
+            ),
+        ];
+        for (given, passwords, owner, by) in cases {
+            let doc = read_opened(&file, passwords);
+            let opened = Encryption::Opened {
+                owner,
+                by: Some(by),
+            };
+            assert_eq!(doc.encryption, opened, "{given}");
+            let reading = Reading::open_with(&file[..], passwords, &Options::DEFAULT).unwrap();
+            assert_eq!(*reading.encryption(), opened, "{given}");
+            // The same order unlocking, given their encodings at once.
+            let locked = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+            let encodings: Vec<Encoded> = (passwords.iter()).flat_map(|p| p.encodings()).collect();
+            let unlocked = locked.unlock(&encodings).map_err(|(_, why)| why).unwrap();
+            let Encryption::Opened {
+                owner: by_owner,
+                by: Some((i, encoding)),
+            } = *unlocked.encryption()
+            else {
+                panic!("{:?}", unlocked.encryption())
+            };
+            assert_eq!(by_owner, owner, "{given}");
+            assert_eq!(encodings[i].encoding(), encoding, "{given}");
+            assert_eq!(encoding, by.1, "{given}");
         }
     }
 

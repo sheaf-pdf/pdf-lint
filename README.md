@@ -22,7 +22,7 @@ decrypts what's encrypted itself.
 |---|---|
 | [pdf-lint](crates/pdf-lint) | The checker, a command line and a library. Its README has the rules, the options, the JSON format and how to install it |
 | [pdf-tokenizer](crates/pdf-tokenizer) | A lossless, zero-copy PDF tokenizer, needing neither `std` nor `alloc` |
-| [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept |
+| [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept; and Flate encoded, with PNG's predictors, on miniz_oxide or zlib-rs |
 | [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler on RustCrypto's primitives: decrypting, every fault said, and encrypting for a writer, a new file's key and dictionary from randomness it's given, its keys wiped |
 | [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, their parser and their writer: each value with where it was written, every fault said, and text strings decoded by the spec |
 | [pdf-structure](crates/pdf-structure) | PDF's file structure, read whole or each object on demand, from any thread, from memory or a file read by position: the header, cross-reference tables and streams along `/Prev`, object streams and recovery by scanning, each object through pdf-objects' parser, decrypted through pdf-crypt and decoded through pdf-filters, and so any stream's data asked for, where it was read from recorded, every choice it made said |
@@ -48,7 +48,8 @@ filters, pdf-crypt, pdf-objects, pdf-structure and pdf-arlington.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
 objects`, `just fuzz structure` and `just fuzz check` fuzz the tokenizer,
-the filters, pdf-crypt's handler, pdf-objects' parser and writer,
+the filters, decoding and encoding, pdf-crypt's handler, new files'
+dictionaries and a password's forms, pdf-objects' parser and writer,
 pdf-structure's reader, and the reader and checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
 says for how many seconds (60 by default).

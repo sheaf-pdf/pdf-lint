@@ -162,8 +162,9 @@ arlington-msrv:
     cargo +{{ arlington_msrv }} test --locked -p pdf-arlington
 
 # Fuzz a target for a while, on nightly with cargo-fuzz: `tokenize`, the
-# tokenizer; `filters`, the filters; `crypt`, pdf-crypt's security
-# handler; `objects`, pdf-objects' parser, and its writer on what it
+# tokenizer; `filters`, the filters, decoding and encoding; `crypt`,
+# pdf-crypt's security handler, new files' dictionaries and a password's
+# forms; `objects`, pdf-objects' parser, and its writer on what it
 # read; `structure`, pdf-structure's reader; or `check`, the reader and
 # the checker. `structure` and `check` begin from the seeds pdf-lint's
 # fuzz module makes.

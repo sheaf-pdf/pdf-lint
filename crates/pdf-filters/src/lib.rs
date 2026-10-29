@@ -71,8 +71,9 @@ use std::fmt;
 /// On data that decodes cleanly, the two give the same. On damaged data,
 /// where each stops, how much it decoded before and the place a fault
 /// says can differ. What each encodes differs, byte for byte, at a level:
-/// each is zlib data any inflater reads, the same as
-/// [flate2](https://crates.io/crates/flate2) on that backend gives.
+/// each is zlib data any inflater reads, deflated as
+/// [flate2](https://crates.io/crates/flate2) deflates on that backend
+/// ([`encode`] says how).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Backend {
@@ -564,11 +565,13 @@ pub enum Unencodable {
 /// first encoder writes straight into `out`, grown with zeros as it fills
 /// and cut to what was written. When it can't be, `out` is as it was.
 ///
-/// Flate's zlib data is what [flate2](https://crates.io/crates/flate2)'s
-/// `ZlibEncoder` gives on the same backend at the same level: a window of
-/// 32 KiB, zlib's memory level 8 and its default strategy, and zlib-rs
-/// called as flate2 calls it, 32 KiB to write into at a call, as what it
-/// writes depends on where that room runs out.
+/// Flate deflates with a window of 32 KiB, zlib's memory level 8 and its
+/// default strategy, zlib-rs given 32 KiB to write into at a call, as what
+/// it writes depends on where that room runs out: as
+/// [flate2](https://crates.io/crates/flate2)'s `ZlibEncoder` deflates on
+/// the same backend. With flate2 1.1 on the same versions of miniz_oxide
+/// and zlib-rs, the bytes were found the same at levels 6 and 9; that's
+/// measured, not promised, as a release of either can change them.
 pub fn encode(
     data: &[u8],
     encoders: &[Encoder],
