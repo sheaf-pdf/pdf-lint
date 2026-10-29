@@ -234,16 +234,26 @@ pub enum Truth {
 
 /// What every row of one file is evaluated in: the trailer, the version,
 /// how a reference resolves (`R`, any [`Resolve`]), the file's length and
-/// the extensions it's checked under; and what the predicates read once a
-/// file (its name trees' keys, its structure tree's content items, its
-/// form's fields' names), kept inside it. [`FileCx::at`] makes a row's
+/// the extensions it's checked under; and what the predicates read of the
+/// file as a whole (its name trees' keys, its structure tree's content
+/// items, its form's fields' names), kept inside it once read, the first
+/// kept where two threads read one at once. [`FileCx::at`] makes a row's
 /// [`Cx`] from it. It's shared across threads when its resolver is `Sync`,
 /// each thread making its rows' [`Cx`]s there.
 ///
-/// Its type names its resolver: `FileCx<'a>` is the default, a `&dyn Fn`,
-/// and one made from a closure is of the closure's type, so a `FileCx` to
-/// keep as the default is given that type before its setters (`let file:
-/// FileCx<'_> = FileCx::new(trailer, version, &resolve);`).
+/// Its type names its resolver: one made from a closure is of the
+/// closure's type, and one over a document or a reading of that
+/// reference's. `FileCx<'a>`, the default, is one over any resolver, a
+/// `dyn Resolve`, as a [`Cx`] reads through it: so `&FileCx` in a
+/// signature takes a reference to one over any resolver. It isn't kept so
+/// by value: one kept is kept by its resolver's type, or boxed
+/// (`Box<FileCx>`).
+///
+/// An object its resolver gives none for is null to the predicates, as
+/// one the file hasn't is (ISO 32000-2, 7.3.10), whatever the reason: over
+/// a reading by position, one whose bytes the source failed to give is
+/// null in that row, and missing from any tree read then, which is kept
+/// so.
 ///
 /// Those it keeps know an object by where it was written and by its
 /// number, so the spans of the objects it's given, and of those its
@@ -252,7 +262,7 @@ pub enum Truth {
 /// here, so a copy is given its number, or its span is dropped. Over a
 /// document of several files' objects, then, its indirect objects are told
 /// apart by their numbers.
-pub struct FileCx<'a, R: ?Sized = &'a dyn Fn(ObjectId) -> Option<&'a Object>> {
+pub struct FileCx<'a, R: ?Sized = dyn Resolve<'a> + 'a> {
     /// The trailer as written (`trailer::`).
     trailer: &'a Dict,
     /// The file's version: its header's, or its catalog's `/Version` when
@@ -321,6 +331,22 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
     where
         R: 'c,
     {
+        Cx {
+            file: self,
+            container,
+            id: None,
+            at,
+            parents: &[],
+            defaults: None,
+        }
+    }
+}
+
+/// One over any resolver, as `&FileCx` in a signature takes it.
+impl<'a> FileCx<'a> {
+    /// The row at `at` in `container`, as one over its resolver's own type
+    /// makes it.
+    pub fn at<'c>(&'c self, container: &'c Object, at: At<'c>) -> Cx<'c, 'a> {
         Cx {
             file: self,
             container,
@@ -427,7 +453,8 @@ impl fmt::Debug for Cx<'_, '_> {
     }
 }
 
-/// The interactive form's fields' fully qualified names, read once a file.
+/// The interactive form's fields' fully qualified names, kept once read,
+/// the first kept where two threads read them at once.
 #[derive(Debug, Default)]
 struct Fields(OnceLock<Names>);
 
@@ -440,7 +467,8 @@ struct Names {
     whole: bool,
 }
 
-/// The structure tree's content items, read once a file. It knows the
+/// The structure tree's content items, kept once read, the first kept
+/// where two threads read them at once. It knows the
 /// objects it found by where they were written, or their numbers
 /// ([`Known`]), so it serves one file.
 #[derive(Debug, Default)]
@@ -525,7 +553,8 @@ struct Known {
     id: Option<ObjectId>,
 }
 
-/// The keys of a file's name trees, read once each, by the tree's root,
+/// The keys of a file's name trees, each kept once read, the first kept
+/// where two threads read one at once, by the tree's root,
 /// the object its own entry comes to, as it's [`Known`]: where it was
 /// written and the number of the object its entry's references end at
 /// ([`entry_id`]), both, so that two roots written at one span are kept
@@ -2625,8 +2654,9 @@ mod tests {
                     *resolved.borrow_mut().entry(id).or_insert(0) += 1;
                     self.objects.get(&id)
                 };
-                let file: FileCx<'_> = FileCx::new(&self.trailer, v(version), &resolve);
-                let file = file.size(self.size).extensions(&self.extensions);
+                let file = FileCx::new(&self.trailer, v(version), &resolve)
+                    .size(self.size)
+                    .extensions(&self.extensions);
                 f(&file)
             };
             (said, resolved.into_inner())
@@ -3957,8 +3987,9 @@ mod tests {
         Box::new(|id| file.objects.get(&id))
     }
 
-    /// Whether `file`'s catalog, by reference, has `/X`, and has `/Y`.
-    fn present<'a, R: Resolve<'a>>(file: &FileCx<'a, R>) -> (Truth, Truth) {
+    /// Whether `file`'s catalog, by reference, has `/X`, and has `/Y`,
+    /// through a `FileCx` over any resolver.
+    fn present(file: &FileCx) -> (Truth, Truth) {
         let row = |text| holds(text, &file.at(&Object::null(), At::Key(b"X")));
         let (x, y) = (
             "fn:IsPresent(trailer::Catalog::X)",
@@ -3980,7 +4011,7 @@ mod tests {
         assert_eq!(present(&by_value), (t.clone(), f.clone()));
         let by_reference = FileCx::new(&file.trailer, v("1.7"), &resolve);
         assert_eq!(present(&by_reference), (t.clone(), f.clone()));
-        let dynamic: FileCx<'_> = FileCx::new(&file.trailer, v("1.7"), &resolve);
+        let dynamic = FileCx::new(&file.trailer, v("1.7"), &resolve as &dyn Fn(_) -> _);
         assert_eq!(present(&dynamic), (t.clone(), f.clone()));
         let boxed = FileCx::new(&file.trailer, v("1.7"), boxed(&file));
         assert_eq!(present(&boxed), (t, f));

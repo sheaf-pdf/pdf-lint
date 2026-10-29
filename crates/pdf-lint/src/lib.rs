@@ -26,8 +26,9 @@ pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, V
 // The model, its tables and predicates, and the commit it's at, are
 // pdf-arlington's; which model every check reads is this crate's.
 pub use pdf_arlington::{COMMIT, predicate};
-// The objects, `dict!` and versions are pdf-objects'.
-pub use pdf_objects::{dict, object, version};
+// The objects, `dict!`, versions and what resolves a reference are
+// pdf-objects'.
+pub use pdf_objects::{Resolve, dict, object, version};
 // The reader, and what it reads a file into, are pdf-structure's; the
 // error a stream's data that doesn't decode cleanly gives is pdf-filters'.
 pub use pdf_structure::{bytes, pdf_filters, source};

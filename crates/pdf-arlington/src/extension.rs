@@ -44,6 +44,13 @@ pub const ISO: &[(&str, i64)] = &[
 /// An entry may be one developer extensions dictionary or, from PDF 2.0,
 /// an array of them. Metadata a reader doesn't have in plain view, given
 /// as none, declares nothing.
+///
+/// `resolve` gives an object of its own, not a borrow, as a
+/// [`Resolve`](pdf_objects::Resolve) does for a
+/// [`FileCx`](crate::predicate::FileCx): what's declared is read once,
+/// before a check, from a few objects, which a reader on demand then
+/// needn't keep, where a check reads every object, many more than once. A
+/// `Resolve` gives one by a clone: `&|id| resolver.resolve(id).cloned()`.
 pub fn declared(
     root: Option<&Object>,
     metadata: Option<&[u8]>,
