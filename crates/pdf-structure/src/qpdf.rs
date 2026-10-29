@@ -554,8 +554,8 @@ mod tests {
     use super::*;
     use crate::Password;
     use crate::bytes;
+    use crate::fixture::{self, Body, Xref};
     use crate::source::Source;
-    use crate::write::{self, Body, Xref};
 
     /// qpdf, which these tests need: `PDF_LINT_QPDF`, else `qpdf` on the
     /// `PATH`. They're ignored, so that `cargo test` needs no qpdf, and run
@@ -722,7 +722,7 @@ mod tests {
         let dir = scratch(test);
         let plain = dir.path().join("plain.pdf");
         let root = dict! { "Root" => Object::reference(1) };
-        std::fs::write(&plain, write::file("1.7", &clean(), root, Xref::Table)).unwrap();
+        std::fs::write(&plain, fixture::file("1.7", &clean(), root, Xref::Table)).unwrap();
         let out = dir.path().join("compressed.pdf");
         let qpdf = qpdf(&plain);
         let mut command = Command::new(&qpdf.program);
@@ -1024,7 +1024,7 @@ mod tests {
             assert_eq!(password.as_bytes(), prepared.as_bytes(), "{typed}");
             let mut rng = ChaCha20Rng::seed_from_u64(6);
             let trailer = dict! { "Root" => Object::reference(1), "Info" => Object::reference(6) };
-            let file = write::created(&password, true, &objects, trailer, &mut rng);
+            let file = fixture::created(&password, true, &objects, trailer, &mut rng);
             let path = dir.path().join(format!("{i}.pdf"));
             std::fs::write(&path, &file).unwrap();
             let qpdf = qpdf(&path).password(prepared);
@@ -1450,7 +1450,7 @@ qpdf: operation succeeded with warnings\n";
         let path = dir.path().join("odd.pdf");
         let catalog = b"<< /Type /Catalog /Pages 2 0 R /Odd#20Name 1 /Bin#FFx 2 /Dup 1 /Dup 2 /Utf16 <FEFF00410042> /Real +.5 >>";
         let pages = b"<< /Type /Pages /Kids [] /Count 0 >>";
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[(1, &catalog[..]), (2, &pages[..])],
             "<< /Size 3 /Root 1 0 R >>",
@@ -1487,7 +1487,7 @@ qpdf: operation succeeded with warnings\n";
 
         // Nor what qpdf reconstructs is as the file writes it.
         let damaged = dir.path().join("damaged.pdf");
-        let mut broken = write::file(
+        let mut broken = fixture::file(
             "1.7",
             &clean(),
             dict! { "Root" => Object::reference(1) },
@@ -1733,7 +1733,7 @@ qpdf: operation succeeded with warnings\n";
                 .collect()
         };
         let ended = |data: &[u8]| [data, b">"].concat();
-        let mut damaged = write::zlib(&text);
+        let mut damaged = fixture::zlib(&text);
         *damaged.last_mut().unwrap() ^= 1;
         // Rows of four, each by a tag of its own, 0 to 4.
         let rows: Vec<u8> = (0..40u8)
@@ -1756,44 +1756,49 @@ qpdf: operation succeeded with warnings\n";
             (
                 "ASCII85",
                 dict! { "Filter" => "ASCII85Decode" },
-                write::ascii85(&text),
+                fixture::ascii85(&text),
                 Alike,
             ),
             (
                 "LZW",
                 dict! { "Filter" => "LZWDecode" },
-                write::lzw(&text),
+                fixture::lzw(&text),
                 Alike,
             ),
             (
                 "RunLength",
                 dict! { "Filter" => "RunLengthDecode" },
-                write::run_length(&text),
+                fixture::run_length(&text),
                 Alike,
             ),
             (
                 "Flate",
                 dict! { "Filter" => "FlateDecode" },
-                write::zlib(&text),
+                fixture::zlib(&text),
                 Alike,
             ),
-            ("Fl", dict! { "Filter" => "Fl" }, write::zlib(&text), Alike),
+            (
+                "Fl",
+                dict! { "Filter" => "Fl" },
+                fixture::zlib(&text),
+                Alike,
+            ),
             (
                 "PNG",
                 dict! { "Filter" => "FlateDecode", "DecodeParms" => png },
-                write::zlib(&rows),
+                fixture::zlib(&rows),
                 Alike,
             ),
             (
                 "TIFF",
                 dict! { "Filter" => "FlateDecode", "DecodeParms" => tiff },
-                write::zlib(&rows[..192]),
+                fixture::zlib(&rows[..192]),
                 Alike,
             ),
             (
                 "Crypt",
                 dict! { "Filter" => crypted, "DecodeParms" => crypt },
-                write::zlib(&text),
+                fixture::zlib(&text),
                 Alike,
             ),
             (
@@ -1812,7 +1817,7 @@ qpdf: operation succeeded with warnings\n";
             (
                 "past 128",
                 dict! { "Filter" => "RunLengthDecode" },
-                [&write::run_length(&text)[..], b"\x02abc\x80"].concat(),
+                [&fixture::run_length(&text)[..], b"\x02abc\x80"].concat(),
                 Shorter,
             ),
             // 7.2.3: NUL is white-space, which qpdf takes as a fault.
@@ -1826,7 +1831,7 @@ qpdf: operation succeeded with warnings\n";
             (
                 "3 bits",
                 dict! { "Filter" => "FlateDecode", "DecodeParms" => tiff3 },
-                write::zlib(&rows),
+                fixture::zlib(&rows),
                 ReaderRefuses,
             ),
         ];
@@ -1838,7 +1843,7 @@ qpdf: operation succeeded with warnings\n";
             objects.push((first + i as u32, Body::stream(dict.clone(), data)));
         }
         let root = dict! { "Root" => Object::reference(1) };
-        std::fs::write(&path, write::file("1.7", &objects, root, Xref::Table)).unwrap();
+        std::fs::write(&path, fixture::file("1.7", &objects, root, Xref::Table)).unwrap();
         let data = std::fs::read(&path).unwrap();
         let doc = bytes::read(&data);
         let ids: Vec<ObjectId> = (0..cases.len()).map(|i| (first + i as u32, 0)).collect();

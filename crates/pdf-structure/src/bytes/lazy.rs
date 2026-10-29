@@ -11,8 +11,8 @@ use super::tests::{
     unfiltered, updated_with_padding, xref_row,
 };
 use super::*;
+use crate::fixture::{self, Xref};
 use crate::source::Source;
-use crate::write::{self, Xref};
 
 /// What a test that reads a bomb takes at most.
 const QUICK: Duration = Duration::from_secs(5);
@@ -51,9 +51,14 @@ pub(super) fn encrypted_objects(filter: &str, data: Option<&[u8]>) -> Vec<u8> {
     let handler =
         Handler::open(&values, b"0123456789abcdef", &[Encoded::verbatim(b"user")]).unwrap();
     let (objects, _) = objects_2_and_3();
-    let encrypted =
-        pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &write::zlib(&objects), None, [4; 16])
-            .unwrap();
+    let encrypted = pdf_crypt::writer::encrypt_stream(
+        &handler,
+        (4, 0),
+        &fixture::zlib(&objects),
+        None,
+        [4; 16],
+    )
+    .unwrap();
     let field = |b: &Option<Vec<u8>>| hex(b.as_deref().unwrap_or_default());
     let encrypt = format!(
         " /Encrypt << /Filter /Standard /V 5 /R 6 /Length 256 /P -4 /O <{}> /U <{}> /OE <{}> /UE <{}> /Perms <{}> \
@@ -95,7 +100,7 @@ pub(super) fn only_attachments_encrypted(file: &[u8]) -> Vec<u8> {
 /// A file whose last object, 4, is `3` without its `endobj`, which object
 /// 3's `/Length` refers to.
 pub(super) fn length_by_reference() -> Vec<u8> {
-    write::assembled(
+    fixture::assembled(
         "1.7",
         &[
             (1, &b"<< /Type /Catalog >>"[..]),
@@ -116,13 +121,13 @@ fn warning_twice() -> Vec<u8> {
     let (objects, _) = objects_2_and_3();
     let at = find(&objects, b"/Mine").unwrap();
     let objects = [&objects[..at], b"/Mi#z", &objects[at + 5..]].concat();
-    let data = write::zlib(&objects);
+    let data = fixture::zlib(&objects);
     filtered(false, " /Filter /FlateDecode", &data[..data.len() - 1])
 }
 
 /// A file whose table lists object 0 in use.
 fn object_0_in_use() -> Vec<u8> {
-    let mut file = write::assembled(
+    let mut file = fixture::assembled(
         "1.7",
         &[(1, &b"<< /Type /Catalog >>"[..])],
         "<< /Size 2 /Root 1 0 R >>",
@@ -160,12 +165,12 @@ pub(super) fn files() -> Vec<Named> {
     let mut files = vec![
         (
             "a table".to_string(),
-            write::file("1.7", &clean(), root(), Xref::Table),
+            fixture::file("1.7", &clean(), root(), Xref::Table),
             none.clone(),
         ),
         (
             "a stream".to_string(),
-            write::file("1.7", &clean(), root(), Xref::Stream),
+            fixture::file("1.7", &clean(), root(), Xref::Stream),
             none.clone(),
         ),
         ("small".to_string(), small(), none.clone()),
@@ -204,7 +209,7 @@ pub(super) fn files() -> Vec<Named> {
         ),
     ];
     let (objects, _) = objects_2_and_3();
-    let zlib = write::zlib(&objects);
+    let zlib = fixture::zlib(&objects);
     let filters = [
         (" /Filter /ASCIIHexDecode", hex(&objects).into_bytes()),
         (" /Filter /FlateDecode", zlib.clone()),
@@ -221,12 +226,12 @@ pub(super) fn files() -> Vec<Named> {
         warning_twice(),
         none.clone(),
     ));
-    let mut scanned = write::file("1.7", &clean(), root(), Xref::Table);
+    let mut scanned = fixture::file("1.7", &clean(), root(), Xref::Table);
     let at = rfind(&scanned, b"startxref").unwrap();
     scanned.truncate(at);
     files.push(("scanned".to_string(), scanned, none.clone()));
     for kind in KINDS {
-        let file = write::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
+        let file = fixture::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
         files.push((
             format!("{kind:?}, locked"),
             file.clone(),
@@ -249,7 +254,7 @@ pub(super) fn files() -> Vec<Named> {
         ));
         files.push((format!("AES-256{filter}, locked"), file, none.clone()));
     }
-    let zlib_plain = write::zlib(&objects);
+    let zlib_plain = fixture::zlib(&objects);
     let identity = " /Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /Identity >> null]";
     let file = encrypted_objects(identity, Some(&zlib_plain));
     files.push((
@@ -548,7 +553,7 @@ fn a_documents_stream_data_is_handed_out_by_the_reading_kept_beside_it() {
 /// `bytes::read`, `read_from`, `read_limited` or `read_opened`'s.
 #[test]
 fn a_document_is_loaded_from_bytes_under_options_and_by_a_password() {
-    let file = write::file("1.7", &clean(), root(), Xref::Stream);
+    let file = fixture::file("1.7", &clean(), root(), Xref::Stream);
     let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
     assert_eq!(reading.to_document().unwrap(), read(&file));
     assert_eq!(reading.into_document().unwrap(), read(&file));
@@ -575,7 +580,7 @@ fn a_document_is_loaded_from_bytes_under_options_and_by_a_password() {
     assert_eq!(reading.into_document().unwrap(), doc);
 
     for kind in KINDS {
-        let file = write::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
+        let file = fixture::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
         let doc = read_opened(&file, &[Password("user")]);
         assert!(
             matches!(doc.encryption, Encryption::Opened { owner: false, .. }),
@@ -614,7 +619,7 @@ fn a_reading_is_send_and_sync_over_each_source() {
 /// and the source a reading reads is handed back.
 #[test]
 fn a_source_behind_a_box_or_shared_reads_as_it_does() {
-    let file = write::file("1.7", &clean(), root(), Xref::Stream);
+    let file = fixture::file("1.7", &clean(), root(), Xref::Stream);
     let doc = read(&file);
     let shared: Arc<dyn ByteSource> = Arc::new(file.clone());
     let reading = Reading::open(Arc::clone(&shared), &Options::DEFAULT).unwrap();
@@ -638,7 +643,7 @@ fn a_source_behind_a_box_or_shared_reads_as_it_does() {
 /// its own.
 #[test]
 fn each_source_in_memory_reads_alike() {
-    let file = write::file("1.7", &clean(), root(), Xref::Stream);
+    let file = fixture::file("1.7", &clean(), root(), Xref::Stream);
     let doc = read(&file);
     let shared: Arc<[u8]> = Arc::from(&file[..]);
     let readings = [
@@ -751,7 +756,7 @@ fn an_object_in_an_object_stream_is_read_before_the_others_in_it() {
 /// nor its record; but for the object stream it's in, decoded and kept.
 #[test]
 fn an_object_read_unkept_keeps_nothing_but_its_object_stream() {
-    let file = write::assembled(
+    let file = fixture::assembled(
         "1.7",
         &[
             (1, &b"<< /Type /Catalog >>"[..]),
@@ -803,7 +808,7 @@ fn an_object_read_unkept_keeps_nothing_but_its_object_stream() {
 /// a stream's, how its data was chosen.
 #[test]
 fn an_objects_record_says_whether_endobj_follows_it() {
-    let file = write::assembled(
+    let file = fixture::assembled(
         "1.7",
         &[
             (1, &b"<< /Type /Catalog >>"[..]),
@@ -932,7 +937,7 @@ fn streams_of(count: u32, size: usize) -> Vec<u8> {
         rows.push(xref_row(2, (first + n - 2) as usize, 0));
         let header = format!("{n} 0 ");
         let string = format!("({})", "x".repeat(size - header.len() - 2));
-        let data = write::zlib(format!("{header}{string}").as_bytes());
+        let data = fixture::zlib(format!("{header}{string}").as_bytes());
         containers.push((first + n - 2, header.len(), data));
     }
     for (number, first, data) in containers {
@@ -965,7 +970,7 @@ fn streams_of(count: u32, size: usize) -> Vec<u8> {
 /// and its objects unread, as the whole read reads it.
 #[test]
 fn an_object_stream_bomb_is_cut_at_its_cap_quickly() {
-    let bomb = write::zlib(&vec![0; 16 << 20]);
+    let bomb = fixture::zlib(&vec![0; 16 << 20]);
     let mut file = b"%PDF-1.7\n".to_vec();
     let one = file.len();
     file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
@@ -1023,7 +1028,7 @@ fn a_cross_reference_stream_bomb_is_decoded_no_further_than_its_rows() {
     rows[7] = u8::try_from(two).unwrap();
     let mut data = rows.clone();
     data.resize(16 << 20, 0);
-    let bomb = write::zlib(&data);
+    let bomb = fixture::zlib(&data);
     let dict = format!(
         "<< /Type /XRef /Size 3 /W [1 1 1] /Root 1 0 R /Filter /FlateDecode /Length {} >>",
         bomb.len()
@@ -1090,7 +1095,7 @@ fn an_encrypted_readings_bytes_are_refused_but_its_object_streams() {
     assert!(matches!(reading.bytes(span(0, 8)), Err(Error::Encrypted)));
     let past = Span::new(Some((4, 0)), 0, objects.len() + 1);
     assert!(matches!(reading.bytes(past), Err(Error::Outside { .. })));
-    let file = write::file("1.7", &clean(), root(), Xref::Table);
+    let file = fixture::file("1.7", &clean(), root(), Xref::Table);
     let reading = open(&file, &[], &Options::DEFAULT);
     assert_eq!(reading.bytes(span(0, 8)).unwrap(), &b"%PDF-1.7"[..]);
     let past = span(0, file.len() + 1);
@@ -1222,7 +1227,7 @@ fn a_reading_unlocked_decodes_on_what_opening_left_and_says_what_opening_says() 
         hex(values.u.as_deref().unwrap())
     );
     let (objects, _) = objects_2_and_3();
-    let file = filtered(false, " /Filter /FlateDecode", &write::zlib(&objects));
+    let file = filtered(false, " /Filter /FlateDecode", &fixture::zlib(&objects));
     let at = find(&file, b"/Root 1 0 R").unwrap();
     let file = [&file[..at], encrypt.as_bytes(), &file[at + 11..]].concat();
     let mut options = Options::DEFAULT;
@@ -1274,7 +1279,7 @@ fn a_reading_unlocked_decodes_on_what_opening_left_and_says_what_opening_says() 
 #[test]
 fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
     let kind = pdf_crypt::writer::Kind::Aes256;
-    let file = write::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
+    let file = fixture::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
     let reading = open(&file, &[], &Options::DEFAULT);
     let ids: Vec<ObjectId> = reading.ids().collect();
     ids.iter().for_each(|&id| drop(reading.get(id)));
@@ -1300,7 +1305,7 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
     let at = find(&file, b"/Standard").unwrap();
     let other = [&file[..at], b"/Standarx", &file[at + 9..]].concat();
     let not_one = with_trailer(
-        &write::file("1.7", &clean(), root(), Xref::Table),
+        &fixture::file("1.7", &clean(), root(), Xref::Table),
         " /Encrypt 7",
     );
     for file in [other, not_one] {
@@ -1318,8 +1323,8 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
     }
 
     // Not encrypted, and opened by the empty password: as they are.
-    let plain = write::file("1.7", &clean(), root(), Xref::Table);
-    let opened = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+    let plain = fixture::file("1.7", &clean(), root(), Xref::Table);
+    let opened = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
     for (file, encryption) in [
         (plain, Encryption::None),
         (
@@ -1346,7 +1351,7 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
 #[test]
 fn open_with_tries_the_passwords_given_in_the_empty_ones_place() {
     let kind = pdf_crypt::writer::Kind::Aes256;
-    let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+    let file = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
     let by = |passwords: &[Password]| {
         Reading::open_with(&file[..], passwords, &Options::DEFAULT)
             .unwrap()
@@ -1381,7 +1386,7 @@ fn open_with_tries_the_passwords_given_in_the_empty_ones_place() {
         user: b"caf\xE9",
         ..settings(pdf_crypt::writer::Kind::Aes128, b"")
     };
-    let file = write::encrypted(&pdf_doc, &to_encrypt(&[]), root());
+    let file = fixture::encrypted(&pdf_doc, &to_encrypt(&[]), root());
     let reading = Reading::open_with(&file[..], &[Password("café")], &Options::DEFAULT).unwrap();
     let by = Some((0, pdf_crypt::Encoding::PdfDoc));
     assert_eq!(

@@ -3575,8 +3575,8 @@ mod tests {
     use pdf_objects::object::Form;
 
     use super::*;
+    use crate::fixture::{self, Body, Xref};
     use crate::source::Source;
-    use crate::write::{self, Body, Xref};
 
     /// `o` with every place it was written, and every string's form, left
     /// out.
@@ -3759,7 +3759,7 @@ mod tests {
     #[test]
     fn a_file_reads_as_written_with_every_value_where_it_was_written() {
         for kind in [Xref::Table, Xref::Stream] {
-            let file = write::file("1.7", &clean(), root(), kind);
+            let file = fixture::file("1.7", &clean(), root(), kind);
             let doc = read(&file);
             assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
             assert_eq!(doc.header, Some(Version::new(1, 7)));
@@ -3788,7 +3788,7 @@ mod tests {
 
     #[test]
     fn an_indirect_length_is_followed() {
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[
                 (1, b"<< /Type /Catalog >>"),
@@ -3813,7 +3813,7 @@ mod tests {
 
     #[test]
     fn a_length_that_misses_endstream_is_said_and_the_data_found_by_it() {
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[
                 (1, b"<< /Type /Catalog >>"),
@@ -3872,7 +3872,7 @@ mod tests {
             (2, dict! { "A" => 1 }.into()),
             (3, dict! { "B" => 2 }.into()),
         ];
-        let mut file = write::file("1.7", &base, root(), Xref::Table);
+        let mut file = fixture::file("1.7", &base, root(), Xref::Table);
         let prev = startxref(&file);
         let changed = file.len();
         file.extend_from_slice(b"2 0 obj\n<< /A 9 >>\nendobj\n");
@@ -3910,7 +3910,7 @@ mod tests {
         assert_eq!(a.and_then(Object::as_integer), Some(1));
         assert_eq!(before.update, None, "one section");
         assert_eq!(
-            read(&write::file("1.7", &base, root(), Xref::Table)).update,
+            read(&fixture::file("1.7", &base, root(), Xref::Table)).update,
             None
         );
 
@@ -3936,7 +3936,7 @@ mod tests {
 
     #[test]
     fn object_0_is_never_an_object() {
-        let mut file = write::assembled(
+        let mut file = fixture::assembled(
             "1.7",
             &[(1, &b"<< /Type /Catalog >>"[..])],
             "<< /Size 2 /Root 1 0 R >>",
@@ -3953,7 +3953,7 @@ mod tests {
 
     #[test]
     fn a_table_row_out_of_range_is_read_as_free_and_the_rest_read() {
-        let mut file = write::assembled(
+        let mut file = fixture::assembled(
             "1.7",
             &[
                 (1, &b"<< /Type /Catalog /Pages 3 0 R >>"[..]),
@@ -3993,7 +3993,7 @@ mod tests {
 
     /// A catalog and an empty page tree, with a table.
     pub(super) fn small() -> Vec<u8> {
-        write::assembled(
+        fixture::assembled(
             "1.7",
             &[
                 (1, &b"<< /Type /Catalog /Pages 2 0 R >>"[..]),
@@ -4139,7 +4139,7 @@ mod tests {
 
     #[test]
     fn a_names_stray_hash_or_nul_is_said_where_it_is() {
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[
                 (1, &b"<< /Type /Catalog /Pages 2 0 R /Ca#zt 1 >>"[..]),
@@ -4180,7 +4180,7 @@ mod tests {
 
     #[test]
     fn a_file_whose_sections_dont_read_is_scanned() {
-        let mut file = write::file("1.7", &clean(), root(), Xref::Table);
+        let mut file = fixture::file("1.7", &clean(), root(), Xref::Table);
         let at = rfind(&file, b"startxref").unwrap();
         file.truncate(at);
         file.extend_from_slice(b"startxref\n999999\n%%EOF\n");
@@ -4197,7 +4197,7 @@ mod tests {
         }
 
         // A cross-reference stream's file, scanned, has it for its trailer.
-        let mut file = write::file("1.7", &clean(), root(), Xref::Stream);
+        let mut file = fixture::file("1.7", &clean(), root(), Xref::Stream);
         let at = rfind(&file, b"startxref").unwrap();
         file.truncate(at);
         let doc = read(&file);
@@ -4209,7 +4209,7 @@ mod tests {
     fn a_scanned_files_last_trailer_takes_what_it_lacks_from_an_earlier_one() {
         // As a linearized file's: the first page's trailer has /Root and
         // /ID, the last only /Size; and startxref misses.
-        let mut file = write::file("1.7", &clean(), root(), Xref::Table);
+        let mut file = fixture::file("1.7", &clean(), root(), Xref::Table);
         let at = rfind(&file, b"startxref").unwrap();
         file.truncate(at);
         file.extend_from_slice(b"trailer\n<< /Size 6 /Root 9 0 R >>\ntrailer\n<< /Size 6 >>\nstartxref\n999999\n%%EOF\n");
@@ -4237,7 +4237,7 @@ mod tests {
 
     #[test]
     fn a_key_written_twice_is_kept() {
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[(1, b"<< /Type /Catalog /Type /Pages >>")],
             "<< /Size 2 /Root 1 0 R >>",
@@ -4259,7 +4259,7 @@ mod tests {
     fn an_encrypted_files_strings_are_ciphertext_but_its_encryption_dictionarys() {
         let encrypted = |v: &str| {
             let encrypt = format!("<< /Filter /Standard /V {v} /O (owner) >>");
-            let file = write::assembled(
+            let file = fixture::assembled(
                 "1.7",
                 &[
                     (1, b"<< /Type /Catalog /Lang (en) >>"),
@@ -4294,7 +4294,7 @@ mod tests {
 
         // A null /Encrypt, or one that refers to no object, is none.
         for (encrypt, warned) in [("null", false), ("9 0 R", true)] {
-            let file = write::assembled(
+            let file = fixture::assembled(
                 "1.7",
                 &[(1, &b"<< /Type /Catalog /Lang (en) >>"[..])],
                 &format!("<< /Size 2 /Root 1 0 R /Encrypt {encrypt} >>"),
@@ -4327,7 +4327,7 @@ mod tests {
             "Encrypt" => Object::reference(2),
             "ID" => vec![Object::bytes(b"01".to_vec())],
         };
-        let file = write::file("1.7", &objects, trailer, Xref::Stream);
+        let file = fixture::file("1.7", &objects, trailer, Xref::Stream);
         let doc = read(&file);
         assert_eq!(string(&doc, 1, b"Lang"), Str::Encrypted(b"en".to_vec()));
         let id = |o: &Object| o.as_dict().unwrap().get(b"ID").unwrap().clone();
@@ -4338,7 +4338,7 @@ mod tests {
 
     #[test]
     fn a_reference_may_be_broken_by_comments_and_lines() {
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[
                 (1, b"<< /Type /Catalog /Pages 2 % a comment\n 0\r\nR >>"),
@@ -4362,7 +4362,7 @@ mod tests {
     #[test]
     fn a_malformed_object_says_why() {
         let deep = format!("{}{}", "[".repeat(300), "]".repeat(300));
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[
                 (1, b"<< /Type /Catalog >>"),
@@ -4401,7 +4401,7 @@ mod tests {
         );
 
         // An offset at another object.
-        let mut file = write::file("1.7", &clean(), root(), Xref::Table);
+        let mut file = fixture::file("1.7", &clean(), root(), Xref::Table);
         let one = find(&file, b"1 0 obj").unwrap();
         let two = find(&file, b"2 0 obj").unwrap();
         let row = format!("{two:010} 00000 n");
@@ -4579,7 +4579,7 @@ mod tests {
         file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Lang (en) >>\nendobj\n");
         let four = file.len();
         let data = match real && !encrypted {
-            true => write::zlib(&objects),
+            true => fixture::zlib(&objects),
             false => b"OBJS".to_vec(),
         };
         file.extend_from_slice(
@@ -4615,7 +4615,7 @@ mod tests {
             None => String::new(),
         };
         let data = match real {
-            true => write::zlib(&written),
+            true => fixture::zlib(&written),
             false => b"JUNK".to_vec(),
         };
         file.extend_from_slice(
@@ -4716,26 +4716,26 @@ mod tests {
             format!("{digits}>").into_bytes()
         };
         let cases = [
-            (" /Filter /FlateDecode", write::zlib(&objects)),
-            (" /Filter /Fl", write::zlib(&objects)),
-            (" /Filter /LZWDecode", write::lzw(&objects)),
+            (" /Filter /FlateDecode", fixture::zlib(&objects)),
+            (" /Filter /Fl", fixture::zlib(&objects)),
+            (" /Filter /LZWDecode", fixture::lzw(&objects)),
             (
                 " /Filter /LZW /DecodeParms << /EarlyChange 1 >>",
-                write::lzw(&objects),
+                fixture::lzw(&objects),
             ),
             (" /Filter /ASCIIHexDecode", hex(&objects)),
             (" /Filter /AHx", hex(&objects)),
-            (" /Filter /ASCII85Decode", write::ascii85(&objects)),
-            (" /Filter /A85", write::ascii85(&objects)),
-            (" /Filter /RunLengthDecode", write::run_length(&objects)),
-            (" /Filter /RL", write::run_length(&objects)),
+            (" /Filter /ASCII85Decode", fixture::ascii85(&objects)),
+            (" /Filter /A85", fixture::ascii85(&objects)),
+            (" /Filter /RunLengthDecode", fixture::run_length(&objects)),
+            (" /Filter /RL", fixture::run_length(&objects)),
             (
                 " /Filter [/AHx /Fl] /DecodeParms [null null]",
-                hex(&write::zlib(&objects)),
+                hex(&fixture::zlib(&objects)),
             ),
             (
                 " /Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /Identity >> null]",
-                write::zlib(&objects),
+                fixture::zlib(&objects),
             ),
             (" /Filter []", objects.clone()),
             (" /Filter null", objects.clone()),
@@ -4791,7 +4791,7 @@ mod tests {
         assert_eq!((message.as_str(), at), (expected, hex.clone()));
         // One in a filter after the first, whose input isn't in the file:
         // the data. The checksum's last byte gone, everything decoded.
-        let zlib = write::zlib(&objects);
+        let zlib = fixture::zlib(&objects);
         let cut: Vec<u8> = (zlib[..zlib.len() - 1].iter())
             .flat_map(|b| format!("{b:02x}").into_bytes())
             .collect();
@@ -4834,7 +4834,7 @@ mod tests {
     fn objects_past_where_a_fault_cut_an_object_stream_off_dont_read() {
         // Its stored block cut short, inside object 3: object 2 reads.
         let (objects, _) = objects_2_and_3();
-        let zlib = write::zlib(&objects);
+        let zlib = fixture::zlib(&objects);
         let cut = &zlib[..zlib.len() - 20];
         let doc = read(&filtered(false, " /Filter /FlateDecode", cut));
         assert!(doc.get((2, 0)).is_ok());
@@ -4847,7 +4847,7 @@ mod tests {
     fn a_number_where_a_fault_cut_an_object_stream_off_doesnt_read() {
         // Object 3 is 12345, cut off at 123.
         let objects = b"2 0 3 6 << >>\n12345";
-        let zlib = write::zlib(objects);
+        let zlib = fixture::zlib(objects);
         let cut = &zlib[..zlib.len() - 6];
         let stream = format!(
             "<< /Type /ObjStm /N 2 /First 8 /Filter /FlateDecode /Length {} >>",
@@ -5012,7 +5012,7 @@ mod tests {
     fn each_kind_of_encryption_decrypts_its_strings_where_they_are() {
         let root = || dict! { "Root" => Object::reference(1) };
         for kind in KINDS {
-            let file = write::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
+            let file = fixture::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
             for (password, owner) in [("user", false), ("owner", true)] {
                 let doc = read_opened(&file, &[Password(password)]);
                 let by = Some((0, pdf_crypt::Encoding::Utf8));
@@ -5077,7 +5077,7 @@ mod tests {
         let created = |typed: &str, encrypt_metadata: bool, objects: &[(u32, Body)]| {
             let password = Password(typed).prepared().unwrap();
             let mut rng = ChaCha20Rng::seed_from_u64(6);
-            write::created(&password, encrypt_metadata, objects, root(), &mut rng)
+            fixture::created(&password, encrypt_metadata, objects, root(), &mut rng)
         };
         let cases = [
             ("user", Encoding::Utf8),
@@ -5178,7 +5178,7 @@ mod tests {
         ];
         for (typed, set, by) in cases {
             let root = dict! { "Root" => Object::reference(1) };
-            let file = write::encrypted(&settings(kind, set.as_bytes()), &to_encrypt(&[]), root);
+            let file = fixture::encrypted(&settings(kind, set.as_bytes()), &to_encrypt(&[]), root);
             let doc = read_opened(&file, &[Password(typed)]);
             let opened = Encryption::Opened {
                 owner: false,
@@ -5190,7 +5190,7 @@ mod tests {
         // The two forms of U+2F874 each open only the file set with it.
         let set = "Password\u{5F53}!";
         let root = dict! { "Root" => Object::reference(1) };
-        let file = write::encrypted(&settings(kind, set.as_bytes()), &to_encrypt(&[]), root);
+        let file = fixture::encrypted(&settings(kind, set.as_bytes()), &to_encrypt(&[]), root);
         let doc = read_opened(&file, &[Password("Password\u{5F33}!")]);
         assert_eq!(doc.encryption, Encryption::Locked);
     }
@@ -5208,7 +5208,7 @@ mod tests {
 
         let root = dict! { "Root" => Object::reference(1) };
         let kind = pdf_crypt::writer::Kind::Aes128;
-        let file = write::encrypted(&settings(kind, b"IX"), &to_encrypt(&[]), root);
+        let file = fixture::encrypted(&settings(kind, b"IX"), &to_encrypt(&[]), root);
         let ix = Password("\u{2168}");
         let (ix_upper, owner) = (Password("IX"), Password("owner"));
         let cases = [
@@ -5271,7 +5271,7 @@ mod tests {
     fn a_decoder_isnt_asked_of_a_file_the_reader_opens_but_when_its_made_to() {
         let root = dict! { "Root" => Object::reference(1) };
         let kind = pdf_crypt::writer::Kind::Aes256;
-        let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root);
+        let file = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root);
         let doc = read_with(&file, &Unaskable);
         assert_eq!(
             doc.encryption,
@@ -5289,7 +5289,7 @@ mod tests {
     fn a_password_that_doesnt_open_it_leaves_it_locked_and_its_strings_ciphertext() {
         let root = dict! { "Root" => Object::reference(1) };
         let kind = pdf_crypt::writer::Kind::Aes128;
-        let file = write::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root);
+        let file = fixture::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root);
         for passwords in [&[][..], &[Password("wrong")][..]] {
             let doc = read_opened(&file, passwords);
             assert_eq!(doc.encryption, Encryption::Locked);
@@ -5309,7 +5309,7 @@ mod tests {
     fn a_handler_the_reader_cant_open_leaves_its_strings_ciphertext_and_says_why() {
         let root = dict! { "Root" => Object::reference(1) };
         let kind = pdf_crypt::writer::Kind::Aes128;
-        let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root);
+        let file = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root);
         // Another handler's name, of the same length, so nothing moves.
         let at = find(&file, b"/Standard").unwrap();
         let file = [&file[..at], b"/Standarx", &file[at + 9..]].concat();
@@ -5407,7 +5407,7 @@ mod tests {
         assert!(doc.get((2, 0)).is_ok());
     }
 
-    /// `file`, written by [`write::encrypted`] with its encryption
+    /// `file`, written by [`fixture::encrypted`] with its encryption
     /// dictionary 6 0 R, and an update that writes the dictionary again
     /// with `from` in it made `to`, and `extra` objects.
     pub(super) fn encryption_updated(
@@ -5444,7 +5444,7 @@ mod tests {
     fn an_encryption_dictionarys_values_by_reference_decrypt_as_written_in_it() {
         let root = || dict! { "Root" => Object::reference(1) };
         let kind = pdf_crypt::writer::Kind::Aes128;
-        let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+        let file = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
         let filter = "<< /CFM /AESV2 /AuthEvent /DocOpen >>";
         let cases = [
             (
@@ -5482,14 +5482,14 @@ mod tests {
     fn what_an_encryption_dictionarys_values_refer_to_is_read_as_written() {
         let root = || dict! { "Root" => Object::reference(1) };
         for kind in KINDS {
-            let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+            let file = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
             // Its /O, a string, written again by reference to 8 0 R, which
             // holds it as written in the dictionary.
             let o = pdf_crypt::writer::dictionary(&settings(kind, b""))
                 .o
                 .unwrap();
             let mut written = Vec::new();
-            write::value(&mut written, &Object::bytes(o.clone()));
+            fixture::value(&mut written, &Object::bytes(o.clone()));
             let written = String::from_utf8(written).unwrap();
             let from = format!("/O {written}");
             let file = encryption_updated(&file, &from, "/O 8 0 R", &[(8, &written)]);
@@ -5525,7 +5525,7 @@ mod tests {
     fn what_an_eff_refers_to_is_the_encryption_dictionarys_own_from_v_4_alone() {
         let root = || dict! { "Root" => Object::reference(1) };
         for kind in KINDS {
-            let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+            let file = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
             let file = encryption_updated(&file, "/P -4", "/EFF 4 0 R /P -4", &[]);
             let doc = read_opened(&file, &[]);
             assert_eq!(
@@ -5566,7 +5566,7 @@ mod tests {
             (2, dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into()),
             (3, Body::stream(metadata, xmp)),
         ];
-        let file = write::encrypted(&settings, &objects, root);
+        let file = fixture::encrypted(&settings, &objects, root);
         for passwords in [&[][..], &[Password("user")][..]] {
             let doc = read_opened(&file, passwords);
             assert_eq!(
@@ -5600,7 +5600,7 @@ mod tests {
                 encrypt_metadata: false,
                 ..settings(kind, b"")
             };
-            let file = write::encrypted(&settings, &objects, root());
+            let file = fixture::encrypted(&settings, &objects, root());
             let doc = read_opened(&file, &[]);
             assert_eq!(
                 doc.encryption,
@@ -5628,7 +5628,7 @@ mod tests {
         let handler =
             Handler::open(&values, b"0123456789abcdef", &[Encoded::verbatim(b"user")]).unwrap();
         let (objects, _) = objects_2_and_3();
-        let data = write::zlib(&objects);
+        let data = fixture::zlib(&objects);
         let data =
             pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &data, None, [4; 16]).unwrap();
         let hex = |b: &Option<Vec<u8>>| -> String {
@@ -5677,7 +5677,7 @@ mod tests {
         let handler =
             Handler::open(&values, b"0123456789abcdef", &[Encoded::verbatim(b"user")]).unwrap();
         let (objects, _) = objects_2_and_3();
-        let plain = write::zlib(&objects);
+        let plain = fixture::zlib(&objects);
         let encrypted =
             pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &plain, None, [4; 16]).unwrap();
         let hex = |b: &Option<Vec<u8>>| -> String {
@@ -5755,7 +5755,7 @@ mod tests {
             id: b"",
             ..settings(kind, b"")
         };
-        let file = write::encrypted(&settings, &to_encrypt(&[]), root);
+        let file = fixture::encrypted(&settings, &to_encrypt(&[]), root);
         // Its /ID, of empty strings, blanked out, so that nothing moves.
         let at = find(&file, b"/ID [() ()]").unwrap();
         let mut file = file;
@@ -5789,7 +5789,7 @@ mod tests {
         };
         for kind in KINDS {
             let root = dict! { "Root" => Object::reference(1) };
-            let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root);
+            let file = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root);
             let doc = read_opened(&file, &[]);
             assert_eq!(
                 doc.encryption,
@@ -5871,7 +5871,7 @@ mod tests {
             // Another type's /Contents is encrypted, and decrypted.
             (5, signature(Some("Annot")).into()),
         ];
-        let file = write::encrypted(&settings(kind, b""), &objects, root);
+        let file = fixture::encrypted(&settings(kind, b""), &objects, root);
         let doc = read_opened(&file, &[]);
         for n in [3, 4, 5] {
             let contents = doc.get((n, 0)).unwrap().as_dict().unwrap().get(b"Contents");
@@ -5887,7 +5887,7 @@ mod tests {
     fn an_earlier_updates_encryption_dictionary_isnt_decrypted_either() {
         let root = || dict! { "Root" => Object::reference(1) };
         let kind = pdf_crypt::writer::Kind::Aes128;
-        let mut file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+        let mut file = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
         // An update that writes the encryption dictionary, 6 0 R, again as
         // 7 0 R, its trailer naming that: the first trailer still names 6.
         let start = find(&file, b"6 0 obj").unwrap();
@@ -5931,7 +5931,7 @@ mod tests {
         let written = Object::from(vec![Object::bytes(id), Object::bytes(id)]);
         let root = || dict! { "Root" => Object::reference(1) };
         for kind in KINDS {
-            let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+            let file = fixture::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
             // Its table and trailer written again as a cross-reference
             // stream, 7 0 R: the table's rows, then its own, each a type,
             // an offset and a generation, of 1, 4 and 2 bytes; and the
@@ -6019,7 +6019,7 @@ mod tests {
             (4, Body::stream(form, drawn)),
         ];
         for kind in KINDS {
-            let file = write::encrypted(&settings(kind, b""), &objects, root());
+            let file = fixture::encrypted(&settings(kind, b""), &objects, root());
             let doc = read_opened(&file, &[]);
             assert_eq!(
                 doc.encryption,
@@ -6057,7 +6057,7 @@ mod tests {
         let kind = pdf_crypt::writer::Kind::Aes128;
         // Two strings too short for AES, as written, of five bytes and
         // seven: the same fault, said once.
-        let file = write::encrypted(
+        let file = fixture::encrypted(
             &settings(kind, b""),
             &to_encrypt(&[b"short", b"longer!"]),
             root,
@@ -6230,7 +6230,7 @@ mod tests {
         assert!(doc.get((3, 0)).is_ok());
         assert_eq!(counted.1.get(), 2);
         // A file with nothing compressed asks nothing.
-        let plain = write::file("1.7", &clean(), root(), Xref::Table);
+        let plain = fixture::file("1.7", &clean(), root(), Xref::Table);
         let counted = Counted(BTreeMap::new(), std::cell::Cell::new(0));
         read_with(&plain, &counted);
         assert_eq!(counted.1.get(), 0);
@@ -6388,7 +6388,7 @@ mod tests {
     fn an_encrypted_files_strings_in_plain_view_take_the_decoders_plaintext() {
         let catalog =
             b"<< /Type /Catalog /Lang (xx) /Dup (aa) /Dup (bb) /Kids [(k1) (k2)] /Short [(s1)] >>";
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[
                 (1, catalog),
@@ -6487,7 +6487,7 @@ mod tests {
         // Nor is a file that isn't encrypted asked about.
         let decoder = Plain(BTreeMap::new(), std::cell::Cell::new(0));
         read_with(
-            &write::assembled(
+            &fixture::assembled(
                 "1.7",
                 &[(1, &b"<< /Type /Catalog /Lang (en) >>"[..])],
                 "<< /Size 2 /Root 1 0 R >>",
@@ -6508,7 +6508,7 @@ mod tests {
                 assert!(at.start <= at.end && at.end <= file.len());
             }
         };
-        let file = write::file("1.7", &clean(), root(), Xref::Table);
+        let file = fixture::file("1.7", &clean(), root(), Xref::Table);
         for end in 0..=file.len() {
             inside(&file[..end], &read(&file[..end]));
         }

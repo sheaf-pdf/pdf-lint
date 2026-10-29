@@ -53,6 +53,11 @@
 
 pub mod bytes;
 mod filter;
+// The tests' file writer; for other crates' tests and fuzz bodies too,
+// with `fixtures`, the feature it's named for.
+#[cfg(any(test, feature = "fixtures"))]
+#[doc(hidden)]
+pub mod fixture;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
@@ -64,11 +69,6 @@ mod json;
 #[doc(hidden)]
 pub mod qpdf;
 pub mod source;
-// The tests' file writer; for other crates' tests and fuzz bodies too,
-// with `fixtures`.
-#[cfg(any(test, feature = "fixtures"))]
-#[doc(hidden)]
-pub mod write;
 
 #[cfg(any(unix, windows))]
 pub use bytes::FileBytes;

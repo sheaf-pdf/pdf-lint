@@ -479,7 +479,7 @@ mod tests {
 
     use super::*;
     use crate::bytes;
-    use crate::write::{self, Body, Xref};
+    use crate::fixture::{self, Body, Xref};
 
     /// A small, fast generator of bytes, the same each run.
     struct Random(u64);
@@ -564,7 +564,7 @@ mod tests {
     /// [`objects`] with a table, then an incremental update that rewrites
     /// the page with a second annotation, and adds it.
     fn updated() -> Vec<u8> {
-        let mut file = write::file("1.7", &objects(), root(), Xref::Table);
+        let mut file = fixture::file("1.7", &objects(), root(), Xref::Table);
         let text = String::from_utf8_lossy(&file);
         let previous: usize = (text.rsplit("startxref\n").next())
             .and_then(|tail| tail.lines().next()?.parse().ok())
@@ -596,7 +596,7 @@ mod tests {
         let pages = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
         let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents (A page) >>";
         let header = format!("2 0 3 {} ", pages.len() + 1);
-        let data = write::zlib(format!("{header}{pages} {page}").as_bytes());
+        let data = fixture::zlib(format!("{header}{pages} {page}").as_bytes());
         let mut file = b"%PDF-1.7\n".to_vec();
         let one = file.len();
         file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
@@ -641,8 +641,8 @@ mod tests {
     /// update; and the object stream.
     fn files() -> Vec<Vec<u8>> {
         let mut files = vec![
-            write::file("1.7", &objects(), root(), Xref::Table),
-            write::file("1.7", &objects(), root(), Xref::Stream),
+            fixture::file("1.7", &objects(), root(), Xref::Table),
+            fixture::file("1.7", &objects(), root(), Xref::Stream),
         ];
         let kinds = [
             Kind::Rc4By40,
@@ -660,7 +660,7 @@ mod tests {
                 id: b"0123456789abcdef",
                 encrypt_metadata: true,
             };
-            files.push(write::encrypted(&settings, &objects(), root()));
+            files.push(fixture::encrypted(&settings, &objects(), root()));
         }
         files.push(updated());
         files.push(in_an_object_stream());

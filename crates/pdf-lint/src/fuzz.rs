@@ -321,8 +321,8 @@ fn object_streams(flate: bool) -> Vec<u8> {
     let (data, filter) = match flate {
         true => (DEFLATED.to_vec(), "/FlateDecode"),
         false => {
-            let objects = pdf_structure::write::inflated(DEFLATED);
-            let hex: String = pdf_structure::write::lzw(&objects)
+            let objects = pdf_structure::fixture::inflated(DEFLATED);
+            let hex: String = pdf_structure::fixture::lzw(&objects)
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect();
@@ -369,7 +369,7 @@ fn object_streams(flate: bool) -> Vec<u8> {
     }
     let (rows, filter) = match flate {
         true => (
-            pdf_structure::write::zlib(&predicted),
+            pdf_structure::fixture::zlib(&predicted),
             " /Filter /FlateDecode",
         ),
         false => (rows.concat(), ""),
@@ -410,7 +410,7 @@ fn opens(kind: Kind, own: bool) -> Vec<u8> {
     let objects = "2 0 3 42 << /Type /Pages /Kids [3 0 R] /Count 1 >>\n\
                    << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [<< /Type /Annot /Subtype /Text /Rect [0 0 9 9] /Contents (In plain view) >>] >>";
     let first = objects.find("<<").unwrap_or(0);
-    let deflated = pdf_structure::write::zlib(objects.as_bytes());
+    let deflated = pdf_structure::fixture::zlib(objects.as_bytes());
     let crypt = own.then(|| handler.named(b"StdCF"));
     let data =
         pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &deflated, crypt.as_ref(), [4; 16])

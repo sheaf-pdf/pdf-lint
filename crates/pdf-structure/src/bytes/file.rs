@@ -219,7 +219,7 @@ mod tests {
     use super::super::tests::{clean, root};
     use super::super::{ByteSource, Options, Reading, read};
     use super::*;
-    use crate::write::{self, Xref};
+    use crate::fixture::{self, Xref};
 
     /// A file of the test's own, in a folder of its own in the temp
     /// folder, removed with the file when it's dropped.
@@ -245,7 +245,7 @@ mod tests {
     /// on demand from the last object back, is the whole read.
     #[test]
     fn a_file_read_by_position_gives_its_bytes_and_reads_as_whole() {
-        let bytes = write::file("1.7", &clean(), root(), Xref::Stream);
+        let bytes = fixture::file("1.7", &clean(), root(), Xref::Stream);
         let temp = Temp::new("bytes", &bytes);
         let file = temp.open();
         assert_eq!(file.len(), bytes.len());
@@ -271,7 +271,7 @@ mod tests {
     /// same.
     #[test]
     fn a_file_loaded_from_its_path_is_the_whole_read_its_reading_kept() {
-        let bytes = write::file("1.7", &clean(), root(), Xref::Stream);
+        let bytes = fixture::file("1.7", &clean(), root(), Xref::Stream);
         let temp = Temp::new("load", &bytes);
         let file = FileBytes::new(File::open(&temp.0).unwrap()).unwrap();
         let reading = Reading::open(file, &Options::DEFAULT).unwrap();

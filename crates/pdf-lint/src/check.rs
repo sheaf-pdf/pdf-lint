@@ -3126,7 +3126,7 @@ mod tests {
     //! TestGrammar chooses them; only held objects found in; and every walk
     //! bounded, on cycles and on deep nesting.
 
-    use pdf_structure::write::{self, Body, Xref};
+    use pdf_structure::fixture::{self, Body, Xref};
 
     use super::*;
     use crate::bytes;
@@ -3143,7 +3143,7 @@ mod tests {
     fn written_with(version: &str, objects: &[(u32, Body)], kind: Xref, trailer: Dict) -> Vec<u8> {
         let mut trailer = trailer;
         trailer.set("Root", r(1));
-        write::file(version, objects, trailer, kind)
+        fixture::file(version, objects, trailer, kind)
     }
 
     /// `bytes` read and checked, holding what `hold` does.
@@ -4609,7 +4609,7 @@ mod tests {
     /// `value` as PDF syntax.
     fn syntax(value: &Object) -> Vec<u8> {
         let mut out = Vec::new();
-        write::value(&mut out, value);
+        fixture::value(&mut out, value);
         out
     }
 
@@ -4631,7 +4631,7 @@ mod tests {
         bodies.sort_by_key(|(n, _)| *n);
         let size = bodies.last().map_or(1, |(n, _)| n + 1);
         let bodies: Vec<(u32, &[u8])> = bodies.iter().map(|(n, b)| (*n, b.as_slice())).collect();
-        write::assembled("1.7", &bodies, &format!("<< /Size {size} /Root 1 0 R >>"))
+        fixture::assembled("1.7", &bodies, &format!("<< /Size {size} /Root 1 0 R >>"))
     }
 
     #[test]
@@ -5888,7 +5888,7 @@ mod tests {
 
     #[test]
     fn a_key_written_twice_is_found_where_it_was_first_written() {
-        let bytes = write::assembled(
+        let bytes = fixture::assembled(
             "1.7",
             &[
                 (1, b"<< /Type /Catalog /Pages 2 0 R /Type /Catalog >>"),
@@ -5928,7 +5928,7 @@ mod tests {
 
     #[test]
     fn what_the_reader_had_to_choose_is_found_in_held_objects_only() {
-        let bytes = write::assembled(
+        let bytes = fixture::assembled(
             "1.7",
             &[
                 (1, b"<< /Type /Catalog /Pages 2 0 R >>"),

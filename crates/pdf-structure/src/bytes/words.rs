@@ -3,8 +3,8 @@
 //! file's sections don't, and what it warns of.
 
 use super::*;
+use crate::fixture;
 use crate::source::Source;
-use crate::write;
 
 /// Why object `id` of `doc` doesn't read, as it says.
 fn why(doc: &Document, id: ObjectId) -> String {
@@ -169,7 +169,7 @@ fn an_object_stream_whose_data_doesnt_decrypt_says_so_and_why() {
 
 #[test]
 fn startxref_inside_another_word_says_where() {
-    let file = write::assembled(
+    let file = fixture::assembled(
         "1.7",
         &[(1, b"<< /Type /Catalog >>")],
         "<< /Size 2 /Root 1 0 R >>",
@@ -230,7 +230,7 @@ fn a_cross_reference_streams_w_index_and_size_say_whats_wrong() {
 #[test]
 fn a_cross_reference_stream_a_decoder_doesnt_decode_says_its_filters() {
     let rows = [0, 0, 0, 255, 1, 0, 9, 0, 1, 0, 9, 0];
-    let zlib = write::zlib(&rows);
+    let zlib = fixture::zlib(&rows);
     for (filter, shown) in [
         ("/FlateDecode", "/FlateDecode"),
         ("[/FlateDecode]", "filters"),
@@ -252,7 +252,7 @@ fn a_cross_reference_stream_a_decoder_doesnt_decode_says_its_filters() {
 
 #[test]
 fn an_encrypt_that_refers_to_no_object_is_read_as_not_encrypted_and_said() {
-    let file = write::assembled(
+    let file = fixture::assembled(
         "1.7",
         &[(1, b"<< /Type /Catalog >>")],
         "<< /Size 2 /Root 1 0 R /Encrypt 9 0 R >>",
@@ -280,7 +280,7 @@ fn an_object_stream_of_a_file_nothing_opens_says_nothing_decodes_it() {
 #[test]
 fn an_object_that_runs_to_where_a_fault_cut_its_object_stream_off_says_so() {
     // Object 3 is 12345, cut off at 123.
-    let zlib = write::zlib(b"2 0 3 6 << >>\n12345");
+    let zlib = fixture::zlib(b"2 0 3 6 << >>\n12345");
     let cut = &zlib[..zlib.len() - 6];
     let body = container("/Type /ObjStm /N 2 /First 8 /Filter /FlateDecode", cut);
     let doc = read(&packed(&body, ""));

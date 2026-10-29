@@ -9,8 +9,8 @@ use pdf_objects::dict;
 use super::lazy::{attachments_only, encrypted_objects, hex, only_attachments_encrypted, open};
 use super::tests::{KINDS, encryption_updated, filtered, objects_2_and_3, root, settings};
 use super::*;
+use crate::fixture::{self, Body};
 use crate::fuzz::{self, Counted};
-use crate::write::{self, Body};
 
 /// The plaintext of [`content`]'s stream 4.
 pub(crate) const CONTENT: &[u8] = b"0 0 m 99 99 l S";
@@ -42,7 +42,7 @@ fn content() -> Vec<(u32, Body)> {
         (4, Body::stream(Dict::new(), CONTENT)),
         (
             5,
-            Body::stream(dict! { "Filter" => "FlateDecode" }, &write::zlib(TEXT)),
+            Body::stream(dict! { "Filter" => "FlateDecode" }, &fixture::zlib(TEXT)),
         ),
     ]
 }
@@ -61,7 +61,7 @@ fn a_stream(entries: &str, data: &[u8], extra: &[(u32, &[u8])]) -> Vec<u8> {
         extra,
     ]
     .concat();
-    write::assembled("1.7", &objects, "<< /Size 9 /Root 1 0 R >>")
+    fixture::assembled("1.7", &objects, "<< /Size 9 /Root 1 0 R >>")
 }
 
 /// The plaintext of [`attached`]'s metadata stream, 3.
@@ -199,7 +199,7 @@ pub(crate) fn attached(how: &Attached, extra: &[(u32, &[u8])]) -> Vec<u8> {
     let id = hex(settings.id);
     let trailer =
         format!("<< /Size {size} /Root 1 0 R /Encrypt << {encrypt} >> /ID [<{id}> <{id}>] >>");
-    write::assembled("1.7", &objects, &trailer)
+    fixture::assembled("1.7", &objects, &trailer)
 }
 
 /// In a file each kind of encryption writes, opened by the user's password
@@ -208,9 +208,9 @@ pub(crate) fn attached(how: &Attached, extra: &[(u32, &[u8])]) -> Vec<u8> {
 /// from memory and read by position alike.
 #[test]
 fn each_kind_of_encryption_hands_out_each_streams_data_decrypted() {
-    let compressed = write::zlib(TEXT);
+    let compressed = fixture::zlib(TEXT);
     for kind in KINDS {
-        let file = write::encrypted(&settings(kind, b"user"), &content(), root());
+        let file = fixture::encrypted(&settings(kind, b"user"), &content(), root());
         // The plaintext isn't written.
         assert!(find(&file, CONTENT).is_none() && find(&file, &compressed).is_none());
         for password in [Password("user"), Password("owner")] {
@@ -245,7 +245,7 @@ fn each_kind_of_encryption_hands_out_each_streams_data_decrypted() {
 #[test]
 fn a_streams_own_crypt_filter_says_how_its_data_is_handed_out() {
     let (objects, _) = objects_2_and_3();
-    let zlib = write::zlib(&objects);
+    let zlib = fixture::zlib(&objects);
     let cases = [
         (" /Filter /FlateDecode", None),
         (
@@ -331,7 +331,7 @@ fn metadata_not_encrypted_is_handed_out_as_written_whether_the_file_opens_or_not
                 encrypt_metadata,
                 ..settings(kind, b"user")
             };
-            let file = write::encrypted(&settings, &objects, root());
+            let file = fixture::encrypted(&settings, &objects, root());
             for passwords in [&[][..], &[Password("user")][..]] {
                 let what = format!("{kind:?}, {encrypt_metadata}, {passwords:?}");
                 let reading = open(&file, passwords, &Options::DEFAULT);
@@ -466,7 +466,7 @@ fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it(
 #[test]
 fn a_locked_files_streams_are_refused() {
     for kind in KINDS {
-        let file = write::encrypted(&settings(kind, b"user"), &content(), root());
+        let file = fixture::encrypted(&settings(kind, b"user"), &content(), root());
         for passwords in [&[][..], &[Password("wrong")][..]] {
             let reading = open(&file, passwords, &Options::DEFAULT);
             assert_eq!(*reading.encryption(), Encryption::Locked, "{kind:?}");
@@ -479,7 +479,7 @@ fn a_locked_files_streams_are_refused() {
             }
         }
     }
-    let file = write::encrypted(&settings(Kind::Aes256, b"user"), &content(), root());
+    let file = fixture::encrypted(&settings(Kind::Aes256, b"user"), &content(), root());
     let reading = open(&file, &[], &Options::DEFAULT);
     let said = |id| reading.data(id).unwrap_err().to_string();
     assert_eq!(
@@ -687,7 +687,7 @@ fn an_embedded_files_data_under_eff_is_decrypted_by_it() {
 /// ciphertext; the file's other streams are decrypted.
 #[test]
 fn a_stream_the_encryption_dictionary_refers_to_is_refused() {
-    let file = write::encrypted(&settings(Kind::Aes256, b""), &content(), root());
+    let file = fixture::encrypted(&settings(Kind::Aes256, b""), &content(), root());
     let stream = "<< /Length 3 >>\nstream\nabc\nendstream";
     let file = encryption_updated(&file, "/Length 256", "/Length 8 0 R", &[(8, stream)]);
     let reading = open(&file, &[], &Options::DEFAULT);
@@ -704,7 +704,7 @@ fn a_stream_the_encryption_dictionary_refers_to_is_refused() {
 /// is refused, as it may be ciphertext.
 #[test]
 fn an_unsupported_handlers_streams_are_refused() {
-    let file = write::encrypted(&settings(Kind::Aes128, b""), &content(), root());
+    let file = fixture::encrypted(&settings(Kind::Aes128, b""), &content(), root());
     // Another handler's name, of the same length, so nothing moves.
     let at = find(&file, b"/Standard").unwrap();
     let file = [&file[..at], b"/Standarx", &file[at + 9..]].concat();
@@ -757,21 +757,24 @@ fn a_streams_data_that_doesnt_decrypt_cleanly_is_an_error_holding_what_did() {
 fn a_streams_data_decodes_through_each_filter() {
     let hex = |data: &[u8]| format!("{}>", hex(data)).into_bytes();
     let cases = [
-        ("/Filter /FlateDecode", write::zlib(TEXT)),
-        ("/Filter /Fl", write::zlib(TEXT)),
-        ("/Filter /LZWDecode", write::lzw(TEXT)),
+        ("/Filter /FlateDecode", fixture::zlib(TEXT)),
+        ("/Filter /Fl", fixture::zlib(TEXT)),
+        ("/Filter /LZWDecode", fixture::lzw(TEXT)),
         (
             "/Filter /LZW /DecodeParms << /EarlyChange 1 >>",
-            write::lzw(TEXT),
+            fixture::lzw(TEXT),
         ),
         ("/Filter /ASCIIHexDecode", hex(TEXT)),
         ("/Filter /AHx", hex(TEXT)),
-        ("/Filter /ASCII85Decode", write::ascii85(TEXT)),
-        ("/Filter /A85", write::ascii85(TEXT)),
-        ("/Filter /RunLengthDecode", write::run_length(TEXT)),
-        ("/Filter /RL", write::run_length(TEXT)),
-        ("/Filter [/AHx /Fl]", hex(&write::zlib(TEXT))),
-        ("/Filter 3 0 R /DecodeParms 4 0 R", hex(&write::zlib(TEXT))),
+        ("/Filter /ASCII85Decode", fixture::ascii85(TEXT)),
+        ("/Filter /A85", fixture::ascii85(TEXT)),
+        ("/Filter /RunLengthDecode", fixture::run_length(TEXT)),
+        ("/Filter /RL", fixture::run_length(TEXT)),
+        ("/Filter [/AHx /Fl]", hex(&fixture::zlib(TEXT))),
+        (
+            "/Filter 3 0 R /DecodeParms 4 0 R",
+            hex(&fixture::zlib(TEXT)),
+        ),
         ("/Filter []", TEXT.to_vec()),
         ("", TEXT.to_vec()),
     ];
@@ -807,7 +810,7 @@ fn a_streams_data_that_doesnt_decode_cleanly_is_an_error_holding_what_did() {
         panic!("{error:?}")
     };
     assert_eq!(error.data, b"Hello");
-    let file = a_stream("/Filter /FlateDecode", &write::zlib(&[b'a'; 4096]), &[]);
+    let file = a_stream("/Filter /FlateDecode", &fixture::zlib(&[b'a'; 4096]), &[]);
     let mut options = Options::DEFAULT;
     options.limits.stream = 100;
     let reading = open(&file, &[], &options);
@@ -838,7 +841,7 @@ fn a_streams_data_that_doesnt_decode_cleanly_is_an_error_holding_what_did() {
 /// against the budget.
 #[test]
 fn a_streams_data_handed_out_leaves_the_reading_the_whole_read() {
-    let file = write::encrypted(&settings(Kind::Aes128, b"user"), &content(), root());
+    let file = fixture::encrypted(&settings(Kind::Aes128, b"user"), &content(), root());
     let reading = open(&file, &[Password("user")], &Options::DEFAULT);
     for id in [(5, 0), (4, 0)] {
         assert!(reading.decoded(id).is_ok() && reading.data(id).is_ok());
@@ -846,7 +849,7 @@ fn a_streams_data_handed_out_leaves_the_reading_the_whole_read() {
     let doc = reading.into_document().unwrap();
     assert_eq!(doc, read_opened(&file, &[Password("user")]));
     let (objects, _) = objects_2_and_3();
-    let file = filtered(false, " /Filter /FlateDecode", &write::zlib(&objects));
+    let file = filtered(false, " /Filter /FlateDecode", &fixture::zlib(&objects));
     let mut options = Options::DEFAULT;
     options.limits.budget = objects.len();
     let reading = open(&file, &[], &options);

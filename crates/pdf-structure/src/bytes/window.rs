@@ -303,9 +303,9 @@ mod tests {
     use super::super::lazy::{files, fixtures, length_by_reference};
     use super::super::tests::{clean, compressed, objects_2_and_3, root, xref_row};
     use super::super::*;
+    use crate::fixture::{self, Xref};
     use crate::fuzz::{Counted, open};
     use crate::source::Source;
-    use crate::write::{self, Xref};
 
     /// The windows the tests read in: each of 1 to 64 bytes, and 4096.
     fn windows() -> impl Iterator<Item = usize> {
@@ -366,7 +366,7 @@ mod tests {
             b"\nendstream",
         ]
         .concat();
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[
                 (1, &b"<< /Type /Catalog /Pages 2 0 R >>"[..]),
@@ -401,7 +401,7 @@ mod tests {
             array.extend_from_slice(format!("{} ", i % 1000).as_bytes());
         }
         array.push(b']');
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[(1, &array[..]), (2, b"<< /Type /Catalog >>")],
             "<< /Size 3 /Root 2 0 R >>",
@@ -617,7 +617,7 @@ mod tests {
     /// nothing, so that asked again it's the object.
     #[test]
     fn a_reading_resolves_what_reads_and_none_where_the_source_fails() {
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[
                 (1, b"<< /Type /Catalog >>"),
@@ -656,7 +656,7 @@ mod tests {
     /// An object whose read fails keeps nothing, and reads again.
     #[test]
     fn an_object_whose_read_fails_keeps_nothing_and_reads_again() {
-        let file = write::file("1.7", &clean(), root(), Xref::Table);
+        let file = fixture::file("1.7", &clean(), root(), Xref::Table);
         let at = find(&file, b"2 0 obj").unwrap();
         fails_and_reads_again(&file, (2, 0), at);
     }
@@ -756,7 +756,7 @@ mod tests {
     /// `/Filter` a reference to object 6, `/FlateDecode`.
     fn filter_by_reference() -> Vec<u8> {
         let (objects, first) = objects_2_and_3();
-        let data = write::zlib(&objects);
+        let data = fixture::zlib(&objects);
         let mut file = b"%PDF-1.7\n".to_vec();
         let one = file.len();
         file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
@@ -797,7 +797,7 @@ mod tests {
     /// asked again it is; and so are the bytes at a span.
     #[test]
     fn metadata_and_bytes_that_fail_to_read_are_given_when_asked_again() {
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[
                 (1, &b"<< /Type /Catalog /Metadata 2 0 R >>"[..]),
@@ -827,14 +827,14 @@ mod tests {
     /// again it reads them; the reading is the whole read.
     #[test]
     fn a_streams_data_that_fails_to_read_is_given_when_asked_again() {
-        let data = write::zlib(b"hello");
+        let data = fixture::zlib(b"hello");
         let stream = [
             format!("<< /Filter 3 0 R /Length {} >>\nstream\n", data.len()).as_bytes(),
             &data,
             b"\nendstream",
         ]
         .concat();
-        let file = write::assembled(
+        let file = fixture::assembled(
             "1.7",
             &[
                 (1, &b"<< /Type /Catalog >>"[..]),
