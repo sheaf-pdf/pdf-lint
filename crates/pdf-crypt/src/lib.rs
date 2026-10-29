@@ -9,11 +9,13 @@
 //!   in version 4), 5 (Adobe's Extension Level 3, AES-256) and 6 (ISO
 //!   32000-2, AES-256), the owner's password or the user's.
 //! - **A password as typed, and the bytes tried:** a [`Password`]'s text
-//!   [`encodings`](Password::encodings) are in UTF-8, which revisions 5
-//!   and 6 take, and in the single-byte encodings 2 to 4's may have been
-//!   set in, each [`Encoded`] tagged with its [`Encoding`];
-//!   [`Handler::open`] tries those that fit the file's revision first, and
-//!   says which opened it.
+//!   [`encodings`](Password::encodings) are its SASLprep form (RFC 4013)
+//!   and UTF-8, which revisions 5 and 6 take, and the single-byte
+//!   encodings 2 to 4's may have been set in, each [`Encoded`] tagged with
+//!   its [`Encoding`]; [`Handler::open`] tries those that fit the file's
+//!   revision first, and says which opened it. A new file's password is
+//!   [`prepared`](Password::prepared), strictly: SASLprep's form, or why
+//!   it can't be one ([`Unusable`]).
 //! - **Every fault said, what decrypted kept,** as a checker wants it: AES
 //!   ciphertext too short, a part block past the whole ones, padding that
 //!   isn't, a crypt filter's method that isn't one, `/Perms` that doesn't
@@ -54,7 +56,7 @@ mod vectors;
 pub mod writer;
 
 pub use handler::{Handler, Method};
-pub use password::{Encoded, Encoding, Password};
+pub use password::{Encoded, Encoding, Password, Unusable};
 
 /// An encryption dictionary's values, as the standard security handler
 /// takes them (ISO 32000-2, Tables 20 and 21).

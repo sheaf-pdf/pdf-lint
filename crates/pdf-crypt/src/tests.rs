@@ -4,6 +4,7 @@
 use crate::writer::{self, Kind, Settings};
 use crate::{
     CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Handler, Method, Password, Refused,
+    Unusable,
 };
 
 /// A file qpdf 12.3 encrypted (`qpdf --encrypt`, the vector's name its
@@ -476,6 +477,91 @@ fn a_key_perms_doesnt_confirm_is_a_fault_unless_another_route_gives_one() {
     assert_eq!(handler.faults(), []);
     assert_eq!(hex(handler.key()), v.key);
     assert!(handler.owner());
+}
+
+/// A password's SASLprep form opens a revision 6 file set with it, tried
+/// first; and of revision 5 or 6, a form whose key `/Perms` doesn't
+/// confirm doesn't stop a later one whose key it does. Ⅸ prepares to `IX`,
+/// the user's password here; as typed, it's the owner's.
+#[test]
+fn a_form_whose_key_perms_doesnt_confirm_doesnt_stop_a_later_one_whose_key_it_does() {
+    let id = b"0123456789abcdef";
+    let typed = Password("\u{2168}");
+    let forms = typed.encodings();
+    assert_eq!(forms[0].encoding(), Encoding::Saslprep);
+    for kind in [Kind::Aes256R5, Kind::Aes256] {
+        let dictionary = written(kind, b"IX", "\u{2168}".as_bytes());
+        let handler = Handler::open(&dictionary, id, &forms).unwrap();
+        assert_eq!(
+            handler.opened_by(),
+            Some((0, Encoding::Saslprep)),
+            "{kind:?}"
+        );
+        assert!(!handler.owner(), "{kind:?}");
+        // A /UE that's wrong: SASLprep's form, the user's, unwraps a key
+        // /Perms doesn't confirm; the password as typed, the owner's, one
+        // it does, which opens it.
+        let mut wrong = dictionary.clone();
+        wrong.ue.as_mut().unwrap()[0] ^= 1;
+        let handler = Handler::open(&wrong, id, &forms).unwrap();
+        assert_eq!(handler.opened_by(), Some((1, Encoding::Utf8)), "{kind:?}");
+        assert!(handler.owner(), "{kind:?}");
+        assert_eq!(handler.faults(), [], "{kind:?}");
+        // SASLprep's form alone opens it by the key /Perms doesn't confirm,
+        // saying so.
+        let alone = Handler::open(&wrong, id, &forms[..1]).unwrap();
+        assert_eq!(alone.opened_by(), Some((0, Encoding::Saslprep)), "{kind:?}");
+        assert_eq!(alone.faults(), [Fault::Unconfirmed], "{kind:?}");
+    }
+}
+
+/// A password of invisible characters, each one SASLprep maps to nothing,
+/// is no new file's; read, its SASLprep form is empty, as the spec makes
+/// it, and opens a revision 6 file whose user password is empty, which the
+/// password as typed doesn't.
+#[test]
+fn a_password_of_invisible_characters_opens_a_file_whose_password_is_empty() {
+    let id = b"0123456789abcdef";
+    let invisible = "\u{200C}\u{200D}\u{2060}";
+    assert_eq!(
+        Password(invisible).prepared().unwrap_err(),
+        Unusable::Vanished
+    );
+    let forms = Password(invisible).encodings();
+    assert_eq!(
+        (forms[0].encoding(), forms[0].as_bytes()),
+        (Encoding::Saslprep, &b""[..])
+    );
+    let empty = written(Kind::Aes256, b"", b"owner");
+    let handler = Handler::open(&empty, id, &forms).unwrap();
+    assert_eq!(handler.opened_by(), Some((0, Encoding::Saslprep)));
+    assert!(!handler.owner());
+    let typed = [Encoded::verbatim(invisible.as_bytes())];
+    assert_eq!(
+        Handler::open(&empty, id, &typed).unwrap_err(),
+        Refused::Password
+    );
+}
+
+/// é typed as e and U+0301 opens a revision 4 file whose password is é in
+/// PDFDocEncoding, as the single-byte encodings take the text composed;
+/// and a revision 6 file whose password is é in UTF-8, by its SASLprep
+/// form. As typed, neither.
+#[test]
+fn decomposed_text_opens_a_file_whose_password_is_it_composed() {
+    let id = b"0123456789abcdef";
+    let forms = Password("e\u{301}").encodings();
+    let r4 = written(Kind::Aes128, b"\xE9", b"owner");
+    let handler = Handler::open(&r4, id, &forms).unwrap();
+    assert_eq!(handler.opened_by(), Some((2, Encoding::PdfDoc)));
+    let r6 = written(Kind::Aes256, "é".as_bytes(), b"owner");
+    let handler = Handler::open(&r6, id, &forms).unwrap();
+    assert_eq!(handler.opened_by(), Some((0, Encoding::Saslprep)));
+    let typed = [Encoded::verbatim("e\u{301}".as_bytes())];
+    for dictionary in [&r4, &r6] {
+        let opened = Handler::open(dictionary, id, &typed);
+        assert_eq!(opened.unwrap_err(), Refused::Password);
+    }
 }
 
 #[test]

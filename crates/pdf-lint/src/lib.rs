@@ -118,11 +118,13 @@ pub mod text {
         /// MacRomanEncoding, a character a byte decodes to has its UTF-8
         /// and that byte's PDFDocEncoding, no more; the Latin-1 characters
         /// at the three bytes the table leaves undefined have their UTF-8
-        /// alone.
+        /// alone. Their SASLprep forms, where they have one (˘'s is a space
+        /// and a breve), are no table's, and left aside.
         #[test]
         fn the_pdfdoc_encoding_matches_this_table() {
             let forms = |typed: &str| -> Vec<(Encoding, Vec<u8>)> {
                 (Password(typed).encodings().iter())
+                    .filter(|e| e.encoding() != Encoding::Saslprep)
                     .map(|e| (e.encoding(), e.as_bytes().to_vec()))
                     .collect()
             };

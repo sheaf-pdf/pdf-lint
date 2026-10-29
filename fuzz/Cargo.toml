@@ -10,7 +10,8 @@
 # `pdf_filters::fuzz::filters` on each backend, which two stable unit tests
 # run on random and damaged inputs, and `pdf_filters::fuzz::encoders`, which
 # a third runs; `crypt` calls
-# `pdf_crypt::fuzz::handler`, which a stable unit test runs; `objects`
+# `pdf_crypt::fuzz::handler` and `pdf_crypt::fuzz::password`, which a stable
+# unit test each runs; `objects`
 # calls `pdf_objects::fuzz::parse`, the parser, the walk of what it read's
 # references and the writer on what it read, which a stable unit test
 # (`random_fragments_keep_every_promise`) runs; `structure` calls

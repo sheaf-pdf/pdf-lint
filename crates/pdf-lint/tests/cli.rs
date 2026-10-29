@@ -487,6 +487,37 @@ fn a_password_is_tried_as_utf_8_and_in_each_single_byte_encoding() {
 }
 
 #[test]
+fn a_password_is_tried_in_its_saslprep_form_first() {
+    let dir = folder();
+    // Ⅸ, which SASLprep makes IX: a revision 6 file whose password a writer
+    // set as the spec has it, and one whose writer skipped SASLprep and set
+    // it as typed, each open by it.
+    for user in [&b"IX"[..], "\u{2168}".as_bytes()] {
+        let path = written(&dir, "password-ix.pdf", &crypted(Kind::Aes256, user));
+        let out = run(&["--password", "\u{2168}", path.to_str().unwrap()]);
+        assert_ne!(
+            out.status.code(),
+            Some(2),
+            "{user:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    // IX is no form of the password Ⅸ as typed.
+    let path = written(
+        &dir,
+        "password-ix.pdf",
+        &crypted(Kind::Aes256, "\u{2168}".as_bytes()),
+    );
+    let path = path.to_str().unwrap();
+    let out = run(&["--password", "IX", path]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{path}: the password --password gives doesn't open it\n")
+    );
+}
+
+#[test]
 fn an_encrypted_files_last_update_is_read_with_its_password() {
     let dir = folder();
     // The page, in the object stream, has a /Rotate that isn't a number,

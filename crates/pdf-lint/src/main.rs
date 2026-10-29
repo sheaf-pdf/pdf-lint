@@ -186,8 +186,9 @@ struct Cli {
         value_name = "PW",
         allow_hyphen_values = true,
         help = "the files' password, user or owner, when it isn't\n\
-                empty: tried as UTF-8, then in PDFDocEncoding,\n\
-                WinAnsiEncoding and MacRomanEncoding"
+                empty: tried in its SASLprep form (RFC 4013) and as\n\
+                UTF-8, then in PDFDocEncoding, WinAnsiEncoding and\n\
+                MacRomanEncoding"
     )]
     password: Option<String>,
     #[arg(

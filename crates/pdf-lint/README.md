@@ -107,8 +107,9 @@ Options:
       --full             print the whole report: tables, checks not made, keys
                          the model doesn't list
       --password <PW>    the files' password, user or owner, when it isn't
-                         empty: tried as UTF-8, then in PDFDocEncoding,
-                         WinAnsiEncoding and MacRomanEncoding
+                         empty: tried in its SASLprep form (RFC 4013) and as
+                         UTF-8, then in PDFDocEncoding, WinAnsiEncoding and
+                         MacRomanEncoding
       --jobs <N>         check N files at once (by default, as many as there
                          are CPUs); the report is in the files' order all the
                          same
@@ -122,7 +123,7 @@ It exits 0 when every file is clean, 1 when there are findings, and 2
 when a file can't be read or the command line is wrong.
 ```
 
-A file that can't be read doesn't stop the others being checked. An encrypted file that won't open with the password given, none or `--password`'s, is one that can't be read, and says so: what its object streams hold would be missing, and its strings ciphertext. `--password` is tried as the owner's and the user's, as typed (UTF-8, which revisions 5 and 6 take), then in each single-byte encoding that has every character of it, as a writer may have set it for revisions 2 to 4; the empty password isn't tried once one is given. A file that encrypts only its embedded files (its strings and streams `/Identity`) needs none. One whose security handler the reader can't open (the public-key handler, or a dictionary the standard handler doesn't take) is checked with its strings ciphertext and its object streams unread, a `reader` finding saying why. A FILE of `-` is standard input, named `-` in the report and in an allowance. A finding in an object stream is printed with its bytes from the stream's decoded data. With `--pdf-version`, the summary says the version a file was checked as beside its own, and an allowance's version is matched against the one it was checked as.
+A file that can't be read doesn't stop the others being checked. An encrypted file that won't open with the password given, none or `--password`'s, is one that can't be read, and says so: what its object streams hold would be missing, and its strings ciphertext. `--password` is tried as the owner's and the user's: in its SASLprep form (RFC 4013), which revisions 5 and 6 take, where that isn't the password as typed; as typed (UTF-8), as a writer that skips SASLprep sets it; then, composed (NFC), in each single-byte encoding that has every character of it, as a writer may have set it for revisions 2 to 4; those the file's revision takes first. The empty password isn't tried once one is given. A file that encrypts only its embedded files (its strings and streams `/Identity`) needs none. One whose security handler the reader can't open (the public-key handler, or a dictionary the standard handler doesn't take) is checked with its strings ciphertext and its object streams unread, a `reader` finding saying why. A FILE of `-` is standard input, named `-` in the report and in an allowance. A finding in an object stream is printed with its bytes from the stream's decoded data. With `--pdf-version`, the summary says the version a file was checked as beside its own, and an allowance's version is matched against the one it was checked as.
 
 With `--format json`, each file's report is a line of JSON. Every line says which version of pdf-lint wrote it and against which model, so a report can always be read against what made it. It has:
 

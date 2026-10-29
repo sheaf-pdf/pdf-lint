@@ -24,6 +24,12 @@ rc4 = { version = "0.2", features = ["zeroize"] }
 sha2 = { version = "0.11", default-features = false, features = ["zeroize"] }
 zeroize = "1.9"
 
+# SASLprep (RFC 4013), the form revisions 5 and 6 take a password in; and
+# NFC, the composed text the single-byte encodings take, by the tables
+# stringprep normalizes with.
+stringprep = "0.1.5"
+unicode-normalization = "0.1"
+
 thiserror = "2"
 
 [features]

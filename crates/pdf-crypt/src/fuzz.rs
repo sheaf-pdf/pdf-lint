@@ -1,5 +1,5 @@
-//! The fuzz target `crypt`'s body, for the fuzz crate. It's compiled only
-//! for tests and under cargo-fuzz's `--cfg fuzzing`.
+//! The fuzz target `crypt`'s bodies, for the fuzz crate. They're compiled
+//! only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 /// The fuzz target `crypt`'s body: a dictionary of any version, revision
 /// and fields of any length that `data` chooses, or one the writer makes
@@ -147,9 +147,92 @@ pub fn handler(data: &[u8]) {
     }
 }
 
+/// The fuzz target `crypt`'s body for passwords as typed: text from
+/// `data`, read as UTF-8 (lossily), as a character each two bytes (the
+/// Basic Multilingual Plane's) and as one each three (every plane's),
+/// given to `Password::encodings` and `Password::prepared`. Panics on a
+/// broken promise: none should; the forms are SASLprep's first where it
+/// isn't the text, then the text as typed, then single-byte forms of the
+/// text composed, a byte a character, none twice among those a revision
+/// takes first; prepared, the text is SASLprep's form, of 1 to 127 bytes
+/// and its own SASLprep, or it's refused for what the text is.
+pub fn password(data: &[u8]) {
+    use crate::{Encoding, Password, Unusable};
+    use stringprep::saslprep;
+    use unicode_normalization::UnicodeNormalization;
+    let lossy = String::from_utf8_lossy(data);
+    let wide: String = (data.chunks_exact(2))
+        .filter_map(|b| char::from_u32(u32::from(u16::from_le_bytes([b[0], b[1]]))))
+        .collect();
+    let planes: String = (data.chunks_exact(3))
+        .filter_map(|b| char::from_u32(u32::from_le_bytes([b[0], b[1], b[2], 0]) % 0x11_0000))
+        .collect();
+    for text in [&lossy[..], &wide, &planes] {
+        let typed = Password(text);
+        let forms = typed.encodings();
+        let form = |i: usize| (forms[i].encoding(), forms[i].as_bytes());
+        let prepared = saslprep(text);
+        let first = match &prepared {
+            Ok(prepared) if prepared != text => {
+                assert_eq!(
+                    form(0),
+                    (Encoding::Saslprep, prepared.as_bytes()),
+                    "SASLprep's"
+                );
+                1
+            }
+            _ => 0,
+        };
+        assert_eq!(form(first), (Encoding::Utf8, text.as_bytes()), "as typed");
+        let len = text.nfc().count();
+        for (encoding, bytes) in (first + 1..forms.len()).map(form) {
+            let single = [Encoding::PdfDoc, Encoding::WinAnsi, Encoding::MacRoman];
+            assert!(single.contains(&encoding), "{encoding:?}");
+            assert_eq!(bytes.len(), len, "a byte a character composed");
+        }
+        for revision in 2..=6 {
+            let fit: Vec<&[u8]> = (forms.iter())
+                .filter(|f| f.encoding().fits(revision))
+                .map(|f| f.as_bytes())
+                .collect();
+            for (i, a) in fit.iter().enumerate() {
+                assert!(!fit[i + 1..].contains(a), "twice for revision {revision}");
+            }
+        }
+        match typed.prepared() {
+            Ok(encoded) => {
+                assert_eq!(encoded.encoding(), Encoding::Saslprep);
+                let bytes = encoded.as_bytes();
+                assert!((1..=127).contains(&bytes.len()), "1 to 127 bytes");
+                let encoded = std::str::from_utf8(bytes).expect("UTF-8");
+                assert_eq!(prepared.as_deref().ok(), Some(encoded), "SASLprep's");
+                let again = saslprep(encoded);
+                assert_eq!(again.as_deref().ok(), Some(encoded), "its own SASLprep");
+            }
+            Err(Unusable::Empty) => assert!(text.is_empty(), "empty"),
+            Err(Unusable::Vanished) => {
+                assert!(
+                    !text.is_empty() && prepared.as_deref().ok() == Some(""),
+                    "vanished"
+                );
+            }
+            Err(Unusable::TooLong { len }) => {
+                assert!(len > 127, "too long");
+                assert_eq!(prepared.map(|p| p.len()).ok(), Some(len), "its length");
+            }
+            Err(Unusable::Prohibited(c)) => {
+                assert!(prepared.is_err() && text.contains(c), "prohibited");
+                assert!(saslprep(c.encode_utf8(&mut [0; 4])).is_err(), "alone too");
+            }
+            Err(Unusable::Bidi) => assert!(prepared.is_err(), "bidi"),
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::handler;
+    use super::{handler, password};
 
     #[test]
     fn random_dictionaries_and_ciphertext_keep_every_promise() {
@@ -165,5 +248,39 @@ mod tests {
                 .collect();
             handler(&data);
         }
+    }
+
+    #[test]
+    fn random_text_keeps_every_promise_of_its_forms() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for i in 0..2000 {
+            let len = (next() % 400) as usize;
+            let data: Vec<u8> = (0..len)
+                .map(|_| match i % 4 {
+                    // Mostly ASCII, as typed text is; a byte past it now
+                    // and then, which the second and third readings make
+                    // characters of other scripts.
+                    0 => b"aZ9 \xC3\xA9\x01\xADx"[(next() % 9) as usize],
+                    _ => next() as u8,
+                })
+                .collect();
+            password(&data);
+        }
+        for text in [
+            "I\u{AD}X",
+            "\u{2168}",
+            "e\u{301}",
+            "\u{5D0}\u{FB44}",
+            "\u{AD}",
+        ] {
+            password(text.as_bytes());
+        }
+        password("\u{2168}".repeat(64).as_bytes());
     }
 }
