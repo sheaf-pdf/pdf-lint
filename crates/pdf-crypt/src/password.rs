@@ -822,9 +822,9 @@ mod tests {
     /// the starter before it, composed as 3.2's definition D2 composes them:
     /// read, 3.2's form first, then as typed, where a later Unicode's form
     /// is the text; for a new file, refused, at the starter. A password
-    /// whose forms by both agree is a new file's. The suite of Unicode
-    /// passwords this follows has `가` U+0300 U+0323 composed once by 3.2,
-    /// and twice: by both, `가` U+0323 U+0300.
+    /// whose forms by both agree is a new file's: `가` U+0300 U+0323, which
+    /// 3.2 and a later Unicode both give as `가` U+0323 U+0300, normalized
+    /// once or twice.
     #[test]
     fn corrigendum_5s_sequences_compose_as_3_2_composes_them() {
         use Encoding::{Saslprep, Utf8};
