@@ -342,6 +342,44 @@ fn a_reading_on_demand_is_the_whole_read_in_any_order_on_any_thread() {
     assert!(compared > 100, "{compared}");
 }
 
+/// Every test file, read whole and on demand, each stream decoded, and
+/// the revision before an update, with its Flate inflated by zlib-rs: the
+/// same documents, and data, as by miniz_oxide, the default.
+#[test]
+fn every_test_file_reads_the_same_on_either_flate_backend() {
+    let mut zlib = Options::DEFAULT;
+    zlib.flate = Backend::ZlibRs;
+    let mut decoded = 0;
+    for (name, file, passwords) in files() {
+        let by_miniz = whole(&file, &passwords, &Options::DEFAULT);
+        let by_zlib = whole(&file, &passwords, &zlib);
+        assert_eq!(by_zlib.document, by_miniz.document, "{name}");
+        on_demand(&name, &file, &passwords, &zlib);
+        let (miniz, other) = (
+            open(&file, &passwords, &Options::DEFAULT),
+            open(&file, &passwords, &zlib),
+        );
+        for id in miniz.ids().collect::<Vec<_>>() {
+            let data = |r: &Reading<&[u8]>| format!("{:?}", r.decoded(id));
+            assert_eq!(data(&other), data(&miniz), "{name}, {id:?}");
+            decoded += usize::from(miniz.decoded(id).is_ok());
+        }
+        if let Some(update) = by_miniz.document.update {
+            let mut before = Options::DEFAULT;
+            before.section = Some(update.previous);
+            let mut zlib = before;
+            zlib.flate = Backend::ZlibRs;
+            let by_miniz = whole(&file, &passwords, &before);
+            assert_eq!(
+                whole(&file, &passwords, &zlib).document,
+                by_miniz.document,
+                "{name}"
+            );
+        }
+    }
+    assert!(decoded > 50, "{decoded}");
+}
+
 /// What `reading` keeps: each object's record, by number, and its
 /// warnings.
 fn kept<S: ByteSource>(reading: &Reading<S>) -> (BTreeMap<ObjectId, Record>, Vec<Warning>) {

@@ -163,7 +163,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use pdf_tokenizer::{Kind, Token, Tokenizer, is_delimiter, is_white_space};
 
 use pdf_crypt::{Handler, Method};
-use pdf_filters::{Fault, Filter, Layout, Predictor};
+use pdf_filters::{Backend, Fault, Filter, Layout, Predictor};
 use pdf_objects::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use pdf_objects::parse::{self, Body, Parser, Sink};
 use pdf_objects::version::Version;
@@ -671,6 +671,8 @@ struct Reader {
     id: SourceId,
     /// What it reads under.
     limits: Limits,
+    /// The backend its Flate streams inflate on.
+    flate: Backend,
     /// Whether it decodes streams itself, as it does but in the tests that
     /// make it ask the decoder.
     native: bool,
@@ -985,6 +987,7 @@ impl Reader {
         let mut reader = Reader {
             id: SourceId::next(),
             limits,
+            flate: options.flate,
             native,
             listable: limits.entries.unwrap_or_else(|| listable(file.len())),
             version: None,
@@ -1596,7 +1599,8 @@ impl Reader {
         if left < own {
             self.reached.store(true, Ordering::Relaxed);
         }
-        let (decoded, faults) = match pdf_filters::decode(data, filters, own.min(left)) {
+        let (decoded, faults) = match pdf_filters::decode(data, filters, own.min(left), self.flate)
+        {
             Ok(decoded) => (decoded, Vec::new()),
             Err(error) => (error.data, error.faults),
         };

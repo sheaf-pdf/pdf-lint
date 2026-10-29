@@ -48,10 +48,13 @@ fn finish(high: Option<u8>, out: &mut Out) -> Result<(), ()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::fuzz::backends;
     use crate::{Fault, Filter, decode};
 
+    /// `data` decoded, by the first backend compiled in, which it doesn't
+    /// read.
     fn hex(data: &[u8]) -> Result<Vec<u8>, crate::Error> {
-        decode(data, &[Filter::AsciiHex], 1 << 20)
+        decode(data, &[Filter::AsciiHex], 1 << 20, backends()[0])
     }
 
     #[test]
@@ -87,7 +90,7 @@ mod tests {
 
     #[test]
     fn the_limit_stops_it() {
-        let error = decode(b"414243>", &[Filter::AsciiHex], 2).unwrap_err();
+        let error = decode(b"414243>", &[Filter::AsciiHex], 2, backends()[0]).unwrap_err();
         assert_eq!(error.data, b"AB");
         assert_eq!(error.faults, [(0, Fault::Limit)]);
     }

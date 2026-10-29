@@ -13,7 +13,9 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 pdf-crypt = { path = "../pdf-crypt", version = "0.1" }
-pdf-filters = { path = "../pdf-filters", version = "0.1" }
+# miniz_oxide named, not taken from pdf-filters' default features: it's
+# `Options::DEFAULT`'s backend, which every build of this crate has.
+pdf-filters = { path = "../pdf-filters", version = "0.1", default-features = false, features = ["miniz_oxide"] }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
 # The file `fixtures` hands qpdf a stream in.
@@ -36,8 +38,12 @@ libc = "0.2"
 # pdf-crypt's writer; the file it hands qpdf a stream in, tempfile, which
 # makes it in the temp folder and removes it after.
 fixtures = ["pdf-crypt/writer", "dep:tempfile"]
+# pdf-filters' zlib-rs, so that `Options::flate` can name it.
+zlib-rs = ["pdf-filters/zlib-rs"]
 
 [dev-dependencies]
+# Both Flate backends, so that the tests read each file on each.
+pdf-filters = { path = "../pdf-filters", version = "0.1", features = ["zlib-rs"] }
 # The tests' encrypted files.
 pdf-crypt = { path = "../pdf-crypt", version = "0.1", features = ["writer"] }
 # The tests' folders of their own, removed after.

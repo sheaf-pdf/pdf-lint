@@ -93,10 +93,13 @@ fn value(group: &[u8; 5], start: usize, out: &mut Out) -> [u8; 4] {
 
 #[cfg(test)]
 mod tests {
+    use crate::fuzz::backends;
     use crate::{Fault, Filter, decode};
 
+    /// `data` decoded, by the first backend compiled in, which it doesn't
+    /// read.
     fn a85(data: &[u8]) -> Result<Vec<u8>, crate::Error> {
-        decode(data, &[Filter::Ascii85], 1 << 20)
+        decode(data, &[Filter::Ascii85], 1 << 20, backends()[0])
     }
 
     #[test]

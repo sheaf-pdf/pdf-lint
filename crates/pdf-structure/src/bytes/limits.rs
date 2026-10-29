@@ -1,6 +1,8 @@
 //! What a reading reads under: one value for every cap, and the options a
 //! caller opens a file with.
 
+use pdf_filters::Backend;
+
 use super::{BUDGET, SECTIONS, STREAM};
 
 /// The caps a reading of a file reads under, so that what a file says
@@ -45,9 +47,10 @@ impl Default for Limits {
     }
 }
 
-/// How a file is opened: under which [`Limits`], and as of which
-/// cross-reference section. A caller sets them on a copy of
-/// [`Options::DEFAULT`] (`options.section = Some(previous)`, say).
+/// How a file is opened: under which [`Limits`], as of which
+/// cross-reference section, and which Flate backend its streams inflate
+/// on. A caller sets them on a copy of [`Options::DEFAULT`]
+/// (`options.section = Some(previous)`, say).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Options {
@@ -59,14 +62,22 @@ pub struct Options {
     /// reads it. None, the default, for the file as its `startxref` gives
     /// it.
     pub section: Option<usize>,
+    /// The backend that inflates the Flate streams it decodes: by default
+    /// pdf-filters' `Backend::MinizOxide`, which every build of this crate
+    /// has; `Backend::ZlibRs` with its `zlib-rs` feature. On clean data the
+    /// two decode alike; on damaged data, how much decodes before a fault,
+    /// and the place it says, can differ.
+    pub flate: Backend,
 }
 
 impl Options {
     /// The options a file is opened with unless it's given others: the
-    /// default limits, and the file as its `startxref` gives it.
+    /// default limits, the file as its `startxref` gives it, and
+    /// miniz_oxide's Flate.
     pub const DEFAULT: Options = Options {
         limits: Limits::DEFAULT,
         section: None,
+        flate: Backend::MinizOxide,
     };
 }
 

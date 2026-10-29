@@ -40,10 +40,13 @@ pub(crate) fn decode(data: &[u8], out: &mut Out) {
 
 #[cfg(test)]
 mod tests {
+    use crate::fuzz::backends;
     use crate::{Fault, Filter, decode};
 
+    /// `data` decoded, by the first backend compiled in, which it doesn't
+    /// read.
     fn rl(data: &[u8]) -> Result<Vec<u8>, crate::Error> {
-        decode(data, &[Filter::RunLength], 1 << 20)
+        decode(data, &[Filter::RunLength], 1 << 20, backends()[0])
     }
 
     #[test]
@@ -83,7 +86,7 @@ mod tests {
 
     #[test]
     fn the_limit_stops_a_repeat() {
-        let error = decode(b"\x81z\x80", &[Filter::RunLength], 100).unwrap_err();
+        let error = decode(b"\x81z\x80", &[Filter::RunLength], 100, backends()[0]).unwrap_err();
         assert_eq!(error.data, [b'z'; 100]);
         assert_eq!(error.faults, [(0, Fault::Limit)]);
     }

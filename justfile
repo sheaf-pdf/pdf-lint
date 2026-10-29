@@ -25,14 +25,18 @@ fmt:
 
 # Lint every crate, with its tests and binaries; then the libraries and the
 # binary as they're built for use, without the features only their tests
-# turn on.
+# turn on; then the filters with zlib-rs their only Flate backend.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
+    cargo clippy --locked -p pdf-filters --no-default-features --features zlib-rs --all-targets -- -D warnings
 
-# Unit tests and doctests.
+# Unit tests and doctests: the workspace's, where the filters have both
+# Flate backends, as pdf-structure's tests turn zlib-rs on; then the
+# filters' with zlib-rs alone.
 test:
     cargo test --locked --workspace
+    cargo test --locked -p pdf-filters --no-default-features --features zlib-rs
 
 # qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
 # pinned SHA-256 (from the release's qpdf-12.4.2.sha256), kept in target/.
@@ -136,9 +140,10 @@ tokenizer-core-only:
 tokenizer-msrv:
     cargo +{{ tokenizer_msrv }} test --locked -p pdf-tokenizer
 
-# Test the filters on their oldest supported Rust, which must be installed.
+# Test the filters on their oldest supported Rust, which must be installed,
+# with both Flate backends.
 filters-msrv:
-    cargo +{{ filters_msrv }} test --locked -p pdf-filters
+    cargo +{{ filters_msrv }} test --locked -p pdf-filters --all-features
 
 # Test pdf-crypt on its oldest supported Rust, which must be installed.
 crypt-msrv:

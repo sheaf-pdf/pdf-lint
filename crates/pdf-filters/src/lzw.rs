@@ -1,4 +1,13 @@
 //! `LZWDecode`'s codes (ISO 32000-2, 7.4.4.2), before its predictor.
+//!
+//! A decoder of its own, not [weezl](https://crates.io/crates/weezl)'s,
+//! though weezl reads both `/EarlyChange` values (as TIFF's LZW and GIF's)
+//! to the same bytes: weezl reads on past a full table, as GIF's decoders
+//! do, where PDF's LZW has no way on and this stops and says so
+//! ([`Fault::TableFull`]), and a code that isn't in the table is an error
+//! with no place in weezl, where [`Fault::Code`] says the byte it begins
+//! in. Both are what a checker reports. weezl is the faster, reading codes
+//! many bits at a time where this reads them a bit at a time.
 
 use crate::{Fault, Out};
 
@@ -96,9 +105,12 @@ impl Bits<'_> {
 #[cfg(test)]
 mod tests {
     use super::{CLEAR, END};
+    use crate::fuzz::backends;
     use crate::{Fault, Filter, Predictor, decode};
     use std::collections::HashMap;
 
+    /// `data` decoded, by the first backend compiled in, which it doesn't
+    /// read.
     fn lzw(data: &[u8], early_change: bool) -> Result<Vec<u8>, crate::Error> {
         let predictor = Predictor::None;
         decode(
@@ -108,6 +120,7 @@ mod tests {
                 predictor,
             }],
             1 << 20,
+            backends()[0],
         )
     }
 

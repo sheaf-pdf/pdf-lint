@@ -7,8 +7,9 @@
 #
 # `tokenize` calls `pdf_tokenizer::fuzz::tokenize`, which a stable unit test
 # (`random_inputs_keep_every_promise`) runs too; `filters` calls
-# `pdf_filters::fuzz::filters`, which two stable unit tests run on random
-# and damaged inputs; `crypt` calls
+# `pdf_filters::fuzz::filters` on each backend, which two stable unit tests
+# run on random and damaged inputs, and `pdf_filters::fuzz::encoders`, which
+# a third runs; `crypt` calls
 # `pdf_crypt::fuzz::handler`, which a stable unit test runs; `objects`
 # calls `pdf_objects::fuzz::parse`, the parser, the walk of what it read's
 # references and the writer on what it read, which a stable unit test
@@ -33,7 +34,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
-pdf-filters = { path = "../crates/pdf-filters" }
+# Both Flate backends, so that the filters' target runs on each.
+pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
 # The library alone, without the command line's crates.
 pdf-lint = { path = "../crates/pdf-lint", default-features = false }
 pdf-objects = { path = "../crates/pdf-objects" }

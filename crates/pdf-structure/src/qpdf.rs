@@ -545,6 +545,7 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use pdf_filters::Backend;
     use pdf_objects::dict;
     use pdf_objects::object::{Data, Form, Object, Str, Value};
     use pdf_objects::text;
@@ -1600,8 +1601,12 @@ qpdf: operation succeeded with warnings\n";
                     Err(why) => panic!("{name}: neither decodes: {why}"),
                 },
                 Ok(filters) => {
-                    let (mine, faults) = match pdf_filters::decode(written, &filters, bytes::STREAM)
-                    {
+                    let (mine, faults) = match pdf_filters::decode(
+                        written,
+                        &filters,
+                        bytes::STREAM,
+                        Backend::MinizOxide,
+                    ) {
                         Ok(data) => (data, Vec::new()),
                         Err(e) => (e.data, e.faults),
                     };
@@ -1803,7 +1808,7 @@ qpdf: operation succeeded with warnings\n";
                         // after, of those.
                         let mut differing: Vec<(ObjectId, String, bool)> = Vec::new();
                         for (id, filters, written) in &streams {
-                            let (mine, mine_faults) = match pdf_filters::decode(written, filters, bytes::STREAM) {
+                            let (mine, mine_faults) = match pdf_filters::decode(written, filters, bytes::STREAM, Backend::MinizOxide) {
                                 Ok(data) => (data, Vec::new()),
                                 Err(e) => (e.data, e.faults),
                             };
@@ -2160,7 +2165,7 @@ qpdf: operation succeeded with warnings\n";
                                 }
                                 decoded += 1;
                                 let Some(plain) = plain else { continue };
-                                let (mine, mine_faults) = match pdf_filters::decode(&plain, &filters, bytes::STREAM) {
+                                let (mine, mine_faults) = match pdf_filters::decode(&plain, &filters, bytes::STREAM, Backend::MinizOxide) {
                                     Ok(data) => (data, Vec::new()),
                                     Err(e) => (e.data, e.faults),
                                 };

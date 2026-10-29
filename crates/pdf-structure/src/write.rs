@@ -180,7 +180,8 @@ pub fn inflated(zlib: &[u8]) -> Vec<u8> {
     let flate = pdf_filters::Filter::Flate {
         predictor: pdf_filters::Predictor::None,
     };
-    pdf_filters::decode(zlib, &[flate], usize::MAX).unwrap_or_else(|e| e.data)
+    let miniz = pdf_filters::Backend::MinizOxide;
+    pdf_filters::decode(zlib, &[flate], usize::MAX, miniz).unwrap_or_else(|e| e.data)
 }
 
 /// A file of these objects, as [`file`] writes it with a table, encrypted
@@ -424,14 +425,18 @@ fn string(out: &mut Vec<u8>, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
+    use pdf_filters::Backend;
+
     #[test]
     fn zlib_data_in_stored_blocks_decompresses() {
         let flate = [pdf_filters::Filter::Flate {
             predictor: pdf_filters::Predictor::None,
         }];
-        for data in [&b""[..], b"stored", &[7; 200_000]] {
-            let decoded = pdf_filters::decode(&super::zlib(data), &flate, 1 << 20);
-            assert_eq!(decoded.as_deref(), Ok(data));
+        for backend in [Backend::MinizOxide, Backend::ZlibRs] {
+            for data in [&b""[..], b"stored", &[7; 200_000]] {
+                let decoded = pdf_filters::decode(&super::zlib(data), &flate, 1 << 20, backend);
+                assert_eq!(decoded.as_deref(), Ok(data), "{backend:?}");
+            }
         }
     }
 }

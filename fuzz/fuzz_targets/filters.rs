@@ -1,6 +1,10 @@
 //! The filters' promises, on any input, with any filters the input's
-//! first bytes choose.
+//! first bytes choose, on each backend; and the encoder's, with the
+//! encoder they choose.
 
 #![no_main]
 
-libfuzzer_sys::fuzz_target!(|data: &[u8]| pdf_filters::fuzz::filters(data));
+libfuzzer_sys::fuzz_target!(|data: &[u8]| {
+    pdf_filters::fuzz::filters(data);
+    pdf_filters::fuzz::encoders(data);
+});

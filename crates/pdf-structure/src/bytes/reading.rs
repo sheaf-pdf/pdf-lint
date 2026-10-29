@@ -658,7 +658,8 @@ impl<S: ByteSource> Reading<S> {
         }
         Ok(match filters {
             Ok(filters) => {
-                pdf_filters::decode(&data, &filters, reader.limits.stream).map_err(Error::Decode)
+                let (limit, flate) = (reader.limits.stream, reader.flate);
+                pdf_filters::decode(&data, &filters, limit, flate).map_err(Error::Decode)
             }
             Err(why) => Err(Error::Filters(why)),
         })
