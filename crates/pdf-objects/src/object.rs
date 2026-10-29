@@ -365,6 +365,32 @@ impl Object {
     pub fn is_null(&self) -> bool {
         matches!(self.value, Value::Null)
     }
+
+    /// The objects its references name, nested ones too, in the order
+    /// written: itself, when it's a reference; an array's elements; a
+    /// dictionary's every entry, a key written twice included; a stream's
+    /// dictionary, never its data. Walked with a stack of its own, so a
+    /// value nested however deeply, as one built in memory may be, walks
+    /// without overflowing the thread's.
+    pub fn references(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        let mut stack = vec![self];
+        std::iter::from_fn(move || {
+            while let Some(object) = stack.pop() {
+                let entries = match &object.value {
+                    Value::Ref(id) => return Some(*id),
+                    Value::Array(array) => {
+                        stack.extend(array.iter().rev());
+                        continue;
+                    }
+                    Value::Dict(dict) => &dict.entries,
+                    Value::Stream(stream) => &stream.dict.entries,
+                    _ => continue,
+                };
+                stack.extend(entries.iter().rev().map(|entry| &entry.value));
+            }
+            None
+        })
+    }
 }
 
 impl Str {
@@ -1284,5 +1310,88 @@ mod tests {
         assert_eq!(Data::At(at).at(), Some(at));
         assert_eq!(Data::At(at).bytes(), None);
         assert_eq!(Data::Bytes(Vec::new()).at(), None);
+    }
+
+    /// The references a value holds, nested ones too, in the order
+    /// written: a reference, an array's, a dictionary's every entry's, a
+    /// key written twice included, and a stream's dictionary's, never its
+    /// data's.
+    #[test]
+    fn a_values_references_are_in_the_order_written() {
+        fn ids(o: &Object) -> Vec<ObjectId> {
+            o.references().collect()
+        }
+        assert_eq!(ids(&Object::reference(7)), [(7, 0)]);
+        for scalar in [
+            Object::null(),
+            1.into(),
+            "Name".into(),
+            Object::string("1 0 R"),
+        ] {
+            assert_eq!(ids(&scalar), [], "{scalar:?}");
+        }
+        assert_eq!(ids(&Object::from(Vec::new())), []);
+        assert_eq!(ids(&Dict::new().into()), []);
+
+        // As the parser reads it, and as built: the same, in order, a
+        // reference named twice given twice.
+        let text = b"[1 0 R << /A 2 0 R /B [3 0 R << /C 4 1 R >>] /A 5 0 R >> [] 6 0 R 1 0 R]";
+        let built = Object::from(vec![
+            Object::reference(1),
+            dict! {
+                "A" => Object::reference(2),
+                "B" => vec![Object::reference(3), dict! { "C" => (4, 1) }.into()],
+                "A" => Object::reference(5),
+            }
+            .into(),
+            Vec::new().into(),
+            Object::reference(6),
+            Object::reference(1),
+        ]);
+        let order = [(1, 0), (2, 0), (3, 0), (4, 1), (5, 0), (6, 0), (1, 0)];
+        assert_eq!(ids(&read(text)), order);
+        assert_eq!(ids(&built), order);
+
+        // A stream's dictionary, its /Length's reference among it, not its
+        // data, whatever the data says.
+        let mut built = Stream::new(dict! { "Resources" => (8, 0) }, b"9 0 R".to_vec());
+        built.dict.set("Length", Object::reference(10));
+        assert_eq!(ids(&built.into()), [(8, 0), (10, 0)]);
+        let file = b"4 0 obj\n<< /Length 5 /F 11 0 R >>\nstream\n9 0 R\nendstream\nendobj";
+        assert_eq!(ids(&stream(file)), [(11, 0)]);
+    }
+
+    /// A value nested far deeper than the parser reads, as one built in
+    /// memory may be, is walked with a stack of the walk's own: on a thread
+    /// of 64 KiB, where a recursive walk overflows. It's built on the
+    /// test's own thread, and taken apart there a level at a time, as
+    /// dropping it whole recurses.
+    #[test]
+    fn a_value_nested_ten_thousand_deep_walks_on_a_small_stack() {
+        const DEPTH: u32 = 10_000;
+        // Each level a reference to its depth, then the level below: in
+        // an array, or a dictionary at every other level.
+        let mut value = Object::reference(DEPTH);
+        for n in (0..DEPTH).rev() {
+            value = match n % 2 {
+                0 => vec![Object::reference(n), value].into(),
+                _ => dict! { "N" => Object::reference(n), "Kid" => value }.into(),
+            };
+        }
+        let walked = std::thread::scope(|scope| {
+            let walk = std::thread::Builder::new().stack_size(64 * 1024);
+            let walk = walk.spawn_scoped(scope, || value.references().collect::<Vec<_>>());
+            walk.unwrap().join().unwrap()
+        });
+        let order: Vec<ObjectId> = (0..=DEPTH).map(|n| (n, 0)).collect();
+        assert_eq!(walked, order);
+        let mut level = Some(value);
+        while let Some(object) = level.take() {
+            level = match object.into_value() {
+                Value::Array(mut array) => array.pop(),
+                Value::Dict(mut dict) => dict.remove(b"Kid"),
+                _ => None,
+            };
+        }
     }
 }

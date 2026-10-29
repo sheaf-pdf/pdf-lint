@@ -1419,7 +1419,10 @@ impl Reader {
         }
         let get = |id| Ok(objects.get(&id).and_then(|o| Some(&o.as_ref().ok()?.0)));
         let metadata = metadata(file, &trailer, &get, !plain_metadata)?.map(Cow::into_owned);
-        let mut document = Document::read(objects, trailer);
+        // New ids start past every number listed, free ones too, and past
+        // the cross-reference streams'.
+        let listed = entries.last().map(|&(n, _)| n).max(facts.max_stream);
+        let mut document = Document::read(objects, trailer, listed);
         document.header = version;
         document.warnings = warnings;
         document.decoded = decoded;

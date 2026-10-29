@@ -4,21 +4,23 @@
 //! an order the input chooses, it's the whole read, so long as no stream
 //! either decodes reaches the budget; read by position, a window at a time
 //! from a first window the input chooses, it's the whole read, and each
-//! stream's data and decoded data are as in memory; and so are its
-//! revision before an incremental update, and the file opened by an
+//! stream's data and decoded data are as in memory; pruned, it reaches what
+//! it did, and an object added to it is at a number none held; and so are
+//! its revision before an incremental update, and the file opened by an
 //! owner's password. It reads under small limits, so that a run tries more
 //! inputs. It's compiled only for tests and under cargo-fuzz's `--cfg
 //! fuzzing`, and only reads.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use pdf_objects::object::{ObjectId, Span, Value};
+use pdf_objects::object::{Object, ObjectId, Span, Value};
 
 use crate::bytes::{ByteSource, Error, Options, Reading, Whole, XrefEntry};
-use crate::source::Document;
+use crate::source::{Document, Source};
 
 /// The owner's password the fuzz target opens a file by, when its input
 /// says to: the one the unit test's encrypted files are written with.
@@ -103,8 +105,10 @@ pub fn open<S: ByteSource>(
 /// the budget. Read by position, through [`Counted`], its first window and
 /// whether an object's reaches the next listed offset as the choice's
 /// bits from the fourth give, it's the whole read, and each stream's data
-/// and decoded data are as in memory. When the file has an incremental
-/// update, so is the revision before it ([`Options::section`]);
+/// and decoded data are as in memory. Pruned, what its trailer reaches is
+/// the same, and every object it keeps is among it, and an object added
+/// is at a number no entry held ([`pruned`]). When the file has an
+/// incremental update, so is the revision before it ([`Options::section`]);
 /// and with the choice's lowest bit set, so is the file opened by the
 /// owner's password `owner`, and its revision before an update. Panics on
 /// a broken promise.
@@ -140,6 +144,7 @@ fn alike(file: &[u8], passwords: &[&[u8]], choice: u16) {
         "a reading is the same twice"
     );
     within(file, doc);
+    pruned(doc);
     on_demand(file, passwords, None, &read, choice);
     by_position(file, passwords, None, doc, choice);
     streams(file, passwords, choice);
@@ -152,6 +157,7 @@ fn alike(file: &[u8], passwords: &[&[u8]], choice: u16) {
             "the revision before an update reads the same twice"
         );
         within(file, &previous.document);
+        pruned(&previous.document);
         on_demand(file, passwords, section, &previous, choice);
         by_position(file, passwords, section, &previous.document, choice);
     }
@@ -260,6 +266,47 @@ fn on_demand(file: &[u8], passwords: &[&[u8]], section: Option<usize>, whole: &W
             lazily.document, whole.document,
             "a reading on demand is the whole read"
         );
+    }
+}
+
+/// Checks that `doc`, pruned, reaches what it reached from its trailer, in
+/// the same order, every id it keeps among it and none it took; and that
+/// two objects added to it, or to it pruned, are each at a number no entry
+/// held, neither 0, and not the same.
+fn pruned(doc: &Document) {
+    let reached = doc.reachable();
+    let mut pruned = doc.clone();
+    let gone = pruned.prune();
+    assert_eq!(
+        pruned.reachable(),
+        reached,
+        "what's reached is the same pruned"
+    );
+    let reached: HashSet<ObjectId> = reached.into_iter().collect();
+    let ids = pruned.ids();
+    assert!(
+        ids.iter().all(|id| reached.contains(id)),
+        "each id kept is reached"
+    );
+    assert_eq!(
+        ids.len() + gone.len(),
+        doc.ids().len(),
+        "each id kept or taken"
+    );
+    assert!(
+        gone.iter().all(|id| !reached.contains(id)),
+        "each id taken unreached"
+    );
+    for mut doc in [doc.clone(), pruned] {
+        let held: HashSet<u32> = doc.ids().into_iter().map(|(n, _)| n).collect();
+        let (one, two) = (doc.add(Object::null()), doc.add(Object::null()));
+        for id in [one, two] {
+            assert!(
+                id.0 != 0 && id.1 == 0 && !held.contains(&id.0),
+                "{id:?} added"
+            );
+        }
+        assert_ne!(one, two, "two objects added at one id");
     }
 }
 

@@ -11,6 +11,7 @@ It's made for a reader that checks files as much as for one that shows them. Whe
 - **A file read by position**, a window at a time: the header from the file's start, `startxref` and the last `%%EOF` back from its end, each section at its offset, and each object at its own, its first window reaching a byte past the next offset the cross-references list, so that an object as it should be is one read; a window doubled while what's read runs to its end where more of the file could change it, so that each read reads what it would of the whole file (pdf-objects' `Parser::window`). Any `ByteSource` that doesn't hold its bytes in memory is read so, from its `first_window`. Where the source fails, the call fails (`bytes::Error::Io`), keeping nothing of what it was reading, so asked again it reads again; an object it read whole on the way, as the object stream an object is in, is kept, as `get` keeps it. A file's `Identity`, taken as it's opened, the file itself by a handle it holds open (its device and inode on Unix, its volume serial number and file index on Windows, through same-file) and its length and modification time, tells whether the file held open has changed in place (`FileBytes::unchanged`), and whether another is at its path now (`Identity::of`), even one made where the first was removed. `Identity::of` opens the file to read, without waiting, so it needs leave to read it, and holds it open while it lives; a path that's neither a file nor a folder, a FIFO, a socket or a device, it refuses without opening it.
 - **A stream's data** (`Reading::data`), read each time it's asked for, and not kept: as written, filters and all, borrowed from bytes in memory; in an encrypted file that opened, decrypted as an object stream's is, by the stream's own `/Crypt` filter when it has one, else as `/StmF` says, but for a cross-reference stream's and the catalog's metadata stream's under `/EncryptMetadata false`, which are left as written, as the file has them. Where it may be ciphertext the reader doesn't decrypt, it's refused, saying why: in a file no password opened (but one whose streams aren't encrypted, `Encryption::Plain`), or whose security handler the reader can't open; an embedded file's in a file whose encryption dictionary has an `/EFF`; a stream the encryption dictionary refers to; and the catalog's metadata stream under `/EncryptMetadata false` whose own `/Crypt` filter encrypts it. Decoded (`Reading::decoded`), it's that through its filters, read as an object stream's are, by pdf-filters, to at most the reading's limit on a stream. Data that doesn't decrypt or decode cleanly is an error holding what did (`bytes::Error`).
 - **Where each object was read from** (`Record`): in which reading (its `SourceId`, so a record is known for the file its places are in, though two readings of one file read alike); at the offset a section gives, at one the scan found, or in an object stream's decoded data, the `index`th of its objects; its bytes, from its `n g obj` to past its `endobj`, and whether `endobj` follows it; and a stream's data (`DataExtent`), and whether it was found by its `/Length`, and whether that's a reference. And what the header and sections say of the file as written (`Facts`): where `%PDF-` starts, the newest section's offset and kind, how many sections, whether one is a hybrid's, the largest cross-reference stream's number, and whether a linearization holds (ISO 32000-2, Annex F). A `Document` keeps each object with its record while the object is as read (`Document::record`): one put in has none, and one taken to edit loses it, so a record is always of the object beside it.
+- **A document in memory** (`Document::new`, or a file read whole): added to and edited, its new objects numbered past every number the file's cross-references list, in use or free, its cross-reference streams' and the trailer's `/Size` less one (`new_id`, `add`; where they start, `max_id` and `set_max_id`), never 0, and once those reach 4,294,967,295, the largest number, at numbers no entry holds. References followed to where their chain ends (`dereference`, as many as 128 of them; `get_dict` and `get_dict_mut`, a stream's dictionary too; `catalog` and `catalog_mut`), and the trailer's dictionary changed where it is (`Trailer::dict_mut`). What the trailer reaches walked, each once, in the order found (`reachable`), every entry of a key written twice among it; and what it doesn't removed (`prune`): the object streams and cross-reference streams, which nothing refers to, among them, the encryption dictionary, which the trailer does, kept, and the decoded data left as it is.
 - **Recovery by scanning.** Where the sections don't read, it finds the objects by scanning the file, and the trailer says why (`Trailer::unwritten`).
 - **Every choice said.** What the reader had to choose how to read is a `Warning`, with its object and where: a stream whose `/Length` doesn't end at `endstream`, an object without `endobj`, a cross-reference table whose rows aren't the 20 bytes the spec writes, a file whose last line isn't `%%EOF` alone, and what pdf-objects' parser reads past.
 - **Streams decoded.** Cross-reference streams and object streams are decoded from their own data, through pdf-filters: ASCIIHex, ASCII85, LZW, Flate and RunLength, with their predictors. Their `/Filter` and `/DecodeParms` are read as qpdf reads them: the abbreviations `/Fl`, `/AHx`, `/A85`, `/LZW` and `/RL` on any stream, `/Crypt` as no filter (decrypting comes before the filters, by its `/Name`), a parameters dictionary that isn't in an array every filter's, a reference to no object as null. A filter it doesn't decode, or parameters it doesn't take, leave the stream undecoded, saying why; data a fault stopped is read as far as it decoded, each fault a warning on the stream. The objects read from an object stream are placed in its decoded data (`Span::stream`), which the `Document` keeps.
@@ -102,6 +103,33 @@ let same = pdf_structure::Identity::of("file.pdf")? == identity;
 println!("the same file: {same}");
 # Ok(())
 # }
+```
+
+A document built in memory, followed from its catalog, and pruned of what its trailer doesn't reach:
+
+```rust
+use pdf_structure::pdf_objects::{Object, dict, version::Version};
+use pdf_structure::{Document, Source};
+
+let mut doc = Document::new(Version::new(1, 7), dict! { "Size" => 1 });
+let kids: Vec<Object> = Vec::new();
+let pages = doc.add(dict! { "Type" => "Pages", "Kids" => kids, "Count" => 0 });
+let catalog = doc.add(dict! { "Type" => "Catalog", "Pages" => pages });
+let font = doc.add(dict! { "Type" => "Font", "Subtype" => "Type1" });
+assert_eq!((pages, catalog, font), ((1, 0), (2, 0), (3, 0)));
+doc.trailer.dict_mut().set("Root", catalog);
+
+// The catalog, and the pages its /Pages refers to.
+let root = doc.catalog().unwrap();
+let (id, tree) = doc.dereference(root.get(b"Pages").unwrap()).unwrap();
+assert_eq!(id, Some(pages));
+assert_eq!(tree.as_dict().and_then(|d| d.type_name()), Some(&b"Pages"[..]));
+
+// What the trailer reaches, and the rest removed.
+assert_eq!(doc.reachable(), [catalog, pages]);
+assert_eq!(doc.prune(), [font]);
+assert_eq!(doc.ids(), [pages, catalog]);
+assert_eq!(doc.new_id(), (4, 0));
 ```
 
 A file without `startxref` is scanned for its objects, and the trailer says so:

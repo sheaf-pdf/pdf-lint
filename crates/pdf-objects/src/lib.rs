@@ -44,7 +44,8 @@
 //! - **References resolved** ([`Resolve`]): what gives the indirect object
 //!   a reference names, a reader's or a document in memory, or any closure
 //!   from an [`ObjectId`] to an object, so that what follows references
-//!   reads through any of them.
+//!   reads through any of them; and walked ([`Object::references`]), a
+//!   value's in the order written, with a stack of the walk's own.
 //!
 //! [`dict!`] builds a dictionary from keys and values.
 

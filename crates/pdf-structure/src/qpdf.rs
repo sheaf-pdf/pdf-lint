@@ -154,7 +154,7 @@ impl Qpdf {
         let trailer = trailer.ok_or("qpdf's JSON has no trailer")?;
         let warnings = warnings(&err, &self.file);
         let trailer = trailer_of(trailer, &objects, &warnings);
-        let mut doc = Document::read(objects, trailer);
+        let mut doc = Document::read(objects, trailer, None);
         doc.header = header;
         doc.warnings = warnings;
         doc.size = (std::fs::metadata(&self.file).ok()).and_then(|m| usize::try_from(m.len()).ok());

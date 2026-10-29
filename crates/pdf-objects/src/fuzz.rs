@@ -68,6 +68,8 @@ enum Length {
 /// it was; and under small limits, a read that reaches them fails saying
 /// which, where a value starts that the read without them takes past
 /// them, or fails after, and one that doesn't is the read without them.
+/// Its references, walked with a stack of their own
+/// ([`Object::references`]), are a recursive walk's, in the same order.
 /// What's read, the writer writes, and it reads back as the same value and
 /// writes as the same bytes again ([`round_trip`]), but for a ciphertext
 /// read's object holding a string: the writer refuses it whole, writing
@@ -104,6 +106,12 @@ pub fn parse(data: &[u8]) {
                 assert!(within(at, whole), "a fault in its object: {at:?}");
             }
             placed(input, &object, whole, how);
+            let mut found = Vec::new();
+            references(&object, &mut found);
+            assert!(
+                object.references().eq(found),
+                "its references are a recursive walk's"
+            );
             rewrite(input, how, &object);
         }
         Err(error) => {
@@ -256,6 +264,22 @@ fn count(o: &Object) -> usize {
         Value::Dict(d) => entries(d),
         Value::Stream(s) => entries(&s.dict),
         _ => 0,
+    }
+}
+
+/// Each reference in `o`, nested ones too, put in `found` in the order
+/// written, walked recursively: an array's elements, a dictionary's every
+/// entry, a stream's dictionary.
+fn references(o: &Object, found: &mut Vec<ObjectId>) {
+    let entries = |d: &Dict, found: &mut Vec<ObjectId>| {
+        (d.entries().iter()).for_each(|e| references(&e.value, found));
+    };
+    match o.value() {
+        Value::Ref(id) => found.push(*id),
+        Value::Array(a) => a.iter().for_each(|o| references(o, found)),
+        Value::Dict(d) => entries(d, found),
+        Value::Stream(s) => entries(&s.dict, found),
+        _ => {}
     }
 }
 

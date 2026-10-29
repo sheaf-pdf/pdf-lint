@@ -3,7 +3,7 @@
 //! build; and what the bytes reader records of where it read each object
 //! ([`Record`]) and of the file as written ([`Facts`]).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::RangeBounds;
 
 use pdf_objects::Resolve;
@@ -95,21 +95,49 @@ impl Trailer {
         static EMPTY: Dict = Dict::EMPTY;
         self.object.as_dict().unwrap_or(&EMPTY)
     }
+
+    /// Its dictionary, to change: the trailer's, or the cross-reference
+    /// stream's. A trailer that's neither, which [`Trailer::dict`] reads as
+    /// empty, is made an empty dictionary first. An edit, as through
+    /// [`Object::as_dict_mut`], so its span goes.
+    pub fn dict_mut(&mut self) -> &mut Dict {
+        let value = self.object.value_mut();
+        if !matches!(value, Value::Dict(_) | Value::Stream(_)) {
+            *value = Value::Dict(Dict::new());
+        }
+        match value {
+            Value::Dict(dict) => dict,
+            Value::Stream(stream) => &mut stream.dict,
+            _ => unreachable!("made a dictionary"),
+        }
+    }
 }
 
 /// A file read whole: its objects, trailer, header version and warnings.
-/// A reader outside the crate starts from [`Document::new`].
+/// A reader outside the crate starts from [`Document::new`], and so does a
+/// document built in memory.
 ///
 /// Each object is kept with the [`Record`] of where it was read, while
 /// it's as read: an object put in ([`Document::set`]) has none, and one
 /// taken to edit ([`Document::get_mut`]) loses it, so a record is always
-/// of the object beside it.
+/// of the object beside it. New objects are numbered past every number
+/// the file's cross-references list ([`Document::new_id`],
+/// [`Document::add`]); what the trailer reaches is walked
+/// ([`Document::reachable`]), and what it doesn't removed
+/// ([`Document::prune`]).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Document {
     /// Each object its cross-references list, with where it was read while
     /// it's as read, or why it doesn't read.
     objects: BTreeMap<ObjectId, Held>,
+    /// Where new ids start ([`Document::new_id`]): one past every number
+    /// the file's cross-references list, the trailer's `/Size` less one
+    /// and every number put in since, never below 1; wider than a `u32`,
+    /// so that one past 4,294,967,295 is too. From there on, it's that,
+    /// `PAST`, plus the last number handed out since, 0 for none, after
+    /// which the next one no entry holds is looked for.
+    next: u64,
     /// The trailer.
     pub trailer: Trailer,
     /// The version in the header.
@@ -431,6 +459,26 @@ impl Update {
 /// for one put in or taken to edit; or why it doesn't read.
 pub(crate) type Held = Result<(Object, Option<Record>), Unread>;
 
+/// One past the largest object number, 4,294,967,295: where a document's
+/// new ids are once they've gone past every number ([`Document::new_id`]).
+const PAST: u64 = 1 << 32;
+
+/// How many references [`Document::dereference`] follows, at the most.
+const DEREFERENCES: usize = 128;
+
+/// Where new ids start in a document under `trailer` whose largest number
+/// listed is `listed`: one past it, and past the trailer's `/Size` less
+/// one, where that's a number (`/Size` is one past the largest number a
+/// file's cross-references list, ISO 32000-2, 7.5.5); never below 1, as
+/// object 0 is always free.
+fn first_new(trailer: &Dict, listed: Option<u32>) -> u64 {
+    let size = (trailer.get(b"Size").and_then(Object::as_integer))
+        .and_then(|size| u64::try_from(size).ok())
+        .filter(|&size| size <= PAST);
+    let listed = listed.map(|n| u64::from(n) + 1);
+    size.into_iter().chain(listed).fold(1, u64::max)
+}
+
 impl Document {
     /// A document with no objects yet, under `trailer`, its header at
     /// `version`: where a reader outside the crate starts, filling in what
@@ -452,6 +500,7 @@ impl Document {
     pub fn new(version: Version, trailer: Dict) -> Document {
         Document {
             objects: BTreeMap::new(),
+            next: first_new(&trailer, None),
             trailer: Trailer {
                 stream: None,
                 object: Object::new(Value::Dict(trailer)),
@@ -469,10 +518,19 @@ impl Document {
     }
 
     /// What a reader read: `objects`, each with the record of where it was
-    /// read, under `trailer`; the rest as [`Document::new`] leaves it, and
-    /// no header, for the reader to fill in.
-    pub(crate) fn read(objects: BTreeMap<ObjectId, Held>, trailer: Trailer) -> Document {
+    /// read, under `trailer`, new ids starting past them, past `listed`,
+    /// the largest number the file's cross-references list beside them
+    /// (a free one, or a cross-reference stream's), and past the
+    /// trailer's `/Size` less one; the rest as [`Document::new`] leaves it,
+    /// and no header, for the reader to fill in.
+    pub(crate) fn read(
+        objects: BTreeMap<ObjectId, Held>,
+        trailer: Trailer,
+        listed: Option<u32>,
+    ) -> Document {
+        let held = objects.last_key_value().map(|(&(n, _), _)| n);
         Document {
+            next: first_new(trailer.dict(), listed.max(held)),
             objects,
             trailer,
             header: None,
@@ -486,7 +544,7 @@ impl Document {
         }
     }
 
-    /// Adds object `n`, generation 0, with no record: [`Document::set`]
+    /// Puts object `n`, generation 0, with no record: [`Document::set`]
     /// at `(n, 0)`.
     pub fn insert(&mut self, n: u32, object: impl Into<Object>) {
         self.set((n, 0), object);
@@ -535,18 +593,27 @@ impl Document {
     }
 
     /// Puts `object` at `id`, with no record, as it wasn't read: gives the
-    /// object it replaces, when one that read was there.
+    /// object it replaces, when one that read was there. New ids start
+    /// past `id`'s number, if they didn't.
     pub fn set(&mut self, id: ObjectId, object: impl Into<Object>) -> Option<Object> {
+        self.past(id.0);
         let was = self.objects.insert(id, Ok((object.into(), None)));
         was?.ok().map(|(object, _)| object)
     }
 
     /// Puts why object `id` doesn't read at `id`, as a reader outside the
     /// crate does for an object it lists that doesn't read: gives the
-    /// object it replaces, when one that read was there.
+    /// object it replaces, when one that read was there. New ids start
+    /// past `id`'s number, if they didn't.
     pub fn set_unread(&mut self, id: ObjectId, why: Unread) -> Option<Object> {
+        self.past(id.0);
         let was = self.objects.insert(id, Err(why));
         was?.ok().map(|(object, _)| object)
+    }
+
+    /// New ids start past `n`, an entry's number, where they didn't.
+    fn past(&mut self, n: u32) {
+        self.next = self.next.max(u64::from(n) + 1);
     }
 
     /// Removes object `id`, whether it reads or not, its record with it:
@@ -563,6 +630,174 @@ impl Document {
         let (object, record) = self.objects.get_mut(&id)?.as_mut().ok()?;
         *record = None;
         Some(object)
+    }
+
+    /// Object `id`, when it reads.
+    fn object(&self, id: ObjectId) -> Option<&Object> {
+        Some(&self.objects.get(&id)?.as_ref().ok()?.0)
+    }
+
+    /// An id for a new object, generation 0, not set yet: past every
+    /// number the file's cross-references list (in use, in an object
+    /// stream or free), its cross-reference streams' too, the trailer's
+    /// `/Size` less one, and every number put in or handed out since, so
+    /// that each call gives another. Never object 0, which is always free.
+    ///
+    /// Once those reach 4,294,967,295, the largest number, as a file that
+    /// lists it can, a new id is the next number above the last one handed
+    /// out that no entry holds, from 1 again after the largest: then it
+    /// may be one the file lists free, which an update writing it there
+    /// should know, as its object's generation is 0. There's always one,
+    /// as an object at every number would take more than 700 GB; were a
+    /// document to hold them, the new id would be 1, which it holds.
+    pub fn new_id(&mut self) -> ObjectId {
+        if let Ok(n) = u32::try_from(self.next) {
+            self.next += 1;
+            return (n, 0);
+        }
+        let last = u32::try_from(self.next - PAST).unwrap_or(0);
+        let n = (self.free_after(last))
+            .or_else(|| self.free_after(0))
+            .unwrap_or(1);
+        self.next = PAST + u64::from(n);
+        (n, 0)
+    }
+
+    /// The first number above `last` that no entry holds, at any
+    /// generation; none when every one to 4,294,967,295 is held.
+    fn free_after(&self, last: u32) -> Option<u32> {
+        let mut n = last.checked_add(1)?;
+        for &(held, _) in self.objects.range((n, 0)..).map(|(id, _)| id) {
+            if held > n {
+                break;
+            }
+            if held == n {
+                n = n.checked_add(1)?;
+            }
+        }
+        Some(n)
+    }
+
+    /// Puts `object` at a new id ([`Document::new_id`]), with no record,
+    /// and gives the id.
+    pub fn add(&mut self, object: impl Into<Object>) -> ObjectId {
+        let id = self.new_id();
+        self.set(id, object);
+        id
+    }
+
+    /// The number new ids start after: one less than the next
+    /// [`Document::new_id`] gives, which can be a number the file lists
+    /// free, as the trailer's `/Size` less one often is; 4,294,967,295 once
+    /// new ids have gone past it.
+    pub fn max_id(&self) -> u32 {
+        u32::try_from(self.next - 1).unwrap_or(u32::MAX)
+    }
+
+    /// Has new ids start after `n`, or after the largest number an entry
+    /// holds, where that's larger: never at a number held. Lowered, they
+    /// may be numbers the file lists free, or numbers handed out before
+    /// and not set.
+    pub fn set_max_id(&mut self, n: u32) {
+        let held = self.objects.last_key_value().map(|(&(held, _), _)| held);
+        self.next = u64::from(n.max(held.unwrap_or(0))) + 1;
+    }
+
+    /// The object a chain of references ends at, from `object`, and the
+    /// last id on the way: `object` itself, and none, when it isn't a
+    /// reference. None where one names an object it hasn't, or one that
+    /// doesn't read, or the chain runs past 128 references, as a loop
+    /// does.
+    pub fn dereference<'a>(&'a self, object: &'a Object) -> Option<(Option<ObjectId>, &'a Object)> {
+        let (mut last, mut object) = (None, object);
+        let mut followed = 0;
+        while let Some(id) = object.as_reference() {
+            if followed == DEREFERENCES {
+                return None;
+            }
+            followed += 1;
+            last = Some(id);
+            object = self.object(id)?;
+        }
+        Some((last, object))
+    }
+
+    /// Object `id`'s dictionary, or its stream's, through the references
+    /// it is ([`Document::dereference`]), when it reads.
+    pub fn get_dict(&self, id: ObjectId) -> Option<&Dict> {
+        self.dereference(self.object(id)?)?.1.as_dict()
+    }
+
+    /// [`Document::get_dict`]'s dictionary, to change: an edit of the
+    /// object it's in, as through [`Object::as_dict_mut`], which drops its
+    /// record as [`Document::get_mut`] does. Nothing's changed where it
+    /// gives none.
+    pub fn get_dict_mut(&mut self, id: ObjectId) -> Option<&mut Dict> {
+        let (last, object) = self.dereference(self.object(id)?)?;
+        object.as_dict()?;
+        self.get_mut(last.unwrap_or(id))?.as_dict_mut()
+    }
+
+    /// The catalog: the dictionary the trailer's `/Root` refers to (ISO
+    /// 32000-2, 7.7.2), as [`Document::get_dict`] gives it.
+    pub fn catalog(&self) -> Option<&Dict> {
+        self.get_dict(self.trailer.dict().get(b"Root")?.as_reference()?)
+    }
+
+    /// The catalog, to change, as [`Document::get_dict_mut`] gives it.
+    pub fn catalog_mut(&mut self) -> Option<&mut Dict> {
+        self.get_dict_mut(self.trailer.dict().get(b"Root")?.as_reference()?)
+    }
+
+    /// Every id the trailer reaches, through the objects that read, each
+    /// once, in the order found: the trailer's references, then each found
+    /// object's in turn, each value's in the order written
+    /// ([`Object::references`]), every entry of a key written twice among
+    /// them. An id of an object it hasn't, or of one that doesn't read, is
+    /// found, and goes no further.
+    pub fn reachable(&self) -> Vec<ObjectId> {
+        let mut found = Vec::new();
+        let mut seen = HashSet::new();
+        let trailer = self.trailer.dict().entries().iter();
+        for id in trailer.flat_map(|entry| entry.value.references()) {
+            if seen.insert(id) {
+                found.push(id);
+            }
+        }
+        let mut i = 0;
+        while let Some(&id) = found.get(i) {
+            if let Some(object) = self.object(id) {
+                for id in object.references() {
+                    if seen.insert(id) {
+                        found.push(id);
+                    }
+                }
+            }
+            i += 1;
+        }
+        found
+    }
+
+    /// Removes each object the trailer doesn't reach
+    /// ([`Document::reachable`]), whether it reads or not, its record with
+    /// it, and gives their ids by number. Nothing refers to an object
+    /// stream or a cross-reference stream, so they go, and
+    /// [`Trailer::stream`] may then name an object it no longer holds; the
+    /// trailer refers to the encryption dictionary, so it stays.
+    /// [`Document::decoded`] is left as it is, as the objects read from an
+    /// object stream are placed in its data still. New ids start where
+    /// they did.
+    pub fn prune(&mut self) -> Vec<ObjectId> {
+        let reached: HashSet<ObjectId> = self.reachable().into_iter().collect();
+        let mut pruned = Vec::new();
+        self.objects.retain(|&id, _| {
+            let kept = reached.contains(&id);
+            if !kept {
+                pruned.push(id);
+            }
+            kept
+        });
+        pruned
     }
 }
 
@@ -605,13 +840,14 @@ impl Source for Document {
 impl<'o> Resolve<'o> for &'o Document {
     fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
         let doc: &'o Document = self;
-        Some(&doc.objects.get(&id)?.as_ref().ok()?.0)
+        doc.object(id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use pdf_objects::dict;
+    use pdf_objects::object::Stream;
 
     use super::*;
 
@@ -927,6 +1163,490 @@ mod tests {
         ];
         for (unread, said) in cases {
             assert_eq!(unread.to_string(), said, "{unread:?}");
+        }
+    }
+
+    /// Where `needle` first is in `file`.
+    fn find(file: &[u8], needle: &[u8]) -> usize {
+        file.windows(needle.len())
+            .position(|w| w == needle)
+            .unwrap()
+    }
+
+    /// New ids, one at a time, each generation 0: past every number a
+    /// file's cross-references list, in use or free, past its
+    /// cross-reference stream's, and past its trailer's `/Size` less one;
+    /// for a document built in memory, its trailer's `/Size` or 1; past
+    /// each number put in since, never 0; and after where `set_max_id`
+    /// puts them, but never at a number held.
+    #[test]
+    fn new_ids_start_past_every_number_the_file_lists() {
+        // Built in memory, under a trailer with no /Size.
+        let mut doc = Document::new(Version::new(1, 7), Dict::new());
+        assert_eq!(doc.max_id(), 0);
+        assert_eq!((doc.new_id(), doc.new_id()), ((1, 0), (2, 0)));
+        assert_eq!(doc.max_id(), 2);
+        assert_eq!(doc.add(dict! { "Type" => "Catalog" }), (3, 0));
+        assert!(doc.get_dict((3, 0)).is_some_and(|d| d.has_type(b"Catalog")));
+        assert_eq!(doc.record((3, 0)), None);
+        assert_eq!(doc.ids(), [(3, 0)], "an id handed out isn't held");
+
+        // Past a /Size, where that's a number of objects; else from 1.
+        let sized = |size: Object| Document::new(Version::new(1, 7), dict! { "Size" => size });
+        assert_eq!(sized(8.into()).new_id(), (8, 0));
+        assert_eq!(sized(8.into()).max_id(), 7);
+        for size in [
+            0.into(),
+            (-3).into(),
+            8.5.into(),
+            (1i64 << 33).into(),
+            Object::reference(8),
+        ] {
+            assert_eq!(sized(size.clone()).new_id(), (1, 0), "{size:?}");
+        }
+
+        // Past what's put in, read or not; one put in below leaves them.
+        let mut doc = sized(8.into());
+        doc.set((20, 3), "Twenty");
+        assert_eq!(doc.new_id(), (21, 0));
+        doc.set_unread((30, 0), Unread::Other("it doesn't parse".to_string()));
+        assert_eq!(doc.add(31), (31, 0));
+        doc.insert(40, 40);
+        doc.insert(5, 5);
+        assert_eq!(doc.max_id(), 40);
+        assert_eq!(doc.new_id(), (41, 0));
+
+        // Lowered, but never below a number held, read or not.
+        doc.set_max_id(9);
+        assert_eq!(doc.max_id(), 40);
+        assert_eq!(doc.remove((40, 0)), Some(40.into()));
+        assert_eq!(doc.max_id(), 40, "removing leaves where they start");
+        doc.set_max_id(9);
+        assert_eq!(doc.max_id(), 31);
+        doc.remove((31, 0));
+        doc.remove((30, 0));
+        doc.set_max_id(9);
+        assert_eq!(doc.new_id(), (21, 0));
+        doc.set_max_id(100);
+        assert_eq!(doc.new_id(), (101, 0));
+        // Object 0, always free, is never one, even held.
+        let mut doc = sized(0.into());
+        doc.set((0, 0), 0);
+        doc.set_max_id(0);
+        assert_eq!((doc.max_id(), doc.new_id()), (0, (1, 0)));
+
+        // Read: past the trailer's /Size less one, which is past what the
+        // table lists.
+        let file = crate::write::assembled(
+            "1.7",
+            &[(1, &b"<< /Type /Catalog >>"[..]), (2, b"2")],
+            "<< /Size 20 /Root 1 0 R >>",
+        );
+        let mut doc = crate::bytes::read(&file);
+        assert_eq!(doc.max_id(), 19);
+        assert_eq!(doc.new_id(), (20, 0));
+
+        // Past every number the table lists, though /Size says less: one
+        // in use, and one free that nothing holds.
+        let mut file = crate::write::assembled(
+            "1.7",
+            &[(1, &b"<< /Type /Catalog >>"[..]), (2, b"2"), (7, b"7")],
+            "<< /Size 3 /Root 1 0 R >>",
+        );
+        let mut doc = crate::bytes::read(&file);
+        assert_eq!(doc.new_id(), (8, 0));
+        let row = format!("{:010} 00000 n", find(&file, b"7 0 obj"));
+        let at = find(&file, row.as_bytes());
+        file[at..at + row.len()].copy_from_slice(b"0000000000 00001 f");
+        let mut doc = crate::bytes::read(&file);
+        assert!(!doc.contains((7, 0)) && doc.contains((2, 0)));
+        assert_eq!(doc.max_id(), 7);
+        assert_eq!(doc.new_id(), (8, 0));
+
+        // Past a cross-reference stream's number, which neither its rows
+        // nor /Size reach.
+        let objects = [
+            (1, dict! { "Type" => "Catalog" }.into()),
+            (2, Object::from(2).into()),
+        ];
+        let root = dict! { "Root" => Object::reference(1) };
+        let mut file = crate::write::file("1.7", &objects, root, crate::write::Xref::Stream);
+        let at = find(&file, b"3 0 obj");
+        file.splice(at..at + 1, *b"90");
+        let mut doc = crate::bytes::read(&file);
+        assert_eq!(doc.facts.max_stream, Some(90));
+        assert_eq!(
+            doc.trailer.dict().get(b"Size").and_then(Object::as_integer),
+            Some(4)
+        );
+        assert_eq!(doc.max_id(), 90);
+        assert_eq!(doc.new_id(), (91, 0));
+    }
+
+    /// Once new ids reach 4,294,967,295, the largest number, as a file that
+    /// lists it can, each is the next number above the last handed out that
+    /// no entry holds, from 1 again after the largest, never 0: two in a
+    /// row differ, though neither is set.
+    #[test]
+    fn new_ids_past_the_largest_number_are_numbers_no_entry_holds() {
+        // Up to the largest, as any other; then from 1.
+        let mut doc = Document::new(Version::new(1, 7), Dict::new());
+        doc.set_max_id(u32::MAX - 2);
+        assert_eq!(doc.new_id(), (u32::MAX - 1, 0));
+        assert_eq!(doc.new_id(), (u32::MAX, 0));
+        assert_eq!(doc.max_id(), u32::MAX);
+        assert_eq!((doc.new_id(), doc.new_id()), ((1, 0), (2, 0)));
+        assert_eq!(doc.max_id(), u32::MAX);
+
+        // A /Size whose number less one is the largest.
+        let size = dict! { "Size" => 1i64 << 32 };
+        let mut doc = Document::new(Version::new(1, 7), size);
+        assert_eq!(doc.max_id(), u32::MAX);
+        assert_eq!((doc.new_id(), doc.new_id()), ((1, 0), (2, 0)));
+
+        // A document holding the largest: numbers no entry holds, at any
+        // generation, read or not, in turn from the last handed out.
+        let mut doc = Document::new(Version::new(1, 7), Dict::new());
+        doc.insert(u32::MAX, "Last");
+        for n in [1, 2, 6] {
+            doc.insert(n, n);
+        }
+        doc.set((4, 2), "Four");
+        doc.set_unread((5, 0), Unread::Other("it doesn't parse".to_string()));
+        assert_eq!(doc.max_id(), u32::MAX);
+        let (three, seven) = (doc.new_id(), doc.new_id());
+        assert_eq!((three, seven), ((3, 0), (7, 0)));
+        assert_eq!(doc.add("Eight"), (8, 0));
+        doc.insert(9, 9);
+        assert_eq!(doc.new_id(), (10, 0));
+        assert!(!doc.contains(three) && !doc.contains(seven));
+
+        // Past the last held, from 1 again, to the first no entry holds.
+        doc.insert(u32::MAX - 1, "Next to last");
+        doc.next = PAST + u64::from(u32::MAX - 2);
+        assert_eq!(doc.free_after(u32::MAX - 2), None);
+        assert_eq!((doc.new_id(), doc.new_id()), ((3, 0), (7, 0)));
+        assert_eq!(doc.free_after(u32::MAX), None);
+
+        // Lowered below the largest held, they're where they were again.
+        doc.set_max_id(0);
+        assert_eq!(doc.max_id(), u32::MAX);
+        assert_eq!(doc.new_id(), (3, 0));
+    }
+
+    /// A reference followed to the object its chain ends at, as many as
+    /// 128 of them, and none where one names an object that isn't there or
+    /// doesn't read, or the chain loops; a dictionary through references,
+    /// a stream's too, to read and to change; and the catalog.
+    #[test]
+    fn references_are_followed_to_the_object_a_chain_ends_at() {
+        let file = crate::write::assembled(
+            "1.7",
+            &[
+                (1, &b"<< /Type /Catalog /Pages 2 0 R >>"[..]),
+                (2, b"3 0 R"),
+                (3, b"<< /Type /Pages /Kids [] /Count 0 >>"),
+                (4, b"<< /Length 3 >>\nstream\nabc\nendstream"),
+                (5, b"5"),
+                (6, b"<< /A >> >>"),
+                (7, b"9 0 R"),
+                (8, b"10 0 R"),
+                (10, b"8 0 R"),
+                (11, b"6 0 R"),
+            ],
+            "<< /Size 12 /Root 1 0 R >>",
+        );
+        let read = crate::bytes::read(&file);
+        let mut doc = read.clone();
+        let pages = read.get((3, 0)).unwrap();
+        let reference = |n| Object::reference(n);
+
+        // Not a reference: itself. A chain: where it ends, and its last id.
+        assert_eq!(doc.dereference(&5.into()), Some((None, &5.into())));
+        assert_eq!(doc.dereference(&reference(2)), Some((Some((3, 0)), pages)));
+        assert_eq!(doc.dereference(&reference(3)), Some((Some((3, 0)), pages)));
+        // To nothing: not there, there and not read, or round in a loop.
+        for n in [9, 6, 7, 11, 8, 12] {
+            assert_eq!(doc.dereference(&reference(n)), None, "{n}");
+        }
+        // An object a reference is, stored as written, and followed.
+        assert_eq!(doc.get((2, 0)).unwrap().as_reference(), Some((3, 0)));
+        let stored = doc.get((2, 0)).unwrap();
+        assert_eq!(doc.dereference(stored).unwrap().1, pages);
+        // A dictionary's value followed.
+        let catalog = doc.get_dict((1, 0)).unwrap();
+        let kids = doc.dereference(catalog.get(b"Pages").unwrap()).unwrap().1;
+        assert_eq!(kids, pages);
+
+        // Dictionaries through references, a stream's too; none for what
+        // isn't one, or doesn't read.
+        assert!(doc.get_dict((1, 0)).is_some_and(|d| d.has_type(b"Catalog")));
+        assert_eq!(doc.get_dict((2, 0)), pages.as_dict());
+        assert!(doc.get_dict((4, 0)).is_some_and(|d| d.has(b"Length")));
+        for n in [5, 6, 7, 8, 9, 11] {
+            assert_eq!(doc.get_dict((n, 0)), None, "{n}");
+        }
+        assert_eq!(doc.catalog(), doc.get_dict((1, 0)));
+
+        // To change: the object the chain ends at is edited, its record
+        // and span dropped, and nothing else; nothing where none is given.
+        doc.get_dict_mut((2, 0)).unwrap().set("Count", 1);
+        assert_eq!(doc.record((3, 0)), None);
+        assert_eq!(doc.get((3, 0)).unwrap().at, None);
+        assert_eq!(doc.record((2, 0)), read.record((2, 0)));
+        assert_eq!(doc.get((2, 0)), read.get((2, 0)));
+        let count = doc.get_dict((2, 0)).and_then(|d| d.get(b"Count"));
+        assert_eq!(count.and_then(Object::as_integer), Some(1));
+        for n in [5, 6, 7, 8] {
+            assert_eq!(doc.get_dict_mut((n, 0)), None, "{n}");
+            assert_eq!(doc.record((n, 0)), read.record((n, 0)), "{n}");
+        }
+        doc.get_dict_mut((4, 0))
+            .unwrap()
+            .set("Filter", "FlateDecode");
+        let stream = doc.get((4, 0)).unwrap().as_stream().unwrap();
+        assert_eq!(
+            stream.data,
+            read.get((4, 0)).unwrap().as_stream().unwrap().data
+        );
+        doc.catalog_mut().unwrap().set("Lang", Object::string("en"));
+        assert!(doc.catalog().is_some_and(|d| d.has(b"Lang")));
+        assert_eq!(doc.record((1, 0)), None);
+
+        // No catalog: no /Root, or one that isn't a reference to one.
+        for root in [
+            None,
+            Some(Object::from(1)),
+            Some(reference(5)),
+            Some(reference(9)),
+        ] {
+            let mut trailer = Dict::new();
+            if let Some(root) = root.clone() {
+                trailer.set("Root", root);
+            }
+            doc.trailer = Trailer::new(trailer.into());
+            assert_eq!(doc.catalog(), None, "{root:?}");
+            assert_eq!(doc.catalog_mut(), None, "{root:?}");
+        }
+
+        // As many as 128 references, and no more; an object's own number
+        // isn't one of them.
+        let mut doc = Document::new(Version::new(1, 7), Dict::new());
+        for n in 99..228 {
+            doc.insert(n, reference(n + 1));
+        }
+        doc.insert(228, dict! { "End" => true });
+        let end = doc.get((228, 0)).unwrap();
+        assert_eq!(
+            doc.dereference(&reference(101)),
+            Some((Some((228, 0)), end))
+        );
+        assert_eq!(doc.dereference(&reference(100)), None);
+        assert_eq!(doc.get_dict((100, 0)), end.as_dict());
+        assert_eq!(doc.get_dict((99, 0)), None);
+    }
+
+    /// A trailer's dictionary changed where it is: the trailer's, or the
+    /// cross-reference stream's; a trailer that's neither made one.
+    #[test]
+    fn a_trailers_dictionary_is_changed_where_it_is() {
+        let objects = [(1, dict! { "Type" => "Catalog" }.into())];
+        let root = || dict! { "Root" => Object::reference(1) };
+        for kind in [crate::write::Xref::Table, crate::write::Xref::Stream] {
+            let file = crate::write::file("1.7", &objects, root(), kind);
+            let mut doc = crate::bytes::read(&file);
+            assert!(doc.trailer.object.at.is_some());
+            let stream = doc.trailer.stream;
+            doc.trailer.dict_mut().set("Info", Object::reference(2));
+            assert_eq!(doc.trailer.object.at, None, "{kind:?}: an edit");
+            assert!(doc.trailer.dict().has(b"Info") && doc.trailer.dict().has(b"Root"));
+            let streamed = doc.trailer.object.as_stream().is_some();
+            assert_eq!(streamed, kind == crate::write::Xref::Stream);
+            assert_eq!(doc.trailer.stream, stream);
+        }
+        let mut trailer = Trailer::new(Object::null());
+        assert!(trailer.dict().is_empty());
+        trailer.dict_mut().set("Root", Object::reference(1));
+        assert_eq!(trailer.object, Object::from(root()));
+    }
+
+    /// A document built in memory: objects that read, one that doesn't,
+    /// one a reference names that isn't there, a key written twice, a
+    /// stream naming one in its data, and objects nothing reaches.
+    fn walked() -> Document {
+        let trailer = dict! {
+            "Size" => 20,
+            "Root" => Object::reference(1),
+            "Info" => Object::reference(2),
+        };
+        let mut doc = Document::new(Version::new(1, 7), trailer);
+        let r = Object::reference;
+        doc.insert(
+            1,
+            dict! {
+                "Type" => "Catalog",
+                "Pages" => r(3),
+                "Outlines" => r(4),
+                "Names" => dict! { "Dests" => r(5) },
+            },
+        );
+        doc.insert(2, dict! { "Extra" => vec![r(6), r(1)] });
+        doc.insert(
+            3,
+            dict! { "Kids" => vec![r(7), r(8)], "A" => r(10), "Count" => 2, "A" => r(11) },
+        );
+        doc.set_unread((4, 0), Unread::Other("it doesn't parse".to_string()));
+        let mut data = Stream::new(Dict::new(), b"13 0 R".to_vec());
+        data.dict.set("Length", r(12));
+        doc.insert(5, data);
+        doc.insert(6, vec![r(99)]);
+        doc.insert(7, dict! { "Parent" => r(3) });
+        doc.insert(8, dict! { "Parent" => r(3), "Annot" => r(14) });
+        for n in [10, 11, 12, 13, 14] {
+            doc.insert(n, n);
+        }
+        doc.insert(15, dict! { "X" => r(16) });
+        doc.insert(16, 16);
+        doc.set_unread((17, 0), Unread::Other("it doesn't parse".to_string()));
+        doc
+    }
+
+    /// What the trailer reaches, each once, in the order found: the
+    /// trailer's references, then each found object's in turn, in the
+    /// order written, every entry of a key written twice; an object that
+    /// isn't there, or doesn't read, found and not followed; a stream's
+    /// data not read.
+    #[test]
+    fn reachable_finds_what_the_trailer_reaches_in_order() {
+        let doc = walked();
+        let reached: Vec<u32> = doc.reachable().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(reached, [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 99, 14]);
+        let mut doc = doc;
+        doc.trailer = Trailer::new(Object::null());
+        assert_eq!(doc.reachable(), []);
+    }
+
+    /// Pruned: each object the trailer doesn't reach, read or not, by
+    /// number, an object stream and a cross-reference stream among them,
+    /// the trailer naming the last still; what it reaches kept as it was,
+    /// one that doesn't read too, and the decoded data, and where new ids
+    /// start.
+    #[test]
+    fn prune_removes_what_the_trailer_doesnt_reach() {
+        let mut doc = walked();
+        doc.insert(18, Stream::new(dict! { "Type" => "XRef" }, Vec::new()));
+        doc.trailer.stream = Some((18, 0));
+        doc.insert(19, Stream::new(dict! { "Type" => "ObjStm" }, Vec::new()));
+        doc.decoded.insert((19, 0), b"20 0".to_vec());
+        let before = doc.clone();
+        assert_eq!(
+            doc.prune(),
+            [(13, 0), (15, 0), (16, 0), (17, 0), (18, 0), (19, 0)]
+        );
+        assert_eq!(
+            doc.ids(),
+            [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 14].map(|n| (n, 0))
+        );
+        assert!(doc.objects().all(|(id, o)| before.get(id) == Ok(o)));
+        assert_eq!(doc.get((4, 0)), before.get((4, 0)));
+        assert_eq!(doc.trailer, before.trailer);
+        assert!(!doc.contains(doc.trailer.stream.unwrap()));
+        assert_eq!(doc.decoded, before.decoded);
+        assert_eq!(doc.max_id(), before.max_id());
+        assert_eq!(doc.reachable(), before.reachable());
+        assert_eq!(doc.prune(), [], "nothing more");
+    }
+
+    /// Each encrypted file qpdf wrote, opened by its user's password and by
+    /// its owner's and pruned: its object streams and cross-reference
+    /// stream go, nothing refers to them; the encryption dictionary stays,
+    /// the trailer refers to it; and what stays is as read, its strings
+    /// decrypted where they are, with its records, beside the decoded data.
+    #[test]
+    fn prune_keeps_an_encrypted_files_encryption_dictionary_and_strings() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
+        if !dir.exists() {
+            return;
+        }
+        let names = [
+            "rc4-40",
+            "rc4-128",
+            "aes-128",
+            "aes-256-r5",
+            "aes-256",
+            "aes-256-unpacked",
+        ];
+        for name in names {
+            let file = std::fs::read(dir.join(format!("qpdf-{name}.pdf"))).unwrap();
+            for (password, owner) in [(&b""[..], false), (b"owner", true)] {
+                let mut doc = crate::bytes::read_opened(&file, &[password]);
+                assert_eq!(doc.encryption, Encryption::opened(owner), "{name}");
+                let before = doc.clone();
+                let reached: BTreeSet<ObjectId> = before.reachable().into_iter().collect();
+                let pruned = doc.prune();
+                assert!(pruned.is_sorted(), "{name}");
+                assert!(
+                    pruned
+                        .iter()
+                        .all(|id| !reached.contains(id) && !doc.contains(*id))
+                );
+                assert_eq!(pruned.len() + doc.ids().len(), before.ids().len(), "{name}");
+                assert!(doc.ids().iter().all(|id| reached.contains(id)), "{name}");
+                // What nothing refers to: the object streams and the
+                // cross-reference stream.
+                let containers = before.decoded.keys().chain(&before.trailer.stream);
+                for id in containers {
+                    assert!(pruned.contains(id), "{name}: {id:?}");
+                }
+                let unpacked = name.ends_with("unpacked");
+                assert_eq!(before.decoded.is_empty(), unpacked, "{name}");
+                // The encryption dictionary, kept as read.
+                let encrypt = doc
+                    .trailer
+                    .dict()
+                    .get(b"Encrypt")
+                    .and_then(Object::as_reference);
+                let encrypt = encrypt.unwrap();
+                assert!(doc.get_dict(encrypt).is_some_and(|d| d.has(b"Filter")));
+                // What stays as read, its records with it.
+                for (id, object) in doc.objects() {
+                    assert_eq!(Ok(object), before.get(id), "{name}: {id:?}");
+                    assert_eq!(doc.record(id), before.record(id), "{name}: {id:?}");
+                    assert!(doc.record(id).is_some(), "{name}: {id:?}");
+                }
+                let strings = |doc: &Document| -> usize {
+                    let mut strings = 0;
+                    for (_, object) in doc.objects() {
+                        let mut stack = vec![object];
+                        while let Some(o) = stack.pop() {
+                            match o.value() {
+                                Value::String(..) => strings += 1,
+                                Value::Array(a) => stack.extend(a),
+                                Value::Dict(d) => {
+                                    stack.extend(d.entries().iter().map(|e| &e.value))
+                                }
+                                Value::Stream(s) => {
+                                    stack.extend(s.dict.entries().iter().map(|e| &e.value))
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    strings
+                };
+                assert!(strings(&doc) > 0, "{name}");
+                assert_eq!(doc.records().count(), doc.objects().count(), "{name}");
+                assert_eq!(
+                    (&doc.trailer, &doc.decoded, &doc.warnings, doc.max_id()),
+                    (
+                        &before.trailer,
+                        &before.decoded,
+                        &before.warnings,
+                        before.max_id()
+                    )
+                );
+                assert_eq!(doc.reachable(), before.reachable(), "{name}");
+            }
         }
     }
 

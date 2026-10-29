@@ -10,6 +10,10 @@
 //!   read while it's as read, or why it doesn't read ([`Unread`]); the
 //!   [`Trailer`], and why it isn't the newest section's when it isn't;
 //!   the header's version; and the file's newest incremental [`Update`].
+//! - **A document in memory:** a [`Document`] built, or read whole, then
+//!   added to, its new objects numbered past every number the file lists;
+//!   its references followed, and what its trailer reaches walked, the
+//!   rest pruned.
 //! - **Or read on demand:** a [`Reading`], opened, then each object read
 //!   when it's first asked for, kept or not, from any thread, each object
 //!   stream decoded once; read whole, it's the [`Document`], by the same
