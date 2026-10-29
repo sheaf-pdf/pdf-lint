@@ -7,7 +7,7 @@ use pdf_objects::dict;
 use pdf_objects::object::{Dict, Object, ObjectId, Stream, Value};
 use pdf_objects::serialize;
 
-use super::{Deflate, Error};
+use super::{Deflate, Error, usable};
 use crate::bytes::Limits;
 
 /// The most a container's data may hold, as the reader decodes a stream:
@@ -18,6 +18,11 @@ pub const MAX_DATA: usize = Limits::DEFAULT.stream;
 /// The most objects a container holds where a writer chooses: qpdf's
 /// default.
 pub const MEMBERS: usize = 100;
+
+/// The most members a container has: as many as a cross-reference
+/// stream's two bytes give a member's place in it, as the writer writes
+/// its entries.
+pub(super) const PLACES: usize = 1 << 16;
 
 /// Whether a container whose data is `len` bytes is one the reader takes.
 pub fn fits(len: usize) -> bool {
@@ -66,12 +71,31 @@ fn signature(d: &Dict) -> bool {
 }
 
 /// An object stream of `members`, each its number and its object as
-/// direct syntax (pdf-objects' [`serialize::write`]), in order: a header
-/// of each member's number and where it starts, counted from `/First`,
-/// then each member followed by a newline, deflated as `deflate` says. Its
-/// `/Length` is direct, as the writer writes every stream's. None when its
-/// data wouldn't [`fit`](fits).
-pub fn container(members: &[(u32, Vec<u8>)], deflate: Deflate) -> Result<Option<Stream>, Error> {
+/// direct syntax (pdf-objects' [`serialize::write`]), borrowed or owned, in
+/// order: a header of each member's number and where it starts, counted
+/// from `/First`, then each member followed by a newline, deflated as
+/// `deflate` says. Its `/Length` is direct, as the writer writes every
+/// stream's. None when its data wouldn't [`fit`](fits), or it has more
+/// than 65,536 members, more than a cross-reference stream's place in it
+/// says as the writer writes one. Refused: a member numbered 0 or at or
+/// past [`NUMBERS`](super::NUMBERS) ([`Error::Number`]), and a number given
+/// twice ([`Error::Twice`]).
+pub fn container<B: AsRef<[u8]>>(
+    members: &[(u32, B)],
+    deflate: Deflate,
+) -> Result<Option<Stream>, Error> {
+    if members.len() > PLACES {
+        return Ok(None);
+    }
+    let mut numbers = Vec::with_capacity(members.len());
+    for &(n, _) in members {
+        usable(n)?;
+        numbers.push(n);
+    }
+    numbers.sort_unstable();
+    if let Some(twice) = numbers.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(Error::Twice(twice[0]));
+    }
     let mut header = Vec::new();
     let mut offset = 0;
     for (i, (n, bytes)) in members.iter().enumerate() {
@@ -81,7 +105,7 @@ pub fn container(members: &[(u32, Vec<u8>)], deflate: Deflate) -> Result<Option<
         serialize::decimal(&mut header, (*n).into());
         header.push(b' ');
         serialize::decimal(&mut header, offset as u64);
-        offset += bytes.len() + 1;
+        offset += bytes.as_ref().len() + 1;
     }
     header.push(b'\n');
     let first = header.len();
@@ -91,7 +115,7 @@ pub fn container(members: &[(u32, Vec<u8>)], deflate: Deflate) -> Result<Option<
     let mut data = header;
     data.reserve(offset);
     for (_, bytes) in members {
-        data.extend_from_slice(bytes);
+        data.extend_from_slice(bytes.as_ref());
         data.push(b'\n');
     }
     let dict = dict! {

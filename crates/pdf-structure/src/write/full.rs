@@ -8,6 +8,7 @@
 //! encrypted once, as a stream, under its own number. An object as read is
 //! copied where the rules for a copy hold ([`Body::Read`]).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 
@@ -22,10 +23,6 @@ use super::{
     dangling, file_id, first_id, fresh, id_value, packable, stopped, usable,
 };
 use crate::source::{Document, XrefKind};
-
-/// The most members an object stream has: as many as a cross-reference
-/// stream's two bytes give a member's place in it.
-const PLACES: usize = 1 << 16;
 
 /// A whole file of `bodies`, at the end of `out`: the header, at
 /// `options.version`, a comment of bytes past ASCII; each body at its
@@ -490,7 +487,8 @@ fn container_numbers(
 /// or that has more members than a place in it can say. Built on up to
 /// `threads` threads, 4 object streams to one at least, `stop` checked
 /// before each, and joined in order, so that the same groups build the
-/// same bytes however many threads build them.
+/// same bytes however many threads build them; a part no thread can be
+/// had for is built on the calling thread.
 pub(super) fn containers(
     groups: &[(u32, Vec<(ObjectId, Member<'_>)>)],
     encrypting: Option<&Encrypting<'_>>,
@@ -513,14 +511,22 @@ pub(super) fn containers(
     let build = &build;
     std::thread::scope(|s| {
         let parts: Vec<_> = (groups.chunks(chunk))
-            .map(|part| s.spawn(move || build(part)))
+            .map(|part| {
+                let spawned = std::thread::Builder::new().spawn_scoped(s, move || build(part));
+                (part, spawned.ok())
+            })
             .collect();
         let mut built = Vec::with_capacity(groups.len());
-        for part in parts {
-            match part.join() {
-                Ok(part) => built.extend(part?),
-                Err(panic) => std::panic::resume_unwind(panic),
-            }
+        for (part, spawned) in parts {
+            let part = match spawned {
+                Some(thread) => match thread.join() {
+                    Ok(part) => part,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                },
+                // No thread to be had: here, the same bytes.
+                None => build(part),
+            };
+            built.extend(part?);
         }
         Ok(built)
     })
@@ -528,23 +534,21 @@ pub(super) fn containers(
 
 /// `members` as object stream `n`, written as an indirect object,
 /// encrypted by `encrypting` when given, each member's value written anew
-/// or its bytes as read: none when its data wouldn't [`fit`](super::fits),
-/// or it has more members than [`PLACES`].
+/// or its bytes as read, borrowed: none when its data wouldn't
+/// [`fit`](super::fits), or it has more members than a place in it can
+/// say ([`objstm`]).
 fn container(
     n: u32,
     members: &[(ObjectId, Member<'_>)],
     encrypting: Option<&Encrypting<'_>>,
     deflate: Deflate,
 ) -> Result<Option<Vec<u8>>, Error> {
-    if members.len() > PLACES {
-        return Ok(None);
-    }
-    let mut written = Vec::with_capacity(members.len());
+    let mut written: Vec<(u32, Cow<'_, [u8]>)> = Vec::with_capacity(members.len());
     for (id, member) in members {
         let obj = match member {
             Member::Object(obj) => obj,
             Member::Copied(bytes) => {
-                written.push((id.0, bytes.to_vec()));
+                written.push((id.0, Cow::Borrowed(bytes)));
                 continue;
             }
         };
@@ -554,7 +558,7 @@ fn container(
             let named = serialize::indirect(&mut Vec::new(), *id, obj).err();
             return Err(Error::Serialize(named.unwrap_or(e)));
         }
-        written.push((id.0, bytes));
+        written.push((id.0, Cow::Owned(bytes)));
     }
     let Some(stream) = objstm(&written, deflate)? else {
         return Ok(None);

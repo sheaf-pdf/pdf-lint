@@ -17,7 +17,7 @@ use pdf_objects::dict;
 use pdf_objects::object::{Dict, Object, Stream};
 use pdf_objects::serialize;
 
-use super::{Deflate, Error};
+use super::{Deflate, Error, NUMBERS, usable};
 
 /// What a section says of an object number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,8 +65,10 @@ struct Row {
 }
 
 impl Section {
-    /// A full write's, of at least `size` numbers. It writes its own
-    /// header, at the start.
+    /// A full write's, of at least `size` numbers, its positions counted
+    /// from 0, where a whole file's header is. Its one subsection lists
+    /// every number below its `/Size`, which past [`NUMBERS`] refuses it
+    /// when it's written ([`Error::Number`]).
     pub fn full(size: u32) -> Section {
         Section {
             entries: BTreeMap::new(),
@@ -89,7 +91,9 @@ impl Section {
 
     /// Lists object `num` as `entry`, `/Size` growing past it as far as a
     /// u32 goes. Entry 0 is the free list's, the section's own: an entry
-    /// for 0 is passed over.
+    /// for 0 is passed over. A number at or past [`NUMBERS`], which a
+    /// written file may not use, is listed, and refuses the section when
+    /// it's written ([`Error::Number`]).
     pub fn insert(&mut self, num: u32, entry: Entry) {
         if num == 0 {
             return;
@@ -118,8 +122,9 @@ impl Section {
     /// The section as a table at file position `pos`, then `trailer` with
     /// its `/Size`, and `startxref`. A table can't list an object stream's
     /// member, so one is refused, as is an offset past its ten digits, a
-    /// position before the header and a trailer pdf-objects' writer
-    /// refuses; then nothing is written.
+    /// position before the header, a number at or past [`NUMBERS`] (a whole
+    /// file's `/Size` past it among them), and a trailer pdf-objects'
+    /// writer refuses; then nothing is written.
     pub fn table(&self, out: &mut Vec<u8>, mut trailer: Dict, pos: usize) -> Result<(), Error> {
         let start = out.len();
         let at = self.offset(pos)?;
@@ -156,8 +161,10 @@ impl Section {
     /// deflated under the PNG Up predictor, as `deflate` says, each less
     /// the row above it, which leaves mostly zeros where offsets climb
     /// slowly; an append's are written as they are. A position before the
-    /// header is refused, as is a dictionary pdf-objects' writer refuses;
-    /// then nothing is written, and it lists what it did.
+    /// header is refused, as is a `num` of 0 or at or past [`NUMBERS`], a
+    /// number listed at or past it (a whole file's `/Size` past it among
+    /// them), and a dictionary pdf-objects' writer refuses; then nothing is
+    /// written, and it lists what it did.
     pub fn stream(
         &mut self,
         out: &mut Vec<u8>,
@@ -166,6 +173,7 @@ impl Section {
         pos: usize,
         deflate: Deflate,
     ) -> Result<(), Error> {
+        usable(num)?;
         let at = self.offset(pos)?;
         let was = self.entries.get(&num).copied();
         let size = self.size;
@@ -252,8 +260,17 @@ impl Section {
     /// The rows, in subsections of contiguous numbers, each with its first
     /// number. Entry 0 heads the free list in a full write, and in an
     /// append that frees anything; each free entry gives the next, the
-    /// last 0.
+    /// last 0. Refused where a number listed, or a full write's `/Size`,
+    /// is past what a written file may use.
     fn subsections(&self) -> Result<Vec<(u32, Vec<Row>)>, Error> {
+        // Every number listed one a written file may use, and a whole
+        // file's rows no more: before a row is made.
+        if let Some((&n, _)) = self.entries.last_key_value() {
+            usable(n)?;
+        }
+        if self.full && self.size > NUMBERS {
+            return Err(Error::Number(self.size - 1));
+        }
         let head = Entry::Free {
             generation: u16::MAX,
         };

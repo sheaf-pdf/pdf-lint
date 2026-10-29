@@ -895,6 +895,66 @@ fn a_position_before_the_header_is_refused() {
     );
 }
 
+/// A section that lists a number a written file may not use, at or past
+/// `NUMBERS`, is refused when it's written, before a row is made, and so
+/// is a whole file's whose `/Size` is past it, and a stream numbered 0 or
+/// past it: nothing is written. An update's `/Size` may be past it, as its
+/// file's may, so long as the numbers it lists aren't.
+#[test]
+fn a_section_past_the_numbers_a_file_may_use_is_refused() {
+    let entry = Entry::InUse {
+        pos: 9,
+        generation: 0,
+    };
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let past = |n| Err(Error::Number(n));
+    for mut section in [Section::full(1), Section::append(3, 0)] {
+        for n in [write::NUMBERS, write::NUMBERS + 1, u32::MAX - 1] {
+            let mut listing = section.clone();
+            listing.insert(n, entry);
+            assert_eq!(listing.table(&mut out, Dict::new(), 20), past(n));
+            let written = listing.stream(&mut out, 4, Dict::new(), 20, Deflate::DEFAULT);
+            assert_eq!(written, past(n));
+        }
+        section.insert(2, entry);
+        for n in [0, write::NUMBERS, u32::MAX] {
+            let written = section.stream(&mut out, n, Dict::new(), 20, Deflate::DEFAULT);
+            assert_eq!(written, past(n));
+        }
+    }
+    let wide = Section::full(write::NUMBERS + 1);
+    assert_eq!(wide.table(&mut out, Dict::new(), 20), past(write::NUMBERS));
+    assert_eq!(out, b"%PDF-1.7\n", "nothing written");
+    let mut wide = Section::append(u32::MAX, 0);
+    wide.insert(2, entry);
+    wide.table(&mut out, Dict::new(), 20).unwrap();
+    assert!(holds(&out, b"/Size 4294967295"));
+}
+
+/// A container's members are numbers a written file may use, each once:
+/// one numbered 0 or at or past `NUMBERS`, or a number given twice, is
+/// refused. More than 65,536, more than a cross-reference stream's place
+/// in it says, make none, told before anything is copied.
+#[test]
+fn a_container_refuses_what_a_file_can_t_list() {
+    let deflate = Deflate::DEFAULT;
+    let one: &[u8] = b"1";
+    for n in [0, write::NUMBERS, u32::MAX] {
+        let made = write::container(&[(1, one), (n, one)], deflate);
+        assert_eq!(made, Err(Error::Number(n)), "{n}");
+    }
+    let twice = write::container(&[(5, one), (6, one), (5, one)], deflate);
+    assert_eq!(twice, Err(Error::Twice(5)));
+    let many: Vec<(u32, &[u8])> = (1..=65_537).map(|n| (n, one)).collect();
+    assert_eq!(write::container(&many, deflate), Ok(None));
+    let most = &many[..65_536];
+    let made = write::container(most, deflate).unwrap().unwrap();
+    assert_eq!(
+        made.dict.get(b"N").and_then(Object::as_integer),
+        Some(65_536)
+    );
+}
+
 /// A full write's cross-reference stream and a container, deflated on
 /// either backend at any level, read back by the reader inflating on
 /// either: the same objects each way. Compressed, the two backends' bytes
