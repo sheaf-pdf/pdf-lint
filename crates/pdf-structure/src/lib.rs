@@ -60,6 +60,7 @@
 //! [`pdf_crypt`].
 
 pub mod bytes;
+mod crypt;
 mod filter;
 // The tests' file writer; for other crates' tests and fuzz bodies too,
 // with `fixtures`, the feature it's named for.

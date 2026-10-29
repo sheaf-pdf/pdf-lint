@@ -15,7 +15,8 @@ use pdf_objects::object::{Object, ObjectId, Span, Stream, Value};
 use pdf_objects::version::Version;
 
 use super::window::{ByPosition, Bytes, InMemory};
-use super::{Crypt, Decode, Options, Reader, Unfiltered, Whole, XrefEntry, is_xref};
+use super::{Crypt, Decode, Options, Reader, Unfiltered, Whole, XrefEntry};
+use crate::crypt::is_xref;
 use crate::filter;
 use crate::source::{Document, Encryption, Facts, Record, Trailer, Unread, Update, Warning};
 
@@ -530,9 +531,8 @@ impl<S: ByteSource> Reading<S> {
     /// [`Reading::metadata`], of `file`.
     fn metadata_in<'f, F: Bytes<'f>>(&'f self, file: F) -> Result<Option<Cow<'f, [u8]>>, F::Error> {
         let reader = &self.reader;
-        let plain = !reader.encrypts || reader.plain_metadata;
         let get = |id| Ok(reader.get(file, id)?.ok());
-        super::metadata(file, &reader.trailer, &get, !plain)
+        super::metadata(file, &reader.trailer, &get, !reader.list.plain_metadata())
     }
 
     /// The bytes at `span`: in the file, or in the decoded data of the
@@ -557,7 +557,7 @@ impl<S: ByteSource> Reading<S> {
         span: Span,
     ) -> Result<Result<Cow<'f, [u8]>, Error>, F::Error> {
         match span.stream {
-            None if self.reader.encrypts => Ok(Err(Error::Encrypted)),
+            None if self.reader.list.encrypts => Ok(Err(Error::Encrypted)),
             _ => self.written_in(file, span),
         }
     }
