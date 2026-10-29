@@ -56,10 +56,12 @@
 //!   - **The encryption dictionary's:** the trailer's `/Encrypt`, every
 //!     earlier cross-reference section's along `/Prev` (an earlier
 //!     update's dictionary), and the objects its entries refer to, where
-//!     the reader reads them to open the file (7.6.2). Held by
+//!     the reader reads them to open the file (7.6.2): `/EFF`'s from `/V`
+//!     4 alone, below which it isn't read. Held by
 //!     `an_encrypted_files_strings_are_ciphertext_but_its_encryption_dictionarys`,
-//!     `an_earlier_updates_encryption_dictionary_isnt_decrypted_either`
-//!     and `what_an_encryption_dictionarys_values_refer_to_is_read_as_written`.
+//!     `an_earlier_updates_encryption_dictionary_isnt_decrypted_either`,
+//!     `what_an_encryption_dictionarys_values_refer_to_is_read_as_written`
+//!     and `what_an_eff_refers_to_is_the_encryption_dictionarys_own_from_v_4_alone`.
 //!   - **A signature's `/Contents`,** in a dictionary with `/ByteRange` and
 //!     a string `/Contents` whose `/Type` is `/Sig`, `/DocTimeStamp` or
 //!     none (7.6.2). Held by
@@ -118,13 +120,14 @@
 //!     filter `/EFF` names, unless the stream has a `/Crypt` filter of its
 //!     own, which decrypts it instead (7.6.6 and Table 20); `/EFF` is
 //!     followed where it's a reference, as `/StmF` is, and counts from `/V`
-//!     4. Without a crypt filter of its own, it's refused in a file no
-//!     password opened ([`Error::Locked`]), whose streams are encrypted or
-//!     not, unless `/EFF` is `/Identity`; and, where `/EFF` isn't a name,
-//!     which doesn't say how embedded files are encrypted, in a file that
-//!     opened ([`Error::Encrypted`]). qpdf decrypts one without a crypt
-//!     filter of its own as `/StmF` says, reading `/EFF` only for what a
-//!     writer should encrypt new embedded files by. Held by
+//!     4, below which it isn't read. Without a crypt filter of its own,
+//!     it's refused in a file no password opened ([`Error::Locked`]), whose
+//!     streams are encrypted or not, unless `/EFF` is `/Identity`; and,
+//!     where `/EFF` isn't a name, which doesn't say how embedded files are
+//!     encrypted, in a file that opened ([`Error::Encrypted`]). qpdf
+//!     decrypts one without a crypt filter of its own as `/StmF` says,
+//!     reading `/EFF` only for what a writer should encrypt new embedded
+//!     files by. Held by
 //!     `an_embedded_files_data_under_eff_is_decrypted_by_it` and
 //!     `a_metadata_stream_and_an_embedded_file_decrypt_as_through_qpdf_but_where_it_ignores_eff`.
 //!   - **In a file no password opened,** each is refused, as it may be
@@ -2918,7 +2921,10 @@ impl Reader {
             stm_f: name(get(dict.get(b"StmF"))?),
             str_f: name(get(dict.get(b"StrF"))?),
         };
-        let eff = dict.get(b"EFF");
+        // /EFF counts from /V 4, which has crypt filters (ISO 32000-2,
+        // Table 20): below, it isn't read, so what it refers to is no more
+        // the dictionary's own than any object.
+        let eff = dict.get(b"EFF").filter(|_| values.v >= 4);
         let eff_followed = get(eff)?;
         // The file's first /ID element, as qpdf takes it: empty, said once
         // the standard handler takes the dictionary, when it isn't a string.
@@ -2942,13 +2948,11 @@ impl Reader {
             let message = "its trailer's /ID has no string first, so its key is made without one";
             cx.warn(None, at, message.to_string());
         }
-        // From /V 4, which has crypt filters (ISO 32000-2, Table 20), and
-        // followed as /StmF is: a null is no entry (7.3.9), and so is a
+        // Followed as /StmF is: a null is no entry (7.3.9), and so is a
         // reference to no object (7.3.10); anything else that isn't a name,
         // a reference to an object that doesn't read among them, doesn't
         // say how embedded files are encrypted.
         self.embedded_files = match eff_followed.as_ref().map(Object::value) {
-            _ if values.v < 4 => Eff::AsStreams,
             Some(Value::Name(name)) => Eff::Named(name.to_vec()),
             Some(Value::Null) => Eff::AsStreams,
             Some(_) => Eff::Unsaid,
@@ -5396,6 +5400,40 @@ mod tests {
                 Object::bytes(o),
                 "{kind:?}"
             );
+            let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
+            assert_eq!(
+                *lang.unwrap().value(),
+                Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// An `/EFF` by reference to an object that isn't a name, the note: from
+    /// `/V` 4, where it counts, followed as `/StmF` is, so the note is the
+    /// encryption dictionary's own and its strings are read as written;
+    /// below, not read, so the note is decrypted as any object is.
+    #[test]
+    fn what_an_eff_refers_to_is_the_encryption_dictionarys_own_from_v_4_alone() {
+        let root = || dict! { "Root" => Object::reference(1) };
+        for kind in KINDS {
+            let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root());
+            let file = encryption_updated(&file, "/P -4", "/EFF 4 0 R /P -4", &[]);
+            let doc = read_opened(&file, &[]);
+            assert_eq!(
+                doc.encryption,
+                Encryption::Opened {
+                    owner: false,
+                    by: None
+                },
+                "{kind:?}"
+            );
+            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            let note = doc.get((4, 0)).unwrap().as_dict().unwrap();
+            let contents = note.get(b"Contents").unwrap().value();
+            let read = Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal));
+            let v = pdf_crypt::writer::dictionary(&settings(kind, b"")).v;
+            assert_eq!(*contents == read, v < 4, "{kind:?}: {contents:?}");
             let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
             assert_eq!(
                 *lang.unwrap().value(),
