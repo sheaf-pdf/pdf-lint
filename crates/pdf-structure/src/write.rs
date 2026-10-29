@@ -480,13 +480,13 @@ impl<S: ByteSource> sealed::Reads for Reading<S> {
         match self.source().unchanged() {
             Ok(true) => Ok(()),
             Ok(false) => Err(Error::Changed(None)),
-            Err(e) => Err(Error::Io(e.to_string())),
+            Err(e) => Err(Error::io(&e)),
         }
     }
 
     fn written(&self, id: ObjectId, span: Span) -> Result<Cow<'_, [u8]>, Error> {
         Reading::written(self, span).map_err(|why| match why {
-            crate::bytes::Error::Io(e) => Error::Io(e.to_string()),
+            crate::bytes::Error::Io(e) => Error::io(&e),
             _ => Error::Changed(Some(id)),
         })
     }
@@ -619,7 +619,10 @@ pub enum Error {
         .0.0, .0.1
     )]
     Placed(ObjectId),
-    /// A stream's data that the reading given doesn't hand out, and why.
+    /// A stream's data that the reading given doesn't hand out, and why:
+    /// the reading's error as words, which a caller can't match on, as the
+    /// reading's error isn't `Clone` or `Eq` and this one is; the reading
+    /// gives it typed ([`Reading::data`]).
     #[error("stream {} {}'s data doesn't read: {why}", id.0, id.1)]
     Data {
         /// The stream.
@@ -642,9 +645,16 @@ pub enum Error {
     /// The write was stopped ([`Options::stop`]).
     #[error("stopped")]
     Stopped,
-    /// A source whose bytes don't read, and why.
-    #[error("its bytes don't read: {0}")]
-    Io(String),
+    /// A source whose bytes don't read: the I/O error's kind, which a
+    /// caller can match (to try again where it's `Interrupted`, say), and
+    /// its words.
+    #[error("its bytes don't read: {why}")]
+    Io {
+        /// The error's kind.
+        kind: std::io::ErrorKind,
+        /// Its words.
+        why: String,
+    },
     /// The file the reading given reads isn't as it was when it was read:
     /// its source says so ([`ByteSource::unchanged`]), before anything's
     /// written; or the bytes object `id` was read from, read again to copy
@@ -659,6 +669,16 @@ pub enum Error {
         .0.0, .0.1
     )]
     Elsewhere(ObjectId),
+}
+
+impl Error {
+    /// [`Error::Io`], of `e`.
+    fn io(e: &std::io::Error) -> Error {
+        Error::Io {
+            kind: e.kind(),
+            why: e.to_string(),
+        }
+    }
 }
 
 /// What [`Error::Changed`] says of object `id`, or of the file.

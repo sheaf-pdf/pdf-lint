@@ -104,7 +104,7 @@ impl Base {
             return Err(Error::Rootless);
         }
         let source = reading.source();
-        let io = |e: io::Error| Error::Io(e.to_string());
+        let io = |e: io::Error| Error::io(&e);
         if let Some(section) = reading.as_of() {
             if startxref(source).map_err(io)? != Some(section) {
                 return Err(Error::Earlier(section));
@@ -307,7 +307,13 @@ fn appended(
         let pos = at(out);
         written(out, *id, body, encrypting.as_ref(), from, copying.as_ref())?;
         let generation = id.1;
-        section.insert(id.0, Entry::InUse { pos, generation });
+        section.insert(
+            id.0,
+            Entry::InUse {
+                offset: pos,
+                generation,
+            },
+        );
     }
     let mut trailer = Dict::new();
     trailer.set("Root", root.clone());

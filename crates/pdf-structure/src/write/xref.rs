@@ -19,13 +19,17 @@ use pdf_objects::serialize;
 
 use super::{Deflate, Error, NUMBERS, usable};
 
-/// What a section says of an object number.
+/// What a section says of an object number, in the words the reader's
+/// entries say it in ([`XrefEntry`](crate::bytes::XrefEntry)): ISO 32000-2
+/// leaves room for other kinds of entry (7.5.8.3), so there may be more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Entry {
-    /// Written at file position `pos`.
+    /// Written at `offset`, a position in the file.
     InUse {
-        /// Where its `n g obj` starts.
-        pos: usize,
+        /// Where its `n g obj` starts: its file position, which a section
+        /// writes counted from the header.
+        offset: usize,
         /// Its generation.
         generation: u16,
     },
@@ -34,10 +38,13 @@ pub enum Entry {
         /// The generation its number is to be used at next.
         generation: u16,
     },
-    /// The `index`th object in object stream `container`, at generation 0.
-    Packed {
+    /// The `index`th object in object stream `stream`, at generation 0: a
+    /// compressed object (7.5.8.3's type 2), which only a cross-reference
+    /// stream lists. Its place is two bytes, as the writer writes a
+    /// stream's entries, where the reader's takes four.
+    Compressed {
         /// The object stream's number.
-        container: u32,
+        stream: u32,
         /// Which of its objects it is, from 0.
         index: u16,
     },
@@ -177,7 +184,13 @@ impl Section {
         let at = self.offset(pos)?;
         let was = self.entries.get(&num).copied();
         let size = self.size;
-        self.insert(num, Entry::InUse { pos, generation: 0 });
+        self.insert(
+            num,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
+            },
+        );
         let written = self.stream_at(out, num, trailer, at, deflate);
         if written.is_err() {
             // As it was: what a refusal leaves.
@@ -294,7 +307,10 @@ impl Section {
         let mut next = 0;
         for &(n, entry) in listed.iter().rev() {
             rows.push(match entry {
-                Entry::InUse { pos, generation } => Row {
+                Entry::InUse {
+                    offset: pos,
+                    generation,
+                } => Row {
                     kind: 1,
                     field: self.offset(pos)?,
                     generation,
@@ -308,9 +324,9 @@ impl Section {
                     next = n;
                     row
                 }
-                Entry::Packed { container, index } => Row {
+                Entry::Compressed { stream, index } => Row {
                     kind: 2,
-                    field: u64::from(container),
+                    field: u64::from(stream),
                     generation: index,
                 },
             });

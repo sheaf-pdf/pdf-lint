@@ -1641,7 +1641,13 @@ qpdf: operation succeeded with warnings\n";
         let objects = |out: &mut Vec<u8>, section: &mut Section, objects: Vec<(u32, Object)>| {
             for (num, obj) in objects {
                 let pos = serialize::indirect(out, (num, 0), &obj).unwrap();
-                section.insert(num, Entry::InUse { pos, generation: 0 });
+                section.insert(
+                    num,
+                    Entry::InUse {
+                        offset: pos,
+                        generation: 0,
+                    },
+                );
             }
         };
         let packed = |members: &[(u32, Object)]| {
@@ -1699,13 +1705,7 @@ qpdf: operation succeeded with warnings\n";
             vec![(1, catalog()), (2, pages()), (7, container)],
         );
         for (num, index) in [(5, 0), (6, 1)] {
-            section.insert(
-                num,
-                Entry::Packed {
-                    container: 7,
-                    index,
-                },
-            );
+            section.insert(num, Entry::Compressed { stream: 7, index });
         }
         let prev = packs.len();
         section
@@ -1718,8 +1718,8 @@ qpdf: operation succeeded with warnings\n";
         objects(&mut file, &mut section, vec![(10, sixty)]);
         section.insert(
             6,
-            Entry::Packed {
-                container: 10,
+            Entry::Compressed {
+                stream: 10,
                 index: 0,
             },
         );

@@ -109,7 +109,13 @@ fn file(objects: &[(u32, Object)]) -> Vec<u8> {
     let mut section = Section::full(0);
     for (num, obj) in std::iter::once(&(1, catalog())).chain(objects) {
         let pos = serialize::indirect(&mut out, (*num, 0), obj).unwrap();
-        section.insert(*num, Entry::InUse { pos, generation: 0 });
+        section.insert(
+            *num,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
+            },
+        );
     }
     let pos = out.len();
     section
@@ -152,7 +158,7 @@ fn a_full_table_links_its_free_entries() {
     section.insert(
         1,
         Entry::InUse {
-            pos: one,
+            offset: one,
             generation: 0,
         },
     );
@@ -160,7 +166,7 @@ fn a_full_table_links_its_free_entries() {
     section.insert(
         3,
         Entry::InUse {
-            pos: three,
+            offset: three,
             generation: 2,
         },
     );
@@ -202,7 +208,7 @@ fn appended_runs_free_deleted_objects_with_the_next_generation() {
     section.insert(
         1,
         Entry::InUse {
-            pos: one,
+            offset: one,
             generation: 0,
         },
     );
@@ -211,7 +217,7 @@ fn appended_runs_free_deleted_objects_with_the_next_generation() {
     section.insert(
         5,
         Entry::InUse {
-            pos: five,
+            offset: five,
             generation: 0,
         },
     );
@@ -252,7 +258,13 @@ fn positions_count_from_the_header() {
     let base = open(&out[100..]);
     let mut section = Section::append(size(&base), 100);
     let pos = serialize::indirect(&mut out, (2, 0), &Object::from(22)).unwrap();
-    section.insert(2, Entry::InUse { pos, generation: 0 });
+    section.insert(
+        2,
+        Entry::InUse {
+            offset: pos,
+            generation: 0,
+        },
+    );
     let pos = out.len();
     let trailer = dict! { "Root" => (1, 0), "Prev" => newest(&base).0 as i64 };
     section.table(&mut out, trailer, pos).unwrap();
@@ -272,7 +284,7 @@ fn a_table_refuses_offsets_past_ten_digits() {
     section.insert(
         1,
         Entry::InUse {
-            pos: far,
+            offset: far,
             generation: 0,
         },
     );
@@ -341,7 +353,13 @@ fn an_xref_stream_lists_its_index() {
     let mut at = Vec::new();
     for (num, obj) in [(1, catalog()), (2, Object::from(2)), (3, Object::from(3))] {
         let pos = serialize::indirect(&mut out, (num, 0), &obj).unwrap();
-        section.insert(num, Entry::InUse { pos, generation: 0 });
+        section.insert(
+            num,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
+            },
+        );
         at.push(pos as u64);
     }
     let pos = out.len();
@@ -378,7 +396,7 @@ fn an_xref_stream_lists_its_index() {
     section.insert(
         2,
         Entry::InUse {
-            pos: two,
+            offset: two,
             generation: 0,
         },
     );
@@ -420,7 +438,13 @@ fn a_full_xref_stream_is_compressed_with_the_up_predictor() {
             Object::from(num)
         };
         let pos = serialize::indirect(&mut out, (num, 0), &obj).unwrap();
-        section.insert(num, Entry::InUse { pos, generation: 0 });
+        section.insert(
+            num,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
+            },
+        );
         at.push(pos as u64);
     }
     let pos = out.len();
@@ -482,16 +506,16 @@ fn packed(num: u32, container: &Stream, members: &[u32], deflate: Deflate) -> Ve
     let container = Object::from(container.clone());
     for (n, obj) in [(1, catalog()), (num, container)] {
         let pos = serialize::indirect(&mut out, (n, 0), &obj).unwrap();
-        section.insert(n, Entry::InUse { pos, generation: 0 });
-    }
-    for (index, &n) in (0..).zip(members) {
         section.insert(
             n,
-            Entry::Packed {
-                container: num,
-                index,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
             },
         );
+    }
+    for (index, &n) in (0..).zip(members) {
+        section.insert(n, Entry::Compressed { stream: num, index });
     }
     let pos = out.len();
     let own = section.size();
@@ -701,17 +725,17 @@ fn a_type_2_entry_is_written_as_its_container_and_place() {
     let mut at = Vec::new();
     for (num, obj) in objects {
         let pos = serialize::indirect(&mut out, (num, 0), &obj).unwrap();
-        section.insert(num, Entry::InUse { pos, generation: 0 });
+        section.insert(
+            num,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
+            },
+        );
         at.push(pos as u64);
     }
     for (num, index) in [(5, 0), (6, 1)] {
-        section.insert(
-            num,
-            Entry::Packed {
-                container: 7,
-                index,
-            },
-        );
+        section.insert(num, Entry::Compressed { stream: 7, index });
     }
     let pos = out.len();
     section
@@ -752,11 +776,17 @@ fn a_type_2_entry_is_written_as_its_container_and_place() {
     let mut section = Section::append(size(&base), 100);
     let sixty = Object::from(dict! { "Six" => 60 });
     let pos = serialize::indirect(&mut out, (10, 0), &container(&[(6, sixty.clone())])).unwrap();
-    section.insert(10, Entry::InUse { pos, generation: 0 });
+    section.insert(
+        10,
+        Entry::InUse {
+            offset: pos,
+            generation: 0,
+        },
+    );
     section.insert(
         6,
-        Entry::Packed {
-            container: 10,
+        Entry::Compressed {
+            stream: 10,
             index: 0,
         },
     );
@@ -783,14 +813,14 @@ fn a_table_refuses_a_packed_entry() {
     section.insert(
         1,
         Entry::InUse {
-            pos: 9,
+            offset: 9,
             generation: 0,
         },
     );
     section.insert(
         5,
-        Entry::Packed {
-            container: 7,
+        Entry::Compressed {
+            stream: 7,
             index: 0,
         },
     );
@@ -816,15 +846,15 @@ fn a_section_gives_back_what_it_lists_each_number_as() {
         (
             1,
             Entry::InUse {
-                pos: 9,
+                offset: 9,
                 generation: 0,
             },
         ),
         (4, Entry::Free { generation: 2 }),
         (
             6,
-            Entry::Packed {
-                container: 1,
+            Entry::Compressed {
+                stream: 1,
                 index: 3,
             },
         ),
@@ -846,7 +876,7 @@ fn a_section_gives_back_what_it_lists_each_number_as() {
     append.insert(
         2,
         Entry::InUse {
-            pos: 9,
+            offset: 9,
             generation: 0,
         },
     );
@@ -878,7 +908,7 @@ fn a_position_before_the_header_is_refused() {
     section.insert(
         2,
         Entry::InUse {
-            pos: 50,
+            offset: 50,
             generation: 0,
         },
     );
@@ -903,7 +933,7 @@ fn a_position_before_the_header_is_refused() {
 #[test]
 fn a_section_past_the_numbers_a_file_may_use_is_refused() {
     let entry = Entry::InUse {
-        pos: 9,
+        offset: 9,
         generation: 0,
     };
     let mut out = b"%PDF-1.7\n".to_vec();
@@ -1394,7 +1424,13 @@ pub(crate) fn encrypted_by(
     let mut section = Section::full(0);
     for (num, obj) in objects {
         let pos = serialize::indirect_with(&mut out, (*num, 0), obj, &encrypting).unwrap();
-        section.insert(*num, Entry::InUse { pos, generation: 0 });
+        section.insert(
+            *num,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
+            },
+        );
     }
     let last = objects.iter().map(|(n, _)| *n).max().unwrap_or(0);
     let mut trailer = trailer.clone();
@@ -1405,7 +1441,13 @@ pub(crate) fn encrypted_by(
             let at = encryptor.at().unwrap_or((last + 1, 0));
             let pos = serialize::indirect(&mut out, at, &Object::from(dict)).unwrap();
             let generation = at.1;
-            section.insert(at.0, Entry::InUse { pos, generation });
+            section.insert(
+                at.0,
+                Entry::InUse {
+                    offset: pos,
+                    generation,
+                },
+            );
             trailer.set("Encrypt", Object::from(at));
         }
     }
@@ -1649,14 +1691,20 @@ fn ivs_are_keyed_by_what_the_object_is() {
         )];
         for (num, obj) in &objects {
             let pos = serialize::indirect_with(&mut file, (*num, 0), obj, &encrypting).unwrap();
-            section.insert(*num, Entry::InUse { pos, generation: 0 });
+            section.insert(
+                *num,
+                Entry::InUse {
+                    offset: pos,
+                    generation: 0,
+                },
+            );
         }
         let at = crypt.at().unwrap();
         let pos = serialize::indirect(&mut file, at, &Object::from(crypt.dictionary().clone()));
         section.insert(
             at.0,
             Entry::InUse {
-                pos: pos.unwrap(),
+                offset: pos.unwrap(),
                 generation: 0,
             },
         );
@@ -1845,22 +1893,28 @@ fn a_container_is_encrypted_whole_where_the_method_packs() {
         let container = container(&members);
         for (num, obj) in [(1, catalog()), (9, container)] {
             let pos = serialize::indirect_with(&mut out, (num, 0), &obj, &encrypting).unwrap();
-            section.insert(num, Entry::InUse { pos, generation: 0 });
-        }
-        for (index, (num, _)) in (0..).zip(&members) {
             section.insert(
-                *num,
-                Entry::Packed {
-                    container: 9,
-                    index,
+                num,
+                Entry::InUse {
+                    offset: pos,
+                    generation: 0,
                 },
             );
+        }
+        for (index, (num, _)) in (0..).zip(&members) {
+            section.insert(*num, Entry::Compressed { stream: 9, index });
         }
         let mut trailer = trailer.clone();
         let at = method.encryptor.at().unwrap_or((20, 0));
         let dict = Object::from(method.encryptor.dictionary().clone());
         let pos = serialize::indirect(&mut out, at, &dict).unwrap();
-        section.insert(at.0, Entry::InUse { pos, generation: 0 });
+        section.insert(
+            at.0,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
+            },
+        );
         trailer.set("Encrypt", Object::from(at));
         let id = Object::hex(method.encryptor.first_id().unwrap_or(ID));
         trailer.set("ID", vec![id.clone(), id]);
@@ -2855,7 +2909,13 @@ fn an_update_lists_only_what_it_writes() {
     for (id, obj) in objects {
         let pos = serialize::indirect(&mut file, id, &obj).unwrap();
         let generation = id.1;
-        full.insert(id.0, Entry::InUse { pos, generation });
+        full.insert(
+            id.0,
+            Entry::InUse {
+                offset: pos,
+                generation,
+            },
+        );
     }
     let pos = file.len();
     full.table(&mut file, dict! { "Root" => (1, 0) }, pos)
@@ -2910,7 +2970,7 @@ fn an_update_lists_only_what_it_writes() {
         }
         // Where each landed, from the header, and the file as it is now.
         let landed = |n| match update.section.get(n) {
-            Some(Entry::InUse { pos, .. }) => pos,
+            Some(Entry::InUse { offset: pos, .. }) => pos,
             entry => panic!("{n}: {entry:?}"),
         };
         assert!(out[landed(2)..].starts_with(b"2 0 obj"));
@@ -3281,26 +3341,38 @@ fn packed_in_the_clear(encryptor: &Encryptor) -> Vec<u8> {
         plain.iter().partition(|(_, o)| o.as_stream().is_some());
     for (num, obj) in streams {
         let pos = serialize::indirect_with(&mut out, (*num, 0), obj, &encrypting).unwrap();
-        section.insert(*num, Entry::InUse { pos, generation: 0 });
+        section.insert(
+            *num,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
+            },
+        );
     }
     let members: Vec<(u32, Object)> = members.into_iter().cloned().collect();
     let container = container(&members);
     let pos = serialize::indirect_with(&mut out, (20, 0), &container, &encrypting).unwrap();
-    section.insert(20, Entry::InUse { pos, generation: 0 });
+    section.insert(
+        20,
+        Entry::InUse {
+            offset: pos,
+            generation: 0,
+        },
+    );
     for (index, (num, _)) in (0..).zip(&members) {
-        section.insert(
-            *num,
-            Entry::Packed {
-                container: 20,
-                index,
-            },
-        );
+        section.insert(*num, Entry::Compressed { stream: 20, index });
     }
     let mut trailer = trailer.clone();
     let at = encryptor.at().unwrap();
     let pos =
         serialize::indirect(&mut out, at, &Object::from(encryptor.dictionary().clone())).unwrap();
-    section.insert(at.0, Entry::InUse { pos, generation: 0 });
+    section.insert(
+        at.0,
+        Entry::InUse {
+            offset: pos,
+            generation: 0,
+        },
+    );
     trailer.set("Encrypt", Object::from(at));
     let pos = out.len();
     let own = section.size();
@@ -4560,7 +4632,13 @@ fn an_earlier_revision_s_encryption_dictionary_is_written_whole_as_any_object() 
     // An update that names the same dictionary, again, as object 41.
     let mut section = Section::append(base.size, 0);
     let pos = serialize::indirect(&mut file, (41, 0), &Object::from(dict)).unwrap();
-    section.insert(41, Entry::InUse { pos, generation: 0 });
+    section.insert(
+        41,
+        Entry::InUse {
+            offset: pos,
+            generation: 0,
+        },
+    );
     let mut trailer = base.trailer.clone();
     trailer.set("Prev", base.prev as i64);
     trailer.set("Encrypt", Object::reference(41));
@@ -4769,7 +4847,7 @@ fn copied<S: ByteSource>(
 ) -> bool {
     let bytes = reading.written(record.at).unwrap();
     match written.section.get(id.0) {
-        Some(Entry::InUse { pos, .. }) => out[pos..].starts_with(&bytes),
+        Some(Entry::InUse { offset: pos, .. }) => out[pos..].starts_with(&bytes),
         _ => false,
     }
 }
@@ -5137,13 +5215,16 @@ pub(crate) fn members_spelled() -> Vec<u8> {
     let mut section = Section::full(0);
     for (n, obj) in &objects {
         let pos = serialize::indirect(&mut out, (*n, 0), obj).unwrap();
-        section.insert(*n, Entry::InUse { pos, generation: 0 });
+        section.insert(
+            *n,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
+            },
+        );
     }
     for (index, (n, _)) in (0..).zip(&MEMBERS_SPELLED) {
-        let entry = Entry::Packed {
-            container: 20,
-            index,
-        };
+        let entry = Entry::Compressed { stream: 20, index };
         section.insert(*n, entry);
     }
     let pos = out.len();

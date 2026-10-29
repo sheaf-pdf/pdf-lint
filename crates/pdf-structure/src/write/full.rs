@@ -241,7 +241,13 @@ fn file(
         }
         let pos = written(out, id, body, encrypting, from, copying)? - start;
         let generation = id.1;
-        section.insert(id.0, Entry::InUse { pos, generation });
+        section.insert(
+            id.0,
+            Entry::InUse {
+                offset: pos,
+                generation,
+            },
+        );
     }
     let given = first_id(trailer);
     let mut trailer = trailer.clone();
@@ -255,7 +261,13 @@ fn file(
                 let dict = Object::from(e.dictionary().clone());
                 let pos = serialize::indirect(out, at, &dict).map_err(Error::Serialize)? - start;
                 let generation = at.1;
-                section.insert(at.0, Entry::InUse { pos, generation });
+                section.insert(
+                    at.0,
+                    Entry::InUse {
+                        offset: pos,
+                        generation,
+                    },
+                );
                 trailer.set("Encrypt", Object::from(at));
                 next = next.max(at.0 + 1);
             }
@@ -426,12 +438,15 @@ impl Packing<'_> {
             };
             let pos = out.len() - self.start;
             out.extend_from_slice(&container);
-            section.insert(*n, Entry::InUse { pos, generation: 0 });
+            section.insert(
+                *n,
+                Entry::InUse {
+                    offset: pos,
+                    generation: 0,
+                },
+            );
             for (index, (id, _)) in (0..=u16::MAX).zip(group) {
-                let entry = Entry::Packed {
-                    container: *n,
-                    index,
-                };
+                let entry = Entry::Compressed { stream: *n, index };
                 section.insert(id.0, entry);
             }
             next = next.max(n + 1);
@@ -452,7 +467,13 @@ impl Packing<'_> {
         stopped(self.options.stop)?;
         let pos = written(out, id, body, self.encrypting, self.from, self.copying)? - self.start;
         let generation = id.1;
-        section.insert(id.0, Entry::InUse { pos, generation });
+        section.insert(
+            id.0,
+            Entry::InUse {
+                offset: pos,
+                generation,
+            },
+        );
         Ok(())
     }
 }
