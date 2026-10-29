@@ -25,18 +25,37 @@
 //!   direct after a header of where each starts, deflated, no bigger than
 //!   the reader decodes a stream to ([`MAX_DATA`]).
 //! - **Deflated** by the backend and at the level a [`Deflate`] says.
+//! - **Encrypted as it's written** (7.6): an encrypted file's every string
+//!   and stream's data, as pdf-objects' writer writes each, by an
+//!   [`Encryptor`], a reading's ([`Encryptor::of`]) or a new file's
+//!   ([`Encryptor::create`]), through what it gives for the file's objects
+//!   ([`Encrypting`]): with the object's key, AES's IV derived from `n g
+//!   obj` and the data, so the same object encrypts to the same bytes on
+//!   every save. What it leaves in the clear is the list the reader
+//!   decrypts by, one list both ways (see [`bytes`](crate::bytes), "What's
+//!   encrypted"). Under RC4 a changed object written again at its number
+//!   and generation is encrypted with the keystream its earlier version
+//!   was, which leaks what changed to one who holds both (pdf-crypt's
+//!   `Method::Rc4`); a file written whole under a new AES-256 encryption
+//!   ([`Encryptor::create`]) doesn't.
 //!
 //! What it can't write is refused ([`Error`]), and then nothing is
 //! written.
 
+mod crypt;
 mod objstm;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod xref;
 
 use pdf_filters::{Backend, Encoder, Level, Prediction, Unencodable};
-use pdf_objects::serialize;
+use pdf_objects::object::ObjectId;
+use pdf_objects::serialize::{self, Refused};
 
+// The tests' file writer writes its encrypted files' dictionaries so too.
+#[cfg(any(test, feature = "fixtures"))]
+pub(crate) use crypt::encryption;
+pub use crypt::{Encrypting, Encryptor, Unencryptable};
 pub use objstm::{MAX_DATA, MEMBERS, container, fits, packable};
 pub use xref::{Entry, Section};
 
@@ -119,4 +138,35 @@ pub enum Error {
     /// Data that pdf-filters doesn't encode as it was asked to: its error.
     #[error("data that doesn't encode: {0}")]
     Unencodable(Unencodable),
+    /// A string or a stream's data of object `id`, in a file written
+    /// encrypted, that isn't encrypted, and why: nothing is written in the
+    /// clear in its place.
+    #[error("object {} {} can't be encrypted: {why}", id.0, id.1)]
+    Encrypt {
+        /// The object.
+        id: ObjectId,
+        /// Why.
+        why: Unencryptable,
+    },
+    /// An encrypted file that no password opened, whether its strings and
+    /// streams are encrypted or not: there's no key to encrypt what's
+    /// written into it by ([`Encryptor::of`]).
+    #[error("it's encrypted, and no password opened it, so there's no key to encrypt by")]
+    Locked,
+    /// An encrypted file whose security handler the reader can't open, and
+    /// why ([`Encryptor::of`]).
+    #[error("it's encrypted by a security handler the reader can't open: {0}")]
+    Unsupported(String),
+}
+
+/// pdf-objects' writer's refusal, through an [`Encrypting`]: the value it
+/// can't write ([`Error::Serialize`]), or the string or stream's data it
+/// can't encrypt ([`Error::Encrypt`]).
+impl From<Refused<Unencryptable>> for Error {
+    fn from(refused: Refused<Unencryptable>) -> Error {
+        match refused {
+            Refused::Write(e) => Error::Serialize(e),
+            Refused::Encrypt { id, why } => Error::Encrypt { id, why },
+        }
+    }
 }

@@ -40,7 +40,11 @@
 //!   under limits that take in its count of values, and a stream as an
 //!   indirect object: a real in its shortest form, names and strings byte
 //!   by byte, a dictionary's every entry; and what it can't write as the
-//!   value refused, with nothing written.
+//!   value refused, with nothing written. An encrypted file's indirect
+//!   objects are written through an encryptor ([`serialize::Encrypt`]),
+//!   which every string and stream's data passes through as it's written,
+//!   given the object's number and generation, but what it leaves in the
+//!   clear; `()` encrypts nothing.
 //! - **References resolved** ([`Resolve`]): what gives the indirect object
 //!   a reference names, a reader's or a document in memory, or any closure
 //!   from an [`ObjectId`] to an object, so that what follows references

@@ -45,7 +45,10 @@
 //! Decrypting is a step before the filters (pdf-filters decodes those),
 //! and which strings and streams aren't encrypted at all, the encryption
 //! dictionary's own, a cross-reference stream, a signature's `/Contents`,
-//! is the caller's to know.
+//! is the caller's to know: pdf-structure's reader decrypts by one list of
+//! it, and its writer encrypts by the same. Under RC4 a changed object
+//! written again at its number and generation leaks what changed
+//! ([`Method::Rc4`]).
 
 mod aes;
 #[cfg(any(test, fuzzing))]

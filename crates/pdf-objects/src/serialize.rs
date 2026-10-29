@@ -28,8 +28,26 @@
 //! a parser reads them under [`Limits::DEFAULT`], a string whose bytes
 //! aren't known or that's still ciphertext, and a stream whose data isn't
 //! in memory, which [`indirect_stream`] writes from data given apart.
+//!
+//! **Encrypted as it's written.** An indirect object of an encrypted file
+//! is written through an encryptor ([`Encrypt`], by [`indirect_with`] and
+//! [`indirect_stream_with`]), which every string in it, a stream's
+//! dictionary's included, and a stream's data pass through, given the
+//! object's number and generation, as each is written (ISO 32000-2,
+//! 7.6.2): a stream's `/Length` is then its encrypted data's. It says what
+//! it leaves in the clear: a whole object, or a dictionary's entry. `()`
+//! encrypts nothing, for a file that isn't encrypted, and [`indirect`] and
+//! [`indirect_stream`] write as through it, by a walk of their own with
+//! nothing to encrypt, so they pay for no encryptor. A direct object
+//! ([`write()`]) is never encrypted, as an object stream's members are
+//! encrypted with their container, whole, and a trailer isn't (7.5.7,
+//! 7.6.2). The encryptor refusing, nothing is written either
+//! ([`Refused`]).
 
+use std::borrow::Cow;
+use std::convert::Infallible;
 use std::io::Write as _;
+use std::marker::PhantomData;
 
 use crate::object::{Dict, Entry, Form, Object, ObjectId, Str, Value};
 use crate::parse::Limits;
@@ -125,65 +143,332 @@ fn in_object(id: &Option<ObjectId>) -> String {
         .unwrap_or_default()
 }
 
-/// `obj` as a direct object. What can't be written as the value is
-/// refused ([`Error`]), and then nothing is written. A stream is written
-/// as one, though a parser reads it back only as an indirect object
-/// ([`indirect`]).
-pub fn write(out: &mut Vec<u8>, obj: &Object) -> Result<(), Error> {
-    let start = out.len();
-    value(out, obj, 0).inspect_err(|_| out.truncate(start))
+/// What encrypts an encrypted file's strings and streams' data as the
+/// writer writes them (ISO 32000-2, 7.6.2), each given the number and
+/// generation of the object it's in, and says what it leaves in the clear.
+/// [`indirect_with`] and [`indirect_stream_with`] write through one; `()`
+/// encrypts nothing, for a file that isn't encrypted, and [`indirect`] and
+/// [`indirect_stream`] write as through it. pdf-structure's
+/// writer implements it over pdf-crypt, by the list of what an encrypted
+/// file leaves in the clear that its reader decrypts by.
+///
+/// An object's strings and its data are encrypted, but where it says
+/// otherwise, so that a caller that leaves something out leaves it in the
+/// clear only by its say: the writer asks it of each indirect object
+/// ([`Encrypt::clear`]), then of each dictionary in it
+/// ([`Encrypt::clear_key`]), and passes every other string through
+/// [`Encrypt::string`] and a stream's data through [`Encrypt::stream`],
+/// once each, as it writes them, a stream's data before its dictionary, so
+/// that its `/Length` is what it gave.
+pub trait Encrypt {
+    /// Why it doesn't encrypt a string or a stream's data, which the writer
+    /// gives back ([`Refused::Encrypt`]).
+    type Error;
+
+    /// Whether object `id` is written as it is, every string in it and its
+    /// data, given its dictionary, or its stream's, when it has one, and
+    /// whether it's a stream: asked once an indirect object, before any of
+    /// it is written. An encryption dictionary, say, or a cross-reference
+    /// stream (7.5.8.2).
+    fn clear(&self, id: ObjectId, dict: Option<&Dict>, stream: bool) -> bool;
+
+    /// The key of `dict`'s entry, in object `id`, that's written as it is,
+    /// every string in its value, if any: asked once a dictionary, in an
+    /// object [`Encrypt::clear`] doesn't leave in the clear, before its
+    /// entries are written. A signature's `/Contents`, say (7.6.2).
+    fn clear_key(&self, id: ObjectId, dict: &Dict) -> Option<&'static [u8]>;
+
+    /// String `text` of object `id`, as it's written.
+    fn string<'t>(&self, id: ObjectId, text: &'t [u8]) -> Result<Cow<'t, [u8]>, Self::Error>;
+
+    /// The data of stream `id`, whose dictionary is `dict`, as it's
+    /// written: `data` is plaintext, encoded by the filters `dict` names,
+    /// and its `/Length` is what this gives.
+    fn stream<'d>(
+        &self,
+        id: ObjectId,
+        dict: &Dict,
+        data: &'d [u8],
+    ) -> Result<Cow<'d, [u8]>, Self::Error>;
 }
 
-/// `obj` as indirect object `id`, `n g obj` to `endobj`, and where in
-/// `out` it starts. Refused as [`write()`] refuses, the error naming `id`.
-pub fn indirect(out: &mut Vec<u8>, id: ObjectId, obj: &Object) -> Result<usize, Error> {
+/// Nothing encrypted: an object of a file that isn't encrypted, written
+/// as it is.
+impl Encrypt for () {
+    type Error = Infallible;
+
+    #[inline]
+    fn clear(&self, _: ObjectId, _: Option<&Dict>, _: bool) -> bool {
+        true
+    }
+
+    #[inline]
+    fn clear_key(&self, _: ObjectId, _: &Dict) -> Option<&'static [u8]> {
+        None
+    }
+
+    #[inline]
+    fn string<'t>(&self, _: ObjectId, text: &'t [u8]) -> Result<Cow<'t, [u8]>, Infallible> {
+        Ok(Cow::Borrowed(text))
+    }
+
+    #[inline]
+    fn stream<'d>(
+        &self,
+        _: ObjectId,
+        _: &Dict,
+        data: &'d [u8],
+    ) -> Result<Cow<'d, [u8]>, Infallible> {
+        Ok(Cow::Borrowed(data))
+    }
+}
+
+/// Why the writer wrote nothing, written through an encryptor: the
+/// writer's own refusal, or the encryptor's. Each grows in its own error,
+/// so this one doesn't.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Refused<E> {
+    /// What the writer can't write as the value ([`Error`]).
+    #[error("{0}")]
+    Write(Error),
+    /// A string or a stream's data of object `id` the encryptor doesn't
+    /// encrypt, and why.
+    #[error("object {} {} can't be encrypted: {why}", id.0, id.1)]
+    Encrypt {
+        /// The object.
+        id: ObjectId,
+        /// The encryptor's error.
+        why: E,
+    },
+}
+
+impl<E> From<Error> for Refused<E> {
+    fn from(error: Error) -> Refused<E> {
+        Refused::Write(error)
+    }
+}
+
+impl<E> Refused<E> {
+    /// The refusal, said of object `id`.
+    fn within(self, id: ObjectId) -> Refused<E> {
+        match self {
+            Refused::Write(e) => Refused::Write(e.within(id)),
+            e => e,
+        }
+    }
+}
+
+/// What a value's strings and streams' data go through as the writer
+/// writes them, and why a write through it fails: nothing, for a value
+/// written as it is ([`Plain`]); or an encryptor, for an indirect object's
+/// ([`Crypt`]). Each is its own copy of the walk, so a value written as it
+/// is carries no encryptor through it, and pays for none.
+trait Through: Copy {
+    /// Why a write through it fails.
+    type Error: From<Error>;
+    /// What the value of the entry it leaves in the clear goes through.
+    type Clear: Through<Error = Self::Error>;
+    /// The same, but nothing encrypted.
+    fn clear(self) -> Self::Clear;
+    /// The key of `dict`'s entry written as it is, if any.
+    fn clear_key(self, dict: &Dict) -> Option<&'static [u8]>;
+    /// `text`, a string, as it's written.
+    fn string<'t>(self, text: &'t [u8]) -> Result<Cow<'t, [u8]>, Self::Error>;
+    /// `data`, a stream's of dictionary `dict`, as it's written.
+    fn stream<'d>(self, dict: &Dict, data: &'d [u8]) -> Result<Cow<'d, [u8]>, Self::Error>;
+}
+
+/// Nothing: what's written as it is, refused, when it is, as `E`.
+struct Plain<E>(PhantomData<fn() -> E>);
+
+impl<E> Plain<E> {
+    const NEW: Plain<E> = Plain(PhantomData);
+}
+
+impl<E> Clone for Plain<E> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<E> Copy for Plain<E> {}
+
+impl<E: From<Error>> Through for Plain<E> {
+    type Error = E;
+    type Clear = Plain<E>;
+
+    #[inline]
+    fn clear(self) -> Plain<E> {
+        self
+    }
+
+    #[inline]
+    fn clear_key(self, _: &Dict) -> Option<&'static [u8]> {
+        None
+    }
+
+    #[inline]
+    fn string<'t>(self, text: &'t [u8]) -> Result<Cow<'t, [u8]>, E> {
+        Ok(Cow::Borrowed(text))
+    }
+
+    #[inline]
+    fn stream<'d>(self, _: &Dict, data: &'d [u8]) -> Result<Cow<'d, [u8]>, E> {
+        Ok(Cow::Borrowed(data))
+    }
+}
+
+/// An encryptor, and the id of the object whose strings and data go
+/// through it.
+struct Crypt<'e, E: ?Sized> {
+    encrypt: &'e E,
+    id: ObjectId,
+}
+
+impl<E: ?Sized> Clone for Crypt<'_, E> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<E: ?Sized> Copy for Crypt<'_, E> {}
+
+impl<E: Encrypt + ?Sized> Through for Crypt<'_, E> {
+    type Error = Refused<E::Error>;
+    type Clear = Plain<Refused<E::Error>>;
+
+    fn clear(self) -> Self::Clear {
+        Plain::NEW
+    }
+
+    fn clear_key(self, dict: &Dict) -> Option<&'static [u8]> {
+        self.encrypt.clear_key(self.id, dict)
+    }
+
+    fn string<'t>(self, text: &'t [u8]) -> Result<Cow<'t, [u8]>, Self::Error> {
+        let Crypt { encrypt, id } = self;
+        encrypt
+            .string(id, text)
+            .map_err(|why| Refused::Encrypt { id, why })
+    }
+
+    fn stream<'d>(self, dict: &Dict, data: &'d [u8]) -> Result<Cow<'d, [u8]>, Self::Error> {
+        let Crypt { encrypt, id } = self;
+        encrypt
+            .stream(id, dict, data)
+            .map_err(|why| Refused::Encrypt { id, why })
+    }
+}
+
+/// `n g obj`, what `body` writes, and `endobj`, at the end of `out`, and
+/// where it starts; nothing, where `body` fails.
+fn object<R>(
+    out: &mut Vec<u8>,
+    id: ObjectId,
+    body: impl FnOnce(&mut Vec<u8>) -> Result<(), R>,
+) -> Result<usize, R> {
     let start = out.len();
     reference(out, id);
     out.extend_from_slice(b" obj\n");
-    match value(out, obj, 0) {
+    match body(out) {
         Ok(()) => {
             out.extend_from_slice(b"\nendobj\n");
             Ok(start)
         }
         Err(e) => {
             out.truncate(start);
-            Err(e.within(id))
+            Err(e)
         }
     }
+}
+
+/// `obj` as a direct object. What can't be written as the value is
+/// refused ([`Error`]), and then nothing is written. A stream is written
+/// as one, though a parser reads it back only as an indirect object
+/// ([`indirect`]). Nothing in it is encrypted, as a direct object isn't
+/// alone: an object stream's members are encrypted with their container,
+/// and a trailer isn't.
+pub fn write(out: &mut Vec<u8>, obj: &Object) -> Result<(), Error> {
+    let start = out.len();
+    value(out, obj, 0, Plain::<Error>::NEW).inspect_err(|_| out.truncate(start))
+}
+
+/// `obj` as indirect object `id`, `n g obj` to `endobj`, and where in
+/// `out` it starts. Refused as [`write()`] refuses, the error naming `id`.
+/// Nothing in it is encrypted, as through `()`: [`indirect_with`] writes
+/// an encrypted file's.
+pub fn indirect(out: &mut Vec<u8>, id: ObjectId, obj: &Object) -> Result<usize, Error> {
+    object(out, id, |out| value(out, obj, 0, Plain::<Error>::NEW)).map_err(|e| e.within(id))
+}
+
+/// `obj` as indirect object `id`, `n g obj` to `endobj`, and where in
+/// `out` it starts, its strings and its data through `encrypt` as it says
+/// ([`Encrypt`]). Refused as [`write()`] refuses, the error naming `id`
+/// ([`Refused::Write`]), or as `encrypt` refuses ([`Refused::Encrypt`]),
+/// and then nothing is written.
+pub fn indirect_with<E: Encrypt + ?Sized>(
+    out: &mut Vec<u8>,
+    id: ObjectId,
+    obj: &Object,
+    encrypt: &E,
+) -> Result<usize, Refused<E::Error>> {
+    let (dict, stream) = match obj.value() {
+        Value::Dict(d) => (Some(d), false),
+        Value::Stream(s) => (Some(&s.dict), true),
+        _ => (None, false),
+    };
+    let written = match encrypt.clear(id, dict, stream) {
+        true => object(out, id, |out| value(out, obj, 0, Plain::NEW)),
+        false => object(out, id, |out| value(out, obj, 0, Crypt { encrypt, id })),
+    };
+    written.map_err(|e| e.within(id))
 }
 
 /// A stream of `dict` and `data`, as indirect object `id`, `n g obj` to
 /// `endobj`, and where in `out` it starts: for data that isn't in memory
 /// as [`Data::Bytes`](crate::Data::Bytes), given apart, without copying
 /// it there. Its `/Length` is `data`'s length. Refused as [`write()`]
-/// refuses, the error naming `id`.
+/// refuses, the error naming `id`. Nothing in it is encrypted, as through
+/// `()`: [`indirect_stream_with`] writes an encrypted file's.
 ///
-/// `data` is written as it is, so it's the stream's data only when it's
-/// encoded by the filters `dict` names and, in an encrypted file,
-/// encrypted as object `id`'s. A reader's [`Data::At`](crate::Data::At)
-/// names data as it was read: encoded by the filters the stream had then,
-/// and in an encrypted file ciphertext, right to write only under the key,
-/// and the number and generation, it was encrypted with, as a string's is
-/// ([`Error::Encrypted`]).
+/// `data` is written as it is, so it's the stream's data when it's
+/// encoded by the filters `dict` names. It's plaintext: in an encrypted
+/// file, [`indirect_stream_with`] encrypts it as object `id`'s. A reader's
+/// [`Data::At`](crate::Data::At) names data as it was read: encoded by the
+/// filters the stream had then, and in an encrypted file ciphertext, which
+/// is right to copy only whole, as the object it's in was read, under the
+/// key, and the number and generation, it was encrypted with, as a
+/// string's is ([`Error::Encrypted`]).
 pub fn indirect_stream(
     out: &mut Vec<u8>,
     id: ObjectId,
     dict: &Dict,
     data: &[u8],
 ) -> Result<usize, Error> {
-    let start = out.len();
-    reference(out, id);
-    out.extend_from_slice(b" obj\n");
-    match stream(out, dict, data, 0) {
-        Ok(()) => {
-            out.extend_from_slice(b"\nendobj\n");
-            Ok(start)
-        }
-        Err(e) => {
-            out.truncate(start);
-            Err(e.within(id))
-        }
-    }
+    let plain = Plain::<Error>::NEW;
+    object(out, id, |out| stream(out, dict, data, 0, plain)).map_err(|e| e.within(id))
+}
+
+/// A stream of `dict` and `data`, as indirect object `id`, as
+/// [`indirect_stream`] writes it, its dictionary's strings and `data`
+/// through `encrypt` as it says ([`Encrypt`]), so its `/Length` is what
+/// `encrypt` gives of `data`. `data` is plaintext, encoded by the filters
+/// `dict` names. Refused as [`indirect_with`] refuses, and then nothing is
+/// written.
+pub fn indirect_stream_with<E: Encrypt + ?Sized>(
+    out: &mut Vec<u8>,
+    id: ObjectId,
+    dict: &Dict,
+    data: &[u8],
+    encrypt: &E,
+) -> Result<usize, Refused<E::Error>> {
+    let written = match encrypt.clear(id, Some(dict), true) {
+        true => object(out, id, |out| stream(out, dict, data, 0, Plain::NEW)),
+        false => object(out, id, |out| {
+            stream(out, dict, data, 0, Crypt { encrypt, id })
+        }),
+    };
+    written.map_err(|e| e.within(id))
 }
 
 /// `x` in its shortest form that reads back as the same f64, never with
@@ -309,11 +594,17 @@ pub fn string(out: &mut Vec<u8>, text: &[u8], form: Form) {
     }
 }
 
-/// `obj`, nested `depth` deep in what's written.
-fn value(out: &mut Vec<u8>, obj: &Object, depth: usize) -> Result<(), Error> {
+/// `obj`, nested `depth` deep in what's written, its strings and its
+/// streams' data through `through`.
+fn value<T: Through>(
+    out: &mut Vec<u8>,
+    obj: &Object,
+    depth: usize,
+    through: T,
+) -> Result<(), T::Error> {
     let limit = Limits::DEFAULT.nesting;
     if depth > limit {
-        return Err(Error::Nested { id: None, limit });
+        return Err(Error::Nested { id: None, limit }.into());
     }
     match obj.value() {
         Value::Null => out.extend_from_slice(b"null"),
@@ -322,26 +613,27 @@ fn value(out: &mut Vec<u8>, obj: &Object, depth: usize) -> Result<(), Error> {
         Value::Real(x) => real(out, *x)?,
         Value::Name(n) => name(out, n),
         Value::String(Str::Bytes(text), form) => {
-            string(out, text, form.unwrap_or(Form::Literal));
+            let text = through.string(text)?;
+            string(out, &text, form.unwrap_or(Form::Literal));
         }
-        Value::String(Str::Text(_), _) => return Err(Error::Text { id: None }),
-        Value::String(Str::Encrypted(_), _) => return Err(Error::Encrypted { id: None }),
+        Value::String(Str::Text(_), _) => return Err(Error::Text { id: None }.into()),
+        Value::String(Str::Encrypted(_), _) => return Err(Error::Encrypted { id: None }.into()),
         Value::Array(items) => {
             out.push(b'[');
             for (i, item) in items.iter().enumerate() {
                 if i > 0 && spaced(item) {
                     out.push(b' ');
                 }
-                value(out, item, depth + 1)?;
+                value(out, item, depth + 1, through)?;
             }
             out.push(b']');
         }
-        Value::Dict(d) => dictionary(out, d, None, depth)?,
+        Value::Dict(d) => dictionary(out, d, None, depth, through)?,
         Value::Stream(s) => {
             let Some(data) = s.data.bytes() else {
-                return Err(Error::Data { id: None });
+                return Err(Error::Data { id: None }.into());
             };
-            stream(out, &s.dict, data, depth)?;
+            stream(out, &s.dict, data, depth, through)?;
         }
         Value::Ref(id) => {
             reference(out, *id);
@@ -351,23 +643,35 @@ fn value(out: &mut Vec<u8>, obj: &Object, depth: usize) -> Result<(), Error> {
     Ok(())
 }
 
-/// A stream of `dict` and `data`, nested `depth` deep.
-fn stream(out: &mut Vec<u8>, dict: &Dict, data: &[u8], depth: usize) -> Result<(), Error> {
-    dictionary(out, dict, Some(data.len()), depth)?;
+/// A stream of `dict` and `data`, nested `depth` deep, its data, then its
+/// dictionary's strings, through `through`.
+fn stream<T: Through>(
+    out: &mut Vec<u8>,
+    dict: &Dict,
+    data: &[u8],
+    depth: usize,
+    through: T,
+) -> Result<(), T::Error> {
+    let data = through.stream(dict, data)?;
+    dictionary(out, dict, Some(data.len()), depth, through)?;
     out.extend_from_slice(b"\nstream\n");
-    out.extend_from_slice(data);
+    out.extend_from_slice(&data);
     out.extend_from_slice(b"\nendstream");
     Ok(())
 }
 
 /// `d`, nested `depth` deep, every entry in order, a key written twice
-/// included; its `/Length` the stream's `length` when it's a stream's.
-fn dictionary(
+/// included; its `/Length` the stream's `length` when it's a stream's. Its
+/// strings through `through`, but those of the entry it leaves in the
+/// clear.
+fn dictionary<T: Through>(
     out: &mut Vec<u8>,
     d: &Dict,
     length: Option<usize>,
     depth: usize,
-) -> Result<(), Error> {
+    through: T,
+) -> Result<(), T::Error> {
+    let clear = through.clear_key(d);
     out.extend_from_slice(b"<<");
     for Entry {
         key: k, value: v, ..
@@ -383,7 +687,10 @@ fn dictionary(
                 if spaced(v) {
                     out.push(b' ');
                 }
-                value(out, v, depth + 1)?;
+                match clear == Some(&k[..]) {
+                    true => value(out, v, depth + 1, through.clear())?,
+                    false => value(out, v, depth + 1, through)?,
+                }
             }
         }
     }
@@ -1108,6 +1415,166 @@ mod tests {
             }
             assert_eq!(out, b"%PDF-1.7\n", "nothing written");
         }
+    }
+
+    /// Through an encryptor, every string of an object, a stream's
+    /// dictionary's included, and a stream's data are given to it once, in
+    /// the order written, as the object's, and what it gives is written in
+    /// their place: undone, the toy's bytes are what's written through `()`,
+    /// which are the plain writer's; random values, as indirect objects.
+    #[test]
+    fn an_encryptor_is_given_every_string_and_streams_data_once_as_its_objects() {
+        let mut random = Random(0x6a09_e667_f3bc_c908);
+        let mut given = 0;
+        for _ in 0..5_000 {
+            let object = random.object();
+            let id = random.id();
+            let mut plain = Vec::new();
+            indirect(&mut plain, id, &object).unwrap();
+            let mut unit = Vec::new();
+            assert_eq!(indirect_with(&mut unit, id, &object, &()), Ok(0));
+            assert_eq!(unit, plain, "through (), the plain bytes");
+            fuzz::toyed(&object, id, &[], Limits::DEFAULT, &plain);
+            let toy = fuzz::Toy::default();
+            indirect_with(&mut Vec::new(), id, &object, &toy).unwrap();
+            given += toy.seen.borrow().len();
+            if let Some(s) = object.as_stream() {
+                let data = s.data.bytes().unwrap();
+                let mut apart = Vec::new();
+                indirect_stream(&mut apart, id, &s.dict, data).unwrap();
+                assert_eq!(apart, plain);
+                let mut unit = Vec::new();
+                indirect_stream_with(&mut unit, id, &s.dict, data, &()).unwrap();
+                assert_eq!(unit, plain);
+                let (mut held, mut given) = (Vec::new(), Vec::new());
+                let toy = fuzz::Toy::default();
+                indirect_with(&mut held, id, &object, &toy).unwrap();
+                let toy_apart = fuzz::Toy::default();
+                indirect_stream_with(&mut given, id, &s.dict, data, &toy_apart).unwrap();
+                assert_eq!(given, held, "given apart, the same bytes");
+                assert_eq!(toy_apart.seen, toy.seen);
+            }
+        }
+        assert!(given > 2_000, "{given} given");
+    }
+
+    /// A string is written in its form, as what the encryptor gives; a
+    /// stream's `/Length` is its encrypted data's, in each `/Length` entry;
+    /// and a stream's data is given before its dictionary's strings.
+    #[test]
+    fn what_an_encryptor_gives_is_written_and_a_streams_length_is_its() {
+        let toy = fuzz::Toy::default();
+        let id = (7, 1);
+        let hex = Object::hex(b"ab");
+        let dict = dict! { "Length" => 1, "S" => Object::string("x(y"), "H" => hex, "Length" => 2 };
+        let mut out = Vec::new();
+        indirect_stream_with(&mut out, id, &dict, b"data", &toy).unwrap();
+        let seen = toy.seen.borrow();
+        let order = [
+            (id, b"data".to_vec(), true),
+            (id, b"x(y".to_vec(), false),
+            (id, b"ab".to_vec(), false),
+        ];
+        assert_eq!(*seen, order);
+        let tag = "\0\0\0\x07\0\x01";
+        let want = format!(
+            "7 1 obj\n<</Length 10/S({tag}y\\(x)/H<0000000700016261>/Length 10>>\n\
+             stream\n{tag}atad\nendstream\nendobj\n"
+        );
+        assert_eq!(String::from_utf8_lossy(&out), want);
+    }
+
+    /// What the encryptor leaves in the clear is written as it is: a whole
+    /// object it says so of, and a dictionary's entry, every string in it,
+    /// a key written twice too, while the rest of the dictionary is
+    /// encrypted. It's asked once an object and once a dictionary.
+    #[test]
+    fn what_an_encryptor_leaves_in_the_clear_is_written_as_it_is() {
+        let signature = dict! {
+            "Contents" => Object::hex(b"\x30\x82"),
+            "ByteRange" => vec![Object::from(0), Object::from(4)],
+            "M" => Object::string("D:2026"),
+            "Contents" => vec![Object::string("in the clear")],
+        };
+        let plain_of = |id, obj: &Object| {
+            let mut out = Vec::new();
+            indirect(&mut out, id, obj).unwrap();
+            out
+        };
+        // The toy leaves an object whose number is a multiple of 5 as it is,
+        // and a cross-reference stream.
+        let xref = dict! { "Type" => "XRef", "ID" => vec![Object::string("an /ID")] };
+        let xref_stream = Object::from(Stream::new(xref.clone(), vec![1, 0, 0]));
+        for (id, obj) in [
+            ((10, 0), Object::from(signature.clone())),
+            ((3, 0), xref_stream),
+        ] {
+            let toy = fuzz::Toy::default();
+            let mut out = Vec::new();
+            indirect_with(&mut out, id, &obj, &toy).unwrap();
+            assert_eq!(out, plain_of(id, &obj), "{id:?}");
+            assert!(toy.seen.borrow().is_empty(), "{id:?}");
+        }
+        // A signature's /Contents, both, as written; its /M encrypted.
+        let toy = fuzz::Toy::default();
+        let id = (3, 0);
+        let mut out = Vec::new();
+        indirect_with(&mut out, id, &Object::from(signature), &toy).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("/Contents<3082>"), "{text}");
+        assert!(text.contains("/Contents[(in the clear)]"), "{text}");
+        assert!(!text.contains("D:2026"), "{text}");
+        let seen = toy.seen.borrow();
+        assert_eq!(*seen, [(id, b"D:2026".to_vec(), false)]);
+        // A dictionary typed /XRef that isn't a stream is encrypted.
+        let toy = fuzz::Toy::default();
+        indirect_with(&mut Vec::new(), id, &Object::from(xref), &toy).unwrap();
+        assert_eq!(*toy.seen.borrow(), [(id, b"an /ID".to_vec(), false)]);
+    }
+
+    /// The encryptor refusing a string or a stream's data, nothing is
+    /// written, and the refusal names the object; the writer's own refusal
+    /// through an encryptor names it too.
+    #[test]
+    fn an_encryptors_refusal_writes_nothing() {
+        let toy = fuzz::Toy {
+            refuse: Some(b"secret".to_vec()),
+            ..fuzz::Toy::default()
+        };
+        let id = (7, 2);
+        let deep = Object::from(vec![
+            Object::from(1),
+            Object::from(dict! { "A" => Object::string("secret") }),
+        ]);
+        let refused = Refused::Encrypt {
+            id,
+            why: "the toy refuses it",
+        };
+        let mut out = b"%PDF-1.7\n".to_vec();
+        assert_eq!(
+            indirect_with(&mut out, id, &deep, &toy),
+            Err(refused.clone())
+        );
+        let stream = dict! { "S" => Object::string("not refused") };
+        assert_eq!(
+            indirect_stream_with(&mut out, id, &stream, b"secret", &toy),
+            Err(refused.clone())
+        );
+        let nan = dict! { "S" => Object::string("x"), "N" => f64::NAN };
+        assert_eq!(
+            indirect_with(&mut out, id, &Object::from(nan), &toy),
+            Err(Refused::Write(Error::NonFinite { id: Some(id) }))
+        );
+        assert_eq!(out, b"%PDF-1.7\n", "nothing written");
+        assert_eq!(
+            refused.to_string(),
+            "object 7 2 can't be encrypted: the toy refuses it"
+        );
+        let write: Refused<&str> = Refused::Write(Error::NonFinite { id: Some(id) });
+        assert_eq!(
+            write.to_string(),
+            "a real that isn't a finite number in object 7 2"
+        );
     }
 
     /// The writer writes values nested as deep as a parser reads them under

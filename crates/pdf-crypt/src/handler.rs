@@ -36,6 +36,20 @@ pub enum Method {
     /// which leaves it as it is.
     None,
     /// RC4 (`/CFM /V2`, and everything in a file of `/V` 1 or 2).
+    ///
+    /// It takes no IV: every string and stream of an object is encrypted
+    /// with one keystream, made from the file's key and the object's number
+    /// and generation (Algorithm 1), from its start each time. So an object
+    /// written again at its number and generation with a string or a
+    /// stream changed, as an incremental update writes a changed object, is
+    /// encrypted with the keystream its earlier version was, and the XOR of
+    /// the two ciphertexts is the XOR of the two plaintexts: what changed
+    /// leaks to one who holds both. An update's file holds both; after a
+    /// file is saved whole again under the same key and `/ID`, the earlier
+    /// file does, wherever it's kept. A writer that doesn't want that writes
+    /// the file whole under a new AES-256 encryption ([`Handler::create`]),
+    /// which leaks neither way: its key is new, and its IVs differ for
+    /// different data.
     Rc4,
     /// AES-128, the key each object's (`/CFM /AESV2`).
     Aes128,

@@ -41,8 +41,12 @@
 //! decoded through its filters ([`Reading::decoded`]).
 //!
 //! **What's encrypted.** In an encrypted file it opens, what the reader
-//! decrypts and what it leaves as written, each with the clause of
-//! ISO 32000-2 that says so and the tests that hold it:
+//! decrypts and what it leaves as written; and, one list both ways, what
+//! the writer encrypts as it writes an encrypted file and what it writes
+//! as it is ([`write::Encrypting`](crate::write::Encrypting)), so that
+//! what it writes reads back by it. Each with the clause of ISO 32000-2
+//! that says so and the tests that hold it, the reader's, then the
+//! writer's (`write::tests`):
 //!
 //! - **Every string of an object read at its offset** is decrypted with
 //!   the object's key, made from its number and generation, and stays
@@ -52,7 +56,13 @@
 //!   `each_kind_of_encryption_decrypts_its_strings_where_they_are`,
 //!   `a_streams_dictionary_strings_decrypt_but_its_data_is_left_as_written`
 //!   and `strings_that_dont_decrypt_cleanly_are_said_once_an_object_and_a_fault`.
-//!   But for these, which are left as written:
+//!   The writer encrypts every string of an object it writes so, in its
+//!   form, AES's IV derived from `n g obj` and the string. Held by
+//!   `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`,
+//!   `objects_encrypt_as_the_lazy_reader_decrypts`,
+//!   `objects_encrypt_alike_every_time` and
+//!   `ivs_are_keyed_by_what_the_object_is`.
+//!   But for these, which are left as written, both ways:
 //!   - **The encryption dictionary's:** the trailer's `/Encrypt`, every
 //!     earlier cross-reference section's along `/Prev` (an earlier
 //!     update's dictionary), and the objects its entries refer to, where
@@ -62,19 +72,35 @@
 //!     `an_earlier_updates_encryption_dictionary_isnt_decrypted_either`,
 //!     `what_an_encryption_dictionarys_values_refer_to_is_read_as_written`
 //!     and `what_an_eff_refers_to_is_the_encryption_dictionarys_own_from_v_4_alone`.
+//!     The writer writes those of the reading it encrypts as, by number,
+//!     whole, as they are; a dictionary shaped as one at another number is
+//!     encrypted. Held by
+//!     `xref_streams_metadata_and_the_encrypt_dict_stay_plain` and
+//!     `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`.
 //!   - **A signature's `/Contents`,** in a dictionary with `/ByteRange` and
 //!     a string `/Contents` whose `/Type` is `/Sig`, `/DocTimeStamp` or
-//!     none (7.6.2). Held by
+//!     none (7.6.2): a `/Type /Sig` dictionary without `/ByteRange` isn't
+//!     one. Held by
 //!     `a_signatures_contents_isnt_decrypted_whatever_its_type` and
-//!     `each_kind_of_encryption_decrypts_its_strings_where_they_are`.
+//!     `each_kind_of_encryption_decrypts_its_strings_where_they_are`; and
+//!     `xref_streams_metadata_and_the_encrypt_dict_stay_plain` and
+//!     `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`.
 //!   - **A cross-reference stream's,** read as the trailer or as an object
-//!     (7.5.8.2). Held by
-//!     `a_cross_reference_streams_strings_are_read_as_written_in_a_file_that_opens`.
+//!     (7.5.8.2); not a dictionary typed `/XRef` that isn't a stream.
+//!     Held by
+//!     `a_cross_reference_streams_strings_are_read_as_written_in_a_file_that_opens`;
+//!     and `xref_streams_metadata_and_the_encrypt_dict_stay_plain` and
+//!     `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`.
 //! - **An object in an object stream** isn't decrypted itself: it's read
 //!   from the stream's decrypted data, its strings as they are there
 //!   (7.5.7, 7.6.2). Held by
 //!   `an_object_streams_own_crypt_filter_says_how_its_data_decrypts` and
 //!   `an_encrypted_files_object_streams_decrypt_by_the_reader_as_through_qpdf`.
+//!   The writer writes a member's strings as they are, and encrypts the
+//!   container whole, as a stream; and makes none where streams are left
+//!   in the clear and strings aren't, whose strings would then be in the
+//!   clear ([`Encryptor::packs`](crate::write::Encryptor::packs)). Held by
+//!   `a_container_is_encrypted_whole_where_the_method_packs`.
 //! - **An object stream's data** is decrypted before it's decoded: by the
 //!   stream's own `/Crypt` filter when it has one, the one its `/Name`
 //!   names (`/Identity` when it names none), else as the encryption
@@ -82,6 +108,9 @@
 //!   `an_object_streams_own_crypt_filter_says_how_its_data_decrypts`,
 //!   `an_encrypted_object_stream_is_decrypted_and_decoded_without_the_decoder`
 //!   and `a_file_whose_strings_and_streams_arent_encrypted_reads_whole_without_its_password`.
+//!   The writer encrypts a container it writes as `/StmF` says, as it has
+//!   no crypt filter of its own. Held by
+//!   `a_container_is_encrypted_whole_where_the_method_packs`.
 //! - **A cross-reference stream's data** is read as written, never
 //!   decrypted (7.5.8.2), and **no other stream's data is read** as the
 //!   file is read: it stays where it was written
@@ -91,6 +120,8 @@
 //!   A reading hands out no bytes of an encrypted file as written
 //!   ([`Reading::bytes`]), so they can't pass for plaintext. Held by
 //!   `an_encrypted_readings_bytes_are_refused_but_its_object_streams`.
+//!   The writer writes a cross-reference stream whole as it is. Held by
+//!   `xref_streams_metadata_and_the_encrypt_dict_stay_plain`.
 //! - **A stream's data handed out** ([`Reading::data`], and decoded,
 //!   [`Reading::decoded`]) is decrypted as an object stream's is: by the
 //!   stream's own `/Crypt` filter when it has one, else as `/StmF` says
@@ -99,13 +130,23 @@
 //!   `each_kind_of_encryption_hands_out_each_streams_data_decrypted`,
 //!   `a_streams_own_crypt_filter_says_how_its_data_is_handed_out` and
 //!   `a_streams_data_that_doesnt_decrypt_cleanly_is_an_error_holding_what_did`.
+//!   The writer encrypts a stream's data so, before its dictionary, so
+//!   that its `/Length` is the encrypted data's; refused, nothing written,
+//!   where its own crypt filter names one the dictionary hasn't
+//!   ([`write::Unencryptable`](crate::write::Unencryptable)). Held by
+//!   `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`
+//!   and `what_cant_be_encrypted_is_refused_and_nothing_written`.
 //!   But for these:
 //!   - **A cross-reference stream's** is handed out as written (7.5.8.2).
 //!     Held by `a_cross_reference_streams_data_is_handed_out_as_written`.
 //!   - **The catalog's metadata stream's,** under `/EncryptMetadata
 //!     false`, is handed out as written, whether the file opens or not, as
-//!     the [`Document`]'s metadata is (7.6.4.2 and 14.3.2). Held by
+//!     the [`Document`]'s metadata is (7.6.4.2 and 14.3.2); not a page's.
+//!     Held by
 //!     `metadata_not_encrypted_is_handed_out_as_written_whether_the_file_opens_or_not`.
+//!     The writer writes it as it is, and encrypts a page's. Held by
+//!     `xref_streams_metadata_and_the_encrypt_dict_stay_plain` and
+//!     `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`.
 //!   - **The catalog's metadata stream's under `/EncryptMetadata false`
 //!     whose own `/Crypt` filter names one that encrypts it** is decrypted
 //!     by that, as a stream's own crypt filter overrides the file's
@@ -130,19 +171,32 @@
 //!     files by. Held by
 //!     `an_embedded_files_data_under_eff_is_decrypted_by_it` and
 //!     `a_metadata_stream_and_an_embedded_file_decrypt_as_through_qpdf_but_where_it_ignores_eff`.
+//!     The writer encrypts one by `/EFF` so, and where `/EFF` isn't a name
+//!     refuses one without a crypt filter of its own, writing nothing.
+//!     Held by
+//!     `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`
+//!     and `what_cant_be_encrypted_is_refused_and_nothing_written`.
 //!   - **In a file no password opened,** each is refused, as it may be
 //!     ciphertext ([`Error::Locked`]); but in one whose streams aren't
 //!     encrypted ([`Encryption::Plain`]), handed out as written, unless the
 //!     stream's own `/Crypt` filter encrypts it. Held by
 //!     `a_locked_files_streams_are_refused` and
 //!     `a_plain_files_streams_are_handed_out_as_written_but_one_its_own_crypt_filter_encrypts`.
+//!     The writer has no encryptor of such a reading, as it has no key
+//!     ([`Encryptor::of`](crate::write::Encryptor::of)). Held by
+//!     `an_encryptor_isnt_had_of_a_locked_plain_or_unsupported_reading`.
 //!   - **In a file whose security handler the reader can't open,** each is
 //!     refused ([`Error::Unsupported`]). Held by
-//!     `an_unsupported_handlers_streams_are_refused`.
+//!     `an_unsupported_handlers_streams_are_refused`. Nor has the writer.
+//!     Held by
+//!     `an_encryptor_isnt_had_of_a_locked_plain_or_unsupported_reading`.
 //!   - **A stream the encryption dictionary refers to,** among the objects
 //!     whose strings are left as written, is refused
 //!     ([`Error::Encrypted`]). Held by
-//!     `a_stream_the_encryption_dictionary_refers_to_is_refused`.
+//!     `a_stream_the_encryption_dictionary_refers_to_is_refused`. The
+//!     writer writes it whole as it is, as it does the dictionary, and
+//!     refuses its data asked of the encryptor alone. Held by
+//!     `what_cant_be_encrypted_is_refused_and_nothing_written`.
 //! - **`/Identity`:** strings are left as written when `/StrF` is
 //!   `/Identity`, as it is by default from `/V` 4, and object streams'
 //!   data when `/StmF` is (7.6.6 and Table 20). A file whose strings and
@@ -152,6 +206,10 @@
 //!   `an_encrypted_files_strings_are_ciphertext_but_its_encryption_dictionarys`,
 //!   `an_encrypted_object_stream_is_decrypted_and_decoded_without_the_decoder`
 //!   and `a_file_whose_strings_and_streams_arent_encrypted_reads_whole_without_its_password`.
+//!   The writer writes them as they are so, and a stream whose own crypt
+//!   filter is `/Identity`, from `/V` 4, below which there are no crypt
+//!   filters. Held by
+//!   `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`.
 //! - **Metadata under `/EncryptMetadata false`,** which counts from `/V`
 //!   4: the catalog's metadata stream's data is in plain view
 //!   ([`Document::metadata`]), whether the file opens or not, and its
@@ -159,11 +217,18 @@
 //!   14.3.2). Held by
 //!   `metadata_not_encrypted_is_in_plain_view_whether_the_file_opens_or_not`
 //!   and `metadata_not_encrypted_has_its_dictionarys_strings_decrypted_all_the_same`.
+//!   The writer writes its data as it is, and encrypts its dictionary's
+//!   strings. Held by
+//!   `xref_streams_metadata_and_the_encrypt_dict_stay_plain` and
+//!   `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`.
 //! - **The trailer** isn't an object: its strings, its `/ID` among them,
 //!   are read as written (7.5.5, 7.6.2). An object its `/ID` refers to,
 //!   though the `/ID` should be direct, is left as written too, as what
 //!   the encryption dictionary's entries refer to is. Held by
-//!   `the_trailers_id_is_read_as_written_in_a_file_that_opens`.
+//!   `the_trailers_id_is_read_as_written_in_a_file_that_opens`. The writer
+//!   writes a trailer as it is, never through the encryptor, a
+//!   cross-reference stream's too. Held by
+//!   `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`.
 //!
 //! In a file it doesn't open, the encryption dictionary's strings, a
 //! cross-reference stream's and the trailer's are read as written all the
@@ -671,6 +736,9 @@ struct Reader {
     offsets: Box<[usize]>,
     /// The security handler of an encrypted file it opened.
     handler: Option<Handler>,
+    /// The encryption dictionary as the file stores it, where, and the
+    /// first `/ID` element its handler opens by, when it's a dictionary.
+    stored: Option<Box<Stored>>,
     /// Whether the file is encrypted, and if it is, whether it opened.
     encryption: Encryption,
     /// What an encrypted file leaves in the clear, which its strings and
@@ -696,6 +764,19 @@ struct Reader {
     /// What an encrypted file's handler opens from, while no password has
     /// opened it ([`Reading::unlock`]).
     lock: Option<Box<Lock>>,
+}
+
+/// An encrypted file's encryption dictionary as the file stores it, its
+/// strings as written, where it is, and the first `/ID` element its
+/// handler opens by: what a writer writes the file encrypted as it was
+/// by ([`Reading::stored`]).
+pub(crate) struct Stored {
+    /// The dictionary.
+    pub(crate) dict: Dict,
+    /// Its number, when it's indirect; none when it's in the trailer.
+    pub(crate) at: Option<ObjectId>,
+    /// The file's first `/ID` element, empty where it hasn't one.
+    pub(crate) id: Vec<u8>,
 }
 
 /// What a reading of an encrypted file no password opened keeps to open
@@ -976,6 +1057,7 @@ impl Reader {
             entries: Box::default(),
             offsets: Box::default(),
             handler: None,
+            stored: None,
             encryption: Encryption::None,
             list: List::default(),
             budget: AtomicUsize::new(limits.budget),
@@ -2845,6 +2927,11 @@ impl Reader {
         };
         let no_id = id.is_none();
         let id = id.unwrap_or_default();
+        self.stored = Some(Box::new(Stored {
+            dict: dict.clone(),
+            at: own,
+            id: id.clone(),
+        }));
         // Each password in each of its encodings, and which password each
         // is of.
         let (encoded, of): (Vec<Encoded>, Vec<usize>) = (passwords.iter().enumerate())
@@ -2904,7 +2991,7 @@ impl Reader {
         warnings: &mut Vec<Warning>,
         at: usize,
     ) -> Encryption {
-        self.list.settle(values, &opened);
+        self.list.settle(values, opened.as_ref());
         match opened {
             Ok(handler) => {
                 let faults = (handler.faults().iter()).map(|fault| Warning {

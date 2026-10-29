@@ -6,7 +6,8 @@
 //! objects by scanning the file, and says so. What it reads is a
 //! document, which a caller can build in memory too, to number new
 //! objects in, edit, walk and prune. And it writes what a file's structure
-//! is written in: cross-reference sections, and object streams.
+//! is written in: cross-reference sections, and object streams, an
+//! encrypted file's objects encrypted as they're written.
 //!
 //! - **What it read, in one value:** a [`Document`], a [`Source`] read
 //!   whole: each object its cross-references list, kept with where it was
@@ -52,6 +53,10 @@
 //!   bigger than the reader decodes. Deflated through pdf-filters, by the
 //!   backend and at the level the caller says ([`write::Deflate`]); what
 //!   can't be written refused, with nothing written ([`write::Error`]).
+//!   An encrypted file's objects encrypted as pdf-objects' writer writes
+//!   them, encrypted as a reading's file is or under a new AES-256
+//!   encryption ([`write::Encryptor`]), by the same list of what's left in
+//!   the clear that the reader decrypts by ([`write::Encrypting`]).
 //!
 //! The objects are pdf-objects' types, re-exported as [`pdf_objects`];
 //! a stream that doesn't decode cleanly says so in pdf-filters' error,

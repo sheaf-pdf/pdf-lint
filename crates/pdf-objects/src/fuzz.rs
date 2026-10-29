@@ -1,12 +1,16 @@
 //! What the fuzz target checks, which a unit test checks too: the promises
-//! the parser makes, on any input, and the writer's on what it read. It's
-//! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
+//! the parser makes, on any input, and the writer's on what it read, written
+//! plainly and through a toy encryptor ([`Toy`]). It's compiled only for
+//! tests and under cargo-fuzz's `--cfg fuzzing`.
+
+use std::borrow::Cow;
+use std::cell::RefCell;
 
 use pdf_tokenizer::{Kind, Tokenizer};
 
 use crate::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value};
 use crate::parse::{Body, Error, Fault, Limits, Parser, Sink};
-use crate::serialize;
+use crate::serialize::{self, Encrypt};
 
 /// What a sink was told: each fault, where it is and what it says.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -74,7 +78,10 @@ enum Length {
 /// writes as the same bytes again ([`round_trip`]), but for a ciphertext
 /// read's object holding a string: the writer refuses it whole, writing
 /// nothing, and writes it with its strings taken as their bytes, which
-/// read back as plain. With flag 0x80 and two bytes after the five (and
+/// read back as plain. An indirect object is written through a toy
+/// encryptor too ([`toyed`]), which is given each string and stream's data
+/// once, as the object's, and what it wrote, undone, is what was written
+/// plainly. With flag 0x80 and two bytes after the five (and
 /// the limits' two), it's read as a window of a file too, from byte 0 or
 /// 1,000,000, cut where those two bytes choose ([`windowed`]): what isn't
 /// [`Error::Short`] reads as the whole input does.
@@ -560,10 +567,10 @@ fn unplace_entries(d: &mut Dict, data: &[u8]) {
 }
 
 /// Checks that `object`, read from `input` as `how` says, is written, and
-/// reads back the same way under the same limits ([`round_trip`]). A
-/// ciphertext read's object holding a string is refused whole, nothing
-/// written, then written with its strings taken as their bytes, and read
-/// back as plain.
+/// reads back the same way under the same limits ([`round_trip`]); and, as
+/// an indirect object, through the toy encryptor ([`toyed`]). A ciphertext
+/// read's object holding a string is refused whole, nothing written, then
+/// written with its strings taken as their bytes, and read back as plain.
 fn rewrite(input: &[u8], how: How, object: &Object) {
     let id = match how.indirect {
         true => Some(Parser::at(input, how.offset).header().expect("its header")),
@@ -581,7 +588,10 @@ fn rewrite(input: &[u8], how: How, object: &Object) {
             }
         }
     }
-    round_trip(&object, id, input, how.stream, how.limits);
+    let written = round_trip(&object, id, input, how.stream, how.limits);
+    if let Some(id) = id {
+        toyed(&object, id, input, how.limits, &written);
+    }
 }
 
 /// Checks that the writer writes `object`, as indirect object `id` when
@@ -610,12 +620,7 @@ pub fn round_trip(
     let mut want = object.clone();
     unplace(&mut want, data);
     as_written(&mut want);
-    let mut limits = limits;
-    if object.as_stream().is_some_and(|s| !s.dict.has(b"Length")) {
-        limits.values = limits.values.saturating_add(2);
-        limits.nesting = limits.nesting.max(1);
-    }
-    let mut parser = Parser::at(&written, 0).limits(limits);
+    let mut parser = Parser::at(&written, 0).limits(written_under(object, limits));
     if let Some(stream) = stream {
         parser = parser.in_stream(stream);
     }
@@ -647,6 +652,201 @@ pub fn round_trip(
     write(&mut again, &back, id, &[]).expect("what's read back writes");
     assert_eq!(again, written, "written again, the same bytes");
     written
+}
+
+/// The limits what the writer wrote of `object` reads back under, when
+/// `object` was read under `limits`: a stream's dictionary without a
+/// `/Length` is written with one, two values more, one deeper.
+fn written_under(object: &Object, limits: Limits) -> Limits {
+    let mut limits = limits;
+    if object.as_stream().is_some_and(|s| !s.dict.has(b"Length")) {
+        limits.values = limits.values.saturating_add(2);
+        limits.nesting = limits.nesting.max(1);
+    }
+    limits
+}
+
+/// Checks that `object`, written as indirect object `id` through a toy
+/// encryptor ([`Toy`]), a stream's data from `data` when it's where it was
+/// written there, gives the toy each string and stream's data the writer
+/// writes once, in the order written, as object `id`'s, and reads back,
+/// under the limits `object` was read under, as what the toy undoes
+/// ([`Toy::undo`]) into `plain`, what the writer wrote of `object` through
+/// `()`. Panics when any of that fails.
+pub fn toyed(object: &Object, id: ObjectId, data: &[u8], limits: Limits, plain: &[u8]) {
+    let toy = Toy::default();
+    let mut written = Vec::new();
+    let refused = match object.as_stream() {
+        Some(Stream {
+            dict,
+            data: Data::At(at),
+        }) => {
+            serialize::indirect_stream_with(&mut written, id, dict, &data[at.start..at.end], &toy)
+        }
+        _ => serialize::indirect_with(&mut written, id, object, &toy),
+    };
+    if let Err(e) = refused {
+        panic!("the writer refused {object:?} through the toy: {e}");
+    }
+    let text = String::from_utf8_lossy(&written);
+    let mut parser = Parser::at(&written, 0).limits(written_under(object, limits));
+    assert_eq!(parser.header(), Ok(id));
+    let back = parser.body(id, &mut ()).and_then(|body| match body {
+        Body::Object(object) => Ok(object),
+        Body::Stream(head) => {
+            let length = head.dict().get(b"Length").and_then(Object::as_integer);
+            let length = usize::try_from(length.expect("an integer /Length")).unwrap();
+            let data = head.declared(length).expect("endstream after its /Length");
+            parser.stream(head, data, &mut ())
+        }
+    });
+    let mut back = back.unwrap_or_else(|e| panic!("{e}, reading back {text:?}"));
+    assert!(written[parser.offset()..] == *b"\nendobj\n", "{text:?}");
+    unplace(&mut back, &written);
+    toy.undo(id, &mut back);
+    let mut again = Vec::new();
+    write(&mut again, &back, Some(id), &[]).expect("what's undone writes");
+    assert!(
+        again == plain,
+        "undone, {text:?} is what was written plainly"
+    );
+}
+
+/// A toy encryptor, for the writer's tests and the fuzz body: each string
+/// and stream's data written as the number (four bytes) and generation
+/// (two) of the object it's in, big-endian, then its bytes reversed, which
+/// [`Toy::undo`] undoes. An object whose number is a multiple of 5, or a
+/// cross-reference stream (a stream of `/Type /XRef`), is written as it is, and so is a
+/// dictionary's `/Contents` when it has a `/ByteRange`, as a signature's.
+/// It keeps what it's given, in order, and refuses a string or data that's
+/// `refuse`.
+#[derive(Debug, Default)]
+pub struct Toy {
+    /// Each string and stream's data it was given, in order: its object,
+    /// its bytes, and whether it's a stream's data.
+    pub seen: RefCell<Vec<(ObjectId, Vec<u8>, bool)>>,
+    /// What it refuses to encrypt.
+    pub refuse: Option<Vec<u8>>,
+}
+
+impl Encrypt for Toy {
+    type Error = &'static str;
+
+    fn clear(&self, id: ObjectId, dict: Option<&Dict>, stream: bool) -> bool {
+        let xref = |d: &Dict| d.get(b"Type").and_then(Object::as_name) == Some(b"XRef");
+        id.0 % 5 == 0 || (stream && dict.is_some_and(xref))
+    }
+
+    fn clear_key(&self, _: ObjectId, dict: &Dict) -> Option<&'static [u8]> {
+        dict.has(b"ByteRange").then_some(b"Contents")
+    }
+
+    fn string<'t>(&self, id: ObjectId, text: &'t [u8]) -> Result<Cow<'t, [u8]>, &'static str> {
+        self.sealed(id, text, false).map(Cow::Owned)
+    }
+
+    fn stream<'d>(
+        &self,
+        id: ObjectId,
+        _: &Dict,
+        data: &'d [u8],
+    ) -> Result<Cow<'d, [u8]>, &'static str> {
+        self.sealed(id, data, true).map(Cow::Owned)
+    }
+}
+
+impl Toy {
+    /// `bytes` of object `id`, as the toy writes them, kept as given.
+    fn sealed(
+        &self,
+        (n, g): ObjectId,
+        bytes: &[u8],
+        stream: bool,
+    ) -> Result<Vec<u8>, &'static str> {
+        self.seen
+            .borrow_mut()
+            .push(((n, g), bytes.to_vec(), stream));
+        if self.refuse.as_deref() == Some(bytes) {
+            return Err("the toy refuses it");
+        }
+        let mut sealed = [&n.to_be_bytes()[..], &g.to_be_bytes()].concat();
+        sealed.extend(bytes.iter().rev());
+        Ok(sealed)
+    }
+
+    /// `o`, read back from what the writer wrote of it as object `id`
+    /// through the toy, its places taken out ([`unplace`]), with each
+    /// string and stream's data the toy wrote as it was given: walked as
+    /// the writer walks it, each checked to be what the toy was given next,
+    /// as object `id`'s, and every one it was given undone. Panics where
+    /// it isn't so.
+    pub fn undo(&self, id: ObjectId, o: &mut Object) {
+        let seen = self.seen.borrow();
+        let (dict, stream) = match o.value() {
+            Value::Dict(d) => (Some(d), false),
+            Value::Stream(s) => (Some(&s.dict), true),
+            _ => (None, false),
+        };
+        let mut next = 0;
+        if !self.clear(id, dict, stream) {
+            self.opened(id, o, &seen, &mut next);
+        }
+        assert_eq!(next, seen.len(), "the toy was given each once");
+    }
+
+    /// `o` undone, as [`Toy::undo`] has it, from the `*next`th of `seen`.
+    fn opened(
+        &self,
+        id: ObjectId,
+        o: &mut Object,
+        seen: &[(ObjectId, Vec<u8>, bool)],
+        next: &mut usize,
+    ) {
+        let mut open = |sealed: &mut Vec<u8>, stream: bool| {
+            let (n, g) = id;
+            let tag = [&n.to_be_bytes()[..], &g.to_be_bytes()].concat();
+            let rest = sealed
+                .strip_prefix(&tag[..])
+                .expect("written as its object's");
+            let bytes: Vec<u8> = rest.iter().rev().copied().collect();
+            assert_eq!(
+                seen.get(*next),
+                Some(&(id, bytes.clone(), stream)),
+                "given in order"
+            );
+            *next += 1;
+            *sealed = bytes;
+        };
+        match o.as_written_mut() {
+            Value::String(Str::Bytes(sealed), _) => open(sealed, false),
+            Value::Array(a) => a.iter_mut().for_each(|e| self.opened(id, e, seen, next)),
+            Value::Dict(d) => self.entries(id, d, seen, next),
+            Value::Stream(s) => {
+                let Data::Bytes(sealed) = &mut s.data else {
+                    panic!("a stream's data unplaced");
+                };
+                open(sealed, true);
+                self.entries(id, &mut s.dict, seen, next);
+            }
+            _ => {}
+        }
+    }
+
+    /// `d`'s entries undone, but the one it leaves in the clear.
+    fn entries(
+        &self,
+        id: ObjectId,
+        d: &mut Dict,
+        seen: &[(ObjectId, Vec<u8>, bool)],
+        next: &mut usize,
+    ) {
+        let clear = self.clear_key(id, d);
+        for entry in d.entries_mut() {
+            if clear != Some(&entry.key[..]) {
+                self.opened(id, &mut entry.value, seen, next);
+            }
+        }
+    }
 }
 
 /// `object` written to `out`, as [`round_trip`] writes it: a stream whose

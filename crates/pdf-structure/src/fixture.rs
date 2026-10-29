@@ -207,7 +207,7 @@ pub fn encrypted(
         }
         .expect("the writer's own method")
     };
-    let dict = encryption(&values, None);
+    let dict = crate::write::encryption(&values, None);
     under(&handler, objects, dict, trailer, settings.id, encrypt)
 }
 
@@ -240,46 +240,8 @@ pub fn created(
         }
         .expect("the handler's own method")
     };
-    let dict = encryption(&values, Some(32));
+    let dict = crate::write::encryption(&values, Some(32));
     under(&handler, objects, dict, trailer, &id, encrypt)
-}
-
-/// The encryption dictionary of `values`, each crypt filter's `/Length`
-/// `length` where it's given.
-fn encryption(values: &pdf_crypt::Dictionary, length: Option<i64>) -> Dict {
-    let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));
-    let value = |bytes: &Option<Vec<u8>>| s(bytes.as_deref().expect("the writer's own value"));
-    let mut dict = pdf_objects::dict! {
-        "Filter" => "Standard",
-        "V" => values.v,
-        "R" => values.r,
-        "O" => value(&values.o),
-        "U" => value(&values.u),
-        "P" => values.p.expect("the writer's own value"),
-    };
-    if let Some(length) = values.length {
-        dict.set("Length", length);
-    }
-    if values.v >= 5 {
-        dict.set("OE", value(&values.oe));
-        dict.set("UE", value(&values.ue));
-        dict.set("Perms", value(&values.perms));
-    }
-    if let Some(encrypt_metadata) = values.encrypt_metadata {
-        dict.set("EncryptMetadata", encrypt_metadata);
-    }
-    if let Some(filter) = values.crypt_filters.first() {
-        let method =
-            String::from_utf8_lossy(filter.method.as_deref().unwrap_or_default()).into_owned();
-        let mut std_cf = pdf_objects::dict! { "CFM" => method.as_str(), "AuthEvent" => "DocOpen" };
-        if let Some(length) = length {
-            std_cf.set("Length", length);
-        }
-        dict.set("CF", pdf_objects::dict! { "StdCF" => std_cf });
-        dict.set("StmF", "StdCF");
-        dict.set("StrF", "StdCF");
-    }
-    dict
 }
 
 /// `objects` encrypted by `encrypt` (an object's id, the data, and whether

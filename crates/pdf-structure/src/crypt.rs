@@ -1,7 +1,10 @@
 //! What an encrypted file leaves in the clear, each rule once, over plain
 //! values: the rules the reader decrypts a file's strings and streams' data
-//! by. Each, with the clause of ISO 32000-2 that says so and the tests that
-//! hold it, is listed in [`bytes`](crate::bytes) ("What's encrypted").
+//! by, and the writer encrypts them by ([`write::Encrypting`]). Each, with
+//! the clause of ISO 32000-2 that says so and the tests that hold it, is
+//! listed in [`bytes`](crate::bytes) ("What's encrypted").
+//!
+//! [`write::Encrypting`]: crate::write::Encrypting
 //!
 //! - **A signature's `/Contents`,** and all in it ([`signature`], 7.6.2).
 //! - **A cross-reference stream,** its dictionary's strings and its data
@@ -25,9 +28,10 @@ use pdf_objects::object::{Dict, Object, ObjectId, Value};
 
 /// What a file leaves in the clear, as its encryption dictionary says: kept
 /// by the reader, which makes it as it opens the file, and settles it once
-/// it knows how the file's strings and streams are encrypted. Nothing is
-/// encrypted in a file without an encryption dictionary.
-#[derive(Default)]
+/// it knows how the file's strings and streams are encrypted; and by the
+/// writer's encryptor, a reading's or a new file's. Nothing is encrypted
+/// in a file without an encryption dictionary.
+#[derive(Clone, Default)]
 pub(crate) struct List {
     /// Whether the file has an encryption dictionary, so that its streams
     /// may be encrypted, whatever its strings are.
@@ -51,7 +55,7 @@ pub(crate) struct List {
 
 /// How an encrypted file's embedded files are encrypted, as its
 /// encryption dictionary's `/EFF` says (ISO 32000-2, 7.6.6 and Table 20).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) enum Eff {
     /// As its streams are: it has no `/EFF`, or a null, or is of a `/V`
     /// below 4, which has no crypt filters.
@@ -92,7 +96,7 @@ impl List {
     pub(crate) fn settle(
         &mut self,
         values: &pdf_crypt::Dictionary,
-        opened: &Result<Handler, Refused>,
+        opened: Result<&Handler, &Refused>,
     ) {
         // Neither, when no crypt filter encrypts them (from /V 4), whatever
         // the handler.

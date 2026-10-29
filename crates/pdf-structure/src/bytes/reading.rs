@@ -9,14 +9,14 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pdf_crypt::{Encoded, Password, Refused};
+use pdf_crypt::{Encoded, Handler, Password, Refused};
 use pdf_objects::Resolve;
 use pdf_objects::object::{Object, ObjectId, Span, Stream, Value};
 use pdf_objects::version::Version;
 
 use super::window::{ByPosition, Bytes, InMemory};
-use super::{Crypt, Decode, Options, Reader, Unfiltered, Whole, XrefEntry};
-use crate::crypt::is_xref;
+use super::{Crypt, Decode, Options, Reader, Stored, Unfiltered, Whole, XrefEntry};
+use crate::crypt::{List, is_xref};
 use crate::filter;
 use crate::source::{Document, Encryption, Facts, Record, Trailer, Unread, Update, Warning};
 
@@ -485,6 +485,25 @@ impl<S: ByteSource> Reading<S> {
     /// Whether the file is encrypted, and if it is, whether it opened.
     pub fn encryption(&self) -> &Encryption {
         &self.reader.encryption
+    }
+
+    /// The security handler of an encrypted file a password opened, for
+    /// the writer, which encrypts by it as the reading decrypts by it.
+    pub(crate) fn handler(&self) -> Option<&Handler> {
+        self.reader.handler.as_ref()
+    }
+
+    /// What the file leaves in the clear, which the reading decrypts by,
+    /// for the writer, which encrypts by it.
+    pub(crate) fn list(&self) -> &List {
+        &self.reader.list
+    }
+
+    /// An encrypted file's encryption dictionary as the file stores it,
+    /// where, and the first `/ID` element its handler opens by; none where
+    /// it isn't encrypted, or its `/Encrypt` isn't a dictionary.
+    pub(crate) fn stored(&self) -> Option<&Stored> {
+        self.reader.stored.as_deref()
     }
 
     /// The file's newest incremental update, when its cross-reference

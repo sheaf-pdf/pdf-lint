@@ -1744,6 +1744,55 @@ qpdf: operation succeeded with warnings\n";
         }
     }
 
+    /// The writer's encrypted files, under every method, with a table and
+    /// with a stream, checked by qpdf by their password ("No syntax or
+    /// stream encoding errors found") and read through qpdf alone as the
+    /// reader reads them: the same objects, and the same values but a
+    /// signature's `/Contents` with no `/Type`, which the reader and the
+    /// writer leave in the clear, as it has a `/ByteRange` (7.6.2), and
+    /// qpdf decrypts, telling a signature by `/Type /Sig` alone.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn written_encrypted_files_read_through_qpdf_as_through_the_reader() {
+        use crate::XrefKind;
+        use crate::write::tests::{encrypted_by, listed, methods};
+
+        let (plain, trailer) = listed();
+        let dir = scratch("encrypted");
+        for method in methods() {
+            for kind in [XrefKind::Table, XrefKind::Stream] {
+                let name = format!("{}, {kind:?}", method.name);
+                let data = encrypted_by(&method.encryptor, &plain, &trailer, kind);
+                let path = dir
+                    .path()
+                    .join(format!("{}-{kind:?}.pdf", method.name.replace(' ', "-")));
+                std::fs::write(&path, &data).unwrap();
+                let qpdf = qpdf(&path).password("user");
+                let check = ["--password=user", "--check", &path.display().to_string()];
+                let (out, _) = qpdf.run(&check.map(String::from)).unwrap();
+                let out = String::from_utf8_lossy(&out);
+                assert!(
+                    out.contains("No syntax or stream encoding errors found"),
+                    "{name}: {out}"
+                );
+                let alone = qpdf.read().unwrap();
+                assert!(alone.warnings.is_empty(), "{name}: {:?}", alone.warnings);
+                let doc = bytes::read_opened(&data, &[Password("user")]);
+                assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
+                // The untyped signature's /Contents, where strings are
+                // encrypted: qpdf decrypts it.
+                let found = differences(&doc, &alone);
+                assert_eq!(
+                    found.len(),
+                    usize::from(method.strings),
+                    "{name}: {found:?}"
+                );
+                let untyped = |(_, d): &(String, String)| d.starts_with("10 0 R/Contents: ");
+                assert!(found.iter().all(untyped), "{name}: {found:?}");
+            }
+        }
+    }
+
     /// Every PDF under `PDF_LINT_CORPUS` read from its bytes, qpdf
     /// decoding, and through qpdf alone, and the differences counted by what
     /// they're of, with examples.
