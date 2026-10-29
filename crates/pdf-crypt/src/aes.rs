@@ -1,26 +1,32 @@
 //! AES with 128- and 256-bit keys, which revisions 4 to 6 of the standard
 //! security handler encrypt with: RustCrypto's `aes`, a block at a time
 //! (ECB) and in CBC by its `cbc`. Encrypting too, as revision 6's password
-//! hash (Algorithm 2.B) does.
+//! hash (Algorithm 2.B) and a writer do. A key's schedule is made once, and
+//! wiped when it's dropped (`aes`' own `zeroize`), as `cbc`'s IV is.
 
 #[cfg(any(test, feature = "writer"))]
 use ::aes::cipher::BlockCipherEncrypt;
 use ::aes::cipher::array::Array;
-use ::aes::cipher::{BlockCipherDecrypt, BlockModeDecrypt, BlockModeEncrypt, KeyInit, KeyIvInit};
+use ::aes::cipher::{BlockCipherDecrypt, BlockModeDecrypt, BlockModeEncrypt, InnerIvInit, KeyInit};
 use ::aes::{Aes128, Aes256, Block};
 
-/// A key, 128 or 256 bits.
+/// AES keyed by a key of 128 or 256 bits: the key's schedule, which the
+/// cipher keeps in place of the key, and wipes when it's dropped. Each is
+/// most of a kilobyte, AES-256's a quarter more, kept in place: a box
+/// would be an allocation a key to save the difference.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
 pub(crate) enum Aes {
-    By128([u8; 16]),
-    By256([u8; 32]),
+    By128(Aes128),
+    By256(Aes256),
 }
 
 impl Aes {
     /// The cipher keyed by `key`, 16 or 32 bytes; none for another length.
     pub(crate) fn new(key: &[u8]) -> Option<Aes> {
         match key.len() {
-            16 => key.try_into().ok().map(Aes::By128),
-            32 => key.try_into().ok().map(Aes::By256),
+            16 => Aes128::new_from_slice(key).ok().map(Aes::By128),
+            32 => Aes256::new_from_slice(key).ok().map(Aes::By256),
             _ => None,
         }
     }
@@ -30,8 +36,8 @@ impl Aes {
     pub(crate) fn encrypt(&self, block: &mut [u8; 16]) {
         let block: &mut Block = block.into();
         match self {
-            Aes::By128(key) => Aes128::new(key.into()).encrypt_block(block),
-            Aes::By256(key) => Aes256::new(key.into()).encrypt_block(block),
+            Aes::By128(cipher) => cipher.encrypt_block(block),
+            Aes::By256(cipher) => cipher.encrypt_block(block),
         }
     }
 
@@ -39,8 +45,8 @@ impl Aes {
     pub(crate) fn decrypt(&self, block: &mut [u8; 16]) {
         let block: &mut Block = block.into();
         match self {
-            Aes::By128(key) => Aes128::new(key.into()).decrypt_block(block),
-            Aes::By256(key) => Aes256::new(key.into()).decrypt_block(block),
+            Aes::By128(cipher) => cipher.decrypt_block(block),
+            Aes::By256(cipher) => cipher.decrypt_block(block),
         }
     }
 
@@ -50,22 +56,29 @@ impl Aes {
         let (blocks, _): (&mut [Block], _) = Array::slice_as_chunks_mut(&mut out);
         let iv = (&iv).into();
         match self {
-            Aes::By128(key) => cbc::Decryptor::<Aes128>::new(key.into(), iv).decrypt_blocks(blocks),
-            Aes::By256(key) => cbc::Decryptor::<Aes256>::new(key.into(), iv).decrypt_blocks(blocks),
+            Aes::By128(cipher) => {
+                cbc::Decryptor::<&Aes128>::inner_iv_init(cipher, iv).decrypt_blocks(blocks)
+            }
+            Aes::By256(cipher) => {
+                cbc::Decryptor::<&Aes256>::inner_iv_init(cipher, iv).decrypt_blocks(blocks)
+            }
         }
         out
     }
 
-    /// `data`'s whole blocks encrypted in CBC from `iv`.
-    pub(crate) fn encrypt_cbc(&self, iv: [u8; 16], data: &[u8]) -> Vec<u8> {
-        let mut out = data[..data.len() - data.len() % 16].to_vec();
-        let (blocks, _): (&mut [Block], _) = Array::slice_as_chunks_mut(&mut out);
+    /// `data`'s whole blocks encrypted in CBC from `iv`, where they are; a
+    /// part block past them left as it is.
+    pub(crate) fn encrypt_cbc(&self, iv: [u8; 16], data: &mut [u8]) {
+        let (blocks, _): (&mut [Block], _) = Array::slice_as_chunks_mut(data);
         let iv = (&iv).into();
         match self {
-            Aes::By128(key) => cbc::Encryptor::<Aes128>::new(key.into(), iv).encrypt_blocks(blocks),
-            Aes::By256(key) => cbc::Encryptor::<Aes256>::new(key.into(), iv).encrypt_blocks(blocks),
+            Aes::By128(cipher) => {
+                cbc::Encryptor::<&Aes128>::inner_iv_init(cipher, iv).encrypt_blocks(blocks)
+            }
+            Aes::By256(cipher) => {
+                cbc::Encryptor::<&Aes256>::inner_iv_init(cipher, iv).encrypt_blocks(blocks)
+            }
         }
-        out
     }
 }
 
@@ -181,7 +194,9 @@ mod tests {
         ];
         for (key, cipher) in examples {
             let aes = Aes::new(&bytes(key)).unwrap();
-            assert_eq!(aes.encrypt_cbc(iv, &plain), bytes(cipher), "{key}");
+            let mut encrypted = plain.clone();
+            aes.encrypt_cbc(iv, &mut encrypted);
+            assert_eq!(encrypted, bytes(cipher), "{key}");
             assert_eq!(aes.decrypt_cbc(iv, &bytes(cipher)), plain, "{key}");
         }
     }

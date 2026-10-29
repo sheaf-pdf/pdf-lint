@@ -4,10 +4,12 @@
 /// The fuzz target `crypt`'s body: a dictionary of any version, revision
 /// and fields of any length that `data` chooses, or one the writer makes
 /// that opens, opened with passwords from it, and when it opens, strings
-/// and streams from it decrypted by each method. Panics on a broken promise: none should, and decrypting
-/// gives no more than it's given.
+/// and streams from it decrypted by each method, and encrypted under a
+/// context from it. Panics on a broken promise: none should, decrypting
+/// gives no more than it's given, and what's encrypted decrypts to what
+/// it was, the same bytes each time, or is refused alike both ways.
 pub fn handler(data: &[u8]) {
-    use crate::{CryptFilter, Dictionary, Handler, Method};
+    use crate::{CryptFilter, Dictionary, Fault, Handler, Method};
     let mut bytes = data.iter().copied();
     let mut next = || bytes.next().unwrap_or(0);
     let mut take = |n: usize| -> Vec<u8> { (0..n).map(|_| next()).collect() };
@@ -97,6 +99,36 @@ pub fn handler(data: &[u8]) {
             };
             check(handler.decrypt_stream(id, data, method.as_ref()));
             check(handler.decrypt_string(id, data));
+        }
+    }
+    // Encrypted under a context from the input, by each method: decrypted,
+    // it's what it was; or it's refused, as decrypting refuses it.
+    let context = &rest[..rest.len().min(usize::from(head[4] % 40))];
+    for method in &methods {
+        for data in [&rest[..], &rest[..rest.len().min(17)]] {
+            let stream = handler.encrypt_stream(id, context, data, method.as_ref());
+            let again = handler.encrypt_stream(id, context, data, method.as_ref());
+            assert_eq!(stream, again, "the same each time");
+            let string = handler.encrypt_string(id, context, data);
+            let decrypted = [
+                stream.map(|s| handler.decrypt_stream(id, &s, method.as_ref())),
+                string.map(|s| handler.decrypt_string(id, &s)),
+            ];
+            for (decrypted, stream) in decrypted.into_iter().zip([true, false]) {
+                match decrypted {
+                    Ok(back) => assert_eq!(back.as_deref(), Ok(data), "decrypts to what it was"),
+                    Err(fault) => {
+                        assert!(matches!(fault, Fault::Key { .. } | Fault::Method { .. }));
+                        // Ciphertext of no white-space, so a stream's isn't
+                        // taken for it.
+                        let refused = match stream {
+                            true => handler.decrypt_stream(id, &[1; 32], method.as_ref()),
+                            false => handler.decrypt_string(id, &[1; 32]),
+                        };
+                        assert_eq!(refused.map_err(|e| e.fault), Err(fault), "refused alike");
+                    }
+                }
+            }
         }
     }
 }

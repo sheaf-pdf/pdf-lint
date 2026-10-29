@@ -1,6 +1,6 @@
-//! PDF's standard security handler (ISO 32000-2, 7.6.4), decrypting: a
-//! file's key from its encryption dictionary and a password, and its
-//! strings and streams decrypted with it.
+//! PDF's standard security handler (ISO 32000-2, 7.6.4): a file's key from
+//! its encryption dictionary and a password, and its strings and streams
+//! decrypted with it, or encrypted for a writer.
 //!
 //! - **Values, not dictionaries.** A [`Dictionary`] is the encryption
 //!   dictionary's values, typed; reading them from the file is the
@@ -16,11 +16,18 @@
 //!   ciphertext too short, a part block past the whole ones, padding that
 //!   isn't, a crypt filter's method that isn't one, `/Perms` that doesn't
 //!   match or doesn't confirm the key.
-//! - **Keys kept in:** a [`Handler`] decrypts with the file's key and
-//!   each object's, and gives out neither, its `Debug` included.
+//! - **Encrypting for a writer:** [`Handler::encrypt_string`] and
+//!   [`Handler::encrypt_stream`] encrypt as the handler decrypts, AES's IV
+//!   derived from the data and what the caller names its object by, so
+//!   the same object encrypts the same on every save and no IV serves two
+//!   plaintexts. RC4 takes no IV; a method that isn't one is refused.
+//! - **Keys kept in, and wiped:** a [`Handler`] decrypts and encrypts with
+//!   the file's key and each object's, and gives out neither, its `Debug`
+//!   included. Each is wiped when it's dropped (RustCrypto's `zeroize`), as
+//!   is every buffer a password or a key passes through on the way to one.
 //! - **RustCrypto's primitives:** MD5 (`md-5`), SHA-256, SHA-384 and
-//!   SHA-512 (`sha2`), RC4 (`rc4`), and AES-128 and AES-256 (`aes`, in CBC
-//!   by `cbc`).
+//!   SHA-512 (`sha2`), HMAC-SHA256 (`hmac`), RC4 (`rc4`), and AES-128 and
+//!   AES-256 (`aes`, in CBC by `cbc`), each built to wipe its own state.
 //!
 //! Decrypting is a step before the filters (pdf-filters decodes those),
 //! and which strings and streams aren't encrypted at all, the encryption
@@ -32,6 +39,7 @@ mod aes;
 #[doc(hidden)]
 pub mod fuzz;
 mod handler;
+mod hmac;
 mod md5;
 mod password;
 mod rc4;

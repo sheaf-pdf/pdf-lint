@@ -326,6 +326,8 @@ fn its_debug_leaves_the_key_out() {
         let shown = format!("{handler:?}");
         assert!(!shown.contains(&format!("{:?}", handler.key())), "{shown}");
         assert!(!shown.contains("key"), "{shown}");
+        // Nor the MAC keyed by it.
+        assert!(!shown.contains("ivs") && !shown.contains("Hmac"), "{shown}");
     }
 }
 
@@ -687,4 +689,297 @@ fn each_refusal_and_fault_says_why() {
         fault: Fault::Padding,
     };
     assert_eq!(error.to_string(), "its AES plaintext isn't padded");
+}
+
+/// The writer's kinds, each way of `/EncryptMetadata`, and qpdf's files:
+/// a name, and the handler opened by the user's password and by the
+/// owner's.
+fn every_kind() -> Vec<(String, Handler, Handler)> {
+    let mut handlers = Vec::new();
+    let kinds = [
+        Kind::Rc4By40,
+        Kind::Rc4By128,
+        Kind::Aes128,
+        Kind::Aes256R5,
+        Kind::Aes256,
+    ];
+    for kind in kinds {
+        for encrypt_metadata in [true, false] {
+            let settings = Settings {
+                kind,
+                user: b"user",
+                owner: b"owner",
+                p: -4,
+                id: b"0123456789abcdef",
+                encrypt_metadata,
+            };
+            let dictionary = writer::dictionary(&settings);
+            let open = |password: &[u8]| Handler::open(&dictionary, settings.id, &[password]);
+            let name = format!("{kind:?}, /EncryptMetadata {encrypt_metadata}");
+            handlers.push((name, open(b"user").unwrap(), open(b"owner").unwrap()));
+        }
+    }
+    for v in vectors() {
+        let open = |password: &[u8]| Handler::open(&v.dictionary, v.id, &[password]);
+        handlers.push((
+            v.name.to_string(),
+            open(v.user).unwrap(),
+            open(v.owner).unwrap(),
+        ));
+    }
+    handlers
+}
+
+/// Strings and streams encrypted under the IVs the handler derives decrypt
+/// to what they were, by the other password's handler, on every revision
+/// and method: the writer's kinds and qpdf's files, and a stream by its
+/// own crypt filter, of each method; the same bytes each time. AES that
+/// the file's key isn't for is refused encrypting as it is decrypting.
+#[test]
+fn what_it_encrypts_decrypts_on_every_revision_and_method() {
+    let thousand = [0; 1000];
+    let data: [&[u8]; 5] = [
+        b"",
+        b"x",
+        b"a string sixteen",
+        b"a string of more than sixteen bytes",
+        &thousand,
+    ];
+    let methods = [
+        Method::Identity,
+        Method::None,
+        Method::Rc4,
+        Method::Aes128,
+        Method::Aes256,
+    ];
+    for (name, user, owner) in &every_kind() {
+        for data in data {
+            for context in [&b""[..], b"7 0 R", b"another context"] {
+                let len = data.len();
+                let string = user.encrypt_string((7, 0), context, data).unwrap();
+                assert_eq!(
+                    owner.decrypt_string((7, 0), &string).unwrap(),
+                    data,
+                    "{name}, {len}"
+                );
+                let again = user.encrypt_string((7, 0), context, data);
+                assert_eq!(again.unwrap(), string, "{name}, {len}");
+                let stream = user.encrypt_stream((8, 0), context, data, None).unwrap();
+                assert_eq!(
+                    owner.decrypt_stream((8, 0), &stream, None).unwrap(),
+                    data,
+                    "{name}, {len}"
+                );
+                for method in &methods {
+                    match user.encrypt_stream((8, 0), context, data, Some(method)) {
+                        Ok(stream) => assert_eq!(
+                            owner.decrypt_stream((8, 0), &stream, Some(method)),
+                            Ok(data.to_vec()),
+                            "{name}, {method:?}, {len}"
+                        ),
+                        Err(fault) => {
+                            assert!(matches!(fault, Fault::Key { .. }), "{name}, {method:?}");
+                            let refused = owner.decrypt_stream((8, 0), &[1; 32], Some(method));
+                            assert_eq!(refused.unwrap_err().fault, fault, "{name}, {method:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// An AES string's or stream's IV is the first 16 bytes of HMAC-SHA256,
+/// under the file's key, of the context's length (8 bytes, big-endian),
+/// the context and the data: as RustCrypto's `hmac` gives it called here
+/// directly, on each of qpdf's AES files; and the whole string as Python's
+/// `hmac` and OpenSSL's `enc` gave it, for qpdf's AES-128 and AES-256
+/// files.
+#[test]
+fn an_aes_iv_is_hmac_sha256_of_the_context_and_the_data() {
+    use ::hmac::{Hmac, KeyInit, Mac};
+    let apart = |key: &[u8], context: &[u8], data: &[u8]| {
+        let mut mac = Hmac::<::sha2::Sha256>::new_from_slice(key).unwrap();
+        mac.update(&(context.len() as u64).to_be_bytes());
+        mac.update(context);
+        mac.update(data);
+        hex(&mac.finalize().into_bytes()[..16])
+    };
+    let cases: [(&[u8], &[u8]); 4] = [
+        (b"", b""),
+        (b"the Info dictionary", b"A plain title"),
+        (b"a context", &[7; 300]),
+        (&[0; 200], b"a longer context than HMAC-SHA256's block"),
+    ];
+    for v in &vectors()[3..] {
+        let name = v.name;
+        let handler = Handler::open(&v.dictionary, v.id, &[v.user]).unwrap();
+        assert!(matches!(handler.strings(), Method::Aes128 | Method::Aes256));
+        for (context, data) in cases {
+            let iv = apart(handler.key(), context, data);
+            let string = handler.encrypt_string((2, 0), context, data).unwrap();
+            assert_eq!(hex(&string[..16]), iv, "{name}");
+            let stream = handler.encrypt_stream((9, 0), context, data, None).unwrap();
+            assert_eq!(hex(&stream[..16]), iv, "{name}");
+        }
+    }
+    let whole = [
+        (
+            3,
+            "3daa97080345736f48ddbf3c562a8501",
+            "7c7ed19fcb44350aa3d10ed2f62b9d1a",
+        ),
+        (
+            6,
+            "7c635604806fcd83b48df659bc00b7c8",
+            "a3c89f20b55df959d0e0535ab97b328f",
+        ),
+    ];
+    for (i, iv, cipher) in whole {
+        let v = &vectors()[i];
+        let handler = Handler::open(&v.dictionary, v.id, &[v.user]).unwrap();
+        let string = handler.encrypt_string((2, 0), b"the Info dictionary", b"A plain title");
+        assert_eq!(hex(&string.unwrap()), format!("{iv}{cipher}"), "{}", v.name);
+    }
+}
+
+/// What an AES string's IV is keyed by: the same for the same context and
+/// value wherever it's written, and another for another context or
+/// another value; a context and value never run together into another's
+/// (`ab` and `c`, `a` and `bc`). Under AES-256, whose key is the file's,
+/// the same context and value encrypt to the same bytes at another number,
+/// and decrypt by the number they're at.
+#[test]
+fn ivs_are_keyed_by_what_the_object_is() {
+    for kind in [Kind::Aes128, Kind::Aes256R5, Kind::Aes256] {
+        let settings = Settings {
+            kind,
+            user: b"",
+            owner: b"owner",
+            p: -4,
+            id: b"an id",
+            encrypt_metadata: true,
+        };
+        let handler = Handler::open(&writer::dictionary(&settings), settings.id, &[]).unwrap();
+        let encrypt = |id: (u32, u16), context: &str, value: &str| {
+            (handler.encrypt_string(id, context.as_bytes(), value.as_bytes())).unwrap()
+        };
+        let iv = |id, context, value| encrypt(id, context, value)[..16].to_vec();
+        let first = iv((5, 0), "the catalog", "a value");
+        assert_eq!(iv((5, 0), "the catalog", "a value"), first, "{kind:?}");
+        assert_eq!(iv((6, 0), "the catalog", "a value"), first, "{kind:?}");
+        assert_eq!(iv((5, 1), "the catalog", "a value"), first, "{kind:?}");
+        for other in [
+            iv((5, 0), "the page labels", "a value"),
+            iv((5, 0), "the catalog", "another value"),
+            iv((5, 0), "a page", "a value"),
+        ] {
+            assert_ne!(other, first, "{kind:?}");
+        }
+        assert_ne!(iv((5, 0), "ab", "c"), iv((5, 0), "a", "bc"), "{kind:?}");
+        assert_ne!(iv((5, 0), "", "abc"), iv((5, 0), "abc", ""), "{kind:?}");
+        let moved = encrypt((6, 0), "the catalog", "a value");
+        let same = moved == encrypt((5, 0), "the catalog", "a value");
+        assert_eq!(same, kind != Kind::Aes128, "{kind:?}");
+        assert_eq!(
+            handler.decrypt_string((6, 0), &moved).unwrap(),
+            b"a value",
+            "{kind:?}"
+        );
+    }
+}
+
+/// RC4 takes no IV: what it encrypts under any context is the writer's
+/// bytes under any IV, and qpdf's string, byte for byte.
+#[test]
+fn rc4_takes_no_iv() {
+    for v in &vectors()[..3] {
+        let name = v.name;
+        let handler = Handler::open(&v.dictionary, v.id, &[v.user]).unwrap();
+        assert_eq!(handler.strings(), &Method::Rc4, "{name}");
+        let (n, written) = v.title;
+        for context in [&b""[..], b"one", b"another"] {
+            let string = handler.encrypt_string((n, 0), context, b"A plain title");
+            assert_eq!(string.unwrap(), written, "{name}");
+        }
+        let string = writer::encrypt_string(&handler, (n, 0), b"A plain title", [9; 16]);
+        assert_eq!(string.unwrap(), written, "{name}");
+    }
+}
+
+/// A method that isn't one encrypts nothing: it's refused, as it is
+/// decrypting, never written as plaintext, by the writer's IVs too; while
+/// `/Identity` and `/None` leave the data as it is.
+#[test]
+fn a_method_that_isnt_one_is_refused_not_written_as_plaintext() {
+    let (handler, _) = aes();
+    let odd = Method::Unknown(b"ROT13".to_vec());
+    let refused = |name: &str| {
+        Err(Fault::Method {
+            name: name.to_string(),
+        })
+    };
+    let encrypted = handler.encrypt_stream((5, 0), b"c", b"x", Some(&odd));
+    assert_eq!(encrypted, refused("ROT13"));
+    let encrypted = writer::encrypt_stream(&handler, (5, 0), b"x", Some(&odd), [0; 16]);
+    assert_eq!(encrypted, refused("ROT13"));
+    for method in [Method::Identity, Method::None] {
+        let encrypted = handler.encrypt_stream((5, 0), b"c", b"x", Some(&method));
+        assert_eq!(encrypted, Ok(b"x".to_vec()), "{method:?}");
+    }
+    // A dictionary whose /StrF names a crypt filter it hasn't, and whose
+    // /StmF names one whose method isn't one.
+    let settings = Settings {
+        kind: Kind::Aes128,
+        user: b"",
+        owner: b"o",
+        p: -4,
+        id: b"id",
+        encrypt_metadata: true,
+    };
+    let mut dictionary = writer::dictionary(&settings);
+    dictionary.crypt_filters.push(CryptFilter {
+        name: b"Odd".to_vec(),
+        method: Some(b"ROT13".to_vec()),
+    });
+    dictionary.str_f = Some(b"Missing".to_vec());
+    dictionary.stm_f = Some(b"Odd".to_vec());
+    let handler = Handler::open(&dictionary, b"id", &[]).unwrap();
+    assert_eq!(
+        handler.encrypt_string((5, 0), b"c", b"x"),
+        refused("Missing")
+    );
+    assert_eq!(
+        writer::encrypt_string(&handler, (5, 0), b"x", [0; 16]),
+        refused("Missing")
+    );
+    let encrypted = handler.encrypt_stream((5, 0), b"c", b"x", None);
+    assert_eq!(encrypted, refused("ROT13"));
+}
+
+/// A handler can be cloned and shared across threads, and its clone and
+/// each thread encrypt and decrypt as it does.
+#[test]
+fn a_handler_is_clone_send_and_sync() {
+    fn cloned<T: Clone + Send + Sync>(t: &T) -> T {
+        t.clone()
+    }
+    let (handler, string) = aes();
+    let clone = cloned(&handler);
+    let encrypted = handler.encrypt_string((5, 0), b"c", b"a value");
+    assert_eq!(clone.encrypt_string((5, 0), b"c", b"a value"), encrypted);
+    assert_eq!(
+        clone.decrypt_string((5, 0), &string),
+        handler.decrypt_string((5, 0), &string)
+    );
+    let shared = &handler;
+    let each = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..2)
+            .map(|_| scope.spawn(|| shared.encrypt_string((5, 0), b"c", b"a value")))
+            .collect();
+        (threads.into_iter())
+            .map(|t| t.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(each, [encrypted.clone(), encrypted]);
 }

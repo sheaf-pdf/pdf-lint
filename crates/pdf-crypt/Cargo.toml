@@ -5,26 +5,31 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF's standard security handler, decrypting, with every fault said"
-keywords = ["pdf", "decryption", "rc4", "aes"]
+description = "PDF's standard security handler: decrypting, with every fault said, and encrypting for a writer"
+keywords = ["pdf", "decryption", "encryption", "rc4", "aes"]
 categories = ["cryptography", "parser-implementations"]
 # Only what users need, so local tooling files can't end up in the package.
 include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 # RustCrypto's, the primitives under the handler, without what it doesn't
-# use (padding schemes, OIDs).
-aes = "0.9"
-cbc = { version = "0.2", default-features = false }
-md-5 = { version = "0.11", default-features = false }
-rc4 = "0.2"
-sha2 = { version = "0.11", default-features = false }
+# use (padding schemes, OIDs), each wiping its key schedule or state when
+# it's dropped; HMAC-SHA256 for the IVs it encrypts under; and zeroize, for
+# the keys and passwords it holds itself.
+aes = { version = "0.9", features = ["zeroize"] }
+cbc = { version = "0.2", default-features = false, features = ["zeroize"] }
+hmac = { version = "0.13", features = ["zeroize"] }
+md-5 = { version = "0.11", default-features = false, features = ["zeroize"] }
+rc4 = { version = "0.2", features = ["zeroize"] }
+sha2 = { version = "0.11", default-features = false, features = ["zeroize"] }
+zeroize = "1.9"
 
 thiserror = "2"
 
 [features]
-# Encrypting as the handler decrypts, with salts and IVs given, not random:
-# for writing test files, not for a writer to protect a document with.
+# An encryption dictionary, and strings and streams encrypted, with salts,
+# keys and IVs given, not random or derived: for writing test files, not
+# for a writer to protect a document with.
 writer = []
 
 [lints.rust]

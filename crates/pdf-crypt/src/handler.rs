@@ -3,10 +3,14 @@
 //! decrypted with it. Revision 5, which ISO 32000-2 leaves out, is read as
 //! Adobe's Extension Level 3 has it, as qpdf reads it.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use zeroize::Zeroizing;
+
 use crate::aes::Aes;
+use crate::hmac::HmacSha256;
 use crate::md5::md5;
 use crate::rc4::rc4;
 use crate::sha2::{sha256, sha384, sha512};
@@ -41,10 +45,17 @@ pub enum Method {
 
 /// A file's security handler, opened: its key, and how its strings and
 /// streams are encrypted. The key stays in it: nothing gives it out, its
-/// `Debug` neither.
+/// `Debug` neither, and it's wiped when the handler is dropped, as each
+/// object's key is when it's been used.
 #[derive(Clone)]
 pub struct Handler {
-    key: Vec<u8>,
+    key: Zeroizing<Vec<u8>>,
+    /// From `/V` 5, AES keyed by the file's key, once, as every AES string
+    /// and stream is (Algorithm 1.A).
+    aes: Option<Aes>,
+    /// HMAC-SHA256 keyed by the file's key, once, for the AES IVs it
+    /// encrypts under.
+    ivs: HmacSha256,
     v: i64,
     owner: bool,
     strings: Method,
@@ -110,6 +121,8 @@ impl Handler {
         };
         let (strings, streams, filters) = methods(dictionary, file.v);
         Ok(Handler {
+            aes: (file.v >= 5).then(|| Aes::new(&key)).flatten(),
+            ivs: HmacSha256::new(&key),
             key,
             v: file.v,
             owner,
@@ -186,25 +199,78 @@ impl Handler {
         self.decrypt(crypt.unwrap_or(&self.streams), id, data, true)
     }
 
-    /// `data` of object `id` encrypted by `method`, AES's from `iv`, for
-    /// the writer; or [`Fault::Key`], when it's AES that the file's key
-    /// isn't for.
-    #[cfg(any(test, feature = "writer"))]
+    /// The string `data` of object `id`, encrypted as strings are; or
+    /// [`Fault::Method`] when that's a method that isn't one, and
+    /// [`Fault::Key`] when it's AES that the file's key isn't for.
+    ///
+    /// AES's IV is the first 16 bytes of HMAC-SHA256, under the file's key,
+    /// of `context`'s length (8 bytes, big-endian), `context` and `data`.
+    /// `context` is the caller's name for the object, the same each time
+    /// it's written, so the same string of the same object encrypts to the
+    /// same bytes on every save, under any number (AES-256's key is the
+    /// file's), and no IV serves two plaintexts. RC4 takes no IV, and
+    /// `/Identity` and `/None` leave `data` as it is.
+    pub fn encrypt_string(
+        &self,
+        id: (u32, u16),
+        context: &[u8],
+        data: &[u8],
+    ) -> Result<Vec<u8>, Fault> {
+        self.encrypt(&self.strings, id, data, || self.iv(context, data))
+    }
+
+    /// The data of stream `id`, encrypted: by its own `/Crypt` filter's
+    /// method when it has one (`crypt`, see [`Handler::named`]), else as
+    /// streams are; AES's IV from `context` and `data` as
+    /// [`Handler::encrypt_string`]'s is. Faults as it has them.
+    pub fn encrypt_stream(
+        &self,
+        id: (u32, u16),
+        context: &[u8],
+        data: &[u8],
+        crypt: Option<&Method>,
+    ) -> Result<Vec<u8>, Fault> {
+        let method = crypt.unwrap_or(&self.streams);
+        self.encrypt(method, id, data, || self.iv(context, data))
+    }
+
+    /// The AES IV for `data` of what `context` names: the first 16 bytes of
+    /// HMAC-SHA256, under the file's key, of `context`'s length (8 bytes,
+    /// big-endian), `context` and `data`. The length first, so no context
+    /// and data run together into another's.
+    fn iv(&self, context: &[u8], data: &[u8]) -> [u8; 16] {
+        let len = (context.len() as u64).to_be_bytes();
+        let mac = self.ivs.mac(&[&len, context, data]);
+        mac[..16].try_into().expect("16 bytes")
+    }
+
+    /// `data` of object `id` encrypted by `method`, AES's from the IV `iv`
+    /// gives, which nothing else asks for; or [`Fault::Method`], when it's a
+    /// method that isn't one, and [`Fault::Key`], when it's AES that the
+    /// file's key isn't for.
     pub(crate) fn encrypt(
         &self,
         method: &Method,
         id: (u32, u16),
         data: &[u8],
-        iv: [u8; 16],
+        iv: impl FnOnce() -> [u8; 16],
     ) -> Result<Vec<u8>, Fault> {
         let aes = || {
             let cipher = self.cipher(method, id)?;
+            let iv = iv();
             let pad = 16 - data.len() % 16;
-            let padded = [data, &vec![pad as u8; pad]].concat();
-            Ok([&iv[..], &cipher.encrypt_cbc(iv, &padded)].concat())
+            let mut out = Vec::with_capacity(16 + data.len() + pad);
+            out.extend_from_slice(&iv);
+            out.extend_from_slice(data);
+            out.resize(out.len() + pad, pad as u8);
+            cipher.encrypt_cbc(iv, &mut out[16..]);
+            Ok(out)
         };
         match method {
-            Method::Identity | Method::None | Method::Unknown(_) => Ok(data.to_vec()),
+            Method::Identity | Method::None => Ok(data.to_vec()),
+            Method::Unknown(name) => Err(Fault::Method {
+                name: String::from_utf8_lossy(name).into_owned(),
+            }),
             Method::Rc4 => Ok(rc4(&self.object_key(id, false), data)),
             Method::Aes128 | Method::Aes256 => aes(),
         }
@@ -233,15 +299,15 @@ impl Handler {
     }
 
     /// AES by `method`'s key for object `id`: AES-128's the object's (the
-    /// file's from revision 5), AES-256's the file's, of `/V` 5 only; or
-    /// [`Fault::Key`], when that isn't a key of AES's length.
-    fn cipher(&self, method: &Method, id: (u32, u16)) -> Result<Aes, Fault> {
-        let key = match method {
-            Method::Aes256 if self.v < 5 => None,
-            Method::Aes256 => Aes::new(&self.key),
-            _ => Aes::new(&self.object_key(id, true)),
+    /// file's from revision 5), AES-256's the file's, of `/V` 5 only, keyed
+    /// once; or [`Fault::Key`], when that isn't a key of AES's length.
+    fn cipher(&self, method: &Method, id: (u32, u16)) -> Result<Cow<'_, Aes>, Fault> {
+        let cipher = match (method, &self.aes) {
+            (Method::Aes256, _) if self.v < 5 => None,
+            (_, Some(aes)) => Some(Cow::Borrowed(aes)),
+            _ => Aes::new(&self.object_key(id, true)).map(Cow::Owned),
         };
-        key.ok_or(Fault::Key {
+        cipher.ok_or(Fault::Key {
             len: self.key.len(),
         })
     }
@@ -249,17 +315,19 @@ impl Handler {
     /// Object `id`'s key (Algorithm 1): the file's key, its number and
     /// generation, and for AES `sAlT`, through MD5, the first n + 5 bytes
     /// up to 16. Revision 5 and later use the file's key (Algorithm 1.A).
-    fn object_key(&self, (n, g): (u32, u16), aes: bool) -> Vec<u8> {
+    fn object_key(&self, (n, g): (u32, u16), aes: bool) -> Zeroizing<Vec<u8>> {
         if self.v >= 5 {
             return self.key.clone();
         }
-        let mut input = self.key.clone();
+        let mut input = Zeroizing::new(Vec::with_capacity(self.key.len() + 9));
+        input.extend_from_slice(&self.key);
         input.extend_from_slice(&n.to_le_bytes()[..3]);
         input.extend_from_slice(&g.to_le_bytes());
         if aes {
             input.extend_from_slice(b"sAlT");
         }
-        md5(&input)[..(self.key.len() + 5).min(16)].to_vec()
+        let digest = Zeroizing::new(md5(&input));
+        Zeroizing::new(digest[..(self.key.len() + 5).min(16)].to_vec())
     }
 }
 
@@ -270,8 +338,8 @@ impl Handler {
 /// Shorter than an IV, it stays ciphertext; just an IV, it's empty; said.
 /// A part block past the whole ones is left off, and the padding kept,
 /// said; padding that isn't, kept, said.
-fn aes(
-    cipher: impl FnOnce() -> Result<Aes, Fault>,
+fn aes<'a>(
+    cipher: impl FnOnce() -> Result<Cow<'a, Aes>, Fault>,
     data: &[u8],
     stream: bool,
 ) -> Result<Vec<u8>, Error> {
@@ -421,7 +489,7 @@ impl<'a> File<'a> {
 
     /// The file's key, when `password` is the user's, and what's wrong
     /// with `/Perms` by it.
-    fn user(&self, password: &[u8]) -> Option<(Vec<u8>, Option<Fault>)> {
+    fn user(&self, password: &[u8]) -> Option<(Zeroizing<Vec<u8>>, Option<Fault>)> {
         match self.r {
             2..=4 => {
                 let key = self.key(password);
@@ -430,7 +498,7 @@ impl<'a> File<'a> {
             }
             _ => {
                 let password = &password[..password.len().min(127)];
-                if self.hash(password, &self.u[32..40], b"") != self.u[..32] {
+                if self.hash(password, &self.u[32..40], b"")[..] != self.u[..32] {
                     return None;
                 }
                 let intermediate = self.hash(password, &self.u[40..48], b"");
@@ -441,16 +509,17 @@ impl<'a> File<'a> {
 
     /// The file's key, when `password` is the owner's, and what's wrong
     /// with `/Perms` by it.
-    fn owner(&self, password: &[u8]) -> Option<(Vec<u8>, Option<Fault>)> {
+    fn owner(&self, password: &[u8]) -> Option<(Zeroizing<Vec<u8>>, Option<Fault>)> {
         match self.r {
             // Algorithm 7: the owner's key decrypts /O to the user's
             // password, padded, which opens the file as the user's does.
             2..=4 => {
                 let key = self.owner_key(password);
-                let mut user = self.o.clone();
+                let mut round = Zeroizing::new(vec![0; key.len()]);
+                let mut user = Zeroizing::new(self.o.clone());
                 for i in (0..self.rounds()).rev() {
-                    let round: Vec<u8> = key.iter().map(|k| k ^ i as u8).collect();
-                    user = rc4(&round, &user);
+                    xored(&key, i as u8, &mut round);
+                    user = Zeroizing::new(rc4(&round, &user));
                 }
                 let key = self.key(&user);
                 (self.u_value(&key)[..self.compared()] == self.u[..self.compared()])
@@ -458,7 +527,7 @@ impl<'a> File<'a> {
             }
             _ => {
                 let password = &password[..password.len().min(127)];
-                if self.hash(password, &self.o[32..40], &self.u[..48]) != self.o[..32] {
+                if self.hash(password, &self.o[32..40], &self.u[..48])[..] != self.o[..32] {
                     return None;
                 }
                 let intermediate = self.hash(password, &self.o[40..48], &self.u[..48]);
@@ -485,25 +554,31 @@ impl<'a> File<'a> {
     }
 
     /// `password` padded or cut to 32 bytes (Algorithm 2, step a).
-    pub(crate) fn padded(password: &[u8]) -> Vec<u8> {
-        let password = &password[..password.len().min(32)];
-        [password, &PADDING[..32 - password.len()]].concat()
+    pub(crate) fn padded(password: &[u8]) -> Zeroizing<[u8; 32]> {
+        let len = password.len().min(32);
+        let mut padded = Zeroizing::new(PADDING);
+        padded[..len].copy_from_slice(&password[..len]);
+        padded[len..].copy_from_slice(&PADDING[..32 - len]);
+        padded
     }
 
     /// MD5 repeated 50 times over its first n bytes from revision 3,
     /// those n bytes.
-    fn iterated(&self, mut digest: [u8; 16]) -> Vec<u8> {
+    fn iterated(&self, digest: [u8; 16]) -> Zeroizing<Vec<u8>> {
+        let mut digest = Zeroizing::new(digest);
         if self.r >= 3 {
             for _ in 0..50 {
-                digest = md5(&digest[..self.n.min(16)]);
+                *digest = md5(&digest[..self.n.min(16)]);
             }
         }
-        digest[..self.n.min(16)].to_vec()
+        Zeroizing::new(digest[..self.n.min(16)].to_vec())
     }
 
     /// The file's key from the user's `password` (Algorithm 2).
-    pub(crate) fn key(&self, password: &[u8]) -> Vec<u8> {
-        let mut input = File::padded(password);
+    pub(crate) fn key(&self, password: &[u8]) -> Zeroizing<Vec<u8>> {
+        let len = 32 + self.o.len() + 4 + self.id.len() + 4;
+        let mut input = Zeroizing::new(Vec::with_capacity(len));
+        input.extend_from_slice(&File::padded(password)[..]);
         input.extend_from_slice(&self.o);
         input.extend_from_slice(&self.p.to_le_bytes());
         input.extend_from_slice(self.id);
@@ -515,20 +590,21 @@ impl<'a> File<'a> {
 
     /// The RC4 key /O is encrypted by, from the owner's `password`
     /// (Algorithm 3, steps a to d).
-    pub(crate) fn owner_key(&self, password: &[u8]) -> Vec<u8> {
-        self.iterated(md5(&File::padded(password)))
+    pub(crate) fn owner_key(&self, password: &[u8]) -> Zeroizing<Vec<u8>> {
+        self.iterated(md5(&File::padded(password)[..]))
     }
 
     /// What /U is for the file's `key` (Algorithms 4 and 5): its first 16
     /// bytes from revision 3, as only they're compared.
-    pub(crate) fn u_value(&self, key: &[u8]) -> Vec<u8> {
+    pub(crate) fn u_value(&self, key: &[u8]) -> Zeroizing<Vec<u8>> {
         match self.r {
-            2 => rc4(key, &PADDING),
+            2 => Zeroizing::new(rc4(key, &PADDING)),
             _ => {
-                let mut value = md5(&[&PADDING[..], self.id].concat()).to_vec();
+                let mut value = Zeroizing::new(md5(&[&PADDING[..], self.id].concat()).to_vec());
+                let mut round = Zeroizing::new(vec![0; key.len()]);
                 for i in 0..20u8 {
-                    let round: Vec<u8> = key.iter().map(|k| k ^ i).collect();
-                    value = rc4(&round, &value);
+                    xored(key, i, &mut round);
+                    value = Zeroizing::new(rc4(&round, &value));
                 }
                 value
             }
@@ -537,7 +613,7 @@ impl<'a> File<'a> {
 
     /// Revision 5's and 6's hash of `password`, `salt` and `udata`
     /// (Algorithm 2.B; revision 5's, SHA-256 alone).
-    fn hash(&self, password: &[u8], salt: &[u8], udata: &[u8]) -> Vec<u8> {
+    fn hash(&self, password: &[u8], salt: &[u8], udata: &[u8]) -> Zeroizing<Vec<u8>> {
         hash(self.r, password, salt, udata)
     }
 
@@ -546,9 +622,13 @@ impl<'a> File<'a> {
     /// against it: [`Fault::Unconfirmed`] without `adb`, else
     /// [`Fault::Perms`] when its /P or /EncryptMetadata isn't the
     /// dictionary's.
-    fn unwrapped(&self, intermediate: &[u8], wrapped: &[u8]) -> (Vec<u8>, Option<Fault>) {
+    fn unwrapped(
+        &self,
+        intermediate: &[u8],
+        wrapped: &[u8],
+    ) -> (Zeroizing<Vec<u8>>, Option<Fault>) {
         let cipher = Aes::new(&intermediate[..32]).expect("32 bytes");
-        let key = cipher.decrypt_cbc([0; 16], wrapped);
+        let key = Zeroizing::new(cipher.decrypt_cbc([0; 16], wrapped));
         let mut perms: [u8; 16] = self.perms.clone().try_into().expect("16 bytes");
         Aes::new(&key).expect("32 bytes").decrypt(&mut perms);
         let metadata = if self.encrypt_metadata { b'T' } else { b'F' };
@@ -566,31 +646,41 @@ impl<'a> File<'a> {
 /// `salt` and `udata`; and from revision 6, rounds of AES-128 and SHA-2
 /// over it until at least 64, and the last byte of the round's AES no more
 /// than its number less 32, the starting hash round 0.
-pub(crate) fn hash(r: i64, password: &[u8], salt: &[u8], udata: &[u8]) -> Vec<u8> {
-    let mut k = sha256(&[password, salt, udata].concat()).to_vec();
+pub(crate) fn hash(r: i64, password: &[u8], salt: &[u8], udata: &[u8]) -> Zeroizing<Vec<u8>> {
+    let input = Zeroizing::new([password, salt, udata].concat());
+    let mut k = Zeroizing::new(sha256(&input).to_vec());
     if r < 6 {
         return k;
     }
     let mut round = 0u32;
     loop {
         round += 1;
-        let block = [password, &k, udata].concat();
-        let k1 = block.repeat(64);
+        let block = Zeroizing::new([password, &k, udata].concat());
+        // K1, 64 times the block, AES-encrypted where it is: E.
+        let mut e = Zeroizing::new(block.repeat(64));
         let cipher = Aes::new(&k[..16]).expect("16 bytes");
-        let iv: [u8; 16] = k[16..32].try_into().expect("16 bytes");
-        let e = cipher.encrypt_cbc(iv, &k1);
+        let iv = Zeroizing::new(<[u8; 16]>::try_from(&k[16..32]).expect("16 bytes"));
+        cipher.encrypt_cbc(*iv, &mut e);
         let which = e[..16].iter().map(|&b| u32::from(b)).sum::<u32>() % 3;
-        k = match which {
+        k = Zeroizing::new(match which {
             0 => sha256(&e).to_vec(),
             1 => sha384(&e).to_vec(),
             _ => sha512(&e).to_vec(),
-        };
+        });
         if round >= 64 && u32::from(*e.last().expect("a block")) <= round - 32 {
             break;
         }
     }
     k.truncate(32);
     k
+}
+
+/// `key` with each byte XORed by `by`, into `round`, its length: an RC4
+/// round's key over /O and /U (Algorithms 3, 5 and 7).
+pub(crate) fn xored(key: &[u8], by: u8, round: &mut [u8]) {
+    for (r, k) in round.iter_mut().zip(key) {
+        *r = k ^ by;
+    }
 }
 
 /// How strings and streams are encrypted, and the crypt filters by name
