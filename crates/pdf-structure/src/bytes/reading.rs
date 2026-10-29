@@ -143,7 +143,8 @@ pub enum Error {
     /// call was reading is kept, so it reads again when it's asked again.
     /// An object it read whole on the way is kept, as [`Reading::get`]
     /// keeps it: the object stream an object is in, and the objects its
-    /// filters refer to.
+    /// filters refer to; and so is an object stream it decoded whole on the
+    /// way to a document ([`Reading::to_document`]).
     #[error("the file doesn't read: {0}")]
     Io(io::Error),
     /// The file is encrypted, and its bytes aren't handed out as written,
@@ -221,8 +222,10 @@ fn outside(span: &Span) -> String {
 }
 
 /// A file being read: opened, then each object read when it's first asked
-/// for, kept or not, on any thread; or read whole, into a [`Document`]
-/// ([`Reading::into_document`]), as [`read`](super::read) reads it.
+/// for, kept or not, on any thread; or read whole, into a [`Document`], as
+/// [`read`](super::read) reads it, the reading taken
+/// ([`Reading::into_document`]) or kept beside it
+/// ([`Reading::to_document`]).
 ///
 /// [`Reading::open`] reads the header, the cross-reference sections and
 /// the trailer (or, where they don't read, finds the objects by scanning
@@ -699,6 +702,36 @@ impl<S: ByteSource> Reading<S> {
             }
         };
         Ok(whole.document)
+    }
+
+    /// Every object its cross-references list read, as
+    /// [`Reading::into_document`] reads them, into a [`Document`], the
+    /// reading kept: what it has kept cloned, and what it hasn't read
+    /// without keeping it, as [`Reading::object_unkept`] reads it, so that
+    /// the document holds the one copy of it. Each object stream is
+    /// decoded and kept, as a read of an object in it keeps it, with the
+    /// objects the stream and its filters are. Its warnings are in the order
+    /// [`Reading::warnings`] says them, and made after it,
+    /// [`Reading::into_document`]'s document is the same; whatever the
+    /// reading read before, it's the whole read, so long as no stream it
+    /// decodes reaches the reading's budget.
+    ///
+    /// Kept beside the document, the reading hands out what the document
+    /// doesn't hold: a stream's data, which stays where it was written
+    /// ([`Data::At`](pdf_objects::object::Data::At)), through
+    /// [`Reading::data`] and [`Reading::decoded`], and the bytes at a span
+    /// ([`Reading::bytes`]); each record names the reading
+    /// ([`Record::source`]). It fails only when the source doesn't give the
+    /// bytes asked of it ([`Error::Io`]), keeping none of what it read
+    /// unkept, so asked again it reads them again.
+    pub fn to_document(&self) -> Result<Document, Error> {
+        match self.source.whole() {
+            Some(file) => {
+                let Ok(document) = self.reader.document(InMemory(file));
+                Ok(document)
+            }
+            None => (self.reader.document(self.by_position())).map_err(Error::Io),
+        }
     }
 }
 

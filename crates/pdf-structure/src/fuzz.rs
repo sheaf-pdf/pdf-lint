@@ -2,14 +2,16 @@
 //! bytes, a file is read without a panic, in the same way twice, with
 //! every place the reading gives inside what was read; read on demand, in
 //! an order the input chooses, it's the whole read, so long as no stream
-//! either decodes reaches the budget; read by position, a window at a time
-//! from a first window the input chooses, it's the whole read, and each
-//! stream's data and decoded data are as in memory; pruned, it reaches what
-//! it did, and an object added to it is at a number none held; and so are
-//! its revision before an incremental update, and the file opened by an
-//! owner's password. It reads under small limits, so that a run tries more
-//! inputs. It's compiled only for tests and under cargo-fuzz's `--cfg
-//! fuzzing`, and only reads.
+//! either decodes reaches the budget, and made a document with the reading
+//! kept, at a point the input chooses, it's the reading's whole read
+//! after; read by position, a window at a time from a first window the
+//! input chooses, it's the whole read, and each stream's data and decoded
+//! data are as in memory; pruned, it reaches what it did, and an object
+//! added to it is at a number none held; and so are its revision before an
+//! incremental update, and the file opened by an owner's password. It
+//! reads under small limits, so that a run tries more inputs. It's
+//! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`, and
+//! only reads.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -102,7 +104,9 @@ pub fn open<S: ByteSource>(
 /// keeps. Read on demand, its objects asked for in an order the choice's
 /// next bits give, some read unkept first, each the object and record it's
 /// kept as, it's the whole read, when neither reading's decoding reached
-/// the budget. Read by position, through [`Counted`], its first window and
+/// the budget, and made a document with the reading kept, at a point the
+/// choice's bits from the eleventh give, it's the reading's whole read
+/// after. Read by position, through [`Counted`], its first window and
 /// whether an object's reaches the next listed offset as the choice's
 /// bits from the fourth give, it's the whole read, and each stream's data
 /// and decoded data are as in memory. Pruned, what its trailer reaches is
@@ -222,8 +226,10 @@ fn streams(file: &[u8], passwords: &[&[u8]], choice: u16) {
 /// objects asked for in the order `choice`'s bits from the second give (by
 /// number, from the last, from the middle out, or the objects in object
 /// streams first), every third read unkept first, which gives the object
-/// and record it's then kept as; then read whole, it's `whole`'s, when
-/// neither reached the budget.
+/// and record it's then kept as, and made a document with the reading kept
+/// once none, a third, two thirds or all of them are, as its bits from the
+/// eleventh give; then read whole, it's that document, and it's `whole`'s,
+/// when neither reached the budget.
 fn on_demand(file: &[u8], passwords: &[&[u8]], section: Option<usize>, whole: &Whole, choice: u16) {
     let mut options = options();
     options.section = section;
@@ -244,7 +250,12 @@ fn on_demand(file: &[u8], passwords: &[&[u8]], section: Option<usize>, whole: &W
             ids.sort_by_key(|id| members.binary_search(&id.0).is_err());
         }
     }
+    let made = ids.len() * usize::from((choice >> 10) & 3) / 3;
+    let mut document = None;
     for (i, &id) in ids.iter().enumerate() {
+        if i == made {
+            document = Some(reading.to_document());
+        }
         let unkept = (i % 3 == 0).then(|| reading.object_unkept(id));
         let got = reading.get(id);
         if let Some(unkept) = unkept {
@@ -260,7 +271,13 @@ fn on_demand(file: &[u8], passwords: &[&[u8]], section: Option<usize>, whole: &W
             }
         }
     }
+    let document = document.unwrap_or_else(|| reading.to_document());
+    let document = document.expect("bytes in memory are made a document without fail");
     let lazily = reading.whole(None);
+    assert_eq!(
+        document, lazily.document,
+        "a document made with its reading kept is the reading's whole read"
+    );
     if !whole.reached && !lazily.reached {
         assert_eq!(
             lazily.document, whole.document,
@@ -562,7 +579,8 @@ mod tests {
     /// The fuzz target's checks on files the tests' writer makes, each
     /// mutated many times as a fuzzer might: bytes changed, cut, repeated,
     /// and moved, each file read by the empty password and, in turn, by
-    /// the owner's too.
+    /// the owner's too, and made a document with its reading kept at a
+    /// point chosen at random.
     #[test]
     fn mutated_files_read_within_their_bytes_the_same_twice() {
         // As written, each reads without a warning, an encrypted one opens
@@ -623,10 +641,14 @@ mod tests {
             b"startxref",
             b"\xff",
         ];
+        // Where a document is made with its reading kept, apart from the
+        // mutations, which are as they were.
+        let mut points = Random(0x2545_f491_4f6c_dd1d);
         for n in 0..2000 {
             // Each file in turn, the choice's lowest bit set every other
             // round: by the empty password alone, then the owner's too.
             let choice = u16::try_from(n / files.len()).unwrap_or(0);
+            let choice = choice | u16::try_from(points.below(4)).unwrap_or(0) << 10;
             let mut file = [&choice.to_le_bytes()[..], &files[n % files.len()]].concat();
             for _ in 0..1 + random.below(6) {
                 let at = 2 + random.below(file.len() - 2);

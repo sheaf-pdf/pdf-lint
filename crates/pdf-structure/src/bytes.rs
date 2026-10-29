@@ -15,7 +15,9 @@
 //! opened, then each object read when it's first asked for, and each
 //! object stream decoded when an object in it is. Read whole, every object
 //! is read so, in order, into a [`Document`] ([`read`],
-//! [`Reading::into_document`]); read on demand, on any thread, only what's
+//! [`Reading::into_document`]), or into one beside the reading, which hands
+//! out what the document doesn't hold, a stream's data among it
+//! ([`Reading::to_document`]); read on demand, on any thread, only what's
 //! asked for is. Each object read records where it was found
 //! ([`Record`]). Its bytes are in memory, or a file is read by position
 //! ([`FileBytes`], or any [`ByteSource`] that doesn't hold its bytes), a
@@ -451,6 +453,128 @@ pub(crate) struct Whole {
     pub(crate) reached: bool,
 }
 
+/// What a reader knows of the file beside its objects, which a document
+/// made of it holds ([`Reader::known`]).
+struct Known {
+    /// What it warned of as it opened the file, in order.
+    opened: Vec<Warning>,
+    /// The trailer.
+    trailer: Trailer,
+    /// The version in the header.
+    version: Option<Version>,
+    /// The newest section, when it updates one written before it.
+    update: Option<Update>,
+    /// Whether the file is encrypted, and if it is, whether it opened.
+    encryption: Encryption,
+    /// What the header and sections say of the file.
+    facts: Facts,
+    /// The largest number the entries list, a free one too, or a
+    /// cross-reference stream is, which new ids start past.
+    listed: Option<u32>,
+    /// Whether the objects' strings are encrypted.
+    encrypted: bool,
+    /// Whether it decrypted the objects' strings itself.
+    natively: bool,
+    /// Whether the catalog's metadata stream is in plain view.
+    plain_metadata: bool,
+}
+
+/// A document being made of a reader's reads, as the whole read makes it:
+/// each object by number, with its record, and what the reader warned of
+/// as it read each, by kind, each kind by number, so that the warnings are
+/// said in the whole read's order ([`Reader::warnings`]).
+#[derive(Default)]
+struct Assembly {
+    /// Each object read, with its record, or why it doesn't read.
+    objects: BTreeMap<ObjectId, Held>,
+    /// What the reader warned of as it read each object in use.
+    read: Vec<Warning>,
+    /// As it decoded each object stream.
+    containers: Vec<Warning>,
+    /// As it read each object in an object stream.
+    members: Vec<Warning>,
+    /// As it decrypted each object in use's strings.
+    decrypted: Vec<Warning>,
+    /// Each object stream's decoded data, where its header read.
+    decoded: BTreeMap<ObjectId, Vec<u8>>,
+}
+
+impl Assembly {
+    /// The object entry `(n, (generation, entry))` lists, as reading it
+    /// gave it, `read`.
+    fn object(&mut self, (n, (generation, entry)): (u32, (u16, XrefEntry)), read: Read) {
+        let Read {
+            object,
+            warnings,
+            decrypt,
+        } = read;
+        let id = match entry {
+            XrefEntry::InUse { .. } => {
+                self.read.extend(warnings);
+                self.decrypted.extend(decrypt);
+                (n, generation)
+            }
+            _ => {
+                self.members.extend(warnings);
+                (n, 0)
+            }
+        };
+        let held = object.map(|(object, record)| (object, Some(record)));
+        self.objects.insert(id, held);
+    }
+
+    /// Object stream `stream`, decoded: what the reader warned of as it
+    /// decoded it, and its decoded data, when its header read.
+    fn container(&mut self, stream: u32, warnings: Vec<Warning>, data: Option<Vec<u8>>) {
+        self.containers.extend(warnings);
+        if let Some(data) = data {
+            self.decoded.insert((stream, 0), data);
+        }
+    }
+
+    /// What it holds made a [`Document`], beside what the reader knows of
+    /// the file, `known`: the warnings in the whole read's order; the
+    /// strings the reader didn't decrypt itself decrypted by `decoder`,
+    /// when there's one; and the catalog's metadata read from `file`.
+    fn document<'f, F: Bytes<'f>>(
+        self,
+        file: F,
+        decoder: Option<&dyn Decode>,
+        known: Known,
+    ) -> Result<Document, F::Error> {
+        let Assembly {
+            mut objects,
+            read,
+            containers,
+            members,
+            decrypted,
+            decoded,
+        } = self;
+        let mut warnings = known.opened;
+        warnings.extend(read);
+        warnings.extend(containers);
+        warnings.extend(members);
+        warnings.extend(decrypted);
+        if !known.natively {
+            decrypt(decoder, known.encrypted, &mut objects, &mut warnings);
+        }
+        let get = |id| Ok(objects.get(&id).and_then(|o| Some(&o.as_ref().ok()?.0)));
+        let trailer = known.trailer;
+        let metadata = metadata(file, &trailer, &get, !known.plain_metadata)?;
+        let metadata = metadata.map(Cow::into_owned);
+        let mut document = Document::read(objects, trailer, known.listed);
+        document.header = known.version;
+        document.warnings = warnings;
+        document.decoded = decoded;
+        document.update = known.update;
+        document.size = Some(file.len());
+        document.metadata = metadata;
+        document.encryption = known.encryption;
+        document.facts = known.facts;
+        Ok(document)
+    }
+}
+
 /// What a read of the objects on the way to the metadata gives: the object
 /// a reference refers to, none for no object that reads, or why the file
 /// doesn't read.
@@ -617,6 +741,7 @@ struct Reader {
 }
 
 /// What reading an object gave, kept in its slot.
+#[derive(Clone)]
 struct Read {
     /// The object and where it was read from, or why it doesn't read.
     object: Result<(Object, Record), Unread>,
@@ -1279,6 +1404,37 @@ impl Reader {
         Ok(())
     }
 
+    /// Where each entry that lists an object is among the entries, in
+    /// order: each in use when `member` is false, else each in an object
+    /// stream. Object 0 is never one.
+    fn listing(&self, member: bool) -> impl Iterator<Item = usize> + '_ {
+        (0..self.entries.len()).filter(move |&i| match self.entries[i] {
+            (0, _) => false,
+            (_, (_, XrefEntry::InUse { .. })) => !member,
+            (_, (_, XrefEntry::Compressed { .. })) => member,
+            _ => false,
+        })
+    }
+
+    /// Every object stream the entries put objects in, decoded and kept,
+    /// by number, as the whole read decodes them: at once when the reader
+    /// asks `decoder` for them.
+    fn decode_all<'f, F: Bytes<'f>>(
+        &self,
+        file: F,
+        decoder: Option<&dyn Decode>,
+    ) -> Result<(), F::Error> {
+        match self.native_containers() {
+            true => {
+                for &stream in self.containers.keys() {
+                    self.container(file, stream)?;
+                }
+            }
+            false => self.decode_containers(file, decoder)?,
+        }
+        Ok(())
+    }
+
     /// Every object the entries list read, as the whole read reads them:
     /// each in use at its offset, by number; then each object stream the
     /// entries put objects in, by number, at once when the reader asks
@@ -1288,24 +1444,11 @@ impl Reader {
         file: F,
         decoder: Option<&dyn Decode>,
     ) -> Result<(), F::Error> {
-        let numbered = |i: usize| self.entries[i].0 != 0;
-        let in_use =
-            |i: &usize| numbered(*i) && matches!(self.entries[*i].1.1, XrefEntry::InUse { .. });
-        let member = |i: &usize| {
-            numbered(*i) && matches!(self.entries[*i].1.1, XrefEntry::Compressed { .. })
-        };
-        for i in (0..self.entries.len()).filter(in_use) {
+        for i in self.listing(false) {
             self.slot(file, i)?;
         }
-        match self.native_containers() {
-            true => {
-                for &stream in self.containers.keys() {
-                    self.container(file, stream)?;
-                }
-            }
-            false => self.decode_containers(file, decoder)?,
-        }
-        for i in (0..self.entries.len()).filter(member) {
+        self.decode_all(file, decoder)?;
+        for i in self.listing(true) {
             self.slot(file, i)?;
         }
         Ok(())
@@ -1340,6 +1483,30 @@ impl Reader {
         warnings
     }
 
+    /// What it knows of the file beside its objects, which a document made
+    /// of it holds, cloned.
+    fn known(&self) -> Known {
+        Known {
+            opened: self.opened.clone(),
+            trailer: self.trailer.clone(),
+            version: self.version,
+            update: self.update.clone(),
+            encryption: self.encryption.clone(),
+            facts: self.facts.clone(),
+            // New ids start past every number listed, free ones too, and
+            // past the cross-reference streams'.
+            listed: (self.entries.last())
+                .map(|&(n, _)| n)
+                .max(self.facts.max_stream),
+            encrypted: self.encrypted.is_some(),
+            natively: self.native && self.handler.is_some(),
+            // Metadata that isn't encrypted is in plain view: in a file that
+            // doesn't encrypt, or by `/EncryptMetadata false`, which counts
+            // from version 4, whether the handler opens or not.
+            plain_metadata: !self.encrypts || self.plain_metadata,
+        }
+    }
+
     /// The file read whole, every object the entries list read as
     /// [`Reader::read_all`] reads them, with `decoder` asked for what the
     /// reader doesn't decode or decrypt itself, into a [`Document`]: each
@@ -1352,90 +1519,66 @@ impl Reader {
     ) -> Result<Whole, F::Error> {
         self.read_all(file, decoder)?;
         let reached = self.reached.load(Ordering::Relaxed);
-        // Metadata that isn't encrypted is in plain view: in a file that
-        // doesn't encrypt, or by `/EncryptMetadata false`, which counts from
-        // version 4, whether the handler opens or not.
-        let plain_metadata = !self.encrypts || self.plain_metadata;
-        let natively = self.native && self.handler.is_some();
+        let known = self.known();
         let Reader {
             entries,
             slots,
             containers,
-            opened,
-            trailer,
-            version,
-            update,
-            encryption,
-            encrypted,
             handler,
-            facts,
             ..
         } = self;
-        let mut objects = BTreeMap::new();
-        let (mut read, mut members, mut decrypted) = (Vec::new(), Vec::new(), Vec::new());
-        for (&(n, (generation, entry)), slot) in entries.iter().zip(slots.into_vec()) {
-            let Some(got) = slot.into_inner() else {
-                continue;
-            };
-            let Read {
-                object,
-                warnings,
-                decrypt,
-            } = *got;
-            let id = match entry {
-                XrefEntry::InUse { .. } => {
-                    read.extend(warnings);
-                    decrypted.extend(decrypt);
-                    (n, generation)
-                }
-                _ => {
-                    members.extend(warnings);
-                    (n, 0)
-                }
-            };
-            objects.insert(id, object.map(|(object, record)| (object, Some(record))));
+        let mut assembly = Assembly::default();
+        for (&entry, slot) in entries.iter().zip(slots.into_vec()) {
+            if let Some(read) = slot.into_inner() {
+                assembly.object(entry, *read);
+            }
         }
-        let mut warnings = opened;
-        warnings.extend(read);
-        let mut decoded = BTreeMap::new();
         for (stream, lock) in containers {
             if let Some(container) = lock.into_inner() {
                 let Container {
                     header,
                     data,
-                    warnings: said,
+                    warnings,
                     ..
                 } = *container;
-                warnings.extend(said);
-                if header.is_ok() {
-                    decoded.insert((stream, 0), data);
-                }
+                assembly.container(stream, warnings, header.is_ok().then_some(data));
             }
         }
-        warnings.extend(members);
-        warnings.extend(decrypted);
-        if !natively {
-            decrypt(decoder, encrypted.is_some(), &mut objects, &mut warnings);
-        }
-        let get = |id| Ok(objects.get(&id).and_then(|o| Some(&o.as_ref().ok()?.0)));
-        let metadata = metadata(file, &trailer, &get, !plain_metadata)?.map(Cow::into_owned);
-        // New ids start past every number listed, free ones too, and past
-        // the cross-reference streams'.
-        let listed = entries.last().map(|&(n, _)| n).max(facts.max_stream);
-        let mut document = Document::read(objects, trailer, listed);
-        document.header = version;
-        document.warnings = warnings;
-        document.decoded = decoded;
-        document.update = update;
-        document.size = Some(file.len());
-        document.metadata = metadata;
-        document.encryption = encryption;
-        document.facts = facts;
+        let document = assembly.document(file, decoder, known)?;
         Ok(Whole {
             document,
             handler,
             reached,
         })
+    }
+
+    /// Every object the entries list, read as [`Reader::read_all`] reads
+    /// them, into a [`Document`], the reader kept: each object it has kept
+    /// cloned, and each it hasn't read without keeping it
+    /// ([`Reader::read`]); each object stream decoded and kept, as a read
+    /// of an object in it keeps it; and the warnings as
+    /// [`Reader::warnings`] says them. A read the file stops keeps none of
+    /// the objects it read unkept.
+    fn document<'f, F: Bytes<'f>>(&self, file: F) -> Result<Document, F::Error> {
+        let read = |i: usize| match self.slots[i].get() {
+            Some(kept) => Ok(Read::clone(kept)),
+            None => self.read(file, i),
+        };
+        let mut assembly = Assembly::default();
+        for i in self.listing(false) {
+            assembly.object(self.entries[i], read(i)?);
+        }
+        self.decode_all(file, None)?;
+        for (&stream, lock) in &self.containers {
+            if let Some(container) = lock.get() {
+                let data = (container.header.is_ok()).then(|| container.data.clone());
+                assembly.container(stream, container.warnings.clone(), data);
+            }
+        }
+        for i in self.listing(true) {
+            assembly.object(self.entries[i], read(i)?);
+        }
+        assembly.document(file, None, self.known())
     }
 
     /// Stream `id`'s data, written at `at`, decoded by `filters`, as much

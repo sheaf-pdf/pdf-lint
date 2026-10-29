@@ -494,6 +494,92 @@ mod tests {
         assert!(failed > 500, "{failed}");
     }
 
+    /// Each read a document made with its reading kept makes by position,
+    /// failed, fails it, keeping none of what it read unkept: what the
+    /// reading keeps, and what it warns of past the opening's warnings, are
+    /// of the object streams and the objects on the way to them, which a
+    /// read of an object in one keeps, or of nothing; asked again, it's the
+    /// whole read, and so is the reading made a document after. Each test
+    /// file, in first windows of 1 byte, not reaching the next listed
+    /// offset, and of 4096, reaching it.
+    #[test]
+    fn a_document_whose_read_fails_keeps_nothing_it_read_unkept_and_reads_again() {
+        let mut failed = 0;
+        for (name, file, passwords) in files() {
+            let whole = read_opened(&file, &passwords);
+            for (first, bound) in [(1, false), (4096, true)] {
+                let source = Failing::new(&file, first);
+                let reading = open(&source, &passwords, &Options::DEFAULT, bound).unwrap();
+                source.starts.lock().unwrap().clear();
+                assert_eq!(reading.to_document().unwrap(), whole, "{name}");
+                // What reading every object unkept keeps: the object
+                // streams, and the objects on the way to them.
+                let twin = Reading::open(&file[..], &passwords, &Options::DEFAULT).unwrap();
+                twin.ids().for_each(|id| drop(twin.object_unkept(id)));
+                let ways: Vec<ObjectId> = (twin.ids())
+                    .filter(|&id| twin.record(id).is_some())
+                    .collect();
+                let mut starts = std::mem::take(&mut *source.starts.lock().unwrap());
+                starts.sort_unstable();
+                starts.dedup();
+                for at in starts {
+                    let reading = open(&source, &passwords, &Options::DEFAULT, bound).unwrap();
+                    let opened = reading.warnings();
+                    source.fail_at(at);
+                    let error = reading.to_document().unwrap_err();
+                    assert!(source.failed(), "{name}: no read at {at}");
+                    assert!(failed_at(error, at), "{name}, at {at}");
+                    let kept: Vec<ObjectId> = (reading.ids())
+                        .filter(|&id| reading.record(id).is_some())
+                        .collect();
+                    let unkept: Vec<_> = kept.iter().filter(|id| !ways.contains(id)).collect();
+                    assert!(unkept.is_empty(), "{name}, at {at}: {unkept:?} kept");
+                    let warnings = reading.warnings();
+                    assert_eq!(warnings[..opened.len()], opened, "{name}, at {at}");
+                    let said = &warnings[opened.len()..];
+                    assert!(
+                        said.iter()
+                            .all(|w| w.object.is_some_and(|id| ways.contains(&id))),
+                        "{name}, at {at}: {said:?}"
+                    );
+                    if kept.is_empty() {
+                        assert!(said.is_empty(), "{name}, at {at}: {said:?}");
+                    }
+                    assert_eq!(reading.to_document().unwrap(), whole, "{name}, at {at}");
+                    assert_eq!(reading.into_document().unwrap(), whole, "{name}, at {at}");
+                    failed += 1;
+                }
+            }
+        }
+        assert!(failed > 300, "{failed}");
+    }
+
+    /// A document made with its reading kept, whose read of an object in
+    /// use fails, the last of them, keeps nothing at all: not the objects
+    /// read before it, nor a warning, and no object stream decoded, though
+    /// the file has one; asked again it's the whole read.
+    #[test]
+    fn a_document_whose_read_of_an_object_fails_keeps_nothing() {
+        let (file, _) = compressed(false);
+        let at = find(&file, b"5 0 obj").unwrap();
+        for bound in [true, false] {
+            let source = Failing::new(&file, 1);
+            let reading = open(&source, &[], &Options::DEFAULT, bound).unwrap();
+            let warnings = reading.warnings();
+            assert!(!reading.reader.containers.is_empty(), "an object stream");
+            source.fail_at(at);
+            assert!(failed_at(reading.to_document().unwrap_err(), at), "{bound}");
+            assert!(source.failed(), "{bound}: no read at {at}");
+            assert_eq!(reading.warnings(), warnings, "{bound}");
+            assert!(
+                reading.ids().all(|id| reading.record(id).is_none()),
+                "{bound}"
+            );
+            assert!((reading.reader.containers.values()).all(|c| c.get().is_none()));
+            assert_eq!(reading.to_document().unwrap(), read(&file), "{bound}");
+        }
+    }
+
     /// `file` opened by position through `source` and read on demand: the
     /// read of object `id` fails when the read at `at` does, keeps nothing
     /// of it (no warning, no record of it, no object stream decoded), and

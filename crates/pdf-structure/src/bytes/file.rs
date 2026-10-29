@@ -264,6 +264,31 @@ mod tests {
         assert_eq!(reading.into_document().unwrap(), read(&bytes));
     }
 
+    /// A file loaded from its path (the inventory's `load`): read by
+    /// position, made a document with its reading kept, it's the whole
+    /// read, the reading beside it handing out each stream's data, the
+    /// file's bytes where the document says it was written; and the
+    /// reading made a document after is the same.
+    #[test]
+    fn a_file_loaded_from_its_path_is_the_whole_read_its_reading_kept() {
+        let bytes = write::file("1.7", &clean(), root(), Xref::Stream);
+        let temp = Temp::new("load", &bytes);
+        let file = FileBytes::new(File::open(&temp.0).unwrap()).unwrap();
+        let reading = Reading::open(file, &[], &Options::DEFAULT).unwrap();
+        let doc = reading.to_document().unwrap();
+        assert_eq!(doc, read(&bytes));
+        let mut streams = 0;
+        for (id, object) in doc.objects() {
+            let Some(at) = object.as_stream().and_then(|s| s.data.at()) else {
+                continue;
+            };
+            assert_eq!(reading.data(id).unwrap(), &bytes[at.start..at.end]);
+            streams += 1;
+        }
+        assert!(streams > 1, "{streams}");
+        assert_eq!(reading.into_document().unwrap(), doc);
+    }
+
     /// A file changed in place after it's opened isn't unchanged, by a
     /// byte appended, which changes its length, and by bytes of the same
     /// length whose modification time is set apart, which doesn't lean on

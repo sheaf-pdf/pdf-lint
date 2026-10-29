@@ -2,6 +2,7 @@
 //! read, so long as no stream it decodes reaches the budget; what it keeps
 //! of what it reads, and where it read each object from.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -105,6 +106,19 @@ pub(super) fn length_by_reference() -> Vec<u8> {
     )
 }
 
+/// [`filtered`]'s file, the page tree in its object stream with a key the
+/// parser reads past (`/Mi#z`, an escape of one digit), and the object
+/// stream's zlib data without its last byte, which decodes whole but for
+/// its checksum: so that the object stream's decode warns, and so does an
+/// object in it.
+fn warning_twice() -> Vec<u8> {
+    let (objects, _) = objects_2_and_3();
+    let at = find(&objects, b"/Mine").unwrap();
+    let objects = [&objects[..at], b"/Mi#z", &objects[at + 5..]].concat();
+    let data = write::zlib(&objects);
+    filtered(false, " /Filter /FlateDecode", &data[..data.len() - 1])
+}
+
 /// A file whose table lists object 0 in use.
 fn object_0_in_use() -> Vec<u8> {
     let mut file = write::assembled(
@@ -192,6 +206,11 @@ pub(super) fn files() -> Vec<Named> {
         let name = format!("filtered{filter}, {} bytes", data.len());
         files.push((name, filtered(false, filter, &data), none.clone()));
     }
+    files.push((
+        "an object stream and an object in it that warn".to_string(),
+        warning_twice(),
+        none.clone(),
+    ));
     let mut scanned = write::file("1.7", &clean(), root(), Xref::Table);
     let at = rfind(&scanned, b"startxref").unwrap();
     scanned.truncate(at);
@@ -312,6 +331,198 @@ fn a_reading_on_demand_is_the_whole_read_in_any_order_on_any_thread() {
         }
     }
     assert!(compared > 100, "{compared}");
+}
+
+/// What `reading` keeps: each object's record, by number, and its
+/// warnings.
+fn kept<S: ByteSource>(reading: &Reading<S>) -> (BTreeMap<ObjectId, Record>, Vec<Warning>) {
+    let records = (reading.ids())
+        .filter_map(|id| Some((id, reading.record(id)?.clone())))
+        .collect();
+    (records, reading.warnings())
+}
+
+/// `file`, under `options`, opened by `passwords`, made a document with its
+/// reading kept: after nothing's read, after every object's got by number,
+/// after every third, and on eight threads at once, each having got every
+/// eighth from the last back. Each time, made after it, `into_document`'s
+/// document is the same, and it's the whole read, but where either's
+/// decoding reached the budget. Made on one thread, it keeps what a reading
+/// keeps that has read every object unkept besides: nothing it read unkept
+/// but the object streams and the objects on the way to them, which, from
+/// nothing read, are all it keeps. How many were set beside the whole
+/// read.
+fn beside(name: &str, file: &[u8], passwords: &[&[u8]], options: &Options) -> usize {
+    let whole = whole(file, passwords, options);
+    let mut compared = 0;
+    let orders = [
+        "nothing read",
+        "every object",
+        "every third",
+        "on eight threads",
+    ];
+    for order in orders {
+        let reading = open(file, passwords, options);
+        let ids: Vec<ObjectId> = reading.ids().collect();
+        let documents: Vec<Document> = match order {
+            "on eight threads" => std::thread::scope(|scope| {
+                let threads: Vec<_> = (0..8)
+                    .map(|t| {
+                        let (reading, ids) = (&reading, &ids);
+                        scope.spawn(move || {
+                            for &id in ids.iter().rev().skip(t).step_by(8) {
+                                let _ = reading.get(id);
+                            }
+                            reading.to_document().unwrap()
+                        })
+                    })
+                    .collect();
+                threads.into_iter().map(|t| t.join().unwrap()).collect()
+            }),
+            _ => {
+                let got: Vec<ObjectId> = match order {
+                    "nothing read" => Vec::new(),
+                    "every object" => ids.clone(),
+                    _ => ids.iter().copied().step_by(3).collect(),
+                };
+                let twin = open(file, passwords, options);
+                for reading in [&reading, &twin] {
+                    got.iter().for_each(|&id| drop(reading.get(id)));
+                }
+                let document = reading.to_document().unwrap();
+                ids.iter().for_each(|&id| drop(twin.object_unkept(id)));
+                let (records, warnings) = kept(&reading);
+                let (twins, said) = kept(&twin);
+                assert_eq!(records, twins, "{name}, {order}: what's kept");
+                let reached = |r: &Reading<&[u8]>| r.reader.reached.load(Ordering::Relaxed);
+                if !reached(&reading) && !reached(&twin) {
+                    assert_eq!(warnings, said, "{name}, {order}: what's said");
+                }
+                if order == "nothing read" {
+                    // The object streams, and what their dictionaries refer
+                    // to, which their filters may.
+                    let mut ways = BTreeSet::new();
+                    for &n in reading.reader.containers.keys() {
+                        ways.insert((n, 0));
+                        if let Ok(o) = document.get((n, 0)) {
+                            ways.extend(o.references());
+                        }
+                    }
+                    let unkept: Vec<_> = (records.keys()).filter(|id| !ways.contains(id)).collect();
+                    assert!(unkept.is_empty(), "{name}: {unkept:?} kept");
+                }
+                vec![document]
+            }
+        };
+        let lazily = reading.whole(None);
+        for document in &documents {
+            assert_eq!(*document, lazily.document, "{name}, {order}: made after it");
+        }
+        if whole.reached || lazily.reached {
+            continue;
+        }
+        assert_eq!(documents[0], whole.document, "{name}, {order}");
+        compared += 1;
+    }
+    compared
+}
+
+/// Every test file, and the revision before an update, made a document
+/// with its reading kept, whatever it read before, by number or on eight
+/// threads, is the whole read, and so is the reading made a document after
+/// it; and it keeps nothing it read unkept but the object streams.
+#[test]
+fn a_document_made_with_its_reading_kept_is_the_whole_read_whatever_was_read() {
+    let mut compared = 0;
+    for (name, file, passwords) in files() {
+        compared += beside(&name, &file, &passwords, &Options::DEFAULT);
+        if let Some(update) = read_opened(&file, &passwords).update {
+            let mut options = Options::DEFAULT;
+            options.section = Some(update.previous);
+            compared += beside(&format!("{name}, before"), &file, &passwords, &options);
+        }
+    }
+    assert!(compared > 150, "{compared}");
+}
+
+/// A document made with its reading kept holds each stream's data where
+/// it was written, and the reading beside it hands it out, as a reading of
+/// its own does, and decoded: the file's bytes there, where nothing's
+/// encrypted. Each test file.
+#[test]
+fn a_documents_stream_data_is_handed_out_by_the_reading_kept_beside_it() {
+    let mut streams = 0;
+    for (name, file, passwords) in files() {
+        let reading = open(&file, &passwords, &Options::DEFAULT);
+        let doc = reading.to_document().unwrap();
+        let own = open(&file, &passwords, &Options::DEFAULT);
+        for (id, object) in doc.objects() {
+            let Value::Stream(stream) = object.value() else {
+                continue;
+            };
+            let at = stream.data.at();
+            assert!(at.is_some(), "{name}: {id:?}'s data isn't placed");
+            let data = reading.data(id);
+            let given = format!("{:?}", own.data(id));
+            assert_eq!(format!("{data:?}"), given, "{name}: {id:?}'s data");
+            let decoded = format!("{:?}", reading.decoded(id));
+            assert_eq!(decoded, format!("{:?}", own.decoded(id)), "{name}: {id:?}");
+            if doc.encryption == Encryption::None {
+                let at = at.unwrap();
+                assert_eq!(data.unwrap(), &file[at.start..at.end], "{name}: {id:?}");
+            }
+            streams += 1;
+        }
+        assert_eq!(reading.into_document().unwrap(), doc, "{name}");
+    }
+    assert!(streams > 50, "{streams}");
+}
+
+/// The inventory's loads from bytes: as they are (`load_mem`), under
+/// options (`load_mem_with_options`: as of an earlier section, and under
+/// limits a stream reaches) and by a password (`load_with_password`), each
+/// a reading made a document, with the reading kept or not, which is
+/// `bytes::read`, `read_from`, `read_limited` or `read_opened`'s.
+#[test]
+fn a_document_is_loaded_from_bytes_under_options_and_by_a_password() {
+    let file = write::file("1.7", &clean(), root(), Xref::Stream);
+    let reading = Reading::open(&file[..], &[], &Options::DEFAULT).unwrap();
+    assert_eq!(reading.to_document().unwrap(), read(&file));
+    assert_eq!(reading.into_document().unwrap(), read(&file));
+
+    let (file, _) = updated_with_padding();
+    let previous = read(&file).update.unwrap().previous;
+    let mut options = Options::DEFAULT;
+    options.section = Some(previous);
+    let reading = Reading::open(&file[..], &[], &options).unwrap();
+    let doc = reading.to_document().unwrap();
+    assert_eq!(doc, read_from(&file, previous));
+    assert_ne!(doc, read(&file));
+    assert_eq!(reading.into_document().unwrap(), doc);
+
+    let size = 64 << 10;
+    let file = streams_of(2, size);
+    let mut options = Options::DEFAULT;
+    (options.limits.stream, options.limits.budget) = (size, size + size / 2);
+    let reading = Reading::open(&file[..], &[], &options).unwrap();
+    let doc = reading.to_document().unwrap();
+    assert!(doc.get((2, 0)).is_ok());
+    assert!(doc.get((3, 0)).is_err(), "cut");
+    assert_eq!(doc, read_limited(&file, size, size + size / 2));
+    assert_eq!(reading.into_document().unwrap(), doc);
+
+    for kind in KINDS {
+        let file = write::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
+        let doc = read_opened(&file, &[b"user"]);
+        assert!(
+            matches!(doc.encryption, Encryption::Opened { owner: false, .. }),
+            "{kind:?}: {:?}",
+            doc.encryption
+        );
+        let reading = Reading::open(&file[..], &[b"user"], &Options::DEFAULT).unwrap();
+        assert_eq!(reading.to_document().unwrap(), doc, "{kind:?}");
+        assert_eq!(reading.into_document().unwrap(), doc, "{kind:?}");
+    }
 }
 
 /// A reading's types can be shared across threads, over each source in
@@ -567,8 +778,8 @@ fn an_objects_record_says_whether_endobj_follows_it() {
 
 /// The budget is spent in the order streams are decoded: read whole, by
 /// number, the first object stream decodes and the second is cut; on
-/// demand, the one an object is first asked of. Each says it reached the
-/// budget.
+/// demand, the one an object is first asked of; made a document with the
+/// reading kept, the rest by number. Each says it reached the budget.
 #[test]
 fn the_budget_cuts_the_stream_decoded_last_whole_by_number_on_demand_as_asked() {
     let size = 64 << 10;
@@ -591,6 +802,20 @@ fn the_budget_cuts_the_stream_decoded_last_whole_by_number_on_demand_as_asked() 
     let reading = open(&file, &[], &options);
     reading.ids().for_each(|id| drop(reading.get(id)));
     assert_eq!(reading.into_document().unwrap(), *doc);
+    // Made a document with the reading kept, from nothing read, its object
+    // streams decoded by number, the whole read's; after the second's
+    // asked for, the second's whole, and the reading made a document after
+    // it the same.
+    let reached = |reading: &Reading<&[u8]>| reading.reader.reached.load(Ordering::Relaxed);
+    let reading = open(&file, &[], &options);
+    assert_eq!(reading.to_document().unwrap(), *doc);
+    assert!(reached(&reading));
+    let reading = open(&file, &[], &options);
+    assert!(reading.get((3, 0)).is_ok());
+    let kept = reading.to_document().unwrap();
+    assert!(kept.get((3, 0)).is_ok() && kept.get((2, 0)).is_err(), "cut");
+    assert!(reached(&reading));
+    assert_eq!(reading.into_document().unwrap(), kept);
     // With the budget for both, neither reaches it.
     options.limits.budget = 2 * size;
     let read = whole(&file, &[], &options);
