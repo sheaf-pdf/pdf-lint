@@ -552,6 +552,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::Password;
     use crate::bytes;
     use crate::source::Source;
     use crate::write::{self, Body, Xref};
@@ -814,7 +815,10 @@ mod tests {
             let doc = bytes::read_with(&data, &Unaskable);
             assert_eq!(
                 doc.encryption,
-                crate::Encryption::Opened { owner: false },
+                crate::Encryption::Opened {
+                    owner: false,
+                    by: None
+                },
                 "{kind}"
             );
             assert!(doc.warnings.is_empty(), "{kind}: {:?}", doc.warnings);
@@ -836,10 +840,11 @@ mod tests {
                 Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal)),
                 "{kind}"
             );
-            let owned = bytes::read_opened(&data, &[b"owner"]);
+            let owned = bytes::read_opened(&data, &[Password("owner")]);
+            let by = Some((0, pdf_crypt::Encoding::Utf8));
             assert_eq!(
                 owned.encryption,
-                crate::Encryption::Opened { owner: true },
+                crate::Encryption::Opened { owner: true, by },
                 "{kind}"
             );
             assert_eq!(owned.decoded, doc.decoded, "{kind}");
@@ -922,7 +927,7 @@ mod tests {
             for password in ["user", "owner"] {
                 let what = format!("{i}, {password}");
                 let options = bytes::Options::DEFAULT;
-                let reading = bytes::Reading::open(&file[..], &[password.as_bytes()], &options);
+                let reading = bytes::Reading::open_with(&file[..], &[Password(password)], &options);
                 let reading = reading.unwrap();
                 let theirs = qpdf(&path).undecoding().password(password).decode(&ids);
                 for (id, plain) in ids.into_iter().zip([XMP, ATTACHED, CONTENT]) {
@@ -1418,7 +1423,11 @@ qpdf: operation succeeded with warnings\n";
         );
         let doc = bytes::read_opened(&data, &[]);
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
-        assert_eq!(doc.encryption, crate::Encryption::Opened { owner: false });
+        let opened = crate::Encryption::Opened {
+            owner: false,
+            by: None,
+        };
+        assert_eq!(doc.encryption, opened);
         let contents = contents(&doc);
         assert_eq!(
             *contents.value(),
@@ -1434,7 +1443,7 @@ qpdf: operation succeeded with warnings\n";
         // A password that doesn't open it, though its user password is
         // empty, is all that's tried: it's locked, and the string stays
         // ciphertext, where it is.
-        let doc = bytes::read_opened(&data, &[b"wrong"]);
+        let doc = bytes::read_opened(&data, &[Password("wrong")]);
         assert_eq!(doc.encryption, crate::Encryption::Locked);
         let annot = (doc.objects().map(|(_, o)| o))
             .find(|o| {
@@ -2120,9 +2129,7 @@ qpdf: operation succeeded with warnings\n";
                             .flatten();
                         let (ours, handler) = match password {
                             Some(password) => {
-                                let passwords = pdf_crypt::passwords(password);
-                                let passwords: Vec<&[u8]> = passwords.iter().map(Vec::as_slice).collect();
-                                bytes::read_opened_by(&data, &passwords)
+                                bytes::read_opened_by(&data, &[Password(password)])
                             }
                             None => (ours, handler),
                         };

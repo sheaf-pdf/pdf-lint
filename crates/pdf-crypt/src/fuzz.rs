@@ -3,13 +3,15 @@
 
 /// The fuzz target `crypt`'s body: a dictionary of any version, revision
 /// and fields of any length that `data` chooses, or one the writer makes
-/// that opens, opened with passwords from it, and when it opens, strings
-/// and streams from it decrypted by each method, and encrypted under a
-/// context from it. Panics on a broken promise: none should, decrypting
-/// gives no more than it's given, and what's encrypted decrypts to what
-/// it was, the same bytes each time, or is refused alike both ways.
+/// that opens, opened with passwords from it, each encoding of its text and
+/// its bytes as they are, and when it opens, strings and streams from it
+/// decrypted by each method, and encrypted under a context from it. Panics
+/// on a broken promise: none should, the handler says which password
+/// opened it, which opens it alike alone, decrypting gives no more than
+/// it's given, and what's encrypted decrypts to what it was, the same
+/// bytes each time, or is refused alike both ways.
 pub fn handler(data: &[u8]) {
-    use crate::{CryptFilter, Dictionary, Fault, Handler, Method};
+    use crate::{CryptFilter, Dictionary, Encoded, Fault, Handler, Method, Password};
     let mut bytes = data.iter().copied();
     let mut next = || bytes.next().unwrap_or(0);
     let mut take = |n: usize| -> Vec<u8> { (0..n).map(|_| next()).collect() };
@@ -72,9 +74,21 @@ pub fn handler(data: &[u8]) {
         }
     };
     let rest: Vec<u8> = data.iter().copied().skip(8 + 5 * 64 + 28).collect();
-    let Ok(handler) = Handler::open(&dictionary, &id, &[&password, b""]) else {
+    let text = String::from_utf8_lossy(&password);
+    let mut passwords = Password(&text).encodings();
+    passwords.extend([Encoded::verbatim(&password), Encoded::verbatim(b"")]);
+    let Ok(handler) = Handler::open(&dictionary, &id, &passwords) else {
         return;
     };
+    let (i, encoding) = handler.opened_by().expect("a password given opened it");
+    assert_eq!(passwords[i].encoding(), encoding, "the password's encoding");
+    let alone = Handler::open(&dictionary, &id, &passwords[i..=i]).expect("it opens alone");
+    assert_eq!(alone.opened_by(), Some((0, encoding)), "opened by it alone");
+    assert_eq!(
+        (alone.owner(), alone.faults()),
+        (handler.owner(), handler.faults()),
+        "opened alike alone"
+    );
     let id = (u32::from(head[2]), u16::from(head[3]));
     let methods = [
         None,

@@ -8,10 +8,11 @@
 //! input chooses, it's the whole read, and each stream's data and decoded
 //! data are as in memory; pruned, it reaches what it did, and an object
 //! added to it is at a number none held; and so are its revision before an
-//! incremental update, and the file opened by an owner's password. It
-//! reads under small limits, so that a run tries more inputs. It's
-//! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`, and
-//! only reads.
+//! incremental update, and the file opened by an owner's password; and
+//! opened by a wrong password, then unlocked by the owner's, it's the file
+//! opened by the owner's. It reads under small limits, so that a run tries
+//! more inputs. It's compiled only for tests and under cargo-fuzz's
+//! `--cfg fuzzing`, and only reads.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -19,14 +20,18 @@ use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use pdf_crypt::Password;
 use pdf_objects::object::{Object, ObjectId, Span, Value};
 
 use crate::bytes::{ByteSource, Error, Options, Reading, Whole, XrefEntry};
-use crate::source::{Document, Source};
+use crate::source::{Document, Encryption, Source};
 
 /// The owner's password the fuzz target opens a file by, when its input
 /// says to: the one the unit test's encrypted files are written with.
-const OWNER: &[u8] = b"owner";
+const OWNER: Password<'static> = Password("owner");
+
+/// Passwords that open none of the unit test's encrypted files.
+const WRONG: [Password<'static>; 2] = [Password("wrong"), Password("also wrong")];
 
 /// The limits the fuzz target reads under: a stream decodes to at most
 /// 1 MiB, and a reading's streams to 4 MiB, so that a run tries more
@@ -82,13 +87,13 @@ impl ByteSource for Counted<'_> {
     }
 }
 
-/// `source` opened as [`Reading::open`] opens it, but that an object read
-/// by position is first given a window to a byte past the next offset the
-/// cross-references list only when `bound`: without, a small first window
-/// reaches every read's windows.
+/// `source` opened as [`Reading::open_with`] opens it, but that an object
+/// read by position is first given a window to a byte past the next offset
+/// the cross-references list only when `bound`: without, a small first
+/// window reaches every read's windows.
 pub fn open<S: ByteSource>(
     source: S,
-    passwords: &[&[u8]],
+    passwords: &[Password],
     options: &Options,
     bound: bool,
 ) -> Result<Reading<S>, Error> {
@@ -114,8 +119,9 @@ pub fn open<S: ByteSource>(
 /// is at a number no entry held (`pruned`). When the file has an
 /// incremental update, so is the revision before it ([`Options::section`]);
 /// and with the choice's lowest bit set, so is the file opened by the
-/// owner's password `owner`, and its revision before an update. Panics on
-/// a broken promise.
+/// owner's password `owner`, and its revision before an update, and the
+/// file opened by a wrong password, then unlocked by the owner's
+/// (`unlocked`). Panics on a broken promise.
 pub fn read_file(data: &[u8]) {
     let (choice, file) = match data {
         [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
@@ -124,12 +130,13 @@ pub fn read_file(data: &[u8]) {
     alike(file, &[], choice);
     if choice & 1 != 0 {
         alike(file, &[OWNER], choice);
+        unlocked(file, choice);
     }
 }
 
 /// `file` read whole under [`options`], opened by `passwords`, as of the
 /// section at `section` when there's one.
-fn whole(file: &[u8], passwords: &[&[u8]], section: Option<usize>) -> Whole {
+fn whole(file: &[u8], passwords: &[Password], section: Option<usize>) -> Whole {
     let mut options = options();
     options.section = section;
     Reading::in_memory(file, passwords, &options, true, None).whole(None)
@@ -139,7 +146,7 @@ fn whole(file: &[u8], passwords: &[&[u8]], section: Option<usize>) -> Whole {
 /// inside `file`'s bytes or what it decoded, and read on demand in the
 /// order `choice` gives, the same; and when the file has an update, the
 /// same of the revision before it.
-fn alike(file: &[u8], passwords: &[&[u8]], choice: u16) {
+fn alike(file: &[u8], passwords: &[Password], choice: u16) {
     let read = whole(file, passwords, None);
     let doc = &read.document;
     assert_eq!(
@@ -175,7 +182,7 @@ fn alike(file: &[u8], passwords: &[&[u8]], choice: u16) {
 /// budget is reached.
 fn by_position(
     file: &[u8],
-    passwords: &[&[u8]],
+    passwords: &[Password],
     section: Option<usize>,
     doc: &Document,
     choice: u16,
@@ -194,7 +201,7 @@ fn by_position(
 /// [`Counted`] as [`by_position`] reads it: each object's data, and its
 /// data decoded, the same each way, or the same error; the data, where
 /// it's borrowed, a borrow of the file's bytes.
-fn streams(file: &[u8], passwords: &[&[u8]], choice: u16) {
+fn streams(file: &[u8], passwords: &[Password], choice: u16) {
     let options = options();
     let reading = Reading::in_memory(file, passwords, &options, true, None);
     let first = 1 + usize::from((choice >> 4) & 63);
@@ -230,26 +237,17 @@ fn streams(file: &[u8], passwords: &[&[u8]], choice: u16) {
 /// once none, a third, two thirds or all of them are, as its bits from the
 /// eleventh give; then read whole, it's that document, and it's `whole`'s,
 /// when neither reached the budget.
-fn on_demand(file: &[u8], passwords: &[&[u8]], section: Option<usize>, whole: &Whole, choice: u16) {
+fn on_demand(
+    file: &[u8],
+    passwords: &[Password],
+    section: Option<usize>,
+    whole: &Whole,
+    choice: u16,
+) {
     let mut options = options();
     options.section = section;
     let reading = Reading::in_memory(file, passwords, &options, true, None);
-    let mut ids: Vec<ObjectId> = reading.ids().collect();
-    match (choice >> 1) & 3 {
-        0 => {}
-        1 => ids.reverse(),
-        2 => {
-            let half = ids.len() / 2;
-            ids.rotate_left(half);
-        }
-        _ => {
-            let members: Vec<u32> = (reading.entries())
-                .filter(|(_, _, entry)| matches!(entry, XrefEntry::Compressed { .. }))
-                .map(|(n, _, _)| n)
-                .collect();
-            ids.sort_by_key(|id| members.binary_search(&id.0).is_err());
-        }
-    }
+    let ids = ordered(&reading, choice);
     let made = ids.len() * usize::from((choice >> 10) & 3) / 3;
     let mut document = None;
     for (i, &id) in ids.iter().enumerate() {
@@ -284,6 +282,100 @@ fn on_demand(file: &[u8], passwords: &[&[u8]], section: Option<usize>, whole: &W
             "a reading on demand is the whole read"
         );
     }
+}
+
+/// The objects of `reading` in the order `choice`'s bits from the second
+/// give: by number, from the last, from the middle out, or the objects in
+/// object streams first.
+fn ordered<S: ByteSource>(reading: &Reading<S>, choice: u16) -> Vec<ObjectId> {
+    let mut ids: Vec<ObjectId> = reading.ids().collect();
+    match (choice >> 1) & 3 {
+        0 => {}
+        1 => ids.reverse(),
+        2 => {
+            let half = ids.len() / 2;
+            ids.rotate_left(half);
+        }
+        _ => {
+            let members: Vec<u32> = (reading.entries())
+                .filter(|(_, _, entry)| matches!(entry, XrefEntry::Compressed { .. }))
+                .map(|(n, _, _)| n)
+                .collect();
+            ids.sort_by_key(|id| members.binary_search(&id.0).is_err());
+        }
+    }
+    ids
+}
+
+/// The file opened by a wrong password, which leaves it locked where no
+/// password but its own opens it, the empty one too; then, after none, a
+/// third, two thirds or all of its objects are asked for, in the order
+/// `choice` gives, as its bits from the eleventh give, unlocked by another
+/// wrong password, which gives it back as it was, keeping what it had read
+/// and said; then by the owner's password `owner`. Read on demand in that
+/// order, it's then the file opened by the owner's password
+/// ([`Reading::open_with`]): each object, its record and the failure to
+/// read one, what it warned of, and made a document, the whole read; but
+/// where the wrong password opened it, which unlocking leaves as it was.
+fn unlocked(file: &[u8], choice: u16) {
+    let options = options();
+    let in_memory = "bytes in memory are read without fail";
+    let locked = Reading::open_with(file, &WRONG[..1], &options).expect(in_memory);
+    let ids = ordered(&locked, choice);
+    let asked = ids.len() * usize::from((choice >> 10) & 3) / 3;
+    for &id in &ids[..asked] {
+        drop(locked.get(id));
+    }
+    let opened = matches!(locked.encryption(), Encryption::Opened { .. });
+    let before = (kept(&locked), locked.encryption().clone());
+    let locked = match locked.unlock(&WRONG[1].encodings()) {
+        Ok(reading) | Err((reading, _)) => reading,
+    };
+    let after = (kept(&locked), locked.encryption().clone());
+    assert_eq!(
+        after, before,
+        "a reading a wrong password doesn't unlock is as it was"
+    );
+    let unlocked = match locked.unlock(&OWNER.encodings()) {
+        Ok(reading) | Err((reading, _)) => reading,
+    };
+    if opened {
+        let after = (kept(&unlocked), unlocked.encryption().clone());
+        assert_eq!(after, before, "a reading opened already is as it was");
+        return;
+    }
+    // The owner's password has one encoding, so its index is the
+    // password's.
+    let by_owner = Reading::open_with(file, &[OWNER], &options).expect(in_memory);
+    for &id in &ids {
+        let got = |reading: &Reading<&[u8]>| match reading.get(id) {
+            Ok(object) => Ok((object.clone(), reading.record(id).cloned())),
+            Err(why) => Err(why.to_string()),
+        };
+        assert_eq!(got(&unlocked), got(&by_owner), "{id:?} unlocked");
+    }
+    assert_eq!(unlocked.encryption(), by_owner.encryption(), "unlocked");
+    assert_eq!(
+        unlocked.warnings(),
+        by_owner.warnings(),
+        "what's said unlocked"
+    );
+    let documents = [unlocked, by_owner].map(|reading| reading.into_document().expect(in_memory));
+    assert_eq!(documents[0], documents[1], "a reading unlocked, read whole");
+}
+
+/// What `reading` keeps: each object's record, by number, and its
+/// warnings.
+fn kept<S: ByteSource>(
+    reading: &Reading<S>,
+) -> (
+    Vec<(ObjectId, crate::source::Record)>,
+    Vec<crate::source::Warning>,
+) {
+    let records = (reading.ids())
+        .filter_map(|id| Some((id, reading.record(id)?.clone())))
+        .collect();
+    (records, reading.warnings())
 }
 
 /// Checks that `doc`, pruned, reaches what it reached from its trailer, in
@@ -387,7 +479,6 @@ mod tests {
 
     use super::*;
     use crate::bytes;
-    use crate::source::{Encryption, Source};
     use crate::write::{self, Body, Xref};
 
     /// A small, fast generator of bytes, the same each run.
@@ -564,7 +655,7 @@ mod tests {
             let settings = Settings {
                 kind,
                 user: b"",
-                owner: OWNER,
+                owner: OWNER.0.as_bytes(),
                 p: -4,
                 id: b"0123456789abcdef",
                 encrypt_metadata: true,
@@ -594,9 +685,13 @@ mod tests {
             assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
             if doc.encryption != Encryption::None {
                 encrypted += 1;
-                assert_eq!(doc.encryption, Encryption::Opened { owner: false });
+                assert_eq!(doc.encryption, Encryption::opened(false, None));
                 let opened = bytes::read_opened(file, &[OWNER]).encryption;
-                assert_eq!(opened, Encryption::Opened { owner: true });
+                let by = Some((0, pdf_crypt::Encoding::Utf8));
+                assert_eq!(opened, Encryption::opened(true, by));
+                // A wrong password leaves it locked.
+                let locked = bytes::read_opened(file, &WRONG[..1]).encryption;
+                assert_eq!(locked, Encryption::Locked);
             }
             read_file(&[&[1, 0][..], file].concat());
         }

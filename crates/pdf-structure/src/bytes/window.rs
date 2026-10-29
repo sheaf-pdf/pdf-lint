@@ -327,7 +327,7 @@ mod tests {
             for section in sections {
                 let mut options = Options::DEFAULT;
                 options.section = section;
-                let whole = Reading::open(&file[..], &passwords, &options)
+                let whole = Reading::open_with(&file[..], &passwords, &options)
                     .unwrap()
                     .into_document()
                     .unwrap();
@@ -376,7 +376,7 @@ mod tests {
             "<< /Size 4 /Root 1 0 R >>",
         );
         let source = Counted::new(&file, 4096);
-        let reading = Reading::open(&source, &[], &Options::DEFAULT).unwrap();
+        let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
         assert!(reading.trailer().unwritten.is_none());
         let opened = source.read();
         assert!(opened <= 5 * 4096, "{opened} bytes read to open it");
@@ -407,7 +407,7 @@ mod tests {
             "<< /Size 3 /Root 2 0 R >>",
         );
         let source = Counted::new(&file, 4096);
-        let reading = Reading::open(&source, &[], &Options::DEFAULT).unwrap();
+        let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
         assert!(reading.trailer().unwritten.is_none());
         assert!(!reading.facts().linearized);
         let opened = source.read();
@@ -516,7 +516,7 @@ mod tests {
                 assert_eq!(reading.to_document().unwrap(), whole, "{name}");
                 // What reading every object unkept keeps: the object
                 // streams, and the objects on the way to them.
-                let twin = Reading::open(&file[..], &passwords, &Options::DEFAULT).unwrap();
+                let twin = Reading::open_with(&file[..], &passwords, &Options::DEFAULT).unwrap();
                 twin.ids().for_each(|id| drop(twin.object_unkept(id)));
                 let ways: Vec<ObjectId> = (twin.ids())
                     .filter(|&id| twin.record(id).is_some())
@@ -628,7 +628,7 @@ mod tests {
         );
         let doc = read(&file);
         assert!(doc.get((3, 0)).is_err());
-        let in_memory = Reading::open(&file[..], &[], &Options::DEFAULT).unwrap();
+        let in_memory = Reading::open(&file[..], &Options::DEFAULT).unwrap();
         let resolve = &in_memory;
         assert_eq!(resolve.resolve((2, 0)), doc.get((2, 0)).ok());
         assert!(in_memory.record((2, 0)).is_some());
@@ -810,7 +810,7 @@ mod tests {
         );
         let at = find(&file, b"hello").unwrap();
         let source = Failing::new(&file, 4096);
-        let reading = Reading::open(&source, &[], &Options::DEFAULT).unwrap();
+        let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
         source.fail_at(at);
         assert!(failed_at(reading.metadata().unwrap_err(), at));
         assert_eq!(reading.metadata().unwrap().as_deref(), Some(&b"hello"[..]));

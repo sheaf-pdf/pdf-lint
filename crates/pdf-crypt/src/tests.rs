@@ -2,7 +2,9 @@
 //! writer writes; and its faults and refusals.
 
 use crate::writer::{self, Kind, Settings};
-use crate::{CryptFilter, Dictionary, Error, Fault, Handler, Method, Refused};
+use crate::{
+    CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Handler, Method, Password, Refused,
+};
 
 /// A file qpdf 12.3 encrypted (`qpdf --encrypt`, the vector's name its
 /// options): its encryption dictionary and first `/ID`, its passwords, the
@@ -296,8 +298,8 @@ fn vectors() -> Vec<Vector> {
 fn files_qpdf_encrypted_open_by_either_password_with_qpdfs_key() {
     for v in vectors() {
         let name = v.name;
-        let user =
-            Handler::open(&v.dictionary, v.id, &[v.user]).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let user = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)])
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(hex(user.key()), v.key, "{name}");
         assert!(!user.owner(), "{name}");
         assert_eq!(user.faults(), [], "{name}");
@@ -307,11 +309,11 @@ fn files_qpdf_encrypted_open_by_either_password_with_qpdfs_key() {
             b"A plain title",
             "{name}"
         );
-        let owner = Handler::open(&v.dictionary, v.id, &[v.owner])
+        let owner = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.owner)])
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(hex(owner.key()), v.key, "{name}");
         assert!(owner.owner(), "{name}");
-        let wrong = Handler::open(&v.dictionary, v.id, &[b"wrong"]);
+        let wrong = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(b"wrong")]);
         assert_eq!(wrong.unwrap_err(), Refused::Password, "{name}");
         // The empty password, as no password is, only when it's the user's.
         let none = Handler::open(&v.dictionary, v.id, &[]);
@@ -322,7 +324,7 @@ fn files_qpdf_encrypted_open_by_either_password_with_qpdfs_key() {
 #[test]
 fn its_debug_leaves_the_key_out() {
     for v in &vectors() {
-        let handler = Handler::open(&v.dictionary, v.id, &[v.user]).unwrap();
+        let handler = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
         let shown = format!("{handler:?}");
         assert!(!shown.contains(&format!("{:?}", handler.key())), "{shown}");
         assert!(!shown.contains("key"), "{shown}");
@@ -334,8 +336,113 @@ fn its_debug_leaves_the_key_out() {
 #[test]
 fn the_first_password_that_opens_it_does() {
     let v = &vectors()[6];
-    let handler = Handler::open(&v.dictionary, v.id, &[b"wrong", v.user, v.owner]).unwrap();
+    let handler = Handler::open(
+        &v.dictionary,
+        v.id,
+        &[
+            Encoded::verbatim(b"wrong"),
+            Encoded::verbatim(v.user),
+            Encoded::verbatim(v.owner),
+        ],
+    )
+    .unwrap();
     assert!(!handler.owner());
+    assert_eq!(handler.opened_by(), Some((1, Encoding::Verbatim)));
+}
+
+/// The writer's dictionary of `kind` for the user's password `user` and
+/// the owner's `owner`.
+fn written(kind: Kind, user: &[u8], owner: &[u8]) -> Dictionary {
+    writer::dictionary(&Settings {
+        kind,
+        user,
+        owner,
+        p: -4,
+        id: b"0123456789abcdef",
+        encrypt_metadata: true,
+    })
+}
+
+/// The encodings that fit a file's revision are tried first, the rest
+/// after, each in the order given, and the handler says which opened it:
+/// its index among those given and its encoding; none for the empty
+/// password tried as none was given.
+#[test]
+fn the_encodings_that_fit_are_tried_first_and_it_says_which_opened_it() {
+    let id = b"0123456789abcdef";
+    let typed = Password("café");
+    let (utf8, pdf_doc) = ("café".as_bytes(), b"caf\xE9");
+    // Given MacRomanEncoding's, PDFDocEncoding's, then UTF-8's.
+    let reversed: Vec<Encoded> = typed.encodings().into_iter().rev().collect();
+    let encodings: Vec<Encoding> = reversed.iter().map(Encoded::encoding).collect();
+    assert_eq!(
+        encodings,
+        [Encoding::MacRoman, Encoding::PdfDoc, Encoding::Utf8]
+    );
+    // The user's password in PDFDocEncoding, the owner's in UTF-8: of
+    // revision 6, UTF-8's is tried first, and opens it as the owner's.
+    let r6 = written(Kind::Aes256, pdf_doc, utf8);
+    let handler = Handler::open(&r6, id, &reversed).unwrap();
+    assert!(handler.owner());
+    assert_eq!(handler.opened_by(), Some((2, Encoding::Utf8)));
+    // Of revision 4, each fits, so they're tried as given: PDFDocEncoding's
+    // opens it, as the user's.
+    let r4 = written(Kind::Aes128, pdf_doc, utf8);
+    let handler = Handler::open(&r4, id, &reversed).unwrap();
+    assert!(!handler.owner());
+    assert_eq!(handler.opened_by(), Some((1, Encoding::PdfDoc)));
+    // One that doesn't fit is still tried, last: the encodings in their
+    // own order open a revision 6 file by PDFDocEncoding's.
+    let r6 = written(Kind::Aes256, pdf_doc, b"owner");
+    let handler = Handler::open(&r6, id, &typed.encodings()).unwrap();
+    assert_eq!(handler.opened_by(), Some((1, Encoding::PdfDoc)));
+    // The empty password: none, tried as none was given; given, it's the
+    // one given.
+    let empty = written(Kind::Aes256, b"", b"owner");
+    assert_eq!(Handler::open(&empty, id, &[]).unwrap().opened_by(), None);
+    let given = [Encoded::verbatim(b"")];
+    let handler = Handler::open(&empty, id, &given).unwrap();
+    assert_eq!(handler.opened_by(), Some((0, Encoding::Verbatim)));
+}
+
+/// How many times opening `dictionary` by `passwords` hashes by revision 5's
+/// or 6's hash, on this thread.
+fn hashes(dictionary: &Dictionary, passwords: &[Encoded]) -> (Result<Handler, Refused>, usize) {
+    crate::handler::HASHED.with(|hashed| hashed.set(0));
+    let opened = Handler::open(dictionary, b"0123456789abcdef", passwords);
+    (opened, crate::handler::HASHED.with(|hashed| hashed.get()))
+}
+
+/// A password whose bytes revision 5 or 6 takes as it took one tried
+/// before, cut to 127 bytes, isn't tried again, as it gives the same key:
+/// it costs no hash. A wrong one costs two, the owner's and the user's.
+#[test]
+fn a_password_taken_as_one_tried_before_costs_no_hash() {
+    for kind in [Kind::Aes256R5, Kind::Aes256] {
+        let dictionary = written(kind, b"user", b"owner");
+        let wrong = Encoded::verbatim(b"wrong");
+        let (opened, alone) = hashes(&dictionary, std::slice::from_ref(&wrong));
+        assert_eq!(
+            (opened.unwrap_err(), alone),
+            (Refused::Password, 2),
+            "{kind:?}"
+        );
+        // The same bytes, as typed and as given.
+        let twice = [Password("wrong").encodings(), vec![wrong]].concat();
+        assert_eq!(hashes(&dictionary, &twice).1, 2, "{kind:?}");
+        // Bytes that differ past the 127th, and within it.
+        let long =
+            |last: &[u8], len: usize| Encoded::verbatim(&[&[b'a'; 200][..len], last].concat());
+        let past = [long(b"x", 127), long(b"y", 127)];
+        assert_eq!(hashes(&dictionary, &past).1, 2, "{kind:?}");
+        let within = [long(b"x", 126), long(b"y", 126)];
+        assert_eq!(hashes(&dictionary, &within).1, 4, "{kind:?}");
+        // The user's, after a form it takes alike: the same key, but by
+        // the first.
+        let user = [long(b"", 127), Encoded::verbatim(b"user"), long(b"z", 127)];
+        let (opened, _) = hashes(&dictionary, &user);
+        assert_eq!(opened.unwrap().opened_by(), Some((1, Encoding::Verbatim)));
+    }
 }
 
 #[test]
@@ -344,7 +451,7 @@ fn a_perms_that_doesnt_match_is_a_fault_and_the_file_opens() {
     let mut dictionary = v.dictionary.clone();
     dictionary.p = dictionary.p.map(|p| p ^ 4);
     // /P is in /Perms, and from revision 5 not in the key.
-    let handler = Handler::open(&dictionary, v.id, &[v.user]).unwrap();
+    let handler = Handler::open(&dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
     assert_eq!(handler.faults(), [Fault::Perms]);
     assert_eq!(hex(handler.key()), v.key);
 }
@@ -356,11 +463,16 @@ fn a_key_perms_doesnt_confirm_is_a_fault_unless_another_route_gives_one() {
     dictionary.ue.as_mut().unwrap()[0] ^= 1;
     // The user's password, which unwraps /UE: a key /Perms doesn't
     // confirm, and no other to take, so it opens by it, saying so.
-    let handler = Handler::open(&dictionary, v.id, &[v.user]).unwrap();
+    let handler = Handler::open(&dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
     assert_eq!(handler.faults(), [Fault::Unconfirmed]);
     assert_ne!(hex(handler.key()), v.key);
     // The owner's too: its key, which /Perms confirms, is taken.
-    let handler = Handler::open(&dictionary, v.id, &[v.user, v.owner]).unwrap();
+    let handler = Handler::open(
+        &dictionary,
+        v.id,
+        &[Encoded::verbatim(v.user), Encoded::verbatim(v.owner)],
+    )
+    .unwrap();
     assert_eq!(handler.faults(), []);
     assert_eq!(hex(handler.key()), v.key);
     assert!(handler.owner());
@@ -373,7 +485,7 @@ fn revision_2_compares_all_of_u() {
     let mut dictionary = v.dictionary.clone();
     dictionary.u.as_mut().unwrap()[31] ^= 1;
     for password in [v.user, v.owner] {
-        let opened = Handler::open(&dictionary, v.id, &[password]);
+        let opened = Handler::open(&dictionary, v.id, &[Encoded::verbatim(password)]);
         assert_eq!(opened.unwrap_err(), Refused::Password);
     }
 }
@@ -398,14 +510,16 @@ fn what_the_writer_writes_opens_and_decrypts() {
                 encrypt_metadata,
             };
             let dictionary = writer::dictionary(&settings);
-            let user = Handler::open(&dictionary, settings.id, &[b"user"])
+            let user = Handler::open(&dictionary, settings.id, &[Encoded::verbatim(b"user")])
                 .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
             assert_eq!(user.faults(), [], "{kind:?}");
-            let owner = Handler::open(&dictionary, settings.id, &[b"owner"]).unwrap();
+            let owner =
+                Handler::open(&dictionary, settings.id, &[Encoded::verbatim(b"owner")]).unwrap();
             assert!(owner.owner() && !user.owner(), "{kind:?}");
             assert_eq!(owner.key(), user.key(), "{kind:?}");
             assert_eq!(
-                Handler::open(&dictionary, settings.id, &[b"wrong"]).unwrap_err(),
+                Handler::open(&dictionary, settings.id, &[Encoded::verbatim(b"wrong")])
+                    .unwrap_err(),
                 Refused::Password
             );
             for data in [
@@ -714,13 +828,16 @@ fn every_kind() -> Vec<(String, Handler, Handler)> {
                 encrypt_metadata,
             };
             let dictionary = writer::dictionary(&settings);
-            let open = |password: &[u8]| Handler::open(&dictionary, settings.id, &[password]);
+            let open = |password: &[u8]| {
+                Handler::open(&dictionary, settings.id, &[Encoded::verbatim(password)])
+            };
             let name = format!("{kind:?}, /EncryptMetadata {encrypt_metadata}");
             handlers.push((name, open(b"user").unwrap(), open(b"owner").unwrap()));
         }
     }
     for v in vectors() {
-        let open = |password: &[u8]| Handler::open(&v.dictionary, v.id, &[password]);
+        let open =
+            |password: &[u8]| Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(password)]);
         handlers.push((
             v.name.to_string(),
             open(v.user).unwrap(),
@@ -813,7 +930,7 @@ fn an_aes_iv_is_hmac_sha256_of_the_context_and_the_data() {
     ];
     for v in &vectors()[3..] {
         let name = v.name;
-        let handler = Handler::open(&v.dictionary, v.id, &[v.user]).unwrap();
+        let handler = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
         assert!(matches!(handler.strings(), Method::Aes128 | Method::Aes256));
         for (context, data) in cases {
             let iv = apart(handler.key(), context, data);
@@ -837,7 +954,7 @@ fn an_aes_iv_is_hmac_sha256_of_the_context_and_the_data() {
     ];
     for (i, iv, cipher) in whole {
         let v = &vectors()[i];
-        let handler = Handler::open(&v.dictionary, v.id, &[v.user]).unwrap();
+        let handler = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
         let string = handler.encrypt_string((2, 0), b"the Info dictionary", b"A plain title");
         assert_eq!(hex(&string.unwrap()), format!("{iv}{cipher}"), "{}", v.name);
     }
@@ -895,7 +1012,7 @@ fn ivs_are_keyed_by_what_the_object_is() {
 fn rc4_takes_no_iv() {
     for v in &vectors()[..3] {
         let name = v.name;
-        let handler = Handler::open(&v.dictionary, v.id, &[v.user]).unwrap();
+        let handler = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
         assert_eq!(handler.strings(), &Method::Rc4, "{name}");
         let (n, written) = v.title;
         for context in [&b""[..], b"one", b"another"] {

@@ -154,7 +154,7 @@ fn an_object_stream_whose_data_doesnt_decrypt_says_so_and_why() {
     let body = container("/Type /ObjStm /N 2 /First 8", b"ABCDEFGH");
     let doc = read_opened(
         &packed(&body, &encrypt(kind, "StdCF", "Identity")),
-        &[b"user"],
+        &[Password("user")],
     );
     assert_eq!(
         said(&doc),

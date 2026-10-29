@@ -288,7 +288,6 @@ name = "pdf-lint"
 version = "0.2.0"
 dependencies = [
  "pdf-arlington",
- "pdf-crypt",
  "pdf-objects",
  "pdf-structure",
  "pdf-tokenizer",

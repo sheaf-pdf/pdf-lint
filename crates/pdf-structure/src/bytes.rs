@@ -28,10 +28,11 @@
 //! It decodes cross-reference streams and object streams from their own
 //! data, through [`pdf_filters`]: a stream up to [`Limits::stream`] bytes,
 //! and a reading's [`Limits::budget`] in all. An encrypted file it opens
-//! with the passwords it's given ([`read_opened`]) through [`pdf_crypt`]'s
-//! standard security handler: its object streams decrypted before they're
-//! decoded, its strings decrypted where they are, a signature's
-//! `/Contents` left as it is. An encrypted file it doesn't open
+//! with the passwords it's given ([`read_opened`], [`Reading::open_with`]),
+//! or the empty password, or unlocks once it's open ([`Reading::unlock`]),
+//! through [`pdf_crypt`]'s standard security handler: its object streams
+//! decrypted before they're decoded, its strings decrypted where they are,
+//! a signature's `/Contents` left as it is. An encrypted file it doesn't open
 //! ([`Document::encryption`]) has its strings [`Str::Encrypted`], and its
 //! object streams unread, saying why. An object read from an object stream
 //! is placed in the stream's decoded data ([`Span::stream`]), which the
@@ -177,7 +178,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use pdf_tokenizer::{Kind, Token, Tokenizer, is_delimiter, is_white_space};
 
-use pdf_crypt::{Handler, Method};
+use pdf_crypt::{Encoded, Handler, Method, Password, Refused};
 use pdf_filters::{Backend, Fault, Filter, Layout, Predictor};
 use pdf_objects::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use pdf_objects::parse::{self, Body, Parser, Sink};
@@ -368,18 +369,18 @@ pub fn read(file: &[u8]) -> Document {
 }
 
 /// The file `file` is, opened, when it's encrypted, by the first of
-/// `passwords` that opens it, each tried as the owner's and then the
-/// user's (none, the empty password). Each is tried as the bytes given;
-/// pdf-crypt's `passwords` gives the bytes a password typed as text may
-/// have been set as.
-pub fn read_opened(file: &[u8], passwords: &[&[u8]]) -> Document {
+/// `passwords` that opens it, each in each of its encodings
+/// ([`Password::encodings`]) and tried as [`Reading::open_with`] tries
+/// them, in the empty password's place: none, the empty password. A wrong
+/// one leaves it [`Encryption::Locked`].
+pub fn read_opened(file: &[u8], passwords: &[Password]) -> Document {
     read_as(file, None, true, &Options::DEFAULT, passwords)
 }
 
 /// The file as of the cross-reference section at byte `section`, as
 /// [`read_from`] reads it, opened as [`read_opened`] opens it: an
 /// update's [`Update::previous`] by its password.
-pub fn read_from_opened(file: &[u8], passwords: &[&[u8]], section: usize) -> Document {
+pub fn read_from_opened(file: &[u8], passwords: &[Password], section: usize) -> Document {
     read_as(file, None, true, &as_of(section), passwords)
 }
 
@@ -439,7 +440,7 @@ fn read_as(
     decoder: Option<&dyn Decode>,
     native: bool,
     options: &Options,
-    passwords: &[&[u8]],
+    passwords: &[Password],
 ) -> Document {
     Reading::in_memory(file, passwords, options, native, decoder)
         .whole(decoder)
@@ -449,7 +450,7 @@ fn read_as(
 /// [`read_opened`]'s reading, and the security handler it opened the file
 /// with, for the oracle to decrypt each stream as the reader would.
 #[cfg(test)]
-pub(crate) fn read_opened_by(file: &[u8], passwords: &[&[u8]]) -> (Document, Option<Handler>) {
+pub(crate) fn read_opened_by(file: &[u8], passwords: &[Password]) -> (Document, Option<Handler>) {
     let whole = Reading::in_memory(file, passwords, &Options::DEFAULT, true, None).whole(None);
     (whole.document, whole.handler)
 }
@@ -754,6 +755,30 @@ struct Reader {
     /// The object streams the entries put objects in, by number, each once
     /// it's decoded.
     containers: BTreeMap<u32, OnceLock<Box<Container>>>,
+    /// What an encrypted file's handler opens from, while no password has
+    /// opened it ([`Reading::unlock`]).
+    lock: Option<Box<Lock>>,
+}
+
+/// What a reading of an encrypted file no password opened keeps to open
+/// it by another ([`Reading::unlock`]) without reading the file again: its
+/// encryption dictionary's values and its first `/ID` element, which are
+/// no secret, and what opening the file left.
+struct Lock {
+    /// The encryption dictionary's values.
+    values: pdf_crypt::Dictionary,
+    /// The file's first `/ID` element, empty where it hasn't one.
+    id: Vec<u8>,
+    /// The encryption dictionary, when it's indirect: what `/Perms`'
+    /// warnings are on.
+    own: Option<ObjectId>,
+    /// Where among what the reader warned of as it opened the file
+    /// `/Perms`' warnings go.
+    perms: usize,
+    /// What was left of the budget once the file was opened, and whether a
+    /// decode had reached it.
+    budget: usize,
+    reached: bool,
 }
 
 /// What reading an object gave, kept in its slot.
@@ -1001,12 +1026,12 @@ impl Reader {
     /// along `/Prev` from `startxref`'s (or from `options.section`, as of
     /// which it's read, without looking for `%%EOF`), or the objects found
     /// by scanning when they don't read, its `%%EOF`, and its encryption
-    /// dictionary, its security handler opened with `passwords`, which
-    /// aren't kept. `decoder` decodes the cross-reference streams the
-    /// reader is made not to.
+    /// dictionary, its security handler opened with `passwords`, each in
+    /// each of its encodings, which aren't kept. `decoder` decodes the
+    /// cross-reference streams the reader is made not to.
     fn new<'f, F: Bytes<'f>>(
         file: F,
-        passwords: &[&[u8]],
+        passwords: &[Password],
         options: &Options,
         native: bool,
         decoder: Option<&dyn Decode>,
@@ -1039,6 +1064,7 @@ impl Reader {
             reached: AtomicBool::new(false),
             slots: Box::default(),
             containers: BTreeMap::new(),
+            lock: None,
         };
         let mut cx = Cx::default();
         reader.version = reader.header(file, &mut cx)?;
@@ -1078,16 +1104,57 @@ impl Reader {
             Some(at) => holds_linearization(file, at, limits.parser)?,
             None => false,
         };
-        reader.slots = reader.entries.iter().map(|_| OnceLock::new()).collect();
-        reader.containers = (reader.entries.iter())
+        reader.empty_slots();
+        if let Some(lock) = &mut reader.lock {
+            lock.budget = reader.budget.load(Ordering::Relaxed);
+            lock.reached = reader.reached.load(Ordering::Relaxed);
+        }
+        reader.trailer = trailer;
+        reader.opened = cx.warnings;
+        Ok(reader)
+    }
+
+    /// An empty slot for each entry, and a lock for each object stream the
+    /// entries put objects in: nothing read yet.
+    fn empty_slots(&mut self) {
+        self.slots = self.entries.iter().map(|_| OnceLock::new()).collect();
+        self.containers = (self.entries.iter())
             .filter_map(|&(_, (_, entry))| match entry {
                 XrefEntry::Compressed { stream, .. } => Some((stream, OnceLock::new())),
                 _ => None,
             })
             .collect();
-        reader.trailer = trailer;
-        reader.opened = cx.warnings;
-        Ok(reader)
+    }
+
+    /// The file opened by the first of `passwords` that opens its security
+    /// handler, as [`Reader::open`] would have opened it, when no password
+    /// has: what it read and decoded is dropped, to be read again
+    /// decrypted, and its budget is what opening the file left. Opened, or
+    /// not encrypted, it's as it was. Refused, it's as it was too: by a
+    /// handler the reader can't open, or by passwords none of which opens
+    /// it.
+    fn unlock(&mut self, passwords: &[Encoded]) -> Result<(), Refused> {
+        if self.handler.is_some() || !self.encrypts {
+            return Ok(());
+        }
+        let Some(lock) = &self.lock else {
+            // Its /Encrypt isn't a dictionary.
+            let why = match &self.encryption {
+                Encryption::Unsupported(why) => why.clone(),
+                _ => String::new(),
+            };
+            return Err(Refused::Unsupported(why));
+        };
+        let handler = Handler::open(&lock.values, &lock.id, passwords)?;
+        let lock = self.lock.take().expect("kept");
+        let mut warnings = std::mem::take(&mut self.opened);
+        let at = lock.perms;
+        self.encryption = self.settle(&lock.values, Ok(handler), &[], lock.own, &mut warnings, at);
+        self.opened = warnings;
+        self.empty_slots();
+        self.budget.store(lock.budget, Ordering::Relaxed);
+        self.reached.store(lock.reached, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Where object number `n`'s entry is among the entries.
@@ -2722,7 +2789,7 @@ impl Reader {
         file: F,
         cx: &mut Cx,
         trailer: &Trailer,
-        passwords: &[&[u8]],
+        passwords: &[Password],
     ) -> Result<(), F::Error> {
         let Some(encrypt) = trailer.dict().get(b"Encrypt") else {
             return Ok(());
@@ -2758,8 +2825,12 @@ impl Reader {
             _ => (None, None, "isn't a dictionary"),
         };
         self.encrypts = true;
+        self.dictionaries.extend(own);
         self.encryption = match &dict {
-            None => Encryption::Unsupported(format!("its /Encrypt {why}")),
+            None => {
+                self.encrypted = Some(self.dictionaries.clone());
+                Encryption::Unsupported(format!("its /Encrypt {why}"))
+            }
             Some(dict) => self.open(file, cx, dict, trailer, own, passwords)?,
         };
         // On the trailer, whose /Encrypt it's about.
@@ -2773,18 +2844,16 @@ impl Reader {
             );
             cx.warn(None, encrypt.at, message);
         }
-        self.dictionaries.extend(own);
-        if self.plain_strings {
-            return Ok(());
-        }
-        self.encrypted = Some(self.dictionaries.clone());
         Ok(())
     }
 
     /// The security handler of encryption dictionary `dict` (object `own`,
-    /// when it's indirect), opened by `passwords`, as far as it opens; its
-    /// values followed where they're references, which are its own, so not
-    /// encrypted. Whether its strings and metadata are plain is set by it.
+    /// when it's indirect), opened by `passwords`, each in each of its
+    /// encodings, as far as it opens; its values followed where they're
+    /// references, which are its own, so not encrypted. Whether its strings
+    /// and metadata are plain is set by it ([`Reader::settle`]); and, when
+    /// no password opens it, what opening it takes is kept
+    /// ([`Reader::unlock`]).
     fn open<'f, F: Bytes<'f>>(
         &mut self,
         file: F,
@@ -2792,7 +2861,7 @@ impl Reader {
         dict: &Dict,
         trailer: &Trailer,
         own: Option<ObjectId>,
-        passwords: &[&[u8]],
+        passwords: &[Password],
     ) -> Result<Encryption, F::Error> {
         let mut get = |o: Option<&Object>| -> Result<Option<Object>, F::Error> {
             let Some(o) = o else {
@@ -2861,28 +2930,18 @@ impl Reader {
             _ => None,
         };
         let no_id = id.is_none();
-        let opened = Handler::open(&values, id.as_deref().unwrap_or_default(), passwords);
-        if no_id && !matches!(opened, Err(pdf_crypt::Refused::Unsupported(_))) {
+        let id = id.unwrap_or_default();
+        // Each password in each of its encodings, and which password each
+        // is of.
+        let (encoded, of): (Vec<Encoded>, Vec<usize>) = (passwords.iter().enumerate())
+            .flat_map(|(i, password)| password.encodings().into_iter().map(move |e| (e, i)))
+            .unzip();
+        let opened = Handler::open(&values, &id, &encoded);
+        if no_id && !matches!(opened, Err(Refused::Unsupported(_))) {
             let at = trailer.dict().get(b"ID").and_then(|o| o.at);
             let message = "its trailer's /ID has no string first, so its key is made without one";
             cx.warn(None, at, message.to_string());
         }
-        self.plain_strings = match &opened {
-            Ok(handler) => matches!(handler.strings(), Method::Identity | Method::None),
-            Err(_) => values.v >= 4 && (values.str_f.as_deref()).is_none_or(|f| f == b"Identity"),
-        };
-        // Neither, when no crypt filter encrypts them (from /V 4), whatever
-        // the handler.
-        let identity = |f: &Option<Vec<u8>>| f.as_deref().is_none_or(|f| f == b"Identity");
-        let plain_streams = match &opened {
-            Ok(handler) => matches!(handler.streams(), Method::Identity | Method::None),
-            Err(_) => values.v >= 4 && identity(&values.stm_f),
-        };
-        self.unencrypted_metadata = match &opened {
-            Ok(handler) => !handler.encrypts_metadata(),
-            Err(_) => values.v >= 4 && values.encrypt_metadata == Some(false),
-        };
-        self.plain_metadata = plain_streams || self.unencrypted_metadata;
         // From /V 4, which has crypt filters (ISO 32000-2, Table 20), and
         // followed as /StmF is: a null is no entry (7.3.9), and so is a
         // reference to no object (7.3.10); anything else that isn't a name,
@@ -2901,27 +2960,77 @@ impl Reader {
                 _ => Eff::AsStreams,
             },
         };
-        Ok(match opened {
+        let perms = cx.warnings.len();
+        let encryption = self.settle(&values, opened, &of, own, &mut cx.warnings, perms);
+        if self.handler.is_none() {
+            self.lock = Some(Box::new(Lock {
+                values,
+                id,
+                own,
+                perms,
+                budget: 0,
+                reached: false,
+            }));
+        }
+        Ok(encryption)
+    }
+
+    /// What the encryption dictionary whose values are `values` makes of
+    /// the file, its handler `opened` or refused: whether its strings,
+    /// streams and metadata are plain, which objects' strings aren't
+    /// encrypted, its handler, and how it's encrypted, by the password
+    /// whose index `of` gives for the one the handler says opened it (each
+    /// its own where `of` is empty); `/Perms`' faults put in `warnings` at
+    /// `at`, on `own`, the encryption dictionary. Opening a file and
+    /// unlocking one ([`Reader::unlock`]) both make it so.
+    fn settle(
+        &mut self,
+        values: &pdf_crypt::Dictionary,
+        opened: Result<Handler, Refused>,
+        of: &[usize],
+        own: Option<ObjectId>,
+        warnings: &mut Vec<Warning>,
+        at: usize,
+    ) -> Encryption {
+        self.plain_strings = match &opened {
+            Ok(handler) => matches!(handler.strings(), Method::Identity | Method::None),
+            Err(_) => values.v >= 4 && (values.str_f.as_deref()).is_none_or(|f| f == b"Identity"),
+        };
+        // Neither, when no crypt filter encrypts them (from /V 4), whatever
+        // the handler.
+        let identity = |f: &Option<Vec<u8>>| f.as_deref().is_none_or(|f| f == b"Identity");
+        let plain_streams = match &opened {
+            Ok(handler) => matches!(handler.streams(), Method::Identity | Method::None),
+            Err(_) => values.v >= 4 && identity(&values.stm_f),
+        };
+        self.unencrypted_metadata = match &opened {
+            Ok(handler) => !handler.encrypts_metadata(),
+            Err(_) => values.v >= 4 && values.encrypt_metadata == Some(false),
+        };
+        self.plain_metadata = plain_streams || self.unencrypted_metadata;
+        self.encrypted = (!self.plain_strings).then(|| self.dictionaries.clone());
+        match opened {
             Ok(handler) => {
-                for fault in handler.faults() {
-                    cx.warn(
-                        own,
-                        None,
-                        format!("its encryption dictionary isn't right: {fault}"),
-                    );
-                }
+                let faults = (handler.faults().iter()).map(|fault| Warning {
+                    object: own,
+                    at: None,
+                    message: format!("its encryption dictionary isn't right: {fault}"),
+                });
+                warnings.splice(at..at, faults);
                 let owner = handler.owner();
+                let by = (handler.opened_by())
+                    .map(|(i, encoding)| (of.get(i).copied().unwrap_or(i), encoding));
                 self.handler = Some(handler);
-                Encryption::Opened { owner }
+                Encryption::Opened { owner, by }
             }
             // Its strings and streams aren't encrypted, as when only its
             // embedded files are: what handler it is, or the password, no
             // matter (but a stream's own crypt filter).
             Err(_) if self.plain_strings && plain_streams => Encryption::Plain,
-            Err(pdf_crypt::Refused::Password) => Encryption::Locked,
-            Err(pdf_crypt::Refused::Unsupported(why)) => Encryption::Unsupported(why),
+            Err(Refused::Password) => Encryption::Locked,
+            Err(Refused::Unsupported(why)) => Encryption::Unsupported(why),
             Err(refused) => Encryption::Unsupported(refused.to_string()),
-        })
+        }
     }
 
     /// Object `id`, the `index`th of object stream `stream`, whose header
@@ -4897,9 +5006,10 @@ mod tests {
         let root = || dict! { "Root" => Object::reference(1) };
         for kind in KINDS {
             let file = write::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root());
-            for (password, owner) in [(&b"user"[..], false), (b"owner", true)] {
-                let doc = read_opened(&file, &[password]);
-                assert_eq!(doc.encryption, Encryption::Opened { owner }, "{kind:?}");
+            for (password, owner) in [("user", false), ("owner", true)] {
+                let doc = read_opened(&file, &[Password(password)]);
+                let by = Some((0, pdf_crypt::Encoding::Utf8));
+                assert_eq!(doc.encryption, Encryption::Opened { owner, by }, "{kind:?}");
                 assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
                 let get = |n: u32, key: &[u8]| {
                     doc.get((n, 0))
@@ -4960,7 +5070,13 @@ mod tests {
         let kind = pdf_crypt::writer::Kind::Aes256;
         let file = write::encrypted(&settings(kind, b""), &to_encrypt(&[]), root);
         let doc = read_with(&file, &Unaskable);
-        assert_eq!(doc.encryption, Encryption::Opened { owner: false });
+        assert_eq!(
+            doc.encryption,
+            Encryption::Opened {
+                owner: false,
+                by: None
+            }
+        );
         let decoder = Plain(BTreeMap::new(), std::cell::Cell::new(0));
         read_through(&file, &decoder);
         assert_eq!(decoder.1.get(), 1, "asked for the plaintext");
@@ -4971,7 +5087,7 @@ mod tests {
         let root = dict! { "Root" => Object::reference(1) };
         let kind = pdf_crypt::writer::Kind::Aes128;
         let file = write::encrypted(&settings(kind, b"user"), &to_encrypt(&[]), root);
-        for passwords in [&[][..], &[&b"wrong"[..]]] {
+        for passwords in [&[][..], &[Password("wrong")][..]] {
             let doc = read_opened(&file, passwords);
             assert_eq!(doc.encryption, Encryption::Locked);
             let lang = doc
@@ -5040,7 +5156,7 @@ mod tests {
         let file = filtered(false, "", &objects);
         let at = find(&file, b"/Root 1 0 R").unwrap();
         let file = [&file[..at], encrypt.as_bytes(), &file[at + 11..]].concat();
-        for passwords in [&[][..], &[&b"wrong"[..]]] {
+        for passwords in [&[][..], &[Password("wrong")][..]] {
             let doc = read_opened(&file, passwords);
             assert_eq!(doc.encryption, Encryption::Plain);
             assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
@@ -5052,8 +5168,14 @@ mod tests {
             );
         }
         // Its password opens it all the same.
-        let doc = read_opened(&file, &[b"user"]);
-        assert_eq!(doc.encryption, Encryption::Opened { owner: false });
+        let doc = read_opened(&file, &[Password("user")]);
+        assert_eq!(
+            doc.encryption,
+            Encryption::Opened {
+                owner: false,
+                by: Some((0, pdf_crypt::Encoding::Utf8))
+            }
+        );
         // But an object stream whose own crypt filter encrypts it doesn't
         // read without it.
         let file = filtered(
@@ -5132,7 +5254,14 @@ mod tests {
         for (from, to, extra) in cases {
             let file = encryption_updated(&file, from, to, &extra);
             let doc = read_opened(&file, &[]);
-            assert_eq!(doc.encryption, Encryption::Opened { owner: false }, "{to}");
+            assert_eq!(
+                doc.encryption,
+                Encryption::Opened {
+                    owner: false,
+                    by: None
+                },
+                "{to}"
+            );
             assert!(doc.warnings.is_empty(), "{to}: {:?}", doc.warnings);
             let lang = doc.get((1, 0)).unwrap().as_dict().unwrap().get(b"Lang");
             assert_eq!(
@@ -5164,7 +5293,10 @@ mod tests {
             let doc = read_opened(&file, &[]);
             assert_eq!(
                 doc.encryption,
-                Encryption::Opened { owner: false },
+                Encryption::Opened {
+                    owner: false,
+                    by: None
+                },
                 "{kind:?}"
             );
             assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
@@ -5198,7 +5330,7 @@ mod tests {
             (3, Body::stream(metadata, xmp)),
         ];
         let file = write::encrypted(&settings, &objects, root);
-        for passwords in [&[][..], &[&b"user"[..]]] {
+        for passwords in [&[][..], &[Password("user")][..]] {
             let doc = read_opened(&file, passwords);
             assert_eq!(
                 doc.metadata.as_deref(),
@@ -5235,7 +5367,10 @@ mod tests {
             let doc = read_opened(&file, &[]);
             assert_eq!(
                 doc.encryption,
-                Encryption::Opened { owner: false },
+                Encryption::Opened {
+                    owner: false,
+                    by: None
+                },
                 "{kind:?}"
             );
             assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
@@ -5253,7 +5388,8 @@ mod tests {
     fn an_encrypted_object_stream_is_decrypted_and_decoded_without_the_decoder() {
         let kind = pdf_crypt::writer::Kind::Aes256;
         let values = pdf_crypt::writer::dictionary(&settings(kind, b"user"));
-        let handler = Handler::open(&values, b"0123456789abcdef", &[b"user"]).unwrap();
+        let handler =
+            Handler::open(&values, b"0123456789abcdef", &[Encoded::verbatim(b"user")]).unwrap();
         let (objects, _) = objects_2_and_3();
         let data = write::zlib(&objects);
         let data =
@@ -5278,8 +5414,20 @@ mod tests {
         let file = filtered(false, " /Filter /FlateDecode", &data);
         let at = find(&file, b"/Root 1 0 R").unwrap();
         let file = [&file[..at], encrypt.as_bytes(), &file[at + 11..]].concat();
-        let doc = read_as(&file, Some(&Unaskable), true, &Options::DEFAULT, &[b"user"]);
-        assert_eq!(doc.encryption, Encryption::Opened { owner: false });
+        let doc = read_as(
+            &file,
+            Some(&Unaskable),
+            true,
+            &Options::DEFAULT,
+            &[Password("user")],
+        );
+        assert_eq!(
+            doc.encryption,
+            Encryption::Opened {
+                owner: false,
+                by: Some((0, pdf_crypt::Encoding::Utf8))
+            }
+        );
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(doc.decoded[&(4, 0)], objects);
         assert_eq!(doc.get((2, 0)).unwrap().at.unwrap().stream, Some((4, 0)));
@@ -5289,7 +5437,8 @@ mod tests {
     fn an_object_streams_own_crypt_filter_says_how_its_data_decrypts() {
         let kind = pdf_crypt::writer::Kind::Aes256;
         let values = pdf_crypt::writer::dictionary(&settings(kind, b"user"));
-        let handler = Handler::open(&values, b"0123456789abcdef", &[b"user"]).unwrap();
+        let handler =
+            Handler::open(&values, b"0123456789abcdef", &[Encoded::verbatim(b"user")]).unwrap();
         let (objects, _) = objects_2_and_3();
         let plain = write::zlib(&objects);
         let encrypted =
@@ -5337,10 +5486,13 @@ mod tests {
             file[at..at + 10].fill(b' ');
             let at = find(&file, b"/Root 1 0 R").unwrap();
             let file = [&file[..at], encrypt.as_bytes(), &file[at + 11..]].concat();
-            let doc = read_opened(&file, &[b"user"]);
+            let doc = read_opened(&file, &[Password("user")]);
             assert_eq!(
                 doc.encryption,
-                Encryption::Opened { owner: false },
+                Encryption::Opened {
+                    owner: false,
+                    by: Some((0, pdf_crypt::Encoding::Utf8))
+                },
                 "{filter}"
             );
             assert!(doc.warnings.is_empty(), "{filter}: {:?}", doc.warnings);
@@ -5372,7 +5524,13 @@ mod tests {
         let mut file = file;
         file[at..at + 11].fill(b' ');
         let doc = read_opened(&file, &[]);
-        assert_eq!(doc.encryption, Encryption::Opened { owner: false });
+        assert_eq!(
+            doc.encryption,
+            Encryption::Opened {
+                owner: false,
+                by: None
+            }
+        );
         let message = "its trailer's /ID has no string first, so its key is made without one";
         let warnings: Vec<_> = doc.warnings.iter().map(|w| w.message.as_str()).collect();
         assert_eq!(warnings, [message]);
@@ -5398,7 +5556,10 @@ mod tests {
             let doc = read_opened(&file, &[]);
             assert_eq!(
                 doc.encryption,
-                Encryption::Opened { owner: false },
+                Encryption::Opened {
+                    owner: false,
+                    by: None
+                },
                 "{kind:?}"
             );
             assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
@@ -5431,7 +5592,10 @@ mod tests {
             let doc = read_opened(&file, &[]);
             assert_eq!(
                 doc.encryption,
-                Encryption::Opened { owner: false },
+                Encryption::Opened {
+                    owner: false,
+                    by: None
+                },
                 "{kind:?}"
             );
             assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
@@ -5504,7 +5668,13 @@ mod tests {
             .as_bytes(),
         );
         let doc = read_opened(&file, &[]);
-        assert_eq!(doc.encryption, Encryption::Opened { owner: false });
+        assert_eq!(
+            doc.encryption,
+            Encryption::Opened {
+                owner: false,
+                by: None
+            }
+        );
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         let written = pdf_crypt::writer::dictionary(&settings(kind, b"")).o;
         for n in [6, 7] {
@@ -5564,7 +5734,10 @@ mod tests {
             let doc = read_opened(&file, &[]);
             assert_eq!(
                 doc.encryption,
-                Encryption::Opened { owner: false },
+                Encryption::Opened {
+                    owner: false,
+                    by: None
+                },
                 "{kind:?}"
             );
             assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
@@ -5613,7 +5786,10 @@ mod tests {
             let doc = read_opened(&file, &[]);
             assert_eq!(
                 doc.encryption,
-                Encryption::Opened { owner: false },
+                Encryption::Opened {
+                    owner: false,
+                    by: None
+                },
                 "{kind:?}"
             );
             assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);

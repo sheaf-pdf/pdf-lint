@@ -30,8 +30,10 @@ pub use pdf_arlington::{COMMIT, predicate};
 // pdf-objects'.
 pub use pdf_objects::{Resolve, dict, object, version};
 // The reader, and what it reads a file into, are pdf-structure's; the
-// error a stream's data that doesn't decode cleanly gives is pdf-filters'.
-pub use pdf_structure::{bytes, pdf_filters, source};
+// error a stream's data that doesn't decode cleanly gives is pdf-filters',
+// and the passwords a reader is given and its security handler are
+// pdf-crypt's.
+pub use pdf_structure::{bytes, pdf_crypt, pdf_filters, source};
 pub use predicate::{Cx, FileCx, Gate, Reference, Since, Truth};
 pub use source::{Document, Encryption, Source, Trailer, Update, Warning};
 pub use version::Version;
@@ -100,37 +102,44 @@ pub mod grammar {
     }
 }
 
-/// Text strings, pdf-objects' [`text`](pdf_objects::text), and a typed
-/// password's byte forms, pdf-crypt's [`passwords`](pdf_crypt::passwords).
+/// Text strings, pdf-objects' [`text`](pdf_objects::text).
 pub mod text {
     pub use pdf_objects::text::*;
-
-    // A typed password's byte forms, in PDFDocEncoding among others, are
-    // pdf-crypt's, beside the security handler they open.
-    pub use pdf_crypt::passwords;
 
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::pdf_crypt::{Encoding, Password};
 
-        /// `passwords` encodes by this table exactly, though pdf-crypt keeps a
-        /// copy of its own. With `Ł` after it, 0x95 in PDFDocEncoding and in
-        /// neither WinAnsiEncoding nor MacRomanEncoding, a character a byte
-        /// decodes to has its UTF-8 and that byte's form, no more; the Latin-1
-        /// characters at the three bytes the table leaves undefined have their
-        /// UTF-8 alone.
+        /// A password's encodings (pdf-crypt's [`Password::encodings`])
+        /// take this table for PDFDocEncoding exactly, though pdf-crypt
+        /// keeps a copy of its own. With `Ł` after it, 0x95 in
+        /// PDFDocEncoding and in neither WinAnsiEncoding nor
+        /// MacRomanEncoding, a character a byte decodes to has its UTF-8
+        /// and that byte's PDFDocEncoding, no more; the Latin-1 characters
+        /// at the three bytes the table leaves undefined have their UTF-8
+        /// alone.
         #[test]
-        fn passwords_encode_by_this_table() {
+        fn the_pdfdoc_encoding_matches_this_table() {
+            let forms = |typed: &str| -> Vec<(Encoding, Vec<u8>)> {
+                (Password(typed).encodings().iter())
+                    .map(|e| (e.encoding(), e.as_bytes().to_vec()))
+                    .collect()
+            };
             for b in 0..=255 {
                 if let Some(c) = pdf_doc_char(b) {
                     let typed = format!("{c}Ł");
-                    let want = [typed.as_bytes().to_vec(), vec![b, 0x95]];
-                    assert_eq!(passwords(&typed), want, "{b:#x}");
+                    let want = [
+                        (Encoding::Utf8, typed.as_bytes().to_vec()),
+                        (Encoding::PdfDoc, vec![b, 0x95]),
+                    ];
+                    assert_eq!(forms(&typed), want, "{b:#x}");
                 }
             }
             for c in ['\u{7F}', '\u{9F}', '\u{AD}'] {
                 let typed = format!("{c}Ł");
-                assert_eq!(passwords(&typed), [typed.as_bytes().to_vec()], "{c:?}");
+                let want = [(Encoding::Utf8, typed.as_bytes().to_vec())];
+                assert_eq!(forms(&typed), want, "{c:?}");
             }
         }
     }

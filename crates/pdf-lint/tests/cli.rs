@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 use pdf_crypt::writer::{self, Kind, Settings};
-use pdf_crypt::{Dictionary, Handler};
+use pdf_crypt::{Dictionary, Encoded, Handler};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -363,7 +363,7 @@ fn crypted(kind: Kind, user: &[u8]) -> Vec<u8> {
 /// [`crypted`]'s file, its object stream holding `objects`.
 fn crypted_with(kind: Kind, user: &[u8], objects: &[u8]) -> Vec<u8> {
     let dictionary = writer::dictionary(&settings(kind, user));
-    let handler = Handler::open(&dictionary, ID, &[user]).unwrap();
+    let handler = Handler::open(&dictionary, ID, &[Encoded::verbatim(user)]).unwrap();
     let data = writer::encrypt_stream(&handler, (4, 0), objects, None, [4; 16]).unwrap();
     in_an_object_stream_under("", &data, &encryption(&dictionary))
 }

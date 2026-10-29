@@ -34,17 +34,22 @@
 //!   reading decode to, which a caller sets ([`Limits`], in [`Options`]);
 //!   the objects read from an object stream placed in its decoded data,
 //!   which the [`Document`] keeps.
-//! - **Encrypted files opened** with the passwords given
-//!   ([`bytes::read_opened`]), through pdf-crypt's standard security
-//!   handler: object streams decrypted before they're decoded, strings
-//!   decrypted where they are; [`Encryption`] says whether the file opened.
+//! - **Encrypted files opened** with the passwords given, each a
+//!   [`Password`] as typed, tried in each of its encodings
+//!   ([`Reading::open_with`], [`bytes::read_opened`]); or opened, then
+//!   unlocked with the bytes to try ([`Reading::unlock`], [`Encoded`]),
+//!   through pdf-crypt's standard security handler: object streams
+//!   decrypted before they're decoded, strings decrypted where they are;
+//!   [`Encryption`] says whether the file opened, and by which password.
 //!   What's decrypted and what's left as written is listed in [`bytes`].
 //! - **A revision before an update** read as the file was then
 //!   ([`bytes::read_from`]).
 //!
 //! The objects are pdf-objects' types, re-exported as [`pdf_objects`];
-//! and a stream that doesn't decode cleanly says so in pdf-filters' error,
-//! re-exported as [`pdf_filters`], whose faults say why.
+//! a stream that doesn't decode cleanly says so in pdf-filters' error,
+//! re-exported as [`pdf_filters`], whose faults say why; and the security
+//! handler, its passwords and its refusals are pdf-crypt's, re-exported as
+//! [`pdf_crypt`].
 
 pub mod bytes;
 mod filter;
@@ -68,6 +73,8 @@ pub mod write;
 #[cfg(any(unix, windows))]
 pub use bytes::FileBytes;
 pub use bytes::{ByteSource, Error, Identity, Limits, Options, Reading, SourceId};
+pub use pdf_crypt;
+pub use pdf_crypt::{Encoded, Encoding, Password};
 pub use pdf_filters;
 pub use pdf_objects;
 pub use source::{

@@ -128,7 +128,7 @@ pub(crate) fn attached(how: &Attached, extra: &[(u32, &[u8])]) -> Vec<u8> {
         .collect();
     values.stm_f = Some(how.streams.as_bytes().to_vec());
     values.str_f = Some(how.strings.as_bytes().to_vec());
-    let handler = Handler::open(&values, settings.id, &[settings.user]).unwrap();
+    let handler = Handler::open(&values, settings.id, &[Encoded::verbatim(settings.user)]).unwrap();
     let name = |n: u32| {
         let name = handler.encrypt_string((n, 0), b"its name", b"a.txt");
         format!("<{}>", hex(&name.unwrap()))
@@ -211,7 +211,7 @@ fn each_kind_of_encryption_hands_out_each_streams_data_decrypted() {
         let file = write::encrypted(&settings(kind, b"user"), &content(), root());
         // The plaintext isn't written.
         assert!(find(&file, CONTENT).is_none() && find(&file, &compressed).is_none());
-        for password in [&b"user"[..], b"owner"] {
+        for password in [Password("user"), Password("owner")] {
             let reading = open(&file, &[password], &Options::DEFAULT);
             assert!(
                 matches!(reading.encryption(), Encryption::Opened { .. }),
@@ -258,7 +258,7 @@ fn a_streams_own_crypt_filter_says_how_its_data_is_handed_out() {
     ];
     for (filter, data) in cases {
         let file = encrypted_objects(filter, data);
-        let reading = open(&file, &[b"user"], &Options::DEFAULT);
+        let reading = open(&file, &[Password("user")], &Options::DEFAULT);
         assert_eq!(reading.data((4, 0)).unwrap(), zlib, "{filter}");
         let decoded = reading.decoded((4, 0)).unwrap();
         assert_eq!(decoded, objects, "{filter}");
@@ -267,7 +267,7 @@ fn a_streams_own_crypt_filter_says_how_its_data_is_handed_out() {
     }
     let undefined = " /Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /Undefined >> null]";
     let file = encrypted_objects(undefined, None);
-    let reading = open(&file, &[b"user"], &Options::DEFAULT);
+    let reading = open(&file, &[Password("user")], &Options::DEFAULT);
     let error = reading.data((4, 0)).unwrap_err();
     assert_eq!(
         error.to_string(),
@@ -283,7 +283,7 @@ fn a_streams_own_crypt_filter_says_how_its_data_is_handed_out() {
 #[test]
 fn a_cross_reference_streams_data_is_handed_out_as_written() {
     let file = encrypted_objects(" /Filter /FlateDecode", None);
-    for passwords in [&[&b"user"[..]][..], &[]] {
+    for passwords in [&[Password("user")][..], &[]] {
         let reading = open(&file, passwords, &Options::DEFAULT);
         let data = reading.data((5, 0)).unwrap();
         let at = reading.record((5, 0)).unwrap().data.unwrap().at;
@@ -330,7 +330,7 @@ fn metadata_not_encrypted_is_handed_out_as_written_whether_the_file_opens_or_not
                 ..settings(kind, b"user")
             };
             let file = write::encrypted(&settings, &objects, root());
-            for passwords in [&[][..], &[&b"user"[..]]] {
+            for passwords in [&[][..], &[Password("user")][..]] {
                 let what = format!("{kind:?}, {encrypt_metadata}, {passwords:?}");
                 let reading = open(&file, passwords, &Options::DEFAULT);
                 let data = reading.data((3, 0));
@@ -386,7 +386,7 @@ fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it(
         let file = attached(how, &[]);
         let what = format!("{:?}", how.kind);
         assert!(find(&file, XMP).is_none(), "{what}: written encrypted");
-        for password in [&b"user"[..], b"owner"] {
+        for password in [Password("user"), Password("owner")] {
             let reading = open(&file, &[password], &Options::DEFAULT);
             assert!(matches!(reading.encryption(), Encryption::Opened { .. }));
             let data = reading.data((3, 0)).unwrap();
@@ -416,7 +416,7 @@ fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it(
         assert_eq!(reading.metadata().unwrap(), None, "{what}");
         let at = find(&file, b"/Standard").unwrap();
         let other = [&file[..at], b"/Standarx", &file[at + 9..]].concat();
-        let reading = open(&other, &[b"user"], &Options::DEFAULT);
+        let reading = open(&other, &[Password("user")], &Options::DEFAULT);
         assert!(matches!(reading.encryption(), Encryption::Unsupported(_)));
         assert!(
             matches!(reading.data((3, 0)), Err(Error::Unsupported)),
@@ -449,7 +449,7 @@ fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it(
         },
         &[],
     );
-    for passwords in [&[][..], &[&b"user"[..]]] {
+    for passwords in [&[][..], &[Password("user")][..]] {
         let reading = open(&file, passwords, &Options::DEFAULT);
         let data = reading.data((3, 0)).unwrap();
         assert!(matches!(data, Cow::Borrowed(_)), "{passwords:?}");
@@ -465,7 +465,7 @@ fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it(
 fn a_locked_files_streams_are_refused() {
     for kind in KINDS {
         let file = write::encrypted(&settings(kind, b"user"), &content(), root());
-        for passwords in [&[][..], &[&b"wrong"[..]]] {
+        for passwords in [&[][..], &[Password("wrong")][..]] {
             let reading = open(&file, passwords, &Options::DEFAULT);
             assert_eq!(*reading.encryption(), Encryption::Locked, "{kind:?}");
             for id in [(4, 0), (5, 0)] {
@@ -533,7 +533,7 @@ fn an_embedded_files_data_under_eff_is_decrypted_by_it() {
     };
     let std_cf = own("StdCF");
     let decrypted = |file: &[u8], what: &str| {
-        for password in [&b"user"[..], b"owner"] {
+        for password in [Password("user"), Password("owner")] {
             let reading = open(file, &[password], &Options::DEFAULT);
             assert!(matches!(reading.encryption(), Encryption::Opened { .. }));
             let data = reading.data((4, 0)).unwrap();
@@ -640,7 +640,7 @@ fn an_embedded_files_data_under_eff_is_decrypted_by_it() {
             ..aes_128_and_rc4(eff)
         };
         let file = written(&how);
-        let reading = open(&file, &[b"user"], &Options::DEFAULT);
+        let reading = open(&file, &[Password("user")], &Options::DEFAULT);
         let error = reading.data((4, 0)).unwrap_err();
         assert!(matches!(error, Error::Encrypted), "{eff}: {error:?}");
         assert!(
@@ -736,7 +736,7 @@ fn a_streams_data_that_doesnt_decrypt_cleanly_is_an_error_holding_what_did() {
     ];
     for (junk, decrypted, fault) in cases {
         let file = encrypted_objects(" /Filter /FlateDecode", Some(junk));
-        let reading = open(&file, &[b"user"], &Options::DEFAULT);
+        let reading = open(&file, &[Password("user")], &Options::DEFAULT);
         let error = reading.data((4, 0)).unwrap_err();
         let said = format!("its data doesn't decrypt cleanly: {fault}");
         assert_eq!(error.to_string(), said);
@@ -837,12 +837,12 @@ fn a_streams_data_that_doesnt_decode_cleanly_is_an_error_holding_what_did() {
 #[test]
 fn a_streams_data_handed_out_leaves_the_reading_the_whole_read() {
     let file = write::encrypted(&settings(Kind::Aes128, b"user"), &content(), root());
-    let reading = open(&file, &[b"user"], &Options::DEFAULT);
+    let reading = open(&file, &[Password("user")], &Options::DEFAULT);
     for id in [(5, 0), (4, 0)] {
         assert!(reading.decoded(id).is_ok() && reading.data(id).is_ok());
     }
     let doc = reading.into_document().unwrap();
-    assert_eq!(doc, read_opened(&file, &[b"user"]));
+    assert_eq!(doc, read_opened(&file, &[Password("user")]));
     let (objects, _) = objects_2_and_3();
     let file = filtered(false, " /Filter /FlateDecode", &write::zlib(&objects));
     let mut options = Options::DEFAULT;

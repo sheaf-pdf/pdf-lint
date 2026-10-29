@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use pdf_crypt::{Encoded, Password, Refused};
 use pdf_objects::Resolve;
 use pdf_objects::object::{Object, ObjectId, Span, Stream, Value};
 use pdf_objects::version::Version;
@@ -224,8 +225,10 @@ fn outside(span: &Span) -> String {
 ///
 /// [`Reading::open`] reads the header, the cross-reference sections and
 /// the trailer (or, where they don't read, finds the objects by scanning
-/// the file), and opens an encrypted file's security handler with the
-/// passwords it's given; no object yet. [`Reading::get`] reads an object
+/// the file), and opens an encrypted file's security handler by the empty
+/// password, [`Reading::open_with`] by the passwords it's given; no object
+/// yet. A reading no password opened is opened by another with
+/// [`Reading::unlock`]. [`Reading::get`] reads an object
 /// the first time it's asked for and keeps it, with what the reader warned
 /// of as it read it, decrypting its strings in an encrypted file it opened;
 /// [`Reading::object_unkept`] reads one without keeping it. An object in an
@@ -259,7 +262,7 @@ fn outside(span: &Span) -> String {
 /// let file = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
 ///     xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
 ///     trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n45\n%%EOF\n";
-/// let reading = Reading::open(&file[..], &[], &Options::DEFAULT).unwrap();
+/// let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
 /// assert_eq!(reading.ids().collect::<Vec<_>>(), [(1, 0)]);
 /// let catalog = reading.get((1, 0)).unwrap();
 /// assert!(catalog.as_dict().is_some_and(|d| d.has(b"Type")));
@@ -291,7 +294,7 @@ impl<'a> Reading<&'a [u8]> {
     /// `decoder` for every stream.
     pub(crate) fn in_memory(
         file: &'a [u8],
-        passwords: &[&[u8]],
+        passwords: &[Password],
         options: &Options,
         native: bool,
         decoder: Option<&dyn Decode>,
@@ -315,20 +318,39 @@ impl<'a> Reading<&'a [u8]> {
 impl<S: ByteSource> Reading<S> {
     /// The file `source` holds, opened: its header, its cross-reference
     /// sections and trailer, and, when it's encrypted, its security
-    /// handler, opened by the first of `passwords` that opens it, each
-    /// tried as the owner's and then the user's (none, the empty
-    /// password), as [`read_opened`](super::read_opened) tries them. The
+    /// handler, opened by the empty password, as most files' is, which
+    /// [`Reading::unlock`] opens by another when it doesn't. It fails only
+    /// when the source doesn't give its bytes ([`Error::Io`]).
+    pub fn open(source: S, options: &Options) -> Result<Reading<S>, Error> {
+        Reading::open_by(source, &[], options, true)
+    }
+
+    /// The file `source` holds, opened as [`Reading::open`] opens it, but
+    /// its security handler by the first of `passwords` that opens it, in
+    /// the empty password's place: each in each of its encodings
+    /// ([`Password::encodings`]), tried as the owner's and then the user's,
+    /// those that fit the file's revision first (see pdf-crypt's
+    /// `Handler::open`), as [`read_opened`](super::read_opened) tries
+    /// them. Given none, the empty password. A wrong one leaves it
+    /// [`Encryption::Locked`], or [`Encryption::Plain`] where its strings
+    /// and streams aren't encrypted, as no password would: the empty one
+    /// isn't tried after it. Which opened it is
+    /// [`Encryption::Opened`]'s `by`, its index among `passwords`. The
     /// passwords aren't kept. It fails only when the source doesn't give
     /// its bytes ([`Error::Io`]).
-    pub fn open(source: S, passwords: &[&[u8]], options: &Options) -> Result<Reading<S>, Error> {
+    pub fn open_with(
+        source: S,
+        passwords: &[Password],
+        options: &Options,
+    ) -> Result<Reading<S>, Error> {
         Reading::open_by(source, passwords, options, true)
     }
 
-    /// [`Reading::open`], an object read by position first given a window
-    /// to a byte past the next listed offset when `bound`.
+    /// [`Reading::open_with`], an object read by position first given a
+    /// window to a byte past the next listed offset when `bound`.
     pub(crate) fn open_by(
         source: S,
-        passwords: &[&[u8]],
+        passwords: &[Password],
         options: &Options,
         bound: bool,
     ) -> Result<Reading<S>, Error> {
@@ -347,6 +369,32 @@ impl<S: ByteSource> Reading<S> {
             reader,
             bound,
         })
+    }
+
+    /// The reading, an encrypted file no password opened, opened by the
+    /// first of `passwords` that opens its security handler, as
+    /// [`Reading::open_with`] would have opened it: those that fit the
+    /// file's revision first, each as the owner's and then the user's (see
+    /// pdf-crypt's `Handler::open`), and [`Encryption::Opened`]'s `by` its
+    /// index among `passwords`. Nothing of the file is read again: the
+    /// reading kept its encryption dictionary's values and its first `/ID`
+    /// element while no password had opened it. What it read and decoded
+    /// is dropped, to be read again decrypted, and what it warned of is
+    /// what it warned of opening the file, with what's wrong with `/Perms`
+    /// among it; its budget is what opening the file left.
+    ///
+    /// Given back as it was, with why: where none of `passwords` opens it
+    /// ([`Refused::Password`]), or its security handler is one the reader
+    /// can't open ([`Refused::Unsupported`]). A file that isn't encrypted,
+    /// or that a password opened, is given back as it is.
+    // The refusal holds the reading, as the reading opened is one: a box
+    // would make neither side smaller.
+    #[allow(clippy::result_large_err)]
+    pub fn unlock(mut self, passwords: &[Encoded]) -> Result<Reading<S>, (Reading<S>, Refused)> {
+        match self.reader.unlock(passwords) {
+            Ok(()) => Ok(self),
+            Err(refused) => Err((self, refused)),
+        }
     }
 
     /// The file read by position.

@@ -196,8 +196,9 @@ pub fn encrypted(
 ) -> Vec<u8> {
     use pdf_crypt::writer;
     let values = writer::dictionary(settings);
-    let handler = pdf_crypt::Handler::open(&values, settings.id, &[settings.user])
-        .expect("the writer's opens");
+    let user = [pdf_crypt::Encoded::verbatim(settings.user)];
+    let handler =
+        pdf_crypt::Handler::open(&values, settings.id, &user).expect("the writer's opens");
     fn strings(o: &mut Object, encrypt: &mut dyn FnMut(&[u8]) -> Vec<u8>) {
         // A dictionary's values, or a stream's dictionary's.
         let mut entries = |d: &mut Dict| {

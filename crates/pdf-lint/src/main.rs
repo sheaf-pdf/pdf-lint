@@ -17,12 +17,14 @@ use anyhow::{Context, Result, bail};
 use clap::builder::{OsStringValueParser, TypedValueParser};
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser};
+use pdf_lint::pdf_crypt::Password;
 use pdf_lint::{
     Allowances, Class, Document, Encryption, Exempt, Finding, Grammar, Hold, Made, Options, Report,
-    Span, UnlistedIn, Version, bytes, check, file_version, text, use_model,
+    Span, UnlistedIn, Version, bytes, check, file_version, use_model,
 };
 use serde::Serialize;
 use serde_json::ser::{CharEscape, CompactFormatter, Formatter};
+use zeroize::Zeroizing;
 
 /// What `--help` says before the usage. clap wraps nothing, so this and
 /// each option's help are broken by hand, within 80 columns.
@@ -268,7 +270,9 @@ struct Args {
     named: BTreeSet<String>,
     allow: Option<PathBuf>,
     full: bool,
-    password: Option<String>,
+    /// `--password`'s, taken from clap's `String` as it's parsed, and wiped
+    /// when it's dropped.
+    password: Option<Zeroizing<String>>,
     jobs: Option<NonZero<usize>>,
     json: bool,
 }
@@ -276,9 +280,6 @@ struct Args {
 /// What every file is checked with.
 struct Setup {
     args: Args,
-    /// `--password`'s, as UTF-8 and in each single-byte encoding that has
-    /// it ([`text::passwords`]); none without it.
-    passwords: Vec<Vec<u8>>,
     hold: Hold,
     exempt: Vec<Exempt>,
     allow: Option<Allowances>,
@@ -433,7 +434,7 @@ fn args() -> Result<Args, clap::Error> {
         named: BTreeSet::new(),
         allow: cli.allow,
         full: cli.full,
-        password: cli.password,
+        password: cli.password.map(Zeroizing::new),
         jobs: cli.jobs,
         json: cli.format.unwrap_or(false),
     })
@@ -528,12 +529,11 @@ fn run(mut args: Args) -> Result<ExitCode> {
         None => Vec::new(),
     };
     let allow = args.allow.as_deref().map(Allowances::read).transpose()?;
-    let passwords = (args.password.as_deref()).map_or_else(Vec::new, text::passwords);
     let baseline = match &args.baseline {
         Some(path) => {
             let data =
                 std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let doc = bytes::read_opened(&data, &slices(&passwords));
+            let doc = bytes::read_opened(&data, password(&args).as_slice());
             if let Some(why) = locked(&doc, args.password.is_some()) {
                 bail!("--baseline {}: {why}", path.display());
             }
@@ -551,7 +551,6 @@ fn run(mut args: Args) -> Result<ExitCode> {
     let model = format!("{:016x}", pdf_lint::grammar().hash());
     let setup = Setup {
         args,
-        passwords,
         hold,
         exempt,
         allow,
@@ -629,9 +628,10 @@ fn checked_in_order(setup: &Setup, mut report: impl FnMut(Checked) -> bool) {
     });
 }
 
-/// `passwords` as the reader takes them.
-fn slices(passwords: &[Vec<u8>]) -> Vec<&[u8]> {
-    passwords.iter().map(Vec::as_slice).collect()
+/// `--password`'s, as the reader takes it, which tries it in each of its
+/// encodings; none without it.
+fn password(args: &Args) -> Option<Password<'_>> {
+    (args.password.as_deref()).map(|password| Password(password.as_str()))
 }
 
 /// Why `doc` isn't checked, when it's encrypted and no password it was
@@ -649,7 +649,6 @@ fn locked(doc: &Document, password: bool) -> Option<&'static str> {
 fn check_file(path: &Path, setup: &Setup) -> Checked {
     let Setup {
         args,
-        passwords,
         hold,
         exempt,
         allow,
@@ -669,7 +668,7 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
         Ok(data) => data,
         Err(e) => return unread(path, &e.to_string(), args.json),
     };
-    let doc = bytes::read_opened(&data, &slices(passwords));
+    let doc = bytes::read_opened(&data, password(args).as_slice());
     if let Some(why) = locked(&doc, args.password.is_some()) {
         return unread(path, why, args.json);
     }
@@ -699,7 +698,8 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             return unread(path, why, args.json);
         }
         (true, Some(update)) => {
-            let previous = bytes::read_from_opened(&data, &slices(passwords), update.previous);
+            let password = password(args);
+            let previous = bytes::read_from_opened(&data, password.as_slice(), update.previous);
             let made = |id| match previous.contains(id) {
                 true => Made::Merged,
                 false => Made::Built,

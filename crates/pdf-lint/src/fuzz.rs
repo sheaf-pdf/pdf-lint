@@ -11,9 +11,10 @@ use std::collections::BTreeSet;
 use crate::bytes;
 use crate::check::{Exempt, Hold, Made, Options, UnlistedIn, check};
 use crate::object::Span;
+use crate::pdf_crypt;
+use crate::pdf_crypt::writer::{Kind, Settings};
 use crate::source::{Document, Source};
 use crate::version::Version;
-use pdf_crypt::writer::{Kind, Settings};
 
 /// The limits the fuzz target reads under: a stream decodes to at most
 /// 1 MiB, and a reading's streams to 4 MiB.
@@ -29,7 +30,7 @@ pub fn options() -> bytes::Options {
 fn read(file: &[u8], section: Option<usize>) -> Document {
     let mut options = options();
     options.section = section;
-    bytes::Reading::open(file, &[], &options)
+    bytes::Reading::open(file, &options)
         .and_then(bytes::Reading::into_document)
         .expect("a file in memory reads")
 }

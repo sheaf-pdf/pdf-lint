@@ -25,7 +25,6 @@ anyhow = { version = "1", optional = true }
 # newer clap in the lock means taking them again.
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"], optional = true }
 pdf-arlington = { path = "../pdf-arlington", version = "0.1" }
-pdf-crypt = { path = "../pdf-crypt", version = "0.1" }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
 pdf-structure = { path = "../pdf-structure", version = "0.1" }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
@@ -33,12 +32,15 @@ pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 thiserror = "2"
+# The command line's too: `--password` held so that it's wiped when it's
+# dropped.
+zeroize = { version = "1.9", optional = true }
 
 [features]
 default = ["cli"]
 # The command line, and what only it depends on: a crate that uses the
 # library alone leaves them out with `default-features = false`.
-cli = ["dep:anyhow", "dep:clap", "dep:serde", "dep:serde_json"]
+cli = ["dep:anyhow", "dep:clap", "dep:serde", "dep:serde_json", "dep:zeroize"]
 
 [[bin]]
 name = "pdf-lint"

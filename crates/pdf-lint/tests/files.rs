@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pdf_lint::bytes::read_opened;
+use pdf_lint::pdf_crypt::{Encoding, Password};
 use pdf_lint::{Document, Encryption, Form, Hold, Made, Object, Options, Str, Value, check};
 
 /// Each fixture's name, whether its dictionaries are in object streams,
@@ -78,7 +79,7 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
         assert!(others.is_empty(), "{name}: {report}");
         // The owner's password opens it too, to the same.
         if encrypted {
-            let owned = read_opened(&data, &[b"owner"]);
+            let owned = read_opened(&data, &[Password("owner")]);
             let opened = matches!(owned.encryption, Encryption::Opened { owner: true, .. });
             assert!(opened, "{name}: {:?}", owned.encryption);
             assert!(owned.objects().eq(doc.objects()), "{name}");
@@ -116,4 +117,42 @@ fn each_file_qpdf_wrote_checks_through_the_command_line() {
         );
         assert!(!stdout.contains("unresolved"), "{name}: {stdout}");
     }
+}
+
+/// The AES-256 file, whose user password is empty: a wrong password, which
+/// is tried in the empty one's place, leaves it unread, said as ever; the
+/// owner's opens it as the owner's, by its first password's UTF-8, and it's
+/// checked.
+#[test]
+fn a_wrong_password_on_a_file_any_password_opens_leaves_it_unread() {
+    let path = fixture("qpdf-aes-256");
+    let data = std::fs::read(&path).unwrap();
+    let wrong = read_opened(&data, &[Password("wrong")]);
+    assert_eq!(wrong.encryption, Encryption::Locked);
+    let owned = read_opened(&data, &[Password("owner")]);
+    let by = Some((0, Encoding::Utf8));
+    let opened =
+        matches!(owned.encryption, Encryption::Opened { owner: true, by: b, .. } if b == by);
+    assert!(opened, "{:?}", owned.encryption);
+    let run = |password: &str| {
+        Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
+            .args(["--password", password])
+            .arg(&path)
+            .output()
+            .unwrap()
+    };
+    let out = run("wrong");
+    assert_eq!(out.status.code(), Some(2));
+    let said = format!(
+        "{}: the password --password gives doesn't open it\n",
+        path.display()
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), said);
+    let out = run("owner");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.code().is_some_and(|c| c < 2), "{stdout}");
+    assert!(
+        out.stderr.is_empty() && stdout.contains(" objects checked"),
+        "{stdout}"
+    );
 }

@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::RangeBounds;
 
+use pdf_crypt::Encoding;
 use pdf_objects::Resolve;
 use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
 use pdf_objects::parse;
@@ -297,6 +298,10 @@ pub enum Encryption {
     Opened {
         /// Whether by the owner's password.
         owner: bool,
+        /// Which of the passwords the reader was given opened it: its index
+        /// among them, and the encoding it opened in. None when it was
+        /// given none, and the empty password opened it.
+        by: Option<(usize, Encoding)>,
     },
     /// It is, and no password it was given opens it.
     Locked,
@@ -443,9 +448,10 @@ pub enum Unread {
 
 impl Encryption {
     /// [`Encryption::Opened`]: by the owner's password when `owner`, else
-    /// by the user's.
-    pub fn opened(owner: bool) -> Encryption {
-        Encryption::Opened { owner }
+    /// by the user's; by the password given at index `by`'s, in its
+    /// encoding, or none, by the empty password, given none.
+    pub fn opened(owner: bool, by: Option<(usize, Encoding)>) -> Encryption {
+        Encryption::Opened { owner, by }
     }
 }
 
@@ -500,7 +506,7 @@ impl Document {
     /// let mut doc = Document::new(Version::new(1, 7), trailer);
     /// doc.insert(1, dict! { "Type" => "Catalog" });
     /// doc.update = Some(Update::new(BTreeSet::from([(1, 0)]), 9));
-    /// doc.encryption = Encryption::opened(false);
+    /// doc.encryption = Encryption::opened(false, None);
     /// assert!(doc.get((1, 0)).is_ok());
     /// ```
     pub fn new(version: Version, trailer: Dict) -> Document {
@@ -868,6 +874,7 @@ impl<'o> Resolve<'o> for &'o Document {
 
 #[cfg(test)]
 mod tests {
+    use pdf_crypt::Password;
     use pdf_objects::dict;
     use pdf_objects::object::Stream;
 
@@ -1096,7 +1103,7 @@ mod tests {
         assert_eq!(doc.header, Some(Version::new(1, 7)));
         assert_eq!(doc.facts.newest, Some((startxref(&file), XrefKind::Stream)));
         assert_ne!(doc.encryption, Encryption::None);
-        assert_eq!(doc.encryption, Encryption::opened(false));
+        assert_eq!(doc.encryption, Encryption::opened(false, None));
     }
 
     /// Each reason an object doesn't read says it as the reader's text
@@ -1651,9 +1658,11 @@ mod tests {
             let Some(file) = fixture(&format!("qpdf-{name}")) else {
                 return;
             };
-            for (password, owner) in [(&b""[..], false), (b"owner", true)] {
-                let mut doc = crate::bytes::read_opened(&file, &[password]);
-                assert_eq!(doc.encryption, Encryption::opened(owner), "{name}");
+            let owner = [Password("owner")];
+            for (passwords, by) in [(&[][..], None), (&owner, Some((0, Encoding::Utf8)))] {
+                let owner = by.is_some();
+                let mut doc = crate::bytes::read_opened(&file, passwords);
+                assert_eq!(doc.encryption, Encryption::opened(owner, by), "{name}");
                 let before = doc.clone();
                 let reached: BTreeSet<ObjectId> = before.reachable().into_iter().collect();
                 let pruned = doc.prune();

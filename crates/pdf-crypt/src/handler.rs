@@ -14,7 +14,7 @@ use crate::hmac::HmacSha256;
 use crate::md5::md5;
 use crate::rc4::rc4;
 use crate::sha2::{sha256, sha384, sha512};
-use crate::{CryptFilter, Dictionary, Error, Fault, Refused};
+use crate::{CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Refused};
 
 /// The padding a password of revisions 2 to 4 is filled out with
 /// (Algorithm 2, step a).
@@ -63,6 +63,8 @@ pub struct Handler {
     filters: BTreeMap<Vec<u8>, Method>,
     encrypt_metadata: bool,
     faults: Vec<Fault>,
+    /// Which of the passwords given opened it, and in which encoding.
+    by: Option<(usize, Encoding)>,
 }
 
 impl fmt::Debug for Handler {
@@ -75,6 +77,7 @@ impl fmt::Debug for Handler {
             .field("filters", &self.filters)
             .field("encrypt_metadata", &self.encrypt_metadata)
             .field("faults", &self.faults)
+            .field("opened_by", &self.by)
             .finish_non_exhaustive()
     }
 }
@@ -82,23 +85,40 @@ impl fmt::Debug for Handler {
 impl Handler {
     /// The handler `dictionary` describes, for the file whose first `/ID`
     /// element is `id`, opened by the first of `passwords` that opens it,
-    /// each tried as the owner's and then the user's; with none, the empty
-    /// password. Of revision 5 or 6, the first whose key `/Perms` confirms,
-    /// else the first whose key it doesn't ([`Fault::Unconfirmed`]).
+    /// each tried as the owner's and then the user's: first those whose
+    /// encoding fits the dictionary's revision ([`Encoding::fits`]), then
+    /// the rest, each in the order given, but one whose bytes the revision
+    /// takes as it took one tried before (padded or cut to 32 bytes for 2
+    /// to 4, cut to 127 for 5 and 6), which gives the same key. With none,
+    /// the empty password. Of revision 5 or 6, the first whose key `/Perms`
+    /// confirms, else the first whose key it doesn't
+    /// ([`Fault::Unconfirmed`]).
     pub fn open(
         dictionary: &Dictionary,
         id: &[u8],
-        passwords: &[&[u8]],
+        passwords: &[Encoded],
     ) -> Result<Handler, Refused> {
         let file = File::of(dictionary, id)?;
-        let empty: [&[u8]; 1] = [b""];
-        let passwords = match passwords.is_empty() {
-            true => &empty[..],
-            false => passwords,
+        let empty = [Encoded::verbatim(b"")];
+        let given = !passwords.is_empty();
+        let passwords = match given {
+            true => passwords,
+            false => &empty[..],
         };
+        let fits = |i: &usize| passwords[*i].encoding().fits(file.r);
+        let order = (0..passwords.len())
+            .filter(fits)
+            .chain((0..passwords.len()).filter(|i| !fits(i)));
+        let mut tried: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(passwords.len());
         let mut unconfirmed = None;
         let mut opened = None;
-        'passwords: for password in passwords {
+        'passwords: for i in order {
+            let password = passwords[i].as_bytes();
+            let taken = file.taken(password);
+            if tried.contains(&taken) {
+                continue;
+            }
+            tried.push(taken);
             for owner in [true, false] {
                 let key = match owner {
                     true => file.owner(password),
@@ -106,17 +126,17 @@ impl Handler {
                 };
                 match key {
                     Some((key, Some(Fault::Unconfirmed))) => {
-                        unconfirmed.get_or_insert((key, owner, Some(Fault::Unconfirmed)));
+                        unconfirmed.get_or_insert((key, owner, i, Some(Fault::Unconfirmed)));
                     }
                     Some((key, fault)) => {
-                        opened = Some((key, owner, fault));
+                        opened = Some((key, owner, i, fault));
                         break 'passwords;
                     }
                     None => {}
                 }
             }
         }
-        let Some((key, owner, fault)) = opened.or(unconfirmed) else {
+        let Some((key, owner, i, fault)) = opened.or(unconfirmed) else {
             return Err(Refused::Password);
         };
         let (strings, streams, filters) = methods(dictionary, file.v);
@@ -131,7 +151,15 @@ impl Handler {
             filters,
             encrypt_metadata: file.encrypt_metadata,
             faults: fault.into_iter().collect(),
+            by: given.then(|| (i, passwords[i].encoding())),
         })
+    }
+
+    /// Which of the passwords [`Handler::open`] was given opened it: its
+    /// index among them, and its encoding. None when it was given none, and
+    /// opened by the empty password.
+    pub fn opened_by(&self) -> Option<(usize, Encoding)> {
+        self.by
     }
 
     /// Whether it was opened by the owner's password, not the user's.
@@ -553,6 +581,16 @@ impl<'a> File<'a> {
         }
     }
 
+    /// `password` as the revision takes it: padded or cut to 32 bytes from
+    /// 2 to 4 (Algorithm 2, step a), cut to 127 for 5 and 6 (7.6.4.3.3).
+    /// Two passwords it takes alike open it alike.
+    fn taken(&self, password: &[u8]) -> Zeroizing<Vec<u8>> {
+        match self.r {
+            2..=4 => Zeroizing::new(File::padded(password).to_vec()),
+            _ => Zeroizing::new(password[..password.len().min(127)].to_vec()),
+        }
+    }
+
     /// `password` padded or cut to 32 bytes (Algorithm 2, step a).
     pub(crate) fn padded(password: &[u8]) -> Zeroizing<[u8; 32]> {
         let len = password.len().min(32);
@@ -647,6 +685,8 @@ impl<'a> File<'a> {
 /// over it until at least 64, and the last byte of the round's AES no more
 /// than its number less 32, the starting hash round 0.
 pub(crate) fn hash(r: i64, password: &[u8], salt: &[u8], udata: &[u8]) -> Zeroizing<Vec<u8>> {
+    #[cfg(test)]
+    HASHED.with(|hashed| hashed.set(hashed.get() + 1));
     let input = Zeroizing::new([password, salt, udata].concat());
     let mut k = Zeroizing::new(sha256(&input).to_vec());
     if r < 6 {
@@ -673,6 +713,14 @@ pub(crate) fn hash(r: i64, password: &[u8], salt: &[u8], udata: &[u8]) -> Zeroiz
     }
     k.truncate(32);
     k
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has hashed by revision 5's or 6's hash:
+    /// the tests' count of what opening costs, a thread's own, as the tests
+    /// run on threads that each hash.
+    pub(crate) static HASHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// `key` with each byte XORed by `by`, into `round`, its length: an RC4

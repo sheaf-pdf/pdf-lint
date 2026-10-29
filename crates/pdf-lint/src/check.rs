@@ -6059,7 +6059,7 @@ mod tests {
         fn shared<T: Send + Sync>(_: &T) {}
         let file = written("1.7", &clean(), Xref::Table);
         let doc = bytes::read(&file);
-        let reading = bytes::Reading::open(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let reading = bytes::Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
         let trailer = doc.trailer.dict();
         let over_doc = FileCx::new(trailer, Version::new(1, 7), &doc);
         let over_reading = FileCx::new(trailer, Version::new(1, 7), &reading);

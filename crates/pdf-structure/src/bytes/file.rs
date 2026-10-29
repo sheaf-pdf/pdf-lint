@@ -255,7 +255,7 @@ mod tests {
             assert_eq!(file.read_at(range.clone()).unwrap(), &bytes[range]);
         }
         assert!(file.read_at(end..end + 1).is_err());
-        let reading = Reading::open(file, &[], &Options::DEFAULT).unwrap();
+        let reading = Reading::open(file, &Options::DEFAULT).unwrap();
         let ids: Vec<_> = reading.ids().collect();
         assert_eq!(ids.len(), 6);
         ids.iter()
@@ -274,7 +274,7 @@ mod tests {
         let bytes = write::file("1.7", &clean(), root(), Xref::Stream);
         let temp = Temp::new("load", &bytes);
         let file = FileBytes::new(File::open(&temp.0).unwrap()).unwrap();
-        let reading = Reading::open(file, &[], &Options::DEFAULT).unwrap();
+        let reading = Reading::open(file, &Options::DEFAULT).unwrap();
         let doc = reading.to_document().unwrap();
         assert_eq!(doc, read(&bytes));
         let mut streams = 0;
