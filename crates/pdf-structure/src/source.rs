@@ -471,13 +471,16 @@ const DEREFERENCES: usize = 128;
 
 /// Where new ids start in a document under `trailer` whose largest number
 /// listed is `listed`: one past it, and past the trailer's `/Size` less
-/// one, where that's a number (`/Size` is one past the largest number a
-/// file's cross-references list, ISO 32000-2, 7.5.5); never below 1, as
-/// object 0 is always free.
+/// one, where that's a number below the largest (`/Size` is one past the
+/// largest number a file's cross-references list, ISO 32000-2, 7.5.5);
+/// never below 1, as object 0 is always free. A `/Size` of 2^32 or more
+/// is passed over, so a `/Size` alone never takes new ids past every
+/// number, where they'd be numbers no entry holds, such as one a file
+/// lists free: only an object at the largest number does.
 fn first_new(trailer: &Dict, listed: Option<u32>) -> u64 {
     let size = (trailer.get(b"Size").and_then(Object::as_integer))
         .and_then(|size| u64::try_from(size).ok())
-        .filter(|&size| size <= PAST);
+        .filter(|&size| size < PAST);
     let listed = listed.map(|n| u64::from(n) + 1);
     size.into_iter().chain(listed).fold(1, u64::max)
 }
@@ -1221,6 +1224,7 @@ mod tests {
             0.into(),
             (-3).into(),
             8.5.into(),
+            (1i64 << 32).into(),
             (1i64 << 33).into(),
             Object::reference(8),
         ] {
@@ -1357,11 +1361,23 @@ mod tests {
         doc.set((u32::MAX, 0), "Copied");
         assert_eq!((doc.new_id(), doc.new_id()), ((4, 0), (5, 0)));
 
-        // A /Size whose number less one is the largest.
+        // A /Size whose number less one is the largest is passed over, as
+        // any larger: alone, it takes new ids nowhere near a free entry.
         let size = dict! { "Size" => 1i64 << 32 };
         let mut doc = Document::new(Version::new(1, 7), size);
-        assert_eq!(doc.max_id(), u32::MAX);
+        assert_eq!(doc.max_id(), 0);
         assert_eq!((doc.new_id(), doc.new_id()), ((1, 0), (2, 0)));
+        file = crate::write::assembled(
+            "1.7",
+            &[(1, &b"<< /Type /Catalog >>"[..]), (2, b"2"), (3, b"3")],
+            "<< /Size 4294967296 /Root 1 0 R >>",
+        );
+        let row = format!("{:010} 00000 n", find(&file, b"2 0 obj"));
+        let at = find(&file, row.as_bytes());
+        file[at..at + row.len()].copy_from_slice(b"0000000000 00001 f");
+        let mut doc = crate::bytes::read(&file);
+        assert_eq!(doc.max_id(), 3);
+        assert_eq!((doc.new_id(), doc.new_id()), ((4, 0), (5, 0)));
 
         // A document holding the largest: numbers no entry holds, at any
         // generation, read or not, in turn from the last handed out.
