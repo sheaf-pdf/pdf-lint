@@ -44,7 +44,7 @@ pub enum Entry {
 }
 
 /// A cross-reference section's entries, by object number.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Section {
     entries: BTreeMap<u32, Entry>,
     /// The trailer's `/Size`: past every number listed.
@@ -150,23 +150,48 @@ impl Section {
     }
 
     /// The section as a stream, object `num` at file position `pos`, which
-    /// lists itself, then `startxref`. `trailer`'s entries are its
-    /// dictionary's. `/W` is as narrow as the widest field needs. A full
-    /// write's rows are deflated under the PNG Up predictor, as `deflate`
-    /// says, each less the row above it, which leaves mostly zeros where
-    /// offsets climb slowly; an append's are written as they are. A
-    /// position before the header is refused, as is a dictionary
-    /// pdf-objects' writer refuses; then nothing is written.
+    /// lists itself, then `startxref`; listed in it after, as a table
+    /// would be written of it. `trailer`'s entries are its dictionary's.
+    /// `/W` is as narrow as the widest field needs. A full write's rows are
+    /// deflated under the PNG Up predictor, as `deflate` says, each less
+    /// the row above it, which leaves mostly zeros where offsets climb
+    /// slowly; an append's are written as they are. A position before the
+    /// header is refused, as is a dictionary pdf-objects' writer refuses;
+    /// then nothing is written, and it lists what it did.
     pub fn stream(
-        mut self,
+        &mut self,
         out: &mut Vec<u8>,
         num: u32,
-        mut trailer: Dict,
+        trailer: Dict,
         pos: usize,
         deflate: Deflate,
     ) -> Result<(), Error> {
         let at = self.offset(pos)?;
+        let was = self.entries.get(&num).copied();
+        let size = self.size;
         self.insert(num, Entry::InUse { pos, generation: 0 });
+        let written = self.stream_at(out, num, trailer, at, deflate);
+        if written.is_err() {
+            // As it was: what a refusal leaves.
+            match was {
+                Some(entry) => self.entries.insert(num, entry),
+                None => self.entries.remove(&num),
+            };
+            self.size = size;
+        }
+        written
+    }
+
+    /// The section, listing itself as object `num`, as a stream whose
+    /// `startxref` is `at`.
+    fn stream_at(
+        &self,
+        out: &mut Vec<u8>,
+        num: u32,
+        mut trailer: Dict,
+        at: u64,
+        deflate: Deflate,
+    ) -> Result<(), Error> {
         let subsections = self.subsections()?;
         let widest = subsections
             .iter()

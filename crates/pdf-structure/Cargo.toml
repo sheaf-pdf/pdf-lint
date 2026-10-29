@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF's file structure, read whole or on demand into a document to number, edit, walk and prune in memory: the header, cross-reference sections along /Prev, object streams, recovery by scanning, decrypting and decoding, every choice said; and cross-reference sections, object streams and an encrypted file's objects written"
+description = "PDF's file structure, read whole or on demand into a document to number, edit, walk and prune in memory: the header, cross-reference sections along /Prev, object streams, recovery by scanning, decrypting and decoding, every choice said; and written, whole or as an incremental update: cross-reference sections, object streams, an encrypted file's objects encrypted as they're written"
 keywords = ["pdf", "parser", "xref", "object-streams", "iso-32000"]
 categories = ["parser-implementations"]
 # Only what users need, so local tooling files can't end up in the package.
@@ -22,6 +22,8 @@ pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
 # The file `fixtures` hands qpdf a stream in.
 tempfile = { version = "3", optional = true }
 thiserror = "2"
+# A written file's second `/ID` element: XXH3-128 of what it wrote.
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_128"] }
 
 # A file's identity, by a handle held open (`bytes::Identity`): its device
 # and inode on Unix, its volume serial number and file index on Windows.

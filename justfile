@@ -165,8 +165,9 @@ arlington-msrv:
 # tokenizer; `filters`, the filters, decoding and encoding; `crypt`,
 # pdf-crypt's security handler, new files' dictionaries and a password's
 # forms; `objects`, pdf-objects' parser, and its writer on what it
-# read; `structure`, pdf-structure's reader; or `check`, the reader and
-# the checker. `structure` and `check` begin from the seeds pdf-lint's
+# read; `structure`, pdf-structure's reader; `write`, pdf-structure's
+# writer, on what its reader read; or `check`, the reader and the
+# checker. `structure`, `write` and `check` begin from the seeds pdf-lint's
 # fuzz module makes.
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.
@@ -192,13 +193,18 @@ fuzz target="tokenize" seconds="60":
         mkdir -p fuzz/corpus/structure
         cargo +nightly fuzz run --target "$host" structure fuzz/corpus/structure fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
+    write)
+        PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/write
+        cargo +nightly fuzz run --target "$host" write fuzz/corpus/write fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/check
         cargo +nightly fuzz run --target "$host" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters, crypt, objects, structure or check" >&2
+        echo "just fuzz: tokenize, filters, crypt, objects, structure, write or check" >&2
         exit 2
         ;;
     esac

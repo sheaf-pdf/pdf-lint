@@ -12,19 +12,28 @@
 //! opened by a wrong password, then unlocked by the owner's, it's the file
 //! opened by the owner's. It reads under small limits, so that a run tries
 //! more inputs. It's compiled only for tests and under cargo-fuzz's
-//! `--cfg fuzzing`, and only reads.
+//! `--cfg fuzzing`.
+//!
+//! And what the `write` target checks ([`write_file`]): a file read is
+//! written whole and as an update, each way the input picks, without a
+//! panic, and where it read soundly, written and read again it's the same
+//! objects.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::convert::Infallible;
 use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pdf_crypt::Password;
+use pdf_crypt::rand_core::{TryCryptoRng, TryRng};
 use pdf_objects::object::{Object, ObjectId, Span, Value};
+use pdf_objects::serialize;
 
 use crate::bytes::{ByteSource, Error, Options, Reading, Whole, XrefEntry};
-use crate::source::{Document, Encryption, Source};
+use crate::source::{Document, Encryption, Source, XrefKind};
+use crate::write::{self, Base, Body, Encryptor, Pack};
 
 /// The owner's password the fuzz target opens a file by, when its input
 /// says to: the one the unit test's encrypted files are written with.
@@ -471,6 +480,270 @@ fn within(file: &[u8], doc: &Document) {
     }
 }
 
+/// The password a file the `write` target writes under a new encryption
+/// opens by.
+const NEW: Password<'static> = Password("new");
+
+/// The most object numbers a file the `write` target writes whole lists:
+/// a whole file's section lists every number up to its last, so one past
+/// it would take a run its time.
+const LISTED: u32 = 1 << 16;
+
+/// The `write` target's body: `data`'s first two bytes choose how the
+/// file after them is read and written, and the rest is the file. Read
+/// under [`options`], by the owner's password `owner` when the choice's
+/// lowest bit is set, made a document with its reading kept, then written
+/// whole, but where it lists a number past [`LISTED`]: with a table, a
+/// stream, or a stream packed, by number or in sevens on one thread, as
+/// the choice's next two bits give; encrypted as it was read, decrypted,
+/// or under a new encryption of revision 6 for `new` whose randomness the
+/// file's bytes give ([`Drawn`]), as its two after give. And, when its
+/// sixth bit is set, an update after it, of the object its bits from the
+/// seventh pick, a key more, under its own encryption. Neither panics.
+/// Where the reading read soundly, with nothing to warn of, and a write
+/// wrote, its file read again under the same limits, by its password, is
+/// sound and holds every object the document did, as pdf-objects' writer
+/// writes each (reals as written and strings' forms aside), a stream's
+/// data as handed out, but the encryption dictionary and what it refers
+/// to, which the writer writes as its encryption is; and the update's
+/// changed object with its key. Panics on a broken promise.
+pub fn write_file(data: &[u8]) {
+    compared(data);
+}
+
+/// [`write_file`]'s body: whether the whole file and the update were
+/// written and read back to compare.
+fn compared(data: &[u8]) -> [bool; 2] {
+    let (choice, file) = match data {
+        [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
+        _ => (0, data),
+    };
+    let password = match choice & 1 {
+        0 => Password(""),
+        _ => OWNER,
+    };
+    let Ok(reading) = Reading::open_with(file, &[password], &options()) else {
+        return [false; 2];
+    };
+    let Ok(doc) = reading.to_document() else {
+        return [false; 2];
+    };
+    let sound = reading.trailer().unwritten.is_none() && reading.warnings().is_empty();
+    let mut options = write::Options::DEFAULT;
+    let sevens = |numbers: &[u32]| numbers.chunks(7).map(<[u32]>::to_vec).collect();
+    let mut sevens_on_one = Pack::DEFAULT;
+    sevens_on_one.groups = Some(&sevens);
+    (options.kind, options.pack) = match (choice >> 1) & 3 {
+        0 => (XrefKind::Table, None),
+        1 => (XrefKind::Stream, None),
+        2 => (XrefKind::Stream, Some(Pack::DEFAULT)),
+        _ => {
+            options.threads = 1;
+            (XrefKind::Stream, Some(sevens_on_one))
+        }
+    };
+    let own = Encryptor::of(&reading);
+    let new = NEW.prepared().ok().and_then(|password| {
+        Encryptor::create(&password, choice & 64 == 0, &mut Drawn::over(file)).ok()
+    });
+    let (encryptor, opens) = match (choice >> 3) & 3 {
+        2 => (None, Password("")),
+        3 => (new.as_ref(), NEW),
+        _ => (own.as_ref().ok().and_then(Option::as_ref), password),
+    };
+    let last = doc.objects().next_back().map_or(0, |(id, _)| id.0);
+    let mut compared = [false; 2];
+    if last < LISTED {
+        let mut out = Vec::new();
+        let written = write::document(&mut out, &doc, encryptor, Some(&reading), &options);
+        if let (true, Ok(_)) = (sound, written) {
+            let back = read_back(&out, opens);
+            same_objects(&doc, &reading, &back, None);
+            compared[0] = true;
+        }
+    }
+    if choice & 32 != 0 {
+        let own = own.ok().flatten();
+        compared[1] = updated(file, &doc, &reading, own.as_ref(), password, sound, choice);
+    }
+    compared
+}
+
+/// `file`, read as `reading` and made `doc`, with an update after it that
+/// writes the object `choice`'s bits from the seventh pick with a key
+/// more, under `encryptor`, its own: when the reading was `sound` and the
+/// update wrote, the file read again by `password` is sound, and the same
+/// objects, but that one with its key: whether it was.
+fn updated(
+    file: &[u8],
+    doc: &Document,
+    reading: &Reading<&[u8]>,
+    encryptor: Option<&Encryptor>,
+    password: Password,
+    sound: bool,
+    choice: u16,
+) -> bool {
+    let Ok(base) = Base::of(reading) else {
+        return false;
+    };
+    let objects: Vec<(ObjectId, &Object)> = doc.objects().collect();
+    let Some(&(id, object)) = objects.get(usize::from(choice >> 7) % objects.len().max(1)) else {
+        return false;
+    };
+    let mut changed = object.clone();
+    let Some(dict) = changed.as_dict_mut() else {
+        return false;
+    };
+    dict.set("WriteFuzzed", true);
+    let mut out = file.to_vec();
+    let given = [(id, Body::from(&changed))];
+    let options = write::Options::DEFAULT;
+    let written = write::update(&mut out, &base, given, encryptor, Some(reading), &options);
+    if let (true, Ok(Some(written))) = (sound, written) {
+        assert!(
+            written.base.holds(&out[..]).expect("in memory"),
+            "the update's base holds"
+        );
+        let back = read_back(&out, password);
+        same_objects(doc, reading, &back, Some(id));
+        let got = back.get(id).expect("the changed object reads");
+        let key = got.as_dict().and_then(|d| d.get(b"WriteFuzzed"));
+        assert_eq!(key.and_then(Object::as_bool), Some(true), "{id:?} changed");
+        return true;
+    }
+    false
+}
+
+/// `file`, written, read again under [`options`] by `password`: sound.
+fn read_back<'f>(file: &'f [u8], password: Password<'_>) -> Reading<&'f [u8]> {
+    let back = Reading::open_with(file, &[password], &options()).expect("in memory");
+    if back.trailer().unwritten.is_none() {
+        let _ = back.to_document();
+    }
+    assert!(
+        back.trailer().unwritten.is_none() && back.warnings().is_empty(),
+        "a written file reads soundly: {:?} {:?}",
+        back.trailer().unwritten,
+        back.warnings()
+    );
+    back
+}
+
+/// `back` holds every object `doc`, read in `reading`, holds, but
+/// `changed`, a whole file's left-out ones, and the encryption dictionary
+/// and what it refers to: each as pdf-objects' writer writes it, a
+/// stream's dictionary but its `/Length`, and its data as each reading
+/// hands it out.
+fn same_objects(
+    doc: &Document,
+    reading: &Reading<&[u8]>,
+    back: &Reading<&[u8]>,
+    changed: Option<ObjectId>,
+) {
+    let encrypt = doc.trailer.dict().get(b"Encrypt");
+    let mut encryption: HashSet<ObjectId> = encrypt
+        .map(|e| e.references().collect())
+        .unwrap_or_default();
+    let mut walk: Vec<ObjectId> = encryption.iter().copied().collect();
+    while let Some(id) = walk.pop() {
+        for at in doc.get(id).ok().into_iter().flat_map(Object::references) {
+            if encryption.insert(at) {
+                walk.push(at);
+            }
+        }
+    }
+    for (id, object) in doc.objects() {
+        let left_out = match object.value() {
+            Value::Stream(s) => s.dict.has_type(b"ObjStm") || s.dict.has_type(b"XRef"),
+            Value::Dict(d) => d.has(b"Linearized"),
+            _ => false,
+        };
+        if left_out || changed == Some(id) || encryption.contains(&id) {
+            continue;
+        }
+        let got = back
+            .get(id)
+            .unwrap_or_else(|e| panic!("{id:?} reads back: {e}"));
+        assert_eq!(written(got), written(object), "{id:?} reads back as it was");
+        if object.as_stream().is_some() {
+            let data =
+                |r: &Reading<&[u8]>| r.data(id).map(Cow::into_owned).map_err(|e| e.to_string());
+            assert_eq!(
+                data(back),
+                data(reading),
+                "{id:?}'s data reads back as it was"
+            );
+        }
+    }
+}
+
+/// `object` as pdf-objects' writer writes it, a stream's dictionary alone,
+/// but its `/Length`.
+fn written(object: &Object) -> Vec<u8> {
+    let object = match object.value() {
+        Value::Stream(stream) => {
+            let mut dict = stream.dict.clone();
+            dict.remove(b"Length");
+            Object::from(dict)
+        }
+        _ => object.clone(),
+    };
+    let mut out = Vec::new();
+    let _ = serialize::write(&mut out, &object);
+    out
+}
+
+/// A random number generator for the `write` target's body alone: the
+/// input's bytes, then a counter's. It's no cryptographic generator, but
+/// says it is (`TryCryptoRng`) so that pdf-crypt's `Handler::create` takes
+/// it, through `Encryptor::create`, which only a fuzz body and the tests
+/// may do: it's compiled for nothing else.
+pub struct Drawn<'a> {
+    data: &'a [u8],
+    counter: u8,
+}
+
+impl Drawn<'_> {
+    /// `data`'s bytes, then a counter's.
+    pub fn over(data: &[u8]) -> Drawn<'_> {
+        Drawn { data, counter: 0 }
+    }
+}
+
+impl TryRng for Drawn<'_> {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        let mut bytes = [0; 4];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        let mut bytes = [0; 8];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+        for byte in dst {
+            *byte = match self.data.split_first() {
+                Some((&first, rest)) => {
+                    self.data = rest;
+                    first
+                }
+                None => {
+                    self.counter = self.counter.wrapping_add(1);
+                    self.counter
+                }
+            };
+        }
+        Ok(())
+    }
+}
+
+impl TryCryptoRng for Drawn<'_> {}
+
 #[cfg(test)]
 mod tests {
     use pdf_crypt::writer::{Kind, Settings};
@@ -665,6 +938,47 @@ mod tests {
         files.push(updated());
         files.push(in_an_object_stream());
         files
+    }
+
+    /// The `write` target's checks on the same files: as written, by either
+    /// password, every way of writing each whole and as an update writes and
+    /// reads back the same objects; then each mutated many times, as a
+    /// fuzzer might, without a panic, the same where it still reads
+    /// soundly.
+    #[test]
+    fn mutated_files_write_and_read_back_alike() {
+        let files = files();
+        for file in &files {
+            for choice in 0..64u16 {
+                let choice = choice | 32 | (choice & 1) << 7;
+                let data = [&choice.to_le_bytes()[..], file].concat();
+                assert_eq!(compared(&data), [true; 2], "{choice}");
+            }
+        }
+        let mut random = Random(0x6a09_e667_f3bc_c908);
+        for n in 0..400 {
+            let choice = u16::try_from(random.next() & 0xffff).unwrap_or(0);
+            let mut file = [&choice.to_le_bytes()[..], &files[n % files.len()]].concat();
+            for _ in 0..1 + random.below(4) {
+                let at = 2 + random.below(file.len() - 2);
+                match random.below(3) {
+                    0 => file[at] = random.next() as u8,
+                    1 => {
+                        let end = (at + random.below(16)).min(file.len());
+                        file.drain(at..end);
+                    }
+                    _ => {
+                        let end = (at + random.below(64)).min(file.len());
+                        let piece = file[at..end].to_vec();
+                        file.splice(at..at, piece);
+                    }
+                }
+                if file.len() < 3 {
+                    break;
+                }
+            }
+            write_file(&file);
+        }
     }
 
     /// The fuzz target's checks on files the tests' writer makes, each

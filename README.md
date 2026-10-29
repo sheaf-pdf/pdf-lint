@@ -25,7 +25,7 @@ decrypts what's encrypted itself.
 | [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept; and Flate encoded, with PNG's predictors, on miniz_oxide or zlib-rs |
 | [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler on RustCrypto's primitives: decrypting, every fault said, and encrypting for a writer, a new file's key and dictionary from randomness it's given, its keys wiped |
 | [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, their parser and their writer, which writes an encrypted file's through an encryptor: each value with where it was written, every fault said, and text strings decoded by the spec |
-| [pdf-structure](crates/pdf-structure) | PDF's file structure, read whole or each object on demand, from any thread, from memory or a file read by position: the header, cross-reference tables and streams along `/Prev`, object streams and recovery by scanning, each object through pdf-objects' parser, decrypted through pdf-crypt and decoded through pdf-filters, and so any stream's data asked for, where it was read from recorded, every choice it made said; and cross-reference sections and object streams written, deflated through pdf-filters, and an encrypted file's objects encrypted as they're written, through pdf-crypt, by the list it decrypts by |
+| [pdf-structure](crates/pdf-structure) | PDF's file structure, read whole or each object on demand, from any thread, from memory or a file read by position: the header, cross-reference tables and streams along `/Prev`, object streams and recovery by scanning, each object through pdf-objects' parser, decrypted through pdf-crypt and decoded through pdf-filters, and so any stream's data asked for, where it was read from recorded, every choice it made said; and written, whole or as an incremental update, cross-reference sections and object streams deflated through pdf-filters, and an encrypted file's objects encrypted as they're written, through pdf-crypt, by the list it decrypts by |
 | [pdf-arlington](crates/pdf-arlington) | The Arlington PDF Model, embedded: its tables read, and the predicates in their cells evaluated over pdf-objects' objects |
 
 ## Development
@@ -47,10 +47,11 @@ build against `core` alone, and the minimum Rust of the tokenizer, the
 filters, pdf-crypt, pdf-objects, pdf-structure and pdf-arlington.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
-objects`, `just fuzz structure` and `just fuzz check` fuzz the tokenizer,
-the filters, decoding and encoding, pdf-crypt's handler, new files'
-dictionaries and a password's forms, pdf-objects' parser and writer,
-pdf-structure's reader, and the reader and checker, on nightly with
+objects`, `just fuzz structure`, `just fuzz write` and `just fuzz check`
+fuzz the tokenizer, the filters, decoding and encoding, pdf-crypt's
+handler, new files' dictionaries and a password's forms, pdf-objects'
+parser and writer, pdf-structure's reader and writer, and the reader and
+checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
 says for how many seconds (60 by default).
 

@@ -74,9 +74,13 @@
 //!     and `what_an_eff_refers_to_is_the_encryption_dictionarys_own_from_v_4_alone`.
 //!     The writer writes those of the reading it encrypts as, by number,
 //!     whole, as they are; a dictionary shaped as one at another number is
-//!     encrypted. Held by
-//!     `xref_streams_metadata_and_the_encrypt_dict_stay_plain` and
-//!     `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`.
+//!     encrypted. A whole file has one section, whose `/Encrypt` is the
+//!     only one: there, an earlier section's, or one the writer writes
+//!     elsewhere, is encrypted as any object. Held by
+//!     `xref_streams_metadata_and_the_encrypt_dict_stay_plain`,
+//!     `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`,
+//!     `an_earlier_revision_s_encryption_dictionary_is_written_whole_as_any_object`
+//!     and `an_object_at_a_moved_encryption_dictionary_s_number_is_encrypted`.
 //!   - **A signature's `/Contents`,** in a dictionary with `/ByteRange` and
 //!     a string `/Contents` whose `/Type` is `/Sig`, `/DocTimeStamp` or
 //!     none (7.6.2): a `/Type /Sig` dictionary without `/ByteRange` isn't
@@ -725,6 +729,10 @@ struct Reader {
     update: Option<Update>,
     /// What the header and sections say of the file.
     facts: Facts,
+    /// The section it was opened as of ([`Options::section`]), when it
+    /// was: a writer's update after it would go after that section, not
+    /// the file's last.
+    as_of: Option<usize>,
     /// Whether its entries were found by scanning the file.
     scanned: bool,
     /// The newest entry for each object number, with its generation, by
@@ -1053,6 +1061,7 @@ impl Reader {
             opened: Vec::new(),
             update: None,
             facts: Facts::default(),
+            as_of: options.section,
             scanned: false,
             entries: Box::default(),
             offsets: Box::default(),
@@ -2071,6 +2080,7 @@ impl Reader {
             let encrypt = section.trailer.dict().get(b"Encrypt");
             if let Some(Value::Ref(id)) = encrypt.map(Object::value) {
                 self.list.dictionaries.insert(*id);
+                self.list.sections.insert(*id);
             }
             sections.push(section);
             offsets.push(offset);
@@ -2817,6 +2827,7 @@ impl Reader {
         };
         self.list.encrypts = true;
         self.list.dictionaries.extend(own);
+        self.list.sections.extend(own);
         self.encryption = match &dict {
             None => {
                 self.list.undescribed();

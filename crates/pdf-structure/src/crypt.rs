@@ -49,6 +49,10 @@ pub(crate) struct List {
     /// their values refer to: an earlier update's encryption dictionary's
     /// strings aren't encrypted either.
     pub(crate) dictionaries: HashSet<ObjectId>,
+    /// Those the sections' trailers name as `/Encrypt` (or, where the file
+    /// was scanned, the trailer's), among `dictionaries`: what a whole file
+    /// written of it, with one section, no longer names so.
+    pub(crate) sections: HashSet<ObjectId>,
     /// How its embedded files are encrypted, by its dictionary's `/EFF`.
     pub(crate) embedded_files: Eff,
 }

@@ -1,9 +1,27 @@
-//! A writer of a file's structure (ISO 32000-2, 7.5): its cross-reference
+//! A writer of a file's structure (ISO 32000-2, 7.5): a whole file
+//! ([`full`], [`document`]) or an incremental update after one
+//! ([`update`]), given numbered objects; and the parts either is laid out
+//! in, for a caller that lays a file out itself: its cross-reference
 //! sections, as a table or a stream, and object streams of the objects
 //! that may go in one, deflated through [`pdf_filters`]. The objects are
 //! written by pdf-objects' writer ([`pdf_objects::serialize`]), each at the
 //! position a section lists it at.
 //!
+//! - **A whole file** ([`full`]): the header, each object at its number,
+//!   in the order given, the encryption dictionary, the object streams,
+//!   and one cross-reference section, a table or a stream, with no
+//!   `/Prev`; the trailer the caller's but for the keys a section writes
+//!   itself, and an `/ID` whose second string is a hash of what's
+//!   written, so the same objects write the same bytes. Packed
+//!   ([`Options::pack`]), what may go in an object stream goes in one,
+//!   built on threads. [`document`] writes a [`Document`](crate::Document)'s
+//!   objects so, but those a whole file leaves out.
+//! - **An update** ([`update`]): after a file, each object at its number,
+//!   and a section in the file's kind listing only those, its `/Prev` the
+//!   file's last section (7.5.6); the file's trailer carried, and what it
+//!   writes said ([`Written`]), so a second update goes after it without
+//!   reading it again. What it goes after is a [`Base`]: a reading's
+//!   ([`Base::of`]), or one a caller describes ([`Base::new`]).
 //! - **Cross-reference sections** ([`Section`]): a whole file's one
 //!   subsection, `[0, /Size)`, every number it doesn't list written as
 //!   free; or an update's, runs of the numbers it lists, which are only
@@ -42,20 +60,34 @@
 //! What it can't write is refused ([`Error`]), and then nothing is
 //! written.
 
+mod append;
 mod crypt;
+mod full;
 mod objstm;
 #[cfg(test)]
 pub(crate) mod tests;
 mod xref;
 
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use pdf_filters::{Backend, Encoder, Level, Prediction, Unencodable};
-use pdf_objects::object::ObjectId;
+use pdf_objects::Resolve;
+use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
 use pdf_objects::serialize::{self, Refused};
+use pdf_objects::version::Version;
+
+use crate::bytes::{ByteSource, Reading};
+use crate::source::XrefKind;
 
 // The tests' file writer writes its encrypted files' dictionaries so too.
+pub use append::{Base, update};
 #[cfg(any(test, feature = "fixtures"))]
 pub(crate) use crypt::encryption;
 pub use crypt::{Encrypting, Encryptor, Unencryptable};
+pub use full::{document, full};
 pub use objstm::{MAX_DATA, MEMBERS, container, fits, packable};
 pub use xref::{Entry, Section};
 
@@ -111,6 +143,224 @@ impl Default for Deflate {
     }
 }
 
+/// What the writer writes of an object, at the number it's given with.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Body<'a> {
+    /// An object written anew, from its value: built, or changed since it
+    /// was read. A stream's data is its [`Data::Bytes`](pdf_objects::object::Data::Bytes),
+    /// or, where it's [`Data::At`](pdf_objects::object::Data::At), the
+    /// data of the stream the reading the write is given read at that
+    /// number there, as the reading hands it out.
+    New(Cow<'a, Object>),
+}
+
+impl Body<'_> {
+    /// The object it writes.
+    fn object(&self) -> &Object {
+        match self {
+            Body::New(object) => object,
+        }
+    }
+}
+
+impl From<Object> for Body<'_> {
+    fn from(object: Object) -> Self {
+        Body::New(Cow::Owned(object))
+    }
+}
+
+impl<'a> From<&'a Object> for Body<'a> {
+    fn from(object: &'a Object) -> Self {
+        Body::New(Cow::Borrowed(object))
+    }
+}
+
+/// How a whole file or an update is written. A caller sets the fields on
+/// a copy of [`Options::DEFAULT`] (`options.kind = XrefKind::Stream`, say),
+/// as it does a reading's [`Options`](crate::Options).
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct Options<'a> {
+    /// A whole file's cross-reference section: a table, by default, or a
+    /// stream. An update's is its base's ([`Base::kind`]).
+    pub kind: XrefKind,
+    /// The version a whole file's header says: 1.7 by default. It's
+    /// written as given, a stream section under 1.5 too.
+    pub version: Version,
+    /// Whether a whole file puts what may go in an object stream in one,
+    /// and how: none by default. Only a cross-reference stream lists an
+    /// object stream's members, so with a table it's refused
+    /// ([`Error::PackedTable`]); an update writes each object on its own.
+    pub pack: Option<Pack<'a>>,
+    /// How what's compressed is deflated: a whole file's cross-reference
+    /// stream and each object stream.
+    pub deflate: Deflate,
+    /// How many threads object streams are built on, at most: 0, the
+    /// default, for as many as the machine runs at once, up to 8, or one
+    /// where that isn't known. Built on any number, they're the same bytes.
+    pub threads: usize,
+    /// Where a whole file's encryption dictionary goes, when it's written
+    /// as an object: by default at its number in the file its
+    /// [`Encryptor`] was read from, and a new file's past every object
+    /// given. One that file had in its trailer stays there.
+    pub encrypt_at: Option<ObjectId>,
+    /// The least number a whole file's cross-reference stream and its new
+    /// object streams take, and an update's cross-reference stream: past
+    /// every number written, by default (0), as they always are; each
+    /// passes over a number what's written refers to and doesn't hold.
+    pub xref_from: u32,
+    /// A flag that, set while the write runs, stops it: it's checked
+    /// before each object and each object stream, and the write then
+    /// writes nothing ([`Error::Stopped`]).
+    pub stop: Option<&'a AtomicBool>,
+}
+
+impl Options<'static> {
+    /// How a file is written unless it's told otherwise: a whole file with
+    /// a table, its header 1.7, nothing in object streams, deflated as
+    /// [`Deflate::DEFAULT`] deflates, on as many threads as the machine
+    /// runs, its encryption dictionary where its encryptor had it, nothing
+    /// to stop it.
+    pub const DEFAULT: Options<'static> = Options {
+        kind: XrefKind::Table,
+        version: Version::new(1, 7),
+        pack: None,
+        deflate: Deflate::DEFAULT,
+        threads: 0,
+        encrypt_at: None,
+        xref_from: 0,
+        stop: None,
+    };
+}
+
+impl Default for Options<'_> {
+    fn default() -> Self {
+        Options::DEFAULT
+    }
+}
+
+/// Which object streams a whole file's packed objects go in: given the
+/// numbers packed, ascending, each object stream's members, in order. A
+/// number not packed, or named twice, is refused ([`Error::Group`]); one
+/// left out of every group is written on its own; an empty group makes no
+/// object stream.
+pub type Groups<'a> = dyn Fn(&[u32]) -> Vec<Vec<u32>> + Sync + 'a;
+
+/// How a whole file puts objects in object streams (ISO 32000-2, 7.5.7):
+/// what it writes anew that may go in one ([`packable`]), but an
+/// encryption dictionary and what one refers to, which a reader reads
+/// before it has a key. A caller sets the fields on a copy of
+/// [`Pack::DEFAULT`]. Under an encryption that leaves streams in the
+/// clear and strings not, nothing is packed ([`Encryptor::packs`]).
+#[derive(Clone, Copy)]
+#[non_exhaustive]
+pub struct Pack<'a> {
+    /// The object streams' members ([`Groups`]); none, the default, for
+    /// [`MEMBERS`] each, by number.
+    pub groups: Option<&'a Groups<'a>>,
+    /// Numbers the object streams take first, in order: a source's own
+    /// object streams', say, whose numbers are free once their members are
+    /// written anew. 0, a number past what a file may use ([`NUMBERS`]),
+    /// one an object written has, one given already and one the file the
+    /// encryptor was read from lists free under keys made per object are
+    /// passed over; then they're numbered past every object written and
+    /// [`Options::xref_from`].
+    pub reuse: &'a [u32],
+}
+
+impl Pack<'static> {
+    /// Objects in object streams of [`MEMBERS`] each, by number, numbered
+    /// past every object written.
+    pub const DEFAULT: Pack<'static> = Pack {
+        groups: None,
+        reuse: &[],
+    };
+}
+
+impl Default for Pack<'_> {
+    fn default() -> Self {
+        Pack::DEFAULT
+    }
+}
+
+impl fmt::Debug for Pack<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Pack")
+            .field("groups", &self.groups.map(|_| "a caller's"))
+            .field("reuse", &self.reuse)
+            .finish()
+    }
+}
+
+/// What a write wrote: where each object landed, and the file it's now,
+/// which an update after it goes after without reading it again.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Written {
+    /// Its cross-reference section: where each object it wrote is, from
+    /// where a whole file starts, an update's file's header, and the
+    /// cross-reference stream's own, when it's one.
+    pub section: Section,
+    /// Where its cross-reference section starts, as its `startxref` says.
+    pub start: usize,
+    /// Its trailer's `/Size`.
+    pub size: u32,
+    /// Its trailer's `/ID`, when it has one.
+    pub id: Option<[Vec<u8>; 2]>,
+    /// The file as it is now, for an update after it.
+    pub base: Base,
+}
+
+/// The reading the objects a write is given were read in, which a stream's
+/// data where it was written ([`Data::At`](pdf_objects::object::Data::At))
+/// is read from, and what their references reach that they don't hold.
+/// Implemented by [`Reading`] alone, as `&dyn ReadFrom`,
+/// so that a write that reads nothing doesn't name a source's type; its
+/// methods are the writer's own.
+pub trait ReadFrom: sealed::Reads + Sync {}
+
+impl<S: ByteSource> ReadFrom for Reading<S> {}
+
+/// What the writer reads of a [`ReadFrom`]: its methods, which nothing
+/// outside the crate calls or implements.
+mod sealed {
+    use std::borrow::Cow;
+
+    use pdf_objects::object::{Object, ObjectId, Span};
+
+    use super::Error;
+
+    /// What the writer reads of the reading its objects were read in.
+    pub trait Reads {
+        /// Stream `id`'s data, as the reading hands it out, where the
+        /// reading's stream `id` has its data at `span`: refused
+        /// otherwise ([`Error::Placed`]).
+        fn data(&self, id: ObjectId, span: Span) -> Result<Cow<'_, [u8]>, Error>;
+
+        /// Object `id`, as the reading reads and keeps it.
+        fn object(&self, id: ObjectId) -> Option<&Object>;
+    }
+}
+
+impl<S: ByteSource> sealed::Reads for Reading<S> {
+    fn data(&self, id: ObjectId, span: Span) -> Result<Cow<'_, [u8]>, Error> {
+        match self.get(id).map(Object::value) {
+            Ok(Value::Stream(stream)) if stream.data.at() == Some(span) => {}
+            _ => return Err(Error::Placed(id)),
+        }
+        Reading::data(self, id).map_err(|why| Error::Data {
+            id,
+            why: why.to_string(),
+        })
+    }
+
+    fn object(&self, id: ObjectId) -> Option<&Object> {
+        let reading: &Reading<S> = self;
+        reading.resolve(id)
+    }
+}
+
 /// Why the writer wrote nothing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -157,6 +407,103 @@ pub enum Error {
     /// why ([`Encryptor::of`]).
     #[error("it's encrypted by a security handler the reader can't open: {0}")]
     Unsupported(String),
+    /// An object number a written file may not use: 0, which heads the
+    /// free list (ISO 32000-2, 7.5.4), or one at or past [`NUMBERS`], which
+    /// a whole file's section would list every number up to.
+    #[error("{}", number(*.0))]
+    Number(u32),
+    /// An object number given twice, at any generation.
+    #[error("object {0} is given twice")]
+    Twice(u32),
+    /// An object at the number a whole file writes its encryption
+    /// dictionary at, or the number an update's file has it at.
+    #[error("object {0} is the encryption dictionary's")]
+    EncryptAt(u32),
+    /// A whole file with a cross-reference table asked to put objects in
+    /// object streams, whose members only a stream lists.
+    #[error("a cross-reference table can't list objects in object streams")]
+    PackedTable,
+    /// An update whose cross-reference stream would be numbered at or past
+    /// [`NUMBERS`], past every number its file and it use: its number.
+    #[error("no object number left for an update's cross-reference stream: it would be {0}")]
+    NoNumber(u32),
+    /// A file with this many bytes before its header ([`Base::of`]): this
+    /// crate's reader counts its positions from the file's start, and
+    /// PDFium, pdf.js and qpdf from the header, so an update's would be
+    /// misread by one or the other; [`Base::new`] says which.
+    #[error(
+        "it has {0} bytes before its header, so an update's positions would count from where one reader or another doesn't"
+    )]
+    Prefixed(usize),
+    /// A file whose cross-reference sections didn't read, which was read
+    /// by scanning: there's no section for an update's `/Prev` to give
+    /// ([`Base::of`]).
+    #[error("its cross-reference sections didn't read, so an update has no /Prev to give")]
+    Unsound,
+    /// A trailer that names no catalog: no `/Root`.
+    #[error("its trailer names no catalog (/Root)")]
+    Rootless,
+    /// A reading as of the section at this byte, not the file's last
+    /// ([`Base::of`]): an update after it would leave every later revision
+    /// unreachable.
+    #[error("it's read as of the section at byte {0}, not its last, which an update goes after")]
+    Earlier(usize),
+    /// An update whose encryption isn't its file's: none for an encrypted
+    /// file, or one for a file that isn't, or another file's. An update
+    /// can't change how the revisions before it are encrypted.
+    #[error("an update is encrypted as its file is, and this one's encryption isn't its file's")]
+    Unmatched,
+    /// An object at a number the file its [`Encryptor`] was read from
+    /// lists free, under keys made per object (RC4, AES-128): it would be
+    /// encrypted with a deleted object's key ([`Encryptor::of`]).
+    #[error(
+        "object {} {} is at a number its file lists free, so its key would be a deleted object's",
+        .0.0, .0.1
+    )]
+    Free(ObjectId),
+    /// A stream whose data is where it was written
+    /// ([`Data::At`](pdf_objects::object::Data::At)), which isn't where
+    /// the reading the write was given read that number's stream's data,
+    /// or with no reading given: its data is given as bytes instead.
+    #[error(
+        "stream {} {}'s data is where no stream of the reading given read it at that number",
+        .0.0, .0.1
+    )]
+    Placed(ObjectId),
+    /// A stream's data that the reading given doesn't hand out, and why.
+    #[error("stream {} {}'s data doesn't read: {why}", id.0, id.1)]
+    Data {
+        /// The stream.
+        id: ObjectId,
+        /// Why, the reading's error's words.
+        why: String,
+    },
+    /// A catalog that isn't among what's written, nor in the reading
+    /// given, under `/EncryptMetadata false`, which leaves the document's
+    /// metadata stream in the clear: its `/Metadata` says which that is.
+    #[error(
+        "object {} {}, the catalog, isn't written or read, so which stream is the metadata /EncryptMetadata false leaves in the clear isn't known",
+        .0.0, .0.1
+    )]
+    Catalog(ObjectId),
+    /// A group of object streams' members ([`Groups`]) that names this
+    /// number, which isn't one the write packs, or names it twice.
+    #[error("a group of object streams names object {0}, which isn't packed, or names it twice")]
+    Group(u32),
+    /// The write was stopped ([`Options::stop`]).
+    #[error("stopped")]
+    Stopped,
+    /// A source whose bytes don't read, and why.
+    #[error("its bytes don't read: {0}")]
+    Io(String),
+}
+
+/// What [`Error::Number`] says of number `n`.
+fn number(n: u32) -> String {
+    match n {
+        0 => "object 0 heads the free list, so no object is written there".to_string(),
+        n => format!("object {n} is past the {NUMBERS} numbers a PDF may use"),
+    }
 }
 
 /// pdf-objects' writer's refusal, through an [`Encrypting`]: the value it
@@ -168,5 +515,256 @@ impl From<Refused<Unencryptable>> for Error {
             Refused::Write(e) => Error::Serialize(e),
             Refused::Encrypt { id, why } => Error::Encrypt { id, why },
         }
+    }
+}
+
+/// After the header, a comment of bytes past ASCII, so that a tool that
+/// guesses from the first lines takes the file for binary (ISO 32000-2,
+/// 7.5.2).
+const BINARY: &[u8] = b"%\xE2\xE3\xCF\xD3\n";
+
+/// The trailer keys a section writes anew, or doesn't have: its links to
+/// other sections, a cross-reference stream's dictionary's own (its
+/// dictionary is the trailer), and the encryption and `/ID`, which the
+/// writer writes itself.
+const SECTION_KEYS: [&[u8]; 15] = [
+    b"Prev",
+    b"XRefStm",
+    b"Type",
+    b"Size",
+    b"W",
+    b"Index",
+    b"Length",
+    b"Filter",
+    b"DecodeParms",
+    b"F",
+    b"FFilter",
+    b"FDecodeParms",
+    b"DL",
+    b"Encrypt",
+    b"ID",
+];
+
+/// `trailer`'s first `/ID` element, which an RC4 or AES-128 key is made
+/// from: the array's first element, when that's a string, however many
+/// elements the array has.
+fn first_id(trailer: &Dict) -> Option<Vec<u8>> {
+    let id = trailer.get(b"ID")?.as_array()?.first()?;
+    match id.value() {
+        Value::String(text, _) => text.as_bytes().map(<[u8]>::to_vec),
+        _ => None,
+    }
+}
+
+/// A trailer's `/ID`: `kept`, the first string a file has already, and
+/// XXH3-128 of `written`, 16 bytes, big-endian, so that the same bytes get
+/// the same `/ID`. A file with no first string gets the hash for both
+/// where it's `encrypted`, which needs an `/ID` (ISO 32000-2, 14.4, has a
+/// new file's two the same), and none otherwise.
+fn file_id(kept: Option<Vec<u8>>, encrypted: bool, written: &[u8]) -> Option<[Vec<u8>; 2]> {
+    if kept.is_none() && !encrypted {
+        return None;
+    }
+    let hash = twox_hash::XxHash3_128::oneshot(written)
+        .to_be_bytes()
+        .to_vec();
+    let first = kept.unwrap_or_else(|| hash.clone());
+    Some([first, hash])
+}
+
+/// `id`, as a trailer's `/ID` value: its two strings, in hex.
+fn id_value([first, second]: &[Vec<u8>; 2]) -> Object {
+    Object::from(vec![
+        Object::hex(first.clone()),
+        Object::hex(second.clone()),
+    ])
+}
+
+/// Whether object number `n` is one a written file may use.
+fn usable(n: u32) -> Result<(), Error> {
+    match n {
+        0 => Err(Error::Number(n)),
+        n if n >= NUMBERS => Err(Error::Number(n)),
+        _ => Ok(()),
+    }
+}
+
+/// Whether the write is to stop ([`Options::stop`]).
+fn stopped(stop: Option<&AtomicBool>) -> Result<(), Error> {
+    match stop.is_some_and(|stop| stop.load(Ordering::Relaxed)) {
+        true => Err(Error::Stopped),
+        false => Ok(()),
+    }
+}
+
+/// `bodies`' numbers, each one a written file may use, given once, not
+/// `encrypt_at`, the encryption dictionary's, and not one `encryptor`'s
+/// file lists free under keys made per object: the first that isn't,
+/// refused.
+fn checked(
+    bodies: &[(ObjectId, Body<'_>)],
+    encrypt_at: Option<u32>,
+    encryptor: Option<&Encryptor>,
+) -> Result<(), Error> {
+    let mut given = HashSet::with_capacity(bodies.len());
+    for &(id, _) in bodies {
+        usable(id.0)?;
+        if !given.insert(id.0) {
+            return Err(Error::Twice(id.0));
+        }
+        if encrypt_at == Some(id.0) {
+            return Err(Error::EncryptAt(id.0));
+        }
+        if encryptor.is_some_and(|e| e.free(id.0)) {
+            return Err(Error::Free(id));
+        }
+    }
+    Ok(())
+}
+
+/// The numbers `bodies` and `trailer` refer to that no body has, from
+/// `from` on and among `also`: a number the writer gives an object of its
+/// own (an object stream, a cross-reference stream, a new encryption
+/// dictionary), which is one of those, passes over them, so that a
+/// reference to an object that isn't there, which a reader reads as null
+/// (ISO 32000-2, 7.3.10), doesn't come to name one. Walked with one stack
+/// for every object, as a value built in memory may nest however deeply.
+fn dangling(
+    bodies: &[(ObjectId, Body<'_>)],
+    trailer: &Dict,
+    from: u32,
+    also: &[u32],
+) -> HashSet<u32> {
+    let also: HashSet<u32> = also.iter().copied().collect();
+    let mut named = HashSet::new();
+    // Each value seen once: a reference noted, an array or a dictionary
+    // put on the stack, the rest passed over.
+    let mut see = |value: &Object| match value.value() {
+        Value::Ref((n, _)) if *n >= from || also.contains(n) => {
+            named.insert(*n);
+            None
+        }
+        Value::Array(_) | Value::Dict(_) | Value::Stream(_) => Some(()),
+        _ => None,
+    };
+    let mut stack: Vec<&Object> = Vec::new();
+    let objects = bodies.iter().map(|(_, body)| body.object());
+    for object in objects.chain(trailer.entries().iter().map(|entry| &entry.value)) {
+        if see(object).is_some() {
+            stack.push(object);
+        }
+        while let Some(object) = stack.pop() {
+            let entries = match object.value() {
+                Value::Array(array) => {
+                    for value in array {
+                        if see(value).is_some() {
+                            stack.push(value);
+                        }
+                    }
+                    continue;
+                }
+                Value::Dict(dict) => dict.entries(),
+                Value::Stream(stream) => stream.dict.entries(),
+                _ => continue,
+            };
+            for entry in entries {
+                if see(&entry.value).is_some() {
+                    stack.push(&entry.value);
+                }
+            }
+        }
+    }
+    if !named.is_empty() {
+        for (id, _) in bodies {
+            named.remove(&id.0);
+        }
+    }
+    named
+}
+
+/// The first number from `from` on that `passed` doesn't hold.
+fn fresh(from: u32, passed: &HashSet<u32>) -> u32 {
+    (from..=u32::MAX)
+        .find(|n| !passed.contains(n))
+        .unwrap_or(u32::MAX)
+}
+
+/// What resolves a reference in what a write writes: the objects it's
+/// given, then the reading they were read in.
+struct Bodies<'b> {
+    bodies: &'b [(ObjectId, Body<'b>)],
+    index: HashMap<ObjectId, usize>,
+    from: Option<&'b dyn ReadFrom>,
+}
+
+impl<'b> Bodies<'b> {
+    fn new(bodies: &'b [(ObjectId, Body<'b>)], from: Option<&'b dyn ReadFrom>) -> Bodies<'b> {
+        let index = (bodies.iter().enumerate()).map(|(i, (id, _))| (*id, i));
+        Bodies {
+            bodies,
+            index: index.collect(),
+            from,
+        }
+    }
+}
+
+impl<'b> Resolve<'b> for Bodies<'b> {
+    fn resolve(&self, id: ObjectId) -> Option<&'b Object> {
+        match self.index.get(&id) {
+            Some(&i) => Some(self.bodies[i].1.object()),
+            None => self.from?.object(id),
+        }
+    }
+}
+
+/// What encrypts what a write under `encryptor` writes, its trailer
+/// `trailer`, its references resolved by `bodies`: refused where
+/// `/EncryptMetadata false` leaves the document's metadata stream in the
+/// clear, and the catalog, which says which stream that is, doesn't
+/// resolve.
+fn encrypting<'b>(
+    encryptor: &'b Encryptor,
+    trailer: &Dict,
+    bodies: &'b Bodies<'b>,
+) -> Result<Encrypting<'b>, Error> {
+    if encryptor.plain_metadata() {
+        let root = trailer.get(b"Root").and_then(Object::as_reference);
+        if let Some(root) = root.filter(|&root| bodies.resolve(root).is_none()) {
+            return Err(Error::Catalog(root));
+        }
+    }
+    Ok(encryptor.encrypting(trailer, bodies))
+}
+
+/// Object `id`, `obj`, written on its own at the end of `out`, encrypted
+/// by `encrypting` when there's one: where it starts. A stream whose data
+/// is where it was written takes it from `from`, as the reading hands it
+/// out ([`Error::Placed`] with none).
+fn indirect(
+    out: &mut Vec<u8>,
+    id: ObjectId,
+    obj: &Object,
+    encrypting: Option<&Encrypting<'_>>,
+    from: Option<&dyn ReadFrom>,
+) -> Result<usize, Error> {
+    if let Value::Stream(stream) = obj.value() {
+        if let Some(span) = stream.data.at() {
+            let data = from.ok_or(Error::Placed(id))?.data(id, span)?;
+            return match encrypting {
+                Some(e) => Ok(serialize::indirect_stream_with(
+                    out,
+                    id,
+                    &stream.dict,
+                    &data,
+                    e,
+                )?),
+                None => serialize::indirect_stream(out, id, &stream.dict, &data)
+                    .map_err(Error::Serialize),
+            };
+        }
+    }
+    match encrypting {
+        Some(e) => Ok(serialize::indirect_with(out, id, obj, e)?),
+        None => serialize::indirect(out, id, obj).map_err(Error::Serialize),
     }
 }

@@ -1793,6 +1793,127 @@ qpdf: operation succeeded with warnings\n";
         }
     }
 
+    /// Whole files and updates the writer writes, plain and under every
+    /// method: [`listed`](crate::write::tests::listed)'s objects whole with
+    /// a table and with a stream, packed, and as an update rewriting every
+    /// object of a file of them; checked by qpdf by their password ("No
+    /// syntax or stream encoding errors found") and read through qpdf alone,
+    /// without reconstructing, as the reader reads them, but a signature's
+    /// `/Contents` with no `/Type`, as above. And an update of a file with
+    /// 100 bytes before its header, its positions counted from there: read
+    /// by qpdf as its sections say, as the reader reads the file without
+    /// them.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn written_whole_files_and_updates_read_through_qpdf_as_through_the_reader() {
+        use crate::XrefKind;
+        use crate::bytes::{Options, Reading};
+        use crate::write::tests::{encrypted_by, listed, methods};
+        use crate::write::{self, Base, Body, Encryptor, Pack};
+
+        let (plain, trailer) = listed();
+        let bodies = || {
+            (plain.iter())
+                .map(|(n, o)| ((*n, 0), Body::from(o)))
+                .collect::<Vec<_>>()
+        };
+        let past = Some(((plain.len() + 1) as u32, 0));
+        let methods = methods();
+        let encryptors =
+            std::iter::once(("plain", None)).chain(methods.iter().map(|m| (m.name, Some(m))));
+        let dir = scratch("whole");
+        for (name, method) in encryptors {
+            let encryptor = method.map(|m| &m.encryptor);
+            let mut files = Vec::new();
+            for (way, kind, pack) in [
+                ("table", XrefKind::Table, None),
+                ("packed", XrefKind::Stream, Some(Pack::DEFAULT)),
+            ] {
+                let mut options = write::Options::DEFAULT;
+                (options.kind, options.pack, options.encrypt_at) = (kind, pack, past);
+                let mut out = Vec::new();
+                write::full(&mut out, bodies(), &trailer, encryptor, None, &options).unwrap();
+                files.push((way, out));
+            }
+            let source = match encryptor {
+                Some(e) => encrypted_by(e, &plain, &trailer, XrefKind::Table),
+                None => {
+                    let mut out = Vec::new();
+                    let options = write::Options::DEFAULT;
+                    write::full(&mut out, bodies(), &trailer, None, None, &options).unwrap();
+                    out
+                }
+            };
+            let reading =
+                Reading::open_with(&source[..], &[Password("user")], &Options::DEFAULT).unwrap();
+            let base = Base::of(&reading).unwrap();
+            let own = Encryptor::of(&reading).unwrap();
+            let mut updated = source.clone();
+            let options = write::Options::DEFAULT;
+            write::update(&mut updated, &base, bodies(), own.as_ref(), None, &options).unwrap();
+            files.push(("updated", updated));
+            for (way, data) in files {
+                let name = format!("{name}, {way}");
+                let path = dir
+                    .path()
+                    .join(format!("{}.pdf", name.replace([' ', ','], "-")));
+                std::fs::write(&path, &data).unwrap();
+                let qpdf = qpdf(&path).password("user");
+                let check = ["--password=user", "--check", &path.display().to_string()];
+                let (out, _) = qpdf.run(&check.map(String::from)).unwrap();
+                let out = String::from_utf8_lossy(&out);
+                assert!(
+                    out.contains("No syntax or stream encoding errors found"),
+                    "{name}: {out}"
+                );
+                let alone = qpdf.read().unwrap();
+                assert_eq!(alone.trailer.unwritten, None, "{name}");
+                assert!(alone.warnings.is_empty(), "{name}: {:?}", alone.warnings);
+                let doc = bytes::read_opened(&data, &[Password("user")]);
+                assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
+                let found = differences(&doc, &alone);
+                let strings = method.is_some_and(|m| m.strings);
+                assert_eq!(found.len(), usize::from(strings), "{name}: {found:?}");
+                let untyped = |(_, d): &(String, String)| d.starts_with("10 0 R/Contents: ");
+                assert!(found.iter().all(untyped), "{name}: {found:?}");
+            }
+        }
+
+        // Bytes before the header: the update counts from it, as qpdf does.
+        let file = {
+            let mut out = Vec::new();
+            let options = write::Options::DEFAULT;
+            write::full(&mut out, bodies(), &trailer, None, None, &options).unwrap();
+            out
+        };
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        let base = Base::of(&reading).unwrap();
+        let mut page = reading.get((4, 0)).unwrap().clone();
+        page.as_dict_mut().unwrap().set("Rotate", 90);
+        let given = || [((4, 0), Body::from(&page))];
+        let options = write::Options::DEFAULT;
+        let mut appended = file.clone();
+        write::update(&mut appended, &base, given(), None, None, &options).unwrap();
+        let mut prefixed = [&[b'~'; 100][..], &file].concat();
+        let mut after = Base::new(
+            prefixed.len(),
+            base.prev,
+            base.size,
+            base.kind,
+            base.trailer,
+        );
+        (after.header, after.ends_line) = (100, true);
+        write::update(&mut prefixed, &after, given(), None, None, &options).unwrap();
+        let path = dir.path().join("prefixed.pdf");
+        std::fs::write(&path, &prefixed).unwrap();
+        let alone = qpdf(&path).read().unwrap();
+        assert_eq!(alone.trailer.unwritten, None);
+        assert!(alone.warnings.is_empty(), "{:?}", alone.warnings);
+        let doc = bytes::read(&appended);
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert_eq!(differences(&doc, &alone), []);
+    }
+
     /// Every PDF under `PDF_LINT_CORPUS` read from its bytes, qpdf
     /// decoding, and through qpdf alone, and the differences counted by what
     /// they're of, with examples.

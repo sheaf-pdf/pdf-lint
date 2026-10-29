@@ -12,7 +12,7 @@ use pdf_crypt::rand_core::SeedableRng;
 use pdf_crypt::writer::{self, Kind, Settings};
 use pdf_filters::{Backend, Filter, Level, Predictor};
 use pdf_objects::dict;
-use pdf_objects::object::{Dict, Form, Object, ObjectId, Str, Stream, Value};
+use pdf_objects::object::{Data, Dict, Form, Object, ObjectId, Str, Stream, Value};
 use pdf_objects::serialize::{self, Encrypt, Refused};
 
 use super::{Deflate, Encryptor, Entry, Error, Section, Unencryptable};
@@ -74,6 +74,17 @@ fn unplaced(o: &Object) -> Object {
 /// Object `id` of `pdf`, as built.
 fn value(pdf: &Reading<Arc<[u8]>>, id: ObjectId) -> Object {
     unplaced(pdf.get(id).unwrap())
+}
+
+/// Object `id` of `pdf`, as built, a stream's data as the reading hands it
+/// out: what two files of the same objects read alike, wherever each put
+/// them.
+fn handed(pdf: &Reading<Arc<[u8]>>, id: ObjectId) -> Object {
+    let mut o = value(pdf, id);
+    if let Some(stream) = o.as_stream_mut() {
+        stream.data = Data::Bytes(pdf.data(id).unwrap().into_owned());
+    }
+    o
 }
 
 /// `stream`'s data, inflated.
@@ -1174,19 +1185,30 @@ fn dictionary_of(kind: Kind, encrypt_metadata: bool) -> Dict {
 
 /// A file to take an encryption from: a catalog, and `dict`, its
 /// encryption dictionary, as object [`ENCRYPT`], or in the trailer when
-/// `direct`, with [`ID`].
+/// `direct`, with [`ID`]. Its table lists those alone, in two
+/// subsections, so that it lists no number free, which a whole file or an
+/// update under its RC4 or AES-128 encryption would refuse an object at.
 pub(crate) fn source(dict: Dict, direct: bool) -> Vec<u8> {
     let id = Object::hex(ID);
     let mut trailer = dict! { "Root" => Object::reference(1), "ID" => vec![id.clone(), id] };
-    let mut objects = vec![(1, Body::from(dict! { "Type" => "Catalog" }))];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let one = serialize::indirect(&mut out, (1, 0), &catalog()).unwrap();
+    let mut rows = format!("xref\n0 2\n0000000000 65535 f \n{one:010} 00000 n \n");
     match direct {
         true => trailer.set("Encrypt", dict),
         false => {
-            objects.push((ENCRYPT, Body::from(dict)));
+            let at = serialize::indirect(&mut out, (ENCRYPT, 0), &Object::from(dict)).unwrap();
+            rows += &format!("{ENCRYPT} 1\n{at:010} 00000 n \n");
             trailer.set("Encrypt", Object::reference(ENCRYPT));
         }
     }
-    fixture::file("1.7", &objects, trailer, Xref::Table)
+    trailer.set("Size", i64::from(ENCRYPT + 1));
+    let xref = out.len();
+    out.extend_from_slice(rows.as_bytes());
+    out.extend_from_slice(b"trailer\n");
+    serialize::write(&mut out, &Object::from(trailer)).unwrap();
+    out.extend_from_slice(format!("\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    out
 }
 
 /// `file` opened by `password`.
@@ -1408,9 +1430,28 @@ pub(crate) fn assert_decrypts_to(
     bytes: &[u8],
     name: &str,
 ) -> Reading<Arc<[u8]>> {
+    let reading = assert_reads_to(objects, bytes, true, name);
+    // The trailer's /ID as written, [`ID`] twice in hex, never decrypted.
+    let id = reading.trailer().dict().get(b"ID").map(unplaced);
+    let written = Object::from(vec![Object::hex(ID), Object::hex(ID)]);
+    assert_eq!(id, Some(written), "{name}: the trailer's /ID as written");
+    reading
+}
+
+/// `bytes`, opened by the user's password, which opens them where
+/// they're `encrypted`, are `objects`, object by object, lazily and
+/// whole, each stream's data handed out as it was built, with nothing to
+/// warn of. Gives the reading.
+pub(crate) fn assert_reads_to(
+    objects: &[(u32, Object)],
+    bytes: &[u8],
+    encrypted: bool,
+    name: &str,
+) -> Reading<Arc<[u8]>> {
     let reading = opened(bytes, "user");
-    assert!(
+    assert_eq!(
         matches!(reading.encryption(), Encryption::Opened { .. }),
+        encrypted,
         "{name}: {:?}",
         reading.encryption()
     );
@@ -1428,10 +1469,6 @@ pub(crate) fn assert_decrypts_to(
     }
     assert!(sound(&reading), "{name}: {:?}", reading.warnings());
     assert!(whole.warnings.is_empty(), "{name}: {:?}", whole.warnings);
-    // The trailer's /ID as written, [`ID`] twice in hex, never decrypted.
-    let id = reading.trailer().dict().get(b"ID").map(unplaced);
-    let written = Object::from(vec![Object::hex(ID), Object::hex(ID)]);
-    assert_eq!(id, Some(written), "{name}: the trailer's /ID as written");
     reading
 }
 
@@ -1927,4 +1964,2536 @@ fn what_cant_be_encrypted_is_refused_and_nothing_written() {
     let mut rng = chacha20::ChaCha20Rng::seed_from_u64(8);
     let unprepared = pdf_crypt::Encoded::verbatim(b"user");
     assert!(Encryptor::create(&unprepared, true, &mut rng).is_err());
+}
+
+// Whole files and updates (`write::full`, `document`, `update`), read
+// back by the reader, by their password, and against what each refuses.
+
+/// Both kinds of section.
+const KINDS: [XrefKind; 2] = [XrefKind::Table, XrefKind::Stream];
+
+/// `objects`, each at its number, generation 0, as a write's bodies.
+fn bodies(objects: &[(u32, Object)]) -> Vec<(ObjectId, write::Body<'_>)> {
+    (objects.iter())
+        .map(|(n, o)| ((*n, 0), write::Body::from(o)))
+        .collect()
+}
+
+/// A write's options: a section of `kind`, packed by `pack` when given.
+fn options(kind: XrefKind, pack: Option<write::Pack<'_>>) -> write::Options<'_> {
+    let mut options = write::Options::DEFAULT;
+    options.kind = kind;
+    options.pack = pack;
+    options
+}
+
+/// `objects` written whole under `trailer`, a section of `kind`,
+/// unpacked, encrypted by `encryptor` when given, its encryption
+/// dictionary past every object.
+fn whole(
+    objects: &[(u32, Object)],
+    trailer: &Dict,
+    kind: XrefKind,
+    encryptor: Option<&Encryptor>,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut options = options(kind, None);
+    options.encrypt_at = Some(past(objects));
+    write::full(
+        &mut out,
+        bodies(objects),
+        trailer,
+        encryptor,
+        None,
+        &options,
+    )
+    .unwrap();
+    out
+}
+
+/// The number past every one of `objects`'.
+fn past(objects: &[(u32, Object)]) -> ObjectId {
+    (objects.iter().map(|(n, _)| n + 1).max().unwrap_or(1), 0)
+}
+
+/// `objects` written whole under `trailer` with a cross-reference stream,
+/// packed, grouped by `groups` when given, else by number, encrypted by
+/// `encryptor` when given, its encryption dictionary past every object.
+fn whole_packed(
+    objects: &[(u32, Object)],
+    trailer: &Dict,
+    encryptor: Option<&Encryptor>,
+    groups: Option<&write::Groups<'_>>,
+) -> Vec<u8> {
+    let mut pack = write::Pack::DEFAULT;
+    pack.groups = groups;
+    let mut out = Vec::new();
+    let mut options = options(XrefKind::Stream, Some(pack));
+    options.encrypt_at = Some(past(objects));
+    write::full(
+        &mut out,
+        bodies(objects),
+        trailer,
+        encryptor,
+        None,
+        &options,
+    )
+    .unwrap();
+    out
+}
+
+/// `bytes` read back, by the user's password where they're `encrypted`.
+fn read_back(bytes: &[u8], encrypted: bool) -> Reading<Arc<[u8]>> {
+    match encrypted {
+        true => opened(bytes, "user"),
+        false => open(bytes),
+    }
+}
+
+/// [`plaintext`]'s page.
+const PAGE: ObjectId = (4, 0);
+
+/// `source`, opened by `password`, read whole, its page turned (its
+/// `/Rotate` 90), and written whole under its own encryption, a section
+/// of `kind`, packed when it's a stream, its streams' data read from the
+/// reading.
+fn rewrite(source: &[u8], password: &str, kind: XrefKind) -> Vec<u8> {
+    let reading = opened(source, password);
+    let mut doc = reading.to_document().unwrap();
+    doc.get_dict_mut(PAGE).unwrap().set("Rotate", 90);
+    let encryptor = Encryptor::of(&reading).unwrap();
+    let pack = (kind == XrefKind::Stream).then_some(write::Pack::DEFAULT);
+    let mut out = Vec::new();
+    let options = options(kind, pack);
+    write::document(&mut out, &doc, encryptor.as_ref(), Some(&reading), &options).unwrap();
+    out
+}
+
+/// What `path`, key by key, reaches from `from` in `pdf`, each reference
+/// followed: the last object a reference named, and what it reached.
+fn reached(pdf: &Reading<Arc<[u8]>>, from: &Object, path: &[&[u8]]) -> (Option<ObjectId>, Object) {
+    let follow = |o: &Object, id: Option<ObjectId>| match o.as_reference() {
+        Some(at) => (Some(at), pdf.get(at).unwrap().clone()),
+        None => (id, o.clone()),
+    };
+    let (mut id, mut obj) = follow(from, None);
+    for key in path {
+        let next = obj.as_dict().unwrap().get(key).unwrap().clone();
+        (id, obj) = follow(&next, id);
+    }
+    (id, obj)
+}
+
+/// A rewrite of [`plaintext`], turned: its page's `/Rotate`, and what it
+/// holds where [`plaintext`] put it: the Info title, the page's private
+/// data, the XMP and the attachment's data.
+fn rewritten(pdf: &Reading<Arc<[u8]>>) -> (i64, [Vec<u8>; 4]) {
+    let trailer = Object::from(pdf.trailer().dict().clone());
+    let (_, catalog) = reached(pdf, &trailer, &[b"Root"]);
+    let (_, kids) = reached(pdf, &catalog, &[b"Pages", b"Kids"]);
+    let page = kids.as_array().unwrap()[0].clone();
+    let (_, files) = reached(pdf, &catalog, &[b"Names", b"EmbeddedFiles", b"Names"]);
+    let text = |(_, o): (Option<ObjectId>, Object)| o.as_bytes().unwrap().to_vec();
+    let data = |(id, _): (Option<ObjectId>, Object)| pdf.data(id.unwrap()).unwrap().into_owned();
+    let held = [
+        text(reached(pdf, &trailer, &[b"Info", b"Title"])),
+        text(reached(pdf, &page, &[b"PieceInfo", b"Editor", b"Private"])),
+        data(reached(pdf, &catalog, &[b"Metadata"])),
+        data(reached(pdf, &files.as_array().unwrap()[1], &[b"EF", b"F"])),
+    ];
+    let (_, rotate) = reached(pdf, &page, &[b"Rotate"]);
+    (rotate.as_integer().unwrap(), held)
+}
+
+/// What [`rewritten`] gives of every rewrite of [`plaintext`].
+fn as_turned() -> (i64, [Vec<u8>; 4]) {
+    (
+        90,
+        [TITLE, PAGE_STRING, XMP, ATTACHMENT].map(<[u8]>::to_vec),
+    )
+}
+
+/// `pdf`'s object streams, by number.
+fn object_streams_of(pdf: &Reading<Arc<[u8]>>) -> Vec<ObjectId> {
+    let ids: Vec<ObjectId> = pdf.ids().collect();
+    (ids.into_iter())
+        .filter(|&id| {
+            pdf.get(id)
+                .is_ok_and(|o| o.as_stream().is_some_and(|s| s.dict.has_type(b"ObjStm")))
+        })
+        .collect()
+}
+
+/// The methods the tests encrypt a source by: RC4-40, RC4-128, AES-128,
+/// and AES-256 of revisions 5 and 6.
+fn standard(methods: &[Method]) -> impl Iterator<Item = &Method> {
+    let names = ["RC4-40", "RC4-128", "AES-128", "AES-256 R5", "AES-256 R6"];
+    methods.iter().filter(move |m| names.contains(&m.name))
+}
+
+/// `bytes` with their trailer's `/ID` cut to its first string, as some
+/// writers write it, where it's [`ID`] twice in hex: RC4's and AES-128's
+/// keys are made from that string all the same. Nothing before the
+/// trailer moves, so the sections still say where each object is.
+fn one_id(bytes: &[u8]) -> Vec<u8> {
+    let hex: String = ID.iter().map(|b| format!("{b:02X}")).collect();
+    let two = format!("/ID[<{hex}><{hex}>]");
+    let one = format!("/ID[<{hex}>]");
+    let at = (bytes.windows(two.len()).rposition(|w| w == two.as_bytes())).unwrap();
+    [&bytes[..at], one.as_bytes(), &bytes[at + two.len()..]].concat()
+}
+
+/// [`plaintext`] encrypted by each of [`standard`]'s sources, with its
+/// `/ID` of two strings and of one, a section of each kind: each with its
+/// name, its kind and its method.
+fn sources(methods: &[Method]) -> Vec<(String, XrefKind, &Method, Vec<u8>)> {
+    let (plain, trailer) = plaintext();
+    let mut sources = Vec::new();
+    for method in standard(methods) {
+        for kind in KINDS {
+            let two = encrypted_by(&method.encryptor, &plain, &trailer, kind);
+            let one = one_id(&two);
+            for (ids, bytes) in [("/ID of two", two), ("/ID of one", one)] {
+                let name = format!("{}, {kind:?}, {ids}", method.name);
+                sources.push((name, kind, method, bytes));
+            }
+        }
+    }
+    sources
+}
+
+#[test]
+fn full_writes_are_deterministic() {
+    let (plain, trailer) = plaintext();
+    let methods = methods();
+    let encryptors = (methods.iter())
+        .filter(|m| ["RC4-128", "AES-128", "AES-256 R6"].contains(&m.name))
+        .map(|m| Some(&m.encryptor));
+    for encryptor in std::iter::once(None).chain(encryptors) {
+        for kind in KINDS {
+            let name = format!("{kind:?}, encrypted: {}", encryptor.is_some());
+            let write = || whole(&plain, &trailer, kind, encryptor);
+            let once = write();
+            let again = std::thread::scope(|scope| {
+                let threads: Vec<_> = (0..2).map(|_| scope.spawn(write)).collect();
+                (threads.into_iter())
+                    .map(|t| t.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(again, [once.clone(), once.clone()], "{name}");
+            let pdf = read_back(&once, encryptor.is_some());
+            assert!(sound(&pdf), "{name}: {:?}", pdf.warnings());
+            assert_eq!(newest(&pdf).1, kind, "{name}");
+        }
+    }
+}
+
+/// [`plaintext`]'s page apart, in an object stream of its own, then the
+/// rest by number, [`write::MEMBERS`] each: as a grouping by the pages
+/// that use each object puts page 1's first.
+fn page_apart(page: u32) -> impl Fn(&[u32]) -> Vec<Vec<u32>> + Sync {
+    move |numbers: &[u32]| {
+        let rest: Vec<u32> = numbers.iter().copied().filter(|&n| n != page).collect();
+        let mut groups = vec![vec![page]];
+        groups.extend(rest.chunks(write::MEMBERS).map(<[u32]>::to_vec));
+        groups
+    }
+}
+
+/// A packed write lists what it packs as its object stream and its place
+/// there (7.5.8.3's type 2), and the reader reads every object back as it
+/// was, lazily and whole. A stream, an object of generation 1 and a
+/// signature dictionary as `packable` tells one (typed, untyped, and a
+/// field merged with its `/FT /Sig`) stay where they are, listed by their
+/// offsets, and the page has an object stream of its own, first, as the
+/// caller's groups say.
+#[test]
+fn type_2_entries_read_back_lazily_and_eagerly() {
+    let (plain, trailer) = plaintext();
+    let older = (14, 1);
+    let generation = Object::from(dict! { "Generation" => 1 });
+    let mut given = bodies(&plain);
+    given.push((older, write::Body::from(&generation)));
+    let groups = page_apart(PAGE.0);
+    let mut pack = write::Pack::DEFAULT;
+    pack.groups = Some(&groups);
+    let mut bytes = Vec::new();
+    let options = options(XrefKind::Stream, Some(pack));
+    write::full(&mut bytes, given, &trailer, None, None, &options).unwrap();
+    let pdf = open(&bytes);
+    assert!(sound(&pdf), "{:?}", pdf.warnings());
+    assert_eq!(newest(&pdf).1, XrefKind::Stream);
+    let xref = pdf.facts().max_stream.unwrap();
+    let (index, _, got) = rows(&pdf, (xref, 0));
+    assert_eq!(index, [0, i64::from(xref) + 1]);
+    let eager = bytes::read(&bytes);
+    let mut stayed = std::collections::BTreeSet::new();
+    let mut containers: std::collections::BTreeMap<u64, Vec<(u64, ObjectId)>> =
+        std::collections::BTreeMap::new();
+    let all = plain
+        .iter()
+        .map(|(n, o)| ((*n, 0), o))
+        .chain([(older, &generation)]);
+    for (id, obj) in all.clone() {
+        assert!(same(pdf.get(id).unwrap(), obj), "{id:?}");
+        assert!(same(eager.get(id).unwrap(), obj), "whole: {id:?}");
+        match got[id.0 as usize] {
+            [1, _, generation] => {
+                assert_eq!(generation, u64::from(id.1), "{id:?}");
+                stayed.insert(id);
+            }
+            [2, container, index] => containers.entry(container).or_default().push((index, id)),
+            row => panic!("{id:?}: {row:?}"),
+        }
+    }
+    let streams = all.clone().filter(|(_, obj)| obj.as_stream().is_some());
+    let signatures = all.filter(|(_, obj)| {
+        matches!(obj.value(), Value::Dict(_))
+            && obj.as_dict().is_some_and(|d| {
+                let field = d.get(b"FT").and_then(Object::as_name) == Some(b"Sig");
+                d.has_type(b"Sig") || d.has(b"ByteRange") || field
+            })
+    });
+    let want: std::collections::BTreeSet<ObjectId> = (streams.chain(signatures).map(|(id, _)| id))
+        .chain([older])
+        .collect();
+    assert_eq!(want.len(), 9);
+    assert_eq!(stayed, want);
+    // Two object streams: the page's, and the rest's.
+    assert_eq!(containers.len(), 2);
+    for (&container, members) in &containers {
+        assert_eq!(got[container as usize][0], 1, "{container}");
+        let stream = pdf.get((container as u32, 0)).unwrap().as_stream().unwrap();
+        assert!(stream.dict.has_type(b"ObjStm"), "{container}");
+        let n = stream.dict.get(b"N").unwrap().as_integer().unwrap();
+        assert_eq!(n, members.len() as i64, "{container}");
+        let places: Vec<u64> = members.iter().map(|&(index, _)| index).collect();
+        assert_eq!(places, (0..n as u64).collect::<Vec<_>>(), "{container}");
+    }
+    let first = *containers.keys().next().unwrap();
+    assert_eq!(got[PAGE.0 as usize], [2, first, 0], "the page's is first");
+}
+
+/// [`plaintext`] with `count` more objects, from 14, each a dictionary
+/// with a string, its page naming the first quarter.
+fn with_many(count: u32) -> (Vec<(u32, Object)>, Dict) {
+    let (mut plain, trailer) = plaintext();
+    let many: Vec<Object> = (14..14 + count).map(Object::reference).collect();
+    for (n, obj) in &mut plain {
+        if (*n, 0) == PAGE {
+            let quarter = many[..count as usize / 4].to_vec();
+            obj.as_dict_mut().unwrap().set("Many", quarter);
+        }
+    }
+    for n in 14..14 + count {
+        let text = lit(format!("object {n}").as_bytes());
+        plain.push((n, Object::from(dict! { "N" => n, "Text" => text })));
+    }
+    (plain, trailer)
+}
+
+/// A packed write writes the same bytes every time: twice and on two
+/// threads, plain and under every method that packs, with eleven object
+/// streams to build on a thread per core.
+#[test]
+fn packed_writes_are_deterministic() {
+    let (plain, trailer) = with_many(1000);
+    let methods = methods();
+    let packing =
+        (methods.iter().filter(|m| m.encryptor.packs())).map(|m| (m.name, Some(&m.encryptor)));
+    for (name, encryptor) in std::iter::once(("plain", None)).chain(packing) {
+        let write = || whole_packed(&plain, &trailer, encryptor, None);
+        let once = write();
+        let again = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..2).map(|_| scope.spawn(write)).collect();
+            (threads.into_iter())
+                .map(|t| t.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(again, [once.clone(), once.clone()], "{name}");
+        let containers = once.windows(12).filter(|w| w == b"/Type/ObjStm").count();
+        assert_eq!(containers, 11, "{name}");
+        let pdf = read_back(&once, encryptor.is_some());
+        assert!(sound(&pdf), "{name}: {:?}", pdf.warnings());
+        assert_eq!(object_streams_of(&pdf).len(), 11, "{name}");
+    }
+}
+
+/// Object streams build the same on one thread as on eight, plain and
+/// under every method that packs: forty of them, on eight threads in eight
+/// runs of five. Stopped, neither builds.
+#[test]
+fn containers_build_alike_on_one_thread_and_on_eight() {
+    let objects: Vec<(ObjectId, Object)> = (1..=4000)
+        .map(|n| {
+            let text = lit(format!("object {n}").as_bytes());
+            ((n, 0), Object::from(dict! { "N" => n, "Text" => text }))
+        })
+        .collect();
+    let groups: Vec<(u32, Vec<(ObjectId, &Object)>)> = (5000..)
+        .zip(objects.chunks(100))
+        .map(|(n, part)| (n, part.iter().map(|(id, o)| (*id, o)).collect()))
+        .collect();
+    let trailer = dict! { "Root" => (1, 0) };
+    let resolve = |_: ObjectId| None;
+    let methods = methods();
+    let encrypting: Vec<(&str, Option<write::Encrypting<'_>>)> = std::iter::once(("plain", None))
+        .chain(
+            (methods.iter().filter(|m| m.encryptor.packs()))
+                .map(|m| (m.name, Some(m.encryptor.encrypting(&trailer, &resolve)))),
+        )
+        .collect();
+    for (name, encrypting) in &encrypting {
+        let built = |threads, stop| {
+            super::full::containers(
+                &groups,
+                encrypting.as_ref(),
+                Deflate::DEFAULT,
+                threads,
+                stop,
+            )
+        };
+        let one = built(1, None).unwrap();
+        assert_eq!(built(8, None).unwrap(), one, "{name}");
+        assert_eq!(one.len(), 40, "{name}");
+        for ((n, _), container) in groups.iter().zip(&one) {
+            let container = container.as_ref().unwrap();
+            assert!(
+                container.starts_with(format!("{n} 0 obj\n").as_bytes()),
+                "{name}: {n}"
+            );
+            assert!(holds(container, b"/Type/ObjStm/N 100"), "{name}: {n}");
+        }
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        for threads in [1, 8] {
+            assert_eq!(built(threads, Some(&stop)), Err(Error::Stopped), "{name}");
+        }
+    }
+}
+
+/// Whether `method` encrypts `text`, one of [`plaintext`]'s.
+fn encrypts(method: &Method, text: &[u8]) -> bool {
+    match text {
+        _ if text == CONTENT => method.streams,
+        _ if text == XMP => method.metadata,
+        _ if text == ATTACHMENT => method.attachment,
+        _ => method.strings,
+    }
+}
+
+/// A packed write under each method that packs encrypts each object
+/// stream once, as a stream under its own number, and its members'
+/// strings only with it: the reader reads every object back by the user's
+/// password, and not without one; nothing is in the clear, even inflated,
+/// but what the method leaves so and a signature's `/Contents`; the
+/// `/Encrypt` dictionary and `/ID[0]` are the source's; and it writes the
+/// same bytes twice.
+#[test]
+fn containers_encrypt_once_as_the_reader_decrypts() {
+    let (plain, trailer) = plaintext();
+    for method in methods().iter().filter(|m| m.encryptor.packs()) {
+        let name = method.name;
+        let crypt = &method.encryptor;
+        let bytes = whole_packed(&plain, &trailer, Some(crypt), None);
+        assert!(holds(&bytes, b"/Type/ObjStm"), "{name}");
+        for text in SECRETS {
+            let text_said = String::from_utf8_lossy(text);
+            assert_eq!(
+                in_clear(&bytes, text),
+                !encrypts(method, text),
+                "{name}: {text_said:?}"
+            );
+        }
+        assert!(holds(&bytes, SIGNATURE_WRITTEN), "{name}");
+        let locked = open(&bytes);
+        assert!(
+            !matches!(locked.encryption(), Encryption::Opened { .. }),
+            "{name}"
+        );
+        let pdf = assert_reads_to(&plain, &bytes, true, name);
+        let xref = pdf.facts().max_stream.unwrap();
+        let (_, _, got) = rows(&pdf, (xref, 0));
+        let packed = (plain.iter())
+            .filter(|(n, _)| got[*n as usize][0] == 2)
+            .count();
+        assert_eq!(packed, 5, "{name}");
+        let now = Encryptor::of(&pdf).unwrap().unwrap();
+        let dictionaries = [now.dictionary(), crypt.dictionary()].map(as_written);
+        assert_eq!(dictionaries[0], dictionaries[1], "{name}");
+        if let Some(first) = crypt.first_id() {
+            assert_eq!(now.first_id(), Some(first), "{name}");
+        }
+        let again = whole_packed(&plain, &trailer, Some(crypt), None);
+        assert_eq!(again, bytes, "{name}");
+    }
+}
+
+/// Under an encryption that leaves streams in the clear (`/StmF
+/// /Identity`) but not strings, nothing is packed, so no string is in the
+/// clear; with strings in the clear too, it packs.
+#[test]
+fn streams_in_the_clear_under_encrypted_strings_pack_nothing() {
+    let (plain, trailer) = plaintext();
+    let methods = methods();
+    let by_name = |name| &methods.iter().find(|m| m.name == name).unwrap().encryptor;
+    let crypt = by_name("streams in the clear");
+    assert!(!crypt.packs());
+    let bytes = whole_packed(&plain, &trailer, Some(crypt), None);
+    assert!(!holds(&bytes, b"/ObjStm"));
+    for text in [PAGE_STRING, TITLE, FIELD_NAME] {
+        let text_said = String::from_utf8_lossy(text);
+        assert!(!in_clear(&bytes, text), "{text_said:?}");
+    }
+    assert!(holds(&bytes, CONTENT));
+    assert_reads_to(&plain, &bytes, true, "strings only");
+
+    let crypt = by_name("attachments alone");
+    assert!(crypt.packs());
+    let bytes = whole_packed(&plain, &trailer, Some(crypt), None);
+    assert!(holds(&bytes, b"/Type/ObjStm"));
+    assert!(!in_clear(&bytes, ATTACHMENT));
+    // Deflated in an object stream, a string a search of the bytes misses.
+    assert!(!holds(&bytes, PAGE_STRING) && in_clear(&bytes, PAGE_STRING));
+    assert_reads_to(&plain, &bytes, true, "attachment only");
+}
+
+/// A file's objects: a catalog (1), its page tree (2), a page (3) and its
+/// content (4), and 250 dictionaries (10 to 259).
+fn numbered() -> Vec<(u32, Object)> {
+    let r = Object::reference;
+    let mut objects = vec![
+        (
+            1,
+            Object::from(dict! { "Type" => "Catalog", "Pages" => r(2) }),
+        ),
+        (
+            2,
+            Object::from(dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => "Page", "Parent" => r(2), "Contents" => r(4),
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(612), Object::from(792)],
+            }),
+        ),
+        (
+            4,
+            Object::from(Stream::new(dict! {}, b"0 0 m 9 9 l S".to_vec())),
+        ),
+    ];
+    for n in 10..260 {
+        let text = lit(format!("object {n}").as_bytes());
+        objects.push((n, Object::from(dict! { "Text" => text })));
+    }
+    objects
+}
+
+/// `objects` written whole with a cross-reference stream from
+/// `xref_from`, packed with the page, 3, apart and object streams taking
+/// `reuse`'s numbers first, encrypted with `encryptor` at object 6 when
+/// given.
+fn packed_from(
+    objects: &[(u32, Object)],
+    reuse: &[u32],
+    xref_from: u32,
+    encryptor: Option<&Encryptor>,
+) -> Result<Vec<u8>, Error> {
+    let id = Object::hex(ID);
+    let trailer = dict! { "Root" => (1, 0), "ID" => vec![id.clone(), id] };
+    let groups = page_apart(3);
+    let mut pack = write::Pack::DEFAULT;
+    pack.groups = Some(&groups);
+    pack.reuse = reuse;
+    let mut options = options(XrefKind::Stream, Some(pack));
+    options.encrypt_at = Some((6, 0));
+    options.xref_from = xref_from;
+    let mut out = Vec::new();
+    write::full(
+        &mut out,
+        bodies(objects),
+        &trailer,
+        encryptor,
+        None,
+        &options,
+    )?;
+    Ok(out)
+}
+
+/// Object streams take the numbers given to reuse first, in order,
+/// passing over 0, what the file lists (a stream it writes on its own, an
+/// object it packs, the `/Encrypt` dictionary), one given already and one
+/// past what a file may use; then from past the last object and the least
+/// the cross-reference stream takes, which goes after them.
+#[test]
+fn containers_take_the_source_s_numbers_first() {
+    let objects = numbered();
+    let methods = methods();
+    let crypt = &methods
+        .iter()
+        .find(|m| m.name == "AES-128")
+        .unwrap()
+        .encryptor;
+    let reuse = [0, 4, 3, write::NUMBERS, 6, 8, 8, 5];
+    let cases = [
+        ("plain", &reuse[..], 300, None, [6, 8, 5, 300], 301),
+        (
+            "encrypted",
+            &reuse[..],
+            300,
+            Some(crypt),
+            [8, 5, 300, 301],
+            302,
+        ),
+        ("none to reuse", &[][..], 1, None, [260, 261, 262, 263], 264),
+    ];
+    for (name, reuse, xref_from, crypt, want, xref) in cases {
+        let bytes = packed_from(&objects, reuse, xref_from, crypt).unwrap();
+        let pdf = read_back(&bytes, crypt.is_some());
+        assert!(sound(&pdf), "{name}: {:?}", pdf.warnings());
+        assert_eq!(pdf.facts().max_stream, Some(xref), "{name}");
+        assert_eq!(size(&pdf), xref + 1, "{name}");
+        let (_, _, got) = rows(&pdf, (xref, 0));
+        // The page's object stream, then the rest's: 1, 2 and 10 to 107;
+        // 108 to 207; and 208 to 259.
+        let containers = [3, 1, 108, 208].map(|n| got[n][1] as u32);
+        assert_eq!(containers, want, "{name}");
+        for (n, first) in want.into_iter().zip([3, 1, 108, 208]) {
+            assert_eq!(got[first], [2, u64::from(n), 0], "{name}: {first}");
+            assert_eq!(got[n as usize][0], 1, "{name}: {n}");
+        }
+        assert_eq!(got[4][0], 1, "{name}: the stream");
+        for (n, obj) in &objects {
+            assert!(same(pdf.get((*n, 0)).unwrap(), obj), "{name}: {n}");
+        }
+    }
+}
+
+/// Packing that would leave the cross-reference stream no number a file
+/// may use writes every object on its own instead: four object streams
+/// from the fifth number before the last leave it the last, and from the
+/// fourth, none. Each whole section lists millions of numbers, deflated to
+/// little, which the reader reads all of when it's told to.
+#[test]
+fn packing_runs_out_of_numbers_writes_plain() {
+    let last = write::NUMBERS - 1;
+    let objects = numbered();
+    let open = |bytes: &[u8]| {
+        let mut options = Options::DEFAULT;
+        options.limits.entries = Some(write::NUMBERS as usize);
+        Reading::open(Arc::<[u8]>::from(bytes), &options).unwrap()
+    };
+    let bytes = packed_from(&objects, &[], last - 4, None).unwrap();
+    let pdf = open(&bytes);
+    assert!(sound(&pdf), "{:?}", pdf.warnings());
+    assert_eq!(pdf.facts().max_stream, Some(last));
+    let (_, _, got) = rows(&pdf, (last, 0));
+    assert_eq!(got[3], [2, u64::from(last - 4), 0]);
+    assert_eq!(got[259], [2, u64::from(last - 1), 51]);
+
+    // With no object stream, no object can be listed as in one.
+    let bytes = packed_from(&objects, &[], last - 3, None).unwrap();
+    assert!(!holds(&bytes, b"/ObjStm"));
+    let pdf = open(&bytes);
+    assert!(sound(&pdf), "{:?}", pdf.warnings());
+    assert_eq!(pdf.facts().max_stream, Some(last - 3));
+    for (n, obj) in &objects {
+        assert!(same(pdf.get((*n, 0)).unwrap(), obj), "{n}");
+    }
+}
+
+/// An object stream whose data would be past what the reader takes isn't
+/// made: its members are written on their own, its number left free, and
+/// the other object streams are made as ever. Object 11, a string as long
+/// as an object stream's data may be, is in the second, with 1, 2 and 10
+/// to 107.
+#[test]
+fn a_container_past_what_the_reader_takes_is_written_plain() {
+    let mut objects = numbered();
+    for (n, obj) in &mut objects {
+        if *n == 11 {
+            *obj = Object::new(Value::String(
+                Str::Bytes(vec![b'a'; write::MAX_DATA]),
+                Some(Form::Literal),
+            ));
+        }
+    }
+    let bytes = packed_from(&objects, &[], 0, None).unwrap();
+    let pdf = open(&bytes);
+    assert!(sound(&pdf), "{:?}", pdf.warnings());
+    let xref = pdf.facts().max_stream.unwrap();
+    assert_eq!(xref, 264);
+    let (_, _, got) = rows(&pdf, (xref, 0));
+    for n in [1, 2].into_iter().chain(10..108) {
+        assert_eq!(got[n][0], 1, "{n}");
+    }
+    assert_eq!(got[261][0], 0, "the second object stream's number");
+    for (n, first) in [(260, 3), (262, 108), (263, 208)] {
+        assert_eq!(got[n][0], 1, "{n}");
+        assert_eq!(got[first], [2, n as u64, 0], "{first}");
+    }
+    assert_eq!(object_streams_of(&pdf), [(260, 0), (262, 0), (263, 0)]);
+    for (n, obj) in &objects {
+        assert!(same(pdf.get((*n, 0)).unwrap(), obj), "{n}");
+    }
+}
+
+/// A cross-reference table can't list an object stream's members, so a
+/// whole file with one, asked to pack, is refused.
+#[test]
+fn a_table_layout_refuses_to_pack() {
+    let trailer = dict! { "Root" => (1, 0) };
+    let mut out = b"before".to_vec();
+    let options = options(XrefKind::Table, Some(write::Pack::DEFAULT));
+    let e = write::full(&mut out, [], &trailer, None, None, &options).unwrap_err();
+    assert_eq!(e, Error::PackedTable);
+    assert_eq!(
+        e.to_string(),
+        "a cross-reference table can't list objects in object streams"
+    );
+    assert_eq!(out, b"before");
+}
+
+#[test]
+fn a_full_write_keeps_the_trailer_but_the_bases_sections() {
+    let linearized = dict! { "Linearized" => 1, "L" => 1000 };
+    let objstm = Stream::new(dict! { "Type" => "ObjStm", "N" => 0, "First" => 0 }, vec![]);
+    let xref = Stream::new(
+        dict! { "Type" => "XRef", "W" => vec![Object::from(1)] },
+        vec![],
+    );
+    let mut doc = crate::Document::new(pdf_objects::version::Version::new(1, 4), Dict::new());
+    doc.insert(1, catalog());
+    doc.insert(2, dict! { "Title" => "Info" });
+    doc.insert(3, linearized);
+    doc.insert(4, Object::from(objstm));
+    doc.insert(5, Object::from(xref));
+    doc.set((6, 2), Object::from(6));
+    let id = Object::hex(ID);
+    let mut base = dict! {
+        "Root" => (1, 0),
+        "Info" => (2, 0),
+        "Custom" => "Kept",
+        "ID" => vec![id.clone(), id],
+        "Encrypt" => (9, 0),
+    };
+    for key in ["Prev", "XRefStm", "Size", "Length", "DL"] {
+        base.set(key, 1000);
+    }
+    for key in [
+        "Type",
+        "W",
+        "Index",
+        "Filter",
+        "DecodeParms",
+        "F",
+        "FFilter",
+        "FDecodeParms",
+    ] {
+        base.set(key, "Stale");
+    }
+    *doc.trailer.dict_mut() = base;
+    for kind in KINDS {
+        let mut options = options(kind, None);
+        options.version = pdf_objects::version::Version::new(1, 4);
+        let mut bytes = Vec::new();
+        write::document(&mut bytes, &doc, None, None, &options).unwrap();
+        assert!(
+            bytes.starts_with(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n"),
+            "{kind:?}"
+        );
+        let pdf = open(&bytes);
+        assert!(sound(&pdf), "{kind:?}: {:?}", pdf.warnings());
+        assert_eq!(pdf.facts().sections, 1, "{kind:?}");
+        // The linearization dictionary and the base's streams left out, and
+        // the stream this section is, when it's one, listed.
+        let (mut ids, own): (_, &[&[u8]]) = match kind {
+            XrefKind::Table => (vec![(1, 0), (2, 0), (6, 2)], &[b"Size"]),
+            XrefKind::Stream => (
+                vec![(1, 0), (2, 0), (6, 2), (7, 0)],
+                &[
+                    b"Size",
+                    b"Type",
+                    b"W",
+                    b"Index",
+                    b"Length",
+                    b"Filter",
+                    b"DecodeParms",
+                ],
+            ),
+        };
+        assert_eq!(pdf.ids().collect::<Vec<_>>(), ids, "{kind:?}");
+        // The base's keys but its sections', and this section's own.
+        let trailer = pdf.trailer().dict();
+        let mut kept: Vec<&[u8]> = trailer.iter().map(|(k, _)| k).collect();
+        kept.retain(|k| !own.contains(k));
+        kept.sort_unstable();
+        assert_eq!(
+            kept,
+            [b"Custom".as_slice(), b"ID", b"Info", b"Root"],
+            "{kind:?}"
+        );
+        let past = ids.pop().unwrap().0 + 1;
+        assert_eq!(size(&pdf), past, "{kind:?}");
+        assert_eq!(
+            trailer.get(b"Custom").and_then(Object::as_name),
+            Some(&b"Kept"[..])
+        );
+        // /ID[0] kept, and /ID[1] the hash of what comes before the section.
+        let (start, _) = newest(&pdf);
+        let written = twox_hash::XxHash3_128::oneshot(&bytes[..start]).to_be_bytes();
+        let id = [ID, &written].map(|id| Object::hex(id.to_vec()));
+        assert_eq!(
+            trailer.get(b"ID").map(unplaced),
+            Some(Object::from(id.to_vec()))
+        );
+    }
+}
+
+/// A whole file's body, or its cross-reference stream, at a number past
+/// what a file may use is refused before the section lists a row: it
+/// lists every number from 0, so it would grow without bound. So is a
+/// body at 0, which heads the free list, where no section lists it.
+#[test]
+fn a_number_past_what_a_file_may_use_isnt_written() {
+    let trailer = dict! { "Root" => (1, 0) };
+    let catalog = catalog();
+    let given = |at: u32| [(1, 0), (at, 0)].map(|id| (id, write::Body::from(&catalog)));
+    let write = |at: u32, kind, xref_from| {
+        let mut options = options(kind, None);
+        options.xref_from = xref_from;
+        let mut out = Vec::new();
+        write::full(&mut out, given(at), &trailer, None, None, &options).map(|_| out)
+    };
+    for kind in KINDS {
+        let e = write(write::NUMBERS, kind, 1).unwrap_err();
+        assert_eq!(e, Error::Number(write::NUMBERS), "{kind:?}");
+        assert!(e.to_string().contains("past the 8388607"), "{kind:?}: {e}");
+        let e = write(0, kind, 1).unwrap_err();
+        assert_eq!(e, Error::Number(0), "{kind:?}");
+        let fits = write(2, kind, 1).unwrap();
+        assert!(sound(&open(&fits)), "{kind:?}");
+    }
+    let stream = write(2, XrefKind::Stream, write::NUMBERS);
+    assert_eq!(stream.unwrap_err(), Error::Number(write::NUMBERS));
+}
+
+/// An update lists only what it writes, in runs, its `/Size` past them,
+/// and nothing when it writes nothing.
+#[test]
+fn an_update_lists_only_what_it_writes() {
+    // Object 3 at generation 4; 2 rewritten, 4 added.
+    let mut file = b"%PDF-1.7\n".to_vec();
+    let mut full = Section::full(0);
+    let objects = [((1, 0), catalog()), ((2, 0), 2.into()), ((3, 4), 3.into())];
+    for (id, obj) in objects {
+        let pos = serialize::indirect(&mut file, id, &obj).unwrap();
+        let generation = id.1;
+        full.insert(id.0, Entry::InUse { pos, generation });
+    }
+    let pos = file.len();
+    full.table(&mut file, dict! { "Root" => (1, 0) }, pos)
+        .unwrap();
+    let (twenty_two, four) = (Object::from(22), Object::from(4));
+    let given =
+        || [((2, 0), &twenty_two), ((4, 0), &four)].map(|(id, o)| (id, write::Body::from(o)));
+    for kind in KINDS {
+        let mut base = write::Base::new(
+            file.len(),
+            newest(&open(&file)).0,
+            4,
+            kind,
+            dict! { "Root" => (1, 0) },
+        );
+        base.ends_line = true;
+        let mut options = write::Options::DEFAULT;
+        options.xref_from = 5;
+        let mut out = file.clone();
+        assert_eq!(
+            write::update(&mut out, &base, [], None, None, &options),
+            Ok(None)
+        );
+        assert_eq!(out, file);
+        let update = (write::update(&mut out, &base, given(), None, None, &options))
+            .unwrap()
+            .unwrap();
+        let pdf = open(&out);
+        assert!(sound(&pdf), "{kind:?}: {:?}", pdf.warnings());
+        assert_eq!(newest(&pdf), (update.start, kind));
+        assert_eq!(pdf.facts().sections, 2, "{kind:?}");
+        assert_eq!(size(&pdf), update.size, "{kind:?}");
+        assert_eq!(value(&pdf, (2, 0)), Object::from(22));
+        assert_eq!(value(&pdf, (3, 4)), Object::from(3));
+        assert_eq!(value(&pdf, (4, 0)), Object::from(4));
+        // Neither an /ID nor /Encrypt, with none to keep.
+        let trailer = pdf.trailer().dict();
+        assert!(!trailer.has(b"ID") && !trailer.has(b"Encrypt"));
+        assert_eq!(update.id, None);
+        match kind {
+            XrefKind::Table => {
+                assert_eq!(update.size, 5);
+                let table = String::from_utf8_lossy(&out[file.len()..]);
+                assert!(table.contains("xref\n2 1\n"), "{table}");
+                assert!(table.contains("\n4 1\n"), "{table}");
+            }
+            XrefKind::Stream => {
+                assert_eq!(update.size, 6);
+                let (index, _, _) = rows(&pdf, (5, 0));
+                assert_eq!(index, [2, 1, 4, 2], "{kind:?}");
+            }
+        }
+        // Where each landed, from the header, and the file as it is now.
+        let landed = |n| match update.section.get(n) {
+            Some(Entry::InUse { pos, .. }) => pos,
+            entry => panic!("{n}: {entry:?}"),
+        };
+        assert!(out[landed(2)..].starts_with(b"2 0 obj"));
+        assert!(out[landed(4)..].starts_with(b"4 0 obj"));
+        assert_eq!(update.base.len, out.len());
+        assert_eq!(update.base.prev, update.start);
+        assert!(update.base.holds(&out[..]).unwrap());
+    }
+}
+
+/// Bytes some writers put before `%PDF-`.
+const PREFIX: [u8; 100] = [b'~'; 100];
+
+/// The update of a file with 100 bytes before its header counts its
+/// positions from there, so past them it's the same update as the file's
+/// without: described by `Base::new`, with its header there, as a caller
+/// that reads offsets from the header does. Read back, the reader finds
+/// its objects by scanning, as it counts positions from the file's start,
+/// and reads the same values; the file without them reads by its
+/// sections.
+#[test]
+fn a_file_with_a_100_byte_prefix_appends() {
+    let (plain, trailer) = plaintext();
+    for kind in KINDS {
+        let file = whole(&plain, &trailer, kind, None);
+        let prefixed = [&PREFIX[..], &file].concat();
+        let reading = open(&file);
+        let mut page = reading.get(PAGE).unwrap().clone();
+        page.as_dict_mut().unwrap().set("Rotate", 90);
+        let turned = [(PAGE, write::Body::from(&page))];
+        let base = write::Base::of(&reading).unwrap();
+        let mut appended = file.clone();
+        write::update(
+            &mut appended,
+            &base,
+            turned.clone(),
+            None,
+            None,
+            &write::Options::DEFAULT,
+        )
+        .unwrap();
+        let mut after = write::Base::new(
+            prefixed.len(),
+            base.prev,
+            base.size,
+            kind,
+            base.trailer.clone(),
+        );
+        after.header = PREFIX.len();
+        after.ends_line = true;
+        let mut after_prefix = prefixed.clone();
+        let written = write::update(
+            &mut after_prefix,
+            &after,
+            turned,
+            None,
+            None,
+            &write::Options::DEFAULT,
+        )
+        .unwrap()
+        .unwrap();
+        // Positions count from the header, so past the prefix it's the same
+        // update.
+        assert!(after_prefix[PREFIX.len()..] == appended[..], "{kind:?}");
+        assert_eq!(written.start, newest(&open(&appended)).0, "{kind:?}");
+        let unprefixed = open(&appended);
+        assert!(sound(&unprefixed), "{kind:?}: {:?}", unprefixed.warnings());
+        assert_eq!(unprefixed.facts().sections, 2, "{kind:?}");
+        assert_eq!(rewritten(&unprefixed), as_turned(), "{kind:?}");
+        let pdf = open(&after_prefix);
+        assert_eq!(pdf.facts().header_offset, Some(PREFIX.len()), "{kind:?}");
+        assert!(pdf.trailer().unwritten.is_some(), "scanned: {kind:?}");
+        for (n, _) in &plain {
+            let id = (*n, 0);
+            assert_eq!(
+                handed(&pdf, id),
+                handed(&unprefixed, id),
+                "{kind:?}: {id:?}"
+            );
+        }
+        assert_eq!(rewritten(&pdf), as_turned(), "{kind:?}");
+    }
+}
+
+/// What a mark's annotation says.
+const NOTE: &[u8] = b"a mark's note";
+
+/// An encrypted file appends encrypted, under each method, its `/ID` of
+/// two strings and of one, after a section of each kind: its page turned
+/// and marked (an annotation added at a new number). The page's string and
+/// the mark's note are encrypted, but where the method leaves strings in
+/// the clear; the update reads back, lazily and whole, its `/Encrypt`
+/// where it was, as stored, `/ID[0]` kept and `/ID[1]` new; the same
+/// bytes twice.
+#[test]
+fn encrypted_files_append_encrypted() {
+    let methods = methods();
+    let mut sources = sources(&methods);
+    let (plain, trailer) = plaintext();
+    let alone = methods
+        .iter()
+        .find(|m| m.name == "attachments alone")
+        .unwrap();
+    for kind in KINDS {
+        let bytes = encrypted_by(&alone.encryptor, &plain, &trailer, kind);
+        sources.push((format!("{}, {kind:?}", alone.name), kind, alone, bytes));
+    }
+    for (name, kind, method, source) in &sources {
+        let reading = opened(source, "user");
+        let mut doc = reading.to_document().unwrap();
+        let note =
+            doc.add(dict! { "Type" => "Annot", "Subtype" => "Square", "Contents" => lit(NOTE) });
+        let page = doc.get_dict_mut(PAGE).unwrap();
+        page.set("Rotate", 90);
+        page.set("Annots", vec![Object::from(note)]);
+        let base = write::Base::of(&reading).unwrap();
+        let encryptor = Encryptor::of(&reading).unwrap();
+        let given = || [PAGE, note].map(|id| (id, write::Body::from(doc.get(id).unwrap())));
+        let update = || {
+            let mut out = source.clone();
+            let options = write::Options::DEFAULT;
+            write::update(
+                &mut out,
+                &base,
+                given(),
+                encryptor.as_ref(),
+                Some(&reading),
+                &options,
+            )
+            .unwrap()
+            .unwrap();
+            out
+        };
+        let bytes = update();
+        assert_eq!(update(), bytes, "{name}");
+        assert!(bytes.starts_with(source), "{name}");
+        let section = &bytes[source.len()..];
+        for text in [PAGE_STRING, NOTE] {
+            let text_said = String::from_utf8_lossy(text);
+            assert_eq!(
+                in_clear(section, text),
+                !method.strings,
+                "{name}: {text_said:?}"
+            );
+        }
+        // The new revision, lazily and whole.
+        let pdf = opened(&bytes, "user");
+        assert!(sound(&pdf), "{name}: {:?}", pdf.warnings());
+        assert_eq!(newest(&pdf).1, *kind, "{name}");
+        assert_eq!(pdf.facts().sections, 2, "{name}");
+        assert_eq!(rewritten(&pdf), as_turned(), "{name}");
+        let (_, annot) = reached(&pdf, &Object::from(PAGE), &[b"Annots"]);
+        let (_, contents) = reached(&pdf, &annot.as_array().unwrap()[0], &[b"Contents"]);
+        assert_eq!(contents.as_bytes(), Some(NOTE), "{name}");
+        let eager = bytes::read_opened(&bytes, &[Password("user")]);
+        for id in pdf.ids() {
+            assert_eq!(
+                unplaced(eager.get(id).unwrap()),
+                value(&pdf, id),
+                "{name}: {id:?}"
+            );
+        }
+        // Its /Encrypt where it was, as stored; /ID[0] kept and /ID[1] new.
+        let encrypt = |pdf: &Reading<Arc<[u8]>>| pdf.trailer().dict().get(b"Encrypt").map(unplaced);
+        assert_eq!(encrypt(&pdf), encrypt(&reading), "{name}");
+        assert!(encrypt(&pdf).unwrap().as_reference().is_some(), "{name}");
+        let now = Encryptor::of(&pdf).unwrap().unwrap();
+        let was = encryptor.as_ref().unwrap();
+        assert_eq!(
+            as_written(now.dictionary()),
+            as_written(was.dictionary()),
+            "{name}"
+        );
+        let ids = |pdf: &Reading<Arc<[u8]>>| {
+            let id = pdf
+                .trailer()
+                .dict()
+                .get(b"ID")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .to_vec();
+            id.iter()
+                .map(|s| s.as_bytes().unwrap().to_vec())
+                .collect::<Vec<_>>()
+        };
+        let (now, was) = (ids(&pdf), ids(&reading));
+        assert_eq!(now[0], ID, "{name}");
+        assert_eq!(now.len(), 2, "{name}");
+        assert_ne!(now.get(1), was.get(1), "{name}");
+    }
+}
+
+/// A file whose cross-reference stream is numbered 4,294,967,295, which
+/// the reader takes: an update would have no number left past it for its
+/// own, so it's refused, and nothing is written.
+#[test]
+fn a_base_numbered_to_the_last_number_isnt_appended_to() {
+    let mut file = b"%PDF-1.7\n".to_vec();
+    let mut rows = vec![0, 0, 0, 0, 0, 0xff, 0xff];
+    let r = Object::reference;
+    let media = vec![
+        Object::from(0),
+        Object::from(0),
+        Object::from(200),
+        Object::from(200),
+    ];
+    let objects = [
+        dict! { "Type" => "Catalog", "Pages" => r(2) },
+        dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 },
+        dict! { "Type" => "Page", "Parent" => r(2), "MediaBox" => media },
+    ];
+    for (num, dict) in (1..).zip(objects) {
+        let pos = serialize::indirect(&mut file, (num, 0), &dict.into()).unwrap();
+        rows.push(1);
+        rows.extend_from_slice(&(pos as u32).to_be_bytes());
+        rows.extend_from_slice(&[0, 0]);
+    }
+    let start = file.len();
+    let xref = dict! {
+        "Type" => "XRef",
+        "Size" => 4,
+        "W" => vec![Object::from(1), Object::from(4), Object::from(2)],
+        "Index" => vec![Object::from(0), Object::from(4)],
+        "Root" => r(1),
+    };
+    let stream = Object::from(Stream::new(xref, rows));
+    serialize::indirect(&mut file, (u32::MAX, 0), &stream).unwrap();
+    file.extend_from_slice(format!("startxref\n{start}\n%%EOF\n").as_bytes());
+    let reading = open(&file);
+    assert_eq!(reading.facts().max_stream, Some(u32::MAX));
+    let base = write::Base::of(&reading).unwrap();
+    assert_eq!(base.size, u32::MAX);
+    let mut page = reading.get((3, 0)).unwrap().clone();
+    page.as_dict_mut().unwrap().set("Rotate", 90);
+    let mut out = file.clone();
+    let given = [((3, 0), write::Body::from(&page))];
+    let refused = write::update(
+        &mut out,
+        &base,
+        given,
+        None,
+        Some(&reading),
+        &write::Options::DEFAULT,
+    );
+    let refused = refused.unwrap_err();
+    assert_eq!(refused, Error::NoNumber(u32::MAX));
+    assert!(
+        refused.to_string().contains("no object number left"),
+        "{refused}"
+    );
+    assert_eq!(out, file);
+}
+
+/// An encrypted file rewrites encrypted every way, packed when its source
+/// has a cross-reference stream: nothing is in the clear, even inflated;
+/// the empty password doesn't open it; it reads back as it was, turned;
+/// its `/Encrypt` as stored and its `/ID[0]` are the source's.
+#[test]
+fn rewrites_stay_encrypted() {
+    let methods = methods();
+    for (name, kind, _, source) in sources(&methods) {
+        let bytes = rewrite(&source, "user", kind);
+        for text in SECRETS {
+            let text_said = String::from_utf8_lossy(text);
+            assert!(!in_clear(&bytes, text), "{name}: {text_said:?}");
+        }
+        let locked = open(&bytes);
+        assert_eq!(locked.encryption(), &Encryption::Locked, "{name}");
+        let pdf = opened(&bytes, "user");
+        assert!(sound(&pdf), "{name}: {:?}", pdf.warnings());
+        assert_eq!(newest(&pdf).1, kind, "{name}");
+        let packs = kind == XrefKind::Stream;
+        assert_eq!(!object_streams_of(&pdf).is_empty(), packs, "{name}");
+        assert_eq!(rewritten(&pdf), as_turned(), "{name}");
+        let (was, now) = (encryptor_of(&source), Encryptor::of(&pdf).unwrap().unwrap());
+        assert_eq!(
+            as_written(now.dictionary()),
+            as_written(was.dictionary()),
+            "{name}"
+        );
+        assert_eq!(now.first_id(), Some(ID), "{name}");
+        assert_eq!(now.at(), was.at(), "{name}");
+        // Two strings, whatever the source had.
+        let id = pdf.trailer().dict().get(b"ID").and_then(Object::as_array);
+        assert_eq!(id.map(<[Object]>::len), Some(2), "{name}");
+    }
+}
+
+/// A file whose `/EFF` encrypts its attachments alone rewrites with only
+/// its attachment encrypted, packed when its source has a cross-reference
+/// stream: every other string and stream is in the clear, if deflated in
+/// an object stream.
+#[test]
+fn an_eff_file_rewrites_with_only_its_attachment_encrypted() {
+    let (plain, trailer) = plaintext();
+    let methods = methods();
+    let alone = &methods
+        .iter()
+        .find(|m| m.name == "attachments alone")
+        .unwrap()
+        .encryptor;
+    for kind in KINDS {
+        let source = encrypted_by(alone, &plain, &trailer, kind);
+        let bytes = rewrite(&source, "user", kind);
+        assert!(!in_clear(&bytes, ATTACHMENT), "{kind:?}");
+        for text in [TITLE, PAGE_STRING, FORM_STRING, CONTENT, XMP] {
+            let text_said = String::from_utf8_lossy(text);
+            assert!(in_clear(&bytes, text), "{kind:?}: {text_said:?}");
+        }
+        let pdf = opened(&bytes, "user");
+        let packed = !object_streams_of(&pdf).is_empty();
+        assert_eq!(packed, kind == XrefKind::Stream, "{kind:?}");
+        assert_eq!(rewritten(&pdf), as_turned(), "{kind:?}");
+        // Its /Encrypt as stored, /EFF and all.
+        let now = Encryptor::of(&pdf).unwrap().unwrap();
+        assert_eq!(
+            as_written(now.dictionary()),
+            as_written(alone.dictionary()),
+            "{kind:?}"
+        );
+        assert!(now.dictionary().has(b"EFF"), "{kind:?}");
+    }
+}
+
+/// A file whose objects are in an object stream encrypted whole reads
+/// each as it was, lazily and whole, and rewrites encrypted and packed
+/// again: each object stream encrypted whole, nothing in the clear, even
+/// inflated.
+#[test]
+fn an_encrypted_object_stream_base_rewrites() {
+    let (plain, trailer) = plaintext();
+    let methods = methods();
+    for method in standard(&methods) {
+        let name = method.name;
+        let base = whole_packed(&plain, &trailer, Some(&method.encryptor), None);
+        let pdf = assert_reads_to(&plain, &base, true, name);
+        assert!(!object_streams_of(&pdf).is_empty(), "{name}");
+        let bytes = rewrite(&base, "user", XrefKind::Stream);
+        for bytes in [&base, &bytes] {
+            for text in SECRETS {
+                let text_said = String::from_utf8_lossy(text);
+                assert!(!in_clear(bytes, text), "{name}: {text_said:?}");
+            }
+        }
+        let pdf = opened(&bytes, "user");
+        assert!(!object_streams_of(&pdf).is_empty(), "{name}");
+        assert!(sound(&pdf), "{name}: {:?}", pdf.warnings());
+        assert_eq!(newest(&pdf).1, XrefKind::Stream, "{name}");
+        assert_eq!(rewritten(&pdf), as_turned(), "{name}");
+        let now = Encryptor::of(&pdf).unwrap().unwrap();
+        let dictionaries = [now.dictionary(), method.encryptor.dictionary()].map(as_written);
+        assert_eq!(dictionaries[0], dictionaries[1], "{name}");
+    }
+}
+
+/// [`plaintext`] under `encryptor`, which leaves streams in the clear and
+/// strings not, as a writer that packs anyway writes it: every object but
+/// the streams in one object stream, its members' strings in the clear in
+/// it, as its stream method leaves it; and a cross-reference stream.
+fn packed_in_the_clear(encryptor: &Encryptor) -> Vec<u8> {
+    let (plain, trailer) = plaintext();
+    let resolve = |id: ObjectId| (plain.iter()).find(|(n, _)| (*n, 0) == id).map(|(_, o)| o);
+    let encrypting = encryptor.encrypting(&trailer, &resolve);
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut section = Section::full(0);
+    let (streams, members): (Vec<_>, Vec<_>) =
+        plain.iter().partition(|(_, o)| o.as_stream().is_some());
+    for (num, obj) in streams {
+        let pos = serialize::indirect_with(&mut out, (*num, 0), obj, &encrypting).unwrap();
+        section.insert(*num, Entry::InUse { pos, generation: 0 });
+    }
+    let members: Vec<(u32, Object)> = members.into_iter().cloned().collect();
+    let container = container(&members);
+    let pos = serialize::indirect_with(&mut out, (20, 0), &container, &encrypting).unwrap();
+    section.insert(20, Entry::InUse { pos, generation: 0 });
+    for (index, (num, _)) in (0..).zip(&members) {
+        section.insert(
+            *num,
+            Entry::Packed {
+                container: 20,
+                index,
+            },
+        );
+    }
+    let mut trailer = trailer.clone();
+    let at = encryptor.at().unwrap();
+    let pos =
+        serialize::indirect(&mut out, at, &Object::from(encryptor.dictionary().clone())).unwrap();
+    section.insert(at.0, Entry::InUse { pos, generation: 0 });
+    trailer.set("Encrypt", Object::from(at));
+    let pos = out.len();
+    let own = section.size();
+    section
+        .stream(&mut out, own, trailer, pos, Deflate::DEFAULT)
+        .unwrap();
+    out
+}
+
+/// A file whose streams are in the clear and strings not (`/StmF
+/// /Identity` under an encrypting `/StrF`) rewrites unpacked, whether it
+/// has a table, a stream, or an object stream holding its members'
+/// strings in the clear: no string is in the clear after.
+#[test]
+fn identity_stmf_under_an_encrypting_strf_isn_t_packed() {
+    let (plain, trailer) = plaintext();
+    let methods = methods();
+    let crypt = &methods
+        .iter()
+        .find(|m| m.name == "streams in the clear")
+        .unwrap()
+        .encryptor;
+    let stream = encrypted_by(crypt, &plain, &trailer, XrefKind::Stream);
+    let packed = packed_in_the_clear(crypt);
+    assert!(
+        in_clear(&packed, PAGE_STRING),
+        "the source's object stream is"
+    );
+    for (kind, base) in [("stream", stream), ("packed", packed)] {
+        let out = rewrite(&base, "user", XrefKind::Stream);
+        let pdf = opened(&out, "user");
+        assert!(sound(&pdf), "{kind}: {:?}", pdf.warnings());
+        assert_eq!(newest(&pdf).1, XrefKind::Stream, "{kind}");
+        assert_eq!(object_streams_of(&pdf), [], "{kind}");
+        for text in [PAGE_STRING, TITLE, FIELD_NAME] {
+            let text_said = String::from_utf8_lossy(text);
+            assert!(!in_clear(&out, text), "{kind}: {text_said:?}");
+        }
+        assert!(holds(&out, CONTENT), "{kind}");
+        assert_eq!(rewritten(&pdf), as_turned(), "{kind}");
+    }
+}
+
+/// `file`, opened by `password`, read whole, and written whole three ways
+/// (a table; a stream, unpacked and packed) and as an update of its
+/// catalog with a key more, under its own encryption, its streams' data
+/// read from the reading; each read back by the same password: sound,
+/// encrypted as it was, every object a whole write keeps the same, spans
+/// aside, a stream's data as handed out, and the update's catalog
+/// changed.
+fn assert_rewrites(file: &[u8], password: &str, name: &str) {
+    let reading = opened(file, password);
+    let encryptor = Encryptor::of(&reading).unwrap();
+    let encrypted = encryptor.is_some();
+    let doc = reading.to_document().unwrap();
+    let left_out = |o: &Object| {
+        o.as_stream()
+            .is_some_and(|s| s.dict.has_type(b"ObjStm") || s.dict.has_type(b"XRef"))
+            || o.as_dict().is_some_and(|d| d.has(b"Linearized"))
+    };
+    let kept: Vec<ObjectId> = (doc.objects())
+        .filter(|(_, o)| !left_out(o))
+        .map(|(id, _)| id)
+        .collect();
+    assert!(!kept.is_empty(), "{name}");
+    let ways = [
+        (XrefKind::Table, None),
+        (XrefKind::Stream, None),
+        (XrefKind::Stream, Some(write::Pack::DEFAULT)),
+    ];
+    for (kind, pack) in ways {
+        let name = format!("{name}, {kind:?}, packed: {}", pack.is_some());
+        let mut out = Vec::new();
+        let options = options(kind, pack);
+        write::document(&mut out, &doc, encryptor.as_ref(), Some(&reading), &options).unwrap();
+        let back = opened(&out, password);
+        assert!(sound(&back), "{name}: {:?}", back.warnings());
+        let opened = matches!(back.encryption(), Encryption::Opened { .. });
+        assert_eq!(opened, encrypted, "{name}");
+        assert_eq!(newest(&back).1, kind, "{name}");
+        for &id in &kept {
+            assert_eq!(handed(&back, id), handed(&reading, id), "{name}: {id:?}");
+        }
+    }
+    let root = doc
+        .trailer
+        .dict()
+        .get(b"Root")
+        .and_then(Object::as_reference)
+        .unwrap();
+    let mut catalog = doc.get(root).unwrap().clone();
+    catalog.as_dict_mut().unwrap().set("Changed", true);
+    let base = write::Base::of(&reading).unwrap();
+    let mut out = file.to_vec();
+    let given = [(root, write::Body::from(&catalog))];
+    let options = write::Options::DEFAULT;
+    write::update(
+        &mut out,
+        &base,
+        given,
+        encryptor.as_ref(),
+        Some(&reading),
+        &options,
+    )
+    .unwrap();
+    let back = opened(&out, password);
+    let name = format!("{name}, updated");
+    assert!(sound(&back), "{name}: {:?}", back.warnings());
+    assert_eq!(
+        back.facts().sections,
+        reading.facts().sections + 1,
+        "{name}"
+    );
+    for &id in &kept {
+        let (got, was) = (handed(&back, id), handed(&reading, id));
+        match id == root {
+            true => assert_eq!(
+                got.as_dict()
+                    .unwrap()
+                    .get(b"Changed")
+                    .and_then(Object::as_bool),
+                Some(true),
+                "{name}"
+            ),
+            false => assert_eq!(got, was, "{name}: {id:?}"),
+        }
+    }
+}
+
+/// The files qpdf wrote, committed, each by the empty password, and
+/// [`plaintext`] under each method, each kind of section, packed or not,
+/// by the user's: read, written whole and as an update, and read again,
+/// the same objects.
+#[test]
+fn written_files_read_back_alike_whole_and_updated() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
+    let mut fixtures: Vec<_> = (std::fs::read_dir(dir).unwrap())
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    fixtures.sort();
+    assert_eq!(fixtures.len(), 8);
+    for path in fixtures {
+        let file = std::fs::read(&path).unwrap();
+        assert_rewrites(&file, "", &path.display().to_string());
+    }
+    let (plain, trailer) = plaintext();
+    for kind in KINDS {
+        assert_rewrites(
+            &whole(&plain, &trailer, kind, None),
+            "",
+            &format!("plain, {kind:?}"),
+        );
+    }
+    assert_rewrites(
+        &whole_packed(&plain, &trailer, None, None),
+        "",
+        "plain, packed",
+    );
+    for method in methods() {
+        for kind in KINDS {
+            let file = encrypted_by(&method.encryptor, &plain, &trailer, kind);
+            assert_rewrites(&file, "user", &format!("{}, {kind:?}", method.name));
+        }
+        if method.encryptor.packs() {
+            let file = whole_packed(&plain, &trailer, Some(&method.encryptor), None);
+            assert_rewrites(&file, "user", &format!("{}, packed", method.name));
+        }
+    }
+}
+
+/// What each method leaves in the clear of [`listed`]'s strings and data:
+/// each, and whether it's encrypted, as the list has it.
+fn listed_rows(method: &Method) -> Vec<(&'static [u8], bool)> {
+    let strings = [
+        PAGE_STRING,
+        FORM_STRING,
+        FIELD_NAME,
+        TITLE,
+        METADATA_STRING,
+        UNSIGNED,
+        SHAPED,
+        XREF_DICT,
+    ];
+    let mut rows: Vec<(&[u8], bool)> = strings.map(|s| (s, method.strings)).to_vec();
+    rows.extend([
+        (CONTENT, method.streams),
+        (PAGE_XMP, method.streams),
+        (XMP, method.metadata),
+        (ATTACHMENT, method.attachment),
+        (OWN_STDCF, true),
+        (OWN_IDENTITY, !method.filters),
+        (SIGNATURE, false),
+        (UNTYPED_SIGNATURE, false),
+    ]);
+    rows
+}
+
+/// Under each method, [`listed`] written whole (a table, and a stream
+/// packed) and as an update rewriting every object of a file of it,
+/// twice each: the same bytes twice; what the list encrypts not in the
+/// clear, as it is, in hex or inflated, and what it leaves so in the
+/// clear; and every object read back by the user's password.
+#[test]
+fn each_method_writes_whole_packed_and_updated_with_nothing_in_the_clear() {
+    let (plain, trailer) = listed();
+    for method in methods() {
+        let crypt = Some(&method.encryptor);
+        let source = encrypted_by(&method.encryptor, &plain, &trailer, XrefKind::Table);
+        let reading = opened(&source, "user");
+        let base = write::Base::of(&reading).unwrap();
+        let own = Encryptor::of(&reading).unwrap();
+        let updated = || {
+            let mut out = source.clone();
+            let options = write::Options::DEFAULT;
+            write::update(
+                &mut out,
+                &base,
+                bodies(&plain),
+                own.as_ref(),
+                None,
+                &options,
+            )
+            .unwrap();
+            out
+        };
+        let ways: [(&str, &dyn Fn() -> Vec<u8>); 3] = [
+            ("whole", &|| whole(&plain, &trailer, XrefKind::Table, crypt)),
+            ("packed", &|| whole_packed(&plain, &trailer, crypt, None)),
+            ("updated", &updated),
+        ];
+        for (way, write) in ways {
+            let name = format!("{}, {way}", method.name);
+            let bytes = write();
+            assert_eq!(write(), bytes, "{name}");
+            let written = match way {
+                "updated" => &bytes[source.len()..],
+                _ => &bytes[..],
+            };
+            for (text, encrypted) in listed_rows(&method) {
+                let text_said = String::from_utf8_lossy(text);
+                assert_eq!(in_clear(written, text), !encrypted, "{name}: {text_said:?}");
+            }
+            assert_reads_to(&plain, &bytes, true, &name);
+        }
+    }
+}
+
+/// An encrypted file written whole without an encryptor is decrypted:
+/// its values as they were, its data in the clear, no `/Encrypt`, its
+/// encryption dictionary left out; and under a new encryption of
+/// revision 6, it opens by the new password alone, nothing in the clear,
+/// the source's dictionary left out too. An RC4 source's as an AES-256
+/// one's.
+#[test]
+fn a_decrypting_write_and_a_new_revision_6_read_back() {
+    use chacha20::ChaCha20Rng;
+
+    let (plain, trailer) = plaintext();
+    let methods = methods();
+    let prepared = Password("new").prepared().unwrap();
+    for method in methods
+        .iter()
+        .filter(|m| ["RC4-40", "AES-256 R6"].contains(&m.name))
+    {
+        let source = encrypted_by(&method.encryptor, &plain, &trailer, XrefKind::Table);
+        let reading = opened(&source, "user");
+        let doc = reading.to_document().unwrap();
+        let encrypt = doc
+            .trailer
+            .dict()
+            .get(b"Encrypt")
+            .and_then(Object::as_reference);
+        assert_eq!(encrypt, Some((ENCRYPT, 0)), "{}", method.name);
+        let mut rng = ChaCha20Rng::seed_from_u64(9);
+        let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+        for (way, encryptor) in [("decrypted", None), ("created", Some(&created))] {
+            let name = format!("{}, {way}", method.name);
+            let mut out = Vec::new();
+            let options = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
+            write::document(&mut out, &doc, encryptor, Some(&reading), &options).unwrap();
+            let back = match encryptor {
+                Some(_) => opened(&out, "new"),
+                None => open(&out),
+            };
+            assert!(sound(&back), "{name}: {:?}", back.warnings());
+            assert!(!back.ids().any(|id| id == (ENCRYPT, 0)), "{name}");
+            for (n, obj) in &plain {
+                let id = (*n, 0);
+                assert!(same(back.get(id).unwrap(), obj), "{name}: {id:?}");
+                if let Some(s) = obj.as_stream() {
+                    assert_eq!(
+                        back.data(id).unwrap().as_ref(),
+                        s.data.bytes().unwrap(),
+                        "{name}"
+                    );
+                }
+            }
+            match encryptor {
+                None => {
+                    assert_eq!(back.encryption(), &Encryption::None, "{name}");
+                    assert!(!back.trailer().dict().has(b"Encrypt"), "{name}");
+                    assert!(holds(&out, CONTENT), "{name}");
+                }
+                Some(_) => {
+                    assert!(
+                        matches!(back.encryption(), Encryption::Opened { .. }),
+                        "{name}"
+                    );
+                    assert!(!matches!(
+                        opened(&out, "user").encryption(),
+                        Encryption::Opened { .. }
+                    ));
+                    for text in SECRETS {
+                        let text_said = String::from_utf8_lossy(text);
+                        assert!(!in_clear(&out, text), "{name}: {text_said:?}");
+                    }
+                    // /ID[0] the document's, which the new key isn't made
+                    // from, and /ID[1] of the bytes written.
+                    let id = back
+                        .trailer()
+                        .dict()
+                        .get(b"ID")
+                        .and_then(Object::as_array)
+                        .unwrap();
+                    assert_eq!(id.len(), 2, "{name}");
+                    assert_eq!(id[0].as_bytes(), Some(ID), "{name}");
+                    assert_ne!(id[1].as_bytes(), Some(ID), "{name}");
+                }
+            }
+        }
+    }
+}
+
+/// The string `Title` of object 13 in `file`, as written: read with no
+/// password, which opens none of the tests' files, so its ciphertext.
+fn title_written(file: &[u8]) -> Vec<u8> {
+    let locked = open(file);
+    assert_eq!(locked.encryption(), &Encryption::Locked);
+    let info = locked.get((13, 0)).unwrap().as_dict().unwrap();
+    match info.get(b"Title").unwrap().value() {
+        Value::String(Str::Encrypted(bytes), _) => bytes.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Under RC4, an update that writes an object again at its number and
+/// generation, a string of it changed, encrypts it with the keystream its
+/// earlier version was: the XOR of the two ciphertexts, both in the file,
+/// is the XOR of the two plaintexts, as `write::update`'s doc and
+/// pdf-crypt's `Method::Rc4` say. Under AES-128, it isn't.
+#[test]
+fn an_rc4_update_leaks_the_xor_of_what_changed() {
+    const CHANGED: &[u8] = b"another title";
+    assert_eq!(CHANGED.len(), TITLE.len());
+    let (plain, trailer) = plaintext();
+    let xor = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(a, b)| a ^ b).collect::<Vec<u8>>();
+    let methods = methods();
+    for method in methods
+        .iter()
+        .filter(|m| ["RC4-128", "AES-128"].contains(&m.name))
+    {
+        let source = encrypted_by(&method.encryptor, &plain, &trailer, XrefKind::Table);
+        let reading = opened(&source, "user");
+        let mut info = reading.get((13, 0)).unwrap().clone();
+        info.as_dict_mut().unwrap().set("Title", lit(CHANGED));
+        let base = write::Base::of(&reading).unwrap();
+        let encryptor = Encryptor::of(&reading).unwrap();
+        let mut out = source.clone();
+        let given = [((13, 0), write::Body::from(&info))];
+        let options = write::Options::DEFAULT;
+        write::update(&mut out, &base, given, encryptor.as_ref(), None, &options).unwrap();
+        let (was, now) = (title_written(&source), title_written(&out));
+        let leaks = xor(&was, &now) == xor(TITLE, CHANGED);
+        assert_eq!(leaks, method.name == "RC4-128", "{}", method.name);
+    }
+}
+
+/// An object at a number its file lists free is refused, in an update and
+/// in a whole write, under its RC4 and AES-128 encryptions, whose keys
+/// are made of the number, at any generation; written under AES-256's, a
+/// new encryption's, and with none.
+#[test]
+fn a_body_at_a_number_the_file_lists_free_is_refused_where_keys_are_per_object() {
+    use chacha20::ChaCha20Rng;
+
+    // Objects 1 and 3: 2 is listed free.
+    let objects = [
+        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (3, Body::from(dict! { "N" => 3 })),
+    ];
+    let root = dict! { "Root" => (1, 0) };
+    let two = Object::from(dict! { "New" => lit(b"a new object") });
+    let catalog = catalog();
+    let kinds = [
+        (Kind::Rc4By40, true),
+        (Kind::Rc4By128, true),
+        (Kind::Aes128, true),
+        (Kind::Aes256R5, false),
+        (Kind::Aes256, false),
+    ];
+    for (kind, refused) in kinds {
+        let name = format!("{kind:?}");
+        let file = fixture::encrypted(&settings(kind, true), &objects, root.clone());
+        let reading = opened(&file, "user");
+        let free = reading
+            .entries()
+            .any(|(n, _, e)| n == 2 && e == XrefEntry::Free);
+        assert!(free, "{name}");
+        let encryptor = Encryptor::of(&reading).unwrap();
+        let base = write::Base::of(&reading).unwrap();
+        for generation in [0, 1] {
+            let id = (2, generation);
+            let mut out = file.clone();
+            let given = [(id, write::Body::from(&two))];
+            let options = write::Options::DEFAULT;
+            let updated = write::update(&mut out, &base, given, encryptor.as_ref(), None, &options);
+            let mut whole = b"held".to_vec();
+            let given = [
+                ((1, 0), write::Body::from(&catalog)),
+                (id, write::Body::from(&two)),
+            ];
+            let written = write::full(&mut whole, given, &root, encryptor.as_ref(), None, &options);
+            match refused {
+                true => {
+                    assert_eq!(updated, Err(Error::Free(id)), "{name}");
+                    assert_eq!(out, file, "{name}");
+                    assert_eq!(written, Err(Error::Free(id)), "{name}");
+                    assert_eq!(whole, b"held", "{name}");
+                }
+                false => {
+                    updated.unwrap();
+                    written.unwrap();
+                    let back = opened(&out, "user");
+                    assert_eq!(value(&back, id), two, "{name}");
+                    let back = opened(&whole[4..], "user");
+                    assert_eq!(value(&back, id), two, "{name}");
+                }
+            }
+        }
+    }
+    // A new encryption's key is new; a file that isn't encrypted has none.
+    let mut rng = ChaCha20Rng::seed_from_u64(10);
+    let prepared = Password("user").prepared().unwrap();
+    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let given = [
+        ((1, 0), write::Body::from(&catalog)),
+        ((2, 0), write::Body::from(&two)),
+    ];
+    let mut out = Vec::new();
+    write::full(
+        &mut out,
+        given,
+        &root,
+        Some(&created),
+        None,
+        &write::Options::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(value(&opened(&out, "user"), (2, 0)), two);
+    let plain = fixture::file("1.7", &objects, root.clone(), Xref::Table);
+    let reading = open(&plain);
+    let base = write::Base::of(&reading).unwrap();
+    let mut out = plain.clone();
+    let given = [((2, 0), write::Body::from(&two))];
+    write::update(&mut out, &base, given, None, None, &write::Options::DEFAULT).unwrap();
+    assert_eq!(value(&open(&out), (2, 0)), two);
+}
+
+/// A whole write under a reading's encryption that writes its encryption
+/// dictionary at another number encrypts what it's given at the number
+/// the dictionary had, as any object: it's no encryption dictionary's in
+/// the file written.
+#[test]
+fn an_object_at_a_moved_encryption_dictionary_s_number_is_encrypted() {
+    let methods = methods();
+    for method in standard(&methods) {
+        let name = method.name;
+        assert_eq!(method.encryptor.at(), Some((ENCRYPT, 0)), "{name}");
+        let objects = [
+            (1, catalog()),
+            (
+                ENCRYPT,
+                Object::from(dict! { "Secret" => lit(PAGE_STRING) }),
+            ),
+        ];
+        let mut options = write::Options::DEFAULT;
+        options.encrypt_at = Some((50, 0));
+        let mut out = Vec::new();
+        let trailer = dict! { "Root" => (1, 0) };
+        write::full(
+            &mut out,
+            bodies(&objects),
+            &trailer,
+            Some(&method.encryptor),
+            None,
+            &options,
+        )
+        .unwrap();
+        assert!(!in_clear(&out, PAGE_STRING), "{name}");
+        let back = opened(&out, "user");
+        assert_eq!(
+            back.trailer()
+                .dict()
+                .get(b"Encrypt")
+                .and_then(Object::as_reference),
+            Some((50, 0))
+        );
+        assert_eq!(value(&back, (ENCRYPT, 0)), objects[1].1, "{name}");
+    }
+}
+
+/// A file whose encryption dictionary is in its trailer, direct, written
+/// whole and as an update, keeps it there, and reads back by its
+/// password.
+#[test]
+fn a_direct_encryption_dictionary_is_written_whole_and_updated_where_it_was() {
+    let (plain, trailer) = plaintext();
+    let direct = encryptor_of(&source(dictionary_of(Kind::Aes128, true), true));
+    assert!(direct.direct());
+    for kind in KINDS {
+        let source = encrypted_by(&direct, &plain, &trailer, kind);
+        let rewritten_whole = rewrite(&source, "user", kind);
+        let reading = opened(&source, "user");
+        let mut page = reading.get(PAGE).unwrap().clone();
+        page.as_dict_mut().unwrap().set("Rotate", 90);
+        let base = write::Base::of(&reading).unwrap();
+        let encryptor = Encryptor::of(&reading).unwrap();
+        let mut updated = source.clone();
+        let given = [(PAGE, write::Body::from(&page))];
+        let options = write::Options::DEFAULT;
+        write::update(
+            &mut updated,
+            &base,
+            given,
+            encryptor.as_ref(),
+            None,
+            &options,
+        )
+        .unwrap();
+        for (way, bytes) in [("whole", rewritten_whole), ("updated", updated)] {
+            let name = format!("{kind:?}, {way}");
+            let back = opened(&bytes, "user");
+            assert!(sound(&back), "{name}: {:?}", back.warnings());
+            let encrypt = back.trailer().dict().get(b"Encrypt").unwrap();
+            assert_eq!(
+                as_written(encrypt.as_dict().unwrap()),
+                as_written(direct.dictionary()),
+                "{name}"
+            );
+            assert!(Encryptor::of(&back).unwrap().unwrap().direct(), "{name}");
+            assert_eq!(rewritten(&back), as_turned(), "{name}");
+            for text in SECRETS {
+                let text_said = String::from_utf8_lossy(text);
+                assert!(!in_clear(&bytes, text), "{name}: {text_said:?}");
+            }
+        }
+    }
+}
+
+/// [`plaintext`] written whole with a table, then updated with its page
+/// turned: both files, and where the first's section starts.
+fn and_updated() -> (Vec<u8>, Vec<u8>, usize) {
+    let (plain, trailer) = plaintext();
+    let file = whole(&plain, &trailer, XrefKind::Table, None);
+    let reading = open(&file);
+    let mut page = reading.get(PAGE).unwrap().clone();
+    page.as_dict_mut().unwrap().set("Rotate", 90);
+    let base = write::Base::of(&reading).unwrap();
+    let mut updated = file.clone();
+    let given = [(PAGE, write::Body::from(&page))];
+    write::update(
+        &mut updated,
+        &base,
+        given,
+        None,
+        None,
+        &write::Options::DEFAULT,
+    )
+    .unwrap();
+    (file, updated, base.prev)
+}
+
+/// `Base::of` gives a reading's file as its last section describes it:
+/// its length, whether its last line is ended, its header at 0, its last
+/// section and kind, its numbers past `/Size`, every number listed and its
+/// cross-reference streams', its `/ID[0]`, its trailer and its reading.
+/// It refuses a file read by scanning, a trailer without `/Root`, and a
+/// reading as of an earlier revision, but not one as of its last.
+#[test]
+fn a_base_is_a_reading_s_file_as_its_last_section_says() {
+    let (file, updated, first) = and_updated();
+    let reading = open(&updated);
+    let base = write::Base::of(&reading).unwrap();
+    assert_eq!(base.len, updated.len());
+    assert!(base.ends_line);
+    assert_eq!(base.header, 0);
+    assert_eq!((base.prev, base.kind), newest(&reading));
+    assert!(base.prev > file.len());
+    assert_eq!(base.size, 14);
+    assert_eq!(base.first_id.as_deref(), Some(ID));
+    assert_eq!(base.trailer, *reading.trailer().dict());
+    assert_eq!(base.source, Some(reading.id()));
+
+    // Past every number listed, and a cross-reference stream's.
+    let small = fixture::assembled(
+        "1.7",
+        &[(1, b"<< /Type /Catalog >>"), (5, b"5")],
+        "<< /Size 2 /Root 1 0 R >>",
+    );
+    assert_eq!(write::Base::of(&open(&small)).unwrap().size, 6);
+    let stream = fixture::file(
+        "1.7",
+        &[(1, Body::from(dict! { "Type" => "Catalog" }))],
+        dict! { "Root" => (1, 0) },
+        Xref::Stream,
+    );
+    let reading = open(&stream);
+    assert_eq!(reading.facts().max_stream, Some(2));
+    assert_eq!(write::Base::of(&reading).unwrap().size, 3);
+    // A last line not ended.
+    let unended = [&small[..], b"%"].concat();
+    assert!(!write::Base::of(&open(&unended)).unwrap().ends_line);
+
+    // As of the last section, it's the file; as of the first, refused.
+    let as_of = |section| {
+        let mut options = Options::DEFAULT;
+        options.section = Some(section);
+        Reading::open(Arc::<[u8]>::from(&updated[..]), &options).unwrap()
+    };
+    let last = base.prev;
+    let mut whole = write::Base::of(&as_of(last)).unwrap();
+    whole.source = base.source;
+    assert_eq!(whole, base);
+    assert_eq!(write::Base::of(&as_of(first)), Err(Error::Earlier(first)));
+
+    // Bytes before its header, a space or a hundred: refused, whether the
+    // reader reads its sections or scans.
+    for before in [&b" "[..], &PREFIX[..]] {
+        let prefixed = [before, &updated[..]].concat();
+        let refused = write::Base::of(&open(&prefixed));
+        assert_eq!(refused, Err(Error::Prefixed(before.len())));
+    }
+    // Scanned, or with no catalog.
+    let scanned =
+        b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+    assert_eq!(write::Base::of(&open(scanned)), Err(Error::Unsound));
+    let rootless = fixture::assembled("1.7", &[(1, b"<< /Type /Catalog >>")], "<< /Size 2 >>");
+    assert_eq!(write::Base::of(&open(&rootless)), Err(Error::Rootless));
+}
+
+/// A base holds while its file is as long and ends in its last section:
+/// not once a byte is appended, nor another section; and the update's own
+/// base holds its file.
+#[test]
+fn a_base_holds_until_its_file_changes() {
+    let (file, updated, _) = and_updated();
+    let base = write::Base::of(&open(&file)).unwrap();
+    assert!(base.holds(&file[..]).unwrap());
+    assert!(!base.holds(&[&file[..], b"\n"].concat()[..]).unwrap());
+    assert!(!base.holds(&updated[..]).unwrap());
+    let after = write::Base::of(&open(&updated)).unwrap();
+    assert!(after.holds(&updated[..]).unwrap());
+    let mut moved = updated.clone();
+    let at = moved.windows(9).rposition(|w| w == b"startxref").unwrap() + 10;
+    moved[at] = if moved[at] == b'1' { b'2' } else { b'1' };
+    assert!(!after.holds(&moved[..]).unwrap());
+}
+
+/// A second update goes after the first as its `Written::base` says,
+/// without reading it again: the file has three sections, each object as
+/// its last section wrote it, and the base's reading kept.
+#[test]
+fn a_second_update_goes_after_the_first_s_written_base() {
+    let (plain, trailer) = plaintext();
+    let file = whole(&plain, &trailer, XrefKind::Stream, None);
+    let reading = open(&file);
+    let base = write::Base::of(&reading).unwrap();
+    let mut page = reading.get(PAGE).unwrap().clone();
+    page.as_dict_mut().unwrap().set("Rotate", 90);
+    let mut out = file.clone();
+    let options = write::Options::DEFAULT;
+    let given = [(PAGE, write::Body::from(&page))];
+    let first = write::update(&mut out, &base, given, None, None, &options)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.base.source, base.source);
+    assert!(first.base.holds(&out[..]).unwrap());
+    let info = Object::from(dict! { "Title" => lit(b"the second") });
+    let given = [((13, 0), write::Body::from(&info))];
+    let second = write::update(&mut out, &first.base, given, None, None, &options)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.base.source, base.source);
+    assert!(second.base.holds(&out[..]).unwrap());
+    let pdf = open(&out);
+    assert!(sound(&pdf), "{:?}", pdf.warnings());
+    assert_eq!(pdf.facts().sections, 3);
+    assert_eq!(newest(&pdf), (second.start, XrefKind::Stream));
+    assert_eq!(value(&pdf, (13, 0)), info);
+    assert_eq!(
+        value(&pdf, PAGE)
+            .as_dict()
+            .unwrap()
+            .get(b"Rotate")
+            .and_then(Object::as_integer),
+        Some(90)
+    );
+    // Its /ID[0] kept from the file's, each update's /ID[1] its own.
+    let ids = [first.id.clone().unwrap(), second.id.clone().unwrap()];
+    assert_eq!([&ids[0][0], &ids[1][0]], [ID, ID]);
+    assert_ne!(ids[0][1], ids[1][1]);
+}
+
+/// A write's positions count from where it starts in `out`: a whole file
+/// after other bytes is the same bytes as one alone, and says the same of
+/// where each object is; an update into an empty `out` is the bytes an
+/// update after the file in `out` appends.
+#[test]
+fn positions_count_from_where_the_write_starts_in_out() {
+    let (plain, trailer) = plaintext();
+    for kind in KINDS {
+        let options = options(kind, None);
+        let mut alone = Vec::new();
+        let written =
+            write::full(&mut alone, bodies(&plain), &trailer, None, None, &options).unwrap();
+        let mut after = b"other bytes, before the file\n".to_vec();
+        let before = after.len();
+        let again =
+            write::full(&mut after, bodies(&plain), &trailer, None, None, &options).unwrap();
+        assert_eq!(after[before..], alone[..], "{kind:?}");
+        assert_eq!(again, written, "{kind:?}");
+        assert_eq!(written.base.len, alone.len(), "{kind:?}");
+        assert!(written.base.holds(&alone[..]).unwrap(), "{kind:?}");
+
+        let mut page = plain[3].1.clone();
+        page.as_dict_mut().unwrap().set("Rotate", 90);
+        let given = || [(PAGE, write::Body::from(&page))];
+        let mut update = Vec::new();
+        let options = write::Options::DEFAULT;
+        let apart =
+            write::update(&mut update, &written.base, given(), None, None, &options).unwrap();
+        let mut file = alone.clone();
+        let appended =
+            write::update(&mut file, &written.base, given(), None, None, &options).unwrap();
+        assert_eq!(file[alone.len()..], update[..], "{kind:?}");
+        assert_eq!(apart, appended, "{kind:?}");
+        let pdf = open(&file);
+        assert!(sound(&pdf), "{kind:?}: {:?}", pdf.warnings());
+        assert_eq!(rewritten(&pdf), as_turned(), "{kind:?}");
+    }
+}
+
+/// An update's trailer carries its file's newest trailer's entries but
+/// its sections' own (ISO 32000-2, 7.5.6): `/Root`, `/Prev`, `/Info` and
+/// `/ID` first, then the rest in the file's order, then `/Size`.
+#[test]
+fn an_update_carries_its_file_s_trailer_entries() {
+    let (plain, mut trailer) = plaintext();
+    trailer.set("Custom", "Kept");
+    trailer.set("Other", 7);
+    for kind in KINDS {
+        let file = whole(&plain, &trailer, kind, None);
+        let reading = open(&file);
+        let base = write::Base::of(&reading).unwrap();
+        let mut out = file.clone();
+        let given = [(PAGE, write::Body::from(&plain[3].1))];
+        write::update(&mut out, &base, given, None, None, &write::Options::DEFAULT).unwrap();
+        let pdf = open(&out);
+        let keys: Vec<&[u8]> = pdf.trailer().dict().iter().map(|(k, _)| k).collect();
+        let want: &[&[u8]] = match kind {
+            XrefKind::Table => &[
+                b"Root", b"Prev", b"Info", b"ID", b"Custom", b"Other", b"Size",
+            ],
+            XrefKind::Stream => &[
+                b"Root", b"Prev", b"Info", b"ID", b"Custom", b"Other", b"Type", b"Size", b"W",
+                b"Index", b"Length",
+            ],
+        };
+        assert_eq!(keys, want, "{kind:?}");
+        let custom = pdf
+            .trailer()
+            .dict()
+            .get(b"Custom")
+            .and_then(Object::as_name);
+        assert_eq!(custom, Some(&b"Kept"[..]), "{kind:?}");
+    }
+}
+
+/// A stream whose data is where it was written takes it from the reading
+/// it was read in, at its own number: decrypted, and encrypted again as
+/// the write is. At another number, from a reading of another file, or
+/// with no reading, it's refused, and nothing is written.
+#[test]
+fn a_stream_s_data_where_it_was_written_is_its_own_reading_s_alone() {
+    let (plain, trailer) = plaintext();
+    let methods = methods();
+    let aes = &methods
+        .iter()
+        .find(|m| m.name == "AES-128")
+        .unwrap()
+        .encryptor;
+    let source = encrypted_by(aes, &plain, &trailer, XrefKind::Table);
+    let reading = opened(&source, "user");
+    let content = reading.get((3, 0)).unwrap().clone();
+    assert!(content.as_stream().unwrap().data.at().is_some());
+    let catalog = catalog();
+    let root = dict! { "Root" => (1, 0) };
+    let given = |at: u32| {
+        [
+            ((1, 0), write::Body::from(&catalog)),
+            ((at, 0), write::Body::from(&content)),
+        ]
+    };
+    let options = write::Options::DEFAULT;
+    for encryptor in [None, Encryptor::of(&reading).unwrap()] {
+        let mut out = Vec::new();
+        write::full(
+            &mut out,
+            given(3),
+            &root,
+            encryptor.as_ref(),
+            Some(&reading),
+            &options,
+        )
+        .unwrap();
+        let back = read_back(&out, encryptor.is_some());
+        assert_eq!(back.data((3, 0)).unwrap().as_ref(), CONTENT);
+        assert_eq!(holds(&out, CONTENT), encryptor.is_none());
+    }
+    let other = whole(&plain, &trailer, XrefKind::Stream, None);
+    let other = open(&other);
+    let refusals: [(u32, Option<&dyn write::ReadFrom>); 3] =
+        [(20, Some(&reading)), (3, Some(&other)), (3, None)];
+    for (at, from) in refusals {
+        let mut out = b"held".to_vec();
+        let refused = write::full(&mut out, given(at), &root, None, from, &options);
+        assert_eq!(refused, Err(Error::Placed((at, 0))));
+        assert_eq!(out, b"held");
+    }
+}
+
+/// A document built in memory is written whole, its objects at their
+/// numbers, read back as built; with no `/ID`, as it had none.
+#[test]
+fn a_built_document_is_written_whole() {
+    let mut doc = crate::Document::new(pdf_objects::version::Version::new(2, 0), Dict::new());
+    let content = doc.add(Stream::new(dict! {}, b"0 0 m 9 9 l S".to_vec()));
+    let pages = doc.new_id();
+    let page = doc.add(dict! { "Type" => "Page", "Parent" => pages, "Contents" => content });
+    doc.set(
+        pages,
+        dict! { "Type" => "Pages", "Kids" => vec![Object::from(page)], "Count" => 1 },
+    );
+    let catalog = doc.add(dict! { "Type" => "Catalog", "Pages" => pages });
+    doc.trailer.dict_mut().set("Root", catalog);
+    let mut options = write::Options::DEFAULT;
+    options.version = pdf_objects::version::Version::new(2, 0);
+    let mut out = Vec::new();
+    let written = write::document(&mut out, &doc, None, None, &options).unwrap();
+    assert!(out.starts_with(b"%PDF-2.0\n"));
+    assert_eq!(written.id, None);
+    let pdf = open(&out);
+    assert!(sound(&pdf), "{:?}", pdf.warnings());
+    for (id, obj) in doc.objects() {
+        assert_eq!(handed(&pdf, id), unplaced(obj), "{id:?}");
+    }
+    assert!(!pdf.trailer().dict().has(b"ID"));
+}
+
+/// Every refusal of a whole file's and an update's writes nothing: `out`
+/// is as it was, whatever the write had written before it refused.
+#[test]
+fn every_refusal_writes_nothing() {
+    use std::sync::atomic::AtomicBool;
+
+    let (plain, trailer) = plaintext();
+    let methods = methods();
+    let by_name = |name| &methods.iter().find(|m| m.name == name).unwrap().encryptor;
+    let catalog = catalog();
+    let nan = Object::from(dict! { "N" => f64::NAN });
+    let unknown = Object::from(Stream::new(
+        dict! {
+            "Filter" => vec![Object::from("Crypt")],
+            "DecodeParms" => vec![Object::from(dict! { "Type" => "CryptFilterDecodeParms", "Name" => "Nonesuch" })],
+        },
+        b"data".to_vec(),
+    ));
+    fn at(n: u32, o: &Object) -> (ObjectId, write::Body<'_>) {
+        ((n, 0), write::Body::from(o))
+    }
+    let stop = AtomicBool::new(true);
+    let mut stopped = write::Options::DEFAULT;
+    stopped.stop = Some(&stop);
+    let not_packed = |_: &[u32]| vec![vec![1, 99]];
+    let twice = |n: &[u32]| vec![n.to_vec(), n.to_vec()];
+    fn packed<'g>(groups: &'g write::Groups<'g>) -> write::Options<'g> {
+        let mut pack = write::Pack::DEFAULT;
+        pack.groups = Some(groups);
+        options(XrefKind::Stream, Some(pack))
+    }
+    let mut encrypt_at = write::Options::DEFAULT;
+    encrypt_at.encrypt_at = Some((1, 0));
+    /// A whole file's bodies, encryptor, options, and the refusal.
+    type Whole<'a> = (
+        Vec<(ObjectId, write::Body<'a>)>,
+        Option<&'a Encryptor>,
+        write::Options<'a>,
+        Error,
+    );
+    let wholes: Vec<Whole<'_>> = vec![
+        (
+            vec![at(0, &catalog)],
+            None,
+            write::Options::DEFAULT,
+            Error::Number(0),
+        ),
+        (
+            vec![at(write::NUMBERS, &catalog)],
+            None,
+            write::Options::DEFAULT,
+            Error::Number(write::NUMBERS),
+        ),
+        (
+            vec![at(1, &catalog), ((1, 1), write::Body::from(&catalog))],
+            None,
+            write::Options::DEFAULT,
+            Error::Twice(1),
+        ),
+        (
+            vec![at(1, &catalog)],
+            Some(by_name("AES-256 created")),
+            encrypt_at,
+            Error::EncryptAt(1),
+        ),
+        (
+            vec![at(1, &catalog)],
+            None,
+            options(XrefKind::Table, Some(write::Pack::DEFAULT)),
+            Error::PackedTable,
+        ),
+        (
+            vec![at(1, &catalog)],
+            None,
+            packed(&not_packed),
+            Error::Group(99),
+        ),
+        (vec![at(1, &catalog)], None, packed(&twice), Error::Group(1)),
+        (vec![at(1, &catalog)], None, stopped, Error::Stopped),
+        (
+            vec![at(1, &catalog), at(2, &nan)],
+            None,
+            write::Options::DEFAULT,
+            Error::Serialize(serialize::Error::NonFinite { id: Some((2, 0)) }),
+        ),
+        (
+            vec![at(1, &catalog), at(2, &nan)],
+            None,
+            packed(&|n: &[u32]| vec![n.to_vec()]),
+            Error::Serialize(serialize::Error::NonFinite { id: Some((2, 0)) }),
+        ),
+        (
+            vec![at(1, &catalog), at(2, &unknown)],
+            Some(by_name("AES-128")),
+            write::Options::DEFAULT,
+            Error::Encrypt {
+                id: (2, 0),
+                why: Unencryptable::Fault(Fault::Method {
+                    name: "Nonesuch".to_string(),
+                }),
+            },
+        ),
+        (
+            vec![at(1, &catalog)],
+            Some(by_name("metadata in the clear")),
+            write::Options::DEFAULT,
+            Error::Catalog((12, 0)),
+        ),
+    ];
+    for (given, encryptor, options, want) in wholes {
+        let mut out = b"held".to_vec();
+        let refused = write::full(&mut out, given, &trailer, encryptor, None, &options);
+        assert_eq!(refused, Err(want.clone()), "{want}");
+        assert_eq!(out, b"held", "{want}");
+    }
+
+    let file = whole(&plain, &trailer, XrefKind::Table, None);
+    let reading = open(&file);
+    let base = write::Base::of(&reading).unwrap();
+    let rootless = write::Base::new(
+        file.len(),
+        base.prev,
+        base.size,
+        XrefKind::Table,
+        Dict::new(),
+    );
+    let source = encrypted_by(by_name("AES-128"), &plain, &trailer, XrefKind::Table);
+    let encrypted = write::Base::of(&opened(&source, "user")).unwrap();
+    let aes = Encryptor::of(&opened(&source, "user")).unwrap();
+    let mut last = base.clone();
+    last.kind = XrefKind::Stream;
+    last.size = write::NUMBERS;
+    let page = &plain[3].1;
+    let updates: Vec<(&write::Base, Option<&Encryptor>, write::Options<'_>, Error)> = vec![
+        (&rootless, None, write::Options::DEFAULT, Error::Rootless),
+        (&encrypted, None, write::Options::DEFAULT, Error::Unmatched),
+        (
+            &base,
+            aes.as_ref(),
+            write::Options::DEFAULT,
+            Error::Unmatched,
+        ),
+        (
+            &encrypted,
+            Some(by_name("AES-256 created")),
+            write::Options::DEFAULT,
+            Error::Unmatched,
+        ),
+        (
+            &last,
+            None,
+            write::Options::DEFAULT,
+            Error::NoNumber(write::NUMBERS),
+        ),
+        (&base, None, stopped, Error::Stopped),
+    ];
+    for (base, encryptor, options, want) in updates {
+        let mut out = file.clone();
+        let given = [(PAGE, write::Body::from(page))];
+        let refused = write::update(&mut out, base, given, encryptor, None, &options);
+        assert_eq!(refused, Err(want.clone()), "{want}");
+        assert_eq!(out, file, "{want}");
+    }
+}
+
+/// What an encryption dictionary refers to is read before a reader has a
+/// key, so a packed write leaves it out of its object streams, which are
+/// encrypted: here `/CF`, a reference to object 41.
+#[test]
+fn an_encryption_dictionary_s_objects_stay_out_of_object_streams() {
+    let mut dict = dictionary_of(Kind::Aes128, true);
+    let filters = dict.remove(b"CF").unwrap();
+    dict.set("CF", Object::reference(41));
+    let id = Object::hex(ID);
+    let trailer = dict! { "Root" => Object::reference(1), "ID" => vec![id.clone(), id] };
+    // Objects 1, 40 and 41, listed in runs, so that none is listed free.
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut at = Vec::new();
+    let objects = [
+        (1, catalog()),
+        (ENCRYPT, Object::from(dict)),
+        (41, filters.clone()),
+    ];
+    for (num, obj) in &objects {
+        at.push(serialize::indirect(&mut out, (*num, 0), obj).unwrap());
+    }
+    let mut source_trailer = trailer.clone();
+    source_trailer.set("Encrypt", Object::reference(ENCRYPT));
+    source_trailer.set("Size", 42);
+    let xref = out.len();
+    let table = format!(
+        "xref\n0 2\n0000000000 65535 f \n{:010} 00000 n \n40 2\n{:010} 00000 n \n{:010} 00000 n \ntrailer\n",
+        at[0], at[1], at[2]
+    );
+    out.extend_from_slice(table.as_bytes());
+    serialize::write(&mut out, &Object::from(source_trailer)).unwrap();
+    out.extend_from_slice(format!("\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    let encryptor = encryptor_of(&out);
+    assert!(encryptor.dictionary_object((41, 0)));
+
+    let (mut plain, trailer) = plaintext();
+    plain.push((41, filters));
+    let bytes = whole_packed(&plain, &trailer, Some(&encryptor), None);
+    let pdf = opened(&bytes, "user");
+    assert!(matches!(pdf.encryption(), Encryption::Opened { .. }));
+    assert!(sound(&pdf), "{:?}", pdf.warnings());
+    let xref = pdf.facts().max_stream.unwrap();
+    let (_, _, got) = rows(&pdf, (xref, 0));
+    assert_eq!(got[41][0], 1, "on its own");
+    assert_eq!(got[13][0], 2, "the Info dictionary is packed");
+    assert_reads_to(&plain, &bytes, true, "/CF by reference");
+}
+
+/// A file whose earlier revision named another encryption dictionary, an
+/// object the reader leaves in the clear as one, written whole: the file
+/// written has one section, whose `/Encrypt` is the newest's alone, so the
+/// earlier one is written encrypted, as any object is, and reads back as
+/// it was; updated, it stays in the clear, as its file names it still.
+#[test]
+fn an_earlier_revision_s_encryption_dictionary_is_written_whole_as_any_object() {
+    let dict = dictionary_of(Kind::Aes128, true);
+    let mut file = source(dict.clone(), false);
+    let earlier = open(&file);
+    let base = write::Base::of(&earlier).unwrap();
+    // An update that names the same dictionary, again, as object 41.
+    let mut section = Section::append(base.size, 0);
+    let pos = serialize::indirect(&mut file, (41, 0), &Object::from(dict)).unwrap();
+    section.insert(41, Entry::InUse { pos, generation: 0 });
+    let mut trailer = base.trailer.clone();
+    trailer.set("Prev", base.prev as i64);
+    trailer.set("Encrypt", Object::reference(41));
+    let pos = file.len();
+    section.table(&mut file, trailer, pos).unwrap();
+
+    let reading = opened(&file, "user");
+    assert!(matches!(reading.encryption(), Encryption::Opened { .. }));
+    let was = value(&reading, (ENCRYPT, 0));
+    let doc = reading.to_document().unwrap();
+    let encryptor = Encryptor::of(&reading).unwrap();
+    assert_eq!(encryptor.as_ref().and_then(Encryptor::at), Some((41, 0)));
+    let mut whole = Vec::new();
+    let options = write::Options::DEFAULT;
+    write::document(
+        &mut whole,
+        &doc,
+        encryptor.as_ref(),
+        Some(&reading),
+        &options,
+    )
+    .unwrap();
+    let back = opened(&whole, "user");
+    assert!(sound(&back), "{:?}", back.warnings());
+    assert_eq!(
+        value(&back, (ENCRYPT, 0)),
+        was,
+        "the earlier dictionary as it was"
+    );
+    // Its strings encrypted: what was in the clear isn't, as written.
+    let o = |pdf: &Reading<Arc<[u8]>>| {
+        pdf.get((ENCRYPT, 0))
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"O")
+            .cloned()
+    };
+    let written = |bytes: &[u8]| {
+        let locked = open(bytes);
+        o(&locked).and_then(|o| match o.into_value() {
+            Value::String(Str::Encrypted(bytes) | Str::Bytes(bytes), _) => Some(bytes),
+            _ => None,
+        })
+    };
+    assert_ne!(written(&whole), written(&file));
+
+    // An update after the file keeps naming it, so leaves it in the clear.
+    let base = write::Base::of(&reading).unwrap();
+    let mut updated = file.clone();
+    let given = [((ENCRYPT, 0), write::Body::from(&was))];
+    write::update(
+        &mut updated,
+        &base,
+        given,
+        encryptor.as_ref(),
+        None,
+        &options,
+    )
+    .unwrap();
+    let back = opened(&updated, "user");
+    assert_eq!(value(&back, (ENCRYPT, 0)), was);
+    let mut clear = Vec::new();
+    serialize::indirect(&mut clear, (ENCRYPT, 0), &was).unwrap();
+    assert!(holds(&updated[file.len()..], &clear), "written as it is");
+}
+
+/// A file whose trailer's `/Encrypt` is null isn't encrypted (ISO 32000-2,
+/// 7.3.9: a null is no entry), so an update after it is written with no
+/// encryption, and none is said of it.
+#[test]
+fn an_update_after_a_null_encrypt_is_unencrypted() {
+    let (plain, mut trailer) = plaintext();
+    trailer.set("Encrypt", Object::null());
+    let file = whole(&plain, &trailer, XrefKind::Table, None);
+    let mut nulled = file.clone();
+    // The writer leaves /Encrypt out; a writer that doesn't writes it null.
+    let at = (nulled.windows(8).rposition(|w| w == b"trailer\n")).unwrap() + 8;
+    nulled.splice(at + 2..at + 2, b"/Encrypt null".iter().copied());
+    let reading = open(&nulled);
+    assert_eq!(reading.encryption(), &Encryption::None);
+    assert!(
+        reading
+            .trailer()
+            .dict()
+            .get(b"Encrypt")
+            .is_some_and(Object::is_null)
+    );
+    let base = write::Base::of(&reading).unwrap();
+    let mut out = nulled.clone();
+    let given = [(PAGE, write::Body::from(&plain[3].1))];
+    write::update(&mut out, &base, given, None, None, &write::Options::DEFAULT).unwrap();
+    let back = open(&out);
+    assert!(sound(&back), "{:?}", back.warnings());
+    assert!(!back.trailer().dict().has(b"Encrypt"));
+}
+
+/// A reference to an object that isn't there reads as null (ISO 32000-2,
+/// 7.3.10), and stays so: the writer's own objects (the object streams,
+/// the cross-reference stream, a new encryption dictionary) pass over the
+/// numbers what it writes refers to and doesn't hold, a trailer's
+/// reference among them, which would otherwise come to name the
+/// cross-reference stream itself.
+#[test]
+fn a_reference_to_no_object_names_none_of_the_writer_s_own() {
+    use chacha20::ChaCha20Rng;
+
+    let mut objects = numbered();
+    let gone = vec![Object::reference(260), Object::reference(261)];
+    objects[4].1.as_dict_mut().unwrap().set("Gone", gone);
+    let trailer = dict! { "Root" => (1, 0), "Missing" => Object::reference(262) };
+    let bytes = whole_packed(&objects, &trailer, None, None);
+    let pdf = open(&bytes);
+    assert!(sound(&pdf), "{:?}", pdf.warnings());
+    assert_eq!(object_streams_of(&pdf), [(263, 0), (264, 0), (265, 0)]);
+    assert_eq!(pdf.facts().max_stream, Some(266));
+    for n in 260..263 {
+        assert!(pdf.get((n, 0)).is_err(), "{n} is no object");
+    }
+    // A new encryption's dictionary, past every object, passes over them
+    // too.
+    let mut rng = ChaCha20Rng::seed_from_u64(11);
+    let prepared = Password("user").prepared().unwrap();
+    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let mut out = Vec::new();
+    let options = write::Options::DEFAULT;
+    write::full(
+        &mut out,
+        bodies(&objects),
+        &trailer,
+        Some(&created),
+        None,
+        &options,
+    )
+    .unwrap();
+    let pdf = opened(&out, "user");
+    let encrypt = pdf
+        .trailer()
+        .dict()
+        .get(b"Encrypt")
+        .and_then(Object::as_reference);
+    assert_eq!(encrypt, Some((263, 0)));
+    // And an update's cross-reference stream.
+    let file = whole(&objects, &trailer, XrefKind::Stream, None);
+    let reading = open(&file);
+    let base = write::Base::of(&reading).unwrap();
+    assert_eq!(base.size, 264);
+    let mut catalog = objects[0].1.clone();
+    catalog
+        .as_dict_mut()
+        .unwrap()
+        .set("Later", Object::reference(264));
+    let mut updated = file.clone();
+    let given = [((1, 0), write::Body::from(&catalog))];
+    let written = write::update(&mut updated, &base, given, None, None, &options)
+        .unwrap()
+        .unwrap();
+    assert!(
+        written.section.get(265).is_some(),
+        "past 264, which the catalog names"
+    );
+    let pdf = open(&updated);
+    assert!(sound(&pdf), "{:?}", pdf.warnings());
+    assert!(pdf.get((264, 0)).is_err());
 }

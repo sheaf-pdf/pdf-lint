@@ -1,6 +1,6 @@
 # pdf-structure
 
-PDF's file structure, read, in one Rust crate on [pdf-objects](https://crates.io/crates/pdf-objects): a file's header, its cross-reference tables and streams along their `/Prev` chain, and each object at the offset they give, every value, key and stream's data with where it was written (ISO 32000-2, §7.5); and what's read, a document, which a caller can build in memory too, to number new objects in, edit, walk and prune. And it writes what a file's structure is written in: cross-reference sections, as tables and streams, and object streams; and an encrypted file's objects, encrypted as they're written, by the list of what's left in the clear that its reader decrypts by. Object streams and cross-reference streams are decoded through [pdf-filters](https://crates.io/crates/pdf-filters), and an encrypted file is opened through [pdf-crypt](https://crates.io/crates/pdf-crypt).
+PDF's file structure, read, in one Rust crate on [pdf-objects](https://crates.io/crates/pdf-objects): a file's header, its cross-reference tables and streams along their `/Prev` chain, and each object at the offset they give, every value, key and stream's data with where it was written (ISO 32000-2, §7.5); and what's read, a document, which a caller can build in memory too, to number new objects in, edit, walk and prune. And it writes a file of numbered objects, whole or as an incremental update after the file it was read from, and what a file's structure is written in: cross-reference sections, as tables and streams, and object streams; an encrypted file's objects encrypted as they're written, by the list of what's left in the clear that its reader decrypts by. Object streams and cross-reference streams are decoded through [pdf-filters](https://crates.io/crates/pdf-filters), and an encrypted file is opened through [pdf-crypt](https://crates.io/crates/pdf-crypt).
 
 It's made for a reader that checks files as much as for one that shows them. Where a file isn't as the spec writes it, it's read as far as a reader can take it, and every choice the reader made is said, with where.
 
@@ -17,7 +17,7 @@ It's made for a reader that checks files as much as for one that shows them. Whe
 - **Streams decoded.** Cross-reference streams and object streams are decoded from their own data, through pdf-filters: ASCIIHex, ASCII85, LZW, Flate and RunLength, with their predictors, Flate inflated by the backend `Options::flate` names (miniz_oxide by default; zlib-rs with this crate's `zlib-rs` feature). Their `/Filter` and `/DecodeParms` are read as qpdf reads them: the abbreviations `/Fl`, `/AHx`, `/A85`, `/LZW` and `/RL` on any stream, `/Crypt` as no filter (decrypting comes before the filters, by its `/Name`), a parameters dictionary that isn't in an array every filter's, a reference to no object as null. A filter it doesn't decode, or parameters it doesn't take, leave the stream undecoded, saying why; data a fault stopped is read as far as it decoded, each fault a warning on the stream. The objects read from an object stream are placed in its decoded data (`Span::stream`), which the `Document` keeps.
 - **Encrypted files opened** (`Reading::open_with`, `bytes::read_opened`) with the passwords given, each a `Password` as typed, tried in each of its encodings, as the owner's and then the user's, every password's that fit the file's revision before any password's others (pdf-crypt's `Password::encodings` and `Handler::open`), in the empty password's place: given none, the empty password, and a wrong one leaves the file locked, or plain where its strings and streams aren't encrypted, as no password would. A reading opened by the empty password (`Reading::open`) and left locked is opened by another once it's open (`Reading::unlock`, with the `Encoded` bytes to try), without reading the file again: what it read is dropped, to be read again decrypted, and a password that doesn't open it gives it back as it was, with why. Through pdf-crypt's standard security handler, revisions 2 to 6: object streams decrypted before they're decoded, and strings decrypted where they are, their bytes exact, but a signature's `/Contents` and the encryption dictionary's. A string or stream that doesn't decrypt cleanly is a warning. `Document::encryption` says whether the file is encrypted, and whether it opened, by the owner's password or the user's, and which of those given in which encoding (`by`), is locked, or has a handler the reader can't open, and why; or reads whole all the same, as its strings and streams aren't encrypted (`/Identity`). `bytes::read` opens a file with the empty password. pdf-crypt is re-exported (`pdf_crypt`), and its `Password`, `Encoded` and `Encoding` at the root. What it decrypts and what it leaves as written is listed in `bytes`' documentation, "What's encrypted", each with the clause of ISO 32000-2 that says so and the tests that hold it.
 - **A revision before an update** (`bytes::read_from`): the file as of a cross-reference section, along its `/Prev` chain as if it were the newest, so that what later updates wrote isn't in it.
-- **Sections and object streams written** (`write`): a whole file's cross-reference section or an update's, as a table or a stream, and object streams of the objects that may go in one, for a caller laying a file out; below, "Writing".
+- **Whole files and updates written** (`write`): a document's objects, or any numbered objects, as a whole file (`write::full`, `write::document`) or as an incremental update after the file they were read from (`write::update`), encrypted as that file is or under a new encryption, or decrypted; and the parts a file is laid out in, cross-reference sections and object streams, for a caller laying a file out itself; below, "Writing".
 - **Limits, one value a caller sets** (`Limits`, in a reading's `Options`): by default, a stream decodes to at most 256 MiB (`bytes::STREAM`), and the streams of a reading of a file to 1 GiB in all (`bytes::BUDGET`); at most 1,024 sections along `/Prev` (`bytes::SECTIONS`); no more cross-reference entries than the file has bytes, or 2²⁰ if that's more; and pdf-objects' limits on each object, values nested 256 deep (`bytes::NESTING`) and 2²⁵ values in one. A caller sets them on a copy of `Limits::DEFAULT`, as it does `Options`', which also say as of which section a file is read, and which Flate backend its streams inflate on (`Options::flate`). They're the same in every build.
 - **Typed errors.** Why an object doesn't read is an `Unread`: it isn't in the file, doesn't parse (pdf-objects' error), or isn't the object at its offset; or the object stream it's in doesn't decode (`bytes::Undecoded`, its filters `bytes::Unfiltered`), needs a password, or doesn't say where the object is (`bytes::Unindexed`); or, from another reader, that reader's words (`Unread::Other`). Each says why as text too. A reading's call fails with a `bytes::Error` (`Error` at the root), which may hold pdf-filters' error, re-exported as `pdf_filters`, or pdf-crypt's. What a reader says of the file it read stays text, as any reader fills it: why the trailer isn't the newest section's (`Trailer::unwritten`), why a security handler doesn't open (`Encryption::Unsupported`), and each warning.
 - **A `Source`,** the trait a reader of a file implements, which `Document` does: its objects by number, its trailer, header version and warnings, and what a reader may know besides, the file's size and the catalog's metadata when it's in plain view. A `Document` and a `Reading`, by reference, are pdf-objects' `Resolve` too, which what follows references reads through, across threads too: a reference resolves to its object, read and kept as `get` keeps it, or to none, null, where the file hasn't it, it doesn't read, or the source fails the read, without saying why.
@@ -149,7 +149,64 @@ assert_eq!(doc.trailer.unwritten.as_deref(), Some("no startxref"));
 
 ## Writing
 
-`write` writes what a file's structure is written in, for a caller that lays the file out: its objects are written by pdf-objects' writer (`serialize::indirect`), each where the output has got to, and a `Section` lists each at that position. A whole file's section (`Section::full`) is one subsection from 0, every number it doesn't list written free, the free entries linked in a list from entry 0, each at the generation its number is to be used at next (ISO 32000-2, §7.5.4); an update's (`Section::append`) lists only what it's given, in runs (§7.5.6). Either is written as a table (`Section::table`), which refuses an object in an object stream and an offset past ten digits, or as a stream (`Section::stream`), its `/W` as narrow as its widest field, a whole file's deflated under PNG's Up predictor, as qpdf writes its own; `Section::get` gives back what it lists each number as. Positions are counted from the header, as PDFium, pdf.js and qpdf read them, past any bytes before `%PDF-`, where ISO 32000-2 counts them from the file's start (§7.5.4), as this crate's reader does: the two differ only for an update of a file with bytes before its header, whose sections this reader reads only by scanning.
+`write` writes numbered objects as a whole file (`write::full`), a document's objects among them (`write::document`, but object streams, cross-reference streams and a linearization dictionary, which it writes anew or would no longer hold), or as an incremental update after a file (`write::update`), at the end of a caller's `Vec<u8>`, positions counted from where the write starts in it. A whole file is the header, each object at its number in the order given, the encryption dictionary, and one cross-reference section, a table or a stream (`write::Options`, set on a copy of `Options::DEFAULT`); asked to (`Options::pack`), what may go in an object stream goes in one, grouped as the caller says (`Pack::groups`) or by number, a hundred each, numbered from the numbers the caller gives first (`Pack::reuse`), built on threads, the same bytes on any number. Its trailer is the caller's but for the keys a section writes itself, and its `/ID` keeps its first string and makes the second XXH3-128 of what it wrote (through twox-hash), so the same objects write the same bytes. An update goes after a file as a `Base` describes it, a reading's (`Base::of`, refused for a file with bytes before its header, whose positions this reader counts from the file's start and PDFium, pdf.js and qpdf from the header, a file read by scanning, one without `/Root`, or a reading as of an earlier revision) or one the caller describes (`Base::new`, its fields set after, a header past bytes before `%PDF-` among them): each object at its number, then a section of the file's kind listing only those, its `/Prev` the file's last section, its trailer the file's newest trailer's entries carried (ISO 32000-2, §7.5.6). Each write gives back what it wrote (`Written`): where each object landed, and the file as it now is, so a second update goes after it without reading it again, and `Base::holds` tells whether a file is still the one a base describes. A stream whose data is where the reader read it (`Data::At`) has it read from the reading given (`&dyn ReadFrom`, a `Reading`), only at its own number there, decrypted and encrypted again as the write is. Under an encryptor, each object is encrypted under the number it's written at, an object stream whole; an update is encrypted as its file is, by that file's encryptor, and refuses another. Where the file's keys are made per object (RC4, AES-128), an object at a number it lists free is refused, as its key would be a deleted object's. What's refused writes nothing (`write::Error`): a number 0 or past `NUMBERS`, or given twice, among it, and a write a flag stops (`Options::stop`). A trailer isn't encrypted (§7.6.2): its values are written as they are, a direct `/Info` dictionary's strings in the clear in an encrypted file, as in the file it was read from.
+
+```rust
+use pdf_structure::pdf_objects::{Object, dict};
+use pdf_structure::write::{self, Base, Body, Pack, ReadFrom};
+use pdf_structure::{Options, Reading, Source, XrefKind};
+
+let file = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
+    xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+    trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n45\n%%EOF\n";
+let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+let from: &dyn ReadFrom = &reading;
+let mut doc = reading.to_document().unwrap();
+doc.catalog_mut().unwrap().set("Lang", Object::string("en"));
+let lang = |reading: &Reading<&[u8]>| {
+    let catalog = reading.get((1, 0)).unwrap().as_dict().unwrap();
+    catalog.get(b"Lang").and_then(Object::as_bytes).map(<[u8]>::to_vec)
+};
+
+// Whole, with a cross-reference stream, what may go in an object stream
+// in one.
+let mut options = write::Options::DEFAULT;
+options.kind = XrefKind::Stream;
+options.pack = Some(Pack::DEFAULT);
+let mut whole = Vec::new();
+write::document(&mut whole, &doc, None, Some(from), &options).unwrap();
+let back = Reading::open(&whole[..], &Options::DEFAULT).unwrap();
+assert!(back.warnings().is_empty());
+assert_eq!(lang(&back).as_deref(), Some(&b"en"[..]));
+
+// As an update after the file: its catalog alone, after its last section.
+let base = Base::of(&reading).unwrap();
+let catalog = [((1, 0), Body::from(doc.get((1, 0)).unwrap()))];
+let mut updated = file.to_vec();
+let defaults = write::Options::DEFAULT;
+let written = write::update(&mut updated, &base, catalog, None, Some(from), &defaults)
+    .unwrap()
+    .unwrap();
+let back = Reading::open(&updated[..], &Options::DEFAULT).unwrap();
+assert_eq!(back.facts().sections, 2);
+assert_eq!(lang(&back).as_deref(), Some(&b"en"[..]));
+assert!(written.base.holds(&updated[..]).unwrap());
+
+// A second, after the file as a caller read it otherwise: its length, its
+// last section and kind, its next number and its trailer.
+let trailer = written.base.trailer.clone();
+let (len, size) = (updated.len(), written.size);
+let mut read = Base::new(len, written.start, size, XrefKind::Table, trailer);
+read.ends_line = true;
+let again = Object::from(dict! { "Type" => "Catalog", "Lang" => Object::string("fr") });
+let catalog = [((1, 0), Body::from(&again))];
+write::update(&mut updated, &read, catalog, None, None, &defaults).unwrap();
+let back = Reading::open(&updated[..], &Options::DEFAULT).unwrap();
+assert_eq!(back.facts().sections, 3);
+assert_eq!(lang(&back).as_deref(), Some(&b"fr"[..]));
+```
+
+For a caller that lays the file out itself, `write` writes what a file's structure is written in: its objects are written by pdf-objects' writer (`serialize::indirect`), each where the output has got to, and a `Section` lists each at that position. A whole file's section (`Section::full`) is one subsection from 0, every number it doesn't list written free, the free entries linked in a list from entry 0, each at the generation its number is to be used at next (ISO 32000-2, §7.5.4); an update's (`Section::append`) lists only what it's given, in runs (§7.5.6). Either is written as a table (`Section::table`), which refuses an object in an object stream and an offset past ten digits, or as a stream (`Section::stream`), its `/W` as narrow as its widest field, a whole file's deflated under PNG's Up predictor, as qpdf writes its own; `Section::get` gives back what it lists each number as. Positions are counted from the header, as PDFium, pdf.js and qpdf read them, past any bytes before `%PDF-`, where ISO 32000-2 counts them from the file's start (§7.5.4), as this crate's reader does: the two differ only for an update of a file with bytes before its header, whose sections this reader reads only by scanning.
 
 `packable` says whether an object may go in an object stream (§7.5.7): not a stream, an object whose generation isn't 0, an encryption dictionary, the linearization dictionary, or a signature dictionary, so that a signing tool finds it where it looks. `container` makes an object stream of objects written direct, a header saying where each starts, deflated; none where its data would be past what the reader decodes a stream to (`MAX_DATA`, 256 MiB, `Limits::stream`'s default). A section lists each object in it as `Entry::Packed`, which only a stream can. Both deflate through pdf-filters, by the backend and at the level a `Deflate` says: by default (`Deflate::DEFAULT`) miniz_oxide at 6, which every build has; zlib-rs with the `zlib-rs` feature. A written file's objects are numbered below `NUMBERS`, 8,388,607, the most a file may hold (ISO 32000-1, Annex C), which the caller keeps to. What can't be written is refused, and nothing is written (`write::Error`): a value pdf-objects' writer refuses among it.
 
@@ -193,7 +250,8 @@ An encrypted file's objects are encrypted as they're written. An `Encryptor` is 
 
 ## What isn't here
 
-- **A whole file, or an update, written from a document's objects.** `write` writes the parts a file is laid out in, at the positions the caller gives, and encrypts each object as its file is; laying a document's objects out whole, or as an update after the file it was read from, is the caller's.
+- **Which objects, and at which numbers.** `write` writes what it's given at the numbers it's given; which of a document's objects to write, what to renumber, and an object nothing changed copied as the bytes it was read from, are a caller's.
+- **A durable write, or an append in place.** `write` writes into a `Vec<u8>`; writing it to a file, replacing one whole or appending to it, and keeping another writer from changing it meanwhile (`Base::holds` says whether a file is still the one a base describes), are the caller's.
 - **Warnings turned off, or typed.** Each warning is text (`Warning::message`), made as the reader meets what it says and kept with the object it's in for as long as the reading is; a clean object costs nothing, but a caller can't turn them off.
 - **Files for tests, and qpdf.** The `fixtures` feature writes files from objects, and runs qpdf (the program `PDF_LINT_QPDF` names, else `qpdf` on the `PATH`) as a second reader, hidden from the docs: for this workspace's tests and fuzz targets, not for a user. A stream qpdf decodes alone is handed to it in a file of its own, which tempfile makes in the temp folder and removes after. Without it, nothing runs a program, reads `PDF_LINT_QPDF` or writes a file.
 

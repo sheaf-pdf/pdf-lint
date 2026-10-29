@@ -36,3 +36,26 @@ opt-level = 3
 
 [profile.dev.package.sha2]
 opt-level = 3
+
+# The writer's tests write and read back whole files of millions of
+# cross-reference rows, and an object stream's worth of one string, 256
+# MiB: pdf-filters and the Flate under it built optimized, and the
+# parser, the tokenizer and pdf-structure lightly, so that they take
+# seconds, not a minute. Debug assertions and overflow checks stay on.
+[profile.dev.package.pdf-filters]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.dev.package.adler2]
+opt-level = 3
+
+[profile.dev.package.pdf-tokenizer]
+opt-level = 1
+
+[profile.dev.package.pdf-objects]
+opt-level = 1
+
+[profile.dev.package.pdf-structure]
+opt-level = 1

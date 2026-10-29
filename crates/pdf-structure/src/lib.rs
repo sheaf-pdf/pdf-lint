@@ -5,7 +5,8 @@
 //! where it was written. Where the sections don't read, it finds the
 //! objects by scanning the file, and says so. What it reads is a
 //! document, which a caller can build in memory too, to number new
-//! objects in, edit, walk and prune. And it writes what a file's structure
+//! objects in, edit, walk and prune. And it writes a file of numbered
+//! objects, whole or as an incremental update, and what a file's structure
 //! is written in: cross-reference sections, and object streams, an
 //! encrypted file's objects encrypted as they're written.
 //!
@@ -46,6 +47,12 @@
 //!   What's decrypted and what's left as written is listed in [`bytes`].
 //! - **A revision before an update** read as the file was then
 //!   ([`bytes::read_from`]).
+//! - **Whole files and updates written** ([`write::full`],
+//!   [`write::document`], [`write::update`]): numbered objects, a
+//!   document's among them, as a whole file, its objects in object streams
+//!   built on threads where it's asked, or as an incremental update after
+//!   the file they were read from, its trailer carried; what each wrote
+//!   given back ([`write::Written`]), for an update after it.
 //! - **Sections and object streams written** ([`write`](mod@write)): a
 //!   whole file's cross-reference section or an update's, as a table or a
 //!   stream, a whole file's stream deflated under PNG's Up predictor; and

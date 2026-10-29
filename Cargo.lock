@@ -363,6 +363,7 @@ dependencies = [
  "same-file",
  "tempfile",
  "thiserror",
+ "twox-hash",
 ]
 
 [[package]]

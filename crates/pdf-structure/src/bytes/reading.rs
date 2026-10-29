@@ -506,6 +506,12 @@ impl<S: ByteSource> Reading<S> {
         self.reader.stored.as_deref()
     }
 
+    /// The section it was opened as of ([`Options::section`]), when it
+    /// was, for the writer, which goes after the file's last.
+    pub(crate) fn as_of(&self) -> Option<usize> {
+        self.reader.as_of
+    }
+
     /// The file's newest incremental update, when its cross-reference
     /// sections were read and the newest follows one written before it.
     pub fn update(&self) -> Option<&Update> {

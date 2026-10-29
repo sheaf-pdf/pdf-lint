@@ -4,6 +4,7 @@
 //! of what's left in the clear that the reader decrypts by.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fmt;
 
@@ -14,7 +15,7 @@ use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
 use pdf_objects::serialize::{self, Encrypt};
 
 use super::Error;
-use crate::bytes::{ByteSource, Reading};
+use crate::bytes::{ByteSource, Reading, XrefEntry};
 use crate::crypt::{self, List, Stream};
 use crate::filter;
 use crate::source::Encryption;
@@ -23,9 +24,11 @@ use crate::source::Encryption;
 /// reading's or a new file's; its encryption dictionary as it's written,
 /// and where the file it was read from had it; the `/ID[0]` the key is
 /// made from; and what it leaves in the clear, the list the reader
-/// decrypts by (see [`bytes`](crate::bytes), "What's encrypted"). It gives
-/// out nothing of the key, its `Debug` neither; a clone clones the handler,
-/// each key wiped when it's dropped (pdf-crypt's `Handler`).
+/// decrypts by (see [`bytes`](crate::bytes), "What's encrypted"); and,
+/// where its keys are made per object, the numbers the file lists free,
+/// at which nothing new is written under it. It gives out nothing of the
+/// key, its `Debug` neither; a clone clones the handler, each key wiped
+/// when it's dropped (pdf-crypt's `Handler`).
 #[derive(Clone)]
 pub struct Encryptor {
     handler: Handler,
@@ -33,11 +36,16 @@ pub struct Encryptor {
     dict: Dict,
     place: Place,
     first_id: Option<Vec<u8>>,
+    /// The numbers the file it was read from lists free, where a method of
+    /// its makes keys per object (RC4, AES-128), from the number and
+    /// generation (ISO 32000-2, 7.6.3, Algorithm 1): a new object there
+    /// would be encrypted with a deleted object's key. Empty otherwise.
+    free: HashSet<u32>,
 }
 
 /// Where an encryption dictionary was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Place {
+pub(super) enum Place {
     /// At its number, in the file it was read from.
     At(ObjectId),
     /// In that file's trailer.
@@ -67,17 +75,35 @@ impl Encryptor {
     /// not, [`Encryption::Plain`]), and for one whose security handler the
     /// reader can't open ([`Error::Unsupported`]): there's nothing to
     /// encrypt what's written by.
+    ///
+    /// Where any of its methods makes keys per object, from the object's
+    /// number and generation (RC4 and AES-128: its strings', its streams',
+    /// a crypt filter's its dictionary has, or `/EFF`'s), it keeps the
+    /// numbers the reading lists free: a whole file or an update written
+    /// under it refuses an object at one ([`Error::Free`]), as its key
+    /// would be a deleted object's, whose ciphertext may still be in the
+    /// file, or in the earlier file a whole save replaces.
     pub fn of<S: ByteSource>(reading: &Reading<S>) -> Result<Option<Encryptor>, Error> {
         match (reading.encryption(), reading.handler(), reading.stored()) {
             (Encryption::None, ..) => Ok(None),
             (Encryption::Unsupported(why), ..) => Err(Error::Unsupported(why.clone())),
-            (Encryption::Opened { .. }, Some(handler), Some(stored)) => Ok(Some(Encryptor {
-                handler: handler.clone(),
-                list: reading.list().clone(),
-                dict: stored.dict.clone(),
-                place: stored.at.map_or(Place::Direct, Place::At),
-                first_id: Some(stored.id.clone()),
-            })),
+            (Encryption::Opened { .. }, Some(handler), Some(stored)) => {
+                let free = match per_object(handler, &stored.dict) {
+                    true => (reading.entries())
+                        .filter(|&(n, _, entry)| n != 0 && entry == XrefEntry::Free)
+                        .map(|(n, ..)| n)
+                        .collect(),
+                    false => HashSet::new(),
+                };
+                Ok(Some(Encryptor {
+                    handler: handler.clone(),
+                    list: reading.list().clone(),
+                    dict: stored.dict.clone(),
+                    place: stored.at.map_or(Place::Direct, Place::At),
+                    first_id: Some(stored.id.clone()),
+                    free,
+                }))
+            }
             _ => Err(Error::Locked),
         }
     }
@@ -107,6 +133,7 @@ impl Encryptor {
             dict: encryption(&values, Some(32)),
             place: Place::New,
             first_id: None,
+            free: HashSet::new(),
         })
     }
 
@@ -150,6 +177,49 @@ impl Encryptor {
     /// has none. None for a new file's, whose key isn't made from it.
     pub fn first_id(&self) -> Option<&[u8]> {
         self.first_id.as_deref()
+    }
+
+    /// Where the file it was read from has its dictionary.
+    pub(super) fn place(&self) -> Place {
+        self.place
+    }
+
+    /// It, for a whole file that writes its dictionary at `at`, or direct
+    /// where that's none: that file has one section, whose `/Encrypt` is
+    /// the only one, so an object at a number the file it was read from
+    /// named `/Encrypt` by, in its trailer or an earlier section's, is
+    /// encrypted as any is, as a reader of the file written decrypts it;
+    /// what the dictionary refers to is still left in the clear.
+    pub(super) fn whole(&self, at: Option<ObjectId>) -> Cow<'_, Encryptor> {
+        let list = &self.list;
+        let named = |id: &ObjectId| list.sections.contains(id) && Some(*id) != at;
+        if !list.dictionaries.iter().any(named) {
+            return Cow::Borrowed(self);
+        }
+        let mut whole = self.clone();
+        whole.list.dictionaries.retain(|id| !named(id));
+        whole.list.sections = at.into_iter().collect();
+        Cow::Owned(whole)
+    }
+
+    /// Whether `n` is a number the file it was read from lists free, under
+    /// keys made per object: nothing new is written there under it.
+    pub(super) fn free(&self, n: u32) -> bool {
+        self.free.contains(&n)
+    }
+
+    /// Whether object `id` is an encryption dictionary, or what one's
+    /// entries refer to, which a reader reads before it has a key, so in
+    /// the clear, never in an object stream.
+    pub(super) fn dictionary_object(&self, id: ObjectId) -> bool {
+        self.list.dictionaries.contains(&id)
+    }
+
+    /// Whether `/EncryptMetadata false` leaves the document's metadata
+    /// stream's data in the clear under it, which the catalog's
+    /// `/Metadata` says.
+    pub(super) fn plain_metadata(&self) -> bool {
+        self.list.unencrypted_metadata
     }
 
     /// What encrypts the objects of a file written under it: pdf-objects'
@@ -302,6 +372,21 @@ impl Encrypt for Encrypting<'_> {
             }
         }
     }
+}
+
+/// Whether any method `handler` encrypts by makes keys per object (RC4,
+/// AES-128): its strings', its streams', those of the crypt filters `dict`,
+/// its encryption dictionary, has in `/CF`, or `/EFF`'s.
+fn per_object(handler: &Handler, dict: &Dict) -> bool {
+    let keyed = |m: &Method| matches!(m, Method::Rc4 | Method::Aes128);
+    let filters = dict.get(b"CF").and_then(Object::as_dict);
+    let named = (filters
+        .into_iter()
+        .flat_map(|cf| cf.iter().map(|(name, _)| name)))
+    .chain(dict.get(b"EFF").and_then(Object::as_name));
+    keyed(handler.strings())
+        || keyed(handler.streams())
+        || named.into_iter().any(|name| keyed(&handler.named(name)))
 }
 
 /// What AES's IV for a string or stream's data of object `id` is derived
