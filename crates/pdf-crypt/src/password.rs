@@ -161,8 +161,9 @@ impl Password<'_> {
         encodings
     }
 
-    /// The bytes a new file's password is set as, strictly: its SASLprep
-    /// form (RFC 4013) in UTF-8, as revisions 5 and 6 take it (ISO 32000-2,
+    /// The bytes a new file's password is set as, strictly, which
+    /// [`Handler::create`](crate::Handler::create) takes: its SASLprep form
+    /// (RFC 4013) in UTF-8, as revisions 5 and 6 take it (ISO 32000-2,
     /// 7.6.4.3.3), tagged [`Encoding::Saslprep`]; or why it can't be. Not a
     /// password SASLprep refuses, the character named where one is why
     /// ([`Unusable::Prohibited`], [`Unusable::Bidi`]); nor the empty one,
@@ -189,7 +190,8 @@ impl Password<'_> {
     }
 }
 
-/// Why a password can't be a new file's ([`Password::prepared`]).
+/// Why a password can't be a new file's ([`Password::prepared`],
+/// [`Handler::create`](crate::Handler::create)).
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unusable {

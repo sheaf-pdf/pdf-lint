@@ -1,6 +1,10 @@
 //! The handler on files qpdf wrote, each way it encrypts, and on what the
 //! writer writes; and its faults and refusals.
 
+use chacha20::ChaCha20Rng;
+use rand_core::{Rng, SeedableRng};
+
+use crate::aes::Aes;
 use crate::writer::{self, Kind, Settings};
 use crate::{
     CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Handler, Method, Password, Refused,
@@ -1185,4 +1189,231 @@ fn a_handler_is_clone_send_and_sync() {
             .collect::<Vec<_>>()
     });
     assert_eq!(each, [encrypted.clone(), encrypted]);
+}
+
+/// A new file's dictionary for `typed`, prepared, and its handler, from a
+/// generator seeded with `seed`.
+fn created(typed: &str, encrypt_metadata: bool, seed: u64) -> (Handler, Dictionary) {
+    let password = Password(typed).prepared().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    Handler::create(&password, encrypt_metadata, &mut rng).unwrap()
+}
+
+/// A new file's dictionary is revision 6's, AES-256, every permission
+/// granted, `/EncryptMetadata` as asked, and `/Perms` saying both; it
+/// opens by the password as typed, as the owner's, its owner's password
+/// being the user's, and by the user's route where the owner's is broken,
+/// each by the key it was created with, without a fault; its handler is
+/// the owner's, opened by none, and encrypts as the opened one does, each
+/// decrypting the other's. A password whose SASLprep form is itself
+/// (`pässwörd`) opens it as typed, in UTF-8; one whose form isn't (Ⅸ, set
+/// as `IX`) by that form, and by `IX` typed, but not by its UTF-8.
+#[test]
+fn a_new_files_dictionary_opens_by_its_password_as_the_owners_and_the_users() {
+    let cases = [
+        ("user", Encoding::Utf8),
+        ("p\u{e4}ssw\u{f6}rd", Encoding::Utf8),
+        ("\u{2168}", Encoding::Saslprep),
+    ];
+    for (typed, by) in cases {
+        for encrypt_metadata in [true, false] {
+            let what = format!("{typed}, {encrypt_metadata}");
+            let (handler, dictionary) = created(typed, encrypt_metadata, 1);
+            let lengths = [&dictionary.o, &dictionary.u, &dictionary.oe, &dictionary.ue]
+                .map(|v| v.as_ref().map(Vec::len));
+            assert_eq!(lengths, [Some(48), Some(48), Some(32), Some(32)], "{what}");
+            let stdcf = vec![CryptFilter {
+                name: b"StdCF".to_vec(),
+                method: Some(b"AESV3".to_vec()),
+            }];
+            assert_eq!(
+                dictionary,
+                Dictionary {
+                    filter: b"Standard".to_vec(),
+                    v: 5,
+                    r: 6,
+                    length: Some(256),
+                    p: Some(-4),
+                    encrypt_metadata: Some(encrypt_metadata),
+                    crypt_filters: stdcf,
+                    stm_f: Some(b"StdCF".to_vec()),
+                    str_f: Some(b"StdCF".to_vec()),
+                    ..dictionary.clone()
+                },
+                "{what}"
+            );
+            assert!(handler.owner(), "{what}");
+            assert_eq!(handler.opened_by(), None, "{what}");
+            assert_eq!(handler.faults(), [], "{what}");
+            assert_eq!(handler.encrypts_metadata(), encrypt_metadata, "{what}");
+            assert_eq!(
+                (handler.strings(), handler.streams()),
+                (&Method::Aes256, &Method::Aes256),
+                "{what}"
+            );
+            // /Perms: /P and /EncryptMetadata, then `adb`.
+            let mut perms: [u8; 16] = dictionary.perms.clone().unwrap().try_into().unwrap();
+            Aes::new(handler.key()).unwrap().decrypt(&mut perms);
+            let metadata = if encrypt_metadata { b'T' } else { b'F' };
+            assert_eq!(
+                perms[..12],
+                [
+                    0xfc, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, metadata, b'a', b'd', b'b'
+                ],
+                "{what}"
+            );
+            let opened = Handler::open(&dictionary, b"", &Password(typed).encodings()).unwrap();
+            assert_eq!(opened.opened_by(), Some((0, by)), "{what}");
+            assert!(opened.owner(), "{what}");
+            assert_eq!(opened.faults(), [], "{what}");
+            assert_eq!(opened.key(), handler.key(), "{what}");
+            assert_eq!(opened.encrypts_metadata(), encrypt_metadata, "{what}");
+            // By the user's route, where /O's hash is broken.
+            let mut user = dictionary.clone();
+            user.o.as_mut().unwrap()[0] ^= 1;
+            let opened = Handler::open(&user, b"", &Password(typed).encodings()).unwrap();
+            assert!(!opened.owner(), "{what}");
+            assert_eq!(opened.faults(), [], "{what}");
+            assert_eq!(opened.key(), handler.key(), "{what}");
+            for data in [&b""[..], b"A plain title", &[7; 100]] {
+                let string = handler.encrypt_string((2, 0), b"the Info dictionary", data);
+                let again = opened.encrypt_string((2, 0), b"the Info dictionary", data);
+                assert_eq!(again, string, "{what}");
+                let back = opened.decrypt_string((2, 0), &string.unwrap());
+                assert_eq!(back.unwrap(), data, "{what}");
+                let stream = opened
+                    .encrypt_stream((3, 0), b"a page", data, None)
+                    .unwrap();
+                let back = handler.decrypt_stream((3, 0), &stream, None);
+                assert_eq!(back.unwrap(), data, "{what}");
+            }
+            let wrong = Handler::open(&dictionary, b"", &Password("wrong").encodings());
+            assert_eq!(wrong.unwrap_err(), Refused::Password, "{what}");
+        }
+    }
+    let (_, ix) = created("\u{2168}", true, 1);
+    let by_ix = Handler::open(&ix, b"", &Password("IX").encodings()).unwrap();
+    assert_eq!(by_ix.opened_by(), Some((0, Encoding::Utf8)));
+    let utf8 = [Encoded::verbatim("\u{2168}".as_bytes())];
+    assert_eq!(
+        Handler::open(&ix, b"", &utf8).unwrap_err(),
+        Refused::Password
+    );
+}
+
+/// What a new file's dictionary is made of is drawn from its generator in
+/// one order: the file's key, the user's validation and key salts, the
+/// owner's, and `/Perms`' four random bytes, and nothing more. The same
+/// seed gives the same dictionary, byte for byte, as an implementation of
+/// Algorithms 2.B, 8, 9 and 10 over OpenSSL's AES and SHA-2 gave it for
+/// these draws; another seed another.
+#[test]
+fn a_new_files_dictionary_is_drawn_from_its_generator_in_order() {
+    let (handler, dictionary) = created("user", true, 1);
+    let mut draws = ChaCha20Rng::seed_from_u64(1);
+    let mut drawn = |n: usize| {
+        let mut bytes = vec![0; n];
+        draws.fill_bytes(&mut bytes);
+        bytes
+    };
+    assert_eq!(drawn(32), handler.key());
+    let (u, o) = (dictionary.u.clone().unwrap(), dictionary.o.clone().unwrap());
+    assert_eq!(drawn(8), u[32..40], "the user's validation salt");
+    assert_eq!(drawn(8), u[40..48], "the user's key salt");
+    assert_eq!(drawn(8), o[32..40], "the owner's validation salt");
+    assert_eq!(drawn(8), o[40..48], "the owner's key salt");
+    let mut perms: [u8; 16] = dictionary.perms.clone().unwrap().try_into().unwrap();
+    Aes::new(handler.key()).unwrap().decrypt(&mut perms);
+    assert_eq!(drawn(4), perms[12..], "/Perms' random bytes");
+    // Nothing more: the generator's next draw is what follows them.
+    let mut rng = ChaCha20Rng::seed_from_u64(1);
+    let password = Password("user").prepared().unwrap();
+    Handler::create(&password, true, &mut rng).unwrap();
+    assert_eq!(rng.next_u64().to_le_bytes().to_vec(), drawn(8));
+    let pinned = [
+        (
+            &dictionary.u,
+            "ab1e57df51de8a284524b0f6e8e2d4766b89155398b6a433dc35d874b3f598b6000efec87c5749ec1157912e0e171f60",
+        ),
+        (
+            &dictionary.ue,
+            "ebd1411d1c225f4064d80d9812915de20549a5a42f522bb1fe179bb1eb08fe39",
+        ),
+        (
+            &dictionary.o,
+            "91d221f45275b3a24057a6431cf164a9f7764930cc9de3635f92e21761b8b456de9e5341348819a2de99f140c59a424c",
+        ),
+        (
+            &dictionary.oe,
+            "24eed81bcf339ab5cfe332f532f091a5c88660a45d5ada01080a0a1e1362e50b",
+        ),
+        (&dictionary.perms, "c700cdbbc128f6798b0efbde215132f1"),
+    ];
+    for (value, hex_bytes) in pinned {
+        assert_eq!(hex(value.as_ref().unwrap()), hex_bytes);
+    }
+    assert_eq!(created("user", true, 1).1, dictionary, "the same seed");
+    let other = created("user", true, 2).1;
+    for (a, b) in [
+        (&other.u, &dictionary.u),
+        (&other.ue, &dictionary.ue),
+        (&other.o, &dictionary.o),
+        (&other.oe, &dictionary.oe),
+        (&other.perms, &dictionary.perms),
+    ] {
+        assert_ne!(a, b, "another seed");
+    }
+}
+
+/// A new file takes a password only in SASLprep's form, of 1 to 127
+/// bytes: one in another encoding is refused, as is SASLprep's form that
+/// a reader tries but no new file takes, empty (each character one
+/// SASLprep maps to nothing) or over 127 bytes, which a reader would cut.
+/// Refused, nothing is drawn.
+#[test]
+fn a_password_not_prepared_or_not_1_to_127_bytes_makes_no_new_file() {
+    let form = |typed: &str, encoding: Encoding| {
+        let forms = Password(typed).encodings();
+        forms
+            .into_iter()
+            .find(|e| e.encoding() == encoding)
+            .unwrap()
+    };
+    let long = "\u{2168}".repeat(64);
+    let refusals = [
+        (
+            form("user", Encoding::Utf8),
+            Unusable::Unprepared(Encoding::Utf8),
+        ),
+        (
+            form("caf\u{e9}", Encoding::PdfDoc),
+            Unusable::Unprepared(Encoding::PdfDoc),
+        ),
+        (
+            Encoded::verbatim(b"user"),
+            Unusable::Unprepared(Encoding::Verbatim),
+        ),
+        (form("\u{AD}", Encoding::Saslprep), Unusable::Empty),
+        (
+            form(&long, Encoding::Saslprep),
+            Unusable::TooLong { len: 128 },
+        ),
+    ];
+    for (password, why) in refusals {
+        let mut rng = ChaCha20Rng::seed_from_u64(1);
+        let refused = Handler::create(&password, true, &mut rng);
+        assert_eq!(refused.map(|_| ()), Err(why.clone()), "{why}");
+        let first = ChaCha20Rng::seed_from_u64(1).next_u64();
+        assert_eq!(rng.next_u64(), first, "{why}: nothing drawn");
+    }
+    // Prepared, those two are refused alike; 63 Ⅸs, 126 bytes, are taken.
+    assert_eq!(
+        Password("\u{AD}").prepared().unwrap_err(),
+        Unusable::Vanished
+    );
+    let too_long = Password(&long).prepared().unwrap_err();
+    assert_eq!(too_long, Unusable::TooLong { len: 128 });
+    let (_, dictionary) = created(&"\u{2168}".repeat(63), true, 1);
+    let opened = Handler::open(&dictionary, b"", &Password(&"IX".repeat(63)).encodings());
+    assert!(opened.unwrap().owner());
 }

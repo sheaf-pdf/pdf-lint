@@ -30,7 +30,16 @@ zeroize = "1.9"
 stringprep = "0.1.5"
 unicode-normalization = "0.1"
 
+# The traits a caller's random number generator meets, which a new file's
+# key and salts are drawn from: pdf-crypt has no randomness of its own.
+rand_core = "0.10"
+
 thiserror = "2"
+
+[dev-dependencies]
+# A seeded generator for the tests' new files: RustCrypto's ChaCha20 as a
+# rand_core generator, without its cipher.
+chacha20 = { version = "0.10", default-features = false, features = ["rng"] }
 
 [features]
 # An encryption dictionary, and strings and streams encrypted, with salts,

@@ -48,6 +48,8 @@ pdf-filters = { path = "../pdf-filters", version = "0.1", features = ["zlib-rs"]
 pdf-crypt = { path = "../pdf-crypt", version = "0.1", features = ["writer"] }
 # The tests' folders of their own, removed after.
 tempfile = "3"
+# A seeded generator for the tests' new encrypted files.
+chacha20 = { version = "0.10", default-features = false, features = ["rng"] }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -1,12 +1,14 @@
 //! The standard security handler (ISO 32000-2, 7.6.4): a file's key from
 //! its encryption dictionary and a password, and its strings and streams
-//! decrypted with it. Revision 5, which ISO 32000-2 leaves out, is read as
-//! Adobe's Extension Level 3 has it, as qpdf reads it.
+//! decrypted with it; or a new file's key and dictionary, of revision 6.
+//! Revision 5, which ISO 32000-2 leaves out, is read as Adobe's Extension
+//! Level 3 has it, as qpdf reads it.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 use crate::aes::Aes;
@@ -14,7 +16,7 @@ use crate::hmac::HmacSha256;
 use crate::md5::md5;
 use crate::rc4::rc4;
 use crate::sha2::{sha256, sha384, sha512};
-use crate::{CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Refused};
+use crate::{CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Refused, Unusable};
 
 /// The padding a password of revisions 2 to 4 is filled out with
 /// (Algorithm 2, step a).
@@ -43,10 +45,10 @@ pub enum Method {
     Unknown(Vec<u8>),
 }
 
-/// A file's security handler, opened: its key, and how its strings and
-/// streams are encrypted. The key stays in it: nothing gives it out, its
-/// `Debug` neither, and it's wiped when the handler is dropped, as each
-/// object's key is when it's been used.
+/// A file's security handler, opened, or created for a new file: its key,
+/// and how its strings and streams are encrypted. The key stays in it:
+/// nothing gives it out, its `Debug` neither, and it's wiped when the
+/// handler is dropped, as each object's key is when it's been used.
 #[derive(Clone)]
 pub struct Handler {
     key: Zeroizing<Vec<u8>>,
@@ -155,9 +157,86 @@ impl Handler {
         })
     }
 
+    /// A new file's handler and encryption dictionary, of revision 6 (ISO
+    /// 32000-2, 7.6.4), for `password`, [prepared](crate::Password::prepared):
+    /// `/V 5 /R 6`, strings and streams encrypted by AES-256 (the crypt
+    /// filter `/StdCF`, `/CFM /AESV3`), the document's metadata as
+    /// `encrypt_metadata` says, every permission granted (`/P -4`, bits 1
+    /// and 2 clear as Table 22 has them), and the owner's password the
+    /// user's, so that it opens by the one password, as the owner's. `/U`
+    /// and `/UE`, `/O` and `/OE`, and `/Perms` are made by Algorithms 8, 9
+    /// and 10, from what's drawn from `rng` in this order: the file's key
+    /// (32 bytes), the user's validation and key salts, the owner's (8 bytes
+    /// each), and `/Perms`' 4 random bytes. pdf-crypt draws on no
+    /// randomness of its own: a program passes the operating system's, and
+    /// a test a seeded generator, the same draws giving the same dictionary.
+    ///
+    /// The handler is the owner's, as one opened by the password is, but
+    /// [`Handler::opened_by`] is none: no password opened it. Refused, the
+    /// password unused and nothing drawn: one not tagged
+    /// [`Encoding::Saslprep`] ([`Unusable::Unprepared`]); and one so tagged
+    /// that's empty ([`Unusable::Empty`]) or over 127 bytes
+    /// ([`Unusable::TooLong`]), which a reader would cut, as SASLprep's
+    /// form [`Password::encodings`](crate::Password::encodings) tries can
+    /// be.
+    pub fn create(
+        password: &Encoded,
+        encrypt_metadata: bool,
+        rng: &mut impl CryptoRng,
+    ) -> Result<(Handler, Dictionary), Unusable> {
+        let password = match (password.encoding(), password.as_bytes()) {
+            (Encoding::Saslprep, []) => return Err(Unusable::Empty),
+            (Encoding::Saslprep, bytes) if bytes.len() > 127 => {
+                return Err(Unusable::TooLong { len: bytes.len() });
+            }
+            (Encoding::Saslprep, bytes) => bytes,
+            (encoding, _) => return Err(Unusable::Unprepared(encoding)),
+        };
+        let mut key = Zeroizing::new(vec![0; 32]);
+        rng.fill_bytes(&mut key);
+        let mut salts = [[0; 8]; 4];
+        for salt in &mut salts {
+            rng.fill_bytes(salt);
+        }
+        let mut rand = [0; 4];
+        rng.fill_bytes(&mut rand);
+        let mut dictionary = Dictionary {
+            filter: b"Standard".to_vec(),
+            v: 5,
+            r: 6,
+            length: Some(256),
+            p: Some(-4),
+            encrypt_metadata: Some(encrypt_metadata),
+            crypt_filters: vec![CryptFilter {
+                name: b"StdCF".to_vec(),
+                method: Some(b"AESV3".to_vec()),
+            }],
+            stm_f: Some(b"StdCF".to_vec()),
+            str_f: Some(b"StdCF".to_vec()),
+            ..Dictionary::default()
+        };
+        seal(&mut dictionary, &key, (password, password), &salts, rand);
+        let (strings, streams, filters) = methods(&dictionary, dictionary.v);
+        let handler = Handler {
+            aes: Aes::new(&key),
+            ivs: HmacSha256::new(&key),
+            key,
+            v: dictionary.v,
+            owner: true,
+            strings,
+            streams,
+            filters,
+            encrypt_metadata,
+            faults: Vec::new(),
+            by: None,
+        };
+        Ok((handler, dictionary))
+    }
+
     /// Which of the passwords [`Handler::open`] was given opened it: its
     /// index among them, and its encoding. None when it was given none, and
-    /// opened by the empty password.
+    /// opened by the empty password; and for a handler
+    /// [created](Handler::create), which no password opened.
     pub fn opened_by(&self) -> Option<(usize, Encoding)> {
         self.by
     }
@@ -678,6 +757,50 @@ impl<'a> File<'a> {
         };
         (key, fault)
     }
+}
+
+/// `dictionary`'s `/U` and `/UE`, `/O` and `/OE` for the file's `key` and
+/// the user's password and the owner's, each cut to 127 bytes, by its
+/// revision's hash, 5's or 6's (Algorithms 8 and 9, as revision 5 has them
+/// too); `salts` the user's validation and key salts, then the owner's.
+/// And `/Perms` (Algorithm 10): the dictionary's `/P` and
+/// `/EncryptMetadata`, `adb` and `rand`, encrypted by the key.
+pub(crate) fn seal(
+    dictionary: &mut Dictionary,
+    key: &[u8],
+    (user, owner): (&[u8], &[u8]),
+    salts: &[[u8; 8]; 4],
+    rand: [u8; 4],
+) {
+    let r = dictionary.r;
+    let [uv, uk, ov, ok] = salts;
+    // The key, encrypted where it is, so that it holds the key only until
+    // then: AES-256 in CBC from a zero IV, without padding, under the hash.
+    let wrap = |intermediate: &[u8]| {
+        let mut wrapped = key.to_vec();
+        Aes::new(&intermediate[..32])
+            .expect("32 bytes")
+            .encrypt_cbc([0; 16], &mut wrapped);
+        wrapped
+    };
+    let user = &user[..user.len().min(127)];
+    let owner = &owner[..owner.len().min(127)];
+    let u = [&hash(r, user, uv, b"")[..], uv, uk].concat();
+    dictionary.ue = Some(wrap(&hash(r, user, uk, b"")));
+    dictionary.o = Some([&hash(r, owner, ov, &u)[..], ov, ok].concat());
+    dictionary.oe = Some(wrap(&hash(r, owner, ok, &u)));
+    dictionary.u = Some(u);
+    let p = dictionary.p.unwrap_or_default() as u32;
+    let metadata = match dictionary.encrypt_metadata.unwrap_or(true) {
+        true => b'T',
+        false => b'F',
+    };
+    let mut perms: [u8; 16] = [&p.to_le_bytes()[..], &[0xff; 4], &[metadata], b"adb", &rand]
+        .concat()
+        .try_into()
+        .expect("16 bytes");
+    Aes::new(key).expect("32 bytes").encrypt(&mut perms);
+    dictionary.perms = Some(perms.to_vec());
 }
 
 /// Revision 5's and 6's hash (Algorithm 2.B): SHA-256 of `password`,

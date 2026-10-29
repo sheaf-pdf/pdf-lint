@@ -1,15 +1,18 @@
 //! The fuzz target `crypt`'s bodies, for the fuzz crate. They're compiled
 //! only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
+use std::convert::Infallible;
+
 /// The fuzz target `crypt`'s body: a dictionary of any version, revision
 /// and fields of any length that `data` chooses, or one the writer makes
 /// that opens, opened with passwords from it, each encoding of its text and
 /// its bytes as they are, and when it opens, strings and streams from it
-/// decrypted by each method, and encrypted under a context from it. Panics
-/// on a broken promise: none should, the handler says which password
-/// opened it, which opens it alike alone, decrypting gives no more than
-/// it's given, and what's encrypted decrypts to what it was, the same
-/// bytes each time, or is refused alike both ways.
+/// decrypted by each method, and encrypted under a context from it; and now
+/// and then, as revision 6 is, a new file's dictionary created for text
+/// from it (`created`). Panics on a broken promise: none should, the
+/// handler says which password opened it, which opens it alike alone,
+/// decrypting gives no more than it's given, and what's encrypted decrypts
+/// to what it was, the same bytes each time, or is refused alike both ways.
 pub fn handler(data: &[u8]) {
     use crate::{CryptFilter, Dictionary, Encoded, Fault, Handler, Method, Password};
     let mut bytes = data.iter().copied();
@@ -74,6 +77,10 @@ pub fn handler(data: &[u8]) {
         }
     };
     let rest: Vec<u8> = data.iter().copied().skip(8 + 5 * 64 + 28).collect();
+    // A new file's dictionary runs revision 6's hash a dozen times: rare.
+    if head[1] == 254 {
+        created(&rest, head[6] & 1 == 0);
+    }
     let text = String::from_utf8_lossy(&password);
     let mut passwords = Password(&text).encodings();
     passwords.extend([Encoded::verbatim(&password), Encoded::verbatim(b"")]);
@@ -146,6 +153,137 @@ pub fn handler(data: &[u8]) {
         }
     }
 }
+
+/// A new file's handler and dictionary ([`Handler::create`](crate::Handler::create)),
+/// for text from `data`: its first byte the text's length, then the text
+/// (UTF-8, lossily), then what's drawn ([`Drawn`]). Panics on a broken
+/// promise: none should; each of the text's encodings is taken exactly
+/// when it's SASLprep's form and `Password::prepared` gives its bytes,
+/// else refused for its tag or its length; and prepared, the same draws
+/// give the same dictionary, of revision 6 with every permission, which
+/// opens by the text's encodings as the owner's, `/Perms` and
+/// `/EncryptMetadata` as asked, its handler and the one opened
+/// encrypting alike and each decrypting the other's.
+fn created(data: &[u8], encrypt_metadata: bool) {
+    use crate::{Encoding, Handler, Password, Unusable};
+    let (len, rest) = data.split_first().unwrap_or((&0, &[]));
+    let (text, draws) = rest.split_at(usize::from(*len).min(rest.len()));
+    let text = String::from_utf8_lossy(text);
+    let typed = Password(&text);
+    let prepared = typed.prepared();
+    for form in typed.encodings() {
+        let created = Handler::create(&form, encrypt_metadata, &mut Drawn::over(draws));
+        let bytes = form.as_bytes();
+        match created {
+            Ok(_) => assert!(
+                form.encoding() == Encoding::Saslprep
+                    && prepared.as_ref().is_ok_and(|p| p.as_bytes() == bytes),
+                "taken: prepared's"
+            ),
+            Err(why) => {
+                let expected = match (form.encoding(), bytes.len()) {
+                    (Encoding::Saslprep, 0) => Unusable::Empty,
+                    (Encoding::Saslprep, len @ 128..) => Unusable::TooLong { len },
+                    (Encoding::Saslprep, _) => panic!("a form of 1 to 127 bytes refused"),
+                    (encoding, _) => Unusable::Unprepared(encoding),
+                };
+                assert_eq!(why, expected, "refused for its tag or length");
+            }
+        }
+    }
+    let Ok(password) = prepared else {
+        return;
+    };
+    let created = Handler::create(&password, encrypt_metadata, &mut Drawn::over(draws));
+    let (handler, dictionary) = created.expect("a password prepared");
+    let again = Handler::create(&password, encrypt_metadata, &mut Drawn::over(draws));
+    assert_eq!(
+        again.map(|(_, d)| d).as_ref(),
+        Ok(&dictionary),
+        "the same draws"
+    );
+    assert_eq!(
+        (dictionary.v, dictionary.r, dictionary.p),
+        (5, 6, Some(-4)),
+        "revision 6, every permission"
+    );
+    assert!(handler.owner() && handler.opened_by().is_none() && handler.faults().is_empty());
+    let opened = Handler::open(&dictionary, b"", &typed.encodings()).expect("it opens");
+    assert!(
+        opened.owner() && opened.faults().is_empty(),
+        "as the owner's"
+    );
+    assert_eq!(
+        opened.encrypts_metadata(),
+        encrypt_metadata,
+        "/EncryptMetadata"
+    );
+    let id = (1, 0);
+    for data in [draws, &draws[..draws.len().min(17)]] {
+        let string = handler.encrypt_string(id, b"a context", data);
+        assert_eq!(
+            opened.encrypt_string(id, b"a context", data),
+            string,
+            "alike"
+        );
+        let string = string.expect("AES-256");
+        assert_eq!(opened.decrypt_string(id, &string), Ok(data.to_vec()));
+        let stream = opened
+            .encrypt_stream(id, b"a context", data, None)
+            .expect("AES-256");
+        assert_eq!(handler.decrypt_stream(id, &stream, None), Ok(data.to_vec()));
+    }
+}
+
+/// A random number generator for the fuzz body alone: the input's bytes,
+/// then a counter's. It's no cryptographic generator, but says it is
+/// (`TryCryptoRng`) so that [`Handler::create`](crate::Handler::create)
+/// takes it, which only a fuzz body may do: it's compiled for nothing
+/// else.
+struct Drawn<'a> {
+    data: &'a [u8],
+    counter: u8,
+}
+
+impl Drawn<'_> {
+    fn over(data: &[u8]) -> Drawn<'_> {
+        Drawn { data, counter: 0 }
+    }
+}
+
+impl rand_core::TryRng for Drawn<'_> {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        let mut bytes = [0; 4];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        let mut bytes = [0; 8];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+        for byte in dst {
+            *byte = match self.data.split_first() {
+                Some((&first, rest)) => {
+                    self.data = rest;
+                    first
+                }
+                None => {
+                    self.counter = self.counter.wrapping_add(1);
+                    self.counter
+                }
+            };
+        }
+        Ok(())
+    }
+}
+
+impl rand_core::TryCryptoRng for Drawn<'_> {}
 
 /// The fuzz target `crypt`'s body for passwords as typed: text from
 /// `data`, read as UTF-8 (lossily), as a character each two bytes (the
@@ -247,6 +385,48 @@ mod tests {
                 })
                 .collect();
             handler(&data);
+        }
+    }
+
+    /// New files' dictionaries, as the fuzz body creates them now and then:
+    /// for text whose SASLprep form is itself, isn't, is empty, is over 127
+    /// bytes, or that SASLprep refuses; and for random text; each with
+    /// draws, and with none but the counter's, each way of
+    /// `/EncryptMetadata`.
+    #[test]
+    fn new_files_dictionaries_keep_every_promise() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        };
+        let long = "\u{2168}".repeat(64);
+        let random: Vec<u8> = (0..40).map(|_| next()).collect();
+        let texts: [&[u8]; 9] = [
+            b"user",
+            "p\u{e4}ssw\u{f6}rd".as_bytes(),
+            "\u{2168}".as_bytes(),
+            "I\u{AD}X".as_bytes(),
+            "\u{AD}".as_bytes(),
+            long.as_bytes(),
+            b"\x07",
+            b"",
+            &random,
+        ];
+        for text in texts {
+            for draws in [&[][..], &[7; 60]] {
+                for metadata in [0, 1] {
+                    let mut data = vec![0; 8 + 5 * 64 + 28];
+                    data[1] = 254;
+                    data[6] = metadata;
+                    data.push(text.len() as u8);
+                    data.extend_from_slice(text);
+                    data.extend_from_slice(draws);
+                    handler(&data);
+                }
+            }
         }
     }
 

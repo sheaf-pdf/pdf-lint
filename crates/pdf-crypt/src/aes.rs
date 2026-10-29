@@ -4,10 +4,11 @@
 //! hash (Algorithm 2.B) and a writer do. A key's schedule is made once, and
 //! wiped when it's dropped (`aes`' own `zeroize`), as `cbc`'s IV is.
 
-#[cfg(any(test, feature = "writer"))]
-use ::aes::cipher::BlockCipherEncrypt;
 use ::aes::cipher::array::Array;
-use ::aes::cipher::{BlockCipherDecrypt, BlockModeDecrypt, BlockModeEncrypt, InnerIvInit, KeyInit};
+use ::aes::cipher::{
+    BlockCipherDecrypt, BlockCipherEncrypt, BlockModeDecrypt, BlockModeEncrypt, InnerIvInit,
+    KeyInit,
+};
 use ::aes::{Aes128, Aes256, Block};
 
 /// AES keyed by a key of 128 or 256 bits: the key's schedule, which the
@@ -31,8 +32,7 @@ impl Aes {
         }
     }
 
-    /// One block encrypted, as the writer encrypts `/Perms`.
-    #[cfg(any(test, feature = "writer"))]
+    /// One block encrypted, as a new file's `/Perms` is (Algorithm 10).
     pub(crate) fn encrypt(&self, block: &mut [u8; 16]) {
         let block: &mut Block = block.into();
         match self {

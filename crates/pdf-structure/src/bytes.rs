@@ -5051,6 +5051,97 @@ mod tests {
         }
     }
 
+    /// A new file's encryption, as the test writer writes it under the
+    /// handler and dictionary pdf-crypt creates for a password prepared,
+    /// opens by the password as typed, as the owner's (its owner's password
+    /// is the user's), its strings decrypted where they are and a
+    /// signature's `/Contents` as written: an ASCII password; `pässwörd`,
+    /// its own SASLprep form, by its UTF-8; and Ⅸ, set as its SASLprep form,
+    /// `IX`, by that form, by `IX` typed too, but not by its UTF-8 as given.
+    /// A wrong password, or none, leaves it locked. Under `/EncryptMetadata
+    /// false` its metadata stream is in plain view, opened or not.
+    #[test]
+    fn a_new_files_encryption_opens_by_its_password_as_typed() {
+        use chacha20::ChaCha20Rng;
+        use pdf_crypt::Encoding;
+        use pdf_crypt::rand_core::SeedableRng;
+
+        let root = || dict! { "Root" => Object::reference(1) };
+        let created = |typed: &str, encrypt_metadata: bool, objects: &[(u32, Body)]| {
+            let password = Password(typed).prepared().unwrap();
+            let mut rng = ChaCha20Rng::seed_from_u64(6);
+            write::created(&password, encrypt_metadata, objects, root(), &mut rng)
+        };
+        let cases = [
+            ("user", Encoding::Utf8),
+            ("p\u{e4}ssw\u{f6}rd", Encoding::Utf8),
+            ("\u{2168}", Encoding::Saslprep),
+        ];
+        for (typed, by) in cases {
+            let file = created(typed, true, &to_encrypt(&[]));
+            let doc = read_opened(&file, &[Password(typed)]);
+            let opened = Encryption::Opened {
+                owner: true,
+                by: Some((0, by)),
+            };
+            assert_eq!(doc.encryption, opened, "{typed}");
+            assert!(doc.warnings.is_empty(), "{typed}: {:?}", doc.warnings);
+            let get = |n: u32, key: &[u8]| {
+                let object = doc.get((n, 0)).unwrap();
+                object.as_dict().unwrap().get(key).unwrap().clone()
+            };
+            let lang = get(1, b"Lang");
+            assert_eq!(
+                *lang.value(),
+                Value::String(Str::Bytes(b"en".to_vec()), Some(Form::Literal)),
+                "{typed}"
+            );
+            let at = lang.at.unwrap();
+            assert!(!file[at.start..at.end].starts_with(b"(en)"), "{typed}");
+            assert_eq!(
+                *get(4, b"Contents").value(),
+                Value::String(Str::Bytes(b"A note".to_vec()), Some(Form::Literal)),
+                "{typed}"
+            );
+            assert_eq!(
+                *get(5, b"Contents").value(),
+                Value::String(
+                    Str::Bytes(vec![0x30, 0x82, 0x00, 0x01]),
+                    Some(Form::Literal)
+                ),
+                "{typed}"
+            );
+            for passwords in [&[][..], &[Password("wrong")][..]] {
+                let doc = read_opened(&file, passwords);
+                assert_eq!(doc.encryption, Encryption::Locked, "{typed}");
+            }
+        }
+        let ix = created("\u{2168}", true, &to_encrypt(&[]));
+        let doc = read_opened(&ix, &[Password("IX")]);
+        let by = Some((0, Encoding::Utf8));
+        assert_eq!(doc.encryption, Encryption::Opened { owner: true, by });
+        let locked = Reading::open(&ix[..], &Options::DEFAULT).unwrap();
+        let utf8 = [Encoded::verbatim("\u{2168}".as_bytes())];
+        let Err((_, why)) = locked.unlock(&utf8) else {
+            panic!("Ⅸ's UTF-8 as given opened it")
+        };
+        assert_eq!(why, pdf_crypt::Refused::Password);
+        // Metadata not encrypted.
+        let xmp = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>";
+        let metadata = dict! { "Type" => "Metadata", "Subtype" => "XML" };
+        let objects = [
+            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
+            (2, dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into()),
+            (3, Body::stream(metadata, xmp)),
+        ];
+        let file = created("user", false, &objects);
+        for passwords in [&[][..], &[Password("user")][..]] {
+            let doc = read_opened(&file, passwords);
+            let encryption = &doc.encryption;
+            assert_eq!(doc.metadata.as_deref(), Some(&xmp[..]), "{encryption:?}");
+        }
+    }
+
     /// A decoder that mustn't be asked anything.
     struct Unaskable;
 

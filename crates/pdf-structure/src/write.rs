@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use pdf_objects::object::{Dict, Object, Str, Value};
+use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
 
 /// The kind of cross-reference section a file is written with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,61 +199,54 @@ pub fn encrypted(
     let user = [pdf_crypt::Encoded::verbatim(settings.user)];
     let handler =
         pdf_crypt::Handler::open(&values, settings.id, &user).expect("the writer's opens");
-    fn strings(o: &mut Object, encrypt: &mut dyn FnMut(&[u8]) -> Vec<u8>) {
-        // A dictionary's values, or a stream's dictionary's.
-        let mut entries = |d: &mut Dict| {
-            // A signature's /Contents, as the reader takes one.
-            let typed = (d.get(b"Type"))
-                .is_none_or(|t| matches!(t.as_name(), Some(b"Sig" | b"DocTimeStamp")));
-            let signature = d.has(b"ByteRange") && typed;
-            for entry in d.entries_mut() {
-                if !(signature && entry.key == b"Contents") {
-                    strings(&mut entry.value, encrypt);
-                }
-            }
-        };
-        match o.value_mut() {
-            Value::String(Str::Bytes(bytes), _) => *bytes = encrypt(bytes),
-            Value::Array(a) => a.iter_mut().for_each(|o| strings(o, encrypt)),
-            Value::Dict(d) => entries(d),
-            Value::Stream(s) => entries(&mut s.dict),
-            _ => {}
+    let encrypt = |(n, g): ObjectId, data: &[u8], stream: bool| {
+        let iv = [n as u8; 16];
+        match stream {
+            true => writer::encrypt_stream(&handler, (n, g), data, None, iv),
+            false => writer::encrypt_string(&handler, (n, g), data, iv),
         }
-    }
-    let mut written = Vec::new();
-    for (n, body) in objects {
-        let id = (*n, 0);
-        let iv = [*n as u8; 16];
-        let mut encrypt = |bytes: &[u8]| {
-            writer::encrypt_string(&handler, id, bytes, iv).expect("the writer's own method")
-        };
-        written.push((
-            *n,
-            match body {
-                Body::Object(object) => {
-                    let mut object = object.clone();
-                    strings(&mut object, &mut encrypt);
-                    Body::Object(object)
-                }
-                Body::Stream(dict, data) => {
-                    // Metadata under /EncryptMetadata false isn't encrypted.
-                    let metadata = dict.get(b"Type").and_then(Object::as_name) == Some(b"Metadata");
-                    let mut dict: Object = dict.clone().into();
-                    strings(&mut dict, &mut encrypt);
-                    let Value::Dict(dict) = dict.into_value() else {
-                        unreachable!()
-                    };
-                    let data = match metadata && !handler.encrypts_metadata() {
-                        true => data.clone(),
-                        false => writer::encrypt_stream(&handler, id, data, None, iv)
-                            .expect("the writer's own method"),
-                    };
-                    Body::Stream(dict, data)
-                }
-            },
-        ));
-    }
-    let own = objects.iter().map(|(n, _)| *n).max().unwrap_or(0) + 1;
+        .expect("the writer's own method")
+    };
+    let dict = encryption(&values, None);
+    under(&handler, objects, dict, trailer, settings.id, encrypt)
+}
+
+/// A new file of these objects, as [`file`] writes it with a table,
+/// encrypted under the handler and dictionary pdf-crypt creates for
+/// `password`, prepared (`Handler::create`: revision 6, AES-256), from
+/// `rng`'s draws: each string, and each stream's data, of each object but
+/// a signature's `/Contents`, AES's IVs derived from the data and the
+/// object's number (`n g obj`, the context); under an encryption
+/// dictionary that's the next object, its crypt filter with `/Length 32`
+/// (bytes, as qpdf writes it) and `/AuthEvent /DocOpen`, with the
+/// trailer's `/ID` drawn from `rng` after the dictionary, and `trailer`'s
+/// entries.
+pub fn created(
+    password: &pdf_crypt::Encoded,
+    encrypt_metadata: bool,
+    objects: &[(u32, Body)],
+    trailer: Dict,
+    rng: &mut impl pdf_crypt::rand_core::CryptoRng,
+) -> Vec<u8> {
+    let (handler, values) =
+        pdf_crypt::Handler::create(password, encrypt_metadata, rng).expect("a password prepared");
+    let mut id = [0; 16];
+    rng.fill_bytes(&mut id);
+    let encrypt = |(n, g): ObjectId, data: &[u8], stream: bool| {
+        let context = format!("{n} {g} obj");
+        match stream {
+            true => handler.encrypt_stream((n, g), context.as_bytes(), data, None),
+            false => handler.encrypt_string((n, g), context.as_bytes(), data),
+        }
+        .expect("the handler's own method")
+    };
+    let dict = encryption(&values, Some(32));
+    under(&handler, objects, dict, trailer, &id, encrypt)
+}
+
+/// The encryption dictionary of `values`, each crypt filter's `/Length`
+/// `length` where it's given.
+fn encryption(values: &pdf_crypt::Dictionary, length: Option<i64>) -> Dict {
     let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));
     let value = |bytes: &Option<Vec<u8>>| s(bytes.as_deref().expect("the writer's own value"));
     let mut dict = pdf_objects::dict! {
@@ -278,15 +271,87 @@ pub fn encrypted(
     if let Some(filter) = values.crypt_filters.first() {
         let method =
             String::from_utf8_lossy(filter.method.as_deref().unwrap_or_default()).into_owned();
-        let std_cf = pdf_objects::dict! { "CFM" => method.as_str(), "AuthEvent" => "DocOpen" };
+        let mut std_cf = pdf_objects::dict! { "CFM" => method.as_str(), "AuthEvent" => "DocOpen" };
+        if let Some(length) = length {
+            std_cf.set("Length", length);
+        }
         dict.set("CF", pdf_objects::dict! { "StdCF" => std_cf });
         dict.set("StmF", "StdCF");
         dict.set("StrF", "StdCF");
     }
+    dict
+}
+
+/// `objects` encrypted by `encrypt` (an object's id, the data, and whether
+/// it's a stream's), each string, and each stream's data, but a
+/// signature's `/Contents` and, where `handler` doesn't encrypt metadata, a
+/// metadata stream's data; written as [`file`] writes them with a table,
+/// under `dict`, the encryption dictionary, the next object, with the
+/// trailer's `/ID` `file_id` twice and `trailer`'s entries.
+fn under(
+    handler: &pdf_crypt::Handler,
+    objects: &[(u32, Body)],
+    dict: Dict,
+    trailer: Dict,
+    file_id: &[u8],
+    encrypt: impl Fn(ObjectId, &[u8], bool) -> Vec<u8>,
+) -> Vec<u8> {
+    fn strings(o: &mut Object, encrypt: &mut dyn FnMut(&[u8]) -> Vec<u8>) {
+        // A dictionary's values, or a stream's dictionary's.
+        let mut entries = |d: &mut Dict| {
+            // A signature's /Contents, as the reader takes one.
+            let typed = (d.get(b"Type"))
+                .is_none_or(|t| matches!(t.as_name(), Some(b"Sig" | b"DocTimeStamp")));
+            let signature = d.has(b"ByteRange") && typed;
+            for entry in d.entries_mut() {
+                if !(signature && entry.key == b"Contents") {
+                    strings(&mut entry.value, encrypt);
+                }
+            }
+        };
+        match o.value_mut() {
+            Value::String(Str::Bytes(bytes), _) => *bytes = encrypt(bytes),
+            Value::Array(a) => a.iter_mut().for_each(|o| strings(o, encrypt)),
+            Value::Dict(d) => entries(d),
+            Value::Stream(s) => entries(&mut s.dict),
+            _ => {}
+        }
+    }
+    let mut written = Vec::new();
+    for (n, body) in objects {
+        let id = (*n, 0);
+        let mut string = |bytes: &[u8]| encrypt(id, bytes, false);
+        written.push((
+            *n,
+            match body {
+                Body::Object(object) => {
+                    let mut object = object.clone();
+                    strings(&mut object, &mut string);
+                    Body::Object(object)
+                }
+                Body::Stream(dict, data) => {
+                    // Metadata under /EncryptMetadata false isn't encrypted.
+                    let metadata = dict.get(b"Type").and_then(Object::as_name) == Some(b"Metadata");
+                    let mut dict: Object = dict.clone().into();
+                    strings(&mut dict, &mut string);
+                    let Value::Dict(dict) = dict.into_value() else {
+                        unreachable!()
+                    };
+                    let data = match metadata && !handler.encrypts_metadata() {
+                        true => data.clone(),
+                        false => encrypt(id, data, true),
+                    };
+                    Body::Stream(dict, data)
+                }
+            },
+        ));
+    }
+    let own = objects.iter().map(|(n, _)| *n).max().unwrap_or(0) + 1;
     written.push((own, Body::Object(dict.into())));
+    let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));
     let mut trailer = trailer;
     trailer.set("Encrypt", Object::reference(own));
-    trailer.set("ID", vec![s(settings.id), s(settings.id)]);
+    trailer.set("ID", vec![s(file_id), s(file_id)]);
     file("1.7", &written, trailer, Xref::Table)
 }
 

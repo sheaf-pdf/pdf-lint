@@ -1,6 +1,6 @@
 # pdf-crypt
 
-PDF's standard security handler, in one small Rust crate on RustCrypto's primitives: a file's key from its encryption dictionary and a password, and its strings and streams decrypted with it, or encrypted for a writer (ISO 32000-2, §7.6).
+PDF's standard security handler, in one small Rust crate on RustCrypto's primitives: a file's key from its encryption dictionary and a password, and its strings and streams decrypted with it, or encrypted for a writer; and a new file's key and encryption dictionary, from randomness the caller passes (ISO 32000-2, §7.6).
 
 It's made for a reader that checks files as much as for one that shows them. Ciphertext that isn't what the handler wrote still decrypts as far as it can, and every fault is said.
 
@@ -9,6 +9,7 @@ It's made for a reader that checks files as much as for one that shows them. Cip
 - **Every revision of the standard handler:** 2 to 4 (RC4 with keys of 40 to 128 bits, and AES-128 through crypt filters in version 4), 5 (AES-256, as Adobe's Extension Level 3 has it, which ISO 32000-2 leaves out) and 6 (AES-256, ISO 32000-2), opened by the owner's password or the user's, the first of several that opens it.
 - **A password as typed, and the bytes tried** (`Password`, `Encoded`, `Encoding`): a password's text in its SASLprep form (RFC 4013, by the `stringprep` crate), which revisions 5 and 6 take, where that isn't the text as typed; as typed, in UTF-8, as writers that skip SASLprep set it; then, for revisions 2 to 4, whose passwords are bytes, the text composed (NFC) in PDFDocEncoding, WinAnsiEncoding and MacRomanEncoding where each has every character of it, as qpdf tries them (`Password::encodings`); or bytes as they are (`Encoded::verbatim`). A password SASLprep refuses (an emoji, a control character) has the rest alone. Each is tagged with its encoding, and wiped when it's dropped. The handler tries those whose encoding fits the file's revision first, the rest after, and none twice where the revision takes two alike (padded or cut to 32 bytes, or cut to 127), as they'd give one key; it says which opened it (`opened_by`).
 - **A new file's password, strictly** (`Password::prepared`): its SASLprep form, 1 to 127 bytes, or why it can't be one (`Unusable`): a character SASLprep doesn't allow, named, right-to-left text it doesn't allow, a password that's empty, that prepares to nothing (each of its characters one SASLprep maps to nothing) or to over 127 bytes, which a reader would cut.
+- **A new file's encryption** (`Handler::create`): a revision 6 encryption dictionary (AES-256, by Algorithms 8, 9 and 10) for a password prepared, and the handler that encrypts under it. Every permission is granted (`/P -4`), and the owner's password is the user's, so that the one password opens it, as the owner's. A password in another encoding is refused (`Unusable::Unprepared`), as is SASLprep's form that a reader tries but a new file can't take: empty, or over 127 bytes. The file's key, the user's salts, the owner's and `/Perms`' random bytes are drawn, in that order, from a random number generator the caller passes, rand_core's `CryptoRng` (re-exported as `pdf_crypt::rand_core`, at the version `create` takes): pdf-crypt has no randomness of its own. A program passes the operating system's, getrandom's `SysRng` through rand_core's `UnwrapErr`; a test, a seeded generator, which gives the same dictionary every run.
 - **Values, not dictionaries.** A `Dictionary` is the encryption dictionary's values, typed; reading them from a file is the caller's, so it works with any object model. One without `/O`, `/U` or `/P` of its type (or of version 5, `/OE`, `/UE` or `/Perms`) is refused, saying so; short values are filled out with zeros, and version 5's long ones cut short, as qpdf reads them.
 - **Crypt filters** by name and method (`/CF`, `/StmF`, `/StrF`, a stream's own `/Crypt`): `/Identity`, `/None`, `/V2`, `/AESV2`, `/AESV3`, and one that isn't, said.
 - **Every fault said, what decrypted kept:** AES ciphertext with no whole block past its IV (shorter than an IV, it stays ciphertext), a part block past the whole ones, padding that isn't, a crypt filter's method that isn't one, AES that the file's key isn't for, and `/Perms` that doesn't match or doesn't confirm the key (the file opens all the same, by another password's key when one is confirmed).
@@ -49,12 +50,36 @@ let wrong = Password("wrong").encodings();
 assert_eq!(Handler::open(&dictionary, settings.id, &wrong).unwrap_err(), Refused::Password);
 ```
 
+A new file's encryption, from a seeded generator (RustCrypto's `chacha20`, with its `rng` feature) where a program would pass the operating system's:
+
+```rust
+use chacha20::ChaCha20Rng;
+use pdf_crypt::rand_core::SeedableRng;
+use pdf_crypt::{Encoding, Handler, Password};
+
+// The password prepared: Ⅸ's SASLprep form is `IX`.
+let password = Password("\u{2168}").prepared().unwrap();
+assert_eq!(password.as_bytes(), b"IX");
+let mut rng = ChaCha20Rng::seed_from_u64(7);
+let (writer, dictionary) = Handler::create(&password, true, &mut rng).unwrap();
+assert_eq!((dictionary.v, dictionary.r, dictionary.p), (5, 6, Some(-4)));
+let title = writer.encrypt_string((5, 0), b"the Info dictionary", b"A title").unwrap();
+
+// A reader opens it by the password as typed, in its SASLprep form, as the
+// owner's (revision 6 takes no /ID).
+let reader = Handler::open(&dictionary, b"", &Password("\u{2168}").encodings()).unwrap();
+assert!(reader.owner());
+assert_eq!(reader.opened_by(), Some((0, Encoding::Saslprep)));
+assert_eq!(reader.decrypt_string((5, 0), &title).unwrap(), b"A title");
+```
+
 ## What isn't here
 
 - **Other security handlers:** the public-key handler (`/Adobe.PubSec`) and those of other names are refused, saying so.
 - **Knowing what isn't encrypted:** the encryption dictionary's own strings, a cross-reference stream, a signature's `/Contents`, metadata under `/EncryptMetadata false`. That takes the file, and is the caller's, writing as reading.
-- **A new file's encryption dictionary.** The handler encrypts under the dictionary it opened. The `writer` feature makes dictionaries, and encrypts under IVs given, but with the salts and keys given, not random: for writing test files, not for protecting a document.
-- **Wiping what it can't reach:** copies the allocator made of a buffer before it was sized, values in registers and spilled to the stack, the buffers `stringprep` and `unicode-normalization` prepare and compose a password in, and the caller's own copies of a password (a `Password` borrows the caller's text) or of plaintext. Decrypted strings and streams are the document's, not key material, and aren't wiped.
+- **New files of revisions 2 to 5.** `create` makes revision 6 alone; a file of an older revision is read, and a writer encrypts under the handler it opened. The `writer` feature makes dictionaries of every revision, and encrypts under IVs given, but with the salts and keys given, not random: for writing test files, not for protecting a document.
+- **Randomness of its own.** A new file's key and salts are what the caller's generator draws: one that isn't a cryptographic generator, or one seeded outside a test, makes a key that can be guessed.
+- **Wiping what it can't reach:** copies the allocator made of a buffer before it was sized, values in registers and spilled to the stack, the buffers `stringprep` and `unicode-normalization` prepare and compose a password in, the caller's own copies of a password (a `Password` borrows the caller's text) or of plaintext, and the state of the generator a new file's key is drawn from, which is the caller's. Decrypted strings and streams are the document's, not key material, and aren't wiped.
 - **SASLprep as of Unicode 3.2.** `stringprep` normalizes by the Unicode `unicode-normalization` has, not by 3.2, which SASLprep's tables are of (RFC 3454): for the five characters Unicode's Corrigendum #4 changed and the sequences Corrigendum #5 did, its form isn't a 3.2 SASLprep's. Every other password's is.
 
 ## License

@@ -1,6 +1,7 @@
 //! PDF's standard security handler (ISO 32000-2, 7.6.4): a file's key from
 //! its encryption dictionary and a password, and its strings and streams
-//! decrypted with it, or encrypted for a writer.
+//! decrypted with it, or encrypted for a writer; and a new file's key and
+//! dictionary.
 //!
 //! - **Values, not dictionaries.** A [`Dictionary`] is the encryption
 //!   dictionary's values, typed; reading them from the file is the
@@ -16,6 +17,13 @@
 //!   revision first, and says which opened it. A new file's password is
 //!   [`prepared`](Password::prepared), strictly: SASLprep's form, or why
 //!   it can't be one ([`Unusable`]).
+//! - **A new file's encryption:** [`Handler::create`] makes a revision 6
+//!   dictionary (AES-256) for a prepared password, every permission
+//!   granted and the owner's password the user's, and the handler to
+//!   encrypt under it. Its key and salts are drawn from a random number
+//!   generator the caller passes ([`rand_core`]'s `CryptoRng`, re-exported
+//!   so that a caller names the version it takes): pdf-crypt has no
+//!   randomness of its own.
 //! - **Every fault said, what decrypted kept,** as a checker wants it: AES
 //!   ciphertext too short, a part block past the whole ones, padding that
 //!   isn't, a crypt filter's method that isn't one, `/Perms` that doesn't
@@ -57,6 +65,7 @@ pub mod writer;
 
 pub use handler::{Handler, Method};
 pub use password::{Encoded, Encoding, Password, Unusable};
+pub use rand_core;
 
 /// An encryption dictionary's values, as the standard security handler
 /// takes them (ISO 32000-2, Tables 20 and 21).

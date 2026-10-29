@@ -945,6 +945,164 @@ mod tests {
         }
     }
 
+    /// Whether `x`, read by `a`, and `y`, by `b`, are alike, references
+    /// followed in step, each pair once: a dictionary's keys in any order, a
+    /// string's form aside, and a stream's data decoded, its `/Length`
+    /// aside. Else where they differ.
+    fn alike(
+        (a, x): (&bytes::Reading<Vec<u8>>, &Object),
+        (b, y): (&bytes::Reading<Vec<u8>>, &Object),
+        followed: &mut BTreeMap<ObjectId, ObjectId>,
+    ) -> Result<(), String> {
+        let differ = || Err(format!("{:?} and {:?}", x.value(), y.value()));
+        let dicts = |x: &Dict, y: &Dict, followed: &mut BTreeMap<_, _>| {
+            let keys = |d: &Dict| {
+                (d.iter().map(|(k, _)| k.to_vec()))
+                    .filter(|k| k != b"Length")
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            if keys(x) != keys(y) {
+                return Err(format!("keys {:?} and {:?}", keys(x), keys(y)));
+            }
+            keys(x).iter().try_for_each(|k| {
+                let (x, y) = (x.get(k).unwrap(), y.get(k).unwrap());
+                alike((a, x), (b, y), followed)
+            })
+        };
+        match (x.value(), y.value()) {
+            (Value::String(s, _), Value::String(t, _)) if s == t => Ok(()),
+            (Value::Array(s), Value::Array(t)) if s.len() == t.len() => {
+                (s.iter().zip(t)).try_for_each(|(x, y)| alike((a, x), (b, y), followed))
+            }
+            (Value::Dict(s), Value::Dict(t)) => dicts(s, t, followed),
+            (Value::Ref(i), Value::Ref(j)) => match followed.get(i) {
+                Some(seen) if seen == j => Ok(()),
+                Some(_) => differ(),
+                None => {
+                    followed.insert(*i, *j);
+                    let (x, y) = (a.get(*i).unwrap(), b.get(*j).unwrap());
+                    match (x.value(), y.value()) {
+                        (Value::Stream(s), Value::Stream(t)) => {
+                            dicts(&s.dict, &t.dict, followed)?;
+                            let (s, t) = (a.decoded(*i).unwrap(), b.decoded(*j).unwrap());
+                            (s == t).then_some(()).ok_or(format!("{i:?}'s data"))
+                        }
+                        _ => alike((a, x), (b, y), followed),
+                    }
+                }
+            },
+            (x, y) if x == y => Ok(()),
+            _ => differ(),
+        }
+    }
+
+    /// A new file's encryption, as pdf-crypt creates it (revision 6,
+    /// AES-256) and the test writer writes it, opens in qpdf by the
+    /// password's SASLprep form, which qpdf takes as given, preparing no
+    /// password (Ⅸ, set as `IX`, opens only by `IX`): its `--check` finds
+    /// nothing wrong; `--show-encryption` says revision 6, AESv3 for
+    /// strings, streams and embedded files, `/P -4` with every permission,
+    /// the password the owner's and the user's, and the key drawn first;
+    /// and `--decrypt` writes a file the reader reads, from the trailer's
+    /// `/Root` and `/Info`, as it reads this one by the password as typed.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn a_new_files_encryption_opens_in_qpdf_and_decrypts_as_the_reader_reads_it() {
+        use chacha20::ChaCha20Rng;
+        use pdf_crypt::rand_core::{Rng, SeedableRng};
+
+        let dir = scratch("created");
+        let mut objects = clean();
+        objects.push((6, dict! { "Title" => Object::string("A title") }.into()));
+        let cases = [
+            ("user", "user"),
+            ("p\u{e4}ssw\u{f6}rd", "p\u{e4}ssw\u{f6}rd"),
+            ("\u{2168}", "IX"),
+        ];
+        for (i, (typed, prepared)) in cases.into_iter().enumerate() {
+            let password = Password(typed).prepared().unwrap();
+            assert_eq!(password.as_bytes(), prepared.as_bytes(), "{typed}");
+            let mut rng = ChaCha20Rng::seed_from_u64(6);
+            let trailer = dict! { "Root" => Object::reference(1), "Info" => Object::reference(6) };
+            let file = write::created(&password, true, &objects, trailer, &mut rng);
+            let path = dir.path().join(format!("{i}.pdf"));
+            std::fs::write(&path, &file).unwrap();
+            let qpdf = qpdf(&path).password(prepared);
+            let run = |args: &[&Path]| {
+                let mut all = vec![format!("--password={prepared}")];
+                all.extend(args.iter().map(|a| a.display().to_string()));
+                qpdf.exec(&all).unwrap()
+            };
+            let check = run(&[Path::new("--check"), &path]);
+            let said = String::from_utf8_lossy(&check.stderr).into_owned();
+            assert_eq!((check.code, said.as_str()), (Some(0), ""), "{typed}");
+            let shown = run(&[
+                Path::new("--show-encryption"),
+                Path::new("--show-encryption-key"),
+                &path,
+            ]);
+            let shown = String::from_utf8_lossy(&shown.stdout).into_owned();
+            let mut key = [0; 32];
+            ChaCha20Rng::seed_from_u64(6).fill_bytes(&mut key);
+            let key: String = key.iter().map(|b| format!("{b:02x}")).collect();
+            let lines = [
+                "R = 6",
+                "P = -4",
+                &format!("Encryption key = {key}"),
+                "Supplied password is owner password",
+                "Supplied password is user password",
+                "modify anything: allowed",
+                "stream encryption method: AESv3",
+                "string encryption method: AESv3",
+                "file encryption method: AESv3",
+            ];
+            for line in lines {
+                assert!(shown.lines().any(|l| l == line), "{typed}: {line}\n{shown}");
+            }
+            assert_eq!(shown.matches(": allowed").count(), 9, "{typed}: {shown}");
+            if typed != prepared {
+                let as_typed = Qpdf::new(&path).password(typed);
+                assert_eq!(as_typed.locked(), Ok(true), "{typed}: qpdf prepares none");
+            }
+            let decrypted = dir.path().join(format!("{i}-decrypted.pdf"));
+            let wrote = run(&[
+                Path::new("--decrypt"),
+                Path::new("--compress-streams=n"),
+                Path::new("--decode-level=none"),
+                &path,
+                &decrypted,
+            ]);
+            assert_eq!(wrote.code, Some(0), "{typed}");
+            let options = bytes::Options::DEFAULT;
+            let ours = bytes::Reading::open_with(file, &[Password(typed)], &options).unwrap();
+            let opened = crate::Encryption::Opened {
+                owner: true,
+                by: Some((0, password_by(typed, prepared))),
+            };
+            assert_eq!(*ours.encryption(), opened, "{typed}");
+            let theirs = std::fs::read(&decrypted).unwrap();
+            let theirs = bytes::Reading::open(theirs, &options).unwrap();
+            assert_eq!(*theirs.encryption(), crate::Encryption::None, "{typed}");
+            let mut followed = BTreeMap::new();
+            for key in [&b"Root"[..], b"Info"] {
+                let x = ours.trailer().dict().get(key).unwrap();
+                let y = theirs.trailer().dict().get(key).unwrap();
+                let alike = alike((&ours, x), (&theirs, y), &mut followed);
+                assert_eq!(alike, Ok(()), "{typed}");
+            }
+            assert_eq!(followed.len(), 6, "{typed}: every object followed");
+        }
+    }
+
+    /// The encoding that opens a file set with `prepared` by `typed`: its
+    /// SASLprep form where that's another text, else as typed.
+    fn password_by(typed: &str, prepared: &str) -> pdf_crypt::Encoding {
+        match typed == prepared {
+            true => pdf_crypt::Encoding::Utf8,
+            false => pdf_crypt::Encoding::Saslprep,
+        }
+    }
+
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
     fn a_qpdf_that_cant_run_says_why_for_every_stream() {

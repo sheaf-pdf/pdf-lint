@@ -5,8 +5,7 @@
 
 use zeroize::Zeroizing;
 
-use crate::aes::Aes;
-use crate::handler::{File, Handler, Method, hash, xored};
+use crate::handler::{File, Handler, Method, seal, xored};
 use crate::rc4::rc4;
 use crate::sha2::sha256;
 use crate::{CryptFilter, Dictionary, Fault};
@@ -100,39 +99,14 @@ pub fn dictionary(settings: &Settings) -> Dictionary {
             dictionary.u = Some(u);
         }
         _ => {
-            // Algorithms 8, 9 and 10, with salts and a key from what's given.
+            // Algorithms 8, 9 and 10, as a new file's are made, but with
+            // salts and a key from what's given.
             let input = Zeroizing::new([id, user, owner].concat());
             let key = Zeroizing::new(sha256(&input));
-            let salt =
-                |n: u8| -> Vec<u8> { (0..8).map(|i| n.wrapping_mul(31).wrapping_add(i)).collect() };
-            let wrap = |intermediate: &[u8]| {
-                let mut wrapped = key.to_vec();
-                Aes::new(&intermediate[..32])
-                    .expect("32 bytes")
-                    .encrypt_cbc([0; 16], &mut wrapped);
-                wrapped
-            };
-            let user = &user[..user.len().min(127)];
-            let owner = &owner[..owner.len().min(127)];
-            let (uv, uk, ov, ok) = (salt(1), salt(2), salt(3), salt(4));
-            let u = [&hash(r, user, &uv, b"")[..], &uv, &uk].concat();
-            dictionary.ue = Some(wrap(&hash(r, user, &uk, b"")));
-            dictionary.o = Some([&hash(r, owner, &ov, &u)[..], &ov, &ok].concat());
-            dictionary.oe = Some(wrap(&hash(r, owner, &ok, &u)));
-            dictionary.u = Some(u);
-            let metadata = if encrypt_metadata { b'T' } else { b'F' };
-            let mut perms: [u8; 16] = [
-                &(p as u32).to_le_bytes()[..],
-                &[0xff; 4],
-                &[metadata],
-                b"adb",
-                b"rand",
-            ]
-            .concat()
-            .try_into()
-            .expect("16 bytes");
-            Aes::new(&key[..]).expect("32 bytes").encrypt(&mut perms);
-            dictionary.perms = Some(perms.to_vec());
+            let salts: [[u8; 8]; 4] = std::array::from_fn(|n| {
+                std::array::from_fn(|i| (n as u8 + 1).wrapping_mul(31).wrapping_add(i as u8))
+            });
+            seal(&mut dictionary, &key[..], (user, owner), &salts, *b"rand");
         }
     }
     dictionary
