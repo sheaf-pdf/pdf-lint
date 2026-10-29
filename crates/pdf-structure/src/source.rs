@@ -176,6 +176,14 @@ pub struct Document {
 /// the same of where their objects were read, whichever readings they're
 /// of, so that two readings of one file are equal; [`Record::source`]
 /// tells the readings apart.
+///
+/// It holds a hash of the bytes it names, as they were when the object was
+/// read, which the writer checks a copy of them by
+/// ([`write::Body::Read`](crate::write::Body::Read)): a fast hash, not a
+/// cryptographic one, which tells bytes changed by accident or by another
+/// program, not by one who means them to hash alike. It isn't public, so
+/// that how it's made can change; two records of the same bytes have the
+/// same one, and it's in their equality.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Record {
@@ -192,6 +200,16 @@ pub struct Record {
     /// A stream's data, as it was read: none for an object that isn't a
     /// stream.
     pub data: Option<DataExtent>,
+    /// XXH3-64 of its bytes, those [`Record::at`] names, as they were read
+    /// ([`Record::hash_of`]).
+    pub(crate) hash: u64,
+}
+
+impl Record {
+    /// What a record's hash is of `bytes`: XXH3-64 (twox-hash's).
+    pub(crate) fn hash_of(bytes: &[u8]) -> u64 {
+        twox_hash::XxHash3_64::oneshot(bytes)
+    }
 }
 
 impl PartialEq for Record {
@@ -202,8 +220,16 @@ impl PartialEq for Record {
             at,
             endobj,
             data,
+            hash,
         } = self;
-        (origin, at, endobj, data) == (&other.origin, &other.at, &other.endobj, &other.data)
+        (origin, at, endobj, data, hash)
+            == (
+                &other.origin,
+                &other.at,
+                &other.endobj,
+                &other.data,
+                &other.hash,
+            )
     }
 }
 
@@ -612,6 +638,18 @@ impl Document {
     /// Each object's record, by number: each [`Document::record`] gives.
     pub fn records(&self) -> impl DoubleEndedIterator<Item = (ObjectId, &Record)> {
         (self.objects.iter()).filter_map(|(&id, held)| Some((id, held.as_ref().ok()?.1.as_ref()?)))
+    }
+
+    /// Each object that reads, by number, with its record while it's as
+    /// read: [`Document::objects`] and [`Document::record`] in one pass,
+    /// for the writer.
+    pub(crate) fn objects_read(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (ObjectId, &Object, Option<&Record>)> {
+        (self.objects.iter()).filter_map(|(&id, held)| {
+            let (object, record) = held.as_ref().ok()?;
+            Some((id, object, record.as_ref()))
+        })
     }
 
     /// Puts `object` at `id`, with no record, as it wasn't read: gives the

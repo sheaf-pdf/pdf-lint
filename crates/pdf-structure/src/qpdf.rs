@@ -1914,6 +1914,69 @@ qpdf: operation succeeded with warnings\n";
         assert_eq!(differences(&doc, &alone), []);
     }
 
+    /// Whole files whose objects are copied as the bytes they were read
+    /// from: the test writer's, spelled otherwise than this writer spells
+    /// them (objects by hand, object stream members by hand, and
+    /// [`plaintext`](crate::write::tests::plaintext) under each method it
+    /// encrypts by), each written by its document and reading under its
+    /// own encryption, with a table and packed; checked by qpdf by their
+    /// password, and read through qpdf alone as the reader reads them, but
+    /// a signature's `/Contents` with no `/Type`, as above.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn written_copies_read_through_qpdf_as_through_the_reader() {
+        use crate::XrefKind;
+        use crate::bytes::{Options, Reading};
+        use crate::write::tests::{KINDS_ENCRYPTED, members_spelled, spelled, written_otherwise};
+        use crate::write::{self, Encryptor, Pack};
+
+        let mut sources = vec![
+            ("spelled".to_string(), spelled(), false),
+            ("members spelled".to_string(), members_spelled(), false),
+        ];
+        for kind in KINDS_ENCRYPTED {
+            sources.push((format!("{kind:?}"), written_otherwise(kind, true), true));
+        }
+        let dir = scratch("copies");
+        for (name, source, strings) in sources {
+            let passwords = [Password("user")];
+            let reading = Reading::open_with(&source[..], &passwords, &Options::DEFAULT).unwrap();
+            let doc = reading.to_document().unwrap();
+            let own = Encryptor::of(&reading).unwrap();
+            for (way, kind, pack) in [
+                ("table", XrefKind::Table, None),
+                ("packed", XrefKind::Stream, Some(Pack::DEFAULT)),
+            ] {
+                let name = format!("{name}, {way}");
+                let mut options = write::Options::DEFAULT;
+                (options.kind, options.pack) = (kind, pack);
+                let mut data = Vec::new();
+                write::document(&mut data, &doc, own.as_ref(), Some(&reading), &options).unwrap();
+                let path = dir
+                    .path()
+                    .join(format!("{}.pdf", name.replace([' ', ','], "-")));
+                std::fs::write(&path, &data).unwrap();
+                let qpdf = qpdf(&path).password("user");
+                let check = ["--password=user", "--check", &path.display().to_string()];
+                let (out, _) = qpdf.run(&check.map(String::from)).expect(&name);
+                let out = String::from_utf8_lossy(&out);
+                assert!(
+                    out.contains("No syntax or stream encoding errors found"),
+                    "{name}: {out}"
+                );
+                let alone = qpdf.read().expect(&name);
+                assert_eq!(alone.trailer.unwritten, None, "{name}");
+                assert!(alone.warnings.is_empty(), "{name}: {:?}", alone.warnings);
+                let doc = bytes::read_opened(&data, &passwords);
+                assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
+                let found = differences(&doc, &alone);
+                assert_eq!(found.len(), usize::from(strings), "{name}: {found:?}");
+                let untyped = |(_, d): &(String, String)| d.starts_with("10 0 R/Contents: ");
+                assert!(found.iter().all(untyped), "{name}: {found:?}");
+            }
+        }
+    }
+
     /// Every PDF under `PDF_LINT_CORPUS` read from its bytes, qpdf
     /// decoding, and through qpdf alone, and the differences counted by what
     /// they're of, with examples.

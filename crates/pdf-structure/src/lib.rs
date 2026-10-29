@@ -52,7 +52,10 @@
 //!   document's among them, as a whole file, its objects in object streams
 //!   built on threads where it's asked, or as an incremental update after
 //!   the file they were read from, its trailer carried; what each wrote
-//!   given back ([`write::Written`]), for an update after it.
+//!   given back ([`write::Written`]), for an update after it. An object as
+//!   it was read is copied as the bytes it was read from where they're
+//!   right to copy ([`write::Body::Read`]), checked against a hash of them
+//!   taken as it was read, its [`Record`]'s.
 //! - **Sections and object streams written** ([`write`](mod@write)): a
 //!   whole file's cross-reference section or an update's, as a table or a
 //!   stream, a whole file's stream deflated under PNG's Up predictor; and

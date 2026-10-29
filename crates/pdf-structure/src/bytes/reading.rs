@@ -29,7 +29,8 @@ use crate::source::{Document, Encryption, Facts, Record, Trailer, Unread, Update
 /// at a time from where a read starts, at first
 /// [`ByteSource::first_window`] bytes, twice as many each time what's read
 /// runs to the window's end, where more of the file could change it:
-/// [`FileBytes`](super::FileBytes) reads a file so.
+/// [`FileBytes`](super::FileBytes) reads a file so, and says whether the
+/// file changed since ([`ByteSource::unchanged`]).
 pub trait ByteSource: Send + Sync {
     /// How many bytes it has.
     fn len(&self) -> usize;
@@ -54,6 +55,19 @@ pub trait ByteSource: Send + Sync {
     /// what a read costs, never what it reads.
     fn first_window(&self) -> usize {
         4096
+    }
+
+    /// Whether its bytes are still those it had when it was made, as far as
+    /// it can tell without reading them: what the writer asks before it
+    /// reads anything of a reading's to write ([`write`](crate::write)),
+    /// refusing to write where they aren't. True, by default: bytes in
+    /// memory are the caller's, which change only as the caller changes
+    /// them. [`FileBytes`](super::FileBytes) asks its file
+    /// ([`FileBytes::unchanged`](super::FileBytes::unchanged)). Whatever it
+    /// says, an object the writer copies as the bytes it was read from is
+    /// checked against a hash of them taken as it was read.
+    fn unchanged(&self) -> io::Result<bool> {
+        Ok(true)
     }
 }
 
@@ -112,6 +126,10 @@ macro_rules! forward {
 
             fn first_window(&self) -> usize {
                 (**self).first_window()
+            }
+
+            fn unchanged(&self) -> io::Result<bool> {
+                (**self).unchanged()
             }
         }
     )*};
@@ -423,6 +441,13 @@ impl<S: ByteSource> Reading<S> {
         (self.reader.entries.iter()).map(|&(n, (generation, entry))| (n, generation, entry))
     }
 
+    /// The newest entry its sections give number `n`, as
+    /// [`Reading::entries`] gives it, for the writer, which copies an
+    /// object in an object stream only as this entry has it.
+    pub(crate) fn entry(&self, n: u32) -> Option<(u16, XrefEntry)> {
+        self.reader.entry(n).copied()
+    }
+
     /// Object `id`, as written: read the first time it's asked for, and
     /// kept, as a failure to read it is ([`Error::Unread`]), and so is the
     /// object stream it's in, decoded. Its references are kept as
@@ -584,6 +609,24 @@ impl<S: ByteSource> Reading<S> {
         match span.stream {
             None if self.reader.list.encrypts => Ok(Err(Error::Encrypted)),
             _ => self.written_in(file, span),
+        }
+    }
+
+    /// The bytes at `span` as written: in the file, an encrypted file's
+    /// too, which [`Reading::bytes`] refuses, as they may be ciphertext; or
+    /// in the decoded data of the object stream it names, decrypted, which
+    /// is decoded and kept when it isn't yet. For the writer, which copies
+    /// an object as the bytes it was read from only where they're right to
+    /// copy: under the key they're encrypted by, at their number.
+    pub(crate) fn written(&self, span: Span) -> Result<Cow<'_, [u8]>, Error> {
+        match self.source.whole() {
+            Some(file) => {
+                let Ok(bytes) = self.written_in(InMemory(file), span);
+                bytes
+            }
+            None => self
+                .written_in(self.by_position(), span)
+                .map_err(Error::Io)?,
         }
     }
 

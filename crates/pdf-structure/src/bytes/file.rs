@@ -180,6 +180,12 @@ impl super::ByteSource for FileBytes {
     fn first_window(&self) -> usize {
         FileBytes::WINDOW
     }
+
+    /// [`FileBytes::unchanged`]: the file's length and modification time
+    /// as they were when it was made.
+    fn unchanged(&self) -> io::Result<bool> {
+        FileBytes::unchanged(self)
+    }
 }
 
 /// `bytes.len()` bytes of `file` from `offset`, without moving its cursor.

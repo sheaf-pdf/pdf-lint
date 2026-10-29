@@ -3,9 +3,10 @@
 //! kind asked for, with no `/Prev` or `/XRefStm`. Encrypted, each object
 //! is encrypted under the number it's written at, an object stream's
 //! members with it, and the encryptor's `/Encrypt` and `/ID[0]` are kept.
-//! Asked to pack, what's written anew that may go in an object stream
-//! goes in one, grouped as the caller says or by number, which are built
-//! on threads, each encrypted once, as a stream, under its own number.
+//! Asked to pack, what may go in an object stream goes in one, grouped as
+//! the caller says or by number, which are built on threads, each
+//! encrypted once, as a stream, under its own number. An object as read is
+//! copied where the rules for a copy hold ([`Body::Read`]).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
@@ -13,11 +14,12 @@ use std::sync::atomic::AtomicBool;
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::serialize;
 
+use super::copy::{Copying, Member, written};
 use super::crypt::Place;
 use super::{
     Base, Bodies, Body, Deflate, Encrypting, Encryptor, Entry, Error, MEMBERS, NUMBERS, Options,
-    Pack, ReadFrom, SECTION_KEYS, Section, Written, checked, container as objstm, dangling,
-    encrypting, file_id, first_id, fresh, id_value, indirect, packable, stopped, usable,
+    Pack, ReadFrom, SECTION_KEYS, Section, Written, bodies as read, checked, container as objstm,
+    dangling, encrypting, file_id, first_id, fresh, id_value, packable, stopped, usable,
 };
 use crate::source::{Document, XrefKind};
 
@@ -53,8 +55,12 @@ const PLACES: usize = 1 << 16;
 ///   [`Options::encrypt_at`], else at its number in the file it was read
 ///   from, else past every body; or direct in the trailer where that file
 ///   had it so.
-/// - **Packed**, what's written anew and may go in an object stream
-///   ([`packable`]), but an encryption dictionary and what one refers to,
+/// - **Copied**, an object as read ([`Body::Read`]) is written as the
+///   bytes it was read from, read from `from`, where the rules for a copy
+///   hold; one read from an object stream, which goes in one of the
+///   write's, as its bytes there.
+/// - **Packed**, what may go in an object stream ([`packable`]), but an
+///   encryption dictionary and what one refers to,
 ///   goes in one after the rest, grouped by [`Pack::groups`], else by
 ///   number, [`MEMBERS`] each; numbered from [`Pack::reuse`], then past
 ///   every body and [`Options::xref_from`], the cross-reference stream
@@ -84,7 +90,10 @@ const PLACES: usize = 1 << 16;
 /// its keys are made per object ([`Encryptor::of`]); a table asked to pack;
 /// a stream's data where it was written that isn't the reading's own for
 /// its number, or with no `from`; a group naming a number that isn't
-/// packed, or one twice; what pdf-objects' writer refuses, or the
+/// packed, or one twice; a `from` whose source says it changed, and a copy
+/// whose bytes aren't those it was read from ([`Error::Changed`]), or
+/// whose record is another reading's or another object's
+/// ([`Error::Elsewhere`]); what pdf-objects' writer refuses, or the
 /// encryptor; and a write stopped.
 pub fn full<'a>(
     out: &mut Vec<u8>,
@@ -104,12 +113,14 @@ pub fn full<'a>(
 }
 
 /// `doc`'s objects as a whole file, through [`full`], its trailer
-/// `doc`'s: but object streams and cross-reference streams, whose members
-/// and entries are written anew, and a linearization dictionary, which
-/// would no longer hold; and its encryption dictionary, which the writer
-/// writes from `encryptor`, if any. Written under another encryption than
-/// the one `doc`'s file was read with (none, or a new one), the objects
-/// its encryption dictionary refers to are left out too.
+/// `doc`'s, each as read where it is ([`bodies`](super::bodies)), so that
+/// given the reading `doc` was read in, it's copied where the rules for a
+/// copy hold: but object streams and cross-reference streams, whose
+/// members and entries are written anew, and a linearization dictionary,
+/// which would no longer hold; and its encryption dictionary, which the
+/// writer writes from `encryptor`, if any. Written under another
+/// encryption than the one `doc`'s file was read with (none, or a new
+/// one), the objects its encryption dictionary refers to are left out too.
 pub fn document(
     out: &mut Vec<u8>,
     doc: &Document,
@@ -119,9 +130,7 @@ pub fn document(
 ) -> Result<Written, Error> {
     let trailer = doc.trailer.dict();
     let left = encryption_objects(doc, encryptor);
-    let bodies = (doc.objects())
-        .filter(|(id, obj)| !left_out(obj) && !left.contains(id))
-        .map(|(id, obj)| (id, Body::from(obj)));
+    let bodies = read(doc).filter(|(id, body)| !left_out(body.object()) && !left.contains(id));
     full(out, bodies, trailer, encryptor, from, options)
 }
 
@@ -179,7 +188,15 @@ fn file(
     let pack = (options.pack).filter(|_| encryptor.is_none_or(Encryptor::packs));
     let past = (bodies.iter().map(|(id, _)| id.0.saturating_add(1))).fold(1, u32::max);
     let reuse = options.pack.map_or(&[][..], |pack| pack.reuse);
-    let dangling = dangling(bodies, trailer, past, reuse);
+    // The writer numbers objects of its own only for a stream section,
+    // object streams and a new encryption dictionary.
+    let numbers = options.kind == XrefKind::Stream
+        || pack.is_some()
+        || encryptor.is_some_and(|e| e.place() == Place::New && options.encrypt_at.is_none());
+    let dangling = match numbers {
+        true => dangling(bodies, trailer, past, reuse),
+        false => HashSet::new(),
+    };
     let encrypt_at = match encryptor.map(Encryptor::place) {
         None | Some(Place::Direct) => None,
         Some(Place::At(at)) => Some(options.encrypt_at.unwrap_or(at)),
@@ -189,6 +206,9 @@ fn file(
     if let Some(at) = encrypt_at {
         usable(at.0)?;
     }
+    // What's copied, by the encryption as given.
+    let copying = from.map(|from| Copying::new(from, encryptor)).transpose()?;
+    let copying = copying.as_ref();
     // One section, whose /Encrypt is the only one: what's at a number the
     // file read named so, and this one doesn't, is encrypted.
     let whole = encryptor.map(|e| e.whole(encrypt_at));
@@ -206,17 +226,17 @@ fn file(
     let mut section = Section::full(1);
     let mut next = 1;
     // What goes in object streams, written once they're numbered.
-    let mut members: Vec<(ObjectId, &Object)> = Vec::new();
+    let mut members: Vec<(ObjectId, &Body<'_>)> = Vec::new();
     for (id, body) in bodies {
         stopped(options.stop)?;
         let (id, obj) = (*id, body.object());
         next = next.max(id.0 + 1);
         let dictionary = encryptor.is_some_and(|e| e.dictionary_object(id));
         if pack.is_some() && packable(id, obj) && !dictionary {
-            members.push((id, obj));
+            members.push((id, body));
             continue;
         }
-        let pos = indirect(out, id, obj, encrypting, from)? - start;
+        let pos = written(out, id, body, encrypting, from, copying)? - start;
         let generation = id.1;
         section.insert(id.0, Entry::InUse { pos, generation });
     }
@@ -244,6 +264,7 @@ fn file(
             encryptor,
             encrypting,
             from,
+            copying,
             options,
             dangling: &dangling,
         };
@@ -293,6 +314,8 @@ struct Packing<'w> {
     encryptor: Option<&'w Encryptor>,
     encrypting: Option<&'w Encrypting<'w>>,
     from: Option<&'w dyn ReadFrom>,
+    /// What's copied by, where `from` is given.
+    copying: Option<&'w Copying<'w>>,
     options: &'w Options<'w>,
     /// The numbers what's written refers to and doesn't hold, which no
     /// object stream takes.
@@ -309,12 +332,14 @@ impl Packing<'_> {
         &self,
         out: &mut Vec<u8>,
         section: &mut Section,
-        members: &[(ObjectId, &Object)],
+        members: &[(ObjectId, &Body<'_>)],
         pack: Pack<'_>,
         mut next: u32,
     ) -> Result<u32, Error> {
-        let by_number: HashMap<u32, (ObjectId, &Object)> =
-            members.iter().map(|&(id, obj)| (id.0, (id, obj))).collect();
+        let by_number: HashMap<u32, (ObjectId, &Body<'_>)> = members
+            .iter()
+            .map(|&(id, body)| (id.0, (id, body)))
+            .collect();
         let mut numbers: Vec<u32> = by_number.keys().copied().collect();
         numbers.sort_unstable();
         let grouped = match pack.groups {
@@ -329,8 +354,8 @@ impl Packing<'_> {
         }
         let grouped: Vec<Vec<u32>> = grouped.into_iter().filter(|g| !g.is_empty()).collect();
         // Those no group takes, on their own.
-        for &(id, obj) in members.iter().filter(|(id, _)| !placed.contains(&id.0)) {
-            self.plain(out, section, id, obj)?;
+        for &(id, body) in members.iter().filter(|(id, _)| !placed.contains(&id.0)) {
+            self.plain(out, section, id, body)?;
         }
         let encryptor = self.encryptor;
         let taken = |n| {
@@ -343,15 +368,27 @@ impl Packing<'_> {
         let Some(given) = container_numbers(grouped.len(), pack.reuse, from, taken) else {
             for group in &grouped {
                 for n in group {
-                    let (id, obj) = by_number[n];
-                    self.plain(out, section, id, obj)?;
+                    let (id, body) = by_number[n];
+                    self.plain(out, section, id, body)?;
                 }
             }
             return Ok(next);
         };
-        let groups: Vec<(u32, Vec<(ObjectId, &Object)>)> = (given.into_iter().zip(grouped))
-            .map(|(n, group)| (n, group.iter().map(|m| by_number[m]).collect()))
-            .collect();
+        // Each member's bytes as read, where it's copied, else its value.
+        let mut groups: Vec<(u32, Vec<(ObjectId, Member<'_>)>)> = Vec::with_capacity(given.len());
+        for (n, group) in given.into_iter().zip(grouped) {
+            let mut members = Vec::with_capacity(group.len());
+            for m in &group {
+                let (id, body) = by_number[m];
+                let copied = match self.copying {
+                    Some(copying) => copying.member(id, body)?,
+                    None => None,
+                };
+                let member = copied.map_or(Member::Object(body.object()), Member::Copied);
+                members.push((id, member));
+            }
+            groups.push((n, members));
+        }
         let threads = match self.options.threads {
             0 => std::thread::available_parallelism().map_or(1, |n| n.get().min(8)),
             n => n,
@@ -366,8 +403,9 @@ impl Packing<'_> {
         )?;
         for ((n, group), container) in groups.iter().zip(built) {
             let Some(container) = container else {
-                for &(id, obj) in group {
-                    self.plain(out, section, id, obj)?;
+                for (id, _) in group {
+                    let (id, body) = by_number[&id.0];
+                    self.plain(out, section, id, body)?;
                 }
                 continue;
             };
@@ -386,17 +424,18 @@ impl Packing<'_> {
         Ok(next)
     }
 
-    /// Object `id`, `obj`, which was to be packed, written on its own after
-    /// the rest of `out`, and listed in `section`.
+    /// Object `id`, `body`, which was to be packed, written on its own
+    /// after the rest of `out`, copied where it's copied, and listed in
+    /// `section`.
     fn plain(
         &self,
         out: &mut Vec<u8>,
         section: &mut Section,
         id: ObjectId,
-        obj: &Object,
+        body: &Body<'_>,
     ) -> Result<(), Error> {
         stopped(self.options.stop)?;
-        let pos = indirect(out, id, obj, self.encrypting, self.from)? - self.start;
+        let pos = written(out, id, body, self.encrypting, self.from, self.copying)? - self.start;
         let generation = id.1;
         section.insert(id.0, Entry::InUse { pos, generation });
         Ok(())
@@ -435,13 +474,13 @@ fn container_numbers(
 /// before each, and joined in order, so that the same groups build the
 /// same bytes however many threads build them.
 pub(super) fn containers(
-    groups: &[(u32, Vec<(ObjectId, &Object)>)],
+    groups: &[(u32, Vec<(ObjectId, Member<'_>)>)],
     encrypting: Option<&Encrypting<'_>>,
     deflate: Deflate,
     threads: usize,
     stop: Option<&AtomicBool>,
 ) -> Result<Vec<Option<Vec<u8>>>, Error> {
-    let build = |part: &[(u32, Vec<(ObjectId, &Object)>)]| -> Result<Vec<_>, Error> {
+    let build = |part: &[(u32, Vec<(ObjectId, Member<'_>)>)]| -> Result<Vec<_>, Error> {
         (part.iter())
             .map(|(n, members)| {
                 stopped(stop)?;
@@ -470,11 +509,12 @@ pub(super) fn containers(
 }
 
 /// `members` as object stream `n`, written as an indirect object,
-/// encrypted by `encrypting` when given: none when its data wouldn't
-/// [`fit`](super::fits), or it has more members than [`PLACES`].
+/// encrypted by `encrypting` when given, each member's value written anew
+/// or its bytes as read: none when its data wouldn't [`fit`](super::fits),
+/// or it has more members than [`PLACES`].
 fn container(
     n: u32,
-    members: &[(ObjectId, &Object)],
+    members: &[(ObjectId, Member<'_>)],
     encrypting: Option<&Encrypting<'_>>,
     deflate: Deflate,
 ) -> Result<Option<Vec<u8>>, Error> {
@@ -482,11 +522,18 @@ fn container(
         return Ok(None);
     }
     let mut written = Vec::with_capacity(members.len());
-    for &(id, obj) in members {
+    for (id, member) in members {
+        let obj = match member {
+            Member::Object(obj) => obj,
+            Member::Copied(bytes) => {
+                written.push((id.0, bytes.to_vec()));
+                continue;
+            }
+        };
         let mut bytes = Vec::new();
         if let Err(e) = serialize::write(&mut bytes, obj) {
             // The refusal, said of the object.
-            let named = serialize::indirect(&mut Vec::new(), id, obj).err();
+            let named = serialize::indirect(&mut Vec::new(), *id, obj).err();
             return Err(Error::Serialize(named.unwrap_or(e)));
         }
         written.push((id.0, bytes));

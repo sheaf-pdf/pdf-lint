@@ -10,10 +10,11 @@ use std::io;
 
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 
+use super::copy::{Copying, written};
 use super::crypt::Place;
 use super::{
     Bodies, Body, Encryptor, Entry, Error, NUMBERS, Options, ReadFrom, SECTION_KEYS, Section,
-    Written, checked, dangling, encrypting, file_id, first_id, fresh, id_value, indirect, stopped,
+    Written, checked, dangling, encrypting, file_id, first_id, fresh, id_value, stopped,
 };
 use crate::bytes::{ByteSource, Reading, SourceId};
 use crate::source::XrefKind;
@@ -50,7 +51,8 @@ pub struct Base {
     pub trailer: Dict,
     /// The reading its bytes are the bytes of, when it was made of one:
     /// kept by an update after it, which appends, and none after a whole
-    /// file.
+    /// file. An update after it passes over an object as that reading read
+    /// it ([`Body::Read`]), whose bytes are in the file already.
     pub source: Option<SourceId>,
 }
 
@@ -154,14 +156,18 @@ impl Base {
 }
 
 /// An update after `base` that writes `bodies`, at the end of `out`: none
-/// when there are none. After a newline, where `base`'s last line isn't
-/// ended, each body at its number, in the order given, then a section of
-/// `base`'s kind listing only those, in runs, positions counted from
-/// `base`'s header, a stream's not deflated, numbered at
+/// when there are none, but an object as the reading `base` is of read it
+/// ([`Body::Read`], [`Base::source`]), which is in the file already and
+/// is passed over, so that a document's [`bodies`](super::bodies) write
+/// what was built or changed since. After a newline, where `base`'s last
+/// line isn't ended, each body at its number, in the order given, then a
+/// section of `base`'s kind listing only those, in runs, positions counted
+/// from `base`'s header, a stream's not deflated, numbered at
 /// [`Options::xref_from`] or past `base.size` and every number written,
 /// whichever is higher, passing over a number the objects written or the
-/// trailer refer to and no object written holds. Its positions are `base.len` and its offset from
-/// where it starts in `out`, so `out` may be empty or hold the file. Of
+/// trailer refer to and no object written holds. Its positions are
+/// `base.len` and its offset from where it starts in `out`, so `out` may
+/// be empty or hold the file. Of
 /// the [`Options`], it takes `deflate`, `xref_from` and `stop`; it writes
 /// each object on its own, never in an object stream.
 ///
@@ -180,6 +186,9 @@ impl Base {
 ///   where it was written read from `from`, decrypted, and encrypted again.
 ///   Its `/Encrypt` is repeated as the file has it, a reference or the
 ///   dictionary.
+/// - **Copied**, an object as read of another reading than `base`'s, read
+///   from `from`, is written as the bytes it was read from where the rules
+///   for a copy hold ([`Body::Read`]).
 ///
 /// **Under RC4**, an object written again at its number and generation is
 /// encrypted with the keystream its earlier version, still in the file,
@@ -200,7 +209,10 @@ impl Base {
 /// where its keys are made per object ([`Encryptor::of`]); a
 /// cross-reference stream with no number left below [`NUMBERS`]; a
 /// stream's data where it was written that isn't the reading's own for its
-/// number, or with no `from`; what pdf-objects' writer refuses, or the
+/// number, or with no `from`; a `from` whose source says it changed, and a
+/// copy whose bytes aren't those it was read from ([`Error::Changed`]), or
+/// whose record is another reading's or another object's
+/// ([`Error::Elsewhere`]); what pdf-objects' writer refuses, or the
 /// encryptor; and a write stopped.
 pub fn update<'a>(
     out: &mut Vec<u8>,
@@ -211,7 +223,14 @@ pub fn update<'a>(
     options: &Options<'_>,
 ) -> Result<Option<Written>, Error> {
     let start = out.len();
-    let bodies: Vec<(ObjectId, Body<'a>)> = bodies.into_iter().collect();
+    // What the file holds as read already, passed over.
+    let held = |body: &Body<'_>| {
+        let record = body.record().map(|record| record.source);
+        record.is_some() && record == base.source
+    };
+    let bodies: Vec<(ObjectId, Body<'a>)> = (bodies.into_iter())
+        .filter(|(_, body)| !held(body))
+        .collect();
     if bodies.is_empty() {
         return Ok(None);
     }
@@ -248,6 +267,7 @@ fn appended(
     }
     let encrypt_at = encryptor.and_then(Encryptor::at).map(|at| at.0);
     checked(bodies, encrypt_at, encryptor)?;
+    let copying = from.map(|from| Copying::new(from, encryptor)).transpose()?;
     // What the encryptor resolves references by, where there's one.
     let resolve = encryptor.map(|_| Bodies::new(bodies, from));
     let encrypting = match (encryptor, &resolve) {
@@ -263,7 +283,7 @@ fn appended(
     for (id, body) in bodies {
         stopped(options.stop)?;
         let pos = at(out);
-        indirect(out, *id, body.object(), encrypting.as_ref(), from)?;
+        written(out, *id, body, encrypting.as_ref(), from, copying.as_ref())?;
         let generation = id.1;
         section.insert(id.0, Entry::InUse { pos, generation });
     }

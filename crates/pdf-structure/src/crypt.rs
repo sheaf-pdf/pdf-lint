@@ -73,6 +73,7 @@ pub(crate) enum Eff {
 }
 
 /// How a stream's data is encrypted, by the [`List`].
+#[derive(PartialEq, Eq)]
 pub(crate) enum Stream {
     /// It isn't: it's in the clear.
     Clear,

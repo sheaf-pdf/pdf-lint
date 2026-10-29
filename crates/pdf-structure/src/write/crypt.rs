@@ -15,7 +15,7 @@ use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
 use pdf_objects::serialize::{self, Encrypt};
 
 use super::Error;
-use crate::bytes::{ByteSource, Reading, XrefEntry};
+use crate::bytes::{ByteSource, Reading, SourceId, XrefEntry};
 use crate::crypt::{self, List, Stream};
 use crate::filter;
 use crate::source::Encryption;
@@ -41,6 +41,9 @@ pub struct Encryptor {
     /// generation (ISO 32000-2, 7.6.3, Algorithm 1): a new object there
     /// would be encrypted with a deleted object's key. Empty otherwise.
     free: HashSet<u32>,
+    /// The reading it was made of, whose objects it encrypts as the
+    /// reading's file has them: none for a new file's.
+    source: Option<SourceId>,
 }
 
 /// Where an encryption dictionary was.
@@ -102,6 +105,7 @@ impl Encryptor {
                     place: stored.at.map_or(Place::Direct, Place::At),
                     first_id: Some(stored.id.clone()),
                     free,
+                    source: Some(reading.id()),
                 }))
             }
             _ => Err(Error::Locked),
@@ -134,6 +138,7 @@ impl Encryptor {
             place: Place::New,
             first_id: None,
             free: HashSet::new(),
+            source: None,
         })
     }
 
@@ -200,6 +205,12 @@ impl Encryptor {
         whole.list.dictionaries.retain(|id| !named(id));
         whole.list.sections = at.into_iter().collect();
         Cow::Owned(whole)
+    }
+
+    /// The reading it was made of ([`Encryptor::of`]), whose objects a
+    /// write under it may copy as their bytes: none for a new file's.
+    pub(super) fn read_in(&self) -> Option<SourceId> {
+        self.source
     }
 
     /// Whether `n` is a number the file it was read from lists free, under
@@ -305,6 +316,42 @@ pub enum Unencryptable {
         "it's an embedded file's data, and the encryption dictionary's /EFF, which says how that's encrypted, isn't a name"
     )]
     Unsaid,
+}
+
+impl<'a> Encrypting<'a> {
+    /// Whether object `id`, `obj`, as the reading `read` was made of read
+    /// it, is encrypted by this as that reading decrypted it: its strings
+    /// by the same rule, and its stream's data, its own crypt filter
+    /// followed through what's written here and through `there`, the
+    /// reading's objects, there, and the reading's document metadata
+    /// stream `metadata`. So, where `read`'s key is this one's, its bytes,
+    /// written at its number, read back as the reading read them.
+    pub(super) fn keeps<'o>(
+        &self,
+        read: &Encryptor,
+        there: &dyn Fn(ObjectId) -> Option<&'o Object>,
+        metadata: Option<ObjectId>,
+        id: ObjectId,
+        obj: &'o Object,
+    ) -> bool
+    where
+        'a: 'o,
+    {
+        let (now, then) = (&self.encryptor.list, &read.list);
+        if now.encrypted(id) != then.encrypted(id) {
+            return false;
+        }
+        let Value::Stream(stream) = obj.value() else {
+            return true;
+        };
+        let dict = &stream.dict;
+        let here = |id| -> Option<&'o Object> { self.resolve.resolve(id) };
+        let own_here = || Ok::<_, Infallible>(filter::crypt_filter(dict, Some(&here)));
+        let own_there = || Ok::<_, Infallible>(filter::crypt_filter(dict, Some(there)));
+        let Ok(here) = now.stream(id, dict, own_here, || Ok(self.metadata));
+        let Ok(there) = then.stream(id, dict, own_there, || Ok(metadata));
+        here == there
+    }
 }
 
 impl Encrypt for Encrypting<'_> {

@@ -5,6 +5,7 @@
 //! encrypted file's objects, encrypted as they're written, read back by
 //! their password, nothing the list encrypts in the clear.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use pdf_crypt::Fault;
@@ -16,9 +17,10 @@ use pdf_objects::object::{Data, Dict, Form, Object, ObjectId, Str, Stream, Value
 use pdf_objects::serialize::{self, Encrypt, Refused};
 
 use super::{Deflate, Encryptor, Entry, Error, Section, Unencryptable};
-use crate::bytes::{self, Limits, Options, Reading, XrefEntry};
+use crate::bytes::{self, ByteSource, Limits, Options, Reading, XrefEntry};
 use crate::fixture::{self, Body, Xref};
-use crate::{Encryption, Password, Source, XrefKind, write};
+use crate::fuzz::Flipped;
+use crate::{Encryption, Password, Record, Source, XrefKind, write};
 
 fn open(bytes: &[u8]) -> Reading<Arc<[u8]>> {
     Reading::open(Arc::<[u8]>::from(bytes), &Options::DEFAULT).unwrap()
@@ -2330,9 +2332,9 @@ fn containers_build_alike_on_one_thread_and_on_eight() {
             ((n, 0), Object::from(dict! { "N" => n, "Text" => text }))
         })
         .collect();
-    let groups: Vec<(u32, Vec<(ObjectId, &Object)>)> = (5000..)
+    let groups: Vec<(u32, Vec<(ObjectId, super::copy::Member<'_>)>)> = (5000..)
         .zip(objects.chunks(100))
-        .map(|(n, part)| (n, part.iter().map(|(id, o)| (*id, o)).collect()))
+        .map(|(n, part)| (n, part.iter().map(|(id, o)| (*id, o.into())).collect()))
         .collect();
     let trailer = dict! { "Root" => (1, 0) };
     let resolve = |_: ObjectId| None;
@@ -3284,7 +3286,9 @@ fn identity_stmf_under_an_encrypting_strf_isn_t_packed() {
 /// read from the reading; each read back by the same password: sound,
 /// encrypted as it was, every object a whole write keeps the same, spans
 /// aside, a stream's data as handed out, and the update's catalog
-/// changed.
+/// changed. Each object read at an offset that a whole write writes on
+/// its own is copied as the bytes it was read from, where the rules for a
+/// copy hold of its record.
 fn assert_rewrites(file: &[u8], password: &str, name: &str) {
     let reading = opened(file, password);
     let encryptor = Encryptor::of(&reading).unwrap();
@@ -3309,15 +3313,31 @@ fn assert_rewrites(file: &[u8], password: &str, name: &str) {
         let name = format!("{name}, {kind:?}, packed: {}", pack.is_some());
         let mut out = Vec::new();
         let options = options(kind, pack);
-        write::document(&mut out, &doc, encryptor.as_ref(), Some(&reading), &options).unwrap();
+        let written =
+            write::document(&mut out, &doc, encryptor.as_ref(), Some(&reading), &options).unwrap();
         let back = opened(&out, password);
         assert!(sound(&back), "{name}: {:?}", back.warnings());
         let opened = matches!(back.encryption(), Encryption::Opened { .. });
         assert_eq!(opened, encrypted, "{name}");
         assert_eq!(newest(&back).1, kind, "{name}");
+        let encryption = (doc.trailer.dict().get(b"Encrypt")).and_then(Object::as_reference);
+        let mut copies = 0;
         for &id in &kept {
             assert_eq!(handed(&back, id), handed(&reading, id), "{name}: {id:?}");
+            // But the encryption dictionary, which the writer writes itself.
+            if Some(id) == encryption {
+                continue;
+            }
+            let record = doc.record(id).unwrap();
+            let copied_ = copied(&out, &written, record, &reading, id);
+            let at = matches!(written.section.get(id.0), Some(Entry::InUse { .. }));
+            let copyable = record.origin == crate::Origin::File
+                && record.endobj
+                && (record.data).is_none_or(|d| d.declared && !d.indirect_length);
+            assert_eq!(copied_, at && copyable, "{name}: {id:?} copied");
+            copies += usize::from(copied_);
         }
+        assert!(copies > 0 || pack.is_some(), "{name}: none copied");
     }
     let root = doc
         .trailer
@@ -4496,4 +4516,746 @@ fn a_reference_to_no_object_names_none_of_the_writer_s_own() {
     let pdf = open(&updated);
     assert!(sound(&pdf), "{:?}", pdf.warnings());
     assert!(pdf.get((264, 0)).is_err());
+}
+
+// Copies (`write::Body::Read`): an object as read, written as the bytes
+// it was read from where the rules for a copy hold, each rule's test
+// failing without it.
+
+/// Objects spelled as a writer other than this one spells them, which this
+/// one writes otherwise: odd spacing, a real `1.50`, a hex string, a
+/// comment; and a stream, its `/Length` a number, its data as long.
+const SPELLED: [(u32, &[u8]); 6] = [
+    (1, b"<</Type /Catalog  /Pages 2 0 R>>"),
+    (2, b"<</Type /Pages /Kids [3 0 R] /Count 1>>"),
+    (
+        3,
+        b"<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /UserUnit 1.50 /Resources <<>> /Contents 6 0 R>>",
+    ),
+    (4, b"<48656C6C6F>"),
+    (5, b"[ 1   2 % a comment\n 3 ]"),
+    (6, b"<</Length 11>>\nstream\n0 0 m 1.5 l\nendstream"),
+];
+
+/// `objects`, [`SPELLED`]'s or others, as a file with a table, its trailer
+/// `/Root 1 0 R`.
+fn spelled_as(objects: &[(u32, &[u8])]) -> Vec<u8> {
+    let size = objects.iter().map(|(n, _)| n + 1).max().unwrap_or(1);
+    fixture::assembled("1.7", objects, &format!("<< /Size {size} /Root 1 0 R >>"))
+}
+
+/// [`SPELLED`] as a file.
+pub(crate) fn spelled() -> Vec<u8> {
+    spelled_as(&SPELLED)
+}
+
+/// Whether object `id`, which `record` says `reading` read, is in `out` as
+/// the bytes it was read from, where `written` lists it at an offset.
+fn copied<S: ByteSource>(
+    out: &[u8],
+    written: &write::Written,
+    record: &Record,
+    reading: &Reading<S>,
+    id: ObjectId,
+) -> bool {
+    let bytes = reading.written(record.at).unwrap();
+    match written.section.get(id.0) {
+        Some(Entry::InUse { pos, .. }) => out[pos..].starts_with(&bytes),
+        _ => false,
+    }
+}
+
+/// An object as read, as `doc` has it: its value and its record.
+fn read_as(doc: &crate::Document, id: ObjectId) -> write::Body<'_> {
+    write::Body::Read {
+        object: Cow::Borrowed(doc.get(id).unwrap()),
+        record: Cow::Borrowed(doc.record(id).unwrap()),
+    }
+}
+
+/// Every object of a document, each as read, is written as the bytes it was
+/// read from, given the reading it was read in: odd spacing, a real
+/// `1.50`, a comment and a stream as they were; with a table and with a
+/// stream; read back, the same objects.
+#[test]
+fn an_object_as_read_is_copied_as_the_bytes_it_was_read_from() {
+    let file = spelled();
+    let reading = open(&file);
+    let doc = reading.to_document().unwrap();
+    assert!(sound(&reading), "{:?}", reading.warnings());
+    for kind in KINDS {
+        let mut out = Vec::new();
+        let options = options(kind, None);
+        let written = write::document(&mut out, &doc, None, Some(&reading), &options).unwrap();
+        for (n, _) in SPELLED {
+            let record = doc.record((n, 0)).unwrap();
+            assert!(
+                copied(&out, &written, record, &reading, (n, 0)),
+                "{kind:?}: {n}"
+            );
+        }
+        assert!(holds(&out, b"/UserUnit 1.50") && holds(&out, b"% a comment"));
+        let back = open(&out);
+        assert!(sound(&back), "{kind:?}: {:?}", back.warnings());
+        for (id, _) in doc.objects() {
+            assert_eq!(handed(&back, id), handed(&reading, id), "{kind:?}: {id:?}");
+        }
+    }
+}
+
+/// Given no reading, an object as read is written anew, as nothing's read
+/// to copy: the same objects, as this writer spells them.
+#[test]
+fn with_no_reading_given_an_object_as_read_is_written_anew() {
+    let file = spelled();
+    let reading = open(&file);
+    let mut doc = reading.to_document().unwrap();
+    // The stream's data given as bytes, as there's no reading to read it.
+    let data = reading.data((6, 0)).unwrap().into_owned();
+    let dict = doc.get((6, 0)).unwrap().as_stream().unwrap().dict.clone();
+    doc.set((6, 0), Stream::new(dict, data));
+    assert!(
+        SPELLED[..5]
+            .iter()
+            .all(|(n, _)| doc.record((*n, 0)).is_some())
+    );
+    let mut out = Vec::new();
+    let options = options(XrefKind::Table, None);
+    write::document(&mut out, &doc, None, None, &options).unwrap();
+    assert!(!holds(&out, b"1.50") && !holds(&out, b"% a comment"));
+    let back = open(&out);
+    assert!(sound(&back), "{:?}", back.warnings());
+    for (id, _) in doc.objects() {
+        assert_eq!(handed(&back, id), handed(&reading, id), "{id:?}");
+    }
+}
+
+/// Rule 1: an object as read, its record another reading's than the one
+/// given, refuses the write, whole or an update, nothing written: its
+/// places are another file's, for all the writer knows. Two readings of
+/// one file give records equal all the same, each its own reading's.
+#[test]
+fn a_record_of_another_reading_than_the_one_given_is_refused() {
+    let file = spelled();
+    let (first, second) = (open(&file), open(&file));
+    let doc = first.to_document().unwrap();
+    let again = second.to_document().unwrap();
+    for (id, record) in doc.records() {
+        let other = again.record(id).unwrap();
+        assert_eq!(other, record, "{id:?}");
+        assert_eq!((record.source, other.source), (first.id(), second.id()));
+    }
+    let options = options(XrefKind::Table, None);
+    let mut out = Vec::new();
+    let refused = write::document(&mut out, &doc, None, Some(&second), &options);
+    assert_eq!(refused, Err(Error::Elsewhere((1, 0))));
+    assert!(out.is_empty());
+    let mut base = write::Base::of(&second).unwrap();
+    base.source = None;
+    let mut updated = file.clone();
+    let refused = write::update(
+        &mut updated,
+        &base,
+        write::bodies(&doc),
+        None,
+        Some(&second),
+        &options,
+    );
+    assert_eq!(refused, Err(Error::Elsewhere((1, 0))));
+    assert_eq!(updated, file);
+    write::document(&mut out, &doc, None, Some(&first), &options).unwrap();
+}
+
+/// [`plaintext`] as the test writer encrypts it under `kind`, user `user`,
+/// the document's metadata encrypted as `encrypt_metadata` says: spelled,
+/// and its AES IVs drawn, otherwise than this writer's, so that a copy's
+/// bytes are told from what this writer writes anew.
+pub(crate) fn written_otherwise(kind: Kind, encrypt_metadata: bool) -> Vec<u8> {
+    let (plain, trailer) = plaintext();
+    let objects: Vec<(u32, fixture::Body)> = (plain.into_iter())
+        .map(|(n, o)| match o.into_value() {
+            Value::Stream(s) => (n, Body::Stream(s.dict, s.data.bytes().unwrap().to_vec())),
+            value => (n, Body::Object(Object::new(value))),
+        })
+        .collect();
+    fixture::encrypted(&settings(kind, encrypt_metadata), &objects, trailer)
+}
+
+/// The methods the test writer encrypts by.
+pub(crate) const KINDS_ENCRYPTED: [Kind; 5] = [
+    Kind::Rc4By40,
+    Kind::Rc4By128,
+    Kind::Aes128,
+    Kind::Aes256R5,
+    Kind::Aes256,
+];
+
+/// Rule 2: an object read at an offset is copied under an encryptor of
+/// the reading it was read in, its ciphertext as it was; written anew
+/// under another, a new one or another reading's of the same file (whose
+/// key is the same, but which this writer can't tell is), and decrypted.
+/// Read back alike every way, nothing in the clear but where it's
+/// decrypted.
+#[test]
+fn objects_at_offsets_are_copied_under_their_own_reading_s_encryption_alone() {
+    use chacha20::ChaCha20Rng;
+
+    let (plain, _) = plaintext();
+    let prepared = Password("new").prepared().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(12);
+    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    for kind in KINDS_ENCRYPTED {
+        let source = written_otherwise(kind, true);
+        let reading = opened(&source, "user");
+        let doc = reading.to_document().unwrap();
+        let own = Encryptor::of(&reading).unwrap();
+        let other = Encryptor::of(&opened(&source, "user")).unwrap();
+        let ways = [
+            ("its own", own.as_ref(), "user", true),
+            ("another reading's", other.as_ref(), "user", false),
+            ("decrypted", None, "", false),
+            ("created", Some(&created), "new", false),
+        ];
+        for (way, encryptor, password, copies) in ways {
+            let name = format!("{kind:?}, {way}");
+            let mut out = Vec::new();
+            let options = options(XrefKind::Table, None);
+            let written =
+                write::document(&mut out, &doc, encryptor, Some(&reading), &options).unwrap();
+            let back = opened(&out, password);
+            assert!(sound(&back), "{name}: {:?}", back.warnings());
+            for (n, _) in &plain {
+                let id = (*n, 0);
+                let record = doc.record(id).unwrap();
+                let was = copied(&out, &written, record, &reading, id);
+                assert_eq!(was, copies, "{name}: {id:?}");
+                assert_alike(&handed(&back, id), &handed(&reading, id), &name);
+            }
+            if encryptor.is_some() {
+                for text in SECRETS {
+                    let said = String::from_utf8_lossy(text);
+                    assert!(!in_clear(&out, text), "{name}: {said:?}");
+                }
+            }
+        }
+    }
+}
+
+/// Rule 2, the list: under `/EncryptMetadata false`, the document's
+/// metadata stream, its data in the clear, once the catalog names another
+/// is written anew, encrypted, under the reading's own encryption: copied,
+/// its data would be read back decrypted, as any stream's. The one the
+/// catalog names now, new, is in the clear; what the list says the same of
+/// is copied.
+#[test]
+fn an_object_the_list_says_otherwise_of_in_the_file_written_isn_t_copied() {
+    const NEW_XMP: &[u8] = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">another</x:xmpmeta>";
+    let source = written_otherwise(Kind::Aes128, false);
+    assert!(holds(&source, XMP), "in the clear in the file read");
+    let reading = opened(&source, "user");
+    let mut doc = reading.to_document().unwrap();
+    let root = (doc.trailer.dict().get(b"Root"))
+        .and_then(Object::as_reference)
+        .unwrap();
+    let old = (doc.get_dict(root).unwrap().get(b"Metadata"))
+        .and_then(Object::as_reference)
+        .unwrap();
+    let new = doc.new_id();
+    let dict = dict! { "Type" => "Metadata", "Subtype" => "XML" };
+    doc.set(new, Stream::new(dict, NEW_XMP.to_vec()));
+    (doc.get_dict_mut(root).unwrap()).set("Metadata", Object::from(new));
+    let encryptor = Encryptor::of(&reading).unwrap();
+    let mut out = Vec::new();
+    let options = options(XrefKind::Table, None);
+    let written =
+        write::document(&mut out, &doc, encryptor.as_ref(), Some(&reading), &options).unwrap();
+    let copies = |id| copied(&out, &written, doc.record(id).unwrap(), &reading, id);
+    assert!(!copies(old), "the old metadata, written anew");
+    assert!(copies(PAGE), "the page, copied");
+    assert!(!in_clear(&out, XMP) && holds(&out, NEW_XMP));
+    let back = opened(&out, "user");
+    assert!(sound(&back), "{:?}", back.warnings());
+    assert_eq!(back.data(old).unwrap().as_ref(), XMP);
+    assert_eq!(back.data(new).unwrap().as_ref(), NEW_XMP);
+}
+
+/// Rule 3: a copy is its number's, and its record's object's: an object as
+/// read given at another number, or with another object's record, or one
+/// read from an object stream given another's place there, refuses the
+/// write, nothing written. One an edit changed, which dropped its place,
+/// is written anew with its record, the edit kept.
+#[test]
+fn a_copy_is_of_its_own_number_and_object_or_refused() {
+    let file = spelled();
+    let reading = open(&file);
+    let doc = reading.to_document().unwrap();
+    let trailer = doc.trailer.dict();
+    let table = options(XrefKind::Table, None);
+    let write = |given: Vec<(ObjectId, write::Body<'_>)>, options: &write::Options<'_>| {
+        let mut out = Vec::new();
+        let written = write::full(&mut out, given, trailer, None, Some(&reading), options);
+        assert!(written.is_ok() || out.is_empty());
+        written.map(|written| (out, written))
+    };
+    // At another number.
+    let mut given: Vec<_> = write::bodies(&doc).collect();
+    given.push(((9, 0), read_as(&doc, (4, 0))));
+    assert_eq!(write(given, &table).err(), Some(Error::Elsewhere((9, 0))));
+    // With another object's record.
+    let given: Vec<_> = (write::bodies(&doc))
+        .map(|(id, body)| match id {
+            (4, 0) => {
+                let object = Cow::Borrowed(doc.get((5, 0)).unwrap());
+                let record = Cow::Borrowed(doc.record((4, 0)).unwrap());
+                (id, write::Body::Read { object, record })
+            }
+            _ => (id, body),
+        })
+        .collect();
+    assert_eq!(write(given, &table).err(), Some(Error::Elsewhere((4, 0))));
+    // Edited, written anew with the edit.
+    let mut page = doc.get((3, 0)).unwrap().clone();
+    page.as_dict_mut().unwrap().set("Rotate", 90);
+    let given: Vec<_> = (write::bodies(&doc))
+        .map(|(id, body)| match id {
+            (3, 0) => {
+                let record = Cow::Borrowed(doc.record(id).unwrap());
+                let object = Cow::Borrowed(&page);
+                (id, write::Body::Read { object, record })
+            }
+            _ => (id, body),
+        })
+        .collect();
+    let (out, _) = write(given, &table).unwrap();
+    assert!(!holds(&out, b"1.50"));
+    let back = open(&out);
+    assert_eq!(value(&back, (3, 0)), unplaced(&page));
+
+    // In an object stream, given another member's place.
+    let packed = members_spelled();
+    let reading = open(&packed);
+    let doc = reading.to_document().unwrap();
+    let pack = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
+    let given: Vec<_> = (write::bodies(&doc))
+        .map(|(id, body)| match id {
+            (5, 0) => (id, read_as(&doc, (4, 0))),
+            _ => (id, body),
+        })
+        .collect();
+    let mut out = Vec::new();
+    let trailer = doc.trailer.dict();
+    let refused = write::full(&mut out, given, trailer, None, Some(&reading), &pack);
+    assert_eq!(refused, Err(Error::Elsewhere((5, 0))));
+    assert!(out.is_empty());
+}
+
+/// Members spelled as a writer other than this one spells them, in an
+/// object stream: a hex string, odd spacing, a real `1.50`.
+const MEMBERS_SPELLED: [(u32, &[u8]); 3] = [
+    (4, b"<48656C6C6F>"),
+    (5, b"[ 1   2 3 ]"),
+    (7, b"<</UserUnit 1.50>>"),
+];
+
+/// A file of a catalog, its page tree of a page, and an object stream,
+/// number 20, of [`MEMBERS_SPELLED`], as they're spelled, listed in it by
+/// a cross-reference stream.
+pub(crate) fn members_spelled() -> Vec<u8> {
+    let members: Vec<(u32, Vec<u8>)> = (MEMBERS_SPELLED.iter())
+        .map(|(n, bytes)| (*n, bytes.to_vec()))
+        .collect();
+    let container = write::container(&members, Deflate::DEFAULT)
+        .unwrap()
+        .unwrap();
+    let kids = vec![Object::reference(3)];
+    let mediabox = [0, 0, 612, 792].map(Object::from).to_vec();
+    let page = dict! {
+        "Type" => "Page",
+        "Parent" => (2, 0),
+        "MediaBox" => mediabox,
+        "Resources" => Dict::new(),
+    };
+    let objects = [
+        (
+            1,
+            Object::from(dict! { "Type" => "Catalog", "Pages" => (2, 0) }),
+        ),
+        (
+            2,
+            Object::from(dict! { "Type" => "Pages", "Kids" => kids, "Count" => 1 }),
+        ),
+        (3, Object::from(page)),
+        (20, Object::from(container)),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut section = Section::full(0);
+    for (n, obj) in &objects {
+        let pos = serialize::indirect(&mut out, (*n, 0), obj).unwrap();
+        section.insert(*n, Entry::InUse { pos, generation: 0 });
+    }
+    for (index, (n, _)) in (0..).zip(&MEMBERS_SPELLED) {
+        let entry = Entry::Packed {
+            container: 20,
+            index,
+        };
+        section.insert(*n, entry);
+    }
+    let pos = out.len();
+    let own = section.size();
+    let trailer = dict! { "Root" => (1, 0) };
+    section
+        .stream(&mut out, own, trailer, pos, Deflate::DEFAULT)
+        .unwrap();
+    out
+}
+
+/// The decoded data of `pdf`'s object streams, one after another.
+fn object_streams_data(pdf: &Reading<Arc<[u8]>>) -> Vec<u8> {
+    (object_streams_of(pdf).into_iter())
+        .flat_map(|id| pdf.decoded(id).unwrap())
+        .collect()
+}
+
+/// Rule 4: an object found by scanning, the file's sections not reading,
+/// isn't copied: written anew, as this writer spells it.
+#[test]
+fn an_object_found_by_scanning_isn_t_copied() {
+    let mut file = spelled();
+    // `startxref` pointing at the header, which isn't a section.
+    let at = (file.windows(10).rposition(|w| w == b"startxref\n")).unwrap() + 10;
+    let digits = file[at..].iter().take_while(|b| b.is_ascii_digit()).count();
+    file[at..at + digits].fill(b'0');
+    let reading = open(&file);
+    let doc = reading.to_document().unwrap();
+    assert!(reading.trailer().unwritten.is_some());
+    assert!(
+        doc.records()
+            .all(|(_, r)| r.origin == crate::Origin::Recovered)
+    );
+    let mut out = Vec::new();
+    let options = options(XrefKind::Table, None);
+    write::document(&mut out, &doc, None, Some(&reading), &options).unwrap();
+    assert!(!holds(&out, b"1.50") && !holds(&out, b"% a comment"));
+    let back = open(&out);
+    assert!(sound(&back), "{:?}", back.warnings());
+    for (id, _) in doc.objects() {
+        assert_eq!(handed(&back, id), handed(&reading, id), "{id:?}");
+    }
+}
+
+/// Rule 5: an object `endobj` doesn't follow isn't copied: written anew,
+/// with its `endobj`, the file read back sound.
+#[test]
+fn an_object_without_endobj_isn_t_copied() {
+    let file = spelled();
+    let comment = (file.windows(11).position(|w| w == b"% a comment")).unwrap();
+    let endobj = comment + (file[comment..].windows(6).position(|w| w == b"endobj")).unwrap();
+    let mut file = file;
+    file[endobj..endobj + 6].fill(b' ');
+    let reading = open(&file);
+    let doc = reading.to_document().unwrap();
+    assert!(!doc.record((5, 0)).unwrap().endobj);
+    let mut out = Vec::new();
+    let options = options(XrefKind::Table, None);
+    let written = write::document(&mut out, &doc, None, Some(&reading), &options).unwrap();
+    assert!(!holds(&out, b"% a comment"));
+    assert!(copied(
+        &out,
+        &written,
+        doc.record((4, 0)).unwrap(),
+        &reading,
+        (4, 0)
+    ));
+    let back = open(&out);
+    assert!(sound(&back), "{:?}", back.warnings());
+    assert_eq!(handed(&back, (5, 0)), handed(&reading, (5, 0)));
+}
+
+/// Rule 6: a stream whose `/Length` is a reference, or isn't how long its
+/// data is, isn't copied: written anew, its `/Length` its data's, the file
+/// read back sound, the data as it was.
+#[test]
+fn a_stream_whose_length_is_a_reference_or_wrong_isn_t_copied() {
+    let by_reference: &[u8] = b"<</Length 7 0 R>>\nstream\n0 0 m 1.5 l\nendstream";
+    let wrong: &[u8] = b"<</Length 99>>\nstream\n0 0 m 1.5 l\nendstream";
+    for (name, stream, length) in [
+        ("by reference", by_reference, &b"/Length 7 0 R"[..]),
+        ("wrong", wrong, &b"/Length 99"[..]),
+    ] {
+        let mut objects = SPELLED.to_vec();
+        objects[5].1 = stream;
+        objects.push((7, b"11"));
+        let file = spelled_as(&objects);
+        let reading = open(&file);
+        let doc = reading.to_document().unwrap();
+        let data = doc.record((6, 0)).unwrap().data.unwrap();
+        assert!(!data.declared || data.indirect_length, "{name}");
+        let mut out = Vec::new();
+        let options = options(XrefKind::Table, None);
+        let written = write::document(&mut out, &doc, None, Some(&reading), &options).unwrap();
+        assert!(!holds(&out, length), "{name}");
+        assert!(copied(
+            &out,
+            &written,
+            doc.record((3, 0)).unwrap(),
+            &reading,
+            (3, 0)
+        ));
+        let back = open(&out);
+        assert!(sound(&back), "{name}: {:?}", back.warnings());
+        let (got, was) = (handed(&back, (6, 0)), handed(&reading, (6, 0)));
+        assert_alike(&got, &was, name);
+        let stream = got.as_stream().unwrap();
+        let len = stream.data.bytes().unwrap().len() as i64;
+        assert_eq!(
+            stream.dict.get(b"Length"),
+            Some(&Object::from(len)),
+            "{name}"
+        );
+    }
+}
+
+/// `got` is `was`, each as [`handed`] gives an object: a stream's
+/// dictionary but its `/Length`, which is its data's as written, and its
+/// data as handed out.
+fn assert_alike(got: &Object, was: &Object, name: &str) {
+    assert!(same(got, was), "{name}: {got:?}");
+    if let (Some(got), Some(was)) = (got.as_stream(), was.as_stream()) {
+        assert_eq!(got.data, was.data, "{name}");
+    }
+}
+
+/// Rule 7: an object read from an object stream goes in one of the
+/// write's as the bytes it was read from there; written on its own, it's
+/// written anew. Read back, the same objects.
+#[test]
+fn a_member_is_copied_into_an_object_stream_and_alone_written_anew() {
+    let file = members_spelled();
+    let reading = open(&file);
+    let doc = reading.to_document().unwrap();
+    assert!(sound(&reading), "{:?}", reading.warnings());
+    let ways = [
+        (XrefKind::Stream, Some(write::Pack::DEFAULT)),
+        (XrefKind::Stream, None),
+        (XrefKind::Table, None),
+    ];
+    for (kind, pack) in ways {
+        let name = format!("{kind:?}, packed: {}", pack.is_some());
+        let mut out = Vec::new();
+        let options = options(kind, pack);
+        write::document(&mut out, &doc, None, Some(&reading), &options).unwrap();
+        let back = open(&out);
+        assert!(sound(&back), "{name}: {:?}", back.warnings());
+        for (n, _) in MEMBERS_SPELLED {
+            assert_eq!(value(&back, (n, 0)), value(&reading, (n, 0)), "{name}: {n}");
+        }
+        let data = object_streams_data(&back);
+        for (n, bytes) in MEMBERS_SPELLED {
+            assert_eq!(holds(&data, bytes), pack.is_some(), "{name}: {n}");
+        }
+        if pack.is_none() {
+            assert!(
+                !holds(&out, b"1.50") && !holds(&out, b"[ 1   2 3 ]"),
+                "{name}"
+            );
+        }
+    }
+}
+
+/// Rule 7, encrypted: a member's bytes, plaintext in any reading, are
+/// copied into an object stream of the write's under any encryption: a
+/// plain file's into one encrypted under each method that packs, and that
+/// one's, decrypted, into a plain one and into one under a new encryption.
+/// Each read back, the same objects, and nothing in the clear where it's
+/// encrypted.
+#[test]
+fn members_are_copied_into_object_streams_under_any_encryption() {
+    use chacha20::ChaCha20Rng;
+
+    let file = members_spelled();
+    let reading = open(&file);
+    let doc = reading.to_document().unwrap();
+    let prepared = Password("new").prepared().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(13);
+    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let pack = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
+    let assert_back = |out: &[u8], password: &str, name: &str| {
+        let back = opened(out, password);
+        assert!(sound(&back), "{name}: {:?}", back.warnings());
+        let data = object_streams_data(&back);
+        for (n, bytes) in MEMBERS_SPELLED {
+            assert_eq!(value(&back, (n, 0)), value(&reading, (n, 0)), "{name}: {n}");
+            assert!(holds(&data, bytes), "{name}: {n}");
+        }
+    };
+    let methods = methods();
+    for method in methods.iter().filter(|m| m.encryptor.packs() && m.streams) {
+        let name = method.name;
+        let mut encrypted = Vec::new();
+        let encryptor = Some(&method.encryptor);
+        write::document(&mut encrypted, &doc, encryptor, Some(&reading), &pack).unwrap();
+        assert!(!in_clear(&encrypted, b"[ 1   2 3 ]"), "{name}");
+        assert_back(&encrypted, "user", name);
+        let again = opened(&encrypted, "user");
+        let doc = again.to_document().unwrap();
+        for (way, encryptor, password) in
+            [("decrypted", None, ""), ("created", Some(&created), "new")]
+        {
+            let name = format!("{name}, {way}");
+            let mut out = Vec::new();
+            write::document(&mut out, &doc, encryptor, Some(&again), &pack).unwrap();
+            assert_eq!(
+                in_clear(&out, b"[ 1   2 3 ]"),
+                encryptor.is_none(),
+                "{name}"
+            );
+            assert_back(&out, password, &name);
+        }
+    }
+}
+
+/// Rule 8: a copy whose bytes changed since they were read refuses the
+/// write, whole or an update, nothing written: a byte of the file, flipped
+/// after it was read, in an object copied at an offset. One flipped where
+/// nothing copied is refuses nothing.
+#[test]
+fn a_copy_whose_bytes_changed_since_they_were_read_is_refused() {
+    let file = spelled();
+    let source = Flipped::new(&file, 64);
+    let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
+    let doc = reading.to_document().unwrap();
+    let options = options(XrefKind::Table, None);
+    let mut out = Vec::new();
+    write::document(&mut out, &doc, None, Some(&reading), &options).unwrap();
+    // `1.50`'s `5`, in the page.
+    let at = (file.windows(4).position(|w| w == b"1.50")).unwrap() + 2;
+    let page = doc.record((3, 0)).unwrap().at;
+    assert!(page.start < at && at < page.end);
+    source.flip(at);
+    let mut out = Vec::new();
+    let refused = write::document(&mut out, &doc, None, Some(&reading), &options);
+    assert_eq!(refused, Err(Error::Changed(Some((3, 0)))));
+    assert!(out.is_empty());
+    let mut base = write::Base::of(&reading).unwrap();
+    base.source = None;
+    let mut updated = file.clone();
+    let given = write::bodies(&doc);
+    let refused = write::update(&mut updated, &base, given, None, Some(&reading), &options);
+    assert_eq!(refused, Err(Error::Changed(Some((3, 0)))));
+    assert_eq!(updated, file);
+    // A byte of the table, which nothing copied holds.
+    let xref = (file.windows(5).rposition(|w| w == b"xref\n")).unwrap();
+    source.flip(xref + 8);
+    write::document(&mut out, &doc, None, Some(&reading), &options).unwrap();
+    let (back, was) = (open(&out), open(&file));
+    assert!(sound(&back), "{:?}", back.warnings());
+    for (id, _) in doc.objects() {
+        assert_eq!(handed(&back, id), handed(&was, id), "{id:?}");
+    }
+}
+
+/// A file read by position that changed since it was read, as another
+/// program's update changes it, refuses a write given its reading before
+/// a byte is written ([`ByteSource::unchanged`]), whole or an update,
+/// though what's copied of it is as it was.
+#[cfg(any(unix, windows))]
+#[test]
+fn a_file_changed_since_it_was_read_refuses_the_write_before_a_byte() {
+    use std::io::Write as _;
+
+    let file = spelled();
+    let dir = (tempfile::Builder::new())
+        .prefix("pdf-structure-changed-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("changed.pdf");
+    std::fs::write(&path, &file).unwrap();
+    let source = crate::bytes::FileBytes::new(std::fs::File::open(&path).unwrap()).unwrap();
+    let reading = Reading::open(source, &Options::DEFAULT).unwrap();
+    let doc = reading.to_document().unwrap();
+    let options = options(XrefKind::Table, None);
+    let mut out = Vec::new();
+    write::document(&mut out, &doc, None, Some(&reading), &options).unwrap();
+    let appended = std::fs::OpenOptions::new().append(true).open(&path);
+    appended.unwrap().write_all(b"\n").unwrap();
+    assert!(!ByteSource::unchanged(reading.source()).unwrap());
+    let mut out = Vec::new();
+    let refused = write::document(&mut out, &doc, None, Some(&reading), &options);
+    assert_eq!(refused, Err(Error::Changed(None)));
+    assert!(out.is_empty());
+    let mut base = write::Base::of(&reading).unwrap();
+    base.source = None;
+    let mut updated = file.clone();
+    let given = write::bodies(&doc);
+    let refused = write::update(&mut updated, &base, given, None, Some(&reading), &options);
+    assert_eq!(refused, Err(Error::Changed(None)));
+    assert_eq!(updated, file);
+    // Given no reading, nothing's read of it, so nothing's asked.
+    let given = [((1, 0), write::Body::from(doc.get((1, 0)).unwrap()))];
+    let trailer = doc.trailer.dict();
+    write::full(&mut out, given, trailer, None, None, &options).unwrap();
+}
+
+/// An update after a reading's file passes over each object as that
+/// reading read it, which the file holds: given a document's bodies, it
+/// writes what was built or changed since, and nothing where nothing was.
+/// A second, after the first's `Written::base`, passes over them too, and
+/// writes what was changed since the reading, which the first wrote and
+/// one more. Read back with three sections, each object as last written.
+#[test]
+fn an_update_writes_what_of_a_document_changed_since_it_was_read() {
+    let file = spelled();
+    let reading = open(&file);
+    let mut doc = reading.to_document().unwrap();
+    let base = write::Base::of(&reading).unwrap();
+    let options = write::Options::DEFAULT;
+    let mut out = file.clone();
+    let none = write::update(
+        &mut out,
+        &base,
+        write::bodies(&doc),
+        None,
+        Some(&reading),
+        &options,
+    );
+    assert_eq!(none, Ok(None));
+    assert_eq!(out, file);
+    let listed = |w: &write::Written| (1..8).filter(|&n| w.section.lists(n)).collect::<Vec<u32>>();
+    doc.get_dict_mut((3, 0)).unwrap().set("Rotate", 90);
+    let first = write::update(
+        &mut out,
+        &base,
+        write::bodies(&doc),
+        None,
+        Some(&reading),
+        &options,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(listed(&first), [3]);
+    let array = doc.get_mut((5, 0)).unwrap().as_array_mut().unwrap();
+    array.push(Object::from(4));
+    let second = write::bodies(&doc);
+    let second = write::update(
+        &mut out,
+        &first.base,
+        second,
+        None,
+        Some(&reading),
+        &options,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(listed(&second), [3, 5]);
+    let back = open(&out);
+    assert!(sound(&back), "{:?}", back.warnings());
+    assert_eq!(back.facts().sections, 3);
+    for (id, object) in doc.objects() {
+        let stream = object.as_stream().is_some();
+        let want = match stream {
+            true => handed(&reading, id),
+            false => unplaced(object),
+        };
+        assert_eq!(handed(&back, id), want, "{id:?}");
+    }
 }

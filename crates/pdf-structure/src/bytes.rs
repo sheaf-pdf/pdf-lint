@@ -233,6 +233,20 @@
 //!   writes a trailer as it is, never through the encryptor, a
 //!   cross-reference stream's too. Held by
 //!   `each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear`.
+//! - **An object the writer copies** as the bytes it was read from
+//!   ([`write::Body::Read`](crate::write::Body::Read)) is written as it
+//!   was, ciphertext and all, only at its number, under an encryptor of
+//!   the reading it was read in, and only where this list says the same of
+//!   it in the file written as in the file read: not an earlier section's
+//!   encryption dictionary in a whole file, nor, under `/EncryptMetadata
+//!   false`, the metadata stream the catalog named and names no longer.
+//!   Held by
+//!   `objects_at_offsets_are_copied_under_their_own_reading_s_encryption_alone`,
+//!   `an_object_the_list_says_otherwise_of_in_the_file_written_isn_t_copied`
+//!   and `an_earlier_revision_s_encryption_dictionary_is_written_whole_as_any_object`.
+//!   A member of an object stream, plaintext there, is copied into one of
+//!   the write's, encrypted whole, or into none. Held by
+//!   `members_are_copied_into_object_streams_under_any_encryption`.
 //!
 //! In a file it doesn't open, the encryption dictionary's strings, a
 //! cross-reference stream's and the trailer's are read as written all the
@@ -3076,6 +3090,7 @@ impl Reader {
             at,
             endobj: false,
             data: None,
+            hash: Record::hash_of(data.get(at.start..at.end).unwrap_or_default()),
         };
         Ok((object, record))
     }
@@ -3171,12 +3186,17 @@ impl Reader {
             .filter(|token| is_keyword(Some(token), b"endobj"));
         let start = (w.significant(&mut w.tokenizer(offset))).map_or(offset, |n| w.place(n.start));
         let end = endobj.as_ref().map_or(end, |token| w.place(token.end()));
+        // Its bytes are in the window, which reaches past what was read.
+        let bytes = (start.checked_sub(w.base))
+            .zip(end.checked_sub(w.base))
+            .and_then(|(from, to)| w.bytes.get(from..to));
         let record = Record {
             source: self.id,
             origin: Origin::File,
             at: span(start, end),
             endobj: endobj.is_some(),
             data,
+            hash: Record::hash_of(bytes.unwrap_or_default()),
         };
         Ok(Ok((id, object, record)))
     }

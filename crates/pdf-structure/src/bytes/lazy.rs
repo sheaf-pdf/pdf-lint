@@ -683,6 +683,44 @@ fn each_source_in_memory_reads_alike() {
     assert!(matches!(entries[0], (0, _, XrefEntry::Free)), "{entries:?}");
 }
 
+/// Each record's hash is of the bytes it names, as they were read, which
+/// the writer checks a copy of them by: in every test file, read in
+/// memory and by position, in windows of any size, each first window
+/// reaching the next listed offset or not, the same; and bytes that differ
+/// hash otherwise.
+#[test]
+fn a_record_s_hash_is_of_the_bytes_it_names_however_it_was_read() {
+    let mut hashes: std::collections::HashMap<Vec<u8>, u64> = Default::default();
+    for (name, file, passwords) in files() {
+        let reading = open(&file, &passwords, &Options::DEFAULT);
+        let doc = reading.to_document().unwrap();
+        assert!(doc.records().next().is_some(), "{name}");
+        for (id, record) in doc.records() {
+            let bytes = reading.written(record.at).unwrap();
+            assert_eq!(record.hash, Record::hash_of(&bytes), "{name}: {id:?}");
+            let was = hashes.insert(bytes.into_owned(), record.hash);
+            assert!(was.is_none_or(|was| was == record.hash), "{name}: {id:?}");
+        }
+        for first in [1, 7, 64, 4096] {
+            for bound in [true, false] {
+                let source = crate::fuzz::Counted::new(&file, first);
+                let by = crate::fuzz::open(source, &passwords, &Options::DEFAULT, bound).unwrap();
+                let read = by.to_document().unwrap();
+                for (id, record) in doc.records() {
+                    let hash = read.record(id).map(|r| r.hash);
+                    assert_eq!(hash, Some(record.hash), "{name}, {first}, {bound}: {id:?}");
+                }
+            }
+        }
+    }
+    let distinct: BTreeSet<u64> = hashes.values().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        hashes.len(),
+        "bytes that differ hash otherwise"
+    );
+}
+
 /// What the cross-references list as object 0, always free, is said as the
 /// open's last warning, before any object is read.
 #[test]

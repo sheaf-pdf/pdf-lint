@@ -14,7 +14,7 @@
 //!   itself, and an `/ID` whose second string is a hash of what's
 //!   written, so the same objects write the same bytes. Packed
 //!   ([`Options::pack`]), what may go in an object stream goes in one,
-//!   built on threads. [`document`] writes a [`Document`](crate::Document)'s
+//!   built on threads. [`document`] writes a [`Document`]'s
 //!   objects so, but those a whole file leaves out.
 //! - **An update** ([`update`]): after a file, each object at its number,
 //!   and a section in the file's kind listing only those, its `/Prev` the
@@ -22,6 +22,15 @@
 //!   writes said ([`Written`]), so a second update goes after it without
 //!   reading it again. What it goes after is a [`Base`]: a reading's
 //!   ([`Base::of`]), or one a caller describes ([`Base::new`]).
+//! - **Copies:** an object as it was read ([`Body::Read`], a document's
+//!   by [`bodies`]) is written as the bytes it was read from, read again
+//!   from the reading given ([`ReadFrom`]), where they're right to copy: at
+//!   its number, under the key it was encrypted with, or none; an object
+//!   stream's member into an object stream of the write's. Its bytes are
+//!   checked first against a hash of them taken as it was read, and the
+//!   reading's source asked whether it changed ([`ByteSource::unchanged`]);
+//!   where they changed, the write is refused. An update passes over what
+//!   its file holds as read, so a document's bodies write what changed.
 //! - **Cross-reference sections** ([`Section`]): a whole file's one
 //!   subsection, `[0, /Size)`, every number it doesn't list written as
 //!   free; or an update's, runs of the numbers it lists, which are only
@@ -61,6 +70,7 @@
 //! written.
 
 mod append;
+mod copy;
 mod crypt;
 mod full;
 mod objstm;
@@ -79,8 +89,9 @@ use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
 use pdf_objects::serialize::{self, Refused};
 use pdf_objects::version::Version;
 
-use crate::bytes::{ByteSource, Reading};
-use crate::source::XrefKind;
+use crate::bytes::{ByteSource, Reading, SourceId, XrefEntry};
+use crate::crypt::Get;
+use crate::source::{Document, Record, XrefKind};
 
 // The tests' file writer writes its encrypted files' dictionaries so too.
 pub use append::{Base, update};
@@ -153,15 +164,90 @@ pub enum Body<'a> {
     /// data of the stream the reading the write is given read at that
     /// number there, as the reading hands it out.
     New(Cow<'a, Object>),
+    /// An object as it was read, with where it was read from
+    /// ([`Reading::record`], [`Document::record`]; [`bodies`] gives a
+    /// document's so): copied as the bytes it was read from where those
+    /// are right to copy, else written anew from `object`, as
+    /// [`Body::New`] is. An update after the reading's own file passes
+    /// over it ([`Base::source`]): its bytes are there already.
+    ///
+    /// Copied, an object read at an offset is written as its bytes from
+    /// `n g obj` to past `endobj`, ciphertext and all; one read from an
+    /// object stream, when it goes in one of the write's
+    /// ([`Options::pack`]), as its bytes there, which are plaintext in any
+    /// reading. A copy is made only from the reading the write is given
+    /// ([`ReadFrom`]), so with none it's written anew; and only:
+    ///
+    /// 1. where `record` is that reading's ([`Record::source`]): else the
+    ///    write is refused ([`Error::Elsewhere`]);
+    /// 2. for an object at an offset, where the write is encrypted as the
+    ///    reading's file is, by an encryptor of that reading
+    ///    ([`Encryptor::of`]), and the list of what's left in the clear
+    ///    says the same of the object in both (see
+    ///    [`bytes`](crate::bytes), "What's encrypted"), or where neither is
+    ///    encrypted: its strings and data are encrypted with its key,
+    ///    which is made from its number. An object read from an object
+    ///    stream is plaintext there, and an object stream is encrypted
+    ///    whole, so it goes in one under any encryption, or none;
+    /// 3. where its bytes are its number's: an object at an offset's bytes
+    ///    start with `n g obj` for its id, and one in an object stream is
+    ///    at the place the reading's sections give its number; and where
+    ///    `object` is `record`'s, as read: else the write is refused
+    ///    ([`Error::Elsewhere`]). One an edit changed, which dropped its
+    ///    place ([`Object::at`]), is written anew;
+    /// 4. where it wasn't found by scanning
+    ///    ([`Origin::Recovered`](crate::Origin::Recovered)), as the file's
+    ///    sections didn't read;
+    /// 5. for an object at an offset, where `endobj` follows it;
+    /// 6. for a stream, where its `/Length` is no reference, and its data is
+    ///    as long as that says ([`DataExtent`](crate::DataExtent));
+    /// 7. for an object read from an object stream, where it goes in one of
+    ///    the write's: on its own, it's written anew, as its strings would
+    ///    otherwise be in the clear in an encrypted file;
+    /// 8. where its bytes, read again, hash as they did when it was read:
+    ///    else the write is refused ([`Error::Changed`]), as the file
+    ///    changed under the reading.
+    Read {
+        /// The object as read: written anew from it where it isn't copied.
+        object: Cow<'a, Object>,
+        /// Where it was read from.
+        record: Cow<'a, Record>,
+    },
 }
 
 impl Body<'_> {
     /// The object it writes.
     fn object(&self) -> &Object {
         match self {
-            Body::New(object) => object,
+            Body::New(object) | Body::Read { object, .. } => object,
         }
     }
+
+    /// Where it was read from, when it's as read.
+    fn record(&self) -> Option<&Record> {
+        match self {
+            Body::New(_) => None,
+            Body::Read { record, .. } => Some(record),
+        }
+    }
+}
+
+/// `doc`'s objects as a write's bodies, by number: each as it was read,
+/// with its record, while it is ([`Body::Read`]), which a write given the
+/// reading it was read in copies, and an update after that reading's file
+/// passes over; the rest, built or changed, written anew ([`Body::New`]).
+pub fn bodies(doc: &Document) -> impl DoubleEndedIterator<Item = (ObjectId, Body<'_>)> {
+    doc.objects_read().map(|(id, object, record)| {
+        let object = Cow::Borrowed(object);
+        let body = match record {
+            Some(record) => Body::Read {
+                object,
+                record: Cow::Borrowed(record),
+            },
+            None => Body::New(object),
+        };
+        (id, body)
+    })
 }
 
 impl From<Object> for Body<'_> {
@@ -314,10 +400,13 @@ pub struct Written {
 
 /// The reading the objects a write is given were read in, which a stream's
 /// data where it was written ([`Data::At`](pdf_objects::object::Data::At))
-/// is read from, and what their references reach that they don't hold.
-/// Implemented by [`Reading`] alone, as `&dyn ReadFrom`,
-/// so that a write that reads nothing doesn't name a source's type; its
-/// methods are the writer's own.
+/// is read from, an object as read is copied from ([`Body::Read`]), and
+/// what their references reach that they don't hold. Implemented by
+/// [`Reading`] alone, as `&dyn ReadFrom`, so that a write that reads
+/// nothing doesn't name a source's type; its methods are the writer's
+/// own. A write given one asks its source first whether its bytes are
+/// those it was read from ([`ByteSource::unchanged`]), and is refused
+/// where they aren't ([`Error::Changed`]).
 pub trait ReadFrom: sealed::Reads + Sync {}
 
 impl<S: ByteSource> ReadFrom for Reading<S> {}
@@ -330,6 +419,7 @@ mod sealed {
     use pdf_objects::object::{Object, ObjectId, Span};
 
     use super::Error;
+    use crate::bytes::{SourceId, XrefEntry};
 
     /// What the writer reads of the reading its objects were read in.
     pub trait Reads {
@@ -340,6 +430,32 @@ mod sealed {
 
         /// Object `id`, as the reading reads and keeps it.
         fn object(&self, id: ObjectId) -> Option<&Object>;
+
+        /// Which reading it is, which its records name.
+        fn id(&self) -> SourceId;
+
+        /// Nothing, where its source's bytes are those it had as the
+        /// reading opened it, as far as the source tells: refused where
+        /// they aren't ([`Error::Changed`]), or it can't tell
+        /// ([`Error::Io`]).
+        fn unchanged(&self) -> Result<(), Error>;
+
+        /// The bytes at `span`, object `id`'s, as written, an encrypted
+        /// file's as they are: refused where they aren't there to read any
+        /// more ([`Error::Changed`]), or don't read ([`Error::Io`]).
+        fn written(&self, id: ObjectId, span: Span) -> Result<Cow<'_, [u8]>, Error>;
+
+        /// The newest entry its sections give number `n`.
+        fn entry(&self, n: u32) -> Option<XrefEntry>;
+
+        /// Whether its file is encrypted: whether what it reads as written
+        /// is, all of it, as written.
+        fn encrypts(&self) -> bool;
+
+        /// Which stream is the document's metadata, as the reading finds it
+        /// (its catalog's `/Metadata`): what `/EncryptMetadata false`
+        /// leaves in the clear.
+        fn metadata(&self) -> Option<ObjectId>;
     }
 }
 
@@ -358,6 +474,40 @@ impl<S: ByteSource> sealed::Reads for Reading<S> {
     fn object(&self, id: ObjectId) -> Option<&Object> {
         let reading: &Reading<S> = self;
         reading.resolve(id)
+    }
+
+    fn id(&self) -> SourceId {
+        Reading::id(self)
+    }
+
+    fn unchanged(&self) -> Result<(), Error> {
+        match self.source().unchanged() {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(Error::Changed(None)),
+            Err(e) => Err(Error::Io(e.to_string())),
+        }
+    }
+
+    fn written(&self, id: ObjectId, span: Span) -> Result<Cow<'_, [u8]>, Error> {
+        Reading::written(self, span).map_err(|why| match why {
+            crate::bytes::Error::Io(e) => Error::Io(e.to_string()),
+            _ => Error::Changed(Some(id)),
+        })
+    }
+
+    fn entry(&self, n: u32) -> Option<XrefEntry> {
+        Reading::entry(self, n).map(|(_, entry)| entry)
+    }
+
+    fn encrypts(&self) -> bool {
+        self.list().encrypts
+    }
+
+    fn metadata(&self) -> Option<ObjectId> {
+        let reading: &Reading<S> = self;
+        let get: Get<'_, '_, std::convert::Infallible> = &|id| Ok(reading.resolve(id));
+        let Ok(metadata) = crate::crypt::metadata_stream(self.trailer().dict(), get);
+        metadata
     }
 }
 
@@ -496,6 +646,29 @@ pub enum Error {
     /// A source whose bytes don't read, and why.
     #[error("its bytes don't read: {0}")]
     Io(String),
+    /// The file the reading given reads isn't as it was when it was read:
+    /// its source says so ([`ByteSource::unchanged`]), before anything's
+    /// written; or the bytes object `id` was read from, read again to copy
+    /// them, aren't those it was read from ([`Body::Read`]).
+    #[error("{}", changed(*.0))]
+    Changed(Option<ObjectId>),
+    /// An object as read ([`Body::Read`]) given with a record of another
+    /// reading than the one given, or of another object.
+    #[error(
+        "object {} {} is given with a record of another reading than the one given, or of another object",
+        .0.0, .0.1
+    )]
+    Elsewhere(ObjectId),
+}
+
+/// What [`Error::Changed`] says of object `id`, or of the file.
+fn changed(id: Option<ObjectId>) -> String {
+    match id {
+        None => "the file the reading given reads has changed since it was read".to_string(),
+        Some((n, g)) => format!(
+            "object {n} {g}'s bytes aren't those it was read from: the file has changed since it was read"
+        ),
+    }
 }
 
 /// What [`Error::Number`] says of number `n`.

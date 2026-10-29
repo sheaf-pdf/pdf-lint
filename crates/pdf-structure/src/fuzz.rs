@@ -17,7 +17,9 @@
 //! And what the `write` target checks ([`write_file`]): a file read is
 //! written whole and as an update, each way the input picks, without a
 //! panic, and where it read soundly, written and read again it's the same
-//! objects.
+//! objects, those copied as the bytes they were read from among them; and
+//! where a byte of it changed after it was read, a copy of an object whose
+//! bytes hold it is refused.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -32,7 +34,7 @@ use pdf_objects::object::{Object, ObjectId, Span, Value};
 use pdf_objects::serialize;
 
 use crate::bytes::{ByteSource, Error, Options, Reading, Whole, XrefEntry};
-use crate::source::{Document, Encryption, Source, XrefKind};
+use crate::source::{Document, Encryption, Origin, Source, XrefKind};
 use crate::write::{self, Base, Body, Encryptor, Pack};
 
 /// The owner's password the fuzz target opens a file by, when its input
@@ -89,6 +91,59 @@ impl ByteSource for Counted<'_> {
             let message = format!("bytes {start}..{end} aren't within the file");
             io::Error::new(io::ErrorKind::UnexpectedEof, message)
         })
+    }
+
+    fn first_window(&self) -> usize {
+        self.first
+    }
+}
+
+/// Bytes in memory, read a window at a time as a file is, by position,
+/// the first window `first` bytes, one of which, once it's flipped
+/// ([`Flipped::flip`]), reads as its complement: a file changed under a
+/// reading that its source doesn't tell ([`ByteSource::unchanged`]).
+#[derive(Debug)]
+pub struct Flipped<'a> {
+    bytes: &'a [u8],
+    first: usize,
+    at: AtomicUsize,
+}
+
+impl<'a> Flipped<'a> {
+    /// `bytes`, read by position, `first` bytes first, none flipped.
+    pub fn new(bytes: &'a [u8], first: usize) -> Flipped<'a> {
+        Flipped {
+            bytes,
+            first,
+            at: AtomicUsize::new(usize::MAX),
+        }
+    }
+
+    /// Byte `at` read as its complement from now on, in place of any
+    /// flipped before.
+    pub fn flip(&self, at: usize) {
+        self.at.store(at, Ordering::Relaxed);
+    }
+}
+
+impl ByteSource for Flipped<'_> {
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn read_at(&self, range: Range<usize>) -> io::Result<Cow<'_, [u8]>> {
+        let (start, end) = (range.start, range.end);
+        let Some(bytes) = self.bytes.get(range) else {
+            let message = format!("bytes {start}..{end} aren't within the file");
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, message));
+        };
+        let at = self.at.load(Ordering::Relaxed);
+        if !(start..end).contains(&at) {
+            return Ok(Cow::Borrowed(bytes));
+        }
+        let mut bytes = bytes.to_vec();
+        bytes[at - start] ^= 0xFF;
+        Ok(Cow::Owned(bytes))
     }
 
     fn first_window(&self) -> usize {
@@ -497,23 +552,30 @@ const LISTED: u32 = 1 << 16;
 /// stream, or a stream packed, by number or in sevens on one thread, as
 /// the choice's next two bits give; encrypted as it was read, decrypted,
 /// or under a new encryption of revision 6 for `new` whose randomness the
-/// file's bytes give ([`Drawn`]), as its two after give. And, when its
-/// sixth bit is set, an update after it, of the object its bits from the
-/// seventh pick, a key more, under its own encryption. Neither panics.
-/// Where the reading read soundly, with nothing to warn of, and a write
-/// wrote, its file read again under the same limits, by its password, is
-/// sound and holds every object the document did, as pdf-objects' writer
-/// writes each (reals as written and strings' forms aside), a stream's
-/// data as handed out, but the encryption dictionary and what it refers
-/// to, which the writer writes as its encryption is; and the update's
-/// changed object with its key. Panics on a broken promise.
+/// file's bytes give ([`Drawn`]), as its two after give; each object as
+/// read ([`write::bodies`]), so copied where the rules for a copy hold.
+/// And, when its sixth bit is set, an update after it, of the document's
+/// objects, the one its bits from the seventh pick changed, a key more,
+/// under its own encryption: it writes that one alone. Else, a reading of
+/// the file by position ([`Flipped`]), made a document, a byte of an
+/// object read at an offset flipped after, the one those bits pick among
+/// their bytes but their streams' data, written whole as before. Neither
+/// panics. Where the reading read soundly, with nothing to warn of, and a
+/// write wrote, its file read again under the same limits, by its
+/// password, is sound and holds every object the document did, as
+/// pdf-objects' writer writes each (reals as written and strings' forms
+/// aside), a stream's data as handed out, but the encryption dictionary
+/// and what it refers to, which the writer writes as its encryption is;
+/// and the update's changed object with its key; and the write after the
+/// byte flipped is refused as changed, of an object whose bytes hold it,
+/// or it wrote what was read. Panics on a broken promise.
 pub fn write_file(data: &[u8]) {
     compared(data);
 }
 
-/// [`write_file`]'s body: whether the whole file and the update were
-/// written and read back to compare.
-fn compared(data: &[u8]) -> [bool; 2] {
+/// [`write_file`]'s body: whether the whole file, the update and the whole
+/// file after a byte was flipped were written, or refused, and compared.
+fn compared(data: &[u8]) -> [bool; 3] {
     let (choice, file) = match data {
         [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
         _ => (0, data),
@@ -523,10 +585,10 @@ fn compared(data: &[u8]) -> [bool; 2] {
         _ => OWNER,
     };
     let Ok(reading) = Reading::open_with(file, &[password], &options()) else {
-        return [false; 2];
+        return [false; 3];
     };
     let Ok(doc) = reading.to_document() else {
-        return [false; 2];
+        return [false; 3];
     };
     let sound = reading.trailer().unwritten.is_none() && reading.warnings().is_empty();
     let mut options = write::Options::DEFAULT;
@@ -543,16 +605,10 @@ fn compared(data: &[u8]) -> [bool; 2] {
         }
     };
     let own = Encryptor::of(&reading);
-    let new = NEW.prepared().ok().and_then(|password| {
-        Encryptor::create(&password, choice & 64 == 0, &mut Drawn::over(file)).ok()
-    });
-    let (encryptor, opens) = match (choice >> 3) & 3 {
-        2 => (None, Password("")),
-        3 => (new.as_ref(), NEW),
-        _ => (own.as_ref().ok().and_then(Option::as_ref), password),
-    };
+    let way = Way::of(file, choice);
+    let (encryptor, opens) = way.encryptor(own.as_ref().ok().and_then(Option::as_ref), password);
     let last = doc.objects().next_back().map_or(0, |(id, _)| id.0);
-    let mut compared = [false; 2];
+    let mut compared = [false; 3];
     if last < LISTED {
         let mut out = Vec::new();
         let written = write::document(&mut out, &doc, encryptor, Some(&reading), &options);
@@ -565,14 +621,120 @@ fn compared(data: &[u8]) -> [bool; 2] {
     if choice & 32 != 0 {
         let own = own.ok().flatten();
         compared[1] = updated(file, &doc, &reading, own.as_ref(), password, sound, choice);
+    } else if last < LISTED && sound {
+        compared[2] = flipped(file, password, &options, &way, choice >> 7);
     }
     compared
 }
 
-/// `file`, read as `reading` and made `doc`, with an update after it that
-/// writes the object `choice`'s bits from the seventh pick with a key
-/// more, under `encryptor`, its own: when the reading was `sound` and the
-/// update wrote, the file read again by `password` is sound, and the same
+/// How the `write` target encrypts a whole file, as the choice's bits
+/// from the fourth say: as it was read, decrypted, or under a new
+/// encryption of revision 6 for `new`, its randomness the file's bytes,
+/// the document's metadata encrypted as the seventh bit says.
+struct Way {
+    /// 0 and 1 as read, 2 decrypted, 3 a new encryption.
+    choice: u16,
+    new: Option<Encryptor>,
+}
+
+impl Way {
+    fn of(file: &[u8], choice: u16) -> Way {
+        let new = NEW.prepared().ok().and_then(|password| {
+            Encryptor::create(&password, choice & 64 == 0, &mut Drawn::over(file)).ok()
+        });
+        Way {
+            choice: (choice >> 3) & 3,
+            new,
+        }
+    }
+
+    /// Its encryptor, `own` as read, and the password the file written
+    /// opens by, `password` where it's encrypted as read.
+    fn encryptor<'e, 'p>(
+        &'e self,
+        own: Option<&'e Encryptor>,
+        password: Password<'p>,
+    ) -> (Option<&'e Encryptor>, Password<'p>) {
+        match self.choice {
+            2 => (None, Password("")),
+            3 => (self.new.as_ref(), NEW),
+            _ => (own, password),
+        }
+    }
+}
+
+/// `file`, read again by position by `password` through [`Flipped`], read
+/// soundly and made a document; then a byte of an object it read at an
+/// offset flipped, the one `pick` picks among those objects' bytes but
+/// their streams' data, and the document written whole as `options` and
+/// `way` say: refused as changed, of an object whose bytes hold the byte
+/// flipped; or, where it wrote, read again the same objects as the
+/// document. Whether the write was compared so.
+fn flipped(
+    file: &[u8],
+    password: Password<'_>,
+    options: &write::Options<'_>,
+    way: &Way,
+    pick: u16,
+) -> bool {
+    let source = Flipped::new(file, 64);
+    let Ok(reading) = Reading::open_with(&source, &[password], &self::options()) else {
+        return false;
+    };
+    let Ok(doc) = reading.to_document() else {
+        return false;
+    };
+    if reading.trailer().unwritten.is_some() || !reading.warnings().is_empty() {
+        return false;
+    }
+    // Each object's bytes read at an offset, but its stream's data.
+    let mut spans: Vec<Range<usize>> = Vec::new();
+    for (_, record) in doc.records().filter(|(_, r)| r.origin == Origin::File) {
+        let at = record.at;
+        match record.data {
+            Some(data) => spans.extend([at.start..data.at.start, data.at.end..at.end]),
+            None => spans.push(at.start..at.end),
+        }
+    }
+    let total: usize = spans.iter().map(Range::len).sum();
+    if total == 0 {
+        return false;
+    }
+    let mut left = usize::from(pick) % total;
+    let Some(at) = spans.iter().find_map(|span| match left < span.len() {
+        true => Some(span.start + left),
+        false => {
+            left -= span.len();
+            None
+        }
+    }) else {
+        return false;
+    };
+    source.flip(at);
+    let own = Encryptor::of(&reading).ok().flatten();
+    let (encryptor, opens) = way.encryptor(own.as_ref(), password);
+    let mut out = Vec::new();
+    match write::document(&mut out, &doc, encryptor, Some(&reading), options) {
+        Ok(_) => {
+            let back = read_back(&out, opens);
+            same_objects(&doc, &reading, &back, None);
+        }
+        Err(write::Error::Changed(Some(id))) => {
+            let record = doc.record(id).expect("a copy's record");
+            let held = (record.at.start..record.at.end).contains(&at);
+            assert!(held, "{id:?}'s bytes hold the byte flipped, {at}");
+        }
+        Err(_) => {}
+    }
+    true
+}
+
+/// `file`, read as `reading` and made `doc`, with an update after it of
+/// `doc`'s objects as read ([`write::bodies`]), but the one `choice`'s
+/// bits from the seventh pick, changed, with a key more, under
+/// `encryptor`, its own: it writes that one alone, passing over the rest,
+/// which the file holds. When the reading was `sound` and the update
+/// wrote, the file read again by `password` is sound, and the same
 /// objects, but that one with its key: whether it was.
 fn updated(
     file: &[u8],
@@ -596,7 +758,10 @@ fn updated(
     };
     dict.set("WriteFuzzed", true);
     let mut out = file.to_vec();
-    let given = [(id, Body::from(&changed))];
+    let given = write::bodies(doc).map(|(at, body)| match at == id {
+        true => (at, Body::from(&changed)),
+        false => (at, body),
+    });
     let options = write::Options::DEFAULT;
     let written = write::update(&mut out, &base, given, encryptor, Some(reading), &options);
     if let (true, Ok(Some(written))) = (sound, written) {
@@ -604,6 +769,10 @@ fn updated(
             written.base.holds(&out[..]).expect("in memory"),
             "the update's base holds"
         );
+        for (at, _) in doc.objects() {
+            let listed = written.section.lists(at.0);
+            assert_eq!(listed, at == id, "{at:?} written alone of what's read");
+        }
         let back = read_back(&out, password);
         same_objects(doc, reading, &back, Some(id));
         let got = back.get(id).expect("the changed object reads");
@@ -634,9 +803,9 @@ fn read_back<'f>(file: &'f [u8], password: Password<'_>) -> Reading<&'f [u8]> {
 /// and what it refers to: each as pdf-objects' writer writes it, a
 /// stream's dictionary but its `/Length`, and its data as each reading
 /// hands it out.
-fn same_objects(
+fn same_objects<S: ByteSource>(
     doc: &Document,
-    reading: &Reading<&[u8]>,
+    reading: &Reading<S>,
     back: &Reading<&[u8]>,
     changed: Option<ObjectId>,
 ) {
@@ -667,10 +836,10 @@ fn same_objects(
         assert_eq!(written(got), written(object), "{id:?} reads back as it was");
         if object.as_stream().is_some() {
             let data =
-                |r: &Reading<&[u8]>| r.data(id).map(Cow::into_owned).map_err(|e| e.to_string());
+                |r: Result<Cow<'_, [u8]>, Error>| r.map(Cow::into_owned).map_err(|e| e.to_string());
             assert_eq!(
-                data(back),
-                data(reading),
+                data(back.data(id)),
+                data(reading.data(id)),
                 "{id:?}'s data reads back as it was"
             );
         }
@@ -942,17 +1111,23 @@ mod tests {
 
     /// The `write` target's checks on the same files: as written, by either
     /// password, every way of writing each whole and as an update writes and
-    /// reads back the same objects; then each mutated many times, as a
-    /// fuzzer might, without a panic, the same where it still reads
-    /// soundly.
+    /// reads back the same objects, and so does each way of writing it whole
+    /// after a byte is flipped, or it's refused as changed, the byte
+    /// flipped at places spread over its objects; then each mutated many
+    /// times, as a fuzzer might, without a panic, the same where it still
+    /// reads soundly.
     #[test]
     fn mutated_files_write_and_read_back_alike() {
         let files = files();
         for file in &files {
             for choice in 0..64u16 {
-                let choice = choice | 32 | (choice & 1) << 7;
-                let data = [&choice.to_le_bytes()[..], file].concat();
-                assert_eq!(compared(&data), [true; 2], "{choice}");
+                let updated = choice | 32 | (choice & 1) << 7;
+                let data = [&updated.to_le_bytes()[..], file].concat();
+                assert_eq!(compared(&data), [true, true, false], "{updated}");
+                let pick = choice.wrapping_mul(0x9e3) & 0x1ff;
+                let flipped = choice & !32 | pick << 7;
+                let data = [&flipped.to_le_bytes()[..], file].concat();
+                assert_eq!(compared(&data), [true, false, true], "{flipped}");
             }
         }
         let mut random = Random(0x6a09_e667_f3bc_c908);
