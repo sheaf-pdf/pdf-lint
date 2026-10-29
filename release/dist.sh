@@ -81,6 +81,8 @@ crates=$(cargo tree --locked -e normal,no-proc-macro --target "$target" -p pdf-l
     grep -vE '^(pdf-lint|pdf-tokenizer|pdf-filters|pdf-crypt|pdf-objects|pdf-structure|pdf-arlington) v')
 texts=$(mktemp)
 table=
+# The names' column as wide as the longest name, 15 at least.
+width=$(sed 's/ v[^ ]*|.*$//' <<<"$crates" | awk '{ if (length > w) w = length } END { print (w > 15 ? w : 15) }')
 while IFS='|' read -r package licence; do
     case "$package" in
     *' ('*) fail "$package isn't from crates.io" ;;
@@ -99,7 +101,7 @@ while IFS='|' read -r package licence; do
         esac
     done
     [ -n "$found" ] || fail "$crate $v has no licence file"
-    table=$table$(printf '  %-15s %-9s %s' "$crate" "$v" "$licence")$'\n'
+    table=$table$(printf "  %-${width}s %-9s %s" "$crate" "$v" "$licence")$'\n'
 done <<<"$crates"
 {
     cat <<END
