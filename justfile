@@ -62,9 +62,9 @@ _qpdf:
         unzip -q "$work/$zip" -d "$dir"
     fi
 
-# The tests that set the reader beside qpdf, pdf-structure's and then the
-# checker's in pdf-lint, which `just test` leaves out as ignored, against
-# the pinned qpdf (the corpus tests aside).
+# The tests that set the reader, and what the writer writes, beside qpdf,
+# pdf-structure's and then the checker's in pdf-lint, which `just test`
+# leaves out as ignored, against the pinned qpdf (the corpus tests aside).
 test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_

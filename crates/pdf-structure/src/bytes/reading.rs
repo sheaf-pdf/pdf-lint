@@ -802,7 +802,10 @@ impl<S: ByteSource> Reading<S> {
     /// the whole read reads them, into a [`Document`]: what it read, its
     /// warnings in the order [`Reading::warnings`] says them. It fails
     /// only when the source doesn't give the bytes asked of it
-    /// ([`Error::Io`]).
+    /// ([`Error::Io`]). The reading is gone after, and its records with it,
+    /// so the writer can't read the data of the document's streams, nor copy
+    /// an object as read: a document to write is made by
+    /// [`Reading::to_document`], the reading kept and given to the write.
     pub fn into_document(self) -> Result<Document, Error> {
         let Reading {
             source,

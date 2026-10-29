@@ -35,8 +35,9 @@ jobs:
         run: just fuzzing
       - name: Test (including doctests)
         run: just test
-      # The tests that set the reader beside qpdf, the oracle, against
-      # the qpdf the recipe fetches at its pinned version.
+      # The tests that set the reader, and what the writer writes, beside
+      # qpdf, the oracle, against the qpdf the recipe fetches at its
+      # pinned version.
       - name: Test against qpdf
         run: just test-qpdf
       - name: Build documentation

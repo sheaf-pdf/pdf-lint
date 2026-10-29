@@ -716,8 +716,9 @@ pub fn toyed(object: &Object, id: ObjectId, data: &[u8], limits: Limits, plain: 
 /// and stream's data written as the number (four bytes) and generation
 /// (two) of the object it's in, big-endian, then its bytes reversed, which
 /// [`Toy::undo`] undoes. An object whose number is a multiple of 5, or a
-/// cross-reference stream (a stream of `/Type /XRef`), is written as it is, and so is a
-/// dictionary's `/Contents` when it has a `/ByteRange`, as a signature's.
+/// cross-reference stream (a stream of `/Type /XRef`), is written as it
+/// is, and so is a dictionary's `/Contents` when it has a `/ByteRange`, as
+/// a signature's.
 /// It keeps what it's given, in order, and refuses a string or data that's
 /// `refuse`.
 #[derive(Debug, Default)]

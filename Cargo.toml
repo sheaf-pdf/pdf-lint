@@ -42,6 +42,9 @@ opt-level = 3
 # MiB: pdf-filters and the Flate under it built optimized, and the
 # parser, the tokenizer and pdf-structure lightly, so that they take
 # seconds, not a minute. Debug assertions and overflow checks stay on.
+# Those two tests hold about 1.3 GB each at their peak, which sets
+# pdf-structure's test binary's, about 1.9 GB as they run beside the
+# rest, whose own peak is about 130 MB.
 [profile.dev.package.pdf-filters]
 opt-level = 3
 

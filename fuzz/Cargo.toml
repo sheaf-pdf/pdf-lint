@@ -20,9 +20,11 @@
 # which a stable unit test
 # (`mutated_files_read_within_their_bytes_the_same_twice`) runs on mutated
 # files; `write` calls `pdf_structure::fuzz::write_file`, the writer, a
-# file read written whole and as an update and read again, which a stable
-# unit test (`mutated_files_write_and_read_back_alike`) runs on mutated
-# files; `check` calls
+# file read written whole with copies, then an update of its objects or a
+# whole write after a byte is flipped, refused as changed or read back
+# alike, which a stable unit test
+# (`mutated_files_write_and_read_back_alike`) runs on mutated files;
+# `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
 # on mutated seeds.

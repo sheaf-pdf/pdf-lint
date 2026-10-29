@@ -148,9 +148,9 @@ fn in_object(id: &Option<ObjectId>) -> String {
 /// generation of the object it's in, and says what it leaves in the clear.
 /// [`indirect_with`] and [`indirect_stream_with`] write through one; `()`
 /// encrypts nothing, for a file that isn't encrypted, and [`indirect`] and
-/// [`indirect_stream`] write as through it. pdf-structure's
-/// writer implements it over pdf-crypt, by the list of what an encrypted
-/// file leaves in the clear that its reader decrypts by.
+/// [`indirect_stream`] write as through it. pdf-structure's writer
+/// implements it over pdf-crypt, by the list of what an encrypted file
+/// leaves in the clear that its reader decrypts by.
 ///
 /// An object's strings and its data are encrypted, but where it says
 /// otherwise, so that a caller that leaves something out leaves it in the

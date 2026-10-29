@@ -450,7 +450,12 @@ impl Decode for BTreeMap<ObjectId, Vec<u8>> {
 }
 
 /// The file `file` is, opened, when it's encrypted, by the empty password,
-/// as [`read_opened`] opens it given none.
+/// as [`read_opened`] opens it given none. The reading is dropped, so its
+/// document's streams, whose data is where it was written
+/// ([`Data::At`](pdf_objects::object::Data::At)), can't be written by the
+/// writer, which reads them from the reading their records are of: a
+/// document to write is made by [`Reading::to_document`], that reading
+/// given to the write ([`write::ReadFrom`](crate::write::ReadFrom)).
 pub fn read(file: &[u8]) -> Document {
     read_as(file, None, true, &Options::DEFAULT, &[])
 }
@@ -462,7 +467,9 @@ pub fn read(file: &[u8]) -> Document {
 /// password can open it before an earlier one that would open it only in
 /// an encoding that doesn't fit. Given none, the empty password. A wrong
 /// one leaves it [`Encryption::Locked`], or [`Encryption::Plain`] where its
-/// strings and streams aren't encrypted, as no password would.
+/// strings and streams aren't encrypted, as no password would. As with
+/// [`read`], the reading is dropped: a document to write is made by
+/// [`Reading::to_document`].
 pub fn read_opened(file: &[u8], passwords: &[Password]) -> Document {
     read_as(file, None, true, &Options::DEFAULT, passwords)
 }

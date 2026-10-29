@@ -58,7 +58,9 @@ use crate::source::{Document, XrefKind};
 /// - **Copied**, an object as read ([`Body::Read`]) is written as the
 ///   bytes it was read from, read from `from`, where the rules for a copy
 ///   hold; one read from an object stream, which goes in one of the
-///   write's, as its bytes there.
+///   write's, as its bytes there. Packed, one read at an offset that may go
+///   in an object stream goes in one, written anew, unless the caller's
+///   groups leave its number out ([`Pack::groups`]).
 /// - **Packed**, what may go in an object stream ([`packable`]), but an
 ///   encryption dictionary and what one refers to,
 ///   goes in one after the rest, grouped by [`Pack::groups`], else by
@@ -115,7 +117,10 @@ pub fn full<'a>(
 /// `doc`'s objects as a whole file, through [`full`], its trailer
 /// `doc`'s, each as read where it is ([`bodies`](super::bodies)), so that
 /// given the reading `doc` was read in, it's copied where the rules for a
-/// copy hold: but object streams and cross-reference streams, whose
+/// copy hold (a document made by
+/// [`Reading::to_document`](crate::Reading::to_document), that reading
+/// kept: one read whole has dropped it, so a stream of it is refused,
+/// [`Error::Placed`], or [`Error::Elsewhere`] given another reading): but object streams and cross-reference streams, whose
 /// members and entries are written anew, and a linearization dictionary,
 /// which would no longer hold; and its encryption dictionary, which the
 /// writer writes from `encryptor`, if any. Written under another

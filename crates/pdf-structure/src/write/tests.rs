@@ -1,9 +1,12 @@
 //! What the writer writes, read back by the reader: cross-reference
 //! sections that read as sound, tables and streams, a full write's and an
 //! update's, placed past any bytes before the header; object streams,
-//! their members read back through the sections that list them; and an
+//! their members read back through the sections that list them; an
 //! encrypted file's objects, encrypted as they're written, read back by
-//! their password, nothing the list encrypts in the clear.
+//! their password, nothing the list encrypts in the clear; whole files and
+//! updates, read, written and read again, the same objects, and what each
+//! refuses; and copies, an object as read written as the bytes it was read
+//! from, a test for each rule.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -2693,7 +2696,8 @@ fn containers_take_the_source_s_numbers_first() {
 /// may use writes every object on its own instead: four object streams
 /// from the fifth number before the last leave it the last, and from the
 /// fourth, none. Each whole section lists millions of numbers, deflated to
-/// little, which the reader reads all of when it's told to.
+/// little, which the reader reads all of when it's told to: about 1.3 GB
+/// at its peak.
 #[test]
 fn packing_runs_out_of_numbers_writes_plain() {
     let last = write::NUMBERS - 1;
@@ -2726,7 +2730,7 @@ fn packing_runs_out_of_numbers_writes_plain() {
 /// made: its members are written on their own, its number left free, and
 /// the other object streams are made as ever. Object 11, a string as long
 /// as an object stream's data may be, is in the second, with 1, 2 and 10
-/// to 107.
+/// to 107: about 1.3 GB at its peak.
 #[test]
 fn a_container_past_what_the_reader_takes_is_written_plain() {
     let mut objects = numbered();
@@ -3036,6 +3040,12 @@ fn a_file_with_a_100_byte_prefix_appends() {
         // update.
         assert!(after_prefix[PREFIX.len()..] == appended[..], "{kind:?}");
         assert_eq!(written.start, newest(&open(&appended)).0, "{kind:?}");
+        // Its section's positions are the file's, past the prefix, where
+        // its start counts from the header.
+        let Some(Entry::InUse { offset, .. }) = written.section.get(PAGE.0) else {
+            panic!("{kind:?}: no page")
+        };
+        assert!(after_prefix[offset..].starts_with(b"4 0 obj"), "{kind:?}");
         let unprefixed = open(&appended);
         assert!(sound(&unprefixed), "{kind:?}: {:?}", unprefixed.warnings());
         assert_eq!(unprefixed.facts().sections, 2, "{kind:?}");
@@ -5444,7 +5454,7 @@ fn members_are_copied_into_object_streams_under_any_encryption() {
 /// Rule 8: a copy whose bytes changed since they were read refuses the
 /// write, whole or an update, nothing written: a byte of the file, flipped
 /// after it was read, in an object copied at an offset. One flipped where
-/// nothing copied is refuses nothing.
+/// nothing's copied refuses nothing.
 #[test]
 fn a_copy_whose_bytes_changed_since_they_were_read_is_refused() {
     let file = spelled();

@@ -93,14 +93,15 @@ use crate::bytes::{ByteSource, Reading, SourceId, XrefEntry};
 use crate::crypt::Get;
 use crate::source::{Document, Record, XrefKind};
 
-// The tests' file writer writes its encrypted files' dictionaries so too.
 pub use append::{Base, update};
-#[cfg(any(test, feature = "fixtures"))]
-pub(crate) use crypt::encryption;
 pub use crypt::{Encrypting, Encryptor, Unencryptable};
 pub use full::{document, full};
 pub use objstm::{MAX_DATA, MEMBERS, container, fits, packable};
 pub use xref::{Entry, Section};
+
+// The tests' file writer writes its encrypted files' dictionaries so too.
+#[cfg(any(test, feature = "fixtures"))]
+pub(crate) use crypt::encryption;
 
 /// The object numbers a written file may use are below it: the
 /// 8,388,607 indirect objects a file may hold (ISO 32000-1, Annex C), so
@@ -177,7 +178,13 @@ pub enum Body<'a> {
     /// `n g obj` to past `endobj`, ciphertext and all; one read from an
     /// object stream, when it goes in one of the write's
     /// ([`Options::pack`]), as its bytes there, which are plaintext in any
-    /// reading. A copy is made only from the reading the write is given
+    /// reading. A packed write puts what may go in an object stream
+    /// ([`packable`]) in one whether it was read at an offset or not, so
+    /// such an object isn't copied at its offset there but written anew in
+    /// a container: a caller that would keep it copied, as a writer that
+    /// packs only what it writes anew does, leaves its number out of every
+    /// group ([`Pack::groups`]), which writes it on its own. Which is the
+    /// caller's. A copy is made only from the reading the write is given
     /// ([`ReadFrom`]), so with none it's written anew; and only:
     ///
     /// 1. where `record` is that reading's ([`Record::source`]): else the
@@ -232,6 +239,12 @@ impl Body<'_> {
 /// with its record, while it is ([`Body::Read`]), which a write given the
 /// reading it was read in copies, and an update after that reading's file
 /// passes over; the rest, built or changed, written anew ([`Body::New`]).
+/// The reading is the one `doc` was made of by [`Reading::to_document`]: a
+/// document read whole ([`bytes::read`](crate::bytes::read),
+/// [`Reading::into_document`]) has records of a reading that's gone, which
+/// a write given another reading refuses ([`Error::Elsewhere`]), and a
+/// stream whose data no reading given holds refuses one given none
+/// ([`Error::Placed`]).
 pub fn bodies(doc: &Document) -> impl DoubleEndedIterator<Item = (ObjectId, Body<'_>)> {
     doc.objects_read().map(|(id, object, record)| {
         let object = Cow::Borrowed(object);
@@ -380,17 +393,26 @@ impl fmt::Debug for Pack<'_> {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Written {
-    /// Its cross-reference section: where each object it wrote is, from
-    /// where a whole file starts, an update's file's header, and the
-    /// cross-reference stream's own, when it's one.
+    /// Its cross-reference section: where each object it wrote is, and the
+    /// cross-reference stream's own, when it's one, as positions in the
+    /// file: a whole file's counted from where it starts in `out`, its
+    /// header; an update's from its file's first byte, as [`Base::len`]
+    /// counts, past any bytes before the header, which the section's rows
+    /// are counted from as it writes them.
     pub section: Section,
-    /// Where its cross-reference section starts, as its `startxref` says.
+    /// Where its cross-reference section starts, counted from the header,
+    /// as its `startxref` says.
     pub start: usize,
     /// Its trailer's `/Size`.
     pub size: u32,
     /// Its trailer's `/ID`, when it has one.
     pub id: Option<[Vec<u8>; 2]>,
-    /// The file as it is now, for an update after it.
+    /// The file as it is now, for an update after it. After a whole file
+    /// it's of no reading ([`Base::source`] none), so an update after it
+    /// passes over nothing as read: a document's [`bodies`] given again,
+    /// their records still of the reading the document was read in, are
+    /// each written again, copied where they copy. After an update it's of
+    /// the reading its base was.
     pub base: Base,
 }
 
@@ -613,7 +635,10 @@ pub enum Error {
     /// A stream whose data is where it was written
     /// ([`Data::At`](pdf_objects::object::Data::At)), which isn't where
     /// the reading the write was given read that number's stream's data,
-    /// or with no reading given: its data is given as bytes instead.
+    /// or with no reading given: its data is given as bytes instead, or the
+    /// reading it was read in given, which a document read whole
+    /// ([`bytes::read`](crate::bytes::read)) has dropped
+    /// ([`Reading::to_document`] keeps it).
     #[error(
         "stream {} {}'s data is where no stream of the reading given read it at that number",
         .0.0, .0.1
@@ -663,7 +688,9 @@ pub enum Error {
     Changed(Option<ObjectId>),
     /// An object as read ([`Body::Read`]) given with a record of another
     /// reading than the one given, or of another object: read as another
-    /// number or generation ([`Record::id`]), or not the object given.
+    /// number or generation ([`Record::id`]), or not the object given. A
+    /// document's objects copy from the reading it was made of by
+    /// [`Reading::to_document`], not another of the same bytes.
     #[error(
         "object {} {} is given with a record of another reading than the one given, or of another object",
         .0.0, .0.1

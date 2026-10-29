@@ -187,9 +187,11 @@ impl Base {
 /// whichever is higher, passing over a number the objects written or the
 /// trailer refer to and no object written holds. Its positions are
 /// `base.len` and its offset from where it starts in `out`, so `out` may
-/// be empty or hold the file. Of
-/// the [`Options`], it takes `deflate`, `xref_from` and `stop`; it writes
-/// each object on its own, never in an object stream.
+/// be empty or hold the file. Of the [`Options`], it takes `xref_from` and
+/// `stop`; it writes each object on its own, never in an object stream.
+/// After a whole file's [`Written::base`], which is of no reading, it
+/// passes over nothing as read, so a document's bodies given again are
+/// each written again: what changed since a save is the caller's to give.
 ///
 /// - **The trailer** carries `base`'s newest trailer's entries but those
 ///   a section writes anew (ISO 32000-2, 7.5.6): `/Root`, `/Prev`, at
