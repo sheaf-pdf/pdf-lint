@@ -13,7 +13,7 @@ use crate::fuzz::{self, Counted};
 use crate::write::{self, Body};
 
 /// The plaintext of [`content`]'s stream 4.
-const CONTENT: &[u8] = b"0 0 m 99 99 l S";
+pub(crate) const CONTENT: &[u8] = b"0 0 m 99 99 l S";
 
 /// What [`content`]'s stream 5 decodes to.
 const TEXT: &[u8] = b"BT /F1 12 Tf 72 712 Td (A page of text) Tj ET";
@@ -62,6 +62,142 @@ fn a_stream(entries: &str, data: &[u8], extra: &[(u32, &[u8])]) -> Vec<u8> {
     ]
     .concat();
     write::assembled("1.7", &objects, "<< /Size 9 /Root 1 0 R >>")
+}
+
+/// The plaintext of [`attached`]'s metadata stream, 3.
+pub(crate) const XMP: &[u8] = b"<?xpacket begin?><x:xmpmeta/><?xpacket end?>";
+
+/// The plaintext of [`attached`]'s embedded file, 4.
+pub(crate) const ATTACHED: &[u8] = b"an attached file's bytes";
+
+/// How [`attached`]'s file is encrypted, by the user's password `user` and
+/// the owner's `owner`, under `/EncryptMetadata false`.
+pub(crate) struct Attached<'a> {
+    /// The kind: of `/V` 4 or later, from which `/EncryptMetadata` counts,
+    /// or below, which has no crypt filters.
+    pub(crate) kind: Kind,
+    /// Its crypt filters, `/CF`'s entries: each one's name and `/CFM`.
+    pub(crate) filters: &'a [(&'a str, &'a str)],
+    /// The name of the crypt filter its streams are encrypted by, `/StmF`.
+    pub(crate) streams: &'a str,
+    /// The name of the crypt filter its strings are encrypted by, `/StrF`.
+    pub(crate) strings: &'a str,
+    /// Its encryption dictionary's `/EFF`, as written, if it has one.
+    pub(crate) eff: &'a str,
+    /// The metadata stream's dictionary's own entries, as written (its
+    /// crypt filter, if it has one), and the name of the crypt filter its
+    /// data is encrypted by.
+    pub(crate) metadata: (&'a str, &'a str),
+    /// The embedded file's, likewise.
+    pub(crate) embedded: (&'a str, &'a str),
+}
+
+/// [`attached`]'s file encrypted by AES-128 (`/V` 4) with two crypt
+/// filters, `/StdCF`, AES-128, its strings' and streams', and `/RC4CF`,
+/// RC4; its encryption dictionary's `/EFF` as `eff` writes it; its metadata
+/// stream without a crypt filter of its own, so as written, and its
+/// embedded file without one, encrypted as its streams are.
+pub(crate) fn aes_128_and_rc4(eff: &str) -> Attached<'_> {
+    Attached {
+        kind: Kind::Aes128,
+        filters: &[("StdCF", "AESV2"), ("RC4CF", "V2")],
+        streams: "StdCF",
+        strings: "StdCF",
+        eff,
+        metadata: ("", "Identity"),
+        embedded: ("", "StdCF"),
+    }
+}
+
+/// A file encrypted as `how` says, besides `extra` objects: a catalog
+/// whose metadata stream, 3, is [`XMP`], and whose one embedded file,
+/// stream 4, named `a.txt` by file specification 5, is [`ATTACHED`], each
+/// encrypted by the crypt filter `how` names; and stream 6, [`CONTENT`],
+/// encrypted as `/StmF` says. Its encryption dictionary is in its trailer.
+pub(crate) fn attached(how: &Attached, extra: &[(u32, &[u8])]) -> Vec<u8> {
+    let settings = pdf_crypt::writer::Settings {
+        encrypt_metadata: false,
+        ..settings(how.kind, b"user")
+    };
+    let mut values = pdf_crypt::writer::dictionary(&settings);
+    values.crypt_filters = (how.filters.iter())
+        .map(|(name, method)| pdf_crypt::CryptFilter {
+            name: name.as_bytes().to_vec(),
+            method: Some(method.as_bytes().to_vec()),
+        })
+        .collect();
+    values.stm_f = Some(how.streams.as_bytes().to_vec());
+    values.str_f = Some(how.strings.as_bytes().to_vec());
+    let handler = Handler::open(&values, settings.id, &[settings.user]).unwrap();
+    let name = |n: u32| {
+        let name = handler.encrypt_string((n, 0), b"its name", b"a.txt");
+        format!("<{}>", hex(&name.unwrap()))
+    };
+    let stream = |n: u32, entries: String, data: &[u8], by: Option<&str>| {
+        let method = by.map(|name| handler.named(name.as_bytes()));
+        let data = handler.encrypt_stream((n, 0), b"its data", data, method.as_ref());
+        let data = data.unwrap();
+        let head = format!("<< {entries}/Length {} >>\nstream\n", data.len());
+        [head.as_bytes(), &data, b"\nendstream"].concat()
+    };
+    let (metadata, metadata_by) = how.metadata;
+    let (embedded, embedded_by) = how.embedded;
+    let files = format!("/EmbeddedFiles << /Names [{} 5 0 R] >>", name(1));
+    let objects = [
+        format!("<< /Type /Catalog /Pages 2 0 R /Metadata 3 0 R /Names << {files} >> >>")
+            .into_bytes(),
+        b"<< /Type /Pages /Kids [] /Count 0 >>".to_vec(),
+        stream(
+            3,
+            format!("/Type /Metadata /Subtype /XML{metadata} "),
+            XMP,
+            Some(metadata_by),
+        ),
+        stream(
+            4,
+            format!("/Type /EmbeddedFile{embedded} "),
+            ATTACHED,
+            Some(embedded_by),
+        ),
+        format!("<< /Type /Filespec /F {} /EF << /F 4 0 R >> >>", name(5)).into_bytes(),
+        stream(6, String::new(), CONTENT, None),
+    ];
+    let objects: Vec<(u32, &[u8])> = (1..)
+        .zip(objects.iter().map(Vec::as_slice))
+        .chain(extra.iter().copied())
+        .collect();
+    let mut encrypt = format!("/Filter /Standard /V {} /R {}", values.v, values.r);
+    if let Some(length) = values.length {
+        encrypt.push_str(&format!(" /Length {length}"));
+    }
+    encrypt.push_str(&format!(" /P {}", settings.p));
+    let fields = [
+        ("O", &values.o),
+        ("U", &values.u),
+        ("OE", &values.oe),
+        ("UE", &values.ue),
+        ("Perms", &values.perms),
+    ];
+    for (key, value) in fields {
+        if let Some(value) = value {
+            encrypt.push_str(&format!(" /{key} <{}>", hex(value)));
+        }
+    }
+    if let Some(encrypt_metadata) = values.encrypt_metadata {
+        encrypt.push_str(&format!(" /EncryptMetadata {encrypt_metadata}"));
+    }
+    let filters: String = (how.filters.iter())
+        .map(|(name, method)| format!("/{name} << /CFM /{method} >> "))
+        .collect();
+    let (streams, strings, eff) = (how.streams, how.strings, how.eff);
+    encrypt.push_str(&format!(
+        " /CF << {filters}>> /StmF /{streams} /StrF /{strings} {eff}"
+    ));
+    let size = objects.iter().map(|(n, _)| n + 1).max().unwrap_or(1);
+    let id = hex(settings.id);
+    let trailer =
+        format!("<< /Size {size} /Root 1 0 R /Encrypt << {encrypt} >> /ID [<{id}> <{id}>] >>");
+    write::assembled("1.7", &objects, &trailer)
 }
 
 /// In a file each kind of encryption writes, opened by the user's password
@@ -214,55 +350,111 @@ fn metadata_not_encrypted_is_handed_out_as_written_whether_the_file_opens_or_not
 }
 
 /// The catalog's metadata stream under `/EncryptMetadata false` whose own
-/// `/Crypt` filter names one that encrypts it is refused, whether the file
-/// opens or not: it's neither handed out as written, where it's
-/// ciphertext, nor decrypted by its own. One whose own is `/Identity` is
-/// handed out as written.
+/// `/Crypt` filter names one that encrypts it is decrypted by that, not as
+/// `/StmF` says nor left as written, by the user's password and the
+/// owner's; refused in a file no password opens, whose streams are
+/// encrypted or not, and in one whose security handler the reader can't
+/// open. One whose own is `/Identity` is handed out as written, whether the
+/// file opens or not. Neither is the document's metadata, which is
+/// unfiltered.
 #[test]
-fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_refused() {
-    let xmp = b"<?xpacket begin?><x:xmpmeta/><?xpacket end?>";
-    let crypt = |name: &str| dict! { "Name" => name };
-    let objects = |metadata: Dict| {
-        [
-            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
-            (2, dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into()),
-            (3, Body::stream(metadata, xmp)),
-        ]
+fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it() {
+    let own = |name: &str| {
+        format!(" /Filter /Crypt /DecodeParms << /Type /CryptFilterDecodeParms /Name /{name} >>")
     };
-    let settings = pdf_crypt::writer::Settings {
-        encrypt_metadata: false,
-        ..settings(Kind::Aes128, b"user")
-    };
-    // Without `/Type /Metadata`, the writer encrypts it, by `/StmF`, which
-    // is `/StdCF`, the crypt filter it names.
-    let own = dict! { "Subtype" => "XML", "Filter" => "Crypt", "DecodeParms" => crypt("StdCF") };
-    let file = write::encrypted(&settings, &objects(own), root());
-    assert!(find(&file, xmp).is_none(), "written encrypted");
-    for passwords in [&[][..], &[&b"user"[..]]] {
-        let reading = open(&file, passwords, &Options::DEFAULT);
-        let data = reading.data((3, 0));
+    let rc4 = own("RC4CF");
+    let std_cf = own("StdCF");
+    let identity = own("Identity");
+    // /StmF a crypt filter of another method; or /Identity, under which its
+    // ciphertext would be handed out as written.
+    let cases = [
+        Attached {
+            metadata: (&rc4, "RC4CF"),
+            ..aes_128_and_rc4("")
+        },
+        Attached {
+            kind: Kind::Aes256,
+            filters: &[("StdCF", "AESV3")],
+            streams: "Identity",
+            strings: "StdCF",
+            eff: "",
+            metadata: (&std_cf, "StdCF"),
+            embedded: ("", "Identity"),
+        },
+    ];
+    for how in &cases {
+        let file = attached(how, &[]);
+        let what = format!("{:?}", how.kind);
+        assert!(find(&file, XMP).is_none(), "{what}: written encrypted");
+        for password in [&b"user"[..], b"owner"] {
+            let reading = open(&file, &[password], &Options::DEFAULT);
+            assert!(matches!(reading.encryption(), Encryption::Opened { .. }));
+            let data = reading.data((3, 0)).unwrap();
+            assert!(matches!(data, Cow::Owned(_)), "{what}: decrypted");
+            assert_eq!(data, XMP, "{what}");
+            assert_eq!(reading.decoded((3, 0)).unwrap(), XMP, "{what}");
+            assert_eq!(
+                reading.data((6, 0)).unwrap(),
+                CONTENT,
+                "{what}: as /StmF says"
+            );
+            assert_eq!(reading.metadata().unwrap(), None, "{what}");
+            assert!(
+                reading.warnings().is_empty(),
+                "{what}: {:?}",
+                reading.warnings()
+            );
+        }
+        let reading = open(&file, &[], &Options::DEFAULT);
+        assert_eq!(*reading.encryption(), Encryption::Locked, "{what}");
+        let error = reading.data((3, 0)).unwrap_err();
+        assert!(matches!(error, Error::Locked), "{what}: {error:?}");
         assert!(
-            matches!(data, Err(Error::Encrypted)),
-            "{passwords:?}: {data:?}"
+            matches!(reading.decoded((3, 0)), Err(Error::Locked)),
+            "{what}"
         );
-        let decoded = reading.decoded((3, 0));
-        assert!(matches!(decoded, Err(Error::Encrypted)), "{passwords:?}");
-        assert_eq!(reading.metadata().unwrap(), None, "{passwords:?}");
+        assert_eq!(reading.metadata().unwrap(), None, "{what}");
+        let at = find(&file, b"/Standard").unwrap();
+        let other = [&file[..at], b"/Standarx", &file[at + 9..]].concat();
+        let reading = open(&other, &[b"user"], &Options::DEFAULT);
+        assert!(matches!(reading.encryption(), Encryption::Unsupported(_)));
+        assert!(
+            matches!(reading.data((3, 0)), Err(Error::Unsupported)),
+            "{what}"
+        );
     }
-    // With `/Type /Metadata`, the writer leaves it as written.
-    let identity = dict! {
-        "Type" => "Metadata",
-        "Subtype" => "XML",
-        "Filter" => "Crypt",
-        "DecodeParms" => crypt("Identity"),
+    // In a file whose strings and streams aren't encrypted.
+    let plain = Attached {
+        metadata: (&rc4, "RC4CF"),
+        ..aes_128_and_rc4("")
     };
-    let file = write::encrypted(&settings, &objects(identity), root());
+    let file = attached(
+        &Attached {
+            streams: "Identity",
+            strings: "Identity",
+            ..plain
+        },
+        &[],
+    );
+    let reading = open(&file, &[], &Options::DEFAULT);
+    assert_eq!(*reading.encryption(), Encryption::Plain);
+    assert!(matches!(reading.data((3, 0)), Err(Error::Locked)));
+    assert!(matches!(reading.decoded((3, 0)), Err(Error::Locked)));
+    assert_eq!(reading.data((6, 0)).unwrap(), CONTENT);
+    // Its own crypt filter /Identity.
+    let file = attached(
+        &Attached {
+            metadata: (&identity, "Identity"),
+            ..aes_128_and_rc4("")
+        },
+        &[],
+    );
     for passwords in [&[][..], &[&b"user"[..]]] {
         let reading = open(&file, passwords, &Options::DEFAULT);
         let data = reading.data((3, 0)).unwrap();
         assert!(matches!(data, Cow::Borrowed(_)), "{passwords:?}");
-        assert_eq!(data, &xmp[..], "{passwords:?}");
-        assert_eq!(reading.decoded((3, 0)).unwrap(), xmp, "{passwords:?}");
+        assert_eq!(data, XMP, "{passwords:?}");
+        assert_eq!(reading.decoded((3, 0)).unwrap(), XMP, "{passwords:?}");
     }
 }
 
@@ -324,34 +516,168 @@ fn a_plain_files_streams_are_handed_out_as_written_but_one_its_own_crypt_filter_
     assert_eq!(reading.decoded((4, 0)).unwrap(), objects);
 }
 
-/// An embedded file's data, in a file whose encryption dictionary says by
-/// its `/EFF` how embedded files are encrypted, is refused, as the reader
-/// doesn't apply `/EFF`: in a file that encrypts only its embedded files,
-/// and in one that opens. Without `/EFF`, it's decrypted as any stream is.
+/// An embedded file's data, in a file whose encryption dictionary has an
+/// `/EFF`, is decrypted by the crypt filter `/EFF` names, not as `/StmF`
+/// says, by the user's password and the owner's, `/EFF` followed where
+/// it's a reference; but one with a `/Crypt` filter of its own is
+/// decrypted by that. In a file no password opens, whose streams are
+/// encrypted or not, it's refused, but where `/EFF` is `/Identity`. An
+/// `/EFF` that isn't a name doesn't say how embedded files are encrypted,
+/// so one's data is refused in a file that opens; a null is none, and so
+/// is a reference to no object, and below `/V` 4, which has no crypt
+/// filters, `/EFF` is nothing: as any stream's.
 #[test]
-fn an_embedded_files_data_under_eff_is_refused() {
-    let file = a_stream("/Type /EmbeddedFile", b"0123456789abcdef", &[]);
-    let file = only_attachments_encrypted(&file);
+fn an_embedded_files_data_under_eff_is_decrypted_by_it() {
+    let own = |name: &str| {
+        format!(" /Filter /Crypt /DecodeParms << /Type /CryptFilterDecodeParms /Name /{name} >>")
+    };
+    let std_cf = own("StdCF");
+    let decrypted = |file: &[u8], what: &str| {
+        for password in [&b"user"[..], b"owner"] {
+            let reading = open(file, &[password], &Options::DEFAULT);
+            assert!(matches!(reading.encryption(), Encryption::Opened { .. }));
+            let data = reading.data((4, 0)).unwrap();
+            assert!(matches!(data, Cow::Owned(_)), "{what}: decrypted");
+            assert_eq!(data, ATTACHED, "{what}");
+            assert_eq!(reading.decoded((4, 0)).unwrap(), ATTACHED, "{what}");
+            assert_eq!(
+                reading.data((6, 0)).unwrap(),
+                CONTENT,
+                "{what}: as /StmF says"
+            );
+            assert!(
+                reading.warnings().is_empty(),
+                "{what}: {:?}",
+                reading.warnings()
+            );
+        }
+    };
+    // What an /EFF can refer to: a name, a string, and an object that
+    // doesn't read; each in a file whose /EFF refers to it.
+    let referred: [(u32, &[u8]); 3] = [(7, b"/RC4CF"), (8, b"(RC4CF)"), (9, b"<< /Open")];
+    let written = |how: &Attached| {
+        let extra: Vec<(u32, &[u8])> = (referred.iter())
+            .filter(|(n, _)| how.eff == format!("/EFF {n} 0 R"))
+            .copied()
+            .collect();
+        attached(how, &extra)
+    };
+    let cases = [
+        // /StmF a crypt filter of another method.
+        (
+            Attached {
+                embedded: ("", "RC4CF"),
+                ..aes_128_and_rc4("/EFF /RC4CF")
+            },
+            "/EFF /RC4CF",
+        ),
+        (
+            Attached {
+                embedded: ("", "RC4CF"),
+                ..aes_128_and_rc4("/EFF 7 0 R")
+            },
+            "/EFF by reference",
+        ),
+        // Its own crypt filter, not /EFF's.
+        (
+            Attached {
+                embedded: (&std_cf, "StdCF"),
+                ..aes_128_and_rc4("/EFF /RC4CF")
+            },
+            "its own",
+        ),
+        (
+            Attached {
+                embedded: (&std_cf, "StdCF"),
+                ..aes_128_and_rc4("/EFF 8 0 R")
+            },
+            "its own, /EFF not a name",
+        ),
+        // /StmF /Identity, under which its ciphertext would be handed out as
+        // written.
+        (
+            Attached {
+                kind: Kind::Aes256,
+                filters: &[("StdCF", "AESV3")],
+                streams: "Identity",
+                strings: "StdCF",
+                eff: "/EFF /StdCF",
+                metadata: ("", "Identity"),
+                embedded: ("", "StdCF"),
+            },
+            "/V 5",
+        ),
+    ];
+    for (how, what) in &cases {
+        let file = written(how);
+        assert!(find(&file, ATTACHED).is_none(), "{what}: written encrypted");
+        decrypted(&file, what);
+        let reading = open(&file, &[], &Options::DEFAULT);
+        assert_eq!(*reading.encryption(), Encryption::Locked, "{what}");
+        assert!(matches!(reading.data((4, 0)), Err(Error::Locked)), "{what}");
+        assert!(
+            matches!(reading.decoded((4, 0)), Err(Error::Locked)),
+            "{what}"
+        );
+    }
+    // A null /EFF, a reference to no object, and none: as /StmF says.
+    for eff in ["/EFF null", "/EFF 99 0 R", ""] {
+        decrypted(&written(&aes_128_and_rc4(eff)), eff);
+    }
+    // Below /V 4, as every stream is, by RC4, whatever /EFF is.
+    for eff in ["/EFF /RC4CF", "/EFF 8 0 R"] {
+        let how = Attached {
+            kind: Kind::Rc4By128,
+            ..aes_128_and_rc4(eff)
+        };
+        decrypted(&written(&how), eff);
+    }
+    // /EFF that isn't a name: refused as it could be ciphertext, the other
+    // streams decrypted; in a file no password opens, refused all the same.
+    for eff in ["/EFF 8 0 R", "/EFF 9 0 R", "/EFF [/RC4CF]", "/EFF 1"] {
+        let how = Attached {
+            embedded: ("", "RC4CF"),
+            ..aes_128_and_rc4(eff)
+        };
+        let file = written(&how);
+        let reading = open(&file, &[b"user"], &Options::DEFAULT);
+        let error = reading.data((4, 0)).unwrap_err();
+        assert!(matches!(error, Error::Encrypted), "{eff}: {error:?}");
+        assert!(
+            matches!(reading.decoded((4, 0)), Err(Error::Encrypted)),
+            "{eff}"
+        );
+        assert_eq!(reading.data((6, 0)).unwrap(), CONTENT, "{eff}");
+        let reading = open(&file, &[], &Options::DEFAULT);
+        assert!(matches!(reading.data((4, 0)), Err(Error::Locked)), "{eff}");
+    }
+    // In a file whose strings and streams aren't encrypted, refused, its
+    // password needed, but where /EFF is /Identity, as written.
+    let file =
+        only_attachments_encrypted(&a_stream("/Type /EmbeddedFile", b"0123456789abcdef", &[]));
     let reading = open(&file, &[], &Options::DEFAULT);
     assert_eq!(*reading.encryption(), Encryption::Plain);
     let error = reading.data((2, 0)).unwrap_err();
-    assert!(matches!(error, Error::EmbeddedFile));
-    assert_eq!(
-        error.to_string(),
-        "it's an embedded file, encrypted as the file's /EFF says, which the reader doesn't decrypt"
-    );
-    let mut objects = content();
-    let attached = dict! { "Type" => "EmbeddedFile" };
-    objects[3] = (4, Body::stream(attached, b"attached"));
-    let file = write::encrypted(&settings(Kind::Aes128, b""), &objects, root());
+    assert!(matches!(error, Error::Locked), "{error:?}");
+    assert!(matches!(reading.decoded((2, 0)), Err(Error::Locked)));
+    let plain = |eff, by| Attached {
+        streams: "Identity",
+        strings: "Identity",
+        embedded: ("", by),
+        ..aes_128_and_rc4(eff)
+    };
+    for (eff, by) in [("/EFF /RC4CF", "RC4CF"), ("/EFF 8 0 R", "RC4CF")] {
+        let file = written(&plain(eff, by));
+        let reading = open(&file, &[], &Options::DEFAULT);
+        assert_eq!(*reading.encryption(), Encryption::Plain, "{eff}");
+        assert!(matches!(reading.data((4, 0)), Err(Error::Locked)), "{eff}");
+        assert_eq!(reading.data((6, 0)).unwrap(), CONTENT, "{eff}");
+    }
+    let file = written(&plain("/EFF /Identity", "Identity"));
     let reading = open(&file, &[], &Options::DEFAULT);
-    assert_eq!(reading.data((4, 0)).unwrap(), &b"attached"[..]);
-    let file = encryption_updated(&file, "/StmF /StdCF", "/StmF /StdCF /EFF /StdCF", &[]);
-    let reading = open(&file, &[], &Options::DEFAULT);
-    assert!(matches!(reading.encryption(), Encryption::Opened { .. }));
-    assert!(matches!(reading.data((4, 0)), Err(Error::EmbeddedFile)));
-    assert!(matches!(reading.decoded((4, 0)), Err(Error::EmbeddedFile)));
-    assert_eq!(reading.decoded((5, 0)).unwrap(), TEXT);
+    let data = reading.data((4, 0)).unwrap();
+    assert!(matches!(data, Cow::Borrowed(_)));
+    assert_eq!(data, ATTACHED);
 }
 
 /// A stream the encryption dictionary refers to, whose strings the reader

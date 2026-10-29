@@ -103,9 +103,29 @@
 //!     false`, is handed out as written, whether the file opens or not, as
 //!     the [`Document`]'s metadata is (7.6.4.2 and 14.3.2). Held by
 //!     `metadata_not_encrypted_is_handed_out_as_written_whether_the_file_opens_or_not`.
-//!     But where its own `/Crypt` filter names one that encrypts it, it's
-//!     refused, decrypted by that or not ([`Error::Encrypted`]). Held by
-//!     `metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_refused`.
+//!   - **The catalog's metadata stream's under `/EncryptMetadata false`
+//!     whose own `/Crypt` filter names one that encrypts it** is decrypted
+//!     by that, as a stream's own crypt filter overrides the file's
+//!     (7.4.10, 7.6.6); refused in a file no password opened
+//!     ([`Error::Locked`]), whose streams are encrypted or not, and in one
+//!     whose security handler the reader can't open
+//!     ([`Error::Unsupported`]). Held by
+//!     `metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it`
+//!     and `a_metadata_stream_and_an_embedded_file_decrypt_as_through_qpdf_but_where_it_ignores_eff`.
+//!   - **An embedded file's** (`/Type /EmbeddedFile`), in a file whose
+//!     encryption dictionary has an `/EFF`, is decrypted by the crypt
+//!     filter `/EFF` names, unless the stream has a `/Crypt` filter of its
+//!     own, which decrypts it instead (7.6.6 and Table 20); `/EFF` is
+//!     followed where it's a reference, as `/StmF` is, and counts from `/V`
+//!     4. Without a crypt filter of its own, it's refused in a file no
+//!     password opened ([`Error::Locked`]), whose streams are encrypted or
+//!     not, unless `/EFF` is `/Identity`; and, where `/EFF` isn't a name,
+//!     which doesn't say how embedded files are encrypted, in a file that
+//!     opened ([`Error::Encrypted`]). qpdf decrypts one without a crypt
+//!     filter of its own as `/StmF` says, reading `/EFF` only for what a
+//!     writer should encrypt new embedded files by. Held by
+//!     `an_embedded_files_data_under_eff_is_decrypted_by_it` and
+//!     `a_metadata_stream_and_an_embedded_file_decrypt_as_through_qpdf_but_where_it_ignores_eff`.
 //!   - **In a file no password opened,** each is refused, as it may be
 //!     ciphertext ([`Error::Locked`]); but in one whose streams aren't
 //!     encrypted ([`Encryption::Plain`]), handed out as written, unless the
@@ -115,11 +135,6 @@
 //!   - **In a file whose security handler the reader can't open,** each is
 //!     refused ([`Error::Unsupported`]). Held by
 //!     `an_unsupported_handlers_streams_are_refused`.
-//!   - **An embedded file's** (`/Type /EmbeddedFile`), in a file whose
-//!     encryption dictionary has an `/EFF`, the crypt filter embedded files
-//!     are encrypted by, is refused, as the reader doesn't apply it
-//!     ([`Error::EmbeddedFile`]; 7.6.6 and Table 20). Held by
-//!     `an_embedded_files_data_under_eff_is_refused`.
 //!   - **A stream the encryption dictionary refers to,** among the objects
 //!     whose strings are left as written, is refused
 //!     ([`Error::Encrypted`]). Held by
@@ -718,10 +733,9 @@ struct Reader {
     /// Whether an encrypted file's metadata stream is left as written by
     /// `/EncryptMetadata false` itself, whatever its streams are.
     unencrypted_metadata: bool,
-    /// Whether an encrypted file's dictionary has an `/EFF`, the crypt
-    /// filter its embedded files are encrypted by, which the reader doesn't
-    /// apply.
-    embedded_files: bool,
+    /// How an encrypted file's embedded files are encrypted, by its
+    /// dictionary's `/EFF`.
+    embedded_files: Eff,
     /// Whether the file has an encryption dictionary, so that its streams
     /// may be encrypted, whatever its strings are.
     encrypts: bool,
@@ -829,9 +843,23 @@ type InUse<'r> = Option<Result<&'r Object, &'r Unread>>;
 enum Crypt<'h> {
     /// As written.
     Written,
-    /// Decrypted by the file's handler: by its own crypt filter's method
-    /// when it has one, else as the file's streams are.
+    /// Decrypted by the file's handler: by the method of the crypt filter
+    /// that encrypts it, its own or an embedded file's `/EFF`, when one
+    /// does, else as the file's streams are.
     Decrypted(&'h Handler, Option<Method>),
+}
+
+/// How an encrypted file's embedded files are encrypted, as its
+/// encryption dictionary's `/EFF` says (ISO 32000-2, 7.6.6 and Table 20).
+enum Eff {
+    /// As its streams are: it has no `/EFF`, or a null, or is of a `/V`
+    /// below 4, which has no crypt filters.
+    AsStreams,
+    /// By the crypt filter of this name, but one with a crypt filter of its
+    /// own.
+    Named(Vec<u8>),
+    /// Its `/EFF` isn't a name, so it doesn't say how.
+    Unsaid,
 }
 
 /// What's at the offset `startxref` or a `/Prev` gives.
@@ -1005,7 +1033,7 @@ impl Reader {
             plain_strings: false,
             plain_metadata: false,
             unencrypted_metadata: false,
-            embedded_files: false,
+            embedded_files: Eff::AsStreams,
             encrypts: false,
             budget: AtomicUsize::new(limits.budget),
             reached: AtomicBool::new(false),
@@ -1728,21 +1756,24 @@ impl Reader {
     /// out ([`Reading::data`]), by the rule its object streams are decrypted
     /// by: by the stream's own `/Crypt` filter when it has one, else as the
     /// file's streams are (ISO 32000-2, 7.6.6), its filters' values
-    /// followed through what's read and kept. Left as written: in a file
-    /// that doesn't encrypt; a cross-reference stream's (7.5.8.2); the
-    /// catalog's metadata stream's under `/EncryptMetadata false` (7.6.4.2
-    /// and 14.3.2), whether the file opens or not, but where its own crypt
-    /// filter encrypts it; and in a file no password opened whose streams
-    /// aren't encrypted ([`Encryption::Plain`]), every stream's but one
-    /// whose own crypt filter encrypts it. Refused where it may be
+    /// followed through what's read and kept; an embedded file's
+    /// (`/Type /EmbeddedFile`) without one of its own, by the crypt filter
+    /// the encryption dictionary's `/EFF` names (7.6.6 and Table 20). Left
+    /// as written: in a file that doesn't encrypt; a cross-reference
+    /// stream's (7.5.8.2); the catalog's metadata stream's under
+    /// `/EncryptMetadata false` (7.6.4.2 and 14.3.2), whether the file
+    /// opens or not, but where its own crypt filter encrypts it, which then
+    /// decrypts it as it does any stream's (7.6.6); and in a file no
+    /// password opened whose streams aren't encrypted
+    /// ([`Encryption::Plain`]), every stream's but one whose own crypt
+    /// filter encrypts it, or an embedded file's without one of its own
+    /// under an `/EFF` that isn't `/Identity`. Refused where it may be
     /// ciphertext the reader doesn't decrypt: in a file no password opened,
     /// every other stream's ([`Error::Locked`]); in a file whose handler it
-    /// can't open, every stream's ([`Error::Unsupported`]); an embedded
-    /// file's, in a file whose encryption dictionary has an `/EFF`
-    /// ([`Error::EmbeddedFile`]); one the encryption dictionary refers to,
-    /// whose strings are left as written, and the catalog's metadata
-    /// stream's under `/EncryptMetadata false` whose own crypt filter
-    /// encrypts it, which the reader neither decrypts nor leaves
+    /// can't open, every stream's ([`Error::Unsupported`]); and one the
+    /// encryption dictionary refers to, whose strings are left as written,
+    /// and an embedded file's without a crypt filter of its own where
+    /// `/EFF` isn't a name, which the reader neither decrypts nor leaves
     /// ([`Error::Encrypted`]).
     fn crypt<'f, F: Bytes<'f>>(
         &'f self,
@@ -1764,35 +1795,35 @@ impl Reader {
                 None
             }
         };
-        let crypt = filter::crypt_filter(dict, Some(&resolve));
+        let own = filter::crypt_filter(dict, Some(&resolve));
         if let Some(error) = failed.into_inner() {
             return Err(error);
         }
-        if self.unencrypted_metadata {
+        // The metadata stream is left as written, but where its own crypt
+        // filter encrypts it, which decrypts it as it does any stream.
+        if self.unencrypted_metadata && own.as_deref().is_none_or(|name| name == b"Identity") {
             let get = |id| Ok(self.get(file, id)?.ok());
             if metadata_stream(&self.trailer, &get)? == Some(id) {
-                // Its own crypt filter may encrypt it all the same.
-                return Ok(match crypt.as_deref() {
-                    Some(name) if name != b"Identity" => Err(Error::Encrypted),
-                    _ => Ok(Crypt::Written),
-                });
+                return Ok(Ok(Crypt::Written));
             }
         }
-        if self.embedded_files
-            && dict.get(b"Type").and_then(Object::as_name) == Some(b"EmbeddedFile")
-        {
-            return Ok(Err(Error::EmbeddedFile));
-        }
+        let embedded = || dict.get(b"Type").and_then(Object::as_name) == Some(b"EmbeddedFile");
+        let (crypt, unsaid) = match (own, &self.embedded_files) {
+            (None, Eff::Named(name)) if embedded() => (Some(name.clone()), false),
+            (None, Eff::Unsaid) if embedded() => (None, true),
+            (own, _) => (own, false),
+        };
         Ok(match (&self.handler, &self.encryption) {
+            (Some(_), _) if unsaid => Err(Error::Encrypted),
             (Some(handler), _) => {
                 let method = crypt.map(|name| handler.named(&name));
                 Ok(Crypt::Decrypted(handler, method))
             }
-            (None, Encryption::Plain) => match crypt.as_deref() {
+            (None, Encryption::Unsupported(_)) => Err(Error::Unsupported),
+            (None, Encryption::Plain) if !unsaid => match crypt.as_deref() {
                 Some(name) if name != b"Identity" => Err(Error::Locked),
                 _ => Ok(Crypt::Written),
             },
-            (None, Encryption::Unsupported(_)) => Err(Error::Unsupported),
             (None, _) => Err(Error::Locked),
         })
     }
@@ -2818,6 +2849,8 @@ impl Reader {
             stm_f: name(get(dict.get(b"StmF"))?),
             str_f: name(get(dict.get(b"StrF"))?),
         };
+        let eff = dict.get(b"EFF");
+        let eff_followed = get(eff)?;
         // The file's first /ID element, as qpdf takes it: empty, said once
         // the standard handler takes the dictionary, when it isn't a string.
         let id = match get(trailer.dict().get(b"ID"))?.map(|o| o.into_value()) {
@@ -2850,8 +2883,24 @@ impl Reader {
             Err(_) => values.v >= 4 && values.encrypt_metadata == Some(false),
         };
         self.plain_metadata = plain_streams || self.unencrypted_metadata;
-        // Said as written: a null is no entry (ISO 32000-2, 7.3.9).
-        self.embedded_files = (dict.get(b"EFF")).is_some_and(|o| !matches!(o.value(), Value::Null));
+        // From /V 4, which has crypt filters (ISO 32000-2, Table 20), and
+        // followed as /StmF is: a null is no entry (7.3.9), and so is a
+        // reference to no object (7.3.10); anything else that isn't a name,
+        // a reference to an object that doesn't read among them, doesn't
+        // say how embedded files are encrypted.
+        self.embedded_files = match eff_followed.as_ref().map(Object::value) {
+            _ if values.v < 4 => Eff::AsStreams,
+            Some(Value::Name(name)) => Eff::Named(name.to_vec()),
+            Some(Value::Null) => Eff::AsStreams,
+            Some(_) => Eff::Unsaid,
+            None => match eff.map(Object::value) {
+                Some(Value::Ref(id)) => match self.entry(id.0) {
+                    None | Some((_, XrefEntry::Free)) => Eff::AsStreams,
+                    Some(_) => Eff::Unsaid,
+                },
+                _ => Eff::AsStreams,
+            },
+        };
         Ok(match opened {
             Ok(handler) => {
                 for fault in handler.faults() {
@@ -3398,7 +3447,7 @@ fn holds_linearization<'f, F: Bytes<'f>>(
 #[cfg(test)]
 pub(crate) mod lazy;
 #[cfg(test)]
-mod streams;
+pub(crate) mod streams;
 #[cfg(test)]
 mod words;
 

@@ -850,6 +850,96 @@ mod tests {
         }
     }
 
+    /// A metadata stream under `/EncryptMetadata false` whose own crypt
+    /// filter encrypts it, and an embedded file with a crypt filter of its
+    /// own, each encrypted by one that isn't the one `/StmF` names, decrypt
+    /// by the reader as through qpdf, byte for byte, by the user's password
+    /// and the owner's, as does the file's other stream, by `/StmF`'s. But
+    /// an embedded file without one of its own, under an `/EFF` that isn't
+    /// `/StmF`, qpdf decrypts as `/StmF` says, as it reads `/EFF` only to
+    /// tell what a writer should encrypt new embedded files by: under
+    /// `/StmF /Identity`, as written; the reader by `/EFF`'s, which ISO
+    /// 32000-2's Table 20 says decrypts it, to the plaintext it was written
+    /// from. qpdf takes a stream's own crypt filter's name from parameters
+    /// of `/Type /CryptFilterDecodeParms`, which the files have.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn a_metadata_stream_and_an_embedded_file_decrypt_as_through_qpdf_but_where_it_ignores_eff() {
+        use crate::bytes::streams::{ATTACHED, Attached, CONTENT, XMP, aes_128_and_rc4, attached};
+        use pdf_crypt::writer::Kind;
+
+        let own = |name: &str| {
+            format!(
+                " /Filter /Crypt /DecodeParms << /Type /CryptFilterDecodeParms /Name /{name} >>"
+            )
+        };
+        let (rc4, std_cf) = (own("RC4CF"), own("StdCF"));
+        // Each file, and whether qpdf hands its embedded file out as
+        // written, where the reader decrypts it.
+        let cases = [
+            // /StmF and /EFF AES-128; the metadata stream and the embedded
+            // file each RC4 by its own.
+            (
+                Attached {
+                    metadata: (&rc4, "RC4CF"),
+                    embedded: (&rc4, "RC4CF"),
+                    ..aes_128_and_rc4("/EFF /StdCF")
+                },
+                false,
+            ),
+            // /StmF /Identity; the metadata stream RC4 by its own, and the
+            // embedded file RC4 by /EFF's.
+            (
+                Attached {
+                    streams: "Identity",
+                    metadata: (&rc4, "RC4CF"),
+                    embedded: ("", "RC4CF"),
+                    ..aes_128_and_rc4("/EFF /RC4CF")
+                },
+                true,
+            ),
+            // /StmF /Identity; the metadata stream AES-256 by its own, and
+            // the embedded file by /EFF's.
+            (
+                Attached {
+                    kind: Kind::Aes256,
+                    filters: &[("StdCF", "AESV3")],
+                    streams: "Identity",
+                    strings: "StdCF",
+                    eff: "/EFF /StdCF",
+                    metadata: (&std_cf, "StdCF"),
+                    embedded: ("", "StdCF"),
+                },
+                true,
+            ),
+        ];
+        let dir = scratch("crypt-filters");
+        let ids = [(3, 0), (4, 0), (6, 0)];
+        for (i, (how, ignored)) in cases.iter().enumerate() {
+            let path = dir.path().join(format!("{i}.pdf"));
+            let file = attached(how, &[]);
+            std::fs::write(&path, &file).unwrap();
+            for password in ["user", "owner"] {
+                let what = format!("{i}, {password}");
+                let options = bytes::Options::DEFAULT;
+                let reading = bytes::Reading::open(&file[..], &[password.as_bytes()], &options);
+                let reading = reading.unwrap();
+                let theirs = qpdf(&path).undecoding().password(password).decode(&ids);
+                for (id, plain) in ids.into_iter().zip([XMP, ATTACHED, CONTENT]) {
+                    let mine = reading.data(id).unwrap();
+                    assert_eq!(mine, plain, "{what}: {id:?}");
+                    let theirs = theirs[&id].as_deref();
+                    if id == (4, 0) && *ignored {
+                        let at = reading.record(id).unwrap().data.unwrap().at;
+                        assert_eq!(theirs, Ok(&file[at.start..at.end]), "{what}: {id:?}");
+                    } else {
+                        assert_eq!(theirs, Ok(&mine[..]), "{what}: {id:?}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
     fn a_qpdf_that_cant_run_says_why_for_every_stream() {
@@ -1951,7 +2041,13 @@ qpdf: operation succeeded with warnings\n";
             _ if kind.starts_with("decrypted, ") && kind.contains("by a /Crypt filter that names none") => Some(
                 "qpdf decrypts what isn't encrypted (see below), and what it gives doesn't decode",
             ),
+            _ if kind.starts_with("decrypted, ") && kind.contains("an embedded file by /EFF") => Some(
+                "qpdf decrypts it as /StmF says (see below), and what it gives doesn't decode",
+            ),
             _ if kind.starts_with("decrypted, ") => explained(&kind["decrypted, ".len()..]),
+            _ if kind.starts_with("decrypts otherwise") && kind.contains("an embedded file by /EFF") => Some(
+                "an embedded file without a crypt filter of its own: the reader decrypts it by the one /EFF names, as ISO 32000-2's Table 20 has it; qpdf as /StmF says, reading /EFF only for what a writer should encrypt new embedded files by",
+            ),
             _ if kind.contains("by a /Crypt filter that names none") => Some(
                 "a /Crypt filter without /Name is /Identity (ISO 32000-2, Table 14), and the data plain (XMP, zlib): qpdf takes a /Name only from parameters of /Type /CryptFilterDecodeParms or in an array, and else decrypts by /StmF",
             ),
@@ -1970,8 +2066,10 @@ qpdf: operation succeeded with warnings\n";
     /// has a handler that can't open, the reader's verdict against qpdf's
     /// `--requires-password`; and in each the reader opens, every stream's
     /// data decrypted as the reader decrypts (its handler, a stream's own
-    /// `/Crypt`, a cross-reference stream not, a metadata stream not under
-    /// `/EncryptMetadata false`) against qpdf's (`undecoding`), and those
+    /// `/Crypt`, else an embedded file's `/EFF` where it's a name, a
+    /// cross-reference stream not, the catalog's metadata stream not under
+    /// `/EncryptMetadata false` but by its own) against qpdf's
+    /// (`undecoding`), and those
     /// with filters the reader decodes, decrypted and decoded, against
     /// qpdf's at `specialized`. Each difference counted by its kind, with
     /// examples, and each kind must be one [`decryption_explained`] knows.
@@ -2013,10 +2111,11 @@ qpdf: operation succeeded with warnings\n";
                             tally.lock().unwrap().files += 1;
                             continue;
                         }
-                        // Locked, by the first password the test suites use
+                        // Locked, or plain, its embedded files encrypted
+                        // alone, by the first password the test suites use
                         // that opens it for qpdf, if one does, given to the
                         // reader as the command line gives it.
-                        let password = (ours.encryption == crate::Encryption::Locked)
+                        let password = matches!(ours.encryption, crate::Encryption::Locked | crate::Encryption::Plain)
                             .then(|| PASSWORDS.iter().find(|p| Qpdf::new(path).password(**p).locked() == Ok(false)))
                             .flatten();
                         let (ours, handler) = match password {
@@ -2089,9 +2188,22 @@ qpdf: operation succeeded with warnings\n";
                                     Value::Ref(id) => Some(id),
                                     _ => None,
                                 });
-                            // Each stream: decrypted, its filters, and whether
-                            // a /Crypt filter of its names none.
-                            type Decrypted = (ObjectId, Result<Vec<u8>, pdf_crypt::Error>, Vec<pdf_filters::Filter>, bool);
+                            // The crypt filter /EFF names, which decrypts an
+                            // embedded file without one of its own.
+                            let followed = |o: &'_ Object| match *o.value() {
+                                Value::Ref(id) => resolve(id),
+                                _ => None,
+                            };
+                            let eff = (ours.trailer.dict().get(b"Encrypt"))
+                                .and_then(|e| followed(e).or(Some(e)))
+                                .and_then(Object::as_dict)
+                                .and_then(|d| d.get(b"EFF"))
+                                .and_then(|e| followed(e).or(Some(e)))
+                                .and_then(Object::as_name);
+                            // Each stream: decrypted, its filters, whether a
+                            // /Crypt filter of its names none, and whether it's
+                            // an embedded file decrypted by /EFF's.
+                            type Decrypted = (ObjectId, Result<Vec<u8>, pdf_crypt::Error>, Vec<pdf_filters::Filter>, bool, bool);
                             let mine: Vec<Decrypted> = (ours.objects())
                                 .filter_map(|(id, object)| {
                                     let Value::Stream(stream) = object.value() else {
@@ -2100,9 +2212,10 @@ qpdf: operation succeeded with warnings\n";
                                     let at = stream.data.at().filter(|at| at.stream.is_none())?;
                                     let written = &data[at.start..at.end];
                                     let typed = stream.dict.get(b"Type").and_then(Object::as_name);
-                                    let plain = typed == Some(b"XRef")
-                                        || (Some(id) == metadata && !handler.encrypts_metadata());
                                     let crypt = crate::filter::crypt_filter(&stream.dict, Some(&resolve));
+                                    let own = crypt.as_deref().filter(|&c| c != b"Identity");
+                                    let plain = typed == Some(b"XRef")
+                                        || (Some(id) == metadata && !handler.encrypts_metadata() && own.is_none());
                                     // A /Crypt filter that names no crypt
                                     // filter, so /Identity.
                                     let named = match stream.dict.get(b"DecodeParms").map(|p| p.value()) {
@@ -2113,6 +2226,9 @@ qpdf: operation succeeded with warnings\n";
                                         _ => false,
                                     };
                                     let unnamed = crypt.is_some() && !named;
+                                    let embedded = typed == Some(b"EmbeddedFile") && crypt.is_none();
+                                    let by_eff = embedded && eff.is_some();
+                                    let crypt = crypt.or_else(|| eff.filter(|_| embedded).map(<[u8]>::to_vec));
                                     let decrypted = match plain {
                                         true => Ok(written.to_vec()),
                                         false => {
@@ -2121,24 +2237,28 @@ qpdf: operation succeeded with warnings\n";
                                         }
                                     };
                                     let filters = crate::filter::filters(&stream.dict, Some(&resolve)).unwrap_or_default();
-                                    Some((id, decrypted, filters, unnamed))
+                                    Some((id, decrypted, filters, unnamed, by_eff))
                                 })
                                 .collect();
                             let ids: Vec<ObjectId> = mine.iter().map(|(id, ..)| *id).collect();
                             let mut raw = qpdf.clone().undecoding().decode(&ids);
                             let with_filters: Vec<ObjectId> = (mine.iter())
-                                .filter(|(_, _, filters, _)| !filters.is_empty())
+                                .filter(|(_, _, filters, ..)| !filters.is_empty())
                                 .map(|(id, ..)| *id)
                                 .collect();
                             let mut specialized = qpdf.clone().specialized().decode(&with_filters);
-                            for (id, decrypted, filters, unnamed) in mine {
+                            for (id, decrypted, filters, unnamed, by_eff) in mine {
                                 streams += 1;
                                 let example = format!("{} {} R", id.0, id.1);
                                 let (plain, fault) = match decrypted {
                                     Ok(plain) => (Some(plain), String::new()),
                                     Err(e) => (e.data, format!(", the reader's fault: {:?}", e.fault)),
                                 };
-                                let by = if unnamed { ", by a /Crypt filter that names none" } else { "" };
+                                let by = match (unnamed, by_eff) {
+                                    (true, _) => ", by a /Crypt filter that names none",
+                                    (false, true) => ", an embedded file by /EFF",
+                                    (false, false) => "",
+                                };
                                 let by = format!("{by}{refused}");
                                 let theirs = raw.remove(&id);
                                 if let Some(dir) = &dump {
@@ -2179,6 +2299,7 @@ qpdf: operation succeeded with warnings\n";
                                 let unnamed = match (unnamed, refused.is_empty()) {
                                     (true, _) => " (by a /Crypt filter that names none)",
                                     (false, false) => " (in a file qpdf refuses)",
+                                    (false, true) if by_eff => " (an embedded file by /EFF)",
                                     (false, true) => "",
                                 };
                                 let kind = match specialized.remove(&id) {

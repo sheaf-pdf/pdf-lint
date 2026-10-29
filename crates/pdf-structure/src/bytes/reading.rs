@@ -152,8 +152,9 @@ pub enum Error {
     /// ([`Reading::bytes`]), or a stream's data that the reader doesn't
     /// decrypt ([`Reading::data`]): a stream among the objects the
     /// encryption dictionary refers to, whose strings it doesn't decrypt
-    /// either, or the catalog's metadata stream under `/EncryptMetadata
-    /// false` whose own crypt filter encrypts it.
+    /// either, or an embedded file's without a `/Crypt` filter of its own
+    /// where the encryption dictionary's `/EFF` isn't a name, which doesn't
+    /// say how it's encrypted.
     #[error("the file is encrypted, and its bytes aren't handed out as written")]
     Encrypted,
     /// No bytes the reading has are at `span`: it runs past the file, or
@@ -174,16 +175,10 @@ pub enum Error {
     /// it, so a stream's data, which may be ciphertext, isn't handed out:
     /// its password is needed. In a file whose streams aren't encrypted
     /// ([`Encryption::Plain`]), only a stream's whose own `/Crypt` filter
-    /// encrypts it.
+    /// encrypts it, or an embedded file's without one of its own under an
+    /// `/EFF` that isn't `/Identity`.
     #[error("the file is encrypted, and no password the reader was given opens it")]
     Locked,
-    /// The stream is an embedded file's (`/Type /EmbeddedFile`), in a file
-    /// whose encryption dictionary says by its `/EFF` how embedded files are
-    /// encrypted, which the reader doesn't apply.
-    #[error(
-        "it's an embedded file, encrypted as the file's /EFF says, which the reader doesn't decrypt"
-    )]
-    EmbeddedFile,
     /// The file is encrypted by a security handler the reader can't open
     /// ([`Encryption::Unsupported`]), so a stream's data, which may be
     /// ciphertext, isn't handed out.
@@ -543,26 +538,30 @@ impl<S: ByteSource> Reading<S> {
     /// The data of stream `id`, as written, filters and all; in an
     /// encrypted file, decrypted as the reader decrypts an object stream's:
     /// by the stream's own `/Crypt` filter when it has one, else as the
-    /// encryption dictionary's `/StmF` says (ISO 32000-2, 7.6.6). The stream
-    /// is read and kept, as [`Reading::get`] keeps it, but not its data,
-    /// which is read each time it's asked for, borrowed from a source in
-    /// memory where nothing's decrypted.
+    /// encryption dictionary's `/StmF` says (ISO 32000-2, 7.6.6); an
+    /// embedded file's (`/Type /EmbeddedFile`) without one of its own, by
+    /// the crypt filter the encryption dictionary's `/EFF` names, when it
+    /// has one (7.6.6 and Table 20). The stream is read and kept, as
+    /// [`Reading::get`] keeps it, but not its data, which is read each time
+    /// it's asked for, borrowed from a source in memory where nothing's
+    /// decrypted.
     ///
     /// Left as written, as the reader leaves them: a cross-reference
     /// stream's, which is never encrypted (7.5.8.2), and the catalog's
     /// metadata stream's under `/EncryptMetadata false`, whether the file
-    /// opens or not, as [`Document::metadata`] has it. Refused, where it may
-    /// be ciphertext the reader doesn't decrypt: in a file no password
-    /// opened ([`Error::Locked`]), but one whose streams aren't encrypted
-    /// ([`Encryption::Plain`]), whose data is as written but a stream's that
-    /// its own crypt filter encrypts; in a file whose security handler the
-    /// reader can't open ([`Error::Unsupported`]); an embedded file's in a
-    /// file whose encryption dictionary has an `/EFF`
-    /// ([`Error::EmbeddedFile`]); and a stream's that the encryption
-    /// dictionary refers to, or the catalog's metadata stream's under
-    /// `/EncryptMetadata false` that its own crypt filter encrypts
-    /// ([`Error::Encrypted`]). Data that doesn't decrypt cleanly is an error
-    /// holding what did ([`Error::Decrypt`]).
+    /// opens or not, as [`Document::metadata`] has it, but where its own
+    /// crypt filter encrypts it, which then decrypts it (7.6.6). Refused,
+    /// where it may be ciphertext the reader doesn't decrypt: in a file no
+    /// password opened ([`Error::Locked`]), but one whose streams aren't
+    /// encrypted ([`Encryption::Plain`]), whose data is as written but a
+    /// stream's that its own crypt filter encrypts, or an embedded file's
+    /// without one of its own under an `/EFF` that isn't `/Identity`; in a
+    /// file whose security handler the reader can't open
+    /// ([`Error::Unsupported`]); and a stream's that the encryption
+    /// dictionary refers to, or an embedded file's without a crypt filter of
+    /// its own where `/EFF` isn't a name ([`Error::Encrypted`]). Data that
+    /// doesn't decrypt cleanly is an error holding what did
+    /// ([`Error::Decrypt`]).
     pub fn data(&self, id: ObjectId) -> Result<Cow<'_, [u8]>, Error> {
         let data = match self.source.whole() {
             Some(file) => {
