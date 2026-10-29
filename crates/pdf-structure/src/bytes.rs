@@ -953,7 +953,6 @@ fn stops(fault: &Fault) -> bool {
             | Fault::BrokenEnd { .. }
             | Fault::InGroup { .. }
             | Fault::Code { .. }
-            | Fault::TableFull { .. }
             | Fault::Header
             | Fault::Corrupt { .. }
             | Fault::Truncated

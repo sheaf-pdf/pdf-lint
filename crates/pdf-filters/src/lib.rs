@@ -213,7 +213,9 @@ pub enum Fault {
         at: usize,
     },
     /// The LZW table full, 4,096 entries, at byte `at`, with no clear code
-    /// to empty it. It stopped there.
+    /// to empty it. It didn't stop: the codes after are read against the
+    /// table as it is, 12 bits wide, until a clear code empties it, as
+    /// PDFium and pdf.js read them (qpdf stops).
     #[error("the table is full at byte {at}")]
     TableFull {
         /// The byte the code that would add to it begins in, in the
@@ -403,12 +405,8 @@ fn one(input: &[u8], filter: &Filter, limit: usize, backend: Backend, out: &mut 
     if predictor != Predictor::None {
         // Data a fault stopped mid-row ends in a row cut off, not short:
         // it isn't read.
-        let cut = (out.faults.iter()).any(|f| {
-            matches!(
-                f,
-                Fault::Limit | Fault::Corrupt { .. } | Fault::Code { .. } | Fault::TableFull { .. }
-            )
-        });
+        let cut = (out.faults.iter())
+            .any(|f| matches!(f, Fault::Limit | Fault::Corrupt { .. } | Fault::Code { .. }));
         out.limit = limit;
         predictor::undo(predictor, cut, out);
     }

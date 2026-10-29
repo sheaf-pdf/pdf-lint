@@ -1919,7 +1919,6 @@ qpdf: operation succeeded with warnings\n";
             "BrokenEnd",
             "InGroup",
             "Code",
-            "TableFull",
             "Header",
             "Corrupt",
             "Truncated",
@@ -1939,6 +1938,13 @@ qpdf: operation succeeded with warnings\n";
             _ if kind.starts_with("qpdf leaves a stream undecoded") && stopped => Some(
                 "a fault stopped a filter: qpdf gives the data undecoded, the reader what decoded before the fault",
             ),
+            _ if kind.starts_with("qpdf leaves a stream undecoded")
+                && faults.contains("TableFull") =>
+            {
+                Some(
+                    "an LZW table full with no clear code: qpdf stops and gives the data undecoded, the reader reads on against the table as it is, as PDFium and pdf.js do",
+                )
+            }
             _ if kind
                 .starts_with("a stream decodes otherwise (the reader's is a prefix of qpdf's)")
                 && faults.contains("Limit") =>

@@ -71,6 +71,12 @@ Where ISO 32000-2 doesn't say how to read a fault, it's read as qpdf reads it: a
 
 Where qpdf departs from the spec, it follows the spec: `ASCIIHexDecode` and `ASCII85Decode` ignore PDF's white-space (NUL among it, vertical tab not); a run-length of 128 ends the data; TIFF's predictor takes 1, 2, 4, 8 or 16 bits a sample.
 
+One reading isn't qpdf's: an LZW table that fills, 4,096 entries, with no clear code to empty it. The spec has an encoder issue the clear code first and says nothing of a decoder; qpdf stops there, while PDFium, pdf.js and poppler read on, the table as it is and its codes 12 bits wide, until a clear code or the end. So does this, the same bytes as theirs, and `Fault::TableFull` says where it filled, so a checker still reports what the encoder did.
+
+## LZW
+
+LZW is a decoder of its own, not [weezl](https://crates.io/crates/weezl)'s, as weezl says no place for a code that isn't in the table and nothing of a full table, which a checker reports. It reads codes from a 64-bit buffer filled eight bytes at a time, and copies a table entry's bytes at once: 4 MB of text, encoded by weezl to 107,565 bytes, decodes in about 1 ms, where weezl 0.1 takes about 8 (a release build of each, with Rust 1.85 and stable alike); measured, not promised.
+
 ## What isn't here
 
 - **The filters for images:** `DCTDecode`, `JPXDecode`, `JBIG2Decode`, `CCITTFaxDecode`. A reader that doesn't render images, a checker's, doesn't need them.
