@@ -685,10 +685,10 @@ mod tests {
             assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
             if doc.encryption != Encryption::None {
                 encrypted += 1;
-                assert_eq!(doc.encryption, Encryption::opened(false, None));
+                assert_eq!(doc.encryption, Encryption::opened(false));
                 let opened = bytes::read_opened(file, &[OWNER]).encryption;
                 let by = Some((0, pdf_crypt::Encoding::Utf8));
-                assert_eq!(opened, Encryption::opened(true, by));
+                assert_eq!(opened, Encryption::opened(true).by(by));
                 // A wrong password leaves it locked.
                 let locked = bytes::read_opened(file, &WRONG[..1]).encryption;
                 assert_eq!(locked, Encryption::Locked);

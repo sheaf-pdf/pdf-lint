@@ -293,7 +293,8 @@ pub enum Encryption {
     None,
     /// It is, and a password it was given opened it, the owner's or the
     /// user's: its strings and object streams are decrypted. A reader
-    /// outside the crate makes it by [`Encryption::opened`].
+    /// outside the crate makes it by [`Encryption::opened`], and says which
+    /// password by [`Encryption::by`].
     #[non_exhaustive]
     Opened {
         /// Whether by the owner's password.
@@ -448,10 +449,22 @@ pub enum Unread {
 
 impl Encryption {
     /// [`Encryption::Opened`]: by the owner's password when `owner`, else
-    /// by the user's; by the password given at index `by`'s, in its
-    /// encoding, or none, by the empty password, given none.
-    pub fn opened(owner: bool, by: Option<(usize, Encoding)>) -> Encryption {
-        Encryption::Opened { owner, by }
+    /// by the user's; by the empty password, given none, until
+    /// [`Encryption::by`] says which of those given. Each field `Opened`
+    /// gains has a setter of its own, so this stays as it is.
+    pub fn opened(owner: bool) -> Encryption {
+        Encryption::Opened { owner, by: None }
+    }
+
+    /// It, opened by the password given at index `by`'s, in its encoding,
+    /// or none, by the empty password, given none: `Opened`'s `by`. Any
+    /// other is given back as it is.
+    #[must_use = "it gives the Encryption back, with which password opened it"]
+    pub fn by(self, by: Option<(usize, Encoding)>) -> Encryption {
+        match self {
+            Encryption::Opened { owner, .. } => Encryption::Opened { owner, by },
+            other => other,
+        }
     }
 }
 
@@ -506,7 +519,7 @@ impl Document {
     /// let mut doc = Document::new(Version::new(1, 7), trailer);
     /// doc.insert(1, dict! { "Type" => "Catalog" });
     /// doc.update = Some(Update::new(BTreeSet::from([(1, 0)]), 9));
-    /// doc.encryption = Encryption::opened(false, None);
+    /// doc.encryption = Encryption::opened(false);
     /// assert!(doc.get((1, 0)).is_ok());
     /// ```
     pub fn new(version: Version, trailer: Dict) -> Document {
@@ -1103,7 +1116,7 @@ mod tests {
         assert_eq!(doc.header, Some(Version::new(1, 7)));
         assert_eq!(doc.facts.newest, Some((startxref(&file), XrefKind::Stream)));
         assert_ne!(doc.encryption, Encryption::None);
-        assert_eq!(doc.encryption, Encryption::opened(false, None));
+        assert_eq!(doc.encryption, Encryption::opened(false));
     }
 
     /// Each reason an object doesn't read says it as the reader's text
@@ -1662,7 +1675,7 @@ mod tests {
             for (passwords, by) in [(&[][..], None), (&owner, Some((0, Encoding::Utf8)))] {
                 let owner = by.is_some();
                 let mut doc = crate::bytes::read_opened(&file, passwords);
-                assert_eq!(doc.encryption, Encryption::opened(owner, by), "{name}");
+                assert_eq!(doc.encryption, Encryption::opened(owner).by(by), "{name}");
                 let before = doc.clone();
                 let reached: BTreeSet<ObjectId> = before.reachable().into_iter().collect();
                 let pruned = doc.prune();

@@ -46,7 +46,7 @@ assert_eq!(error.unwrap_err().data, b"Hello"); // read without its `>`
 
 ## Encoding
 
-An `Encoder` says what a writer chooses as well as the filter: for Flate, a `Level` (0, stored, to 9, the smallest; 6 by default, as zlib's) and a `Prediction`, none or PNG's with a `Row` filter for every row (Up, say, for a cross-reference stream's rows). `Encoder::filter` is the `Filter` that decodes what it encodes, which a writer's `/Filter` and `/DecodeParms` say. Encoders are listed as a stream's `/Filter` lists them, the last applied first. Each backend's bytes are what [flate2](https://crates.io/crates/flate2)'s `ZlibEncoder` gives on it at the same level (zlib-rs is called as flate2 calls it, as what it writes depends on how much room each call has); the two backends' differ.
+An `Encoder` says what a writer chooses as well as the filter: for Flate, a `Level` (0, stored, to 9, the smallest; 6 by default, as zlib's) and a `Prediction`, none or PNG's with a `Row` filter for every row (Up, say, for a cross-reference stream's rows). `Encoder::filter` is the `Filter` that decodes what it encodes, which a writer's `/Filter` and `/DecodeParms` say, and `Prediction::predictor` the `/Predictor` it writes (10 plus the row filter's tag, `Row::tag`), which the `Filter` doesn't hold, as PNG's 10 to 15 decode alike. Encoders are listed as a stream's `/Filter` lists them, the last applied first. Each backend's bytes are what [flate2](https://crates.io/crates/flate2)'s `ZlibEncoder` gives on it at the same level (zlib-rs is called as flate2 calls it, as what it writes depends on how much room each call has); the two backends' differ.
 
 ```rust
 use pdf_filters::{Backend, Encoder, Layout, Level, Prediction, Row, decode, encode};
@@ -54,7 +54,9 @@ use pdf_filters::{Backend, Encoder, Layout, Level, Prediction, Row, decode, enco
 // A cross-reference stream's rows, /W [1 2 1]: four bytes a row.
 let rows = [1, 0, 0x10, 0, 1, 0, 0x35, 0, 2, 0, 0x55, 0];
 let layout = Layout { colors: 1, bits_per_component: 8, columns: 4 };
-let encoder = Encoder::Flate { level: Level::DEFAULT, predictor: Prediction::Png(layout, Row::Up) };
+let prediction = Prediction::Png(layout, Row::Up);
+assert_eq!(prediction.predictor(), 12); // its /DecodeParms: << /Predictor 12 /Columns 4 >>
+let encoder = Encoder::Flate { level: Level::DEFAULT, predictor: prediction };
 let mut out = Vec::new();
 encode(&rows, &[encoder], Backend::MinizOxide, &mut out).unwrap();
 let decoded = decode(&out, &[encoder.filter()], 1 << 20, Backend::MinizOxide);

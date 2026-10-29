@@ -170,6 +170,12 @@ impl Handler {
     /// each), and `/Perms`' 4 random bytes. pdf-crypt draws on no
     /// randomness of its own: a program passes the operating system's, and
     /// a test a seeded generator, the same draws giving the same dictionary.
+    /// The dictionary is whole as it's given: its crypt filter's
+    /// `/AuthEvent` and `/Length`, which [`CryptFilter`] has no fields for,
+    /// can be left out (`/AuthEvent`'s default is `/DocOpen`, ISO 32000-2,
+    /// Table 25, and AES-256's key is 256 bits whatever `/Length` says), as
+    /// qpdf, pdf.js and PDFium read it, or written as `/AuthEvent
+    /// /DocOpen` and `/Length 32`, as qpdf writes them.
     ///
     /// The handler is the owner's, as one opened by the password is, but
     /// [`Handler::opened_by`] is none: no password opened it. Refused, the
@@ -182,7 +188,7 @@ impl Handler {
     pub fn create(
         password: &Encoded,
         encrypt_metadata: bool,
-        rng: &mut impl CryptoRng,
+        rng: &mut (impl CryptoRng + ?Sized),
     ) -> Result<(Handler, Dictionary), Unusable> {
         let password = match (password.encoding(), password.as_bytes()) {
             (Encoding::Saslprep, []) => return Err(Unusable::Empty),

@@ -121,9 +121,11 @@ pub(crate) fn attached(how: &Attached, extra: &[(u32, &[u8])]) -> Vec<u8> {
     };
     let mut values = pdf_crypt::writer::dictionary(&settings);
     values.crypt_filters = (how.filters.iter())
-        .map(|(name, method)| pdf_crypt::CryptFilter {
-            name: name.as_bytes().to_vec(),
-            method: Some(method.as_bytes().to_vec()),
+        .map(|(name, method)| {
+            let mut filter = pdf_crypt::CryptFilter::default();
+            filter.name = name.as_bytes().to_vec();
+            filter.method = Some(method.as_bytes().to_vec());
+            filter
         })
         .collect();
     values.stm_f = Some(how.streams.as_bytes().to_vec());

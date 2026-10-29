@@ -41,6 +41,11 @@ fixtures = ["pdf-crypt/writer", "dep:tempfile"]
 # pdf-filters' zlib-rs, so that `Options::flate` can name it.
 zlib-rs = ["pdf-filters/zlib-rs"]
 
+# docs.rs documents both Flate backends, as `Options::flate` names either;
+# not `fixtures`, which is hidden.
+[package.metadata.docs.rs]
+features = ["zlib-rs"]
+
 [dev-dependencies]
 # Both Flate backends, so that the tests read each file on each.
 pdf-filters = { path = "../pdf-filters", version = "0.1", features = ["zlib-rs"] }

@@ -2,7 +2,7 @@
 //! writer writes; and its faults and refusals.
 
 use chacha20::ChaCha20Rng;
-use rand_core::{Rng, SeedableRng};
+use rand_core::{CryptoRng, Rng, SeedableRng};
 
 use crate::aes::Aes;
 use crate::writer::{self, Kind, Settings};
@@ -1306,7 +1306,8 @@ fn a_new_files_dictionary_opens_by_its_password_as_the_owners_and_the_users() {
 /// owner's, and `/Perms`' four random bytes, and nothing more. The same
 /// seed gives the same dictionary, byte for byte, as an implementation of
 /// Algorithms 2.B, 8, 9 and 10 over OpenSSL's AES and SHA-2 gave it for
-/// these draws; another seed another.
+/// these draws, by the generator's own type or behind `dyn CryptoRng`;
+/// another seed another.
 #[test]
 fn a_new_files_dictionary_is_drawn_from_its_generator_in_order() {
     let (handler, dictionary) = created("user", true, 1);
@@ -1353,6 +1354,12 @@ fn a_new_files_dictionary_is_drawn_from_its_generator_in_order() {
         assert_eq!(hex(value.as_ref().unwrap()), hex_bytes);
     }
     assert_eq!(created("user", true, 1).1, dictionary, "the same seed");
+    // A generator behind `dyn CryptoRng`, as a caller choosing one at run
+    // time holds it, draws the same.
+    let mut seeded = ChaCha20Rng::seed_from_u64(1);
+    let rng: &mut dyn CryptoRng = &mut seeded;
+    let (_, by_dyn) = Handler::create(&password, true, rng).unwrap();
+    assert_eq!(by_dyn, dictionary, "by dyn CryptoRng");
     let other = created("user", true, 2).1;
     for (a, b) in [
         (&other.u, &dictionary.u),

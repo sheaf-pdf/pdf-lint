@@ -68,8 +68,11 @@ pub use password::{Encoded, Encoding, Password, Unusable};
 pub use rand_core;
 
 /// An encryption dictionary's values, as the standard security handler
-/// takes them (ISO 32000-2, Tables 20 and 21).
+/// takes them (ISO 32000-2, Tables 20 and 21). Outside the crate, one is
+/// made from [`Dictionary::default`], its fields set after, so that a
+/// field it gains breaks no caller.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Dictionary {
     /// `/Filter`: the security handler's name, `Standard` for this one.
     pub filter: Vec<u8>,
@@ -101,8 +104,10 @@ pub struct Dictionary {
     pub str_f: Option<Vec<u8>>,
 }
 
-/// One of `/CF`'s crypt filters.
+/// One of `/CF`'s crypt filters. Outside the crate, one is made from
+/// [`CryptFilter::default`], its fields set after.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CryptFilter {
     /// Its name in `/CF`.
     pub name: Vec<u8>,

@@ -94,34 +94,24 @@ pub(crate) fn png(data: &[u8], layout: Layout, row: Row) -> Result<Vec<u8>, Unen
     for bytes in data.chunks_exact(rows.len) {
         let up = |i: usize| above.map_or(0, |above| above[i]);
         let left = |i: usize| i.checked_sub(rows.pixel).map_or(0, |j| bytes[j]);
+        out.push(row.tag());
         match row {
-            Row::None => {
-                out.push(0);
-                out.extend_from_slice(bytes);
-            }
-            Row::Sub => {
-                out.push(1);
-                out.extend((0..bytes.len()).map(|i| bytes[i].wrapping_sub(left(i))));
-            }
-            Row::Up => {
-                out.push(2);
-                match above {
-                    Some(above) => {
-                        let less = bytes.iter().zip(above);
-                        out.extend(less.map(|(byte, up)| byte.wrapping_sub(*up)));
-                    }
-                    None => out.extend_from_slice(bytes),
+            Row::None => out.extend_from_slice(bytes),
+            Row::Sub => out.extend((0..bytes.len()).map(|i| bytes[i].wrapping_sub(left(i)))),
+            Row::Up => match above {
+                Some(above) => {
+                    let less = bytes.iter().zip(above);
+                    out.extend(less.map(|(byte, up)| byte.wrapping_sub(*up)));
                 }
-            }
+                None => out.extend_from_slice(bytes),
+            },
             Row::Average => {
-                out.push(3);
                 out.extend((0..bytes.len()).map(|i| {
                     let mean = (u16::from(left(i)) + u16::from(up(i))) / 2;
                     bytes[i].wrapping_sub(mean as u8)
                 }));
             }
             Row::Paeth => {
-                out.push(4);
                 out.extend((0..bytes.len()).map(|i| {
                     let up_left = i.checked_sub(rows.pixel).map_or(0, up);
                     bytes[i].wrapping_sub(paeth(left(i), up(i), up_left))
@@ -417,7 +407,9 @@ mod tests {
     }
 
     /// Each of PNG's filters predicts each row as `png_rows_each_undo_their_own_filter`'s
-    /// rows were predicted, each by its own: the inverse of the undo.
+    /// rows were predicted, each by its own: the inverse of the undo. Each
+    /// row begins with the filter's tag, and the `/Predictor` written for it
+    /// is 10 plus the tag (1 for no prediction).
     #[test]
     fn each_row_filter_predicts_as_its_undo_undoes() {
         let rows = [9, 9, 9, 10, 15, 18, 6, 12, 18, 7, 13, 19, 8, 14, 20];
@@ -432,7 +424,12 @@ mod tests {
             let all = png(&rows, layout(1, 8, 3), row).unwrap();
             assert_eq!(all.len(), rows.len() + 5, "{row:?}");
             assert_eq!(all[i * 4..i * 4 + 4], predicted, "{row:?}");
+            assert!(all.chunks(4).all(|r| r[0] == row.tag()), "{row:?}");
+            let prediction = Prediction::Png(layout(1, 8, 3), row);
+            assert_eq!(prediction.predictor(), 10 + predicted[0], "{row:?}");
         }
+        assert_eq!(Prediction::Png(layout(1, 8, 3), Row::Up).predictor(), 12);
+        assert_eq!(Prediction::None.predictor(), 1);
     }
 
     /// `rows`, each `columns` bytes, under PNG's Up, as a cross-reference

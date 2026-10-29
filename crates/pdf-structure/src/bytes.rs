@@ -2890,37 +2890,37 @@ impl Reader {
         let mut crypt_filters = Vec::new();
         if let Some(Value::Dict(filters)) = get(dict.get(b"CF"))?.map(|o| o.into_value()) {
             for (name, filter) in filters.iter() {
-                let method = match get(Some(filter))?.map(|o| o.into_value()) {
+                let mut crypt_filter = pdf_crypt::CryptFilter::default();
+                crypt_filter.name = name.to_vec();
+                crypt_filter.method = match get(Some(filter))?.map(|o| o.into_value()) {
                     Some(Value::Dict(filter)) => (get(filter.get(b"CFM"))?.as_ref())
                         .and_then(Object::as_name)
                         .map(<[u8]>::to_vec),
                     _ => None,
                 };
-                crypt_filters.push(pdf_crypt::CryptFilter {
-                    name: name.to_vec(),
-                    method,
-                });
+                crypt_filters.push(crypt_filter);
             }
         }
-        let values = pdf_crypt::Dictionary {
-            filter: name(get(dict.get(b"Filter"))?).unwrap_or_default(),
-            v: integer(get(dict.get(b"V"))?).unwrap_or(0),
-            r: integer(get(dict.get(b"R"))?).unwrap_or(0),
-            length: integer(get(dict.get(b"Length"))?),
-            o: bytes(get(dict.get(b"O"))?),
-            u: bytes(get(dict.get(b"U"))?),
-            oe: bytes(get(dict.get(b"OE"))?),
-            ue: bytes(get(dict.get(b"UE"))?),
-            perms: bytes(get(dict.get(b"Perms"))?),
-            p: integer(get(dict.get(b"P"))?),
-            encrypt_metadata: match get(dict.get(b"EncryptMetadata"))?.map(|o| o.into_value()) {
-                Some(Value::Bool(b)) => Some(b),
-                _ => None,
-            },
-            crypt_filters,
-            stm_f: name(get(dict.get(b"StmF"))?),
-            str_f: name(get(dict.get(b"StrF"))?),
+        // Each value in turn, as what each refers to is read, and warned
+        // of, in this order.
+        let mut values = pdf_crypt::Dictionary::default();
+        values.filter = name(get(dict.get(b"Filter"))?).unwrap_or_default();
+        values.v = integer(get(dict.get(b"V"))?).unwrap_or(0);
+        values.r = integer(get(dict.get(b"R"))?).unwrap_or(0);
+        values.length = integer(get(dict.get(b"Length"))?);
+        values.o = bytes(get(dict.get(b"O"))?);
+        values.u = bytes(get(dict.get(b"U"))?);
+        values.oe = bytes(get(dict.get(b"OE"))?);
+        values.ue = bytes(get(dict.get(b"UE"))?);
+        values.perms = bytes(get(dict.get(b"Perms"))?);
+        values.p = integer(get(dict.get(b"P"))?);
+        values.encrypt_metadata = match get(dict.get(b"EncryptMetadata"))?.map(|o| o.into_value()) {
+            Some(Value::Bool(b)) => Some(b),
+            _ => None,
         };
+        values.crypt_filters = crypt_filters;
+        values.stm_f = name(get(dict.get(b"StmF"))?);
+        values.str_f = name(get(dict.get(b"StrF"))?);
         // /EFF counts from /V 4, which has crypt filters (ISO 32000-2,
         // Table 20): below, it isn't read, so what it refers to is no more
         // the dictionary's own than any object.

@@ -226,7 +226,7 @@ pub fn created(
     encrypt_metadata: bool,
     objects: &[(u32, Body)],
     trailer: Dict,
-    rng: &mut impl pdf_crypt::rand_core::CryptoRng,
+    rng: &mut (impl pdf_crypt::rand_core::CryptoRng + ?Sized),
 ) -> Vec<u8> {
     let (handler, values) =
         pdf_crypt::Handler::create(password, encrypt_metadata, rng).expect("a password prepared");

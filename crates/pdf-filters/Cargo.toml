@@ -25,6 +25,11 @@ default = ["miniz_oxide"]
 miniz_oxide = ["dep:miniz_oxide"]
 zlib-rs = ["dep:zlib-rs"]
 
+# docs.rs documents both backends, as a caller names either, not the
+# default's alone.
+[package.metadata.docs.rs]
+features = ["zlib-rs"]
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"

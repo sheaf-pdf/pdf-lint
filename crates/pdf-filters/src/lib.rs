@@ -430,7 +430,9 @@ pub enum Encoder {
 
 impl Encoder {
     /// The filter that decodes what this encodes: what a writer's
-    /// `/Filter` and `/DecodeParms` say.
+    /// `/Filter` and `/DecodeParms` say, but for which of PNG's predictors
+    /// `/Predictor` names, 10 to 15, any of which decodes alike, so the
+    /// filter doesn't hold it: that's [`Prediction::predictor`].
     pub fn filter(&self) -> Filter {
         match *self {
             Encoder::Flate { predictor, .. } => Filter::Flate {
@@ -492,6 +494,18 @@ pub enum Prediction {
     Png(Layout, Row),
 }
 
+impl Prediction {
+    /// The `/Predictor` a writer writes for it: 1 for none, and for PNG's
+    /// 10 plus its row filter's tag, so 12 for Up, as cross-reference
+    /// streams are often written.
+    pub const fn predictor(self) -> u8 {
+        match self {
+            Prediction::None => 1,
+            Prediction::Png(_, row) => 10 + row.tag(),
+        }
+    }
+}
+
 /// Which of PNG's filters predicts each row from the bytes before it in
 /// the row and the row above it, read as zeros for the first row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -511,6 +525,19 @@ pub enum Row {
     /// it, above it, and above that is nearest the first plus the second
     /// less the third.
     Paeth,
+}
+
+impl Row {
+    /// Its tag, the first byte of each row it predicts: 0 to 4.
+    pub const fn tag(self) -> u8 {
+        match self {
+            Row::None => 0,
+            Row::Sub => 1,
+            Row::Up => 2,
+            Row::Average => 3,
+            Row::Paeth => 4,
+        }
+    }
 }
 
 /// Why data can't be encoded as its encoders say. Nothing was written.
