@@ -10,7 +10,7 @@ use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_objects::parse::Parser;
 
 use super::{Body, Encrypting, Encryptor, Error, ReadFrom};
-use crate::bytes::XrefEntry;
+use crate::bytes::{SourceId, XrefEntry};
 use crate::source::{Origin, Record};
 
 /// What a write copies by: the reading its objects were read in, and
@@ -91,7 +91,7 @@ impl<'w> Copying<'w> {
         let Body::Read { object, record } = body else {
             return Ok(None);
         };
-        if !self.as_read(id, object, record)? {
+        if !as_read(id, object, record, self.from.id())? {
             return Ok(None);
         }
         // Read at an offset its sections give, `endobj` after it.
@@ -135,7 +135,7 @@ impl<'w> Copying<'w> {
         let Body::Read { object, record } = body else {
             return Ok(None);
         };
-        if !self.as_read(id, object, record)? {
+        if !as_read(id, object, record, self.from.id())? {
             return Ok(None);
         }
         let Origin::Stream { stream, index } = record.origin else {
@@ -155,30 +155,6 @@ impl<'w> Copying<'w> {
         self.checked(id, record).map(Some)
     }
 
-    /// Whether `object`, given with `record` as object `id`, is as it was
-    /// read: not where an edit dropped its place. Refused where `record`
-    /// is another reading's, or another object's: its place isn't among
-    /// the bytes `record` names, or one is a stream and the other's not.
-    fn as_read(&self, id: ObjectId, object: &Object, record: &Record) -> Result<bool, Error> {
-        if record.source != self.from.id() {
-            return Err(Error::Elsewhere(id));
-        }
-        let Some(at) = object.at else {
-            return Ok(false);
-        };
-        let within =
-            at.stream == record.at.stream && record.at.start <= at.start && at.end <= record.at.end;
-        let stream = match object.value() {
-            Value::Stream(stream) => Some(stream),
-            _ => None,
-        };
-        if !within || stream.is_some() != record.data.is_some() {
-            return Err(Error::Elsewhere(id));
-        }
-        // A stream's data as it was read, not data given in its place.
-        Ok(stream.is_none_or(|s| s.data.at() == record.data.map(|d| d.at)))
-    }
-
     /// The bytes `record` names, object `id`'s, read again: refused where
     /// they don't hash as they did when it was read ([`Error::Changed`]).
     fn checked(&self, id: ObjectId, record: &Record) -> Result<Cow<'w, [u8]>, Error> {
@@ -188,6 +164,37 @@ impl<'w> Copying<'w> {
             false => Err(Error::Changed(Some(id))),
         }
     }
+}
+
+/// Whether `object`, given with `record` as object `id`, is as reading
+/// `source` read it: not where an edit dropped its place. Refused, however
+/// the write is encrypted, where `record` is another reading's, or another
+/// object's: read as another number or generation than `id`'s, or its
+/// place isn't among the bytes `record` names, or one is a stream and the
+/// other's not.
+pub(super) fn as_read(
+    id: ObjectId,
+    object: &Object,
+    record: &Record,
+    source: SourceId,
+) -> Result<bool, Error> {
+    if record.source != source || record.id != id {
+        return Err(Error::Elsewhere(id));
+    }
+    let Some(at) = object.at else {
+        return Ok(false);
+    };
+    let within =
+        at.stream == record.at.stream && record.at.start <= at.start && at.end <= record.at.end;
+    let stream = match object.value() {
+        Value::Stream(stream) => Some(stream),
+        _ => None,
+    };
+    if !within || stream.is_some() != record.data.is_some() {
+        return Err(Error::Elsewhere(id));
+    }
+    // A stream's data as it was read, not data given in its place.
+    Ok(stream.is_none_or(|s| s.data.at() == record.data.map(|d| d.at)))
 }
 
 /// Object `id`, `body`, written on its own at the end of `out`, copied

@@ -169,7 +169,9 @@ pub enum Body<'a> {
     /// document's so): copied as the bytes it was read from where those
     /// are right to copy, else written anew from `object`, as
     /// [`Body::New`] is. An update after the reading's own file passes
-    /// over it ([`Base::source`]): its bytes are there already.
+    /// over it ([`Base::source`]), its bytes there already, where it's as
+    /// read at the number it's given: given at another, it refuses the
+    /// update ([`Error::Elsewhere`]), as rule 3 says.
     ///
     /// Copied, an object read at an offset is written as its bytes from
     /// `n g obj` to past `endobj`, ciphertext and all; one read from an
@@ -189,12 +191,14 @@ pub enum Body<'a> {
     ///    which is made from its number. An object read from an object
     ///    stream is plaintext there, and an object stream is encrypted
     ///    whole, so it goes in one under any encryption, or none;
-    /// 3. where its bytes are its number's: an object at an offset's bytes
-    ///    start with `n g obj` for its id, and one in an object stream is
-    ///    at the place the reading's sections give its number; and where
-    ///    `object` is `record`'s, as read: else the write is refused
-    ///    ([`Error::Elsewhere`]). One an edit changed, which dropped its
-    ///    place ([`Object::at`]), is written anew;
+    /// 3. where `record` was read as the id it's given at
+    ///    ([`Record::id`]), and `object` is `record`'s, as read: else the
+    ///    write is refused ([`Error::Elsewhere`]), however it's encrypted,
+    ///    whether or not it would copy; and where its bytes are its
+    ///    number's, an object at an offset's starting with `n g obj` for
+    ///    its id, one in an object stream at the place the reading's
+    ///    sections give its number, else refused so. One an edit changed,
+    ///    which dropped its place ([`Object::at`]), is written anew;
     /// 4. where it wasn't found by scanning
     ///    ([`Origin::Recovered`](crate::Origin::Recovered)), as the file's
     ///    sections didn't read;
@@ -220,14 +224,6 @@ impl Body<'_> {
     fn object(&self) -> &Object {
         match self {
             Body::New(object) | Body::Read { object, .. } => object,
-        }
-    }
-
-    /// Where it was read from, when it's as read.
-    fn record(&self) -> Option<&Record> {
-        match self {
-            Body::New(_) => None,
-            Body::Read { record, .. } => Some(record),
         }
     }
 }
@@ -656,7 +652,8 @@ pub enum Error {
     #[error("{}", changed(*.0))]
     Changed(Option<ObjectId>),
     /// An object as read ([`Body::Read`]) given with a record of another
-    /// reading than the one given, or of another object.
+    /// reading than the one given, or of another object: read as another
+    /// number or generation ([`Record::id`]), or not the object given.
     #[error(
         "object {} {} is given with a record of another reading than the one given, or of another object",
         .0.0, .0.1

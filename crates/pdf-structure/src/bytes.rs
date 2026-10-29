@@ -3086,6 +3086,7 @@ impl Reader {
         let at = (object.at).unwrap_or(Span::new(Some((stream, 0)), offset, offset));
         let record = Record {
             source: self.id,
+            id,
             origin: Origin::Stream { stream, index },
             at,
             endobj: false,
@@ -3192,6 +3193,7 @@ impl Reader {
             .and_then(|(from, to)| w.bytes.get(from..to));
         let record = Record {
             source: self.id,
+            id,
             origin: Origin::File,
             at: span(start, end),
             endobj: endobj.is_some(),

@@ -4931,10 +4931,15 @@ fn an_object_the_list_says_otherwise_of_in_the_file_written_isn_t_copied() {
 /// Rule 3: a copy is its number's, and its record's object's: an object as
 /// read given at another number, or with another object's record, or one
 /// read from an object stream given another's place there, refuses the
-/// write, nothing written. One an edit changed, which dropped its place,
-/// is written anew with its record, the edit kept.
+/// write, nothing written, under any encryption, a new one where nothing
+/// at an offset is copied too; and an update after the reading's file,
+/// which passes over what it holds, refuses one at another number rather
+/// than pass it over. One an edit changed, which dropped its place, is
+/// written anew with its record, the edit kept, and an update writes it.
 #[test]
 fn a_copy_is_of_its_own_number_and_object_or_refused() {
+    use chacha20::ChaCha20Rng;
+
     let file = spelled();
     let reading = open(&file);
     let doc = reading.to_document().unwrap();
@@ -4949,7 +4954,35 @@ fn a_copy_is_of_its_own_number_and_object_or_refused() {
     // At another number.
     let mut given: Vec<_> = write::bodies(&doc).collect();
     given.push(((9, 0), read_as(&doc, (4, 0))));
-    assert_eq!(write(given, &table).err(), Some(Error::Elsewhere((9, 0))));
+    assert_eq!(
+        write(given.clone(), &table).err(),
+        Some(Error::Elsewhere((9, 0)))
+    );
+    // So too under a new encryption, which copies nothing at an offset.
+    let prepared = Password("user").prepared().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(12);
+    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let mut out = Vec::new();
+    let refused = write::full(
+        &mut out,
+        given,
+        trailer,
+        Some(&created),
+        Some(&reading),
+        &table,
+    );
+    assert_eq!(refused.err(), Some(Error::Elsewhere((9, 0))));
+    assert!(out.is_empty());
+    // And by an update after the reading's file, with or without it.
+    let base = write::Base::of(&reading).unwrap();
+    let from: &dyn write::ReadFrom = &reading;
+    for from in [Some(from), None] {
+        let mut out = file.clone();
+        let given = [((9, 0), read_as(&doc, (4, 0)))];
+        let refused = write::update(&mut out, &base, given, None, from, &table);
+        assert_eq!(refused, Err(Error::Elsewhere((9, 0))));
+        assert_eq!(out, file);
+    }
     // With another object's record.
     let given: Vec<_> = (write::bodies(&doc))
         .map(|(id, body)| match id {
@@ -4975,10 +5008,14 @@ fn a_copy_is_of_its_own_number_and_object_or_refused() {
             _ => (id, body),
         })
         .collect();
-    let (out, _) = write(given, &table).unwrap();
+    let (out, _) = write(given.clone(), &table).unwrap();
     assert!(!holds(&out, b"1.50"));
     let back = open(&out);
     assert_eq!(value(&back, (3, 0)), unplaced(&page));
+    let mut out = file.clone();
+    let written = write::update(&mut out, &base, given, None, Some(&reading), &table);
+    assert!(written.unwrap().unwrap().section.lists(3));
+    assert_eq!(value(&open(&out), (3, 0)), unplaced(&page));
 
     // In an object stream, given another member's place.
     let packed = members_spelled();

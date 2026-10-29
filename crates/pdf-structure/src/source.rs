@@ -189,6 +189,10 @@ pub struct Document {
 pub struct Record {
     /// The reading it was read in, whose file its places are in.
     pub source: SourceId,
+    /// The object it was read as: the number and generation its `n g obj`
+    /// says, or, in an object stream, the number its header gives the
+    /// place it was read from, at the generation it was asked for.
+    pub id: ObjectId,
     /// Where it was found.
     pub origin: Origin,
     /// Its bytes: from its `n g obj` to past its `endobj`, or to where it
@@ -216,14 +220,16 @@ impl PartialEq for Record {
     fn eq(&self, other: &Record) -> bool {
         let Record {
             source: _,
+            id,
             origin,
             at,
             endobj,
             data,
             hash,
         } = self;
-        (origin, at, endobj, data, hash)
+        (id, origin, at, endobj, data, hash)
             == (
+                &other.id,
                 &other.origin,
                 &other.at,
                 &other.endobj,

@@ -11,7 +11,7 @@ use std::io;
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::serialize;
 
-use super::copy::{Copying, written};
+use super::copy::{Copying, as_read, written};
 use super::crypt::Place;
 use super::{
     Bodies, Body, Encryptor, Entry, Error, NUMBERS, Options, ReadFrom, SECTION_KEYS, Section,
@@ -174,10 +174,12 @@ impl Base {
 }
 
 /// An update after `base` that writes `bodies`, at the end of `out`: none
-/// when there are none, but an object as the reading `base` is of read it
-/// ([`Body::Read`], [`Base::source`]), which is in the file already and
-/// is passed over, so that a document's [`bodies`](super::bodies) write
-/// what was built or changed since. After a newline, where `base`'s last
+/// when there are none, but an object as the reading `base` is of read it,
+/// at its own number ([`Body::Read`], [`Base::source`]), which is in the
+/// file already and is passed over, so that a document's
+/// [`bodies`](super::bodies) write what was built or changed since; one
+/// of that reading's given at another number is refused
+/// ([`Error::Elsewhere`]), not passed over. After a newline, where `base`'s last
 /// line isn't ended, each body at its number, in the order given, then a
 /// section of `base`'s kind listing only those, in runs, positions counted
 /// from `base`'s header, a stream's not deflated, numbered at
@@ -244,14 +246,21 @@ pub fn update<'a>(
     options: &Options<'_>,
 ) -> Result<Option<Written>, Error> {
     let start = out.len();
-    // What the file holds as read already, passed over.
-    let held = |body: &Body<'_>| {
-        let record = body.record().map(|record| record.source);
-        record.is_some() && record == base.source
+    // What the file holds as read already, passed over: an object as the
+    // reading `base` is of read it, at its own number.
+    let held = |id: ObjectId, body: &Body<'_>| match (body, base.source) {
+        (Body::Read { object, record }, Some(source)) if record.source == source => {
+            as_read(id, object, record, source)
+        }
+        _ => Ok(false),
     };
-    let bodies: Vec<(ObjectId, Body<'a>)> = (bodies.into_iter())
-        .filter(|(_, body)| !held(body))
-        .collect();
+    let mut kept: Vec<(ObjectId, Body<'a>)> = Vec::new();
+    for (id, body) in bodies {
+        if !held(id, &body)? {
+            kept.push((id, body));
+        }
+    }
+    let bodies = kept;
     if bodies.is_empty() {
         return Ok(None);
     }
