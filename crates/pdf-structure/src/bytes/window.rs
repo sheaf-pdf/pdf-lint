@@ -300,7 +300,7 @@ mod tests {
     use pdf_objects::Resolve;
     use pdf_objects::object::ObjectId;
 
-    use super::super::lazy::{files, length_by_reference};
+    use super::super::lazy::{files, fixtures, length_by_reference};
     use super::super::tests::{clean, compressed, objects_2_and_3, root, xref_row};
     use super::super::*;
     use crate::fuzz::{Counted, open};
@@ -347,7 +347,9 @@ mod tests {
                 }
             }
         }
-        assert!(compared > 5000, "{compared}");
+        // The writer's files, and qpdf's where they are.
+        let floor = if fixtures() { 5000 } else { 4000 };
+        assert!(compared > floor, "{compared}");
     }
 
     /// A file of a catalog, its page tree and, after them, an 8 MiB stream,

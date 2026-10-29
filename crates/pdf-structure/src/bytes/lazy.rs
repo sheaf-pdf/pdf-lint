@@ -131,11 +131,20 @@ fn object_0_in_use() -> Vec<u8> {
     file
 }
 
-/// The fixture qpdf wrote, by name: none where the crate is without them,
-/// as its package is, which holds no `tests/files`.
-fn fixture(name: &str) -> Option<Vec<u8>> {
+/// Whether the crate has the fixtures qpdf wrote: not where it's without
+/// them, as its package is, which holds no `tests/files`, so a test of
+/// them is skipped there, and one that counts what it read counts fewer.
+pub(crate) fn fixtures() -> bool {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/files")
+        .exists()
+}
+
+/// The fixture qpdf wrote, by name: none where the crate is without them
+/// ([`fixtures`]).
+pub(crate) fn fixture(name: &str) -> Option<Vec<u8>> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
-    (dir.exists()).then(|| std::fs::read(dir.join(format!("{name}.pdf"))).unwrap())
+    fixtures().then(|| std::fs::read(dir.join(format!("{name}.pdf"))).unwrap())
 }
 
 /// A test file: its name, its bytes, and the passwords it's read by.
@@ -442,7 +451,9 @@ fn a_document_made_with_its_reading_kept_is_the_whole_read_whatever_was_read() {
             compared += beside(&format!("{name}, before"), &file, &passwords, &options);
         }
     }
-    assert!(compared > 150, "{compared}");
+    // The writer's files, and qpdf's where they are.
+    let floor = if fixtures() { 150 } else { 100 };
+    assert!(compared > floor, "{compared}");
 }
 
 /// A document made with its reading kept holds each stream's data where
@@ -475,7 +486,9 @@ fn a_documents_stream_data_is_handed_out_by_the_reading_kept_beside_it() {
         }
         assert_eq!(reading.into_document().unwrap(), doc, "{name}");
     }
-    assert!(streams > 50, "{streams}");
+    // The writer's files, and qpdf's where they are.
+    let floor = if fixtures() { 50 } else { 30 };
+    assert!(streams > floor, "{streams}");
 }
 
 /// The inventory's loads from bytes: as they are (`load_mem`), under

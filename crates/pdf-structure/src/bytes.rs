@@ -3392,7 +3392,7 @@ fn holds_linearization<'f, F: Bytes<'f>>(
 }
 
 #[cfg(test)]
-mod lazy;
+pub(crate) mod lazy;
 #[cfg(test)]
 mod streams;
 #[cfg(test)]

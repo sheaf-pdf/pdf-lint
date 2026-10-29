@@ -863,6 +863,7 @@ mod tests {
     use pdf_objects::object::Stream;
 
     use super::*;
+    use crate::bytes::lazy::fixture;
 
     #[test]
     fn a_document_gives_what_it_holds() {
@@ -1077,9 +1078,11 @@ mod tests {
         assert_eq!(doc.encryption, Encryption::None);
 
         // qpdf's file, its dictionaries in object streams, encrypted with
-        // AES-256 and opened by its empty user password.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/files/qpdf-aes-256.pdf");
-        let file = std::fs::read(path).unwrap();
+        // AES-256 and opened by its empty user password, where the crate
+        // has it.
+        let Some(file) = fixture("qpdf-aes-256") else {
+            return;
+        };
         let doc = crate::bytes::read(&file);
         assert_eq!(doc.header, Some(Version::new(1, 7)));
         assert_eq!(doc.facts.newest, Some((startxref(&file), XrefKind::Stream)));
@@ -1614,10 +1617,6 @@ mod tests {
     /// decrypted where they are, with its records, beside the decoded data.
     #[test]
     fn prune_keeps_an_encrypted_files_encryption_dictionary_and_strings() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
-        if !dir.exists() {
-            return;
-        }
         let names = [
             "rc4-40",
             "rc4-128",
@@ -1627,7 +1626,9 @@ mod tests {
             "aes-256-unpacked",
         ];
         for name in names {
-            let file = std::fs::read(dir.join(format!("qpdf-{name}.pdf"))).unwrap();
+            let Some(file) = fixture(&format!("qpdf-{name}")) else {
+                return;
+            };
             for (password, owner) in [(&b""[..], false), (b"owner", true)] {
                 let mut doc = crate::bytes::read_opened(&file, &[password]);
                 assert_eq!(doc.encryption, Encryption::opened(owner), "{name}");
