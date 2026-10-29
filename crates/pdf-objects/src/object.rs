@@ -366,8 +366,8 @@ impl Object {
         matches!(self.value, Value::Null)
     }
 
-    /// The objects its references name, nested ones too, in the order
-    /// written: itself, when it's a reference; an array's elements; a
+    /// The ids of the objects its references name, nested ones too, in the
+    /// order written: itself, when it's a reference; an array's elements; a
     /// dictionary's every entry, a key written twice included; a stream's
     /// dictionary, never its data. Walked with a stack of its own, so a
     /// value nested however deeply, as one built in memory may be, walks

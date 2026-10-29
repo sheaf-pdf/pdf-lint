@@ -713,8 +713,8 @@ impl<S: ByteSource> Reading<S> {
     /// objects the stream and its filters are. Its warnings are in the order
     /// [`Reading::warnings`] says them, and made after it,
     /// [`Reading::into_document`]'s document is the same; whatever the
-    /// reading read before, it's the whole read, so long as no stream it
-    /// decodes reaches the reading's budget.
+    /// reading read before, it's the whole read, so long as no stream the
+    /// reading decodes, before it or in it, reaches its budget.
     ///
     /// Kept beside the document, the reading hands out what the document
     /// doesn't hold: a stream's data, which stays where it was written

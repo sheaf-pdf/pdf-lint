@@ -1,7 +1,8 @@
 //! A file as a reader read it: a [`Source`], which any reader can
-//! implement, and [`Document`], an owned one that readers fill and tests
-//! build; and what the bytes reader records of where it read each object
-//! ([`Record`]) and of the file as written ([`Facts`]).
+//! implement, and [`Document`], an owned one that readers fill, tests
+//! build, and a caller builds and edits in memory; and what the bytes
+//! reader records of where it read each object ([`Record`]) and of the
+//! file as written ([`Facts`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::RangeBounds;
@@ -564,11 +565,8 @@ impl Document {
 
     /// Each object that reads whose id is in `range`, by number: a
     /// number's every generation, `n`'s, is `(n, 0)..=(n, u16::MAX)`.
-    ///
-    /// # Panics
-    ///
-    /// When `range` starts after it ends, or starts and ends at one id it
-    /// leaves out, as [`BTreeMap::range`] does.
+    /// Panics where [`BTreeMap::range`] does: a range that starts after it
+    /// ends, or starts and ends at one id it leaves out.
     pub fn range(
         &self,
         range: impl RangeBounds<ObjectId>,
@@ -596,7 +594,11 @@ impl Document {
 
     /// Puts `object` at `id`, with no record, as it wasn't read: gives the
     /// object it replaces, when one that read was there. New ids start
-    /// past `id`'s number, if they didn't.
+    /// past `id`'s number, if they didn't. The object keeps the spans it
+    /// has, its own and its values', of whatever file it was read from,
+    /// with nothing to say which: where spans are read as places in this
+    /// document's file, as a check reads them, a copy from another file is
+    /// told apart by its number alone.
     pub fn set(&mut self, id: ObjectId, object: impl Into<Object>) -> Option<Object> {
         self.past(id.0);
         let was = self.objects.insert(id, Ok((object.into(), None)));
@@ -633,7 +635,10 @@ impl Document {
     /// Object `id`, to edit, when it reads. Its record is dropped, as what
     /// the object is then is the caller's: a record says the object is as
     /// it was read, which a `&mut` can replace whole without an edit that
-    /// drops its span.
+    /// drops its span. It's the object at `id` itself, a reference as it
+    /// is, not followed: [`Document::dereference`] gives the id a chain of
+    /// them ends at, and [`Document::get_dict_mut`] follows one to a
+    /// dictionary.
     pub fn get_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
         let (object, record) = self.objects.get_mut(&id)?.as_mut().ok()?;
         *record = None;
@@ -795,8 +800,9 @@ impl Document {
     /// ([`Document::reachable`]), whether it reads or not, its record with
     /// it, and gives their ids by number. Nothing refers to an object
     /// stream or a cross-reference stream, so they go, and
-    /// [`Trailer::stream`] may then name an object it no longer holds; the
-    /// trailer refers to the encryption dictionary, so it stays.
+    /// [`Trailer::stream`], [`Document::update`]'s objects and a warning's
+    /// object may then name one it no longer holds; the trailer refers to
+    /// the encryption dictionary, so it stays.
     /// [`Document::decoded`] is left as it is, as the objects read from an
     /// object stream are placed in its data still. New ids start where
     /// they did.

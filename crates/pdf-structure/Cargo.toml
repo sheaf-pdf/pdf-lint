@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF's file structure, read whole or on demand: the header, cross-reference sections along /Prev, object streams, recovery by scanning, decrypting and decoding, every choice said"
+description = "PDF's file structure, read whole or on demand into a document to number, edit, walk and prune in memory: the header, cross-reference sections along /Prev, object streams, recovery by scanning, decrypting and decoding, every choice said"
 keywords = ["pdf", "parser", "xref", "object-streams", "iso-32000"]
 categories = ["parser-implementations"]
 # Only what users need, so local tooling files can't end up in the package.

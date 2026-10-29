@@ -491,10 +491,9 @@ fn a_documents_stream_data_is_handed_out_by_the_reading_kept_beside_it() {
     assert!(streams > floor, "{streams}");
 }
 
-/// The inventory's loads from bytes: as they are (`load_mem`), under
-/// options (`load_mem_with_options`: as of an earlier section, and under
-/// limits a stream reaches) and by a password (`load_with_password`), each
-/// a reading made a document, with the reading kept or not, which is
+/// A document loaded from bytes as they are, under options (as of an
+/// earlier section, and under limits a stream reaches) and by a password,
+/// each a reading made a document, with the reading kept or not, which is
 /// `bytes::read`, `read_from`, `read_limited` or `read_opened`'s.
 #[test]
 fn a_document_is_loaded_from_bytes_under_options_and_by_a_password() {

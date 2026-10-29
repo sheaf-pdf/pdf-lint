@@ -10,9 +10,10 @@
 # `pdf_filters::fuzz::filters`, which two stable unit tests run on random
 # and damaged inputs; `crypt` calls
 # `pdf_crypt::fuzz::handler`, which a stable unit test runs; `objects`
-# calls `pdf_objects::fuzz::parse`, the parser, and the writer on what it
-# read, which a stable unit test (`random_fragments_keep_every_promise`)
-# runs; `structure` calls `pdf_structure::fuzz::read_file`, the reader,
+# calls `pdf_objects::fuzz::parse`, the parser, the walk of what it read's
+# references and the writer on what it read, which a stable unit test
+# (`random_fragments_keep_every_promise`) runs; `structure` calls
+# `pdf_structure::fuzz::read_file`, the reader and the document it reads,
 # which a stable unit test
 # (`mutated_files_read_within_their_bytes_the_same_twice`) runs on mutated
 # files; `check` calls

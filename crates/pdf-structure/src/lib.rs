@@ -1,9 +1,11 @@
-//! PDF's file structure, read (ISO 32000-2, 7.5): a file's header, its
-//! cross-reference tables and streams along their `/Prev` chain, and each
-//! object at the offset they give, through pdf-objects' parser, every
-//! value, key and stream's data with where it was written. Where the
-//! sections don't read, it finds the objects by scanning the file, and
-//! says so.
+//! PDF's file structure, read, and a document of it in memory (ISO
+//! 32000-2, 7.5): a file's header, its cross-reference tables and streams
+//! along their `/Prev` chain, and each object at the offset they give,
+//! through pdf-objects' parser, every value, key and stream's data with
+//! where it was written. Where the sections don't read, it finds the
+//! objects by scanning the file, and says so. What it reads is a
+//! document, which a caller can build in memory too, to number new
+//! objects in, edit, walk and prune.
 //!
 //! - **What it read, in one value:** a [`Document`], a [`Source`] read
 //!   whole: each object its cross-references list, kept with where it was

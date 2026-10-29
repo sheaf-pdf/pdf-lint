@@ -264,11 +264,11 @@ mod tests {
         assert_eq!(reading.into_document().unwrap(), read(&bytes));
     }
 
-    /// A file loaded from its path (the inventory's `load`): read by
-    /// position, made a document with its reading kept, it's the whole
-    /// read, the reading beside it handing out each stream's data, the
-    /// file's bytes where the document says it was written; and the
-    /// reading made a document after is the same.
+    /// A file opened from its path and read by position, made a document
+    /// with its reading kept: it's the whole read, the reading beside it
+    /// handing out each stream's data, the file's bytes where the document
+    /// says it was written; and the reading made a document after is the
+    /// same.
     #[test]
     fn a_file_loaded_from_its_path_is_the_whole_read_its_reading_kept() {
         let bytes = write::file("1.7", &clean(), root(), Xref::Stream);

@@ -111,7 +111,7 @@ pub fn open<S: ByteSource>(
 /// bits from the fourth give, it's the whole read, and each stream's data
 /// and decoded data are as in memory. Pruned, what its trailer reaches is
 /// the same, and every object it keeps is among it, and an object added
-/// is at a number no entry held ([`pruned`]). When the file has an
+/// is at a number no entry held (`pruned`). When the file has an
 /// incremental update, so is the revision before it ([`Options::section`]);
 /// and with the choice's lowest bit set, so is the file opened by the
 /// owner's password `owner`, and its revision before an update. Panics on
