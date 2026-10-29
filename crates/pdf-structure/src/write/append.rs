@@ -15,7 +15,7 @@ use super::copy::{Copying, written};
 use super::crypt::Place;
 use super::{
     Bodies, Body, Encryptor, Entry, Error, NUMBERS, Options, ReadFrom, SECTION_KEYS, Section,
-    Written, checked, dangling, encrypting, file_id, first_id, fresh, id_value, stopped,
+    Written, checked, dangling, file_id, first_id, fresh, id_value, stopped,
 };
 use crate::bytes::{ByteSource, Reading, SourceId};
 use crate::source::XrefKind;
@@ -284,7 +284,7 @@ fn appended(
     // What the encryptor resolves references by, where there's one.
     let resolve = encryptor.map(|_| Bodies::new(bodies, from));
     let encrypting = match (encryptor, &resolve) {
-        (Some(e), Some(resolve)) => Some(encrypting(e, &base.trailer, resolve)?),
+        (Some(e), Some(resolve)) => Some(e.encrypting(&base.trailer, resolve)?),
         _ => None,
     };
 
@@ -331,7 +331,8 @@ fn appended(
             let past = [options.xref_from, base.size, section.size()]
                 .into_iter()
                 .fold(0, u32::max);
-            let num = fresh(past, &dangling(bodies, &base.trailer, past, &[]));
+            let dangling = dangling(bodies, &base.trailer, past, &[]);
+            let num = fresh(past, |n| dangling.contains(&n));
             if num >= NUMBERS {
                 return Err(Error::NoNumber(num));
             }

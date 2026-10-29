@@ -791,7 +791,7 @@ fn checked(
         if encrypt_at == Some(id.0) {
             return Err(Error::EncryptAt(id.0));
         }
-        if encryptor.is_some_and(|e| e.free(id.0)) {
+        if encryptor.is_some_and(|e| e.free(id.0).is_some()) {
             return Err(Error::Free(id));
         }
     }
@@ -858,11 +858,9 @@ fn dangling(
     named
 }
 
-/// The first number from `from` on that `passed` doesn't hold.
-fn fresh(from: u32, passed: &HashSet<u32>) -> u32 {
-    (from..=u32::MAX)
-        .find(|n| !passed.contains(n))
-        .unwrap_or(u32::MAX)
+/// The first number from `from` on that isn't `passed`.
+fn fresh(from: u32, passed: impl Fn(u32) -> bool) -> u32 {
+    (from..=u32::MAX).find(|&n| !passed(n)).unwrap_or(u32::MAX)
 }
 
 /// What resolves a reference in what a write writes: the objects it's
@@ -891,25 +889,6 @@ impl<'b> Resolve<'b> for Bodies<'b> {
             None => self.from?.object(id),
         }
     }
-}
-
-/// What encrypts what a write under `encryptor` writes, its trailer
-/// `trailer`, its references resolved by `bodies`: refused where
-/// `/EncryptMetadata false` leaves the document's metadata stream in the
-/// clear, and the catalog, which says which stream that is, doesn't
-/// resolve.
-fn encrypting<'b>(
-    encryptor: &'b Encryptor,
-    trailer: &Dict,
-    bodies: &'b Bodies<'b>,
-) -> Result<Encrypting<'b>, Error> {
-    if encryptor.plain_metadata() {
-        let root = trailer.get(b"Root").and_then(Object::as_reference);
-        if let Some(root) = root.filter(|&root| bodies.resolve(root).is_none()) {
-            return Err(Error::Catalog(root));
-        }
-    }
-    Ok(encryptor.encrypting(trailer, bodies))
 }
 
 /// Object `id`, `obj`, written on its own at the end of `out`, encrypted

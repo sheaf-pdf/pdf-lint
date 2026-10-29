@@ -4,7 +4,7 @@
 //! of what's left in the clear that the reader decrypts by.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fmt;
 
@@ -26,9 +26,16 @@ use crate::source::Encryption;
 /// made from; and what it leaves in the clear, the list the reader
 /// decrypts by (see [`bytes`](crate::bytes), "What's encrypted"); and,
 /// where its keys are made per object, the numbers the file lists free,
-/// at which nothing new is written under it. It gives out nothing of the
-/// key, its `Debug` neither; a clone clones the handler, each key wiped
-/// when it's dropped (pdf-crypt's `Handler`).
+/// at which nothing new is written under it ([`Encryptor::free`]). It
+/// gives out nothing of the key, its `Debug` neither; a clone clones the
+/// handler, each key wiped when it's dropped (pdf-crypt's `Handler`).
+///
+/// A caller that lays a file out itself, as [`full`](super::full) does,
+/// writes it encrypted as `full` does through [`Encryptor::whole`], then
+/// [`Encryptor::encrypting`]; writes no object at a number
+/// [`Encryptor::free`] gives, and lists each free at its generation
+/// ([`Encryptor::free_numbers`]); and puts in no object stream an object
+/// [`Encryptor::dictionary_object`] says is the encryption dictionary's.
 #[derive(Clone)]
 pub struct Encryptor {
     handler: Handler,
@@ -36,11 +43,12 @@ pub struct Encryptor {
     dict: Dict,
     place: Place,
     first_id: Option<Vec<u8>>,
-    /// The numbers the file it was read from lists free, where a method of
-    /// its makes keys per object (RC4, AES-128), from the number and
-    /// generation (ISO 32000-2, 7.6.3, Algorithm 1): a new object there
-    /// would be encrypted with a deleted object's key. Empty otherwise.
-    free: HashSet<u32>,
+    /// The numbers the file it was read from lists free, each with the
+    /// generation its entry gives, where a method of its makes keys per
+    /// object (RC4, AES-128), from the number and generation (ISO 32000-2,
+    /// 7.6.3, Algorithm 1): a new object there would be encrypted with a
+    /// deleted object's key. Empty otherwise.
+    free: BTreeMap<u32, u16>,
     /// The reading it was made of, whose objects it encrypts as the
     /// reading's file has them: none for a new file's.
     source: Option<SourceId>,
@@ -82,10 +90,13 @@ impl Encryptor {
     /// Where any of its methods makes keys per object, from the object's
     /// number and generation (RC4 and AES-128: its strings', its streams',
     /// a crypt filter's its dictionary has, or `/EFF`'s), it keeps the
-    /// numbers the reading lists free: a whole file or an update written
+    /// numbers the reading lists free, each with the generation it's to be
+    /// used at next ([`Encryptor::free`]): a whole file or an update written
     /// under it refuses an object at one ([`Error::Free`]), as its key
     /// would be a deleted object's, whose ciphertext may still be in the
-    /// file, or in the earlier file a whole save replaces.
+    /// file, or in the earlier file a whole save replaces; and a whole file
+    /// lists each free at that generation, so that a tool that follows its
+    /// free list doesn't take one at a deleted object's key.
     pub fn of<S: ByteSource>(reading: &Reading<S>) -> Result<Option<Encryptor>, Error> {
         match (reading.encryption(), reading.handler(), reading.stored()) {
             (Encryption::None, ..) => Ok(None),
@@ -94,9 +105,9 @@ impl Encryptor {
                 let free = match per_object(handler, &stored.dict) {
                     true => (reading.entries())
                         .filter(|&(n, _, entry)| n != 0 && entry == XrefEntry::Free)
-                        .map(|(n, ..)| n)
+                        .map(|(n, generation, _)| (n, generation))
                         .collect(),
-                    false => HashSet::new(),
+                    false => BTreeMap::new(),
                 };
                 Ok(Some(Encryptor {
                     handler: handler.clone(),
@@ -137,7 +148,7 @@ impl Encryptor {
             dict: encryption(&values, Some(32)),
             place: Place::New,
             first_id: None,
-            free: HashSet::new(),
+            free: BTreeMap::new(),
             source: None,
         })
     }
@@ -189,13 +200,14 @@ impl Encryptor {
         self.place
     }
 
-    /// It, for a whole file that writes its dictionary at `at`, or direct
-    /// where that's none: that file has one section, whose `/Encrypt` is
-    /// the only one, so an object at a number the file it was read from
-    /// named `/Encrypt` by, in its trailer or an earlier section's, is
-    /// encrypted as any is, as a reader of the file written decrypts it;
-    /// what the dictionary refers to is still left in the clear.
-    pub(super) fn whole(&self, at: Option<ObjectId>) -> Cow<'_, Encryptor> {
+    /// It, for a file written whole that writes its dictionary at `at`, or
+    /// direct where that's none, every section of it naming that one: an
+    /// object at a number the file it was read from named `/Encrypt` by, in
+    /// its trailer or an earlier section's, is encrypted as any is, as a
+    /// reader of the file written decrypts it, where it would otherwise be
+    /// left as written; what the dictionary refers to is still left in the
+    /// clear. A file written whole under it is encrypted through this.
+    pub fn whole(&self, at: Option<ObjectId>) -> Cow<'_, Encryptor> {
         let list = &self.list;
         let named = |id: &ObjectId| list.sections.contains(id) && Some(*id) != at;
         if !list.dictionaries.iter().any(named) {
@@ -213,16 +225,29 @@ impl Encryptor {
         self.source
     }
 
-    /// Whether `n` is a number the file it was read from lists free, under
-    /// keys made per object: nothing new is written there under it.
-    pub(super) fn free(&self, n: u32) -> bool {
-        self.free.contains(&n)
+    /// Where the file it was read from lists number `n` free, under keys
+    /// made per object (RC4, AES-128): the generation its entry gives, the
+    /// one the number is to be used at next. Nothing new is written there
+    /// under it, as it would be encrypted with a deleted object's key
+    /// ([`Error::Free`]), and a file written whole lists it free at that
+    /// generation. None for any other number, and every number under keys
+    /// that aren't made per object.
+    pub fn free(&self, n: u32) -> Option<u16> {
+        self.free.get(&n).copied()
+    }
+
+    /// Each number [`Encryptor::free`] gives a generation for, with it,
+    /// ascending.
+    pub fn free_numbers(&self) -> impl Iterator<Item = (u32, u16)> + '_ {
+        self.free.iter().map(|(&n, &generation)| (n, generation))
     }
 
     /// Whether object `id` is an encryption dictionary, or what one's
-    /// entries refer to, which a reader reads before it has a key, so in
-    /// the clear, never in an object stream.
-    pub(super) fn dictionary_object(&self, id: ObjectId) -> bool {
+    /// entries refer to, by number, which a reader reads before it has a
+    /// key: left in the clear, and never put in an object stream, which is
+    /// encrypted. [`packable`](super::packable) tells an encryption
+    /// dictionary by its shape alone.
+    pub fn dictionary_object(&self, id: ObjectId) -> bool {
         self.list.dictionaries.contains(&id)
     }
 
@@ -239,25 +264,32 @@ impl Encryptor {
     /// document's metadata (its catalog's `/Metadata`), and `resolve` gives
     /// the objects a reference names: the metadata stream's way there, and a
     /// stream's `/Filter` and `/DecodeParms`, which say whether it has a
-    /// crypt filter of its own.
+    /// crypt filter of its own. Refused where `/EncryptMetadata false` leaves
+    /// the document's metadata stream in the clear and `resolve` doesn't
+    /// give the catalog, which says which stream that is
+    /// ([`Error::Catalog`]), rather than encrypt it.
     pub fn encrypting<'a>(
         &'a self,
         trailer: &Dict,
         resolve: &'a (dyn Resolve<'a> + Sync),
-    ) -> Encrypting<'a> {
+    ) -> Result<Encrypting<'a>, Error> {
         let metadata = match self.list.unencrypted_metadata {
             true => {
+                let root = trailer.get(b"Root").and_then(Object::as_reference);
+                if let Some(root) = root.filter(|&root| resolve.resolve(root).is_none()) {
+                    return Err(Error::Catalog(root));
+                }
                 let get: crypt::Get<'_, '_, Infallible> = &|id| Ok(resolve.resolve(id));
                 let Ok(metadata) = crypt::metadata_stream(trailer, get);
                 metadata
             }
             false => None,
         };
-        Encrypting {
+        Ok(Encrypting {
             encryptor: self,
             resolve,
             metadata,
-        }
+        })
     }
 }
 

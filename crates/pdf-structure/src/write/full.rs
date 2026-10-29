@@ -19,7 +19,7 @@ use super::crypt::Place;
 use super::{
     Base, Bodies, Body, Deflate, Encrypting, Encryptor, Entry, Error, MEMBERS, NUMBERS, Options,
     Pack, ReadFrom, SECTION_KEYS, Section, Written, bodies as read, checked, container as objstm,
-    dangling, encrypting, file_id, first_id, fresh, id_value, packable, stopped, usable,
+    dangling, file_id, first_id, fresh, id_value, packable, stopped, usable,
 };
 use crate::source::{Document, XrefKind};
 
@@ -54,7 +54,10 @@ const PLACES: usize = 1 << 16;
 ///   dictionary is written as the encryptor has it, as an object at
 ///   [`Options::encrypt_at`], else at its number in the file it was read
 ///   from, else past every body; or direct in the trailer where that file
-///   had it so.
+///   had it so. Where its keys are made per object, each number its file
+///   lists free is listed free at the generation that file's entry gives
+///   it ([`Encryptor::free`]), `/Size` past it, and no object of the
+///   writer's own is numbered there.
 /// - **Copied**, an object as read ([`Body::Read`]) is written as the
 ///   bytes it was read from, read from `from`, where the rules for a copy
 ///   hold; one read from an object stream, which goes in one of the
@@ -200,7 +203,10 @@ fn file(
     let encrypt_at = match encryptor.map(Encryptor::place) {
         None | Some(Place::Direct) => None,
         Some(Place::At(at)) => Some(options.encrypt_at.unwrap_or(at)),
-        Some(Place::New) => Some(options.encrypt_at.unwrap_or((fresh(past, &dangling), 0))),
+        Some(Place::New) => {
+            let at = fresh(past, |n| dangling.contains(&n));
+            Some(options.encrypt_at.unwrap_or((at, 0)))
+        }
     };
     checked(bodies, encrypt_at.map(|at| at.0), encryptor)?;
     if let Some(at) = encrypt_at {
@@ -216,7 +222,7 @@ fn file(
     // What the encryptor resolves references by, where there's one.
     let resolve = encryptor.map(|_| Bodies::new(bodies, from));
     let encrypting = match (encryptor, &resolve) {
-        (Some(e), Some(resolve)) => Some(encrypting(e, trailer, resolve)?),
+        (Some(e), Some(resolve)) => Some(e.encrypting(trailer, resolve)?),
         _ => None,
     };
     let encrypting = encrypting.as_ref();
@@ -270,6 +276,15 @@ fn file(
         };
         next = packing.packed(out, &mut section, &members, pack, next)?;
     }
+    // The numbers the file read lists free under keys made per object,
+    // free at the generation each is to be used at next, so that a tool
+    // that follows this file's free list doesn't take one at a deleted
+    // object's key.
+    for (n, generation) in encryptor.into_iter().flat_map(Encryptor::free_numbers) {
+        if !section.lists(n) {
+            section.insert(n, Entry::Free { generation });
+        }
+    }
     let kept = (encryptor.and_then(Encryptor::first_id).map(<[u8]>::to_vec)).or(given);
     let id = file_id(kept, encryptor.is_some(), &out[start..]);
     if let Some(id) = &id {
@@ -280,7 +295,9 @@ fn file(
     match options.kind {
         XrefKind::Table => section.table(out, trailer, pos)?,
         XrefKind::Stream => {
-            let at = fresh(next.max(options.xref_from), &dangling);
+            let at = fresh(next.max(options.xref_from), |n| {
+                dangling.contains(&n) || section.lists(n)
+            });
             usable(at)?;
             section.stream(out, at, trailer, pos, options.deflate)?;
         }
@@ -363,7 +380,7 @@ impl Packing<'_> {
             section.lists(n)
                 || by_number.contains_key(&n)
                 || self.dangling.contains(&n)
-                || encryptor.is_some_and(|e| e.free(n))
+                || encryptor.is_some_and(|e| e.free(n).is_some())
         };
         let from = next.max(self.options.xref_from);
         let Some(given) = container_numbers(grouped.len(), pack.reuse, from, taken) else {

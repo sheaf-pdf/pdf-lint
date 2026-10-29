@@ -25,12 +25,16 @@ pub fn fits(len: usize) -> bool {
 }
 
 /// Whether object `id`, `obj`, may go in an object stream (7.5.7): not a
-/// stream, an object whose generation isn't 0, an encryption dictionary
-/// (the trailer's `/Encrypt`, or an earlier revision's) or the
-/// linearization dictionary; nor a signature dictionary, so a later
+/// stream, an object whose generation isn't 0, an encryption dictionary or
+/// the linearization dictionary; nor a signature dictionary, so a later
 /// signing tool finds it where it expects, its `/Contents` unencrypted. A
 /// cross-reference stream is a stream, and a container's own `/Length` is
-/// direct ([`container`]).
+/// direct ([`container`]). An encryption dictionary is told by its shape
+/// alone, the standard security handler's (a `/Filter` name, `/O` and
+/// `/U`): a caller leaves out what the file's `/Encrypt` names and what
+/// that refers to by number
+/// ([`Encryptor::dictionary_object`](super::Encryptor::dictionary_object)),
+/// as a whole file does.
 pub fn packable(id: ObjectId, obj: &Object) -> bool {
     if id.1 != 0 {
         return false;

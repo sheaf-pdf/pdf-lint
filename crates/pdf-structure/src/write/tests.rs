@@ -1329,7 +1329,7 @@ pub(crate) fn encrypted_by(
             .find(|(n, _)| (*n, 0) == id)
             .map(|(_, o)| o)
     };
-    let encrypting = encryptor.encrypting(trailer, &resolve);
+    let encrypting = encryptor.encrypting(trailer, &resolve).unwrap();
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut section = Section::full(0);
     for (num, obj) in objects {
@@ -1533,7 +1533,7 @@ fn objects_encrypt_alike_every_time() {
     for kind in [Kind::Rc4By128, Kind::Aes128, Kind::Aes256] {
         let crypt = encryptor_of(&source(dictionary_of(kind, true), false));
         let resolve = |id: ObjectId| (plain.iter()).find(|(n, _)| (*n, 0) == id).map(|(_, o)| o);
-        let encrypting = crypt.encrypting(&trailer, &resolve);
+        let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
         let encrypt = |num: u32, obj: &Object| {
             let mut out = Vec::new();
             serialize::indirect_with(&mut out, (num, 0), obj, &encrypting).unwrap();
@@ -1569,7 +1569,7 @@ fn ivs_are_keyed_by_what_the_object_is() {
     for kind in [Kind::Aes128, Kind::Aes256R5, Kind::Aes256] {
         let crypt = encryptor_of(&source(dictionary_of(kind, true), false));
         let resolve = |id: ObjectId| (plain.iter()).find(|(n, _)| (*n, 0) == id).map(|(_, o)| o);
-        let encrypting = crypt.encrypting(&trailer, &resolve);
+        let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
         let iv = |id: ObjectId, value: &[u8]| encrypting.string(id, value).unwrap()[..16].to_vec();
         let first = iv((5, 0), b"a value");
         assert_eq!(iv((5, 0), b"a value"), first, "{kind:?}");
@@ -1613,7 +1613,7 @@ fn xref_streams_metadata_and_the_encrypt_dict_stay_plain() {
     let (plain, trailer) = listed();
     let crypt = encryptor_of(&source(dictionary_of(Kind::Aes128, false), false));
     let resolve = |id: ObjectId| (plain.iter()).find(|(n, _)| (*n, 0) == id).map(|(_, o)| o);
-    let encrypting = crypt.encrypting(&trailer, &resolve);
+    let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
     let written = |id: ObjectId, obj: &Object| {
         let mut out = Vec::new();
         serialize::indirect_with(&mut out, id, obj, &encrypting).unwrap();
@@ -1779,7 +1779,7 @@ fn a_container_is_encrypted_whole_where_the_method_packs() {
                 .find(|(n, _)| (*n, 0) == id)
                 .map(|(_, o)| o)
         };
-        let encrypting = method.encryptor.encrypting(&trailer, &resolve);
+        let encrypting = method.encryptor.encrypting(&trailer, &resolve).unwrap();
         let mut out = b"%PDF-1.7\n".to_vec();
         let mut section = Section::full(0);
         let container = container(&members);
@@ -1907,7 +1907,7 @@ fn what_cant_be_encrypted_is_refused_and_nothing_written() {
     let crypt = encryptor_of(&source(dictionary_of(Kind::Aes128, true), false));
     let trailer = dict! { "Root" => (1, 0) };
     let resolve = |_: ObjectId| None;
-    let encrypting = crypt.encrypting(&trailer, &resolve);
+    let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
     let unknown = dict! {
         "Filter" => "Crypt",
         "DecodeParms" => dict! { "Name" => "Nonesuch" },
@@ -1936,7 +1936,7 @@ fn what_cant_be_encrypted_is_refused_and_nothing_written() {
     let mut unsaid = dictionary_of(Kind::Aes128, true);
     unsaid.set("EFF", 5);
     let crypt = encryptor_of(&source(unsaid, false));
-    let encrypting = crypt.encrypting(&trailer, &resolve);
+    let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
     let embedded = Object::from(Stream::new(
         dict! { "Type" => "EmbeddedFile" },
         b"data".to_vec(),
@@ -2337,13 +2337,17 @@ fn containers_build_alike_on_one_thread_and_on_eight() {
         .map(|(n, part)| (n, part.iter().map(|(id, o)| (*id, o.into())).collect()))
         .collect();
     let trailer = dict! { "Root" => (1, 0) };
-    let resolve = |_: ObjectId| None;
+    // The catalog given, which says which stream is the metadata where
+    // `/EncryptMetadata false` leaves it in the clear.
+    let resolve = |id: ObjectId| (objects.iter()).find(|(at, _)| *at == id).map(|(_, o)| o);
     let methods = methods();
     let encrypting: Vec<(&str, Option<write::Encrypting<'_>>)> = std::iter::once(("plain", None))
-        .chain(
-            (methods.iter().filter(|m| m.encryptor.packs()))
-                .map(|m| (m.name, Some(m.encryptor.encrypting(&trailer, &resolve)))),
-        )
+        .chain((methods.iter().filter(|m| m.encryptor.packs())).map(|m| {
+            (
+                m.name,
+                Some(m.encryptor.encrypting(&trailer, &resolve).unwrap()),
+            )
+        }))
         .collect();
     for (name, encrypting) in &encrypting {
         let built = |threads, stop| {
@@ -3210,7 +3214,7 @@ fn an_encrypted_object_stream_base_rewrites() {
 fn packed_in_the_clear(encryptor: &Encryptor) -> Vec<u8> {
     let (plain, trailer) = plaintext();
     let resolve = |id: ObjectId| (plain.iter()).find(|(n, _)| (*n, 0) == id).map(|(_, o)| o);
-    let encrypting = encryptor.encrypting(&trailer, &resolve);
+    let encrypting = encryptor.encrypting(&trailer, &resolve).unwrap();
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut section = Section::full(0);
     let (streams, members): (Vec<_>, Vec<_>) =
@@ -3724,6 +3728,87 @@ fn a_body_at_a_number_the_file_lists_free_is_refused_where_keys_are_per_object()
     let given = [((2, 0), write::Body::from(&two))];
     write::update(&mut out, &base, given, None, None, &write::Options::DEFAULT).unwrap();
     assert_eq!(value(&open(&out), (2, 0)), two);
+}
+
+/// A whole file written under its reading's encryption lists each number
+/// the reading listed free at the generation its entry gave, where keys
+/// are made per object, so that a tool that follows its free list takes
+/// none at a deleted object's key: here 2, free at generation 1, with a
+/// table, a stream and packed, each read back so. Under AES-256's keys,
+/// which aren't made per object, it's free at 0, as any number not
+/// written.
+#[test]
+fn a_whole_file_lists_its_reading_s_free_numbers_at_their_generations() {
+    let objects = [
+        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (3, Body::from(dict! { "N" => 3 })),
+    ];
+    let root = dict! { "Root" => (1, 0) };
+    let kinds = [
+        (Kind::Rc4By40, true),
+        (Kind::Rc4By128, true),
+        (Kind::Aes128, true),
+        (Kind::Aes256, false),
+    ];
+    for (kind, kept) in kinds {
+        let name = format!("{kind:?}");
+        let mut file = fixture::encrypted(&settings(kind, true), &objects, root.clone());
+        // Number 2's row, free, to be used next at generation 1.
+        let row: &[u8] = b"0000000000 00000 f \n";
+        let at = file.windows(row.len()).position(|w| w == row).unwrap();
+        file[at..at + row.len()].copy_from_slice(b"0000000000 00001 f \n");
+        let reading = opened(&file, "user");
+        let listed: Vec<_> = reading.entries().filter(|&(n, ..)| n == 2).collect();
+        assert_eq!(listed, [(2, 1, XrefEntry::Free)], "{name}");
+        let encryptor = Encryptor::of(&reading).unwrap().unwrap();
+        assert_eq!(encryptor.free(2), kept.then_some(1), "{name}");
+        let numbers: Vec<_> = encryptor.free_numbers().collect();
+        assert_eq!(numbers, if kept { vec![(2, 1)] } else { vec![] }, "{name}");
+        let doc = reading.to_document().unwrap();
+        let layouts = [
+            (XrefKind::Table, None),
+            (XrefKind::Stream, None),
+            (XrefKind::Stream, Some(write::Pack::DEFAULT)),
+        ];
+        for (layout, pack) in layouts {
+            let mut out = Vec::new();
+            let options = options(layout, pack);
+            write::document(&mut out, &doc, Some(&encryptor), Some(&reading), &options).unwrap();
+            let back = opened(&out, "user");
+            assert!(sound(&back), "{name}, {layout:?}: {:?}", back.warnings());
+            let free: Vec<_> = back.entries().filter(|&(n, ..)| n == 2).collect();
+            let generation = u16::from(kept);
+            assert_eq!(
+                free,
+                [(2, generation, XrefEntry::Free)],
+                "{name}, {layout:?}"
+            );
+            assert_eq!(
+                value(&back, (3, 0)),
+                value(&reading, (3, 0)),
+                "{name}, {layout:?}"
+            );
+        }
+    }
+}
+
+/// `Encryptor::encrypting`, as a caller laying a file out has it, refuses
+/// as a whole file does where `/EncryptMetadata false` leaves the
+/// document's metadata stream in the clear and the catalog, which says
+/// which stream that is, doesn't resolve, rather than encrypt it.
+#[test]
+fn encrypting_without_the_catalog_where_metadata_is_in_the_clear_is_refused() {
+    let methods = methods();
+    let clear = (methods.iter())
+        .find(|m| m.name == "metadata in the clear")
+        .unwrap();
+    let (plain, trailer) = plaintext();
+    let root = trailer.get(b"Root").and_then(Object::as_reference).unwrap();
+    let none = |_: ObjectId| -> Option<&Object> { None };
+    let refused = clear.encryptor.encrypting(&trailer, &none).err();
+    assert_eq!(refused, Some(Error::Catalog(root)));
+    let resolve = |id: ObjectId| (plain.iter()).find(|(n, _)| (*n, 0) == id).map(|(_, o)| o);
+    assert!(clear.encryptor.encrypting(&trailer, &resolve).is_ok());
 }
 
 /// A whole write under a reading's encryption that writes its encryption
@@ -4385,6 +4470,8 @@ fn an_encryption_dictionary_s_objects_stay_out_of_object_streams() {
     out.extend_from_slice(format!("\nstartxref\n{xref}\n%%EOF\n").as_bytes());
     let encryptor = encryptor_of(&out);
     assert!(encryptor.dictionary_object((41, 0)));
+    // By its shape alone, it may go in one.
+    assert!(write::packable((41, 0), &filters));
 
     let (mut plain, trailer) = plaintext();
     plain.push((41, filters));
