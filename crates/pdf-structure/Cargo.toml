@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF's file structure, read whole or on demand into a document to number, edit, walk and prune in memory: the header, cross-reference sections along /Prev, object streams, recovery by scanning, decrypting and decoding, every choice said"
+description = "PDF's file structure, read whole or on demand into a document to number, edit, walk and prune in memory: the header, cross-reference sections along /Prev, object streams, recovery by scanning, decrypting and decoding, every choice said; and cross-reference sections and object streams written"
 keywords = ["pdf", "parser", "xref", "object-streams", "iso-32000"]
 categories = ["parser-implementations"]
 # Only what users need, so local tooling files can't end up in the package.
@@ -14,7 +14,8 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 [dependencies]
 pdf-crypt = { path = "../pdf-crypt", version = "0.1" }
 # miniz_oxide named, not taken from pdf-filters' default features: it's
-# `Options::DEFAULT`'s backend, which every build of this crate has.
+# `Options::DEFAULT`'s backend, and `write::Deflate::DEFAULT`'s, which every
+# build of this crate has.
 pdf-filters = { path = "../pdf-filters", version = "0.1", default-features = false, features = ["miniz_oxide"] }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
@@ -38,11 +39,12 @@ libc = "0.2"
 # pdf-crypt's writer; the file it hands qpdf a stream in, tempfile, which
 # makes it in the temp folder and removes it after.
 fixtures = ["pdf-crypt/writer", "dep:tempfile"]
-# pdf-filters' zlib-rs, so that `Options::flate` can name it.
+# pdf-filters' zlib-rs, so that `Options::flate` and `write::Deflate` can
+# name it.
 zlib-rs = ["pdf-filters/zlib-rs"]
 
-# docs.rs documents both Flate backends, as `Options::flate` names either;
-# not `fixtures`, which is hidden.
+# docs.rs documents both Flate backends, as `Options::flate` and
+# `write::Deflate` name either; not `fixtures`, which is hidden.
 [package.metadata.docs.rs]
 features = ["zlib-rs"]
 

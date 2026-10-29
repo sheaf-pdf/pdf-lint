@@ -5,7 +5,8 @@
 //! where it was written. Where the sections don't read, it finds the
 //! objects by scanning the file, and says so. What it reads is a
 //! document, which a caller can build in memory too, to number new
-//! objects in, edit, walk and prune.
+//! objects in, edit, walk and prune. And it writes what a file's structure
+//! is written in: cross-reference sections, and object streams.
 //!
 //! - **What it read, in one value:** a [`Document`], a [`Source`] read
 //!   whole: each object its cross-references list, kept with where it was
@@ -44,6 +45,13 @@
 //!   What's decrypted and what's left as written is listed in [`bytes`].
 //! - **A revision before an update** read as the file was then
 //!   ([`bytes::read_from`]).
+//! - **Sections and object streams written** ([`write`](mod@write)): a
+//!   whole file's cross-reference section or an update's, as a table or a
+//!   stream, a whole file's stream deflated under PNG's Up predictor; and
+//!   object streams of the objects that may go in one, deflated, no
+//!   bigger than the reader decodes. Deflated through pdf-filters, by the
+//!   backend and at the level the caller says ([`write::Deflate`]); what
+//!   can't be written refused, with nothing written ([`write::Error`]).
 //!
 //! The objects are pdf-objects' types, re-exported as [`pdf_objects`];
 //! a stream that doesn't decode cleanly says so in pdf-filters' error,
@@ -69,6 +77,7 @@ mod json;
 #[doc(hidden)]
 pub mod qpdf;
 pub mod source;
+pub mod write;
 
 #[cfg(any(unix, windows))]
 pub use bytes::FileBytes;

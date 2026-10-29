@@ -1616,6 +1616,134 @@ qpdf: operation succeeded with warnings\n";
         ));
     }
 
+    /// The writer's sections and object streams read through qpdf alone as
+    /// the reader reads them, each section sound: a whole file's
+    /// cross-reference stream deflated under Up; a table linking its free
+    /// entries, and an update after it freeing an object; a stream listing
+    /// objects in an object stream, and an update after it with 100 bytes
+    /// before the header, which qpdf counts positions from, where the
+    /// reader counts them from the file's start, so it reads the file from
+    /// the header.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn written_sections_and_containers_read_through_qpdf_as_through_the_reader() {
+        use crate::write::{self, Deflate, Entry, Section};
+        use pdf_objects::serialize;
+
+        // A catalog, and the page tree qpdf needs, as object 2.
+        let catalog = || Object::from(dict! { "Type" => "Catalog", "Pages" => (2, 0) });
+        let pages = || {
+            Object::from(dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 })
+        };
+        let root = || dict! { "Root" => (1, 0) };
+        let deflate = Deflate::DEFAULT;
+        // Objects one after another, each listed where it starts.
+        let objects = |out: &mut Vec<u8>, section: &mut Section, objects: Vec<(u32, Object)>| {
+            for (num, obj) in objects {
+                let pos = serialize::indirect(out, (num, 0), &obj).unwrap();
+                section.insert(num, Entry::InUse { pos, generation: 0 });
+            }
+        };
+        let packed = |members: &[(u32, Object)]| {
+            let members: Vec<(u32, Vec<u8>)> = (members.iter())
+                .map(|(num, obj)| {
+                    let mut bytes = Vec::new();
+                    serialize::write(&mut bytes, obj).unwrap();
+                    (*num, bytes)
+                })
+                .collect();
+            Object::from(write::container(&members, deflate).unwrap().unwrap())
+        };
+        let mut files = Vec::new();
+
+        let mut up = b"%PDF-1.7\n".to_vec();
+        let mut section = Section::full(0);
+        let numbered = (1..=200).map(|n| match n {
+            1 => (n, catalog()),
+            2 => (n, pages()),
+            n => (n, Object::from(n)),
+        });
+        objects(&mut up, &mut section, numbered.collect());
+        let pos = up.len();
+        section.stream(&mut up, 201, root(), pos, deflate).unwrap();
+        files.push(("up", up, 0));
+
+        let mut freed = b"%PDF-1.7\n".to_vec();
+        let mut section = Section::full(0);
+        let three = vec![(1, catalog()), (2, pages()), (3, Object::from(3))];
+        objects(&mut freed, &mut section, three);
+        let prev = freed.len();
+        section.table(&mut freed, root(), prev).unwrap();
+        let mut section = Section::append(section.size(), 0);
+        let mut marked = catalog();
+        marked.as_dict_mut().unwrap().set("Marked", true);
+        objects(
+            &mut freed,
+            &mut section,
+            vec![(1, marked), (5, Object::from(5))],
+        );
+        section.insert(3, Entry::Free { generation: 1 });
+        let pos = freed.len();
+        let trailer = dict! { "Root" => (1, 0), "Prev" => prev as i64 };
+        section.table(&mut freed, trailer, pos).unwrap();
+        files.push(("freed", freed, 0));
+
+        let five = Object::bytes("five");
+        let six = Object::from(dict! { "Six" => 6 });
+        let mut packs = b"%PDF-1.7\n".to_vec();
+        let mut section = Section::full(0);
+        let container = packed(&[(5, five), (6, six)]);
+        objects(
+            &mut packs,
+            &mut section,
+            vec![(1, catalog()), (2, pages()), (7, container)],
+        );
+        for (num, index) in [(5, 0), (6, 1)] {
+            section.insert(
+                num,
+                Entry::Packed {
+                    container: 7,
+                    index,
+                },
+            );
+        }
+        let prev = packs.len();
+        section
+            .stream(&mut packs, 8, root(), prev, deflate)
+            .unwrap();
+        let mut file = [vec![b'~'; 100], packs.clone()].concat();
+        files.push(("packed", packs, 0));
+        let mut section = Section::append(9, 100);
+        let sixty = packed(&[(6, Object::from(dict! { "Six" => 60 }))]);
+        objects(&mut file, &mut section, vec![(10, sixty)]);
+        section.insert(
+            6,
+            Entry::Packed {
+                container: 10,
+                index: 0,
+            },
+        );
+        let pos = file.len();
+        let trailer = dict! { "Root" => (1, 0), "Prev" => prev as i64 };
+        section
+            .stream(&mut file, 11, trailer, pos, deflate)
+            .unwrap();
+        files.push(("prefixed", file, 100));
+
+        let dir = scratch("written");
+        for (test, data, header) in files {
+            let path = dir.path().join(format!("{test}.pdf"));
+            std::fs::write(&path, &data).unwrap();
+            let alone = qpdf(&path).read().unwrap();
+            assert_eq!(alone.trailer.unwritten, None, "{test}");
+            assert!(alone.warnings.is_empty(), "{test}: {:?}", alone.warnings);
+            let doc = bytes::read(&data[header..]);
+            assert_eq!(doc.trailer.unwritten, None, "{test}");
+            assert!(doc.warnings.is_empty(), "{test}: {:?}", doc.warnings);
+            assert_eq!(differences(&doc, &alone), [], "{test}");
+        }
+    }
+
     /// Every PDF under `PDF_LINT_CORPUS` read from its bytes, qpdf
     /// decoding, and through qpdf alone, and the differences counted by what
     /// they're of, with examples.
