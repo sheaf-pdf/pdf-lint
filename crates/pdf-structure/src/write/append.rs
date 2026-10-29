@@ -9,6 +9,7 @@
 use std::io;
 
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
+use pdf_objects::serialize;
 
 use super::copy::{Copying, written};
 use super::crypt::Place;
@@ -45,10 +46,19 @@ pub struct Base {
     pub size: u32,
     /// Its last section's kind, which the update's is.
     pub kind: XrefKind,
-    /// Its `/ID[0]`, which an RC4 or AES-128 key is made from.
+    /// Its `/ID[0]`, which an RC4 or AES-128 key is made from, and which
+    /// an update's encryptor must have ([`Error::Unmatched`]), none counting
+    /// as empty.
     pub first_id: Option<Vec<u8>>,
     /// Its newest trailer, whose entries the update's carries.
     pub trailer: Dict,
+    /// Its encryption dictionary, as the file stores it, where that's
+    /// known: an update's encryptor must have the same
+    /// ([`Error::Unmatched`]). None for a file that isn't encrypted, and for
+    /// one described by [`Base::new`] whose `/Encrypt` is a reference,
+    /// unless the caller sets it: an update's encryptor is then matched to
+    /// the file by where the dictionary is and by `/ID[0]` alone.
+    pub encryption: Option<Dict>,
     /// The reading its bytes are the bytes of, when it was made of one:
     /// kept by an update after it, which appends, and none after a whole
     /// file. An update after it passes over an object as that reading read
@@ -58,12 +68,14 @@ pub struct Base {
 
 impl Base {
     /// `reading`'s file, as its last section describes it: its length, its
-    /// last byte, its newest section's start and kind, its trailer and its
-    /// `/ID[0]`, its header at 0, as the reader counts positions from the
-    /// file's start (ISO 32000-2, 7.5.4), and the reading's
-    /// [`SourceId`]. New numbers start past its trailer's `/Size` (below
-    /// 2³²), every number its sections list, in use or free, and its
-    /// cross-reference streams' numbers.
+    /// last byte, its newest section's start and kind, its trailer, its
+    /// `/ID[0]` (an encrypted file's as its handler opened by it, empty
+    /// where the trailer has none) and its encryption dictionary as stored,
+    /// its header at 0, as the reader counts positions from the file's
+    /// start (ISO 32000-2, 7.5.4), and the reading's [`SourceId`]. New
+    /// numbers start past its trailer's `/Size` (below 2³²), every number
+    /// its sections list, in use or free, and its cross-reference streams'
+    /// numbers.
     ///
     /// Refused: a file with bytes before its header ([`Error::Prefixed`]),
     /// whose positions this crate's reader counts from the file's start
@@ -121,17 +133,22 @@ impl Base {
             prev,
             size,
             kind,
-            first_id: first_id(dict),
+            first_id: match reading.stored() {
+                Some(stored) => Some(stored.id.clone()),
+                None => first_id(dict),
+            },
             trailer: dict.clone(),
+            encryption: reading.stored().map(|stored| stored.dict.clone()),
             source: Some(reading.id()),
         })
     }
 
     /// A file read otherwise: `len` bytes, its last section at `prev`, of
     /// `kind`, new numbers from `size`, `trailer` its newest trailer, its
-    /// `/ID[0]` the trailer's; its header at 0, its last line taken as not
-    /// ended (an update then starts with a newline), and of no reading.
-    /// Each is a field, to set after.
+    /// `/ID[0]` the trailer's, its encryption dictionary the trailer's where
+    /// that's direct; its header at 0, its last line taken as not ended (an
+    /// update then starts with a newline), and of no reading. Each is a
+    /// field, to set after.
     pub fn new(len: usize, prev: usize, size: u32, kind: XrefKind, trailer: Dict) -> Base {
         Base {
             len,
@@ -141,6 +158,7 @@ impl Base {
             size,
             kind,
             first_id: first_id(&trailer),
+            encryption: (trailer.get(b"Encrypt").and_then(Object::as_dict)).cloned(),
             trailer,
             source: None,
         }
@@ -181,11 +199,13 @@ impl Base {
 ///   so the same update writes the same bytes. A file that isn't
 ///   encrypted and has no first string gets none.
 /// - **Encrypted** as `base`'s file is, by `encryptor`, which is that
-///   file's ([`Encryptor::of`]): every string and stream's data as
-///   [`Encrypting`](super::Encrypting) says; a stream's whose data is
-///   where it was written read from `from`, decrypted, and encrypted again.
-///   Its `/Encrypt` is repeated as the file has it, a reference or the
-///   dictionary.
+///   file's ([`Encryptor::of`] of a reading of its bytes): its dictionary
+///   where the file's trailer has it, the one the file stores where `base`
+///   knows it ([`Base::encryption`]), and its `/ID[0]`, `base`'s; every
+///   string and stream's data as [`Encrypting`](super::Encrypting) says; a
+///   stream's whose data is where it was written read from `from`,
+///   decrypted, and encrypted again. Its `/Encrypt` is repeated as the
+///   file has it, a reference or the dictionary.
 /// - **Copied**, an object as read of another reading than `base`'s, read
 ///   from `from`, is written as the bytes it was read from where the rules
 ///   for a copy hold ([`Body::Read`]).
@@ -203,7 +223,8 @@ impl Base {
 /// ([`Encryptor::create`]) instead.
 ///
 /// Refused, with nothing written ([`Error`]): a `base` without `/Root`; an
-/// encryptor that isn't `base`'s file's, or none for an encrypted file;
+/// encryptor that isn't `base`'s file's (another file's, though its
+/// `/Encrypt` is at the same number), or none for an encrypted file;
 /// a number 0 or at or past [`NUMBERS`], or given twice; a body at the
 /// encryption dictionary's number; one at a number the file lists free
 /// where its keys are made per object ([`Encryptor::of`]); a
@@ -254,15 +275,7 @@ fn appended(
     let Some(root) = base.trailer.get(b"Root") else {
         return Err(Error::Rootless);
     };
-    // A null is no entry (ISO 32000-2, 7.3.9), so no encryption.
-    let encrypt = (base.trailer.get(b"Encrypt")).filter(|e| !e.is_null());
-    let matched = match (encryptor.map(Encryptor::place), encrypt.map(Object::value)) {
-        (None, None) => true,
-        (Some(Place::At(at)), Some(Value::Ref(id))) => at == *id,
-        (Some(Place::Direct), Some(Value::Dict(_))) => true,
-        _ => false,
-    };
-    if !matched {
+    if !matched(base, encryptor) {
         return Err(Error::Unmatched);
     }
     let encrypt_at = encryptor.and_then(Encryptor::at).map(|at| at.0);
@@ -337,6 +350,7 @@ fn appended(
         kind: base.kind,
         first_id: (id.as_ref().map(|[first, _]| first.clone())).or_else(|| base.first_id.clone()),
         trailer: kept,
+        encryption: base.encryption.clone(),
         source: base.source,
     };
     Ok(Written {
@@ -346,6 +360,43 @@ fn appended(
         id,
         base,
     })
+}
+
+/// Whether `encryptor` is how `base`'s file is encrypted, or neither
+/// encrypts: its dictionary where the file's trailer has it, at the same
+/// number or the same direct dictionary; the same dictionary as the one
+/// `base` knows the file stores ([`Base::encryption`]); and the same
+/// `/ID[0]`, an absent one empty. Those are what a password's key is made
+/// from and checked by (ISO 32000-2, 7.6.4.3), so its key is then the
+/// file's; another file's, whose `/Encrypt` is at the same number, isn't
+/// taken for it.
+fn matched(base: &Base, encryptor: Option<&Encryptor>) -> bool {
+    // A null is no entry (ISO 32000-2, 7.3.9), so no encryption.
+    let encrypt = (base.trailer.get(b"Encrypt")).filter(|e| !e.is_null());
+    let (e, encrypt) = match (encryptor, encrypt) {
+        (None, None) => return true,
+        (Some(e), Some(encrypt)) => (e, encrypt),
+        _ => return false,
+    };
+    // Compared as written, as an object's place in its file isn't the
+    // dictionary.
+    let theirs = as_written(e.dictionary());
+    let alike = |dict: &Dict| theirs.is_some() && as_written(dict) == theirs;
+    let placed = match (e.place(), encrypt.value()) {
+        (Place::At(at), Value::Ref(id)) => at == *id,
+        (Place::Direct, Value::Dict(dict)) => alike(dict),
+        _ => false,
+    };
+    let stored = base.encryption.as_ref().is_none_or(alike);
+    let id = e.first_id().unwrap_or_default() == base.first_id.as_deref().unwrap_or_default();
+    placed && stored && id
+}
+
+/// `dict` as pdf-objects' writer writes it, where it can.
+fn as_written(dict: &Dict) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    serialize::write(&mut out, &Object::from(dict.clone())).ok()?;
+    Some(out)
 }
 
 /// What the last `startxref` in `source` says: read back from its end, a

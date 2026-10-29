@@ -599,8 +599,11 @@ pub enum Error {
     #[error("it's read as of the section at byte {0}, not its last, which an update goes after")]
     Earlier(usize),
     /// An update whose encryption isn't its file's: none for an encrypted
-    /// file, or one for a file that isn't, or another file's. An update
-    /// can't change how the revisions before it are encrypted.
+    /// file, or one for a file that isn't, or another file's, whose
+    /// dictionary is elsewhere or isn't the one the file stores
+    /// ([`Base::encryption`]), or whose `/ID[0]` isn't the file's. An
+    /// update can't change how the revisions before it are encrypted, and
+    /// under another file's key what it writes wouldn't decrypt.
     #[error("an update is encrypted as its file is, and this one's encryption isn't its file's")]
     Unmatched,
     /// An object at a number the file its [`Encryptor`] was read from

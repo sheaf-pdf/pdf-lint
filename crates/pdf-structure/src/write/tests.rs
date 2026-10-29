@@ -4292,6 +4292,65 @@ fn every_refusal_writes_nothing() {
     }
 }
 
+/// An update's encryptor is its file's: another file's is refused, nothing
+/// written, though its `/Encrypt` is at the same number (two of the test
+/// writer's files, their `/ID`s other, under RC4, AES-128 and AES-256), or
+/// direct (two files with one `/ID`, their dictionaries other), as its key
+/// isn't the file's; one of another reading of the same bytes, by the
+/// owner's password, writes, and its update reads back by the user's.
+#[test]
+fn an_update_under_another_file_s_encryptor_is_refused() {
+    let objects = [
+        (1, Body::from(dict! { "Type" => "Catalog" })),
+        (2, Body::from(dict! { "Title" => lit(b"secret") })),
+    ];
+    let root = dict! { "Root" => (1, 0) };
+    let changed = Object::from(dict! { "Title" => lit(b"changed") });
+    for kind in [Kind::Rc4By128, Kind::Aes128, Kind::Aes256] {
+        let name = format!("{kind:?}");
+        let mut other = settings(kind, true);
+        other.id = b"another file's i";
+        let a = fixture::encrypted(&settings(kind, true), &objects, root.clone());
+        let b = fixture::encrypted(&other, &objects, root.clone());
+        let (theirs, ours) = (encryptor_of(&b), encryptor_of(&a));
+        assert_eq!(theirs.at(), ours.at(), "{name}");
+        let base = write::Base::of(&opened(&a, "user")).unwrap();
+        let given = [((2, 0), write::Body::from(&changed))];
+        let mut out = a.clone();
+        let options = &write::Options::DEFAULT;
+        let refused = write::update(&mut out, &base, given.clone(), Some(&theirs), None, options);
+        assert_eq!(refused, Err(Error::Unmatched), "{name}");
+        assert_eq!(out, a, "{name}");
+        let owner = Encryptor::of(&opened(&a, "owner")).unwrap();
+        write::update(&mut out, &base, given, owner.as_ref(), None, options).unwrap();
+        assert_eq!(value(&opened(&out, "user"), (2, 0)), changed, "{name}");
+    }
+    let catalog = Object::from(dict! { "Type" => "Catalog", "Lang" => lit(b"en") });
+    let a = source(dictionary_of(Kind::Aes128, true), true);
+    let b = source(dictionary_of(Kind::Aes128, false), true);
+    let theirs = encryptor_of(&b);
+    assert!(theirs.direct());
+    let reading = opened(&a, "user");
+    let bases = [
+        write::Base::of(&reading).unwrap(),
+        write::Base::new(
+            a.len(),
+            newest(&reading).0,
+            size(&reading),
+            XrefKind::Table,
+            reading.trailer().dict().clone(),
+        ),
+    ];
+    for base in bases {
+        let mut out = a.clone();
+        let given = [((1, 0), write::Body::from(&catalog))];
+        let options = &write::Options::DEFAULT;
+        let refused = write::update(&mut out, &base, given, Some(&theirs), None, options);
+        assert_eq!(refused, Err(Error::Unmatched));
+        assert_eq!(out, a);
+    }
+}
+
 /// What an encryption dictionary refers to is read before a reader has a
 /// key, so a packed write leaves it out of its object streams, which are
 /// encrypted: here `/CF`, a reference to object 41.

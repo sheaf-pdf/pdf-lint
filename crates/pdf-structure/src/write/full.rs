@@ -296,6 +296,7 @@ fn file(
         kind: options.kind,
         first_id: id.as_ref().map(|[first, _]| first.clone()),
         trailer: kept,
+        encryption: encryptor.map(|e| e.dictionary().clone()),
         source: None,
     };
     Ok(Written {
