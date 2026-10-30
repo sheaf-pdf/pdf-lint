@@ -2,9 +2,11 @@
 //! PDFium's rules, errors that say where, the caps, operands read as
 //! objects, a page's streams read as one and joined under the cap,
 //! operations: the tokens grouped, every operand kept, taken from the
-//! last; the faults; and the operator table: each operator by its name,
-//! its operands, category and clause as a table of the tests' own reads
-//! them, and the graphics objects' states.
+//! last; the faults; the operator table: each operator by its name, its
+//! operands, category and clause as a table of the tests' own reads them,
+//! and the graphics objects' states; and over the operations, a page's
+//! `q`/`Q` balance, marked content and resource names, and their steppers
+//! driven by hand.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -628,6 +630,12 @@ fn the_types_are_send_and_sync() {
     both::<Operand>();
     both::<Elements>();
     both::<InlineImage>();
+    both::<Balance>();
+    both::<Properties>();
+    both::<Marked>();
+    both::<MarkedNest>();
+    both::<NameSet>();
+    both::<crate::Kept>();
 }
 
 /// `s`'s operations under `lim`, until the end or an error.
@@ -2331,4 +2339,396 @@ fn sets_of_operators() {
         format!("{:?}", Operators::TEXT_SHOWING.with(Operator::Other)),
         "{Tj, TJ, ', \", Other}"
     );
+}
+
+const LIM: &Limits = &Limits::DEFAULT;
+
+/// `streams`' marked ranges, read as a page's with no color spaces.
+fn found(streams: &[&[u8]], props: &Properties) -> Result<Vec<Marked>, Error> {
+    marked(&Concat::new(streams), props, &ResCx::none(), LIM)
+}
+
+fn span(start: (u32, u32), end: (u32, u32)) -> SpanAcross {
+    let pos = |(stream, at)| Pos { stream, at };
+    SpanAcross {
+        start: pos(start),
+        end: pos(end),
+    }
+}
+
+/// The span of `part` in `s`, one stream.
+fn span_of(s: &[u8], part: &[u8]) -> SpanAcross {
+    let at = s.windows(part.len()).position(|w| w == part).unwrap() as u32;
+    span((0, at), (0, at + part.len() as u32))
+}
+
+#[test]
+fn marked_ranges_have_their_lists() {
+    let ocg = dict! { "Type" => "OCG" };
+    let props = Properties::new([
+        (b"P0".to_vec(), dict! { "Subtype" => "Header" }),
+        (b"oc1".to_vec(), ocg.clone()),
+    ]);
+    let first: &[u8] =
+        b"/Artifact <</Type /Pagination /S#75btype /Footer /A [1 (b\\)) <0a>]>> BDC q";
+    let second: &[u8] =
+        b"/OC /oc1 BDC /Span BMC EMC EMC Q EMC /Artifact /P0 BDC EMC /X /None BDC EMC";
+    let m = found(&[first, second], &props).unwrap();
+    let tags: Vec<&[u8]> = m.iter().map(|m| m.tag.as_slice()).collect();
+    assert_eq!(tags, [&b"Artifact"[..], b"OC", b"Span", b"Artifact", b"X"]);
+    assert_eq!(
+        m.iter().map(|m| m.depth).collect::<Vec<_>>(),
+        [0, 1, 2, 0, 0]
+    );
+    // The first runs from the first stream into the second.
+    assert_eq!(m[0].span, span((0, 0), (1, 36)));
+    let Some(Props::Inline(list)) = &m[0].props else {
+        panic!("{:?}", m[0].props)
+    };
+    assert_eq!(list.get(b"Subtype").unwrap(), &Object::from("Footer"));
+    assert_eq!(
+        list.get(b"A").unwrap(),
+        &Object::from(vec![
+            1.into(),
+            string(b"b)", Form::Literal),
+            string(&[10], Form::Hex),
+        ])
+    );
+    // Named lists, found or not.
+    assert_eq!(m[1].props, Some(Props::Named(b"oc1".to_vec(), Some(ocg))));
+    assert_eq!(m[2].props, None);
+    assert_eq!(
+        m[3].props.as_ref().and_then(Props::dict),
+        Some(&dict! { "Subtype" => "Header" })
+    );
+    assert_eq!(m[4].props, Some(Props::Named(b"None".to_vec(), None)));
+}
+
+#[test]
+fn marked_content_must_balance() {
+    let props = Properties::default();
+    let kind = |s: &[u8]| found(&[s], &props).unwrap_err();
+    assert_eq!(
+        kind(b"q /A BMC Q EMC EMC"),
+        Error {
+            at: 15,
+            kind: ErrorKind::Emc
+        }
+    );
+    assert_eq!(
+        kind(b"/A BMC /B BMC EMC"),
+        Error {
+            at: 0,
+            kind: ErrorKind::Marked
+        }
+    );
+    let deep = Limits { depth: 2, ..*LIM };
+    let e = marked(
+        &Concat::new(&[b"/A BMC /B BMC /C BMC EMC EMC EMC"]),
+        &props,
+        &ResCx::none(),
+        &deep,
+    )
+    .unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Depth);
+    // Marked content inside a string or an inline image isn't.
+    assert!(found(&[b"(EMC) Tj BI /W 3 /H 1 /CS /G /BPC 8 ID EMC EI"], &props).is_ok());
+}
+
+#[test]
+fn balance_is_the_q_count() {
+    let of = |s: &[u8]| balance(&Concat::new(&[s]), &ResCx::none(), LIM).unwrap();
+    // A state left saved, one restored that wasn't saved, and both.
+    let b = |net, min_prefix| Balance { net, min_prefix };
+    assert_eq!(of(b"q 1 0 0 1 0 0 cm"), b(1, 0));
+    assert_eq!(of(b"Q q"), b(0, -1));
+    assert_eq!(of(b"Q"), b(-1, -1));
+    assert_eq!(of(b"q q Q Q Q q"), b(0, -1));
+    // Not in strings, names or an image's data.
+    assert_eq!(
+        of(b"(Q) Tj /Q gs BI /W 1 /H 1 /CS /G /BPC 8 ID Q EI"),
+        b(0, 0)
+    );
+    // Across streams.
+    let c = Concat::new(&[b"q", b"Q Q"]);
+    assert_eq!(balance(&c, &ResCx::none(), LIM).unwrap(), b(-1, -1));
+}
+
+#[test]
+fn names_used_are_by_category() {
+    let s: &[u8] = b"/GS0 gs /F1 9 Tf /CS0 cs /DeviceRGB CS /P0 scn 0.5 /P1 SCN /Im1 Do \
+        /Sh0 sh /OC /oc0 BDC EMC /X /Named DP /Y <<>> BDC EMC \
+        BI /W 1 /H 1 /CS /Idx /BPC 8 ID x EI BI /W 1 /H 1 /CS /RGB /BPC 8 ID xyz EI \
+        /Artifact BMC /F9 1 Tf EMC";
+    let c = Concat::new(&[s]);
+    let except = [span_of(s, b"/Artifact BMC /F9 1 Tf EMC")];
+    let names = names_used(&c, &ResCx::none(), LIM, &except).unwrap();
+    let of = |kind| names.of(kind).collect::<Vec<_>>();
+    assert_eq!(of(ResKind::ExtGState), [b"GS0"]);
+    assert_eq!(of(ResKind::Font), [b"F1"]);
+    assert_eq!(of(ResKind::ColorSpace), [&b"CS0"[..], b"Idx"]);
+    assert_eq!(of(ResKind::Pattern), [b"P0", b"P1"]);
+    assert_eq!(of(ResKind::XObject), [b"Im1"]);
+    assert_eq!(of(ResKind::Shading), [b"Sh0"]);
+    assert_eq!(of(ResKind::Properties), [&b"Named"[..], b"oc0"]);
+    assert_eq!(names.len(), 10);
+    assert!(!names.contains(ResKind::Font, b"F9"));
+}
+
+/// Marked content stepped through an operation at a time: each range
+/// told as it opens and as it ends, by its index, one open spanning where
+/// it starts alone, one ended through its `EMC`; what's found is what
+/// [`marked`] finds, and the errors are its own, where they are.
+#[test]
+fn marked_content_stepped_by_hand() {
+    use MarkedEvent::{Ended, Opened};
+    let header = dict! { "Subtype" => "Header" };
+    let props = Properties::new([(b"P0".to_vec(), header.clone())]);
+    let s: &[u8] = b"/A BMC q /B /P0 BDC 0 0 m EMC Q /C <</K 1>> BDC EMC EMC";
+    let page = Concat::new(&[s]);
+    let none = ResCx::none();
+    let mut nest = MarkedNest::new(&props, LIM);
+    let (mut names, mut events) = (Vec::new(), Vec::new());
+    for op in page.operations(&none, LIM) {
+        let op = op.unwrap();
+        let event = nest.step(&page, &op).unwrap();
+        match event {
+            Some(Opened(i)) => {
+                let open = nest.get(i).unwrap();
+                let start = page.pos(op.range().start);
+                assert_eq!((open.span.start, open.span.end), (start, start));
+            }
+            Some(Ended(i)) => {
+                let ended = nest.get(i).unwrap();
+                assert_eq!(ended.span.end, page.pos(op.at().end));
+            }
+            None => {}
+        }
+        names.push(op.name());
+        events.push(event);
+    }
+    assert_eq!(
+        names,
+        [
+            &b"BMC"[..],
+            b"q",
+            b"BDC",
+            b"m",
+            b"EMC",
+            b"Q",
+            b"BDC",
+            b"EMC",
+            b"EMC"
+        ]
+    );
+    assert_eq!(
+        events,
+        [
+            Some(Opened(0)),
+            None,
+            Some(Opened(1)),
+            None,
+            Some(Ended(1)),
+            None,
+            Some(Opened(2)),
+            Some(Ended(2)),
+            Some(Ended(0)),
+        ]
+    );
+    assert!(nest.get(3).is_none());
+    let stepped = nest.done().unwrap();
+    assert_eq!(stepped, marked(&page, &props, &none, LIM).unwrap());
+    assert_eq!(stepped[0].span, span_of(s, s));
+    assert_eq!(stepped[1].span, span_of(s, b"/B /P0 BDC 0 0 m EMC"));
+    assert_eq!(
+        stepped[1].props,
+        Some(Props::Named(b"P0".to_vec(), Some(header)))
+    );
+    assert_eq!(stepped[2].props, Some(Props::Inline(dict! { "K" => 1 })));
+    assert_eq!((stepped[2].depth, &stepped[2].tag[..]), (1, &b"C"[..]));
+
+    // An `EMC` with none open, where it is; one still open at the end,
+    // where the first of those starts; one past the cap, where its
+    // operator is.
+    let stepped = |s: &[u8], lim: &Limits| {
+        let page = Concat::new(&[s]);
+        let mut nest = MarkedNest::new(&props, lim);
+        for op in page.operations(&none, lim) {
+            nest.step(&page, &op.unwrap())?;
+        }
+        nest.done()
+    };
+    let error = |at, kind| Err(Error { at, kind });
+    assert_eq!(stepped(b"/A BMC EMC EMC", LIM), error(11, ErrorKind::Emc));
+    assert_eq!(
+        stepped(b"q /A BMC /B BMC EMC", LIM),
+        error(2, ErrorKind::Marked)
+    );
+    assert_eq!(
+        stepped(b"q /A BMC /B BMC", LIM),
+        error(2, ErrorKind::Marked)
+    );
+    let deep = Limits { depth: 1, ..*LIM };
+    assert_eq!(
+        stepped(b"/A BMC /B BMC EMC EMC", &deep),
+        error(10, ErrorKind::Depth)
+    );
+    for (s, lim) in [
+        (&b"/A BMC EMC EMC"[..], LIM),
+        (b"q /A BMC /B BMC EMC", LIM),
+        (b"q /A BMC /B BMC", LIM),
+        (b"/A BMC /B BMC EMC EMC", &deep),
+    ] {
+        assert_eq!(
+            stepped(s, lim),
+            marked(&Concat::new(&[s]), &props, &none, lim)
+        );
+    }
+}
+
+/// `q`/`Q` balance and resource names counted an operation at a time are
+/// what [`balance`] and [`names_used`] give: each operation names one
+/// resource at most, by its category, a name used twice counted once.
+#[test]
+fn balance_and_names_stepped_by_hand() {
+    let s: &[u8] = b"Q q /GS0 gs /F1 9 Tf (x) Tj /CS0 cs /DeviceGray CS /P0 scn \
+        BI /W 1 /H 1 /CS /CS1 /BPC 8 ID x EI q /Im#201 Do Q /F1 9 Tf /X /P1 DP";
+    let page = Concat::new(&[s]);
+    let none = ResCx::none();
+    let mut counted = Balance::default();
+    let mut names = NameSet::default();
+    let mut each = Vec::new();
+    for op in page.operations(&none, LIM) {
+        let op = op.unwrap();
+        counted.take(&op);
+        names.take(&op);
+        each.push(op.resource().map(|(kind, name)| (kind, name.into_owned())));
+    }
+    assert_eq!(
+        counted,
+        Balance {
+            net: 0,
+            min_prefix: -1
+        }
+    );
+    assert_eq!(counted, balance(&page, &none, LIM).unwrap());
+    assert_eq!(names, names_used(&page, &none, LIM, &[]).unwrap());
+    let named = |kind, name: &[u8]| Some((kind, name.to_vec()));
+    assert_eq!(
+        each,
+        [
+            None,
+            None,
+            named(ResKind::ExtGState, b"GS0"),
+            named(ResKind::Font, b"F1"),
+            None,
+            named(ResKind::ColorSpace, b"CS0"),
+            None,
+            named(ResKind::Pattern, b"P0"),
+            named(ResKind::ColorSpace, b"CS1"),
+            None,
+            named(ResKind::XObject, b"Im 1"),
+            None,
+            named(ResKind::Font, b"F1"),
+            named(ResKind::Properties, b"P1"),
+        ]
+    );
+    assert_eq!(names.len(), 7);
+    let every: Vec<_> = names.iter().collect();
+    assert_eq!(every[0], (ResKind::ColorSpace, &b"CS0"[..]));
+    names.remove(ResKind::Font, b"F1");
+    names.remove(ResKind::Font, b"F2");
+    assert_eq!(names.len(), 6);
+    assert!(!names.contains(ResKind::Font, b"F1") && !names.is_empty());
+}
+
+/// What content keeps once ranges are taken out: what's left's balance
+/// and names, and the names only what's taken out uses. An operation is
+/// taken out only when all of it, its operands too, is inside a range; a
+/// range may be a whole stream, and one that's nowhere takes nothing.
+#[test]
+fn what_content_keeps_without_ranges() {
+    let s: &[u8] = b"q /F1 9 Tf /Artifact BMC Q /F2 9 Tf /F1 9 Tf /Im1 Do EMC /Im2 Do";
+    let page = Concat::new(&[s, b"/GS0 gs Q /F4 9 Tf"]);
+    let none = ResCx::none();
+    let artifact = span_of(s, b"/Artifact BMC Q /F2 9 Tf /F1 9 Tf /Im1 Do EMC");
+    let k = kept(&page, &none, LIM, &[artifact]).unwrap();
+    assert_eq!(
+        k.balance,
+        Balance {
+            net: 0,
+            min_prefix: 0
+        }
+    );
+    let list = |names: &NameSet| -> Vec<(ResKind, Vec<u8>)> {
+        names.iter().map(|(kind, n)| (kind, n.to_vec())).collect()
+    };
+    let named = |kind, name: &[u8]| (kind, name.to_vec());
+    assert_eq!(
+        list(&k.names),
+        [
+            named(ResKind::ExtGState, b"GS0"),
+            named(ResKind::Font, b"F1"),
+            named(ResKind::Font, b"F4"),
+            named(ResKind::XObject, b"Im2"),
+        ]
+    );
+    // `F1` is used outside it too.
+    assert_eq!(
+        list(&k.dropped),
+        [named(ResKind::Font, b"F2"), named(ResKind::XObject, b"Im1")]
+    );
+    assert_eq!(
+        names_used(&page, &none, LIM, &[artifact]),
+        Ok(k.names.clone())
+    );
+    // A range from the first `Tf`'s operand on leaves that `Tf` kept.
+    let from_nine = span_of(s, b"9 Tf /Artifact BMC Q /F2 9 Tf /F1 9 Tf /Im1 Do EMC");
+    assert_eq!(kept(&page, &none, LIM, &[from_nine]), Ok(k));
+    // The second stream, whole.
+    let second = page.span(page.range(1));
+    let k = kept(&page, &none, LIM, &[second]).unwrap();
+    assert_eq!(
+        k.balance,
+        Balance {
+            net: 0,
+            min_prefix: 0
+        }
+    );
+    assert_eq!(
+        list(&k.dropped),
+        [
+            named(ResKind::ExtGState, b"GS0"),
+            named(ResKind::Font, b"F4")
+        ]
+    );
+    // Nowhere: past the second stream's end, and in no stream.
+    let nowhere = [span((1, 0), (1, 99)), span((2, 0), (2, 0))];
+    let all = kept(&page, &none, LIM, &[]).unwrap();
+    assert_eq!(
+        all.balance,
+        Balance {
+            net: -1,
+            min_prefix: -1
+        }
+    );
+    assert_eq!(all.names.len(), 6);
+    assert!(all.dropped.is_empty());
+    assert_eq!(kept(&page, &none, LIM, &nowhere), Ok(all));
+}
+
+/// Each pass gives the error that stops the operations, where it is.
+#[test]
+fn the_passes_give_the_operations_error() {
+    let page = Concat::new(&[b"q /F1 9 Tf", b"/A BMC (unended"]);
+    let none = ResCx::none();
+    let e = Error {
+        at: 18,
+        kind: ErrorKind::String,
+    };
+    let props = Properties::default();
+    assert_eq!(balance(&page, &none, LIM), Err(e));
+    assert_eq!(marked(&page, &props, &none, LIM), Err(e));
+    assert_eq!(names_used(&page, &none, LIM, &[]), Err(e));
+    assert_eq!(kept(&page, &none, LIM, &[]), Err(e));
 }

@@ -1,7 +1,8 @@
 # What page content is made of, for libFuzzer's -dict with the content
 # target: its delimiters, an inline image's keys and their abbreviations,
-# the filters and color spaces that end its data, a few operators, and
-# what ISO 32000-2 reads otherwise than PDFium.
+# the filters and color spaces that end its data, a few operators, among
+# them marked content's and those that name resources, and what ISO
+# 32000-2 reads otherwise than PDFium.
 "("
 ")"
 "\\("
@@ -72,5 +73,12 @@
 " BDC "
 " BMC "
 " EMC "
+" MP "
+" DP "
+"/P0 "
+" gs "
+" cs "
+" scn "
+" sh "
 " re f "
 " cm "

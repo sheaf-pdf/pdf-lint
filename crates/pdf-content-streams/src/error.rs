@@ -9,7 +9,9 @@
 pub struct Error {
     /// Where what's wrong starts: a string's, an array's or a
     /// dictionary's first byte, an inline image's `BI`, or the first
-    /// operand past the cap.
+    /// operand past the cap; and in marked content ([`marked`](crate::marked)),
+    /// an `EMC` that ends none, a `BMC` or `BDC` past the cap, or the
+    /// first operand of the first range still open at the end.
     pub at: usize,
     /// What's wrong.
     pub kind: ErrorKind,

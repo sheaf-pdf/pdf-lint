@@ -29,7 +29,9 @@
 # seeds with the third byte its input has;
 # `content` calls `pdf_content_streams::fuzz::content`, a page's content
 # read whole and as two streams, its tokens tiling it, each operand read and
-# its operations its tokens grouped, and again under small caps, which two
+# its operations its tokens grouped, and again under small caps, its faults
+# the same through any sink, each operation typed and stepped through the
+# states, and its balance, marked content and names its steppers', which two
 # stable unit tests (`mutated_seeds_keep_every_promise`,
 # `random_fragments_keep_every_promise`) run on mutated seeds and random
 # content;

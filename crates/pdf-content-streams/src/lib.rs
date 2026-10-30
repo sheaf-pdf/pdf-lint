@@ -30,6 +30,13 @@
 //!   offset in them mapped back to a stream and a place in it ([`Pos`],
 //!   [`SpanAcross`]); joined as they're decoded ([`Join`]), under a cap,
 //!   each decoded straight into the joined bytes.
+//! - **A page's balance, marked content and names** ([`balance`],
+//!   [`marked`], [`names_used`]): its `q`/`Q` balance, its marked
+//!   content's ranges, each with its tag and property list, and the
+//!   resource names it uses, by category, or what it keeps once ranges of
+//!   it are taken out ([`kept`]). Each is counted an operation at a time
+//!   ([`Balance::take`], [`MarkedNest::step`], [`NameSet::take`]), so one
+//!   pass can find several.
 //! - **Caps** ([`Limits`]) **and errors that say where** ([`Error`]): a
 //!   string, array, dictionary or inline image that doesn't end, or one
 //!   past a cap. It never panics, whatever the bytes, and every token moves
@@ -40,9 +47,10 @@
 //!   [`Operations::with_sink`], [`Operand::object_with`]); what's read is
 //!   the same. With none, `()`, none is looked for.
 //!
-//! No resolver: what's read from the file, the streams decoded and the
-//! color spaces' components, the caller gives.
+//! No resolver: what's read from the file, the streams decoded, the color
+//! spaces' components and the property lists, the caller gives.
 
+mod balance;
 mod error;
 pub mod fault;
 #[cfg(any(test, fuzzing))]
@@ -50,6 +58,8 @@ pub mod fault;
 pub mod fuzz;
 mod inline;
 mod limits;
+mod marked;
+mod names;
 mod operand;
 mod operations;
 mod operator;
@@ -58,9 +68,12 @@ mod scan;
 mod state;
 mod tokens;
 
+pub use balance::{Balance, balance};
 pub use error::{Error, ErrorKind};
 pub use inline::{InlineImage, ResCx, family_components};
 pub use limits::Limits;
+pub use marked::{Marked, MarkedEvent, MarkedNest, Properties, Props, marked};
+pub use names::{Kept, NameSet, ResKind, kept, names_used};
 pub use operand::{Elements, Operand, name, object};
 pub use operations::{Operation, Operations, operations};
 pub use operator::{Category, FillRule, Operands, Operator, Operators, Paint, Type};

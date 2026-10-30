@@ -26,7 +26,7 @@ decrypts what's encrypted itself.
 | [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler on RustCrypto's primitives: decrypting, every fault said, and encrypting for a writer, a new file's key and dictionary from randomness it's given, its keys wiped |
 | [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, their parser and their writer, which writes an encrypted file's through an encryptor: each value with where it was written, every fault said, and text strings decoded by the spec |
 | [pdf-structure](crates/pdf-structure) | PDF's file structure, read whole or each object on demand, from any thread, from memory or a file read by position: the header, cross-reference tables and streams along `/Prev`, object streams and recovery by scanning, each object through pdf-objects' parser, decrypted through pdf-crypt and decoded through pdf-filters, and so any stream's data asked for, where it was read from recorded, every choice it made said; and written, whole or as an incremental update, cross-reference sections and object streams deflated through pdf-filters, an encrypted file's objects encrypted as they're written, through pdf-crypt, by the list it decrypts by, and an object as read copied as the bytes it was read from, checked against a hash of them |
-| [pdf-content-streams](crates/pdf-content-streams) | PDF content streams read as PDFium reads them: each token with where it is, an inline image's data found by PDFium's rules, each operation with its operands, operands read as pdf-objects' values when asked, and a page's streams joined as one, every place mapped back to its stream, under caps, every error saying where, and where ISO 32000-2 reads it otherwise told to a sink; and each operator typed by ISO 32000-2's Annex A, with its operands and where it may be used |
+| [pdf-content-streams](crates/pdf-content-streams) | PDF content streams read as PDFium reads them: each token with where it is, an inline image's data found by PDFium's rules, each operation with its operands, operands read as pdf-objects' values when asked, and a page's streams joined as one, every place mapped back to its stream, under caps, every error saying where, and where ISO 32000-2 reads it otherwise told to a sink; each operator typed by ISO 32000-2's Annex A, with its operands and where it may be used; and a page's `q`/`Q` balance, its marked content and the resource names it uses |
 | [pdf-arlington](crates/pdf-arlington) | The Arlington PDF Model, embedded: its tables read, and the predicates in their cells evaluated over pdf-objects' objects |
 
 ## Development
@@ -53,10 +53,10 @@ objects`, `just fuzz structure`, `just fuzz write`, `just fuzz content`
 and `just fuzz check` fuzz the tokenizer, the filters, decoding and
 encoding, pdf-crypt's handler, new files' dictionaries and a password's
 forms, pdf-objects' parser and writer, pdf-structure's reader and writer,
-pdf-content-streams' tokens, operations, faults and operator table, and
-the reader and checker, on nightly with
-[cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
-says for how many seconds (60 by default).
+pdf-content-streams' tokens, operations, faults, operator table, and the
+balance, marked content and names over them, and the reader and checker,
+on nightly with [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a
+second argument says for how many seconds (60 by default).
 
 ## License
 

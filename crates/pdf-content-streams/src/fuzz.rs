@@ -4,12 +4,13 @@
 
 use std::ops::Range;
 
-use pdf_objects::{Object, Value};
+use pdf_objects::{Object, Value, dict};
 
 use crate::fault::{Fault, Sink};
 use crate::{
-    Concat, Error, ErrorKind, Join, Limits, Operand, Operation, Operations, Operator, ResCx, State,
-    Tok, name, object, operations, tokens,
+    Balance, Concat, Error, ErrorKind, Join, Limits, MarkedEvent, MarkedNest, NameSet, Operand,
+    Operation, Operations, Operator, Properties, Props, ResCx, ResKind, SpanAcross, State, Tok,
+    balance, kept, marked, name, names_used, object, operations, tokens,
 };
 
 /// A sink that keeps every fault it's told, in order, where it is.
@@ -50,7 +51,8 @@ type Read<'a> = Vec<Result<(Range<usize>, Tok<'a>), Error>>;
 /// to an error, which is the cap's, where the first read's token past it
 /// starts, or the first read's own; and the operations are those tokens
 /// grouped. Each read through a sink that keeps its faults is the same as
-/// through `()` ([`faulted`]), and one that wants none is told none.
+/// through `()` ([`faulted`]), and one that wants none is told none. And
+/// the passes over its operations are their steppers' ([`passes`]).
 /// Panics on a broken promise.
 pub fn content(data: &[u8]) {
     let res = ResCx::new([
@@ -110,6 +112,184 @@ pub fn content(data: &[u8]) {
     }
     grouped(data, operations(data, &res, &small), &capped, &small);
     faulted(&whole, &res, &small);
+    passes(data);
+}
+
+/// `data` as a page's content, two streams split at its middle, drawn
+/// with resources that name a property list and a color space: its
+/// `q`/`Q` balance, its marked ranges and the resource names it uses, each
+/// what its stepper gives, driven an operation at a time ([`Balance::take`],
+/// [`stepped_marked`], [`NameSet::take`]), and each name the one its
+/// operator's category says ([`resource_typed`]); its marked ranges again
+/// under a cap of two deep. With its ranges at the top taken out, what it
+/// keeps is what the operations outside them give, and the names only
+/// those inside use are the rest. Panics on a broken promise.
+pub fn passes(data: &[u8]) {
+    let (first, second) = data.split_at(data.len() / 2);
+    let page = Concat::new(&[first, second]);
+    let res = ResCx::new([(b"CS3".to_vec(), 3)]);
+    let props = Properties::new([(
+        b"P0".to_vec(),
+        dict! { "Type" => "Pagination", "Subtype" => "Header" },
+    )]);
+    let limits = &Limits::DEFAULT;
+    let ops: Vec<Result<Operation, Error>> = page.operations(&res, limits).collect();
+    let error = ops.iter().find_map(|op| op.as_ref().err()).copied();
+    let mut counted = Balance::default();
+    let mut names = NameSet::default();
+    for op in ops.iter().flatten() {
+        counted.take(op);
+        names.take(op);
+        resource_typed(op);
+    }
+    let read = balance(&page, &res, limits);
+    assert_eq!(read, error.map_or(Ok(counted), Err), "balance");
+    let read = names_used(&page, &res, limits, &[]);
+    assert_eq!(read, error.map_or(Ok(names.clone()), Err), "names used");
+    let found = stepped_marked(&page, &ops, &props, limits);
+    assert_eq!(marked(&page, &props, &res, limits), found, "marked");
+    let shallow = Limits {
+        depth: 2,
+        ..*limits
+    };
+    let ops_shallow: Vec<_> = page.operations(&res, &shallow).collect();
+    assert_eq!(
+        marked(&page, &props, &res, &shallow),
+        stepped_marked(&page, &ops_shallow, &props, &shallow),
+        "marked under a cap"
+    );
+
+    let Ok(found) = found else { return };
+    let top: Vec<SpanAcross> = found
+        .iter()
+        .filter(|m| m.depth == 0)
+        .map(|m| m.span)
+        .collect();
+    let drop: Vec<Range<usize>> = top.iter().filter_map(|&s| page.offsets(s)).collect();
+    assert_eq!(drop.len(), top.len(), "each range in the content");
+    let mut kept_balance = Balance::default();
+    let (mut kept_names, mut inside) = (NameSet::default(), NameSet::default());
+    for op in ops.iter().flatten() {
+        let r = op.range();
+        if drop.iter().any(|d| d.start <= r.start && r.end <= d.end) {
+            inside.take(op);
+        } else {
+            kept_balance.take(op);
+            kept_names.take(op);
+        }
+    }
+    let k = kept(&page, &res, limits, &top).expect("read as before");
+    assert_eq!((k.balance, &k.names), (kept_balance, &kept_names), "kept");
+    for (kind, name) in inside.iter() {
+        let only_inside = !kept_names.contains(kind, name);
+        assert_eq!(k.dropped.contains(kind, name), only_inside, "dropped");
+    }
+    assert!(k.dropped.iter().all(|(kind, n)| inside.contains(kind, n)));
+    assert_eq!(k.names.len() + k.dropped.len(), names.len(), "every name");
+    assert_eq!(names_used(&page, &res, limits, &top), Ok(k.names));
+}
+
+/// `ops`, `page`'s operations under `limits`, stepped through marked
+/// content by hand ([`MarkedNest`]): each `BMC` or `BDC` opens the next
+/// range, as deep as those open, its tag and list its operands', spanning
+/// where it starts until the `EMC` that ends it, the last open, spans it
+/// through that; nothing else opens or ends one. An `EMC` with none open,
+/// or a range opened past the cap, is an error where its operator is; a
+/// range open at the end, where the first of those starts; and the
+/// operations' own error is theirs.
+fn stepped_marked(
+    page: &Concat,
+    ops: &[Result<Operation, Error>],
+    props: &Properties,
+    limits: &Limits,
+) -> Result<Vec<crate::Marked>, Error> {
+    let mut nest = MarkedNest::new(props, limits);
+    let mut open: Vec<usize> = Vec::new();
+    let mut opened = 0;
+    for op in ops {
+        let op = op.as_ref().map_err(|e| *e)?;
+        let name = op.name();
+        let opens = matches!(name, b"BMC" | b"BDC");
+        let event = match nest.step(page, op) {
+            Ok(event) => event,
+            Err(e) => {
+                assert_eq!(e.at, op.at().start, "{e} where its operator is");
+                match e.kind {
+                    ErrorKind::Emc => assert!(name == b"EMC" && open.is_empty()),
+                    ErrorKind::Depth => assert!(opens && open.len() >= limits.depth),
+                    kind => panic!("{kind} stepping"),
+                }
+                return Err(e);
+            }
+        };
+        match event {
+            Some(MarkedEvent::Opened(i)) => {
+                assert!(opens, "{name:?} opens none");
+                assert_eq!(i, opened, "the next range");
+                opened += 1;
+                let m = nest.get(i).expect("found");
+                let start = page.pos(op.range().start);
+                assert_eq!((m.span.start, m.span.end), (start, start));
+                assert_eq!(usize::from(m.depth), open.len());
+                let tag = op.arg(usize::from(name == b"BDC"));
+                let tag = tag.and_then(|t| t.name()).unwrap_or_default();
+                assert_eq!(m.tag, *tag, "its tag");
+                let list = op.arg(0).filter(|_| name == b"BDC");
+                match (&m.props, list) {
+                    (Some(Props::Named(n, read)), Some(list)) => {
+                        assert_eq!(list.name().as_deref(), Some(&n[..]));
+                        assert_eq!(read.as_ref(), props.get(n));
+                    }
+                    (Some(Props::Inline(_)), Some(list)) => assert!(list.is_dict()),
+                    (None, list) => assert!(list.is_none_or(|l| !l.is_name() && !l.is_dict())),
+                    (props, list) => panic!("{props:?} from {list:?}"),
+                }
+                open.push(i);
+            }
+            Some(MarkedEvent::Ended(i)) => {
+                assert_eq!(name, b"EMC");
+                assert_eq!(open.pop(), Some(i), "the last open");
+                let m = nest.get(i).expect("found");
+                assert_eq!(m.span.end, page.pos(op.at().end));
+                assert!(m.span.start <= m.span.end);
+            }
+            None => assert!(!opens && name != b"EMC", "{name:?} told"),
+        }
+    }
+    assert!(nest.get(opened).is_none());
+    let first_open = open
+        .first()
+        .map(|&i| nest.get(i).expect("found").span.start);
+    let done = nest.done();
+    match first_open {
+        Some(start) => {
+            let e = done.as_ref().expect_err("one open");
+            assert_eq!((e.kind, page.pos(e.at)), (ErrorKind::Marked, start));
+        }
+        None => assert_eq!(done.as_ref().map(Vec::len), Ok(opened)),
+    }
+    done
+}
+
+/// The resource `op` names is the one its operator's category says, by
+/// the table, not by its name: a font for `Tf`, an external object for
+/// `Do`, and so on.
+fn resource_typed(op: &Operation) {
+    let Some((kind, _)) = op.resource() else {
+        return;
+    };
+    let says = match op.operator() {
+        Operator::Font => ResKind::Font,
+        Operator::Draw => ResKind::XObject,
+        Operator::ExtGState => ResKind::ExtGState,
+        Operator::Shade => ResKind::Shading,
+        Operator::StrokeColorSpace | Operator::FillColorSpace => ResKind::ColorSpace,
+        Operator::BeginInlineImage => ResKind::ColorSpace,
+        Operator::StrokeColorN | Operator::FillColorN => ResKind::Pattern,
+        Operator::BeginMarkedProps | Operator::MarkedPointProps => ResKind::Properties,
+        other => panic!("{other:?} names no resource"),
+    };
+    assert_eq!(kind, says, "{op:?}");
 }
 
 /// `content`'s tokens and operations through a sink that keeps their
@@ -593,9 +773,9 @@ mod tests {
     use crate::tests::Random;
 
     /// What a mutation of content may write: its tokens, the bytes that
-    /// end an inline image's data, what moves text and draws forms, and
-    /// runs of operands, of which two are more than an operation holds
-    /// inline.
+    /// end an inline image's data, what moves text and draws forms, runs
+    /// of operands, of which two are more than an operation holds inline,
+    /// marked content and what names resources.
     const CONTENT_TOKENS: &[&[u8]] = &[
         b" ",
         b"(",
@@ -642,6 +822,12 @@ mod tests {
         b" /Fm1 Do ",
         b" /OC /OC0 BDC ",
         b" 1 2 3 4 5 6 7 8 9 ",
+        b" /Span BMC ",
+        b" /X /P0 DP ",
+        b" /Tag MP ",
+        b" /GS0 gs ",
+        b" /CS3 cs /P0 scn ",
+        b" /Sh0 sh ",
     ];
 
     /// The seeds read to their end, each of the first ten one inline
