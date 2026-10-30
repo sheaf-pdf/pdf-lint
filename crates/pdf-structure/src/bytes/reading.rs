@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::fmt;
 use std::io;
+use std::mem::discriminant;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -223,16 +224,22 @@ pub enum Error {
     /// A document isn't taken as the reading's ([`Reading::adopt`]), and
     /// is left as it was: its object `id` isn't read here as it was read
     /// (another file's, or the file changed since, or a revision of it with
-    /// another object there), or doesn't read here; or, with none, the
-    /// document isn't encrypted as the reading's file is (its encryption
-    /// dictionary, as stored and where its trailer names it, or its first
-    /// `/ID` element, which a key is made of, isn't the file's, or one is
-    /// encrypted and the other isn't).
-    #[error("{}", unlike(*.id))]
+    /// another object there), or doesn't read here, or reads here where the
+    /// document holds it unread.
+    #[error("{} {} R isn't read here as the document read it", .id.0, .id.1)]
     Unlike {
-        /// The object, or none for the encryption.
-        id: Option<ObjectId>,
+        /// The object.
+        id: ObjectId,
     },
+    /// A document isn't taken as the reading's ([`Reading::adopt`]), and
+    /// is left as it was: it isn't encrypted as the reading's file is, or
+    /// wasn't opened as the reading opened it ([`Encryption`]: one is
+    /// encrypted and the other isn't, or a password opened one and not the
+    /// other), or its encryption dictionary, as stored and where its
+    /// trailer names it, or its first `/ID` element, which a key is made
+    /// of, isn't the file's.
+    #[error("the document isn't encrypted, or opened, as this reading's file is")]
+    UnlikeEncryption,
 }
 
 /// A stream, and its data as [`Reading::data`] hands it out; or why it
@@ -247,14 +254,6 @@ fn outside(span: &Span) -> String {
         Some((n, g)) => {
             format!("bytes {start}..{end} aren't in object stream {n} {g} R's decoded data")
         }
-    }
-}
-
-/// [`Error::Unlike`]'s text.
-fn unlike(id: Option<ObjectId>) -> String {
-    match id {
-        Some((n, g)) => format!("{n} {g} R isn't read here as the document read it"),
-        None => "the document isn't encrypted as this reading's file is".to_string(),
     }
 }
 
@@ -879,8 +878,8 @@ impl<S: ByteSource> Reading<S> {
     }
 
     /// `doc`'s objects as read taken as this reading's, where it reads each
-    /// alike and `doc` is encrypted as its file is: each record then names
-    /// it ([`Record::source`]). So a document read whole
+    /// alike and `doc` is encrypted, and opened, as its file is: each record
+    /// then names it ([`Record::source`]). So a document read whole
     /// ([`read`](super::read), [`Reading::into_document`]), whose reading is
     /// gone, is written from a reading of its file opened again as one made
     /// by [`Reading::to_document`] is: its streams' data, where it was
@@ -897,26 +896,48 @@ impl<S: ByteSource> Reading<S> {
     /// has kept is compared as it is; the rest are read without keeping
     /// them, as [`Reading::object_unkept`] reads them, a parse each, the
     /// object streams they're in decoded and kept: about what reading the
-    /// file whole takes again. An encrypted file's encryption is `doc`'s
-    /// where the encryption dictionary it was opened by, as stored, is the
-    /// one `doc`'s trailer names, at the same number or alike in the
-    /// trailer, and its first `/ID` element is `doc`'s: what a password's
-    /// key is made of (ISO 32000-2, 7.6.4.3), so that the bytes copied are
-    /// encrypted as `doc`'s objects were read. The key itself isn't
-    /// compared, so a reading by the owner's password takes a document read
-    /// by the user's, and the other way. An object without a record, built
-    /// or edited, is left as it is, to be written anew.
+    /// file whole takes again. Each object `doc` holds unread
+    /// ([`Document::unread`]) is one the reading doesn't read either: one it
+    /// reads, as under larger [`Limits`](super::Limits), would be left out
+    /// of what `doc` writes and not out of what the reading's own document
+    /// writes. One `doc` doesn't list at all, removed or never listed (an
+    /// object stream's members past where its data was cut off), isn't
+    /// asked of, and is left out of what it writes. An object without a
+    /// record, built or edited, is left as it is, to be written anew.
     ///
-    /// All or none: where an object isn't alike, or the encryption isn't,
-    /// `doc` is left as it was, and it's refused ([`Error::Unlike`]):
-    /// another file, the file changed since `doc` was read, a reading as of
-    /// another revision ([`Options::section`]) whose object at a number
-    /// isn't `doc`'s, or the same objects' bytes under another `/ID`, whose
-    /// key is another. So it is where the source doesn't give the bytes
-    /// asked of it ([`Error::Io`]), and asked again it reads them again.
+    /// `doc` was opened as the reading was ([`Document::encryption`] and
+    /// [`Reading::encryption`] alike: neither encrypted, both opened by a
+    /// password, both locked, and so on), so that its strings are
+    /// plaintext where the reading's are, and its object streams read where
+    /// the reading's do: a document read without the password the reading
+    /// was given, whose strings are ciphertext and whose object streams'
+    /// members don't read, isn't taken. And an encrypted file's encryption is `doc`'s where the
+    /// encryption dictionary it was opened by, as stored, is the one `doc`'s
+    /// trailer names, at the same number or alike in the trailer, and its
+    /// first `/ID` element is `doc`'s: what a password's key is made of (ISO
+    /// 32000-2, 7.6.4.3), so that the bytes copied are encrypted as `doc`'s
+    /// objects were read. That's read from `doc`'s trailer as it was read:
+    /// a trailer whose `/Encrypt` or `/ID` was edited first is refused, so a
+    /// document is taken before it's edited so (a write writes `/Encrypt` and
+    /// `/ID` from its encryptor, whatever the trailer says). The key itself
+    /// isn't compared: the owner's password and the user's open a file with
+    /// one key (ISO 32000-2, 7.6.4.3 and 7.6.4.4), so a reading by the
+    /// owner's password takes a document read by the user's, and the other
+    /// way.
+    ///
+    /// All or none: where an object isn't alike, `doc` is left as it was,
+    /// and it's refused ([`Error::Unlike`]): another file, the file changed
+    /// since `doc` was read, a reading as of another revision
+    /// ([`Options::section`]) whose object at a number isn't `doc`'s, or
+    /// under other limits. So it is where the encryption isn't alike
+    /// ([`Error::UnlikeEncryption`]): the same objects' bytes under another
+    /// `/ID`, whose key is another, or `doc` read by no password that opens
+    /// the file, or by one where the reading wasn't. And so it is where the
+    /// source doesn't give the bytes asked of it ([`Error::Io`]), and asked
+    /// again it reads them again.
     pub fn adopt(&self, doc: &mut Document) -> Result<(), Error> {
         if !self.encrypts_as(doc) {
-            return Err(Error::Unlike { id: None });
+            return Err(Error::UnlikeEncryption);
         }
         for (id, record) in doc.records() {
             let alike = match self.record(id) {
@@ -928,22 +949,40 @@ impl<S: ByteSource> Reading<S> {
                 },
             };
             if !alike {
-                return Err(Error::Unlike { id: Some(id) });
+                return Err(Error::Unlike { id });
+            }
+        }
+        // What `doc` holds unread, the reading doesn't read either.
+        for (id, _) in doc.unread() {
+            let reads = match self.record(id) {
+                Some(_) => true,
+                None => match self.object_unkept(id) {
+                    Ok(_) => true,
+                    Err(Error::Io(error)) => return Err(Error::Io(error)),
+                    Err(_) => false,
+                },
+            };
+            if reads {
+                return Err(Error::Unlike { id });
             }
         }
         doc.adopted(self.id());
         Ok(())
     }
 
-    /// Whether `doc` is encrypted as the reading's file is: neither is, as
-    /// the reader reads a trailer's `/Encrypt`; or both are, by the
-    /// encryption dictionary the reading opened the file by, as stored
-    /// ([`Reading::stored`]), at the number `doc`'s trailer names, where
-    /// the object `doc` holds is alike, or in `doc`'s trailer alike, and by
-    /// the same first `/ID` element, an absent one empty. Dictionaries are
-    /// compared as pdf-objects' writer writes them, as an object's places in
-    /// its file aren't the dictionary.
+    /// Whether `doc` is encrypted, and opened, as the reading's file is:
+    /// its [`Encryption`] of the reading's kind (opened by a password,
+    /// whichever, locked, and so on); and neither encrypted, as the reader reads a
+    /// trailer's `/Encrypt`, or both, by the encryption dictionary the
+    /// reading opened the file by, as stored ([`Reading::stored`]), at the
+    /// number `doc`'s trailer names, where the object `doc` holds is alike,
+    /// or in `doc`'s trailer alike, and by the same first `/ID` element, an
+    /// absent one empty. Dictionaries are compared as pdf-objects' writer
+    /// writes them, as an object's places in its file aren't the dictionary.
     fn encrypts_as(&self, doc: &Document) -> bool {
+        if discriminant(&doc.encryption) != discriminant(self.encryption()) {
+            return false;
+        }
         let encrypt = match doc.trailer.dict().get(b"Encrypt") {
             // A null is no entry, and so is a reference to no object (ISO
             // 32000-2, 7.3.9 and 7.3.10).

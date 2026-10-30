@@ -7956,8 +7956,10 @@ fn sources_of(doc: &crate::Document) -> Vec<(ObjectId, bytes::SourceId)> {
         .collect()
 }
 
-/// `reading` doesn't take `doc`, as `why` says ([`bytes::Error::Unlike`]),
-/// and leaves it as it was, its records their own reading's.
+/// `reading` doesn't take `doc`, as `why` says: the object it doesn't read
+/// alike ([`bytes::Error::Unlike`]), or none for the encryption
+/// ([`bytes::Error::UnlikeEncryption`]); and leaves it as it was, its
+/// records their own reading's.
 fn not_taken<S: ByteSource>(
     reading: &Reading<S>,
     doc: &crate::Document,
@@ -7966,7 +7968,10 @@ fn not_taken<S: ByteSource>(
 ) {
     let mut left = doc.clone();
     let got = reading.adopt(&mut left);
-    let unlike = matches!(got, Err(bytes::Error::Unlike { id }) if id == why);
+    let unlike = match why {
+        Some(why) => matches!(got, Err(bytes::Error::Unlike { id }) if id == why),
+        None => matches!(got, Err(bytes::Error::UnlikeEncryption)),
+    };
     assert!(unlike, "{name}: {got:?}");
     assert_eq!(left, *doc, "{name}");
     assert_eq!(sources_of(&left), sources_of(doc), "{name}");
@@ -8104,6 +8109,73 @@ fn a_document_a_reading_doesn_t_read_alike_isn_t_taken() {
         not_taken(&opened(&source(changed, true), "user"), &doc, None, &name);
         opened(&file, "user").adopt(&mut doc.clone()).unwrap();
     }
+}
+
+/// A document isn't taken by a reading not opened as it was read, and is
+/// left as it was: under each method the test writer encrypts by, its user
+/// password not empty, with a table and packed (its object streams
+/// encrypted whole), read whole by no password and by a wrong one, which
+/// don't open it (its strings ciphertext, its object streams' members
+/// unread), by a reading opened by the user's password, which would write
+/// it without them; and read by the user's password, by a reading that no
+/// password opened. Each is taken by a reading opened as it was read, and
+/// writes then what that reading's own document writes, refused or not.
+/// Nor is a document that holds unread what the reading reads: read under a
+/// parser's limit that its pages and page nest past, by a reading under the
+/// default limits; one under the same limit takes it.
+#[test]
+fn a_document_isn_t_taken_by_a_reading_opened_otherwise() {
+    for kind in KINDS_ENCRYPTED {
+        let table = written_otherwise(kind, true);
+        let reading = opened(&table, "user");
+        let encryptor = Encryptor::of(&reading).unwrap();
+        let encryptor = encryptor.as_ref();
+        let doc = reading.to_document().unwrap();
+        let options = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
+        let mut packed = Vec::new();
+        write::document(&mut packed, &doc, encryptor, Some(&reading), &options).unwrap();
+        for (way, file) in [("a table", &table), ("packed", &packed)] {
+            let name = format!("{kind:?}, {way}");
+            let user = opened(file, "user");
+            let locked = open(file);
+            assert!(matches!(locked.encryption(), Encryption::Locked), "{name}");
+            for password in [None, Some("wrong")] {
+                let name = format!("{name}, read by {password:?}");
+                let doc = match password {
+                    None => bytes::read(file),
+                    Some(password) => bytes::read_opened(file, &[Password(password)]),
+                };
+                assert!(matches!(doc.encryption, Encryption::Locked), "{name}");
+                assert_eq!(doc.unread().count() > 0, way == "packed", "{name}");
+                not_taken(&user, &doc, None, &name);
+                // Taken by a reading no password opened, as it was read.
+                let mut taken = doc.clone();
+                locked.adopt(&mut taken).unwrap();
+                let own = locked.to_document().unwrap();
+                let defaults = write::Options::DEFAULT;
+                let written = [taken, own].map(|doc| {
+                    let mut out = Vec::new();
+                    let got = write::document(&mut out, &doc, None, Some(&locked), &defaults);
+                    (got.map(|written| written.size), out)
+                });
+                assert!(written[0] == written[1], "{name}: {:?}", written[0].0);
+            }
+            let doc = bytes::read_opened(file, &[Password("user")]);
+            not_taken(&locked, &doc, None, &format!("{name}, read by the user's"));
+            user.adopt(&mut doc.clone()).unwrap();
+        }
+    }
+    // Read under a parser's nesting of 1: the pages and the page, which nest
+    // deeper, unread.
+    let file = spelled();
+    let mut shallow = Options::DEFAULT;
+    shallow.limits.parser.nesting = 1;
+    let under = |options| Reading::open(Arc::<[u8]>::from(&file[..]), options).unwrap();
+    let doc = under(&shallow).into_document().unwrap();
+    let unread: Vec<ObjectId> = doc.unread().map(|(id, _)| id).collect();
+    assert_eq!(unread, [(2, 0), (3, 0)]);
+    not_taken(&open(&file), &doc, Some((2, 0)), "nested past a limit");
+    under(&shallow).adopt(&mut doc.clone()).unwrap();
 }
 
 /// A reading by position whose file was cut short after it was opened
