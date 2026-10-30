@@ -1,8 +1,9 @@
 //! Where an inline image's data ends, as PDFium's `ReadInlineStream`
-//! finds it, from its dictionary and the components of the color space
-//! it's drawn in ([`ResCx`]); and what an image read says
+//! finds it, from its dictionary as PDFium reads it and the components of
+//! the color space it's drawn in ([`ResCx`]); and what an image read says
 //! ([`InlineImage`]).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
@@ -10,9 +11,10 @@ use std::ops::Range;
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Read, Sink};
 use crate::limits::Limits;
-use crate::operand::{Operand, name};
+use crate::operand::{Operand, hex, literal, name};
 use crate::scan::{
-    Raw, UNCAPPED, ei_scan, elements, find, int, is_space, next_raw, run_length_end,
+    Raw, UNCAPPED, a85_end, ei_scan, elements, find, int, is_number, is_space, next_raw,
+    run_length_end,
 };
 
 /// What reading content needs of the resources it's drawn with: how many
@@ -68,7 +70,7 @@ pub fn family_components(family: &[u8]) -> u32 {
 /// let image = read.next().unwrap().unwrap().inline_image().unwrap();
 /// assert_eq!((image.at(), image.data()), (2..44, 37..41));
 /// assert_eq!(&content[image.dict()], b" /W 4 /H 1 /BPC 8 /CS /G /L 4 ");
-/// let space = image.entry(&[b"CS", b"ColorSpace"]).unwrap();
+/// let space = image.entry(b"ColorSpace").unwrap();
 /// assert_eq!(space.name().as_deref(), Some(&b"G"[..]));
 /// assert_eq!(image.length(), Some(4));
 /// ```
@@ -103,34 +105,46 @@ impl<'a> InlineImage<'a> {
         self.data.clone()
     }
 
-    /// The value under one of `keys`, as written: the last such entry's,
-    /// as PDFium's dictionary keeps the last. Each key is a name's,
-    /// without its `/`, matched with its `#` escapes decoded; an image's
-    /// keys may be abbreviated (8.9.7), so `&[b"CS", b"ColorSpace"]` finds
-    /// its color space either way.
-    pub fn entry(&self, keys: &[&[u8]]) -> Option<Operand<'a>> {
+    /// The value under `key`, as written, as PDFium reads the image's
+    /// dictionary: `key` a name's, without its `/`, matched as written,
+    /// its `#` escapes not decoded. Of a key 8.9.7 abbreviates (Table
+    /// 91), either spelling finds the value: where both are written, the
+    /// abbreviation's, unless the full name's is an abbreviated name
+    /// (Table 92, `/RGB` say), which PDFium sets over it; so
+    /// `entry(b"CS")` and `entry(b"ColorSpace")` are the same. Of a key
+    /// written twice, the last.
+    pub fn entry(&self, key: &[u8]) -> Option<Operand<'a>> {
+        let pair = KEYS
+            .iter()
+            .position(|&(full, short, _)| key == full.as_bytes() || key == short.as_bytes());
+        let mut dict = ImageDict::default();
         let mut found = None;
         // It was read under a cap on depth, so nothing in it is deeper.
         image_dict(
             &self.content[..self.at.end],
             self.at.start,
             UNCAPPED,
-            |key, value| {
-                if name(key).is_some_and(|k| keys.contains(&&*k)) {
-                    found = Some(value);
-                }
+            |k, value| match pair {
+                Some(_) => dict.set(k, value),
+                None if &k[1..] == key => found = Some(value),
+                None => {}
             },
             &mut (),
         )
         .ok()?;
+        let found = match pair {
+            Some(i) => dict.get(self.content, i),
+            None => found,
+        };
         found.map(|r| Operand::new(self.content, r))
     }
 
-    /// The length it gives its data, its `/L` or `/Length`, where that's a
-    /// length, as its data's end is found from it: a non-negative number
-    /// under 2^32, a real's whole part.
+    /// The length it gives its data, its `/L` or `/Length` (PDF 2.0),
+    /// where that's a length: a non-negative number under 2^32, a real's
+    /// whole part. Where both are written, `/L`'s, as 8.9.7 has it; PDFium
+    /// reads neither, and finds the data otherwise.
     pub fn length(&self) -> Option<u64> {
-        self.entry(&[b"L", b"Length"]).and_then(|l| int(l.bytes()))
+        self.entry(b"L").and_then(|l| int(l.bytes()))
     }
 }
 
@@ -170,8 +184,8 @@ impl<'a, 'r> Images<'a, 'r> {
     /// The inline image whose `BI` is at `bi`: where it ends, past its
     /// `EI`, and where its data is. Where ISO 32000-2 would read it
     /// otherwise, `sink` is told, if it wants: its dictionary's tokens'
-    /// own faults and its entries', then its `ID`'s, its length's and
-    /// what's before its `EI`.
+    /// own faults and its entries', then its keys', its `ID`'s, its
+    /// length's and what's before its `EI`.
     pub(crate) fn read(
         &mut self,
         bi: usize,
@@ -187,26 +201,36 @@ impl<'a, 'r> Images<'a, 'r> {
         let at = image_dict(s, bi, self.lim.depth, set, sink)?;
         // One white-space byte after `ID`, then the data.
         let start = at + usize::from(s.get(at).is_some_and(|&c| is_space(c)));
-        let counted = match self.first_filter(&dict) {
-            None => self.unfiltered(&dict).map(|n| start.saturating_add(n)),
-            Some(Filter::Hex) => Some(find(s, start, b">").ok_or(unterminated)? + 1),
-            Some(Filter::A85) => Some(find(s, start, b"~>").ok_or(unterminated)? + 2),
-            Some(Filter::RunLength) => Some(run_length_end(s, start).ok_or(unterminated)?),
-            Some(Filter::Dct) => self.eoi(start).map(|eoi| eoi + 2),
-            Some(Filter::Other) => None,
-        }
-        .or_else(|| {
-            let length = dict.l.clone().and_then(|l| int(&s[l]))?;
-            start
-                .checked_add(usize::try_from(length).ok()?)
-                .filter(|&end| end <= s.len())
-        });
-        let (data, end) = match counted {
-            Some(end) if end <= s.len() => (start..end, self.ei_from(end).ok_or(unterminated)?),
-            Some(_) => return Err(unterminated),
-            None => {
+        // A decoder that finds no end of its data is none to PDFium, which
+        // then reads on from `ID` as it does for a filter it can't decode.
+        let end = match self.first_filter(&dict) {
+            None => self
+                .unfiltered(&dict)
+                .map_or(End::Walk, |n| End::Counted(start.saturating_add(n))),
+            Some(Filter::Hex) => find(s, start, b">").map_or(End::Walk, |at| End::Counted(at + 1)),
+            Some(Filter::A85) => a85_end(s, start).map_or(End::Walk, End::Counted),
+            Some(Filter::RunLength) => run_length_end(s, start).map_or(End::Walk, End::Counted),
+            Some(Filter::Dct) => self
+                .eoi(start)
+                .map_or(End::Scan, |eoi| End::Counted(eoi + 2)),
+            Some(Filter::Decoded) => End::Scan,
+            Some(Filter::Other) => End::Walk,
+        };
+        let (data, end) = match end {
+            End::Counted(end) if end <= s.len() => {
+                (start..end, self.ei_from(end).ok_or(unterminated)?.end)
+            }
+            End::Counted(_) => return Err(unterminated),
+            End::Scan => {
                 let ei = ei_scan(s, start).ok_or(unterminated)?;
                 (start..(ei - 1).max(start), ei + 2)
+            }
+            End::Walk => {
+                let ei = self.ei_from(start).ok_or(unterminated)?;
+                // Its data to its `EI`, the white-space byte before it left
+                // out.
+                let before = ei.start > start && is_space(s[ei.start - 1]);
+                (start..ei.start - usize::from(before), ei.end)
             }
         };
         if data.len() > self.lim.inline_image {
@@ -216,24 +240,31 @@ impl<'a, 'r> Images<'a, 'r> {
             });
         }
         if sink.wants() {
-            self.faults(&dict, at, &data, end, sink);
+            self.faults(&dict, bi + 2..at - 2, &data, end, sink);
         }
         Ok((end, data))
     }
 
     /// Where ISO 32000-2 reads an image read otherwise, told to `sink`:
-    /// its `ID`, ending at `id`, with no white-space after it; a length
-    /// that ends its data elsewhere than `data`; tokens between its data
-    /// and its `EI`, which ends at `end`.
+    /// a key both abbreviated and in full whose value ISO reads otherwise,
+    /// its dictionary at `between`, from after `BI` to `ID`; its `ID`,
+    /// ending two bytes after, with no white-space after it; a length that
+    /// ends its data elsewhere than `data`; tokens between its data and its
+    /// `EI`, which ends at `end`.
     fn faults(
         &self,
         dict: &ImageDict,
-        id: usize,
+        between: Range<usize>,
         data: &Range<usize>,
         end: usize,
         sink: &mut impl Sink<'a>,
     ) {
         let s = self.s;
+        let id = between.end + 2;
+        for key in dict.parted(s) {
+            let written = &s[between.clone()];
+            sink.fault(between.clone(), Fault::Abbreviation { written, key });
+        }
         // ISO asks white-space after `ID`, and counts its length from after
         // more of it, by the last of its filters (8.9.7).
         let ascii = self
@@ -242,7 +273,7 @@ impl<'a, 'r> Images<'a, 'r> {
         if !ascii && !s.get(id).is_some_and(|&c| is_space(c)) {
             sink.fault(id - 2..id, Fault::AfterId);
         }
-        if let Some(given) = dict.l.clone().and_then(|l| int(&s[l])) {
+        if let Some(given) = dict.iso(L).and_then(|l| int(&s[l])) {
             let mut start = data.start;
             if ascii {
                 while s.get(start).is_some_and(|&c| is_space(c)) && start < data.end {
@@ -273,9 +304,10 @@ impl<'a, 'r> Images<'a, 'r> {
         }
     }
 
-    /// The last of an image's filters, or its one: a name's, decoded.
-    fn last_filter(&self, dict: &ImageDict) -> Option<std::borrow::Cow<'a, [u8]>> {
-        let f = &self.s[dict.f.clone()?];
+    /// The last of an image's filters, or its one, as ISO 32000-2 reads
+    /// its dictionary: a name's, decoded.
+    fn last_filter(&self, dict: &ImageDict) -> Option<Cow<'a, [u8]>> {
+        let f = &self.s[dict.iso(F)?];
         let last = match f.first() {
             Some(b'[') => *elements(f, self.lim.depth).last()?,
             _ => f,
@@ -283,20 +315,37 @@ impl<'a, 'r> Images<'a, 'r> {
         name(last)
     }
 
-    /// An image's first filter, by what finds its data's end; None when
-    /// it has none.
+    /// An image's first filter, by what finds its data's end, as PDFium
+    /// takes it: a name, its abbreviation read as the full name (Table
+    /// 92), or a string's bytes, naming a filter. None, as for no filter,
+    /// for `null`, a dictionary or what's no object, and for an empty
+    /// array; [`Filter::Other`] for a name or a string that names no filter
+    /// PDFium decodes, a number, a boolean, or an array first in an array.
     fn first_filter(&self, dict: &ImageDict) -> Option<Filter> {
-        let f = &self.s[dict.f.clone()?];
+        let s = self.s;
+        let f = &s[dict.get(s, F)?];
         let first = match f.first() {
             Some(b'[') => *elements(f, self.lim.depth).first()?,
             _ => f,
         };
-        // A filter that isn't a name is none, as PDFium reads it.
-        Some(match &*name(first)? {
-            b"AHx" | b"ASCIIHexDecode" => Filter::Hex,
-            b"A85" | b"ASCII85Decode" => Filter::A85,
-            b"RL" | b"RunLengthDecode" => Filter::RunLength,
-            b"DCT" | b"DCTDecode" => Filter::Dct,
+        let named: Cow<[u8]> = match first {
+            [b'/', ..] => {
+                let n = name(first)?;
+                expanded(&n).map_or(n, Cow::Borrowed)
+            }
+            [b'(', ..] => Cow::Owned(literal(first)),
+            [b'<', b'<', ..] => return None,
+            [b'<', ..] => Cow::Owned(hex(first)),
+            [b'[', ..] | b"true" | b"false" => return Some(Filter::Other),
+            n if is_number(n) => return Some(Filter::Other),
+            _ => return None,
+        };
+        Some(match &*named {
+            b"ASCIIHexDecode" => Filter::Hex,
+            b"ASCII85Decode" => Filter::A85,
+            b"RunLengthDecode" => Filter::RunLength,
+            b"DCTDecode" => Filter::Dct,
+            b"FlateDecode" | b"LZWDecode" | b"CCITTFaxDecode" => Filter::Decoded,
             _ => Filter::Other,
         })
     }
@@ -305,31 +354,32 @@ impl<'a, 'r> Images<'a, 'r> {
     /// when it counts none.
     fn unfiltered(&self, dict: &ImageDict) -> Option<usize> {
         let s = self.s;
-        let value = |r: &Option<Range<usize>>| int(&s[r.clone()?]);
-        let (components, bpc) = match &dict.cs {
+        let value = |key| int(&s[dict.get(s, key)?]);
+        let (components, bpc) = match dict.get(s, CS) {
             None => (1, 1),
-            Some(cs) => match self.components(&s[cs.clone()]) {
-                Some(n) => (n, value(&dict.bpc)?),
+            Some(cs) => match self.components(&s[cs]) {
+                Some(n) => (n, value(BPC)?),
                 None => (1, 1),
             },
         };
-        let pitch = value(&dict.w)?
+        let pitch = value(W)?
             .checked_mul(bpc)?
             .checked_mul(components)?
             .div_ceil(8);
-        let size = pitch.checked_mul(value(&dict.h)?)?;
+        let size = pitch.checked_mul(value(H)?)?;
         usize::try_from(size).ok().filter(|&n| n > 0)
     }
 
     /// The components of an inline image's color space, as written; None
     /// for a name the resources don't have, which PDFium reads as no
-    /// color space. What it can't make out has 3, as in PDFium.
+    /// color space, an abbreviation looked up by its full name (`/I` as
+    /// `/Indexed`). What it can't make out has 3, as in PDFium.
     fn components(&self, cs: &[u8]) -> Option<u64> {
         if let Some(n) = name(cs) {
-            return match &*n {
-                b"G" | b"DeviceGray" => Some(1),
-                b"RGB" | b"DeviceRGB" => Some(3),
-                b"CMYK" | b"DeviceCMYK" => Some(4),
+            return match expanded(&n).unwrap_or(&n) {
+                b"DeviceGray" => Some(1),
+                b"DeviceRGB" => Some(3),
+                b"DeviceCMYK" => Some(4),
                 n => self.res.spaces.get(n).map(|&c| c.into()),
             };
         }
@@ -349,12 +399,13 @@ impl<'a, 'r> Images<'a, 'r> {
         })
     }
 
-    /// The next `EI` operator from `at`: where it ends.
-    fn ei_from(&self, mut at: usize) -> Option<usize> {
+    /// The next `EI` operator from `at`, its tokens read as PDFium reads
+    /// them, a string or an array one token: where it is.
+    fn ei_from(&self, mut at: usize) -> Option<Range<usize>> {
         loop {
             let (r, kind) = next_raw(self.s, at, self.lim.depth)?.ok()?;
             if matches!(kind, Raw::Op) && &self.s[r.clone()] == b"EI" {
-                return Some(r.end);
+                return Some(r);
             }
             at = r.end;
         }
@@ -373,31 +424,128 @@ impl<'a, 'r> Images<'a, 'r> {
     }
 }
 
+/// The keys of an inline image's dictionary that 8.9.7 abbreviates (Table
+/// 91): each full name, its abbreviation, and whether PDFium reads the
+/// abbreviation as the key. `Length` (PDF 2.0) PDFium neither abbreviates
+/// nor reads.
+const KEYS: [(&str, &str, bool); 10] = [
+    ("BitsPerComponent", "BPC", true),
+    ("ColorSpace", "CS", true),
+    ("Decode", "D", true),
+    ("DecodeParms", "DP", true),
+    ("Filter", "F", true),
+    ("Height", "H", true),
+    ("ImageMask", "IM", true),
+    ("Interpolate", "I", true),
+    ("Length", "L", false),
+    ("Width", "W", true),
+];
+
+/// The keys among [`KEYS`] whose values find an image's data's end.
+const BPC: usize = 0;
+const CS: usize = 1;
+const F: usize = 4;
+const H: usize = 5;
+const L: usize = 8;
+const W: usize = 9;
+
+/// The full name an abbreviated name stands for in an inline image
+/// (8.9.7, Table 92), `name` decoded; None for any other.
+pub(crate) fn expanded(name: &[u8]) -> Option<&'static [u8]> {
+    Some(match name {
+        b"G" => b"DeviceGray",
+        b"RGB" => b"DeviceRGB",
+        b"CMYK" => b"DeviceCMYK",
+        b"I" => b"Indexed",
+        b"AHx" => b"ASCIIHexDecode",
+        b"A85" => b"ASCII85Decode",
+        b"LZW" => b"LZWDecode",
+        b"Fl" => b"FlateDecode",
+        b"RL" => b"RunLengthDecode",
+        b"CCF" => b"CCITTFaxDecode",
+        b"DCT" => b"DCTDecode",
+        _ => return None,
+    })
+}
+
+/// Whether an inline image's key, decoded, is one 8.9.7 has it read
+/// (Table 91): a key of [`KEYS`], either spelling, or `Intent`.
+fn image_key(key: &[u8]) -> bool {
+    key == b"Intent"
+        || (KEYS.iter()).any(|&(full, short, _)| key == full.as_bytes() || key == short.as_bytes())
+}
+
 /// What an inline image's dictionary says that finds its data's end:
-/// where each value is.
+/// where the value of each key of [`KEYS`] is, under its full name and
+/// under its abbreviation apart, the last of each. A key is matched as
+/// written, its `#` escapes not decoded, as PDFium matches it.
 #[derive(Default)]
 struct ImageDict {
-    w: Option<Range<usize>>,
-    h: Option<Range<usize>>,
-    bpc: Option<Range<usize>>,
-    cs: Option<Range<usize>>,
-    f: Option<Range<usize>>,
-    l: Option<Range<usize>>,
+    /// By [`KEYS`]' order: the full name's value, then the abbreviation's.
+    values: [[Option<Range<usize>>; 2]; KEYS.len()],
 }
 
 impl ImageDict {
+    /// `key`, a name as written, its `/` first, has `value`.
     fn set(&mut self, key: &[u8], value: Range<usize>) {
-        let slot = match name(key).as_deref() {
-            Some(b"W" | b"Width") => &mut self.w,
-            Some(b"H" | b"Height") => &mut self.h,
-            Some(b"BPC" | b"BitsPerComponent") => &mut self.bpc,
-            Some(b"CS" | b"ColorSpace") => &mut self.cs,
-            Some(b"F" | b"Filter") => &mut self.f,
-            Some(b"L" | b"Length") => &mut self.l,
-            _ => return,
-        };
-        *slot = Some(value);
+        let key = &key[1..];
+        for (i, &(full, short, _)) in KEYS.iter().enumerate() {
+            if key == full.as_bytes() {
+                self.values[i][0] = Some(value);
+                return;
+            }
+            if key == short.as_bytes() {
+                self.values[i][1] = Some(value);
+                return;
+            }
+        }
     }
+
+    /// Where the value of key `i` of [`KEYS`] is as PDFium reads it, `s`
+    /// what the dictionary is in: the abbreviation's, unless both are
+    /// written and the full name's is an abbreviated name, which PDFium
+    /// sets over it (its `ReplaceAbbr`). `Length`, which PDFium doesn't
+    /// read, as [`iso`](ImageDict::iso).
+    fn get(&self, s: &[u8], i: usize) -> Option<Range<usize>> {
+        let [full, short] = self.values[i].clone();
+        match (full, short) {
+            (Some(full), Some(_)) if KEYS[i].2 && abbreviated(&s[full.clone()]) => Some(full),
+            (full, short) => short.or(full),
+        }
+    }
+
+    /// Where the value of key `i` of [`KEYS`] is as ISO 32000-2 reads it:
+    /// the abbreviation's, where both are written (8.9.7, as its errata
+    /// add).
+    fn iso(&self, i: usize) -> Option<Range<usize>> {
+        let [full, short] = self.values[i].clone();
+        short.or(full)
+    }
+
+    /// The keys PDFium reads otherwise than ISO 32000-2, `s` what the
+    /// dictionary is in: both spellings written, and the full name's value
+    /// an abbreviated name that means another than the abbreviation's.
+    fn parted<'s>(&'s self, s: &'s [u8]) -> impl Iterator<Item = &'static str> + 's {
+        (0..KEYS.len()).filter_map(move |i| {
+            let [Some(full), Some(short)] = self.values[i].clone() else {
+                return None;
+            };
+            fn meaning(v: &[u8]) -> Cow<'_, [u8]> {
+                match name(v) {
+                    Some(n) => expanded(&n).map_or(n, Cow::Borrowed),
+                    None => Cow::Borrowed(v),
+                }
+            }
+            let parted =
+                self.get(s, i) == Some(full.clone()) && meaning(&s[full]) != meaning(&s[short]);
+            parted.then_some(KEYS[i].0)
+        })
+    }
+}
+
+/// Whether a value, as written, is an abbreviated name (8.9.7, Table 92).
+fn abbreviated(value: &[u8]) -> bool {
+    name(value).is_some_and(|n| expanded(&n).is_some())
 }
 
 /// The dictionary of the inline image whose `BI` is at `bi`, to its `ID`:
@@ -465,14 +613,38 @@ fn entry_faults<'a>(
         Read::Object if key.is_none() && written[0] != b'/' => {
             sink.fault(r, Fault::Key { written });
         }
+        // A key ISO reads by its escapes decoded, which PDFium matches as
+        // written.
+        Read::Object
+            if key.is_none()
+                && written.contains(&b'#')
+                && name(written).is_some_and(|k| *k != written[1..] && image_key(&k)) =>
+        {
+            sink.fault(r, Fault::EscapedKey { written });
+        }
         _ => {}
     }
 }
 
+/// An inline image's first filter, by what finds its data's end.
 enum Filter {
     Hex,
     A85,
     RunLength,
     Dct,
+    /// Flate, LZW or CCITTFax: what PDFium finds the end of by decoding.
+    Decoded,
+    /// One PDFium has no decoder for.
     Other,
+}
+
+/// How an inline image's data ends.
+enum End {
+    /// Where it's counted to, by its size or its filter.
+    Counted(usize),
+    /// At the first `EI` with white-space before it and white-space, a
+    /// delimiter or the end after it.
+    Scan,
+    /// At the next `EI` operator, its tokens read as PDFium reads them.
+    Walk,
 }

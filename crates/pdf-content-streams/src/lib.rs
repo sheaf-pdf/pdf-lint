@@ -7,8 +7,9 @@
 //!   images, `BI` to `EI`, each one token. Tokens end where PDFium's
 //!   `CPDF_StreamParser` ends them, and an inline image's data is found by
 //!   PDFium's `ReadInlineStream` rules, from the components of the color
-//!   spaces the caller gives ([`ResCx`]). What an operator does is no part
-//!   of it, so one nobody knows is a token like any other.
+//!   spaces the caller gives ([`ResCx`]), but where PDFium decodes it to
+//!   find its end ([`tokens`] says where). What an operator does is no
+//!   part of it, so one nobody knows is a token like any other.
 //! - **Operations** ([`operations`]): each operator, or inline image
 //!   ([`InlineImage`]), with the operands before it ([`Operation`]), their
 //!   ranges held in the item, so an operation of sixteen operands or fewer

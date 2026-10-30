@@ -302,16 +302,275 @@ fn filtered_data_ends_at_its_marker() {
         b"\xff\xd8\xff\xe0 EI \x00\xff\xd9",
         &none,
     );
-    // PDF 2.0's length, abbreviated or not.
-    assert_image("/F /Fl /W 9 /H 9 /BPC 8 /CS /G /L 6", b"x EI y", &none);
-    assert_image("/F /LZW /Length 6 /W 9 /H 9", b"x EI y", &none);
-    // With nothing to go by, the first `EI` between white-space.
+    // Flate, LZW and CCITTFax data, which PDFium decodes to find its end,
+    // end at the first `EI` between white-space; PDF 2.0's length,
+    // abbreviated or not, PDFium doesn't read.
+    assert_image("/F /Fl /W 9 /H 9 /BPC 8 /CS /G /L 2", b"xEIy", &none);
+    assert_image("/F /LZW /Length 2 /W 9 /H 9", b"xEIy", &none);
     assert_image(
         "/F /CCF /DP <</K -1 /Columns 9>> /W 9 /H 9",
         b"xEI EIy",
         &none,
     );
     assert_image("/F /Fl /W 9 /H 9 /BPC 8 /CS /G", b"", &none);
+    // A filter PDFium can't decode: its tokens read to the next `EI`, a
+    // string one token.
+    assert_image("/F /XYZ /W 9 /H 9 /BPC 8 /CS /G", b"(x EI y)", &none);
+}
+
+/// Inline images as PDFium reads them, each case's data and the paths
+/// drawn after it those PDFium's page objects show for the same content:
+/// a key written both abbreviated and in full, a key's `#` escapes, a
+/// filter by what its value is, a filter PDFium has no decoder for or one
+/// that finds no end, an image no size counts, and ASCII85's end.
+#[test]
+fn inline_images_read_as_pdfium_reads_them() {
+    let res = ResCx::new([
+        (b"CS0".to_vec(), 1),
+        (b"CS1".to_vec(), 3),
+        (b"Indexed".to_vec(), 3),
+    ]);
+    // An `EI` the data may hide, a path, an `EI`, a path.
+    let two =
+        |dict: &str, data: &str| format!("BI {dict} ID {data} EI 0 0 m 9 9 l S EI 5 5 m 7 7 l S");
+    // The data, an `EI` and a path.
+    let one = |dict: &str, data: &str| format!("BI {dict} ID {data} EI 5 5 m 7 7 l S");
+    // A string holding an `EI` and a path, then an `EI` and a path.
+    let string = |dict: &str| one(dict, "(x EI 0 0 m 9 9 l S)");
+    let gray = "/W 1 /H 1 /BPC 8 /CS /G";
+    let cases: Vec<(String, &str, usize)> = vec![
+        // The abbreviation's value, unless the full name's is an
+        // abbreviated name, wherever each is written.
+        (
+            two(
+                "/W 1 /H 1 /BPC 8 /CS /DeviceGray /ColorSpace /DeviceRGB",
+                "a",
+            ),
+            "a",
+            2,
+        ),
+        (
+            two(
+                "/W 1 /H 1 /BPC 8 /ColorSpace /DeviceRGB /CS /DeviceGray",
+                "a",
+            ),
+            "a",
+            2,
+        ),
+        (
+            two("/W 1 /Width 3 /H 1 /BPC 8 /CS /DeviceGray", "a"),
+            "a",
+            2,
+        ),
+        (
+            two("/Width 3 /W 1 /H 1 /BPC 8 /CS /DeviceGray", "a"),
+            "a",
+            2,
+        ),
+        (
+            two("/W 1 /H 1 /BPC 8 /CS /G /ColorSpace /RGB", "a"),
+            "a E",
+            1,
+        ),
+        (
+            two("/W 1 /H 1 /BPC 8 /CS /G /ColorSpace /DeviceRGB", "a"),
+            "a",
+            2,
+        ),
+        (
+            two("/W 1 /H 1 /BPC 8 /CS /DeviceGray /ColorSpace /RGB", "a"),
+            "a E",
+            1,
+        ),
+        (
+            two("/W 1 /H 1 /BPC 8 /CS /CS0 /ColorSpace /CS1", "a"),
+            "a",
+            2,
+        ),
+        (
+            one(&format!("{gray} /F /XYZ /Filter /AHx"), "41>"),
+            "41>",
+            1,
+        ),
+        (
+            one(&format!("{gray} /F /AHx /Filter /XYZ"), "41>"),
+            "41>",
+            1,
+        ),
+        // A key's escapes aren't decoded, a value's are; an abbreviated
+        // name is looked up by its full name.
+        (two("/W 1 /H 1 /BPC 8 /C#53 /RGB", "a"), "a", 2),
+        (two(&format!("{gray} /#46 /XYZ"), "a"), "a", 2),
+        (two("/W 1 /H 1 /BPC 8 /CS /R#47B", "a"), "a E", 1),
+        (one(&format!("{gray} /F /A#48x"), "41>"), "41>", 1),
+        (two("/W 1 /H 1 /BPC 8 /CS /I", "a"), "a E", 1),
+        // A filter PDFium has no decoder for, by name or as a string's
+        // bytes, a number, a boolean or an array first: the tokens read on
+        // to the next `EI`, its `/L` not read; `null`, a dictionary, an
+        // empty array or what's no object is none.
+        (two(&format!("{gray} /F /XYZ /L 19"), "a"), "a", 2),
+        (
+            string(&format!("{gray} /F /XYZ")),
+            "(x EI 0 0 m 9 9 l S)",
+            1,
+        ),
+        (
+            string(&format!("{gray} /F [/XYZ /Fl]")),
+            "(x EI 0 0 m 9 9 l S)",
+            1,
+        ),
+        (
+            string(&format!("{gray} /F /JPXDecode")),
+            "(x EI 0 0 m 9 9 l S)",
+            1,
+        ),
+        (
+            string(&format!("{gray} /F (Fl)")),
+            "(x EI 0 0 m 9 9 l S)",
+            1,
+        ),
+        (
+            string(&format!("{gray} /F (AHx)")),
+            "(x EI 0 0 m 9 9 l S)",
+            1,
+        ),
+        (
+            string(&format!("{gray} /F <41>")),
+            "(x EI 0 0 m 9 9 l S)",
+            1,
+        ),
+        (string(&format!("{gray} /F 5")), "(x EI 0 0 m 9 9 l S)", 1),
+        (
+            string(&format!("{gray} /F true")),
+            "(x EI 0 0 m 9 9 l S)",
+            1,
+        ),
+        (string(&format!("{gray} /F [5]")), "(x EI 0 0 m 9 9 l S)", 1),
+        (
+            string(&format!("{gray} /F [(XYZ)]")),
+            "(x EI 0 0 m 9 9 l S)",
+            1,
+        ),
+        (
+            string(&format!("{gray} /F [[/AHx]]")),
+            "(x EI 0 0 m 9 9 l S)",
+            1,
+        ),
+        (one(&format!("{gray} /F (ASCIIHexDecode)"), "41>"), "41>", 1),
+        (
+            one(&format!("{gray} /F [(ASCIIHexDecode)]"), "41>"),
+            "41>",
+            1,
+        ),
+        (two(&format!("{gray} /F null"), "a"), "a", 2),
+        (two(&format!("{gray} /F <<>>"), "a"), "a", 2),
+        (two(&format!("{gray} /F []"), "a"), "a", 2),
+        (two(&format!("{gray} /F [null]"), "a"), "a", 2),
+        (two(&format!("{gray} /F foo"), "a"), "a", 2),
+        // No size counted: the tokens read on to the next `EI`.
+        (string("/H 1 /BPC 8 /CS /G"), "(x EI 0 0 m 9 9 l S)", 1),
+        (string("/W 0 /H 1 /BPC 8 /CS /G"), "(x EI 0 0 m 9 9 l S)", 1),
+        (two("/H 1 /BPC 8 /CS /G /L 19", "a"), "a", 2),
+        // ASCII85 to the first byte that's none of its digits, and a `>`
+        // after it; ASCIIHex, ASCII85 and RunLength that don't end read
+        // on to the next `EI`.
+        (two(&format!("{gray} /F /A85"), "9jqo~"), "9jqo~", 2),
+        (two(&format!("{gray} /F /A85"), "9jqov"), "9jqov", 2),
+        (two(&format!("{gray} /F [/A85 /Fl]"), "9jqo~"), "9jqo~", 2),
+        (one(&format!("{gray} /F /A85"), "9jqo^~>"), "9jqo^~>", 1),
+        (one(&format!("{gray} /F /A85"), "~>"), "", 1),
+        (one(&format!("{gray} /F /AHx"), "0E"), "0E", 1),
+        (one(&format!("{gray} /F /A85"), "9jqo"), "9jqo", 1),
+        (one(&format!("{gray} /F /RL"), "\x05abc"), "\x05abc", 1),
+    ];
+    for (content, data, paths) in &cases {
+        let s = content.as_bytes();
+        let read = operations_of(s, &res, &Limits::DEFAULT);
+        let read: Vec<_> = read.into_iter().map(Result::unwrap).collect();
+        let image = read[0].inline_image().expect("an image");
+        assert_eq!(&s[image.data()], data.as_bytes(), "{content}");
+        let drawn = read.iter().filter(|op| op.name() == b"S").count();
+        assert_eq!(drawn, *paths, "{content}");
+    }
+    // Either spelling finds the value PDFium reads, and the color space
+    // used is the one PDFium looks up.
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /CS0 /ColorSpace /CS1 ID a EI";
+    let op = operations_of(s, &res, &Limits::DEFAULT).remove(0).unwrap();
+    let image = op.inline_image().unwrap();
+    let cs = |key: &[u8]| image.entry(key).map(|o| o.bytes());
+    assert_eq!(
+        (cs(b"CS"), cs(b"ColorSpace")),
+        (Some(&b"/CS0"[..]), Some(&b"/CS0"[..]))
+    );
+    assert_eq!(
+        op.resource(),
+        Some((ResKind::ColorSpace, b"CS0"[..].into()))
+    );
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G /ColorSpace /RGB ID abc EI";
+    let op = operations_of(s, &res, &Limits::DEFAULT).remove(0).unwrap();
+    assert_eq!(
+        op.inline_image().unwrap().entry(b"CS").unwrap().bytes(),
+        b"/RGB"
+    );
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /I ID abc EI";
+    let op = operations_of(s, &res, &Limits::DEFAULT).remove(0).unwrap();
+    assert_eq!(
+        op.resource(),
+        Some((ResKind::ColorSpace, b"Indexed"[..].into()))
+    );
+    // `/L` before `/Length`, as 8.9.7 has it.
+    let s = b"BI /F /XYZ /Length 9 /L 2 ID ab EI";
+    let op = operations_of(s, &res, &Limits::DEFAULT).remove(0).unwrap();
+    assert_eq!(op.inline_image().unwrap().length(), Some(2));
+}
+
+/// An inline image's key ISO 32000-2 reads otherwise: written with a `#`
+/// escape, or both abbreviated and in full where the full name's value is
+/// an abbreviated name that means another, told with its dictionary, in
+/// the order of their ends.
+#[test]
+fn an_inline_images_keys_read_otherwise() {
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G /ColorSpace /RGB ID abc EI";
+    let dict = place(s, b" /W 1 /H 1 /BPC 8 /CS /G /ColorSpace /RGB ");
+    let words = "an inline image's ColorSpace is read from its full name, and by ISO 32000-2 \
+                 from its abbreviation";
+    assert_eq!(told(s), [(dict, words.to_string())]);
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /DeviceGray /ColorSpace /RGB ID abc EI";
+    assert_eq!(told(s).len(), 1);
+    let s = b"BI /W 1 /H 1 /BPC 8 /F /XYZ /Filter /AHx ID 41> EI";
+    let found = told(s);
+    assert_eq!(found.len(), 1);
+    assert!(found[0].1.contains(" Filter "));
+    // The same meaning, or PDFium reading the abbreviation as ISO does,
+    // isn't told.
+    assert_eq!(
+        told(b"BI /W 1 /H 1 /BPC 8 /CS /DeviceRGB /ColorSpace /RGB ID abc EI"),
+        []
+    );
+    assert_eq!(
+        told(b"BI /W 1 /H 1 /BPC 8 /CS /G /ColorSpace /DeviceRGB ID a EI"),
+        []
+    );
+    assert_eq!(told(b"BI /W 1 /Width 3 /H 1 /BPC 8 /CS /G ID a EI"), []);
+    // A key with an escape that ISO reads as one of an image's, and not
+    // one it doesn't read.
+    let s = b"BI /W 1 /H 1 /BPC 8 /C#53 /RGB /#46 /XYZ /A#42 1 ID a EI";
+    let key = |w: &str| format!("{w} is an inline image's key to ISO 32000-2, and no key here");
+    assert_eq!(
+        told(s),
+        [
+            (place(s, b"/C#53"), key("/C#53")),
+            (place(s, b"/#46"), key("/#46"))
+        ]
+    );
+    // A token's fault later in the dictionary is told before the keys'.
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G /ColorSpace /RGB /X <4G> ID abc EI";
+    let found = told(s);
+    assert_eq!(found[0].0, place(s, b"<4G>"));
+    assert_eq!(
+        found[1].0,
+        place(s, b" /W 1 /H 1 /BPC 8 /CS /G /ColorSpace /RGB /X <4G> ")
+    );
 }
 
 #[test]
@@ -350,9 +609,8 @@ fn errors_say_where() {
         at(b"BI /W 9 /H 9 /BPC 8 /CS /G ID abc EI"),
         (0, InlineImage)
     );
-    assert_eq!(at(b"Q BI /F /AHx ID 0E EI"), (2, InlineImage));
-    assert_eq!(at(b"BI /F /A85 ID 9jqo EI"), (0, InlineImage));
-    assert_eq!(at(b"BI /F /RL ID \x05abc EI"), (0, InlineImage));
+    assert_eq!(at(b"Q BI /F /AHx ID 0E"), (2, InlineImage));
+    assert_eq!(at(b"BI /F /A85 ID 9jqo~> 1"), (0, InlineImage));
     // The tokens before an error come first.
     let lexed: Vec<_> = tokens(b"q (a", &ResCx::none(), lim).collect();
     assert_eq!(lexed.len(), 2);
@@ -805,7 +1063,7 @@ fn every_operand_is_kept_to_the_cap() {
 
 #[test]
 fn an_inline_image_is_one_operation() {
-    let s = b"/Im 0 BI /W 4 /H 1 /BPC 8 /CS /RGB /C#53 /G /L 4 ID abcd EI Q";
+    let s = b"/Im 0 BI /W 4 /H 1 /BPC 8 /CS /G /C#53 /RGB /L 4 ID abcd EI Q";
     let read = operations_of(s, &ResCx::none(), &Limits::DEFAULT);
     assert_eq!(read.len(), 2);
     let op = read[0].as_ref().unwrap();
@@ -819,15 +1077,18 @@ fn an_inline_image_is_one_operation() {
     assert_eq!(&s[image.data()], b"abcd");
     assert_eq!(
         &s[image.dict()],
-        b" /W 4 /H 1 /BPC 8 /CS /RGB /C#53 /G /L 4 "
+        b" /W 4 /H 1 /BPC 8 /CS /G /C#53 /RGB /L 4 "
     );
-    // The last entry under any of the keys, its key's escapes decoded, as
-    // its data was found by.
-    let entry = |keys: &[&[u8]]| image.entry(keys).map(|o| o.bytes());
-    assert_eq!(entry(&[b"CS", b"ColorSpace"]), Some(&b"/G"[..]));
-    assert_eq!(entry(&[b"ColorSpace"]), None);
-    assert_eq!(entry(&[b"W"]), Some(&b"4"[..]));
-    let w = image.entry(&[b"W"]).unwrap();
+    // The entry under a key, either spelling of one 8.9.7 abbreviates, its
+    // key matched as written, as its data was found by: `/C#53` isn't
+    // `/CS` to PDFium.
+    let entry = |key: &[u8]| image.entry(key).map(|o| o.bytes());
+    assert_eq!(entry(b"CS"), Some(&b"/G"[..]));
+    assert_eq!(entry(b"ColorSpace"), Some(&b"/G"[..]));
+    assert_eq!(entry(b"C#53"), Some(&b"/RGB"[..]));
+    assert_eq!(entry(b"Width"), Some(&b"4"[..]));
+    assert_eq!(entry(b"Decode"), None);
+    let w = image.entry(b"W").unwrap();
     assert_eq!(&s[w.range()], b"4");
     assert_eq!(image.length(), Some(4));
     assert_eq!(
@@ -1494,22 +1755,18 @@ fn an_inline_images_faults() {
         )
     );
     // ASCIIHexDecode the last of its filters, or its one: its length
-    // counted past more white-space after `ID`. Its data found by its first filter's
-    // end where that's ASCIIHexDecode, and by its length where it isn't.
+    // counted past more white-space after `ID`. Its data found by its
+    // first filter's end where that's ASCIIHexDecode, and at the first
+    // `EI` between white-space where that's Flate.
     assert_eq!(told(b"BI /F /AHx /L 3 ID   0E> EI"), []);
-    let s = b"BI /F [/Fl /AHx] /L 3 ID   0E> EI";
+    assert_eq!(told(b"BI /F [/Fl /AHx] /L 3 ID   0E> EI"), []);
+    let s = b"BI /F [/Fl /AHx] /L 2 ID   0E> EI";
     assert_eq!(
         told(s),
-        [
-            (
-                place(s, b"  0"),
-                "an inline image's data is read as 1 bytes, where its length says 3".to_string()
-            ),
-            (
-                place(s, b"E>"),
-                "E> is between an inline image's data and its EI".to_string()
-            ),
-        ]
+        one(
+            place(s, b"  0E>"),
+            "an inline image's data is read as 3 bytes, where its length says 2"
+        )
     );
     let s = b"BI /F [/AHx /Fl] /L 3 ID   0E> EI";
     assert_eq!(
@@ -1542,7 +1799,7 @@ fn an_inline_images_faults() {
     );
     assert_eq!(told(b"BI /F /AHx ID>EI"), []);
     assert_eq!(told(b"BI /F [/Fl /A85] ID<~~>\nEI"), []);
-    let s = b"BI /F [/A85 /Fl] ID<~~>EI";
+    let s = b"BI /F [/A85 /Fl] ID<9jqo~>EI";
     assert_eq!(
         told(s),
         one(
@@ -1639,9 +1896,10 @@ fn moved_inputs() -> Vec<Vec<u8>> {
             "/F /DCT /W 9 /H 9 /BPC 8 /CS /RGB",
             b"\xff\xd8\xff\xe0 EI \x00\xff\xd9",
         ),
-        ("/F /Fl /W 9 /H 9 /BPC 8 /CS /G /L 6", b"x EI y"),
-        ("/F /LZW /Length 6 /W 9 /H 9", b"x EI y"),
+        ("/F /Fl /W 9 /H 9 /BPC 8 /CS /G /L 4", b"xEIy"),
+        ("/F /LZW /Length 4 /W 9 /H 9", b"xEIy"),
         ("/F /CCF /DP <</K -1 /Columns 9>> /W 9 /H 9", b"xEI EIy"),
+        ("/F /XYZ /W 9 /H 9", b"(x EI y)"),
     ];
     let mut inputs: Vec<Vec<u8>> = images
         .iter()

@@ -37,21 +37,35 @@ pub enum Tok<'a> {
 /// on.
 ///
 /// An inline image, `BI` to `EI`, is one token. Its data is found as
-/// PDFium's `ReadInlineStream` finds it, by the first of these rules that
-/// applies:
+/// PDFium's `ReadInlineStream` finds it, by its first filter:
 /// - unfiltered, its exact size: `/H` rows of `/W` samples of its color
 ///   space's components, `/BPC` bits each, padded to a byte. With no
 ///   color space, an image mask's, one bit of one component; a name `res`
 ///   doesn't have reads as none, as in PDFium.
-/// - `/AHx`, `/A85` and `/RL`, to their end-of-data marker;
-/// - `/DCT`, to the JPEG's end of image;
-/// - `/L` or `/Length` bytes, where they're given (PDF 2.0).
+/// - `/AHx` to its `>`, `/A85` past the first byte that's none of its
+///   digits or the white-space it passes over (its `~`, and a `>` after
+///   it), and `/RL` to its end-of-data byte, as PDFium's decoders end
+///   them.
+/// - a filter PDFium has no decoder for, one of those that finds no end,
+///   or an unfiltered image no size counts: none, its tokens read on to
+///   the next `EI`.
 ///
-/// Past the data so found, the image ends at the next `EI` operator.
-/// When no rule applies, at the first `EI` with white-space before it and
-/// white-space, a delimiter or the end after. Only an image's first
-/// filter counts, and the abbreviated keys and names read as the full
-/// ones.
+/// Past the data so found, the image ends at the next `EI` operator, its
+/// tokens read as PDFium reads them, a string one token. Its `/L` or
+/// `/Length` isn't read, as PDFium reads neither. PDFium decodes `/Fl`,
+/// `/LZW`, `/CCF` and `/DCT` data to find its end; here a JPEG's ends at
+/// its end of image, and the rest, or a JPEG with none, at the first `EI`
+/// with white-space before it and white-space, a delimiter or the end
+/// after, which agree but where the encoded bytes hold such an `EI`, or a
+/// JPEG's end of image comes before its last.
+///
+/// The dictionary is read as PDFium reads it: a key matched as written,
+/// its `#` escapes not decoded, a value's decoded, and an abbreviated name
+/// (8.9.7, Table 92) read as the full one. Of a key written both
+/// abbreviated and in full, the abbreviation's value counts, unless the
+/// full name's is an abbreviated name, which PDFium sets over it. The
+/// filter is a name, or a string's bytes, naming one; `null`, a
+/// dictionary or an empty array is none.
 ///
 /// Where ISO 32000-2 would read the bytes otherwise, a sink given by
 /// [`Tokens::with_sink`] is told ([`fault`](crate::fault)); the tokens are

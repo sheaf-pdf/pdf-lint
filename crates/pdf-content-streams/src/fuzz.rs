@@ -438,6 +438,8 @@ fn in_order(s: &[u8], faults: &[(Range<usize>, Fault)]) {
             | Fault::Key { written }
             | Fault::NoValue { written }
             | Fault::Across { written }
+            | Fault::EscapedKey { written }
+            | Fault::Abbreviation { written, .. }
             | Fault::BeforeEi { written } => Some(written),
             Fault::Trailing { .. } | Fault::ImageLength { .. } | Fault::AfterId => None,
         };
@@ -520,12 +522,15 @@ fn operation(
             let dict = image.dict();
             assert!(at.start + 2 <= dict.start && dict.end + 2 <= data.start);
             assert_eq!(&s[dict.end..dict.end + 2], b"ID");
-            for keys in [
-                &[&b"W"[..], b"Width"][..],
-                &[b"CS", b"ColorSpace"],
-                &[b"F", b"Filter"],
+            // Either spelling of a key finds the one value.
+            for [full, short] in [
+                [&b"Width"[..], b"W"],
+                [b"ColorSpace", b"CS"],
+                [b"Filter", b"F"],
             ] {
-                if let Some(value) = image.entry(keys) {
+                let value = image.entry(full);
+                assert_eq!(value, image.entry(short), "either spelling");
+                if let Some(value) = value {
                     let r = value.range();
                     assert!(
                         dict.start <= r.start && r.end <= dict.end,
@@ -739,10 +744,10 @@ pub(crate) fn blank(gap: &[u8]) -> bool {
 }
 
 /// Page content with an inline image found by each of PDFium's rules,
-/// ` EI ` in its data where the data is counted, strings, arrays,
-/// dictionaries and marked content, and a color of 32 components and a
-/// pattern, more operands than an operation holds inline: the fuzz
-/// target's seeds.
+/// ` EI ` in its data where the data is counted or its tokens read,
+/// strings, arrays, dictionaries and marked content, and a color of 32
+/// components and a pattern, more operands than an operation holds
+/// inline: the fuzz target's seeds.
 pub fn fixtures() -> Vec<Vec<u8>> {
     let image = |dict: &str, data: &[u8]| {
         [format!("q BI {dict} ID ").as_bytes(), data, b"\nEI Q\n"].concat()
@@ -757,8 +762,9 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         image("/F [/A85 /Fl] /W 9 /H 9", b"9jqo^ EI ~>"),
         image("/F /RL /W 4 /H 1 /BPC 8 /CS /G", b"\x03 EI \x80"),
         image("/F /DCT /W 9 /H 9 /BPC 8 /CS /RGB", b"\xff\xd8 EI \xff\xd9"),
-        image("/F /Fl /L 6", b"x EI y"),
+        image("/F /Fl /L 4", b"xEIy"),
         image("/F /CCF /DP <</K -1>>", b"xEI EIy"),
+        image("/F /XYZ", b"(x EI y)"),
         b"%c\nq /Artifact <</Type /Pagination /Subtype /Header /Attached [/Top]>> BDC\n\
           q BT /F1 12 Tf 72 720 Td [(a\\)(b) c) -250 <4142>] TJ (\\\\) Tj ET Q EMC\n\
           [1 [2 [3]] <</A <</B (c)>>>>] true false null Q { } ) ]"
@@ -830,7 +836,7 @@ mod tests {
         b" /Sh0 sh ",
     ];
 
-    /// The seeds read to their end, each of the first ten one inline
+    /// The seeds read to their end, each of the first eleven one inline
     /// image between `q` and `Q`, and the last an `scn` of 33 operands.
     #[test]
     fn the_seeds_read_to_their_end() {
@@ -840,7 +846,7 @@ mod tests {
             let read: Vec<_> = tokens(seed, &res, &Limits::DEFAULT)
                 .collect::<Result<_, _>>()
                 .unwrap_or_else(|e| panic!("seed {i}: {e}"));
-            if i < 10 {
+            if i < 11 {
                 assert_eq!(read.len(), 3, "seed {i}");
                 assert!(matches!(read[1].1, Tok::InlineImage(_)), "seed {i}");
             }

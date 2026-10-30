@@ -14,9 +14,11 @@
 //!   [`Operations`](crate::Operations) with a sink
 //!   ([`Tokens::with_sink`](crate::Tokens::with_sink)), as each operand
 //!   is read; an inline image's dictionary's tokens too.
-//! - **An inline image's** ([`ImageLength`](Fault::ImageLength),
-//!   [`AfterId`](Fault::AfterId), [`BeforeEi`](Fault::BeforeEi), and its
-//!   dictionary's [`Key`](Fault::Key), [`Keyword`](Fault::Keyword) and
+//! - **An inline image's** ([`EscapedKey`](Fault::EscapedKey),
+//!   [`Abbreviation`](Fault::Abbreviation),
+//!   [`ImageLength`](Fault::ImageLength), [`AfterId`](Fault::AfterId),
+//!   [`BeforeEi`](Fault::BeforeEi), and its dictionary's
+//!   [`Key`](Fault::Key), [`Keyword`](Fault::Keyword) and
 //!   [`NoValue`](Fault::NoValue)): the same, as the image is read.
 //! - **A page's** ([`Across`](Fault::Across)): the same, over a page's
 //!   streams joined ([`Concat::tokens`](crate::Concat::tokens),
@@ -206,13 +208,38 @@ pub enum Fault<'a> {
         /// How many.
         count: usize,
     },
+    /// An inline image's key written with a `#` escape, decoded one of
+    /// the keys 8.9.7 reads (Table 91's, either spelling): passed over
+    /// here, as PDFium matches a key as written; ISO 32000-2 reads a name
+    /// by its escapes decoded (7.3.5), so the key is the one it names.
+    #[error("{} is an inline image's key to ISO 32000-2, and no key here", shown(.written))]
+    EscapedKey {
+        /// The key.
+        written: &'a [u8],
+    },
+    /// An inline image's key written both abbreviated and in full (8.9.7,
+    /// Table 91), where the full name's value is an abbreviated name
+    /// (Table 92) that means another than the abbreviation's: read here
+    /// by the full name's, as PDFium sets an abbreviated value over the
+    /// abbreviation's; ISO 32000-2 gives the abbreviated key precedence
+    /// (8.9.7, "shall", as its errata add).
+    #[error(
+        "an inline image's {key} is read from its full name, and by ISO 32000-2 from its abbreviation"
+    )]
+    Abbreviation {
+        /// The image's dictionary, from after `BI` to `ID`.
+        written: &'a [u8],
+        /// The key's full name.
+        key: &'static str,
+    },
     /// An inline image whose `/L` or `/Length` gives its data a length
-    /// that ends it elsewhere than it's read here, where PDFium finds an
-    /// unfiltered image's data by its size, or a filter's by its end, and
-    /// counts `/L` only when it finds neither. ISO 32000-2's `/L` is the
-    /// data's length (8.9.7, "shall"), after the white-space byte after
-    /// `ID`, and any more white-space where the last of its filters is
-    /// one of the two ASCII ones, ASCIIHexDecode and ASCII85Decode.
+    /// that ends it elsewhere than it's read here, where PDFium reads
+    /// neither: it finds an unfiltered image's data by its size, a
+    /// filter's by its end, and otherwise reads on to the next `EI`. ISO
+    /// 32000-2's `/L` is the data's length (8.9.7, "shall"), after the
+    /// white-space byte after `ID`, and any more white-space where the
+    /// last of its filters is one of the two ASCII ones, ASCIIHexDecode and
+    /// ASCII85Decode.
     #[error("an inline image's data is read as {read} bytes, where its length says {given}")]
     ImageLength {
         /// The length its dictionary gives.

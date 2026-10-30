@@ -439,7 +439,7 @@ fn word(word: &[u8]) -> Option<Value> {
 }
 
 /// A literal string's bytes, its escapes read: `(…)` as lexed.
-fn literal(string: &[u8]) -> Vec<u8> {
+pub(crate) fn literal(string: &[u8]) -> Vec<u8> {
     let inner = &string[1..string.len().saturating_sub(1).max(1)];
     let mut out = Vec::with_capacity(inner.len());
     let mut i = 0;
@@ -487,7 +487,7 @@ fn literal(string: &[u8]) -> Vec<u8> {
 
 /// A hex string's bytes: `<…>` as lexed, what isn't a hex digit passed
 /// over, an odd last digit followed by 0.
-fn hex(string: &[u8]) -> Vec<u8> {
+pub(crate) fn hex(string: &[u8]) -> Vec<u8> {
     let digits: Vec<u8> = string
         .iter()
         .filter_map(|&c| (c as char).to_digit(16).map(|d| d as u8))

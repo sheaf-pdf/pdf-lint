@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use crate::balance::Balance;
 use crate::error::Error;
-use crate::inline::ResCx;
+use crate::inline::{ResCx, expanded};
 use crate::limits::Limits;
 use crate::operations::Operation;
 use crate::page::{Concat, SpanAcross};
@@ -143,11 +143,13 @@ impl<'a> Operation<'a> {
             b"scn" | b"SCN" => (ResKind::Pattern, name(0)),
             b"BDC" | b"DP" => (ResKind::Properties, name(0)),
             _ => {
-                let keys: &[&[u8]] = &[b"CS", b"ColorSpace"];
-                let space = self.inline_image()?.entry(keys);
+                // By the name PDFium looks it up by: an abbreviation read
+                // as the full name, so `/I` as `/Indexed`.
+                let space = self.inline_image()?.entry(b"ColorSpace");
                 let space = space
                     .and_then(|s| s.name())
-                    .filter(|n| !device(n) && !abbreviated(n));
+                    .map(|n| expanded(&n).map_or(n, Cow::Borrowed))
+                    .filter(|n| !device(n));
                 (ResKind::ColorSpace, space)
             }
         };
@@ -160,8 +162,11 @@ impl<'a> Operation<'a> {
 /// (ranges to be taken out, whole streams among them):
 /// - `Tf`'s font, `Do`'s XObject, `gs`'s ExtGState and `sh`'s shading;
 /// - `cs` and `CS`'s color space, and an inline image's, but for the
-///   device spaces and `/Pattern`, which aren't resources, and an inline
-///   image's abbreviations of them;
+///   device spaces and `/Pattern`, which aren't resources: an inline
+///   image's as PDFium reads its dictionary
+///   ([`InlineImage::entry`](crate::InlineImage::entry)), by the name it
+///   looks it up by, an abbreviation read as the full name (8.9.7, Table
+///   92), so `/G` is none and `/I` is `/Indexed`;
 /// - `scn` and `SCN`'s pattern, when the last operand is a name;
 /// - `BDC` and `DP`'s property list, when it's named.
 ///
@@ -246,9 +251,4 @@ fn device(name: &[u8]) -> bool {
         name,
         b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK" | b"Pattern"
     )
-}
-
-/// Whether a color space name is an inline image's abbreviation.
-fn abbreviated(name: &[u8]) -> bool {
-    matches!(name, b"G" | b"RGB" | b"CMYK" | b"I")
 }

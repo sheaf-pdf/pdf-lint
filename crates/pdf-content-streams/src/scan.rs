@@ -166,6 +166,20 @@ pub(crate) fn run_length_end(s: &[u8], mut at: usize) -> Option<usize> {
     None
 }
 
+/// Where ASCII85 data from `at` ends, as PDFium's decoder reads it: past
+/// the first byte that's neither one of its digits (`!` to `u`), `z`, nor
+/// white-space it passes over (CR, LF, space and tab), `~` among them, and
+/// past a `>` straight after; where it starts when that byte is its first.
+/// None when no such byte comes before the end.
+pub(crate) fn a85_end(s: &[u8], at: usize) -> Option<usize> {
+    let passed = |c: &u8| matches!(c, b'!'..=b'u' | b'z' | b'\r' | b'\n' | b' ' | b'\t');
+    let first = at + s.get(at..)?.iter().position(|c| !passed(c))?;
+    if first == at {
+        return Some(at);
+    }
+    Some(first + 1 + usize::from(s.get(first + 1) == Some(&b'>')))
+}
+
 /// The first `EI` from `start` with white-space before it and white-space,
 /// a delimiter or the end after it: where it is.
 pub(crate) fn ei_scan(s: &[u8], start: usize) -> Option<usize> {
