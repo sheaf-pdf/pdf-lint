@@ -573,7 +573,9 @@ impl<S: ByteSource> Reading<S> {
     }
 
     /// The file's revisions, the first first, as [`Document::revisions`]
-    /// gives them: none where its sections didn't read.
+    /// gives them: none where its sections didn't read, nor where its later
+    /// revisions list more numbers in all than it reads entries
+    /// ([`Limits::entries`](crate::Limits::entries)).
     pub fn revisions(&self) -> &[Revision] {
         &self.reader.revisions
     }

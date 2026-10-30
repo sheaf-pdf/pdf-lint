@@ -592,14 +592,17 @@ pub enum Class {
     Other,
 }
 
-/// A check a predicate that can't be told stood in the way of.
+/// A check a predicate that can't be told stood in the way of; or an
+/// earlier revision's trailer that can't be checked, its column and key
+/// `-`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Unchecked {
     /// The column whose cell it is.
     pub column: &'static str,
     /// What's in the way ([`Truth::Unknown`]'s): a function
     /// (`fn:IsMeaningful`), a value that can't be read (`@Type`), or a
-    /// string's bytes the reader didn't give.
+    /// string's bytes the reader didn't give; for a trailer, why it can't
+    /// be checked ([`UNTOLD`], [`UNKEPT`]).
     pub why: String,
     pub table: String,
     pub key: String,
@@ -615,7 +618,8 @@ pub struct Report {
     pub checked: BTreeMap<String, usize>,
     /// Keys and elements of held objects checked against their rows.
     pub keys: usize,
-    /// Checks not made, for a predicate that can't be told.
+    /// Checks not made, for a predicate that can't be told; and earlier
+    /// revisions' trailers held that can't be checked, by why.
     pub unchecked: BTreeMap<Unchecked, usize>,
     /// Keys and elements of held objects the model doesn't list.
     pub unlisted: BTreeMap<Unlisted, usize>,
@@ -701,10 +705,32 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         .extensions(&extensions);
     // The earlier revisions' trailers held, and what each one's predicates
     // are evaluated in: its trailer, the objects that revision had, and
-    // the file's length, as where a revision ended isn't recorded.
+    // the file's length, as where a revision ended isn't recorded. Those
+    // before a revision whose numbers aren't known are counted as not
+    // checked, as are a file's whose revisions the reader didn't keep.
     let revisions = source.revisions();
-    let held = held_revisions(revisions, hold);
-    let written_since = match held.is_empty() {
+    let first = first_known(revisions);
+    let (held, untold): (Vec<_>, Vec<_>) =
+        (held_revisions(revisions, hold).into_iter()).partition(|&(revision, _)| revision > first);
+    let mut unchecked = BTreeMap::new();
+    for (_, trailer) in untold {
+        let table = match trailer.object.value() {
+            Value::Stream(_) => "XRefStream",
+            _ => "FileTrailer",
+        };
+        *unchecked.entry(not_checked(table, UNTOLD)).or_default() += 1;
+    }
+    let unkept = source
+        .facts()
+        .is_some_and(|f| f.newest.is_some() && f.sections > 1);
+    if revisions.is_empty() && unkept && matches!(hold, Hold::All(_)) {
+        unchecked.insert(not_checked("-", UNKEPT), 1);
+    }
+    // Each number a later revision lists, where an earlier trailer is held
+    // or names an encryption dictionary (`Walk::packed`).
+    let encrypts = (revisions.split_last())
+        .is_some_and(|(_, earlier)| earlier.iter().any(|r| r.trailer.dict().has(b"Encrypt")));
+    let written_since = match held.is_empty() && !encrypts {
         true => HashMap::new(),
         false => listed_last(revisions),
     };
@@ -766,6 +792,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         containers: Vec::new(),
         report: Report {
             findings,
+            unchecked,
             trailer: id,
             extensions: checked_under,
             ..Report::default()
@@ -1019,17 +1046,12 @@ struct Earlier<'a> {
 /// first as 1, with its trailer, the newest first: with every object held,
 /// every one; else a cross-reference stream whose number `hold` names, as
 /// merged, and never a table's, as a hold names what a writer wrote, and
-/// `--last-update` the last revision's. None before a revision after the
-/// first whose numbers aren't known, as what it wrote over can't be told.
+/// `--last-update` the last revision's.
 fn held_revisions<'s>(revisions: &'s [Revision], hold: &Hold) -> Vec<(usize, &'s Trailer)> {
     let Some((_, earlier)) = revisions.split_last() else {
         return Vec::new();
     };
-    let known = (1..revisions.len())
-        .rev()
-        .find(|&i| revisions[i].numbers.is_none())
-        .unwrap_or(0);
-    (earlier.iter().enumerate().skip(known).rev())
+    (earlier.iter().enumerate().rev())
         .filter(|(_, revision)| match (hold, revision.trailer.stream) {
             (Hold::All(_), _) => true,
             (Hold::Only(objects), Some(id)) => objects.contains_key(&id),
@@ -1037,6 +1059,37 @@ fn held_revisions<'s>(revisions: &'s [Revision], hold: &Hold) -> Vec<(usize, &'s
         })
         .map(|(i, revision)| (i + 1, &revision.trailer))
         .collect()
+}
+
+/// How many of `revisions`, the first first, come before the last after
+/// the first whose numbers aren't known ([`Revision::numbers`]): what it
+/// wrote over of theirs can't be told, so their trailers can't be checked,
+/// nor what they name told. 0 where every one's are.
+fn first_known(revisions: &[Revision]) -> usize {
+    (1..revisions.len())
+        .rev()
+        .find(|&i| revisions[i].numbers.is_none())
+        .unwrap_or(0)
+}
+
+/// Why an earlier revision's trailer held isn't checked, before a revision
+/// whose numbers aren't known ([`first_known`]).
+const UNTOLD: &str = "an earlier revision's trailer, before a revision whose numbers aren't known";
+
+/// Why the earlier revisions' trailers of a file aren't checked, every
+/// object held, when the reader read more than one cross-reference section
+/// but kept no revisions: their numbers are more in all than it reads
+/// entries ([`Limits::entries`](crate::bytes::Limits::entries)).
+const UNKEPT: &str = "the earlier revisions' trailers, which the reader didn't keep";
+
+/// An earlier revision's trailer, as `table`, not checked for `why`.
+fn not_checked(table: &str, why: &str) -> Unchecked {
+    Unchecked {
+        column: "-",
+        why: why.to_string(),
+        table: table.to_string(),
+        key: "-".to_string(),
+    }
 }
 
 /// Each number a revision after the first lists, in use or free, with the
@@ -1142,7 +1195,8 @@ struct Walk<'a> {
     /// Each number a revision after the first lists, in use or free, with
     /// the last that lists it, counted from the first as 1: an earlier
     /// revision's object at that number was written over or freed since.
-    /// Only where an earlier trailer is held.
+    /// Only where an earlier trailer is held, or names an encryption
+    /// dictionary.
     written: &'a HashMap<u32, usize>,
     /// Set when an evaluation in an earlier revision's trailer asks for an
     /// object written over or freed since ([`AsOf`]).
@@ -2983,7 +3037,7 @@ impl<'a> Walk<'a> {
                 members.entry(n).or_default().push(id);
             }
         }
-        let encryption = encryption_dictionaries(source);
+        let encryption = encryption_dictionaries(source, self.written);
         let mut lengths: BTreeMap<ObjectId, Vec<ObjectId>> = BTreeMap::new();
         for &stream in &self.containers {
             let length = (source.get(stream).ok())
@@ -3277,32 +3331,26 @@ fn stream_follows(data: &[u8], end: usize) -> bool {
 
 /// The objects the trailers name as the file's encryption dictionary, by
 /// reference (`/Encrypt`): the newest's, and each earlier revision's where
-/// no later revision lists its number, as one that wrote the number over
-/// or freed it put another object there, or none; where a later
-/// revision's numbers aren't known, nor those before it.
-fn encryption_dictionaries(source: &dyn Source) -> BTreeSet<ObjectId> {
+/// no later revision lists its number, as `written` has them
+/// ([`Walk::written`]), as one that wrote the number over or freed it put
+/// another object there, or none; where a later revision's numbers aren't
+/// known, nor those before it ([`first_known`]).
+fn encryption_dictionaries(
+    source: &dyn Source,
+    written: &HashMap<u32, usize>,
+) -> BTreeSet<ObjectId> {
     let named = |trailer: &Trailer| trailer.dict().get(b"Encrypt")?.as_reference();
     let mut named_by: BTreeSet<ObjectId> = named(source.trailer()).into_iter().collect();
     let revisions = source.revisions();
-    let Some((_, earlier)) = revisions.split_last() else {
-        return named_by;
-    };
-    let earlier: Vec<(usize, ObjectId)> = (earlier.iter().enumerate())
-        .filter_map(|(i, revision)| Some((i + 1, named(&revision.trailer)?)))
-        .collect();
-    if earlier.is_empty() {
-        return named_by;
+    if let Some((_, earlier)) = revisions.split_last() {
+        let known = earlier.iter().enumerate().skip(first_known(revisions));
+        named_by.extend(
+            known
+                .filter_map(|(i, revision)| Some((i + 1, named(&revision.trailer)?)))
+                .filter(|&(revision, id)| !written_since(written, revision, id))
+                .map(|(_, id)| id),
+        );
     }
-    let known = (1..revisions.len())
-        .rev()
-        .find(|&i| revisions[i].numbers.is_none())
-        .unwrap_or(0);
-    let written = listed_last(revisions);
-    named_by.extend(
-        (earlier.into_iter())
-            .filter(|&(revision, id)| revision > known && !written_since(&written, revision, id))
-            .map(|(_, id)| id),
-    );
     named_by
 }
 
@@ -5896,6 +5944,68 @@ mod tests {
             [(None, "trailer 1", "FileTrailer", "Prev", Rule::Value, prev)],
             "{report}"
         );
+    }
+
+    /// An earlier revision's trailer that can't be checked is counted as
+    /// not checked, never passed over: one before a revision whose numbers
+    /// aren't known, as a reader of its own may give, since what that
+    /// revision wrote over of its own can't be told, the revision itself
+    /// checked; and, every object held, a file's whose revisions the reader
+    /// didn't keep, as they list more numbers in all than it reads entries.
+    /// Not held, neither is counted.
+    #[test]
+    fn earlier_trailers_that_cant_be_checked_are_counted() {
+        // Five revisions, the first two's trailers without /Size, each
+        // after the first listing object 2 alone.
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        let mut at = file.table(&[0, 1, 2], "/Root 1 0 R");
+        for size in ["", "/Size 3 ", "/Size 3 ", "/Size 3 "] {
+            file.end(at).object(2, PAGES);
+            at = file.table(&[2], &format!("{size}/Root 1 0 R /Prev {at}"));
+        }
+        file.end(at);
+        let missing = |report: &Report| {
+            let found = walked(report).into_iter();
+            let missing = found.filter(|&(.., rule, _)| rule == Rule::Missing);
+            missing
+                .map(|(_, path, ..)| path.to_string())
+                .collect::<Vec<_>>()
+        };
+        let trailers = |report: &Report| {
+            let unchecked = report.unchecked.iter();
+            let trailers = unchecked.filter(|(u, _)| u.column == "-");
+            trailers.map(|(u, &n)| (u.clone(), n)).collect::<Vec<_>>()
+        };
+        let all = Hold::All(Made::Merged);
+        let some = Hold::Only(BTreeMap::from([((2, 0), Made::Merged)]));
+        let mut doc = bytes::read(&file.out);
+        assert_eq!(doc.revisions.len(), 5);
+        let report = check(&doc, &all, &Options::default());
+        assert_eq!(missing(&report), ["trailer 2", "trailer 1"], "{report}");
+        assert_eq!(trailers(&report), [], "{report}");
+
+        // The third's numbers not known: the first two not checked.
+        doc.revisions[2].numbers = None;
+        let report = check(&doc, &all, &Options::default());
+        assert_eq!(missing(&report), Vec::<String>::new(), "{report}");
+        let untold = not_checked("FileTrailer", UNTOLD);
+        assert_eq!(trailers(&report), [(untold, 2)], "{report}");
+        assert_eq!(report.checked.get("FileTrailer"), Some(&3), "{report}");
+        assert_eq!(trailers(&check(&doc, &some, &Options::default())), []);
+
+        // Read listing no more than three entries: the four later
+        // revisions list four numbers in all, so none is kept.
+        let mut options = bytes::Options::DEFAULT;
+        options.limits.entries = Some(3);
+        let doc = (bytes::Reading::open(&file.out[..], &options))
+            .and_then(bytes::Reading::into_document)
+            .unwrap();
+        assert!(doc.revisions.is_empty() && doc.warnings.is_empty());
+        let report = check(&doc, &all, &Options::default());
+        assert_eq!(missing(&report), Vec::<String>::new(), "{report}");
+        assert_eq!(trailers(&report), [(not_checked("-", UNKEPT), 1)]);
+        assert_eq!(trailers(&check(&doc, &some, &Options::default())), []);
     }
 
     /// An earlier revision's cross-reference stream is checked as

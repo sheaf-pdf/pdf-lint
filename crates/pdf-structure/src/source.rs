@@ -51,12 +51,17 @@ pub trait Source {
         None
     }
     /// The file's revisions, the first first, when the reader read its
-    /// cross-reference sections.
+    /// cross-reference sections: the last is the newest, whose trailer is
+    /// [`Source::trailer`]'s. A checker tells what a later revision wrote
+    /// over of an earlier one's by its [`Revision::numbers`].
     fn revisions(&self) -> &[Revision] {
         &[]
     }
     /// What the file's header and sections say of it, as written, when the
-    /// reader knows.
+    /// reader knows. A [`Document`] gives its own ([`Document::facts`]),
+    /// the defaults where its reader recorded none, as in a document built:
+    /// there, [`Facts::linearized`] false says only that it isn't known to
+    /// be.
     fn facts(&self) -> Option<&Facts> {
         None
     }
@@ -361,9 +366,12 @@ pub struct Revision {
     /// Its trailer: its newest section's, the dictionary after `trailer`
     /// or the cross-reference stream ([`Trailer::stream`]).
     pub trailer: Trailer,
-    /// The numbers its sections list, in use or free, but 0, in order:
-    /// what it may have written over of an earlier revision's. None for
-    /// the first, before which there's none.
+    /// The numbers its sections list, in use or free, but 0, ascending,
+    /// each once: what it may have written over of an earlier revision's.
+    /// None for the first, before which there's none. After the first, none
+    /// where the reader doesn't know them: what it wrote over of the
+    /// revisions before it can't then be told, so a checker checks none of
+    /// their trailers.
     pub numbers: Option<Box<[u32]>>,
 }
 
