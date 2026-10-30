@@ -872,7 +872,11 @@ impl Report {
     /// finding at the same path for, alike as [`Report::beyond`] has them;
     /// or, where the baseline reached nothing at that path, as where a page
     /// moved, no like finding anywhere. A rewrite renumbers objects, but
-    /// most stay where they were.
+    /// most stay where they were. A path from an object's number, an
+    /// object stream's or an earlier revision's cross-reference stream's
+    /// (`12 0 R/DecodeParms`), is no place a rewrite keeps, as it's the
+    /// number it renumbers: a finding there is carried by a like one
+    /// anywhere.
     pub fn by_path<'a>(&'a self, baseline: &Report) -> Vec<&'a Finding> {
         let at_path: HashSet<_> = (baseline.findings.iter())
             .map(|f| (f.path.as_str(), like(f)))
@@ -880,7 +884,8 @@ impl Report {
         let anywhere: HashSet<_> = baseline.findings.iter().map(like).collect();
         (self.findings.iter())
             .filter(|f| {
-                let carried = match baseline.paths.contains(&f.path) {
+                let placed = baseline.paths.contains(&f.path) && !from_number(&f.path);
+                let carried = match placed {
                     true => at_path.contains(&(f.path.as_str(), like(f))),
                     false => anywhere.contains(&like(f)),
                 };
@@ -3339,6 +3344,18 @@ fn packed_in(stream: ObjectId, made: Made, value: String, at: Option<Span>) -> F
 /// An object as a path from its number starts: `12 0 R`.
 fn object_path((n, g): ObjectId) -> String {
     format!("{n} {g} R")
+}
+
+/// Whether `path` starts from an object's number, as [`object_path`]
+/// writes it: `12 0 R`, `12 0 R/DecodeParms`. A path cut short to its last
+/// steps, from `…`, names no number.
+fn from_number(path: &str) -> bool {
+    let first = path.split(['/', '[', '{']).next().unwrap_or_default();
+    let digits = |word: &str| !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit());
+    match first.split(' ').collect::<Vec<_>>()[..] {
+        [n, g, "R"] => digits(n) && digits(g),
+        _ => false,
+    }
 }
 
 /// The field tables, as a widget's `/Parent` links them.
@@ -7699,6 +7716,59 @@ mod tests {
             [&written, &built],
             "Kids[1] had none, though Kids[0] had one; the baseline has no Kids[2]"
         );
+    }
+
+    /// A rewrite renumbers objects, so a finding from an object stream's
+    /// number is carried by a like one anywhere in the baseline: the
+    /// baseline's fault in object stream 15, rewritten at 12, where the
+    /// baseline has a clean one, and at 20, where it has none, is carried
+    /// both ways.
+    #[test]
+    fn by_path_carries_a_finding_from_a_number_from_anywhere() {
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>";
+        let objects = [
+            (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        ];
+        let faulty = "/Type /ObjStm /Extends 1 0 R";
+        let other = (4, "<< /A 1 >>");
+        let options = Options {
+            paths: true,
+            ..Options::default()
+        };
+        let hold = Hold::All(Made::Merged);
+        let checked = |file: Vec<u8>| check(&bytes::read(&file), &hold, &options);
+        // The /Extends of type its row doesn't allow: its object and path.
+        let typed = |report: &Report| {
+            let found = walked(report).into_iter();
+            let typed = found.filter(|&(.., rule, value)| {
+                rule == Rule::Type && value == "<< /Pages 2 0 R /Type /Catalog >>"
+            });
+            typed
+                .map(|(n, path, ..)| (n, path.to_string()))
+                .collect::<Vec<_>>()
+        };
+        let clean = [(3, page)];
+        let streams: [Packed; 2] = [(12, "/Type /ObjStm", &clean), (15, faulty, &[other])];
+        let baseline = checked(packed(&objects, &streams));
+        assert_eq!(typed(&baseline), [(Some(15), "15 0 R".to_string())]);
+        assert!(baseline.paths.contains("12 0 R"));
+        for n in [12, 20] {
+            let rewrite = checked(packed(&objects, &[(n, faulty, &[(3, page), other])]));
+            assert_eq!(typed(&rewrite), [(Some(n), format!("{n} 0 R"))]);
+            assert_eq!(rewrite.by_path(&baseline), Vec::<&Finding>::new(), "{n}");
+        }
+        assert!(from_number("12 0 R") && from_number("12 0 R/DecodeParms"));
+        for path in [
+            "trailer",
+            "trailer 1/ID",
+            "Root/Pages",
+            "-",
+            "…Kids[0]",
+            "1 0 Rx",
+        ] {
+            assert!(!from_number(path), "{path}");
+        }
     }
 
     #[test]
