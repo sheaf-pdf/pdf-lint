@@ -7762,3 +7762,374 @@ fn an_update_that_moves_what_stays_where_it_is_is_refused() {
         assert_eq!(out, file, "{case}");
     }
 }
+
+// A document read whole, taken by a reading of its file opened again
+// (`Reading::adopt`): each record that reading's where it reads each object
+// alike and the document is encrypted as its file is, so that it's written
+// as a document made beside the reading is; else left as it was.
+
+/// What `doc`, a document of `file`, writes through `reading`, a reading
+/// of `file`, under that reading's own encryption: whole, with a table and
+/// with a stream, packed; and as an update after the file, under no
+/// renumbering and under `map`. And how many objects the table copied as
+/// the bytes they were read from.
+fn written_through<S: ByteSource>(
+    doc: &crate::Document,
+    reading: &Reading<S>,
+    file: &[u8],
+    map: &Map,
+) -> (Vec<Vec<u8>>, usize) {
+    let encryptor = Encryptor::of(reading).unwrap();
+    let encryptor = encryptor.as_ref();
+    let mut outs = Vec::new();
+    let mut copies = 0;
+    let ways = [
+        (XrefKind::Table, None),
+        (XrefKind::Stream, Some(write::Pack::DEFAULT)),
+    ];
+    for (kind, pack) in ways {
+        let mut out = Vec::new();
+        let options = options(kind, pack);
+        let written = write::document(&mut out, doc, encryptor, Some(reading), &options).unwrap();
+        if pack.is_none() {
+            for (id, body) in write::bodies(doc) {
+                if let write::Body::Read { record, .. } = &body {
+                    copies += usize::from(copied(&out, &written, record, reading, id));
+                }
+            }
+        }
+        outs.push(out);
+    }
+    let base = write::Base::of(reading).unwrap();
+    let mut out = file.to_vec();
+    let defaults = write::Options::DEFAULT;
+    let given = write::bodies(doc);
+    write::update(&mut out, &base, given, encryptor, Some(reading), &defaults).unwrap();
+    outs.push(out);
+    let given = write::bodies(doc);
+    let (out, _) = updated_under(file, &base, given, encryptor, Some(reading), map);
+    outs.push(out);
+    (outs, copies)
+}
+
+/// `doc` taken by `reading` ([`Reading::adopt`]): each record, the same
+/// many, that reading's, the document otherwise as it was; and what it then
+/// writes through it ([`written_through`]).
+fn taken_through<S: ByteSource>(
+    doc: &crate::Document,
+    reading: &Reading<S>,
+    file: &[u8],
+    map: &Map,
+    name: &str,
+) -> (Vec<Vec<u8>>, usize) {
+    let mut taken = doc.clone();
+    reading.adopt(&mut taken).unwrap();
+    assert_eq!(taken, *doc, "{name}");
+    assert_eq!(taken.records().count(), doc.records().count(), "{name}");
+    let source = reading.id();
+    assert!(taken.records().all(|(_, r)| r.source == source), "{name}");
+    written_through(&taken, reading, file, map)
+}
+
+/// Every test file (qpdf's committed ones where they are, [`spelled`],
+/// [`members_spelled`], and the test writer's under each of its methods,
+/// the document's metadata encrypted and not) read whole by the user's
+/// password and by the owner's (`bytes::read_opened`; a reading made a
+/// document, `Reading::into_document`), its catalog given a key. Written
+/// through a reading of its file opened again by the other password, it's
+/// refused, its records another reading's ([`Error::Elsewhere`]). Taken by
+/// that reading, in memory and by position (`FileBytes`), each record but
+/// the catalog's, which its edit dropped, is that reading's, the document
+/// otherwise as it was; and it writes what a document made beside that
+/// reading ([`Reading::to_document`]), its catalog given the key too,
+/// writes: whole, with a table and with a stream, packed, and as an update
+/// after the file, under no renumbering and one that moves the catalog and
+/// a stream past every number, the same bytes, the same copies among them.
+/// Read back, each object is the file's at its number, the catalog with
+/// its key.
+#[cfg(any(unix, windows))]
+#[test]
+fn a_document_read_whole_is_written_through_a_reading_that_takes_it() {
+    let qpdf = [
+        "qpdf-plain",
+        "qpdf-compressed",
+        "qpdf-rc4-40",
+        "qpdf-rc4-128",
+        "qpdf-aes-128",
+        "qpdf-aes-256-r5",
+        "qpdf-aes-256",
+        "qpdf-aes-256-unpacked",
+    ];
+    let mut files: Vec<(String, Vec<u8>, [&str; 2])> = (qpdf.iter())
+        .filter_map(|name| Some((name.to_string(), bytes::lazy::fixture(name)?, ["", "owner"])))
+        .collect();
+    assert_eq!(files.len(), if bytes::lazy::fixtures() { 8 } else { 0 });
+    files.push(("spelled".into(), spelled(), ["", ""]));
+    files.push(("members spelled".into(), members_spelled(), ["", ""]));
+    for kind in KINDS_ENCRYPTED {
+        for encrypt_metadata in [true, false] {
+            let name = format!("{kind:?}, metadata encrypted: {encrypt_metadata}");
+            let file = written_otherwise(kind, encrypt_metadata);
+            files.push((name, file, ["user", "owner"]));
+        }
+    }
+    let dir = (tempfile::Builder::new())
+        .prefix("pdf-structure-taken-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("taken.pdf");
+    let (mut taken, mut copies) = (0, 0);
+    for (name, file, [user, owner]) in &files {
+        std::fs::write(&path, file).unwrap();
+        for (read_by, taken_by) in [(*user, *owner), (*owner, *user)] {
+            let name = format!("{name}, read by {read_by:?}, taken by {taken_by:?}");
+            let passwords = [Password(read_by)];
+            let mut doc = match read_by == *user {
+                true => bytes::read_opened(file, &passwords),
+                false => (Reading::open_with(&file[..], &passwords, &Options::DEFAULT))
+                    .unwrap()
+                    .into_document()
+                    .unwrap(),
+            };
+            let reading = opened(file, taken_by);
+            let mut own = reading.to_document().unwrap();
+            for d in [&mut doc, &mut own] {
+                d.catalog_mut().unwrap().set("Taken", true);
+            }
+            let root = doc.trailer.dict().get(b"Root");
+            let root = root.and_then(Object::as_reference).unwrap();
+            let stream = (written_of(&doc).into_iter())
+                .find(|&id| doc.get(id).unwrap().as_stream().is_some());
+            let base = write::Base::of(&reading).unwrap();
+            let moves: Vec<(u32, u32)> = ([Some(root), stream].into_iter().flatten())
+                .zip(base.size..)
+                .map(|(id, n)| (id.0, n))
+                .collect();
+            let map = moving(&reading, &moves);
+            // Before it's taken, its records are another reading's.
+            let encryptor = Encryptor::of(&reading).unwrap();
+            let mut out = Vec::new();
+            let options = options(XrefKind::Table, None);
+            let refused =
+                write::document(&mut out, &doc, encryptor.as_ref(), Some(&reading), &options);
+            assert!(
+                matches!(refused, Err(Error::Elsewhere(_))),
+                "{name}: {refused:?}"
+            );
+            assert!(out.is_empty(), "{name}");
+            let (want, own_copies) = written_through(&own, &reading, file, &map);
+            let (got, got_copies) = taken_through(&doc, &reading, file, &map, &name);
+            assert!(got == want, "{name}: in memory");
+            assert_eq!(got_copies, own_copies, "{name}");
+            let source = crate::bytes::FileBytes::new(std::fs::File::open(&path).unwrap());
+            let passwords = [Password(taken_by)];
+            let by_position = Reading::open_with(source.unwrap(), &passwords, &Options::DEFAULT);
+            let (got, _) = taken_through(&doc, &by_position.unwrap(), file, &map, &name);
+            assert!(got == want, "{name}: by position");
+            (taken, copies) = (taken + 1, copies + own_copies);
+            // Read back: whole, the update under none, and under the map.
+            let identity = |id| Some(id);
+            let to = by(&map);
+            let tos: [&dyn Fn(ObjectId) -> Option<ObjectId>; 4] =
+                [&identity, &identity, &identity, &to];
+            let kept: Vec<ObjectId> = (written_of(&doc).into_iter())
+                .filter(|&id| id != root)
+                .collect();
+            for (out, to) in want.iter().zip(tos) {
+                let back = opened(out, taken_by);
+                assert!(sound(&back), "{name}: {:?}", back.warnings());
+                assert_moved(&reading, &back, &kept, to, &name);
+                let catalog = handed(&back, to(root).unwrap());
+                let key = catalog.as_dict().and_then(|d| d.get(b"Taken"));
+                assert_eq!(key.and_then(Object::as_bool), Some(true), "{name}");
+            }
+        }
+    }
+    assert_eq!(taken, 2 * files.len(), "each file taken both ways");
+    assert!(copies > 0, "copies of documents taken");
+}
+
+/// Each of `doc`'s records' reading, by number.
+fn sources_of(doc: &crate::Document) -> Vec<(ObjectId, bytes::SourceId)> {
+    (doc.records())
+        .map(|(id, record)| (id, record.source))
+        .collect()
+}
+
+/// `reading` doesn't take `doc`, as `why` says ([`bytes::Error::Unlike`]),
+/// and leaves it as it was, its records their own reading's.
+fn not_taken<S: ByteSource>(
+    reading: &Reading<S>,
+    doc: &crate::Document,
+    why: Option<ObjectId>,
+    name: &str,
+) {
+    let mut left = doc.clone();
+    let got = reading.adopt(&mut left);
+    let unlike = matches!(got, Err(bytes::Error::Unlike { id }) if id == why);
+    assert!(unlike, "{name}: {got:?}");
+    assert_eq!(left, *doc, "{name}");
+    assert_eq!(sources_of(&left), sources_of(doc), "{name}");
+}
+
+/// A document isn't taken by a reading that doesn't read each of its
+/// objects alike, or whose file isn't encrypted as it is, and is left as it
+/// was: another file; the file changed since, a byte of an object's
+/// flipped, or an update appended that writes the page again; a reading as
+/// of the revision before that update, the document read as of the newest,
+/// and the other way; under each method the test writer encrypts by, the
+/// same objects' bytes under another `/ID[0]`, every object read alike but
+/// the key made of another, which the user's password then opens under
+/// AES-256 alone, whose key isn't made of it; the same encryption
+/// dictionary at two numbers, every object read alike, the trailer naming
+/// the one, then the other, which the reader leaves in the clear; and a
+/// direct encryption dictionary with another `/P`. The file as it was, and
+/// a reading as of the revision the document was read as of, take it, and
+/// so does a file whose `/Encrypt` is null or names no object, which isn't
+/// encrypted.
+#[test]
+fn a_document_a_reading_doesn_t_read_alike_isn_t_taken() {
+    let file = spelled();
+    let doc = bytes::read(&file);
+    not_taken(
+        &open(&members_spelled()),
+        &doc,
+        Some((1, 0)),
+        "another file",
+    );
+    // A byte of an object flipped: its real, `1.50`, now `1.51`.
+    let at = file.windows(4).position(|w| w == b"1.50").unwrap() + 3;
+    let mut flipped = file.clone();
+    flipped[at] = b'1';
+    not_taken(&open(&flipped), &doc, Some((3, 0)), "a byte flipped");
+    open(&file).adopt(&mut doc.clone()).unwrap();
+    // Not encrypted, as the reader reads a null `/Encrypt` and one naming no
+    // object.
+    for encrypt in ["null", "99 0 R"] {
+        let trailer = format!("<< /Size 7 /Root 1 0 R /Encrypt {encrypt} >>");
+        let file = fixture::assembled("1.7", &SPELLED, &trailer);
+        let reading = open(&file);
+        assert!(
+            matches!(reading.encryption(), Encryption::None),
+            "{encrypt}"
+        );
+        reading.adopt(&mut bytes::read(&file)).unwrap();
+    }
+    // An update appended that writes the page again; and its file read as
+    // of the revision before it, and as of the newest.
+    let (first, updated, previous) = and_updated();
+    let doc = bytes::read(&first);
+    not_taken(&open(&updated), &doc, Some(PAGE), "an update appended");
+    open(&first).adopt(&mut doc.clone()).unwrap();
+    let mut before = Options::DEFAULT;
+    before.section = Some(previous);
+    let as_of = Reading::open(Arc::<[u8]>::from(&updated[..]), &before).unwrap();
+    let newest = bytes::read(&updated);
+    not_taken(&as_of, &newest, Some(PAGE), "as of the revision before");
+    let doc = bytes::read_from(&updated, previous);
+    not_taken(&open(&updated), &doc, Some(PAGE), "as of the newest");
+    as_of.adopt(&mut doc.clone()).unwrap();
+    // The same objects' bytes under another /ID[0]: the trailer's first
+    // string, read backward.
+    for kind in KINDS_ENCRYPTED {
+        let name = format!("{kind:?}");
+        let file = written_otherwise(kind, true);
+        let trailer = file.windows(7).rposition(|w| w == b"trailer").unwrap();
+        let at = trailer
+            + file[trailer..]
+                .windows(ID.len())
+                .position(|w| w == ID)
+                .unwrap();
+        let mut other = file.clone();
+        other[at..at + ID.len()].reverse();
+        let doc = bytes::read_opened(&file, &[Password("user")]);
+        let reading = opened(&other, "user");
+        for (id, record) in doc.records() {
+            let (_, own) = reading.object_unkept(id).unwrap();
+            assert_eq!(own, *record, "{name}: {id:?}");
+        }
+        let per_object = !matches!(kind, Kind::Aes256R5 | Kind::Aes256);
+        let opens = matches!(reading.encryption(), Encryption::Opened { .. });
+        assert_eq!(opens, !per_object, "{name}");
+        not_taken(&reading, &doc, None, &name);
+        opened(&file, "owner").adopt(&mut doc.clone()).unwrap();
+    }
+    // The dictionary at two numbers, the trailer naming one, then the other.
+    for kind in KINDS_ENCRYPTED {
+        let name = format!("{kind:?}, at another number");
+        let dict = Object::from(dictionary_of(kind, true));
+        let named = |n: u32| {
+            let mut out = b"%PDF-1.7\n".to_vec();
+            let one = serialize::indirect(&mut out, (1, 0), &catalog()).unwrap();
+            let first = serialize::indirect(&mut out, (ENCRYPT, 0), &dict).unwrap();
+            let second = serialize::indirect(&mut out, (ENCRYPT + 1, 0), &dict).unwrap();
+            let xref = out.len();
+            out.extend_from_slice(
+                format!(
+                    "xref\n0 2\n0000000000 65535 f \n{one:010} 00000 n \n\
+                     {ENCRYPT} 2\n{first:010} 00000 n \n{second:010} 00000 n \ntrailer\n"
+                )
+                .as_bytes(),
+            );
+            let id = Object::hex(ID);
+            let trailer = dict! {
+                "Size" => i64::from(ENCRYPT + 2),
+                "Root" => Object::reference(1),
+                "Encrypt" => Object::reference(n),
+                "ID" => vec![id.clone(), id],
+            };
+            serialize::write(&mut out, &Object::from(trailer)).unwrap();
+            out.extend_from_slice(format!("\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+            out
+        };
+        let (file, other) = (named(ENCRYPT), named(ENCRYPT + 1));
+        let doc = bytes::read_opened(&file, &[Password("user")]);
+        let reading = opened(&other, "user");
+        for (id, record) in doc.records() {
+            let (_, own) = reading.object_unkept(id).unwrap();
+            assert_eq!(own, *record, "{name}: {id:?}");
+        }
+        not_taken(&reading, &doc, None, &name);
+        opened(&file, "owner").adopt(&mut doc.clone()).unwrap();
+    }
+    // A direct encryption dictionary with another /P.
+    for kind in KINDS_ENCRYPTED {
+        let name = format!("{kind:?}, direct");
+        let dict = dictionary_of(kind, true);
+        let file = source(dict.clone(), true);
+        let mut changed = dict;
+        changed.set("P", -8);
+        let doc = bytes::read_opened(&file, &[Password("user")]);
+        assert!(doc.records().count() > 0, "{name}");
+        not_taken(&opened(&source(changed, true), "user"), &doc, None, &name);
+        opened(&file, "user").adopt(&mut doc.clone()).unwrap();
+    }
+}
+
+/// A reading by position whose file was cut short after it was opened
+/// doesn't take a document, as it can't read the objects to compare
+/// ([`bytes::Error::Io`]), and leaves it as it was; the file as it was
+/// again, asked again, it reads them again, and takes it.
+#[cfg(any(unix, windows))]
+#[test]
+fn a_document_isn_t_taken_where_its_file_doesn_t_read() {
+    let file = spelled();
+    let dir = (tempfile::Builder::new())
+        .prefix("pdf-structure-cut-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("cut.pdf");
+    std::fs::write(&path, &file).unwrap();
+    let source = crate::bytes::FileBytes::new(std::fs::File::open(&path).unwrap()).unwrap();
+    let reading = Reading::open(source, &Options::DEFAULT).unwrap();
+    let doc = bytes::read(&file);
+    std::fs::write(&path, &file[..20]).unwrap();
+    let mut left = doc.clone();
+    let got = reading.adopt(&mut left);
+    assert!(matches!(got, Err(bytes::Error::Io(_))), "{got:?}");
+    assert_eq!(left, doc);
+    assert_eq!(sources_of(&left), sources_of(&doc));
+    std::fs::write(&path, &file).unwrap();
+    reading.adopt(&mut left).unwrap();
+    assert!(left.records().all(|(_, r)| r.source == reading.id()));
+}

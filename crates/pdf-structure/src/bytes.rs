@@ -455,7 +455,8 @@ impl Decode for BTreeMap<ObjectId, Vec<u8>> {
 /// ([`Data::At`](pdf_objects::object::Data::At)), can't be written by the
 /// writer, which reads them from the reading their records are of: a
 /// document to write is made by [`Reading::to_document`], that reading
-/// given to the write ([`write::ReadFrom`](crate::write::ReadFrom)).
+/// given to the write ([`write::ReadFrom`](crate::write::ReadFrom)), or
+/// taken by a reading of the file opened again ([`Reading::adopt`]).
 pub fn read(file: &[u8]) -> Document {
     read_as(file, None, true, &Options::DEFAULT, &[])
 }
@@ -469,7 +470,8 @@ pub fn read(file: &[u8]) -> Document {
 /// one leaves it [`Encryption::Locked`], or [`Encryption::Plain`] where its
 /// strings and streams aren't encrypted, as no password would. As with
 /// [`read`], the reading is dropped: a document to write is made by
-/// [`Reading::to_document`].
+/// [`Reading::to_document`], or taken by a reading of the file opened
+/// again ([`Reading::adopt`]).
 pub fn read_opened(file: &[u8], passwords: &[Password]) -> Document {
     read_as(file, None, true, &Options::DEFAULT, passwords)
 }

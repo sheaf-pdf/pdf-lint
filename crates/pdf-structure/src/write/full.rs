@@ -141,12 +141,14 @@ pub fn full<'a>(
 /// copy hold (a document made by
 /// [`Reading::to_document`](crate::Reading::to_document), that reading
 /// kept: one read whole has dropped it, so a stream of it is refused,
-/// [`Error::Placed`], or [`Error::Elsewhere`] given another reading): but object streams and cross-reference streams, whose
-/// members and entries are written anew, and a linearization dictionary,
-/// which would no longer hold; and its encryption dictionary, which the
-/// writer writes from `encryptor`, if any. Written under another
-/// encryption than the one `doc`'s file was read with (none, or a new
-/// one), the objects its encryption dictionary refers to are left out too.
+/// [`Error::Placed`], or [`Error::Elsewhere`] given another reading, until
+/// that reading takes it, [`Reading::adopt`](crate::Reading::adopt)): but
+/// object streams and cross-reference streams, whose members and entries
+/// are written anew, and a linearization dictionary, which would no longer
+/// hold; and its encryption dictionary, which the writer writes from
+/// `encryptor`, if any. Written under another encryption than the one
+/// `doc`'s file was read with (none, or a new one), the objects its
+/// encryption dictionary refers to are left out too.
 /// What's left out is told by the numbers of `doc`. It gives every other
 /// object of `doc`, so a renumbering ([`Options::renumber`]) that puts two
 /// at one number is refused ([`Error::Twice`]): a caller whose renumbering

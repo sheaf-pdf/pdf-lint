@@ -113,6 +113,10 @@ pub use full::{document, full};
 pub use objstm::{MAX_DATA, MEMBERS, container, fits, packable};
 pub use xref::{Entry, Section};
 
+// A reading compares a document's encryption dictionary as written too
+// (`Reading::adopt`).
+pub(crate) use append::as_written;
+
 // The tests' file writer writes its encrypted files' dictionaries so too.
 #[cfg(any(test, feature = "fixtures"))]
 pub(crate) use crypt::encryption;
@@ -281,7 +285,8 @@ impl Body<'_> {
 /// [`Reading::into_document`]) has records of a reading that's gone, which
 /// a write given another reading refuses ([`Error::Elsewhere`]), and a
 /// stream whose data no reading given holds refuses one given none
-/// ([`Error::Placed`]).
+/// ([`Error::Placed`]), until a reading of its file opened again takes them
+/// as its own ([`Reading::adopt`]).
 pub fn bodies(doc: &Document) -> impl DoubleEndedIterator<Item = (ObjectId, Body<'_>)> {
     doc.objects_read().map(|(id, object, record)| {
         let object = Cow::Borrowed(object);
@@ -777,7 +782,8 @@ pub enum Error {
     /// or with no reading given: its data is given as bytes instead, or the
     /// reading it was read in given, which a document read whole
     /// ([`bytes::read`](crate::bytes::read)) has dropped
-    /// ([`Reading::to_document`] keeps it).
+    /// ([`Reading::to_document`] keeps it), or a reading of its file opened
+    /// again that took the document ([`Reading::adopt`]).
     #[error(
         "stream {} {}'s data is where no stream of the reading given read it at that number",
         .0.0, .0.1
@@ -830,7 +836,8 @@ pub enum Error {
     /// number or generation ([`Record::id`]), or not the object given, nor,
     /// under a renumbering, with its references where its bytes have them.
     /// A document's objects copy from the reading it was made of by
-    /// [`Reading::to_document`], not another of the same bytes.
+    /// [`Reading::to_document`], not another of the same bytes, unless that
+    /// one took them as its own ([`Reading::adopt`]).
     #[error(
         "object {} {} is given with a record of another reading than the one given, or of another object",
         .0.0, .0.1

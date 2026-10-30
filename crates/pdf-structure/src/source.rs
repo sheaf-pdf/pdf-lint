@@ -658,6 +658,17 @@ impl Document {
         })
     }
 
+    /// Each record it holds made reading `source`'s ([`Record::source`]),
+    /// for [`Reading::adopt`](crate::Reading::adopt), which has found that
+    /// reading's own record of each object equal to it: so each is that
+    /// reading's record.
+    pub(crate) fn adopted(&mut self, source: SourceId) {
+        let held = (self.objects.values_mut()).filter_map(|held| held.as_mut().ok());
+        for record in held.filter_map(|(_, record)| record.as_mut()) {
+            record.source = source;
+        }
+    }
+
     /// Puts `object` at `id`, with no record, as it wasn't read: gives the
     /// object it replaces, when one that read was there. New ids start
     /// past `id`'s number, if they didn't. The object keeps the spans it

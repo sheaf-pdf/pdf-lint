@@ -527,7 +527,7 @@ fn matched(base: &Base, encryptor: Option<&Encryptor>) -> bool {
 }
 
 /// `dict` as pdf-objects' writer writes it, where it can.
-fn as_written(dict: &Dict) -> Option<Vec<u8>> {
+pub(crate) fn as_written(dict: &Dict) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     serialize::write(&mut out, &Object::from(dict.clone())).ok()?;
     Some(out)

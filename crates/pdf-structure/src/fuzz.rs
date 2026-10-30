@@ -20,8 +20,11 @@
 //! soundly, written and read again it's the same objects, each at the
 //! number the renumbering gives it, those copied as the bytes they were
 //! read from among them, their headers and the references that move
-//! written anew in place; and where a byte of it changed after it was read,
-//! a copy of an object whose bytes hold it is refused.
+//! written anew in place; as the input picks, the document written is the
+//! file read whole and taken by the reading, which takes it where it read
+//! soundly, and leaves it as it was where it doesn't; and where a byte of
+//! it changed after it was read, a copy of an object whose bytes hold it is
+//! refused.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -548,10 +551,12 @@ const LISTED: u32 = 1 << 16;
 
 /// The `write` target's body: `data`'s first two bytes choose how the
 /// file after them is read and written, its third how a whole file of it
-/// and an update after it are renumbered ([`Renumbering`]), and the rest
-/// is the file. Read under
+/// and an update after it are renumbered ([`Renumbering`]) and, by its top
+/// bit, whether the document is read whole and taken by the reading
+/// ([`adopted`]), and the rest is the file. Read under
 /// [`options`], by the owner's password `owner` when the choice's lowest
-/// bit is set, made a document with its reading kept, then written whole,
+/// bit is set, made a document with its reading kept (or read whole and
+/// taken by that reading, which reads it alike), then written whole,
 /// but where it would list a number past [`LISTED`]: with a table, a
 /// stream, or a stream packed, by number or in sevens on one thread, as
 /// the choice's next two bits give; encrypted as it was read, decrypted,
@@ -583,7 +588,8 @@ pub fn write_file(data: &[u8]) {
 
 /// How the `write` target renumbers a whole file, and an update after it
 /// ([`Renumbering::of_update`]), as its input's third byte, but its top
-/// bit, gives it, taken by five: none; each object at its
+/// bit (which says whether the document written is read whole and taken by
+/// the reading, [`adopted`]), gives it, taken by five: none; each object at its
 /// own number, given; the document's numbers reversed, each object at the
 /// number of the one as far from the end as it is from the start; each
 /// past every number the file has; or numbered from 1 in order, passing
@@ -714,10 +720,13 @@ fn compared(data: &[u8]) -> [bool; 3] {
     let Ok(reading) = Reading::open_with(file, &[password], &options()) else {
         return [false; 3];
     };
-    let Ok(doc) = reading.to_document() else {
+    let Ok(mut doc) = reading.to_document() else {
         return [false; 3];
     };
     let sound = reading.trailer().unwritten.is_none() && reading.warnings().is_empty();
+    if byte & 0x80 != 0 {
+        doc = adopted(file, password, &reading, doc, sound);
+    }
     let mut options = write::Options::DEFAULT;
     let sevens = |numbers: &[u32]| numbers.chunks(7).map(<[u32]>::to_vec).collect();
     let mut sevens_on_one = Pack::DEFAULT;
@@ -760,6 +769,49 @@ fn compared(data: &[u8]) -> [bool; 3] {
         compared[2] = flipped(file, password, &options, &way, choice >> 7, &to);
     }
     compared
+}
+
+/// `file` read whole by `password`, by a reading of its own that's gone
+/// after, then taken by `reading` ([`Reading::adopt`]), a reading of it
+/// kept, of which `doc` was made, so that its objects as read are written
+/// through `reading` as `doc`'s are. Where `reading` read soundly, it's
+/// taken, each record `reading`'s, and it's `doc`; where it isn't taken,
+/// it's left as it was, its records their own reading's. The document
+/// taken, or else `doc`.
+fn adopted(
+    file: &[u8],
+    password: Password<'_>,
+    reading: &Reading<&[u8]>,
+    doc: Document,
+    sound: bool,
+) -> Document {
+    let whole = Reading::open_with(file, &[password], &options()).and_then(Reading::into_document);
+    let Ok(mut whole) = whole else {
+        return doc;
+    };
+    let sources = |d: &Document| -> Vec<_> { d.records().map(|(id, r)| (id, r.source)).collect() };
+    let (was, by) = (whole.clone(), sources(&whole));
+    match reading.adopt(&mut whole) {
+        Ok(()) => {
+            assert!(
+                whole.records().all(|(_, r)| r.source == reading.id()),
+                "each record taken is the reading's"
+            );
+            if sound {
+                assert_eq!(whole, doc, "the document taken is the reading's own");
+            }
+            whole
+        }
+        Err(error) => {
+            assert!(
+                !sound,
+                "a reading read soundly takes its file's document: {error}"
+            );
+            assert_eq!(whole, was, "a document not taken is as it was");
+            assert_eq!(sources(&whole), by, "its records their own reading's");
+            doc
+        }
+    }
 }
 
 /// How the `write` target encrypts a whole file, as the choice's bits
@@ -1274,7 +1326,8 @@ mod tests {
 
     /// The `write` target's checks on the same files: as written, by either
     /// password, every way of writing each whole and as an update writes and
-    /// reads back the same objects, and so does each way of writing it whole
+    /// reads back the same objects, its document made beside its reading or
+    /// read whole and taken by it, and so does each way of writing it whole
     /// after a byte is flipped, or it's refused as changed, the byte
     /// flipped at places spread over its objects; then each mutated many
     /// times, as a fuzzer might, without a panic, the same where it still
@@ -1284,8 +1337,10 @@ mod tests {
         let files = files();
         for file in &files {
             for choice in 0..64u16 {
-                // Each renumbering in turn, spread over the choices.
-                let renumbered = [u8::try_from(choice % 5).unwrap_or(0)];
+                // Each renumbering in turn, spread over the choices, and
+                // the document taken by the reading in every other turn.
+                let taken = |turn: u16| u8::try_from(turn / 5 % 2).unwrap_or(0) << 7;
+                let renumbered = [u8::try_from(choice % 5).unwrap_or(0) | taken(choice)];
                 let updated = choice | 32 | (choice & 1) << 7;
                 let data = [&updated.to_le_bytes()[..], &renumbered, file].concat();
                 assert_eq!(
@@ -1293,7 +1348,8 @@ mod tests {
                     [true, true, false],
                     "{updated}, {renumbered:?}"
                 );
-                let renumbered = [u8::try_from((choice + 2) % 5).unwrap_or(0)];
+                let turn = choice + 2;
+                let renumbered = [u8::try_from(turn % 5).unwrap_or(0) | taken(turn)];
                 let pick = choice.wrapping_mul(0x9e3) & 0x1ff;
                 let flipped = choice & !32 | pick << 7;
                 let data = [&flipped.to_le_bytes()[..], &renumbered, file].concat();

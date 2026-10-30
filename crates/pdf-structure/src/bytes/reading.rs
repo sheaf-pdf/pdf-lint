@@ -19,6 +19,7 @@ use super::{Crypt, Decode, Options, Reader, Stored, Unfiltered, Whole, XrefEntry
 use crate::crypt::{List, is_xref};
 use crate::filter;
 use crate::source::{Document, Encryption, Facts, Record, Trailer, Unread, Update, Warning};
+use crate::write::as_written;
 
 /// A file's bytes, which a [`Reading`] reads. Bytes in memory give all of
 /// them ([`ByteSource::whole`]): the slices, vectors and shared slices of
@@ -219,6 +220,19 @@ pub enum Error {
     /// [`Fault::Limit`](pdf_filters::Fault::Limit) among them.
     #[error("its data doesn't decode cleanly: {0}")]
     Decode(pdf_filters::Error),
+    /// A document isn't taken as the reading's ([`Reading::adopt`]), and
+    /// is left as it was: its object `id` isn't read here as it was read
+    /// (another file's, or the file changed since, or a revision of it with
+    /// another object there), or doesn't read here; or, with none, the
+    /// document isn't encrypted as the reading's file is (its encryption
+    /// dictionary, as stored and where its trailer names it, or its first
+    /// `/ID` element, which a key is made of, isn't the file's, or one is
+    /// encrypted and the other isn't).
+    #[error("{}", unlike(*.id))]
+    Unlike {
+        /// The object, or none for the encryption.
+        id: Option<ObjectId>,
+    },
 }
 
 /// A stream, and its data as [`Reading::data`] hands it out; or why it
@@ -233,6 +247,14 @@ fn outside(span: &Span) -> String {
         Some((n, g)) => {
             format!("bytes {start}..{end} aren't in object stream {n} {g} R's decoded data")
         }
+    }
+}
+
+/// [`Error::Unlike`]'s text.
+fn unlike(id: Option<ObjectId>) -> String {
+    match id {
+        Some((n, g)) => format!("{n} {g} R isn't read here as the document read it"),
+        None => "the document isn't encrypted as this reading's file is".to_string(),
     }
 }
 
@@ -805,7 +827,8 @@ impl<S: ByteSource> Reading<S> {
     /// ([`Error::Io`]). The reading is gone after, and its records with it,
     /// so the writer can't read the data of the document's streams, nor copy
     /// an object as read: a document to write is made by
-    /// [`Reading::to_document`], the reading kept and given to the write.
+    /// [`Reading::to_document`], the reading kept and given to the write, or
+    /// taken by a reading of the file opened again ([`Reading::adopt`]).
     pub fn into_document(self) -> Result<Document, Error> {
         let Reading {
             source,
@@ -854,6 +877,113 @@ impl<S: ByteSource> Reading<S> {
             None => (self.reader.document(self.by_position())).map_err(Error::Io),
         }
     }
+
+    /// `doc`'s objects as read taken as this reading's, where it reads each
+    /// alike and `doc` is encrypted as its file is: each record then names
+    /// it ([`Record::source`]). So a document read whole
+    /// ([`read`](super::read), [`Reading::into_document`]), whose reading is
+    /// gone, is written from a reading of its file opened again as one made
+    /// by [`Reading::to_document`] is: its streams' data, where it was
+    /// written ([`Data::At`](pdf_objects::object::Data::At)), read from it,
+    /// and its objects copied as the bytes they were read from where the
+    /// rules for a copy hold ([`write::Body::Read`](crate::write::Body::Read)),
+    /// or passed over by an update after the file
+    /// ([`write::Base::of`](crate::write::Base::of)).
+    ///
+    /// Each object `doc` holds with a record ([`Document::record`]) is
+    /// compared with the reading's own record of its number: alike where
+    /// it's the same record, but the reading's ([`Record`]'s equality: read
+    /// as that number, where and how, and its bytes' hash). One the reading
+    /// has kept is compared as it is; the rest are read without keeping
+    /// them, as [`Reading::object_unkept`] reads them, a parse each, the
+    /// object streams they're in decoded and kept: about what reading the
+    /// file whole takes again. An encrypted file's encryption is `doc`'s
+    /// where the encryption dictionary it was opened by, as stored, is the
+    /// one `doc`'s trailer names, at the same number or alike in the
+    /// trailer, and its first `/ID` element is `doc`'s: what a password's
+    /// key is made of (ISO 32000-2, 7.6.4.3), so that the bytes copied are
+    /// encrypted as `doc`'s objects were read. The key itself isn't
+    /// compared, so a reading by the owner's password takes a document read
+    /// by the user's, and the other way. An object without a record, built
+    /// or edited, is left as it is, to be written anew.
+    ///
+    /// All or none: where an object isn't alike, or the encryption isn't,
+    /// `doc` is left as it was, and it's refused ([`Error::Unlike`]):
+    /// another file, the file changed since `doc` was read, a reading as of
+    /// another revision ([`Options::section`]) whose object at a number
+    /// isn't `doc`'s, or the same objects' bytes under another `/ID`, whose
+    /// key is another. So it is where the source doesn't give the bytes
+    /// asked of it ([`Error::Io`]), and asked again it reads them again.
+    pub fn adopt(&self, doc: &mut Document) -> Result<(), Error> {
+        if !self.encrypts_as(doc) {
+            return Err(Error::Unlike { id: None });
+        }
+        for (id, record) in doc.records() {
+            let alike = match self.record(id) {
+                Some(own) => own == record,
+                None => match self.object_unkept(id) {
+                    Ok((_, own)) => own == *record,
+                    Err(Error::Io(error)) => return Err(Error::Io(error)),
+                    Err(_) => false,
+                },
+            };
+            if !alike {
+                return Err(Error::Unlike { id: Some(id) });
+            }
+        }
+        doc.adopted(self.id());
+        Ok(())
+    }
+
+    /// Whether `doc` is encrypted as the reading's file is: neither is, as
+    /// the reader reads a trailer's `/Encrypt`; or both are, by the
+    /// encryption dictionary the reading opened the file by, as stored
+    /// ([`Reading::stored`]), at the number `doc`'s trailer names, where
+    /// the object `doc` holds is alike, or in `doc`'s trailer alike, and by
+    /// the same first `/ID` element, an absent one empty. Dictionaries are
+    /// compared as pdf-objects' writer writes them, as an object's places in
+    /// its file aren't the dictionary.
+    fn encrypts_as(&self, doc: &Document) -> bool {
+        let encrypt = match doc.trailer.dict().get(b"Encrypt") {
+            // A null is no entry, and so is a reference to no object (ISO
+            // 32000-2, 7.3.9 and 7.3.10).
+            Some(e) if e.is_null() => None,
+            Some(e) if e.as_reference().is_some_and(|id| !doc.contains(id)) => None,
+            encrypt => encrypt,
+        };
+        let (encrypt, stored) = match (encrypt, self.stored()) {
+            (None, _) => return !self.reader.list.encrypts,
+            (Some(encrypt), Some(stored)) => (encrypt, stored),
+            (Some(_), None) => return false,
+        };
+        let dict = match encrypt.value() {
+            Value::Ref(id) if stored.at == Some(*id) => doc.resolve(*id).and_then(Object::as_dict),
+            Value::Dict(dict) if stored.at.is_none() => Some(dict),
+            _ => None,
+        };
+        let theirs = as_written(&stored.dict);
+        let alike = dict.is_some_and(|d| theirs.is_some() && as_written(d) == theirs);
+        alike && first_id(doc) == stored.id
+    }
+}
+
+/// `doc`'s first `/ID` element, as the reader takes a file's: its trailer's
+/// `/ID`, followed where it's a reference, its first string; empty where
+/// it hasn't one.
+fn first_id(doc: &Document) -> Vec<u8> {
+    let id = doc.trailer.dict().get(b"ID");
+    let id = match id.map(Object::value) {
+        Some(Value::Ref(at)) => doc.resolve(*at),
+        _ => id,
+    };
+    let first = match id.map(Object::value) {
+        Some(Value::Array(id)) => match id.first().map(Object::value) {
+            Some(Value::String(s, _)) => s.as_bytes().map(<[u8]>::to_vec),
+            _ => None,
+        },
+        _ => None,
+    };
+    first.unwrap_or_default()
 }
 
 /// Its objects, as a reference resolves them: each read and kept the first
