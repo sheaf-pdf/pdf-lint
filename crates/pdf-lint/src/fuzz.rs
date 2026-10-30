@@ -138,7 +138,8 @@ fn within(doc: &Document, file: &[u8], at: Span) -> bool {
 /// structure tree, a name tree and a number tree; a cross-reference stream
 /// with extensions declared and XMP metadata; an incremental update; and
 /// an encrypted file. Each begins with the two bytes that choose how it's
-/// checked, all clear.
+/// checked, all clear, as the `check` and `structure` targets take them;
+/// the `write` target's take a third ([`write_seeds`]).
 pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
     let page = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
@@ -224,6 +225,24 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         seed.splice(0..0, [0, 0]);
     }
     seeds
+}
+
+/// [`seeds`] for pdf-structure's `write` target, whose input has a third
+/// byte after the two that choose how it's written, before the file: which
+/// renumbering the whole file is written under, of five, and, its top bit
+/// set, whether its document is read whole and taken by the reading. Each
+/// seed once with each, named for it, so each way is fuzzed from the
+/// start.
+pub fn write_seeds() -> Vec<(String, Vec<u8>)> {
+    let mut written = Vec::new();
+    for (name, seed) in seeds() {
+        for third in (0..5).chain(0x80..0x85) {
+            let mut seed = seed.clone();
+            seed.insert(2, third);
+            written.push((format!("{name}-{third:02x}"), seed));
+        }
+    }
+    written
 }
 
 /// A stream's object: its dictionary's `entries` and its `data`, with the
@@ -663,6 +682,38 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         for (name, seed) in seeds() {
             std::fs::write(dir.join(format!("{name}.pdf")), seed).unwrap();
+        }
+    }
+
+    /// With PDF_LINT_FUZZ_SEEDS naming a folder, writes the `write`
+    /// target's seeds there ([`write_seeds`], `just fuzz write`).
+    #[test]
+    #[ignore = "needs PDF_LINT_FUZZ_SEEDS, a folder to write the seeds to"]
+    fn the_write_seeds_are_written() {
+        let dir =
+            std::env::var_os("PDF_LINT_FUZZ_SEEDS").expect("PDF_LINT_FUZZ_SEEDS names a folder");
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+        for (name, seed) in write_seeds() {
+            std::fs::write(dir.join(format!("{name}.pdf")), seed).unwrap();
+        }
+    }
+
+    /// The `write` target's seeds are the seeds, each with a third byte
+    /// for each of its ways, the file after it as it was: so each file
+    /// read whole is the seed's.
+    #[test]
+    fn the_write_seeds_are_the_seeds_with_a_third_byte() {
+        let (seeds, written) = (seeds(), write_seeds());
+        assert_eq!(written.len(), 10 * seeds.len());
+        for ((name, seed), ways) in seeds.iter().zip(written.chunks(10)) {
+            let thirds: Vec<u8> = ways.iter().map(|(_, w)| w[2]).collect();
+            assert_eq!(thirds, [0, 1, 2, 3, 4, 0x80, 0x81, 0x82, 0x83, 0x84]);
+            for (_, way) in ways {
+                assert_eq!(way[..2], seed[..2], "{name}");
+                assert_eq!(way[3..], seed[2..], "{name}");
+                assert!(way[3..].starts_with(b"%PDF-"), "{name}");
+            }
         }
     }
 }

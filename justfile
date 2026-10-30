@@ -168,7 +168,7 @@ arlington-msrv:
 # read; `structure`, pdf-structure's reader; `write`, pdf-structure's
 # writer, on what its reader read; or `check`, the reader and the
 # checker. `structure`, `write` and `check` begin from the seeds pdf-lint's
-# fuzz module makes.
+# fuzz module makes, `write`'s with the third byte its input has.
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.
 fuzz target="tokenize" seconds="60":
@@ -194,9 +194,9 @@ fuzz target="tokenize" seconds="60":
         cargo +nightly fuzz run --target "$host" structure fuzz/corpus/structure fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     write)
-        PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/write" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_write_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/write
-        cargo +nightly fuzz run --target "$host" write fuzz/corpus/write fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +nightly fuzz run --target "$host" write fuzz/corpus/write fuzz/seeds/write -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
