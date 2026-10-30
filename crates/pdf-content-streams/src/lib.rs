@@ -18,11 +18,13 @@
 //!   ranges held in the item, so an operation of sixteen operands or fewer
 //!   allocates nothing. Operand `i` is taken from the last, as PDFium takes
 //!   them ([`Operation::arg`]), and every operand is kept, up to the cap.
-//! - **Operands read when asked** ([`Operand`]): a name, its `#` escapes
-//!   decoded ([`name`]), any operand as a pdf-objects
-//!   [`Object`](pdf_objects::Object) ([`object`]), an array's and a
-//!   dictionary's elements each read so, and an array's elements as
-//!   written ([`Operand::elements`]).
+//! - **Operands read when asked** ([`Operand`]), each as PDFium's content
+//!   parser reads it: a name, its `#` escapes decoded ([`name`]), a number
+//!   ([`Operand::number`]), any operand as a pdf-objects
+//!   [`Object`](pdf_objects::Object) ([`object`]), its numbers at 64 bits
+//!   as pdf-objects reads them, an array's and a dictionary's elements
+//!   each read so, and an array's elements as written
+//!   ([`Operand::elements`]).
 //! - **Operators** ([`Operator`]): each of ISO 32000-2's Annex A by its
 //!   name ([`Operation::operator`]), with the operands the clause defining
 //!   it gives it ([`Operands`], [`Type`]), its category of 8.2

@@ -1,5 +1,6 @@
 //! Operands as written, read when asked: a name, its `#` escapes
-//! decoded, any operand as a pdf-objects value, and an array's elements.
+//! decoded, a number, any operand as a pdf-objects value, and an array's
+//! elements, each as PDFium's content parser reads it.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -8,7 +9,7 @@ use std::ops::Range;
 
 use pdf_objects::{Dict, Form, Object, Str, Value};
 use pdf_tokenizer::Kind;
-use pdf_tokenizer::decode::{self, NumberError};
+use pdf_tokenizer::decode::{self, NumberError, pdfium};
 
 use crate::fault::{self, Fault, Read, Sink};
 use crate::limits::Limits;
@@ -21,7 +22,8 @@ use crate::scan::{UNCAPPED, is_number, next_raw, significant, skip_space};
 /// ([`Operand::elements`]) and an inline image's values
 /// ([`InlineImage::entry`](crate::InlineImage::entry)). Nothing is read
 /// from it until it's asked: [`name`](Operand::name),
-/// [`object`](Operand::object) and the kind it is, from how it starts.
+/// [`number`](Operand::number), [`object`](Operand::object) and the kind
+/// it is, from how it starts.
 ///
 /// ```
 /// use pdf_content_streams::{Limits, ResCx, operations};
@@ -35,6 +37,7 @@ use crate::scan::{UNCAPPED, is_number, next_raw, significant, skip_space};
 /// assert_eq!((font.bytes(), font.range()), (&b"/F1"[..], 0..3));
 /// assert_eq!(font.name().as_deref(), Some(&b"F1"[..]));
 /// assert!(tf.arg(0).unwrap().is_number());
+/// assert_eq!(tf.arg(0).unwrap().number(), 12.0);
 ///
 /// let tj = read.next().unwrap().unwrap();
 /// let shown = tj.arg(0).unwrap();
@@ -68,10 +71,43 @@ impl<'a> Operand<'a> {
         self.at..self.at + self.bytes.len()
     }
 
-    /// The name it is, its `#` escapes decoded ([`name`]); None when it
-    /// isn't one.
+    /// The name it is, its `#` escapes decoded as PDFium decodes them
+    /// ([`name`]); None when it isn't one.
     pub fn name(&self) -> Option<Cow<'a, [u8]>> {
         name(self.bytes)
+    }
+
+    /// The number it is, as PDFium's content parser reads an operand
+    /// (`GetNumber`): a number word ([`is_number`](Operand::is_number)) by
+    /// its first 255 bytes, the most of a word that parser keeps, read by
+    /// pdf-tokenizer's [`decode::pdfium::number`] as an `f32`; and 0 for
+    /// what isn't one, a name, a string, `true` or an array among it. So
+    /// `--5` is 0, `1.2.3` 1.2, `4294967296` 0 (a word without a sign past
+    /// 32 bits), `+2147483648` 0 (one with a sign past `i32`) and a real
+    /// past an `f32`'s range infinite, where ISO 32000-2 (7.3.3) reads
+    /// `--5` and `1.2.3` as no number and the others as written
+    /// ([`Fault::Number`], [`Fault::OutOfRange`]). An operator that takes
+    /// an integer, such as `Tr`, `J` or `j`, reads PDFium's as this cut to
+    /// its whole part, where that's in `i32`'s range. An array's elements
+    /// read alike ([`elements`](Operand::elements)): a `TJ`'s, a `d`'s.
+    ///
+    /// [`object`](Operand::object) reads a number otherwise, as
+    /// pdf-objects does, at 64 bits.
+    ///
+    /// ```
+    /// use pdf_content_streams::{Limits, ResCx, operations};
+    ///
+    /// let content = b"--5 1.2.3 4294967296 +2147483648 0.5 7 re";
+    /// let read = operations(content, &ResCx::none(), &Limits::DEFAULT).next();
+    /// let re = read.unwrap().unwrap();
+    /// let numbers: Vec<f32> = re.operands().map(|o| o.number()).collect();
+    /// assert_eq!(numbers, [0.0, 1.2, 0.0, 0.0, 0.5, 7.0]);
+    /// ```
+    pub fn number(&self) -> f32 {
+        if !self.is_number() {
+            return 0.0;
+        }
+        pdfium::number(&self.bytes[..self.bytes.len().min(WORD)]).float()
     }
 
     /// It read as a PDF object ([`object`]), under `limits`' caps on how
@@ -230,17 +266,39 @@ impl<'a> Iterator for Elements<'a> {
 
 impl FusedIterator for Elements<'_> {}
 
-/// The name an operand is, its `#` escapes decoded (ISO 32000-2, 7.3.5);
-/// None when it isn't one. A `#` without two hex digits after it stays as
-/// written. Borrowed where there's no `#` to decode.
+/// The name an operand is, as PDFium's content parser reads one
+/// (`PDF_NameDecode`); None when it isn't one. Of a name longer than 255
+/// bytes, its `/` among them, its first 255, the most of a word that
+/// parser keeps. A `#` with two bytes after it stands for the byte they
+/// make as hex digits, a byte that isn't one read as 0, where ISO 32000-2
+/// (7.3.5) reads a `#` as an escape only before two hex digits
+/// ([`Fault::Name`]); with fewer, it's itself. Borrowed where there's no
+/// `#` to decode.
 ///
 /// ```
 /// use pdf_content_streams::name;
 ///
 /// assert_eq!(name(b"/F#311").as_deref(), Some(&b"F11"[..]));
+/// assert_eq!(name(b"/F#3G").as_deref(), Some(&b"F0"[..]));
+/// assert_eq!(name(b"/F#3").as_deref(), Some(&b"F#3"[..]));
 /// assert_eq!(name(b"12"), None);
 /// ```
 pub fn name(operand: &[u8]) -> Option<Cow<'_, [u8]>> {
+    if operand.first() != Some(&b'/') {
+        return None;
+    }
+    let word = &operand[..operand.len().min(WORD)];
+    if !word.contains(&b'#') {
+        return Some(Cow::Borrowed(&word[1..]));
+    }
+    Some(Cow::Owned(pdfium::name(word).collect()))
+}
+
+/// The name an operand is, its `#` escapes decoded as ISO 32000-2 reads
+/// them (7.3.5), every byte of it: a `#` without two hex digits after it
+/// stays as written. None when it isn't one. For what's judged by ISO's
+/// reading: whether a key is one 8.9.7 reads, an image's last filter.
+pub(crate) fn iso_name(operand: &[u8]) -> Option<Cow<'_, [u8]>> {
     let raw = operand.strip_prefix(b"/")?;
     if !raw.contains(&b'#') {
         return Some(Cow::Borrowed(raw));
@@ -263,9 +321,14 @@ pub fn name(operand: &[u8]) -> Option<Cow<'_, [u8]>> {
     Some(Cow::Owned(out))
 }
 
-/// An operand as a PDF object: a name's escapes decoded, a string's
-/// escapes or hex digits read, and an array's or a dictionary's elements
-/// each read so. A number past what 64 bits hold reads as pdf-objects
+/// An operand as a PDF object: a name's escapes decoded and a string's
+/// escapes or hex digits read as PDFium's content parser reads them
+/// ([`name`]; a literal string's unescaped CR or CR LF as written, where
+/// ISO 32000-2 reads LF, and a string's first 32,767 bytes read, the most
+/// that parser keeps), and an array's or a dictionary's elements each read
+/// so. A number is read as ISO 32000-2 writes one (7.3.3), as
+/// pdf-objects reads it, at 64 bits: [`Operand::number`] reads one as
+/// PDFium does. A number past what 64 bits hold reads as pdf-objects
 /// reads one: an integer as the nearest that fits, a real as the largest
 /// finite float of its sign. None for what isn't an object, such as a
 /// stray closing delimiter or a word of signs, and for one that doesn't
@@ -463,14 +526,25 @@ fn word(word: &[u8]) -> Option<Value> {
     })
 }
 
-/// A literal string's bytes, its escapes read: `(…)` as lexed, read as
-/// ISO 32000-2 reads one (7.3.4.2), an end of line as a line feed.
+/// The most of a word PDFium's content parser keeps: a number or a name
+/// longer than this, its `/` counted, is read as its first `WORD` bytes.
+pub(crate) const WORD: usize = 255;
+
+/// The most of a string's value PDFium's content parser keeps: a literal or
+/// hex string whose bytes, read, are more is read as its first `STRING`.
+pub(crate) const STRING: usize = 32_767;
+
+/// A literal string's bytes as PDFium's content parser reads them: `(…)`
+/// as lexed, its escapes as ISO 32000-2 reads them (7.3.4.2), an
+/// unescaped CR or CR LF as written, where ISO reads LF, and the first
+/// [`STRING`] of them.
 pub(crate) fn literal(string: &[u8]) -> Vec<u8> {
-    decode::literal(string).bytes().collect()
+    pdfium::literal(string).take(STRING).collect()
 }
 
-/// A hex string's bytes: `<…>` as lexed, what isn't a hex digit passed
-/// over, an odd last digit followed by 0, as PDFium reads one.
+/// A hex string's bytes as PDFium's content parser reads them: `<…>` as
+/// lexed, what isn't a hex digit passed over, an odd last digit followed
+/// by 0, and the first [`STRING`] of them.
 pub(crate) fn hex(string: &[u8]) -> Vec<u8> {
-    decode::pdfium::hex(string).collect()
+    pdfium::hex(string).take(STRING).collect()
 }

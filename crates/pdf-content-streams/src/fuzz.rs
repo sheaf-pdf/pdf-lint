@@ -7,6 +7,7 @@
 use std::ops::Range;
 
 use pdf_objects::{Object, Value, dict};
+use pdf_tokenizer::decode;
 
 use crate::fault::{Fault, Sink};
 use crate::scan::{Raw, next_raw};
@@ -527,6 +528,8 @@ fn in_order(s: &[u8], faults: &[(Range<usize>, Fault)]) {
             | Fault::OutOfRange { written }
             | Fault::HexString { written }
             | Fault::Name { written, .. }
+            | Fault::StringCr { written }
+            | Fault::Long { written }
             | Fault::Closer { written }
             | Fault::Brace { written }
             | Fault::Keyword { written }
@@ -542,6 +545,16 @@ fn in_order(s: &[u8], faults: &[(Range<usize>, Fault)]) {
         };
         if let Some(written) = written {
             assert_eq!(written, &s[at.clone()], "{fault:?} where it is");
+        }
+        match *fault {
+            Fault::StringCr { written } => {
+                assert!(
+                    written.starts_with(b"(") && written.contains(&b'\r'),
+                    "{fault:?}"
+                );
+            }
+            Fault::Long { written } => assert!(written.len() > 255, "{fault:?}"),
+            _ => {}
         }
         assert!(!fault.to_string().is_empty());
     }
@@ -721,8 +734,9 @@ fn stepped(state: State, op: &Operation) -> State {
 }
 
 /// An operand, read from `s`, is the kind its first bytes say, at most
-/// one; its name as [`name`] reads it; and an array's elements tile what's
-/// inside it, each where it is, and read as the array's elements do.
+/// one; its name as [`name`] reads it; its number as [`number`] holds it;
+/// and an array's elements tile what's inside it, each where it is, read
+/// as the array's elements do, each its number too.
 fn operand(s: &[u8], operand: &Operand, limits: &Limits) {
     let bytes = operand.bytes();
     let kinds = [
@@ -737,6 +751,7 @@ fn operand(s: &[u8], operand: &Operand, limits: &Limits) {
         assert!(matches!(bytes[0], b'0'..=b'9' | b'+' | b'-' | b'.'));
     }
     assert_eq!(operand.name(), name(bytes));
+    number(operand);
     let r = operand.range();
     if !operand.is_array() {
         assert_eq!(operand.elements().count(), 0);
@@ -752,6 +767,7 @@ fn operand(s: &[u8], operand: &Operand, limits: &Limits) {
         );
         assert!(blank(&s[at..e.start]), "only white-space between");
         assert_eq!(element.bytes(), &s[e.clone()]);
+        number(element);
         at = e.end;
     }
     assert!(blank(&s[at..r.end - 1]), "only white-space after");
@@ -762,6 +778,31 @@ fn operand(s: &[u8], operand: &Operand, limits: &Limits) {
         };
         let each: Vec<Object> = elements.iter().filter_map(|e| e.object(&inside)).collect();
         assert_eq!(each, read, "the elements read as the array's");
+    }
+}
+
+/// An operand's number as PDFium reads one ([`Operand::number`]): 0 for
+/// what's no number word; and for a word of no more than the 255 bytes
+/// PDFium reads that ISO 32000-2 reads as a number too, ISO's value, an
+/// integer in `i32`'s range exactly and a real to an `f32`'s precision.
+fn number(operand: &Operand) {
+    let (bytes, n) = (operand.bytes(), operand.number());
+    if !operand.is_number() {
+        assert_eq!(n, 0.0, "{operand:?} is no number");
+        return;
+    }
+    if bytes.len() > 255 {
+        return;
+    }
+    if !bytes.contains(&b'.') {
+        if let Some(i) = (decode::integer(bytes).ok()).and_then(|i| i32::try_from(i).ok()) {
+            assert_eq!(n, i as f32, "{operand:?}");
+        }
+    } else if let Ok(x) = decode::number(bytes) {
+        let x = x as f32;
+        if x.is_finite() {
+            assert!((n - x).abs() <= x.abs() * 1e-6 + 1e-37, "{operand:?}: {n}");
+        }
     }
 }
 
@@ -893,7 +934,9 @@ mod tests {
     /// What a mutation of content may write: its tokens, the bytes that
     /// end an inline image's data, what moves text and draws forms, runs
     /// of operands, of which two are more than an operation holds inline,
-    /// marked content and what names resources.
+    /// marked content and what names resources, and what PDFium reads
+    /// otherwise than ISO 32000-2: a string's CR, a name's `#`, an inline
+    /// image's numbers, numbers past 32 bits and past an `f32`.
     const CONTENT_TOKENS: &[&[u8]] = &[
         b" ",
         b"(",
@@ -946,6 +989,11 @@ mod tests {
         b" /GS0 gs ",
         b" /CS3 cs /P0 scn ",
         b" /Sh0 sh ",
+        b" (a\rb\r\nc) ",
+        b" /F#3G ",
+        b" /W -1 /H true /BPC 2.9 ",
+        b" +2147483648 ",
+        b" 400000000000000000000000000000000000000.0 ",
     ];
 
     /// The seeds read to their end, each of the first eleven one inline

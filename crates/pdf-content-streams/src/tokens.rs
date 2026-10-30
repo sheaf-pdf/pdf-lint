@@ -45,16 +45,20 @@ pub enum Tok<'a> {
 /// An inline image, `BI` to `EI`, is one token. Its data is found as
 /// PDFium's `ReadInlineStream` finds it, by its first filter:
 /// - unfiltered, its exact size: `/H` rows of `/W` samples of its color
-///   space's components, `/BPC` bits each, padded to a byte. With no
-///   color space, an image mask's, one bit of one component; a name `res`
-///   doesn't have reads as none, as in PDFium.
+///   space's components, `/BPC` bits each, padded to a byte, each number
+///   as PDFium reads an integer from it, in 32 bits (a real cut to its
+///   whole part, `true` 1, what's no number 0). With no color space, an
+///   image mask's, one bit of one component; a name `res` doesn't have
+///   reads as none, as in PDFium.
 /// - `/AHx` to its `>`, `/A85` past the first byte that's none of its
 ///   digits or the white-space it passes over (its `~`, and a `>` after
 ///   it), and `/RL` to its end-of-data byte, as PDFium's decoders end
 ///   them.
 /// - a filter PDFium has no decoder for, one of those that finds no end,
 ///   or an unfiltered image no size counts: none, its tokens read on to
-///   the next `EI`.
+///   the next `EI`. And so for any image, filtered or not, whose size
+///   overflows 32 bits as PDFium counts it, or has a negative width, which
+///   PDFium reads no data of.
 ///
 /// Past the data so found, the image ends at the next `EI` operator, its
 /// tokens read as PDFium reads them, a string one token. Its `/L` or
@@ -73,7 +77,8 @@ pub enum Tok<'a> {
 /// where a keyword other than `ID` is, there's no image: `BI` is an
 /// operator of its own ([`Tok::Op`]), and what's after it is read as
 /// content, the dictionary's tokens among it. A key is matched as written,
-/// its `#` escapes not decoded, a value's decoded, and an abbreviated name
+/// its `#` escapes not decoded, a value's decoded as PDFium decodes it
+/// ([`name`](crate::name)), and an abbreviated name
 /// (8.9.7, Table 92) read as the full one. Of a key written both
 /// abbreviated and in full, the abbreviation's value counts, unless the
 /// full name's is an abbreviated name, which PDFium sets over it. The

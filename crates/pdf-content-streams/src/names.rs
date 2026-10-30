@@ -117,8 +117,9 @@ impl NameSet {
 }
 
 impl<'a> Operation<'a> {
-    /// The resource it names, by category, and its name, decoded, without
-    /// its `/`: what a `/Resources` it's drawn with must have under that
+    /// The resource it names, by category, and its name, decoded as PDFium
+    /// decodes it ([`name`](crate::name)), without its `/`: what a
+    /// `/Resources` it's drawn with must have under that
     /// category ([`names_used`] lists each operator's). None for an
     /// operation that names none.
     ///

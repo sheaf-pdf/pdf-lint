@@ -9,7 +9,8 @@
 //!
 //! - **A token's own** ([`Number`](Fault::Number),
 //!   [`OutOfRange`](Fault::OutOfRange), [`HexString`](Fault::HexString),
-//!   [`Name`](Fault::Name), [`Closer`](Fault::Closer),
+//!   [`Name`](Fault::Name), [`StringCr`](Fault::StringCr),
+//!   [`Long`](Fault::Long), [`Closer`](Fault::Closer),
 //!   [`Brace`](Fault::Brace)): [`Tokens`](crate::Tokens) and
 //!   [`Operations`](crate::Operations) with a sink
 //!   ([`Tokens::with_sink`](crate::Tokens::with_sink)), as each operand
@@ -46,9 +47,10 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use pdf_tokenizer::decode::{self, NumberError};
+use pdf_tokenizer::decode::{self, NumberError, pdfium};
 use pdf_tokenizer::is_white_space;
 
+use crate::operand::{STRING, WORD};
 use crate::scan::is_number;
 
 /// Where faults are told: a checker keeps them; `()` drops them, and
@@ -112,11 +114,15 @@ pub enum Fault<'a> {
         written: &'a [u8],
     },
     /// A number ISO 32000-2 reads as its value, past what's read here: an
-    /// integer outside 64 bits, read as the nearest that fits, or a real
-    /// too large for a 64-bit float, read as the largest finite one of its
-    /// sign, as pdf-objects reads them. ISO converts the number written to
-    /// its value ("shall"), the range left to the processor (7.3.3, Annex
-    /// C).
+    /// integer outside the 32 bits PDFium reads, unsigned when it's written
+    /// without a sign and signed when with one, or a real past an `f32`'s
+    /// range, which [`Operand::number`](crate::Operand::number) reads as 0
+    /// and as infinite, as PDFium reads them; and so an integer outside 64
+    /// bits, which [`object`](crate::object) reads as the nearest that fits,
+    /// or a real too large for a 64-bit float, read as the largest finite
+    /// one of its sign, as pdf-objects reads them. ISO converts the number
+    /// written to its value ("shall"), the range left to the processor
+    /// (7.3.3; Annex C, which is advice).
     #[error("{} is past the numbers read here", shown(.written))]
     OutOfRange {
         /// The number.
@@ -131,10 +137,13 @@ pub enum Fault<'a> {
         /// The string, `<` to `>`.
         written: &'a [u8],
     },
-    /// A name with a `#` without two hex digits after it, read with the
-    /// `#` as itself, or with `#00`, read as NUL: ISO 32000-2 writes a `#`
-    /// in a name as `#23` ("shall"), and a name holds any byte but NUL
-    /// (7.3.5).
+    /// A name with a `#` without two hex digits after it, or with `#00`,
+    /// read as NUL. Read as PDFium reads it ([`name`](crate::name)), such
+    /// a `#` with two bytes after it is an escape, a byte that's no hex
+    /// digit read as 0 (`/F#3G` is `F0`), and with fewer it's itself; ISO
+    /// 32000-2 reads a `#` as an escape only before two hex digits, writes
+    /// a `#` in a name as `#23` ("shall"), and a name holds any byte but
+    /// NUL (7.3.5).
     #[error(
         "the name {} has {}, which readers read differently",
         shown(.written),
@@ -147,6 +156,29 @@ pub enum Fault<'a> {
         stray: bool,
         /// Whether it has `#00`.
         nul: bool,
+    },
+    /// A literal string with a carriage return written in it, not
+    /// escaped: read as written, a CR or a CR LF, as PDFium reads it,
+    /// where ISO 32000-2 reads an end of line in a literal string as a line
+    /// feed alone (7.3.4.2, "shall").
+    #[error(
+        "the string {} has a CR written in it, read as written, where ISO 32000-2 reads LF",
+        shown(.written)
+    )]
+    StringCr {
+        /// The string, `(` to `)`.
+        written: &'a [u8],
+    },
+    /// A number or a name longer than the 255 bytes PDFium's content parser
+    /// keeps of a word, its `/` counted, or a string whose bytes, read, are
+    /// more than the 32,767 it keeps of one: read here, as PDFium reads it,
+    /// as its first 255 or its first 32,767, the rest dropped, where ISO
+    /// 32000-2 reads all of it, and sets no length (Annex C's are advice).
+    /// [`object`](crate::object) reads a number whole, at 64 bits.
+    #[error("{} is longer than PDFium reads, and read as its first part", shown(.written))]
+    Long {
+        /// The word or the string, whole.
+        written: &'a [u8],
     },
     /// A `)`, `>`, `]` or `>>` with nothing open to close: passed over
     /// here, as PDFium passes it over, an operand that's no object; to ISO
@@ -336,44 +368,79 @@ pub(crate) enum Read {
 
 /// A token's own faults, told to `sink` at `at`, where it is: a number
 /// ISO 32000-2 doesn't write so or reads past what's read here, a hex
-/// string's byte that's no hex digit, a name's `#`, a closer or a brace.
-/// What it is where an object is written.
+/// string's byte that's no hex digit, a name's `#`, a literal string's CR,
+/// a word or a string longer than PDFium reads, a closer or a brace. What
+/// it is where an object is written.
 pub(crate) fn token<'a>(written: &'a [u8], at: usize, sink: &mut (impl Sink<'a> + ?Sized)) -> Read {
-    let fault = match written {
-        [b'[', ..] | [b'(', ..] | [b'<', b'<', ..] => None,
-        [b'/', ..] => name(written),
-        [b'<', ..] => hex_string(written),
-        b")" | b">" | b"]" | b">>" => Some(Fault::Closer { written }),
-        b"{" | b"}" => Some(Fault::Brace { written }),
-        b"true" | b"false" | b"null" => None,
-        _ if is_number(written) => number(written),
+    let (fault, long) = match written {
+        [b'[', ..] | [b'<', b'<', ..] => (None, false),
+        [b'(', ..] => (string_cr(written), long_string(written, pdfium::literal)),
+        [b'/', ..] => (name(written), written.len() > WORD),
+        [b'<', ..] => (hex_string(written), long_string(written, pdfium::hex)),
+        b")" | b">" | b"]" | b">>" => (Some(Fault::Closer { written }), false),
+        b"{" | b"}" => (Some(Fault::Brace { written }), false),
+        b"true" | b"false" | b"null" => (None, false),
+        _ if is_number(written) => (number(written), written.len() > WORD),
         _ => return Read::Keyword,
     };
-    let Some(fault) = fault else {
-        return Read::Object;
-    };
     let read = match fault {
-        Fault::Number { .. } | Fault::Closer { .. } | Fault::Brace { .. } => Read::Told,
+        Some(Fault::Number { .. } | Fault::Closer { .. } | Fault::Brace { .. }) => Read::Told,
         _ => Read::Object,
     };
-    sink.fault(at..at + written.len(), fault);
+    if let Some(fault) = fault {
+        sink.fault(at..at + written.len(), fault);
+    }
+    if long {
+        sink.fault(at..at + written.len(), Fault::Long { written });
+    }
     read
 }
 
 /// A number word's fault: one ISO 32000-2 doesn't write so (7.3.3), or
-/// one past what's read here, each as pdf-tokenizer reads a number by ISO's
-/// rules: an integer, or a real when it has a point.
+/// one past what's read here, each judged on the whole word as pdf-tokenizer
+/// reads a number by ISO's rules, an integer, or a real when it has a
+/// point: an integer PDFium reads otherwise, outside its 32 bits, or a
+/// real it reads as infinite, past an `f32`; or one past 64 bits.
 fn number(written: &[u8]) -> Option<Fault<'_>> {
-    let read = if written.contains(&b'.') {
-        decode::number(written).map(drop)
-    } else {
-        decode::integer(written).map(drop)
-    };
-    match read {
-        Ok(()) => None,
-        Err(NumberError::NotANumber) => Some(Fault::Number { written }),
-        Err(NumberError::Overflow) => Some(Fault::OutOfRange { written }),
+    let past = Fault::OutOfRange { written };
+    if written.contains(&b'.') {
+        return match decode::number(written) {
+            Ok(_) => pdfium::number(written)
+                .float()
+                .is_infinite()
+                .then_some(past),
+            Err(NumberError::NotANumber) => Some(Fault::Number { written }),
+            Err(NumberError::Overflow) => Some(past),
+        };
     }
+    match decode::integer(written) {
+        Ok(n) => {
+            let pdfium = match pdfium::number(written) {
+                pdfium::Number::Unsigned(u) => i64::from(u),
+                pdfium::Number::Signed(i) => i64::from(i),
+                pdfium::Number::Real(_) => return Some(past),
+            };
+            (pdfium != n).then_some(past)
+        }
+        Err(NumberError::NotANumber) => Some(Fault::Number { written }),
+        Err(NumberError::Overflow) => Some(past),
+    }
+}
+
+/// A literal string's fault: a CR written in it, not escaped, which PDFium
+/// reads as written and ISO 32000-2 as LF (7.3.4.2). Every escape reads
+/// alike, so the readings differ only there.
+fn string_cr(written: &[u8]) -> Option<Fault<'_>> {
+    let cr =
+        written.contains(&b'\r') && !pdfium::literal(written).eq(decode::literal(written).bytes());
+    cr.then_some(Fault::StringCr { written })
+}
+
+/// Whether a string's bytes, read by `read`, are more than the
+/// [`STRING`] PDFium's content parser keeps. A string's bytes are never
+/// more than it's written in, so only a long one is read.
+fn long_string(written: &[u8], read: fn(&[u8]) -> pdfium::Bytes<'_>) -> bool {
+    written.len() > STRING && read(written).nth(STRING).is_some()
 }
 
 /// A hex string's fault: a byte between its `<` and `>` that's neither a

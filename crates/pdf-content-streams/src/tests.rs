@@ -129,9 +129,12 @@ fn names_decode_their_escapes() {
     assert_eq!(name(b"/F#311").as_deref(), Some(&b"F11"[..]));
     assert_eq!(name(b"/A#20B").as_deref(), Some(&b"A B"[..]));
     assert!(matches!(name(b"/Plain"), Some(Cow::Borrowed(b"Plain"))));
-    // An escape with no two hex digits stays as written.
+    // A `#` with fewer than two bytes after it stays as written; with two
+    // that aren't hex digits, it escapes them as PDFium reads it, each
+    // read as 0 (`/F#3G 10 Tf` finds the font `F0` in PDFium 7881 and
+    // 8076).
     assert_eq!(name(b"/A#2").as_deref(), Some(&b"A#2"[..]));
-    assert_eq!(name(b"/#zz").as_deref(), Some(&b"#zz"[..]));
+    assert_eq!(name(b"/#zz").as_deref(), Some(&b"\0"[..]));
     assert_eq!(name(b"/").as_deref(), Some(&b""[..]));
     assert_eq!(name(b"(F1)"), None);
 }
@@ -151,10 +154,12 @@ fn operands_read_as_objects() {
     assert_eq!(o(b"true"), Some(Object::from(true)));
     assert_eq!(o(b"null"), Some(Object::null()));
     assert_eq!(o(b"/A#20B"), Some(Object::from("A B")));
-    // Escapes, octal codes, a line continued, and an end of line.
+    // Escapes, octal codes, a line continued, and an end of line, a CR LF
+    // read as written, as PDFium reads it (`(a\rb\r\nc) Tj` shows those
+    // bytes in PDFium 7881 and 8076).
     assert_eq!(
         o(b"(a\\(b\\)\\101\\0533\\\nc\r\nd)"),
-        Some(string(b"a(b)A+3c\nd", Literal))
+        Some(string(b"a(b)A+3c\r\nd", Literal))
     );
     assert_eq!(o(b"<48 65 6>"), Some(string(b"He`", Hex)));
     assert_eq!(
@@ -293,6 +298,280 @@ fn a_number_is_one_word() {
     }
 }
 
+/// An operand's number as PDFium's content parser reads it (`GetNumber`),
+/// an `f32`: a number word as `FX_Number` holds it, by its first 255
+/// bytes, and 0 for what's no number. The words and values a reader of
+/// content by PDFium's rules is held to; and as PDFium 7881 and 8076 read
+/// `cm`'s last operand (one-page files, 2026-10-30): 0 for `true`,
+/// `false`, `null`, a name, a string or an array, a word of 255 bytes read
+/// whole and one of 256 by its first 255, so a real cut before its point
+/// is an integer. An array's elements read alike, a `TJ`'s.
+#[test]
+fn an_operands_number_is_read_as_pdfium_reads_it() {
+    let number = |word: &[u8]| {
+        let s = [word, b" cm"].concat();
+        let read = operations_of(&s, &ResCx::none(), &Limits::DEFAULT);
+        read[0].as_ref().unwrap().arg(0).unwrap().number()
+    };
+    for (word, n) in [
+        (&b"1.2.3"[..], 1.2),
+        (b"--5.0", -5.0),
+        (b"+-.5", -0.5),
+        (b"5.", 5.0),
+        (b".", 0.0),
+        (b"-", 0.0),
+        (b"007", 7.0),
+        (b"4294967295", 4_294_967_295.0),
+        (b"4294967296", 0.0),
+        (b"+2147483648", 0.0),
+        (b"-2147483648", -2_147_483_648.0),
+        (b"5-3", 5.0),
+        (b"--5", 0.0),
+        (b"/Name", 0.0),
+        (b"(5)", 0.0),
+        (b"2147483648", 2_147_483_648.0),
+        (b"16777217", 16_777_216.0),
+        (b"true", 0.0),
+        (b"false", 0.0),
+        (b"null", 0.0),
+        (b"<35>", 0.0),
+        (b"[5]", 0.0),
+        (b"<</N 5>>", 0.0),
+    ] {
+        assert_eq!(number(word), n, "{}", String::from_utf8_lossy(word));
+    }
+    assert!(number(&[b"9".repeat(40), b".0".to_vec()].concat()).is_infinite());
+    let zeros = |n: usize, then: &[u8]| [b"0".repeat(n).as_slice(), then].concat();
+    assert_eq!(number(&zeros(254, b"2")), 2.0);
+    assert_eq!(number(&zeros(255, b"2")), 0.0);
+    assert_eq!(number(&zeros(254, b"7.5")), 7.0);
+    assert_eq!(number(&zeros(255, b"7.5")), 0.0);
+
+    let s = b"[(a) -250 (b) --5 1.2.3 /N [7]] TJ";
+    let read = operations_of(s, &ResCx::none(), &Limits::DEFAULT);
+    let tj = read[0].as_ref().unwrap().arg(0).unwrap();
+    let numbers: Vec<f32> = tj.elements().map(|e| e.number()).collect();
+    assert_eq!(numbers, [0.0, -250.0, 0.0, 0.0, 1.2, 0.0, 0.0]);
+}
+
+/// A name as PDFium's content parser reads it: a `#` with two bytes after
+/// it stands for the byte they make, one that's no hex digit read as 0,
+/// and with fewer it's itself; and a name longer than 255 bytes, its `/`
+/// among them, is its first 255. As PDFium 7881 and 8076 find `Tf`'s font
+/// (one-page files, 2026-10-30): `F0` for `/F#30`, `/F#3G`, `/F#3g` and
+/// `/#460`, none for `/F#G0`, `/F#3`, `/F0#`, `/F0#2`, `/F#300` and
+/// `/#F#30`; and a font named by 254 bytes for those and any more. The
+/// resource an operation names is read so, and a name in an array or a
+/// dictionary.
+#[test]
+fn a_name_is_read_as_pdfium_reads_it() {
+    for (written, read) in [
+        (&b"/F#30"[..], &b"F0"[..]),
+        (b"/F#3G", b"F0"),
+        (b"/F#3g", b"F0"),
+        (b"/#460", b"F0"),
+        (b"/F#G0", b"F\0"),
+        (b"/F#3", b"F#3"),
+        (b"/F0#", b"F0#"),
+        (b"/F0#2", b"F0#2"),
+        (b"/F#300", b"F00"),
+        (b"/#F#30", b"\xf030"),
+    ] {
+        let shown = String::from_utf8_lossy(written);
+        assert_eq!(name(written).as_deref(), Some(read), "{shown}");
+        let s = [b"BT ", written, b" 10 Tf ET"].concat();
+        let ops = operations_of(&s, &ResCx::none(), &Limits::DEFAULT);
+        let font = ops[1].as_ref().unwrap().resource();
+        assert_eq!(font, Some((ResKind::Font, read.into())), "{shown}");
+    }
+    let f254 = b"F".repeat(254);
+    for more in [&b""[..], b"X", b"XX", b"#41"] {
+        let long = [b"/", f254.as_slice(), more].concat();
+        assert_eq!(name(&long).as_deref(), Some(&f254[..]));
+    }
+    // A `#` the cut leaves one byte after is itself.
+    let cut = [b"/", &f254[..252], b"#41"].concat();
+    let kept = [&f254[..252], b"#4"].concat();
+    assert_eq!(name(&cut).as_deref(), Some(&kept[..]));
+    let read = object(b"<</F#3G [/G#3G]>>", &Limits::DEFAULT);
+    let g0 = Object::from(vec![Object::from("G0")]);
+    assert_eq!(read, Some(Object::from(dict! { "F0" => g0 })));
+}
+
+/// A string as PDFium's content parser reads it: a literal string's CR or
+/// CR LF written in it as written, where ISO 32000-2 reads LF, every escape
+/// as ISO reads it; and a literal's or a hex string's first 32,767 bytes,
+/// read. As PDFium 7881 and 8076 show `Tj`'s and `TJ`'s text (one-page
+/// files, 2026-10-30): `(a\rb\r\nc)` those bytes, `[(a\rb) -250 (c)]` `a\rb`
+/// and `c`, and 32,767 bytes of a string of 32,768 read, 32,768 `\101`
+/// escapes or 32,768 pairs of hex digits and one more digit among them.
+#[test]
+fn a_string_is_read_as_pdfium_reads_it() {
+    use Form::{Hex, Literal};
+    let lim = &Limits::DEFAULT;
+    assert_eq!(
+        object(b"(a\rb\r\nc)", lim),
+        Some(string(b"a\rb\r\nc", Literal))
+    );
+    assert_eq!(object(b"(a\r\rb)", lim), Some(string(b"a\r\rb", Literal)));
+    assert_eq!(object(b"(a\n\rb)", lim), Some(string(b"a\n\rb", Literal)));
+    // An end of line escaped is nothing, and `\015` a CR, as ISO reads them.
+    let escaped = object(b"(a\\\rb\\\r\nc\\\nd\\015)", lim);
+    assert_eq!(escaped, Some(string(b"abcd\r", Literal)));
+    let array = object(b"[(a\rb) -250 (c)]", lim);
+    let shown = vec![
+        string(b"a\rb", Literal),
+        Object::from(-250),
+        string(b"c", Literal),
+    ];
+    assert_eq!(array, Some(Object::from(shown)));
+
+    let length = |written: &[u8]| match object(written, lim).map(Object::into_value) {
+        Some(Value::String(Str::Bytes(bytes), _)) => bytes.len(),
+        other => panic!("{other:?}"),
+    };
+    let literal = |inside: Vec<u8>| [b"(", inside.as_slice(), b")"].concat();
+    let hex = |inside: Vec<u8>| [b"<", inside.as_slice(), b">"].concat();
+    for (written, read) in [
+        (literal(b"a".repeat(32_766)), 32_766),
+        (literal(b"a".repeat(32_767)), 32_767),
+        (literal(b"a".repeat(32_768)), 32_767),
+        (literal(b"\\101".repeat(32_768)), 32_767),
+        (hex(b"41".repeat(32_767)), 32_767),
+        (hex([b"41".repeat(32_767), b"4".to_vec()].concat()), 32_767),
+        (hex(b"41".repeat(32_768)), 32_767),
+    ] {
+        assert_eq!(length(&written), read);
+    }
+    let first = object(&literal(b"\\101".repeat(32_768)), lim);
+    assert_eq!(first, Some(string(&b"A".repeat(32_767), Literal)));
+    let first = object(&hex([b"41".repeat(32_767), b"4".to_vec()].concat()), lim);
+    assert_eq!(first, Some(string(&b"A".repeat(32_767), Hex)));
+}
+
+/// An inline image's `/W`, `/H` and `/BPC` as PDFium reads an integer from
+/// each, held in 32 bits, and the size they count; an image whose size
+/// can't be counted, filtered or not, read on to `EI` from its data's
+/// start; and its color space's name as PDFium decodes it. As PDFium 8076
+/// reads each (one-page files, 2026-10-30; 7881 alike but where a row is
+/// 2^32 − 7 bits or more, below): the data, or the operations after it.
+/// Where PDFium counts no data, or reads none, the data here runs on to
+/// `EI`, as for any image no size counts.
+#[test]
+fn an_inline_images_numbers_are_read_as_pdfium_reads_them() {
+    let res = ResCx::new([(b"CP".to_vec(), 3)]);
+    let image = |dict: &str| format!("BI {dict} ID xyzw EI 5 5 m 7 7 l S");
+    let all = Some("xyzw");
+    let cases: Vec<(String, Option<&str>)> = vec![
+        // A width: a real's whole part, `true` 1, what's no number 0, an
+        // unsigned one past `i32` wrapped, negative, as none.
+        (image("/W 1.9 /H 1 /BPC 8 /CS /G"), Some("x")),
+        (image("/W 2.9 /H 1 /BPC 8 /CS /G"), Some("xy")),
+        (image("/W +2 /H 1 /BPC 8 /CS /G"), Some("xy")),
+        (image("/W true /H 1 /BPC 8 /CS /G"), Some("x")),
+        (image("/W --3 /H 1 /BPC 8 /CS /G"), all),
+        (image("/W false /H 1 /BPC 8 /CS /G"), all),
+        (image("/W (3) /H 1 /BPC 8 /CS /G"), all),
+        (image("/W /N /H 1 /BPC 8 /CS /G"), all),
+        (image("/W -0.5 /H 1 /BPC 8 /CS /G"), all),
+        (image("/W 4294967297 /H 1 /BPC 8 /CS /G"), all),
+        (image("/W -1 /H 1 /BPC 8 /CS /G"), all),
+        (image("/W 4294967295 /H 1 /BPC 8 /CS /G"), all),
+        (image("/W 2147483648 /H 1 /BPC 8 /CS /G"), all),
+        (image("/W 5000000000.0 /H 1 /BPC 8 /CS /G"), all),
+        (
+            image(&format!("/W {}2 /H 1 /BPC 8 /CS /G", "0".repeat(254))),
+            Some("xy"),
+        ),
+        (
+            image(&format!("/W {}2 /H 1 /BPC 8 /CS /G", "0".repeat(255))),
+            all,
+        ),
+        // A height and bits per component alike.
+        (image("/W 1 /H 1.9 /BPC 8 /CS /G"), Some("x")),
+        (image("/W 1 /H true /BPC 8 /CS /G"), Some("x")),
+        (image("/W 2 /H -1 /BPC 8 /CS /G"), all),
+        (image("/W 2 /H 1 /BPC true /CS /G"), Some("x")),
+        (image("/W 2 /H 1 /BPC 2.9 /CS /G"), Some("x")),
+        (image("/W 1 /H 1 /BPC 16 /CS /G"), Some("xy")),
+        (image("/W 2 /H 1 /BPC -8 /CS /G"), all),
+        (image("/W 2 /H 1 /BPC --8 /CS /G"), all),
+        (image("/W 1 /H 1 /BPC -8 /CS /RGB"), all),
+        // No bits to a pixel: no size, whatever the width; a negative
+        // width at one bit a pixel, though its row fits 32 bits unsigned:
+        // none.
+        (image("/W -1 /H 1 /BPC 0 /CS /G"), all),
+        (image("/W -1 /H 1 /BPC 1 /CS /G"), all),
+        (image("/W 4294967295 /H 1 /BPC 1 /CS /G"), all),
+        // A key matched as written, `/B#5GC` and `/B#50C` no `/BPC`, so 0
+        // bits a component where there's a color space.
+        (image("/W 8 /H 1 /B#5GC 8 /CS /G"), all),
+        (image("/W 8 /H 1 /B#50C 8 /CS /G"), all),
+        // The color space's name as PDFium decodes it: `/C#5G` is `CP`.
+        (image("/W 1 /H 1 /BPC 8 /CS /C#5G"), Some("xyz")),
+        (image("/W 1 /H 1 /BPC 8 /CS /C#50"), Some("xyz")),
+        (image("/W 1 /H 1 /BPC 8 /CS /CQ"), Some("x")),
+        // A filter's name decoded.
+        (
+            image("/W 1 /H 1 /BPC 8 /CS /G /F /A#48x").replace("xyzw", "41>"),
+            Some("41>"),
+        ),
+    ];
+    for (content, data) in &cases {
+        let s = content.as_bytes();
+        let read = operations_of(s, &res, &Limits::DEFAULT);
+        let read: Vec<_> = read.into_iter().map(Result::unwrap).collect();
+        let names: Vec<_> = read.iter().map(|op| op.name()).collect();
+        assert_eq!(names, [&b"BI"[..], b"m", b"l", b"S"], "{content}");
+        let found = read[0].inline_image().map(|i| &s[i.data()]);
+        assert_eq!(found, data.map(str::as_bytes), "{content}");
+    }
+
+    // A size that takes the rest of the content: PDFium reads nothing
+    // after it, and here the image doesn't end. A width past `i32` by a
+    // real is its largest, at one bit a pixel; a height of -1 is 2^32 − 1
+    // rows; a row of 2^32 − 1 bits is 2^29 bytes (7881 overflows adding 7
+    // first, and reads on to `EI`).
+    for dict in [
+        "/W 5000000000.0 /H 1 /BPC 1 /CS /G",
+        "/IM true /W 5000000000.0 /H 1",
+        "/W 1 /H -1 /BPC 8 /CS /G",
+        "/W 1 /H 4294967295 /BPC 8 /CS /G",
+        "/W 1431655765 /H 1 /BPC 3 /CS /G",
+        "/W 1431655764 /H 1 /BPC 3 /CS /G",
+    ] {
+        let content = image(dict);
+        let e = error(content.as_bytes(), &Limits::DEFAULT);
+        assert_eq!((e.at, e.kind), (0, ErrorKind::InlineImage), "{content}");
+    }
+
+    // A filtered image whose size can't be counted has no data to PDFium,
+    // which reads on to the first `EI`, not to its filter's end: two paths
+    // drawn, where one is when it can be counted.
+    let tail = "41 EI 1 1 m 2 2 l S 42> EI 5 5 m 7 7 l S";
+    let mut cases = vec![];
+    for (dict, data) in [
+        ("/W -1 /H 1 /BPC 8 /CS /G /F /AHx", "41"),
+        ("/W 2147483648 /H 1 /BPC 8 /CS /G /F /AHx", "41"),
+        ("/W -1 /H 1 /BPC 8 /CS /G /F /A85", "41"),
+        ("/W 2 /H 4294967295 /BPC 8 /CS /G /F /RL", "41"),
+        ("/W 1 /H 1 /BPC 8 /CS /G /F /AHx", "41 EI 1 1 m 2 2 l S 42>"),
+        ("/F /AHx", "41 EI 1 1 m 2 2 l S 42>"),
+    ] {
+        cases.push((format!("BI {dict} ID {tail}"), data));
+    }
+    for (content, data) in &cases {
+        let s = content.as_bytes();
+        let read: Vec<_> = (operations_of(s, &res, &Limits::DEFAULT).into_iter())
+            .map(Result::unwrap)
+            .collect();
+        let found = read[0].inline_image().map(|i| &s[i.data()]);
+        assert_eq!(found, Some(data.as_bytes()), "{content}");
+        let paths = read.iter().filter(|op| op.name() == b"S").count();
+        assert_eq!(paths, if data.len() == 2 { 2 } else { 1 }, "{content}");
+    }
+}
+
 #[test]
 fn deep_operands_read_in_one_pass() {
     let mut s = b"[".repeat(500);
@@ -309,9 +588,8 @@ fn deep_operands_read_in_one_pass() {
         };
         o = inner.pop().unwrap();
     }
-    assert!(
-        matches!(o.into_value(), Value::String(Str::Bytes(bytes), _) if bytes.len() == 4 << 20)
-    );
+    // Its first 32,767 bytes, the most PDFium keeps of a string.
+    assert!(matches!(o.into_value(), Value::String(Str::Bytes(bytes), _) if bytes.len() == 32_767));
 }
 
 /// `s`'s one inline image: where the token is, and its data.
@@ -1983,6 +2261,14 @@ fn numbers_iso_doesnt_write_are_faults() {
             },
         )
     };
+    let long = |i: usize| {
+        (
+            at[i].clone(),
+            Fault::Long {
+                written: &s[at[i].clone()],
+            },
+        )
+    };
     assert_eq!(
         found,
         [
@@ -1993,8 +2279,11 @@ fn numbers_iso_doesnt_write_are_faults() {
             number(4),
             number(5),
             past(12),
+            past(13),
+            past(14),
             past(15),
-            past(16)
+            past(16),
+            long(16)
         ]
     );
     assert_eq!(
@@ -2010,9 +2299,123 @@ fn numbers_iso_doesnt_write_are_faults() {
     );
     // Its first 40 bytes.
     assert_eq!(
-        words(&found)[8],
+        words(&found)[10],
         format!("{} is past the numbers read here", "1".repeat(40))
     );
+}
+
+/// Where ISO 32000-2 reads an operand otherwise than PDFium's content
+/// parser: an integer outside the 32 bits PDFium reads, or a real past an
+/// `f32`, as [`Fault::OutOfRange`]; a literal string with a CR written in
+/// it, as [`Fault::StringCr`]; a number or a name past 255 bytes, or a
+/// string whose bytes, read, are more than 32,767, as [`Fault::Long`].
+/// None for a number PDFium reads as ISO does, a CR escaped, or a word or
+/// a string at the most PDFium reads. Each a token's own, told by the
+/// tokens, and inside an array or a dictionary, or as an inline image's
+/// value, as it's read.
+#[test]
+fn operands_pdfium_reads_otherwise_are_told() {
+    let f = |n: usize| [b"/".as_slice(), &b"F".repeat(n - 1)].concat();
+    let zeros = |n: usize| [b"0".repeat(n - 1).as_slice(), b"2"].concat();
+    let literal = |n: usize| [b"(", b"a".repeat(n).as_slice(), b")"].concat();
+    let hex = |n: usize| [b"<", b"41".repeat(n).as_slice(), b">"].concat();
+    let escapes = [b"(", b"\\101".repeat(32_768).as_slice(), b")"].concat();
+    let (s, at) = spaced(&[
+        b"4294967296",
+        b"+2147483648",
+        b"-2147483649",
+        b"4294967295",
+        b"2147483648",
+        b"-2147483648",
+        b"340282356779733661637539395458142568448.0",
+        b"340282346638528859811704183484516925440.0",
+        b"(a\rb)",
+        b"(a\\\rb\\015)",
+        b"(a\nb)",
+        &f(255),
+        &f(256),
+        &zeros(255),
+        &zeros(256),
+        &literal(32_767),
+        &literal(32_768),
+        &hex(32_767),
+        &hex(32_768),
+        &escapes,
+        b"Tj",
+    ]);
+    let page = Concat::new(&[&s]);
+    let found = faults(&page);
+    let w = |i: usize| &s[at[i].clone()];
+    let expected = [
+        (0, Fault::OutOfRange { written: w(0) }),
+        (1, Fault::OutOfRange { written: w(1) }),
+        (2, Fault::OutOfRange { written: w(2) }),
+        (6, Fault::OutOfRange { written: w(6) }),
+        (8, Fault::StringCr { written: w(8) }),
+        (12, Fault::Long { written: w(12) }),
+        (14, Fault::Long { written: w(14) }),
+        (16, Fault::Long { written: w(16) }),
+        (18, Fault::Long { written: w(18) }),
+        (19, Fault::Long { written: w(19) }),
+    ]
+    .map(|(i, f)| (at[i].clone(), f));
+    assert_eq!(found, expected);
+    let said = [
+        "the string (a\rb) has a CR written in it, read as written, where ISO 32000-2 reads LF"
+            .to_string(),
+        format!(
+            "/{} is longer than PDFium reads, and read as its first part",
+            "F".repeat(39)
+        ),
+    ];
+    assert_eq!(words(&found)[4..6], said);
+
+    // Inside an array, and as an inline image's value: as they're read.
+    let s = b"[(a\rb) 4294967296] TJ BI /W 1 /H 1 /BPC 8 /CS /G /DP (c\rd) ID x EI";
+    let read: Vec<_> = operations(s, &ResCx::none(), &Limits::DEFAULT)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let mut kept = Collected::default();
+    read[0]
+        .arg(0)
+        .unwrap()
+        .object_with(&Limits::DEFAULT, &mut kept);
+    let (cr, past) = (place(s, b"(a\rb)"), place(s, b"4294967296"));
+    assert_eq!(
+        kept.0,
+        [
+            (cr.clone(), Fault::StringCr { written: &s[cr] }),
+            (past.clone(), Fault::OutOfRange { written: &s[past] }),
+        ]
+    );
+    let image = place(s, b"(c\rd)");
+    let page = Concat::new(&[s]);
+    let told: Vec<_> = (faults(&page).into_iter())
+        .filter(|(at, _)| at.start > read[0].range().end)
+        .collect();
+    assert_eq!(
+        told,
+        [(image.clone(), Fault::StringCr { written: &s[image] })]
+    );
+
+    // A key ISO 32000-2 decodes to an image's is told so; one only PDFium
+    // would decode to one, `/B#5GC`, isn't, as ISO reads its `#` as
+    // itself (and tells that, a token's own).
+    let s = b"BI /W 8 /H 1 /B#5GC 8 /B#50C 8 /CS /G ID x EI";
+    let (lax, hex) = (place(s, b"/B#5GC"), place(s, b"/B#50C"));
+    let page = Concat::new(&[s]);
+    let told: Vec<_> = (faults(&page).into_iter())
+        .filter(|(at, _)| *at == lax || *at == hex)
+        .collect();
+    let name = Fault::Name {
+        written: &s[lax.clone()],
+        stray: true,
+        nul: false,
+    };
+    let key = Fault::EscapedKey {
+        written: &s[hex.clone()],
+    };
+    assert_eq!(told, [(lax, name), (hex, key)]);
 }
 
 /// A hex string of other bytes than hex digits and white-space, a name

@@ -8,13 +8,14 @@ use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
 
-use pdf_tokenizer::{decode, is_white_space};
+use pdf_tokenizer::decode::{self, pdfium};
+use pdf_tokenizer::is_white_space;
 
 use crate::data::{a85_end, ei_scan, find, run_length_end};
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Sink};
 use crate::limits::Limits;
-use crate::operand::{Operand, hex, literal, name};
+use crate::operand::{Operand, WORD, hex, iso_name, literal, name};
 use crate::scan::{Raw, UNCAPPED, elements, is_number, is_space, next_raw};
 
 /// What reading content needs of the resources it's drawn with: how many
@@ -32,7 +33,9 @@ impl ResCx {
     }
 
     /// Color spaces by name, each with its components: each name as a
-    /// `/ColorSpace` dictionary's key, its `#` escapes decoded. PDFium
+    /// `/ColorSpace` dictionary's key, its `#` escapes decoded as PDFium
+    /// decodes them (pdf-objects reads a key so by PDFium's rules), as an
+    /// image's color space is looked up by its name read so. PDFium
     /// counts a space named by a family alone as [`family_components`]
     /// does, an array by its first element the same, but an ICCBased
     /// space by its stream's `/N` (1, 3 or 4, and 3 otherwise) and a
@@ -221,19 +224,26 @@ impl<'a, 'r> Images<'a, 'r> {
         let start = at + usize::from(s.get(at).is_some_and(|&c| is_space(c)));
         // A decoder that finds no end of its data is none to PDFium, which
         // then reads on from its data's start as it does for a filter it
-        // can't decode.
-        let end = match self.first_filter(&dict) {
-            None => self
-                .unfiltered(&dict)
+        // can't decode; and so for an image whose size it can't count,
+        // which it reads no data of, filtered or not.
+        let end = match (self.size(&dict), self.first_filter(&dict)) {
+            (None, _) => End::Walk,
+            (Some(size), None) => usize::try_from(size)
+                .ok()
+                .filter(|&n| n > 0)
                 .map_or(End::Walk, |n| End::Counted(start.saturating_add(n))),
-            Some(Filter::Hex) => find(s, start, b">").map_or(End::Walk, |at| End::Counted(at + 1)),
-            Some(Filter::A85) => a85_end(s, start).map_or(End::Walk, End::Counted),
-            Some(Filter::RunLength) => run_length_end(s, start).map_or(End::Walk, End::Counted),
-            Some(Filter::Dct) => self
+            (_, Some(Filter::Hex)) => {
+                find(s, start, b">").map_or(End::Walk, |at| End::Counted(at + 1))
+            }
+            (_, Some(Filter::A85)) => a85_end(s, start).map_or(End::Walk, End::Counted),
+            (_, Some(Filter::RunLength)) => {
+                run_length_end(s, start).map_or(End::Walk, End::Counted)
+            }
+            (_, Some(Filter::Dct)) => self
                 .eoi(start)
                 .map_or(End::Scan, |eoi| End::Counted(eoi + 2)),
-            Some(Filter::Decoded) => End::Scan,
-            Some(Filter::Other) => End::Walk,
+            (_, Some(Filter::Decoded)) => End::Scan,
+            (_, Some(Filter::Other)) => End::Walk,
         };
         let (data, end) = match end {
             End::Counted(end) if end <= s.len() => {
@@ -334,19 +344,21 @@ impl<'a, 'r> Images<'a, 'r> {
     }
 
     /// The last of an image's filters, or its one, as ISO 32000-2 reads
-    /// its dictionary: a name's, decoded.
+    /// its dictionary: a name's, decoded as ISO decodes one (7.3.5).
     fn last_filter(&self, dict: &ImageDict) -> Option<Cow<'a, [u8]>> {
         let f = &self.s[dict.iso(F)?];
         let last = match f.first() {
             Some(b'[') => *elements(f, self.lim.depth).last()?,
             _ => f,
         };
-        name(last)
+        iso_name(last)
     }
 
     /// An image's first filter, by what finds its data's end, as PDFium
     /// takes it: a name, its abbreviation read as the full name (Table
-    /// 92), or a string's bytes, naming a filter. None, as for no filter,
+    /// 92), or a string's bytes, naming a filter, each read as PDFium's
+    /// content parser reads it ([`name`], [`literal`], [`hex`]: `/A#48x`
+    /// is `/AHx`). None, as for no filter,
     /// for `null`, a dictionary or what's no object, and for an empty
     /// array; [`Filter::Other`] for a name or a string that names no filter
     /// PDFium decodes, a number, a boolean, or an array first in an array.
@@ -379,30 +391,40 @@ impl<'a, 'r> Images<'a, 'r> {
         })
     }
 
-    /// The size of an unfiltered image's data, as PDFium counts it; None
-    /// when it counts none.
-    fn unfiltered(&self, dict: &ImageDict) -> Option<usize> {
+    /// The size of an image's data as PDFium counts it from its
+    /// dictionary (`ReadInlineStream`), which an unfiltered image's data
+    /// is: its `/W`, `/H` and `/BPC` each as PDFium reads an integer from
+    /// a value ([`integer`]), 0 where there's none, and held as PDFium
+    /// holds them, in 32 bits, unsigned, the width signed where a row's
+    /// bits are counted; its color space's components and `/BPC` where it
+    /// has one the resources give, and one bit of one component where it
+    /// has none or names one they don't; a row's bits padded to a byte.
+    /// None where that count overflows 32 bits, or a row of any bits to a
+    /// pixel has a negative width: PDFium then reads no data, filtered or
+    /// not, and reads on to `EI` from the data's start. (PDFium 7881 pads a
+    /// row by adding 7 to its bits first, so a row of 2^32 − 7 bits or more
+    /// overflows there; 8076 divides, rounding up, as here.)
+    fn size(&self, dict: &ImageDict) -> Option<u32> {
         let s = self.s;
-        let value = |key| int(&s[dict.get(s, key)?]);
-        let (components, bpc) = match dict.get(s, CS) {
+        let value = |key| dict.get(s, key).map_or(0, |r| integer(&s[r]));
+        let (bpc, components) = match dict.get(s, CS).and_then(|cs| self.components(&s[cs])) {
+            Some(n) => (value(BPC) as u32, u32::try_from(n).ok()?),
             None => (1, 1),
-            Some(cs) => match self.components(&s[cs]) {
-                Some(n) => (n, value(BPC)?),
-                None => (1, 1),
-            },
         };
-        let pitch = value(W)?
-            .checked_mul(bpc)?
-            .checked_mul(components)?
-            .div_ceil(8);
-        let size = pitch.checked_mul(value(H)?)?;
-        usize::try_from(size).ok().filter(|&n| n > 0)
+        let bits = bpc.checked_mul(components)?;
+        let row = match u32::try_from(value(W)) {
+            Ok(width) => bits.checked_mul(width)?,
+            Err(_) if bits == 0 => 0,
+            Err(_) => return None,
+        };
+        row.div_ceil(8).checked_mul(value(H) as u32)
     }
 
-    /// The components of an inline image's color space, as written; None
-    /// for a name the resources don't have, which PDFium reads as no
-    /// color space, an abbreviation looked up by its full name (`/I` as
-    /// `/Indexed`). What it can't make out has 3, as in PDFium.
+    /// The components of an inline image's color space, as written, a name
+    /// read as PDFium's content parser reads it ([`name`]); None for a
+    /// name the resources don't have, which PDFium reads as no color space,
+    /// an abbreviation looked up by its full name (`/I` as `/Indexed`).
+    /// What it can't make out has 3, as in PDFium.
     fn components(&self, cs: &[u8]) -> Option<u64> {
         if let Some(n) = name(cs) {
             return match expanded(&n).unwrap_or(&n) {
@@ -664,14 +686,27 @@ fn key_faults<'a>(s: &'a [u8], r: Range<usize>, sink: &mut (impl Sink<'a> + ?Siz
     fault::token(written, r.start, sink);
     // A key ISO reads by its escapes decoded, which PDFium matches as
     // written.
-    if written.contains(&b'#') && name(written).is_some_and(|k| *k != written[1..] && image_key(&k))
-    {
+    let iso = || iso_name(written).is_some_and(|k| *k != written[1..] && image_key(&k));
+    if written.contains(&b'#') && iso() {
         sink.fault(r, Fault::EscapedKey { written });
     }
 }
 
-/// A non-negative number, as PDFium reads an integer from one: a real's
-/// whole part.
+/// An inline image's value as PDFium reads an integer from it
+/// (`GetIntegerFor`): a number word by its first 255 bytes, as
+/// pdf-tokenizer's [`Number::integer`](pdfium::Number::integer) holds it
+/// (an unsigned one past `i32` wrapped, a real cut to its whole part,
+/// saturating), `true` 1, and 0 for anything else.
+fn integer(value: &[u8]) -> i32 {
+    match value {
+        b"true" => 1,
+        v if is_number(v) => pdfium::number(&v[..v.len().min(WORD)]).integer(),
+        _ => 0,
+    }
+}
+
+/// A length, as ISO 32000-2 writes a number (7.3.3): a non-negative one
+/// under 2^32, a real's whole part.
 fn int(number: &[u8]) -> Option<u64> {
     let value = decode::number(number).ok()?;
     (0.0..4_294_967_296.0)
