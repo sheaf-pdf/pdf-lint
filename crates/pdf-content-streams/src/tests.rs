@@ -694,9 +694,385 @@ fn an_image_ends_at_the_next_ei_past_its_data() {
     // And `EI` straight after the data.
     let s = b"BI /W 1 /H 1 /BPC 8 /CS /G ID xEI Q";
     assert_eq!(image(s, &ResCx::none()).1, b"x");
-    // A key that isn't a name is passed over.
+    // An object where a key should be ends the dictionary, as PDFium ends
+    // it, the data read from after it: here none counted, so on to the
+    // next `EI` (PDFium 7881 and 8076 alike: `BI 7 /W 1 /H 1 /BPC 8 /CS
+    // /G ID (x EI 0 0 m 9 9 l S) EI 5 5 m 7 7 l S` an image of no data,
+    // then one path).
     let s = b"BI 7 /W 1 /H 1 /BPC 8 /CS /G ID x EI";
-    assert_eq!(image(s, &ResCx::none()).1, b"x");
+    assert_eq!(image(s, &ResCx::none()).1, b"/W 1 /H 1 /BPC 8 /CS /G ID x");
+}
+
+/// An inline image's dictionary as PDFium's `Handle_BeginImage` reads it
+/// (PDFium 7881 and 8076 alike, each case's page objects): a name and its
+/// value, and so on, until what's where a key should be isn't a name.
+/// `ID` ends it. Any other object ends it too, the data read from after
+/// it as from after `ID`, sized by the entries before it. A keyword other
+/// than `ID` makes the `BI` no image but an operation of its own, and
+/// what's after it content, the dictionary's tokens among it. A value
+/// PDFium reads as no object (a keyword, `ID` among them, a closer or a
+/// brace) takes its key out. Each case's image's data, where there's an
+/// image, and the operations read, which draw the paths PDFium's page
+/// objects show (an `S` each). Where PDFium's image has no data, none
+/// counted, the data here is read on to the next `EI`, as for an image no
+/// size counts; and PDFium makes no image of a filter it can't decode.
+#[test]
+fn an_inline_images_dictionary_ends_as_pdfium_reads_it() {
+    let p = " 5 5 m 7 7 l S";
+    let g = "/W 1 /H 1 /BPC 8 /CS /G";
+    let data = "/W 1 /H 1 /BPC 8 /CS /G ID (x EI 0 0 m 9 9 l S)";
+    let cases: Vec<(String, Option<&str>, &str)> = vec![
+        // An object where a key should be: the dictionary ends there.
+        (
+            format!("BI 7 {g} ID (x EI 0 0 m 9 9 l S) EI{p}"),
+            Some(data),
+            "BI m l S",
+        ),
+        (
+            format!("BI true {g} ID (x EI 0 0 m 9 9 l S) EI{p}"),
+            Some(data),
+            "BI m l S",
+        ),
+        (
+            format!("BI false {g} ID (x EI 0 0 m 9 9 l S) EI{p}"),
+            Some(data),
+            "BI m l S",
+        ),
+        (
+            format!("BI null {g} ID (x EI 0 0 m 9 9 l S) EI{p}"),
+            Some(data),
+            "BI m l S",
+        ),
+        (format!("BI {g} (k) xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} (k) ID ab EI{p}"), Some("I"), "BI m l S"),
+        (format!("BI {g} <6B> xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} [1 2] xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} <</A 1>> xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} 1.5 xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} --5 xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} ) xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} ] xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} >> xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} > xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} {{ xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} }} xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} (k)xy EI{p}"), Some("x"), "BI m l S"),
+        (format!("BI {g} 7 ID x EI{p}"), Some("I"), "BI m l S"),
+        (
+            format!("BI /W 2 /H 1 /BPC 8 /CS /G 7 xyz EI{p}"),
+            Some("xy"),
+            "BI m l S",
+        ),
+        // Its filter and size, the object after them or before.
+        (
+            format!("BI {g} /F /AHx 7 41> EI{p}"),
+            Some("41>"),
+            "BI m l S",
+        ),
+        (format!("BI {g} 7 /F /AHx 41> EI{p}"), Some("/"), "BI m l S"),
+        (
+            format!("BI {g} /F /A85 (k) 9jqo^~> EI{p}"),
+            Some("9jqo^~>"),
+            "BI m l S",
+        ),
+        (
+            format!("BI /W 1 /H 1 /BPC 8 /CS /RGB [0] abcd EI{p}"),
+            Some("abc"),
+            "BI m l S",
+        ),
+        (
+            format!("BI {g} /F /XYZ 7 (x EI 0 0 m 9 9 l S) EI{p}"),
+            Some("(x EI 0 0 m 9 9 l S)"),
+            "BI m l S",
+        ),
+        // A keyword where a key should be: no image.
+        (
+            format!("BI /W 1 /H 1 foo /BPC 8 /CS /G ID a EI 0 0 m 9 9 l S EI{p}"),
+            None,
+            "BI foo ID a EI m l S EI m l S",
+        ),
+        (
+            format!("BI foo 0 0 m 9 9 l S{p}"),
+            None,
+            "BI foo m l S m l S",
+        ),
+        (
+            format!("BI {g} foo ID x EI{p}"),
+            None,
+            "BI foo ID x EI m l S",
+        ),
+        (format!("BI EI{p}"), None, "BI EI m l S"),
+        (format!("BI BI {g} ID x EI{p}"), Some("x"), "BI BI m l S"),
+        (
+            format!("BI /W 1 BI {g} ID x EI{p}"),
+            Some("x"),
+            "BI BI m l S",
+        ),
+        (format!("BI BI foo{p}"), None, "BI BI foo m l S"),
+        (format!("BI /W 1 % c ID\nfoo{p}"), None, "BI foo m l S"),
+        (
+            format!("BI foo BI {g} ID x EI{p}"),
+            Some("x"),
+            "BI foo BI m l S",
+        ),
+        ("0 0 m 9 9 l S BI foo".to_string(), None, "m l S BI foo"),
+        // A value PDFium reads as no object: its key taken out, an `ID`
+        // too, the dictionary read on past it.
+        (format!("BI {g} /F ID x EI{p}"), None, "BI ID x EI m l S"),
+        (
+            format!("BI /W 1 /H 1 /BPC 8 /CS ID x EI{p}"),
+            None,
+            "BI ID x EI m l S",
+        ),
+        (
+            format!("BI /W 1 /H 1 /BPC 8 /CS ID 7 x EI{p}"),
+            Some("x"),
+            "BI m l S",
+        ),
+        (
+            format!("BI /W 1 /H 1 /BPC 8 /CS ID ID abc EI{p}"),
+            Some("a"),
+            "BI m l S",
+        ),
+        (
+            format!("BI /CS ID /W 1 /H 1 /BPC 8 ID x EI{p}"),
+            Some("x"),
+            "BI m l S",
+        ),
+        (
+            format!("BI /W 1 /H 1 /BPC 8 /CS foo ID abc EI{p}"),
+            Some("a"),
+            "BI m l S",
+        ),
+        (
+            format!("BI /W 3 /H 1 /BPC 8 /CS /G /CS foo ID abcdefghij EI{p}"),
+            Some("a"),
+            "BI m l S",
+        ),
+        (
+            format!("BI /W foo /H 1 /BPC 8 /CS /G ID abc EI{p}"),
+            Some("abc"),
+            "BI m l S",
+        ),
+        (
+            format!("BI /W 1 /H 1 /BPC 8 /CS ) ID abc EI{p}"),
+            Some("a"),
+            "BI m l S",
+        ),
+        (
+            format!("BI /W 1 /H 1 /BPC 8 /CS ] ID abc EI{p}"),
+            Some("a"),
+            "BI m l S",
+        ),
+        (
+            format!("BI /W 1 /H 1 /BPC 8 /CS >> ID abc EI{p}"),
+            Some("a"),
+            "BI m l S",
+        ),
+        (
+            format!("BI /W 1 /H 1 /BPC 8 /CS {{ ID abc EI{p}"),
+            Some("a"),
+            "BI m l S",
+        ),
+        (
+            format!("BI /W 1 /H 1 /BPC 8 /CS BI ID abc EI{p}"),
+            Some("a"),
+            "BI m l S",
+        ),
+        (
+            format!("BI /W 1 /H 1 /BPC 8 /CS true ID abc EI{p}"),
+            Some("abc"),
+            "BI m l S",
+        ),
+        (
+            format!("BI {g} /F /AHx /F foo ID 41> EI{p}"),
+            Some("4"),
+            "BI m l S",
+        ),
+    ];
+    let res = ResCx::none();
+    for (content, data, names) in &cases {
+        let s = content.as_bytes();
+        let read = operations_of(s, &res, &Limits::DEFAULT);
+        let read: Vec<_> = read.into_iter().map(Result::unwrap).collect();
+        let found: Vec<_> = read
+            .iter()
+            .map(|op| String::from_utf8_lossy(op.name()))
+            .collect();
+        assert_eq!(found.join(" "), *names, "{content}");
+        let images: Vec<&[u8]> = (read.iter())
+            .filter_map(|op| op.inline_image().map(|i| &s[i.data()]))
+            .collect();
+        assert_eq!(images, data.map(str::as_bytes).as_slice(), "{content}");
+    }
+}
+
+/// A `BI` that begins no inline image is an operation of its own, with
+/// the operands before it, as PDFium clears them after it (`10 20 30 40
+/// BI re f`, PDFium 7881 and 8076 alike, fills a rectangle at 0 0 of no
+/// size); its dictionary's tokens are content, operands of the keyword
+/// that ends it (`BT BI /F1 24 Tf ... (Hi) Tj ET` shows its text at 24
+/// points). An image whose dictionary an object ends has a dictionary to
+/// that object, and the entries before it; a key whose value PDFium reads
+/// as no object has none.
+#[test]
+fn a_lone_bi_is_an_operation_and_an_ended_dictionary_ends_there() {
+    let res = ResCx::none();
+    assert_eq!(
+        ops(b"10 20 30 40 BI re f"),
+        [
+            (&b"BI"[..], vec![&b"10"[..], b"20", b"30", b"40"]),
+            (b"re", vec![]),
+            (b"f", vec![])
+        ]
+    );
+    let s = b"BT BI /F1 24 Tf 10 10 Td (Hi) Tj ET";
+    let read = operations_of(s, &res, &Limits::DEFAULT);
+    let lone = read[1].as_ref().unwrap();
+    assert_eq!(
+        (lone.name(), lone.at(), lone.range()),
+        (&b"BI"[..], 3..5, 3..5)
+    );
+    assert!(lone.inline_image().is_none());
+    assert_eq!(lone.operator(), Operator::BeginInlineImage);
+    assert_eq!(lone.resource(), None);
+    assert_eq!(
+        ops(s)[2],
+        (&b"Tf"[..], vec![&b"/F1"[..], b"24"]),
+        "the dictionary's tokens are content"
+    );
+    assert_eq!(toks(b"BI foo"), [Tok::Op(&b"BI"[..]), Tok::Op(b"foo")]);
+
+    let s = b"BI /W 2 /H 1 /BPC 8 /CS /G 7 /F /AHx xy EI";
+    let read = operations_of(s, &res, &Limits::DEFAULT);
+    let image = read[0].as_ref().unwrap().inline_image().unwrap();
+    assert_eq!(&s[image.dict()], b" /W 2 /H 1 /BPC 8 /CS /G ");
+    assert_eq!(&s[image.data()], b"/F");
+    assert_eq!(image.entry(b"F"), None, "past what ends it");
+    assert_eq!(image.entry(b"W").unwrap().bytes(), b"2");
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G /CS foo /X 1 /X ) /Y 2 ID a EI";
+    let read = operations_of(s, &res, &Limits::DEFAULT);
+    let image = read[0].as_ref().unwrap().inline_image().unwrap();
+    assert_eq!(
+        &s[image.dict()],
+        b" /W 1 /H 1 /BPC 8 /CS /G /CS foo /X 1 /X ) /Y 2 "
+    );
+    assert_eq!(
+        (image.entry(b"CS"), image.entry(b"ColorSpace")),
+        (None, None)
+    );
+    assert_eq!(
+        (image.entry(b"X"), image.entry(b"Y").map(|y| y.bytes())),
+        (None, Some(&b"2"[..]))
+    );
+    // `ID` as a value, then an object.
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS ID (k) x EI";
+    let read = operations_of(s, &res, &Limits::DEFAULT);
+    let image = read[0].as_ref().unwrap().inline_image().unwrap();
+    assert_eq!(&s[image.dict()], b" /W 1 /H 1 /BPC 8 /CS ID ");
+    assert_eq!((&s[image.data()], image.entry(b"CS")), (&b"x"[..], None));
+}
+
+/// Where ISO 32000-2 reads an inline image's dictionary otherwise than
+/// PDFium structures it, told: an object where a key is written ends it
+/// here (`DictEnd`, after the object's own faults and the image's keys');
+/// a keyword there makes the `BI` no image (`LoneBi`, from the `BI` to the
+/// keyword, told as reading passes the keyword, after what's read as
+/// content before it, and for each `BI` it makes one, a `BI` read as a
+/// value among them); an `ID` as a value is the key's (`NoValue`). No `ID`
+/// ends a dictionary an object ends, so nothing is told of one.
+#[test]
+fn an_inline_images_dictionary_read_otherwise_is_told() {
+    let ends = |w: &str| format!("{w} ends an inline image's dictionary, where a key is written");
+    let lone = |w: &str| format!("{w} begins no inline image, a keyword where a key is written");
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G --5 x EI";
+    assert_eq!(
+        told(s),
+        [
+            (
+                place(s, b"--5"),
+                "--5 is a number here and a keyword to ISO 32000-2".to_string()
+            ),
+            (place(s, b"--5"), ends("--5"))
+        ]
+    );
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G (k)x EI";
+    assert_eq!(told(s), [(place(s, b"(k)"), ends("(k)"))]);
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G /ColorSpace /RGB 7 abc EI";
+    let words = "an inline image's ColorSpace is read from its full name, and by ISO 32000-2 \
+                 from its abbreviation";
+    assert_eq!(
+        told(s),
+        [
+            (
+                place(s, b" /W 1 /H 1 /BPC 8 /CS /G /ColorSpace /RGB "),
+                words.to_string()
+            ),
+            (place(s, b"7"), ends("7"))
+        ]
+    );
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS ID 7 x EI";
+    assert_eq!(
+        told(s),
+        [
+            (place(s, b"/CS"), "the key /CS has no value".to_string()),
+            (place(s, b"7"), ends("7"))
+        ]
+    );
+    let s = b"BI /W --5 foo q";
+    assert_eq!(
+        told(s),
+        [
+            (
+                place(s, b"--5"),
+                "--5 is a number here and a keyword to ISO 32000-2".to_string()
+            ),
+            (place(s, b"BI /W --5 foo"), lone("BI /W --5 foo"))
+        ]
+    );
+    let s = b"BI BI foo";
+    assert_eq!(told(s), [(0..5, lone("BI BI")), (3..9, lone("BI foo"))]);
+    let s = b"BI /A BI /B BI foo";
+    assert_eq!(
+        told(s),
+        [
+            (0..18, lone("BI /A BI /B BI foo")),
+            (6..18, lone("BI /B BI foo")),
+            (12..18, lone("BI foo"))
+        ]
+    );
+    let s = b"BI /W 1 BI /W 1 /H 1 /BPC 8 /CS /G ID x EI";
+    assert_eq!(told(s), [(0..10, lone("BI /W 1 BI"))]);
+    // Told as reading passes the keyword: before an error after it, and
+    // not where an error stops reading before it.
+    let s = b"BI foo (";
+    let mut kept = Collected::default();
+    let read: Vec<_> = tokens(s, &ResCx::none(), &Limits::DEFAULT)
+        .with_sink(&mut kept)
+        .collect();
+    assert_eq!(read.last().unwrap().as_ref().err().map(|e| e.at), Some(7));
+    assert_eq!(kept.0, [(0..6, Fault::LoneBi { written: &s[..6] })]);
+    // An image whose data doesn't end: its dictionary's tokens' own
+    // faults told as they're read, before the error; and none of what
+    // ends it, which the image tells when it's read.
+    let s = b"BI /W <4G> 7";
+    let mut kept = Collected::default();
+    let read: Vec<_> = tokens(s, &ResCx::none(), &Limits::DEFAULT)
+        .with_sink(&mut kept)
+        .collect();
+    assert_eq!(read.last().unwrap().as_ref().err().map(|e| e.at), Some(0));
+    assert_eq!(kept.0, [(6..10, Fault::HexString { written: &s[6..10] })]);
+    let s = b"BI /a /b /c /d foo";
+    let small = Limits {
+        operands: 3,
+        ..Limits::DEFAULT
+    };
+    let mut kept = Collected::default();
+    let read: Vec<_> = tokens(s, &ResCx::none(), &small)
+        .with_sink(&mut kept)
+        .collect();
+    assert_eq!(read.last().unwrap().as_ref().err().map(|e| e.at), Some(12));
+    assert_eq!(kept.0, []);
 }
 
 /// PDFium reads 0x80 and 0xFF as white-space, beside ISO 32000-2's six
@@ -865,6 +1241,27 @@ fn unended_images_dont_search_again() {
     let started = std::time::Instant::now();
     assert_eq!(tokens(&s, &ResCx::none(), &Limits::DEFAULT).count(), 50_000);
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+/// Content of many `BI`s that begin no inline image, each a value in the
+/// dictionary of the one before, is read once: each is lone with the
+/// keyword that ends them all, its dictionary not read on to it again.
+#[test]
+fn lone_bis_dont_read_again() {
+    let mut s = b"BI /A ".repeat(50_000);
+    s.extend_from_slice(b"BI foo");
+    let started = std::time::Instant::now();
+    let (res, mut kept) = (ResCx::none(), Collected::default());
+    let read = tokens(&s, &res, &Limits::DEFAULT).with_sink(&mut kept);
+    assert_eq!(read.count(), 100_002);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    let lone: Vec<_> = (0..=50_000)
+        .map(|i| {
+            let at = 6 * i..s.len();
+            (at.clone(), Fault::LoneBi { written: &s[at] })
+        })
+        .collect();
+    assert_eq!(kept.0, lone);
 }
 
 /// What content is made of, run together into tokens.
@@ -2050,17 +2447,14 @@ fn an_inline_images_faults() {
         )
     );
     assert_eq!(told(b"BI /W 1 /H 1 /BPC 8 /CS /G ID xEI Q"), []);
-    // Its dictionary: a key that's no name, its tokens' own faults, a
-    // word that's no object, and a key with no value.
-    let s = b"BI 7 /W 1 /H 1 /BPC 8 /CS /G /A#zz foo /B ) /D <4G> /F#2 ID x EI";
+    // Its dictionary: its tokens' own faults, a word that's no object, a
+    // key whose value is `ID`, and an object where a key is written,
+    // which ends it.
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G /A#zz foo /B ) /D <4G> /F#2 ID 7 x EI";
     let stray = "has a # without two hex digits after it, which readers read differently";
     assert_eq!(
         told(s),
         [
-            (
-                place(s, b"7"),
-                "7 is a dictionary's key and not a name".to_string()
-            ),
             (place(s, b"/A#zz"), format!("the name /A#zz {stray}")),
             (
                 place(s, b"foo"),
@@ -2073,6 +2467,10 @@ fn an_inline_images_faults() {
             ),
             (place(s, b"/F#2"), format!("the name /F#2 {stray}")),
             (place(s, b"/F#2"), "the key /F#2 has no value".to_string()),
+            (
+                place(s, b"7"),
+                "7 ends an inline image's dictionary, where a key is written".to_string()
+            ),
         ]
     );
 }
@@ -2175,7 +2573,7 @@ fn faults_change_nothing() {
 #[test]
 fn a_sink_that_wants_none_is_told_none() {
     let s: &[u8] =
-        b"q --5 <4G> /A#2 { ) <</K 1 2 /M>> BI 7 /W 1 /H 1 /BPC 8 /CS /G /L 3 ID x 1 EI 1";
+        b"q --5 <4G> /A#2 { ) <</K 1 2 /M>> BI /W 1 /H 1 /BPC 8 /CS /G /L 3 7 x 1 EI BI foo 1";
     let page = Concat::new(&[s, b"(a", b"b) Tj %c", b"Q\n1 2"]);
     let kinds: Vec<_> = faults(&page)
         .iter()
@@ -2197,9 +2595,10 @@ fn a_sink_that_wants_none_is_told_none() {
             "Name",
             "Brace",
             "Closer",
-            "Key",
+            "DictEnd",
             "ImageLength",
             "BeforeEi",
+            "LoneBi",
             "Across",
             "Across",
             "Trailing"
@@ -2749,6 +3148,49 @@ fn an_inline_image_steps_back_to_where_it_began() {
         [Some(ContentStream), Some(Path), Some(ContentStream)]
     );
     assert_eq!(walk(glyph, ContentStream)[0], None);
+}
+
+/// A `BI` that begins no inline image, a keyword where its dictionary's
+/// key should be, is allowed where an image may begin, and content stays
+/// where it was, as nothing is drawn: at the content stream level, and
+/// nowhere else; the content after it steps as it reads.
+#[test]
+fn a_lone_bi_steps_as_nothing_where_an_image_may_begin() {
+    let res = ResCx::none();
+    let lim = &Limits::DEFAULT;
+    let read = operations_of(b"BI foo", &res, lim);
+    let op = read[0].as_ref().unwrap();
+    assert_eq!(
+        (op.operator(), op.inline_image().is_none()),
+        (Operator::BeginInlineImage, true)
+    );
+    assert_eq!(State::ContentStream.step(op), Some(State::ContentStream));
+    for state in [
+        State::Path,
+        State::ClippingPath,
+        State::Text,
+        State::InlineImage,
+        State::GlyphStart,
+    ] {
+        assert_eq!(state.step(op), None, "{state:?}");
+    }
+    use State::{ContentStream, Path, Text};
+    let walk = |s: &[u8]| -> Vec<Option<State>> {
+        let mut state = Some(ContentStream);
+        let read = operations(s, &res, lim);
+        (read.map(|op| {
+            state = state.and_then(|state| state.step(&op.unwrap()));
+            state
+        }))
+        .collect()
+    };
+    let level = Some(ContentStream);
+    // `BI`, `re` with `/W 1` its operands, `f`, `Q`.
+    assert_eq!(
+        walk(b"q BI /W 1 re f Q"),
+        [level, level, Some(Path), level, level]
+    );
+    assert_eq!(walk(b"BT BI foo ET"), [Some(Text), None, None, None]);
 }
 
 /// Operators as sets: each category's const its operators, the sixteen

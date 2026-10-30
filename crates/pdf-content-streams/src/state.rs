@@ -166,15 +166,19 @@ impl State {
     /// Where content is after `op`, an operation, where it may be used
     /// here: none where it may not. An inline image, one operation from
     /// `BI` to `EI`, is `BI`, `ID` and `EI` in turn, so it ends where it
-    /// began; any other operation is its operator
+    /// began. A `BI` that begins none, as PDFium reads a keyword where its
+    /// dictionary's key should be ([`Operation::inline_image`] none), is
+    /// allowed where an inline image may begin, and content stays where it
+    /// was, as nothing is drawn. Any other operation is its operator
     /// ([`Operation::operator`]).
     pub fn step(self, op: &Operation) -> Option<State> {
-        if op.is_inline_image() {
-            self.after(Operator::BeginInlineImage)?
+        match op.operator() {
+            Operator::BeginInlineImage if op.is_inline_image() => self
+                .after(Operator::BeginInlineImage)?
                 .after(Operator::InlineImageData)?
-                .after(Operator::EndInlineImage)
-        } else {
-            self.after(op.operator())
+                .after(Operator::EndInlineImage),
+            Operator::BeginInlineImage => self.after(Operator::BeginInlineImage).map(|_| self),
+            operator => self.after(operator),
         }
     }
 }

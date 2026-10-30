@@ -9,6 +9,7 @@ use std::ops::Range;
 use pdf_objects::{Object, Value, dict};
 
 use crate::fault::{Fault, Sink};
+use crate::scan::{Raw, next_raw};
 use crate::{
     Balance, Concat, Error, ErrorKind, Join, Limits, MarkedEvent, MarkedNest, NameSet, Operand,
     Operation, Operations, Operator, Properties, Props, ResCx, ResKind, SpanAcross, State, Tok,
@@ -328,7 +329,9 @@ fn resource_typed(op: &Operation) {
 /// faults are those through `()`; the operations' faults are the tokens'
 /// and, at the end, operands no operator takes, told once; each fault is
 /// inside the content, what it borrows what's where it is, and they come
-/// in the order of their ends. Every operand read with a sink
+/// in the order of their ends; and each `BI`'s dictionary ends where
+/// PDFium's walk of it ends, told where an object ends it or it's no
+/// image ([`dict_ends`]). Every operand read with a sink
 /// ([`faulted_operand`]) reads as it does without. Through a sink that
 /// wants none, none is told.
 pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
@@ -339,6 +342,7 @@ pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
     assert_eq!(read, plain, "the same tokens through a sink");
     in_order(s, &kept.0);
     divided(content, &plain, &kept.0);
+    dict_ends(s, &plain, &kept.0, limits);
     // The operands after the last operator or inline image, if no error
     // ends the tokens.
     let at_end: Vec<Range<usize>> = match plain.last() {
@@ -451,6 +455,65 @@ fn divided(content: &Concat, tokens: &Read, faults: &[(Range<usize>, Fault)]) {
     }
 }
 
+/// What ends the dictionary of the inline image whose `BI` is at `bi`, as
+/// PDFium's `Handle_BeginImage` reads it, written out: from after `BI`, a
+/// name and the token after it, its value, and so on, until what's where
+/// a key should be isn't a name. Where that is, and whether it's a
+/// keyword other than `ID`, which makes the `BI` no image; none where the
+/// content ends first or a token there is an error.
+fn dict_end(s: &[u8], bi: usize, depth: usize) -> Option<(Range<usize>, bool)> {
+    let mut at = bi + 2;
+    loop {
+        let (key, kind) = next_raw(s, at, depth)?.ok()?;
+        match kind {
+            Raw::Op => return Some((key.clone(), &s[key] != b"ID")),
+            Raw::Operand if s[key.start] != b'/' => return Some((key, false)),
+            Raw::Operand => at = next_raw(s, key.end, depth)?.ok()?.0.end,
+        }
+    }
+}
+
+/// Each `BI` among `tokens`, `s`'s, read through a sink that kept
+/// `faults`: an image's dictionary ends at `ID` or at an object that's no
+/// name, told as [`Fault::DictEnd`] there; a `BI` that's an operator
+/// alone has a keyword where a key should be, told as [`Fault::LoneBi`],
+/// from the `BI` to the keyword, where reading reaches the keyword: where
+/// no error stops it before. And nothing else is told as either.
+fn dict_ends(s: &[u8], tokens: &Read, faults: &[(Range<usize>, Fault)], limits: &Limits) {
+    let stop = tokens.last().and_then(|t| t.as_ref().err()).map(|e| e.at);
+    let mut told = Vec::new();
+    for (r, tok) in tokens.iter().flatten() {
+        let is_bi = match tok {
+            Tok::Op(op) => *op == b"BI",
+            Tok::InlineImage(_) => true,
+            Tok::Operand(_) => false,
+        };
+        if !is_bi {
+            continue;
+        }
+        let (end, keyword) = dict_end(s, r.start, limits.depth).expect("a BI read");
+        assert_eq!(
+            keyword,
+            matches!(tok, Tok::Op(_)),
+            "{r:?}: a lone BI has a keyword"
+        );
+        if keyword && stop.is_none_or(|stop| stop >= end.start) {
+            let written = &s[r.start..end.end];
+            told.push((r.start..end.end, Fault::LoneBi { written }));
+        }
+        if !keyword && &s[end.clone()] != b"ID" {
+            let written = &s[end.clone()];
+            told.push((end, Fault::DictEnd { written }));
+        }
+    }
+    let found: Vec<_> = (faults.iter())
+        .filter(|(_, f)| matches!(f, Fault::DictEnd { .. } | Fault::LoneBi { .. }))
+        .cloned()
+        .collect();
+    told.sort_by_key(|(at, _)| at.end);
+    assert_eq!(found, told, "each dictionary's end and each lone BI told");
+}
+
 /// Faults told while reading `s`: each inside it, what it borrows what's
 /// where it is, in the order of their ends, each with words.
 fn in_order(s: &[u8], faults: &[(Range<usize>, Fault)]) {
@@ -472,7 +535,9 @@ fn in_order(s: &[u8], faults: &[(Range<usize>, Fault)]) {
             | Fault::Across { written }
             | Fault::EscapedKey { written }
             | Fault::Abbreviation { written, .. }
-            | Fault::BeforeEi { written } => Some(written),
+            | Fault::BeforeEi { written }
+            | Fault::DictEnd { written }
+            | Fault::LoneBi { written } => Some(written),
             Fault::Trailing { .. } | Fault::ImageLength { .. } | Fault::AfterId => None,
         };
         if let Some(written) = written {
@@ -507,10 +572,7 @@ fn grouped(s: &[u8], mut read: Operations, tokens: &Read, limits: &Limits) {
                 operands.push(r.clone());
                 continue;
             }
-            Tok::Op(op) => {
-                assert!(*op != b"BI");
-                None
-            }
+            Tok::Op(_) => None,
             Tok::InlineImage(data) => Some(data.clone()),
         };
         let op = match read.next() {
@@ -529,7 +591,10 @@ fn grouped(s: &[u8], mut read: Operations, tokens: &Read, limits: &Limits) {
 /// `op`, read from `s`, is the operator or inline image at `at`, with
 /// `image`'s data if it's one, and the operands at `operands`; each read
 /// as [`operand`] checks it, an image's dictionary between its `BI` and
-/// `ID`, its data after it and its entries in its dictionary.
+/// what ends it, `ID` or an object that's no name, its data after that
+/// and one white-space byte at most, and its entries in its dictionary.
+/// A `BI` with no image is an operation of its own, the operands before
+/// it its.
 fn operation(
     s: &[u8],
     op: &Operation,
@@ -552,8 +617,11 @@ fn operation(
             let image = op.inline_image().expect("an inline image");
             assert_eq!((image.at(), image.data()), (at.clone(), data.clone()));
             let dict = image.dict();
-            assert!(at.start + 2 <= dict.start && dict.end + 2 <= data.start);
-            assert_eq!(&s[dict.end..dict.end + 2], b"ID");
+            let (end, keyword) = dict_end(s, at.start, limits.depth).expect("a BI read");
+            assert!(!keyword, "an image's dictionary ends at ID or an object");
+            assert_eq!(dict, at.start + 2..end.start, "BI to what ends it");
+            let space = data.start.checked_sub(end.end).expect("data after it");
+            assert!(space == 0 || (space == 1 && blank(&s[end.end..data.start])));
             // Either spelling of a key finds the one value.
             for [full, short] in [
                 [&b"Width"[..], b"W"],
@@ -626,9 +694,10 @@ fn typed(op: &Operation, image: bool) {
 
 /// Where content is after `op`, from `state`: [`State::step`], which is
 /// `after` its operator, or for an inline image `BI`, `ID` and `EI` in
-/// turn; each state's `allows` and `allowed` agreeing with `after`. Where
-/// it's not allowed, the state stays as it was, as a reader passing over
-/// it would keep it.
+/// turn, and for a `BI` that begins none the state as it was, where `BI`
+/// is allowed; each state's `allows` and `allowed` agreeing with `after`.
+/// Where it's not allowed, the state stays as it was, as a reader passing
+/// over it would keep it.
 fn stepped(state: State, op: &Operation) -> State {
     let operator = op.operator();
     let after = state.after(operator);
@@ -642,6 +711,9 @@ fn stepped(state: State, op: &Operation) -> State {
                 .and_then(|s| s.after(Operator::EndInlineImage));
             assert_eq!(step, image, "an image is BI, ID and EI");
             assert!(image.is_none_or(|s| s == state));
+        }
+        None if operator == Operator::BeginInlineImage => {
+            assert_eq!(step, after.map(|_| state), "a lone BI is nothing");
         }
         None => assert_eq!(step, after),
     }
@@ -721,7 +793,7 @@ fn tiled<'a>(content: &'a Concat, res: &ResCx, limits: &Limits) -> Read<'a> {
         match tok {
             Tok::Op(op) => {
                 assert_eq!(*op, &s[r.clone()]);
-                assert!(!matches!(*op, b"BI" | b"true" | b"false" | b"null"));
+                assert!(!matches!(*op, b"true" | b"false" | b"null"));
                 assert!(
                     op.iter()
                         .all(|&c| !blank(&[c]) && !b"()<>[]{}/%".contains(&c))

@@ -12,7 +12,7 @@ use pdf_tokenizer::{decode, is_white_space};
 
 use crate::data::{a85_end, ei_scan, find, run_length_end};
 use crate::error::{Error, ErrorKind};
-use crate::fault::{self, Fault, Read, Sink};
+use crate::fault::{self, Fault, Sink};
 use crate::limits::Limits;
 use crate::operand::{Operand, hex, literal, name};
 use crate::scan::{Raw, UNCAPPED, elements, is_number, is_space, next_raw};
@@ -92,13 +92,19 @@ impl<'a> InlineImage<'a> {
         self.at.clone()
     }
 
-    /// Where its dictionary is: what's between `BI` and `ID`.
+    /// Where its dictionary is: what's between `BI` and `ID`, or, where
+    /// an object that's no name is written for a key, `BI` and that
+    /// object, which ends it as PDFium reads it ([`tokens`](crate::tokens)).
     pub fn dict(&self) -> Range<usize> {
-        // `ID` ends at its data, or at the one white-space byte before it,
-        // white-space by PDFium's rules.
-        let before = self.content[self.data.start - 1];
-        let id = self.data.start - usize::from(is_space(before)) - 2;
-        self.at.start + 2..id
+        let start = self.at.start + 2;
+        // It was read under a cap on depth, so nothing in it is deeper;
+        // read again, it ends where it ended, at `ID` or an object, never
+        // at a keyword or an error.
+        let s = &self.content[..self.at.end];
+        match image_dict(s, self.at.start, UNCAPPED, |_, _| {}, &mut ()) {
+            Ok(Ends::Id(end) | Ends::Object(end)) => start..end.start,
+            Ok(Ends::Keyword(_)) | Err(_) => start..start,
+        }
     }
 
     /// Where its data is, as [`tokens`](crate::tokens) found it.
@@ -113,7 +119,9 @@ impl<'a> InlineImage<'a> {
     /// abbreviation's, unless the full name's is an abbreviated name
     /// (Table 92, `/RGB` say), which PDFium sets over it; so
     /// `entry(b"CS")` and `entry(b"ColorSpace")` are the same. Of a key
-    /// written twice, the last.
+    /// written twice, the last; and a value PDFium reads as no object (a
+    /// keyword, a closer or a brace) takes the key out, as PDFium takes
+    /// out a key it reads no value for.
     pub fn entry(&self, key: &[u8]) -> Option<Operand<'a>> {
         let pair = KEYS
             .iter()
@@ -127,7 +135,7 @@ impl<'a> InlineImage<'a> {
             UNCAPPED,
             |k, value| match pair {
                 Some(_) => dict.set(k, value),
-                None if &k[1..] == key => found = Some(value),
+                None if &k[1..] == key => found = value,
                 None => {}
             },
             &mut (),
@@ -182,16 +190,13 @@ impl<'a, 'r> Images<'a, 'r> {
         }
     }
 
-    /// The inline image whose `BI` is at `bi`: where it ends, past its
-    /// `EI`, and where its data is. Where ISO 32000-2 would read it
-    /// otherwise, `sink` is told, if it wants: its dictionary's tokens'
-    /// own faults and its entries', then its keys', its `ID`'s, its
-    /// length's and what's before its `EI`.
-    pub(crate) fn read(
-        &mut self,
-        bi: usize,
-        sink: &mut impl Sink<'a>,
-    ) -> Result<(usize, Range<usize>), Error> {
+    /// The inline image whose `BI` is at `bi`, or none, where a keyword
+    /// is written for its dictionary's key ([`Image`]). Where ISO 32000-2
+    /// would read an image otherwise, `sink` is told, if it wants: its
+    /// dictionary's tokens' own faults and its entries', as they're read;
+    /// then, the image read, its keys', what ends its dictionary, its
+    /// `ID`'s, its length's and what's before its `EI`.
+    pub(crate) fn read(&mut self, bi: usize, sink: &mut impl Sink<'a>) -> Result<Image, Error> {
         let s = self.s;
         let unterminated = Error {
             at: bi,
@@ -199,12 +204,24 @@ impl<'a, 'r> Images<'a, 'r> {
         };
         let mut dict = ImageDict::default();
         let set = |key: &[u8], value| dict.set(key, value);
-        let at = image_dict(s, bi, self.lim.depth, set, sink)?;
-        // One white-space byte after `ID`, by PDFium's rules, then the
-        // data.
+        let read = image_dict(s, bi, self.lim.depth, set, &mut ());
+        // An image's dictionary, or one that doesn't end, read again for
+        // its tokens' faults, told as they're read, before what's after
+        // them; not a `BI`'s that begins none, whose tokens are content.
+        if sink.wants() && !matches!(read, Ok(Ends::Keyword(_))) {
+            image_dict(s, bi, self.lim.depth, |_, _| {}, sink)?;
+        }
+        let ends = read?;
+        let (between, at) = match &ends {
+            Ends::Id(end) | Ends::Object(end) => (bi + 2..end.start, end.end),
+            Ends::Keyword(keyword) => return Ok(Image::Lone(keyword.clone())),
+        };
+        // One white-space byte after `ID`, or the object that ends the
+        // dictionary, by PDFium's rules, then the data.
         let start = at + usize::from(s.get(at).is_some_and(|&c| is_space(c)));
         // A decoder that finds no end of its data is none to PDFium, which
-        // then reads on from `ID` as it does for a filter it can't decode.
+        // then reads on from its data's start as it does for a filter it
+        // can't decode.
         let end = match self.first_filter(&dict) {
             None => self
                 .unfiltered(&dict)
@@ -242,27 +259,28 @@ impl<'a, 'r> Images<'a, 'r> {
             });
         }
         if sink.wants() {
-            self.faults(&dict, bi + 2..at - 2, &data, end, sink);
+            self.faults(&dict, between, &ends, &data, end, sink);
         }
-        Ok((end, data))
+        Ok(Image::Read(end, data))
     }
 
     /// Where ISO 32000-2 reads an image read otherwise, told to `sink`:
     /// a key both abbreviated and in full whose value ISO reads otherwise,
-    /// its dictionary at `between`, from after `BI` to `ID`; its `ID`,
-    /// ending two bytes after, with no white-space after it; a length that
-    /// ends its data elsewhere than `data`; tokens between its data and its
-    /// `EI`, which ends at `end`.
+    /// its dictionary at `between`, from after `BI` to what `ends` it; the
+    /// object that ends it, where one does, its own faults and then that
+    /// it ends it; its `ID`, where that ends it, with no white-space after
+    /// it; a length that ends its data elsewhere than `data`; tokens
+    /// between its data and its `EI`, which ends at `end`.
     fn faults(
         &self,
         dict: &ImageDict,
         between: Range<usize>,
+        ends: &Ends,
         data: &Range<usize>,
         end: usize,
         sink: &mut impl Sink<'a>,
     ) {
         let s = self.s;
-        let id = between.end + 2;
         for key in dict.parted(s) {
             let written = &s[between.clone()];
             sink.fault(between.clone(), Fault::Abbreviation { written, key });
@@ -273,8 +291,16 @@ impl<'a, 'r> Images<'a, 'r> {
         let ascii = self
             .last_filter(dict)
             .is_some_and(|f| matches!(&*f, b"AHx" | b"ASCIIHexDecode" | b"A85" | b"ASCII85Decode"));
-        if !ascii && !s.get(id).is_some_and(|&c| is_white_space(c)) {
-            sink.fault(id - 2..id, Fault::AfterId);
+        match ends {
+            Ends::Object(object) => {
+                let written = &s[object.clone()];
+                fault::token(written, object.start, sink);
+                sink.fault(object.clone(), Fault::DictEnd { written });
+            }
+            Ends::Id(id) if !ascii && !s.get(id.end).is_some_and(|&c| is_white_space(c)) => {
+                sink.fault(id.clone(), Fault::AfterId);
+            }
+            Ends::Id(_) | Ends::Keyword(_) => {}
         }
         if let Some(given) = dict.iso(L).and_then(|l| int(&s[l])) {
             let mut start = data.start;
@@ -489,16 +515,17 @@ struct ImageDict {
 }
 
 impl ImageDict {
-    /// `key`, a name as written, its `/` first, has `value`.
-    fn set(&mut self, key: &[u8], value: Range<usize>) {
+    /// `key`, a name as written, its `/` first, has `value`, or is taken
+    /// out where it has none.
+    fn set(&mut self, key: &[u8], value: Option<Range<usize>>) {
         let key = &key[1..];
         for (i, &(full, short, _)) in KEYS.iter().enumerate() {
             if key == full.as_bytes() {
-                self.values[i][0] = Some(value);
+                self.values[i][0] = value;
                 return;
             }
             if key == short.as_bytes() {
-                self.values[i][1] = Some(value);
+                self.values[i][1] = value;
                 return;
             }
         }
@@ -551,81 +578,95 @@ fn abbreviated(value: &[u8]) -> bool {
     name(value).is_some_and(|n| expanded(&n).is_some())
 }
 
-/// The dictionary of the inline image whose `BI` is at `bi`, to its `ID`:
-/// `entry` is given each key, as written, and where its value is. What
-/// isn't a name where a key should be is passed over. Returns where `ID`
-/// ends. Where ISO 32000-2 would read it otherwise, `sink` is told, if it
-/// wants: each token's own faults, a key that's an object but no name, a
-/// word that's no object, and a key with no value.
+/// How an inline image's dictionary ends, as PDFium's `Handle_BeginImage`
+/// reads it: by what's written where its next key should be, and where
+/// that is.
+pub(crate) enum Ends {
+    /// `ID`: the data is after it.
+    Id(Range<usize>),
+    /// An object that's no name (a number, a string, an array, a
+    /// dictionary, `true`, `false`, `null`, a closer or a brace): the data
+    /// is after it, as after `ID`.
+    Object(Range<usize>),
+    /// A keyword other than `ID`: there's no image, and `BI` is an
+    /// operator of its own.
+    Keyword(Range<usize>),
+}
+
+/// What reading an inline image's `BI` gives ([`Images::read`]).
+pub(crate) enum Image {
+    /// An image: where it ends, past its `EI`, and where its data is.
+    Read(usize, Range<usize>),
+    /// No image, a keyword where its dictionary's key is written: where
+    /// that keyword is.
+    Lone(Range<usize>),
+}
+
+/// The dictionary of the inline image whose `BI` is at `bi`, as PDFium's
+/// `Handle_BeginImage` reads it, and what ends it ([`Ends`]): a name, its
+/// value, and so on, until what's written for a key isn't a name. `entry`
+/// is given each key, as written, and where its value is, or none for a
+/// value PDFium reads as no object (a keyword, `ID` among them, a closer
+/// or a brace), which takes the key out. Where ISO 32000-2 would read it
+/// otherwise, `sink` is told, if it wants: each key's and value's own
+/// faults, a key with a `#` escape ISO reads as an image's, a word that's
+/// no object as a value, and a key whose value is `ID`, which ends ISO's
+/// dictionary; not what ends it, which is the image's to tell
+/// ([`Images::read`]).
 fn image_dict<'a>(
     s: &'a [u8],
     bi: usize,
     depth: usize,
-    mut entry: impl FnMut(&[u8], Range<usize>),
+    mut entry: impl FnMut(&[u8], Option<Range<usize>>),
     sink: &mut (impl Sink<'a> + ?Sized),
-) -> Result<usize, Error> {
+) -> Result<Ends, Error> {
     let unterminated = Error {
         at: bi,
         kind: ErrorKind::InlineImage,
     };
-    let mut key = None;
     let mut at = bi + 2;
     loop {
-        let (r, kind) = next_raw(s, at, depth).ok_or(unterminated)??;
-        at = r.end;
-        let is_id = matches!(kind, Raw::Op) && &s[r.clone()] == b"ID";
+        let (key, kind) = next_raw(s, at, depth).ok_or(unterminated)??;
+        match kind {
+            Raw::Op if &s[key.clone()] == b"ID" => return Ok(Ends::Id(key)),
+            Raw::Op => return Ok(Ends::Keyword(key)),
+            Raw::Operand if s[key.start] != b'/' => return Ok(Ends::Object(key)),
+            Raw::Operand => {}
+        }
         if sink.wants() {
-            entry_faults(s, r.clone(), kind, is_id, key.clone(), sink);
+            key_faults(s, key.clone(), sink);
         }
-        if is_id {
-            return Ok(at);
+        let (value, kind) = next_raw(s, key.end, depth).ok_or(unterminated)??;
+        at = value.end;
+        let written = &s[value.clone()];
+        if sink.wants() {
+            match kind {
+                Raw::Op if written == b"ID" => {
+                    let written = &s[key.clone()];
+                    sink.fault(key.clone(), Fault::NoValue { written });
+                }
+                Raw::Op => sink.fault(value.clone(), Fault::Keyword { written }),
+                Raw::Operand => {
+                    fault::token(written, value.start, sink);
+                }
+            }
         }
-        match key.take() {
-            Some(key) => entry(&s[key], r),
-            None if s[r.start] == b'/' => key = Some(r),
-            None => {}
-        }
+        let none =
+            matches!(kind, Raw::Op) || matches!(written, b")" | b">" | b"]" | b">>" | b"{" | b"}");
+        entry(&s[key], (!none).then_some(value));
     }
 }
 
-/// An inline image's dictionary's token at `r`, `ID` or not, after `key`,
-/// a key waiting for its value: where ISO 32000-2 would read it
+/// An inline image's key at `r`, a name: where ISO 32000-2 would read it
 /// otherwise, told to `sink`.
-fn entry_faults<'a>(
-    s: &'a [u8],
-    r: Range<usize>,
-    kind: Raw,
-    is_id: bool,
-    key: Option<Range<usize>>,
-    sink: &mut (impl Sink<'a> + ?Sized),
-) {
+fn key_faults<'a>(s: &'a [u8], r: Range<usize>, sink: &mut (impl Sink<'a> + ?Sized)) {
     let written = &s[r.clone()];
-    if is_id {
-        if let Some(key) = key {
-            let written = &s[key.clone()];
-            sink.fault(key, Fault::NoValue { written });
-        }
-        return;
-    }
-    let read = match kind {
-        Raw::Op => Read::Keyword,
-        Raw::Operand => fault::token(written, r.start, sink),
-    };
-    match read {
-        Read::Keyword => sink.fault(r, Fault::Keyword { written }),
-        Read::Object if key.is_none() && written[0] != b'/' => {
-            sink.fault(r, Fault::Key { written });
-        }
-        // A key ISO reads by its escapes decoded, which PDFium matches as
-        // written.
-        Read::Object
-            if key.is_none()
-                && written.contains(&b'#')
-                && name(written).is_some_and(|k| *k != written[1..] && image_key(&k)) =>
-        {
-            sink.fault(r, Fault::EscapedKey { written });
-        }
-        _ => {}
+    fault::token(written, r.start, sink);
+    // A key ISO reads by its escapes decoded, which PDFium matches as
+    // written.
+    if written.contains(&b'#') && name(written).is_some_and(|k| *k != written[1..] && image_key(&k))
+    {
+        sink.fault(r, Fault::EscapedKey { written });
     }
 }
 

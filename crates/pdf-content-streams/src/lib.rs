@@ -6,11 +6,13 @@
 //! - **Tokens** ([`tokens`]): operators, operands as written, and inline
 //!   images, `BI` to `EI`, each one token. Tokens end where PDFium's
 //!   `CPDF_StreamParser` ends them, pdf-tokenizer's tokens read by its
-//!   PDFium rules, and an inline image's data is found by
-//!   PDFium's `ReadInlineStream` rules, from the components of the color
-//!   spaces the caller gives ([`ResCx`]), but where PDFium decodes it to
-//!   find its end ([`tokens`] says where). What an operator does is no
-//!   part of it, so one nobody knows is a token like any other.
+//!   PDFium rules. An inline image's dictionary is read as PDFium's
+//!   `Handle_BeginImage` structures it, a `BI` with a keyword where a key
+//!   should be no image but an operator of its own; and its data is found
+//!   by PDFium's `ReadInlineStream` rules, from the components of the
+//!   color spaces the caller gives ([`ResCx`]), but where PDFium decodes
+//!   it to find its end ([`tokens`] says where). What an operator does is
+//!   no part of it, so one nobody knows is a token like any other.
 //! - **Operations** ([`operations`]): each operator, or inline image
 //!   ([`InlineImage`]), with the operands before it ([`Operation`]), their
 //!   ranges held in the item, so an operation of sixteen operands or fewer

@@ -15,11 +15,13 @@
 //!   ([`Tokens::with_sink`](crate::Tokens::with_sink)), as each operand
 //!   is read; an inline image's dictionary's tokens too.
 //! - **An inline image's** ([`EscapedKey`](Fault::EscapedKey),
-//!   [`Abbreviation`](Fault::Abbreviation),
+//!   [`Abbreviation`](Fault::Abbreviation), [`DictEnd`](Fault::DictEnd),
 //!   [`ImageLength`](Fault::ImageLength), [`AfterId`](Fault::AfterId),
 //!   [`BeforeEi`](Fault::BeforeEi), and its dictionary's
-//!   [`Key`](Fault::Key), [`Keyword`](Fault::Keyword) and
-//!   [`NoValue`](Fault::NoValue)): the same, as the image is read.
+//!   [`Keyword`](Fault::Keyword) and [`NoValue`](Fault::NoValue)): the
+//!   same, as the image is read; and a `BI` that begins none,
+//!   [`LoneBi`](Fault::LoneBi), as reading passes the keyword that makes
+//!   it one.
 //! - **A page's** ([`Across`](Fault::Across)): the same, over a page's
 //!   streams joined ([`Concat::tokens`](crate::Concat::tokens),
 //!   [`Concat::operations`](crate::Concat::operations)).
@@ -165,26 +167,31 @@ pub enum Fault<'a> {
         written: &'a [u8],
     },
     /// A word that's no object where an object is written: an element of
-    /// an array, a key or value of a dictionary, an inline image's too.
-    /// Passed over here, as PDFium passes it over; ISO 32000-2's arrays and
-    /// dictionaries hold objects ("shall": 7.3.6, 7.3.7), and so does an
-    /// inline image's dictionary, its key-value pairs (8.9.7).
+    /// an array, a key or value of a dictionary, or a value of an inline
+    /// image's. Passed over here, as PDFium passes it over, an inline
+    /// image's key with it, as PDFium takes out a key it reads no value
+    /// for; ISO 32000-2's arrays and dictionaries hold objects ("shall":
+    /// 7.3.6, 7.3.7), and so does an inline image's dictionary, its
+    /// key-value pairs (8.9.7). Where an inline image's key is written, a
+    /// keyword makes its `BI` a [`LoneBi`](Fault::LoneBi).
     #[error("{} is no object, where one is written", shown(.written))]
     Keyword {
         /// The word.
         written: &'a [u8],
     },
-    /// A dictionary's key that's an object but not a name, an inline
-    /// image's too: passed over here, as PDFium passes it over, what's
-    /// next read as the key; ISO 32000-2's keys are names (7.3.7,
-    /// "shall").
+    /// A dictionary's key that's an object but not a name: passed over
+    /// here, as PDFium passes it over, what's next read as the key; ISO
+    /// 32000-2's keys are names (7.3.7, "shall"). In an inline image's
+    /// dictionary, such an object ends it: [`DictEnd`](Fault::DictEnd).
     #[error("{} is a dictionary's key and not a name", shown(.written))]
     Key {
         /// The key.
         written: &'a [u8],
     },
-    /// A dictionary's key with no value after it, at its `>>`, or an
-    /// inline image's at its `ID`: passed over here; ISO 32000-2's
+    /// A dictionary's key with no value after it, at its `>>`: passed over
+    /// here. Or an inline image's, at an `ID`, which PDFium reads as its
+    /// value, none, taking the key out and reading the dictionary on past
+    /// it, where ISO 32000-2's ends at that `ID` (8.9.7). ISO's
     /// dictionaries are key-value pairs (7.3.7, "shall").
     #[error("the key {} has no value", shown(.written))]
     NoValue {
@@ -271,6 +278,31 @@ pub enum Fault<'a> {
     #[error("{} is between an inline image's data and its EI", shown(.written))]
     BeforeEi {
         /// What's between, the first token to the last.
+        written: &'a [u8],
+    },
+    /// An object that's no name where an inline image's key is written:
+    /// a number, a string, an array, a dictionary, `true`, `false`,
+    /// `null`, a closer or a brace. Its dictionary ends there, as PDFium
+    /// ends it, and its data is read from after it, as from after `ID`;
+    /// ISO 32000-2's keys are names (7.3.7, "shall"), and an inline
+    /// image's key-value pairs run from `BI` to `ID` (8.9.7, "shall"), so
+    /// ISO reads its dictionary on. In an operand's dictionary, such a key
+    /// is a [`Key`](Fault::Key).
+    #[error("{} ends an inline image's dictionary, where a key is written", shown(.written))]
+    DictEnd {
+        /// The object.
+        written: &'a [u8],
+    },
+    /// A `BI` with a keyword other than `ID` where its dictionary's key is
+    /// written, from `BI` to that keyword: no inline image here, as
+    /// PDFium reads it, the `BI` an operator of its own, and what's after
+    /// it read as content, the dictionary's tokens and the keyword among
+    /// it. To ISO 32000-2, `BI` begins an inline image, its key-value
+    /// pairs running to `ID` (8.9.7, "shall"), and a keyword is no key
+    /// (7.3.7). Told as reading passes the keyword.
+    #[error("{} begins no inline image, a keyword where a key is written", shown(.written))]
+    LoneBi {
+        /// `BI` to the keyword.
         written: &'a [u8],
     },
 }

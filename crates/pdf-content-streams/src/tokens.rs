@@ -9,7 +9,7 @@ use pdf_tokenizer::{Kind, is_white_space};
 
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Sink};
-use crate::inline::{Images, ResCx};
+use crate::inline::{Image, Images, ResCx};
 use crate::limits::Limits;
 use crate::scan::{Raw, next_raw, tokenizer};
 
@@ -17,7 +17,9 @@ use crate::scan::{Raw, next_raw, tokenizer};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Tok<'a> {
     /// An operator: any word that isn't a number, `true`, `false` or
-    /// `null`.
+    /// `null`; `BI` among them where it begins no inline image, a keyword
+    /// written where its dictionary's key should be, as PDFium reads it
+    /// ([`tokens`]).
     Op(&'a [u8]),
     /// An operand as written: a number, a name, a string, an array or a
     /// dictionary with all it holds, `true`, `false` or `null`. A closing
@@ -63,7 +65,14 @@ pub enum Tok<'a> {
 /// after, which agree but where the encoded bytes hold such an `EI`, or a
 /// JPEG's end of image comes before its last.
 ///
-/// The dictionary is read as PDFium reads it: a key matched as written,
+/// The dictionary is read as PDFium's `Handle_BeginImage` reads it: a
+/// name, its value, and so on, to `ID`. A value PDFium reads as no object
+/// (a keyword, `ID` among them, a closer or a brace) takes its key out.
+/// Where an object that's no name is written for a key, the dictionary
+/// ends there, and the data is read from after it, as from after `ID`;
+/// where a keyword other than `ID` is, there's no image: `BI` is an
+/// operator of its own ([`Tok::Op`]), and what's after it is read as
+/// content, the dictionary's tokens among it. A key is matched as written,
 /// its `#` escapes not decoded, a value's decoded, and an abbreviated name
 /// (8.9.7, Table 92) read as the full one. Of a key written both
 /// abbreviated and in full, the abbreviation's value counts, unless the
@@ -97,6 +106,7 @@ pub fn tokens<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Tokens<'a
         ended: false,
         joins: &[],
         join: 0,
+        lone: Vec::new(),
         sink: (),
     }
 }
@@ -122,6 +132,13 @@ pub struct Tokens<'a, 'r, S = ()> {
     joins: &'a [usize],
     /// The next of `joins` not yet passed.
     join: usize,
+    /// Each `BI` read as no image whose keyword reading hasn't passed, and
+    /// where that keyword starts: told ([`Fault::LoneBi`]) as reading
+    /// passes it. A `BI` read as content after one is a value in its
+    /// dictionary, so its own dictionary is read from the same place with
+    /// the keys in the same places, and ends at the same keyword: it's
+    /// pushed with that keyword, its dictionary not read again.
+    lone: Vec<(usize, usize)>,
     sink: S,
 }
 
@@ -184,6 +201,7 @@ impl<'a, 'r, S> Tokens<'a, 'r, S> {
             ended: self.ended,
             joins: self.joins,
             join: self.join,
+            lone: self.lone,
             sink,
         }
     }
@@ -241,18 +259,41 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
         if self.sink.wants() {
             self.divided(gap..r.start, true);
         }
+        if self
+            .lone
+            .first()
+            .is_some_and(|&(_, keyword)| keyword == r.start)
+        {
+            for (bi, _) in std::mem::take(&mut self.lone) {
+                if self.sink.wants() {
+                    let written = &s[bi..r.end];
+                    self.sink.fault(bi..r.end, Fault::LoneBi { written });
+                }
+            }
+        }
         let tok = match kind {
             Raw::Op if &s[r.clone()] == b"BI" => {
                 self.operands = 0;
-                let (end, data) = match self.images.read(r.start, &mut self.sink) {
-                    Ok(read) => read,
-                    Err(e) => return Some(Err(e)),
+                // A `BI` read while one is pending is lone with its keyword
+                // (`lone`), its dictionary not read on to that keyword
+                // again: content of many reads in one pass.
+                let keyword = match self.lone.last() {
+                    Some(&(_, keyword)) => keyword,
+                    None => match self.images.read(r.start, &mut self.sink) {
+                        Ok(Image::Read(end, data)) => {
+                            self.at = end;
+                            if self.sink.wants() {
+                                self.across(r.start..end, Some(data.clone()));
+                            }
+                            return Some(Ok((r.start..end, Tok::InlineImage(data))));
+                        }
+                        Ok(Image::Lone(keyword)) => keyword.start,
+                        Err(e) => return Some(Err(e)),
+                    },
                 };
-                self.at = end;
-                if self.sink.wants() {
-                    self.across(r.start..end, Some(data.clone()));
-                }
-                return Some(Ok((r.start..end, Tok::InlineImage(data))));
+                // No image: `BI` alone, read on from after it.
+                self.lone.push((r.start, keyword));
+                Tok::Op(&s[r.clone()])
             }
             Raw::Op => {
                 self.operands = 0;

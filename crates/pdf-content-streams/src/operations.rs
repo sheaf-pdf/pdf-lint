@@ -174,7 +174,8 @@ pub struct Operation<'a> {
 }
 
 impl<'a> Operation<'a> {
-    /// The operator, as written: `BI` for an inline image.
+    /// The operator, as written: `BI` for an inline image, and for a `BI`
+    /// that begins none ([`inline_image`](Operation::inline_image)).
     pub fn name(&self) -> &'a [u8] {
         let end = match self.image {
             Some(_) => self.at.start + 2,
@@ -212,7 +213,10 @@ impl<'a> Operation<'a> {
     }
 
     /// The inline image it is, when it's one: its dictionary's entries,
-    /// its data and the length it gives it.
+    /// its data and the length it gives it. None for a `BI` that begins no
+    /// image, a keyword written where its dictionary's key should be, as
+    /// PDFium reads it ([`tokens`](crate::tokens)): an operation of its
+    /// own, with the operands before it, as PDFium clears them after it.
     pub fn inline_image(&self) -> Option<InlineImage<'a>> {
         let data = self.image.clone()?;
         Some(InlineImage::new(self.content, self.at.clone(), data))
