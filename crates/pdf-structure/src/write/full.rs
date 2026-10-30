@@ -8,7 +8,7 @@
 //! encrypted once, as a stream, under its own number. An object as read is
 //! copied where the rules for a copy hold ([`Body::Read`]). Under a
 //! renumbering, each object is written at the number it gives, and each
-//! reference as it names it.
+//! reference as it names it, a copy's in place.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -89,11 +89,13 @@ use crate::source::{Document, XrefKind};
 ///   in the numbers written ([`Encryptor::renumbered`]); under RC4, an
 ///   object written at a number another had in the file the encryptor was
 ///   read from leaks the XOR of the two plaintexts to one who keeps both
-///   files. An object as read is copied only where nothing in it moves. The
-///   numbers checked, listed and taken by the writer's own objects are those
-///   written, but [`Pack::groups`]', which are those given (see
-///   [`Options::renumber`]); what's written says it was renumbered
-///   ([`Base::renumbered`]).
+///   files. An object as read is copied, its header and each reference that
+///   moves written anew where its bytes had it; at another number only
+///   where neither file is encrypted or no key is made per object
+///   (AES-256), else written anew. The numbers checked, listed and taken by
+///   the writer's own objects are those written, but [`Pack::groups`]',
+///   which are those given (see [`Options::renumber`]); what's written says
+///   it was renumbered ([`Base::renumbered`]).
 ///
 /// A whole file's section lists every number from 0 to the last, so
 /// objects numbered sparsely make many rows: as a stream, deflated, more
@@ -112,7 +114,8 @@ use crate::source::{Document, XrefKind};
 /// its number, or with no `from`; a group naming a number that isn't
 /// packed, or one twice; a `from` whose source says it changed, and a copy
 /// whose bytes aren't those it was read from ([`Error::Changed`]), or
-/// whose record is another reading's or another object's
+/// whose record is another reading's or another object's, or under a
+/// renumbering whose references aren't where its bytes have them
 /// ([`Error::Elsewhere`]); what pdf-objects' writer refuses, or the
 /// encryptor; and a write stopped.
 pub fn full<'a>(
@@ -466,18 +469,18 @@ impl Packing<'_> {
             }
             return Ok(next);
         };
-        // Each member's bytes as read, where it's copied, else its value,
-        // at the number it's written at.
+        // Each member at the number it's written at: copied, where it's
+        // given as read and a reading is given, as its object stream is
+        // built; else its value.
         let mut groups: Vec<(u32, Vec<(ObjectId, Member<'_>)>)> = Vec::with_capacity(given.len());
         for (n, group) in given.into_iter().zip(&grouped) {
             let mut members = Vec::with_capacity(group.len());
             for m in group {
                 let (id, at, body) = by_number[m];
-                let copied = match self.copying {
-                    Some(copying) => copying.member(id, body, self.to)?,
-                    None => None,
+                let member = match (self.copying, body) {
+                    (Some(_), Body::Read { .. }) => Member::Read(id, body),
+                    _ => Member::Object(body.object()),
                 };
-                let member = copied.map_or(Member::Object(body.object()), Member::Copied);
                 members.push((at, member));
             }
             groups.push((n, members));
@@ -489,6 +492,7 @@ impl Packing<'_> {
         let options = self.options;
         let built = containers(
             &groups,
+            self.copying,
             self.encrypting,
             self.to,
             options.deflate,
@@ -571,16 +575,18 @@ fn container_numbers(
 
 /// Each of `groups`, an object stream's number and its members, each at
 /// the number it's written at, as that object stream written, a member
-/// written anew with its references as `to` names them, encrypted by
-/// `encrypting` when given, under its number: none for one whose data
-/// would be more than the reader takes,
+/// copied where `copying` copies it, else written anew, with its references
+/// as `to` names them, encrypted by `encrypting` when given, under its
+/// number: none for one whose data would be more than the reader takes,
 /// or that has more members than a place in it can say. Built on up to
 /// `threads` threads, 4 object streams to one at least, `stop` checked
 /// before each, and joined in order, so that the same groups build the
-/// same bytes however many threads build them; a part no thread can be
-/// had for is built on the calling thread.
+/// same bytes however many threads build them, and a refusal is the first
+/// in their order; a part no thread can be had for is built on the
+/// calling thread.
 pub(super) fn containers(
     groups: &[(u32, Vec<(ObjectId, Member<'_>)>)],
+    copying: Option<&Copying<'_>>,
     encrypting: Option<&Encrypting<'_>>,
     to: Numbering<'_>,
     deflate: Deflate,
@@ -591,7 +597,7 @@ pub(super) fn containers(
         (part.iter())
             .map(|(n, members)| {
                 stopped(stop)?;
-                container(*n, members, encrypting, to, deflate)
+                container(*n, members, copying, encrypting, to, deflate)
             })
             .collect()
     };
@@ -625,24 +631,35 @@ pub(super) fn containers(
 
 /// `members`, each at the number it's written at, as object stream `n`,
 /// written as an indirect object, encrypted by `encrypting` when given,
-/// each member's value written anew, its references as `to` names them, or
-/// its bytes as read, borrowed: none when its data wouldn't
+/// each member's bytes as read where `copying` copies it, borrowed where
+/// none of its references moves, else its value written anew, its
+/// references as `to` names them: none when its data wouldn't
 /// [`fit`](super::fits), or it has more members than a place in it can
 /// say ([`objstm`]).
 fn container(
     n: u32,
     members: &[(ObjectId, Member<'_>)],
+    copying: Option<&Copying<'_>>,
     encrypting: Option<&Encrypting<'_>>,
     to: Numbering<'_>,
     deflate: Deflate,
 ) -> Result<Option<Vec<u8>>, Error> {
     let mut written: Vec<(u32, Cow<'_, [u8]>)> = Vec::with_capacity(members.len());
     for (id, member) in members {
-        let obj = match member {
+        let obj = match *member {
             Member::Object(obj) => obj,
-            Member::Copied(bytes) => {
-                written.push((id.0, Cow::Borrowed(bytes)));
-                continue;
+            Member::Read(given, body) => {
+                let copied = match copying {
+                    Some(copying) => copying.member(given, body, to)?,
+                    None => None,
+                };
+                match copied {
+                    Some(bytes) => {
+                        written.push((id.0, bytes));
+                        continue;
+                    }
+                    None => body.object(),
+                }
             }
         };
         let mut bytes = Vec::new();

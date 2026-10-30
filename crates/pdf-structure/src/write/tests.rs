@@ -16,7 +16,7 @@ use pdf_crypt::rand_core::SeedableRng;
 use pdf_crypt::writer::{self, Kind, Settings};
 use pdf_filters::{Backend, Filter, Level, Predictor};
 use pdf_objects::dict;
-use pdf_objects::object::{Data, Dict, Form, Object, ObjectId, Str, Stream, Value};
+use pdf_objects::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value};
 use pdf_objects::serialize::{self, Encrypt, Refused};
 
 use super::{Deflate, Encryptor, Entry, Error, Section, Unencryptable};
@@ -2470,6 +2470,7 @@ fn containers_build_alike_on_one_thread_and_on_eight() {
         let built = |threads, stop| {
             super::full::containers(
                 &groups,
+                None,
                 encrypting.as_ref(),
                 super::Numbering::NONE,
                 Deflate::DEFAULT,
@@ -5241,7 +5242,13 @@ const MEMBERS_SPELLED: [(u32, &[u8]); 3] = [
 /// number 20, of [`MEMBERS_SPELLED`], as they're spelled, listed in it by
 /// a cross-reference stream.
 pub(crate) fn members_spelled() -> Vec<u8> {
-    let members: Vec<(u32, Vec<u8>)> = (MEMBERS_SPELLED.iter())
+    members_spelled_as(&MEMBERS_SPELLED)
+}
+
+/// [`members_spelled`]'s file, its object stream of `members`, as they're
+/// spelled.
+fn members_spelled_as(members: &[(u32, &[u8])]) -> Vec<u8> {
+    let members: Vec<(u32, Vec<u8>)> = (members.iter())
         .map(|(n, bytes)| (*n, bytes.to_vec()))
         .collect();
     let container = write::container(&members, Deflate::DEFAULT)
@@ -5279,7 +5286,7 @@ pub(crate) fn members_spelled() -> Vec<u8> {
             },
         );
     }
-    for (index, (n, _)) in (0..).zip(&MEMBERS_SPELLED) {
+    for (index, (n, _)) in (0..).zip(&members) {
         let entry = Entry::Compressed { stream: 20, index };
         section.insert(*n, entry);
     }
@@ -5646,8 +5653,8 @@ fn an_update_writes_what_of_a_document_changed_since_it_was_read() {
 // Whole files under a renumbering (`write::Options::renumber`): each object
 // at the number it gives, each reference named as it names it, null where
 // it names none, the trailer's too; encrypted in the numbers written, the
-// list of what's left in the clear among them; copied only where nothing
-// in an object moves.
+// list of what's left in the clear among them; copied, its header and the
+// references that move written anew in place.
 
 /// A renumbering, each object to where it's written: a reference to one it
 /// doesn't map is written null.
@@ -5794,6 +5801,7 @@ fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike()
     files.push(("members spelled".into(), members_spelled()));
     files.push(("shared".into(), shared()));
     let mut sharing = 0;
+    let mut copies = 0;
     for (file, bytes) in &files {
         let reading = opened(bytes, "");
         let encryptor = Encryptor::of(&reading).unwrap();
@@ -5825,14 +5833,16 @@ fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike()
             (XrefKind::Table, None),
             (XrefKind::Stream, Some(write::Pack::DEFAULT)),
         ];
+        let per_object = encryptor.as_ref().is_some_and(Encryptor::per_object);
         for (kind, pack) in ways {
             let name = format!("{file}, {kind:?}, packed: {}", pack.is_some());
             let enc = encryptor.as_ref();
-            let unrenumbered = {
+            let (unrenumbered, unrenumbered_written) = {
                 let mut out = Vec::new();
                 let options = options(kind, pack);
-                write::document(&mut out, &doc, enc, Some(&reading), &options).unwrap();
-                out
+                let written =
+                    write::document(&mut out, &doc, enc, Some(&reading), &options).unwrap();
+                (out, written)
             };
             let identity = |id| Some(id);
             let mut options = options(kind, pack);
@@ -5847,13 +5857,33 @@ fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike()
                 let mut options = options;
                 options.renumber = Some(&to);
                 let shares = *way == "dense" && !alike.is_empty();
-                let bodies = (write::bodies(&doc))
-                    .filter(|(id, _)| kept.contains(id) && !(shares && alike.contains_key(id)));
+                let given = |(id, _): &(ObjectId, write::Body<'_>)| {
+                    kept.contains(id) && !(shares && alike.contains_key(id))
+                };
                 let mut out = Vec::new();
                 let trailer = doc.trailer.dict();
+                let bodies = write::bodies(&doc).filter(given);
                 let written =
                     write::full(&mut out, bodies, trailer, enc, Some(&reading), &options).unwrap();
                 assert!(written.base.renumbered, "{name}");
+                // Each object at an offset copied without a renumbering is
+                // copied under it, where its key isn't made of its number or
+                // it stays, its header and references spliced.
+                for (id, body) in write::bodies(&doc).filter(given) {
+                    let write::Body::Read { object, record } = &body else {
+                        continue;
+                    };
+                    let was = copied(&unrenumbered, &unrenumbered_written, record, &reading, id);
+                    let at = to(id).unwrap();
+                    let Some(Entry::InUse { offset, .. }) = written.section.get(at.0) else {
+                        continue;
+                    };
+                    if was && (at == id || !per_object) {
+                        let copy = copy_of(&reading, record, object, at, &to);
+                        assert!(out[offset..].starts_with(&copy), "{name}: {id:?} at {at:?}");
+                        copies += usize::from(at != id);
+                    }
+                }
                 let back = opened(&out, "");
                 assert!(sound(&back), "{name}: {:?}", back.warnings());
                 let opens = matches!(back.encryption(), Encryption::Opened { .. });
@@ -5914,36 +5944,79 @@ fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike()
         }
     }
     assert!(sharing > 0, "a file with two streams alike");
+    assert!(copies > 0, "copies at new numbers");
 }
 
-/// Under a renumbering, an object as read is copied only where nothing in
-/// it moves: here, of [`SPELLED`]'s, those that keep their number and name
-/// none that moves; the page, which names the stream moved, and the stream,
-/// are written anew. Read back, the same objects, renumbered.
+/// [`SPELLED`]'s objects and a seventh naming others, as another writer
+/// spells them: a reference with a comment between its tokens, one in an
+/// array, a string that reads as one, and one to object 9, which nothing
+/// holds.
+const NAMING: (u32, &[u8]) = (
+    7,
+    b"<</A 2 % between\n0 R /B [3 0 R] /C (2 0 R) /D 4 0 R /E 9 0 R>>",
+);
+
+/// The bytes `written` lists object number `n` at in `out`, to its end.
+fn listed_at<'o>(out: &'o [u8], written: &write::Written, n: u32) -> &'o [u8] {
+    match written.section.get(n) {
+        Some(Entry::InUse { offset, .. }) => &out[offset..],
+        other => panic!("{n} isn't at an offset: {other:?}"),
+    }
+}
+
+/// Under a renumbering, an object as read is copied as the bytes it was
+/// read from, but its header where it's written at another number and each
+/// reference the renumbering names otherwise, `null` where it names none,
+/// written where its bytes had it: odd spacing, a real `1.50`, a hex
+/// string, a comment, a stream's data and a string that reads as a
+/// reference as they were, and a comment between a changed reference's
+/// tokens gone. With a table and with a stream; read back, the objects
+/// renumbered.
 #[test]
-fn a_copy_is_made_only_where_nothing_in_it_moves() {
-    let file = spelled();
+fn a_copy_under_a_renumbering_is_its_bytes_but_its_header_and_the_references_moved() {
+    let mut objects = SPELLED.to_vec();
+    objects.push(NAMING);
+    let file = spelled_as(&objects);
     let reading = open(&file);
     let doc = reading.to_document().unwrap();
     let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
-    let mut map: Map = ids.iter().map(|&id| (id, id)).collect();
-    map.insert((6, 0), (9, 0));
+    // 2, 4, 6 and 7 move ten on; 1, 3 and 5 stay; 9 is no object's.
+    let moves = |n: u32| n % 2 == 0 || n == 7;
+    let map: Map = (ids.iter())
+        .map(|&(n, g)| ((n, g), (if moves(n) { n + 10 } else { n }, g)))
+        .collect();
     let to = by(&map);
+    let want: [(u32, &[u8]); 7] = [
+        (1, b"1 0 obj\n<</Type /Catalog  /Pages 12 0 R>>\nendobj\n"),
+        (12, b"12 0 obj\n<</Type /Pages /Kids [3 0 R] /Count 1>>\nendobj\n"),
+        (
+            3,
+            b"3 0 obj\n<</Type /Page /Parent 12 0 R /MediaBox [0 0 612 792] /UserUnit 1.50 /Resources <<>> /Contents 16 0 R>>\nendobj\n",
+        ),
+        (14, b"14 0 obj\n<48656C6C6F>\nendobj\n"),
+        (5, b"5 0 obj\n[ 1   2 % a comment\n 3 ]\nendobj\n"),
+        (
+            16,
+            b"16 0 obj\n<</Length 11>>\nstream\n0 0 m 1.5 l\nendstream\nendobj\n",
+        ),
+        (
+            17,
+            b"17 0 obj\n<</A 12 0 R /B [3 0 R] /C (2 0 R) /D 14 0 R /E null>>\nendobj\n",
+        ),
+    ];
     for kind in KINDS {
         let mut options = options(kind, None);
         options.renumber = Some(&to);
         let mut out = Vec::new();
         let written = write::document(&mut out, &doc, None, Some(&reading), &options).unwrap();
-        for (n, copies) in [(1, true), (2, true), (3, false), (4, true), (5, true)] {
-            let record = doc.record((n, 0)).unwrap();
-            let was = copied(&out, &written, record, &reading, (n, 0));
-            assert_eq!(was, copies, "{kind:?}: {n}");
+        for (n, bytes) in want {
+            let at = listed_at(&out, &written, n);
+            let got = String::from_utf8_lossy(&at[..bytes.len().min(at.len())]);
+            assert!(at.starts_with(bytes), "{kind:?}: {n}: {got:?}");
         }
-        assert!(!written.section.lists(6), "{kind:?}");
-        assert!(
-            !holds(&out, b"6 0 R") && !holds(&out, b"6 0 obj"),
-            "{kind:?}"
-        );
+        for n in [2, 4, 6, 7] {
+            assert!(!written.section.lists(n), "{kind:?}: {n}");
+        }
         let back = open(&out);
         assert!(sound(&back), "{kind:?}: {:?}", back.warnings());
         assert_moved(&reading, &back, &ids, &to, &format!("{kind:?}"));
@@ -6666,4 +6739,426 @@ fn an_rc4_renumbering_leaks_the_xor_of_what_moved() {
         let leaks = xor(&title(&file, 2), &title(&out, 2)) == xor(ONE, TWO);
         assert_eq!(leaks, kind == Kind::Rc4By128, "{kind:?}");
     }
+}
+
+// Copies under a renumbering: an object as read written as the bytes it was
+// read from, its header and the references that move written anew in place
+// (rule 9); at another number only where its key isn't made of its number
+// (rule 2).
+
+/// What a copy of `object`, read as `record` in `reading`, written at `at`
+/// under the renumbering `to` is: the bytes it was read from, but its header,
+/// `n g obj`, of the number written where that's another, and each reference
+/// `to` names otherwise, `n g R` or `null`, in place of the bytes its place
+/// names. Made here as the writer doesn't make it, a reference's place found
+/// by recursing.
+fn copy_of<S: ByteSource>(
+    reading: &Reading<S>,
+    record: &Record,
+    object: &Object,
+    at: ObjectId,
+    to: &dyn Fn(ObjectId) -> Option<ObjectId>,
+) -> Vec<u8> {
+    fn placed(o: &Object, out: &mut Vec<(ObjectId, Span)>) {
+        match o.value() {
+            Value::Ref(id) => out.push((*id, o.at.unwrap())),
+            Value::Array(array) => array.iter().for_each(|o| placed(o, out)),
+            Value::Dict(dict) => dict.entries().iter().for_each(|e| placed(&e.value, out)),
+            Value::Stream(stream) => {
+                (stream.dict.entries().iter()).for_each(|e| placed(&e.value, out))
+            }
+            _ => {}
+        }
+    }
+    let bytes = reading.written(record.at).unwrap();
+    let mut runs: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+    if record.origin == crate::Origin::File && at != record.id {
+        let header = bytes.windows(3).position(|w| w == b"obj").unwrap() + 3;
+        runs.push((0, header, format!("{} {} obj", at.0, at.1).into_bytes()));
+    }
+    let mut references = Vec::new();
+    placed(object, &mut references);
+    for (id, span) in references {
+        let named = to(id);
+        if named != Some(id) {
+            let text = match named {
+                Some((n, g)) => format!("{n} {g} R"),
+                None => "null".to_string(),
+            };
+            let run = (span.start - record.at.start, span.end - record.at.start);
+            runs.push((run.0, run.1, text.into_bytes()));
+        }
+    }
+    let mut out = Vec::new();
+    let mut from = 0;
+    for (start, end, text) in runs {
+        out.extend_from_slice(&bytes[from..start]);
+        out.extend_from_slice(&text);
+        from = end;
+    }
+    out.extend_from_slice(&bytes[from..]);
+    out
+}
+
+/// Members naming others, spelled as another writer spells them: a
+/// reference in an array, one with a comment between its tokens, and one to
+/// object 9, which nothing holds.
+const MEMBERS_NAMING: [(u32, &[u8]); 3] = [
+    (4, b"<48656C6C6F>"),
+    (5, b"[ 1   2 3 0 R ]"),
+    (7, b"<</UserUnit 1.50 /Up 2 % between\n0 R /Gone 9 0 R>>"),
+];
+
+/// Under a renumbering, a member's bytes go into an object stream of the
+/// write's as they were read but each reference the renumbering names
+/// otherwise, `null` where it names none, and the comment between a changed
+/// reference's tokens gone, at the number written, under any encryption: a
+/// plain file's written plain and under each method that packs, and that
+/// one's, read by its password, renumbered again under its own encryption,
+/// decrypted and under a new encryption. Each read back, the objects
+/// renumbered, nothing in the clear where it's encrypted.
+#[test]
+fn members_are_copied_renumbered_into_object_streams_under_any_encryption() {
+    use chacha20::ChaCha20Rng;
+
+    let file = members_spelled_as(&MEMBERS_NAMING);
+    let reading = open(&file);
+    let doc = reading.to_document().unwrap();
+    let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
+    let kept = written_of(&doc);
+    let map = shifted(&ids, 100);
+    let to = by(&map);
+    let prepared = Password("new").prepared().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(15);
+    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let mut pack = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
+    pack.renumber = Some(&to);
+    // Its members' bytes, renumbered `by` on, in the object streams written.
+    let members = |by: u32| -> [Vec<u8>; 3] {
+        [
+            b"<48656C6C6F>".to_vec(),
+            format!("[ 1   2 {} 0 R ]", 3 + by).into_bytes(),
+            format!("<</UserUnit 1.50 /Up {} 0 R /Gone null>>", 2 + by).into_bytes(),
+        ]
+    };
+    let assert_back = |out: &[u8], password: &str, by: u32, name: &str| {
+        let back = opened(out, password);
+        assert!(sound(&back), "{name}: {:?}", back.warnings());
+        let data = object_streams_data(&back);
+        for bytes in members(by) {
+            assert!(
+                holds(&data, &bytes),
+                "{name}: {:?}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+        back
+    };
+    let mut out = Vec::new();
+    write::document(&mut out, &doc, None, Some(&reading), &pack).unwrap();
+    let back = assert_back(&out, "", 100, "plain");
+    assert_moved(&reading, &back, &kept, &to, "plain");
+    let methods = methods();
+    for method in methods.iter().filter(|m| m.encryptor.packs() && m.streams) {
+        let name = method.name;
+        let mut encrypted = Vec::new();
+        let encryptor = Some(&method.encryptor);
+        write::document(&mut encrypted, &doc, encryptor, Some(&reading), &pack).unwrap();
+        for bytes in members(100) {
+            assert!(!in_clear(&encrypted, &bytes), "{name}");
+        }
+        let back = assert_back(&encrypted, "user", 100, name);
+        assert_moved(&reading, &back, &kept, &to, name);
+        // Read by its password, and renumbered again, as it was read.
+        let again = opened(&encrypted, "user");
+        let doc = again.to_document().unwrap();
+        let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
+        let kept = written_of(&doc);
+        let map = shifted(&ids, 100);
+        let to = by(&map);
+        let mut pack = pack;
+        pack.renumber = Some(&to);
+        let own = Encryptor::of(&again).unwrap().unwrap();
+        for (way, encryptor, password) in [
+            ("its own", Some(&own), "user"),
+            ("decrypted", None, ""),
+            ("created", Some(&created), "new"),
+        ] {
+            let name = format!("{name}, {way}");
+            let mut out = Vec::new();
+            write::document(&mut out, &doc, encryptor, Some(&again), &pack).unwrap();
+            for bytes in members(200) {
+                assert_eq!(in_clear(&out, &bytes), encryptor.is_none(), "{name}");
+            }
+            let back = assert_back(&out, password, 200, &name);
+            assert_moved(&again, &back, &kept, &to, &name);
+        }
+    }
+}
+
+/// A stream whose data, and a string in its dictionary, read as a
+/// reference, which its dictionary's `/Ref` is.
+const DATA_NAMING: (u32, &[u8]) = (
+    8,
+    b"<</Length 5 /Big (15 0 R) /Ref 5 0 R>>\nstream\n5 0 R\nendstream",
+);
+
+/// Rule 9: under a renumbering, an object as read whose references aren't
+/// where its bytes have them refuses the write, nothing written, as it
+/// isn't what its bytes say: a reference with no place, one the
+/// renumbering moves and one it doesn't, and one put in (by
+/// `as_written_mut`, which keeps the object's own); two whose places are
+/// swapped, so out of the order walked; one placed past the object's bytes;
+/// one whose place reads as another reference; one placed on bytes that
+/// read as it inside a string's token, and inside a stream's data; and a
+/// member's with no place. Without a renumbering, nothing of it is asked:
+/// copied as the bytes it was read from.
+#[test]
+fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
+    let mut objects = SPELLED.to_vec();
+    objects.extend([NAMING, DATA_NAMING]);
+    let file = spelled_as(&objects);
+    let reading = open(&file);
+    let doc = reading.to_document().unwrap();
+    let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
+    // 5, 6 and 7 move; 9 is no object's.
+    let mut map: Map = ids.iter().map(|&id| (id, id)).collect();
+    map.extend([5, 6, 7].map(|n| ((n, 0), (n + 10, 0))));
+    let to = by(&map);
+    let mut renumbered = options(XrefKind::Table, None);
+    renumbered.renumber = Some(&to);
+    let plain = options(XrefKind::Table, None);
+    // Object `n` as read, but as `edit` changes its dictionary's places.
+    let edited = |n: u32, edit: &dyn Fn(&mut Dict)| {
+        let mut object = doc.get((n, 0)).unwrap().clone();
+        match object.as_written_mut() {
+            Value::Dict(dict) => edit(dict),
+            Value::Stream(stream) => edit(&mut stream.dict),
+            other => panic!("{other:?}"),
+        }
+        assert!(object.at.is_some());
+        object
+    };
+    let span_of = |n: u32, key: &[u8]| -> Span {
+        let object = doc.get((n, 0)).unwrap();
+        let value = object.as_dict().unwrap().get(key).unwrap();
+        match value.value() {
+            Value::Array(array) => array[0].at.unwrap(),
+            _ => value.at.unwrap(),
+        }
+    };
+    let past = doc.record((3, 0)).unwrap().at.end;
+    let data = doc.record((8, 0)).unwrap().data.unwrap().at;
+    let string = (file.windows(8).position(|w| w == b"(15 0 R)")).unwrap() + 2;
+    let inside = Span::new(None, string, string + 5);
+    let cases: Vec<(&str, u32, Object)> = vec![
+        (
+            "a moved one with no place",
+            3,
+            edited(3, &|d| d.get_mut(b"Contents").unwrap().at = None),
+        ),
+        (
+            "one kept with no place",
+            3,
+            edited(3, &|d| d.get_mut(b"Parent").unwrap().at = None),
+        ),
+        (
+            "one put in",
+            1,
+            edited(1, &|d| d.push("Added", Object::reference(3))),
+        ),
+        (
+            "two swapped",
+            7,
+            edited(7, &|d| {
+                let (b, dd) = (span_of(7, b"B"), span_of(7, b"D"));
+                match d.get_mut(b"B").unwrap().as_written_mut() {
+                    Value::Array(array) => array[0].at = Some(dd),
+                    other => panic!("{other:?}"),
+                }
+                d.get_mut(b"D").unwrap().at = Some(b);
+            }),
+        ),
+        (
+            "one past its bytes",
+            3,
+            edited(3, &|d| {
+                let at = Span::new(None, past + 4, past + 9);
+                d.get_mut(b"Contents").unwrap().at = Some(at);
+            }),
+        ),
+        (
+            "one that reads as another",
+            3,
+            edited(3, &|d| {
+                *d.get_mut(b"Contents").unwrap().as_written_mut() = Value::Ref((7, 0))
+            }),
+        ),
+        (
+            "one inside a string",
+            8,
+            edited(8, &|d| d.get_mut(b"Ref").unwrap().at = Some(inside)),
+        ),
+        (
+            "one in its stream's data",
+            8,
+            edited(8, &|d| d.get_mut(b"Ref").unwrap().at = Some(data)),
+        ),
+    ];
+    for (name, n, object) in &cases {
+        let given = |object: &Object| -> Vec<(ObjectId, write::Body<'_>)> {
+            let record = Cow::Borrowed(doc.record((*n, 0)).unwrap());
+            (write::bodies(&doc))
+                .map(|(id, body)| match id == (*n, 0) {
+                    true => (
+                        id,
+                        write::Body::Read {
+                            object: Cow::Owned(object.clone()),
+                            record: record.clone(),
+                        },
+                    ),
+                    false => (id, body),
+                })
+                .collect()
+        };
+        let trailer = doc.trailer.dict();
+        let mut out = Vec::new();
+        let refused = write::full(
+            &mut out,
+            given(object),
+            trailer,
+            None,
+            Some(&reading),
+            &renumbered,
+        );
+        assert_eq!(refused, Err(Error::Elsewhere((*n, 0))), "{name}");
+        assert!(out.is_empty(), "{name}");
+        // Without a renumbering, copied as it was read.
+        let written = write::full(
+            &mut out,
+            given(object),
+            trailer,
+            None,
+            Some(&reading),
+            &plain,
+        )
+        .unwrap();
+        let record = doc.record((*n, 0)).unwrap();
+        assert!(copied(&out, &written, record, &reading, (*n, 0)), "{name}");
+    }
+
+    // A member's, with no place.
+    let file = members_spelled_as(&MEMBERS_NAMING);
+    let reading = open(&file);
+    let doc = reading.to_document().unwrap();
+    let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
+    let map = shifted(&ids, 100);
+    let to = by(&map);
+    let mut pack = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
+    pack.renumber = Some(&to);
+    let mut member = doc.get((5, 0)).unwrap().clone();
+    match member.as_written_mut() {
+        Value::Array(array) => array[2].at = None,
+        other => panic!("{other:?}"),
+    }
+    let given = (write::bodies(&doc)).map(|(id, body)| match id {
+        (5, 0) => (
+            id,
+            write::Body::Read {
+                object: Cow::Borrowed(&member),
+                record: Cow::Borrowed(doc.record(id).unwrap()),
+            },
+        ),
+        _ => (id, body),
+    });
+    let mut out = Vec::new();
+    let trailer = doc.trailer.dict();
+    let refused = write::full(&mut out, given, trailer, None, Some(&reading), &pack);
+    assert_eq!(refused, Err(Error::Elsewhere((5, 0))));
+    assert!(out.is_empty());
+}
+
+/// Rule 2 under a renumbering, for each method the test writer encrypts by,
+/// the document's metadata encrypted and not: [`plaintext`] as it spells it
+/// and draws its IVs, written whole by its document and reading under its
+/// own encryption, a table and a stream packed, under three renumberings:
+/// every object shifted, every other number kept, and the encryption
+/// dictionary's number swapped with the Info's. An object at an offset is
+/// copied at a new number where no key is made of its number (AES-256, its
+/// ciphertext the source's), and else written anew, as its key would be
+/// another's; at its own number it's copied, its references spliced. Read
+/// back by the user's and the owner's password, every object the source's
+/// at its number, nothing in the clear but the metadata where it's left so.
+#[test]
+fn copies_go_to_new_numbers_where_keys_aren_t_made_of_them() {
+    let mut moved = 0;
+    for kind in KINDS_ENCRYPTED {
+        let per_object = !matches!(kind, Kind::Aes256R5 | Kind::Aes256);
+        for encrypt_metadata in [true, false] {
+            let source = written_otherwise(kind, encrypt_metadata);
+            let reading = opened(&source, "user");
+            let own = Encryptor::of(&reading).unwrap().unwrap();
+            assert_eq!(own.per_object(), per_object, "{kind:?}");
+            let doc = reading.to_document().unwrap();
+            let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
+            let kept = written_of(&doc);
+            let top = ids.iter().map(|id| id.0).max().unwrap() + 1;
+            let halved: Map = (ids.iter())
+                .map(|&(n, g)| ((n, g), if n % 2 == 0 { (n, g) } else { (n + top, g) }))
+                .collect();
+            let encrypt = (doc.trailer.dict().get(b"Encrypt"))
+                .and_then(Object::as_reference)
+                .unwrap();
+            let mut swapped: Map = ids.iter().map(|&id| (id, id)).collect();
+            swapped.insert(encrypt, (13, 0));
+            swapped.insert((13, 0), encrypt);
+            let maps = [
+                ("shifted", shifted(&ids, top)),
+                ("halved", halved),
+                ("swapped", swapped),
+            ];
+            for (way, map) in &maps {
+                let to = by(map);
+                for (xref, pack) in [
+                    (XrefKind::Table, None),
+                    (XrefKind::Stream, Some(write::Pack::DEFAULT)),
+                ] {
+                    let name = format!(
+                        "{kind:?}, metadata encrypted: {encrypt_metadata}, {way}, {xref:?}"
+                    );
+                    let mut options = options(xref, pack);
+                    options.renumber = Some(&to);
+                    let mut out = Vec::new();
+                    let written =
+                        write::document(&mut out, &doc, Some(&own), Some(&reading), &options)
+                            .unwrap();
+                    for (id, body) in write::bodies(&doc).filter(|(id, _)| kept.contains(id)) {
+                        let write::Body::Read { object, record } = &body else {
+                            continue;
+                        };
+                        let at = to(id).unwrap();
+                        let Some(Entry::InUse { offset, .. }) = written.section.get(at.0) else {
+                            continue;
+                        };
+                        let copy = copy_of(&reading, record, object, at, &to);
+                        let copied = out[offset..].starts_with(&copy);
+                        assert_eq!(copied, at == id || !per_object, "{name}: {id:?} at {at:?}");
+                        moved += usize::from(copied && at != id);
+                    }
+                    let filters = !matches!(kind, Kind::Rc4By40 | Kind::Rc4By128);
+                    for text in SECRETS {
+                        let clear = text == XMP && !encrypt_metadata && filters;
+                        let said = String::from_utf8_lossy(text);
+                        assert_eq!(in_clear(&out, text), clear, "{name}: {said:?}");
+                    }
+                    for password in ["user", "owner"] {
+                        let back = opened(&out, password);
+                        assert!(sound(&back), "{name}: {:?}", back.warnings());
+                        assert_moved(&reading, &back, &kept, &to, &format!("{name}, {password}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(moved > 0, "AES-256's copied at new numbers");
 }

@@ -19,7 +19,8 @@
 //! update, each way the input picks, without a panic, and where it read
 //! soundly, written and read again it's the same objects, each at the
 //! number the renumbering gives it, those copied as the bytes they were
-//! read from among them; and where a byte of it changed after it was read,
+//! read from among them, their headers and the references that move
+//! written anew in place; and where a byte of it changed after it was read,
 //! a copy of an object whose bytes hold it is refused.
 
 use std::borrow::Cow;

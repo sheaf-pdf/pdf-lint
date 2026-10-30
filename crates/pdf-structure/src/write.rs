@@ -38,7 +38,9 @@
 //!   what the encryptor resolves are found by; an encrypted file's objects
 //!   are encrypted under the numbers they're written at, by the encryptor
 //!   in those numbers ([`Encryptor::renumbered`]). An object as read is
-//!   copied only where nothing in it moves.
+//!   copied as its bytes, its header and each reference that moves written
+//!   anew where its bytes had it; at another number only where its key
+//!   isn't made of its number.
 //! - **Cross-reference sections** ([`Section`]): a whole file's one
 //!   subsection, `[0, /Size)`, every number it doesn't list written as
 //!   free; or an update's, runs of the numbers it lists, which are only
@@ -193,11 +195,12 @@ pub enum Body<'a> {
     /// a container: a caller that would keep it copied, as a writer that
     /// packs only what it writes anew does, leaves its number out of every
     /// group ([`Pack::groups`]), which writes it on its own. Which is the
-    /// caller's. Under a renumbering ([`Options::renumber`]), it's copied
-    /// only where nothing in it moves, its number and every reference in it
-    /// as they are, as its bytes say both. A copy is made only from the
-    /// reading the write is given ([`ReadFrom`]), so with none it's written
-    /// anew; and only:
+    /// caller's. Under a renumbering ([`Options::renumber`]), its bytes
+    /// are copied but its header, `n g obj`, where it's written at another
+    /// number, and each reference the renumbering names otherwise, `n g R`
+    /// or `null`, each written anew where its bytes had it (rule 9). A copy
+    /// is made only from the reading the write is given ([`ReadFrom`]), so
+    /// with none it's written anew; and only:
     ///
     /// 1. where `record` is that reading's ([`Record::source`]): else the
     ///    write is refused ([`Error::Elsewhere`]);
@@ -206,10 +209,17 @@ pub enum Body<'a> {
     ///    ([`Encryptor::of`]), and the list of what's left in the clear
     ///    says the same of the object in both (see
     ///    [`bytes`](crate::bytes), "What's encrypted"), or where neither is
-    ///    encrypted: its strings and data are encrypted with its key,
-    ///    which is made from its number. An object read from an object
-    ///    stream is plaintext there, and an object stream is encrypted
-    ///    whole, so it goes in one under any encryption, or none;
+    ///    encrypted: its strings and data are encrypted with its key. Under
+    ///    a renumbering, at another number than it was read as only where
+    ///    neither is encrypted, or no method of that encryptor makes a key
+    ///    per object (RC4 and AES-128 make one of the object's number and
+    ///    generation, ISO 32000-2, 7.6.3, Algorithm 1; AES-256's is the
+    ///    file's, Algorithm 1.A, its IV beside its ciphertext): else it's
+    ///    written anew, encrypted under the number it's written at. At its
+    ///    own number, its references are rewritten under any encryption, as
+    ///    a reference isn't encrypted. An object read from an object stream
+    ///    is plaintext there, and an object stream is encrypted whole, so it
+    ///    goes in one under any encryption, or none, at any number;
     /// 3. where `record` was read as the id it's given at
     ///    ([`Record::id`]), and `object` is `record`'s, as read: else the
     ///    write is refused ([`Error::Elsewhere`]), however it's encrypted,
@@ -229,7 +239,18 @@ pub enum Body<'a> {
     ///    otherwise be in the clear in an encrypted file;
     /// 8. where its bytes, read again, hash as they did when it was read:
     ///    else the write is refused ([`Error::Changed`]), as the file
-    ///    changed under the reading.
+    ///    changed under the reading;
+    /// 9. under a renumbering, where its references are where its bytes
+    ///    have them: each, as [`Object::references`] walks them, placed
+    ///    ([`Object::at`]) among the bytes `record` names, past its header
+    ///    and before a stream's data, in the order walked and apart, and
+    ///    each the renumbering names otherwise reading there as itself,
+    ///    `n g R`, three tokens of their own: else `object` isn't what its
+    ///    bytes say, and the write is refused ([`Error::Elsewhere`]),
+    ///    however it's encrypted. A comment between a changed reference's
+    ///    tokens goes with them; every other byte, strings and data among
+    ///    them, is copied as it was. Without a renumbering, nothing of it is
+    ///    asked.
     Read {
         /// The object as read: written anew from it where it isn't copied.
         object: Cow<'a, Object>,
@@ -372,9 +393,13 @@ pub struct Options<'a> {
     ///   moved onto another's number (pdf-crypt's `Method::Rc4`). A caller
     ///   who doesn't want that writes the file under a new AES-256
     ///   encryption ([`Encryptor::create`]) instead.
-    /// - **Copied**, an object as read ([`Body::Read`]) is its bytes only
-    ///   where nothing in it moves, its number and every reference in it
-    ///   as they are; else it's written anew.
+    /// - **Copied**, an object as read ([`Body::Read`]) is its bytes, its
+    ///   header and each reference the renumbering names otherwise written
+    ///   anew where its bytes had them, where the rules for a copy hold:
+    ///   at another number than it was read as only where neither file is
+    ///   encrypted, or no method of the encryptor makes keys per object
+    ///   (AES-256); else it's written anew. Its references are checked to be
+    ///   where its bytes have them first ([`Error::Elsewhere`]).
     /// - **What's written says so** ([`Written::base`],
     ///   [`Base::renumbered`]): an update after it is given objects at the
     ///   numbers written, built or edited, and refuses an object as read
@@ -789,8 +814,9 @@ pub enum Error {
     Changed(Option<ObjectId>),
     /// An object as read ([`Body::Read`]) given with a record of another
     /// reading than the one given, or of another object: read as another
-    /// number or generation ([`Record::id`]), or not the object given. A
-    /// document's objects copy from the reading it was made of by
+    /// number or generation ([`Record::id`]), or not the object given, nor,
+    /// under a renumbering, with its references where its bytes have them.
+    /// A document's objects copy from the reading it was made of by
     /// [`Reading::to_document`], not another of the same bytes.
     #[error(
         "object {} {} is given with a record of another reading than the one given, or of another object",
@@ -953,14 +979,6 @@ impl<'a> Numbering<'a> {
         match self.0 {
             None => Some(id),
             Some(to) => to.renumber(id),
-        }
-    }
-
-    /// Whether every reference in `obj` is named as it is.
-    fn still(self, obj: &Object) -> bool {
-        match self.0 {
-            None => true,
-            Some(to) => obj.references().all(|r| to.renumber(r) == Some(r)),
         }
     }
 }

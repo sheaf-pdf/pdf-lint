@@ -50,6 +50,11 @@ pub struct Encryptor {
     /// 7.6.3, Algorithm 1): a new object there would be encrypted with a
     /// deleted object's key. Empty otherwise.
     free: BTreeMap<u32, u16>,
+    /// Whether a method of its makes keys per object (RC4, AES-128), from
+    /// the object's number and generation: then what's encrypted under it
+    /// is right at its own number alone. AES-256's key is the file's
+    /// (Algorithm 1.A), its IV beside its ciphertext.
+    per_object: bool,
     /// The reading it was made of, whose objects it encrypts as the
     /// reading's file has them: none for a new file's.
     source: Option<SourceId>,
@@ -103,7 +108,8 @@ impl Encryptor {
             (Encryption::None, ..) => Ok(None),
             (Encryption::Unsupported(why), ..) => Err(Error::Unsupported(why.clone())),
             (Encryption::Opened { .. }, Some(handler), Some(stored)) => {
-                let free = match per_object(handler, &stored.dict) {
+                let per_object = per_object(handler, &stored.dict);
+                let free = match per_object {
                     true => (reading.entries())
                         .filter(|&(n, _, entry)| n != 0 && entry == XrefEntry::Free)
                         .map(|(n, generation, _)| (n, generation))
@@ -117,6 +123,7 @@ impl Encryptor {
                     place: stored.at.map_or(Place::Direct, Place::At),
                     first_id: Some(stored.id.clone()),
                     free,
+                    per_object,
                     source: Some(reading.id()),
                 }))
             }
@@ -150,6 +157,7 @@ impl Encryptor {
             place: Place::New,
             first_id: None,
             free: BTreeMap::new(),
+            per_object: false,
             source: None,
         })
     }
@@ -276,6 +284,14 @@ impl Encryptor {
     /// write under it may copy as their bytes: none for a new file's.
     pub(super) fn read_in(&self) -> Option<SourceId> {
         self.source
+    }
+
+    /// Whether any method of its makes keys per object (RC4, AES-128: its
+    /// strings', its streams', a crypt filter's its dictionary has, or
+    /// `/EFF`'s), so that what it encrypted is right at its own number
+    /// alone, which a copy at another number isn't.
+    pub(super) fn per_object(&self) -> bool {
+        self.per_object
     }
 
     /// Where the file it was read from lists number `n` free, under keys

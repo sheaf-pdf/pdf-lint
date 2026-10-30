@@ -1977,15 +1977,19 @@ qpdf: operation succeeded with warnings\n";
         }
     }
 
-    /// Whole files written under a renumbering, each object's number
+    /// Whole files written under two renumberings, each object's number
     /// reversed (each at the number of the one as far from the end as it is
-    /// from the start), by their document and reading under their own
-    /// encryption, with a table and packed: [`listed`]'s objects plain and
-    /// under every method, the test writer's spelled objects and members,
-    /// and [`plaintext`] under each method it encrypts by. Checked by qpdf by
-    /// their password ("No syntax or stream encoding errors found") and read
-    /// through qpdf alone as the reader reads them, but a signature's
-    /// `/Contents` with no `/Type`, as above, at the number it's written at.
+    /// from the start), and every other number kept, the rest moved past
+    /// every number, by their document and reading under their own
+    /// encryption, with a table and packed, copied where the rules hold:
+    /// their headers and the references that move written anew in place,
+    /// at new numbers where no key is made of the number: [`listed`]'s
+    /// objects plain and under every method, the test writer's spelled
+    /// objects and members, and [`plaintext`] under each method it encrypts
+    /// by. Checked by qpdf by their password ("No syntax or stream encoding
+    /// errors found") and read through qpdf alone as the reader reads them,
+    /// but a signature's `/Contents` with no `/Type`, as above, at the
+    /// number it's written at.
     ///
     /// [`listed`]: crate::write::tests::listed
     /// [`plaintext`]: crate::write::tests::plaintext
@@ -2030,20 +2034,33 @@ qpdf: operation succeeded with warnings\n";
             let own = Encryptor::of(&reading).unwrap();
             let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
             let numbers = ids.iter().rev().map(|id| id.0);
-            let map: BTreeMap<ObjectId, ObjectId> = (ids.iter().zip(numbers))
+            let reversed: BTreeMap<ObjectId, ObjectId> = (ids.iter().zip(numbers))
                 .map(|(&id, n)| (id, (n, id.1)))
                 .collect();
-            let to = |id| map.get(&id).copied();
-            let untyped = match to((10, 0)) {
-                Some((n, g)) => format!("{n} {g} R/Contents: "),
-                None => String::new(),
-            };
-            let mut ways = vec![("table", XrefKind::Table, None)];
-            if own.as_ref().is_none_or(Encryptor::packs) {
-                ways.push(("packed", XrefKind::Stream, Some(Pack::DEFAULT)));
+            let top = ids.iter().map(|id| id.0).max().unwrap_or(0) + 1;
+            let halved: BTreeMap<ObjectId, ObjectId> = (ids.iter())
+                .map(|&(n, g)| ((n, g), if n % 2 == 0 { (n, g) } else { (n + top, g) }))
+                .collect();
+            let mut ways = vec![];
+            for (numbering, map) in [("reversed", &reversed), ("halved", &halved)] {
+                ways.push((numbering, map, "table", XrefKind::Table, None));
+                if own.as_ref().is_none_or(Encryptor::packs) {
+                    ways.push((
+                        numbering,
+                        map,
+                        "packed",
+                        XrefKind::Stream,
+                        Some(Pack::DEFAULT),
+                    ));
+                }
             }
-            for (way, kind, pack) in ways {
-                let name = format!("{name}, {way}");
+            for (numbering, map, way, kind, pack) in ways {
+                let to = |id| map.get(&id).copied();
+                let untyped = match to((10, 0)) {
+                    Some((n, g)) => format!("{n} {g} R/Contents: "),
+                    None => String::new(),
+                };
+                let name = format!("{name}, {numbering}, {way}");
                 let mut options = write::Options::DEFAULT;
                 (options.kind, options.pack) = (kind, pack);
                 options.renumber = Some(&to);
