@@ -3,7 +3,8 @@
 
 use core::iter::FusedIterator;
 
-use crate::chars::{is_regular, is_white_space};
+use crate::chars::is_white_space;
+use crate::rules::{Iso, RuleSet, Rules};
 use crate::token::{Kind, Token};
 
 /// Splits bytes into [`Token`]s, from any offset.
@@ -14,31 +15,59 @@ use crate::token::{Kind, Token};
 /// to the next, so started at any token's first byte it yields that token
 /// first. Cloning it is cheap, so a clone can look ahead.
 ///
+/// It follows ISO 32000-2's lexical rules unless it's given PDFium's
+/// ([`with_rules`](Self::with_rules)), and keeps every promise under
+/// either. `R` holds them: [`Iso`], the default, or
+/// [`Pdfium`](crate::Pdfium), fixed in the type, or a [`Rules`] value,
+/// chosen as it runs ([`RuleSet`]).
+///
 /// After a `stream` keyword, or an inline image's `ID`, come bytes whose
 /// length the tokenizer can't know. Iterating on reads them as tokens like
 /// any others. To take them as data instead, take the white-space before
 /// them with [`eol`](Self::eol) or [`space_byte`](Self::space_byte), then
 /// the data with [`data`](Self::data) or [`data_until`](Self::data_until).
 #[derive(Debug, Clone)]
-pub struct Tokenizer<'a> {
+pub struct Tokenizer<'a, R: RuleSet = Iso> {
     bytes: &'a [u8],
     /// Never past the end of `bytes`.
     pos: usize,
+    rules: R,
 }
 
 impl<'a> Tokenizer<'a> {
-    /// The tokens of `bytes`, from the start.
+    /// The tokens of `bytes`, from the start, by ISO 32000-2's rules, fixed
+    /// in its type.
     pub fn new(bytes: &'a [u8]) -> Self {
         Self::at(bytes, 0)
     }
 
     /// The tokens of `bytes`, from `offset`, or none when `offset` is past
-    /// the end.
+    /// the end, by ISO 32000-2's rules, fixed in its type.
     pub fn at(bytes: &'a [u8], offset: usize) -> Self {
         Tokenizer {
             bytes,
             pos: offset.min(bytes.len()),
+            rules: Iso,
         }
+    }
+}
+
+impl<'a, R: RuleSet> Tokenizer<'a, R> {
+    /// The same tokenizer, where it is, following `rules` from its next
+    /// token on: `Tokenizer::at(bytes, offset).with_rules(Pdfium)` reads by
+    /// PDFium's rules from any offset, fixed in its type, and
+    /// `with_rules(Rules::Pdfium)` by the same rules, chosen as it runs.
+    pub fn with_rules<S: RuleSet>(self, rules: S) -> Tokenizer<'a, S> {
+        Tokenizer {
+            bytes: self.bytes,
+            pos: self.pos,
+            rules,
+        }
+    }
+
+    /// The rules it follows.
+    pub fn rules(&self) -> Rules {
+        self.rules.rules()
     }
 
     /// The offset of the next token. (Not `position`: on a `&mut
@@ -60,10 +89,11 @@ impl<'a> Tokenizer<'a> {
     }
 
     /// One white-space byte, as a [`Kind::Space`] token, if one is next:
-    /// what separates an inline image's `ID` from its data.
+    /// what separates an inline image's `ID` from its data. White-space by
+    /// the tokenizer's rules, so 0x80 and 0xFF too by PDFium's.
     pub fn space_byte(&mut self) -> Option<Token<'a>> {
         match self.rest() {
-            [b, ..] if is_white_space(*b) => Some(self.take(Kind::Space, 1)),
+            [b, ..] if self.rules().is_white_space(*b) => Some(self.take(Kind::Space, 1)),
             _ => None,
         }
     }
@@ -109,30 +139,16 @@ impl<'a> Tokenizer<'a> {
     }
 }
 
-impl<'a> Iterator for Tokenizer<'a> {
+impl<'a, R: RuleSet> Iterator for Tokenizer<'a, R> {
     type Item = Token<'a>;
 
     fn next(&mut self) -> Option<Token<'a>> {
-        let rest = self.rest();
-        let (&first, after) = rest.split_first()?;
-        let (kind, len) = match first {
-            b if is_white_space(b) => (Kind::Space, run(rest, is_white_space)),
-            b'%' => (Kind::Comment, 1 + run(after, |b| b != b'\r' && b != b'\n')),
-            b'/' => (Kind::Name, 1 + run(after, is_regular)),
-            b'(' => literal_string(rest),
-            b'<' if after.first() == Some(&b'<') => (Kind::DictOpen, 2),
-            b'<' => hex_string(rest),
-            b'>' if after.first() == Some(&b'>') => (Kind::DictClose, 2),
-            b'>' | b')' => (Kind::Junk, 1),
-            b'[' => (Kind::ArrayOpen, 1),
-            b']' => (Kind::ArrayClose, 1),
-            b'{' => (Kind::BraceOpen, 1),
-            b'}' => (Kind::BraceClose, 1),
-            // Every delimiter is above, so `first` is regular.
-            _ => {
-                let len = run(rest, is_regular);
-                (word(rest.get(..len).unwrap_or_default()), len)
-            }
+        // Each set of rules is a loop of its own. Fixed in the type, the
+        // rules are settled when this is compiled; chosen as it runs, they
+        // cost a branch a token.
+        let (kind, len) = match self.rules() {
+            Rules::Iso => next_token::<false>(self.rest())?,
+            Rules::Pdfium => next_token::<true>(self.rest())?,
         };
         Some(self.take(kind, len))
     }
@@ -143,7 +159,42 @@ impl<'a> Iterator for Tokenizer<'a> {
     }
 }
 
-impl FusedIterator for Tokenizer<'_> {}
+impl<R: RuleSet> FusedIterator for Tokenizer<'_, R> {}
+
+/// The kind and length of the token `rest` starts with, by PDFium's rules
+/// when `PDFIUM` and otherwise by ISO 32000-2's; `None` when it's empty.
+// Inlined, with `literal_string`, into `next`: so each set of rules runs
+// the instructions the tokenizer ran before there were two, where called
+// they run about a tenth more on a file whose strings are long.
+#[inline(always)]
+fn next_token<const PDFIUM: bool>(rest: &[u8]) -> Option<(Kind, usize)> {
+    let rules = if PDFIUM { Rules::Pdfium } else { Rules::Iso };
+    let space = |b| rules.is_white_space(b);
+    let regular = |b| rules.is_regular(b);
+    let (&first, after) = rest.split_first()?;
+    Some(match first {
+        b if space(b) => (Kind::Space, run(rest, space)),
+        b'%' => (Kind::Comment, 1 + run(after, |b| b != b'\r' && b != b'\n')),
+        b'/' => (Kind::Name, 1 + run(after, regular)),
+        b'(' => literal_string(rest),
+        b'<' if after.first() == Some(&b'<') => (Kind::DictOpen, 2),
+        b'<' if PDFIUM => pdfium_hex_string(rest),
+        b'<' => hex_string(rest),
+        b'>' if after.first() == Some(&b'>') => (Kind::DictClose, 2),
+        b'>' | b')' => (Kind::Junk, 1),
+        b'[' => (Kind::ArrayOpen, 1),
+        b']' => (Kind::ArrayClose, 1),
+        b'{' => (Kind::BraceOpen, 1),
+        b'}' => (Kind::BraceClose, 1),
+        // Every delimiter is above, so `first` is regular.
+        _ => {
+            let len = run(rest, regular);
+            let run = rest.get(..len).unwrap_or_default();
+            let kind = if PDFIUM { pdfium_word(run) } else { word(run) };
+            (kind, len)
+        }
+    })
+}
 
 /// How many of `bytes`' first bytes `keep` holds for.
 fn run(bytes: &[u8], keep: impl Fn(u8) -> bool) -> usize {
@@ -173,9 +224,30 @@ pub(crate) fn word(run: &[u8]) -> Kind {
     }
 }
 
+/// What a run of regular bytes is by PDFium's rules: a number when it's
+/// all digits, signs and points, a real if a point is among them and an
+/// integer if not; otherwise a keyword.
+pub(crate) fn pdfium_word(run: &[u8]) -> Kind {
+    let mut point = false;
+    for &b in run {
+        match b {
+            b'0'..=b'9' | b'+' | b'-' => {}
+            b'.' => point = true,
+            _ => return Kind::Keyword,
+        }
+    }
+    match (run.is_empty(), point) {
+        (true, _) => Kind::Keyword,
+        (false, false) => Kind::Integer,
+        (false, true) => Kind::Real,
+    }
+}
+
 /// A literal string at the start of `rest`, which starts with `(`: to the
 /// `)` that balances it, past any byte a backslash escapes (ISO 32000-2,
 /// 7.3.4.2).
+// Inlined: see `next_token`.
+#[inline(always)]
 fn literal_string(rest: &[u8]) -> (Kind, usize) {
     let mut depth = 0usize;
     let mut escaped = false;
@@ -212,6 +284,15 @@ fn hex_string(rest: &[u8]) -> (Kind, usize) {
         }
     }
     (Kind::HexString { closed: false }, rest.len())
+}
+
+/// A hexadecimal string at the start of `rest`, which starts with `<` and
+/// not `<<`, by PDFium's rules: to its `>`, over any byte.
+fn pdfium_hex_string(rest: &[u8]) -> (Kind, usize) {
+    match rest.iter().skip(1).position(|&b| b == b'>') {
+        Some(i) => (Kind::HexString { closed: true }, i + 2),
+        None => (Kind::HexString { closed: false }, rest.len()),
+    }
 }
 
 #[cfg(test)]
@@ -519,5 +600,265 @@ mod tests {
         assert_eq!((data.start, data.bytes), (0, &b"abc"[..]));
         let empty: Token<'_> = tokens.data(1);
         assert_eq!((empty.start, empty.bytes), (3, &b""[..]));
+    }
+
+    /// The tokenizer under PDFium's rules, where they part from ISO
+    /// 32000-2's: what PDFium 7881 and 8076 read the same bytes as, one-page
+    /// files through their page objects (2026-10-30).
+    mod pdfiums_rules {
+        extern crate std;
+
+        use std::vec::Vec;
+
+        use super::{HEX, STRING, UNCLOSED_HEX, kind_of, tokens};
+        use crate::{Iso, Kind, Pdfium, Rules, Tokenizer, fuzz};
+
+        /// `input`'s tokens by PDFium's rules, each kind and its bytes,
+        /// checked by the fuzz target's body, whole and cut at every byte,
+        /// under both sets of rules and side by side.
+        fn pdfium(input: &[u8]) -> Vec<(Kind, &[u8])> {
+            let tokenizer = Tokenizer::new(input).with_rules(Rules::Pdfium);
+            let tokens = tokenizer.map(|t| (t.kind, t.bytes)).collect();
+            fuzz::walk(input, 0);
+            for cut in 0..=input.len() {
+                fuzz::prefix(input, 0, cut);
+            }
+            tokens
+        }
+
+        fn pdfium_kind_of(word: &[u8]) -> Kind {
+            match pdfium(word)[..] {
+                [(kind, bytes)] if bytes == word => kind,
+                ref other => panic!("{word:?} isn't one token: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn new_and_at_follow_iso_32000s_rules() {
+            assert_eq!(Tokenizer::new(b"--5").rules(), Rules::Iso);
+            assert_eq!(Tokenizer::at(b"--5", 1).rules(), Rules::Iso);
+            assert_eq!(Tokenizer::new(b"--5").next().unwrap().kind, Kind::Keyword);
+        }
+
+        /// A number word is digits, signs and points, a real when there's a
+        /// point: in `cm`, `re` and a `/MediaBox`, PDFium reads each of these
+        /// as a number, and `1e5` as an operator.
+        #[test]
+        fn a_number_is_any_word_of_digits_signs_and_points() {
+            for int in [
+                "--5",
+                "5-3",
+                "+",
+                "-",
+                "+-1",
+                "007",
+                "4294967296",
+                "-0",
+                "+5",
+            ] {
+                assert_eq!(pdfium_kind_of(int.as_bytes()), Kind::Integer, "{int}");
+                assert_eq!(kind_of(int.as_bytes()), iso(int), "{int}");
+            }
+            for real in [
+                "1.2.3", "--5.0", "+-.5", ".", "5.", "-.", "+.", ".5.", "1..2", "34.5",
+            ] {
+                assert_eq!(pdfium_kind_of(real.as_bytes()), Kind::Real, "{real}");
+                assert_eq!(kind_of(real.as_bytes()), iso(real), "{real}");
+            }
+            for word in ["1e5", "12abc", "0x1F", "3.4e38", "inf", "--5x"] {
+                assert_eq!(pdfium_kind_of(word.as_bytes()), Kind::Keyword, "{word}");
+                assert_eq!(kind_of(word.as_bytes()), Kind::Keyword, "{word}");
+            }
+        }
+
+        /// What ISO 32000-2's rules make of the same word.
+        fn iso(word: &str) -> Kind {
+            match word {
+                "007" | "4294967296" | "-0" | "+5" => Kind::Integer,
+                "5." | "34.5" => Kind::Real,
+                _ => Kind::Keyword,
+            }
+        }
+
+        #[test]
+        fn a_hex_string_runs_to_its_close_over_any_byte() {
+            for hex in [
+                &b"<41G42>"[..],
+                b"<4G1>",
+                b"<g>",
+                b"<41(42>",
+                b"<41/42>",
+                b"<41\x80%]>",
+            ] {
+                assert_eq!(pdfium_kind_of(hex), HEX, "{hex:?}");
+                assert_ne!(kind_of_iso(hex), HEX, "{hex:?}");
+            }
+            assert_eq!(
+                pdfium(b"<48(x)>)"),
+                [(HEX, &b"<48(x)>"[..]), (Kind::Junk, b")")]
+            );
+            assert_eq!(
+                pdfium(b"<<<>"),
+                [(Kind::DictOpen, &b"<<"[..]), (HEX, b"<>")]
+            );
+            assert_eq!(pdfium(b"<41><42>"), [(HEX, &b"<41>"[..]), (HEX, b"<42>")]);
+        }
+
+        /// ISO 32000-2's first token of `input`'s kind.
+        fn kind_of_iso(input: &[u8]) -> Kind {
+            tokens(input)[0].0
+        }
+
+        #[test]
+        fn a_hex_string_is_unclosed_only_at_the_end() {
+            for hex in [&b"<4865"[..], b"<48(x) Tj", b"<", b"<48 >"] {
+                let kind = if hex.ends_with(b">") {
+                    HEX
+                } else {
+                    UNCLOSED_HEX
+                };
+                assert_eq!(pdfium_kind_of(hex), kind, "{hex:?}");
+            }
+            assert_eq!(
+                pdfium(b"(a)<"),
+                [(STRING, &b"(a)"[..]), (UNCLOSED_HEX, b"<")]
+            );
+        }
+
+        /// 0x80 and 0xFF are white-space to PDFium: in content, `1 2 3
+        /// 4<0x80>re` is a rectangle and `/F0<0x80>10 Tf` names `F0`; in a
+        /// `/MediaBox`, `[0<0x80>0 100 100]` is four numbers. No other byte is.
+        #[test]
+        fn white_space_takes_0x80_and_0xff() {
+            assert_eq!(
+                pdfium(b"4\x80re /F0\xff\x80 \xff10"),
+                [
+                    (Kind::Integer, &b"4"[..]),
+                    (Kind::Space, b"\x80"),
+                    (Kind::Keyword, b"re"),
+                    (Kind::Space, b" "),
+                    (Kind::Name, b"/F0"),
+                    (Kind::Space, b"\xff\x80 \xff"),
+                    (Kind::Integer, b"10"),
+                ]
+            );
+            assert_eq!(
+                tokens(b"4\x80re"),
+                [(Kind::Keyword, &b"4\x80re"[..])],
+                "regular to ISO 32000-2"
+            );
+            for b in [0x0B, 0x7F, 0x85, 0xA0] {
+                assert_eq!(
+                    pdfium(&[b'4', b, b'x']),
+                    [(Kind::Keyword, &[b'4', b, b'x'][..])]
+                );
+            }
+            // A comment and strings hold them by either rules.
+            assert_eq!(
+                pdfium(b"%\x80\n(\xff)<\x80>"),
+                [
+                    (Kind::Comment, &b"%\x80"[..]),
+                    (Kind::Space, b"\n"),
+                    (STRING, b"(\xff)"),
+                    (HEX, b"<\x80>"),
+                ]
+            );
+        }
+
+        /// The one white-space byte PDFium takes after an inline image's
+        /// `ID` may be 0x80 or 0xFF.
+        #[test]
+        fn space_byte_follows_the_rules() {
+            let after_id = |rules| {
+                let mut tokens = Tokenizer::at(b"ID\x80a EI", 2).with_rules(rules);
+                tokens.space_byte().map(|t| t.bytes)
+            };
+            assert_eq!(after_id(Rules::Iso), None);
+            assert_eq!(after_id(Rules::Pdfium), Some(&b"\x80"[..]));
+        }
+
+        /// Fixed in the type or chosen as it runs, the rules read the same
+        /// tokens, and `new` and `at` give ISO 32000-2's, fixed:
+        /// `Tokenizer<'a>` is `Tokenizer<'a, Iso>`.
+        #[test]
+        fn rules_fixed_in_the_type_read_as_rules_chosen() {
+            let input = b"1 --5 <4G> 2\x80ID\xffx";
+            let iso: Tokenizer<'_, Iso> = Tokenizer::new(input);
+            assert!(iso.clone().eq(Tokenizer::new(input).with_rules(Rules::Iso)));
+            let fixed: Tokenizer<'_, Pdfium> = iso.with_rules(Pdfium);
+            assert_eq!(fixed.rules(), Rules::Pdfium);
+            let chosen = Tokenizer::new(input).with_rules(Rules::Pdfium);
+            assert!(fixed.eq(chosen));
+            let mut after_id = Tokenizer::at(input, 15).with_rules(Pdfium);
+            assert_eq!(after_id.space_byte().map(|t| t.bytes), Some(&b"\xff"[..]));
+            assert_eq!(Tokenizer::at(input, 15).space_byte(), None);
+            pdfium(input);
+        }
+
+        /// From any offset, and from where a tokenizer is: `with_rules`
+        /// keeps its place and changes how the next token reads.
+        #[test]
+        fn with_rules_reads_from_any_offset() {
+            let input = b"1 --5 <4G> 2";
+            let mut tokens = Tokenizer::at(input, 2).with_rules(Rules::Pdfium);
+            assert_eq!((tokens.offset(), tokens.rules()), (2, Rules::Pdfium));
+            let word = tokens.next().unwrap();
+            assert_eq!(
+                (word.kind, word.start, word.bytes),
+                (Kind::Integer, 2, &b"--5"[..])
+            );
+            let mut tokens = tokens.with_rules(Rules::Iso);
+            assert_eq!(tokens.offset(), 5);
+            tokens.next();
+            let hex = tokens.next().unwrap();
+            assert_eq!((hex.kind, hex.bytes), (UNCLOSED_HEX, &b"<4"[..]));
+            let hex = Tokenizer::at(input, 6).with_rules(Rules::Pdfium).next();
+            assert_eq!(hex.map(|t| (t.kind, t.bytes)), Some((HEX, &b"<4G>"[..])));
+            assert_eq!(
+                Tokenizer::at(input, 99).with_rules(Rules::Pdfium).next(),
+                None
+            );
+        }
+
+        /// A slice by PDFium's rules tokenizes as the whole does but for its
+        /// last token: a hex string cut before its `>`, a number word cut
+        /// short, white-space that goes on over 0x80.
+        #[test]
+        fn only_the_last_token_of_a_slice_can_come_out_otherwise() {
+            let file = b"[--5.0 <4G 1>]\x80\xff x";
+            let cases: [(usize, Kind, &[u8]); 4] = [
+                (4, Kind::Integer, b"--5"),
+                (11, UNCLOSED_HEX, b"<4G "),
+                (15, Kind::Space, b"\x80"),
+                (16, Kind::Space, b"\x80\xff"),
+            ];
+            let whole = pdfium(file);
+            for (cut, kind, bytes) in cases {
+                let part = pdfium(&file[..cut]);
+                let (last, before) = part.split_last().unwrap();
+                assert_eq!(before, &whole[..before.len()], "{cut}");
+                assert_eq!(*last, (kind, bytes), "{cut}");
+                assert_ne!(whole[before.len()], *last, "{cut}");
+            }
+        }
+
+        /// Side by side, the rules give the same tokens but where they part.
+        #[test]
+        fn the_rules_part_only_where_they_say() {
+            let input = b"q 1 0 0 1 --5 1.2.3 cm /F#3G 1 Tf (a\rb) Tj <4G1> Tj [1e5 2]\x80re";
+            let iso = tokens(input);
+            let pdfium = pdfium(input);
+            let differ: Vec<_> = pdfium.iter().filter(|t| !iso.contains(t)).collect();
+            assert_eq!(
+                differ,
+                [
+                    &(Kind::Integer, &b"--5"[..]),
+                    &(Kind::Real, b"1.2.3"),
+                    &(HEX, b"<4G1>"),
+                    &(Kind::Space, b"\x80"),
+                    &(Kind::Keyword, b"re"),
+                ]
+            );
+        }
     }
 }

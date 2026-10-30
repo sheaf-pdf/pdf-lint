@@ -1,4 +1,5 @@
-//! What a token stands for: a name's or a string's bytes, or a number.
+//! What a token stands for: a name's or a string's bytes, or a number, as
+//! ISO 32000-2 reads them; and in [`pdfium`], as PDFium does.
 //!
 //! Decoding hides nothing. Every byte of a name or string is in exactly one
 //! [`Piece`], which says what value byte it stands for and how, so each
@@ -8,6 +9,8 @@
 
 use core::fmt;
 use core::ops::Range;
+
+pub mod pdfium;
 
 use crate::chars::{is_regular, is_white_space};
 use crate::token::{Kind, Token};
@@ -61,8 +64,9 @@ pub enum How {
     /// A `\` that an unclosed string ends on: no byte.
     Dangling,
     /// A byte the syntax doesn't allow there, such as a letter in a hex
-    /// string, or anything after a string's close: no byte. A token from
-    /// the tokenizer never has one.
+    /// string, or anything after a string's close: no byte. A token read by
+    /// ISO 32000-2's rules never has one; a hex string read by PDFium's may,
+    /// a byte in it that's neither a hex digit nor white-space.
     Invalid,
 }
 
@@ -363,7 +367,9 @@ pub fn number(bytes: &[u8]) -> Result<f64, NumberError> {
 
 impl<'a> Token<'a> {
     /// The pieces of a name, a literal string or a hex string, at their
-    /// offsets in the input. `None` for any other kind.
+    /// offsets in the input, as ISO 32000-2 reads them, whatever rules read
+    /// the token. `None` for any other kind. [`pdfium`] reads the same
+    /// bytes as PDFium does.
     pub fn pieces(&self) -> Option<Pieces<'a>> {
         let syntax = match self.kind {
             Kind::Name => Syntax::Name,
@@ -395,7 +401,10 @@ impl<'a> Token<'a> {
         Some(self.bytes.get(run).unwrap_or_default())
     }
 
-    /// The integer an [`Integer`](Kind::Integer) token is written as.
+    /// The integer an [`Integer`](Kind::Integer) token is written as, read
+    /// as ISO 32000-2 writes one: a word only PDFium's rules make an
+    /// integer, such as `--5`, isn't one here, and [`pdfium::number`] reads
+    /// it.
     pub fn integer(&self) -> Result<i64, NumberError> {
         match self.kind {
             Kind::Integer => integer(self.bytes),
@@ -404,7 +413,9 @@ impl<'a> Token<'a> {
     }
 
     /// The number an [`Integer`](Kind::Integer) or [`Real`](Kind::Real)
-    /// token is written as, as an `f64`.
+    /// token is written as, as an `f64`, read as ISO 32000-2 writes one: a
+    /// word only PDFium's rules make a number, such as `1.2.3`, isn't one
+    /// here, and [`pdfium::number`] reads it.
     pub fn number(&self) -> Result<f64, NumberError> {
         match self.kind {
             Kind::Integer | Kind::Real => number(self.bytes),

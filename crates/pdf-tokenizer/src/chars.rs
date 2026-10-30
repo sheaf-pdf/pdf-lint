@@ -1,5 +1,6 @@
-//! The three classes of byte (ISO 32000-2, 7.2.2). Every byte is exactly
-//! one of them.
+//! The three classes of byte (ISO 32000-2, 7.2.3). Every byte is exactly
+//! one of them. PDFium's rules read 0x80 and 0xFF as white-space too
+//! ([`Rules`](crate::Rules)).
 
 /// Whether `b` is white-space: NUL, tab, line feed, form feed, carriage
 /// return or space.

@@ -16,7 +16,53 @@ Every promise below is checked on every token by the tests, a fuzz target, and t
 - **No grammar.** `obj`, `R`, `stream`, `xref`, `trailer`, `true` and `null` are keywords like any other, and `3 0 R` is three tokens with spaces between them. Joining tokens into references, objects or cross-reference sections is the next layer's work.
 - **No allocation, no I/O.** It needs only `core`, so whatever an untrusted file holds, tokenizing and decoding it can't allocate memory or touch the system; its one dependency, thiserror, which derives its error type's traits, is built without `std`. CI checks this by building it against `core` alone (`-Z build-std=core`), for a target with neither `std` nor `alloc`. A value's bytes come as an iterator, to collect however you like, or borrowed as written when there's nothing to decode.
 
-It follows the lexical conventions of ISO 32000-2 (§7.2): its white-space characters, its delimiters, and its regular characters. A run of regular characters is a number only when it's written as one, so `1e5` and `--5` are keywords.
+## ISO 32000-2's rules, or PDFium's
+
+By default it follows the lexical conventions of ISO 32000-2 (§7.2, §7.3): its white-space characters, its delimiters, and its regular characters. A run of regular characters is a number only when it's written as one, so `1e5` and `--5` are keywords.
+
+A reader that means to see what PDFium sees can have PDFium's rules instead, from any offset. They part from ISO 32000-2's in three places, and every promise above holds under either:
+
+- **Numbers.** A run of regular characters that are all digits, signs and points is a number to PDFium: `--5`, `5-3` and `+` are integers, and `1.2.3` and `.` reals. `1e5` is a keyword under both.
+- **Hexadecimal strings.** PDFium's runs from `<` to the next `>` over any byte, where ISO 32000-2's (§7.3.4.3) ends before a byte that's neither a hex digit nor white-space.
+- **White-space.** PDFium reads 0x80 and 0xFF as white-space too, so either ends a name or a word.
+
+```rust
+use pdf_tokenizer::{Kind, Rules, Tokenizer};
+
+let input = b"--5 1.2.3 cm <4G1> Tj";
+let kinds = |rules| -> Vec<Kind> {
+    Tokenizer::new(input)
+        .with_rules(rules)
+        .map(|t| t.kind)
+        .filter(|&k| k != Kind::Space)
+        .collect()
+};
+assert_eq!(kinds(Rules::Iso), [
+    Kind::Keyword,
+    Kind::Keyword,
+    Kind::Keyword,
+    Kind::HexString { closed: false },
+    Kind::Keyword,
+    Kind::Junk,
+    Kind::Keyword,
+]);
+assert_eq!(kinds(Rules::Pdfium), [
+    Kind::Integer,
+    Kind::Real,
+    Kind::Keyword,
+    Kind::HexString { closed: true },
+    Kind::Keyword,
+]);
+```
+
+A `Rules` value, as above, chooses the rules as the tokenizer runs, for a reader that learns only then which it wants, at a branch a token. `Iso` and `Pdfium` fix them in the tokenizer's type instead, with nothing to choose at each token: `Tokenizer<'a>` is `Tokenizer<'a, Iso>`, what `new` and `at` give, and `with_rules(Pdfium)` gives a `Tokenizer<'a, Pdfium>`. The tokens are the same either way.
+
+```rust
+use pdf_tokenizer::{Kind, Pdfium, Tokenizer};
+
+let mut tokens = Tokenizer::new(b"--5 cm").with_rules(Pdfium);
+assert_eq!(tokens.next().map(|t| t.kind), Some(Kind::Integer));
+```
 
 ## An example
 
@@ -108,6 +154,17 @@ Where ISO 32000-2 leaves a choice, or a reader departs from it, the decoder stil
 
 Numbers decode too. `integer()` gives an `i64`, or `Overflow` outside it, where qpdf reads the whole object holding the integer as null. `number()` gives an `f64` for an integer or a real, and `1e5` and `inf` aren't numbers.
 
+The pieces and numbers are ISO 32000-2's reading of a token, whatever rules read it. `decode::pdfium` reads the same bytes as PDFium does, values only: a number as PDFium holds one (an unsigned or signed 32-bit integer, 0 past it, or an `f32`: `--5` is 0, `1.2.3` is 1.2), a name's `#` before any two bytes as an escape, a literal string's unescaped CR as written, and a hex string's digits paired over any other byte.
+
+```rust
+use pdf_tokenizer::decode::pdfium::{self, Number};
+
+assert_eq!(pdfium::number(b"4294967296"), Number::Unsigned(0));
+assert_eq!(pdfium::number(b"+-.5").float(), -0.5);
+assert!(pdfium::name(b"/F#3G").eq(*b"F0"));
+assert!(pdfium::hex(b"<41 G 42>").eq(*b"AB"));
+```
+
 Text strings (PDFDocEncoding, and UTF-16BE or UTF-8 with a byte-order mark) are a level up: whether a string is text depends on the key it's under.
 
 ## What it's for
@@ -126,12 +183,14 @@ Text strings (PDFDocEncoding, and UTF-16BE or UTF-8 with a byte-order mark) are 
 
 ## The API
 
-- `Tokenizer::new(bytes)` and `Tokenizer::at(bytes, offset)`: an iterator of `Token`s. Cloning one is cheap, so a clone can look ahead.
+- `Tokenizer::new(bytes)` and `Tokenizer::at(bytes, offset)`: an iterator of `Token`s, by ISO 32000-2's rules. Cloning one is cheap, so a clone can look ahead.
+- `with_rules(Pdfium)` or `with_rules(Rules::Pdfium)`, and `rules()`: the rules it follows from its next token on, fixed in its type (`Iso`, the default, or `Pdfium`) or chosen as it runs (`Rules`). `Rules::is_white_space` and `is_regular` say a byte's class under each.
 - `Token { kind, start, bytes }`: `bytes` is a slice of the input, and `range()` says where it is.
 - `Kind`: the lexical kinds, and `Data` for bytes the caller measured.
 - `eol()`, `space_byte()`, `data(len)` and `data_until(marker)`: for the data after `stream` and `ID`.
 - `is_white_space`, `is_delimiter` and `is_regular`: ISO 32000-2's three classes of byte.
 - `token.pieces()`, `token.verbatim()`, `token.integer()` and `token.number()`: what a token stands for. A value's bytes are `pieces().bytes()`, never longer than the token, and `verbatim()` borrows them as written when nothing needs decoding. `decode::name`, `literal`, `hex`, `integer` and `number` decode bytes from elsewhere.
+- `decode::pdfium::number`, `real`, `name`, `literal` and `hex`: what bytes stand for as PDFium reads them.
 
 ## License
 

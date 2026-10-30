@@ -6,11 +6,12 @@
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
-# `tokenize` calls `pdf_tokenizer::fuzz::tokenize`, which a stable unit test
-# (`random_inputs_keep_every_promise`) runs too; `filters` calls
-# `pdf_filters::fuzz::filters` on each backend, which two stable unit tests
-# run on random and damaged inputs, and `pdf_filters::fuzz::encoders`, which
-# a third runs; `crypt` calls
+# `tokenize` calls `pdf_tokenizer::fuzz::tokenize`, the tokenizer and its
+# decoders under ISO 32000-2's rules and PDFium's and the two side by side,
+# which a stable unit test (`random_inputs_keep_every_promise`) runs too;
+# `filters` calls `pdf_filters::fuzz::filters` on each backend, which two
+# stable unit tests run on random and damaged inputs, and
+# `pdf_filters::fuzz::encoders`, which a third runs; `crypt` calls
 # `pdf_crypt::fuzz::handler`, on any dictionary and on new files'
 # dictionaries, and `pdf_crypt::fuzz::password`, which three stable unit
 # tests run, one on new files'; `objects`

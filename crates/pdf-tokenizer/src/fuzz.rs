@@ -1,16 +1,19 @@
 //! What the fuzz target checks, which the unit tests check too: every
-//! promise the tokenizer and the decoders make, on any input. It's compiled
-//! only for tests and under cargo-fuzz's `--cfg fuzzing`.
+//! promise the tokenizer and the decoders make, on any input, under each
+//! set of rules, the two sets side by side, and each chosen as the
+//! tokenizer runs against the same fixed in its type. It's compiled only
+//! for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use core::str::from_utf8;
 
+use crate::decode::pdfium::{self, Number};
 use crate::decode::{How, NumberError};
-use crate::{Kind, Token, Tokenizer, is_regular, is_white_space};
+use crate::{Iso, Kind, Pdfium, RuleSet, Rules, Token, Tokenizer, is_white_space};
 
 /// The fuzz target's body: [`walk`]s the input after `data`'s first two
 /// bytes, from an offset those bytes choose, and checks it cut short
 /// ([`prefix`]), from that offset, where the same bytes read the other way
-/// round choose.
+/// round choose: each under both sets of rules, and the two side by side.
 pub fn tokenize(data: &[u8]) {
     let (offset, cut, input) = match data {
         [a, b, input @ ..] => {
@@ -25,19 +28,25 @@ pub fn tokenize(data: &[u8]) {
     prefix(input, offset, cut);
 }
 
-/// Checks the tokens of `input[..cut]` from `offset` against the whole
-/// input's, in lockstep, taking each stream's data as [`walk`] does: each
-/// that ends before the cut is the whole input's token at the same place,
-/// its kind and bytes; the last reaches the cut, starting where the whole
-/// input's token does; and none comes after it. Only a token that reaches
-/// the end of a slice can come out otherwise with more bytes after it.
-/// The cut is taken no nearer than `offset`, and no further than the
-/// input's end. Panics on a broken promise.
+/// [`prefix_with`] under each set of rules, fixed in the tokenizer's type.
 pub fn prefix(input: &[u8], offset: usize, cut: usize) {
+    prefix_with(input, offset, cut, Iso);
+    prefix_with(input, offset, cut, Pdfium);
+}
+
+/// Checks the tokens of `input[..cut]` from `offset` against the whole
+/// input's, in lockstep, under `rules`, taking each stream's data as
+/// [`walk`] does: each that ends before the cut is the whole input's token
+/// at the same place, its kind and bytes; the last reaches the cut,
+/// starting where the whole input's token does; and none comes after it.
+/// Only a token that reaches the end of a slice can come out otherwise with
+/// more bytes after it. The cut is taken no nearer than `offset`, and no
+/// further than the input's end. Panics on a broken promise.
+pub fn prefix_with<R: RuleSet>(input: &[u8], offset: usize, cut: usize, rules: R) {
     let offset = offset.min(input.len());
     let cut = cut.clamp(offset, input.len());
-    let mut part = Tokenizer::at(&input[..cut], offset);
-    let mut whole = Tokenizer::at(input, offset);
+    let mut part = Tokenizer::at(&input[..cut], offset).with_rules(rules);
+    let mut whole = Tokenizer::at(input, offset).with_rules(rules);
     // Whether the slice goes on after `token`, checked against `full`, the
     // whole input's token at the same point.
     let settled = |token: Token<'_>, full: Option<Token<'_>>| {
@@ -70,36 +79,66 @@ pub fn prefix(input: &[u8], offset: usize, cut: usize) {
     assert_eq!(part.next(), None, "nothing after the last");
 }
 
-/// Tokenizes `input` from `offset` to its end, taking each stream's data as
-/// a reader might (an end of line, then up to `endstream`), and checks
-/// every token. Returns how many tokens there were. Panics on a broken
-/// promise.
+/// [`walk_with`] under each set of rules, fixed in the tokenizer's type,
+/// then [`side_by_side`] and [`chosen_as_fixed`]. Returns how many tokens
+/// there were by ISO 32000-2's rules.
 pub fn walk(input: &[u8], offset: usize) -> usize {
-    let mut tokenizer = Tokenizer::at(input, offset);
+    let count = walk_with(input, offset, Iso);
+    walk_with(input, offset, Pdfium);
+    side_by_side(input, offset);
+    chosen_as_fixed(input, offset);
+    count
+}
+
+/// Checks that each set of rules, chosen as the tokenizer runs (a
+/// [`Rules`] value), gives the tokens of `input` from `offset` that the
+/// same rules fixed in its type give.
+pub fn chosen_as_fixed(input: &[u8], offset: usize) {
+    let iso = Tokenizer::at(input, offset);
+    let chosen = iso.clone().with_rules(Rules::Iso);
+    assert_eq!((iso.rules(), chosen.rules()), (Rules::Iso, Rules::Iso));
+    assert!(iso.eq(chosen), "ISO 32000-2's rules, fixed or chosen");
+    let pdfium = Tokenizer::at(input, offset).with_rules(Pdfium);
+    let chosen = pdfium.clone().with_rules(Rules::Pdfium);
+    assert_eq!(
+        (pdfium.rules(), chosen.rules()),
+        (Rules::Pdfium, Rules::Pdfium)
+    );
+    assert!(pdfium.eq(chosen), "PDFium's rules, fixed or chosen");
+}
+
+/// Tokenizes `input` from `offset` to its end under the rules `set`,
+/// taking each stream's data as a reader might (an end of line, then up
+/// to `endstream`), and checks every token. Returns how many tokens there
+/// were. Panics on a broken promise.
+pub fn walk_with<R: RuleSet>(input: &[u8], offset: usize, set: R) -> usize {
+    let mut tokenizer = Tokenizer::at(input, offset).with_rules(set);
+    let rules = set.rules();
+    assert_eq!(tokenizer.rules(), rules);
     let mut at = offset.min(input.len());
     let mut count = 0;
     while let Some(token) = tokenizer.next() {
-        check(input, &token, at);
-        let again = Tokenizer::at(input, token.start).next();
+        check_with(input, &token, at, rules);
+        let again = Tokenizer::at(input, token.start).with_rules(set).next();
         assert_eq!(again, Some(token), "started at a token, it yields it");
         if token.kind == Kind::Space {
             let next = input.get(token.end()).copied();
             assert!(
-                !next.is_some_and(is_white_space),
+                !next.is_some_and(|b| rules.is_white_space(b)),
                 "a run of white-space is one token"
             );
         }
-        check_decoding(input, &token);
+        check_decoding_with(input, &token, rules);
         at = token.end();
         count += 1;
         if token.kind == Kind::Keyword && token.bytes == b"stream" {
             if let Some(eol) = tokenizer.eol() {
-                check(input, &eol, at);
+                check_with(input, &eol, at, rules);
                 at = eol.end();
                 count += 1;
             }
             let data = tokenizer.data_until(b"endstream");
-            check(input, &data, at);
+            check_with(input, &data, at, rules);
             let marker = &b"endstream"[..];
             assert!(!data.bytes.windows(marker.len()).any(|w| w == marker));
             let after = input.get(data.end()..).unwrap_or_default();
@@ -112,9 +151,14 @@ pub fn walk(input: &[u8], offset: usize) -> usize {
     count
 }
 
-/// Checks that `token` starts at `at`, is the input's bytes there, and
-/// keeps its kind's promises.
+/// [`check_with`] under ISO 32000-2's rules.
 pub fn check(input: &[u8], token: &Token<'_>, at: usize) {
+    check_with(input, token, at, Rules::Iso);
+}
+
+/// Checks that `token`, read under `rules`, starts at `at`, is the input's
+/// bytes there, and keeps its kind's promises.
+pub fn check_with(input: &[u8], token: &Token<'_>, at: usize, rules: Rules) {
     assert_eq!(token.start, at, "tokens join with no gap or overlap");
     assert_eq!(input.get(token.range()), Some(token.bytes));
     let bytes = token.bytes;
@@ -122,9 +166,10 @@ pub fn check(input: &[u8], token: &Token<'_>, at: usize) {
     if token.kind != Kind::Data {
         assert!(!bytes.is_empty(), "only data can be empty");
     }
-    let maximal = !next.is_some_and(is_regular);
+    let regular = |b| rules.is_regular(b);
+    let maximal = !next.is_some_and(regular);
     match token.kind {
-        Kind::Space => assert!(bytes.iter().all(|&b| is_white_space(b))),
+        Kind::Space => assert!(bytes.iter().all(|&b| rules.is_white_space(b))),
         Kind::Comment => {
             assert_eq!(bytes[0], b'%');
             assert!(!bytes.iter().any(|&b| b == b'\r' || b == b'\n'));
@@ -132,13 +177,17 @@ pub fn check(input: &[u8], token: &Token<'_>, at: usize) {
         }
         Kind::Name => {
             assert_eq!(bytes[0], b'/');
-            assert!(bytes[1..].iter().all(|&b| is_regular(b)));
+            assert!(bytes[1..].iter().all(|&b| regular(b)));
             assert!(maximal);
         }
         Kind::Integer | Kind::Real | Kind::Keyword => {
-            assert!(bytes.iter().all(|&b| is_regular(b)));
+            assert!(bytes.iter().all(|&b| regular(b)));
             assert!(maximal);
-            assert_eq!(token.kind, number(bytes).unwrap_or(Kind::Keyword));
+            let kind = match rules {
+                Rules::Iso => number(bytes),
+                Rules::Pdfium => pdfium_word(bytes),
+            };
+            assert_eq!(token.kind, kind.unwrap_or(Kind::Keyword));
         }
         Kind::String { closed } => {
             assert_eq!(bytes[0], b'(');
@@ -153,11 +202,17 @@ pub fn check(input: &[u8], token: &Token<'_>, at: usize) {
             let inside = if closed {
                 assert_eq!(bytes.last(), Some(&b'>'));
                 &bytes[1..bytes.len() - 1]
+            } else if rules == Rules::Pdfium {
+                assert_eq!(token.end(), input.len(), "unclosed only at the end");
+                &bytes[1..]
             } else {
                 assert!(!next.is_some_and(|b| hex_or_space(b) || b == b'>'));
                 &bytes[1..]
             };
-            assert!(inside.iter().all(|&b| hex_or_space(b)));
+            match rules {
+                Rules::Iso => assert!(inside.iter().all(|&b| hex_or_space(b))),
+                Rules::Pdfium => assert!(!inside.contains(&b'>'), "to its first `>`"),
+            }
         }
         Kind::ArrayOpen => assert_eq!(bytes, b"["),
         Kind::ArrayClose => assert_eq!(bytes, b"]"),
@@ -170,19 +225,38 @@ pub fn check(input: &[u8], token: &Token<'_>, at: usize) {
     }
 }
 
-/// Checks what a token decodes to, read apart from the decoder: a name's
-/// or string's pieces join into it, and each stands for what its own bytes
-/// say; an integer is the one its digits say.
+/// [`check_decoding_with`] under ISO 32000-2's rules.
 pub fn check_decoding(input: &[u8], token: &Token<'_>) {
+    check_decoding_with(input, token, Rules::Iso);
+}
+
+/// Checks what a token read under `rules` decodes to, read apart from the
+/// decoder: a name's or string's pieces join into it, and each stands for
+/// what its own bytes say; an integer is the one its digits say. The
+/// pieces and numbers are ISO 32000-2's reading, so a number word only
+/// PDFium's rules make one, such as `--5`, isn't a number to them. And
+/// PDFium's readings, on every token whatever its rules: a number's as
+/// PDFium's digits say, a name's and a string's bytes as their pieces or
+/// their own bytes say.
+pub fn check_decoding_with(input: &[u8], token: &Token<'_>, rules: Rules) {
+    let iso_number = number(token.bytes) == Some(token.kind);
     match token.kind {
+        Kind::Integer | Kind::Real if rules == Rules::Pdfium && !iso_number => {
+            assert_eq!(token.integer(), Err(NumberError::NotANumber));
+            assert_eq!(token.number(), Err(NumberError::NotANumber));
+        }
         Kind::Integer => check_integer(token),
         Kind::Real => check_number(token),
-        Kind::Name | Kind::String { .. } | Kind::HexString { .. } => check_pieces(input, token),
+        Kind::Name | Kind::String { .. } | Kind::HexString { .. } => {
+            check_pieces(input, token, rules);
+            check_pdfium_bytes(input, token);
+        }
         _ => {
             assert!(token.pieces().is_none());
             assert_eq!(token.number(), Err(NumberError::NotANumber));
         }
     }
+    check_pdfium_number(token.bytes);
 }
 
 fn check_integer(token: &Token<'_>) {
@@ -222,7 +296,149 @@ fn check_number(token: &Token<'_>) {
     }
 }
 
-fn check_pieces(input: &[u8], token: &Token<'_>) {
+/// Checks PDFium's reading of a number against its digits, read apart:
+/// a word without a point is an integer of 32 bits, unsigned unless it
+/// starts with a sign, and 0 past its range; one with a point is the
+/// decimal it starts with, negative after a minus, a finite `f32` when
+/// that has 38 digits or fewer before its point and too large for one
+/// when it has 40 or more (`f32::MAX` is about 3.4e38), and so at 64 bits
+/// for 308 and 310. Any bytes are read, never panicking.
+fn check_pdfium_number(bytes: &[u8]) {
+    let read = pdfium::number(bytes);
+    let (float, integer, real) = (read.float(), read.integer(), pdfium::real(bytes));
+    assert!(!float.is_nan() && !real.is_nan());
+    if bytes.contains(&b'.') {
+        let Number::Real(value) = read else {
+            panic!("a word with a point is a real: {read:?}");
+        };
+        // The decimal: past the signs and spaces, but for a minus right
+        // before the rest; then a minus, digits, a point and digits.
+        let signs = bytes.iter().take_while(|b| b" +-".contains(b)).count();
+        let minus = signs > 0 && bytes[signs - 1] == b'-';
+        let rest = &bytes[signs..];
+        let whole = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        let fraction = match rest.get(whole) {
+            Some(b'.') => rest[whole + 1..]
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .count(),
+            _ => 0,
+        };
+        if whole + fraction == 0 {
+            assert_eq!((value, real), (0.0, 0.0), "no digit, no number");
+            return;
+        }
+        assert_eq!(
+            value < 0.0 || real < 0.0,
+            minus && (value != 0.0 || real != 0.0)
+        );
+        let significant = rest[..whole].iter().skip_while(|&&b| b == b'0').count();
+        if significant <= 38 {
+            assert!(value.is_finite(), "{value} from {significant} digits");
+        } else if significant >= 40 {
+            assert!(value.is_infinite(), "{value} from {significant} digits");
+        }
+        if significant <= 308 {
+            assert!(real.is_finite());
+        } else if significant >= 310 {
+            assert!(real.is_infinite());
+        }
+        assert_eq!(float, value);
+        assert_eq!(integer, value as i32);
+        return;
+    }
+    let (sign, digits) = match bytes {
+        [b'-', digits @ ..] => (Some(-1i128), digits),
+        [b'+', digits @ ..] => (Some(1), digits),
+        digits => (None, digits),
+    };
+    let mut value = Some(0i128);
+    for &d in digits.iter().take_while(|b| b.is_ascii_digit()) {
+        value = value
+            .map(|v| v * 10 + i128::from(d - b'0'))
+            .filter(|&v| v <= i128::from(u32::MAX));
+    }
+    let value = value.unwrap_or(0);
+    let meant = match sign {
+        None => Number::Unsigned(u32::try_from(value).unwrap()),
+        Some(sign) => Number::Signed(i32::try_from(sign * value).unwrap_or(0)),
+    };
+    assert_eq!(read, meant, "{bytes:?}");
+    match read {
+        Number::Unsigned(n) => assert_eq!((float, integer), (n as f32, n as i32)),
+        Number::Signed(n) => assert_eq!((float, integer), (n as f32, n)),
+        Number::Real(_) => unreachable!(),
+    }
+}
+
+/// Checks PDFium's reading of a name's or a string's bytes. A literal
+/// string's is its pieces' bytes, but each unescaped CR or CR LF as
+/// written, and an octal escape of one or two digits that an unclosed
+/// string ends on as nothing. A name's and a hex string's are read apart
+/// from their bytes: a name's `#` with two bytes after it stands for them
+/// as hex digits, and a hex string's digits pair up to its `>`. None is
+/// ever longer than its token.
+fn check_pdfium_bytes(input: &[u8], token: &Token<'_>) {
+    let bytes = token.bytes;
+    let digit = |b: u8| match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0,
+    };
+    match token.kind {
+        Kind::Name => {
+            let body = &bytes[1..];
+            let mut i = 0;
+            let meant = core::iter::from_fn(|| {
+                let &b = body.get(i)?;
+                if b == b'#' && i + 2 < body.len() {
+                    i += 3;
+                    return Some(digit(body[i - 2]) * 16 + digit(body[i - 1]));
+                }
+                i += 1;
+                Some(b)
+            });
+            assert!(pdfium::name(bytes).eq(meant), "{bytes:?}");
+        }
+        Kind::String { closed } => {
+            let pieces = token.pieces().expect("strings have pieces");
+            let meant = pieces.flat_map(|piece| {
+                let written = &input[piece.at.clone()];
+                let short_octal = written.len() <= 3
+                    && written[0] == b'\\'
+                    && written[1..].iter().all(|b| (b'0'..=b'7').contains(b))
+                    && written.len() > 1;
+                let dropped = !closed && piece.at.end == token.end() && short_octal;
+                let (run, byte) = match piece.how {
+                    How::EolAsLf => (written, None),
+                    _ if dropped => (&[][..], None),
+                    _ => (&[][..], piece.byte),
+                };
+                run.iter().copied().chain(byte)
+            });
+            assert!(pdfium::literal(bytes).eq(meant), "{bytes:?}");
+        }
+        Kind::HexString { .. } => {
+            let inside = bytes[1..].split(|&b| b == b'>').next().unwrap_or_default();
+            let mut digits = inside.iter().copied().filter(u8::is_ascii_hexdigit);
+            let meant = core::iter::from_fn(|| {
+                let high = digit(digits.next()?);
+                Some(high * 16 + digits.next().map_or(0, digit))
+            });
+            assert!(pdfium::hex(bytes).eq(meant), "{bytes:?}");
+        }
+        _ => unreachable!("only names and strings"),
+    }
+    let longest = match token.kind {
+        Kind::Name => pdfium::name(bytes).count(),
+        Kind::String { .. } => pdfium::literal(bytes).count(),
+        _ => pdfium::hex(bytes).count(),
+    };
+    assert!(longest < bytes.len(), "never longer than its token");
+}
+
+fn check_pieces(input: &[u8], token: &Token<'_>, rules: Rules) {
     let pieces = token.pieces().expect("names and strings have pieces");
     let total = pieces.clone().count();
     let closed = matches!(
@@ -239,6 +455,13 @@ fn check_pieces(input: &[u8], token: &Token<'_>) {
         let after = input.get(piece.at.end..token.end()).unwrap_or_default();
         let byte = piece.byte;
         match (token.kind, piece.how) {
+            // A hex string by PDFium's rules runs over bytes ISO 32000-2's
+            // can't hold.
+            (Kind::HexString { .. }, How::Invalid) if rules == Rules::Pdfium => {
+                assert!(written.len() == 1 && !hex_or_space(written[0]));
+                assert_ne!(written[0], b'>');
+                assert_eq!(byte, None);
+            }
             (_, How::Invalid) => panic!("a token has no invalid bytes: {written:?}"),
             (_, How::Delimiter) => {
                 let opening = i == 0 && matches!(written, b"/" | b"(" | b"<");
@@ -332,8 +555,12 @@ fn check_pieces(input: &[u8], token: &Token<'_>) {
             (Kind::HexString { .. }, How::OddDigit) => {
                 assert!(written.len() == 1 && written[0].is_ascii_hexdigit());
                 let next = after.iter().find(|&&b| !is_white_space(b));
+                // By PDFium's rules, a byte ISO 32000-2's can't hold may
+                // come before the next digit, as in `<4G1>`.
+                let invalid =
+                    rules == Rules::Pdfium && next.is_some_and(|b| !b.is_ascii_hexdigit());
                 assert!(
-                    matches!(next, None | Some(b'>')),
+                    matches!(next, None | Some(b'>')) || invalid,
                     "only the last digit is odd"
                 );
                 let value = u8::from_str_radix(from_utf8(written).unwrap(), 16).unwrap();
@@ -364,6 +591,71 @@ fn check_verbatim(token: &Token<'_>) {
         }
         None => assert!(!plain, "decoded only when there's something to decode"),
     }
+}
+
+/// Checks PDFium's tokens against ISO 32000-2's from the same places: at
+/// each token PDFium's rules read from `offset`, ISO's rules give the same
+/// token, but where the two part. A number word ISO's rules don't write as
+/// one is a keyword to them, the same bytes. A hex string with a byte
+/// that's neither a hex digit nor white-space before its `>` ends, to ISO's
+/// rules, before that byte, unclosed. And 0x80 and 0xFF, white-space to
+/// PDFium alone: ISO's white-space stops before one, which starts a
+/// keyword, and a name or a word before one runs on over it.
+pub fn side_by_side(input: &[u8], offset: usize) {
+    let high = |b: u8| matches!(b, 0x80 | 0xFF);
+    for token in Tokenizer::at(input, offset).with_rules(Pdfium) {
+        let iso = Tokenizer::at(input, token.start).next();
+        let iso = iso.expect("a token where PDFium's starts");
+        assert_eq!(iso.start, token.start);
+        let after = input.get(token.end()).copied();
+        match token.kind {
+            Kind::HexString { .. } if iso.bytes != token.bytes => {
+                assert_eq!(iso.kind, Kind::HexString { closed: false });
+                assert!(token.bytes.starts_with(iso.bytes));
+                let stop = token.bytes[iso.bytes.len()];
+                assert!(!hex_or_space(stop) && stop != b'>', "{stop:#x}");
+            }
+            Kind::Space if token.bytes.iter().any(|&b| high(b)) => {
+                let lead = token.bytes.iter().take_while(|&&b| is_white_space(b));
+                match lead.count() {
+                    0 => assert_eq!((iso.kind, iso.bytes[0]), (Kind::Keyword, token.bytes[0])),
+                    lead => assert_eq!((iso.kind, iso.bytes), (Kind::Space, &token.bytes[..lead])),
+                }
+            }
+            Kind::Name | Kind::Integer | Kind::Real | Kind::Keyword if after.is_some_and(high) => {
+                assert!(iso.bytes.len() > token.bytes.len());
+                assert!(iso.bytes.starts_with(token.bytes));
+                assert_eq!(iso.kind == Kind::Name, token.kind == Kind::Name);
+            }
+            _ => {
+                assert_eq!(
+                    iso.bytes, token.bytes,
+                    "the same token but where the rules part"
+                );
+                let number = matches!(token.kind, Kind::Integer | Kind::Real);
+                assert!(
+                    iso.kind == token.kind || (number && iso.kind == Kind::Keyword),
+                    "{:?} by PDFium's rules, {:?} by ISO's",
+                    token.kind,
+                    iso.kind
+                );
+            }
+        }
+    }
+}
+
+/// PDFium's numbers, written out apart from the tokenizer's own reading of
+/// them: digits, signs and points, and a point makes a real.
+fn pdfium_word(bytes: &[u8]) -> Option<Kind> {
+    let numeric = |b: &u8| b.is_ascii_digit() || b"+-.".contains(b);
+    if bytes.is_empty() || !bytes.iter().all(numeric) {
+        return None;
+    }
+    Some(if bytes.contains(&b'.') {
+        Kind::Real
+    } else {
+        Kind::Integer
+    })
 }
 
 /// ISO 32000-2's numbers, written out apart from the tokenizer's own
