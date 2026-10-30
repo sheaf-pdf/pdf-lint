@@ -100,8 +100,9 @@ pub enum Fault<'a> {
         written: &'a [u8],
     },
     /// A number ISO 32000-2 reads as its value, past what's read here: an
-    /// integer outside 64 bits, read as no object, or a real too large for
-    /// a 64-bit float, read as infinite. ISO converts the number written to
+    /// integer outside 64 bits, read as the nearest that fits, or a real
+    /// too large for a 64-bit float, read as the largest finite one of its
+    /// sign, as pdf-objects reads them. ISO converts the number written to
     /// its value ("shall"), the range left to the processor (7.3.3, Annex
     /// C).
     #[error("{} is past the numbers read here", shown(.written))]

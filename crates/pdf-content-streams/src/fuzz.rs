@@ -397,8 +397,8 @@ pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
 /// dictionary, whose faults are its token's, has none told here.
 fn faulted_operand(s: &[u8], operand: &Operand, limits: &Limits) {
     let mut kept = Kept::default();
-    let read = operand.object_with(limits.depth, &mut kept);
-    assert_eq!(read, operand.object(limits.depth), "the same object");
+    let read = operand.object_with(limits, &mut kept);
+    assert_eq!(read, operand.object(limits), "the same object");
     let r = operand.range();
     for (at, _) in &kept.0 {
         assert!(r.start <= at.start && at.end <= r.end, "{at:?} in {r:?}");
@@ -408,7 +408,7 @@ fn faulted_operand(s: &[u8], operand: &Operand, limits: &Limits) {
         assert!(kept.0.is_empty(), "a token's own faults are the tokens'");
     }
     let mut unwanted = Unwanted::default();
-    operand.object_with(limits.depth, &mut unwanted);
+    operand.object_with(limits, &mut unwanted);
     assert!(unwanted.0.is_empty(), "none told where none is wanted");
 }
 
@@ -679,9 +679,12 @@ fn operand(s: &[u8], operand: &Operand, limits: &Limits) {
         at = e.end;
     }
     assert!(blank(&s[at..r.end - 1]), "only white-space after");
-    if let Some(Value::Array(read)) = operand.object(limits.depth).map(Object::into_value) {
-        let depth = limits.depth.saturating_sub(1);
-        let each: Vec<Object> = elements.iter().filter_map(|e| e.object(depth)).collect();
+    if let Some(Value::Array(read)) = operand.object(limits).map(Object::into_value) {
+        let inside = Limits {
+            depth: limits.depth.saturating_sub(1),
+            ..*limits
+        };
+        let each: Vec<Object> = elements.iter().filter_map(|e| e.object(&inside)).collect();
         assert_eq!(each, read, "the elements read as the array's");
     }
 }
@@ -743,7 +746,7 @@ fn tiled<'a>(content: &'a Concat, res: &ResCx, limits: &Limits) -> Read<'a> {
 /// An operand read as an object: as the array, dictionary or string it
 /// starts as one, and as the name it is, decoded.
 fn operand_reads(operand: &[u8], limits: &Limits) {
-    let read = object(operand, limits.depth).map(|o| o.into_value());
+    let read = object(operand, limits).map(|o| o.into_value());
     match operand.first() {
         Some(b'[') => assert!(matches!(read, Some(Value::Array(_))), "an array reads"),
         Some(b'<') if operand.starts_with(b"<<") => {

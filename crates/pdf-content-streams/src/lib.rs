@@ -41,7 +41,8 @@
 //! - **Caps** ([`Limits`]) **and errors that say where** ([`Error`]): a
 //!   string, array, dictionary or inline image that doesn't end, or one
 //!   past a cap. It never panics, whatever the bytes, and every token moves
-//!   it on.
+//!   it on; reading an operand nests on the stack, so a cap on depth
+//!   raised far past its default needs a stack to match.
 //! - **Where ISO 32000-2 reads it otherwise** ([`fault`]): each place its
 //!   rules would read the bytes another way than PDFium's, told with where
 //!   it is to a sink the caller gives ([`Tokens::with_sink`],
@@ -68,6 +69,11 @@ mod page;
 mod scan;
 mod state;
 mod tokens;
+
+/// pdf-objects, whose values operands are read as and property lists are
+/// given in: named through it, they're the version this crate is built
+/// with.
+pub use pdf_objects;
 
 pub use balance::{Balance, balance};
 pub use error::{Error, ErrorKind};

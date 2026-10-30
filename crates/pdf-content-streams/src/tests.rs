@@ -144,7 +144,7 @@ fn string(bytes: &[u8], form: Form) -> Object {
 #[test]
 fn operands_read_as_objects() {
     use Form::{Hex, Literal};
-    let o = |s: &[u8]| object(s, 8);
+    let o = |s: &[u8]| object(s, &deep(8));
     assert_eq!(o(b"12"), Some(Object::from(12)));
     assert_eq!(o(b"-.5"), Some(Object::from(-0.5)));
     assert_eq!(o(b"72."), Some(Object::from(72.0)));
@@ -183,13 +183,63 @@ fn operands_read_as_objects() {
             Object::from(dict! { "A" => 2 }),
         ]))
     );
-    assert_eq!(object(b"[[[1]]]", 2), None);
-    assert!(object(b"[[1]]", 2).is_some());
+    assert_eq!(object(b"[[[1]]]", &deep(2)), None);
+    assert!(object(b"[[1]]", &deep(2)).is_some());
     assert_eq!(o(b"[1 (2"), None);
 }
 
 /// An operand nested 500 deep around 8 MiB is read in one pass, not once
 /// for each level it's inside.
+/// A number past 64 bits reads as pdf-objects reads one, the nearest
+/// integer that fits or the largest finite real of its sign, so an array
+/// holding one keeps its place, and a real read writes; and an operand of
+/// more values than the cap reads as none.
+#[test]
+fn operands_read_as_pdf_objects_reads_them() {
+    let lim = &Limits::DEFAULT;
+    let integer = |s: &[u8]| object(s, lim).and_then(|o| o.as_integer());
+    assert_eq!(integer(b"99999999999999999999"), Some(i64::MAX));
+    assert_eq!(integer(b"-99999999999999999999"), Some(i64::MIN));
+    assert_eq!(integer(b"9223372036854775807"), Some(i64::MAX));
+    assert_eq!(integer(b"+-1"), None);
+    let huge = format!("1{}.0", "0".repeat(400));
+    let real = |s: &[u8]| object(s, lim).and_then(|o| o.as_number());
+    assert_eq!(real(huge.as_bytes()), Some(f64::MAX));
+    assert_eq!(real(format!("-{huge}").as_bytes()), Some(f64::MIN));
+    let mut written = Vec::new();
+    pdf_objects::serialize::real(&mut written, real(huge.as_bytes()).unwrap()).unwrap();
+    let read = object(b"[1 99999999999999999999 3]", lim).unwrap();
+    let items: Vec<_> = read
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o.as_integer())
+        .collect();
+    assert_eq!(items, [Some(1), Some(i64::MAX), Some(3)]);
+
+    // Values: the operand, an array's elements, a dictionary's keys and
+    // values, and theirs, what's no object among them.
+    let values = |values| Limits { values, ..*lim };
+    assert!(object(b"[[] [] []]", &values(4)).is_some());
+    assert_eq!(object(b"[[] [] []]", &values(3)), None);
+    assert!(object(b"<</A [1]>>", &values(4)).is_some());
+    assert_eq!(object(b"<</A [1]>>", &values(3)), None);
+    assert_eq!(object(b"1", &values(0)), None);
+    // A list of many empty arrays, past the cap, read as none.
+    let wide = [
+        b"/Span <<".as_slice(),
+        &b"[]".repeat(1 << 17),
+        b">> BDC EMC",
+    ]
+    .concat();
+    let props = Properties::default();
+    let small = values(1 << 16);
+    let found = marked(&Concat::new(&[&wide]), &props, &ResCx::none(), &small).unwrap();
+    assert_eq!(found[0].props, None);
+    let found = marked(&Concat::new(&[&wide]), &props, &ResCx::none(), lim).unwrap();
+    assert!(found[0].props.is_some());
+}
+
 #[test]
 fn deep_operands_read_in_one_pass() {
     let mut s = b"[".repeat(500);
@@ -198,7 +248,7 @@ fn deep_operands_read_in_one_pass() {
     s.push(b'>');
     s.extend(b"]".repeat(500));
     let started = std::time::Instant::now();
-    let mut o = object(&s, Limits::DEFAULT.depth).unwrap();
+    let mut o = object(&s, &Limits::DEFAULT).unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
     for _ in 0..500 {
         let Value::Array(mut inner) = o.into_value() else {
@@ -212,6 +262,14 @@ fn deep_operands_read_in_one_pass() {
 }
 
 /// `s`'s one inline image: where the token is, and its data.
+/// The default caps but on depth, `depth`.
+fn deep(depth: usize) -> Limits {
+    Limits {
+        depth,
+        ..Limits::DEFAULT
+    }
+}
+
 fn image<'a>(s: &'a [u8], res: &ResCx) -> (Range<usize>, &'a [u8]) {
     read(s, res, &Limits::DEFAULT)
         .into_iter()
@@ -1237,12 +1295,15 @@ fn operands_are_read_when_asked() {
     assert_eq!(kinds(&o[8]), [f; 5]);
     // A number to PDFium, though it reads as none.
     assert_eq!(kinds(&o[9]), [true, f, f, f, f]);
-    assert_eq!(o[9].object(8), None);
+    assert_eq!(o[9].object(&deep(8)), None);
     assert_eq!(o[0].name().as_deref(), Some(&b"A B"[..]));
     assert_eq!(o[1].name(), None);
-    assert_eq!(o[1].object(8), Some(Object::from(12)));
-    assert_eq!(o[5].object(8), Some(Object::from(dict! { "K" => 1 })));
-    assert_eq!(o[5].object(0), None);
+    assert_eq!(o[1].object(&deep(8)), Some(Object::from(12)));
+    assert_eq!(
+        o[5].object(&deep(8)),
+        Some(Object::from(dict! { "K" => 1 }))
+    );
+    assert_eq!(o[5].object(&deep(0)), None);
 
     // An array's elements as written, each where it is: a stray closer
     // too, which isn't an element of the object it reads as.
@@ -1256,8 +1317,8 @@ fn operands_are_read_when_asked() {
     assert_eq!(elements[1].range(), 35..40);
     let inner: Vec<_> = elements[1].elements().map(|e| e.range()).collect();
     assert_eq!(inner, [36..37, 38..39]);
-    let read: Vec<_> = elements.iter().filter_map(|e| e.object(7)).collect();
-    assert_eq!(array.object(8), Some(Object::from(read)));
+    let read: Vec<_> = elements.iter().filter_map(|e| e.object(&deep(7))).collect();
+    assert_eq!(array.object(&deep(8)), Some(Object::from(read)));
     // None for what isn't an array, and none in an empty one.
     assert_eq!(o[5].elements().count(), 0);
     assert_eq!(o[1].elements().count(), 0);
@@ -1468,8 +1529,8 @@ fn whats_inside_is_told_when_its_read() {
     let (array, dict, name) = (m.arg(2).unwrap(), m.arg(1).unwrap(), m.arg(0).unwrap());
     fn read_with(o: Operand<'_>) -> Vec<(Range<usize>, Fault<'_>)> {
         let mut kept = Kept::default();
-        let object = o.object_with(8, &mut kept);
-        assert_eq!(object, o.object(8), "the same object");
+        let object = o.object_with(&deep(8), &mut kept);
+        assert_eq!(object, o.object(&deep(8)), "the same object");
         kept.0
     }
     let w = |r: &Range<usize>| &s[r.clone()];
@@ -1989,7 +2050,7 @@ fn a_sink_that_wants_none_is_told_none() {
         .for_each(drop);
     for op in page.operations(&none, &Limits::DEFAULT) {
         for operand in op.unwrap().operands() {
-            operand.object_with(8, &mut unwanted);
+            operand.object_with(&deep(8), &mut unwanted);
         }
     }
     assert_eq!(unwanted.0, []);
@@ -2008,7 +2069,7 @@ fn a_dyn_sink_is_a_sink() {
         .with_sink(&mut *sink)
         .collect::<Result<_, _>>()
         .unwrap();
-    read[1].arg(0).unwrap().object_with(8, sink);
+    read[1].arg(0).unwrap().object_with(&deep(8), sink);
     tokens(s, &none, &Limits::DEFAULT)
         .with_sink(&mut &mut *sink)
         .for_each(drop);
@@ -2060,7 +2121,7 @@ fn no_fault_where_iso_reads_alike() {
             .unwrap();
         for op in &read {
             for operand in op.operands() {
-                operand.object_with(lim.depth, &mut kept);
+                operand.object_with(lim, &mut kept);
             }
         }
         assert_eq!(kept.0, [], "{}", String::from_utf8_lossy(s));

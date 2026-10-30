@@ -93,7 +93,7 @@ pub struct Marked<'p> {
 ///
 /// ```
 /// use pdf_content_streams::{Concat, Limits, Properties, Props, ResCx, marked};
-/// use pdf_objects::dict;
+/// use pdf_content_streams::pdf_objects::dict;
 ///
 /// let props = Properties::new([(b"P0".to_vec(), dict! { "Subtype" => "Header" })]);
 /// let page = Concat::new(&[b"/Artifact /P0 BDC q", b"/Span BMC EMC Q EMC"]);
@@ -146,7 +146,7 @@ pub fn marked<'p>(
 #[derive(Debug, Clone)]
 pub struct MarkedNest<'p> {
     props: &'p Properties,
-    depth: usize,
+    limits: Limits,
     /// Each range open: where it is in `found`, and where it starts.
     open: Vec<(usize, usize)>,
     found: Vec<Marked<'p>>,
@@ -165,11 +165,11 @@ pub enum MarkedEvent {
 impl<'p> MarkedNest<'p> {
     /// None open and none found yet, named lists to be looked up in
     /// `props`, ranges nested up to [`Limits::depth`] deep, and property
-    /// lists read up to it.
+    /// lists read under `limits`.
     pub fn new(props: &'p Properties, limits: &Limits) -> MarkedNest<'p> {
         MarkedNest {
             props,
-            depth: limits.depth,
+            limits: *limits,
             open: Vec::new(),
             found: Vec::new(),
         }
@@ -195,7 +195,7 @@ impl<'p> MarkedNest<'p> {
         if name != b"BMC" && name != b"BDC" {
             return Ok(None);
         }
-        if self.open.len() >= self.depth {
+        if self.open.len() >= self.limits.depth {
             return Err(Error {
                 at: at.start,
                 kind: ErrorKind::Depth,
@@ -226,7 +226,7 @@ impl<'p> MarkedNest<'p> {
             let list = self.props.get(&name);
             return Some(Props::Named(name.into_owned(), list));
         }
-        match operand.object(self.depth)?.into_value() {
+        match operand.object(&self.limits)?.into_value() {
             Value::Dict(dict) => Some(Props::Inline(dict)),
             _ => None,
         }

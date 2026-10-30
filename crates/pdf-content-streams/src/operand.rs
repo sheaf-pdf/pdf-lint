@@ -4,11 +4,13 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::iter::FusedIterator;
+use std::num::IntErrorKind;
 use std::ops::Range;
 
 use pdf_objects::{Dict, Form, Object, Str, Value};
 
 use crate::fault::{self, Fault, Read, Sink};
+use crate::limits::Limits;
 use crate::scan::{
     UNCAPPED, hex_string, is_number, literal_string, next_raw, skip_space, word_end,
 };
@@ -73,10 +75,11 @@ impl<'a> Operand<'a> {
         name(self.bytes)
     }
 
-    /// It read as a PDF object ([`object`]), arrays and dictionaries
-    /// nested up to `depth` deep; None for what isn't one.
-    pub fn object(&self, depth: usize) -> Option<Object> {
-        object(self.bytes, depth)
+    /// It read as a PDF object ([`object`]), under `limits`' caps on how
+    /// deep arrays and dictionaries nest and how many values it holds;
+    /// None for what isn't one.
+    pub fn object(&self, limits: &Limits) -> Option<Object> {
+        object(self.bytes, limits)
     }
 
     /// It read as [`object`](Operand::object) reads it, and where ISO
@@ -91,7 +94,7 @@ impl<'a> Operand<'a> {
     /// ```
     /// use pdf_content_streams::fault::{Fault, Sink};
     /// use pdf_content_streams::{Limits, ResCx, operations};
-    /// use pdf_objects::Object;
+    /// use pdf_content_streams::pdf_objects::Object;
     /// use std::ops::Range;
     ///
     /// #[derive(Default)]
@@ -106,7 +109,8 @@ impl<'a> Operand<'a> {
     /// let res = ResCx::none();
     /// let bdc = operations(content, &res, &Limits::DEFAULT).next().unwrap().unwrap();
     /// let mut kept = Kept::default();
-    /// let props = bdc.arg(0).unwrap().object_with(8, &mut kept).unwrap();
+    /// let props = bdc.arg(0).unwrap().object_with(&Limits::DEFAULT, &mut kept);
+    /// let props = props.unwrap();
     /// assert_eq!(props.as_dict().unwrap().get(b"MCID"), Some(&Object::from(0)));
     /// let (one, alt) = (&content[16..17], &content[18..22]);
     /// assert_eq!(
@@ -117,13 +121,18 @@ impl<'a> Operand<'a> {
     ///     ]
     /// );
     /// ```
-    pub fn object_with(&self, depth: usize, sink: &mut (impl Sink<'a> + ?Sized)) -> Option<Object> {
+    pub fn object_with(
+        &self,
+        limits: &Limits,
+        sink: &mut (impl Sink<'a> + ?Sized),
+    ) -> Option<Object> {
         let mut read = Reading {
             s: self.bytes,
             base: self.at,
+            values: limits.values,
             sink,
         };
-        match read.item(&mut 0, depth, None)? {
+        match read.item(&mut 0, limits.depth, None)? {
             Item::Value(object) => object,
             Item::Close => None,
         }
@@ -256,31 +265,42 @@ pub fn name(operand: &[u8]) -> Option<Cow<'_, [u8]>> {
 
 /// An operand as a PDF object: a name's escapes decoded, a string's
 /// escapes or hex digits read, and an array's or a dictionary's elements
-/// each read so. None for what isn't an object, such as a stray closing
-/// delimiter or a word of signs, and for one that doesn't end or nests
-/// more than `depth` deep. A dictionary keeps every entry, a key written
+/// each read so. A number past what 64 bits hold reads as pdf-objects
+/// reads one: an integer as the nearest that fits, a real as the largest
+/// finite float of its sign. None for what isn't an object, such as a
+/// stray closing delimiter or a word of signs, and for one that doesn't
+/// end, nests deeper than [`Limits::depth`] or holds more values than
+/// [`Limits::values`]. A dictionary keeps every entry, a key written
 /// twice too, as pdf-objects' [`Dict`] does, so a lookup takes its last;
 /// an entry whose key isn't a name is passed over. A string keeps its
 /// [`Form`]. Nothing read has a place ([`Object::at`] is none): an
 /// operand's place is in the content, where its token's range is. It's
 /// read in one pass, so a deep operand costs what a flat one of its size
-/// does.
+/// does, but it nests on the stack a level for each array or dictionary
+/// ([`Limits::depth`] says what that takes).
+///
+/// It reads any operand's bytes, such as a token's
+/// ([`Tok::Operand`](crate::Tok::Operand)), which has no [`Operand`] to
+/// read it through.
 ///
 /// ```
-/// use pdf_content_streams::object;
-/// use pdf_objects::Object;
+/// use pdf_content_streams::{Limits, object};
+/// use pdf_content_streams::pdf_objects::Object;
 ///
-/// let read = object(b"<</MCID 3 /Lang (en)>>", 512).unwrap();
+/// let limits = Limits::DEFAULT;
+/// let read = object(b"<</MCID 3 /Lang (en)>>", &limits).unwrap();
 /// let mcid = read.as_dict().and_then(|d| d.get(b"MCID"));
 /// assert_eq!(mcid.and_then(Object::as_integer), Some(3));
-/// assert_eq!(object(b"--5", 512), None);
+/// assert_eq!(object(b"--5", &limits), None);
+/// let big = object(b"99999999999999999999", &limits);
+/// assert_eq!(big.as_ref().and_then(Object::as_integer), Some(i64::MAX));
 /// ```
-pub fn object(operand: &[u8], depth: usize) -> Option<Object> {
+pub fn object(operand: &[u8], limits: &Limits) -> Option<Object> {
     Operand {
         bytes: operand,
         at: 0,
     }
-    .object_with(depth, &mut ())
+    .object_with(limits, &mut ())
 }
 
 /// What's next in an operand read as an object.
@@ -292,12 +312,14 @@ enum Item {
 }
 
 /// An operand being read as an object: its bytes, where they are in the
-/// content, and the sink told where ISO 32000-2 would read what's inside
-/// it otherwise.
+/// content, how many more values it may hold, and the sink told where ISO
+/// 32000-2 would read what's inside it otherwise.
 struct Reading<'a, 's, S: ?Sized> {
     s: &'a [u8],
     /// Where `s` starts in the content.
     base: usize,
+    /// The values, objects or not, it may read yet.
+    values: usize,
     sink: &'s mut S,
 }
 
@@ -305,14 +327,23 @@ impl<'a, S: Sink<'a> + ?Sized> Reading<'a, '_, S> {
     /// The item from `*at`, `*at` moved past it, inside the array or
     /// dictionary that `close` ends, if one's open, `depth` more of which
     /// may nest. None at the end, and for a string, array or dictionary
-    /// that doesn't end, or one nested too deep. Inside an array or a
-    /// dictionary, an item that isn't one is told to the sink, if it
-    /// wants: its own faults, and a word that's no object.
+    /// that doesn't end, one nested too deep, or a value past those it may
+    /// read. Inside an array or a dictionary, an item that isn't one is
+    /// told to the sink, if it wants: its own faults, and a word that's no
+    /// object.
     fn item(&mut self, at: &mut usize, depth: usize, close: Option<&[u8]>) -> Option<Item> {
         let s = self.s;
         let start = skip_space(s, *at);
         let rest = s.get(start..)?;
         let closes = |delimiter: &[u8]| close == Some(delimiter);
+        let closer = match *rest.first()? {
+            b']' => closes(b"]"),
+            b'>' => rest.starts_with(b">>") && closes(b">>"),
+            _ => false,
+        };
+        if !closer {
+            self.values = self.values.checked_sub(1)?;
+        }
         let (end, value) = match *rest.first()? {
             b'(' => {
                 let end = literal_string(s, start).ok()?;
@@ -420,7 +451,9 @@ impl<'a, S: Sink<'a> + ?Sized> Reading<'a, '_, S> {
     }
 }
 
-/// A word as an object: a number, `true`, `false` or `null`.
+/// A word as an object: a number, `true`, `false` or `null`. A number
+/// past 64 bits as pdf-objects reads one: an integer the nearest that
+/// fits, a real the largest finite float of its sign.
 fn word(word: &[u8]) -> Option<Value> {
     Some(match word {
         b"true" => Value::Bool(true),
@@ -430,9 +463,20 @@ fn word(word: &[u8]) -> Option<Value> {
         n => {
             let n = std::str::from_utf8(n).ok()?;
             if n.contains('.') {
-                Value::Real(n.parse().ok()?)
+                let real: f64 = n.parse().ok()?;
+                Value::Real(match real.is_finite() {
+                    true => real,
+                    false => f64::MAX.copysign(real),
+                })
             } else {
-                Value::Integer(n.parse().ok()?)
+                Value::Integer(match n.parse::<i64>() {
+                    Ok(integer) => integer,
+                    Err(e) => match e.kind() {
+                        IntErrorKind::PosOverflow => i64::MAX,
+                        IntErrorKind::NegOverflow => i64::MIN,
+                        _ => return None,
+                    },
+                })
             }
         }
     })
