@@ -40,6 +40,14 @@
 //! again as another table, which it isn't checked as, is unlisted only if
 //! that table doesn't list it either.
 //!
+//! Then every object stream of the file (ISO 32000-2, 7.5.7), from its
+//! number, as `ObjectStream`, and what it links to: nothing in the model
+//! links to one but another's `/Extends`, so the walk from the trailer
+//! reaches none. Each is visited after that walk, so what it reaches is
+//! the table it was, and all of them are reached before any is visited, so
+//! each is visited from its own number, an `/Extends` meeting the one it
+//! names reached already.
+//!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
 //! under another is as if it weren't in the model, as in TestGrammar
@@ -491,9 +499,10 @@ pub struct Finding {
     /// file as a whole.
     pub object: Option<ObjectId>,
     pub made: Made,
-    /// Where the walk reached it from the trailer:
-    /// `Root/Pages/Kids[0]/Annots[2]`, `trailer` for the trailer, `-` for
-    /// an object it never reached.
+    /// Where the walk reached it: from the trailer,
+    /// `Root/Pages/Kids[0]/Annots[2]`, `trailer` for the trailer; from an
+    /// object stream's number, `12 0 R/DecodeParms`, `12 0 R` for the
+    /// stream; `-` for an object it never reached.
     pub path: String,
     /// The table and key of the row it breaks; for an unreached object,
     /// those of the object that references it, `-` for none; `-` and `-`
@@ -603,9 +612,9 @@ pub struct Report {
 
 /// The objects of `source` that `hold` names, held to the model: each
 /// reached from the trailer as the file's newest cross-reference section
-/// writes it, at the file's version unless `options` says another. A
-/// trailer the reader couldn't read so is a finding, and the walk starts
-/// from what it made of the file instead.
+/// writes it, and then from each object stream, at the file's version
+/// unless `options` says another. A trailer the reader couldn't read so is
+/// a finding, and the walk starts from what it made of the file instead.
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     let version = options.version.unwrap_or_else(|| file_version(source));
     let written = source.trailer();
@@ -689,17 +698,9 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         loose: false,
         also: None,
     });
-    loop {
-        while let Some(visit) = walk.queue.pop_front() {
-            walk.visit(visit);
-        }
-        let Some(visit) = walk.later.pop_front() else {
-            break;
-        };
-        if visit.holder.is_some_and(|id| walk.waiting.remove(&id)) {
-            walk.visit(visit);
-        }
-    }
+    walk.run();
+    walk.object_streams();
+    walk.run();
     walk.excuse();
     walk.unreached();
     walk.read_as(source.warnings());
@@ -968,6 +969,8 @@ impl Drop for Trail<'_> {
 #[derive(Clone)]
 enum Step<'a> {
     Trailer,
+    /// An object stream, from its number.
+    Object(ObjectId),
     Key(&'a [u8]),
     Index(usize),
     /// A name or number tree's entry.
@@ -1012,6 +1015,64 @@ fn entry_at(entry: &Entry) -> Option<Span> {
 }
 
 impl<'a> Walk<'a> {
+    /// Visits what's queued, and what waits to be visited as a
+    /// `_Universal` table once the queue is empty, unless it was reached
+    /// as another meanwhile, until neither is left.
+    fn run(&mut self) {
+        loop {
+            while let Some(visit) = self.queue.pop_front() {
+                self.visit(visit);
+            }
+            let Some(visit) = self.later.pop_front() else {
+                break;
+            };
+            if visit.holder.is_some_and(|id| self.waiting.remove(&id)) {
+                self.visit(visit);
+            }
+        }
+    }
+
+    /// Queues each of the file's object streams ([`object_stream`]), by
+    /// number, as `ObjectStream`, each from its own number: all marked
+    /// reached before any is visited, so that an `/Extends` meets the one
+    /// it names reached already. One the walk reached as another table
+    /// stays that, reached again as this, as any object is.
+    fn object_streams(&mut self) {
+        let table = grammar()
+            .table("ObjectStream")
+            .expect("the model has the object streams' table");
+        let source = self.source;
+        for id in source.ids() {
+            let Ok(object) = source.get(id) else {
+                continue;
+            };
+            if !object_stream(object) {
+                continue;
+            }
+            if let Some(first) = self.reached.get(&id).copied().flatten() {
+                if self.made(Some(id)).is_some() {
+                    self.reached_again(id, first, table);
+                }
+                continue;
+            }
+            self.reached.insert(id, Some(table.name.as_str()));
+            let trail = Rc::new(Trail {
+                up: None,
+                step: Step::Object(id),
+                object,
+            });
+            self.queue.push_back(Visit {
+                object,
+                holder: Some(id),
+                table,
+                trail,
+                depth: 0,
+                loose: false,
+                also: None,
+            });
+        }
+    }
+
     /// How the object `holder` was made, when it's held: the trailer as
     /// [`Made::Merged`].
     fn made(&self, holder: Option<ObjectId>) -> Option<Made> {
@@ -1561,19 +1622,7 @@ impl<'a> Walk<'a> {
             // doesn't count `_Universal` ones, which fit anything.
             let instead = waiting && !universal(&table.name);
             if !instead {
-                if first != table.name
-                    && self.also_of.get(&id) != Some(&table.name.as_str())
-                    && !universal(first)
-                    && !universal(&table.name)
-                {
-                    self.report.two_contexts += 1;
-                    if !self.one_table {
-                        let again = self.again.entry(id).or_default();
-                        if !again.iter().any(|t| t.name == table.name) {
-                            again.push(table);
-                        }
-                    }
-                }
+                self.reached_again(id, first, table);
                 return;
             }
             self.waiting.remove(&id);
@@ -1635,6 +1684,27 @@ impl<'a> Walk<'a> {
                 self.later.push_back(visit);
             }
             _ => self.queue.push_back(visit),
+        }
+    }
+
+    /// `id`, a held object reached first as `first`, reached again as
+    /// `table`: counted in [`Report::two_contexts`] when that's another
+    /// table, neither `_Universal` nor the other it's checked as, and kept
+    /// among those it was reached again as, for [`Walk::excuse`] (unless
+    /// [`Options::one_table`]).
+    fn reached_again(&mut self, id: ObjectId, first: &'static str, table: &'static Table) {
+        if first != table.name
+            && self.also_of.get(&id) != Some(&table.name.as_str())
+            && !universal(first)
+            && !universal(&table.name)
+        {
+            self.report.two_contexts += 1;
+            if !self.one_table {
+                let again = self.again.entry(id).or_default();
+                if !again.iter().any(|t| t.name == table.name) {
+                    again.push(table);
+                }
+            }
         }
     }
 
@@ -2456,8 +2526,9 @@ impl<'a> Walk<'a> {
 
     /// The held objects the walk never reached, each a [`Rule::Unreached`]
     /// finding but those referenced under a key the model doesn't list,
-    /// and the file's own structures (object and cross-reference streams,
-    /// a linearization dictionary). Its table and key are those it was
+    /// and the file's own structures it doesn't visit ([`left_out`]): an
+    /// object stream it visits, and what it refers to is reached through
+    /// it, as through any object. Its table and key are those it was
     /// referenced under in an object walked, else the key of a held object
     /// unreached too, else `-`. One the file hasn't, or that doesn't read,
     /// is [`Rule::Unresolved`].
@@ -2565,8 +2636,9 @@ impl<'a> Trail<'a> {
         parents
     }
 
-    /// The way from the trailer, its last [`PATH`] steps:
-    /// `Root/Pages/Kids[0]/Annots[2]`, a tree's entries in braces.
+    /// The way from the trailer, or from an object stream's number, its
+    /// last [`PATH`] steps: `Root/Pages/Kids[0]/Annots[2]`, a tree's
+    /// entries in braces; `12 0 R/DecodeParms`.
     fn path(&self) -> String {
         let mut steps = Vec::new();
         let mut at = Some(self);
@@ -2584,6 +2656,9 @@ impl<'a> Trail<'a> {
         for step in steps.into_iter().rev() {
             match step {
                 Step::Trailer => {}
+                Step::Object((n, g)) => {
+                    let _ = write!(path, "{n} {g} R");
+                }
                 Step::Key(key) => {
                     if !path.is_empty() {
                         path.push('/');
@@ -2621,17 +2696,24 @@ fn unknown_bytes(value: &Object, ty: ArlType) -> bool {
 }
 
 /// Whether `object` is one of the file's own structures, which nothing
-/// reaches: an object stream, a cross-reference stream, a linearization
-/// dictionary.
+/// reaches and the walk doesn't visit: a cross-reference stream, a
+/// linearization dictionary. An object stream it visits
+/// ([`Walk::object_streams`]).
 fn left_out(object: &Object) -> bool {
     match object.value() {
-        Value::Stream(s) => {
-            matches!(
-                s.dict.get(b"Type").and_then(Object::as_name),
-                Some(b"ObjStm" | b"XRef")
-            )
-        }
+        Value::Stream(s) => s.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef"),
         Value::Dict(d) => d.has(b"Linearized"),
+        _ => false,
+    }
+}
+
+/// Whether `object` is an object stream: a stream whose `/Type` is
+/// `/ObjStm`, written direct, as the reader reads one (ISO 32000-2,
+/// 7.5.7). A `/Type` that's a string, or a reference, makes no object
+/// stream, to the reader or here.
+fn object_stream(object: &Object) -> bool {
+    match object.value() {
+        Value::Stream(s) => s.dict.get(b"Type").and_then(Object::as_name) == Some(b"ObjStm"),
         _ => false,
     }
 }
@@ -4452,6 +4534,500 @@ mod tests {
             assert_eq!(said(&hold), [(Some((4, 0)), made, value, at)]);
         }
         assert_eq!(said(&only((3, 0), Made::Built)), []);
+    }
+
+    /// An object stream [`packed`] writes: its number, the entries of its
+    /// dictionary it's given, and its members, each its number and as
+    /// written.
+    type Packed<'a> = (u32, &'a str, &'a [(u32, &'a str)]);
+
+    /// A file at 1.7 of `objects`, each written at its number as given,
+    /// and of object streams, each its number, the entries of its
+    /// dictionary but `/N`, `/First` and `/Length` (its `/Type` among
+    /// them), and its members, each its number and as written; with a
+    /// cross-reference stream listing every one, its trailer's `/Root` 1.
+    fn packed(objects: &[(u32, &str)], streams: &[Packed]) -> Vec<u8> {
+        let mut file = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+        // Each object's cross-reference entry: its type, and two fields.
+        let mut entries = BTreeMap::new();
+        for &(n, body) in objects {
+            entries.insert(n, (1u8, file.len(), 0u16));
+            file.extend_from_slice(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+        }
+        for &(n, dict, members) in streams {
+            let (mut header, mut data) = (String::new(), String::new());
+            for (i, &(m, body)) in members.iter().enumerate() {
+                header.push_str(&format!("{m} {} ", data.len()));
+                data.push_str(body);
+                data.push('\n');
+                entries.insert(m, (2, n as usize, i as u16));
+            }
+            let (count, first) = (members.len(), header.len());
+            let length = first + data.len();
+            entries.insert(n, (1, file.len(), 0));
+            let head =
+                format!("{n} 0 obj\n<< {dict} /N {count} /First {first} /Length {length} >>");
+            let body = format!("{head}\nstream\n{header}{data}\nendstream\nendobj\n");
+            file.extend_from_slice(body.as_bytes());
+        }
+        let own = entries.keys().max().map_or(1, |n| n + 1);
+        let xref = file.len();
+        entries.insert(own, (1, xref, 0));
+        let rows: Vec<u8> = (0..=own)
+            .flat_map(|n| {
+                let (kind, field, index) = match (n, entries.get(&n)) {
+                    (0, _) => (0, 0, 65535),
+                    (_, Some(&entry)) => entry,
+                    (_, None) => (0, 0, 0),
+                };
+                let field = u32::try_from(field).unwrap().to_be_bytes();
+                [&[kind][..], &field, &index.to_be_bytes()].concat()
+            })
+            .collect();
+        let dict = format!(
+            "{own} 0 obj\n<< /Type /XRef /Size {} /W [1 4 2] /Root 1 0 R /Length {} >>\nstream\n",
+            own + 1,
+            rows.len()
+        );
+        file.extend_from_slice(dict.as_bytes());
+        file.extend_from_slice(&rows);
+        file.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        file
+    }
+
+    /// A finding's object, path, table, key, rule and value.
+    type Walked<'a> = (Option<u32>, &'a str, &'a str, &'a str, Rule, &'a str);
+
+    /// Each finding's object, path, table, key, rule and value.
+    fn walked(report: &Report) -> Vec<Walked<'_>> {
+        (report.findings.iter())
+            .map(|f| {
+                let object = f.object.map(|(n, _)| n);
+                let (path, table, key) = (f.path.as_str(), f.table.as_str(), f.key.as_str());
+                (object, path, table, key, f.rule, f.value.as_str())
+            })
+            .collect()
+    }
+
+    /// An object stream is checked as `ObjectStream`, from its number,
+    /// though nothing in the model links to one but another's `/Extends`:
+    /// one that extends the catalog, with a key the model doesn't list,
+    /// holding a page whose `/Rotate` is a string. Its `/Extends` is of a
+    /// type its row doesn't allow; its key is counted unlisted, a finding
+    /// where it's built; and the page is found in as before.
+    #[test]
+    fn an_object_stream_is_checked_from_its_number() {
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> \
+                    /Rotate (abc) >>";
+        let file = packed(
+            &[
+                (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+                (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            ],
+            &[(10, "/Type /ObjStm /Extends 1 0 R /Bogus 1", &[(3, page)])],
+        );
+        let doc = bytes::read(&file);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        let extends = "<< /Pages 2 0 R /Type /Catalog >>";
+        assert_eq!(
+            walked(&report),
+            [
+                (
+                    Some(3),
+                    "Root/Pages/Kids[0]",
+                    "PageObject",
+                    "Rotate",
+                    Rule::Type,
+                    "(abc)"
+                ),
+                (
+                    Some(10),
+                    "10 0 R",
+                    "ObjectStream",
+                    "Extends",
+                    Rule::Type,
+                    extends
+                ),
+            ],
+            "{report}"
+        );
+        let extends_at = report.findings[1].at.unwrap();
+        assert_eq!(&file[extends_at.start..extends_at.end], b"/Extends 1 0 R");
+        assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
+        let bogus = unlisted("ObjectStream", "Bogus", Class::Other);
+        assert_eq!(report.unlisted, BTreeMap::from([(bogus, 1)]), "{report}");
+
+        let built = check(&doc, &Hold::All(Made::Built), &Options::default());
+        let unlisted: Vec<_> = (walked(&built).into_iter())
+            .filter(|f| f.4 == Rule::Unlisted)
+            .collect();
+        assert_eq!(
+            unlisted,
+            [(
+                Some(10),
+                "10 0 R",
+                "ObjectStream",
+                "Bogus",
+                Rule::Unlisted,
+                "1"
+            )],
+            "{built}"
+        );
+
+        // Clean, it's checked and counted all the same, with no finding.
+        let page = page.replace("/Rotate (abc)", "/Rotate 90");
+        let file = packed(
+            &[
+                (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+                (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            ],
+            &[(10, "/Type /ObjStm", &[(3, &page)])],
+        );
+        let report = checked_as(&file, &Hold::All(Made::Built));
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.unlisted, BTreeMap::new(), "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
+    }
+
+    /// A document at `version` with a catalog (1) and an empty page tree
+    /// (2), what's tested added to it.
+    fn bare(version: Version) -> Document {
+        let trailer = dict! { "Root" => Object::reference(1), "Size" => 7 };
+        let mut doc = Document::new(version, trailer);
+        doc.insert(
+            1,
+            dict! { "Type" => "Catalog", "Pages" => Object::reference(2) },
+        );
+        doc.insert(
+            2,
+            dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 },
+        );
+        doc
+    }
+
+    /// What `report` found: each finding's object, table, key and rule,
+    /// sorted.
+    fn faults(report: &Report) -> Vec<(Option<ObjectId>, &str, &str, Rule)> {
+        let mut found: Vec<_> = (report.findings.iter())
+            .map(|f| (f.object, f.table.as_str(), f.key.as_str(), f.rule))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Object streams with a fault of each kind the table makes: a key it
+    /// doesn't list, a required one missing, one of a type it doesn't
+    /// allow, a value it doesn't allow or that fails its SpecialCase, one
+    /// direct that must be indirect, a reference to nothing, a key written
+    /// twice; and what they link to: a filter in an array that isn't one,
+    /// directly and through a reference, and decode parameters, a
+    /// dictionary and an array's, held to the first table of a filter's
+    /// their keys fit as well as any (a tie, counted), as any stream's are.
+    /// Each is found, in the object it's in, held as built, and counted,
+    /// and the array referenced isn't unreached; held as merged, each is
+    /// checked as well.
+    #[test]
+    fn an_object_streams_faults_are_found() {
+        let mut doc = bare(Version::new(1, 7));
+        let extended = dict! { "Type" => "ObjStm", "N" => 0, "First" => 0, "Length" => 0 };
+        let container = dict! {
+            "Type" => "ObjStm",
+            "First" => -1,
+            "Length" => 10,
+            "Filter" => vec![Object::from("Bogus")],
+            "Extends" => Object::stream(extended),
+            "Stray" => 1,
+        };
+        doc.insert(3, Object::stream(container));
+        let container = dict! {
+            "Type" => "ObjStm",
+            "N" => "x",
+            "First" => 0,
+            "First" => 0,
+            "DL" => -1,
+            "Length" => Object::reference(99),
+            "Filter" => "FlateDecode",
+            "DecodeParms" => dict! { "Predictor" => 3 },
+        };
+        doc.insert(4, Object::stream(container));
+        let container = dict! {
+            "Type" => "ObjStm",
+            "N" => 0,
+            "First" => 0,
+            "Length" => 0,
+            "Filter" => Object::reference(6),
+            "DecodeParms" => vec![dict! { "Predictor" => 3 }.into(), Object::null()],
+        };
+        doc.insert(5, Object::stream(container));
+        doc.insert(6, vec![Object::from("FlateDecode"), Object::from("Bogus")]);
+        let hold = Hold::Only((3..=6).map(|n| ((n, 0), Made::Built)).collect());
+        let report = check(&doc, &hold, &Options::default());
+        let at = |n| Some((n, 0));
+        assert_eq!(
+            faults(&report),
+            [
+                (at(3), "ArrayOfCompressionFilterNames", "0", Rule::Value),
+                (at(3), "ObjectStream", "Extends", Rule::Indirect),
+                (at(3), "ObjectStream", "First", Rule::Value),
+                (at(3), "ObjectStream", "N", Rule::Missing),
+                (at(3), "ObjectStream", "Stray", Rule::Unlisted),
+                (at(4), "FilterLZWDecode", "Predictor", Rule::Value),
+                (at(4), "ObjectStream", "DL", Rule::Value),
+                (at(4), "ObjectStream", "DL", Rule::Special),
+                (at(4), "ObjectStream", "First", Rule::Duplicate),
+                (at(4), "ObjectStream", "Length", Rule::Unresolved),
+                (at(4), "ObjectStream", "N", Rule::Type),
+                (at(5), "FilterLZWDecode", "Predictor", Rule::Value),
+                (at(6), "ArrayOfCompressionFilterNames", "1", Rule::Value),
+            ],
+            "{report}"
+        );
+        // The three, and the one that the first extends.
+        assert_eq!(report.checked.get("ObjectStream"), Some(&4), "{report}");
+        let filters = report.checked.get("FilterLZWDecode");
+        assert_eq!((filters, report.ties), (Some(&2), 2), "{report}");
+        let merged = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(merged.checked.get("ObjectStream"), Some(&4), "{merged}");
+    }
+
+    /// An object stream in a file of a version before object streams came
+    /// in (1.5): each of its keys is too new.
+    #[test]
+    fn an_object_stream_before_1_5_is_too_new() {
+        let mut doc = bare(Version::new(1, 4));
+        let container = dict! { "Type" => "ObjStm", "N" => 0, "First" => 0, "Length" => 0 };
+        doc.insert(3, Object::stream(container));
+        let report = check(
+            &doc,
+            &Hold::Only([((3, 0), Made::Built)].into()),
+            &Options::default(),
+        );
+        let at = Some((3, 0));
+        assert_eq!(
+            faults(&report),
+            [
+                (at, "ObjectStream", "First", Rule::TooNew),
+                (at, "ObjectStream", "Length", Rule::TooNew),
+                (at, "ObjectStream", "N", Rule::TooNew),
+                (at, "ObjectStream", "Type", Rule::TooNew),
+            ],
+            "{report}"
+        );
+    }
+
+    /// The object streams of a file a writer packs, each checked as
+    /// `ObjectStream`, clean.
+    #[test]
+    fn the_object_streams_a_writer_packs_check_clean() {
+        use pdf_structure::write;
+        let objects: Vec<(u32, Object)> = (clean().into_iter())
+            .map(|(n, body)| match body {
+                Body::Object(object) => (n, object),
+                Body::Stream(dict, data) => (n, crate::object::Stream::new(dict, data).into()),
+            })
+            .collect();
+        let mut options = write::Options::DEFAULT;
+        options.kind = crate::source::XrefKind::Stream;
+        options.pack = Some(write::Pack::DEFAULT);
+        let bodies = (objects.iter()).map(|(n, object)| ((*n, 0), write::Body::from(object)));
+        let mut file = Vec::new();
+        let trailer = dict! { "Root" => r(1) };
+        write::full(&mut file, bodies, &trailer, None, None, &options).unwrap();
+        let doc = bytes::read(&file);
+        let containers = doc.objects().filter(|&(_, o)| object_stream(o)).count();
+        assert_eq!(containers, 1);
+        assert!(doc.get((4, 0)).unwrap().at.unwrap().stream.is_some());
+        let report = checked_as(&file, &Hold::All(Made::Built));
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
+    }
+
+    /// An object stream without its `/N`, its `/First` a name, is found
+    /// for each.
+    #[test]
+    fn an_object_streams_required_keys_and_their_types_are_checked() {
+        let mut doc = bare(Version::new(1, 7));
+        let container = dict! { "Type" => "ObjStm", "First" => "x", "Length" => 0 };
+        doc.insert(10, Object::stream(container));
+        let report = check(&doc, &Hold::All(Made::Built), &Options::default());
+        assert_eq!(
+            walked(&report),
+            [
+                (
+                    Some(10),
+                    "10 0 R",
+                    "ObjectStream",
+                    "First",
+                    Rule::Type,
+                    "/x"
+                ),
+                (
+                    Some(10),
+                    "10 0 R",
+                    "ObjectStream",
+                    "N",
+                    Rule::Missing,
+                    "absent"
+                ),
+            ],
+            "{report}"
+        );
+    }
+
+    /// An object stream's `/Extends` goes on to the one it names, which is
+    /// checked from its own number, whether it's numbered after the one
+    /// naming it or before; every path recorded is each one's own. A cycle
+    /// of them is a SpecialCase false in each.
+    #[test]
+    fn an_object_streams_extends_meets_the_one_it_names_from_its_own_number() {
+        let mut doc = bare(Version::new(1, 7));
+        let container = |extends: Option<u32>| {
+            let mut dict = dict! { "Type" => "ObjStm", "N" => 0, "First" => 0, "Length" => 0 };
+            if let Some(n) = extends {
+                dict.set("Extends", r(n));
+            }
+            Object::stream(dict)
+        };
+        // 10 extends 12, numbered after it, and 13 extends 11, before it.
+        doc.insert(10, container(Some(12)));
+        doc.insert(11, container(None));
+        doc.insert(12, container(None));
+        doc.insert(13, container(Some(11)));
+        let options = Options {
+            paths: true,
+            ..Options::default()
+        };
+        let report = check(&doc, &Hold::All(Made::Built), &options);
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), Some(&4), "{report}");
+        let paths: Vec<_> = (report.paths.iter())
+            .filter(|path| path.contains(" R"))
+            .collect();
+        assert_eq!(paths, ["10 0 R", "11 0 R", "12 0 R", "13 0 R"]);
+
+        // 20 and 21 extend each other.
+        doc.insert(20, container(Some(21)));
+        doc.insert(21, container(Some(20)));
+        let report = check(&doc, &Hold::All(Made::Built), &options);
+        let specials: Vec<_> = (walked(&report).into_iter())
+            .map(|(n, path, _, key, rule, _)| (n, path, key, rule))
+            .collect();
+        assert_eq!(
+            specials,
+            [
+                (Some(20), "20 0 R", "Extends", Rule::Special),
+                (Some(21), "21 0 R", "Extends", Rule::Special)
+            ],
+            "{report}"
+        );
+        assert_eq!(report.checked.get("ObjectStream"), Some(&6), "{report}");
+    }
+
+    /// What an object stream refers to is reached through it, as through
+    /// any object walked: its `/Length`, by reference, which nothing else
+    /// refers to, isn't unreached.
+    #[test]
+    fn what_an_object_stream_refers_to_is_reached_through_it() {
+        let mut doc = bare(Version::new(1, 7));
+        let container = dict! { "Type" => "ObjStm", "N" => 0, "First" => 0, "Length" => r(5) };
+        doc.insert(10, Object::stream(container));
+        doc.insert(5, 0);
+        let report = check(&doc, &Hold::All(Made::Built), &Options::default());
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
+    }
+
+    /// A stream whose `/Type` is the string `(ObjStm)` is no object stream,
+    /// to the reader or to the check: its objects don't read, a reference
+    /// to one is unresolved, and it's unreached.
+    #[test]
+    fn a_stream_whose_type_is_a_string_is_no_object_stream() {
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>";
+        let file = packed(
+            &[(1, "<< /Type /Catalog /Pages 2 0 R >>")],
+            &[(
+                10,
+                "/Type (ObjStm)",
+                &[(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"), (3, page)],
+            )],
+        );
+        let doc = bytes::read(&file);
+        let why = doc.get((2, 0)).unwrap_err().to_string();
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(report.checked.get("ObjectStream"), None, "{report}");
+        let unread = "stream << /First 9 /N 2 /Type (ObjStm) >>";
+        assert_eq!(
+            walked(&report),
+            [
+                (
+                    Some(1),
+                    "Root",
+                    "Catalog",
+                    "Pages",
+                    Rule::Unresolved,
+                    "2 0 R"
+                ),
+                (Some(2), "-", "-", "-", Rule::Unresolved, why.as_str()),
+                (Some(3), "-", "-", "-", Rule::Unresolved, why.as_str()),
+                (Some(10), "-", "-", "-", Rule::Unreached, unread),
+            ],
+            "{report}"
+        );
+    }
+
+    /// An object stream is held as any object, by its number: under a hold
+    /// of other objects it's walked, and not found in; a hold file naming
+    /// it holds it, as it says it was made.
+    #[test]
+    fn an_object_stream_is_held_by_its_number() {
+        let mut doc = bare(Version::new(1, 7));
+        let container = dict! { "Type" => "ObjStm", "N" => -1, "First" => 0, "Length" => 0 };
+        doc.insert(10, Object::stream(container));
+        let other = Hold::parse("1 0 built\n").unwrap();
+        let report = check(&doc, &other, &Options::default());
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), None, "{report}");
+        for (named, made) in [
+            ("10 0 built\n", Made::Built),
+            ("10 0 merged\n", Made::Merged),
+        ] {
+            let report = check(&doc, &Hold::parse(named).unwrap(), &Options::default());
+            let held: Vec<_> = (report.findings.iter())
+                .map(|f| (f.object, f.made, f.key.as_str(), f.rule))
+                .collect();
+            assert_eq!(held, [(Some((10, 0)), made, "N", Rule::Value)], "{report}");
+        }
+    }
+
+    /// An object stream the walk from the trailer reached first as another
+    /// table, as a page's contents, stays that: reached again as
+    /// `ObjectStream`, it's counted in two contexts, not checked twice, and
+    /// its keys that table lists aren't unlisted.
+    #[test]
+    fn an_object_stream_reached_as_another_table_stays_it() {
+        let mut doc = bare(Version::new(1, 7));
+        doc.insert(
+            2,
+            dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 },
+        );
+        let page = dict! {
+            "Type" => "Page",
+            "Parent" => r(2),
+            "MediaBox" => numbers(&[0, 0, 612, 792]),
+            "Resources" => dict! {},
+            "Contents" => r(10),
+        };
+        doc.insert(3, page);
+        let container = dict! { "Type" => "ObjStm", "N" => 0, "First" => 0, "Length" => 0 };
+        doc.insert(10, Object::stream(container));
+        let report = check(&doc, &Hold::All(Made::Built), &Options::default());
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.unlisted, BTreeMap::new(), "{report}");
+        assert_eq!(report.checked.get("Stream"), Some(&1), "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), None, "{report}");
+        assert_eq!(report.two_contexts, 1, "{report}");
     }
 
     /// A reader that doesn't say where its objects were written: the

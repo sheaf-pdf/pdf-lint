@@ -89,7 +89,8 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
 }
 
 /// The file whose dictionaries are in object streams, read by the reader
-/// alone, checks clean, its text annotation checked once.
+/// alone, checks clean, its text annotation checked once, and its object
+/// stream too.
 #[test]
 fn the_compressed_file_checks_clean() {
     let data = std::fs::read(fixture("qpdf-compressed")).unwrap();
@@ -97,6 +98,7 @@ fn the_compressed_file_checks_clean() {
     let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
     assert_eq!(report.findings, [], "{report}");
     assert_eq!(report.checked.get("AnnotText"), Some(&1), "{report}");
+    assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
 }
 
 #[test]

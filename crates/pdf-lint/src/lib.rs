@@ -51,11 +51,14 @@ pub mod grammar {
     static CHOSEN: OnceLock<Option<Grammar>> = OnceLock::new();
 
     /// The tables the checker reads by name, which a model must have: the
-    /// trailer's two, and those it checks a metadata stream and associated
-    /// files as where the model has no row for them.
-    pub const NAMED: [&str; 4] = [
+    /// trailer's two; the object streams', which nothing in the model links
+    /// to but an object stream, so the checker visits each as it; and
+    /// those it checks a metadata stream and associated files as where the
+    /// model has no row for them.
+    pub const NAMED: [&str; 5] = [
         "FileTrailer",
         "XRefStream",
+        "ObjectStream",
         "Metadata",
         "ArrayOfFileSpecifications",
     ];
@@ -224,6 +227,28 @@ mod tests {
         assert_eq!(
             format!("{e:#}"),
             "it has no FileTrailer table, which the checker reads by name"
+        );
+    }
+
+    /// A model with every table the checker reads by name but the object
+    /// streams' is refused, naming it: the checker visits every object
+    /// stream as it.
+    #[test]
+    fn a_model_without_the_object_streams_table_is_refused() {
+        let dir = tempfile::Builder::new()
+            .prefix("pdf-lint-model-")
+            .tempdir()
+            .unwrap();
+        let header = grammar::HEADER.join("\t");
+        let row = "Rotate\tinteger\t1.0\t\tFALSE\tFALSE\tTRUE\t0\t\t\t\t";
+        for table in grammar::NAMED.iter().filter(|&&t| t != "ObjectStream") {
+            let path = dir.path().join(format!("{table}.tsv"));
+            std::fs::write(path, format!("{header}\n{row}\n")).unwrap();
+        }
+        let e = use_model(Grammar::load(dir.path()).unwrap()).unwrap_err();
+        assert_eq!(
+            format!("{e:#}"),
+            "it has no ObjectStream table, which the checker reads by name"
         );
     }
 

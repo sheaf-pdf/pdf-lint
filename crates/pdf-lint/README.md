@@ -6,7 +6,7 @@ It's a command line and a library. It reads a file from its bytes, through [pdf-
 
 ## What it checks
 
-It walks every object reachable from the trailer, picks the model's table for each one the way the PDF Association's TestGrammar does, and checks each key:
+It walks every object reachable from the trailer, and then every object stream's dictionary, reached or not, from its number (nothing in the model links to one but another's `/Extends`), and what it refers to; picks the model's table for each one the way the PDF Association's TestGrammar does, and checks each key:
 
 - its **type**, and whether it must be **direct** or **indirect**;
 - whether a required key is **missing**, counting what a page inherits from its parents;
@@ -130,7 +130,7 @@ With `--format json`, each file's report is a line of JSON. Every line says whic
 - `pdf_lint`, the version of pdf-lint that wrote it, and `file`;
 - how it was checked: `version`, `checked_as` (`--pdf-version`'s, else `version`), `one_table` (whether `--one-table`), `unlisted_in` (`--unlisted`'s), `deprecations` (whether `--deprecations`), `extensions` (those it was checked under), and `model`, the model's hash (XXH64 of its tables' files, as `Grammar::hash` says, 16 hex digits, which `--version` prints for the embedded one);
 - `objects` and `keys`;
-- `findings`, each with its `rule`, `table`, `key`, `path`, `object` (`[n, g]`, or null for the trailer), `made`, `value`, and `at` (`stream`, `start` and `end`, or null);
+- `findings`, each with its `rule`, `table`, `key`, `path` (where the walk reached it: from the trailer, `trailer` for it; from an object stream's number, `12 0 R`; `-` for an object nothing reaches), `object` (`[n, g]`, or null for the trailer), `made`, `value`, and `at` (`stream`, `start` and `end`, or null);
 - how many findings were left out as `carried` and as `allowed`;
 - the counts `--full` prints: `tables`, `not_checked`, `unlisted`, `deprecated` (keys the version checked at deprecates, or deprecates the type or value of, by table and key), `ignored` (keys the model says readers ignore there), `no_table`, `ties`, `truncated`, `two_contexts` and `two_tables` (objects checked as two tables at once, counted in `tables` as each, and once in `objects`).
 
@@ -233,7 +233,7 @@ The model's `tsv/latest` is embedded at a pinned upstream commit, which `--versi
 - a variable-text field's own `/DR`, which PDF 1.4 defines (Table 8.51) and the model has no row for, is added to the text and choice field tables, obsolete from PDF 1.5 (the 1.7 reference's implementation note 118), so deprecated there (counted only, unless `--deprecations` makes it a finding);
 - the PDF 1.0 `Encoding` resource, a dictionary of named encodings as Acrobat writes one in a form's `/DR`, is linked to `EncodingMap`, an added table of them, where the model checks it as one encoding.
 
-`--model <DIR>` checks against a `tsv/latest` checkout as it is instead, upstream's own or a newer one, which must read whole: every row, and every table a row links to (`Grammar::load`), and the four tables the checker reads by name (`use_model`, `grammar::NAMED`). The JSON report's `model` tells them apart: the embedded model's hash is of its tables with the corrections made, and a checkout of the same commit has upstream's.
+`--model <DIR>` checks against a `tsv/latest` checkout as it is instead, upstream's own or a newer one, which must read whole: every row, and every table a row links to (`Grammar::load`), and the five tables the checker reads by name (`use_model`, `grammar::NAMED`). The JSON report's `model` tells them apart: the embedded model's hash is of its tables with the corrections made, and a checkout of the same commit has upstream's.
 
 ## License
 

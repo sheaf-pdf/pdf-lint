@@ -613,13 +613,20 @@ fn a_fault_in_a_streams_data_is_a_finding() {
     let dir = folder();
     let (objects, _) = object_stream_objects();
     let hex: String = objects.iter().map(|b| format!("{b:02x}")).collect();
+    // Its data clean, under `/AHx`, an inline image's abbreviation (ISO
+    // 32000-2, 8.9.7), which the reader reads as qpdf does and which the
+    // object stream's `/Filter` may not be: that alone is found.
+    let filter = "- value: ObjectStream/Filter at 4 0 R, in 4 0 R (merged): /AHx (not one of";
     let clean = written(
         &dir,
         "hex-clean.pdf",
         &in_an_object_stream(" /Filter /AHx", format!("{hex}>").as_bytes()),
     );
     let out = run(&[clean.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains(filter), "{stdout}");
+    assert!(stdout.contains("objects checked, 1 findings"), "{stdout}");
     // Without its `>`, which qpdf reads without a word: everything reads,
     // and the fault is the reader's finding, at the data.
     let faulted = written(
@@ -634,7 +641,55 @@ fn a_fault_in_a_streams_data_is_a_finding() {
         stdout.contains("- reader: -/- at -, in 4 0 R (merged): its data doesn't decode cleanly through /ASCIIHexDecode: no end-of-data marker"),
         "{stdout}"
     );
-    assert!(stdout.contains("objects checked, 1 findings"), "{stdout}");
+    assert!(stdout.contains(filter), "{stdout}");
+    assert!(stdout.contains("objects checked, 2 findings"), "{stdout}");
+}
+
+/// An object stream is held as any object, by its number: `--last-update`
+/// holds one the update wrote, and none it didn't, and `--baseline`
+/// carries a like finding in one from the same number.
+#[test]
+fn an_object_stream_is_held_as_any_object() {
+    let dir = folder();
+    let (objects, _) = object_stream_objects();
+    let hex: String = objects.iter().map(|b| format!("{b:02x}")).collect();
+    // Object stream 4's `/AHx` is a finding.
+    let original = in_an_object_stream(" /Filter /AHx", format!("{hex}>").as_bytes());
+    let base = written(&dir, "packed.pdf", &original);
+    let base = base.to_str().unwrap();
+    let findings = |out: &Output| -> Vec<String> {
+        (text(&out.stdout).lines())
+            .filter(|l| l.starts_with("- "))
+            .map(str::to_string)
+            .collect()
+    };
+    // An update that gives the page an annotation writes no object stream.
+    let page =
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Annots [6 0 R] >>";
+    let note = "<< /Type /Annot /Subtype /Text /Rect [0 0 1 1] >>";
+    let noted = updated(&original, &[(3, page), (6, note)]);
+    let noted = written(&dir, "packed-noted.pdf", &noted);
+    let noted = noted.to_str().unwrap();
+    let out = run(&["--last-update", noted]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains(", 0 findings\n"), "{stdout}");
+    let out = run(&["--baseline", base, noted]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains(", 0 findings, 1 carried\n"), "{stdout}");
+    // One that writes an object stream, with a key the model doesn't list,
+    // answers for it: new, so built.
+    let stream = "<< /Type /ObjStm /N 0 /First 0 /Bogus 1 /Length 0 >>\nstream\n\nendstream";
+    let packed = updated(&original, &[(6, stream)]);
+    let packed = written(&dir, "packed-packed.pdf", &packed);
+    let out = run(&["--last-update", packed.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let found = findings(&out);
+    let bogus = "- unlisted: ObjectStream/Bogus at 6 0 R, in 6 0 R (built): 1 [bytes ";
+    assert!(found.len() == 1 && found[0].starts_with(bogus), "{stdout}");
+    assert!(stdout.contains("\n    | /Bogus 1\n"), "{stdout}");
 }
 
 #[test]
