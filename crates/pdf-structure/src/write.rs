@@ -110,6 +110,7 @@ use crate::source::{Document, Record, XrefKind};
 pub use append::{Base, update};
 pub use crypt::{Encrypting, Encryptor, Unencryptable};
 pub use full::{document, full};
+pub use objstm::{KeptOut, kept_out};
 pub use objstm::{MAX_DATA, MEMBERS, container, fits, packable};
 pub use xref::{Entry, Section};
 

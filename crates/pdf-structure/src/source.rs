@@ -2,7 +2,7 @@
 //! implement, and [`Document`], an owned one that readers fill, tests
 //! build, and a caller builds and edits in memory; and what the bytes
 //! reader records of where it read each object ([`Record`]) and of the
-//! file as written ([`Facts`]).
+//! file as written ([`Facts`]), its revisions among it ([`Revision`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::RangeBounds;
@@ -38,6 +38,35 @@ pub trait Source {
     /// written, when the reader has it in plain view.
     fn metadata(&self) -> Option<&[u8]> {
         None
+    }
+    /// Where object `id` was read from, when the reader recorded it.
+    fn record(&self, id: ObjectId) -> Option<&Record> {
+        let _ = id;
+        None
+    }
+    /// Object stream `stream`'s decoded data, which the objects read from
+    /// it are placed in ([`Span::stream`]), when the reader keeps it.
+    fn decoded(&self, stream: ObjectId) -> Option<&[u8]> {
+        let _ = stream;
+        None
+    }
+    /// The file's revisions, the first first, when the reader read its
+    /// cross-reference sections.
+    fn revisions(&self) -> &[Revision] {
+        &[]
+    }
+    /// What the file's header and sections say of it, as written, when the
+    /// reader knows.
+    fn facts(&self) -> Option<&Facts> {
+        None
+    }
+    /// Whether object stream `stream` leaves the strings of the objects read
+    /// from it in the clear, in a file that encrypts its strings: an object
+    /// in one is encrypted with the stream's data, whole, not itself, and
+    /// that isn't encrypted (ISO 32000-2, 7.5.7, 7.6.2, 7.6.6).
+    fn in_the_clear(&self, stream: ObjectId) -> bool {
+        let _ = stream;
+        false
     }
 }
 
@@ -167,6 +196,19 @@ pub struct Document {
     /// What the file's cross-reference sections and header say of it, as
     /// written, by the bytes reader; the defaults from another.
     pub facts: Facts,
+    /// The file's revisions, the first first, when the reader read its
+    /// cross-reference sections: the last's trailer is
+    /// [`Document::trailer`] as read. Empty where the file was scanned, or
+    /// its later revisions list more numbers in all than the reader reads
+    /// entries ([`Limits::entries`](crate::Limits::entries)), and in a
+    /// document built.
+    pub revisions: Vec<Revision>,
+    /// The object streams whose data an encrypted file leaves in the clear,
+    /// by `/StmF` or their own `/Crypt` filter `/Identity`, while it
+    /// encrypts its strings, by number: the strings of the objects read
+    /// from them are in the clear (ISO 32000-2, 7.5.7, 7.6.6). The reader
+    /// records each whose data it decoded, or a decoder did.
+    pub in_the_clear: BTreeSet<ObjectId>,
 }
 
 /// Where an object was read from, which the bytes reader records when it
@@ -303,6 +345,26 @@ pub struct Facts {
     /// the file's length counted from there. An update appended after it,
     /// which changes the length, voids it. Its hint tables aren't read.
     pub linearized: bool,
+}
+
+/// One of a file's revisions (ISO 32000-2, 7.5.6): the file as first
+/// written, or what an incremental update added after it. A linearized
+/// file's first-page cross-reference section and the main one its `/Prev`
+/// gives, later in the file, are one revision (Annex F). A reader outside
+/// the crate makes one by [`Revision::new`].
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Revision {
+    /// Where its newest cross-reference section starts: what its
+    /// `startxref` gave.
+    pub at: usize,
+    /// Its trailer: its newest section's, the dictionary after `trailer`
+    /// or the cross-reference stream ([`Trailer::stream`]).
+    pub trailer: Trailer,
+    /// The numbers its sections list, in use or free, but 0, in order:
+    /// what it may have written over of an earlier revision's. None for
+    /// the first, before which there's none.
+    pub numbers: Option<Box<[u32]>>,
 }
 
 /// How a cross-reference section is written.
@@ -508,6 +570,46 @@ impl Update {
     }
 }
 
+impl Revision {
+    /// The revision whose newest cross-reference section starts at `at`,
+    /// under `trailer`, its sections listing `numbers` (none for the
+    /// first).
+    pub fn new(at: usize, trailer: Trailer, numbers: Option<Box<[u32]>>) -> Revision {
+        Revision {
+            at,
+            trailer,
+            numbers,
+        }
+    }
+}
+
+impl Unread {
+    /// The object stream an object that doesn't read is in, where why is
+    /// that stream's or the object's place in it: the stream doesn't
+    /// decode, or nothing decodes it, it doesn't read or isn't in the file,
+    /// its header doesn't say where the object is, or has no such object,
+    /// or numbers it another, it has no data, or the object runs to where a
+    /// fault cut it off. None for the rest, an object in one that doesn't
+    /// parse among them, which isn't placed.
+    pub fn container(&self) -> Option<u32> {
+        match *self {
+            Unread::Container { stream, .. }
+            | Unread::Undecodable { stream }
+            | Unread::ContainerUnread { stream, .. }
+            | Unread::ContainerMissing { stream }
+            | Unread::ContainerHeader { stream, .. }
+            | Unread::NoIndex { stream, .. }
+            | Unread::Numbered { stream, .. }
+            | Unread::NoData { stream }
+            | Unread::Cut { stream } => Some(stream),
+            Unread::Missing { .. }
+            | Unread::Parse(_)
+            | Unread::Elsewhere { .. }
+            | Unread::Other(_) => None,
+        }
+    }
+}
+
 /// What a [`Document`] holds of an object its cross-references list: the
 /// object, with the record of where it was read while it's as read, none
 /// for one put in or taken to edit; or why it doesn't read.
@@ -571,6 +673,8 @@ impl Document {
             metadata: None,
             encryption: Encryption::None,
             facts: Facts::default(),
+            revisions: Vec::new(),
+            in_the_clear: BTreeSet::new(),
         }
     }
 
@@ -598,6 +702,8 @@ impl Document {
             metadata: None,
             encryption: Encryption::None,
             facts: Facts::default(),
+            revisions: Vec::new(),
+            in_the_clear: BTreeSet::new(),
         }
     }
 
@@ -930,6 +1036,26 @@ impl Source for Document {
 
     fn metadata(&self) -> Option<&[u8]> {
         self.metadata.as_deref()
+    }
+
+    fn record(&self, id: ObjectId) -> Option<&Record> {
+        Document::record(self, id)
+    }
+
+    fn decoded(&self, stream: ObjectId) -> Option<&[u8]> {
+        self.decoded.get(&stream).map(Vec::as_slice)
+    }
+
+    fn revisions(&self) -> &[Revision] {
+        &self.revisions
+    }
+
+    fn facts(&self) -> Option<&Facts> {
+        Some(&self.facts)
+    }
+
+    fn in_the_clear(&self, stream: ObjectId) -> bool {
+        self.in_the_clear.contains(&stream)
     }
 }
 
@@ -1266,6 +1392,130 @@ mod tests {
         for (unread, said) in cases {
             assert_eq!(unread.to_string(), said, "{unread:?}");
         }
+    }
+
+    /// The object stream an object that doesn't read is in, for each reason
+    /// that's its stream's or its place in it; none for the rest, an object
+    /// in one that doesn't parse among them.
+    #[test]
+    fn why_an_object_doesnt_read_says_the_object_stream_its_in_where_its_why() {
+        let stream = 4;
+        let inner = Unread::Parse(parse::Error::Header { at: 7 });
+        let placed = [
+            Unread::Container {
+                stream,
+                why: Undecoded::NotAStream,
+            },
+            Unread::Undecodable { stream },
+            Unread::ContainerUnread {
+                stream,
+                why: Box::new(inner.clone()),
+            },
+            Unread::ContainerMissing { stream },
+            Unread::ContainerHeader {
+                stream,
+                why: Unindexed::Counts,
+            },
+            Unread::NoIndex { stream, index: 2 },
+            Unread::Numbered {
+                stream,
+                index: 1,
+                number: 9,
+                expected: 3,
+            },
+            Unread::NoData { stream },
+            Unread::Cut { stream },
+        ];
+        for why in &placed {
+            assert_eq!(why.container(), Some(stream), "{why:?}");
+        }
+        let unplaced = [
+            Unread::Missing { id: (3, 0) },
+            inner,
+            Unread::Elsewhere {
+                offset: 120,
+                found: (5, 0),
+                expected: (3, 0),
+            },
+            Unread::Other("qpdf's words".to_string()),
+        ];
+        for why in &unplaced {
+            assert_eq!(why.container(), None, "{why:?}");
+        }
+    }
+
+    /// A reader outside the crate makes a revision, as it does an update.
+    #[test]
+    fn a_revision_is_made_outside_the_crate_by_new() {
+        let trailer = Trailer::new(dict! { "Size" => 3 }.into());
+        let first = Revision::new(9, trailer.clone(), None);
+        assert_eq!(
+            (first.at, &first.trailer, &first.numbers),
+            (9, &trailer, &None)
+        );
+        let numbers: Box<[u32]> = Box::new([2, 5]);
+        let later = Revision::new(120, trailer, Some(numbers.clone()));
+        assert_eq!(later.numbers, Some(numbers));
+        assert_ne!(first, later);
+    }
+
+    /// A reader of its own, implementing `Source`'s five methods alone,
+    /// gives none of what a reader may know besides: no record, decoded
+    /// data, revisions or facts, and no object stream in the clear. A
+    /// document gives what it holds, through the trait as through itself.
+    #[test]
+    fn a_source_says_what_a_reader_knows_besides_where_it_knows_it() {
+        struct Own(Trailer);
+        impl Source for Own {
+            fn ids(&self) -> Vec<ObjectId> {
+                Vec::new()
+            }
+            fn get(&self, id: ObjectId) -> Result<&Object, Unread> {
+                Err(Unread::Missing { id })
+            }
+            fn trailer(&self) -> &Trailer {
+                &self.0
+            }
+            fn header_version(&self) -> Option<Version> {
+                None
+            }
+            fn warnings(&self) -> &[Warning] {
+                &[]
+            }
+        }
+        let own = Own(Trailer::new(dict! {}.into()));
+        assert_eq!(own.record((1, 0)), None);
+        assert_eq!(own.decoded((4, 0)), None);
+        assert!(own.revisions().is_empty());
+        assert_eq!(own.facts(), None);
+        assert!(!own.in_the_clear((4, 0)));
+
+        // qpdf's file of object streams, read whole, where the crate has it.
+        let Some(file) = fixture("qpdf-compressed") else {
+            return;
+        };
+        let mut doc = crate::bytes::read(&file);
+        let source: &dyn Source = &doc;
+        let member = (doc.objects())
+            .find_map(|(id, o)| Some((id, o.at?.stream?)))
+            .expect("a member");
+        let (id, stream) = member;
+        assert_eq!(source.record(id), doc.record(id));
+        assert!(source.record(id).is_some());
+        assert_eq!(source.decoded(stream), Some(&doc.decoded[&stream][..]));
+        assert_eq!(source.decoded((1_000_000, 0)), None);
+        assert_eq!(source.revisions(), &doc.revisions[..]);
+        assert_eq!(source.revisions().len(), 1);
+        assert_eq!(source.facts(), Some(&doc.facts));
+        assert!(!source.in_the_clear(stream));
+        doc.in_the_clear.insert(stream);
+        assert!(Source::in_the_clear(&doc, stream));
+
+        // One built has the defaults, and no revisions.
+        let built = Document::new(Version::new(1, 7), dict! {});
+        assert!(Source::revisions(&built).is_empty());
+        assert_eq!(Source::facts(&built), Some(&Facts::default()));
+        assert!(built.in_the_clear.is_empty());
     }
 
     /// Where `needle` first is in `file`.
@@ -1814,5 +2064,6 @@ mod tests {
         shared::<Unread>();
         shared::<Record>();
         shared::<Facts>();
+        shared::<Revision>();
     }
 }

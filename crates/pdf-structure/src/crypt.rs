@@ -20,6 +20,10 @@
 //!   14.3.2; [`List::stream`]).
 //! - **`/Identity`** leaves strings or streams as they are (7.6.6 and Table
 //!   20; [`List::settle`]).
+//! - **An object stream's objects' strings,** encrypted with its data,
+//!   whole, not each with its object's key: in the clear where its data is
+//!   and strings aren't ([`bares_strings`], 7.5.7, 7.6.2), which the writer
+//!   doesn't pack in ([`packs`]), and the reader records ([`List::bares`]).
 
 use std::collections::HashSet;
 
@@ -107,11 +111,11 @@ impl List {
         // the handler.
         let identity = |f: &Option<Vec<u8>>| f.as_deref().is_none_or(|f| f == b"Identity");
         self.strings = match opened {
-            Ok(handler) => !matches!(handler.strings(), Method::Identity | Method::None),
+            Ok(handler) => !plain(handler.strings()),
             Err(_) => !(values.v >= 4 && identity(&values.str_f)),
         };
         self.streams = match opened {
-            Ok(handler) => !matches!(handler.streams(), Method::Identity | Method::None),
+            Ok(handler) => !plain(handler.streams()),
             Err(_) => !(values.v >= 4 && identity(&values.stm_f)),
         };
         self.unencrypted_metadata = match opened {
@@ -183,6 +187,57 @@ impl List {
             (own, _) => Stream::By(own),
         })
     }
+
+    /// Whether an object stream whose own `/Crypt` filter names `own`, none
+    /// where it has none, leaves the strings of the objects in it in the
+    /// clear ([`bares_strings`]): its data encrypted as that crypt filter
+    /// says, else as the file's streams are (7.6.6), by `handler`'s methods
+    /// where the file opened. Where it didn't, as its encryption dictionary
+    /// says, which settled the list, and as the reader reads the stream: in
+    /// the clear by its own crypt filter `/Identity`, or without one where
+    /// the file's streams are.
+    pub(crate) fn bares(&self, handler: Option<&Handler>, own: Option<&[u8]>) -> bool {
+        match handler {
+            Some(handler) => {
+                let named;
+                let data = match own {
+                    Some(name) => {
+                        named = handler.named(name);
+                        &named
+                    }
+                    None => handler.streams(),
+                };
+                bares_strings(data, handler.strings())
+            }
+            None => self.strings && own.map_or(!self.streams, |name| name == b"Identity"),
+        }
+    }
+}
+
+/// Whether what's encrypted by `method` is left in the clear: `/Identity`,
+/// or a crypt filter whose method is `/None`, which leaves it as it is.
+fn plain(method: &Method) -> bool {
+    matches!(method, Method::Identity | Method::None)
+}
+
+/// Whether an object stream whose data is encrypted by `data` leaves its
+/// objects' strings in the clear where strings are encrypted by
+/// `strings`: an object in one isn't encrypted itself but with its
+/// stream's data, whole (ISO 32000-2, 7.5.7, 7.6.2), so where that's in
+/// the clear and strings aren't, theirs are.
+pub(crate) fn bares_strings(data: &Method, strings: &Method) -> bool {
+    plain(data) && !plain(strings)
+}
+
+/// Whether a writer may put objects in object streams in a file whose
+/// streams are encrypted by `streams` and strings by `strings`
+/// ([`write::Encryptor::packs`](crate::write::Encryptor::packs)): not where
+/// a container it encrypts as a stream, whole, would leave its objects'
+/// strings in the clear ([`bares_strings`]); nor where either's method
+/// isn't one.
+pub(crate) fn packs(streams: &Method, strings: &Method) -> bool {
+    let known = |m: &Method| !matches!(m, Method::Unknown(_));
+    known(streams) && known(strings) && !bares_strings(streams, strings)
 }
 
 /// Whether `dict` is a signature's, whose `/Contents`, and all in it, isn't
@@ -256,4 +311,97 @@ pub(crate) fn metadata_stream<'o, E>(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every method a crypt filter can have, and one that isn't one.
+    fn methods() -> [Method; 6] {
+        [
+            Method::Identity,
+            Method::None,
+            Method::Rc4,
+            Method::Aes128,
+            Method::Aes256,
+            Method::Unknown(b"Nonesuch".to_vec()),
+        ]
+    }
+
+    /// An object stream's data in the clear, `/Identity` or `/CFM /None`,
+    /// leaves its objects' strings in the clear where strings aren't; data
+    /// encrypted, or strings in the clear too, doesn't.
+    #[test]
+    fn an_object_stream_bares_strings_where_its_data_is_in_the_clear_and_strings_arent() {
+        let plain = |m: &Method| matches!(m, Method::Identity | Method::None);
+        for data in methods() {
+            for strings in methods() {
+                assert_eq!(
+                    bares_strings(&data, &strings),
+                    plain(&data) && !plain(&strings),
+                    "{data:?} {strings:?}"
+                );
+            }
+        }
+        assert!(bares_strings(&Method::Identity, &Method::Aes128));
+        assert!(bares_strings(&Method::None, &Method::Rc4));
+        assert!(bares_strings(
+            &Method::Identity,
+            &Method::Unknown(b"X".to_vec())
+        ));
+        assert!(!bares_strings(&Method::Aes256, &Method::Aes256));
+        assert!(!bares_strings(&Method::Aes256, &Method::Identity));
+        assert!(!bares_strings(&Method::Identity, &Method::None));
+        assert!(!bares_strings(
+            &Method::Unknown(b"X".to_vec()),
+            &Method::Rc4
+        ));
+    }
+
+    /// What a writer packs is as it was before it was said through
+    /// `bares_strings`, over every pair of methods: the old expression
+    /// beside.
+    #[test]
+    fn what_a_writer_packs_is_as_before_over_every_pair_of_methods() {
+        let before = |streams: &Method, strings: &Method| {
+            let plain = |m: &Method| matches!(m, Method::Identity | Method::None);
+            let known = |m: &Method| !matches!(m, Method::Unknown(_));
+            known(streams) && known(strings) && (!plain(streams) || plain(strings))
+        };
+        for streams in methods() {
+            for strings in methods() {
+                assert_eq!(
+                    packs(&streams, &strings),
+                    before(&streams, &strings),
+                    "{streams:?} {strings:?}"
+                );
+            }
+        }
+    }
+
+    /// Where the file opened, an object stream's data is encrypted by its
+    /// own crypt filter's method, else the streams'; where it didn't, as
+    /// the list says, its own crypt filter `/Identity` in the clear.
+    #[test]
+    fn an_object_stream_bares_strings_by_its_own_crypt_filter_else_the_files_streams() {
+        let list = |strings: bool, streams: bool| List {
+            encrypts: true,
+            strings,
+            streams,
+            ..List::default()
+        };
+        // Not opened: by the list.
+        let cases = [
+            (list(true, false), None, true),
+            (list(true, false), Some(&b"StdCF"[..]), false),
+            (list(true, true), None, false),
+            (list(true, true), Some(&b"Identity"[..]), true),
+            (list(false, false), None, false),
+            (list(false, true), Some(&b"Identity"[..]), false),
+        ];
+        for (list, own, bares) in cases {
+            assert_eq!(list.bares(None, own), bares, "{own:?}");
+        }
+    }
 }

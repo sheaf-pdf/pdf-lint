@@ -3,7 +3,8 @@
 //! written ([`Span`]), dictionaries as written with any key written twice,
 //! and every choice it had to make a [`Warning`]. It reads the header,
 //! `startxref`, the cross-reference tables and streams along their `/Prev`
-//! chain, and each object at the offset they give, a stream's data by its
+//! chain, each revision they make kept with its trailer ([`Revision`]),
+//! and each object at the offset they give, a stream's data by its
 //! `/Length` when that ends at `endstream`. Where the sections don't read,
 //! it finds the objects by scanning the file, and says so. An object that
 //! doesn't read says why ([`Unread`]): it doesn't parse, its offset holds
@@ -100,6 +101,11 @@
 //!   (7.5.7, 7.6.2). Held by
 //!   `an_object_streams_own_crypt_filter_says_how_its_data_decrypts` and
 //!   `an_encrypted_files_object_streams_decrypt_by_the_reader_as_through_qpdf`.
+//!   Where the stream's data is in the clear, by `/StmF` or its own crypt
+//!   filter `/Identity`, and strings aren't, so are its objects' strings:
+//!   the reader records the stream ([`Document::in_the_clear`]), whether it
+//!   decoded it or a decoder did. Held by
+//!   `an_object_stream_left_in_the_clear_where_strings_arent_is_recorded`.
 //!   The writer writes a member's strings as they are, and encrypts the
 //!   container whole, as a stream; and makes none where streams are left
 //!   in the clear and strings aren't, whose strings would then be in the
@@ -258,7 +264,7 @@
 
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -274,8 +280,8 @@ use crate::crypt::{self, Eff, Get, List, Stream, follow, is_xref};
 use crate::filter;
 pub use crate::filter::Unfiltered;
 use crate::source::{
-    DataExtent, Document, Encryption, Facts, Held, Origin, Record, Trailer, Unread, Update,
-    Warning, XrefKind,
+    DataExtent, Document, Encryption, Facts, Held, Origin, Record, Revision, Trailer, Unread,
+    Update, Warning, XrefKind,
 };
 
 mod file;
@@ -583,6 +589,8 @@ struct Known {
     encryption: Encryption,
     /// What the header and sections say of the file.
     facts: Facts,
+    /// The file's revisions, the first first.
+    revisions: Vec<Revision>,
     /// The largest number the entries list, a free one too, or a
     /// cross-reference stream is, which new ids start past.
     listed: Option<u32>,
@@ -612,6 +620,9 @@ struct Assembly {
     decrypted: Vec<Warning>,
     /// Each object stream's decoded data, where its header read.
     decoded: BTreeMap<ObjectId, Vec<u8>>,
+    /// The object streams whose objects' strings are in the clear, where
+    /// the file's aren't.
+    in_the_clear: BTreeSet<ObjectId>,
 }
 
 impl Assembly {
@@ -639,11 +650,22 @@ impl Assembly {
     }
 
     /// Object stream `stream`, decoded: what the reader warned of as it
-    /// decoded it, and its decoded data, when its header read.
-    fn container(&mut self, stream: u32, warnings: Vec<Warning>, data: Option<Vec<u8>>) {
+    /// decoded it, and its decoded data, when its header read; and whether
+    /// its objects' strings are in the clear, where the file's aren't
+    /// (`clear`).
+    fn container(
+        &mut self,
+        stream: u32,
+        warnings: Vec<Warning>,
+        data: Option<Vec<u8>>,
+        clear: bool,
+    ) {
         self.containers.extend(warnings);
         if let Some(data) = data {
             self.decoded.insert((stream, 0), data);
+        }
+        if clear {
+            self.in_the_clear.insert((stream, 0));
         }
     }
 
@@ -664,6 +686,7 @@ impl Assembly {
             members,
             decrypted,
             decoded,
+            in_the_clear,
         } = self;
         let mut warnings = known.opened;
         warnings.extend(read);
@@ -686,6 +709,8 @@ impl Assembly {
         document.metadata = metadata;
         document.encryption = known.encryption;
         document.facts = known.facts;
+        document.revisions = known.revisions;
+        document.in_the_clear = in_the_clear;
         Ok(document)
     }
 }
@@ -752,6 +777,8 @@ struct Reader {
     update: Option<Update>,
     /// What the header and sections say of the file.
     facts: Facts,
+    /// The file's revisions, the first first, once its sections are read.
+    revisions: Vec<Revision>,
     /// The section it was opened as of ([`Options::section`]), when it
     /// was: a writer's update after it would go after that section, not
     /// the file's last.
@@ -855,6 +882,10 @@ struct Container {
     data: Vec<u8>,
     /// Whether a fault cut its data off.
     cut: bool,
+    /// Whether its objects' strings are in the clear, where the file's
+    /// aren't ([`Reader::bares_strings`]): none are, but where its header
+    /// read.
+    clear: bool,
     /// What the reader warned of as it decoded it.
     warnings: Vec<Warning>,
 }
@@ -976,6 +1007,13 @@ fn listable(len: usize) -> usize {
     len.max(1 << 20)
 }
 
+/// A revision's numbers, as its sections list them: in order, each once.
+fn in_order(mut numbers: Vec<u32>) -> Box<[u32]> {
+    numbers.sort_unstable();
+    numbers.dedup();
+    numbers.into_boxed_slice()
+}
+
 /// Whether `fault` stopped its filter, cutting the data off.
 fn stops(fault: &Fault) -> bool {
     matches!(
@@ -1084,6 +1122,7 @@ impl Reader {
             opened: Vec::new(),
             update: None,
             facts: Facts::default(),
+            revisions: Vec::new(),
             as_of: options.section,
             scanned: false,
             entries: Box::default(),
@@ -1479,12 +1518,34 @@ impl Reader {
             Ok((header, data)) => (Ok(header), data),
             Err(why) => (Err(why), Vec::new()),
         };
+        // Whether its objects' strings are in the clear: what the file
+        // holds, so the same whether it decoded the data or the decoder did.
+        let clear = header.is_ok() && matches!(object, Some(Ok(o)) if self.bares_strings(o));
         Container {
             header,
             data,
             cut,
+            clear,
             warnings: cx.warnings,
         }
+    }
+
+    /// Whether object stream `object` leaves the strings of the objects read
+    /// from it in the clear, in a file whose strings are encrypted: its
+    /// data decrypted by its own crypt filter when it names one, else as
+    /// the file's streams are, as [`Reader::object_stream`] decrypts it,
+    /// isn't encrypted ([`List::bares`]). What its filters' values refer
+    /// to is read already, as its decode reads it, or the whole read.
+    fn bares_strings(&self, object: &Object) -> bool {
+        let Value::Stream(stream) = object.value() else {
+            return false;
+        };
+        if !self.list.strings {
+            return false;
+        }
+        let resolve = |id| self.kept(id)?.ok();
+        let own = filter::crypt_filter(&stream.dict, Some(&resolve));
+        self.list.bares(self.handler.as_ref(), own.as_deref())
     }
 
     /// Every object stream the entries put objects in decoded at once, as
@@ -1624,6 +1685,7 @@ impl Reader {
             update: self.update.clone(),
             encryption: self.encryption.clone(),
             facts: self.facts.clone(),
+            revisions: self.revisions.clone(),
             // New ids start past every number listed, free ones too, and
             // past the cross-reference streams'.
             listed: (self.entries.last())
@@ -1669,10 +1731,11 @@ impl Reader {
                 let Container {
                     header,
                     data,
+                    clear,
                     warnings,
                     ..
                 } = *container;
-                assembly.container(stream, warnings, header.is_ok().then_some(data));
+                assembly.container(stream, warnings, header.is_ok().then_some(data), clear);
             }
         }
         let document = assembly.document(file, decoder, known)?;
@@ -1703,7 +1766,8 @@ impl Reader {
         for (&stream, lock) in &self.containers {
             if let Some(container) = lock.get() {
                 let data = (container.header.is_ok()).then(|| container.data.clone());
-                assembly.container(stream, container.warnings.clone(), data);
+                let warnings = container.warnings.clone();
+                assembly.container(stream, warnings, data, container.clear);
             }
         }
         for i in self.listing(true) {
@@ -2140,6 +2204,22 @@ impl Reader {
         let starts: Vec<usize> = (offsets.iter().copied())
             .chain(streams.map(|&(at, _, _)| at))
             .collect();
+        // Which revision each section is of, counted back from the newest,
+        // 0: a section is of the one whose /Prev gives it where it's written
+        // after it, as a linearized file's main section is after its first
+        // page's (Annex F), the rule an update is told by below; else it's
+        // of an earlier one. The first revision lists no numbers, as there's
+        // none before it for them to write over; the others' are kept, as
+        // read, no more of them in all than the entries the reader reads.
+        let mut back = vec![0usize; offsets.len()];
+        for i in 1..offsets.len() {
+            back[i] = back[i - 1] + usize::from(offsets[i] < offsets[i - 1]);
+        }
+        let oldest = back.last().copied().unwrap_or(0);
+        let mut revisions: Vec<Revision> = Vec::new();
+        let mut numbers: Vec<u32> = Vec::new();
+        let mut kept = 0usize;
+        let mut fits = true;
         for (i, section) in sections.into_iter().enumerate() {
             let mut listed = section.table;
             if let Some((offset, id, stream)) = &section.stream {
@@ -2177,6 +2257,22 @@ impl Reader {
                     }
                 }
             }
+            // Where a revision begins, at its newest section, the one after
+            // it, read before it, is done.
+            let begins = i == 0 || back[i] != back[i - 1];
+            if begins {
+                if let Some(last) = revisions.last_mut().filter(|_| i > 0) {
+                    last.numbers = Some(in_order(std::mem::take(&mut numbers)));
+                }
+            }
+            if back[i] != oldest && fits {
+                kept = kept.saturating_add(listed.len());
+                fits = kept <= self.listable;
+                match fits {
+                    true => numbers.extend(listed.keys().copied().filter(|&n| n != 0)),
+                    false => numbers = Vec::new(),
+                }
+            }
             // An update is written after the section it follows: a
             // linearized file's first section, before its other, isn't one.
             if let [newest, previous, ..] = offsets[..] {
@@ -2210,11 +2306,22 @@ impl Reader {
                 );
                 cx.warn(None, None, message);
             }
-            trailer.get_or_insert(section.trailer);
+            if i == 0 {
+                trailer = Some(section.trailer.clone());
+            }
+            if begins {
+                revisions.push(Revision::new(offsets[i], section.trailer, None));
+            }
         }
         let Some(trailer) = trailer else {
             return Ok(Err("no section".to_string()));
         };
+        // The first first; none where the numbers don't fit.
+        revisions.reverse();
+        if !fits {
+            revisions.clear();
+        }
+        self.revisions = revisions;
         self.entries = entries.into_iter().collect();
         self.offsets = starts.into();
         self.facts = Facts {
@@ -3939,6 +4046,139 @@ mod tests {
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert!(doc.get((1, 0)).is_ok());
         assert_eq!(doc.update, None);
+    }
+
+    /// A linearized file's first section, its catalog in it, and its main
+    /// section, after it, which its `/Prev` gives: one revision, written
+    /// before the main section's (Annex F). With where its first section
+    /// starts, what its `startxref` gives.
+    fn linearized() -> (Vec<u8>, usize) {
+        let mut file = b"%PDF-1.7\n".to_vec();
+        let one = file.len();
+        file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog >>\nendobj\n");
+        let first = file.len();
+        let last = first + 120;
+        let section = format!(
+            "xref\n0 2\n0000000000 65535 f \n{one:010} 00000 n \ntrailer\n<< /Size 2 /Root 1 0 R /Prev {last} >>\n"
+        );
+        file.extend_from_slice(section.as_bytes());
+        file.resize(last, b' ');
+        file.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 2 >>\n");
+        file.extend_from_slice(format!("startxref\n{first}\n%%EOF\n").as_bytes());
+        (file, first)
+    }
+
+    /// `file` with an update appended, writing object `n` and listing it
+    /// alone, after the section at `prev`; and where its section starts.
+    fn updated(mut file: Vec<u8>, n: u32, prev: usize) -> (Vec<u8>, usize) {
+        let at = file.len();
+        file.extend_from_slice(format!("{n} 0 obj\n<< /N {n} >>\nendobj\n").as_bytes());
+        let xref = file.len();
+        let size = n + 1;
+        file.extend_from_slice(
+            format!(
+                "xref\n{n} 1\n{at:010} 00000 n \ntrailer\n<< /Size {size} /Root 1 0 R /Prev {prev} >>\nstartxref\n{xref}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        (file, xref)
+    }
+
+    /// Each revision, the first first: where its newest section starts,
+    /// its trailer, a cross-reference stream's or a table's, and the
+    /// numbers its sections list, in use or free, but 0, the first's none;
+    /// the last's trailer the document's. A linearized file's two sections
+    /// are one revision, and an update after it another; a file scanned
+    /// has none. Read as of an earlier section, the revisions up to it; and
+    /// a reading on demand, the whole read's.
+    #[test]
+    fn each_revision_is_kept_with_its_trailer_and_the_numbers_it_lists() {
+        // One section.
+        let base: Vec<(u32, Body)> = vec![
+            (1, dict! { "Type" => "Catalog" }.into()),
+            (2, dict! { "A" => 1 }.into()),
+            (3, dict! { "B" => 2 }.into()),
+        ];
+        let file = fixture::file("1.7", &base, root(), Xref::Table);
+        let doc = read(&file);
+        let one = Revision::new(startxref(&file), doc.trailer.clone(), None);
+        assert_eq!(doc.revisions, [one]);
+
+        // A cross-reference stream, its stream object 4; then an update
+        // that writes 2 and frees 3, its table listing 0 too; then one that
+        // writes 5.
+        let mut file = fixture::file("1.7", &base, root(), Xref::Stream);
+        let first = startxref(&file);
+        let changed = file.len();
+        file.extend_from_slice(b"2 0 obj\n<< /A 9 >>\nendobj\n");
+        let second = file.len();
+        file.extend_from_slice(
+            format!(
+                "xref\n0 1\n0000000000 65535 f \n2 2\n{changed:010} 00000 n \n0000000000 00001 f \n\
+                 trailer\n<< /Size 5 /Root 1 0 R /Prev {first} >>\nstartxref\n{second}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        let (file, third) = updated(file, 5, second);
+        let doc = read(&file);
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        let ats: Vec<usize> = doc.revisions.iter().map(|r| r.at).collect();
+        assert_eq!(ats, [first, second, third]);
+        let numbers: Vec<Option<&[u32]>> = (doc.revisions.iter())
+            .map(|r| r.numbers.as_deref())
+            .collect();
+        assert_eq!(numbers, [None, Some(&[2, 3][..]), Some(&[5][..])]);
+        let streams: Vec<Option<ObjectId>> =
+            (doc.revisions.iter()).map(|r| r.trailer.stream).collect();
+        assert_eq!(streams, [Some((4, 0)), None, None]);
+        let sizes: Vec<Option<i64>> = (doc.revisions.iter())
+            .map(|r| r.trailer.dict().get(b"Size").and_then(Object::as_integer))
+            .collect();
+        assert_eq!(sizes, [Some(5), Some(5), Some(6)]);
+        assert_eq!(doc.revisions[2].trailer, doc.trailer);
+
+        // As of an earlier section, the revisions up to it; and on demand,
+        // the whole read's, as the document made of it has them.
+        assert_eq!(read_from(&file, second).revisions, doc.revisions[..2]);
+        assert_eq!(read_from(&file, first).revisions, doc.revisions[..1]);
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        assert_eq!(reading.revisions(), &doc.revisions[..]);
+        assert_eq!(reading.to_document().unwrap().revisions, doc.revisions);
+        assert_eq!(reading.into_document().unwrap().revisions, doc.revisions);
+
+        // The numbers kept no more in all than the entries the reader
+        // reads: past them, no revision is kept.
+        assert_eq!(read_listing(&file, 4).revisions.len(), 3);
+        assert!(read_listing(&file, 3).revisions.is_empty());
+
+        // A linearized file: one revision of two sections, its trailer its
+        // first section's, read first; updated, two.
+        let (file, first) = linearized();
+        let doc = read(&file);
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert_eq!(doc.facts.sections, 2);
+        assert_eq!(doc.revisions.len(), 1);
+        let only = &doc.revisions[0];
+        assert_eq!((only.at, &only.numbers), (first, &None));
+        assert_eq!(only.trailer, doc.trailer);
+        assert!(only.trailer.dict().has(b"Root"));
+        let (file, update) = updated(file, 2, first);
+        let doc = read(&file);
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert_eq!(doc.facts.sections, 3);
+        let ats: Vec<usize> = doc.revisions.iter().map(|r| r.at).collect();
+        assert_eq!(ats, [first, update]);
+        assert_eq!(doc.revisions[0].numbers, None);
+        assert_eq!(doc.revisions[1].numbers.as_deref(), Some(&[2][..]));
+        assert!(doc.revisions[0].trailer.dict().has(b"Root"));
+
+        // Scanned, as its sections don't read: none.
+        let file = fixture::file("1.7", &base, root(), Xref::Table);
+        let at = rfind(&file, b"startxref").unwrap();
+        let file = [&file[..at], b"startxreF", &file[at + 9..]].concat();
+        let doc = read(&file);
+        assert!(doc.trailer.unwritten.is_some());
+        assert!(doc.revisions.is_empty());
     }
 
     #[test]
@@ -5751,6 +5991,170 @@ mod tests {
                 Value::String(Str::Bytes(b"plain".to_vec()), Some(Form::Literal)),
                 "{filter}"
             );
+        }
+    }
+
+    /// `/Encrypt` and `/ID` for `filtered`'s file, of `kind` (AES-128,
+    /// AES-256 or RC4 by 128 bits, its user password `user`), its streams
+    /// and strings encrypted as `stm_f` and `str_f` say where it has crypt
+    /// filters; and its handler, opened by `user`.
+    fn encrypt_entries(
+        kind: pdf_crypt::writer::Kind,
+        user: &'static [u8],
+        stm_f: &str,
+        str_f: &str,
+    ) -> (String, Handler) {
+        use pdf_crypt::writer::Kind;
+        let values = pdf_crypt::writer::dictionary(&settings(kind, user));
+        let handler =
+            Handler::open(&values, b"0123456789abcdef", &[Encoded::verbatim(user)]).unwrap();
+        let hex = |b: &Option<Vec<u8>>| -> String {
+            b.as_ref()
+                .unwrap()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        let (o, u) = (hex(&values.o), hex(&values.u));
+        let filters = format!("/StmF {stm_f} /StrF {str_f}");
+        let encrypt = match kind {
+            Kind::Aes128 => format!(
+                "/V 4 /R 4 /Length 128 /P -4 /O <{o}> /U <{u}> /CF << /StdCF << /CFM /AESV2 >> >> {filters}"
+            ),
+            Kind::Aes256 => format!(
+                "/V 5 /R 6 /Length 256 /P -4 /O <{o}> /U <{u}> /OE <{}> /UE <{}> /Perms <{}> /CF << /StdCF << /CFM /AESV3 >> >> {filters}",
+                hex(&values.oe),
+                hex(&values.ue),
+                hex(&values.perms)
+            ),
+            _ => format!("/V 2 /R 3 /Length 128 /P -4 /O <{o}> /U <{u}>"),
+        };
+        let entries = format!(
+            "/Root 1 0 R /Encrypt << /Filter /Standard {encrypt} >> /ID [(0123456789abcdef) (0123456789abcdef)]"
+        );
+        (entries, handler)
+    }
+
+    /// [`filtered`]'s file, its object stream's dictionary given `filter`'s
+    /// entries and its data `data`, encrypted by `entries`, its catalog's
+    /// string, written in plain view, blanked out, so that nothing moves.
+    fn encrypted_filtered(entries: &str, filter: &str, data: &[u8]) -> Vec<u8> {
+        let mut file = filtered(false, filter, data);
+        let at = find(&file, b"/Lang (en)").unwrap();
+        file[at..at + 10].fill(b' ');
+        let at = find(&file, b"/Root 1 0 R").unwrap();
+        [&file[..at], entries.as_bytes(), &file[at + 11..]].concat()
+    }
+
+    /// An object stream whose data an encrypted file leaves in the clear,
+    /// by `/StmF /Identity` or its own `/Crypt` filter `/Identity`, while
+    /// it encrypts its strings, is recorded, as its objects' strings are in
+    /// the clear: under AES-128 and AES-256, natively, through a decoder
+    /// and on demand alike. Not one whose data is encrypted, nor any in a
+    /// file whose strings aren't (both `/Identity`, read as plain), nor
+    /// under RC4, which has no crypt filters, so a `/Crypt` filter
+    /// `/Identity` is as the streams are. A file no password opens has its
+    /// object streams read only through a decoder, which records it by the
+    /// encryption dictionary.
+    #[test]
+    fn an_object_stream_left_in_the_clear_where_strings_arent_is_recorded() {
+        use pdf_crypt::writer::Kind;
+        let (objects, _) = objects_2_and_3();
+        let plain = fixture::zlib(&objects);
+        let four = BTreeSet::from([(4, 0)]);
+        let none = BTreeSet::new();
+        let own = |name: &str| {
+            format!(" /Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /{name} >> null]")
+        };
+        let decoder = BTreeMap::from([((4, 0), objects.clone())]);
+        for kind in [Kind::Aes128, Kind::Aes256] {
+            // /StmF /Identity, strings encrypted: in the clear.
+            let (entries, _) = encrypt_entries(kind, b"", "/Identity", "/StdCF");
+            let file = encrypted_filtered(&entries, " /Filter /FlateDecode", &plain);
+            let doc = read(&file);
+            assert!(
+                matches!(doc.encryption, Encryption::Opened { .. }),
+                "{kind:?}"
+            );
+            assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+            let pages = doc.get((2, 0)).unwrap().as_dict().unwrap();
+            assert_eq!(
+                *pages.get(b"Mine").unwrap().value(),
+                Value::String(Str::Bytes(b"plain".to_vec()), Some(Form::Literal)),
+            );
+            assert_eq!(doc.in_the_clear, four, "{kind:?}");
+            assert_eq!(read_through(&file, &decoder).in_the_clear, four, "{kind:?}");
+            let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+            assert!(reading.get((3, 0)).is_ok());
+            assert_eq!(
+                reading.to_document().unwrap().in_the_clear,
+                four,
+                "{kind:?}"
+            );
+
+            // Its own crypt filter /Identity, the file's streams and strings
+            // encrypted: in the clear; its own naming none, /Identity too.
+            let (entries, handler) = encrypt_entries(kind, b"", "/StdCF", "/StdCF");
+            for filter in [
+                own("Identity"),
+                " /Filter [/Crypt /FlateDecode]".to_string(),
+            ] {
+                let file = encrypted_filtered(&entries, &filter, &plain);
+                let doc = read(&file);
+                assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+                assert!(doc.get((2, 0)).is_ok());
+                assert_eq!(doc.in_the_clear, four, "{kind:?} {filter}");
+                assert_eq!(read_through(&file, &decoder).in_the_clear, four);
+            }
+
+            // Both encrypted, by /StmF or its own crypt filter: not.
+            let encrypted =
+                pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &plain, None, [4; 16]).unwrap();
+            for filter in [" /Filter /FlateDecode".to_string(), own("StdCF")] {
+                let file = encrypted_filtered(&entries, &filter, &encrypted);
+                let doc = read(&file);
+                assert!(doc.warnings.is_empty(), "{kind:?}: {:?}", doc.warnings);
+                assert!(doc.get((2, 0)).is_ok());
+                assert_eq!(doc.in_the_clear, none, "{kind:?} {filter}");
+                assert_eq!(read_through(&file, &decoder).in_the_clear, none);
+            }
+
+            // Strings in the clear, its data too: not, opened or plain.
+            for user in [&b""[..], b"user"] {
+                let (entries, _) = encrypt_entries(kind, user, "/Identity", "/Identity");
+                let file = encrypted_filtered(&entries, " /Filter /FlateDecode", &plain);
+                let doc = read(&file);
+                assert!(doc.get((2, 0)).is_ok());
+                assert_eq!(doc.in_the_clear, none, "{kind:?}");
+            }
+            let (entries, _) = encrypt_entries(kind, b"user", "/Identity", "/Identity");
+            let file = encrypted_filtered(&entries, " /Filter /FlateDecode", &plain);
+            assert_eq!(read(&file).encryption, Encryption::Plain);
+
+            // No password opens it: natively, its object stream isn't read;
+            // through a decoder, it's in the clear by the dictionary.
+            let (entries, _) = encrypt_entries(kind, b"user", "/Identity", "/StdCF");
+            let file = encrypted_filtered(&entries, " /Filter /FlateDecode", &plain);
+            let doc = read(&file);
+            assert_eq!(doc.encryption, Encryption::Locked);
+            assert!(doc.get((2, 0)).is_err());
+            assert_eq!(doc.in_the_clear, none, "{kind:?}");
+            let through = read_through(&file, &decoder);
+            assert!(through.get((2, 0)).is_ok());
+            assert_eq!(through.in_the_clear, four, "{kind:?}");
+        }
+
+        // RC4: streams and strings both encrypted, and a crypt filter named
+        // /Identity is as the streams are, below /V 4.
+        let (entries, handler) = encrypt_entries(Kind::Rc4By128, b"", "", "");
+        let encrypted =
+            pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &plain, None, [4; 16]).unwrap();
+        for filter in [" /Filter /FlateDecode".to_string(), own("Identity")] {
+            let file = encrypted_filtered(&entries, &filter, &encrypted);
+            let doc = read(&file);
+            assert!(doc.warnings.is_empty(), "{filter}: {:?}", doc.warnings);
+            assert!(doc.get((2, 0)).is_ok());
+            assert_eq!(doc.in_the_clear, none, "{filter}");
         }
     }
 

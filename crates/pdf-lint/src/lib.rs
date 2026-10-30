@@ -35,7 +35,7 @@ pub use pdf_objects::{Resolve, dict, object, version};
 // pdf-crypt's.
 pub use pdf_structure::{bytes, pdf_crypt, pdf_filters, source};
 pub use predicate::{Cx, FileCx, Gate, Reference, Since, Truth};
-pub use source::{Document, Encryption, Source, Trailer, Update, Warning};
+pub use source::{Document, Encryption, Revision, Source, Trailer, Update, Warning};
 pub use version::Version;
 
 /// The model's tables, pdf-arlington's [`grammar`](pdf_arlington::grammar)

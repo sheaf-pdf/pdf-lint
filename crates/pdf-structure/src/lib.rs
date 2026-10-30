@@ -14,7 +14,9 @@
 //!   whole: each object its cross-references list, kept with where it was
 //!   read while it's as read, or why it doesn't read ([`Unread`]); the
 //!   [`Trailer`], and why it isn't the newest section's when it isn't;
-//!   the header's version; and the file's newest incremental [`Update`].
+//!   the header's version; the file's newest incremental [`Update`], and
+//!   each of its revisions, the first first, with its trailer
+//!   ([`Revision`]).
 //! - **A document in memory:** a [`Document`] built, or read whole, then
 //!   added to, its new objects numbered past every number the file lists;
 //!   its references followed, and what its trailer reaches walked, the
@@ -105,8 +107,8 @@ pub use pdf_crypt::{Encoded, Encoding, Password};
 pub use pdf_filters;
 pub use pdf_objects;
 pub use source::{
-    DataExtent, Document, Encryption, Facts, Origin, Record, Source, Trailer, Unread, Update,
-    Warning, XrefKind,
+    DataExtent, Document, Encryption, Facts, Origin, Record, Revision, Source, Trailer, Unread,
+    Update, Warning, XrefKind,
 };
 
 /// The README's examples, run as doctests.

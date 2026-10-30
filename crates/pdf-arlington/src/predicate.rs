@@ -78,6 +78,7 @@ pub const SUPPORTED: &[&str] = &[
     "fn:IsRequired",
     "fn:MustBeDirect",
     "fn:MustBeIndirect",
+    "fn:NoCycle",
     "fn:Not",
     "fn:NotStandard14Font",
     "fn:PageContainsStructContentItems",
@@ -411,9 +412,9 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
 
     /// The number of the indirect object the container is, not one it's
-    /// written inside: `fn:ImageIsStructContentItem` and
-    /// `fn:PageContainsStructContentItems` know it by that alone, where
-    /// without one they know it by where it was written. So one built in
+    /// written inside: `fn:ImageIsStructContentItem`,
+    /// `fn:PageContainsStructContentItems` and `fn:NoCycle` know it by that
+    /// alone, where without one they know it by where it was written. So one built in
     /// memory, or edited, which has no span, is still known, and one whose
     /// bytes are another object's too, as an object stream's header can
     /// start two of its objects at one offset, is told apart from it.
@@ -1091,6 +1092,7 @@ fn call(f: &str, args: &[Expr], cx: &Cx) -> Tri {
             other => other,
         },
         ("fn:NotStandard14Font", []) => Tri::Is(not_standard_14(cx)),
+        ("fn:NoCycle", []) => no_cycle(f, cx),
         // A note to readers, which asks nothing of the value: the row is
         // ignored when the condition holds, or always, or only meaningful
         // when it holds ([`ignored`] says which).
@@ -1121,6 +1123,37 @@ fn not_standard_14(cx: &Cx) -> bool {
     name(b"Type") == Some(b"Font")
         && name(b"Subtype") == Some(b"Type1")
         && !name(b"BaseFont").is_some_and(|base| STANDARD_14.iter().any(|f| f.as_bytes() == base))
+}
+
+/// Whether the row's key, followed from the row's container through each
+/// object its value refers to, keyed the same, never comes back to an
+/// object met on the way (`fn:NoCycle`: "no cycles (loops) when using the
+/// current key or array index to key into the linked list of objects").
+/// True where it ends: at an object without the key, or whose value isn't
+/// a reference, or names no object. False where it comes to one met
+/// already, the container among them, known by its number where
+/// [`Cx::id`] gives it, else by where it was written. Unknown past
+/// [`HOPS`] objects.
+fn no_cycle(f: &str, cx: &Cx) -> Tri {
+    let mut met: HashSet<ObjectId> = cx.id.into_iter().collect();
+    let written = cx.container.at.filter(|_| cx.id.is_none());
+    let mut o = cx.container;
+    for _ in 0..HOPS {
+        let Some(id) = entry(o, cx.at, cx).and_then(Object::as_reference) else {
+            return Tri::Is(true);
+        };
+        if !met.insert(id) {
+            return Tri::Is(false);
+        }
+        let Some(next) = cx.file.resolve.resolve(id) else {
+            return Tri::Is(true);
+        };
+        if written.is_some() && next.at == written {
+            return Tri::Is(false);
+        }
+        o = next;
+    }
+    Tri::Unknown(f.to_string())
 }
 
 /// Whether bits `low` to `high` of the row's own value, a bitmask whose
@@ -3134,6 +3167,79 @@ mod tests {
             holds_in(&file, &x, "1.7", "fn:Eval(fn:IsEncryptedWrapper())"),
             unknown("fn:IsEncryptedWrapper")
         );
+    }
+
+    /// `fn:NoCycle`, the model's on an object stream's `/Extends`: the key
+    /// followed through the objects it refers to ends, true; or comes back
+    /// to one met on the way, the container among them, by its number or
+    /// where it was written, false. Past as many objects as a value goes
+    /// through to its object, it can't be told.
+    #[test]
+    fn no_cycle_follows_the_key_through_the_objects_it_names() {
+        let cell = &row("ObjectStream", b"Extends").special_case[0];
+        assert_eq!(cell, "fn:NoCycle()");
+        // Object stream `n`, extending `to`, written at byte `n`.
+        let container = |n: u32, to: Option<u32>| {
+            let mut dict = dict! { "Type" => "ObjStm", "N" => 0, "First" => 0 };
+            if let Some(to) = to {
+                dict.set("Extends", Object::reference(to));
+            }
+            let stream = Object::from(pdf_objects::Stream::new(dict, Vec::new()));
+            (n, stream.at(written(n as usize)))
+        };
+        let file = |links: &[(u32, Option<u32>)]| {
+            let objects = links.iter().map(|&(n, to)| container(n, to));
+            File::new(dict! { "Root" => Object::reference(1) }, objects)
+        };
+        // Whether object `n`'s /Extends has no cycle: given its number
+        // where `id`, else known by where it was written.
+        let no_cycle = |file: &File, n: u32, id: bool| {
+            let o = &file.objects[&(n, 0)];
+            file.eval(o, At::Key(b"Extends"), &[], "1.7", |cx| match id {
+                true => holds(cell, &cx.id((n, 0))),
+                false => holds(cell, cx),
+            })
+        };
+
+        // A chain, 10 to 11 to 12, which extends none; and one without
+        // /Extends.
+        let chain = file(&[(10, Some(11)), (11, Some(12)), (12, None)]);
+        for (n, id) in [(10, true), (10, false), (11, true), (12, true)] {
+            assert_eq!(no_cycle(&chain, n, id), Truth::True, "{n}");
+        }
+        // A cycle of two, from either.
+        let two = file(&[(10, Some(11)), (11, Some(10))]);
+        for (n, id) in [(10, true), (10, false), (11, true), (11, false)] {
+            assert_eq!(no_cycle(&two, n, id), Truth::False, "{n} {id}");
+        }
+        // One extending itself: by its number, by where it was written,
+        // and by neither, once it comes back to itself.
+        let own = file(&[(10, Some(10))]);
+        assert_eq!(no_cycle(&own, 10, true), Truth::False);
+        assert_eq!(no_cycle(&own, 10, false), Truth::False);
+        let unplaced = Object::from(dict! { "Extends" => Object::reference(10) });
+        let own = File::new(dict! {}, [(10, unplaced.clone())]);
+        let said = own.eval(&unplaced, At::Key(b"Extends"), &[], "1.7", |cx| {
+            holds(cell, cx)
+        });
+        assert_eq!(said, Truth::False);
+        // A cycle entered past the start: 10 to 11 to 12 to 11.
+        let looped = file(&[(10, Some(11)), (11, Some(12)), (12, Some(11))]);
+        assert_eq!(no_cycle(&looped, 10, true), Truth::False);
+        // A reference to no object ends it, as null.
+        let none = file(&[(10, Some(11)), (11, Some(99))]);
+        assert_eq!(no_cycle(&none, 10, true), Truth::True);
+        // A chain of HOPS objects, the container among them, is told; one
+        // of more can't be.
+        let last = 10 + HOPS as u32 - 1;
+        let links: Vec<_> = (10..last).map(|n| (n, Some(n + 1))).collect();
+        let mut within = links.clone();
+        within.push((last, None));
+        assert_eq!(no_cycle(&file(&within), 10, true), Truth::True);
+        let mut past = links;
+        past.push((last, Some(last + 1)));
+        past.push((last + 1, None));
+        assert_eq!(no_cycle(&file(&past), 10, true), unknown("fn:NoCycle"));
     }
 
     #[test]

@@ -173,10 +173,7 @@ impl Encryptor {
     /// aren't, whose strings would then be in the clear; nor where either's
     /// method isn't one.
     pub fn packs(&self) -> bool {
-        let plain = |m: &Method| matches!(m, Method::Identity | Method::None);
-        let known = |m: &Method| !matches!(m, Method::Unknown(_));
-        let (streams, strings) = (self.handler.streams(), self.handler.strings());
-        known(streams) && known(strings) && (!plain(streams) || plain(strings))
+        crypt::packs(self.handler.streams(), self.handler.strings())
     }
 
     /// The encryption dictionary, as the file it was read from stores it,

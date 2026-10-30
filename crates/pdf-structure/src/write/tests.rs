@@ -617,6 +617,83 @@ fn packable_leaves_out_what_iso_7_5_7_does() {
     }
 }
 
+/// What 7.5.7 keeps out of an object stream, by what the object alone
+/// tells, each by its tell: its value a stream, its generation, an
+/// encryption dictionary's shape, `/Linearized`; a stream first, at any
+/// generation. What only the file tells, an object stream's `/Length` or a
+/// linearized file's catalog and pages, and a signature, which `packable`
+/// keeps out but the clause doesn't, are none. Each says the clause's
+/// words.
+#[test]
+fn kept_out_tells_what_iso_7_5_7_keeps_out_by_the_object_alone() {
+    use write::KeptOut;
+    let dict = |d: Dict| Object::from(d);
+    let stream = |d: Dict| Object::from(Stream::new(d, b"data".to_vec()));
+    let bytes = |b: &[u8]| Object::hex(b);
+    let encryption = dict(dict! {
+        "Filter" => "Standard",
+        "V" => 2,
+        "O" => bytes(b"o"),
+        "U" => bytes(b"u"),
+    });
+    let linearization = dict(dict! { "Linearized" => 1, "L" => 1000 });
+    let cases = [
+        ((5, 0), stream(dict! {}), Some(KeptOut::Stream)),
+        (
+            (5, 0),
+            stream(dict! { "Type" => "XRef" }),
+            Some(KeptOut::Stream),
+        ),
+        (
+            (5, 0),
+            stream(dict! { "Type" => "ObjStm" }),
+            Some(KeptOut::Stream),
+        ),
+        ((5, 2), stream(dict! {}), Some(KeptOut::Stream)),
+        ((5, 1), catalog(), Some(KeptOut::Generation)),
+        ((5, 1), encryption.clone(), Some(KeptOut::Generation)),
+        ((5, 0), encryption, Some(KeptOut::Encryption)),
+        ((5, 0), linearization, Some(KeptOut::Linearization)),
+        ((5, 0), catalog(), None),
+        ((5, 0), Object::from(7), None),
+        ((5, 0), dict(dict! { "Type" => "Page" }), None),
+        (
+            (5, 0),
+            dict(dict! { "Filter" => "Standard", "O" => bytes(b"o") }),
+            None,
+        ),
+        (
+            (5, 0),
+            dict(dict! { "Type" => "Sig", "Filter" => "Adobe.PPKLite" }),
+            None,
+        ),
+    ];
+    for (id, obj, kept) in &cases {
+        assert_eq!(write::kept_out(*id, obj), *kept, "{id:?} {obj:?}");
+        if kept.is_some() {
+            assert!(!write::packable(*id, obj), "{id:?} {obj:?}");
+        }
+    }
+    let said = [
+        (KeptOut::Stream, "a stream"),
+        (
+            KeptOut::Generation,
+            "an object with a generation number other than 0",
+        ),
+        (KeptOut::Encryption, "the document's encryption dictionary"),
+        (KeptOut::Length, "the value of an object stream's /Length"),
+        (KeptOut::Linearization, "the linearization dictionary"),
+        (
+            KeptOut::Catalog,
+            "the document catalog of a linearized file",
+        ),
+        (KeptOut::Page, "a page object of a linearized file"),
+    ];
+    for (kept, words) in said {
+        assert_eq!(kept.to_string(), words);
+    }
+}
+
 /// A container's header gives each member's number and where it starts,
 /// counted from `/First`, each member followed by a newline so numbers
 /// side by side don't run together; it's deflated, the reader reads every

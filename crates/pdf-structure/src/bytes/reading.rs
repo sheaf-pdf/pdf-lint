@@ -19,7 +19,9 @@ use super::window::{ByPosition, Bytes, InMemory};
 use super::{Crypt, Decode, Options, Reader, Stored, Unfiltered, Whole, XrefEntry};
 use crate::crypt::{List, is_xref};
 use crate::filter;
-use crate::source::{Document, Encryption, Facts, Record, Trailer, Unread, Update, Warning};
+use crate::source::{
+    Document, Encryption, Facts, Record, Revision, Trailer, Unread, Update, Warning,
+};
 use crate::write::as_written;
 
 /// A file's bytes, which a [`Reading`] reads. Bytes in memory give all of
@@ -568,6 +570,12 @@ impl<S: ByteSource> Reading<S> {
     /// written.
     pub fn facts(&self) -> &Facts {
         &self.reader.facts
+    }
+
+    /// The file's revisions, the first first, as [`Document::revisions`]
+    /// gives them: none where its sections didn't read.
+    pub fn revisions(&self) -> &[Revision] {
+        &self.reader.revisions
     }
 
     /// The file's length in bytes.
