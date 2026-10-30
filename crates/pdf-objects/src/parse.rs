@@ -24,12 +24,19 @@
 //! an `endobj` cut short among them, and the call that reads tells it
 //! again of those that are: a caller reading in windows keeps a call's
 //! faults only once it doesn't come back short.
+//!
+//! It reads by ISO 32000-2's lexical rules, or by PDFium's
+//! ([`Parser::rules`]): its tokens then cut where PDFium cuts them, and
+//! each read as PDFium's object parser reads it, a fault said where ISO
+//! 32000-2 reads it otherwise. What it makes of the tokens, a reference or
+//! a dictionary, is its own under either.
 
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use pdf_tokenizer::decode::How;
-use pdf_tokenizer::{Kind, Token, Tokenizer};
+use pdf_tokenizer::decode::pdfium::{self, Number};
+use pdf_tokenizer::decode::{self, How, NumberError};
+use pdf_tokenizer::{Iso, Kind, Pdfium, RuleSet, Rules, Token, Tokenizer};
 
 use crate::object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
 
@@ -79,40 +86,73 @@ impl Default for Limits {
 }
 
 /// Where a parser says what it read past: a checker keeps it; `()` drops
-/// it. A fault borrows from `'a`, the data the parser reads, so a sink can
-/// keep it as it is. A sink borrowed, `&mut S` or `&mut dyn Sink`, is a
-/// sink too.
+/// it, and wants none, so none is looked for. A fault borrows from `'a`,
+/// the data the parser reads, so a sink can keep it as it is. A sink
+/// borrowed, `&mut S` or `&mut dyn Sink`, is a sink too.
 pub trait Sink<'a> {
     /// A fault at `at`, which the parser read past.
     fn fault(&mut self, at: Span, fault: Fault<'a>);
+
+    /// Whether faults are wanted. A check that does work of its own, such
+    /// as reading a token as ISO 32000-2 reads it beside the reading
+    /// PDFium's rules take ([`Parser::rules`]), runs only when they are,
+    /// and a sink that doesn't want them is told none. True unless a sink
+    /// says otherwise; asked as the parser reads.
+    fn wants(&self) -> bool {
+        true
+    }
 }
 
-/// Drops every fault.
+/// Drops every fault, and wants none, so none is looked for.
 impl Sink<'_> for () {
+    #[inline]
     fn fault(&mut self, _: Span, _: Fault<'_>) {}
+
+    #[inline]
+    fn wants(&self) -> bool {
+        false
+    }
 }
 
-/// Tells the sink it borrows.
+/// Tells the sink it borrows, and wants what it wants.
 impl<'a, S: Sink<'a> + ?Sized> Sink<'a> for &mut S {
+    #[inline]
     fn fault(&mut self, at: Span, fault: Fault<'a>) {
         (**self).fault(at, fault);
+    }
+
+    #[inline]
+    fn wants(&self) -> bool {
+        (**self).wants()
     }
 }
 
 /// What the parser read past: the value is read, as readers read it, and
 /// the fault said.
+///
+/// By PDFium's rules ([`Parser::rules`]), a token is read as PDFium's
+/// object parser reads it, and where ISO 32000-2 reads it otherwise,
+/// that's a fault: [`Number`](Fault::Number),
+/// [`OutOfRange`](Fault::OutOfRange), [`HexString`](Fault::HexString),
+/// [`StringCr`](Fault::StringCr), [`Long`](Fault::Long), and
+/// [`Name`](Fault::Name) as by ISO 32000-2's rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault<'a> {
-    /// An integer outside 64 bits, read as the nearest that fits.
+    /// An integer outside 64 bits, read as the nearest that fits, by ISO
+    /// 32000-2's rules.
     #[error("an integer outside 64 bits, read as the nearest that fits")]
     IntegerOverflow,
-    /// A real too large for 64 bits, read as the largest.
+    /// A real too large for 64 bits, read as the largest, by ISO 32000-2's
+    /// rules.
     #[error("a real too large for 64 bits, read as the largest")]
     RealOverflow,
     /// A name with a `#` without two hex digits after it, or with `#00`,
     /// NUL, which a name can't hold (ISO 32000-2, 7.3.5), readers reading
-    /// each their own way: read with the `#` as itself, and `#00` as NUL.
+    /// each their own way. By ISO 32000-2's rules, read with the `#` as
+    /// itself; by PDFium's, as an escape when two bytes follow it, a byte
+    /// that's no hex digit read as 0, and as itself when fewer do; `#00`
+    /// as NUL by both.
     #[error(
         "the name {written} has {what}, which readers read differently",
         written = first_40(.written),
@@ -139,9 +179,70 @@ pub enum Fault<'a> {
         /// The object.
         id: ObjectId,
     },
+    /// A word of digits, signs and points that ISO 32000-2 doesn't write
+    /// as a number, such as `--5`, `1.2.3`, `+` or `.`: a number by
+    /// PDFium's rules, read as PDFium reads it (`--5` the integer 0,
+    /// `1.2.3` the real 1.2), and a keyword to ISO, whose integer is
+    /// digits, a sign before them or not, and whose real has one point
+    /// among its digits too (7.3.3, "shall").
+    #[error(
+        "{} is a number by PDFium's rules and a keyword to ISO 32000-2",
+        first_40(.written)
+    )]
+    Number {
+        /// The word.
+        written: &'a [u8],
+    },
+    /// An integer outside the 32 bits PDFium's rules read, unsigned when
+    /// it's written without a sign and signed when with one: read as 0,
+    /// as PDFium reads it, where ISO 32000-2 reads the integer written
+    /// ("shall"), its range left to the processor (7.3.3; Annex C, which
+    /// is advice).
+    #[error(
+        "{} is outside the integers PDFium's rules read, and read as 0",
+        first_40(.written)
+    )]
+    OutOfRange {
+        /// The integer.
+        written: &'a [u8],
+    },
+    /// A hex string with a byte that's neither a hex digit nor
+    /// white-space: read by PDFium's rules to its `>`, the byte passed
+    /// over, where ISO 32000-2's hex string holds hex digits and
+    /// white-space alone (7.3.4.3, "shall"), and ends before any other
+    /// byte.
+    #[error("the hex string {} has a byte that's no hex digit", first_40(.written))]
+    HexString {
+        /// The string, `<` to `>`.
+        written: &'a [u8],
+    },
+    /// A literal string with a carriage return written in it, not
+    /// escaped: read as written by PDFium's rules, a CR or a CR LF, where
+    /// ISO 32000-2 reads an end of line in a literal string as a line
+    /// feed alone (7.3.4.2, "shall").
+    #[error(
+        "the string {} has a CR written in it, read as written, where ISO 32000-2 reads LF",
+        first_40(.written)
+    )]
+    StringCr {
+        /// The string, `(` to `)`.
+        written: &'a [u8],
+    },
+    /// A number or a name longer than the 256 bytes PDFium's object parser
+    /// keeps of a word: read by PDFium's rules as its first 256, a name's
+    /// `/` among them, the rest dropped, where ISO 32000-2 reads every
+    /// byte, and sets no length (Annex C's lengths are advice).
+    #[error(
+        "{} is longer than the 256 bytes PDFium's rules read of a word, and read as its first 256",
+        first_40(.written)
+    )]
+    Long {
+        /// The word, whole.
+        written: &'a [u8],
+    },
 }
 
-/// A name's first 40 bytes, for [`Fault::Name`]'s text.
+/// A word's or a string's first 40 bytes, for a [`Fault`]'s text.
 fn first_40(written: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(&written[..written.len().min(40)])
 }
@@ -294,9 +395,10 @@ fn lossy(bytes: &[u8]) -> Cow<'_, str> {
 /// data, from an offset on. Its strings are read as their bytes, or as
 /// ciphertext ([`Parser::ciphertext`]), and its spans are in the file, or
 /// in an object stream's data ([`Parser::in_stream`]). It reads under
-/// [`Limits`] ([`Parser::limits`]). A call that fails leaves the parser
-/// where it was, though it has said the faults it read past before the
-/// error.
+/// [`Limits`] ([`Parser::limits`]), by ISO 32000-2's lexical rules unless
+/// it's given PDFium's ([`Parser::rules`]). A call that fails leaves the
+/// parser where it was, though it has said the faults it read past before
+/// the error.
 #[derive(Debug, Clone)]
 pub struct Parser<'a> {
     data: &'a [u8],
@@ -313,6 +415,10 @@ pub struct Parser<'a> {
     ciphertext: bool,
     /// How deeply values may nest, and how many one call may read.
     limits: Limits,
+    /// The lexical rules it reads by. Each call reads by a tokenizer with
+    /// them fixed in its type, so that it has nothing to choose at each
+    /// token.
+    rules: Rules,
 }
 
 impl<'a> Parser<'a> {
@@ -329,6 +435,7 @@ impl<'a> Parser<'a> {
             stream: None,
             ciphertext: false,
             limits: Limits::DEFAULT,
+            rules: Rules::Iso,
         }
     }
 
@@ -374,6 +481,39 @@ impl<'a> Parser<'a> {
         Parser { limits, ..self }
     }
 
+    /// The parser, reading by `rules`: ISO 32000-2's lexical rules, the
+    /// default, or PDFium's ([`Rules::Pdfium`]). Any other rules are read
+    /// as ISO 32000-2's.
+    ///
+    /// By PDFium's rules, its tokens are cut where PDFium cuts them (0x80
+    /// and 0xFF are white-space, a word of digits, signs and points is a
+    /// number, and a hex string runs to its `>`: pdf-tokenizer's
+    /// [`Rules`]), and each is read as PDFium's object parser reads it
+    /// ([`pdf_tokenizer::decode::pdfium`]), held as this parser holds a
+    /// value: a number word as the integer or the real PDFium holds, at 64
+    /// bits (`--5` the integer 0, `1.2.3` the real 1.2, `4294967296` 0,
+    /// `4294967295` itself); a name's `#` before any two bytes as an
+    /// escape, a byte that's no hex digit as 0; a literal string's CR as
+    /// written; a hex string's digits paired over any other byte; and a
+    /// number or a name longer than 256 bytes as its first 256, a name's
+    /// `/` among them. Where ISO 32000-2 reads such a token otherwise,
+    /// that's a fault ([`Fault::Number`], [`Fault::OutOfRange`],
+    /// [`Fault::HexString`], [`Fault::Name`], [`Fault::StringCr`],
+    /// [`Fault::Long`]), looked for only when the sink
+    /// [wants](Sink::wants) faults. A byte read as white-space by PDFium's
+    /// rules alone, 0x80 or 0xFF, isn't told.
+    ///
+    /// What the parser makes of its tokens is its own under either: a
+    /// reference is two integers and `R`, its number and generation the
+    /// integers' values, fitting 32 and 16 bits, and a header's the same;
+    /// a dictionary's keys are names; a value is a token that starts one;
+    /// and the limits are the same. PDFium's object parser reads more
+    /// loosely, a reference from any two number words, say, its generation
+    /// unread, which isn't followed here.
+    pub fn rules(self, rules: Rules) -> Parser<'a> {
+        Parser { rules, ..self }
+    }
+
     /// Where it reads next, counted as its spans are, from a window's base:
     /// past what it has read, or where it was made at, as given, when it
     /// has read nothing. A call that fails leaves it where it was.
@@ -383,8 +523,20 @@ impl<'a> Parser<'a> {
 
     /// The next value.
     pub fn value(&mut self, sink: &mut (impl Sink<'a> + ?Sized)) -> Result<Object, Error> {
+        match self.rules {
+            Rules::Pdfium => self.value_by(Pdfium, sink),
+            _ => self.value_by(Iso, sink),
+        }
+    }
+
+    /// [`Parser::value`], by `rules`.
+    fn value_by<R: RuleSet>(
+        &mut self,
+        rules: R,
+        sink: &mut (impl Sink<'a> + ?Sized),
+    ) -> Result<Object, Error> {
         let mut call = Call::of(self.data);
-        let mut t = Tokenizer::at(self.data, self.offset);
+        let mut t = Tokenizer::at(self.data, self.offset).with_rules(rules);
         let value = self.read(&mut t, &mut call, sink, 0);
         self.settled(&call)?;
         let value = value?;
@@ -396,15 +548,23 @@ impl<'a> Parser<'a> {
     /// number and generation. Its error names where the parser was, as it
     /// was given when it has read nothing.
     pub fn header(&mut self) -> Result<ObjectId, Error> {
+        match self.rules {
+            Rules::Pdfium => self.header_by(Pdfium),
+            _ => self.header_by(Iso),
+        }
+    }
+
+    /// [`Parser::header`], by `rules`.
+    fn header_by<R: RuleSet>(&mut self, rules: R) -> Result<ObjectId, Error> {
         let offset = self.offset;
         let mut call = Call::of(self.data);
-        let mut t = Tokenizer::at(self.data, offset);
-        let mut header = |t: &mut Tokenizer<'a>| {
+        let mut t = Tokenizer::at(self.data, offset).with_rules(rules);
+        let mut header = |t: &mut Tokenizer<'a, R>| {
             let n = call.significant(t).filter(|n| n.kind == Kind::Integer)?;
             let g = call.significant(t).filter(|g| g.kind == Kind::Integer)?;
             let obj = call.significant(t)?;
-            let number = u32::try_from(n.integer().ok()?).ok()?;
-            let generation = u16::try_from(g.integer().ok()?).ok()?;
+            let number = u32::try_from(integer(&n, rules.rules())?).ok()?;
+            let generation = u16::try_from(integer(&g, rules.rules())?).ok()?;
             is_keyword(Some(&obj), b"obj").then_some((number, generation))
         };
         let id = header(&mut t).ok_or(Error::Header {
@@ -425,8 +585,21 @@ impl<'a> Parser<'a> {
         id: ObjectId,
         sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Result<Body<'a>, Error> {
+        match self.rules {
+            Rules::Pdfium => self.body_by(Pdfium, id, sink),
+            _ => self.body_by(Iso, id, sink),
+        }
+    }
+
+    /// [`Parser::body`], by `rules`.
+    fn body_by<R: RuleSet>(
+        &mut self,
+        rules: R,
+        id: ObjectId,
+        sink: &mut (impl Sink<'a> + ?Sized),
+    ) -> Result<Body<'a>, Error> {
         let mut call = Call::of(self.data);
-        let mut t = Tokenizer::at(self.data, self.offset);
+        let mut t = Tokenizer::at(self.data, self.offset).with_rules(rules);
         let body = self.read_body(&mut t, &mut call, id, sink);
         self.settled(&call)?;
         let body = body?;
@@ -447,7 +620,10 @@ impl<'a> Parser<'a> {
     ) -> Result<Object, Error> {
         let mut call = Call::of(self.data);
         call.touched = head.touched.load(Ordering::Relaxed);
-        let stream = self.read_stream(head, data, &mut call, sink);
+        let stream = match self.rules {
+            Rules::Pdfium => self.read_stream(Pdfium, head, data, &mut call, sink),
+            _ => self.read_stream(Iso, head, data, &mut call, sink),
+        };
         self.settled(&call)?;
         let (object, offset) = stream?;
         self.offset = offset;
@@ -476,9 +652,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// [`Parser::stream`], to where it leaves the parser.
-    fn read_stream(
+    /// [`Parser::stream`], by `rules`, to where it leaves the parser.
+    fn read_stream<R: RuleSet>(
         &self,
+        rules: R,
         head: StreamHead<'a>,
         data: Span,
         call: &mut Call,
@@ -506,7 +683,7 @@ impl<'a> Parser<'a> {
             call.touched = true;
             return Err(extent);
         }
-        let mut t = Tokenizer::at(self.data, end);
+        let mut t = Tokenizer::at(self.data, end).with_rules(rules);
         let endstream = call.significant(&mut t);
         let endstream = (endstream.filter(|token| is_keyword(Some(token), b"endstream")))
             .ok_or(Error::Endstream { id })?;
@@ -522,9 +699,9 @@ impl<'a> Parser<'a> {
     }
 
     /// [`Parser::body`], from `t`.
-    fn read_body(
+    fn read_body<R: RuleSet>(
         &self,
-        t: &mut Tokenizer<'a>,
+        t: &mut Tokenizer<'a, R>,
         call: &mut Call,
         id: ObjectId,
         sink: &mut (impl Sink<'a> + ?Sized),
@@ -540,6 +717,7 @@ impl<'a> Parser<'a> {
                 let eol = t.eol();
                 call.note(t);
                 match eol {
+                    _ if !sink.wants() => {}
                     None => sink.fault(keyword, Fault::NoEol),
                     Some(eol) if eol.bytes == b"\r" => {
                         sink.fault(self.span(eol.start, eol.end()), Fault::LoneCr);
@@ -555,6 +733,7 @@ impl<'a> Parser<'a> {
                     data: self.data,
                     base: self.base,
                     stream: self.stream,
+                    rules: self.rules,
                     touched: AtomicBool::new(false),
                 }));
             }
@@ -570,30 +749,35 @@ impl<'a> Parser<'a> {
 
     /// Says object `id`, `object`, has no `endobj` when `t` doesn't go on
     /// with it.
-    fn endobj(
+    fn endobj<R: RuleSet>(
         &self,
-        t: &Tokenizer<'a>,
+        t: &Tokenizer<'a, R>,
         call: &mut Call,
         id: ObjectId,
         object: &Object,
         sink: &mut (impl Sink<'a> + ?Sized),
     ) {
+        // Looked for whatever the sink, as it may reach a window's end.
         if !is_keyword(call.significant(&mut t.clone()).as_ref(), b"endobj") {
             // Every value the parser reads is placed.
-            if let Some(at) = object.at {
+            if let Some(at) = object.at.filter(|_| sink.wants()) {
                 sink.fault(at, Fault::NoEndobj { id });
             }
         }
     }
 
-    /// The value `t` goes on with, nested `depth` deep, in `call`.
-    fn read(
+    /// The value `t` goes on with, nested `depth` deep, in `call`, read by
+    /// `t`'s rules.
+    fn read<R: RuleSet>(
         &self,
-        t: &mut Tokenizer<'a>,
+        t: &mut Tokenizer<'a, R>,
         call: &mut Call,
         sink: &mut (impl Sink<'a> + ?Sized),
         depth: usize,
     ) -> Result<Object, Error> {
+        // Settled where the rules are fixed in `R`, as they are.
+        let rules = t.rules();
+        let pdfium = rules == Rules::Pdfium;
         let token = call.significant(t).ok_or(Error::End)?;
         // Only a value reaches a limit: a token that can't start one is
         // the error it is, below, as it is without them.
@@ -617,8 +801,8 @@ impl<'a> Parser<'a> {
                     .significant(&mut look)
                     .filter(|r| is_keyword(Some(r), b"R"));
                 if let (Some(g), Some(r)) = (generation, r) {
-                    let number = token.integer().ok().and_then(|n| u32::try_from(n).ok());
-                    let generation = g.integer().ok().and_then(|g| u16::try_from(g).ok());
+                    let number = integer(&token, rules).and_then(|n| u32::try_from(n).ok());
+                    let generation = integer(&g, rules).and_then(|g| u16::try_from(g).ok());
                     let (Some(number), Some(generation)) = (number, generation) else {
                         return Err(Error::Reference {
                             at: self.place(token.start),
@@ -626,26 +810,39 @@ impl<'a> Parser<'a> {
                             generation: g.bytes.to_vec(),
                         });
                     };
+                    if pdfium && sink.wants() {
+                        self.told_number(&token, sink);
+                        self.told_number(&g, sink);
+                    }
                     *t = look;
                     let at = self.span(token.start, r.end());
                     return Ok(Object::new(Value::Ref((number, generation))).at(at));
                 }
-                match token.integer() {
-                    Ok(n) => Value::Integer(n),
-                    Err(_) => {
-                        sink.fault(at, Fault::IntegerOverflow);
-                        Value::Integer(if token.bytes.starts_with(b"-") {
-                            i64::MIN
-                        } else {
-                            i64::MAX
-                        })
+                if pdfium {
+                    self.pdfium_number(&token, sink)
+                } else {
+                    match token.integer() {
+                        Ok(n) => Value::Integer(n),
+                        Err(_) => {
+                            if sink.wants() {
+                                sink.fault(at, Fault::IntegerOverflow);
+                            }
+                            Value::Integer(if token.bytes.starts_with(b"-") {
+                                i64::MIN
+                            } else {
+                                i64::MAX
+                            })
+                        }
                     }
                 }
             }
+            Kind::Real if pdfium => self.pdfium_number(&token, sink),
             Kind::Real => match token.number() {
                 Ok(r) => Value::Real(r),
                 Err(_) => {
-                    sink.fault(at, Fault::RealOverflow);
+                    if sink.wants() {
+                        sink.fault(at, Fault::RealOverflow);
+                    }
                     Value::Real(if token.bytes.starts_with(b"-") {
                         f64::MIN
                     } else {
@@ -653,13 +850,16 @@ impl<'a> Parser<'a> {
                     })
                 }
             },
-            Kind::Name => Value::Name(self.name(&token, sink)),
+            Kind::Name => Value::Name(self.name(&token, pdfium, sink)),
             Kind::String { closed: true } | Kind::HexString { closed: true } => {
                 let form = match token.kind {
                     Kind::HexString { .. } => Form::Hex,
                     _ => Form::Literal,
                 };
-                let bytes = decoded(&token);
+                let bytes = match pdfium {
+                    true => self.pdfium_string(&token, sink),
+                    false => decoded(&token),
+                };
                 let s = match self.ciphertext {
                     true => Str::Encrypted(bytes),
                     false => Str::Bytes(bytes),
@@ -705,7 +905,7 @@ impl<'a> Parser<'a> {
                             self.count(call, key.start)?;
                             let value = self.read(t, call, sink, depth + 1)?;
                             dict.push_entry(Entry {
-                                key: self.name(&key, sink),
+                                key: self.name(&key, pdfium, sink),
                                 key_at: Some(self.span(key.start, key.end())),
                                 value,
                             });
@@ -752,16 +952,33 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A name's bytes, its escapes decoded; and a fault where it is when it
-    /// has a `#` without two hex digits after it, or `#00`, NUL, which a
-    /// name can't hold (ISO 32000-2, 7.3.5), readers reading each their own
-    /// way.
-    fn name(&self, token: &Token<'a>, sink: &mut (impl Sink<'a> + ?Sized)) -> Vec<u8> {
+    /// A name's bytes, its escapes decoded, by PDFium's rules when
+    /// `pdfium`; and a fault where it is when it has a `#` without two hex
+    /// digits after it, or `#00`, NUL, which a name can't hold (ISO
+    /// 32000-2, 7.3.5), readers reading each their own way.
+    fn name(
+        &self,
+        token: &Token<'a>,
+        pdfium: bool,
+        sink: &mut (impl Sink<'a> + ?Sized),
+    ) -> Vec<u8> {
+        if pdfium {
+            return self.pdfium_name(token, sink);
+        }
         // Only a `#` starts an escape or a fault: without one, a name is the
         // regular bytes after its `/`, as written.
         if !token.bytes.contains(&b'#') {
             return token.bytes.get(1..).unwrap_or_default().to_vec();
         }
+        if sink.wants() {
+            self.told_name(token, sink);
+        }
+        decoded(token)
+    }
+
+    /// Tells `sink` of name `token`'s fault, if it has one: a `#` without
+    /// two hex digits after it, or `#00`.
+    fn told_name(&self, token: &Token<'a>, sink: &mut (impl Sink<'a> + ?Sized)) {
         let hows: Vec<How> = (token.pieces().into_iter().flatten())
             .map(|piece| piece.how)
             .filter(|how| matches!(how, How::StrayHash | How::NulEscape))
@@ -774,8 +991,175 @@ impl<'a> Parser<'a> {
             };
             sink.fault(self.span(token.start, token.end()), fault);
         }
-        decoded(token)
     }
+
+    /// A name's bytes as PDFium's object parser reads them
+    /// ([`pdfium::name`]), from its first 256 bytes, its `/` among them;
+    /// and its faults: a `#` ISO 32000-2 reads otherwise, or `#00`
+    /// ([`Fault::Name`]), and its length past 256 ([`Fault::Long`]).
+    fn pdfium_name(&self, token: &Token<'a>, sink: &mut (impl Sink<'a> + ?Sized)) -> Vec<u8> {
+        if sink.wants() {
+            if token.bytes.contains(&b'#') {
+                self.told_name(token, sink);
+            }
+            self.told_long(token, sink);
+        }
+        let word = kept(token.bytes);
+        if !word.contains(&b'#') {
+            return word.get(1..).unwrap_or_default().to_vec();
+        }
+        exact(pdfium::name(word))
+    }
+
+    /// A number token's value as PDFium's object parser reads it
+    /// ([`pdfium_number`]), and its faults where ISO 32000-2 reads it
+    /// otherwise ([`told_number`](Self::told_number)).
+    fn pdfium_number(&self, token: &Token<'a>, sink: &mut (impl Sink<'a> + ?Sized)) -> Value {
+        if sink.wants() {
+            self.told_number(token, sink);
+        }
+        pdfium_number(token.bytes)
+    }
+
+    /// Tells `sink` where ISO 32000-2 reads number token `token`, read by
+    /// PDFium's rules, otherwise: as no number ([`Fault::Number`]); as an
+    /// integer outside the 32 bits PDFium reads, which it reads as 0
+    /// ([`Fault::OutOfRange`]); or as every byte of a word longer than the
+    /// 256 PDFium reads ([`Fault::Long`]). A real ISO 32000-2 reads is
+    /// the same decimal to both, read at 64 bits.
+    fn told_number(&self, token: &Token<'a>, sink: &mut (impl Sink<'a> + ?Sized)) {
+        let written = token.bytes;
+        let fault = match decode::integer(written) {
+            // Unsigned or signed, by PDFium's reading of the whole word.
+            Ok(n) => {
+                (wide(pdfium::number(written)) != Some(n)).then_some(Fault::OutOfRange { written })
+            }
+            Err(NumberError::Overflow) => Some(Fault::OutOfRange { written }),
+            Err(NumberError::NotANumber) => {
+                matches!(decode::number(written), Err(NumberError::NotANumber))
+                    .then_some(Fault::Number { written })
+            }
+        };
+        if let Some(fault) = fault {
+            sink.fault(self.span(token.start, token.end()), fault);
+        }
+        self.told_long(token, sink);
+    }
+
+    /// Tells `sink` when word `token` is longer than the 256 bytes
+    /// PDFium's object parser reads of one ([`Fault::Long`]).
+    fn told_long(&self, token: &Token<'a>, sink: &mut (impl Sink<'a> + ?Sized)) {
+        if token.bytes.len() > WORD {
+            let fault = Fault::Long {
+                written: token.bytes,
+            };
+            sink.fault(self.span(token.start, token.end()), fault);
+        }
+    }
+
+    /// A closed string's bytes as PDFium's object parser reads them
+    /// ([`pdfium::literal`], [`pdfium::hex`]), and its fault where ISO
+    /// 32000-2 reads them otherwise: a hex string with a byte that's
+    /// neither a hex digit nor white-space ([`Fault::HexString`]), a
+    /// literal string with a CR written in it ([`Fault::StringCr`]).
+    fn pdfium_string(&self, token: &Token<'a>, sink: &mut (impl Sink<'a> + ?Sized)) -> Vec<u8> {
+        // Nothing to decode: read alike by both.
+        if let Some(value) = token.verbatim() {
+            return value.to_vec();
+        }
+        let bytes = match token.kind {
+            Kind::HexString { .. } => pdfium::hex(token.bytes),
+            _ => pdfium::literal(token.bytes),
+        };
+        if sink.wants() {
+            self.told_string(token, bytes.clone(), sink);
+        }
+        exact(bytes)
+    }
+
+    /// Tells `sink` where ISO 32000-2 reads closed string `token`, whose
+    /// bytes PDFium's object parser reads as `bytes`, otherwise.
+    fn told_string(
+        &self,
+        token: &Token<'a>,
+        bytes: pdfium::Bytes<'_>,
+        sink: &mut (impl Sink<'a> + ?Sized),
+    ) {
+        let written = token.bytes;
+        let fault = match token.kind {
+            Kind::HexString { .. } => {
+                // Between its `<` and its `>`.
+                let inner = written.get(1..written.len().saturating_sub(1));
+                let stray = |b: &u8| !b.is_ascii_hexdigit() && !pdf_tokenizer::is_white_space(*b);
+                let stray = inner.unwrap_or_default().iter().any(stray);
+                stray.then_some(Fault::HexString { written })
+            }
+            // Only a CR written in it reads otherwise, PDFium keeping it
+            // where ISO 32000-2 reads LF; every escape reads alike.
+            _ => {
+                let cr = written.contains(&b'\r')
+                    && token.pieces().is_some_and(|iso| !bytes.eq(iso.bytes()));
+                cr.then_some(Fault::StringCr { written })
+            }
+        };
+        if let Some(fault) = fault {
+            sink.fault(self.span(token.start, token.end()), fault);
+        }
+    }
+}
+
+/// The most of a word PDFium's object parser keeps: a number or a name
+/// longer than this, its `/` counted, is read as its first `WORD` bytes.
+const WORD: usize = 256;
+
+/// The bytes of `word` PDFium's object parser keeps: its first [`WORD`].
+fn kept(word: &[u8]) -> &[u8] {
+    &word[..word.len().min(WORD)]
+}
+
+/// A number word's value as PDFium's object parser reads it, held as this
+/// parser holds a value, at 64 bits: from its first [`WORD`] bytes, the
+/// integer PDFium holds (unsigned or signed in 32 bits, 0 outside them),
+/// or with a point among them the real, the decimal they start with
+/// ([`pdfium::real`]). 256 bytes hold no decimal past an `f64`'s range, so
+/// the real is finite.
+fn pdfium_number(word: &[u8]) -> Value {
+    let word = kept(word);
+    match pdfium::number(word) {
+        Number::Unsigned(n) => Value::Integer(n.into()),
+        Number::Signed(n) => Value::Integer(n.into()),
+        Number::Real(_) => Value::Real(pdfium::real(word)),
+    }
+}
+
+/// An integer PDFium holds, at 64 bits; none for a real.
+fn wide(number: Number) -> Option<i64> {
+    match number {
+        Number::Unsigned(n) => Some(n.into()),
+        Number::Signed(n) => Some(n.into()),
+        Number::Real(_) => None,
+    }
+}
+
+/// The value of [`Integer`](Kind::Integer) token `token`, a reference's
+/// number or generation or a header's, read by `rules`: by ISO 32000-2's,
+/// none past 64 bits; by PDFium's, its integer reading
+/// ([`pdfium_number`]).
+fn integer(token: &Token, rules: Rules) -> Option<i64> {
+    match rules {
+        Rules::Pdfium => match pdfium_number(token.bytes) {
+            Value::Integer(n) => Some(n),
+            _ => None,
+        },
+        _ => token.integer().ok(),
+    }
+}
+
+/// A PDFium reading's bytes, in a buffer of their exact length.
+fn exact(bytes: pdfium::Bytes<'_>) -> Vec<u8> {
+    let mut value = Vec::with_capacity(bytes.clone().count());
+    value.extend(bytes);
+    value
 }
 
 /// An indirect object's value, read after its header.
@@ -806,6 +1190,9 @@ pub struct StreamHead<'a> {
     /// Where `data` starts in the file.
     base: usize,
     stream: Option<ObjectId>,
+    /// The rules its parser reads by, which find `endstream` after data
+    /// by a `/Length`.
+    rules: Rules,
     /// Whether an extent ran to `data`'s end, where more of the file could
     /// change it: an atomic, so that a head can be shared, though nothing
     /// orders it with anything else.
@@ -823,6 +1210,7 @@ impl Clone for StreamHead<'_> {
             data: self.data,
             base: self.base,
             stream: self.stream,
+            rules: self.rules,
             touched: AtomicBool::new(self.touched.load(Ordering::Relaxed)),
         }
     }
@@ -846,7 +1234,8 @@ impl StreamHead<'_> {
     }
 
     /// Its data by a `/Length` of `length`: that many bytes from where it
-    /// starts, when `endstream` follows them, past white-space; else none.
+    /// starts, when `endstream` follows them, past white-space (and
+    /// comments) by its parser's rules; else none.
     pub fn declared(&self, length: usize) -> Option<Span> {
         let end = self.start.checked_add(length)?;
         if end > self.data.len() {
@@ -854,7 +1243,12 @@ impl StreamHead<'_> {
             return None;
         }
         let mut call = Call::of(self.data);
-        let after = call.significant(&mut Tokenizer::at(self.data, end));
+        let after = match self.rules {
+            Rules::Pdfium => {
+                call.significant(&mut Tokenizer::at(self.data, end).with_rules(Pdfium))
+            }
+            _ => call.significant(&mut Tokenizer::at(self.data, end)),
+        };
         if call.touched {
             self.touched.store(true, Ordering::Relaxed);
         }
@@ -901,13 +1295,13 @@ impl Call {
     }
 
     /// Notes whether `t`, over the data, has reached its end.
-    fn note(&mut self, t: &Tokenizer<'_>) {
+    fn note<R: RuleSet>(&mut self, t: &Tokenizer<'_, R>) {
         self.touched |= t.offset() >= self.end;
     }
 
     /// The next token that isn't white-space or a comment, noting when it
     /// reaches the data's end, or none comes before it.
-    fn significant<'t>(&mut self, t: &mut Tokenizer<'t>) -> Option<Token<'t>> {
+    fn significant<'t, R: RuleSet>(&mut self, t: &mut Tokenizer<'t, R>) -> Option<Token<'t>> {
         let token = t.find(|token| !matches!(token.kind, Kind::Space | Kind::Comment));
         self.note(t);
         token
@@ -916,6 +1310,9 @@ impl Call {
 
 /// Whether `token` starts a value: a number, a name, a string that ends,
 /// `[`, `<<`, `true`, `false` or `null`.
+// Asked of each value: inlined into `read`, which is compiled for each set
+// of rules now, and left a call without it.
+#[inline]
 fn starts_value(token: &Token) -> bool {
     match token.kind {
         Kind::Integer | Kind::Real | Kind::Name | Kind::ArrayOpen | Kind::DictOpen => true,
@@ -1733,6 +2130,525 @@ mod tests {
                 17,
             ),
             (b"[/A#zz 99999999999999999999 -1.5e3]", 0),
+        ];
+        for (input, length) in inputs {
+            let read = crate::fuzz::every_window(input, length);
+            assert!(read > 0, "{}", String::from_utf8_lossy(input));
+        }
+    }
+
+    /// `input` read as a value from its start by PDFium's rules: the value
+    /// or the error, and what the sink was told.
+    fn pdfium(input: &[u8]) -> (Result<Object, Error>, Kept) {
+        let mut kept = Kept::default();
+        let value = Parser::at(input, 0).rules(Rules::Pdfium).value(&mut kept);
+        (value, kept)
+    }
+
+    /// The text of each fault `kept` was told, where it was told it.
+    fn said(input: &[u8], kept: &Kept) -> Vec<(String, String)> {
+        let at = |at: Span| String::from_utf8_lossy(&input[at.start..at.end]).into_owned();
+        (kept.faults.iter())
+            .map(|(span, said)| (at(*span), said.clone()))
+            .collect()
+    }
+
+    /// ISO 32000-2's rules are the default, and any rules but PDFium's
+    /// read as they do.
+    #[test]
+    fn iso_32000s_rules_are_the_default() {
+        assert_eq!(Parser::at(b"", 0).rules, Rules::Iso);
+        let input = b"[--5 1.2.3]";
+        let iso = Err(Error::Keyword {
+            at: 1,
+            word: b"--5".to_vec(),
+        });
+        assert_eq!(value(input).0, iso);
+        let mut parser = Parser::at(input, 0).rules(Rules::default());
+        assert_eq!(parser.value(&mut ()), iso);
+        assert!(pdfium(input).0.is_ok());
+    }
+
+    /// By PDFium's rules a number word is the number PDFium holds, at 64
+    /// bits, as PDFium 7881 and 8076 read the first corner of a
+    /// `/MediaBox` (one-page files, 2026-10-30), a fault said where ISO
+    /// 32000-2 reads it otherwise: not as a number, or as an integer
+    /// PDFium doesn't hold.
+    #[test]
+    fn pdfiums_rules_read_numbers_as_pdfium_holds_them() {
+        let keyword = "is a number by PDFium's rules and a keyword to ISO 32000-2";
+        let range = "is outside the integers PDFium's rules read, and read as 0";
+        let cases: [(&[u8], Value, &str); 22] = [
+            (b"--5", Value::Integer(0), keyword),
+            (b"1.2.3", Value::Real(1.2), keyword),
+            (b"--5.0", Value::Real(-5.0), keyword),
+            (b"+-.5", Value::Real(-0.5), keyword),
+            (b"5-3", Value::Integer(5), keyword),
+            (b"+", Value::Integer(0), keyword),
+            (b"-", Value::Integer(0), keyword),
+            (b".", Value::Real(0.0), keyword),
+            (b"1..2", Value::Real(1.0), keyword),
+            (b"4294967296", Value::Integer(0), range),
+            (b"+2147483648", Value::Integer(0), range),
+            (b"-2147483649", Value::Integer(0), range),
+            (b"99999999999999999999", Value::Integer(0), range),
+            // Read alike by both.
+            (b"-5", Value::Integer(-5), ""),
+            (b"007", Value::Integer(7), ""),
+            (b"+5", Value::Integer(5), ""),
+            (b"4294967295", Value::Integer(4_294_967_295), ""),
+            (b"2147483648", Value::Integer(2_147_483_648), ""),
+            (b"-2147483648", Value::Integer(-2_147_483_648), ""),
+            (b"-.5", Value::Real(-0.5), ""),
+            (b"0.1", Value::Real(0.1), ""),
+            (b"5.", Value::Real(5.0), ""),
+        ];
+        for (word, read, fault) in cases {
+            let (value, kept) = pdfium(word);
+            assert_eq!(*value.unwrap().value(), read, "{word:?}");
+            let text = String::from_utf8_lossy(word);
+            let want: Vec<(String, String)> = match fault {
+                "" => Vec::new(),
+                fault => vec![(text.to_string(), format!("{text} {fault}"))],
+            };
+            assert_eq!(said(word, &kept), want, "{word:?}");
+            // In a /MediaBox's first corner, as PDFium's width says.
+            let input = [b"[", word, b" 0 100 100]"].concat();
+            let (boxed, kept) = pdfium(&input);
+            let corner = boxed.unwrap().as_array().unwrap()[0].as_number();
+            assert_eq!(corner, read_number(&read), "{word:?}");
+            assert_eq!(kept.faults.len(), usize::from(!fault.is_empty()));
+        }
+        // ISO 32000-2's rules read none of them otherwise.
+        let (value, kept) = self::value(b"4294967296");
+        assert_eq!(*value.unwrap().value(), Value::Integer(4_294_967_296));
+        assert!(kept.faults.is_empty());
+        // A keyword to both.
+        for word in [&b"1e5"[..], b"3.4028236e38"] {
+            assert!(matches!(pdfium(word).0, Err(Error::Keyword { .. })));
+        }
+    }
+
+    /// A number value as an `f64`.
+    fn read_number(value: &Value) -> Option<f64> {
+        match *value {
+            Value::Integer(n) => Some(n as f64),
+            Value::Real(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// By PDFium's rules a number or a name is read by its first 256
+    /// bytes, a name's `/` among them, as PDFium 7881 and 8076 read a
+    /// `/MediaBox`'s corner and an `/Info` key (2026-10-30): longer, a
+    /// fault, as ISO 32000-2 reads every byte.
+    #[test]
+    fn pdfiums_rules_read_a_word_by_its_first_256_bytes() {
+        let long =
+            "is longer than the 256 bytes PDFium's rules read of a word, and read as its first 256";
+        // `000...05`, read as 5 whole and 0 cut.
+        for (length, read) in [(255, 5), (256, 5), (257, 0), (258, 0)] {
+            let word = [vec![b'0'; length - 1], b"5".to_vec()].concat();
+            let (value, kept) = pdfium(&word);
+            assert_eq!(value.unwrap().as_integer(), Some(read), "{length}");
+            assert_eq!(kept.faults.len(), usize::from(length > 256), "{length}");
+            assert_eq!(self::value(&word).0.unwrap().as_integer(), Some(5));
+        }
+        // A real, an integer where its point is cut away, as PDFium holds
+        // the bytes it keeps.
+        let real = [b"0.".as_slice(), &[b'0'; 254], b"5"].concat();
+        let (value, kept) = pdfium(&real);
+        assert_eq!(*value.unwrap().value(), Value::Real(0.0));
+        let text = String::from_utf8_lossy(&real[..40]);
+        assert_eq!(
+            kept.faults,
+            [(Span::new(None, 0, 257), format!("{text} {long}"))]
+        );
+        let real = [&[b'0'; 255][..], b"7.5"].concat();
+        assert_eq!(*pdfium(&real).0.unwrap().value(), Value::Integer(7));
+        let real = [&[b'0'; 256][..], b".5"].concat();
+        assert_eq!(*pdfium(&real).0.unwrap().value(), Value::Integer(0));
+        assert_eq!(*self::value(&real).0.unwrap().value(), Value::Real(0.5));
+        // A name, as a key and as a value: `/` and 255 bytes kept.
+        for length in [255, 256, 257] {
+            let name = [b"/".as_slice(), &vec![b'P'; length - 1]].concat();
+            let input = [b"<<".as_slice(), &name, b" ", &name, b">>"].concat();
+            let (dict, kept) = pdfium(&input);
+            let dict = dict.unwrap();
+            let kept_bytes = vec![b'P'; (length - 1).min(255)];
+            let (key, value) = dict.as_dict().unwrap().iter().next().unwrap();
+            assert_eq!(
+                (key, value.as_name()),
+                (&kept_bytes[..], Some(&kept_bytes[..]))
+            );
+            assert_eq!(kept.faults.len(), 2 * usize::from(length > 256), "{length}");
+        }
+        // A keyword isn't cut: it's no value either way.
+        let keyword = vec![b'x'; 300];
+        let (error, _) = pdfium(&keyword);
+        assert_eq!(
+            error,
+            Err(Error::Keyword {
+                at: 0,
+                word: vec![b'x'; 32]
+            })
+        );
+    }
+
+    /// By PDFium's rules a hex string's digits pair to its `>` over any
+    /// other byte, as PDFium 7881 and 8076 read a `/Title`, a fault said
+    /// where ISO 32000-2 ends the string before such a byte.
+    #[test]
+    fn pdfiums_rules_read_a_hex_string_to_its_close() {
+        for (input, meant, fault) in [
+            (&b"<41G42>"[..], &b"AB"[..], true),
+            (b"<4G1>", b"A", true),
+            (b"<4G>", b"@", true),
+            (b"<41(42>", b"AB", true),
+            (b"<41/42>", b"AB", true),
+            (b"<41\x8042>", b"AB", true),
+            (b"<41%42>", b"AB", true),
+            (b"<41 4>", b"A@", false),
+            (b"<414>", b"A@", false),
+            (b"<41\n42>", b"AB", false),
+            (b"<>", b"", false),
+        ] {
+            let (value, kept) = pdfium(input);
+            let value = value.unwrap();
+            assert_eq!(value.as_bytes(), Some(meant), "{input:?}");
+            assert_eq!(
+                *value.value(),
+                Value::String(Str::Bytes(meant.to_vec()), Some(Form::Hex))
+            );
+            let text = String::from_utf8_lossy(input);
+            let want = format!("the hex string {text} has a byte that's no hex digit");
+            let want = match fault {
+                true => vec![(text.to_string(), want)],
+                false => Vec::new(),
+            };
+            assert_eq!(said(input, &kept), want, "{input:?}");
+            let iso = self::value(input).0;
+            assert_eq!(iso.is_err(), fault, "{input:?}");
+        }
+        // Unclosed only where the data ends first.
+        assert_eq!(pdfium(b"<41G").0, Err(Error::String { at: 0 }));
+        // As ciphertext, the same bytes.
+        let mut parser = Parser::at(b"<4G1>", 0)
+            .rules(Rules::Pdfium)
+            .ciphertext(true);
+        let value = parser.value(&mut ()).unwrap();
+        assert_eq!(
+            *value.value(),
+            Value::String(Str::Encrypted(b"A".to_vec()), Some(Form::Hex))
+        );
+    }
+
+    /// By PDFium's rules a name's `#` before any two bytes is an escape, a
+    /// byte that's no hex digit 0, as PDFium 7881 and 8076 read an `/Info`
+    /// key (2026-10-30); with fewer after it, itself. ISO 32000-2's rules
+    /// read such a `#` as itself, and the fault is theirs.
+    #[test]
+    fn pdfiums_rules_read_a_names_hash_before_any_two_bytes() {
+        let stray = "has a # without two hex digits after it, which readers read differently";
+        let nul = "has #00, NUL, which a name can't hold, which readers read differently";
+        for (input, meant, iso, fault) in [
+            (
+                &b"/#5Groducer"[..],
+                &b"Producer"[..],
+                &b"#5Groducer"[..],
+                stray,
+            ),
+            (b"/P#g4", b"P\x04", b"P#g4", stray),
+            (b"/##41", b"\x041", b"#A", stray),
+            (b"/P#7z", b"Pp", b"P#7z", stray),
+            (b"/F#3", b"F#3", b"F#3", stray),
+            (b"/Producer#", b"Producer#", b"Producer#", stray),
+            (b"/N#00", b"N\0", b"N\0", nul),
+            (b"/A#20B", b"A B", b"A B", ""),
+            (b"/Producer", b"Producer", b"Producer", ""),
+        ] {
+            let (value, kept) = pdfium(input);
+            assert_eq!(value.unwrap().as_name(), Some(meant), "{input:?}");
+            let text = String::from_utf8_lossy(input);
+            let want = match fault {
+                "" => Vec::new(),
+                fault => vec![(text.to_string(), format!("the name {text} {fault}"))],
+            };
+            assert_eq!(said(input, &kept), want, "{input:?}");
+            let (value, iso_kept) = self::value(input);
+            assert_eq!(value.unwrap().as_name(), Some(iso), "{input:?}");
+            assert_eq!(iso_kept, kept, "told alike, {input:?}");
+            // As a key.
+            let dict = [b"<<".as_slice(), input, b" (x)>>"].concat();
+            let (dict, _) = pdfium(&dict);
+            let dict = dict.unwrap();
+            assert!(dict.as_dict().unwrap().has(meant), "{input:?}");
+        }
+    }
+
+    /// By PDFium's rules a literal string's CR, alone or before LF, is
+    /// read as written, as PDFium 7881 and 8076 read a `/Title`
+    /// (2026-10-30), a fault said where ISO 32000-2 reads LF; every escape
+    /// reads alike.
+    #[test]
+    fn pdfiums_rules_read_a_literal_strings_cr_as_written() {
+        let cr = |text: &str| {
+            format!(
+                "the string {text} has a CR written in it, read as written, where ISO 32000-2 reads LF"
+            )
+        };
+        for (input, meant, iso, fault) in [
+            (
+                &b"(a\rb\r\nc)"[..],
+                &b"a\rb\r\nc"[..],
+                &b"a\nb\nc"[..],
+                true,
+            ),
+            (b"(a\r\rb)", b"a\r\rb", b"a\n\nb", true),
+            (b"(a\n\rb)", b"a\n\rb", b"a\n\nb", true),
+            (b"(a\\\rb)", b"ab", b"ab", false),
+            (b"(a\\\r\nb)", b"ab", b"ab", false),
+            (b"(a\\\nb)", b"ab", b"ab", false),
+            (b"(a\\015b)", b"a\rb", b"a\rb", false),
+            (b"(a\nb)", b"a\nb", b"a\nb", false),
+            (b"(a\\)b)", b"a)b", b"a)b", false),
+        ] {
+            let (value, kept) = pdfium(input);
+            let value = value.unwrap();
+            assert_eq!(value.as_bytes(), Some(meant), "{input:?}");
+            assert_eq!(
+                value.value(),
+                &Value::String(Str::Bytes(meant.to_vec()), Some(Form::Literal))
+            );
+            let text = String::from_utf8_lossy(input);
+            let want = match fault {
+                true => vec![(text.to_string(), cr(&text))],
+                false => Vec::new(),
+            };
+            assert_eq!(said(input, &kept), want, "{input:?}");
+            assert_eq!(self::value(input).0.unwrap().as_bytes(), Some(iso));
+        }
+    }
+
+    /// By PDFium's rules 0x80 and 0xFF are white-space, as PDFium 7881 and
+    /// 8076 read a `/MediaBox` and an `/Info` key (2026-10-30); nothing is
+    /// told of them.
+    #[test]
+    fn pdfiums_rules_read_0x80_and_0xff_as_white_space() {
+        for space in [0x80, 0xFF] {
+            let input = [b"[0".as_slice(), &[space], b"0 100 100]"].concat();
+            let (value, kept) = pdfium(&input);
+            let each: Vec<i64> = (value.unwrap().as_array().unwrap().iter())
+                .map(|o| o.as_integer().unwrap())
+                .collect();
+            assert_eq!(each, [0, 0, 100, 100]);
+            assert!(kept.faults.is_empty());
+            assert!(matches!(
+                self::value(&input).0,
+                Err(Error::Keyword { at: 1, .. })
+            ));
+            let input = [b"<< /Title".as_slice(), &[space], b"(x) >>"].concat();
+            let dict = pdfium(&input).0.unwrap();
+            assert_eq!(
+                dict.as_dict()
+                    .unwrap()
+                    .get(b"Title")
+                    .and_then(Object::as_bytes),
+                Some(&b"x"[..])
+            );
+        }
+    }
+
+    /// By PDFium's rules a reference is still two integers and `R`, each
+    /// integer as PDFium holds it, a fault said where ISO 32000-2 reads it
+    /// otherwise; it numbers no object where the number doesn't fit 32 bits
+    /// or the generation 16. PDFium 7881 and 8076 name object 3 from `3.9
+    /// 0 R`, `3 -1 R`, `3 99999999999 R`, `3 --1 R`, `3 0.5 R`, `3 65536 R`
+    /// and `3 + R` in a page tree's `/Kids`, and nothing from `--3 0 R`,
+    /// `-3 0 R` or `4294967299 0 R` (2026-10-30): a reference is any two
+    /// number words and `R` to its object parser, its number read from the
+    /// first and its generation not read, which isn't followed here.
+    #[test]
+    fn pdfiums_rules_read_a_reference_by_its_integers() {
+        let keyword = "is a number by PDFium's rules and a keyword to ISO 32000-2";
+        let range = "is outside the integers PDFium's rules read, and read as 0";
+        for (input, id, told) in [
+            (&b"3 0 R"[..], (3, 0), vec![]),
+            (b"+3 0 R", (3, 0), vec![]),
+            (b"--3 0 R", (0, 0), vec![("--3", keyword)]),
+            (b"3 --1 R", (3, 0), vec![("--1", keyword)]),
+            (b"3 + R", (3, 0), vec![("+", keyword)]),
+            (b"--3 + R", (0, 0), vec![("--3", keyword), ("+", keyword)]),
+            (b"3 99999999999 R", (3, 0), vec![("99999999999", range)]),
+            (b"4294967299 0 R", (0, 0), vec![("4294967299", range)]),
+            (b"4294967295 65535 R", (u32::MAX, u16::MAX), vec![]),
+        ] {
+            let (value, kept) = pdfium(input);
+            let value = value.unwrap();
+            assert_eq!(value.as_reference(), Some(id), "{input:?}");
+            assert_eq!(value.at, Some(Span::new(None, 0, input.len())));
+            let want: Vec<(String, String)> = (told.iter())
+                .map(|(at, said)| (at.to_string(), format!("{at} {said}")))
+                .collect();
+            assert_eq!(said(input, &kept), want, "{input:?}");
+        }
+        // Numbering no object.
+        for (input, number, generation) in [
+            (&b"3 -1 R"[..], &b"3"[..], &b"-1"[..]),
+            (b"-3 0 R", b"-3", b"0"),
+            (b"3 65536 R", b"3", b"65536"),
+        ] {
+            let error = Error::Reference {
+                at: 0,
+                number: number.to_vec(),
+                generation: generation.to_vec(),
+            };
+            assert_eq!(pdfium(input), (Err(error), Kept::default()), "{input:?}");
+        }
+        // A real is no reference's number or generation: three values.
+        for input in [&b"[3.9 0 R]"[..], b"[3 0.5 R]"] {
+            let at = input.len() - 2;
+            let error = Error::Keyword {
+                at,
+                word: b"R".to_vec(),
+            };
+            assert_eq!(pdfium(input).0, Err(error), "{input:?}");
+        }
+        // A header's integers are read the same way.
+        let mut parser = Parser::at(b"--1 4294967296 obj 7 endobj", 0).rules(Rules::Pdfium);
+        assert_eq!(parser.header(), Ok((0, 0)));
+        let mut parser = Parser::at(b"1\x800 obj", 0).rules(Rules::Pdfium);
+        assert_eq!(parser.header(), Ok((1, 0)));
+        assert_eq!(
+            Parser::at(b"1\x800 obj", 0).header(),
+            Err(Error::Header { at: 0 })
+        );
+    }
+
+    /// By PDFium's rules a stream's `endstream` after the data a `/Length`
+    /// gives is found past their white-space, 0x80 among it, and the
+    /// stream read so.
+    #[test]
+    fn pdfiums_rules_find_endstream_past_their_white_space() {
+        let input = b"1 0 obj << /Length 2 >> stream\nab\x80endstream\x80endobj";
+        for (rules, declared) in [(Rules::Iso, false), (Rules::Pdfium, true)] {
+            let mut parser = Parser::at(input, 0).rules(rules);
+            let id = parser.header().unwrap();
+            let mut kept = Kept::default();
+            let Ok(Body::Stream(head)) = parser.body(id, &mut kept) else {
+                panic!("a stream");
+            };
+            let ab = found(input, b"ab");
+            assert_eq!(head.declared(2), declared.then_some(ab), "{rules:?}");
+            let stream = parser.stream(head, ab, &mut kept);
+            assert_eq!(stream.is_ok(), declared, "{rules:?}");
+            assert!(kept.faults.is_empty());
+        }
+    }
+
+    /// `()` wants no fault, and a sink borrowed wants what it does; a sink
+    /// that wants none is told none, by either rules.
+    #[test]
+    fn a_sink_that_wants_no_faults_is_told_none() {
+        struct Unwanted;
+        impl Sink<'_> for Unwanted {
+            fn fault(&mut self, at: Span, fault: Fault<'_>) {
+                panic!("{fault} at {at:?}, told a sink that wants none");
+            }
+            fn wants(&self) -> bool {
+                false
+            }
+        }
+        // Through the impl for a borrow.
+        fn wants<'a>(sink: impl Sink<'a>) -> bool {
+            sink.wants()
+        }
+        assert!(!().wants() && !wants(&mut ()));
+        assert!(Kept::default().wants() && wants(&mut Kept::default()));
+        let sink: &mut dyn Sink = &mut Unwanted;
+        assert!(!sink.wants() && !wants(&mut *sink));
+        let inputs: [&[u8]; 6] = [
+            b"[/A#zz 99999999999999999999 -1.5e3]",
+            b"1 0 obj << >>stream\rxy\nendstream\nendobj",
+            b"1 0 obj << >>stream xy\nendstream",
+            b"1 0 obj [--5 1.2.3 4294967296 <4G1> (a\rb) /#5Gx 3 --1 R] stray",
+            b"1 0 obj << /N#00 1 >> endobj",
+            &[b"1 0 obj [/".as_slice(), &[b'x'; 300], b"] endobj"].concat(),
+        ];
+        for rules in [Rules::Iso, Rules::Pdfium] {
+            for input in inputs {
+                let wanted = indirect_by(input, rules, &mut Kept::default());
+                let unwanted = indirect_by(input, rules, &mut Unwanted);
+                assert_eq!(wanted, unwanted, "{rules:?}");
+            }
+        }
+    }
+
+    /// The indirect object `input` begins with, read by `rules`, its
+    /// stream's data the scanned extent, telling `sink`.
+    fn indirect_by<'a>(
+        input: &'a [u8],
+        rules: Rules,
+        sink: &mut impl Sink<'a>,
+    ) -> Result<Object, Error> {
+        let mut parser = Parser::at(input, 0).rules(rules);
+        let id = parser.header()?;
+        match parser.body(id, sink)? {
+            Body::Object(object) => Ok(object),
+            Body::Stream(head) => {
+                let data = head.scanned();
+                parser.stream(head, data, sink)
+            }
+        }
+    }
+
+    /// The limits hold by PDFium's rules as by ISO 32000-2's: tokens only
+    /// PDFium's rules read as values count as values, and nest, where ISO
+    /// 32000-2's read values of their lengths.
+    #[test]
+    fn the_limits_hold_by_either_rules() {
+        let pdfiums = b"<< /A [--5 1.2.3] /B << /C <4G> >> >>";
+        let isos = b"<< /A [-55 1.234] /B << /C <4F> >> >>";
+        for (nesting, values) in [(2, 9), (1, 9), (0, 9), (2, 8), (2, 4), (2, 1)] {
+            let limits = Limits { nesting, values };
+            let mut pdfium = Parser::at(pdfiums, 0).rules(Rules::Pdfium).limits(limits);
+            let mut iso = Parser::at(isos, 0).limits(limits);
+            let (pdfium_read, iso_read) = (pdfium.value(&mut ()), iso.value(&mut ()));
+            match (&pdfium_read, &iso_read) {
+                (Ok(_), Ok(_)) => assert_eq!((nesting, values), (2, 9)),
+                _ => assert_eq!(pdfium_read, iso_read, "{limits:?}"),
+            }
+            assert_eq!(pdfium.offset(), iso.offset(), "{limits:?}");
+        }
+        let limits = Limits {
+            nesting: 1,
+            values: 9,
+        };
+        let mut parser = Parser::at(pdfiums, 0).rules(Rules::Pdfium).limits(limits);
+        assert_eq!(
+            parser.value(&mut ()),
+            Err(Error::Nested { limit: 1, at: 7 })
+        );
+    }
+
+    /// The tests' inputs where the rules part, read in every window, cut
+    /// at every byte, from bytes 0 and 1,000,000 of a file, by both rules:
+    /// short, or as the whole input reads.
+    #[test]
+    fn every_window_where_the_rules_part_is_short_or_reads_as_the_whole() {
+        let inputs: [(&[u8], u16); 6] = [
+            (
+                b"[--5 1.2.3 4294967296 <41G42> (a\rb\r\nc) /#5Gx 3 --1 R]",
+                0,
+            ),
+            (b"<< /A\x80/B 1\xff2 >> 7", 0),
+            (b"--3 0 R 4294967299 0 R", 0),
+            (
+                b"1 0 obj << /Length 2 >> stream\nab\x80endstream\x80endobj",
+                2,
+            ),
+            (b"--1 0 obj 1.2.3 endobj", 0),
+            (b"1 0 obj <4%1> endobj", 0),
         ];
         for (input, length) in inputs {
             let read = crate::fuzz::every_window(input, length);

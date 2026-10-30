@@ -37,7 +37,10 @@
 //!   said to a [`parse::Sink`], which `()` drops; a stream's two extents,
 //!   by its `/Length` and up to `endstream`, both given, for the caller to
 //!   choose its data from; and caps on how deeply values nest and how many
-//!   one call reads ([`Limits`]).
+//!   one call reads ([`Limits`]). It reads by ISO 32000-2's lexical rules,
+//!   or by PDFium's ([`Rules`], [`parse::Parser::rules`]), each token then
+//!   read as PDFium reads it, and a fault said where ISO 32000-2 reads it
+//!   otherwise.
 //! - **A writer** ([`serialize`]): a value as PDF syntax, or as an
 //!   indirect object, which the parser reads back as the same value,
 //!   under limits that take in its count of values, and a stream as an
@@ -70,6 +73,7 @@ pub mod version;
 
 pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
 pub use parse::Limits;
+pub use pdf_tokenizer::Rules;
 pub use version::Version;
 
 /// What gives the indirect objects a value's references name: a file's,

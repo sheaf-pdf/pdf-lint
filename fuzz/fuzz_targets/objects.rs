@@ -1,6 +1,8 @@
 //! The parser's promises, on any input, read as a value or an indirect
-//! object as the input's first bytes choose, and as a window of a file
-//! cut where they choose, which is short or reads as the whole input does;
+//! object as the input's first bytes choose, by ISO 32000-2's rules and by
+//! PDFium's, the two read alike up to where they first part, and as a
+//! window of a file cut where they choose, which is short or reads as the
+//! whole input does;
 //! what it read's references, walked with a stack of their own, as a
 //! recursive walk gives them; and the writer's on what it read: written,
 //! it reads back as the same value; written through a toy encryptor,

@@ -1,12 +1,14 @@
 //! What the fuzz target checks, which a unit test checks too: the promises
-//! the parser makes, on any input, and the writer's on what it read, written
+//! the parser makes, on any input, by ISO 32000-2's rules and by PDFium's
+//! and the two side by side, and the writer's on what it read, written
 //! plainly, through a toy encryptor ([`Toy`]) and through a renumbering.
 //! It's compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
 
-use pdf_tokenizer::{Kind, Tokenizer};
+use pdf_tokenizer::decode::{self, pdfium};
+use pdf_tokenizer::{Kind, Pdfium, Rules, Token, Tokenizer};
 
 use crate::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value};
 use crate::parse::{Body, Error, Fault, Limits, Parser, Sink};
@@ -44,6 +46,8 @@ struct How {
     limits: Limits,
     /// A window to read the input in too.
     window: Option<Window>,
+    /// The rules read by.
+    rules: Rules,
 }
 
 /// A window of a file to read the input in, as a reader by position
@@ -92,9 +96,30 @@ enum Length {
 /// file too, from byte 0 or 1,000,000, cut where those two bytes choose
 /// ([`windowed`]): what isn't [`Error::Short`] reads as the whole input
 /// does.
+///
+/// All of it by ISO 32000-2's rules and again by PDFium's
+/// ([`Parser::rules`]), and the two side by side ([`side_by_side`]): read
+/// alike up to the first token the two rules cut otherwise, or PDFium's
+/// reads otherwise, from where the read starts; and each fault PDFium's
+/// rules alone tell is told of a token ISO 32000-2 reads otherwise.
 /// Panics on a broken promise.
 pub fn parse(data: &[u8]) {
     let (how, input) = chosen(data);
+    let iso = promised(input, how);
+    let pdfium = How {
+        rules: Rules::Pdfium,
+        ..how
+    };
+    side_by_side(input, how, &iso, &promised(input, pdfium));
+}
+
+/// What reading `input` as `how` says: the object or the error, and where
+/// the parser ended.
+type Read = (Result<Object, Error>, usize);
+
+/// [`parse`]'s promises, `input` read as `how` says: what it read and
+/// what its sink was told.
+fn promised(input: &[u8], how: How) -> (Read, Kept) {
     let mut kept = Kept::default();
     let first = read(input, how, &mut kept);
     let mut again = Kept::default();
@@ -107,7 +132,7 @@ pub fn parse(data: &[u8]) {
     if let Some(window) = how.window {
         windowed(input, how, window, &first, &kept);
     }
-    let (result, offset) = first;
+    let (result, offset) = first.clone();
     assert!(offset <= input.len().max(how.offset), "{offset}");
     let inside = |at: Span| at.stream == how.stream && at.start <= at.end && at.end <= input.len();
     for &(at, _) in &kept.faults {
@@ -148,7 +173,7 @@ pub fn parse(data: &[u8]) {
                 // The stream's own, after its body.
                 Error::Endstream { .. } | Error::Extent { .. } => {}
                 _ if how.indirect => {
-                    let mut parser = Parser::at(input, how.offset);
+                    let mut parser = Parser::at(input, how.offset).rules(how.rules);
                     assert!(parser.header().is_ok());
                     assert_eq!(
                         offset,
@@ -160,6 +185,127 @@ pub fn parse(data: &[u8]) {
             }
         }
     }
+    (first, kept)
+}
+
+/// Checks `iso` and `pdfium`, what reading `input` as `how` gave by ISO
+/// 32000-2's rules and by PDFium's: alike where their tokens and what the
+/// parser reads of them are. Where the two first part, from where the read
+/// starts ([`parting`]), the input is cut, and read so, in a window that
+/// isn't the file's last, the two rules read it alike: the same object or
+/// error, the parser left at the same place, the same faults told. Where
+/// they never part, the whole reads are alike. The parser starts a token
+/// where a stream's data ends too, wherever that is, so the two are
+/// compared from every offset, not along one walk of the tokens. And read
+/// by PDFium's rules,
+/// each fault they alone tell, [`Fault::Number`], [`Fault::OutOfRange`],
+/// [`Fault::HexString`], [`Fault::StringCr`] and [`Fault::Long`], is told
+/// at a token they read, which ISO 32000-2's rules cut or read otherwise.
+fn side_by_side(input: &[u8], how: How, iso: &(Read, Kept), pdfium: &(Read, Kept)) {
+    let from = how.offset.min(input.len());
+    let at = parting(input, from);
+    if at == input.len() {
+        assert_eq!(iso, pdfium, "read alike where the rules read alike");
+    } else {
+        let cut = |rules| {
+            let mut kept = Kept::default();
+            let read = read_in(&input[..at], 0, false, How { rules, ..how }, &mut kept);
+            (read, kept)
+        };
+        assert_eq!(
+            cut(Rules::Iso),
+            cut(Rules::Pdfium),
+            "read alike before the rules part, at {at}"
+        );
+    }
+    let mut own = Own::default();
+    let pdfium = How {
+        rules: Rules::Pdfium,
+        ..how
+    };
+    let _ = read(input, pdfium, &mut own);
+    for at in own.0 {
+        let token = Tokenizer::at(input, at.start).with_rules(Pdfium).next();
+        let token = token.filter(|t| t.end() == at.end).expect("a token");
+        let iso = Tokenizer::at(input, at.start).next();
+        assert!(
+            iso != Some(token) || read_otherwise(&token),
+            "a fault at {at:?}, which ISO 32000-2 reads alike"
+        );
+    }
+}
+
+/// Where `input` read by ISO 32000-2's rules and by PDFium's, from
+/// `from`, first part: the first offset whose token they cut otherwise, or
+/// the parser reads otherwise by PDFium's rules ([`read_otherwise`]), or
+/// the start of the word it's in, as a word's first bytes may be a number
+/// by one rule and not the other (`-.` of `-.4294967296`); the input's end
+/// when none does. Before it, a token from any offset is the same by both
+/// rules, read alike, and so is one cut there.
+fn parting(input: &[u8], from: usize) -> usize {
+    let parts = |at: usize| {
+        let pdfium = Tokenizer::at(input, at).with_rules(Pdfium).next();
+        pdfium != Tokenizer::at(input, at).next() || pdfium.is_some_and(|t| read_otherwise(&t))
+    };
+    let Some(mut at) = (from..input.len()).find(|&at| parts(at)) else {
+        return input.len();
+    };
+    while at > from && Rules::Pdfium.is_regular(input[at - 1]) {
+        at -= 1;
+    }
+    at
+}
+
+/// Whether the parser reads `token`, a token both rules cut alike,
+/// otherwise by PDFium's rules than by ISO 32000-2's: written out, a number
+/// longer than 256 bytes, or one ISO reads as a value PDFium doesn't (an
+/// integer outside PDFium's unsigned or signed 32 bits); a name longer
+/// than 256 bytes, or whose bytes PDFium reads otherwise; a string whose
+/// bytes it does.
+fn read_otherwise(token: &Token) -> bool {
+    let bytes = token.bytes;
+    let long = bytes.len() > 256;
+    match token.kind {
+        Kind::Integer => {
+            let pdfium = match pdfium::number(bytes) {
+                pdfium::Number::Unsigned(n) => Some(i64::from(n)),
+                pdfium::Number::Signed(n) => Some(i64::from(n)),
+                pdfium::Number::Real(_) => None,
+            };
+            long || decode::integer(bytes).ok() != pdfium
+        }
+        Kind::Real => long || decode::number(bytes).ok() != Some(pdfium::real(bytes)),
+        Kind::Name => long || !pdfium::name(bytes).eq(decode::name(bytes).bytes()),
+        Kind::String { .. } => !pdfium::literal(bytes).eq(decode::literal(bytes).bytes()),
+        Kind::HexString { .. } => !pdfium::hex(bytes).eq(decode::hex(bytes).bytes()),
+        _ => false,
+    }
+}
+
+/// Where each fault PDFium's rules alone tell was told.
+#[derive(Default)]
+struct Own(Vec<Span>);
+
+impl Sink<'_> for Own {
+    fn fault(&mut self, at: Span, fault: Fault<'_>) {
+        if matches!(
+            fault,
+            Fault::Number { .. }
+                | Fault::OutOfRange { .. }
+                | Fault::HexString { .. }
+                | Fault::StringCr { .. }
+                | Fault::Long { .. }
+        ) {
+            self.0.push(at);
+        }
+    }
+}
+
+/// The first token of `input` from `at`, by `rules`, that isn't
+/// white-space or a comment.
+fn significant(input: &[u8], at: usize, rules: Rules) -> Option<Token<'_>> {
+    (Tokenizer::at(input, at).with_rules(rules))
+        .find(|t| !matches!(t.kind, Kind::Space | Kind::Comment))
 }
 
 /// How `data`'s first five bytes say to read the rest, and the rest: with
@@ -178,6 +324,7 @@ fn chosen(data: &[u8]) -> (How, &[u8]) {
             astray: false,
             limits: Limits::DEFAULT,
             window: None,
+            rules: Rules::Iso,
         };
         return (how, data);
     };
@@ -221,6 +368,7 @@ fn chosen(data: &[u8]) -> (How, &[u8]) {
         astray: flags & 0x10 != 0,
         limits,
         window,
+        rules: Rules::Iso,
     };
     (how, input)
 }
@@ -259,7 +407,7 @@ fn limited(input: &[u8], how: How, small: &(Result<Object, Error>, usize)) {
     // that fails after its first token: never the error of a token that
     // can't start one.
     assert!(at < input.len(), "{at}");
-    let there = Parser::at(input, at).value(&mut ());
+    let there = Parser::at(input, at).rules(how.rules).value(&mut ());
     let not_a_value = matches!(
         there,
         Err(Error::Token { at: a, .. } | Error::Keyword { at: a, .. } | Error::String { at: a })
@@ -315,7 +463,7 @@ fn deepest(o: &Object) -> usize {
 
 /// What reading `input` as `how` says: the object or the error, and where
 /// the parser ended.
-fn read<'a>(input: &'a [u8], how: How, sink: &mut impl Sink<'a>) -> (Result<Object, Error>, usize) {
+fn read<'a>(input: &'a [u8], how: How, sink: &mut impl Sink<'a>) -> Read {
     read_in(input, 0, true, how, sink)
 }
 
@@ -331,7 +479,8 @@ fn read_in<'a>(
     let mut parser = (Parser::at(input, how.offset))
         .window(base, last)
         .ciphertext(how.ciphertext)
-        .limits(how.limits);
+        .limits(how.limits)
+        .rules(how.rules);
     if let Some(stream) = how.stream {
         parser = parser.in_stream(stream);
     }
@@ -364,8 +513,7 @@ fn read_in<'a>(
                     (declared.start, declared.end - declared.start),
                     (start, length)
                 );
-                let after = Tokenizer::at(input, declared.end - base)
-                    .find(|t| !matches!(t.kind, Kind::Space | Kind::Comment));
+                let after = significant(input, declared.end - base, how.rules);
                 assert!(after.is_some_and(|t| t.bytes == marker));
             }
             let data = declared.unwrap_or(scanned);
@@ -432,8 +580,9 @@ fn windowed(
 /// Checks `input`'s every window ([`windowed`]): read from its start as a
 /// value, and as an indirect object, a stream's data by a `/Length` of
 /// `length` and by its scanned extent, in the file and in an object
-/// stream's data; cut at every byte, from bytes 0 and 1,000,000 of a
-/// file. How many of the cut windows weren't [`Error::Short`].
+/// stream's data, by ISO 32000-2's rules and by PDFium's; cut at every
+/// byte, from bytes 0 and 1,000,000 of a file. How many of the cut windows
+/// weren't [`Error::Short`].
 pub fn every_window(input: &[u8], length: u16) -> usize {
     let how = How {
         offset: 0,
@@ -445,9 +594,11 @@ pub fn every_window(input: &[u8], length: u16) -> usize {
         astray: true,
         limits: Limits::DEFAULT,
         window: None,
+        rules: Rules::Iso,
     };
     let mut read = 0;
-    for stream in [None, Some((7, 0))] {
+    let each = [Rules::Iso, Rules::Pdfium].map(|rules| [(rules, None), (rules, Some((7, 0)))]);
+    for (rules, stream) in each.concat() {
         for (indirect, length) in [
             (false, how.length),
             (true, how.length),
@@ -457,6 +608,7 @@ pub fn every_window(input: &[u8], length: u16) -> usize {
                 stream,
                 indirect,
                 length,
+                rules,
                 ..how
             };
             let mut said = Kept::default();
@@ -574,7 +726,11 @@ pub fn unplace(o: &mut Object, data: &[u8]) {
 /// written with its strings taken as their bytes, and read back as plain.
 fn rewrite(input: &[u8], how: How, object: &Object) {
     let id = match how.indirect {
-        true => Some(Parser::at(input, how.offset).header().expect("its header")),
+        true => Some(
+            (Parser::at(input, how.offset).rules(how.rules))
+                .header()
+                .expect("its header"),
+        ),
         false => None,
     };
     let mut object = object.clone();
@@ -1239,6 +1395,88 @@ mod tests {
             }
             for _ in 0..random(40) + 2 {
                 input.extend_from_slice(FRAGMENTS[random(FRAGMENTS.len())]);
+            }
+            parse(&input);
+        }
+    }
+
+    /// Fragments where ISO 32000-2's rules and PDFium's part: number words
+    /// only PDFium's read as numbers, integers outside its 32 bits, hex
+    /// strings with bytes that are no hex digits, names' `#`, literal
+    /// strings' CR, its white-space, and words past its 256 bytes (and,
+    /// made as they're chosen, names).
+    const PARTING: &[&[u8]] = &[
+        b"--5",
+        b"1.2.3",
+        b"+",
+        b"-",
+        b".",
+        b"-.",
+        b"5-3",
+        b"4294967296",
+        b"4294967295",
+        b"+2147483648",
+        b"-2147483649",
+        b"<41G42>",
+        b"<4%1>",
+        b"<4",
+        b"(a\rb)",
+        b"(a\r\nb)",
+        b"(a\\\rb)",
+        b"/#5Gx",
+        b"/F#3",
+        b"\x80",
+        b"\xff",
+        b"3 --1 R",
+        b"--3 0 R",
+        b"4294967299 0 R",
+        b"3.9 0 R",
+        &[b'0'; 256],
+        &[b'7'; 257],
+        b"endstream\x80",
+    ];
+
+    /// Inputs made of the fragments of objects and those where the rules
+    /// part, after the five bytes that choose how they're read (and the
+    /// two that give small limits, and two that give a window, when they
+    /// choose those), run through the fuzz target's body: each promise
+    /// by both rules, and the two side by side.
+    #[test]
+    fn random_fragments_keep_every_promise_where_the_rules_part() {
+        let mut random = randoms();
+        for _ in 0..20_000 {
+            let mut input: Vec<u8> = (0..5).map(|_| random(256) as u8).collect();
+            // From the first byte, under the default limits, mostly.
+            if random(4) != 0 {
+                input[..2].fill(0);
+                input[2] &= !0x60;
+            }
+            if input[2] & 0x20 != 0 {
+                input.extend_from_slice(&[random(256) as u8, random(256) as u8]);
+            }
+            if input[2] & 0x80 != 0 {
+                input.extend_from_slice(&[random(256) as u8, random(256) as u8]);
+            }
+            if input[2] & 4 != 0 && random(2) == 0 {
+                input[..2].fill(0);
+                input.extend_from_slice(b"1 0 obj ");
+                if random(2) == 0 {
+                    input.extend_from_slice(b"<< /Length 3 >>\nstream\r\n");
+                }
+            }
+            for _ in 0..random(30) + 2 {
+                match random(2 * PARTING.len() + 1) {
+                    n if n < PARTING.len() => input.extend_from_slice(PARTING[n]),
+                    // A name past 256 bytes.
+                    n if n == PARTING.len() => {
+                        input.push(b'/');
+                        input.extend_from_slice(&[b'P'; 300]);
+                    }
+                    _ => input.extend_from_slice(FRAGMENTS[random(FRAGMENTS.len())]),
+                }
+                if random(2) == 0 {
+                    input.push(b' ');
+                }
             }
             parse(&input);
         }

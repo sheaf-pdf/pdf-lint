@@ -14,12 +14,13 @@
 # `pdf_filters::fuzz::encoders`, which a third runs; `crypt` calls
 # `pdf_crypt::fuzz::handler`, on any dictionary and on new files'
 # dictionaries, and `pdf_crypt::fuzz::password`, which three stable unit
-# tests run, one on new files'; `objects`
-# calls `pdf_objects::fuzz::parse`, the parser, the walk of what it read's
-# references and the writer on what it read, which a stable unit test
-# (`random_fragments_keep_every_promise`) runs; `structure` calls
-# `pdf_structure::fuzz::read_file`, the reader and the document it reads,
-# which a stable unit test
+# tests run, one on new files'; `objects` calls `pdf_objects::fuzz::parse`,
+# the parser by ISO 32000-2's rules and PDFium's and the two side by side,
+# the walk of what it read's references and the writer on what it read,
+# which two stable unit tests (`random_fragments_keep_every_promise` and
+# `random_fragments_keep_every_promise_where_the_rules_part`) run;
+# `structure` calls `pdf_structure::fuzz::read_file`, the reader and the
+# document it reads, which a stable unit test
 # (`mutated_files_read_within_their_bytes_the_same_twice`) runs on mutated
 # files; `write` calls `pdf_structure::fuzz::write_file`, the writer, a
 # file read written whole with copies, under a renumbering the input

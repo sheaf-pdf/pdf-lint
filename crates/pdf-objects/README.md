@@ -13,7 +13,8 @@ It's made for a reader that checks files as much as for one that shows or edits 
 - **Strings as their bytes.** A `Str` is `Bytes`, its escapes decoded; or `Text`, text a reader decoded without saying from which encoding; or `Encrypted`, ciphertext it didn't decrypt. Of those two, what depends on the bytes can't be told, and `as_bytes` gives none. Beside it, `Value::String` keeps the string's `Form`, `Literal` or `Hex`, as it was written; a string built without choosing one (`Object::bytes`, where `Object::hex` chooses hex), or read by a reader that doesn't say, has none.
 - **Text strings decoded by the spec.** `text::decode` reads UTF-16BE or UTF-8 after their byte order marks, and PDFDocEncoding (Annex D) without one, and says each `Quirk`, where the string departs from the spec: UTF-16LE's mark, which PDF doesn't have, an odd last byte, a lone surrogate, UTF-8 that isn't, a byte PDFDocEncoding leaves undefined.
 - **Versions.** A `Version` is read from a header's `%PDF-1.7` or a catalog's `/Version`, and versions order.
-- **A parser.** `parse::Parser` reads a value, or an indirect object, from a file's bytes or an object stream's decoded data, from any offset, each value placed and each string in its form. What it reads past, an integer too large or a name's stray `#`, say, is a `Fault`, which it tells a `Sink` as it reads: a checker keeps them, and `()` drops them. What stops a value, an array that doesn't end, say, is an `Error`, with where. It reads under `Limits`: arrays and dictionaries nested at most 256 deep (`NESTING`), and at most 2^25 values in one call, keys among them, unless it's given others, set on a copy of `Limits::DEFAULT`.
+- **A parser.** `parse::Parser` reads a value, or an indirect object, from a file's bytes or an object stream's decoded data, from any offset, each value placed and each string in its form. What it reads past, an integer too large or a name's stray `#`, say, is a `Fault`, which it tells a `Sink` as it reads: a checker keeps them, and `()` drops them, wanting none (`Sink::wants`), so a fault that takes work of its own to find isn't looked for. What stops a value, an array that doesn't end, say, is an `Error`, with where. It reads under `Limits`: arrays and dictionaries nested at most 256 deep (`NESTING`), and at most 2^25 values in one call, keys among them, unless it's given others, set on a copy of `Limits::DEFAULT`.
+- **ISO 32000-2's rules, or PDFium's.** The parser reads by ISO 32000-2's lexical rules unless it's given PDFium's (`Parser::rules(Rules::Pdfium)`; `Rules` is pdf-tokenizer's, re-exported). Then its tokens are cut where PDFium cuts them, and each is read as PDFium's object parser reads it, at this crate's width: a number word as the integer or the real PDFium holds (`--5` the integer 0, `1.2.3` the real 1.2, an integer outside 32 bits 0); a name's `#` before any two bytes as an escape; a literal string's CR as written; a hex string's digits paired over any other byte; a number or a name longer than 256 bytes as its first 256. Where ISO 32000-2 reads such a token otherwise, that's a fault, each naming its clause. What it makes of the tokens, a reference or a dictionary, is its own under either.
 - **A stream's two extents, the choice the caller's.** An indirect object is read in steps: `header`, `n g obj`; `body`, its value, or a stream's dictionary to where its data starts; and `stream`, the rest. A stream's data may be as long as its `/Length` says, when `endstream` follows it (`declared`), or run up to the first `endstream` (`scanned`), and readers choose differently, so the caller resolves the `/Length`, which may be a reference, and passes `stream` the one it chose.
 - **A window of a file.** A reader that reads a file by position gives the parser the bytes it has read from an offset on, where they start in the file, and whether they end it (`Parser::window`): spans, offsets and errors are then the file's. Where the window ends before the file does, a call whose read reaches its end, where more bytes could change what it reads, is `Error::Short`, and the reader reads again with more. Read so, the parser reads as it would with the whole file.
 - **A writer.** `serialize::write` writes a value as PDF syntax, and `serialize::indirect` as an indirect object, `n g obj` to `endobj`, which the parser reads back as the same value, under limits that take in its count of values (a value in memory may have more than the default's 2^25), and a stream as an indirect object: a real in its shortest form that reads back as the same f64, past i64's range too, never with an exponent, its magnitude clamped as Annex C has it; names and strings byte by byte, a string in its `Form`, or literal when it has none; a dictionary's every entry, in order, a key written twice included, which ISO 32000-2 doesn't allow (`remove_duplicates` leaves each key's last); and a stream's bytes as they are, their length its `/Length`. `indirect_stream` writes a stream whose data is given apart, as it is, such as data a reader decrypted and hands out: plaintext, encoded by the filters the stream's dictionary names. What it can't write as the value it refuses, writing nothing: a real that isn't finite, values nested deeper than the parser reads them under its default limits, a string read as text or still ciphertext, and a stream whose data isn't in memory.
@@ -76,6 +77,33 @@ let Value::Stream(s) = stream.value() else { panic!() };
 assert_eq!(&file[data.start..data.end], b"hello");
 assert_eq!(s.data.at(), Some(data));
 assert_eq!(said.0, ["the name /N#00 has #00, NUL, which a name can't hold, which readers read differently"]);
+```
+
+By PDFium's rules, where ISO 32000-2's make `--5` and `1.2.3` keywords, which are no values:
+
+```rust
+use pdf_objects::parse::{Error, Fault, Parser, Sink};
+use pdf_objects::{Rules, Span, Value};
+
+struct Said(Vec<String>);
+impl Sink<'_> for Said {
+    fn fault(&mut self, _at: Span, fault: Fault<'_>) {
+        self.0.push(fault.to_string());
+    }
+}
+
+let words = b"[--5 1.2.3 <4G1>]";
+let iso = Parser::at(words, 0).value(&mut ());
+assert_eq!(iso, Err(Error::Keyword { at: 1, word: b"--5".to_vec() }));
+
+let mut said = Said(Vec::new());
+let array = Parser::at(words, 0).rules(Rules::Pdfium).value(&mut said).unwrap();
+let array = array.as_array().unwrap();
+assert_eq!(*array[0].value(), Value::Integer(0));
+assert_eq!(*array[1].value(), Value::Real(1.2));
+assert_eq!(array[2].as_bytes(), Some(&b"A"[..]));
+assert_eq!(said.0[0], "--5 is a number by PDFium's rules and a keyword to ISO 32000-2");
+assert_eq!(said.0.len(), 3);
 ```
 
 Limits are set on a copy of `Limits::DEFAULT`, as more of them may come:

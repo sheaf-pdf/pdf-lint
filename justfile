@@ -169,14 +169,15 @@ arlington-msrv:
 # Fuzz a target for a while, on nightly with cargo-fuzz: `tokenize`, the
 # tokenizer, by ISO 32000-2's rules and PDFium's; `filters`, the filters,
 # decoding and encoding; `crypt`, pdf-crypt's security handler, new files'
-# dictionaries and a password's forms; `objects`, pdf-objects' parser, and
-# its writer on what it read; `structure`, pdf-structure's reader;
-# `write`, pdf-structure's writer, on what its reader read; `content`,
-# pdf-content-streams' tokens, operations, faults, operator table, and the
-# balance, marked content and names over them; or `check`, the reader and
-# the checker. `structure`, `write` and `check` begin from the seeds
-# pdf-lint's fuzz module makes, `write`'s with the third byte its input
-# has; `content` from those pdf-content-streams' fuzz module makes.
+# dictionaries and a password's forms; `objects`, pdf-objects' parser, by
+# ISO 32000-2's rules and PDFium's, and its writer on what it read;
+# `structure`, pdf-structure's reader; `write`, pdf-structure's writer, on
+# what its reader read; `content`, pdf-content-streams' tokens, operations,
+# faults, operator table, and the balance, marked content and names over
+# them; or `check`, the reader and the checker. `structure`, `write` and
+# `check` begin from the seeds pdf-lint's fuzz module makes, `write`'s with
+# the third byte its input has; `content` from those pdf-content-streams'
+# fuzz module makes.
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.
 fuzz target="tokenize" seconds="60":
