@@ -6,7 +6,8 @@
 //! operation typed and stepped through the graphics objects' states; and
 //! its `q`/`Q` balance, marked content and resource names what their
 //! steppers give, an operation at a time, and what it keeps with its
-//! ranges at the top taken out.
+//! ranges taken out, those at the top and every one, in no order and
+//! overlapping.
 
 #![no_main]
 

@@ -95,13 +95,16 @@ pub struct Marked<'p> {
 /// use pdf_content_streams::{Concat, Limits, Properties, Props, ResCx, marked};
 /// use pdf_content_streams::pdf_objects::dict;
 ///
-/// let props = Properties::new([(b"P0".to_vec(), dict! { "Subtype" => "Header" })]);
+/// let header = dict! { "Subtype" => "Header" };
+/// let props = Properties::new([(b"P0".to_vec(), header)]);
 /// let page = Concat::new(&[b"/Artifact /P0 BDC q", b"/Span BMC EMC Q EMC"]);
-/// let found = marked(&page, &props, &ResCx::none(), &Limits::DEFAULT).unwrap();
+/// let (res, limits) = (ResCx::none(), Limits::DEFAULT);
+/// let found = marked(&page, &props, &res, &limits).unwrap();
 /// assert_eq!(found.len(), 2);
 /// assert_eq!((&found[0].tag[..], found[0].depth), (&b"Artifact"[..], 0));
 /// // The first runs from the first stream into the second.
-/// assert_eq!(found[0].span.to_string(), "stream 0 byte 0 to stream 1 byte 19");
+/// let span = found[0].span.to_string();
+/// assert_eq!(span, "stream 0 byte 0 to stream 1 byte 19");
 /// let list = found[0].props.as_ref().and_then(Props::dict).unwrap();
 /// assert!(list.get(b"Subtype").is_some());
 /// assert_eq!((&found[1].tag[..], found[1].depth), (&b"Span"[..], 1));
@@ -126,7 +129,9 @@ pub fn marked<'p>(
 /// pass, and is told as each range opens and ends ([`MarkedEvent`]).
 ///
 /// ```
-/// use pdf_content_streams::{Concat, Limits, MarkedEvent, MarkedNest, Properties, ResCx};
+/// use pdf_content_streams::{
+///     Concat, Limits, MarkedEvent, MarkedNest, Properties, ResCx,
+/// };
 ///
 /// let props = Properties::default();
 /// let page = Concat::new(&[b"/Artifact BMC 0 0 9 9 re f EMC"]);
@@ -141,7 +146,8 @@ pub fn marked<'p>(
 /// }
 /// assert_eq!(events, [("opened", 0), ("ended", 0)]);
 /// let found = nest.done().unwrap();
-/// assert_eq!(found[0].span.to_string(), "stream 0 byte 0 to stream 0 byte 30");
+/// let span = found[0].span.to_string();
+/// assert_eq!(span, "stream 0 byte 0 to stream 0 byte 30");
 /// ```
 #[derive(Debug, Clone)]
 pub struct MarkedNest<'p> {

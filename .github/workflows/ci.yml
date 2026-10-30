@@ -185,8 +185,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      # Keep in step with rust-version in crates/pdf-content-streams/Cargo.toml,
-      # which `just content-msrv` reads.
+      # Keep in step with rust-version in
+      # crates/pdf-content-streams/Cargo.toml, which `just content-msrv`
+      # reads.
       - uses: dtolnay/rust-toolchain@1.85
       - uses: extractions/setup-just@v4
       - name: Test

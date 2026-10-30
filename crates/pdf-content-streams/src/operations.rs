@@ -81,17 +81,18 @@ impl<'a, 'r, S> Operations<'a, 'r, S> {
     /// use std::ops::Range;
     ///
     /// #[derive(Default)]
-    /// struct Kept<'a>(Vec<(Range<usize>, Fault<'a>)>);
-    /// impl<'a> Sink<'a> for Kept<'a> {
+    /// struct Collected<'a>(Vec<(Range<usize>, Fault<'a>)>);
+    /// impl<'a> Sink<'a> for Collected<'a> {
     ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
     ///         self.0.push((at, fault));
     ///     }
     /// }
     ///
     /// let content = b"q 0 0 m 9 9 l S Q 1 2";
-    /// let mut kept = Kept::default();
+    /// let mut kept = Collected::default();
     /// let res = ResCx::none();
-    /// let read = operations(content, &res, &Limits::DEFAULT).with_sink(&mut kept);
+    /// let read = operations(content, &res, &Limits::DEFAULT);
+    /// let read = read.with_sink(&mut kept);
     /// assert_eq!(read.count(), 5);
     /// assert_eq!(kept.0, [(18..21, Fault::Trailing { count: 2 })]);
     /// assert_eq!(

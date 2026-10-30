@@ -163,12 +163,15 @@ macro_rules! operators {
         /// be used in ([`State`](crate::State)).
         ///
         /// ```
-        /// use pdf_content_streams::{Category, Operands, Operator, Paint, Type};
+        /// use pdf_content_streams::{
+        ///     Category, Operands, Operator, Paint, Type,
+        /// };
         ///
         /// let op = Operator::of(b"Tf");
         /// assert_eq!(op, Operator::Font);
         /// assert_eq!(op.name(), Some("Tf"));
-        /// assert_eq!(op.operands(), Some(Operands::Fixed(&[Type::Name, Type::Number])));
+        /// let font = Operands::Fixed(&[Type::Name, Type::Number]);
+        /// assert_eq!(op.operands(), Some(font));
         /// assert_eq!(op.category(), Some(Category::TextState));
         /// assert_eq!(op.clause(), Some("9.3.1"));
         /// assert_eq!(Operator::of(b"F").paint(), Some(Paint::Fill));
@@ -190,8 +193,8 @@ macro_rules! operators {
             /// all but [`Other`](Operator::Other).
             pub const ALL: &'static [Operator] = &[$(Operator::$variant),*];
 
-            /// The operator named `name`, as written: [`Other`](Operator::Other)
-            /// for a word that's none.
+            /// The operator named `name`, as written:
+            /// [`Other`](Operator::Other) for a word that's none.
             pub const fn of(name: &[u8]) -> Operator {
                 match name {
                     $($name => Operator::$variant,)*

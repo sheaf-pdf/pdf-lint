@@ -149,15 +149,15 @@ impl<'a, 'r, S> Tokens<'a, 'r, S> {
     /// use std::ops::Range;
     ///
     /// #[derive(Default)]
-    /// struct Kept<'a>(Vec<(Range<usize>, Fault<'a>)>);
-    /// impl<'a> Sink<'a> for Kept<'a> {
+    /// struct Collected<'a>(Vec<(Range<usize>, Fault<'a>)>);
+    /// impl<'a> Sink<'a> for Collected<'a> {
     ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
     ///         self.0.push((at, fault));
     ///     }
     /// }
     ///
     /// let content = b"q 1.2.3 w <4G> Tj Q";
-    /// let mut kept = Kept::default();
+    /// let mut kept = Collected::default();
     /// let res = ResCx::none();
     /// let read = tokens(content, &res, &Limits::DEFAULT).with_sink(&mut kept);
     /// assert_eq!(read.count(), 6);

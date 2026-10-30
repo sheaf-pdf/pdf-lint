@@ -1,6 +1,8 @@
 //! What the fuzz target checks, which unit tests check too: the promises
-//! the tokens, the operations and the faults make, on any input. It's
-//! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
+//! the tokens, the operations, the faults and the operator table and its
+//! states make, and the balance, marked content and names over them, on
+//! any input. It's compiled only for tests and under cargo-fuzz's
+//! `--cfg fuzzing`.
 
 use std::ops::Range;
 
@@ -15,9 +17,9 @@ use crate::{
 
 /// A sink that keeps every fault it's told, in order, where it is.
 #[derive(Debug, Default)]
-pub struct Kept<'a>(pub Vec<(Range<usize>, Fault<'a>)>);
+pub struct Collected<'a>(pub Vec<(Range<usize>, Fault<'a>)>);
 
-impl<'a> Sink<'a> for Kept<'a> {
+impl<'a> Sink<'a> for Collected<'a> {
     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
         self.0.push((at, fault));
     }
@@ -46,14 +48,16 @@ type Read<'a> = Vec<Result<(Range<usize>, Tok<'a>), Error>>;
 /// its middle, joined by [`Join`] and by [`Concat::new`] alike. The
 /// resources name a color space of each size an inline image may be drawn
 /// in. Each read's tokens tile its bytes ([`tiled`]), and its operations
-/// are its tokens grouped ([`grouped`]). Read again under small caps on
-/// operands and an inline image's data, the tokens are the first read's up
-/// to an error, which is the cap's, where the first read's token past it
-/// starts, or the first read's own; and the operations are those tokens
-/// grouped. Each read through a sink that keeps its faults is the same as
-/// through `()` ([`faulted`]), and one that wants none is told none. And
-/// the passes over its operations are their steppers' ([`passes`]).
-/// Panics on a broken promise.
+/// are its tokens grouped ([`grouped`]), each typed by the operator table
+/// and stepped through the graphics objects' states ([`typed`],
+/// [`stepped`]). Read again under small caps on operands and an inline
+/// image's data, the tokens are the first read's up to an error, which is
+/// the cap's, where the first read's token past it starts, or the first
+/// read's own; and the operations are those tokens grouped. Each read
+/// through a sink that keeps its faults is the same as through `()`
+/// ([`faulted`]), and one that wants none is told none. And the passes
+/// over its operations are their steppers' ([`passes`]). Panics on a
+/// broken promise.
 pub fn content(data: &[u8]) {
     let res = ResCx::new([
         (b"CS1".to_vec(), 1),
@@ -330,7 +334,7 @@ fn resource_typed(op: &Operation) {
 pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
     let s = content.bytes();
     let plain: Vec<_> = content.tokens(res, limits).collect();
-    let mut kept = Kept::default();
+    let mut kept = Collected::default();
     let read: Vec<_> = content.tokens(res, limits).with_sink(&mut kept).collect();
     assert_eq!(read, plain, "the same tokens through a sink");
     in_order(s, &kept.0);
@@ -353,7 +357,7 @@ pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
         .operations(res, limits)
         .map(|op| shown(&op))
         .collect();
-    let mut faults = Kept::default();
+    let mut faults = Collected::default();
     let read: Vec<_> = content
         .operations(res, limits)
         .with_sink(&mut faults)
@@ -396,7 +400,7 @@ pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
 /// wants none is told none; and an operand that's no array or
 /// dictionary, whose faults are its token's, has none told here.
 fn faulted_operand(s: &[u8], operand: &Operand, limits: &Limits) {
-    let mut kept = Kept::default();
+    let mut kept = Collected::default();
     let read = operand.object_with(limits, &mut kept);
     assert_eq!(read, operand.object(limits), "the same object");
     let r = operand.range();

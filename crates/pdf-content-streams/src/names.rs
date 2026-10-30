@@ -126,7 +126,8 @@ impl<'a> Operation<'a> {
     /// use pdf_content_streams::{Limits, ResCx, ResKind, operations};
     ///
     /// let content = b"/F1 12 Tf /DeviceRGB cs /Im#201 Do";
-    /// let named: Vec<_> = operations(content, &ResCx::none(), &Limits::DEFAULT)
+    /// let (res, limits) = (ResCx::none(), Limits::DEFAULT);
+    /// let named: Vec<_> = operations(content, &res, &limits)
     ///     .map(|op| op.unwrap().resource())
     ///     .collect();
     /// assert_eq!(named[0], Some((ResKind::Font, b"F1"[..].into())));
@@ -178,14 +179,16 @@ impl<'a> Operation<'a> {
 /// ```
 /// use pdf_content_streams::{Concat, Limits, ResCx, ResKind, names_used};
 ///
-/// let page = Concat::new(&[b"/GS0 gs /F1 9 Tf", b"/Artifact BMC /F2 9 Tf EMC"]);
-/// let names = names_used(&page, &ResCx::none(), &Limits::DEFAULT, &[]).unwrap();
+/// let first: &[u8] = b"/GS0 gs /F1 9 Tf";
+/// let page = Concat::new(&[first, b"/Artifact BMC /F2 9 Tf EMC"]);
+/// let (res, limits) = (ResCx::none(), Limits::DEFAULT);
+/// let names = names_used(&page, &res, &limits, &[]).unwrap();
 /// let fonts: Vec<_> = names.of(ResKind::Font).collect();
 /// assert_eq!(fonts, [b"F1", b"F2"]);
 ///
 /// // The second stream to be taken out.
 /// let second = page.span(page.range(1));
-/// let names = names_used(&page, &ResCx::none(), &Limits::DEFAULT, &[second]).unwrap();
+/// let names = names_used(&page, &res, &limits, &[second]).unwrap();
 /// let fonts: Vec<_> = names.of(ResKind::Font).collect();
 /// assert_eq!(fonts, [b"F1"]);
 /// assert!(names.contains(ResKind::ExtGState, b"GS0"));

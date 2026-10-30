@@ -14,7 +14,7 @@ use std::ops::Range;
 use pdf_objects::{Form, Object, Str, Value, dict};
 
 use crate::fault::{Fault, Sink};
-use crate::fuzz::{Kept, Unwanted, blank, faulted, fixtures};
+use crate::fuzz::{Collected, Unwanted, blank, faulted, fixtures};
 use crate::*;
 
 /// Numbers below what each call is given, the same each run.
@@ -969,7 +969,7 @@ fn the_types_are_send_and_sync() {
     both::<Marked>();
     both::<MarkedNest>();
     both::<NameSet>();
-    both::<crate::Kept>();
+    both::<Kept>();
 }
 
 /// `s`'s operations under `lim`, until the end or an error.
@@ -1360,7 +1360,7 @@ fn operands_are_read_when_asked() {
 /// The faults reading `page`'s operations tells, with no resources, in
 /// order: each where it is, and the fault.
 fn faults<'a>(page: &'a Concat) -> Vec<(Range<usize>, Fault<'a>)> {
-    let mut kept = Kept::default();
+    let mut kept = Collected::default();
     let none = ResCx::none();
     let read = page
         .operations(&none, &Limits::DEFAULT)
@@ -1546,7 +1546,7 @@ fn whats_inside_is_told_when_its_read() {
     let m = &read[1];
     let (array, dict, name) = (m.arg(2).unwrap(), m.arg(1).unwrap(), m.arg(0).unwrap());
     fn read_with(o: Operand<'_>) -> Vec<(Range<usize>, Fault<'_>)> {
-        let mut kept = Kept::default();
+        let mut kept = Collected::default();
         let object = o.object_with(&deep(8), &mut kept);
         assert_eq!(object, o.object(&deep(8)), "the same object");
         kept.0
@@ -1649,7 +1649,7 @@ fn a_token_across_streams() {
             })
             .collect();
         // The tokens tell the same.
-        let mut kept = Kept::default();
+        let mut kept = Collected::default();
         let none = ResCx::none();
         let tokens = page.tokens(&none, &Limits::DEFAULT).with_sink(&mut kept);
         tokens.for_each(drop);
@@ -1760,7 +1760,7 @@ fn a_token_across_streams() {
     assert_eq!(found[0].0, comment);
     // Read whole, there are no streams to cross.
     let page = Concat::new(&[b"q (ab", b"c) Tj Q"]);
-    let mut kept = Kept::default();
+    let mut kept = Collected::default();
     let none = ResCx::none();
     tokens(page.bytes(), &none, &Limits::DEFAULT)
         .with_sink(&mut kept)
@@ -1790,7 +1790,7 @@ fn operands_at_the_end_are_a_fault() {
     assert_eq!(at_end(&[b"q 1 2 (open"]), []);
     assert_eq!(at_end(&[b"q 0 0 m"]), []);
     // Told once, however often the end is asked for.
-    let mut kept = Kept::default();
+    let mut kept = Collected::default();
     let none = ResCx::none();
     let mut read = operations(b"q 1", &none, &Limits::DEFAULT).with_sink(&mut kept);
     assert!(read.next().is_some());
@@ -1800,7 +1800,7 @@ fn operands_at_the_end_are_a_fault() {
 
 /// `content`'s faults, read whole with no error, and each's words.
 fn told(content: &[u8]) -> Vec<(Range<usize>, String)> {
-    let mut kept = Kept::default();
+    let mut kept = Collected::default();
     let none = ResCx::none();
     operations(content, &none, &Limits::DEFAULT)
         .with_sink(&mut kept)
@@ -2081,7 +2081,7 @@ fn a_sink_that_wants_none_is_told_none() {
 fn a_dyn_sink_is_a_sink() {
     let s: &[u8] = b"q --5 <</K 1 2>> BDC 1";
     let none = ResCx::none();
-    let mut kept = Kept::default();
+    let mut kept = Collected::default();
     let sink: &mut dyn Sink = &mut kept;
     let read: Vec<_> = operations(s, &none, &Limits::DEFAULT)
         .with_sink(&mut *sink)
@@ -2131,7 +2131,7 @@ fn no_fault_where_iso_reads_alike() {
     inputs.push(b"q 1 0 0 1 72 720 cm /F1 12 Tf [(Hel) -20 (lo)] TJ Q".to_vec());
     for s in &inputs {
         let page = Concat::new(&[s]);
-        let mut kept = Kept::default();
+        let mut kept = Collected::default();
         let read: Vec<_> = page
             .operations(&res, lim)
             .with_sink(&mut kept)
@@ -3108,7 +3108,7 @@ fn many_ranges_taken_out_read_in_one_pass() {
     let started = std::time::Instant::now();
     let k = kept(&page, &none, LIM, &ranges).unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
-    assert_eq!(k, crate::Kept::default());
+    assert_eq!(k, Kept::default());
 }
 
 /// Ranges naming one property list share it, whatever its size: each

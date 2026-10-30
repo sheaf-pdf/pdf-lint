@@ -98,8 +98,8 @@ impl<'a> Operand<'a> {
     /// use std::ops::Range;
     ///
     /// #[derive(Default)]
-    /// struct Kept<'a>(Vec<(Range<usize>, Fault<'a>)>);
-    /// impl<'a> Sink<'a> for Kept<'a> {
+    /// struct Collected<'a>(Vec<(Range<usize>, Fault<'a>)>);
+    /// impl<'a> Sink<'a> for Collected<'a> {
     ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
     ///         self.0.push((at, fault));
     ///     }
@@ -107,11 +107,12 @@ impl<'a> Operand<'a> {
     ///
     /// let content = b"/Span <</MCID 0 1 /Alt>> BDC";
     /// let res = ResCx::none();
-    /// let bdc = operations(content, &res, &Limits::DEFAULT).next().unwrap().unwrap();
-    /// let mut kept = Kept::default();
-    /// let props = bdc.arg(0).unwrap().object_with(&Limits::DEFAULT, &mut kept);
-    /// let props = props.unwrap();
-    /// assert_eq!(props.as_dict().unwrap().get(b"MCID"), Some(&Object::from(0)));
+    /// let limits = Limits::DEFAULT;
+    /// let bdc = operations(content, &res, &limits).next().unwrap().unwrap();
+    /// let mut kept = Collected::default();
+    /// let props = bdc.arg(0).unwrap().object_with(&limits, &mut kept);
+    /// let mcid = props.unwrap().as_dict().unwrap().get(b"MCID").cloned();
+    /// assert_eq!(mcid, Some(Object::from(0)));
     /// let (one, alt) = (&content[16..17], &content[18..22]);
     /// assert_eq!(
     ///     kept.0,
