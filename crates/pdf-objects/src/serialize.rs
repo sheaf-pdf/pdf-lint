@@ -51,9 +51,10 @@
 //! and generation it gives, or `null` where it gives none, the value
 //! itself unchanged. An indirect object's own number is the one it's
 //! written at, given as [`indirect`] is given it, and so is the one an
-//! encryptor is given. `()` names each as it is, and the writers without a
-//! renumbering write as through it, by the walk compiled for it, so they
-//! pay for none.
+//! encryptor is given; the dictionary it's given beside it is the value as
+//! held, its references in the numbers they're held at. `()` names each as
+//! it is, and the writers without a renumbering write as through it, by
+//! the walk compiled for it, so they pay for none.
 
 use std::borrow::Cow;
 use std::convert::Infallible;
@@ -171,6 +172,14 @@ fn in_object(id: &Option<ObjectId>) -> String {
 /// [`Encrypt::string`] and a stream's data through [`Encrypt::stream`],
 /// once each, as it writes them, a stream's data before its dictionary, so
 /// that its `/Length` is what it gave.
+///
+/// The `id` each is asked with is the number the object is written at,
+/// whose key encrypts it; the `dict` it's given is the object's, or its
+/// stream's, as held, its references not renumbered, though a renumbering
+/// writes them otherwise ([`indirect_renumbered`],
+/// [`indirect_stream_renumbered`]): an encryptor that follows one, to a
+/// stream's `/DecodeParms` given by reference say, resolves it in the
+/// numbers the objects are held at.
 pub trait Encrypt {
     /// Why it doesn't encrypt a string or a stream's data, which the writer
     /// gives back ([`Refused::Encrypt`]).
@@ -285,6 +294,12 @@ impl<E> Refused<E> {
 /// they pay for no renumbering. Any function from an [`ObjectId`] to an
 /// `Option<ObjectId>` is one, a closure, a `dyn Fn` and a reference to one
 /// among them.
+///
+/// It is a function: a writer may ask it of the same id many times, in
+/// any order and on several threads at once (as pdf-structure's does, one
+/// place naming by number what's written in another), and it gives the
+/// same answer each time. A numbering made as it's asked, its next number
+/// handed to the next id it hasn't seen, is made first and given as a map.
 ///
 /// ```
 /// use std::collections::BTreeMap;
@@ -492,8 +507,10 @@ pub fn indirect_with<E: Encrypt + ?Sized>(
 /// `obj` as indirect object `id`, as [`indirect_with`] writes it, each
 /// reference in it as `to` names it ([`Renumber`]). `id` is the number and
 /// generation it's written at, which `to` isn't asked: its `n g obj`, and
-/// what `encrypt` is given, its key being that number's. Refused as
-/// [`indirect_with`] refuses, and then nothing is written.
+/// what `encrypt` is given, its key being that number's; the dictionary
+/// `encrypt` is given is `obj`'s as held, its references as they are
+/// ([`Encrypt`]). Refused as [`indirect_with`] refuses, and then nothing
+/// is written.
 pub fn indirect_renumbered<E: Encrypt + ?Sized, N: Renumber + ?Sized>(
     out: &mut Vec<u8>,
     id: ObjectId,
@@ -557,9 +574,9 @@ pub fn indirect_stream_with<E: Encrypt + ?Sized>(
 /// A stream of `dict` and `data`, as indirect object `id`, as
 /// [`indirect_stream_with`] writes it, each reference in `dict` as `to`
 /// names it ([`Renumber`]), but a `/Length`, which is the data's. `id` is
-/// the number and generation it's written at, which `to` isn't asked, as
-/// [`indirect_renumbered`] has it. Refused as [`indirect_with`] refuses,
-/// and then nothing is written.
+/// the number and generation it's written at, which `to` isn't asked, and
+/// `encrypt` is given `dict` as it is, as [`indirect_renumbered`] has it.
+/// Refused as [`indirect_with`] refuses, and then nothing is written.
 pub fn indirect_stream_renumbered<E: Encrypt + ?Sized, N: Renumber + ?Sized>(
     out: &mut Vec<u8>,
     id: ObjectId,

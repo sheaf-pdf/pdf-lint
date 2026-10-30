@@ -410,7 +410,8 @@ impl Object {
     /// nested however deeply walks without overflowing the thread's.
     ///
     /// The writer names references so as it writes them, without changing
-    /// the value ([`Renumber`](crate::serialize::Renumber)).
+    /// the value ([`Renumber`](crate::serialize::Renumber)); a renumbering
+    /// given so is given here as `|id| to.renumber(id)`.
     pub fn renumber(&mut self, mut to: impl FnMut(ObjectId) -> Option<ObjectId>) -> bool {
         // The place of each value that holds the one walked, from the
         // outermost, and how many of them, from the outermost, have been
