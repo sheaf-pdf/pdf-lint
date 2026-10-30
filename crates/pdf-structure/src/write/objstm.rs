@@ -49,7 +49,7 @@ pub enum KeptOut {
     /// its id ([`kept_out`]); a reader can't, as an object in an object
     /// stream is read at generation 0, its entry having none (7.5.8.3).
     Generation,
-    /// The document's encryption dictionary. The writer tells one by its
+    /// The file's encryption dictionary. The writer tells one by its
     /// shape ([`kept_out`]: the standard security handler's, a `/Filter`
     /// name, `/O` and `/U`), its caller leaving out the one the file it was
     /// read from names by number

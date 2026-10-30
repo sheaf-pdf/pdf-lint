@@ -513,10 +513,10 @@ pub enum Rule {
     /// inside another's bytes, and the like ([`Warning`]).
     Reader,
     /// What an object stream holds that it mustn't: what ISO 32000-2 7.5.7
-    /// keeps out of one ([`KeptOut`]), a stream, the document's encryption
+    /// keeps out of one ([`KeptOut`]), a stream, the file's encryption
     /// dictionary (the newest trailer's `/Encrypt`, or an earlier
     /// revision's where no later revision wrote the number over or freed
-    /// it), the value of an object stream's `/Length`, a linearization
+    /// it), what an object stream's `/Length` refers to, a linearization
     /// dictionary, and in a file whose linearization holds, its catalog and
     /// page objects; or, in a file that encrypts its strings, its objects'
     /// strings in the clear, its data not encrypted (7.6.6). In the object
@@ -6545,7 +6545,7 @@ mod tests {
         }
     }
 
-    /// The document's encryption dictionary in an object stream is found:
+    /// The file's encryption dictionary in an object stream is found:
     /// an earlier revision's, which its trailer names and no later one
     /// lists, at its bytes in the object stream's data; not a dictionary of
     /// its shape no trailer names, nor what's at a number an earlier
@@ -6615,8 +6615,8 @@ mod tests {
         assert!(said, "{report}");
     }
 
-    /// The value of an object stream's `/Length` in an object stream is
-    /// found in the one holding it, which names the object stream whose
+    /// What an object stream's `/Length` refers to, in an object stream,
+    /// is found in the one holding it, which names the object stream whose
     /// `/Length` it is: in another, and in the object stream itself.
     #[test]
     fn an_object_streams_length_in_an_object_stream_is_found() {
