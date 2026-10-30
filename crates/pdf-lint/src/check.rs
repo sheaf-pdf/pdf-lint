@@ -3673,7 +3673,9 @@ impl Made {
 }
 
 impl Rule {
-    pub const ALL: [Rule; 15] = [
+    /// Every rule: a slice, not an array of a fixed length, so a rule can
+    /// come without a breaking release.
+    pub const ALL: &'static [Rule] = &[
         Rule::Type,
         Rule::Missing,
         Rule::TooNew,
@@ -3714,7 +3716,7 @@ impl Rule {
 
     /// The rule named `name`.
     pub fn named(name: &str) -> Option<Rule> {
-        Rule::ALL.into_iter().find(|r| r.name() == name)
+        Rule::ALL.iter().copied().find(|r| r.name() == name)
     }
 }
 
@@ -6741,7 +6743,7 @@ mod tests {
     /// `packed`, the newest, is last.
     #[test]
     fn each_rule_is_named_by_its_name() {
-        for rule in Rule::ALL {
+        for &rule in Rule::ALL {
             assert_eq!(Rule::named(rule.name()), Some(rule));
             assert_eq!(rule.to_string(), rule.name());
         }

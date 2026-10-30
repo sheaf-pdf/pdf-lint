@@ -54,8 +54,9 @@ pub mod grammar {
     /// trailer's two; the object streams', which nothing in the model links
     /// to but an object stream, so the checker visits each as it; and
     /// those it checks a metadata stream and associated files as where the
-    /// model has no row for them.
-    pub const NAMED: [&str; 5] = [
+    /// model has no row for them. A slice, not an array of a fixed length,
+    /// so a table can come without a breaking release.
+    pub const NAMED: &[&str] = &[
         "FileTrailer",
         "XRefStream",
         "ObjectStream",
@@ -80,7 +81,7 @@ pub mod grammar {
     /// [`Refused`] says when something has, or when `model` lacks a table
     /// the checker reads by name ([`NAMED`]).
     pub fn use_model(model: Grammar) -> Result<(), Refused> {
-        for name in NAMED {
+        for &name in NAMED {
             if model.table(name).is_none() {
                 return Err(Refused::Lacks { table: name });
             }
