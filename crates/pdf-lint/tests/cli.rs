@@ -2065,7 +2065,7 @@ fn an_earlier_revisions_trailer_isnt_the_updates() {
         all,
         [
             "type: FileTrailer/ID at trailer, in the trailer",
-            "type: FileTrailer/ID at trailer 1, in the trailer"
+            "type: FileTrailer/ID at trailer 1, in trailer 1"
         ]
     );
     let out = run(&["--format", "json", again]);

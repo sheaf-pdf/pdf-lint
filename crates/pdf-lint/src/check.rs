@@ -160,7 +160,12 @@ pub enum Made {
 }
 
 /// The objects held to the grammar: what a writer wrote. The trailer as
-/// written is always held, as [`Made::Merged`].
+/// written is always held, as [`Made::Merged`]. An earlier revision's
+/// trailer ([`Source::revisions`]) is held as merged too, however the
+/// objects are made: each one with every object ([`Hold::All`]); with some
+/// ([`Hold::Only`]), a cross-reference stream's where its number is among
+/// them, as a hold names objects by number, and a table's never, as it
+/// has no number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hold {
     /// Every object in the file.
@@ -509,15 +514,17 @@ pub enum Rule {
     Reader,
     /// What an object stream holds that it mustn't: what ISO 32000-2 7.5.7
     /// keeps out of one ([`KeptOut`]), a stream, the document's encryption
-    /// dictionary (any revision's trailer's `/Encrypt`), the value of an
-    /// object stream's `/Length`, a linearization dictionary, and in a file
-    /// whose linearization holds, its catalog and page objects; or, in a
-    /// file that encrypts its strings, its objects' strings in the clear,
-    /// its data not encrypted (7.6.6). In the object stream, `ObjectStream`
-    /// and `-` its table and key, at the object's bytes in its data, its
-    /// value the object and what it is; the strings counted, at the first.
-    /// An object of a generation other than 0, which 7.5.7 keeps out too,
-    /// can't be read from one: its entry has no generation (7.5.8.3).
+    /// dictionary (the newest trailer's `/Encrypt`, or an earlier
+    /// revision's where no later revision wrote the number over or freed
+    /// it), the value of an object stream's `/Length`, a linearization
+    /// dictionary, and in a file whose linearization holds, its catalog and
+    /// page objects; or, in a file that encrypts its strings, its objects'
+    /// strings in the clear, its data not encrypted (7.6.6). In the object
+    /// stream, `ObjectStream` and `-` its table and key, at the object's
+    /// bytes in its data, its value the object and what it is; the strings
+    /// counted, at the first. An object of a generation other than 0, which
+    /// 7.5.7 keeps out too, can't be read from one: its entry has no
+    /// generation (7.5.8.3).
     Packed,
 }
 
@@ -538,7 +545,8 @@ pub struct Finding {
     pub path: String,
     /// The table and key of the row it breaks; for an unreached object,
     /// those of the object that references it, `-` for none; `-` and `-`
-    /// for the reader's.
+    /// for the reader's; `ObjectStream` and `-` for a [`Rule::Packed`]
+    /// one.
     pub table: String,
     pub key: String,
     pub rule: Rule,
@@ -3249,9 +3257,9 @@ fn object_stream(object: &Object) -> bool {
 /// a dictionary with `/Linearized`, as the writer tells one it keeps out of
 /// an object stream ([`kept_out`](pdf_structure::write::kept_out)'s
 /// [`KeptOut::Linearization`]). Asked apart from `kept_out`, which gives
-/// one reason an object and an encryption dictionary's shape before this
-/// one, where a reader tells the encryption dictionary by what the
-/// trailers name.
+/// one reason an object is kept out and asks an encryption dictionary's
+/// shape first, where the check tells the encryption dictionary by what
+/// the trailers name instead.
 fn linearization(object: &Object) -> bool {
     matches!(object.value(), Value::Dict(d) if d.has(b"Linearized"))
 }
@@ -3749,9 +3757,10 @@ impl fmt::Display for Rule {
 
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let object = match self.object {
-            Some((n, g)) => format!("{n} {g} R"),
-            None => "the trailer".to_string(),
+        let object = match (self.object, self.revision) {
+            (Some((n, g)), _) => format!("{n} {g} R"),
+            (None, Some(revision)) => format!("trailer {revision}"),
+            (None, None) => "the trailer".to_string(),
         };
         let value: String = match self.value.char_indices().nth(SHOWN - 1) {
             Some((cut, _)) if self.value.chars().count() > SHOWN => {
@@ -5861,7 +5870,7 @@ mod tests {
             assert_eq!(&file.out[at.start..at.end], b"<< /Root 1 0 R >>");
             assert_eq!(report.checked.get("FileTrailer"), Some(&2), "{report}");
             assert!(report.paths.contains("trailer 1"), "{:?}", report.paths);
-            assert!(found.to_string().contains("at trailer 1, in the trailer"));
+            assert!(found.to_string().contains("at trailer 1, in trailer 1 ("));
         }
         let some = Hold::Only(BTreeMap::from([((2, 0), Made::Merged)]));
         let report = check(&doc, &some, &Options::default());
