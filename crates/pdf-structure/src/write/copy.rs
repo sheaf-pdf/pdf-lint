@@ -2,14 +2,16 @@
 //! it was read from, where those are still the bytes it was read from and
 //! still mean what they meant: in the reading the write is given, at its
 //! own number, under the key its strings and data are encrypted with, or
-//! none; or, read from an object stream, in one of the write's.
+//! none; or, read from an object stream, in one of the write's. Under a
+//! renumbering, only where nothing in it moves: its number, and every
+//! reference in it.
 
 use std::borrow::Cow;
 
 use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_objects::parse::Parser;
 
-use super::{Body, Encrypting, Encryptor, Error, ReadFrom};
+use super::{Body, Encrypting, Encryptor, Error, Numbering, ReadFrom};
 use crate::bytes::{SourceId, XrefEntry};
 use crate::source::{Origin, Record};
 
@@ -77,16 +79,18 @@ impl<'w> Copying<'w> {
         Ok(Copying { from, offsets })
     }
 
-    /// Object `id`, `body`, written on its own: the bytes it was read from,
-    /// where they're copied; none where it's written anew. Refused where
-    /// its record is another reading's or another object's
-    /// ([`Error::Elsewhere`]), or its bytes aren't those it was read from
-    /// ([`Error::Changed`]).
+    /// Object `id`, `body`, written on its own at `at` with its references
+    /// as `to` names them: the bytes it was read from, where they're
+    /// copied; none where it's written anew. Refused where its record is
+    /// another reading's or another object's ([`Error::Elsewhere`]), or its
+    /// bytes aren't those it was read from ([`Error::Changed`]).
     pub(super) fn at_offset(
         &self,
         id: ObjectId,
+        at: ObjectId,
         body: &Body<'_>,
         encrypting: Option<&Encrypting<'_>>,
+        to: Numbering<'_>,
     ) -> Result<Option<Cow<'w, [u8]>>, Error> {
         let Body::Read { object, record } = body else {
             return Ok(None);
@@ -105,13 +109,18 @@ impl<'w> Copying<'w> {
         {
             return Ok(None);
         }
+        // Its bytes say its number and its references: copied where
+        // neither moves.
+        if at != id || !to.still(object) {
+            return Ok(None);
+        }
         // Encrypted, its bytes are right under the same key alone.
         let keeps = match &self.offsets {
             Offsets::No => false,
             Offsets::Plain => true,
             Offsets::Same { read, metadata } => encrypting.is_some_and(|e| {
                 let there = |id| -> Option<&Object> { self.from.object(id) };
-                e.keeps(read, &there, *metadata, id, object)
+                e.keeps(read, &there, *metadata, (id, at), object)
             }),
         };
         if !keeps {
@@ -124,13 +133,16 @@ impl<'w> Copying<'w> {
         Ok(Some(bytes))
     }
 
-    /// Object `id`, `body`, which goes in an object stream of the write's:
-    /// the bytes it was read from in another, where they're copied; none
-    /// where it's written anew. Refused as [`Copying::at_offset`] refuses.
+    /// Object `id`, `body`, which goes in an object stream of the write's,
+    /// its references as `to` names them: the bytes it was read from in
+    /// another, where they're copied; none where it's written anew. The
+    /// number it's written at is its container's to say, not its bytes'.
+    /// Refused as [`Copying::at_offset`] refuses.
     pub(super) fn member(
         &self,
         id: ObjectId,
         body: &Body<'_>,
+        to: Numbering<'_>,
     ) -> Result<Option<Cow<'w, [u8]>>, Error> {
         let Body::Read { object, record } = body else {
             return Ok(None);
@@ -151,6 +163,10 @@ impl<'w> Copying<'w> {
         };
         if !listed || id.1 != 0 || record.at.stream != Some((stream, 0)) {
             return Err(Error::Elsewhere(id));
+        }
+        // Its bytes say its references: copied where they don't move.
+        if !to.still(object) {
+            return Ok(None);
         }
         self.checked(id, record).map(Some)
     }
@@ -197,25 +213,28 @@ pub(super) fn as_read(
     Ok(stream.is_none_or(|s| s.data.at() == record.data.map(|d| d.at)))
 }
 
-/// Object `id`, `body`, written on its own at the end of `out`, copied
-/// where `copying` copies it, else anew, encrypted by `encrypting` when
-/// there's one, a stream's data where it was written read from `from`:
-/// where it starts.
+/// Object `id`, `body`, written on its own at the end of `out` at `at`,
+/// its references as `to` names them, copied where `copying` copies it,
+/// else anew, encrypted by `encrypting` when there's one, a stream's data
+/// where it was written read from `from`: where it starts.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn written(
     out: &mut Vec<u8>,
     id: ObjectId,
+    at: ObjectId,
     body: &Body<'_>,
     encrypting: Option<&Encrypting<'_>>,
     from: Option<&dyn ReadFrom>,
     copying: Option<&Copying<'_>>,
+    to: Numbering<'_>,
 ) -> Result<usize, Error> {
     if let Some(copying) = copying {
-        if let Some(bytes) = copying.at_offset(id, body, encrypting)? {
+        if let Some(bytes) = copying.at_offset(id, at, body, encrypting, to)? {
             let pos = out.len();
             out.extend_from_slice(&bytes);
             out.push(b'\n');
             return Ok(pos);
         }
     }
-    super::indirect(out, id, body.object(), encrypting, from)
+    super::indirect(out, id, at, body.object(), encrypting, from, to)
 }

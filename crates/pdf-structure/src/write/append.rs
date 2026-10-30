@@ -14,8 +14,8 @@ use pdf_objects::serialize;
 use super::copy::{Copying, as_read, written};
 use super::crypt::Place;
 use super::{
-    Bodies, Body, Encryptor, Entry, Error, NUMBERS, Options, ReadFrom, SECTION_KEYS, Section,
-    Written, checked, dangling, file_id, first_id, fresh, id_value, stopped,
+    Bodies, Body, Encryptor, Entry, Error, NUMBERS, Numbering, Options, ReadFrom, SECTION_KEYS,
+    Section, Written, checked, dangling, file_id, first_id, fresh, id_value, stopped,
 };
 use crate::bytes::{ByteSource, Reading, SourceId};
 use crate::source::XrefKind;
@@ -64,6 +64,14 @@ pub struct Base {
     /// file. An update after it passes over an object as that reading read
     /// it ([`Body::Read`]), whose bytes are in the file already.
     pub source: Option<SourceId>,
+    /// Whether it was written whole under a renumbering
+    /// ([`Options::renumber`]), kept by an update after it: its objects
+    /// aren't at the numbers a reading of the file before was read at, so
+    /// an update after it is given objects at its numbers, built or
+    /// edited, and refuses an object as read and a reading
+    /// ([`Error::Renumbered`]), which would be written over another object
+    /// of the file. [`Base::of`] and [`Base::new`] leave it unset.
+    pub renumbered: bool,
 }
 
 impl Base {
@@ -140,6 +148,7 @@ impl Base {
             trailer: dict.clone(),
             encryption: reading.stored().map(|stored| stored.dict.clone()),
             source: Some(reading.id()),
+            renumbered: false,
         })
     }
 
@@ -161,6 +170,7 @@ impl Base {
             encryption: (trailer.get(b"Encrypt").and_then(Object::as_dict)).cloned(),
             trailer,
             source: None,
+            renumbered: false,
         }
     }
 
@@ -188,10 +198,17 @@ impl Base {
 /// trailer refer to and no object written holds. Its positions are
 /// `base.len` and its offset from where it starts in `out`, so `out` may
 /// be empty or hold the file. Of the [`Options`], it takes `xref_from` and
-/// `stop`; it writes each object on its own, never in an object stream.
-/// After a whole file's [`Written::base`], which is of no reading, it
-/// passes over nothing as read, so a document's bodies given again are
-/// each written again: what changed since a save is the caller's to give.
+/// `stop`; it writes each object on its own, never in an object stream,
+/// and at the number it's given at, as it's a number of the file `base`
+/// describes. After a whole file's [`Written::base`], which is of no
+/// reading, it passes over nothing as read, so a document's bodies given
+/// again are each written again: what changed since a save is the
+/// caller's to give. After a whole file written under a renumbering
+/// ([`Base::renumbered`]), whose numbers aren't the document's, it's given
+/// objects at the numbers written, built or edited, under the encryptor in
+/// those numbers ([`Encryptor::renumbered`]), and refuses an object as read
+/// and a reading ([`Error::Renumbered`]); a caller that copies opens the
+/// file written and goes after [`Base::of`] that reading.
 ///
 /// - **The trailer** carries `base`'s newest trailer's entries but those
 ///   a section writes anew (ISO 32000-2, 7.5.6): `/Root`, `/Prev`, at
@@ -227,9 +244,10 @@ impl Base {
 /// ([`Encryptor::create`]) instead.
 ///
 /// Refused, with nothing written ([`Error`]): a `base` without `/Root`; an
-/// encryptor that isn't `base`'s file's (another file's, though its
-/// `/Encrypt` is at the same number), or none for an encrypted file;
-/// a number 0 or at or past [`NUMBERS`], or given twice; a body at the
+/// object as read or a `from` after a whole file written under a
+/// renumbering; an encryptor that isn't `base`'s file's (another file's,
+/// though its `/Encrypt` is at the same number), or none for an encrypted
+/// file; a number 0 or at or past [`NUMBERS`], or given twice; a body at the
 /// encryption dictionary's number; one at a number the file lists free
 /// where its keys are made per object ([`Encryptor::of`]); a
 /// cross-reference stream with no number left below [`NUMBERS`]; a
@@ -248,9 +266,15 @@ pub fn update<'a>(
     options: &Options<'_>,
 ) -> Result<Option<Written>, Error> {
     let start = out.len();
+    // After a whole file written under a renumbering, what was read is in
+    // numbers the file doesn't have.
+    if base.renumbered && from.is_some() {
+        return Err(Error::Renumbered);
+    }
     // What the file holds as read already, passed over: an object as the
     // reading `base` is of read it, at its own number.
     let held = |id: ObjectId, body: &Body<'_>| match (body, base.source) {
+        (Body::Read { .. }, _) if base.renumbered => Err(Error::Renumbered),
         (Body::Read { object, record }, Some(source)) if record.source == source => {
             as_read(id, object, record, source)
         }
@@ -290,7 +314,8 @@ fn appended(
         return Err(Error::Unmatched);
     }
     let encrypt_at = encryptor.and_then(Encryptor::at).map(|at| at.0);
-    checked(bodies, encrypt_at, encryptor)?;
+    let to = Numbering::NONE;
+    checked(bodies, to, encrypt_at, encryptor)?;
     let copying = from.map(|from| Copying::new(from, encryptor)).transpose()?;
     // What the encryptor resolves references by, where there's one.
     let resolve = encryptor.map(|_| Bodies::new(bodies, from));
@@ -307,7 +332,16 @@ fn appended(
     for (id, body) in bodies {
         stopped(options.stop)?;
         let pos = at(out);
-        written(out, *id, body, encrypting.as_ref(), from, copying.as_ref())?;
+        written(
+            out,
+            *id,
+            *id,
+            body,
+            encrypting.as_ref(),
+            from,
+            copying.as_ref(),
+            to,
+        )?;
         let generation = id.1;
         section.insert(
             id.0,
@@ -348,7 +382,7 @@ fn appended(
             let past = [options.xref_from, base.size, section.size()]
                 .into_iter()
                 .fold(0, u32::max);
-            let dangling = dangling(bodies, &base.trailer, past, &[]);
+            let dangling = dangling(bodies, to, &base.trailer, past, &[]);
             let num = fresh(past, |n| dangling.contains(&n));
             if num >= NUMBERS {
                 return Err(Error::NoNumber(num));
@@ -370,6 +404,7 @@ fn appended(
         trailer: kept,
         encryption: base.encryption.clone(),
         source: base.source,
+        renumbered: base.renumbered,
     };
     Ok(Written {
         section,

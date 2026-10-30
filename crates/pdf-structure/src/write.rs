@@ -31,6 +31,14 @@
 //!   reading's source asked whether it changed ([`ByteSource::unchanged`]);
 //!   where they changed, the write is refused. An update passes over what
 //!   its file holds as read, so a document's bodies write what changed.
+//! - **Renumbered** ([`Options::renumber`]): a whole file's objects written
+//!   at the numbers a caller's renumbering gives them, each reference named
+//!   as it names it, `null` where it names none, the trailer's too. What's
+//!   given stays at its numbers, which a stream's data, a copy's record and
+//!   what the encryptor resolves are found by; an encrypted file's objects
+//!   are encrypted under the numbers they're written at, by the encryptor
+//!   in those numbers ([`Encryptor::renumbered`]). An object as read is
+//!   copied only where nothing in it moves.
 //! - **Cross-reference sections** ([`Section`]): a whole file's one
 //!   subsection, `[0, /Size)`, every number it doesn't list written as
 //!   free; or an update's, runs of the numbers it lists, which are only
@@ -63,8 +71,9 @@
 //!   encrypted"). Under RC4 a changed object written again at its number
 //!   and generation is encrypted with the keystream its earlier version
 //!   was, which leaks what changed to one who holds both (pdf-crypt's
-//!   `Method::Rc4`); a file written whole under a new AES-256 encryption
-//!   ([`Encryptor::create`]) doesn't.
+//!   `Method::Rc4`), and so is an object a renumbering writes at a number
+//!   another object had, which leaks the XOR of the two; a file written
+//!   whole under a new AES-256 encryption ([`Encryptor::create`]) doesn't.
 //!
 //! What it can't write is refused ([`Error`]), and then nothing is
 //! written.
@@ -86,7 +95,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use pdf_filters::{Backend, Encoder, Level, Prediction, Unencodable};
 use pdf_objects::Resolve;
 use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
-use pdf_objects::serialize::{self, Refused};
+use pdf_objects::serialize::{self, Refused, Renumber};
 use pdf_objects::version::Version;
 
 use crate::bytes::{ByteSource, Reading, SourceId, XrefEntry};
@@ -184,8 +193,11 @@ pub enum Body<'a> {
     /// a container: a caller that would keep it copied, as a writer that
     /// packs only what it writes anew does, leaves its number out of every
     /// group ([`Pack::groups`]), which writes it on its own. Which is the
-    /// caller's. A copy is made only from the reading the write is given
-    /// ([`ReadFrom`]), so with none it's written anew; and only:
+    /// caller's. Under a renumbering ([`Options::renumber`]), it's copied
+    /// only where nothing in it moves, its number and every reference in it
+    /// as they are, as its bytes say both. A copy is made only from the
+    /// reading the write is given ([`ReadFrom`]), so with none it's written
+    /// anew; and only:
     ///
     /// 1. where `record` is that reading's ([`Record::source`]): else the
     ///    write is refused ([`Error::Elsewhere`]);
@@ -274,7 +286,7 @@ impl<'a> From<&'a Object> for Body<'a> {
 /// How a whole file or an update is written. A caller sets the fields on
 /// a copy of [`Options::DEFAULT`] (`options.kind = XrefKind::Stream`, say),
 /// as it does a reading's [`Options`](crate::Options).
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct Options<'a> {
     /// A whole file's cross-reference section: a table, by default, or a
@@ -296,9 +308,11 @@ pub struct Options<'a> {
     /// where that isn't known. Built on any number, they're the same bytes.
     pub threads: usize,
     /// Where a whole file's encryption dictionary goes, when it's written
-    /// as an object: by default at its number in the file its
-    /// [`Encryptor`] was read from, and a new file's past every object
-    /// given. One that file had in its trailer stays there.
+    /// as an object, a number the file uses ([`Options::renumber`]): by
+    /// default at its number in the file its [`Encryptor`] was read from,
+    /// as the renumbering names it, and a new file's past every object
+    /// written, as is one whose number the renumbering names none of. One
+    /// that file had in its trailer stays there.
     pub encrypt_at: Option<ObjectId>,
     /// The least number a whole file's cross-reference stream and its new
     /// object streams take, and an update's cross-reference stream: past
@@ -309,6 +323,64 @@ pub struct Options<'a> {
     /// before each object and each object stream, and the write then
     /// writes nothing ([`Error::Stopped`]).
     pub stop: Option<&'a AtomicBool>,
+    /// Where each object of a whole file goes ([`full`], [`document`]):
+    /// given the number and generation an object is given at, or a
+    /// reference in what's written names, those it's written at, or none
+    /// for an object the file doesn't hold, a reference to it then written
+    /// `null`, as a reference to no object reads (ISO 32000-2, 7.3.10). Any
+    /// function from an [`ObjectId`] to an `Option<ObjectId>` is one
+    /// (pdf-objects' `serialize::Renumber`). None, the default, writes each
+    /// at the number it's given at. An update ([`update`]) takes none: what
+    /// it's given is at the numbers it writes.
+    ///
+    /// - **What's given keeps its numbers:** a document's ids, an object
+    ///   as read at the number it was read as ([`Record::id`]); a stream's
+    ///   data where it was written, a copy's record and what the encryptor
+    ///   resolves are found by them. Each object is written at the number
+    ///   the renumbering gives it, refused where it gives none
+    ///   ([`Error::Unnumbered`]), and each reference in it and in the
+    ///   trailer is written as the renumbering names it. Two numbers may
+    ///   be given one, a reference to either then naming the object there,
+    ///   but one object is written at a number ([`Error::Twice`]): a caller
+    ///   whose renumbering shares a number gives one object at it, which
+    ///   [`document`], giving every object of the document, doesn't.
+    /// - **The numbers the file uses are those written:** 0 and
+    ///   [`NUMBERS`], a number two objects are written at, the encryption
+    ///   dictionary's ([`Options::encrypt_at`]), one the encryptor's file
+    ///   lists free under keys made per object ([`Error::Free`]), which a
+    ///   renumbering passes over ([`Encryptor::free_numbers`]),
+    ///   [`Pack::reuse`] and those the writer gives its own objects;
+    ///   [`Pack::groups`] is given the numbers packed objects are given at.
+    ///   An object given past [`NUMBERS`] and written below it is written.
+    /// - **Errors name** an object by the number it's given at
+    ///   ([`Error::Unnumbered`], [`Error::Elsewhere`], [`Error::Changed`],
+    ///   [`Error::Placed`], [`Error::Data`], [`Error::Group`], and
+    ///   [`Error::Twice`] of a number given twice); a number the file uses
+    ///   by the number written ([`Error::Number`], [`Error::Twice`],
+    ///   [`Error::EncryptAt`], [`Error::Free`]); and what pdf-objects'
+    ///   writer or the encryptor refuses by the number it was writing at
+    ///   ([`Error::Serialize`], [`Error::Encrypt`]).
+    /// - **Encrypted**, each object is encrypted under the number it's
+    ///   written at, by the encryptor in the numbers written
+    ///   ([`Encryptor::renumbered`]): what it leaves in the clear, its
+    ///   dictionary's place and the references in it, and the document's
+    ///   metadata stream. **Under RC4**, an object written at a number
+    ///   another object had in the file the encryptor was read from is
+    ///   encrypted with that object's keystream, the key and `/ID[0]`
+    ///   being the file's: where the earlier file is kept, the XOR of the
+    ///   two ciphertexts is the XOR of the two plaintexts, for every object
+    ///   moved onto another's number (pdf-crypt's `Method::Rc4`). A caller
+    ///   who doesn't want that writes the file under a new AES-256
+    ///   encryption ([`Encryptor::create`]) instead.
+    /// - **Copied**, an object as read ([`Body::Read`]) is its bytes only
+    ///   where nothing in it moves, its number and every reference in it
+    ///   as they are; else it's written anew.
+    /// - **What's written says so** ([`Written::base`],
+    ///   [`Base::renumbered`]): an update after it is given objects at the
+    ///   numbers written, built or edited, and refuses an object as read
+    ///   and a reading given ([`Error::Renumbered`]), whose numbers aren't
+    ///   the file's any more.
+    pub renumber: Option<&'a (dyn Renumber + Sync + 'a)>,
 }
 
 impl Options<'static> {
@@ -326,6 +398,7 @@ impl Options<'static> {
         encrypt_at: None,
         xref_from: 0,
         stop: None,
+        renumber: None,
     };
 }
 
@@ -335,11 +408,29 @@ impl Default for Options<'_> {
     }
 }
 
+impl fmt::Debug for Options<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Options")
+            .field("kind", &self.kind)
+            .field("version", &self.version)
+            .field("pack", &self.pack)
+            .field("deflate", &self.deflate)
+            .field("threads", &self.threads)
+            .field("encrypt_at", &self.encrypt_at)
+            .field("xref_from", &self.xref_from)
+            .field("stop", &self.stop)
+            .field("renumber", &self.renumber.map(|_| "a caller's"))
+            .finish()
+    }
+}
+
 /// Which object streams a whole file's packed objects go in: given the
 /// numbers packed, ascending, each object stream's members, in order. A
 /// number not packed, or named twice, is refused ([`Error::Group`]); one
 /// left out of every group is written on its own; an empty group makes no
-/// object stream.
+/// object stream. Under a renumbering ([`Options::renumber`]), the numbers
+/// are those the packed objects are given at, as a caller groups its own
+/// objects by what it knows of them.
 pub type Groups<'a> = dyn Fn(&[u32]) -> Vec<Vec<u32>> + Sync + 'a;
 
 /// How a whole file puts objects in object streams (ISO 32000-2, 7.5.7):
@@ -360,7 +451,8 @@ pub struct Pack<'a> {
     /// one an object written has, one given already and one the file the
     /// encryptor was read from lists free under keys made per object are
     /// passed over; then they're numbered past every object written and
-    /// [`Options::xref_from`].
+    /// [`Options::xref_from`]. They're numbers the file uses, so under a
+    /// renumbering ([`Options::renumber`]) they're numbers written.
     pub reuse: &'a [u32],
 }
 
@@ -411,8 +503,15 @@ pub struct Written {
     /// it's of no reading ([`Base::source`] none), so an update after it
     /// passes over nothing as read: a document's [`bodies`] given again,
     /// their records still of the reading the document was read in, are
-    /// each written again, copied where they copy. After an update it's of
-    /// the reading its base was.
+    /// each written again, copied where they copy. After a whole file
+    /// written under a renumbering ([`Options::renumber`]) it says so
+    /// ([`Base::renumbered`]): the document's numbers aren't the file's,
+    /// so an update after it is given objects at the numbers written,
+    /// built or edited, under the encryptor in those numbers
+    /// ([`Encryptor::renumbered`]), and refuses an object as read and a
+    /// reading ([`Error::Renumbered`]); one that copies opens the file
+    /// written and goes after [`Base::of`] that reading. After an update
+    /// it's of the reading its base was, renumbered as its base was.
     pub base: Base,
 }
 
@@ -580,8 +679,10 @@ pub enum Error {
     /// a whole file's section would list every number up to.
     #[error("{}", number(*.0))]
     Number(u32),
-    /// An object number given twice, at any generation.
-    #[error("object {0} is given twice")]
+    /// An object number given twice, at any generation; or, under a
+    /// renumbering ([`Options::renumber`]), the number two objects are
+    /// written at.
+    #[error("object number {0} is given twice, or two objects are written there")]
     Twice(u32),
     /// An object at the number a whole file writes its encryption
     /// dictionary at, or the number an update's file has it at.
@@ -696,6 +797,24 @@ pub enum Error {
         .0.0, .0.1
     )]
     Elsewhere(ObjectId),
+    /// An object given at this number and generation that the renumbering
+    /// ([`Options::renumber`]) gives no number to be written at: an object
+    /// given is one the caller means written.
+    #[error(
+        "object {} {} is given, and the renumbering gives it no number to be written at",
+        .0.0, .0.1
+    )]
+    Unnumbered(ObjectId),
+    /// An update after a whole file written under a renumbering
+    /// ([`Base::renumbered`]) given an object as read ([`Body::Read`]), or
+    /// a reading: the reading's records and objects are at the numbers it
+    /// read, which aren't the file's any more, so one given again would be
+    /// written over another object of the file. An update after it is
+    /// given objects at the numbers written, built or edited.
+    #[error(
+        "the file was written whole under a renumbering, so an update after it is given objects at its numbers, built or edited, and no reading"
+    )]
+    Renumbered,
 }
 
 impl Error {
@@ -817,51 +936,97 @@ fn stopped(stop: Option<&AtomicBool>) -> Result<(), Error> {
     }
 }
 
-/// `bodies`' numbers, each one a written file may use, given once, not
-/// `encrypt_at`, the encryption dictionary's, and not one `encryptor`'s
-/// file lists free under keys made per object: the first that isn't,
-/// refused.
-fn checked(
-    bodies: &[(ObjectId, Body<'_>)],
-    encrypt_at: Option<u32>,
-    encryptor: Option<&Encryptor>,
-) -> Result<(), Error> {
-    let mut given = HashSet::with_capacity(bodies.len());
-    for &(id, _) in bodies {
-        usable(id.0)?;
-        if !given.insert(id.0) {
-            return Err(Error::Twice(id.0));
-        }
-        if encrypt_at == Some(id.0) {
-            return Err(Error::EncryptAt(id.0));
-        }
-        if encryptor.is_some_and(|e| e.free(id.0).is_some()) {
-            return Err(Error::Free(id));
+/// The renumbering a write is given ([`Options::renumber`]), or none: where
+/// each object it's given is written, and what each reference names.
+#[derive(Clone, Copy)]
+struct Numbering<'a>(Option<&'a (dyn Renumber + Sync + 'a)>);
+
+impl<'a> Numbering<'a> {
+    /// None: each object at the number it's given at.
+    const NONE: Numbering<'static> = Numbering(None);
+
+    /// Where an object given at `id` is written, and what a reference to
+    /// `id` names: `id` itself with no renumbering; none for an object the
+    /// file doesn't hold.
+    #[inline]
+    fn at(self, id: ObjectId) -> Option<ObjectId> {
+        match self.0 {
+            None => Some(id),
+            Some(to) => to.renumber(id),
         }
     }
-    Ok(())
+
+    /// Whether every reference in `obj` is named as it is.
+    fn still(self, obj: &Object) -> bool {
+        match self.0 {
+            None => true,
+            Some(to) => obj.references().all(|r| to.renumber(r) == Some(r)),
+        }
+    }
 }
 
-/// The numbers `bodies` and `trailer` refer to that no body has, from
-/// `from` on and among `also`: a number the writer gives an object of its
-/// own (an object stream, a cross-reference stream, a new encryption
-/// dictionary), which is one of those, passes over them, so that a
-/// reference to an object that isn't there, which a reader reads as null
-/// (ISO 32000-2, 7.3.10), doesn't come to name one. Walked with one stack
-/// for every object, as a value built in memory may nest however deeply.
+/// Where each of `bodies` is written, by `to`, in order: refused where `to`
+/// gives one none ([`Error::Unnumbered`]); each a number a written file may
+/// use, given once and written once, not `encrypt_at`, the encryption
+/// dictionary's, and not one `encryptor`'s file lists free under keys made
+/// per object: the first that isn't, refused.
+fn checked(
+    bodies: &[(ObjectId, Body<'_>)],
+    to: Numbering<'_>,
+    encrypt_at: Option<u32>,
+    encryptor: Option<&Encryptor>,
+) -> Result<Vec<ObjectId>, Error> {
+    let mut written = Vec::with_capacity(bodies.len());
+    let mut taken = HashSet::with_capacity(bodies.len());
+    // Under a renumbering, the numbers given too, each once.
+    let mut given = HashSet::with_capacity(if to.0.is_some() { bodies.len() } else { 0 });
+    for &(id, _) in bodies {
+        if to.0.is_some() && !given.insert(id.0) {
+            return Err(Error::Twice(id.0));
+        }
+        let at = to.at(id).ok_or(Error::Unnumbered(id))?;
+        usable(at.0)?;
+        if !taken.insert(at.0) {
+            return Err(Error::Twice(at.0));
+        }
+        if encrypt_at == Some(at.0) {
+            return Err(Error::EncryptAt(at.0));
+        }
+        if encryptor.is_some_and(|e| e.free(at.0).is_some()) {
+            return Err(Error::Free(at));
+        }
+        written.push(at);
+    }
+    Ok(written)
+}
+
+/// The numbers `bodies` and `trailer` refer to, as `to` names them, that no
+/// body is written at, from `from` on and among `also`: a number the writer
+/// gives an object of its own (an object stream, a cross-reference stream,
+/// a new encryption dictionary), which is one of those, passes over them,
+/// so that a reference to an object that isn't there, which a reader reads
+/// as null (ISO 32000-2, 7.3.10), doesn't come to name one. Walked with one
+/// stack for every object, as a value built in memory may nest however
+/// deeply.
 fn dangling(
     bodies: &[(ObjectId, Body<'_>)],
+    to: Numbering<'_>,
     trailer: &Dict,
     from: u32,
     also: &[u32],
 ) -> HashSet<u32> {
     let also: HashSet<u32> = also.iter().copied().collect();
     let mut named = HashSet::new();
-    // Each value seen once: a reference noted, an array or a dictionary
-    // put on the stack, the rest passed over.
+    // Each value seen once: a reference noted, as it's written, an array or
+    // a dictionary put on the stack, the rest passed over.
     let mut see = |value: &Object| match value.value() {
-        Value::Ref((n, _)) if *n >= from || also.contains(n) => {
-            named.insert(*n);
+        Value::Ref(id) => {
+            match to.at(*id) {
+                Some((n, _)) if n >= from || also.contains(&n) => {
+                    named.insert(n);
+                }
+                _ => {}
+            }
             None
         }
         Value::Array(_) | Value::Dict(_) | Value::Stream(_) => Some(()),
@@ -895,8 +1060,8 @@ fn dangling(
         }
     }
     if !named.is_empty() {
-        for (id, _) in bodies {
-            named.remove(&id.0);
+        for at in bodies.iter().filter_map(|(id, _)| to.at(*id)) {
+            named.remove(&at.0);
         }
     }
     named
@@ -935,35 +1100,52 @@ impl<'b> Resolve<'b> for Bodies<'b> {
     }
 }
 
-/// Object `id`, `obj`, written on its own at the end of `out`, encrypted
-/// by `encrypting` when there's one: where it starts. A stream whose data
-/// is where it was written takes it from `from`, as the reading hands it
-/// out ([`Error::Placed`] with none).
+/// pdf-objects' writer's refusal, through no encryptor: the value it can't
+/// write.
+fn plain(refused: Refused<std::convert::Infallible>) -> Error {
+    match refused {
+        Refused::Write(e) => Error::Serialize(e),
+        Refused::Encrypt { why, .. } => match why {},
+    }
+}
+
+/// Object `id`, `obj`, written on its own at the end of `out` at `at`, its
+/// references as `to` names them, encrypted by `encrypting` when there's
+/// one, under `at`: where it starts. A stream whose data is where it was
+/// written takes it from `from`, as the reading hands it out, by `id`
+/// ([`Error::Placed`] with none).
 fn indirect(
     out: &mut Vec<u8>,
     id: ObjectId,
+    at: ObjectId,
     obj: &Object,
     encrypting: Option<&Encrypting<'_>>,
     from: Option<&dyn ReadFrom>,
+    to: Numbering<'_>,
 ) -> Result<usize, Error> {
     if let Value::Stream(stream) = obj.value() {
         if let Some(span) = stream.data.at() {
             let data = from.ok_or(Error::Placed(id))?.data(id, span)?;
-            return match encrypting {
-                Some(e) => Ok(serialize::indirect_stream_with(
-                    out,
-                    id,
-                    &stream.dict,
-                    &data,
-                    e,
+            let dict = &stream.dict;
+            return match (encrypting, to.0) {
+                (Some(e), None) => Ok(serialize::indirect_stream_with(out, at, dict, &data, e)?),
+                (None, None) => {
+                    serialize::indirect_stream(out, at, dict, &data).map_err(Error::Serialize)
+                }
+                (Some(e), Some(to)) => Ok(serialize::indirect_stream_renumbered(
+                    out, at, dict, &data, e, to,
                 )?),
-                None => serialize::indirect_stream(out, id, &stream.dict, &data)
-                    .map_err(Error::Serialize),
+                (None, Some(to)) => {
+                    serialize::indirect_stream_renumbered(out, at, dict, &data, &(), to)
+                        .map_err(plain)
+                }
             };
         }
     }
-    match encrypting {
-        Some(e) => Ok(serialize::indirect_with(out, id, obj, e)?),
-        None => serialize::indirect(out, id, obj).map_err(Error::Serialize),
+    match (encrypting, to.0) {
+        (Some(e), None) => Ok(serialize::indirect_with(out, at, obj, e)?),
+        (None, None) => serialize::indirect(out, at, obj).map_err(Error::Serialize),
+        (Some(e), Some(to)) => Ok(serialize::indirect_renumbered(out, at, obj, e, to)?),
+        (None, Some(to)) => serialize::indirect_renumbered(out, at, obj, &(), to).map_err(plain),
     }
 }

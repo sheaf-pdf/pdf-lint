@@ -4,7 +4,7 @@
 //! of what's left in the clear that the reader decrypts by.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
 use std::fmt;
 
@@ -12,9 +12,9 @@ use pdf_crypt::rand_core::CryptoRng;
 use pdf_crypt::{Encoded, Fault, Handler, Method, Unusable};
 use pdf_objects::Resolve;
 use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
-use pdf_objects::serialize::{self, Encrypt};
+use pdf_objects::serialize::{self, Encrypt, Renumber};
 
-use super::Error;
+use super::{Error, Numbering};
 use crate::bytes::{ByteSource, Reading, SourceId, XrefEntry};
 use crate::crypt::{self, List, Stream};
 use crate::filter;
@@ -31,7 +31,8 @@ use crate::source::Encryption;
 /// handler, each key wiped when it's dropped (pdf-crypt's `Handler`).
 ///
 /// A caller that lays a file out itself, as [`full`](super::full) does,
-/// writes it encrypted as `full` does through [`Encryptor::whole`], then
+/// writes it encrypted as `full` does through [`Encryptor::renumbered`]
+/// where it renumbers its objects, [`Encryptor::whole`], then
 /// [`Encryptor::encrypting`]; writes no object at a number
 /// [`Encryptor::free`] gives, and lists each free at its generation
 /// ([`Encryptor::free_numbers`]); and puts in no object stream an object
@@ -219,6 +220,58 @@ impl Encryptor {
         Cow::Owned(whole)
     }
 
+    /// It, for a file whose objects are written at the numbers `to` gives
+    /// them ([`Options::renumber`](super::Options::renumber)), in those
+    /// numbers: what it leaves in the clear by number, each encryption
+    /// dictionary and what one refers to, at the number `to` gives it, one
+    /// it gives none left out, as it isn't written; where its dictionary
+    /// is, at the number `to` gives it, or, where it gives none, nowhere
+    /// yet, as a new file's is, a whole file then writing it past every
+    /// object; and its dictionary's references as `to` names them, null
+    /// where it names none. Its free numbers stay as they are: they're
+    /// numbers of the file written too, where nothing is written under
+    /// keys made per object. Where `to` moves none of those, it's itself.
+    ///
+    /// A whole file written under a renumbering is encrypted through this,
+    /// then [`Encryptor::whole`]; and so is an update after it, given
+    /// objects at the numbers written ([`Written::base`](super::Written::base)),
+    /// whose place and dictionary are then the file's, as an update's
+    /// encryptor must have ([`Error::Unmatched`]), where the whole write
+    /// put the dictionary where `to` puts its number: not where `to` names
+    /// it none, or [`Options::encrypt_at`](super::Options::encrypt_at)
+    /// moved it. An object's strings and data are encrypted under the number
+    /// it's written at, the document's metadata stream found from the
+    /// objects given and kept as its number written.
+    pub fn renumbered<N: Renumber + ?Sized>(&self, to: &N) -> Cow<'_, Encryptor> {
+        let list = &self.list;
+        let numbers = list.dictionaries.iter().chain(&list.sections);
+        let place = match self.place {
+            Place::At(at) => to.renumber(at).map_or(Place::New, Place::At),
+            place => place,
+        };
+        let mut dict = Object::from(self.dict.clone());
+        let named = dict.renumber(|id| to.renumber(id));
+        if !named
+            && place == self.place
+            && numbers.into_iter().all(|&id| to.renumber(id) == Some(id))
+        {
+            return Cow::Borrowed(self);
+        }
+        let mut renumbered = self.clone();
+        let translated =
+            |ids: &HashSet<ObjectId>| ids.iter().filter_map(|&id| to.renumber(id)).collect();
+        renumbered.list.dictionaries = translated(&list.dictionaries);
+        renumbered.list.sections = translated(&list.sections);
+        renumbered.place = place;
+        if named {
+            renumbered.dict = match dict.into_value() {
+                Value::Dict(dict) => dict,
+                _ => unreachable!("a dictionary renumbered is one"),
+            };
+        }
+        Cow::Owned(renumbered)
+    }
+
     /// The reading it was made of ([`Encryptor::of`]), whose objects a
     /// write under it may copy as their bytes: none for a new file's.
     pub(super) fn read_in(&self) -> Option<SourceId> {
@@ -273,6 +326,20 @@ impl Encryptor {
         trailer: &Dict,
         resolve: &'a (dyn Resolve<'a> + Sync),
     ) -> Result<Encrypting<'a>, Error> {
+        self.encrypting_at(trailer, resolve, Numbering::NONE)
+    }
+
+    /// [`Encryptor::encrypting`], for a file whose objects are written at
+    /// the numbers `to` gives them, `trailer` and `resolve` in the numbers
+    /// they're given at: the document's metadata stream found there, and
+    /// kept as the number it's written at, which pdf-objects' writer asks
+    /// by. It's itself in the numbers written ([`Encryptor::renumbered`]).
+    pub(super) fn encrypting_at<'a>(
+        &'a self,
+        trailer: &Dict,
+        resolve: &'a (dyn Resolve<'a> + Sync),
+        to: Numbering<'_>,
+    ) -> Result<Encrypting<'a>, Error> {
         let metadata = match self.list.unencrypted_metadata {
             true => {
                 let root = trailer.get(b"Root").and_then(Object::as_reference);
@@ -281,7 +348,7 @@ impl Encryptor {
                 }
                 let get: crypt::Get<'_, '_, Infallible> = &|id| Ok(resolve.resolve(id));
                 let Ok(metadata) = crypt::metadata_stream(trailer, get);
-                metadata
+                metadata.and_then(|id| to.at(id))
             }
             false => None,
         };
@@ -311,7 +378,7 @@ pub struct Encrypting<'a> {
     encryptor: &'a Encryptor,
     resolve: &'a (dyn Resolve<'a> + Sync),
     /// The document's metadata stream, where `/EncryptMetadata false`
-    /// leaves its data in the clear.
+    /// leaves its data in the clear, at the number it's written at.
     metadata: Option<ObjectId>,
 }
 
@@ -351,26 +418,28 @@ pub enum Unencryptable {
 }
 
 impl<'a> Encrypting<'a> {
-    /// Whether object `id`, `obj`, as the reading `read` was made of read
-    /// it, is encrypted by this as that reading decrypted it: its strings
-    /// by the same rule, and its stream's data, its own crypt filter
+    /// Whether object `obj`, which the reading `read` was made of read at
+    /// `id`, written here at `at`, is encrypted by this as that reading
+    /// decrypted it: its strings by the same rule, the list asked of each
+    /// number in its own file, and its stream's data, its own crypt filter
     /// followed through what's written here and through `there`, the
     /// reading's objects, there, and the reading's document metadata
     /// stream `metadata`. So, where `read`'s key is this one's, its bytes,
-    /// written at its number, read back as the reading read them.
+    /// written at the number they were read at, read back as the reading
+    /// read them.
     pub(super) fn keeps<'o>(
         &self,
         read: &Encryptor,
         there: &dyn Fn(ObjectId) -> Option<&'o Object>,
         metadata: Option<ObjectId>,
-        id: ObjectId,
+        (id, at): (ObjectId, ObjectId),
         obj: &'o Object,
     ) -> bool
     where
         'a: 'o,
     {
         let (now, then) = (&self.encryptor.list, &read.list);
-        if now.encrypted(id) != then.encrypted(id) {
+        if now.encrypted(at) != then.encrypted(id) {
             return false;
         }
         let Value::Stream(stream) = obj.value() else {
@@ -380,7 +449,7 @@ impl<'a> Encrypting<'a> {
         let here = |id| -> Option<&'o Object> { self.resolve.resolve(id) };
         let own_here = || Ok::<_, Infallible>(filter::crypt_filter(dict, Some(&here)));
         let own_there = || Ok::<_, Infallible>(filter::crypt_filter(dict, Some(there)));
-        let Ok(here) = now.stream(id, dict, own_here, || Ok(self.metadata));
+        let Ok(here) = now.stream(at, dict, own_here, || Ok(self.metadata));
         let Ok(there) = then.stream(id, dict, own_there, || Ok(metadata));
         here == there
     }

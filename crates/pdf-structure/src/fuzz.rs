@@ -15,14 +15,15 @@
 //! `--cfg fuzzing`.
 //!
 //! And what the `write` target checks ([`write_file`]): a file read is
-//! written whole and as an update, each way the input picks, without a
-//! panic, and where it read soundly, written and read again it's the same
-//! objects, those copied as the bytes they were read from among them; and
-//! where a byte of it changed after it was read, a copy of an object whose
-//! bytes hold it is refused.
+//! written whole, under a renumbering the input picks or none, and as an
+//! update, each way the input picks, without a panic, and where it read
+//! soundly, written and read again it's the same objects, each at the
+//! number the renumbering gives it, those copied as the bytes they were
+//! read from among them; and where a byte of it changed after it was read,
+//! a copy of an object whose bytes hold it is refused.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::convert::Infallible;
 use std::io;
 use std::ops::Range;
@@ -545,15 +546,17 @@ const NEW: Password<'static> = Password("new");
 const LISTED: u32 = 1 << 16;
 
 /// The `write` target's body: `data`'s first two bytes choose how the
-/// file after them is read and written, and the rest is the file. Read
-/// under [`options`], by the owner's password `owner` when the choice's
-/// lowest bit is set, made a document with its reading kept, then written
-/// whole, but where it lists a number past [`LISTED`]: with a table, a
+/// file after them is read and written, its third how a whole file of it
+/// is renumbered ([`Renumbering`]), and the rest is the file. Read under
+/// [`options`], by the owner's password `owner` when the choice's lowest
+/// bit is set, made a document with its reading kept, then written whole,
+/// but where it would list a number past [`LISTED`]: with a table, a
 /// stream, or a stream packed, by number or in sevens on one thread, as
 /// the choice's next two bits give; encrypted as it was read, decrypted,
 /// or under a new encryption of revision 6 for `new` whose randomness the
-/// file's bytes give ([`Drawn`]), as its two after give; each object as
-/// read ([`write::bodies`]), so copied where the rules for a copy hold.
+/// file's bytes give ([`Drawn`]), as its two after give; under the
+/// renumbering; each object as read ([`write::bodies`]), so copied where
+/// the rules for a copy hold.
 /// And, when its sixth bit is set, an update after it, of the document's
 /// objects, the one its bits from the seventh pick changed, a key more,
 /// under its own encryption: it writes that one alone. Else, a reading of
@@ -562,7 +565,8 @@ const LISTED: u32 = 1 << 16;
 /// their bytes but their streams' data, written whole as before. Neither
 /// panics. Where the reading read soundly, with nothing to warn of, and a
 /// write wrote, its file read again under the same limits, by its
-/// password, is sound and holds every object the document did, as
+/// password, is sound and holds every object the document did, at the
+/// number the renumbering gives it, its references as it names them, as
 /// pdf-objects' writer writes each (reals as written and strings' forms
 /// aside), a stream's data as handed out, but the encryption dictionary
 /// and what it refers to, which the writer writes as its encryption is;
@@ -573,12 +577,80 @@ pub fn write_file(data: &[u8]) {
     compared(data);
 }
 
+/// How the `write` target renumbers a whole file, as its input's third
+/// byte, but its top bit, gives it, taken by five: none; each object at its
+/// own number, given; the document's numbers reversed, each object at the
+/// number of the one as far from the end as it is from the start; each
+/// past every number the file has; or numbered from 1 in order, passing
+/// over the numbers the encryptor keeps free (a dense numbering, two
+/// objects never sharing one, as `document` gives every object). A
+/// reference to a number the document doesn't hold is written null.
+struct Renumbering(Option<BTreeMap<ObjectId, ObjectId>>);
+
+impl Renumbering {
+    fn of(byte: u8, doc: &Document, encryptor: Option<&Encryptor>) -> Renumbering {
+        let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
+        let free: BTreeSet<u32> = (encryptor.into_iter())
+            .flat_map(|e| e.free_numbers().map(|(n, _)| n))
+            .collect();
+        let map = match (byte & 0x7f) % 5 {
+            1 => ids.iter().map(|&id| (id, id)).collect(),
+            2 => {
+                let numbers = ids.iter().rev().map(|id| id.0);
+                (ids.iter().zip(numbers))
+                    .map(|(&id, n)| (id, (n, id.1)))
+                    .collect()
+            }
+            3 => {
+                let top = (ids.iter().map(|id| id.0))
+                    .chain(free.iter().copied())
+                    .max();
+                let past = top.unwrap_or(0).saturating_add(1);
+                (ids.iter())
+                    .map(|&(n, g)| ((n, g), (n.saturating_add(past), g)))
+                    .collect()
+            }
+            4 => {
+                let mut next = 1u32;
+                let mut map = BTreeMap::new();
+                for &id in &ids {
+                    while free.contains(&next) {
+                        next += 1;
+                    }
+                    map.insert(id, (next, 0));
+                    next += 1;
+                }
+                map
+            }
+            _ => return Renumbering(None),
+        };
+        Renumbering(Some(map))
+    }
+
+    /// Where an object given at `id` is written, and what a reference to it
+    /// names.
+    fn at(&self, id: ObjectId) -> Option<ObjectId> {
+        match &self.0 {
+            None => Some(id),
+            Some(map) => map.get(&id).copied(),
+        }
+    }
+
+    /// The last number a whole file of `doc` writes an object at, under it.
+    fn last(&self, doc: &Document) -> u32 {
+        (doc.objects().filter_map(|(id, _)| self.at(id)))
+            .map(|id| id.0)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
 /// [`write_file`]'s body: whether the whole file, the update and the whole
 /// file after a byte was flipped were written, or refused, and compared.
 fn compared(data: &[u8]) -> [bool; 3] {
-    let (choice, file) = match data {
-        [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
-        _ => (0, data),
+    let (choice, renumbering, file) = match data {
+        [a, b, c, file @ ..] => (u16::from_le_bytes([*a, *b]), *c, file),
+        _ => (0, 0, data),
     };
     let password = match choice & 1 {
         0 => Password(""),
@@ -607,22 +679,29 @@ fn compared(data: &[u8]) -> [bool; 3] {
     let own = Encryptor::of(&reading);
     let way = Way::of(file, choice);
     let (encryptor, opens) = way.encryptor(own.as_ref().ok().and_then(Option::as_ref), password);
+    let renumbering = Renumbering::of(renumbering, &doc, encryptor);
+    let to = |id| renumbering.at(id);
+    if renumbering.0.is_some() {
+        options.renumber = Some(&to);
+    }
     let last = doc.objects().next_back().map_or(0, |(id, _)| id.0);
+    let listed = last < LISTED && renumbering.last(&doc) < LISTED;
     let mut compared = [false; 3];
-    if last < LISTED {
+    if listed {
         let mut out = Vec::new();
         let written = write::document(&mut out, &doc, encryptor, Some(&reading), &options);
-        if let (true, Ok(_)) = (sound, written) {
+        if let (true, Ok(written)) = (sound, written) {
+            assert_eq!(written.base.renumbered, renumbering.0.is_some());
             let back = read_back(&out, opens);
-            same_objects(&doc, &reading, &back, None);
+            same_objects(&doc, &reading, &back, None, &to);
             compared[0] = true;
         }
     }
     if choice & 32 != 0 {
         let own = own.ok().flatten();
         compared[1] = updated(file, &doc, &reading, own.as_ref(), password, sound, choice);
-    } else if last < LISTED && sound {
-        compared[2] = flipped(file, password, &options, &way, choice >> 7);
+    } else if listed && sound {
+        compared[2] = flipped(file, password, &options, &way, choice >> 7, &to);
     }
     compared
 }
@@ -669,13 +748,15 @@ impl Way {
 /// their streams' data, and the document written whole as `options` and
 /// `way` say: refused as changed, of an object whose bytes hold the byte
 /// flipped; or, where it wrote, read again the same objects as the
-/// document. Whether the write was compared so.
+/// document, renumbered as `to` names them, which is `options`'
+/// renumbering. Whether the write was compared so.
 fn flipped(
     file: &[u8],
     password: Password<'_>,
     options: &write::Options<'_>,
     way: &Way,
     pick: u16,
+    to: &dyn Fn(ObjectId) -> Option<ObjectId>,
 ) -> bool {
     let source = Flipped::new(file, 64);
     let Ok(reading) = Reading::open_with(&source, &[password], &self::options()) else {
@@ -717,7 +798,7 @@ fn flipped(
     match write::document(&mut out, &doc, encryptor, Some(&reading), options) {
         Ok(_) => {
             let back = read_back(&out, opens);
-            same_objects(&doc, &reading, &back, None);
+            same_objects(&doc, &reading, &back, None, to);
         }
         Err(write::Error::Changed(Some(id))) => {
             let record = doc.record(id).expect("a copy's record");
@@ -774,7 +855,7 @@ fn updated(
             assert_eq!(listed, at == id, "{at:?} written alone of what's read");
         }
         let back = read_back(&out, password);
-        same_objects(doc, reading, &back, Some(id));
+        same_objects(doc, reading, &back, Some(id), &Some);
         let got = back.get(id).expect("the changed object reads");
         let key = got.as_dict().and_then(|d| d.get(b"WriteFuzzed"));
         assert_eq!(key.and_then(Object::as_bool), Some(true), "{id:?} changed");
@@ -800,14 +881,16 @@ fn read_back<'f>(file: &'f [u8], password: Password<'_>) -> Reading<&'f [u8]> {
 
 /// `back` holds every object `doc`, read in `reading`, holds, but
 /// `changed`, a whole file's left-out ones, and the encryption dictionary
-/// and what it refers to: each as pdf-objects' writer writes it, a
-/// stream's dictionary but its `/Length`, and its data as each reading
-/// hands it out.
+/// and what it refers to, at the number `to` gives it, its references as
+/// `to` names them: each as pdf-objects' writer writes it, a stream's
+/// dictionary but its `/Length`, and its data as each reading hands it
+/// out.
 fn same_objects<S: ByteSource>(
     doc: &Document,
     reading: &Reading<S>,
     back: &Reading<&[u8]>,
     changed: Option<ObjectId>,
+    to: &dyn Fn(ObjectId) -> Option<ObjectId>,
 ) {
     let encrypt = doc.trailer.dict().get(b"Encrypt");
     let mut encryption: HashSet<ObjectId> = encrypt
@@ -830,17 +913,26 @@ fn same_objects<S: ByteSource>(
         if left_out || changed == Some(id) || encryption.contains(&id) {
             continue;
         }
+        let at = to(id).expect("a number for each object written");
         let got = back
-            .get(id)
-            .unwrap_or_else(|e| panic!("{id:?} reads back: {e}"));
-        assert_eq!(written(got), written(object), "{id:?} reads back as it was");
+            .get(at)
+            .unwrap_or_else(|e| panic!("{id:?} reads back at {at:?}: {e}"));
+        let mut renumbered = Cow::Borrowed(object);
+        if at != id || object.references().any(|r| to(r) != Some(r)) {
+            renumbered.to_mut().renumber(to);
+        }
+        assert_eq!(
+            written(got),
+            written(&renumbered),
+            "{id:?} reads back at {at:?} as it was"
+        );
         if object.as_stream().is_some() {
             let data =
                 |r: Result<Cow<'_, [u8]>, Error>| r.map(Cow::into_owned).map_err(|e| e.to_string());
             assert_eq!(
-                data(back.data(id)),
+                data(back.data(at)),
                 data(reading.data(id)),
-                "{id:?}'s data reads back as it was"
+                "{id:?}'s data reads back at {at:?} as it was"
             );
         }
     }
@@ -1121,21 +1213,38 @@ mod tests {
         let files = files();
         for file in &files {
             for choice in 0..64u16 {
+                // Each renumbering in turn, spread over the choices.
+                let renumbered = [u8::try_from(choice % 5).unwrap_or(0)];
                 let updated = choice | 32 | (choice & 1) << 7;
-                let data = [&updated.to_le_bytes()[..], file].concat();
-                assert_eq!(compared(&data), [true, true, false], "{updated}");
+                let data = [&updated.to_le_bytes()[..], &renumbered, file].concat();
+                assert_eq!(
+                    compared(&data),
+                    [true, true, false],
+                    "{updated}, {renumbered:?}"
+                );
+                let renumbered = [u8::try_from((choice + 2) % 5).unwrap_or(0)];
                 let pick = choice.wrapping_mul(0x9e3) & 0x1ff;
                 let flipped = choice & !32 | pick << 7;
-                let data = [&flipped.to_le_bytes()[..], file].concat();
-                assert_eq!(compared(&data), [true, false, true], "{flipped}");
+                let data = [&flipped.to_le_bytes()[..], &renumbered, file].concat();
+                assert_eq!(
+                    compared(&data),
+                    [true, false, true],
+                    "{flipped}, {renumbered:?}"
+                );
             }
         }
         let mut random = Random(0x6a09_e667_f3bc_c908);
         for n in 0..400 {
             let choice = u16::try_from(random.next() & 0xffff).unwrap_or(0);
-            let mut file = [&choice.to_le_bytes()[..], &files[n % files.len()]].concat();
+            let renumbered = [random.next() as u8];
+            let mut file = [
+                &choice.to_le_bytes()[..],
+                &renumbered,
+                &files[n % files.len()],
+            ]
+            .concat();
             for _ in 0..1 + random.below(4) {
-                let at = 2 + random.below(file.len() - 2);
+                let at = 3 + random.below(file.len() - 3);
                 match random.below(3) {
                     0 => file[at] = random.next() as u8,
                     1 => {
@@ -1148,7 +1257,7 @@ mod tests {
                         file.splice(at..at, piece);
                     }
                 }
-                if file.len() < 3 {
+                if file.len() < 4 {
                     break;
                 }
             }

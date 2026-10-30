@@ -1977,6 +1977,103 @@ qpdf: operation succeeded with warnings\n";
         }
     }
 
+    /// Whole files written under a renumbering, each object's number
+    /// reversed (each at the number of the one as far from the end as it is
+    /// from the start), by their document and reading under their own
+    /// encryption, with a table and packed: [`listed`]'s objects plain and
+    /// under every method, the test writer's spelled objects and members,
+    /// and [`plaintext`] under each method it encrypts by. Checked by qpdf by
+    /// their password ("No syntax or stream encoding errors found") and read
+    /// through qpdf alone as the reader reads them, but a signature's
+    /// `/Contents` with no `/Type`, as above, at the number it's written at.
+    ///
+    /// [`listed`]: crate::write::tests::listed
+    /// [`plaintext`]: crate::write::tests::plaintext
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn renumbered_files_read_through_qpdf_as_through_the_reader() {
+        use crate::XrefKind;
+        use crate::bytes::{Options, Reading};
+        use crate::write::tests::{
+            KINDS_ENCRYPTED, encrypted_by, listed, members_spelled, methods, spelled,
+            written_otherwise,
+        };
+        use crate::write::{self, Body, Encryptor, Pack};
+
+        let (plain, trailer) = listed();
+        let plain_file = {
+            let mut out = Vec::new();
+            let bodies = (plain.iter()).map(|(n, o)| ((*n, 0), Body::from(o)));
+            let options = write::Options::DEFAULT;
+            write::full(&mut out, bodies, &trailer, None, None, &options).unwrap();
+            out
+        };
+        // Each source, and whether a signature's /Contents with no /Type is
+        // left in the clear in it, which qpdf decrypts.
+        let mut sources = vec![
+            ("listed".to_string(), plain_file, false),
+            ("spelled".to_string(), spelled(), false),
+            ("members spelled".to_string(), members_spelled(), false),
+        ];
+        for method in methods() {
+            let data = encrypted_by(&method.encryptor, &plain, &trailer, XrefKind::Table);
+            sources.push((format!("listed, {}", method.name), data, method.strings));
+        }
+        for kind in KINDS_ENCRYPTED {
+            sources.push((format!("{kind:?}"), written_otherwise(kind, true), true));
+        }
+        let dir = scratch("renumbered");
+        for (name, source, strings) in sources {
+            let passwords = [Password("user")];
+            let reading = Reading::open_with(&source[..], &passwords, &Options::DEFAULT).unwrap();
+            let doc = reading.to_document().unwrap();
+            let own = Encryptor::of(&reading).unwrap();
+            let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
+            let numbers = ids.iter().rev().map(|id| id.0);
+            let map: BTreeMap<ObjectId, ObjectId> = (ids.iter().zip(numbers))
+                .map(|(&id, n)| (id, (n, id.1)))
+                .collect();
+            let to = |id| map.get(&id).copied();
+            let untyped = match to((10, 0)) {
+                Some((n, g)) => format!("{n} {g} R/Contents: "),
+                None => String::new(),
+            };
+            let mut ways = vec![("table", XrefKind::Table, None)];
+            if own.as_ref().is_none_or(Encryptor::packs) {
+                ways.push(("packed", XrefKind::Stream, Some(Pack::DEFAULT)));
+            }
+            for (way, kind, pack) in ways {
+                let name = format!("{name}, {way}");
+                let mut options = write::Options::DEFAULT;
+                (options.kind, options.pack) = (kind, pack);
+                options.renumber = Some(&to);
+                let mut data = Vec::new();
+                write::document(&mut data, &doc, own.as_ref(), Some(&reading), &options).unwrap();
+                let path = dir
+                    .path()
+                    .join(format!("{}.pdf", name.replace([' ', ','], "-")));
+                std::fs::write(&path, &data).unwrap();
+                let qpdf = qpdf(&path).password("user");
+                let check = ["--password=user", "--check", &path.display().to_string()];
+                let (out, _) = qpdf.run(&check.map(String::from)).expect(&name);
+                let out = String::from_utf8_lossy(&out);
+                assert!(
+                    out.contains("No syntax or stream encoding errors found"),
+                    "{name}: {out}"
+                );
+                let alone = qpdf.read().expect(&name);
+                assert_eq!(alone.trailer.unwritten, None, "{name}");
+                assert!(alone.warnings.is_empty(), "{name}: {:?}", alone.warnings);
+                let back = bytes::read_opened(&data, &passwords);
+                assert!(back.warnings.is_empty(), "{name}: {:?}", back.warnings);
+                let found = differences(&back, &alone);
+                assert_eq!(found.len(), usize::from(strings), "{name}: {found:?}");
+                let untyped = |(_, d): &(String, String)| d.starts_with(&untyped);
+                assert!(found.iter().all(untyped), "{name}: {found:?}");
+            }
+        }
+    }
+
     /// Every PDF under `PDF_LINT_CORPUS` read from its bytes, qpdf
     /// decoding, and through qpdf alone, and the differences counted by what
     /// they're of, with examples.

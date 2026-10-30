@@ -6,7 +6,9 @@
 //! Asked to pack, what may go in an object stream goes in one, grouped as
 //! the caller says or by number, which are built on threads, each
 //! encrypted once, as a stream, under its own number. An object as read is
-//! copied where the rules for a copy hold ([`Body::Read`]).
+//! copied where the rules for a copy hold ([`Body::Read`]). Under a
+//! renumbering, each object is written at the number it gives, and each
+//! reference as it names it.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -18,9 +20,9 @@ use pdf_objects::serialize;
 use super::copy::{Copying, Member, written};
 use super::crypt::Place;
 use super::{
-    Base, Bodies, Body, Deflate, Encrypting, Encryptor, Entry, Error, MEMBERS, NUMBERS, Options,
-    Pack, ReadFrom, SECTION_KEYS, Section, Written, bodies as read, checked, container as objstm,
-    dangling, file_id, first_id, fresh, id_value, packable, stopped, usable,
+    Base, Bodies, Body, Deflate, Encrypting, Encryptor, Entry, Error, MEMBERS, NUMBERS, Numbering,
+    Options, Pack, ReadFrom, SECTION_KEYS, Section, Written, bodies as read, checked,
+    container as objstm, dangling, file_id, first_id, fresh, id_value, packable, stopped, usable,
 };
 use crate::source::{Document, XrefKind};
 
@@ -77,6 +79,21 @@ use crate::source::{Document, XrefKind};
 ///   their own, and so are all of them where no number is left for the
 ///   cross-reference stream, or under an encryption that leaves streams in
 ///   the clear and strings not ([`Encryptor::packs`]).
+/// - **Renumbered** by [`Options::renumber`], each body is written at the
+///   number it gives, each reference in it and in `trailer` named as it
+///   names it, `null` where it names none, `trailer`'s before the writer's
+///   own entries go in; a body it gives none refused. The encryption
+///   dictionary goes at the number it gives the encryptor's, else past
+///   every object, its references renumbered, a direct one's too, and each
+///   object is encrypted under the number it's written at, by the encryptor
+///   in the numbers written ([`Encryptor::renumbered`]); under RC4, an
+///   object written at a number another had in the file the encryptor was
+///   read from leaks the XOR of the two plaintexts to one who keeps both
+///   files. An object as read is copied only where nothing in it moves. The
+///   numbers checked, listed and taken by the writer's own objects are those
+///   written, but [`Pack::groups`]', which are those given (see
+///   [`Options::renumber`]); what's written says it was renumbered
+///   ([`Base::renumbered`]).
 ///
 /// A whole file's section lists every number from 0 to the last, so
 /// objects numbered sparsely make many rows: as a stream, deflated, more
@@ -87,7 +104,8 @@ use crate::source::{Document, XrefKind};
 ///
 /// Refused, with nothing written ([`Error`]): a number 0 or at or past
 /// [`NUMBERS`], a body's, the encryption dictionary's or the
-/// cross-reference stream's; one given twice; a body at the encryption
+/// cross-reference stream's; one given twice; a body the renumbering gives
+/// no number, and two it writes at one; a body at the encryption
 /// dictionary's; a body at a number `encryptor`'s file lists free, where
 /// its keys are made per object ([`Encryptor::of`]); a table asked to pack;
 /// a stream's data where it was written that isn't the reading's own for
@@ -126,6 +144,10 @@ pub fn full<'a>(
 /// writer writes from `encryptor`, if any. Written under another
 /// encryption than the one `doc`'s file was read with (none, or a new
 /// one), the objects its encryption dictionary refers to are left out too.
+/// What's left out is told by the numbers of `doc`. It gives every other
+/// object of `doc`, so a renumbering ([`Options::renumber`]) that puts two
+/// at one number is refused ([`Error::Twice`]): a caller whose renumbering
+/// shares a number gives one of them through [`full`].
 pub fn document(
     out: &mut Vec<u8>,
     doc: &Document,
@@ -190,8 +212,22 @@ fn file(
     if options.pack.is_some() && options.kind == XrefKind::Table {
         return Err(Error::PackedTable);
     }
+    let to = Numbering(options.renumber);
     let pack = (options.pack).filter(|_| encryptor.is_none_or(Encryptor::packs));
-    let past = (bodies.iter().map(|(id, _)| id.0.saturating_add(1))).fold(1, u32::max);
+    // The encryptor as given, whose list and place are of the numbers its
+    // file has, which are what's given; and in the numbers written.
+    let given = encryptor;
+    let renumbered = match (encryptor, to.0) {
+        (Some(e), Some(to)) => Some(e.renumbered(to)),
+        _ => None,
+    };
+    let encryptor = renumbered.as_deref().or(encryptor);
+    // Past every number written, which a body given and not written is
+    // refused at below.
+    let past = (bodies.iter())
+        .filter_map(|(id, _)| to.at(*id))
+        .map(|at| at.0.saturating_add(1))
+        .fold(1, u32::max);
     let reuse = options.pack.map_or(&[][..], |pack| pack.reuse);
     // The writer numbers objects of its own only for a stream section,
     // object streams and a new encryption dictionary.
@@ -199,7 +235,7 @@ fn file(
         || pack.is_some()
         || encryptor.is_some_and(|e| e.place() == Place::New && options.encrypt_at.is_none());
     let dangling = match numbers {
-        true => dangling(bodies, trailer, past, reuse),
+        true => dangling(bodies, to, trailer, past, reuse),
         false => HashSet::new(),
     };
     let encrypt_at = match encryptor.map(Encryptor::place) {
@@ -210,21 +246,22 @@ fn file(
             Some(options.encrypt_at.unwrap_or((at, 0)))
         }
     };
-    checked(bodies, encrypt_at.map(|at| at.0), encryptor)?;
+    let at = checked(bodies, to, encrypt_at.map(|at| at.0), given)?;
     if let Some(at) = encrypt_at {
         usable(at.0)?;
     }
     // What's copied, by the encryption as given.
-    let copying = from.map(|from| Copying::new(from, encryptor)).transpose()?;
+    let copying = from.map(|from| Copying::new(from, given)).transpose()?;
     let copying = copying.as_ref();
     // One section, whose /Encrypt is the only one: what's at a number the
     // file read named so, and this one doesn't, is encrypted.
     let whole = encryptor.map(|e| e.whole(encrypt_at));
     let encryptor = whole.as_deref().or(encryptor);
-    // What the encryptor resolves references by, where there's one.
+    // What the encryptor resolves references by, where there's one: the
+    // bodies and the reading, by the numbers they're given at.
     let resolve = encryptor.map(|_| Bodies::new(bodies, from));
     let encrypting = match (encryptor, &resolve) {
-        (Some(e), Some(resolve)) => Some(e.encrypting(trailer, resolve)?),
+        (Some(e), Some(resolve)) => Some(e.encrypting_at(trailer, resolve, to)?),
         _ => None,
     };
     let encrypting = encrypting.as_ref();
@@ -233,31 +270,42 @@ fn file(
     out.extend_from_slice(super::BINARY);
     let mut section = Section::full(1);
     let mut next = 1;
-    // What goes in object streams, written once they're numbered.
-    let mut members: Vec<(ObjectId, &Body<'_>)> = Vec::new();
-    for (id, body) in bodies {
+    // What goes in object streams, written once they're numbered: each
+    // given at, written at, and its body.
+    let mut members: Vec<(ObjectId, ObjectId, &Body<'_>)> = Vec::new();
+    for ((id, body), &at) in bodies.iter().zip(&at) {
         stopped(options.stop)?;
         let (id, obj) = (*id, body.object());
-        next = next.max(id.0 + 1);
-        let dictionary = encryptor.is_some_and(|e| e.dictionary_object(id));
-        if pack.is_some() && packable(id, obj) && !dictionary {
-            members.push((id, body));
+        next = next.max(at.0 + 1);
+        let dictionary = encryptor.is_some_and(|e| e.dictionary_object(at));
+        if pack.is_some() && packable(at, obj) && !dictionary {
+            members.push((id, at, body));
             continue;
         }
-        let pos = written(out, id, body, encrypting, from, copying)? - start;
-        let generation = id.1;
+        let pos = written(out, id, at, body, encrypting, from, copying, to)? - start;
+        let generation = at.1;
         section.insert(
-            id.0,
+            at.0,
             Entry::InUse {
                 offset: pos,
                 generation,
             },
         );
     }
-    let given = first_id(trailer);
+    let given_id = first_id(trailer);
     let mut trailer = trailer.clone();
     for key in SECTION_KEYS {
         trailer.remove(key);
+    }
+    // The caller's entries in the numbers written, before the writer's own,
+    // which are.
+    if let Some(to) = to.0 {
+        let mut renumbered = Object::from(trailer);
+        renumbered.renumber(|id| to.renumber(id));
+        trailer = match renumbered.into_value() {
+            Value::Dict(dict) => dict,
+            _ => unreachable!("a dictionary renumbered is one"),
+        };
     }
     if let Some(e) = encryptor {
         match encrypt_at {
@@ -287,6 +335,7 @@ fn file(
             copying,
             options,
             dangling: &dangling,
+            to,
         };
         next = packing.packed(out, &mut section, &members, pack, next)?;
     }
@@ -299,7 +348,7 @@ fn file(
             section.insert(n, Entry::Free { generation });
         }
     }
-    let kept = (encryptor.and_then(Encryptor::first_id).map(<[u8]>::to_vec)).or(given);
+    let kept = (encryptor.and_then(Encryptor::first_id).map(<[u8]>::to_vec)).or(given_id);
     let id = file_id(kept, encryptor.is_some(), &out[start..]);
     if let Some(id) = &id {
         trailer.set("ID", id_value(id));
@@ -329,6 +378,7 @@ fn file(
         trailer: kept,
         encryption: encryptor.map(|e| e.dictionary().clone()),
         source: None,
+        renumbered: to.0.is_some(),
     };
     Ok(Written {
         section,
@@ -352,25 +402,28 @@ struct Packing<'w> {
     /// The numbers what's written refers to and doesn't hold, which no
     /// object stream takes.
     dangling: &'w HashSet<u32>,
+    /// The renumbering.
+    to: Numbering<'w>,
 }
 
 impl Packing<'_> {
-    /// `members` written after the rest of `out`, grouped as `pack` says
-    /// and numbered from its `reuse` first, and listed in `section`, whose
-    /// numbers are below `next`: each object stream, which lists its
+    /// `members`, each given at, written at, and its body, written after
+    /// the rest of `out`, grouped as `pack` says by the numbers they're
+    /// given at, numbered from its `reuse` first, and listed in `section`,
+    /// whose numbers are below `next`: each object stream, which lists its
     /// members, and on their own those no object stream takes. What's
     /// next past the object streams.
     fn packed(
         &self,
         out: &mut Vec<u8>,
         section: &mut Section,
-        members: &[(ObjectId, &Body<'_>)],
+        members: &[(ObjectId, ObjectId, &Body<'_>)],
         pack: Pack<'_>,
         mut next: u32,
     ) -> Result<u32, Error> {
-        let by_number: HashMap<u32, (ObjectId, &Body<'_>)> = members
-            .iter()
-            .map(|&(id, body)| (id.0, (id, body)))
+        type Packed<'m, 'b> = (ObjectId, ObjectId, &'m Body<'b>);
+        let by_number: HashMap<u32, Packed<'_, '_>> = (members.iter())
+            .map(|&member| (member.0.0, member))
             .collect();
         let mut numbers: Vec<u32> = by_number.keys().copied().collect();
         numbers.sort_unstable();
@@ -386,13 +439,21 @@ impl Packing<'_> {
         }
         let grouped: Vec<Vec<u32>> = grouped.into_iter().filter(|g| !g.is_empty()).collect();
         // Those no group takes, on their own.
-        for &(id, body) in members.iter().filter(|(id, _)| !placed.contains(&id.0)) {
-            self.plain(out, section, id, body)?;
+        for &member in members.iter().filter(|(id, ..)| !placed.contains(&id.0)) {
+            self.plain(out, section, member)?;
         }
+        // The numbers the members are written at, where they aren't those
+        // they're given at.
+        let written: Option<HashSet<u32>> =
+            (self.to.0.is_some()).then(|| members.iter().map(|(_, at, _)| at.0).collect());
+        let member_at = |n: u32| match &written {
+            Some(written) => written.contains(&n),
+            None => by_number.contains_key(&n),
+        };
         let encryptor = self.encryptor;
         let taken = |n| {
             section.lists(n)
-                || by_number.contains_key(&n)
+                || member_at(n)
                 || self.dangling.contains(&n)
                 || encryptor.is_some_and(|e| e.free(n).is_some())
         };
@@ -400,24 +461,24 @@ impl Packing<'_> {
         let Some(given) = container_numbers(grouped.len(), pack.reuse, from, taken) else {
             for group in &grouped {
                 for n in group {
-                    let (id, body) = by_number[n];
-                    self.plain(out, section, id, body)?;
+                    self.plain(out, section, by_number[n])?;
                 }
             }
             return Ok(next);
         };
-        // Each member's bytes as read, where it's copied, else its value.
+        // Each member's bytes as read, where it's copied, else its value,
+        // at the number it's written at.
         let mut groups: Vec<(u32, Vec<(ObjectId, Member<'_>)>)> = Vec::with_capacity(given.len());
-        for (n, group) in given.into_iter().zip(grouped) {
+        for (n, group) in given.into_iter().zip(&grouped) {
             let mut members = Vec::with_capacity(group.len());
-            for m in &group {
-                let (id, body) = by_number[m];
+            for m in group {
+                let (id, at, body) = by_number[m];
                 let copied = match self.copying {
-                    Some(copying) => copying.member(id, body)?,
+                    Some(copying) => copying.member(id, body, self.to)?,
                     None => None,
                 };
                 let member = copied.map_or(Member::Object(body.object()), Member::Copied);
-                members.push((id, member));
+                members.push((at, member));
             }
             groups.push((n, members));
         }
@@ -429,15 +490,16 @@ impl Packing<'_> {
         let built = containers(
             &groups,
             self.encrypting,
+            self.to,
             options.deflate,
             threads,
             options.stop,
         )?;
-        for ((n, group), container) in groups.iter().zip(built) {
+        for ((n, group), (container, numbers)) in groups.iter().zip(built.into_iter().zip(&grouped))
+        {
             let Some(container) = container else {
-                for (id, _) in group {
-                    let (id, body) = by_number[&id.0];
-                    self.plain(out, section, id, body)?;
+                for m in numbers {
+                    self.plain(out, section, by_number[m])?;
                 }
                 continue;
             };
@@ -459,21 +521,21 @@ impl Packing<'_> {
         Ok(next)
     }
 
-    /// Object `id`, `body`, which was to be packed, written on its own
-    /// after the rest of `out`, copied where it's copied, and listed in
-    /// `section`.
+    /// `member`, given at, written at, and its body, which was to be
+    /// packed, written on its own after the rest of `out`, copied where
+    /// it's copied, and listed in `section`.
     fn plain(
         &self,
         out: &mut Vec<u8>,
         section: &mut Section,
-        id: ObjectId,
-        body: &Body<'_>,
+        (id, at, body): (ObjectId, ObjectId, &Body<'_>),
     ) -> Result<(), Error> {
         stopped(self.options.stop)?;
-        let pos = written(out, id, body, self.encrypting, self.from, self.copying)? - self.start;
-        let generation = id.1;
+        let (encrypting, from, copying, to) = (self.encrypting, self.from, self.copying, self.to);
+        let pos = written(out, id, at, body, encrypting, from, copying, to)? - self.start;
+        let generation = at.1;
         section.insert(
-            id.0,
+            at.0,
             Entry::InUse {
                 offset: pos,
                 generation,
@@ -507,9 +569,11 @@ fn container_numbers(
     (given.len() == count && xref < NUMBERS).then_some(given)
 }
 
-/// Each of `groups`, an object stream's number and its members, as that
-/// object stream written, encrypted by `encrypting` when given, under its
-/// number: none for one whose data would be more than the reader takes,
+/// Each of `groups`, an object stream's number and its members, each at
+/// the number it's written at, as that object stream written, a member
+/// written anew with its references as `to` names them, encrypted by
+/// `encrypting` when given, under its number: none for one whose data
+/// would be more than the reader takes,
 /// or that has more members than a place in it can say. Built on up to
 /// `threads` threads, 4 object streams to one at least, `stop` checked
 /// before each, and joined in order, so that the same groups build the
@@ -518,6 +582,7 @@ fn container_numbers(
 pub(super) fn containers(
     groups: &[(u32, Vec<(ObjectId, Member<'_>)>)],
     encrypting: Option<&Encrypting<'_>>,
+    to: Numbering<'_>,
     deflate: Deflate,
     threads: usize,
     stop: Option<&AtomicBool>,
@@ -526,7 +591,7 @@ pub(super) fn containers(
         (part.iter())
             .map(|(n, members)| {
                 stopped(stop)?;
-                container(*n, members, encrypting, deflate)
+                container(*n, members, encrypting, to, deflate)
             })
             .collect()
     };
@@ -558,15 +623,17 @@ pub(super) fn containers(
     })
 }
 
-/// `members` as object stream `n`, written as an indirect object,
-/// encrypted by `encrypting` when given, each member's value written anew
-/// or its bytes as read, borrowed: none when its data wouldn't
+/// `members`, each at the number it's written at, as object stream `n`,
+/// written as an indirect object, encrypted by `encrypting` when given,
+/// each member's value written anew, its references as `to` names them, or
+/// its bytes as read, borrowed: none when its data wouldn't
 /// [`fit`](super::fits), or it has more members than a place in it can
 /// say ([`objstm`]).
 fn container(
     n: u32,
     members: &[(ObjectId, Member<'_>)],
     encrypting: Option<&Encrypting<'_>>,
+    to: Numbering<'_>,
     deflate: Deflate,
 ) -> Result<Option<Vec<u8>>, Error> {
     let mut written: Vec<(u32, Cow<'_, [u8]>)> = Vec::with_capacity(members.len());
@@ -579,7 +646,11 @@ fn container(
             }
         };
         let mut bytes = Vec::new();
-        if let Err(e) = serialize::write(&mut bytes, obj) {
+        let refused = match to.0 {
+            None => serialize::write(&mut bytes, obj),
+            Some(to) => serialize::write_renumbered(&mut bytes, obj, to),
+        };
+        if let Err(e) = refused {
             // The refusal, said of the object.
             let named = serialize::indirect(&mut Vec::new(), *id, obj).err();
             return Err(Error::Serialize(named.unwrap_or(e)));
