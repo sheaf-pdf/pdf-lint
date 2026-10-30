@@ -260,6 +260,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-content-streams"
+version = "0.1.0"
+dependencies = [
+ "pdf-objects",
+ "thiserror",
+]
+
+[[package]]
 name = "pdf-crypt"
 version = "0.1.0"
 dependencies = [
@@ -332,6 +340,7 @@ name = "pdf-tokenizer-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "pdf-content-streams",
  "pdf-crypt",
  "pdf-filters",
  "pdf-lint",

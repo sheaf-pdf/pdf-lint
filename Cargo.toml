@@ -1,14 +1,15 @@
 [workspace]
 resolver = "3"
-# pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure and
-# pdf-arlington inherit nothing from here, so each can move to a repository
-# of its own unchanged.
+# pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure,
+# pdf-content-streams and pdf-arlington inherit nothing from here, so each
+# can move to a repository of its own unchanged.
 members = [
     "crates/pdf-tokenizer",
     "crates/pdf-filters",
     "crates/pdf-crypt",
     "crates/pdf-objects",
     "crates/pdf-structure",
+    "crates/pdf-content-streams",
     "crates/pdf-arlington",
     "crates/pdf-lint",
 ]
@@ -61,4 +62,10 @@ opt-level = 1
 opt-level = 1
 
 [profile.dev.package.pdf-structure]
+opt-level = 1
+
+# The content streams' tests read operands of 8 MiB, and content of 50,000
+# inline images, each in under two seconds: built lightly optimized, they
+# take a fraction of that.
+[profile.dev.package.pdf-content-streams]
 opt-level = 1

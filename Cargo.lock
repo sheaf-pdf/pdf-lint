@@ -297,6 +297,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-content-streams"
+version = "0.1.0"
+dependencies = [
+ "pdf-objects",
+ "thiserror",
+]
+
+[[package]]
 name = "pdf-crypt"
 version = "0.1.0"
 dependencies = [

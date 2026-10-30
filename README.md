@@ -26,6 +26,7 @@ decrypts what's encrypted itself.
 | [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler on RustCrypto's primitives: decrypting, every fault said, and encrypting for a writer, a new file's key and dictionary from randomness it's given, its keys wiped |
 | [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, their parser and their writer, which writes an encrypted file's through an encryptor: each value with where it was written, every fault said, and text strings decoded by the spec |
 | [pdf-structure](crates/pdf-structure) | PDF's file structure, read whole or each object on demand, from any thread, from memory or a file read by position: the header, cross-reference tables and streams along `/Prev`, object streams and recovery by scanning, each object through pdf-objects' parser, decrypted through pdf-crypt and decoded through pdf-filters, and so any stream's data asked for, where it was read from recorded, every choice it made said; and written, whole or as an incremental update, cross-reference sections and object streams deflated through pdf-filters, an encrypted file's objects encrypted as they're written, through pdf-crypt, by the list it decrypts by, and an object as read copied as the bytes it was read from, checked against a hash of them |
+| [pdf-content-streams](crates/pdf-content-streams) | PDF content streams read as PDFium reads them: each token with where it is, an inline image's data found by PDFium's rules, operands read as pdf-objects' values when asked, and a page's streams joined as one, every place mapped back to its stream, under caps, every error saying where |
 | [pdf-arlington](crates/pdf-arlington) | The Arlington PDF Model, embedded: its tables read, and the predicates in their cells evaluated over pdf-objects' objects |
 
 ## Development
@@ -44,22 +45,23 @@ and `wasm32-unknown-unknown` targets, nightly Rust with its `rust-src`
 component, and Rust 1.85 installed: for the tokenizer's no-std build,
 pdf-structure's lints for Windows and a 32-bit target, the tokenizer's
 build against `core` alone, and the minimum Rust of the tokenizer, the
-filters, pdf-crypt, pdf-objects, pdf-structure and pdf-arlington.
+filters, pdf-crypt, pdf-objects, pdf-structure, pdf-content-streams and
+pdf-arlington.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
-objects`, `just fuzz structure`, `just fuzz write` and `just fuzz check`
-fuzz the tokenizer, the filters, decoding and encoding, pdf-crypt's
-handler, new files' dictionaries and a password's forms, pdf-objects'
-parser and writer, pdf-structure's reader and writer, and the reader and
-checker, on nightly with
+objects`, `just fuzz structure`, `just fuzz write`, `just fuzz content`
+and `just fuzz check` fuzz the tokenizer, the filters, decoding and
+encoding, pdf-crypt's handler, new files' dictionaries and a password's
+forms, pdf-objects' parser and writer, pdf-structure's reader and writer,
+pdf-content-streams' tokens, and the reader and checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
 says for how many seconds (60 by default).
 
 ## License
 
-pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects and pdf-structure are
-licensed under either of Apache License, Version 2.0
-([LICENSE-APACHE](LICENSE-APACHE)) or MIT license
+pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure and
+pdf-content-streams are licensed under either of Apache License, Version
+2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT license
 ([LICENSE-MIT](LICENSE-MIT)) at your option. pdf-lint and pdf-arlington
 are licensed under the Apache License, Version 2.0, as is the Arlington
 model pdf-arlington embeds.

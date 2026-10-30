@@ -1,7 +1,8 @@
 # The fuzz targets, in cargo-fuzz's layout, outside the workspace: they
 # build on nightly with libFuzzer. Locally, `just fuzz tokenize`,
 # `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
-# `just fuzz structure`, `just fuzz write` or `just fuzz check`, or:
+# `just fuzz structure`, `just fuzz write`, `just fuzz content` or
+# `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
@@ -26,6 +27,11 @@
 # flipped, refused as changed or read back alike, which a stable unit test
 # (`mutated_files_write_and_read_back_alike`) runs on mutated files, from
 # seeds with the third byte its input has;
+# `content` calls `pdf_content_streams::fuzz::content`, a page's content
+# read whole and as two streams, its tokens tiling it and each operand read,
+# and again under small caps, which two stable unit tests
+# (`mutated_seeds_keep_every_promise`, `random_fragments_keep_every_promise`)
+# run on mutated seeds and random content;
 # `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
@@ -42,6 +48,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+pdf-content-streams = { path = "../crates/pdf-content-streams" }
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
 # Both Flate backends, so that the filters' target runs on each.
 pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
@@ -89,6 +96,13 @@ bench = false
 [[bin]]
 name = "write"
 path = "fuzz_targets/write.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content"
+path = "fuzz_targets/content.rs"
 test = false
 doc = false
 bench = false

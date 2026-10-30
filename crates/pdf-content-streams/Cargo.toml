@@ -1,0 +1,22 @@
+[package]
+name = "pdf-content-streams"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "PDF content streams read as PDFium reads them: their tokens, each where it is, inline images ended by PDFium's rules, operands read as pdf-objects values when asked, and a page's streams joined as one, under caps, every error saying where"
+keywords = ["pdf", "content-stream", "lexer", "iso-32000"]
+categories = ["parser-implementations", "graphics"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+pdf-objects = { path = "../pdf-objects", version = "0.1" }
+thiserror = "2"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

@@ -3,6 +3,6 @@ corpus
 artifacts
 coverage
 
-# What `just fuzz check`, `just fuzz structure` and `just fuzz write` write
-# for the fuzzer to begin from.
+# What `just fuzz check`, `just fuzz structure`, `just fuzz write` and
+# `just fuzz content` write for the fuzzer to begin from.
 seeds

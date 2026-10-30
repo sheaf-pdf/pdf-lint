@@ -178,6 +178,20 @@ jobs:
       - name: Test
         run: just structure-msrv
 
+  content-msrv:
+    name: Content streams on their minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in crates/pdf-content-streams/Cargo.toml,
+      # which `just content-msrv` reads.
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just content-msrv
+
   arlington-msrv:
     name: Arlington on its minimum Rust
     runs-on: ubuntu-latest

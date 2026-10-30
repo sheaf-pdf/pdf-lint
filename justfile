@@ -2,14 +2,15 @@
 # what CI checks.
 
 # The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects,
-# pdf-structure and pdf-arlington support, from their Cargo.toml. Only the
-# libraries promise one: the checker ships as a binary built with stable
-# Rust.
+# pdf-structure, pdf-content-streams and pdf-arlington support, from their
+# Cargo.toml. Only the libraries promise one: the checker ships as a binary
+# built with stable Rust.
 tokenizer_msrv := `grep -m1 '^rust-version' crates/pdf-tokenizer/Cargo.toml | cut -d'"' -f2`
 filters_msrv := `grep -m1 '^rust-version' crates/pdf-filters/Cargo.toml | cut -d'"' -f2`
 crypt_msrv := `grep -m1 '^rust-version' crates/pdf-crypt/Cargo.toml | cut -d'"' -f2`
 objects_msrv := `grep -m1 '^rust-version' crates/pdf-objects/Cargo.toml | cut -d'"' -f2`
 structure_msrv := `grep -m1 '^rust-version' crates/pdf-structure/Cargo.toml | cut -d'"' -f2`
+content_msrv := `grep -m1 '^rust-version' crates/pdf-content-streams/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
 
 # List the recipes.
@@ -17,7 +18,7 @@ default:
     @just --list --unsorted
 
 # Everything CI runs.
-ci: fmt clippy test test-qpdf doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv arlington-msrv
+ci: fmt clippy test test-qpdf doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -157,6 +158,11 @@ objects-msrv:
 structure-msrv:
     cargo +{{ structure_msrv }} test --locked -p pdf-structure
 
+# Test pdf-content-streams on its oldest supported Rust, which must be
+# installed.
+content-msrv:
+    cargo +{{ content_msrv }} test --locked -p pdf-content-streams
+
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:
     cargo +{{ arlington_msrv }} test --locked -p pdf-arlington
@@ -166,9 +172,11 @@ arlington-msrv:
 # pdf-crypt's security handler, new files' dictionaries and a password's
 # forms; `objects`, pdf-objects' parser, and its writer on what it
 # read; `structure`, pdf-structure's reader; `write`, pdf-structure's
-# writer, on what its reader read; or `check`, the reader and the
-# checker. `structure`, `write` and `check` begin from the seeds pdf-lint's
-# fuzz module makes, `write`'s with the third byte its input has.
+# writer, on what its reader read; `content`, pdf-content-streams' tokens
+# of a page's content; or `check`, the reader and the checker.
+# `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz
+# module makes, `write`'s with the third byte its input has; `content` from
+# those pdf-content-streams' makes.
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.
 fuzz target="tokenize" seconds="60":
@@ -198,13 +206,18 @@ fuzz target="tokenize" seconds="60":
         mkdir -p fuzz/corpus/write
         cargo +nightly fuzz run --target "$host" write fuzz/corpus/write fuzz/seeds/write -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
+    content)
+        PDF_CONTENT_STREAMS_FUZZ_SEEDS="$PWD/fuzz/seeds/content" cargo test --locked -q -p pdf-content-streams --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/content
+        cargo +nightly fuzz run --target "$host" content fuzz/corpus/content fuzz/seeds/content -- -dict=fuzz/content.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/check
         cargo +nightly fuzz run --target "$host" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters, crypt, objects, structure, write or check" >&2
+        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content or check" >&2
         exit 2
         ;;
     esac
