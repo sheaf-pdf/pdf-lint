@@ -73,7 +73,10 @@ pub struct Base {
     /// an update after it is given objects at its numbers, built or
     /// edited, and refuses an object as read and a reading
     /// ([`Error::Renumbered`]), which would be written over another object
-    /// of the file. [`Base::of`] and [`Base::new`] leave it unset.
+    /// of the file. Any renumbering given counts, the identity among them
+    /// (`&()`, or a function that names each as it is): a write with
+    /// nothing to renumber is given none. [`Base::of`] and [`Base::new`]
+    /// leave it unset.
     pub renumbered: bool,
 }
 
@@ -213,7 +216,10 @@ impl Base {
 /// whole file, [`Encryptor::renumbered`]'s; after an update, the file's
 /// own), and refuses an object as read and a reading
 /// ([`Error::Renumbered`]); a caller that copies opens the file written and
-/// goes after [`Base::of`] that reading.
+/// goes after [`Base::of`] that reading. With no reading to resolve it,
+/// where `/EncryptMetadata false` leaves the document's metadata stream in
+/// the clear, the catalog, which says which stream that is, is among what
+/// it's given ([`Error::Catalog`]).
 ///
 /// - **The trailer** carries `base`'s newest trailer's entries but those
 ///   a section writes anew (ISO 32000-2, 7.5.6): `/Root`, `/Prev`, at
@@ -248,7 +254,7 @@ impl Base {
 ///   does, is written, copied where the rules for a copy hold, its header
 ///   and the references that move written anew in place ([`Body::Read`],
 ///   rules 2 and 9), and no other object is written at the number of one
-///   passed over ([`Error::Twice`]). Encrypted, it encrypts by the list of
+///   passed over ([`Error::WrittenTwice`]). Encrypted, it encrypts by the list of
 ///   what's left in the clear as the encryptor has it, in the file's
 ///   numbers, each object under the number it's written at, and the
 ///   document's metadata stream told by the number it's written at. It
@@ -281,12 +287,13 @@ impl Base {
 /// `/Encrypt` is at the same number), or none for an encrypted file; a
 /// number 0 or at or past [`NUMBERS`], or given twice, or under a
 /// renumbering written at twice, one passed over among them; a body the
-/// renumbering gives no number; a
-/// body at the encryption dictionary's number; one at a number the file
-/// lists free where its keys are made per object ([`Encryptor::of`]); a
-/// renumbering that moves an encryption dictionary or what one refers to,
-/// or writes another object there; a cross-reference stream with no number
-/// left below [`NUMBERS`]; a stream's data where it was written that isn't
+/// renumbering gives no number; a body at the encryption dictionary's
+/// number; one at a number the file lists free where its keys are made
+/// per object ([`Encryptor::of`]); a renumbering that moves an encryption
+/// dictionary or what one refers to, or writes another object there; a
+/// catalog neither given nor in `from`, where `/EncryptMetadata false`
+/// leaves the metadata stream it names in the clear ([`Error::Catalog`]); a
+/// cross-reference stream with no number left below [`NUMBERS`]; a stream's data where it was written that isn't
 /// the reading's own for its number, or with no `from`; a `from` whose
 /// source says it changed, and a copy whose bytes aren't those it was read
 /// from ([`Error::Changed`]), or whose record is another reading's or

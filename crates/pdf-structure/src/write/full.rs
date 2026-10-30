@@ -64,17 +64,18 @@ use crate::source::{Document, XrefKind};
 ///   in an object stream goes in one, written anew, unless the caller's
 ///   groups leave its number out ([`Pack::groups`]).
 /// - **Packed**, what may go in an object stream ([`packable`]), but an
-///   encryption dictionary and what one refers to,
-///   goes in one after the rest, grouped by [`Pack::groups`], else by
-///   number, [`MEMBERS`] each; numbered from [`Pack::reuse`], then past
-///   every body and [`Options::xref_from`], the cross-reference stream
-///   after them, each passing over a number what's written refers to and
-///   doesn't hold, so that a reference to no object, which a reader reads
-///   as null (ISO 32000-2, 7.3.10), doesn't come to name one of the
-///   writer's own (a new encryption dictionary's number passes over them
-///   too); built on up to [`Options::threads`] threads, the same
-///   bytes on any number; each encrypted once, whole, as a stream, under
-///   its number. An object stream whose data would be more than the reader
+///   encryption dictionary and what one refers to, goes in one after the
+///   rest, grouped by [`Pack::groups`], else by number, [`MEMBERS`] each;
+///   numbered from [`Pack::reuse`], then past every body and
+///   [`Options::xref_from`], the cross-reference stream after them, each
+///   passing over a number what's written refers to and doesn't hold, so
+///   that a reference to no object, which a reader reads as null (ISO
+///   32000-2, 7.3.10), doesn't come to name one of the writer's own, and
+///   over one an encryption dictionary refers to, what's there being read
+///   in the clear (7.6.2) (a new encryption dictionary's number passes over
+///   them too); built on up to [`Options::threads`] threads, the same bytes
+///   on any number; each encrypted once, whole, as a stream, under its
+///   number. An object stream whose data would be more than the reader
 ///   decodes ([`MAX_DATA`](super::MAX_DATA)) is written as its members on
 ///   their own, and so are all of them where no number is left for the
 ///   cross-reference stream, or under an encryption that leaves streams in
@@ -89,13 +90,15 @@ use crate::source::{Document, XrefKind};
 ///   in the numbers written ([`Encryptor::renumbered`]); under RC4, an
 ///   object written at a number another had in the file the encryptor was
 ///   read from leaks the XOR of the two plaintexts to one who keeps both
-///   files. An object as read is copied, its header and each reference that
-///   moves written anew where its bytes had it; at another number only
-///   where neither file is encrypted or no key is made per object
-///   (AES-256), else written anew. The numbers checked, listed and taken by
-///   the writer's own objects are those written, but [`Pack::groups`]',
-///   which are those given (see [`Options::renumber`]); what's written says
-///   it was renumbered ([`Base::renumbered`]).
+///   files. No body is written at the number of an encryption dictionary or
+///   what one refers to but that object, what's there being left in the
+///   clear ([`Error::Moved`]). An object as read is copied, its header and
+///   each reference that moves written anew where its bytes had it; at
+///   another number only where neither file is encrypted or no key is made
+///   per object (AES-256), else written anew. The numbers checked, listed
+///   and taken by the writer's own objects are those written, but
+///   [`Pack::groups`]', which are those given (see [`Options::renumber`]);
+///   what's written says it was renumbered ([`Base::renumbered`]).
 ///
 /// A whole file's section lists every number from 0 to the last, so
 /// objects numbered sparsely make many rows: as a stream, deflated, more
@@ -107,9 +110,11 @@ use crate::source::{Document, XrefKind};
 /// Refused, with nothing written ([`Error`]): a number 0 or at or past
 /// [`NUMBERS`], a body's, the encryption dictionary's or the
 /// cross-reference stream's; one given twice; a body the renumbering gives
-/// no number, and two it writes at one; a body at the encryption
-/// dictionary's; a body at a number `encryptor`'s file lists free, where
-/// its keys are made per object ([`Encryptor::of`]); a table asked to pack;
+/// no number, two it writes at one, and one it writes at the number of an
+/// encryption dictionary or what one refers to that isn't that object; a
+/// body at the encryption dictionary's; a body at a number `encryptor`'s
+/// file lists free, where its keys are made per object
+/// ([`Encryptor::of`]); a table asked to pack;
 /// a stream's data where it was written that isn't the reading's own for
 /// its number, or with no `from`; a group naming a number that isn't
 /// packed, or one twice; a `from` whose source says it changed, and a copy
@@ -148,11 +153,11 @@ pub fn full<'a>(
 /// hold; and its encryption dictionary, which the writer writes from
 /// `encryptor`, if any. Written under another encryption than the one
 /// `doc`'s file was read with (none, or a new one), the objects its
-/// encryption dictionary refers to are left out too.
-/// What's left out is told by the numbers of `doc`. It gives every other
-/// object of `doc`, so a renumbering ([`Options::renumber`]) that puts two
-/// at one number is refused ([`Error::Twice`]): a caller whose renumbering
-/// shares a number gives one of them through [`full`].
+/// encryption dictionary refers to are left out too. What's left out is
+/// told by the numbers of `doc`. It gives every other object of `doc`, so
+/// a renumbering ([`Options::renumber`]) that puts two at one number is
+/// refused ([`Error::WrittenTwice`]): a caller whose renumbering shares a
+/// number gives one of them through [`full`].
 pub fn document(
     out: &mut Vec<u8>,
     doc: &Document,
@@ -239,8 +244,18 @@ fn file(
     let numbers = options.kind == XrefKind::Stream
         || pack.is_some()
         || encryptor.is_some_and(|e| e.place() == Place::New && options.encrypt_at.is_none());
+    // Those, and what the encryptor leaves in the clear by number, in the
+    // numbers written, which no object of the writer's own takes.
     let dangling = match numbers {
-        true => dangling(bodies, to, trailer, past, reuse),
+        true => {
+            let mut dangling = dangling(bodies, to, trailer, past, reuse);
+            dangling.extend(
+                encryptor
+                    .into_iter()
+                    .flat_map(Encryptor::dictionary_numbers),
+            );
+            dangling
+        }
         false => HashSet::new(),
     };
     let encrypt_at = match encryptor.map(Encryptor::place) {
@@ -263,6 +278,14 @@ fn file(
     // file read named so, and this one doesn't, is encrypted.
     let whole = encryptor.map(|e| e.whole(encrypt_at));
     let encryptor = whole.as_deref().or(encryptor);
+    // No object at the number of what's left in the clear by number but
+    // the object that is.
+    if let (Some(given), Some(now)) = (given, encryptor) {
+        let written = bodies.iter().map(|(id, _)| *id).zip(at.iter().copied());
+        if let Some(id) = given.shared(now, to, written) {
+            return Err(Error::Moved(id));
+        }
+    }
     // What the encryptor resolves references by, where there's one: the
     // bodies and the reading, by the numbers they're given at.
     let resolve = encryptor.map(|_| Bodies::new(bodies, from));

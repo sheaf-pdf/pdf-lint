@@ -3955,6 +3955,48 @@ fn encrypting_without_the_catalog_where_metadata_is_in_the_clear_is_refused() {
     assert!(clear.encryptor.encrypting(&trailer, &resolve).is_ok());
 }
 
+/// A caller laying a renumbered file out itself encrypts it as a whole file
+/// does, through `Encryptor::renumbered`, `whole`, then
+/// `encrypting_renumbered`, given the renumbering, the trailer and what
+/// resolves in the numbers held: under `/EncryptMetadata false`, the
+/// document's metadata stream (5) and the page's content (3) swapped, the
+/// metadata stream written at 3 is in the clear, and the content written at
+/// 5 encrypted, under AES-128 and AES-256; `encrypting`, given the same,
+/// finds the metadata stream at the number it's held at. Refused alike
+/// where the catalog doesn't resolve.
+#[test]
+fn a_renumbered_file_laid_out_by_a_caller_leaves_its_metadata_in_the_clear() {
+    for kind in [Kind::Aes128, Kind::Aes256] {
+        let name = format!("{kind:?}");
+        let source = written_otherwise(kind, false);
+        let reading = opened(&source, "user");
+        let own = Encryptor::of(&reading).unwrap().unwrap();
+        let doc = reading.to_document().unwrap();
+        let swap = |id: ObjectId| match id {
+            (5, 0) => Some((3, 0)),
+            (3, 0) => Some((5, 0)),
+            id => Some(id),
+        };
+        let renumbered = own.renumbered(&swap);
+        let whole = renumbered.whole(renumbered.at());
+        let (trailer, resolve) = (doc.trailer.dict(), &&doc);
+        let renumbering = whole.encrypting_renumbered(trailer, resolve, &swap);
+        let encrypting = renumbering.unwrap();
+        let dict_of = |n: u32| doc.get((n, 0)).unwrap().as_stream().unwrap().dict.clone();
+        let content = encrypting.stream((5, 0), &dict_of(3), CONTENT).unwrap();
+        let metadata = encrypting.stream((3, 0), &dict_of(5), XMP).unwrap();
+        assert_ne!(content.as_ref(), CONTENT, "{name}: the content, at 5");
+        assert_eq!(metadata.as_ref(), XMP, "{name}: the metadata, at 3");
+        let held = whole.encrypting(trailer, resolve).unwrap();
+        let metadata = held.stream((5, 0), &dict_of(5), XMP).unwrap();
+        assert_eq!(metadata.as_ref(), XMP, "{name}: the metadata, held at 5");
+        let none = |_: ObjectId| -> Option<&Object> { None };
+        let refused = whole.encrypting_renumbered(trailer, &none, &swap).err();
+        let root = trailer.get(b"Root").and_then(Object::as_reference);
+        assert_eq!(refused, root.map(Error::Catalog), "{name}");
+    }
+}
+
 /// A whole write under a reading's encryption that writes its encryption
 /// dictionary at another number encrypts what it's given at the number
 /// the dictionary had, as any object: it's no encryption dictionary's in
@@ -5903,7 +5945,8 @@ fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike()
                     false => assert_eq!(again, out, "{name}: through document"),
                     true => {
                         let later = alike.keys().next().unwrap();
-                        assert_eq!(through, Err(Error::Twice(map[later].0)), "{name}");
+                        let twice = Error::WrittenTwice(map[later].0);
+                        assert_eq!(through, Err(twice), "{name}");
                         assert!(again.is_empty(), "{name}");
                     }
                 }
@@ -6056,7 +6099,7 @@ fn a_renumbering_that_writes_an_object_nowhere_or_twice_is_refused() {
             vec![at(1, &catalog), at(3, &three)],
             None,
             write::Options::DEFAULT,
-            Error::Twice(1),
+            Error::WrittenTwice(1),
         ),
         (
             Map::from([((1, 0), (1, 0)), ((1, 1), (2, 0))]),
@@ -6099,9 +6142,10 @@ fn a_renumbering_that_writes_an_object_nowhere_or_twice_is_refused() {
         Error::Unnumbered((3, 0)).to_string(),
         "object 3 0 is given, and the renumbering gives it no number to be written at"
     );
+    assert_eq!(Error::Twice(1).to_string(), "object 1 is given twice");
     assert_eq!(
-        Error::Twice(1).to_string(),
-        "object number 1 is given twice, or two objects are written there"
+        Error::WrittenTwice(1).to_string(),
+        "two objects would be written at object number 1"
     );
     // Given past the numbers a file may use, written below them.
     let far = (write::NUMBERS + 5, 0);
@@ -6131,7 +6175,7 @@ fn a_renumbering_that_writes_an_object_nowhere_or_twice_is_refused() {
     options.renumber = Some(&to);
     let mut out = Vec::new();
     let refused = write::document(&mut out, &doc, None, Some(&reading), &options);
-    assert_eq!(refused, Err(Error::Twice(6)));
+    assert_eq!(refused, Err(Error::WrittenTwice(6)));
     assert!(out.is_empty());
 }
 
@@ -6552,6 +6596,51 @@ fn written_otherwise_files_write_whole_renumbered() {
     }
 }
 
+/// A note in the crypt filters [`with_filters_by_reference`]'s encryption
+/// dictionary refers to.
+const CF_NOTE: &[u8] = b"a crypt filter's note";
+
+/// [`plaintext`] encrypted under `kind` by a dictionary whose `/CF` is
+/// object 41, with a note ([`CF_NOTE`]), which a reader reads before it
+/// has a key: the dictionary at [`ENCRYPT`], or direct in the trailer.
+fn with_filters_by_reference(kind: Kind, direct: bool) -> Vec<u8> {
+    let (mut plain, trailer) = plaintext();
+    let mut dict = dictionary_of(kind, true);
+    let mut filters = dict.remove(b"CF").unwrap();
+    filters.as_dict_mut().unwrap().set("Note", lit(CF_NOTE));
+    dict.set("CF", Object::reference(41));
+    // A source of that dictionary, with its /CF as object 41.
+    let id = Object::hex(ID);
+    let mut source_trailer = dict! { "Root" => Object::reference(1), "ID" => vec![id.clone(), id] };
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut section = Section::full(0);
+    let mut objects = vec![(1, catalog()), (41, filters.clone())];
+    match direct {
+        true => source_trailer.set("Encrypt", dict.clone()),
+        false => {
+            objects.push((ENCRYPT, Object::from(dict.clone())));
+            source_trailer.set("Encrypt", Object::reference(ENCRYPT));
+        }
+    }
+    for (n, o) in &objects {
+        let pos = serialize::indirect(&mut out, (*n, 0), o).unwrap();
+        section.insert(
+            *n,
+            Entry::InUse {
+                offset: pos,
+                generation: 0,
+            },
+        );
+    }
+    let pos = out.len();
+    section.table(&mut out, source_trailer, pos).unwrap();
+    let encryptor = encryptor_of(&out);
+    assert!(encryptor.dictionary_object((41, 0)), "{kind:?}");
+    plain.retain(|(n, _)| *n != 41);
+    plain.push((41, filters));
+    encrypted_by(&encryptor, &plain, &trailer, XrefKind::Table)
+}
+
 /// What the encryption dictionary refers to, read before a reader has a
 /// key, stays in the clear at the number it's written at, and what's
 /// written at the number it had is encrypted, as any object: here its
@@ -6561,8 +6650,6 @@ fn written_otherwise_files_write_whole_renumbered() {
 /// with a table, and packed, the `/CF` on its own, out of object streams.
 #[test]
 fn an_encryption_dictionary_s_referent_moves_in_the_clear() {
-    const CF_NOTE: &[u8] = b"a crypt filter's note";
-    let (mut plain, trailer) = plaintext();
     for (kind, direct) in [
         (Kind::Aes128, false),
         (Kind::Aes256, false),
@@ -6570,41 +6657,7 @@ fn an_encryption_dictionary_s_referent_moves_in_the_clear() {
         (Kind::Aes256, true),
     ] {
         let name = format!("{kind:?}, direct: {direct}");
-        let mut dict = dictionary_of(kind, true);
-        let mut filters = dict.remove(b"CF").unwrap();
-        filters.as_dict_mut().unwrap().set("Note", lit(CF_NOTE));
-        dict.set("CF", Object::reference(41));
-        // A source of that dictionary, with its /CF as object 41.
-        let id = Object::hex(ID);
-        let mut source_trailer =
-            dict! { "Root" => Object::reference(1), "ID" => vec![id.clone(), id] };
-        let mut out = b"%PDF-1.7\n".to_vec();
-        let mut section = Section::full(0);
-        let mut objects = vec![(1, catalog()), (41, filters.clone())];
-        match direct {
-            true => source_trailer.set("Encrypt", dict.clone()),
-            false => {
-                objects.push((ENCRYPT, Object::from(dict.clone())));
-                source_trailer.set("Encrypt", Object::reference(ENCRYPT));
-            }
-        }
-        for (n, o) in &objects {
-            let pos = serialize::indirect(&mut out, (*n, 0), o).unwrap();
-            section.insert(
-                *n,
-                Entry::InUse {
-                    offset: pos,
-                    generation: 0,
-                },
-            );
-        }
-        let pos = out.len();
-        section.table(&mut out, source_trailer, pos).unwrap();
-        let encryptor = encryptor_of(&out);
-        assert!(encryptor.dictionary_object((41, 0)), "{name}");
-        plain.retain(|(n, _)| *n != 41);
-        plain.push((41, filters.clone()));
-        let source = encrypted_by(&encryptor, &plain, &trailer, XrefKind::Table);
+        let source = with_filters_by_reference(kind, direct);
         let reading = opened(&source, "user");
         let own = Encryptor::of(&reading).unwrap().unwrap();
         assert_eq!(own.direct(), direct, "{name}");
@@ -6640,6 +6693,113 @@ fn an_encryption_dictionary_s_referent_moves_in_the_clear() {
             assert_eq!(cf, Some((50, 0)), "{name}");
             let direct_back = Encryptor::of(&back).unwrap().unwrap().direct();
             assert_eq!(direct_back, direct, "{name}");
+        }
+    }
+}
+
+/// A whole file under a renumbering that puts another object at the
+/// number of what the encryption dictionary refers to is refused, nothing
+/// written ([`Error::Moved`], naming that by the number it's given at): its
+/// `/CF`, by reference, and the Info given one number, the Info given and
+/// the `/CF` not, which would leave the Info's title in the clear where a
+/// reader reads the `/CF`; under AES-128 and AES-256, the dictionary at a
+/// number and direct, with a table and packed. Given the `/CF` there
+/// instead, it's written, in the clear, the Info's title nowhere.
+#[test]
+fn a_renumbering_that_puts_an_object_at_a_referent_s_number_is_refused() {
+    for (kind, direct) in [
+        (Kind::Aes128, false),
+        (Kind::Aes256, false),
+        (Kind::Aes128, true),
+        (Kind::Aes256, true),
+    ] {
+        let source = with_filters_by_reference(kind, direct);
+        let reading = opened(&source, "user");
+        let own = Encryptor::of(&reading).unwrap().unwrap();
+        let doc = reading.to_document().unwrap();
+        let mut map: Map = doc.objects().map(|(id, _)| (id, id)).collect();
+        map.insert((41, 0), (50, 0));
+        map.insert((13, 0), (50, 0));
+        let to = by(&map);
+        for (xref, pack) in [
+            (XrefKind::Table, None),
+            (XrefKind::Stream, Some(write::Pack::DEFAULT)),
+        ] {
+            let name = format!("{kind:?}, direct: {direct}, {xref:?}");
+            let mut options = options(xref, pack);
+            options.renumber = Some(&to);
+            // Each left out, and what's then written.
+            let cases = [
+                ([41, ENCRYPT], Err(Error::Moved((41, 0)))),
+                ([13, ENCRYPT], Ok(())),
+            ];
+            for (left, want) in cases {
+                let bodies = write::bodies(&doc).filter(|(id, _)| !left.contains(&id.0));
+                let mut out = b"held".to_vec();
+                let trailer = doc.trailer.dict();
+                let written = write::full(
+                    &mut out,
+                    bodies,
+                    trailer,
+                    Some(&own),
+                    Some(&reading),
+                    &options,
+                );
+                assert_eq!(written.map(|_| ()), want, "{name}: {left:?} left out");
+                match want {
+                    Err(_) => assert_eq!(out, b"held", "{name}"),
+                    Ok(()) => {
+                        assert!(holds(&out, CF_NOTE), "{name}: /CF at 50, in the clear");
+                        assert!(!in_clear(&out, TITLE), "{name}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// No object of the writer's own, an object stream, the cross-reference
+/// stream or a new encryption dictionary, is numbered at the number of
+/// what an encryption dictionary refers to, which a reader reads in the
+/// clear, whether it's given or not: the `/CF` by reference left out,
+/// packed, under AES-128 and AES-256, at its own number with no
+/// renumbering and under the identity, and moved to the first number past
+/// every object and to the next, where the object stream and the
+/// cross-reference stream would go; the Info's title nowhere in the clear.
+#[test]
+fn no_object_of_the_writer_s_own_is_at_a_referent_s_number() {
+    for kind in [Kind::Aes128, Kind::Aes256] {
+        let source = with_filters_by_reference(kind, false);
+        let reading = opened(&source, "user");
+        let own = Encryptor::of(&reading).unwrap().unwrap();
+        let doc = reading.to_document().unwrap();
+        let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
+        for moved in [None, Some(41), Some(42)] {
+            let name = format!("{kind:?}, /CF at {moved:?}");
+            let mut map: Map = ids.iter().map(|&id| (id, id)).collect();
+            if let Some(n) = moved {
+                map.insert((41, 0), (n, 0));
+            }
+            let to = by(&map);
+            let mut options = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
+            if moved.is_some() {
+                options.renumber = Some(&to);
+            }
+            let bodies = write::bodies(&doc).filter(|(id, _)| id.0 != 41 && id.0 != ENCRYPT);
+            let mut out = Vec::new();
+            let trailer = doc.trailer.dict();
+            let written = write::full(
+                &mut out,
+                bodies,
+                trailer,
+                Some(&own),
+                Some(&reading),
+                &options,
+            );
+            let written = written.unwrap();
+            let at = moved.unwrap_or(41);
+            assert_eq!(written.section.get(at), None, "{name}");
+            assert!(!in_clear(&out, TITLE), "{name}");
         }
     }
 }
@@ -7697,7 +7857,7 @@ fn an_update_that_moves_what_stays_where_it_is_is_refused() {
                 "the Info at its /CF's, given",
                 moving(&reading, &[(13, 41)]),
                 all(),
-                Error::Twice(41),
+                Error::WrittenTwice(41),
             ),
         ];
         for (case, map, given, want) in cases {
@@ -7732,7 +7892,7 @@ fn an_update_that_moves_what_stays_where_it_is_is_refused() {
             "the page at the array's",
             moving(&reading, &[(3, 5)]),
             None,
-            Error::Twice(5),
+            Error::WrittenTwice(5),
         ),
         (
             "the page named none",
