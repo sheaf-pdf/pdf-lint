@@ -586,9 +586,10 @@ impl<S: ByteSource> Reading<S> {
     /// What the reader warned of in what it has read so far, in the order
     /// the whole read says it: as it opened the file; as it read each
     /// object in use, by number; as it decoded each object stream, by
-    /// number; as it read each object in an object stream, by number; and
-    /// as it decrypted each object's strings, by number. What was read
-    /// without keeping it isn't here.
+    /// number; as it read each object in an object stream, by number; each
+    /// of those read that starts inside the bytes of another read, by
+    /// stream, then where it starts; and as it decrypted each object's
+    /// strings, by number. What was read without keeping it isn't here.
     pub fn warnings(&self) -> Vec<Warning> {
         self.reader.warnings()
     }

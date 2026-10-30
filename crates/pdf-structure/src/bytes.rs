@@ -10,6 +10,9 @@
 //! doesn't read says why ([`Unread`]): it doesn't parse, its offset holds
 //! another, or the object stream it's in doesn't decode ([`Undecoded`],
 //! its filters [`Unfiltered`]) or doesn't say where it is ([`Unindexed`]).
+//! One read from an object stream that starts inside the bytes of another
+//! read from it, where the stream's header puts it, is read all the same,
+//! and said.
 //!
 //! A file is read one way, by a [`Reading`]: opened, its header,
 //! cross-reference sections and trailer read and its security handler
@@ -670,9 +673,11 @@ impl Assembly {
     }
 
     /// What it holds made a [`Document`], beside what the reader knows of
-    /// the file, `known`: the warnings in the whole read's order; the
-    /// strings the reader didn't decrypt itself decrypted by `decoder`,
-    /// when there's one; and the catalog's metadata read from `file`.
+    /// the file, `known`: the warnings in the whole read's order, each
+    /// object in an object stream that starts inside another's bytes said
+    /// after what it warned of as it read them ([`overlaps`]); the strings
+    /// the reader didn't decrypt itself decrypted by `decoder`, when there's
+    /// one; and the catalog's metadata read from `file`.
     fn document<'f, F: Bytes<'f>>(
         self,
         file: F,
@@ -692,6 +697,8 @@ impl Assembly {
         warnings.extend(read);
         warnings.extend(containers);
         warnings.extend(members);
+        let records = objects.values().filter_map(|o| o.as_ref().ok()?.1.as_ref());
+        warnings.extend(overlaps(records));
         warnings.extend(decrypted);
         if !known.natively {
             decrypt(decoder, known.encrypted, &mut objects, &mut warnings);
@@ -713,6 +720,45 @@ impl Assembly {
         document.in_the_clear = in_the_clear;
         Ok(document)
     }
+}
+
+/// A warning on each object read from an object stream, of those
+/// `records` places, that starts inside the bytes of one read before it
+/// from the stream's decoded data, where the stream's header gives it a
+/// place another's value runs over (ISO 32000-2, 7.5.7): at its own bytes,
+/// naming the one it's inside, the one reaching furthest of those starting
+/// before it, or at the same byte at a lower index. By stream, then where
+/// each starts. Both are objects the cross-reference sections list and the
+/// reader read: one no entry lists isn't read, so isn't said.
+fn overlaps<'r>(records: impl Iterator<Item = &'r Record>) -> Vec<Warning> {
+    let mut members: Vec<(u32, usize, u32, &Record)> = records
+        .filter_map(|record| match record.origin {
+            Origin::Stream { stream, index } => Some((stream, record.at.start, index, record)),
+            _ => None,
+        })
+        .collect();
+    members.sort_unstable_by_key(|&(stream, start, index, _)| (stream, start, index));
+    let mut warnings = Vec::new();
+    // The one reaching furthest so far, in the stream gone through.
+    let mut furthest: Option<(u32, &Record)> = None;
+    for (stream, start, _, record) in members {
+        if let Some((_, outer)) = furthest.filter(|&(s, outer)| s == stream && start < outer.at.end)
+        {
+            let (n, g) = outer.id;
+            let (from, to) = (outer.at.start, outer.at.end);
+            warnings.push(Warning {
+                object: Some(record.id),
+                at: Some(record.at),
+                message: format!(
+                    "it starts at byte {start} of object stream {stream} 0 R's data, inside {n} {g} R, which runs from byte {from} to {to}"
+                ),
+            });
+        }
+        if furthest.is_none_or(|(s, outer)| s != stream || record.at.end > outer.at.end) {
+            furthest = Some((stream, record));
+        }
+    }
+    warnings
 }
 
 /// The data of the catalog's metadata stream (ISO 32000-2, 14.3.2), as
@@ -1649,8 +1695,10 @@ impl Reader {
     /// What it warned of in the objects it has read, as a whole read says
     /// it: what it warned of as it opened the file; then as it read each
     /// object in use, by number; as it decoded each object stream, by
-    /// number; as it read each object in an object stream, by number; and
-    /// as it decrypted each object's strings, by number.
+    /// number; as it read each object in an object stream, by number; each
+    /// of those that starts inside another's bytes, by stream, then where
+    /// it starts ([`overlaps`]); and as it decrypted each object's strings,
+    /// by number.
     fn warnings(&self) -> Vec<Warning> {
         let reads = |member: bool| {
             (self.entries.iter().zip(&self.slots))
@@ -1669,6 +1717,8 @@ impl Reader {
         for read in reads(true) {
             warnings.extend(read.warnings.iter().cloned());
         }
+        let records = reads(true).filter_map(|read| Some(&read.object.as_ref().ok()?.1));
+        warnings.extend(overlaps(records));
         for read in reads(false) {
             warnings.extend(read.decrypt.iter().cloned());
         }
@@ -5133,6 +5183,133 @@ mod tests {
         let why = doc.get((3, 0)).unwrap_err().to_string();
         assert!(why.contains("so it may be cut short"), "{why}");
         assert!(doc.get((2, 0)).is_ok());
+    }
+
+    /// A file whose catalog is 1 and whose object stream 4 holds `data`,
+    /// unfiltered, its `/N` `n` and its `/First` `first`, listed by
+    /// cross-reference stream 5 with each of `members`, a number and its
+    /// index in 4, and every other number free.
+    fn holding(data: &[u8], n: usize, first: usize, members: &[(u32, u8)]) -> Vec<u8> {
+        let mut file = b"%PDF-1.7\n".to_vec();
+        let one = file.len();
+        file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let four = file.len();
+        let length = data.len();
+        file.extend_from_slice(
+            format!(
+                "4 0 obj\n<< /Type /ObjStm /N {n} /First {first} /Length {length} >>\nstream\n"
+            )
+            .as_bytes(),
+        );
+        file.extend_from_slice(data);
+        file.extend_from_slice(b"\nendstream\nendobj\n");
+        let five = file.len();
+        let size = members.iter().map(|&(n, _)| n).fold(5, u32::max) + 1;
+        let row = |m: u32| match (m, members.iter().find(|&&(n, _)| n == m)) {
+            (1, _) => xref_row(1, one, 0),
+            (4, _) => xref_row(1, four, 0),
+            (5, _) => xref_row(1, five, 0),
+            (_, Some(&(_, index))) => xref_row(2, 4, index),
+            (0, None) => xref_row(0, 0, 255),
+            (_, None) => xref_row(0, 0, 0),
+        };
+        let rows: Vec<u8> = (0..size).flat_map(row).collect();
+        file.extend_from_slice(
+            format!(
+                "5 0 obj\n<< /Type /XRef /Size {size} /W [1 2 1] /Root 1 0 R /Length {} >>\nstream\n",
+                rows.len()
+            )
+            .as_bytes(),
+        );
+        file.extend_from_slice(&rows);
+        file.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes(),
+        );
+        file
+    }
+
+    /// The warning that object `n`, at `start` to `end` in object stream
+    /// 4's data, starts inside `outer`, at `from` to `to`.
+    fn inside(
+        n: u32,
+        (start, end): (usize, usize),
+        outer: u32,
+        (from, to): (usize, usize),
+    ) -> Warning {
+        Warning {
+            object: Some((n, 0)),
+            at: Some(Span::new(Some((4, 0)), start, end)),
+            message: format!(
+                "it starts at byte {start} of object stream 4 0 R's data, inside {outer} 0 R, which runs from byte {from} to {to}"
+            ),
+        }
+    }
+
+    #[test]
+    fn an_object_starting_inside_anothers_bytes_in_an_object_stream_is_said() {
+        // Two at one offset: the second said, at its bytes, the first
+        // named; each read all the same, after what each warned of.
+        let file = holding(b"2 0 3 0 << /A#zz 1 >>", 2, 8, &[(2, 0), (3, 1)]);
+        let doc = read(&file);
+        assert_eq!(doc.get((2, 0)), doc.get((3, 0)));
+        let (overlap, before) = doc.warnings.split_last().unwrap();
+        assert_eq!(*overlap, inside(3, (8, 21), 2, (8, 21)));
+        let of: Vec<_> = before.iter().map(|w| w.object).collect();
+        assert_eq!(of, [Some((2, 0)), Some((3, 0))], "{:?}", doc.warnings);
+        // One inside a member two before it, past the one between: each
+        // inside the one reaching furthest.
+        let file = holding(b"2 0 3 2 6 6 [ (x) (y) ]", 3, 12, &[(2, 0), (3, 1), (6, 2)]);
+        let doc = read(&file);
+        let said = [
+            inside(3, (14, 17), 2, (12, 23)),
+            inside(6, (18, 21), 2, (12, 23)),
+        ];
+        assert_eq!(doc.warnings, said);
+        // One that starts where the one before ends isn't inside it; nor
+        // is either of two apart whose header gives them out of order.
+        for data in [&b"2 0 3 3 [1][2]"[..], b"2 4 3 0 [1] [2]"] {
+            let doc = read(&holding(data, 2, 8, &[(2, 0), (3, 1)]));
+            assert!(doc.get((2, 0)).is_ok() && doc.get((3, 0)).is_ok());
+            assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        }
+        // A neighbour no entry lists isn't read, so isn't said; listed, it
+        // is.
+        let data = b"9 0 2 2 3 6 [ (x) (y) ]";
+        let doc = read(&holding(data, 3, 12, &[(2, 1), (3, 2)]));
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        let doc = read(&holding(data, 3, 12, &[(9, 0), (2, 1), (3, 2)]));
+        let said = [
+            inside(2, (14, 17), 9, (12, 23)),
+            inside(3, (18, 21), 9, (12, 23)),
+        ];
+        assert_eq!(doc.warnings, said);
+    }
+
+    /// A reading that reads two objects at one offset of an object stream,
+    /// each on a thread of its own, in either order, says the overlap once
+    /// it has read both, as the whole read does.
+    #[test]
+    fn a_reading_says_an_overlap_once_it_has_read_both_as_the_whole_read() {
+        let file = holding(b"2 0 3 0 << /A 1 >>", 2, 8, &[(2, 0), (3, 1)]);
+        let whole = read(&file);
+        assert_eq!(whole.warnings, [inside(3, (8, 18), 2, (8, 18))]);
+        for (first, second) in [((2, 0), (3, 0)), ((3, 0), (2, 0))] {
+            let reading = Reading::open(file.as_slice(), &Options::DEFAULT).unwrap();
+            let get = |id| {
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| assert!(reading.get(id).is_ok()))
+                        .join()
+                        .unwrap();
+                });
+            };
+            get(first);
+            assert!(reading.warnings().is_empty(), "{first:?}");
+            get(second);
+            assert_eq!(reading.warnings(), whole.warnings, "{first:?}");
+            assert_eq!(reading.to_document().unwrap(), whole, "{first:?}");
+            assert_eq!(reading.into_document().unwrap(), whole, "{first:?}");
+        }
     }
 
     #[test]

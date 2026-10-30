@@ -478,7 +478,8 @@ pub enum Rule {
     /// `/Length` doesn't end at `endstream`, a lone CR after `stream`, an
     /// object without `endobj`, a name's stray `#` or `#00`, a
     /// cross-reference table's rows not 20 bytes, a file whose last line
-    /// isn't `%%EOF` alone, and the like ([`Warning`]).
+    /// isn't `%%EOF` alone, an object an object stream's header starts
+    /// inside another's bytes, and the like ([`Warning`]).
     Reader,
 }
 
@@ -4366,7 +4367,8 @@ mod tests {
     /// Two objects an object stream's header starts at one offset, page 3
     /// in the page tree and 4, which a structure element's `/Pg` names:
     /// read from the same bytes, they have one span, and their numbers
-    /// tell them apart, so only 4 needs a `/StructParents`.
+    /// tell them apart, so only 4 needs a `/StructParents`. The reader says
+    /// 4 starts inside 3's bytes, a finding held as 4 is.
     #[test]
     fn objects_an_object_stream_starts_at_one_offset_are_told_apart_by_their_numbers() {
         let page = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>";
@@ -4429,6 +4431,27 @@ mod tests {
             [(Some(4), "PageObject", Rule::Missing)],
             "{report}"
         );
+        let inside = "it starts at byte 8 of object stream 10 0 R's data, \
+                      inside 3 0 R, which runs from byte 8 to 80";
+        let at = doc.get((4, 0)).unwrap().at;
+        let said = |hold: &Hold| {
+            let report = check(&doc, hold, &Options::default());
+            (report.findings.into_iter())
+                .filter(|f| f.rule == Rule::Reader)
+                .map(|f| (f.object, f.made, f.value, f.at))
+                .collect::<Vec<_>>()
+        };
+        let only = |id, made| Hold::Only(BTreeMap::from([(id, made)]));
+        let holds = [
+            (Hold::All(Made::Built), Made::Built),
+            (only((4, 0), Made::Built), Made::Built),
+            (only((4, 0), Made::Merged), Made::Merged),
+        ];
+        for (hold, made) in holds {
+            let value = inside.to_string();
+            assert_eq!(said(&hold), [(Some((4, 0)), made, value, at)]);
+        }
+        assert_eq!(said(&only((3, 0), Made::Built)), []);
     }
 
     /// A reader that doesn't say where its objects were written: the

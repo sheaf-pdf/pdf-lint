@@ -136,10 +136,11 @@ fn within(doc: &Document, file: &[u8], at: Span) -> bool {
 /// a page with an annotation and its appearance; an interactive form with
 /// a field merged with its widget, a radio group and a hide action; a
 /// structure tree, a name tree and a number tree; a cross-reference stream
-/// with extensions declared and XMP metadata; an incremental update; and
-/// an encrypted file. Each begins with the two bytes that choose how it's
-/// checked, all clear, as the `check` and `structure` targets take them;
-/// the `write` target's take a third ([`write_seeds`]).
+/// with extensions declared and XMP metadata; an object stream whose
+/// header starts two objects inside another's bytes; an incremental
+/// update; and an encrypted file. Each begins with the two bytes that
+/// choose how it's checked, all clear, as the `check` and `structure`
+/// targets take them; the `write` target's take a third ([`write_seeds`]).
 pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
     let page = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
@@ -209,6 +210,7 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         ("xref-stream", xref_stream()),
         ("object-streams", object_streams(true)),
         ("object-streams-lzw", object_streams(false)),
+        ("object-streams-overlapping", overlapping()),
         ("update", update()),
         (
             "encrypted",
@@ -407,6 +409,55 @@ fn object_streams(flate: bool) -> Vec<u8> {
     out
 }
 
+/// A file whose page tree and pages are in an object stream, unfiltered,
+/// whose header starts the second page where the first starts, and the
+/// page tree's resources inside the first page, at its own resources.
+fn overlapping() -> Vec<u8> {
+    let pages = "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /Resources 5 0 R >>";
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+                /Resources << /ProcSet [/PDF] >> >>";
+    let three = pages.len() + 1;
+    let five = three + page.find("<< /ProcSet").unwrap_or(0);
+    let header = format!("2 0 3 {three} 6 {three} 5 {five} ");
+    let data = format!("{header}{pages} {page}");
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let one = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    let four = out.len();
+    let dict = format!(
+        "<< /Type /ObjStm /N 4 /First {} /Length {} >>",
+        header.len(),
+        data.len()
+    );
+    out.extend_from_slice(
+        format!("4 0 obj\n{dict}\nstream\n{data}\nendstream\nendobj\n").as_bytes(),
+    );
+    let seven = out.len();
+    let row = |kind: u8, field: usize, index: u8| {
+        let [high, low] = u16::try_from(field).unwrap_or(0).to_be_bytes();
+        [kind, high, low, index]
+    };
+    let rows = [
+        row(0, 0, 255),
+        row(1, one, 0),
+        row(2, 4, 0),
+        row(2, 4, 1),
+        row(1, four, 0),
+        row(2, 4, 3),
+        row(2, 4, 2),
+        row(1, seven, 0),
+    ]
+    .concat();
+    let dict = format!(
+        "<< /Type /XRef /Size 8 /W [1 2 1] /Root 1 0 R /Length {} >>",
+        rows.len()
+    );
+    out.extend_from_slice(format!("7 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{seven}\n%%EOF\n").as_bytes());
+    out
+}
+
 /// A file encrypted as `kind` with the empty user password, so that it
 /// opens: its catalog's /Lang encrypted, its page tree and page in an
 /// object stream compressed and encrypted, by the file's crypt filter for
@@ -557,7 +608,14 @@ mod tests {
                 "{name}: {:?}",
                 doc.trailer()
             );
-            assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
+            // But where objects start inside another's bytes, the second
+            // page and the page tree's resources, inside the first page.
+            let inside: &[_] = match name {
+                "object-streams-overlapping" => &[Some((6, 0)), Some((5, 0))],
+                _ => &[],
+            };
+            let on: Vec<_> = doc.warnings.iter().map(|w| w.object).collect();
+            assert_eq!(on, inside, "{name}: {:?}", doc.warnings);
             let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
             assert!(report.objects() > 3, "{name}: {report}");
             check_file(&seed);
