@@ -692,6 +692,212 @@ fn an_object_stream_is_held_as_any_object() {
     assert!(stdout.contains("\n    | /Bogus 1\n"), "{stdout}");
 }
 
+/// The page [`holding`]'s object stream holds, its resources object 6.
+const HELD_PAGE: &str = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources 6 0 R >>";
+
+/// [`holding`]'s object stream's body: the catalog, the page tree, the
+/// page and object 6, `six` as written, each on a line of its own.
+fn holding_body(six: &str) -> String {
+    let (mut header, mut data) = (String::new(), String::new());
+    for (n, object) in [(1, CATALOG), (2, PAGES), (3, HELD_PAGE), (6, six)] {
+        header.push_str(&format!("{n} {} ", data.len()));
+        data.push_str(object);
+        data.push('\n');
+    }
+    let first = header.len();
+    let length = first + data.len();
+    format!(
+        "<< /Type /ObjStm /N 4 /First {first} /Length {length} >>\nstream\n{header}{data}\nendstream"
+    )
+}
+
+/// A file whose catalog, page tree and page, and the page's resources,
+/// object 6, `six` as written, are in object stream `n`
+/// ([`holding_body`]), with a cross-reference stream numbered after every
+/// other.
+fn holding(n: u32, six: &str) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let at = out.len();
+    out.extend_from_slice(format!("{n} 0 obj\n{}\nendobj\n", holding_body(six)).as_bytes());
+    let xref = out.len();
+    let own = n.max(6) + 1;
+    let rows: Vec<u8> = (0..=own)
+        .flat_map(|m| {
+            let (kind, field, index): (u8, usize, u16) = match m {
+                0 => (0, 0, 65535),
+                1..=3 => (2, n as usize, (m - 1) as u16),
+                6 => (2, n as usize, 3),
+                _ if m == n => (1, at, 0),
+                _ if m == own => (1, xref, 0),
+                _ => (0, 0, 0),
+            };
+            [
+                &[kind][..],
+                &(field as u32).to_be_bytes(),
+                &index.to_be_bytes(),
+            ]
+            .concat()
+        })
+        .collect();
+    let dict = format!(
+        "<< /Type /XRef /Size {} /W [1 4 2] /Root 1 0 R /Length {} >>",
+        own + 1,
+        rows.len()
+    );
+    out.extend_from_slice(format!("{own} 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    out
+}
+
+/// The resources [`holding`]'s page has; and them as a stream's
+/// dictionary, which an object stream mustn't hold.
+const RESOURCES: &str = "<< /ProcSet [/PDF] >>";
+const A_STREAM: &str = "<< /ProcSet [/PDF] >>\nstream\nhi\nendstream";
+
+/// What an object stream holds that it mustn't, a stream, is a `packed`
+/// finding in the object stream, from its number, its bytes printed from
+/// the object stream's data; and so in the JSON. An allowance naming the
+/// rule allows it, and one that allows nothing is said.
+#[test]
+fn what_an_object_stream_mustnt_hold_is_a_packed_finding() {
+    let dir = folder();
+    let path = written(&dir, "packed-stream.pdf", &holding(4, A_STREAM));
+    let path = path.to_str().unwrap();
+    let out = run(&[path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let findings: Vec<_> = stdout.lines().filter(|l| l.starts_with("- ")).collect();
+    let packed = "- packed: ObjectStream/- at 4 0 R, in 4 0 R (merged): 6 0 R, a stream [bytes ";
+    assert!(
+        findings.len() == 1
+            && findings[0].starts_with(packed)
+            && findings[0].ends_with(" of 4 0 R's data]"),
+        "{stdout}"
+    );
+    let printed = format!("\n    | {RESOURCES}   (of 4 0 R's data, decoded)\n");
+    assert!(stdout.contains(&printed), "{stdout}");
+
+    let out = run(&["--format", "json", path]);
+    assert_eq!(out.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let found = &report["findings"][0];
+    let at = found["at"].clone();
+    assert_eq!(
+        found,
+        &json!({
+            "rule": "packed",
+            "table": "ObjectStream",
+            "key": "-",
+            "path": "4 0 R",
+            "object": [4, 0],
+            "made": "merged",
+            "value": "6 0 R, a stream",
+            "at": at,
+        })
+    );
+    assert_eq!(at["stream"], json!([4, 0]));
+    let (start, end) = (at["start"].as_u64().unwrap(), at["end"].as_u64().unwrap());
+    assert_eq!(end - start, RESOURCES.len() as u64);
+
+    // Allowed, it's left out; on a file without it, the allowance allowed
+    // nothing, and says so.
+    let allow = written(
+        &dir,
+        "packed.tsv",
+        b"# test\nObjectStream\t-\tpacked\t*\t*\tthe test's\n",
+    );
+    let allow = allow.to_str().unwrap();
+    let out = run(&["--allow", allow, path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 findings, 1 allowed"), "{stdout}");
+    assert_eq!(text(&out.stderr), "");
+    let clean = written(&dir, "packed-clean.pdf", &holding(4, RESOURCES));
+    let out = run(&["--allow", allow, clean.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains(", 0 findings\n"), "{stdout}");
+    assert_eq!(
+        text(&out.stderr),
+        "note: the allowance on line 2 allowed nothing\n"
+    );
+}
+
+/// What an object stream holds that it mustn't is held as the object
+/// stream is: `--last-update` finds it where the update wrote the object
+/// stream, holds no other, and carries it where the revision before had
+/// it; `--baseline` sets an update against its file object by object, and
+/// carries it from anywhere in a rewrite that renumbers the object stream.
+#[test]
+fn a_packed_finding_is_held_as_its_object_stream() {
+    let dir = folder();
+    let found = |args: &[&str]| {
+        let out = run(args);
+        let stdout = text(&out.stdout);
+        let summary = stdout.lines().next().unwrap_or_default().to_string();
+        let found: Vec<String> = (stdout.lines())
+            .filter_map(|l| l.strip_prefix("- "))
+            .map(|l| l.split(" [bytes").next().unwrap().to_string())
+            .collect();
+        (out.status.code(), summary, found)
+    };
+    let packed = "packed: ObjectStream/- at 4 0 R, in 4 0 R (merged): 6 0 R, a stream";
+    let clean = holding(4, RESOURCES);
+    let base = written(&dir, "clean.pdf", &clean);
+    let base = base.to_str().unwrap();
+
+    // An update that writes object stream 4 again, a stream in it now:
+    // the update's, against the revision before and the file it updates.
+    let packing = updated(&clean, &[(4, &holding_body(A_STREAM))]);
+    let packing = written(&dir, "packing.pdf", &packing);
+    let packing = packing.to_str().unwrap();
+    for args in [
+        &["--last-update", packing][..],
+        &["--baseline", base, packing],
+    ] {
+        let (code, summary, found) = found(args);
+        assert_eq!(code, Some(1), "{summary}");
+        assert!(summary.ends_with(", 1 findings"), "{args:?}: {summary}");
+        assert_eq!(found, [packed], "{args:?}");
+    }
+
+    // A file with it, updated: writing the page out of the object stream,
+    // which the update doesn't write, nothing; writing the object stream
+    // again, as it was, carried.
+    let with = holding(4, A_STREAM);
+    let path = written(&dir, "packed.pdf", &with);
+    let path = path.to_str().unwrap();
+    let paged = updated(&with, &[(3, HELD_PAGE)]);
+    let paged = written(&dir, "paged.pdf", &paged);
+    let (code, summary, found_paged) = found(&["--last-update", paged.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "{summary}");
+    assert!(summary.ends_with(", 0 findings"), "{summary}");
+    assert_eq!(found_paged, Vec::<String>::new());
+    let again = updated(&with, &[(4, &holding_body(A_STREAM))]);
+    let again = written(&dir, "again.pdf", &again);
+    let again = again.to_str().unwrap();
+    for args in [&["--last-update", again][..], &["--baseline", path, again]] {
+        let (code, summary, _) = found(args);
+        assert_eq!(code, Some(0), "{args:?}: {summary}");
+        assert!(
+            summary.ends_with(", 0 findings, 1 carried"),
+            "{args:?}: {summary}"
+        );
+    }
+
+    // A rewrite, the object stream renumbered: its path isn't one the file
+    // has, so a like finding anywhere carries it.
+    let rewrite = written(&dir, "rewritten.pdf", &holding(9, A_STREAM));
+    let rewrite = rewrite.to_str().unwrap();
+    let (code, summary, all) = found(&[rewrite]);
+    assert_eq!(code, Some(1), "{summary}");
+    assert_eq!(all, [packed.replace("4 0 R", "9 0 R")]);
+    let (code, summary, _) = found(&["--baseline", path, rewrite]);
+    assert_eq!(code, Some(0), "{summary}");
+    assert!(summary.ends_with(", 0 findings, 1 carried"), "{summary}");
+}
+
 #[test]
 fn a_file_of_dash_is_standard_input() {
     let dir = folder();

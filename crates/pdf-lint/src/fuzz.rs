@@ -138,9 +138,11 @@ fn within(doc: &Document, file: &[u8], at: Span) -> bool {
 /// structure tree, a name tree and a number tree; a cross-reference stream
 /// with extensions declared and XMP metadata; an object stream whose
 /// header starts two objects inside another's bytes; an incremental
-/// update; and an encrypted file. Each begins with the two bytes that
-/// choose how it's checked, all clear, as the `check` and `structure`
-/// targets take them; the `write` target's take a third ([`write_seeds`]).
+/// update; and encrypted files, one of them with an object stream whose
+/// data isn't encrypted, so that its objects' strings are in the clear.
+/// Each begins with the two bytes that choose how it's checked, all
+/// clear, as the `check` and `structure` targets take them; the `write`
+/// target's take a third ([`write_seeds`]).
 pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
     let page = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
@@ -216,12 +218,19 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
             "encrypted",
             file(&encrypted, &format!("/Encrypt 4 0 R /ID [{id} {id}]")).0,
         ),
-        ("encrypted-rc4-40", opens(Kind::Rc4By40, false)),
-        ("encrypted-rc4-128", opens(Kind::Rc4By128, false)),
-        ("encrypted-aes-128", opens(Kind::Aes128, false)),
-        ("encrypted-aes-256-r5", opens(Kind::Aes256R5, false)),
-        ("encrypted-aes-256", opens(Kind::Aes256, false)),
-        ("encrypted-own-crypt", opens(Kind::Aes128, true)),
+        ("encrypted-rc4-40", opens(Kind::Rc4By40, Packing::Streams)),
+        ("encrypted-rc4-128", opens(Kind::Rc4By128, Packing::Streams)),
+        ("encrypted-aes-128", opens(Kind::Aes128, Packing::Streams)),
+        (
+            "encrypted-aes-256-r5",
+            opens(Kind::Aes256R5, Packing::Streams),
+        ),
+        ("encrypted-aes-256", opens(Kind::Aes256, Packing::Streams)),
+        ("encrypted-own-crypt", opens(Kind::Aes128, Packing::Own)),
+        (
+            "encrypted-in-the-clear",
+            opens(Kind::Aes128, Packing::Clear),
+        ),
     ];
     for (_, seed) in &mut seeds {
         seed.splice(0..0, [0, 0]);
@@ -458,11 +467,24 @@ fn overlapping() -> Vec<u8> {
     out
 }
 
+/// What encrypts the object stream of [`opens`]'s file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Packing {
+    /// The file's crypt filter for streams.
+    Streams,
+    /// Its own `/Crypt` filter, the file's for streams `/Identity`.
+    Own,
+    /// Nothing: the file's crypt filter for streams `/Identity`, and none
+    /// of its own, so that its objects' strings are in the clear, where
+    /// the file's are encrypted.
+    Clear,
+}
+
 /// A file encrypted as `kind` with the empty user password, so that it
 /// opens: its catalog's /Lang encrypted, its page tree and page in an
-/// object stream compressed and encrypted, by the file's crypt filter for
-/// streams or, with `own`, by its own /Crypt filter (/StmF /Identity).
-fn opens(kind: Kind, own: bool) -> Vec<u8> {
+/// object stream compressed, and encrypted as `packing` says (by a crypt
+/// filter only where `kind` has them).
+fn opens(kind: Kind, packing: Packing) -> Vec<u8> {
     let id = b"0123456789abcdef";
     let settings = Settings {
         kind,
@@ -481,13 +503,17 @@ fn opens(kind: Kind, own: bool) -> Vec<u8> {
                    << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [<< /Type /Annot /Subtype /Text /Rect [0 0 9 9] /Contents (In plain view) >>] >>";
     let first = objects.find("<<").unwrap_or(0);
     let deflated = pdf_structure::fixture::zlib(objects.as_bytes());
-    let crypt = own.then(|| handler.named(b"StdCF"));
-    let data =
-        pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &deflated, crypt.as_ref(), [4; 16])
-            .unwrap_or_default();
-    let filter = match own {
-        true => "/Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /StdCF >> null]",
-        false => "/Filter /FlateDecode",
+    let crypt = (packing == Packing::Own).then(|| handler.named(b"StdCF"));
+    let data = match packing {
+        Packing::Clear => deflated,
+        _ => {
+            pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &deflated, crypt.as_ref(), [4; 16])
+                .unwrap_or_default()
+        }
+    };
+    let filter = match packing {
+        Packing::Own => "/Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /StdCF >> null]",
+        _ => "/Filter /FlateDecode",
     };
     let mut out = b"%PDF-1.7\n".to_vec();
     let one = out.len();
@@ -538,7 +564,10 @@ fn opens(kind: Kind, own: bool) -> Vec<u8> {
     }
     if let Some(filter) = values.crypt_filters.first() {
         let method = String::from_utf8_lossy(filter.method.as_deref().unwrap_or_default());
-        let streams = if own { "/Identity" } else { "/StdCF" };
+        let streams = match packing {
+            Packing::Streams => "/StdCF",
+            _ => "/Identity",
+        };
         entries.push_str(&format!(
             " /CF << /StdCF << /CFM /{method} >> >> /StmF {streams} /StrF /StdCF"
         ));
@@ -645,6 +674,23 @@ mod tests {
                 Some(crate::object::Form::Hex),
             );
             assert_eq!(lang.map(|l| l.into_value()), Some(en), "{name}");
+            // The one whose object stream leaves its annotation's string in
+            // the clear is recorded so, and found.
+            let clear = name == "encrypted-in-the-clear";
+            let left: BTreeSet<_> = clear.then_some((4, 0)).into_iter().collect();
+            assert_eq!(doc.in_the_clear, left, "{name}");
+            let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+            let packed: Vec<_> = (report.findings.iter())
+                .filter(|f| f.rule == crate::check::Rule::Packed)
+                .map(|f| f.value.as_str())
+                .collect();
+            let found: &[_] = match clear {
+                true => &[
+                    "1 string in the clear: its data isn't encrypted, where the file's strings are",
+                ],
+                false => &[],
+            };
+            assert_eq!(packed, found, "{name}: {report}");
         }
         let update = &seeds().into_iter().find(|(n, _)| *n == "update").unwrap().1;
         assert!(

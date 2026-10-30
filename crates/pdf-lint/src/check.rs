@@ -57,6 +57,12 @@
 //! revision wrote over or freed isn't followed, as what that revision had
 //! there isn't read: what needs the object is counted as not made.
 //!
+//! Then, of each object stream held, what it holds that it mustn't
+//! ([`Rule::Packed`]): what ISO 32000-2 7.5.7 keeps out of one, and in a
+//! file that encrypts its strings, its objects' strings left in the clear,
+//! its data not encrypted. After the walk, which tells which objects are
+//! pages.
+//!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
 //! under another is as if it weren't in the model, as in TestGrammar
@@ -80,8 +86,9 @@
 //! walk never reached ([`Rule::Unreached`]); in an object built whole (or
 //! as [`Options::unlisted`] says), a key the model doesn't list that isn't
 //! exempt ([`Rule::Unlisted`]); a
-//! key written twice ([`Rule::Duplicate`]); and what the reader had to
-//! choose how to read ([`Rule::Reader`]). A check whose predicate can't be
+//! key written twice ([`Rule::Duplicate`]); what the reader had to
+//! choose how to read ([`Rule::Reader`]); and what an object stream holds
+//! that it mustn't ([`Rule::Packed`]). A check whose predicate can't be
 //! told, or uses a function the evaluator doesn't support, or reads a
 //! string's bytes the reader didn't give, is counted as not made
 //! ([`Report::unchecked`]), and every key the model doesn't list is
@@ -110,11 +117,12 @@ use std::num::ParseIntError;
 use std::rc::Rc;
 
 use pdf_objects::Resolve;
+use pdf_structure::write::KeptOut;
 
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::predicate::{self, Cx, FileCx, Gate, Reference, Since, TOLERANCE, Truth};
-use crate::source::{Revision, Source, Trailer, Warning};
+use crate::source::{Origin, Revision, Source, Trailer, Warning};
 use crate::text;
 use crate::version::Version;
 
@@ -499,6 +507,18 @@ pub enum Rule {
     /// isn't `%%EOF` alone, an object an object stream's header starts
     /// inside another's bytes, and the like ([`Warning`]).
     Reader,
+    /// What an object stream holds that it mustn't: what ISO 32000-2 7.5.7
+    /// keeps out of one ([`KeptOut`]), a stream, the document's encryption
+    /// dictionary (any revision's trailer's `/Encrypt`), the value of an
+    /// object stream's `/Length`, a linearization dictionary, and in a file
+    /// whose linearization holds, its catalog and page objects; or, in a
+    /// file that encrypts its strings, its objects' strings in the clear,
+    /// its data not encrypted (7.6.6). In the object stream, `ObjectStream`
+    /// and `-` its table and key, at the object's bytes in its data, its
+    /// value the object and what it is; the strings counted, at the first.
+    /// An object of a generation other than 0, which 7.5.7 keeps out too,
+    /// can't be read from one: its entry has no generation (7.5.8.3).
+    Packed,
 }
 
 /// A rule a held object breaks.
@@ -633,9 +653,10 @@ pub struct Report {
 /// writes it, and then from each object stream, at the file's version
 /// unless `options` says another; and each earlier revision's trailer
 /// ([`Source::revisions`]) when every object is held, or, a
-/// cross-reference stream, when `hold` names its number. A trailer the
-/// reader couldn't read so is a finding, and the walk starts from what it
-/// made of the file instead.
+/// cross-reference stream, when `hold` names its number; and what each
+/// object stream held holds that it mustn't ([`Rule::Packed`]). A trailer
+/// the reader couldn't read so is a finding, and the walk starts from what
+/// it made of the file instead.
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     let version = options.version.unwrap_or_else(|| file_version(source));
     let written = source.trailer();
@@ -734,6 +755,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         written: &written_since,
         marked: &marked,
         revision: None,
+        containers: Vec::new(),
         report: Report {
             findings,
             trailer: id,
@@ -763,6 +785,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     walk.run();
     walk.revisions();
     walk.excuse();
+    walk.packed();
     walk.unreached();
     walk.read_as(source.warnings());
     walk.report
@@ -1117,6 +1140,9 @@ struct Walk<'a> {
     /// indirect and marks nothing it refers to. None for the rest of the
     /// walk.
     revision: Option<usize>,
+    /// The file's object streams, by number ([`Walk::object_streams`]),
+    /// which [`Walk::packed`] looks in.
+    containers: Vec<ObjectId>,
     report: Report,
 }
 
@@ -1272,6 +1298,7 @@ impl<'a> Walk<'a> {
             if !object_stream(object) {
                 continue;
             }
+            self.containers.push(id);
             if let Some(first) = self.reached.get(&id).copied().flatten() {
                 if self.made(Some(id)).is_some() {
                     self.reached_again(id, first, table);
@@ -2901,6 +2928,120 @@ impl<'a> Walk<'a> {
         });
     }
 
+    /// What each held object stream holds that it mustn't, each a
+    /// [`Rule::Packed`] finding in the object stream, from its number, at
+    /// the object's bytes in its data where it reads, its value the object
+    /// and what it is: what ISO 32000-2 7.5.7 keeps out of one
+    /// ([`KeptOut`]), and, in a file that encrypts its strings, its
+    /// objects' strings left in the clear ([`Source::in_the_clear`]),
+    /// counted, at the first. After the walk, which tells the pages; the
+    /// object streams by number, each one's objects by number, its strings
+    /// last. Its objects are those read from it ([`Source::record`]), and
+    /// those that don't read for it or for their place in it
+    /// ([`Unread::container`](crate::source::Unread::container)); an
+    /// object stream not held is passed over before they're looked at.
+    ///
+    /// A stream is told by the keyword `stream` after its dictionary in the
+    /// object stream's data, as a reader tells one in the file, as an
+    /// object in one is read as a value; the encryption dictionary by what
+    /// the trailers name ([`encryption_dictionaries`]); the catalog by the
+    /// trailer's `/Root`, and the pages by the table the walk reached them
+    /// as, where the file's linearization holds
+    /// ([`Facts::linearized`](crate::source::Facts::linearized)).
+    fn packed(&mut self) {
+        let source = self.source;
+        let held: BTreeMap<u32, Made> = (self.containers.iter())
+            .filter(|&&(_, g)| g == 0)
+            .filter_map(|&id| Some((id.0, self.made(Some(id))?)))
+            .collect();
+        if held.is_empty() {
+            return;
+        }
+        let mut members: BTreeMap<u32, Vec<ObjectId>> = BTreeMap::new();
+        for id in source.ids() {
+            let container = match source.record(id) {
+                Some(record) => match record.origin {
+                    Origin::Stream { stream, .. } => Some(stream),
+                    _ => None,
+                },
+                None => source.get(id).err().and_then(|why| why.container()),
+            };
+            if let Some(n) = container.filter(|n| held.contains_key(n)) {
+                members.entry(n).or_default().push(id);
+            }
+        }
+        let encryption = encryption_dictionaries(source);
+        let mut lengths: BTreeMap<ObjectId, Vec<ObjectId>> = BTreeMap::new();
+        for &stream in &self.containers {
+            let length = (source.get(stream).ok())
+                .and_then(|object| object.as_dict()?.get(b"Length")?.as_reference());
+            if let Some(to) = length {
+                lengths.entry(to).or_default().push(stream);
+            }
+        }
+        let linearized = source.facts().is_some_and(|facts| facts.linearized);
+        let catalog = (source.trailer().dict().get(b"Root"))
+            .and_then(Object::as_reference)
+            .filter(|_| linearized);
+        for (n, ids) in members {
+            let stream = (n, 0);
+            let made = held[&n];
+            let data = source.decoded(stream);
+            let clear = source.in_the_clear(stream);
+            let (mut strings, mut first) = (0, None);
+            for id in ids {
+                let object = source.get(id).ok();
+                let at = (source.record(id).map(|record| record.at))
+                    .or_else(|| object.and_then(|o| o.at));
+                let mut kept = Vec::new();
+                let streamed = (data.zip(at)).is_some_and(|(data, at)| {
+                    at.stream == Some(stream) && stream_follows(data, at.end)
+                });
+                if object.is_some() && streamed {
+                    kept.push(KeptOut::Stream.to_string());
+                }
+                if encryption.contains(&id) {
+                    kept.push(KeptOut::Encryption.to_string());
+                }
+                for &(m, g) in lengths.get(&id).into_iter().flatten() {
+                    kept.push(format!("object stream {m} {g} R's /Length"));
+                }
+                if object.is_some_and(linearization) {
+                    kept.push(KeptOut::Linearization.to_string());
+                }
+                if catalog == Some(id) {
+                    kept.push(KeptOut::Catalog.to_string());
+                }
+                if linearized && self.reached.get(&id) == Some(&Some("PageObject")) {
+                    kept.push(KeptOut::Page.to_string());
+                }
+                for what in kept {
+                    let value = format!("{} {} R, {what}", id.0, id.1);
+                    self.report
+                        .findings
+                        .push(packed_in(stream, made, value, at));
+                }
+                if let Some(object) = object.filter(|_| clear) {
+                    let (count, at) = strings_in(object);
+                    if strings == 0 && count > 0 {
+                        first = at;
+                    }
+                    strings += count;
+                }
+            }
+            if strings > 0 {
+                let s = if strings == 1 { "" } else { "s" };
+                let value = format!(
+                    "{strings} string{s} in the clear: its data isn't encrypted, where the file's \
+                     strings are"
+                );
+                self.report
+                    .findings
+                    .push(packed_in(stream, made, value, first));
+            }
+        }
+    }
+
     /// The held objects the walk never reached, each a [`Rule::Unreached`]
     /// finding but those referenced under a key the model doesn't list,
     /// and the file's own structures it doesn't visit ([`left_out`]): an
@@ -3040,9 +3181,7 @@ impl<'a> Trail<'a> {
                 Step::Revision(revision) => {
                     let _ = write!(path, "trailer {revision}");
                 }
-                Step::Object((n, g)) => {
-                    let _ = write!(path, "{n} {g} R");
-                }
+                Step::Object(id) => path.push_str(&object_path(*id)),
                 Step::Key(key) => {
                     if !path.is_empty() {
                         path.push('/');
@@ -3086,8 +3225,7 @@ fn unknown_bytes(value: &Object, ty: ArlType) -> bool {
 fn left_out(object: &Object) -> bool {
     match object.value() {
         Value::Stream(s) => s.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef"),
-        Value::Dict(d) => d.has(b"Linearized"),
-        _ => false,
+        _ => linearization(object),
     }
 }
 
@@ -3100,6 +3238,107 @@ fn object_stream(object: &Object) -> bool {
         Value::Stream(s) => s.dict.get(b"Type").and_then(Object::as_name) == Some(b"ObjStm"),
         _ => false,
     }
+}
+
+/// Whether `object` is a linearization dictionary (ISO 32000-2, Annex F):
+/// a dictionary with `/Linearized`, as the writer tells one it keeps out of
+/// an object stream ([`kept_out`](pdf_structure::write::kept_out)'s
+/// [`KeptOut::Linearization`]). Asked apart from `kept_out`, which gives
+/// one reason an object and an encryption dictionary's shape before this
+/// one, where a reader tells the encryption dictionary by what the
+/// trailers name.
+fn linearization(object: &Object) -> bool {
+    matches!(object.value(), Value::Dict(d) if d.has(b"Linearized"))
+}
+
+/// Whether the keyword `stream` comes next in `data` from `end`, past
+/// white-space and comments: an object read from an object stream, as a
+/// value, that's a stream's dictionary, as a reader tells a stream in the
+/// file (ISO 32000-2, 7.3.8.1).
+fn stream_follows(data: &[u8], end: usize) -> bool {
+    use pdf_tokenizer::{Kind, Tokenizer};
+    (Tokenizer::at(data, end))
+        .find(|token| !matches!(token.kind, Kind::Space | Kind::Comment))
+        .is_some_and(|token| token.kind == Kind::Keyword && token.bytes == b"stream")
+}
+
+/// The objects the trailers name as the file's encryption dictionary, by
+/// reference (`/Encrypt`): the newest's, and each earlier revision's where
+/// no later revision lists its number, as one that wrote the number over
+/// or freed it put another object there, or none; where a later
+/// revision's numbers aren't known, nor those before it.
+fn encryption_dictionaries(source: &dyn Source) -> BTreeSet<ObjectId> {
+    let named = |trailer: &Trailer| trailer.dict().get(b"Encrypt")?.as_reference();
+    let mut named_by: BTreeSet<ObjectId> = named(source.trailer()).into_iter().collect();
+    let revisions = source.revisions();
+    let Some((_, earlier)) = revisions.split_last() else {
+        return named_by;
+    };
+    let earlier: Vec<(usize, ObjectId)> = (earlier.iter().enumerate())
+        .filter_map(|(i, revision)| Some((i + 1, named(&revision.trailer)?)))
+        .collect();
+    if earlier.is_empty() {
+        return named_by;
+    }
+    let known = (1..revisions.len())
+        .rev()
+        .find(|&i| revisions[i].numbers.is_none())
+        .unwrap_or(0);
+    let written = listed_last(revisions);
+    named_by.extend(
+        (earlier.into_iter())
+            .filter(|&(revision, id)| revision > known && !written_since(&written, revision, id))
+            .map(|(_, id)| id),
+    );
+    named_by
+}
+
+/// How many strings `o` holds, in it and in the direct objects it holds,
+/// no deeper than [`NESTING`], every entry as written, a key written twice
+/// among them; and where the first was written, in the order written.
+fn strings_in(o: &Object) -> (usize, Option<Span>) {
+    let (mut count, mut first) = (0, None);
+    let mut stack = vec![(o, 0)];
+    while let Some((o, depth)) = stack.pop() {
+        match o.value() {
+            Value::String(..) => {
+                if count == 0 {
+                    first = o.at;
+                }
+                count += 1;
+            }
+            _ if depth >= NESTING => {}
+            Value::Array(a) => stack.extend(a.iter().rev().map(|e| (e, depth + 1))),
+            Value::Dict(d) => stack.extend(d.entries().iter().rev().map(|e| (&e.value, depth + 1))),
+            Value::Stream(s) => {
+                let entries = s.dict.entries().iter().rev();
+                stack.extend(entries.map(|e| (&e.value, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    (count, first)
+}
+
+/// A [`Rule::Packed`] finding in object stream `stream`, made as `made`,
+/// from its number.
+fn packed_in(stream: ObjectId, made: Made, value: String, at: Option<Span>) -> Finding {
+    Finding {
+        object: Some(stream),
+        made,
+        path: object_path(stream),
+        table: "ObjectStream".to_string(),
+        key: "-".to_string(),
+        rule: Rule::Packed,
+        value,
+        at,
+        revision: None,
+    }
+}
+
+/// An object as a path from its number starts: `12 0 R`.
+fn object_path((n, g): ObjectId) -> String {
+    format!("{n} {g} R")
 }
 
 /// The field tables, as a widget's `/Parent` links them.
@@ -3409,7 +3648,7 @@ impl Made {
 }
 
 impl Rule {
-    pub const ALL: [Rule; 14] = [
+    pub const ALL: [Rule; 15] = [
         Rule::Type,
         Rule::Missing,
         Rule::TooNew,
@@ -3424,6 +3663,7 @@ impl Rule {
         Rule::Unlisted,
         Rule::Duplicate,
         Rule::Reader,
+        Rule::Packed,
     ];
 
     /// Its name, as findings and allowances write it.
@@ -3443,6 +3683,7 @@ impl Rule {
             Rule::Unlisted => "unlisted",
             Rule::Duplicate => "duplicate",
             Rule::Reader => "reader",
+            Rule::Packed => "packed",
         }
     }
 
@@ -5416,13 +5657,16 @@ mod tests {
     }
 
     /// A file written by hand a section at a time, for its revisions: each
-    /// object at its number as given, and each section a table or a
-    /// cross-reference stream listing the numbers given, those written and
-    /// not freed in use, the rest free.
+    /// object at its number as given, or in an object stream, and each
+    /// section a table or a cross-reference stream listing the numbers
+    /// given, those written and not freed in use, the rest free.
     struct Sections {
         out: Vec<u8>,
         /// Where each object written and not freed starts.
         at: BTreeMap<u32, usize>,
+        /// Each object written in an object stream and not freed: the
+        /// stream's number, and its index there.
+        packed: BTreeMap<u32, (u32, u16)>,
     }
 
     impl Sections {
@@ -5430,20 +5674,53 @@ mod tests {
             Sections {
                 out: format!("%PDF-{version}\n").into_bytes(),
                 at: BTreeMap::new(),
+                packed: BTreeMap::new(),
             }
         }
 
         /// Object `n`, `body` as written.
         fn object(&mut self, n: u32, body: &str) -> &mut Sections {
+            self.packed.remove(&n);
             self.at.insert(n, self.out.len());
             let object = format!("{n} 0 obj\n{body}\nendobj\n");
             self.out.extend_from_slice(object.as_bytes());
             self
         }
 
+        /// Object stream `n`, unfiltered, its dictionary `entries` with its
+        /// `/Type`, `/N`, `/First` and `/Length`, of `members`, each its
+        /// number and as written, a line each, which only a
+        /// cross-reference stream lists.
+        fn object_stream(
+            &mut self,
+            n: u32,
+            entries: &str,
+            members: &[(u32, &str)],
+        ) -> &mut Sections {
+            let (mut header, mut data) = (String::new(), String::new());
+            for &(m, body) in members {
+                header.push_str(&format!("{m} {} ", data.len()));
+                data.push_str(body);
+                data.push('\n');
+            }
+            let (count, first) = (members.len(), header.len());
+            let length = first + data.len();
+            let body = format!(
+                "<< /Type /ObjStm /N {count} /First {first} /Length {length}{entries} >>\n\
+                 stream\n{header}{data}\nendstream"
+            );
+            self.object(n, &body);
+            for (i, &(m, _)) in members.iter().enumerate() {
+                self.at.remove(&m);
+                self.packed.insert(m, (n, u16::try_from(i).unwrap()));
+            }
+            self
+        }
+
         /// Object `n` freed, as the next section lists it.
         fn free(&mut self, n: u32) -> &mut Sections {
             self.at.remove(&n);
+            self.packed.remove(&n);
             self
         }
 
@@ -5453,6 +5730,7 @@ mod tests {
             let xref = self.out.len();
             let mut table = String::from("xref\n");
             for &n in numbers {
+                assert!(!self.packed.contains_key(&n), "a table lists {n}");
                 let row = match self.at.get(&n) {
                     Some(at) if n > 0 => format!("{at:010} 00000 n \n"),
                     _ => format!("0000000000 {:05} f \n", if n == 0 { 65535 } else { 1 }),
@@ -5476,8 +5754,9 @@ mod tests {
             listed.dedup();
             let (mut rows, mut index) = (Vec::new(), String::new());
             for &m in &listed {
-                let (kind, field, generation) = match self.at.get(&m) {
-                    Some(&at) if m > 0 => (1u8, at, 0u16),
+                let (kind, field, generation) = match (self.at.get(&m), self.packed.get(&m)) {
+                    (Some(&at), _) if m > 0 => (1u8, at, 0u16),
+                    (_, Some(&(stream, index))) if m > 0 => (2, stream as usize, index),
                     _ => (0, 0, if m == 0 { 65535 } else { 1 }),
                 };
                 rows.push(kind);
@@ -5485,7 +5764,8 @@ mod tests {
                 rows.extend_from_slice(&generation.to_be_bytes());
                 index.push_str(&format!("{m} 1 "));
             }
-            let size = self.at.keys().max().map_or(1, |n| n + 1);
+            let numbers = self.at.keys().chain(self.packed.keys());
+            let size = numbers.max().map_or(1, |n| n + 1);
             let length = match trailer.contains("/Length") {
                 true => String::new(),
                 false => format!(" /Length {}", rows.len()),
@@ -5773,6 +6053,7 @@ mod tests {
         let mut file = Sections {
             out,
             at: BTreeMap::new(),
+            packed: BTreeMap::new(),
         };
         file.end(first);
         let report = checked_as(&file.out, &Hold::All(Made::Merged));
@@ -6046,6 +6327,401 @@ mod tests {
             assert!(seen.contains(reached), "{reached}: {seen:?}");
         }
         assert!(!seen.contains("Catalog"), "{seen:?}");
+    }
+
+    /// Each [`Rule::Packed`] finding's object, path and value, its table
+    /// and key, `ObjectStream` and `-`, asserted.
+    fn packed_found(report: &Report) -> Vec<(Option<u32>, &str, &str)> {
+        (report.findings.iter())
+            .filter(|f| f.rule == Rule::Packed)
+            .map(|f| {
+                assert_eq!((f.table.as_str(), f.key.as_str()), ("ObjectStream", "-"));
+                assert_eq!(f.revision, None);
+                (f.object.map(|(n, _)| n), f.path.as_str(), f.value.as_str())
+            })
+            .collect()
+    }
+
+    /// The bytes `doc`'s object stream's data holds where `finding` is.
+    fn in_data<'d>(doc: &'d Document, finding: &Finding) -> &'d str {
+        let at = (finding.at).unwrap_or_else(|| panic!("{finding} says nowhere"));
+        let data = &doc.decoded[&at.stream.expect("in an object stream's data")];
+        std::str::from_utf8(&data[at.start..at.end]).unwrap()
+    }
+
+    /// The [`Rule::Packed`] findings of `doc`, every object held as `made`.
+    fn packed_of(doc: &Document, made: Made) -> Vec<Finding> {
+        let report = check(doc, &Hold::All(made), &Options::default());
+        (report.findings.into_iter())
+            .filter(|f| f.rule == Rule::Packed)
+            .collect()
+    }
+
+    /// A page of [`PAGES`]'s tree as a kid of it.
+    const PAGE: &str = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>";
+
+    /// A stream in an object stream, its dictionary followed by the keyword
+    /// `stream` in the object stream's data, past a comment too, is found
+    /// in the object stream, from its number, made as it is, at the
+    /// dictionary's bytes there; a dictionary that `stream` doesn't follow
+    /// isn't.
+    #[test]
+    fn a_stream_in_an_object_stream_is_found() {
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        file.object_stream(
+            10,
+            "",
+            &[
+                (3, "<< /Length 5 >>\nstream\nhello\nendstream"),
+                (4, "<< /Length 5 >> % a comment\nstream\nhello\nendstream"),
+                (5, "<< /Length 5 >>"),
+            ],
+        );
+        let at = file.stream(11, &[0, 1, 2, 3, 4, 5, 10], "/Root 1 0 R");
+        file.end(at);
+        let doc = bytes::read(&file.out);
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(
+            packed_found(&report),
+            [
+                (Some(10), "10 0 R", "3 0 R, a stream"),
+                (Some(10), "10 0 R", "4 0 R, a stream"),
+            ],
+            "{report}"
+        );
+        for made in [Made::Merged, Made::Built] {
+            let found = packed_of(&doc, made);
+            assert_eq!(found.len(), 2);
+            for finding in &found {
+                assert_eq!(finding.made, made);
+                assert_eq!(in_data(&doc, finding), "<< /Length 5 >>");
+                assert!(
+                    finding
+                        .to_string()
+                        .starts_with("packed: ObjectStream/- at 10 0 R, in 10 0 R (")
+                );
+            }
+        }
+    }
+
+    /// The document's encryption dictionary in an object stream is found:
+    /// an earlier revision's, which its trailer names and no later one
+    /// lists, at its bytes in the object stream's data; not a dictionary of
+    /// its shape no trailer names, nor what's at a number an earlier
+    /// trailer names that a later revision wrote over. The newest's makes
+    /// the file one the reader can't open, which it says, its object
+    /// streams unread: found too, nowhere, beside the reader's finding.
+    #[test]
+    fn the_encryption_dictionary_in_an_object_stream_is_found() {
+        let encrypt = "<< /Filter /Standard /V 1 /R 2 /O <00> /U <00> /P -4 >>";
+        let id = "/ID [(abc) (abc)]";
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        file.object_stream(10, "", &[(7, encrypt), (8, encrypt)]);
+        let numbers = [0, 1, 2, 7, 8, 10];
+        let first = file.stream(11, &numbers, &format!("/Root 1 0 R /Encrypt 7 0 R {id}"));
+        file.end(first).object(2, PAGES);
+        let second = file.stream(12, &[2], &format!("/Root 1 0 R /Prev {first}"));
+        file.end(second);
+        let doc = bytes::read(&file.out);
+        assert_eq!(doc.encryption, crate::source::Encryption::None);
+        assert_eq!(doc.revisions.len(), 2);
+        let found = packed_of(&doc, Made::Merged);
+        let value = "7 0 R, the document's encryption dictionary";
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(
+            packed_found(&report),
+            [(Some(10), "10 0 R", value)],
+            "{report}"
+        );
+        assert_eq!(in_data(&doc, &found[0]), encrypt);
+
+        // A later revision writes 7 over, in an object stream of its own:
+        // what's there now isn't what the first trailer named.
+        file.object_stream(13, "", &[(7, "<< /Type /Mine >>")]);
+        let third = file.stream(14, &[7, 13], &format!("/Root 1 0 R /Prev {second}"));
+        file.end(third);
+        let doc = bytes::read(&file.out);
+        assert_eq!(doc.revisions.len(), 3);
+        assert_eq!(packed_of(&doc, Made::Merged), []);
+
+        // The newest trailer's.
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        file.object_stream(10, "", &[(3, PAGE), (7, encrypt)]);
+        let at = file.stream(
+            11,
+            &[0, 1, 2, 3, 7, 10],
+            &format!("/Root 1 0 R /Encrypt 7 0 R {id}"),
+        );
+        file.end(at);
+        let doc = bytes::read(&file.out);
+        assert!(matches!(
+            doc.encryption,
+            crate::source::Encryption::Unsupported(_)
+        ));
+        assert!(doc.get((7, 0)).is_err());
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(
+            packed_found(&report),
+            [(Some(10), "10 0 R", value)],
+            "{report}"
+        );
+        let found = (report.findings.iter()).find(|f| f.rule == Rule::Packed);
+        assert_eq!(found.and_then(|f| f.at), None);
+        let said = (report.findings.iter())
+            .any(|f| f.rule == Rule::Reader && f.object.is_none() && f.value.contains("/Encrypt"));
+        assert!(said, "{report}");
+    }
+
+    /// The value of an object stream's `/Length` in an object stream is
+    /// found in the one holding it, which names the object stream whose
+    /// `/Length` it is: in another, and in the object stream itself.
+    #[test]
+    fn an_object_streams_length_in_an_object_stream_is_found() {
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        file.object_stream(11, "", &[(12, "15")]);
+        let data = "4 0 << /A 1 >>\n";
+        let ten =
+            format!("<< /Type /ObjStm /N 1 /First 4 /Length 12 0 R >>\nstream\n{data}\nendstream");
+        file.object(10, &ten);
+        file.packed.insert(4, (10, 0));
+        let data = "15 0 99\n";
+        let fourteen =
+            format!("<< /Type /ObjStm /N 1 /First 5 /Length 15 0 R >>\nstream\n{data}\nendstream");
+        file.object(14, &fourteen);
+        file.packed.insert(15, (14, 0));
+        let numbers = [0, 1, 2, 4, 10, 11, 12, 14, 15];
+        let at = file.stream(13, &numbers, "/Root 1 0 R");
+        file.end(at);
+        let doc = bytes::read(&file.out);
+        assert!(doc.get((4, 0)).is_ok() && doc.get((15, 0)).is_ok());
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(
+            packed_found(&report),
+            [
+                (Some(11), "11 0 R", "12 0 R, object stream 10 0 R's /Length"),
+                (Some(14), "14 0 R", "15 0 R, object stream 14 0 R's /Length"),
+            ],
+            "{report}"
+        );
+        let found = packed_of(&doc, Made::Merged);
+        assert_eq!(in_data(&doc, &found[0]), "15");
+        assert_eq!(in_data(&doc, &found[1]), "99");
+    }
+
+    /// A linearization dictionary in an object stream is found, in a file
+    /// that isn't linearized: one there can't make it so.
+    #[test]
+    fn a_linearization_dictionary_in_an_object_stream_is_found() {
+        let linearization = "<< /Linearized 1 /L 1000 /H [0 0] /O 3 /E 0 /N 1 /T 0 >>";
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        file.object_stream(10, "", &[(5, linearization)]);
+        let at = file.stream(11, &[0, 1, 2, 5, 10], "/Root 1 0 R");
+        file.end(at);
+        let doc = bytes::read(&file.out);
+        assert!(!doc.facts.linearized);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(
+            packed_found(&report),
+            [(Some(10), "10 0 R", "5 0 R, the linearization dictionary")],
+            "{report}"
+        );
+        let found = packed_of(&doc, Made::Merged);
+        assert_eq!(in_data(&doc, &found[0]), linearization);
+    }
+
+    /// In a file whose linearization holds, its catalog and a page in an
+    /// object stream are found; the same file updated, its linearization no
+    /// longer holding, they aren't, as an update may put them there.
+    #[test]
+    fn a_linearized_files_catalog_and_pages_in_an_object_stream_are_found() {
+        let pages = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
+        let mut file = Sections::new("1.7");
+        let blank = " ".repeat(10);
+        file.object(20, &format!("<< /Linearized 1 /L {blank} >>"));
+        file.object(2, pages);
+        file.object_stream(10, "", &[(1, CATALOG), (3, PAGE)]);
+        let first = file.stream(11, &[0, 1, 2, 3, 10, 20], "/Root 1 0 R");
+        file.end(first);
+        let length = file.out.len().to_string();
+        let at = find(&file.out, b"/L ") + 3;
+        file.out[at..at + length.len()].copy_from_slice(length.as_bytes());
+        let doc = bytes::read(&file.out);
+        assert!(doc.facts.linearized);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(
+            packed_found(&report),
+            [
+                (
+                    Some(10),
+                    "10 0 R",
+                    "1 0 R, the document catalog of a linearized file"
+                ),
+                (
+                    Some(10),
+                    "10 0 R",
+                    "3 0 R, a page object of a linearized file"
+                ),
+            ],
+            "{report}"
+        );
+        let found = packed_of(&doc, Made::Merged);
+        assert_eq!(in_data(&doc, &found[0]), CATALOG);
+        assert_eq!(in_data(&doc, &found[1]), PAGE);
+
+        file.object(2, pages);
+        let second = file.table(&[2], &format!("/Size 21 /Root 1 0 R /Prev {first}"));
+        file.end(second);
+        let doc = bytes::read(&file.out);
+        assert!(!doc.facts.linearized);
+        assert_eq!(packed_of(&doc, Made::Merged), []);
+    }
+
+    /// An encryption dictionary for [`ID`], of `kind`, its user password
+    /// empty, its streams and strings encrypted as `stm_f` and `str_f` say.
+    fn encryption(kind: crate::pdf_crypt::writer::Kind, stm_f: &str, str_f: &str) -> String {
+        let settings = crate::pdf_crypt::writer::Settings {
+            kind,
+            user: b"",
+            owner: b"owner",
+            p: -4,
+            id: ID,
+            encrypt_metadata: true,
+        };
+        let values = crate::pdf_crypt::writer::dictionary(&settings);
+        let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let mut entries = format!("/Filter /Standard /V {} /R {} /P -4", values.v, values.r);
+        if let Some(length) = values.length {
+            entries.push_str(&format!(" /Length {length}"));
+        }
+        let strings = [
+            ("O", &values.o),
+            ("U", &values.u),
+            ("OE", &values.oe),
+            ("UE", &values.ue),
+            ("Perms", &values.perms),
+        ];
+        for (name, value) in strings {
+            if let Some(value) = value {
+                entries.push_str(&format!(" /{name} <{}>", hex(value)));
+            }
+        }
+        let filter = values.crypt_filters.first().expect("an AES file's");
+        let method = String::from_utf8_lossy(filter.method.as_deref().unwrap_or_default());
+        format!("<< {entries} /CF << /StdCF << /CFM /{method} >> >> /StmF {stm_f} /StrF {str_f} >>")
+    }
+
+    /// The file ID [`encryption`]'s dictionaries are for.
+    const ID: &[u8] = b"0123456789abcdef";
+
+    /// In a file that encrypts its strings, an object stream whose data
+    /// isn't encrypted (`/StmF /Identity`) leaves its objects' strings in
+    /// the clear: found once, in the object stream, at the first string,
+    /// counted; under AES-128 and AES-256. Not where it holds no string,
+    /// nor where the file's strings aren't encrypted either.
+    #[test]
+    fn strings_an_object_stream_leaves_in_the_clear_are_found() {
+        use crate::pdf_crypt::writer::Kind;
+        let file = |encrypt: &str, members: &[(u32, &str)]| {
+            let mut file = Sections::new("1.7");
+            file.object(7, encrypt);
+            file.object_stream(10, "", members);
+            let hex: String = ID.iter().map(|b| format!("{b:02x}")).collect();
+            let trailer = format!("/Root 1 0 R /Encrypt 7 0 R /ID [<{hex}> <{hex}>]");
+            let mut numbers = vec![0, 7, 10];
+            numbers.extend(members.iter().map(|&(n, _)| n));
+            let at = file.stream(11, &numbers, &trailer);
+            file.end(at);
+            bytes::read(&file.out)
+        };
+        let catalog = "<< /Type /Catalog /Pages 2 0 R /Lang (en-US) >>";
+        let info = "<< /Title (A test) /Producer (Its own) >>";
+        let three = [(1, catalog), (2, PAGES), (6, info)];
+        let one = [(1, catalog), (2, PAGES)];
+        let none = [(1, CATALOG), (2, PAGES)];
+        let said = "strings in the clear: its data isn't encrypted, where the file's strings are";
+        for kind in [Kind::Aes128, Kind::Aes256] {
+            let clear = encryption(kind, "/Identity", "/StdCF");
+            let doc = file(&clear, &three);
+            assert!(
+                matches!(doc.encryption, crate::source::Encryption::Opened { .. }),
+                "{kind:?}"
+            );
+            assert_eq!(doc.in_the_clear, BTreeSet::from([(10, 0)]), "{kind:?}");
+            let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+            let value = format!("3 {said}");
+            assert_eq!(
+                packed_found(&report),
+                [(Some(10), "10 0 R", value.as_str())],
+                "{kind:?}: {report}"
+            );
+            let found = packed_of(&doc, Made::Merged);
+            assert_eq!(in_data(&doc, &found[0]), "(en-US)");
+
+            let doc = file(&clear, &one);
+            let value = format!("1 {}", said.replacen("strings", "string", 1));
+            let found = packed_of(&doc, Made::Merged);
+            assert_eq!(
+                found.iter().map(|f| f.value.as_str()).collect::<Vec<_>>(),
+                [value.as_str()],
+                "{kind:?}"
+            );
+            assert_eq!(packed_of(&file(&clear, &none), Made::Merged), []);
+
+            let identity = encryption(kind, "/Identity", "/Identity");
+            let doc = file(&identity, &three);
+            assert_eq!(doc.in_the_clear, BTreeSet::new(), "{kind:?}");
+            assert_eq!(packed_of(&doc, Made::Merged), []);
+        }
+    }
+
+    /// What an object stream holds that it mustn't is found only where the
+    /// object stream is held, made as it's held: a hold file naming it
+    /// holds it; one naming the object in it, or another, doesn't.
+    #[test]
+    fn what_an_object_stream_holds_is_found_where_its_held() {
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        file.object_stream(10, "", &[(3, "<< /Length 5 >>\nstream\nhello\nendstream")]);
+        let at = file.stream(11, &[0, 1, 2, 3, 10], "/Root 1 0 R");
+        file.end(at);
+        let doc = bytes::read(&file.out);
+        for (named, made) in [
+            ("10 0 built\n", Made::Built),
+            ("10 0 merged\n", Made::Merged),
+        ] {
+            let report = check(&doc, &Hold::parse(named).unwrap(), &Options::default());
+            let held: Vec<_> = (report.findings.iter())
+                .map(|f| (f.object, f.made, f.rule, f.value.as_str()))
+                .collect();
+            assert_eq!(
+                held,
+                [(Some((10, 0)), made, Rule::Packed, "3 0 R, a stream")],
+                "{report}"
+            );
+        }
+        for other in ["3 0 merged\n", "1 0 built\n"] {
+            let report = check(&doc, &Hold::parse(other).unwrap(), &Options::default());
+            assert_eq!(packed_found(&report), [], "{other}: {report}");
+        }
+    }
+
+    /// Each rule is the one its name names, as an allowance names it, and
+    /// `packed`, the newest, is last.
+    #[test]
+    fn each_rule_is_named_by_its_name() {
+        for rule in Rule::ALL {
+            assert_eq!(Rule::named(rule.name()), Some(rule));
+            assert_eq!(rule.to_string(), rule.name());
+        }
+        assert_eq!(Rule::named("packed"), Some(Rule::Packed));
+        assert_eq!(Rule::ALL.last(), Some(&Rule::Packed));
+        assert_eq!(Rule::named("Packed"), None);
     }
 
     /// A reader that doesn't say where its objects were written: the

@@ -84,9 +84,9 @@ fn a_file_checks_through_qpdf_alone_as_through_its_bytes() {
 /// Every PDF under `PDF_LINT_CORPUS` read from its bytes, qpdf decoding,
 /// and through qpdf alone, and the findings one reading gives and the
 /// other doesn't counted by rule and side, with examples: but for where
-/// and for what only the bytes can show (`duplicate` and `reader`, and
-/// what's in an earlier revision's trailer, as qpdf reads the newest
-/// alone).
+/// and for what only the bytes can show (`duplicate` and `reader`; what's
+/// in an earlier revision's trailer, as qpdf reads the newest alone; and
+/// `packed`, which needs where each object was read).
 #[test]
 #[ignore = "needs PDF_LINT_CORPUS, a folder of PDF files, and qpdf"]
 fn a_corpus_checks_alike_through_qpdf_alone() {
@@ -116,7 +116,10 @@ fn a_corpus_checks_alike_through_qpdf_alone() {
     };
     let findings = |doc: &Document| {
         (findings(doc).into_iter())
-            .filter(|f| !matches!(f.rule, Rule::Duplicate | Rule::Reader) && f.revision.is_none())
+            .filter(|f| {
+                !matches!(f.rule, Rule::Duplicate | Rule::Reader | Rule::Packed)
+                    && f.revision.is_none()
+            })
             .collect::<Vec<_>>()
     };
     thread::scope(|scope| {
