@@ -61,9 +61,11 @@
 //!   before its header ([`Section::append`]), whose sections this crate's
 //!   reader reads only by scanning.
 //! - **Object streams** (7.5.7): which objects may go in one
-//!   ([`packable`]), and a container of them ([`container`]), its members
-//!   direct after a header of where each starts, deflated, no bigger than
-//!   the reader decodes a stream to ([`MAX_DATA`]).
+//!   ([`packable`]), by the clause's list of what mustn't ([`KeptOut`]),
+//!   what of it an object alone tells ([`kept_out`]); and a container of
+//!   them ([`container`]), its members direct after a header of where each
+//!   starts, deflated, no bigger than the reader decodes a stream to
+//!   ([`MAX_DATA`]).
 //! - **Deflated** by the backend and at the level a [`Deflate`] says.
 //! - **Encrypted as it's written** (7.6): an encrypted file's every string
 //!   and stream's data, as pdf-objects' writer writes each, by an
@@ -110,8 +112,7 @@ use crate::source::{Document, Record, XrefKind};
 pub use append::{Base, update};
 pub use crypt::{Encrypting, Encryptor, Unencryptable};
 pub use full::{document, full};
-pub use objstm::{KeptOut, kept_out};
-pub use objstm::{MAX_DATA, MEMBERS, container, fits, packable};
+pub use objstm::{KeptOut, MAX_DATA, MEMBERS, container, fits, kept_out, packable};
 pub use xref::{Entry, Section};
 
 // A reading compares a document's encryption dictionary as written too

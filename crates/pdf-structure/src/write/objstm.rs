@@ -36,7 +36,7 @@ pub fn fits(len: usize) -> bool {
 /// What ISO 32000-2, 7.5.7, keeps out of an object stream: one list,
 /// which the writer keeps out of those it packs ([`kept_out`]) and a
 /// reader finds in those it reads. Each says how either tells it. Its
-/// `Display` is the clause's words.
+/// `Display` says what it is in a few words, as a finding names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KeptOut {
@@ -58,7 +58,7 @@ pub enum KeptOut {
     Encryption,
     /// The object an object stream's `/Length` refers to. The writer
     /// writes a container's `/Length` direct ([`container`]); a reader tells
-    /// it by a container's `/Length`.
+    /// it by a container's `/Length`, and may name it by that container.
     Length,
     /// The linearization dictionary (Annex F), told by its `/Linearized`
     /// both ways ([`kept_out`]): one in an object stream can't be the
@@ -71,7 +71,8 @@ pub enum KeptOut {
     Catalog,
     /// In a linearized file, a page object. A writer that lays a file out
     /// linearized keeps them out; a reader tells one where the file's
-    /// linearization holds, by the page tree.
+    /// linearization holds, by what reaches it as a page: the page tree,
+    /// or the name dictionary's templates.
     Page,
 }
 
@@ -79,12 +80,12 @@ impl fmt::Display for KeptOut {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             KeptOut::Stream => "a stream",
-            KeptOut::Generation => "an object with a generation number other than 0",
-            KeptOut::Encryption => "the document's encryption dictionary",
-            KeptOut::Length => "the value of an object stream's /Length",
-            KeptOut::Linearization => "the linearization dictionary",
-            KeptOut::Catalog => "the document catalog of a linearized file",
-            KeptOut::Page => "a page object of a linearized file",
+            KeptOut::Generation => "an object at a generation other than 0",
+            KeptOut::Encryption => "the file's encryption dictionary",
+            KeptOut::Length => "what an object stream's /Length refers to",
+            KeptOut::Linearization => "a linearization dictionary",
+            KeptOut::Catalog => "a linearized file's catalog",
+            KeptOut::Page => "a linearized file's page",
         })
     }
 }

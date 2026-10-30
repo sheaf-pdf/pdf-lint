@@ -622,8 +622,7 @@ fn packable_leaves_out_what_iso_7_5_7_does() {
 /// encryption dictionary's shape, `/Linearized`; a stream first, at any
 /// generation. What only the file tells, an object stream's `/Length` or a
 /// linearized file's catalog and pages, and a signature, which `packable`
-/// keeps out but the clause doesn't, are none. Each says the clause's
-/// words.
+/// keeps out but the clause doesn't, are none. Each says what it is.
 #[test]
 fn kept_out_tells_what_iso_7_5_7_keeps_out_by_the_object_alone() {
     use write::KeptOut;
@@ -678,16 +677,13 @@ fn kept_out_tells_what_iso_7_5_7_keeps_out_by_the_object_alone() {
         (KeptOut::Stream, "a stream"),
         (
             KeptOut::Generation,
-            "an object with a generation number other than 0",
+            "an object at a generation other than 0",
         ),
-        (KeptOut::Encryption, "the document's encryption dictionary"),
-        (KeptOut::Length, "the value of an object stream's /Length"),
-        (KeptOut::Linearization, "the linearization dictionary"),
-        (
-            KeptOut::Catalog,
-            "the document catalog of a linearized file",
-        ),
-        (KeptOut::Page, "a page object of a linearized file"),
+        (KeptOut::Encryption, "the file's encryption dictionary"),
+        (KeptOut::Length, "what an object stream's /Length refers to"),
+        (KeptOut::Linearization, "a linearization dictionary"),
+        (KeptOut::Catalog, "a linearized file's catalog"),
+        (KeptOut::Page, "a linearized file's page"),
     ];
     for (kept, words) in said {
         assert_eq!(kept.to_string(), words);

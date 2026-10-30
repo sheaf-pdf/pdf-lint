@@ -6457,7 +6457,7 @@ mod tests {
         assert_eq!(doc.encryption, crate::source::Encryption::None);
         assert_eq!(doc.revisions.len(), 2);
         let found = packed_of(&doc, Made::Merged);
-        let value = "7 0 R, the document's encryption dictionary";
+        let value = "7 0 R, the file's encryption dictionary";
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(
             packed_found(&report),
@@ -6556,7 +6556,7 @@ mod tests {
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(
             packed_found(&report),
-            [(Some(10), "10 0 R", "5 0 R, the linearization dictionary")],
+            [(Some(10), "10 0 R", "5 0 R, a linearization dictionary")],
             "{report}"
         );
         let found = packed_of(&doc, Made::Merged);
@@ -6585,16 +6585,8 @@ mod tests {
         assert_eq!(
             packed_found(&report),
             [
-                (
-                    Some(10),
-                    "10 0 R",
-                    "1 0 R, the document catalog of a linearized file"
-                ),
-                (
-                    Some(10),
-                    "10 0 R",
-                    "3 0 R, a page object of a linearized file"
-                ),
+                (Some(10), "10 0 R", "1 0 R, a linearized file's catalog"),
+                (Some(10), "10 0 R", "3 0 R, a linearized file's page"),
             ],
             "{report}"
         );
