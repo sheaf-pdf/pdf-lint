@@ -1,8 +1,10 @@
 //! Tokens that tile what they're read from, inline images by each of
 //! PDFium's rules, errors that say where, the caps, operands read as
-//! objects, a page's streams read as one and joined under the cap, and
+//! objects, a page's streams read as one and joined under the cap,
 //! operations: the tokens grouped, every operand kept, taken from the
-//! last.
+//! last; the faults; and the operator table: each operator by its name,
+//! its operands, category and clause as a table of the tests' own reads
+//! them, and the graphics objects' states.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -1799,4 +1801,534 @@ fn no_fault_where_iso_reads_alike() {
     }
     let streams: [&[u8]; 3] = [b"q 1 0 0", b"1 0 0 cm /P <</MCID 0>> BDC (ab) Tj", b"EMC Q"];
     assert_eq!(faults(&Concat::new(&streams)), []);
+}
+
+/// Each operator of Annex A, as this test reads its clause: its name,
+/// its operands (`n` a number, `i` an integer, `N` a name, `s` a string,
+/// `a` an array, `D` a name or a dictionary, `-` none; `c` a number for
+/// each component, `p` the same or a pattern's name), its category, and
+/// the clause defining it. Written apart from the crate's table, in
+/// another form, so each holds the other.
+const OPERATORS: &str = "
+    w n general 8.4.4 | J i general 8.4.4 | j i general 8.4.4 | M n general 8.4.4
+    d an general 8.4.4 | ri N general 8.4.4 | i n general 8.4.4 | gs N general 8.4.4
+    q - general 8.4.4 | Q - general 8.4.4 | cm nnnnnn special 8.4.4
+    m nn construct 8.5.2.1 | l nn construct 8.5.2.1 | c nnnnnn construct 8.5.2.1
+    v nnnn construct 8.5.2.1 | y nnnn construct 8.5.2.1 | h - construct 8.5.2.1
+    re nnnn construct 8.5.2.1
+    S - paint 8.5.3.1 | s - paint 8.5.3.1 | f - paint 8.5.3.1 | F - paint 8.5.3.1
+    f* - paint 8.5.3.1 | B - paint 8.5.3.1 | B* - paint 8.5.3.1 | b - paint 8.5.3.1
+    b* - paint 8.5.3.1 | n - paint 8.5.3.1 | W - clip 8.5.4 | W* - clip 8.5.4
+    BT - text 9.4.1 | ET - text 9.4.1
+    Tc n state 9.3.1 | Tw n state 9.3.1 | Tz n state 9.3.1 | TL n state 9.3.1
+    Tf Nn state 9.3.1 | Tr i state 9.3.1 | Ts n state 9.3.1
+    Td nn position 9.4.2 | TD nn position 9.4.2 | Tm nnnnnn position 9.4.2
+    T* - position 9.4.2
+    Tj s show 9.4.3 | TJ a show 9.4.3 | ' s show 9.4.3 | \" nns show 9.4.3
+    d0 nn type3 9.6.4 | d1 nnnnnn type3 9.6.4
+    CS N color 8.6.8 | cs N color 8.6.8 | SC c color 8.6.8 | sc c color 8.6.8
+    SCN p color 8.6.8 | scn p color 8.6.8 | G n color 8.6.8 | g n color 8.6.8
+    RG nnn color 8.6.8 | rg nnn color 8.6.8 | K nnnn color 8.6.8 | k nnnn color 8.6.8
+    sh N shading 8.7.4.2 | BI - image 8.9.7 | ID - image 8.9.7 | EI - image 8.9.7
+    Do N xobject 8.8.1
+    MP N marked 14.6.1 | DP ND marked 14.6.1 | BMC N marked 14.6.1
+    BDC ND marked 14.6.1 | EMC - marked 14.6.1 | BX - compat 7.8.2 | EX - compat 7.8.2";
+
+/// `OPERATORS`' rows: name, operands, category, clause.
+fn operator_rows() -> Vec<(&'static str, Operands, Category, &'static str)> {
+    let types = |code: &str| -> Operands {
+        let fixed: Vec<Type> = match code {
+            "c" => return Operands::Components,
+            "p" => return Operands::ComponentsOrPattern,
+            "-" => Vec::new(),
+            _ => code
+                .chars()
+                .map(|c| match c {
+                    'n' => Type::Number,
+                    'i' => Type::Integer,
+                    'N' => Type::Name,
+                    's' => Type::String,
+                    'a' => Type::Array,
+                    'D' => Type::NameOrDict,
+                    _ => panic!("{c}"),
+                })
+                .collect(),
+        };
+        Operands::Fixed(fixed.leak())
+    };
+    let category = |word: &str| match word {
+        "general" => Category::GeneralGraphicsState,
+        "special" => Category::SpecialGraphicsState,
+        "construct" => Category::PathConstruction,
+        "paint" => Category::PathPainting,
+        "clip" => Category::ClippingPath,
+        "text" => Category::TextObject,
+        "state" => Category::TextState,
+        "position" => Category::TextPositioning,
+        "show" => Category::TextShowing,
+        "type3" => Category::Type3Font,
+        "color" => Category::Color,
+        "shading" => Category::Shading,
+        "image" => Category::InlineImage,
+        "xobject" => Category::XObject,
+        "marked" => Category::MarkedContent,
+        "compat" => Category::Compatibility,
+        _ => panic!("{word}"),
+    };
+    OPERATORS
+        .split(['|', '\n'])
+        .filter(|row| !row.trim().is_empty())
+        .map(|row| {
+            let cells: Vec<&str> = row.split_whitespace().collect();
+            let [name, operands, of, clause] = cells[..] else {
+                panic!("{row}")
+            };
+            (name, types(operands), category(of), clause)
+        })
+        .collect()
+}
+
+/// Every operator of Annex A is in `ALL` once, and reads back from its
+/// name; `Other` isn't, and has none.
+#[test]
+fn every_operator_round_trips() {
+    assert_eq!(Operator::ALL.len(), 73);
+    let mut names = Vec::new();
+    for (i, &op) in Operator::ALL.iter().enumerate() {
+        assert_ne!(op, Operator::Other);
+        assert_eq!(Operator::ALL.iter().position(|&o| o == op), Some(i));
+        let name = op.name().unwrap();
+        assert_eq!(Operator::of(name.as_bytes()), op, "{name}");
+        names.push(name);
+        // Its place in a set is its place in `ALL`.
+        let one = Operators::NONE.with(op);
+        assert_eq!(one.iter().collect::<Vec<_>>(), [op]);
+        assert_eq!(op as usize, i);
+    }
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), 73);
+    assert_eq!(Operator::Other as usize, 73);
+    assert_eq!(Operator::Other.name(), None);
+}
+
+/// Each operator's operands, category and clause are as `OPERATORS`
+/// reads its clause.
+#[test]
+fn every_operators_operands_and_category() {
+    let rows = operator_rows();
+    assert_eq!(rows.len(), 73);
+    for (name, operands, category, clause) in &rows {
+        let op = Operator::of(name.as_bytes());
+        assert_ne!(op, Operator::Other, "{name}");
+        assert_eq!(op.operands(), Some(*operands), "{name}");
+        assert_eq!(op.category(), Some(*category), "{name}");
+        assert_eq!(op.clause(), Some(*clause), "{name}");
+        assert_eq!(category.clause(), *clause, "{name}");
+    }
+    for op in Operator::ALL {
+        let name = op.name().unwrap();
+        assert_eq!(rows.iter().filter(|r| r.0 == name).count(), 1, "{name}");
+    }
+    // The counts: none, one, two, three, four and six operands.
+    let count = |n: usize| {
+        let fixed =
+            |op: &&Operator| matches!(op.operands(), Some(Operands::Fixed(t)) if t.len() == n);
+        Operator::ALL.iter().filter(fixed).count()
+    };
+    let counts: Vec<usize> = [0, 1, 2, 3, 4, 5, 6].map(count).to_vec();
+    assert_eq!(counts, [24, 24, 9, 3, 5, 0, 4]);
+}
+
+/// The names a path's builder and painter tell apart, as they were told:
+/// each painting operator's paint, `F` and `f` both a fill; `W` and `W*`
+/// clipping by their rules; and those that build the path.
+#[test]
+fn names_tell_paint_clip_and_path() {
+    use Operator as O;
+    let named: [(&[u8], Operator); 51] = [
+        (b"m", O::Move),
+        (b"l", O::Line),
+        (b"c", O::Curve),
+        (b"v", O::CurveFromPen),
+        (b"y", O::CurveToEnd),
+        (b"h", O::ClosePath),
+        (b"re", O::Rect),
+        (b"W", O::Clip),
+        (b"W*", O::ClipEvenOdd),
+        (b"f", O::Fill),
+        (b"F", O::FillCompat),
+        (b"f*", O::FillEvenOdd),
+        (b"S", O::Stroke),
+        (b"s", O::CloseStroke),
+        (b"B", O::FillStroke),
+        (b"B*", O::FillStrokeEvenOdd),
+        (b"b", O::CloseFillStroke),
+        (b"b*", O::CloseFillStrokeEvenOdd),
+        (b"n", O::EndPath),
+        (b"cm", O::Transform),
+        (b"w", O::LineWidth),
+        (b"J", O::LineCap),
+        (b"j", O::LineJoin),
+        (b"M", O::MiterLimit),
+        (b"q", O::Save),
+        (b"Q", O::Restore),
+        (b"gs", O::ExtGState),
+        (b"BT", O::BeginText),
+        (b"ET", O::EndText),
+        (b"Tm", O::TextMatrix),
+        (b"Td", O::MoveLine),
+        (b"TD", O::MoveLineLeading),
+        (b"T*", O::NextLine),
+        (b"Tc", O::CharSpace),
+        (b"Tw", O::WordSpace),
+        (b"Tz", O::Scale),
+        (b"TL", O::Leading),
+        (b"Ts", O::Rise),
+        (b"Tr", O::RenderMode),
+        (b"Tf", O::Font),
+        (b"Tj", O::Show),
+        (b"TJ", O::ShowArray),
+        (b"'", O::NextLineShow),
+        (b"\"", O::NextLineShowSpaced),
+        (b"Do", O::Draw),
+        (b"sh", O::Shade),
+        (b"BMC", O::BeginMarked),
+        (b"BDC", O::BeginMarkedProps),
+        (b"EMC", O::EndMarked),
+        (b"MP", O::MarkedPoint),
+        (b"DP", O::MarkedPointProps),
+    ];
+    for (name, op) in named {
+        assert_eq!(Operator::of(name), op, "{}", String::from_utf8_lossy(name));
+    }
+    let painted: [(&[u8], Paint); 10] = [
+        (b"f", Paint::Fill),
+        (b"F", Paint::Fill),
+        (b"f*", Paint::FillEvenOdd),
+        (b"S", Paint::Stroke),
+        (b"s", Paint::CloseStroke),
+        (b"B", Paint::FillStroke),
+        (b"B*", Paint::FillStrokeEvenOdd),
+        (b"b", Paint::CloseFillStroke),
+        (b"b*", Paint::CloseFillStrokeEvenOdd),
+        (b"n", Paint::None),
+    ];
+    let painted = painted.map(|(name, paint)| (Operator::of(name), paint));
+    let clips = [
+        (Operator::Clip, FillRule::NonZero),
+        (Operator::ClipEvenOdd, FillRule::EvenOdd),
+    ];
+    let built = Operators::of(&[b"m", b"l", b"c", b"v", b"y", b"h", b"re", b"W", b"W*"]);
+    for &op in Operator::ALL.iter().chain([&Operator::Other]) {
+        let paint = painted.iter().find(|(o, _)| *o == op).map(|p| p.1);
+        assert_eq!(op.paint(), paint, "{op:?}");
+        let clip = clips.iter().find(|(o, _)| *o == op).map(|c| c.1);
+        assert_eq!(op.clip(), clip, "{op:?}");
+        assert_eq!(op.builds_path(), built.contains(op), "{op:?}");
+    }
+    // What each paint does.
+    let fills = |p: Paint| p.fills();
+    assert_eq!(fills(Paint::Fill), Some(FillRule::NonZero));
+    assert_eq!(
+        fills(Paint::CloseFillStrokeEvenOdd),
+        Some(FillRule::EvenOdd)
+    );
+    assert_eq!(fills(Paint::CloseStroke), None);
+    assert_eq!(fills(Paint::None), None);
+    let strokes: Vec<&str> = painted
+        .iter()
+        .filter(|(_, p)| p.strokes())
+        .map(|(op, _)| op.name().unwrap())
+        .collect();
+    assert_eq!(strokes, ["S", "s", "B", "B*", "b", "b*"]);
+}
+
+/// A word that's no operator of Annex A is `Other`, as written: case
+/// counts, and nothing is trimmed.
+#[test]
+fn a_word_thats_no_operator_is_other() {
+    for word in [
+        &b"Sh"[..],
+        b"BM",
+        b"BD",
+        b"endstream",
+        b"",
+        b"qq",
+        b"F*",
+        b"w ",
+        b" w",
+        b"d2",
+        b"TJ*",
+        b"bi",
+        b"Bi",
+        b"\"\"",
+        b"Tf\0",
+        b"true",
+        b"null",
+    ] {
+        assert_eq!(Operator::of(word), Operator::Other, "{word:?}");
+    }
+    let other = Operator::Other;
+    assert_eq!(
+        (
+            other.name(),
+            other.operands(),
+            other.category(),
+            other.clause()
+        ),
+        (None, None, None, None)
+    );
+    assert_eq!(
+        (other.paint(), other.clip(), other.builds_path()),
+        (None, None, false)
+    );
+    // Through the operations: each operation's operator is its name's.
+    let s = b"1 2 Sh 3 BM endstream q";
+    let read = operations_of(s, &ResCx::none(), &Limits::DEFAULT);
+    let typed: Vec<_> = read
+        .iter()
+        .map(|op| op.as_ref().unwrap().operator())
+        .collect();
+    use Operator::{Other, Save};
+    assert_eq!(typed, [Other, Other, Other, Save]);
+    for op in operations_of(PAGE, &ResCx::none(), &Limits::DEFAULT) {
+        let op = op.unwrap();
+        assert_eq!(op.operator(), Operator::of(op.name()));
+    }
+}
+
+/// Each state's operators, and the state each leaves, as 8.2's Figure 9
+/// draws them, with the errata (8.4.2's and 9.4.1's: `q` and `Q` in a
+/// text object; 14.6.1's: marked content in one; Table 50's: the shading
+/// operator is `sh`); `d0`
+/// and `d1` first in a Type 3 glyph description alone; `Other` nowhere.
+#[test]
+fn the_states_of_graphics_objects() {
+    use State::{ClippingPath, ContentStream, GlyphStart, InlineImage, Path, Text};
+    let general = "w J j M d ri i gs q Q";
+    let color = "CS cs SC SCN sc scn G g RG rg K k";
+    let text_state = "Tc Tw Tz TL Tf Tr Ts";
+    let marked = "MP DP BMC BDC EMC";
+    let painting = "S s f F f* B B* b b* n";
+    let level = format!("{general} cm {color} {text_state} {marked} BX EX sh Do");
+    let in_text = format!("{general} {color} {text_state} {marked} BX EX Tj TJ ' \" Td TD Tm T*");
+    let states: [(State, Vec<(String, State)>); 6] = [
+        (
+            ContentStream,
+            vec![
+                (level, ContentStream),
+                ("m re".into(), Path),
+                ("BT".into(), Text),
+                ("BI".into(), InlineImage),
+            ],
+        ),
+        (
+            Path,
+            vec![
+                ("m l c v y h re".into(), Path),
+                ("W W*".into(), ClippingPath),
+                (painting.into(), ContentStream),
+            ],
+        ),
+        (ClippingPath, vec![(painting.into(), ContentStream)]),
+        (Text, vec![(in_text, Text), ("ET".into(), ContentStream)]),
+        (
+            InlineImage,
+            vec![("ID".into(), InlineImage), ("EI".into(), ContentStream)],
+        ),
+        (GlyphStart, vec![("d0 d1".into(), ContentStream)]),
+    ];
+    for (state, moves) in &states {
+        let mut allowed = Operators::NONE;
+        for &op in Operator::ALL.iter().chain([&Operator::Other]) {
+            let name = op.name().unwrap_or("Other");
+            let to = moves
+                .iter()
+                .find(|(names, _)| names.split(' ').any(|n| n == name))
+                .map(|m| m.1);
+            assert_eq!(state.after(op), to, "{name} in {state:?}");
+            assert_eq!(state.allows(op), to.is_some(), "{name} in {state:?}");
+            if to.is_some() {
+                allowed = allowed.with(op);
+            }
+        }
+        assert_eq!(state.allowed(), allowed, "{state:?}");
+    }
+    // The errata, each on its own.
+    for op in Operators::of(&[b"q", b"Q", b"BMC", b"BDC", b"EMC", b"MP", b"DP"]).iter() {
+        assert_eq!(Text.after(op), Some(Text), "{op:?}: 9.4.1, 14.6.1");
+    }
+    assert_eq!(
+        Operator::of(b"sh").category(),
+        Some(Category::Shading),
+        "Table 50"
+    );
+    assert_eq!(ContentStream.after(Operator::Shade), Some(ContentStream));
+    assert_eq!(Operator::of(b"Sh"), Operator::Other);
+    // Nowhere else: `cm`, a path, a shading, an XObject or an inline image
+    // in a text object; `d0` and `d1` past a glyph's start; `Other`.
+    for name in ["cm", "m", "re", "sh", "Do", "BI", "BT"] {
+        assert!(!Text.allows(Operator::of(name.as_bytes())), "{name}");
+    }
+    for state in [ContentStream, Path, ClippingPath, Text, InlineImage] {
+        assert!(!state.allows(Operator::GlyphWidth));
+        assert!(!state.allows(Operator::GlyphWidthBox));
+    }
+    for state in [
+        ContentStream,
+        Path,
+        ClippingPath,
+        Text,
+        InlineImage,
+        GlyphStart,
+    ] {
+        assert!(!state.allows(Operator::Other), "{state:?}");
+    }
+    assert_eq!(State::default(), ContentStream);
+}
+
+/// `State::step` takes an inline image, one operation, as `BI`, `ID` and
+/// `EI` in turn: back where it began at the content stream level, and
+/// not allowed in a text object; a stray `ID` or `EI` is its operator
+/// alone.
+#[test]
+fn an_inline_image_steps_back_to_where_it_began() {
+    let res = ResCx::none();
+    let lim = &Limits::DEFAULT;
+    let walk = |s: &[u8], start: State| -> Vec<Option<State>> {
+        let mut state = Some(start);
+        let mut states = Vec::new();
+        for op in operations(s, &res, lim) {
+            state = state.and_then(|state| state.step(&op.unwrap()));
+            states.push(state);
+        }
+        states
+    };
+    let image = b"BI /W 1 /H 1 /BPC 8 /CS /G ID x EI";
+    let read = operations_of(image, &res, lim);
+    let op = read[0].as_ref().unwrap();
+    assert_eq!(op.operator(), Operator::BeginInlineImage);
+    assert_eq!(
+        State::ContentStream.after(op.operator()),
+        Some(State::InlineImage)
+    );
+    assert_eq!(State::ContentStream.step(op), Some(State::ContentStream));
+    for state in [
+        State::Path,
+        State::ClippingPath,
+        State::Text,
+        State::InlineImage,
+        State::GlyphStart,
+    ] {
+        assert_eq!(state.step(op), None, "{state:?}");
+    }
+    use State::{ContentStream, Path, Text};
+    let page = b"q BI /W 1 /H 1 /BPC 8 /CS /G ID x EI 0 0 m 1 1 l S Q";
+    let level = Some(ContentStream);
+    assert_eq!(
+        walk(page, ContentStream),
+        [level, level, Some(Path), Some(Path), level, level]
+    );
+    let in_text = b"BT BI /W 1 /H 1 /BPC 8 /CS /G ID x EI ET";
+    assert_eq!(walk(in_text, ContentStream), [Some(Text), None, None]);
+    // A stray `ID` or `EI`: its operator alone.
+    let stray = operations_of(b"ID EI", &res, lim);
+    let (id, ei) = (stray[0].as_ref().unwrap(), stray[1].as_ref().unwrap());
+    assert_eq!(
+        (id.operator(), ei.operator()),
+        (Operator::InlineImageData, Operator::EndInlineImage)
+    );
+    assert!(id.inline_image().is_none() && ei.inline_image().is_none());
+    assert_eq!(State::ContentStream.step(id), None);
+    assert_eq!(State::InlineImage.step(id), Some(State::InlineImage));
+    assert_eq!(State::InlineImage.step(ei), Some(State::ContentStream));
+    // `d0` first in a glyph description, and then the content stream level.
+    let glyph = b"750 0 d0 0 0 750 750 re f";
+    assert_eq!(
+        walk(glyph, State::GlyphStart),
+        [Some(ContentStream), Some(Path), Some(ContentStream)]
+    );
+    assert_eq!(walk(glyph, ContentStream)[0], None);
+}
+
+/// Operators as sets: each category's const its operators, the sixteen
+/// apart and together all of Annex A's; and each operation on them.
+#[test]
+fn sets_of_operators() {
+    let consts = [
+        (
+            Operators::GENERAL_GRAPHICS_STATE,
+            Category::GeneralGraphicsState,
+            10,
+        ),
+        (
+            Operators::SPECIAL_GRAPHICS_STATE,
+            Category::SpecialGraphicsState,
+            1,
+        ),
+        (Operators::PATH_CONSTRUCTION, Category::PathConstruction, 7),
+        (Operators::PATH_PAINTING, Category::PathPainting, 10),
+        (Operators::CLIPPING_PATH, Category::ClippingPath, 2),
+        (Operators::TEXT_OBJECT, Category::TextObject, 2),
+        (Operators::TEXT_STATE, Category::TextState, 7),
+        (Operators::TEXT_POSITIONING, Category::TextPositioning, 4),
+        (Operators::TEXT_SHOWING, Category::TextShowing, 4),
+        (Operators::TYPE3_FONT, Category::Type3Font, 2),
+        (Operators::COLOR, Category::Color, 12),
+        (Operators::SHADING, Category::Shading, 1),
+        (Operators::INLINE_IMAGE, Category::InlineImage, 3),
+        (Operators::XOBJECT, Category::XObject, 1),
+        (Operators::MARKED_CONTENT, Category::MarkedContent, 5),
+        (Operators::COMPATIBILITY, Category::Compatibility, 2),
+    ];
+    let mut every = Operators::NONE;
+    for (set, category, len) in consts {
+        assert_eq!(set, category.operators(), "{category:?}");
+        assert_eq!(set.len(), len, "{category:?}");
+        let theirs: Operators = Operator::ALL
+            .iter()
+            .copied()
+            .filter(|op| op.category() == Some(category))
+            .collect();
+        assert_eq!(set, theirs, "{category:?}");
+        assert!(every.intersection(set).is_empty(), "{category:?} apart");
+        every = every.union(set);
+    }
+    assert_eq!(every, Operators::ALL.without(Operator::Other));
+    assert_eq!(every.len(), 73);
+
+    let (q, cm) = (Operator::Save, Operator::Transform);
+    assert!(Operators::NONE.is_empty());
+    assert_eq!((Operators::NONE.len(), Operators::of(&[]).len()), (0, 0));
+    assert_eq!(Operators::default(), Operators::NONE);
+    assert_eq!(Operators::ALL.len(), 74);
+    assert!(Operators::ALL.contains(Operator::Other));
+    let set = Operators::NONE.with(q).with(cm).with(q);
+    assert_eq!(set.len(), 2);
+    assert!(set.contains(q) && set.contains(cm) && !set.contains(Operator::Restore));
+    assert_eq!(set.without(q), Operators::NONE.with(cm));
+    assert_eq!(set.without(Operator::Restore), set);
+    assert_eq!(set, Operators::of(&[b"cm", b"q"]));
+    assert_eq!(
+        Operators::of(&[b"q", b"Sh"]),
+        Operators::NONE.with(q).with(Operator::Other)
+    );
+    let general = Operators::GENERAL_GRAPHICS_STATE;
+    assert_eq!(set.intersection(general), Operators::NONE.with(q));
+    assert_eq!(set.difference(general), Operators::NONE.with(cm));
+    assert_eq!(set.union(general).len(), 11);
+    assert_eq!(general.difference(set).len(), 9);
+    assert!(!general.contains(cm));
+    // In `ALL`'s order, `Other` last; from an iterator; shown by name.
+    let all: Vec<_> = Operators::ALL.iter().collect();
+    assert_eq!(all[..73], *Operator::ALL);
+    assert_eq!(all[73], Operator::Other);
+    assert_eq!(Operators::ALL.iter().collect::<Operators>(), Operators::ALL);
+    assert_eq!(format!("{set:?}"), "{q, cm}");
+    assert_eq!(format!("{:?}", Operators::NONE), "{}");
+    assert_eq!(
+        format!("{:?}", Operators::TEXT_SHOWING.with(Operator::Other)),
+        "{Tj, TJ, ', \", Other}"
+    );
 }

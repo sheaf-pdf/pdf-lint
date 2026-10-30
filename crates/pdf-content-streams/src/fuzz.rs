@@ -8,8 +8,8 @@ use pdf_objects::{Object, Value};
 
 use crate::fault::{Fault, Sink};
 use crate::{
-    Concat, Error, ErrorKind, Join, Limits, Operand, Operation, Operations, ResCx, Tok, name,
-    object, operations, tokens,
+    Concat, Error, ErrorKind, Join, Limits, Operand, Operation, Operations, Operator, ResCx, State,
+    Tok, name, object, operations, tokens,
 };
 
 /// A sink that keeps every fault it's told, in order, where it is.
@@ -274,8 +274,10 @@ fn in_order(s: &[u8], faults: &[(Range<usize>, Fault)]) {
 /// since the last, each where its token is, in order and inside its
 /// range; [`Operation::arg`] the operands from the last; operands at the
 /// end no operation's; the same error, and nothing after. Each operand
-/// and each inline image as [`operation`] checks it.
+/// and each inline image as [`operation`] checks it, and each operation
+/// stepped through the graphics objects' states ([`stepped`]).
 fn grouped(s: &[u8], mut read: Operations, tokens: &Read, limits: &Limits) {
+    let mut states = [State::ContentStream, State::GlyphStart];
     let mut operands = Vec::new();
     for token in tokens {
         let (r, tok) = match token {
@@ -302,6 +304,9 @@ fn grouped(s: &[u8], mut read: Operations, tokens: &Read, limits: &Limits) {
             other => panic!("{other:?} where an operation's token is, {r:?}"),
         };
         operation(s, &op, r.clone(), image, &operands, limits);
+        for state in &mut states {
+            *state = stepped(*state, &op);
+        }
         operands.clear();
     }
     assert!(read.next().is_none(), "nothing more");
@@ -320,6 +325,7 @@ fn operation(
     limits: &Limits,
 ) {
     assert_eq!(op.at(), at);
+    typed(op, image.is_some());
     let start = operands.first().map_or(at.start, |o| o.start);
     assert_eq!(op.range(), start..at.end, "from its first operand");
     match image {
@@ -369,6 +375,60 @@ fn operation(
         assert_eq!(op.arg(i), from_the_last, "arg {i}");
     }
     assert_eq!(op.arg(usize::MAX), None);
+}
+
+/// `op`'s operator is the one its name names, an inline image's `BI`'s,
+/// with its name; or `Other`, for a name none has, with nothing from the
+/// table; and it's in each set its category's, and only those.
+fn typed(op: &Operation, image: bool) {
+    let operator = op.operator();
+    assert_eq!(operator, Operator::of(op.name()));
+    assert!(!image || operator == Operator::BeginInlineImage);
+    match operator.name() {
+        Some(name) => {
+            assert_eq!(name.as_bytes(), op.name());
+            assert!(operator.operands().is_some() && operator.clause().is_some());
+        }
+        None => {
+            assert_eq!(operator, Operator::Other);
+            let named = Operator::ALL
+                .iter()
+                .any(|o| o.name().map(str::as_bytes) == Some(op.name()));
+            assert!(!named, "Other for a name none has");
+            assert_eq!((operator.operands(), operator.category()), (None, None));
+        }
+    }
+    if let Some(category) = operator.category() {
+        assert!(category.operators().contains(operator));
+        assert_eq!(operator.clause(), Some(category.clause()));
+    }
+    assert!(
+        operator.paint().is_none() || operator.category() == Some(crate::Category::PathPainting)
+    );
+}
+
+/// Where content is after `op`, from `state`: [`State::step`], which is
+/// `after` its operator, or for an inline image `BI`, `ID` and `EI` in
+/// turn; each state's `allows` and `allowed` agreeing with `after`. Where
+/// it's not allowed, the state stays as it was, as a reader passing over
+/// it would keep it.
+fn stepped(state: State, op: &Operation) -> State {
+    let operator = op.operator();
+    let after = state.after(operator);
+    assert_eq!(state.allows(operator), after.is_some());
+    assert_eq!(state.allowed().contains(operator), after.is_some());
+    let step = state.step(op);
+    match op.inline_image() {
+        Some(_) => {
+            let image = after
+                .and_then(|s| s.after(Operator::InlineImageData))
+                .and_then(|s| s.after(Operator::EndInlineImage));
+            assert_eq!(step, image, "an image is BI, ID and EI");
+            assert!(image.is_none_or(|s| s == state));
+        }
+        None => assert_eq!(step, after),
+    }
+    step.unwrap_or(state)
 }
 
 /// An operand, read from `s`, is the kind its first bytes say, at most

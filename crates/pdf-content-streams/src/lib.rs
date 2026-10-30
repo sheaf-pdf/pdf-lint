@@ -19,6 +19,12 @@
 //!   [`Object`](pdf_objects::Object) ([`object`]), an array's and a
 //!   dictionary's elements each read so, and an array's elements as
 //!   written ([`Operand::elements`]).
+//! - **Operators** ([`Operator`]): each of ISO 32000-2's Annex A by its
+//!   name ([`Operation::operator`]), with the operands the clause defining
+//!   it gives it ([`Operands`], [`Type`]), its category of 8.2
+//!   ([`Category`]) and that clause, and sets of them ([`Operators`]); and
+//!   where each may be used, the graphics objects of 8.2 ([`State`]), so
+//!   content can be stepped through them ([`State::step`]).
 //! - **A page as one** ([`Concat`]): its decoded `/Contents` streams
 //!   joined with a space between each, as PDFium joins them, and an
 //!   offset in them mapped back to a stream and a place in it ([`Pos`],
@@ -46,8 +52,10 @@ mod inline;
 mod limits;
 mod operand;
 mod operations;
+mod operator;
 mod page;
 mod scan;
+mod state;
 mod tokens;
 
 pub use error::{Error, ErrorKind};
@@ -55,7 +63,9 @@ pub use inline::{InlineImage, ResCx, family_components};
 pub use limits::Limits;
 pub use operand::{Elements, Operand, name, object};
 pub use operations::{Operation, Operations, operations};
+pub use operator::{Category, FillRule, Operands, Operator, Operators, Paint, Type};
 pub use page::{Concat, Join, Pos, Pushed, SpanAcross, TooLarge};
+pub use state::State;
 pub use tokens::{Tok, Tokens, tokens};
 
 /// The README's examples, run as doctests.

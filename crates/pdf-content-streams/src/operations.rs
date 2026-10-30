@@ -13,6 +13,7 @@ use crate::fault::{Fault, Sink};
 use crate::inline::{InlineImage, ResCx};
 use crate::limits::Limits;
 use crate::operand::Operand;
+use crate::operator::Operator;
 use crate::tokens::{Tok, Tokens, tokens};
 
 /// Where an operation's operands are: the first sixteen held inline, as
@@ -214,6 +215,19 @@ impl<'a> Operation<'a> {
     pub fn inline_image(&self) -> Option<InlineImage<'a>> {
         let data = self.image.clone()?;
         Some(InlineImage::new(self.content, self.at.clone(), data))
+    }
+
+    /// Its operator, by its name ([`Operator::of`]): an inline image's is
+    /// `BI`'s, and a word ISO 32000-2's Annex A doesn't name is
+    /// [`Operator::Other`]. Where it may be used is
+    /// [`State`](crate::State)'s to say ([`State::step`](crate::State::step)).
+    pub fn operator(&self) -> Operator {
+        Operator::of(self.name())
+    }
+
+    /// Whether it's an inline image.
+    pub(crate) fn is_inline_image(&self) -> bool {
+        self.image.is_some()
     }
 
     /// Whether its operands are held in the item, not spilled to the heap.
