@@ -249,7 +249,11 @@ impl Encryptor {
     /// it none, or [`Options::encrypt_at`](super::Options::encrypt_at)
     /// moved it. An object's strings and data are encrypted under the number
     /// it's written at, the document's metadata stream found from the
-    /// objects given and kept as its number written.
+    /// objects given and kept as its number written. An update's own
+    /// renumbering doesn't go through this: the update doesn't write the
+    /// dictionary again, so it encrypts by the list as it is, in its file's
+    /// numbers, which its renumbering moves nothing of
+    /// ([`Error::Moved`]).
     pub fn renumbered<N: Renumber + ?Sized>(&self, to: &N) -> Cow<'_, Encryptor> {
         let list = &self.list;
         let numbers = list.dictionaries.iter().chain(&list.sections);
@@ -318,6 +322,34 @@ impl Encryptor {
     /// dictionary by its shape alone.
     pub fn dictionary_object(&self, id: ObjectId) -> bool {
         self.list.dictionaries.contains(&id)
+    }
+
+    /// For an update under the renumbering `to`, whose objects are each
+    /// given at, and written at, as `written` pairs them: the least of the
+    /// objects [`Encryptor::dictionary_object`] says are an encryption
+    /// dictionary's, by number in the file, that `to` moves, or names none,
+    /// or that `written` puts another object's number on. None where
+    /// there's none, and with no renumbering. A whole file writes the
+    /// dictionary again, in the numbers written ([`Encryptor::renumbered`]);
+    /// an update doesn't, so the file names those where they are, and its
+    /// reader reads what's there in the clear.
+    pub(super) fn moved(
+        &self,
+        to: Numbering<'_>,
+        written: impl IntoIterator<Item = (ObjectId, ObjectId)>,
+    ) -> Option<ObjectId> {
+        to.0?;
+        let dictionaries = &self.list.dictionaries;
+        let moved = (dictionaries.iter().copied()).filter(|&id| to.at(id) != Some(id));
+        let mut numbers: BTreeMap<u32, ObjectId> = BTreeMap::new();
+        for &id in dictionaries {
+            let least = numbers.entry(id.0).or_insert(id);
+            *least = id.min(*least);
+        }
+        let onto = (written.into_iter())
+            .filter(|(given, at)| given != at)
+            .filter_map(|(_, at)| numbers.get(&at.0).copied());
+        moved.chain(onto).min()
     }
 
     /// Whether `/EncryptMetadata false` leaves the document's metadata

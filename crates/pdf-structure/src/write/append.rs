@@ -4,7 +4,10 @@
 //! at the last section's start. Positions count from the file's header,
 //! `/ID[0]` is kept, `/ID[1]` is new, and `/Encrypt` and the rest of the
 //! trailer are carried. An update frees nothing: an object it no longer
-//! needs stays in use, its number never given again.
+//! needs stays in use, its number never given again. Under a renumbering,
+//! what it's given is in its file's numbers, and what moves is written at
+//! the number the renumbering gives it, the encryption dictionary and what
+//! it refers to staying where they are.
 
 use std::io;
 
@@ -64,8 +67,8 @@ pub struct Base {
     /// file. An update after it passes over an object as that reading read
     /// it ([`Body::Read`]), whose bytes are in the file already.
     pub source: Option<SourceId>,
-    /// Whether it was written whole under a renumbering
-    /// ([`Options::renumber`]), kept by an update after it: its objects
+    /// Whether it was written under a renumbering ([`Options::renumber`]),
+    /// whole or as an update, kept by an update after it: its objects
     /// aren't at the numbers a reading of the file before was read at, so
     /// an update after it is given objects at its numbers, built or
     /// edited, and refuses an object as read and a reading
@@ -197,24 +200,27 @@ impl Base {
 /// whichever is higher, passing over a number the objects written or the
 /// trailer refer to and no object written holds. Its positions are
 /// `base.len` and its offset from where it starts in `out`, so `out` may
-/// be empty or hold the file. Of the [`Options`], it takes `xref_from` and
-/// `stop`; it writes each object on its own, never in an object stream,
-/// and at the number it's given at, as it's a number of the file `base`
-/// describes. After a whole file's [`Written::base`], which is of no
-/// reading, it passes over nothing as read, so a document's bodies given
-/// again are each written again: what changed since a save is the
-/// caller's to give. After a whole file written under a renumbering
-/// ([`Base::renumbered`]), whose numbers aren't the document's, it's given
-/// objects at the numbers written, built or edited, under the encryptor in
-/// those numbers ([`Encryptor::renumbered`]), and refuses an object as read
-/// and a reading ([`Error::Renumbered`]); a caller that copies opens the
-/// file written and goes after [`Base::of`] that reading.
+/// be empty or hold the file. Of the [`Options`], it takes `xref_from`,
+/// `stop` and `renumber`; it writes each object on its own, never in an
+/// object stream, at the number it's given at, a number of the file `base`
+/// describes, or at the one the renumbering gives it. After a whole file's
+/// [`Written::base`], which is of no reading, it passes over nothing as
+/// read, so a document's bodies given again are each written again: what
+/// changed since a save is the caller's to give. After a file written under
+/// a renumbering, whole or as an update ([`Base::renumbered`]), whose
+/// numbers aren't the document's, it's given objects at the numbers
+/// written, built or edited, under the encryptor in those numbers (after a
+/// whole file, [`Encryptor::renumbered`]'s; after an update, the file's
+/// own), and refuses an object as read and a reading
+/// ([`Error::Renumbered`]); a caller that copies opens the file written and
+/// goes after [`Base::of`] that reading.
 ///
 /// - **The trailer** carries `base`'s newest trailer's entries but those
 ///   a section writes anew (ISO 32000-2, 7.5.6): `/Root`, `/Prev`, at
 ///   `base.prev`, `/Info`, `/Encrypt` and `/ID` first, then the rest in
-///   `base`'s order, then `/Size`. Its values are written as they are,
-///   never encrypted, as a trailer isn't an object (7.6.2).
+///   `base`'s order, then `/Size`. Its values are written as they are, each
+///   reference as the renumbering names it, never encrypted, as a trailer
+///   isn't an object (7.6.2).
 /// - **The `/ID`** keeps its first string, the encryptor's, else `base`'s;
 ///   the second is XXH3-128 of what the update wrote before its section,
 ///   so the same update writes the same bytes. A file that isn't
@@ -230,6 +236,30 @@ impl Base {
 /// - **Copied**, an object as read of another reading than `base`'s, read
 ///   from `from`, is written as the bytes it was read from where the rules
 ///   for a copy hold ([`Body::Read`]).
+/// - **Renumbered** ([`Options::renumber`]): what it's given is in its
+///   file's numbers, `base`'s, its bodies' and the references in them, and
+///   so is the trailer it carries; the renumbering takes them to the numbers
+///   it writes, which its section lists, and names each reference as it
+///   does, `/Root`, `/Info` and the rest carried too, `null` where it names
+///   none. An object as read is passed over only where the renumbering
+///   leaves its number and every reference in it where they are, which it
+///   walks each one's references to tell (a caller who knows what names
+///   what moves may give those alone); one that moves, or names one that
+///   does, is written, copied where the rules for a copy hold, its header
+///   and the references that move written anew in place ([`Body::Read`],
+///   rules 2 and 9), and no other object is written at the number of one
+///   passed over ([`Error::Twice`]). Encrypted, it encrypts by the list of
+///   what's left in the clear as the encryptor has it, in the file's
+///   numbers, each object under the number it's written at, and the
+///   document's metadata stream told by the number it's written at. It
+///   doesn't write the encryption dictionary again, so the dictionary and
+///   what it refers to stay where the file has them, which its reader reads
+///   in the clear: a renumbering that moves one, names one none, or writes
+///   another object at one's number is refused ([`Error::Moved`]). An
+///   update frees nothing, so an object it moves is still at its old number
+///   too, and what it doesn't write still names it there: a caller gives
+///   every object a reference in which moves, as the writer reads nothing
+///   it isn't given.
 ///
 /// **Under RC4**, an object written again at its number and generation is
 /// encrypted with the keystream its earlier version, still in the file,
@@ -238,25 +268,31 @@ impl Base {
 /// generation (Algorithm 1). So where a string's or stream's plaintext
 /// changed, the XOR of the two ciphertexts is the XOR of the two
 /// plaintexts, and one who holds the file, which holds both, has what
-/// changed. AES-128 and AES-256 don't leak so, as each string and stream
-/// has an IV of its own, derived from its data. A caller who doesn't want
-/// that writes the file whole under a new AES-256 encryption
+/// changed. So it is for an object a renumbering writes at a number another
+/// object of the file had, under that one's keystream: the XOR of the two
+/// objects' plaintexts. AES-128 and AES-256 don't leak so, as each string
+/// and stream has an IV of its own, derived from its data. A caller who
+/// doesn't want that writes the file whole under a new AES-256 encryption
 /// ([`Encryptor::create`]) instead.
 ///
 /// Refused, with nothing written ([`Error`]): a `base` without `/Root`; an
-/// object as read or a `from` after a whole file written under a
-/// renumbering; an encryptor that isn't `base`'s file's (another file's,
-/// though its `/Encrypt` is at the same number), or none for an encrypted
-/// file; a number 0 or at or past [`NUMBERS`], or given twice; a body at the
-/// encryption dictionary's number; one at a number the file lists free
-/// where its keys are made per object ([`Encryptor::of`]); a
-/// cross-reference stream with no number left below [`NUMBERS`]; a
-/// stream's data where it was written that isn't the reading's own for its
-/// number, or with no `from`; a `from` whose source says it changed, and a
-/// copy whose bytes aren't those it was read from ([`Error::Changed`]), or
-/// whose record is another reading's or another object's
-/// ([`Error::Elsewhere`]); what pdf-objects' writer refuses, or the
-/// encryptor; and a write stopped.
+/// object as read or a `from` after a file written under a renumbering; an
+/// encryptor that isn't `base`'s file's (another file's, though its
+/// `/Encrypt` is at the same number), or none for an encrypted file; a
+/// number 0 or at or past [`NUMBERS`], or given twice, or under a
+/// renumbering written at twice, one passed over among them; a body the
+/// renumbering gives no number; a
+/// body at the encryption dictionary's number; one at a number the file
+/// lists free where its keys are made per object ([`Encryptor::of`]); a
+/// renumbering that moves an encryption dictionary or what one refers to,
+/// or writes another object there; a cross-reference stream with no number
+/// left below [`NUMBERS`]; a stream's data where it was written that isn't
+/// the reading's own for its number, or with no `from`; a `from` whose
+/// source says it changed, and a copy whose bytes aren't those it was read
+/// from ([`Error::Changed`]), or whose record is another reading's or
+/// another object's, or under a renumbering whose references aren't where
+/// its bytes have them ([`Error::Elsewhere`]); what pdf-objects' writer
+/// refuses, or the encryptor; and a write stopped.
 pub fn update<'a>(
     out: &mut Vec<u8>,
     base: &Base,
@@ -266,7 +302,7 @@ pub fn update<'a>(
     options: &Options<'_>,
 ) -> Result<Option<Written>, Error> {
     let start = out.len();
-    // After a whole file written under a renumbering, what was read is in
+    // After a file written under a renumbering, what was read is in
     // numbers the file doesn't have.
     if base.renumbered && from.is_some() {
         return Err(Error::Renumbered);
@@ -280,29 +316,55 @@ pub fn update<'a>(
         }
         _ => Ok(false),
     };
+    // Under a renumbering, whether it leaves object `id`, `object`, and
+    // every reference in it where they are, as what's passed over must be.
+    let to = Numbering(options.renumber);
+    let stays = |id: ObjectId, object: &Object| {
+        to.at(id) == Some(id) && object.references().all(|r| to.at(r) == Some(r))
+    };
     let mut kept: Vec<(ObjectId, Body<'a>)> = Vec::new();
-    for (id, body) in bodies {
-        if !held(id, &body)? {
-            kept.push((id, body));
+    // Under a renumbering, the numbers of what's passed over, at which no
+    // other object is given or written.
+    let mut passed = Vec::new();
+    match to.0 {
+        None => {
+            for (id, body) in bodies {
+                if !held(id, &body)? {
+                    kept.push((id, body));
+                }
+            }
+        }
+        Some(_) => {
+            for (id, body) in bodies {
+                match held(id, &body)? && stays(id, body.object()) {
+                    true => passed.push(id.0),
+                    false => kept.push((id, body)),
+                }
+            }
         }
     }
+    // Ascending, as a document's bodies come already.
+    passed.sort_unstable();
     let bodies = kept;
     if bodies.is_empty() {
         return Ok(None);
     }
-    let written = appended(out, start, base, &bodies, encryptor, from, options);
+    let written = appended(out, start, base, &bodies, &passed, encryptor, from, options);
     if written.is_err() {
         out.truncate(start);
     }
     written.map(Some)
 }
 
-/// [`update`]'s section, `out` from `start` on.
+/// [`update`]'s section, `out` from `start` on, `passed` the numbers of the
+/// objects it passes over, ascending.
+#[allow(clippy::too_many_arguments)]
 fn appended(
     out: &mut Vec<u8>,
     start: usize,
     base: &Base,
     bodies: &[(ObjectId, Body<'_>)],
+    passed: &[u32],
     encryptor: Option<&Encryptor>,
     from: Option<&dyn ReadFrom>,
     options: &Options<'_>,
@@ -314,13 +376,24 @@ fn appended(
         return Err(Error::Unmatched);
     }
     let encrypt_at = encryptor.and_then(Encryptor::at).map(|at| at.0);
-    let to = Numbering::NONE;
-    checked(bodies, to, encrypt_at, encryptor)?;
+    let to = Numbering(options.renumber);
+    let written_at = checked(bodies, to, encrypt_at, encryptor, passed)?;
+    // The encryption dictionaries and what they refer to stay where the
+    // file has them, and nothing else goes there: the list the update
+    // encrypts by is the encryptor's as it is, in the file's numbers.
+    let given = bodies.iter().map(|(id, _)| *id);
+    let moved = encryptor.and_then(|e| e.moved(to, given.zip(written_at.iter().copied())));
+    if let Some(id) = moved {
+        return Err(Error::Moved(id));
+    }
     let copying = from.map(|from| Copying::new(from, encryptor)).transpose()?;
-    // What the encryptor resolves references by, where there's one.
+    // What the encryptor resolves references by, where there's one: the
+    // bodies and the reading, by the numbers they're given at, the
+    // document's metadata stream found there and kept as its number
+    // written.
     let resolve = encryptor.map(|_| Bodies::new(bodies, from));
     let encrypting = match (encryptor, &resolve) {
-        (Some(e), Some(resolve)) => Some(e.encrypting(&base.trailer, resolve)?),
+        (Some(e), Some(resolve)) => Some(e.encrypting_at(&base.trailer, resolve, to)?),
         _ => None,
     };
 
@@ -329,33 +402,41 @@ fn appended(
         out.push(b'\n');
     }
     let mut section = Section::append(base.size, base.header);
-    for (id, body) in bodies {
+    for ((id, body), &written_at) in bodies.iter().zip(&written_at) {
         stopped(options.stop)?;
         let pos = at(out);
         written(
             out,
             *id,
-            *id,
+            written_at,
             body,
             encrypting.as_ref(),
             from,
             copying.as_ref(),
             to,
         )?;
-        let generation = id.1;
+        let generation = written_at.1;
         section.insert(
-            id.0,
+            written_at.0,
             Entry::InUse {
                 offset: pos,
                 generation,
             },
         );
     }
+    // The file's entries, in the numbers written.
+    let named = |value: &Object| {
+        let mut value = value.clone();
+        if let Some(to) = to.0 {
+            value.renumber(|id| to.renumber(id));
+        }
+        value
+    };
     let mut trailer = Dict::new();
-    trailer.set("Root", root.clone());
+    trailer.set("Root", named(root));
     trailer.set("Prev", base.prev as i64);
     if let Some(info) = base.trailer.get(b"Info") {
-        trailer.set("Info", info.clone());
+        trailer.set("Info", named(info));
     }
     if let Some(e) = encryptor {
         match e.place() {
@@ -372,7 +453,7 @@ fn appended(
     let carried = (base.trailer.iter())
         .filter(|(key, _)| !SECTION_KEYS.contains(key) && !matches!(*key, b"Root" | b"Info"));
     for (key, value) in carried {
-        trailer.set(key, value.clone());
+        trailer.set(key, named(value));
     }
     let pos = at(out);
     let mut kept = trailer.clone();
@@ -404,7 +485,7 @@ fn appended(
         trailer: kept,
         encryption: base.encryption.clone(),
         source: base.source,
-        renumbered: base.renumbered,
+        renumbered: base.renumbered || to.0.is_some(),
     };
     Ok(Written {
         section,

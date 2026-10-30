@@ -31,16 +31,19 @@
 //!   reading's source asked whether it changed ([`ByteSource::unchanged`]);
 //!   where they changed, the write is refused. An update passes over what
 //!   its file holds as read, so a document's bodies write what changed.
-//! - **Renumbered** ([`Options::renumber`]): a whole file's objects written
-//!   at the numbers a caller's renumbering gives them, each reference named
-//!   as it names it, `null` where it names none, the trailer's too. What's
-//!   given stays at its numbers, which a stream's data, a copy's record and
-//!   what the encryptor resolves are found by; an encrypted file's objects
-//!   are encrypted under the numbers they're written at, by the encryptor
-//!   in those numbers ([`Encryptor::renumbered`]). An object as read is
-//!   copied as its bytes, its header and each reference that moves written
-//!   anew where its bytes had it; at another number only where its key
-//!   isn't made of its number.
+//! - **Renumbered** ([`Options::renumber`]): a whole file's or an update's
+//!   objects written at the numbers a caller's renumbering gives them, each
+//!   reference named as it names it, `null` where it names none, the
+//!   trailer's too. What's given stays at its numbers, which a stream's
+//!   data, a copy's record and what the encryptor resolves are found by; an
+//!   encrypted file's objects are encrypted under the numbers they're
+//!   written at, a whole file's by the encryptor in those numbers
+//!   ([`Encryptor::renumbered`]), an update's by its file's, whose
+//!   encryption dictionary and what that refers to it doesn't move. An
+//!   object as read is copied as its bytes, its header and each reference
+//!   that moves written anew where its bytes had it; at another number only
+//!   where its key isn't made of its number. An update passes over only
+//!   what doesn't move, nor names what does.
 //! - **Cross-reference sections** ([`Section`]): a whole file's one
 //!   subsection, `[0, /Size)`, every number it doesn't list written as
 //!   free; or an update's, runs of the numbers it lists, which are only
@@ -182,8 +185,9 @@ pub enum Body<'a> {
     /// are right to copy, else written anew from `object`, as
     /// [`Body::New`] is. An update after the reading's own file passes
     /// over it ([`Base::source`]), its bytes there already, where it's as
-    /// read at the number it's given: given at another, it refuses the
-    /// update ([`Error::Elsewhere`]), as rule 3 says.
+    /// read at the number it's given, and a renumbering moves neither it
+    /// nor a reference in it: given at another, it refuses the update
+    /// ([`Error::Elsewhere`]), as rule 3 says.
     ///
     /// Copied, an object read at an offset is written as its bytes from
     /// `n g obj` to past `endobj`, ciphertext and all; one read from an
@@ -344,15 +348,17 @@ pub struct Options<'a> {
     /// before each object and each object stream, and the write then
     /// writes nothing ([`Error::Stopped`]).
     pub stop: Option<&'a AtomicBool>,
-    /// Where each object of a whole file goes ([`full`], [`document`]):
-    /// given the number and generation an object is given at, or a
-    /// reference in what's written names, those it's written at, or none
-    /// for an object the file doesn't hold, a reference to it then written
-    /// `null`, as a reference to no object reads (ISO 32000-2, 7.3.10). Any
-    /// function from an [`ObjectId`] to an `Option<ObjectId>` is one
-    /// (pdf-objects' `serialize::Renumber`). None, the default, writes each
-    /// at the number it's given at. An update ([`update`]) takes none: what
-    /// it's given is at the numbers it writes.
+    /// Where each object of a whole file ([`full`], [`document`]) or an
+    /// update ([`update`]) goes: given the number and generation an object
+    /// is given at, or a reference in what's written names, those it's
+    /// written at, or none for an object the file doesn't hold, a reference
+    /// to it then written `null`, as a reference to no object reads (ISO
+    /// 32000-2, 7.3.10). Any function from an [`ObjectId`] to an
+    /// `Option<ObjectId>` is one (pdf-objects' `serialize::Renumber`). None,
+    /// the default, writes each at the number it's given at. What an update
+    /// is given is in its file's numbers, and it leaves the encryption
+    /// dictionary and what that refers to where they are ([`update`],
+    /// "Renumbered").
     ///
     /// - **What's given keeps its numbers:** a document's ids, an object
     ///   as read at the number it was read as ([`Record::id`]); a stream's
@@ -370,7 +376,8 @@ pub struct Options<'a> {
     ///   dictionary's ([`Options::encrypt_at`]), one the encryptor's file
     ///   lists free under keys made per object ([`Error::Free`]), which a
     ///   renumbering passes over ([`Encryptor::free_numbers`]),
-    ///   [`Pack::reuse`] and those the writer gives its own objects;
+    ///   [`Pack::reuse`], those the writer gives its own objects, and an
+    ///   update's file's where it passes over an object as read;
     ///   [`Pack::groups`] is given the numbers packed objects are given at.
     ///   An object given past [`NUMBERS`] and written below it is written.
     /// - **Errors name** an object by the number it's given at
@@ -378,18 +385,22 @@ pub struct Options<'a> {
     ///   [`Error::Placed`], [`Error::Data`], [`Error::Group`], and
     ///   [`Error::Twice`] of a number given twice); a number the file uses
     ///   by the number written ([`Error::Number`], [`Error::Twice`],
-    ///   [`Error::EncryptAt`], [`Error::Free`]); and what pdf-objects'
-    ///   writer or the encryptor refuses by the number it was writing at
-    ///   ([`Error::Serialize`], [`Error::Encrypt`]).
+    ///   [`Error::EncryptAt`], [`Error::Free`], [`Error::Moved`]); and what
+    ///   pdf-objects' writer or the encryptor refuses by the number it was
+    ///   writing at ([`Error::Serialize`], [`Error::Encrypt`]).
     /// - **Encrypted**, each object is encrypted under the number it's
-    ///   written at, by the encryptor in the numbers written
-    ///   ([`Encryptor::renumbered`]): what it leaves in the clear, its
+    ///   written at: a whole file's by the encryptor in the numbers written
+    ///   ([`Encryptor::renumbered`]), what it leaves in the clear, its
     ///   dictionary's place and the references in it, and the document's
-    ///   metadata stream. **Under RC4**, an object written at a number
-    ///   another object had in the file the encryptor was read from is
-    ///   encrypted with that object's keystream, the key and `/ID[0]`
-    ///   being the file's: where the earlier file is kept, the XOR of the
-    ///   two ciphertexts is the XOR of the two plaintexts, for every object
+    ///   metadata stream; an update's by its encryptor as it is, in its
+    ///   file's numbers, the metadata stream told by the number it's
+    ///   written at: it doesn't write the dictionary again, and moves
+    ///   neither it nor what it refers to ([`Error::Moved`]). **Under RC4**,
+    ///   an object written at a number another object had in the file the
+    ///   encryptor was read from is encrypted with that object's keystream,
+    ///   the key and `/ID[0]` being the file's: where the earlier file is
+    ///   kept, or the update's file holds both, the XOR of the two
+    ///   ciphertexts is the XOR of the two plaintexts, for every object
     ///   moved onto another's number (pdf-crypt's `Method::Rc4`). A caller
     ///   who doesn't want that writes the file under a new AES-256
     ///   encryption ([`Encryptor::create`]) instead.
@@ -528,15 +539,16 @@ pub struct Written {
     /// it's of no reading ([`Base::source`] none), so an update after it
     /// passes over nothing as read: a document's [`bodies`] given again,
     /// their records still of the reading the document was read in, are
-    /// each written again, copied where they copy. After a whole file
-    /// written under a renumbering ([`Options::renumber`]) it says so
-    /// ([`Base::renumbered`]): the document's numbers aren't the file's,
-    /// so an update after it is given objects at the numbers written,
-    /// built or edited, under the encryptor in those numbers
-    /// ([`Encryptor::renumbered`]), and refuses an object as read and a
-    /// reading ([`Error::Renumbered`]); one that copies opens the file
-    /// written and goes after [`Base::of`] that reading. After an update
-    /// it's of the reading its base was, renumbered as its base was.
+    /// each written again, copied where they copy. After a file written
+    /// under a renumbering ([`Options::renumber`]), whole or as an update,
+    /// it says so ([`Base::renumbered`]): the document's numbers aren't
+    /// the file's, so an update after it is given objects at the numbers
+    /// written, built or edited, under the encryptor in those numbers
+    /// (after a whole file, [`Encryptor::renumbered`]'s), and refuses an
+    /// object as read and a reading ([`Error::Renumbered`]); one that
+    /// copies opens the file written and goes after [`Base::of`] that
+    /// reading. After an update it's of the reading its base was, and
+    /// renumbered where its base was or the update was.
     pub base: Base,
 }
 
@@ -706,7 +718,8 @@ pub enum Error {
     Number(u32),
     /// An object number given twice, at any generation; or, under a
     /// renumbering ([`Options::renumber`]), the number two objects are
-    /// written at.
+    /// written at, an object an update passes over among them, which is in
+    /// its file at its number already ([`Body::Read`]).
     #[error("object number {0} is given twice, or two objects are written there")]
     Twice(u32),
     /// An object at the number a whole file writes its encryption
@@ -831,16 +844,29 @@ pub enum Error {
         .0.0, .0.1
     )]
     Unnumbered(ObjectId),
-    /// An update after a whole file written under a renumbering
-    /// ([`Base::renumbered`]) given an object as read ([`Body::Read`]), or
-    /// a reading: the reading's records and objects are at the numbers it
-    /// read, which aren't the file's any more, so one given again would be
-    /// written over another object of the file. An update after it is
-    /// given objects at the numbers written, built or edited.
+    /// An update after a file written under a renumbering, whole or as an
+    /// update ([`Base::renumbered`]), given an object as read
+    /// ([`Body::Read`]), or a reading: the reading's records and objects
+    /// are at the numbers it read, which aren't the file's any more, so one
+    /// given again would be written over another object of the file. An
+    /// update after it is given objects at the numbers written, built or
+    /// edited.
     #[error(
-        "the file was written whole under a renumbering, so an update after it is given objects at its numbers, built or edited, and no reading"
+        "the file was written under a renumbering, so an update after it is given objects at its numbers, built or edited, and no reading"
     )]
     Renumbered,
+    /// An update whose renumbering ([`Options::renumber`]) moves object
+    /// `id` of its file, an encryption dictionary or what one refers to,
+    /// or names it none; or writes another object at its number. An update
+    /// doesn't write the encryption dictionary again, so the file's
+    /// `/Encrypt` names them where they are, and its reader reads what's at
+    /// their numbers in the clear (ISO 32000-2, 7.6.2), which another
+    /// object's strings would then be.
+    #[error(
+        "object {} {} is an encryption dictionary or what one refers to, which an update leaves where it is: the renumbering moves it, or writes another object there",
+        .0.0, .0.1
+    )]
+    Moved(ObjectId),
 }
 
 impl Error {
@@ -987,24 +1013,29 @@ impl<'a> Numbering<'a> {
 /// gives one none ([`Error::Unnumbered`]); each a number a written file may
 /// use, given once and written once, not `encrypt_at`, the encryption
 /// dictionary's, and not one `encryptor`'s file lists free under keys made
-/// per object: the first that isn't, refused.
+/// per object: the first that isn't, refused. `held` are the numbers of
+/// objects an update under a renumbering passes over, ascending, given and
+/// in its file at those numbers already, which no body is given or written
+/// at again.
 fn checked(
     bodies: &[(ObjectId, Body<'_>)],
     to: Numbering<'_>,
     encrypt_at: Option<u32>,
     encryptor: Option<&Encryptor>,
+    held: &[u32],
 ) -> Result<Vec<ObjectId>, Error> {
+    let held = |n: u32| held.binary_search(&n).is_ok();
     let mut written = Vec::with_capacity(bodies.len());
     let mut taken = HashSet::with_capacity(bodies.len());
     // Under a renumbering, the numbers given too, each once.
     let mut given = HashSet::with_capacity(if to.0.is_some() { bodies.len() } else { 0 });
     for &(id, _) in bodies {
-        if to.0.is_some() && !given.insert(id.0) {
+        if (to.0.is_some() && !given.insert(id.0)) || held(id.0) {
             return Err(Error::Twice(id.0));
         }
         let at = to.at(id).ok_or(Error::Unnumbered(id))?;
         usable(at.0)?;
-        if !taken.insert(at.0) {
+        if !taken.insert(at.0) || held(at.0) {
             return Err(Error::Twice(at.0));
         }
         if encrypt_at == Some(at.0) {

@@ -15,8 +15,8 @@
 //! `--cfg fuzzing`.
 //!
 //! And what the `write` target checks ([`write_file`]): a file read is
-//! written whole, under a renumbering the input picks or none, and as an
-//! update, each way the input picks, without a panic, and where it read
+//! written whole and as an update, under a renumbering the input picks or
+//! none, each way the input picks, without a panic, and where it read
 //! soundly, written and read again it's the same objects, each at the
 //! number the renumbering gives it, those copied as the bytes they were
 //! read from among them, their headers and the references that move
@@ -548,7 +548,8 @@ const LISTED: u32 = 1 << 16;
 
 /// The `write` target's body: `data`'s first two bytes choose how the
 /// file after them is read and written, its third how a whole file of it
-/// is renumbered ([`Renumbering`]), and the rest is the file. Read under
+/// and an update after it are renumbered ([`Renumbering`]), and the rest
+/// is the file. Read under
 /// [`options`], by the owner's password `owner` when the choice's lowest
 /// bit is set, made a document with its reading kept, then written whole,
 /// but where it would list a number past [`LISTED`]: with a table, a
@@ -560,7 +561,9 @@ const LISTED: u32 = 1 << 16;
 /// the rules for a copy hold.
 /// And, when its sixth bit is set, an update after it, of the document's
 /// objects, the one its bits from the seventh pick changed, a key more,
-/// under its own encryption: it writes that one alone. Else, a reading of
+/// under its own encryption and the renumbering, kept off what an update
+/// leaves where it is ([`Renumbering::of_update`]): it writes that one and
+/// what the renumbering moves or names otherwise alone. Else, a reading of
 /// the file by position ([`Flipped`]), made a document, a byte of an
 /// object read at an offset flipped after, the one those bits pick among
 /// their bytes but their streams' data, written whole as before. Neither
@@ -571,15 +574,16 @@ const LISTED: u32 = 1 << 16;
 /// pdf-objects' writer writes each (reals as written and strings' forms
 /// aside), a stream's data as handed out, but the encryption dictionary
 /// and what it refers to, which the writer writes as its encryption is;
-/// and the update's changed object with its key; and the write after the
-/// byte flipped is refused as changed, of an object whose bytes hold it,
-/// or it wrote what was read. Panics on a broken promise.
+/// and the update's changed object with its key, at its number; and the
+/// write after the byte flipped is refused as changed, of an object whose
+/// bytes hold it, or it wrote what was read. Panics on a broken promise.
 pub fn write_file(data: &[u8]) {
     compared(data);
 }
 
-/// How the `write` target renumbers a whole file, as its input's third
-/// byte, but its top bit, gives it, taken by five: none; each object at its
+/// How the `write` target renumbers a whole file, and an update after it
+/// ([`Renumbering::of_update`]), as its input's third byte, but its top
+/// bit, gives it, taken by five: none; each object at its
 /// own number, given; the document's numbers reversed, each object at the
 /// number of the one as far from the end as it is from the start; each
 /// past every number the file has; or numbered from 1 in order, passing
@@ -637,6 +641,56 @@ impl Renumbering {
         }
     }
 
+    /// How the `write` target renumbers an update after `doc`'s file, as
+    /// `byte` gives a whole file's ([`Renumbering::of`]), but what an update
+    /// leaves where it is: what `encryptor` leaves in the clear by number,
+    /// an encryption dictionary and what one refers to, and what a whole
+    /// file leaves out (object streams, whose members the file may still
+    /// read through them, cross-reference streams, a linearization
+    /// dictionary), each at its own number; another object the whole
+    /// file's would put at one of their numbers goes past every number the
+    /// file and the rest take, from `size`, the file's.
+    fn of_update(
+        byte: u8,
+        doc: &Document,
+        encryptor: Option<&Encryptor>,
+        size: u32,
+    ) -> Renumbering {
+        let Renumbering(Some(mut map)) = Renumbering::of(byte, doc, encryptor) else {
+            return Renumbering(None);
+        };
+        let left_out = |o: &Object| match o.value() {
+            Value::Stream(s) => s.dict.has_type(b"ObjStm") || s.dict.has_type(b"XRef"),
+            Value::Dict(d) => d.has(b"Linearized"),
+            _ => false,
+        };
+        let mut stays: BTreeSet<ObjectId> = (doc.objects())
+            .filter(|&(id, o)| left_out(o) || encryptor.is_some_and(|e| e.dictionary_object(id)))
+            .map(|(id, _)| id)
+            .collect();
+        if let Some(e) = encryptor {
+            stays.extend(e.at());
+            stays.extend(e.dictionary().iter().flat_map(|(_, v)| v.references()));
+        }
+        let numbers: BTreeSet<u32> = stays.iter().map(|id| id.0).collect();
+        let mut next = (map.values().map(|at| at.0.saturating_add(1)))
+            .chain([size])
+            .max()
+            .unwrap_or(size);
+        for (id, at) in &mut map {
+            if stays.contains(id) {
+                *at = *id;
+            } else if numbers.contains(&at.0) {
+                *at = (next, at.1);
+                next = next.saturating_add(1);
+            }
+        }
+        for &id in &stays {
+            map.insert(id, id);
+        }
+        Renumbering(Some(map))
+    }
+
     /// The last number a whole file of `doc` writes an object at, under it.
     fn last(&self, doc: &Document) -> u32 {
         (doc.objects().filter_map(|(id, _)| self.at(id)))
@@ -649,7 +703,7 @@ impl Renumbering {
 /// [`write_file`]'s body: whether the whole file, the update and the whole
 /// file after a byte was flipped were written, or refused, and compared.
 fn compared(data: &[u8]) -> [bool; 3] {
-    let (choice, renumbering, file) = match data {
+    let (choice, byte, file) = match data {
         [a, b, c, file @ ..] => (u16::from_le_bytes([*a, *b]), *c, file),
         _ => (0, 0, data),
     };
@@ -680,7 +734,7 @@ fn compared(data: &[u8]) -> [bool; 3] {
     let own = Encryptor::of(&reading);
     let way = Way::of(file, choice);
     let (encryptor, opens) = way.encryptor(own.as_ref().ok().and_then(Option::as_ref), password);
-    let renumbering = Renumbering::of(renumbering, &doc, encryptor);
+    let renumbering = Renumbering::of(byte, &doc, encryptor);
     let to = |id| renumbering.at(id);
     if renumbering.0.is_some() {
         options.renumber = Some(&to);
@@ -700,7 +754,8 @@ fn compared(data: &[u8]) -> [bool; 3] {
     }
     if choice & 32 != 0 {
         let own = own.ok().flatten();
-        compared[1] = updated(file, &doc, &reading, own.as_ref(), password, sound, choice);
+        let how = (choice, byte);
+        compared[1] = updated(file, &doc, &reading, own.as_ref(), password, sound, how);
     } else if listed && sound {
         compared[2] = flipped(file, password, &options, &way, choice >> 7, &to);
     }
@@ -812,12 +867,15 @@ fn flipped(
 }
 
 /// `file`, read as `reading` and made `doc`, with an update after it of
-/// `doc`'s objects as read ([`write::bodies`]), but the one `choice`'s
+/// `doc`'s objects as read ([`write::bodies`]), but the one the choice's
 /// bits from the seventh pick, changed, with a key more, under
-/// `encryptor`, its own: it writes that one alone, passing over the rest,
-/// which the file holds. When the reading was `sound` and the update
-/// wrote, the file read again by `password` is sound, and the same
-/// objects, but that one with its key: whether it was.
+/// `encryptor`, its own, and under the renumbering the input's third byte
+/// gives ([`Renumbering::of_update`]): it writes that one, and what the
+/// renumbering moves or names otherwise, passing over the rest, which the
+/// file holds. When the reading was `sound` and the update wrote, the file
+/// read again by `password` is sound, and the same objects, each at the
+/// number the renumbering gives it, but that one with its key: whether it
+/// was.
 fn updated(
     file: &[u8],
     doc: &Document,
@@ -825,7 +883,7 @@ fn updated(
     encryptor: Option<&Encryptor>,
     password: Password,
     sound: bool,
-    choice: u16,
+    (choice, byte): (u16, u8),
 ) -> bool {
     let Ok(base) = Base::of(reading) else {
         return false;
@@ -839,25 +897,37 @@ fn updated(
         return false;
     };
     dict.set("WriteFuzzed", true);
+    let renumbering = Renumbering::of_update(byte, doc, encryptor, base.size);
+    let to = |id| renumbering.at(id);
+    let mut options = write::Options::DEFAULT;
+    if renumbering.0.is_some() {
+        options.renumber = Some(&to);
+    }
     let mut out = file.to_vec();
     let given = write::bodies(doc).map(|(at, body)| match at == id {
         true => (at, Body::from(&changed)),
         false => (at, body),
     });
-    let options = write::Options::DEFAULT;
     let written = write::update(&mut out, &base, given, encryptor, Some(reading), &options);
     if let (true, Ok(Some(written))) = (sound, written) {
         assert!(
             written.base.holds(&out[..]).expect("in memory"),
             "the update's base holds"
         );
-        for (at, _) in doc.objects() {
-            let listed = written.section.lists(at.0);
-            assert_eq!(listed, at == id, "{at:?} written alone of what's read");
+        assert_eq!(written.base.renumbered, renumbering.0.is_some());
+        for (at, object) in doc.objects() {
+            let moves = to(at) != Some(at) || object.references().any(|r| to(r) != Some(r));
+            let listed = written.section.lists(to(at).expect("numbered").0);
+            assert_eq!(
+                listed,
+                at == id || moves,
+                "{at:?} written alone of what's read"
+            );
         }
         let back = read_back(&out, password);
-        same_objects(doc, reading, &back, Some(id), &Some);
-        let got = back.get(id).expect("the changed object reads");
+        same_objects(doc, reading, &back, Some(id), &to);
+        let at = to(id).expect("numbered");
+        let got = back.get(at).expect("the changed object reads");
         let key = got.as_dict().and_then(|d| d.get(b"WriteFuzzed"));
         assert_eq!(key.and_then(Object::as_bool), Some(true), "{id:?} changed");
         return true;

@@ -249,7 +249,8 @@ fn file(
             Some(options.encrypt_at.unwrap_or((at, 0)))
         }
     };
-    let at = checked(bodies, to, encrypt_at.map(|at| at.0), given)?;
+    // Nothing is passed over, as an update passes over what its file holds.
+    let at = checked(bodies, to, encrypt_at.map(|at| at.0), given, &[])?;
     if let Some(at) = encrypt_at {
         usable(at.0)?;
     }
