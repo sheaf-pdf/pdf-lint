@@ -1,14 +1,15 @@
 # pdf-content-streams
 
-PDF content streams (ISO 32000-2, §7.8.2), read as PDFium reads them, in a small Rust crate on [pdf-objects](https://crates.io/crates/pdf-objects): each token with where it is and its bytes as written, an inline image's data found by PDFium's rules, operands read as values only when asked, and a page's streams joined as one, every place in them mapped back to the stream it's in.
+PDF content streams (ISO 32000-2, §7.8.2), read as PDFium reads them, in a small Rust crate on [pdf-objects](https://crates.io/crates/pdf-objects): each token with where it is and its bytes as written, an inline image's data found by PDFium's rules, each operation with its operands held in the item, operands read as values only when asked, and a page's streams joined as one, every place in them mapped back to the stream it's in.
 
-It's made for what reads content to draw it, check it or edit it. A token is a range of the bytes read, so what it says can point at them; nothing is read that isn't asked for; and no file is read here: the caller gives the streams, decoded, and what an inline image's size depends on.
+It's made for what reads content to draw it, check it or edit it. A token is a range of the bytes read, so what it says can point at them; an operation of sixteen operands or fewer allocates nothing; nothing is read that isn't asked for; and no file is read here: the caller gives the streams, decoded, and what an inline image's size depends on.
 
 ## What it does
 
 - **Tokens.** `tokens` gives a stream's tokens in order, each with its range: an operator, any word that isn't a number, `true`, `false` or `null`; an operand as written, a number, a name, a string, an array or a dictionary with all it holds, or a closing delimiter with nothing to close, which PDFium passes over; and an inline image, `BI` to `EI`, one token, with where its data is. Between them is only white-space and comments. Tokens end where PDFium's `CPDF_StreamParser` ends them: a word of digits, signs and points is a number, and strings nest. What an operator does is no part of it, so one nobody knows is a token like any other.
 - **Inline images, as PDFium finds their data** (`ReadInlineStream`): an unfiltered image by its exact size, from `/W`, `/H`, `/BPC` and its color space's components; `/AHx`, `/A85` and `/RL` to their end-of-data markers; `/DCT` to the JPEG's end of image; else `/L` or `/Length` where it's given (PDF 2.0); then on to the next `EI`. With none of those, the first `EI` with white-space before it and white-space, a delimiter or the end after. The components of a color space the resources name are the caller's to give (`ResCx`), counted as PDFium counts them (`family_components`).
-- **Operands read when asked.** `name` decodes a name's `#` escapes, borrowing it when there are none. `object` reads any operand as a pdf-objects `Object`: numbers, names, strings in their form, literal or hex, and arrays and dictionaries, a dictionary keeping every entry as pdf-objects' `Dict` does, in one pass however deep.
+- **Operations.** `operations` gives a stream's operations in order, a standard iterator of `Operation`s: each operator, or inline image, with the operands before it, its tokens grouped. An operation's operands' ranges are held in the item, sixteen of them, as many as PDFium keeps, before they spill to the heap; every operand is kept, up to the cap. Operand `i` is taken from the last, as PDFium takes them (`arg`), and `operands` gives them all in order. Operands at the end, which no operator takes, are no operation. An inline image is one operation, `BI` to `EI` (`InlineImage`): where its dictionary and its data are, the value under a key, abbreviated or not, the last as PDFium keeps it (`entry`), and the length it gives its data (`length`).
+- **Operands read when asked.** An `Operand` is its bytes as written and where they are, and says what kind it is from how it starts: a number, a name, a string, an array or a dictionary. `name` decodes a name's `#` escapes, borrowing it when there are none. `object` reads any operand as a pdf-objects `Object`: numbers, names, strings in their form, literal or hex, and arrays and dictionaries, a dictionary keeping every entry as pdf-objects' `Dict` does, in one pass however deep. `elements` gives an array's elements as written, each where it is, gathering nothing.
 - **A page as one.** `Concat` joins a page's `/Contents` streams with a space between each, as PDFium joins them (one stream is borrowed as it is), and maps an offset in them back to a stream and a place in it (`Pos`, `SpanAcross`), and back again. A string or an inline image can still run from one stream into the next, as in PDFium. `Join` joins streams as they're read, under a cap, and decodes each straight into the joined bytes when its decoder appends to a buffer, as pdf-filters' `decode_into` does: a stream past the cap, or that won't decode, is refused, the bytes cut back to where they were.
 - **Caps, and errors that say where.** It reads under `Limits`: operands before an operator, how deep arrays and dictionaries nest, an inline image's data, and a page's streams joined. A string, array, dictionary or inline image that doesn't end, or one past a cap, is an `Error` with where it starts, and nothing comes after it. It never panics, whatever the bytes, and every token moves it on.
 
@@ -44,6 +45,19 @@ let span = page.span(string);
 assert_eq!(span.start, Pos { stream: 0, at: 24 });
 assert_eq!(span.end, Pos { stream: 1, at: 3 });
 assert_eq!(span.to_string(), "stream 0 byte 24 to stream 1 byte 3");
+
+// Or each operation, with the operands before it.
+let ops: Vec<_> = page
+    .operations(&ResCx::none(), &Limits::DEFAULT)
+    .collect::<Result<_, _>>()
+    .unwrap();
+let names: Vec<_> = ops.iter().map(|op| op.name()).collect();
+assert_eq!(names, [&b"q"[..], b"BDC", b"Tj", b"EMC", b"Q"]);
+// Operand 0 is the last, as PDFium takes them.
+let props = ops[1].arg(0).unwrap();
+assert!(props.is_dict());
+assert_eq!(ops[1].arg(1).unwrap().name().as_deref(), Some(&b"Span"[..]));
+assert_eq!(page.span(ops[2].range()).start, Pos { stream: 0, at: 24 });
 ```
 
 ## What isn't here

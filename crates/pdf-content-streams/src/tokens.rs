@@ -102,6 +102,11 @@ impl<'a> Iterator for Tokens<'a, '_> {
 impl FusedIterator for Tokens<'_, '_> {}
 
 impl<'a> Tokens<'a, '_> {
+    /// The content read.
+    pub(crate) fn content(&self) -> &'a [u8] {
+        self.s
+    }
+
     fn token(&mut self) -> Option<Result<(Range<usize>, Tok<'a>), Error>> {
         let s = self.s;
         let (r, kind) = match next_raw(s, self.at, self.lim.depth)? {

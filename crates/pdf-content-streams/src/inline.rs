@@ -1,14 +1,18 @@
 //! Where an inline image's data ends, as PDFium's `ReadInlineStream`
 //! finds it, from its dictionary and the components of the color space
-//! it's drawn in ([`ResCx`]).
+//! it's drawn in ([`ResCx`]); and what an image read says
+//! ([`InlineImage`]).
 
 use std::collections::HashMap;
+use std::fmt;
 use std::ops::Range;
 
 use crate::error::{Error, ErrorKind};
 use crate::limits::Limits;
-use crate::operand::name;
-use crate::scan::{Raw, ei_scan, elements, find, int, is_space, next_raw, run_length_end};
+use crate::operand::{Operand, name};
+use crate::scan::{
+    Raw, UNCAPPED, ei_scan, elements, find, int, is_space, next_raw, run_length_end,
+};
 
 /// What reading content needs of the resources it's drawn with: how many
 /// components each named color space has, which sizes an unfiltered
@@ -46,6 +50,95 @@ pub fn family_components(family: &[u8]) -> u32 {
         b"G" | b"DeviceGray" | b"CalGray" | b"I" | b"Indexed" | b"Separation" | b"Pattern" => 1,
         b"CMYK" | b"DeviceCMYK" => 4,
         _ => 3,
+    }
+}
+
+/// An inline image (ISO 32000-2, 8.9.7), `BI` to `EI`, one operation
+/// ([`Operation::inline_image`](crate::Operation::inline_image)): where
+/// it is, its dictionary and its data, as written.
+///
+/// ```
+/// use pdf_content_streams::{Limits, ResCx, operations};
+///
+/// let content = b"q BI /W 4 /H 1 /BPC 8 /CS /G /L 4 ID abcd EI Q";
+/// let res = ResCx::none();
+/// let mut read = operations(content, &res, &Limits::DEFAULT);
+/// read.next();
+/// let image = read.next().unwrap().unwrap().inline_image().unwrap();
+/// assert_eq!((image.at(), image.data()), (2..44, 37..41));
+/// assert_eq!(&content[image.dict()], b" /W 4 /H 1 /BPC 8 /CS /G /L 4 ");
+/// let space = image.entry(&[b"CS", b"ColorSpace"]).unwrap();
+/// assert_eq!(space.name().as_deref(), Some(&b"G"[..]));
+/// assert_eq!(image.length(), Some(4));
+/// ```
+#[derive(Clone)]
+pub struct InlineImage<'a> {
+    content: &'a [u8],
+    at: Range<usize>,
+    data: Range<usize>,
+}
+
+impl<'a> InlineImage<'a> {
+    /// The image at `at` in `content`, `BI` to `EI`, its data at `data`.
+    pub(crate) fn new(content: &'a [u8], at: Range<usize>, data: Range<usize>) -> InlineImage<'a> {
+        InlineImage { content, at, data }
+    }
+
+    /// Where it is, `BI` to `EI`.
+    pub fn at(&self) -> Range<usize> {
+        self.at.clone()
+    }
+
+    /// Where its dictionary is: what's between `BI` and `ID`.
+    pub fn dict(&self) -> Range<usize> {
+        // `ID` ends at its data, or at the one white-space byte before it.
+        let before = self.content[self.data.start - 1];
+        let id = self.data.start - usize::from(is_space(before)) - 2;
+        self.at.start + 2..id
+    }
+
+    /// Where its data is, as [`tokens`](crate::tokens) found it.
+    pub fn data(&self) -> Range<usize> {
+        self.data.clone()
+    }
+
+    /// The value under one of `keys`, as written: the last such entry's,
+    /// as PDFium's dictionary keeps the last. Each key is a name's,
+    /// without its `/`, matched with its `#` escapes decoded; an image's
+    /// keys may be abbreviated (8.9.7), so `&[b"CS", b"ColorSpace"]` finds
+    /// its color space either way.
+    pub fn entry(&self, keys: &[&[u8]]) -> Option<Operand<'a>> {
+        let mut found = None;
+        // It was read under a cap on depth, so nothing in it is deeper.
+        image_dict(
+            &self.content[..self.at.end],
+            self.at.start,
+            UNCAPPED,
+            |key, value| {
+                if name(key).is_some_and(|k| keys.contains(&&*k)) {
+                    found = Some(value);
+                }
+            },
+        )
+        .ok()?;
+        found.map(|r| Operand::new(self.content, r))
+    }
+
+    /// The length it gives its data, its `/L` or `/Length`, where that's a
+    /// length, as its data's end is found from it: a non-negative number
+    /// under 2^32, a real's whole part.
+    pub fn length(&self) -> Option<u64> {
+        self.entry(&[b"L", b"Length"]).and_then(|l| int(l.bytes()))
+    }
+}
+
+impl fmt::Debug for InlineImage<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("InlineImage")
+            .field("at", &self.at)
+            .field("dict", &self.dict())
+            .field("data", &self.data)
+            .finish()
     }
 }
 

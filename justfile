@@ -173,7 +173,8 @@ arlington-msrv:
 # forms; `objects`, pdf-objects' parser, and its writer on what it
 # read; `structure`, pdf-structure's reader; `write`, pdf-structure's
 # writer, on what its reader read; `content`, pdf-content-streams' tokens
-# of a page's content; or `check`, the reader and the checker.
+# and operations of a page's content; or `check`, the reader and the
+# checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz
 # module makes, `write`'s with the third byte its input has; `content` from
 # those pdf-content-streams' makes.

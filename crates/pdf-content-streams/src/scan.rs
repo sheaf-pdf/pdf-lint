@@ -9,6 +9,11 @@ use std::ops::Range;
 
 use crate::error::{Error, ErrorKind};
 
+/// No cap on how deep arrays and dictionaries nest: for reading again
+/// what was read under one, which holds none deeper. What's open is kept
+/// in a list on the heap, not on the stack, so any depth is safe.
+pub(crate) const UNCAPPED: usize = usize::MAX;
+
 /// What a raw token is, before an inline image is made one.
 pub(crate) enum Raw {
     Op,

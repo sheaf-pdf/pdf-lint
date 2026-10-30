@@ -16,6 +16,7 @@ use std::ops::Range;
 
 use crate::inline::ResCx;
 use crate::limits::Limits;
+use crate::operations::{Operations, operations};
 use crate::tokens::{Tokens, tokens};
 
 /// A place in a page's content: a byte in one of its streams. The end of
@@ -150,6 +151,13 @@ impl<'a> Concat<'a> {
     /// into them.
     pub fn tokens<'s, 'r>(&'s self, res: &'r ResCx, limits: &Limits) -> Tokens<'s, 'r> {
         tokens(&self.bytes, res, limits)
+    }
+
+    /// The joined bytes' operations ([`operations`](crate::operations)),
+    /// at offsets into them, which [`pos`](Concat::pos) and
+    /// [`span`](Concat::span) map back to the streams.
+    pub fn operations<'s, 'r>(&'s self, res: &'r ResCx, limits: &Limits) -> Operations<'s, 'r> {
+        operations(&self.bytes, res, limits)
     }
 }
 

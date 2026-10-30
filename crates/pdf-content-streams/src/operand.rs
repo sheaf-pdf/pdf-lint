@@ -1,11 +1,174 @@
-//! Operands read when asked: a name, its `#` escapes decoded, and any
-//! operand as a pdf-objects value.
+//! Operands as written, read when asked: a name, its `#` escapes
+//! decoded, any operand as a pdf-objects value, and an array's elements.
 
 use std::borrow::Cow;
+use std::fmt;
+use std::iter::FusedIterator;
+use std::ops::Range;
 
 use pdf_objects::{Dict, Form, Object, Str, Value};
 
-use crate::scan::{hex_string, is_number, literal_string, skip_space, word_end};
+use crate::scan::{
+    UNCAPPED, hex_string, is_number, literal_string, next_raw, skip_space, word_end,
+};
+
+/// An operand as written, and where it is in the content read: what an
+/// operation's operands are
+/// ([`Operation::operands`](crate::Operation::operands),
+/// [`Operation::arg`](crate::Operation::arg)), an array's elements
+/// ([`Operand::elements`]) and an inline image's values
+/// ([`InlineImage::entry`](crate::InlineImage::entry)). Nothing is read
+/// from it until it's asked: [`name`](Operand::name),
+/// [`object`](Operand::object) and the kind it is, from how it starts.
+///
+/// ```
+/// use pdf_content_streams::{Limits, ResCx, operations};
+///
+/// let content = b"/F1 12 Tf [(Hel) -20 (lo)] TJ";
+/// let res = ResCx::none();
+/// let mut read = operations(content, &res, &Limits::DEFAULT);
+/// let tf = read.next().unwrap().unwrap();
+/// // Operand 0 is the last, as PDFium takes them.
+/// let font = tf.arg(1).unwrap();
+/// assert_eq!((font.bytes(), font.range()), (&b"/F1"[..], 0..3));
+/// assert_eq!(font.name().as_deref(), Some(&b"F1"[..]));
+/// assert!(tf.arg(0).unwrap().is_number());
+///
+/// let tj = read.next().unwrap().unwrap();
+/// let shown = tj.arg(0).unwrap();
+/// assert!(shown.is_array());
+/// let elements: Vec<_> = shown.elements().map(|e| e.bytes()).collect();
+/// assert_eq!(elements, [&b"(Hel)"[..], b"-20", b"(lo)"]);
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Operand<'a> {
+    bytes: &'a [u8],
+    /// Where `bytes` starts in the content.
+    at: usize,
+}
+
+impl<'a> Operand<'a> {
+    /// The operand at `range` in `content`.
+    pub(crate) fn new(content: &'a [u8], range: Range<usize>) -> Operand<'a> {
+        Operand {
+            at: range.start,
+            bytes: &content[range],
+        }
+    }
+
+    /// Its bytes, as written.
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Where it is in the content read.
+    pub fn range(&self) -> Range<usize> {
+        self.at..self.at + self.bytes.len()
+    }
+
+    /// The name it is, its `#` escapes decoded ([`name`]); None when it
+    /// isn't one.
+    pub fn name(&self) -> Option<Cow<'a, [u8]>> {
+        name(self.bytes)
+    }
+
+    /// It read as a PDF object ([`object`]), arrays and dictionaries
+    /// nested up to `depth` deep; None for what isn't one.
+    pub fn object(&self, depth: usize) -> Option<Object> {
+        object(self.bytes, depth)
+    }
+
+    /// An array's elements, as written, each where it is, in order: each
+    /// a number, a name, a string, an array or a dictionary with all it
+    /// holds, `true`, `false` or `null`, or what's no object (a closing
+    /// delimiter with nothing to close, a word that's no number); none
+    /// when it isn't an array. Nothing is gathered: each is found as it's
+    /// asked for, where an array's [`object`](Operand::object) finds it.
+    pub fn elements(&self) -> Elements<'a> {
+        let inner = match self.bytes {
+            [b'[', inner @ ..] => inner.strip_suffix(b"]").unwrap_or(inner),
+            _ => &[],
+        };
+        Elements {
+            inner,
+            base: self.at + 1,
+            at: 0,
+        }
+    }
+
+    /// Whether it's a number as PDFium tells one: a word of digits, signs
+    /// and points only. It may still read as none ([`object`]), as `--5`
+    /// does.
+    pub fn is_number(&self) -> bool {
+        !self.bytes.is_empty() && is_number(self.bytes)
+    }
+
+    /// Whether it's a name: it starts with `/`.
+    pub fn is_name(&self) -> bool {
+        self.bytes.first() == Some(&b'/')
+    }
+
+    /// Whether it's a string: it starts with `(`, or with a `<` that
+    /// isn't `<<`.
+    pub fn is_string(&self) -> bool {
+        match self.bytes {
+            [b'(', ..] => true,
+            [b'<', rest @ ..] => rest.first() != Some(&b'<'),
+            _ => false,
+        }
+    }
+
+    /// Whether it's an array: it starts with `[`.
+    pub fn is_array(&self) -> bool {
+        self.bytes.first() == Some(&b'[')
+    }
+
+    /// Whether it's a dictionary: it starts with `<<`.
+    pub fn is_dict(&self) -> bool {
+        self.bytes.starts_with(b"<<")
+    }
+}
+
+impl fmt::Debug for Operand<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Operand")
+            .field("bytes", &String::from_utf8_lossy(self.bytes))
+            .field("range", &self.range())
+            .finish()
+    }
+}
+
+/// An array operand's elements, as written, each where it is
+/// ([`Operand::elements`]).
+#[derive(Debug, Clone)]
+pub struct Elements<'a> {
+    /// What's inside the array, its `[` and `]` left out.
+    inner: &'a [u8],
+    /// Where `inner` starts in the content.
+    base: usize,
+    /// Where the next element is looked for in `inner`.
+    at: usize,
+}
+
+impl<'a> Iterator for Elements<'a> {
+    type Item = Operand<'a>;
+
+    fn next(&mut self) -> Option<Operand<'a>> {
+        // The array was read under a cap on depth, so nothing in it is
+        // deeper, and an element is read as the array read it.
+        let Some(Ok((r, _))) = next_raw(self.inner, self.at, UNCAPPED) else {
+            self.at = self.inner.len();
+            return None;
+        };
+        self.at = r.end;
+        Some(Operand {
+            at: self.base + r.start,
+            bytes: &self.inner[r],
+        })
+    }
+}
+
+impl FusedIterator for Elements<'_> {}
 
 /// The name an operand is, its `#` escapes decoded (ISO 32000-2, 7.3.5);
 /// None when it isn't one. A `#` without two hex digits after it stays as

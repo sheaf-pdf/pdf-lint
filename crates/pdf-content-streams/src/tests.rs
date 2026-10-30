@@ -1,6 +1,8 @@
 //! Tokens that tile what they're read from, inline images by each of
 //! PDFium's rules, errors that say where, the caps, operands read as
-//! objects, and a page's streams read as one and joined under the cap.
+//! objects, a page's streams read as one and joined under the cap, and
+//! operations: the tokens grouped, every operand kept, taken from the
+//! last.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -618,4 +620,388 @@ fn the_types_are_send_and_sync() {
     both::<Join>();
     both::<Error>();
     both::<Pushed<std::io::Error>>();
+    both::<Operations>();
+    both::<Operation>();
+    both::<Operand>();
+    both::<Elements>();
+    both::<InlineImage>();
+}
+
+/// `s`'s operations under `lim`, until the end or an error.
+fn operations_of<'a>(s: &'a [u8], res: &ResCx, lim: &Limits) -> Vec<Result<Operation<'a>, Error>> {
+    operations(s, res, lim).collect()
+}
+
+/// `s`'s operations under the default caps, with no resources: each
+/// one's name and its operands' bytes.
+fn ops(s: &[u8]) -> Vec<(&[u8], Vec<&[u8]>)> {
+    operations_of(s, &ResCx::none(), &Limits::DEFAULT)
+        .into_iter()
+        .map(|op| {
+            let op = op.unwrap();
+            (op.name(), op.operands().map(|o| o.bytes()).collect())
+        })
+        .collect()
+}
+
+/// The operations of `s` are its tokens grouped: each operator or inline
+/// image where its token is, with the operands since the last, each where
+/// its token is, in order; operands at the end are none's.
+fn assert_grouped(s: &[u8], res: &ResCx, lim: &Limits) {
+    let mut read = operations(s, res, lim);
+    let mut operands = Vec::new();
+    for token in tokens(s, res, lim) {
+        let (r, tok) = match token {
+            Ok(token) => token,
+            Err(e) => {
+                assert_eq!(read.next().unwrap().unwrap_err(), e);
+                break;
+            }
+        };
+        let image = match tok {
+            Tok::Operand(_) => {
+                operands.push(r);
+                continue;
+            }
+            Tok::Op(_) => None,
+            Tok::InlineImage(data) => Some(data),
+        };
+        let op = read.next().unwrap().unwrap();
+        assert_eq!(op.at(), r);
+        assert_eq!(op.name(), &s[r.start..r.start + op.name().len()]);
+        assert_eq!(op.inline_image().map(|i| i.data()), image);
+        let ranges: Vec<_> = op.operands().map(|o| o.range()).collect();
+        assert_eq!(ranges, operands);
+        for o in op.operands() {
+            assert_eq!(o.bytes(), &s[o.range()]);
+        }
+        let start = operands.first().map_or(r.start, |o| o.start);
+        assert_eq!(op.range(), start..r.end);
+        operands.clear();
+    }
+    assert!(read.next().is_none(), "nothing more");
+}
+
+#[test]
+fn operations_are_the_tokens_grouped() {
+    let two = |a, b| vec![a, b];
+    assert_eq!(
+        ops(PAGE),
+        vec![
+            (&b"q"[..], vec![]),
+            (
+                b"cm",
+                vec![&b"0.5"[..], b"0", b"0", b"-1.25", b"+.5", b"72."]
+            ),
+            (
+                b"BDC",
+                two(&b"/Artifact"[..], b"<</Type /Pagination /Attached [/Top]>>")
+            ),
+            (b"BT", vec![]),
+            (b"Tf", two(&b"/F#311"[..], b"12")),
+            (b"TJ", vec![&b"[(a\\)(b) c) -250 <4142 43>]"[..]]),
+            (b"Tj", vec![&b"(\\\\)"[..]]),
+            (b"ET", vec![]),
+            (b"EMC", vec![]),
+            (
+                b"Q",
+                vec![
+                    &b"[1 [2 [3]] <</A <</B (c)>>>>]"[..],
+                    b"true",
+                    b"false",
+                    b"null"
+                ]
+            ),
+        ]
+    );
+    assert_grouped(PAGE, &ResCx::none(), &Limits::DEFAULT);
+    let tf = operations(PAGE, &ResCx::none(), &Limits::DEFAULT)
+        .nth(4)
+        .unwrap()
+        .unwrap();
+    assert_eq!((tf.at(), tf.range()), (117..119, 107..119));
+    assert_eq!(tf.arg(1).map(|o| o.range()), Some(107..113));
+    // Its Debug is the operation's, not the content's.
+    assert_eq!(
+        format!("{tf:?}"),
+        r#"Operation { name: "Tf", at: 117..119, image: None, operands: [107..113, 114..116] }"#
+    );
+}
+
+#[test]
+fn args_are_taken_from_the_last() {
+    let read = operations_of(b"1 2 3 4 5 6 7 l h", &ResCx::none(), &Limits::DEFAULT);
+    let (l, h) = (read[0].as_ref().unwrap(), read[1].as_ref().unwrap());
+    let arg = |i| l.arg(i).map(|o| o.bytes());
+    assert_eq!(
+        (arg(0), arg(1), arg(6)),
+        (Some(&b"7"[..]), Some(&b"6"[..]), Some(&b"1"[..]))
+    );
+    for i in [7, 8, usize::MAX] {
+        assert_eq!(l.arg(i), None, "{i}");
+    }
+    let from_the_last: Vec<_> = (0..7).map(|i| l.arg(i).unwrap()).collect();
+    let reversed: Vec<_> = l.operands().rev().collect();
+    assert_eq!(from_the_last, reversed);
+    assert_eq!(l.operands().len(), 7);
+    // None for an operator that has none.
+    assert_eq!((h.arg(0), h.operands().len()), (None, 0));
+}
+
+/// `n` operands, each its index, and then `scn`.
+fn numbered(n: usize) -> Vec<u8> {
+    let mut s: Vec<u8> = (0..n).flat_map(|i| format!("{i} ").into_bytes()).collect();
+    s.extend(b"scn");
+    s
+}
+
+/// Every operand is kept, past the sixteen held in the item too, up to
+/// the cap; past the cap is the error where the first past it starts.
+#[test]
+fn every_operand_is_kept_to_the_cap() {
+    let cap = Limits::DEFAULT.operands;
+    assert_eq!(cap, 65_536);
+    for n in [0, 1, 15, 16, 17, 33, cap] {
+        let s = numbered(n);
+        let read = operations_of(&s, &ResCx::none(), &Limits::DEFAULT);
+        assert_eq!(read.len(), 1, "{n}");
+        let op = read[0].as_ref().unwrap();
+        assert_eq!(op.operands().len(), n);
+        assert_eq!(op.inline(), n <= 16, "{n} held in the item");
+        for (i, o) in op.operands().enumerate() {
+            assert_eq!(o.bytes(), i.to_string().as_bytes());
+        }
+        if n > 0 {
+            assert_eq!(op.arg(0).unwrap().bytes(), (n - 1).to_string().as_bytes());
+            assert_eq!(op.arg(n - 1).unwrap().bytes(), b"0");
+        }
+        assert_eq!(op.arg(n), None);
+    }
+    let mut s = b"q ".to_vec();
+    s.extend(numbered(cap + 1));
+    let read = operations_of(&s, &ResCx::none(), &Limits::DEFAULT);
+    assert_eq!(read.len(), 2);
+    assert_eq!(read[0].as_ref().unwrap().name(), b"q");
+    let first_past = s.len() - b"65536 scn".len();
+    assert_eq!(
+        read[1].as_ref().unwrap_err(),
+        &Error {
+            at: first_past,
+            kind: ErrorKind::Operands
+        }
+    );
+}
+
+#[test]
+fn an_inline_image_is_one_operation() {
+    let s = b"/Im 0 BI /W 4 /H 1 /BPC 8 /CS /RGB /C#53 /G /L 4 ID abcd EI Q";
+    let read = operations_of(s, &ResCx::none(), &Limits::DEFAULT);
+    assert_eq!(read.len(), 2);
+    let op = read[0].as_ref().unwrap();
+    assert_eq!((op.name(), op.at()), (&b"BI"[..], 6..59));
+    // The operands before `BI` are its.
+    let operands: Vec<_> = op.operands().map(|o| o.bytes()).collect();
+    assert_eq!(operands, [&b"/Im"[..], b"0"]);
+    assert_eq!(op.range(), 0..59);
+    let image = op.inline_image().unwrap();
+    assert_eq!((image.at(), image.data()), (6..59, 52..56));
+    assert_eq!(&s[image.data()], b"abcd");
+    assert_eq!(
+        &s[image.dict()],
+        b" /W 4 /H 1 /BPC 8 /CS /RGB /C#53 /G /L 4 "
+    );
+    // The last entry under any of the keys, its key's escapes decoded, as
+    // its data was found by.
+    let entry = |keys: &[&[u8]]| image.entry(keys).map(|o| o.bytes());
+    assert_eq!(entry(&[b"CS", b"ColorSpace"]), Some(&b"/G"[..]));
+    assert_eq!(entry(&[b"ColorSpace"]), None);
+    assert_eq!(entry(&[b"W"]), Some(&b"4"[..]));
+    let w = image.entry(&[b"W"]).unwrap();
+    assert_eq!(&s[w.range()], b"4");
+    assert_eq!(image.length(), Some(4));
+    assert_eq!(
+        read[1].as_ref().unwrap().inline_image().map(|i| i.at()),
+        None
+    );
+    assert_eq!(
+        format!("{image:?}"),
+        "InlineImage { at: 6..59, dict: 8..49, data: 52..56 }"
+    );
+
+    // Data straight after `ID`'s white-space byte, or after `ID` where a
+    // delimiter ends it; a length by either key, a real's whole part, or
+    // none that isn't one.
+    let image = |s: &'static [u8]| {
+        let op = operations_of(s, &ResCx::none(), &Limits::DEFAULT)
+            .remove(0)
+            .unwrap();
+        op.inline_image().unwrap()
+    };
+    let i = image(b"BI /F /AHx /Length 3.7 ID\n0E>EI");
+    assert_eq!((i.dict(), i.length()), (2..23, Some(3)));
+    let i = image(b"BI /F /AHx /L -3 ID 0E> EI");
+    assert_eq!((i.dict(), i.length()), (2..17, None));
+    let i = image(b"BI /F /AHx /L /Three ID 0E> EI");
+    assert_eq!(i.length(), None);
+    let i = image(b"BI/W 2/H 1/BPC 8/CS/G ID[)EI");
+    assert_eq!((i.dict(), i.data()), (2..22, 24..26));
+}
+
+#[test]
+fn operands_at_the_end_are_no_operation() {
+    assert_eq!(ops(b"q 1 2"), [(&b"q"[..], vec![])]);
+    assert_eq!(ops(b"1 2 3"), []);
+    assert_eq!(ops(b""), []);
+    assert_eq!(ops(b" % 1 2 Q"), []);
+    // The same at the end of a page's streams.
+    let page = Concat::new(&[b"q 1", b"0 0 RG Q 9"]);
+    let read: Vec<_> = page
+        .operations(&ResCx::none(), &Limits::DEFAULT)
+        .map(|op| op.unwrap().name())
+        .collect();
+    assert_eq!(read, [&b"q"[..], b"RG", b"Q"]);
+}
+
+#[test]
+fn an_error_ends_the_operations() {
+    let lim = &Limits::DEFAULT;
+    let read = operations_of(b"q 1 0 0 1 0 0 cm (open", &ResCx::none(), lim);
+    let names: Vec<_> = read[..2]
+        .iter()
+        .map(|op| op.as_ref().unwrap().name())
+        .collect();
+    assert_eq!(names, [&b"q"[..], b"cm"]);
+    assert_eq!(
+        read[2].as_ref().unwrap_err(),
+        &Error {
+            at: 17,
+            kind: ErrorKind::String
+        }
+    );
+    assert_eq!(read.len(), 3);
+    // The operands before an error are no operation's.
+    let read = operations_of(b"q 1 2 [3 BT", &ResCx::none(), lim);
+    assert_eq!(read.len(), 2);
+    assert_eq!(
+        read[1].as_ref().unwrap_err(),
+        &Error {
+            at: 6,
+            kind: ErrorKind::Array
+        }
+    );
+    // Nothing after it, asked again.
+    let none = ResCx::none();
+    let mut read = operations(b"BI /W 1 ID", &none, lim);
+    assert_eq!(
+        read.next().unwrap().unwrap_err().kind,
+        ErrorKind::InlineImage
+    );
+    assert!(read.next().is_none() && read.next().is_none());
+}
+
+#[test]
+fn a_pages_operations_map_back_to_its_streams() {
+    let streams: [&[u8]; 3] = [
+        b"q 1 0 0",
+        b"1 0 0 cm /P <</MCID 0>> BDC (a",
+        b"b) Tj EMC Q",
+    ];
+    let page = Concat::new(&streams);
+    let read: Vec<_> = page
+        .operations(&ResCx::none(), &Limits::DEFAULT)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(read.len(), 6);
+    let cm = &read[1];
+    // From its first operand in the first stream to its operator in the
+    // second.
+    assert_eq!(
+        page.span(cm.range()),
+        SpanAcross {
+            start: Pos { stream: 0, at: 2 },
+            end: Pos { stream: 1, at: 8 },
+        }
+    );
+    assert_eq!(page.pos(cm.at().start), Pos { stream: 1, at: 6 });
+    let mcid = read[2].arg(0).unwrap();
+    assert_eq!(page.span(mcid.range()).start, Pos { stream: 1, at: 12 });
+    // The string runs from the second stream into the third.
+    let shown = read[3].arg(0).unwrap();
+    assert_eq!(
+        page.span(shown.range()),
+        SpanAcross {
+            start: Pos { stream: 1, at: 28 },
+            end: Pos { stream: 2, at: 2 },
+        }
+    );
+    assert_eq!(page.pos(read[5].at().start), Pos { stream: 2, at: 10 });
+    assert_grouped(page.bytes(), &ResCx::none(), &Limits::DEFAULT);
+}
+
+#[test]
+fn operands_are_read_when_asked() {
+    let s = b"/A#20B 12 -.5 (s) <41> <</K 1>> [1 [2 3] (x) >> /N] true null --5 m";
+    let read = operations_of(s, &ResCx::none(), &Limits::DEFAULT);
+    let op = read[0].as_ref().unwrap();
+    let o: Vec<Operand> = op.operands().collect();
+    let kinds = |o: &Operand| {
+        [
+            o.is_number(),
+            o.is_name(),
+            o.is_string(),
+            o.is_array(),
+            o.is_dict(),
+        ]
+    };
+    let f = false;
+    assert_eq!(kinds(&o[0]), [f, true, f, f, f]);
+    assert_eq!(kinds(&o[1]), [true, f, f, f, f]);
+    assert_eq!(kinds(&o[2]), [true, f, f, f, f]);
+    assert_eq!(kinds(&o[3]), [f, f, true, f, f]);
+    assert_eq!(kinds(&o[4]), [f, f, true, f, f]);
+    assert_eq!(kinds(&o[5]), [f, f, f, f, true]);
+    assert_eq!(kinds(&o[6]), [f, f, f, true, f]);
+    assert_eq!(kinds(&o[7]), [f; 5]);
+    assert_eq!(kinds(&o[8]), [f; 5]);
+    // A number to PDFium, though it reads as none.
+    assert_eq!(kinds(&o[9]), [true, f, f, f, f]);
+    assert_eq!(o[9].object(8), None);
+    assert_eq!(o[0].name().as_deref(), Some(&b"A B"[..]));
+    assert_eq!(o[1].name(), None);
+    assert_eq!(o[1].object(8), Some(Object::from(12)));
+    assert_eq!(o[5].object(8), Some(Object::from(dict! { "K" => 1 })));
+    assert_eq!(o[5].object(0), None);
+
+    // An array's elements as written, each where it is: a stray closer
+    // too, which isn't an element of the object it reads as.
+    let array = o[6];
+    let elements: Vec<Operand> = array.elements().collect();
+    let bytes: Vec<_> = elements.iter().map(|e| e.bytes()).collect();
+    assert_eq!(bytes, [&b"1"[..], b"[2 3]", b"(x)", b">>", b"/N"]);
+    for e in &elements {
+        assert_eq!(&s[e.range()], e.bytes());
+    }
+    assert_eq!(elements[1].range(), 35..40);
+    let inner: Vec<_> = elements[1].elements().map(|e| e.range()).collect();
+    assert_eq!(inner, [36..37, 38..39]);
+    let read: Vec<_> = elements.iter().filter_map(|e| e.object(7)).collect();
+    assert_eq!(array.object(8), Some(Object::from(read)));
+    // None for what isn't an array, and none in an empty one.
+    assert_eq!(o[5].elements().count(), 0);
+    assert_eq!(o[1].elements().count(), 0);
+    let empty = operations_of(b"[ %]\n] TJ", &ResCx::none(), &Limits::DEFAULT);
+    assert_eq!(
+        empty[0]
+            .as_ref()
+            .unwrap()
+            .arg(0)
+            .unwrap()
+            .elements()
+            .count(),
+        0
+    );
+    assert_eq!(
+        format!("{:?}", o[3]),
+        r#"Operand { bytes: "(s)", range: 14..17 }"#
+    );
 }

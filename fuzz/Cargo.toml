@@ -28,10 +28,11 @@
 # (`mutated_files_write_and_read_back_alike`) runs on mutated files, from
 # seeds with the third byte its input has;
 # `content` calls `pdf_content_streams::fuzz::content`, a page's content
-# read whole and as two streams, its tokens tiling it and each operand read,
-# and again under small caps, which two stable unit tests
-# (`mutated_seeds_keep_every_promise`, `random_fragments_keep_every_promise`)
-# run on mutated seeds and random content;
+# read whole and as two streams, its tokens tiling it, each operand read and
+# its operations its tokens grouped, and again under small caps, which two
+# stable unit tests (`mutated_seeds_keep_every_promise`,
+# `random_fragments_keep_every_promise`) run on mutated seeds and random
+# content;
 # `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
