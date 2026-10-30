@@ -325,6 +325,7 @@ mod tests {
             rule,
             value: "absent".to_string(),
             at: None,
+            revision: None,
         }
     }
 

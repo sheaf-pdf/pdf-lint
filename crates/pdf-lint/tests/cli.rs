@@ -1822,6 +1822,75 @@ fn the_last_update_answers_for_what_it_wrote() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// An earlier revision's trailer is checked from `trailer K`, K its
+/// revision counted from the first, and isn't the update's: `--last-update`
+/// holds none, and a fault an update brings back, which the revision before
+/// it had mended, is the update's, though an older revision had it, as
+/// `--last-update` and `--baseline` of the revision before say.
+#[test]
+fn an_earlier_revisions_trailer_isnt_the_updates() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    // The first revision's trailer's /ID isn't an array; the second's has
+    // none; the third's isn't again.
+    let first = text(&file(&[CATALOG, PAGES, page]));
+    let first = first.replacen("/Root 1 0 R >>", "/Root 1 0 R /ID (abc) >>", 1);
+    let mended = updated(first.as_bytes(), &[(3, page)]);
+    let again = updated_under(&mended, &[(3, page)], " /ID (abc)");
+    let mended = written(&dir, "mended.pdf", &mended);
+    let mended = mended.to_str().unwrap();
+    let again = written(&dir, "again.pdf", &again);
+    let again = again.to_str().unwrap();
+    let found = |args: &[&str]| {
+        let out = run(args);
+        let stdout = text(&out.stdout);
+        let summary = stdout.lines().next().unwrap_or_default().to_string();
+        let found: Vec<String> = (stdout.lines())
+            .filter_map(|l| l.strip_prefix("- "))
+            .map(|l| l.split(" (merged)").next().unwrap().to_string())
+            .collect();
+        (summary, found)
+    };
+
+    // Checked whole, each trailer's own, the newest first.
+    let (summary, all) = found(&[again]);
+    assert!(summary.contains("2 findings"), "{summary}");
+    assert_eq!(
+        all,
+        [
+            "type: FileTrailer/ID at trailer, in the trailer",
+            "type: FileTrailer/ID at trailer 1, in the trailer"
+        ]
+    );
+    let out = run(&["--format", "json", again]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let paths: Vec<_> = (report["findings"].as_array().unwrap().iter())
+        .map(|f| (f["path"].clone(), f["object"].clone()))
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            (json!("trailer"), Value::Null),
+            (json!("trailer 1"), Value::Null)
+        ]
+    );
+    assert_eq!(report["tables"]["FileTrailer"], json!(3));
+
+    // The update's: its trailer's fault, not carried from the first's;
+    // and no earlier trailer held.
+    let (summary, last) = found(&["--last-update", again]);
+    assert!(summary.ends_with(", 1 findings"), "{summary}");
+    assert_eq!(last, ["type: FileTrailer/ID at trailer, in the trailer"]);
+    let out = run(&["--last-update", "--format", "json", again]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["tables"]["FileTrailer"], json!(1));
+
+    // Against the revision before, the same; the first's carried.
+    let (summary, against) = found(&["--baseline", mended, again]);
+    assert!(summary.ends_with(", 1 findings, 1 carried"), "{summary}");
+    assert_eq!(against, last);
+}
+
 #[test]
 fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
     let dir = folder();

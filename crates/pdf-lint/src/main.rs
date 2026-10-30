@@ -971,7 +971,7 @@ struct Line<'a> {
 }
 
 /// A finding, with where its bytes are; its object is `[n,g]`, or null
-/// for the trailer.
+/// for a table's trailer.
 #[derive(Serialize)]
 struct Found<'a> {
     rule: &'a str,
