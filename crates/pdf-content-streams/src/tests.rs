@@ -240,6 +240,59 @@ fn operands_read_as_pdf_objects_reads_them() {
     assert!(found[0].props.is_some());
 }
 
+/// A word of more digits than 64 bits hold with a sign after them, such
+/// as `99999999999999999999--5`, is no number as ISO 32000-2 writes one
+/// (7.3.3), as `--5` isn't: it reads as no object, and is told so, where a
+/// number that long alone reads as the nearest that fits.
+#[test]
+fn a_long_word_of_digits_and_signs_reads_as_none() {
+    let lim = &Limits::DEFAULT;
+    for not in [
+        &b"99999999999999999999--5"[..],
+        b"-99999999999999999999+5",
+        b"+99999999999999999999-",
+        b"99999999999999999999+",
+    ] {
+        assert_eq!(object(not, lim), None, "{}", String::from_utf8_lossy(not));
+    }
+    let read = object(b"[1 99999999999999999999--5 3]", lim).unwrap();
+    assert_eq!(read, Object::from(vec![1.into(), 3.into()]));
+    let s = b"99999999999999999999--5 w";
+    assert_eq!(
+        told(s),
+        [(
+            0..23,
+            "99999999999999999999--5 is a number here and a keyword to ISO 32000-2".to_string()
+        )]
+    );
+}
+
+/// A string operand reads to its end, a hex string's bytes its digits
+/// paired, what's no digit passed over, as PDFium reads them; one that
+/// doesn't end reads as none, alone or inside an array or a dictionary.
+#[test]
+fn a_string_reads_to_its_end_or_as_none() {
+    let lim = &Limits::DEFAULT;
+    assert_eq!(object(b"<4G1>", lim), Some(string(b"A", Form::Hex)));
+    assert_eq!(object(b"<41 4G>", lim), Some(string(b"A@", Form::Hex)));
+    for not in [&b"(a"[..], b"<41", b"[1 <41", b"<</A (b"] {
+        assert_eq!(object(not, lim), None, "{}", String::from_utf8_lossy(not));
+    }
+}
+
+/// A number is one word of digits, signs and points, as PDFium's rules
+/// tell one: bytes of more than one token, or none, aren't one.
+#[test]
+fn a_number_is_one_word() {
+    use crate::scan::is_number;
+    for word in [&b"1"[..], b"--5", b"1.2.3", b"+", b"."] {
+        assert!(is_number(word), "{}", String::from_utf8_lossy(word));
+    }
+    for not in [&b""[..], b"1 2", b"1(", b"1/2", b"1\x80", b"1e5", b"x"] {
+        assert!(!is_number(not), "{}", String::from_utf8_lossy(not));
+    }
+}
+
 #[test]
 fn deep_operands_read_in_one_pass() {
     let mut s = b"[".repeat(500);
@@ -646,6 +699,73 @@ fn an_image_ends_at_the_next_ei_past_its_data() {
     assert_eq!(image(s, &ResCx::none()).1, b"x");
 }
 
+/// PDFium reads 0x80 and 0xFF as white-space, beside ISO 32000-2's six
+/// bytes, in content as everywhere (PDFium 7881 and 8076 alike: `1 2 3
+/// 4<80>re f` fills the rectangle, `/F0<80>10 Tf` sets the font `F0`, and
+/// either after `ID` is the one white-space byte before an inline image's
+/// data): a word or a name ends at either, and it's passed over between
+/// tokens, in an array, and after `ID` or before `EI`; in a string or a
+/// comment it's a byte like any other. To ISO 32000-2 they're regular
+/// (7.2.3), so `ID` with one after it has no white-space there.
+#[test]
+fn pdfiums_white_space_has_0x80_and_0xff() {
+    use Tok::{Op, Operand};
+    assert_eq!(
+        toks(b"1 2 3 4\x80re\xfff"),
+        [
+            Operand(&b"1"[..]),
+            Operand(b"2"),
+            Operand(b"3"),
+            Operand(b"4"),
+            Op(b"re"),
+            Op(b"f")
+        ]
+    );
+    assert_eq!(
+        toks(b"/F0\x8010\xffTf"),
+        [Operand(&b"/F0"[..]), Operand(b"10"), Op(b"Tf")]
+    );
+    let shown = ops(b"[(a)\x80-250\xff(b)]TJ");
+    assert_eq!(shown, [(&b"TJ"[..], vec![&b"[(a)\x80-250\xff(b)]"[..]])]);
+    let tj = operations(b"[(a)\x80-250\xff(b)]TJ", &ResCx::none(), &Limits::DEFAULT)
+        .next()
+        .unwrap()
+        .unwrap();
+    let elements: Vec<_> = tj.arg(0).unwrap().elements().map(|e| e.bytes()).collect();
+    assert_eq!(elements, [&b"(a)"[..], b"-250", b"(b)"]);
+    assert_eq!(
+        toks(b"(\x80\xff)Tj %\x80\nQ"),
+        [Operand(&b"(\x80\xff)"[..]), Op(b"Tj"), Op(b"Q")]
+    );
+    assert_tiles(b"q\x80\xff Q\x80", &ResCx::none(), &Limits::DEFAULT);
+
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G ID\x80x EI";
+    assert_eq!(image(s, &ResCx::none()).1, b"x");
+    let read = operations(s, &ResCx::none(), &Limits::DEFAULT).next();
+    let found = read.unwrap().unwrap().inline_image().unwrap();
+    assert_eq!((found.dict(), found.data()), (2..27, 30..31));
+    assert_eq!(
+        told(s),
+        [(
+            27..29,
+            "an inline image's ID has no white-space after it".to_string()
+        )]
+    );
+    // Its tokens read to `EI`, the byte before it left out of its data.
+    let s = b"BI /F /Xyz ID x y\xffEI";
+    assert_eq!(image(s, &ResCx::none()).1, b"x y");
+    // In a hex string, a byte ISO 32000-2 doesn't allow there.
+    let words = "the hex string <41\u{fffd}42> has a byte that's no hex digit";
+    assert_eq!(told(b"<41\x8042> Tj"), [(0..7, words.to_string())]);
+    // A comment at a stream's end that reads the next stream's first line
+    // as comment, which to ISO 32000-2 holds a token.
+    let page = Concat::new(&[b"q %c", b"\x80\nQ"]);
+    let across = Fault::Across {
+        written: b"%c \x80",
+    };
+    assert_eq!(faults(&page), [(2..6, across)]);
+}
+
 #[test]
 fn errors_say_where() {
     let lim = &Limits::DEFAULT;
@@ -674,6 +794,40 @@ fn errors_say_where() {
     assert_eq!(lexed.len(), 2);
     assert_eq!(lexed[0], Ok((0..1, Tok::Op(b"q"))));
     assert!(lexed[1].is_err());
+}
+
+/// An array or a dictionary is one token to the closer that balances its
+/// opener, what a string or a comment inside holds closing nothing, and a
+/// closer of the other kind passed over. One that doesn't end is an error
+/// where the last opener still open is, or where a string inside that
+/// doesn't end starts; nested past the cap, where the first opener past it
+/// is.
+#[test]
+fn an_array_or_a_dictionary_ends_where_its_tokens_close_it() {
+    use ErrorKind::*;
+    use Tok::{Op, Operand};
+    assert_eq!(toks(b"[(])] TJ"), [Operand(&b"[(])]"[..]), Op(b"TJ")]);
+    assert_eq!(
+        toks(b"[1 %]\n2] TJ"),
+        [Operand(&b"[1 %]\n2]"[..]), Op(b"TJ")]
+    );
+    assert_eq!(
+        toks(b"<</A <4>]>>>> BDC"),
+        [Operand(&b"<</A <4>]>>"[..]), Operand(b">>"), Op(b"BDC")]
+    );
+    assert_eq!(toks(b"[1 >> 2] q"), [Operand(&b"[1 >> 2]"[..]), Op(b"q")]);
+    let lim = &Limits::DEFAULT;
+    let at = |s: &[u8], lim: &Limits| {
+        let e = error(s, lim);
+        (e.at, e.kind)
+    };
+    assert_eq!(at(b"[1 <41", lim), (3, HexString));
+    assert_eq!(at(b"[1 [2", lim), (3, Array));
+    assert_eq!(at(b"<</A [1", lim), (5, Array));
+    assert_eq!(at(b"[<</A 1", lim), (1, Dict));
+    assert_eq!(at(b"[1 %]", lim), (0, Array));
+    assert_eq!(at(b"<<<</A [1]>>>>", &deep(2)), (7, Depth));
+    assert_eq!(at(b"[1]", &deep(0)), (0, Depth));
 }
 
 #[test]

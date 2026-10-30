@@ -13,6 +13,7 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
+pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1.1" }
 thiserror = "2"
 # An operation's operands, sixteen held inline before they spill to the heap.
 tinyvec = { version = "1.13", features = ["alloc"] }

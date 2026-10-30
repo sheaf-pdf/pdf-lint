@@ -4,16 +4,15 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::iter::FusedIterator;
-use std::num::IntErrorKind;
 use std::ops::Range;
 
 use pdf_objects::{Dict, Form, Object, Str, Value};
+use pdf_tokenizer::Kind;
+use pdf_tokenizer::decode::{self, NumberError};
 
 use crate::fault::{self, Fault, Read, Sink};
 use crate::limits::Limits;
-use crate::scan::{
-    UNCAPPED, hex_string, is_number, literal_string, next_raw, skip_space, word_end,
-};
+use crate::scan::{UNCAPPED, is_number, next_raw, significant, skip_space};
 
 /// An operand as written, and where it is in the content read: what an
 /// operation's operands are
@@ -334,61 +333,47 @@ impl<'a, S: Sink<'a> + ?Sized> Reading<'a, '_, S> {
     /// object.
     fn item(&mut self, at: &mut usize, depth: usize, close: Option<&[u8]>) -> Option<Item> {
         let s = self.s;
-        let start = skip_space(s, *at);
-        let rest = s.get(start..)?;
-        let closes = |delimiter: &[u8]| close == Some(delimiter);
-        let closer = match *rest.first()? {
-            b']' => closes(b"]"),
-            b'>' => rest.starts_with(b">>") && closes(b">>"),
+        let token = significant(s, *at)?;
+        let (start, end, written) = (token.start, token.end(), token.bytes);
+        let closer = match token.kind {
+            Kind::ArrayClose => close == Some(b"]"),
+            Kind::DictClose => close == Some(b">>"),
             _ => false,
         };
         if !closer {
             self.values = self.values.checked_sub(1)?;
         }
-        let (end, value) = match *rest.first()? {
-            b'(' => {
-                let end = literal_string(s, start).ok()?;
-                let string =
-                    Value::String(Str::Bytes(literal(&s[start..end])), Some(Form::Literal));
-                (end, Some(string))
+        let value = match token.kind {
+            Kind::String { closed: true } => Some(Value::String(
+                Str::Bytes(literal(written)),
+                Some(Form::Literal),
+            )),
+            Kind::HexString { closed: true } => {
+                Some(Value::String(Str::Bytes(hex(written)), Some(Form::Hex)))
             }
-            b'<' if rest.starts_with(b"<<") => {
-                *at = start + 2;
+            // A string that doesn't end.
+            Kind::String { .. } | Kind::HexString { .. } => return None,
+            Kind::DictOpen => {
+                *at = end;
                 let dict = self.dictionary(at, depth.checked_sub(1)?)?;
                 return Some(Item::Value(Some(dict)));
             }
-            b'<' => {
-                let end = hex_string(s, start).ok()?;
-                let string = Value::String(Str::Bytes(hex(&s[start..end])), Some(Form::Hex));
-                (end, Some(string))
-            }
-            b'[' => {
-                *at = start + 1;
+            Kind::ArrayOpen => {
+                *at = end;
                 let array = self.array(at, depth.checked_sub(1)?)?;
                 return Some(Item::Value(Some(array)));
             }
-            b']' if closes(b"]") => {
-                *at = start + 1;
+            _ if closer => {
+                *at = end;
                 return Some(Item::Close);
             }
-            b'>' if rest.starts_with(b">>") && closes(b">>") => {
-                *at = start + 2;
-                return Some(Item::Close);
-            }
-            b'>' if rest.starts_with(b">>") => (start + 2, None),
-            b')' | b'>' | b']' | b'{' | b'}' => (start + 1, None),
-            b'/' => {
-                let end = word_end(s, start + 1);
-                (end, Some(Value::Name(name(&s[start..end])?.into_owned())))
-            }
-            _ => {
-                let end = word_end(s, start);
-                (end, word(&s[start..end]))
-            }
+            Kind::Name => Some(Value::Name(name(written)?.into_owned())),
+            Kind::Integer | Kind::Real | Kind::Keyword => word(written),
+            // A closer with nothing to close, or a brace.
+            _ => None,
         };
         *at = end;
         if close.is_some() && self.sink.wants() {
-            let written = &s[start..end];
             let place = self.base + start..self.base + end;
             if fault::token(written, place.start, self.sink) == Read::Keyword {
                 self.sink.fault(place, Fault::Keyword { written });
@@ -454,91 +439,38 @@ impl<'a, S: Sink<'a> + ?Sized> Reading<'a, '_, S> {
 
 /// A word as an object: a number, `true`, `false` or `null`. A number
 /// past 64 bits as pdf-objects reads one: an integer the nearest that
-/// fits, a real the largest finite float of its sign.
+/// fits, a real the largest finite float of its sign. A number is read as
+/// ISO 32000-2 writes one (7.3.3), so a word only PDFium reads as a
+/// number, such as `--5`, is none.
 fn word(word: &[u8]) -> Option<Value> {
+    let negative = word.first() == Some(&b'-');
     Some(match word {
         b"true" => Value::Bool(true),
         b"false" => Value::Bool(false),
         b"null" => Value::Null,
-        n if !is_number(n) => return None,
-        n => {
-            let n = std::str::from_utf8(n).ok()?;
-            if n.contains('.') {
-                let real: f64 = n.parse().ok()?;
-                Value::Real(match real.is_finite() {
-                    true => real,
-                    false => f64::MAX.copysign(real),
-                })
-            } else {
-                Value::Integer(match n.parse::<i64>() {
-                    Ok(integer) => integer,
-                    Err(e) => match e.kind() {
-                        IntErrorKind::PosOverflow => i64::MAX,
-                        IntErrorKind::NegOverflow => i64::MIN,
-                        _ => return None,
-                    },
-                })
-            }
-        }
+        n if n.contains(&b'.') => Value::Real(match decode::number(n) {
+            Ok(real) => real,
+            Err(NumberError::Overflow) if negative => f64::MIN,
+            Err(NumberError::Overflow) => f64::MAX,
+            Err(NumberError::NotANumber) => return None,
+        }),
+        n => Value::Integer(match decode::integer(n) {
+            Ok(integer) => integer,
+            Err(NumberError::Overflow) if negative => i64::MIN,
+            Err(NumberError::Overflow) => i64::MAX,
+            Err(NumberError::NotANumber) => return None,
+        }),
     })
 }
 
-/// A literal string's bytes, its escapes read: `(…)` as lexed.
+/// A literal string's bytes, its escapes read: `(…)` as lexed, read as
+/// ISO 32000-2 reads one (7.3.4.2), an end of line as a line feed.
 pub(crate) fn literal(string: &[u8]) -> Vec<u8> {
-    let inner = &string[1..string.len().saturating_sub(1).max(1)];
-    let mut out = Vec::with_capacity(inner.len());
-    let mut i = 0;
-    while let Some(&c) = inner.get(i) {
-        i += 1;
-        match c {
-            b'\\' => {
-                let Some(&e) = inner.get(i) else { break };
-                i += 1;
-                match e {
-                    b'n' => out.push(b'\n'),
-                    b'r' => out.push(b'\r'),
-                    b't' => out.push(b'\t'),
-                    b'b' => out.push(0x08),
-                    b'f' => out.push(0x0c),
-                    b'0'..=b'7' => {
-                        let mut v = u32::from(e - b'0');
-                        for _ in 0..2 {
-                            match inner.get(i) {
-                                Some(&d @ b'0'..=b'7') => {
-                                    v = v * 8 + u32::from(d - b'0');
-                                    i += 1;
-                                }
-                                _ => break,
-                            }
-                        }
-                        out.push(v as u8);
-                    }
-                    // A line continued: the end of line is no part of it.
-                    b'\r' => i += usize::from(inner.get(i) == Some(&b'\n')),
-                    b'\n' => {}
-                    e => out.push(e),
-                }
-            }
-            // Any end of line reads as a line feed.
-            b'\r' => {
-                i += usize::from(inner.get(i) == Some(&b'\n'));
-                out.push(b'\n');
-            }
-            c => out.push(c),
-        }
-    }
-    out
+    decode::literal(string).bytes().collect()
 }
 
 /// A hex string's bytes: `<…>` as lexed, what isn't a hex digit passed
-/// over, an odd last digit followed by 0.
+/// over, an odd last digit followed by 0, as PDFium reads one.
 pub(crate) fn hex(string: &[u8]) -> Vec<u8> {
-    let digits: Vec<u8> = string
-        .iter()
-        .filter_map(|&c| (c as char).to_digit(16).map(|d| d as u8))
-        .collect();
-    digits
-        .chunks(2)
-        .map(|pair| pair[0] << 4 | pair.get(1).copied().unwrap_or(0))
-        .collect()
+    decode::pdfium::hex(string).collect()
 }

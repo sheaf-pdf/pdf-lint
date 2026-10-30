@@ -5,7 +5,8 @@
 //!
 //! - **Tokens** ([`tokens`]): operators, operands as written, and inline
 //!   images, `BI` to `EI`, each one token. Tokens end where PDFium's
-//!   `CPDF_StreamParser` ends them, and an inline image's data is found by
+//!   `CPDF_StreamParser` ends them, pdf-tokenizer's tokens read by its
+//!   PDFium rules, and an inline image's data is found by
 //!   PDFium's `ReadInlineStream` rules, from the components of the color
 //!   spaces the caller gives ([`ResCx`]), but where PDFium decodes it to
 //!   find its end ([`tokens`] says where). What an operator does is no
@@ -47,12 +48,14 @@
 //!   rules would read the bytes another way than PDFium's, told with where
 //!   it is to a sink the caller gives ([`Tokens::with_sink`],
 //!   [`Operations::with_sink`], [`Operand::object_with`]); what's read is
-//!   the same. With none, `()`, none is looked for.
+//!   the same. With none, `()`, none is looked for. One isn't told: 0x80
+//!   and 0xFF read as white-space ([`fault`] says).
 //!
 //! No resolver: what's read from the file, the streams decoded, the color
 //! spaces' components and the property lists, the caller gives.
 
 mod balance;
+mod data;
 mod error;
 pub mod fault;
 #[cfg(any(test, fuzzing))]

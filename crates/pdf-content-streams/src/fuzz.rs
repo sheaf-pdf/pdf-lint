@@ -765,7 +765,8 @@ fn operand_reads(operand: &[u8], limits: &Limits) {
     }
 }
 
-/// Whether `gap` is white-space and comments only.
+/// Whether `gap` is white-space and comments only: white-space by
+/// PDFium's rules, ISO 32000-2's six bytes and 0x80 and 0xFF.
 pub(crate) fn blank(gap: &[u8]) -> bool {
     let mut comment = false;
     gap.iter().all(|&c| {
@@ -774,7 +775,11 @@ pub(crate) fn blank(gap: &[u8]) -> bool {
             b'\r' | b'\n' => false,
             _ => comment,
         };
-        comment || matches!(c, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
+        comment
+            || matches!(
+                c,
+                b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ' | 0x80 | 0xFF
+            )
     })
 }
 

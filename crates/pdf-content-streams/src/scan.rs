@@ -1,11 +1,14 @@
 //! What a token is and where it ends, as PDFium's `CPDF_StreamParser`
-//! ends them: at white-space and delimiters, a word of digits, signs and
-//! points a number, strings nested, an array or a dictionary one token
-//! with all it holds, and a closing delimiter with nothing to close a
-//! token of its own. Only this module knows how a token ends; the rest of
-//! the crate takes the ranges it cuts.
+//! ends them: pdf-tokenizer's tokens, read by PDFium's rules
+//! ([`Pdfium`]), white-space and comments passed over, a word of digits,
+//! signs and points a number, strings nested, an array or a dictionary one
+//! token with all it holds, and a closing delimiter with nothing to close a
+//! token of its own. Content's tokens come from here: the rest of the
+//! crate takes the ranges it cuts, or the tokenizer it makes.
 
 use std::ops::Range;
+
+use pdf_tokenizer::{Kind, Pdfium, Token, Tokenizer};
 
 use crate::error::{Error, ErrorKind};
 
@@ -20,6 +23,23 @@ pub(crate) enum Raw {
     Operand,
 }
 
+/// The tokens of `s` from `at`, by PDFium's rules.
+pub(crate) fn tokenizer(s: &[u8], at: usize) -> Tokenizer<'_, Pdfium> {
+    Tokenizer::at(s, at).with_rules(Pdfium)
+}
+
+/// The first token from `at` that isn't white-space or a comment; None at
+/// the end.
+pub(crate) fn significant(s: &[u8], at: usize) -> Option<Token<'_>> {
+    tokenizer(s, at).find(|t| !matches!(t.kind, Kind::Space | Kind::Comment))
+}
+
+/// Where the first token from `at` that isn't white-space or a comment
+/// starts, or the end.
+pub(crate) fn skip_space(s: &[u8], at: usize) -> usize {
+    significant(s, at).map_or(s.len().max(at), |t| t.start)
+}
+
 /// The token from `from` on, past white-space and comments; None at the
 /// end.
 pub(crate) fn next_raw(
@@ -27,40 +47,75 @@ pub(crate) fn next_raw(
     from: usize,
     depth: usize,
 ) -> Option<Result<(Range<usize>, Raw), Error>> {
-    let start = skip_space(s, from);
-    let end = match *s.get(start)? {
-        b'(' => literal_string(s, start),
-        b'[' => nested(s, start, depth),
-        b'<' if s.get(start + 1) == Some(&b'<') => nested(s, start, depth),
-        b'<' => hex_string(s, start),
-        b'>' if s.get(start + 1) == Some(&b'>') => Ok(start + 2),
-        b')' | b'>' | b']' | b'{' | b'}' => Ok(start + 1),
-        b'/' => Ok(word_end(s, start + 1)),
-        _ => {
-            let end = word_end(s, start);
-            let word = &s[start..end];
-            let kind = if is_number(word) || matches!(word, b"true" | b"false" | b"null") {
-                Raw::Operand
-            } else {
-                Raw::Op
-            };
-            return Some(Ok((start..end, kind)));
-        }
+    let mut tokens = tokenizer(s, from);
+    let token = tokens.find(|t| !matches!(t.kind, Kind::Space | Kind::Comment))?;
+    let error = |kind| {
+        Some(Err(Error {
+            at: token.start,
+            kind,
+        }))
     };
-    Some(end.map(|end| (start..end, Raw::Operand)))
+    let end = match token.kind {
+        Kind::Keyword if !matches!(token.bytes, b"true" | b"false" | b"null") => {
+            return Some(Ok((token.range(), Raw::Op)));
+        }
+        Kind::String { closed: false } => return error(ErrorKind::String),
+        Kind::HexString { closed: false } => return error(ErrorKind::HexString),
+        Kind::ArrayOpen | Kind::DictOpen => match nested(tokens, token, depth) {
+            Ok(end) => end,
+            Err(e) => return Some(Err(e)),
+        },
+        // A number, `true`, `false` or `null`, a name, a string, a closer
+        // with nothing to close or a brace.
+        _ => token.end(),
+    };
+    Some(Ok((token.start..end, Raw::Operand)))
 }
 
-/// An array or dictionary from `start`, with all it holds: where it
-/// ends. A closing delimiter that doesn't close what's open is passed
-/// over.
-fn nested(s: &[u8], start: usize, cap: usize) -> Result<usize, Error> {
+/// An array or dictionary from `open`, its `[` or `<<`, with all it holds,
+/// `tokens` reading on after it: where it ends. A closing delimiter that
+/// doesn't close what's open is passed over.
+fn nested(mut tokens: Tokenizer<'_, Pdfium>, open: Token<'_>, cap: usize) -> Result<usize, Error> {
     // Where each array or dictionary still open starts, and whether it's
     // a dictionary.
-    let mut open: Vec<(usize, bool)> = Vec::new();
-    let mut at = start;
+    let mut open_at: Vec<(usize, bool)> = Vec::new();
+    let mut token = open;
     loop {
-        let Some(&c) = s.get(at) else {
-            let (at, dict) = open.last().copied().unwrap_or((start, false));
+        match token.kind {
+            Kind::ArrayOpen | Kind::DictOpen => {
+                if open_at.len() >= cap {
+                    return Err(Error {
+                        at: token.start,
+                        kind: ErrorKind::Depth,
+                    });
+                }
+                open_at.push((token.start, token.kind == Kind::DictOpen));
+            }
+            Kind::ArrayClose | Kind::DictClose => {
+                let dict = token.kind == Kind::DictClose;
+                if open_at.last().is_some_and(|&(_, d)| d == dict) {
+                    open_at.pop();
+                    if open_at.is_empty() {
+                        return Ok(token.end());
+                    }
+                }
+            }
+            Kind::String { closed: false } => {
+                return Err(Error {
+                    at: token.start,
+                    kind: ErrorKind::String,
+                });
+            }
+            Kind::HexString { closed: false } => {
+                return Err(Error {
+                    at: token.start,
+                    kind: ErrorKind::HexString,
+                });
+            }
+            _ => {}
+        }
+        let Some(next) = tokens.next() else {
+            let (at, dict) = open_at.last().copied().unwrap_or((open.start, false));
             let kind = if dict {
                 ErrorKind::Dict
             } else {
@@ -68,73 +123,8 @@ fn nested(s: &[u8], start: usize, cap: usize) -> Result<usize, Error> {
             };
             return Err(Error { at, kind });
         };
-        let pair = |second: u8| c == second && s.get(at + 1) == Some(&second);
-        let closes = match c {
-            b'[' | b'<' if c == b'[' || pair(b'<') => {
-                if open.len() >= cap {
-                    return Err(Error {
-                        at,
-                        kind: ErrorKind::Depth,
-                    });
-                }
-                open.push((at, c == b'<'));
-                at += 1 + usize::from(c == b'<');
-                continue;
-            }
-            b']' => Some(false),
-            b'>' if pair(b'>') => Some(true),
-            _ => None,
-        };
-        at = match (c, closes) {
-            (_, Some(dict)) => {
-                let end = at + 1 + usize::from(dict);
-                if open.last().is_some_and(|&(_, d)| d == dict) {
-                    open.pop();
-                    if open.is_empty() {
-                        return Ok(end);
-                    }
-                }
-                end
-            }
-            (b'(', _) => literal_string(s, at)?,
-            (b'<', _) => hex_string(s, at)?,
-            (b'%', _) => line_end(s, at),
-            _ => at + 1,
-        };
+        token = next;
     }
-}
-
-/// A literal string from its `(`: where it ends, after the `)` that
-/// balances it.
-pub(crate) fn literal_string(s: &[u8], start: usize) -> Result<usize, Error> {
-    let mut depth = 0usize;
-    let mut at = start;
-    while let Some(&c) = s.get(at) {
-        match c {
-            b'\\' => at += 1,
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok(at + 1);
-                }
-            }
-            _ => {}
-        }
-        at += 1;
-    }
-    Err(Error {
-        at: start,
-        kind: ErrorKind::String,
-    })
-}
-
-/// A hex string from its `<`: where it ends, after its `>`.
-pub(crate) fn hex_string(s: &[u8], start: usize) -> Result<usize, Error> {
-    find(s, start + 1, b">").map(|end| end + 1).ok_or(Error {
-        at: start,
-        kind: ErrorKind::HexString,
-    })
 }
 
 /// The elements of an array token, as written.
@@ -154,109 +144,16 @@ fn items(inner: &[u8], depth: usize) -> Vec<&[u8]> {
     out
 }
 
-/// Where RunLength data from `at` ends, past its end-of-data byte (128).
-pub(crate) fn run_length_end(s: &[u8], mut at: usize) -> Option<usize> {
-    while let Some(&n) = s.get(at) {
-        at += match n {
-            0..=127 => usize::from(n) + 2,
-            128 => return Some(at + 1),
-            _ => 2,
-        };
-    }
-    None
-}
-
-/// Where ASCII85 data from `at` ends, as PDFium's decoder reads it: past
-/// the first byte that's neither one of its digits (`!` to `u`), `z`, nor
-/// white-space it passes over (CR, LF, space and tab), `~` among them, and
-/// past a `>` straight after; where it starts when that byte is its first.
-/// None when no such byte comes before the end.
-pub(crate) fn a85_end(s: &[u8], at: usize) -> Option<usize> {
-    let passed = |c: &u8| matches!(c, b'!'..=b'u' | b'z' | b'\r' | b'\n' | b' ' | b'\t');
-    let first = at + s.get(at..)?.iter().position(|c| !passed(c))?;
-    if first == at {
-        return Some(at);
-    }
-    Some(first + 1 + usize::from(s.get(first + 1) == Some(&b'>')))
-}
-
-/// The first `EI` from `start` with white-space before it and white-space,
-/// a delimiter or the end after it: where it is.
-pub(crate) fn ei_scan(s: &[u8], start: usize) -> Option<usize> {
-    let mut at = start;
-    loop {
-        let i = find(s, at, b"EI")?;
-        let before = i > 0 && is_space(s[i - 1]);
-        let after = s.get(i + 2).is_none_or(|&c| is_space(c) || is_delimiter(c));
-        if before && after {
-            return Some(i);
-        }
-        at = i + 1;
-    }
-}
-
-pub(crate) fn skip_space(s: &[u8], mut at: usize) -> usize {
-    while let Some(&c) = s.get(at) {
-        if c == b'%' {
-            at = line_end(s, at);
-        } else if is_space(c) {
-            at += 1;
-        } else {
-            break;
-        }
-    }
-    at
-}
-
-/// Where the line from `at` ends: its end-of-line byte, or the end.
-pub(crate) fn line_end(s: &[u8], at: usize) -> usize {
-    s[at..]
-        .iter()
-        .position(|&c| c == b'\r' || c == b'\n')
-        .map_or(s.len(), |n| at + n)
-}
-
-pub(crate) fn word_end(s: &[u8], at: usize) -> usize {
-    s[at..]
-        .iter()
-        .position(|&c| is_space(c) || is_delimiter(c))
-        .map_or(s.len(), |n| at + n)
-}
-
-/// Where `needle` first is in `s` from `at`.
-pub(crate) fn find(s: &[u8], at: usize, needle: &[u8]) -> Option<usize> {
-    s.get(at..)?
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .map(|n| at + n)
-}
-
-/// A non-negative number, as PDFium reads an integer from one: a real's
-/// whole part.
-pub(crate) fn int(number: &[u8]) -> Option<u64> {
-    if !is_number(number) {
-        return None;
-    }
-    let value: f64 = std::str::from_utf8(number).ok()?.parse().ok()?;
-    (0.0..4_294_967_296.0)
-        .contains(&value)
-        .then_some(value as u64)
-}
-
 /// Whether a word is a number, as PDFium tells one: digits, signs and
-/// points only.
+/// points only, an integer or a real by PDFium's rules.
 pub(crate) fn is_number(word: &[u8]) -> bool {
-    word.iter()
-        .all(|c| matches!(c, b'0'..=b'9' | b'+' | b'-' | b'.'))
+    tokenizer(word, 0).next().is_some_and(|t| {
+        matches!(t.kind, Kind::Integer | Kind::Real) && t.bytes.len() == word.len()
+    })
 }
 
+/// Whether `c` is white-space by PDFium's rules: ISO 32000-2's six bytes
+/// (7.2.3), and 0x80 and 0xFF.
 pub(crate) fn is_space(c: u8) -> bool {
-    matches!(c, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
-}
-
-fn is_delimiter(c: u8) -> bool {
-    matches!(
-        c,
-        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
-    )
+    pdf_tokenizer::Rules::Pdfium.is_white_space(c)
 }

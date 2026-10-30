@@ -33,11 +33,21 @@
 //!
 //! Each is told once, as reading passes its end: faults come in the order
 //! of their ends.
+//!
+//! One reading isn't told: 0x80 and 0xFF are white-space to PDFium and
+//! regular bytes to ISO 32000-2 (7.2.3), so where one is outside a string,
+//! a comment or an inline image's data, ISO reads a word or a name on over
+//! it, or a word of its own. Only as the byte after an inline image's `ID`
+//! is it told, as [`AfterId`](Fault::AfterId): ISO's white-space isn't
+//! there.
 
 use std::borrow::Cow;
 use std::ops::Range;
 
-use crate::scan::{is_number, is_space};
+use pdf_tokenizer::decode::{self, NumberError};
+use pdf_tokenizer::is_white_space;
+
+use crate::scan::is_number;
 
 /// Where faults are told: a checker keeps them; `()` drops them, and
 /// wants none, so none is looked for. A fault borrows from `'a`, the
@@ -318,42 +328,29 @@ pub(crate) fn token<'a>(written: &'a [u8], at: usize, sink: &mut (impl Sink<'a> 
     read
 }
 
-/// A number word's fault: one ISO 32000-2 doesn't write so, or one past
-/// what's read here.
+/// A number word's fault: one ISO 32000-2 doesn't write so (7.3.3), or
+/// one past what's read here, each as pdf-tokenizer reads a number by ISO's
+/// rules: an integer, or a real when it has a point.
 fn number(written: &[u8]) -> Option<Fault<'_>> {
-    if !iso_number(written) {
-        return Some(Fault::Number { written });
-    }
-    // Digits, signs and points: ASCII, so text.
-    let text = std::str::from_utf8(written).ok()?;
-    let fits = if written.contains(&b'.') {
-        text.parse::<f64>().is_ok_and(f64::is_finite)
+    let read = if written.contains(&b'.') {
+        decode::number(written).map(drop)
     } else {
-        text.parse::<i64>().is_ok()
+        decode::integer(written).map(drop)
     };
-    (!fits).then_some(Fault::OutOfRange { written })
-}
-
-/// Whether a word is a number as ISO 32000-2 writes one (7.3.3): digits,
-/// a sign before them or not, with at most one point among, before or
-/// after them.
-pub(crate) fn iso_number(word: &[u8]) -> bool {
-    let unsigned = match word {
-        [b'+' | b'-', rest @ ..] => rest,
-        _ => word,
-    };
-    unsigned.iter().any(u8::is_ascii_digit)
-        && unsigned.iter().all(|&c| c.is_ascii_digit() || c == b'.')
-        && unsigned.iter().filter(|&&c| c == b'.').count() <= 1
+    match read {
+        Ok(()) => None,
+        Err(NumberError::NotANumber) => Some(Fault::Number { written }),
+        Err(NumberError::Overflow) => Some(Fault::OutOfRange { written }),
+    }
 }
 
 /// A hex string's fault: a byte between its `<` and `>` that's neither a
-/// hex digit nor white-space.
+/// hex digit nor white-space, ISO 32000-2's (7.2.3).
 fn hex_string(written: &[u8]) -> Option<Fault<'_>> {
     let inner = written.get(1..written.len().saturating_sub(1))?;
     inner
         .iter()
-        .any(|&c| !c.is_ascii_hexdigit() && !is_space(c))
+        .any(|&c| !c.is_ascii_hexdigit() && !is_white_space(c))
         .then_some(Fault::HexString { written })
 }
 

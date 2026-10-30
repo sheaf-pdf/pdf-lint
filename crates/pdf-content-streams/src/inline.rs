@@ -8,14 +8,14 @@ use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
 
+use pdf_tokenizer::{decode, is_white_space};
+
+use crate::data::{a85_end, ei_scan, find, run_length_end};
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Read, Sink};
 use crate::limits::Limits;
 use crate::operand::{Operand, hex, literal, name};
-use crate::scan::{
-    Raw, UNCAPPED, a85_end, ei_scan, elements, find, int, is_number, is_space, next_raw,
-    run_length_end,
-};
+use crate::scan::{Raw, UNCAPPED, elements, is_number, is_space, next_raw};
 
 /// What reading content needs of the resources it's drawn with: how many
 /// components each named color space has, which sizes an unfiltered
@@ -94,7 +94,8 @@ impl<'a> InlineImage<'a> {
 
     /// Where its dictionary is: what's between `BI` and `ID`.
     pub fn dict(&self) -> Range<usize> {
-        // `ID` ends at its data, or at the one white-space byte before it.
+        // `ID` ends at its data, or at the one white-space byte before it,
+        // white-space by PDFium's rules.
         let before = self.content[self.data.start - 1];
         let id = self.data.start - usize::from(is_space(before)) - 2;
         self.at.start + 2..id
@@ -199,7 +200,8 @@ impl<'a, 'r> Images<'a, 'r> {
         let mut dict = ImageDict::default();
         let set = |key: &[u8], value| dict.set(key, value);
         let at = image_dict(s, bi, self.lim.depth, set, sink)?;
-        // One white-space byte after `ID`, then the data.
+        // One white-space byte after `ID`, by PDFium's rules, then the
+        // data.
         let start = at + usize::from(s.get(at).is_some_and(|&c| is_space(c)));
         // A decoder that finds no end of its data is none to PDFium, which
         // then reads on from `ID` as it does for a filter it can't decode.
@@ -227,8 +229,8 @@ impl<'a, 'r> Images<'a, 'r> {
             }
             End::Walk => {
                 let ei = self.ei_from(start).ok_or(unterminated)?;
-                // Its data to its `EI`, the white-space byte before it left
-                // out.
+                // Its data to its `EI`, the white-space byte before it, by
+                // PDFium's rules, left out.
                 let before = ei.start > start && is_space(s[ei.start - 1]);
                 (start..ei.start - usize::from(before), ei.end)
             }
@@ -266,17 +268,18 @@ impl<'a, 'r> Images<'a, 'r> {
             sink.fault(between.clone(), Fault::Abbreviation { written, key });
         }
         // ISO asks white-space after `ID`, and counts its length from after
-        // more of it, by the last of its filters (8.9.7).
+        // more of it, by the last of its filters (8.9.7): its white-space
+        // (7.2.3).
         let ascii = self
             .last_filter(dict)
             .is_some_and(|f| matches!(&*f, b"AHx" | b"ASCIIHexDecode" | b"A85" | b"ASCII85Decode"));
-        if !ascii && !s.get(id).is_some_and(|&c| is_space(c)) {
+        if !ascii && !s.get(id).is_some_and(|&c| is_white_space(c)) {
             sink.fault(id - 2..id, Fault::AfterId);
         }
         if let Some(given) = dict.iso(L).and_then(|l| int(&s[l])) {
             let mut start = data.start;
             if ascii {
-                while s.get(start).is_some_and(|&c| is_space(c)) && start < data.end {
+                while s.get(start).is_some_and(|&c| is_white_space(c)) && start < data.end {
                     start += 1;
                 }
             }
@@ -624,6 +627,15 @@ fn entry_faults<'a>(
         }
         _ => {}
     }
+}
+
+/// A non-negative number, as PDFium reads an integer from one: a real's
+/// whole part.
+fn int(number: &[u8]) -> Option<u64> {
+    let value = decode::number(number).ok()?;
+    (0.0..4_294_967_296.0)
+        .contains(&value)
+        .then_some(value as u64)
 }
 
 /// An inline image's first filter, by what finds its data's end.

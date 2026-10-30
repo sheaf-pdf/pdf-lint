@@ -5,11 +5,13 @@
 use std::iter::FusedIterator;
 use std::ops::Range;
 
+use pdf_tokenizer::{Kind, is_white_space};
+
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Sink};
 use crate::inline::{Images, ResCx};
 use crate::limits::Limits;
-use crate::scan::{Raw, hex_string, is_space, line_end, literal_string, next_raw};
+use crate::scan::{Raw, next_raw, tokenizer};
 
 /// A token of a content stream.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -28,9 +30,11 @@ pub enum Tok<'a> {
 /// The tokens of `s`, in order, each with where it is. Between them is
 /// only white-space and comments. After an error there's nothing more.
 ///
-/// Tokens end where PDFium's `CPDF_StreamParser` ends them: at white-space
-/// and delimiters, a word of digits, signs and points is a number, strings
-/// nest, and an array or a dictionary is one token with all it holds.
+/// Tokens end where PDFium's `CPDF_StreamParser` ends them, as
+/// pdf-tokenizer reads them by PDFium's rules: at white-space, 0x80 and
+/// 0xFF among it beside ISO 32000-2's six bytes, and delimiters, a word of
+/// digits, signs and points is a number, strings nest, and an array or a
+/// dictionary is one token with all it holds.
 /// Where PDFium reads on regardless, this fails: a string, array,
 /// dictionary or inline image that doesn't end, or one past `limits`, is
 /// an [`Error`] saying where. It never panics, and every token moves it
@@ -324,33 +328,35 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
     fn divided(&mut self, region: Range<usize>, tell: bool) -> bool {
         let s = self.s;
         let mut found = false;
-        let mut at = region.start;
+        let mut tokens = tokenizer(s, region.start);
         loop {
             // A join between what's read is between tokens, or in
             // white-space.
+            let at = tokens.offset();
             self.pass(at);
             if at >= region.end || !self.next_join().is_some_and(|join| join < region.end) {
                 return found;
             }
-            // A string or a comment, and where it ends; any other byte is
-            // passed, a `<<` whole.
-            let (end, piece) = match s[at] {
-                b'(' => (literal_string(s, at).unwrap_or(region.end), true),
-                b'<' if s.get(at + 1) == Some(&b'<') => (at + 2, false),
-                b'<' => (hex_string(s, at).unwrap_or(region.end), true),
-                b'%' => (line_end(s, at), true),
-                _ => (at + 1, false),
+            // A string or a comment, and where it ends; any other token is
+            // passed.
+            let Some(token) = tokens.next() else {
+                return found;
             };
-            let (start, end) = (at, end.min(region.end));
-            at = end;
+            let piece = matches!(
+                token.kind,
+                Kind::String { .. } | Kind::HexString { .. } | Kind::Comment
+            );
+            let (start, end) = (token.start, token.end().min(region.end));
             let Some(join) = self.next_join().filter(|&join| piece && join < end) else {
                 continue;
             };
             self.pass(end);
-            let divides = s[start] != b'%' || {
-                // What the comment reads as comment, past the join.
+            let divides = token.kind != Kind::Comment || {
+                // What the comment reads as comment, past the join, holds
+                // a token by ISO 32000-2's rules: its first byte that isn't
+                // their white-space (7.2.3) starts no comment.
                 let swallowed = &s[join + 1..end];
-                let first = swallowed.iter().find(|&&c| !is_space(c));
+                let first = swallowed.iter().find(|&&c| !is_white_space(c));
                 first.is_some_and(|&c| c != b'%')
             };
             if divides {
