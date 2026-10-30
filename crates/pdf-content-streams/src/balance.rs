@@ -1,6 +1,7 @@
 //! A page's `q`/`Q` balance (ISO 32000-2, 8.4.2): how many graphics states
 //! its content leaves saved, and how far it restores states it didn't
-//! save, counted from its operations, with no "unknown".
+//! save, counted from its operations; content that can't be read gives
+//! the operations' error, never a count.
 
 use crate::error::Error;
 use crate::inline::ResCx;
@@ -24,7 +25,7 @@ use crate::page::Concat;
 /// let page = Concat::new(&[b"Q q q 1 0 0 1 9 9 cm", b"Q"]);
 /// let res = ResCx::none();
 /// let counted = balance(&page, &res, &Limits::DEFAULT).unwrap();
-/// assert_eq!(counted, Balance { net: 0, min_prefix: -1 });
+/// assert_eq!((counted.net, counted.min_prefix), (0, -1));
 ///
 /// let mut stepped = Balance::default();
 /// for op in page.operations(&res, &Limits::DEFAULT) {
@@ -33,6 +34,7 @@ use crate::page::Concat;
 /// assert_eq!(stepped, counted);
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Balance {
     /// The `q`s less the `Q`s.
     pub net: i32,

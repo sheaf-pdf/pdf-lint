@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::ops::Range;
 
 use crate::balance::Balance;
 use crate::error::Error;
@@ -16,6 +17,7 @@ use crate::page::{Concat, SpanAcross};
 /// A resource category: a key of `/Resources` (7.8.3, Table 34) whose
 /// dictionary maps the names content uses to what they name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum ResKind {
     /// Color spaces: `CS`'s, `cs`'s and an inline image's.
     ColorSpace,
@@ -35,7 +37,7 @@ pub enum ResKind {
 
 impl ResKind {
     /// Every category, in order.
-    pub const ALL: [ResKind; 7] = [
+    pub const ALL: &'static [ResKind] = &[
         ResKind::ColorSpace,
         ResKind::ExtGState,
         ResKind::Font,
@@ -200,6 +202,7 @@ pub fn names_used(
 /// What's left of content once ranges are taken out, read in one pass
 /// ([`kept`]).
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Kept {
     /// How its `q`s and `Q`s balance.
     pub balance: Balance,
@@ -220,16 +223,12 @@ pub fn kept(
     limits: &Limits,
     drop: &[SpanAcross],
 ) -> Result<Kept, Error> {
-    let drop: Vec<_> = drop.iter().filter_map(|&s| content.offsets(s)).collect();
+    let drop = Dropped::new(drop.iter().filter_map(|&s| content.offsets(s)));
     let mut kept = Kept::default();
     let mut inside = NameSet::default();
     for op in content.operations(res, limits) {
         let op = op?;
-        let range = op.range();
-        let dropped = drop
-            .iter()
-            .any(|d| d.start <= range.start && range.end <= d.end);
-        match dropped {
+        match drop.holds(op.range()) {
             true => inside.take(&op),
             false => {
                 kept.names.take(&op);
@@ -242,6 +241,37 @@ pub fn kept(
         .filter(|n| !kept.names.names.contains(n))
         .collect();
     Ok(kept)
+}
+
+/// Ranges to be taken out, by where they start, each beside the furthest
+/// any of them reaches that starts no later: whether one holds a range is
+/// one search, in any order and however they overlap.
+struct Dropped {
+    starts: Vec<usize>,
+    reach: Vec<usize>,
+}
+
+impl Dropped {
+    fn new(ranges: impl Iterator<Item = Range<usize>>) -> Dropped {
+        let mut ranges: Vec<_> = ranges.collect();
+        ranges.sort_unstable_by_key(|r| r.start);
+        let mut furthest = 0;
+        let (starts, reach) = ranges
+            .iter()
+            .map(|r| {
+                furthest = furthest.max(r.end);
+                (r.start, furthest)
+            })
+            .unzip();
+        Dropped { starts, reach }
+    }
+
+    /// Whether one of them holds `range`: of those starting where it does
+    /// or before, the furthest reaches its end.
+    fn holds(&self, range: Range<usize>) -> bool {
+        let before = self.starts.partition_point(|&s| s <= range.start);
+        before > 0 && self.reach[before - 1] >= range.end
+    }
 }
 
 /// Whether a color space name is a device space or `/Pattern`: no

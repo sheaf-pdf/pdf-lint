@@ -121,9 +121,11 @@ pub fn content(data: &[u8]) {
 /// what its stepper gives, driven an operation at a time ([`Balance::take`],
 /// [`stepped_marked`], [`NameSet::take`]), and each name the one its
 /// operator's category says ([`resource_typed`]); its marked ranges again
-/// under a cap of two deep. With its ranges at the top taken out, what it
-/// keeps is what the operations outside them give, and the names only
-/// those inside use are the rest. Panics on a broken promise.
+/// under a cap of two deep. With its ranges at the top taken out, and
+/// with every range and ranges across two at the top, in no order and
+/// overlapping, what it keeps is what the operations outside them give,
+/// and the names only those inside use are the rest ([`kept_by_hand`]).
+/// Panics on a broken promise.
 pub fn passes(data: &[u8]) {
     let (first, second) = data.split_at(data.len() / 2);
     let page = Concat::new(&[first, second]);
@@ -165,20 +167,45 @@ pub fn passes(data: &[u8]) {
         .filter(|m| m.depth == 0)
         .map(|m| m.span)
         .collect();
-    let drop: Vec<Range<usize>> = top.iter().filter_map(|&s| page.offsets(s)).collect();
-    assert_eq!(drop.len(), top.len(), "each range in the content");
+    kept_by_hand(&page, &ops, &res, &top, &names);
+    // Every range, the innermost first, and ranges each across two at the
+    // top: in no order, overlapping.
+    let mut every: Vec<SpanAcross> = found.iter().rev().map(|m| m.span).collect();
+    let tops: Vec<Range<usize>> = top.iter().filter_map(|&s| page.offsets(s)).collect();
+    for pair in tops.windows(2) {
+        let middle = |r: &Range<usize>| r.start + (r.end - r.start) / 2;
+        every.push(page.span(middle(&pair[0])..middle(&pair[1])));
+    }
+    kept_by_hand(&page, &ops, &res, &every, &names);
+}
+
+/// What `page`, its operations `ops`, keeps once the ranges `drop` are
+/// taken out, as [`kept`] gives it, is what each operation held to each
+/// range by hand gives: the balance and names of those outside every
+/// range, and the names only those inside one use; and [`names_used`]
+/// with the same ranges, its names. `names` are those the whole uses.
+fn kept_by_hand(
+    page: &Concat,
+    ops: &[Result<Operation, Error>],
+    res: &ResCx,
+    drop: &[SpanAcross],
+    names: &NameSet,
+) {
+    let limits = &Limits::DEFAULT;
+    let ranges: Vec<Range<usize>> = drop.iter().filter_map(|&s| page.offsets(s)).collect();
+    assert_eq!(ranges.len(), drop.len(), "each range in the content");
     let mut kept_balance = Balance::default();
     let (mut kept_names, mut inside) = (NameSet::default(), NameSet::default());
     for op in ops.iter().flatten() {
         let r = op.range();
-        if drop.iter().any(|d| d.start <= r.start && r.end <= d.end) {
+        if ranges.iter().any(|d| d.start <= r.start && r.end <= d.end) {
             inside.take(op);
         } else {
             kept_balance.take(op);
             kept_names.take(op);
         }
     }
-    let k = kept(&page, &res, limits, &top).expect("read as before");
+    let k = kept(page, res, limits, drop).expect("read as before");
     assert_eq!((k.balance, &k.names), (kept_balance, &kept_names), "kept");
     for (kind, name) in inside.iter() {
         let only_inside = !kept_names.contains(kind, name);
@@ -186,7 +213,7 @@ pub fn passes(data: &[u8]) {
     }
     assert!(k.dropped.iter().all(|(kind, n)| inside.contains(kind, n)));
     assert_eq!(k.names.len() + k.dropped.len(), names.len(), "every name");
-    assert_eq!(names_used(&page, &res, limits, &top), Ok(k.names));
+    assert_eq!(names_used(page, res, limits, drop), Ok(k.names));
 }
 
 /// `ops`, `page`'s operations under `limits`, stepped through marked
@@ -197,12 +224,12 @@ pub fn passes(data: &[u8]) {
 /// or a range opened past the cap, is an error where its operator is; a
 /// range open at the end, where the first of those starts; and the
 /// operations' own error is theirs.
-fn stepped_marked(
+fn stepped_marked<'p>(
     page: &Concat,
     ops: &[Result<Operation, Error>],
-    props: &Properties,
+    props: &'p Properties,
     limits: &Limits,
-) -> Result<Vec<crate::Marked>, Error> {
+) -> Result<Vec<crate::Marked<'p>>, Error> {
     let mut nest = MarkedNest::new(props, limits);
     let mut open: Vec<usize> = Vec::new();
     let mut opened = 0;
@@ -238,7 +265,7 @@ fn stepped_marked(
                 match (&m.props, list) {
                     (Some(Props::Named(n, read)), Some(list)) => {
                         assert_eq!(list.name().as_deref(), Some(&n[..]));
-                        assert_eq!(read.as_ref(), props.get(n));
+                        assert_eq!(*read, props.get(n));
                     }
                     (Some(Props::Inline(_)), Some(list)) => assert!(list.is_dict()),
                     (None, list) => assert!(list.is_none_or(|l| !l.is_name() && !l.is_dict())),
@@ -255,6 +282,7 @@ fn stepped_marked(
             }
             None => assert!(!opens && name != b"EMC", "{name:?} told"),
         }
+        assert!(nest.open().eq(open.iter().copied()), "those open");
     }
     assert!(nest.get(opened).is_none());
     let first_open = open

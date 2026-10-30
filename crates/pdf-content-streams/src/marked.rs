@@ -50,33 +50,37 @@ impl Properties {
 
 /// A marked range's property list.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Props {
+pub enum Props<'p> {
     /// Written in the content: `/Tag << … >> BDC`.
     Inline(Dict),
     /// Named there, `/Tag /Name BDC`: the name, decoded, and the list the
-    /// resources have under it, if they have one.
-    Named(Vec<u8>, Option<Dict>),
+    /// resources have under it ([`Properties`]), if they have one,
+    /// borrowed, so ranges naming one list share it.
+    Named(Vec<u8>, Option<&'p Dict>),
 }
 
-impl Props {
+impl Props<'_> {
     /// The list itself, wherever it's written.
     pub fn dict(&self) -> Option<&Dict> {
         match self {
             Props::Inline(dict) => Some(dict),
-            Props::Named(_, dict) => dict.as_ref(),
+            Props::Named(_, dict) => *dict,
         }
     }
 }
 
 /// A marked range: from its tag, before `BMC` or `BDC`, through its `EMC`.
+/// A named property list is borrowed from the [`Properties`] it's found
+/// in, `'p`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Marked {
+#[non_exhaustive]
+pub struct Marked<'p> {
     /// Its tag, decoded, without its `/`: empty when what's before `BMC`
     /// or `BDC` there isn't a name.
     pub tag: Vec<u8>,
     /// None for `BMC`, or a `BDC` whose list is neither a dictionary nor
     /// a name.
-    pub props: Option<Props>,
+    pub props: Option<Props<'p>>,
     /// Where it is: from the first operand of its `BMC` or `BDC` to the
     /// end of its `EMC`.
     pub span: SpanAcross,
@@ -102,12 +106,12 @@ pub struct Marked {
 /// assert!(list.get(b"Subtype").is_some());
 /// assert_eq!((&found[1].tag[..], found[1].depth), (&b"Span"[..], 1));
 /// ```
-pub fn marked(
+pub fn marked<'p>(
     content: &Concat,
-    props: &Properties,
+    props: &'p Properties,
     res: &ResCx,
     limits: &Limits,
-) -> Result<Vec<Marked>, Error> {
+) -> Result<Vec<Marked<'p>>, Error> {
     let mut nest = MarkedNest::new(props, limits);
     for op in content.operations(res, limits) {
         nest.step(content, &op?)?;
@@ -145,7 +149,7 @@ pub struct MarkedNest<'p> {
     depth: usize,
     /// Each range open: where it is in `found`, and where it starts.
     open: Vec<(usize, usize)>,
-    found: Vec<Marked>,
+    found: Vec<Marked<'p>>,
 }
 
 /// What an operation did to marked content: the range it opened or
@@ -217,9 +221,9 @@ impl<'p> MarkedNest<'p> {
     }
 
     /// A `BDC`'s list, `operand` as written.
-    fn props(&self, operand: &Operand) -> Option<Props> {
+    fn props(&self, operand: &Operand) -> Option<Props<'p>> {
         if let Some(name) = operand.name() {
-            let list = self.props.get(&name).cloned();
+            let list = self.props.get(&name);
             return Some(Props::Named(name.into_owned(), list));
         }
         match operand.object(self.depth)?.into_value() {
@@ -230,14 +234,22 @@ impl<'p> MarkedNest<'p> {
 
     /// The range at `index` among those found, in the order they open:
     /// one still open spans its start alone.
-    pub fn get(&self, index: usize) -> Option<&Marked> {
+    pub fn get(&self, index: usize) -> Option<&Marked<'p>> {
         self.found.get(index)
+    }
+
+    /// The ranges still open, by their index among those found
+    /// ([`get`](MarkedNest::get)), the outermost first: at content's end,
+    /// those it leaves open, which [`done`](MarkedNest::done) gives the
+    /// first of.
+    pub fn open(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
+        self.open.iter().map(|&(index, _)| index)
     }
 
     /// Every range found, once content has ended; an error when one is
     /// still open ([`ErrorKind::Marked`]), where the first of those
     /// starts.
-    pub fn done(self) -> Result<Vec<Marked>, Error> {
+    pub fn done(self) -> Result<Vec<Marked<'p>>, Error> {
         match self.open.first() {
             Some(&(_, start)) => Err(Error {
                 at: start,

@@ -2602,7 +2602,7 @@ fn sets_of_operators() {
 const LIM: &Limits = &Limits::DEFAULT;
 
 /// `streams`' marked ranges, read as a page's with no color spaces.
-fn found(streams: &[&[u8]], props: &Properties) -> Result<Vec<Marked>, Error> {
+fn found<'p>(streams: &[&[u8]], props: &'p Properties) -> Result<Vec<Marked<'p>>, Error> {
     marked(&Concat::new(streams), props, &ResCx::none(), LIM)
 }
 
@@ -2653,7 +2653,7 @@ fn marked_ranges_have_their_lists() {
         ])
     );
     // Named lists, found or not.
-    assert_eq!(m[1].props, Some(Props::Named(b"oc1".to_vec(), Some(ocg))));
+    assert_eq!(m[1].props, Some(Props::Named(b"oc1".to_vec(), Some(&ocg))));
     assert_eq!(m[2].props, None);
     assert_eq!(
         m[3].props.as_ref().and_then(Props::dict),
@@ -2746,10 +2746,11 @@ fn marked_content_stepped_by_hand() {
     let page = Concat::new(&[s]);
     let none = ResCx::none();
     let mut nest = MarkedNest::new(&props, LIM);
-    let (mut names, mut events) = (Vec::new(), Vec::new());
+    let (mut names, mut events, mut open) = (Vec::new(), Vec::new(), Vec::new());
     for op in page.operations(&none, LIM) {
         let op = op.unwrap();
         let event = nest.step(&page, &op).unwrap();
+        open.push(nest.open().collect::<Vec<_>>());
         match event {
             Some(Opened(i)) => {
                 let open = nest.get(i).unwrap();
@@ -2793,6 +2794,22 @@ fn marked_content_stepped_by_hand() {
             Some(Ended(0)),
         ]
     );
+    // The ranges open after each, the outermost first.
+    let (outer, inner): (&[usize], &[usize]) = (&[0], &[0, 1]);
+    assert_eq!(
+        open,
+        [
+            outer,
+            outer,
+            inner,
+            inner,
+            outer,
+            outer,
+            &[0, 2],
+            outer,
+            &[]
+        ]
+    );
     assert!(nest.get(3).is_none());
     let stepped = nest.done().unwrap();
     assert_eq!(stepped, marked(&page, &props, &none, LIM).unwrap());
@@ -2800,7 +2817,7 @@ fn marked_content_stepped_by_hand() {
     assert_eq!(stepped[1].span, span_of(s, b"/B /P0 BDC 0 0 m EMC"));
     assert_eq!(
         stepped[1].props,
-        Some(Props::Named(b"P0".to_vec(), Some(header)))
+        Some(Props::Named(b"P0".to_vec(), Some(&header)))
     );
     assert_eq!(stepped[2].props, Some(Props::Inline(dict! { "K" => 1 })));
     assert_eq!((stepped[2].depth, &stepped[2].tag[..]), (1, &b"C"[..]));
@@ -2973,6 +2990,64 @@ fn what_content_keeps_without_ranges() {
     assert_eq!(all.names.len(), 6);
     assert!(all.dropped.is_empty());
     assert_eq!(kept(&page, &none, LIM, &nowhere), Ok(all));
+
+    // Ranges in no order, overlapping: an operation is taken out when one
+    // of them holds all of it, whichever.
+    let s: &[u8] = b"/A BMC /F1 9 Tf /F2 9 Tf EMC /F3 9 Tf /F4 9 Tf /F5 9 Tf";
+    let page = Concat::new(&[s]);
+    let ranges = [
+        span_of(s, b"/F4 9 Tf /F5"),
+        span_of(s, b"/F2 9 Tf EMC /F3 9 Tf"),
+        span_of(s, b"/A BMC /F1 9 Tf /F2 9 Tf EMC"),
+        span_of(s, b"9 Tf EMC /F3"),
+    ];
+    let k = kept(&page, &none, LIM, &ranges).unwrap();
+    let fonts = |names: &NameSet| {
+        names
+            .of(ResKind::Font)
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(fonts(&k.names), [b"F5"]);
+    assert_eq!(fonts(&k.dropped), [b"F1", b"F2", b"F3", b"F4"]);
+    let mut reversed = ranges;
+    reversed.reverse();
+    assert_eq!(kept(&page, &none, LIM, &reversed), Ok(k));
+}
+
+/// A content of many ranges, each taken out, keeps what's outside them
+/// in time that grows with the ranges as their count does, not as its
+/// square: 100,000 ranges, as many as a page's 1.5 MB can make.
+#[test]
+fn many_ranges_taken_out_read_in_one_pass() {
+    let s = b"/A BMC q Q EMC ".repeat(100_000);
+    let page = Concat::new(&[&s]);
+    let none = ResCx::none();
+    let props = Properties::default();
+    let found = marked(&page, &props, &none, LIM).unwrap();
+    let ranges: Vec<SpanAcross> = found.iter().map(|m| m.span).rev().collect();
+    let started = std::time::Instant::now();
+    let k = kept(&page, &none, LIM, &ranges).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(k, crate::Kept::default());
+}
+
+/// Ranges naming one property list share it, whatever its size: each
+/// range's is the one the lists given hold, not a copy.
+#[test]
+fn ranges_share_their_named_list() {
+    let big: pdf_objects::Dict = (0..1_000).map(|i| (format!("K{i}"), i)).collect();
+    let props = Properties::new([(b"P".to_vec(), big)]);
+    let s = b"/T /P BDC EMC ".repeat(20_000);
+    let started = std::time::Instant::now();
+    let found = found(&[&s], &props).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(found.len(), 20_000);
+    let list = props.get(b"P").unwrap();
+    for m in &found {
+        let read = m.props.as_ref().and_then(Props::dict).unwrap();
+        assert!(std::ptr::eq(read, list), "the list given");
+    }
 }
 
 /// Each pass gives the error that stops the operations, where it is.
