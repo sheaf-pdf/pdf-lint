@@ -4326,6 +4326,51 @@ fn a_stream_s_data_where_it_was_written_is_its_own_reading_s_alone() {
     }
 }
 
+/// A stream of another file, its data where it was written there, is
+/// written from the reading given wherever its stream of that number has
+/// its data at the same place: another file's bytes. Unplaced, it's
+/// refused, nothing written; its data given first as its bytes, as its own
+/// file's reading hands them out, it's written from them.
+#[test]
+fn a_stream_of_another_file_is_written_from_its_bytes_once_unplaced() {
+    let stream = |data: &[u8]| Object::from(Stream::new(dict! {}, data.to_vec()));
+    let (a, b) = (file(&[(3, stream(b"aaaa"))]), file(&[(3, stream(b"bbbb"))]));
+    let (a, b) = (open(&a), open(&b));
+    let content = a.get((3, 0)).unwrap().clone();
+    let at = content.as_stream().unwrap().data.at();
+    assert_eq!(at, b.get((3, 0)).unwrap().as_stream().unwrap().data.at());
+    let catalog = catalog();
+    let root = dict! { "Root" => (1, 0) };
+    let options = write::Options::DEFAULT;
+    let written = |content: &Object, out: &mut Vec<u8>| {
+        let bodies = [
+            ((1, 0), write::Body::from(&catalog)),
+            ((3, 0), write::Body::from(content)),
+        ];
+        write::full(out, bodies, &root, None, Some(&b), &options)
+    };
+    // As read: written from the other file's bytes, at the same place.
+    let mut out = Vec::new();
+    written(&content, &mut out).unwrap();
+    assert_eq!(open(&out).data((3, 0)).unwrap().as_ref(), b"bbbb");
+    // Unplaced, it has no data to write.
+    let mut unplaced = content.clone();
+    unplaced.unplace();
+    let mut out = b"held".to_vec();
+    let refused = written(&unplaced, &mut out);
+    let data = serialize::Error::Data { id: Some((3, 0)) };
+    assert_eq!(refused, Err(Error::Serialize(data)));
+    assert_eq!(out, b"held");
+    // Its data given first as its bytes, from its own file's reading.
+    let mut moved = content.clone();
+    let bytes = a.data((3, 0)).unwrap().into_owned();
+    moved.as_stream_mut().unwrap().set_bytes(bytes);
+    moved.unplace();
+    let mut out = Vec::new();
+    written(&moved, &mut out).unwrap();
+    assert_eq!(open(&out).data((3, 0)).unwrap().as_ref(), b"aaaa");
+}
+
 /// A document built in memory is written whole, its objects at their
 /// numbers, read back as built; with no `/ID`, as it had none.
 #[test]

@@ -662,9 +662,11 @@ impl Document {
     /// object it replaces, when one that read was there. New ids start
     /// past `id`'s number, if they didn't. The object keeps the spans it
     /// has, its own and its values', of whatever file it was read from,
-    /// with nothing to say which: where spans are read as places in this
-    /// document's file, as a check reads them, a copy from another file is
-    /// told apart by its number alone.
+    /// with nothing to say which, so an object of another file is put in
+    /// unplaced ([`Object::unplace`]), a stream's data given first as its
+    /// bytes, as that file's reading hands them out: a check reads spans as
+    /// places in this document's file, and a writer would read a stream's
+    /// data where its span says in the reading of this one.
     pub fn set(&mut self, id: ObjectId, object: impl Into<Object>) -> Option<Object> {
         self.past(id.0);
         let was = self.objects.insert(id, Ok((object.into(), None)));

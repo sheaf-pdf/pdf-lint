@@ -37,7 +37,9 @@ impl Span {
 /// [`Object::value_mut`] or an `as_*_mut` accessor, each an edit, which
 /// drops its span: reaching a value inside another goes through each
 /// value that holds it, so their spans go too, and a value no edit
-/// reached keeps its own.
+/// reached keeps its own. [`Object::renumber`] names its references anew,
+/// an edit of each it changes; [`Object::unplace`] drops every place in
+/// it, for an object put among another file's.
 ///
 /// Two are equal when their values are and they were written at the same
 /// place, as [`Value`]'s equality takes in places too: a value read, with
@@ -390,6 +392,98 @@ impl Object {
             }
             None
         })
+    }
+
+    /// Each reference in it, itself too, named as `to` names its object:
+    /// the number and generation it gives, or null where it gives none,
+    /// which is how a reference to no object reads (ISO 32000-2, 7.3.10).
+    /// Its references are those [`Object::references`] gives, in the order
+    /// it gives them, a stream's dictionary's among them, never its data,
+    /// and `to` is asked once each. Whether it changed any.
+    ///
+    /// Each reference it changes is an edit, as through
+    /// [`Object::value_mut`]: its place goes, and the place of every value
+    /// that holds it, as they may no longer be what their bytes say. A value
+    /// it changed nothing in keeps its own, a key its own, and a stream its
+    /// data's, so a writer may still copy what `to` left as it was. It walks
+    /// with a stack of its own, as [`Object::references`] does, so a value
+    /// nested however deeply walks without overflowing the thread's.
+    ///
+    /// The writer names references so as it writes them, without changing
+    /// the value ([`Renumber`](crate::serialize::Renumber)).
+    pub fn renumber(&mut self, mut to: impl FnMut(ObjectId) -> Option<ObjectId>) -> bool {
+        // The place of each value that holds the one walked, from the
+        // outermost, and how many of them, from the outermost, have been
+        // dropped: those holding a reference changed already.
+        let mut holders: Vec<&mut Option<Span>> = Vec::new();
+        let mut dropped = 0;
+        let mut changed = false;
+        // Each value still to walk, and how many values hold it.
+        let mut stack = vec![(self, 0)];
+        while let Some((Object { value, at }, depth)) = stack.pop() {
+            holders.truncate(depth);
+            dropped = dropped.min(depth);
+            let entries = match value {
+                Value::Ref(id) => {
+                    let named = to(*id);
+                    if named != Some(*id) {
+                        *value = named.map_or(Value::Null, Value::Ref);
+                        *at = None;
+                        holders[dropped..].iter_mut().for_each(|held| **held = None);
+                        dropped = depth;
+                        changed = true;
+                    }
+                    continue;
+                }
+                Value::Array(array) => {
+                    holders.push(at);
+                    stack.extend(array.iter_mut().rev().map(|o| (o, depth + 1)));
+                    continue;
+                }
+                Value::Dict(dict) => &mut dict.entries,
+                Value::Stream(stream) => &mut stream.dict.entries,
+                _ => continue,
+            };
+            holders.push(at);
+            let values = entries.iter_mut().rev().map(|entry| &mut entry.value);
+            stack.extend(values.map(|o| (o, depth + 1)));
+        }
+        changed
+    }
+
+    /// Every place in it dropped: its own, each value's in it and each
+    /// key's, and a stream's data's where it was written ([`Data::At`]),
+    /// which then has none ([`Data::Unplaced`]); data in memory
+    /// ([`Data::Bytes`]) stays. For an object of one file put among
+    /// another's objects, whose places would be read as places in that
+    /// file: a writer would write the bytes it has there, and a checker
+    /// point at them. A stream's data is given first as its bytes
+    /// ([`Stream::set_bytes`]), from the reading it was read in, as a stream
+    /// unplaced has no data a writer writes. It walks with a stack of its
+    /// own, as [`Object::references`] does.
+    pub fn unplace(&mut self) {
+        let mut stack = vec![self];
+        while let Some(Object { value, at }) = stack.pop() {
+            *at = None;
+            let entries = match value {
+                Value::Array(array) => {
+                    stack.extend(array.iter_mut());
+                    continue;
+                }
+                Value::Dict(dict) => &mut dict.entries,
+                Value::Stream(stream) => {
+                    if let Data::At(_) = stream.data {
+                        stream.data = Data::Unplaced;
+                    }
+                    &mut stream.dict.entries
+                }
+                _ => continue,
+            };
+            for entry in entries {
+                entry.key_at = None;
+                stack.push(&mut entry.value);
+            }
+        }
     }
 }
 
@@ -1393,5 +1487,311 @@ mod tests {
                 _ => None,
             };
         }
+    }
+
+    /// How many places `o` holds: its own, each value's in it and each
+    /// key's, and a stream's data's where it was written.
+    fn places(o: &Object) -> usize {
+        let entries = |d: &Dict| -> usize {
+            (d.entries.iter())
+                .map(|e| usize::from(e.key_at.is_some()) + places(&e.value))
+                .sum()
+        };
+        usize::from(o.at.is_some())
+            + match &o.value {
+                Value::Array(a) => a.iter().map(places).sum(),
+                Value::Dict(d) => entries(d),
+                Value::Stream(s) => usize::from(s.data.at().is_some()) + entries(&s.dict),
+                _ => 0,
+            }
+    }
+
+    /// Each reference renumbered as the map names its object, the map
+    /// asked once each, in the order written: a reference itself, an
+    /// array's, a dictionary's every entry, a key written twice included,
+    /// and a stream's dictionary's, never its data; nested; generations
+    /// too; null where the map names none; and two numbers named as one.
+    #[test]
+    fn renumber_names_each_reference_as_the_map_does() {
+        use std::cell::RefCell;
+        use std::collections::BTreeMap;
+        let map = BTreeMap::from([
+            ((1, 0), Some((10, 0))),
+            ((2, 0), Some((10, 0))),
+            ((3, 0), None),
+            ((4, 1), Some((40, 2))),
+        ]);
+        let asked = RefCell::new(Vec::new());
+        let to = |id| {
+            asked.borrow_mut().push(id);
+            map.get(&id).copied().unwrap_or(Some(id))
+        };
+        // A reference: named anew, null, or as it is.
+        let mut one = Object::reference(1);
+        assert!(one.renumber(to));
+        assert_eq!(one, Object::from((10, 0)));
+        let mut three = Object::reference(3);
+        assert!(three.renumber(to));
+        assert_eq!(three, Object::null());
+        let mut five = Object::reference(5);
+        assert!(!five.renumber(to));
+        assert_eq!(five, Object::reference(5));
+        for mut scalar in [
+            Object::null(),
+            1.into(),
+            "N".into(),
+            Object::string("1 0 R"),
+        ] {
+            let was = scalar.clone();
+            assert!(!scalar.renumber(to), "{scalar:?}");
+            assert_eq!(scalar, was);
+        }
+
+        // As the parser reads it, nested: in the order written, a key
+        // written twice and 1 named twice among them.
+        asked.borrow_mut().clear();
+        let text = b"[1 0 R << /A 2 0 R /B [3 0 R << /C 4 1 R >>] /A 5 0 R >> [] 6 0 R 1 0 R]";
+        let mut o = read(text);
+        assert!(o.renumber(to));
+        o.unplace();
+        let renumbered = Object::from(vec![
+            Object::from((10, 0)),
+            dict! {
+                "A" => (10, 0),
+                "B" => vec![Object::null(), dict! { "C" => (40, 2) }.into()],
+                "A" => (5, 0),
+            }
+            .into(),
+            Vec::new().into(),
+            Object::reference(6),
+            Object::from((10, 0)),
+        ]);
+        assert_eq!(o, renumbered);
+        let order = [(1, 0), (2, 0), (3, 0), (4, 1), (5, 0), (6, 0), (1, 0)];
+        assert_eq!(*asked.borrow(), order);
+
+        // A stream's dictionary, not its data, whatever the data says,
+        // which stays where it was written; its /Length's reference among
+        // it.
+        asked.borrow_mut().clear();
+        let file = b"4 0 obj\n<< /Length 5 /F 2 0 R >>\nstream\n1 0 R\nendstream\nendobj";
+        let mut s = stream(file);
+        let data = s.as_stream().unwrap().data.clone();
+        assert!(s.renumber(to));
+        assert_eq!(*asked.borrow(), [(2, 0)]);
+        let s = s.as_stream().unwrap();
+        assert_eq!(s.data, data);
+        assert_eq!(s.dict.get(b"F"), Some(&Object::from((10, 0))));
+        asked.borrow_mut().clear();
+        let mut built = Stream::new(dict! { "F" => (4, 1) }, b"1 0 R".to_vec());
+        built.dict.set("Length", Object::reference(1));
+        let mut built = Object::from(built);
+        assert!(built.renumber(to));
+        assert_eq!(*asked.borrow(), [(4, 1), (1, 0)]);
+        let s = built.as_stream().unwrap();
+        assert_eq!(s.data.bytes(), Some(&b"1 0 R"[..]));
+        assert_eq!(s.dict, dict! { "F" => (40, 2), "Length" => (10, 0) });
+    }
+
+    /// Renumbering drops the place of each reference it changes and of
+    /// every value that holds one, and nothing else's: a sibling's, at each
+    /// depth, before the change and after it, a key's, a dictionary's that
+    /// holds no change, and a stream's data's stay. A map that changes
+    /// nothing changes nothing.
+    #[test]
+    fn renumber_drops_the_places_on_the_path_to_a_change_and_keeps_the_rest() {
+        let text = b"<< /E [5] /A [1 0 R 2 0 R] /B << /C 3 0 R >> /D 4 0 R >>";
+        let to = |(n, g): ObjectId| {
+            Some(if (2..=3).contains(&n) {
+                (n * 10, 0)
+            } else {
+                (n, g)
+            })
+        };
+        let read_ = read(text);
+        let mut o = read_.clone();
+        assert!(o.renumber(to));
+        let d = o.as_dict().unwrap();
+        let a = d.get(b"A").unwrap();
+        let [one, twenty] = a.as_array().unwrap() else {
+            panic!("two elements");
+        };
+        let b = d.get(b"B").unwrap();
+        let thirty = b.as_dict().unwrap().get(b"C").unwrap();
+        // What changed, and each value that holds it: in one array, then
+        // in the dictionary after it.
+        assert_eq!(twenty, &Object::from((20, 0)));
+        assert_eq!(thirty, &Object::from((30, 0)));
+        for changed in [&o, a, twenty, b, thirty] {
+            assert_eq!(changed.at, None, "{changed:?}");
+        }
+        // Everything else, where it was written.
+        assert_eq!(written(text, one), Some(&b"1 0 R"[..]));
+        assert_eq!(written(text, d.get(b"D").unwrap()), Some(&b"4 0 R"[..]));
+        let e = d.get(b"E").unwrap();
+        assert_eq!(written(text, e), Some(&b"[5]"[..]));
+        assert_eq!(written(text, &e.as_array().unwrap()[0]), Some(&b"5"[..]));
+        assert!(d.entries().iter().all(|e| e.key_at.is_some()));
+        assert_eq!(places(&o), places(&read_) - 5);
+
+        // Nothing changed: the same value, every place kept, though the map
+        // gave each reference, as it is.
+        for to in [|id| Some(id), |(n, g)| Some((n, g))] {
+            let mut same = read_.clone();
+            assert!(!same.renumber(to));
+            assert_eq!(same, read_);
+        }
+
+        // A stream's dictionary's reference made null: the stream's place
+        // goes, its data's stays, and its other entries'.
+        let file = b"4 0 obj\n<< /Length 5 /F 1 0 R /G 2 0 R >>\nstream\nhello\nendstream\nendobj";
+        let mut s = stream(file);
+        let before = places(&s);
+        assert!(s.renumber(|(n, g)| (n != 1).then_some((n, g))));
+        assert_eq!(s.at, None);
+        let stream_ = s.as_stream().unwrap();
+        let data = stream_.data.at().unwrap();
+        assert_eq!(&file[data.start..data.end], b"hello");
+        assert_eq!(stream_.dict.get(b"F"), Some(&Object::null()));
+        assert_eq!(
+            written(file, stream_.dict.get(b"G").unwrap()),
+            Some(&b"2 0 R"[..])
+        );
+        assert_eq!(places(&s), before - 2);
+    }
+
+    /// Every place dropped: each value's, each key's, and a stream's data's
+    /// where it was written, which then has none, so the writer refuses it;
+    /// a stream's data given first as its bytes stays, and is written. The
+    /// values are what they were.
+    #[test]
+    fn unplace_drops_every_place_and_a_streams_data_where_it_was_written() {
+        let text = b"<< /A [1 (s) <61> 2.50] /B << /C 2 0 R >> /A 3 >>";
+        let mut o = read(text);
+        let mut was = Vec::new();
+        crate::serialize::write(&mut was, &o).unwrap();
+        assert!(places(&o) > 10);
+        o.unplace();
+        assert_eq!(places(&o), 0);
+        let mut now = Vec::new();
+        crate::serialize::write(&mut now, &o).unwrap();
+        assert_eq!(now, was);
+        assert_eq!(now, b"<</A[1(s)<61> 2.5]/B<</C 2 0 R>>/A 3>>");
+
+        // A stream: its data where it was written is gone, so the writer
+        // has none to write.
+        let file = b"4 0 obj\n<< /Length 5 /F (f) >>\nstream\nhello\nendstream\nendobj";
+        let mut s = stream(file);
+        s.unplace();
+        assert_eq!(places(&s), 0);
+        assert_eq!(s.as_stream().unwrap().data, Data::Unplaced);
+        let refused = crate::serialize::indirect(&mut Vec::new(), (4, 0), &s);
+        let data = crate::serialize::Error::Data { id: Some((4, 0)) };
+        assert_eq!(refused, Err(data));
+        // Given as its bytes first, from where it was read, they stay.
+        let mut s = stream(file);
+        let at = s.as_stream().unwrap().data.at().unwrap();
+        let bytes = file[at.start..at.end].to_vec();
+        s.as_stream_mut().unwrap().set_bytes(bytes);
+        s.unplace();
+        assert_eq!(places(&s), 0);
+        assert_eq!(s.as_stream().unwrap().data.bytes(), Some(&b"hello"[..]));
+        let mut out = Vec::new();
+        crate::serialize::indirect(&mut out, (4, 0), &s).unwrap();
+        let want = b"4 0 obj\n<</Length 5/F(f)>>\nstream\nhello\nendstream\nendobj\n";
+        assert_eq!(out, want);
+    }
+
+    /// A value 10,000 levels deep, each level placed, its key too, holding
+    /// a reference to its depth and the level below, as
+    /// [`a_value_nested_ten_thousand_deep_walks_on_a_small_stack`] builds
+    /// it.
+    fn nested(depth: u32) -> Object {
+        let at = |n: u32| Span::new(None, n as usize, n as usize + 1);
+        let mut value = Object::reference(depth).at(at(depth));
+        for n in (0..depth).rev() {
+            value = match n % 2 {
+                0 => Object::from(vec![Object::reference(n).at(at(n)), value]),
+                _ => {
+                    let mut dict = Dict::new();
+                    for (key, value) in [("N", Object::reference(n).at(at(n))), ("Kid", value)] {
+                        let key_at = Some(at(n));
+                        let key = key.as_bytes().to_vec();
+                        dict.push_entry(Entry { key, key_at, value });
+                    }
+                    Object::from(dict)
+                }
+            };
+            value = value.at(at(n));
+        }
+        value
+    }
+
+    /// `value` taken apart a level at a time, as dropping it whole
+    /// recurses, each level given to `each`.
+    fn take_apart(value: Object, mut each: impl FnMut(&Object)) {
+        let mut level = Some(value);
+        while let Some(object) = level.take() {
+            each(&object);
+            level = match object.into_value() {
+                Value::Array(mut array) => array.pop(),
+                Value::Dict(mut dict) => dict.remove(b"Kid"),
+                _ => None,
+            };
+        }
+    }
+
+    /// `walk` on `value`, on a thread of 64 KiB, where a recursive walk of a
+    /// value nested 10,000 deep overflows.
+    fn on_a_small_stack<T: Send>(
+        value: &mut Object,
+        walk: impl FnOnce(&mut Object) -> T + Send,
+    ) -> T {
+        std::thread::scope(|scope| {
+            let small = std::thread::Builder::new().stack_size(64 * 1024);
+            let walked = small.spawn_scoped(scope, || walk(value));
+            walked.unwrap().join().unwrap()
+        })
+    }
+
+    /// A value nested far deeper than the parser reads, as one built in
+    /// memory may be, renumbered with a stack of the walk's own: on a
+    /// thread of 64 KiB. Every level holds a reference changed, so every
+    /// place goes.
+    #[test]
+    fn a_value_nested_ten_thousand_deep_renumbers_on_a_small_stack() {
+        const DEPTH: u32 = 10_000;
+        let mut value = nested(DEPTH);
+        let changed = on_a_small_stack(&mut value, |v| v.renumber(|(n, g)| Some((n + 1, g))));
+        assert!(changed);
+        let walked = on_a_small_stack(&mut value, |v| v.references().collect::<Vec<_>>());
+        let order: Vec<ObjectId> = (1..=DEPTH + 1).map(|n| (n, 0)).collect();
+        assert_eq!(walked, order);
+        let mut levels = 0;
+        take_apart(value, |level| {
+            assert_eq!(level.at, None);
+            levels += 1;
+        });
+        assert_eq!(levels, DEPTH + 1);
+    }
+
+    /// A value nested far deeper than the parser reads unplaced with a
+    /// stack of the walk's own, on a thread of 64 KiB: no level keeps a
+    /// place, nor its keys.
+    #[test]
+    fn a_value_nested_ten_thousand_deep_unplaces_on_a_small_stack() {
+        const DEPTH: u32 = 10_000;
+        let mut value = nested(DEPTH);
+        on_a_small_stack(&mut value, Object::unplace);
+        let mut levels = 0;
+        take_apart(value, |level| {
+            let keys = level.as_dict().map_or(&[][..], Dict::entries);
+            assert!(level.at.is_none() && keys.iter().all(|e| e.key_at.is_none()));
+            if let Some(n) = level.as_dict().and_then(|d| d.get(b"N")) {
+                assert_eq!(n.at, None);
+            }
+            levels += 1;
+        });
+        assert_eq!(levels, DEPTH + 1);
     }
 }

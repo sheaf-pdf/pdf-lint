@@ -1,7 +1,7 @@
 //! What the fuzz target checks, which a unit test checks too: the promises
 //! the parser makes, on any input, and the writer's on what it read, written
-//! plainly and through a toy encryptor ([`Toy`]). It's compiled only for
-//! tests and under cargo-fuzz's `--cfg fuzzing`.
+//! plainly, through a toy encryptor ([`Toy`]) and through a renumbering.
+//! It's compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -10,7 +10,7 @@ use pdf_tokenizer::{Kind, Tokenizer};
 
 use crate::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value};
 use crate::parse::{Body, Error, Fault, Limits, Parser, Sink};
-use crate::serialize::{self, Encrypt};
+use crate::serialize::{self, Encrypt, Renumber};
 
 /// What a sink was told: each fault, where it is and what it says.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -29,6 +29,9 @@ impl Sink<'_> for Kept {
 #[derive(Debug, Clone, Copy)]
 struct How {
     offset: usize,
+    /// What the offset is read from, which the renumbering what's read is
+    /// written through is taken from too ([`renumbering`]).
+    seed: u16,
     stream: Option<ObjectId>,
     ciphertext: bool,
     /// An indirect object, else a value.
@@ -81,10 +84,14 @@ enum Length {
 /// read back as plain. An indirect object is written through a toy
 /// encryptor too ([`toyed`]), which is given each string and stream's data
 /// once, as the object's, and what it wrote, undone, is what was written
-/// plainly. With flag 0x80 and two bytes after the five (and
-/// the limits' two), it's read as a window of a file too, from byte 0 or
-/// 1,000,000, cut where those two bytes choose ([`windowed`]): what isn't
-/// [`Error::Short`] reads as the whole input does.
+/// plainly. Written through a renumbering the offset's two bytes give
+/// ([`renumbering`]), each reference named anew or null, it reads back as
+/// the value renumbered in memory, which keeps its places where the
+/// renumbering changes nothing ([`renumbered`]). With flag 0x80 and two
+/// bytes after the five (and the limits' two), it's read as a window of a
+/// file too, from byte 0 or 1,000,000, cut where those two bytes choose
+/// ([`windowed`]): what isn't [`Error::Short`] reads as the whole input
+/// does.
 /// Panics on a broken promise.
 pub fn parse(data: &[u8]) {
     let (how, input) = chosen(data);
@@ -163,6 +170,7 @@ fn chosen(data: &[u8]) -> (How, &[u8]) {
     let [a, b, flags, c, d, rest @ ..] = data else {
         let how = How {
             offset: 0,
+            seed: 0,
             stream: None,
             ciphertext: false,
             indirect: false,
@@ -187,10 +195,10 @@ fn chosen(data: &[u8]) -> (How, &[u8]) {
         [e, f, input @ ..] if flags & 0x80 != 0 => (Some(u16::from_le_bytes([*e, *f])), input),
         _ => (None, rest),
     };
-    let seed = usize::from(u16::from_le_bytes([*a, *b]));
+    let seed = u16::from_le_bytes([*a, *b]);
     let offset = match flags & 0x40 {
-        0 => seed % (input.len() + 1),
-        _ => input.len() + seed,
+        0 => usize::from(seed) % (input.len() + 1),
+        _ => input.len() + usize::from(seed),
     };
     let window = window.map(|seed| {
         let seed = usize::from(seed);
@@ -202,6 +210,7 @@ fn chosen(data: &[u8]) -> (How, &[u8]) {
     });
     let how = How {
         offset,
+        seed,
         stream: (flags & 1 != 0).then_some((u32::from(*c), 0)),
         ciphertext: flags & 2 != 0,
         indirect: flags & 4 != 0,
@@ -428,6 +437,7 @@ fn windowed(
 pub fn every_window(input: &[u8], length: u16) -> usize {
     let how = How {
         offset: 0,
+        seed: 0,
         stream: None,
         ciphertext: false,
         indirect: false,
@@ -541,34 +551,25 @@ fn shifted_error(error: Error, base: usize) -> Error {
     }
 }
 
-/// Takes every place out of `o`, its values' spans and its keys', and
-/// makes a stream's data the bytes of `data` it was read from, so that a
-/// value read compares with one built.
+/// Takes every place out of `o`, its values' spans and its keys'
+/// ([`Object::unplace`]), making a stream's data first the bytes of `data`
+/// it was read from, so that a value read compares with one built. Only an
+/// indirect object is a stream a parser reads (ISO 32000-2, 7.3.8), so a
+/// stream inside `o` is one built, whose data is its bytes already.
 pub fn unplace(o: &mut Object, data: &[u8]) {
-    match o.value_mut() {
-        Value::Array(a) => a.iter_mut().for_each(|e| unplace(e, data)),
-        Value::Dict(d) => unplace_entries(d, data),
-        Value::Stream(s) => {
-            if let Some(at) = s.data.at() {
-                s.data = Data::Bytes(data[at.start..at.end].to_vec());
-            }
-            unplace_entries(&mut s.dict, data);
+    if let Value::Stream(s) = o.as_written_mut() {
+        if let Some(at) = s.data.at() {
+            s.data = Data::Bytes(data[at.start..at.end].to_vec());
         }
-        _ => {}
     }
-}
-
-/// [`unplace`] on each of `d`'s entries, its key's span too.
-fn unplace_entries(d: &mut Dict, data: &[u8]) {
-    for entry in d.entries_mut() {
-        entry.key_at = None;
-        unplace(&mut entry.value, data);
-    }
+    o.unplace();
 }
 
 /// Checks that `object`, read from `input` as `how` says, is written, and
 /// reads back the same way under the same limits ([`round_trip`]); and, as
-/// an indirect object, through the toy encryptor ([`toyed`]). A ciphertext
+/// an indirect object, through the toy encryptor ([`toyed`]); and written
+/// through the renumbering the offset's seed gives ([`renumbering`]), it
+/// reads back as renumbered in memory ([`renumbered`]). A ciphertext
 /// read's object holding a string is refused whole, nothing written, then
 /// written with its strings taken as their bytes, and read back as plain.
 fn rewrite(input: &[u8], how: How, object: &Object) {
@@ -591,6 +592,20 @@ fn rewrite(input: &[u8], how: How, object: &Object) {
     let written = round_trip(&object, id, input, how.stream, how.limits);
     if let Some(id) = id {
         toyed(&object, id, input, how.limits, &written);
+    }
+    let to = renumbering(how.seed);
+    renumbered(&object, id, input, how.stream, how.limits, &to, &written);
+}
+
+/// The renumbering the fuzz body writes what it read through, from `seed`:
+/// each reference as it is, for 0; else each number `seed` on, wrapping
+/// past the largest, the generation kept, but a number whose remainder by 7
+/// is `seed`'s, which it names none of.
+pub fn renumbering(seed: u16) -> impl Fn(ObjectId) -> Option<ObjectId> {
+    move |(n, g)| match seed {
+        0 => Some((n, g)),
+        _ if n % 7 == u32::from(seed % 7) => None,
+        _ => Some((n.wrapping_add(u32::from(seed)), g)),
     }
 }
 
@@ -620,11 +635,29 @@ pub fn round_trip(
     let mut want = object.clone();
     unplace(&mut want, data);
     as_written(&mut want);
-    let mut parser = Parser::at(&written, 0).limits(written_under(object, limits));
+    read_back(&written, &want, object, id, stream, limits);
+    written
+}
+
+/// Checks that `written`, what the writer wrote of `object`, as indirect
+/// object `id` when there's one, else as a value, reads back, read as a
+/// parser under `limits` reads it, in object stream `stream`'s data when
+/// there's one, as `want`, its places taken out ([`unplace`]), the parser
+/// saying only that a name holds NUL, `#00`, for each name that does; and
+/// that the value read back is written as the same bytes again, as it is.
+fn read_back(
+    written: &[u8],
+    want: &Object,
+    object: &Object,
+    id: Option<ObjectId>,
+    stream: Option<ObjectId>,
+    limits: Limits,
+) {
+    let mut parser = Parser::at(written, 0).limits(written_under(object, limits));
     if let Some(stream) = stream {
         parser = parser.in_stream(stream);
     }
-    let text = String::from_utf8_lossy(&written);
+    let text = String::from_utf8_lossy(written);
     let mut nul = Nul::default();
     // What's read back, and what follows it.
     let (back, after) = match id {
@@ -645,13 +678,86 @@ pub fn round_trip(
     };
     let mut back = back.unwrap_or_else(|e| panic!("{e}, reading back {text:?}"));
     assert!(written[parser.offset()..] == *after, "{text:?}");
-    unplace(&mut back, &written);
-    assert_eq!(back, want, "read back from {text:?}");
-    assert_eq!(nul.0, nul_names(&want), "a fault but for a name's NUL");
+    unplace(&mut back, written);
+    assert_eq!(back, *want, "read back from {text:?}");
+    assert_eq!(nul.0, nul_names(want), "a fault but for a name's NUL");
     let mut again = Vec::new();
     write(&mut again, &back, id, &[]).expect("what's read back writes");
     assert_eq!(again, written, "written again, the same bytes");
-    written
+}
+
+/// Checks that the writer writes `object` with each reference as `to`
+/// names it ([`serialize::write_renumbered`]; as indirect object `id` when
+/// there's one, [`serialize::indirect_renumbered`], a stream's data from
+/// `data` when it's where it was written there,
+/// [`serialize::indirect_stream_renumbered`]), and that what it wrote reads
+/// back, as [`round_trip`] reads it, as `object` renumbered in memory
+/// ([`Object::renumber`]), places aside; and as an indirect object,
+/// through the toy encryptor too, undone, as what it wrote plainly
+/// ([`toyed`]). Renumbered in memory, `object`'s references are its own as
+/// `to` names them, those it names none of left out; where `to` changes
+/// none, `object` is unchanged, every place kept, and what the writer
+/// writes is `plain`, what it wrote of `object` with no renumbering; where
+/// it changes one, `object`'s own place goes. Panics when any of that
+/// fails, or the writer refuses `object`.
+pub fn renumbered<N: Renumber>(
+    object: &Object,
+    id: Option<ObjectId>,
+    data: &[u8],
+    stream: Option<ObjectId>,
+    limits: Limits,
+    to: &N,
+    plain: &[u8],
+) {
+    let mut moved = object.clone();
+    let changed = moved.renumber(|id| to.renumber(id));
+    let named = object.references().filter_map(|id| to.renumber(id));
+    assert!(moved.references().eq(named), "its references, renumbered");
+    match changed {
+        false => assert_eq!(moved, *object, "nothing changed, every place kept"),
+        true => assert_eq!(moved.at, None, "a reference changed, the place gone"),
+    }
+    let mut written = Vec::new();
+    let at = object
+        .as_stream()
+        .and_then(|s| Some((&s.dict, s.data.at()?)));
+    let refused = match (id, at) {
+        (Some(id), Some((dict, at))) => {
+            let data = &data[at.start..at.end];
+            serialize::indirect_stream_renumbered(&mut written, id, dict, data, &(), to).map(drop)
+        }
+        (Some(id), None) => {
+            serialize::indirect_renumbered(&mut written, id, object, &(), to).map(drop)
+        }
+        (None, _) => {
+            serialize::write_renumbered(&mut written, object, to).map_err(serialize::Refused::Write)
+        }
+    };
+    if let Err(e) = refused {
+        panic!("the writer refused {object:?} renumbered: {e}");
+    }
+    if !changed {
+        assert!(written == plain, "renumbering nothing, the plain bytes");
+    }
+    let mut want = moved.clone();
+    unplace(&mut want, data);
+    as_written(&mut want);
+    read_back(&written, &want, object, id, stream, limits);
+    if let Some(id) = id {
+        let toy = Toy::default();
+        let mut sealed = Vec::new();
+        let refused = match at {
+            Some((dict, at)) => {
+                let data = &data[at.start..at.end];
+                serialize::indirect_stream_renumbered(&mut sealed, id, dict, data, &toy, to)
+            }
+            None => serialize::indirect_renumbered(&mut sealed, id, object, &toy, to),
+        };
+        if let Err(e) = refused {
+            panic!("the writer refused {object:?} renumbered through the toy: {e}");
+        }
+        undone(&toy, &sealed, &moved, id, limits, &written);
+    }
 }
 
 /// The limits what the writer wrote of `object` reads back under, when
@@ -688,8 +794,17 @@ pub fn toyed(object: &Object, id: ObjectId, data: &[u8], limits: Limits, plain: 
     if let Err(e) = refused {
         panic!("the writer refused {object:?} through the toy: {e}");
     }
-    let text = String::from_utf8_lossy(&written);
-    let mut parser = Parser::at(&written, 0).limits(written_under(object, limits));
+    undone(&toy, &written, object, id, limits, plain);
+}
+
+/// Checks that `written`, what the writer wrote of `object` as indirect
+/// object `id` through `toy`, gave the toy each string and stream's data the
+/// writer writes once, in the order written, as object `id`'s, and reads
+/// back, under the limits `object` was read under, as what the toy undoes
+/// ([`Toy::undo`]) into `plain`.
+fn undone(toy: &Toy, written: &[u8], object: &Object, id: ObjectId, limits: Limits, plain: &[u8]) {
+    let text = String::from_utf8_lossy(written);
+    let mut parser = Parser::at(written, 0).limits(written_under(object, limits));
     assert_eq!(parser.header(), Ok(id));
     let back = parser.body(id, &mut ()).and_then(|body| match body {
         Body::Object(object) => Ok(object),
@@ -702,7 +817,7 @@ pub fn toyed(object: &Object, id: ObjectId, data: &[u8], limits: Limits, plain: 
     });
     let mut back = back.unwrap_or_else(|e| panic!("{e}, reading back {text:?}"));
     assert!(written[parser.offset()..] == *b"\nendobj\n", "{text:?}");
-    unplace(&mut back, &written);
+    unplace(&mut back, written);
     toy.undo(id, &mut back);
     let mut again = Vec::new();
     write(&mut again, &back, Some(id), &[]).expect("what's undone writes");

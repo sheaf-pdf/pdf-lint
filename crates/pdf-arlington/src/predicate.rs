@@ -259,9 +259,9 @@ pub enum Truth {
 /// number, so the spans of the objects it's given, and of those its
 /// resolver gives, are places in one file's bytes: an object copied from
 /// another file keeps the span it had there, which can be another object's
-/// here, so a copy is given its number, or its span is dropped. Over a
-/// document of several files' objects, then, its indirect objects are told
-/// apart by their numbers.
+/// here, so a copy is given its number, or its spans are dropped
+/// ([`Object::unplace`]). Over a document of several files' objects, then,
+/// its indirect objects are told apart by their numbers.
 pub struct FileCx<'a, R: ?Sized = dyn Resolve<'a> + 'a> {
     /// The trailer as written (`trailer::`).
     trailer: &'a Dict,

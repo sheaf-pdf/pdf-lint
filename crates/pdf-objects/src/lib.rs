@@ -16,6 +16,9 @@
 //!   that still has a span is still what its bytes say;
 //!   [`Object::as_written_mut`] keeps it, for a reader that turns a value
 //!   into what the same bytes stand for, as decrypting a string does.
+//!   [`Object::renumber`] names a value's references anew, an edit of each
+//!   it changes, and [`Object::unplace`] drops every place in a value, for
+//!   one put among another file's objects.
 //! - **A stream's data** ([`Data`]): where it was written, or its bytes.
 //! - **Strings as their bytes:** a [`Str`] is its bytes, its escapes
 //!   decoded; or text a reader decoded without saying from which encoding,
@@ -44,7 +47,10 @@
 //!   objects are written through an encryptor ([`serialize::Encrypt`]),
 //!   which every string and stream's data passes through as it's written,
 //!   given the object's number and generation, but what it leaves in the
-//!   clear; `()` encrypts nothing.
+//!   clear; `()` encrypts nothing. Through a renumbering
+//!   ([`serialize::Renumber`]), each reference is written as it names it,
+//!   for a file whose objects are written at numbers other than those
+//!   they're held at, the value unchanged; `()` names each as it is.
 //! - **References resolved** ([`Resolve`]): what gives the indirect object
 //!   a reference names, a reader's or a document in memory, or any closure
 //!   from an [`ObjectId`] to an object, so that what follows references
