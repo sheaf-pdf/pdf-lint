@@ -28,11 +28,17 @@
 //!   string, array, dictionary or inline image that doesn't end, or one
 //!   past a cap. It never panics, whatever the bytes, and every token moves
 //!   it on.
+//! - **Where ISO 32000-2 reads it otherwise** ([`fault`]): each place its
+//!   rules would read the bytes another way than PDFium's, told with where
+//!   it is to a sink the caller gives ([`Tokens::with_sink`],
+//!   [`Operations::with_sink`], [`Operand::object_with`]); what's read is
+//!   the same. With none, `()`, none is looked for.
 //!
 //! No resolver: what's read from the file, the streams decoded and the
 //! color spaces' components, the caller gives.
 
 mod error;
+pub mod fault;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;

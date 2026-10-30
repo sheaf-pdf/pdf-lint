@@ -1,6 +1,7 @@
 # What page content is made of, for libFuzzer's -dict with the content
 # target: its delimiters, an inline image's keys and their abbreviations,
-# the filters and color spaces that end its data, and a few operators.
+# the filters and color spaces that end its data, a few operators, and
+# what ISO 32000-2 reads otherwise than PDFium.
 "("
 ")"
 "\\("
@@ -16,6 +17,10 @@
 "}"
 "%"
 "#20"
+"#00"
+"#z"
+"<4G>"
+"99999999999999999999"
 "-.5"
 "+17"
 "4."
@@ -46,6 +51,7 @@
 "/F "
 "/Filter "
 "/AHx"
+"[/Fl /AHx]"
 "/A85"
 "/RL"
 "/DCT"

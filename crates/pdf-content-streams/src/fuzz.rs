@@ -1,15 +1,40 @@
 //! What the fuzz target checks, which unit tests check too: the promises
-//! the tokens and the operations make, on any input. It's compiled only
-//! for tests and under cargo-fuzz's `--cfg fuzzing`.
+//! the tokens, the operations and the faults make, on any input. It's
+//! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::ops::Range;
 
 use pdf_objects::{Object, Value};
 
+use crate::fault::{Fault, Sink};
 use crate::{
     Concat, Error, ErrorKind, Join, Limits, Operand, Operation, Operations, ResCx, Tok, name,
     object, operations, tokens,
 };
+
+/// A sink that keeps every fault it's told, in order, where it is.
+#[derive(Debug, Default)]
+pub struct Kept<'a>(pub Vec<(Range<usize>, Fault<'a>)>);
+
+impl<'a> Sink<'a> for Kept<'a> {
+    fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
+        self.0.push((at, fault));
+    }
+}
+
+/// A sink that wants no faults, and keeps any it's told.
+#[derive(Debug, Default)]
+pub struct Unwanted<'a>(pub Vec<(Range<usize>, Fault<'a>)>);
+
+impl<'a> Sink<'a> for Unwanted<'a> {
+    fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
+        self.0.push((at, fault));
+    }
+
+    fn wants(&self) -> bool {
+        false
+    }
+}
 
 /// What one read gave: each token and where it is, then the error, if
 /// one stopped it.
@@ -24,7 +49,9 @@ type Read<'a> = Vec<Result<(Range<usize>, Tok<'a>), Error>>;
 /// operands and an inline image's data, the tokens are the first read's up
 /// to an error, which is the cap's, where the first read's token past it
 /// starts, or the first read's own; and the operations are those tokens
-/// grouped. Panics on a broken promise.
+/// grouped. Each read through a sink that keeps its faults is the same as
+/// through `()` ([`faulted`]), and one that wants none is told none.
+/// Panics on a broken promise.
 pub fn content(data: &[u8]) {
     let res = ResCx::new([
         (b"CS1".to_vec(), 1),
@@ -48,6 +75,7 @@ pub fn content(data: &[u8]) {
     let whole = Concat::new(&[data]);
     let read = tiled(&whole, &res, limits);
     grouped(data, whole.operations(&res, limits), &read, limits);
+    faulted(&whole, &res, limits);
     let halves = tiled(&split, &res, limits);
     grouped(
         split.bytes(),
@@ -55,6 +83,7 @@ pub fn content(data: &[u8]) {
         &halves,
         limits,
     );
+    faulted(&split, &res, limits);
     let small = Limits {
         operands: 3,
         inline_image: 8,
@@ -80,6 +109,163 @@ pub fn content(data: &[u8]) {
         assert_eq!(capped.len(), read.len(), "every token under small caps");
     }
     grouped(data, operations(data, &res, &small), &capped, &small);
+    faulted(&whole, &res, &small);
+}
+
+/// `content`'s tokens and operations through a sink that keeps their
+/// faults are those through `()`; the operations' faults are the tokens'
+/// and, at the end, operands no operator takes, told once; each fault is
+/// inside the content, what it borrows what's where it is, and they come
+/// in the order of their ends. Every operand read with a sink
+/// ([`faulted_operand`]) reads as it does without. Through a sink that
+/// wants none, none is told.
+pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
+    let s = content.bytes();
+    let plain: Vec<_> = content.tokens(res, limits).collect();
+    let mut kept = Kept::default();
+    let read: Vec<_> = content.tokens(res, limits).with_sink(&mut kept).collect();
+    assert_eq!(read, plain, "the same tokens through a sink");
+    in_order(s, &kept.0);
+    divided(content, &plain, &kept.0);
+    // The operands after the last operator or inline image, if no error
+    // ends the tokens.
+    let at_end: Vec<Range<usize>> = match plain.last() {
+        Some(Err(_)) => Vec::new(),
+        _ => {
+            let last = plain.iter().flatten();
+            let operands = last.rev().take_while(|(_, t)| matches!(t, Tok::Operand(_)));
+            let mut operands: Vec<_> = operands.map(|(r, _)| r.clone()).collect();
+            operands.reverse();
+            operands
+        }
+    };
+
+    let shown = |op: &Result<Operation, Error>| format!("{op:?}");
+    let plain: Vec<String> = content
+        .operations(res, limits)
+        .map(|op| shown(&op))
+        .collect();
+    let mut faults = Kept::default();
+    let read: Vec<_> = content
+        .operations(res, limits)
+        .with_sink(&mut faults)
+        .collect();
+    let shown_read: Vec<String> = read.iter().map(shown).collect();
+    assert_eq!(shown_read, plain, "the same operations through a sink");
+    in_order(s, &faults.0);
+    let (trailing, theirs): (Vec<_>, Vec<_>) = faults
+        .0
+        .iter()
+        .cloned()
+        .partition(|(_, f)| matches!(f, Fault::Trailing { .. }));
+    assert_eq!(theirs, kept.0, "the operations' faults the tokens'");
+    let told: Vec<_> = trailing.iter().map(|(at, f)| (at.clone(), *f)).collect();
+    let operands_at_end = match (at_end.first(), at_end.last()) {
+        (Some(first), Some(last)) => {
+            let count = at_end.len();
+            vec![(first.start..last.end, Fault::Trailing { count })]
+        }
+        _ => Vec::new(),
+    };
+    assert_eq!(told, operands_at_end, "operands at the end told once");
+    for op in read.iter().flatten() {
+        for operand in op.operands() {
+            faulted_operand(s, &operand, limits);
+        }
+    }
+
+    let mut unwanted = Unwanted::default();
+    let count = content
+        .operations(res, limits)
+        .with_sink(&mut unwanted)
+        .count();
+    assert_eq!(count, plain.len());
+    assert!(unwanted.0.is_empty(), "none told where none is wanted");
+}
+
+/// An operand read with a sink that keeps its faults reads as it does
+/// without, its faults inside it, in the order of their ends; a sink that
+/// wants none is told none; and an operand that's no array or
+/// dictionary, whose faults are its token's, has none told here.
+fn faulted_operand(s: &[u8], operand: &Operand, limits: &Limits) {
+    let mut kept = Kept::default();
+    let read = operand.object_with(limits.depth, &mut kept);
+    assert_eq!(read, operand.object(limits.depth), "the same object");
+    let r = operand.range();
+    for (at, _) in &kept.0 {
+        assert!(r.start <= at.start && at.end <= r.end, "{at:?} in {r:?}");
+    }
+    in_order(s, &kept.0);
+    if !operand.is_array() && !operand.is_dict() {
+        assert!(kept.0.is_empty(), "a token's own faults are the tokens'");
+    }
+    let mut unwanted = Unwanted::default();
+    operand.object_with(limits.depth, &mut unwanted);
+    assert!(unwanted.0.is_empty(), "none told where none is wanted");
+}
+
+/// Each place a page's streams divide what ISO 32000-2 doesn't let them
+/// divide, among `faults`, holds a join, the space before a stream, and
+/// is a string, a comment or an inline image; and each string token, and
+/// each inline image whose data, holds one is told so.
+fn divided(content: &Concat, tokens: &Read, faults: &[(Range<usize>, Fault)]) {
+    let joins: Vec<usize> = (1..content.stream_count())
+        .map(|i| content.range(i).start - 1)
+        .collect();
+    let holds = |r: &Range<usize>| joins.iter().any(|j| r.contains(j));
+    let string = |w: &[u8]| {
+        w.first() == Some(&b'(') || (w.first() == Some(&b'<') && w.get(1) != Some(&b'<'))
+    };
+    let mut told = Vec::new();
+    for (at, fault) in faults {
+        if let Fault::Across { written } = *fault {
+            assert!(holds(at), "{at:?} holds a join");
+            let comment = written.first() == Some(&b'%');
+            let image = written.starts_with(b"BI");
+            assert!(
+                string(written) || comment || image,
+                "{fault:?}: what's divided"
+            );
+            told.push(at.clone());
+        }
+    }
+    for (r, tok) in tokens.iter().flatten() {
+        let divided = match tok {
+            Tok::Operand(w) => string(w) && holds(r),
+            Tok::InlineImage(data) => holds(data),
+            Tok::Op(_) => false,
+        };
+        assert!(!divided || told.contains(r), "{r:?} told divided");
+    }
+}
+
+/// Faults told while reading `s`: each inside it, what it borrows what's
+/// where it is, in the order of their ends, each with words.
+fn in_order(s: &[u8], faults: &[(Range<usize>, Fault)]) {
+    let mut end = 0;
+    for (at, fault) in faults {
+        assert!(at.start <= at.end && at.end <= s.len(), "{at:?} inside");
+        assert!(at.end >= end, "{at:?} in the order of their ends");
+        end = at.end;
+        let written = match *fault {
+            Fault::Number { written }
+            | Fault::OutOfRange { written }
+            | Fault::HexString { written }
+            | Fault::Name { written, .. }
+            | Fault::Closer { written }
+            | Fault::Brace { written }
+            | Fault::Keyword { written }
+            | Fault::Key { written }
+            | Fault::NoValue { written }
+            | Fault::Across { written }
+            | Fault::BeforeEi { written } => Some(written),
+            Fault::Trailing { .. } | Fault::ImageLength { .. } | Fault::AfterId => None,
+        };
+        if let Some(written) = written {
+            assert_eq!(written, &s[at.clone()], "{fault:?} where it is");
+        }
+        assert!(!fault.to_string().is_empty());
+    }
 }
 
 /// The operations `read` under `limits` against its tokens, `tokens` (as

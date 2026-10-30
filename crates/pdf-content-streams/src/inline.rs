@@ -8,6 +8,7 @@ use std::fmt;
 use std::ops::Range;
 
 use crate::error::{Error, ErrorKind};
+use crate::fault::{self, Fault, Read, Sink};
 use crate::limits::Limits;
 use crate::operand::{Operand, name};
 use crate::scan::{
@@ -119,6 +120,7 @@ impl<'a> InlineImage<'a> {
                     found = Some(value);
                 }
             },
+            &mut (),
         )
         .ok()?;
         found.map(|r| Operand::new(self.content, r))
@@ -166,15 +168,23 @@ impl<'a, 'r> Images<'a, 'r> {
     }
 
     /// The inline image whose `BI` is at `bi`: where it ends, past its
-    /// `EI`, and where its data is.
-    pub(crate) fn read(&mut self, bi: usize) -> Result<(usize, Range<usize>), Error> {
+    /// `EI`, and where its data is. Where ISO 32000-2 would read it
+    /// otherwise, `sink` is told, if it wants: its dictionary's tokens'
+    /// own faults and its entries', then its `ID`'s, its length's and
+    /// what's before its `EI`.
+    pub(crate) fn read(
+        &mut self,
+        bi: usize,
+        sink: &mut impl Sink<'a>,
+    ) -> Result<(usize, Range<usize>), Error> {
         let s = self.s;
         let unterminated = Error {
             at: bi,
             kind: ErrorKind::InlineImage,
         };
         let mut dict = ImageDict::default();
-        let at = image_dict(s, bi, self.lim.depth, |key, value| dict.set(key, value))?;
+        let set = |key: &[u8], value| dict.set(key, value);
+        let at = image_dict(s, bi, self.lim.depth, set, sink)?;
         // One white-space byte after `ID`, then the data.
         let start = at + usize::from(s.get(at).is_some_and(|&c| is_space(c)));
         let counted = match self.first_filter(&dict) {
@@ -186,7 +196,7 @@ impl<'a, 'r> Images<'a, 'r> {
             Some(Filter::Other) => None,
         }
         .or_else(|| {
-            let length = dict.l.and_then(|l| int(&s[l]))?;
+            let length = dict.l.clone().and_then(|l| int(&s[l]))?;
             start
                 .checked_add(usize::try_from(length).ok()?)
                 .filter(|&end| end <= s.len())
@@ -205,7 +215,72 @@ impl<'a, 'r> Images<'a, 'r> {
                 kind: ErrorKind::InlineImageSize,
             });
         }
+        if sink.wants() {
+            self.faults(&dict, at, &data, end, sink);
+        }
         Ok((end, data))
+    }
+
+    /// Where ISO 32000-2 reads an image read otherwise, told to `sink`:
+    /// its `ID`, ending at `id`, with no white-space after it; a length
+    /// that ends its data elsewhere than `data`; tokens between its data
+    /// and its `EI`, which ends at `end`.
+    fn faults(
+        &self,
+        dict: &ImageDict,
+        id: usize,
+        data: &Range<usize>,
+        end: usize,
+        sink: &mut impl Sink<'a>,
+    ) {
+        let s = self.s;
+        // ISO asks white-space after `ID`, and counts its length from after
+        // more of it, by the last of its filters (8.9.7).
+        let ascii = self
+            .last_filter(dict)
+            .is_some_and(|f| matches!(&*f, b"AHx" | b"ASCIIHexDecode" | b"A85" | b"ASCII85Decode"));
+        if !ascii && !s.get(id).is_some_and(|&c| is_space(c)) {
+            sink.fault(id - 2..id, Fault::AfterId);
+        }
+        if let Some(given) = dict.l.clone().and_then(|l| int(&s[l])) {
+            let mut start = data.start;
+            if ascii {
+                while s.get(start).is_some_and(|&c| is_space(c)) && start < data.end {
+                    start += 1;
+                }
+            }
+            let ends = usize::try_from(given)
+                .ok()
+                .and_then(|n| start.checked_add(n));
+            if ends != Some(data.end) {
+                let read = data.end - start;
+                sink.fault(data.clone(), Fault::ImageLength { given, read });
+            }
+        }
+        // What's between the data and `EI`, the first token to the last.
+        let mut between: Option<Range<usize>> = None;
+        let mut at = data.end;
+        while let Some(Ok((r, _))) = next_raw(s, at, self.lim.depth) {
+            if r.end == end && &s[r.clone()] == b"EI" {
+                break;
+            }
+            at = r.end;
+            between = Some(between.map_or(r.start, |b| b.start)..r.end);
+        }
+        if let Some(between) = between {
+            let written = &s[between.clone()];
+            sink.fault(between, Fault::BeforeEi { written });
+        }
+    }
+
+    /// The last of an image's filters, or its one: a name's, decoded.
+    fn last_filter(&self, dict: &ImageDict) -> Option<std::borrow::Cow<'a, [u8]>> {
+        let f = &self.s[dict.f.clone()?];
+        let last = match f.first() {
+            Some(b'[') => *elements(f, self.lim.depth).last()?,
+            _ => f,
+        };
+        name(last)
     }
 
     /// An image's first filter, by what finds its data's end; None when
@@ -328,12 +403,15 @@ impl ImageDict {
 /// The dictionary of the inline image whose `BI` is at `bi`, to its `ID`:
 /// `entry` is given each key, as written, and where its value is. What
 /// isn't a name where a key should be is passed over. Returns where `ID`
-/// ends.
-fn image_dict(
-    s: &[u8],
+/// ends. Where ISO 32000-2 would read it otherwise, `sink` is told, if it
+/// wants: each token's own faults, a key that's an object but no name, a
+/// word that's no object, and a key with no value.
+fn image_dict<'a>(
+    s: &'a [u8],
     bi: usize,
     depth: usize,
     mut entry: impl FnMut(&[u8], Range<usize>),
+    sink: &mut (impl Sink<'a> + ?Sized),
 ) -> Result<usize, Error> {
     let unterminated = Error {
         at: bi,
@@ -344,7 +422,11 @@ fn image_dict(
     loop {
         let (r, kind) = next_raw(s, at, depth).ok_or(unterminated)??;
         at = r.end;
-        if matches!(kind, Raw::Op) && &s[r.clone()] == b"ID" {
+        let is_id = matches!(kind, Raw::Op) && &s[r.clone()] == b"ID";
+        if sink.wants() {
+            entry_faults(s, r.clone(), kind, is_id, key.clone(), sink);
+        }
+        if is_id {
             return Ok(at);
         }
         match key.take() {
@@ -352,6 +434,38 @@ fn image_dict(
             None if s[r.start] == b'/' => key = Some(r),
             None => {}
         }
+    }
+}
+
+/// An inline image's dictionary's token at `r`, `ID` or not, after `key`,
+/// a key waiting for its value: where ISO 32000-2 would read it
+/// otherwise, told to `sink`.
+fn entry_faults<'a>(
+    s: &'a [u8],
+    r: Range<usize>,
+    kind: Raw,
+    is_id: bool,
+    key: Option<Range<usize>>,
+    sink: &mut (impl Sink<'a> + ?Sized),
+) {
+    let written = &s[r.clone()];
+    if is_id {
+        if let Some(key) = key {
+            let written = &s[key.clone()];
+            sink.fault(key, Fault::NoValue { written });
+        }
+        return;
+    }
+    let read = match kind {
+        Raw::Op => Read::Keyword,
+        Raw::Operand => fault::token(written, r.start, sink),
+    };
+    match read {
+        Read::Keyword => sink.fault(r, Fault::Keyword { written }),
+        Read::Object if key.is_none() && written[0] != b'/' => {
+            sink.fault(r, Fault::Key { written });
+        }
+        _ => {}
     }
 }
 

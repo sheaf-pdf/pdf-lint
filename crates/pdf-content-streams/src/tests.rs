@@ -9,7 +9,8 @@ use std::ops::Range;
 
 use pdf_objects::{Form, Object, Str, Value, dict};
 
-use crate::fuzz::blank;
+use crate::fault::{Fault, Sink};
+use crate::fuzz::{Kept, Unwanted, blank, faulted, fixtures};
 use crate::*;
 
 /// Numbers below what each call is given, the same each run.
@@ -1004,4 +1005,798 @@ fn operands_are_read_when_asked() {
         format!("{:?}", o[3]),
         r#"Operand { bytes: "(s)", range: 14..17 }"#
     );
+}
+
+/// The faults reading `page`'s operations tells, with no resources, in
+/// order: each where it is, and the fault.
+fn faults<'a>(page: &'a Concat) -> Vec<(Range<usize>, Fault<'a>)> {
+    let mut kept = Kept::default();
+    let none = ResCx::none();
+    let read = page
+        .operations(&none, &Limits::DEFAULT)
+        .with_sink(&mut kept);
+    read.for_each(drop);
+    kept.0
+}
+
+/// `words` joined by spaces, and where each is.
+fn spaced(words: &[&[u8]]) -> (Vec<u8>, Vec<Range<usize>>) {
+    let mut s = Vec::new();
+    let mut places = Vec::new();
+    for word in words {
+        if !s.is_empty() {
+            s.push(b' ');
+        }
+        places.push(s.len()..s.len() + word.len());
+        s.extend_from_slice(word);
+    }
+    (s, places)
+}
+
+/// Each fault's words.
+fn words(faults: &[(Range<usize>, Fault)]) -> Vec<String> {
+    faults.iter().map(|(_, f)| f.to_string()).collect()
+}
+
+/// A word of digits, signs and points is a number to PDFium, and a
+/// keyword to ISO 32000-2 unless it's an integer or a real as 7.3.3
+/// writes one; and a number past what's read here is one too.
+#[test]
+fn numbers_iso_doesnt_write_are_faults() {
+    let huge = [b"1".repeat(400), b".5".to_vec()].concat();
+    let (s, at) = spaced(&[
+        b"--5",
+        b"1.2.3",
+        b"+",
+        b".",
+        b"5-",
+        b"+-1",
+        b"+5",
+        b"-.5",
+        b"5.",
+        b"00987",
+        b"-0",
+        b"w",
+        b"99999999999999999999",
+        b"9223372036854775807",
+        b"-9223372036854775808",
+        b"9223372036854775808",
+        &huge,
+        b"1e5",
+    ]);
+    let page = Concat::new(&[&s]);
+    let found = faults(&page);
+    let number = |i: usize| {
+        (
+            at[i].clone(),
+            Fault::Number {
+                written: &s[at[i].clone()],
+            },
+        )
+    };
+    let past = |i: usize| {
+        (
+            at[i].clone(),
+            Fault::OutOfRange {
+                written: &s[at[i].clone()],
+            },
+        )
+    };
+    assert_eq!(
+        found,
+        [
+            number(0),
+            number(1),
+            number(2),
+            number(3),
+            number(4),
+            number(5),
+            past(12),
+            past(15),
+            past(16)
+        ]
+    );
+    assert_eq!(
+        words(&found)[..2],
+        [
+            "--5 is a number here and a keyword to ISO 32000-2",
+            "1.2.3 is a number here and a keyword to ISO 32000-2",
+        ]
+    );
+    assert_eq!(
+        words(&found)[6],
+        "99999999999999999999 is past the numbers read here"
+    );
+    // Its first 40 bytes.
+    assert_eq!(
+        words(&found)[8],
+        format!("{} is past the numbers read here", "1".repeat(40))
+    );
+}
+
+/// A hex string of other bytes than hex digits and white-space, a name
+/// with a `#` that escapes nothing or NUL, a closer with nothing open, and
+/// a brace, are each a token's own fault.
+#[test]
+fn a_tokens_own_faults() {
+    let (s, at) = spaced(&[
+        b"<41 42\t\r\n>",
+        b"<4G>",
+        b"<41%c>",
+        b"/A#41",
+        b"/A#2",
+        b"/A#00",
+        b"/#zz#00",
+        b"(not<4G>)",
+        b"Tj",
+        b"{",
+        b"}",
+        b")",
+        b"]",
+        b">>",
+        b">",
+        b"Q",
+    ]);
+    let page = Concat::new(&[&s]);
+    let found = faults(&page);
+    let w = |i: usize| &s[at[i].clone()];
+    let name = |i: usize, stray, nul| Fault::Name {
+        written: w(i),
+        stray,
+        nul,
+    };
+    let expected = [
+        (1, Fault::HexString { written: w(1) }),
+        (2, Fault::HexString { written: w(2) }),
+        (4, name(4, true, false)),
+        (5, name(5, false, true)),
+        (6, name(6, true, true)),
+        (9, Fault::Brace { written: w(9) }),
+        (10, Fault::Brace { written: w(10) }),
+        (11, Fault::Closer { written: w(11) }),
+        (12, Fault::Closer { written: w(12) }),
+        (13, Fault::Closer { written: w(13) }),
+        (14, Fault::Closer { written: w(14) }),
+    ]
+    .map(|(i, f)| (at[i].clone(), f));
+    assert_eq!(found, expected);
+    assert_eq!(
+        words(&found),
+        [
+            "the hex string <4G> has a byte that's no hex digit",
+            "the hex string <41%c> has a byte that's no hex digit",
+            "the name /A#2 has a # without two hex digits after it, which readers read differently",
+            "the name /A#00 has #00, NUL, which a name can't hold, which readers read differently",
+            "the name /#zz#00 has a # without two hex digits after it, and #00, NUL, which readers read differently",
+            "{ is a delimiter here and a regular character to ISO 32000-2",
+            "} is a delimiter here and a regular character to ISO 32000-2",
+            ") closes nothing",
+            "] closes nothing",
+            ">> closes nothing",
+            "> closes nothing",
+        ]
+    );
+}
+
+/// What's inside an array or a dictionary is told when it's read, each
+/// element's, key's and value's own faults, a word that's no object, a
+/// key that's no name and a key with no value, where each is in the
+/// content; the operand's own faults are its token's.
+#[test]
+fn whats_inside_is_told_when_its_read() {
+    let s: &[u8] = b"q [1 --5 R <4G> /A#zz ) { >> [/B#2] 99999999999999999999] \
+        <</K 1 2 (v) [3] /V /N#00 ] /L R /M>> /C#2 m";
+    let at = |w: &[u8], from: usize| {
+        let i = from + s[from..].windows(w.len()).position(|x| x == w).unwrap();
+        i..i + w.len()
+    };
+    let read: Vec<_> = operations(s, &ResCx::none(), &Limits::DEFAULT)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let m = &read[1];
+    let (array, dict, name) = (m.arg(2).unwrap(), m.arg(1).unwrap(), m.arg(0).unwrap());
+    fn read_with(o: Operand<'_>) -> Vec<(Range<usize>, Fault<'_>)> {
+        let mut kept = Kept::default();
+        let object = o.object_with(8, &mut kept);
+        assert_eq!(object, o.object(8), "the same object");
+        kept.0
+    }
+    let w = |r: &Range<usize>| &s[r.clone()];
+    let fault = |r: Range<usize>, f: fn(&[u8]) -> Fault| (r.clone(), f(w(&r)));
+    let a = array.range().start;
+    assert_eq!(
+        read_with(array),
+        [
+            fault(at(b"--5", a), |written| Fault::Number { written }),
+            fault(at(b"R", a), |written| Fault::Keyword { written }),
+            fault(at(b"<4G>", a), |written| Fault::HexString { written }),
+            (
+                at(b"/A#zz", a),
+                Fault::Name {
+                    written: w(&at(b"/A#zz", a)),
+                    stray: true,
+                    nul: false
+                }
+            ),
+            fault(at(b")", a), |written| Fault::Closer { written }),
+            fault(at(b"{", a), |written| Fault::Brace { written }),
+            fault(at(b">>", a), |written| Fault::Closer { written }),
+            (
+                at(b"/B#2", a),
+                Fault::Name {
+                    written: w(&at(b"/B#2", a)),
+                    stray: true,
+                    nul: false
+                }
+            ),
+            fault(at(b"99999999999999999999", a), |written| {
+                Fault::OutOfRange { written }
+            }),
+        ]
+    );
+    let d = dict.range().start;
+    assert_eq!(
+        read_with(dict),
+        [
+            fault(at(b"2", d), |written| Fault::Key { written }),
+            fault(at(b"(v)", d), |written| Fault::Key { written }),
+            fault(at(b"[3]", d), |written| Fault::Key { written }),
+            (
+                at(b"/N#00", d),
+                Fault::Name {
+                    written: w(&at(b"/N#00", d)),
+                    stray: false,
+                    nul: true
+                }
+            ),
+            fault(at(b"] /L", d).start..at(b"] /L", d).start + 1, |written| {
+                Fault::Closer { written }
+            }),
+            fault(at(b"R", d), |written| Fault::Keyword { written }),
+            fault(at(b"/M", d), |written| Fault::NoValue { written }),
+        ]
+    );
+    // A name's own fault is its token's, told by the operations.
+    assert_eq!(read_with(name), []);
+    let page = Concat::new(&[s]);
+    assert_eq!(
+        faults(&page),
+        [fault(at(b"/C#2", d), |written| Fault::Name {
+            written,
+            stray: true,
+            nul: false
+        })]
+    );
+    let words = words(&read_with(dict));
+    assert_eq!(
+        [&words[0], &words[5], &words[6]],
+        [
+            "2 is a dictionary's key and not a name",
+            "R is no object, where one is written",
+            "the key /M has no value"
+        ]
+    );
+}
+
+/// A string, an inline image or a comment that runs from one of a page's
+/// streams into the next is told, over the page's tokens and its
+/// operations; a comment only where the next stream's first line has a
+/// token it reads as comment. A string or a comment inside an array or a
+/// dictionary is told where it is; an array, a dictionary or an inline
+/// image's dictionary divided between its tokens isn't told.
+#[test]
+fn a_token_across_streams() {
+    let across = |streams: &[&[u8]]| {
+        let page = Concat::new(streams);
+        let found: Vec<_> = faults(&page)
+            .into_iter()
+            .map(|(at, f)| {
+                let Fault::Across { written } = f else {
+                    panic!("{f:?}")
+                };
+                assert_eq!(written, &page.bytes()[at.clone()]);
+                (at, f.to_string())
+            })
+            .collect();
+        // The tokens tell the same.
+        let mut kept = Kept::default();
+        let none = ResCx::none();
+        let tokens = page.tokens(&none, &Limits::DEFAULT).with_sink(&mut kept);
+        tokens.for_each(drop);
+        let words: Vec<_> = kept
+            .0
+            .iter()
+            .map(|(at, f)| (at.clone(), f.to_string()))
+            .collect();
+        assert_eq!(words, found);
+        found
+    };
+    let one = |at: Range<usize>, words: &str| vec![(at, words.to_string())];
+    assert_eq!(
+        across(&[b"q (ab", b"c) Tj Q"]),
+        one(2..8, "(ab c) runs from one stream into the next")
+    );
+    assert_eq!(
+        across(&[b"BI /W 4 /H 1 /BPC 8 /CS /G ID ab", b"c EI Q"]),
+        one(
+            0..37,
+            "BI /W 4 /H 1 /BPC 8 /CS /G ID ab c EI runs from one stream into the next"
+        )
+    );
+    // A comment at a stream's end with no end of line, reading the next
+    // stream's `Q` as comment, past an empty stream too.
+    assert_eq!(
+        across(&[b"q %c", b"Q"]),
+        one(2..6, "%c Q runs from one stream into the next")
+    );
+    assert_eq!(
+        across(&[b"q %c", b"", b" Q"]),
+        one(2..8, "%c   Q runs from one stream into the next")
+    );
+    // A string across two joins is one.
+    assert_eq!(across(&[b"q (a", b"b", b"c) Tj"]).len(), 1);
+    // None where ISO reads alike: a comment that reads only white-space or
+    // a comment as comment, an end of line before the join, operands in
+    // one stream and their operator in the next, a stream that's a token.
+    for streams in [
+        &[&b"q %c"[..], b"  % more\nQ"][..],
+        &[b"q %c", b"\nQ"],
+        &[b"q %c\n", b"Q"],
+        &[b"q %c\r", b"Q"],
+        &[b"0 0", b"m 1 1 l", b"S"],
+        &[b"q", b"(a) Tj", b"Q"],
+        &[b"q %c", b" "],
+        // Between an array's, a dictionary's or an image's dictionary's
+        // tokens, which ISO lets streams divide.
+        &[b"/Span <</MCID", b"0>> BDC EMC"],
+        &[b"/Span <<", b"/MCID 0>> BDC EMC"],
+        &[b"/P <</A <</B (b)", b">> /C [1 2]>> BDC EMC"],
+        &[b"[", b"(a) 1 (b)] TJ"],
+        &[b"[(a) 1", b"(b)] TJ"],
+        &[b"[(a)", b"<62>] TJ"],
+        &[b"BI /W 1 /H 1", b"/BPC 8 /CS /G ID x EI"],
+        &[b"BI /W 1 /H 1 /BPC 8 /CS /G ID", b"x EI"],
+        &[b"BI /W 1 /H 1 /BPC 8 /CS /G ID x", b"EI"],
+        // A comment inside an array that reads only white-space.
+        &[b"[(a) %c", b"  \n(b)] TJ"],
+    ] {
+        assert_eq!(across(streams), [], "{streams:?}");
+    }
+    // Inside a string inside an array or a dictionary, a hex string's
+    // too, told where the string is, each string divided once.
+    let words = " runs from one stream into the next";
+    let strings = |streams: &[&[u8]], strings: &[&str]| {
+        let page = Concat::new(streams);
+        let told: Vec<_> = strings
+            .iter()
+            .map(|w| (place(page.bytes(), w.as_bytes()), format!("{w}{words}")))
+            .collect();
+        assert_eq!(across(streams), told, "{streams:?}");
+    };
+    strings(&[b"[(a", b"b)] TJ"], &["(a b)"]);
+    strings(&[b"[(a", b"b) 1 (c", b"d)] TJ"], &["(a b)", "(c d)"]);
+    strings(&[b"[<6", b"2>] TJ"], &["<6 2>"]);
+    strings(&[b"/Span <</Lang (en", b"-AU)>> BDC EMC"], &["(en -AU)"]);
+    strings(&[b"/P <</A [(x) (y", b"z)]>> BDC EMC"], &["(y z)"]);
+    // A comment inside an array reading the next stream's first line,
+    // the array closed on the line after.
+    strings(&[b"[(a) %c", b"(b)]\n(c)] TJ"], &["%c (b)]"]);
+    // An inline image divided in a string or a comment in its dictionary,
+    // or in what's between its data and its `EI`, is told whole.
+    let image = |streams: &[&[u8]]| {
+        let page = Concat::new(streams);
+        let found: Vec<_> = faults(&page)
+            .into_iter()
+            .filter(|(_, f)| matches!(f, Fault::Across { .. }))
+            .map(|(at, _)| at)
+            .collect();
+        let at = page.bytes().iter().position(|&c| c == b'B').unwrap();
+        let end = place(page.bytes(), b"EI").end;
+        assert_eq!(found, vec![at..end], "{streams:?}");
+    };
+    image(&[b"BI /W 1 /H 1 /BPC 8 /CS /G /X (a", b"b) ID x EI"]);
+    image(&[b"BI /W 1 /H 1 %c", b"/W 2\n/BPC 8 /CS /G ID x EI"]);
+    image(&[b"BI /W 1 /H 1 /BPC 8 /CS /G ID x (a", b"b) EI"]);
+    // A page of many streams is read once: each join isn't read back from.
+    let empty = vec![&b""[..]; 200_000];
+    let streams = [&[&b"q"[..]][..], &empty, &[b"Q %c"], &empty, &[b"Q"]].concat();
+    let page = Concat::new(&streams);
+    let started = std::time::Instant::now();
+    let found = faults(&page);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    let percent = page.bytes().iter().position(|&c| c == b'%').unwrap();
+    let comment = percent..page.bytes().len();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].0, comment);
+    // Read whole, there are no streams to cross.
+    let page = Concat::new(&[b"q (ab", b"c) Tj Q"]);
+    let mut kept = Kept::default();
+    let none = ResCx::none();
+    tokens(page.bytes(), &none, &Limits::DEFAULT)
+        .with_sink(&mut kept)
+        .for_each(drop);
+    assert_eq!(kept.0, []);
+}
+
+/// Operands at the end that no operator takes are told once, where they
+/// are, with how many; not before an error, which ends them otherwise.
+#[test]
+fn operands_at_the_end_are_a_fault() {
+    let at_end = |streams: &[&[u8]]| {
+        let page = Concat::new(streams);
+        let found: Vec<_> = faults(&page)
+            .into_iter()
+            .map(|(at, f)| (at, f.to_string()))
+            .collect();
+        found
+    };
+    let one = |at: Range<usize>, count: usize| {
+        let words = format!("{count} operands at the end that no operator takes");
+        vec![(at, words)]
+    };
+    assert_eq!(at_end(&[b"q 1 2 % no operator"]), one(2..5, 2));
+    assert_eq!(at_end(&[b"1"]), one(0..1, 1));
+    assert_eq!(at_end(&[b"q 1", b"0 0 RG Q 9"]), one(13..14, 1));
+    assert_eq!(at_end(&[b"q 1 2 (open"]), []);
+    assert_eq!(at_end(&[b"q 0 0 m"]), []);
+    // Told once, however often the end is asked for.
+    let mut kept = Kept::default();
+    let none = ResCx::none();
+    let mut read = operations(b"q 1", &none, &Limits::DEFAULT).with_sink(&mut kept);
+    assert!(read.next().is_some());
+    assert!(read.next().is_none() && read.next().is_none());
+    assert_eq!(kept.0, [(2..3, Fault::Trailing { count: 1 })]);
+}
+
+/// `content`'s faults, read whole with no error, and each's words.
+fn told(content: &[u8]) -> Vec<(Range<usize>, String)> {
+    let mut kept = Kept::default();
+    let none = ResCx::none();
+    operations(content, &none, &Limits::DEFAULT)
+        .with_sink(&mut kept)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    kept.0
+        .into_iter()
+        .map(|(at, f)| (at, f.to_string()))
+        .collect()
+}
+
+/// Where `w` first is in `s`.
+fn place(s: &[u8], w: &[u8]) -> Range<usize> {
+    let at = s.windows(w.len()).position(|x| x == w).expect("there");
+    at..at + w.len()
+}
+
+/// An inline image's length that ends its data elsewhere, its `ID` with
+/// no white-space after it, tokens between its data and its `EI`, and its
+/// dictionary's tokens and entries, are told as the image is read.
+#[test]
+fn an_inline_images_faults() {
+    let one = |at: Range<usize>, words: &str| vec![(at, words.to_string())];
+    // Its data counted to 4 bytes, where its length says 3.
+    let s = b"BI /W 4 /H 1 /BPC 8 /CS /G /L 3 ID abcd EI";
+    assert_eq!(
+        told(s),
+        one(
+            place(s, b"abcd"),
+            "an inline image's data is read as 4 bytes, where its length says 3"
+        )
+    );
+    // ASCIIHexDecode the last of its filters, or its one: its length
+    // counted past more white-space after `ID`. Its data found by its first filter's
+    // end where that's ASCIIHexDecode, and by its length where it isn't.
+    assert_eq!(told(b"BI /F /AHx /L 3 ID   0E> EI"), []);
+    let s = b"BI /F [/Fl /AHx] /L 3 ID   0E> EI";
+    assert_eq!(
+        told(s),
+        [
+            (
+                place(s, b"  0"),
+                "an inline image's data is read as 1 bytes, where its length says 3".to_string()
+            ),
+            (
+                place(s, b"E>"),
+                "E> is between an inline image's data and its EI".to_string()
+            ),
+        ]
+    );
+    let s = b"BI /F [/AHx /Fl] /L 3 ID   0E> EI";
+    assert_eq!(
+        told(s),
+        one(
+            place(s, b"  0E>"),
+            "an inline image's data is read as 5 bytes, where its length says 3"
+        )
+    );
+    // A length that's its data's, and one past the content, read to the
+    // first `EI` between white-space.
+    assert_eq!(told(b"BI /F /DCT /L 4 ID \xff\xd8\xff\xd9 EI"), []);
+    let s = b"BI /F /Fl /L 99 ID xy EI";
+    assert_eq!(
+        told(s),
+        one(
+            place(s, b"xy"),
+            "an inline image's data is read as 2 bytes, where its length says 99"
+        )
+    );
+    // `ID` with a delimiter after it, not white-space, unless the last of
+    // its filters, or its one, is one of the two ASCII ones.
+    let s = b"BI/W 2/H 1/BPC 8/CS/G ID[)EI";
+    assert_eq!(
+        told(s),
+        one(
+            place(s, b"ID"),
+            "an inline image's ID has no white-space after it"
+        )
+    );
+    assert_eq!(told(b"BI /F /AHx ID>EI"), []);
+    assert_eq!(told(b"BI /F [/Fl /A85] ID<~~>\nEI"), []);
+    let s = b"BI /F [/A85 /Fl] ID<~~>EI";
+    assert_eq!(
+        told(s),
+        one(
+            place(s, b"ID"),
+            "an inline image's ID has no white-space after it"
+        )
+    );
+    // Past its counted data, tokens PDFium reads on past to its `EI`.
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G ID x 1 2 % EI\nEI Q";
+    assert_eq!(
+        told(s),
+        one(
+            place(s, b"1 2"),
+            "1 2 is between an inline image's data and its EI"
+        )
+    );
+    assert_eq!(told(b"BI /W 1 /H 1 /BPC 8 /CS /G ID xEI Q"), []);
+    // Its dictionary: a key that's no name, its tokens' own faults, a
+    // word that's no object, and a key with no value.
+    let s = b"BI 7 /W 1 /H 1 /BPC 8 /CS /G /A#zz foo /B ) /D <4G> /F#2 ID x EI";
+    let stray = "has a # without two hex digits after it, which readers read differently";
+    assert_eq!(
+        told(s),
+        [
+            (
+                place(s, b"7"),
+                "7 is a dictionary's key and not a name".to_string()
+            ),
+            (place(s, b"/A#zz"), format!("the name /A#zz {stray}")),
+            (
+                place(s, b"foo"),
+                "foo is no object, where one is written".to_string()
+            ),
+            (place(s, b")"), ") closes nothing".to_string()),
+            (
+                place(s, b"<4G>"),
+                "the hex string <4G> has a byte that's no hex digit".to_string()
+            ),
+            (place(s, b"/F#2"), format!("the name /F#2 {stray}")),
+            (place(s, b"/F#2"), "the key /F#2 has no value".to_string()),
+        ]
+    );
+}
+
+/// Faults come in the order of their ends, as reading passes them: an
+/// operand's own before the operands at the end it's among, and those
+/// before a comment after them that runs into the next stream.
+#[test]
+fn faults_come_in_the_order_of_their_ends() {
+    let page = Concat::new(&[b"q --5 %c", b"Q"]);
+    let found = faults(&page);
+    let s = page.bytes();
+    assert_eq!(
+        found,
+        [
+            (2..5, Fault::Number { written: &s[2..5] }),
+            (2..5, Fault::Trailing { count: 1 }),
+            (6..10, Fault::Across { written: &s[6..10] }),
+        ]
+    );
+    // An inline image's own before its running into the next stream.
+    let page = Concat::new(&[b"BI /W 3 /H 1 /BPC 8 /CS /G /L 2 ID a", b"b EI Q"]);
+    let s = page.bytes();
+    let image = 0..place(s, b"EI").end;
+    assert_eq!(
+        faults(&page),
+        [
+            (place(s, b"a b"), Fault::ImageLength { given: 2, read: 3 }),
+            (image.clone(), Fault::Across { written: &s[image] }),
+        ]
+    );
+}
+
+/// The contents of the moved tests: a page, the inline images of each of
+/// PDFium's rules, and the fuzz target's seeds.
+fn moved_inputs() -> Vec<Vec<u8>> {
+    let images = [
+        ("/W 4 /H 1 /BPC 8 /CS /G", &b" EI "[..]),
+        ("/W 3 /H 2 /BPC 1 /CS /G", b"EI"),
+        ("/IM true /W 10 /H 2 /D [1 0]", b" EI "),
+        (
+            "/W 2 /H 2 /BPC 8 /CS [/I /RGB 1 <000000FFFFFF>] /I true",
+            b"EI E",
+        ),
+        (
+            "/W 2 /H 1 /BPC 8 /CS [/DeviceN [/Cyan /Spot] /DeviceCMYK {}]",
+            b" EI ",
+        ),
+        ("/W 4.9 /H 1.0 /BPC 8 /CS /G", b" EI "),
+        ("/F /AHx /W 2 /H 2 /BPC 8 /CS /G", b"0E EI 0>"),
+        ("/F [/A85 /Fl] /W 9 /H 9 /BPC 8 /CS /G", b"9jqo^ EI ~>"),
+        ("/F /RL /W 4 /H 1 /BPC 8 /CS /G", b"\x03 EI \x80"),
+        (
+            "/F /DCT /W 9 /H 9 /BPC 8 /CS /RGB",
+            b"\xff\xd8\xff\xe0 EI \x00\xff\xd9",
+        ),
+        ("/F /Fl /W 9 /H 9 /BPC 8 /CS /G /L 6", b"x EI y"),
+        ("/F /LZW /Length 6 /W 9 /H 9", b"x EI y"),
+        ("/F /CCF /DP <</K -1 /Columns 9>> /W 9 /H 9", b"xEI EIy"),
+    ];
+    let mut inputs: Vec<Vec<u8>> = images
+        .iter()
+        .map(|(dict, data)| [format!("q BI {dict} ID ").as_bytes(), data, b"\nEI Q"].concat())
+        .collect();
+    inputs.push(PAGE.to_vec());
+    inputs.extend(fixtures());
+    inputs
+}
+
+/// Through a sink that keeps faults, the tokens and operations are those
+/// through `()`, every operand reads the same, and a sink that wants none
+/// is told none: on the moved tests' contents, read whole and as two
+/// streams, and on content made of their pieces.
+#[test]
+fn faults_change_nothing() {
+    let res = ResCx::new([(b"CS3".to_vec(), 3)]);
+    let lim = &Limits::DEFAULT;
+    let mut told = 0;
+    for s in moved_inputs() {
+        let (first, second) = s.split_at(s.len() / 2);
+        for page in [Concat::new(&[&s]), Concat::new(&[first, second])] {
+            faulted(&page, &res, lim);
+            told += faults(&page).len();
+        }
+    }
+    assert!(told > 0, "some faults told");
+    let mut random = Random(0x6a09_e667_f3bc_c908);
+    for _ in 0..512 {
+        let s: Vec<u8> = (0..random.below(48))
+            .flat_map(|_| PIECES[random.below(PIECES.len())])
+            .copied()
+            .collect();
+        faulted(&Concat::new(&[&s]), &res, lim);
+    }
+}
+
+/// A sink that doesn't want faults is told none, of any kind, through a
+/// borrow too, and what's read is the same.
+#[test]
+fn a_sink_that_wants_none_is_told_none() {
+    let s: &[u8] =
+        b"q --5 <4G> /A#2 { ) <</K 1 2 /M>> BI 7 /W 1 /H 1 /BPC 8 /CS /G /L 3 ID x 1 EI 1";
+    let page = Concat::new(&[s, b"(a", b"b) Tj %c", b"Q\n1 2"]);
+    let kinds: Vec<_> = faults(&page)
+        .iter()
+        .map(|(_, f)| {
+            format!("{f:?}")
+                .split([' ', '{'])
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    // A token's own, an inline image's, the joins' and the operands' at
+    // the end.
+    assert_eq!(
+        kinds,
+        [
+            "Number",
+            "HexString",
+            "Name",
+            "Brace",
+            "Closer",
+            "Key",
+            "ImageLength",
+            "BeforeEi",
+            "Across",
+            "Across",
+            "Trailing"
+        ]
+    );
+    let none = ResCx::none();
+    let mut unwanted = Unwanted::default();
+    let read: Vec<_> = page
+        .operations(&none, &Limits::DEFAULT)
+        .with_sink(&mut unwanted)
+        .map(|op| format!("{op:?}"))
+        .collect();
+    let plain: Vec<_> = page
+        .operations(&none, &Limits::DEFAULT)
+        .map(|op| format!("{op:?}"))
+        .collect();
+    assert_eq!(read, plain);
+    page.tokens(&none, &Limits::DEFAULT)
+        .with_sink(&mut &mut unwanted)
+        .for_each(drop);
+    for op in page.operations(&none, &Limits::DEFAULT) {
+        for operand in op.unwrap().operands() {
+            operand.object_with(8, &mut unwanted);
+        }
+    }
+    assert_eq!(unwanted.0, []);
+    // `()` wants none, so none is looked for.
+    assert!(!Sink::wants(&()));
+}
+
+/// A sink borrowed, and a `dyn` one, are sinks.
+#[test]
+fn a_dyn_sink_is_a_sink() {
+    let s: &[u8] = b"q --5 <</K 1 2>> BDC 1";
+    let none = ResCx::none();
+    let mut kept = Kept::default();
+    let sink: &mut dyn Sink = &mut kept;
+    let read: Vec<_> = operations(s, &none, &Limits::DEFAULT)
+        .with_sink(&mut *sink)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    read[1].arg(0).unwrap().object_with(8, sink);
+    tokens(s, &none, &Limits::DEFAULT)
+        .with_sink(&mut &mut *sink)
+        .for_each(drop);
+    let kinds: Vec<_> = kept
+        .0
+        .iter()
+        .map(|(at, f)| (at.clone(), f.to_string()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (
+                2..5,
+                "--5 is a number here and a keyword to ISO 32000-2".to_string()
+            ),
+            (
+                21..22,
+                "1 operands at the end that no operator takes".to_string()
+            ),
+            (13..14, "2 is a dictionary's key and not a name".to_string()),
+            (
+                2..5,
+                "--5 is a number here and a keyword to ISO 32000-2".to_string()
+            ),
+        ]
+    );
+}
+
+/// Content ISO 32000-2 reads as it's read here has no fault: the moved
+/// tests' well-formed contents, their operands read with a sink too.
+#[test]
+fn no_fault_where_iso_reads_alike() {
+    let res = ResCx::new([(b"CS3".to_vec(), 3), (b"CS0".to_vec(), 3)]);
+    let lim = &Limits::DEFAULT;
+    // The page less its strays, the images, the seeds less the one with
+    // strays, and pages of streams split between tokens.
+    let page_end = PAGE.windows(5).position(|w| w == b"Q { }").unwrap() + 1;
+    let mut inputs = moved_inputs();
+    inputs.retain(|s| s != PAGE && !s.ends_with(b"{ } ) ]"));
+    inputs.push(PAGE[..page_end].to_vec());
+    inputs.push(b"q 1 0 0 1 72 720 cm /F1 12 Tf [(Hel) -20 (lo)] TJ Q".to_vec());
+    for s in &inputs {
+        let page = Concat::new(&[s]);
+        let mut kept = Kept::default();
+        let read: Vec<_> = page
+            .operations(&res, lim)
+            .with_sink(&mut kept)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for op in &read {
+            for operand in op.operands() {
+                operand.object_with(lim.depth, &mut kept);
+            }
+        }
+        assert_eq!(kept.0, [], "{}", String::from_utf8_lossy(s));
+    }
+    let streams: [&[u8]; 3] = [b"q 1 0 0", b"1 0 0 cm /P <</MCID 0>> BDC (ab) Tj", b"EMC Q"];
+    assert_eq!(faults(&Concat::new(&streams)), []);
 }

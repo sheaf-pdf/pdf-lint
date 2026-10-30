@@ -8,6 +8,7 @@ use std::ops::Range;
 
 use pdf_objects::{Dict, Form, Object, Str, Value};
 
+use crate::fault::{self, Fault, Read, Sink};
 use crate::scan::{
     UNCAPPED, hex_string, is_number, literal_string, next_raw, skip_space, word_end,
 };
@@ -76,6 +77,56 @@ impl<'a> Operand<'a> {
     /// nested up to `depth` deep; None for what isn't one.
     pub fn object(&self, depth: usize) -> Option<Object> {
         object(self.bytes, depth)
+    }
+
+    /// It read as [`object`](Operand::object) reads it, and where ISO
+    /// 32000-2 would read what's inside it otherwise told to `sink`
+    /// ([`fault`](crate::fault)), at offsets into the content: each
+    /// element's, key's and value's own faults, a key that's an object but
+    /// no name, a word that's no object, and a key with no value, as
+    /// they're read, those before where reading stops among them. Its own
+    /// faults, as a token, are the tokens' to tell, or its array's, for an
+    /// element. What's read is the same, whatever the sink.
+    ///
+    /// ```
+    /// use pdf_content_streams::fault::{Fault, Sink};
+    /// use pdf_content_streams::{Limits, ResCx, operations};
+    /// use pdf_objects::Object;
+    /// use std::ops::Range;
+    ///
+    /// #[derive(Default)]
+    /// struct Kept<'a>(Vec<(Range<usize>, Fault<'a>)>);
+    /// impl<'a> Sink<'a> for Kept<'a> {
+    ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
+    ///         self.0.push((at, fault));
+    ///     }
+    /// }
+    ///
+    /// let content = b"/Span <</MCID 0 1 /Alt>> BDC";
+    /// let res = ResCx::none();
+    /// let bdc = operations(content, &res, &Limits::DEFAULT).next().unwrap().unwrap();
+    /// let mut kept = Kept::default();
+    /// let props = bdc.arg(0).unwrap().object_with(8, &mut kept).unwrap();
+    /// assert_eq!(props.as_dict().unwrap().get(b"MCID"), Some(&Object::from(0)));
+    /// let (one, alt) = (&content[16..17], &content[18..22]);
+    /// assert_eq!(
+    ///     kept.0,
+    ///     [
+    ///         (16..17, Fault::Key { written: one }),
+    ///         (18..22, Fault::NoValue { written: alt }),
+    ///     ]
+    /// );
+    /// ```
+    pub fn object_with(&self, depth: usize, sink: &mut (impl Sink<'a> + ?Sized)) -> Option<Object> {
+        let mut read = Reading {
+            s: self.bytes,
+            base: self.at,
+            sink,
+        };
+        match read.item(&mut 0, depth, None)? {
+            Item::Value(object) => object,
+            Item::Close => None,
+        }
     }
 
     /// An array's elements, as written, each where it is, in order: each
@@ -225,10 +276,11 @@ pub fn name(operand: &[u8]) -> Option<Cow<'_, [u8]>> {
 /// assert_eq!(object(b"--5", 512), None);
 /// ```
 pub fn object(operand: &[u8], depth: usize) -> Option<Object> {
-    match item(operand, &mut 0, depth, None)? {
-        Item::Value(object) => object,
-        Item::Close => None,
+    Operand {
+        bytes: operand,
+        at: 0,
     }
+    .object_with(depth, &mut ())
 }
 
 /// What's next in an operand read as an object.
@@ -239,94 +291,131 @@ enum Item {
     Close,
 }
 
-/// The item from `*at` in `s`, `*at` moved past it, inside the array or
-/// dictionary that `close` ends, if one's open, `depth` more of which may
-/// nest. None at the end, and for a string, array or dictionary that
-/// doesn't end, or one nested too deep.
-fn item(s: &[u8], at: &mut usize, depth: usize, close: Option<&[u8]>) -> Option<Item> {
-    let start = skip_space(s, *at);
-    let rest = s.get(start..)?;
-    let closes = |delimiter: &[u8]| close == Some(delimiter);
-    let (end, value) = match *rest.first()? {
-        b'(' => {
-            let end = literal_string(s, start).ok()?;
-            let string = Value::String(Str::Bytes(literal(&s[start..end])), Some(Form::Literal));
-            (end, Some(string))
-        }
-        b'<' if rest.starts_with(b"<<") => {
-            *at = start + 2;
-            return Some(Item::Value(Some(dictionary(s, at, depth.checked_sub(1)?)?)));
-        }
-        b'<' => {
-            let end = hex_string(s, start).ok()?;
-            let string = Value::String(Str::Bytes(hex(&s[start..end])), Some(Form::Hex));
-            (end, Some(string))
-        }
-        b'[' => {
-            *at = start + 1;
-            return Some(Item::Value(Some(array(s, at, depth.checked_sub(1)?)?)));
-        }
-        b']' if closes(b"]") => {
-            *at = start + 1;
-            return Some(Item::Close);
-        }
-        b'>' if rest.starts_with(b">>") => {
-            *at = start + 2;
-            return Some(if closes(b">>") {
-                Item::Close
-            } else {
-                Item::Value(None)
-            });
-        }
-        b')' | b'>' | b']' | b'{' | b'}' => (start + 1, None),
-        b'/' => {
-            let end = word_end(s, start + 1);
-            (end, Some(Value::Name(name(&s[start..end])?.into_owned())))
-        }
-        _ => {
-            let end = word_end(s, start);
-            (end, word(&s[start..end]))
-        }
-    };
-    *at = end;
-    Some(Item::Value(value.map(Object::new)))
+/// An operand being read as an object: its bytes, where they are in the
+/// content, and the sink told where ISO 32000-2 would read what's inside
+/// it otherwise.
+struct Reading<'a, 's, S: ?Sized> {
+    s: &'a [u8],
+    /// Where `s` starts in the content.
+    base: usize,
+    sink: &'s mut S,
 }
 
-/// The array whose `[` ends at `*at`: its elements read, to its `]`.
-fn array(s: &[u8], at: &mut usize, depth: usize) -> Option<Object> {
-    let mut elements = Vec::new();
-    loop {
-        match item(s, at, depth, Some(b"]")) {
-            Some(Item::Value(element)) => elements.extend(element),
-            Some(Item::Close) => return Some(Object::new(Value::Array(elements))),
-            None => return None,
+impl<'a, S: Sink<'a> + ?Sized> Reading<'a, '_, S> {
+    /// The item from `*at`, `*at` moved past it, inside the array or
+    /// dictionary that `close` ends, if one's open, `depth` more of which
+    /// may nest. None at the end, and for a string, array or dictionary
+    /// that doesn't end, or one nested too deep. Inside an array or a
+    /// dictionary, an item that isn't one is told to the sink, if it
+    /// wants: its own faults, and a word that's no object.
+    fn item(&mut self, at: &mut usize, depth: usize, close: Option<&[u8]>) -> Option<Item> {
+        let s = self.s;
+        let start = skip_space(s, *at);
+        let rest = s.get(start..)?;
+        let closes = |delimiter: &[u8]| close == Some(delimiter);
+        let (end, value) = match *rest.first()? {
+            b'(' => {
+                let end = literal_string(s, start).ok()?;
+                let string =
+                    Value::String(Str::Bytes(literal(&s[start..end])), Some(Form::Literal));
+                (end, Some(string))
+            }
+            b'<' if rest.starts_with(b"<<") => {
+                *at = start + 2;
+                let dict = self.dictionary(at, depth.checked_sub(1)?)?;
+                return Some(Item::Value(Some(dict)));
+            }
+            b'<' => {
+                let end = hex_string(s, start).ok()?;
+                let string = Value::String(Str::Bytes(hex(&s[start..end])), Some(Form::Hex));
+                (end, Some(string))
+            }
+            b'[' => {
+                *at = start + 1;
+                let array = self.array(at, depth.checked_sub(1)?)?;
+                return Some(Item::Value(Some(array)));
+            }
+            b']' if closes(b"]") => {
+                *at = start + 1;
+                return Some(Item::Close);
+            }
+            b'>' if rest.starts_with(b">>") && closes(b">>") => {
+                *at = start + 2;
+                return Some(Item::Close);
+            }
+            b'>' if rest.starts_with(b">>") => (start + 2, None),
+            b')' | b'>' | b']' | b'{' | b'}' => (start + 1, None),
+            b'/' => {
+                let end = word_end(s, start + 1);
+                (end, Some(Value::Name(name(&s[start..end])?.into_owned())))
+            }
+            _ => {
+                let end = word_end(s, start);
+                (end, word(&s[start..end]))
+            }
+        };
+        *at = end;
+        if close.is_some() && self.sink.wants() {
+            let written = &s[start..end];
+            let place = self.base + start..self.base + end;
+            if fault::token(written, place.start, self.sink) == Read::Keyword {
+                self.sink.fault(place, Fault::Keyword { written });
+            }
+        }
+        Some(Item::Value(value.map(Object::new)))
+    }
+
+    /// The array whose `[` ends at `*at`: its elements read, to its `]`.
+    fn array(&mut self, at: &mut usize, depth: usize) -> Option<Object> {
+        let mut elements = Vec::new();
+        loop {
+            match self.item(at, depth, Some(b"]")) {
+                Some(Item::Value(element)) => elements.extend(element),
+                Some(Item::Close) => return Some(Object::new(Value::Array(elements))),
+                None => return None,
+            }
         }
     }
-}
 
-/// The dictionary whose `<<` ends at `*at`: its entries read, to its
-/// `>>`.
-fn dictionary(s: &[u8], at: &mut usize, depth: usize) -> Option<Object> {
-    let mut dict = Dict::new();
-    let next = |at: &mut usize| match item(s, at, depth, Some(b">>")) {
-        Some(Item::Value(value)) => Some(Ok(value)),
-        Some(Item::Close) => Some(Err(())),
-        None => None,
-    };
-    loop {
-        let Ok(key) = next(at)? else {
-            return Some(Object::new(Value::Dict(dict)));
-        };
-        let Some(key) = key.and_then(|key| match key.into_value() {
-            Value::Name(key) => Some(key),
-            _ => None,
-        }) else {
-            continue;
-        };
-        match next(at)? {
-            Ok(Some(value)) => dict.push(key, value),
-            Ok(None) => {}
-            Err(()) => return Some(Object::new(Value::Dict(dict))),
+    /// The dictionary whose `<<` ends at `*at`: its entries read, to its
+    /// `>>`. A key that's an object but no name, and a key with no value,
+    /// told to the sink, if it wants.
+    fn dictionary(&mut self, at: &mut usize, depth: usize) -> Option<Object> {
+        let mut dict = Dict::new();
+        loop {
+            let from = *at;
+            let key = match self.item(at, depth, Some(b">>"))? {
+                Item::Value(key) => key,
+                Item::Close => return Some(Object::new(Value::Dict(dict))),
+            };
+            // Where the key is, its white-space before it left out.
+            let place = skip_space(self.s, from)..*at;
+            let key = match key.map(Object::into_value) {
+                Some(Value::Name(key)) => key,
+                Some(_) => {
+                    self.tell(place, |written| Fault::Key { written });
+                    continue;
+                }
+                None => continue,
+            };
+            match self.item(at, depth, Some(b">>"))? {
+                Item::Value(Some(value)) => dict.push(key, value),
+                Item::Value(None) => {}
+                Item::Close => {
+                    self.tell(place, |written| Fault::NoValue { written });
+                    return Some(Object::new(Value::Dict(dict)));
+                }
+            }
+        }
+    }
+
+    /// `fault` of what's at `place` in the operand, told to the sink, at
+    /// its place in the content, if it wants faults.
+    fn tell(&mut self, place: Range<usize>, fault: impl FnOnce(&'a [u8]) -> Fault<'a>) {
+        if self.sink.wants() {
+            let written = &self.s[place.clone()];
+            let place = self.base + place.start..self.base + place.end;
+            self.sink.fault(place, fault(written));
         }
     }
 }

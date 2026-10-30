@@ -195,7 +195,7 @@ pub(crate) fn skip_space(s: &[u8], mut at: usize) -> usize {
 }
 
 /// Where the line from `at` ends: its end-of-line byte, or the end.
-fn line_end(s: &[u8], at: usize) -> usize {
+pub(crate) fn line_end(s: &[u8], at: usize) -> usize {
     s[at..]
         .iter()
         .position(|&c| c == b'\r' || c == b'\n')

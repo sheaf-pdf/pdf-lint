@@ -16,7 +16,7 @@ use std::ops::Range;
 
 use crate::inline::ResCx;
 use crate::limits::Limits;
-use crate::operations::{Operations, operations};
+use crate::operations::Operations;
 use crate::tokens::{Tokens, tokens};
 
 /// A place in a page's content: a byte in one of its streams. The end of
@@ -148,16 +148,23 @@ impl<'a> Concat<'a> {
     }
 
     /// The joined bytes' tokens ([`tokens`](crate::tokens)), at offsets
-    /// into them.
+    /// into them. With a sink ([`Tokens::with_sink`]), a string, a
+    /// comment or an inline image that runs from one stream into the next
+    /// is told too ([`Fault::Across`](crate::fault::Fault::Across)).
     pub fn tokens<'s, 'r>(&'s self, res: &'r ResCx, limits: &Limits) -> Tokens<'s, 'r> {
-        tokens(&self.bytes, res, limits)
+        // Where each stream after the first starts.
+        let joins = self.starts.get(1..).unwrap_or_default();
+        tokens(&self.bytes, res, limits).joined(joins)
     }
 
     /// The joined bytes' operations ([`operations`](crate::operations)),
     /// at offsets into them, which [`pos`](Concat::pos) and
-    /// [`span`](Concat::span) map back to the streams.
+    /// [`span`](Concat::span) map back to the streams. With a sink
+    /// ([`Operations::with_sink`]), a string, a comment or an inline image
+    /// that runs from one stream into the next is told too
+    /// ([`Fault::Across`](crate::fault::Fault::Across)).
     pub fn operations<'s, 'r>(&'s self, res: &'r ResCx, limits: &Limits) -> Operations<'s, 'r> {
-        operations(&self.bytes, res, limits)
+        Operations::new(self.tokens(res, limits))
     }
 }
 

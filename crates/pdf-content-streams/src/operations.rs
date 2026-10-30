@@ -9,6 +9,7 @@ use std::ops::Range;
 use tinyvec::TinyVec;
 
 use crate::error::Error;
+use crate::fault::{Fault, Sink};
 use crate::inline::{InlineImage, ResCx};
 use crate::limits::Limits;
 use crate::operand::Operand;
@@ -30,6 +31,10 @@ type Ranges = TinyVec<[Range<usize>; 16]>;
 /// a reader that counts them, or reads a color with more components,
 /// has them all.
 ///
+/// Where ISO 32000-2 would read the bytes otherwise, a sink given by
+/// [`Operations::with_sink`] is told ([`fault`](crate::fault)); the
+/// operations are the same.
+///
 /// ```
 /// use pdf_content_streams::{Limits, ResCx, operations};
 ///
@@ -46,24 +51,72 @@ type Ranges = TinyVec<[Range<usize>; 16]>;
 /// assert_eq!(cm.arg(0).unwrap().bytes(), b"720");
 /// ```
 pub fn operations<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Operations<'a, 'r> {
-    Operations {
-        tokens: tokens(s, res, limits),
+    Operations::new(tokens(s, res, limits))
+}
+
+/// A content stream's operations, in order ([`operations`]), and where
+/// ISO 32000-2 would read them otherwise told to `S`, a
+/// [`Sink`](crate::fault::Sink): none for `()`.
+#[derive(Debug, Clone)]
+pub struct Operations<'a, 'r, S = ()> {
+    tokens: Tokens<'a, 'r, S>,
+}
+
+impl<'a, 'r, S> Operations<'a, 'r, S> {
+    /// The operations of `tokens`.
+    pub(crate) fn new(tokens: Tokens<'a, 'r, S>) -> Operations<'a, 'r, S> {
+        Operations { tokens }
+    }
+
+    /// The same operations, from where these are, with where ISO 32000-2
+    /// would read them otherwise told to `sink` ([`fault`](crate::fault)):
+    /// what [`Tokens::with_sink`] tells, and operands at the end that no
+    /// operator takes. A sink borrowed, `&mut S`, is one, so it can be read
+    /// after.
+    ///
+    /// ```
+    /// use pdf_content_streams::fault::{Fault, Sink};
+    /// use pdf_content_streams::{Limits, ResCx, operations};
+    /// use std::ops::Range;
+    ///
+    /// #[derive(Default)]
+    /// struct Kept<'a>(Vec<(Range<usize>, Fault<'a>)>);
+    /// impl<'a> Sink<'a> for Kept<'a> {
+    ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
+    ///         self.0.push((at, fault));
+    ///     }
+    /// }
+    ///
+    /// let content = b"q 0 0 m 9 9 l S Q 1 2";
+    /// let mut kept = Kept::default();
+    /// let res = ResCx::none();
+    /// let read = operations(content, &res, &Limits::DEFAULT).with_sink(&mut kept);
+    /// assert_eq!(read.count(), 5);
+    /// assert_eq!(kept.0, [(18..21, Fault::Trailing { count: 2 })]);
+    /// assert_eq!(
+    ///     kept.0[0].1.to_string(),
+    ///     "2 operands at the end that no operator takes"
+    /// );
+    /// ```
+    pub fn with_sink<T: Sink<'a>>(self, sink: T) -> Operations<'a, 'r, T> {
+        Operations {
+            tokens: self.tokens.with_sink(sink),
+        }
     }
 }
 
-/// A content stream's operations, in order ([`operations`]).
-#[derive(Debug, Clone)]
-pub struct Operations<'a, 'r> {
-    tokens: Tokens<'a, 'r>,
-}
-
-impl<'a> Iterator for Operations<'a, '_> {
+impl<'a, S: Sink<'a>> Iterator for Operations<'a, '_, S> {
     type Item = Result<Operation<'a>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut operands = Ranges::new();
         loop {
-            let (at, tok) = match self.tokens.next()? {
+            let Some(token) = self.tokens.step() else {
+                self.trailing(&operands);
+                self.tokens.finish();
+                return None;
+            };
+            let (at, tok) = match token {
                 Ok(token) => token,
                 Err(e) => return Some(Err(e)),
             };
@@ -85,7 +138,21 @@ impl<'a> Iterator for Operations<'a, '_> {
     }
 }
 
-impl FusedIterator for Operations<'_, '_> {}
+impl<'a, S: Sink<'a>> FusedIterator for Operations<'a, '_, S> {}
+
+impl<'a, S: Sink<'a>> Operations<'a, '_, S> {
+    /// `operands`, at the end, no operator's: told, if there are any.
+    fn trailing(&mut self, operands: &Ranges) {
+        let sink = self.tokens.sink();
+        if !sink.wants() {
+            return;
+        }
+        if let (Some(first), Some(last)) = (operands.first(), operands.last()) {
+            let count = operands.len();
+            sink.fault(first.start..last.end, Fault::Trailing { count });
+        }
+    }
+}
 
 /// An operator, or an inline image, and the operands before it: an
 /// operation of a content stream ([`operations`]). Offsets are into the
