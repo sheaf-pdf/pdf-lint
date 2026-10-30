@@ -826,6 +826,24 @@ fn streams_past_the_cap_are_refused() {
         TooLarge { cap: 999 }.to_string(),
         "its streams decode to more than 999 bytes"
     );
+    // No more than a place in them can count to, whatever the cap.
+    let uncapped = Limits {
+        content: usize::MAX,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(Join::new(&uncapped).room(), u32::MAX as usize);
+    // A place past a stream, however far, is nowhere.
+    let page = Concat::new(&streams);
+    for at in [1001, u32::MAX] {
+        assert_eq!(page.offset(Pos { stream: 1, at }), None);
+    }
+    assert_eq!(
+        page.offset(Pos {
+            stream: u32::MAX,
+            at: 0
+        }),
+        None
+    );
 }
 
 #[test]

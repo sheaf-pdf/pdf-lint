@@ -19,6 +19,10 @@ use crate::limits::Limits;
 use crate::operations::Operations;
 use crate::tokens::{Tokens, tokens};
 
+/// The most bytes a place in a page's content can count to: a [`Pos`]'s
+/// 32 bits.
+const PLACES: usize = u32::MAX as usize;
+
 /// A place in a page's content: a byte in one of its streams. The end of
 /// a stream is the place after its last byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -55,10 +59,10 @@ impl fmt::Display for SpanAcross {
 /// Streams as one: their bytes joined, a space between each, as PDFium
 /// joins a page's. A token can still run from one into the next, as in
 /// PDFium, when a string or an inline image does. Offsets are into the
-/// joined bytes. A place in them ([`Pos`]) counts in 32 bits, which a
-/// page's content under [`Limits::content`] keeps within; streams of more
-/// than 4 GiB together, joined by [`Concat::new`], which has no cap, give
-/// places past it as `u32::MAX`.
+/// joined bytes. A place in them ([`Pos`]) counts in 32 bits, which
+/// [`Join`] keeps within, refusing past 4 GiB whatever [`Limits::content`]
+/// says; streams of more than 4 GiB together, joined by [`Concat::new`],
+/// which has no cap, give places past it as `u32::MAX`.
 #[derive(Debug, Clone)]
 pub struct Concat<'a> {
     bytes: Cow<'a, [u8]>,
@@ -126,9 +130,9 @@ impl<'a> Concat<'a> {
     /// Where `pos` is in the joined bytes; None past its stream's end, or
     /// past the last stream.
     pub fn offset(&self, pos: Pos) -> Option<usize> {
-        let stream = pos.stream as usize;
+        let stream = usize::try_from(pos.stream).ok()?;
         let range = (stream < self.starts.len()).then(|| self.range(stream))?;
-        let at = range.start + pos.at as usize;
+        let at = range.start.checked_add(usize::try_from(pos.at).ok()?)?;
         (at <= range.end).then_some(at)
     }
 
@@ -205,12 +209,13 @@ pub struct Join {
 }
 
 impl Join {
-    /// None yet, under `limits.content`.
+    /// None yet, under `limits.content`, and under 4 GiB, past which a
+    /// place in them can't be counted ([`Pos`]).
     pub fn new(limits: &Limits) -> Join {
         Join {
             bytes: Vec::new(),
             starts: Vec::new(),
-            cap: limits.content,
+            cap: limits.content.min(PLACES),
         }
     }
 

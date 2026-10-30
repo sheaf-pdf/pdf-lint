@@ -32,7 +32,9 @@ pub struct Limits {
     /// An inline image's data, in bytes: 64 MiB by default.
     pub inline_image: usize,
     /// A page's streams joined ([`Join`](crate::Join)), in bytes, the
-    /// space between each among them: 256 MiB by default.
+    /// space between each among them: 256 MiB by default. A place in them
+    /// is counted in 32 bits ([`Pos`](crate::Pos)), so `Join` refuses past
+    /// 4 GiB, whatever this says.
     pub content: usize,
 }
 
