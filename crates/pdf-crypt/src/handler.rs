@@ -46,14 +46,15 @@ pub enum Method {
     /// the two ciphertexts is the XOR of the two plaintexts: what changed
     /// leaks to one who holds both. An update's file holds both; after a
     /// file is saved whole again under the same key and `/ID`, the earlier
-    /// file does, wherever it's kept. So too where a file saved whole again,
-    /// or an update, puts an object at a number another object had, as a
-    /// writer that renumbers its objects does: it's encrypted with that
-    /// object's keystream, and the XOR of the two ciphertexts, one in each
-    /// file or both in the updated one, is the XOR of the two plaintexts,
-    /// for every object moved onto another's number. A writer that doesn't want that writes the file whole under a
-    /// new AES-256 encryption ([`Handler::create`]), which leaks neither
-    /// way: its key is new, and its IVs differ for different data.
+    /// file does, wherever it's kept. So too where a file saved whole
+    /// again, or an update, puts an object at a number another object had,
+    /// as a writer that renumbers its objects does: it's encrypted with
+    /// that object's keystream, and the XOR of the two ciphertexts, one in
+    /// each file or both in the updated one, is the XOR of the two
+    /// plaintexts, for every object moved onto another's number. A writer
+    /// that doesn't want that writes the file whole under a new AES-256
+    /// encryption ([`Handler::create`]), which leaks neither way: its key
+    /// is new, and its IVs differ for different data.
     Rc4,
     /// AES-128, the key each object's (`/CFM /AESV2`).
     Aes128,

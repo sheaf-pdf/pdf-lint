@@ -1977,32 +1977,21 @@ qpdf: operation succeeded with warnings\n";
         }
     }
 
-    /// Whole files written under two renumberings, each object's number
-    /// reversed (each at the number of the one as far from the end as it is
-    /// from the start), and every other number kept, the rest moved past
-    /// every number, by their document and reading under their own
-    /// encryption, with a table and packed, copied where the rules hold:
-    /// their headers and the references that move written anew in place,
-    /// at new numbers where no key is made of the number: [`listed`]'s
-    /// objects plain and under every method, the test writer's spelled
-    /// objects and members, and [`plaintext`] under each method it encrypts
-    /// by. Checked by qpdf by their password ("No syntax or stream encoding
-    /// errors found") and read through qpdf alone as the reader reads them,
-    /// but a signature's `/Contents` with no `/Type`, as above, at the
-    /// number it's written at.
+    /// The files the renumbered files' and updates' tests write from, each
+    /// named, and with whether a signature's `/Contents` with no `/Type` is
+    /// left in the clear in it, which qpdf decrypts: [`listed`]'s objects
+    /// plain and under every method, the test writer's spelled objects and
+    /// members, and [`plaintext`] under each method it encrypts by.
     ///
     /// [`listed`]: crate::write::tests::listed
     /// [`plaintext`]: crate::write::tests::plaintext
-    #[test]
-    #[ignore = "needs qpdf: just test-qpdf"]
-    fn renumbered_files_read_through_qpdf_as_through_the_reader() {
+    fn renumbered_sources() -> Vec<(String, Vec<u8>, bool)> {
         use crate::XrefKind;
-        use crate::bytes::{Options, Reading};
         use crate::write::tests::{
             KINDS_ENCRYPTED, encrypted_by, listed, members_spelled, methods, spelled,
             written_otherwise,
         };
-        use crate::write::{self, Body, Encryptor, Pack};
+        use crate::write::{self, Body};
 
         let (plain, trailer) = listed();
         let plain_file = {
@@ -2012,8 +2001,6 @@ qpdf: operation succeeded with warnings\n";
             write::full(&mut out, bodies, &trailer, None, None, &options).unwrap();
             out
         };
-        // Each source, and whether a signature's /Contents with no /Type is
-        // left in the clear in it, which qpdf decrypts.
         let mut sources = vec![
             ("listed".to_string(), plain_file, false),
             ("spelled".to_string(), spelled(), false),
@@ -2026,8 +2013,29 @@ qpdf: operation succeeded with warnings\n";
         for kind in KINDS_ENCRYPTED {
             sources.push((format!("{kind:?}"), written_otherwise(kind, true), true));
         }
+        sources
+    }
+
+    /// Whole files written under two renumberings, each object's number
+    /// reversed (each at the number of the one as far from the end as it is
+    /// from the start), and every other number kept, the rest moved past
+    /// every number, by their document and reading under their own
+    /// encryption, with a table and packed, copied where the rules hold:
+    /// their headers and the references that move written anew in place,
+    /// at new numbers where no key is made of the number: each of
+    /// [`renumbered_sources`]. Checked by qpdf by their password ("No syntax
+    /// or stream encoding errors found") and read through qpdf alone as the
+    /// reader reads them, but a signature's `/Contents` with no `/Type`, as
+    /// above, at the number it's written at.
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn renumbered_files_read_through_qpdf_as_through_the_reader() {
+        use crate::XrefKind;
+        use crate::bytes::{Options, Reading};
+        use crate::write::{self, Encryptor, Pack};
+
         let dir = scratch("renumbered");
-        for (name, source, strings) in sources {
+        for (name, source, strings) in renumbered_sources() {
             let passwords = [Password("user")];
             let reading = Reading::open_with(&source[..], &passwords, &Options::DEFAULT).unwrap();
             let doc = reading.to_document().unwrap();
@@ -2091,51 +2099,26 @@ qpdf: operation succeeded with warnings\n";
         }
     }
 
-    /// [`renumbered_files_read_through_qpdf_as_through_the_reader`]'s
-    /// sources, each updated under two renumberings, given its document's
-    /// objects as read and its reading, under its own encryption: every
-    /// object but an encryption dictionary and what it refers to moved past
-    /// every number, so that each is written, copied where the rules hold;
-    /// and the catalog alone moved, so that what names it is written and the
-    /// rest passed over. Checked by qpdf by their password, and read through
-    /// qpdf alone as the reader reads them, but a signature's `/Contents`
-    /// with no `/Type`, as above, at each number the file holds it at, its
-    /// own and the one it's written at.
+    /// [`renumbered_sources`], each updated under two renumberings, given
+    /// its document's objects as read and its reading, under its own
+    /// encryption: every object but an encryption dictionary and what it
+    /// refers to moved past every number, so that each is written, copied
+    /// where the rules hold; and the catalog alone moved, so that what
+    /// names it is written and the rest passed over. Checked by qpdf by
+    /// their password, and read through qpdf alone as the reader reads
+    /// them, but a signature's `/Contents` with no `/Type`, as above, at
+    /// each number the file holds it at, its own and the one it's written
+    /// at.
     #[test]
     #[ignore = "needs qpdf: just test-qpdf"]
     fn renumbered_updates_read_through_qpdf_as_through_the_reader() {
         use std::collections::BTreeSet;
 
-        use crate::XrefKind;
         use crate::bytes::{Options, Reading};
-        use crate::write::tests::{
-            KINDS_ENCRYPTED, encrypted_by, listed, members_spelled, methods, spelled,
-            written_otherwise,
-        };
-        use crate::write::{self, Body, Encryptor};
+        use crate::write::{self, Encryptor};
 
-        let (plain, trailer) = listed();
-        let plain_file = {
-            let mut out = Vec::new();
-            let bodies = (plain.iter()).map(|(n, o)| ((*n, 0), Body::from(o)));
-            let options = write::Options::DEFAULT;
-            write::full(&mut out, bodies, &trailer, None, None, &options).unwrap();
-            out
-        };
-        let mut sources = vec![
-            ("listed".to_string(), plain_file, false),
-            ("spelled".to_string(), spelled(), false),
-            ("members spelled".to_string(), members_spelled(), false),
-        ];
-        for method in methods() {
-            let data = encrypted_by(&method.encryptor, &plain, &trailer, XrefKind::Table);
-            sources.push((format!("listed, {}", method.name), data, method.strings));
-        }
-        for kind in KINDS_ENCRYPTED {
-            sources.push((format!("{kind:?}"), written_otherwise(kind, true), true));
-        }
         let dir = scratch("renumbered-updates");
-        for (name, source, strings) in sources {
+        for (name, source, strings) in renumbered_sources() {
             let passwords = [Password("user")];
             let reading = Reading::open_with(&source[..], &passwords, &Options::DEFAULT).unwrap();
             let doc = reading.to_document().unwrap();

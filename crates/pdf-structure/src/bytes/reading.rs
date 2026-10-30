@@ -907,23 +907,23 @@ impl<S: ByteSource> Reading<S> {
     ///
     /// `doc` was opened as the reading was ([`Document::encryption`] and
     /// [`Reading::encryption`] alike: neither encrypted, both opened by a
-    /// password, both locked, and so on), so that its strings are
-    /// plaintext where the reading's are, and its object streams read where
-    /// the reading's do: a document read without the password the reading
-    /// was given, whose strings are ciphertext and whose object streams'
-    /// members don't read, isn't taken. And an encrypted file's encryption is `doc`'s where the
-    /// encryption dictionary it was opened by, as stored, is the one `doc`'s
-    /// trailer names, at the same number or alike in the trailer, and its
-    /// first `/ID` element is `doc`'s: what a password's key is made of (ISO
-    /// 32000-2, 7.6.4.3), so that the bytes copied are encrypted as `doc`'s
-    /// objects were read. That's read from `doc`'s trailer as it was read:
-    /// a trailer whose `/Encrypt` or `/ID` was edited first is refused, so a
-    /// document is taken before it's edited so (a write writes `/Encrypt` and
-    /// `/ID` from its encryptor, whatever the trailer says). The key itself
-    /// isn't compared: the owner's password and the user's open a file with
-    /// one key (ISO 32000-2, 7.6.4.3 and 7.6.4.4), so a reading by the
-    /// owner's password takes a document read by the user's, and the other
-    /// way.
+    /// password, both locked, and so on), so that its strings are plaintext
+    /// where the reading's are, and its object streams read where the
+    /// reading's do: a document read without the password the reading was
+    /// given, whose strings are ciphertext and whose object streams'
+    /// members don't read, isn't taken. And an encrypted file's encryption
+    /// is `doc`'s where the encryption dictionary it was opened by, as
+    /// stored, is the one `doc`'s trailer names, at the same number or
+    /// alike in the trailer, and its first `/ID` element is `doc`'s: what a
+    /// password's key is made of (ISO 32000-2, 7.6.4.3), so that the bytes
+    /// copied are encrypted as `doc`'s objects were read. That's read from
+    /// `doc`'s trailer as it was read: a trailer whose `/Encrypt` or `/ID`
+    /// was edited first is refused, so a document is taken before it's
+    /// edited so (a write writes `/Encrypt` and `/ID` from its encryptor,
+    /// whatever the trailer says). The key itself isn't compared: the
+    /// owner's password and the user's open a file with one key (ISO
+    /// 32000-2, 7.6.4.3 and 7.6.4.4), so a reading by the owner's password
+    /// takes a document read by the user's, and the other way.
     ///
     /// All or none: where an object isn't alike, `doc` is left as it was,
     /// and it's refused ([`Error::Unlike`]): another file, the file changed
@@ -972,13 +972,14 @@ impl<S: ByteSource> Reading<S> {
 
     /// Whether `doc` is encrypted, and opened, as the reading's file is:
     /// its [`Encryption`] of the reading's kind (opened by a password,
-    /// whichever, locked, and so on); and neither encrypted, as the reader reads a
-    /// trailer's `/Encrypt`, or both, by the encryption dictionary the
-    /// reading opened the file by, as stored ([`Reading::stored`]), at the
-    /// number `doc`'s trailer names, where the object `doc` holds is alike,
-    /// or in `doc`'s trailer alike, and by the same first `/ID` element, an
-    /// absent one empty. Dictionaries are compared as pdf-objects' writer
-    /// writes them, as an object's places in its file aren't the dictionary.
+    /// whichever, locked, and so on); and neither encrypted, as the reader
+    /// reads a trailer's `/Encrypt`, or both, by the encryption dictionary
+    /// the reading opened the file by, as stored ([`Reading::stored`]), at
+    /// the number `doc`'s trailer names, where the object `doc` holds is
+    /// alike, or in `doc`'s trailer alike, and by the same first `/ID`
+    /// element, an absent one empty. Dictionaries are compared as
+    /// pdf-objects' writer writes them, as an object's places in its file
+    /// aren't the dictionary.
     fn encrypts_as(&self, doc: &Document) -> bool {
         if discriminant(&doc.encryption) != discriminant(self.encryption()) {
             return false;
