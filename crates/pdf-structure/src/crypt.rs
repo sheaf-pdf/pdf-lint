@@ -380,9 +380,12 @@ mod tests {
         }
     }
 
-    /// Where the file opened, an object stream's data is encrypted by its
-    /// own crypt filter's method, else the streams'; where it didn't, as
-    /// the list says, its own crypt filter `/Identity` in the clear.
+    /// Where the file didn't open, an object stream bares its objects'
+    /// strings as the list says, where the file's strings are encrypted:
+    /// by its own crypt filter, `/Identity` in the clear, else as the
+    /// file's streams are. Where it opened, by the handler's methods, which
+    /// the reader's test of what it records holds
+    /// (`an_object_stream_left_in_the_clear_where_strings_arent_is_recorded`).
     #[test]
     fn an_object_stream_bares_strings_by_its_own_crypt_filter_else_the_files_streams() {
         let list = |strings: bool, streams: bool| List {

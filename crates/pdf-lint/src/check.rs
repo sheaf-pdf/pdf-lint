@@ -5238,17 +5238,17 @@ mod tests {
         assert_eq!(said(&only((3, 0), Made::Built)), []);
     }
 
-    /// An object stream [`packed`] writes: its number, the entries of its
-    /// dictionary it's given, and its members, each its number and as
-    /// written.
-    type Packed<'a> = (u32, &'a str, &'a [(u32, &'a str)]);
+    /// An object stream [`with_object_streams`] writes: its number, the
+    /// entries of its dictionary it's given, and its members, each its
+    /// number and as written.
+    type ObjStm<'a> = (u32, &'a str, &'a [(u32, &'a str)]);
 
     /// A file at 1.7 of `objects`, each written at its number as given,
     /// and of object streams, each its number, the entries of its
     /// dictionary but `/N`, `/First` and `/Length` (its `/Type` among
     /// them), and its members, each its number and as written; with a
     /// cross-reference stream listing every one, its trailer's `/Root` 1.
-    fn packed(objects: &[(u32, &str)], streams: &[Packed]) -> Vec<u8> {
+    fn with_object_streams(objects: &[(u32, &str)], streams: &[ObjStm]) -> Vec<u8> {
         let mut file = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
         // Each object's cross-reference entry: its type, and two fields.
         let mut entries = BTreeMap::new();
@@ -5323,7 +5323,7 @@ mod tests {
     fn an_object_stream_is_checked_from_its_number() {
         let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> \
                     /Rotate (abc) >>";
-        let file = packed(
+        let file = with_object_streams(
             &[
                 (1, "<< /Type /Catalog /Pages 2 0 R >>"),
                 (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
@@ -5380,7 +5380,7 @@ mod tests {
 
         // Clean, it's checked and counted all the same, with no finding.
         let page = page.replace("/Rotate (abc)", "/Rotate 90");
-        let file = packed(
+        let file = with_object_streams(
             &[
                 (1, "<< /Type /Catalog /Pages 2 0 R >>"),
                 (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
@@ -5647,7 +5647,7 @@ mod tests {
     #[test]
     fn a_stream_whose_type_is_a_string_is_no_object_stream() {
         let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>";
-        let file = packed(
+        let file = with_object_streams(
             &[(1, "<< /Type /Catalog /Pages 2 0 R >>")],
             &[(
                 10,
@@ -7862,12 +7862,15 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let clean = [(3, page)];
-        let streams: [Packed; 2] = [(12, "/Type /ObjStm", &clean), (15, faulty, &[other])];
-        let baseline = checked(packed(&objects, &streams));
+        let streams: [ObjStm; 2] = [(12, "/Type /ObjStm", &clean), (15, faulty, &[other])];
+        let baseline = checked(with_object_streams(&objects, &streams));
         assert_eq!(typed(&baseline), [(Some(15), "15 0 R".to_string())]);
         assert!(baseline.paths.contains("12 0 R"));
         for n in [12, 20] {
-            let rewrite = checked(packed(&objects, &[(n, faulty, &[(3, page), other])]));
+            let rewrite = checked(with_object_streams(
+                &objects,
+                &[(n, faulty, &[(3, page), other])],
+            ));
             assert_eq!(typed(&rewrite), [(Some(n), format!("{n} 0 R"))]);
             assert_eq!(rewrite.by_path(&baseline), Vec::<&Finding>::new(), "{n}");
         }

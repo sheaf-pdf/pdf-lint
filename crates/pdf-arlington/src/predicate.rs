@@ -414,10 +414,11 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// The number of the indirect object the container is, not one it's
     /// written inside: `fn:ImageIsStructContentItem`,
     /// `fn:PageContainsStructContentItems` and `fn:NoCycle` know it by that
-    /// alone, where without one they know it by where it was written. So one built in
-    /// memory, or edited, which has no span, is still known, and one whose
-    /// bytes are another object's too, as an object stream's header can
-    /// start two of its objects at one offset, is told apart from it.
+    /// alone, where without one they know it by where it was written. So
+    /// one built in memory, or edited, which has no span, is still known,
+    /// and one whose bytes are another object's too, as an object stream's
+    /// header can start two of its objects at one offset, is told apart
+    /// from it.
     #[must_use = "a Cx is a copy: it gives a new one, with the number"]
     pub fn id(mut self, id: ObjectId) -> Cx<'c, 'a> {
         self.id = Some(id);

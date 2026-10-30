@@ -212,9 +212,9 @@ fn whole(file: &[u8], passwords: &[Password], section: Option<usize>) -> Whole {
 }
 
 /// The file read whole twice, the same each time, every place it gives
-/// inside `file`'s bytes or what it decoded, and read on demand in the
-/// order `choice` gives, the same; and when the file has an update, the
-/// same of the revision before it.
+/// inside `file`'s bytes or what it decoded, its newest revision's trailer
+/// the trailer, and read on demand in the order `choice` gives, the same;
+/// and when the file has an update, the same of the revision before it.
 fn alike(file: &[u8], passwords: &[Password], choice: u16) {
     let read = whole(file, passwords, None);
     let doc = &read.document;
@@ -224,6 +224,12 @@ fn alike(file: &[u8], passwords: &[Password], choice: u16) {
         "a reading is the same twice"
     );
     within(file, doc);
+    if let Some(newest) = doc.revisions.last() {
+        assert_eq!(
+            newest.trailer, doc.trailer,
+            "the newest revision's trailer is the trailer"
+        );
+    }
     pruned(doc);
     on_demand(file, passwords, None, &read, choice);
     by_position(file, passwords, None, doc, choice);
@@ -490,8 +496,8 @@ fn pruned(doc: &Document) {
 
 /// Checks that every place `doc` gives is inside what was read, the file
 /// or the decoded data of the object stream it names: each object's, and
-/// each value's and key's in it, each stream's data's, the trailer's, and
-/// each warning's.
+/// each value's and key's in it, each stream's data's, the trailer's, each
+/// revision's trailer's, and each warning's.
 fn within(file: &[u8], doc: &Document) {
     let inside = |at: Span, of: Option<ObjectId>| {
         let len = match at.stream {
@@ -505,7 +511,8 @@ fn within(file: &[u8], doc: &Document) {
     };
     let objects = doc.objects().map(|(id, o)| (Some(id), o));
     let trailer = (doc.trailer.stream, &doc.trailer.object);
-    for (of, object) in objects.chain([trailer]) {
+    let revisions = (doc.revisions.iter()).map(|r| (r.trailer.stream, &r.trailer.object));
+    for (of, object) in objects.chain([trailer]).chain(revisions) {
         let mut stack = vec![object];
         while let Some(o) = stack.pop() {
             if let Some(at) = o.at {
