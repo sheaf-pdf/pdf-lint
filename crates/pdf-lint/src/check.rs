@@ -602,7 +602,8 @@ pub struct Unchecked {
     /// What's in the way ([`Truth::Unknown`]'s): a function
     /// (`fn:IsMeaningful`), a value that can't be read (`@Type`), or a
     /// string's bytes the reader didn't give; for a trailer, why it can't
-    /// be checked ([`UNTOLD`], [`UNKEPT`]).
+    /// be checked: a later revision whose numbers aren't known, or the
+    /// revisions not kept.
     pub why: String,
     pub table: String,
     pub key: String,
