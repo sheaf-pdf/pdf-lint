@@ -323,8 +323,11 @@ pub enum Fault<'a> {
     /// An inline image whose `/L` or `/Length` gives its data a length
     /// that ends it elsewhere than it's read here, where PDFium reads
     /// neither: it finds an unfiltered image's data by its size, a
-    /// filter's by its end, and otherwise reads on to the next `EI`. ISO
-    /// 32000-2's `/L` is the data's length (8.9.7, "shall"), after the
+    /// filter's by its end, and otherwise reads on to the next `EI`; or,
+    /// where a decoder ends it short of its filter's own end of data (with
+    /// the `image-ends` feature, fax data's end-of-block pattern or a
+    /// JPEG's end of image), elsewhere than that end, where ISO ends it.
+    /// ISO 32000-2's `/L` is the data's length (8.9.7, "shall"), after the
     /// white-space byte after `ID`, and any more white-space where the
     /// last of its filters is one of the two ASCII ones, ASCIIHexDecode and
     /// ASCII85Decode. The length and the filters are read from the
@@ -350,7 +353,9 @@ pub enum Fault<'a> {
     AfterId,
     /// Tokens between an inline image's data and its `EI`: passed over
     /// here, as PDFium reads on to the next `EI`; ISO 32000-2's `EI`
-    /// follows the data (8.9.7, "shall").
+    /// follows the data (8.9.7, "shall"). The data runs on to its filter's
+    /// own end of data where a decoder ends it sooner, as for
+    /// [`ImageLength`](Fault::ImageLength).
     #[error("{} is between an inline image's data and its EI", shown(.written))]
     BeforeEi {
         /// What's between, the first token to the last.

@@ -56,8 +56,11 @@ outside its package, so they move with it:
 - `chromium-N.txt`: PDFium's answer for each case, one line each, at the
   pinned build, chromium/N. There's one.
 - `differ.tsv`: the cases the crate reads otherwise than PDFium, each with
-  why. The crate's test holds each to still differ, so a change that
-  settles one is seen and its line goes.
+  the builds it's read otherwise in (`all`; or, where a feature changes
+  the reading, `default` for the build without it, or the feature's name,
+  as pdf-content-streams' `image-ends`) and why. The crate's test holds
+  each to still differ in those builds, and to agree in the others, so a
+  change that settles one is seen and its line goes.
 - `chromium-N.differs`, at a bump only: cases whose answer at chromium/N
   is PDFium's regression, kept at their recorded answer (below).
 

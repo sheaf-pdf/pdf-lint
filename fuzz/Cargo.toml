@@ -42,7 +42,8 @@
 # lone `BI` told, each operation typed and stepped through the states, its
 # balance, marked content and names its steppers', and its searches for an
 # inline image's end and its walks past one to `EI`, remembered or not,
-# its Flate data decoded a window at a time as whole, and its skims of
+# its Flate data decoded a window at a time as whole, its DCT and
+# CCITTFax data decoded, with the `image-ends` feature, and its skims of
 # arrays and dictionaries the same as plain ones', which two stable unit tests
 # (`mutated_seeds_keep_every_promise`, `random_fragments_keep_every_promise`)
 # run on mutated seeds and random content;
@@ -62,7 +63,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-pdf-content-streams = { path = "../crates/pdf-content-streams" }
+# With `image-ends`, so the content target decodes DCT and CCITTFax data to
+# find where an inline image's ends, as the feature does.
+pdf-content-streams = { path = "../crates/pdf-content-streams", features = ["image-ends"] }
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
 # Both Flate backends, so that the filters' target runs on each.
 pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }

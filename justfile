@@ -12,6 +12,9 @@ objects_msrv := `grep -m1 '^rust-version' crates/pdf-objects/Cargo.toml | cut -d
 structure_msrv := `grep -m1 '^rust-version' crates/pdf-structure/Cargo.toml | cut -d'"' -f2`
 content_msrv := `grep -m1 '^rust-version' crates/pdf-content-streams/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
+# pdf-content-streams' `image-ends` feature needs a newer one than the crate:
+# its fax decoder, hayro-ccitt, uses Rust 1.87's library.
+content_image_ends_msrv := "1.87"
 
 # The nightly the fuzz targets build on: `nightly`, or the toolchain
 # FUZZ_TOOLCHAIN names, as CI's fuzzing pins one.
@@ -37,18 +40,21 @@ fmt:
 
 # Lint every crate, with its tests and binaries; then the libraries and the
 # binary as they're built for use, without the features only their tests
-# turn on; then the filters with zlib-rs their only Flate backend.
+# turn on; then the filters with zlib-rs their only Flate backend; then the
+# content streams with `image-ends`, which no other crate turns on.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
     cargo clippy --locked -p pdf-filters --no-default-features --features zlib-rs --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-content-streams --features image-ends --all-targets -- -D warnings
 
 # Unit tests and doctests: the workspace's, where the filters have both
 # Flate backends, as pdf-structure's tests turn zlib-rs on; then the
-# filters' with zlib-rs alone.
+# filters' with zlib-rs alone; then the content streams' with `image-ends`.
 test:
     cargo test --locked --workspace
     cargo test --locked -p pdf-filters --no-default-features --features zlib-rs
+    cargo test --locked -p pdf-content-streams --features image-ends
 
 # qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
 # pinned SHA-256 (from the release's qpdf-12.4.2.sha256), kept in target/.
@@ -231,9 +237,11 @@ objects-msrv:
 structure-msrv:
     cargo +{{ structure_msrv }} test --locked -p pdf-structure
 
-# Test pdf-content-streams on its oldest Rust, which must be installed.
+# Test pdf-content-streams on its oldest Rust, then with `image-ends` on
+# that feature's, each of which must be installed.
 content-msrv:
     cargo +{{ content_msrv }} test --locked -p pdf-content-streams
+    cargo +{{ content_image_ends_msrv }} test --locked -p pdf-content-streams --features image-ends
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:

@@ -80,6 +80,25 @@ pub enum Tok<'a> {
 ///   on nothing): none. (Past an LZW code that isn't in its table, but
 ///   for the first since a clear code, PDFium's decoder reads on as if it
 ///   were the next entry, which isn't followed.)
+/// - `/DCT` and `/CCF`, which PDFium decodes to find their end too, with
+///   the `image-ends` feature decoded so, every row, to where the decoder
+///   stands after the last: a JPEG on zune-jpeg, from its first start of
+///   image, its end counted from there, as PDFium counts it; refused
+///   where its header doesn't read or it's narrower than `/W`. Fax data
+///   on hayro-ccitt, its rows by `/Rows`, or `/H`, each `/Columns` wide
+///   (1728 where it isn't written, `/W` where it's 0), by `/K`'s coding,
+///   `/EndOfLine` and `/EncodedByteAlign` as PDFium reads them; refused
+///   where either count is none or past 65,535. Where the decoder can't
+///   decode what PDFium's reads on through, damaged data, the end is the
+///   stand-in's, and so where zune-jpeg stops short of the end of image,
+///   as at a progressive JPEG's scan of no coded data, which
+///   libjpeg-turbo reads on through. Without the feature, a stand-in
+///   finds the end in the data's bytes: a JPEG's past its first end of
+///   image, and fax data's, or a JPEG's with none, at the first `EI` with
+///   white-space before it and white-space, a delimiter or the end after
+///   it, which agree with PDFium's decoders but where a JPEG's end of
+///   image comes before its last (a thumbnail's), the coded bytes hold
+///   such an `EI`, or PDFium refuses the data.
 /// - a filter PDFium has no decoder for, one of those that finds no end,
 ///   or an unfiltered image no size counts: none, its tokens read on to
 ///   the next `EI`. And so for any image, filtered or not, whose size
@@ -92,13 +111,8 @@ pub enum Tok<'a> {
 /// ([`ImageStream::Missing`](crate::ImageStream::Missing)), and reads on
 /// from its start to the next `EI`; but an unfiltered image's counted
 /// data with no `EI` after it doesn't end. Its `/L` or `/Length` isn't
-/// read, as PDFium reads neither. PDFium decodes `/CCF` and `/DCT` data
-/// to find its end too; here a JPEG's ends at its end of image, and fax
-/// data, or a JPEG with none, at the first `EI` with white-space before
-/// it and white-space, a delimiter or the end after, which agree but
-/// where the encoded bytes hold such an `EI`, or a JPEG's end of image
-/// comes before its last. What finding the ends costs, decoding and
-/// reading in vain past an end, is capped for the reading
+/// read, as PDFium reads neither. What finding the ends costs, decoding
+/// and reading in vain past an end, is capped for the reading
 /// ([`Limits::image_ends`]).
 ///
 /// The dictionary is read as PDFium's `Handle_BeginImage` reads it: a

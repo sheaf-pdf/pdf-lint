@@ -1087,6 +1087,55 @@ pub(crate) const FLATE_EI: &[u8] = b"x\x01\x01\x04\x00\xfb\xff EI \x02\x05\x00\x
 /// each 9 bits wide.
 pub(crate) const LZW_EI: &[u8] = b"\x80\x08\x08\xa4\x91\x04\x04";
 
+/// A JPEG of `w` by `h` gray samples, written by hand: its start of
+/// image, `before` (segments ahead of its tables), quantizers all 1, a
+/// table of 4-bit codes for each DC difference's size, 0 to 11, and one for
+/// each AC value's, 1 to 10, the end of a block 0; its frame, one scan of
+/// `coded`, its blocks' coded bits, and its end of image.
+pub(crate) fn jpeg(w: u16, h: u16, before: &[u8], coded: &[u8]) -> Vec<u8> {
+    let segment = |marker: u8, body: &[u8]| {
+        let n = u16::try_from(body.len() + 2).expect("a segment's length");
+        [&[0xFF, marker][..], &n.to_be_bytes(), body].concat()
+    };
+    let table = |class: u8, symbols: u8| {
+        let mut body = vec![class, 0, 0, 0, symbols];
+        body.extend([0; 12]);
+        body.extend(0..symbols);
+        segment(0xC4, &body)
+    };
+    let quantizers = [&[0][..], &[1; 64]].concat();
+    let frame = [
+        &[8][..],
+        &h.to_be_bytes(),
+        &w.to_be_bytes(),
+        &[1, 1, 0x11, 0],
+    ]
+    .concat();
+    [
+        &b"\xff\xd8"[..],
+        before,
+        &segment(0xDB, &quantizers),
+        &table(0x00, 12),
+        &table(0x10, 11),
+        &segment(0xC0, &frame),
+        &segment(0xDA, &[1, 1, 0, 0, 63, 0]),
+        coded,
+        b"\xff\xd9",
+    ]
+    .concat()
+}
+
+/// One 8-by-8 block coded in [`jpeg`]'s tables: a DC difference of 5, AC
+/// values 3, -2 and 1, and its end.
+pub(crate) const BLOCK: &[u8] = b"\x3a\x59\x23\x0f";
+
+/// A JPEG's comment segment holding ` EI `.
+pub(crate) const COMMENT_EI: &[u8] = b"\xff\xfe\x00\x06 EI ";
+
+/// Fax data of four rows 16 pixels wide, Group 4 coded (`/K -1`): a white
+/// row, two with two runs of black, and one whose first four pixels are.
+pub(crate) const G4: &[u8] = b"\x97\x8e\x76\xee\x08\x21\x80";
+
 /// Flate data: a zlib header, `data` in a stored block, the last if
 /// `last`, and, if it's the last, its checksum.
 pub(crate) fn stored(data: &[u8], last: bool) -> Vec<u8> {
@@ -1113,7 +1162,8 @@ pub(crate) fn stored(data: &[u8], last: bool) -> Vec<u8> {
 /// Page content with an inline image found by each of PDFium's rules,
 /// ` EI ` in its data where the data is counted or its tokens read, or
 /// its Flate data decoded, one decoding to more than the fuzz body's
-/// small caps allow, strings, arrays, dictionaries and marked content,
+/// small caps allow, a JPEG and fax data, which the `image-ends` feature
+/// decodes, strings, arrays, dictionaries and marked content,
 /// and a color of 32 components and a pattern, more operands than an
 /// operation holds inline: the fuzz target's seeds.
 pub fn fixtures() -> Vec<Vec<u8>> {
@@ -1129,7 +1179,10 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         image("/F /AHx /W 2 /H 2 /BPC 8 /CS /G", b"0E EI 0>"),
         image("/F [/A85 /Fl] /W 9 /H 9", b"9jqo^ EI ~>"),
         image("/F /RL /W 4 /H 1 /BPC 8 /CS /G", b"\x03 EI \x80"),
-        image("/F /DCT /W 9 /H 9 /BPC 8 /CS /RGB", b"\xff\xd8 EI \xff\xd9"),
+        image(
+            "/F /DCT /W 8 /H 8 /BPC 8 /CS /G",
+            &jpeg(8, 8, COMMENT_EI, BLOCK),
+        ),
         image("/F /Fl /L 15", FLATE_EI),
         image("/F /LZW /DP <</EarlyChange 1>> /W 4 /H 1", LZW_EI),
         image(
@@ -1141,6 +1194,7 @@ pub fn fixtures() -> Vec<Vec<u8>> {
             &stored(b"0 1 2 3 EI 4 5 6 7 8 9 EI a b c d", true),
         ),
         image("/F /CCF /DP <</K -1>>", b"xEI EIy"),
+        image("/F /CCF /DP <</K -1 /Columns 16>> /W 16 /H 4", G4),
         image("/F /XYZ", b"(x EI y)"),
         b"%c\nq /Artifact <</Type /Pagination /Subtype /Header /Attached [/Top]>> BDC\n\
           q BT /F1 12 Tf 72 720 Td [(a\\)(b) c) -250 <4142>] TJ (\\\\) Tj ET Q EMC\n\
@@ -1231,7 +1285,7 @@ mod tests {
         b" 400000000000000000000000000000000000000.0 ",
     ];
 
-    /// The seeds read to their end, each of the first fourteen one inline
+    /// The seeds read to their end, each of the first fifteen one inline
     /// image between `q` and `Q`, and the last an `scn` of 33 operands.
     #[test]
     fn the_seeds_read_to_their_end() {
@@ -1241,7 +1295,7 @@ mod tests {
             let read: Vec<_> = tokens(seed, &res, &Limits::DEFAULT)
                 .collect::<Result<_, _>>()
                 .unwrap_or_else(|e| panic!("seed {i}: {e}"));
-            if i < 14 {
+            if i < 15 {
                 assert_eq!(read.len(), 3, "seed {i}");
                 assert!(matches!(read[1].1, Tok::InlineImage(_)), "seed {i}");
             }

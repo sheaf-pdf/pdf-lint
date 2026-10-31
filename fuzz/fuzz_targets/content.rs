@@ -12,7 +12,9 @@
 //! every one, in no order and overlapping; and its searches for an inline
 //! image's end and its walks past one to `EI`, remembered or not, and its
 //! skims of arrays and dictionaries, what plain ones find, and its Flate
-//! data decoded a window at a time as whole.
+//! data decoded a window at a time as whole; with the `image-ends`
+//! feature, which the fuzz crate turns on, its DCT and CCITTFax data
+//! decoded to find where an inline image's ends.
 
 #![no_main]
 

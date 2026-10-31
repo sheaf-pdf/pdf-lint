@@ -623,8 +623,24 @@ fn answer(content: &[u8], res: &[u8]) -> String {
 #[test]
 fn every_case_reads_as_pdfium_reads_it() {
     let recorded = recorded();
-    let differ: HashMap<String, String> = (rows(&set().join("differ.tsv")).into_iter())
-        .map(|r| (r[0].clone(), r[1].clone()))
+    // Each case read otherwise in every build, `all`, or only in the
+    // default's, `default`, or only with the `image-ends` feature,
+    // `image-ends`; those of this build's.
+    let build = if cfg!(feature = "image-ends") {
+        "image-ends"
+    } else {
+        "default"
+    };
+    let listed = rows(&set().join("differ.tsv"));
+    for r in &listed {
+        assert!(
+            r.len() == 3 && ["all", "default", "image-ends"].contains(&r[1].as_str()),
+            "differ.tsv: {r:?} isn't a name, the builds it differs in and why"
+        );
+    }
+    let differ: HashMap<String, String> = (listed.iter())
+        .filter(|r| r[1] == "all" || r[1] == build)
+        .map(|r| (r[0].clone(), r[2].clone()))
         .collect();
     let mut wrong = Vec::new();
     let cases = rows(&set().join("cases.tsv"));
@@ -647,9 +663,9 @@ fn every_case_reads_as_pdfium_reads_it() {
             )),
         }
     }
-    for name in differ.keys() {
-        if !cases.iter().any(|c| &c[0] == name) {
-            wrong.push(format!("{name}: in differ.tsv but no case"));
+    for r in &listed {
+        if !cases.iter().any(|c| c[0] == r[0]) {
+            wrong.push(format!("{}: in differ.tsv but no case", r[0]));
         }
     }
     assert!(

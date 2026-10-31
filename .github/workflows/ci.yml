@@ -194,8 +194,10 @@ jobs:
           persist-credentials: false
       # Keep in step with rust-version in
       # crates/pdf-content-streams/Cargo.toml, which `just content-msrv`
-      # reads.
+      # reads, and with `content_image_ends_msrv` in the justfile, the
+      # `image-ends` feature's, which it tests on the second.
       - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.87
       - uses: extractions/setup-just@v4
       - name: Test
         run: just content-msrv

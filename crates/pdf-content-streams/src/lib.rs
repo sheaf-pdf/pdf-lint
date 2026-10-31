@@ -14,9 +14,10 @@
 //!   color spaces the caller gives ([`ResCx`]): Flate and LZW data decoded
 //!   to where the decoder stops reading it, as PDFium decodes it, by
 //!   [pdf-filters](https://crates.io/crates/pdf-filters), Flate on
-//!   zlib-rs; CCITTFax and DCT data, which PDFium decodes too, by a
-//!   stand-in ([`tokens`] says where). What an operator does is no part
-//!   of it, so one nobody knows is a token like any other.
+//!   zlib-rs; DCT and CCITTFax data, which PDFium decodes too, so with the
+//!   `image-ends` feature (below), and by a stand-in without it ([`tokens`]
+//!   says where). What an operator does is no part of it, so one nobody
+//!   knows is a token like any other.
 //! - **Operations** ([`operations`]): each operator, or inline image
 //!   ([`InlineImage`]), with the operands before it ([`Operation`]), their
 //!   ranges held in the item, so an operation of sixteen operands or fewer
@@ -65,9 +66,24 @@
 //!
 //! No resolver: what's read from the file, the streams decoded, the color
 //! spaces' components and the property lists, the caller gives.
+//!
+//! # Features
+//!
+//! - **`image-ends`**, off by default: an inline image's DCT data decoded
+//!   on [zune-jpeg](https://crates.io/crates/zune-jpeg), and its CCITTFax
+//!   data on [hayro-ccitt](https://crates.io/crates/hayro-ccitt), to find
+//!   where it ends, as PDFium decodes them, what's decoded not kept; its
+//!   output counted against [`Limits::image_ends`] before it's made. It
+//!   needs Rust 1.87, where the crate needs 1.85. zune-jpeg is built
+//!   without its SIMD features (`x86`, `neon`), which hold all its
+//!   `unsafe`, so it builds with `unsafe_code` forbidden, as hayro-ccitt
+//!   does always; a crate built beside this one that turns those features
+//!   on, as Cargo's features are additive, turns them on here too.
 
 mod balance;
 mod data;
+#[cfg(feature = "image-ends")]
+mod decoders;
 mod error;
 pub mod fault;
 #[cfg(any(test, fuzzing))]

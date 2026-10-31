@@ -299,6 +299,10 @@ pub(crate) struct Images<'a, 'r> {
     run_length: RunLength,
     /// The last search for a JPEG's end of image.
     eoi: Searched,
+    /// The last search for a JPEG's start of image, where its data's end
+    /// is found by decoding it.
+    #[cfg(feature = "image-ends")]
+    soi: Searched,
     /// The walks to `EI` from where a filter's data ends.
     walks: Walks,
     /// What finding images' ends may cost yet in this reading, in bytes.
@@ -317,6 +321,8 @@ impl<'a, 'r> Images<'a, 'r> {
             a85: Searched::default(),
             run_length: RunLength::default(),
             eoi: Searched::default(),
+            #[cfg(feature = "image-ends")]
+            soi: Searched::default(),
             walks: Walks::default(),
             budget: lim.image_ends,
             decoded: Vec::new(),
@@ -358,7 +364,13 @@ impl<'a, 'r> Images<'a, 'r> {
         // A decoder that finds no end of its data, or refuses it, is none
         // to PDFium, which then reads on from its data's start as it does
         // for a filter it can't decode; and so for an image whose size it
-        // can't count, which it reads no data of, filtered or not.
+        // can't count, which it reads no data of, filtered or not. What a
+        // decoder read in vain, whatever comes after, is spent once the
+        // image is found to end. Where a decoder ends the data short of
+        // where ISO 32000-2 ends it, over the filter's own end of data,
+        // that end too, for the faults.
+        let mut vain = 0;
+        let mut iso = None;
         let end = match (self.size(&dict), self.first_filter(&dict)) {
             (None, _) => End::Walk,
             (Some(size), None) => match usize::try_from(size) {
@@ -374,10 +386,13 @@ impl<'a, 'r> Images<'a, 'r> {
                 Filter::RunLength => {
                     (self.run_length.end(s, start)).map_or(End::Walk, |end| End::Filter(end, 0))
                 }
-                Filter::Dct => (self.eoi.from(start, |at| find(s, at, b"\xff\xd9")))
-                    .map_or(End::Scan, |eoi| End::Filter(eoi + 2, 0)),
                 Filter::Flate | Filter::Lzw => self.decoded_end(bi, start, filter, &dict)?,
-                Filter::CcittFax => End::Scan,
+                Filter::Dct | Filter::CcittFax => {
+                    let (end, read, past) =
+                        self.coded_end(bi, start, filter, &dict, sink.wants())?;
+                    (vain, iso) = (read, past);
+                    end
+                }
                 Filter::Other => End::Walk,
             },
         };
@@ -417,6 +432,7 @@ impl<'a, 'r> Images<'a, 'r> {
                 (data, end, Found::Walk)
             }
         };
+        self.spend(bi, vain)?;
         if data.len() > self.lim.inline_image {
             return Err(Error {
                 at: bi,
@@ -424,7 +440,11 @@ impl<'a, 'r> Images<'a, 'r> {
             });
         }
         if sink.wants() {
-            self.faults(&dict, between, &ends, &data, end, sink);
+            // Where ISO's data ends, where that's past where it's found to
+            // end here and before `EI`.
+            let past = |&iso: &usize| found == Found::Filter && data.end < iso && iso <= end - 2;
+            let iso = iso.filter(past).unwrap_or(data.end);
+            self.faults(&dict, between, &ends, &data, iso, end, sink);
         }
         Ok(Image::Read(end, data, found))
     }
@@ -436,15 +456,18 @@ impl<'a, 'r> Images<'a, 'r> {
     /// it ends it; its `ID`, where that ends it and ISO's dictionary too,
     /// with no white-space after it (an earlier `ID`, a key's value, that
     /// ends ISO's alone is [`image_dict`]'s to tell); a length that ends
-    /// its data elsewhere than `data`; tokens between its data and its
-    /// `EI`, which ends at `end`. ISO's dictionary is read to its first
-    /// `ID` ([`ImageDict::iso`]).
+    /// its data elsewhere than ISO's data ends, at `iso`: `data`'s end, or
+    /// past it where a decoder ends the data short of the filter's own end
+    /// of data; tokens between there and its `EI`, which ends at `end`.
+    /// ISO's dictionary is read to its first `ID` ([`ImageDict::iso`]).
+    #[allow(clippy::too_many_arguments)]
     fn faults(
         &self,
         dict: &ImageDict,
         between: Range<usize>,
         ends: &Ends,
         data: &Range<usize>,
+        iso: usize,
         end: usize,
         sink: &mut impl Sink<'a>,
     ) {
@@ -479,12 +502,14 @@ impl<'a, 'r> Images<'a, 'r> {
             let ends = usize::try_from(given)
                 .ok()
                 .and_then(|n| start.checked_add(n));
-            if ends != Some(data.end) {
-                let read = data.end - start;
-                sink.fault(data.clone(), Fault::ImageLength { given, read });
+            if ends != Some(iso) {
+                let read = iso - start;
+                sink.fault(data.start..iso, Fault::ImageLength { given, read });
             }
         }
-        // What's between the data and `EI`, the first token to the last.
+        // What's between ISO's data and `EI`, the first token to the last:
+        // the tokens from the data's end, read as the walk to `EI` read
+        // them, from where ISO's data ends.
         let mut between: Option<Range<usize>> = None;
         let mut at = data.end;
         while let Some(Ok((r, _))) = next_raw(s, at, self.lim.depth) {
@@ -492,7 +517,10 @@ impl<'a, 'r> Images<'a, 'r> {
                 break;
             }
             at = r.end;
-            between = Some(between.map_or(r.start, |b| b.start)..r.end);
+            if r.end > iso {
+                let first = r.start.max(iso);
+                between = Some(between.map_or(first, |b| b.start)..r.end);
+            }
         }
         if let Some(between) = between {
             let written = &s[between.clone()];
@@ -674,24 +702,10 @@ impl<'a, 'r> Images<'a, 'r> {
     /// multiplied in that order in 32 bits, signed, overflowing, or past
     /// 2^31 − 8.
     fn params(&self, dict: &ImageDict) -> Option<Params> {
-        let s = self.s;
-        let value = |key| dict.get(s, key).map(|r| &s[r]);
-        let dp = match (value(F), value(DP)) {
-            (Some([b'[', ..]), Some(dp @ [b'[', ..])) => elements(dp)
-                .into_iter()
-                .find(|&(_, object)| object)
-                .map(|(first, _)| first),
-            (Some([b'[', ..]), _) => None,
-            (_, dp) => dp,
-        };
-        let Some(dp) = dp.filter(|dp| dp.starts_with(b"<<")) else {
+        let Some(entries) = self.decode_parms(dict) else {
             return Some(Params::DEFAULT);
         };
-        let mut entries = Entries::default();
-        // It was read under a cap on depth, so nothing in it is deeper.
-        walk(dp, 0, TOP, UNCAPPED, true, &mut entries);
-        let get =
-            |key: &[u8]| (entries.read.iter().rev()).find_map(|(k, v)| (**k == *key).then_some(*v));
+        let get = |key: &[u8]| entries.get(key);
         let int = |key: &[u8], default| get(key).map_or(default, integer);
         let bits_per_component = match (get(b"BitsPerComponent"), get(b"BPC")) {
             (Some(full), Some(_)) if abbreviated(full) => Some(full),
@@ -715,6 +729,156 @@ impl<'a, 'r> Images<'a, 'r> {
         }
         let bits = columns.checked_mul(colors)?.checked_mul(bpc)?;
         (bits <= i32::MAX - 7).then_some(params)
+    }
+
+    /// The entries of the dictionary an image's `/DecodeParms` give its
+    /// first filter, as PDFium finds it (`ReadInlineStream`): its value
+    /// where that's a dictionary, or, where the filter is an array, the
+    /// first object of its array, where that's one. None where there's no
+    /// such dictionary.
+    fn decode_parms(&self, dict: &ImageDict) -> Option<Entries<'a>> {
+        let s = self.s;
+        let value = |key| dict.get(s, key).map(|r| &s[r]);
+        let dp = match (value(F), value(DP)) {
+            (Some([b'[', ..]), Some(dp @ [b'[', ..])) => elements(dp)
+                .into_iter()
+                .find(|&(_, object)| object)
+                .map(|(first, _)| first),
+            (Some([b'[', ..]), _) => None,
+            (_, dp) => dp,
+        };
+        let dp = dp.filter(|dp| dp.starts_with(b"<<"))?;
+        let mut entries = Entries::default();
+        // It was read under a cap on depth, so nothing in it is deeper.
+        walk(dp, 0, TOP, UNCAPPED, true, &mut entries);
+        Some(entries)
+    }
+
+    /// Where an image's DCT or CCITTFax data from `start` ends, what
+    /// finding it read in vain, whatever comes after it, and, where the
+    /// decoder found its end, where the data ends as ISO 32000-2 reads it,
+    /// which for fax data is looked for only where `wants`. PDFium decodes
+    /// both to find where they end (its `DecodeInlineStream`), DCT's on
+    /// libjpeg-turbo and CCITTFax's on a decoder of its own; with the
+    /// `image-ends` feature, so is this (zune-jpeg, hayro-ccitt), the
+    /// image's `/W` and `/H` and its parameters read as PDFium reads them
+    /// ([`Images::fax`]), PDFium's refusals the walk from the data's start
+    /// ([`End::Refused`]), and the end the stand-in's
+    /// ([`Images::stand_in`]) where the decoder can't decode what PDFium's
+    /// reads on through. What decoding makes is spent: past the budget, an
+    /// error at `bi`. ISO's end is past PDFium's where the filter's own end
+    /// of data follows the rows PDFium decodes: a JPEG's end of image where
+    /// bytes come before its start of image (PDFium counting its end from
+    /// there), fax data's end-of-block pattern
+    /// ([`decoders::ccitt_iso`](crate::decoders::ccitt_iso)).
+    #[cfg(feature = "image-ends")]
+    fn coded_end(
+        &mut self,
+        bi: usize,
+        start: usize,
+        filter: Filter,
+        dict: &ImageDict,
+        wants: bool,
+    ) -> Result<(End, usize, Option<usize>), Error> {
+        use crate::decoders::{self, Found};
+        let s = self.s;
+        let value = |key| dict.get(s, key).map_or(0, |r| integer(&s[r]));
+        let (width, height, data) = (value(W), value(H), &s[start..]);
+        let (found, iso) = match filter {
+            Filter::Dct => {
+                let soi = (self.soi.from(start, |at| find(s, at, b"\xff\xd8")))
+                    .map_or(0, |soi| soi - start);
+                let decoded =
+                    decoders::dct(data, soi, width as u32, self.budget, &mut self.decoded).ok_or(
+                        Error {
+                            at: bi,
+                            kind: ErrorKind::ImageEnds,
+                        },
+                    )?;
+                self.spend(bi, decoded.made)?;
+                // Its decoder read to just past its end of image.
+                let iso = match decoded.end {
+                    Found::At { read, .. } => Some(read),
+                    _ => None,
+                };
+                (decoded.end, iso)
+            }
+            _ => {
+                let fax = self.fax(dict);
+                let found = decoders::ccitt(data, width, height, fax);
+                let iso = (wants && matches!(found, Found::At { .. }))
+                    .then(|| decoders::ccitt_iso(data, width, height, fax))
+                    .flatten();
+                (found, iso)
+            }
+        };
+        Ok(match found {
+            Found::At { end, read } => (
+                End::Filter(start + end, read),
+                0,
+                iso.map(|iso| start + iso),
+            ),
+            Found::Refused(read) => (End::Refused(read), 0, None),
+            Found::Undecoded(read) => (self.stand_in(start, filter), read, None),
+        })
+    }
+
+    /// Where an image's DCT or CCITTFax data from `start` ends, without
+    /// the `image-ends` feature: the stand-in's ([`Images::stand_in`]),
+    /// nothing decoded.
+    #[cfg(not(feature = "image-ends"))]
+    fn coded_end(
+        &mut self,
+        _bi: usize,
+        start: usize,
+        filter: Filter,
+        _dict: &ImageDict,
+        _wants: bool,
+    ) -> Result<(End, usize, Option<usize>), Error> {
+        Ok((self.stand_in(start, filter), 0, None))
+    }
+
+    /// Where an image's DCT or CCITTFax data from `start` ends, found in
+    /// its bytes, standing in for PDFium's decoders: a JPEG's past its
+    /// first end of image (FF D9) from its start, and fax data's, or a
+    /// JPEG's with none, at the first `EI` with white-space before it and
+    /// white-space, a delimiter or the end after it ([`End::Scan`]). They
+    /// agree with the decoders wherever a JPEG holds no end of image before
+    /// its own (a thumbnail's, in its metadata) and the coded bytes no such
+    /// `EI`, and the data isn't damaged.
+    fn stand_in(&mut self, start: usize, filter: Filter) -> End {
+        let s = self.s;
+        match filter {
+            Filter::Dct => (self.eoi.from(start, |at| find(s, at, b"\xff\xd9")))
+                .map_or(End::Scan, |eoi| End::Filter(eoi + 2, 0)),
+            _ => End::Scan,
+        }
+    }
+
+    /// What an image's `/DecodeParms` say to PDFium's fax decoder, as
+    /// PDFium reads them (`CreateFaxDecoder`), from the dictionary
+    /// [`Images::decode_parms`] finds: `/K`, `/EndOfLine`,
+    /// `/EncodedByteAlign`, `/Columns` and `/Rows`, each as PDFium reads an
+    /// integer from it, `/Columns` 1728 where it isn't written, and `/Rows`
+    /// 0, the image's height, where it's past 65,535; and `/EndOfBlock`, as
+    /// ISO 32000-2 reads it, true unless it's `false`, which PDFium doesn't
+    /// read.
+    #[cfg(feature = "image-ends")]
+    fn fax(&self, dict: &ImageDict) -> crate::decoders::Fax {
+        use crate::decoders::Fax;
+        let Some(entries) = self.decode_parms(dict) else {
+            return Fax::DEFAULT;
+        };
+        let int = |key: &[u8], default| entries.get(key).map_or(default, integer);
+        let rows = int(b"Rows", 0);
+        Fax {
+            k: int(b"K", 0),
+            end_of_line: int(b"EndOfLine", 0) != 0,
+            byte_align: int(b"EncodedByteAlign", 0) != 0,
+            columns: int(b"Columns", 1728),
+            rows: if rows > 65535 { 0 } else { rows },
+            end_of_block: entries.get(b"EndOfBlock") != Some(b"false"),
+        }
     }
 
     /// `n` bytes more of what finding images' ends may cost in the
@@ -895,6 +1059,12 @@ struct Entries<'a> {
 }
 
 impl<'a> Entries<'a> {
+    /// The value of `key`, decoded, as written: the last where it's written
+    /// twice.
+    fn get(&self, key: &[u8]) -> Option<&'a [u8]> {
+        (self.read.iter().rev()).find_map(|(k, v)| (**k == *key).then_some(*v))
+    }
+
     /// `value`'s first token read where a value is: the dictionary's, its
     /// key's.
     fn value(&mut self, value: &'a [u8]) {
@@ -1255,12 +1425,13 @@ enum Filter {
     Hex,
     A85,
     RunLength,
-    Dct,
     /// Flate and LZW, which PDFium decodes to find their end, as here.
     Flate,
     Lzw,
-    /// CCITTFax, which PDFium decodes to find its end, which here is found
-    /// otherwise ([`End::Scan`]).
+    /// DCT and CCITTFax, which PDFium decodes to find their end, as here
+    /// with the `image-ends` feature, which without it a stand-in finds
+    /// ([`Images::coded_end`]).
+    Dct,
     CcittFax,
     /// One PDFium has no decoder for.
     Other,

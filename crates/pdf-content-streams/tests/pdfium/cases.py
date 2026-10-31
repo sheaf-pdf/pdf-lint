@@ -659,5 +659,314 @@ image("fl-end-no-EI", FL, zlib_data(stored(IN), IN), P)
 image("lzw-end-no-EI", LZ, lzw([256, A, B, 257]), P)
 
 
+class Msb:
+    """Bits written most significant first, as JPEG and fax data are."""
+
+    def __init__(self):
+        self.bits = []
+
+    def put(self, value, n):
+        self.bits += [(value >> i) & 1 for i in reversed(range(n))]
+
+    def code(self, text):
+        self.bits += [int(c) for c in text]
+
+    def bytes(self, pad=1, stuff=False):
+        """The bits, the last byte filled with `pad`; with `stuff`, each
+        0xFF followed by a 0, as a JPEG's coded data has it."""
+        bits = self.bits + [pad] * (-len(self.bits) % 8)
+        out = bytearray()
+        for i in range(0, len(bits), 8):
+            b = int("".join(map(str, bits[i:i + 8])), 2)
+            out.append(b)
+            if stuff and b == 0xFF:
+                out.append(0)
+        return bytes(out)
+
+
+# JPEGs written by hand: each segment a marker and its length; quantizers
+# all 1; two Huffman tables of 4-bit codes, one coding a DC difference's
+# size, 0 to 11, as itself, the other an AC value's, a run of 0 and a size
+# of 1 to 10 as the size, 0 the end of the block.
+def segment(marker, body):
+    return bytes([0xFF, marker]) + (len(body) + 2).to_bytes(2, "big") + body
+
+
+QUANT = segment(0xDB, b"\x00" + b"\x01" * 64)
+
+
+def huffman(table, symbols):
+    counts = [0] * 16
+    counts[3] = len(symbols)
+    return segment(0xC4, bytes([table]) + bytes(counts) + bytes(symbols))
+
+
+HUFFMAN = huffman(0x00, range(12)) + huffman(0x10, range(11))
+
+
+def frame(marker, w, h, components):
+    body = b"\x08" + h.to_bytes(2, "big") + w.to_bytes(2, "big") + bytes([len(components)])
+    for c, sampling in components:
+        body += bytes([c, sampling, 0])
+    return segment(marker, body)
+
+
+def scan(components, first=0, last=63):
+    body = bytes([len(components)])
+    for c in components:
+        body += bytes([c, 0x00])
+    return segment(0xDA, body + bytes([first, last, 0]))
+
+
+def value(b, v):
+    """A coefficient: its size as its code, then its bits."""
+    size = abs(v).bit_length()
+    b.put(size, 4)
+    if size:
+        b.put(v if v >= 0 else v + (1 << size) - 1, size)
+
+
+def jpeg(w, h, blocks, components=((1, 0x11),), before=b""):
+    """A baseline JPEG: `blocks` in the order its scan takes them, each a
+    DC difference and the AC values that start it, then the end of the
+    block; `before` the segments ahead of its tables."""
+    b = Msb()
+    for dc, acs in blocks:
+        value(b, dc)
+        for ac in acs:
+            value(b, ac)
+        b.put(0, 4)
+    return (b"\xff\xd8" + before + QUANT + HUFFMAN + frame(0xC0, w, h, components)
+            + scan([c for c, _ in components]) + b.bytes(stuff=True) + b"\xff\xd9")
+
+
+def progressive(w, h, dcs, bands=((1, 63),), empty=()):
+    """A progressive gray JPEG: a scan of the DC differences, then one of
+    the AC values of each band, each block's band ended at once; the scans
+    `empty` names (0 the DC scan's, 1 the first band's) with no coded
+    data."""
+    dc = Msb()
+    for d in dcs:
+        value(dc, d)
+    ac = Msb()
+    for _ in dcs:
+        ac.put(0, 4)
+    scans = [(0, 0, dc.bytes(stuff=True))] + [(a, b, ac.bytes(stuff=True)) for a, b in bands]
+    return (b"\xff\xd8" + QUANT + HUFFMAN + frame(0xC2, w, h, [(1, 0x11)])
+            + b"".join(scan([1], a, b) + (b"" if i in empty else coded)
+                       for i, (a, b, coded) in enumerate(scans)) + b"\xff\xd9")
+
+
+# DCT data: PDFium decodes every row of the JPEG and its data ends where
+# libjpeg-turbo's reader then stands, past the end of image it reads as it
+# fills its bits, or, with none after the coded data, at those bits; it
+# refuses a JPEG whose header doesn't read, or one narrower than /W. A
+# thumbnail in the metadata ends before the JPEG does; a comment segment
+# holds ` EI `; a content of more than 512 bytes after a gray JPEG puts the
+# decoder on its fast path. Then a JPEG cut short, with bytes before its
+# start (its end counted from its start of image, so short by as many),
+# damaged, with samples of 12 bits.
+G8 = b"/W 8 /H 8 /BPC 8 /CS /G /F /DCT"
+# Two spaces at the content's end, which chromium/7881 and 8076, writing an
+# end of image over the content's own last two bytes where the JPEG's data
+# runs to its end, write over, the last path left whole.
+DT = T + b"  "
+
+
+def jpeg_image(name, d, data, tail=DT):
+    image(name, d, data, tail)
+
+
+J8 = jpeg(8, 8, [(5, [3, -2, 1])])
+LONG_TAIL = b" " + b"q Q " * 200
+jpeg_image("dct-base", G8, J8)
+jpeg_image("dct-base-then-EI", G8, J8, T[1:] + b"  ")
+jpeg_image("dct-base-long", G8, J8, T + LONG_TAIL)
+jpeg_image("dct-base-then-EI-long", G8, J8, T[1:] + LONG_TAIL)
+jpeg_image("dct-dc-only", G8, jpeg(8, 8, [(0, [])]))
+jpeg_image("dct-16", b"/W 16 /H 16 /BPC 8 /CS /G /F /DCT", jpeg(16, 16, [(i * 3 - 5, [i, -i, 2]) for i in range(4)]))
+jpeg_image("dct-rgb", b"/W 8 /H 8 /BPC 8 /CS /RGB /F /DCT",
+      jpeg(8, 8, [(4, [1]), (-3, []), (2, [2, 2])], components=((1, 0x11), (2, 0x11), (3, 0x11))))
+jpeg_image("dct-subsampled", b"/W 16 /H 16 /BPC 8 /CS /RGB /F /DCT",
+      jpeg(16, 16, [(1, [1])] + [(0, [])] * 3 + [(2, []), (-1, [])], components=((1, 0x22), (2, 0x11), (3, 0x11))))
+jpeg_image("dct-progressive", G8, progressive(8, 8, [7]))
+jpeg_image("dct-progressive-16", b"/W 16 /H 16 /BPC 8 /CS /G /F /DCT", progressive(16, 16, [7, -1, 2, 0]))
+# A scan with no coded data, which libjpeg-turbo reads on through to the
+# end of image; the next scan's header, of the band from 37 (0x25), holds a
+# `%`.
+jpeg_image("dct-progressive-empty-dc", G8, progressive(8, 8, [7], empty=[0]))
+jpeg_image("dct-progressive-empty-scan", G8, progressive(8, 8, [7], ((1, 36), (37, 63)), empty=[1]))
+COMMENT = segment(0xFE, b" EI 1 1 m 2 2 l S ")
+THUMBNAIL = segment(0xE1, b"Exif\x00\x00" + jpeg(8, 8, [(0, [])]))
+jpeg_image("dct-thumbnail", G8, jpeg(8, 8, [(5, [3])], before=THUMBNAIL + COMMENT))
+jpeg_image("dct-comment-EI", G8, jpeg(8, 8, [(5, [3])], before=COMMENT))
+jpeg_image("dct-then-bytes", G8, J8 + b" xyz")
+jpeg_image("dct-narrower-than-W", b"/W 16 /H 8 /BPC 8 /CS /G /F /DCT", J8)
+jpeg_image("dct-wider-than-W", b"/W 4 /H 8 /BPC 8 /CS /G /F /DCT", J8)
+jpeg_image("dct-taller-than-H", b"/W 8 /H 4 /BPC 8 /CS /G /F /DCT", J8)
+jpeg_image("dct-W-0", b"/W 0 /H 8 /BPC 8 /CS /G /F /DCT", J8)
+jpeg_image("dct-cut", G8, J8[:-6])
+# Cut short at the content's end, where PDFium reads its last two bytes as
+# an end of image, which no `EI` comes after: read on from the data's
+# start, to the comment's `EI`.
+jpeg_image("dct-cut-at-content-end", G8, jpeg(8, 8, [(5, [3, -2, 1])], before=COMMENT)[:-3], b"")
+# The same, cut in its second block, the content's last two bytes no codes
+# of its tables: PDFium's end of image in their place ends the coded data.
+J16 = jpeg(16, 16, [(i * 3 - 5, [i, -i, 2]) for i in range(4)], before=COMMENT)
+cut = J16.index(b"\xff\xda") + 10 + 2
+jpeg_image("dct-cut-in-codes-at-content-end", b"/W 16 /H 16 /BPC 8 /CS /G /F /DCT", J16[:cut] + b"\xfe\xfe", b"")
+jpeg_image("dct-cut-header", G8, J8[:40])
+jpeg_image("dct-no-eoi", G8, J8[:-2])
+jpeg_image("dct-no-eoi-long", G8, J8[:-2], T + LONG_TAIL)
+jpeg_image("dct-no-soi", G8, J8[2:])
+jpeg_image("dct-soi-only", G8, b"\xff\xd8")
+jpeg_image("dct-bytes-first", G8, b"ab" + J8)
+jpeg_image("dct-bytes-first-EI", G8, b"a" * 170 + b" EI 1 1 m 2 2 l S " + J8)
+damaged = bytearray(J8)
+damaged[-4] ^= 0xF0
+jpeg_image("dct-damaged", G8, bytes(damaged))
+jpeg_image("dct-12-bit", G8, J8.replace(b"\xff\xc0\x00\x0b\x08", b"\xff\xc0\x00\x0b\x0c"))
+jpeg_image("dct-array-params", b"/W 8 /H 8 /BPC 8 /CS /G /F [/DCT] /DP [<< /ColorTransform 0 >>]", J8)
+
+# Fax data written by hand: the run codes these cases take, and the 2-D
+# coding's modes, as ITU-T T.4 and T.6 code them.
+WHITE_RUN = {0: "00110101", 1: "000111", 2: "0111", 3: "1000", 4: "1011", 5: "1100", 6: "1110",
+             7: "1111", 8: "10011", 9: "10100", 10: "00111", 11: "01000", 12: "001000",
+             13: "000011", 14: "110100", 15: "110101", 16: "101010", 17: "101011", 23: "0000100"}
+BLACK_RUN = {0: "0000110111", 1: "010", 2: "11", 3: "10", 4: "011", 5: "0011", 6: "0010",
+             7: "00011", 8: "000101", 9: "000100", 10: "0000100", 11: "0000101", 12: "0000111",
+             13: "00000100"}
+MAKEUP_64 = ("11011", "0000001111")
+EOL = "000000000001"
+VERTICAL = {0: "1", 1: "011", -1: "010", 2: "000011", -2: "000010", 3: "0000011", -3: "0000010"}
+
+
+def runs(row):
+    """A row's runs of one color, white first, so the first may be none."""
+    out, color, n = [], 0, 0
+    for p in row:
+        if p != color:
+            out.append(n)
+            color, n = p, 0
+        n += 1
+    return out + [n]
+
+
+def run(b, color, n):
+    if n >= 64:
+        b.code(MAKEUP_64[color])
+        n -= 64
+    b.code((BLACK_RUN if color else WHITE_RUN)[n])
+
+
+def one_d(b, row):
+    for i, n in enumerate(runs(row)):
+        run(b, i % 2, n)
+
+
+def two_d(b, row, ref):
+    """`row` coded against `ref`, the row before it."""
+    width = len(row)
+
+    def changes(line):
+        return [i for i in range(width) if line[i] != (line[i - 1] if i else 0)]
+
+    def after(found, at):
+        return next((x for x in found if x > at), width)
+
+    here, there = changes(row), changes(ref)
+    a0, color = -1, 0
+    while a0 < width:
+        a1 = after(here, a0)
+        a2 = after(here, a1)
+        b1 = next((x for x in there if x > a0 and ref[x] != color), width)
+        b2 = after(there, b1)
+        if b2 < a1:
+            b.code("0001")
+            a0 = b2
+        elif abs(a1 - b1) <= 3:
+            b.code(VERTICAL[a1 - b1])
+            a0, color = a1, 1 - color
+        else:
+            b.code("001")
+            run(b, color, a1 - max(a0, 0))
+            run(b, 1 - color, a2 - a1)
+            a0 = a2
+
+
+def group_4(rows, end=False):
+    b = Msb()
+    ref = [0] * len(rows[0])
+    for row in rows:
+        two_d(b, row, ref)
+        ref = row
+    if end:
+        b.code(EOL + EOL)
+    return b.bytes(pad=0)
+
+
+def group_3(rows, k=0, eol=False, align=False, rtc=False):
+    """Group 3 coding: each row's runs, or with `k`, every k-th row so and
+    the rest against the row before, each tagged; `eol` an end of line
+    before each row, `align` each row padded to a byte, `rtc` six ends of
+    line after the last."""
+    b = Msb()
+    ref = [0] * len(rows[0])
+    for i, row in enumerate(rows):
+        if eol:
+            b.code(EOL)
+        if k > 0:
+            b.code("1" if i % k == 0 else "0")
+        if k > 0 and i % k:
+            two_d(b, row, ref)
+        else:
+            one_d(b, row)
+        ref = row
+        if align:
+            b.bits += [0] * (-len(b.bits) % 8)
+    if rtc:
+        b.code(EOL * 6)
+    return b.bytes(pad=0)
+
+
+# CCITTFax data: PDFium decodes as many rows as /Rows, or /H, says, each
+# /Columns wide, 1728 where it isn't written, /W where it's 0, by /K's
+# coding, and its data ends at the byte its decoder then stands in; it
+# reads no end of block, and it refuses a width or a height of none or
+# past 65,535. A row whose codes hold an `EI` between white-space.
+ROWS = [[0] * 16, [0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0],
+        [0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0], [1] * 4 + [0] * 12]
+F16 = b"/W 16 /H 4 /BPC 1 /CS /G /F /CCF /DP "
+G4 = F16 + b"<< /K -1 /Columns 16 >>"
+image("ccf-g4", G4, group_4(ROWS))
+image("ccf-g4-then-EI", G4, group_4(ROWS), T[1:])
+image("ccf-g4-end-of-block", G4, group_4(ROWS, end=True))
+image("ccf-g4-white", b"/W 16 /H 2 /BPC 1 /CS /G /F /CCF /DP << /K -1 /Columns 16 >>", group_4([[0] * 16] * 2))
+image("ccf-g4-rows-1", F16 + b"<< /K -1 /Columns 16 /Rows 1 >>", group_4(ROWS))
+image("ccf-g4-H-2", b"/W 16 /H 2 /BPC 1 /CS /G /F /CCF /DP << /K -1 /Columns 16 >>", group_4(ROWS))
+image("ccf-g4-rows-past-65535", F16 + b"<< /K -1 /Columns 16 /Rows 70000 >>", group_4(ROWS))
+image("ccf-g4-columns-past-65535", F16 + b"<< /K -1 /Columns 70000 >>", group_4(ROWS))
+image("ccf-g4-columns-0", F16 + b"<< /K -1 /Columns 0 >>", group_4(ROWS))
+image("ccf-g4-no-columns", F16 + b"<< /K -1 >>", group_4(ROWS))
+image("ccf-g4-cut", G4, group_4(ROWS)[:2])
+damaged = bytearray(group_4(ROWS))
+damaged[1] = 0x00
+image("ccf-g4-damaged", G4, bytes(damaged))
+image("ccf-g4-array-params", b"/W 16 /H 4 /BPC 1 /CS /G /F [/CCF] /DP [<< /K -1 /Columns 16 >>]", group_4(ROWS))
+G3 = F16 + b"<< /Columns 16 >>"
+image("ccf-g3", G3, group_3(ROWS))
+image("ccf-g3-eol", G3, group_3(ROWS, eol=True))
+image("ccf-g3-end-of-line", F16 + b"<< /Columns 16 /EndOfLine true >>", group_3(ROWS, eol=True))
+image("ccf-g3-rtc", G3, group_3(ROWS, eol=True, rtc=True))
+image("ccf-g3-byte-align", F16 + b"<< /Columns 16 /EncodedByteAlign true >>", group_3(ROWS, align=True))
+image("ccf-g3-2d", F16 + b"<< /K 2 /Columns 16 >>", group_3(ROWS, k=2, eol=True))
+image("ccf-g3-2d-no-eol", F16 + b"<< /K 2 /Columns 16 >>", group_3(ROWS, k=2))
+image("ccf-no-params", b"/W 16 /H 4 /BPC 1 /CS /G /F /CCF", group_3(ROWS))
+image("ccf-g3-no-columns", F16 + b"<< /K 0 >>", group_3(ROWS))
+TAB_EI = [0] * 23 + [1] * 3 + [0] * 3 + [1] * 3 + [0] * 9 + [1] * 3 + [0] * 11 + [1] * 13
+image("ccf-g3-codes-EI", b"/W 68 /H 2 /BPC 1 /CS /G /F /CCF /DP << /Columns 68 /EncodedByteAlign true >>",
+      group_3([[0] * 68, TAB_EI], align=True))
+
+
 def cases():
     return CASES

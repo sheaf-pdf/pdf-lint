@@ -25,6 +25,23 @@ pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1.1" }
 thiserror = "2"
 # An operation's operands, sixteen held inline before they spill to the heap.
 tinyvec = { version = "1.13", features = ["alloc"] }
+# With `image-ends`: DCT data in an inline image decoded to find where it
+# ends, as PDFium decodes it; without its SIMD features (`x86`, `neon`),
+# which hold all its `unsafe`, so it builds with `unsafe_code` forbidden.
+zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
+# With `image-ends`: CCITTFax data in an inline image decoded to find where
+# it ends, as PDFium decodes it. It needs Rust 1.87.
+hayro-ccitt = { version = "0.3", optional = true }
+
+# DCT's and CCITTFax's ends found by decoding, as PDFium finds them, where
+# without it they're found from the data's bytes: off by default, so a
+# caller takes the decoders only when it asks.
+[features]
+image-ends = ["dep:zune-jpeg", "dep:hayro-ccitt"]
+
+# docs.rs documents what the feature changes, beside the default.
+[package.metadata.docs.rs]
+features = ["image-ends"]
 
 [lints.rust]
 unsafe_code = "forbid"
