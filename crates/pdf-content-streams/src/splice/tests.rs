@@ -3,7 +3,7 @@
 //! again without some of their keys.
 
 use super::*;
-use crate::{Pos, Properties, marked};
+use crate::{Pos, Properties, marked, tokens};
 
 const LIM: &Limits = &Limits::DEFAULT;
 
@@ -433,6 +433,104 @@ fn a_range_after_an_array_ended_sooner_is_refused() {
     );
 }
 
+/// A `BI` whose dictionary meets a keyword where a key should be begins
+/// no image, its would-be dictionary read as content: taking out a range
+/// in it would make the `BI` an image, as what's left reads. Refused;
+/// taking the `BI` out with it isn't, nor a range before it.
+#[test]
+fn a_range_that_would_make_a_lone_bi_an_image_is_refused() {
+    let s: &[u8] = b"BI /A BMC EMC /W 1 /H 1 /CS /G /BPC 8 ID x EI Q";
+    let read: Vec<_> = (tokens(s, &ResCx::none(), LIM).map(|t| t.unwrap().1)).collect();
+    assert_eq!(read[0], Tok::Op(b"BI"));
+    let made: Vec<_> = (tokens(
+        b"BI  /W 1 /H 1 /CS /G /BPC 8 ID x EI Q",
+        &ResCx::none(),
+        LIM,
+    ))
+    .map(|t| t.unwrap().1)
+    .collect();
+    assert_eq!(made[0], Tok::InlineImage(31..32));
+    assert!(is_unsafe(without(s, b"/A BMC EMC")));
+    assert_eq!(
+        without(s, b"BI /A BMC EMC").unwrap(),
+        b" /W 1 /H 1 /CS /G /BPC 8 ID x EI Q"
+    );
+    let s: &[u8] = b"/X BMC EMC BI /A BMC EMC /W 1 /H 1 /CS /G /BPC 8 ID x EI Q";
+    assert_eq!(
+        without(s, b"/X BMC EMC").unwrap(),
+        b" BI /A BMC EMC /W 1 /H 1 /CS /G /BPC 8 ID x EI Q"
+    );
+    let c = Concat::new(&[s]);
+    let groups: Vec<_> = ranges(&c).into_iter().map(|r| vec![r]).collect();
+    let each = splice_each(&c, &ResCx::none(), LIM, &groups);
+    assert_eq!(each.taken, [true, false]);
+}
+
+/// An inline image's end may be found past it: an ASCIIHex image whose
+/// first `>` is in a comment after it, with no `EI` after that, is no
+/// stream to PDFium, read on from its data's start to its first `EI`, so
+/// taking out a range that holds the comment makes a stray `>` its end,
+/// and the image runs on over the rectangle after it to the `EI` after
+/// that; and Flate data that's a header asking for a preset dictionary is
+/// kept to `EI` where the four bytes naming it are there. Refused; taking
+/// the image out with it isn't.
+#[test]
+fn a_range_that_would_move_an_image_s_end_is_refused() {
+    let s: &[u8] = b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI q % > (\n Q 0 0 9 9 re f > EI";
+    assert!(is_unsafe(without(s, b"q % > (\n Q")));
+    let image = b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI q % > (\n Q";
+    assert_eq!(without(s, image).unwrap(), b" 0 0 9 9 re f > EI");
+    // In a marked range.
+    let s: &[u8] =
+        b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI /A BMC % > (\n EMC 0 0 9 9 re f > EI";
+    let c = Concat::new(&[s]);
+    assert!(matches!(
+        spliced(&c, &ranges(&c)),
+        Err(SpliceError::Unsafe(_))
+    ));
+    let s: &[u8] = b"q BI /F /Fl /L 6 ID x EI /A BMC EMC";
+    assert!(is_unsafe(without(s, b"/A BMC EMC")));
+    assert_eq!(
+        without(s, b"BI /F /Fl /L 6 ID x EI /A BMC EMC").unwrap(),
+        b"q "
+    );
+}
+
+/// Only a list that's a token of the page's is written again: a range
+/// that starts inside an inline image's data, where a list's bytes may
+/// be, is refused; and so is a list whose writing again would make what's
+/// before it read otherwise.
+#[test]
+fn a_list_written_again_leaves_the_content_read_as_it_was() {
+    // `/A <</Tool_Gen 1>> BDC EMC` as an image's 26 bytes of data.
+    let s: &[u8] = b"q BI /W 26 /H 1 /CS /G /BPC 8 ID /A <</Tool_Gen 1>> BDC EMC EI Q";
+    let c = Concat::new(&[s]);
+    let inside = span_of(s, b"/A <</Tool_Gen 1>> BDC EMC");
+    let read = without_keys(&c, &ResCx::none(), LIM, inside, &KEYS);
+    assert!(matches!(read, Err(SpliceError::List(_))));
+    // Refused whatever the keys, none of them in it among them.
+    let other: [&[u8]; 1] = [b"Other"];
+    let read = without_keys(&c, &ResCx::none(), LIM, inside, &other);
+    assert!(matches!(read, Err(SpliceError::List(_))));
+    // An ASCIIHex image whose first `>` is in the list, a comment after it
+    // to the end: no stream of it is kept. Without the key, its first `>`
+    // is the list's end, an `EI` after it, and the image runs on to it.
+    let list: &[u8] = b"/A <</Tool_Gen (>%) /B 1>> BDC 0 0 9 9 re f EMC";
+    let s = [
+        &b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI "[..],
+        list,
+        b" EI",
+    ]
+    .concat();
+    let c = Concat::new(&[&s]);
+    let read = without_keys(&c, &ResCx::none(), LIM, ranges(&c)[0], &KEYS);
+    assert!(matches!(read, Err(SpliceError::List(_))));
+    // Alone, it's written again.
+    let (rewrite, made) = rewritten(&[list]).unwrap();
+    assert!(rewrite.is_some());
+    assert_eq!(made, [&b"/A << /B 1>> BDC 0 0 9 9 re f EMC"[..]]);
+}
+
 /// A range is judged by the reading `limits` names: a JPEG whose scan a
 /// comment holding `EI` follows ends at that `EI` where it's decoded, as
 /// PDFium's decoder stops past the marker after its scan, so a range after
@@ -466,5 +564,39 @@ fn a_range_is_judged_by_the_reading_asked() {
     let kept = splice(&c, &ResCx::none(), &decoded, &range).unwrap();
     assert_eq!(kept[0].len(), s.len() - b"/A BMC EMC".len());
     let refused = splice(&c, &ResCx::none(), LIM, &range);
+    assert!(matches!(refused, Err(SpliceError::Unsafe(_))));
+}
+
+/// Where it's decoded, a JPEG's end may be found by what's past it: a
+/// range taken out of the comment after its scan, content where the JPEG
+/// ends at the comment's `EI`, would cut short the comment its length
+/// counts, the decoder can't decode it, and its end is the stand-in's,
+/// past its end of image. Refused.
+#[cfg(feature = "image-ends")]
+#[test]
+fn a_range_that_a_decoder_reads_past_is_refused() {
+    use crate::CodedEnds;
+    use crate::fuzz::{BLOCK, jpeg};
+
+    let body = format!("{:<30}", " EI /A BMC EMC").into_bytes();
+    let n = u16::try_from(body.len() + 2).unwrap();
+    let comment = [&[0xff, 0xfe][..], &n.to_be_bytes(), &body].concat();
+    let whole = jpeg(8, 8, b"", BLOCK);
+    let data = [&whole[..whole.len() - 2], &comment, b"\xff\xd9"].concat();
+    let s = [
+        &b"q BI /W 8 /H 8 /BPC 8 /CS /G /F /DCT ID "[..],
+        &data,
+        b"\nEI Q",
+    ]
+    .concat();
+    let decoded = Limits {
+        coded_ends: CodedEnds::Decoded,
+        ..Limits::DEFAULT
+    };
+    let read: Vec<_> = (tokens(&s, &ResCx::none(), &decoded).map(|t| t.unwrap().1)).collect();
+    assert_eq!(read[2], Tok::Operand(b"/A"));
+    let c = Concat::new(&[&s]);
+    let range = [span_of(&s, b"/A BMC EMC")];
+    let refused = splice(&c, &ResCx::none(), &decoded, &range);
     assert!(matches!(refused, Err(SpliceError::Unsafe(_))));
 }

@@ -5,8 +5,8 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF content streams read as PDFium reads them: tokens and operations, operators typed by Annex A, q/Q balance, marked content and resource names"
-keywords = ["pdf", "content-stream", "lexer", "iso-32000"]
+description = "PDF content streams read as PDFium reads them, written and spliced: tokens and operations, operators typed by Annex A, q/Q balance, marked content and resource names"
+keywords = ["pdf", "content-stream", "lexer", "iso-32000", "writer"]
 categories = ["parser-implementations", "graphics"]
 # Only what users need, so local tooling files can't end up in the package.
 include = ["/src", "/README.md", "/CHANGELOG.md"]

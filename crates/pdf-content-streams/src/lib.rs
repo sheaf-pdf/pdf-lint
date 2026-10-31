@@ -76,9 +76,10 @@
 //!   with binds to something else ([`Reserved`]).
 //! - **Splicing** ([`splice`]): a page's streams with ranges taken out,
 //!   every other byte as it was, only where that can't change what's drawn
-//!   after them, judged by the reading the caller names; as many of several
-//!   as can be ([`splice_each`]); and a marked range's property list
-//!   written again without some of its keys ([`without_keys`]).
+//!   after them, judged by the reading the caller names, and what's kept
+//!   read again as it was read; as many of several as can be
+//!   ([`splice_each`]); and a marked range's property list written again
+//!   without some of its keys ([`without_keys`]).
 //!
 //! No resolver: what's read from the file, the streams decoded, the color
 //! spaces' components and the property lists, the caller gives; and the

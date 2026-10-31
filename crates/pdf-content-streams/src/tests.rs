@@ -4300,11 +4300,18 @@ fn no_fault_where_iso_reads_alike() {
     // dictionary, which PDFium ends sooner, those in a dictionary instead;
     // the images but the DeviceN space's, whose colorants' array PDFium
     // doesn't open; the seeds less those with strays and with what PDFium
-    // ends sooner, an image's Flate data at its start among them; and
-    // pages of streams split between tokens.
+    // ends sooner, an image's Flate data at its start among them, with
+    // tokens before an image's `EI`, and with a lone `BI`; and pages of
+    // streams split between tokens.
     let nested = PAGE.windows(5).position(|w| w == b"[1 [2").unwrap();
     let mut inputs = moved_inputs();
-    let sooner: [&[u8]; 3] = [b"{ } ) ]", b">> n", b"ID x EI\n\n"];
+    let sooner: [&[u8]; 5] = [
+        b"{ } ) ]",
+        b">> n",
+        b"ID x EI\n\n",
+        b"EIxyz EI EMC Q",
+        b"/BPC 8 ID x EI Q",
+    ];
     inputs.retain(|s| s != PAGE && !sooner.iter().any(|end| s.ends_with(end)));
     inputs.retain(|s| !s.windows(10).any(|w| w == b"[/DeviceN "));
     inputs.push(PAGE[..nested].to_vec());

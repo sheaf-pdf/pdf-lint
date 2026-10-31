@@ -4,6 +4,7 @@
 //! writer's, on any input. It's compiled only for tests and under
 //! cargo-fuzz's `--cfg fuzzing`.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use pdf_objects::{Dict, Object, Str, Value, dict};
@@ -18,7 +19,7 @@ use crate::{
     Join, Limits, LineCap, LineJoin, MarkedEvent, MarkedNest, NameSet, Operand, Operation,
     Operations, Operator, Paint, Properties, Props, Res, ResBody, ResCx, ResId, ResKind, Reserved,
     ResourceNeeds, SpanAcross, State, TextMode, Tok, balance, kept, marked, name, names_used,
-    object, operations, tokens,
+    object, operations, splice, splice_each, tokens, without_keys,
 };
 
 /// A sink that keeps every fault it's told, in order, where it is.
@@ -82,8 +83,10 @@ const LIMITS: Limits = Limits::DEFAULT;
 /// searches and skims are plain ones' ([`searched`]). Its operations,
 /// written again, read as they did, by the stand-in's reading of DCT and
 /// CCITTFax data, which reads no further than an image's token
-/// ([`written_again`]); and the writer's calls its bytes choose read back
-/// as written ([`calls`]). Panics on a broken promise.
+/// ([`written_again`]); the writer's calls its bytes choose read back
+/// as written ([`calls`]); and its marked ranges taken out, and their
+/// lists written again, reading as the splice promises ([`spliced`]).
+/// Panics on a broken promise.
 pub fn content(data: &[u8]) {
     let res = ResCx::new([
         (b"CS1".to_vec(), 1),
@@ -157,6 +160,7 @@ pub fn content(data: &[u8]) {
     searched(data);
     written_again(data, &res, &Limits::DEFAULT);
     calls(data);
+    spliced(data);
 }
 
 /// Checks the searches the tokens make in `s`'s bytes, and their skims,
@@ -956,6 +960,33 @@ pub fn calls(data: &[u8]) {
         (content.clone(), needs.clone()),
         "taken, the same"
     );
+    let (bumped, again) = w.named(&bound_elsewhere(&needs));
+    for (need, was) in again.0.iter().zip(&needs.0) {
+        assert_ne!(need.name, was.name, "bumped past a name bound to another");
+        assert_eq!((need.kind, need.res.id), (was.kind, was.res.id));
+    }
+    // The places are the operands that name a resource, as above: a
+    // marked-content tag the input made a bumped name is none.
+    let none = ResCx::none();
+    let read = operations(&bumped, &none, &LIMITS);
+    let names_at: Vec<usize> = read
+        .flatten()
+        .filter_map(|op| op.resource())
+        .map(|(kind, name)| {
+            again
+                .0
+                .iter()
+                .position(|n| (n.kind, &n.name[..]) == (kind, &name[..]))
+                .expect("a need's name")
+        })
+        .collect();
+    assert_eq!(names_at, named_at, "the same needs in the same places");
+}
+
+/// Names reserved as a page's `/Resources` binding each of `needs`' names,
+/// in its category, to something else: what a writer naming them bumps
+/// each past.
+fn bound_elsewhere(needs: &ResourceNeeds) -> Reserved {
     let mut bound = Dict::new();
     for need in &needs.0 {
         let category = match bound.get_mut(need.kind.key()) {
@@ -969,25 +1000,209 @@ pub fn calls(data: &[u8]) {
         category.push(&need.name, Object::null());
     }
     let resources = Object::from(bound);
-    let elsewhere = Reserved::read(&|_| None, Some(&resources));
-    let (bumped, again) = w.named(&elsewhere);
-    for (need, was) in again.0.iter().zip(&needs.0) {
-        assert_ne!(need.name, was.name, "bumped past a name bound to another");
-        assert_eq!((need.kind, need.res.id), (was.kind, was.res.id));
-    }
-    let none = ResCx::none();
-    let read = operations(&bumped, &none, &LIMITS);
-    let names_at: Vec<usize> = read
-        .flatten()
-        .flat_map(|op| {
-            op.operands()
-                .filter_map(|o| o.name())
-                .map(|n| n.into_owned())
-                .collect::<Vec<_>>()
-        })
-        .filter_map(|name| again.0.iter().position(|n| n.name == name))
+    Reserved::read(&|_| None, Some(&resources))
+}
+
+/// What a tool might mark the property lists it writes with, its own keys:
+/// those [`spliced`] takes out of each list.
+pub(crate) const KEYS: [&[u8]; 2] = [b"Tool_Gen", b"Tool_Block"];
+
+/// The most marked ranges at the top [`spliced`] takes out one at a time
+/// and writes the lists of again, so content of many costs no more than
+/// these.
+const RANGES: usize = 8;
+
+/// `data` as a page's content, two streams split at its middle, read
+/// under [`LIMITS`] with resources that name a property list and a color
+/// space of each size an inline image may be drawn in: its marked ranges
+/// at the top, found under the same caps, the first [`RANGES`] of them
+/// each taken out alone, and all of them widened to touch ([`touching`]);
+/// each splice made reads as the tokens outside its cuts ([`assert_kept`]).
+/// [`splice_each`] of those ranges, each a group of its own, takes what
+/// [`splice`] takes of them, all together, or those it takes alone, if
+/// it takes them together, or none, and gives the streams that splice
+/// gives, or none where it takes none. And each of those ranges with
+/// [`KEYS`] taken out of its list: the content reads as it did but for that
+/// list, which reads as it did without them ([`assert_rewritten`]). Panics
+/// on a broken promise; returns how many were made.
+pub fn spliced(data: &[u8]) -> usize {
+    let res = ResCx::new([
+        (b"CS1".to_vec(), 1),
+        (b"CS3".to_vec(), 3),
+        (b"CS4".to_vec(), 4),
+    ]);
+    let props = Properties::new([(
+        b"P0".to_vec(),
+        dict! { "Type" => "Pagination", "Subtype" => "Header" },
+    )]);
+    let limits = &LIMITS;
+    let (first, second) = data.split_at(data.len() / 2);
+    let page = Concat::new(&[first, second]);
+    let Ok(found) = marked(&page, &props, &res, limits) else {
+        return 0;
+    };
+    let top: Vec<SpanAcross> = found
+        .iter()
+        .filter(|m| m.depth == 0)
+        .map(|m| m.span)
         .collect();
-    assert_eq!(names_at, named_at, "the same needs in the same places");
+    let groups: Vec<Vec<SpanAcross>> = top.iter().take(RANGES).map(|&s| vec![s]).collect();
+    let mut drops = groups.clone();
+    if top.len() > 1 {
+        drops.push(touching(&page, &top));
+    }
+    let mut made = 0;
+    for drop in &drops {
+        if let Ok(kept) = splice(&page, &res, limits, drop) {
+            assert_kept(&page, &res, &kept, drop);
+            made += 1;
+        }
+    }
+    if !groups.is_empty() {
+        let each = splice_each(&page, &res, limits, &groups);
+        let takes = |cuts: &[SpanAcross]| splice(&page, &res, limits, cuts).is_ok();
+        let alone: Vec<bool> = groups.iter().map(|g| takes(g)).collect();
+        let together: Vec<SpanAcross> = (groups.iter().zip(&alone))
+            .filter(|(_, taken)| **taken)
+            .flat_map(|(g, _)| g.iter().copied())
+            .collect();
+        let (taken, cuts) = if takes(&groups.concat()) {
+            (vec![true; groups.len()], groups.concat())
+        } else if together.is_empty() || takes(&together) {
+            (alone, together)
+        } else {
+            (vec![false; groups.len()], Vec::new())
+        };
+        assert_eq!(each.taken, taken, "what splice_each takes");
+        for (g, &t) in groups.iter().zip(&taken) {
+            assert_eq!(each.takes(&page, g[0]), t, "where it takes");
+        }
+        let streams = each.streams(&page, &[]);
+        let want = (!cuts.is_empty()).then(|| splice(&page, &res, limits, &cuts).expect("taken"));
+        assert_eq!(streams, want, "the streams splice_each gives");
+    }
+    for &span in top.iter().take(RANGES) {
+        if let Ok(Some(rewrite)) = without_keys(&page, &res, limits, span, &KEYS) {
+            let nothing = splice_each(&page, &res, limits, &[]);
+            let rewritten = (nothing.streams(&page, &[rewrite])).expect("a list written again");
+            assert_rewritten(&page, &res, &rewritten);
+            made += 1;
+        }
+    }
+    made
+}
+
+/// `spans`, in order and apart, each widened over the white-space either
+/// side of it, white-space between two split at its middle: cuts that
+/// touch, so whether one needs a space in its place depends on bytes its
+/// neighbour takes.
+fn touching(content: &Concat, spans: &[SpanAcross]) -> Vec<SpanAcross> {
+    let s = content.bytes();
+    let space = |c: &&u8| iso_white_space(**c);
+    let ranges: Vec<Range<usize>> = spans
+        .iter()
+        .filter_map(|&span| content.offsets(span))
+        .collect();
+    let mut cuts: Vec<Range<usize>> = ranges
+        .iter()
+        .map(|r| {
+            let before = s[..r.start].iter().rev().take_while(space).count();
+            r.start - before..r.end + s[r.end..].iter().take_while(space).count()
+        })
+        .collect();
+    for i in 1..cuts.len() {
+        if cuts[i].start < cuts[i - 1].end {
+            let middle = (ranges[i - 1].end + ranges[i].start) / 2;
+            (cuts[i - 1].end, cuts[i].start) = (middle, middle);
+        }
+    }
+    cuts.into_iter().map(|r| content.span(r)).collect()
+}
+
+/// A token as read, wherever it is: its kind and bytes, and an inline
+/// image's data and what PDFium keeps of it, each from its start.
+#[derive(Debug, PartialEq)]
+enum Seen<'a> {
+    Op(&'a [u8]),
+    Operand(&'a [u8]),
+    Image(&'a [u8], Range<usize>, ImageStream),
+}
+
+/// `content`'s tokens under [`LIMITS`], each where it is and as
+/// [`Seen`]; `what` names it, where it doesn't read to its end.
+fn seen<'a>(content: &'a Concat, res: &ResCx, what: &str) -> Vec<(Range<usize>, Seen<'a>)> {
+    let s = content.bytes();
+    let mut read = content.tokens(res, &LIMITS);
+    let mut out = Vec::new();
+    while let Some(token) = read.next() {
+        let (r, tok) = token.unwrap_or_else(|e| panic!("{what}: {e}"));
+        let seen = match tok {
+            Tok::Op(op) => Seen::Op(op),
+            Tok::Operand(o) => Seen::Operand(o),
+            Tok::InlineImage(data) => {
+                let image = crate::InlineImage::new(s, r.clone(), data.clone(), read.found());
+                let inside = |d: Range<usize>| d.start - r.start..d.end - r.start;
+                let stream = match image.stream() {
+                    ImageStream::Data(kept) => ImageStream::Data(inside(kept)),
+                    other => other,
+                };
+                Seen::Image(&s[r.clone()], inside(data), stream)
+            }
+        };
+        out.push((r, seen));
+    }
+    out
+}
+
+/// That `kept`, `content` spliced without `drop`, reads as the tokens of
+/// `content` outside `drop`: each its kind and bytes, an inline image its
+/// data and what PDFium keeps of it in the same places in it.
+fn assert_kept(content: &Concat, res: &ResCx, kept: &[Cow<[u8]>], drop: &[SpanAcross]) {
+    let drop: Vec<Range<usize>> = drop.iter().filter_map(|&d| content.offsets(d)).collect();
+    let before: Vec<Seen> = seen(content, res, "a splice read it")
+        .into_iter()
+        .filter(|(r, _)| !drop.iter().any(|d| d.start <= r.start && r.end <= d.end))
+        .map(|(_, t)| t)
+        .collect();
+    let kept: Vec<&[u8]> = kept.iter().map(|s| &**s).collect();
+    let kept = Concat::new(&kept);
+    let after: Vec<Seen> = (seen(&kept, res, "what a splice keeps reads").into_iter())
+        .map(|(_, t)| t)
+        .collect();
+    assert_eq!(before, after, "the tokens a splice kept");
+}
+
+/// That `rewritten`, `content` with a list written again without
+/// [`KEYS`], reads as `content` does but for that list, one operand, which
+/// reads as it did without them.
+fn assert_rewritten(content: &Concat, res: &ResCx, rewritten: &[Cow<[u8]>]) {
+    let streams: Vec<&[u8]> = rewritten.iter().map(|s| &**s).collect();
+    let rewritten = Concat::new(&streams);
+    let before = seen(content, res, "a list written again was read");
+    let after = seen(&rewritten, res, "a list written again reads");
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "the tokens of a list written again"
+    );
+    let changed: Vec<_> = (before.iter().zip(&after))
+        .filter(|((_, b), (_, a))| b != a)
+        .collect();
+    let [((_, Seen::Operand(was)), (_, Seen::Operand(now)))] = changed[..] else {
+        panic!("a list written again is one operand: {changed:?}")
+    };
+    let read = |list: &[u8]| object(list, &LIMITS);
+    let mut left = (read(was).as_ref().and_then(Object::as_dict).cloned())
+        .expect("a list written again was one");
+    for key in KEYS {
+        left.remove(key);
+    }
+    let now = read(now);
+    assert_eq!(
+        now.as_ref().and_then(Object::as_dict),
+        Some(&left),
+        "the list written again"
+    );
 }
 
 /// `content`'s tokens and operations through a sink that keeps their
@@ -1701,9 +1916,16 @@ pub(crate) fn stored(data: &[u8], last: bool) -> Vec<u8> {
 /// small caps allow, a JPEG and fax data, which the `image-ends` feature
 /// decodes, strings, arrays, dictionaries and marked content, an image
 /// whose filter's end is in a comment after it, one whose Flate header
-/// asks for a dictionary named past its `EI`, and a color of 32
-/// components and a pattern, more operands than an operation holds
-/// inline: the fuzz target's seeds.
+/// asks for a dictionary named past its `EI`; marked content to take out
+/// and lists to write again: pagination artifacts, one opening with the
+/// `Q` that ends the page's `q`, ranges inside text objects, with
+/// white-space between, across the two streams the body splits a seed
+/// into, and around forms drawn, and lists with a tool's own keys
+/// ([`KEYS`]); a lone `BI` whose would-be dictionary a range is in, and an
+/// ASCIIHex image whose `>` a range holds in a comment, which taking the
+/// range out would make read otherwise; and a color of 32 components and
+/// a pattern, more operands than an operation holds inline: the fuzz
+/// target's seeds.
 pub fn fixtures() -> Vec<Vec<u8>> {
     let image = |dict: &str, data: &[u8]| {
         [format!("q BI {dict} ID ").as_bytes(), data, b"\nEI Q\n"].concat()
@@ -1752,6 +1974,33 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         // as here, and not written again, a line's end alone after it, so
         // the writer's round trip passes it over.
         b"BI /F /Fl /L 6 ID x EI\n\n".to_vec(),
+        // Marked content to take out, and lists to write again.
+        b"q /Artifact /P0 BDC q BT /F1 9 Tf (Head) Tj ET Q EMC Q 0 0 9 9 re f".to_vec(),
+        b"q 0 g 0 0 9 9 re f 1 1 8 8 re f 2 2 7 7 re f 3 3 6 6 re f 0 0 1 rg 9 9 m 4 4 l h S  \
+          /Artifact <</Type /Pagination /Subtype /Header>> BDC Q q 1 0 0 1 9 9 cm /X0 Do Q EMC"
+            .to_vec(),
+        b"0 g/A <<>> BDC EMC  /B <<>> BDC EMC 1 g 0 0 9 9 re f 1 1 8 8 re f 2 2 7 7 re f".to_vec(),
+        b"/Artifact <</Type /Pagination /Subtype /Header>> BDC q /X0 Do Q EMC /X1 Do".to_vec(),
+        b"BT /F1 12 Tf 72 700 Td /Artifact <</Subtype /Footer>> BDC (f) Tj EMC \
+          0 -14 Td (Body) Tj ET"
+            .to_vec(),
+        b"/Artifact <</Subtype /Watermark /Tool_Gen (g1)>> BDC q 0.5 g \
+          BT /F1 9 Tf (wm) Tj ET Q EMC /Span <</MCID 0>> BDC (x) Tj EMC"
+            .to_vec(),
+        b"1 g /Artifact <</Subtype /Background>> BDC 0 0 m 9 9 l S \
+          BI /W 2 /H 1 /BPC 8 /CS /CS3 ID ab EIxyz EI EMC Q"
+            .to_vec(),
+        b"/Artifact <</Type/Pagination/Subtype/Background/Tool_Gen (g1)\
+          /Tool_Block({\"note\":\"/a (b)\"}) % kept\n/D <</Tool_Gen 1>>>> BDC\n\
+          q\n0.5 g 0 0 9 9 re f\nQ\nEMC\n"
+            .to_vec(),
+        // A range in a lone `BI`'s would-be dictionary: taken out, the
+        // `BI` would begin an image.
+        b"BI /A BMC EMC /W 1 /H 1 /CS /G /BPC 8 ID x EI Q".to_vec(),
+        // An ASCIIHex image's first `>` in a comment a range holds: taken
+        // out, the image would run on to the last `EI`.
+        b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI /A BMC % > (\n EMC 0 0 9 9 re f <41> Tj EI"
+            .to_vec(),
         format!("q /CS0 cs {components}/P0 scn 0 0 9 9 re f Q\n").into_bytes(),
     ]
 }
@@ -1839,7 +2088,7 @@ mod tests {
 
     /// The seeds read to their end, each of the first fifteen one inline
     /// image between `q` and `Q`, and the last an `scn` of 33 operands;
-    /// and each written again.
+    /// each written again; and those with marked content spliced.
     #[test]
     fn the_seeds_read_to_their_end() {
         let res = ResCx::new([(b"CS3".to_vec(), 3)]);
@@ -1853,10 +2102,10 @@ mod tests {
                 assert!(matches!(read[1].1, Tok::InlineImage(_)), "seed {i}");
             }
             // Each written again but those holding an image PDFium keeps
-            // no stream of, of a filter it has no decoder for, and one
+            // no stream of, of a filter it has no decoder for, and two
             // whose filter's end is past its `EI`; and the one whose last
             // image's Flate header asks for a dictionary named past it.
-            let passed = matches!(i, 14 | 17 | 18);
+            let passed = matches!(i, 14 | 17 | 18 | 28);
             assert_eq!(
                 written_again(seed, &res, &Limits::DEFAULT),
                 !passed,
@@ -1864,12 +2113,38 @@ mod tests {
             );
             content(seed);
         }
+        // The splices and lists written again of those with marked content
+        // to take out: none of the header that opens with the `Q` ending
+        // the page's `q`, alone, nor of the two whose ranges would leave
+        // what's kept read otherwise.
+        let made: Vec<usize> = seeds[19..29].iter().map(|seed| spliced(seed)).collect();
+        assert_eq!(made, [1, 0, 3, 1, 1, 4, 1, 1, 0, 0]);
         let last = seeds.last().unwrap();
         let scn = operations(last, &res, &Limits::DEFAULT)
             .nth(2)
             .unwrap()
             .unwrap();
         assert_eq!((scn.name(), scn.operands().len()), (&b"scn"[..], 33));
+    }
+
+    /// A marked-content tag that's the name a font is bumped to, a fuzzer
+    /// having found it, is no place of the font's: the writer's calls,
+    /// bumped, name the font where they did, the tag left as it is.
+    #[test]
+    fn a_tag_named_as_a_bumped_resource_is_none() {
+        let font =
+            Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" });
+        let mut w = ContentWriter::new();
+        w.font(font, 12.0);
+        let (_, needs) = w.named(&Reserved::default());
+        let (_, bumped) = w.named(&bound_elsewhere(&needs));
+        let tag = &bumped.0[0].name;
+        assert_ne!(tag, &needs.0[0].name);
+        // `BMC` with that tag, then Helvetica's `Tf` at 12.
+        let mut data = vec![29, tag.len() as u8];
+        data.extend(tag);
+        data.extend([19, 0, 1, 12, 0, 0, 0]);
+        calls(&data);
     }
 
     /// The fuzz target's checks on the seeds, each mutated many times as a

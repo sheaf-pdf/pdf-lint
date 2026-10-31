@@ -537,3 +537,7 @@ ccf-g3-2d-no-eol	image matrix 1 0 0 1 0 0 raw %D4/%1C%F8%AE%80%20%86 ; path fill
 ccf-no-params	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
 ccf-g3-no-columns	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
 ccf-g3-codes-EI	image matrix 1 0 0 1 0 0 raw %DD%80%09EI%00%80 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+splice-lone-bi	none
+splice-lone-bi-taken	image matrix 1 0 0 1 0 0 raw x
+splice-ahx-reach	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 9 0 l 9 9 l 0 9 l 0 0 h
+splice-ahx-reach-taken	image matrix 1 0 0 1 0 0 raw 41%20EI%20%200%200%209%209%20re%20f%20>

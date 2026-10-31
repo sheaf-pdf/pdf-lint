@@ -9,12 +9,12 @@ use std::ops::Range;
 use pdf_tokenizer::is_white_space;
 
 use crate::error::Error;
-use crate::inline::ResCx;
+use crate::inline::{Found, ImageStream, InlineImage, ResCx};
 use crate::limits::Limits;
 use crate::operand::{name, object};
 use crate::page::{Concat, SpanAcross};
 use crate::scan::{Event, Raw, TOP, Visit, next_raw, walk};
-use crate::tokens::{Tok, tokens};
+use crate::tokens::{Tok, Tokens};
 
 /// Why a splice, or a property list written again, was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
@@ -32,11 +32,12 @@ pub enum SpliceError {
     #[error("{0} overlaps another range taken out")]
     Overlap(SpanAcross),
     /// A range whose taking out could change what's drawn after it, by
-    /// [`splice`]'s rules.
+    /// [`splice`]'s rules, or which leaves what's kept read otherwise.
     #[error("taking out {0} would change what's drawn after it")]
     Unsafe(SpanAcross),
     /// A marked range whose property list can't be written again without
-    /// the keys asked, as [`without_keys`] says.
+    /// the keys asked, as [`without_keys`] says, or whose writing again
+    /// leaves the content read otherwise.
     #[error("the property list of the range at {0} can't be written again without the keys asked")]
     List(SpanAcross),
 }
@@ -81,14 +82,31 @@ pub enum SpliceError {
 /// and one that isn't in the content ([`SpliceError::OutOfRange`]); an
 /// empty one is no cut.
 ///
-/// The tokens are read as [`tokens`] reads them, by PDFium's rules, so a
-/// range is judged by where those end each token, an inline image's among
-/// them, by the reading `limits` names: its DCT and CCITTFax data's end by
-/// the stand-in, or decoded ([`Limits::coded_ends`]). A splice judged by
-/// one reading holds for that one: a caller that wants what PDFium draws
-/// asks for the decoders' (`CodedEnds::Decoded`, with the `image-ends`
-/// feature). Content that can't be read under `limits` is refused with its
-/// error ([`SpliceError::Read`]). It costs a reading of `content`.
+/// The tokens are read as [`tokens`](crate::tokens) reads them, by
+/// PDFium's rules, so a range is judged by where those end each token, an
+/// inline image's among them, by the reading `limits` names: its DCT and
+/// CCITTFax data's end by the stand-in, or decoded
+/// ([`Limits::coded_ends`]). A splice judged by one reading holds for that
+/// one: a caller that wants what PDFium draws asks for the decoders'
+/// (`CodedEnds::Decoded`, with the `image-ends` feature). Content that
+/// can't be read under `limits` is refused with its error
+/// ([`SpliceError::Read`]).
+///
+/// What's kept must read as it did, as how a token is read may depend on
+/// what's after it: a `BI` with a keyword where its dictionary's key
+/// should be begins no image, and its would-be dictionary is read as
+/// content, up to that keyword; and an inline image's data's end may be
+/// found by what's past it, or past the image (an ASCIIHex image's `>`,
+/// with no `EI` after it, makes PDFium keep no stream of it and read it on
+/// to its first `EI`; Flate data whose header asks for a preset
+/// dictionary is ended by the bytes naming it; a decoder of DCT or
+/// CCITTFax data may read on past `EI`). So what a splice gives is read
+/// again under `limits`, and it's refused ([`SpliceError::Unsafe`], naming
+/// the first range at or after the first token kept that reads otherwise,
+/// or the last) unless every token kept reads as it did: its kind and
+/// bytes, and an inline image's data and what PDFium keeps of it in the
+/// same places in it. It costs two readings: of `content`, and of what it
+/// gives.
 ///
 /// ```
 /// use pdf_content_streams::{Concat, Limits, Properties, ResCx, SpliceError, marked, splice};
@@ -111,8 +129,7 @@ pub fn splice<'a>(
     limits: &Limits,
     drop: &[SpanAcross],
 ) -> Result<Vec<Cow<'a, [u8]>>, SpliceError> {
-    let cuts = checked(content, res, limits, drop)?;
-    Ok(written(content, &cuts, &[]))
+    Ok(checked(content, res, limits, drop)?.1)
 }
 
 /// What [`splice_each`] takes out of a page's content.
@@ -133,7 +150,10 @@ impl Spliced {
 
     /// `content`'s streams with what's taken out taken out, and `rewrites`
     /// made in what's kept; one in what's taken out goes with it. None when
-    /// no stream changes.
+    /// no stream changes. What's taken out was read again as
+    /// [`splice_each`] took it, and each rewrite as [`without_keys`] made it,
+    /// with nothing taken out; the two together aren't read again here: a
+    /// caller that wants them so reads what this gives.
     pub fn streams<'a>(
         &self,
         content: &'a Concat,
@@ -153,9 +173,9 @@ impl Spliced {
 /// those it takes alone, together, or none where it refuses those
 /// together. A group it refuses stays as it is ([`Spliced::taken`]).
 ///
-/// It costs a reading of `content` for all of them together, and where
-/// that's refused, one for each group and one for those taken: a caller
-/// bounds how many groups it gives.
+/// It costs a check of all of them together, and where that's refused,
+/// one for each group and one for those taken, each two readings
+/// ([`splice`]): a caller bounds how many groups it gives.
 pub fn splice_each(
     content: &Concat,
     res: &ResCx,
@@ -169,7 +189,7 @@ pub fn splice_each(
     if groups.is_empty() {
         return none(Vec::new());
     }
-    if let Ok(cuts) = checked(content, res, limits, &groups.concat()) {
+    if let Ok((cuts, _)) = checked(content, res, limits, &groups.concat()) {
         return Spliced {
             taken: vec![true; groups.len()],
             cuts,
@@ -186,7 +206,7 @@ pub fn splice_each(
         return none(taken);
     }
     match checked(content, res, limits, &cuts) {
-        Ok(cuts) => Spliced { taken, cuts },
+        Ok((cuts, _)) => Spliced { taken, cuts },
         Err(_) => none(vec![false; groups.len()]),
     }
 }
@@ -206,15 +226,23 @@ pub struct Rewrite {
 /// byte stays as written, comments, line ends and what the dictionaries
 /// it holds hold among them. None when it has none of them.
 ///
-/// The `BDC`'s operands are read from `span`'s start as [`tokens`] reads
-/// them, with `res` under `limits`, its list the last of them; the list's
-/// entries as PDFium reads a dictionary, so arrays nest in it, and its
-/// keys decoded as [`name`](crate::name) decodes them. Refused
-/// ([`SpliceError::List`]) when the range doesn't open with a `BDC` whose
-/// list is written in the content, in one stream, and reads as a
-/// dictionary ([`object`](crate::object)), or when what's left of it isn't
-/// one operand that reads as the list without those entries; every entry
-/// of a key written twice goes.
+/// The `BDC`'s operands are the content's tokens, read from its start as
+/// [`tokens`](crate::tokens) reads them, with `res` under `limits`, from
+/// the first at `span`'s start to the `BDC`, its list the last of them, so
+/// the list is a token of the page's, never bytes inside an image's data
+/// or a string; the list's entries are read as PDFium reads a dictionary,
+/// so arrays nest in it, and its keys decoded as [`name`](crate::name)
+/// decodes them. Refused ([`SpliceError::List`]) when the range doesn't
+/// open with a `BDC` whose list is written in the content, in one stream,
+/// and reads as a dictionary ([`object`](crate::object)); when what's left
+/// of it isn't one operand that reads as the list without those entries
+/// (every entry of a key written twice goes); or when the content with it
+/// written again doesn't read as it did but for the list, read as one
+/// operand, the list written again, as [`splice`] reads what it gives.
+/// Content that can't be read is refused with its error
+/// ([`SpliceError::Read`]). It costs a reading of the content to the
+/// `BDC`, and, where it writes the list again, two more: of the content
+/// and of what it gives.
 ///
 /// ```
 /// use pdf_content_streams::{Concat, Limits, Properties, ResCx, marked, splice_each, without_keys};
@@ -238,22 +266,20 @@ pub fn without_keys(
 ) -> Result<Option<Rewrite>, SpliceError> {
     let range = content.offsets(span).ok_or(SpliceError::OutOfRange(span))?;
     let refused = || SpliceError::List(span);
-    let at = |e: Error| Error {
-        at: e.at + range.start,
-        ..e
-    };
     let s = content.bytes();
-    // Its operands, the list last, to its `BDC`.
+    // Its operands, the list last, to its `BDC`: the content's tokens from
+    // its start, the first at the range's start or after it, inside it.
     let mut list = None;
-    let mut read = tokens(&s[range.clone()], res, limits);
+    let mut read = content.tokens(res, limits);
     loop {
-        match read.next().transpose().map_err(at)? {
+        match read.next().transpose()? {
+            Some((r, _)) if r.end <= range.start => {}
+            Some((r, _)) if r.start < range.start || r.end > range.end => return Err(refused()),
             Some((r, Tok::Operand(_))) => list = Some(r),
             Some((_, Tok::Op(b"BDC"))) => break,
             _ => return Err(refused()),
         }
     }
-    let list = list.map(|r| range.start + r.start..range.start + r.end);
     let list = list
         .filter(|r| s[r.clone()].starts_with(b"<<"))
         .ok_or_else(refused)?;
@@ -262,7 +288,33 @@ pub fn without_keys(
         return Err(refused());
     }
     let with = without_entries(&s[list.clone()], keys, limits).ok_or_else(refused)?;
-    Ok((with != s[list.clone()]).then_some(Rewrite { range: list, with }))
+    if with == s[list.clone()] {
+        return Ok(None);
+    }
+    let rewrite = Rewrite { range: list, with };
+    // The content with it written again, read again beside the content:
+    // each token as it was, the list as it's written.
+    let made = written(content, &[], &[&rewrite]);
+    let streams: Vec<&[u8]> = made.iter().map(|s| &**s).collect();
+    let made = Concat::new(&streams);
+    let mut again = Again(made.tokens(res, limits));
+    let mut read = content.tokens(res, limits);
+    while let Some(token) = read.next() {
+        let (r, tok) = token?;
+        let same = if r == rewrite.range {
+            let list = Tok::Operand(&rewrite.with);
+            again.next_is(&rewrite.with, 0..rewrite.with.len(), &list, Found::Walk)
+        } else {
+            again.next_is(s, r, &tok, read.found())
+        };
+        if !same {
+            return Err(refused());
+        }
+    }
+    match again.done() {
+        true => Ok(Some(rewrite)),
+        false => Err(refused()),
+    }
 }
 
 /// A dictionary operand as written, but for its entries whose keys are
@@ -343,6 +395,9 @@ impl<'a> Visit<'a> for Entries {
     }
 }
 
+/// A page's streams, each borrowed where nothing changes it.
+type Streams<'a> = Vec<Cow<'a, [u8]>>;
+
 /// A range to take out, in the joined bytes.
 #[derive(Debug, Clone)]
 struct Cut {
@@ -351,13 +406,14 @@ struct Cut {
 }
 
 /// The cuts that take `drop` out of `content`, its tokens read with `res`
-/// under `limits`, in order, once they're found safe to take out together.
-fn checked(
-    content: &Concat,
+/// under `limits`, in order, once they're found safe to take out together;
+/// and the streams they give, read again as the tokens they keep.
+fn checked<'a>(
+    content: &'a Concat,
     res: &ResCx,
     limits: &Limits,
     drop: &[SpanAcross],
-) -> Result<Vec<Cut>, SpliceError> {
+) -> Result<(Vec<Cut>, Streams<'a>), SpliceError> {
     let mut cuts = drop
         .iter()
         .map(|&span| {
@@ -373,8 +429,68 @@ fn checked(
     {
         return Err(SpliceError::Overlap(pair[1].span));
     }
-    check(content, res, limits, &cuts)?;
-    Ok(cuts)
+    let kept = written(content, &cuts, &[]);
+    if cuts.is_empty() {
+        check(content, res, limits, &cuts, None)?;
+        return Ok((cuts, kept));
+    }
+    let streams: Vec<&[u8]> = kept.iter().map(|s| &**s).collect();
+    let again = Concat::new(&streams);
+    check(
+        content,
+        res,
+        limits,
+        &cuts,
+        Some(Again(again.tokens(res, limits))),
+    )?;
+    Ok((cuts, kept))
+}
+
+/// What a splice or a list written again gives, its tokens read again as
+/// the content it's made from was, to be held to what it keeps of them.
+struct Again<'s, 'r>(Tokens<'s, 'r>);
+
+impl Again<'_, '_> {
+    /// Whether the next token read again is `tok`, at `at` in `s`, read as
+    /// it was there: its kind and bytes, and an inline image's data and
+    /// what PDFium keeps of it in the same places in it, its data's end
+    /// found as `found` says.
+    fn next_is(&mut self, s: &[u8], at: Range<usize>, tok: &Tok, found: Found) -> bool {
+        let Some(Ok((again, read))) = self.0.next() else {
+            return false;
+        };
+        let content = self.0.content();
+        match (tok, read) {
+            (Tok::Op(a), Tok::Op(b)) | (Tok::Operand(a), Tok::Operand(b)) => *a == b,
+            (Tok::InlineImage(was), Tok::InlineImage(data)) => {
+                s[at.clone()] == content[again.clone()]
+                    && placed(content, again, data, self.0.found())
+                        == placed(s, at, was.clone(), found)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether it's read to its end: no token is left, and no error.
+    fn done(&mut self) -> bool {
+        self.0.next().is_none()
+    }
+}
+
+/// An inline image at `at` in `s`, its data at `data`, found as `found`
+/// says: its data and the stream PDFium keeps of it, each from its start.
+fn placed(
+    s: &[u8],
+    at: Range<usize>,
+    data: Range<usize>,
+    found: Found,
+) -> (Range<usize>, ImageStream) {
+    let inside = |r: Range<usize>| r.start - at.start..r.end - at.start;
+    let stream = match InlineImage::new(s, at.clone(), data.clone(), found).stream() {
+        ImageStream::Data(kept) => ImageStream::Data(inside(kept)),
+        other => other,
+    };
+    (inside(data), stream)
 }
 
 fn overlap(a: &Range<usize>, b: &Range<usize>) -> bool {
@@ -520,8 +636,15 @@ fn ends_path(op: &[u8]) -> bool {
 
 /// Whether `cuts` may be taken out of `content`: each starts and ends
 /// between steps, outside a comment and a path, and is safe ([`splice`]'s
-/// rules).
-fn check(content: &Concat, res: &ResCx, limits: &Limits, cuts: &[Cut]) -> Result<(), SpliceError> {
+/// rules); and, where `again` is what they give, each token kept reads
+/// there as it did.
+fn check(
+    content: &Concat,
+    res: &ResCx,
+    limits: &Limits,
+    cuts: &[Cut],
+    mut again: Option<Again>,
+) -> Result<(), SpliceError> {
     let s = content.bytes();
     let mut in_text = false;
     let mut in_path = false;
@@ -583,10 +706,13 @@ fn check(content: &Concat, res: &ResCx, limits: &Limits, cuts: &[Cut]) -> Result
             next += 1;
         }
         let Some((r, tok)) = token else {
-            return match pending {
-                0 => Ok(()),
-                _ => Err(unsafe_cut(opener)),
-            };
+            if pending != 0 {
+                return Err(unsafe_cut(opener));
+            }
+            if again.as_mut().is_some_and(|again| !again.done()) {
+                return Err(unsafe_cut(cuts.len() - 1));
+            }
+            return Ok(());
         };
         // A token across either end of a cut.
         if let Some(i) = (open.as_ref().map(|(i, _)| *i)).filter(|&i| r.end > cuts[i].range.end) {
@@ -594,6 +720,13 @@ fn check(content: &Concat, res: &ResCx, limits: &Limits, cuts: &[Cut]) -> Result
         }
         if next < cuts.len() && cuts[next].range.start < r.end {
             return Err(unsafe_cut(next));
+        }
+        // A token kept, read again: the first cut after it, or the last,
+        // is named where it reads otherwise, as a token's reading looks on.
+        if let Some(again) = again.as_mut().filter(|_| open.is_none()) {
+            if !again.next_is(s, r.clone(), &tok, tokens.found()) {
+                return Err(unsafe_cut(next.min(cuts.len() - 1)));
+            }
         }
         after = r.end;
         operand = matches!(tok, Tok::Operand(_));
@@ -649,7 +782,7 @@ fn in_comment(gap: &[u8]) -> bool {
 
 /// `content`'s streams with `cuts` taken out and `rewrites` made, none of
 /// them in a cut: a stream neither touches is borrowed as it is.
-fn written<'a>(content: &'a Concat, cuts: &[Cut], rewrites: &[&Rewrite]) -> Vec<Cow<'a, [u8]>> {
+fn written<'a>(content: &'a Concat, cuts: &[Cut], rewrites: &[&Rewrite]) -> Streams<'a> {
     (0..content.stream_count())
         .map(|i| cut(content, i, cuts, rewrites))
         .collect()

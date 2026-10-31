@@ -1030,6 +1030,19 @@ TAB_EI = [0] * 23 + [1] * 3 + [0] * 3 + [1] * 3 + [0] * 9 + [1] * 3 + [0] * 11 +
 image("ccf-g3-codes-EI", b"/W 68 /H 2 /BPC 1 /CS /G /F /CCF /DP << /Columns 68 /EncodedByteAlign true >>",
       group_3([[0] * 68, TAB_EI], align=True))
 
+# What taking out a range that draws and sets nothing would change, each
+# before and after. A `BI` with a keyword where its dictionary's key should
+# be begins no image, its would-be dictionary content: a marked range taken
+# out of it makes it begin one. An ASCIIHex image whose first `>` is in a
+# comment after it, with no `EI` after that, is no stream, its data read on
+# to its first `EI`, the rectangle after it drawn: the range holding the
+# comment taken out, a `>` after the rectangle is its end, and the image
+# runs on over the rectangle to the `EI` after that.
+case("splice-lone-bi", b"BI /A BMC EMC /W 1 /H 1 /CS /G /BPC 8 ID x EI Q")
+case("splice-lone-bi-taken", b"BI  /W 1 /H 1 /CS /G /BPC 8 ID x EI Q")
+case("splice-ahx-reach", b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI q % > (\n Q 0 0 9 9 re f > EI")
+case("splice-ahx-reach-taken", b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI  0 0 9 9 re f > EI")
+
 
 def cases():
     return CASES
