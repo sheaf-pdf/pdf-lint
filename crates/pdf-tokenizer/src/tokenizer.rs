@@ -217,7 +217,8 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// `kind`: `rest` taken once a token, by its caller. `len` is never more
     /// than its length, as each token function measures within what it's
     /// given (which the fuzz target checks on every token), so it's sliced
-    /// directly.
+    /// directly: a token function that measured past it, a bug, panics here
+    /// in any build.
     fn token(&mut self, rest: &'a [u8], kind: Kind, len: usize) -> Token<'a> {
         let start = self.pos;
         let bytes = &rest[..len];
@@ -834,6 +835,17 @@ mod tests {
         assert_eq!((data.start, data.bytes), (0, &b"abc"[..]));
         let empty: Token<'_> = tokens.data(1);
         assert_eq!((empty.start, empty.bytes), (3, &b""[..]));
+    }
+
+    /// A token measured past what's left, which no token function does, is
+    /// a bug, and panics in any build.
+    #[test]
+    #[should_panic]
+    fn a_token_measured_past_the_input_panics() {
+        let mut tokens = Tokenizer::new(b"abc");
+        tokens.pos = 1;
+        let rest = tokens.rest();
+        tokens.token(rest, Kind::Keyword, 5);
     }
 
     /// The tokenizer under PDFium's rules, where they part from ISO
