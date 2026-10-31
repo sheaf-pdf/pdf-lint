@@ -8,15 +8,18 @@ use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
 
+use pdf_filters::{Backend, Faults, Predictor, Prefix, decode_prefix_into};
 use pdf_tokenizer::decode::{self, pdfium};
 use pdf_tokenizer::is_white_space;
 
-use crate::data::{RunLength, Searched, a85_end, a85_stop, ei_scan, find};
+use crate::data::{Places, RunLength, Searched, a85_end, a85_stop, ei_scan, find};
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Sink};
 use crate::limits::Limits;
 use crate::operand::{Operand, WORD, hex, iso_name, literal, name};
-use crate::scan::{Raw, UNCAPPED, elements, is_number, is_space, next_raw};
+use crate::scan::{
+    Event, Raw, TOP, UNCAPPED, Visit, elements, is_number, is_space, next_raw, walk,
+};
 
 /// What reading content needs of the resources it's drawn with: how many
 /// components each named color space has, which sizes an unfiltered
@@ -257,8 +260,9 @@ pub enum ImageStream {
     Empty,
     /// No stream, and so no image, which PDFium neither keeps nor draws:
     /// its data read on to `EI` from its start, its filter one PDFium has
-    /// no decoder for or one whose data's end isn't found, or its size one
-    /// PDFium can't count.
+    /// no decoder for, one whose data's end isn't found or has no `EI`
+    /// after it, or one that refuses the data or its parameters, or its
+    /// size one PDFium can't count.
     Missing,
 }
 
@@ -276,10 +280,12 @@ pub(crate) enum Found {
     Walk,
 }
 
-/// The inline images of one content stream: what finds each one's data,
-/// and its searches for where an image's data ends, remembered, so content
-/// of many images whose data doesn't end is searched once, not once for
-/// each image.
+/// The inline images of one content stream: what finds each one's data;
+/// its searches for where an image's data ends, and its walks to `EI` past
+/// those ends, remembered, so content of many images whose data doesn't
+/// end, or whose ends have no `EI` after them, is searched and walked
+/// once, not once for each image; and what finding their ends may cost
+/// yet ([`Limits::image_ends`]), with one buffer for what decoding gives.
 #[derive(Debug, Clone)]
 pub(crate) struct Images<'a, 'r> {
     s: &'a [u8],
@@ -293,6 +299,12 @@ pub(crate) struct Images<'a, 'r> {
     run_length: RunLength,
     /// The last search for a JPEG's end of image.
     eoi: Searched,
+    /// The walks to `EI` from where a filter's data ends.
+    walks: Walks,
+    /// What finding images' ends may cost yet in this reading, in bytes.
+    budget: usize,
+    /// What decoding an image's data gives, emptied after each image.
+    decoded: Vec<u8>,
 }
 
 impl<'a, 'r> Images<'a, 'r> {
@@ -305,6 +317,9 @@ impl<'a, 'r> Images<'a, 'r> {
             a85: Searched::default(),
             run_length: RunLength::default(),
             eoi: Searched::default(),
+            walks: Walks::default(),
+            budget: lim.image_ends,
+            decoded: Vec::new(),
         }
     }
 
@@ -313,7 +328,10 @@ impl<'a, 'r> Images<'a, 'r> {
     /// would read an image otherwise, `sink` is told, if it wants: its
     /// dictionary's tokens' own faults and its entries', as they're read;
     /// then, the image read, its keys', what ends its dictionary, its
-    /// `ID`'s, its length's and what's before its `EI`.
+    /// `ID`'s, its length's and what's before its `EI`. Where finding its
+    /// data's end would cost more than is left of
+    /// [`Limits::image_ends`] for the reading, an error at `bi`
+    /// ([`ErrorKind::ImageEnds`]).
     pub(crate) fn read(&mut self, bi: usize, sink: &mut impl Sink<'a>) -> Result<Image, Error> {
         let s = self.s;
         let unterminated = Error {
@@ -337,53 +355,66 @@ impl<'a, 'r> Images<'a, 'r> {
         // One white-space byte after `ID`, or the object that ends the
         // dictionary, by PDFium's rules, then the data.
         let start = at + usize::from(s.get(at).is_some_and(|&c| is_space(c)));
-        // A decoder that finds no end of its data is none to PDFium, which
-        // then reads on from its data's start as it does for a filter it
-        // can't decode; and so for an image whose size it can't count,
-        // which it reads no data of, filtered or not.
-        let (end, found) = match (self.size(&dict), self.first_filter(&dict)) {
-            (None, _) => (End::Walk, Found::Walk),
+        // A decoder that finds no end of its data, or refuses it, is none
+        // to PDFium, which then reads on from its data's start as it does
+        // for a filter it can't decode; and so for an image whose size it
+        // can't count, which it reads no data of, filtered or not.
+        let end = match (self.size(&dict), self.first_filter(&dict)) {
+            (None, _) => End::Walk,
             (Some(size), None) => match usize::try_from(size) {
-                Ok(0) => (End::Walk, Found::Empty),
-                Ok(n) => (End::Counted(start.saturating_add(n)), Found::Counted),
-                Err(_) => (End::Walk, Found::Walk),
+                Ok(0) => End::Empty,
+                Ok(n) => End::Size(start.saturating_add(n)),
+                Err(_) => End::Walk,
             },
-            (_, Some(filter)) => {
-                let end = match filter {
-                    Filter::Hex => (self.hex.from(start, |at| find(s, at, b">")))
-                        .map_or(End::Walk, |at| End::Counted(at + 1)),
-                    Filter::A85 => (self.a85.from(start, |at| a85_stop(s, at)))
-                        .map_or(End::Walk, |stop| End::Counted(a85_end(s, start, stop))),
-                    Filter::RunLength => {
-                        (self.run_length.end(s, start)).map_or(End::Walk, End::Counted)
-                    }
-                    Filter::Dct => (self.eoi.from(start, |at| find(s, at, b"\xff\xd9")))
-                        .map_or(End::Scan, |eoi| End::Counted(eoi + 2)),
-                    Filter::Decoded => End::Scan,
-                    Filter::Other => End::Walk,
-                };
-                let found = match end {
-                    End::Walk => Found::Walk,
-                    End::Counted(_) | End::Scan => Found::Filter,
-                };
-                (end, found)
-            }
+            (_, Some(filter)) => match filter {
+                Filter::Hex => (self.hex.from(start, |at| find(s, at, b">")))
+                    .map_or(End::Walk, |at| End::Filter(at + 1, 0)),
+                Filter::A85 => (self.a85.from(start, |at| a85_stop(s, at)))
+                    .map_or(End::Walk, |stop| End::Filter(a85_end(s, start, stop), 0)),
+                Filter::RunLength => {
+                    (self.run_length.end(s, start)).map_or(End::Walk, |end| End::Filter(end, 0))
+                }
+                Filter::Dct => (self.eoi.from(start, |at| find(s, at, b"\xff\xd9")))
+                    .map_or(End::Scan, |eoi| End::Filter(eoi + 2, 0)),
+                Filter::Flate | Filter::Lzw => self.decoded_end(bi, start, filter, &dict)?,
+                Filter::CcittFax => End::Scan,
+                Filter::Other => End::Walk,
+            },
         };
-        let (data, end) = match end {
-            End::Counted(end) if end <= s.len() => {
-                (start..end, self.ei_from(end).ok_or(unterminated)?.end)
+        let (data, end, found) = match end {
+            End::Size(end) if end <= s.len() => {
+                let ei = self.ei_from(end).ok_or(unterminated)?;
+                (start..end, ei.end, Found::Counted)
             }
-            End::Counted(_) => return Err(unterminated),
+            End::Size(_) => return Err(unterminated),
+            End::Filter(end, decoded) => match self.walks.ei_from(s, end, self.lim.depth) {
+                Ok(ei) => (start..end, ei.end, Found::Filter),
+                // No `EI` after the filter's end: PDFium keeps no stream
+                // of the data, and reads on from its start. What was read
+                // in vain, past the end and decoded before it, is spent,
+                // once the image is found to end.
+                Err(passed) => {
+                    let (data, end) = self.walk(start).ok_or(unterminated)?;
+                    self.spend(bi, passed.saturating_add(decoded))?;
+                    (data, end, Found::Walk)
+                }
+            },
+            End::Refused(decoded) => {
+                let (data, end) = self.walk(start).ok_or(unterminated)?;
+                self.spend(bi, decoded)?;
+                (data, end, Found::Walk)
+            }
             End::Scan => {
                 let ei = ei_scan(s, start).ok_or(unterminated)?;
-                (start..(ei - 1).max(start), ei + 2)
+                (start..(ei - 1).max(start), ei + 2, Found::Filter)
+            }
+            End::Empty => {
+                let (data, end) = self.walk(start).ok_or(unterminated)?;
+                (data, end, Found::Empty)
             }
             End::Walk => {
-                let ei = self.ei_from(start).ok_or(unterminated)?;
-                // Its data to its `EI`, the white-space byte before it, by
-                // PDFium's rules, left out.
-                let before = ei.start > start && is_space(s[ei.start - 1]);
-                (start..ei.start - usize::from(before), ei.end)
+                let (data, end) = self.walk(start).ok_or(unterminated)?;
+                (data, end, Found::Walk)
             }
         };
         if data.len() > self.lim.inline_image {
@@ -502,7 +533,9 @@ impl<'a, 'r> Images<'a, 'r> {
             b"ASCII85Decode" => Filter::A85,
             b"RunLengthDecode" => Filter::RunLength,
             b"DCTDecode" => Filter::Dct,
-            b"FlateDecode" | b"LZWDecode" | b"CCITTFaxDecode" => Filter::Decoded,
+            b"FlateDecode" => Filter::Flate,
+            b"LZWDecode" => Filter::Lzw,
+            b"CCITTFaxDecode" => Filter::CcittFax,
             _ => Filter::Other,
         })
     }
@@ -565,15 +598,325 @@ impl<'a, 'r> Images<'a, 'r> {
         Some(family.map_or(3, |family| family_components(&family).into()))
     }
 
-    /// The next `EI` operator from `at`, its tokens read as PDFium reads
-    /// them, a string or an array one token: where it is.
-    fn ei_from(&self, mut at: usize) -> Option<Range<usize>> {
-        loop {
-            let (r, kind) = next_raw(self.s, at, self.lim.depth)?.ok()?;
-            if matches!(kind, Raw::Op) && &self.s[r.clone()] == b"EI" {
-                return Some(r);
+    /// Where an image's Flate or LZW data from `start` ends, as PDFium's
+    /// `DecodeInlineStream` finds it: where its decoder stops reading it
+    /// ([`End::Filter`]), its parameters read as PDFium reads them
+    /// ([`Images::params`]), the data decoded by pdf-filters, Flate's on
+    /// zlib-rs, whose count of what it read is zlib's, and so PDFium's
+    /// ([`Prefix::read`]). None ([`End::Walk`]) where PDFium refuses the
+    /// parameters, and none, what was read in vain said
+    /// ([`End::Refused`]), where it refuses what decoding gives: an LZW
+    /// code that isn't in the table, LZW data that decodes to nothing, a
+    /// predictor whose rows would be no bytes, a PNG predictor on nothing
+    /// decoded, or an end past 2^31 − 1 bytes. (Of an LZW code that isn't
+    /// in the table, PDFium refuses one that's the first since a clear
+    /// code or the data's start, and reads on past a later one as if it
+    /// were the table's next entry, which isn't followed here.) What
+    /// decoding gives is spent: past the budget, an error at `bi`.
+    fn decoded_end(
+        &mut self,
+        bi: usize,
+        start: usize,
+        filter: Filter,
+        dict: &ImageDict,
+    ) -> Result<End, Error> {
+        let Some(params) = self.params(dict) else {
+            return Ok(End::Walk);
+        };
+        let data = &self.s[start..];
+        let lzw = matches!(filter, Filter::Lzw);
+        // The decoder alone: a predictor changes no end, but by refusing.
+        let (prefix, decoded) = match lzw {
+            true => {
+                let early_change = params.early_change;
+                let predictor = Predictor::None;
+                let lzw = pdf_filters::Filter::Lzw {
+                    early_change,
+                    predictor,
+                };
+                decode_prefix_into(data, lzw, self.budget, Backend::ZlibRs, &mut self.decoded)
             }
-            at = r.end;
+            false => flate(data, self.budget, FLATE_WINDOW, &mut self.decoded),
+        };
+        let made = self.decoded.len();
+        self.decoded.clear();
+        let faults = decoded.err().map_or_else(Vec::new, |Faults(faults)| faults);
+        let faulted = |is: fn(&pdf_filters::Fault) -> bool| faults.iter().any(|(_, f)| is(f));
+        if faulted(|f| matches!(f, pdf_filters::Fault::Limit)) {
+            return Err(Error {
+                at: bi,
+                kind: ErrorKind::ImageEnds,
+            });
+        }
+        self.spend(bi, made)?;
+        let refused = (lzw
+            && (made == 0 || faulted(|f| matches!(f, pdf_filters::Fault::Code { .. }))))
+            || params.refuses(made)
+            || i32::try_from(prefix.read).is_err();
+        if refused {
+            return Ok(End::Refused(prefix.read));
+        }
+        Ok(End::Filter(start + prefix.read, prefix.read))
+    }
+
+    /// What an image's `/DecodeParms` say to PDFium's Flate and LZW
+    /// decoders, as PDFium reads them (`GetAndCheckDecodeParams`): its
+    /// value where that's a dictionary, or, where the filter is an array,
+    /// the first object of its array, where that's one; each key decoded,
+    /// as PDFium decodes a name in a dictionary ([`name`]), the last of
+    /// one written twice, `/BPC` read as `/BitsPerComponent`, as PDFium
+    /// reads an image's abbreviated keys, its value too, and each value as
+    /// PDFium reads an integer from it ([`integer`]): `/Predictor` 0,
+    /// `/EarlyChange` 1, `/Colors` 1, `/BitsPerComponent` 8 and `/Columns`
+    /// 1 where they're not written, or there's no dictionary. None where
+    /// PDFium refuses them: `/Colors`, `/BitsPerComponent` or `/Columns`
+    /// negative, or `/Columns` times `/Colors` times `/BitsPerComponent`,
+    /// multiplied in that order in 32 bits, signed, overflowing, or past
+    /// 2^31 − 8.
+    fn params(&self, dict: &ImageDict) -> Option<Params> {
+        let s = self.s;
+        let value = |key| dict.get(s, key).map(|r| &s[r]);
+        let dp = match (value(F), value(DP)) {
+            (Some([b'[', ..]), Some(dp @ [b'[', ..])) => elements(dp)
+                .into_iter()
+                .find(|&(_, object)| object)
+                .map(|(first, _)| first),
+            (Some([b'[', ..]), _) => None,
+            (_, dp) => dp,
+        };
+        let Some(dp) = dp.filter(|dp| dp.starts_with(b"<<")) else {
+            return Some(Params::DEFAULT);
+        };
+        let mut entries = Entries::default();
+        // It was read under a cap on depth, so nothing in it is deeper.
+        walk(dp, 0, TOP, UNCAPPED, true, &mut entries);
+        let get =
+            |key: &[u8]| (entries.read.iter().rev()).find_map(|(k, v)| (**k == *key).then_some(*v));
+        let int = |key: &[u8], default| get(key).map_or(default, integer);
+        let bits_per_component = match (get(b"BitsPerComponent"), get(b"BPC")) {
+            (Some(full), Some(_)) if abbreviated(full) => Some(full),
+            (full, short) => short.or(full),
+        };
+        let params = Params {
+            predictor: int(b"Predictor", 0),
+            early_change: int(b"EarlyChange", 1) != 0,
+            colors: int(b"Colors", 1),
+            bits_per_component: bits_per_component.map_or(8, integer),
+            columns: int(b"Columns", 1),
+        };
+        let Params {
+            colors,
+            bits_per_component: bpc,
+            columns,
+            ..
+        } = params;
+        if colors < 0 || bpc < 0 || columns < 0 {
+            return None;
+        }
+        let bits = columns.checked_mul(colors)?.checked_mul(bpc)?;
+        (bits <= i32::MAX - 7).then_some(params)
+    }
+
+    /// `n` bytes more of what finding images' ends may cost in the
+    /// reading spent, for the image whose `BI` is at `bi`: past the
+    /// budget, an error there.
+    fn spend(&mut self, bi: usize, n: usize) -> Result<(), Error> {
+        self.budget = self.budget.checked_sub(n).ok_or(Error {
+            at: bi,
+            kind: ErrorKind::ImageEnds,
+        })?;
+        Ok(())
+    }
+
+    /// An image's data from `start` to the next `EI` operator, the
+    /// white-space byte before it, by PDFium's rules, left out, and where
+    /// that `EI` ends; None where none comes.
+    fn walk(&self, start: usize) -> Option<(Range<usize>, usize)> {
+        let ei = self.ei_from(start)?;
+        let before = ei.start > start && is_space(self.s[ei.start - 1]);
+        Some((start..ei.start - usize::from(before), ei.end))
+    }
+
+    /// The next `EI` operator from `at` ([`ei_from`]).
+    fn ei_from(&self, at: usize) -> Option<Range<usize>> {
+        ei_from(self.s, at, self.lim.depth)
+    }
+}
+
+/// The next `EI` operator from `at` in `s`, its tokens read as PDFium
+/// reads them under `depth`, a string or an array one token: where it is.
+pub(crate) fn ei_from(s: &[u8], mut at: usize, depth: usize) -> Option<Range<usize>> {
+    loop {
+        let (r, kind) = next_raw(s, at, depth)?.ok()?;
+        if matches!(kind, Raw::Op) && &s[r.clone()] == b"EI" {
+            return Some(r);
+        }
+        at = r.end;
+    }
+}
+
+/// The walks to the next `EI` operator from where inline images' data
+/// ends, in one content stream, where PDFium walks from a decoder's end
+/// (its `ReadInlineStream`): each place one that found none began at, or
+/// passed as a token's start, remembered, as a walk from it finds none
+/// either. So content of many images whose data ends where no `EI` comes
+/// after reads what's after it once, not once for each image.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Walks {
+    /// The places a walk finds no `EI` from.
+    endless: Places,
+}
+
+impl Walks {
+    /// The next `EI` operator from `at` in `s`, the content stream it's
+    /// always given, read as [`ei_from`] reads it under `depth`: where it
+    /// is; or, where the walk meets the end, an error, or a place a walk
+    /// that found none began at or passed as a token's start, how many
+    /// bytes it passed.
+    pub(crate) fn ei_from(
+        &mut self,
+        s: &[u8],
+        at: usize,
+        depth: usize,
+    ) -> Result<Range<usize>, usize> {
+        let mut place = at;
+        let stopped = loop {
+            if self.endless.has(place) {
+                break place;
+            }
+            let Some(Ok((r, kind))) = next_raw(s, place, depth) else {
+                break s.len();
+            };
+            if self.endless.has(r.start) {
+                break r.start;
+            }
+            if matches!(kind, Raw::Op) && &s[r.clone()] == b"EI" {
+                return Ok(r);
+            }
+            place = r.end;
+        };
+        // None from `at`: it, and each token's start passed, remembered,
+        // on a second walk, as only one that finds none remembers.
+        self.endless.set(s, at);
+        let mut place = at;
+        while let Some(Ok((r, _))) = next_raw(s, place, depth) {
+            if r.start >= stopped {
+                break;
+            }
+            self.endless.set(s, r.start);
+            place = r.end;
+        }
+        Err(stopped - at)
+    }
+}
+
+/// How much of what's left of the content an image's Flate data is first
+/// decoded from ([`flate`]), in bytes.
+const FLATE_WINDOW: usize = 4096;
+
+/// `data`, an inline image's Flate data and the content after it, decoded
+/// as [`decode_prefix_into`] decodes it on zlib-rs, under `limit`, into
+/// `out`: given its first `first` bytes, then twice as many, and so on,
+/// until the decoder ends its data within what it's given, or stops short
+/// of its last byte, or it's given all of it. That gives what all of it
+/// at once does, as what the decoder does with a byte doesn't depend on
+/// those after it; but a decode first makes room for as much output as
+/// it's given input, so given the rest of a long content, each of many
+/// small images would cost the rest's length.
+pub(crate) fn flate(
+    data: &[u8],
+    limit: usize,
+    first: usize,
+    out: &mut Vec<u8>,
+) -> (Prefix, Result<(), Faults>) {
+    let filter = pdf_filters::Filter::Flate {
+        predictor: Predictor::None,
+    };
+    let start = out.len();
+    let mut window = first.max(1);
+    loop {
+        let given = &data[..window.min(data.len())];
+        let (prefix, decoded) = decode_prefix_into(given, filter, limit, Backend::ZlibRs, out);
+        if prefix.ended || prefix.read < given.len() || given.len() == data.len() {
+            return (prefix, decoded);
+        }
+        out.truncate(start);
+        window = window.saturating_mul(2);
+    }
+}
+
+/// What an image's `/DecodeParms` say to PDFium's Flate and LZW decoders,
+/// as PDFium reads them ([`Images::params`]).
+#[derive(Debug, Clone, Copy)]
+struct Params {
+    predictor: i32,
+    early_change: bool,
+    colors: i32,
+    bits_per_component: i32,
+    columns: i32,
+}
+
+impl Params {
+    /// What's read where there are none.
+    const DEFAULT: Params = Params {
+        predictor: 0,
+        early_change: true,
+        colors: 1,
+        bits_per_component: 8,
+        columns: 1,
+    };
+
+    /// Whether PDFium's predictor refuses what its decoder gave, `made`
+    /// bytes (`ApplyPredictor`): PNG's (a `/Predictor` of 10 or more) where
+    /// a row would be no bytes, or on nothing; TIFF's (2) where a row would
+    /// be no bytes. Any other predicts nothing.
+    fn refuses(&self, made: usize) -> bool {
+        let row =
+            i64::from(self.columns) * i64::from(self.colors) * i64::from(self.bits_per_component);
+        match self.predictor {
+            10.. => row == 0 || made == 0,
+            2 => row == 0,
+            _ => false,
+        }
+    }
+}
+
+/// A dictionary's entries, as a [`walk`] of it tells them: each key, decoded
+/// as PDFium decodes a name ([`name`]), and its value's first token as
+/// written, a `[` or a `<<` for an array or a dictionary, in the order
+/// written.
+#[derive(Default)]
+struct Entries<'a> {
+    /// How many arrays and dictionaries are open.
+    depth: usize,
+    /// The key read last, whose value is next.
+    key: Option<Cow<'a, [u8]>>,
+    read: Vec<(Cow<'a, [u8]>, &'a [u8])>,
+}
+
+impl<'a> Entries<'a> {
+    /// `value`'s first token read where a value is: the dictionary's, its
+    /// key's.
+    fn value(&mut self, value: &'a [u8]) {
+        if self.depth == 1 {
+            if let Some(key) = self.key.take() {
+                self.read.push((key, value));
+            }
+        }
+    }
+}
+
+impl<'a> Visit<'a> for Entries<'a> {
+    fn visit(&mut self, event: Event<'a>) {
+        match event {
+            Event::Leaf(token) => self.value(token.bytes),
+            Event::Open(token) => {
+                self.value(token.bytes);
+                self.depth += 1;
+            }
+            Event::Key(token) if self.depth == 1 => self.key = name(token.bytes),
+            Event::Close(_) => self.depth = self.depth.saturating_sub(1),
+            _ => {}
         }
     }
 }
@@ -598,6 +941,7 @@ const KEYS: [(&str, &str, bool); 10] = [
 /// The keys among [`KEYS`] whose values find an image's data's end.
 const BPC: usize = 0;
 const CS: usize = 1;
+const DP: usize = 3;
 const F: usize = 4;
 const H: usize = 5;
 const L: usize = 8;
@@ -906,21 +1250,36 @@ fn int(number: &[u8]) -> Option<u64> {
 }
 
 /// An inline image's first filter, by what finds its data's end.
+#[derive(Clone, Copy)]
 enum Filter {
     Hex,
     A85,
     RunLength,
     Dct,
-    /// Flate, LZW or CCITTFax: what PDFium finds the end of by decoding.
-    Decoded,
+    /// Flate and LZW, which PDFium decodes to find their end, as here.
+    Flate,
+    Lzw,
+    /// CCITTFax, which PDFium decodes to find its end, which here is found
+    /// otherwise ([`End::Scan`]).
+    CcittFax,
     /// One PDFium has no decoder for.
     Other,
 }
 
 /// How an inline image's data ends.
 enum End {
-    /// Where it's counted to, by its size or its filter.
-    Counted(usize),
+    /// An unfiltered image's, where its size counts it to.
+    Size(usize),
+    /// An unfiltered image's whose size counts to 0: at the next `EI`
+    /// operator, PDFium keeping a stream of none.
+    Empty,
+    /// Where its filter's data ends, as PDFium's decoder finds it, and how
+    /// many bytes of it were decoded to find it, which are read in vain if
+    /// no `EI` comes after.
+    Filter(usize, usize),
+    /// At the next `EI` operator, as [`End::Walk`], its decoder having
+    /// refused the data, read in vain: how many bytes it read.
+    Refused(usize),
     /// At the first `EI` with white-space before it and white-space, a
     /// delimiter or the end after it.
     Scan,

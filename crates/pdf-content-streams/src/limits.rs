@@ -30,6 +30,24 @@ pub struct Limits {
     pub values: usize,
     /// An inline image's data, in bytes: 64 MiB by default.
     pub inline_image: usize,
+    /// What finding inline images' data's ends may cost in one reading of
+    /// content ([`tokens`](crate::tokens)), in bytes, in all: 256 MiB by
+    /// default. Where PDFium decodes an image's data to find where it ends
+    /// (Flate and LZW), what decoding gives counts. And where that end
+    /// comes to nothing, the decoder refusing the data or no `EI` coming
+    /// after it, PDFium makes no stream of the data and reads on from its
+    /// start, so the data, read on as content, may hold further images,
+    /// each decoded again from inside it: the bytes such a decode read
+    /// count too, and, for any filter, those read past an end in vain,
+    /// looking for an `EI` (a place from which none was found is
+    /// remembered, and not read from again). So no content can make
+    /// finding its images' ends cost more than this past its own length,
+    /// whether by a deflate bomb or by many images read again; content
+    /// whose images' ends each have an `EI` after them spends only what
+    /// decoding gives. Past it, reading stops with an error at the image's
+    /// `BI` ([`ErrorKind::ImageEnds`](crate::ErrorKind::ImageEnds)), where
+    /// PDFium, which has no such cap, reads on.
+    pub image_ends: usize,
     /// A page's streams joined ([`Join`](crate::Join)), in bytes, the
     /// space between each among them: 256 MiB by default. A place in them
     /// is counted in 32 bits ([`Pos`](crate::Pos)), so `Join` refuses past
@@ -44,6 +62,7 @@ impl Limits {
         depth: 512,
         values: 1 << 25,
         inline_image: 64 << 20,
+        image_ends: 256 << 20,
         content: 256 << 20,
     };
 }

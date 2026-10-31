@@ -52,6 +52,12 @@ pub enum ErrorKind {
     /// [`Limits::inline_image`](crate::Limits::inline_image).
     #[error("an inline image too large")]
     InlineImageSize,
+    /// Finding inline images' data's ends past what
+    /// [`Limits::image_ends`](crate::Limits::image_ends) lets it cost in
+    /// one reading: decoding an image's data, or reading in vain past its
+    /// end, or both.
+    #[error("too much read to find inline images' ends")]
+    ImageEnds,
     /// Marked content, `BMC` or `BDC`, that no `EMC` ends.
     #[error("marked content that doesn't end")]
     Marked,

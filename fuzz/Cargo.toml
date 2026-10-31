@@ -36,12 +36,14 @@
 # `content` calls `pdf_content_streams::fuzz::content`, a page's content
 # read whole and as two streams, its tokens tiling it, each operand read,
 # its number as PDFium reads it and as an object, and its operations its
-# tokens grouped, and again under small caps, its faults the same through
+# tokens grouped, and again under small caps, what finding inline images'
+# ends may cost among them, its faults the same through
 # any sink, where an object ends an inline image's dictionary and each
 # lone `BI` told, each operation typed and stepped through the states, its
 # balance, marked content and names its steppers', and its searches for an
-# inline image's end, remembered or not, and its skims of arrays and
-# dictionaries the same as plain ones', which two stable unit tests
+# inline image's end and its walks past one to `EI`, remembered or not,
+# its Flate data decoded a window at a time as whole, and its skims of
+# arrays and dictionaries the same as plain ones', which two stable unit tests
 # (`mutated_seeds_keep_every_promise`, `random_fragments_keep_every_promise`)
 # run on mutated seeds and random content;
 # `check` calls

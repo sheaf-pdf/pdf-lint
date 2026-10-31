@@ -11,9 +11,12 @@
 //!   `Handle_BeginImage` structures it, a `BI` with a keyword where a key
 //!   should be no image but an operator of its own; and its data is found
 //!   by PDFium's `ReadInlineStream` rules, from the components of the
-//!   color spaces the caller gives ([`ResCx`]), but where PDFium decodes
-//!   it to find its end ([`tokens`] says where). What an operator does is
-//!   no part of it, so one nobody knows is a token like any other.
+//!   color spaces the caller gives ([`ResCx`]): Flate and LZW data decoded
+//!   to where the decoder stops reading it, as PDFium decodes it, by
+//!   [pdf-filters](https://crates.io/crates/pdf-filters), Flate on
+//!   zlib-rs; CCITTFax and DCT data, which PDFium decodes too, by a
+//!   stand-in ([`tokens`] says where). What an operator does is no part
+//!   of it, so one nobody knows is a token like any other.
 //! - **Operations** ([`operations`]): each operator, or inline image
 //!   ([`InlineImage`]), with the operands before it ([`Operation`]), their
 //!   ranges held in the item, so an operation of sixteen operands or fewer
@@ -48,9 +51,11 @@
 //!   pass can find several.
 //! - **Caps** ([`Limits`]) **and errors that say where** ([`Error`]): a
 //!   string, array, dictionary or inline image that doesn't end, one past
-//!   a cap, or arrays and dictionaries nested deeper than PDFium reads. It
-//!   never panics, whatever the bytes, and every token moves it on; what's
-//!   open is kept on the heap, however deep.
+//!   a cap, among them what finding inline images' ends may cost in a
+//!   reading, decoding a deflate bomb or reading many images again, or
+//!   arrays and dictionaries nested deeper than PDFium reads. It never
+//!   panics, whatever the bytes, and every token moves it on; what's open
+//!   is kept on the heap, however deep.
 //! - **Where ISO 32000-2 reads it otherwise** ([`fault`]): each place its
 //!   rules would read the bytes another way than PDFium's, told with where
 //!   it is to a sink the caller gives ([`Tokens::with_sink`],

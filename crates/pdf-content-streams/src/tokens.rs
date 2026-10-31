@@ -66,6 +66,20 @@ pub enum Tok<'a> {
 ///   digits or the white-space it passes over (its `~`, and a `>` after
 ///   it), and `/RL` to its end-of-data byte, as PDFium's decoders end
 ///   them.
+/// - `/Fl` and `/LZW` decoded, as PDFium decodes them to find their end,
+///   to where the decoder stops reading: Flate's to what zlib counts it
+///   read (on zlib-rs), its checksum among it; LZW's to its code of 257
+///   or the last whole code before the data's end. The first of an array
+///   of filters, with the first object of an array of `/DecodeParms`, or
+///   its one with its dictionary, each parameter as PDFium reads an
+///   integer from it (`/BPC` read as `/BitsPerComponent`). Where PDFium
+///   refuses the parameters (`/Colors`, `/BitsPerComponent` or `/Columns`
+///   negative, or multiplied past 2^31 − 8) or what decoding gives (an
+///   LZW code that isn't in the table yet, LZW data that decodes to
+///   nothing, a predictor whose rows would be no bytes, a PNG predictor
+///   on nothing): none. (Past an LZW code that isn't in its table, but
+///   for the first since a clear code, PDFium's decoder reads on as if it
+///   were the next entry, which isn't followed.)
 /// - a filter PDFium has no decoder for, one of those that finds no end,
 ///   or an unfiltered image no size counts: none, its tokens read on to
 ///   the next `EI`. And so for any image, filtered or not, whose size
@@ -73,13 +87,19 @@ pub enum Tok<'a> {
 ///   PDFium reads no data of.
 ///
 /// Past the data so found, the image ends at the next `EI` operator, its
-/// tokens read as PDFium reads them, a string one token. Its `/L` or
-/// `/Length` isn't read, as PDFium reads neither. PDFium decodes `/Fl`,
-/// `/LZW`, `/CCF` and `/DCT` data to find its end; here a JPEG's ends at
-/// its end of image, and the rest, or a JPEG with none, at the first `EI`
-/// with white-space before it and white-space, a delimiter or the end
-/// after, which agree but where the encoded bytes hold such an `EI`, or a
-/// JPEG's end of image comes before its last.
+/// tokens read as PDFium reads them, a string one token. Where no `EI`
+/// comes after a filter's end, PDFium keeps no stream of the data
+/// ([`ImageStream::Missing`](crate::ImageStream::Missing)), and reads on
+/// from its start to the next `EI`; but an unfiltered image's counted
+/// data with no `EI` after it doesn't end. Its `/L` or `/Length` isn't
+/// read, as PDFium reads neither. PDFium decodes `/CCF` and `/DCT` data
+/// to find its end too; here a JPEG's ends at its end of image, and fax
+/// data, or a JPEG with none, at the first `EI` with white-space before
+/// it and white-space, a delimiter or the end after, which agree but
+/// where the encoded bytes hold such an `EI`, or a JPEG's end of image
+/// comes before its last. What finding the ends costs, decoding and
+/// reading in vain past an end, is capped for the reading
+/// ([`Limits::image_ends`]).
 ///
 /// The dictionary is read as PDFium's `Handle_BeginImage` reads it: a
 /// name, its value, and so on, to `ID`, each value, or an object written

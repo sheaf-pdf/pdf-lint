@@ -12,9 +12,8 @@ use pdf_tokenizer::{is_delimiter, is_white_space};
 /// once for each image.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RunLength {
-    /// A bit for each place in the content, set where a walk from it
-    /// finds no end; none until one doesn't.
-    endless: Vec<u64>,
+    /// The places a walk finds no end from.
+    endless: Places,
 }
 
 impl RunLength {
@@ -27,27 +26,40 @@ impl RunLength {
             if n == 128 {
                 return Some(to + 1);
             }
-            if self.is_endless(to) {
+            if self.endless.has(to) {
                 break;
             }
             to += run(n);
         }
         // No end from `at`, nor from any place the walk passed.
-        if self.endless.is_empty() {
-            self.endless = vec![0; s.len().div_ceil(64)];
-        }
         let mut at = at;
         while at < to.min(s.len()) {
-            self.endless[at / 64] |= 1 << (at % 64);
+            self.endless.set(s, at);
             at += run(s[at]);
         }
         None
     }
+}
 
-    fn is_endless(&self, at: usize) -> bool {
-        self.endless
-            .get(at / 64)
-            .is_some_and(|w| w >> (at % 64) & 1 != 0)
+/// Places in one content stream, its end among them, remembered a bit for
+/// each, none until one is: those a walk finds nothing from, so that a
+/// walk that reaches one stops there.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Places(Vec<u64>);
+
+impl Places {
+    /// `at`, a place in `s`, the content stream it's always given, or its
+    /// end, remembered.
+    pub(crate) fn set(&mut self, s: &[u8], at: usize) {
+        if self.0.is_empty() {
+            self.0 = vec![0; s.len() / 64 + 1];
+        }
+        self.0[at / 64] |= 1 << (at % 64);
+    }
+
+    /// Whether `at` is remembered.
+    pub(crate) fn has(&self, at: usize) -> bool {
+        self.0.get(at / 64).is_some_and(|w| w >> (at % 64) & 1 != 0)
     }
 }
 

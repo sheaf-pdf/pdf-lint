@@ -400,5 +400,264 @@ for name, a in [("plain", b"[2 3]"), ("--5", b"[--5 3]"), ("1.2.3", b"[1.2.3 4]"
     case("dash-" + name, a + b" 0 d" + L)
 
 
+# Flate's and LZW's ends, where PDFium decodes the data to find them: what
+# zlib counts it read, and what PDFium's LZW decoder does, then on to `EI`;
+# data a decoder or its predictor refuses, or whose parameters it refuses,
+# read on from its start, and so an end with no `EI` after it, for every
+# filter whose end PDFium's decoder finds. The deflate data is written
+# here, stored blocks and fixed-Huffman blocks bit by bit, and one stream of
+# dynamic blocks as its bytes; nothing is compressed by the zlib Python
+# links, whose output differs between builds.
+
+
+class Bits:
+    """Bits packed as deflate packs them, the least significant first."""
+
+    def __init__(self):
+        self.out = bytearray()
+        self.acc = 0
+        self.n = 0
+
+    def put(self, value, n):
+        for i in range(n):
+            self.acc |= ((value >> i) & 1) << self.n
+            self.n += 1
+            if self.n == 8:
+                self.out.append(self.acc)
+                self.acc, self.n = 0, 0
+
+    def code(self, code, n):
+        """A Huffman code, its most significant bit first."""
+        for i in reversed(range(n)):
+            self.put((code >> i) & 1, 1)
+
+    def bytes(self):
+        if self.n:
+            self.out.append(self.acc)
+            self.acc, self.n = 0, 0
+        return bytes(self.out)
+
+
+def symbol(b, sym):
+    """A literal or length symbol in deflate's fixed code."""
+    if sym < 144:
+        b.code(0x30 + sym, 8)
+    elif sym < 256:
+        b.code(0x190 + sym - 144, 9)
+    elif sym < 280:
+        b.code(sym - 256, 7)
+    else:
+        b.code(0xC0 + sym - 280, 8)
+
+
+def fixed(data, last=True, extra=()):
+    """A fixed-Huffman block: `data` as literals, then `extra`, each a
+    symbol or ("dist", a distance code), then its end."""
+    b = Bits()
+    b.put(1 if last else 0, 1)
+    b.put(1, 2)
+    for x in data:
+        symbol(b, x)
+    for e in extra:
+        if isinstance(e, tuple):
+            b.code(e[1], 5)
+        else:
+            symbol(b, e)
+    symbol(b, 256)
+    return b.bytes()
+
+
+def stored(data, last=True):
+    n = len(data)
+    return bytes([1 if last else 0]) + n.to_bytes(2, "little") + (n ^ 0xFFFF).to_bytes(2, "little") + data
+
+
+def zlib_data(blocks, data, header=b"\x78\x01", check=None):
+    """A zlib stream: a header (deflate, no preset dictionary), the blocks,
+    and the Adler-32 of `data`, or `check`."""
+    return header + blocks + (zlib.adler32(data) if check is None else check).to_bytes(4, "big")
+
+
+def lzw(codes, early=True):
+    """LZW codes, the most significant bit first, each as wide as the
+    decoder's table makes it then, one entry early with `early`."""
+    bits = []
+    width, entry, first = 9, 258, True
+    for c in codes:
+        assert c < 1 << width
+        bits += [(c >> i) & 1 for i in reversed(range(width))]
+        if c == 256:
+            width, entry, first = 9, 258, True
+        elif c == 257:
+            pass
+        elif first:
+            first = False
+        elif entry < 4096:
+            if entry + early in (511, 1023, 2047):
+                width += 1
+            entry += 1
+    bits += [0] * (-len(bits) % 8)
+    return bytes(int("".join(map(str, bits[i:i + 8])), 2) for i in range(0, len(bits), 8))
+
+
+FL = G + b" /F /Fl"
+LZ = G + b" /F /LZW"
+TEXT = b"hello, hello, hello, hello"
+LONG = bytes((i * 7 + 13) % 251 for i in range(3000))
+
+
+def image(name, d, data, tail=T):
+    case(name, b"BI " + d + b" ID " + data + tail)
+
+
+# Ended cleanly: its last byte at a byte's start, and in its middle; two
+# blocks; `EI` at once after its checksum.
+FIXED = zlib_data(fixed(TEXT), TEXT)
+image("fl-stored", FL, zlib_data(stored(TEXT), TEXT))
+image("fl-fixed", FL, FIXED)
+image("fl-fixed-long", FL, zlib_data(fixed(LONG), LONG))
+image("fl-two-blocks", FL, zlib_data(stored(b"abc", last=False) + fixed(b"def"), b"abcdef"))
+image("fl-end-then-EI", FL, FIXED, T[1:])
+# Its checksum missing, or cut short, and so read from what follows; one
+# that doesn't match.
+image("fl-no-checksum", FL, FIXED[:-4])
+image("fl-short-checksum", FL, FIXED[:-2])
+image("fl-bad-checksum", FL, zlib_data(fixed(TEXT), TEXT, check=0x01020304))
+# Headers zlib refuses: a check that fails, a method not deflate, a window
+# too large, a preset dictionary (`(4` names one, and reads as a string).
+image("fl-header-check", FL, b"\x78\x02" + FIXED[2:])
+image("fl-header-method", FL, b"\x79\x9d" + FIXED[2:])
+image("fl-header-window", FL, b"\x88\x98" + FIXED[2:])
+image("fl-header-dict", FL, b"\x78\x20abcd" + FIXED[2:])
+image("fl-header-dict-paren", FL, b"(4abcdEI 0 0 m 9 9 l S EI" + P, b"")
+# Corrupt: a block of type 3, a stored block's length and its complement
+# that don't agree, a length symbol 286, a distance code 30, a distance
+# past the start; and cut short, so read on into what follows.
+image("fl-type-3", FL, b"\x78\x01\x07" + b"\x00" * 6)
+image("fl-stored-nlen", FL, b"\x78\x01\x01\x05\x00\x00\x00abcde" + b"\x00" * 4)
+image("fl-code-286", FL, zlib_data(fixed(TEXT, extra=[286]), TEXT))
+image("fl-code-286-long", FL, zlib_data(fixed(LONG, extra=[286]), LONG))
+image("fl-dist-30", FL, zlib_data(fixed(TEXT, extra=[257, ("dist", 30)]), TEXT))
+far = Bits()
+far.put(1, 1)
+far.put(1, 2)
+symbol(far, 257)
+far.code(5, 5)
+far.put(0, 1)
+symbol(far, 256)
+image("fl-too-far", FL, zlib_data(far.bytes(), b""))
+image("fl-cut", FL, FIXED[:10])
+image("fl-cut-header", FL, FIXED[:2])
+image("fl-cut-long", FL, zlib_data(fixed(LONG), LONG)[:1500])
+# Dynamic blocks: more length codes than there are; code lengths that make
+# no code, where decoders part (zlib reads on, miniz_oxide refuses at once);
+# and a stream of them, whole and with a byte flipped at places, each
+# showing a kind of end: corrupt early, the checksum alone, corrupt later,
+# and cut short by a length.
+hlit = Bits()
+for v, n in [(1, 1), (2, 2), (30, 5), (0, 5), (0, 4)]:
+    hlit.put(v, n)
+image("fl-dyn-hlit", FL, b"\x78\x01" + hlit.bytes() + b"\x00" * 8)
+lengths = Bits()
+for v, n in [(1, 1), (2, 2), (0, 5), (0, 5), (0, 4)] + [(0, 3)] * 4:
+    lengths.put(v, n)
+image("fl-dyn-lengths", FL, b"\x78\x01" + lengths.bytes() + b"\x00" * 8)
+DYN = bytes.fromhex(
+    "78daed90d915c3200c045ba184186cc095d17e66025d643f78123a56d2ac4f5957597759"
+    "2f4e2fab3e6535eccdbf139e641b61dc7b94352a3e11a21dfb5a4d7a28c3ffc17fed5650"
+    "5dfff80ff9490be5159589ff10aeb44c073984dc859db47725a869e42ffb504169523228"
+    "1fda76de8999b3a6ef0e3b555049c5eb4c7092139dec066ee2466e36f79eeefbdbfb3a77"
+    "f47d97f779a7f77a773f1ceaa6221d29b5cd4c76326c87a96cdf1f6892811ee8811ee881"
+    "1ee8811ee8811ee8811ee8811ee8811ee8811ee8811ee8ff02fd0b4e83ae69")
+image("fl-dyn", FL, DYN)
+for at, flip in [(3, 0x80), (40, 0x01), (100, 0x80), (204, 0xFF)]:
+    bad = bytearray(DYN)
+    bad[at] ^= flip
+    image("fl-dyn-%d-%02x" % (at, flip), FL, bytes(bad))
+
+# Predictors and parameters, on six bytes stored, or none: PDFium refuses
+# parameters negative or too large, a PNG predictor on rows of no bytes or
+# on nothing, TIFF's on rows of no bytes, each read as an integer, the
+# first of an array where the filter is one.
+SIX = zlib_data(stored(b"abcdef"), b"abcdef")
+NONE_DECODED = zlib_data(stored(b""), b"")
+for name, dp, data in [
+        ("fl-png", b"<< /Predictor 12 /Columns 1 >>", SIX),
+        ("fl-png-short-row", b"<< /Predictor 12 /Columns 4 >>", SIX),
+        ("fl-png-bad-tag", b"<< /Predictor 15 /Columns 1 >>", zlib_data(stored(b"\x07a\x07b"), b"\x07a\x07b")),
+        ("fl-png-nothing", b"<< /Predictor 12 >>", NONE_DECODED),
+        ("fl-tiff-nothing", b"<< /Predictor 2 >>", NONE_DECODED),
+        ("fl-png-columns-0", b"<< /Predictor 10 /Columns 0 >>", SIX),
+        ("fl-tiff", b"<< /Predictor 2 /Colors 3 /Columns 2 >>", SIX),
+        ("fl-tiff-columns-0", b"<< /Predictor 2 /Columns 0 >>", SIX),
+        ("fl-predictor-9-columns-0", b"<< /Predictor 9 /Columns 0 >>", SIX),
+        ("fl-colors--1", b"<< /Colors -1 >>", SIX),
+        ("fl-bpc--1", b"<< /BitsPerComponent -1 >>", SIX),
+        ("fl-columns--1", b"<< /Columns -1 >>", SIX),
+        ("fl-colors--1.5", b"<< /Colors -1.5 >>", SIX),
+        ("fl-colors-true", b"<< /Predictor 12 /Colors true /Columns 1 >>", SIX),
+        ("fl-colors-name", b"<< /Predictor 2 /Colors /G >>", SIX),
+        ("fl-params-at-edge", b"<< /Columns 2147483640 /BitsPerComponent 1 >>", SIX),
+        ("fl-params-past-edge", b"<< /Columns 2147483641 /BitsPerComponent 1 >>", SIX),
+        ("fl-params-overflow-first", b"<< /Columns 1073741824 /Colors 4 /BitsPerComponent 0 >>", SIX),
+        ("fl-bpc-abbr", b"<< /BPC -1 >>", SIX),
+        ("fl-bpc-abbr-wins", b"<< /BitsPerComponent 8 /BPC -1 >>", SIX),
+        ("fl-bpc-escaped", b"<< /B#50C -1 >>", SIX),
+        ("fl-bpc-full-abbr-name", b"<< /BitsPerComponent /G /BPC -1 >>", SIX),
+        ("fl-params-twice", b"<< /Colors -1 /Colors 1 >>", SIX),
+        ("fl-params-array", b"[<< /Colors -1 >>]", SIX)]:
+    image(name, FL + b" /DP " + dp, data)
+FA = G + b" /F [/Fl]"
+image("fl-array-params-array", FA + b" /DP [<< /Colors -1 >>]", SIX)
+image("fl-array-params-dict", FA + b" /DP << /Colors -1 >>", SIX)
+image("fl-array-params-null-first", FA + b" /DP [null << /Colors -1 >>]", SIX)
+image("fl-array-params-keyword-first", FA + b" /DP [foo << /Colors -1 >>]", SIX)
+image("fl-params-full-and-abbr", FL + b" /DecodeParms << /Colors -1 >> /DP << >>", SIX)
+
+# LZW: ended by 257 at each code width, either early change, read on past
+# a full table; codes PDFium's decoder refuses (one past the table first
+# after a clear code or at the start, nothing decoded) and one it reads on
+# past; no 257, and bytes that aren't codes; `/EarlyChange` as PDFium reads
+# an integer from it.
+A, B = 65, 66
+image("lzw-end", LZ, lzw([256, A, B, 258, 257]))
+image("lzw-end-0", LZ + b" /DP << /EarlyChange 0 >>", lzw([256, A, B, 258, 257], early=False))
+image("lzw-end-then-EI", LZ, lzw([256, A, B, 258, 257]), T[1:])
+for name, codes in [
+        ("lzw-no-clear", [A, B, 258, 257]),
+        ("lzw-kwkwk", [256, A, 258, 257]),
+        ("lzw-nothing", [256, 257]),
+        ("lzw-first-entry", [256, 300, A, 257]),
+        ("lzw-start-entry", [300, A, 257]),
+        ("lzw-cleared-entry", [256, A, B, 256, 300, A, 257]),
+        ("lzw-bad-code", [256, A, B, 300, 257]),
+        ("lzw-bad-code-then-entry", [256, A, B, 300, 258, A, 257]),
+        ("lzw-bad-code-then-bytes", [256, A, B, 300, A, B, 257]),
+        ("lzw-no-end", [256, A, B, 258])]:
+    image(name, LZ, lzw(codes))
+image("lzw-no-end-x", LZ, b"xy")
+WIDE = [256] + [(i * 37) % 251 + 1 for i in range(260)] + [257]
+image("lzw-wide", LZ, lzw(WIDE))
+image("lzw-wide-0", LZ + b" /DP << /EarlyChange 0 >>", lzw(WIDE, early=False))
+image("lzw-wide-early-2", LZ + b" /DP << /EarlyChange 2 >>", lzw(WIDE))
+image("lzw-wide-early-null", LZ + b" /DP << /EarlyChange null >>", lzw(WIDE, early=False))
+image("lzw-wide-0-read-early", LZ, lzw(WIDE, early=False))
+FILL = [256] + [1 + (k * 37 % 255) for k in range(3839)]
+image("lzw-full", LZ, lzw(FILL + [A, 300, 4095, 257]))
+image("lzw-full-0", LZ + b" /DP << /EarlyChange 0 >>", lzw(FILL + [A, 300, 4095, 257], early=False))
+image("lzw-png-columns-0", LZ + b" /DP << /Predictor 12 /Columns 0 >>", lzw([256, A, B, 258, 257]))
+
+# An end with no `EI` after it: no stream, read on from the data's start,
+# for each filter whose end a decoder finds (a JPEG's by its end of image
+# here, PDFium refusing this one).
+IN = b"a EI 0 0 m 9 9 l S b"
+image("ahx-end-no-EI", G + b" /F /AHx", b"41 EI 0 0 m 9 9 l S 42>", P)
+image("a85-end-no-EI", G + b" /F /A85", b"9jqo EI 0 0 m 9 9 l S ~>", P)
+image("rl-end-no-EI", G + b" /F /RL", b"\x04 EI 0\x80", P)
+image("dct-end-no-EI", G + b" /F /DCT", b"\xff\xd8 EI 0 0 m 9 9 l S \xff\xd9", P)
+image("fl-end-no-EI", FL, zlib_data(stored(IN), IN), P)
+image("lzw-end-no-EI", LZ, lzw([256, A, B, 257]), P)
+
+
 def cases():
     return CASES

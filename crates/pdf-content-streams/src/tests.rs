@@ -14,7 +14,7 @@ use std::ops::Range;
 use pdf_objects::{Form, Object, Str, Value, dict};
 
 use crate::fault::{Fault, Sink};
-use crate::fuzz::{Collected, Unwanted, blank, faulted, fixtures};
+use crate::fuzz::{Collected, FLATE_EI, LZW_EI, Unwanted, blank, faulted, fixtures, stored};
 use crate::*;
 
 /// Numbers below what each call is given, the same each run.
@@ -826,16 +826,19 @@ fn filtered_data_ends_at_its_marker() {
         b"\xff\xd8\xff\xe0 EI \x00\xff\xd9",
         &none,
     );
-    // Flate, LZW and CCITTFax data, which PDFium decodes to find its end,
-    // end at the first `EI` between white-space; PDF 2.0's length,
+    // Flate and LZW data, which PDFium decodes to find its end, end where
+    // its decoder stops reading, ` EI ` in Flate's stored block read past;
+    // CCITTFax's at the first `EI` between white-space. PDF 2.0's length,
     // abbreviated or not, PDFium doesn't read.
-    assert_image("/F /Fl /W 9 /H 9 /BPC 8 /CS /G /L 2", b"xEIy", &none);
-    assert_image("/F /LZW /Length 2 /W 9 /H 9", b"xEIy", &none);
+    assert_image("/F /Fl /W 9 /H 9 /BPC 8 /CS /G /L 2", FLATE_EI, &none);
+    assert_image("/F /LZW /Length 2 /W 9 /H 9", LZW_EI, &none);
     assert_image(
         "/F /CCF /DP <</K -1 /Columns 9>> /W 9 /H 9",
         b"xEI EIy",
         &none,
     );
+    // No Flate data: the decoder takes `\nE` for a zlib header, and
+    // refuses it, and no `EI` comes after, so it's read on from its start.
     assert_image("/F /Fl /W 9 /H 9 /BPC 8 /CS /G", b"", &none);
     // A filter PDFium can't decode: its tokens read to the next `EI`, a
     // string one token.
@@ -1885,26 +1888,48 @@ fn unended_images_dont_search_again() {
 /// The searches for where an inline image's data ends, remembered, find
 /// what plain ones find, from every offset, in order, in reverse and
 /// leaping about: RunLength's walk to its end-of-data byte, where ASCII85
-/// data stops, ASCIIHex's `>` and a JPEG's end of image.
+/// data stops, ASCIIHex's `>` and a JPEG's end of image; and the walks to
+/// the next `EI` operator, remembered where they find none, find it where
+/// plain ones do, or don't.
 #[test]
 fn remembered_searches_find_what_plain_ones_find() {
     use crate::data::{RunLength, Searched, a85_stop, find};
-    // Bytes a RunLength walk, and the other searches, part on.
+    use crate::inline::{Walks, ei_from};
+    // Bytes a RunLength walk, and the other searches, part on; and tokens
+    // a walk to `EI` reads.
     let mut random = Vec::new();
+    let mut tokens = Vec::new();
     let mut x = 0x2545_f491_u32;
     for _ in 0..600 {
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
         random.push(b"\x00\x01\x02\x05\x7f\x80\x81\xfe\xd9\xff>~9 z"[x as usize % 15]);
+        let token: &[u8] = [
+            &b" EI "[..],
+            b"(",
+            b")",
+            b"[",
+            b"]",
+            b"x",
+            b" ",
+            b"<",
+            b"%",
+            b"\n",
+        ][x as usize % 10];
+        tokens.extend_from_slice(token);
     }
-    let contents: [&[u8]; 6] = [
+    let contents: [&[u8]; 10] = [
         b"\x02\x80ab\x80\x01x\x80",
         b"\x00a\x81b\x05abcdef\x80\x00",
         b"\x01\x01\x01\x01\x01\x01\x01\x01\x80",
         b"9 EI ~> 9 x z EI 9",
         b"41 > 42> EI \xff\xff\xd9 \xd9",
+        b"1 EI 2 (x EI) 3 EI 4",
+        b"a EI b [c EI] d (",
+        b"x ((a) EI) y EI z (w EI",
         &random,
+        &tokens,
     ];
     for s in contents {
         let walk = |mut at: usize| {
@@ -1923,7 +1948,13 @@ fn remembered_searches_find_what_plain_ones_find() {
         for order in orders {
             let mut run_length = RunLength::default();
             let mut searched: [Searched; 3] = Default::default();
+            let mut walks = Walks::default();
             for at in order {
+                if at <= s.len() {
+                    let walked = walks.ei_from(s, at, Limits::DEFAULT.depth).ok();
+                    let plain = ei_from(s, at, Limits::DEFAULT.depth);
+                    assert_eq!(walked, plain, "{s:?}: EI from {at}");
+                }
                 assert_eq!(
                     run_length.end(s, at),
                     walk(at),
@@ -1963,6 +1994,302 @@ fn lone_bis_dont_read_again() {
         })
         .collect();
     assert_eq!(kept.0, lone);
+}
+
+/// LZW codes 9 bits wide, the most significant bit first, as a table of
+/// fewer than 253 entries keeps them.
+fn lzw9(codes: &[u16]) -> Vec<u8> {
+    let bits: Vec<bool> = (codes.iter())
+        .flat_map(|&c| (0..9).rev().map(move |i| c >> i & 1 == 1))
+        .collect();
+    bits.chunks(8)
+        .map(|byte| (0..8).fold(0, |b, i| b << 1 | u8::from(byte.get(i) == Some(&true))))
+        .collect()
+}
+
+/// `s`'s first inline image read under `lim`: its data, and what PDFium
+/// keeps of it.
+fn first_image<'a>(s: &'a [u8], lim: &Limits) -> (&'a [u8], ImageStream) {
+    let none = ResCx::none();
+    let image = (operations(s, &none, lim).map(Result::unwrap))
+        .find_map(|op| op.inline_image().map(|i| (i.data(), i.stream())))
+        .expect("an inline image");
+    (&s[image.0], image.1)
+}
+
+/// Flate and LZW data ends where PDFium's decoder stops reading it, its
+/// parameters read as PDFium reads them, and on to `EI`; where PDFium
+/// refuses the data or its parameters, it's read on from its start to
+/// `EI`, with no stream.
+#[test]
+fn flate_and_lzw_data_ends_where_their_decoders_stop() {
+    use ImageStream::{Data, Missing};
+    let lim = &Limits::DEFAULT;
+    let image = |dict: &str, data: &[u8], after: &str| {
+        [format!("BI {dict} ID ").as_bytes(), data, after.as_bytes()].concat()
+    };
+    // To its checksum, ` EI ` in its stored block read past; on over `1`
+    // to `EI`, which PDFium keeps.
+    let s = image("/F /Fl", FLATE_EI, " 1 EI 0 0 m");
+    let (data, stream) = first_image(&s, lim);
+    assert_eq!((data, stream), (FLATE_EI, Data(13..30)));
+    assert_eq!(&s[13..30], [FLATE_EI, b" 1"].concat());
+    // Two bytes zlib refuses as a header.
+    let s = image("/F /Fl", b"xy", " 1 EI");
+    assert_eq!(first_image(&s, lim), (&b"xy"[..], Data(13..17)));
+    // Its checksum read from what follows, and no `EI` after that: read
+    // on from its start, to the `EI` its stored block holds.
+    let cut = &FLATE_EI[..11];
+    let s = image("/F /Fl", cut, " EI 1 2 m");
+    assert_eq!(first_image(&s, lim), (&FLATE_EI[..7], Missing));
+    // Parameters PDFium refuses, or a predictor that refuses the data.
+    let none_decoded = stored(b"", true);
+    for (dict, data, read) in [
+        ("/F /Fl /DP <</Colors -1>>", FLATE_EI, false),
+        (
+            "/F /Fl /DP <</Columns 1073741824 /Colors 4 /BPC 0>>",
+            FLATE_EI,
+            false,
+        ),
+        (
+            "/F /Fl /DP <</Columns 2147483640 /BitsPerComponent 1>>",
+            FLATE_EI,
+            true,
+        ),
+        ("/F /Fl /DP <</B#50C -1>>", FLATE_EI, false),
+        ("/F /Fl /DP <</Predictor 12>>", &none_decoded, false),
+        ("/F /Fl /DP <</Predictor 2>>", &none_decoded, true),
+        ("/F /Fl /DP <</Predictor 2 /Columns 0>>", FLATE_EI, false),
+        ("/F [/Fl] /DP [<</Colors -1>>]", FLATE_EI, false),
+        ("/F [/Fl] /DP <</Colors -1>>", FLATE_EI, true),
+        ("/F /Fl /DP [<</Colors -1>>]", FLATE_EI, true),
+        ("/F [/Fl] /DP [null <</Colors -1>>]", FLATE_EI, true),
+    ] {
+        let s = image(dict, data, " EI");
+        let (found, stream) = first_image(&s, lim);
+        assert_eq!(matches!(stream, Data(_)), read, "{dict}");
+        if read {
+            assert_eq!(found, data, "{dict}");
+        }
+    }
+    // LZW to its code of 257; refused at a code past the table's next
+    // entry, or where nothing's decoded.
+    let s = image("/F /LZW", LZW_EI, " EI");
+    assert_eq!(first_image(&s, lim), (LZW_EI, Data(14..21)));
+    for codes in [&[256, 65, 300, 257][..], &[256, 257], &[300, 65, 257]] {
+        let data = lzw9(codes);
+        let s = image("/F /LZW", &data, " EI");
+        assert_eq!(first_image(&s, lim), (&data[..], Missing), "{codes:?}");
+    }
+}
+
+/// Where a filter's data ends with no `EI` after it, PDFium keeps no
+/// stream of it, and reads on from its start to `EI`: for every filter
+/// whose end its decoder finds (a JPEG's by its end of image here). Not
+/// for an unfiltered image, whose data PDFium takes as its size counts
+/// it, reading on to `EI` from there: here that doesn't end.
+#[test]
+fn an_end_with_no_ei_after_it_reads_on_from_the_data() {
+    let lim = &Limits::DEFAULT;
+    for (dict, data) in [
+        ("/F /AHx", &b"41 EI 1 2 m 3>4 5 l"[..]),
+        ("/F /A85", b"9jqo EI 1 2 m ~>4 5 l"),
+        ("/F /RL", b"\x04 EI 1\x80 4 5 l"),
+        ("/F /DCT", b"\xff\xd8 EI 1 2 m \xff\xd9 4 5 l"),
+        ("/F /Fl", &[FLATE_EI, b" 4 5 l"].concat()),
+    ] {
+        let s = [format!("BI {dict} ID ").as_bytes(), data].concat();
+        let ei = s.windows(4).position(|w| w == b" EI ").unwrap();
+        let start = 3 + dict.len() + 4;
+        assert_eq!(
+            first_image(&s, lim),
+            (&s[start..ei], ImageStream::Missing),
+            "{dict}"
+        );
+    }
+    // None at all: it doesn't end.
+    let s = [&b"BI /F /LZW ID "[..], LZW_EI, b" 4 5 l"].concat();
+    assert_eq!(error(&s, lim).kind, ErrorKind::InlineImage);
+    let s = b"BI /W 4 /H 1 /BPC 8 /CS /G ID a EI 1 2 m";
+    assert_eq!(error(s, lim).kind, ErrorKind::InlineImage);
+}
+
+/// Many inline images whose data shares one end, with no `EI` after it
+/// but a long tail: the tail is walked once, by the first, and each
+/// after stops where that walk began.
+#[test]
+fn images_sharing_an_end_with_no_ei_after_it_walk_once() {
+    let mut s = b"BI /F /AHx ID EI ".repeat(5_000);
+    s.push(b'>');
+    s.extend_from_slice(&b" 1 2 m".repeat(20_000));
+    let started = std::time::Instant::now();
+    let read: Vec<_> = tokens(&s, &ResCx::none(), &Limits::DEFAULT)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let took = started.elapsed();
+    let images = read
+        .iter()
+        .filter(|(_, t)| matches!(t, Tok::InlineImage(_)));
+    assert_eq!(images.count(), 5_000);
+    assert_eq!(read.len(), 5_000 + 1 + 60_000);
+    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+}
+
+/// Walks past images' ends that keep out of step, each from inside a long
+/// string a little further in, so that none reaches a place one before
+/// began at or passed, are each spent, and in all past the budget stop
+/// reading: images of Flate data, each a stored block whose end, past its
+/// checksum, is at a `(` of the string, one further than the last's.
+#[test]
+fn walks_out_of_step_stop_at_the_budget() {
+    const N: usize = 100;
+    const DEEP: usize = 50_000;
+    let head = b"BI /F /Fl ID ";
+    // Each image: its head, a zlib header and a stored block's header
+    // whose length is to be set, then ` EI `, which a walk from its
+    // data's start finds, and the next image.
+    let mut s = Vec::new();
+    let mut starts = Vec::new();
+    for _ in 0..N {
+        s.extend_from_slice(head);
+        starts.push(s.len());
+        s.extend_from_slice(b"x\x01\x01\0\0\0\0 EI ");
+    }
+    let string = s.len();
+    s.extend(std::iter::repeat_n(b'(', DEEP));
+    s.extend(std::iter::repeat_n(b')', DEEP));
+    s.extend_from_slice(b" 1 2 m");
+    // A length whose bytes, and its complement's, a walk passes as one
+    // word.
+    let plain = |n: u16| {
+        (n.to_le_bytes().into_iter().chain((!n).to_le_bytes())).all(|b| !b"()<>[]{}/%".contains(&b))
+    };
+    let mut at = string + 4;
+    for &start in &starts {
+        let n = loop {
+            at += 1;
+            let n = u16::try_from(at - start - 11).unwrap();
+            if plain(n) {
+                break n;
+            }
+        };
+        s[start + 3..start + 5].copy_from_slice(&n.to_le_bytes());
+        s[start + 5..start + 7].copy_from_slice(&(!n).to_le_bytes());
+    }
+    let none = ResCx::none();
+    let read: Vec<_> = (tokens(&s, &none, &Limits::DEFAULT).collect::<Result<_, _>>()).unwrap();
+    let images: Vec<_> = (read.iter())
+        .filter_map(|(r, t)| matches!(t, Tok::InlineImage(_)).then_some(r.start))
+        .collect();
+    assert_eq!(images.len(), N);
+    // Each walks the string from its `(`, about 100 KB, beyond what its
+    // data decodes to.
+    let budget = Limits {
+        image_ends: 2 << 20,
+        ..Limits::DEFAULT
+    };
+    let e = error(&s, &budget);
+    assert_eq!(e.kind, ErrorKind::ImageEnds);
+    let stopped = images.iter().position(|&bi| bi == e.at).unwrap();
+    assert!((10..30).contains(&stopped), "{stopped}");
+}
+
+/// What finding images' ends may cost in a reading holds at its edge, and
+/// is the reading's, not each image's: what decoding gives, what's
+/// walked in vain past an end with no `EI` after it, and the data decoded
+/// in vain to find that end.
+#[test]
+fn the_budget_holds_at_its_edge() {
+    let budget = |image_ends| Limits {
+        image_ends,
+        ..Limits::DEFAULT
+    };
+    let hundred = stored(&[7; 100], true);
+    let s = [&b"BI /F /Fl ID "[..], &hundred, b" EI"].concat();
+    assert_eq!(read(&s, &ResCx::none(), &budget(100)).len(), 1);
+    let e = error(&s, &budget(99));
+    assert_eq!((e.at, e.kind), (0, ErrorKind::ImageEnds));
+    // Two images of 60 bytes each: the second is past 100.
+    let sixty = stored(&[7; 60], true);
+    let one = [&b"BI /F /Fl ID "[..], &sixty, b" EI "].concat();
+    let s = one.repeat(2);
+    assert_eq!(read(&s, &ResCx::none(), &budget(120)).len(), 2);
+    let e = error(&s, &budget(100));
+    assert_eq!((e.at, e.kind), (one.len(), ErrorKind::ImageEnds));
+    // Walked in vain: what's after the `>`, to the end.
+    let s = b"BI /F /AHx ID 41 EI 0>1 2 3 4";
+    let after = s.len() - 22;
+    assert_eq!(read(s, &ResCx::none(), &budget(after)).len(), 7);
+    assert_eq!(error(s, &budget(after - 1)).kind, ErrorKind::ImageEnds);
+    // Decoded in vain: stored blocks of nothing, which give nothing, read
+    // to the end, after a block of ` EI `.
+    let mut data = stored(b" EI ", false);
+    for _ in 0..20_000 {
+        data.extend_from_slice(b"\0\0\0\xff\xff");
+    }
+    let s = [&b"BI /F /Fl ID "[..], &data].concat();
+    assert_eq!(first_image(&s, &Limits::DEFAULT).1, ImageStream::Missing);
+    let e = error(&s, &budget(64 << 10));
+    assert_eq!((e.at, e.kind), (0, ErrorKind::ImageEnds));
+}
+
+/// A deflate bomb, Flate data of 64 KB that decodes to 16 MiB, decodes
+/// under the default budget, and stops at a smaller one.
+#[test]
+fn a_deflate_bomb_stops_at_the_budget() {
+    // A fixed-Huffman block: a 0, then copies of 258 bytes from one back,
+    // each 13 bits, and its end; then its checksum.
+    let (mut out, mut acc, mut n) = (b"x\x01".to_vec(), 0u64, 0);
+    let mut put = |code: u64, bits: u32, reversed: bool| {
+        for i in 0..bits {
+            let bit = match reversed {
+                true => code >> (bits - 1 - i) & 1,
+                false => code >> i & 1,
+            };
+            acc |= bit << n;
+            n += 1;
+            if n == 8 {
+                out.push(acc as u8);
+                (acc, n) = (0, 0);
+            }
+        }
+    };
+    put(1, 1, false);
+    put(1, 2, false);
+    put(0x30, 8, true);
+    let copies = (16 << 20) / 258;
+    for _ in 0..copies {
+        put(0xC5, 8, true);
+        put(0, 5, true);
+    }
+    put(0, 7, true);
+    put(0, 7, false);
+    let made = 1 + 258 * copies;
+    out.extend_from_slice(&(((made % 65521) as u32) << 16 | 1).to_be_bytes());
+    let s = [&b"BI /F /Fl ID "[..], &out, b" EI"].concat();
+    let read = read(&s, &ResCx::none(), &Limits::DEFAULT);
+    assert_eq!(read[0].1, Tok::InlineImage(13..13 + out.len()));
+    let small = Limits {
+        image_ends: 1 << 20,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(error(&s, &small).kind, ErrorKind::ImageEnds);
+}
+
+/// Many small inline images of Flate data, before a long tail: each is
+/// decoded from what's left of the content a window at a time, not from
+/// all of it, which would cost the tail's length each time.
+#[test]
+fn many_flate_images_decode_in_one_pass() {
+    let mut s = [&b"BI /F /Fl ID "[..], FLATE_EI, b" EI "]
+        .concat()
+        .repeat(50_000);
+    s.extend_from_slice(&b"q Q ".repeat(1 << 20));
+    let started = std::time::Instant::now();
+    let read = tokens(&s, &ResCx::none(), &Limits::DEFAULT).count();
+    let took = started.elapsed();
+    assert_eq!(read, 50_000 + (2 << 20));
+    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
 }
 
 /// What content is made of, run together into tokens.
@@ -3341,16 +3668,26 @@ fn an_inline_images_faults() {
     );
     // ASCIIHexDecode the last of its filters, or its one: its length
     // counted past more white-space after `ID`. Its data found by its
-    // first filter's end where that's ASCIIHexDecode, and at the first
-    // `EI` between white-space where that's Flate.
+    // first filter's end: ASCIIHexDecode's `>`; Flate's where its decoder
+    // stops, after its checksum, or at two bytes of white-space it refuses
+    // as a zlib header, the digits after them tokens before `EI`.
     assert_eq!(told(b"BI /F /AHx /L 3 ID   0E> EI"), []);
-    assert_eq!(told(b"BI /F [/Fl /AHx] /L 3 ID   0E> EI"), []);
-    let s = b"BI /F [/Fl /AHx] /L 2 ID   0E> EI";
+    let s = [&b"BI /F [/Fl /AHx] /L 15 ID "[..], FLATE_EI, b" EI"].concat();
+    assert_eq!(told(&s), []);
+    let s = [&b"BI /F [/Fl /AHx] /L 14 ID "[..], FLATE_EI, b" EI"].concat();
+    assert_eq!(
+        told(&s),
+        one(
+            place(&s, FLATE_EI),
+            "an inline image's data is read as 15 bytes, where its length says 14"
+        )
+    );
+    let s = b"BI /F [/Fl /AHx] /L 0 ID   0E> EI";
     assert_eq!(
         told(s),
         one(
-            place(s, b"  0E>"),
-            "an inline image's data is read as 3 bytes, where its length says 2"
+            place(s, b"0E>"),
+            "0E> is between an inline image's data and its EI"
         )
     );
     let s = b"BI /F [/AHx /Fl] /L 3 ID   0E> EI";
@@ -3361,8 +3698,8 @@ fn an_inline_images_faults() {
             "an inline image's data is read as 5 bytes, where its length says 3"
         )
     );
-    // A length that's its data's, and one past the content, read to the
-    // first `EI` between white-space.
+    // A length that's its data's, a JPEG's to its end of image, and one
+    // past the content, Flate's to the zlib header its decoder refuses.
     assert_eq!(told(b"BI /F /DCT /L 4 ID \xff\xd8\xff\xd9 EI"), []);
     let s = b"BI /F /Fl /L 99 ID xy EI";
     assert_eq!(
@@ -3383,7 +3720,15 @@ fn an_inline_images_faults() {
         )
     );
     assert_eq!(told(b"BI /F /AHx ID>EI"), []);
-    assert_eq!(told(b"BI /F [/Fl /A85] ID<~~>\nEI"), []);
+    // (Its Flate data the two bytes the decoder refuses as a zlib header.)
+    let s = b"BI /F [/Fl /A85] ID<~~>\nEI";
+    assert_eq!(
+        told(s),
+        one(
+            place(s, b"~>"),
+            "~> is between an inline image's data and its EI"
+        )
+    );
     let s = b"BI /F [/A85 /Fl] ID<9jqo~>EI";
     assert_eq!(
         told(s),
@@ -3482,8 +3827,8 @@ fn moved_inputs() -> Vec<Vec<u8>> {
             "/F /DCT /W 9 /H 9 /BPC 8 /CS /RGB",
             b"\xff\xd8\xff\xe0 EI \x00\xff\xd9",
         ),
-        ("/F /Fl /W 9 /H 9 /BPC 8 /CS /G /L 4", b"xEIy"),
-        ("/F /LZW /Length 4 /W 9 /H 9", b"xEIy"),
+        ("/F /Fl /W 9 /H 9 /BPC 8 /CS /G /L 15", FLATE_EI),
+        ("/F /LZW /Length 7 /W 9 /H 9", LZW_EI),
         ("/F /CCF /DP <</K -1 /Columns 9>> /W 9 /H 9", b"xEI EIy"),
         ("/F /XYZ /W 9 /H 9", b"(x EI y)"),
     ];

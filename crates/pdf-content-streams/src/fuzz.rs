@@ -11,6 +11,7 @@ use pdf_tokenizer::decode;
 
 use crate::data::{RunLength, Searched, a85_stop, ei_scan, find};
 use crate::fault::{Fault, Sink};
+use crate::inline::{Walks, ei_from, flate};
 use crate::scan::{Raw, UNCAPPED, next_raw, next_raw_walked};
 use crate::{
     Balance, Concat, Error, ErrorKind, ImageStream, Join, Limits, MarkedEvent, MarkedNest, NameSet,
@@ -53,10 +54,12 @@ type Read<'a> = Vec<Result<(Range<usize>, Tok<'a>), Error>>;
 /// in. Each read's tokens tile its bytes ([`tiled`]), and its operations
 /// are its tokens grouped ([`grouped`]), each typed by the operator table
 /// and stepped through the graphics objects' states ([`typed`],
-/// [`stepped`]). Read again under small caps on operands and an inline
-/// image's data, the tokens are the first read's up to an error, which is
-/// the cap's, where the first read's token past it starts, or the first
-/// read's own; and the operations are those tokens grouped. Each read
+/// [`stepped`]). Read again under small caps on operands, an inline
+/// image's data and what finding images' ends may cost, the tokens are the
+/// first read's up to an error, which is the cap's, where the first read's
+/// token past it starts, or, the last of these, where its own error is,
+/// an image that doesn't end, or the first read's own; and the operations
+/// are those tokens grouped. Each read
 /// through a sink that keeps its faults is the same as through `()`
 /// ([`faulted`]), and one that wants none is told none. And the passes
 /// over its operations are their steppers' ([`passes`]). Its searches
@@ -96,6 +99,7 @@ pub fn content(data: &[u8]) {
     let small = Limits {
         operands: 3,
         inline_image: 8,
+        image_ends: 24,
         ..Limits::DEFAULT
     };
     let capped: Read = tokens(data, &res, &small).collect();
@@ -108,8 +112,14 @@ pub fn content(data: &[u8]) {
                     ErrorKind::InlineImageSize => {
                         assert!(matches!(tok, Tok::InlineImage(d) if d.len() > small.inline_image));
                     }
+                    ErrorKind::ImageEnds => assert!(matches!(tok, Tok::InlineImage(_))),
                     kind => panic!("{kind} where the caps' alone could be"),
                 }
+            }
+            // An image whose data is decoded past the cap before it's found
+            // not to end.
+            (Err(e), Some(Err(first))) if e.kind == ErrorKind::ImageEnds => {
+                assert_eq!((e.at, first.kind), (first.at, ErrorKind::InlineImage));
             }
             (token, first) => assert_eq!(Some(token), first, "the same under small caps"),
         }
@@ -130,11 +140,15 @@ pub fn content(data: &[u8]) {
 /// the first `EI` between white-space where a walk of the bytes does, and
 /// the remembered searches, taken from those offsets in turn, where the
 /// plain ones find (RunLength's walk to its end-of-data byte, where ASCII85
-/// data stops, AHx's `>` and a JPEG's end of image); and from the start
-/// and from each `[` or `<` (some 32 of them spread over `s`, where there
-/// are more), an array or a dictionary skimmed is read to its end, or to
-/// its error, where a walk of every token it holds reads it, under the
-/// default cap on depth and one of two.
+/// data stops, AHx's `>` and a JPEG's end of image), and the remembered
+/// walks to the next `EI` operator where plain ones find it, or don't, the
+/// bytes each passed within those to the content's end; Flate data from
+/// those offsets decoded a window at a time as it's decoded whole, from
+/// windows of 1, 3 and 64 bytes; and from the start and from each `[` or
+/// `<` (some 32 of them spread over `s`, where there are more), an array
+/// or a dictionary skimmed is read to its end, or to its error, where a
+/// walk of every token it holds reads it, under the default cap on depth
+/// and one of two.
 pub fn searched(s: &[u8]) {
     let n = s.len();
     // Where each marker next is from each offset, found from the end.
@@ -166,6 +180,8 @@ pub fn searched(s: &[u8]) {
         .chain(n.saturating_sub(16)..=n);
     let mut run_length = RunLength::default();
     let mut remembered: [Searched; 3] = Default::default();
+    let mut walks = Walks::default();
+    let depth = Limits::DEFAULT.depth;
     for at in offsets {
         for (k, needle) in [&b"EI"[..], b">", b"\xff\xd9"].into_iter().enumerate() {
             assert_eq!(find(s, at, needle), next[k][at], "{needle:?} from {at}");
@@ -195,6 +211,22 @@ pub fn searched(s: &[u8]) {
                 _ => find(s, at, b"\xff\xd9"),
             });
             assert_eq!(found, plain, "search {k} from {at}");
+        }
+        let plain = ei_from(s, at, depth);
+        match walks.ei_from(s, at, depth) {
+            Ok(ei) => assert_eq!(Some(ei), plain, "EI walked to from {at}"),
+            Err(passed) => {
+                assert_eq!(plain, None, "EI walked to from {at}");
+                assert!(at + passed <= n, "{passed} passed from {at}");
+            }
+        }
+        let rest = &s[at..];
+        let mut whole = Vec::new();
+        let whole = (flate(rest, 1 << 20, rest.len(), &mut whole), whole);
+        for first in [1, 3, 64] {
+            let mut out = Vec::new();
+            let windowed = (flate(rest, 1 << 20, first, &mut out), out);
+            assert_eq!(windowed, whole, "Flate from {at} a window of {first} first");
         }
     }
     let read = |r: Option<Result<(Range<usize>, Raw), Error>>| r.map(|r| r.map(|(at, _)| at));
@@ -1047,11 +1079,43 @@ pub(crate) fn blank(gap: &[u8]) -> bool {
     })
 }
 
+/// Flate data holding ` EI `: a zlib header, a last stored block of
+/// those four bytes, and its checksum.
+pub(crate) const FLATE_EI: &[u8] = b"x\x01\x01\x04\x00\xfb\xff EI \x02\x05\x00\xcf";
+
+/// LZW data of ` EI `: a clear code, a code for each byte and the end,
+/// each 9 bits wide.
+pub(crate) const LZW_EI: &[u8] = b"\x80\x08\x08\xa4\x91\x04\x04";
+
+/// Flate data: a zlib header, `data` in a stored block, the last if
+/// `last`, and, if it's the last, its checksum.
+pub(crate) fn stored(data: &[u8], last: bool) -> Vec<u8> {
+    let n = u16::try_from(data.len()).expect("a stored block's length");
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in data {
+        a = (a + u32::from(x)) % 65521;
+        b = (b + a) % 65521;
+    }
+    let check = (b << 16 | a).to_be_bytes();
+    let check: &[u8] = if last { &check } else { &[] };
+    let header = [u8::from(last)];
+    [
+        &b"x\x01"[..],
+        &header,
+        &n.to_le_bytes(),
+        &(!n).to_le_bytes(),
+        data,
+        check,
+    ]
+    .concat()
+}
+
 /// Page content with an inline image found by each of PDFium's rules,
-/// ` EI ` in its data where the data is counted or its tokens read,
-/// strings, arrays, dictionaries and marked content, and a color of 32
-/// components and a pattern, more operands than an operation holds
-/// inline: the fuzz target's seeds.
+/// ` EI ` in its data where the data is counted or its tokens read, or
+/// its Flate data decoded, one decoding to more than the fuzz body's
+/// small caps allow, strings, arrays, dictionaries and marked content,
+/// and a color of 32 components and a pattern, more operands than an
+/// operation holds inline: the fuzz target's seeds.
 pub fn fixtures() -> Vec<Vec<u8>> {
     let image = |dict: &str, data: &[u8]| {
         [format!("q BI {dict} ID ").as_bytes(), data, b"\nEI Q\n"].concat()
@@ -1066,7 +1130,16 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         image("/F [/A85 /Fl] /W 9 /H 9", b"9jqo^ EI ~>"),
         image("/F /RL /W 4 /H 1 /BPC 8 /CS /G", b"\x03 EI \x80"),
         image("/F /DCT /W 9 /H 9 /BPC 8 /CS /RGB", b"\xff\xd8 EI \xff\xd9"),
-        image("/F /Fl /L 4", b"xEIy"),
+        image("/F /Fl /L 15", FLATE_EI),
+        image("/F /LZW /DP <</EarlyChange 1>> /W 4 /H 1", LZW_EI),
+        image(
+            "/F [/Fl] /DP [<</Predictor 12 /Columns 2>>] /W 2 /H 1",
+            FLATE_EI,
+        ),
+        image(
+            "/F /Fl /W 8 /H 4",
+            &stored(b"0 1 2 3 EI 4 5 6 7 8 9 EI a b c d", true),
+        ),
         image("/F /CCF /DP <</K -1>>", b"xEI EIy"),
         image("/F /XYZ", b"(x EI y)"),
         b"%c\nq /Artifact <</Type /Pagination /Subtype /Header /Attached [/Top]>> BDC\n\
@@ -1148,11 +1221,17 @@ mod tests {
         b" (a\rb\r\nc) ",
         b" /F#3G ",
         b" /W -1 /H true /BPC 2.9 ",
+        b"/F /Fl ",
+        b"/F /LZW ",
+        b"/DP <</Predictor 12 /Columns 2>> ",
+        b"x\x01",
+        FLATE_EI,
+        LZW_EI,
         b" +2147483648 ",
         b" 400000000000000000000000000000000000000.0 ",
     ];
 
-    /// The seeds read to their end, each of the first eleven one inline
+    /// The seeds read to their end, each of the first fourteen one inline
     /// image between `q` and `Q`, and the last an `scn` of 33 operands.
     #[test]
     fn the_seeds_read_to_their_end() {
@@ -1162,7 +1241,7 @@ mod tests {
             let read: Vec<_> = tokens(seed, &res, &Limits::DEFAULT)
                 .collect::<Result<_, _>>()
                 .unwrap_or_else(|e| panic!("seed {i}: {e}"));
-            if i < 11 {
+            if i < 14 {
                 assert_eq!(read.len(), 3, "seed {i}");
                 assert!(matches!(read[1].1, Tok::InlineImage(_)), "seed {i}");
             }

@@ -270,6 +270,7 @@ name = "pdf-content-streams"
 version = "0.1.0"
 dependencies = [
  "memchr",
+ "pdf-filters",
  "pdf-objects",
  "pdf-tokenizer",
  "thiserror",
