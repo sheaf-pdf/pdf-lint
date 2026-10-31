@@ -24,6 +24,14 @@ attestation (`gh attestation verify FILE --repo bblanchon/pdfium-binaries`);
 without, it says the SHA-256 alone was checked. Elsewhere than Linux x86_64,
 `PDF_LINT_PDFIUM` names a PDFium library to use instead.
 
+What PDFium reads also depends on how it's built. pdfium-binaries' build
+(its `args.gn`, in the tgz) leaves `pdf_enable_rust_jpeg` at PDFium's
+default, off, so its JPEG decoder is libjpeg-turbo, whose reader says where
+a JPEG's data ends; the recorded DCT answers are that decoder's. With the
+Rust decoder PDFium can be built with instead (`PDF_ENABLE_RUST_JPEG`),
+which says nothing of where it stopped, every inline JPEG would end at its
+start of image.
+
 The library is only ever loaded by the runner below, on the cases' own
 inputs. No crate depends on it or ships it.
 
@@ -49,18 +57,24 @@ outside its package, so they move with it:
 - `cases.py`, the generator: every case's bytes, written in it from
   literals and Python's standard library. Nothing comes from another
   file. Flate data is written as stored blocks (`zlib.compress(data, 0)`),
-  whose bytes every zlib writes alike.
+  whose bytes every zlib writes alike. No two cases' names are alike but
+  for case, as a file system that ignores case would keep one file for
+  both.
 - `cases/` and `cases.tsv`: what the generator writes, each case's files
   (`NAME.EXT`) and a line naming it, its kind and its files. Line endings
   in `cases/` are kept as written (`.gitattributes`).
 - `chromium-N.txt`: PDFium's answer for each case, one line each, at the
-  pinned build, chromium/N. There's one.
+  pinned build, chromium/N. There's one, and the crate's README, and its
+  sources' docs wherever they say which build they read as ("as of
+  chromium/N"), name the same N: `cases` holds them to it.
 - `differ.tsv`: the cases the crate reads otherwise than PDFium, each with
-  the builds it's read otherwise in (`all`; or, where a feature changes
-  the reading, `default` for the build without it, or the feature's name,
-  as pdf-content-streams' `image-ends`) and why. The crate's test holds
-  each to still differ in those builds, and to agree in the others, so a
-  change that settles one is seen and its line goes.
+  why, the crate's test holding each to still differ, so a change that
+  settles one is seen and its line goes. Where the crate can read in more
+  than one way, as pdf-content-streams finds an inline image's DCT and
+  CCITTFax data's end by a stand-in or, with its `image-ends` feature, by
+  decoding it, a column between the two says in which it's read otherwise
+  (`all`; `default`, the stand-in; or `image-ends`, the decoders), and the
+  test holds it to agree in the others.
 - `chromium-N.differs`, at a bump only: cases whose answer at chromium/N
   is PDFium's regression, kept at their recorded answer (below).
 
@@ -98,7 +112,12 @@ To follow PDFium's newer reading, the pin moves to a newer build:
 
 1. Take the new tag's `pdfium-linux-x64.tgz` from pdfium-binaries' release,
    verify its attestation (`gh attestation verify FILE --repo
-   bblanchon/pdfium-binaries`), and only then take its SHA-256.
+   bblanchon/pdfium-binaries`), and only then take its SHA-256. Check how
+   it's built: its `args.gn`, and PDFium's default for
+   `pdf_enable_rust_jpeg` at the new tag (`pdfium.gni`, and the
+   `build_overrides` it reads). A build with the Rust JPEG decoder moves
+   every DCT case's end, which is the build's choice of decoder, not a
+   reading to follow: take one with libjpeg-turbo.
 2. `PDF_LINT_PDFIUM=<its lib/libpdfium.so> just test-pdfium` lists each
    case whose answer moved.
 3. Read each against PDFium's changes between the two tags, its log and
@@ -110,9 +129,11 @@ To follow PDFium's newer reading, the pin moves to a newer build:
      and the new build's answer goes in `chromium-NEW.differs` (the case's
      name, a tab, the answer), which `check` accepts at that build only.
 4. The tag and the SHA-256 in the justfile (`pdfium_build`, `_pdfium`),
-   the build named in this file, the crates' docs and their CHANGELOGs;
-   then `just pdfium-answers`, which records every answer at the new build,
-   and `just ci`.
+   the build named in this file, the crates' docs (each "as of chromium/N",
+   which `cases` holds to the recorded build) and their CHANGELOGs; then
+   `just pdfium-answers`, which records every answer at the new build but
+   for the cases `chromium-NEW.differs` lists, which keep the answers
+   recorded before, and `just ci`.
 
 Rules for two PDFium builds at once would come only if two read
 differently and a caller needs both.

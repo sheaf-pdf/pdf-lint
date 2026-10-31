@@ -54,8 +54,8 @@ hex-odd	text A@
 hex-empty	none
 name-plain	found
 name-hash-30	found
-name-hash-3G	found
-name-hash-3g	found
+name-hash-3-upper-G	found
+name-hash-3-lower-g	found
 name-hash-G0	not-found
 name-hash-46-first	found
 name-hash-one-digit	not-found

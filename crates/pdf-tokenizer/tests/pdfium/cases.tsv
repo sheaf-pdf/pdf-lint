@@ -54,8 +54,8 @@ hex-odd	hex	hex-odd.word
 hex-empty	hex	hex-empty.word
 name-plain	name	name-plain.word
 name-hash-30	name	name-hash-30.word
-name-hash-3G	name	name-hash-3G.word
-name-hash-3g	name	name-hash-3g.word
+name-hash-3-upper-G	name	name-hash-3-upper-G.word
+name-hash-3-lower-g	name	name-hash-3-lower-g.word
 name-hash-G0	name	name-hash-G0.word
 name-hash-46-first	name	name-hash-46-first.word
 name-hash-one-digit	name	name-hash-one-digit.word

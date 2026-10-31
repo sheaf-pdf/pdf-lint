@@ -42,11 +42,15 @@ just clippy   # or one at a time
 
 `just ci` also needs the `thumbv6m-none-eabi`, `x86_64-pc-windows-gnu`
 and `wasm32-unknown-unknown` targets, nightly Rust with its `rust-src`
-component, and Rust 1.85 installed: for the tokenizer's no-std build,
-pdf-structure's lints for Windows and a 32-bit target, the tokenizer's
-build against `core` alone, and the minimum Rust of the tokenizer, the
-filters, pdf-crypt, pdf-objects, pdf-structure, pdf-content-streams and
-pdf-arlington.
+component, and Rust 1.85 and 1.87 installed: for the tokenizer's no-std
+build, pdf-structure's lints for Windows and a 32-bit target, the
+tokenizer's build against `core` alone, and the minimum Rust of the
+tokenizer, the filters, pdf-crypt, pdf-objects, pdf-structure,
+pdf-content-streams and pdf-arlington, and of pdf-content-streams'
+`image-ends` feature (1.87). Its `test-pdfium` needs Python 3, and fetches
+the pinned PDFium build from GitHub unless `PDF_LINT_PDFIUM` names a
+library: [oracle/README.md](oracle/README.md) says how the crates are held
+to PDFium.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
 objects`, `just fuzz structure`, `just fuzz write`, `just fuzz content`

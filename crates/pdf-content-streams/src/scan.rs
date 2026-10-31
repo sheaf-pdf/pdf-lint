@@ -19,7 +19,7 @@ use crate::error::{Error, ErrorKind};
 pub(crate) const UNCAPPED: usize = usize::MAX;
 
 /// How deep PDFium's content parser reads arrays and dictionaries, the
-/// outermost at 0, as of chromium/8076 and chromium/8125 (chromium/7881's
+/// outermost at 0, at chromium/8076 and chromium/8125 (chromium/7881's
 /// was 512): an object inside one at this depth it reads as none, a word
 /// read for it. Where that reads otherwise than ISO 32000-2, it's an
 /// error here ([`ErrorKind::Depth`]), as past

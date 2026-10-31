@@ -77,8 +77,8 @@ HEX = [
 NAMES = [
     ("plain", b"/F0"),
     ("hash-30", b"/F#30"),
-    ("hash-3G", b"/F#3G"),
-    ("hash-3g", b"/F#3g"),
+    ("hash-3-upper-G", b"/F#3G"),
+    ("hash-3-lower-g", b"/F#3g"),
     ("hash-G0", b"/F#G0"),
     ("hash-46-first", b"/#460"),
     ("hash-one-digit", b"/F#3"),

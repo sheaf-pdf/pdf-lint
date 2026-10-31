@@ -14,6 +14,7 @@ at the pinned build, chromium/N. Run it as `python3 -I -B`."""
 import ctypes
 import importlib.util
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -294,6 +295,10 @@ def write_cases(folder, out):
     names = [c[0] for c in cases]
     if len(set(names)) != len(names):
         raise SystemExit("%s: a case's name written twice" % folder)
+    # A file system that ignores case (macOS's, Windows') would keep one
+    # file for both.
+    if len({n.lower() for n in names}) != len(names):
+        raise SystemExit("%s: two cases' names alike but for case" % folder)
     os.makedirs(os.path.join(out, "cases"), exist_ok=True)
     for file in os.listdir(os.path.join(out, "cases")):
         os.remove(os.path.join(out, "cases", file))
@@ -332,6 +337,34 @@ def recorded_file(folder):
     if len(found) != 1:
         raise SystemExit("%s: %d recorded answer files, not one" % (folder, len(found)))
     return os.path.join(folder, found[0])
+
+
+def pin_named(folder):
+    """Where the docs of a set's crate name another build than the one its
+    answers are recorded at: each "as of chromium/N" in its README.md and
+    its sources' comments, the claim of which build it reads as, held to
+    the N of the set's chromium-N.txt. A list of what's wrong."""
+    build = os.path.basename(recorded_file(folder))[len("chromium-"):-len(".txt")]
+    crate = os.path.dirname(os.path.dirname(os.path.abspath(folder)))
+    paths = [os.path.join(crate, "README.md")]
+    for root, _, files in os.walk(os.path.join(crate, "src")):
+        paths += [os.path.join(root, f) for f in sorted(files) if f.endswith(".rs")]
+    wrong = []
+    named = False
+    for path in paths:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        # Comments' markers taken out, so a claim across two lines reads
+        # as one.
+        words = re.sub(r"\s*\n\s*(//[/!]?)?\s*", " ", text)
+        for n in re.findall(r"\bas of chromium/(\d+)", words):
+            if n != build:
+                wrong.append("%s names chromium/%s" % (os.path.relpath(path, crate), n))
+            elif path.endswith("README.md"):
+                named = True
+    if not named:
+        wrong.append("README.md doesn't say it reads as of chromium/%s" % build)
+    return ["%s: %s, where its answers are chromium/%s's" % (crate, w, build) for w in wrong]
 
 
 def read_answers(path):
@@ -382,6 +415,7 @@ def main(argv):
             if write:
                 write_cases(folder, folder)
                 continue
+            wrong = 0
             with tempfile.TemporaryDirectory() as tmp:
                 write_cases(folder, tmp)
                 made = sorted(os.listdir(os.path.join(tmp, "cases")))
@@ -391,11 +425,19 @@ def main(argv):
                     b = os.path.join(folder, "cases", file)
                     if not (os.path.exists(a) and os.path.exists(b)) or read_file(a) != read_file(b):
                         print("%s: cases/%s isn't what cases.py writes" % (folder, file))
-                        failed += 1
+                        wrong += 1
                 if read_file(os.path.join(tmp, "cases.tsv")) != read_file(os.path.join(folder, "cases.tsv")):
                     print("%s: cases.tsv isn't what cases.py writes" % folder)
-                    failed += 1
-            print("%s: %d cases, as cases.py writes them" % (folder, len(read_cases(folder))))
+                    wrong += 1
+            for line in pin_named(folder):
+                print(line)
+                wrong += 1
+            if wrong:
+                print("%s: %d files not as cases.py writes them, or naming another build"
+                      % (folder, wrong))
+            else:
+                print("%s: %d cases, as cases.py writes them" % (folder, len(read_cases(folder))))
+            failed += wrong
         sys.exit(1 if failed else 0)
 
     if command not in ("run", "check", "record") or not rest:
@@ -412,6 +454,14 @@ def main(argv):
         elif command == "record":
             if not build:
                 raise SystemExit("record: --build names the build the answers are PDFium's at")
+            # A case the build's .differs lists is PDFium's regression at
+            # it: it keeps the answer recorded before (README.md).
+            known = read_answers(os.path.join(folder, "chromium-%s.differs" % build))
+            before = read_answers(recorded_file(folder)) if known else {}
+            for name in sorted(set(known) - set(before)):
+                raise SystemExit("%s: %s is in chromium-%s.differs with no answer recorded before"
+                                 % (folder, name, build))
+            answers = [(name, before[name] if name in known else text) for name, text in answers]
             for f in os.listdir(folder):
                 if f.startswith("chromium-") and f.endswith(".txt"):
                     os.remove(os.path.join(folder, f))
@@ -420,8 +470,12 @@ def main(argv):
                         "(oracle/pdfium.py record)\n" % build)
                 for name, text in answers:
                     f.write("%s\t%s\n" % (name, text))
-            print("%s: %d answers recorded" % (folder, len(answers)))
+            print("%s: %d answers recorded, %d kept as chromium-%s.differs lists"
+                  % (folder, len(answers), len(known), build))
         else:
+            if build and not recorded_file(folder).endswith("chromium-%s.txt" % build):
+                print("%s: answers recorded at another build than chromium/%s" % (folder, build))
+                failed += 1
             recorded = read_answers(recorded_file(folder))
             # A case whose answer a build gives otherwise, kept at its
             # recorded answer, as PDFium's to fix (README.md).
