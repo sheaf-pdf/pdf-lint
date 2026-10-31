@@ -35,7 +35,13 @@ impl ResCx {
     /// Color spaces by name, each with its components: each name as a
     /// `/ColorSpace` dictionary's key, its `#` escapes decoded as PDFium
     /// decodes them (pdf-objects reads a key so by PDFium's rules), as an
-    /// image's color space is looked up by its name read so. PDFium
+    /// image's color space is looked up by its name read so. A key read by
+    /// ISO 32000-2's rules, as pdf-structure reads a file, is the same
+    /// name wherever the two readings of it agree: where it has no `#` that
+    /// ISO reads otherwise and is no longer than PDFium reads
+    /// ([`Fault::Name`], [`Fault::Long`]). Where it's otherwise, the key's
+    /// bytes as written (pdf-objects' `Entry::key_at`), read by
+    /// [`name`](crate::name), give PDFium's. PDFium
     /// counts a space named by a family alone as [`family_components`]
     /// does, an array by its first element the same, but an ICCBased
     /// space by its stream's `/N` (1, 3 or 4, and 3 otherwise) and a

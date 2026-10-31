@@ -51,7 +51,11 @@
 //! [`NumberError`](decode::NumberError)'s traits, and memchr, which finds
 //! where a comment or a string ends, and a marker after data, on SIMD where
 //! the target has it. A build against `core` alone, for a target with
-//! neither `std` nor `alloc`, checks it. A value's bytes come as an iterator
+//! neither `std` nor `alloc`, checks it. Without `std`, memchr can't ask the
+//! processor what it has as it runs, so on x86-64 it searches with SSE2; an
+//! application with `std` gets AVX2 where the processor has it by turning
+//! on memchr's `std` feature, which depending on memchr with its default
+//! features does. A value's bytes come as an iterator
 //! ([`Pieces::bytes`](decode::Pieces::bytes)), to collect as the caller
 //! likes, or as written, borrowed, when nothing in it needs decoding
 //! ([`Token::verbatim`]).

@@ -71,7 +71,10 @@ impl Number {
 /// The number a number word is, as PDFium reads it (`FX_Number`): a
 /// word of digits, signs and points, an [`Integer`](crate::Kind::Integer)
 /// or a [`Real`](crate::Kind::Real) by PDFium's rules. Other bytes are
-/// read without failing, as far as they read as one.
+/// read without failing, as far as they read as one: the number ends at
+/// the first byte that's no digit, nor a real's point, so an exponent,
+/// which no number word holds, isn't read (`1.5e3` is 1.5), where PDFium's
+/// own conversion of a string to a number reads one.
 ///
 /// ISO 32000-2 (7.3.3) has no reading of `--5` or `1.2.3`, and holds
 /// integers past 32 bits; PDFium reads `--5` as 0, `1.2.3` as 1.2 and
@@ -99,8 +102,11 @@ pub fn number(bytes: &[u8]) -> Number {
 }
 
 /// The decimal `bytes` start with, read as [`Number::Real`] reads it but
-/// as an `f64` (PDFium's `StringToDouble`): for a reader that holds a real
-/// at 64 bits. 0 when there's no digit, and infinite past `f64`'s range.
+/// as an `f64`: for a reader that holds a real at 64 bits. 0 when there's
+/// no digit, and infinite past `f64`'s range. Like [`number`], it reads a
+/// number word: the decimal ends at the first byte that's no digit, nor
+/// its point, so an exponent isn't read (`1e5` is 1), where PDFium's own
+/// conversion of a string to a number (`StringToDouble`) reads one.
 pub fn real(bytes: &[u8]) -> f64 {
     decimal(bytes).parse().unwrap_or(0.0)
 }
@@ -466,6 +472,9 @@ mod tests {
         }
         let huge = [[b'9'; 400].as_slice(), b"."].concat();
         assert!(real(&huge).is_infinite());
+        // Bytes no number word holds, read as far as they read as one: no
+        // exponent.
+        assert_eq!((real(b"1e5"), number(b"1.5e3")), (1.0, Number::Real(1.5)));
     }
 
     fn value(bytes: impl Iterator<Item = u8>) -> Vec<u8> {

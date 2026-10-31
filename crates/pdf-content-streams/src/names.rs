@@ -120,8 +120,15 @@ impl<'a> Operation<'a> {
     /// The resource it names, by category, and its name, decoded as PDFium
     /// decodes it ([`name`](crate::name)), without its `/`: what a
     /// `/Resources` it's drawn with must have under that
-    /// category ([`names_used`] lists each operator's). None for an
-    /// operation that names none.
+    /// category ([`names_used`] lists each operator's), its keys read as
+    /// PDFium reads them. Read by ISO 32000-2's rules, as pdf-structure
+    /// reads a file, a key is the same name wherever the two readings
+    /// agree: where neither it nor this name has a `#` that ISO reads
+    /// otherwise, or is longer than PDFium reads
+    /// ([`Fault::Name`](crate::fault::Fault::Name),
+    /// [`Fault::Long`](crate::fault::Fault::Long)). Where one is, the key's
+    /// bytes as written, read by [`name`](crate::name), give PDFium's. None
+    /// for an operation that names none.
     ///
     /// ```
     /// use pdf_content_streams::{Limits, ResCx, ResKind, operations};
