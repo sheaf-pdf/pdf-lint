@@ -1,12 +1,13 @@
 //! What the fuzz target checks, which unit tests check too: the promises
-//! [`decode`](crate::decode), [`decode_into`](crate::decode_into) and
+//! [`decode`](crate::decode), [`decode_into`](crate::decode_into),
+//! [`decode_prefix_into`](crate::decode_prefix_into) and
 //! [`encode`](crate::encode) make, on any input, any filters and any
 //! encoder, on each backend compiled in. It's compiled only for tests and
 //! under cargo-fuzz's `--cfg fuzzing`.
 
 use crate::{
-    Backend, Encoder, Error, Fault, Faults, Filter, Layout, Level, Prediction, Predictor, Row,
-    Unencodable, decode, decode_into, encode,
+    Backend, Encoder, Error, Fault, Faults, Filter, Layout, Level, Prediction, Predictor, Prefix,
+    Row, Unencodable, decode, decode_into, decode_prefix_into, encode,
 };
 
 /// The limit the target decodes to, small, so that a bomb ends quickly.
@@ -22,13 +23,99 @@ pub fn backends() -> Vec<Backend> {
     ]
 }
 
+/// `data` decoded by `filter` as data that may run on, by `backend`, into
+/// a buffer that holds something already: what it read, what it added and
+/// its faults.
+pub fn prefix(data: &[u8], filter: Filter, backend: Backend) -> (Prefix, Vec<u8>, Vec<Fault>) {
+    let mut out = b"held".to_vec();
+    let (prefix, decoded) = decode_prefix_into(data, filter, LIMIT, backend, &mut out);
+    assert_eq!(&out[..4], b"held", "what the buffer held, kept");
+    let faults = match decoded {
+        Ok(()) => Vec::new(),
+        Err(Faults(faults)) => {
+            assert!(!faults.is_empty(), "an error has a fault");
+            assert!(faults.iter().all(|&(i, _)| i == 0), "one filter's");
+            faults.into_iter().map(|(_, fault)| fault).collect()
+        }
+    };
+    (prefix, out.split_off(4), faults)
+}
+
+/// The promises [`decode_prefix_into`] makes of `input` decoded by
+/// `filter` on `backend`: what [`decode_into`] gives by a list of that
+/// filter alone; never past the input; the data up to what it read
+/// decoding alike, with the same faults but a missing end's; where its data
+/// ended, bytes after it changing nothing.
+fn prefixes(input: &[u8], filter: Filter, backend: Backend) {
+    let (read, added, faults) = prefix(input, filter, backend);
+    let mut out = Vec::new();
+    let into = decode_into(input, &[filter], LIMIT, backend, &mut out);
+    let listed: Vec<Fault> = match into {
+        Ok(()) => Vec::new(),
+        Err(Faults(faults)) => faults.into_iter().map(|(_, fault)| fault).collect(),
+    };
+    assert_eq!(
+        (&added, &faults),
+        (&out, &listed),
+        "as decode_into decodes it"
+    );
+    assert!(read.read <= input.len(), "never past the input: {read:?}");
+    if read.ended {
+        let missing = |f: &Fault| {
+            matches!(
+                f,
+                Fault::NoEnd | Fault::Truncated | Fault::BrokenEnd { .. } | Fault::Header
+            )
+        };
+        assert!(
+            !faults.iter().any(missing),
+            "ended, its end there: {faults:?}"
+        );
+    }
+    // What it read, alone: the same, but where its data didn't end, a
+    // fault for the end it then lacks. Where it read nothing (a header
+    // zlib counts none of), nothing came of it, and nothing decodes to
+    // nothing.
+    if read.read == 0 {
+        assert!(added.is_empty(), "nothing read, nothing added");
+        return;
+    }
+    let (again, cut, cut_faults) = prefix(&input[..read.read], filter, backend);
+    assert_eq!(cut, added, "what it read decodes alike: {read:?}");
+    let lacking = |f: &&Fault| !matches!(f, Fault::NoEnd | Fault::Truncated);
+    match read.ended {
+        true => assert_eq!((again, &cut_faults), (read, &faults), "ended, the same"),
+        false => {
+            let (a, b): (Vec<_>, Vec<_>) = (
+                cut_faults.iter().filter(lacking).collect(),
+                faults.iter().filter(lacking).collect(),
+            );
+            assert_eq!(a, b, "what it read, the same faults but the end's");
+        }
+    }
+    // Bytes after an end change nothing: an inline image's `EI`, and the
+    // input itself again.
+    if read.ended {
+        for tail in [&b" EI Q"[..], input] {
+            let longer = [&input[..read.read], tail].concat();
+            assert_eq!(
+                prefix(&longer, filter, backend),
+                (read, added.clone(), faults.clone()),
+                "ended, bytes after it change nothing"
+            );
+        }
+    }
+}
+
 /// The filters and predictors `data`'s first bytes choose, over the rest,
 /// decoded twice on each backend, and into a buffer that holds something
-/// already. Panics on a broken promise.
+/// already; and by the first of them as data that may run on. Panics on a
+/// broken promise.
 pub fn filters(data: &[u8]) {
     let (filters, input) = chosen(data);
     let mut clean: Option<Vec<u8>> = None;
     for backend in backends() {
+        prefixes(input, filters[0], backend);
         let decoded = decode(input, &filters, LIMIT, backend);
         assert_eq!(
             decoded,

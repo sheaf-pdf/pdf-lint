@@ -11,8 +11,10 @@
 # and its skims, passes and searches against plain walks, which two stable
 # unit tests (`random_inputs_keep_every_promise` and
 # `random_inputs_keep_every_promise_where_the_rules_part`) run too;
-# `filters` calls `pdf_filters::fuzz::filters` on each backend, which two
-# stable unit tests run on random and damaged inputs, and
+# `filters` calls `pdf_filters::fuzz::filters` on each backend, the
+# filters and the first of them on data that may run on (what it read
+# held to the input), which two stable unit tests run on random and
+# damaged inputs, and
 # `pdf_filters::fuzz::encoders`, which a third runs; `crypt` calls
 # `pdf_crypt::fuzz::handler`, on any dictionary and on new files'
 # dictionaries, and `pdf_crypt::fuzz::password`, which three stable unit

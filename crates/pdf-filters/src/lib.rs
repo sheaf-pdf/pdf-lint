@@ -28,6 +28,12 @@
 //! - **Into the caller's buffer.** [`decode_into`] and [`encode`] append to
 //!   a `Vec` the caller gives, so that streams join in one buffer, and one
 //!   buffer serves many; [`decode`] gives a `Vec` of its own.
+//! - **What a filter read, where its data runs on.** [`decode_prefix_into`]
+//!   decodes data that may run on into other bytes, an inline image's in a
+//!   content stream, by one filter, and says how many bytes of it the
+//!   filter read and whether its data ended there ([`Prefix`]): Flate's and
+//!   LZW's counted as zlib and PDFium count them, so a reader can find
+//!   where PDFium takes such data to end.
 //!
 //! ```
 //! use pdf_filters::{Filter, decode};
@@ -374,33 +380,124 @@ pub fn decode_into(
     }
 }
 
+/// What a filter read of data that may run on into other bytes, as
+/// [`decode_prefix_into`] gives it: how many bytes from the data's start,
+/// and whether its data ended within them. A reader of such data, an
+/// inline image's in a content stream (which ISO 32000-2, 8.9.7, has end
+/// before its `EI`), can take it to end where its filter stopped reading,
+/// as PDFium does where it decodes Flate and LZW data to find that end.
+///
+/// A filter reads what it takes to decode, and to judge the byte it stops
+/// at: up to its end-of-data marker; up to the byte a fault stopped it at;
+/// up to the byte whose output was over the limit; or, with no marker, to
+/// the data's end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct Prefix {
+    /// How many bytes of the data the filter read, from its start:
+    /// - `ASCIIHexDecode`'s, `ASCII85Decode`'s and `RunLengthDecode`'s, to
+    ///   the last byte this crate's decoder took: its `>`, the `>` of its
+    ///   `~>`, its run-length of 128, or the byte it stopped at (after a
+    ///   `~` that isn't followed by `>`, the byte that follows it). PDFium
+    ///   reads these filters' data otherwise.
+    /// - `LZWDecode`'s, to the last bit of the last code it read, rounded
+    ///   up to a byte, never the bytes read ahead of it, as PDFium's LZW
+    ///   decoder counts what it consumed: to its code of 257, to the code
+    ///   it stopped at, or to the last whole code before the data's end,
+    ///   the bits after it too few for one. At a code that isn't in the
+    ///   table, which stops this decoder ([`Fault::Code`]), PDFium's reads
+    ///   on, as if it were the table's next entry, so it counts more.
+    /// - `FlateDecode`'s, the zlib data's bytes the backend took, its
+    ///   checksum among them, as zlib's `total_in` counts them: each byte
+    ///   any of whose bits it used, those it read ahead and didn't use
+    ///   given back. On damaged data the backends can part, where each
+    ///   finds the damage: miniz_oxide refuses at once a dynamic block
+    ///   whose code-length code has no lengths, which zlib and zlib-rs read
+    ///   on into. A header that isn't one for deflate data without a preset
+    ///   dictionary isn't given to the backend, and is counted as zlib
+    ///   counts it: its two bytes (or as many as there are), but none where
+    ///   it asks for a preset dictionary and four bytes after it name one,
+    ///   as zlib then stops for the dictionary without counting them.
+    pub read: usize,
+    /// Whether the filter's data ended within those bytes, at its
+    /// end-of-data marker: `>`; `~>`; an LZW code of 257; a run-length of
+    /// 128; for Flate, the zlib data's last deflate block and the checksum
+    /// after it, matching its data or not. When it did, bytes after them
+    /// change nothing the filter gives; when it didn't, a fault or the
+    /// limit stopped it, or the data ended without its marker.
+    pub ended: bool,
+}
+
+impl Prefix {
+    /// Read to `read`, its data ended there.
+    fn ended(read: usize) -> Prefix {
+        Prefix { read, ended: true }
+    }
+
+    /// Read to `read`, its data not ended: stopped there, or at the data's
+    /// end.
+    fn unended(read: usize) -> Prefix {
+        Prefix { read, ended: false }
+    }
+}
+
+/// `data` decoded by one `filter`, appended to `out` as [`decode_into`]
+/// appends it decoded by a list of that filter alone, the same bytes and
+/// the same faults, for data that may run on into other bytes, as an
+/// inline image's does in a content stream: and the [`Prefix`] of `data`
+/// the filter read, and whether its data ended there. Bytes after those
+/// it read change nothing it gives. Nothing is read of nothing, which
+/// decodes to nothing.
+///
+/// ```
+/// use pdf_filters::{Filter, decode_prefix_into};
+/// # #[cfg(feature = "miniz_oxide")]
+/// # let backend = pdf_filters::Backend::MinizOxide;
+/// # #[cfg(not(feature = "miniz_oxide"))]
+/// # let backend = pdf_filters::Backend::ZlibRs;
+///
+/// // Hex digits, their `>`, and what follows: an inline image's data, then
+/// // the content stream's `EI`.
+/// let mut out = Vec::new();
+/// let (prefix, decoded) =
+///     decode_prefix_into(b"48 69> EI Q", Filter::AsciiHex, 1 << 20, backend, &mut out);
+/// assert_eq!((out, decoded), (b"Hi".to_vec(), Ok(())));
+/// assert_eq!((prefix.read, prefix.ended), (6, true));
+/// ```
+pub fn decode_prefix_into(
+    data: &[u8],
+    filter: Filter,
+    limit: usize,
+    backend: Backend,
+    out: &mut Vec<u8>,
+) -> (Prefix, Result<(), Faults>) {
+    let mut into = Out::new(std::mem::take(out), predictor::before(limit, &filter));
+    // Nothing decodes to nothing, as `decode_into` has it.
+    let prefix = match data.is_empty() {
+        true => Prefix::unended(0),
+        false => one(data, &filter, limit, backend, &mut into),
+    };
+    *out = into.data;
+    let decoded = match into.faults.is_empty() {
+        true => Ok(()),
+        false => Err(Faults(into.faults.into_iter().map(|f| (0, f)).collect())),
+    };
+    (prefix, decoded)
+}
+
 /// `input` decoded by `filter` into `out`, its predictor undone, the
-/// predictor's output no more than `limit` bytes.
-fn one(input: &[u8], filter: &Filter, limit: usize, backend: Backend, out: &mut Out) {
-    let predictor = match *filter {
-        Filter::AsciiHex => {
-            hex::decode(input, out);
-            Predictor::None
-        }
-        Filter::Ascii85 => {
-            ascii85::decode(input, out);
-            Predictor::None
-        }
+/// predictor's output no more than `limit` bytes: what of `input` the
+/// filter read.
+fn one(input: &[u8], filter: &Filter, limit: usize, backend: Backend, out: &mut Out) -> Prefix {
+    let (prefix, predictor) = match *filter {
+        Filter::AsciiHex => (hex::decode(input, out), Predictor::None),
+        Filter::Ascii85 => (ascii85::decode(input, out), Predictor::None),
         Filter::Lzw {
             early_change,
             predictor,
-        } => {
-            lzw::decode(input, early_change, out);
-            predictor
-        }
-        Filter::Flate { predictor } => {
-            flate::decode(input, backend, out);
-            predictor
-        }
-        Filter::RunLength => {
-            run_length::decode(input, out);
-            Predictor::None
-        }
+        } => (lzw::decode(input, early_change, out), predictor),
+        Filter::Flate { predictor } => (flate::decode(input, backend, out), predictor),
+        Filter::RunLength => (run_length::decode(input, out), Predictor::None),
     };
     if predictor != Predictor::None {
         // Data a fault stopped mid-row ends in a row cut off, not short:
@@ -410,6 +507,7 @@ fn one(input: &[u8], filter: &Filter, limit: usize, backend: Backend, out: &mut 
         out.limit = limit;
         predictor::undo(predictor, cut, out);
     }
+    prefix
 }
 
 /// What a filter does to data as a writer encodes it: the filter, and
@@ -684,7 +782,7 @@ fn whole(taken: usize, n: usize) -> Result<(), ()> {
 mod tests {
     use super::{
         Encoder, Error, Fault, Faults, Filter, Layout, Level, Prediction, Predictor, Row,
-        Unencodable, decode, decode_into, encode,
+        Unencodable, decode, decode_into, decode_prefix_into, encode,
     };
     use crate::fuzz::{backends, zlib};
 
@@ -782,6 +880,44 @@ mod tests {
                 (&out[4..], decoded),
                 (&error.data[..], Err(Faults(error.faults)))
             );
+        }
+    }
+
+    /// Data that may run on decodes into a buffer as `decode_into` decodes
+    /// it by a list of its one filter, what the buffer held kept, under the
+    /// limit; and nothing is read of nothing, which decodes to nothing.
+    #[test]
+    fn data_that_may_run_on_decodes_as_decode_into_decodes_it() {
+        let flate = Filter::Flate {
+            predictor: Predictor::None,
+        };
+        let lzw = Filter::Lzw {
+            early_change: true,
+            predictor: Predictor::None,
+        };
+        for backend in backends() {
+            let hello = [&zlib(b"hello", Level::DEFAULT, backend)[..], b" EI"].concat();
+            for (data, filter) in [
+                (&hello[..], flate),
+                (&hello[..9], flate),
+                (b"48 69> EI", Filter::AsciiHex),
+                (b"87cUR~> EI", Filter::Ascii85),
+                (b"\x01ab\x80 EI", Filter::RunLength),
+                (b"\x80\x0B\x60\x50\x22\x0C\x0C\x85\x01 EI", lzw),
+                (b"\x80\x0B\x60", lzw),
+            ] {
+                for limit in [2, 100] {
+                    let mut out = b"held".to_vec();
+                    let (_, decoded) = decode_prefix_into(data, filter, limit, backend, &mut out);
+                    let mut whole = b"held".to_vec();
+                    let listed = decode_into(data, &[filter], limit, backend, &mut whole);
+                    assert_eq!((out, decoded), (whole, listed), "{filter:?}, {limit}");
+                }
+            }
+            let mut out = b"held".to_vec();
+            let (prefix, decoded) = decode_prefix_into(b"", flate, 100, backend, &mut out);
+            assert_eq!((prefix.read, prefix.ended), (0, false));
+            assert_eq!((out, decoded), (b"held".to_vec(), Ok(())));
         }
     }
 

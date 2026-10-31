@@ -7,22 +7,23 @@ mod miniz;
 #[cfg(feature = "zlib-rs")]
 mod zlib;
 
-use crate::{Backend, Fault, Level, Out};
+use crate::{Backend, Fault, Level, Out, Prefix};
 
 /// `data` decompressed by `backend`: a zlib header, deflate data and its
 /// checksum. As in qpdf, a checksum that doesn't match is read as the end,
-/// and data that ends early keeps what decompressed.
-pub(crate) fn decode(data: &[u8], backend: Backend, out: &mut Out) {
+/// and data that ends early keeps what decompressed. What of `data` it
+/// read, as zlib counts it.
+pub(crate) fn decode(data: &[u8], backend: Backend, out: &mut Out) -> Prefix {
     if !header(data) {
         out.fault(Fault::Header);
-        return;
+        return Prefix::unended(refused(data));
     }
     // Grown as it fills, to a byte past the limit, so that data of just
     // the limit's length decompresses whole; what's written is the front.
     let most = out.limit.saturating_add(1);
     let start = out.data.len();
     out.data.resize(start + data.len().max(64).min(most), 0);
-    let (mut written, mut fault): (usize, Option<Fault>) = match backend {
+    let (mut written, mut fault, prefix): (usize, Option<Fault>, Prefix) = match backend {
         #[cfg(feature = "miniz_oxide")]
         Backend::MinizOxide => miniz::inflate(data, &mut out.data, start, most),
         #[cfg(feature = "zlib-rs")]
@@ -36,6 +37,7 @@ pub(crate) fn decode(data: &[u8], backend: Backend, out: &mut Out) {
     if let Some(fault) = fault {
         out.fault(fault);
     }
+    prefix
 }
 
 /// `data` compressed by `backend` at `level` into zlib data, appended to
@@ -70,15 +72,39 @@ fn header(data: &[u8]) -> bool {
     let [cmf, flg, ..] = *data else {
         return false;
     };
+    deflate(cmf, flg) && flg & 0x20 == 0
+}
+
+/// Whether a zlib header's two bytes are one for deflate data with a
+/// window zlib takes, its check right, whatever it says of a preset
+/// dictionary.
+fn deflate(cmf: u8, flg: u8) -> bool {
     let deflate = cmf & 0x0F == 8 && cmf >> 4 <= 7;
     let check = (u16::from(cmf) << 8 | u16::from(flg)) % 31 == 0;
-    deflate && check && flg & 0x20 == 0
+    deflate && check
+}
+
+/// How many bytes of `data`, whose header [`header`] refuses, zlib reads
+/// before it refuses it: the header's two, or as many as there are; but
+/// where only its preset dictionary is refused, none once the four bytes
+/// after it that name the dictionary are there, as zlib then stops for the
+/// dictionary without counting what it read, and as many as there are
+/// before.
+fn refused(data: &[u8]) -> usize {
+    match *data {
+        [cmf, flg, ..] if deflate(cmf, flg) => match data.len() {
+            ..6 => data.len(),
+            _ => 0,
+        },
+        [_, _, ..] => 2,
+        _ => data.len(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::fuzz::{backends, zlib};
-    use crate::{Backend, Fault, Filter, Level, Predictor, decode};
+    use crate::fuzz::{backends, prefix, zlib};
+    use crate::{Backend, Fault, Filter, Layout, Level, Predictor, decode, decode_prefix_into};
 
     const FLATE: Filter = Filter::Flate {
         predictor: Predictor::None,
@@ -289,5 +315,159 @@ mod tests {
             decode(&deflated, &[FLATE], data.len(), Backend::ZlibRs),
             Ok(data)
         );
+    }
+
+    /// `data` read as data that may run on, by `backend`: how far, whether
+    /// it ended, how much it gave and its faults.
+    fn read(data: &[u8], backend: Backend) -> (usize, bool, usize, Vec<Fault>) {
+        let (prefix, out, faults) = prefix(data, FLATE, backend);
+        (prefix.read, prefix.ended, out.len(), faults)
+    }
+
+    /// Zlib data that runs on is read to its checksum's last byte,
+    /// matching or not, on each backend; and data whose deflate stream is
+    /// whole but its checksum isn't takes what follows as the checksum.
+    #[test]
+    fn what_it_read_is_to_its_checksum() {
+        let text = b"one two three two one, three two one two three; ".repeat(400);
+        for backend in backends() {
+            let after = |data: &[u8]| [data, b" EI Q", &text].concat();
+            assert_eq!(read(&after(&HELLO), backend), (16, true, 23, vec![]));
+            let mut damaged = HELLO;
+            damaged[15] ^= 1;
+            let checksum = vec![Fault::Checksum];
+            assert_eq!(
+                read(&after(&damaged), backend),
+                (16, true, 23, checksum.clone())
+            );
+            assert_eq!(
+                read(&after(&HELLO[..12]), backend),
+                (16, true, 23, checksum)
+            );
+            for level in [Level::NONE, Level::DEFAULT, Level::BEST] {
+                for deflater in backends() {
+                    let compressed = zlib(&text, level, deflater);
+                    let want = (compressed.len(), true, text.len(), vec![]);
+                    assert_eq!(read(&after(&compressed), backend), want, "{level:?}");
+                }
+            }
+        }
+    }
+
+    /// Data that ends early is read to its end; data that's corrupt, to the
+    /// byte it was found corrupt in; a header it doesn't take, to what zlib
+    /// reads of it before it refuses it: two bytes, or as many as there
+    /// are, or none where it asks for a preset dictionary that four bytes
+    /// after it name.
+    #[test]
+    fn what_it_read_short_of_its_end() {
+        for backend in backends() {
+            let truncated = vec![Fault::Truncated];
+            let (read_to, ended, _, faults) = read(&HELLO[..10], backend);
+            assert_eq!((read_to, ended, faults), (10, false, truncated));
+            // A block of the reserved type, 11, in the third byte.
+            let data = [0x78, 0x9c, 0x07, 0x00, b' ', b'E', b'I'];
+            let corrupt = vec![Fault::Corrupt { at: 2 }];
+            assert_eq!(read(&data, backend), (3, false, 0, corrupt));
+            // A stored block whose lengths don't match, read whole.
+            let data = b"\x78\x01\x01\x05\x00\x00\x00abcde EI";
+            let corrupt = vec![Fault::Corrupt { at: 6 }];
+            assert_eq!(read(data, backend), (7, false, 0, corrupt));
+            let header = vec![Fault::Header];
+            for (data, n) in [
+                (&b"\x78\x02\x03\x00 EI"[..], 2),
+                (b"\x79\x9d\x03\x00", 2),
+                (b"\x88\x98\x03\x00", 2),
+                (b"x", 1),
+                (b"x\x20abcd\x03\x00 EI", 0),
+                (b"x\x20abc", 5),
+            ] {
+                assert_eq!(
+                    read(data, backend),
+                    (n, false, 0, header.clone()),
+                    "{data:?}"
+                );
+            }
+        }
+    }
+
+    /// At the limit, it's read as far as the backend read to give a byte
+    /// over it, its end unread.
+    #[test]
+    fn what_it_read_at_the_limit() {
+        let data = vec![0; 1_000_000];
+        for backend in backends() {
+            let bomb = zlib(&data, Level::BEST, backend);
+            for limit in [5, 100_000] {
+                let mut out = Vec::new();
+                let (prefix, decoded) = decode_prefix_into(&bomb, FLATE, limit, backend, &mut out);
+                assert!(!prefix.ended && prefix.read < bomb.len(), "{prefix:?}");
+                assert_eq!(
+                    (out.len(), decoded.unwrap_err().0),
+                    (limit, vec![(0, Fault::Limit)])
+                );
+            }
+            // Its end read, its output one byte over: ended.
+            let mut out = Vec::new();
+            let (prefix, _) = decode_prefix_into(&HELLO, FLATE, 22, backend, &mut out);
+            assert_eq!((prefix.read, prefix.ended, out.len()), (16, true, 22));
+        }
+    }
+
+    /// The two backends read alike: on every Flate probe of an inline
+    /// image's data, clean, corrupt, cut short and followed by content, the
+    /// count zlib's `total_in` gives. They part where miniz_oxide refuses
+    /// what zlib reads on past: a dynamic block whose code-length code has
+    /// no lengths, which zlib reads as code lengths of nothing, one bit
+    /// each, before it finds no end-of-block code.
+    #[test]
+    fn the_backends_read_alike_but_where_miniz_oxide_refuses_sooner() {
+        let text = b"one two three two one, three two one two three; ".repeat(40);
+        let mut inputs = vec![HELLO.to_vec()];
+        for deflater in backends() {
+            let compressed = zlib(&text, Level::BEST, deflater);
+            for at in (0..compressed.len()).step_by(7) {
+                for flip in [0x01, 0x10, 0xff] {
+                    let mut damaged = compressed.clone();
+                    damaged[at] ^= flip;
+                    inputs.push([&damaged[..], b" EI Q"].concat());
+                }
+            }
+            inputs.push(compressed[..compressed.len() / 2].to_vec());
+        }
+        let first = backends()[0];
+        for input in &inputs {
+            for backend in backends() {
+                assert_eq!(read(input, backend).0, read(input, first).0, "{backend:?}");
+            }
+        }
+        // BFINAL 1, BTYPE 2, HLIT 0, HDIST 0, HCLEN 0, and four lengths of 0.
+        #[cfg(all(feature = "miniz_oxide", feature = "zlib-rs"))]
+        {
+            let data = [&b"\x78\x01\x05\x00\x00"[..], &[0; 25]].concat();
+            let truncated = (30, false, 0, vec![Fault::Truncated]);
+            assert_eq!(read(&data, Backend::ZlibRs), truncated);
+            let corrupt = (6, false, 0, vec![Fault::Corrupt { at: 5 }]);
+            assert_eq!(read(&data, Backend::MinizOxide), corrupt);
+        }
+    }
+
+    /// A predictor after it changes nothing of what it read.
+    #[test]
+    fn a_predictor_after_it_reads_alike() {
+        let png = Filter::Flate {
+            predictor: Predictor::Png(Layout {
+                colors: 1,
+                bits_per_component: 8,
+                columns: 2,
+            }),
+        };
+        for backend in backends() {
+            let rows = zlib(&[1, 1, 1, 2, 1, 1], Level::DEFAULT, backend);
+            let data = [&rows[..], b" EI"].concat();
+            let (prefix, out, faults) = prefix(&data, png, backend);
+            assert_eq!((prefix.read, prefix.ended), (rows.len(), true));
+            assert_eq!((out, faults), (vec![1, 2, 2, 3], vec![]));
+        }
     }
 }

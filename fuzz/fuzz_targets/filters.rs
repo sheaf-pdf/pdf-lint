@@ -1,6 +1,6 @@
 //! The filters' promises, on any input, with any filters the input's
-//! first bytes choose, on each backend; and the encoder's, with the
-//! encoder they choose.
+//! first bytes choose, on each backend, the first of them on data that may
+//! run on too; and the encoder's, with the encoder they choose.
 
 #![no_main]
 

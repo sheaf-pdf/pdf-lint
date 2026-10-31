@@ -6,23 +6,27 @@ use miniz_oxide::inflate::TINFLStatus;
 use miniz_oxide::inflate::core::{DecompressorOxide, decompress, inflate_flags};
 
 use super::grow;
-use crate::Fault;
+use crate::{Fault, Prefix};
 
 /// `data` inflated into `out` past `start`, which it grows to at most
-/// `most` bytes: how many it wrote, and the fault that stopped it, if one
-/// did.
+/// `most` bytes: how many it wrote, the fault that stopped it, if one did,
+/// and what of `data` it read, the bytes it took to fill its bit buffer
+/// ahead of what it used given back at each call's end.
 pub(super) fn inflate(
     data: &[u8],
     out: &mut Vec<u8>,
     start: usize,
     most: usize,
-) -> (usize, Option<Fault>) {
+) -> (usize, Option<Fault>, Prefix) {
     // What's written is the window it reads matches from.
     let flags = inflate_flags::TINFL_FLAG_PARSE_ZLIB_HEADER
         | inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
     let mut state = Box::<DecompressorOxide>::default();
     let (mut read, mut written) = (0, 0);
     let fault = loop {
+        // What it used of what it was given: it gives back the whole bytes
+        // left in its bit buffer as it returns, but not where it returns
+        // wanting more input, having read all it was given.
         let (status, used, made) =
             decompress(&mut state, &data[read..], &mut out[start..], written, flags);
         read += used;
@@ -48,7 +52,9 @@ pub(super) fn inflate(
             }
         }
     };
-    (written, fault)
+    // Its end, and its checksum after it, whether that matched or not.
+    let ended = matches!(fault, None | Some(Fault::Checksum));
+    (written, fault, Prefix { read, ended })
 }
 
 /// `data` deflated at `level` into zlib data in `out` past `start`, which

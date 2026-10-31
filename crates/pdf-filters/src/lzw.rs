@@ -17,8 +17,12 @@
 //! with no place in weezl. Both are what a checker reports. Codes are read
 //! as weezl reads them, from a 64-bit buffer filled eight bytes at a time,
 //! and an entry's bytes are copied at once.
+//!
+//! What it read is counted by the bits of the codes it read, not by the
+//! bytes the buffer took ahead of them: to the last bit of the last code,
+//! rounded up to a byte, as PDFium's LZW decoder counts what it consumed.
 
-use crate::{Fault, Out};
+use crate::{Fault, Out, Prefix};
 
 const CLEAR: u16 = 256;
 const END: u16 = 257;
@@ -27,8 +31,8 @@ const END: u16 = 257;
 const FULL: usize = 4096;
 
 /// `data`'s codes, 9 to 12 bits wide, up to a code of 257; with
-/// `early_change`, codes widen one entry early.
-pub(crate) fn decode(data: &[u8], early_change: bool, out: &mut Out) {
+/// `early_change`, codes widen one entry early. What of `data` it read.
+pub(crate) fn decode(data: &[u8], early_change: bool, out: &mut Out) -> Prefix {
     let mut bits = Bits::new(data);
     let mut width = 9;
     // Each entry from 258 on, as where its bytes are in what's decoded.
@@ -41,7 +45,7 @@ pub(crate) fn decode(data: &[u8], early_change: bool, out: &mut Out) {
         let at = bits.at();
         let Some(code) = bits.read(width) else {
             out.fault(Fault::NoEnd);
-            return;
+            return Prefix::unended(bits.read_to());
         };
         match code {
             CLEAR => {
@@ -50,7 +54,7 @@ pub(crate) fn decode(data: &[u8], early_change: bool, out: &mut Out) {
                 last = None;
                 continue;
             }
-            END => return,
+            END => return Prefix::ended(bits.read_to()),
             _ => {}
         }
         // An entry, or the one the last code is about to make: its bytes
@@ -58,7 +62,7 @@ pub(crate) fn decode(data: &[u8], early_change: bool, out: &mut Out) {
         let entry = (code > END).then(|| usize::from(code - END - 1));
         if entry.is_some_and(|i| i > table.len() || (i == table.len() && last.is_none())) {
             out.fault(Fault::Code { at });
-            return;
+            return Prefix::unended(bits.read_to());
         }
         if let Some((start, len)) = last {
             let index = 258 + table.len();
@@ -80,7 +84,7 @@ pub(crate) fn decode(data: &[u8], early_change: bool, out: &mut Out) {
             Some(i) => copy(out, table[i]),
         };
         if written.is_err() {
-            return;
+            return Prefix::unended(bits.read_to());
         }
         last = Some((start, out.data.len() - start));
     }
@@ -131,6 +135,12 @@ impl<'a> Bits<'a> {
         (self.next * 8 - self.held as usize) / 8
     }
 
+    /// How many bytes the codes read so far take: to the last bit of the
+    /// last, rounded up, whatever the buffer took after it.
+    fn read_to(&self) -> usize {
+        (self.next * 8 - self.held as usize).div_ceil(8)
+    }
+
     /// The next `width` bits, at most 16, unless the data ends first.
     fn read(&mut self, width: u32) -> Option<u16> {
         if self.held < width {
@@ -171,8 +181,8 @@ impl<'a> Bits<'a> {
 #[cfg(test)]
 mod tests {
     use super::{CLEAR, END};
-    use crate::fuzz::backends;
-    use crate::{Fault, Filter, Predictor, decode};
+    use crate::fuzz::{backends, prefix};
+    use crate::{Fault, Filter, Predictor, decode, decode_prefix_into};
     use std::collections::HashMap;
 
     /// `data` decoded, by the first backend compiled in, which it doesn't
@@ -406,6 +416,96 @@ mod tests {
             let data = lzw(&Codes::all(early_change, cleared), early_change);
             let want = [&bytes[..], b"ABABBA"].concat();
             assert_eq!(data.unwrap(), want, "{early_change}");
+        }
+    }
+
+    /// `data` read as data that may run on: how far, whether it ended,
+    /// what it gave and its faults.
+    fn read(data: &[u8], early_change: bool) -> (usize, bool, Vec<u8>, Vec<Fault>) {
+        let predictor = Predictor::None;
+        let filter = Filter::Lzw {
+            early_change,
+            predictor,
+        };
+        let (prefix, out, faults) = prefix(data, filter, backends()[0]);
+        (prefix.read, prefix.ended, out, faults)
+    }
+
+    /// Data that runs on is read to its code of 257: to the code's last
+    /// bit, rounded up to a byte, however many bytes after it the buffer
+    /// took, as wide as the codes are, and past a full table.
+    #[test]
+    fn what_it_read_is_to_its_257() {
+        let after = [&b" EI Q"[..], &[0xff; 16]].concat();
+        let spec = [0x80, 0x0B, 0x60, 0x50, 0x22, 0x0C, 0x0C, 0x85, 0x01];
+        let data = [&spec[..], &after].concat();
+        assert_eq!(read(&data, true), (9, true, b"-----A---B".to_vec(), vec![]));
+        let wide: Vec<u16> = (0..600u16).map(|i| i * 37 % 251 + 1).collect();
+        let fill = filling();
+        let full = fill.iter().copied().chain([65, 300, 4095]);
+        for early_change in [true, false] {
+            for codes in [
+                vec![CLEAR, 65, 66, END],
+                vec![65, 66, 258, END],
+                vec![CLEAR, 65, 258, END],
+                vec![CLEAR, END],
+                [&[CLEAR][..], &wide, &[END]].concat(),
+                full.clone().chain([END]).collect(),
+            ] {
+                let written = Codes::all(early_change, codes.iter().copied());
+                let data = [&written[..], &after].concat();
+                let (read, ended, _, _) = read(&data, early_change);
+                assert_eq!(
+                    (read, ended),
+                    (written.len(), true),
+                    "{early_change}, {codes:?}"
+                );
+            }
+        }
+    }
+
+    /// Without a code of 257, it's read to the last whole code before the
+    /// data's end, rounded up, the bits after it too few for a code; at a
+    /// code not in the table, to that code, where PDFium's decoder reads
+    /// on as if it were the table's next entry.
+    #[test]
+    fn what_it_read_without_its_257() {
+        let codes = Codes::all(true, [CLEAR, 65, 66, 67, 68, 69, 70, 71]);
+        assert_eq!(codes.len(), 9);
+        let data = [&codes[..], &[0xff]].concat();
+        let no_end = vec![Fault::NoEnd];
+        assert_eq!(
+            read(&data, true),
+            (9, false, b"ABCDEFG".to_vec(), no_end.clone())
+        );
+        assert_eq!(read(&codes, true), (9, false, b"ABCDEFG".to_vec(), no_end));
+        // 256 65 66 300 257: 300 isn't in the table, at bit 27.
+        let data = [&Codes::all(true, [CLEAR, 65, 66, 300, END])[..], b" EI"].concat();
+        let code = vec![Fault::Code { at: 3 }];
+        assert_eq!(read(&data, true), (5, false, b"AB".to_vec(), code));
+        // A code of 258 first: no entry yet.
+        let data = [&Codes::all(true, [CLEAR, 258, END])[..], b" EI"].concat();
+        let code = vec![Fault::Code { at: 1 }];
+        assert_eq!(read(&data, true), (3, false, vec![], code));
+        assert_eq!(read(b"\x80", true), (0, false, vec![], vec![Fault::NoEnd]));
+    }
+
+    /// At the limit, it's read to the code whose bytes are over it.
+    #[test]
+    fn what_it_read_at_the_limit() {
+        let filter = Filter::Lzw {
+            early_change: true,
+            predictor: Predictor::None,
+        };
+        let data = [&Codes::all(true, [CLEAR, 65, 66, 258, END])[..], b" EI"].concat();
+        for backend in backends() {
+            let mut out = Vec::new();
+            let (prefix, decoded) = decode_prefix_into(&data, filter, 3, backend, &mut out);
+            assert_eq!(
+                (prefix.read, prefix.ended, &out[..]),
+                (5, false, &b"ABA"[..])
+            );
+            assert_eq!(decoded.unwrap_err().0, [(0, Fault::Limit)]);
         }
     }
 }

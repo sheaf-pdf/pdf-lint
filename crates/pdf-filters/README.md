@@ -12,6 +12,7 @@ It's made for a checker as much as a reader. Data that breaks a rule still decod
 - **The same result every time,** with nothing but the input deciding it: no I/O, no global state.
 - **Either Flate backend, named at each call.** `FlateDecode` inflates and deflates through [miniz_oxide](https://crates.io/crates/miniz_oxide) (the `miniz_oxide` feature, on by default) or [zlib-rs](https://crates.io/crates/zlib-rs) (the `zlib-rs` feature), each compiled in by its feature, both if both are on. Each call that decodes or encodes names its `Backend`, which exists only with its feature, so turning a feature on, in this crate or any that depends on it, changes nothing a call gives. There's no precedence between them. Without either, the crate doesn't build.
 - **Into the caller's buffer.** `decode_into` appends what it decodes to a `Vec` the caller gives, keeping what it held (the limit counts only what's added), and `encode` appends what it encodes, so streams join in one buffer and one buffer serves many. `decode` gives a `Vec` of its own.
+- **What a filter read, where its data runs on.** `decode_prefix_into` decodes data that may run on into other bytes, as an inline image's does in a content stream, by one filter, as `decode_into` decodes it, and says how many bytes the filter read and whether its data ended there.
 
 ## An example
 
@@ -42,6 +43,28 @@ use pdf_filters::{Backend, Filter, decode};
 
 let error = decode(b"48 65 6C 6C 6F", &[Filter::AsciiHex], 1 << 20, Backend::MinizOxide);
 assert_eq!(error.unwrap_err().data, b"Hello"); // read without its `>`
+```
+
+## Data that runs on
+
+An inline image's data, in a content stream, has no length to say where it ends but its filter's own end, and the content goes on after it (ISO 32000-2, 8.9.7). `decode_prefix_into` decodes such data by one filter and gives a `Prefix`: `read`, how many bytes from the data's start the filter read, and `ended`, whether its data ended within them, at its end-of-data marker (for Flate, the zlib data's checksum, matching or not). Bytes after those it read change nothing it gives.
+
+What a filter reads is what it takes to decode and to judge the byte it stops at: up to its marker, the byte a fault stopped it at, or the byte whose output was over the limit; or, with no marker, the whole. Flate's bytes are counted as zlib's `total_in` counts them (each byte any of whose bits were used, those read ahead given back), on either backend, and LZW's to the last bit of the last code read, rounded up to a byte, never the bytes read ahead of it: as PDFium counts both where it decodes an inline image's data to find where it ends. Their counts part from PDFium's where this crate's LZW decoder stops at a code that isn't in the table, which PDFium's reads on past, and the two backends can part from each other on damaged data, each stopping where it finds the damage (miniz_oxide refuses at once a dynamic block whose code-length code has no lengths, which zlib reads on into).
+
+```rust
+use pdf_filters::{Backend, Filter, Predictor, decode_prefix_into};
+
+// zlib data, then the content after an inline image's data.
+let data = [
+    0x78, 0xda, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57,
+    0xc8, 0x40, 0x27, 0x01, 0x68, 0x03, 0x08, 0xb1,
+    b' ', b'E', b'I', b' ', b'Q',
+];
+let flate = Filter::Flate { predictor: Predictor::None };
+let mut out = Vec::new();
+let (prefix, decoded) = decode_prefix_into(&data, flate, 1 << 20, Backend::MinizOxide, &mut out);
+assert_eq!((out, decoded), (b"hello hello hello hello".to_vec(), Ok(())));
+assert_eq!((prefix.read, prefix.ended), (16, true)); // ` EI Q` isn't read
 ```
 
 ## Encoding

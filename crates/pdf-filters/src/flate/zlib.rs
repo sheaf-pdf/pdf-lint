@@ -3,20 +3,21 @@
 use zlib_rs::{Deflate, DeflateFlush, Inflate, InflateError, InflateFlush, Status};
 
 use super::grow;
-use crate::Fault;
+use crate::{Fault, Prefix};
 
 /// The most zlib takes or gives in a call: a C `unsigned int`'s worth.
 const CALL: usize = u32::MAX as usize;
 
 /// `data` inflated into `out` past `start`, which it grows to at most
-/// `most` bytes: how many it wrote, and the fault that stopped it, if one
-/// did.
+/// `most` bytes: how many it wrote, the fault that stopped it, if one did,
+/// and what of `data` it read, its `total_in`, which counts out the whole
+/// bytes it read ahead and gave back.
 pub(super) fn inflate(
     data: &[u8],
     out: &mut Vec<u8>,
     start: usize,
     most: usize,
-) -> (usize, Option<Fault>) {
+) -> (usize, Option<Fault>, Prefix) {
     let mut state = Inflate::new(true, 15);
     let fault = loop {
         let (read, written) = (state.total_in() as usize, state.total_out() as usize);
@@ -59,7 +60,10 @@ pub(super) fn inflate(
             }
         }
     };
-    (state.total_out() as usize, fault)
+    // Its end, and its checksum after it, whether that matched or not.
+    let ended = matches!(fault, None | Some(Fault::Checksum));
+    let read = state.total_in() as usize;
+    (state.total_out() as usize, fault, Prefix { read, ended })
 }
 
 /// `data` deflated at `level` into zlib data in `out` past `start`, which

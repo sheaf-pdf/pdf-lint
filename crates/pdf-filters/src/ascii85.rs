@@ -1,10 +1,11 @@
 //! `ASCII85Decode` (ISO 32000-2, 7.4.3).
 
-use crate::{Fault, Out};
+use crate::{Fault, Out, Prefix};
 use pdf_tokenizer::is_white_space;
 
-/// `data`'s base-85 groups as bytes, up to `~>`, white-space ignored.
-pub(crate) fn decode(data: &[u8], out: &mut Out) {
+/// `data`'s base-85 groups as bytes, up to `~>`, white-space ignored: what
+/// of `data` it read.
+pub(crate) fn decode(data: &[u8], out: &mut Out) -> Prefix {
     // The group read so far, and where it began.
     let mut group = [0u8; 5];
     let mut n = 0;
@@ -15,28 +16,32 @@ pub(crate) fn decode(data: &[u8], out: &mut Out) {
             _ if is_white_space(byte) => {}
             b'~' => {
                 let next = bytes.by_ref().find(|(_, b)| !is_white_space(**b));
-                match next {
-                    Some((_, b'>')) => {
+                return match next {
+                    Some((end, b'>')) => {
                         let _ = finish(&group, n, start, out);
+                        Prefix::ended(end + 1)
                     }
                     // What decoded is kept, but not the group it's in.
-                    Some(_) => out.fault(Fault::BrokenEnd { at }),
+                    Some((after, _)) => {
+                        out.fault(Fault::BrokenEnd { at });
+                        Prefix::unended(after + 1)
+                    }
                     None => {
                         if finish(&group, n, start, out).is_ok() {
                             out.fault(Fault::BrokenEnd { at });
                         }
+                        Prefix::unended(data.len())
                     }
-                }
-                return;
+                };
             }
             b'z' if n == 0 => {
                 if out.extend(&[0; 4]).is_err() {
-                    return;
+                    return Prefix::unended(at + 1);
                 }
             }
             b'z' => {
                 out.fault(Fault::InGroup { at });
-                return;
+                return Prefix::unended(at + 1);
             }
             b'!'..=b'u' => {
                 if n == 0 {
@@ -48,19 +53,20 @@ pub(crate) fn decode(data: &[u8], out: &mut Out) {
                     n = 0;
                     let bytes = value(&group, start, out);
                     if out.extend(&bytes).is_err() {
-                        return;
+                        return Prefix::unended(at + 1);
                     }
                 }
             }
             _ => {
                 out.fault(Fault::Byte { at, byte });
-                return;
+                return Prefix::unended(at + 1);
             }
         }
     }
     if finish(&group, n, start, out).is_ok() {
         out.fault(Fault::NoEnd);
     }
+    Prefix::unended(data.len())
 }
 
 /// A last group of `n` characters, which stands for `n` - 1 bytes: the
@@ -93,7 +99,7 @@ fn value(group: &[u8; 5], start: usize, out: &mut Out) -> [u8; 4] {
 
 #[cfg(test)]
 mod tests {
-    use crate::fuzz::backends;
+    use crate::fuzz::{backends, prefix};
     use crate::{Fault, Filter, decode};
 
     /// `data` decoded, by the first backend compiled in, which it doesn't
@@ -161,5 +167,65 @@ mod tests {
         let error = a85(b"87cURD]j7B{").unwrap_err();
         assert_eq!(error.data, b"Hello wo");
         assert_eq!(error.faults, [(0, Fault::Byte { at: 10, byte: b'{' })]);
+    }
+
+    /// `data` read as data that may run on: how far, whether it ended,
+    /// what it gave and its faults.
+    fn read(data: &[u8]) -> (usize, bool, Vec<u8>, Vec<Fault>) {
+        let (prefix, out, faults) = prefix(data, Filter::Ascii85, backends()[0]);
+        (prefix.read, prefix.ended, out, faults)
+    }
+
+    /// Data that runs on is read to the `>` of its `~>`, white-space
+    /// between them or not; without one, to its end; at a fault that stops
+    /// it, to the byte it stopped at, the one after a `~` that isn't `>`.
+    #[test]
+    fn what_it_read_is_to_its_end() {
+        let hello = b"Hello world".to_vec();
+        assert_eq!(
+            read(b"87cURD]j7BEbo7~> EI"),
+            (16, true, hello.clone(), vec![])
+        );
+        assert_eq!(
+            read(b"87cURD]j7BEbo7~\n> EI"),
+            (17, true, hello.clone(), vec![])
+        );
+        assert_eq!(read(b"~>~>"), (2, true, vec![], vec![]));
+        let no_end = vec![Fault::NoEnd];
+        assert_eq!(read(b"87cURD]j7BEbo7"), (14, false, hello.clone(), no_end));
+        let broken = vec![Fault::BrokenEnd { at: 7 }];
+        assert_eq!(read(b"87cURD]~ x~>"), (10, false, b"Hell".to_vec(), broken));
+        let broken = vec![Fault::BrokenEnd { at: 14 }];
+        assert_eq!(read(b"87cURD]j7BEbo7~ "), (16, false, hello, broken));
+        let in_group = vec![Fault::InGroup { at: 7 }];
+        assert_eq!(read(b"87cURD]z~>"), (8, false, b"Hell".to_vec(), in_group));
+        let byte = vec![Fault::Byte { at: 10, byte: b'{' }];
+        assert_eq!(
+            read(b"87cURD]j7B{~>"),
+            (11, false, b"Hello wo".to_vec(), byte)
+        );
+    }
+
+    /// At the limit, it's read to the byte that ends the group, or the
+    /// `z`, over it; at the `~>`, a last group over it, ended.
+    #[test]
+    fn what_it_read_at_the_limit() {
+        for backend in backends() {
+            let at = |data: &[u8], limit| {
+                let mut out = Vec::new();
+                let (prefix, decoded) =
+                    crate::decode_prefix_into(data, Filter::Ascii85, limit, backend, &mut out);
+                (
+                    prefix.read,
+                    prefix.ended,
+                    out.len(),
+                    decoded.map_err(|f| f.0),
+                )
+            };
+            let limit = Err(vec![(0, Fault::Limit)]);
+            assert_eq!(at(b"87cURD]j7BEbo7~>", 6), (10, false, 6, limit.clone()));
+            assert_eq!(at(b"zz~>", 5), (2, false, 5, limit.clone()));
+            assert_eq!(at(b"87cURD]j7BEbo7~>", 10), (16, true, 10, limit));
+        }
     }
 }
