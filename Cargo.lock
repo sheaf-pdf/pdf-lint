@@ -300,6 +300,7 @@ dependencies = [
 name = "pdf-content-streams"
 version = "0.1.0"
 dependencies = [
+ "memchr",
  "pdf-objects",
  "pdf-tokenizer",
  "thiserror",
@@ -380,6 +381,7 @@ dependencies = [
 name = "pdf-tokenizer"
 version = "0.1.1"
 dependencies = [
+ "memchr",
  "thiserror",
 ]
 

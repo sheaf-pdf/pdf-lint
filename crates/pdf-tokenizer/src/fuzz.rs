@@ -80,14 +80,91 @@ pub fn prefix_with<R: RuleSet>(input: &[u8], offset: usize, cut: usize, rules: R
 }
 
 /// [`walk_with`] under each set of rules, fixed in the tokenizer's type,
-/// then [`side_by_side`] and [`chosen_as_fixed`]. Returns how many tokens
-/// there were by ISO 32000-2's rules.
+/// then [`side_by_side`], [`chosen_as_fixed`], [`skimmed`] under each set
+/// of rules and [`searched`]. Returns how many tokens there were by ISO
+/// 32000-2's rules.
 pub fn walk(input: &[u8], offset: usize) -> usize {
     let count = walk_with(input, offset, Iso);
     walk_with(input, offset, Pdfium);
     side_by_side(input, offset);
     chosen_as_fixed(input, offset);
+    skimmed(input, offset, Iso);
+    skimmed(input, offset, Pdfium);
+    searched(input, offset);
     count
+}
+
+/// Checks [`Tokenizer::skim`] and [`Tokenizer::next_significant`],
+/// each chained from `offset` to the end under `rules`, against the
+/// tokens they stand for: each gives the token iterating on to the first
+/// of its kinds finds (one that opens or closes an array or a dictionary,
+/// or a string that doesn't close; one that's neither white-space nor a
+/// comment), and leaves the tokenizer where that leaves it.
+pub fn skimmed<R: RuleSet>(input: &[u8], offset: usize, rules: R) {
+    let nests = |t: &Token<'_>| {
+        matches!(
+            t.kind,
+            Kind::ArrayOpen
+                | Kind::ArrayClose
+                | Kind::DictOpen
+                | Kind::DictClose
+                | Kind::String { closed: false }
+                | Kind::HexString { closed: false }
+        )
+    };
+    let tokens = Tokenizer::at(input, offset).with_rules(rules);
+    let (mut skim, mut walk) = (tokens.clone(), tokens.clone());
+    loop {
+        let (skimmed, walked) = (skim.skim(), walk.find(nests));
+        assert_eq!(skimmed, walked, "the skim gives what iterating finds");
+        assert_eq!(skim.offset(), walk.offset(), "and leaves it there");
+        if skimmed.is_none() {
+            break;
+        }
+    }
+    let (mut next, mut walk) = (tokens.clone(), tokens);
+    loop {
+        let significant = next.next_significant();
+        let walked = walk.find(|t| !matches!(t.kind, Kind::Space | Kind::Comment));
+        assert_eq!(significant, walked, "the next significant token");
+        assert_eq!(next.offset(), walk.offset(), "and where it leaves it");
+        if significant.is_none() {
+            break;
+        }
+    }
+}
+
+/// Checks [`Tokenizer::data_until`] from `offset` against a look at every
+/// window of the bytes, for markers a reader looks for (`endstream`, `EI`),
+/// one byte, none, a marker longer than the input, and three bytes taken
+/// from the input itself, halfway through what's after `offset`.
+pub fn searched(input: &[u8], offset: usize) {
+    let rest = input.get(offset..).unwrap_or_default();
+    let middle = rest.len() / 2;
+    let own = rest
+        .get(middle..rest.len().min(middle + 3))
+        .unwrap_or_default();
+    let long = [b'x'; 64];
+    let longer = if input.len() < long.len() {
+        &long[..]
+    } else {
+        b""
+    };
+    for marker in [&b"endstream"[..], b"EI", b">", b"", longer, own] {
+        let before = match marker {
+            [] => Some(0),
+            _ => rest.windows(marker.len()).position(|w| w == marker),
+        }
+        .unwrap_or(rest.len());
+        let data = Tokenizer::at(input, offset).data_until(marker);
+        assert_eq!(data.kind, Kind::Data);
+        assert_eq!(data.start, offset.min(input.len()), "from where it is");
+        assert_eq!(
+            data.bytes,
+            &rest[..before],
+            "up to the marker's first window: {marker:?}"
+        );
+    }
 }
 
 /// Checks that each set of rules, chosen as the tokenizer runs (a
@@ -257,6 +334,43 @@ pub fn check_decoding_with(input: &[u8], token: &Token<'_>, rules: Rules) {
         }
     }
     check_pdfium_number(token.bytes);
+    for kind in [
+        Kind::Name,
+        Kind::String { closed: true },
+        Kind::HexString { closed: true },
+    ] {
+        verbatim_as_walked(&Token { kind, ..*token });
+    }
+}
+
+/// Checks that [`Token::verbatim`], which searches a token's bytes, gives
+/// what walking its pieces gives, the same bytes from the same place, for
+/// a token of any kind and any bytes: its value as written when every
+/// piece is plain or a delimiter, the run of plain pieces, or empty where
+/// the token starts when there's none; otherwise none.
+pub fn verbatim_as_walked(token: &Token<'_>) {
+    let walked = token.pieces().and_then(|pieces| {
+        let mut plain: Option<core::ops::Range<usize>> = None;
+        for piece in pieces {
+            match piece.how {
+                How::Delimiter => {}
+                How::Plain => plain = Some(plain.map_or(piece.at.start, |p| p.start)..piece.at.end),
+                _ => return None,
+            }
+        }
+        let run = plain.map_or(0..0, |p| p.start - token.start..p.end - token.start);
+        token.bytes.get(run)
+    });
+    let scanned = token.verbatim();
+    assert_eq!(
+        scanned, walked,
+        "a scan says what a walk of the pieces says"
+    );
+    assert_eq!(
+        scanned.map(<[u8]>::as_ptr),
+        walked.map(<[u8]>::as_ptr),
+        "from the same place"
+    );
 }
 
 fn check_integer(token: &Token<'_>) {

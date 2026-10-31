@@ -31,7 +31,7 @@ pub(crate) fn tokenizer(s: &[u8], at: usize) -> Tokenizer<'_, Pdfium> {
 /// The first token from `at` that isn't white-space or a comment; None at
 /// the end.
 pub(crate) fn significant(s: &[u8], at: usize) -> Option<Token<'_>> {
-    tokenizer(s, at).find(|t| !matches!(t.kind, Kind::Space | Kind::Comment))
+    tokenizer(s, at).next_significant()
 }
 
 /// Where the first token from `at` that isn't white-space or a comment
@@ -47,8 +47,30 @@ pub(crate) fn next_raw(
     from: usize,
     depth: usize,
 ) -> Option<Result<(Range<usize>, Raw), Error>> {
+    raw(s, from, depth, Tokenizer::skim)
+}
+
+/// [`next_raw`], an array or a dictionary passed by walking every token
+/// it holds, not by skimming them: what the fuzz body holds the skim to.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn next_raw_walked(
+    s: &[u8],
+    from: usize,
+    depth: usize,
+) -> Option<Result<(Range<usize>, Raw), Error>> {
+    raw(s, from, depth, Iterator::next)
+}
+
+/// [`next_raw`], each token inside an array or a dictionary read by
+/// `inside`.
+fn raw<'a>(
+    s: &'a [u8],
+    from: usize,
+    depth: usize,
+    inside: impl FnMut(&mut Tokenizer<'a, Pdfium>) -> Option<Token<'a>>,
+) -> Option<Result<(Range<usize>, Raw), Error>> {
     let mut tokens = tokenizer(s, from);
-    let token = tokens.find(|t| !matches!(t.kind, Kind::Space | Kind::Comment))?;
+    let token = tokens.next_significant()?;
     let error = |kind| {
         Some(Err(Error {
             at: token.start,
@@ -61,7 +83,7 @@ pub(crate) fn next_raw(
         }
         Kind::String { closed: false } => return error(ErrorKind::String),
         Kind::HexString { closed: false } => return error(ErrorKind::HexString),
-        Kind::ArrayOpen | Kind::DictOpen => match nested(tokens, token, depth) {
+        Kind::ArrayOpen | Kind::DictOpen => match nested(tokens, token, depth, inside) {
             Ok(end) => end,
             Err(e) => return Some(Err(e)),
         },
@@ -73,9 +95,17 @@ pub(crate) fn next_raw(
 }
 
 /// An array or dictionary from `open`, its `[` or `<<`, with all it holds,
-/// `tokens` reading on after it: where it ends. A closing delimiter that
-/// doesn't close what's open is passed over.
-fn nested(mut tokens: Tokenizer<'_, Pdfium>, open: Token<'_>, cap: usize) -> Result<usize, Error> {
+/// `tokens` reading on after it, each token by `next`: where it ends. A
+/// closing delimiter that doesn't close what's open is passed over.
+/// [`next_raw`] skims the tokens between ([`Tokenizer::skim`]), reading
+/// only those that open or close, and a string that doesn't close, which
+/// are all this looks at.
+fn nested<'a>(
+    mut tokens: Tokenizer<'a, Pdfium>,
+    open: Token<'a>,
+    cap: usize,
+    mut next: impl FnMut(&mut Tokenizer<'a, Pdfium>) -> Option<Token<'a>>,
+) -> Result<usize, Error> {
     // Where each array or dictionary still open starts, and whether it's
     // a dictionary.
     let mut open_at: Vec<(usize, bool)> = Vec::new();
@@ -114,7 +144,7 @@ fn nested(mut tokens: Tokenizer<'_, Pdfium>, open: Token<'_>, cap: usize) -> Res
             }
             _ => {}
         }
-        let Some(next) = tokens.next() else {
+        let Some(following) = next(&mut tokens) else {
             let (at, dict) = open_at.last().copied().unwrap_or((open.start, false));
             let kind = if dict {
                 ErrorKind::Dict
@@ -123,7 +153,7 @@ fn nested(mut tokens: Tokenizer<'_, Pdfium>, open: Token<'_>, cap: usize) -> Res
             };
             return Err(Error { at, kind });
         };
-        token = next;
+        token = following;
     }
 }
 

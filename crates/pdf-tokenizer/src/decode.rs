@@ -10,6 +10,8 @@
 use core::fmt;
 use core::ops::Range;
 
+use memchr::memchr2;
+
 pub mod pdfium;
 
 use crate::chars::{is_regular, is_white_space};
@@ -315,6 +317,31 @@ fn escape(after: &[u8]) -> (usize, Option<u8>, How) {
     }
 }
 
+/// A literal string's value as written, when nothing in it needs decoding:
+/// what's inside its parentheses (the first and the one that balances it)
+/// holds no backslash and no CR, and nothing comes after the one that
+/// balances it.
+fn literal_verbatim(bytes: &[u8]) -> Option<&[u8]> {
+    if memchr2(b'\\', b'\r', bytes).is_some() {
+        return None;
+    }
+    let (start, mut depth) = match bytes.first() {
+        Some(b'(') => (1, 1usize),
+        _ => (0, 0),
+    };
+    let mut at = start;
+    while let Some(i) = bytes.get(at..).and_then(|rest| memchr2(b'(', b')', rest)) {
+        at += i;
+        match bytes[at] {
+            b'(' => depth += 1,
+            _ if depth == 1 => return (at + 1 == bytes.len()).then(|| &bytes[start..at]),
+            _ => depth = depth.saturating_sub(1),
+        }
+        at += 1;
+    }
+    bytes.get(start..)
+}
+
 /// A hex digit's value.
 fn digit(b: u8) -> u8 {
     match b {
@@ -386,19 +413,33 @@ impl<'a> Token<'a> {
     /// empty hex string). `None` when something does, its value then being
     /// its pieces' [`bytes`](Pieces::bytes), and for any other kind.
     pub fn verbatim(&self) -> Option<&'a [u8]> {
-        let mut plain: Option<Range<usize>> = None;
-        for piece in self.pieces()? {
-            match piece.how {
-                How::Delimiter => {}
-                How::Plain => {
-                    let start = plain.map_or(piece.at.start, |run| run.start);
-                    plain = Some(start..piece.at.end);
-                }
-                _ => return None,
+        // The bytes are searched for what the pieces would say isn't plain,
+        // not walked piece by piece: the same answer, from any bytes, a
+        // token's or not.
+        let bytes = self.bytes;
+        let value = match self.kind {
+            Kind::Name => {
+                let body = bytes.strip_prefix(b"/").unwrap_or(bytes);
+                body.iter()
+                    .all(|&b| is_regular(b) && b != b'#')
+                    .then_some(body)?
             }
-        }
-        let run = plain.map_or(0..0, |run| run.start - self.start..run.end - self.start);
-        Some(self.bytes.get(run).unwrap_or_default())
+            Kind::String { .. } => literal_verbatim(bytes)?,
+            // No piece of a hex string is plain (each between its
+            // delimiters is digits, white-space or a byte it can't hold),
+            // so it's verbatim only with nothing but them.
+            Kind::HexString { .. } => match bytes {
+                [] | [b'<' | b'>'] | [b'<', b'>'] => &[],
+                _ => return None,
+            },
+            _ => return None,
+        };
+        // Empty, it's where the token starts, as the pieces would place it.
+        Some(if value.is_empty() {
+            bytes.get(..0).unwrap_or_default()
+        } else {
+            value
+        })
     }
 
     /// The integer an [`Integer`](Kind::Integer) token is written as, read
@@ -729,5 +770,70 @@ mod tests {
         decoded(b"(\\))", b")");
         decoded(b"<41>", b"A");
         assert_eq!(token(b"17").verbatim(), None);
+    }
+
+    /// `verbatim` searches the bytes for what its pieces would decode: the
+    /// same answer as walking them, from the same place, for every run of
+    /// bytes of these inputs taken as a name, a literal string and a hex
+    /// string, a token's or not, and for every token of them.
+    #[test]
+    fn verbatim_by_a_search_is_verbatim_by_the_pieces() {
+        use crate::Kind;
+        let inputs: [&[u8]; 9] = [
+            b"/Type/A#20B/#/ x\x80",
+            b"(a (b) c)(a)b)()(",
+            b"(a\\) (a\r\nb) (\\(\\)) ((a)) (a)) )(",
+            b"<41 4G> <> < > <<>> >",
+            b"/A)(B(C) (D)E",
+            b"(\x80\xff/[]{}%) [<a>]",
+            b"/a#2 /a#20 /#00",
+            b"",
+            b")))(((",
+        ];
+        let kinds = [
+            Kind::Name,
+            Kind::String { closed: true },
+            Kind::HexString { closed: false },
+        ];
+        for input in inputs {
+            for start in 0..=input.len() {
+                for end in start..=input.len() {
+                    for kind in kinds {
+                        let bytes = &input[start..end];
+                        fuzz::verbatim_as_walked(&Token { kind, start, bytes });
+                    }
+                }
+            }
+            fuzz::walk(input, 0);
+        }
+        let scanned = |kind, bytes: &'static [u8]| {
+            Token {
+                kind,
+                start: 0,
+                bytes,
+            }
+            .verbatim()
+        };
+        assert_eq!(
+            scanned(Kind::Name, b"Type"),
+            Some(&b"Type"[..]),
+            "a name's `/` is a delimiter only first"
+        );
+        assert_eq!(scanned(Kind::Name, b"/A/B"), None);
+        assert_eq!(
+            scanned(Kind::String { closed: true }, b"(a)b"),
+            None,
+            "nothing after the close"
+        );
+        assert_eq!(
+            scanned(Kind::String { closed: true }, b"a)b"),
+            Some(&b"a)b"[..]),
+            "no open, no close"
+        );
+        assert_eq!(
+            scanned(Kind::HexString { closed: true }, b">"),
+            Some(&b""[..])
+        );
+        assert_eq!(scanned(Kind::HexString { closed: true }, b"<<"), None);
     }
 }

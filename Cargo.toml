@@ -55,6 +55,11 @@ opt-level = 3
 [profile.dev.package.adler2]
 opt-level = 3
 
+# The searches for a byte or a marker in those strings, and in a stream's
+# or an inline image's data, under the tokenizer and the content streams.
+[profile.dev.package.memchr]
+opt-level = 3
+
 [profile.dev.package.pdf-tokenizer]
 opt-level = 1
 

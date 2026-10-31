@@ -12,6 +12,9 @@ categories = ["parser-implementations", "no-std::no-alloc"]
 include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
+# Without std, as the tokenizer needs only core: its searches for a byte or
+# a marker (comments, strings, `data_until`) on SIMD where the target has it.
+memchr = { version = "2.8", default-features = false }
 # Without std, as the tokenizer needs only core.
 thiserror = { version = "2", default-features = false }
 

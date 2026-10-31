@@ -1484,6 +1484,64 @@ fn an_array_or_a_dictionary_ends_where_its_tokens_close_it() {
     assert_eq!(at(b"[1]", &deep(0)), (0, Depth));
 }
 
+/// An array or a dictionary skimmed ends, or fails, where a walk of every
+/// token it holds does, under caps on depth of none to three and the
+/// default; and an inline image's markers are found where a look at every
+/// window, or for the `EI` between white-space a walk of the bytes, finds
+/// them: from every offset of the contents above, and of those that hold
+/// an image's ends.
+#[test]
+fn skims_and_searches_find_what_walks_find() {
+    use crate::data::{ei_scan, find};
+    use crate::scan::{next_raw, next_raw_walked};
+    let contents: [&[u8]; 14] = [
+        b"[(])] TJ",
+        b"[1 %]\n2] TJ",
+        b"<</A <4>]>>>> BDC",
+        b"[1 >> 2] q",
+        b"[1 <41",
+        b"[1 [2",
+        b"<</A [1",
+        b"[<</A 1",
+        b"[1 %]",
+        b"<<<</A [1]>>>> [[]] <<>>",
+        b"[(a\\) <4G1> (b(c)) /N\x80[1] {}] >>> <<<",
+        b"BI /F /AHx ID 41> EI BI /F /DCT ID x\xff\xd9 EI",
+        b"xEI EI\tEI(EI/EI%EIEI EIx",
+        b"\xff\xff\xd9\xd9>> >",
+    ];
+    let read = |r: Option<Result<(Range<usize>, scan::Raw), Error>>| r.map(|r| r.map(|(at, _)| at));
+    for s in contents {
+        for at in 0..=s.len() + 1 {
+            for depth in [0, 1, 2, 3, Limits::DEFAULT.depth] {
+                let skimmed = read(next_raw(s, at, depth));
+                assert_eq!(
+                    skimmed,
+                    read(next_raw_walked(s, at, depth)),
+                    "{s:?} from {at}"
+                );
+            }
+            for needle in [&b"EI"[..], b">", b"\xff\xd9"] {
+                let windows = s.get(at..).and_then(|rest| {
+                    let found = rest.windows(needle.len()).position(|w| w == needle);
+                    found.map(|n| at + n)
+                });
+                assert_eq!(find(s, at, needle), windows, "{s:?}: {needle:?} from {at}");
+            }
+            let walked = (at..s.len().saturating_sub(1)).find(|&i| {
+                let space = |c: u8| b"\0\t\n\x0c\r ".contains(&c);
+                let before = i > 0 && space(s[i - 1]);
+                let after = s
+                    .get(i + 2)
+                    .is_none_or(|&c| space(c) || b"()<>[]{}/%".contains(&c));
+                &s[i..i + 2] == b"EI" && before && after
+            });
+            assert_eq!(ei_scan(s, at), walked, "{s:?}: EI from {at}");
+        }
+        crate::fuzz::searched(s);
+    }
+}
+
 #[test]
 fn the_caps_hold() {
     let depth = Limits::DEFAULT.depth;

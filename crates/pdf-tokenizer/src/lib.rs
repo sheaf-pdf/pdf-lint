@@ -10,7 +10,9 @@
 //!   its bytes as written, borrowed from the input.
 //! - **No grammar:** `obj`, `R`, `stream`, `xref` and `trailer` are
 //!   keywords like any other. Joining `n g R` or `n g obj` is the next
-//!   layer's work.
+//!   layer's work. [`Tokenizer::skim`] passes an array's or a dictionary's
+//!   insides without a token each, giving only the tokens that open or
+//!   close one, but judges nothing: which closes which is the caller's.
 //! - **Data it can't measure:** after `stream` or `ID`, the caller says
 //!   where the data ends, by `/Length` or by scanning for `endstream` or
 //!   `EI` ([`Tokenizer::data`], [`Tokenizer::data_until`]). That's where
@@ -44,10 +46,12 @@
 //!
 //! It needs only `core` and never allocates, so whatever the input,
 //! tokenizing and decoding it can't allocate memory or do I/O: a file it
-//! reads, untrusted, can't make it use memory. Its one dependency, thiserror,
-//! which derives [`NumberError`](decode::NumberError)'s traits, is built
-//! without `std`. A build against `core` alone, for a target with neither
-//! `std` nor `alloc`, checks it. A value's bytes come as an iterator
+//! reads, untrusted, can't make it use memory. Its two dependencies are
+//! built without `std`: thiserror, which derives
+//! [`NumberError`](decode::NumberError)'s traits, and memchr, which finds
+//! where a comment or a string ends, and a marker after data, on SIMD where
+//! the target has it. A build against `core` alone, for a target with
+//! neither `std` nor `alloc`, checks it. A value's bytes come as an iterator
 //! ([`Pieces::bytes`](decode::Pieces::bytes)), to collect as the caller
 //! likes, or as written, borrowed, when nothing in it needs decoding
 //! ([`Token::verbatim`]).

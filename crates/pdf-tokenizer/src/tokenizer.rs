@@ -3,7 +3,9 @@
 
 use core::iter::FusedIterator;
 
-use crate::chars::is_white_space;
+use memchr::{memchr, memchr2, memchr3, memmem};
+
+use crate::chars::{SKIMMED, class, is_white_space};
 use crate::rules::{Iso, RuleSet, Rules};
 use crate::token::{Kind, Token};
 
@@ -115,14 +117,90 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// finds it itself and calls [`data`](Self::data).
     pub fn data_until(&mut self, marker: &[u8]) -> Token<'a> {
         let rest = self.rest();
-        let len = if marker.is_empty() {
-            0
-        } else {
-            rest.windows(marker.len())
-                .position(|w| w == marker)
-                .unwrap_or(rest.len())
-        };
+        let len = memmem::find(rest, marker).unwrap_or(rest.len());
         self.take(Kind::Data, len)
+    }
+
+    /// The next token that's neither white-space nor a comment, the
+    /// white-space and comments before it passed over; `None` at the end,
+    /// every token passed. It's the token iterating on to the first such
+    /// one finds, and leaves the tokenizer where that leaves it, but it
+    /// makes no token of the white-space (ISO 32000-2, 7.2.4, reads a
+    /// comment as white-space too).
+    ///
+    /// ```
+    /// use pdf_tokenizer::Tokenizer;
+    ///
+    /// let mut tokens = Tokenizer::new(b"  % a comment\n /Type");
+    /// assert_eq!(tokens.next_significant().map(|t| t.bytes), Some(&b"/Type"[..]));
+    /// assert_eq!(tokens.next_significant(), None);
+    /// ```
+    pub fn next_significant(&mut self) -> Option<Token<'a>> {
+        let rules = self.rules();
+        loop {
+            let space = run(self.rest(), |b| rules.is_white_space(b));
+            self.pos += space;
+            let rest = self.rest();
+            // The token function itself, inlined here as in `next`: a call
+            // a token fewer.
+            let (kind, len) = match rules {
+                Rules::Iso => next_token::<false>(rest)?,
+                Rules::Pdfium => next_token::<true>(rest)?,
+            };
+            if kind != Kind::Comment {
+                return Some(self.token(rest, kind, len));
+            }
+            self.pos += len;
+        }
+    }
+
+    /// The next token that opens or closes an array or a dictionary
+    /// ([`Kind::ArrayOpen`], [`ArrayClose`](Kind::ArrayClose),
+    /// [`DictOpen`](Kind::DictOpen), [`DictClose`](Kind::DictClose)), or a
+    /// string that doesn't close, the tokens before it passed over; `None`
+    /// at the end, every token passed. It's the token iterating on to the
+    /// first such one finds, and leaves the tokenizer where that leaves it,
+    /// but it looks only at the bytes that can start one, or a string or a
+    /// comment that holds such bytes, and makes no token of the rest.
+    ///
+    /// From an array's or a dictionary's opening token, skimming on to the
+    /// token that closes it passes it without reading what it holds. Which
+    /// closes which, how deep they may nest, and what a string that doesn't
+    /// close means are the caller's to say: the skim judges nothing.
+    ///
+    /// ```
+    /// use pdf_tokenizer::{Kind, Tokenizer};
+    ///
+    /// let input = b"[1 (a]) <</A [2]>>] 3";
+    /// let mut tokens = Tokenizer::new(input);
+    /// let kinds: Vec<_> = core::iter::from_fn(|| tokens.skim()).map(|t| t.kind).collect();
+    /// assert_eq!(
+    ///     kinds,
+    ///     [Kind::ArrayOpen, Kind::DictOpen, Kind::ArrayOpen, Kind::ArrayClose, Kind::DictClose, Kind::ArrayClose]
+    /// );
+    /// assert_eq!(tokens.offset(), input.len());
+    /// ```
+    pub fn skim(&mut self) -> Option<Token<'a>> {
+        loop {
+            let Some(i) = self.rest().iter().position(|&b| class(b) & SKIMMED != 0) else {
+                self.pos = self.bytes.len();
+                return None;
+            };
+            // No token before it runs past it: white-space, words and names
+            // end at any delimiter, and `)`, `{` and `}` are a byte each. So
+            // a token starts here.
+            self.pos += i;
+            let token = self.next()?;
+            match token.kind {
+                Kind::ArrayOpen
+                | Kind::ArrayClose
+                | Kind::DictOpen
+                | Kind::DictClose
+                | Kind::String { closed: false }
+                | Kind::HexString { closed: false } => return Some(token),
+                _ => {}
+            }
+        }
     }
 
     fn rest(&self) -> &'a [u8] {
@@ -132,9 +210,18 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// The next `len` bytes as a token of `kind`. `len` is never more than
     /// what's left.
     fn take(&mut self, kind: Kind, len: usize) -> Token<'a> {
+        self.token(self.rest(), kind, len)
+    }
+
+    /// The first `len` bytes of `rest`, which is what's left, as a token of
+    /// `kind`: `rest` taken once a token, by its caller. `len` is never more
+    /// than its length, as each token function measures within what it's
+    /// given (which the fuzz target checks on every token), so it's sliced
+    /// directly.
+    fn token(&mut self, rest: &'a [u8], kind: Kind, len: usize) -> Token<'a> {
         let start = self.pos;
-        let bytes = self.rest().get(..len).unwrap_or_default();
-        self.pos += bytes.len();
+        let bytes = &rest[..len];
+        self.pos += len;
         Token { kind, start, bytes }
     }
 }
@@ -146,11 +233,12 @@ impl<'a, R: RuleSet> Iterator for Tokenizer<'a, R> {
         // Each set of rules is a loop of its own. Fixed in the type, the
         // rules are settled when this is compiled; chosen as it runs, they
         // cost a branch a token.
+        let rest = self.rest();
         let (kind, len) = match self.rules() {
-            Rules::Iso => next_token::<false>(self.rest())?,
-            Rules::Pdfium => next_token::<true>(self.rest())?,
+            Rules::Iso => next_token::<false>(rest)?,
+            Rules::Pdfium => next_token::<true>(rest)?,
         };
-        Some(self.take(kind, len))
+        Some(self.token(rest, kind, len))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -174,7 +262,7 @@ fn next_token<const PDFIUM: bool>(rest: &[u8]) -> Option<(Kind, usize)> {
     let (&first, after) = rest.split_first()?;
     Some(match first {
         b if space(b) => (Kind::Space, run(rest, space)),
-        b'%' => (Kind::Comment, 1 + run(after, |b| b != b'\r' && b != b'\n')),
+        b'%' => (Kind::Comment, 1 + line_end(after)),
         b'/' => (Kind::Name, 1 + run(after, regular)),
         b'(' => literal_string(rest),
         b'<' if after.first() == Some(&b'<') => (Kind::DictOpen, 2),
@@ -199,6 +287,11 @@ fn next_token<const PDFIUM: bool>(rest: &[u8]) -> Option<(Kind, usize)> {
 /// How many of `bytes`' first bytes `keep` holds for.
 fn run(bytes: &[u8], keep: impl Fn(u8) -> bool) -> usize {
     bytes.iter().position(|&b| !keep(b)).unwrap_or(bytes.len())
+}
+
+/// How many of `bytes`' first bytes come before an end of line, CR or LF.
+fn line_end(bytes: &[u8]) -> usize {
+    memchr2(b'\r', b'\n', bytes).unwrap_or(bytes.len())
 }
 
 /// What a run of regular bytes is: a number, when it's written as one
@@ -250,22 +343,25 @@ pub(crate) fn pdfium_word(run: &[u8]) -> Kind {
 #[inline(always)]
 fn literal_string(rest: &[u8]) -> (Kind, usize) {
     let mut depth = 0usize;
-    let mut escaped = false;
-    for (i, &b) in rest.iter().enumerate() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match b {
-            b'\\' => escaped = true,
-            b'(' => depth += 1,
-            b')' => {
+    let mut at = 0;
+    // From one parenthesis or backslash to the next: the bytes between
+    // change nothing.
+    while let Some(i) = rest.get(at..).and_then(|r| memchr3(b'(', b')', b'\\', r)) {
+        at += i;
+        match rest[at] {
+            // The byte it escapes, whatever it is, is passed over too.
+            b'\\' => at += 2,
+            b'(' => {
+                depth += 1;
+                at += 1;
+            }
+            _ => {
                 depth -= 1;
+                at += 1;
                 if depth == 0 {
-                    return (Kind::String { closed: true }, i + 1);
+                    return (Kind::String { closed: true }, at);
                 }
             }
-            _ => {}
         }
     }
     (Kind::String { closed: false }, rest.len())
@@ -289,7 +385,7 @@ fn hex_string(rest: &[u8]) -> (Kind, usize) {
 /// A hexadecimal string at the start of `rest`, which starts with `<` and
 /// not `<<`, by PDFium's rules: to its `>`, over any byte.
 fn pdfium_hex_string(rest: &[u8]) -> (Kind, usize) {
-    match rest.iter().skip(1).position(|&b| b == b'>') {
+    match memchr(b'>', rest.get(1..).unwrap_or_default()) {
         Some(i) => (Kind::HexString { closed: true }, i + 2),
         None => (Kind::HexString { closed: false }, rest.len()),
     }
@@ -301,7 +397,7 @@ mod tests {
 
     use std::vec::Vec;
 
-    use crate::{Kind, Token, Tokenizer, fuzz};
+    use crate::{Iso, Kind, Pdfium, Rules, Token, Tokenizer, fuzz};
 
     const STRING: Kind = Kind::String { closed: true };
     const UNCLOSED_STRING: Kind = Kind::String { closed: false };
@@ -590,6 +686,144 @@ mod tests {
             assert_eq!((last.kind, last.bytes, last.end()), (kind, bytes, cut));
             assert_ne!(whole[before.len()], *last, "{cut}");
             fuzz::prefix(file, 0, cut);
+        }
+    }
+
+    /// The inputs of the tests above, and more where a skim or a search
+    /// could go wrong: closers with nothing open, strings and comments
+    /// holding delimiters, strings that don't close, hex strings each set
+    /// of rules ends otherwise, and markers at the start, at the end and
+    /// cut short.
+    const INPUTS: &[&[u8]] = &[
+        b" \t\r\n\x0c\x00x",
+        b"%PDF-1.7\r\n%%EOF",
+        b"/Type/A#20B/ /",
+        b"[1 (a]) <</A [2]>>] 3",
+        b"[[1] 2] <<>> [<<]>>] >>> <<< ]]",
+        b"(a (nested) string) (an escaped \\) one) (\\\\)",
+        b"[(open (and more) ",
+        b"[<48 65\n6C> <4G1> <48(x)> <g>]",
+        b"<< /K [1 %] not a closer\r 2] >>\n% [\n]",
+        b"4 0 obj\n<< /Length 5 >>\nstream\r\nBT ET\nendstream\nendobj",
+        b"endstreamendstrea",
+        b"ID \x00\x01EI",
+        b"BI /W 1 ID xEI EI EI",
+        b"[123] << /A (a b) >>  % c\nstream\r\nxy endstream",
+        b"[--5.0 <4G 1>]\x80\xff x",
+        b"[(\x80]\xff) /N\x80[ 1\xff]",
+    ];
+
+    /// A skim gives the next token that opens or closes an array or a
+    /// dictionary, or a string that doesn't close, as iterating on to it
+    /// does, under each set of rules: from every offset of the inputs.
+    #[test]
+    fn a_skim_gives_what_opens_or_closes_as_the_tokens_do() {
+        let skims = |input: &'static [u8], rules| {
+            let mut tokens = Tokenizer::new(input).with_rules(rules);
+            core::iter::from_fn(move || tokens.skim().map(|t| (t.kind, t.bytes)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            skims(b"[1 (a]) <</A [2]>>] 3", Rules::Iso),
+            [
+                (Kind::ArrayOpen, &b"["[..]),
+                (Kind::DictOpen, b"<<"),
+                (Kind::ArrayOpen, b"["),
+                (Kind::ArrayClose, b"]"),
+                (Kind::DictClose, b">>"),
+                (Kind::ArrayClose, b"]"),
+            ]
+        );
+        // A closer with nothing open is given too: which closes which is
+        // the caller's to say. `>>>` is `>>` and `>`, `<<<` `<<` and `<`.
+        assert_eq!(
+            skims(b"] >>> <<<", Rules::Iso),
+            [
+                (Kind::ArrayClose, &b"]"[..]),
+                (Kind::DictClose, b">>"),
+                (Kind::DictOpen, b"<<"),
+                (UNCLOSED_HEX, b"<"),
+            ]
+        );
+        // A hex string ISO 32000-2's rules end before a byte they can't
+        // hold doesn't close, and the skim goes on after it.
+        assert_eq!(
+            skims(b"[<4G1>]", Rules::Iso),
+            [
+                (Kind::ArrayOpen, &b"["[..]),
+                (UNCLOSED_HEX, b"<4"),
+                (Kind::ArrayClose, b"]"),
+            ]
+        );
+        assert_eq!(
+            skims(b"[<4G1>] [(a", Rules::Pdfium),
+            [
+                (Kind::ArrayOpen, &b"["[..]),
+                (Kind::ArrayClose, b"]"),
+                (Kind::ArrayOpen, b"["),
+                (UNCLOSED_STRING, b"(a"),
+            ]
+        );
+        // A comment hides what it holds to its end of line.
+        assert_eq!(
+            skims(b"%[]\r]", Rules::Iso),
+            [(Kind::ArrayClose, &b"]"[..])]
+        );
+        for input in INPUTS {
+            for at in 0..=input.len() {
+                fuzz::skimmed(input, at, Iso);
+                fuzz::skimmed(input, at, Pdfium);
+            }
+        }
+    }
+
+    /// The next significant token is the next that's neither white-space
+    /// nor a comment, as iterating on to it finds it: from every offset of
+    /// the inputs, under each set of rules, here chosen as the tokenizer
+    /// runs (the skim's test has them fixed in its type).
+    #[test]
+    fn next_significant_passes_white_space_and_comments() {
+        let input = b" %a\r\n%b\n\x80/N %c";
+        let mut tokens = Tokenizer::new(input);
+        let word = tokens.next_significant().unwrap();
+        assert_eq!(
+            (word.kind, word.start, word.bytes),
+            (Kind::Keyword, 8, &b"\x80"[..])
+        );
+        let mut tokens = Tokenizer::new(input).with_rules(Pdfium);
+        let name = tokens.next_significant().unwrap();
+        assert_eq!(
+            (name.kind, name.start, name.bytes),
+            (Kind::Name, 9, &b"/N"[..])
+        );
+        assert_eq!(tokens.next_significant(), None);
+        assert_eq!(tokens.offset(), input.len(), "every token passed");
+        for input in INPUTS {
+            for at in 0..=input.len() {
+                fuzz::skimmed(input, at, Rules::Iso);
+                fuzz::skimmed(input, at, Rules::Pdfium);
+            }
+        }
+    }
+
+    /// `data_until` stops where a look at every window finds its marker
+    /// first, or at the end: from every offset of the inputs.
+    #[test]
+    fn data_until_stops_where_its_marker_first_is() {
+        let input = b"endstreamendstrea";
+        assert_eq!(Tokenizer::new(input).data_until(b"endstream").bytes, b"");
+        let cut = Tokenizer::at(input, 1).data_until(b"endstream");
+        assert_eq!(
+            (cut.start, cut.bytes),
+            (1, &input[1..]),
+            "a marker cut short is none"
+        );
+        let mut tokens = Tokenizer::at(b"BI /W 1 ID xEI EI EI", 11);
+        assert_eq!(tokens.data_until(b" EI").bytes, b"xEI");
+        for input in INPUTS {
+            for at in 0..=input.len() + 1 {
+                fuzz::searched(input, at);
+            }
         }
     }
 

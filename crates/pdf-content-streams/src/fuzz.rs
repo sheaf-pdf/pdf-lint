@@ -9,8 +9,9 @@ use std::ops::Range;
 use pdf_objects::{Object, Value, dict};
 use pdf_tokenizer::decode;
 
+use crate::data::{ei_scan, find};
 use crate::fault::{Fault, Sink};
-use crate::scan::{Raw, next_raw};
+use crate::scan::{Raw, next_raw, next_raw_walked};
 use crate::{
     Balance, Concat, Error, ErrorKind, Join, Limits, MarkedEvent, MarkedNest, NameSet, Operand,
     Operation, Operations, Operator, Properties, Props, ResCx, ResKind, SpanAcross, State, Tok,
@@ -58,8 +59,8 @@ type Read<'a> = Vec<Result<(Range<usize>, Tok<'a>), Error>>;
 /// read's own; and the operations are those tokens grouped. Each read
 /// through a sink that keeps its faults is the same as through `()`
 /// ([`faulted`]), and one that wants none is told none. And the passes
-/// over its operations are their steppers' ([`passes`]). Panics on a
-/// broken promise.
+/// over its operations are their steppers' ([`passes`]). Its searches
+/// and skims are plain ones' ([`searched`]). Panics on a broken promise.
 pub fn content(data: &[u8]) {
     let res = ResCx::new([
         (b"CS1".to_vec(), 1),
@@ -119,6 +120,67 @@ pub fn content(data: &[u8]) {
     grouped(data, operations(data, &res, &small), &capped, &small);
     faulted(&whole, &res, &small);
     passes(data);
+    searched(data);
+}
+
+/// Checks the searches the tokens make in `s`'s bytes, and their skims,
+/// against plain ones: from offsets spread over `s` (its first and last
+/// 16, and some 48 between), an inline image's end markers (`EI`, AHx's
+/// `>`, a JPEG's end of image) where a look at every window finds them,
+/// and the first `EI` between white-space where a walk of the bytes does;
+/// and from the start and from each `[` or `<` (some 32 of them spread
+/// over `s`, where there are more), an array or a dictionary skimmed is
+/// read to its end, or to its error, where a walk of every token it holds
+/// reads it, under the default cap on depth and one of two.
+pub fn searched(s: &[u8]) {
+    let n = s.len();
+    // Where each marker next is from each offset, found from the end.
+    let mut next = [
+        vec![None; n + 1],
+        vec![None; n + 1],
+        vec![None; n + 1],
+        vec![None; n + 1],
+    ];
+    for i in (0..n).rev() {
+        let ei = s[i..].starts_with(b"EI");
+        let before = i > 0 && decode_space(s[i - 1]);
+        let after = s
+            .get(i + 2)
+            .is_none_or(|&c| decode_space(c) || b"()<>[]{}/%".contains(&c));
+        let here = [
+            ei,
+            s[i] == b'>',
+            s[i..].starts_with(b"\xff\xd9"),
+            ei && before && after,
+        ];
+        for (k, found) in here.into_iter().enumerate() {
+            next[k][i] = if found { Some(i) } else { next[k][i + 1] };
+        }
+    }
+    let stride = (n / 48).max(1);
+    let offsets = (0..=n.min(16))
+        .chain((0..=n).step_by(stride))
+        .chain(n.saturating_sub(16)..=n);
+    for at in offsets {
+        for (k, needle) in [&b"EI"[..], b">", b"\xff\xd9"].into_iter().enumerate() {
+            assert_eq!(find(s, at, needle), next[k][at], "{needle:?} from {at}");
+        }
+        assert_eq!(ei_scan(s, at), next[3][at], "EI from {at}");
+    }
+    let read = |r: Option<Result<(Range<usize>, Raw), Error>>| r.map(|r| r.map(|(at, _)| at));
+    let openers: Vec<usize> = (0..n).filter(|&i| matches!(s[i], b'[' | b'<')).collect();
+    let some = openers.iter().step_by((openers.len() / 32).max(1));
+    for &at in std::iter::once(&0).chain(some) {
+        for depth in [Limits::DEFAULT.depth, 2] {
+            let skimmed = read(next_raw(s, at, depth));
+            assert_eq!(skimmed, read(next_raw_walked(s, at, depth)), "from {at}");
+        }
+    }
+}
+
+/// ISO 32000-2's white-space, the six bytes (7.2.3), written out.
+fn decode_space(c: u8) -> bool {
+    matches!(c, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
 }
 
 /// `data` as a page's content, two streams split at its middle, drawn

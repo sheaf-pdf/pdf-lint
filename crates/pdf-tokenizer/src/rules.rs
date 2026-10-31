@@ -3,7 +3,7 @@
 
 use core::fmt::Debug;
 
-use crate::chars::{is_delimiter, is_white_space};
+use crate::chars::{DELIMITER, PDFIUM_SPACE, SPACE, class};
 
 /// Which lexical rules a [`Tokenizer`](crate::Tokenizer) follows: where a
 /// token ends, and what kind it is. ISO 32000-2's unless the caller
@@ -53,13 +53,22 @@ impl Rules {
     /// [`is_white_space`](crate::is_white_space) says, and under PDFium's
     /// 0x80 and 0xFF too.
     pub const fn is_white_space(self, b: u8) -> bool {
-        is_white_space(b) || (matches!(self, Rules::Pdfium) && matches!(b, 0x80 | 0xFF))
+        class(b) & self.space() != 0
     }
 
     /// Whether `b` is regular under these rules: neither white-space nor a
     /// delimiter. The delimiters are the same under both.
     pub const fn is_regular(self, b: u8) -> bool {
-        !self.is_white_space(b) && !is_delimiter(b)
+        class(b) & (self.space() | DELIMITER) == 0
+    }
+
+    /// The classes that are white-space under these rules.
+    #[inline(always)]
+    const fn space(self) -> u8 {
+        match self {
+            Rules::Iso => SPACE,
+            Rules::Pdfium => SPACE | PDFIUM_SPACE,
+        }
     }
 }
 

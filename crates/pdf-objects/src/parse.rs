@@ -1302,7 +1302,7 @@ impl Call {
     /// The next token that isn't white-space or a comment, noting when it
     /// reaches the data's end, or none comes before it.
     fn significant<'t, R: RuleSet>(&mut self, t: &mut Tokenizer<'t, R>) -> Option<Token<'t>> {
-        let token = t.find(|token| !matches!(token.kind, Kind::Space | Kind::Comment));
+        let token = t.next_significant();
         self.note(t);
         token
     }

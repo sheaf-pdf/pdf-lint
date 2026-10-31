@@ -2,6 +2,7 @@
 //! not in tokens: an end-of-data marker its filter writes, a JPEG's end of
 //! image, or an `EI` between white-space.
 
+use memchr::memmem;
 use pdf_tokenizer::{is_delimiter, is_white_space};
 
 /// Where RunLength data from `at` ends, past its end-of-data byte (128).
@@ -50,8 +51,5 @@ pub(crate) fn ei_scan(s: &[u8], start: usize) -> Option<usize> {
 
 /// Where `needle` first is in `s` from `at`.
 pub(crate) fn find(s: &[u8], at: usize, needle: &[u8]) -> Option<usize> {
-    s.get(at..)?
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .map(|n| at + n)
+    memmem::find(s.get(at..)?, needle).map(|n| at + n)
 }
