@@ -37,16 +37,16 @@
 # read whole and as two streams, its tokens tiling it, each operand read,
 # its number as PDFium reads it and as an object, and its operations its
 # tokens grouped, and again under small caps, what finding inline images'
-# ends may cost among them, its faults the same through
-# any sink, where an object ends an inline image's dictionary and each
-# lone `BI` told, each operation typed and stepped through the states, its
-# balance, marked content and names its steppers', and its searches for an
-# inline image's end and its walks past one to `EI`, remembered or not,
-# its Flate data decoded a window at a time as whole, its DCT and
-# CCITTFax data decoded, with the `image-ends` feature, and its skims of
-# arrays and dictionaries the same as plain ones', which two stable unit tests
-# (`mutated_seeds_keep_every_promise`, `random_fragments_keep_every_promise`)
-# run on mutated seeds and random content;
+# ends may cost among them, its faults the same through any sink, where an
+# object ends an inline image's dictionary and each lone `BI` told, each
+# operation typed and stepped through the states, its balance, marked
+# content and names its steppers', its searches for an inline image's end
+# and its walks past one to `EI`, remembered or not, and its skims of
+# arrays and dictionaries the same as plain ones', its DCT and CCITTFax
+# data decoded, with the `image-ends` feature, and read by the stand-in
+# too, which two stable unit tests (`mutated_seeds_keep_every_promise`,
+# `random_fragments_keep_every_promise`) run on mutated seeds and random
+# content;
 # `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
@@ -63,8 +63,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-# With `image-ends`, so the content target decodes DCT and CCITTFax data to
-# find where an inline image's ends, as the feature does.
+# With `image-ends`, so the content target can read with DCT and CCITTFax
+# data decoded to find where an inline image's ends, as it asks to.
 pdf-content-streams = { path = "../crates/pdf-content-streams", features = ["image-ends"] }
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
 # Both Flate backends, so that the filters' target runs on each.

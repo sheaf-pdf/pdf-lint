@@ -1,7 +1,9 @@
 # What page content is made of, for libFuzzer's -dict with the content
 # target: its delimiters, an inline image's keys and their abbreviations,
-# the filters and color spaces that end its data, a few operators, among
-# them marked content's and those that name resources, and what ISO
+# the filters, their parameters and the color spaces that end its data,
+# what starts and ends a filter's data (a zlib header; a JPEG's start of
+# image, a restart, a comment and its end of image), a few operators,
+# among them marked content's and those that name resources, and what ISO
 # 32000-2 reads otherwise than PDFium.
 "("
 ")"
@@ -57,6 +59,24 @@
 "/RL"
 "/DCT"
 "/Fl"
+"/LZW"
+"/CCF"
+"/DP "
+"/DecodeParms "
+"/Predictor 12 "
+"/Columns 16 "
+"/Colors 3 "
+"/EarlyChange 0 "
+"/K -1 "
+"/EndOfLine true "
+"/EncodedByteAlign true "
+"/EndOfBlock false "
+"/Rows 4 "
+"\x78\x01"
+"\x78\x9c"
+"\xff\xd8"
+"\xff\xd0"
+"\xff\xfe\x00\x03("
 "/L 9 "
 "/Length "
 "~>"

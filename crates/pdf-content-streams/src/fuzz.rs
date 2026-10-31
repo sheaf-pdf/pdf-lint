@@ -162,11 +162,11 @@ pub fn content(data: &[u8]) {
 /// data stops, AHx's `>` and a JPEG's end of image), and the remembered
 /// walks to the next `EI` operator where plain ones find it, or don't, the
 /// bytes each passed within those to the content's end; and from the
-/// start and from each `[` or
-/// `<` (some 32 of them spread over `s`, where there are more), an array
-/// or a dictionary skimmed is read to its end, or to its error, where a
-/// walk of every token it holds reads it, under the default cap on depth
-/// and one of two.
+/// start and from each `[` or `<` (some 32 of them spread over `s`, where
+/// there are more), an array or a dictionary skimmed is read to its end,
+/// or to its error, where a walk of every token it holds reads it, and as
+/// what it reads it, an operand an object or not, under the default cap on
+/// depth and one of two.
 pub fn searched(s: &[u8]) {
     let n = s.len();
     // Where each marker next is from each offset, found from the end.
@@ -239,13 +239,12 @@ pub fn searched(s: &[u8]) {
             }
         }
     }
-    let read = |r: Option<Result<(Range<usize>, Raw), Error>>| r.map(|r| r.map(|(at, _)| at));
     let openers: Vec<usize> = (0..n).filter(|&i| matches!(s[i], b'[' | b'<')).collect();
     let some = openers.iter().step_by((openers.len() / 32).max(1));
     for &at in std::iter::once(&0).chain(some) {
         for depth in [Limits::DEFAULT.depth, 2] {
-            let skimmed = read(next_raw(s, at, depth));
-            assert_eq!(skimmed, read(next_raw_walked(s, at, depth)), "from {at}");
+            let skimmed = next_raw(s, at, depth);
+            assert_eq!(skimmed, next_raw_walked(s, at, depth), "from {at}");
         }
     }
 }
@@ -1289,6 +1288,11 @@ mod tests {
         b"/F /LZW ",
         b"/DP <</Predictor 12 /Columns 2>> ",
         b"x\x01",
+        b"/F /CCF ",
+        b"/DP <</K -1 /Columns 16>> ",
+        b"\xff\xd8",
+        b"\xff\xd0",
+        b"\xff\xfe\x00\x03(",
         FLATE_EI,
         LZW_EI,
         b" +2147483648 ",
