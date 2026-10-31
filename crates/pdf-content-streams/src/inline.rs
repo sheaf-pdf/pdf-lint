@@ -138,7 +138,7 @@ impl<'a> InlineImage<'a> {
             UNCAPPED,
             |k, value| match pair {
                 Some(_) => dict.set(k, value),
-                None if &k[1..] == key => found = value,
+                None if &k[1..] == key => found = value.object(),
                 None => {}
             },
             &mut (),
@@ -154,9 +154,19 @@ impl<'a> InlineImage<'a> {
     /// The length it gives its data, its `/L` or `/Length` (PDF 2.0),
     /// where that's a length: a non-negative number under 2^32, a real's
     /// whole part. Where both are written, `/L`'s, as 8.9.7 has it; PDFium
-    /// reads neither, and finds the data otherwise.
+    /// reads neither, and finds the data otherwise. Read from its
+    /// dictionary as ISO 32000-2 reads it, to its first `ID`, one written
+    /// as a key's value among them, where PDFium reads on past such an
+    /// `ID` ([`entry`](InlineImage::entry)); and, where an object that's
+    /// no name is written for a key, which ends the dictionary as PDFium
+    /// reads it, to that object, as ISO 32000-2's keys are names (7.3.7).
     pub fn length(&self) -> Option<u64> {
-        self.entry(b"L").and_then(|l| int(l.bytes()))
+        let mut dict = ImageDict::default();
+        // It was read under a cap on depth, so nothing in it is deeper.
+        let s = &self.content[..self.at.end];
+        let set = |key: &[u8], value| dict.set(key, value);
+        image_dict(s, self.at.start, UNCAPPED, set, &mut ()).ok()?;
+        int(&self.content[dict.iso(L)?])
     }
 }
 
@@ -286,9 +296,12 @@ impl<'a, 'r> Images<'a, 'r> {
     /// a key both abbreviated and in full whose value ISO reads otherwise,
     /// its dictionary at `between`, from after `BI` to what `ends` it; the
     /// object that ends it, where one does, its own faults and then that
-    /// it ends it; its `ID`, where that ends it, with no white-space after
-    /// it; a length that ends its data elsewhere than `data`; tokens
-    /// between its data and its `EI`, which ends at `end`.
+    /// it ends it; its `ID`, where that ends it and ISO's dictionary too,
+    /// with no white-space after it (an earlier `ID`, a key's value, that
+    /// ends ISO's alone is [`image_dict`]'s to tell); a length that ends
+    /// its data elsewhere than `data`; tokens between its data and its
+    /// `EI`, which ends at `end`. ISO's dictionary is read to its first
+    /// `ID` ([`ImageDict::iso`]).
     fn faults(
         &self,
         dict: &ImageDict,
@@ -306,16 +319,14 @@ impl<'a, 'r> Images<'a, 'r> {
         // ISO asks white-space after `ID`, and counts its length from after
         // more of it, by the last of its filters (8.9.7): its white-space
         // (7.2.3).
-        let ascii = self
-            .last_filter(dict)
-            .is_some_and(|f| matches!(&*f, b"AHx" | b"ASCIIHexDecode" | b"A85" | b"ASCII85Decode"));
+        let ascii = ascii(s, dict.iso(F), self.lim.depth);
         match ends {
             Ends::Object(object) => {
                 let written = &s[object.clone()];
                 fault::token(written, object.start, sink);
                 sink.fault(object.clone(), Fault::DictEnd { written });
             }
-            Ends::Id(id) if !ascii && !s.get(id.end).is_some_and(|&c| is_white_space(c)) => {
+            Ends::Id(id) if !dict.ended() && !ascii && !space_after(s, id) => {
                 sink.fault(id.clone(), Fault::AfterId);
             }
             Ends::Id(_) | Ends::Keyword(_) => {}
@@ -349,17 +360,6 @@ impl<'a, 'r> Images<'a, 'r> {
             let written = &s[between.clone()];
             sink.fault(between, Fault::BeforeEi { written });
         }
-    }
-
-    /// The last of an image's filters, or its one, as ISO 32000-2 reads
-    /// its dictionary: a name's, decoded as ISO decodes one (7.3.5).
-    fn last_filter(&self, dict: &ImageDict) -> Option<Cow<'a, [u8]>> {
-        let f = &self.s[dict.iso(F)?];
-        let last = match f.first() {
-            Some(b'[') => *elements(f, self.lim.depth).last()?,
-            _ => f,
-        };
-        iso_name(last)
     }
 
     /// An image's first filter, by what finds its data's end, as PDFium
@@ -530,12 +530,20 @@ fn image_key(key: &[u8]) -> bool {
 struct ImageDict {
     /// By [`KEYS`]' order: the full name's value, then the abbreviation's.
     values: [[Option<Range<usize>>; 2]; KEYS.len()],
+    /// The values as ISO 32000-2's dictionary ends with them, where an
+    /// `ID` written as a key's value ends it before PDFium's (8.9.7).
+    iso: Option<[[Option<Range<usize>>; 2]; KEYS.len()]>,
 }
 
 impl ImageDict {
     /// `key`, a name as written, its `/` first, has `value`, or is taken
-    /// out where it has none.
-    fn set(&mut self, key: &[u8], value: Option<Range<usize>>) {
+    /// out where it has none. The first `ID` given as a value ends ISO
+    /// 32000-2's dictionary, with the values before it.
+    fn set(&mut self, key: &[u8], value: Value) {
+        if matches!(value, Value::Id) && self.iso.is_none() {
+            self.iso = Some(self.values.clone());
+        }
+        let value = value.object();
         let key = &key[1..];
         for (i, &(full, short, _)) in KEYS.iter().enumerate() {
             if key == full.as_bytes() {
@@ -547,6 +555,12 @@ impl ImageDict {
                 return;
             }
         }
+    }
+
+    /// Whether ISO 32000-2's dictionary ended before PDFium's, at an `ID`
+    /// written as a key's value.
+    fn ended(&self) -> bool {
+        self.iso.is_some()
     }
 
     /// Where the value of key `i` of [`KEYS`] is as PDFium reads it, `s`
@@ -564,20 +578,23 @@ impl ImageDict {
 
     /// Where the value of key `i` of [`KEYS`] is as ISO 32000-2 reads it:
     /// the abbreviation's, where both are written (8.9.7, as its errata
-    /// add).
+    /// add), in its dictionary, which ends at its first `ID`, a key's value
+    /// too.
     fn iso(&self, i: usize) -> Option<Range<usize>> {
-        let [full, short] = self.values[i].clone();
+        let [full, short] = self.iso.as_ref().unwrap_or(&self.values)[i].clone();
         short.or(full)
     }
 
     /// The keys PDFium reads otherwise than ISO 32000-2, `s` what the
-    /// dictionary is in: both spellings written, and the full name's value
-    /// an abbreviated name that means another than the abbreviation's.
+    /// dictionary is in: both spellings written, PDFium's value the full
+    /// name's, an abbreviated name, and ISO's the abbreviation's
+    /// ([`iso`](ImageDict::iso)), which means another.
     fn parted<'s>(&'s self, s: &'s [u8]) -> impl Iterator<Item = &'static str> + 's {
         (0..KEYS.len()).filter_map(move |i| {
-            let [Some(full), Some(short)] = self.values[i].clone() else {
+            let [Some(full), Some(_)] = self.values[i].clone() else {
                 return None;
             };
+            let short = self.iso.as_ref().unwrap_or(&self.values)[i][1].clone()?;
             fn meaning(v: &[u8]) -> Cow<'_, [u8]> {
                 match name(v) {
                     Some(n) => expanded(&n).map_or(n, Cow::Borrowed),
@@ -611,6 +628,28 @@ pub(crate) enum Ends {
     Keyword(Range<usize>),
 }
 
+/// What's written for an inline image's key, as [`image_dict`] gives it.
+pub(crate) enum Value {
+    /// An object: where it is.
+    Object(Range<usize>),
+    /// What PDFium reads as no object, a keyword, a closer or a brace,
+    /// which takes the key out.
+    None,
+    /// `ID`, which PDFium reads as no object too, and which ends ISO
+    /// 32000-2's dictionary (8.9.7).
+    Id,
+}
+
+impl Value {
+    /// Where the object is, if it's one.
+    fn object(self) -> Option<Range<usize>> {
+        match self {
+            Value::Object(at) => Some(at),
+            Value::None | Value::Id => None,
+        }
+    }
+}
+
 /// What reading an inline image's `BI` gives ([`Images::read`]).
 pub(crate) enum Image {
     /// An image: where it ends, past its `EI`, and where its data is.
@@ -623,19 +662,20 @@ pub(crate) enum Image {
 /// The dictionary of the inline image whose `BI` is at `bi`, as PDFium's
 /// `Handle_BeginImage` reads it, and what ends it ([`Ends`]): a name, its
 /// value, and so on, until what's written for a key isn't a name. `entry`
-/// is given each key, as written, and where its value is, or none for a
-/// value PDFium reads as no object (a keyword, `ID` among them, a closer
+/// is given each key, as written, and its value ([`Value`]): where it is,
+/// or what PDFium reads as no object (a keyword, `ID` among them, a closer
 /// or a brace), which takes the key out. Where ISO 32000-2 would read it
 /// otherwise, `sink` is told, if it wants: each key's and value's own
 /// faults, a key with a `#` escape ISO reads as an image's, a word that's
-/// no object as a value, and a key whose value is `ID`, which ends ISO's
-/// dictionary; not what ends it, which is the image's to tell
-/// ([`Images::read`]).
+/// no object as a value, a key whose value is `ID`, which ends ISO's
+/// dictionary, and, the first such `ID`, its own white-space after it
+/// where ISO asks it ([`Fault::AfterId`]); not what ends PDFium's, which
+/// is the image's to tell ([`Images::read`]).
 fn image_dict<'a>(
     s: &'a [u8],
     bi: usize,
     depth: usize,
-    mut entry: impl FnMut(&[u8], Option<Range<usize>>),
+    mut entry: impl FnMut(&[u8], Value),
     sink: &mut (impl Sink<'a> + ?Sized),
 ) -> Result<Ends, Error> {
     let unterminated = Error {
@@ -643,6 +683,9 @@ fn image_dict<'a>(
         kind: ErrorKind::InlineImage,
     };
     let mut at = bi + 2;
+    // ISO 32000-2's dictionary, to its first `ID`, a key's value too: its
+    // filters, full name and abbreviation, and whether it's ended.
+    let (mut filter, mut ended): ([Option<Range<usize>>; 2], bool) = ([None, None], false);
     loop {
         let (key, kind) = next_raw(s, at, depth).ok_or(unterminated)??;
         match kind {
@@ -657,11 +700,16 @@ fn image_dict<'a>(
         let (value, kind) = next_raw(s, key.end, depth).ok_or(unterminated)??;
         at = value.end;
         let written = &s[value.clone()];
+        let id = matches!(kind, Raw::Op) && written == b"ID";
         if sink.wants() {
             match kind {
-                Raw::Op if written == b"ID" => {
+                _ if id => {
                     let written = &s[key.clone()];
                     sink.fault(key.clone(), Fault::NoValue { written });
+                    let [full, short] = filter.clone();
+                    if !ended && !ascii(s, short.or(full), depth) && !space_after(s, &value) {
+                        sink.fault(value.clone(), Fault::AfterId);
+                    }
                 }
                 Raw::Op => sink.fault(value.clone(), Fault::Keyword { written }),
                 Raw::Operand => {
@@ -671,8 +719,45 @@ fn image_dict<'a>(
         }
         let none =
             matches!(kind, Raw::Op) || matches!(written, b")" | b">" | b"]" | b">>" | b"{" | b"}");
-        entry(&s[key], (!none).then_some(value));
+        let key = &s[key];
+        if !ended {
+            match key {
+                b"/Filter" => filter[0] = (!none).then(|| value.clone()),
+                b"/F" => filter[1] = (!none).then(|| value.clone()),
+                _ => {}
+            }
+        }
+        ended |= id;
+        let value = match () {
+            _ if id => Value::Id,
+            _ if none => Value::None,
+            _ => Value::Object(value),
+        };
+        entry(key, value);
     }
+}
+
+/// Whether the last of an image's filters, or its one, its value at `f`,
+/// is one of the two ASCII ones, ASCIIHexDecode and ASCII85Decode, as ISO
+/// 32000-2 reads its name, decoded (7.3.5): where ISO asks no white-space
+/// after `ID`, and counts the data's length from after any (8.9.7).
+fn ascii(s: &[u8], f: Option<Range<usize>>, depth: usize) -> bool {
+    let Some(f) = f.map(|f| &s[f]) else {
+        return false;
+    };
+    let last = match f.first() {
+        Some(b'[') => elements(f, depth).last().copied(),
+        _ => Some(f),
+    };
+    let ascii =
+        |n: Cow<[u8]>| matches!(&*n, b"AHx" | b"ASCIIHexDecode" | b"A85" | b"ASCII85Decode");
+    last.and_then(iso_name).is_some_and(ascii)
+}
+
+/// Whether the byte after `id`, an `ID`, is white-space as ISO 32000-2
+/// reads it (7.2.3).
+fn space_after(s: &[u8], id: &Range<usize>) -> bool {
+    s.get(id.end).is_some_and(|&c| is_white_space(c))
 }
 
 /// An inline image's key at `r`, a name: where ISO 32000-2 would read it

@@ -1353,6 +1353,72 @@ fn an_inline_images_dictionary_read_otherwise_is_told() {
     assert_eq!(kept.0, []);
 }
 
+/// What's judged by ISO 32000-2's reading of an inline image's dictionary
+/// is read to its first `ID`, a key's value too, where PDFium reads on
+/// past it: its length, its filters (whether ISO asks white-space after
+/// that `ID`) and its abbreviated keys. Where an object ends PDFium's
+/// dictionary, ISO's is read to that object.
+#[test]
+fn an_inline_images_dictionary_as_iso_reads_it_ends_at_its_first_id() {
+    let image = |s: &[u8]| {
+        let read = operations_of(s, &ResCx::none(), &Limits::DEFAULT);
+        let image = read[0].as_ref().unwrap().inline_image().unwrap();
+        (image.length(), image.data())
+    };
+    let no_value = |w: &str| format!("the key {w} has no value");
+    let after_id = "an inline image's ID has no white-space after it".to_string();
+    // ISO's `/L` is the first; the data is PDFium's, after the second
+    // `ID`, one byte as the first `/L` says.
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G /L 1 /K ID /L 5 ID x EI";
+    assert_eq!(image(s), (Some(1), place(s, b"x")));
+    assert_eq!(told(s), [(place(s, b"/K"), no_value("/K"))]);
+    // ISO asks white-space after its `ID`, where no ASCII filter is before
+    // it; one after it is no filter to ISO.
+    let s = b"BI /W 1 /H 1 /CS /G /BPC 8 /K ID/F /AHx ID 41> EI";
+    assert_eq!(image(s), (None, place(s, b"41>")));
+    let id = place(s, b"ID/F");
+    assert_eq!(
+        told(s),
+        [
+            (place(s, b"/K"), no_value("/K")),
+            (id.start..id.start + 2, after_id.clone())
+        ]
+    );
+    let s = b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx /K ID/L 9 ID 41> EI";
+    assert_eq!(image(s), (None, place(s, b"41>")));
+    assert_eq!(told(s), [(place(s, b"/K"), no_value("/K"))]);
+    // Only the first `ID` is ISO's: none after the second is asked.
+    let s = b"BI /W 1 /H 1 /CS /G /BPC 8 /K ID /J ID/L 1 ID x EI";
+    assert_eq!(image(s), (None, place(s, b"x")));
+    assert_eq!(
+        told(s),
+        [
+            (place(s, b"/K"), no_value("/K")),
+            (place(s, b"/J"), no_value("/J"))
+        ]
+    );
+    // ISO's abbreviation is the one before its `ID`.
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G /K ID /ColorSpace /RGB ID xyz EI";
+    let words = "an inline image's ColorSpace is read from its full name, and by ISO 32000-2 \
+                 from its abbreviation";
+    assert_eq!(
+        told(s),
+        [
+            (place(s, b"/K"), no_value("/K")),
+            (
+                place(s, b" /W 1 /H 1 /BPC 8 /CS /G /K ID /ColorSpace /RGB "),
+                words.to_string()
+            )
+        ]
+    );
+    let s = b"BI /W 1 /H 1 /BPC 8 /ColorSpace /RGB /K ID /CS /G ID xyz EI";
+    assert_eq!(told(s), [(place(s, b"/K"), no_value("/K"))]);
+    // An object that ends PDFium's dictionary ends ISO's here too.
+    let s = b"BI /W 1 /H 1 /CS /G /BPC 8 /L 1 2 /L 3 ID x EI";
+    let data = place(s, b"/L 3").start;
+    assert_eq!(image(s), (Some(1), data..data + 1));
+}
+
 /// PDFium reads 0x80 and 0xFF as white-space, beside ISO 32000-2's six
 /// bytes, in content as everywhere (PDFium 7881 and 8076 alike: `1 2 3
 /// 4<80>re f` fills the rectangle, `/F0<80>10 Tf` sets the font `F0`, and

@@ -289,7 +289,10 @@ pub enum Fault<'a> {
     /// 32000-2's `/L` is the data's length (8.9.7, "shall"), after the
     /// white-space byte after `ID`, and any more white-space where the
     /// last of its filters is one of the two ASCII ones, ASCIIHexDecode and
-    /// ASCII85Decode.
+    /// ASCII85Decode. The length and the filters are read from the
+    /// dictionary as ISO reads it, to its first `ID`, a key's value too
+    /// ([`InlineImage::length`](crate::InlineImage::length)), and counted
+    /// from where the data is read here.
     #[error("an inline image's data is read as {read} bytes, where its length says {given}")]
     ImageLength {
         /// The length its dictionary gives.
@@ -301,7 +304,10 @@ pub enum Fault<'a> {
     /// the data read from straight after it, as PDFium reads it: ISO
     /// 32000-2 asks one white-space byte after `ID`, unless the last of the
     /// image's filters is one of the two ASCII ones, ASCIIHexDecode and
-    /// ASCII85Decode (8.9.7, "shall", as its errata correct it).
+    /// ASCII85Decode (8.9.7, "shall", as its errata correct it). The `ID`
+    /// is the first, where ISO's dictionary ends: one written as a key's
+    /// value ([`NoValue`](Fault::NoValue)) too, after which PDFium reads
+    /// on, its filters those before it.
     #[error("an inline image's ID has no white-space after it")]
     AfterId,
     /// Tokens between an inline image's data and its `EI`: passed over
