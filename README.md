@@ -58,7 +58,10 @@ writer, pdf-content-streams' tokens, operations, faults, operator table,
 and the balance, marked content and names over them, and the reader and
 checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
-says for how many seconds (60 by default).
+says for how many seconds (60 by default). CI fuzzes each target the same
+way: two minutes on every pull request and push to main, and half an hour
+twice a week, each run starting from the inputs the runs before it kept
+(`.github/workflows/fuzz.yml`).
 
 ## License
 

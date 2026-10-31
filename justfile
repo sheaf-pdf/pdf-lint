@@ -13,6 +13,10 @@ structure_msrv := `grep -m1 '^rust-version' crates/pdf-structure/Cargo.toml | cu
 content_msrv := `grep -m1 '^rust-version' crates/pdf-content-streams/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
 
+# The nightly the fuzz targets build on: `nightly`, or the toolchain
+# FUZZ_TOOLCHAIN names, as CI's fuzzing pins one.
+fuzz_toolchain := env("FUZZ_TOOLCHAIN", "nightly")
+
 # List the recipes.
 default:
     @just --list --unsorted
@@ -177,7 +181,7 @@ arlington-msrv:
 # them; or `check`, the reader and the checker. `structure`, `write` and
 # `check` begin from the seeds pdf-lint's fuzz module makes, `write`'s with
 # the third byte its input has; `content` from those pdf-content-streams'
-# fuzz module makes.
+# fuzz module makes. The nightly is `fuzz_toolchain`.
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.
 fuzz target="tokenize" seconds="60":
@@ -186,39 +190,44 @@ fuzz target="tokenize" seconds="60":
     host=$(rustc -vV | sed -n 's/^host: //p')
     case "{{ target }}" in
     tokenize)
-        cargo +nightly fuzz run --target "$host" tokenize -- -dict=fuzz/pdf.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" tokenize -- -dict=fuzz/pdf.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     filters)
-        cargo +nightly fuzz run --target "$host" filters -- -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" filters -- -max_total_time={{ seconds }} -timeout=10
         ;;
     crypt)
-        cargo +nightly fuzz run --target "$host" crypt -- -max_total_time={{ seconds }} -timeout=10 -len_control=0
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" crypt -- -max_total_time={{ seconds }} -timeout=10 -len_control=0
         ;;
     objects)
-        cargo +nightly fuzz run --target "$host" objects -- -dict=fuzz/pdf.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" objects -- -dict=fuzz/pdf.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     structure)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/structure
-        cargo +nightly fuzz run --target "$host" structure fuzz/corpus/structure fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" structure fuzz/corpus/structure fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     write)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/write" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_write_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/write
-        cargo +nightly fuzz run --target "$host" write fuzz/corpus/write fuzz/seeds/write -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" write fuzz/corpus/write fuzz/seeds/write -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     content)
         PDF_CONTENT_STREAMS_FUZZ_SEEDS="$PWD/fuzz/seeds/content" cargo test --locked -q -p pdf-content-streams --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/content
-        cargo +nightly fuzz run --target "$host" content fuzz/corpus/content fuzz/seeds/content -- -dict=fuzz/content.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" content fuzz/corpus/content fuzz/seeds/content -- -dict=fuzz/content.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/check
-        cargo +nightly fuzz run --target "$host" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
         echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content or check" >&2
         exit 2
         ;;
     esac
+
+# Cut a fuzz target's corpus in fuzz/corpus down to the inputs that keep
+# what it covers, as CI's scheduled fuzzing does before keeping it.
+fuzz-cmin target="tokenize":
+    cargo +{{ fuzz_toolchain }} fuzz cmin --target "$(rustc -vV | sed -n 's/^host: //p')" {{ target }}
