@@ -216,13 +216,15 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// The first `len` bytes of `rest`, which is what's left, as a token of
     /// `kind`: `rest` taken once a token, by its caller. `len` is never more
     /// than its length, as each token function measures within what it's
-    /// given (which the fuzz target checks on every token), so it's sliced
-    /// directly: a token function that measured past it, a bug, panics here
-    /// in any build.
+    /// given (which the fuzz target checks on every token). A token function
+    /// that measured past it would be a bug: a build with debug assertions
+    /// stops at it, and one without reads the token to the input's end, so
+    /// the tokenizer still never panics and still moves on.
     fn token(&mut self, rest: &'a [u8], kind: Kind, len: usize) -> Token<'a> {
+        debug_assert!(len <= rest.len(), "a token measured past what's left");
         let start = self.pos;
-        let bytes = &rest[..len];
-        self.pos += len;
+        let bytes = &rest[..len.min(rest.len())];
+        self.pos += bytes.len();
         Token { kind, start, bytes }
     }
 }
@@ -838,14 +840,22 @@ mod tests {
     }
 
     /// A token measured past what's left, which no token function does, is
-    /// a bug, and panics in any build.
+    /// a bug: a build with debug assertions panics at it, and one without
+    /// reads the token to the input's end and moves on.
     #[test]
-    #[should_panic]
-    fn a_token_measured_past_the_input_panics() {
-        let mut tokens = Tokenizer::new(b"abc");
-        tokens.pos = 1;
-        let rest = tokens.rest();
-        tokens.token(rest, Kind::Keyword, 5);
+    fn a_token_measured_past_the_input_stops_only_a_debug_build() {
+        let read = std::panic::catch_unwind(|| {
+            let mut tokens = Tokenizer::new(b"abc");
+            tokens.pos = 1;
+            let rest = tokens.rest();
+            let token = tokens.token(rest, Kind::Keyword, 5);
+            (token.start, token.bytes, tokens.offset(), tokens.next())
+        });
+        if cfg!(debug_assertions) {
+            assert!(read.is_err(), "a debug build stops at the bug");
+        } else {
+            assert_eq!(read.ok(), Some((1, &b"bc"[..], 3, None)));
+        }
     }
 
     /// The tokenizer under PDFium's rules, where they part from ISO
