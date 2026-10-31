@@ -75,8 +75,9 @@ pub enum SpliceError {
 ///   ISO 32000-2 has neither (9.4.1), the text matrices as the last text
 ///   object left them: so a range outside one that shows text, moves a
 ///   line or holds a text object, again even inside a `q`…`Q` of its own,
-///   is refused where text is shown or a line moved after it outside a
-///   text object, before one begins or `Tm` sets the matrices;
+///   is refused where text is shown after it outside a text object, or,
+///   where it moves a line or holds a text object, a line is moved there,
+///   before a text object begins or `Tm` sets the matrices;
 /// - text shown while the text rendering mode adds it to the clip (modes
 ///   4 to 7) goes into the clip at the end of its text object (9.3.6),
 ///   which lasts past it: so it shows no text while the mode may, but in a
