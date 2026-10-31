@@ -8,12 +8,12 @@ use std::iter::FusedIterator;
 use std::ops::Range;
 
 use pdf_objects::{Dict, Form, Object, Str, Value};
-use pdf_tokenizer::Kind;
 use pdf_tokenizer::decode::pdfium::{self, Number};
+use pdf_tokenizer::{Kind, Token};
 
 use crate::fault::{self, Fault, Read, Sink};
 use crate::limits::Limits;
-use crate::scan::{UNCAPPED, is_number, next_raw, significant, skip_space};
+use crate::scan::{Event, TOP, Visit, element, is_number, walk};
 
 /// An operand as written, and where it is in the content read: what an
 /// operation's operands are
@@ -120,11 +120,14 @@ impl<'a> Operand<'a> {
     /// It read as [`object`](Operand::object) reads it, and where ISO
     /// 32000-2 would read what's inside it otherwise told to `sink`
     /// ([`fault`](crate::fault)), at offsets into the content: each
-    /// element's, key's and value's own faults, a key that's an object but
-    /// no name, a word that's no object, and a key with no value, as
-    /// they're read, those before where reading stops among them. Its own
-    /// faults, as a token, are the tokens' to tell, or its array's, for an
-    /// element. What's read is the same, whatever the sink.
+    /// element's, key's and value's own faults, a word that's no object,
+    /// and, where a dictionary is none as PDFium reads it, a key that's no
+    /// name or a key with no value, as they're read, those before where
+    /// reading stops among them. Its own faults, as a token, are the
+    /// tokens' to tell, or its array's, for an element: among them where
+    /// PDFium ends what it holds before ISO would
+    /// ([`Fault::NestedArray`], [`Fault::NoDict`]). What's read is the
+    /// same, whatever the sink.
     ///
     /// ```
     /// use pdf_content_streams::fault::{Fault, Sink};
@@ -140,22 +143,22 @@ impl<'a> Operand<'a> {
     ///     }
     /// }
     ///
-    /// let content = b"/Span <</MCID 0 1 /Alt>> BDC";
+    /// let content = b"/Span <</MCID 0 /Alt (A) 1 /Lang>> BDC";
     /// let res = ResCx::none();
     /// let limits = Limits::DEFAULT;
     /// let bdc = operations(content, &res, &limits).next().unwrap().unwrap();
     /// let mut kept = Collected::default();
-    /// let props = bdc.arg(0).unwrap().object_with(&limits, &mut kept);
-    /// let mcid = props.unwrap().as_dict().unwrap().get(b"MCID").cloned();
+    /// // A key that's no name: PDFium reads no dictionary, and ends the
+    /// // operand there, `BDC`'s last operands what follows.
+    /// let props = bdc.arg(2).unwrap();
+    /// assert_eq!(props.bytes(), b"<</MCID 0 /Alt (A) 1");
+    /// assert_eq!(props.object_with(&limits, &mut kept), None);
+    /// assert_eq!(kept.0, [(25..26, Fault::Key { written: b"1" })]);
+    /// assert_eq!(bdc.arg(0).unwrap().bytes(), b">>");
+    /// // Without the key that's no name, the list is read.
+    /// let read = pdf_content_streams::object(b"<</MCID 0 /Alt (A)>>", &limits);
+    /// let mcid = read.unwrap().as_dict().unwrap().get(b"MCID").cloned();
     /// assert_eq!(mcid, Some(Object::from(0)));
-    /// let (one, alt) = (&content[16..17], &content[18..22]);
-    /// assert_eq!(
-    ///     kept.0,
-    ///     [
-    ///         (16..17, Fault::Key { written: one }),
-    ///         (18..22, Fault::NoValue { written: alt }),
-    ///     ]
-    /// );
     /// ```
     pub fn object_with(
         &self,
@@ -167,28 +170,32 @@ impl<'a> Operand<'a> {
             base: self.at,
             values: limits.values,
             sink,
+            open: Vec::new(),
+            read: None,
         };
-        match read.item(&mut 0, limits.depth, None)? {
-            Item::Value(object) => object,
-            Item::Close => None,
-        }
+        walk(self.bytes, 0, TOP, limits.depth, false, &mut read)?.ok()?;
+        read.read?
     }
 
-    /// An array's elements, as written, each where it is, in order: each
-    /// a number, a name, a string, an array or a dictionary with all it
-    /// holds, `true`, `false` or `null`, or what's no object (a closing
-    /// delimiter with nothing to close, a word that's no number); none
-    /// when it isn't an array. Nothing is gathered: each is found as it's
-    /// asked for, where an array's [`object`](Operand::object) finds it.
+    /// An array's elements, as written, each where it is, in order, as
+    /// PDFium reads them: each a number, a name, a string, a dictionary
+    /// (to where PDFium ends it), `true`, `false` or `null`, or what's no
+    /// object (a closing delimiter with nothing to close, a word that's no
+    /// number, a `[` that opens no array, as PDFium reads an array inside
+    /// an array, outside any dictionary); none when it isn't an array.
+    /// Nothing is gathered: each is found as it's asked for, where an
+    /// array's [`object`](Operand::object) finds it. An array of PDFium's
+    /// ends at the first `]` read for an element, so `[[1] 2]` is `[[1]`,
+    /// its elements `[` and `1`.
     pub fn elements(&self) -> Elements<'a> {
-        let inner = match self.bytes {
-            [b'[', inner @ ..] => inner.strip_suffix(b"]").unwrap_or(inner),
+        let array = match self.bytes {
+            [b'[', ..] => self.bytes,
             _ => &[],
         };
         Elements {
-            inner,
-            base: self.at + 1,
-            at: 0,
+            array,
+            base: self.at,
+            at: 1,
         }
     }
 
@@ -220,7 +227,9 @@ impl<'a> Operand<'a> {
         self.bytes.first() == Some(&b'[')
     }
 
-    /// Whether it's a dictionary: it starts with `<<`.
+    /// Whether it's a dictionary: it starts with `<<`. It may still read as
+    /// none, where PDFium reads it so ([`object`]), such as `<< 1`, read to
+    /// a key that's no name.
     pub fn is_dict(&self) -> bool {
         self.bytes.starts_with(b"<<")
     }
@@ -239,11 +248,11 @@ impl fmt::Debug for Operand<'_> {
 /// ([`Operand::elements`]).
 #[derive(Debug, Clone)]
 pub struct Elements<'a> {
-    /// What's inside the array, its `[` and `]` left out.
-    inner: &'a [u8],
-    /// Where `inner` starts in the content.
+    /// The array, from its `[`.
+    array: &'a [u8],
+    /// Where `array` starts in the content.
     base: usize,
-    /// Where the next element is looked for in `inner`.
+    /// Where the next element is looked for in `array`.
     at: usize,
 }
 
@@ -251,16 +260,11 @@ impl<'a> Iterator for Elements<'a> {
     type Item = Operand<'a>;
 
     fn next(&mut self) -> Option<Operand<'a>> {
-        // The array was read under a cap on depth, so nothing in it is
-        // deeper, and an element is read as the array read it.
-        let Some(Ok((r, _))) = next_raw(self.inner, self.at, UNCAPPED) else {
-            self.at = self.inner.len();
-            return None;
-        };
-        self.at = r.end;
+        // An element is read as the array read it.
+        let r = element(self.array, &mut self.at)?.at;
         Some(Operand {
             at: self.base + r.start,
-            bytes: &self.inner[r],
+            bytes: &self.array[r],
         })
     }
 }
@@ -339,15 +343,19 @@ pub(crate) fn iso_name(operand: &[u8]) -> Option<Cow<'_, [u8]>> {
 /// ([`Operand::bytes`]) with pdf-objects' `Parser`, by ISO's rules. None
 /// for what isn't an object, such as a stray closing delimiter or a word
 /// that's no number, and for one that doesn't end, nests deeper than
-/// [`Limits::depth`] or holds more values than [`Limits::values`]. A
-/// dictionary keeps every entry, a key written twice too, as pdf-objects'
-/// [`Dict`] does, so a lookup takes its last; an entry whose key isn't a
-/// name is passed over. A string keeps its [`Form`]. Nothing read has a
-/// place ([`Object::at`] is none): an operand's place is in the content,
-/// where its token's range is. It's read in one pass, so a deep operand
-/// costs what a flat one of its size does, but it nests on the stack a
-/// level for each array or dictionary ([`Limits::depth`] says what that
-/// takes).
+/// [`Limits::depth`] or PDFium reads, or holds more values than
+/// [`Limits::values`]. Arrays and dictionaries are read as PDFium's
+/// `ReadNextObject` reads them, the first object in the bytes: in an
+/// array, outside any dictionary, a `[` opens no array, and the first `]`
+/// ends it, so `[[1] 2]` is the array of 1; a word that's no object in an
+/// array is dropped; and a dictionary with a key that's no name, or a
+/// value that's no object, is none, so `<< /A 1 2 >>` is none, and
+/// `[<< 1 >> 2]` the array of 2. A dictionary keeps every entry, a key
+/// written twice too, as pdf-objects' [`Dict`] does, so a lookup takes
+/// its last. A string keeps its [`Form`]. Nothing read has a place
+/// ([`Object::at`] is none): an operand's place is in the content, where
+/// its token's range is. It's read in one pass, what's open kept on the
+/// heap, so a deep operand costs what a flat one of its size does.
 ///
 /// It reads any operand's bytes, such as a token's
 /// ([`Tok::Operand`](crate::Tok::Operand)), which has no [`Operand`] to
@@ -374,126 +382,134 @@ pub fn object(operand: &[u8], limits: &Limits) -> Option<Object> {
     .object_with(limits, &mut ())
 }
 
-/// What's next in an operand read as an object.
-enum Item {
-    /// An object, or None for what isn't one.
-    Value(Option<Object>),
-    /// The delimiter that ends the array or dictionary being read.
-    Close,
-}
-
-/// An operand being read as an object: its bytes, where they are in the
-/// content, how many more values it may hold, and the sink told where ISO
-/// 32000-2 would read what's inside it otherwise.
+/// An operand being read as an object, built from a [`walk`]'s steps:
+/// where it is in the content, how many more values it may hold, the sink
+/// told where ISO 32000-2 would read what's inside it otherwise, what's
+/// open, and what's read.
 struct Reading<'a, 's, S: ?Sized> {
+    /// The operand's bytes.
     s: &'a [u8],
-    /// Where `s` starts in the content.
+    /// Where they start in the content.
     base: usize,
     /// The values, objects or not, it may read yet.
     values: usize,
     sink: &'s mut S,
+    /// Each array or dictionary open, the outermost first.
+    open: Vec<Partial>,
+    /// What's read, once it is: an object, or None for what's none. None
+    /// throughout once it's read more values than it may.
+    read: Option<Option<Object>>,
+}
+
+/// An array or a dictionary being read: what it holds so far, and a
+/// dictionary's key read, with where it is, waiting for its value.
+enum Partial {
+    Array(Vec<Object>),
+    Dict(Dict, Option<(Vec<u8>, Range<usize>)>),
+}
+
+impl<'a, S: Sink<'a> + ?Sized> Visit<'a> for Reading<'a, '_, S> {
+    fn visit(&mut self, event: Event<'a>) {
+        if self.values == usize::MAX {
+            return;
+        }
+        if !matches!(event, Event::Close(_) | Event::Unmade) {
+            match self.values.checked_sub(1) {
+                Some(left) => self.values = left,
+                // Past the values it may read: none read, and nothing
+                // told after.
+                None => {
+                    self.values = usize::MAX;
+                    self.read = None;
+                    return;
+                }
+            }
+        }
+        match event {
+            Event::Leaf(token) => {
+                self.inside(token);
+                self.put(leaf(token));
+            }
+            Event::Word(token) => {
+                // A key with no value: `>>` read for it.
+                let key = match self.open.last() {
+                    Some(Partial::Dict(_, Some((_, key)))) if token.kind == Kind::DictClose => {
+                        Some(key.clone())
+                    }
+                    _ => None,
+                };
+                match key {
+                    Some(key) => self.tell(key, |written| Fault::NoValue { written }),
+                    None => self.inside(token),
+                }
+                self.put(None);
+            }
+            Event::Open(token) => self.open.push(match token.kind {
+                Kind::DictOpen => Partial::Dict(Dict::new(), None),
+                _ => Partial::Array(Vec::new()),
+            }),
+            Event::Key(token) => {
+                self.inside(token);
+                let key = name(token.bytes).map_or_else(Vec::new, Cow::into_owned);
+                let place = token.range();
+                if let Some(Partial::Dict(_, pending)) = self.open.last_mut() {
+                    *pending = Some((key, place));
+                }
+            }
+            Event::NotKey(token) => {
+                if self.sink.wants() {
+                    let place = self.base + token.start..self.base + token.end();
+                    match fault::token(token.bytes, place.start, self.sink) {
+                        Read::Object => self.tell(token.range(), |written| Fault::Key { written }),
+                        Read::Keyword => {
+                            self.tell(token.range(), |written| Fault::Keyword { written });
+                        }
+                        Read::Told => {}
+                    }
+                }
+            }
+            Event::Close(_) => {
+                let value = match self.open.pop() {
+                    Some(Partial::Array(elements)) => Value::Array(elements),
+                    Some(Partial::Dict(dict, _)) => Value::Dict(dict),
+                    None => return,
+                };
+                self.put(Some(Object::new(value)));
+            }
+            Event::Unmade => {
+                self.open.pop();
+                self.put(None);
+            }
+        }
+    }
 }
 
 impl<'a, S: Sink<'a> + ?Sized> Reading<'a, '_, S> {
-    /// The item from `*at`, `*at` moved past it, inside the array or
-    /// dictionary that `close` ends, if one's open, `depth` more of which
-    /// may nest. None at the end, and for a string, array or dictionary
-    /// that doesn't end, one nested too deep, or a value past those it may
-    /// read. Inside an array or a dictionary, an item that isn't one is
-    /// told to the sink, if it wants: its own faults, and a word that's no
-    /// object.
-    fn item(&mut self, at: &mut usize, depth: usize, close: Option<&[u8]>) -> Option<Item> {
-        let s = self.s;
-        let token = significant(s, *at)?;
-        let (start, end, written) = (token.start, token.end(), token.bytes);
-        let closer = match token.kind {
-            Kind::ArrayClose => close == Some(b"]"),
-            Kind::DictClose => close == Some(b">>"),
-            _ => false,
-        };
-        if !closer {
-            self.values = self.values.checked_sub(1)?;
-        }
-        let value = match token.kind {
-            Kind::String { closed: true } => Some(Value::String(
-                Str::Bytes(literal(written)),
-                Some(Form::Literal),
-            )),
-            Kind::HexString { closed: true } => {
-                Some(Value::String(Str::Bytes(hex(written)), Some(Form::Hex)))
-            }
-            // A string that doesn't end.
-            Kind::String { .. } | Kind::HexString { .. } => return None,
-            Kind::DictOpen => {
-                *at = end;
-                let dict = self.dictionary(at, depth.checked_sub(1)?)?;
-                return Some(Item::Value(Some(dict)));
-            }
-            Kind::ArrayOpen => {
-                *at = end;
-                let array = self.array(at, depth.checked_sub(1)?)?;
-                return Some(Item::Value(Some(array)));
-            }
-            _ if closer => {
-                *at = end;
-                return Some(Item::Close);
-            }
-            Kind::Name => Some(Value::Name(name(written)?.into_owned())),
-            Kind::Integer | Kind::Real | Kind::Keyword => word(written),
-            // A closer with nothing to close, or a brace.
-            _ => None,
-        };
-        *at = end;
-        if close.is_some() && self.sink.wants() {
-            let place = self.base + start..self.base + end;
-            if fault::token(written, place.start, self.sink) == Read::Keyword {
-                self.sink.fault(place, Fault::Keyword { written });
-            }
-        }
-        Some(Item::Value(value.map(Object::new)))
-    }
-
-    /// The array whose `[` ends at `*at`: its elements read, to its `]`.
-    fn array(&mut self, at: &mut usize, depth: usize) -> Option<Object> {
-        let mut elements = Vec::new();
-        loop {
-            match self.item(at, depth, Some(b"]")) {
-                Some(Item::Value(element)) => elements.extend(element),
-                Some(Item::Close) => return Some(Object::new(Value::Array(elements))),
-                None => return None,
+    /// `value` read where the innermost array or dictionary open wants
+    /// one, or for the operand: an element kept, a value kept under its
+    /// key, which is then read, or the operand read. What's none is
+    /// dropped.
+    fn put(&mut self, value: Option<Object>) {
+        match self.open.last_mut() {
+            None => self.read = Some(value),
+            Some(Partial::Array(elements)) => elements.extend(value),
+            Some(Partial::Dict(dict, pending)) => {
+                if let (Some((key, _)), Some(value)) = (pending.take(), value) {
+                    dict.push(key, value);
+                }
             }
         }
     }
 
-    /// The dictionary whose `<<` ends at `*at`: its entries read, to its
-    /// `>>`. A key that's an object but no name, and a key with no value,
-    /// told to the sink, if it wants.
-    fn dictionary(&mut self, at: &mut usize, depth: usize) -> Option<Object> {
-        let mut dict = Dict::new();
-        loop {
-            let from = *at;
-            let key = match self.item(at, depth, Some(b">>"))? {
-                Item::Value(key) => key,
-                Item::Close => return Some(Object::new(Value::Dict(dict))),
-            };
-            // Where the key is, its white-space before it left out.
-            let place = skip_space(self.s, from)..*at;
-            let key = match key.map(Object::into_value) {
-                Some(Value::Name(key)) => key,
-                Some(_) => {
-                    self.tell(place, |written| Fault::Key { written });
-                    continue;
-                }
-                None => continue,
-            };
-            match self.item(at, depth, Some(b">>"))? {
-                Item::Value(Some(value)) => dict.push(key, value),
-                Item::Value(None) => {}
-                Item::Close => {
-                    self.tell(place, |written| Fault::NoValue { written });
-                    return Some(Object::new(Value::Dict(dict)));
-                }
-            }
+    /// A token read inside an array or a dictionary, told to the sink, if
+    /// it wants: its own faults, and a word that's no object.
+    fn inside(&mut self, token: Token<'a>) {
+        if self.open.is_empty() || !self.sink.wants() {
+            return;
+        }
+        let at = self.base + token.start;
+        if fault::token(token.bytes, at, self.sink) == Read::Keyword {
+            self.tell(token.range(), |written| Fault::Keyword { written });
         }
     }
 
@@ -506,6 +522,19 @@ impl<'a, S: Sink<'a> + ?Sized> Reading<'a, '_, S> {
             self.sink.fault(place, fault(written));
         }
     }
+}
+
+/// An object that holds none, as a token by PDFium's rules: a string's
+/// bytes read in its form, a name decoded, a number word, `true`, `false`
+/// or `null` ([`word`]).
+fn leaf(token: Token) -> Option<Object> {
+    let value = match token.kind {
+        Kind::String { .. } => Value::String(Str::Bytes(literal(token.bytes)), Some(Form::Literal)),
+        Kind::HexString { .. } => Value::String(Str::Bytes(hex(token.bytes)), Some(Form::Hex)),
+        Kind::Name => Value::Name(name(token.bytes)?.into_owned()),
+        _ => word(token.bytes)?,
+    };
+    Some(Object::new(value))
 }
 
 /// A word as an object: a number, `true`, `false` or `null`; none for any

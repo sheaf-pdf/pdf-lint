@@ -35,7 +35,12 @@
 //!   PDFium keeps no stream.
 //! - each object's marked content, as `BDC`, `BMC` and `EMC` nest around
 //!   it: each mark's `/MCID`, where its property list gives one as a
-//!   number, as PDFium reads an integer from it.
+//!   number, as PDFium reads an integer from it. A `BDC` whose last operand
+//!   isn't a dictionary opens no mark, as PDFium opens none for one that's
+//!   no object or names a list the resources lack (the cases' have none),
+//!   and its `EMC` then ends the mark around it, if there's one.
+//! - a dash array of `d`'s elements that are objects, as PDFium holds the
+//!   array, and none where its operand isn't an array.
 //!
 //! Numbers are compared as `f32`s. Text and data longer than 64 bytes are
 //! compared by their length and hash, as the oracle writes them.
@@ -487,11 +492,11 @@ impl Reader<'_> {
                     self.st.round_cap = cap == 1;
                 }
                 b"d" => {
-                    let dash = op
-                        .arg(1)
-                        .filter(Operand::is_array)
-                        .map(|a| a.elements().map(|e| e.number()).collect());
-                    self.st.dash = Some((dash.unwrap_or_default(), n(0)));
+                    let Some(array) = op.arg(1).filter(Operand::is_array) else {
+                        continue;
+                    };
+                    let objects = array.elements().filter(|e| e.object(&lim).is_some());
+                    self.st.dash = Some((objects.map(|e| e.number()).collect(), n(0)));
                 }
                 b"m" if count == 2 => {
                     self.add_point((n(1), n(0)), Seg::Move);
@@ -566,14 +571,15 @@ impl Reader<'_> {
                     self.text_object(&strings);
                 }
                 b"BDC" => {
-                    let mcid = (op.arg(0))
-                        .and_then(|o| o.object(&Limits::DEFAULT))
-                        .and_then(|o| o.as_dict().and_then(|d| d.get(b"MCID")).cloned())
-                        .and_then(|v| match v.into_value() {
-                            Value::Integer(i) => Some(i32::try_from(i).unwrap_or(0)),
-                            Value::Real(r) => Some(r as i32),
-                            _ => None,
-                        });
+                    let props = op.arg(0).and_then(|o| o.object(&lim));
+                    let Some(props) = props.as_ref().and_then(Object::as_dict) else {
+                        continue;
+                    };
+                    let mcid = (props.get(b"MCID").cloned()).and_then(|v| match v.into_value() {
+                        Value::Integer(i) => Some(i32::try_from(i).unwrap_or(0)),
+                        Value::Real(r) => Some(r as i32),
+                        _ => None,
+                    });
                     self.marks.push(mcid);
                 }
                 b"BMC" => self.marks.push(None),

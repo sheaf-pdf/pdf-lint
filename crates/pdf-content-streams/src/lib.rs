@@ -6,7 +6,8 @@
 //! - **Tokens** ([`tokens`]): operators, operands as written, and inline
 //!   images, `BI` to `EI`, each one token. Tokens end where PDFium's
 //!   `CPDF_StreamParser` ends them, pdf-tokenizer's tokens read by its
-//!   PDFium rules. An inline image's dictionary is read as PDFium's
+//!   PDFium rules, an array or a dictionary where its `ReadNextObject`
+//!   ends it. An inline image's dictionary is read as PDFium's
 //!   `Handle_BeginImage` structures it, a `BI` with a keyword where a key
 //!   should be no image but an operator of its own; and its data is found
 //!   by PDFium's `ReadInlineStream` rules, from the components of the
@@ -46,10 +47,10 @@
 //!   ([`Balance::take`], [`MarkedNest::step`], [`NameSet::take`]), so one
 //!   pass can find several.
 //! - **Caps** ([`Limits`]) **and errors that say where** ([`Error`]): a
-//!   string, array, dictionary or inline image that doesn't end, or one
-//!   past a cap. It never panics, whatever the bytes, and every token moves
-//!   it on; reading an operand nests on the stack, so a cap on depth
-//!   raised far past its default needs a stack to match.
+//!   string, array, dictionary or inline image that doesn't end, one past
+//!   a cap, or arrays and dictionaries nested deeper than PDFium reads. It
+//!   never panics, whatever the bytes, and every token moves it on; what's
+//!   open is kept on the heap, however deep.
 //! - **Where ISO 32000-2 reads it otherwise** ([`fault`]): each place its
 //!   rules would read the bytes another way than PDFium's, told with where
 //!   it is to a sink the caller gives ([`Tokens::with_sink`],

@@ -39,7 +39,9 @@ pub enum ErrorKind {
     #[error("an inline image that doesn't end")]
     InlineImage,
     /// Arrays and dictionaries, or marked content, nested past
-    /// [`Limits::depth`](crate::Limits::depth).
+    /// [`Limits::depth`](crate::Limits::depth); or arrays and dictionaries
+    /// nested deeper than PDFium reads ([`tokens`](crate::tokens)), where
+    /// it's the innermost's first byte.
     #[error("arrays, dictionaries or marked content nested too deep")]
     Depth,
     /// More operands before an operator than

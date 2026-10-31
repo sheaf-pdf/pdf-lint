@@ -121,6 +121,58 @@ nested-array-operand	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 2 0 l 5 0 l 5 4 l
 flat-array-operand	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 3 0 l 3 4 l 0 4 l 0 0 h
 bad-dict-operand	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 2 0 l 5 0 l 5 4 l 2 4 l 2 0 h
 good-dict-operand	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 3 0 l 3 4 l 0 4 l 0 0 h
+array-bad-dict	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 10 10 dash 2 3 phase 0
+array-dict-ended-by-bracket	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 6 0 l 9 0 l 9 4 l 6 4 l 6 0 h
+dict-string-key	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 0 l 4 0 l 4 4 l 1 4 l 1 0 h
+dict-hex-key	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 0 l 4 0 l 4 4 l 1 4 l 1 0 h
+dict-nested-arrays	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 5
+triple-array	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 5 0 l 5 6 l 0 6 l 0 0 h
+nested-array-dash	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 10 10 dash 1 2 phase 0
+dict-no-value	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+dict-array-dict	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 3
+dict-array-bad-dict	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 3
+dict-array-dict-key	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 3
+bdc-broken	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+bdc-broken-in-bmc	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid - ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 5 0 l 5 5 l 0 5 l 0 0 h
+bdc-keyword-value	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+bdc-string-key-then-dict	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 7
+image-decode-nested	image matrix 1 0 0 1 0 0 raw I ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+image-dp-bad-dict	image matrix 1 0 0 1 0 0 raw I ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+nested-array-filter-id	image matrix 1 0 0 1 0 0 raw ID%2041> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+nested-array-filter-hex	image matrix 1 0 0 1 0 0 raw 41> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+keyword-first-in-filter	image matrix 1 0 0 1 0 0 raw 41> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+closer-first-in-filter	image matrix 1 0 0 1 0 0 raw 41> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+devicen-nested-names	image matrix 1 0 0 1 0 0 raw ID%20 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+cs-keyword-first	image matrix 1 0 0 1 0 0 raw abc ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+cs-erased-by-dict-none	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+cs-empty-array	image matrix 1 0 0 1 0 0 raw abc ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+array-bad-dict-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+array-dict-ended-by-bracket-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+dict-string-key-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+dict-nested-arrays-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+triple-array-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+dict-no-value-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+dict-array-dict-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+bdc-broken-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+image-cs-nested-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+image-decode-nested-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+image-dp-bad-dict-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+nested-array-filter-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+array-bad-dict-cut-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+array-dict-ended-by-bracket-cut-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+dict-string-key-cut-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+dict-nested-arrays-cut-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+triple-array-cut-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+dict-no-value-cut-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+dict-array-dict-cut-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+bdc-broken-cut-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+image-cs-nested-cut-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+image-dp-bad-dict-cut-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+deep-64	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 3
+deep-65	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+deep-64-empty-dict	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 3
+deep-64-empty-array	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 3
+deep-64-array-element	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 3
 byte-80-before-re	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
 byte-80-after-tf-name	text font Courier size 10 text ab
 byte-80-after-id	image matrix 1 0 0 1 0 0 raw a ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h

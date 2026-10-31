@@ -13,13 +13,12 @@ pub struct Limits {
     /// space's colorants, to which PDF 2.0 sets no limit, and a pattern's
     /// name; and a stream may hold runs of numbers no operator ends.
     pub operands: usize,
-    /// How deep arrays and dictionaries nest, as PDFium caps them, and
-    /// marked content: 512 by default. The tokens keep what's open on the
-    /// heap, but reading an operand as an object
-    /// ([`Operand::object`](crate::Operand::object)) nests on the stack a
-    /// level for each, some 0.4 KiB a level optimized and twice that
-    /// unoptimized, so a cap past a few thousand needs a thread with a
-    /// stack to match, or content can overflow it.
+    /// How deep arrays and dictionaries nest, and marked content: 512 by
+    /// default. PDFium reads arrays and dictionaries 64 levels deep, the
+    /// outermost at 0, and what's nested deeper as no object, which is an
+    /// error here too ([`tokens`](crate::tokens)), whatever this says; an
+    /// array inside an array, outside any dictionary, opens none, so nests
+    /// no deeper. What's open is kept on the heap, however deep.
     pub depth: usize,
     /// How many values reading one operand as an object may build
     /// ([`Operand::object`](crate::Operand::object)): it, an array's

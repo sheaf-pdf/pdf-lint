@@ -108,7 +108,14 @@ fn tokens_are_as_written() {
             Op(b"Tj"),
             Op(b"ET"),
             Op(b"EMC"),
-            Operand(b"[1 [2 [3]] <</A <</B (c)>>>>]"),
+            // An array inside an array, outside a dictionary, opens none:
+            // the first `]` ends the outer one, and what's after it is
+            // read on, as PDFium's chromium/7881, 8076 and 8125 read it
+            // (`1 2 [[[1]]] 5 6 re f` fills a rectangle at 0 0).
+            Operand(b"[1 [2 [3]"),
+            Operand(b"]"),
+            Operand(b"<</A <</B (c)>>>>"),
+            Operand(b"]"),
             Operand(b"true"),
             Operand(b"false"),
             Operand(b"null"),
@@ -162,19 +169,36 @@ fn operands_read_as_objects() {
         Some(string(b"a(b)A+3c\r\nd", Literal))
     );
     assert_eq!(o(b"<48 65 6>"), Some(string(b"He`", Hex)));
+    // An array inside an array, outside a dictionary, opens none, and the
+    // first `]` ends the outer one; inside a dictionary they nest, as
+    // PDFium's chromium/7881, 8076 and 8125 read them (`[1 [2] 0 d`
+    // dashes 1 2; `<< /A [[1] 2] /MCID 5 >> BDC` marks 5).
     assert_eq!(
         o(b"[1 /N (s) [2]]"),
         Some(Object::from(vec![
             1.into(),
             Object::from("N"),
             string(b"s", Literal),
-            Object::from(vec![2.into()]),
+            2.into(),
         ]))
     );
-    // A key that isn't a name is passed over.
     assert_eq!(
-        o(b"<</A 1 2 /B /C>>"),
-        Some(Object::from(dict! { "A" => 1, "B" => "C" }))
+        o(b"<</A [1 [2]] /B /C>>"),
+        Some(Object::from(dict! {
+            "A" => Object::from(vec![1.into(), Object::from(vec![2.into()])]),
+            "B" => "C",
+        }))
+    );
+    // A key that isn't a name, or a value that's no object, makes the
+    // dictionary none, as PDFium's builds read it (`/Span <</MCID 0 1
+    // /Alt>> BDC` marks nothing); in an array, the array reads on after
+    // the word it stopped at (`[<< 1 2 >> 3] 0 d` dashes 2 3).
+    assert_eq!(o(b"<</A 1 2 /B /C>>"), None);
+    assert_eq!(o(b"<</A>>"), None);
+    assert_eq!(o(b"<</A foo>>"), None);
+    assert_eq!(
+        o(b"[<</A 1 2 /B>> 3]"),
+        Some(Object::from(vec![Object::from("B"), 3.into()]))
     );
     // A number word as PDFium reads it: PDFium's chromium/7881, 8076 and
     // 8125 hold a property list's `/MCID --5` and `/MCID 1.2.3` as 0 and 1,
@@ -184,17 +208,23 @@ fn operands_read_as_objects() {
     for not in [&b")"[..], b"Tj"] {
         assert_eq!(o(not), None, "{}", String::from_utf8_lossy(not));
     }
-    // Stray closers inside are no elements; one past `depth`, or one that
-    // doesn't end, is no object.
+    // Stray closers inside are no elements, but a `]` read for a
+    // dictionary's key ends it, none, and the array it's in; one past
+    // `depth`, or one that doesn't end, is no object.
+    assert_eq!(o(b"[1 >> <</A 2 ]>>]"), Some(Object::from(vec![1.into()])));
     assert_eq!(
-        o(b"[1 >> <</A 2 ]>>]"),
+        o(b"[1 >> <</A 2>>]"),
         Some(Object::from(vec![
             1.into(),
             Object::from(dict! { "A" => 2 }),
         ]))
     );
-    assert_eq!(object(b"[[[1]]]", &deep(2)), None);
-    assert!(object(b"[[1]]", &deep(2)).is_some());
+    assert_eq!(object(b"<</A [[1]]>>", &deep(2)), None);
+    assert!(object(b"<</A [[1]]>>", &deep(3)).is_some());
+    assert_eq!(
+        object(b"[[[1]]]", &deep(1)),
+        Some(Object::from(vec![1.into()]))
+    );
     assert_eq!(o(b"[1 (2"), None);
 }
 
@@ -236,15 +266,15 @@ fn operands_read_as_pdf_objects_reads_them() {
     // Values: the operand, an array's elements, a dictionary's keys and
     // values, and theirs, what's no object among them.
     let values = |values| Limits { values, ..*lim };
-    assert!(object(b"[[] [] []]", &values(4)).is_some());
-    assert_eq!(object(b"[[] [] []]", &values(3)), None);
+    assert!(object(b"[1 foo 3]", &values(4)).is_some());
+    assert_eq!(object(b"[1 foo 3]", &values(3)), None);
     assert!(object(b"<</A [1]>>", &values(4)).is_some());
     assert_eq!(object(b"<</A [1]>>", &values(3)), None);
     assert_eq!(object(b"1", &values(0)), None);
     // A list of many empty arrays, past the cap, read as none.
     let wide = [
         b"/Span <<".as_slice(),
-        &b"[]".repeat(1 << 17),
+        &b"/A []".repeat(1 << 16),
         b">> BDC EMC",
     ]
     .concat();
@@ -366,7 +396,7 @@ fn an_operands_number_is_read_as_pdfium_reads_it() {
     assert_eq!(number(&zeros(254, b"7.5")), 7.0);
     assert_eq!(number(&zeros(255, b"7.5")), 0.0);
 
-    let s = b"[(a) -250 (b) --5 1.2.3 /N [7]] TJ";
+    let s = b"[(a) -250 (b) --5 1.2.3 /N <</A 7>>] TJ";
     let read = operations_of(s, &ResCx::none(), &Limits::DEFAULT);
     let tj = read[0].as_ref().unwrap().arg(0).unwrap();
     let numbers: Vec<f32> = tj.elements().map(|e| e.number()).collect();
@@ -654,26 +684,52 @@ fn an_inline_images_stream_is_what_pdfium_keeps() {
     }
 }
 
-/// An operand nested 500 deep around 8 MiB is read in one pass, not once
-/// for each level it's inside.
+/// An operand nested as deep as PDFium reads, 64 levels, around 8 MiB, is
+/// read in one pass, not once for each level it's inside; and 500 `[`s,
+/// outside a dictionary, are one array, as PDFium reads them.
 #[test]
 fn deep_operands_read_in_one_pass() {
-    let mut s = b"[".repeat(500);
+    let mut s = b"<</A [".repeat(32);
     s.push(b'<');
     s.resize(s.len() + (8 << 20), b'0');
     s.push(b'>');
-    s.extend(b"]".repeat(500));
+    s.extend(b"]>>".repeat(32));
     let started = std::time::Instant::now();
     let mut o = object(&s, &Limits::DEFAULT).unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
-    for _ in 0..500 {
-        let Value::Array(mut inner) = o.into_value() else {
+    for _ in 0..32 {
+        let Value::Dict(dict) = o.into_value() else {
+            panic!("a dictionary")
+        };
+        let Some(Value::Array(mut inner)) = dict.get(b"A").cloned().map(Object::into_value) else {
             panic!("an array")
         };
         o = inner.pop().unwrap();
     }
     // Its first 32,767 bytes, the most PDFium keeps of a string.
     assert!(matches!(o.into_value(), Value::String(Str::Bytes(bytes), _) if bytes.len() == 32_767));
+    let arrays = [b"[".repeat(500), b"1".to_vec(), b"]".repeat(500)].concat();
+    let started = std::time::Instant::now();
+    assert_eq!(toks(&arrays).len(), 500);
+    let one = object(&arrays, &Limits::DEFAULT);
+    assert_eq!(one, Some(Object::from(vec![1.into()])));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+/// A string a dictionary's key opens is read as its `(` alone, and what's
+/// after it as content, so content of many, each inside the last, is read
+/// in one pass, not once for each; and so where none ends.
+#[test]
+fn strings_keys_open_read_in_one_pass() {
+    let n = 100_000;
+    let nested = [b"<< (q ".repeat(n), b") q ".repeat(n)].concat();
+    let started = std::time::Instant::now();
+    assert_eq!(toks(&nested).len(), 4 * n);
+    assert_eq!(toks(&nested[..6 * n]).len(), 2 * n);
+    let hex = b"<< <q ".repeat(n);
+    assert_eq!(toks(&hex).len(), 2 * n);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(toks(b"<< (q"), [Tok::Operand(b"<< ("), Tok::Op(b"q")]);
 }
 
 /// `s`'s one inline image: where the token is, and its data.
@@ -737,11 +793,6 @@ fn unfiltered_data_is_its_exact_size() {
     assert_image(
         "/W 2 /H 2 /BPC 8 /CS [/I /RGB 1 <000000FFFFFF>] /I true",
         b"EI E",
-        &none,
-    );
-    assert_image(
-        "/W 2 /H 1 /BPC 8 /CS [/DeviceN [/Cyan /Spot] /DeviceCMYK {}]",
-        b" EI ",
         &none,
     );
     // A name the resources have, by its components; one they don't is
@@ -924,9 +975,39 @@ fn inline_images_read_as_pdfium_reads_them() {
             "(x EI 0 0 m 9 9 l S)",
             1,
         ),
+        // An array as PDFium reads it: its first element that's an
+        // object; and `[[/AHx]` is the array of `/AHx`, an array inside an
+        // array, outside a dictionary, opening none, so the `]` after it
+        // is no name, which ends the dictionary, the data after it.
         (
             string(&format!("{gray} /F [[/AHx]]")),
-            "(x EI 0 0 m 9 9 l S)",
+            "ID (x EI 0 0 m 9 9 l S)",
+            1,
+        ),
+        (one(&format!("{gray} /F [[/AHx]]"), "41>"), "ID 41>", 1),
+        (one(&format!("{gray} /F [foo /AHx]"), "41>"), "41>", 1),
+        (one(&format!("{gray} /F [) /AHx]"), "41>"), "41>", 1),
+        // A color space's array alike: its family its first element that's
+        // an object, and a DeviceN space's colorants, an array inside it,
+        // none, so one of 3 components, PDFium's for what it can't make out.
+        (
+            one("/W 3 /H 1 /BPC 8 /CS [foo /DeviceGray]", "abcdefghi"),
+            "abc",
+            1,
+        ),
+        // A dictionary that's none, as a value, takes its key out, so the
+        // image has no color space: a bit a sample.
+        (
+            one("/W 3 /H 1 /BPC 8 /CS /G /CS << /A >>", "abcdefghi"),
+            "a",
+            1,
+        ),
+        (
+            one(
+                "/W 1 /H 1 /BPC 8 /CS [/DeviceN [/A /B] /DeviceGray null]",
+                "abc",
+            ),
+            "ID ",
             1,
         ),
         (one(&format!("{gray} /F (ASCIIHexDecode)"), "41>"), "41>", 1),
@@ -1582,10 +1663,12 @@ fn errors_say_where() {
     assert_eq!(at(b"0 0 m (a(b)c"), (6, String));
     assert_eq!(at(b"q <414"), (2, HexString));
     assert_eq!(at(b"[1 2 ("), (5, String));
-    assert_eq!(at(b"[1 [2]"), (0, Array));
-    assert_eq!(at(b"/P << /A [1] >"), (3, Dict));
-    // A `]` doesn't close a dictionary: it's passed over.
-    assert_eq!(at(b"/P [ << /A 1 ] "), (5, Dict));
+    assert_eq!(at(b"[1 [2"), (0, Array));
+    assert_eq!(at(b"<</A [1 [2]"), (5, Array));
+    assert_eq!(at(b"/P << /A [1]"), (3, Dict));
+    // A `]` read for a dictionary's key ends it, none, and the array it's
+    // in, as PDFium reads them; what's after is read on.
+    assert_eq!(at(b"/P [ << /A 1 ] <<"), (15, Dict));
     assert_eq!(at(b"q BI /W 1 /H 1"), (2, InlineImage));
     assert_eq!(at(b"q BI /W 1 ID abc"), (2, InlineImage));
     assert_eq!(
@@ -1601,12 +1684,18 @@ fn errors_say_where() {
     assert!(lexed[1].is_err());
 }
 
-/// An array or a dictionary is one token to the closer that balances its
-/// opener, what a string or a comment inside holds closing nothing, and a
-/// closer of the other kind passed over. One that doesn't end is an error
-/// where the last opener still open is, or where a string inside that
-/// doesn't end starts; nested past the cap, where the first opener past it
-/// is.
+/// An array or a dictionary is one token, ended where PDFium's
+/// `ReadNextObject` ends it, what a string or a comment inside holds
+/// closing nothing: an array at the first `]` read for an element, an
+/// array inside it, outside any dictionary, opening none, and a stray
+/// closer passed over; a dictionary at its `>>`, or, none, at a key that's
+/// no name, a string's `(` or a hex string's `<` alone, or at a value
+/// that's no object; and what's after read on, as content (PDFium's
+/// chromium/7881, 8076 and 8125 alike: `[<< /A ] 5 >> 6] 3 4 re f` fills a
+/// rectangle at 6 0, `<< (x) 1 >> 3 4 re f` at 1 0). One that doesn't end
+/// is an error where the last opener still open is, or where a string
+/// inside that doesn't end starts; nested past the cap, where the first
+/// opener past it is.
 #[test]
 fn an_array_or_a_dictionary_ends_where_its_tokens_close_it() {
     use ErrorKind::*;
@@ -1616,22 +1705,56 @@ fn an_array_or_a_dictionary_ends_where_its_tokens_close_it() {
         toks(b"[1 %]\n2] TJ"),
         [Operand(&b"[1 %]\n2]"[..]), Op(b"TJ")]
     );
+    assert_eq!(toks(b"[1 >> 2] q"), [Operand(&b"[1 >> 2]"[..]), Op(b"q")]);
+    let o = |s: &'static [u8]| Operand(s);
     assert_eq!(
         toks(b"<</A <4>]>>>> BDC"),
-        [Operand(&b"<</A <4>]>>"[..]), Operand(b">>"), Op(b"BDC")]
+        [o(b"<</A <4>]"), o(b">>"), o(b">>"), Op(b"BDC")]
     );
-    assert_eq!(toks(b"[1 >> 2] q"), [Operand(&b"[1 >> 2]"[..]), Op(b"q")]);
+    assert_eq!(toks(b"[[1] 2] q"), [o(b"[[1]"), o(b"2"), o(b"]"), Op(b"q")]);
+    assert_eq!(
+        toks(b"<< 1 2 >> q"),
+        [o(b"<< 1"), o(b"2"), o(b">>"), Op(b"q")]
+    );
+    assert_eq!(
+        toks(b"<< (x) 1 >> q"),
+        [o(b"<< ("), Op(b"x"), o(b")"), o(b"1"), o(b">>"), Op(b"q")]
+    );
+    assert_eq!(
+        toks(b"<< <41> 1 >> q"),
+        [o(b"<< <"), o(b"41"), o(b">"), o(b"1"), o(b">>"), Op(b"q")]
+    );
+    assert_eq!(
+        toks(b"[<< /A ] 5 >> 6] q"),
+        [
+            o(b"[<< /A ]"),
+            o(b"5"),
+            o(b">>"),
+            o(b"6"),
+            o(b"]"),
+            Op(b"q")
+        ]
+    );
+    assert_eq!(toks(b"[<< 1 2 >> 3] q"), [o(b"[<< 1 2 >> 3]"), Op(b"q")]);
+    assert_eq!(
+        toks(b"<< /A [[1] 2] /B << /C [<< /D 1 >>] >> >> q"),
+        [o(b"<< /A [[1] 2] /B << /C [<< /D 1 >>] >> >>"), Op(b"q")]
+    );
+    assert_eq!(toks(b"<< /A >> q"), [o(b"<< /A >>"), Op(b"q")]);
+    assert_eq!(toks(b"<< /A q >> Q"), [o(b"<< /A q"), o(b">>"), Op(b"Q")]);
+    // A `(` that's no key opens no string, whatever follows.
+    assert_eq!(toks(b"<< (x q"), [o(b"<< ("), Op(b"x"), Op(b"q")]);
     let lim = &Limits::DEFAULT;
     let at = |s: &[u8], lim: &Limits| {
         let e = error(s, lim);
         (e.at, e.kind)
     };
     assert_eq!(at(b"[1 <41", lim), (3, HexString));
-    assert_eq!(at(b"[1 [2", lim), (3, Array));
+    assert_eq!(at(b"[1 [2", lim), (0, Array));
     assert_eq!(at(b"<</A [1", lim), (5, Array));
     assert_eq!(at(b"[<</A 1", lim), (1, Dict));
     assert_eq!(at(b"[1 %]", lim), (0, Array));
-    assert_eq!(at(b"<<<</A [1]>>>>", &deep(2)), (7, Depth));
+    assert_eq!(at(b"<</A <</B [1]>>>>", &deep(2)), (10, Depth));
     assert_eq!(at(b"[1]", &deep(0)), (0, Depth));
 }
 
@@ -1693,15 +1816,32 @@ fn skims_and_searches_find_what_walks_find() {
     }
 }
 
+/// Each cap at the cap and one past. On depth: `Limits::depth`, and past
+/// it, an error; and PDFium's 64 levels, past which it reads what's
+/// nested as none (chromium/8076 and 8125; 7881, 512), an error too.
 #[test]
 fn the_caps_hold() {
-    let depth = Limits::DEFAULT.depth;
-    let nested = |n: usize| [b"[".repeat(n), b"]".repeat(n)].concat();
-    assert_eq!(toks(&nested(depth)).len(), 1);
-    let e = error(&nested(depth + 1), &Limits::DEFAULT);
-    assert_eq!((e.at, e.kind), (depth, ErrorKind::Depth));
-    let dicts = [b"<<".repeat(depth + 1), b">>".repeat(depth + 1)].concat();
-    assert_eq!(error(&dicts, &Limits::DEFAULT).kind, ErrorKind::Depth);
+    let nested =
+        |n: usize, inner: &[u8]| [b"<</A ".repeat(n).as_slice(), inner, &b">>".repeat(n)].concat();
+    let e = error(&nested(11, b"1"), &deep(10));
+    assert_eq!((e.at, e.kind), (50, ErrorKind::Depth));
+    assert_eq!(read(&nested(10, b"1"), &ResCx::none(), &deep(10)).len(), 1);
+    // The outermost at 0, a value 64 levels in is read, and one 65 in
+    // isn't, where it's an error at the dictionary holding it.
+    assert_eq!(toks(&nested(64, b"1")).len(), 1);
+    let e = error(&nested(65, b"1"), &Limits::DEFAULT);
+    assert_eq!((e.at, e.kind), (320, ErrorKind::Depth));
+    // A dictionary 64 levels in with nothing in it to read, or an array
+    // whose `]` is all that's read in it, is read alike; an array there
+    // with an element isn't.
+    assert_eq!(toks(&nested(64, b"<< >>")).len(), 1);
+    assert_eq!(toks(&nested(64, b"[ ]")).len(), 1);
+    let e = error(&nested(64, b"[1]"), &Limits::DEFAULT);
+    assert_eq!((e.at, e.kind), (320, ErrorKind::Depth));
+    // Arrays outside a dictionary don't nest, so reach neither.
+    let arrays = [b"[".repeat(600), b"]".repeat(600)].concat();
+    assert_eq!(toks(&arrays).len(), 600);
+    assert_eq!(read(&arrays, &ResCx::none(), &deep(1)).len(), 600);
 
     let three = Limits {
         operands: 3,
@@ -2163,7 +2303,10 @@ fn operations_are_the_tokens_grouped() {
             (
                 b"Q",
                 vec![
-                    &b"[1 [2 [3]] <</A <</B (c)>>>>]"[..],
+                    &b"[1 [2 [3]"[..],
+                    b"]",
+                    b"<</A <</B (c)>>>>",
+                    b"]",
                     b"true",
                     b"false",
                     b"null"
@@ -2400,7 +2543,7 @@ fn a_pages_operations_map_back_to_its_streams() {
 
 #[test]
 fn operands_are_read_when_asked() {
-    let s = b"/A#20B 12 -.5 (s) <41> <</K 1>> [1 [2 3] (x) >> /N] true null --5 m";
+    let s = b"/A#20B 12 -.5 (s) <41> <</K 1>> [1 (x) >> /N <</A [2 [3]]>>] true null --5 m";
     let read = operations_of(s, &ResCx::none(), &Limits::DEFAULT);
     let op = read[0].as_ref().unwrap();
     let o: Vec<Operand> = op.operands().collect();
@@ -2436,19 +2579,43 @@ fn operands_are_read_when_asked() {
     assert_eq!(o[5].object(&deep(0)), None);
 
     // An array's elements as written, each where it is: a stray closer
-    // too, which isn't an element of the object it reads as.
+    // too, which isn't an element of the object it reads as; a
+    // dictionary, arrays nesting in it.
     let array = o[6];
     let elements: Vec<Operand> = array.elements().collect();
     let bytes: Vec<_> = elements.iter().map(|e| e.bytes()).collect();
-    assert_eq!(bytes, [&b"1"[..], b"[2 3]", b"(x)", b">>", b"/N"]);
+    assert_eq!(bytes, [&b"1"[..], b"(x)", b">>", b"/N", b"<</A [2 [3]]>>"]);
     for e in &elements {
         assert_eq!(&s[e.range()], e.bytes());
     }
-    assert_eq!(elements[1].range(), 35..40);
-    let inner: Vec<_> = elements[1].elements().map(|e| e.range()).collect();
-    assert_eq!(inner, [36..37, 38..39]);
+    assert_eq!(elements[4].range(), 45..59);
+    assert_eq!(elements[4].elements().count(), 0);
     let read: Vec<_> = elements.iter().filter_map(|e| e.object(&deep(7))).collect();
     assert_eq!(array.object(&deep(8)), Some(Object::from(read)));
+    // An array inside an array, outside a dictionary, opens none: the
+    // first `]` ends the outer one, its `[` an element that's no object
+    // (PDFium's chromium/7881, 8076 and 8125: `[1 [2] 0 d` dashes 1 2).
+    let read = operations_of(b"[1 [2 3] 4] x", &ResCx::none(), &Limits::DEFAULT);
+    let op = read[0].as_ref().unwrap();
+    let bytes: Vec<_> = op.operands().map(|o| o.bytes()).collect();
+    assert_eq!(bytes, [&b"[1 [2 3]"[..], b"4", b"]"]);
+    let first = op.operands().next().unwrap();
+    let inner: Vec<_> = first.elements().map(|e| (e.range(), e.bytes())).collect();
+    assert_eq!(
+        inner,
+        [(1..2, &b"1"[..]), (3..4, b"["), (4..5, b"2"), (6..7, b"3")]
+    );
+    assert_eq!(first.elements().nth(1).unwrap().object(&deep(8)), None);
+    let numbers = Object::from(vec![1.into(), 2.into(), 3.into()]);
+    assert_eq!(first.object(&deep(8)), Some(numbers));
+    // A dictionary that's none, whose reading stops at a `]`, ends the
+    // array it's in, an element that's no object.
+    let read = operations_of(b"[1 <</A ] 2] x", &ResCx::none(), &Limits::DEFAULT);
+    let first = read[0].as_ref().unwrap().operands().next().unwrap();
+    assert_eq!(first.bytes(), b"[1 <</A ]");
+    let elements: Vec<_> = first.elements().map(|e| e.bytes()).collect();
+    assert_eq!(elements, [&b"1"[..], b"<</A ]"]);
+    assert_eq!(first.object(&deep(8)), Some(Object::from(vec![1.into()])));
     // None for what isn't an array, and none in an empty one.
     assert_eq!(o[5].elements().count(), 0);
     assert_eq!(o[1].elements().count(), 0);
@@ -2766,13 +2933,14 @@ fn a_tokens_own_faults() {
 }
 
 /// What's inside an array or a dictionary is told when it's read, each
-/// element's, key's and value's own faults, a word that's no object, a
-/// key that's no name and a key with no value, where each is in the
-/// content; the operand's own faults are its token's.
+/// element's, key's and value's own faults, a word that's no object, and,
+/// where a dictionary is none as PDFium reads it, a key that's no name or
+/// one with no value, where each is in the content; the operand's own
+/// faults are its token's, a dictionary that's none among them.
 #[test]
 fn whats_inside_is_told_when_its_read() {
-    let s: &[u8] = b"q [1 --5 R <4G> /A#zz ) { >> [/B#2] 99999999999999999999] \
-        <</K 1 2 (v) [3] /V /N#00 ] /L R /M>> /C#2 m";
+    let s: &[u8] = b"q [1 --5 R <4G> /A#zz ) { >> <</B /B#2>> 99999999999999999999] \
+        <</K [3 [/N#00 ]] /L R>> <</K 1 2>> <</M>> /C#2 m";
     let at = |w: &[u8], from: usize| {
         let i = from + s[from..].windows(w.len()).position(|x| x == w).unwrap();
         i..i + w.len()
@@ -2781,7 +2949,12 @@ fn whats_inside_is_told_when_its_read() {
         .collect::<Result<_, _>>()
         .unwrap();
     let m = &read[1];
-    let (array, dict, name) = (m.arg(2).unwrap(), m.arg(1).unwrap(), m.arg(0).unwrap());
+    let arg = |i| m.arg(i).unwrap();
+    let (array, value, key, no_value, name) = (arg(6), arg(5), arg(3), arg(1), arg(0));
+    assert_eq!(
+        [value.bytes(), key.bytes(), no_value.bytes()],
+        [&b"<</K [3 [/N#00 ]] /L R"[..], b"<</K 1 2", b"<</M>>"]
+    );
     fn read_with(o: Operand<'_>) -> Vec<(Range<usize>, Fault<'_>)> {
         let mut kept = Collected::default();
         let object = o.object_with(&deep(8), &mut kept);
@@ -2821,48 +2994,144 @@ fn whats_inside_is_told_when_its_read() {
             }),
         ]
     );
-    let d = dict.range().start;
+    let v = value.range().start;
     assert_eq!(
-        read_with(dict),
+        read_with(value),
         [
-            fault(at(b"2", d), |written| Fault::Key { written }),
-            fault(at(b"(v)", d), |written| Fault::Key { written }),
-            fault(at(b"[3]", d), |written| Fault::Key { written }),
             (
-                at(b"/N#00", d),
+                at(b"/N#00", v),
                 Fault::Name {
-                    written: w(&at(b"/N#00", d)),
+                    written: w(&at(b"/N#00", v)),
                     stray: false,
                     nul: true
                 }
             ),
-            fault(at(b"] /L", d).start..at(b"] /L", d).start + 1, |written| {
-                Fault::Closer { written }
-            }),
-            fault(at(b"R", d), |written| Fault::Keyword { written }),
-            fault(at(b"/M", d), |written| Fault::NoValue { written }),
+            fault(at(b"R", v), |written| Fault::Keyword { written }),
         ]
     );
-    // A name's own fault is its token's, told by the operations.
+    let k = key.range().start;
+    assert_eq!(
+        read_with(key),
+        [fault(at(b"2", k), |written| Fault::Key { written })]
+    );
+    let n = no_value.range().start;
+    assert_eq!(
+        read_with(no_value),
+        [fault(at(b"/M", n), |written| Fault::NoValue { written })]
+    );
+    // A name's own fault is its token's, told by the operations, as is
+    // each dictionary that's none, and the `>>` after it, which then
+    // closes nothing.
     assert_eq!(read_with(name), []);
     let page = Concat::new(&[s]);
     assert_eq!(
         faults(&page),
-        [fault(at(b"/C#2", d), |written| Fault::Name {
-            written,
-            stray: true,
-            nul: false
-        })]
+        [
+            fault(value.range(), |written| Fault::NoDict { written }),
+            fault(at(b">>", value.range().end), |written| Fault::Closer {
+                written
+            }),
+            fault(key.range(), |written| Fault::NoDict { written }),
+            fault(at(b">>", key.range().end), |written| Fault::Closer {
+                written
+            }),
+            fault(no_value.range(), |written| Fault::NoDict { written }),
+            fault(at(b"/C#2", n), |written| Fault::Name {
+                written,
+                stray: true,
+                nul: false
+            }),
+        ]
     );
-    let words = words(&read_with(dict));
+    let told = [read_with(key), read_with(value), read_with(no_value)].concat();
+    let page_words = words(&faults(&page));
+    let words = words(&told);
     assert_eq!(
-        [&words[0], &words[5], &words[6]],
+        [&words[0], &words[2], &words[3]],
         [
             "2 is a dictionary's key and not a name",
             "R is no object, where one is written",
             "the key /M has no value"
         ]
     );
+    assert_eq!(
+        page_words[0],
+        "<</K [3 [/N#00 ]] /L R is no dictionary here, where ISO 32000-2 reads one"
+    );
+}
+
+/// Where PDFium ends what an array or a dictionary holds before ISO
+/// 32000-2 would, the token tells it, with its own faults, in the order of
+/// their ends with a string inside it running across a page's streams: a
+/// `[` inside an array, outside a dictionary, which opens no array; and a
+/// dictionary that's none. So does an inline image's value, and the
+/// object that ends its dictionary. Each is told once, wherever it's
+/// nested in the token.
+#[test]
+fn where_pdfium_ends_an_operand_sooner_is_told() {
+    let s: &[u8] = b"[1 [2 <</A [[3]] /B <</C ]>> [4 [5] 0 d";
+    let page = Concat::new(&[s]);
+    let at = |w: &[u8]| {
+        let i = s.windows(w.len()).position(|x| x == w).unwrap();
+        i..i + w.len()
+    };
+    let w = |r: Range<usize>| &s[r];
+    assert_eq!(
+        faults(&page),
+        [
+            (3..4, Fault::NestedArray { written: b"[" }),
+            (at(b"<</C ]"), Fault::NoDict { written: b"<</C ]" }),
+            (
+                at(b"<</A [[3]] /B <</C ]"),
+                Fault::NoDict {
+                    written: w(at(b"<</A [[3]] /B <</C ]"))
+                }
+            ),
+            (26..28, Fault::Closer { written: b">>" }),
+            (32..33, Fault::NestedArray { written: b"[" }),
+        ]
+    );
+    // A string inside, divided between two streams: told in the order of
+    // the ends.
+    let streams: [&[u8]; 2] = [b"/P <</A [(a", b"b) 1] 2>> BDC"];
+    let page = Concat::new(&streams);
+    let told: Vec<_> = faults(&page)
+        .into_iter()
+        .map(|(at, f)| (at, f.to_string()))
+        .collect();
+    assert_eq!(
+        told,
+        [
+            (
+                9..14,
+                "(a b) runs from one stream into the next".to_string()
+            ),
+            (
+                3..19,
+                "<</A [(a b) 1] 2 is no dictionary here, where ISO 32000-2 reads one".to_string()
+            ),
+            (19..21, ">> closes nothing".to_string()),
+        ]
+    );
+    // An inline image's value, and what ends its dictionary.
+    let s: &[u8] = b"BI /W 1 /H 1 /BPC 8 /CS /G /D [[0 1]] ID a EI";
+    let page = Concat::new(&[s]);
+    let kinds: Vec<_> = faults(&page)
+        .into_iter()
+        .map(|(at, f)| (at, f.to_string()))
+        .collect();
+    let nested = "[ opens no array here, inside an array, and one to ISO 32000-2";
+    assert_eq!(kinds[0], (31..32, nested.to_string()));
+    assert_eq!(kinds[1].1, "] closes nothing");
+    assert_eq!(
+        kinds[2].1,
+        "] ends an inline image's dictionary, where a key is written"
+    );
+    let s: &[u8] = b"BI /W 1 /H 1 /BPC 8 /CS /G << 1 2 >> xy EI";
+    let page = Concat::new(&[s]);
+    let told = faults(&page);
+    assert_eq!(told[0], (27..31, Fault::NoDict { written: b"<< 1" }));
+    assert_eq!(told[1], (27..31, Fault::DictEnd { written: b"<< 1" }));
 }
 
 /// A string, an inline image or a comment that runs from one of a page's
@@ -3281,6 +3550,8 @@ fn a_sink_that_wants_none_is_told_none() {
             "Name",
             "Brace",
             "Closer",
+            "NoDict",
+            "Closer",
             "DictEnd",
             "ImageLength",
             "BeforeEi",
@@ -3326,7 +3597,7 @@ fn a_dyn_sink_is_a_sink() {
         .with_sink(&mut *sink)
         .collect::<Result<_, _>>()
         .unwrap();
-    read[1].arg(0).unwrap().object_with(&deep(8), sink);
+    read[1].arg(1).unwrap().object_with(&deep(8), sink);
     tokens(s, &none, &Limits::DEFAULT)
         .with_sink(&mut &mut *sink)
         .for_each(drop);
@@ -3335,22 +3606,23 @@ fn a_dyn_sink_is_a_sink() {
         .iter()
         .map(|(at, f)| (at.clone(), f.to_string()))
         .collect();
+    let number = "--5 is a number here and a keyword to ISO 32000-2".to_string();
+    let none = "<</K 1 2 is no dictionary here, where ISO 32000-2 reads one".to_string();
+    let closer = ">> closes nothing".to_string();
     assert_eq!(
         kinds,
         [
-            (
-                2..5,
-                "--5 is a number here and a keyword to ISO 32000-2".to_string()
-            ),
+            (2..5, number.clone()),
+            (6..14, none.clone()),
+            (14..16, closer.clone()),
             (
                 21..22,
                 "1 operands at the end that no operator takes".to_string()
             ),
             (13..14, "2 is a dictionary's key and not a name".to_string()),
-            (
-                2..5,
-                "--5 is a number here and a keyword to ISO 32000-2".to_string()
-            ),
+            (2..5, number),
+            (6..14, none),
+            (14..16, closer),
         ]
     );
 }
@@ -3361,12 +3633,17 @@ fn a_dyn_sink_is_a_sink() {
 fn no_fault_where_iso_reads_alike() {
     let res = ResCx::new([(b"CS3".to_vec(), 3), (b"CS0".to_vec(), 3)]);
     let lim = &Limits::DEFAULT;
-    // The page less its strays, the images, the seeds less the one with
-    // strays, and pages of streams split between tokens.
-    let page_end = PAGE.windows(5).position(|w| w == b"Q { }").unwrap() + 1;
+    // The page less its strays and its arrays inside arrays, outside a
+    // dictionary, which PDFium ends sooner, those in a dictionary instead;
+    // the images but the DeviceN space's, whose colorants' array PDFium
+    // doesn't open; the seeds less those with strays and with what PDFium
+    // ends sooner; and pages of streams split between tokens.
+    let nested = PAGE.windows(5).position(|w| w == b"[1 [2").unwrap();
     let mut inputs = moved_inputs();
-    inputs.retain(|s| s != PAGE && !s.ends_with(b"{ } ) ]"));
-    inputs.push(PAGE[..page_end].to_vec());
+    inputs.retain(|s| s != PAGE && !s.ends_with(b"{ } ) ]") && !s.ends_with(b">> n"));
+    inputs.retain(|s| !s.windows(10).any(|w| w == b"[/DeviceN "));
+    inputs.push(PAGE[..nested].to_vec());
+    inputs.push(b"<</N [1 [2 [3]] <</A <</B (c)>>>>]>> true false null Q".to_vec());
     inputs.push(b"q 1 0 0 1 72 720 cm /F1 12 Tf [(Hel) -20 (lo)] TJ Q".to_vec());
     for s in &inputs {
         let page = Concat::new(&[s]);
@@ -4092,6 +4369,28 @@ fn names_used_are_by_category() {
     assert_eq!(of(ResKind::Properties), [&b"Named"[..], b"oc0"]);
     assert_eq!(names.len(), 10);
     assert!(!names.contains(ResKind::Font, b"F9"));
+}
+
+/// A property list PDFium reads as no dictionary, its key no name, ends
+/// where PDFium ends it, and `BDC` takes its tag and list from the
+/// operands PDFium gives it, what's after the list among them: in
+/// `/Span <</MCID 0 1 /Alt>> BDC`, the tag `/Alt` and the list `>>`,
+/// none, where PDFium's chromium/7881, 8076 and 8125 mark nothing; in
+/// `/Tag <</A 1 2 /P1 BDC`, no tag and the named list `/P1`, which the
+/// names content uses have.
+#[test]
+fn marked_content_takes_the_operands_pdfium_gives_bdc() {
+    let list = dict! { "Lang" => "en" };
+    let props = Properties::new([(b"P1".to_vec(), list.clone())]);
+    let s: &[u8] = b"/Span <</MCID 0 1 /Alt>> BDC 0 0 1 1 re f EMC /Tag <</A 1 2 /P1 BDC EMC";
+    let c = Concat::new(&[s]);
+    let found = marked(&c, &props, &ResCx::none(), LIM).unwrap();
+    assert_eq!((&found[0].tag[..], &found[0].props), (&b"Alt"[..], &None));
+    let named = Some(Props::Named(b"P1".to_vec(), Some(&list)));
+    assert_eq!((&found[1].tag[..], &found[1].props), (&b""[..], &named));
+    let names = names_used(&c, &ResCx::none(), LIM, &[]).unwrap();
+    let of = |kind| names.of(kind).collect::<Vec<_>>();
+    assert_eq!(of(ResKind::Properties), [b"P1"]);
 }
 
 /// Marked content stepped through an operation at a time: each range

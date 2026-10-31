@@ -22,8 +22,9 @@ pub enum Tok<'a> {
     /// ([`tokens`]).
     Op(&'a [u8]),
     /// An operand as written: a number, a name, a string, an array or a
-    /// dictionary with all it holds, `true`, `false` or `null`. A closing
-    /// delimiter with nothing to close is one too, as PDFium skips it.
+    /// dictionary as far as PDFium reads it ([`tokens`]), `true`, `false`
+    /// or `null`. A closing delimiter with nothing to close is one too, as
+    /// PDFium skips it.
     Operand(&'a [u8]),
     /// An inline image, `BI` to `EI`: where its data is.
     InlineImage(Range<usize>),
@@ -35,12 +36,23 @@ pub enum Tok<'a> {
 /// Tokens end where PDFium's `CPDF_StreamParser` ends them, as
 /// pdf-tokenizer reads them by PDFium's rules: at white-space, 0x80 and
 /// 0xFF among it beside ISO 32000-2's six bytes, and delimiters, a word of
-/// digits, signs and points is a number, strings nest, and an array or a
-/// dictionary is one token with all it holds.
+/// digits, signs and points is a number, and strings nest. An array or a
+/// dictionary is one token, ended where PDFium's `ReadNextObject` ends it:
+/// an array at the first `]` read for an element, as an array inside an
+/// array, outside any dictionary, opens none (its `[` dropped, as is an
+/// element that's no object); a dictionary at its `>>`, or, none, at a key
+/// that's no name, of which a string's `(` or a hex string's `<` is the
+/// first byte alone, or at a value that's no object, a `]` that so ends it
+/// ending an array it's in too; and inside a dictionary, arrays nest.
+/// What's after it is read on, as content: `[[1] 2]` is `[[1]`, then `2`
+/// and `]`, and `<< (x) 1 >>` is `<< (`, then `x`, an operator, `)`, `1`
+/// and `>>`.
 /// Where PDFium reads on regardless, this fails: a string, array,
-/// dictionary or inline image that doesn't end, or one past `limits`, is
-/// an [`Error`] saying where. It never panics, and every token moves it
-/// on.
+/// dictionary or inline image that doesn't end, one past `limits`, or
+/// arrays and dictionaries nested deeper than the 64 levels PDFium reads,
+/// past which it reads what's nested as no object (chromium/8076 and
+/// chromium/8125; chromium/7881, 512), is an [`Error`] saying where. It
+/// never panics, and every token moves it on.
 ///
 /// An inline image, `BI` to `EI`, is one token. Its data is found as
 /// PDFium's `ReadInlineStream` finds it, by its first filter:
@@ -70,8 +82,10 @@ pub enum Tok<'a> {
 /// JPEG's end of image comes before its last.
 ///
 /// The dictionary is read as PDFium's `Handle_BeginImage` reads it: a
-/// name, its value, and so on, to `ID`. A value PDFium reads as no object
-/// (a keyword, `ID` among them, a closer or a brace) takes its key out.
+/// name, its value, and so on, to `ID`, each value, or an object written
+/// for a key, read as far as PDFium reads it, as an operand is. A value
+/// PDFium reads as no object (a keyword, `ID` among them, a closer, a
+/// brace or a dictionary that's none) takes its key out.
 /// Where an object that's no name is written for a key, the dictionary
 /// ends there, and the data is read from after it, as from after `ID`;
 /// where a keyword other than `ID` is, there's no image: `BI` is an
@@ -113,6 +127,7 @@ pub fn tokens<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Tokens<'a
         joins: &[],
         join: 0,
         lone: Vec::new(),
+        held: Vec::new(),
         sink: (),
     }
 }
@@ -147,6 +162,11 @@ pub struct Tokens<'a, 'r, S = ()> {
     /// the keys in the same places, and ends at the same keyword: it's
     /// pushed with that keyword, its dictionary not read again.
     lone: Vec<(usize, usize)>,
+    /// The faults of the operand being read where PDFium ends what it
+    /// holds before ISO 32000-2 would, held to be told in the order of
+    /// their ends with what [`across`](Tokens::across) tells of it, the
+    /// last to be told first.
+    held: Vec<(Range<usize>, Fault<'a>)>,
     sink: S,
 }
 
@@ -211,6 +231,7 @@ impl<'a, 'r, S> Tokens<'a, 'r, S> {
             joins: self.joins,
             join: self.join,
             lone: self.lone,
+            held: self.held,
             sink,
         }
     }
@@ -314,7 +335,7 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
                 self.operands = 0;
                 Tok::Op(&s[r.clone()])
             }
-            Raw::Operand => {
+            Raw::Operand { .. } => {
                 self.operands += 1;
                 if self.operands > self.lim.operands {
                     return Some(Err(Error {
@@ -328,8 +349,13 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
         if self.sink.wants() {
             if let Tok::Operand(written) = tok {
                 fault::token(written, r.start, &mut self.sink);
+                fault::nesting(s, r.start, |at, fault| self.held.push((at, fault)));
+                self.held.reverse();
             }
             self.across(r.clone(), None);
+            while let Some((at, fault)) = self.held.pop() {
+                self.sink.fault(at, fault);
+            }
         }
         Some(Ok((r, tok)))
     }
@@ -368,8 +394,22 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
         let after = self.divided(data.end..token.end, false);
         if dict || inside || after {
             let written = &self.s[token.clone()];
-            self.sink.fault(token, Fault::Across { written });
+            self.tell(token, Fault::Across { written });
         }
+    }
+
+    /// `fault` told to the sink, the faults held before it that end no
+    /// later told first.
+    fn tell(&mut self, at: Range<usize>, fault: Fault<'a>) {
+        while let Some((held, _)) = self.held.last() {
+            if held.end > at.end {
+                break;
+            }
+            if let Some((held, before)) = self.held.pop() {
+                self.sink.fault(held, before);
+            }
+        }
+        self.sink.fault(at, fault);
     }
 
     /// What a join divides in `region`, read as the scanner reads it:
@@ -419,7 +459,7 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
                 found = true;
                 if tell {
                     let written = &s[start..end];
-                    self.sink.fault(start..end, Fault::Across { written });
+                    self.tell(start..end, Fault::Across { written });
                 }
             }
         }

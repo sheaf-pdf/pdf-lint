@@ -1,8 +1,5 @@
 # name	why pdf-content-streams reads it otherwise than PDFium
 flate-EI	Flate data's end is taken at the first EI between white-space, where PDFium decodes the data to find it: this stored block holds EI, which PDFium reads on past.
 lzw-plain	LZW data's end is taken at the first EI between white-space, where PDFium decodes the data to find it: these bytes aren't LZW data, which PDFium keeps no stream of.
-bad-dict-in-key-place	A dictionary operand is read whole, to the >> that closes it; PDFium reads one whose key is no name as no object, its reading stopped at that key.
-nested-array-in-key-place	An array operand is read whole, to the ] that closes it; PDFium ends an array inside an array, outside a dictionary, at the inner ].
-nested-array-value	An array operand is read whole, to the ] that closes it; PDFium ends an array inside an array, outside a dictionary, at the inner ].
-nested-array-operand	An array operand is read whole, to the ] that closes it; PDFium ends an array inside an array, outside a dictionary, at the inner ].
-bad-dict-operand	A dictionary operand is read whole, to the >> that closes it; PDFium reads one whose key is no name as no object, its reading stopped at that key.
+deep-65	An operand nested past the 64 levels PDFium reads is an error here, which stops reading, where PDFium reads it as no object and reads on.
+deep-64-array-element	An operand nested past the 64 levels PDFium reads is an error here, which stops reading, where PDFium drops what's that deep and reads on.

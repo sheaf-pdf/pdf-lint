@@ -177,6 +177,64 @@ case("flat-array-operand", b"[1 2] 3 4 re f")
 case("bad-dict-operand", b"<< 1 2 >> 3 4 re f")
 case("good-dict-operand", b"<< /A 2 >> 3 4 re f")
 
+# How far PDFium reads a nested operand: a dash array's numbers, the
+# operands `re` takes and a marked-content property list's /MCID show
+# where it ended and what it held.
+DASH = b" 0 d 0 0 m 10 10 l S"
+MC = b" BDC 0 0 10 10 re f EMC"
+END = b"0 0 m 9 9 l S "
+case("array-bad-dict", b"[<< 1 2 >> 3]" + DASH)
+case("array-dict-ended-by-bracket", b"[<< /A ] 5 >> 6] 3 4 re f")
+case("dict-string-key", b"<< (x) 1 >> 3 4 re f")
+case("dict-hex-key", b"<< <41> 1 >> 3 4 re f")
+case("dict-nested-arrays", b"/Span << /A [[1] 2] /MCID 5 >>" + MC)
+case("triple-array", b"1 2 [[[1]]] 5 6 re f")
+case("nested-array-dash", b"[1 [2] 0 d 0 0 m 10 10 l S")
+case("dict-no-value", b"/Span << /A >>" + MC)
+case("dict-array-dict", b"/Span << /A [<< /B 1 >>] /MCID 3 >>" + MC)
+case("dict-array-bad-dict", b"/Span << /A [<< /B ] /MCID 3 >>" + MC)
+case("dict-array-dict-key", b"/Span << /A [<< 1 >> 2] /MCID 3 >>" + MC)
+case("bdc-broken", b"/Span <</MCID 0 1 /Alt>>" + MC)
+case("bdc-broken-in-bmc", b"/Span BMC /Span <</MCID 0 1 /Alt>> BDC 0 0 10 10 re f EMC 0 0 5 5 re f EMC")
+case("bdc-keyword-value", b"/Span <</MCID 4 /A foo>>" + MC)
+case("bdc-string-key-then-dict", b"/Span <</A 1 (/MCID 7) <</MCID 7>>" + MC)
+case("image-decode-nested", b"BI /W 1 /H 1 /BPC 8 /CS /G /D [[0 1]] ID a" + T)
+case("image-dp-bad-dict", b"BI /W 1 /H 1 /BPC 8 /CS /G /DP << 1 >> ID a" + T)
+case("nested-array-filter-id", b"BI /W 1 /H 1 /BPC 8 /CS /G /F [[/AHx]] ID 41> EI" + P)
+case("nested-array-filter-hex", b"BI /W 1 /H 1 /BPC 8 /CS /G /F [[/AHx]] 41> EI" + P)
+case("keyword-first-in-filter", b"BI /W 1 /H 1 /BPC 8 /CS /G /F [foo /AHx] ID 41> EI" + P)
+case("closer-first-in-filter", b"BI /W 1 /H 1 /BPC 8 /CS /G /F [) /AHx] ID 41> EI" + P)
+case("devicen-nested-names", b"BI /W 1 /H 1 /BPC 8 /CS [/DeviceN [/A /B] /DeviceGray null] ID abc EI" + P)
+case("cs-keyword-first", b"BI /W 3 /H 1 /BPC 8 /CS [foo /DeviceGray] ID abcdefghi EI" + P)
+case("cs-erased-by-dict-none", b"BI /W 3 /H 1 /BPC 8 /CS /G /CS << /A >> ID abcdefghi EI" + P)
+case("cs-empty-array", b"BI /W 1 /H 1 /BPC 8 /CS [] ID abc EI" + P)
+# Each at the content's end, whole and cut short.
+for name, x in [("array-bad-dict", b"[<< 1 2 >> 3]"), ("array-dict-ended-by-bracket", b"[<< /A ] 5 >> 6]"),
+                ("dict-string-key", b"<< (x) 1 >>"), ("dict-nested-arrays", b"<< /A [[1] 2] >>"),
+                ("triple-array", b"[[[1]]]"), ("dict-no-value", b"<< /A >>"),
+                ("dict-array-dict", b"<< /A [<< /B 1 >>] >>"), ("bdc-broken", b"/Span <</MCID 0 1 /Alt>> BDC"),
+                ("image-cs-nested", b"BI /W 1 /H 1 /BPC 8 /CS [[/G]]"),
+                ("image-decode-nested", b"BI /W 1 /H 1 /BPC 8 /CS /G /D [[0 1]]"),
+                ("image-dp-bad-dict", b"BI /W 1 /H 1 /BPC 8 /CS /G /DP << 1 >>"),
+                ("nested-array-filter", b"BI /W 1 /H 1 /BPC 8 /CS /G /F [[/AHx]] ID")]:
+    case(name + "-at-end", END + x)
+for name, x in [("array-bad-dict", b"[<< 1 2"), ("array-dict-ended-by-bracket", b"[<< /A"),
+                ("dict-string-key", b"<< (x"), ("dict-nested-arrays", b"<< /A [[1]"), ("triple-array", b"[[[1"),
+                ("dict-no-value", b"<< /A"), ("dict-array-dict", b"<< /A [<< /B"),
+                ("bdc-broken", b"/Span <</MCID 0 1"), ("image-cs-nested", b"BI /W 1 /H 1 /BPC 8 /CS [[/G"),
+                ("image-dp-bad-dict", b"BI /W 1 /H 1 /BPC 8 /CS /G /DP << 1")]:
+    case(name + "-cut-at-end", END + x)
+# How deep PDFium reads: a property list whose last value is 64 levels in,
+# and 65, where PDFium's chromium/8076 and 8125 read none (chromium/7881,
+# 512); one with an empty dictionary or array 64 levels in, and an array
+# there with an element.
+DEEP = b"/Span <</MCID 3 /A "
+case("deep-64", DEEP + b"<</A " * 63 + b"1" + b" >>" * 64 + MC)
+case("deep-65", DEEP + b"<</A " * 64 + b"1" + b" >>" * 65 + MC)
+case("deep-64-empty-dict", DEEP + b"<</A " * 63 + b"<< >>" + b" >>" * 64 + MC)
+case("deep-64-empty-array", DEEP + b"<</A " * 63 + b"[ ]" + b" >>" * 64 + MC)
+case("deep-64-array-element", DEEP + b"<</A " * 63 + b"[1]" + b" >>" * 64 + MC)
+
 # White-space: 0x80 and 0xFF are PDFium's too; 0x0B, 0x85, 0x7F and 0xA0
 # aren't.
 for name, b in (("80", b"\x80"), ("ff", b"\xff"), ("0b", b"\x0b"), ("85", b"\x85"), ("7f", b"\x7f"),

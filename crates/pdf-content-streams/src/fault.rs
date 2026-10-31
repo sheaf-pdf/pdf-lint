@@ -11,10 +11,12 @@
 //!   [`OutOfRange`](Fault::OutOfRange), [`HexString`](Fault::HexString),
 //!   [`Name`](Fault::Name), [`StringCr`](Fault::StringCr),
 //!   [`Long`](Fault::Long), [`Closer`](Fault::Closer),
-//!   [`Brace`](Fault::Brace)): [`Tokens`](crate::Tokens) and
-//!   [`Operations`](crate::Operations) with a sink
-//!   ([`Tokens::with_sink`](crate::Tokens::with_sink)), as each operand
-//!   is read; an inline image's dictionary's tokens too.
+//!   [`Brace`](Fault::Brace), and an array's or a dictionary's
+//!   [`NestedArray`](Fault::NestedArray) and [`NoDict`](Fault::NoDict),
+//!   where PDFium ends what it holds before ISO 32000-2 would):
+//!   [`Tokens`](crate::Tokens) and [`Operations`](crate::Operations) with
+//!   a sink ([`Tokens::with_sink`](crate::Tokens::with_sink)), as each
+//!   operand is read; an inline image's dictionary's tokens too.
 //! - **An inline image's** ([`EscapedKey`](Fault::EscapedKey),
 //!   [`Abbreviation`](Fault::Abbreviation), [`DictEnd`](Fault::DictEnd),
 //!   [`ImageLength`](Fault::ImageLength), [`AfterId`](Fault::AfterId),
@@ -32,7 +34,9 @@
 //!   and value's own, and [`Key`](Fault::Key),
 //!   [`Keyword`](Fault::Keyword) and [`NoValue`](Fault::NoValue), when
 //!   it's read ([`Operand::object_with`](crate::Operand::object_with)):
-//!   reading it is what finds them.
+//!   reading it is what finds them. A dictionary one of them makes none is
+//!   the token's to tell ([`NoDict`](Fault::NoDict)), with where PDFium's
+//!   reading of it stops.
 //!
 //! Each is told once, as reading passes its end: faults come in the order
 //! of their ends.
@@ -51,7 +55,7 @@ use pdf_tokenizer::decode::{self, NumberError, pdfium};
 use pdf_tokenizer::is_white_space;
 
 use crate::operand::{STRING, WORD};
-use crate::scan::is_number;
+use crate::scan::{Event, TOP, UNCAPPED, Visit, is_number, walk};
 
 /// Where faults are told: a checker keeps them; `()` drops them, and
 /// wants none, so none is looked for. A fault borrows from `'a`, the
@@ -184,7 +188,9 @@ pub enum Fault<'a> {
     /// A `)`, `>`, `]` or `>>` with nothing open to close: passed over
     /// here, as PDFium passes it over, an operand that's no object; to ISO
     /// 32000-2 it's no token at all, where content is objects and operators
-    /// ("shall": 7.8.2, 7.2.3).
+    /// ("shall": 7.8.2, 7.2.3). Or one that closes nothing here, but what
+    /// ISO reads open, where PDFium has ended it sooner
+    /// ([`NestedArray`](Fault::NestedArray), [`NoDict`](Fault::NoDict)).
     #[error("{} closes nothing", shown(.written))]
     Closer {
         /// The delimiter.
@@ -201,34 +207,65 @@ pub enum Fault<'a> {
     },
     /// A word that's no object where an object is written: an element of
     /// an array, a key or value of a dictionary, or a value of an inline
-    /// image's. Passed over here, as PDFium passes it over, an inline
-    /// image's key with it, as PDFium takes out a key it reads no value
-    /// for; ISO 32000-2's arrays and dictionaries hold objects ("shall":
-    /// 7.3.6, 7.3.7), and so does an inline image's dictionary, its
-    /// key-value pairs (8.9.7). Where an inline image's key is written, a
-    /// keyword makes its `BI` a [`LoneBi`](Fault::LoneBi).
+    /// image's. Passed over here in an array, as PDFium passes it over;
+    /// a dictionary's key or value makes the dictionary none, as PDFium
+    /// reads it ([`NoDict`](Fault::NoDict)); and an inline image's value
+    /// takes its key out, as PDFium takes out a key it reads no value for.
+    /// ISO 32000-2's arrays and dictionaries hold objects ("shall": 7.3.6,
+    /// 7.3.7), and so does an inline image's dictionary, its key-value
+    /// pairs (8.9.7). Where an inline image's key is written, a keyword
+    /// makes its `BI` a [`LoneBi`](Fault::LoneBi).
     #[error("{} is no object, where one is written", shown(.written))]
     Keyword {
         /// The word.
         written: &'a [u8],
     },
-    /// A dictionary's key that's an object but not a name: passed over
-    /// here, as PDFium passes it over, what's next read as the key; ISO
-    /// 32000-2's keys are names (7.3.7, "shall"). In an inline image's
-    /// dictionary, such an object ends it: [`DictEnd`](Fault::DictEnd).
+    /// A dictionary's key that's an object but not a name: the dictionary
+    /// is none here, as PDFium reads it, its reading stopped at that key
+    /// ([`NoDict`](Fault::NoDict)), of which a string's `(` or a hex
+    /// string's `<` is the first byte alone; ISO 32000-2's keys are names
+    /// (7.3.7, "shall"). In an inline image's dictionary, such an object
+    /// ends it: [`DictEnd`](Fault::DictEnd).
     #[error("{} is a dictionary's key and not a name", shown(.written))]
     Key {
         /// The key.
         written: &'a [u8],
     },
-    /// A dictionary's key with no value after it, at its `>>`: passed over
-    /// here. Or an inline image's, at an `ID`, which PDFium reads as its
-    /// value, none, taking the key out and reading the dictionary on past
-    /// it, where ISO 32000-2's ends at that `ID` (8.9.7). ISO's
-    /// dictionaries are key-value pairs (7.3.7, "shall").
+    /// A dictionary's key with no value after it, at its `>>`: the
+    /// dictionary is none here, as PDFium reads it
+    /// ([`NoDict`](Fault::NoDict)). Or an inline image's, at an `ID`, which
+    /// PDFium reads as its value, none, taking the key out and reading the
+    /// dictionary on past it, where ISO 32000-2's ends at that `ID`
+    /// (8.9.7). ISO's dictionaries are key-value pairs (7.3.7, "shall").
     #[error("the key {} has no value", shown(.written))]
     NoValue {
         /// The key.
+        written: &'a [u8],
+    },
+    /// A `[` inside an array, with no dictionary open around it: it opens
+    /// no array here, as PDFium reads it, which drops it and reads on the
+    /// array it's in, so the next `]` ends that array, and what ISO
+    /// 32000-2 reads after the inner array's `]` is read as content, or as
+    /// that array's elements; ISO's arrays may hold arrays, however deep
+    /// (7.3.6). So `[[1] 2]` is the array of 1 here, then `2` and `]`,
+    /// which closes nothing.
+    #[error("{} opens no array here, inside an array, and one to ISO 32000-2", shown(.written))]
+    NestedArray {
+        /// The `[`.
+        written: &'a [u8],
+    },
+    /// A dictionary that's none here, as PDFium reads it, from its `<<` to
+    /// the word its reading stopped at: a key that's no name
+    /// ([`Key`](Fault::Key)), its first byte alone where it's a string, or
+    /// a value that's no object (a keyword, a closer that closes nothing,
+    /// a brace, a `>>` where a key has no value, or a dictionary that's
+    /// none itself), what's after it read as content, or as the elements
+    /// of an array it's in, which a `]` read for it ends. ISO 32000-2's
+    /// dictionary runs to its `>>`, its keys names and its values objects
+    /// (7.3.7, "shall").
+    #[error("{} is no dictionary here, where ISO 32000-2 reads one", shown(.written))]
+    NoDict {
+        /// The dictionary, `<<` to where its reading stopped.
         written: &'a [u8],
     },
     /// A string, a comment or an inline image running from one of a page's
@@ -326,7 +363,7 @@ pub enum Fault<'a> {
     /// ISO 32000-2's keys are names (7.3.7, "shall"), and an inline
     /// image's key-value pairs run from `BI` to `ID` (8.9.7, "shall"), so
     /// ISO reads its dictionary on. In an operand's dictionary, such a key
-    /// is a [`Key`](Fault::Key).
+    /// is a [`Key`](Fault::Key), which makes the dictionary none.
     #[error("{} ends an inline image's dictionary, where a key is written", shown(.written))]
     DictEnd {
         /// The object.
@@ -401,6 +438,67 @@ pub(crate) fn token<'a>(written: &'a [u8], at: usize, sink: &mut (impl Sink<'a> 
         sink.fault(at..at + written.len(), Fault::Long { written });
     }
     read
+}
+
+/// Where PDFium ends what an array or a dictionary token holds before ISO
+/// 32000-2 would, `at` where the token starts in `s`, each told to `tell`
+/// as reading passes its end: a `[` it drops ([`Fault::NestedArray`]),
+/// and a dictionary it reads as none ([`Fault::NoDict`]). Nothing for any
+/// other token. The token was read under a cap on depth, so nothing in it
+/// is deeper.
+pub(crate) fn nesting<'a>(s: &'a [u8], at: usize, tell: impl FnMut(Range<usize>, Fault<'a>)) {
+    let rest = s.get(at..).unwrap_or_default();
+    if !(rest.starts_with(b"[") || rest.starts_with(b"<<")) {
+        return;
+    }
+    let mut nesting = Nesting {
+        s,
+        tell,
+        open: Vec::new(),
+        last: at,
+    };
+    walk(s, at, TOP, UNCAPPED, true, &mut nesting);
+}
+
+/// What [`nesting`] tells as a walk reads a token: each array or
+/// dictionary open, a dictionary by where it starts, and where the last
+/// word read ends.
+struct Nesting<'a, T> {
+    s: &'a [u8],
+    tell: T,
+    open: Vec<Option<usize>>,
+    last: usize,
+}
+
+impl<'a, T: FnMut(Range<usize>, Fault<'a>)> Visit<'a> for Nesting<'a, T> {
+    fn visit(&mut self, event: Event<'a>) {
+        match event {
+            Event::Open(token) => {
+                let dict = token.bytes.starts_with(b"<<");
+                self.open.push(dict.then_some(token.start));
+            }
+            Event::Word(token) => {
+                if token.bytes == b"[" {
+                    let written = token.bytes;
+                    (self.tell)(token.range(), Fault::NestedArray { written });
+                }
+                self.last = token.end();
+            }
+            Event::Close(token) => {
+                self.open.pop();
+                self.last = token.end();
+            }
+            Event::Leaf(token) | Event::Key(token) | Event::NotKey(token) => {
+                self.last = token.end();
+            }
+            Event::Unmade => {
+                if let Some(Some(start)) = self.open.pop() {
+                    let written = &self.s[start..self.last];
+                    (self.tell)(start..self.last, Fault::NoDict { written });
+                }
+            }
+        }
+    }
 }
 
 /// A number word's fault: one ISO 32000-2 doesn't write so (7.3.3), or

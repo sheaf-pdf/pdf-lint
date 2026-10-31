@@ -11,7 +11,7 @@ use pdf_tokenizer::decode;
 
 use crate::data::{RunLength, Searched, a85_stop, ei_scan, find};
 use crate::fault::{Fault, Sink};
-use crate::scan::{Raw, next_raw, next_raw_walked};
+use crate::scan::{Raw, UNCAPPED, next_raw, next_raw_walked};
 use crate::{
     Balance, Concat, Error, ErrorKind, ImageStream, Join, Limits, MarkedEvent, MarkedNest, NameSet,
     Operand, Operation, Operations, Operator, Properties, Props, ResCx, ResKind, SpanAcross, State,
@@ -366,7 +366,11 @@ fn stepped_marked<'p>(
                         assert_eq!(*read, props.get(n));
                     }
                     (Some(Props::Inline(_)), Some(list)) => assert!(list.is_dict()),
-                    (None, list) => assert!(list.is_none_or(|l| !l.is_name() && !l.is_dict())),
+                    (None, list) => {
+                        let dict =
+                            |l: &Operand| l.object(limits).is_some_and(|o| o.as_dict().is_some());
+                        assert!(list.is_none_or(|l| !l.is_name() && !dict(&l)));
+                    }
                     (props, list) => panic!("{props:?} from {list:?}"),
                 }
                 open.push(i);
@@ -560,8 +564,8 @@ fn dict_end(s: &[u8], bi: usize, depth: usize) -> Option<(Range<usize>, bool)> {
         let (key, kind) = next_raw(s, at, depth)?.ok()?;
         match kind {
             Raw::Op => return Some((key.clone(), &s[key] != b"ID")),
-            Raw::Operand if s[key.start] != b'/' => return Some((key, false)),
-            Raw::Operand => at = next_raw(s, key.end, depth)?.ok()?.0.end,
+            Raw::Operand { .. } if s[key.start] != b'/' => return Some((key, false)),
+            Raw::Operand { .. } => at = next_raw(s, key.end, depth)?.ok()?.0.end,
         }
     }
 }
@@ -627,6 +631,8 @@ fn in_order(s: &[u8], faults: &[(Range<usize>, Fault)]) {
             | Fault::Keyword { written }
             | Fault::Key { written }
             | Fault::NoValue { written }
+            | Fault::NestedArray { written }
+            | Fault::NoDict { written }
             | Fault::Across { written }
             | Fault::EscapedKey { written }
             | Fault::Abbreviation { written, .. }
@@ -836,8 +842,10 @@ fn stepped(state: State, op: &Operation) -> State {
 
 /// An operand, read from `s`, is the kind its first bytes say, at most
 /// one; its name as [`name`] reads it; its number as [`number`] holds it;
-/// and an array's elements tile what's inside it, each where it is, read
-/// as the array's elements do, each its number too.
+/// and an array's elements tile what's inside it, each where it is, the
+/// last ending at its `]` or with it, read as the array's elements do,
+/// each its number too, and each but a keyword or a `[` that opens none,
+/// no objects, read again as itself ([`operand_reads`]).
 fn operand(s: &[u8], operand: &Operand, limits: &Limits) {
     let bytes = operand.bytes();
     let kinds = [
@@ -863,15 +871,23 @@ fn operand(s: &[u8], operand: &Operand, limits: &Limits) {
     for element in &elements {
         let e = element.range();
         assert!(
-            at <= e.start && e.start < e.end && e.end < r.end,
+            at <= e.start && e.start < e.end && e.end <= r.end,
             "{e:?} in {r:?}"
         );
         assert!(blank(&s[at..e.start]), "only white-space between");
         assert_eq!(element.bytes(), &s[e.clone()]);
         number(element);
+        match next_raw(element.bytes(), 0, UNCAPPED) {
+            Some(Ok((_, Raw::Op))) => assert_eq!(element.object(limits), None, "a keyword"),
+            _ if element.bytes() == b"[" => assert_eq!(element.object(limits), None),
+            _ => operand_reads(element.bytes(), limits),
+        }
         at = e.end;
     }
-    assert!(blank(&s[at..r.end - 1]), "only white-space after");
+    assert_eq!(s[r.end - 1], b']', "an array ends at a `]`");
+    if at < r.end {
+        assert!(blank(&s[at..r.end - 1]), "only white-space after");
+    }
     if let Some(Value::Array(read)) = operand.object(limits).map(Object::into_value) {
         let inside = Limits {
             depth: limits.depth.saturating_sub(1),
@@ -965,9 +981,23 @@ fn tiled<'a>(content: &'a Concat, res: &ResCx, limits: &Limits) -> Read<'a> {
 /// starts as one, as the name it is, decoded, and a number word as a
 /// number: an integer the number PDFium reads ([`Operand::number`]), and
 /// a real finite, ISO 32000-2's value where ISO reads the word as a number
-/// too, by no more than the 255 bytes PDFium reads.
+/// too, by no more than the 255 bytes PDFium reads. Its bytes read again
+/// as a token are it, whole, and it's an object, a dictionary among them,
+/// where that reading makes one.
 fn operand_reads(operand: &[u8], limits: &Limits) {
     let read = object(operand, limits).map(|o| o.into_value());
+    let made = match next_raw(operand, 0, UNCAPPED) {
+        Some(Ok((r, Raw::Operand { object }))) => {
+            assert_eq!(r, 0..operand.len(), "read again, itself");
+            object
+        }
+        again => panic!("read again, {again:?}"),
+    };
+    assert_eq!(
+        read.is_some(),
+        made,
+        "an object where its reading makes one"
+    );
     let as_operand = Operand::new(operand, 0..operand.len());
     if as_operand.is_number() {
         match read {
@@ -984,7 +1014,11 @@ fn operand_reads(operand: &[u8], limits: &Limits) {
     match operand.first() {
         Some(b'[') => assert!(matches!(read, Some(Value::Array(_))), "an array reads"),
         Some(b'<') if operand.starts_with(b"<<") => {
-            assert!(matches!(read, Some(Value::Dict(_))), "a dictionary reads");
+            assert_eq!(
+                matches!(read, Some(Value::Dict(_))),
+                made,
+                "a dictionary reads"
+            );
         }
         Some(b'(' | b'<') => assert!(matches!(read, Some(Value::String(..))), "a string reads"),
         Some(b'/') => {
@@ -1038,6 +1072,11 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         b"%c\nq /Artifact <</Type /Pagination /Subtype /Header /Attached [/Top]>> BDC\n\
           q BT /F1 12 Tf 72 720 Td [(a\\)(b) c) -250 <4142>] TJ (\\\\) Tj ET Q EMC\n\
           [1 [2 [3]] <</A <</B (c)>>>>] true false null Q { } ) ]"
+            .to_vec(),
+        // Arrays and dictionaries PDFium ends sooner than ISO 32000-2.
+        b"[<< 1 2 >> 3] 0 d << (x) 1 >> [<< /A ] 5 >> 6] 3 4 re\n\
+          /Span <</MCID 0 1 /Alt>> BDC << /A [[1] 2] /B << /C [<< /D 1 >>] >> >> EMC\n\
+          BI /W 1 /H 1 /BPC 8 /CS /G /D [[0 1]] ID a EI 1 [2 <4>] <</A <</B ]>>> >> n"
             .to_vec(),
         format!("q /CS0 cs {components}/P0 scn 0 0 9 9 re f Q\n").into_bytes(),
     ]

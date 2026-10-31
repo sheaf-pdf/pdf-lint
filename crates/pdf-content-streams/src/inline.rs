@@ -182,8 +182,8 @@ impl<'a> InlineImage<'a> {
     /// (Table 92, `/RGB` say), which PDFium sets over it; so
     /// `entry(b"CS")` and `entry(b"ColorSpace")` are the same. Of a key
     /// written twice, the last; and a value PDFium reads as no object (a
-    /// keyword, a closer or a brace) takes the key out, as PDFium takes
-    /// out a key it reads no value for.
+    /// keyword, a closer, a brace or a dictionary that's none) takes the
+    /// key out, as PDFium takes out a key it reads no value for.
     pub fn entry(&self, key: &[u8]) -> Option<Operand<'a>> {
         let pair = KEYS
             .iter()
@@ -425,11 +425,12 @@ impl<'a, 'r> Images<'a, 'r> {
         // ISO asks white-space after `ID`, and counts its length from after
         // more of it, by the last of its filters (8.9.7): its white-space
         // (7.2.3).
-        let ascii = ascii(s, dict.iso(F), self.lim.depth);
+        let ascii = ascii(s, dict.iso(F));
         match ends {
             Ends::Object(object) => {
                 let written = &s[object.clone()];
                 fault::token(written, object.start, sink);
+                fault::nesting(s, object.start, |at, fault| sink.fault(at, fault));
                 sink.fault(object.clone(), Fault::DictEnd { written });
             }
             Ends::Id(id) if !dict.ended() && !ascii && !space_after(s, id) => {
@@ -472,15 +473,16 @@ impl<'a, 'r> Images<'a, 'r> {
     /// takes it: a name, its abbreviation read as the full name (Table
     /// 92), or a string's bytes, naming a filter, each read as PDFium's
     /// content parser reads it ([`name`], [`literal`], [`hex`]: `/A#48x`
-    /// is `/AHx`). None, as for no filter,
-    /// for `null`, a dictionary or what's no object, and for an empty
-    /// array; [`Filter::Other`] for a name or a string that names no filter
-    /// PDFium decodes, a number, a boolean, or an array first in an array.
+    /// is `/AHx`); of an array, its first element that's an object, as
+    /// PDFium reads the array ([`elements`]: `[[/AHx]` is `/AHx`). None, as
+    /// for no filter, for `null`, a dictionary or what's no object, and for
+    /// an array with no object in it; [`Filter::Other`] for a name or a
+    /// string that names no filter PDFium decodes, a number or a boolean.
     fn first_filter(&self, dict: &ImageDict) -> Option<Filter> {
         let s = self.s;
         let f = &s[dict.get(s, F)?];
         let first = match f.first() {
-            Some(b'[') => *elements(f, self.lim.depth).first()?,
+            Some(b'[') => elements(f).into_iter().find(|&(_, object)| object)?.0,
             _ => f,
         };
         let named: Cow<[u8]> = match first {
@@ -491,7 +493,7 @@ impl<'a, 'r> Images<'a, 'r> {
             [b'(', ..] => Cow::Owned(literal(first)),
             [b'<', b'<', ..] => return None,
             [b'<', ..] => Cow::Owned(hex(first)),
-            [b'[', ..] | b"true" | b"false" => return Some(Filter::Other),
+            b"true" | b"false" => return Some(Filter::Other),
             n if is_number(n) => return Some(Filter::Other),
             _ => return None,
         };
@@ -552,17 +554,15 @@ impl<'a, 'r> Images<'a, 'r> {
         if cs.first() != Some(&b'[') {
             return Some(3);
         }
-        let parts = elements(cs, self.lim.depth);
-        let family = parts.first().and_then(|f| name(f));
-        Some(match family.as_deref() {
-            Some(b"DeviceN") => parts
-                .get(1)
-                .map(|names| elements(names, self.lim.depth).len() as u64)
-                .filter(|&n| n > 0)
-                .unwrap_or(3),
-            Some(family) => family_components(family).into(),
-            None => 3,
-        })
+        // Its family, the array's first element that's an object, as
+        // PDFium reads the array ([`elements`]). A DeviceN space names its
+        // colorants in an array, its second element, which an array here
+        // never holds, as PDFium opens none in an array outside a
+        // dictionary: so it's one PDFium can't make out, as
+        // `family_components` counts it.
+        let first = elements(cs).into_iter().find(|&(_, object)| object);
+        let family = first.and_then(|(first, _)| name(first));
+        Some(family.map_or(3, |family| family_components(&family).into()))
     }
 
     /// The next `EI` operator from `at`, its tokens read as PDFium reads
@@ -739,8 +739,8 @@ pub(crate) enum Ends {
 pub(crate) enum Value {
     /// An object: where it is.
     Object(Range<usize>),
-    /// What PDFium reads as no object, a keyword, a closer or a brace,
-    /// which takes the key out.
+    /// What PDFium reads as no object, a keyword, a closer, a brace or a
+    /// dictionary that's none, which takes the key out.
     None,
     /// `ID`, which PDFium reads as no object too, and which ends ISO
     /// 32000-2's dictionary (8.9.7).
@@ -771,14 +771,16 @@ pub(crate) enum Image {
 /// `Handle_BeginImage` reads it, and what ends it ([`Ends`]): a name, its
 /// value, and so on, until what's written for a key isn't a name. `entry`
 /// is given each key, as written, and its value ([`Value`]): where it is,
-/// or what PDFium reads as no object (a keyword, `ID` among them, a closer
-/// or a brace), which takes the key out. Where ISO 32000-2 would read it
-/// otherwise, `sink` is told, if it wants: each key's and value's own
-/// faults, a key with a `#` escape ISO reads as an image's, a word that's
-/// no object as a value, a key whose value is `ID`, which ends ISO's
-/// dictionary, and, the first such `ID`, its own white-space after it
-/// where ISO asks it ([`Fault::AfterId`]); not what ends PDFium's, which
-/// is the image's to tell ([`Images::read`]).
+/// or what PDFium reads as no object (a keyword, `ID` among them, a
+/// closer, a brace or a dictionary that's none), which takes the key out.
+/// Where ISO 32000-2 would read it otherwise, `sink` is told, if it wants:
+/// each key's and value's own faults, where PDFium ends a value before ISO
+/// would among them ([`fault::nesting`]), a key with a `#` escape ISO
+/// reads as an image's, a word that's no object as a value, a key whose
+/// value is `ID`, which ends ISO's dictionary, and, the first such `ID`,
+/// its own white-space after it where ISO asks it ([`Fault::AfterId`]);
+/// not what ends PDFium's, which is the image's to tell
+/// ([`Images::read`]).
 fn image_dict<'a>(
     s: &'a [u8],
     bi: usize,
@@ -799,8 +801,8 @@ fn image_dict<'a>(
         match kind {
             Raw::Op if &s[key.clone()] == b"ID" => return Ok(Ends::Id(key)),
             Raw::Op => return Ok(Ends::Keyword(key)),
-            Raw::Operand if s[key.start] != b'/' => return Ok(Ends::Object(key)),
-            Raw::Operand => {}
+            Raw::Operand { .. } if s[key.start] != b'/' => return Ok(Ends::Object(key)),
+            Raw::Operand { .. } => {}
         }
         if sink.wants() {
             key_faults(s, key.clone(), sink);
@@ -815,18 +817,18 @@ fn image_dict<'a>(
                     let written = &s[key.clone()];
                     sink.fault(key.clone(), Fault::NoValue { written });
                     let [full, short] = filter.clone();
-                    if !ended && !ascii(s, short.or(full), depth) && !space_after(s, &value) {
+                    if !ended && !ascii(s, short.or(full)) && !space_after(s, &value) {
                         sink.fault(value.clone(), Fault::AfterId);
                     }
                 }
                 Raw::Op => sink.fault(value.clone(), Fault::Keyword { written }),
-                Raw::Operand => {
+                Raw::Operand { .. } => {
                     fault::token(written, value.start, sink);
+                    fault::nesting(s, value.start, |at, fault| sink.fault(at, fault));
                 }
             }
         }
-        let none =
-            matches!(kind, Raw::Op) || matches!(written, b")" | b">" | b"]" | b">>" | b"{" | b"}");
+        let none = !matches!(kind, Raw::Operand { object: true });
         let key = &s[key];
         if !ended {
             match key {
@@ -849,12 +851,12 @@ fn image_dict<'a>(
 /// is one of the two ASCII ones, ASCIIHexDecode and ASCII85Decode, as ISO
 /// 32000-2 reads its name, decoded (7.3.5): where ISO asks no white-space
 /// after `ID`, and counts the data's length from after any (8.9.7).
-fn ascii(s: &[u8], f: Option<Range<usize>>, depth: usize) -> bool {
+fn ascii(s: &[u8], f: Option<Range<usize>>) -> bool {
     let Some(f) = f.map(|f| &s[f]) else {
         return false;
     };
     let last = match f.first() {
-        Some(b'[') => elements(f, depth).last().copied(),
+        Some(b'[') => elements(f).last().map(|&(last, _)| last),
         _ => Some(f),
     };
     let ascii =
