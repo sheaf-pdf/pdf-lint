@@ -654,8 +654,7 @@ fn an_inline_images_stream_is_what_pdfium_keeps() {
         ImageStream::Data(start..start + kept.len())
     };
     let g = b"BI /W 1 /H 1 /BPC 8 /CS /G";
-    // A JPEG, its end where its decoder stops with the `image-ends`
-    // feature, at its end of image without it.
+    // A JPEG, its end at its end of image, where its decoder stops too.
     let jpeg8 = jpeg(8, 8, b"", BLOCK);
     let jpeg8_kept = [&jpeg8[..], b" 7"].concat();
     let cases: Vec<(Vec<u8>, Option<&[u8]>)> = vec![
@@ -839,12 +838,12 @@ fn filtered_data_ends_at_its_marker() {
     );
     // RunLength: a run of 4 bytes, ` EI `, then its end.
     assert_image("/F /RL /W 4 /H 1 /BPC 8 /CS /G", b"\x03 EI \x80", &none);
-    // A JPEG, ` EI ` in a comment in it, ended where its decoder stops
-    // with the `image-ends` feature, and at its end of image without it;
-    // without it, data that's no JPEG ends at an end of image too.
+    // A JPEG, ` EI ` in a comment in it, ended at its end of image, where
+    // its decoder stops too; data that's no JPEG ends at an end of image
+    // too, under the default caps, which find DCT and CCITTFax data's end
+    // by the stand-in.
     let jpeg8 = jpeg(8, 8, COMMENT_EI, BLOCK);
     assert_image("/F /DCT /W 8 /H 8 /BPC 8 /CS /G", &jpeg8, &none);
-    #[cfg(not(feature = "image-ends"))]
     assert_image(
         "/F /DCT /W 9 /H 9 /BPC 8 /CS /RGB",
         b"\xff\xd8\xff\xe0 EI \x00\xff\xd9",
@@ -852,13 +851,13 @@ fn filtered_data_ends_at_its_marker() {
     );
     // Flate and LZW data, which PDFium decodes to find its end, end where
     // its decoder stops reading, ` EI ` in Flate's stored block read past;
-    // CCITTFax's too with the `image-ends` feature, and without it at the
-    // first `EI` between white-space, which data that's no fax data ends
-    // at. PDF 2.0's length, abbreviated or not, PDFium doesn't read.
+    // CCITTFax's, under the default caps, at the first `EI` between
+    // white-space, where its decoder stops too, and which data that's no
+    // fax data ends at. PDF 2.0's length, abbreviated or not, PDFium
+    // doesn't read.
     assert_image("/F /Fl /W 9 /H 9 /BPC 8 /CS /G /L 2", FLATE_EI, &none);
     assert_image("/F /LZW /Length 2 /W 9 /H 9", LZW_EI, &none);
     assert_image("/F /CCF /DP <</K -1 /Columns 16>> /W 16 /H 4", G4, &none);
-    #[cfg(not(feature = "image-ends"))]
     assert_image(
         "/F /CCF /DP <</K -1 /Columns 9>> /W 9 /H 9",
         b"xEI EIy",
@@ -2319,14 +2318,46 @@ fn many_flate_images_decode_in_one_pass() {
     assert!(took < std::time::Duration::from_secs(2), "{took:?}");
 }
 
-/// With the `image-ends` feature, DCT and CCITTFax data ends where PDFium's
+/// The default caps, an image's DCT and CCITTFax data's end found by
+/// decoding it.
+#[cfg(feature = "image-ends")]
+const DECODED: Limits = Limits {
+    coded_ends: CodedEnds::Decoded,
+    ..Limits::DEFAULT
+};
+
+/// With the `image-ends` feature, a reading finds DCT and CCITTFax data's
+/// end by decoding it only where it asks for that: under the default caps,
+/// it's the stand-in's, as without the feature. A thumbnail's end of image
+/// in a JPEG's metadata, and a comment's ` EI `, end it for the stand-in;
+/// its decoder reads past them both.
+#[cfg(feature = "image-ends")]
+#[test]
+fn decoding_coded_data_is_asked_for() {
+    let plain = jpeg(8, 8, b"", BLOCK);
+    let n = u16::try_from(plain.len() + 2).unwrap().to_be_bytes();
+    let app1 = [&b"\xff\xe1"[..], &n, &plain].concat();
+    let whole = jpeg(8, 8, &[&app1[..], COMMENT_EI].concat(), BLOCK);
+    let dict = "/W 8 /H 8 /BPC 8 /CS /G /F /DCT";
+    let s = [format!("BI {dict} ID ").as_bytes(), &whole, b" EI"].concat();
+    let start = format!("BI {dict} ID ").len();
+    let thumbnail = place(&whole, b"\xff\xd9").end;
+    assert_eq!(
+        first_image(&s, &Limits::DEFAULT).0,
+        &s[start..start + thumbnail]
+    );
+    assert_eq!(first_image(&s, &DECODED).0, &whole[..]);
+    assert_eq!(Limits::DEFAULT.coded_ends, CodedEnds::StandIn);
+}
+
+/// Decoded, with the `image-ends` feature, DCT and CCITTFax data ends where PDFium's
 /// decoders stop reading it, and on to `EI`; where PDFium refuses the data
 /// or its parameters, it's read on from its start to `EI`, with no stream.
 #[cfg(feature = "image-ends")]
 #[test]
 fn dct_and_ccitt_data_ends_where_their_decoders_stop() {
     use ImageStream::{Data, Missing};
-    let lim = &Limits::DEFAULT;
+    let lim = &DECODED;
     let image = |dict: &str, data: &[u8], after: &str| {
         [format!("BI {dict} ID ").as_bytes(), data, after.as_bytes()].concat()
     };
@@ -2391,7 +2422,7 @@ fn dct_and_ccitt_data_ends_where_their_decoders_stop() {
     );
 }
 
-/// With the `image-ends` feature, what decoding a JPEG holds, its output
+/// Decoded, with the `image-ends` feature, what decoding a JPEG holds, its output
 /// and its coefficients, is spent before it's decoded, and one past the
 /// budget stops reading at its `BI`.
 #[cfg(feature = "image-ends")]
@@ -2404,7 +2435,7 @@ fn the_budget_counts_what_decoding_a_jpeg_holds() {
     let s = one.repeat(2);
     let at = |image_ends| Limits {
         image_ends,
-        ..Limits::DEFAULT
+        ..DECODED
     };
     assert_eq!(read(&s, &none, &at(2 * 2240)).len(), 2);
     let e = error(&s, &at(2 * 2240 - 1));
@@ -2414,11 +2445,11 @@ fn the_budget_counts_what_decoding_a_jpeg_holds() {
     let huge = jpeg(65535, 65535, b"", BLOCK);
     let s = [&b"BI /F /DCT ID "[..], &huge, b" EI"].concat();
     let started = std::time::Instant::now();
-    assert_eq!(error(&s, &Limits::DEFAULT).kind, ErrorKind::ImageEnds);
+    assert_eq!(error(&s, &DECODED).kind, ErrorKind::ImageEnds);
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
 }
 
-/// With the `image-ends` feature, fax data hayro-ccitt can't decode, which
+/// Decoded, with the `image-ends` feature, fax data hayro-ccitt can't decode, which
 /// then says nothing of how far it read, spends all that follows it.
 #[cfg(feature = "image-ends")]
 #[test]
@@ -2429,13 +2460,13 @@ fn fax_data_it_cant_decode_spends_what_follows() {
     let rest = s.len() - (image.len() - 6);
     let at = |image_ends| Limits {
         image_ends,
-        ..Limits::DEFAULT
+        ..DECODED
     };
     assert_eq!(read(&s, &none, &at(rest)).len(), 201);
     assert_eq!(error(&s, &at(rest - 1)).kind, ErrorKind::ImageEnds);
 }
 
-/// With the `image-ends` feature, a progressive JPEG with a scan of no
+/// Decoded, with the `image-ends` feature, a progressive JPEG with a scan of no
 /// coded data, after which zune-jpeg stops short of its end of image
 /// without an error, where PDFium's decoder reads on through every scan to
 /// that end: its data ends there, the stand-in's end, with no fault, and
@@ -2469,11 +2500,11 @@ fn a_jpeg_decoded_short_of_its_end_of_image_ends_at_it() {
     .concat();
     let start = format!("BI {dict} ID ").len();
     let stream = ImageStream::Data(start..start + prog.len());
-    assert_eq!(first_image(&s, &Limits::DEFAULT), (&prog[..], stream));
-    assert_eq!(told(&s), []);
+    assert_eq!(first_image(&s, &DECODED), (&prog[..], stream));
+    assert_eq!(told_with(&s, &DECODED), []);
 }
 
-/// With the `image-ends` feature, data whose decoder ends it short of the
+/// Decoded, with the `image-ends` feature, data whose decoder ends it short of the
 /// filter's own end of data, where ISO 32000-2 ends it, is told no fault
 /// for that end's bytes: fax data's end-of-block pattern after the rows
 /// PDFium decodes, unless `/EndOfBlock` is false; a JPEG's end of image
@@ -2483,7 +2514,7 @@ fn a_jpeg_decoded_short_of_its_end_of_image_ends_at_it() {
 #[cfg(feature = "image-ends")]
 #[test]
 fn a_filters_own_end_of_data_is_iso_s_data() {
-    let lim = &Limits::DEFAULT;
+    let lim = &DECODED;
     let one = |at: Range<usize>, words: &str| vec![(at, words.to_string())];
     // Its rows end in the 7th byte, where PDFium's decoder ends the data;
     // the end of block's 24 bits run on through the 10th.
@@ -2491,10 +2522,10 @@ fn a_filters_own_end_of_data_is_iso_s_data() {
     let fax = "/W 16 /H 4 /BPC 1 /CS /G /F /CCF /DP <</K -1 /Columns 16";
     let s = [format!("BI {fax}>> /L 10 ID ").as_bytes(), &g4, b" EI"].concat();
     assert_eq!(first_image(&s, lim).0, G4);
-    assert_eq!(told(&s), []);
+    assert_eq!(told_with(&s, &DECODED), []);
     let s = [format!("BI {fax}>> ID ").as_bytes(), &g4, b"xy EI"].concat();
     assert_eq!(
-        told(&s),
+        told_with(&s, &DECODED),
         one(
             place(&s, b"xy"),
             "xy is between an inline image's data and its EI"
@@ -2508,7 +2539,7 @@ fn a_filters_own_end_of_data_is_iso_s_data() {
     .concat();
     let eob = s.len() - b"\x08\x00\x80 EI".len();
     assert_eq!(
-        told(&s),
+        told_with(&s, &DECODED),
         one(
             eob..eob + 1,
             "\u{8} is between an inline image's data and its EI"
@@ -2520,7 +2551,7 @@ fn a_filters_own_end_of_data_is_iso_s_data() {
     let dct = format!("BI /W 8 /H 8 /BPC 8 /CS /G /F /DCT /L {n} ID \n");
     let s = [dct.as_bytes(), &whole, b" EI"].concat();
     assert_eq!(first_image(&s, lim).0, &s[dct.len() - 1..s.len() - 4]);
-    assert_eq!(told(&s), []);
+    assert_eq!(told_with(&s, &DECODED), []);
 }
 
 /// What content is made of, run together into tokens.
@@ -3864,9 +3895,15 @@ fn operands_at_the_end_are_a_fault() {
 
 /// `content`'s faults, read whole with no error, and each's words.
 fn told(content: &[u8]) -> Vec<(Range<usize>, String)> {
+    told_with(content, &Limits::DEFAULT)
+}
+
+/// What a sink is told of `content`'s operations under `lim`, as [`told`]
+/// gives it.
+fn told_with(content: &[u8], lim: &Limits) -> Vec<(Range<usize>, String)> {
     let mut kept = Collected::default();
     let none = ResCx::none();
-    operations(content, &none, &Limits::DEFAULT)
+    operations(content, &none, lim)
         .with_sink(&mut kept)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

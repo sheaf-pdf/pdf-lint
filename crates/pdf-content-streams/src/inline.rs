@@ -15,7 +15,7 @@ use pdf_tokenizer::is_white_space;
 use crate::data::{Places, RunLength, Searched, a85_end, a85_stop, ei_scan, find};
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Sink};
-use crate::limits::Limits;
+use crate::limits::{CodedEnds, Limits};
 use crate::operand::{Operand, WORD, hex, iso_name, literal, name};
 use crate::scan::{
     Event, Raw, TOP, UNCAPPED, Visit, elements, is_number, is_space, next_raw, walk,
@@ -760,14 +760,36 @@ impl<'a, 'r> Images<'a, 'r> {
     }
 
     /// Where an image's DCT or CCITTFax data from `start` ends, what
-    /// finding it read in vain, whatever comes after it, and, where the
+    /// finding it read in vain, whatever comes after it, and, where a
     /// decoder found its end, where the data ends as ISO 32000-2 reads it,
-    /// which for fax data is looked for only where `wants`. PDFium decodes
+    /// which for fax data is looked for only where `wants`: as the reading
+    /// asks ([`Limits::coded_ends`]), the stand-in's
+    /// ([`Images::stand_in`]), nothing decoded, or, with the `image-ends`
+    /// feature, the decoders' (`Images::decoders_end`).
+    // Without the feature, the stand-in takes only where the data starts.
+    #[cfg_attr(not(feature = "image-ends"), allow(unused_variables))]
+    fn coded_end(
+        &mut self,
+        bi: usize,
+        start: usize,
+        filter: Filter,
+        dict: &ImageDict,
+        wants: bool,
+    ) -> Result<(End, usize, Option<usize>), Error> {
+        match self.lim.coded_ends {
+            CodedEnds::StandIn => Ok((self.stand_in(start, filter), 0, None)),
+            #[cfg(feature = "image-ends")]
+            CodedEnds::Decoded => self.decoders_end(bi, start, filter, dict, wants),
+        }
+    }
+
+    /// Where an image's DCT or CCITTFax data from `start` ends, as
+    /// [`Images::coded_end`] gives it, found by decoding it. PDFium decodes
     /// both to find where they end (its `DecodeInlineStream`), DCT's on
-    /// libjpeg-turbo and CCITTFax's on a decoder of its own; with the
-    /// `image-ends` feature, so is this (zune-jpeg, hayro-ccitt), the
-    /// image's `/W` and `/H` and its parameters read as PDFium reads them
-    /// ([`Images::fax`]), PDFium's refusals the walk from the data's start
+    /// libjpeg-turbo and CCITTFax's on a decoder of its own; so is this
+    /// (zune-jpeg, hayro-ccitt), the image's `/W` and `/H` and its
+    /// parameters read as PDFium reads them ([`Images::fax`]), PDFium's
+    /// refusals the walk from the data's start
     /// ([`End::Refused`]), and the end the stand-in's
     /// ([`Images::stand_in`]) where the decoder can't decode what PDFium's
     /// reads on through. What decoding makes is spent: past the budget, an
@@ -777,7 +799,7 @@ impl<'a, 'r> Images<'a, 'r> {
     /// there), fax data's end-of-block pattern
     /// ([`decoders::ccitt_iso`](crate::decoders::ccitt_iso)).
     #[cfg(feature = "image-ends")]
-    fn coded_end(
+    fn decoders_end(
         &mut self,
         bi: usize,
         start: usize,
@@ -826,21 +848,6 @@ impl<'a, 'r> Images<'a, 'r> {
             Found::Refused(read) => (End::Refused(read), 0, None),
             Found::Undecoded(read) => (self.stand_in(start, filter), read, None),
         })
-    }
-
-    /// Where an image's DCT or CCITTFax data from `start` ends, without
-    /// the `image-ends` feature: the stand-in's ([`Images::stand_in`]),
-    /// nothing decoded.
-    #[cfg(not(feature = "image-ends"))]
-    fn coded_end(
-        &mut self,
-        _bi: usize,
-        start: usize,
-        filter: Filter,
-        _dict: &ImageDict,
-        _wants: bool,
-    ) -> Result<(End, usize, Option<usize>), Error> {
-        Ok((self.stand_in(start, filter), 0, None))
     }
 
     /// Where an image's DCT or CCITTFax data from `start` ends, found in

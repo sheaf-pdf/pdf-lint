@@ -14,10 +14,10 @@
 //!   color spaces the caller gives ([`ResCx`]): Flate and LZW data decoded
 //!   to where the decoder stops reading it, as PDFium decodes it, by
 //!   [pdf-filters](https://crates.io/crates/pdf-filters), Flate on
-//!   zlib-rs; DCT and CCITTFax data, which PDFium decodes too, so with the
-//!   `image-ends` feature (below), and by a stand-in without it ([`tokens`]
-//!   says where). What an operator does is no part of it, so one nobody
-//!   knows is a token like any other.
+//!   zlib-rs; DCT and CCITTFax data, which PDFium decodes too, by a
+//!   stand-in, or so where a reading asks for it ([`CodedEnds`], with the
+//!   `image-ends` feature, below; [`tokens`] says where). What an operator
+//!   does is no part of it, so one nobody knows is a token like any other.
 //! - **Operations** ([`operations`]): each operator, or inline image
 //!   ([`InlineImage`]), with the operands before it ([`Operation`]), their
 //!   ranges held in the item, so an operation of sixteen operands or fewer
@@ -74,11 +74,15 @@
 //!   data on [hayro-ccitt](https://crates.io/crates/hayro-ccitt), to find
 //!   where it ends, as PDFium decodes them, what's decoded not kept; its
 //!   output counted against [`Limits::image_ends`] before it's made. It
-//!   needs Rust 1.87, where the crate needs 1.85. zune-jpeg is built
-//!   without its SIMD features (`x86`, `neon`), which hold all its
-//!   `unsafe`, so it builds with `unsafe_code` forbidden, as hayro-ccitt
-//!   does always; a crate built beside this one that turns those features
-//!   on, as Cargo's features are additive, turns them on here too.
+//!   adds `CodedEnds::Decoded`, which a reading names in
+//!   [`Limits::coded_ends`] to find ends so: turned on, by this crate's
+//!   user or by any other crate built beside it, it changes nothing a
+//!   reading that doesn't name it gives. It needs Rust 1.87, where the
+//!   crate needs 1.85. zune-jpeg is built without its SIMD features
+//!   (`x86`, `neon`), which hold all its `unsafe`, so it builds with
+//!   `unsafe_code` forbidden, as hayro-ccitt does always; a crate built
+//!   beside this one that turns those features on, as Cargo's features
+//!   are additive, turns them on here too.
 
 mod balance;
 mod data;
@@ -109,7 +113,7 @@ pub use pdf_objects;
 pub use balance::{Balance, balance};
 pub use error::{Error, ErrorKind};
 pub use inline::{ImageStream, InlineImage, ResCx, family_components};
-pub use limits::Limits;
+pub use limits::{CodedEnds, Limits};
 pub use marked::{Marked, MarkedEvent, MarkedNest, Properties, Props, marked};
 pub use names::{Kept, NameSet, ResKind, kept, names_used};
 pub use operand::{Elements, Operand, name, object};

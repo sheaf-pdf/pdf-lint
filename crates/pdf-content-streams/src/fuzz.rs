@@ -47,8 +47,21 @@ impl<'a> Sink<'a> for Unwanted<'a> {
 /// one stopped it.
 type Read<'a> = Vec<Result<(Range<usize>, Tok<'a>), Error>>;
 
-/// The fuzz target's body: `data` as a page's content, read under the
-/// default caps, every token taken: whole, and as two streams split at
+/// The caps the fuzz target's body reads under: the default caps, and
+/// with the `image-ends` feature, DCT and CCITTFax data's end found by
+/// decoding it.
+#[cfg(feature = "image-ends")]
+const LIMITS: Limits = Limits {
+    coded_ends: crate::CodedEnds::Decoded,
+    ..Limits::DEFAULT
+};
+
+/// The caps the fuzz target's body reads under: the default caps.
+#[cfg(not(feature = "image-ends"))]
+const LIMITS: Limits = Limits::DEFAULT;
+
+/// The fuzz target's body: `data` as a page's content, read under
+/// [`LIMITS`], every token taken: whole, and as two streams split at
 /// its middle, joined by [`Join`] and by [`Concat::new`] alike. The
 /// resources name a color space of each size an inline image may be drawn
 /// in. Each read's tokens tile its bytes ([`tiled`]), and its operations
@@ -59,18 +72,20 @@ type Read<'a> = Vec<Result<(Range<usize>, Tok<'a>), Error>>;
 /// first read's up to an error, which is the cap's, where the first read's
 /// token past it starts, or, the last of these, where its own error is,
 /// an image that doesn't end, or the first read's own; and the operations
-/// are those tokens grouped. Each read
-/// through a sink that keeps its faults is the same as through `()`
-/// ([`faulted`]), and one that wants none is told none. And the passes
-/// over its operations are their steppers' ([`passes`]). Its searches
-/// and skims are plain ones' ([`searched`]). Panics on a broken promise.
+/// are those tokens grouped. With the `image-ends` feature, read whole by
+/// the stand-in too, under the default caps, its tokens tile its bytes.
+/// Each read through a sink that keeps its faults is the same as through
+/// `()` ([`faulted`]), and one that wants none is told none. And the
+/// passes over its operations are their steppers' ([`passes`]). Its
+/// searches and skims are plain ones' ([`searched`]). Panics on a broken
+/// promise.
 pub fn content(data: &[u8]) {
     let res = ResCx::new([
         (b"CS1".to_vec(), 1),
         (b"CS3".to_vec(), 3),
         (b"CS4".to_vec(), 4),
     ]);
-    let limits = &Limits::DEFAULT;
+    let limits = &LIMITS;
     let (first, second) = data.split_at(data.len() / 2);
     let split = Concat::new(&[first, second]);
     let mut join = Join::new(limits);
@@ -86,6 +101,10 @@ pub fn content(data: &[u8]) {
     }
     let whole = Concat::new(&[data]);
     let read = tiled(&whole, &res, limits);
+    // The stand-in's reading too, which a reading gets unless it asks for
+    // the decoders'.
+    #[cfg(feature = "image-ends")]
+    tiled(&whole, &res, &Limits::DEFAULT);
     grouped(data, whole.operations(&res, limits), &read, limits);
     faulted(&whole, &res, limits);
     let halves = tiled(&split, &res, limits);
@@ -100,7 +119,7 @@ pub fn content(data: &[u8]) {
         operands: 3,
         inline_image: 8,
         image_ends: 24,
-        ..Limits::DEFAULT
+        ..LIMITS
     };
     let capped: Read = tokens(data, &res, &small).collect();
     for (i, token) in capped.iter().enumerate() {

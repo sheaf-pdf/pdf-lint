@@ -324,9 +324,10 @@ pub enum Fault<'a> {
     /// that ends it elsewhere than it's read here, where PDFium reads
     /// neither: it finds an unfiltered image's data by its size, a
     /// filter's by its end, and otherwise reads on to the next `EI`; or,
-    /// where a decoder ends it short of its filter's own end of data (with
-    /// the `image-ends` feature, fax data's end-of-block pattern or a
-    /// JPEG's end of image), elsewhere than that end, where ISO ends it.
+    /// where a decoder ends it short of its filter's own end of data (where
+    /// DCT and CCITTFax data is decoded, fax data's end-of-block pattern
+    /// or a JPEG's end of image), elsewhere than that end, where ISO ends
+    /// it.
     /// ISO 32000-2's `/L` is the data's length (8.9.7, "shall"), after the
     /// white-space byte after `ID`, and any more white-space where the
     /// last of its filters is one of the two ASCII ones, ASCIIHexDecode and

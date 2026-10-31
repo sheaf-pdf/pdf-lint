@@ -7,7 +7,9 @@
 //! describes): the page objects PDFium makes of it, in order. Here the
 //! same objects are made from the crate's operations by a small
 //! interpreter, and the two must agree, but for the cases `differ.tsv`
-//! names, which must still differ.
+//! names, which must still differ. Each case is read each way the build
+//! can read it: an inline image's DCT and CCITTFax data ended by the
+//! stand-in, and, with the `image-ends` feature, by decoding it.
 //!
 //! The interpreter makes what PDFium's content parser makes, as far as the
 //! cases need:
@@ -232,6 +234,9 @@ struct Reader<'r> {
     clip: bool,
     /// The marks open, each its `/MCID`, where it has one.
     marks: Vec<Option<i32>>,
+    /// The caps it reads under, which say how DCT and CCITTFax data's end
+    /// is found.
+    lim: Limits,
 }
 
 /// An operand's string, as shown: a string's bytes, read as PDFium reads
@@ -416,7 +421,7 @@ impl Reader<'_> {
 
     fn read(&mut self, content: &[u8]) {
         let res = ResCx::new(self.res.spaces.iter().cloned());
-        let lim = Limits::DEFAULT;
+        let lim = self.lim;
         let mut fast: Option<[f32; 6]> = None;
         for op in operations(content, &res, &lim) {
             let Ok(op) = op else { break };
@@ -592,9 +597,9 @@ impl Reader<'_> {
     }
 }
 
-/// The crate's answer for a case: its page objects, as the oracle writes
-/// PDFium's.
-fn answer(content: &[u8], res: &[u8]) -> String {
+/// The crate's answer for a case, read under `lim`: its page objects, as
+/// the oracle writes PDFium's.
+fn answer(content: &[u8], res: &[u8], lim: Limits) -> String {
     let res = Res::read(res);
     let mut reader = Reader {
         res: &res,
@@ -612,6 +617,7 @@ fn answer(content: &[u8], res: &[u8]) -> String {
         current: (0.0, 0.0),
         clip: false,
         marks: Vec::new(),
+        lim,
     };
     reader.read(content);
     if reader.out.is_empty() {
@@ -620,47 +626,62 @@ fn answer(content: &[u8], res: &[u8]) -> String {
     reader.out.join(" ; ")
 }
 
+/// The ways the crate reads the cases: each with how DCT and CCITTFax
+/// data's end is found, by the stand-in, `default`, and, with the
+/// `image-ends` feature, by decoding it, `image-ends`, as differ.tsv names
+/// them.
+fn readings() -> Vec<(&'static str, Limits)> {
+    #[cfg_attr(not(feature = "image-ends"), allow(unused_mut))]
+    let mut ways = vec![("default", Limits::DEFAULT)];
+    #[cfg(feature = "image-ends")]
+    {
+        let mut decoded = Limits::DEFAULT;
+        decoded.coded_ends = pdf_content_streams::CodedEnds::Decoded;
+        ways.push(("image-ends", decoded));
+    }
+    ways
+}
+
 #[test]
 fn every_case_reads_as_pdfium_reads_it() {
     let recorded = recorded();
-    // Each case read otherwise in every build, `all`, or only in the
-    // default's, `default`, or only with the `image-ends` feature,
-    // `image-ends`; those of this build's.
-    let build = if cfg!(feature = "image-ends") {
-        "image-ends"
-    } else {
-        "default"
-    };
     let listed = rows(&set().join("differ.tsv"));
     for r in &listed {
         assert!(
             r.len() == 3 && ["all", "default", "image-ends"].contains(&r[1].as_str()),
-            "differ.tsv: {r:?} isn't a name, the builds it differs in and why"
+            "differ.tsv: {r:?} isn't a name, the readings it differs in and why"
         );
     }
-    let differ: HashMap<String, String> = (listed.iter())
-        .filter(|r| r[1] == "all" || r[1] == build)
-        .map(|r| (r[0].clone(), r[2].clone()))
-        .collect();
-    let mut wrong = Vec::new();
     let cases = rows(&set().join("cases.tsv"));
     assert!(!cases.is_empty());
-    for case in &cases {
-        let (name, kind) = (&case[0], &case[1]);
-        assert_eq!(kind, "content", "{name}: a kind this test doesn't read");
-        let read = |ext: &str| fs::read(set().join("cases").join(format!("{name}.{ext}")));
-        let content = read("content").unwrap();
-        let res = read("res").unwrap_or_else(|_| b"<< >>".to_vec());
-        let ours = answer(&content, &res);
-        let pdfium = recorded
-            .get(name)
-            .unwrap_or_else(|| panic!("{name}: no answer recorded"));
-        match (agree(pdfium, &ours), differ.contains_key(name)) {
-            (true, false) | (false, true) => {}
-            (false, false) => wrong.push(format!("{name}:\n  PDFium {pdfium}\n  here   {ours}")),
-            (true, true) => wrong.push(format!(
-                "{name}: read as PDFium reads it, but in differ.tsv"
-            )),
+    let mut wrong = Vec::new();
+    // Each case read otherwise in every reading, `all`, or only by the
+    // stand-in, `default`, or only by decoding, `image-ends`; each held
+    // to those of each reading this build has.
+    for (reading, lim) in readings() {
+        let differ: HashMap<String, String> = (listed.iter())
+            .filter(|r| r[1] == "all" || r[1] == reading)
+            .map(|r| (r[0].clone(), r[2].clone()))
+            .collect();
+        for case in &cases {
+            let (name, kind) = (&case[0], &case[1]);
+            assert_eq!(kind, "content", "{name}: a kind this test doesn't read");
+            let read = |ext: &str| fs::read(set().join("cases").join(format!("{name}.{ext}")));
+            let content = read("content").unwrap();
+            let res = read("res").unwrap_or_else(|_| b"<< >>".to_vec());
+            let ours = answer(&content, &res, lim);
+            let pdfium = recorded
+                .get(name)
+                .unwrap_or_else(|| panic!("{name}: no answer recorded"));
+            match (agree(pdfium, &ours), differ.contains_key(name)) {
+                (true, false) | (false, true) => {}
+                (false, false) => wrong.push(format!(
+                    "{name}, {reading}:\n  PDFium {pdfium}\n  here   {ours}"
+                )),
+                (true, true) => wrong.push(format!(
+                    "{name}, {reading}: read as PDFium reads it, but in differ.tsv"
+                )),
+            }
         }
     }
     for r in &listed {

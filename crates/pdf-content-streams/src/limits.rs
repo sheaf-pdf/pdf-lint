@@ -1,9 +1,11 @@
-//! The caps content is read under: one value for all of them.
+//! The caps content is read under, and how far it decodes to find where
+//! inline images end: one value for all of them.
 
 /// The caps on reading content: past one, it can't be read, and reading
-/// stops with an [`Error`](crate::Error) saying which and where. A caller
-/// sets them on a copy of [`Limits::DEFAULT`] (`limits.operands = 64`,
-/// say), as more may come.
+/// stops with an [`Error`](crate::Error) saying which and where; and how
+/// an inline image's DCT and CCITTFax data's end is found
+/// ([`Limits::coded_ends`]). A caller sets them on a copy of
+/// [`Limits::DEFAULT`] (`limits.operands = 64`, say), as more may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
@@ -33,24 +35,28 @@ pub struct Limits {
     /// What finding inline images' data's ends may cost in one reading of
     /// content ([`tokens`](crate::tokens)), in bytes, in all: 256 MiB by
     /// default. Where PDFium decodes an image's data to find where it ends
-    /// (Flate and LZW), what decoding gives counts; with the `image-ends`
-    /// feature, which decodes DCT data too, what decoding a JPEG holds,
-    /// its output and its coefficients, counted from its header before
-    /// it's decoded (fax data is decoded to no output), and, where the
-    /// decoder can't decode the data, what it read, which for fax data is
-    /// all that follows, as its decoder doesn't say. And where that end
-    /// comes to nothing, the decoder refusing the data or no `EI` coming
-    /// after it, PDFium makes no stream of the data and reads on from its
-    /// start, so the data, read on as content, may hold further images,
-    /// each decoded again from inside it: the bytes such a decode read
-    /// count too, and, for any filter, those read past an end in vain,
-    /// looking for an `EI` (a place from which none was found is
-    /// remembered, and not read from again). So no content can make
-    /// finding its images' ends cost more than this past its own length,
-    /// whether by a deflate bomb or by many images read again; content
-    /// whose images' ends each have an `EI` after them spends only what
-    /// decoding gives. Past it, reading stops with an error at the image's
-    /// `BI` ([`ErrorKind::ImageEnds`](crate::ErrorKind::ImageEnds)), where
+    /// (Flate and LZW), what decoding gives counts; where DCT and CCITTFax
+    /// data is decoded too ([`CodedEnds`]' `Decoded`, with the
+    /// `image-ends` feature), what decoding a JPEG holds, its output and,
+    /// decoding several scans, its coefficients, counted from its header
+    /// before it's decoded (fax data is decoded to no output); and, where
+    /// the decoder can't decode the data, what it was given to read: fax
+    /// data is given a window of what follows, from 4 KiB, doubled while
+    /// its decoder reads to the window's end, as it says nothing of how far
+    /// it read where it can't decode the data. And where that end comes to
+    /// nothing, the decoder refusing the data or no `EI` coming after it,
+    /// PDFium makes no stream of the data and reads on from its start, so
+    /// the data, read on as content, may hold further images, each decoded
+    /// again from inside it: the bytes such a decode read count too, and,
+    /// for any filter, those read past an end in vain, looking for an `EI`
+    /// (a place from which none was found is remembered, and not read from
+    /// again). So no content can make finding its images' ends cost more
+    /// than this past its own length, whether by a deflate bomb or by many
+    /// images read again; content whose images' ends each have an `EI`
+    /// after them spends only what decoding gives, and a window for each
+    /// image's data its decoder can't decode. Past it, reading stops with an
+    /// error at the image's `BI`
+    /// ([`ErrorKind::ImageEnds`](crate::ErrorKind::ImageEnds)), where
     /// PDFium, which has no such cap, reads on.
     pub image_ends: usize,
     /// A page's streams joined ([`Join`](crate::Join)), in bytes, the
@@ -58,6 +64,34 @@ pub struct Limits {
     /// is counted in 32 bits ([`Pos`](crate::Pos)), so `Join` refuses past
     /// 4 GiB, whatever this says.
     pub content: usize,
+    /// How an inline image's DCT and CCITTFax data's end is found, which
+    /// PDFium finds by decoding it: by the stand-in, by default, or, with
+    /// the `image-ends` feature, by decoding it as PDFium does
+    /// ([`CodedEnds`]). Turning the feature on changes nothing until a
+    /// reading asks for it here.
+    pub coded_ends: CodedEnds,
+}
+
+/// How an inline image's DCT and CCITTFax data's end is found
+/// ([`Limits::coded_ends`]): PDFium decodes the data to find it, every row,
+/// and ends it where its decoder then stands. Flate's and LZW's ends are
+/// found by decoding them always.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum CodedEnds {
+    /// Found in the data's bytes, standing in for PDFium's decoders: a
+    /// JPEG's past its first end of image (FF D9) from its start, and fax
+    /// data's, or a JPEG's with none, at the first `EI` with white-space
+    /// before it and white-space, a delimiter or the end after it. The
+    /// default, and, without the `image-ends` feature, the only way.
+    #[default]
+    StandIn,
+    /// Found by decoding the data as PDFium does, DCT data on zune-jpeg
+    /// and CCITTFax data on hayro-ccitt, what's decoded not kept
+    /// ([`tokens`](crate::tokens) says where each ends). Only with the
+    /// `image-ends` feature.
+    #[cfg(feature = "image-ends")]
+    Decoded,
 }
 
 impl Limits {
@@ -69,6 +103,7 @@ impl Limits {
         inline_image: 64 << 20,
         image_ends: 256 << 20,
         content: 256 << 20,
+        coded_ends: CodedEnds::StandIn,
     };
 }
 
