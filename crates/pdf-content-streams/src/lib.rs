@@ -67,9 +67,18 @@
 //!   with, its objects named by a 128-bit digest of them ([`ResId`],
 //!   XXH3-128), so that equal resources are written once and named alike,
 //!   however their dictionaries are written.
+//! - **Writing** ([`ContentWriter`]): operators with their operands written
+//!   the same way every time ([`write_number`], [`write_string`]), text
+//!   shown as codes a font already encoded, geometry as plain numbers, and
+//!   an operation of content read written again as it was; and the
+//!   resources the content draws with named only when it's finished, by
+//!   their digest, clear of the names the resources dictionary it goes
+//!   with binds to something else ([`Reserved`]).
 //!
 //! No resolver: what's read from the file, the streams decoded, the color
-//! spaces' components and the property lists, the caller gives.
+//! spaces' components and the property lists, the caller gives; and the
+//! writer reads a resources dictionary's references through the caller's
+//! [`Resolve`](pdf_objects::Resolve) ([`Reserved::read`]).
 //!
 //! # Features
 //!
@@ -109,6 +118,7 @@ mod res;
 mod scan;
 mod state;
 mod tokens;
+mod write;
 
 /// pdf-objects, whose values operands are read as and property lists are
 /// given in: named through it, they're the version this crate is built
@@ -128,6 +138,10 @@ pub use page::{Concat, Join, Pos, Pushed, SpanAcross, TooLarge};
 pub use res::{Res, ResBody, ResId};
 pub use state::State;
 pub use tokens::{Tok, Tokens, tokens};
+pub use write::{
+    Blend, Color, ContentWriter, GState, LineCap, LineJoin, Need, Reserved, ResourceNeeds,
+    TextMode, write_number, write_string,
+};
 
 /// The README's examples, run as doctests.
 #[cfg(doctest)]

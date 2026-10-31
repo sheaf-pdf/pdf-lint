@@ -1,12 +1,12 @@
 //! What the fuzz target checks, which unit tests check too: the promises
 //! the tokens, the operations, the faults and the operator table and its
-//! states make, and the balance, marked content and names over them, on
-//! any input. It's compiled only for tests and under cargo-fuzz's
-//! `--cfg fuzzing`.
+//! states make, the balance, marked content and names over them, and the
+//! writer's, on any input. It's compiled only for tests and under
+//! cargo-fuzz's `--cfg fuzzing`.
 
 use std::ops::Range;
 
-use pdf_objects::{Object, Value, dict};
+use pdf_objects::{Dict, Object, Str, Value, dict};
 use pdf_tokenizer::decode;
 
 use crate::data::{RunLength, Searched, a85_stop, ei_scan, find};
@@ -14,9 +14,11 @@ use crate::fault::{Fault, Sink};
 use crate::inline::{Walks, ei_from};
 use crate::scan::{Raw, UNCAPPED, next_raw, next_raw_walked};
 use crate::{
-    Balance, Concat, Error, ErrorKind, ImageStream, Join, Limits, MarkedEvent, MarkedNest, NameSet,
-    Operand, Operation, Operations, Operator, Properties, Props, ResCx, ResKind, SpanAcross, State,
-    Tok, balance, kept, marked, name, names_used, object, operations, tokens,
+    Balance, Blend, Color, Concat, ContentWriter, Error, ErrorKind, FillRule, GState, ImageStream,
+    Join, Limits, LineCap, LineJoin, MarkedEvent, MarkedNest, NameSet, Operand, Operation,
+    Operations, Operator, Paint, Properties, Props, Res, ResBody, ResCx, ResId, ResKind, Reserved,
+    ResourceNeeds, SpanAcross, State, TextMode, Tok, balance, kept, marked, name, names_used,
+    object, operations, tokens,
 };
 
 /// A sink that keeps every fault it's told, in order, where it is.
@@ -77,8 +79,11 @@ const LIMITS: Limits = Limits::DEFAULT;
 /// Each read through a sink that keeps its faults is the same as through
 /// `()` ([`faulted`]), and one that wants none is told none. And the
 /// passes over its operations are their steppers' ([`passes`]). Its
-/// searches and skims are plain ones' ([`searched`]). Panics on a broken
-/// promise.
+/// searches and skims are plain ones' ([`searched`]). Its operations,
+/// written again, read as they did, by the stand-in's reading of DCT and
+/// CCITTFax data, which reads no further than an image's token
+/// ([`written_again`]); and the writer's calls its bytes choose read back
+/// as written ([`calls`]). Panics on a broken promise.
 pub fn content(data: &[u8]) {
     let res = ResCx::new([
         (b"CS1".to_vec(), 1),
@@ -150,6 +155,8 @@ pub fn content(data: &[u8]) {
     faulted(&whole, &res, &small);
     passes(data);
     searched(data);
+    written_again(data, &res, &Limits::DEFAULT);
+    calls(data);
 }
 
 /// Checks the searches the tokens make in `s`'s bytes, and their skims,
@@ -461,6 +468,510 @@ fn resource_typed(op: &Operation) {
         other => panic!("{other:?} names no resource"),
     };
     assert_eq!(kind, says, "{op:?}");
+}
+
+/// `data`'s operations, read whole under `limits`, each written again
+/// through [`ContentWriter::operation`], its operands and operator as
+/// written, an inline image whole: what's written reads as the same
+/// operations, each operand as it was, and each inline image its token
+/// as it was, its data and what PDFium keeps of it in the same place in
+/// it; and names no resource. Content that doesn't read to its end is
+/// passed over, and so is content holding an inline image PDFium keeps no
+/// stream of ([`ImageStream::Missing`]), whose reading may have looked
+/// past its token's end, at what isn't written again
+/// ([`ContentWriter::operation`] says). Under a reading that decodes DCT
+/// and CCITTFax data, an image of either may have too, its decoder reading
+/// past its `EI`, which `limits` with the stand-in's reading doesn't.
+/// Whether it was written again.
+pub fn written_again(data: &[u8], res: &ResCx, limits: &Limits) -> bool {
+    let Ok(ops) = operations(data, res, limits).collect::<Result<Vec<_>, _>>() else {
+        return false;
+    };
+    let missing = |op: &Operation| {
+        (op.inline_image()).is_some_and(|image| image.stream() == ImageStream::Missing)
+    };
+    if ops.iter().any(missing) {
+        return false;
+    }
+    let mut w = ContentWriter::new();
+    for op in &ops {
+        let operands = op.operands().map(|o| o.bytes());
+        match op.inline_image() {
+            Some(image) => w.operation(operands, &data[image.at()]),
+            None => w.operation(operands, op.name()),
+        }
+    }
+    let (again, needs) = w.finish(&Reserved::default());
+    assert_eq!(needs, ResourceNeeds::default(), "no resource named");
+    let read: Result<Vec<_>, _> = operations(&again, res, limits).collect();
+    let shown = String::from_utf8_lossy(&again);
+    let read = read.unwrap_or_else(|e| panic!("{e} written again: {shown}"));
+    assert_eq!(read.len(), ops.len(), "as many operations: {shown}");
+    // An inline image's place in content, its data's in it and what
+    // PDFium keeps of it.
+    let image = |s: &[u8], image: crate::InlineImage| {
+        let at = image.at();
+        let inside = |r: Range<usize>| r.start - at.start..r.end - at.start;
+        let kept = match image.stream() {
+            ImageStream::Data(kept) => Some(inside(kept)),
+            _ => None,
+        };
+        (s[at.clone()].to_vec(), inside(image.data()), kept)
+    };
+    for (op, again_op) in ops.iter().zip(&read) {
+        assert_eq!(op.name(), again_op.name(), "{shown}");
+        let operands = |op: &Operation| {
+            op.operands()
+                .map(|o| o.bytes().to_vec())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(operands(op), operands(again_op), "{shown}");
+        let images = (op.inline_image(), again_op.inline_image());
+        assert_eq!(
+            images.0.map(|i| image(data, i)),
+            images.1.map(|i| image(&again, i)),
+            "{shown}"
+        );
+    }
+    true
+}
+
+/// Whether `read`, a number written as
+/// [`write_number`](crate::write_number) writes `x`, is `x`: within its
+/// rounding to four decimals and to an `f32`, and 0 for what isn't
+/// finite.
+pub(crate) fn read_as_written(read: f32, x: f32) -> bool {
+    let x = if x.is_finite() { f64::from(x) } else { 0.0 };
+    (f64::from(read) - x).abs() <= 5e-5 + x.abs() * f64::from(f32::EPSILON)
+}
+
+/// Whether `x`, finite and whole, is outside the signed 32-bit range,
+/// where PDFium reads a whole number written without a point as 0, unless
+/// it's below 2^32 and unsigned.
+fn past_32_bits(x: f32) -> bool {
+    let x = f64::from(x);
+    x.is_finite() && !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&x)
+}
+
+/// What the bytes of a fuzz target's input choose.
+struct Choices<'a>(&'a [u8]);
+
+impl Choices<'_> {
+    fn byte(&mut self) -> Option<u8> {
+        let (&b, rest) = self.0.split_first()?;
+        self.0 = rest;
+        Some(b)
+    }
+
+    /// One of `n`, 0 when the input's done.
+    fn below(&mut self, n: usize) -> usize {
+        usize::from(self.byte().unwrap_or(0)) % n
+    }
+
+    /// A number: the bits of the next four bytes, a small whole number, a
+    /// number of four decimals, or one of the edges.
+    fn number(&mut self) -> f32 {
+        let mut word = [0; 4];
+        let kind = self.byte().unwrap_or(0);
+        for b in &mut word {
+            *b = self.byte().unwrap_or(0);
+        }
+        let bits = u32::from_le_bytes(word);
+        match kind % 4 {
+            0 => f32::from_bits(bits),
+            1 => f32::from(word[0] as i8),
+            2 => bits as i32 as f32 / 10_000.0,
+            _ => [
+                -0.0,
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                0.00005,
+                -0.00005,
+                0.99995,
+                2_147_483_520.0,
+                2_147_483_648.0,
+                4_294_967_040.0,
+                4_294_967_296.0,
+                -2_147_483_648.0,
+                -2_147_483_904.0,
+                1e10,
+                f32::MAX,
+                f32::MIN,
+            ][usize::from(word[0]) % 16],
+        }
+    }
+
+    fn numbers<const N: usize>(&mut self) -> [f32; N] {
+        std::array::from_fn(|_| self.number())
+    }
+
+    /// Up to `most` bytes.
+    fn bytes(&mut self, most: usize) -> &[u8] {
+        let n = self.below(most + 1).min(self.0.len());
+        let (taken, rest) = self.0.split_at(n);
+        self.0 = rest;
+        taken
+    }
+}
+
+/// An operand a call wrote, as it should read back.
+#[derive(Debug)]
+enum Arg {
+    Number(f32),
+    Numbers(Vec<f32>),
+    Name(Vec<u8>),
+    Res(ResKind, ResId),
+    Codes(Vec<u8>),
+}
+
+/// Calls of a [`ContentWriter`] that `data`'s bytes choose, a few dozen,
+/// their numbers from four bytes each, NaN, the infinities, `-0`, the
+/// four-decimal edges and the edges of 32 bits among them, their codes and
+/// tags from the input; written, and read back: each call's operator and
+/// operands, each number within its rounding (and, a whole number outside
+/// the signed 32-bit range, as PDFium reads it), each name and string as
+/// given, each resource's name its need's in its category. The needs are
+/// one a resource, in the order first drawn; named again with their names
+/// taken, the same; and with their names bound to something else, each
+/// bumped, the content naming the same needs in the same places.
+pub fn calls(data: &[u8]) {
+    let mut input = Choices(data);
+    let fonts = ["Helvetica", "Courier", "Wide"].map(|base| {
+        Res::dict(dict! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base })
+    });
+    let lists = ["Header", "Footer", "Watermark"]
+        .map(|subtype| Res::dict(dict! { "Type" => "Pagination", "Subtype" => subtype }));
+    let alphas = [None, Some(0.0), Some(0.5), Some(1.5), Some(f32::NAN)];
+    let blends = [
+        None,
+        Some(Blend::Normal),
+        Some(Blend::Multiply),
+        Some(Blend::Color),
+    ];
+    let paints: [(Paint, &[u8]); 9] = [
+        (Paint::Fill, b"f"),
+        (Paint::FillEvenOdd, b"f*"),
+        (Paint::Stroke, b"S"),
+        (Paint::CloseStroke, b"s"),
+        (Paint::FillStroke, b"B"),
+        (Paint::FillStrokeEvenOdd, b"B*"),
+        (Paint::CloseFillStroke, b"b"),
+        (Paint::CloseFillStrokeEvenOdd, b"b*"),
+        (Paint::None, b"n"),
+    ];
+    let mut w = ContentWriter::new();
+    let mut want: Vec<(&[u8], Vec<Arg>)> = Vec::new();
+    let numbers = |xs: &[f32]| xs.iter().map(|&x| Arg::Number(x)).collect::<Vec<_>>();
+    for _ in 0..48 {
+        let Some(call) = input.byte() else { break };
+        match call % 32 {
+            0 => {
+                w.save();
+                want.push((b"q", vec![]));
+            }
+            1 => {
+                w.restore();
+                want.push((b"Q", vec![]));
+            }
+            2 => {
+                let m = input.numbers::<6>();
+                w.transform(m);
+                want.push((b"cm", numbers(&m)));
+            }
+            3 | 4 => {
+                let stroke = call % 32 == 4;
+                let (color, op, values): (_, [&[u8]; 2], Vec<f32>) = match input.below(3) {
+                    0 => {
+                        let v = input.number();
+                        (Color::Gray(v), [b"g", b"G"], vec![v])
+                    }
+                    1 => {
+                        let v = input.numbers::<3>();
+                        (Color::Rgb(v), [b"rg", b"RG"], v.to_vec())
+                    }
+                    _ => {
+                        let v = input.numbers::<4>();
+                        (Color::Cmyk(v), [b"k", b"K"], v.to_vec())
+                    }
+                };
+                if stroke {
+                    w.stroke_color(color);
+                } else {
+                    w.fill_color(color);
+                }
+                want.push((op[usize::from(stroke)], numbers(&values)));
+            }
+            5 => {
+                let state = GState {
+                    fill_alpha: alphas[input.below(alphas.len())],
+                    stroke_alpha: alphas[input.below(alphas.len())],
+                    blend: blends[input.below(blends.len())],
+                };
+                w.gstate(state);
+                want.push((b"gs", vec![Arg::Res(ResKind::ExtGState, state.res().id)]));
+            }
+            6 => {
+                let x = input.number();
+                w.line_width(x);
+                want.push((b"w", vec![Arg::Number(x)]));
+            }
+            7 => {
+                let dashes: Vec<f32> = (0..input.below(5)).map(|_| input.number()).collect();
+                let phase = input.number();
+                w.dash(&dashes, phase);
+                want.push((b"d", vec![Arg::Numbers(dashes), Arg::Number(phase)]));
+            }
+            8 => {
+                let (cap, n) = [
+                    (LineCap::Butt, 0.0),
+                    (LineCap::Round, 1.0),
+                    (LineCap::Square, 2.0),
+                ][input.below(3)];
+                w.line_cap(cap);
+                want.push((b"J", vec![Arg::Number(n)]));
+            }
+            9 => {
+                let (join, n) = [
+                    (LineJoin::Miter, 0.0),
+                    (LineJoin::Round, 1.0),
+                    (LineJoin::Bevel, 2.0),
+                ][input.below(3)];
+                w.line_join(join);
+                want.push((b"j", vec![Arg::Number(n)]));
+            }
+            10 | 11 => {
+                let [x, y] = input.numbers::<2>();
+                let op: &[u8] = if call % 32 == 10 {
+                    w.move_to(x, y);
+                    b"m"
+                } else {
+                    w.line_to(x, y);
+                    b"l"
+                };
+                want.push((op, numbers(&[x, y])));
+            }
+            12 => {
+                let [x1, y1, x2, y2, x3, y3] = input.numbers::<6>();
+                w.curve_to(x1, y1, x2, y2, x3, y3);
+                want.push((b"c", numbers(&[x1, y1, x2, y2, x3, y3])));
+            }
+            13 => {
+                let [x, y, w_, h] = input.numbers::<4>();
+                w.rect(x, y, w_, h);
+                want.push((b"re", numbers(&[x, y, w_, h])));
+            }
+            14 => {
+                w.close();
+                want.push((b"h", vec![]));
+            }
+            15 => {
+                let (paint, op) = paints[input.below(paints.len())];
+                w.paint(paint);
+                want.push((op, vec![]));
+            }
+            16 => {
+                let (rule, op): (_, &[u8]) =
+                    [(FillRule::NonZero, &b"W"[..]), (FillRule::EvenOdd, b"W*")][input.below(2)];
+                w.clip(rule);
+                want.push((op, vec![]));
+            }
+            17 => {
+                w.begin_text();
+                want.push((b"BT", vec![]));
+            }
+            18 => {
+                w.end_text();
+                want.push((b"ET", vec![]));
+            }
+            19 => {
+                let font = fonts[input.below(fonts.len())].clone();
+                let size = input.number();
+                want.push((
+                    b"Tf",
+                    vec![Arg::Res(ResKind::Font, font.id), Arg::Number(size)],
+                ));
+                w.font(font, size);
+            }
+            20 | 21 => {
+                let m = input.numbers::<6>();
+                let op: &[u8] = if call % 32 == 20 {
+                    w.text_matrix(m);
+                    b"Tm"
+                } else {
+                    w.text_move(m[0], m[1]);
+                    b"Td"
+                };
+                let n = if op == b"Tm" { 6 } else { 2 };
+                want.push((op, numbers(&m[..n])));
+            }
+            22 => {
+                w.next_line();
+                want.push((b"T*", vec![]));
+            }
+            23 => {
+                let n = input.below(8);
+                w.text_mode(TextMode::of(n as i32).expect("a mode"));
+                want.push((b"Tr", vec![Arg::Number(n as f32)]));
+            }
+            24 | 25 => {
+                let x = input.number();
+                let op: &[u8] = if call % 32 == 24 {
+                    w.horizontal_scale(x);
+                    b"Tz"
+                } else {
+                    w.leading(x);
+                    b"TL"
+                };
+                want.push((op, vec![Arg::Number(x)]));
+            }
+            26 => {
+                let codes = input.bytes(40).to_vec();
+                w.show(&codes);
+                want.push((b"Tj", vec![Arg::Codes(codes)]));
+            }
+            27 | 28 => {
+                let form = Res::written((u32::from(input.byte().unwrap_or(0) % 4) + 1, 0));
+                let drawn = Arg::Res(ResKind::XObject, form.id);
+                if call % 32 == 27 {
+                    w.draw(form);
+                    want.push((b"Do", vec![drawn]));
+                } else {
+                    let [x, y, w_, h] = input.numbers::<4>();
+                    w.image(form, x, y, w_, h);
+                    want.push((b"q", vec![]));
+                    want.push((b"cm", numbers(&[w_, 0.0, 0.0, h, x, y])));
+                    want.push((b"Do", vec![drawn]));
+                    want.push((b"Q", vec![]));
+                }
+            }
+            29 | 30 => {
+                let tag = String::from_utf8_lossy(input.bytes(24)).into_owned();
+                let name = Arg::Name(tag.as_bytes().to_vec());
+                if call % 32 == 29 {
+                    w.begin_tagged(&tag);
+                    want.push((b"BMC", vec![name]));
+                } else {
+                    let list = lists[input.below(lists.len())].clone();
+                    let ResBody::Objects(objects) = &list.body else {
+                        unreachable!("a list is its objects")
+                    };
+                    let props = objects[0].as_dict().expect("a list").clone();
+                    want.push((b"BDC", vec![name, Arg::Res(ResKind::Properties, list.id)]));
+                    w.begin_marked(&tag, props);
+                }
+            }
+            _ => {
+                w.end_marked();
+                want.push((b"EMC", vec![]));
+            }
+        }
+    }
+
+    let (content, needs) = w.named(&Reserved::default());
+    let shown = String::from_utf8_lossy(&content);
+    // One need a resource, in the order first drawn.
+    let mut drawn: Vec<(ResKind, ResId)> = Vec::new();
+    for arg in want.iter().flat_map(|(_, args)| args) {
+        if let Arg::Res(kind, id) = arg {
+            if !drawn.iter().any(|(_, d)| d == id) {
+                drawn.push((*kind, *id));
+            }
+        }
+    }
+    let given: Vec<_> = needs.0.iter().map(|n| (n.kind, n.res.id)).collect();
+    assert_eq!(given, drawn, "a need a resource, first drawn first");
+    let mut names: Vec<_> = needs.0.iter().map(|n| (n.kind, n.name.clone())).collect();
+    for (_, name) in &names {
+        assert!(name.len() == 8 && name.starts_with(b"Sh"), "{name:?}");
+    }
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), needs.0.len(), "a name a need");
+
+    let read: Result<Vec<_>, _> = operations(&content, &ResCx::none(), &LIMITS).collect();
+    let read = read.unwrap_or_else(|e| panic!("{e} in {shown}"));
+    assert_eq!(read.len(), want.len(), "an operation a call: {shown}");
+    let need_of = |name: &[u8]| needs.0.iter().position(|n| n.name == name);
+    let mut named_at = Vec::new();
+    for (op, (name, args)) in read.iter().zip(&want) {
+        assert_eq!(op.name(), *name, "{shown}");
+        assert_eq!(op.operands().len(), args.len(), "{op:?} in {shown}");
+        for (operand, arg) in op.operands().zip(args) {
+            let as_written =
+                |read: f32, x: f32| read_as_written(read, x) || (past_32_bits(x) && read == 0.0);
+            match arg {
+                Arg::Number(x) => {
+                    let read = operand.number();
+                    assert!(as_written(read, *x), "{x} read {read}: {operand:?}");
+                }
+                Arg::Numbers(xs) => {
+                    let read: Vec<f32> = operand.elements().map(|e| e.number()).collect();
+                    assert_eq!(read.len(), xs.len(), "{operand:?}");
+                    for (&read, &x) in read.iter().zip(xs) {
+                        assert!(as_written(read, x), "{x} read {read}: {operand:?}");
+                    }
+                }
+                Arg::Name(tag) => assert_eq!(operand.name().as_deref(), Some(&tag[..])),
+                Arg::Codes(codes) => {
+                    let read = object(operand.bytes(), &LIMITS).map(Object::into_value);
+                    assert!(
+                        matches!(&read, Some(Value::String(Str::Bytes(b), _)) if b == codes),
+                        "{read:?} for {codes:?}"
+                    );
+                }
+                Arg::Res(kind, id) => {
+                    let name = operand.name().expect("a resource's name");
+                    let need = need_of(&name).expect("a need's name");
+                    assert_eq!((needs.0[need].kind, needs.0[need].res.id), (*kind, *id));
+                    assert_eq!(op.resource(), Some((*kind, name.clone())));
+                    named_at.push(need);
+                }
+            }
+        }
+    }
+
+    // Named with their names taken, the same; with each bound to
+    // something else, each bumped, in the same places.
+    let mut kept = Reserved::default();
+    kept.take(&needs);
+    assert_eq!(
+        w.named(&kept),
+        (content.clone(), needs.clone()),
+        "taken, the same"
+    );
+    let mut bound = Dict::new();
+    for need in &needs.0 {
+        let category = match bound.get_mut(need.kind.key()) {
+            Some(category) => category,
+            None => {
+                bound.push(need.kind.key(), Dict::new());
+                bound.get_mut(need.kind.key()).expect("just put")
+            }
+        };
+        let category = category.as_dict_mut().expect("a category");
+        category.push(&need.name, Object::null());
+    }
+    let resources = Object::from(bound);
+    let elsewhere = Reserved::read(&|_| None, Some(&resources));
+    let (bumped, again) = w.named(&elsewhere);
+    for (need, was) in again.0.iter().zip(&needs.0) {
+        assert_ne!(need.name, was.name, "bumped past a name bound to another");
+        assert_eq!((need.kind, need.res.id), (was.kind, was.res.id));
+    }
+    let none = ResCx::none();
+    let read = operations(&bumped, &none, &LIMITS);
+    let names_at: Vec<usize> = read
+        .flatten()
+        .flat_map(|op| {
+            op.operands()
+                .filter_map(|o| o.name())
+                .map(|n| n.into_owned())
+                .collect::<Vec<_>>()
+        })
+        .filter_map(|name| again.0.iter().position(|n| n.name == name))
+        .collect();
+    assert_eq!(names_at, named_at, "the same needs in the same places");
 }
 
 /// `content`'s tokens and operations through a sink that keeps their
@@ -1172,9 +1683,10 @@ pub(crate) fn stored(data: &[u8], last: bool) -> Vec<u8> {
 /// ` EI ` in its data where the data is counted or its tokens read, or
 /// its Flate data decoded, one decoding to more than the fuzz body's
 /// small caps allow, a JPEG and fax data, which the `image-ends` feature
-/// decodes, strings, arrays, dictionaries and marked content,
-/// and a color of 32 components and a pattern, more operands than an
-/// operation holds inline: the fuzz target's seeds.
+/// decodes, strings, arrays, dictionaries and marked content, an image
+/// whose filter's end is in a comment after it, and a color of 32
+/// components and a pattern, more operands than an operation holds
+/// inline: the fuzz target's seeds.
 pub fn fixtures() -> Vec<Vec<u8>> {
     let image = |dict: &str, data: &[u8]| {
         [format!("q BI {dict} ID ").as_bytes(), data, b"\nEI Q\n"].concat()
@@ -1214,6 +1726,10 @@ pub fn fixtures() -> Vec<Vec<u8>> {
           /Span <</MCID 0 1 /Alt>> BDC << /A [[1] 2] /B << /C [<< /D 1 >>] >> >> EMC\n\
           BI /W 1 /H 1 /BPC 8 /CS /G /D [[0 1]] ID a EI 1 [2 <4>] <</A <</B ]>>> >> n"
             .to_vec(),
+        // An image PDFium keeps no stream of, whose first `>` is in a
+        // comment after it: written again, it would run on to the last
+        // `EI`, which the writer's round trip passes over.
+        b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI q % > (\n Q 0 0 9 9 re f <41> Tj EI".to_vec(),
         format!("q /CS0 cs {components}/P0 scn 0 0 9 9 re f Q\n").into_bytes(),
     ]
 }
@@ -1300,7 +1816,8 @@ mod tests {
     ];
 
     /// The seeds read to their end, each of the first fifteen one inline
-    /// image between `q` and `Q`, and the last an `scn` of 33 operands.
+    /// image between `q` and `Q`, and the last an `scn` of 33 operands;
+    /// and each written again.
     #[test]
     fn the_seeds_read_to_their_end() {
         let res = ResCx::new([(b"CS3".to_vec(), 3)]);
@@ -1313,6 +1830,15 @@ mod tests {
                 assert_eq!(read.len(), 3, "seed {i}");
                 assert!(matches!(read[1].1, Tok::InlineImage(_)), "seed {i}");
             }
+            // Each written again but those holding an image PDFium keeps
+            // no stream of: of a filter it has no decoder for, and one
+            // whose filter's end is past its `EI`.
+            let missing = matches!(i, 14 | 17);
+            assert_eq!(
+                written_again(seed, &res, &Limits::DEFAULT),
+                !missing,
+                "seed {i}"
+            );
             content(seed);
         }
         let last = seeds.last().unwrap();
