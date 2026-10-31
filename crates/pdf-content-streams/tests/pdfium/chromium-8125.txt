@@ -1,0 +1,338 @@
+# PDFium's answer for each case, as chromium/8125 gives it (oracle/pdfium.py record)
+abbr-full-values	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+full-first	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+abbr-W-first	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+full-W-first	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+abbr-values-both	image matrix 1 0 0 1 0 0 raw a%20E ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+abbr-value-then-full	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+full-value-then-abbr	image matrix 1 0 0 1 0 0 raw a%20E ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+same-meaning	image matrix 1 0 0 1 0 0 raw abc ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+escaped-key	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+escaped-value	image matrix 1 0 0 1 0 0 raw a%20E ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+res-names	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+res-I	image matrix 1 0 0 1 0 0 raw a%20E ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+unknown-L	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+unknown-string	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+unknown-array	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+jpx	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+no-W-string	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+no-W-L	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+no-W-plain	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+zero-W	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+a85-tilde	image matrix 1 0 0 1 0 0 raw 9jqo~ ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+a85-end	image matrix 1 0 0 1 0 0 raw 9jqo^~> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+a85-first-tilde	image matrix 1 0 0 1 0 0 raw ~> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+a85-v	image matrix 1 0 0 1 0 0 raw 9jqov ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+a85-array	image matrix 1 0 0 1 0 0 raw 9jqo~ ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+ahx	image matrix 1 0 0 1 0 0 raw 41> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+flate-EI	image matrix 1 0 0 1 0 0 raw x%01%01%14%00%EB%FFa%20EI%200%200%20m%209%209%20l%20S%20b-%B1%04p ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+flate-L	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+lzw-plain	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+string-filter	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+number-filter	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+string-ahx-full	image matrix 1 0 0 1 0 0 raw 41> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+string-ahx-abbr	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dict-filter	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+null-filter	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+true-filter	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+empty-array-filter	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+nested-array-filter	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+array-string-filter	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+escaped-filter-key	image matrix 1 0 0 1 0 0 raw ( ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+escaped-filter-value	image matrix 1 0 0 1 0 0 raw 41> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+filter-abbr-both	image matrix 1 0 0 1 0 0 raw 41> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+filter-abbr-both-2	image matrix 1 0 0 1 0 0 raw 41> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+nested-array-filter-string	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+number-filter-string	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+null-filter-string	image matrix 1 0 0 1 0 0 raw ( ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dict-filter-string	image matrix 1 0 0 1 0 0 raw ( ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+array-string-ahx	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+array-null	image matrix 1 0 0 1 0 0 raw ( ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+array-dict	image matrix 1 0 0 1 0 0 raw ( ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+array-number	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+array-true	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+hex-string-filter	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+closer-filter	image matrix 1 0 0 1 0 0 raw ( ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+keyword-filter	image matrix 1 0 0 1 0 0 raw ( ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+array-string-ahx-data	image matrix 1 0 0 1 0 0 raw 41> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dp-array-ahx	image matrix 1 0 0 1 0 0 raw 41> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+ahx-no-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+ahx-no-end-string	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+a85-to-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+rl-no-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+unfiltered-past-end	none
+keyword-in-key-place	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+number-in-key-place	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+true-in-key-place	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+false-in-key-place	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+null-in-key-place	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+string-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+string-in-key-place-id	image matrix 1 0 0 1 0 0 raw I ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+hex-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+array-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dict-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+number-after-entries	image matrix 1 0 0 1 0 0 raw xy ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+real-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+pdfium-number-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+closer-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bracket-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dictclose-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+gt-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+brace-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+closebrace-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+object-no-space	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+object-then-id-data	image matrix 1 0 0 1 0 0 raw I ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+ahx-then-object	image matrix 1 0 0 1 0 0 raw 41> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+object-then-ahx	image matrix 1 0 0 1 0 0 raw / ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+a85-then-object	image matrix 1 0 0 1 0 0 raw 9jqo^~> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+rgb-size-then-object	image matrix 1 0 0 1 0 0 raw abc ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+unknown-filter-then-object	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+keyword-first	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+keyword-after-value	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+ei-in-key-place	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bi-in-key-place	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bi-after-entry	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+lone-lone	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+comment-then-keyword	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+keyword-tf-text	text font Helvetica size 24 text Hi
+operands-before-lone	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 0 0 l 0 0 l 0 0 l 0 0 h
+operands-before-lone-2	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 0 0 l 0 0 l 0 0 l 0 0 h
+lone-then-image	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+lone-at-end	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9
+id-in-value-place	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+id-in-value-place-cs	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+id-in-value-then-object	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+id-in-value-then-id	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+id-in-value-then-name	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+keyword-in-value-cs	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+keyword-in-value-erases	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+keyword-in-value-w	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+closer-in-value-cs	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bracket-in-value-cs	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dictclose-in-value-cs	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+brace-in-value-cs	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bi-in-value-place	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+true-in-value-cs	image matrix 1 0 0 1 0 0 raw abc ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+filter-erased	image matrix 1 0 0 1 0 0 raw 4 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bad-dict-in-key-place	image matrix 1 0 0 1 0 0 raw 2 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+nested-array-in-key-place	image matrix 1 0 0 1 0 0 raw 2 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+nested-array-value	image matrix 1 0 0 1 0 0 raw I ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+nested-array-operand	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 2 0 l 5 0 l 5 4 l 2 4 l 2 0 h
+flat-array-operand	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 3 0 l 3 4 l 0 4 l 0 0 h
+bad-dict-operand	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 2 0 l 5 0 l 5 4 l 2 4 l 2 0 h
+good-dict-operand	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 3 0 l 3 4 l 0 4 l 0 0 h
+byte-80-before-re	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-80-after-tf-name	text font Courier size 10 text ab
+byte-80-after-id	image matrix 1 0 0 1 0 0 raw a ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-ff-before-re	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-ff-after-tf-name	text font Courier size 10 text ab
+byte-ff-after-id	image matrix 1 0 0 1 0 0 raw a ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-0b-before-re	none
+byte-0b-after-tf-name	text font Helvetica size 0 text %
+byte-0b-after-id	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-85-before-re	none
+byte-85-after-tf-name	text font Helvetica size 0 text %
+byte-85-after-id	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-7f-before-re	none
+byte-7f-after-tf-name	text font Helvetica size 0 text %
+byte-7f-after-id	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-a0-before-re	none
+byte-a0-after-tf-name	text font Helvetica size 0 text %
+byte-a0-after-id	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-80-after-id-2-bytes	image matrix 1 0 0 1 0 0 raw xy ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-80-after-id-1-byte	image matrix 1 0 0 1 0 0 raw x ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-80-before-walked-ei	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-80-before-walked-ei-sized	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-ff-after-id-2-bytes	image matrix 1 0 0 1 0 0 raw xy ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-ff-after-id-1-byte	image matrix 1 0 0 1 0 0 raw x ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-ff-before-walked-ei	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-ff-before-walked-ei-sized	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-space-after-id-2-bytes	image matrix 1 0 0 1 0 0 raw xy ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-space-after-id-1-byte	image matrix 1 0 0 1 0 0 raw x ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-space-before-walked-ei	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-space-before-walked-ei-sized	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-0b-after-id-2-bytes	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-0b-after-id-1-byte	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-0b-before-walked-ei	none
+byte-0b-before-walked-ei-sized	none
+byte-85-after-id-2-bytes	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-85-after-id-1-byte	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+byte-85-before-walked-ei	none
+byte-85-before-walked-ei-sized	none
+ahx-end-then-ei	image matrix 1 0 0 1 0 0 raw 41> ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+ahx-end-tokens-ei	image matrix 1 0 0 1 0 0 raw 41>%20zz%207 ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+ahx-end-spaces-ei	image matrix 1 0 0 1 0 0 raw 41> ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+unfiltered-spaces-before-ei	image matrix 1 0 0 1 0 0 raw x ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+unfiltered-tokens-before-ei	image matrix 1 0 0 1 0 0 raw x ; path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 1 2 l 4 2 l 4 6 l 1 6 l 1 2 h
+word-254-bytes-as-cm-a	path fill 2 stroke 0 matrix 2 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+word-255-bytes-as-cm-a	path fill 2 stroke 0 matrix 2 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+word-256-bytes-as-cm-a	path fill 2 stroke 0 matrix 0 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+word-257-bytes-as-cm-a	path fill 2 stroke 0 matrix 0 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+word-300-bytes-as-cm-a	path fill 2 stroke 0 matrix 0 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+name-255-bytes-in-tf	text font Courier size 10 text ab
+name-256-bytes-in-tf	text font Courier size 10 text ab
+name-257-bytes-in-tf	text font Courier size 10 text ab
+literal-32766-bytes	text font Courier size 1 text #32766:a14a286139a8d6a3
+literal-32767-bytes	text font Courier size 1 text #32767:b9d95f34f9e4eba6
+literal-32768-bytes	text font Courier size 1 text #32767:b9d95f34f9e4eba6
+literal-32769-bytes	text font Courier size 1 text #32767:b9d95f34f9e4eba6
+literal-40000-bytes	text font Courier size 1 text #32767:b9d95f34f9e4eba6
+hex-20000-bytes	text font Courier size 1 text #20000:92b581dc8bb18a45
+hex-32767-bytes	text font Courier size 1 text #32767:e47544126da4eb86
+hex-32768-bytes	text font Courier size 1 text #32767:e47544126da4eb86
+hex-40000-bytes	text font Courier size 1 text #32767:e47544126da4eb86
+name-300-bytes-in-tf	text font Helvetica size 1 text ab
+cm-f-true	path fill 2 stroke 0 matrix 2 0 0 2 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-f-name	path fill 2 stroke 0 matrix 2 0 0 2 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-f-string	path fill 2 stroke 0 matrix 2 0 0 2 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-f-hex	path fill 2 stroke 0 matrix 2 0 0 2 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-f-array	path fill 2 stroke 0 matrix 2 0 0 2 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-f-null	path fill 2 stroke 0 matrix 2 0 0 2 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-f-false	path fill 2 stroke 0 matrix 2 0 0 2 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-f-254-zeros-7.5	path fill 2 stroke 0 matrix 2 0 0 2 0 7 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-f-255-zeros-7.5	path fill 2 stroke 0 matrix 2 0 0 2 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-f-256-zeros-7.5	path fill 2 stroke 0 matrix 2 0 0 2 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-f-signed-past	path fill 2 stroke 0 matrix 2 0 0 2 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-f-unsigned-past	path fill 2 stroke 0 matrix 2 0 0 2 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-f-unsigned-31	path fill 2 stroke 0 matrix 2 0 0 2 0 2.14748365e+09 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-a-p1	path fill 2 stroke 0 matrix 0.100000001 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-a-pi	path fill 2 stroke 0 matrix 3.14159274 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+cm-a-2^24+1	path fill 2 stroke 0 matrix 16777216 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h
+re-w-f32-max	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 3.40282347e+38 0 l 3.40282347e+38 10 l 0 10 l 0 0 h
+re-w-f32-below-mid	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 3.40282347e+38 0 l 3.40282347e+38 10 l 0 10 l 0 0 h
+re-w-f32-above-mid	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l inf 0 l inf 10 l 0 10 l 0 0 h
+re-w-past-f32	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l inf 0 l inf 10 l 0 10 l 0 0 h
+re-w-past-f32-neg	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l -inf 0 l -inf 10 l 0 10 l 0 0 h
+re-w-p1	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 0.100000001 0 l 0.100000001 10 l 0 10 l 0 0 h
+re-w-1.00000005	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 1 0 l 1 10 l 0 10 l 0 0 h
+re-w-1.0000001	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 1.00000012 0 l 1.00000012 10 l 0 10 l 0 0 h
+re-w-2^24+1	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 16777216 0 l 16777216 10 l 0 10 l 0 0 h
+re-w-2^24+3	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 16777220 0 l 16777220 10 l 0 10 l 0 0 h
+re-w-2^24+1-real	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 16777216 0 l 16777216 10 l 0 10 l 0 0 h
+re-w-micro	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 9.99999997e-07 0 l 9.99999997e-07 10 l 0 10 l 0 0 h
+re-w-pi	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 3.14159274 0 l 3.14159274 10 l 0 10 l 0 0 h
+re-w-123456.789	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 123456.789 0 l 123456.789 10 l 0 10 l 0 0 h
+re-w-denormal	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 9.80908925e-45 0 l 9.80908925e-45 10 l 0 10 l 0 0 h
+re-w-tiny	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 0 0 l 0 10 l 0 10 l 0 0 h
+re-w--0	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 0 0 l 0 10 l 0 10 l 0 0 h
+re-w--.5	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l -0.5 0 l -0.5 10 l 0 10 l 0 0 h
+re-w-5.	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 5 0 l 5 10 l 0 10 l 0 0 h
+re-w-.5.5	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 0.5 0 l 0.5 10 l 0 10 l 0 0 h
+re-w-+.5	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 0.5 0 l 0.5 10 l 0 10 l 0 0 h
+re-w-i32-max	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 2.14748365e+09 0 l 2.14748365e+09 10 l 0 10 l 0 0 h
+re-w-i32-min	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l -2.14748365e+09 0 l -2.14748365e+09 10 l 0 10 l 0 0 h
+re-w-i32-min-1	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 0 0 l 0 10 l 0 10 l 0 0 h
+re-w-u32-max	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 4.2949673e+09 0 l 4.2949673e+09 10 l 0 10 l 0 0 h
+re-w-u32-max+1	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 0 0 l 0 10 l 0 10 l 0 0 h
+re-w-+u32	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 0 0 l 0 10 l 0 10 l 0 0 h
+re-w-many-digits-real	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 1.11111116 0 l 1.11111116 10 l 0 10 l 0 0 h
+re-w-lead-zeros-real	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 1.5 0 l 1.5 10 l 0 10 l 0 0 h
+re-w-sign-mid	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 5 0 l 5 10 l 0 10 l 0 0 h
+re-w-plus-minus	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 0 0 l 0 10 l 0 10 l 0 0 h
+re-w-dots	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 0 0 l 0 10 l 0 10 l 0 0 h
+w-1.9	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w---3	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w--1	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-true	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-false	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-string	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-name	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-4294967295	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-4294967297	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-2147483648	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-+2	image matrix 1 0 0 1 0 0 raw xy ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-2.9	image matrix 1 0 0 1 0 0 raw xy ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-5e9-real	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w--0.5	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-long-255	image matrix 1 0 0 1 0 0 raw xy ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-long-256	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+h-1.9	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+h--1-w1	none
+h-true	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+h-4294967295-w1	none
+h--1-w2	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bpc-true	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bpc-2.9	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bpc--8	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bpc---8	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bpc-16	image matrix 1 0 0 1 0 0 raw xyzw ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bpc--8-rgb	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-5e9-bpc1	none
+w-5e9-mask	none
+w--1-bpc0	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w--1-bpc1	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-4294967295-bpc1	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+row-2^32-1	none
+row-2^32-8	none
+mask-w--1	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w3-h2-bpc1	image matrix 1 0 0 1 0 0 raw xy ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w9-h1-bpc1	image matrix 1 0 0 1 0 0 raw xy ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w2-cmyk-bpc4	image matrix 1 0 0 1 0 0 raw abcd ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+h-2^32	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+h-2^31	none
+w-true-h-true-bpc-true	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+bpc-0	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+w-long-hash-key	image matrix 1 0 0 1 0 0 raw x ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+ahx-w--1	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 2 2 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+ahx-w-1	image matrix 1 0 0 1 0 0 raw 41%20EI%201%201%20m%202%202%20l%20S%2042> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+ahx-w-2147483648	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 2 2 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+ahx-no-size	image matrix 1 0 0 1 0 0 raw 41%20EI%201%201%20m%202%202%20l%20S%2042> ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+rl-h-2^32-1-w2	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 2 2 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+a85-w--1	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 2 2 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dct-w--1	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 2 2 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+fl-w--1	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 2 2 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+unknown-w--1	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 1 1 l 2 2 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+cs-hash-lax	image matrix 1 0 0 1 0 0 raw abcdef ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+cs-hash-hex	image matrix 1 0 0 1 0 0 raw abcdef ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+cs-plain	image matrix 1 0 0 1 0 0 raw abcdef ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+cs-unknown	image matrix 1 0 0 1 0 0 raw a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+cs-array-hash	image matrix 1 0 0 1 0 0 raw abcdef ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+f-string-abbr	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+key-hash-lax	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+key-hash-hex	image matrix 1 0 0 1 0 0 raw % ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+tf-hash-lax	text font Courier size 10 text ab
+tf-hash-hex	text font Courier size 10 text ab
+tf-hash-one-digit	text font Helvetica size 10 text ab
+tf-hash-short	text font Courier size 10 text ab
+tj-cr	text font Courier size 10 text a%0Db%0D%0Ac
+tj-array-cr	text font Courier size 10 text a%0Db%20c
+tj-hex-cap	text font Courier size 1 text #32767:e47544126da4eb86
+tj-literal-escapes-cap	text font Courier size 1 text #32767:e47544126da4eb86
+name-straddle-253	text font Courier size 10 text ab
+name-straddle-254	text font Courier size 10 text ab
+name-255-escape-inside	text font Courier size 10 text ab
+name-lax-high-nibble	text font Courier size 10 text ab
+name-lax-both	text font Courier size 10 text ab
+name-hash-23	text font Courier size 10 text ab
+tj-bs-cr	text font Courier size 10 text ab
+tj-bs-crlf	text font Courier size 10 text ab
+tj-bs-lf	text font Courier size 10 text ab
+tj-cr-at-end	text font Courier size 10 text ab%0D
+tj-cr-cr-lf	text font Courier size 10 text a%0D%0D%0Ab
+tj-lf-cr	text font Courier size 10 text a%0A%0Db
+tj-cr-escaped	text font Courier size 10 text a%0Db
+tj-cr-before-paren	text font Courier size 10 text a%0D
+tj-octal-cr	text font Courier size 10 text a%0Db
+tj-nested-cr	text font Courier size 10 text a(b%0Dc)d
+tf-size-1.5.5	text font Courier size 1.5 text ab
+tf-size---3	text font Courier size 0 text %
+tf-size-+	text font Courier size 0 text %
+tf-size-true	text font Courier size 0 text %
+tf-size-long	text font Courier size 9 text ab
+mcid-7	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 7
+mcid---5	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 0
+mcid-1.2.3	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 1
+mcid-4294967296	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 0
+mcid-+2147483648	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 0
+mcid-20-nines	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 0
+mcid-20-nines--5	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 0
+mcid--20-nines	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 0
+mcid-19-digits	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 0
+mcid-2.5	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 2
+mcid-in-array	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 10 0 l 10 10 l 0 10 l 0 0 h mcid 3
+dash-plain	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 10 10 dash 2 3 phase 0
+dash---5	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 10 10 dash 0 3 phase 0
+dash-1.2.3	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 10 10 dash 1.20000005 4 phase 0
+dash-4294967296	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 10 10 dash 0 2 phase 0
+dash-20-nines	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 10 10 dash 0 2 phase 0
+dash-20-nines--5	path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 10 10 dash 0 2 phase 0

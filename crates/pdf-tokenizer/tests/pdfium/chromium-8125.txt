@@ -1,0 +1,74 @@
+# PDFium's answer for each case, as chromium/8125 gives it (oracle/pdfium.py record)
+number-two-points	1.20000005
+number-two-minus-real	-5
+number-plus-minus-point	-0.5
+number-trailing-point	5
+number-point	0
+number-minus	0
+number-plus	0
+number-leading-zeros	7
+number-u32-max	4.2949673e+09
+number-u32-max-plus-1	0
+number-plus-i32-max-plus-1	0
+number-i32-min	-2.14748365e+09
+number-i32-max-plus-1	2.14748365e+09
+number-i32-min-minus-1	0
+number-minus-inside	5
+number-two-minus	0
+number-exponent	not-a-number
+number-minus-point-5	-0.5
+number-plus-point	0
+number-minus-point	0
+number-point-5-point	0.5
+number-two-points-together	1
+number-plus-5	5
+number-minus-0	0
+number-41-nines-point-0	inf
+number-50-nines	0
+number-1e-45	1.40129846e-45
+number-f32-max-exponent	not-a-number
+number-f32-max	3.40282347e+38
+number-f32-max-rounding-down	3.40282347e+38
+number-f32-max-rounding-up	inf
+number-minus-f32-max-rounding-up	-inf
+number-point-1	0.100000001
+number-2^24-plus-1-real	16777216
+number-2^24-plus-1	16777216
+number-plus-2^24-plus-1	16777216
+number-halfway-to-even	2
+number-past-halfway	2.00000024
+hex-space	text AB
+hex-letter-between	text AB
+hex-letter-inside	text A
+hex-letter-last	text @
+hex-open-paren	text AB
+hex-slash	text AB
+hex-percent	text AB
+hex-bracket	text AB
+hex-byte-80	text AB
+hex-close-brace	text AB
+hex-open-brace	text AB
+hex-space-inside	text A
+hex-odd-after-space	text A@
+hex-odd	text A@
+hex-empty	none
+name-plain	found
+name-hash-30	found
+name-hash-3G	found
+name-hash-3g	found
+name-hash-G0	not-found
+name-hash-46-first	found
+name-hash-one-digit	not-found
+name-hash-last	not-found
+name-hash-2-last	not-found
+name-hash-300	not-found
+name-hash-twice	not-found
+name-hash-then-word	not-found
+literal-cr-and-crlf	text a%0Db%0D%0Ac
+literal-lf	text a%0Ab
+literal-escaped-cr	text ab
+literal-escaped-crlf	text ab
+literal-escaped-lf	text ab
+literal-octal-cr	text a%0Db
+literal-two-cr	text a%0D%0Db
+literal-lf-cr	text a%0A%0Db

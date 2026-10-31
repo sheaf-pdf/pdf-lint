@@ -88,12 +88,24 @@ pub struct InlineImage<'a> {
     content: &'a [u8],
     at: Range<usize>,
     data: Range<usize>,
+    found: Found,
 }
 
 impl<'a> InlineImage<'a> {
-    /// The image at `at` in `content`, `BI` to `EI`, its data at `data`.
-    pub(crate) fn new(content: &'a [u8], at: Range<usize>, data: Range<usize>) -> InlineImage<'a> {
-        InlineImage { content, at, data }
+    /// The image at `at` in `content`, `BI` to `EI`, its data at `data`,
+    /// its end found as `found` says.
+    pub(crate) fn new(
+        content: &'a [u8],
+        at: Range<usize>,
+        data: Range<usize>,
+        found: Found,
+    ) -> InlineImage<'a> {
+        InlineImage {
+            content,
+            at,
+            data,
+            found,
+        }
     }
 
     /// Where it is, `BI` to `EI`.
@@ -119,6 +131,47 @@ impl<'a> InlineImage<'a> {
     /// Where its data is, as [`tokens`](crate::tokens) found it.
     pub fn data(&self) -> Range<usize> {
         self.data.clone()
+    }
+
+    /// What PDFium makes of its data as it reads the image to draw it
+    /// (its `ReadInlineStream`): a stream of the bytes it keeps, a stream
+    /// of none, or no stream and so no image ([`ImageStream`]).
+    ///
+    /// ```
+    /// use pdf_content_streams::{ImageStream, Limits, ResCx, operations};
+    ///
+    /// let content = b"BI /W 1 /H 1 /BPC 8 /CS /G /F /AHx ID 41> 7 EI \
+    ///     BI /W 0 /H 1 /BPC 8 /CS /G ID xy EI \
+    ///     BI /W 1 /H 1 /BPC 8 /CS /G /F /XYZ ID xy EI";
+    /// let res = ResCx::none();
+    /// let read: Vec<_> = operations(content, &res, &Limits::DEFAULT)
+    ///     .map(|op| op.unwrap().inline_image().unwrap().stream())
+    ///     .collect();
+    /// // The filter's end, and the tokens before `EI` with it.
+    /// assert_eq!(read[0], ImageStream::Data(38..43));
+    /// assert_eq!(&content[38..43], b"41> 7");
+    /// // No bytes, a size of 0; no stream, a filter PDFium can't decode.
+    /// assert_eq!(read[1..], [ImageStream::Empty, ImageStream::Missing]);
+    /// ```
+    pub fn stream(&self) -> ImageStream {
+        match self.found {
+            Found::Counted => ImageStream::Data(self.data.clone()),
+            Found::Empty => ImageStream::Empty,
+            Found::Walk => ImageStream::Missing,
+            Found::Filter => {
+                // On from the filter's end to the last token before `EI`,
+                // which ends where the image does. It was read under a cap
+                // on depth, so nothing in it is deeper.
+                let (s, mut end) = (self.content, self.data.end);
+                while let Some(Ok((r, _))) = next_raw(s, end, UNCAPPED) {
+                    if r.end == self.at.end && &s[r.clone()] == b"EI" {
+                        break;
+                    }
+                    end = r.end;
+                }
+                ImageStream::Data(self.data.start..end)
+            }
+        }
     }
 
     /// The value under `key`, as written, as PDFium reads the image's
@@ -186,6 +239,43 @@ impl fmt::Debug for InlineImage<'_> {
     }
 }
 
+/// What PDFium makes of an inline image's data as it reads the image to
+/// draw it (its `ReadInlineStream`), as [`InlineImage::stream`] says.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ImageStream {
+    /// A stream of the bytes here: an unfiltered image's, as many as its
+    /// size counts, its [`data`](InlineImage::data); a filtered image's,
+    /// from its data's start to where its filter's data ends, and on over
+    /// any tokens written between that end and `EI`, the white-space
+    /// before `EI` left out, which PDFium keeps too. Where PDFium decodes
+    /// the data to find its end (Flate, LZW, CCITTFax, DCT), its end as
+    /// [`tokens`](crate::tokens) finds it.
+    Data(Range<usize>),
+    /// A stream of no bytes: an unfiltered image whose size counts to 0,
+    /// whose data, read on to `EI` from its start, PDFium keeps none of.
+    Empty,
+    /// No stream, and so no image, which PDFium neither keeps nor draws:
+    /// its data read on to `EI` from its start, its filter one PDFium has
+    /// no decoder for or one whose data's end isn't found, or its size one
+    /// PDFium can't count.
+    Missing,
+}
+
+/// How an inline image's data's end was found, which says what PDFium
+/// makes of it ([`ImageStream`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Found {
+    /// By its size, unfiltered.
+    Counted,
+    /// By its filter's end.
+    Filter,
+    /// By the walk to `EI`, unfiltered, its size counting to 0.
+    Empty,
+    /// By the walk to `EI`: no end found.
+    Walk,
+}
+
 /// The inline images of one content stream: what finds each one's data,
 /// and its searches for where an image's data ends, remembered, so content
 /// of many images whose data doesn't end is searched once, not once for
@@ -251,23 +341,33 @@ impl<'a, 'r> Images<'a, 'r> {
         // then reads on from its data's start as it does for a filter it
         // can't decode; and so for an image whose size it can't count,
         // which it reads no data of, filtered or not.
-        let end = match (self.size(&dict), self.first_filter(&dict)) {
-            (None, _) => End::Walk,
-            (Some(size), None) => usize::try_from(size)
-                .ok()
-                .filter(|&n| n > 0)
-                .map_or(End::Walk, |n| End::Counted(start.saturating_add(n))),
-            (_, Some(Filter::Hex)) => (self.hex.from(start, |at| find(s, at, b">")))
-                .map_or(End::Walk, |at| End::Counted(at + 1)),
-            (_, Some(Filter::A85)) => (self.a85.from(start, |at| a85_stop(s, at)))
-                .map_or(End::Walk, |stop| End::Counted(a85_end(s, start, stop))),
-            (_, Some(Filter::RunLength)) => {
-                (self.run_length.end(s, start)).map_or(End::Walk, End::Counted)
+        let (end, found) = match (self.size(&dict), self.first_filter(&dict)) {
+            (None, _) => (End::Walk, Found::Walk),
+            (Some(size), None) => match usize::try_from(size) {
+                Ok(0) => (End::Walk, Found::Empty),
+                Ok(n) => (End::Counted(start.saturating_add(n)), Found::Counted),
+                Err(_) => (End::Walk, Found::Walk),
+            },
+            (_, Some(filter)) => {
+                let end = match filter {
+                    Filter::Hex => (self.hex.from(start, |at| find(s, at, b">")))
+                        .map_or(End::Walk, |at| End::Counted(at + 1)),
+                    Filter::A85 => (self.a85.from(start, |at| a85_stop(s, at)))
+                        .map_or(End::Walk, |stop| End::Counted(a85_end(s, start, stop))),
+                    Filter::RunLength => {
+                        (self.run_length.end(s, start)).map_or(End::Walk, End::Counted)
+                    }
+                    Filter::Dct => (self.eoi.from(start, |at| find(s, at, b"\xff\xd9")))
+                        .map_or(End::Scan, |eoi| End::Counted(eoi + 2)),
+                    Filter::Decoded => End::Scan,
+                    Filter::Other => End::Walk,
+                };
+                let found = match end {
+                    End::Walk => Found::Walk,
+                    End::Counted(_) | End::Scan => Found::Filter,
+                };
+                (end, found)
             }
-            (_, Some(Filter::Dct)) => (self.eoi.from(start, |at| find(s, at, b"\xff\xd9")))
-                .map_or(End::Scan, |eoi| End::Counted(eoi + 2)),
-            (_, Some(Filter::Decoded)) => End::Scan,
-            (_, Some(Filter::Other)) => End::Walk,
         };
         let (data, end) = match end {
             End::Counted(end) if end <= s.len() => {
@@ -295,7 +395,7 @@ impl<'a, 'r> Images<'a, 'r> {
         if sink.wants() {
             self.faults(&dict, between, &ends, &data, end, sink);
         }
-        Ok(Image::Read(end, data))
+        Ok(Image::Read(end, data, found))
     }
 
     /// Where ISO 32000-2 reads an image read otherwise, told to `sink`:
@@ -405,19 +505,20 @@ impl<'a, 'r> Images<'a, 'r> {
         })
     }
 
-    /// The size of an image's data as PDFium counts it from its
-    /// dictionary (`ReadInlineStream`), which an unfiltered image's data
-    /// is: its `/W`, `/H` and `/BPC` each as PDFium reads an integer from
-    /// a value ([`integer`]), 0 where there's none, and held as PDFium
-    /// holds them, in 32 bits, unsigned, the width signed where a row's
-    /// bits are counted; its color space's components and `/BPC` where it
-    /// has one the resources give, and one bit of one component where it
-    /// has none or names one they don't; a row's bits padded to a byte.
-    /// None where that count overflows 32 bits, or a row of any bits to a
-    /// pixel has a negative width: PDFium then reads no data, filtered or
-    /// not, and reads on to `EI` from the data's start. (PDFium 7881 pads a
-    /// row by adding 7 to its bits first, so a row of 2^32 − 7 bits or more
-    /// overflows there; 8076 divides, rounding up, as here.)
+    /// The size of an image's data as PDFium counts it from its dictionary
+    /// (`ReadInlineStream`), which an unfiltered image's data is: its `/W`,
+    /// `/H` and `/BPC` each as PDFium reads an integer from a value
+    /// ([`integer`]), 0 where there's none, and held as PDFium holds them,
+    /// in 32 bits, unsigned, the width signed where a row's bits are
+    /// counted; its color space's components and `/BPC` where it has one the
+    /// resources give, and one bit of one component where it has none or
+    /// names one they don't; a row's bits padded to a byte. None where that
+    /// count overflows 32 bits, or a row of any bits to a pixel has a
+    /// negative width: PDFium then reads no data, filtered or not, and reads
+    /// on to `EI` from the data's start. (PDFium's chromium/7881 pads a row
+    /// by adding 7 to its bits first, so a row of 2^32 − 7 bits or more
+    /// overflows there; chromium/8076 and chromium/8125, which this follows,
+    /// divide, rounding up, as here.)
     fn size(&self, dict: &ImageDict) -> Option<u32> {
         let s = self.s;
         let value = |key| dict.get(s, key).map_or(0, |r| integer(&s[r]));
@@ -658,8 +759,9 @@ impl Value {
 
 /// What reading an inline image's `BI` gives ([`Images::read`]).
 pub(crate) enum Image {
-    /// An image: where it ends, past its `EI`, and where its data is.
-    Read(usize, Range<usize>),
+    /// An image: where it ends, past its `EI`, where its data is, and how
+    /// that was found.
+    Read(usize, Range<usize>, Found),
     /// No image, a keyword where its dictionary's key is written: where
     /// that keyword is.
     Lone(Range<usize>),

@@ -1,6 +1,6 @@
-//! What a token stands for as PDFium reads it, where that's otherwise than
-//! ISO 32000-2: a number word's value, a name's bytes, a literal string's
-//! and a hex string's.
+//! What a token stands for as PDFium reads it, as of chromium/8125, where
+//! that's otherwise than ISO 32000-2: a number word's value, a name's
+//! bytes, a literal string's and a hex string's.
 //!
 //! These readings go with tokens read by
 //! [`Rules::Pdfium`](crate::Rules::Pdfium), and give values only: unlike
@@ -373,8 +373,9 @@ mod tests {
         );
     }
 
-    /// What PDFium 7881 and 8076 read each word as, in `cm`, `re` and a
-    /// `/MediaBox` alike (one-page files, 2026-10-30), and how it holds it.
+    /// What PDFium's chromium/7881, 8076 and 8125 read each word as, in
+    /// `cm`, `re` and a `/MediaBox` alike (one-page files, 2026-10-30), and
+    /// how it holds it.
     #[test]
     fn numbers_are_held_as_pdfium_holds_them() {
         let max = f32::MAX;
@@ -482,8 +483,9 @@ mod tests {
     }
 
     /// A `#` with two bytes after it is an escape, a byte that's no hex
-    /// digit 0: as PDFium 7881 and 8076 read a font's name in `Tf` and an
-    /// `/Info` key (2026-10-30). ISO 32000-2 keeps such a `#`.
+    /// digit 0: as PDFium's chromium/7881, 8076 and 8125 read a font's
+    /// name in `Tf` and an `/Info` key (2026-10-30). ISO 32000-2 keeps
+    /// such a `#`.
     #[test]
     fn a_names_hash_takes_any_two_bytes() {
         for (input, meant) in [
@@ -515,9 +517,9 @@ mod tests {
         assert_eq!(value(decode::name(b"/F#3G").bytes()), b"F#3G");
     }
 
-    /// An unescaped CR or CR LF is kept as written, in `Tj` and in
-    /// `/Title` (PDFium 7881 and 8076, 2026-10-30), where ISO 32000-2 reads
-    /// LF; every escape is as ISO 32000-2's.
+    /// An unescaped CR or CR LF is kept as written, in `Tj` and in `/Title`
+    /// (PDFium's chromium/7881, 8076 and 8125, 2026-10-30), where ISO
+    /// 32000-2 reads LF; every escape is as ISO 32000-2's.
     #[test]
     fn a_literal_strings_end_of_line_is_as_written() {
         for (input, meant) in [
@@ -578,7 +580,7 @@ mod tests {
     }
 
     /// Hex digits pair up to the `>`, over any other byte, in `Tj` and in
-    /// `/Title` (PDFium 7881 and 8076, 2026-10-30).
+    /// `/Title` (PDFium's chromium/7881, 8076 and 8125, 2026-10-30).
     #[test]
     fn a_hex_strings_digits_pair_over_any_byte() {
         for (input, meant) in [

@@ -482,8 +482,8 @@ impl<'a> Parser<'a> {
     }
 
     /// The parser, reading by `rules`: ISO 32000-2's lexical rules, the
-    /// default, or PDFium's ([`Rules::Pdfium`]). Any other rules are read
-    /// as ISO 32000-2's.
+    /// default, or PDFium's, as of chromium/8125 ([`Rules::Pdfium`]). Any
+    /// other rules are read as ISO 32000-2's.
     ///
     /// By PDFium's rules, its tokens are cut where PDFium cuts them (0x80
     /// and 0xFF are white-space, a word of digits, signs and points is a
@@ -2170,10 +2170,10 @@ mod tests {
     }
 
     /// By PDFium's rules a number word is the number PDFium holds, at 64
-    /// bits, as PDFium 7881 and 8076 read the first corner of a
-    /// `/MediaBox` (one-page files, 2026-10-30), a fault said where ISO
-    /// 32000-2 reads it otherwise: not as a number, or as an integer
-    /// PDFium doesn't hold.
+    /// bits, as PDFium's chromium/7881, 8076 and 8125 read the first
+    /// corner of a `/MediaBox` (one-page files, 2026-10-30), a fault said
+    /// where ISO 32000-2 reads it otherwise: not as a number, or as an
+    /// integer PDFium doesn't hold.
     #[test]
     fn pdfiums_rules_read_numbers_as_pdfium_holds_them() {
         let keyword = "is a number by PDFium's rules and a keyword to ISO 32000-2";
@@ -2239,9 +2239,9 @@ mod tests {
     }
 
     /// By PDFium's rules a number or a name is read by its first 256
-    /// bytes, a name's `/` among them, as PDFium 7881 and 8076 read a
-    /// `/MediaBox`'s corner and an `/Info` key (2026-10-30): longer, a
-    /// fault, as ISO 32000-2 reads every byte.
+    /// bytes, a name's `/` among them, as PDFium's chromium/7881, 8076
+    /// and 8125 read a `/MediaBox`'s corner and an `/Info` key
+    /// (2026-10-30): longer, a fault, as ISO 32000-2 reads every byte.
     #[test]
     fn pdfiums_rules_read_a_word_by_its_first_256_bytes() {
         let long =
@@ -2296,8 +2296,9 @@ mod tests {
     }
 
     /// By PDFium's rules a hex string's digits pair to its `>` over any
-    /// other byte, as PDFium 7881 and 8076 read a `/Title`, a fault said
-    /// where ISO 32000-2 ends the string before such a byte.
+    /// other byte, as PDFium's chromium/7881, 8076 and 8125 read a
+    /// `/Title`, a fault said where ISO 32000-2 ends the string before
+    /// such a byte.
     #[test]
     fn pdfiums_rules_read_a_hex_string_to_its_close() {
         for (input, meant, fault) in [
@@ -2344,9 +2345,9 @@ mod tests {
     }
 
     /// By PDFium's rules a name's `#` before any two bytes is an escape, a
-    /// byte that's no hex digit 0, as PDFium 7881 and 8076 read an `/Info`
-    /// key (2026-10-30); with fewer after it, itself. ISO 32000-2's rules
-    /// read such a `#` as itself, and the fault is theirs.
+    /// byte that's no hex digit 0, as PDFium's chromium/7881, 8076 and 8125
+    /// read an `/Info` key (2026-10-30); with fewer after it, itself. ISO
+    /// 32000-2's rules read such a `#` as itself, and the fault is theirs.
     #[test]
     fn pdfiums_rules_read_a_names_hash_before_any_two_bytes() {
         let stray = "has a # without two hex digits after it, which readers read differently";
@@ -2386,8 +2387,8 @@ mod tests {
         }
     }
 
-    /// By PDFium's rules a literal string's CR, alone or before LF, is
-    /// read as written, as PDFium 7881 and 8076 read a `/Title`
+    /// By PDFium's rules a literal string's CR, alone or before LF, is read
+    /// as written, as PDFium's chromium/7881, 8076 and 8125 read a `/Title`
     /// (2026-10-30), a fault said where ISO 32000-2 reads LF; every escape
     /// reads alike.
     #[test]
@@ -2430,9 +2431,9 @@ mod tests {
         }
     }
 
-    /// By PDFium's rules 0x80 and 0xFF are white-space, as PDFium 7881 and
-    /// 8076 read a `/MediaBox` and an `/Info` key (2026-10-30); nothing is
-    /// told of them.
+    /// By PDFium's rules 0x80 and 0xFF are white-space, as PDFium's
+    /// chromium/7881, 8076 and 8125 read a `/MediaBox` and an `/Info` key
+    /// (2026-10-30); nothing is told of them.
     #[test]
     fn pdfiums_rules_read_0x80_and_0xff_as_white_space() {
         for space in [0x80, 0xFF] {
@@ -2462,12 +2463,13 @@ mod tests {
     /// By PDFium's rules a reference is still two integers and `R`, each
     /// integer as PDFium holds it, a fault said where ISO 32000-2 reads it
     /// otherwise; it numbers no object where the number doesn't fit 32 bits
-    /// or the generation 16. PDFium 7881 and 8076 name object 3 from `3.9
-    /// 0 R`, `3 -1 R`, `3 99999999999 R`, `3 --1 R`, `3 0.5 R`, `3 65536 R`
-    /// and `3 + R` in a page tree's `/Kids`, and nothing from `--3 0 R`,
-    /// `-3 0 R` or `4294967299 0 R` (2026-10-30): a reference is any two
-    /// number words and `R` to its object parser, its number read from the
-    /// first and its generation not read, which isn't followed here.
+    /// or the generation 16. PDFium's chromium/7881, 8076 and 8125 name
+    /// object 3 from `3.9 0 R`, `3 -1 R`, `3 99999999999 R`, `3 --1 R`, `3
+    /// 0.5 R`, `3 65536 R` and `3 + R` in a page tree's `/Kids`, and nothing
+    /// from `--3 0 R`, `-3 0 R` or `4294967299 0 R` (2026-10-30): a
+    /// reference is any two number words and `R` to its object parser, its
+    /// number read from the first and its generation not read, which isn't
+    /// followed here.
     #[test]
     fn pdfiums_rules_read_a_reference_by_its_integers() {
         let keyword = "is a number by PDFium's rules and a keyword to ISO 32000-2";

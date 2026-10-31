@@ -40,6 +40,13 @@ jobs:
       # pinned version.
       - name: Test against qpdf
         run: just test-qpdf
+      # The readers that follow PDFium's rules, each case asked of the
+      # PDFium the recipe fetches at its pinned build, its build provenance
+      # verified by gh, which the token lets read it.
+      - name: Test against PDFium
+        run: just test-pdfium
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Build documentation
         run: just doc
 

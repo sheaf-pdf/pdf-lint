@@ -42,8 +42,9 @@ pub enum Rules {
     /// ISO 32000-2's lexical conventions (7.2, 7.3): the default.
     #[default]
     Iso,
-    /// PDFium's, as both its content stream parser (`CPDF_StreamParser`)
-    /// and its object parser (`CPDF_SyntaxParser`) read tokens.
+    /// PDFium's, as of chromium/8125, as both its content stream parser
+    /// (`CPDF_StreamParser`) and its object parser (`CPDF_SyntaxParser`)
+    /// read tokens.
     Pdfium,
 }
 

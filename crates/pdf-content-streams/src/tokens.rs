@@ -9,7 +9,7 @@ use pdf_tokenizer::{Kind, is_white_space};
 
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Sink};
-use crate::inline::{Image, Images, ResCx};
+use crate::inline::{Found, Image, Images, ResCx};
 use crate::limits::Limits;
 use crate::scan::{Raw, next_raw, tokenizer};
 
@@ -107,6 +107,7 @@ pub fn tokens<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Tokens<'a
         lim: *limits,
         operands: 0,
         images: Images::new(s, res, *limits),
+        found: Found::Walk,
         done: false,
         ended: false,
         joins: &[],
@@ -127,6 +128,8 @@ pub struct Tokens<'a, 'r, S = ()> {
     /// Operands since the last operator.
     operands: usize,
     images: Images<'a, 'r>,
+    /// How the last inline image's data's end was found.
+    found: Found,
     done: bool,
     /// Whether the end was reached with no error, and the white-space
     /// after the last token not yet looked at for faults.
@@ -202,6 +205,7 @@ impl<'a, 'r, S> Tokens<'a, 'r, S> {
             lim: self.lim,
             operands: self.operands,
             images: self.images,
+            found: self.found,
             done: self.done,
             ended: self.ended,
             joins: self.joins,
@@ -214,6 +218,11 @@ impl<'a, 'r, S> Tokens<'a, 'r, S> {
     /// The content read.
     pub(crate) fn content(&self) -> &'a [u8] {
         self.s
+    }
+
+    /// How the last inline image read found its data's end.
+    pub(crate) fn found(&self) -> Found {
+        self.found
     }
 
     /// The same, the content being a page's streams joined, each of
@@ -285,8 +294,9 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
                 let keyword = match self.lone.last() {
                     Some(&(_, keyword)) => keyword,
                     None => match self.images.read(r.start, &mut self.sink) {
-                        Ok(Image::Read(end, data)) => {
+                        Ok(Image::Read(end, data, found)) => {
                             self.at = end;
+                            self.found = found;
                             if self.sink.wants() {
                                 self.across(r.start..end, Some(data.clone()));
                             }

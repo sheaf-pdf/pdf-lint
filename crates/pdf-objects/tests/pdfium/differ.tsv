@@ -1,0 +1,6 @@
+# name	why pdf-objects reads it otherwise than PDFium
+mediabox-f32-max-rounding-down	A real is held as the decimal it starts with at 64 bits, where PDFium holds the nearest f32: this one, just under the halfway point past the greatest f32, rounds to a 64-bit value that rounds on to infinity as an f32, where PDFium's is the greatest f32.
+kids-real-number	A reference is two integers and R here; PDFium's object parser takes any two number words, so 3.9 0 R names object 3 there.
+kids-negative-generation	A reference's generation fits 16 bits here; PDFium's object parser doesn't read the generation, so 3 -1 R names object 3 there.
+kids-real-generation	A reference is two integers and R here; PDFium's object parser takes any two number words, its generation unread, so 3 0.5 R names object 3 there.
+kids-generation-past-16-bits	A reference's generation fits 16 bits here; PDFium's object parser doesn't read the generation, so 3 65536 R names object 3 there.

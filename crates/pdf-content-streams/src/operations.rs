@@ -10,7 +10,7 @@ use tinyvec::TinyVec;
 
 use crate::error::Error;
 use crate::fault::{Fault, Sink};
-use crate::inline::{InlineImage, ResCx};
+use crate::inline::{Found, InlineImage, ResCx};
 use crate::limits::Limits;
 use crate::operand::Operand;
 use crate::operator::Operator;
@@ -128,7 +128,7 @@ impl<'a, S: Sink<'a>> Iterator for Operations<'a, '_, S> {
                     continue;
                 }
                 Tok::Op(_) => None,
-                Tok::InlineImage(data) => Some(data),
+                Tok::InlineImage(data) => Some((data, self.tokens.found())),
             };
             return Some(Ok(Operation {
                 content: self.tokens.content(),
@@ -168,8 +168,8 @@ pub struct Operation<'a> {
     content: &'a [u8],
     /// Where the operator is, or the inline image, `BI` to `EI`.
     at: Range<usize>,
-    /// Where an inline image's data is.
-    image: Option<Range<usize>>,
+    /// Where an inline image's data is, and how its end was found.
+    image: Option<(Range<usize>, Found)>,
     operands: Ranges,
 }
 
@@ -218,8 +218,8 @@ impl<'a> Operation<'a> {
     /// PDFium reads it ([`tokens`](crate::tokens)): an operation of its
     /// own, with the operands before it, as PDFium clears them after it.
     pub fn inline_image(&self) -> Option<InlineImage<'a>> {
-        let data = self.image.clone()?;
-        Some(InlineImage::new(self.content, self.at.clone(), data))
+        let (data, found) = self.image.clone()?;
+        Some(InlineImage::new(self.content, self.at.clone(), data, found))
     }
 
     /// Its operator, by its name ([`Operator::of`]): an inline image's is
@@ -247,7 +247,7 @@ impl fmt::Debug for Operation<'_> {
         f.debug_struct("Operation")
             .field("name", &String::from_utf8_lossy(self.name()))
             .field("at", &self.at)
-            .field("image", &self.image)
+            .field("image", &self.image.as_ref().map(|(data, _)| data))
             .field("operands", &self.operands.as_slice())
             .finish()
     }

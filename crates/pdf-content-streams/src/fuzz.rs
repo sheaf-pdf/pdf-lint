@@ -13,9 +13,9 @@ use crate::data::{RunLength, Searched, a85_stop, ei_scan, find};
 use crate::fault::{Fault, Sink};
 use crate::scan::{Raw, next_raw, next_raw_walked};
 use crate::{
-    Balance, Concat, Error, ErrorKind, Join, Limits, MarkedEvent, MarkedNest, NameSet, Operand,
-    Operation, Operations, Operator, Properties, Props, ResCx, ResKind, SpanAcross, State, Tok,
-    balance, kept, marked, name, names_used, object, operations, tokens,
+    Balance, Concat, Error, ErrorKind, ImageStream, Join, Limits, MarkedEvent, MarkedNest, NameSet,
+    Operand, Operation, Operations, Operator, Properties, Props, ResCx, ResKind, SpanAcross, State,
+    Tok, balance, kept, marked, name, names_used, object, operations, tokens,
 };
 
 /// A sink that keeps every fault it's told, in order, where it is.
@@ -746,6 +746,15 @@ fn operation(
             }
             if let Some(length) = image.length() {
                 assert!(length < 1 << 32);
+            }
+            // What PDFium keeps of its data starts with it, and ends at it
+            // or past it, before `EI`.
+            if let ImageStream::Data(kept) = image.stream() {
+                assert_eq!(kept.start, data.start, "{kept:?} from {data:?}");
+                assert!(
+                    data.end <= kept.end && kept.end <= at.end - 2,
+                    "{kept:?} in {at:?}"
+                );
             }
         }
     }

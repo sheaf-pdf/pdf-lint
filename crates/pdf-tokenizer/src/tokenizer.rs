@@ -860,8 +860,8 @@ mod tests {
     }
 
     /// The tokenizer under PDFium's rules, where they part from ISO
-    /// 32000-2's: what PDFium 7881 and 8076 read the same bytes as, one-page
-    /// files through their page objects (2026-10-30).
+    /// 32000-2's: what PDFium's chromium/7881, 8076 and 8125 read the same
+    /// bytes as, one-page files through their page objects (2026-10-30).
     mod pdfiums_rules {
         extern crate std;
 

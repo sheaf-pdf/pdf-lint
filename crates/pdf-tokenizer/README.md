@@ -20,7 +20,7 @@ Every promise below is checked on every token by the tests, a fuzz target, and t
 
 By default it follows the lexical conventions of ISO 32000-2 (§7.2, §7.3): its white-space characters, its delimiters, and its regular characters. A run of regular characters is a number only when it's written as one, so `1e5` and `--5` are keywords.
 
-A reader that means to see what PDFium sees can have PDFium's rules instead, from any offset. They part from ISO 32000-2's in three places, and every promise above holds under either:
+A reader that means to see what PDFium sees can have PDFium's rules instead, from any offset: PDFium's as of chromium/8125, a development snapshot of PDFium that the crate's tests hold them to. They part from ISO 32000-2's in three places, and every promise above holds under either:
 
 - **Numbers.** A run of regular characters that are all digits, signs and points is a number to PDFium: `--5`, `5-3` and `+` are integers, and `1.2.3` and `.` reals. `1e5` is a keyword under both.
 - **Hexadecimal strings.** PDFium's runs from `<` to the next `>` over any byte, where ISO 32000-2's (§7.3.4.3) ends before a byte that's neither a hex digit nor white-space.

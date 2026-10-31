@@ -1,7 +1,7 @@
-//! PDF content streams (ISO 32000-2, 7.8.2), read as PDFium reads them: a
-//! stream's tokens and its operations, each with where it is and its bytes
-//! as written, and a page's streams as one, every place in them mapped
-//! back.
+//! PDF content streams (ISO 32000-2, 7.8.2), read as PDFium reads them, as
+//! of chromium/8125: a stream's tokens and its operations, each with where
+//! it is and its bytes as written, and a page's streams as one, every place
+//! in them mapped back.
 //!
 //! - **Tokens** ([`tokens`]): operators, operands as written, and inline
 //!   images, `BI` to `EI`, each one token. Tokens end where PDFium's
@@ -86,7 +86,7 @@ pub use pdf_objects;
 
 pub use balance::{Balance, balance};
 pub use error::{Error, ErrorKind};
-pub use inline::{InlineImage, ResCx, family_components};
+pub use inline::{ImageStream, InlineImage, ResCx, family_components};
 pub use limits::Limits;
 pub use marked::{Marked, MarkedEvent, MarkedNest, Properties, Props, marked};
 pub use names::{Kept, NameSet, ResKind, kept, names_used};

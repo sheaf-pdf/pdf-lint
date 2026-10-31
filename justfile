@@ -17,12 +17,19 @@ arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cu
 # FUZZ_TOOLCHAIN names, as CI's fuzzing pins one.
 fuzz_toolchain := env("FUZZ_TOOLCHAIN", "nightly")
 
+# The PDFium build the readers that follow PDFium's rules are held to
+# (`_pdfium`, oracle/README.md).
+pdfium_build := "8125"
+
+# The crates' PDFium cases, each a crate's tests/pdfium.
+pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-content-streams/tests/pdfium"
+
 # List the recipes.
 default:
     @just --list --unsorted
 
 # Everything CI runs.
-ci: fmt clippy test test-qpdf doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -73,6 +80,68 @@ _qpdf:
 test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_
+
+# PDFium, the oracle of the readers that follow PDFium's rules: a
+# development snapshot, PDFium as of chromium/8125, pdfium-binaries' Linux
+# x86_64 build at that tag, at a pinned SHA-256 and, where `gh` can,
+# its build provenance attested; kept in target/. To bump it, as
+# oracle/README.md says: verify the new build's attestation, take its
+# SHA-256, ask every case of it (`PDF_LINT_PDFIUM=... just test-pdfium`),
+# read each answer that moved against PDFium's changes, then the tag and
+# checksum here and `just pdfium-answers`.
+_pdfium:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    build={{ pdfium_build }}
+    if [ "$(rustc -vV | sed -n 's/^host: //p')" != x86_64-unknown-linux-gnu ]; then
+        echo "PDFium chromium/$build is fetched for Linux x86_64 only: name another in PDF_LINT_PDFIUM" >&2
+        exit 2
+    fi
+    dir=$PWD/target/pdfium-$build
+    if [ ! -f "$dir/lib/libpdfium.so" ]; then
+        tgz=pdfium-linux-x64.tgz
+        mkdir -p target
+        work=$(mktemp -d "$PWD/target/pdfium-fetch.XXXXXX")
+        trap 'rm -rf "$work"' EXIT
+        curl -fsSL --retry 3 -o "$work/$tgz" \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/$build/$tgz"
+        echo "e1c3ce6e270cb5e0c20816b379ad9f2c1309972697c505f508de92bf5e7d6659  $work/$tgz" \
+            | sha256sum --check --quiet
+        if gh attestation verify --help >/dev/null 2>&1 \
+            && { [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1; }; then
+            gh attestation verify "$work/$tgz" --repo bblanchon/pdfium-binaries >/dev/null
+        else
+            echo "no gh to verify its attestation: chromium/$build checked by its SHA-256 alone" >&2
+        fi
+        rm -rf "$dir"
+        mkdir -p "$dir"
+        tar -xzf "$work/$tgz" -C "$dir"
+    fi
+
+# The crates' PDFium cases: each generator writing the cases committed
+# beside it, then every case asked of PDFium, its answer held to the one
+# recorded at the pin, and each that moved listed. The library is the one
+# PDF_LINT_PDFIUM names, or the pinned build. A token for gh, which the
+# fetch alone uses, is kept from the process that loads the library.
+test-pdfium:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 -I -B oracle/pdfium.py cases {{ pdfium_sets }}
+    if [ -n "${PDF_LINT_PDFIUM:-}" ]; then
+        env -u GH_TOKEN -u GITHUB_TOKEN python3 -I -B oracle/pdfium.py check "$PDF_LINT_PDFIUM" {{ pdfium_sets }}
+    else
+        "{{ just_executable() }}" _pdfium
+        env -u GH_TOKEN -u GITHUB_TOKEN python3 -I -B oracle/pdfium.py check \
+            "$PWD/target/pdfium-{{ pdfium_build }}/lib/libpdfium.so" {{ pdfium_sets }} --build {{ pdfium_build }}
+    fi
+
+# Write the crates' PDFium cases anew from their generators, and their
+# answers from the pinned build: when cases are added, and at a bump, once
+# each answer that moved has been read.
+pdfium-answers: _pdfium
+    python3 -I -B oracle/pdfium.py cases --write {{ pdfium_sets }}
+    env -u GH_TOKEN -u GITHUB_TOKEN python3 -I -B oracle/pdfium.py record \
+        "$PWD/target/pdfium-{{ pdfium_build }}/lib/libpdfium.so" {{ pdfium_sets }} --build {{ pdfium_build }}
 
 # Write the files qpdf makes from the tests' clean file anew, into
 # crates/pdf-structure/tests/files, which the tests read: only when the

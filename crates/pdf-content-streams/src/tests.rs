@@ -131,8 +131,8 @@ fn names_decode_their_escapes() {
     assert!(matches!(name(b"/Plain"), Some(Cow::Borrowed(b"Plain"))));
     // A `#` with fewer than two bytes after it stays as written; with two
     // that aren't hex digits, it escapes them as PDFium reads it, each
-    // read as 0 (`/F#3G 10 Tf` finds the font `F0` in PDFium 7881 and
-    // 8076).
+    // read as 0 (`/F#3G 10 Tf` finds the font `F0` in PDFium's
+    // chromium/7881, 8076 and 8125).
     assert_eq!(name(b"/A#2").as_deref(), Some(&b"A#2"[..]));
     assert_eq!(name(b"/#zz").as_deref(), Some(&b"\0"[..]));
     assert_eq!(name(b"/").as_deref(), Some(&b""[..]));
@@ -156,7 +156,7 @@ fn operands_read_as_objects() {
     assert_eq!(o(b"/A#20B"), Some(Object::from("A B")));
     // Escapes, octal codes, a line continued, and an end of line, a CR LF
     // read as written, as PDFium reads it (`(a\rb\r\nc) Tj` shows those
-    // bytes in PDFium 7881 and 8076).
+    // bytes in PDFium's chromium/7881, 8076 and 8125).
     assert_eq!(
         o(b"(a\\(b\\)\\101\\0533\\\nc\r\nd)"),
         Some(string(b"a(b)A+3c\r\nd", Literal))
@@ -176,9 +176,9 @@ fn operands_read_as_objects() {
         o(b"<</A 1 2 /B /C>>"),
         Some(Object::from(dict! { "A" => 1, "B" => "C" }))
     );
-    // A number word as PDFium reads it: PDFium 7881 and 8076 hold a
-    // property list's `/MCID --5` and `/MCID 1.2.3` as 0 and 1, and a dash
-    // array `[--5 3]` as 0 and 3, `[1.2.3 4]` as 1.2 and 4.
+    // A number word as PDFium reads it: PDFium's chromium/7881, 8076 and
+    // 8125 hold a property list's `/MCID --5` and `/MCID 1.2.3` as 0 and 1,
+    // and a dash array `[--5 3]` as 0 and 3, `[1.2.3 4]` as 1.2 and 4.
     assert_eq!(o(b"--5"), Some(Object::from(0)));
     assert_eq!(o(b"1.2.3"), Some(Object::from(1.2)));
     for not in [&b")"[..], b"Tj"] {
@@ -198,9 +198,9 @@ fn operands_read_as_objects() {
     assert_eq!(o(b"[1 (2"), None);
 }
 
-/// A number past 32 bits reads as PDFium reads one, 0, held as
-/// pdf-objects holds a number it reads by PDFium's rules, so an array
-/// holding one keeps its place (PDFium 7881 and 8076 hold a property
+/// A number past 32 bits reads as PDFium reads one, 0, held as pdf-objects
+/// holds a number it reads by PDFium's rules, so an array holding one
+/// keeps its place (PDFium's chromium/7881, 8076 and 8125 hold a property
 /// list's `/MCID` of 20 nines, or of `9223372036854775807`, as 0, and a
 /// dash array's element alike); a word longer than 255 bytes reads by its
 /// first 255, so a real is finite, and writes; and an operand of more
@@ -259,8 +259,9 @@ fn operands_read_as_pdf_objects_reads_them() {
 /// A word of more digits than 64 bits hold with a sign after them, such
 /// as `99999999999999999999--5`, is no number as ISO 32000-2 writes one
 /// (7.3.3), as `--5` isn't, and is told so: it reads as PDFium reads it,
-/// 0, its digits past 32 bits (PDFium 7881 and 8076 hold such a property
-/// list's `/MCID`, and such an element of a dash array, as 0).
+/// 0, its digits past 32 bits (PDFium's chromium/7881, 8076 and 8125 hold
+/// such a property list's `/MCID`, and such an element of a dash array,
+/// as 0).
 #[test]
 fn a_long_word_of_digits_and_signs_reads_as_pdfium_reads_it() {
     let lim = &Limits::DEFAULT;
@@ -317,13 +318,13 @@ fn a_number_is_one_word() {
 }
 
 /// An operand's number as PDFium's content parser reads it (`GetNumber`),
-/// an `f32`: a number word as `FX_Number` holds it, by its first 255
-/// bytes, and 0 for what's no number. The words and values a reader of
-/// content by PDFium's rules is held to; and as PDFium 7881 and 8076 read
-/// `cm`'s last operand (one-page files, 2026-10-30): 0 for `true`,
+/// an `f32`: a number word as `FX_Number` holds it, by its first 255 bytes,
+/// and 0 for what's no number. The words and values a reader of content by
+/// PDFium's rules is held to; and as PDFium's chromium/7881, 8076 and 8125
+/// read `cm`'s last operand (one-page files, 2026-10-30): 0 for `true`,
 /// `false`, `null`, a name, a string or an array, a word of 255 bytes read
-/// whole and one of 256 by its first 255, so a real cut before its point
-/// is an integer. An array's elements read alike, a `TJ`'s.
+/// whole and one of 256 by its first 255, so a real cut before its point is
+/// an integer. An array's elements read alike, a `TJ`'s.
 #[test]
 fn an_operands_number_is_read_as_pdfium_reads_it() {
     let number = |word: &[u8]| {
@@ -375,12 +376,12 @@ fn an_operands_number_is_read_as_pdfium_reads_it() {
 /// A name as PDFium's content parser reads it: a `#` with two bytes after
 /// it stands for the byte they make, one that's no hex digit read as 0,
 /// and with fewer it's itself; and a name longer than 255 bytes, its `/`
-/// among them, is its first 255. As PDFium 7881 and 8076 find `Tf`'s font
-/// (one-page files, 2026-10-30): `F0` for `/F#30`, `/F#3G`, `/F#3g` and
-/// `/#460`, none for `/F#G0`, `/F#3`, `/F0#`, `/F0#2`, `/F#300` and
-/// `/#F#30`; and a font named by 254 bytes for those and any more. The
-/// resource an operation names is read so, and a name in an array or a
-/// dictionary.
+/// among them, is its first 255. As PDFium's chromium/7881, 8076 and 8125
+/// find `Tf`'s font (one-page files, 2026-10-30): `F0` for `/F#30`,
+/// `/F#3G`, `/F#3g` and `/#460`, none for `/F#G0`, `/F#3`, `/F0#`,
+/// `/F0#2`, `/F#300` and `/#F#30`; and a font named by 254 bytes for those
+/// and any more. The resource an operation names is read so, and a name in
+/// an array or a dictionary.
 #[test]
 fn a_name_is_read_as_pdfium_reads_it() {
     for (written, read) in [
@@ -416,13 +417,14 @@ fn a_name_is_read_as_pdfium_reads_it() {
     assert_eq!(read, Some(Object::from(dict! { "F0" => g0 })));
 }
 
-/// A string as PDFium's content parser reads it: a literal string's CR or
-/// CR LF written in it as written, where ISO 32000-2 reads LF, every escape
-/// as ISO reads it; and a literal's or a hex string's first 32,767 bytes,
-/// read. As PDFium 7881 and 8076 show `Tj`'s and `TJ`'s text (one-page
-/// files, 2026-10-30): `(a\rb\r\nc)` those bytes, `[(a\rb) -250 (c)]` `a\rb`
-/// and `c`, and 32,767 bytes of a string of 32,768 read, 32,768 `\101`
-/// escapes or 32,768 pairs of hex digits and one more digit among them.
+/// A string as PDFium's content parser reads it: a literal string's CR or CR
+/// LF written in it as written, where ISO 32000-2 reads LF, every escape as
+/// ISO reads it; and a literal's or a hex string's first 32,767 bytes, read.
+/// As PDFium's chromium/7881, 8076 and 8125 show `Tj`'s and `TJ`'s text
+/// (one-page files, 2026-10-30): `(a\rb\r\nc)` those bytes, `[(a\rb) -250
+/// (c)]` `a\rb` and `c`, and 32,767 bytes of a string of 32,768 read, 32,768
+/// `\101` escapes or 32,768 pairs of hex digits and one more digit among
+/// them.
 #[test]
 fn a_string_is_read_as_pdfium_reads_it() {
     use Form::{Hex, Literal};
@@ -470,11 +472,12 @@ fn a_string_is_read_as_pdfium_reads_it() {
 /// An inline image's `/W`, `/H` and `/BPC` as PDFium reads an integer from
 /// each, held in 32 bits, and the size they count; an image whose size
 /// can't be counted, filtered or not, read on to `EI` from its data's
-/// start; and its color space's name as PDFium decodes it. As PDFium 8076
-/// reads each (one-page files, 2026-10-30; 7881 alike but where a row is
-/// 2^32 − 7 bits or more, below): the data, or the operations after it.
-/// Where PDFium counts no data, or reads none, the data here runs on to
-/// `EI`, as for any image no size counts.
+/// start; and its color space's name as PDFium decodes it. As PDFium's
+/// chromium/8076 and 8125 read each (one-page files, 2026-10-30;
+/// chromium/7881 alike but where a row is 2^32 − 7 bits or more, below):
+/// the data, or the operations after it. Where PDFium counts no data, or
+/// reads none, the data here runs on to `EI`, as for any image no size
+/// counts.
 #[test]
 fn an_inline_images_numbers_are_read_as_pdfium_reads_them() {
     let res = ResCx::new([(b"CP".to_vec(), 3)]);
@@ -548,8 +551,8 @@ fn an_inline_images_numbers_are_read_as_pdfium_reads_them() {
     // A size that takes the rest of the content: PDFium reads nothing
     // after it, and here the image doesn't end. A width past `i32` by a
     // real is its largest, at one bit a pixel; a height of -1 is 2^32 − 1
-    // rows; a row of 2^32 − 1 bits is 2^29 bytes (7881 overflows adding 7
-    // first, and reads on to `EI`).
+    // rows; a row of 2^32 − 1 bits is 2^29 bytes (chromium/7881 overflows
+    // adding 7 first, and reads on to `EI`).
     for dict in [
         "/W 5000000000.0 /H 1 /BPC 1 /CS /G",
         "/IM true /W 5000000000.0 /H 1",
@@ -587,6 +590,67 @@ fn an_inline_images_numbers_are_read_as_pdfium_reads_them() {
         assert_eq!(found, Some(data.as_bytes()), "{content}");
         let paths = read.iter().filter(|op| op.name() == b"S").count();
         assert_eq!(paths, if data.len() == 2 { 2 } else { 1 }, "{content}");
+    }
+}
+
+/// What PDFium makes of an image's data ([`InlineImage::stream`]): a stream
+/// of the bytes its size counts, unfiltered, the tokens before `EI` left
+/// out; of its data to its filter's end and on over the tokens before
+/// `EI`, filtered, the white-space before `EI` left out; of no bytes,
+/// unfiltered, its size 0 (no `/W` among them); and none where its data's
+/// end isn't found or its size can't be counted, as PDFium draws no image
+/// (each as the image or none in PDFium's page objects for the same bytes,
+/// `tests/pdfium`). Where PDFium decodes the data to find its end, the
+/// end the crate takes stands in.
+#[test]
+fn an_inline_images_stream_is_what_pdfium_keeps() {
+    let res = ResCx::none();
+    let some = |s: &[u8], kept: &[u8]| {
+        let start = s.windows(3).position(|w| w == b"ID ").unwrap() + 3;
+        ImageStream::Data(start..start + kept.len())
+    };
+    let g = b"BI /W 1 /H 1 /BPC 8 /CS /G";
+    let cases: Vec<(Vec<u8>, Option<&[u8]>)> = vec![
+        ([&g[..], b" ID x zz EI"].concat(), Some(b"x")),
+        ([&g[..], b" ID x   EI"].concat(), Some(b"x")),
+        (
+            [&g[..], b" /F /AHx ID 41> zz 7 EI"].concat(),
+            Some(b"41> zz 7"),
+        ),
+        ([&g[..], b" /F /AHx ID 41>   EI"].concat(), Some(b"41>")),
+        (
+            [&g[..], b" /F /A85 ID 9jqo^~> EI"].concat(),
+            Some(b"9jqo^~>"),
+        ),
+        (
+            [&g[..], b" /F /RL ID \x01ab\x80 7 EI"].concat(),
+            Some(b"\x01ab\x80 7"),
+        ),
+        (
+            [&g[..], b" /F /DCT ID \xff\xd8\xff\xd9 7 EI"].concat(),
+            Some(b"\xff\xd8\xff\xd9 7"),
+        ),
+        ([&g[..], b" /F /Fl ID xyz EI"].concat(), Some(b"xyz")),
+        ([&g[..], b" /F [] ID x zz EI"].concat(), Some(b"x")),
+        (b"BI /W 0 /H 1 /BPC 8 /CS /G ID xy EI".to_vec(), Some(b"")),
+        (b"BI /H 1 /BPC 8 /CS /G ID xy EI".to_vec(), Some(b"")),
+        ([&g[..], b" /F /XYZ ID xy EI"].concat(), None),
+        ([&g[..], b" /F /AHx ID 0E EI"].concat(), None),
+        (b"BI /W -1 /H 1 /BPC 8 /CS /G ID xy EI".to_vec(), None),
+        (
+            b"BI /W -1 /H 1 /BPC 8 /CS /G /F /AHx ID 41> EI".to_vec(),
+            None,
+        ),
+    ];
+    for (s, kept) in &cases {
+        let read = operations_of(s, &res, &Limits::DEFAULT);
+        let image = read[0].as_ref().unwrap().inline_image().unwrap();
+        let want = match kept {
+            Some(b"") => ImageStream::Empty,
+            Some(kept) => some(s, kept),
+            None => ImageStream::Missing,
+        };
+        assert_eq!(image.stream(), want, "{:?}", String::from_utf8_lossy(s));
     }
 }
 
@@ -994,26 +1058,27 @@ fn an_image_ends_at_the_next_ei_past_its_data() {
     assert_eq!(image(s, &ResCx::none()).1, b"x");
     // An object where a key should be ends the dictionary, as PDFium ends
     // it, the data read from after it: here none counted, so on to the
-    // next `EI` (PDFium 7881 and 8076 alike: `BI 7 /W 1 /H 1 /BPC 8 /CS
-    // /G ID (x EI 0 0 m 9 9 l S) EI 5 5 m 7 7 l S` an image of no data,
-    // then one path).
+    // next `EI` (PDFium's chromium/7881, 8076 and 8125 alike: `BI 7 /W 1
+    // /H 1 /BPC 8 /CS /G ID (x EI 0 0 m 9 9 l S) EI 5 5 m 7 7 l S` an
+    // image of no data, then one path).
     let s = b"BI 7 /W 1 /H 1 /BPC 8 /CS /G ID x EI";
     assert_eq!(image(s, &ResCx::none()).1, b"/W 1 /H 1 /BPC 8 /CS /G ID x");
 }
 
 /// An inline image's dictionary as PDFium's `Handle_BeginImage` reads it
-/// (PDFium 7881 and 8076 alike, each case's page objects): a name and its
-/// value, and so on, until what's where a key should be isn't a name.
-/// `ID` ends it. Any other object ends it too, the data read from after
-/// it as from after `ID`, sized by the entries before it. A keyword other
-/// than `ID` makes the `BI` no image but an operation of its own, and
-/// what's after it content, the dictionary's tokens among it. A value
-/// PDFium reads as no object (a keyword, `ID` among them, a closer or a
-/// brace) takes its key out. Each case's image's data, where there's an
-/// image, and the operations read, which draw the paths PDFium's page
-/// objects show (an `S` each). Where PDFium's image has no data, none
-/// counted, the data here is read on to the next `EI`, as for an image no
-/// size counts; and PDFium makes no image of a filter it can't decode.
+/// (PDFium's chromium/7881, 8076 and 8125 alike, each case's page
+/// objects): a name and its value, and so on, until what's where a key
+/// should be isn't a name. `ID` ends it. Any other object ends it too, the
+/// data read from after it as from after `ID`, sized by the entries before
+/// it. A keyword other than `ID` makes the `BI` no image but an operation
+/// of its own, and what's after it content, the dictionary's tokens among
+/// it. A value PDFium reads as no object (a keyword, `ID` among them, a
+/// closer or a brace) takes its key out. Each case's image's data, where
+/// there's an image, and the operations read, which draw the paths
+/// PDFium's page objects show (an `S` each). Where PDFium's image has no
+/// data, none counted, the data here is read on to the next `EI`, as for
+/// an image no size counts; and PDFium makes no image of a filter it can't
+/// decode.
 #[test]
 fn an_inline_images_dictionary_ends_as_pdfium_reads_it() {
     let p = " 5 5 m 7 7 l S";
@@ -1205,14 +1270,14 @@ fn an_inline_images_dictionary_ends_as_pdfium_reads_it() {
     }
 }
 
-/// A `BI` that begins no inline image is an operation of its own, with
-/// the operands before it, as PDFium clears them after it (`10 20 30 40
-/// BI re f`, PDFium 7881 and 8076 alike, fills a rectangle at 0 0 of no
-/// size); its dictionary's tokens are content, operands of the keyword
-/// that ends it (`BT BI /F1 24 Tf ... (Hi) Tj ET` shows its text at 24
-/// points). An image whose dictionary an object ends has a dictionary to
-/// that object, and the entries before it; a key whose value PDFium reads
-/// as no object has none.
+/// A `BI` that begins no inline image is an operation of its own, with the
+/// operands before it, as PDFium clears them after it (`10 20 30 40 BI re
+/// f`, PDFium's chromium/7881, 8076 and 8125 alike, fills a rectangle at 0
+/// 0 of no size); its dictionary's tokens are content, operands of the
+/// keyword that ends it (`BT BI /F1 24 Tf ... (Hi) Tj ET` shows its text
+/// at 24 points). An image whose dictionary an object ends has a
+/// dictionary to that object, and the entries before it; a key whose value
+/// PDFium reads as no object has none.
 #[test]
 fn a_lone_bi_is_an_operation_and_an_ended_dictionary_ends_there() {
     let res = ResCx::none();
@@ -1440,13 +1505,13 @@ fn an_inline_images_dictionary_as_iso_reads_it_ends_at_its_first_id() {
 }
 
 /// PDFium reads 0x80 and 0xFF as white-space, beside ISO 32000-2's six
-/// bytes, in content as everywhere (PDFium 7881 and 8076 alike: `1 2 3
-/// 4<80>re f` fills the rectangle, `/F0<80>10 Tf` sets the font `F0`, and
-/// either after `ID` is the one white-space byte before an inline image's
-/// data): a word or a name ends at either, and it's passed over between
-/// tokens, in an array, and after `ID` or before `EI`; in a string or a
-/// comment it's a byte like any other. To ISO 32000-2 they're regular
-/// (7.2.3), so `ID` with one after it has no white-space there.
+/// bytes, in content as everywhere (PDFium's chromium/7881, 8076 and 8125
+/// alike: `1 2 3 4<80>re f` fills the rectangle, `/F0<80>10 Tf` sets the
+/// font `F0`, and either after `ID` is the one white-space byte before an
+/// inline image's data): a word or a name ends at either, and it's passed
+/// over between tokens, in an array, and after `ID` or before `EI`; in a
+/// string or a comment it's a byte like any other. To ISO 32000-2 they're
+/// regular (7.2.3), so `ID` with one after it has no white-space there.
 #[test]
 fn pdfiums_white_space_has_0x80_and_0xff() {
     use Tok::{Op, Operand};
