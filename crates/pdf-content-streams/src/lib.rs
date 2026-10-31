@@ -74,6 +74,11 @@
 //!   resources the content draws with named only when it's finished, by
 //!   their digest, clear of the names the resources dictionary it goes
 //!   with binds to something else ([`Reserved`]).
+//! - **Splicing** ([`splice`]): a page's streams with ranges taken out,
+//!   every other byte as it was, only where that can't change what's drawn
+//!   after them, judged by the reading the caller names; as many of several
+//!   as can be ([`splice_each`]); and a marked range's property list
+//!   written again without some of its keys ([`without_keys`]).
 //!
 //! No resolver: what's read from the file, the streams decoded, the color
 //! spaces' components and the property lists, the caller gives; and the
@@ -116,6 +121,7 @@ mod operator;
 mod page;
 mod res;
 mod scan;
+mod splice;
 mod state;
 mod tokens;
 mod write;
@@ -136,6 +142,7 @@ pub use operations::{Operation, Operations, operations};
 pub use operator::{Category, FillRule, Operands, Operator, Operators, Paint, Type};
 pub use page::{Concat, Join, Pos, Pushed, SpanAcross, TooLarge};
 pub use res::{Res, ResBody, ResId};
+pub use splice::{Rewrite, SpliceError, Spliced, splice, splice_each, without_keys};
 pub use state::State;
 pub use tokens::{Tok, Tokens, tokens};
 pub use write::{
