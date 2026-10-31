@@ -640,6 +640,91 @@ fn a_placed_stream_is_told_by_its_reference_alone() {
     }
 }
 
+/// What the names a resources dictionary binds end at is read and
+/// digested once, however many names bind it, so a dictionary of many
+/// names binding one large object costs what it holds; and only the
+/// writer's names are read for what they bind.
+#[test]
+fn each_object_names_bind_is_read_once() {
+    use std::cell::Cell;
+    let sh = |i: u32| {
+        let mut name = b"Sh".to_vec();
+        name.extend((0..6).rev().map(|k| BASE32[(i >> (5 * k)) as usize & 31]));
+        name
+    };
+    let big = Object::from((0..10_000).map(Object::from).collect::<Vec<_>>());
+    let mut objects = BTreeMap::from([((5, 0), big)]);
+    let mut names = Dict::new();
+    for i in 0..200u32 {
+        // Half bound straight to object 5, half through one of their own.
+        let to = match i % 2 {
+            0 => 5,
+            _ => {
+                objects.insert((100 + i, 0), Object::reference(5));
+                100 + i
+            }
+        };
+        names.push(sh(i), Object::reference(to));
+        names.push(format!("F{i}").as_bytes(), Object::reference(to));
+    }
+    let resources = Object::from(dict! { "XObject" => names });
+    let five = Cell::new(0);
+    let resolve = |id: ObjectId| {
+        five.set(five.get() + usize::from(id == (5, 0)));
+        objects.get(&id)
+    };
+    let kept = Reserved::read(&resolve, Some(&resources));
+    assert_eq!(five.get(), 1, "object 5 read once");
+    assert_eq!(kept.names().count(), 400);
+    // A name of the writer's binding the very resource, through a
+    // reference of its own, is used again.
+    let mut w = ContentWriter::new();
+    w.draw(Res::of([objects[&(5, 0)].clone()]));
+    let (_, needs) = w.named(&Reserved::default());
+    let mut bound = Dict::new();
+    bound.push(&needs.0[0].name, Object::reference(101));
+    let resources = Object::from(dict! { "XObject" => bound });
+    let (_, again) = w.named(&reserved(&objects, &resources));
+    assert_eq!(again.0[0].name, needs.0[0].name);
+}
+
+/// A resolver kept in a binding reads resources dictionaries made one
+/// after another, each borrowed for its call alone.
+#[test]
+fn a_resolver_reads_resources_made_after_it() {
+    let objects = BTreeMap::from([((1, 0), Object::from(list("Header")))]);
+    let resolve = |id: ObjectId| objects.get(&id);
+    let mut read = 0;
+    for name in ["ShAAAAAA", "ShAAAAAB"] {
+        let resources = Object::from(dict! {
+            "Properties" => dict! { name => Object::reference(1) },
+        });
+        read += Reserved::read(&resolve, Some(&resources)).names().count();
+    }
+    assert_eq!(read, 2);
+}
+
+/// One resource drawn in two categories is a need in each, each named in
+/// its own.
+#[test]
+fn a_resource_in_two_categories_is_a_need_in_each() {
+    let form = Res::written((7, 0));
+    let mut w = ContentWriter::new();
+    w.draw(form.clone());
+    w.begin_text();
+    w.font(form.clone(), 12.0);
+    w.end_text();
+    w.draw(form.clone());
+    let (text, needs) = written(w);
+    let kinds: Vec<_> = needs.0.iter().map(|n| (n.kind, &n.res)).collect();
+    assert_eq!(kinds, [(ResKind::XObject, &form), (ResKind::Font, &form)]);
+    let name = |i: usize| String::from_utf8_lossy(&needs.0[i].name).into_owned();
+    assert_eq!(
+        text,
+        format!("/{0} Do\nBT\n/{1} 12 Tf\nET\n/{0} Do\n", name(0), name(1))
+    );
+}
+
 /// Two resources whose digests start with the same 30 bits are named
 /// apart in one content, the second drawn the next name up.
 #[test]

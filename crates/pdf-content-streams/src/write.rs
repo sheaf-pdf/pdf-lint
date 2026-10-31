@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 
-use pdf_objects::{Data, Dict, Object, Resolve, Value, dict, serialize};
+use pdf_objects::{Data, Dict, Object, ObjectId, Resolve, Value, dict, serialize};
 
 use crate::names::ResKind;
 use crate::operator::{FillRule, Paint};
@@ -204,7 +204,7 @@ impl TextMode {
 
 /// The resources content draws with, each named: what the resources
 /// dictionary it goes with must bind. In the order the content first
-/// draws with them, one entry a resource.
+/// draws with them, one entry a resource in each category it's drawn in.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResourceNeeds(pub Vec<Need>);
 
@@ -222,9 +222,9 @@ pub struct Need {
 /// The names a resources dictionary already binds, which
 /// [`ContentWriter::finish`] keeps clear of: each with what it binds, as
 /// far as that can be told by what it is (an object that reaches no other
-/// and holds each stream's data in memory) or by number (a reference). A name bound to the very resource
-/// being named is used again, not bumped, so content written again for
-/// the same resources gets the same names.
+/// and holds each stream's data in memory) or by number (a reference). A
+/// name bound to the very resource being named is used again, not bumped,
+/// so content written again for the same resources gets the same names.
 #[derive(Debug, Clone, Default)]
 pub struct Reserved {
     names: BTreeMap<(ResKind, Vec<u8>), Vec<ResId>>,
@@ -241,16 +241,22 @@ impl Reserved {
     /// references, up to eight in a row; a stream is read as its
     /// dictionary, as pdf-objects reads one.
     ///
-    /// A name bound by reference binds that object, as one written already
+    /// What a name binds matters only where it's one the writer gives, `Sh`
+    /// and six base32 characters, which it may use again: every other name
+    /// is kept clear of, whatever it binds. One of the writer's bound by
+    /// reference binds that object, as one written already
     /// ([`Res::written`]); and, where what the name binds, followed so,
     /// refers to no other object and holds each stream's data in memory, it
     /// binds a resource of that object ([`Res::of`]) too, told by its digest.
     /// One that holds a stream's data where a reader found it, or none, is
     /// told by its reference alone: a place tells apart the streams of one
     /// reading, not of two ([`ResId`]), so a page's image is never taken
-    /// for another file's at the same place.
-    pub fn read<'o>(objects: &impl Resolve<'o>, resources: Option<&'o Object>) -> Reserved {
+    /// for another file's at the same place. What the references a name
+    /// follows end at is read and digested once, however many names bind
+    /// it, so it costs what the dictionary and what it binds hold.
+    pub fn read<'r, 'o: 'r>(objects: &impl Resolve<'o>, resources: Option<&'r Object>) -> Reserved {
         let mut names = BTreeMap::new();
+        let mut told = BTreeMap::new();
         let resources = resources
             .and_then(|r| direct(objects, r))
             .and_then(Object::as_dict);
@@ -263,11 +269,11 @@ impl Reserved {
             };
             for (name, bound) in category.iter() {
                 let mut ids = Vec::new();
-                if let Value::Ref(id) = bound.value() {
-                    ids.push(Res::written(*id).id);
-                }
-                if let Some(resolved) = direct(objects, bound).filter(|o| told_by_content(o)) {
-                    ids.push(ResId::of(std::slice::from_ref(resolved)));
+                if writers(name) {
+                    if let Value::Ref(id) = bound.value() {
+                        ids.push(Res::written(*id).id);
+                    }
+                    ids.extend(by_content(objects, bound, &mut told));
                 }
                 names.insert((kind, name.to_vec()), ids);
             }
@@ -308,10 +314,46 @@ impl Reserved {
     }
 }
 
+/// Whether `name` is one [`ContentWriter`] gives: `Sh` and six base32
+/// characters.
+fn writers(name: &[u8]) -> bool {
+    name.len() == 8 && name.starts_with(b"Sh") && name[2..].iter().all(|c| BASE32.contains(c))
+}
+
+/// The digest of what `bound` binds, followed as [`direct`] follows it,
+/// where it's told by what it is ([`told_by_content`]); each object the
+/// references end at read and digested once, kept in `told`.
+fn by_content<'r, 'o: 'r>(
+    objects: &impl Resolve<'o>,
+    bound: &'r Object,
+    told: &mut BTreeMap<ObjectId, Option<ResId>>,
+) -> Option<ResId> {
+    let mut object = bound;
+    let mut last = None;
+    for _ in 0..HOPS {
+        let Value::Ref(id) = object.value() else {
+            break;
+        };
+        if let Some(&known) = told.get(id) {
+            return known;
+        }
+        object = objects.resolve(*id)?;
+        last = Some(*id);
+    }
+    if matches!(object.value(), Value::Ref(_)) {
+        return None;
+    }
+    let id = told_by_content(object).then(|| ResId::of(std::slice::from_ref(object)));
+    if let Some(last) = last {
+        told.insert(last, id);
+    }
+    id
+}
+
 /// `object`, or what the references from it lead to, followed through
 /// `objects`, at most [`HOPS`] in a row; none for a reference to no
 /// object, or past that.
-fn direct<'o>(objects: &impl Resolve<'o>, mut object: &'o Object) -> Option<&'o Object> {
+fn direct<'r, 'o: 'r>(objects: &impl Resolve<'o>, mut object: &'r Object) -> Option<&'r Object> {
     for _ in 0..HOPS {
         match object.value() {
             Value::Ref(id) => object = objects.resolve(*id)?,
@@ -357,13 +399,13 @@ fn told_by_content(object: &Object) -> bool {
 ///   delimiter or a byte outside `!` to `~` (7.3.5), 0x80 and 0xFF among
 ///   them, which PDFium reads as white-space.
 /// - **Resources named at the end** (7.8.3): each resource drawn is one
-///   need ([`ResourceNeeds`]), in the order first drawn, however often it's
-///   drawn. Its name is `Sh` and six base32 characters of the top 30 bits
-///   of its digest ([`ResId`]), counted up past a name the resources
-///   dictionary binds to another resource, or one this content named
-///   another with already. A name it binds to the very resource is used
-///   again, so content written again for the same resources gets the
-///   same names.
+///   need ([`ResourceNeeds`]) in each category it's drawn in, in the order
+///   first drawn, however often it's drawn. Its name is `Sh` and six
+///   base32 characters of the top 30 bits of its digest ([`ResId`]),
+///   counted up past a name the resources dictionary binds to another
+///   resource, or one this content named another with already. A name it
+///   binds to the very resource is used again, so content written again
+///   for the same resources gets the same names.
 ///
 /// It refuses nothing: what PDFium would read otherwise is the caller's
 /// to keep from it, a name past 255 bytes, its `/` among them, of which
@@ -701,9 +743,11 @@ impl ContentWriter {
         self.out.push(b'\n');
     }
 
-    /// `/` and the place `res`'s name goes, once it has one.
+    /// `/` and the place `res`'s name goes, once it has one: one need for
+    /// a resource in each category it's drawn in.
     fn name(&mut self, kind: ResKind, res: Res) {
-        let need = match self.needs.iter().position(|(_, r)| r.id == res.id) {
+        let drawn = |(k, r): &(ResKind, Res)| *k == kind && r.id == res.id;
+        let need = match self.needs.iter().position(drawn) {
             Some(i) => i,
             None => {
                 self.needs.push((kind, res));
@@ -730,6 +774,9 @@ fn paint_op(paint: Paint) -> &'static str {
     }
 }
 
+/// The characters of the names [`fresh`] gives after `Sh`.
+const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
 /// A name for `id` in `kind`: `Sh` and six base32 characters, its
 /// digest's first thirty bits, counted up past any name `reserved` keeps
 /// for something else or this content has given already.
@@ -739,12 +786,11 @@ fn fresh(
     reserved: &Reserved,
     taken: &BTreeSet<(ResKind, Vec<u8>)>,
 ) -> Vec<u8> {
-    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     const BITS: u32 = 30;
     let mut n = (id.0 >> (128 - BITS)) as u32;
     loop {
         let mut name = b"Sh".to_vec();
-        name.extend((0..6).rev().map(|i| ALPHABET[(n >> (5 * i)) as usize & 31]));
+        name.extend((0..6).rev().map(|i| BASE32[(n >> (5 * i)) as usize & 31]));
         if !taken.contains(&(kind, name.clone())) && reserved.allows(kind, &name, id) {
             return name;
         }

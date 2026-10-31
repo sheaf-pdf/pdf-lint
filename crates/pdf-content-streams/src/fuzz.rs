@@ -651,10 +651,11 @@ enum Arg {
 /// tags from the input; written, and read back: each call's operator and
 /// operands, each number within its rounding (and, a whole number outside
 /// the signed 32-bit range, as itself), each name and string as given,
-/// each resource's name its need's in its category. The needs are
-/// one a resource, in the order first drawn; named again with their names
-/// taken, the same; and with their names bound to something else, each
-/// bumped, the content naming the same needs in the same places.
+/// each resource's name its need's in its category. The needs are one a
+/// resource in each category it's drawn in, in the order first drawn;
+/// named again with their names taken, the same; and with their names
+/// bound to something else, each bumped, the content naming the same
+/// needs in the same places.
 pub fn calls(data: &[u8]) {
     let mut input = Choices(data);
     let fonts = ["Helvetica", "Courier", "Wide"].map(|base| {
@@ -805,7 +806,12 @@ pub fn calls(data: &[u8]) {
                 want.push((b"ET", vec![]));
             }
             19 => {
-                let font = fonts[input.below(fonts.len())].clone();
+                // A font already written, as object 1, is drawn as a form
+                // too: a resource in two categories.
+                let font = match input.below(fonts.len() + 1) {
+                    i if i < fonts.len() => fonts[i].clone(),
+                    _ => Res::written((1, 0)),
+                };
                 let size = input.number();
                 want.push((
                     b"Tf",
@@ -890,11 +896,11 @@ pub fn calls(data: &[u8]) {
 
     let (content, needs) = w.named(&Reserved::default());
     let shown = String::from_utf8_lossy(&content);
-    // One need a resource, in the order first drawn.
+    // One need a resource in each category, in the order first drawn.
     let mut drawn: Vec<(ResKind, ResId)> = Vec::new();
     for arg in want.iter().flat_map(|(_, args)| args) {
         if let Arg::Res(kind, id) = arg {
-            if !drawn.iter().any(|(_, d)| d == id) {
+            if !drawn.contains(&(*kind, *id)) {
                 drawn.push((*kind, *id));
             }
         }
@@ -912,7 +918,8 @@ pub fn calls(data: &[u8]) {
     let read: Result<Vec<_>, _> = operations(&content, &ResCx::none(), &LIMITS).collect();
     let read = read.unwrap_or_else(|e| panic!("{e} in {shown}"));
     assert_eq!(read.len(), want.len(), "an operation a call: {shown}");
-    let need_of = |name: &[u8]| needs.0.iter().position(|n| n.name == name);
+    let need_of =
+        |kind, name: &[u8]| (needs.0.iter()).position(|n| (n.kind, &n.name[..]) == (kind, name));
     let mut named_at = Vec::new();
     for (op, (name, args)) in read.iter().zip(&want) {
         assert_eq!(op.name(), *name, "{shown}");
@@ -942,7 +949,7 @@ pub fn calls(data: &[u8]) {
                 }
                 Arg::Res(kind, id) => {
                     let name = operand.name().expect("a resource's name");
-                    let need = need_of(&name).expect("a need's name");
+                    let need = need_of(*kind, &name).expect("a need's name");
                     assert_eq!((needs.0[need].kind, needs.0[need].res.id), (*kind, *id));
                     assert_eq!(op.resource(), Some((*kind, name.clone())));
                     named_at.push(need);
