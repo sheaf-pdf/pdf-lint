@@ -9,7 +9,7 @@ use std::ops::Range;
 
 use pdf_objects::{Dict, Form, Object, Str, Value};
 use pdf_tokenizer::Kind;
-use pdf_tokenizer::decode::{self, NumberError, pdfium};
+use pdf_tokenizer::decode::pdfium::{self, Number};
 
 use crate::fault::{self, Fault, Read, Sink};
 use crate::limits::Limits;
@@ -80,19 +80,19 @@ impl<'a> Operand<'a> {
     /// The number it is, as PDFium's content parser reads an operand
     /// (`GetNumber`): a number word ([`is_number`](Operand::is_number)) by
     /// its first 255 bytes, the most of a word that parser keeps, read by
-    /// pdf-tokenizer's [`decode::pdfium::number`] as an `f32`; and 0 for
-    /// what isn't one, a name, a string, `true` or an array among it. So
-    /// `--5` is 0, `1.2.3` 1.2, `4294967296` 0 (a word without a sign past
-    /// 32 bits), `+2147483648` 0 (one with a sign past `i32`) and a real
-    /// past an `f32`'s range infinite, where ISO 32000-2 (7.3.3) reads
+    /// pdf-tokenizer's [`decode::pdfium::number`](pdfium::number) as an
+    /// `f32`; and 0 for what isn't one, a name, a string, `true` or an array
+    /// among it. So `--5` is 0, `1.2.3` 1.2, `4294967296` 0 (a word without a
+    /// sign past 32 bits), `+2147483648` 0 (one with a sign past `i32`) and a
+    /// real past an `f32`'s range infinite, where ISO 32000-2 (7.3.3) reads
     /// `--5` and `1.2.3` as no number and the others as written
-    /// ([`Fault::Number`], [`Fault::OutOfRange`]). An operator that takes
-    /// an integer, such as `Tr`, `J` or `j`, reads PDFium's as this cut to
-    /// its whole part, where that's in `i32`'s range. An array's elements
-    /// read alike ([`elements`](Operand::elements)): a `TJ`'s, a `d`'s.
+    /// ([`Fault::Number`], [`Fault::OutOfRange`]). An operator that takes an
+    /// integer, such as `Tr`, `J` or `j`, reads PDFium's as this cut to its
+    /// whole part, where that's in `i32`'s range. An array's elements read
+    /// alike ([`elements`](Operand::elements)): a `TJ`'s, a `d`'s.
     ///
-    /// [`object`](Operand::object) reads a number otherwise, as
-    /// pdf-objects does, at 64 bits.
+    /// [`object`](Operand::object) reads the same number, held as
+    /// pdf-objects holds one, at 64 bits.
     ///
     /// ```
     /// use pdf_content_streams::{Limits, ResCx, operations};
@@ -193,8 +193,9 @@ impl<'a> Operand<'a> {
     }
 
     /// Whether it's a number as PDFium tells one: a word of digits, signs
-    /// and points only. It may still read as none ([`object`]), as `--5`
-    /// does.
+    /// and points only. It may be none as ISO 32000-2 writes a number, as
+    /// `--5` isn't, which PDFium reads as 0 ([`number`](Operand::number),
+    /// [`object`]).
     pub fn is_number(&self) -> bool {
         !self.bytes.is_empty() && is_number(self.bytes)
     }
@@ -321,26 +322,32 @@ pub(crate) fn iso_name(operand: &[u8]) -> Option<Cow<'_, [u8]>> {
     Some(Cow::Owned(out))
 }
 
-/// An operand as a PDF object: a name's escapes decoded and a string's
-/// escapes or hex digits read as PDFium's content parser reads them
-/// ([`name`]; a literal string's unescaped CR or CR LF as written, where
-/// ISO 32000-2 reads LF, and a string's first 32,767 bytes read, the most
-/// that parser keeps), and an array's or a dictionary's elements each read
-/// so. A number is read as ISO 32000-2 writes one (7.3.3), as
-/// pdf-objects reads it, at 64 bits: [`Operand::number`] reads one as
-/// PDFium does. A number past what 64 bits hold reads as pdf-objects
-/// reads one: an integer as the nearest that fits, a real as the largest
-/// finite float of its sign. None for what isn't an object, such as a
-/// stray closing delimiter or a word of signs, and for one that doesn't
-/// end, nests deeper than [`Limits::depth`] or holds more values than
-/// [`Limits::values`]. A dictionary keeps every entry, a key written
-/// twice too, as pdf-objects' [`Dict`] does, so a lookup takes its last;
-/// an entry whose key isn't a name is passed over. A string keeps its
-/// [`Form`]. Nothing read has a place ([`Object::at`] is none): an
-/// operand's place is in the content, where its token's range is. It's
-/// read in one pass, so a deep operand costs what a flat one of its size
-/// does, but it nests on the stack a level for each array or dictionary
-/// ([`Limits::depth`] says what that takes).
+/// An operand as a PDF object, read as PDFium's content parser reads it: a
+/// number word as [`Operand::number`] reads it, by its first 255 bytes,
+/// held as pdf-objects holds a number it reads by PDFium's rules, at 64
+/// bits (the integer PDFium holds, in 32 bits, unsigned without a sign and
+/// signed with one, 0 past them; or, with a point, the real, the decimal it
+/// starts with); a name's escapes decoded and a string's escapes or hex
+/// digits read ([`name`]; a literal string's unescaped CR or CR LF as
+/// written, where ISO 32000-2 reads LF, and a string's first 32,767 bytes
+/// read, the most that parser keeps); and an array's or a dictionary's
+/// elements each read so. So `--5` is the integer 0, `1.2.3` the real 1.2
+/// and `4294967296` the integer 0, where ISO 32000-2 (7.3.3) reads the
+/// first two as no number and the last as written: where ISO reads what's
+/// inside an operand otherwise, [`Operand::object_with`] tells it, and a
+/// reader that wants ISO's reading reads an operand's bytes
+/// ([`Operand::bytes`]) with pdf-objects' `Parser`, by ISO's rules. None
+/// for what isn't an object, such as a stray closing delimiter or a word
+/// that's no number, and for one that doesn't end, nests deeper than
+/// [`Limits::depth`] or holds more values than [`Limits::values`]. A
+/// dictionary keeps every entry, a key written twice too, as pdf-objects'
+/// [`Dict`] does, so a lookup takes its last; an entry whose key isn't a
+/// name is passed over. A string keeps its [`Form`]. Nothing read has a
+/// place ([`Object::at`] is none): an operand's place is in the content,
+/// where its token's range is. It's read in one pass, so a deep operand
+/// costs what a flat one of its size does, but it nests on the stack a
+/// level for each array or dictionary ([`Limits::depth`] says what that
+/// takes).
 ///
 /// It reads any operand's bytes, such as a token's
 /// ([`Tok::Operand`](crate::Tok::Operand)), which has no [`Operand`] to
@@ -354,9 +361,10 @@ pub(crate) fn iso_name(operand: &[u8]) -> Option<Cow<'_, [u8]>> {
 /// let read = object(b"<</MCID 3 /Lang (en)>>", &limits).unwrap();
 /// let mcid = read.as_dict().and_then(|d| d.get(b"MCID"));
 /// assert_eq!(mcid.and_then(Object::as_integer), Some(3));
-/// assert_eq!(object(b"--5", &limits), None);
-/// let big = object(b"99999999999999999999", &limits);
-/// assert_eq!(big.as_ref().and_then(Object::as_integer), Some(i64::MAX));
+/// assert_eq!(object(b"--5", &limits), Some(Object::from(0)));
+/// let big = object(b"4294967296", &limits);
+/// assert_eq!(big.as_ref().and_then(Object::as_integer), Some(0));
+/// assert_eq!(object(b"Tj", &limits), None);
 /// ```
 pub fn object(operand: &[u8], limits: &Limits) -> Option<Object> {
     Operand {
@@ -500,29 +508,26 @@ impl<'a, S: Sink<'a> + ?Sized> Reading<'a, '_, S> {
     }
 }
 
-/// A word as an object: a number, `true`, `false` or `null`. A number
-/// past 64 bits as pdf-objects reads one: an integer the nearest that
-/// fits, a real the largest finite float of its sign. A number is read as
-/// ISO 32000-2 writes one (7.3.3), so a word only PDFium reads as a
-/// number, such as `--5`, is none.
+/// A word as an object: a number, `true`, `false` or `null`; none for any
+/// other. A number word (digits, signs and points) as PDFium's content
+/// parser reads it, by its first [`WORD`] bytes, held at 64 bits: the
+/// integer PDFium holds, or, with a point among the bytes kept, the real,
+/// the decimal they start with ([`pdfium::real`]). 255 bytes hold no
+/// decimal past an `f64`'s range, so the real is finite.
 fn word(word: &[u8]) -> Option<Value> {
-    let negative = word.first() == Some(&b'-');
     Some(match word {
         b"true" => Value::Bool(true),
         b"false" => Value::Bool(false),
         b"null" => Value::Null,
-        n if n.contains(&b'.') => Value::Real(match decode::number(n) {
-            Ok(real) => real,
-            Err(NumberError::Overflow) if negative => f64::MIN,
-            Err(NumberError::Overflow) => f64::MAX,
-            Err(NumberError::NotANumber) => return None,
-        }),
-        n => Value::Integer(match decode::integer(n) {
-            Ok(integer) => integer,
-            Err(NumberError::Overflow) if negative => i64::MIN,
-            Err(NumberError::Overflow) => i64::MAX,
-            Err(NumberError::NotANumber) => return None,
-        }),
+        n if is_number(n) => {
+            let n = &n[..n.len().min(WORD)];
+            match pdfium::number(n) {
+                Number::Unsigned(n) => Value::Integer(n.into()),
+                Number::Signed(n) => Value::Integer(n.into()),
+                Number::Real(_) => Value::Real(pdfium::real(n)),
+            }
+        }
+        _ => return None,
     })
 }
 

@@ -953,9 +953,25 @@ fn tiled<'a>(content: &'a Concat, res: &ResCx, limits: &Limits) -> Read<'a> {
 }
 
 /// An operand read as an object: as the array, dictionary or string it
-/// starts as one, and as the name it is, decoded.
+/// starts as one, as the name it is, decoded, and a number word as a
+/// number: an integer the number PDFium reads ([`Operand::number`]), and
+/// a real finite, ISO 32000-2's value where ISO reads the word as a number
+/// too, by no more than the 255 bytes PDFium reads.
 fn operand_reads(operand: &[u8], limits: &Limits) {
     let read = object(operand, limits).map(|o| o.into_value());
+    let as_operand = Operand::new(operand, 0..operand.len());
+    if as_operand.is_number() {
+        match read {
+            Some(Value::Integer(n)) => assert_eq!(n as f32, as_operand.number(), "an integer"),
+            Some(Value::Real(r)) => {
+                assert!(r.is_finite(), "a real {r}");
+                if let (true, Ok(iso)) = (operand.len() <= 255, decode::number(operand)) {
+                    assert_eq!(r, iso, "a real as ISO 32000-2 reads it");
+                }
+            }
+            _ => panic!("a number word reads as a number"),
+        }
+    }
     match operand.first() {
         Some(b'[') => assert!(matches!(read, Some(Value::Array(_))), "an array reads"),
         Some(b'<') if operand.starts_with(b"<<") => {

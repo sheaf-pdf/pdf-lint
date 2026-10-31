@@ -21,10 +21,12 @@
 //! - **Operands read when asked** ([`Operand`]), each as PDFium's content
 //!   parser reads it: a name, its `#` escapes decoded ([`name`]), a number
 //!   ([`Operand::number`]), any operand as a pdf-objects
-//!   [`Object`](pdf_objects::Object) ([`object`]), its numbers at 64 bits
-//!   as pdf-objects reads them, an array's and a dictionary's elements
-//!   each read so, and an array's elements as written
-//!   ([`Operand::elements`]).
+//!   [`Object`](pdf_objects::Object) ([`object`]), its numbers held at 64
+//!   bits as pdf-objects holds them, an array's and a dictionary's
+//!   elements each read so, and an array's elements as written
+//!   ([`Operand::elements`]). Where ISO 32000-2 reads one otherwise, that's
+//!   a fault ([`fault`]); a reader that wants ISO's reading of an operand
+//!   reads its bytes with pdf-objects' `Parser`, by ISO's rules.
 //! - **Operators** ([`Operator`]): each of ISO 32000-2's Annex A by its
 //!   name ([`Operation::operator`]), with the operands the clause defining
 //!   it gives it ([`Operands`], [`Type`]), its category of 8.2

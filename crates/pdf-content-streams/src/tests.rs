@@ -176,7 +176,12 @@ fn operands_read_as_objects() {
         o(b"<</A 1 2 /B /C>>"),
         Some(Object::from(dict! { "A" => 1, "B" => "C" }))
     );
-    for not in [&b"--5"[..], b")", b"Tj", b"1.2.3"] {
+    // A number word as PDFium reads it: PDFium 7881 and 8076 hold a
+    // property list's `/MCID --5` and `/MCID 1.2.3` as 0 and 1, and a dash
+    // array `[--5 3]` as 0 and 3, `[1.2.3 4]` as 1.2 and 4.
+    assert_eq!(o(b"--5"), Some(Object::from(0)));
+    assert_eq!(o(b"1.2.3"), Some(Object::from(1.2)));
+    for not in [&b")"[..], b"Tj"] {
         assert_eq!(o(not), None, "{}", String::from_utf8_lossy(not));
     }
     // Stray closers inside are no elements; one past `depth`, or one that
@@ -193,26 +198,32 @@ fn operands_read_as_objects() {
     assert_eq!(o(b"[1 (2"), None);
 }
 
-/// An operand nested 500 deep around 8 MiB is read in one pass, not once
-/// for each level it's inside.
-/// A number past 64 bits reads as pdf-objects reads one, the nearest
-/// integer that fits or the largest finite real of its sign, so an array
-/// holding one keeps its place, and a real read writes; and an operand of
-/// more values than the cap reads as none.
+/// A number past 32 bits reads as PDFium reads one, 0, held as
+/// pdf-objects holds a number it reads by PDFium's rules, so an array
+/// holding one keeps its place (PDFium 7881 and 8076 hold a property
+/// list's `/MCID` of 20 nines, or of `9223372036854775807`, as 0, and a
+/// dash array's element alike); a word longer than 255 bytes reads by its
+/// first 255, so a real is finite, and writes; and an operand of more
+/// values than the cap reads as none.
 #[test]
 fn operands_read_as_pdf_objects_reads_them() {
     let lim = &Limits::DEFAULT;
     let integer = |s: &[u8]| object(s, lim).and_then(|o| o.as_integer());
-    assert_eq!(integer(b"99999999999999999999"), Some(i64::MAX));
-    assert_eq!(integer(b"-99999999999999999999"), Some(i64::MIN));
-    assert_eq!(integer(b"9223372036854775807"), Some(i64::MAX));
-    assert_eq!(integer(b"+-1"), None);
-    let huge = format!("1{}.0", "0".repeat(400));
+    assert_eq!(integer(b"99999999999999999999"), Some(0));
+    assert_eq!(integer(b"-99999999999999999999"), Some(0));
+    assert_eq!(integer(b"9223372036854775807"), Some(0));
+    assert_eq!(integer(b"4294967295"), Some(4_294_967_295));
+    assert_eq!(integer(b"-2147483648"), Some(-2_147_483_648));
+    assert_eq!(integer(b"+-1"), Some(0));
     let real = |s: &[u8]| object(s, lim).and_then(|o| o.as_number());
-    assert_eq!(real(huge.as_bytes()), Some(f64::MAX));
-    assert_eq!(real(format!("-{huge}").as_bytes()), Some(f64::MIN));
+    let long = format!("1{}.5", "0".repeat(250));
+    assert_eq!(real(long.as_bytes()), Some(1e250));
+    assert_eq!(real(format!("-{long}").as_bytes()), Some(-1e250));
     let mut written = Vec::new();
-    pdf_objects::serialize::real(&mut written, real(huge.as_bytes()).unwrap()).unwrap();
+    pdf_objects::serialize::real(&mut written, real(long.as_bytes()).unwrap()).unwrap();
+    // Its point past the 255 bytes read, a whole number past 32 bits.
+    let huge = format!("1{}.0", "0".repeat(400));
+    assert_eq!(integer(huge.as_bytes()), Some(0));
     let read = object(b"[1 99999999999999999999 3]", lim).unwrap();
     let items: Vec<_> = read
         .as_array()
@@ -220,7 +231,7 @@ fn operands_read_as_pdf_objects_reads_them() {
         .iter()
         .map(|o| o.as_integer())
         .collect();
-    assert_eq!(items, [Some(1), Some(i64::MAX), Some(3)]);
+    assert_eq!(items, [Some(1), Some(0), Some(3)]);
 
     // Values: the operand, an array's elements, a dictionary's keys and
     // values, and theirs, what's no object among them.
@@ -247,21 +258,28 @@ fn operands_read_as_pdf_objects_reads_them() {
 
 /// A word of more digits than 64 bits hold with a sign after them, such
 /// as `99999999999999999999--5`, is no number as ISO 32000-2 writes one
-/// (7.3.3), as `--5` isn't: it reads as no object, and is told so, where a
-/// number that long alone reads as the nearest that fits.
+/// (7.3.3), as `--5` isn't, and is told so: it reads as PDFium reads it,
+/// 0, its digits past 32 bits (PDFium 7881 and 8076 hold such a property
+/// list's `/MCID`, and such an element of a dash array, as 0).
 #[test]
-fn a_long_word_of_digits_and_signs_reads_as_none() {
+fn a_long_word_of_digits_and_signs_reads_as_pdfium_reads_it() {
     let lim = &Limits::DEFAULT;
-    for not in [
+    for word in [
         &b"99999999999999999999--5"[..],
         b"-99999999999999999999+5",
         b"+99999999999999999999-",
         b"99999999999999999999+",
     ] {
-        assert_eq!(object(not, lim), None, "{}", String::from_utf8_lossy(not));
+        let read = object(word, lim);
+        assert_eq!(
+            read,
+            Some(Object::from(0)),
+            "{}",
+            String::from_utf8_lossy(word)
+        );
     }
     let read = object(b"[1 99999999999999999999--5 3]", lim).unwrap();
-    assert_eq!(read, Object::from(vec![1.into(), 3.into()]));
+    assert_eq!(read, Object::from(vec![1.into(), 0.into(), 3.into()]));
     let s = b"99999999999999999999--5 w";
     assert_eq!(
         told(s),
@@ -572,6 +590,8 @@ fn an_inline_images_numbers_are_read_as_pdfium_reads_them() {
     }
 }
 
+/// An operand nested 500 deep around 8 MiB is read in one pass, not once
+/// for each level it's inside.
 #[test]
 fn deep_operands_read_in_one_pass() {
     let mut s = b"[".repeat(500);
@@ -2338,9 +2358,9 @@ fn operands_are_read_when_asked() {
     assert_eq!(kinds(&o[6]), [f, f, f, true, f]);
     assert_eq!(kinds(&o[7]), [f; 5]);
     assert_eq!(kinds(&o[8]), [f; 5]);
-    // A number to PDFium, though it reads as none.
+    // A number to PDFium, read as PDFium reads it.
     assert_eq!(kinds(&o[9]), [true, f, f, f, f]);
-    assert_eq!(o[9].object(&deep(8)), None);
+    assert_eq!(o[9].object(&deep(8)), Some(Object::from(0)));
     assert_eq!(o[0].name().as_deref(), Some(&b"A B"[..]));
     assert_eq!(o[1].name(), None);
     assert_eq!(o[1].object(&deep(8)), Some(Object::from(12)));

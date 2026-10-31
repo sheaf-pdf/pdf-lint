@@ -115,14 +115,15 @@ pub enum Fault<'a> {
     },
     /// A number ISO 32000-2 reads as its value, past what's read here: an
     /// integer outside the 32 bits PDFium reads, unsigned when it's written
-    /// without a sign and signed when with one, or a real past an `f32`'s
-    /// range, which [`Operand::number`](crate::Operand::number) reads as 0
-    /// and as infinite, as PDFium reads them; and so an integer outside 64
-    /// bits, which [`object`](crate::object) reads as the nearest that fits,
-    /// or a real too large for a 64-bit float, read as the largest finite
-    /// one of its sign, as pdf-objects reads them. ISO converts the number
-    /// written to its value ("shall"), the range left to the processor
-    /// (7.3.3; Annex C, which is advice).
+    /// without a sign and signed when with one, which
+    /// [`Operand::number`](crate::Operand::number) and
+    /// [`object`](crate::object) read as 0, as PDFium reads it; or a real
+    /// past an `f32`'s range, which `Operand::number` reads as infinite, as
+    /// PDFium reads it, and `object` as the decimal it is, at 64 bits; or
+    /// one too large for a 64-bit float, longer than the 255 bytes of a word
+    /// read here ([`Long`](Fault::Long)). ISO converts the number written to
+    /// its value ("shall"), the range left to the processor (7.3.3; Annex
+    /// C, which is advice).
     #[error("{} is past the numbers read here", shown(.written))]
     OutOfRange {
         /// The number.
