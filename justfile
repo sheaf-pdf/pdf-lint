@@ -186,7 +186,7 @@ fuzz target="tokenize" seconds="60":
     host=$(rustc -vV | sed -n 's/^host: //p')
     case "{{ target }}" in
     tokenize)
-        cargo +nightly fuzz run --target "$host" tokenize -- -dict=fuzz/pdf.dict -max_total_time={{ seconds }}
+        cargo +nightly fuzz run --target "$host" tokenize -- -dict=fuzz/pdf.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     filters)
         cargo +nightly fuzz run --target "$host" filters -- -max_total_time={{ seconds }} -timeout=10
