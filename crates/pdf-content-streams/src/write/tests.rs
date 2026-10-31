@@ -276,6 +276,50 @@ fn an_image_read_as_missing_may_read_otherwise_written_again() {
     );
 }
 
+/// The content's last operation may read otherwise written again where its
+/// reading looked past its token: Flate data that's a zlib header asking
+/// for a preset dictionary, `x` and the space before `EI`, the four bytes
+/// that name the dictionary past `EI`. Where they're there, zlib, and
+/// PDFium on it, stops for the dictionary, having counted none of the
+/// data, and PDFium keeps the data to `EI`; written again, a line's end
+/// alone after it, they aren't, zlib reads on to the end, and PDFium keeps
+/// no stream. An operation after the image, written again, writes enough
+/// after it. The fuzz body's round trip passes over the first, and not a
+/// last image that reads alike.
+#[test]
+fn flate_data_asking_for_a_dictionary_past_its_ei_may_read_otherwise_written_again() {
+    use crate::ImageStream;
+    use crate::fuzz::written_again;
+    let again = |content: &[u8]| {
+        let mut w = ContentWriter::new();
+        for op in read(content) {
+            let operands = op.operands().map(|o| o.bytes());
+            match op.inline_image() {
+                Some(image) => w.operation(operands, &content[image.at()]),
+                None => w.operation(operands, op.name()),
+            }
+        }
+        w.finish(&Reserved::default()).0
+    };
+    let stream = |s: &[u8]| read(s)[0].inline_image().unwrap().stream();
+    let res = ResCx::none();
+    let last: &[u8] = b"BI /F /Fl /L 6 ID x EI\n\n";
+    let last_again = again(last);
+    assert_eq!(last_again, b"BI /F /Fl /L 6 ID x EI\n");
+    assert_eq!(stream(last), ImageStream::Data(18..19));
+    assert_eq!(stream(&last_again), ImageStream::Missing);
+    assert!(!written_again(last, &res, &Limits::DEFAULT));
+    let followed: &[u8] = b"BI /F /Fl /L 6 ID x EI q Q";
+    let followed_again = again(followed);
+    assert_eq!(followed_again, b"BI /F /Fl /L 6 ID x EI\nq\nQ\n");
+    for s in [followed, &followed_again] {
+        assert_eq!(stream(s), ImageStream::Data(18..19));
+    }
+    assert!(written_again(followed, &res, &Limits::DEFAULT));
+    let unfiltered: &[u8] = b"BI /W 2 /H 1 /BPC 8 /CS /G ID xy EI % a comment";
+    assert!(written_again(unfiltered, &res, &Limits::DEFAULT));
+}
+
 /// Where a reading decodes CCITTFax data to find its end, as PDFium does,
 /// the decoder reads on past the image's `EI`: fax data whose decoder fails
 /// in what follows `EI`, its end the stand-in's, is kept as a stream;
@@ -854,6 +898,50 @@ fn what_each_call_writes_reads_back_as_written() {
         res,
         [&helvetica, &Res::dict(header), &state.res(), &written_9]
     );
+}
+
+/// A whole number outside the signed 32-bit range keeps its point, so
+/// PDFium reads it as itself, where without it, it reads 0; one inside
+/// that range, `-2147483648` and `2147483520` (the `f32` below 2^31)
+/// among them, is written bare, as is every other number but for its
+/// decimals.
+#[test]
+fn numbers_past_32_bits_keep_their_point() {
+    for (x, written) in [
+        (2_147_483_648.0, &b"2147483648."[..]),
+        (4_294_967_296.0, b"4294967296."),
+        (1e10, b"10000000000."),
+        (-2_147_483_904.0, b"-2147483904."),
+        // Its exact decimal, as every number is written.
+        (f32::MAX, b"340282346638528859811704183484516925440."),
+        (f32::MIN, b"-340282346638528859811704183484516925440."),
+        (-2_147_483_648.0, b"-2147483648"),
+        (2_147_483_520.0, b"2147483520"),
+        (16_777_216.0, b"16777216"),
+        (-0.0, b"0"),
+        (0.5, b"0.5"),
+    ] {
+        let mut out = Vec::new();
+        write_number(&mut out, x);
+        assert_eq!(out, written, "{x}");
+        let mut w = ContentWriter::new();
+        w.line_width(x);
+        let (content, _) = w.finish(&Reserved::default());
+        let as_written = read(&content)[0].arg(0).unwrap().number();
+        assert_eq!(as_written, x, "{x} read from {content:?}");
+        // Without its point, PDFium reads one past 32 bits as 0, or, below
+        // 2^32 and unsigned, as itself.
+        let bare = written.strip_suffix(b".").unwrap_or(written);
+        let without = [bare, b" w"].concat();
+        let bare_read = read(&without)[0].arg(0).unwrap().number();
+        let unsigned = (0.0..4_294_967_296.0).contains(&x);
+        let shown = String::from_utf8_lossy(bare);
+        assert_eq!(
+            bare_read == x,
+            written == bare || unsigned,
+            "{shown} read as {bare_read}"
+        );
+    }
 }
 
 /// A name past 255 bytes, its `/` among them, and a string past 32,767

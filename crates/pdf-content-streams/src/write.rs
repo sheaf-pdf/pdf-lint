@@ -343,8 +343,10 @@ fn told_by_content(object: &Object) -> bool {
 /// calls give the same bytes and names every time, on any thread.
 ///
 /// - **Numbers** ([`write_number`]): at most four decimals, trailing
-///   zeros and a bare point trimmed, never an exponent or `-0`, and 0 for
-///   NaN and the infinities (ISO 32000-2, 7.3.3).
+///   zeros and a bare point trimmed, but a whole number's outside the
+///   signed 32-bit range, which keeps it, as PDFium reads such a number
+///   without a point as 0; never an exponent or `-0`, and 0 for NaN and
+///   the infinities (ISO 32000-2, 7.3.3).
 /// - **Strings** ([`write_string`]): literal, `(`, `)` and `\` escaped,
 ///   unless a byte is a control code (below 0x20, or 0x7F), when the whole
 ///   string is written in hex (7.3.4), so a CR, which PDFium reads in a
@@ -369,9 +371,9 @@ fn told_by_content(object: &Object) -> bool {
 /// it reads the first 32,767. Each call's operator and operands read back
 /// through [`operations`](crate::operations) as written: a number as
 /// [`Operand::number`](crate::Operand::number) reads it, within its
-/// rounding, but a whole number PDFium holds no integer of, 2^32 or more,
-/// or below −2^31, which it reads as 0; a name as [`name`](crate::name)
-/// reads it; a string as [`object`](crate::object) reads it.
+/// rounding, and a whole number past 32 bits as itself; a name as
+/// [`name`](crate::name) reads it; a string as [`object`](crate::object)
+/// reads it.
 ///
 /// ```
 /// use pdf_content_streams::pdf_objects::dict;
@@ -632,7 +634,15 @@ impl ContentWriter {
     /// end, at what isn't written again. An inline image PDFium keeps no
     /// stream of ([`ImageStream::Missing`](crate::ImageStream::Missing))
     /// may have: one whose filter's end was found past its `EI`, in a
-    /// comment, say, may run on, written again, to a later `EI`. And where
+    /// comment, say, may run on, written again, to a later `EI`. So may the
+    /// content's last operation, an image whose Flate data up to its `EI`
+    /// is a zlib header asking for a preset dictionary (`x` and the space
+    /// before `EI`): where the four bytes after the header that name the
+    /// dictionary are there, past `EI`, zlib, and PDFium on it, stops for
+    /// the dictionary, having counted none of the data, and PDFium keeps a
+    /// stream of it; written again, a line's end alone after it, they
+    /// aren't, zlib reads on to the end, and PDFium keeps none. An
+    /// operation after the image writes enough after it. And where
     /// a reading decodes DCT and CCITTFax data to find its end
     /// ([`CodedEnds::Decoded`](crate::CodedEnds)), an image of either may
     /// have, its decoder reading on past its `EI` before it fails, as
@@ -743,18 +753,28 @@ fn fresh(
 }
 
 /// `x` as an operand, as [`ContentWriter`] writes every number: at most
-/// four decimals, trailing zeros and a bare point trimmed, with no
-/// exponent and no `-0`. Anything but a finite number is 0.
+/// four decimals, trailing zeros trimmed, and a bare point too, but a
+/// whole number's outside the signed 32-bit range, which keeps it
+/// (`10000000000.`); with no exponent and no `-0`. Anything but a finite
+/// number is 0.
+///
+/// PDFium reads a whole number written without a point in 32 bits,
+/// unsigned without a sign and signed with one, and as 0 past them, where
+/// it reads one with a point as a real
+/// ([`Operand::number`](crate::Operand::number)); ISO 32000-2 lets a real
+/// end in its point (7.3.3), and advises integers within 32 bits (C.2).
+/// Every `f32` of magnitude 2^24 or more is whole, so a number keeps its
+/// point from 2^31 up, or below −2^31.
 ///
 /// ```
 /// use pdf_content_streams::write_number;
 ///
 /// let mut out = Vec::new();
-/// for x in [1.0 / 3.0, 2.5, -0.00001, 1e7, f32::NAN] {
+/// for x in [1.0 / 3.0, 2.5, -0.00001, 1e7, f32::NAN, 1e10, -2147483648.0] {
 ///     write_number(&mut out, x);
 ///     out.push(b' ');
 /// }
-/// assert_eq!(out, b"0.3333 2.5 0 10000000 0 ");
+/// assert_eq!(out, b"0.3333 2.5 0 10000000 0 10000000000. -2147483648 ");
 /// ```
 pub fn write_number(out: &mut Vec<u8>, x: f32) {
     let x = if x.is_finite() { x } else { 0.0 };
@@ -763,7 +783,8 @@ pub fn write_number(out: &mut Vec<u8>, x: f32) {
     while out.last() == Some(&b'0') {
         out.pop();
     }
-    if out.last() == Some(&b'.') {
+    let in_32_bits = (f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&f64::from(x));
+    if out.last() == Some(&b'.') && in_32_bits {
         out.pop();
     }
     if out[start..] == *b"-0" {

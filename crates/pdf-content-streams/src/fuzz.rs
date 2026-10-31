@@ -476,22 +476,50 @@ fn resource_typed(op: &Operation) {
 /// operations, each operand as it was, and each inline image its token
 /// as it was, its data and what PDFium keeps of it in the same place in
 /// it; and names no resource. Content that doesn't read to its end is
-/// passed over, and so is content holding an inline image PDFium keeps no
-/// stream of ([`ImageStream::Missing`]), whose reading may have looked
-/// past its token's end, at what isn't written again
-/// ([`ContentWriter::operation`] says). Under a reading that decodes DCT
-/// and CCITTFax data, an image of either may have too, its decoder reading
-/// past its `EI`, which `limits` with the stand-in's reading doesn't.
-/// Whether it was written again.
+/// passed over, and so is content whose reading may have looked past a
+/// token's end, at what isn't written again ([`ContentWriter::operation`]
+/// says): content holding an inline image PDFium keeps no stream of
+/// ([`ImageStream::Missing`]), and content whose last operation is an
+/// inline image read otherwise with a line's end alone after it, all
+/// that's written again after the last (Flate data that's a header asking
+/// for a preset dictionary, the four bytes naming it past `EI`). Under a
+/// reading that decodes DCT and CCITTFax data, an image of either may have
+/// looked past its token too, its decoder reading past its `EI`, which
+/// `limits` with the stand-in's reading doesn't. Whether it was written
+/// again.
 pub fn written_again(data: &[u8], res: &ResCx, limits: &Limits) -> bool {
     let Ok(ops) = operations(data, res, limits).collect::<Result<Vec<_>, _>>() else {
         return false;
+    };
+    // An inline image's place in content, its data's in it and what
+    // PDFium keeps of it.
+    let image = |s: &[u8], image: crate::InlineImage| {
+        let at = image.at();
+        let inside = |r: Range<usize>| r.start - at.start..r.end - at.start;
+        let kept = match image.stream() {
+            ImageStream::Data(kept) => Some(inside(kept)),
+            _ => None,
+        };
+        (s[at.clone()].to_vec(), inside(image.data()), kept)
     };
     let missing = |op: &Operation| {
         (op.inline_image()).is_some_and(|image| image.stream() == ImageStream::Missing)
     };
     if ops.iter().any(missing) {
         return false;
+    }
+    // The last operation an image read otherwise where what's written
+    // again after it, a line's end, is all that follows it.
+    if let Some(last) = ops.last().and_then(Operation::inline_image) {
+        let cut = [&data[..last.at().end], b"\n"].concat();
+        let read: Result<Vec<_>, _> = operations(&cut, res, limits).collect();
+        let read = read.ok().and_then(|ops| {
+            let i = ops.last()?.inline_image().filter(|i| i.at() == last.at())?;
+            Some(image(&cut, i))
+        });
+        if read != Some(image(data, last)) {
+            return false;
+        }
     }
     let mut w = ContentWriter::new();
     for op in &ops {
@@ -507,17 +535,6 @@ pub fn written_again(data: &[u8], res: &ResCx, limits: &Limits) -> bool {
     let shown = String::from_utf8_lossy(&again);
     let read = read.unwrap_or_else(|e| panic!("{e} written again: {shown}"));
     assert_eq!(read.len(), ops.len(), "as many operations: {shown}");
-    // An inline image's place in content, its data's in it and what
-    // PDFium keeps of it.
-    let image = |s: &[u8], image: crate::InlineImage| {
-        let at = image.at();
-        let inside = |r: Range<usize>| r.start - at.start..r.end - at.start;
-        let kept = match image.stream() {
-            ImageStream::Data(kept) => Some(inside(kept)),
-            _ => None,
-        };
-        (s[at.clone()].to_vec(), inside(image.data()), kept)
-    };
     for (op, again_op) in ops.iter().zip(&read) {
         assert_eq!(op.name(), again_op.name(), "{shown}");
         let operands = |op: &Operation| {
@@ -545,9 +562,8 @@ pub(crate) fn read_as_written(read: f32, x: f32) -> bool {
     (f64::from(read) - x).abs() <= 5e-5 + x.abs() * f64::from(f32::EPSILON)
 }
 
-/// Whether `x`, finite and whole, is outside the signed 32-bit range,
-/// where PDFium reads a whole number written without a point as 0, unless
-/// it's below 2^32 and unsigned.
+/// Whether `x`, finite, is outside the signed 32-bit range, where it's
+/// whole and written with its point, so PDFium reads it as itself.
 fn past_32_bits(x: f32) -> bool {
     let x = f64::from(x);
     x.is_finite() && !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&x)
@@ -630,8 +646,8 @@ enum Arg {
 /// four-decimal edges and the edges of 32 bits among them, their codes and
 /// tags from the input; written, and read back: each call's operator and
 /// operands, each number within its rounding (and, a whole number outside
-/// the signed 32-bit range, as PDFium reads it), each name and string as
-/// given, each resource's name its need's in its category. The needs are
+/// the signed 32-bit range, as itself), each name and string as given,
+/// each resource's name its need's in its category. The needs are
 /// one a resource, in the order first drawn; named again with their names
 /// taken, the same; and with their names bound to something else, each
 /// bumped, the content naming the same needs in the same places.
@@ -899,7 +915,7 @@ pub fn calls(data: &[u8]) {
         assert_eq!(op.operands().len(), args.len(), "{op:?} in {shown}");
         for (operand, arg) in op.operands().zip(args) {
             let as_written =
-                |read: f32, x: f32| read_as_written(read, x) || (past_32_bits(x) && read == 0.0);
+                |read: f32, x: f32| read_as_written(read, x) && (!past_32_bits(x) || read == x);
             match arg {
                 Arg::Number(x) => {
                     let read = operand.number();
@@ -1684,7 +1700,8 @@ pub(crate) fn stored(data: &[u8], last: bool) -> Vec<u8> {
 /// its Flate data decoded, one decoding to more than the fuzz body's
 /// small caps allow, a JPEG and fax data, which the `image-ends` feature
 /// decodes, strings, arrays, dictionaries and marked content, an image
-/// whose filter's end is in a comment after it, and a color of 32
+/// whose filter's end is in a comment after it, one whose Flate header
+/// asks for a dictionary named past its `EI`, and a color of 32
 /// components and a pattern, more operands than an operation holds
 /// inline: the fuzz target's seeds.
 pub fn fixtures() -> Vec<Vec<u8>> {
@@ -1730,6 +1747,11 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         // comment after it: written again, it would run on to the last
         // `EI`, which the writer's round trip passes over.
         b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI q % > (\n Q 0 0 9 9 re f <41> Tj EI".to_vec(),
+        // Flate data that's a header asking for a preset dictionary, the
+        // four bytes naming it past `EI`: kept to `EI` where they're there,
+        // as here, and not written again, a line's end alone after it, so
+        // the writer's round trip passes it over.
+        b"BI /F /Fl /L 6 ID x EI\n\n".to_vec(),
         format!("q /CS0 cs {components}/P0 scn 0 0 9 9 re f Q\n").into_bytes(),
     ]
 }
@@ -1831,12 +1853,13 @@ mod tests {
                 assert!(matches!(read[1].1, Tok::InlineImage(_)), "seed {i}");
             }
             // Each written again but those holding an image PDFium keeps
-            // no stream of: of a filter it has no decoder for, and one
-            // whose filter's end is past its `EI`.
-            let missing = matches!(i, 14 | 17);
+            // no stream of, of a filter it has no decoder for, and one
+            // whose filter's end is past its `EI`; and the one whose last
+            // image's Flate header asks for a dictionary named past it.
+            let passed = matches!(i, 14 | 17 | 18);
             assert_eq!(
                 written_again(seed, &res, &Limits::DEFAULT),
-                !missing,
+                !passed,
                 "seed {i}"
             );
             content(seed);
