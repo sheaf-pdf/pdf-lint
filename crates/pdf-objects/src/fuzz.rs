@@ -1,4 +1,4 @@
-//! What the fuzz target checks, which a unit test checks too: the promises
+//! What the fuzz target checks, which unit tests check too: the promises
 //! the parser makes, on any input, by ISO 32000-2's rules and by PDFium's
 //! and the two side by side, and the writer's on what it read, written
 //! plainly, through a toy encryptor ([`Toy`]) and through a renumbering.

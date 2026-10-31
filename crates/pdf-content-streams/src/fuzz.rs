@@ -146,10 +146,10 @@ pub fn searched(s: &[u8]) {
     ];
     for i in (0..n).rev() {
         let ei = s[i..].starts_with(b"EI");
-        let before = i > 0 && decode_space(s[i - 1]);
+        let before = i > 0 && iso_white_space(s[i - 1]);
         let after = s
             .get(i + 2)
-            .is_none_or(|&c| decode_space(c) || b"()<>[]{}/%".contains(&c));
+            .is_none_or(|&c| iso_white_space(c) || b"()<>[]{}/%".contains(&c));
         let here = [
             ei,
             s[i] == b'>',
@@ -209,7 +209,7 @@ pub fn searched(s: &[u8]) {
 }
 
 /// ISO 32000-2's white-space, the six bytes (7.2.3), written out.
-fn decode_space(c: u8) -> bool {
+fn iso_white_space(c: u8) -> bool {
     matches!(c, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
 }
 
