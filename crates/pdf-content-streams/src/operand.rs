@@ -169,6 +169,7 @@ impl<'a> Operand<'a> {
             s: self.bytes,
             base: self.at,
             values: limits.values,
+            past: false,
             sink,
             open: Vec::new(),
             read: None,
@@ -393,6 +394,9 @@ struct Reading<'a, 's, S: ?Sized> {
     base: usize,
     /// The values, objects or not, it may read yet.
     values: usize,
+    /// Whether it's read more values than it may: kept apart from
+    /// `values`, which a caller may set to any number, `usize::MAX` too.
+    past: bool,
     sink: &'s mut S,
     /// Each array or dictionary open, the outermost first.
     open: Vec<Partial>,
@@ -410,7 +414,7 @@ enum Partial {
 
 impl<'a, S: Sink<'a> + ?Sized> Visit<'a> for Reading<'a, '_, S> {
     fn visit(&mut self, event: Event<'a>) {
-        if self.values == usize::MAX {
+        if self.past {
             return;
         }
         if !matches!(event, Event::Close(_) | Event::Unmade) {
@@ -419,7 +423,7 @@ impl<'a, S: Sink<'a> + ?Sized> Visit<'a> for Reading<'a, '_, S> {
                 // Past the values it may read: none read, and nothing
                 // told after.
                 None => {
-                    self.values = usize::MAX;
+                    self.past = true;
                     self.read = None;
                     return;
                 }

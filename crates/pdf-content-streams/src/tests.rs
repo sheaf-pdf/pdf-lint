@@ -274,6 +274,17 @@ fn operands_read_as_pdf_objects_reads_them() {
     assert!(object(b"<</A [1]>>", &values(4)).is_some());
     assert_eq!(object(b"<</A [1]>>", &values(3)), None);
     assert_eq!(object(b"1", &values(0)), None);
+    // Uncapped, every value is read.
+    let uncapped = values(usize::MAX);
+    assert_eq!(object(b"1", &uncapped), Some(Object::from(1)));
+    assert_eq!(
+        object(b"[1 2]", &uncapped),
+        Some(Object::from(vec![1.into(), 2.into()]))
+    );
+    assert_eq!(
+        object(b"<</B 1>>", &uncapped),
+        Some(Object::from(dict! { "B" => 1 }))
+    );
     // A list of many empty arrays, past the cap, read as none.
     let wide = [
         b"/Span <<".as_slice(),
