@@ -345,8 +345,9 @@ pub(crate) fn pdfium_word(run: &[u8]) -> Kind {
 // Inlined: see `next_token`.
 #[inline(always)]
 fn literal_string(rest: &[u8]) -> (Kind, usize) {
-    let mut depth = 0usize;
-    let mut at = 0;
+    // Inside the string's own `(`, which is no search's to find.
+    let mut depth = 1usize;
+    let mut at = 1;
     // From one parenthesis or backslash to the next: the bytes between
     // change nothing.
     while let Some(i) = rest.get(at..).and_then(|r| memchr3(b'(', b')', b'\\', r)) {
