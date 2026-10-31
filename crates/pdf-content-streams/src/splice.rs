@@ -25,7 +25,9 @@ pub enum SpliceError {
     #[error(transparent)]
     Read(#[from] Error),
     /// A range that isn't in the content: an end past its stream's end or
-    /// past the last stream, or before its start.
+    /// past the last stream, or before its start; or what's taken out, or
+    /// a list written again, found in a content of another length
+    /// ([`Spliced::streams`]).
     #[error("{0} is outside the content")]
     OutOfRange(SpanAcross),
     /// A range that overlaps another taken out with it; or a marked range
@@ -158,6 +160,8 @@ pub struct Spliced {
     pub taken: Vec<bool>,
     /// The cuts of those taken, in order.
     cuts: Vec<Cut>,
+    /// The length of the content's joined bytes.
+    of: usize,
 }
 
 impl Spliced {
@@ -169,8 +173,10 @@ impl Spliced {
 
     /// `content`'s streams with what's taken out taken out, and `rewrites`
     /// made in what's kept, `content` the one [`splice_each`] and
-    /// [`without_keys`] were given: a rewrite in what's taken out goes with
-    /// it, and one given twice is made once. None when no stream changes.
+    /// [`without_keys`] were given (another of another length is refused,
+    /// [`SpliceError::OutOfRange`]): a rewrite in what's taken out goes
+    /// with it, and one given twice is made once. None when no stream
+    /// changes.
     ///
     /// What's taken out was read again as [`splice_each`] took it, and
     /// each rewrite as [`without_keys`] made it, alone. Together they may
@@ -195,6 +201,13 @@ impl Spliced {
         limits: &Limits,
         rewrites: &[Rewrite],
     ) -> Result<Option<Vec<Cow<'a, [u8]>>>, SpliceError> {
+        let of = content.bytes().len();
+        if let Some(cut) = self.cuts.first().filter(|_| self.of != of) {
+            return Err(SpliceError::OutOfRange(cut.span));
+        }
+        if let Some(list) = rewrites.iter().find(|r| r.of != of) {
+            return Err(SpliceError::OutOfRange(list.span));
+        }
         let mut lists: Vec<&Rewrite> = (rewrites.iter())
             .filter(|r| !(self.cuts.iter()).any(|c| overlap(&c.range, &r.range)))
             .collect();
@@ -236,12 +249,13 @@ pub fn splice_each(
         Err(SpliceError::Read(e)) => Err(SpliceError::Read(e)),
         Err(_) => Ok(None),
     };
+    let of = content.bytes().len();
     if groups.is_empty() {
         return Ok(Spliced::default());
     }
     if let Some(cuts) = check(&groups.concat())? {
         let taken = vec![true; groups.len()];
-        return Ok(Spliced { taken, cuts });
+        return Ok(Spliced { taken, cuts, of });
     }
     let taken = (groups.iter())
         .map(|cuts| Ok(check(cuts)?.is_some()))
@@ -253,14 +267,16 @@ pub fn splice_each(
     if cuts.is_empty() {
         return Ok(Spliced {
             taken,
-            ..Spliced::default()
+            cuts: Vec::new(),
+            of,
         });
     }
     Ok(match check(&cuts)? {
-        Some(cuts) => Spliced { taken, cuts },
+        Some(cuts) => Spliced { taken, cuts, of },
         None => Spliced {
             taken: vec![false; groups.len()],
-            ..Spliced::default()
+            cuts: Vec::new(),
+            of,
         },
     })
 }
@@ -274,6 +290,8 @@ pub struct Rewrite {
     span: SpanAcross,
     pub(crate) range: Range<usize>,
     with: Vec<u8>,
+    /// The length of the content's joined bytes.
+    of: usize,
 }
 
 /// The property list of the `BDC` that opens `span` in `content` (14.6.2),
@@ -352,6 +370,7 @@ pub fn without_keys(
         span,
         range: list,
         with,
+        of: s.len(),
     };
     // The content with it written again, read again beside the content:
     // each token as it was, the list as it's written.

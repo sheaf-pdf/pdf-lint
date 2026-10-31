@@ -676,6 +676,14 @@ fn each_object_names_bind_is_read_once() {
     let kept = Reserved::read(&resolve, Some(&resources));
     assert_eq!(five.get(), 1, "object 5 read once");
     assert_eq!(kept.names().count(), 400);
+    // Names the writer doesn't give are kept clear of, unread.
+    let others: Dict = (0..200u32)
+        .map(|i| (format!("F{i}").into_bytes(), Object::reference(5)))
+        .collect();
+    let resources = Object::from(dict! { "XObject" => others });
+    five.set(0);
+    let kept = Reserved::read(&resolve, Some(&resources));
+    assert_eq!((five.get(), kept.names().count()), (0, 200));
     // A name of the writer's binding the very resource, through a
     // reference of its own, is used again.
     let mut w = ContentWriter::new();

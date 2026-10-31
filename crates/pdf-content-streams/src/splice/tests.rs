@@ -526,7 +526,25 @@ fn a_list_is_written_again_once() {
         once,
         [&b"/Artifact <</Subtype /Watermark /Tool_Block 2>> BDC q 0 g Q EMC"[..]]
     );
-    assert_eq!(made(&[a.clone(), a]), Ok(Some(once)));
+    assert_eq!(made(&[a.clone(), a.clone()]), Ok(Some(once)));
+    // Made in another content: of another length, refused as such; of the
+    // same, where its place holds other tokens, it reads otherwise.
+    let other = Concat::new(&[b"0 0 m 100 100 l S /Artifact <</Tool_Gen 1>> BDC EMC"]);
+    let made = nothing.streams(&other, &res, LIM, std::slice::from_ref(&a));
+    assert_eq!(made, Err(SpliceError::OutOfRange(range)));
+    let other = Concat::new(&[
+        b"q 0 g Q /Artifact <</Subtype /Watermark /Tool_Gen 1 /Tool_Block 2>> BDC EMC",
+    ]);
+    assert_eq!(other.bytes().len(), s.len());
+    let made = nothing.streams(&other, &res, LIM, &[a]);
+    assert_eq!(made, Err(SpliceError::List(range)));
+    // What splice_each took out, likewise by its length.
+    let each = splice_each(&c, &res, LIM, &[vec![range]]).unwrap();
+    let short = Concat::new(&[&s[1..]]);
+    assert_eq!(
+        each.streams(&short, &res, LIM, &[]),
+        Err(SpliceError::OutOfRange(range))
+    );
 }
 
 /// Content that can't be read under the caps is refused with its error,
