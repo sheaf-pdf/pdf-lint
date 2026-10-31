@@ -87,14 +87,23 @@ pub enum Tok<'a> {
 ///   where the decoder stands after the last: a JPEG on zune-jpeg, from
 ///   its first start of image, its end counted from there, as PDFium
 ///   counts it; refused where its header doesn't read or it's narrower
-///   than `/W`. Fax data on hayro-ccitt, its rows by `/Rows`, or `/H`,
+///   than `/W`. PDFium's JPEG decoder, libjpeg-turbo (its Rust one not
+///   built, as in the build the crate is held to), reads a JPEG of several
+///   scans whole before its first row, to its end of image, and one of
+///   one scan as its rows need it, stopping past the marker it runs into
+///   after the coded data, restarts read past: there it ends, a comment or
+///   an application's segment between the scan and the end of image
+///   left out. Fax data on hayro-ccitt, its rows by `/Rows`, or `/H`,
 ///   each `/Columns` wide (1728 where it isn't written, `/W` where it's
 ///   0), by `/K`'s coding, `/EndOfLine` and `/EncodedByteAlign` as PDFium
 ///   reads them; refused where either count is none or past 65,535. Where
 ///   the decoder can't decode what PDFium's reads on through, damaged
 ///   data, the end is the stand-in's, and so where zune-jpeg stops short
-///   of the end of image, as at a progressive JPEG's scan of no coded
-///   data, which libjpeg-turbo reads on through. The stand-in finds the
+///   of the end of image of a JPEG of several scans, as at a progressive
+///   JPEG's scan of no coded data, which libjpeg-turbo reads on through.
+///   Where libjpeg-turbo holds a JPEG's last bits before it runs into the
+///   marker after them, it stops short of it, which isn't followed. The
+///   stand-in finds the
 ///   end in the data's bytes: a JPEG's past its first end of image, and
 ///   fax data's, or a JPEG's with none, at the first `EI` with white-space
 ///   before it and white-space, a delimiter or the end after it, which

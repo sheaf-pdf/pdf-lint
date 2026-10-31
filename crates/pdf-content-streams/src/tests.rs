@@ -2422,25 +2422,38 @@ fn dct_and_ccitt_data_ends_where_their_decoders_stop() {
     );
 }
 
-/// Decoded, with the `image-ends` feature, what decoding a JPEG holds, its output
-/// and its coefficients, is spent before it's decoded, and one past the
-/// budget stops reading at its `BI`.
+/// Decoded, with the `image-ends` feature, what decoding a JPEG holds, its
+/// output and its coefficients, is spent before it's decoded, and one past
+/// the budget stops reading at its `BI`. A JPEG of one scan holds a row of
+/// coefficients, one of several all of them; gray samples are decoded as
+/// they are, a byte each.
 #[cfg(feature = "image-ends")]
 #[test]
 fn the_budget_counts_what_decoding_a_jpeg_holds() {
     let none = ResCx::none();
-    // 8 by 8 gray samples, decoded as RGB, 192 bytes, and their
-    // coefficients, two bytes each of a 32 by 32 square, 2,048.
+    // 8 by 8 gray samples, 64 bytes, and a row of coefficients, two bytes
+    // each of a 32 by 32 square, 2,048.
     let one = [&b"BI /F /DCT ID "[..], &jpeg(8, 8, b"", BLOCK), b" EI "].concat();
     let s = one.repeat(2);
     let at = |image_ends| Limits {
         image_ends,
         ..DECODED
     };
-    assert_eq!(read(&s, &none, &at(2 * 2240)).len(), 2);
-    let e = error(&s, &at(2 * 2240 - 1));
+    assert_eq!(read(&s, &none, &at(2 * 2112)).len(), 2);
+    let e = error(&s, &at(2 * 2112 - 1));
     assert_eq!((e.at, e.kind), (one.len(), ErrorKind::ImageEnds));
-    // A header of 65,535 by 65,535 samples, 12 GiB decoded: past the
+    // 2,048 by 2,048 gray samples in one scan: 4 MiB and 128 KiB, where
+    // its coefficients all together would be 8 MiB more.
+    let wide = [
+        &b"BI /F /DCT ID "[..],
+        &jpeg(2048, 2048, b"", BLOCK),
+        b" EI",
+    ]
+    .concat();
+    let made = (4 << 20) + (2048 * 32 * 2);
+    assert_eq!(read(&wide, &none, &at(made)).len(), 1);
+    assert_eq!(error(&wide, &at(made - 1)).kind, ErrorKind::ImageEnds);
+    // A header of 65,535 by 65,535 samples, 4 GiB decoded: past the
     // default budget, nothing made.
     let huge = jpeg(65535, 65535, b"", BLOCK);
     let s = [&b"BI /F /DCT ID "[..], &huge, b" EI"].concat();
@@ -2449,21 +2462,36 @@ fn the_budget_counts_what_decoding_a_jpeg_holds() {
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
 }
 
-/// Decoded, with the `image-ends` feature, fax data hayro-ccitt can't decode, which
-/// then says nothing of how far it read, spends all that follows it.
+/// Decoded, with the `image-ends` feature, fax data hayro-ccitt can't
+/// decode, which then says nothing of how far it read, spends the window
+/// of what follows it was given: from 4 KiB to the first byte whose last
+/// bit is 1, or all that follows where that's less. So many such images
+/// before a long tail each spend a window, not the tail.
 #[cfg(feature = "image-ends")]
 #[test]
-fn fax_data_it_cant_decode_spends_what_follows() {
+fn fax_data_it_cant_decode_spends_its_window() {
     let none = ResCx::none();
     let image = b"BI /W 16 /H 4 /F /CCF /DP <</K -1>> ID \x00\x00 EI ";
-    let s = [&image[..], &b"q Q ".repeat(100)].concat();
-    let rest = s.len() - (image.len() - 6);
     let at = |image_ends| Limits {
         image_ends,
         ..DECODED
     };
+    // All that follows, less than a window.
+    let s = [&image[..], &b"q Q ".repeat(100)].concat();
+    let rest = s.len() - (image.len() - 6);
     assert_eq!(read(&s, &none, &at(rest)).len(), 201);
     assert_eq!(error(&s, &at(rest - 1)).kind, ErrorKind::ImageEnds);
+    // A window, to the `q` at or after its 4,096th byte.
+    let s = [&image[..], &b"q Q ".repeat(4000)].concat();
+    let data = image.len() - 6;
+    let window = (data + 4095..s.len()).find(|&i| s[i] & 1 == 1).unwrap() + 1 - data;
+    assert_eq!(read(&s, &none, &at(window)).len(), 8001);
+    assert_eq!(error(&s, &at(window - 1)).kind, ErrorKind::ImageEnds);
+    // 300 of them before a tail of 1 MiB, each spending its window: 1.2
+    // MiB or so of the default budget, where the tail each time would be
+    // 300 MiB.
+    let s = [&image.repeat(300)[..], &b"q Q ".repeat(1 << 18)].concat();
+    assert_eq!(read(&s, &none, &DECODED).len(), 300 + (2 << 18));
 }
 
 /// Decoded, with the `image-ends` feature, a progressive JPEG with a scan of no
@@ -3931,7 +3959,7 @@ fn an_inline_images_faults() {
         told(s),
         one(
             place(s, b"abcd"),
-            "an inline image's data is read as 4 bytes, where its length says 3"
+            "an inline image's data is 4 bytes, where its length says 3"
         )
     );
     // ASCIIHexDecode the last of its filters, or its one: its length
@@ -3947,7 +3975,7 @@ fn an_inline_images_faults() {
         told(&s),
         one(
             place(&s, FLATE_EI),
-            "an inline image's data is read as 15 bytes, where its length says 14"
+            "an inline image's data is 15 bytes, where its length says 14"
         )
     );
     let s = b"BI /F [/Fl /AHx] /L 0 ID   0E> EI";
@@ -3963,7 +3991,7 @@ fn an_inline_images_faults() {
         told(s),
         one(
             place(s, b"  0E>"),
-            "an inline image's data is read as 5 bytes, where its length says 3"
+            "an inline image's data is 5 bytes, where its length says 3"
         )
     );
     // A length that's its data's, a JPEG's to its end of image, and one
@@ -3974,7 +4002,7 @@ fn an_inline_images_faults() {
         told(s),
         one(
             place(s, b"xy"),
-            "an inline image's data is read as 2 bytes, where its length says 99"
+            "an inline image's data is 2 bytes, where its length says 99"
         )
     );
     // `ID` with a delimiter after it, not white-space, unless the last of

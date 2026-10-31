@@ -506,6 +506,14 @@ dct-bytes-first-EI	image matrix 1 0 0 1 0 0 raw #170:81b794cecb1a86bf ; path fil
 dct-damaged	image matrix 1 0 0 1 0 0 raw #165:a8faa41f1ba25884 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
 dct-12-bit	image matrix 1 0 0 1 0 0 raw #165:9eb6ae90ecc70b20 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
 dct-array-params	image matrix 1 0 0 1 0 0 raw #165:a04647c4cdba47f4 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dct-comment-after-scan	image matrix 1 0 0 1 0 0 raw #189:10a3ac64451083e3 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dct-app-after-scan	image matrix 1 0 0 1 0 0 raw #189:9986e4cce5ef087e ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dct-thumbnail-comment-after-scan	image matrix 1 0 0 1 0 0 raw #361:b180f68882f11ba3 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dct-restarts-comment-after-scan	image matrix 1 0 0 1 0 0 raw #214:30ff1bbca8c1215a ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dct-scan-each-comment-after	image matrix 1 0 0 1 0 0 raw #209:aabc6f7d9752d4a5 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dct-progressive-comment-after	image matrix 1 0 0 1 0 0 raw #178:d8e7725d77033a33 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dct-EI-after-eoi	image matrix 1 0 0 1 0 0 raw #177:5dd0d6fbe522b197 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
+dct-EI-after-eoi-unread	image matrix 1 0 0 1 0 0 raw #185:422fe96e361887d2 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
 ccf-g4	image matrix 1 0 0 1 0 0 raw %97%8Ev%EE%08!%80 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
 ccf-g4-then-EI	image matrix 1 0 0 1 0 0 raw %97%8Ev%EE%08!%80 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7
 ccf-g4-end-of-block	image matrix 1 0 0 1 0 0 raw %97%8Ev%EE%08!%80%08 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 0 0 l 9 9 ; path fill 0 stroke 1 matrix 1 0 0 1 0 0 m 5 5 l 7 7

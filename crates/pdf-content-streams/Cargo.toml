@@ -33,13 +33,14 @@ zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
 # it ends, as PDFium decodes it. It needs Rust 1.87.
 hayro-ccitt = { version = "0.3", optional = true }
 
-# DCT's and CCITTFax's ends found by decoding, as PDFium finds them, where
-# without it they're found from the data's bytes: off by default, so a
-# caller takes the decoders only when it asks.
+# The decoders that find DCT's and CCITTFax's ends as PDFium finds them, for
+# a reading that asks for them (`Limits::coded_ends`), where without them
+# they're found from the data's bytes: off by default, so a caller takes the
+# decoders only when it asks.
 [features]
 image-ends = ["dep:zune-jpeg", "dep:hayro-ccitt"]
 
-# docs.rs documents what the feature changes, beside the default.
+# docs.rs documents what the feature adds, beside the default.
 [package.metadata.docs.rs]
 features = ["image-ends"]
 

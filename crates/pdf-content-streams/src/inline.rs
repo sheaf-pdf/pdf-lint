@@ -823,7 +823,9 @@ impl<'a, 'r> Images<'a, 'r> {
                         },
                     )?;
                 self.spend(bi, decoded.made)?;
-                // Its decoder read to just past its end of image.
+                // Its decoder read to just past its end of image, or, a
+                // JPEG of one scan, to past the marker it stopped at, where
+                // PDFium's ends it.
                 let iso = match decoded.end {
                     Found::At { read, .. } => Some(read),
                     _ => None,

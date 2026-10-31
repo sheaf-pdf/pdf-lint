@@ -827,6 +827,69 @@ damaged[-4] ^= 0xF0
 jpeg_image("dct-damaged", G8, bytes(damaged))
 jpeg_image("dct-12-bit", G8, J8.replace(b"\xff\xc0\x00\x0b\x08", b"\xff\xc0\x00\x0b\x0c"))
 jpeg_image("dct-array-params", b"/W 8 /H 8 /BPC 8 /CS /G /F [/DCT] /DP [<< /ColorTransform 0 >>]", J8)
+# A JPEG of one scan is read as its rows need it: the reader stops past the
+# marker it runs into after the coded data, restarts read past, so a
+# segment between the scan and the end of image, holding `(`, puts the end
+# inside it, the walk from there reading `( ... )` as one string. Where the
+# reader holds the last row's bits before it runs into the marker, it
+# stops short of it, `EI` straight after the end of image then no word of
+# its own. A JPEG of several scans, progressive or one component a scan,
+# is read whole first, to its end of image.
+CT = b" EI 0 0 m 9 9 l S ) EI" + P + b"  "
+OPEN = segment(0xFE, b"(")
+
+
+def then_eoi(jpeg, segments):
+    """`jpeg` with `segments` before its end of image."""
+    return jpeg[:-2] + segments + b"\xff\xd9"
+
+
+def restarted(w, blocks):
+    """A baseline gray JPEG with a restart after each of its blocks but the
+    last, each block's bits filled out to a byte."""
+    coded = b""
+    for i, (dc, acs) in enumerate(blocks):
+        b = Msb()
+        value(b, dc)
+        for ac in acs:
+            value(b, ac)
+        b.put(0, 4)
+        coded += b.bytes(stuff=True)
+        if i < len(blocks) - 1:
+            coded += bytes([0xFF, 0xD0 + i % 8])
+    interval = b"\xff\xdd\x00\x04\x00\x01"
+    return (b"\xff\xd8" + QUANT + HUFFMAN + interval + frame(0xC0, w, w, [(1, 0x11)])
+            + scan([1]) + coded + b"\xff\xd9")
+
+
+def scan_each(blocks, between=b""):
+    """An 8 by 8 baseline JPEG of three components, a scan for each, its
+    block in it, `between` after each scan but the last."""
+    scans = []
+    for c, (dc, acs) in zip((1, 2, 3), blocks):
+        b = Msb()
+        value(b, dc)
+        for ac in acs:
+            value(b, ac)
+        b.put(0, 4)
+        scans.append(scan([c]) + b.bytes(stuff=True))
+    return (b"\xff\xd8" + QUANT + HUFFMAN + frame(0xC0, 8, 8, [(1, 0x11), (2, 0x11), (3, 0x11)])
+            + between.join(scans) + b"\xff\xd9")
+
+
+jpeg_image("dct-comment-after-scan", G8, then_eoi(J8, OPEN), CT)
+jpeg_image("dct-app-after-scan", G8, then_eoi(J8, segment(0xE5, b"(")), CT)
+jpeg_image("dct-thumbnail-comment-after-scan", G8,
+           then_eoi(jpeg(8, 8, [(5, [3, -2, 1])], before=THUMBNAIL), OPEN), CT)
+R16 = [(-50, []), (30, [18, 8, 2, 12]), (-13, []), (26, [-7, 14, -7, -15, -13])]
+jpeg_image("dct-restarts-comment-after-scan", b"/W 16 /H 16 /BPC 8 /CS /G /F /DCT",
+           then_eoi(restarted(16, R16), OPEN), CT)
+RGB3 = [(4, [1]), (-3, []), (2, [2, 2])]
+jpeg_image("dct-scan-each-comment-after", b"/W 8 /H 8 /BPC 8 /CS /RGB /F /DCT",
+           then_eoi(scan_each(RGB3, OPEN), OPEN), CT)
+jpeg_image("dct-progressive-comment-after", G8, then_eoi(progressive(8, 8, [7]), OPEN), CT)
+jpeg_image("dct-EI-after-eoi", b"/W 16 /H 16 /BPC 8 /CS /G /F /DCT", jpeg(16, 16, R16), T[1:] + b"  ")
+jpeg_image("dct-EI-after-eoi-unread", G8, jpeg(8, 8, [(31, [13, -9, 3, -13, 15, 13])]), T[1:] + b"  ")
 
 # Fax data written by hand: the run codes these cases take, and the 2-D
 # coding's modes, as ITU-T T.4 and T.6 code them.

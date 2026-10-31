@@ -506,6 +506,14 @@ dct-bytes-first-EI	content	dct-bytes-first-EI.content
 dct-damaged	content	dct-damaged.content
 dct-12-bit	content	dct-12-bit.content
 dct-array-params	content	dct-array-params.content
+dct-comment-after-scan	content	dct-comment-after-scan.content
+dct-app-after-scan	content	dct-app-after-scan.content
+dct-thumbnail-comment-after-scan	content	dct-thumbnail-comment-after-scan.content
+dct-restarts-comment-after-scan	content	dct-restarts-comment-after-scan.content
+dct-scan-each-comment-after	content	dct-scan-each-comment-after.content
+dct-progressive-comment-after	content	dct-progressive-comment-after.content
+dct-EI-after-eoi	content	dct-EI-after-eoi.content
+dct-EI-after-eoi-unread	content	dct-EI-after-eoi-unread.content
 ccf-g4	content	ccf-g4.content
 ccf-g4-then-EI	content	ccf-g4-then-EI.content
 ccf-g4-end-of-block	content	ccf-g4-end-of-block.content

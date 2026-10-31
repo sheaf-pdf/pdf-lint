@@ -335,11 +335,13 @@ pub enum Fault<'a> {
     /// dictionary as ISO reads it, to its first `ID`, a key's value too
     /// ([`InlineImage::length`](crate::InlineImage::length)), and counted
     /// from where the data is read here.
-    #[error("an inline image's data is read as {read} bytes, where its length says {given}")]
+    #[error("an inline image's data is {read} bytes, where its length says {given}")]
     ImageLength {
         /// The length its dictionary gives.
         given: u64,
-        /// The data's bytes as ISO counts them, to where it's read.
+        /// The data's bytes as ISO 32000-2 counts them, to where it ends
+        /// them: where the data is read here, or, where a decoder ends it
+        /// short of its filter's own end of data, that end.
         read: usize,
     },
     /// An inline image's `ID` with a delimiter after it, not white-space,
