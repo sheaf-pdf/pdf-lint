@@ -68,6 +68,8 @@ mod run_length;
 
 use std::fmt;
 
+use crate::flate::Room;
+
 /// Which deflate implementation a Flate filter inflates and deflates
 /// with. Each exists only with its feature, `miniz_oxide` (the default)
 /// or `zlib-rs`; with both on, both do, and every call names the one it
@@ -366,7 +368,7 @@ pub fn decode_into(
         let mut into = Out::new(into, predictor::before(limit, filter));
         // Nothing decodes to nothing, as in qpdf, whatever the filter.
         if !input.is_empty() {
-            one(input, filter, limit, backend, &mut into);
+            one(input, filter, limit, backend, Room::Given, &mut into);
         }
         faults.extend(into.faults.into_iter().map(|fault| (i, fault)));
         match i == last {
@@ -446,8 +448,10 @@ impl Prefix {
 /// the same faults, for data that may run on into other bytes, as an
 /// inline image's does in a content stream: and the [`Prefix`] of `data`
 /// the filter read, and whether its data ended there. Bytes after those
-/// it read change nothing it gives. Nothing is read of nothing, which
-/// decodes to nothing.
+/// it read change nothing it gives, and cost nothing: what decoding costs,
+/// in time and memory, follows what the filter reads and gives, not
+/// `data`'s length, so `data` may be all that follows, however long.
+/// Nothing is read of nothing, which decodes to nothing.
 ///
 /// ```
 /// use pdf_filters::{Filter, decode_prefix_into};
@@ -475,7 +479,7 @@ pub fn decode_prefix_into(
     // Nothing decodes to nothing, as `decode_into` has it.
     let prefix = match data.is_empty() {
         true => Prefix::unended(0),
-        false => one(data, &filter, limit, backend, &mut into),
+        false => one(data, &filter, limit, backend, Room::RunsOn, &mut into),
     };
     *out = into.data;
     let decoded = match into.faults.is_empty() {
@@ -486,9 +490,16 @@ pub fn decode_prefix_into(
 }
 
 /// `input` decoded by `filter` into `out`, its predictor undone, the
-/// predictor's output no more than `limit` bytes: what of `input` the
-/// filter read.
-fn one(input: &[u8], filter: &Filter, limit: usize, backend: Backend, out: &mut Out) -> Prefix {
+/// predictor's output no more than `limit` bytes, Flate's output first
+/// given `room`: what of `input` the filter read.
+fn one(
+    input: &[u8],
+    filter: &Filter,
+    limit: usize,
+    backend: Backend,
+    room: Room,
+    out: &mut Out,
+) -> Prefix {
     let (prefix, predictor) = match *filter {
         Filter::AsciiHex => (hex::decode(input, out), Predictor::None),
         Filter::Ascii85 => (ascii85::decode(input, out), Predictor::None),
@@ -496,7 +507,7 @@ fn one(input: &[u8], filter: &Filter, limit: usize, backend: Backend, out: &mut 
             early_change,
             predictor,
         } => (lzw::decode(input, early_change, out), predictor),
-        Filter::Flate { predictor } => (flate::decode(input, backend, out), predictor),
+        Filter::Flate { predictor } => (flate::decode(input, backend, room, out), predictor),
         Filter::RunLength => (run_length::decode(input, out), Predictor::None),
     };
     if predictor != Predictor::None {

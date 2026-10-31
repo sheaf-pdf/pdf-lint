@@ -11,7 +11,7 @@ use pdf_tokenizer::decode;
 
 use crate::data::{RunLength, Searched, a85_stop, ei_scan, find};
 use crate::fault::{Fault, Sink};
-use crate::inline::{Walks, ei_from, flate};
+use crate::inline::{Walks, ei_from};
 use crate::scan::{Raw, UNCAPPED, next_raw, next_raw_walked};
 use crate::{
     Balance, Concat, Error, ErrorKind, ImageStream, Join, Limits, MarkedEvent, MarkedNest, NameSet,
@@ -142,9 +142,8 @@ pub fn content(data: &[u8]) {
 /// plain ones find (RunLength's walk to its end-of-data byte, where ASCII85
 /// data stops, AHx's `>` and a JPEG's end of image), and the remembered
 /// walks to the next `EI` operator where plain ones find it, or don't, the
-/// bytes each passed within those to the content's end; Flate data from
-/// those offsets decoded a window at a time as it's decoded whole, from
-/// windows of 1, 3 and 64 bytes; and from the start and from each `[` or
+/// bytes each passed within those to the content's end; and from the
+/// start and from each `[` or
 /// `<` (some 32 of them spread over `s`, where there are more), an array
 /// or a dictionary skimmed is read to its end, or to its error, where a
 /// walk of every token it holds reads it, under the default cap on depth
@@ -219,14 +218,6 @@ pub fn searched(s: &[u8]) {
                 assert_eq!(plain, None, "EI walked to from {at}");
                 assert!(at + passed <= n, "{passed} passed from {at}");
             }
-        }
-        let rest = &s[at..];
-        let mut whole = Vec::new();
-        let whole = (flate(rest, 1 << 20, rest.len(), &mut whole), whole);
-        for first in [1, 3, 64] {
-            let mut out = Vec::new();
-            let windowed = (flate(rest, 1 << 20, first, &mut out), out);
-            assert_eq!(windowed, whole, "Flate from {at} a window of {first} first");
         }
     }
     let read = |r: Option<Result<(Range<usize>, Raw), Error>>| r.map(|r| r.map(|(at, _)| at));

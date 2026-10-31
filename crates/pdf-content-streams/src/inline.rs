@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
 
-use pdf_filters::{Backend, Faults, Predictor, Prefix, decode_prefix_into};
+use pdf_filters::{Backend, Faults, Predictor, decode_prefix_into};
 use pdf_tokenizer::decode::{self, pdfium};
 use pdf_tokenizer::is_white_space;
 
@@ -631,7 +631,9 @@ impl<'a, 'r> Images<'a, 'r> {
     /// ([`End::Filter`]), its parameters read as PDFium reads them
     /// ([`Images::params`]), the data decoded by pdf-filters, Flate's on
     /// zlib-rs, whose count of what it read is zlib's, and so PDFium's
-    /// ([`Prefix::read`]). None ([`End::Walk`]) where PDFium refuses the
+    /// ([`Prefix::read`](pdf_filters::Prefix::read)), given all that
+    /// follows, which costs nothing more than what it reads. None
+    /// ([`End::Walk`]) where PDFium refuses the
     /// parameters, and none, what was read in vain said
     /// ([`End::Refused`]), where it refuses what decoding gives: an LZW
     /// code that isn't in the table, LZW data that decodes to nothing, a
@@ -654,18 +656,21 @@ impl<'a, 'r> Images<'a, 'r> {
         let data = &self.s[start..];
         let lzw = matches!(filter, Filter::Lzw);
         // The decoder alone: a predictor changes no end, but by refusing.
-        let (prefix, decoded) = match lzw {
-            true => {
-                let early_change = params.early_change;
-                let predictor = Predictor::None;
-                let lzw = pdf_filters::Filter::Lzw {
-                    early_change,
-                    predictor,
-                };
-                decode_prefix_into(data, lzw, self.budget, Backend::ZlibRs, &mut self.decoded)
-            }
-            false => flate(data, self.budget, FLATE_WINDOW, &mut self.decoded),
+        let predictor = Predictor::None;
+        let filter = match lzw {
+            true => pdf_filters::Filter::Lzw {
+                early_change: params.early_change,
+                predictor,
+            },
+            false => pdf_filters::Filter::Flate { predictor },
         };
+        let (prefix, decoded) = decode_prefix_into(
+            data,
+            filter,
+            self.budget,
+            Backend::ZlibRs,
+            &mut self.decoded,
+        );
         let made = self.decoded.len();
         self.decoded.clear();
         let faults = decoded.err().map_or_else(Vec::new, |Faults(faults)| faults);
@@ -971,41 +976,6 @@ impl Walks {
             place = r.end;
         }
         Err(stopped - at)
-    }
-}
-
-/// How much of what's left of the content an image's Flate data is first
-/// decoded from ([`flate`]), in bytes.
-const FLATE_WINDOW: usize = 4096;
-
-/// `data`, an inline image's Flate data and the content after it, decoded
-/// as [`decode_prefix_into`] decodes it on zlib-rs, under `limit`, into
-/// `out`: given its first `first` bytes, then twice as many, and so on,
-/// until the decoder ends its data within what it's given, or stops short
-/// of its last byte, or it's given all of it. That gives what all of it
-/// at once does, as what the decoder does with a byte doesn't depend on
-/// those after it; but a decode first makes room for as much output as
-/// it's given input, so given the rest of a long content, each of many
-/// small images would cost the rest's length.
-pub(crate) fn flate(
-    data: &[u8],
-    limit: usize,
-    first: usize,
-    out: &mut Vec<u8>,
-) -> (Prefix, Result<(), Faults>) {
-    let filter = pdf_filters::Filter::Flate {
-        predictor: Predictor::None,
-    };
-    let start = out.len();
-    let mut window = first.max(1);
-    loop {
-        let given = &data[..window.min(data.len())];
-        let (prefix, decoded) = decode_prefix_into(given, filter, limit, Backend::ZlibRs, out);
-        if prefix.ended || prefix.read < given.len() || given.len() == data.len() {
-            return (prefix, decoded);
-        }
-        out.truncate(start);
-        window = window.saturating_mul(2);
     }
 }
 

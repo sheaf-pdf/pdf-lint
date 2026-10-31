@@ -9,11 +9,25 @@ mod zlib;
 
 use crate::{Backend, Fault, Level, Out, Prefix};
 
-/// `data` decompressed by `backend`: a zlib header, deflate data and its
-/// checksum. As in qpdf, a checksum that doesn't match is read as the end,
-/// and data that ends early keeps what decompressed. What of `data` it
-/// read, as zlib counts it.
-pub(crate) fn decode(data: &[u8], backend: Backend, out: &mut Out) -> Prefix {
+/// How much room the output is first given, before it grows as it fills.
+#[derive(Clone, Copy)]
+pub(crate) enum Room {
+    /// As many bytes as the data's, 64 at least: data that's all its own.
+    Given,
+    /// As many as the data's, from 64 to [`RUNS_ON`]: data that may run on
+    /// into other bytes, which may be many more than its own, so that
+    /// what decoding costs follows what it reads, not what it's given.
+    RunsOn,
+}
+
+/// The most room data that may run on is first given ([`Room::RunsOn`]).
+const RUNS_ON: usize = 4096;
+
+/// `data` decompressed by `backend`, its output first given `room`: a
+/// zlib header, deflate data and its checksum. As in qpdf, a checksum that
+/// doesn't match is read as the end, and data that ends early keeps what
+/// decompressed. What of `data` it read, as zlib counts it.
+pub(crate) fn decode(data: &[u8], backend: Backend, room: Room, out: &mut Out) -> Prefix {
     if !header(data) {
         out.fault(Fault::Header);
         return Prefix::unended(refused(data));
@@ -22,7 +36,11 @@ pub(crate) fn decode(data: &[u8], backend: Backend, out: &mut Out) -> Prefix {
     // the limit's length decompresses whole; what's written is the front.
     let most = out.limit.saturating_add(1);
     let start = out.data.len();
-    out.data.resize(start + data.len().max(64).min(most), 0);
+    let first = match room {
+        Room::Given => data.len().max(64),
+        Room::RunsOn => data.len().clamp(64, RUNS_ON),
+    };
+    out.data.resize(start + first.min(most), 0);
     let (mut written, mut fault, prefix): (usize, Option<Fault>, Prefix) = match backend {
         #[cfg(feature = "miniz_oxide")]
         Backend::MinizOxide => miniz::inflate(data, &mut out.data, start, most),
@@ -414,9 +432,9 @@ mod tests {
         }
     }
 
-    /// The two backends read alike: on every Flate probe of an inline
-    /// image's data, clean, corrupt, cut short and followed by content, the
-    /// count zlib's `total_in` gives. They part where miniz_oxide refuses
+    /// The two backends read alike, as zlib's `total_in` counts: a zlib
+    /// stream whole, damaged at every seventh byte, three ways, with ` EI
+    /// Q` after it, and cut in half. They part where miniz_oxide refuses
     /// what zlib reads on past: a dynamic block whose code-length code has
     /// no lengths, which zlib reads as code lengths of nothing, one bit
     /// each, before it finds no end-of-block code.
@@ -449,6 +467,21 @@ mod tests {
             assert_eq!(read(&data, Backend::ZlibRs), truncated);
             let corrupt = (6, false, 0, vec![Fault::Corrupt { at: 5 }]);
             assert_eq!(read(&data, Backend::MinizOxide), corrupt);
+        }
+    }
+
+    /// Data that runs on into many more bytes than its own costs what it
+    /// reads and gives: its output isn't first given room for all it's
+    /// given.
+    #[test]
+    fn what_runs_on_after_it_costs_nothing() {
+        let data = [&HELLO[..], &vec![b' '; 1 << 20]].concat();
+        for backend in backends() {
+            let mut out = Vec::new();
+            let (prefix, decoded) = decode_prefix_into(&data, FLATE, 1 << 24, backend, &mut out);
+            assert_eq!((prefix.read, prefix.ended, decoded), (16, true, Ok(())));
+            assert_eq!(out, b"hello hello hello hello");
+            assert!(out.capacity() <= 4096, "{}", out.capacity());
         }
     }
 
