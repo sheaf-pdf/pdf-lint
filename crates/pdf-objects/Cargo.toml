@@ -1,0 +1,22 @@
+[package]
+name = "pdf-objects"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "PDF's objects as written, their parser and their writer: owned values, each with where it was written, every fault said, and text strings decoded"
+keywords = ["pdf", "objects", "pdfdocencoding", "iso-32000"]
+categories = ["data-structures", "encoding", "parser-implementations"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1.1" }
+thiserror = "2"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

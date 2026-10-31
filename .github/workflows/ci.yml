@@ -35,8 +35,9 @@ jobs:
         run: just fuzzing
       - name: Test (including doctests)
         run: just test
-      # The tests that set the reader beside qpdf, the oracle, against
-      # the qpdf the recipe fetches at its pinned version.
+      # The tests that set the reader, and what the writer writes, beside
+      # qpdf, the oracle, against the qpdf the recipe fetches at its
+      # pinned version.
       - name: Test against qpdf
         run: just test-qpdf
       - name: Build documentation
@@ -58,10 +59,27 @@ jobs:
       - name: Build and check the archive
         run: just dist
 
-  # The tokenizer's own promises: no std or alloc, and its oldest Rust.
-  # Neither job needs qpdf, and neither ever will.
+  # pdf-structure for Windows and a 32-bit target without files, whose
+  # code of their own nothing else here builds.
+  structure-cross:
+    name: pdf-structure for Windows and wasm32
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-gnu, wasm32-unknown-unknown
+      - uses: extractions/setup-just@v4
+      - name: Lint for x86_64-pc-windows-gnu and wasm32-unknown-unknown
+        run: just structure-cross
+
+  # The tokenizer's own promises: no std, no alloc, and its oldest Rust.
+  # None of these jobs needs qpdf, and none ever will.
   tokenizer-no-std:
-    name: Tokenizer without std or alloc
+    name: Tokenizer without std
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -73,6 +91,22 @@ jobs:
       - uses: extractions/setup-just@v4
       - name: Build for thumbv6m-none-eabi
         run: just tokenizer-no-std
+
+  # thumbv6m-none-eabi ships alloc, so a build against core alone, built
+  # from source, is what shows the tokenizer needs nothing more.
+  tokenizer-core-only:
+    name: Tokenizer on core alone
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: extractions/setup-just@v4
+      - name: Build against core alone for thumbv6m-none-eabi
+        run: just tokenizer-core-only
 
   tokenizer-msrv:
     name: Tokenizer on its minimum Rust
@@ -115,3 +149,60 @@ jobs:
       - uses: extractions/setup-just@v4
       - name: Test
         run: just crypt-msrv
+
+  objects-msrv:
+    name: Objects on their minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in crates/pdf-objects/Cargo.toml,
+      # which `just objects-msrv` reads.
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just objects-msrv
+
+  structure-msrv:
+    name: Structure on its minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in crates/pdf-structure/Cargo.toml,
+      # which `just structure-msrv` reads.
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just structure-msrv
+
+  content-msrv:
+    name: Content streams on their minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in
+      # crates/pdf-content-streams/Cargo.toml, which `just content-msrv`
+      # reads.
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just content-msrv
+
+  arlington-msrv:
+    name: Arlington on its minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in crates/pdf-arlington/Cargo.toml,
+      # which `just arlington-msrv` reads.
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just arlington-msrv

@@ -21,9 +21,13 @@ decrypts what's encrypted itself.
 | Crate | What |
 |---|---|
 | [pdf-lint](crates/pdf-lint) | The checker, a command line and a library. Its README has the rules, the options, the JSON format and how to install it |
-| [pdf-tokenizer](crates/pdf-tokenizer) | A lossless, zero-copy PDF tokenizer, with no dependencies and needing neither `std` nor `alloc` |
-| [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept |
-| [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler, decrypting on RustCrypto's primitives, every fault said |
+| [pdf-tokenizer](crates/pdf-tokenizer) | A lossless, zero-copy PDF tokenizer, by ISO 32000-2's rules or PDFium's, needing neither `std` nor `alloc` |
+| [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept; and Flate encoded, with PNG's predictors, on miniz_oxide or zlib-rs |
+| [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler on RustCrypto's primitives: decrypting, every fault said, and encrypting for a writer, a new file's key and dictionary from randomness it's given, its keys wiped |
+| [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, their parser, by ISO 32000-2's rules or PDFium's, and their writer, which writes an encrypted file's through an encryptor: each value with where it was written, every fault said, and text strings decoded by the spec |
+| [pdf-structure](crates/pdf-structure) | PDF's file structure, read whole or each object on demand, from any thread, from memory or a file read by position: the header, cross-reference tables and streams along `/Prev`, object streams and recovery by scanning, each object through pdf-objects' parser, decrypted through pdf-crypt and decoded through pdf-filters, and so any stream's data asked for, where it was read from recorded, every choice it made said; and written, whole or as an incremental update, cross-reference sections and object streams deflated through pdf-filters, an encrypted file's objects encrypted as they're written, through pdf-crypt, by the list it decrypts by, and an object as read copied as the bytes it was read from, checked against a hash of them |
+| [pdf-content-streams](crates/pdf-content-streams) | PDF content streams read as PDFium reads them: each token with where it is, an inline image's data found by PDFium's rules, each operation with its operands, operands read as pdf-objects' values when asked, and a page's streams joined as one, every place mapped back to its stream, under caps, every error saying where, and where ISO 32000-2 reads it otherwise told to a sink; each operator typed by ISO 32000-2's Annex A, with its operands and where it may be used; and a page's `q`/`Q` balance, its marked content and the resource names it uses |
+| [pdf-arlington](crates/pdf-arlington) | The Arlington PDF Model, embedded: its tables read, and the predicates in their cells evaluated over pdf-objects' objects |
 
 ## Development
 
@@ -36,20 +40,34 @@ just ci       # run everything CI runs
 just clippy   # or one at a time
 ```
 
-`just ci` also needs the `thumbv6m-none-eabi` target and Rust 1.85
-installed, for the tokenizer's no-std build and the minimum Rust of the
-tokenizer, the filters and pdf-crypt.
+`just ci` also needs the `thumbv6m-none-eabi`, `x86_64-pc-windows-gnu`
+and `wasm32-unknown-unknown` targets, nightly Rust with its `rust-src`
+component, and Rust 1.85 installed: for the tokenizer's no-std build,
+pdf-structure's lints for Windows and a 32-bit target, the tokenizer's
+build against `core` alone, and the minimum Rust of the tokenizer, the
+filters, pdf-crypt, pdf-objects, pdf-structure, pdf-content-streams and
+pdf-arlington.
 
-`just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt` and `just
-fuzz check` fuzz the tokenizer, the filters, pdf-crypt's handler, and the
-reader and checker, on nightly with
+`just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
+objects`, `just fuzz structure`, `just fuzz write`, `just fuzz content`
+and `just fuzz check` fuzz the tokenizer, by ISO 32000-2's rules and
+PDFium's, the filters, decoding and encoding, pdf-crypt's handler, new
+files' dictionaries and a password's forms, pdf-objects' parser, by ISO
+32000-2's rules and PDFium's, and its writer, pdf-structure's reader and
+writer, pdf-content-streams' tokens, operations, faults, operator table,
+and the balance, marked content and names over them, and the reader and
+checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
-says for how many seconds (60 by default).
+says for how many seconds (60 by default). CI fuzzes each target the same
+way: two minutes on every pull request and push to main, and half an hour
+twice a week, each run starting from the inputs the runs before it kept
+(`.github/workflows/fuzz.yml`).
 
 ## License
 
-pdf-tokenizer, pdf-filters and pdf-crypt are licensed under either of
-Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT
-license ([LICENSE-MIT](LICENSE-MIT)) at your option. pdf-lint is
-licensed under the Apache License, Version 2.0, as is the Arlington
-model it embeds.
+pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure and
+pdf-content-streams are licensed under either of Apache License, Version
+2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT license
+([LICENSE-MIT](LICENSE-MIT)) at your option. pdf-lint and pdf-arlington
+are licensed under the Apache License, Version 2.0, as is the Arlington
+model pdf-arlington embeds.

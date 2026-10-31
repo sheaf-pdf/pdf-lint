@@ -11,15 +11,18 @@ use core::ops::Range;
 /// whatever its kind, [`Kind::Junk`] included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
-    /// A run of white-space bytes.
+    /// A run of white-space bytes: by PDFium's rules, 0x80 and 0xFF among
+    /// them ([`Rules`](crate::Rules)).
     Space,
     /// `%` and what follows it, up to but not including an end of line.
     Comment,
     /// A run of regular bytes that is an integer: digits, with an optional
     /// sign (`17`, `+17`, `-98`). It may be too large for any integer type.
+    /// By PDFium's rules, any run of digits and signs (`--5`, `5-3`, `+`).
     Integer,
     /// A run of regular bytes that is a real: digits and one point, with an
-    /// optional sign (`34.5`, `-.002`, `4.`).
+    /// optional sign (`34.5`, `-.002`, `4.`). By PDFium's rules, any run of
+    /// digits, signs and points with a point among them (`1.2.3`, `.`).
     Real,
     /// `/` and the regular bytes after it, `#xx` escapes as written. `/`
     /// alone is the empty name.
@@ -33,7 +36,9 @@ pub enum Kind {
     },
     /// A hexadecimal string, `<` to `>`. It's unclosed when a byte that is
     /// neither a hex digit nor white-space comes before `>`, and then ends
-    /// before that byte, or when the input ends first.
+    /// before that byte, or when the input ends first. By PDFium's rules it
+    /// runs to its `>` over any byte, and is unclosed only when the input
+    /// ends first.
     HexString {
         /// Whether its `>` came.
         closed: bool,

@@ -1,6 +1,6 @@
 # The model's TSVs stay byte for byte as upstream ships them, whatever a
 # checkout's line-ending settings.
-crates/pdf-lint/model/** -text
+crates/pdf-arlington/model/** -text
 
 # Shell scripts run under bash on every runner, Windows too, where a CR
 # would break them.

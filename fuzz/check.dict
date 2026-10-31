@@ -1,5 +1,6 @@
-# What PDF files are made of, for libFuzzer's -dict with the check target:
-# their structure's keywords and the names the checker looks for first.
+# What PDF files are made of, for libFuzzer's -dict with the check and
+# structure targets: their structure's keywords and the names the checker
+# looks for first.
 "obj"
 "endobj"
 "stream\x0a"
@@ -25,6 +26,17 @@
 "/Index"
 "/Encrypt"
 "/ID"
+"/XRef"
+"/XRefStm"
+"/ObjStm"
+"/N"
+"/First"
+"/Extends"
+"/Linearized"
+"/StmF"
+"/StrF"
+"/Identity"
+"/Crypt"
 "/Catalog"
 "/Pages"
 "/Page"

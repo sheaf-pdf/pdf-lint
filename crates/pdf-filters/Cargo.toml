@@ -5,15 +5,30 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF's standard stream filters, decoded, with every fault said and what decoded kept"
+description = "PDF's standard stream filters, decoded with every fault said and what decoded kept, and Flate encoded, on miniz_oxide or zlib-rs"
 keywords = ["pdf", "flate", "lzw", "ascii85", "decompression"]
 categories = ["compression", "encoding"]
 # Only what users need, so local tooling files can't end up in the package.
-include = ["/src", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
-miniz_oxide = "0.9"
+miniz_oxide = { version = "0.9", optional = true }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
+thiserror = "2"
+# Through its own safe API, on Rust's allocator, not C's.
+zlib-rs = { version = "0.6", default-features = false, features = ["rust-allocator", "std"], optional = true }
+
+# Each Flate backend, compiled in by its feature; with both, a caller names
+# the one each call takes (`Backend`). With neither, the crate doesn't build.
+[features]
+default = ["miniz_oxide"]
+miniz_oxide = ["dep:miniz_oxide"]
+zlib-rs = ["dep:zlib-rs"]
+
+# docs.rs documents both backends, as a caller names either, not the
+# default's alone.
+[package.metadata.docs.rs]
+features = ["zlib-rs"]
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -1,7 +1,8 @@
 //! What the fuzz target checks, which a unit test checks too: on any
 //! bytes, a file is read and checked without a panic, in the same way
 //! twice, with every finding's bytes inside what was read; and set against
-//! its previous revision, when it has an incremental update. It's
+//! its previous revision, when it has an incremental update. It reads
+//! under small limits ([`options`]), so that a run tries more inputs. It's
 //! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`, with
 //! [`seeds`], files for the fuzzer to begin from.
 
@@ -10,18 +11,39 @@ use std::collections::BTreeSet;
 use crate::bytes;
 use crate::check::{Exempt, Hold, Made, Options, UnlistedIn, check};
 use crate::object::Span;
+use crate::pdf_crypt;
+use crate::pdf_crypt::writer::{Kind, Settings};
 use crate::source::{Document, Source};
 use crate::version::Version;
-use pdf_crypt::writer::{Kind, Settings};
+
+/// The limits the fuzz target reads under: a stream decodes to at most
+/// 1 MiB, and a reading's streams to 4 MiB.
+pub fn options() -> bytes::Options {
+    let mut options = bytes::Options::DEFAULT;
+    options.limits.stream = 1 << 20;
+    options.limits.budget = 4 << 20;
+    options
+}
+
+/// `file` read whole under [`options`], as of the cross-reference section
+/// at `section` when there's one.
+fn read(file: &[u8], section: Option<usize>) -> Document {
+    let mut options = options();
+    options.section = section;
+    bytes::Reading::open(file, &options)
+        .and_then(bytes::Reading::into_document)
+        .expect("a file in memory reads")
+}
 
 /// The fuzz target's body: `data`'s first two bytes choose how the file
-/// after them is held and checked ([`setting`]), and the rest is the file.
+/// after them is held and checked ([`setting`]), and the rest is the file,
+/// read under [`options`].
 pub fn check_file(data: &[u8]) {
     let (choice, file) = match data {
         [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
         _ => (0, data),
     };
-    let doc = bytes::read(file);
+    let doc = read(file, None);
     let (hold, options) = setting(choice, &doc);
     let report = check(&doc, &hold, &options);
     assert_eq!(
@@ -40,7 +62,7 @@ pub fn check_file(data: &[u8]) {
     let _ = report.to_string();
     let _ = report.objects();
     if let Some(update) = &doc.update {
-        let previous = bytes::read_from(file, update.previous);
+        let previous = read(file, Some(update.previous));
         let options = Options {
             paths: true,
             ..options
@@ -114,9 +136,13 @@ fn within(doc: &Document, file: &[u8], at: Span) -> bool {
 /// a page with an annotation and its appearance; an interactive form with
 /// a field merged with its widget, a radio group and a hide action; a
 /// structure tree, a name tree and a number tree; a cross-reference stream
-/// with extensions declared and XMP metadata; an incremental update; and
-/// an encrypted file. Each begins with the two bytes that choose how it's
-/// checked, all clear.
+/// with extensions declared and XMP metadata; an object stream whose
+/// header starts two objects inside another's bytes; an incremental
+/// update; and encrypted files, one of them with an object stream whose
+/// data isn't encrypted, so that its objects' strings are in the clear.
+/// Each begins with the two bytes that choose how it's checked, all
+/// clear, as the `check` and `structure` targets take them; the `write`
+/// target's take a third ([`write_seeds`]).
 pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
     let page = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
@@ -186,22 +212,48 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         ("xref-stream", xref_stream()),
         ("object-streams", object_streams(true)),
         ("object-streams-lzw", object_streams(false)),
+        ("object-streams-overlapping", overlapping()),
         ("update", update()),
         (
             "encrypted",
             file(&encrypted, &format!("/Encrypt 4 0 R /ID [{id} {id}]")).0,
         ),
-        ("encrypted-rc4-40", opens(Kind::Rc4By40, false)),
-        ("encrypted-rc4-128", opens(Kind::Rc4By128, false)),
-        ("encrypted-aes-128", opens(Kind::Aes128, false)),
-        ("encrypted-aes-256-r5", opens(Kind::Aes256R5, false)),
-        ("encrypted-aes-256", opens(Kind::Aes256, false)),
-        ("encrypted-own-crypt", opens(Kind::Aes128, true)),
+        ("encrypted-rc4-40", opens(Kind::Rc4By40, Packing::Streams)),
+        ("encrypted-rc4-128", opens(Kind::Rc4By128, Packing::Streams)),
+        ("encrypted-aes-128", opens(Kind::Aes128, Packing::Streams)),
+        (
+            "encrypted-aes-256-r5",
+            opens(Kind::Aes256R5, Packing::Streams),
+        ),
+        ("encrypted-aes-256", opens(Kind::Aes256, Packing::Streams)),
+        ("encrypted-own-crypt", opens(Kind::Aes128, Packing::Own)),
+        (
+            "encrypted-in-the-clear",
+            opens(Kind::Aes128, Packing::Clear),
+        ),
     ];
     for (_, seed) in &mut seeds {
         seed.splice(0..0, [0, 0]);
     }
     seeds
+}
+
+/// [`seeds`] for pdf-structure's `write` target, whose input has a third
+/// byte after the two that choose how it's written, before the file: which
+/// renumbering the whole file is written under, of five, and, its top bit
+/// set, whether its document is read whole and taken by the reading. Each
+/// seed once with each, named for it, so each way is fuzzed from the
+/// start.
+pub fn write_seeds() -> Vec<(String, Vec<u8>)> {
+    let mut written = Vec::new();
+    for (name, seed) in seeds() {
+        for third in (0..5).chain(0x80..0x85) {
+            let mut seed = seed.clone();
+            seed.insert(2, third);
+            written.push((format!("{name}-{third:02x}"), seed));
+        }
+    }
+    written
 }
 
 /// A stream's object: its dictionary's `entries` and its `data`, with the
@@ -299,8 +351,8 @@ fn object_streams(flate: bool) -> Vec<u8> {
     let (data, filter) = match flate {
         true => (DEFLATED.to_vec(), "/FlateDecode"),
         false => {
-            let objects = crate::write::inflated(DEFLATED);
-            let hex: String = crate::write::lzw(&objects)
+            let objects = pdf_structure::fixture::inflated(DEFLATED);
+            let hex: String = pdf_structure::fixture::lzw(&objects)
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect();
@@ -346,7 +398,10 @@ fn object_streams(flate: bool) -> Vec<u8> {
         above = row;
     }
     let (rows, filter) = match flate {
-        true => (crate::write::zlib(&predicted), " /Filter /FlateDecode"),
+        true => (
+            pdf_structure::fixture::zlib(&predicted),
+            " /Filter /FlateDecode",
+        ),
         false => (rows.concat(), ""),
     };
     let parms = match flate {
@@ -363,11 +418,73 @@ fn object_streams(flate: bool) -> Vec<u8> {
     out
 }
 
+/// A file whose page tree and pages are in an object stream, unfiltered,
+/// whose header starts the second page where the first starts, and the
+/// page tree's resources inside the first page, at its own resources.
+fn overlapping() -> Vec<u8> {
+    let pages = "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /Resources 5 0 R >>";
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+                /Resources << /ProcSet [/PDF] >> >>";
+    let three = pages.len() + 1;
+    let five = three + page.find("<< /ProcSet").unwrap_or(0);
+    let header = format!("2 0 3 {three} 6 {three} 5 {five} ");
+    let data = format!("{header}{pages} {page}");
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let one = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    let four = out.len();
+    let dict = format!(
+        "<< /Type /ObjStm /N 4 /First {} /Length {} >>",
+        header.len(),
+        data.len()
+    );
+    out.extend_from_slice(
+        format!("4 0 obj\n{dict}\nstream\n{data}\nendstream\nendobj\n").as_bytes(),
+    );
+    let seven = out.len();
+    let row = |kind: u8, field: usize, index: u8| {
+        let [high, low] = u16::try_from(field).unwrap_or(0).to_be_bytes();
+        [kind, high, low, index]
+    };
+    let rows = [
+        row(0, 0, 255),
+        row(1, one, 0),
+        row(2, 4, 0),
+        row(2, 4, 1),
+        row(1, four, 0),
+        row(2, 4, 3),
+        row(2, 4, 2),
+        row(1, seven, 0),
+    ]
+    .concat();
+    let dict = format!(
+        "<< /Type /XRef /Size 8 /W [1 2 1] /Root 1 0 R /Length {} >>",
+        rows.len()
+    );
+    out.extend_from_slice(format!("7 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{seven}\n%%EOF\n").as_bytes());
+    out
+}
+
+/// What encrypts the object stream of [`opens`]'s file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Packing {
+    /// The file's crypt filter for streams.
+    Streams,
+    /// Its own `/Crypt` filter, the file's for streams `/Identity`.
+    Own,
+    /// Nothing: the file's crypt filter for streams `/Identity`, and none
+    /// of its own, so that its objects' strings are in the clear, where
+    /// the file's are encrypted.
+    Clear,
+}
+
 /// A file encrypted as `kind` with the empty user password, so that it
 /// opens: its catalog's /Lang encrypted, its page tree and page in an
-/// object stream compressed and encrypted, by the file's crypt filter for
-/// streams or, with `own`, by its own /Crypt filter (/StmF /Identity).
-fn opens(kind: Kind, own: bool) -> Vec<u8> {
+/// object stream compressed, and encrypted as `packing` says (by a crypt
+/// filter only where `kind` has them).
+fn opens(kind: Kind, packing: Packing) -> Vec<u8> {
     let id = b"0123456789abcdef";
     let settings = Settings {
         kind,
@@ -385,14 +502,18 @@ fn opens(kind: Kind, own: bool) -> Vec<u8> {
     let objects = "2 0 3 42 << /Type /Pages /Kids [3 0 R] /Count 1 >>\n\
                    << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [<< /Type /Annot /Subtype /Text /Rect [0 0 9 9] /Contents (In plain view) >>] >>";
     let first = objects.find("<<").unwrap_or(0);
-    let deflated = crate::write::zlib(objects.as_bytes());
-    let crypt = own.then(|| handler.named(b"StdCF"));
-    let data =
-        pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &deflated, crypt.as_ref(), [4; 16])
-            .unwrap_or_default();
-    let filter = match own {
-        true => "/Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /StdCF >> null]",
-        false => "/Filter /FlateDecode",
+    let deflated = pdf_structure::fixture::zlib(objects.as_bytes());
+    let crypt = (packing == Packing::Own).then(|| handler.named(b"StdCF"));
+    let data = match packing {
+        Packing::Clear => deflated,
+        _ => {
+            pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &deflated, crypt.as_ref(), [4; 16])
+                .unwrap_or_default()
+        }
+    };
+    let filter = match packing {
+        Packing::Own => "/Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /StdCF >> null]",
+        _ => "/Filter /FlateDecode",
     };
     let mut out = b"%PDF-1.7\n".to_vec();
     let one = out.len();
@@ -443,7 +564,10 @@ fn opens(kind: Kind, own: bool) -> Vec<u8> {
     }
     if let Some(filter) = values.crypt_filters.first() {
         let method = String::from_utf8_lossy(filter.method.as_deref().unwrap_or_default());
-        let streams = if own { "/Identity" } else { "/StdCF" };
+        let streams = match packing {
+            Packing::Streams => "/StdCF",
+            _ => "/Identity",
+        };
         entries.push_str(&format!(
             " /CF << /StdCF << /CFM /{method} >> >> /StmF {streams} /StrF /StdCF"
         ));
@@ -513,7 +637,14 @@ mod tests {
                 "{name}: {:?}",
                 doc.trailer()
             );
-            assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
+            // But where objects start inside another's bytes, the second
+            // page and the page tree's resources, inside the first page.
+            let inside: &[_] = match name {
+                "object-streams-overlapping" => &[Some((6, 0)), Some((5, 0))],
+                _ => &[],
+            };
+            let on: Vec<_> = doc.warnings.iter().map(|w| w.object).collect();
+            assert_eq!(on, inside, "{name}: {:?}", doc.warnings);
             let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
             assert!(report.objects() > 3, "{name}: {report}");
             check_file(&seed);
@@ -524,8 +655,11 @@ mod tests {
             .filter(|(n, _)| n.starts_with("encrypted-"))
         {
             let doc = bytes::read(&seed[2..]);
-            let opened = crate::source::Encryption::Opened { owner: false };
-            assert_eq!(doc.encryption, opened, "{name}");
+            let opened = matches!(
+                doc.encryption,
+                crate::source::Encryption::Opened { owner: false, .. }
+            );
+            assert!(opened, "{name}: {:?}", doc.encryption);
             assert_eq!(
                 doc.get((3, 0)).map(|o| o.at.and_then(|at| at.stream)),
                 Ok(Some((4, 0))),
@@ -535,8 +669,28 @@ mod tests {
                 .get((1, 0))
                 .ok()
                 .and_then(|o| o.as_dict()?.get(b"Lang").cloned());
-            let en = crate::object::Value::String(crate::object::Str::Bytes(b"en".to_vec()));
-            assert_eq!(lang.map(|l| l.value), Some(en), "{name}");
+            let en = crate::object::Value::String(
+                crate::object::Str::Bytes(b"en".to_vec()),
+                Some(crate::object::Form::Hex),
+            );
+            assert_eq!(lang.map(|l| l.into_value()), Some(en), "{name}");
+            // The one whose object stream leaves its annotation's string in
+            // the clear is recorded so, and found.
+            let clear = name == "encrypted-in-the-clear";
+            let left: BTreeSet<_> = clear.then_some((4, 0)).into_iter().collect();
+            assert_eq!(doc.in_the_clear, left, "{name}");
+            let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+            let packed: Vec<_> = (report.findings.iter())
+                .filter(|f| f.rule == crate::check::Rule::Packed)
+                .map(|f| f.value.as_str())
+                .collect();
+            let found: &[_] = match clear {
+                true => &[
+                    "1 string in the clear: its data isn't encrypted, where the file's strings are",
+                ],
+                false => &[],
+            };
+            assert_eq!(packed, found, "{name}: {report}");
         }
         let update = &seeds().into_iter().find(|(n, _)| *n == "update").unwrap().1;
         assert!(
@@ -632,6 +786,38 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         for (name, seed) in seeds() {
             std::fs::write(dir.join(format!("{name}.pdf")), seed).unwrap();
+        }
+    }
+
+    /// With PDF_LINT_FUZZ_SEEDS naming a folder, writes the `write`
+    /// target's seeds there ([`write_seeds`], `just fuzz write`).
+    #[test]
+    #[ignore = "needs PDF_LINT_FUZZ_SEEDS, a folder to write the seeds to"]
+    fn the_write_seeds_are_written() {
+        let dir =
+            std::env::var_os("PDF_LINT_FUZZ_SEEDS").expect("PDF_LINT_FUZZ_SEEDS names a folder");
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+        for (name, seed) in write_seeds() {
+            std::fs::write(dir.join(format!("{name}.pdf")), seed).unwrap();
+        }
+    }
+
+    /// The `write` target's seeds are the seeds, each with a third byte
+    /// for each of its ways, the file after it as it was: so each file
+    /// read whole is the seed's.
+    #[test]
+    fn the_write_seeds_are_the_seeds_with_a_third_byte() {
+        let (seeds, written) = (seeds(), write_seeds());
+        assert_eq!(written.len(), 10 * seeds.len());
+        for ((name, seed), ways) in seeds.iter().zip(written.chunks(10)) {
+            let thirds: Vec<u8> = ways.iter().map(|(_, w)| w[2]).collect();
+            assert_eq!(thirds, [0, 1, 2, 3, 4, 0x80, 0x81, 0x82, 0x83, 0x84]);
+            for (_, way) in ways {
+                assert_eq!(way[..2], seed[..2], "{name}");
+                assert_eq!(way[3..], seed[2..], "{name}");
+                assert!(way[3..].starts_with(b"%PDF-"), "{name}");
+            }
         }
     }
 }

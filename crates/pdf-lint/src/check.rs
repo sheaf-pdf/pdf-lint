@@ -5,8 +5,17 @@
 // `Walk::array_rows` (from `CParsePDF::parse_object`'s order), `is_date`
 // (from `is_valid_pdf_date_string`) and `Class::of` (from
 // `is_second_class_pdf_name` and `is_third_class_pdf_name`). Each one's
-// doc says how it differs from TestGrammar. The license and NOTICE.txt are
-// in model/.
+// doc says how it differs from TestGrammar. The notices of upstream's
+// NOTICE.txt (pdf-arlington's `model/NOTICE.txt`) that pertain to them:
+//
+//     Copyright 2020 PDF Association, Inc. https://www.pdfa.org
+//
+//     This material is based upon work supported by the Defense Advanced
+//     Research Projects Agency (DARPA) under Contract No. HR001119C0079.
+//     Any opinions, findings and conclusions or recommendations expressed
+//     in this material are those of the author(s) and do not necessarily
+//     reflect the views of the Defense Advanced Research Projects Agency
+//     (DARPA). Approved for public release.
 
 //! The walk: from the trailer as the file writes it, every object it
 //! reaches, each checked against the table it's reached as. Links are
@@ -31,6 +40,29 @@
 //! again as another table, which it isn't checked as, is unlisted only if
 //! that table doesn't list it either.
 //!
+//! Then every object stream of the file (ISO 32000-2, 7.5.7), from its
+//! number, as `ObjectStream`, and what it links to: nothing in the model
+//! links to one but another's `/Extends`, so the walk from the trailer
+//! reaches none. Each is visited after that walk, so what it reaches is
+//! the table it was, and all of them are reached before any is visited, so
+//! each is visited from its own number, an `/Extends` meeting the one it
+//! names reached already.
+//!
+//! Then each earlier revision's trailer (ISO 32000-2, 7.5.6), the newest
+//! first, as the newest is: a table's from `trailer 1`, the first's, a
+//! cross-reference stream's from its number. Each goes on to nothing
+//! indirect and marks nothing it refers to, as what a revision refers to
+//! is the file's where no later revision wrote it again, which the walk
+//! from the trailer checks; and a reference in it to an object a later
+//! revision wrote over or freed isn't followed, as what that revision had
+//! there isn't read: what needs the object is counted as not made.
+//!
+//! Then, of each object stream held, what it holds that it mustn't
+//! ([`Rule::Packed`]): what ISO 32000-2 7.5.7 keeps out of one, and in a
+//! file that encrypts its strings, its objects' strings left in the clear,
+//! its data not encrypted. After the walk, which tells which objects are
+//! pages.
+//!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
 //! under another is as if it weren't in the model, as in TestGrammar
@@ -54,8 +86,9 @@
 //! walk never reached ([`Rule::Unreached`]); in an object built whole (or
 //! as [`Options::unlisted`] says), a key the model doesn't list that isn't
 //! exempt ([`Rule::Unlisted`]); a
-//! key written twice ([`Rule::Duplicate`]); and what the reader had to
-//! choose how to read ([`Rule::Reader`]). A check whose predicate can't be
+//! key written twice ([`Rule::Duplicate`]); what the reader had to
+//! choose how to read ([`Rule::Reader`]); and what an object stream holds
+//! that it mustn't ([`Rule::Packed`]). A check whose predicate can't be
 //! told, or uses a function the evaluator doesn't support, or reads a
 //! string's bytes the reader didn't give, is counted as not made
 //! ([`Report::unchecked`]), and every key the model doesn't list is
@@ -77,16 +110,19 @@
 //! objects nested at most [`NESTING`] deep in one; `/Parent` chains at most
 //! the page tree's depth.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{self, Write as _};
+use std::num::ParseIntError;
 use std::rc::Rc;
 
+use pdf_objects::Resolve;
+use pdf_structure::write::KeptOut;
+
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
-use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Stream, Value};
-use crate::predicate::{
-    self, Cx, Fields, Gate, Reference, Since, Structure, TOLERANCE, Trees, Truth,
-};
-use crate::source::{Source, Warning};
+use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
+use crate::predicate::{self, Cx, FileCx, Gate, Reference, Since, TOLERANCE, Truth};
+use crate::source::{Origin, Revision, Source, Trailer, Warning};
 use crate::text;
 use crate::version::Version;
 
@@ -124,7 +160,12 @@ pub enum Made {
 }
 
 /// The objects held to the grammar: what a writer wrote. The trailer as
-/// written is always held, as [`Made::Merged`].
+/// written is always held, as [`Made::Merged`]. An earlier revision's
+/// trailer ([`Source::revisions`]) is held as merged too, however the
+/// objects are made: each one with every object ([`Hold::All`]); with some
+/// ([`Hold::Only`]), a cross-reference stream's where its number is among
+/// them, as a hold names objects by number, and a table's never, as it
+/// has no number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hold {
     /// Every object in the file.
@@ -136,10 +177,9 @@ pub enum Hold {
 impl Hold {
     /// The objects a hold file names: a line each, its object's number,
     /// generation and how it was made (`12 0 built`, `3 0 merged`), and
-    /// `#` lines and blank ones besides. An error names the line that
-    /// doesn't read, or that names an object a second time.
-    pub fn parse(text: &str) -> anyhow::Result<Hold> {
-        use anyhow::{Context, bail};
+    /// `#` lines and blank ones besides. A [`HoldError`] names the line
+    /// that doesn't read, or that names an object a second time.
+    pub fn parse(text: &str) -> Result<Hold, HoldError> {
         let mut objects = BTreeMap::new();
         for (i, line) in text.lines().enumerate() {
             let line_number = i + 1;
@@ -148,25 +188,87 @@ impl Hold {
                 [] => continue,
                 [first, ..] if first.starts_with('#') => continue,
                 [n, g, made] => (n, g, made),
-                _ => bail!("line {line_number}: not a number, a generation and built or merged"),
+                _ => return Err(HoldError::Words { line: line_number }),
             };
-            let n: u32 = n
-                .parse()
-                .with_context(|| format!("line {line_number}: {n:?} isn't an object number"))?;
-            let g: u16 = g
-                .parse()
-                .with_context(|| format!("line {line_number}: {g:?} isn't a generation"))?;
+            let n: u32 = n.parse().map_err(|error| HoldError::Number {
+                line: line_number,
+                number: n.to_string(),
+                error,
+            })?;
+            let g: u16 = g.parse().map_err(|error| HoldError::Generation {
+                line: line_number,
+                generation: g.to_string(),
+                error,
+            })?;
             let made = match made {
                 "built" => Made::Built,
                 "merged" => Made::Merged,
-                other => bail!("line {line_number}: {other:?} isn't built or merged"),
+                other => {
+                    return Err(HoldError::Made {
+                        line: line_number,
+                        made: other.to_string(),
+                    });
+                }
             };
             if objects.insert((n, g), made).is_some() {
-                bail!("line {line_number}: {n} {g} is held a second time");
+                return Err(HoldError::Again {
+                    line: line_number,
+                    id: (n, g),
+                });
             }
         }
         Ok(Hold::Only(objects))
     }
+}
+
+/// Why a hold file's text doesn't read ([`Hold::parse`]): the rule a line
+/// breaks, after the line. The std error under one is a field, said after
+/// `: `, not a source.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum HoldError {
+    /// A line of other than three words, neither blank nor a `#` line.
+    #[error("line {line}: not a number, a generation and built or merged")]
+    Words {
+        /// Its line.
+        line: usize,
+    },
+    /// An object number that isn't one: not digits, or over 32 bits.
+    #[error("line {line}: {number:?} isn't an object number: {error}")]
+    Number {
+        /// Its line.
+        line: usize,
+        /// The number, as written.
+        number: String,
+        /// Why, as std says.
+        error: ParseIntError,
+    },
+    /// A generation that isn't one: not digits, or over 16 bits.
+    #[error("line {line}: {generation:?} isn't a generation: {error}")]
+    Generation {
+        /// Its line.
+        line: usize,
+        /// The generation, as written.
+        generation: String,
+        /// Why, as std says.
+        error: ParseIntError,
+    },
+    /// A third word that's neither `built` nor `merged`.
+    #[error("line {line}: {made:?} isn't built or merged")]
+    Made {
+        /// Its line.
+        line: usize,
+        /// The word.
+        made: String,
+    },
+    /// An object a line before holds.
+    #[error("line {line}: {n} {g} is held a second time", n = .id.0, g = .id.1)]
+    Again {
+        /// Its line.
+        line: usize,
+        /// The object.
+        id: ObjectId,
+    },
 }
 
 /// What a check is told besides the file and what it holds.
@@ -248,10 +350,9 @@ impl Exempt {
     /// writes one, its `#xx` escapes decoded (`/MyKey`), or with a `*`
     /// after it for every key it begins (`/My*`; a name that ends in a
     /// star is written `/My#2A`); and `#` lines and blank ones besides.
-    /// An error names the line that doesn't read, or that names a key a
-    /// second time.
-    pub fn parse(text: &str) -> anyhow::Result<Vec<Exempt>> {
-        use anyhow::bail;
+    /// An [`ExemptError`] names the line that doesn't read, or that names
+    /// a key a second time.
+    pub fn parse(text: &str) -> Result<Vec<Exempt>, ExemptError> {
         use pdf_tokenizer::decode::How;
         use pdf_tokenizer::{Kind, Tokenizer};
         let mut keys = Vec::new();
@@ -268,33 +369,91 @@ impl Exempt {
             let tokens: Vec<_> = Tokenizer::new(written.as_bytes()).collect();
             let token = match tokens[..] {
                 [token] if matches!(token.kind, Kind::Name) => token,
-                _ => bail!("line {line_number}: {line:?} isn't a name, as /MyKey, or /My*"),
+                _ => {
+                    return Err(ExemptError::Name {
+                        line: line_number,
+                        written: line.to_string(),
+                    });
+                }
             };
             for piece in token.pieces().into_iter().flatten() {
                 match piece.how {
                     How::StrayHash => {
-                        bail!(
-                            "line {line_number}: {line:?} has a # without two hex digits after it"
-                        )
+                        return Err(ExemptError::Hash {
+                            line: line_number,
+                            written: line.to_string(),
+                        });
                     }
                     How::NulEscape => {
-                        bail!("line {line_number}: {line:?} has #00, which a name may not hold")
+                        return Err(ExemptError::Nul {
+                            line: line_number,
+                            written: line.to_string(),
+                        });
                     }
                     _ => {}
                 }
             }
-            let name = crate::bytes::decoded(&token);
+            let name: Vec<u8> = token.pieces().into_iter().flat_map(|p| p.bytes()).collect();
             if name.is_empty() {
-                bail!("line {line_number}: an empty name");
+                return Err(ExemptError::Empty { line: line_number });
             }
             let key = Exempt { name, prefix };
             if keys.contains(&key) {
-                bail!("line {line_number}: {line:?} is exempt a second time");
+                return Err(ExemptError::Again {
+                    line: line_number,
+                    written: line.to_string(),
+                });
             }
             keys.push(key);
         }
         Ok(keys)
     }
+}
+
+/// Why an exempt file's text doesn't read ([`Exempt::parse`]): the rule a
+/// line breaks, after the line.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ExemptError {
+    /// A line that isn't a name, or a name and a `*`.
+    #[error("line {line}: {written:?} isn't a name, as /MyKey, or /My*")]
+    Name {
+        /// Its line.
+        line: usize,
+        /// The line as written, its white space at either end off.
+        written: String,
+    },
+    /// A name with a `#` without two hex digits after it.
+    #[error("line {line}: {written:?} has a # without two hex digits after it")]
+    Hash {
+        /// Its line.
+        line: usize,
+        /// The line as written, its white space at either end off.
+        written: String,
+    },
+    /// A name with `#00`, NUL, which a name may not hold (ISO 32000-2,
+    /// 7.3.5).
+    #[error("line {line}: {written:?} has #00, which a name may not hold")]
+    Nul {
+        /// Its line.
+        line: usize,
+        /// The line as written, its white space at either end off.
+        written: String,
+    },
+    /// A name of no bytes: `/`, or `/*`.
+    #[error("line {line}: an empty name")]
+    Empty {
+        /// Its line.
+        line: usize,
+    },
+    /// A key, or a prefix, a line before exempts.
+    #[error("line {line}: {written:?} is exempt a second time")]
+    Again {
+        /// Its line.
+        line: usize,
+        /// The line as written, its white space at either end off.
+        written: String,
+    },
 }
 
 /// What a finding breaks.
@@ -350,8 +509,23 @@ pub enum Rule {
     /// `/Length` doesn't end at `endstream`, a lone CR after `stream`, an
     /// object without `endobj`, a name's stray `#` or `#00`, a
     /// cross-reference table's rows not 20 bytes, a file whose last line
-    /// isn't `%%EOF` alone, and the like ([`Warning`]).
+    /// isn't `%%EOF` alone, an object an object stream's header starts
+    /// inside another's bytes, and the like ([`Warning`]).
     Reader,
+    /// What an object stream holds that it mustn't: what ISO 32000-2 7.5.7
+    /// keeps out of one ([`KeptOut`]), a stream, the file's encryption
+    /// dictionary (the newest trailer's `/Encrypt`, or an earlier
+    /// revision's where no later revision wrote the number over or freed
+    /// it), what an object stream's `/Length` refers to, a linearization
+    /// dictionary, and in a file whose linearization holds, its catalog and
+    /// page objects; or, in a file that encrypts its strings, its objects'
+    /// strings in the clear, its data not encrypted (7.6.6). In the object
+    /// stream, `ObjectStream` and `-` its table and key, at the object's
+    /// bytes in its data, its value the object and what it is; the strings
+    /// counted, at the first. An object of a generation other than 0, which
+    /// 7.5.7 keeps out too, can't be read from one: its entry has no
+    /// generation (7.5.8.3).
+    Packed,
 }
 
 /// A rule a held object breaks.
@@ -362,13 +536,17 @@ pub struct Finding {
     /// file as a whole.
     pub object: Option<ObjectId>,
     pub made: Made,
-    /// Where the walk reached it from the trailer:
-    /// `Root/Pages/Kids[0]/Annots[2]`, `trailer` for the trailer, `-` for
-    /// an object it never reached.
+    /// Where the walk reached it: from the trailer,
+    /// `Root/Pages/Kids[0]/Annots[2]`, `trailer` for the trailer; from an
+    /// earlier revision's, `trailer 1/ID` for the first's, a table's; from
+    /// an object stream's number, or an earlier revision's cross-reference
+    /// stream's, `12 0 R/DecodeParms`, `12 0 R` for the stream; `-` for an
+    /// object it never reached.
     pub path: String,
     /// The table and key of the row it breaks; for an unreached object,
     /// those of the object that references it, `-` for none; `-` and `-`
-    /// for the reader's.
+    /// for the reader's; `ObjectStream` and `-` for a [`Rule::Packed`]
+    /// one.
     pub table: String,
     pub key: String,
     pub rule: Rule,
@@ -380,6 +558,11 @@ pub struct Finding {
     /// value, an array's element, the dictionary that lacks a key, the
     /// object nothing reaches.
     pub at: Option<Span>,
+    /// The earlier revision whose trailer it's in, a table's or a
+    /// cross-reference stream, or in what's direct in it, counted from the
+    /// first as 1, as its path names a table's (`trailer 1`); none for the
+    /// newest trailer's and for an object's.
+    pub revision: Option<usize>,
 }
 
 /// A key or element of held objects that the model doesn't list: no row
@@ -409,14 +592,18 @@ pub enum Class {
     Other,
 }
 
-/// A check a predicate that can't be told stood in the way of.
+/// A check a predicate that can't be told stood in the way of; or an
+/// earlier revision's trailer that can't be checked, its column and key
+/// `-`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Unchecked {
     /// The column whose cell it is.
     pub column: &'static str,
     /// What's in the way ([`Truth::Unknown`]'s): a function
     /// (`fn:IsMeaningful`), a value that can't be read (`@Type`), or a
-    /// string's bytes the reader didn't give.
+    /// string's bytes the reader didn't give; for a trailer, why it can't
+    /// be checked: a later revision whose numbers aren't known, or the
+    /// revisions not kept.
     pub why: String,
     pub table: String,
     pub key: String,
@@ -432,7 +619,8 @@ pub struct Report {
     pub checked: BTreeMap<String, usize>,
     /// Keys and elements of held objects checked against their rows.
     pub keys: usize,
-    /// Checks not made, for a predicate that can't be told.
+    /// Checks not made, for a predicate that can't be told; and earlier
+    /// revisions' trailers held that can't be checked, by why.
     pub unchecked: BTreeMap<Unchecked, usize>,
     /// Keys and elements of held objects the model doesn't list.
     pub unlisted: BTreeMap<Unlisted, usize>,
@@ -465,7 +653,8 @@ pub struct Report {
     /// `/AA` (unless [`Options::one_table`]).
     pub two_tables: usize,
     /// The cross-reference stream the trailer is, when it's one: a finding
-    /// in the trailer is in it, or in no object.
+    /// in the trailer is in it, or in no object; one in an earlier
+    /// revision's says which ([`Finding::revision`]).
     pub trailer: Option<ObjectId>,
     /// With [`Options::paths`], the path of every held value the walk
     /// reached, as a finding's is written.
@@ -474,9 +663,13 @@ pub struct Report {
 
 /// The objects of `source` that `hold` names, held to the model: each
 /// reached from the trailer as the file's newest cross-reference section
-/// writes it, at the file's version unless `options` says another. A
-/// trailer the reader couldn't read so is a finding, and the walk starts
-/// from what it made of the file instead.
+/// writes it, and then from each object stream, at the file's version
+/// unless `options` says another; and each earlier revision's trailer
+/// ([`Source::revisions`]) when every object is held, or, a
+/// cross-reference stream, when `hold` names its number; and what each
+/// object stream held holds that it mustn't ([`Rule::Packed`]). A trailer
+/// the reader couldn't read so is a finding, and the walk starts from what
+/// it made of the file instead.
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     let version = options.version.unwrap_or_else(|| file_version(source));
     let written = source.trailer();
@@ -491,10 +684,11 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
             rule: Rule::Unresolved,
             value: why.clone(),
             at: None,
+            revision: None,
         });
     }
     let object = &written.object;
-    let (trailer, name) = match &object.value {
+    let (trailer, name) = match object.value() {
         Value::Stream(s) => (&s.dict, "XRefStream"),
         Value::Dict(d) => (d, "FileTrailer"),
         _ => (&Dict::EMPTY, "FileTrailer"),
@@ -506,6 +700,66 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     let mut extensions = crate::extension::declared(source);
     extensions.extend(options.extensions.iter().cloned());
     let checked_under = extensions.clone();
+    // What every predicate of the file is evaluated in, once.
+    let file = FileCx::new(trailer, version, Objects(source))
+        .size(source.size())
+        .extensions(&extensions);
+    // The earlier revisions' trailers held, and what each one's predicates
+    // are evaluated in: its trailer, the objects that revision had, and
+    // the file's length, as where a revision ended isn't recorded. Those
+    // before a revision whose numbers aren't known are counted as not
+    // checked, as are a file's whose revisions the reader didn't keep.
+    let revisions = source.revisions();
+    let first = first_known(revisions);
+    let (held, untold): (Vec<_>, Vec<_>) =
+        (held_revisions(revisions, hold).into_iter()).partition(|&(revision, _)| revision > first);
+    let mut unchecked = BTreeMap::new();
+    for (_, trailer) in untold {
+        let table = match trailer.object.value() {
+            Value::Stream(_) => "XRefStream",
+            _ => "FileTrailer",
+        };
+        *unchecked.entry(not_checked(table, UNTOLD)).or_default() += 1;
+    }
+    let unkept = source
+        .facts()
+        .is_some_and(|f| f.newest.is_some() && f.sections > 1);
+    if revisions.is_empty() && unkept && matches!(hold, Hold::All(_)) {
+        unchecked.insert(not_checked("-", UNKEPT), 1);
+    }
+    // Each number a later revision lists, where an earlier trailer is held
+    // or names an encryption dictionary (`Walk::packed`).
+    let encrypts = (revisions.split_last())
+        .is_some_and(|(_, earlier)| earlier.iter().any(|r| r.trailer.dict().has(b"Encrypt")));
+    let written_since = match held.is_empty() && !encrypts {
+        true => HashMap::new(),
+        false => listed_last(revisions),
+    };
+    let marked = Cell::new(false);
+    let empty = Dict::EMPTY;
+    let earlier = (held.into_iter())
+        .map(|(revision, trailer)| {
+            let dict = match trailer.object.value() {
+                Value::Stream(s) => &s.dict,
+                Value::Dict(d) => d,
+                _ => &empty,
+            };
+            let as_of = AsOf {
+                source,
+                written: &written_since,
+                revision,
+                marked: &marked,
+            };
+            let file = FileCx::new(dict, version, as_of)
+                .size(source.size())
+                .extensions(&extensions);
+            Earlier {
+                revision,
+                trailer,
+                file,
+            }
+        })
+        .collect();
     let mut walk = Walk {
         source,
         trailer,
@@ -522,7 +776,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         under_unlisted: HashSet::new(),
         one_table: options.one_table,
         unlisted_findings: options.unlisted,
-        extensions,
+        extensions: &extensions,
         deprecations: options.deprecations,
         field_keys: match options.one_table {
             true => Vec::new(),
@@ -531,11 +785,15 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         also_of: HashMap::new(),
         again: HashMap::new(),
         unlisted_in: Vec::new(),
-        trees: Trees::default(),
-        structure: Structure::default(),
-        fields: Fields::default(),
+        file,
+        earlier,
+        written: &written_since,
+        marked: &marked,
+        revision: None,
+        containers: Vec::new(),
         report: Report {
             findings,
+            unchecked,
             trailer: id,
             extensions: checked_under,
             ..Report::default()
@@ -558,18 +816,12 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         loose: false,
         also: None,
     });
-    loop {
-        while let Some(visit) = walk.queue.pop_front() {
-            walk.visit(visit);
-        }
-        let Some(visit) = walk.later.pop_front() else {
-            break;
-        };
-        if visit.holder.is_some_and(|id| walk.waiting.remove(&id)) {
-            walk.visit(visit);
-        }
-    }
+    walk.run();
+    walk.object_streams();
+    walk.run();
+    walk.revisions();
     walk.excuse();
+    walk.packed();
     walk.unreached();
     walk.read_as(source.warnings());
     walk.report
@@ -625,17 +877,27 @@ impl Report {
     /// the object of the same number, or the trailer, had no like finding
     /// in before, alike as [`Report::beyond`] has them. An update keeps its
     /// objects' numbers, so a fault is carried only from the object it was
-    /// in.
+    /// in. It leaves the revisions before it as they were, so a finding in
+    /// an earlier revision's trailer ([`Finding::revision`]) is carried by
+    /// a like one in any of `before`'s trailers; one in the newest trailer
+    /// only by one in `before`'s newest, so that a fault the update brings
+    /// back, which the revision before it had mended, is the update's.
     pub fn since<'a>(&'a self, before: &Report) -> Vec<&'a Finding> {
-        let place = |report: &Report, f: &Finding| match report.in_trailer(f) {
-            true => None,
-            false => f.object,
-        };
         let carried: HashSet<_> = (before.findings.iter())
-            .map(|f| (place(before, f), like(f)))
+            .map(|f| (before.place(f), like(f)))
             .collect();
         (self.findings.iter())
-            .filter(|f| f.made == Made::Built || !carried.contains(&(place(self, f), like(f))))
+            .filter(|f| {
+                let like = like(f);
+                let carried = match self.place(f) {
+                    Place::Earlier => {
+                        carried.contains(&(Place::Earlier, like.clone()))
+                            || carried.contains(&(Place::Trailer, like))
+                    }
+                    place => carried.contains(&(place, like)),
+                };
+                f.made == Made::Built || !carried
+            })
             .collect()
     }
 
@@ -646,7 +908,11 @@ impl Report {
     /// finding at the same path for, alike as [`Report::beyond`] has them;
     /// or, where the baseline reached nothing at that path, as where a page
     /// moved, no like finding anywhere. A rewrite renumbers objects, but
-    /// most stay where they were.
+    /// most stay where they were. A path from an object's number, an
+    /// object stream's or an earlier revision's cross-reference stream's
+    /// (`12 0 R/DecodeParms`), is no place a rewrite keeps, as it's the
+    /// number it renumbers: a finding there is carried by a like one
+    /// anywhere.
     pub fn by_path<'a>(&'a self, baseline: &Report) -> Vec<&'a Finding> {
         let at_path: HashSet<_> = (baseline.findings.iter())
             .map(|f| (f.path.as_str(), like(f)))
@@ -654,7 +920,8 @@ impl Report {
         let anywhere: HashSet<_> = baseline.findings.iter().map(like).collect();
         (self.findings.iter())
             .filter(|f| {
-                let carried = match baseline.paths.contains(&f.path) {
+                let placed = baseline.paths.contains(&f.path) && !from_number(&f.path);
+                let carried = match placed {
                     true => at_path.contains(&(f.path.as_str(), like(f))),
                     false => anywhere.contains(&like(f)),
                 };
@@ -663,11 +930,29 @@ impl Report {
             .collect()
     }
 
-    /// Whether `finding` is in the trailer as written: in its
-    /// cross-reference stream, or in no object.
+    /// Whether `finding` is in a trailer as written: an earlier revision's,
+    /// or the newest, in its cross-reference stream or in no object.
     fn in_trailer(&self, finding: &Finding) -> bool {
-        finding.object.is_none() || finding.object == self.trailer
+        finding.revision.is_some() || finding.object.is_none() || finding.object == self.trailer
     }
+
+    /// Where `finding` is, as [`Report::since`] carries it.
+    fn place(&self, finding: &Finding) -> Place {
+        match (finding.revision, finding.object) {
+            (Some(_), _) => Place::Earlier,
+            (None, Some(id)) if Some(id) != self.trailer => Place::Object(id),
+            (None, _) => Place::Trailer,
+        }
+    }
+}
+
+/// Where a finding is, as [`Report::since`] carries it: in an object, the
+/// newest trailer, or an earlier revision's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Place {
+    Object(ObjectId),
+    Trailer,
+    Earlier,
 }
 
 /// What a finding is, for [`Report::beyond`], [`Report::since`] and
@@ -707,6 +992,155 @@ pub fn file_version(source: &dyn Source) -> Version {
     header.max(catalog.unwrap_or(header))
 }
 
+/// A file's objects, as the predicates resolve a reference: an object that
+/// doesn't read is none, as one the file hasn't is.
+struct Objects<'a>(&'a dyn Source);
+
+impl<'a> Resolve<'a> for Objects<'a> {
+    fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
+        self.0.get(id).ok()
+    }
+}
+
+/// A file's objects as an earlier revision had them, as the predicates of
+/// its trailer resolve a reference: the file's, where no later revision
+/// lists the number, as none wrote it over or freed it; else none, and the
+/// evaluation marked, which can't then be told, as what the revision had
+/// there isn't read.
+struct AsOf<'a> {
+    source: &'a dyn Source,
+    /// [`Walk::written`].
+    written: &'a HashMap<u32, usize>,
+    /// Which revision, counted from the first as 1.
+    revision: usize,
+    /// Set when an object written over since is asked for.
+    marked: &'a Cell<bool>,
+}
+
+impl<'a> Resolve<'a> for AsOf<'a> {
+    fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
+        if written_since(self.written, self.revision, id) {
+            self.marked.set(true);
+            return None;
+        }
+        self.source.get(id).ok()
+    }
+}
+
+/// Whether a revision after `revision` (counted from the first as 1) lists
+/// `id`'s number, as `written` has them ([`Walk::written`]): then it wrote
+/// the object over or freed it.
+fn written_since(written: &HashMap<u32, usize>, revision: usize, (n, _): ObjectId) -> bool {
+    written.get(&n).is_some_and(|&last| last > revision)
+}
+
+/// An earlier revision's trailer, held, to visit ([`Walk::revisions`]):
+/// which revision it is, counted from the first as 1, its trailer, and what
+/// its predicates are evaluated in.
+struct Earlier<'a> {
+    revision: usize,
+    trailer: &'a Trailer,
+    file: FileCx<'a, AsOf<'a>>,
+}
+
+/// The earlier revisions whose trailers `hold` holds, each counted from the
+/// first as 1, with its trailer, the newest first: with every object held,
+/// every one; else a cross-reference stream whose number `hold` names, as
+/// merged, and never a table's, as a hold names what a writer wrote, and
+/// `--last-update` the last revision's.
+fn held_revisions<'s>(revisions: &'s [Revision], hold: &Hold) -> Vec<(usize, &'s Trailer)> {
+    let Some((_, earlier)) = revisions.split_last() else {
+        return Vec::new();
+    };
+    (earlier.iter().enumerate().rev())
+        .filter(|(_, revision)| match (hold, revision.trailer.stream) {
+            (Hold::All(_), _) => true,
+            (Hold::Only(objects), Some(id)) => objects.contains_key(&id),
+            (Hold::Only(_), None) => false,
+        })
+        .map(|(i, revision)| (i + 1, &revision.trailer))
+        .collect()
+}
+
+/// How many of `revisions`, the first first, come before the last after
+/// the first whose numbers aren't known ([`Revision::numbers`]): what it
+/// wrote over of theirs can't be told, so their trailers can't be checked,
+/// nor what they name told. 0 where every one's are.
+fn first_known(revisions: &[Revision]) -> usize {
+    (1..revisions.len())
+        .rev()
+        .find(|&i| revisions[i].numbers.is_none())
+        .unwrap_or(0)
+}
+
+/// Why an earlier revision's trailer held isn't checked, before a revision
+/// whose numbers aren't known ([`first_known`]).
+const UNTOLD: &str = "an earlier revision's trailer, before a revision whose numbers aren't known";
+
+/// Why the earlier revisions' trailers of a file aren't checked, every
+/// object held, when the reader read more than one cross-reference section
+/// but kept no revisions: their numbers are more in all than it reads
+/// entries ([`Limits::entries`](crate::bytes::Limits::entries)).
+const UNKEPT: &str = "the earlier revisions' trailers, which the reader didn't keep";
+
+/// An earlier revision's trailer, as `table`, not checked for `why`.
+fn not_checked(table: &str, why: &str) -> Unchecked {
+    Unchecked {
+        column: "-",
+        why: why.to_string(),
+        table: table.to_string(),
+        key: "-".to_string(),
+    }
+}
+
+/// Each number a revision after the first lists, in use or free, with the
+/// last that lists it, counted from the first as 1.
+fn listed_last(revisions: &[Revision]) -> HashMap<u32, usize> {
+    let mut last = HashMap::new();
+    for (i, revision) in revisions.iter().enumerate().skip(1) {
+        for &n in revision.numbers.iter().flatten() {
+            last.insert(n, i + 1);
+        }
+    }
+    last
+}
+
+/// What a predicate comes to where an evaluation in an earlier revision's
+/// trailer met an object written over or freed since: it can't be told,
+/// for `why`.
+trait Untold {
+    fn untold(why: String) -> Self;
+}
+
+impl Untold for Truth {
+    fn untold(why: String) -> Truth {
+        Truth::Unknown(why)
+    }
+}
+
+impl Untold for Reference {
+    fn untold(why: String) -> Reference {
+        Reference::Unknown(why)
+    }
+}
+
+impl Untold for Values {
+    fn untold(why: String) -> Values {
+        Values::Unknown(why)
+    }
+}
+
+/// A SpecialCase's truth, and whether readers ignore its key.
+impl Untold for (Truth, Option<Truth>) {
+    fn untold(why: String) -> (Truth, Option<Truth>) {
+        (Truth::Unknown(why), None)
+    }
+}
+
+/// Why a check on an earlier revision's trailer isn't made, when it needs
+/// an object a later revision wrote over or freed.
+const WRITTEN_OVER: &str = "an earlier revision's object, written over or freed since";
+
 /// A walk of one file.
 struct Walk<'a> {
     source: &'a dyn Source,
@@ -740,7 +1174,7 @@ struct Walk<'a> {
     /// [`Options::deprecations`].
     deprecations: bool,
     /// [`Report::extensions`].
-    extensions: BTreeSet<String>,
+    extensions: &'a BTreeSet<String>,
     /// The keys only field tables list, not the widget's: a widget with
     /// one of them, or `/T`, is a field too.
     field_keys: Vec<&'static [u8]>,
@@ -752,11 +1186,31 @@ struct Walk<'a> {
     /// Each held indirect object's own keys found unlisted: the object,
     /// the key, its count, and its finding, if one was made.
     unlisted_in: Vec<(ObjectId, Vec<u8>, Unlisted, Option<usize>)>,
-    /// The name trees' keys, the structure tree's content items and the
-    /// form's fields' names, as predicates read them.
-    trees: Trees,
-    structure: Structure,
-    fields: Fields,
+    /// What the predicates are evaluated in: the file's parts, and the name
+    /// trees' keys, the structure tree's content items and the form's
+    /// fields' names, as they read them.
+    file: FileCx<'a, Objects<'a>>,
+    /// The earlier revisions' trailers held, the newest first, visited
+    /// after the object streams ([`Walk::revisions`]).
+    earlier: Vec<Earlier<'a>>,
+    /// Each number a revision after the first lists, in use or free, with
+    /// the last that lists it, counted from the first as 1: an earlier
+    /// revision's object at that number was written over or freed since.
+    /// Only where an earlier trailer is held, or names an encryption
+    /// dictionary.
+    written: &'a HashMap<u32, usize>,
+    /// Set when an evaluation in an earlier revision's trailer asks for an
+    /// object written over or freed since ([`AsOf`]).
+    marked: &'a Cell<bool>,
+    /// Which of [`Walk::earlier`] the walk is in the trailer of, while it
+    /// visits it: a reference resolves to the object that revision had, a
+    /// predicate is evaluated in its trailer, and it goes on to nothing
+    /// indirect and marks nothing it refers to. None for the rest of the
+    /// walk.
+    revision: Option<usize>,
+    /// The file's object streams, by number ([`Walk::object_streams`]),
+    /// which [`Walk::packed`] looks in.
+    containers: Vec<ObjectId>,
     report: Report,
 }
 
@@ -782,6 +1236,13 @@ struct Visit<'a> {
 }
 
 impl<'a> Visit<'a> {
+    /// The number of the indirect object it is, not one it's nested in:
+    /// its holder's when it's that object; none for a direct object, and
+    /// for a trailer that isn't a cross-reference stream.
+    fn id(&self) -> Option<ObjectId> {
+        self.holder.filter(|_| self.depth == 0)
+    }
+
     /// The same visit as `table`, with this one's table the other.
     fn as_(&self, table: &'static Table) -> Visit<'a> {
         Visit {
@@ -821,6 +1282,12 @@ impl Drop for Trail<'_> {
 #[derive(Clone)]
 enum Step<'a> {
     Trailer,
+    /// An earlier revision's trailer, a table's, counted from the first as
+    /// 1.
+    Revision(usize),
+    /// An object stream, or an earlier revision's cross-reference stream,
+    /// from its number.
+    Object(ObjectId),
     Key(&'a [u8]),
     Index(usize),
     /// A name or number tree's entry.
@@ -859,18 +1326,128 @@ enum Values {
 /// Where an entry's key and value were written, the two together.
 fn entry_at(entry: &Entry) -> Option<Span> {
     match (entry.key_at, entry.value.at) {
-        (Some(key), Some(value)) => Some(Span {
-            end: value.end,
-            ..key
-        }),
+        (Some(key), Some(value)) => Some(Span::new(key.stream, key.start, value.end)),
         (key, value) => value.or(key),
     }
 }
 
 impl<'a> Walk<'a> {
+    /// Visits what's queued, and what waits to be visited as a
+    /// `_Universal` table once the queue is empty, unless it was reached
+    /// as another meanwhile, until neither is left.
+    fn run(&mut self) {
+        loop {
+            while let Some(visit) = self.queue.pop_front() {
+                self.visit(visit);
+            }
+            let Some(visit) = self.later.pop_front() else {
+                break;
+            };
+            if visit.holder.is_some_and(|id| self.waiting.remove(&id)) {
+                self.visit(visit);
+            }
+        }
+    }
+
+    /// Queues each of the file's object streams ([`object_stream`]), by
+    /// number, as `ObjectStream`, each from its own number: all marked
+    /// reached before any is visited, so that an `/Extends` meets the one
+    /// it names reached already. One the walk reached as another table
+    /// stays that, reached again as this, as any object is.
+    fn object_streams(&mut self) {
+        let table = grammar()
+            .table("ObjectStream")
+            .expect("the model has the object streams' table");
+        let source = self.source;
+        for id in source.ids() {
+            let Ok(object) = source.get(id) else {
+                continue;
+            };
+            if !object_stream(object) {
+                continue;
+            }
+            self.containers.push(id);
+            if let Some(first) = self.reached.get(&id).copied().flatten() {
+                if self.made(Some(id)).is_some() {
+                    self.reached_again(id, first, table);
+                }
+                continue;
+            }
+            self.reached.insert(id, Some(table.name.as_str()));
+            let trail = Rc::new(Trail {
+                up: None,
+                step: Step::Object(id),
+                object,
+            });
+            self.queue.push_back(Visit {
+                object,
+                holder: Some(id),
+                table,
+                trail,
+                depth: 0,
+                loose: false,
+                also: None,
+            });
+        }
+    }
+
+    /// Visits each earlier revision's trailer held ([`Walk::earlier`]), the
+    /// newest first, as `FileTrailer`, or as `XRefStream` when it's a
+    /// stream, as the newest is: a table's from `trailer K`, K its revision
+    /// counted from the first, a cross-reference stream's from its number,
+    /// each walked through what's direct in it before the next. A stream is
+    /// marked reached where the file's object at its number is that stream,
+    /// read where the section is; a newer object at the number stays as it
+    /// was.
+    fn revisions(&mut self) {
+        let source = self.source;
+        for i in 0..self.earlier.len() {
+            let (revision, trailer) = (self.earlier[i].revision, self.earlier[i].trailer);
+            let object = &trailer.object;
+            let name = match object.value() {
+                Value::Stream(_) => "XRefStream",
+                _ => "FileTrailer",
+            };
+            let table = grammar()
+                .table(name)
+                .expect("the model has the trailers' tables");
+            let step = match trailer.stream {
+                Some(id) => {
+                    let here = source.get(id).ok().and_then(|o| o.at);
+                    if here.is_some() && here == object.at {
+                        self.reached.entry(id).or_insert(Some(table.name.as_str()));
+                    }
+                    Step::Object(id)
+                }
+                None => Step::Revision(revision),
+            };
+            let trail = Rc::new(Trail {
+                up: None,
+                step,
+                object,
+            });
+            self.revision = Some(i);
+            self.queue.push_back(Visit {
+                object,
+                holder: trailer.stream,
+                table,
+                trail,
+                depth: 0,
+                loose: false,
+                also: None,
+            });
+            self.run();
+        }
+        self.revision = None;
+    }
+
     /// How the object `holder` was made, when it's held: the trailer as
-    /// [`Made::Merged`].
+    /// [`Made::Merged`], and an earlier revision's, which is visited only
+    /// where it's held ([`held_revisions`]).
     fn made(&self, holder: Option<ObjectId>) -> Option<Made> {
+        if self.revision.is_some() {
+            return Some(Made::Merged);
+        }
         match holder {
             None => Some(Made::Merged),
             Some(id) if Some(id) == self.trailer_id => Some(Made::Merged),
@@ -901,50 +1478,45 @@ impl<'a> Walk<'a> {
             }
         }
         let parents = v.trail.parents();
-        match &v.object.value {
-            Value::Dict(dict) | Value::Stream(Stream { dict, .. }) => {
-                for entry in dict.last_entries() {
-                    let at = At::Key(&entry.key);
-                    let row = v.table.row(at);
-                    let also = also.as_ref().map(|also| (also, also.table.row(at)));
-                    let (raw, written) = (&entry.value, entry_at(entry));
-                    self.entry(&v, at, row, raw, written, made, &parents, also);
+        if let Some(dict) = v.object.as_dict() {
+            for entry in dict.last_entries() {
+                let at = At::Key(&entry.key);
+                let row = v.table.row(at);
+                let also = also.as_ref().map(|also| (also, also.table.row(at)));
+                let (raw, written) = (&entry.value, entry_at(entry));
+                self.entry(&v, at, row, raw, written, made, &parents, also);
+            }
+            if let Some(made) = made {
+                for twice in dict.duplicates() {
+                    let key = String::from_utf8_lossy(&twice.key).into_owned();
+                    let value = format!("{} (its key written again later)", render(&twice.value));
+                    let table = &v.table.name;
+                    self.find(
+                        &v,
+                        made,
+                        Rule::Duplicate,
+                        table,
+                        &key,
+                        value,
+                        entry_at(twice),
+                    );
                 }
-                if let Some(made) = made {
-                    for twice in dict.duplicates() {
-                        let key = String::from_utf8_lossy(&twice.key).into_owned();
-                        let value =
-                            format!("{} (its key written again later)", render(&twice.value));
-                        let table = &v.table.name;
-                        self.find(
-                            &v,
-                            made,
-                            Rule::Duplicate,
-                            table,
-                            &key,
-                            value,
-                            entry_at(twice),
-                        );
-                    }
-                    let first = self.report.findings.len();
-                    self.required_keys(&v, dict, made, &parents);
-                    if let Some(also) = &also {
-                        self.required_keys(also, dict, made, &parents);
-                        self.once(first);
-                    }
+                let first = self.report.findings.len();
+                self.required_keys(&v, dict, made, &parents);
+                if let Some(also) = &also {
+                    self.required_keys(also, dict, made, &parents);
+                    self.once(first);
                 }
             }
-            Value::Array(array) => {
-                let rows = self.array_rows(v.table, array);
-                for (i, (value, row)) in array.iter().zip(rows).enumerate() {
-                    let at = At::Index(i);
-                    self.entry(&v, at, row, value, value.at, made, &parents, None);
-                }
-                if let Some(made) = made {
-                    self.required_elements(&v, array.len(), made, &parents);
-                }
+        } else if let Value::Array(array) = v.object.value() {
+            let rows = self.array_rows(v.table, array);
+            for (i, (value, row)) in array.iter().zip(rows).enumerate() {
+                let at = At::Index(i);
+                self.entry(&v, at, row, value, value.at, made, &parents, None);
             }
-            _ => {}
+            if let Some(made) = made {
+                self.required_elements(&v, array.len(), made, &parents);
+            }
         }
     }
 
@@ -1010,6 +1582,12 @@ impl<'a> Walk<'a> {
         };
         let (id, value) = match self.resolve(raw) {
             Ok(found) => found,
+            Err(gone) if self.written_since(gone) => {
+                if let Some(made) = made {
+                    self.written_over(v, at, row, raw, written, made, parents);
+                }
+                return;
+            }
             Err(gone) => {
                 if let Some(made) = made {
                     let value = format!("{} {} R", gone.0, gone.1);
@@ -1019,9 +1597,9 @@ impl<'a> Walk<'a> {
                 return;
             }
         };
-        let (row, extension) = walked(v.table, row, &self.extensions);
+        let (row, extension) = walked(v.table, row, self.extensions);
         let also = (also)
-            .and_then(|(also, row)| Some((also, walked(also.table, row, &self.extensions).0?)));
+            .and_then(|(also, row)| Some((also, walked(also.table, row, self.extensions).0?)));
         let (v, row, also) = match (row, also) {
             (Some(row), also) => (v, row, also),
             (None, Some((other, row))) => (other, row, None),
@@ -1029,16 +1607,18 @@ impl<'a> Walk<'a> {
                 // Metadata streams may be anywhere from PDF 1.4 (ISO 32000-2
                 // 14.3.2), and associated files from 2.0 (14.13), which
                 // TestGrammar checks as such where the model has no row.
-                let table = match (at, &value.value) {
+                let table = match (at, value.value()) {
                     (At::Key(b"Metadata"), Value::Stream(_)) => "Metadata",
                     (At::Key(b"AF"), Value::Array(_)) => "ArrayOfFileSpecifications",
                     _ => {
                         if let Some(made) = made {
                             self.unlisted(v, at, key, extension, value, written, made);
                         }
-                        each_reference(raw, |to| {
-                            self.under_unlisted.insert(to);
-                        });
+                        if self.revision.is_none() {
+                            each_reference(raw, |to| {
+                                self.under_unlisted.insert(to);
+                            });
+                        }
                         return;
                     }
                 };
@@ -1055,7 +1635,7 @@ impl<'a> Walk<'a> {
         // A dictionary's null entry is no entry (ISO 32000-2, 7.3.7), unless
         // its row allows null.
         let null = |row: &Row| row.r#type.iter().any(|t| t.item == ArlType::Null);
-        if matches!((at, &value.value), (At::Key(_), Value::Null))
+        if matches!((at, value.value()), (At::Key(_), Value::Null))
             && !null(row)
             && also.is_none_or(|(_, row)| !null(row))
         {
@@ -1089,6 +1669,55 @@ impl<'a> Walk<'a> {
             }
             (None, _) => {}
         }
+    }
+
+    /// The entry `raw` at `at` in an earlier revision's trailer, `v`'s held
+    /// object, on `row` of its table, written at `written`: a reference to
+    /// an object a later revision wrote over or freed, which isn't read, as
+    /// what the revision had there isn't. What doesn't need the object is
+    /// checked, the key's versions and whether it may be a reference (where
+    /// the row's types ask the same); its type, and so all that follows
+    /// from it, is counted as not made.
+    #[allow(clippy::too_many_arguments)]
+    fn written_over(
+        &mut self,
+        v: &Visit<'a>,
+        at: At<'a>,
+        row: Option<&'static Row>,
+        raw: &'a Object,
+        written: Option<Span>,
+        made: Made,
+        parents: &[&'a Object],
+    ) {
+        let key = at_text(at);
+        let table = &v.table.name;
+        let row = match walked(v.table, row, self.extensions) {
+            (Some(row), _) => row,
+            (None, extension) => {
+                self.unlisted(v, at, key, extension, raw, written, made);
+                return;
+            }
+        };
+        self.report.keys += 1;
+        self.versions(v, made, row, &key, raw, written);
+        let cells = &row.indirect_reference;
+        match cells.split_first() {
+            Some((cell, rest)) if rest.iter().all(|c| c == cell) => {
+                match self.with_cx((v.id(), v.object), at, parents, None, |cx| {
+                    predicate::reference(cell, cx)
+                }) {
+                    Reference::Direct => {
+                        self.find(v, made, Rule::Direct, table, &key, render(raw), written);
+                    }
+                    Reference::Unknown(why) => {
+                        self.unchecked("IndirectReference", why, table, &key)
+                    }
+                    _ => {}
+                }
+            }
+            _ => self.unchecked("IndirectReference", WRITTEN_OVER.to_string(), table, &key),
+        }
+        self.unchecked("Type", WRITTEN_OVER.to_string(), table, &key);
     }
 
     /// The key or element at `at` of `v`'s object, `value`, that no row
@@ -1132,8 +1761,12 @@ impl<'a> Walk<'a> {
             class,
         };
         // An indirect object's own key: unlisted only if no other table
-        // it's reached as lists it either, which the walk's end tells.
-        if let (At::Key(name), Some(id), 0, false) = (at, v.holder, v.depth, self.one_table) {
+        // it's reached as lists it either, which the walk's end tells. An
+        // earlier revision's cross-reference stream is as it was, whatever
+        // the file's object at its number is reached as now.
+        if let (At::Key(name), Some(id), 0, false, None) =
+            (at, v.holder, v.depth, self.one_table, self.revision)
+        {
             (self.unlisted_in).push((id, name.to_vec(), unlisted.clone(), finding));
         }
         *self.report.unlisted.entry(unlisted).or_default() += 1;
@@ -1224,7 +1857,7 @@ impl<'a> Walk<'a> {
         value: &Object,
         written: Option<Span>,
     ) {
-        match predicate::since(&row.since_version, &self.extensions) {
+        match predicate::since(&row.since_version, self.extensions) {
             Since::In(since) if since > self.version => {
                 let value = format!("{} (since {since})", render(value));
                 self.find(v, made, Rule::TooNew, &v.table.name, key, value, written);
@@ -1263,10 +1896,10 @@ impl<'a> Walk<'a> {
         // "Column 6 - IndirectReference"), which the model asks of none
         // but under an extension (a test says so): unread.
         if !matches!(row.r#type[i].item, ArlType::NameTree | ArlType::NumberTree) {
-            let asked = self.with_cx(v.object, at, parents, None, |cx| {
+            let asked = self.with_cx((v.id(), v.object), at, parents, None, |cx| {
                 predicate::reference(&row.indirect_reference[i], cx)
             });
-            let referenced = matches!(raw.value, Value::Ref(_));
+            let referenced = matches!(raw.value(), Value::Ref(_));
             match asked {
                 Reference::Indirect if !referenced && !value.is_null() => {
                     self.find(v, made, Rule::Indirect, table, &key, render(value), written);
@@ -1278,7 +1911,7 @@ impl<'a> Walk<'a> {
                 _ => {}
             }
         }
-        match self.with_cx(v.object, at, parents, Some(v.table), |cx| {
+        match self.with_cx((v.id(), v.object), at, parents, Some(v.table), |cx| {
             self.values(row, i, value, cx)
         }) {
             Values::Allowed => {}
@@ -1298,12 +1931,13 @@ impl<'a> Walk<'a> {
         }
         let special = &row.special_case[i];
         if !special.is_empty() {
-            let (holds, ignored) = self.with_cx(v.object, at, parents, Some(v.table), |cx| {
-                (
-                    predicate::holds_fully(special, cx),
-                    predicate::ignored(special, cx),
-                )
-            });
+            let (holds, ignored) =
+                self.with_cx((v.id(), v.object), at, parents, Some(v.table), |cx| {
+                    (
+                        predicate::holds_fully(special, cx),
+                        predicate::ignored(special, cx),
+                    )
+                });
             if ignored == Some(Truth::True) {
                 *self
                     .report
@@ -1323,9 +1957,13 @@ impl<'a> Walk<'a> {
     }
 
     /// Notes that `raw`, when it's a reference, was seen under `key` of
-    /// an object walked as `table`.
+    /// an object walked as `table`; not in an earlier revision's trailer,
+    /// which marks nothing it refers to.
     fn refer(&mut self, raw: &Object, table: &'static Table, key: String) {
-        if let Value::Ref(to) = raw.value {
+        if self.revision.is_some() {
+            return;
+        }
+        if let Value::Ref(to) = *raw.value() {
             (self.referrers.entry(to)).or_insert_with(|| (table.name.as_str(), key));
         }
     }
@@ -1333,7 +1971,8 @@ impl<'a> Walk<'a> {
     /// Goes on from `found`, the entry at `step` of `v`'s object (and the
     /// number of the object it's in), of its row's `i`th type: to the
     /// table of its links it fits best (and of `also`, the other table's
-    /// row's links, if another), or through its tree.
+    /// row's links, if another), or through its tree. From an earlier
+    /// revision's trailer, to nothing indirect, and marking nothing.
     #[allow(clippy::too_many_arguments)]
     fn follow(
         &mut self,
@@ -1345,6 +1984,9 @@ impl<'a> Walk<'a> {
         parents: &[&'a Object],
         also: &[&'static Table],
     ) {
+        if self.revision.is_some() && found.0.is_some() {
+            return;
+        }
         match row.r#type[i].item {
             ArlType::NameTree | ArlType::NumberTree => self.tree(v, step, found, row, i, parents),
             ArlType::Array | ArlType::Dictionary | ArlType::Stream => {
@@ -1369,7 +2011,7 @@ impl<'a> Walk<'a> {
                 .expect("the loader checks that every link names a table")
         };
         let allowed: Vec<&Table> = (links.iter())
-            .filter(|l| predicate::gate(&l.wraps, self.version, &self.extensions) != Gate::Excluded)
+            .filter(|l| predicate::gate(&l.wraps, self.version, self.extensions) != Gate::Excluded)
             .map(table)
             .collect();
         if allowed.is_empty() {
@@ -1387,7 +2029,8 @@ impl<'a> Walk<'a> {
     /// another table meanwhile, is queued as that. Unless
     /// [`Options::one_table`], it's checked as two tables at once when the
     /// table of `also` it fits best is another, or when it's a field and
-    /// its widget merged ([`Walk::merged`]).
+    /// its widget merged ([`Walk::merged`]). From an earlier revision's
+    /// trailer, an indirect object isn't gone on to, nor marked.
     fn reach(
         &mut self,
         from: &Visit<'a>,
@@ -1397,6 +2040,9 @@ impl<'a> Walk<'a> {
         parents: &[&'a Object],
         also: &[&'static Table],
     ) {
+        if self.revision.is_some() && id.is_some() {
+            return;
+        }
         let held = self.made(id.or(from.holder)).is_some();
         let first = id.and_then(|id| self.reached.get(&id).copied().flatten());
         let waiting = id.is_some_and(|id| self.waiting.contains(&id));
@@ -1406,7 +2052,7 @@ impl<'a> Walk<'a> {
         let mut up = Vec::with_capacity(PARENTS);
         up.push(from.object);
         up.extend(parents.iter().take(PARENTS - 1));
-        let Some((table, tie)) = self.choose(value, links, &up) else {
+        let Some((table, tie)) = self.choose((id, value), links, &up) else {
             if held && id.is_none_or(|id| !self.reached.contains_key(&id)) {
                 self.report.no_table += 1;
             }
@@ -1421,31 +2067,19 @@ impl<'a> Walk<'a> {
             // doesn't count `_Universal` ones, which fit anything.
             let instead = waiting && !universal(&table.name);
             if !instead {
-                if first != table.name
-                    && self.also_of.get(&id) != Some(&table.name.as_str())
-                    && !universal(first)
-                    && !universal(&table.name)
-                {
-                    self.report.two_contexts += 1;
-                    if !self.one_table {
-                        let again = self.again.entry(id).or_default();
-                        if !again.iter().any(|t| t.name == table.name) {
-                            again.push(table);
-                        }
-                    }
-                }
+                self.reached_again(id, first, table);
                 return;
             }
             self.waiting.remove(&id);
         }
         // Only a dictionary or stream is checked as two tables at once.
-        let dict = matches!(value.value, Value::Dict(_) | Value::Stream(_));
+        let dict = matches!(value.value(), Value::Dict(_) | Value::Stream(_));
         let also = match dict && !self.one_table && !universal(&table.name) {
             false => None,
-            true => (self.choose(value, also, &up))
+            true => (self.choose((id, value), also, &up))
                 .map(|(also, _)| also)
                 .filter(|also| also.name != table.name && !universal(&also.name))
-                .or_else(|| self.merged(value, table, &up)),
+                .or_else(|| self.merged((id, value), table, &up)),
         };
         if tie && held {
             self.report.ties += 1;
@@ -1498,6 +2132,27 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// `id`, a held object reached first as `first`, reached again as
+    /// `table`: counted in [`Report::two_contexts`] when that's another
+    /// table, neither `_Universal` nor the other it's checked as, and kept
+    /// among those it was reached again as, for [`Walk::excuse`] (unless
+    /// [`Options::one_table`]).
+    fn reached_again(&mut self, id: ObjectId, first: &'static str, table: &'static Table) {
+        if first != table.name
+            && self.also_of.get(&id) != Some(&table.name.as_str())
+            && !universal(first)
+            && !universal(&table.name)
+        {
+            self.report.two_contexts += 1;
+            if !self.one_table {
+                let again = self.again.entry(id).or_default();
+                if !again.iter().any(|t| t.name == table.name) {
+                    again.push(table);
+                }
+            }
+        }
+    }
+
     /// The other table `object`, reached as `table`, is checked as too
     /// when it's a field and its widget merged in one dictionary (ISO
     /// 32000-2 12.5.6.19; and a dictionary without `/T` under a field is
@@ -1507,20 +2162,21 @@ impl<'a> Walk<'a> {
     /// field table [`Walk::field_table`] says. A field whose `/Subtype` is
     /// `/Widget` is a widget too. The model's widget table lists the keys
     /// all fields have, but not a field type's (`/FT`, `/V`, `/DA`...); a
-    /// field's tables, none of a widget's.
+    /// field's tables, none of a widget's. `id` is the indirect object
+    /// `object` is, when it's one.
     fn merged(
         &self,
-        object: &'a Object,
+        (id, object): (Option<ObjectId>, &'a Object),
         table: &'static Table,
         parents: &[&'a Object],
     ) -> Option<&'static Table> {
-        let Value::Dict(dict) = &object.value else {
+        let Value::Dict(dict) = object.value() else {
             return None;
         };
         if table.name == "AnnotWidget" {
             let field = self.present(dict.get(b"T"))
                 || (self.field_keys.iter()).any(|key| self.present(dict.get(key)));
-            return field.then(|| self.field_table(object, dict, parents));
+            return field.then(|| self.field_table((id, object), dict, parents));
         }
         let subtype = (dict.get(b"Subtype").and_then(|o| self.resolve(o).ok()))
             .and_then(|(_, o)| o.as_name());
@@ -1535,10 +2191,10 @@ impl<'a> Walk<'a> {
     /// type, `/FT`, says, and a button's flags, `/Ff` (ISO 32000-2 Tables
     /// 226 and 227: bit 17 a push button, else bit 16 a radio button, else
     /// a checkbox), each its own or inherited; else the field table it
-    /// fits best.
+    /// fits best. `id` is the indirect object it is, when it's one.
     fn field_table(
         &self,
-        object: &'a Object,
+        (id, object): (Option<ObjectId>, &'a Object),
         dict: &'a Dict,
         parents: &[&'a Object],
     ) -> &'static Table {
@@ -1565,7 +2221,7 @@ impl<'a> Walk<'a> {
             Some(name) => table(name),
             None => {
                 let fields: Vec<&'static Table> = FIELDS.into_iter().map(table).collect();
-                (self.choose(object, &fields, parents)).map_or(table("Field"), |(t, _)| t)
+                (self.choose((id, object), &fields, parents)).map_or(table("Field"), |(t, _)| t)
             }
         }
     }
@@ -1573,10 +2229,11 @@ impl<'a> Walk<'a> {
     /// The table of `links` that `object` fits best, and whether another
     /// fit as well, the first of them taken; none when there are none.
     /// TestGrammar's `recommended_link_for_object` (ParseObjects.cpp),
-    /// ported: see [`Walk::score`].
+    /// ported: see [`Walk::score`]. `id` is the indirect object `object`
+    /// is, when it's one.
     fn choose(
         &self,
-        object: &'a Object,
+        (id, object): (Option<ObjectId>, &'a Object),
         links: &[&'static Table],
         parents: &[&'a Object],
     ) -> Option<(&'static Table, bool)> {
@@ -1594,7 +2251,7 @@ impl<'a> Walk<'a> {
         let mut best: Option<(&'static Table, i32)> = None;
         let mut tie = false;
         for &table in links {
-            let score = self.score(object, table, parents);
+            let score = self.score((id, object), table, parents);
             match best {
                 Some((_, least)) if score > least => {}
                 Some((_, least)) if score == least => tie = true,
@@ -1610,14 +2267,14 @@ impl<'a> Walk<'a> {
     /// How well `object` fits `table`, lower better (like golf): ported
     /// from `CParsePDF::recommended_link_for_object` in TestGrammar's
     /// `src/ParseObjects.cpp`, Copyright 2020-2022 PDF Association, Inc.,
-    /// Apache-2.0 (the embedded model's NOTICE.txt), its weights kept. Each
-    /// row's entry scores: a disambiguating key's (`Type`, `Subtype`, `S`,
-    /// `Parent`, `TransformMethod`) value of an allowed type and value -80,
-    /// an array's first element's -60 required or -20, another's -10
-    /// required or -4; a value it doesn't allow +10, +7 or +5, a type it
-    /// doesn't +20, +3 or +1; a deprecated key's +8 more. All required
-    /// entries good, -8 for each entry found; and -10 times the share of
-    /// rows found. An array as long as the table has rows -20.
+    /// Apache-2.0 (pdf-arlington's `model/NOTICE.txt`), its weights kept.
+    /// Each row's entry scores: a disambiguating key's (`Type`, `Subtype`,
+    /// `S`, `Parent`, `TransformMethod`) value of an allowed type and
+    /// value -80, an array's first element's -60 required or -20,
+    /// another's -10 required or -4; a value it doesn't allow +10, +7 or
+    /// +5, a type it doesn't +20, +3 or +1; a deprecated key's +8 more.
+    /// All required entries good, -8 for each entry found; and -10 times
+    /// the share of rows found. An array as long as the table has rows -20.
     ///
     /// Where its code departs from what its comments say, this follows
     /// the comments: the array bonus goes to tables without repeating or
@@ -1634,10 +2291,16 @@ impl<'a> Walk<'a> {
     /// `/Ff` bits, which the model checks in SpecialCase, and would tie,
     /// the push button taken. Both are read as the rules read them: what
     /// can't be told counts as allowed.
-    fn score(&self, object: &'a Object, table: &'static Table, parents: &[&'a Object]) -> i32 {
+    fn score(
+        &self,
+        (id, object): (Option<ObjectId>, &'a Object),
+        table: &'static Table,
+        parents: &[&'a Object],
+    ) -> i32 {
         let rows = &table.rows;
-        let (dict, array) = match &object.value {
-            Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => (Some(d), None),
+        let (dict, array) = match object.value() {
+            Value::Dict(d) => (Some(d), None),
+            Value::Stream(s) => (Some(&s.dict), None),
             Value::Array(a) => (None, Some(a)),
             _ => return 0,
         };
@@ -1669,8 +2332,9 @@ impl<'a> Walk<'a> {
                 continue;
             };
             found += 1;
-            let required =
-                self.with_cx(object, at, parents, None, |cx| self.required(row, cx)) == Truth::True;
+            let required = self
+                .with_cx((id, object), at, parents, None, |cx| self.required(row, cx))
+                == Truth::True;
             let decisive = matches!(row.key.as_str(), "Type" | "Subtype" | "S");
             let first = array.is_some() && row.key == "0";
             let typed = row.r#type.iter().position(|t| {
@@ -1690,12 +2354,15 @@ impl<'a> Walk<'a> {
                 continue;
             };
             let special = &row.special_case[i];
-            let allowed = self.with_cx(object, at, parents, Some(table), |cx| {
-                !matches!(self.values(row, i, entry, cx), Values::Not(_))
-            }) && (special.is_empty()
-                || self.with_cx(object, at, parents, Some(table), |cx| {
-                    predicate::holds_fully(special, cx) != Truth::False
-                }));
+            let allowed = !matches!(
+                self.with_cx((id, object), at, parents, Some(table), |cx| {
+                    self.values(row, i, entry, cx)
+                }),
+                Values::Not(_)
+            ) && (special.is_empty()
+                || self.with_cx((id, object), at, parents, Some(table), |cx| {
+                    predicate::holds_fully(special, cx)
+                }) != Truth::False);
             if allowed {
                 score += if decisive || matches!(row.key.as_str(), "Parent" | "TransformMethod") {
                     -80
@@ -1757,12 +2424,13 @@ impl<'a> Walk<'a> {
         let mut nodes = vec![(root, id, depth, true)];
         while let Some((node, node_id, depth, is_root)) = nodes.pop() {
             if let Some(n) = node_id {
-                if self.reached.get(&n).copied().flatten().is_some() {
+                // An earlier revision's trailer goes on to nothing indirect.
+                if self.revision.is_some() || self.reached.get(&n).copied().flatten().is_some() {
                     continue;
                 }
                 self.reached.insert(n, Some(ty.name()));
             }
-            let Value::Dict(dict) = &node.value else {
+            let Value::Dict(dict) = node.value() else {
                 continue;
             };
             let here = Visit {
@@ -1814,7 +2482,7 @@ impl<'a> Walk<'a> {
             }
             if let Some(raw) = dict.get(entries) {
                 self.refer(raw, from.table, row.key.clone());
-                match self.resolve(raw).map(|(_, o)| &o.value) {
+                match self.resolve(raw).map(|(_, o)| o.value()) {
                     Ok(Value::Array(pairs)) => {
                         for (k, pair) in pairs.chunks(2).enumerate() {
                             let (label, value) = match pair {
@@ -1825,8 +2493,8 @@ impl<'a> Walk<'a> {
                                     continue;
                                 }
                             };
-                            let label = match self.resolve(label).map(|(_, o)| &o.value) {
-                                Ok(Value::String(s)) if names => {
+                            let label = match self.resolve(label).map(|(_, o)| o.value()) {
+                                Ok(Value::String(s, _)) if names => {
                                     s.text().unwrap_or_else(|| "…".to_string())
                                 }
                                 Ok(Value::Integer(n)) if !names => n.to_string(),
@@ -1841,7 +2509,7 @@ impl<'a> Walk<'a> {
                             match self.resolve(value) {
                                 Ok((vid, v))
                                     if matches!(
-                                        v.value,
+                                        v.value(),
                                         Value::Dict(_) | Value::Stream(_) | Value::Array(_)
                                     ) =>
                                 {
@@ -1860,7 +2528,7 @@ impl<'a> Walk<'a> {
                                             format!("its {label} is {}, of no table", render(v));
                                         wrong.push((Rule::Tree, what));
                                     }
-                                    if let Some(vid) = vid {
+                                    if let Some(vid) = vid.filter(|_| self.revision.is_none()) {
                                         self.reached.entry(vid).or_insert(None);
                                     }
                                 }
@@ -1881,12 +2549,12 @@ impl<'a> Walk<'a> {
             }
             if let Some(raw) = dict.get(b"Kids") {
                 self.refer(raw, from.table, row.key.clone());
-                match self.resolve(raw).map(|(_, o)| &o.value) {
+                match self.resolve(raw).map(|(_, o)| o.value()) {
                     Ok(Value::Array(kids)) => {
                         for (i, kid) in kids.iter().enumerate() {
                             self.refer(kid, from.table, row.key.clone());
                             match self.resolve(kid) {
-                                Ok((kid_id, kid)) if matches!(kid.value, Value::Dict(_)) => {
+                                Ok((kid_id, kid)) if matches!(kid.value(), Value::Dict(_)) => {
                                     let depth = if kid_id.is_some() { 0 } else { depth + 1 };
                                     if depth <= NESTING {
                                         nodes.push((kid, kid_id, depth, false));
@@ -1929,7 +2597,7 @@ impl<'a> Walk<'a> {
             if row.key.ends_with('*') || self.present(dict.get(key)) {
                 continue;
             }
-            match self.with_cx(v.object, At::Key(key), parents, None, |cx| {
+            match self.with_cx((v.id(), v.object), At::Key(key), parents, None, |cx| {
                 self.required(row, cx)
             }) {
                 Truth::True if row.inheritable && self.inherited(dict, key) => {}
@@ -1964,7 +2632,7 @@ impl<'a> Walk<'a> {
             if i < n {
                 continue;
             }
-            match self.with_cx(v.object, At::Index(i), parents, None, |cx| {
+            match self.with_cx((v.id(), v.object), At::Index(i), parents, None, |cx| {
                 self.required(row, cx)
             }) {
                 Truth::True => {
@@ -1982,7 +2650,7 @@ impl<'a> Walk<'a> {
     /// SinceVersion, nor an extension's key (TestGrammar's
     /// `IsValidForPDFVersion`); else as its Required cell says.
     fn required(&self, row: &Row, cx: &Cx) -> Truth {
-        match predicate::since(&row.since_version, &self.extensions) {
+        match predicate::since(&row.since_version, self.extensions) {
             Since::In(v) if self.version >= v => predicate::required(&row.required, cx),
             _ => Truth::False,
         }
@@ -2027,7 +2695,7 @@ impl<'a> Walk<'a> {
         let mut at = dict;
         for _ in 0..PAGE_TREE_DEPTH {
             let (id, parent) = match at.get(b"Parent").map(|p| self.resolve(p)) {
-                Some(Ok((id, parent))) => match &parent.value {
+                Some(Ok((id, parent))) => match parent.value() {
                     Value::Dict(parent) => (id, parent),
                     _ => break,
                 },
@@ -2061,7 +2729,7 @@ impl<'a> Walk<'a> {
             if !self.matches(value, ty.item) {
                 continue;
             }
-            match predicate::gate(&ty.wraps, self.version, &self.extensions) {
+            match predicate::gate(&ty.wraps, self.version, self.extensions) {
                 Gate::Allowed => return Typed::Is(i, None),
                 Gate::AllowedDeprecated(from) => {
                     deprecated.get_or_insert(Typed::Is(i, Some(from)));
@@ -2085,20 +2753,20 @@ impl<'a> Walk<'a> {
     /// is taken to be what it may be ([`unknown_bytes`]).
     fn matches(&self, o: &Object, ty: ArlType) -> bool {
         use ArlType as T;
-        match (&o.value, ty) {
+        match (o.value(), ty) {
             (Value::Integer(_), T::Integer | T::Bitmask | T::Number)
             | (Value::Real(_), T::Number)
             | (Value::Bool(_), T::Boolean)
             | (Value::Name(_), T::Name)
             | (Value::Null, T::Null)
             | (Value::Stream(_), T::Stream)
-            | (Value::String(_), T::String | T::StringByte | T::StringText)
+            | (Value::String(..), T::String | T::StringByte | T::StringText)
             | (Value::Array(_), T::Array)
             | (Value::Dict(_), T::Dictionary | T::NameTree | T::NumberTree) => true,
-            (Value::String(s), T::StringAscii) => {
+            (Value::String(s, _), T::StringAscii) => {
                 (s.as_bytes()).is_none_or(|b| b.iter().all(|b| (0x20..=0x7E).contains(b)))
             }
-            (Value::String(s), T::Date) => s.text().is_none_or(|t| is_date(&t)),
+            (Value::String(s, _), T::Date) => s.text().is_none_or(|t| is_date(&t)),
             (Value::Array(a), T::Rectangle) => self.numbers(a, 4),
             (Value::Array(a), T::Matrix) => self.numbers(a, 6),
             _ => false,
@@ -2110,7 +2778,7 @@ impl<'a> Walk<'a> {
         a.len() == n
             && (a.iter()).all(|e| {
                 (self.resolve(e))
-                    .is_ok_and(|(_, o)| matches!(o.value, Value::Integer(_) | Value::Real(_)))
+                    .is_ok_and(|(_, o)| matches!(o.value(), Value::Integer(_) | Value::Real(_)))
             })
     }
 
@@ -2133,13 +2801,13 @@ impl<'a> Walk<'a> {
         if items.is_empty() {
             return Values::Allowed;
         }
-        if matches!(value.value, Value::String(Str::Encrypted(_))) {
+        if matches!(value.value(), Value::String(Str::Encrypted(_), _)) {
             return Values::Unknown("the string's bytes".to_string());
         }
         let (mut listed, mut met, mut unknown) = (Vec::new(), None, None);
         let mut required = None;
         for item in items {
-            let gate = predicate::gate(&item.wraps, self.version, &self.extensions);
+            let gate = predicate::gate(&item.wraps, self.version, self.extensions);
             if gate == Gate::Excluded {
                 continue;
             }
@@ -2182,53 +2850,61 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// `f` of the predicates' view of the row at `at` in `container`,
-    /// with `defaults`, the container's table for a SpecialCase or
-    /// PossibleValues.
-    fn with_cx<R>(
+    /// `f` of the predicates' view of the row at `at` in `container`, the
+    /// indirect object `id` when it's one, with `defaults`, the
+    /// container's table for a SpecialCase or PossibleValues. In an earlier
+    /// revision's trailer, in that revision's: what met an object written
+    /// over or freed since can't be told ([`AsOf`]).
+    fn with_cx<R: Untold>(
         &self,
-        container: &Object,
+        (id, container): (Option<ObjectId>, &Object),
         at: At,
         parents: &[&Object],
         defaults: Option<&'static Table>,
         f: impl FnOnce(&Cx) -> R,
     ) -> R {
-        let resolve = |id: ObjectId| self.source.get(id).ok();
-        let hex = |at: Span| self.source.hex(at);
-        f(&Cx {
-            container,
-            at,
-            parents,
-            trailer: self.trailer,
-            resolve: &resolve,
-            version: self.version,
-            defaults,
-            size: self.source.size(),
-            hex: &hex,
-            trees: &self.trees,
-            structure: &self.structure,
-            fields: &self.fields,
-            extensions: &self.extensions,
-        })
+        let row = match self.revision {
+            None => self.file.at(container, at),
+            Some(i) => {
+                self.marked.set(false);
+                self.earlier[i].file.at(container, at)
+            }
+        };
+        let row = row.parents(parents).defaults(defaults);
+        let said = f(&id.map_or(row, |id| row.id(id)));
+        match self.revision.is_some() && self.marked.get() {
+            true => R::untold(WRITTEN_OVER.to_string()),
+            false => said,
+        }
     }
 
     /// `raw` with its references followed, at most [`REFERENCES`]: the
     /// number of the object it's in, if it's an indirect object, and it.
     /// The number of one the file hasn't, or of the last of a chain too
-    /// long, is the error.
+    /// long, is the error; in an earlier revision's trailer, of one written
+    /// over or freed since too.
     fn resolve<'o>(&self, raw: &'o Object) -> Result<(Option<ObjectId>, &'o Object), ObjectId>
     where
         'a: 'o,
     {
         let (mut id, mut at) = (None, raw);
         for _ in 0..REFERENCES {
-            let Value::Ref(to) = at.value else {
+            let Value::Ref(to) = *at.value() else {
                 return Ok((id, at));
             };
+            if self.written_since(to) {
+                return Err(to);
+            }
             at = self.source.get(to).map_err(|_| to)?;
             id = Some(to);
         }
         Err(id.unwrap_or((0, 0)))
+    }
+
+    /// Whether, in an earlier revision's trailer, `id` names an object a
+    /// later revision wrote over or freed.
+    fn written_since(&self, id: ObjectId) -> bool {
+        (self.revision).is_some_and(|i| written_since(self.written, self.earlier[i].revision, id))
     }
 
     /// Whether `key` is exempt from being found unlisted.
@@ -2259,6 +2935,7 @@ impl<'a> Walk<'a> {
             rule,
             value,
             at,
+            revision: self.revision.map(|i| self.earlier[i].revision),
         });
     }
 
@@ -2301,7 +2978,7 @@ impl<'a> Walk<'a> {
                 continue;
             };
             let at = At::Key(&key);
-            if !(again.iter()).any(|t| walked(t, t.row(at), &self.extensions).0.is_some()) {
+            if !(again.iter()).any(|t| walked(t, t.row(at), self.extensions).0.is_some()) {
                 continue;
             }
             if let Some(n) = self.report.unlisted.get_mut(&unlisted) {
@@ -2319,10 +2996,125 @@ impl<'a> Walk<'a> {
         });
     }
 
+    /// What each held object stream holds that it mustn't, each a
+    /// [`Rule::Packed`] finding in the object stream, from its number, at
+    /// the object's bytes in its data where it reads, its value the object
+    /// and what it is: what ISO 32000-2 7.5.7 keeps out of one
+    /// ([`KeptOut`]), and, in a file that encrypts its strings, its
+    /// objects' strings left in the clear ([`Source::in_the_clear`]),
+    /// counted, at the first. After the walk, which tells the pages; the
+    /// object streams by number, each one's objects by number, its strings
+    /// last. Its objects are those read from it ([`Source::record`]), and
+    /// those that don't read for it or for their place in it
+    /// ([`Unread::container`](crate::source::Unread::container)); an
+    /// object stream not held is passed over before they're looked at.
+    ///
+    /// A stream is told by the keyword `stream` after its dictionary in the
+    /// object stream's data, as a reader tells one in the file, as an
+    /// object in one is read as a value; the encryption dictionary by what
+    /// the trailers name ([`encryption_dictionaries`]); the catalog by the
+    /// trailer's `/Root`, and the pages by the table the walk reached them
+    /// as, where the file's linearization holds
+    /// ([`Facts::linearized`](crate::source::Facts::linearized)).
+    fn packed(&mut self) {
+        let source = self.source;
+        let held: BTreeMap<u32, Made> = (self.containers.iter())
+            .filter(|&&(_, g)| g == 0)
+            .filter_map(|&id| Some((id.0, self.made(Some(id))?)))
+            .collect();
+        if held.is_empty() {
+            return;
+        }
+        let mut members: BTreeMap<u32, Vec<ObjectId>> = BTreeMap::new();
+        for id in source.ids() {
+            let container = match source.record(id) {
+                Some(record) => match record.origin {
+                    Origin::Stream { stream, .. } => Some(stream),
+                    _ => None,
+                },
+                None => source.get(id).err().and_then(|why| why.container()),
+            };
+            if let Some(n) = container.filter(|n| held.contains_key(n)) {
+                members.entry(n).or_default().push(id);
+            }
+        }
+        let encryption = encryption_dictionaries(source, self.written);
+        let mut lengths: BTreeMap<ObjectId, Vec<ObjectId>> = BTreeMap::new();
+        for &stream in &self.containers {
+            let length = (source.get(stream).ok())
+                .and_then(|object| object.as_dict()?.get(b"Length")?.as_reference());
+            if let Some(to) = length {
+                lengths.entry(to).or_default().push(stream);
+            }
+        }
+        let linearized = source.facts().is_some_and(|facts| facts.linearized);
+        let catalog = (source.trailer().dict().get(b"Root"))
+            .and_then(Object::as_reference)
+            .filter(|_| linearized);
+        for (n, ids) in members {
+            let stream = (n, 0);
+            let made = held[&n];
+            let data = source.decoded(stream);
+            let clear = source.in_the_clear(stream);
+            let (mut strings, mut first) = (0, None);
+            for id in ids {
+                let object = source.get(id).ok();
+                let at = (source.record(id).map(|record| record.at))
+                    .or_else(|| object.and_then(|o| o.at));
+                let mut kept = Vec::new();
+                let streamed = (data.zip(at)).is_some_and(|(data, at)| {
+                    at.stream == Some(stream) && stream_follows(data, at.end)
+                });
+                if object.is_some() && streamed {
+                    kept.push(KeptOut::Stream.to_string());
+                }
+                if encryption.contains(&id) {
+                    kept.push(KeptOut::Encryption.to_string());
+                }
+                for &(m, g) in lengths.get(&id).into_iter().flatten() {
+                    kept.push(format!("object stream {m} {g} R's /Length"));
+                }
+                if object.is_some_and(linearization) {
+                    kept.push(KeptOut::Linearization.to_string());
+                }
+                if catalog == Some(id) {
+                    kept.push(KeptOut::Catalog.to_string());
+                }
+                if linearized && self.reached.get(&id) == Some(&Some("PageObject")) {
+                    kept.push(KeptOut::Page.to_string());
+                }
+                for what in kept {
+                    let value = format!("{} {} R, {what}", id.0, id.1);
+                    self.report
+                        .findings
+                        .push(packed_in(stream, made, value, at));
+                }
+                if let Some(object) = object.filter(|_| clear) {
+                    let (count, at) = strings_in(object);
+                    if strings == 0 && count > 0 {
+                        first = at;
+                    }
+                    strings += count;
+                }
+            }
+            if strings > 0 {
+                let s = if strings == 1 { "" } else { "s" };
+                let value = format!(
+                    "{strings} string{s} in the clear: its data isn't encrypted, where the file's \
+                     strings are"
+                );
+                self.report
+                    .findings
+                    .push(packed_in(stream, made, value, first));
+            }
+        }
+    }
+
     /// The held objects the walk never reached, each a [`Rule::Unreached`]
     /// finding but those referenced under a key the model doesn't list,
-    /// and the file's own structures (object and cross-reference streams,
-    /// a linearization dictionary). Its table and key are those it was
+    /// and the file's own structures it doesn't visit ([`left_out`]): an
+    /// object stream it visits, and what it refers to is reached through
+    /// it, as through any object. Its table and key are those it was
     /// referenced under in an object walked, else the key of a held object
     /// unreached too, else `-`. One the file hasn't, or that doesn't read,
     /// is [`Rule::Unresolved`].
@@ -2348,23 +3140,25 @@ impl<'a> Walk<'a> {
                     table: "-".to_string(),
                     key: "-".to_string(),
                     rule: Rule::Unresolved,
-                    value: why,
+                    value: why.to_string(),
                     at: None,
+                    revision: None,
                 }),
             }
         }
         let mut among = HashMap::new();
         for &(_, _, object) in &left {
-            let entries: Vec<(String, &Object)> = match &object.value {
-                Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => (d.iter())
+            let entries: Vec<(String, &Object)> = if let Some(d) = object.as_dict() {
+                (d.iter())
                     .map(|(k, v)| (String::from_utf8_lossy(k).into_owned(), v))
-                    .collect(),
-                Value::Array(a) => a
-                    .iter()
+                    .collect()
+            } else if let Some(a) = object.as_array() {
+                a.iter()
                     .enumerate()
                     .map(|(i, v)| (i.to_string(), v))
-                    .collect(),
-                _ => Vec::new(),
+                    .collect()
+            } else {
+                Vec::new()
             };
             for (key, value) in entries {
                 each_reference(value, |to| {
@@ -2389,6 +3183,7 @@ impl<'a> Walk<'a> {
                 rule: Rule::Unreached,
                 value: render(object),
                 at: object.at,
+                revision: None,
             });
         }
     }
@@ -2409,6 +3204,7 @@ impl<'a> Walk<'a> {
                 rule: Rule::Reader,
                 value: warning.message.clone(),
                 at: warning.at,
+                revision: None,
             });
         }
     }
@@ -2429,8 +3225,10 @@ impl<'a> Trail<'a> {
         parents
     }
 
-    /// The way from the trailer, its last [`PATH`] steps:
-    /// `Root/Pages/Kids[0]/Annots[2]`, a tree's entries in braces.
+    /// The way from the trailer, from an earlier revision's, or from an
+    /// object stream's or an earlier cross-reference stream's number, its
+    /// last [`PATH`] steps: `Root/Pages/Kids[0]/Annots[2]`, a tree's
+    /// entries in braces; `trailer 1/ID`; `12 0 R/DecodeParms`.
     fn path(&self) -> String {
         let mut steps = Vec::new();
         let mut at = Some(self);
@@ -2448,6 +3246,10 @@ impl<'a> Trail<'a> {
         for step in steps.into_iter().rev() {
             match step {
                 Step::Trailer => {}
+                Step::Revision(revision) => {
+                    let _ = write!(path, "trailer {revision}");
+                }
+                Step::Object(id) => path.push_str(&object_path(*id)),
                 Step::Key(key) => {
                     if !path.is_empty() {
                         path.push('/');
@@ -2475,27 +3277,140 @@ impl<'a> Trail<'a> {
 /// read as text, and a string-ascii or date read as ciphertext.
 fn unknown_bytes(value: &Object, ty: ArlType) -> bool {
     matches!(
-        (&value.value, ty),
-        (Value::String(Str::Text(_)), ArlType::StringAscii)
+        (value.value(), ty),
+        (Value::String(Str::Text(_), _), ArlType::StringAscii)
             | (
-                Value::String(Str::Encrypted(_)),
+                Value::String(Str::Encrypted(_), _),
                 ArlType::StringAscii | ArlType::Date
             )
     )
 }
 
 /// Whether `object` is one of the file's own structures, which nothing
-/// reaches: an object stream, a cross-reference stream, a linearization
-/// dictionary.
+/// reaches and the walk doesn't visit: a cross-reference stream, a
+/// linearization dictionary. An object stream it visits
+/// ([`Walk::object_streams`]).
 fn left_out(object: &Object) -> bool {
-    match &object.value {
-        Value::Stream(s) => {
-            matches!(
-                s.dict.get(b"Type").and_then(Object::as_name),
-                Some(b"ObjStm" | b"XRef")
-            )
+    match object.value() {
+        Value::Stream(s) => s.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef"),
+        _ => linearization(object),
+    }
+}
+
+/// Whether `object` is an object stream: a stream whose `/Type` is
+/// `/ObjStm`, written direct, as the reader reads one (ISO 32000-2,
+/// 7.5.7). A `/Type` that's a string, or a reference, makes no object
+/// stream, to the reader or here.
+fn object_stream(object: &Object) -> bool {
+    match object.value() {
+        Value::Stream(s) => s.dict.get(b"Type").and_then(Object::as_name) == Some(b"ObjStm"),
+        _ => false,
+    }
+}
+
+/// Whether `object` is a linearization dictionary (ISO 32000-2, Annex F):
+/// a dictionary with `/Linearized`, as the writer tells one it keeps out of
+/// an object stream ([`kept_out`](pdf_structure::write::kept_out)'s
+/// [`KeptOut::Linearization`]). Asked apart from `kept_out`, which gives
+/// one reason an object is kept out and asks an encryption dictionary's
+/// shape first, where the check tells the encryption dictionary by what
+/// the trailers name instead.
+fn linearization(object: &Object) -> bool {
+    matches!(object.value(), Value::Dict(d) if d.has(b"Linearized"))
+}
+
+/// Whether the keyword `stream` comes next in `data` from `end`, past
+/// white-space and comments: an object read from an object stream, as a
+/// value, that's a stream's dictionary, as a reader tells a stream in the
+/// file (ISO 32000-2, 7.3.8.1).
+fn stream_follows(data: &[u8], end: usize) -> bool {
+    use pdf_tokenizer::{Kind, Tokenizer};
+    (Tokenizer::at(data, end))
+        .find(|token| !matches!(token.kind, Kind::Space | Kind::Comment))
+        .is_some_and(|token| token.kind == Kind::Keyword && token.bytes == b"stream")
+}
+
+/// The objects the trailers name as the file's encryption dictionary, by
+/// reference (`/Encrypt`): the newest's, and each earlier revision's where
+/// no later revision lists its number, as `written` has them
+/// ([`Walk::written`]), as one that wrote the number over or freed it put
+/// another object there, or none; where a later revision's numbers aren't
+/// known, nor those before it ([`first_known`]).
+fn encryption_dictionaries(
+    source: &dyn Source,
+    written: &HashMap<u32, usize>,
+) -> BTreeSet<ObjectId> {
+    let named = |trailer: &Trailer| trailer.dict().get(b"Encrypt")?.as_reference();
+    let mut named_by: BTreeSet<ObjectId> = named(source.trailer()).into_iter().collect();
+    let revisions = source.revisions();
+    if let Some((_, earlier)) = revisions.split_last() {
+        let known = earlier.iter().enumerate().skip(first_known(revisions));
+        named_by.extend(
+            known
+                .filter_map(|(i, revision)| Some((i + 1, named(&revision.trailer)?)))
+                .filter(|&(revision, id)| !written_since(written, revision, id))
+                .map(|(_, id)| id),
+        );
+    }
+    named_by
+}
+
+/// How many strings `o` holds, in it and in the direct objects it holds,
+/// no deeper than [`NESTING`], every entry as written, a key written twice
+/// among them; and where the first was written, in the order written.
+fn strings_in(o: &Object) -> (usize, Option<Span>) {
+    let (mut count, mut first) = (0, None);
+    let mut stack = vec![(o, 0)];
+    while let Some((o, depth)) = stack.pop() {
+        match o.value() {
+            Value::String(..) => {
+                if count == 0 {
+                    first = o.at;
+                }
+                count += 1;
+            }
+            _ if depth >= NESTING => {}
+            Value::Array(a) => stack.extend(a.iter().rev().map(|e| (e, depth + 1))),
+            Value::Dict(d) => stack.extend(d.entries().iter().rev().map(|e| (&e.value, depth + 1))),
+            Value::Stream(s) => {
+                let entries = s.dict.entries().iter().rev();
+                stack.extend(entries.map(|e| (&e.value, depth + 1)));
+            }
+            _ => {}
         }
-        Value::Dict(d) => d.has(b"Linearized"),
+    }
+    (count, first)
+}
+
+/// A [`Rule::Packed`] finding in object stream `stream`, made as `made`,
+/// from its number.
+fn packed_in(stream: ObjectId, made: Made, value: String, at: Option<Span>) -> Finding {
+    Finding {
+        object: Some(stream),
+        made,
+        path: object_path(stream),
+        table: "ObjectStream".to_string(),
+        key: "-".to_string(),
+        rule: Rule::Packed,
+        value,
+        at,
+        revision: None,
+    }
+}
+
+/// An object as a path from its number starts: `12 0 R`.
+fn object_path((n, g): ObjectId) -> String {
+    format!("{n} {g} R")
+}
+
+/// Whether `path` starts from an object's number, as [`object_path`]
+/// writes it: `12 0 R`, `12 0 R/DecodeParms`. A path cut short to its last
+/// steps, from `…`, names no number.
+fn from_number(path: &str) -> bool {
+    let first = path.split(['/', '[', '{']).next().unwrap_or_default();
+    let digits = |word: &str| !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit());
+    match first.split(' ').collect::<Vec<_>>()[..] {
+        [n, g, "R"] => digits(n) && digits(g),
         _ => false,
     }
 }
@@ -2571,7 +3486,7 @@ fn fits(object: &Object, table: &Table) -> bool {
         !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())
     };
     let keyed = |row: &Row| row.key != "*" && !element(row);
-    match &object.value {
+    match object.value() {
         Value::Array(_) => !table.rows.iter().any(keyed),
         Value::Dict(_) | Value::Stream(_) => !table.rows.iter().any(element),
         _ => true,
@@ -2600,7 +3515,7 @@ fn at_text(at: At) -> String {
 /// brackets, its elements apart by spaces (an image mask's `[0 1]`). A
 /// null, a dictionary or a stream is any.
 fn is_value(text: &str, value: &Object) -> bool {
-    match &value.value {
+    match value.value() {
         Value::Array(elements) => {
             let inner = text.strip_prefix('[').and_then(|t| t.strip_suffix(']'));
             inner.is_some_and(|inner| {
@@ -2610,7 +3525,7 @@ fn is_value(text: &str, value: &Object) -> bool {
             })
         }
         Value::Name(name) => text == "*" || name.as_slice() == text.as_bytes(),
-        Value::String(s) => {
+        Value::String(s, _) => {
             let quoted = text.strip_prefix('\'').and_then(|t| t.strip_suffix('\''));
             quoted.is_some_and(|quoted| s.text().as_deref() == Some(quoted))
         }
@@ -2629,13 +3544,12 @@ fn is_value(text: &str, value: &Object) -> bool {
 pub(crate) fn each_reference(o: &Object, mut f: impl FnMut(ObjectId)) {
     let mut stack = vec![(o, 0)];
     while let Some((o, depth)) = stack.pop() {
-        match &o.value {
+        match o.value() {
             Value::Ref(id) => f(*id),
             _ if depth >= NESTING => {}
             Value::Array(a) => stack.extend(a.iter().map(|e| (e, depth + 1))),
-            Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
-                stack.extend(d.iter().map(|(_, v)| (v, depth + 1)))
-            }
+            Value::Dict(d) => stack.extend(d.iter().map(|(_, v)| (v, depth + 1))),
+            Value::Stream(s) => stack.extend(s.dict.iter().map(|(_, v)| (v, depth + 1))),
             _ => {}
         }
     }
@@ -2734,7 +3648,7 @@ fn render(o: &Object) -> String {
 }
 
 fn write_value(out: &mut String, o: &Object, depth: usize) {
-    match &o.value {
+    match o.value() {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => {
             let _ = write!(out, "{b}");
@@ -2749,7 +3663,7 @@ fn write_value(out: &mut String, o: &Object, depth: usize) {
             out.push('/');
             out.push_str(&String::from_utf8_lossy(&name[..name.len().min(TOKEN)]));
         }
-        Value::String(s) => {
+        Value::String(s, _) => {
             let text = match s {
                 Str::Bytes(bytes) => text::decode(&bytes[..bytes.len().min(TOKEN)]).text,
                 Str::Text(text) => text.chars().take(TOKEN).collect(),
@@ -2808,7 +3722,9 @@ impl Made {
 }
 
 impl Rule {
-    pub const ALL: [Rule; 14] = [
+    /// Every rule: a slice, not an array of a fixed length, so a rule can
+    /// come without a breaking release.
+    pub const ALL: &'static [Rule] = &[
         Rule::Type,
         Rule::Missing,
         Rule::TooNew,
@@ -2823,6 +3739,7 @@ impl Rule {
         Rule::Unlisted,
         Rule::Duplicate,
         Rule::Reader,
+        Rule::Packed,
     ];
 
     /// Its name, as findings and allowances write it.
@@ -2842,12 +3759,13 @@ impl Rule {
             Rule::Unlisted => "unlisted",
             Rule::Duplicate => "duplicate",
             Rule::Reader => "reader",
+            Rule::Packed => "packed",
         }
     }
 
     /// The rule named `name`.
     pub fn named(name: &str) -> Option<Rule> {
-        Rule::ALL.into_iter().find(|r| r.name() == name)
+        Rule::ALL.iter().copied().find(|r| r.name() == name)
     }
 }
 
@@ -2890,9 +3808,10 @@ impl fmt::Display for Rule {
 
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let object = match self.object {
-            Some((n, g)) => format!("{n} {g} R"),
-            None => "the trailer".to_string(),
+        let object = match (self.object, self.revision) {
+            (Some((n, g)), _) => format!("{n} {g} R"),
+            (None, Some(revision)) => format!("trailer {revision}"),
+            (None, None) => "the trailer".to_string(),
         };
         let value: String = match self.value.char_indices().nth(SHOWN - 1) {
             Some((cut, _)) if self.value.chars().count() > SHOWN => {
@@ -2914,11 +3833,13 @@ impl fmt::Display for Finding {
                 stream: None,
                 start,
                 end,
+                ..
             }) => write!(f, " [bytes {start}..{end}]"),
             Some(Span {
                 stream: Some((n, g)),
                 start,
                 end,
+                ..
             }) => write!(f, " [bytes {start}..{end} of {n} {g} R's data]"),
             None => Ok(()),
         }
@@ -2990,11 +3911,12 @@ mod tests {
     //! TestGrammar chooses them; only held objects found in; and every walk
     //! bounded, on cycles and on deep nesting.
 
+    use pdf_structure::fixture::{self, Body, Xref};
+
     use super::*;
     use crate::bytes;
     use crate::dict;
     use crate::source::Document;
-    use crate::write::{self, Body, Xref};
 
     /// `objects`, the catalog object 1, written at `version` with a
     /// section of `kind`.
@@ -3006,7 +3928,7 @@ mod tests {
     fn written_with(version: &str, objects: &[(u32, Body)], kind: Xref, trailer: Dict) -> Vec<u8> {
         let mut trailer = trailer;
         trailer.set("Root", r(1));
-        write::file(version, objects, trailer, kind)
+        fixture::file(version, objects, trailer, kind)
     }
 
     /// `bytes` read and checked, holding what `hold` does.
@@ -3110,10 +4032,10 @@ mod tests {
         f: impl FnOnce(&mut Dict),
     ) -> Vec<(u32, Body)> {
         match objects.iter_mut().find(|(m, _)| *m == n).map(|(_, b)| b) {
-            Some(Body::Object(Object {
-                value: Value::Dict(d),
-                ..
-            })) => f(d),
+            Some(Body::Object(o)) => match o.value_mut() {
+                Value::Dict(d) => f(d),
+                _ => panic!("no dictionary {n}"),
+            },
             Some(Body::Stream(d, _)) => f(d),
             _ => panic!("no dictionary {n}"),
         }
@@ -3132,6 +4054,7 @@ mod tests {
             rule,
             value: value.to_string(),
             at: None,
+            revision: None,
         }
     }
 
@@ -3352,7 +4275,9 @@ mod tests {
 
     #[test]
     fn a_required_key_absent_is_found_unless_inherited() {
-        let no_rect = changed(clean(), 4, |annot| annot.remove(b"Rect"));
+        let no_rect = changed(clean(), 4, |annot| {
+            annot.remove(b"Rect");
+        });
         assert_eq!(
             placeless(&checked(&no_rect)),
             [finding(
@@ -3365,7 +4290,9 @@ mod tests {
         );
 
         // A page's MediaBox is inheritable: its parent's will do.
-        let no_box = changed(clean(), 3, |page| page.remove(b"MediaBox"));
+        let no_box = changed(clean(), 3, |page| {
+            page.remove(b"MediaBox");
+        });
         assert_eq!(
             placeless(&checked(&no_box)),
             [finding(
@@ -3548,7 +4475,9 @@ mod tests {
         );
 
         // Reached as nothing else, it's checked as that table, last.
-        let alone = changed(tree, 3, |page| page.remove(b"Annots"));
+        let alone = changed(tree, 3, |page| {
+            page.remove(b"Annots");
+        });
         let report = checked(&alone);
         assert_eq!(report.findings, [], "{report}");
         assert_eq!(report.checked.get("AnnotText"), None, "{report}");
@@ -3849,7 +4778,9 @@ mod tests {
 
     #[test]
     fn only_held_objects_are_found_in_but_all_are_walked() {
-        let no_box = changed(clean(), 3, |page| page.remove(b"MediaBox"));
+        let no_box = changed(clean(), 3, |page| {
+            page.remove(b"MediaBox");
+        });
         let bytes = written("1.7", &no_box, Xref::Table);
         let all = checked_as(&bytes, &Hold::All(Made::Built));
         assert_eq!(all.findings.len(), 1, "{all}");
@@ -3979,7 +4910,9 @@ mod tests {
     #[test]
     fn every_walk_ends_on_cycles_and_deep_nesting() {
         // A /Parent cycle, up which the inheritable MediaBox is looked for.
-        let cycle = changed(clean(), 3, |page| page.remove(b"MediaBox"));
+        let cycle = changed(clean(), 3, |page| {
+            page.remove(b"MediaBox");
+        });
         let cycle = changed(cycle, 2, |pages| pages.set("Parent", r(3)));
         let report = checked(&cycle);
         let missing: Vec<_> = (found(&report).into_iter())
@@ -4187,6 +5120,1802 @@ mod tests {
         assert_eq!(tagged(true), []);
     }
 
+    /// A page written directly in the page tree has no number of its own:
+    /// a content item on the node it's in isn't on it.
+    #[test]
+    fn a_page_written_directly_isnt_the_page_tree_node_its_in() {
+        let mut objects = clean();
+        let at = objects.iter().position(|(n, _)| *n == 3).unwrap();
+        let Body::Object(page) = objects.remove(at).1 else {
+            panic!("page 3 is a dictionary");
+        };
+        let objects = changed(objects, 2, |pages| pages.set("Kids", vec![page]));
+        let mut objects = changed(objects, 1, |catalog| catalog.set("StructTreeRoot", r(6)));
+        let element =
+            dict! { "Type" => "StructElem", "S" => "P", "P" => r(6), "Pg" => r(2), "K" => 0 };
+        objects.extend([
+            (6, dict! { "Type" => "StructTreeRoot", "K" => r(7) }.into()),
+            (7, element.into()),
+        ]);
+        let report = checked(&objects);
+        assert_eq!(report.checked.get("PageObject"), Some(&1), "{report}");
+        assert!(
+            !(found(&report).iter()).any(|f| f.2 == "StructParents"),
+            "{report}"
+        );
+        assert!(
+            !(report.unchecked.keys()).any(|u| u.key == "StructParents"),
+            "{report}"
+        );
+    }
+
+    /// Two objects an object stream's header starts at one offset, page 3
+    /// in the page tree and 4, which a structure element's `/Pg` names:
+    /// read from the same bytes, they have one span, and their numbers
+    /// tell them apart, so only 4 needs a `/StructParents`. The reader says
+    /// 4 starts inside 3's bytes, a finding held as 4 is.
+    #[test]
+    fn objects_an_object_stream_starts_at_one_offset_are_told_apart_by_their_numbers() {
+        let page = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>";
+        let data = [b"3 0 4 0 ".as_slice(), page].concat();
+        let head = format!(
+            "<< /Type /ObjStm /N 2 /First 8 /Length {} >>\nstream\n",
+            data.len()
+        );
+        let objects: [(u32, Vec<u8>); 5] = [
+            (
+                1,
+                b"<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 5 0 R >>".to_vec(),
+            ),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (5, b"<< /Type /StructTreeRoot /K 6 0 R >>".to_vec()),
+            (
+                6,
+                b"<< /Type /StructElem /S /P /P 5 0 R /Pg 4 0 R /K 0 >>".to_vec(),
+            ),
+            (10, [head.as_bytes(), &data, b"\nendstream"].concat()),
+        ];
+        let mut file = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+        // Each object's cross-reference entry: its type, and two fields.
+        let mut rows = [(0u8, 0usize, 0u16); 12];
+        rows[0] = (0, 0, 65535);
+        for (n, body) in &objects {
+            rows[*n as usize] = (1, file.len(), 0);
+            file.extend_from_slice(format!("{n} 0 obj\n").as_bytes());
+            file.extend_from_slice(body);
+            file.extend_from_slice(b"\nendobj\n");
+        }
+        (rows[3], rows[4]) = ((2, 10, 0), (2, 10, 1));
+        let xref = file.len();
+        rows[11] = (1, xref, 0);
+        let rows: Vec<u8> = (rows.iter())
+            .flat_map(|&(kind, field, index)| {
+                let field = u32::try_from(field).unwrap().to_be_bytes();
+                [&[kind][..], &field, &index.to_be_bytes()].concat()
+            })
+            .collect();
+        let dict = format!(
+            "11 0 obj\n<< /Type /XRef /Size 12 /W [1 4 2] /Root 1 0 R /Length {} >>\nstream\n",
+            rows.len()
+        );
+        file.extend_from_slice(dict.as_bytes());
+        file.extend_from_slice(&rows);
+        file.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        let doc = bytes::read(&file);
+        assert_eq!(doc.get((3, 0)).unwrap().at, doc.get((4, 0)).unwrap().at);
+        let report = check(&doc, &Hold::All(Made::Built), &Options::default());
+        assert_eq!(report.checked.get("PageObject"), Some(&2), "{report}");
+        let parents: Vec<_> = (found(&report).into_iter())
+            .filter(|f| f.2 == "StructParents")
+            .map(|f| (f.0, f.1, f.3))
+            .collect();
+        assert_eq!(
+            parents,
+            [(Some(4), "PageObject", Rule::Missing)],
+            "{report}"
+        );
+        let inside = "it starts at byte 8 of object stream 10 0 R's data, \
+                      inside 3 0 R, which runs from byte 8 to 80";
+        let at = doc.get((4, 0)).unwrap().at;
+        let said = |hold: &Hold| {
+            let report = check(&doc, hold, &Options::default());
+            (report.findings.into_iter())
+                .filter(|f| f.rule == Rule::Reader)
+                .map(|f| (f.object, f.made, f.value, f.at))
+                .collect::<Vec<_>>()
+        };
+        let only = |id, made| Hold::Only(BTreeMap::from([(id, made)]));
+        let holds = [
+            (Hold::All(Made::Built), Made::Built),
+            (only((4, 0), Made::Built), Made::Built),
+            (only((4, 0), Made::Merged), Made::Merged),
+        ];
+        for (hold, made) in holds {
+            let value = inside.to_string();
+            assert_eq!(said(&hold), [(Some((4, 0)), made, value, at)]);
+        }
+        assert_eq!(said(&only((3, 0), Made::Built)), []);
+    }
+
+    /// An object stream [`with_object_streams`] writes: its number, the
+    /// entries of its dictionary it's given, and its members, each its
+    /// number and as written.
+    type ObjStm<'a> = (u32, &'a str, &'a [(u32, &'a str)]);
+
+    /// A file at 1.7 of `objects`, each written at its number as given,
+    /// and of object streams, each its number, the entries of its
+    /// dictionary but `/N`, `/First` and `/Length` (its `/Type` among
+    /// them), and its members, each its number and as written; with a
+    /// cross-reference stream listing every one, its trailer's `/Root` 1.
+    fn with_object_streams(objects: &[(u32, &str)], streams: &[ObjStm]) -> Vec<u8> {
+        let mut file = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+        // Each object's cross-reference entry: its type, and two fields.
+        let mut entries = BTreeMap::new();
+        for &(n, body) in objects {
+            entries.insert(n, (1u8, file.len(), 0u16));
+            file.extend_from_slice(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+        }
+        for &(n, dict, members) in streams {
+            let (mut header, mut data) = (String::new(), String::new());
+            for (i, &(m, body)) in members.iter().enumerate() {
+                header.push_str(&format!("{m} {} ", data.len()));
+                data.push_str(body);
+                data.push('\n');
+                entries.insert(m, (2, n as usize, i as u16));
+            }
+            let (count, first) = (members.len(), header.len());
+            let length = first + data.len();
+            entries.insert(n, (1, file.len(), 0));
+            let head =
+                format!("{n} 0 obj\n<< {dict} /N {count} /First {first} /Length {length} >>");
+            let body = format!("{head}\nstream\n{header}{data}\nendstream\nendobj\n");
+            file.extend_from_slice(body.as_bytes());
+        }
+        let own = entries.keys().max().map_or(1, |n| n + 1);
+        let xref = file.len();
+        entries.insert(own, (1, xref, 0));
+        let rows: Vec<u8> = (0..=own)
+            .flat_map(|n| {
+                let (kind, field, index) = match (n, entries.get(&n)) {
+                    (0, _) => (0, 0, 65535),
+                    (_, Some(&entry)) => entry,
+                    (_, None) => (0, 0, 0),
+                };
+                let field = u32::try_from(field).unwrap().to_be_bytes();
+                [&[kind][..], &field, &index.to_be_bytes()].concat()
+            })
+            .collect();
+        let dict = format!(
+            "{own} 0 obj\n<< /Type /XRef /Size {} /W [1 4 2] /Root 1 0 R /Length {} >>\nstream\n",
+            own + 1,
+            rows.len()
+        );
+        file.extend_from_slice(dict.as_bytes());
+        file.extend_from_slice(&rows);
+        file.extend_from_slice(
+            format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        file
+    }
+
+    /// A finding's object, path, table, key, rule and value.
+    type Walked<'a> = (Option<u32>, &'a str, &'a str, &'a str, Rule, &'a str);
+
+    /// Each finding's object, path, table, key, rule and value.
+    fn walked(report: &Report) -> Vec<Walked<'_>> {
+        (report.findings.iter())
+            .map(|f| {
+                let object = f.object.map(|(n, _)| n);
+                let (path, table, key) = (f.path.as_str(), f.table.as_str(), f.key.as_str());
+                (object, path, table, key, f.rule, f.value.as_str())
+            })
+            .collect()
+    }
+
+    /// An object stream is checked as `ObjectStream`, from its number,
+    /// though nothing in the model links to one but another's `/Extends`:
+    /// one that extends the catalog, with a key the model doesn't list,
+    /// holding a page whose `/Rotate` is a string. Its `/Extends` is of a
+    /// type its row doesn't allow; its key is counted unlisted, a finding
+    /// where it's built; and the page is found in as before.
+    #[test]
+    fn an_object_stream_is_checked_from_its_number() {
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> \
+                    /Rotate (abc) >>";
+        let file = with_object_streams(
+            &[
+                (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+                (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            ],
+            &[(10, "/Type /ObjStm /Extends 1 0 R /Bogus 1", &[(3, page)])],
+        );
+        let doc = bytes::read(&file);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        let extends = "<< /Pages 2 0 R /Type /Catalog >>";
+        assert_eq!(
+            walked(&report),
+            [
+                (
+                    Some(3),
+                    "Root/Pages/Kids[0]",
+                    "PageObject",
+                    "Rotate",
+                    Rule::Type,
+                    "(abc)"
+                ),
+                (
+                    Some(10),
+                    "10 0 R",
+                    "ObjectStream",
+                    "Extends",
+                    Rule::Type,
+                    extends
+                ),
+            ],
+            "{report}"
+        );
+        let extends_at = report.findings[1].at.unwrap();
+        assert_eq!(&file[extends_at.start..extends_at.end], b"/Extends 1 0 R");
+        assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
+        let bogus = unlisted("ObjectStream", "Bogus", Class::Other);
+        assert_eq!(report.unlisted, BTreeMap::from([(bogus, 1)]), "{report}");
+
+        let built = check(&doc, &Hold::All(Made::Built), &Options::default());
+        let unlisted: Vec<_> = (walked(&built).into_iter())
+            .filter(|f| f.4 == Rule::Unlisted)
+            .collect();
+        assert_eq!(
+            unlisted,
+            [(
+                Some(10),
+                "10 0 R",
+                "ObjectStream",
+                "Bogus",
+                Rule::Unlisted,
+                "1"
+            )],
+            "{built}"
+        );
+
+        // Clean, it's checked and counted all the same, with no finding.
+        let page = page.replace("/Rotate (abc)", "/Rotate 90");
+        let file = with_object_streams(
+            &[
+                (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+                (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            ],
+            &[(10, "/Type /ObjStm", &[(3, &page)])],
+        );
+        let report = checked_as(&file, &Hold::All(Made::Built));
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.unlisted, BTreeMap::new(), "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
+    }
+
+    /// A document at `version` with a catalog (1) and an empty page tree
+    /// (2), what's tested added to it.
+    fn bare(version: Version) -> Document {
+        let trailer = dict! { "Root" => Object::reference(1), "Size" => 7 };
+        let mut doc = Document::new(version, trailer);
+        doc.insert(
+            1,
+            dict! { "Type" => "Catalog", "Pages" => Object::reference(2) },
+        );
+        doc.insert(
+            2,
+            dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 },
+        );
+        doc
+    }
+
+    /// What `report` found: each finding's object, table, key and rule,
+    /// sorted.
+    fn faults(report: &Report) -> Vec<(Option<ObjectId>, &str, &str, Rule)> {
+        let mut found: Vec<_> = (report.findings.iter())
+            .map(|f| (f.object, f.table.as_str(), f.key.as_str(), f.rule))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Object streams with a fault of each kind the table makes: a key it
+    /// doesn't list, a required one missing, one of a type it doesn't
+    /// allow, a value it doesn't allow or that fails its SpecialCase, one
+    /// direct that must be indirect, a reference to nothing, a key written
+    /// twice; and what they link to: a filter in an array that isn't one,
+    /// directly and through a reference, and decode parameters, a
+    /// dictionary and an array's, held to the first table of a filter's
+    /// their keys fit as well as any (a tie, counted), as any stream's are.
+    /// Each is found, in the object it's in, held as built, and counted,
+    /// and the array referenced isn't unreached; held as merged, each is
+    /// checked as well.
+    #[test]
+    fn an_object_streams_faults_are_found() {
+        let mut doc = bare(Version::new(1, 7));
+        let extended = dict! { "Type" => "ObjStm", "N" => 0, "First" => 0, "Length" => 0 };
+        let container = dict! {
+            "Type" => "ObjStm",
+            "First" => -1,
+            "Length" => 10,
+            "Filter" => vec![Object::from("Bogus")],
+            "Extends" => Object::stream(extended),
+            "Stray" => 1,
+        };
+        doc.insert(3, Object::stream(container));
+        let container = dict! {
+            "Type" => "ObjStm",
+            "N" => "x",
+            "First" => 0,
+            "First" => 0,
+            "DL" => -1,
+            "Length" => Object::reference(99),
+            "Filter" => "FlateDecode",
+            "DecodeParms" => dict! { "Predictor" => 3 },
+        };
+        doc.insert(4, Object::stream(container));
+        let container = dict! {
+            "Type" => "ObjStm",
+            "N" => 0,
+            "First" => 0,
+            "Length" => 0,
+            "Filter" => Object::reference(6),
+            "DecodeParms" => vec![dict! { "Predictor" => 3 }.into(), Object::null()],
+        };
+        doc.insert(5, Object::stream(container));
+        doc.insert(6, vec![Object::from("FlateDecode"), Object::from("Bogus")]);
+        let hold = Hold::Only((3..=6).map(|n| ((n, 0), Made::Built)).collect());
+        let report = check(&doc, &hold, &Options::default());
+        let at = |n| Some((n, 0));
+        assert_eq!(
+            faults(&report),
+            [
+                (at(3), "ArrayOfCompressionFilterNames", "0", Rule::Value),
+                (at(3), "ObjectStream", "Extends", Rule::Indirect),
+                (at(3), "ObjectStream", "First", Rule::Value),
+                (at(3), "ObjectStream", "N", Rule::Missing),
+                (at(3), "ObjectStream", "Stray", Rule::Unlisted),
+                (at(4), "FilterLZWDecode", "Predictor", Rule::Value),
+                (at(4), "ObjectStream", "DL", Rule::Value),
+                (at(4), "ObjectStream", "DL", Rule::Special),
+                (at(4), "ObjectStream", "First", Rule::Duplicate),
+                (at(4), "ObjectStream", "Length", Rule::Unresolved),
+                (at(4), "ObjectStream", "N", Rule::Type),
+                (at(5), "FilterLZWDecode", "Predictor", Rule::Value),
+                (at(6), "ArrayOfCompressionFilterNames", "1", Rule::Value),
+            ],
+            "{report}"
+        );
+        // The three, and the one that the first extends.
+        assert_eq!(report.checked.get("ObjectStream"), Some(&4), "{report}");
+        let filters = report.checked.get("FilterLZWDecode");
+        assert_eq!((filters, report.ties), (Some(&2), 2), "{report}");
+        let merged = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(merged.checked.get("ObjectStream"), Some(&4), "{merged}");
+    }
+
+    /// An object stream in a file of a version before object streams came
+    /// in (1.5): each of its keys is too new.
+    #[test]
+    fn an_object_stream_before_1_5_is_too_new() {
+        let mut doc = bare(Version::new(1, 4));
+        let container = dict! { "Type" => "ObjStm", "N" => 0, "First" => 0, "Length" => 0 };
+        doc.insert(3, Object::stream(container));
+        let report = check(
+            &doc,
+            &Hold::Only([((3, 0), Made::Built)].into()),
+            &Options::default(),
+        );
+        let at = Some((3, 0));
+        assert_eq!(
+            faults(&report),
+            [
+                (at, "ObjectStream", "First", Rule::TooNew),
+                (at, "ObjectStream", "Length", Rule::TooNew),
+                (at, "ObjectStream", "N", Rule::TooNew),
+                (at, "ObjectStream", "Type", Rule::TooNew),
+            ],
+            "{report}"
+        );
+    }
+
+    /// The object streams of a file a writer packs, each checked as
+    /// `ObjectStream`, clean.
+    #[test]
+    fn the_object_streams_a_writer_packs_check_clean() {
+        use pdf_structure::write;
+        let objects: Vec<(u32, Object)> = (clean().into_iter())
+            .map(|(n, body)| match body {
+                Body::Object(object) => (n, object),
+                Body::Stream(dict, data) => (n, crate::object::Stream::new(dict, data).into()),
+            })
+            .collect();
+        let mut options = write::Options::DEFAULT;
+        options.kind = crate::source::XrefKind::Stream;
+        options.pack = Some(write::Pack::DEFAULT);
+        let bodies = (objects.iter()).map(|(n, object)| ((*n, 0), write::Body::from(object)));
+        let mut file = Vec::new();
+        let trailer = dict! { "Root" => r(1) };
+        write::full(&mut file, bodies, &trailer, None, None, &options).unwrap();
+        let doc = bytes::read(&file);
+        let containers = doc.objects().filter(|&(_, o)| object_stream(o)).count();
+        assert_eq!(containers, 1);
+        assert!(doc.get((4, 0)).unwrap().at.unwrap().stream.is_some());
+        let report = checked_as(&file, &Hold::All(Made::Built));
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
+    }
+
+    /// An object stream without its `/N`, its `/First` a name, is found
+    /// for each.
+    #[test]
+    fn an_object_streams_required_keys_and_their_types_are_checked() {
+        let mut doc = bare(Version::new(1, 7));
+        let container = dict! { "Type" => "ObjStm", "First" => "x", "Length" => 0 };
+        doc.insert(10, Object::stream(container));
+        let report = check(&doc, &Hold::All(Made::Built), &Options::default());
+        assert_eq!(
+            walked(&report),
+            [
+                (
+                    Some(10),
+                    "10 0 R",
+                    "ObjectStream",
+                    "First",
+                    Rule::Type,
+                    "/x"
+                ),
+                (
+                    Some(10),
+                    "10 0 R",
+                    "ObjectStream",
+                    "N",
+                    Rule::Missing,
+                    "absent"
+                ),
+            ],
+            "{report}"
+        );
+    }
+
+    /// An object stream's `/Extends` goes on to the one it names, which is
+    /// checked from its own number, whether it's numbered after the one
+    /// naming it or before; every path recorded is each one's own. A cycle
+    /// of them is a SpecialCase false in each.
+    #[test]
+    fn an_object_streams_extends_meets_the_one_it_names_from_its_own_number() {
+        let mut doc = bare(Version::new(1, 7));
+        let container = |extends: Option<u32>| {
+            let mut dict = dict! { "Type" => "ObjStm", "N" => 0, "First" => 0, "Length" => 0 };
+            if let Some(n) = extends {
+                dict.set("Extends", r(n));
+            }
+            Object::stream(dict)
+        };
+        // 10 extends 12, numbered after it, and 13 extends 11, before it.
+        doc.insert(10, container(Some(12)));
+        doc.insert(11, container(None));
+        doc.insert(12, container(None));
+        doc.insert(13, container(Some(11)));
+        let options = Options {
+            paths: true,
+            ..Options::default()
+        };
+        let report = check(&doc, &Hold::All(Made::Built), &options);
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), Some(&4), "{report}");
+        let paths: Vec<_> = (report.paths.iter())
+            .filter(|path| path.contains(" R"))
+            .collect();
+        assert_eq!(paths, ["10 0 R", "11 0 R", "12 0 R", "13 0 R"]);
+
+        // 20 and 21 extend each other.
+        doc.insert(20, container(Some(21)));
+        doc.insert(21, container(Some(20)));
+        let report = check(&doc, &Hold::All(Made::Built), &options);
+        let specials: Vec<_> = (walked(&report).into_iter())
+            .map(|(n, path, _, key, rule, _)| (n, path, key, rule))
+            .collect();
+        assert_eq!(
+            specials,
+            [
+                (Some(20), "20 0 R", "Extends", Rule::Special),
+                (Some(21), "21 0 R", "Extends", Rule::Special)
+            ],
+            "{report}"
+        );
+        assert_eq!(report.checked.get("ObjectStream"), Some(&6), "{report}");
+    }
+
+    /// What an object stream refers to is reached through it, as through
+    /// any object walked: its `/Length`, by reference, which nothing else
+    /// refers to, isn't unreached.
+    #[test]
+    fn what_an_object_stream_refers_to_is_reached_through_it() {
+        let mut doc = bare(Version::new(1, 7));
+        let container = dict! { "Type" => "ObjStm", "N" => 0, "First" => 0, "Length" => r(5) };
+        doc.insert(10, Object::stream(container));
+        doc.insert(5, 0);
+        let report = check(&doc, &Hold::All(Made::Built), &Options::default());
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
+    }
+
+    /// A stream whose `/Type` is the string `(ObjStm)` is no object stream,
+    /// to the reader or to the check: its objects don't read, a reference
+    /// to one is unresolved, and it's unreached.
+    #[test]
+    fn a_stream_whose_type_is_a_string_is_no_object_stream() {
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>";
+        let file = with_object_streams(
+            &[(1, "<< /Type /Catalog /Pages 2 0 R >>")],
+            &[(
+                10,
+                "/Type (ObjStm)",
+                &[(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"), (3, page)],
+            )],
+        );
+        let doc = bytes::read(&file);
+        let why = doc.get((2, 0)).unwrap_err().to_string();
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(report.checked.get("ObjectStream"), None, "{report}");
+        let unread = "stream << /First 9 /N 2 /Type (ObjStm) >>";
+        assert_eq!(
+            walked(&report),
+            [
+                (
+                    Some(1),
+                    "Root",
+                    "Catalog",
+                    "Pages",
+                    Rule::Unresolved,
+                    "2 0 R"
+                ),
+                (Some(2), "-", "-", "-", Rule::Unresolved, why.as_str()),
+                (Some(3), "-", "-", "-", Rule::Unresolved, why.as_str()),
+                (Some(10), "-", "-", "-", Rule::Unreached, unread),
+            ],
+            "{report}"
+        );
+    }
+
+    /// An object stream is held as any object, by its number: under a hold
+    /// of other objects it's walked, and not found in; a hold file naming
+    /// it holds it, as it says it was made.
+    #[test]
+    fn an_object_stream_is_held_by_its_number() {
+        let mut doc = bare(Version::new(1, 7));
+        let container = dict! { "Type" => "ObjStm", "N" => -1, "First" => 0, "Length" => 0 };
+        doc.insert(10, Object::stream(container));
+        let other = Hold::parse("1 0 built\n").unwrap();
+        let report = check(&doc, &other, &Options::default());
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), None, "{report}");
+        for (named, made) in [
+            ("10 0 built\n", Made::Built),
+            ("10 0 merged\n", Made::Merged),
+        ] {
+            let report = check(&doc, &Hold::parse(named).unwrap(), &Options::default());
+            let held: Vec<_> = (report.findings.iter())
+                .map(|f| (f.object, f.made, f.key.as_str(), f.rule))
+                .collect();
+            assert_eq!(held, [(Some((10, 0)), made, "N", Rule::Value)], "{report}");
+        }
+    }
+
+    /// An object stream the walk from the trailer reached first as another
+    /// table, as a page's contents, stays that: reached again as
+    /// `ObjectStream`, it's counted in two contexts, not checked twice, and
+    /// its keys that table lists aren't unlisted.
+    #[test]
+    fn an_object_stream_reached_as_another_table_stays_it() {
+        let mut doc = bare(Version::new(1, 7));
+        doc.insert(
+            2,
+            dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 },
+        );
+        let page = dict! {
+            "Type" => "Page",
+            "Parent" => r(2),
+            "MediaBox" => numbers(&[0, 0, 612, 792]),
+            "Resources" => dict! {},
+            "Contents" => r(10),
+        };
+        doc.insert(3, page);
+        let container = dict! { "Type" => "ObjStm", "N" => 0, "First" => 0, "Length" => 0 };
+        doc.insert(10, Object::stream(container));
+        let report = check(&doc, &Hold::All(Made::Built), &Options::default());
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.unlisted, BTreeMap::new(), "{report}");
+        assert_eq!(report.checked.get("Stream"), Some(&1), "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), None, "{report}");
+        assert_eq!(report.two_contexts, 1, "{report}");
+    }
+
+    /// A file written by hand a section at a time, for its revisions: each
+    /// object at its number as given, or in an object stream, and each
+    /// section a table or a cross-reference stream listing the numbers
+    /// given, those written and not freed in use, the rest free.
+    struct Sections {
+        out: Vec<u8>,
+        /// Where each object written and not freed starts.
+        at: BTreeMap<u32, usize>,
+        /// Each object written in an object stream and not freed: the
+        /// stream's number, and its index there.
+        packed: BTreeMap<u32, (u32, u16)>,
+    }
+
+    impl Sections {
+        fn new(version: &str) -> Sections {
+            Sections {
+                out: format!("%PDF-{version}\n").into_bytes(),
+                at: BTreeMap::new(),
+                packed: BTreeMap::new(),
+            }
+        }
+
+        /// Object `n`, `body` as written.
+        fn object(&mut self, n: u32, body: &str) -> &mut Sections {
+            self.packed.remove(&n);
+            self.at.insert(n, self.out.len());
+            let object = format!("{n} 0 obj\n{body}\nendobj\n");
+            self.out.extend_from_slice(object.as_bytes());
+            self
+        }
+
+        /// Object stream `n`, unfiltered, its dictionary `entries` with its
+        /// `/Type`, `/N`, `/First` and `/Length`, of `members`, each its
+        /// number and as written, a line each, which only a
+        /// cross-reference stream lists.
+        fn object_stream(
+            &mut self,
+            n: u32,
+            entries: &str,
+            members: &[(u32, &str)],
+        ) -> &mut Sections {
+            let (mut header, mut data) = (String::new(), String::new());
+            for &(m, body) in members {
+                header.push_str(&format!("{m} {} ", data.len()));
+                data.push_str(body);
+                data.push('\n');
+            }
+            let (count, first) = (members.len(), header.len());
+            let length = first + data.len();
+            let body = format!(
+                "<< /Type /ObjStm /N {count} /First {first} /Length {length}{entries} >>\n\
+                 stream\n{header}{data}\nendstream"
+            );
+            self.object(n, &body);
+            for (i, &(m, _)) in members.iter().enumerate() {
+                self.at.remove(&m);
+                self.packed.insert(m, (n, u16::try_from(i).unwrap()));
+            }
+            self
+        }
+
+        /// Object `n` freed, as the next section lists it.
+        fn free(&mut self, n: u32) -> &mut Sections {
+            self.at.remove(&n);
+            self.packed.remove(&n);
+            self
+        }
+
+        /// A table of `numbers`, each a subsection of its own, and its
+        /// trailer, `trailer`'s entries; where it starts.
+        fn table(&mut self, numbers: &[u32], trailer: &str) -> usize {
+            let xref = self.out.len();
+            let mut table = String::from("xref\n");
+            for &n in numbers {
+                assert!(!self.packed.contains_key(&n), "a table lists {n}");
+                let row = match self.at.get(&n) {
+                    Some(at) if n > 0 => format!("{at:010} 00000 n \n"),
+                    _ => format!("0000000000 {:05} f \n", if n == 0 { 65535 } else { 1 }),
+                };
+                table.push_str(&format!("{n} 1\n{row}"));
+            }
+            table.push_str(&format!("trailer\n<< {trailer} >>\n"));
+            self.out.extend_from_slice(table.as_bytes());
+            xref
+        }
+
+        /// Cross-reference stream `n`, listing `numbers` and itself, its
+        /// rows unfiltered, with `trailer`'s entries, `/Length` among them
+        /// when they have one; where it starts.
+        fn stream(&mut self, n: u32, numbers: &[u32], trailer: &str) -> usize {
+            let xref = self.out.len();
+            self.at.insert(n, xref);
+            let mut listed = numbers.to_vec();
+            listed.push(n);
+            listed.sort_unstable();
+            listed.dedup();
+            let (mut rows, mut index) = (Vec::new(), String::new());
+            for &m in &listed {
+                let (kind, field, generation) = match (self.at.get(&m), self.packed.get(&m)) {
+                    (Some(&at), _) if m > 0 => (1u8, at, 0u16),
+                    (_, Some(&(stream, index))) if m > 0 => (2, stream as usize, index),
+                    _ => (0, 0, if m == 0 { 65535 } else { 1 }),
+                };
+                rows.push(kind);
+                rows.extend_from_slice(&u32::try_from(field).unwrap().to_be_bytes());
+                rows.extend_from_slice(&generation.to_be_bytes());
+                index.push_str(&format!("{m} 1 "));
+            }
+            let numbers = self.at.keys().chain(self.packed.keys());
+            let size = numbers.max().map_or(1, |n| n + 1);
+            let length = match trailer.contains("/Length") {
+                true => String::new(),
+                false => format!(" /Length {}", rows.len()),
+            };
+            let head = format!(
+                "{n} 0 obj\n<< /Type /XRef /Size {size} /W [1 4 2] /Index [{index}] {trailer}{length} >>\nstream\n"
+            );
+            self.out.extend_from_slice(head.as_bytes());
+            self.out.extend_from_slice(&rows);
+            self.out.extend_from_slice(b"\nendstream\nendobj\n");
+            xref
+        }
+
+        /// `startxref`, giving `at`, and `%%EOF`.
+        fn end(&mut self, at: usize) -> &mut Sections {
+            let end = format!("startxref\n{at}\n%%EOF\n");
+            self.out.extend_from_slice(end.as_bytes());
+            self
+        }
+    }
+
+    /// A catalog, object 1, of an empty page tree, object 2.
+    const CATALOG: &str = "<< /Type /Catalog /Pages 2 0 R >>";
+    const PAGES: &str = "<< /Type /Pages /Kids [] /Count 0 >>";
+
+    /// The checks not made, each its column, why, table and key, and how
+    /// many.
+    fn not_made(report: &Report) -> Vec<(&str, &str, &str, &str, usize)> {
+        (report.unchecked.iter())
+            .map(|(u, &n)| {
+                (
+                    u.column,
+                    u.why.as_str(),
+                    u.table.as_str(),
+                    u.key.as_str(),
+                    n,
+                )
+            })
+            .collect()
+    }
+
+    /// An earlier revision's trailer is checked as the newest is, from
+    /// `trailer K`, K its revision counted from the first, its findings in
+    /// no object: one that lacks `/Size`, held as merged with every object
+    /// however they're held, and with some objects held not at all; and
+    /// one whose `/Prev` is past the file's end, which its predicates read
+    /// as the file's length.
+    #[test]
+    fn an_earlier_revisions_trailer_is_checked_from_its_revision() {
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        let first = file.table(&[0, 1, 2], "/Root 1 0 R");
+        file.end(first).object(2, PAGES);
+        let second = file.table(&[2], &format!("/Size 3 /Root 1 0 R /Prev {first}"));
+        file.end(second);
+        let doc = bytes::read(&file.out);
+        assert_eq!(doc.revisions.len(), 2);
+        let missing = (
+            None,
+            "trailer 1",
+            "FileTrailer",
+            "Size",
+            Rule::Missing,
+            "absent",
+        );
+        for hold in [Hold::All(Made::Merged), Hold::All(Made::Built)] {
+            let options = Options {
+                paths: true,
+                ..Options::default()
+            };
+            let report = check(&doc, &hold, &options);
+            assert_eq!(walked(&report), [missing], "{report}");
+            let found = &report.findings[0];
+            assert_eq!((found.made, found.revision), (Made::Merged, Some(1)));
+            let at = found.at.unwrap();
+            assert_eq!(&file.out[at.start..at.end], b"<< /Root 1 0 R >>");
+            assert_eq!(report.checked.get("FileTrailer"), Some(&2), "{report}");
+            assert!(report.paths.contains("trailer 1"), "{:?}", report.paths);
+            assert!(found.to_string().contains("at trailer 1, in trailer 1 ("));
+        }
+        let some = Hold::Only(BTreeMap::from([((2, 0), Made::Merged)]));
+        let report = check(&doc, &some, &Options::default());
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("FileTrailer"), Some(&1), "{report}");
+
+        // Its /Prev past the file's end, which the reader can't follow.
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        let first = file.table(&[0, 1, 2], "/Size 3 /Root 1 0 R /Prev 99999");
+        file.end(first).object(2, PAGES);
+        let second = file.table(&[2], &format!("/Size 3 /Root 1 0 R /Prev {first}"));
+        file.end(second);
+        let report = checked_as(&file.out, &Hold::All(Made::Merged));
+        let found: Vec<_> = (walked(&report).into_iter())
+            .filter(|f| f.4 != Rule::Reader)
+            .collect();
+        let prev = "99999 (not one of fn:Eval((@Prev>=0) && (@Prev<=fn:FileSize())))";
+        assert_eq!(
+            found,
+            [(None, "trailer 1", "FileTrailer", "Prev", Rule::Value, prev)],
+            "{report}"
+        );
+    }
+
+    /// An earlier revision's trailer that can't be checked is counted as
+    /// not checked, never passed over: one before a revision whose numbers
+    /// aren't known, as a reader of its own may give, since what that
+    /// revision wrote over of its own can't be told, the revision itself
+    /// checked; and, every object held, a file's whose revisions the reader
+    /// didn't keep, as they list more numbers in all than it reads entries.
+    /// Not held, neither is counted.
+    #[test]
+    fn earlier_trailers_that_cant_be_checked_are_counted() {
+        // Five revisions, the first two's trailers without /Size, each
+        // after the first listing object 2 alone.
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        let mut at = file.table(&[0, 1, 2], "/Root 1 0 R");
+        for size in ["", "/Size 3 ", "/Size 3 ", "/Size 3 "] {
+            file.end(at).object(2, PAGES);
+            at = file.table(&[2], &format!("{size}/Root 1 0 R /Prev {at}"));
+        }
+        file.end(at);
+        let missing = |report: &Report| {
+            let found = walked(report).into_iter();
+            let missing = found.filter(|&(.., rule, _)| rule == Rule::Missing);
+            missing
+                .map(|(_, path, ..)| path.to_string())
+                .collect::<Vec<_>>()
+        };
+        let trailers = |report: &Report| {
+            let unchecked = report.unchecked.iter();
+            let trailers = unchecked.filter(|(u, _)| u.column == "-");
+            trailers.map(|(u, &n)| (u.clone(), n)).collect::<Vec<_>>()
+        };
+        let all = Hold::All(Made::Merged);
+        let some = Hold::Only(BTreeMap::from([((2, 0), Made::Merged)]));
+        let mut doc = bytes::read(&file.out);
+        assert_eq!(doc.revisions.len(), 5);
+        let report = check(&doc, &all, &Options::default());
+        assert_eq!(missing(&report), ["trailer 2", "trailer 1"], "{report}");
+        assert_eq!(trailers(&report), [], "{report}");
+
+        // The third's numbers not known: the first two not checked.
+        doc.revisions[2].numbers = None;
+        let report = check(&doc, &all, &Options::default());
+        assert_eq!(missing(&report), Vec::<String>::new(), "{report}");
+        let untold = not_checked("FileTrailer", UNTOLD);
+        assert_eq!(trailers(&report), [(untold, 2)], "{report}");
+        assert_eq!(report.checked.get("FileTrailer"), Some(&3), "{report}");
+        assert_eq!(trailers(&check(&doc, &some, &Options::default())), []);
+
+        // Read listing no more than three entries: the four later
+        // revisions list four numbers in all, so none is kept.
+        let mut options = bytes::Options::DEFAULT;
+        options.limits.entries = Some(3);
+        let doc = (bytes::Reading::open(&file.out[..], &options))
+            .and_then(bytes::Reading::into_document)
+            .unwrap();
+        assert!(doc.revisions.is_empty() && doc.warnings.is_empty());
+        let report = check(&doc, &all, &Options::default());
+        assert_eq!(missing(&report), Vec::<String>::new(), "{report}");
+        assert_eq!(trailers(&report), [(not_checked("-", UNKEPT), 1)]);
+        assert_eq!(trailers(&check(&doc, &some, &Options::default())), []);
+    }
+
+    /// An earlier revision's cross-reference stream is checked as
+    /// `XRefStream` from its number, its findings' object it, held as
+    /// merged with every object or by a hold that names it, and with what's
+    /// direct in it; under a hold that doesn't, not at all.
+    #[test]
+    fn an_earlier_cross_reference_stream_is_checked_from_its_number() {
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        let first = file.stream(3, &[0, 1, 2], "/Root 1 0 R /ID (abc)");
+        file.end(first).object(2, PAGES);
+        let second = file.table(&[2], &format!("/Size 4 /Root 1 0 R /Prev {first}"));
+        file.end(second);
+        let doc = bytes::read(&file.out);
+        let only = |n| Hold::Only(BTreeMap::from([((n, 0), Made::Built)]));
+        let id = (Some(3), "3 0 R", "XRefStream", "ID", Rule::Type, "(abc)");
+        for hold in [Hold::All(Made::Built), only(3)] {
+            let report = check(&doc, &hold, &Options::default());
+            assert_eq!(walked(&report), [id], "{report}");
+            let found = &report.findings[0];
+            assert_eq!((found.made, found.revision), (Made::Merged, Some(1)));
+            for table in [
+                "XRefStream",
+                "ArrayOfXRefWIntegers",
+                "ArrayOfXRefIndexIntegers",
+                "FileTrailer",
+            ] {
+                assert_eq!(report.checked.get(table), Some(&1), "{table}: {report}");
+            }
+        }
+        let report = check(&doc, &only(1), &Options::default());
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("XRefStream"), None, "{report}");
+    }
+
+    /// A reference in an earlier revision's trailer to an object a later
+    /// revision wrote over or freed isn't followed, as what that revision
+    /// had there isn't read: its type, and what follows from it, is counted
+    /// as not made, never a finding, and what needs no object is checked,
+    /// as that it be direct. One to an object no revision lists doesn't
+    /// resolve, as it didn't then.
+    #[test]
+    fn a_reference_in_an_earlier_trailer_to_an_object_written_over_since_isnt_followed() {
+        let mut file = Sections::new("1.7");
+        (file.object(1, CATALOG).object(2, PAGES))
+            .object(4, "3")
+            .object(5, "<< /Title (Old) >>");
+        let first = file.table(&[0, 1, 2, 4, 5], "/Size 4 0 R /Root 1 0 R /Info 5 0 R");
+        // The catalog and the size written over, the information
+        // dictionary freed.
+        file.end(first).object(1, CATALOG).object(4, "6").free(5);
+        let second = file.table(&[1, 4, 5], &format!("/Size 6 /Root 1 0 R /Prev {first}"));
+        file.end(second);
+        let report = checked_as(&file.out, &Hold::All(Made::Merged));
+        assert_eq!(
+            walked(&report),
+            [
+                (
+                    None,
+                    "trailer 1",
+                    "FileTrailer",
+                    "Size",
+                    Rule::Direct,
+                    "4 0 R"
+                ),
+                (Some(4), "-", "-", "-", Rule::Unreached, "6"),
+            ],
+            "{report}"
+        );
+        assert_eq!(
+            not_made(&report),
+            [
+                ("Type", WRITTEN_OVER, "FileTrailer", "Info", 1),
+                ("Type", WRITTEN_OVER, "FileTrailer", "Root", 1),
+                ("Type", WRITTEN_OVER, "FileTrailer", "Size", 1),
+            ],
+            "{report}"
+        );
+        assert_eq!(report.checked.get("FileTrailer"), Some(&2), "{report}");
+
+        // To an object no revision lists: unresolved, as it was then.
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        let first = file.table(&[0, 1, 2], "/Size 3 /Root 1 0 R /Info 9 0 R");
+        file.end(first).object(2, PAGES);
+        let second = file.table(&[2], &format!("/Size 3 /Root 1 0 R /Prev {first}"));
+        file.end(second);
+        let report = checked_as(&file.out, &Hold::All(Made::Merged));
+        let info = (
+            None,
+            "trailer 1",
+            "FileTrailer",
+            "Info",
+            Rule::Unresolved,
+            "9 0 R",
+        );
+        assert_eq!(walked(&report), [info], "{report}");
+        assert_eq!(not_made(&report), [], "{report}");
+    }
+
+    /// An earlier revision's trailer's predicates are evaluated in that
+    /// trailer, over the objects that revision had: `/Info`'s SpecialCase,
+    /// that the information dictionary have `/ModDate` where the catalog
+    /// has `/PieceInfo`, reads its catalog and information dictionary, the
+    /// update's not; and where a later revision wrote over the catalog, it
+    /// can't be told, counted as not made.
+    #[test]
+    fn an_earlier_trailers_predicates_read_the_objects_its_revision_had() {
+        let catalog =
+            "<< /Type /Catalog /Pages 2 0 R /PieceInfo << >> /LastModified (D:20240101) >>";
+        let written = |catalog_again: bool| {
+            let mut file = Sections::new("1.7");
+            (file.object(1, catalog).object(2, PAGES)).object(5, "<< /Title (Old) >>");
+            let first = file.table(&[0, 1, 2, 5], "/Size 6 /Root 1 0 R /Info 5 0 R");
+            (file.end(first)).object(6, "<< /Title (New) /ModDate (D:20240102) >>");
+            let mut numbers = vec![6];
+            if catalog_again {
+                file.object(1, catalog);
+                numbers.insert(0, 1);
+            }
+            let trailer = format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {first}");
+            let second = file.table(&numbers, &trailer);
+            file.end(second);
+            file.out
+        };
+        let old = "<< /Title (Old) >>";
+        let unreached = (Some(5), "-", "-", "-", Rule::Unreached, old);
+        let report = checked_as(&written(false), &Hold::All(Made::Merged));
+        let special = format!(
+            "{old} (fn:Eval(fn:SinceVersion(1.4,fn:IsPresent(trailer::Catalog::PieceInfo,fn:IsPresent(trailer::Info::ModDate)))))"
+        );
+        assert_eq!(
+            walked(&report),
+            [
+                (
+                    None,
+                    "trailer 1",
+                    "FileTrailer",
+                    "Info",
+                    Rule::Special,
+                    special.as_str()
+                ),
+                unreached,
+            ],
+            "{report}"
+        );
+        assert_eq!(not_made(&report), [], "{report}");
+
+        let report = checked_as(&written(true), &Hold::All(Made::Merged));
+        assert_eq!(walked(&report), [unreached], "{report}");
+        assert_eq!(
+            not_made(&report),
+            [
+                ("SpecialCase", WRITTEN_OVER, "FileTrailer", "Info", 1),
+                ("Type", WRITTEN_OVER, "FileTrailer", "Root", 1),
+            ],
+            "{report}"
+        );
+    }
+
+    /// A linearized file's first-page section and its main one, which the
+    /// first's `/Prev` gives, later in the file, are one revision, whose
+    /// trailer is the first's (Annex F): the main one's, which may hold
+    /// `/Size` alone, isn't checked. Updated, the first-page trailer is
+    /// `trailer 1`'s, and the main one still isn't.
+    #[test]
+    fn a_linearized_files_main_trailer_isnt_checked() {
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let one = out.len();
+        out.extend_from_slice(format!("1 0 obj\n{CATALOG}\nendobj\n").as_bytes());
+        let two = out.len();
+        out.extend_from_slice(format!("2 0 obj\n{PAGES}\nendobj\n").as_bytes());
+        let first = out.len();
+        let main = first + 160;
+        let section = format!(
+            "xref\n0 3\n0000000000 65535 f \n{one:010} 00000 n \n{two:010} 00000 n \ntrailer\n<< /Size 3 /Root 1 0 R /Prev {main} >>\n"
+        );
+        out.extend_from_slice(section.as_bytes());
+        assert!(out.len() < main);
+        out.resize(main, b' ');
+        out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 3 >>\n");
+        let mut file = Sections {
+            out,
+            at: BTreeMap::new(),
+            packed: BTreeMap::new(),
+        };
+        file.end(first);
+        let report = checked_as(&file.out, &Hold::All(Made::Merged));
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("FileTrailer"), Some(&1), "{report}");
+
+        file.object(2, PAGES);
+        let update = file.table(&[2], &format!("/Size 3 /Root 1 0 R /Prev {first}"));
+        file.end(update);
+        let doc = bytes::read(&file.out);
+        assert_eq!(doc.revisions.len(), 2);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("FileTrailer"), Some(&2), "{report}");
+    }
+
+    /// A hybrid revision's trailer is its table's, checked; the
+    /// cross-reference stream its `/XRefStm` gives isn't a trailer, nor
+    /// checked as one, and is one of the file's own structures, which
+    /// nothing reaches and isn't unreached.
+    #[test]
+    fn a_hybrid_revisions_trailer_is_its_tables() {
+        let mut file = Sections::new("1.5");
+        file.object(1, CATALOG).object(2, PAGES);
+        let stm = file.stream(4, &[2], "");
+        let trailer = format!("/Size 5 /Root 1 0 R /XRefStm {stm}");
+        let first = file.table(&[0, 1], &trailer);
+        file.end(first).object(2, PAGES);
+        let second = file.table(&[2], &format!("/Size 5 /Root 1 0 R /Prev {first}"));
+        file.end(second);
+        let doc = bytes::read(&file.out);
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert_eq!(doc.revisions.len(), 2);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get("FileTrailer"), Some(&2), "{report}");
+        assert_eq!(report.checked.get("XRefStream"), None, "{report}");
+    }
+
+    /// What only an earlier revision's trailer refers to stays as it was,
+    /// unreached, its table and key `-`, as an earlier trailer names no
+    /// referrer and marks nothing: an information dictionary an update
+    /// wrote anew at another number, the old one; what an earlier
+    /// trailer's key the model doesn't list refers to; an earlier
+    /// cross-reference stream's `/Length` written indirect.
+    #[test]
+    fn what_only_an_earlier_trailer_refers_to_stays_unreached() {
+        let mut file = Sections::new("1.7");
+        (file.object(1, CATALOG).object(2, PAGES))
+            .object(5, "<< /Title (Old) >>")
+            .object(7, "<< /Mine 1 >>")
+            // What the stream's rows take: 0 to 3, 5, 7 and 8, seven bytes
+            // each.
+            .object(8, "49");
+        let first = file.stream(
+            3,
+            &[0, 1, 2, 5, 7, 8],
+            "/Root 1 0 R /Info 5 0 R /Bogus 7 0 R /Length 8 0 R",
+        );
+        (file.end(first)).object(6, "<< /Title (New) >>");
+        let trailer = format!("/Size 9 /Root 1 0 R /Info 6 0 R /Prev {first}");
+        let second = file.table(&[6], &trailer);
+        file.end(second);
+        let doc = bytes::read(&file.out);
+        assert_eq!(doc.revisions.len(), 2);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        // The reader can't follow the stream's own /Length before its rows
+        // are read, and says so.
+        let found: Vec<_> = (walked(&report).into_iter())
+            .filter(|f| f.4 != Rule::Reader)
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Some(5),
+                    "-",
+                    "-",
+                    "-",
+                    Rule::Unreached,
+                    "<< /Title (Old) >>"
+                ),
+                (Some(7), "-", "-", "-", Rule::Unreached, "<< /Mine 1 >>"),
+                (Some(8), "-", "-", "-", Rule::Unreached, "49"),
+            ],
+            "{report}"
+        );
+        assert_eq!(report.checked.get("XRefStream"), Some(&1), "{report}");
+        let bogus = unlisted("XRefStream", "Bogus", Class::Other);
+        assert_eq!(report.unlisted.get(&bogus), Some(&1), "{report}");
+    }
+
+    /// An earlier revision's cross-reference stream is reached where the
+    /// file's object at its number is that stream, as read where its
+    /// section is; a newer object at the number, written over it, stays as
+    /// it was. Told by a stream the walk would find unreached, one whose
+    /// `/Type` isn't `/XRef`, which a reader of its own may give.
+    #[test]
+    fn an_earlier_stream_is_reached_where_the_files_object_at_its_number_is_it() {
+        let stream = |at: usize| {
+            let dict = dict! { "Size" => 8, "Root" => r(1), "Length" => 0 };
+            Object::stream(dict).at(Span::new(None, at, at + 100))
+        };
+        let mut earlier = Trailer::new(stream(100));
+        earlier.stream = Some((7, 0));
+        let revisions = |doc: &Document| {
+            vec![
+                Revision::new(100, earlier.clone(), None),
+                Revision::new(300, doc.trailer.clone(), Some(Box::new([2]))),
+            ]
+        };
+        let mut doc = bare(Version::new(1, 7));
+        doc.insert(7, stream(100));
+        doc.revisions = revisions(&doc);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        let found: Vec<_> = (walked(&report).into_iter())
+            .map(|(object, path, table, key, rule, _)| (object, path, table, key, rule))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (Some(7), "7 0 R", "XRefStream", "Type", Rule::Missing),
+                (Some(7), "7 0 R", "XRefStream", "W", Rule::Missing),
+            ],
+            "{report}"
+        );
+
+        // Object 7 written over since, elsewhere: it's unreached.
+        let mut doc = bare(Version::new(1, 7));
+        doc.insert(7, stream(400));
+        doc.revisions = revisions(&doc);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        let unreached: Vec<_> = (report.findings.iter())
+            .filter(|f| f.rule == Rule::Unreached)
+            .map(|f| f.object)
+            .collect();
+        assert_eq!(unreached, [Some((7, 0))], "{report}");
+    }
+
+    /// `since` carries a finding in an earlier revision's trailer from a
+    /// like one in any trailer before, as an update leaves the revisions
+    /// before it as they were; and one in the newest trailer from the
+    /// newest before alone, so that a fault an update brings back, which
+    /// the revision before had mended, is the update's, though an older
+    /// revision had it. An earlier cross-reference stream's is carried from
+    /// a baseline whose newest trailer that stream was. `by_path` reads
+    /// paths alone, an earlier trailer's among them; and `beyond` carries a
+    /// key too new in any trailer from any trailer of a source's.
+    #[test]
+    fn since_carries_an_earlier_trailers_finding_from_any_trailer_before() {
+        let id = |object: Option<u32>, path: &str, revision: Option<usize>| Finding {
+            object: object.map(|n| (n, 0)),
+            made: Made::Merged,
+            path: path.to_string(),
+            table: "FileTrailer".to_string(),
+            key: "ID".to_string(),
+            rule: Rule::Type,
+            value: "(abc)".to_string(),
+            at: None,
+            revision,
+        };
+        let stream = |revision| Finding {
+            table: "XRefStream".to_string(),
+            ..id(Some(7), "7 0 R", revision)
+        };
+        let newest = id(None, "trailer", None);
+        let first = id(None, "trailer 1", Some(1));
+        let earlier_stream = stream(Some(2));
+        let updated = Report {
+            findings: vec![newest.clone(), first.clone(), earlier_stream.clone()],
+            ..Report::default()
+        };
+        // The revision before: the first's trailer had the fault, and its
+        // newest, cross-reference stream 7, had mended it.
+        let before = Report {
+            findings: vec![id(None, "trailer 1", Some(1)), stream(None)],
+            trailer: Some((7, 0)),
+            ..Report::default()
+        };
+        assert_eq!(updated.since(&before), [&newest]);
+        // A revision before whose newest trailer had it carries the
+        // newest's and the first's; it has no stream's like the update's.
+        let before = Report {
+            findings: vec![id(None, "trailer", None)],
+            ..Report::default()
+        };
+        assert_eq!(updated.since(&before), [&earlier_stream]);
+
+        let baseline = Report {
+            findings: vec![id(None, "trailer 1", Some(1))],
+            paths: ["trailer", "trailer 1"].map(String::from).into(),
+            ..Report::default()
+        };
+        let rewrite = Report {
+            findings: vec![newest.clone(), first.clone()],
+            ..Report::default()
+        };
+        assert_eq!(rewrite.by_path(&baseline), [&newest]);
+
+        let too_new = |revision| Finding {
+            rule: Rule::TooNew,
+            key: "XRefStm".to_string(),
+            value: "9 (since 1.5)".to_string(),
+            ..id(None, "trailer 1", revision)
+        };
+        let written = Report {
+            findings: vec![too_new(Some(1))],
+            ..Report::default()
+        };
+        let source = Report {
+            findings: vec![Finding {
+                key: "Index".to_string(),
+                ..too_new(None)
+            }],
+            ..Report::default()
+        };
+        assert_eq!(written.beyond(&[&source]), Vec::<&Finding>::new());
+    }
+
+    /// The tables an earlier revision's trailer reaches through what's
+    /// direct in it ask nothing the predicates keep once read for a file
+    /// (a name tree's keys, the structure tree's content items, the form's
+    /// fields' names): its predicates are evaluated over the objects its
+    /// revision had, some not read, and a part kept from a reading that
+    /// met one would answer a later evaluation as if it hadn't. Nor is any
+    /// of them a tree. A value that must be indirect, or is a stream, is,
+    /// and isn't gone on to.
+    #[test]
+    fn an_earlier_trailers_direct_values_reach_nothing_the_predicates_keep() {
+        let kept = [
+            "fn:InNameTree",
+            "fn:ImageIsStructContentItem",
+            "fn:PageContainsStructContentItems",
+            "fn:IsFullyQualifiedFieldName",
+        ];
+        let mut seen = BTreeSet::new();
+        let mut tables = vec!["FileTrailer", "XRefStream"];
+        while let Some(name) = tables.pop() {
+            if !seen.insert(name) {
+                continue;
+            }
+            let table = grammar().table(name).unwrap();
+            for row in &table.rows {
+                let values = row.possible_values.iter().flatten().map(|v| &v.item);
+                let cells = [&row.since_version, &row.required, &row.default_value]
+                    .into_iter()
+                    .chain(&row.indirect_reference)
+                    .chain(&row.special_case)
+                    .chain(values);
+                for cell in cells {
+                    for f in kept {
+                        assert!(!cell.contains(f), "{name}/{}: {cell}", row.key);
+                    }
+                }
+                for (i, ty) in row.r#type.iter().enumerate() {
+                    let tree = matches!(ty.item, ArlType::NameTree | ArlType::NumberTree);
+                    assert!(!tree, "{name}/{}", row.key);
+                    if row.indirect_reference[i] == "TRUE" || ty.item == ArlType::Stream {
+                        continue;
+                    }
+                    tables.extend(row.link[i].iter().map(|l| l.item.as_str()));
+                }
+            }
+        }
+        for reached in [
+            "EncryptionStandard",
+            "CryptFilter",
+            "DocInfo",
+            "FileSpecification",
+        ] {
+            assert!(seen.contains(reached), "{reached}: {seen:?}");
+        }
+        assert!(!seen.contains("Catalog"), "{seen:?}");
+    }
+
+    /// Each [`Rule::Packed`] finding's object, path and value, its table
+    /// and key, `ObjectStream` and `-`, asserted.
+    fn packed_found(report: &Report) -> Vec<(Option<u32>, &str, &str)> {
+        (report.findings.iter())
+            .filter(|f| f.rule == Rule::Packed)
+            .map(|f| {
+                assert_eq!((f.table.as_str(), f.key.as_str()), ("ObjectStream", "-"));
+                assert_eq!(f.revision, None);
+                (f.object.map(|(n, _)| n), f.path.as_str(), f.value.as_str())
+            })
+            .collect()
+    }
+
+    /// The bytes `doc`'s object stream's data holds where `finding` is.
+    fn in_data<'d>(doc: &'d Document, finding: &Finding) -> &'d str {
+        let at = (finding.at).unwrap_or_else(|| panic!("{finding} says nowhere"));
+        let data = &doc.decoded[&at.stream.expect("in an object stream's data")];
+        std::str::from_utf8(&data[at.start..at.end]).unwrap()
+    }
+
+    /// The [`Rule::Packed`] findings of `doc`, every object held as `made`.
+    fn packed_of(doc: &Document, made: Made) -> Vec<Finding> {
+        let report = check(doc, &Hold::All(made), &Options::default());
+        (report.findings.into_iter())
+            .filter(|f| f.rule == Rule::Packed)
+            .collect()
+    }
+
+    /// A page of [`PAGES`]'s tree as a kid of it.
+    const PAGE: &str = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>";
+
+    /// A stream in an object stream, its dictionary followed by the keyword
+    /// `stream` in the object stream's data, past a comment too, is found
+    /// in the object stream, from its number, made as it is, at the
+    /// dictionary's bytes there; a dictionary that `stream` doesn't follow
+    /// isn't.
+    #[test]
+    fn a_stream_in_an_object_stream_is_found() {
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        file.object_stream(
+            10,
+            "",
+            &[
+                (3, "<< /Length 5 >>\nstream\nhello\nendstream"),
+                (4, "<< /Length 5 >> % a comment\nstream\nhello\nendstream"),
+                (5, "<< /Length 5 >>"),
+            ],
+        );
+        let at = file.stream(11, &[0, 1, 2, 3, 4, 5, 10], "/Root 1 0 R");
+        file.end(at);
+        let doc = bytes::read(&file.out);
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(
+            packed_found(&report),
+            [
+                (Some(10), "10 0 R", "3 0 R, a stream"),
+                (Some(10), "10 0 R", "4 0 R, a stream"),
+            ],
+            "{report}"
+        );
+        for made in [Made::Merged, Made::Built] {
+            let found = packed_of(&doc, made);
+            assert_eq!(found.len(), 2);
+            for finding in &found {
+                assert_eq!(finding.made, made);
+                assert_eq!(in_data(&doc, finding), "<< /Length 5 >>");
+                assert!(
+                    finding
+                        .to_string()
+                        .starts_with("packed: ObjectStream/- at 10 0 R, in 10 0 R (")
+                );
+            }
+        }
+    }
+
+    /// The file's encryption dictionary in an object stream is found:
+    /// an earlier revision's, which its trailer names and no later one
+    /// lists, at its bytes in the object stream's data; not a dictionary of
+    /// its shape no trailer names, nor what's at a number an earlier
+    /// trailer names that a later revision wrote over. The newest's makes
+    /// the file one the reader can't open, which it says, its object
+    /// streams unread: found too, nowhere, beside the reader's finding.
+    #[test]
+    fn the_encryption_dictionary_in_an_object_stream_is_found() {
+        let encrypt = "<< /Filter /Standard /V 1 /R 2 /O <00> /U <00> /P -4 >>";
+        let id = "/ID [(abc) (abc)]";
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        file.object_stream(10, "", &[(7, encrypt), (8, encrypt)]);
+        let numbers = [0, 1, 2, 7, 8, 10];
+        let first = file.stream(11, &numbers, &format!("/Root 1 0 R /Encrypt 7 0 R {id}"));
+        file.end(first).object(2, PAGES);
+        let second = file.stream(12, &[2], &format!("/Root 1 0 R /Prev {first}"));
+        file.end(second);
+        let doc = bytes::read(&file.out);
+        assert_eq!(doc.encryption, crate::source::Encryption::None);
+        assert_eq!(doc.revisions.len(), 2);
+        let found = packed_of(&doc, Made::Merged);
+        let value = "7 0 R, the file's encryption dictionary";
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(
+            packed_found(&report),
+            [(Some(10), "10 0 R", value)],
+            "{report}"
+        );
+        assert_eq!(in_data(&doc, &found[0]), encrypt);
+
+        // A later revision writes 7 over, in an object stream of its own:
+        // what's there now isn't what the first trailer named.
+        file.object_stream(13, "", &[(7, "<< /Type /Mine >>")]);
+        let third = file.stream(14, &[7, 13], &format!("/Root 1 0 R /Prev {second}"));
+        file.end(third);
+        let doc = bytes::read(&file.out);
+        assert_eq!(doc.revisions.len(), 3);
+        assert_eq!(packed_of(&doc, Made::Merged), []);
+
+        // The newest trailer's.
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        file.object_stream(10, "", &[(3, PAGE), (7, encrypt)]);
+        let at = file.stream(
+            11,
+            &[0, 1, 2, 3, 7, 10],
+            &format!("/Root 1 0 R /Encrypt 7 0 R {id}"),
+        );
+        file.end(at);
+        let doc = bytes::read(&file.out);
+        assert!(matches!(
+            doc.encryption,
+            crate::source::Encryption::Unsupported(_)
+        ));
+        assert!(doc.get((7, 0)).is_err());
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(
+            packed_found(&report),
+            [(Some(10), "10 0 R", value)],
+            "{report}"
+        );
+        let found = (report.findings.iter()).find(|f| f.rule == Rule::Packed);
+        assert_eq!(found.and_then(|f| f.at), None);
+        let said = (report.findings.iter())
+            .any(|f| f.rule == Rule::Reader && f.object.is_none() && f.value.contains("/Encrypt"));
+        assert!(said, "{report}");
+    }
+
+    /// What an object stream's `/Length` refers to, in an object stream,
+    /// is found in the one holding it, which names the object stream whose
+    /// `/Length` it is: in another, and in the object stream itself.
+    #[test]
+    fn an_object_streams_length_in_an_object_stream_is_found() {
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        file.object_stream(11, "", &[(12, "15")]);
+        let data = "4 0 << /A 1 >>\n";
+        let ten =
+            format!("<< /Type /ObjStm /N 1 /First 4 /Length 12 0 R >>\nstream\n{data}\nendstream");
+        file.object(10, &ten);
+        file.packed.insert(4, (10, 0));
+        let data = "15 0 99\n";
+        let fourteen =
+            format!("<< /Type /ObjStm /N 1 /First 5 /Length 15 0 R >>\nstream\n{data}\nendstream");
+        file.object(14, &fourteen);
+        file.packed.insert(15, (14, 0));
+        let numbers = [0, 1, 2, 4, 10, 11, 12, 14, 15];
+        let at = file.stream(13, &numbers, "/Root 1 0 R");
+        file.end(at);
+        let doc = bytes::read(&file.out);
+        assert!(doc.get((4, 0)).is_ok() && doc.get((15, 0)).is_ok());
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(
+            packed_found(&report),
+            [
+                (Some(11), "11 0 R", "12 0 R, object stream 10 0 R's /Length"),
+                (Some(14), "14 0 R", "15 0 R, object stream 14 0 R's /Length"),
+            ],
+            "{report}"
+        );
+        let found = packed_of(&doc, Made::Merged);
+        assert_eq!(in_data(&doc, &found[0]), "15");
+        assert_eq!(in_data(&doc, &found[1]), "99");
+    }
+
+    /// A linearization dictionary in an object stream is found, in a file
+    /// that isn't linearized: one there can't make it so.
+    #[test]
+    fn a_linearization_dictionary_in_an_object_stream_is_found() {
+        let linearization = "<< /Linearized 1 /L 1000 /H [0 0] /O 3 /E 0 /N 1 /T 0 >>";
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        file.object_stream(10, "", &[(5, linearization)]);
+        let at = file.stream(11, &[0, 1, 2, 5, 10], "/Root 1 0 R");
+        file.end(at);
+        let doc = bytes::read(&file.out);
+        assert!(!doc.facts.linearized);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(
+            packed_found(&report),
+            [(Some(10), "10 0 R", "5 0 R, a linearization dictionary")],
+            "{report}"
+        );
+        let found = packed_of(&doc, Made::Merged);
+        assert_eq!(in_data(&doc, &found[0]), linearization);
+    }
+
+    /// In a file whose linearization holds, its catalog and a page in an
+    /// object stream are found; the same file updated, its linearization no
+    /// longer holding, they aren't, as an update may put them there.
+    #[test]
+    fn a_linearized_files_catalog_and_pages_in_an_object_stream_are_found() {
+        let pages = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
+        let mut file = Sections::new("1.7");
+        let blank = " ".repeat(10);
+        file.object(20, &format!("<< /Linearized 1 /L {blank} >>"));
+        file.object(2, pages);
+        file.object_stream(10, "", &[(1, CATALOG), (3, PAGE)]);
+        let first = file.stream(11, &[0, 1, 2, 3, 10, 20], "/Root 1 0 R");
+        file.end(first);
+        let length = file.out.len().to_string();
+        let at = find(&file.out, b"/L ") + 3;
+        file.out[at..at + length.len()].copy_from_slice(length.as_bytes());
+        let doc = bytes::read(&file.out);
+        assert!(doc.facts.linearized);
+        let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(
+            packed_found(&report),
+            [
+                (Some(10), "10 0 R", "1 0 R, a linearized file's catalog"),
+                (Some(10), "10 0 R", "3 0 R, a linearized file's page"),
+            ],
+            "{report}"
+        );
+        let found = packed_of(&doc, Made::Merged);
+        assert_eq!(in_data(&doc, &found[0]), CATALOG);
+        assert_eq!(in_data(&doc, &found[1]), PAGE);
+
+        file.object(2, pages);
+        let second = file.table(&[2], &format!("/Size 21 /Root 1 0 R /Prev {first}"));
+        file.end(second);
+        let doc = bytes::read(&file.out);
+        assert!(!doc.facts.linearized);
+        assert_eq!(packed_of(&doc, Made::Merged), []);
+    }
+
+    /// An encryption dictionary for [`ID`], of `kind`, its user password
+    /// empty, its streams and strings encrypted as `stm_f` and `str_f` say.
+    fn encryption(kind: crate::pdf_crypt::writer::Kind, stm_f: &str, str_f: &str) -> String {
+        let settings = crate::pdf_crypt::writer::Settings {
+            kind,
+            user: b"",
+            owner: b"owner",
+            p: -4,
+            id: ID,
+            encrypt_metadata: true,
+        };
+        let values = crate::pdf_crypt::writer::dictionary(&settings);
+        let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let mut entries = format!("/Filter /Standard /V {} /R {} /P -4", values.v, values.r);
+        if let Some(length) = values.length {
+            entries.push_str(&format!(" /Length {length}"));
+        }
+        let strings = [
+            ("O", &values.o),
+            ("U", &values.u),
+            ("OE", &values.oe),
+            ("UE", &values.ue),
+            ("Perms", &values.perms),
+        ];
+        for (name, value) in strings {
+            if let Some(value) = value {
+                entries.push_str(&format!(" /{name} <{}>", hex(value)));
+            }
+        }
+        let filter = values.crypt_filters.first().expect("an AES file's");
+        let method = String::from_utf8_lossy(filter.method.as_deref().unwrap_or_default());
+        format!("<< {entries} /CF << /StdCF << /CFM /{method} >> >> /StmF {stm_f} /StrF {str_f} >>")
+    }
+
+    /// The file ID [`encryption`]'s dictionaries are for.
+    const ID: &[u8] = b"0123456789abcdef";
+
+    /// In a file that encrypts its strings, an object stream whose data
+    /// isn't encrypted (`/StmF /Identity`) leaves its objects' strings in
+    /// the clear: found once, in the object stream, at the first string,
+    /// counted; under AES-128 and AES-256. Not where it holds no string,
+    /// nor where the file's strings aren't encrypted either.
+    #[test]
+    fn strings_an_object_stream_leaves_in_the_clear_are_found() {
+        use crate::pdf_crypt::writer::Kind;
+        let file = |encrypt: &str, members: &[(u32, &str)]| {
+            let mut file = Sections::new("1.7");
+            file.object(7, encrypt);
+            file.object_stream(10, "", members);
+            let hex: String = ID.iter().map(|b| format!("{b:02x}")).collect();
+            let trailer = format!("/Root 1 0 R /Encrypt 7 0 R /ID [<{hex}> <{hex}>]");
+            let mut numbers = vec![0, 7, 10];
+            numbers.extend(members.iter().map(|&(n, _)| n));
+            let at = file.stream(11, &numbers, &trailer);
+            file.end(at);
+            bytes::read(&file.out)
+        };
+        let catalog = "<< /Type /Catalog /Pages 2 0 R /Lang (en-US) >>";
+        let info = "<< /Title (A test) /Producer (Its own) >>";
+        let three = [(1, catalog), (2, PAGES), (6, info)];
+        let one = [(1, catalog), (2, PAGES)];
+        let none = [(1, CATALOG), (2, PAGES)];
+        let said = "strings in the clear: its data isn't encrypted, where the file's strings are";
+        for kind in [Kind::Aes128, Kind::Aes256] {
+            let clear = encryption(kind, "/Identity", "/StdCF");
+            let doc = file(&clear, &three);
+            assert!(
+                matches!(doc.encryption, crate::source::Encryption::Opened { .. }),
+                "{kind:?}"
+            );
+            assert_eq!(doc.in_the_clear, BTreeSet::from([(10, 0)]), "{kind:?}");
+            let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+            let value = format!("3 {said}");
+            assert_eq!(
+                packed_found(&report),
+                [(Some(10), "10 0 R", value.as_str())],
+                "{kind:?}: {report}"
+            );
+            let found = packed_of(&doc, Made::Merged);
+            assert_eq!(in_data(&doc, &found[0]), "(en-US)");
+
+            let doc = file(&clear, &one);
+            let value = format!("1 {}", said.replacen("strings", "string", 1));
+            let found = packed_of(&doc, Made::Merged);
+            assert_eq!(
+                found.iter().map(|f| f.value.as_str()).collect::<Vec<_>>(),
+                [value.as_str()],
+                "{kind:?}"
+            );
+            assert_eq!(packed_of(&file(&clear, &none), Made::Merged), []);
+
+            let identity = encryption(kind, "/Identity", "/Identity");
+            let doc = file(&identity, &three);
+            assert_eq!(doc.in_the_clear, BTreeSet::new(), "{kind:?}");
+            assert_eq!(packed_of(&doc, Made::Merged), []);
+        }
+    }
+
+    /// What an object stream holds that it mustn't is found only where the
+    /// object stream is held, made as it's held: a hold file naming it
+    /// holds it; one naming the object in it, or another, doesn't.
+    #[test]
+    fn what_an_object_stream_holds_is_found_where_its_held() {
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, PAGES);
+        file.object_stream(10, "", &[(3, "<< /Length 5 >>\nstream\nhello\nendstream")]);
+        let at = file.stream(11, &[0, 1, 2, 3, 10], "/Root 1 0 R");
+        file.end(at);
+        let doc = bytes::read(&file.out);
+        for (named, made) in [
+            ("10 0 built\n", Made::Built),
+            ("10 0 merged\n", Made::Merged),
+        ] {
+            let report = check(&doc, &Hold::parse(named).unwrap(), &Options::default());
+            let held: Vec<_> = (report.findings.iter())
+                .map(|f| (f.object, f.made, f.rule, f.value.as_str()))
+                .collect();
+            assert_eq!(
+                held,
+                [(Some((10, 0)), made, Rule::Packed, "3 0 R, a stream")],
+                "{report}"
+            );
+        }
+        for other in ["3 0 merged\n", "1 0 built\n"] {
+            let report = check(&doc, &Hold::parse(other).unwrap(), &Options::default());
+            assert_eq!(packed_found(&report), [], "{other}: {report}");
+        }
+    }
+
+    /// Each rule is the one its name names, as an allowance names it, and
+    /// `packed`, the newest, is last.
+    #[test]
+    fn each_rule_is_named_by_its_name() {
+        for &rule in Rule::ALL {
+            assert_eq!(Rule::named(rule.name()), Some(rule));
+            assert_eq!(rule.to_string(), rule.name());
+        }
+        assert_eq!(Rule::named("packed"), Some(Rule::Packed));
+        assert_eq!(Rule::ALL.last(), Some(&Rule::Packed));
+        assert_eq!(Rule::named("Packed"), None);
+    }
+
+    /// A reader that doesn't say where its objects were written: the
+    /// structure tree's content items, and the pages and images checked,
+    /// are known by their numbers.
+    #[test]
+    fn content_items_are_known_by_their_numbers_where_nothing_is_placed() {
+        let objects = changed(clean(), 1, |catalog| catalog.set("StructTreeRoot", r(6)));
+        let mut objects = changed(objects, 3, |page| {
+            page.set("Resources", dict! { "XObject" => dict! { "Im" => r(8) } });
+        });
+        let image = dict! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => 1,
+            "Height" => 1,
+            "ColorSpace" => "DeviceGray",
+            "BitsPerComponent" => 8,
+        };
+        let reference = dict! { "Type" => "OBJR", "Obj" => r(8) };
+        objects.extend([
+            (6, dict! { "Type" => "StructTreeRoot", "K" => r(7) }.into()),
+            (
+                7,
+                dict! {
+                    "Type" => "StructElem",
+                    "S" => "Figure",
+                    "P" => r(6),
+                    "Pg" => r(3),
+                    "K" => vec![Object::from(0), Object::from(reference)],
+                }
+                .into(),
+            ),
+            (8, Body::stream(image, &[0])),
+        ]);
+        let mut doc = bytes::read(&written("1.7", &objects, Xref::Table));
+        let content = |doc: &Document| {
+            let report = check(doc, &Hold::All(Made::Built), &Options::default());
+            let found = (found(&report).into_iter())
+                .filter(|f| matches!(f.2, "StructParents" | "StructParent"))
+                .map(|f| (f.0, f.1.to_string(), f.3))
+                .collect::<Vec<_>>();
+            let unchecked = (report.unchecked.keys())
+                .filter(|u| u.column == "Required")
+                .count();
+            (found, unchecked)
+        };
+        let placed = content(&doc);
+        for id in doc.ids() {
+            if let Some(object) = doc.get_mut(id) {
+                object.at = None;
+            }
+        }
+        assert_eq!(content(&doc), placed);
+        assert_eq!(
+            placed.0,
+            [
+                (Some(3), "PageObject".to_string(), Rule::Missing),
+                (Some(8), "XObjectImage".to_string(), Rule::Missing)
+            ]
+        );
+    }
+
     /// A SpecialCase's or PossibleValues' `@Key` the object lacks takes the
     /// key's DefaultValue; Required's doesn't, and what it asks of a key
     /// that's absent stays unknown.
@@ -4304,7 +7033,7 @@ mod tests {
     /// `value` as PDF syntax.
     fn syntax(value: &Object) -> Vec<u8> {
         let mut out = Vec::new();
-        write::value(&mut out, value);
+        fixture::value(&mut out, value);
         out
     }
 
@@ -4326,7 +7055,7 @@ mod tests {
         bodies.sort_by_key(|(n, _)| *n);
         let size = bodies.last().map_or(1, |(n, _)| n + 1);
         let bodies: Vec<(u32, &[u8])> = bodies.iter().map(|(n, b)| (*n, b.as_slice())).collect();
-        write::assembled("1.7", &bodies, &format!("<< /Size {size} /Root 1 0 R >>"))
+        fixture::assembled("1.7", &bodies, &format!("<< /Size {size} /Root 1 0 R >>"))
     }
 
     #[test]
@@ -4915,7 +7644,9 @@ mod tests {
         );
         assert_eq!(report.ignored.get(&rt), None, "{report}");
         // Outside a reply, readers ignore it: no finding, and counted so.
-        let objects = changed(objects, 4, |annot| annot.remove(b"IRT"));
+        let objects = changed(objects, 4, |annot| {
+            annot.remove(b"IRT");
+        });
         let report = checked(&objects);
         assert_eq!(report.ignored.get(&rt), Some(&1), "{report}");
         assert!(!found(&report).iter().any(|f| f.2 == "RT"), "{report}");
@@ -4954,6 +7685,7 @@ mod tests {
             rule,
             value: value.to_string(),
             at: None,
+            revision: None,
         };
         let merged = at(4, Made::Merged, Rule::Type, "/Bogus");
         let built = at(5, Made::Built, Rule::Type, "/Bogus");
@@ -5065,6 +7797,7 @@ mod tests {
             rule: Rule::Missing,
             value: "absent".to_string(),
             at: None,
+            revision: None,
         };
         let stayed = missing(10, Made::Merged, "Root/Pages/Kids[0]");
         let written = missing(11, Made::Merged, "Root/Pages/Kids[1]");
@@ -5097,6 +7830,62 @@ mod tests {
             [&written, &built],
             "Kids[1] had none, though Kids[0] had one; the baseline has no Kids[2]"
         );
+    }
+
+    /// A rewrite renumbers objects, so a finding from an object stream's
+    /// number is carried by a like one anywhere in the baseline: the
+    /// baseline's fault in object stream 15, rewritten at 12, where the
+    /// baseline has a clean one, and at 20, where it has none, is carried
+    /// both ways.
+    #[test]
+    fn by_path_carries_a_finding_from_a_number_from_anywhere() {
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>";
+        let objects = [
+            (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        ];
+        let faulty = "/Type /ObjStm /Extends 1 0 R";
+        let other = (4, "<< /A 1 >>");
+        let options = Options {
+            paths: true,
+            ..Options::default()
+        };
+        let hold = Hold::All(Made::Merged);
+        let checked = |file: Vec<u8>| check(&bytes::read(&file), &hold, &options);
+        // The /Extends of type its row doesn't allow: its object and path.
+        let typed = |report: &Report| {
+            let found = walked(report).into_iter();
+            let typed = found.filter(|&(.., rule, value)| {
+                rule == Rule::Type && value == "<< /Pages 2 0 R /Type /Catalog >>"
+            });
+            typed
+                .map(|(n, path, ..)| (n, path.to_string()))
+                .collect::<Vec<_>>()
+        };
+        let clean = [(3, page)];
+        let streams: [ObjStm; 2] = [(12, "/Type /ObjStm", &clean), (15, faulty, &[other])];
+        let baseline = checked(with_object_streams(&objects, &streams));
+        assert_eq!(typed(&baseline), [(Some(15), "15 0 R".to_string())]);
+        assert!(baseline.paths.contains("12 0 R"));
+        for n in [12, 20] {
+            let rewrite = checked(with_object_streams(
+                &objects,
+                &[(n, faulty, &[(3, page), other])],
+            ));
+            assert_eq!(typed(&rewrite), [(Some(n), format!("{n} 0 R"))]);
+            assert_eq!(rewrite.by_path(&baseline), Vec::<&Finding>::new(), "{n}");
+        }
+        assert!(from_number("12 0 R") && from_number("12 0 R/DecodeParms"));
+        for path in [
+            "trailer",
+            "trailer 1/ID",
+            "Root/Pages",
+            "-",
+            "…Kids[0]",
+            "1 0 Rx",
+        ] {
+            assert!(!from_number(path), "{path}");
+        }
     }
 
     #[test]
@@ -5135,6 +7924,7 @@ mod tests {
             rule: Rule::Missing,
             value: "absent".to_string(),
             at: None,
+            revision: None,
         };
         let page = missing(Some(4), Made::Merged);
         let built = missing(Some(5), Made::Built);
@@ -5213,6 +8003,7 @@ mod tests {
             rule: Rule::Missing,
             value: "absent".to_string(),
             at: None,
+            revision: None,
         };
         let written = Report {
             findings: vec![missing(3, Made::Merged), missing(4, Made::Built)],
@@ -5237,6 +8028,7 @@ mod tests {
                 rule: Rule::TooNew,
                 value: value.to_string(),
                 at: None,
+                revision: None,
             };
         let info = at(
             Some(3),
@@ -5458,6 +8250,81 @@ mod tests {
         }
     }
 
+    /// A hold file's line that doesn't read is said word for word: its
+    /// number and why, a number's or a generation's after what std said
+    /// parsing it.
+    #[test]
+    fn a_hold_files_line_that_doesnt_read_says_why() {
+        let number = |text: &str| text.parse::<u32>().unwrap_err();
+        let generation = |text: &str| text.parse::<u16>().unwrap_err();
+        let cases = [
+            (
+                "# held\n\n4 0",
+                "line 3: not a number, a generation and built or merged".to_string(),
+            ),
+            (
+                "x 0 built",
+                format!("line 1: \"x\" isn't an object number: {}", number("x")),
+            ),
+            (
+                "99999999999 0 built",
+                format!(
+                    "line 1: \"99999999999\" isn't an object number: {}",
+                    number("99999999999")
+                ),
+            ),
+            (
+                "4 y built",
+                format!("line 1: \"y\" isn't a generation: {}", generation("y")),
+            ),
+            (
+                "4 70000 built",
+                format!(
+                    "line 1: \"70000\" isn't a generation: {}",
+                    generation("70000")
+                ),
+            ),
+            (
+                "4 0 made",
+                "line 1: \"made\" isn't built or merged".to_string(),
+            ),
+            (
+                "4 0 built\n4 0 merged",
+                "line 2: 4 0 is held a second time".to_string(),
+            ),
+        ];
+        for (text, said) in cases {
+            let e = Hold::parse(text).unwrap_err();
+            assert_eq!(format!("{e:#}"), said, "{text:?}");
+        }
+    }
+
+    /// An exempt file's line that doesn't read is said word for word: its
+    /// number, the line as written, and why.
+    #[test]
+    fn an_exempt_files_line_that_doesnt_read_says_why() {
+        let cases = [
+            (
+                "# mine\n\nWriterAnnot",
+                "line 3: \"WriterAnnot\" isn't a name, as /MyKey, or /My*",
+            ),
+            (
+                "/A#G1",
+                "line 1: \"/A#G1\" has a # without two hex digits after it",
+            ),
+            (
+                "/A#00",
+                "line 1: \"/A#00\" has #00, which a name may not hold",
+            ),
+            ("/", "line 1: an empty name"),
+            ("/A\n/A", "line 2: \"/A\" is exempt a second time"),
+        ];
+        for (text, said) in cases {
+            let e = Exempt::parse(text).unwrap_err();
+            assert_eq!(format!("{e:#}"), said, "{text:?}");
+        }
+    }
+
     /// The bytes each finding says it's at, as text.
     fn bytes_at<'a>(bytes: &'a [u8], finding: &Finding) -> &'a str {
         let at = finding
@@ -5506,7 +8373,7 @@ mod tests {
 
     #[test]
     fn a_key_written_twice_is_found_where_it_was_first_written() {
-        let bytes = write::assembled(
+        let bytes = fixture::assembled(
             "1.7",
             &[
                 (1, b"<< /Type /Catalog /Pages 2 0 R /Type /Catalog >>"),
@@ -5546,7 +8413,7 @@ mod tests {
 
     #[test]
     fn what_the_reader_had_to_choose_is_found_in_held_objects_only() {
-        let bytes = write::assembled(
+        let bytes = fixture::assembled(
             "1.7",
             &[
                 (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
@@ -5610,7 +8477,7 @@ mod tests {
                     "Parent" => r(2),
                     "MediaBox" => numbers(&[0, 0, 1, 1]),
                     "Resources" => dict! {},
-                    "LastModified" => Object::new(Value::String(date)),
+                    "LastModified" => Object::new(Value::String(date, None)),
                     "Annots" => vec![r(4)],
                 },
             );
@@ -5620,7 +8487,7 @@ mod tests {
                     "Type" => "Annot",
                     "Subtype" => "Link",
                     "Rect" => numbers(&[0, 0, 1, 1]),
-                    "A" => dict! { "S" => "URI", "URI" => Object::new(Value::String(uri)) },
+                    "A" => dict! { "S" => "URI", "URI" => Object::new(Value::String(uri, None)) },
                 },
             );
             check(&doc, &Hold::All(Made::Built), &Options::default())
@@ -5662,5 +8529,32 @@ mod tests {
         // Text is a date's text, which can be told.
         let report = link(bytes("https://x"), Str::Text("D:20261324".to_string()));
         assert_eq!(found(&report).len(), 1, "{report}");
+    }
+
+    /// Whether the catalog's page tree has kids, as `file` resolves them.
+    fn has_kids<'a, R: Resolve<'a>>(file: &FileCx<'a, R>) -> Truth {
+        let kids = "fn:IsPresent(trailer::Catalog::Pages::Kids)";
+        predicate::holds(kids, &file.at(&Object::null(), At::Key(b"X")))
+    }
+
+    /// One `FileCx` of a file goes across threads over its document or its
+    /// reading, each a `Sync` resolver, and resolves there as on one.
+    #[test]
+    fn a_file_over_a_document_or_a_reading_is_send_and_sync() {
+        fn shared<T: Send + Sync>(_: &T) {}
+        let file = written("1.7", &clean(), Xref::Table);
+        let doc = bytes::read(&file);
+        let reading = bytes::Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let trailer = doc.trailer.dict();
+        let over_doc = FileCx::new(trailer, Version::new(1, 7), &doc);
+        let over_reading = FileCx::new(trailer, Version::new(1, 7), &reading);
+        shared(&over_doc);
+        shared(&over_reading);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| assert_eq!(has_kids(&over_doc), Truth::True));
+                scope.spawn(|| assert_eq!(has_kids(&over_reading), Truth::True));
+            }
+        });
     }
 }

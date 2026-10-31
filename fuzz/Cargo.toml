@@ -1,14 +1,48 @@
 # The fuzz targets, in cargo-fuzz's layout, outside the workspace: they
 # build on nightly with libFuzzer. Locally, `just fuzz tokenize`,
-# `just fuzz filters` or `just fuzz check`, or:
+# `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
+# `just fuzz structure`, `just fuzz write`, `just fuzz content` or
+# `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
-# `tokenize` calls `pdf_tokenizer::fuzz::tokenize`, which a stable unit test
-# (`random_inputs_keep_every_promise`) runs too; `filters` calls
-# `pdf_filters::fuzz::filters`, which two stable unit tests run on random
-# and damaged inputs; `crypt` calls
-# `pdf_crypt::fuzz::handler`, which a stable unit test runs; `check` calls
+# `tokenize` calls `pdf_tokenizer::fuzz::tokenize`, the tokenizer and its
+# decoders under ISO 32000-2's rules and PDFium's and the two side by side,
+# and its skims, passes and searches against plain walks, which two stable
+# unit tests (`random_inputs_keep_every_promise` and
+# `random_inputs_keep_every_promise_where_the_rules_part`) run too;
+# `filters` calls `pdf_filters::fuzz::filters` on each backend, which two
+# stable unit tests run on random and damaged inputs, and
+# `pdf_filters::fuzz::encoders`, which a third runs; `crypt` calls
+# `pdf_crypt::fuzz::handler`, on any dictionary and on new files'
+# dictionaries, and `pdf_crypt::fuzz::password`, which three stable unit
+# tests run, one on new files'; `objects` calls `pdf_objects::fuzz::parse`,
+# the parser by ISO 32000-2's rules and PDFium's and the two side by side,
+# the walk of what it read's references and the writer on what it read,
+# which two stable unit tests (`random_fragments_keep_every_promise` and
+# `random_fragments_keep_every_promise_where_the_rules_part`) run;
+# `structure` calls `pdf_structure::fuzz::read_file`, the reader and the
+# document it reads, which a stable unit test
+# (`mutated_files_read_within_their_bytes_the_same_twice`) runs on mutated
+# files; `write` calls `pdf_structure::fuzz::write_file`, the writer, a
+# file read written whole with copies, under a renumbering the input
+# picks, its document as the input picks read whole and taken by the
+# reading, then an update of its objects or a whole write after a byte is
+# flipped, refused as changed or read back alike, which a stable unit test
+# (`mutated_files_write_and_read_back_alike`) runs on mutated files, from
+# seeds with the third byte its input has;
+# `content` calls `pdf_content_streams::fuzz::content`, a page's content
+# read whole and as two streams, its tokens tiling it, each operand read,
+# its number as PDFium reads it and as an object, and its operations its
+# tokens grouped, and again under small caps, its faults the same through
+# any sink, where an object ends an inline image's dictionary and each
+# lone `BI` told, each operation typed and stepped through the states, its
+# balance, marked content and names its steppers', and its searches for an
+# inline image's end, remembered or not, and its skims of arrays and
+# dictionaries the same as plain ones', which two stable unit tests
+# (`mutated_seeds_keep_every_promise`, `random_fragments_keep_every_promise`)
+# run on mutated seeds and random content;
+# `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
 # on mutated seeds.
@@ -24,9 +58,14 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+pdf-content-streams = { path = "../crates/pdf-content-streams" }
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
-pdf-filters = { path = "../crates/pdf-filters" }
-pdf-lint = { path = "../crates/pdf-lint" }
+# Both Flate backends, so that the filters' target runs on each.
+pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
+# The library alone, without the command line's crates.
+pdf-lint = { path = "../crates/pdf-lint", default-features = false }
+pdf-objects = { path = "../crates/pdf-objects" }
+pdf-structure = { path = "../crates/pdf-structure", features = ["fixtures"] }
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 
 [[bin]]
@@ -46,6 +85,34 @@ bench = false
 [[bin]]
 name = "crypt"
 path = "fuzz_targets/crypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "objects"
+path = "fuzz_targets/objects.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "structure"
+path = "fuzz_targets/structure.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "write"
+path = "fuzz_targets/write.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content"
+path = "fuzz_targets/content.rs"
 test = false
 doc = false
 bench = false

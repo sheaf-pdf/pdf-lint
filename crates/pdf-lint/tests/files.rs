@@ -1,12 +1,13 @@
 //! Files another writer made, qpdf, read and checked by pdf-lint alone:
-//! each as committed in `tests/files`, written once from a clean file
-//! (qpdf.rs's `the_fixtures_are_written`).
+//! each as committed in pdf-structure's `tests/files`, written once from a
+//! clean file (its qpdf.rs's `the_fixtures_are_written`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pdf_lint::bytes::read_opened;
-use pdf_lint::{Document, Encryption, Hold, Made, Object, Options, Str, Value, check};
+use pdf_lint::pdf_crypt::{Encoding, Password};
+use pdf_lint::{Document, Encryption, Form, Hold, Made, Object, Options, Str, Value, check};
 
 /// Each fixture's name, whether its dictionaries are in object streams,
 /// and whether it's encrypted, with the empty user password and `owner`
@@ -24,13 +25,13 @@ const FIXTURES: [(&str, bool, bool); 8] = [
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/files")
+        .join("../pdf-structure/tests/files")
         .join(format!("{name}.pdf"))
 }
 
 /// The text annotation, which every fixture has, with its `/Contents`.
 fn annotation(doc: &Document) -> &Object {
-    (doc.objects.values().flatten())
+    (doc.objects().map(|(_, o)| o))
         .find(|o| {
             o.as_dict()
                 .is_some_and(|d| d.get(b"Subtype").and_then(Object::as_name) == Some(b"Text"))
@@ -44,13 +45,13 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
         let data = std::fs::read(fixture(name)).unwrap();
         let doc = read_opened(&data, &[]);
         let opened = match encrypted {
-            true => Encryption::Opened { owner: false },
-            false => Encryption::None,
+            true => matches!(doc.encryption, Encryption::Opened { owner: false, .. }),
+            false => doc.encryption == Encryption::None,
         };
-        assert_eq!(doc.encryption, opened, "{name}");
+        assert!(opened, "{name}: {:?}", doc.encryption);
         assert_eq!(doc.trailer.unwritten, None, "{name}");
         assert!(doc.warnings.is_empty(), "{name}: {:?}", doc.warnings);
-        assert!(doc.objects.values().all(Result::is_ok), "{name}");
+        assert_eq!(doc.unread().next(), None, "{name}");
         let annotation = annotation(&doc);
         assert_eq!(
             annotation.at.unwrap().stream.is_some(),
@@ -58,9 +59,15 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
             "{name}: in an object stream or not"
         );
         let contents = annotation.as_dict().unwrap().get(b"Contents").unwrap();
+        // As qpdf wrote it: literal, but ciphertext outside an object
+        // stream, which it writes as a hex string.
+        let form = match encrypted && !packed {
+            true => Form::Hex,
+            false => Form::Literal,
+        };
         assert_eq!(
-            contents.value,
-            Value::String(Str::Bytes(b"A note".to_vec())),
+            *contents.value(),
+            Value::String(Str::Bytes(b"A note".to_vec()), Some(form)),
             "{name}"
         );
         // Clean, but for what the model finds of the encryption itself
@@ -72,15 +79,26 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
         assert!(others.is_empty(), "{name}: {report}");
         // The owner's password opens it too, to the same.
         if encrypted {
-            let owned = read_opened(&data, &[b"owner"]);
-            assert_eq!(
-                owned.encryption,
-                Encryption::Opened { owner: true },
-                "{name}"
-            );
-            assert_eq!(owned.objects, doc.objects, "{name}");
+            let owned = read_opened(&data, &[Password("owner")]);
+            let opened = matches!(owned.encryption, Encryption::Opened { owner: true, .. });
+            assert!(opened, "{name}: {:?}", owned.encryption);
+            assert!(owned.objects().eq(doc.objects()), "{name}");
+            assert!(owned.unread().eq(doc.unread()), "{name}");
         }
     }
+}
+
+/// The file whose dictionaries are in object streams, read by the reader
+/// alone, checks clean, its text annotation checked once, and its object
+/// stream too.
+#[test]
+fn the_compressed_file_checks_clean() {
+    let data = std::fs::read(fixture("qpdf-compressed")).unwrap();
+    let doc = read_opened(&data, &[]);
+    let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
+    assert_eq!(report.findings, [], "{report}");
+    assert_eq!(report.checked.get("AnnotText"), Some(&1), "{report}");
+    assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
 }
 
 #[test]
@@ -101,4 +119,42 @@ fn each_file_qpdf_wrote_checks_through_the_command_line() {
         );
         assert!(!stdout.contains("unresolved"), "{name}: {stdout}");
     }
+}
+
+/// The AES-256 file, whose user password is empty: a wrong password, which
+/// is tried in the empty one's place, leaves it unread, said as ever; the
+/// owner's opens it as the owner's, by its first password's UTF-8, and it's
+/// checked.
+#[test]
+fn a_wrong_password_on_a_file_any_password_opens_leaves_it_unread() {
+    let path = fixture("qpdf-aes-256");
+    let data = std::fs::read(&path).unwrap();
+    let wrong = read_opened(&data, &[Password("wrong")]);
+    assert_eq!(wrong.encryption, Encryption::Locked);
+    let owned = read_opened(&data, &[Password("owner")]);
+    let by = Some((0, Encoding::Utf8));
+    let opened =
+        matches!(owned.encryption, Encryption::Opened { owner: true, by: b, .. } if b == by);
+    assert!(opened, "{:?}", owned.encryption);
+    let run = |password: &str| {
+        Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
+            .args(["--password", password])
+            .arg(&path)
+            .output()
+            .unwrap()
+    };
+    let out = run("wrong");
+    assert_eq!(out.status.code(), Some(2));
+    let said = format!(
+        "{}: the password --password gives doesn't open it\n",
+        path.display()
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), said);
+    let out = run("owner");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.code().is_some_and(|c| c < 2), "{stdout}");
+    assert!(
+        out.stderr.is_empty() && stdout.contains(" objects checked"),
+        "{stdout}"
+    );
 }

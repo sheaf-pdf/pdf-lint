@@ -1,4 +1,7 @@
-# Where PDF tokens begin and end, for libFuzzer's -dict.
+# Where PDF tokens begin and end, for libFuzzer's -dict, and where
+# PDFium's rules part from ISO 32000-2's: its white-space bytes, its
+# number words, a name's `#`, a string's CR, a hex string's stray byte
+# and an integer past 32 bits.
 "obj"
 "endobj"
 "stream"
@@ -22,3 +25,11 @@
 " 0 R"
 "ID "
 "EI"
+"\x80"
+"\xff"
+"--5"
+"1.2.3"
+"#3G"
+"(a\x0db)"
+"4294967296"
+"<4G1>"
