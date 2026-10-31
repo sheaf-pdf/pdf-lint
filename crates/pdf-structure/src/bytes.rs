@@ -1283,6 +1283,13 @@ impl Reader {
         self.index(n).map(|i| &self.entries[i].1)
     }
 
+    /// The entry that lists object `id`, as `listed` finds it: none where
+    /// its number's newest entry is free or of another generation, so a
+    /// reference to it is to no object (ISO 32000-2, 7.3.10).
+    fn listed_entry(&self, id: ObjectId) -> Option<&(u16, XrefEntry)> {
+        self.listed(id).map(|i| &self.entries[i].1)
+    }
+
     /// Where the entry that lists object `id` is among the entries: one in
     /// use of its generation, or one in an object stream, of generation 0.
     /// Object 0 is never one.
@@ -2979,7 +2986,7 @@ impl Reader {
             // A null is no entry, and so is a reference to no object (ISO
             // 32000-2, 7.3.9 and 7.3.10).
             Value::Null => return Ok(()),
-            Value::Ref(id) => match self.entry(id.0) {
+            Value::Ref(id) => match self.listed_entry(*id) {
                 Some(&(_, XrefEntry::InUse { offset, .. })) => {
                     match self.indirect(file, cx, offset, Some(*id))? {
                         Ok((_, object, _)) => {
@@ -3052,7 +3059,7 @@ impl Reader {
                 return Ok(None);
             };
             Ok(match o.value() {
-                Value::Ref(id) => match self.entry(id.0) {
+                Value::Ref(id) => match self.listed_entry(*id) {
                     Some(&(_, XrefEntry::InUse { offset, .. })) => {
                         self.list.dictionaries.insert(*id);
                         (self.indirect(file, cx, offset, Some(*id))?.ok()).map(|(_, o, _)| o)
@@ -3143,7 +3150,7 @@ impl Reader {
             Some(Value::Null) => Eff::AsStreams,
             Some(_) => Eff::Unsaid,
             None => match eff.map(Object::value) {
-                Some(Value::Ref(id)) => match self.entry(id.0) {
+                Some(Value::Ref(id)) => match self.listed_entry(*id) {
                     None | Some((_, XrefEntry::Free)) => Eff::AsStreams,
                     Some(_) => Eff::Unsaid,
                 },

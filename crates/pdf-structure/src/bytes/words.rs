@@ -268,6 +268,46 @@ fn an_encrypt_that_refers_to_no_object_is_read_as_not_encrypted_and_said() {
 }
 
 #[test]
+fn an_encrypt_that_refers_to_a_generation_not_listed_is_read_as_not_encrypted_and_said() {
+    // Object 2 is listed at generation 30, so 2 0 R is to no object, though
+    // the object written at the entry's offset says it's 2 0.
+    let ok = fixture::assembled(
+        "1.7",
+        &[
+            (1, b"<< /Type /Catalog >>"),
+            (2, b"<< /Filter /Standard /V 4 /R 4 /Length 128 /P -4 >>"),
+        ],
+        "<< /Size 3 /Root 1 0 R /Encrypt 2 0 R /ID [<00> <00>] >>",
+    );
+    let at = |file: &[u8]| file.windows(9).rposition(|w| w == b"00000 n \n").unwrap();
+    let mut file = ok.clone();
+    let row = at(&file);
+    file[row..row + 5].copy_from_slice(b"00030");
+    assert_ne!(
+        read(&ok).encryption,
+        Encryption::None,
+        "encrypted where 2 0 is listed"
+    );
+    let doc = read(&file);
+    assert_eq!(
+        said(&doc),
+        [
+            "the trailer's /Encrypt is 2 0 R, which is no object, so the file is read as not encrypted"
+        ]
+    );
+    assert_eq!(doc.encryption, Encryption::None);
+    // Read alike, as a reading and the document it makes, so the reading
+    // takes the document read whole.
+    let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    assert_eq!(*reading.encryption(), Encryption::None);
+    let mut whole = Reading::open(&file[..], &Options::DEFAULT)
+        .unwrap()
+        .into_document()
+        .unwrap();
+    reading.adopt(&mut whole).unwrap();
+}
+
+#[test]
 fn an_object_stream_of_a_file_nothing_opens_says_nothing_decodes_it() {
     let body = container("/Type /ObjStm /N 2 /First 8", MEMBERS);
     let doc = read(&packed(&body, " /Encrypt << /Filter /Standard /V 2 >>"));
