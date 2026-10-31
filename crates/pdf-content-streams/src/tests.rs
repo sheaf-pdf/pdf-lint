@@ -1569,14 +1569,88 @@ fn the_caps_hold() {
     assert_eq!((e.at, e.kind), (39, ErrorKind::InlineImageSize));
 }
 
-/// Content of many inline images that don't end is read once: the end
-/// of the first is searched for, not each one's.
+/// Content of many inline images whose data doesn't end is read once,
+/// for each filter that ends it: a JPEG's end of image, ASCIIHex's `>`,
+/// the byte ASCII85 data stops at and RunLength's end-of-data byte are
+/// searched for from the first image, not from each.
 #[test]
 fn unended_images_dont_search_again() {
-    let s = b"BI /F /DCT ID x EI ".repeat(50_000);
-    let started = std::time::Instant::now();
-    assert_eq!(tokens(&s, &ResCx::none(), &Limits::DEFAULT).count(), 50_000);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    for unit in [
+        &b"BI /F /DCT ID x EI "[..],
+        b"BI /F /AHx ID x EI ",
+        b"BI /F /A85 ID 9 EI ",
+        b"BI /F /RL ID x EI ",
+    ] {
+        let s = unit.repeat(200_000);
+        let started = std::time::Instant::now();
+        let read = tokens(&s, &ResCx::none(), &Limits::DEFAULT).count();
+        assert_eq!(read, 200_000, "{}", String::from_utf8_lossy(unit));
+        let took = started.elapsed();
+        let unit = String::from_utf8_lossy(unit);
+        assert!(took < std::time::Duration::from_secs(2), "{unit}: {took:?}");
+    }
+}
+
+/// The searches for where an inline image's data ends, remembered, find
+/// what plain ones find, from every offset, in order, in reverse and
+/// leaping about: RunLength's walk to its end-of-data byte, where ASCII85
+/// data stops, ASCIIHex's `>` and a JPEG's end of image.
+#[test]
+fn remembered_searches_find_what_plain_ones_find() {
+    use crate::data::{RunLength, Searched, a85_stop, find};
+    // Bytes a RunLength walk, and the other searches, part on.
+    let mut random = Vec::new();
+    let mut x = 0x2545_f491_u32;
+    for _ in 0..600 {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        random.push(b"\x00\x01\x02\x05\x7f\x80\x81\xfe\xd9\xff>~9 z"[x as usize % 15]);
+    }
+    let contents: [&[u8]; 6] = [
+        b"\x02\x80ab\x80\x01x\x80",
+        b"\x00a\x81b\x05abcdef\x80\x00",
+        b"\x01\x01\x01\x01\x01\x01\x01\x01\x80",
+        b"9 EI ~> 9 x z EI 9",
+        b"41 > 42> EI \xff\xff\xd9 \xd9",
+        &random,
+    ];
+    for s in contents {
+        let walk = |mut at: usize| {
+            while let Some(&n) = s.get(at) {
+                at += match n {
+                    0..=127 => usize::from(n) + 2,
+                    128 => return Some(at + 1),
+                    _ => 2,
+                };
+            }
+            None
+        };
+        let n = s.len() + 2;
+        let leaps = (0..n).map(|i| i * 7 % n);
+        let orders: [Vec<usize>; 3] = [(0..n).collect(), (0..n).rev().collect(), leaps.collect()];
+        for order in orders {
+            let mut run_length = RunLength::default();
+            let mut searched: [Searched; 3] = Default::default();
+            for at in order {
+                assert_eq!(
+                    run_length.end(s, at),
+                    walk(at),
+                    "{s:?}: RunLength from {at}"
+                );
+                let plain = [a85_stop(s, at), find(s, at, b">"), find(s, at, b"\xff\xd9")];
+                for (k, plain) in plain.into_iter().enumerate() {
+                    let remembered = searched[k].from(at, |at| match k {
+                        0 => a85_stop(s, at),
+                        1 => find(s, at, b">"),
+                        _ => find(s, at, b"\xff\xd9"),
+                    });
+                    assert_eq!(remembered, plain, "{s:?}: search {k} from {at}");
+                }
+            }
+        }
+        crate::fuzz::searched(s);
+    }
 }
 
 /// Content of many `BI`s that begin no inline image, each a value in the

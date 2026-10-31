@@ -9,7 +9,7 @@ use std::ops::Range;
 use pdf_objects::{Object, Value, dict};
 use pdf_tokenizer::decode;
 
-use crate::data::{ei_scan, find};
+use crate::data::{RunLength, Searched, a85_stop, ei_scan, find};
 use crate::fault::{Fault, Sink};
 use crate::scan::{Raw, next_raw, next_raw_walked};
 use crate::{
@@ -127,11 +127,14 @@ pub fn content(data: &[u8]) {
 /// against plain ones: from offsets spread over `s` (its first and last
 /// 16, and some 48 between), an inline image's end markers (`EI`, AHx's
 /// `>`, a JPEG's end of image) where a look at every window finds them,
-/// and the first `EI` between white-space where a walk of the bytes does;
-/// and from the start and from each `[` or `<` (some 32 of them spread
-/// over `s`, where there are more), an array or a dictionary skimmed is
-/// read to its end, or to its error, where a walk of every token it holds
-/// reads it, under the default cap on depth and one of two.
+/// the first `EI` between white-space where a walk of the bytes does, and
+/// the remembered searches, taken from those offsets in turn, where the
+/// plain ones find (RunLength's walk to its end-of-data byte, where ASCII85
+/// data stops, AHx's `>` and a JPEG's end of image); and from the start
+/// and from each `[` or `<` (some 32 of them spread over `s`, where there
+/// are more), an array or a dictionary skimmed is read to its end, or to
+/// its error, where a walk of every token it holds reads it, under the
+/// default cap on depth and one of two.
 pub fn searched(s: &[u8]) {
     let n = s.len();
     // Where each marker next is from each offset, found from the end.
@@ -161,11 +164,38 @@ pub fn searched(s: &[u8]) {
     let offsets = (0..=n.min(16))
         .chain((0..=n).step_by(stride))
         .chain(n.saturating_sub(16)..=n);
+    let mut run_length = RunLength::default();
+    let mut remembered: [Searched; 3] = Default::default();
     for at in offsets {
         for (k, needle) in [&b"EI"[..], b">", b"\xff\xd9"].into_iter().enumerate() {
             assert_eq!(find(s, at, needle), next[k][at], "{needle:?} from {at}");
         }
         assert_eq!(ei_scan(s, at), next[3][at], "EI from {at}");
+        // A run copies the n + 1 bytes after a length byte n under 128, or
+        // repeats the one after a length byte over it.
+        let mut walked = at;
+        let walked = loop {
+            match s.get(walked) {
+                Some(&n @ 0..=127) => walked += usize::from(n) + 2,
+                Some(128) => break Some(walked + 1),
+                Some(_) => walked += 2,
+                None => break None,
+            }
+        };
+        assert_eq!(run_length.end(s, at), walked, "RunLength from {at}");
+        let a85 = |c: &u8| matches!(c, b'!'..=b'u' | b'z' | b'\r' | b'\n' | b' ' | b'\t');
+        let stop = s
+            .get(at..)
+            .and_then(|rest| rest.iter().position(|c| !a85(c)));
+        let plain = [stop.map(|n| at + n), next[1][at], next[2][at]];
+        for (k, plain) in plain.into_iter().enumerate() {
+            let found = remembered[k].from(at, |at| match k {
+                0 => a85_stop(s, at),
+                1 => find(s, at, b">"),
+                _ => find(s, at, b"\xff\xd9"),
+            });
+            assert_eq!(found, plain, "search {k} from {at}");
+        }
     }
     let read = |r: Option<Result<(Range<usize>, Raw), Error>>| r.map(|r| r.map(|(at, _)| at));
     let openers: Vec<usize> = (0..n).filter(|&i| matches!(s[i], b'[' | b'<')).collect();

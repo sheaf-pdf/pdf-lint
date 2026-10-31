@@ -11,7 +11,7 @@ use std::ops::Range;
 use pdf_tokenizer::decode::{self, pdfium};
 use pdf_tokenizer::is_white_space;
 
-use crate::data::{a85_end, ei_scan, find, run_length_end};
+use crate::data::{RunLength, Searched, a85_end, a85_stop, ei_scan, find};
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Sink};
 use crate::limits::Limits;
@@ -171,16 +171,22 @@ impl fmt::Debug for InlineImage<'_> {
 }
 
 /// The inline images of one content stream: what finds each one's data,
-/// and the last search for a JPEG's end of image.
+/// and its searches for where an image's data ends, remembered, so content
+/// of many images whose data doesn't end is searched once, not once for
+/// each image.
 #[derive(Debug, Clone)]
 pub(crate) struct Images<'a, 'r> {
     s: &'a [u8],
     res: &'r ResCx,
     lim: Limits,
-    /// The last search for a JPEG's end of image: from where, and where
-    /// it was. Content of many JPEG images that don't end is searched
-    /// once, not once per image.
-    eoi: Option<(usize, Option<usize>)>,
+    /// The last search for ASCIIHex data's end, its `>`.
+    hex: Searched,
+    /// The last search for where ASCII85 data stops.
+    a85: Searched,
+    /// The walks of RunLength data.
+    run_length: RunLength,
+    /// The last search for a JPEG's end of image.
+    eoi: Searched,
 }
 
 impl<'a, 'r> Images<'a, 'r> {
@@ -189,7 +195,10 @@ impl<'a, 'r> Images<'a, 'r> {
             s,
             res,
             lim,
-            eoi: None,
+            hex: Searched::default(),
+            a85: Searched::default(),
+            run_length: RunLength::default(),
+            eoi: Searched::default(),
         }
     }
 
@@ -232,15 +241,14 @@ impl<'a, 'r> Images<'a, 'r> {
                 .ok()
                 .filter(|&n| n > 0)
                 .map_or(End::Walk, |n| End::Counted(start.saturating_add(n))),
-            (_, Some(Filter::Hex)) => {
-                find(s, start, b">").map_or(End::Walk, |at| End::Counted(at + 1))
-            }
-            (_, Some(Filter::A85)) => a85_end(s, start).map_or(End::Walk, End::Counted),
+            (_, Some(Filter::Hex)) => (self.hex.from(start, |at| find(s, at, b">")))
+                .map_or(End::Walk, |at| End::Counted(at + 1)),
+            (_, Some(Filter::A85)) => (self.a85.from(start, |at| a85_stop(s, at)))
+                .map_or(End::Walk, |stop| End::Counted(a85_end(s, start, stop))),
             (_, Some(Filter::RunLength)) => {
-                run_length_end(s, start).map_or(End::Walk, End::Counted)
+                (self.run_length.end(s, start)).map_or(End::Walk, End::Counted)
             }
-            (_, Some(Filter::Dct)) => self
-                .eoi(start)
+            (_, Some(Filter::Dct)) => (self.eoi.from(start, |at| find(s, at, b"\xff\xd9")))
                 .map_or(End::Scan, |eoi| End::Counted(eoi + 2)),
             (_, Some(Filter::Decoded)) => End::Scan,
             (_, Some(Filter::Other)) => End::Walk,
@@ -460,18 +468,6 @@ impl<'a, 'r> Images<'a, 'r> {
             }
             at = r.end;
         }
-    }
-
-    /// Where the next JPEG end of image (`FF D9`) from `at` is.
-    fn eoi(&mut self, at: usize) -> Option<usize> {
-        if let Some((from, found)) = self.eoi {
-            if at >= from && found.is_none_or(|f| f >= at) {
-                return found;
-            }
-        }
-        let found = find(self.s, at, b"\xff\xd9");
-        self.eoi = Some((at, found));
-        found
     }
 }
 
