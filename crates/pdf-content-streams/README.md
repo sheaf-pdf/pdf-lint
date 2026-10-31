@@ -106,10 +106,11 @@ let name = String::from_utf8_lossy(&needs.0[0].name).into_owned();
 let want = format!("BT\n/{name} 12 Tf\n72 700 Td\n(Hello, \\(world\\)) Tj\nET\n");
 assert_eq!(content, want.as_bytes());
 
-// A page whose resources bind that name to another font: the next name up.
+// A page whose resources bind that name to another font, object 1: the
+// next name up.
 let objects = [Object::from(dict! { "Type" => "Font", "BaseFont" => "Courier" })];
-let resolve = |id: ObjectId| objects.get(id.0 as usize);
-let resources = Object::from(dict! { "Font" => dict! { name.as_str() => Object::reference(0) } });
+let resolve = |id: ObjectId| objects.get((id.0 as usize).checked_sub(1)?);
+let resources = Object::from(dict! { "Font" => dict! { name.as_str() => Object::reference(1) } });
 let (_, renamed) = w.named(&Reserved::read(&resolve, Some(&resources)));
 assert_ne!(renamed.0[0].name, needs.0[0].name);
 assert_eq!(renamed.0[0].res, font);

@@ -3,7 +3,9 @@
 # the filters, their parameters and the color spaces that end its data,
 # what starts and ends a filter's data (a zlib header; a JPEG's start of
 # image, a restart, a comment and its end of image), a few operators,
-# among them marked content's and those that name resources, and what ISO
+# among them marked content's, those that name resources and a text
+# rendering mode that clips, a property list's keys a tool might mark it
+# with, which the splice's lists written again take out, and what ISO
 # 32000-2 reads otherwise than PDFium.
 "("
 ")"
@@ -96,6 +98,10 @@
 " MP "
 " DP "
 "/P0 "
+"/Tool_Gen "
+"/Tool_Block "
+"<</Tool_Gen 1>>"
+" Tr "
 " gs "
 " cs "
 " scn "

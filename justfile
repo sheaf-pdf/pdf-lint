@@ -254,8 +254,9 @@ arlington-msrv:
 # ISO 32000-2's rules and PDFium's, and its writer on what it read;
 # `structure`, pdf-structure's reader; `write`, pdf-structure's writer, on
 # what its reader read; `content`, pdf-content-streams' tokens, operations,
-# faults, operator table, and the balance, marked content and names over
-# them; or `check`, the reader and the checker. `structure`, `write` and
+# faults, operator table, the balance, marked content and names over them,
+# its writer, content written again and the calls, and its splices and
+# lists written again; or `check`, the reader and the checker. `structure`, `write` and
 # `check` begin from the seeds pdf-lint's fuzz module makes, `write`'s with
 # the third byte its input has; `content` from those pdf-content-streams'
 # fuzz module makes. The nightly is `fuzz_toolchain`.

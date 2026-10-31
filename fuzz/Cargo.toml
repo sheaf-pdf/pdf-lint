@@ -44,7 +44,12 @@
 # and its walks past one to `EI`, remembered or not, and its skims of
 # arrays and dictionaries the same as plain ones', its DCT and CCITTFax
 # data decoded, with the `image-ends` feature, and read by the stand-in
-# too, which two stable unit tests (`mutated_seeds_keep_every_promise`,
+# too, its operations written again reading as they did, and the writer's
+# calls its bytes choose read back as written, their resources named and
+# bumped in the same places, and its marked ranges at the top taken out,
+# alone, together and by splice_each, and their lists written again
+# without a tool's keys, alone and with what's taken out, what's kept
+# reading as it did, which two stable unit tests (`mutated_seeds_keep_every_promise`,
 # `random_fragments_keep_every_promise`) run on mutated seeds and random
 # content;
 # `check` calls

@@ -1,7 +1,10 @@
 //! PDF content streams (ISO 32000-2, 7.8.2), read as PDFium reads them, as
 //! of chromium/8125: a stream's tokens and its operations, each with where
 //! it is and its bytes as written, and a page's streams as one, every place
-//! in them mapped back.
+//! in them mapped back; and content written, the same bytes for the same
+//! calls, its resources named at the end, or spliced, ranges taken out and
+//! every other byte kept, only where that can't change what's drawn after
+//! them.
 //!
 //! - **Tokens** ([`tokens`]): operators, operands as written, and inline
 //!   images, `BI` to `EI`, each one token. Tokens end where PDFium's

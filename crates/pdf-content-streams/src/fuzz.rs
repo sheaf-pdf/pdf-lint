@@ -1,8 +1,8 @@
 //! What the fuzz target checks, which unit tests check too: the promises
 //! the tokens, the operations, the faults and the operator table and its
-//! states make, the balance, marked content and names over them, and the
-//! writer's, on any input. It's compiled only for tests and under
-//! cargo-fuzz's `--cfg fuzzing`.
+//! states make, the balance, marked content and names over them, the
+//! writer's, and the splice's and the lists written again, on any input.
+//! It's compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -2088,11 +2088,12 @@ mod tests {
     use crate::tests::Random;
 
     /// What a mutation of content may write: its tokens, the bytes that
-    /// end an inline image's data, what moves text and draws forms, runs
-    /// of operands, of which two are more than an operation holds inline,
-    /// marked content and what names resources, and what PDFium reads
-    /// otherwise than ISO 32000-2: a string's CR, a name's `#`, an inline
-    /// image's numbers, numbers past 32 bits and past an `f32`.
+    /// end an inline image's data, what moves text and draws forms, a text
+    /// rendering mode that clips, runs of operands, of which two are more
+    /// than an operation holds inline, marked content, a list with a tool's
+    /// keys and what names resources, and what PDFium reads otherwise than
+    /// ISO 32000-2: a string's CR, a name's `#`, an inline image's numbers,
+    /// numbers past 32 bits and past an `f32`.
     const CONTENT_TOKENS: &[&[u8]] = &[
         b" ",
         b"(",
@@ -2127,6 +2128,9 @@ mod tests {
         b" /X0 Do ",
         b" /Artifact /P0 BDC ",
         b" /Artifact <</Type /Pagination /Subtype /Footer>> BDC ",
+        b" /Artifact <</Subtype /Watermark /Tool_Gen 1>> BDC ",
+        b" /Tool_Block ",
+        b" 7 Tr ",
         b"4294967296",
         b" 12 TL ",
         b" 5 -14 TD ",
@@ -2165,7 +2169,8 @@ mod tests {
 
     /// The seeds read to their end, each of the first fifteen one inline
     /// image between `q` and `Q`, and the last an `scn` of 33 operands;
-    /// each written again; and those with marked content spliced.
+    /// each written again but four, which the round trip passes over; and
+    /// those with marked content spliced.
     #[test]
     fn the_seeds_read_to_their_end() {
         let res = ResCx::new([(b"CS3".to_vec(), 3)]);
