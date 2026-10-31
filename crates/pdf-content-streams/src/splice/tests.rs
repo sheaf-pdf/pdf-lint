@@ -3,6 +3,7 @@
 //! again without some of their keys.
 
 use super::*;
+use crate::fuzz::KEYS;
 use crate::{Pos, Properties, marked, tokens};
 
 const LIM: &Limits = &Limits::DEFAULT;
@@ -159,6 +160,100 @@ fn a_range_that_sets_state_is_refused() {
     }
 }
 
+/// Text shown while the rendering mode adds it to the clip goes into the
+/// clip at the end of its text object, which lasts past it: a range that
+/// shows such text, or may, is refused, but in a text object of its own
+/// inside a `q`…`Q` of its own. The mode follows `Tr`, `q` and `Q`.
+#[test]
+fn text_a_range_adds_to_the_clip_is_kept() {
+    let shows = "/A BMC (ab) Tj EMC";
+    let body = |before: &str| {
+        format!("q BT /F0 80 Tf {before} 10 60 Td {shows} ET 0 0 200 200 re f Q").into_bytes()
+    };
+    for mode in [
+        "7 Tr",
+        "4 Tr",
+        "7 Tr (cd) Tj",
+        "Tr",
+        "9 Tr",
+        "q 0 Tr Q 7 Tr",
+    ] {
+        assert!(is_unsafe(without(&body(mode), shows.as_bytes())), "{mode}");
+    }
+    for mode in [
+        "",
+        "0 Tr",
+        "3 Tr",
+        "3.5 Tr",
+        "/X Tr",
+        "q 7 Tr Q",
+        "7 Tr 1 Tr",
+    ] {
+        assert!(without(&body(mode), shows.as_bytes()).is_ok(), "{mode}");
+    }
+    // A text object of its own: its clip lasts past it but in its own
+    // `q`…`Q`, and text shown outside one goes into the next one's.
+    let own = |range: &str| {
+        let s = format!("7 Tr {range} 0 0 9 9 re f").into_bytes();
+        without(&s, range.as_bytes())
+    };
+    assert!(is_unsafe(own("/A BMC BT (ab) Tj ET EMC")));
+    assert!(is_unsafe(own("/A BMC BT q (ab) Tj Q ET EMC")));
+    assert!(is_unsafe(own("/A BMC q (ab) Tj Q EMC")));
+    assert!(own("/A BMC q BT (ab) Tj ET Q EMC").is_ok());
+    assert!(own("/A BMC q BT 0 Tr (ab) Tj ET Q EMC").is_ok());
+}
+
+/// PDFium shows text and moves lines outside a text object, from the text
+/// matrices the last one left: a range that moves them is refused where
+/// text is shown or a line moved after it outside one, until a text
+/// object begins or `Tm` sets them.
+#[test]
+fn text_shown_outside_a_text_object_stays_where_it_was() {
+    for (s, range) in [
+        (
+            "/F0 10 Tf (ab) Tj /A BMC (cd) Tj EMC (ef) Tj",
+            "/A BMC (cd) Tj EMC",
+        ),
+        (
+            "/F0 10 Tf /A BMC 50 50 Td EMC (ef) Tj",
+            "/A BMC 50 50 Td EMC",
+        ),
+        (
+            "/A BMC 1 0 0 1 50 50 Tm EMC (ef) Tj",
+            "/A BMC 1 0 0 1 50 50 Tm EMC",
+        ),
+        ("BT ET /A BMC 50 50 Td EMC (ef) Tj", "/A BMC 50 50 Td EMC"),
+        (
+            "/A BMC BT 50 50 Td ET EMC (ef) Tj",
+            "/A BMC BT 50 50 Td ET EMC",
+        ),
+        (
+            "/A BMC q BT 50 50 Td ET Q EMC (ef) Tj",
+            "/A BMC q BT 50 50 Td ET Q EMC",
+        ),
+        ("/A BMC 50 50 Td EMC 0 -14 Td", "/A BMC 50 50 Td EMC"),
+        ("/A BMC 50 50 Td EMC (ef) '", "/A BMC 50 50 Td EMC"),
+        ("BT /A BMC (ab) Tj EMC ET (ef) Tj", "/A BMC (ab) Tj EMC"),
+    ] {
+        assert!(is_unsafe(without(s.as_bytes(), range.as_bytes())), "{s}");
+    }
+    for (s, range) in [
+        ("/A BMC 50 50 Td EMC BT (ef) Tj ET", "/A BMC 50 50 Td EMC"),
+        (
+            "/A BMC 50 50 Td EMC 1 0 0 1 0 0 Tm (ef) Tj",
+            "/A BMC 50 50 Td EMC",
+        ),
+        ("/A BMC (ab) Tj EMC 0 -14 Td (ef) Tj", "/A BMC (ab) Tj EMC"),
+        (
+            "/A BMC BT (ab) Tj ET EMC 0 0 9 9 re f",
+            "/A BMC BT (ab) Tj ET EMC",
+        ),
+    ] {
+        assert!(without(s.as_bytes(), range.as_bytes()).is_ok(), "{s}");
+    }
+}
+
 /// A path is painted by the operator that ends it: a range can't take
 /// part of one.
 #[test]
@@ -270,9 +365,6 @@ fn ranges_must_lie_between_steps() {
     assert_eq!(without(s, b"1 2 3 /A BMC EMC").unwrap(), b" 4 5 6 re f");
 }
 
-/// What a tool might mark the lists it writes with, its own keys.
-const KEYS: [&[u8]; 2] = [b"Tool_Gen", b"Tool_Block"];
-
 /// The list of the range that opens `streams` written again without
 /// [`KEYS`], and the streams as they're then.
 fn rewritten(streams: &[&[u8]]) -> Result<(Option<Rewrite>, Vec<Vec<u8>>), SpliceError> {
@@ -284,8 +376,8 @@ fn rewritten(streams: &[&[u8]]) -> Result<(Option<Rewrite>, Vec<Vec<u8>>), Splic
 
 /// `c`'s streams with `groups` taken out and `rewrites` made.
 fn content_with(c: &Concat, groups: &[Vec<SpanAcross>], rewrites: &[Rewrite]) -> Vec<Vec<u8>> {
-    let spliced = splice_each(c, &ResCx::none(), LIM, groups);
-    match spliced.streams(c, rewrites) {
+    let spliced = splice_each(c, &ResCx::none(), LIM, groups).unwrap();
+    match spliced.streams(c, &ResCx::none(), LIM, rewrites).unwrap() {
         Some(streams) => streams.into_iter().map(Cow::into_owned).collect(),
         None => (0..c.stream_count())
             .map(|i| c.stream(i).to_vec())
@@ -363,7 +455,7 @@ fn a_list_written_again_goes_with_what_s_taken_out() {
                 .unwrap()
         })
         .collect();
-    let spliced = splice_each(&c, &ResCx::none(), LIM, &[vec![ranges[1]]]);
+    let spliced = splice_each(&c, &ResCx::none(), LIM, &[vec![ranges[1]]]).unwrap();
     assert_eq!(spliced.taken, [true]);
     assert!(spliced.takes(&c, ranges[1]) && !spliced.takes(&c, ranges[0]));
     assert_eq!(
@@ -371,13 +463,86 @@ fn a_list_written_again_goes_with_what_s_taken_out() {
         [&b"/Artifact <</Subtype /Watermark>> BDC Q EMC "[..]]
     );
     // The first's `Q` would end what's before it: refused, it stays.
-    let refused = splice_each(&c, &ResCx::none(), LIM, &[vec![ranges[0]]]);
+    let refused = splice_each(&c, &ResCx::none(), LIM, &[vec![ranges[0]]]).unwrap();
     assert_eq!(refused.taken, [false]);
     assert_eq!(
         content_with(&c, &[vec![ranges[0]]], &rewrites),
         [&b"/Artifact <</Subtype /Watermark>> BDC Q EMC \
             /Artifact <</Subtype /Background>> BDC 0 0 9 9 re f EMC"[..]]
     );
+}
+
+/// Lists written again, each of which reads as it did alone, may read
+/// otherwise together, or with what's taken out: an ASCII85 image ended
+/// by a `~` in one list and a comment in another runs on, both written
+/// again, over the rectangle after them; an ASCIIHex image whose first
+/// `>` is in a comment a range holds would end at a list's `>>`. So what
+/// they give together is read again, and refused unless it reads as it
+/// did.
+#[test]
+fn lists_written_again_are_read_again_together() {
+    let s: &[u8] = b"BI /W 1 /H 1 /CS /G /BPC 8 /F /A85 ID 9jqo^ EI \
+        /A <</Tool_Gen (~%)>> BDC EMC /C <</Tool_Gen (~%)>> BDC EMC 0 0 9 9 re f ~> EI";
+    let c = Concat::new(&[s]);
+    let (res, found) = (ResCx::none(), ranges(&c));
+    let list = |r| without_keys(&c, &res, LIM, r, &KEYS).unwrap().unwrap();
+    let (a, b) = (list(found[0]), list(found[1]));
+    let nothing = Spliced::default();
+    for alone in [&a, &b] {
+        let made = nothing.streams(&c, &res, LIM, std::slice::from_ref(alone));
+        assert!(matches!(made, Ok(Some(_))));
+    }
+    let both = nothing.streams(&c, &res, LIM, &[a, b]);
+    assert_eq!(both, Err(SpliceError::List(found[0])));
+
+    let s: &[u8] = b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI q % > (\n Q \
+        /A <</Tool_Gen (>%) /B 1>> BDC EMC 0 0 9 9 re f EI";
+    let c = Concat::new(&[s]);
+    let cut = span_of(s, b"q % > (\n Q");
+    let each = splice_each(&c, &res, LIM, &[vec![cut]]).unwrap();
+    assert_eq!(each.taken, [true]);
+    let rewrite = without_keys(&c, &res, LIM, ranges(&c)[0], &KEYS);
+    let rewrite = rewrite.unwrap().unwrap();
+    let alone = Spliced::default().streams(&c, &res, LIM, std::slice::from_ref(&rewrite));
+    assert!(matches!(alone, Ok(Some(_))));
+    let both = each.streams(&c, &res, LIM, &[rewrite]);
+    assert_eq!(both, Err(SpliceError::Unsafe(cut)));
+}
+
+/// A list's keys are taken out in one call: two lists written again of
+/// one are refused; one given twice is made once.
+#[test]
+fn a_list_is_written_again_once() {
+    let s: &[u8] = b"/Artifact <</Subtype /Watermark /Tool_Gen 1 /Tool_Block 2>> BDC q 0 g Q EMC";
+    let c = Concat::new(&[s]);
+    let (res, range) = (ResCx::none(), ranges(&c)[0]);
+    let one = |key: &[u8]| without_keys(&c, &res, LIM, range, &[key]).unwrap().unwrap();
+    let (a, b) = (one(b"Tool_Gen"), one(b"Tool_Block"));
+    let nothing = Spliced::default();
+    let made = |lists: &[Rewrite]| nothing.streams(&c, &res, LIM, lists);
+    assert_eq!(made(&[a.clone(), b]), Err(SpliceError::Overlap(range)));
+    let once = made(std::slice::from_ref(&a)).unwrap().unwrap();
+    assert_eq!(
+        once,
+        [&b"/Artifact <</Subtype /Watermark /Tool_Block 2>> BDC q 0 g Q EMC"[..]]
+    );
+    assert_eq!(made(&[a.clone(), a]), Ok(Some(once)));
+}
+
+/// Content that can't be read under the caps is refused with its error,
+/// not taken for groups refused.
+#[test]
+fn content_that_cant_be_read_is_an_error_to_splice_each() {
+    let s: &[u8] = b"/A BMC EMC /B BMC EMC (no end";
+    let c = Concat::new(&[s]);
+    let groups = [
+        vec![span_of(s, b"/A BMC EMC")],
+        vec![span_of(s, b"/B BMC EMC")],
+    ];
+    let each = splice_each(&c, &ResCx::none(), LIM, &groups);
+    assert!(matches!(each, Err(SpliceError::Read(_))), "{each:?}");
+    let nothing = splice_each(&c, &ResCx::none(), LIM, &[]).unwrap();
+    assert!(nothing.taken.is_empty());
 }
 
 /// A list's value nesting arrays, as arrays nest inside a dictionary, is
@@ -462,7 +627,7 @@ fn a_range_that_would_make_a_lone_bi_an_image_is_refused() {
     );
     let c = Concat::new(&[s]);
     let groups: Vec<_> = ranges(&c).into_iter().map(|r| vec![r]).collect();
-    let each = splice_each(&c, &ResCx::none(), LIM, &groups);
+    let each = splice_each(&c, &ResCx::none(), LIM, &groups).unwrap();
     assert_eq!(each.taken, [true, false]);
 }
 

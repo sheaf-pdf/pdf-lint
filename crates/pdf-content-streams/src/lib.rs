@@ -79,7 +79,8 @@
 //!   after them, judged by the reading the caller names, and what's kept
 //!   read again as it was read; as many of several as can be
 //!   ([`splice_each`]); and a marked range's property list written again
-//!   without some of its keys ([`without_keys`]).
+//!   without some of its keys ([`without_keys`]), made with what's taken
+//!   out and read again together ([`Spliced::streams`]).
 //!
 //! No resolver: what's read from the file, the streams decoded, the color
 //! spaces' components and the property lists, the caller gives; and the

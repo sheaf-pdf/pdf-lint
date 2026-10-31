@@ -541,3 +541,6 @@ splice-lone-bi	none
 splice-lone-bi-taken	image matrix 1 0 0 1 0 0 raw x
 splice-ahx-reach	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 9 0 l 9 9 l 0 9 l 0 0 h
 splice-ahx-reach-taken	image matrix 1 0 0 1 0 0 raw 41%20EI%20%200%200%209%209%20re%20f%20>
+splice-a85-two-lists	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 9 0 l 9 9 l 0 9 l 0 0 h
+splice-a85-one-list-made	path fill 2 stroke 0 matrix 1 0 0 1 0 0 m 0 0 l 9 0 l 9 9 l 0 9 l 0 0 h
+splice-a85-two-lists-made	image matrix 1 0 0 1 0 0 raw 9jqo^%20EI%20/A%20<<>>%20BDC%20EMC%20/C%20<<>>%20BDC%20EMC%200%200%209%209%20re%20f%20~>

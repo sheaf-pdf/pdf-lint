@@ -1043,6 +1043,17 @@ case("splice-lone-bi-taken", b"BI  /W 1 /H 1 /CS /G /BPC 8 ID x EI Q")
 case("splice-ahx-reach", b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI q % > (\n Q 0 0 9 9 re f > EI")
 case("splice-ahx-reach-taken", b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI  0 0 9 9 re f > EI")
 
+# Two lists, each written again alone leaving the content read as it was,
+# written again together: an ASCII85 image whose data's end, `~>`, is past
+# both, each list holding a `~` and a comment, is no stream, read to its
+# first `EI`, the rectangle after it drawn; with one list written again,
+# the other's `~` ends its data, its comment hiding the rest; with both,
+# the `~>` past the rectangle is its end, and the image runs on over it.
+A85_LISTS = b"BI /W 1 /H 1 /CS /G /BPC 8 /F /A85 ID 9jqo^ EI /A <<%s>> BDC EMC /C <<%s>> BDC EMC 0 0 9 9 re f ~> EI"
+case("splice-a85-two-lists", A85_LISTS % (b"/Tool_Gen (~%)", b"/Tool_Gen (~%)"))
+case("splice-a85-one-list-made", A85_LISTS % (b"", b"/Tool_Gen (~%)"))
+case("splice-a85-two-lists-made", A85_LISTS % (b"", b""))
+
 
 def cases():
     return CASES

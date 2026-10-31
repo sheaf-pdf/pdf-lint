@@ -18,8 +18,8 @@ use crate::{
     Balance, Blend, Color, Concat, ContentWriter, Error, ErrorKind, FillRule, GState, ImageStream,
     Join, Limits, LineCap, LineJoin, MarkedEvent, MarkedNest, NameSet, Operand, Operation,
     Operations, Operator, Paint, Properties, Props, Res, ResBody, ResCx, ResId, ResKind, Reserved,
-    ResourceNeeds, SpanAcross, State, TextMode, Tok, balance, kept, marked, name, names_used,
-    object, operations, splice, splice_each, tokens, without_keys,
+    ResourceNeeds, Rewrite, SpanAcross, SpliceError, Spliced, State, TextMode, Tok, balance, kept,
+    marked, name, names_used, object, operations, splice, splice_each, tokens, without_keys,
 };
 
 /// A sink that keeps every fault it's told, in order, where it is.
@@ -1023,8 +1023,13 @@ const RANGES: usize = 8;
 /// it takes them together, or none, and gives the streams that splice
 /// gives, or none where it takes none. And each of those ranges with
 /// [`KEYS`] taken out of its list: the content reads as it did but for that
-/// list, which reads as it did without them ([`assert_rewritten`]). Panics
-/// on a broken promise; returns how many were made.
+/// list, which reads as it did without them ([`assert_rewritten`]); given
+/// twice, it's made once, and two lists written again of its list, each
+/// without one of the keys, are refused. And the lists written again made
+/// with what `splice_each` takes out, where they're made: what's kept reads
+/// as it did, each list as it did without the keys ([`assert_made`]).
+/// Panics on a broken promise; returns how many splices were made and
+/// lists written again alone.
 pub fn spliced(data: &[u8]) -> usize {
     let res = ResCx::new([
         (b"CS1".to_vec(), 1),
@@ -1058,8 +1063,9 @@ pub fn spliced(data: &[u8]) -> usize {
             made += 1;
         }
     }
+    let read = "content marked reads";
+    let each = splice_each(&page, &res, limits, &groups).expect(read);
     if !groups.is_empty() {
-        let each = splice_each(&page, &res, limits, &groups);
         let takes = |cuts: &[SpanAcross]| splice(&page, &res, limits, cuts).is_ok();
         let alone: Vec<bool> = groups.iter().map(|g| takes(g)).collect();
         let together: Vec<SpanAcross> = (groups.iter().zip(&alone))
@@ -1077,16 +1083,43 @@ pub fn spliced(data: &[u8]) -> usize {
         for (g, &t) in groups.iter().zip(&taken) {
             assert_eq!(each.takes(&page, g[0]), t, "where it takes");
         }
-        let streams = each.streams(&page, &[]);
+        let streams = each.streams(&page, &res, limits, &[]).expect(read);
         let want = (!cuts.is_empty()).then(|| splice(&page, &res, limits, &cuts).expect("taken"));
         assert_eq!(streams, want, "the streams splice_each gives");
     }
+    let nothing = Spliced::default();
+    let mut lists = Vec::new();
     for &span in top.iter().take(RANGES) {
         if let Ok(Some(rewrite)) = without_keys(&page, &res, limits, span, &KEYS) {
-            let nothing = splice_each(&page, &res, limits, &[]);
-            let rewritten = (nothing.streams(&page, &[rewrite])).expect("a list written again");
+            let alone = nothing.streams(&page, &res, limits, std::slice::from_ref(&rewrite));
+            let rewritten = alone.expect("a list written again").expect("made");
             assert_rewritten(&page, &res, &rewritten);
+            let twice = [rewrite.clone(), rewrite.clone()];
+            let twice = nothing.streams(&page, &res, limits, &twice);
+            assert_eq!(
+                twice,
+                Ok(Some(rewritten)),
+                "a list written again given twice"
+            );
+            let one = |key| without_keys(&page, &res, limits, span, &KEYS[key..=key]);
+            if let (Ok(Some(a)), Ok(Some(b))) = (one(0), one(1)) {
+                let both = nothing.streams(&page, &res, limits, &[a, b]);
+                assert!(matches!(both, Err(SpliceError::Overlap(_))), "{both:?}");
+            }
+            lists.push(rewrite);
             made += 1;
+        }
+    }
+    if !lists.is_empty() {
+        let drop: Vec<SpanAcross> = (groups.iter().zip(&each.taken))
+            .filter(|(_, taken)| **taken)
+            .flat_map(|(g, _)| g.iter().copied())
+            .collect();
+        match each.streams(&page, &res, limits, &lists) {
+            Ok(Some(streams)) => assert_made(&page, &res, &streams, &drop, &lists),
+            Ok(None) => panic!("lists written again, made none"),
+            Err(SpliceError::Unsafe(_) | SpliceError::List(_)) => {}
+            Err(e) => panic!("lists written again with what's taken out: {e:?}"),
         }
     }
     made
@@ -1172,6 +1205,54 @@ fn assert_kept(content: &Concat, res: &ResCx, kept: &[Cow<[u8]>], drop: &[SpanAc
     assert_eq!(before, after, "the tokens a splice kept");
 }
 
+/// That `made`, `content` with `drop` taken out and `lists` made, reads
+/// as the tokens of `content` outside `drop`: each as [`assert_kept`] has
+/// it, but each list kept, one operand, which reads as it did without
+/// [`KEYS`].
+fn assert_made(
+    content: &Concat,
+    res: &ResCx,
+    made: &[Cow<[u8]>],
+    drop: &[SpanAcross],
+    lists: &[Rewrite],
+) {
+    let drop: Vec<Range<usize>> = drop.iter().filter_map(|&d| content.offsets(d)).collect();
+    let before: Vec<(Range<usize>, Seen)> = seen(content, res, "what's made was read")
+        .into_iter()
+        .filter(|(r, _)| !drop.iter().any(|d| d.start <= r.start && r.end <= d.end))
+        .collect();
+    let made: Vec<&[u8]> = made.iter().map(|s| &**s).collect();
+    let made = Concat::new(&made);
+    let after = seen(&made, res, "what's made reads");
+    assert_eq!(before.len(), after.len(), "the tokens made");
+    for ((r, was), (_, now)) in before.iter().zip(&after) {
+        match lists.iter().any(|l| l.range == *r) {
+            true => without_keys_read(was, now),
+            false => assert_eq!(was, now, "a token kept"),
+        }
+    }
+}
+
+/// That `now`, a list written again, is one operand that reads as `was`
+/// did without [`KEYS`].
+fn without_keys_read(was: &Seen, now: &Seen) {
+    let (Seen::Operand(was), Seen::Operand(now)) = (was, now) else {
+        panic!("a list written again is one operand: {was:?}, {now:?}")
+    };
+    let read = |list: &[u8]| object(list, &LIMITS);
+    let mut left = (read(was).as_ref().and_then(Object::as_dict).cloned())
+        .expect("a list written again was one");
+    for key in KEYS {
+        left.remove(key);
+    }
+    let now = read(now);
+    assert_eq!(
+        now.as_ref().and_then(Object::as_dict),
+        Some(&left),
+        "the list written again"
+    );
+}
+
 /// That `rewritten`, `content` with a list written again without
 /// [`KEYS`], reads as `content` does but for that list, one operand, which
 /// reads as it did without them.
@@ -1188,21 +1269,10 @@ fn assert_rewritten(content: &Concat, res: &ResCx, rewritten: &[Cow<[u8]>]) {
     let changed: Vec<_> = (before.iter().zip(&after))
         .filter(|((_, b), (_, a))| b != a)
         .collect();
-    let [((_, Seen::Operand(was)), (_, Seen::Operand(now)))] = changed[..] else {
-        panic!("a list written again is one operand: {changed:?}")
+    let [((_, was), (_, now))] = changed[..] else {
+        panic!("a list written again is one token: {changed:?}")
     };
-    let read = |list: &[u8]| object(list, &LIMITS);
-    let mut left = (read(was).as_ref().and_then(Object::as_dict).cloned())
-        .expect("a list written again was one");
-    for key in KEYS {
-        left.remove(key);
-    }
-    let now = read(now);
-    assert_eq!(
-        now.as_ref().and_then(Object::as_dict),
-        Some(&left),
-        "the list written again"
-    );
+    without_keys_read(was, now);
 }
 
 /// `content`'s tokens and operations through a sink that keeps their
@@ -2116,9 +2186,10 @@ mod tests {
         // The splices and lists written again of those with marked content
         // to take out: none of the header that opens with the `Q` ending
         // the page's `q`, alone, nor of the two whose ranges would leave
-        // what's kept read otherwise.
+        // what's kept read otherwise; and not the watermark that shows
+        // text, alone, as text is shown after it outside a text object.
         let made: Vec<usize> = seeds[19..29].iter().map(|seed| spliced(seed)).collect();
-        assert_eq!(made, [1, 0, 3, 1, 1, 4, 1, 1, 0, 0]);
+        assert_eq!(made, [1, 0, 3, 1, 1, 3, 1, 1, 0, 0]);
         let last = seeds.last().unwrap();
         let scn = operations(last, &res, &Limits::DEFAULT)
             .nth(2)

@@ -11,7 +11,7 @@ use pdf_tokenizer::is_white_space;
 use crate::error::Error;
 use crate::inline::{Found, ImageStream, InlineImage, ResCx};
 use crate::limits::Limits;
-use crate::operand::{name, object};
+use crate::operand::{Operand, name, object};
 use crate::page::{Concat, SpanAcross};
 use crate::scan::{Event, Raw, TOP, Visit, next_raw, walk};
 use crate::tokens::{Tok, Tokens};
@@ -28,8 +28,10 @@ pub enum SpliceError {
     /// past the last stream, or before its start.
     #[error("{0} is outside the content")]
     OutOfRange(SpanAcross),
-    /// A range that overlaps another taken out with it.
-    #[error("{0} overlaps another range taken out")]
+    /// A range that overlaps another taken out with it; or a marked range
+    /// whose property list written again another written again with it
+    /// overlaps ([`Spliced::streams`]).
+    #[error("{0} overlaps another range taken out, or another list written again")]
     Overlap(SpanAcross),
     /// A range whose taking out could change what's drawn after it, by
     /// [`splice`]'s rules, or which leaves what's kept read otherwise.
@@ -37,7 +39,8 @@ pub enum SpliceError {
     Unsafe(SpanAcross),
     /// A marked range whose property list can't be written again without
     /// the keys asked, as [`without_keys`] says, or whose writing again
-    /// leaves the content read otherwise.
+    /// leaves the content read otherwise, alone or with what's made with it
+    /// ([`Spliced::streams`]).
     #[error("the property list of the range at {0} can't be written again without the keys asked")]
     List(SpanAcross),
 }
@@ -63,8 +66,22 @@ pub enum SpliceError {
 ///   no line (`Td`, `TD`, `Tm`, `T*`, `'`, `"`; 9.4.2, 9.4.3), even inside
 ///   a `q`…`Q` of its own, as ISO 32000-2 puts the text matrices on the
 ///   graphics state stack only by its errata (9.4.1). Text it shows moved
-///   the text matrix on (9.4.3), so text shown after it, in its text
-///   object, before a line is moved, would move back: that refuses it too;
+///   the text matrix on (9.4.3), which outlasts its text object, so text
+///   shown after it, before a line is moved or a text object begins, would
+///   move back: that refuses it too;
+/// - PDFium shows text and moves lines outside a text object too, where
+///   ISO 32000-2 has neither (9.4.1), the text matrices as the last text
+///   object left them: so a range outside one that shows text, moves a
+///   line or holds a text object, again even inside a `q`…`Q` of its own,
+///   is refused where text is shown or a line moved after it outside a
+///   text object, before one begins or `Tm` sets the matrices;
+/// - text shown while the text rendering mode adds it to the clip (modes
+///   4 to 7) goes into the clip at the end of its text object (9.3.6),
+///   which lasts past it: so it shows no text while the mode may, but in a
+///   text object of its own that ends inside a `q`…`Q` of its own. The
+///   mode is followed through the content as `Tr` sets it, and `q` and `Q`
+///   save and restore it; one whose operand PDFium reads as no mode, or
+///   has none, may;
 /// - it starts and ends outside a path being built (8.5.2), which the
 ///   operator after it would paint (8.5.3);
 /// - marked content draws nothing (14.6), but for optional content
@@ -132,8 +149,10 @@ pub fn splice<'a>(
     Ok(checked(content, res, limits, drop)?.1)
 }
 
-/// What [`splice_each`] takes out of a page's content.
-#[derive(Debug, Clone)]
+/// What [`splice_each`] takes out of a page's content: of that content, as
+/// what it holds are places in its joined bytes. [`Spliced::default`]
+/// takes nothing out, for lists written again alone.
+#[derive(Debug, Clone, Default)]
 pub struct Spliced {
     /// Whether each group was taken out.
     pub taken: Vec<bool>,
@@ -149,21 +168,46 @@ impl Spliced {
     }
 
     /// `content`'s streams with what's taken out taken out, and `rewrites`
-    /// made in what's kept; one in what's taken out goes with it. None when
-    /// no stream changes. What's taken out was read again as
-    /// [`splice_each`] took it, and each rewrite as [`without_keys`] made it,
-    /// with nothing taken out; the two together aren't read again here: a
-    /// caller that wants them so reads what this gives.
+    /// made in what's kept, `content` the one [`splice_each`] and
+    /// [`without_keys`] were given: a rewrite in what's taken out goes with
+    /// it, and one given twice is made once. None when no stream changes.
+    ///
+    /// What's taken out was read again as [`splice_each`] took it, and
+    /// each rewrite as [`without_keys`] made it, alone. Together they may
+    /// read otherwise: an ASCII85 image's data ended by a `~` in one list
+    /// and a comment in another may run on, both written again, over what
+    /// was drawn after them. So with rewrites, what this gives is read
+    /// again, its tokens read with `res` under `limits`, as [`splice`]
+    /// reads what it gives, and it's refused unless every token kept reads
+    /// as it did, a list written again as it's now written: refused
+    /// ([`SpliceError::Unsafe`] for a range taken out,
+    /// [`SpliceError::List`] for a list) naming the first at or after the
+    /// first token kept that reads otherwise, or the last. Two rewrites of
+    /// one list are refused ([`SpliceError::Overlap`]): its keys are taken
+    /// out in one [`without_keys`]. A caller refused may make what's taken
+    /// out alone, or each rewrite alone. Content that can't be read under
+    /// `limits` is refused with its error ([`SpliceError::Read`]). With
+    /// rewrites, it costs two readings: of `content`, and of what it gives.
     pub fn streams<'a>(
         &self,
         content: &'a Concat,
+        res: &ResCx,
+        limits: &Limits,
         rewrites: &[Rewrite],
-    ) -> Option<Vec<Cow<'a, [u8]>>> {
-        let rewrites: Vec<&Rewrite> = (rewrites.iter())
+    ) -> Result<Option<Vec<Cow<'a, [u8]>>>, SpliceError> {
+        let mut lists: Vec<&Rewrite> = (rewrites.iter())
             .filter(|r| !(self.cuts.iter()).any(|c| overlap(&c.range, &r.range)))
             .collect();
-        (!self.cuts.is_empty() || !rewrites.is_empty())
-            .then(|| written(content, &self.cuts, &rewrites))
+        lists.sort_by_key(|r| r.range.start);
+        lists.dedup_by(|a, b| a.range == b.range && a.with == b.with);
+        if let Some(pair) = (lists.windows(2)).find(|pair| overlap(&pair[0].range, &pair[1].range))
+        {
+            return Err(SpliceError::Overlap(pair[1].span));
+        }
+        if lists.is_empty() {
+            return Ok((!self.cuts.is_empty()).then(|| written(content, &self.cuts, &[])));
+        }
+        make(content, res, limits, &self.cuts, &lists).map(Some)
     }
 }
 
@@ -172,6 +216,9 @@ impl Spliced {
 /// one thing out, all of them where [`splice`] takes them together; else
 /// those it takes alone, together, or none where it refuses those
 /// together. A group it refuses stays as it is ([`Spliced::taken`]).
+/// Content that can't be read under `limits` is refused with its error
+/// ([`SpliceError::Read`]) where a check reads as far as it, as every
+/// check reads the content alike, never taken for groups refused.
 ///
 /// It costs a check of all of them together, and where that's refused,
 /// one for each group and one for those taken, each two readings
@@ -181,42 +228,51 @@ pub fn splice_each(
     res: &ResCx,
     limits: &Limits,
     groups: &[Vec<SpanAcross>],
-) -> Spliced {
-    let none = |taken| Spliced {
-        taken,
-        cuts: Vec::new(),
+) -> Result<Spliced, SpliceError> {
+    // The cuts of `drop` where it's taken out, none where it's refused;
+    // the content's error where it can't be read.
+    let check = |drop: &[SpanAcross]| match checked(content, res, limits, drop) {
+        Ok((cuts, _)) => Ok(Some(cuts)),
+        Err(SpliceError::Read(e)) => Err(SpliceError::Read(e)),
+        Err(_) => Ok(None),
     };
     if groups.is_empty() {
-        return none(Vec::new());
+        return Ok(Spliced::default());
     }
-    if let Ok((cuts, _)) = checked(content, res, limits, &groups.concat()) {
-        return Spliced {
-            taken: vec![true; groups.len()],
-            cuts,
-        };
+    if let Some(cuts) = check(&groups.concat())? {
+        let taken = vec![true; groups.len()];
+        return Ok(Spliced { taken, cuts });
     }
-    let taken: Vec<bool> = (groups.iter())
-        .map(|cuts| checked(content, res, limits, cuts).is_ok())
-        .collect();
+    let taken = (groups.iter())
+        .map(|cuts| Ok(check(cuts)?.is_some()))
+        .collect::<Result<Vec<bool>, SpliceError>>()?;
     let cuts: Vec<SpanAcross> = (groups.iter().zip(&taken))
         .filter(|(_, taken)| **taken)
         .flat_map(|(cuts, _)| cuts.iter().copied())
         .collect();
     if cuts.is_empty() {
-        return none(taken);
+        return Ok(Spliced {
+            taken,
+            ..Spliced::default()
+        });
     }
-    match checked(content, res, limits, &cuts) {
-        Ok((cuts, _)) => Spliced { taken, cuts },
-        Err(_) => none(vec![false; groups.len()]),
-    }
+    Ok(match check(&cuts)? {
+        Some(cuts) => Spliced { taken, cuts },
+        None => Spliced {
+            taken: vec![false; groups.len()],
+            ..Spliced::default()
+        },
+    })
 }
 
 /// A marked range's property list written again ([`without_keys`]):
-/// where it is in the joined bytes, and what it's now. It's made by
-/// [`Spliced::streams`].
+/// the range, where its list is in the joined bytes of the content it was
+/// read from, and what it's now. [`Spliced::streams`] makes it in that
+/// content's streams.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rewrite {
-    range: Range<usize>,
+    span: SpanAcross,
+    pub(crate) range: Range<usize>,
     with: Vec<u8>,
 }
 
@@ -242,10 +298,11 @@ pub struct Rewrite {
 /// Content that can't be read is refused with its error
 /// ([`SpliceError::Read`]). It costs a reading of the content to the
 /// `BDC`, and, where it writes the list again, two more: of the content
-/// and of what it gives.
+/// and of what it gives. What it gives is made in `content`'s streams by
+/// [`Spliced::streams`], with what's taken out or with nothing.
 ///
 /// ```
-/// use pdf_content_streams::{Concat, Limits, Properties, ResCx, marked, splice_each, without_keys};
+/// use pdf_content_streams::{Concat, Limits, Properties, ResCx, Spliced, marked, without_keys};
 ///
 /// let (res, limits, props) = (ResCx::none(), Limits::DEFAULT, Properties::default());
 /// let page = Concat::new(&[b"/Artifact <</Subtype /Watermark /Tool_Gen 1>> BDC q 0 g Q EMC"]);
@@ -253,8 +310,8 @@ pub struct Rewrite {
 /// let keys: [&[u8]; 1] = [b"Tool_Gen"];
 /// let rewrite = without_keys(&page, &res, &limits, span, &keys).unwrap().unwrap();
 /// // Made with nothing taken out.
-/// let nothing = splice_each(&page, &res, &limits, &[]);
-/// let made = nothing.streams(&page, &[rewrite]).unwrap();
+/// let nothing = Spliced::default();
+/// let made = nothing.streams(&page, &res, &limits, &[rewrite]).unwrap().unwrap();
 /// assert_eq!(&*made[0], b"/Artifact <</Subtype /Watermark>> BDC q 0 g Q EMC");
 /// ```
 pub fn without_keys(
@@ -291,30 +348,15 @@ pub fn without_keys(
     if with == s[list.clone()] {
         return Ok(None);
     }
-    let rewrite = Rewrite { range: list, with };
+    let rewrite = Rewrite {
+        span,
+        range: list,
+        with,
+    };
     // The content with it written again, read again beside the content:
     // each token as it was, the list as it's written.
-    let made = written(content, &[], &[&rewrite]);
-    let streams: Vec<&[u8]> = made.iter().map(|s| &**s).collect();
-    let made = Concat::new(&streams);
-    let mut again = Again(made.tokens(res, limits));
-    let mut read = content.tokens(res, limits);
-    while let Some(token) = read.next() {
-        let (r, tok) = token?;
-        let same = if r == rewrite.range {
-            let list = Tok::Operand(&rewrite.with);
-            again.next_is(&rewrite.with, 0..rewrite.with.len(), &list, Found::Walk)
-        } else {
-            again.next_is(s, r, &tok, read.found())
-        };
-        if !same {
-            return Err(refused());
-        }
-    }
-    match again.done() {
-        true => Ok(Some(rewrite)),
-        false => Err(refused()),
-    }
+    make(content, res, limits, &[], &[&rewrite])?;
+    Ok(Some(rewrite))
 }
 
 /// A dictionary operand as written, but for its entries whose keys are
@@ -429,21 +471,32 @@ fn checked<'a>(
     {
         return Err(SpliceError::Overlap(pair[1].span));
     }
-    let kept = written(content, &cuts, &[]);
-    if cuts.is_empty() {
-        check(content, res, limits, &cuts, None)?;
-        return Ok((cuts, kept));
+    let kept = make(content, res, limits, &cuts, &[])?;
+    Ok((cuts, kept))
+}
+
+/// `content`'s streams with `cuts` taken out and `lists` written again,
+/// apart and in order, its tokens read with `res` under `limits`, once
+/// they're found safe to make together: each cut by [`splice`]'s rules,
+/// and what they give read again as the tokens they keep, each list as
+/// it's now written.
+fn make<'a>(
+    content: &'a Concat,
+    res: &ResCx,
+    limits: &Limits,
+    cuts: &[Cut],
+    lists: &[&Rewrite],
+) -> Result<Streams<'a>, SpliceError> {
+    let kept = written(content, cuts, lists);
+    if cuts.is_empty() && lists.is_empty() {
+        check(content, res, limits, cuts, lists, None)?;
+        return Ok(kept);
     }
     let streams: Vec<&[u8]> = kept.iter().map(|s| &**s).collect();
     let again = Concat::new(&streams);
-    check(
-        content,
-        res,
-        limits,
-        &cuts,
-        Some(Again(again.tokens(res, limits))),
-    )?;
-    Ok((cuts, kept))
+    let again = Some(Again(again.tokens(res, limits)));
+    check(content, res, limits, cuts, lists, again)?;
+    Ok(kept)
 }
 
 /// What a splice or a list written again gives, its tokens read again as
@@ -497,6 +550,23 @@ fn overlap(a: &Range<usize>, b: &Range<usize>) -> bool {
     a.start < b.end && b.start < a.end
 }
 
+/// The cut or list written again to name where what's kept reads
+/// otherwise from `at` on: the first at or after it, as a token's reading
+/// looks on, or the last.
+fn blame(cuts: &[Cut], lists: &[&Rewrite], at: usize) -> Option<SpliceError> {
+    let edits = || {
+        let cuts = cuts
+            .iter()
+            .map(|c| (c.range.start, SpliceError::Unsafe(c.span)));
+        cuts.chain((lists.iter()).map(|l| (l.range.start, SpliceError::List(l.span))))
+    };
+    let first = edits()
+        .filter(|(start, _)| *start >= at)
+        .min_by_key(|(start, _)| *start);
+    let last = || edits().max_by_key(|(start, _)| *start);
+    first.or_else(last).map(|(_, refused)| refused)
+}
+
 /// A running count of opens and closes: where it is, and the lowest it's
 /// been.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -534,11 +604,17 @@ struct Tally {
     moves: bool,
     /// Whether it shows text.
     shows: bool,
+    /// Whether text it shows may go into a clip that lasts past it.
+    clips: bool,
+    /// Whether text it shows in a text object of its own may go into the
+    /// clip at that one's end, still to come.
+    clip_text: bool,
 }
 
 impl Tally {
-    /// `op`, and `tag` when it opens marked content.
-    fn take(&mut self, op: &[u8], tag: Option<&[u8]>) {
+    /// `op`, `tag` when it opens marked content, and whether text shown
+    /// now may go into the clip.
+    fn take(&mut self, op: &[u8], tag: Option<&[u8]>, clipping: bool) {
         self.sets_state |= self.q.net == 0 && sets_state(op);
         self.optional |= tag.and_then(name).as_deref() == Some(b"OC");
         match op {
@@ -551,28 +627,87 @@ impl Tally {
             b"ET" => {
                 self.text.add(-1);
                 self.text_objects = true;
+                // The clip it sets lasts past the range but inside a
+                // `q`…`Q` of its own.
+                self.clips |= self.clip_text && self.q.net <= 0;
+                self.clip_text = false;
             }
             b"BMC" | b"BDC" => self.marked.add(1),
             b"EMC" => self.marked.add(-1),
             _ => {}
         }
         self.moves |= moves_text(op);
-        self.shows |= matches!(op, b"Tj" | b"TJ" | b"'" | b"\"");
+        let shows = matches!(op, b"Tj" | b"TJ" | b"'" | b"\"");
+        self.shows |= shows;
+        if shows && clipping {
+            // The text object it starts in ends after it.
+            match self.in_text {
+                true => self.clips = true,
+                false => self.clip_text = true,
+            }
+        }
     }
 
     /// Whether taking it out leaves what's drawn after it as it was, but
-    /// for text shown after it in its text object, and the marked content
-    /// it opens or closes.
+    /// for text shown or lines moved after it, and the marked content it
+    /// opens or closes.
     fn safe(&self) -> bool {
         // Optional content left open would show or hide what's kept.
         let hides = self.optional && self.marked.net > 0;
-        let kept = self.q.balanced() && !self.sets_state && !hides;
+        let clips = self.clips || self.clip_text;
+        let kept = self.q.balanced() && !self.sets_state && !hides && !clips;
         if self.in_text {
             kept && !self.text_objects && !self.moves
         } else {
             kept && self.text.balanced()
         }
     }
+}
+
+/// Whether text shown may go into the clip, by the text rendering mode
+/// (9.3.6), as `Tr` sets it and `q` and `Q` save and restore it: each
+/// setting, and how many `q`s deep it was made.
+#[derive(Default)]
+struct Modes {
+    depth: usize,
+    set: Vec<(usize, bool)>,
+}
+
+impl Modes {
+    fn clipping(&self) -> bool {
+        self.set.last().is_some_and(|&(_, clipping)| clipping)
+    }
+
+    fn save(&mut self) {
+        self.depth = self.depth.saturating_add(1);
+    }
+
+    /// A `Q` with nothing saved restores nothing.
+    fn restore(&mut self) {
+        if self.depth == 0 {
+            return;
+        }
+        self.depth -= 1;
+        while self.set.last().is_some_and(|&(at, _)| at > self.depth) {
+            self.set.pop();
+        }
+    }
+
+    fn set(&mut self, clipping: bool) {
+        match self.set.last_mut() {
+            Some((at, was)) if *at == self.depth => *was = clipping,
+            _ => self.set.push((self.depth, clipping)),
+        }
+    }
+}
+
+/// Whether `Tr` with `operand`, its last, may set a mode that puts text
+/// shown into the clip (4 to 7): any but a number whose whole part is 0 to
+/// 3, as PDFium reads an integer operand ([`Operand::number`]); none, or a
+/// number PDFium reads as no mode, may.
+fn clipping(operand: Option<&[u8]>) -> bool {
+    let n = operand.map_or(f32::NAN, |o| Operand::new(o, 0..o.len()).number());
+    !(n > -1.0 && n < 4.0)
 }
 
 /// Whether `op` sets graphics state, which lasts until a `Q` restores it:
@@ -636,13 +771,15 @@ fn ends_path(op: &[u8]) -> bool {
 
 /// Whether `cuts` may be taken out of `content`: each starts and ends
 /// between steps, outside a comment and a path, and is safe ([`splice`]'s
-/// rules); and, where `again` is what they give, each token kept reads
-/// there as it did.
+/// rules); and, where `again` is what they give with `lists` written
+/// again, each token kept reads there as it did, a list as it's now
+/// written.
 fn check(
     content: &Concat,
     res: &ResCx,
     limits: &Limits,
     cuts: &[Cut],
+    lists: &[&Rewrite],
     mut again: Option<Again>,
 ) -> Result<(), SpliceError> {
     let s = content.bytes();
@@ -650,11 +787,16 @@ fn check(
     let mut in_path = false;
     // The cut being read, and what it holds.
     let mut open: Option<(usize, Tally)> = None;
-    // The next cut to start.
+    // The next cut to start, and the next list written again to read.
     let mut next = 0;
-    // A cut that showed text in a text object that hasn't moved a line
-    // since.
+    let mut list = 0;
+    // A cut that showed text, so moved the text matrix, which nothing kept
+    // has set since; and one outside a text object that moved a line or
+    // began a text object, so set the text line matrix too.
     let mut shown: Option<SpanAcross> = None;
+    let mut moved: Option<SpanAcross> = None;
+    // Whether text shown may go into the clip.
+    let mut modes = Modes::default();
     // Marked content cuts opened that no cut has closed yet, and the first
     // cut that left some open.
     let mut pending = 0;
@@ -682,8 +824,11 @@ fn check(
                 opener = i;
             }
             pending += tally.marked.net;
-            if tally.in_text && tally.shows {
+            if tally.shows {
                 shown = Some(cuts[i].span);
+            }
+            if !tally.in_text && (tally.moves || tally.text_objects) {
+                moved = Some(cuts[i].span);
             }
         }
         while open.is_none() && next < cuts.len() && cuts[next].range.start <= start {
@@ -710,7 +855,8 @@ fn check(
                 return Err(unsafe_cut(opener));
             }
             if again.as_mut().is_some_and(|again| !again.done()) {
-                return Err(unsafe_cut(cuts.len() - 1));
+                let last = content.span(s.len()..s.len());
+                return Err(blame(cuts, lists, s.len()).unwrap_or(SpliceError::Unsafe(last)));
             }
             return Ok(());
         };
@@ -721,11 +867,23 @@ fn check(
         if next < cuts.len() && cuts[next].range.start < r.end {
             return Err(unsafe_cut(next));
         }
-        // A token kept, read again: the first cut after it, or the last,
-        // is named where it reads otherwise, as a token's reading looks on.
+        // A token kept, read again, a list as it's now written: the first
+        // cut or list at or after it, or the last, is named where it reads
+        // otherwise, as a token's reading looks on.
         if let Some(again) = again.as_mut().filter(|_| open.is_none()) {
-            if !again.next_is(s, r.clone(), &tok, tokens.found()) {
-                return Err(unsafe_cut(next.min(cuts.len() - 1)));
+            while lists.get(list).is_some_and(|l| l.range.start < r.start) {
+                list += 1;
+            }
+            let same = match lists.get(list).filter(|l| l.range == r) {
+                Some(l) => {
+                    let now = Tok::Operand(&l.with);
+                    again.next_is(&l.with, 0..l.with.len(), &now, Found::Walk)
+                }
+                None => again.next_is(s, r.clone(), &tok, tokens.found()),
+            };
+            if !same {
+                let token = SpliceError::Unsafe(content.span(r.clone()));
+                return Err(blame(cuts, lists, r.start).unwrap_or(token));
             }
         }
         after = r.end;
@@ -746,24 +904,40 @@ fn check(
             b"BDC" => operands[0],
             _ => None,
         };
+        let last = operands[1];
         operands = [None, None];
         match &mut open {
-            Some((_, tally)) => tally.take(op, tag),
+            Some((_, tally)) => tally.take(op, tag, modes.clipping()),
             None => {
                 if pending > 0 && matches!(op, b"BMC" | b"BDC" | b"EMC") {
                     return Err(unsafe_cut(opener));
                 }
-                if let Some(span) = shown.filter(|_| matches!(op, b"Tj" | b"TJ")) {
+                // Text shown from the text matrix a cut left, or a line
+                // moved from the line matrix one left (9.4.2, 9.4.3); a
+                // line moved sets the text matrix, a text object begun or
+                // `Tm` both.
+                let shows = matches!(op, b"Tj" | b"TJ");
+                let from_line = matches!(op, b"Td" | b"TD" | b"T*" | b"'" | b"\"");
+                if let Some(span) = moved.filter(|_| shows || from_line) {
                     return Err(SpliceError::Unsafe(span));
                 }
-                if moves_text(op) || matches!(op, b"BT" | b"ET") {
+                if let Some(span) = shown.filter(|_| shows) {
+                    return Err(SpliceError::Unsafe(span));
+                }
+                if from_line {
                     shown = None;
+                }
+                if matches!(op, b"BT" | b"Tm") {
+                    (shown, moved) = (None, None);
                 }
             }
         }
         match op {
             b"BT" => in_text = true,
             b"ET" => in_text = false,
+            b"q" => modes.save(),
+            b"Q" => modes.restore(),
+            b"Tr" => modes.set(clipping(last)),
             op if makes_path(op) => in_path = true,
             op if ends_path(op) => in_path = false,
             _ => {}
