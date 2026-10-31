@@ -1,7 +1,8 @@
 //! What the fuzz target checks, which unit tests check too: the promises
 //! the parser makes, on any input, by ISO 32000-2's rules and by PDFium's
 //! and the two side by side, and the writer's on what it read, written
-//! plainly, through a toy encryptor ([`Toy`]) and through a renumbering.
+//! plainly, through a toy encryptor ([`Toy`]) and through a renumbering; and
+//! text strings', the input decoded and, as text, encoded ([`texts`]).
 //! It's compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::borrow::Cow;
@@ -13,6 +14,7 @@ use pdf_tokenizer::{Kind, Pdfium, Rules, Token, Tokenizer};
 use crate::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value};
 use crate::parse::{Body, Error, Fault, Limits, Parser, Sink};
 use crate::serialize::{self, Encrypt, Renumber};
+use crate::text::{self, Encoding};
 
 /// What a sink was told: each fault, where it is and what it says.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -111,6 +113,55 @@ pub fn parse(data: &[u8]) {
         ..how
     };
     side_by_side(input, how, &iso, &promised(input, pdfium));
+}
+
+/// `data` decoded as a text string by each rules, and as text, what it
+/// decodes to, and its own bytes taken as UTF-8, each encoded: what's written
+/// reads back as that text, with nothing to say, in each encoding that takes
+/// it, and through the writer and the parser by each rules; by PDFium's as
+/// by ISO 32000-2's, but where a language escape comes out.
+pub fn texts(data: &[u8]) {
+    let iso = text::decode(data);
+    assert_eq!(text::decode_with(data, Rules::Iso), iso);
+    let pdfium = text::decode_with(data, Rules::Pdfium);
+    let lossy = String::from_utf8_lossy(data);
+    for written in [lossy.as_ref(), &iso.text, &pdfium.text] {
+        encoded(written);
+    }
+}
+
+/// [`texts`]' promises for `written`.
+fn encoded(written: &str) {
+    let read_back = |bytes: &[u8]| {
+        for rules in [Rules::Iso, Rules::Pdfium] {
+            let read = text::decode_with(bytes, rules);
+            if rules == Rules::Iso || !written.contains('\u{1B}') {
+                assert_eq!(read.text, written, "{bytes:02X?}, by {rules:?}");
+                assert_eq!(read.quirks, [], "{bytes:02X?}, by {rules:?}");
+            }
+        }
+    };
+    let bytes = text::encode(written);
+    read_back(&bytes);
+    for encoding in [Encoding::PdfDoc, Encoding::Utf16Be, Encoding::Utf8] {
+        if let Ok(bytes) = text::encode_as(written, encoding) {
+            read_back(&bytes);
+            assert_eq!(text::decode(&bytes).encoding, encoding, "{bytes:02X?}");
+        }
+    }
+    assert!(text::encode_as(written, Encoding::Utf16Le).is_err());
+    let object = Object::text(written);
+    let mut out = Vec::new();
+    serialize::write(&mut out, &object).expect("a text string writes");
+    for rules in [Rules::Iso, Rules::Pdfium] {
+        let read = Parser::at(&out, 0).rules(rules).value(&mut ());
+        let read = read.expect("a text string reads");
+        assert_eq!(
+            read.as_bytes(),
+            Some(&bytes[..]),
+            "{out:02X?}, by {rules:?}"
+        );
+    }
 }
 
 /// What reading `input` as `how` says: the object or the error, and where
@@ -1290,7 +1341,7 @@ fn placed(input: &[u8], o: &Object, outer: Span, how: How) {
 
 #[cfg(test)]
 mod tests {
-    use super::{every_window, parse};
+    use super::{every_window, parse, texts};
 
     /// Fragments of objects, where they begin and end.
     const FRAGMENTS: &[&[u8]] = &[
@@ -1349,6 +1400,51 @@ mod tests {
             state ^= state >> 7;
             state ^= state << 17;
             (state % below as u64) as usize
+        }
+    }
+
+    /// What decodes and encodes oddly, the marks and escapes among it, each
+    /// after another at random.
+    #[test]
+    fn random_text_strings_keep_every_promise() {
+        const PIECES: &[&[u8]] = &[
+            b"\xFE\xFF",
+            b"\xFF\xFE",
+            b"\xEF\xBB\xBF",
+            b"\x00\x1B",
+            b"\x1B",
+            b"\x00A",
+            b"A\x00",
+            b"(",
+            b")",
+            b"\\",
+            b"\r",
+            b"\n",
+            b"\xD8\x3D",
+            b"\xDE\x00",
+            b"\xC3\xA9",
+            b"\xC3",
+            b"\xE9",
+            b"\xBF",
+            b"\x7F",
+            b"\x18",
+            b"\x9F",
+            b"\xAD",
+            b"\xF8",
+            b"\xF4\x90\x80\x80",
+            b"\xED\xA0\x80",
+            b"\xF0\x9F\x98\x80",
+            "þÿ".as_bytes(),
+            "ï»¿".as_bytes(),
+            "ÿþ".as_bytes(),
+        ];
+        let mut random = randoms();
+        for _ in 0..5_000 {
+            let mut input = Vec::new();
+            for _ in 0..random(8) {
+                input.extend_from_slice(PIECES[random(PIECES.len())]);
+            }
+            texts(&input);
         }
     }
 

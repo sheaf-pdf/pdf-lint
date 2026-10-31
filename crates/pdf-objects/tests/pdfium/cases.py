@@ -94,6 +94,75 @@ TITLE_LITERAL = [
     ("two-cr", b"(a\r\rb)"),
     ("lf-cr", b"(a\n\rb)"),
 ]
+# Text strings, in /Title as hex strings so that every byte is as written:
+# each encoding by its mark, what isn't one, a surrogate alone, language
+# escapes, bad UTF-8. A surrogate alone can't be held in a Rust string: it's
+# U+FFFD here, and the oracle decodes its answer with `replace`, so the two
+# agree and no line of differ.tsv names one.
+TEXT = [
+    ("be", b"\xfe\xff\x00A\x00\xe9"),
+    ("be-empty", b"\xfe\xff"),
+    ("be-odd", b"\xfe\xff\x00A\x00"),
+    ("be-nul", b"\xfe\xff\x00A\x00\x00\x00B"),
+    ("be-mark-inside", b"\xfe\xff\xfe\xff\x00A\xff\xfe\x00B"),
+    ("be-pair", b"\xfe\xff\xd8\x3d\xde\x00"),
+    ("be-lone-high", b"\xfe\xff\xd8\x00\x00A"),
+    ("be-lone-high-last", b"\xfe\xff\x00A\xd8\x00"),
+    ("be-lone-low", b"\xfe\xff\xdc\x00\x00A"),
+    ("be-high-high-low", b"\xfe\xff\xd8\x00\xd8\x00\xdc\x00"),
+    ("le", b"\xff\xfeA\x00\xe9\x00"),
+    ("le-empty", b"\xff\xfe"),
+    ("le-odd", b"\xff\xfeA\x00\x00"),
+    ("le-pair", b"\xff\xfe\x3d\xd8\x00\xde"),
+    ("le-lone-high", b"\xff\xfe\x00\xd8A\x00"),
+    ("utf8", b"\xef\xbb\xbfcaf\xc3\xa9"),
+    ("utf8-empty", b"\xef\xbb\xbf"),
+    ("utf8-four-bytes", b"\xef\xbb\xbf\xf0\x9f\x98\x80"),
+    ("no-mark-fe", b"\xfe"),
+    ("no-mark-ff", b"\xff"),
+    ("no-mark-ef-bb", b"\xef\xbb"),
+    ("no-mark-fe-fe", b"\xfe\xfe\x41"),
+    ("no-mark-ff-ff", b"\xff\xff\x41"),
+    ("lang-be", b"\xfe\xff\x00\x1b\x00e\x00n\x00\x1b\x00A"),
+    ("lang-be-between", b"\xfe\xff\x00A\x00\x1b\x00e\x00n\x00\x1b\x00B"),
+    ("lang-be-two", b"\xfe\xff\x00\x1b\x00e\x00\x1b\x00A\x00\x1b\x00f\x00\x1b\x00B"),
+    ("lang-be-empty", b"\xfe\xff\x00A\x00\x1b\x00\x1b\x00B"),
+    ("lang-be-unclosed", b"\xfe\xff\x00A\x00\x1b\x00e\x00n\x00B"),
+    ("lang-be-last", b"\xfe\xff\x00A\x00\x1b"),
+    ("lang-be-surrogates-parted", b"\xfe\xff\xd8\x3d\x00\x1b\x00\x1b\xde\x00"),
+    ("lang-le", b"\xff\xfe\x1b\x00e\x00n\x00\x1b\x00A\x00"),
+    ("lang-le-unclosed", b"\xff\xfeA\x00\x1b\x00e\x00"),
+    ("lang-utf8", b"\xef\xbb\xbf\x1benUS\x1bA"),
+    ("lang-utf8-unclosed", b"\xef\xbb\xbfA\x1benUS"),
+    ("lang-doc", b"a\x1benUS\x1bb"),
+    ("bad-utf8-ff", b"\xef\xbb\xbfa\xffb"),
+    ("bad-utf8-fe", b"\xef\xbb\xbfa\xfeb"),
+    ("bad-utf8-continuation", b"\xef\xbb\xbfa\x80b"),
+    ("bad-utf8-two-short", b"\xef\xbb\xbf\xc3A"),
+    ("bad-utf8-two-short-last", b"\xef\xbb\xbfA\xc3"),
+    ("bad-utf8-three-short", b"\xef\xbb\xbf\xe2\x82A"),
+    ("bad-utf8-new-start", b"\xef\xbb\xbf\xc3\xc3\xa9"),
+    ("bad-utf8-continuation-after-char", b"\xef\xbb\xbf\xc3\xa9\xa9"),
+    ("bad-utf8-short-then-ff", b"\xef\xbb\xbf\xe2\x82\xff\x82A"),
+    ("bad-utf8-overlong-nul", b"\xef\xbb\xbfa\xc0\x80b"),
+    ("bad-utf8-overlong-a", b"\xef\xbb\xbf\xc1\x81"),
+    ("bad-utf8-overlong-three", b"\xef\xbb\xbf\xe0\x81\x81"),
+    ("bad-utf8-overlong-escape", b"\xef\xbb\xbfa\xc0\x9benUS\xc0\x9bb"),
+    ("bad-utf8-surrogate", b"\xef\xbb\xbf\xed\xa0\x80A"),
+    ("bad-utf8-surrogates-paired", b"\xef\xbb\xbf\xed\xa0\xbd\xed\xb8\x80"),
+    ("bad-utf8-past-unicode", b"\xef\xbb\xbf\xf4\x90\x80\x81"),
+    ("bad-utf8-past-unicode-escape", b"\xef\xbb\xbf\xf4\x90\x80\x9bA"),
+    ("bad-utf8-four-top", b"\xef\xbb\xbf\xf7\xbf\xbf\xbf"),
+    ("bad-utf8-five", b"\xef\xbb\xbf\xf8\x88\x80\x80\x81"),
+    ("bad-utf8-six", b"\xef\xbb\xbf\xfc\x84\x80\x80\x80\x81"),
+    ("bad-utf8-six-top", b"\xef\xbb\xbf\xfd\xbf\xbf\xbf\xbf\xbf"),
+    ("bad-utf8-four-overlong", b"\xef\xbb\xbf\xf0\x80\x81\x81"),
+    ("bad-utf8-short-then-f8", b"\xef\xbb\xbf\xe2\x82\xf8\x82A"),
+    ("bad-utf8-five-overlong", b"\xef\xbb\xbf\xf8\x80\x80\x81\x81"),
+    ("bad-utf8-six-overlong", b"\xef\xbb\xbf\xfc\x80\x80\x80\x81\x81"),
+    ("bad-utf8-short-then-a-then-continuation", b"\xef\xbb\xbf\xe2\x82A\x82"),
+    ("bad-utf8-three-new-start", b"\xef\xbb\xbf\xe2\xc3\xa9"),
+]
 
 # /Info keys with `#` in them, and the tag asked: a `#` and the two bytes
 # after it make a byte, one that's no hex digit read as 0.
@@ -145,6 +214,12 @@ def cases():
     ]
     out += [info("title-hex-" + n, b"<< /Title " + v + b" >>", b"Title") for n, v in TITLE_HEX]
     out += [info("title-literal-" + n, b"<< /Title " + v + b" >>", b"Title") for n, v in TITLE_LITERAL]
+    out += [info("text-" + n, b"<< /Title <" + v.hex().encode() + b"> >>", b"Title") for n, v in TEXT]
+    # Every byte of PDFDocEncoding, sixteen to a case, the marks' first
+    # bytes after another.
+    for high in range(16):
+        row = bytes(high * 16 + low for low in range(16))
+        out.append(info("text-doc-%xx" % high, b"<< /Title <" + (b"a" + row).hex().encode() + b"> >>", b"Title"))
     out += [info("key-" + n, b"<< " + k + b" (x) >>", t) for n, k, t in KEYS]
     for n in (255, 256, 257):
         body = b"P" * (n - 1)

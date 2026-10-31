@@ -25,9 +25,14 @@
 //!   or ciphertext it didn't decrypt, where what depends on the bytes
 //!   can't be told. Beside it, a string keeps its [`Form`], literal or
 //!   hex, as written.
-//! - **Text strings decoded by the spec** ([`text`]): UTF-16BE or UTF-8
-//!   after their byte order marks, PDFDocEncoding without one, and where a
-//!   string departs from the spec, said.
+//! - **Text strings decoded by the spec, or by PDFium** ([`text`]): UTF-16BE
+//!   or UTF-8 after their byte order marks, PDFDocEncoding without one, and
+//!   where a string departs from the spec, said. By PDFium's rules, as of
+//!   chromium/8125 ([`text::decode_with`]), language escapes come out, and
+//!   UTF-16LE's mark and bad UTF-8 read as PDFium reads them.
+//! - **Text strings written** ([`text::encode`], [`Object::text`]): as they
+//!   are where PDFDocEncoding reads those bytes back so, else UTF-16BE; or
+//!   in an encoding the caller chooses, or refused ([`text::encode_as`]).
 //! - **Versions** ([`Version`]), read from a header's or a catalog's text,
 //!   in order.
 //! - **A parser** ([`parse`]), on pdf-tokenizer: a value, or an indirect

@@ -14,8 +14,9 @@
 //!   for what's none, its corners put in order, and where it's empty, or
 //!   no such array, the 612 by 792 PDFium gives a page then.
 //! - `info`: the document's `/Info` dictionary, PDFium's answer the text of
-//!   its entry under the key `.tag` holds; here that entry's string as
-//!   text, and none where there's no such entry, or no dictionary.
+//!   its entry under the key `.tag` holds; here that entry's string decoded
+//!   by PDFium's rules (`text::decode_with`), and none where there's no such
+//!   entry, or no dictionary.
 //! - `kids`: what a page tree's `/Kids` holds, the page object 3, of 50 by
 //!   60, PDFium's answer the page's size, or `no-page`; here whether the
 //!   array's first element is a reference to object 3.
@@ -25,7 +26,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdf_objects::parse::Parser;
-use pdf_objects::{Object, Rules, Str, Value};
+use pdf_objects::{Object, Rules, Value, text};
 
 /// A case's text or data longer than this is written by its length and
 /// FNV-1a 64 hash, as the oracle writes it.
@@ -148,7 +149,9 @@ fn info(bytes: &[u8], tag: &[u8]) -> String {
     let text = value(bytes)
         .and_then(|v| v.as_dict().and_then(|d| d.get(tag)).cloned())
         .and_then(|e| match e.into_value() {
-            Value::String(s, _) => Str::text(&s),
+            Value::String(s, _) => s
+                .as_bytes()
+                .map(|bytes| text::decode_with(bytes, Rules::Pdfium).text),
             _ => None,
         })
         .unwrap_or_default();

@@ -192,9 +192,21 @@ impl Object {
     /// not chosen. Read as a text string (ISO 32000-2, 7.9.2.2), bytes
     /// with no mark are PDFDocEncoding, so it reads back as `text` only
     /// when that's ASCII, but for 0x18–0x1F and 0x7F: `é` reads back as
-    /// `Ã©`.
+    /// `Ã©`: [`Object::text`] writes a text string.
     pub fn string(text: &str) -> Object {
         Object::new(Value::String(Str::Bytes(text.as_bytes().to_vec()), None))
+    }
+
+    /// A text string (ISO 32000-2, 7.9.2.2) that reads back as `text`: the
+    /// bytes [`text::encode`] gives, written as a literal string when
+    /// they're as they are, and as a hex string when they're UTF-16BE.
+    pub fn text(text: &str) -> Object {
+        let form = if text::as_it_is(text) {
+            Form::Literal
+        } else {
+            Form::Hex
+        };
+        Object::new(Value::String(Str::Bytes(text::encode(text)), Some(form)))
     }
 
     /// A string of `bytes`, its form not chosen.
@@ -927,6 +939,47 @@ macro_rules! dict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A text string is literal as it is and hex as UTF-16BE, and what it
+    /// must escape as a literal reads back, by either rules.
+    #[test]
+    fn a_text_string_is_written_in_the_form_it_is_and_reads_back() {
+        let plain = Object::text("plain");
+        assert_eq!(
+            plain.value(),
+            &Value::String(Str::Bytes(b"plain".to_vec()), Some(Form::Literal))
+        );
+        let marked = Object::text("é");
+        assert_eq!(
+            marked.value(),
+            &Value::String(Str::Bytes(b"\xFE\xFF\x00\xE9".to_vec()), Some(Form::Hex))
+        );
+        let delete = Object::text("a\x7F");
+        assert_eq!(delete.as_bytes(), Some(&b"\xFE\xFF\x00a\x00\x7F"[..]));
+        let mut written = Vec::new();
+        crate::serialize::write(&mut written, &plain).unwrap();
+        assert_eq!(written, b"(plain)");
+        written.clear();
+        crate::serialize::write(&mut written, &marked).unwrap();
+        assert_eq!(written, b"<FEFF00E9>");
+        for text in [
+            "", "a\rb", "a\r\nb", "a\nb", "a(b", "a)b", "(a)", "a\\b", "\\", "\t\0", "é\r",
+            "\x1B\x7F",
+        ] {
+            let mut written = Vec::new();
+            crate::serialize::write(&mut written, &Object::text(text)).unwrap();
+            for rules in [crate::Rules::Iso, crate::Rules::Pdfium] {
+                let read = (crate::parse::Parser::at(&written, 0).rules(rules))
+                    .value(&mut ())
+                    .unwrap();
+                assert_eq!(
+                    read.as_bytes().map(|bytes| crate::text::decode(bytes).text),
+                    Some(text.to_string()),
+                    "{written:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_dictionary_keeps_what_was_written_and_reads_a_keys_last_entry() {

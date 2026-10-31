@@ -12,4 +12,7 @@
 
 #![no_main]
 
-libfuzzer_sys::fuzz_target!(|data: &[u8]| pdf_objects::fuzz::parse(data));
+libfuzzer_sys::fuzz_target!(|data: &[u8]| {
+    pdf_objects::fuzz::parse(data);
+    pdf_objects::fuzz::texts(data);
+});
