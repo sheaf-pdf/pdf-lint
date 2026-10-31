@@ -62,8 +62,10 @@
 //! - **References resolved** ([`Resolve`]): what gives the indirect object
 //!   a reference names, a reader's or a document in memory, or any closure
 //!   from an [`ObjectId`] to an object, so that what follows references
-//!   reads through any of them; and walked ([`Object::references`]), a
-//!   value's in the order written, with a stack of the walk's own.
+//!   reads through any of them, and why it gives none where it can say
+//!   ([`Resolve::try_resolve`], [`Unreadable`]); and walked
+//!   ([`Object::references`]), a value's in the order written, with a stack
+//!   of the walk's own.
 //!
 //! [`dict!`] builds a dictionary from keys and values.
 
@@ -112,10 +114,64 @@ pub use version::Version;
 /// let file = File(objects.clone());
 /// assert_eq!((&file).resolve((1, 0)), objects.get(&(1, 0)));
 /// ```
+///
+/// [`Resolve::resolve`] doesn't say why it gives none, and
+/// [`Resolve::try_resolve`] does, where the resolver knows: a reader's and a
+/// document's do. A closure can't say, so one over a reader loses the reason
+/// and the reader's own should be given where the reason matters.
 pub trait Resolve<'o> {
     /// Object `id`; none when there's none to give: the file hasn't it, or
     /// it doesn't read.
     fn resolve(&self, id: ObjectId) -> Option<&'o Object>;
+
+    /// Object `id`; none when the file hasn't it; or why it doesn't read.
+    /// By default what [`Resolve::resolve`] gives, for a resolver that can't
+    /// say why.
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        Ok(self.resolve(id))
+    }
+}
+
+/// Why a resolver gives no object for a number the file has
+/// ([`Resolve::try_resolve`]).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+#[error("{message}")]
+pub struct Unreadable {
+    /// The object.
+    pub id: ObjectId,
+    /// What kind of failure it is.
+    pub why: Why,
+    /// What the reader said of it, the whole message.
+    pub message: String,
+}
+
+impl Unreadable {
+    /// Object `id` doesn't read, for `why`, as `message` says.
+    pub fn new(id: ObjectId, why: Why, message: impl Into<String>) -> Unreadable {
+        Unreadable {
+            id,
+            why,
+            message: message.into(),
+        }
+    }
+}
+
+/// What kind of failure an [`Unreadable`] is, so that a caller can decide
+/// what to do without knowing a reader's own errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Why {
+    /// What's written there isn't that object: it doesn't parse, or the file
+    /// doesn't lead to it, or doesn't hold it as it says.
+    Damaged,
+    /// It's past a cap the reader reads under.
+    Limit,
+    /// It takes a password the reader wasn't given, or doesn't decrypt.
+    Locked,
+    /// The source of the file's bytes didn't give them: it may read if it's
+    /// asked again.
+    Source,
 }
 
 /// A closure, or a function, from an object's number to the object.
@@ -168,5 +224,37 @@ mod tests {
         assert_eq!(resolves(&boxed), (Some(7), true));
         assert_eq!(resolves(&*boxed), (Some(7), true));
         assert_eq!(resolves(&nothing), (None, true));
+    }
+
+    /// A resolver that can't say why gives what it gives, by reference, as
+    /// a `dyn Fn` and as a `dyn Resolve`.
+    #[test]
+    fn a_closure_can_t_say_why() {
+        let objects = BTreeMap::from([((1, 0), Object::from(7))]);
+        let closure = |id: ObjectId| objects.get(&id);
+        assert_eq!(closure.try_resolve((1, 0)), Ok(objects.get(&(1, 0))));
+        assert_eq!(closure.try_resolve((2, 0)), Ok(None));
+        let dynamic = &closure as &dyn Fn(_) -> _;
+        assert_eq!(dynamic.try_resolve((2, 0)), Ok(None));
+        let resolver = &closure as &dyn Resolve;
+        assert_eq!(resolver.try_resolve((1, 0)), Ok(objects.get(&(1, 0))));
+    }
+
+    /// One that can says so, and what it says is the whole message.
+    #[test]
+    fn a_resolver_says_why_it_gives_none() {
+        struct Locked;
+        impl<'o> Resolve<'o> for Locked {
+            fn resolve(&self, _: ObjectId) -> Option<&'o Object> {
+                None
+            }
+            fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+                Err(Unreadable::new(id, Why::Locked, "it wants a password"))
+            }
+        }
+        let why = Locked.try_resolve((3, 1)).unwrap_err();
+        assert_eq!((why.id, why.why), ((3, 1), Why::Locked));
+        assert_eq!(why.to_string(), "it wants a password");
+        assert!(std::error::Error::source(&why).is_none());
     }
 }

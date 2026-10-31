@@ -11,9 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pdf_crypt::{Encoded, Handler, Password, Refused};
-use pdf_objects::Resolve;
 use pdf_objects::object::{Object, ObjectId, Span, Stream, Value};
 use pdf_objects::version::Version;
+use pdf_objects::{Resolve, Unreadable, Why};
 
 use super::window::{ByPosition, Bytes, InMemory};
 use super::{Crypt, Decode, Options, Reader, Stored, Unfiltered, Whole, XrefEntry};
@@ -318,6 +318,9 @@ pub struct Reading<S> {
     /// the fuzz target read without, so that a small first window reaches
     /// every read's windows.
     bound: bool,
+    /// How many times a resolver's read stopped at the source
+    /// ([`Reading::failed_resolves`]).
+    failed_resolves: AtomicU64,
 }
 
 impl<S> fmt::Debug for Reading<S> {
@@ -346,6 +349,7 @@ impl<'a> Reading<&'a [u8]> {
             reader,
             source: file,
             bound: true,
+            failed_resolves: AtomicU64::new(0),
         }
     }
 
@@ -412,6 +416,7 @@ impl<S: ByteSource> Reading<S> {
             source,
             reader,
             bound,
+            failed_resolves: AtomicU64::new(0),
         })
     }
 
@@ -518,6 +523,18 @@ impl<S: ByteSource> Reading<S> {
         let i = self.reader.listed(id)?;
         let read = self.reader.slots[i].get()?;
         read.object.as_ref().ok().map(|(_, record)| record)
+    }
+
+    /// How many times a resolve has found that the source didn't give the
+    /// bytes asked of it: through [`Resolve::resolve`], which gives none, as
+    /// a reference to an object the file hasn't, and through
+    /// [`Resolve::try_resolve`], which says so ([`Why::Source`]). What follows
+    /// references through `resolve` reads such an object as null: the count
+    /// is how a caller learns that something may have read so, where nothing
+    /// after it would say, and it may ask again. A read by [`Reading::get`]
+    /// says so to its caller, and isn't counted. In memory, always 0.
+    pub fn failed_resolves(&self) -> u64 {
+        self.failed_resolves.load(Ordering::Relaxed)
     }
 
     /// The trailer.
@@ -844,6 +861,7 @@ impl<S: ByteSource> Reading<S> {
             source,
             reader,
             bound,
+            ..
         } = self;
         let whole = match source.whole() {
             Some(file) => {
@@ -1040,8 +1058,9 @@ fn first_id(doc: &Document) -> Vec<u8> {
 /// Its objects, as a reference resolves them: each read and kept the first
 /// time it's asked for, as [`Reading::get`] keeps it; none for one the file
 /// hasn't, one that doesn't read, or one whose bytes the source doesn't
-/// give, without why ([`Reading::get`] says). A read the source stops keeps
-/// nothing, so asked again it reads.
+/// give, without why, which [`Resolve::try_resolve`] and [`Reading::get`]
+/// say. A read the source stops keeps nothing, so asked again it reads, and
+/// it's counted ([`Reading::failed_resolves`]).
 impl<'o, S: ByteSource> Resolve<'o> for &'o Reading<S> {
     fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
         let reading: &'o Reading<S> = self;
@@ -1050,7 +1069,32 @@ impl<'o, S: ByteSource> Resolve<'o> for &'o Reading<S> {
                 let Ok(object) = reading.reader.resolve(InMemory(file), id);
                 object
             }
-            None => (reading.reader.resolve(reading.by_position(), id)).unwrap_or(None),
+            None => match reading.reader.resolve(reading.by_position(), id) {
+                Ok(object) => object,
+                Err(_) => {
+                    reading.failed_resolves.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+            },
         }
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        let reading: &'o Reading<S> = self;
+        let got = match reading.source.whole() {
+            Some(file) => {
+                let Ok(got) = reading.reader.get(InMemory(file), id);
+                got
+            }
+            None => match reading.reader.get(reading.by_position(), id) {
+                Ok(got) => got,
+                Err(error) => {
+                    reading.failed_resolves.fetch_add(1, Ordering::Relaxed);
+                    let message = format!("{} {} R doesn't read: {error}", id.0, id.1);
+                    return Err(Unreadable::new(id, Why::Source, message));
+                }
+            },
+        };
+        got.map_or_else(|why| why.unreadable(id), |object| Ok(Some(object)))
     }
 }

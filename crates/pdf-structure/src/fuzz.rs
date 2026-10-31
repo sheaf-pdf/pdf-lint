@@ -8,7 +8,9 @@
 //! input chooses, it's the whole read, and each stream's data and decoded
 //! data are as in memory; pruned, it reaches what it did, and an object
 //! added to it is at a number none held; and so are its revision before an
-//! incremental update, and the file opened by an owner's password; and
+//! incremental update, and the file opened by an owner's password; a
+//! resolver says of each object what `get` says, in memory and by position;
+//! and
 //! opened by a wrong password, then unlocked by the owner's, it's the file
 //! opened by the owner's. It reads under small limits, so that a run tries
 //! more inputs. It's compiled only for tests and under cargo-fuzz's
@@ -35,11 +37,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pdf_crypt::Password;
 use pdf_crypt::rand_core::{TryCryptoRng, TryRng};
+use pdf_objects::Resolve;
 use pdf_objects::object::{Object, ObjectId, Span, Value};
 use pdf_objects::serialize;
 
 use crate::bytes::{ByteSource, Error, Options, Reading, Whole, XrefEntry};
-use crate::source::{Document, Encryption, Origin, Source, XrefKind};
+use crate::source::{Document, Encryption, Origin, Source, Unread, XrefKind};
 use crate::write::{self, Base, Body, Encryptor, Pack};
 
 /// The owner's password the fuzz target opens a file by, when its input
@@ -270,6 +273,53 @@ fn by_position(
         .and_then(|reading| reading.into_document());
     let read = read.expect("bytes in memory are read by position without fail");
     assert_eq!(read, *doc, "a reading by position is the whole read");
+    let reading = open(&source, passwords, &options, choice & 8 != 0);
+    said_as_got(&reading.expect("it opened"));
+}
+
+/// What a reading's resolver says of each object is what [`Reading::get`]
+/// says: the object it gives, and the one `resolve` gives; none, where the
+/// file hasn't it; or why it doesn't read, in the same words. No resolve
+/// found the source failing, and none was counted.
+fn said_as_got<S: ByteSource>(reading: &Reading<S>) {
+    for id in reading.ids().chain([(u32::MAX, 0)]) {
+        let said = reading.try_resolve(id);
+        match (&said, reading.get(id)) {
+            (Ok(Some(object)), Ok(got)) => assert!(std::ptr::eq(*object, got), "{id:?}"),
+            (Ok(None), Err(Error::Unread(Unread::Missing { .. }))) => {}
+            (Err(why), Err(Error::Unread(unread))) => {
+                assert_eq!(why.id, id);
+                assert_eq!(
+                    why.message,
+                    format!("{} {} R doesn't read: {unread}", id.0, id.1)
+                );
+            }
+            (said, got) => panic!("{id:?} resolves to {said:?}, and reads as {got:?}"),
+        }
+        assert_eq!(said.ok().flatten(), reading.resolve(id), "{id:?}");
+    }
+    assert_eq!(reading.failed_resolves(), 0, "a source that didn't fail");
+}
+
+/// [`said_as_got`], of a document and [`Source::get`].
+fn said_of_document(doc: &Document) {
+    let resolve = doc;
+    for id in doc.ids().into_iter().chain([(u32::MAX, 0)]) {
+        let said = resolve.try_resolve(id);
+        match (&said, doc.get(id)) {
+            (Ok(Some(object)), Ok(got)) => assert!(std::ptr::eq(*object, got), "{id:?}"),
+            (Ok(None), Err(Unread::Missing { .. })) => {}
+            (Err(why), Err(unread)) => {
+                assert_eq!(why.id, id);
+                assert_eq!(
+                    why.message,
+                    format!("{} {} R doesn't read: {unread}", id.0, id.1)
+                );
+            }
+            (said, got) => panic!("{id:?} resolves to {said:?}, and reads as {got:?}"),
+        }
+        assert_eq!(said.ok().flatten(), resolve.resolve(id), "{id:?}");
+    }
 }
 
 /// The file, opened by `passwords`, in memory and read by position through
@@ -344,8 +394,10 @@ fn on_demand(
             }
         }
     }
+    said_as_got(&reading);
     let document = document.unwrap_or_else(|| reading.to_document());
     let document = document.expect("bytes in memory are made a document without fail");
+    said_of_document(&document);
     let lazily = reading.whole(None);
     assert_eq!(
         document, lazily.document,

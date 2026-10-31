@@ -254,7 +254,9 @@ pub enum Truth {
 /// one the file hasn't is (ISO 32000-2, 7.3.10), whatever the reason: over
 /// a reading by position, one whose bytes the source failed to give is
 /// null in that row, and missing from any tree read then, which is kept
-/// so.
+/// so. pdf-structure's `Reading::failed_resolves` counts those, for a caller
+/// to learn that some were, and what asks of a resolver itself can ask why
+/// (`Resolve::try_resolve`).
 ///
 /// Those it keeps know an object by where it was written and by its
 /// number, so the spans of the objects it's given, and of those its

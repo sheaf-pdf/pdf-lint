@@ -8,12 +8,12 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::RangeBounds;
 
 use pdf_crypt::Encoding;
-use pdf_objects::Resolve;
 use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
 use pdf_objects::parse;
 use pdf_objects::version::Version;
+use pdf_objects::{Resolve, Unreadable, Why};
 
-use crate::bytes::{SourceId, Undecoded, Unindexed};
+use crate::bytes::{SourceId, Undecoded, Unfiltered, Unindexed};
 
 /// A file, as a reader read it.
 pub trait Source {
@@ -549,6 +549,43 @@ pub enum Unread {
     Other(String),
 }
 
+impl Unread {
+    /// What [`Resolve::try_resolve`] says of object `id`, which doesn't read
+    /// for this: none where the file hasn't it, or else why.
+    pub(crate) fn unreadable<'o>(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        if let Unread::Missing { .. } = self {
+            return Ok(None);
+        }
+        let message = format!("{} {} R doesn't read: {self}", id.0, id.1);
+        Err(Unreadable::new(id, self.why(), message))
+    }
+
+    /// What kind of failure it is. Every kind of failure is named here, so
+    /// that a new one is put with its like on purpose.
+    fn why(&self) -> Why {
+        match self {
+            Unread::Parse(parse::Error::Nested { .. } | parse::Error::Values { .. }) => Why::Limit,
+            Unread::Container { why, .. } => match why {
+                Undecoded::Filters(Unfiltered::Filters { .. }) => Why::Limit,
+                Undecoded::Encrypted { .. } | Undecoded::Decrypt(_) => Why::Locked,
+                Undecoded::NotAStream | Undecoded::Filters(_) | Undecoded::Other(_) => Why::Damaged,
+            },
+            Unread::Undecodable { .. } => Why::Locked,
+            Unread::ContainerUnread { why, .. } => why.why(),
+            Unread::Missing { .. }
+            | Unread::Parse(_)
+            | Unread::Elsewhere { .. }
+            | Unread::ContainerMissing { .. }
+            | Unread::ContainerHeader { .. }
+            | Unread::NoIndex { .. }
+            | Unread::Numbered { .. }
+            | Unread::NoData { .. }
+            | Unread::Cut { .. }
+            | Unread::Other(_) => Why::Damaged,
+        }
+    }
+}
+
 impl Encryption {
     /// [`Encryption::Opened`]: by the owner's password when `owner`, else
     /// by the user's; by the empty password, given none, until
@@ -1068,11 +1105,21 @@ impl Source for Document {
 }
 
 /// Its objects, as a reference resolves them: none for one it hasn't, or
-/// one that doesn't read, without why ([`Source::get`] says).
+/// one that doesn't read, without why, which [`Resolve::try_resolve`] and
+/// [`Source::get`] say.
 impl<'o> Resolve<'o> for &'o Document {
     fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
         let doc: &'o Document = self;
         doc.object(id)
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        let doc: &'o Document = self;
+        match doc.objects.get(&id) {
+            Some(Ok((object, _))) => Ok(Some(object)),
+            Some(Err(why)) => why.unreadable(id),
+            None => Ok(None),
+        }
     }
 }
 
@@ -1400,6 +1447,109 @@ mod tests {
         for (unread, said) in cases {
             assert_eq!(unread.to_string(), said, "{unread:?}");
         }
+    }
+
+    /// Each reason an object doesn't read, as a document's resolver says it:
+    /// by the kind a caller decides by, the reason's words after the object's
+    /// number; and none, with no reason, where the file hasn't it.
+    #[test]
+    fn a_document_says_why_an_object_doesnt_resolve() {
+        let stream = 4;
+        let id = (9, 1);
+        let filters = |why| Unread::Container {
+            stream,
+            why: Undecoded::Filters(why),
+        };
+        let container = |why| Unread::Container { stream, why };
+        let parse_error = |error| Unread::Parse(error);
+        let boxed = |why: Unread| Unread::ContainerUnread {
+            stream,
+            why: Box::new(why),
+        };
+        let cases = [
+            (parse_error(parse::Error::End), Why::Damaged),
+            (parse_error(parse::Error::Header { at: 7 }), Why::Damaged),
+            (
+                parse_error(parse::Error::Nested { limit: 2, at: 7 }),
+                Why::Limit,
+            ),
+            (
+                parse_error(parse::Error::Values { limit: 2, at: 7 }),
+                Why::Limit,
+            ),
+            (
+                Unread::Elsewhere {
+                    offset: 5,
+                    found: (1, 0),
+                    expected: id,
+                },
+                Why::Damaged,
+            ),
+            (container(Undecoded::NotAStream), Why::Damaged),
+            (filters(Unfiltered::Filter), Why::Damaged),
+            (filters(Unfiltered::Filters { count: 26 }), Why::Limit),
+            (
+                container(Undecoded::Encrypted {
+                    filter: b"StdCF".to_vec(),
+                }),
+                Why::Locked,
+            ),
+            (
+                container(Undecoded::Decrypt(pdf_crypt::Fault::Short { len: 3 })),
+                Why::Locked,
+            ),
+            (
+                container(Undecoded::Other("words".to_string())),
+                Why::Damaged,
+            ),
+            (Unread::Undecodable { stream }, Why::Locked),
+            (boxed(Unread::Undecodable { stream }), Why::Locked),
+            (
+                boxed(parse_error(parse::Error::Nested { limit: 2, at: 7 })),
+                Why::Limit,
+            ),
+            (boxed(parse_error(parse::Error::End)), Why::Damaged),
+            // The stream isn't in the file, though the object is listed.
+            (boxed(Unread::Missing { id: (stream, 0) }), Why::Damaged),
+            (Unread::ContainerMissing { stream }, Why::Damaged),
+            (
+                Unread::ContainerHeader {
+                    stream,
+                    why: Unindexed::Counts,
+                },
+                Why::Damaged,
+            ),
+            (Unread::NoIndex { stream, index: 2 }, Why::Damaged),
+            (
+                Unread::Numbered {
+                    stream,
+                    index: 1,
+                    number: 8,
+                    expected: id.0,
+                },
+                Why::Damaged,
+            ),
+            (Unread::NoData { stream }, Why::Damaged),
+            (Unread::Cut { stream }, Why::Damaged),
+            (Unread::Other("words".to_string()), Why::Damaged),
+        ];
+        let mut doc = Document::new(Version::new(1, 7), dict! {});
+        let object = doc.add(Object::from(7));
+        for (unread, why) in cases {
+            doc.set_unread(id, unread.clone());
+            let resolve = &doc;
+            assert_eq!(resolve.resolve(id), None, "{unread:?}");
+            let said = resolve.try_resolve(id).unwrap_err();
+            assert_eq!((said.id, said.why), (id, why), "{unread:?}");
+            assert_eq!(said.message, format!("9 1 R doesn't read: {unread}"));
+            assert_eq!(said.to_string(), said.message);
+        }
+        let resolve = &doc;
+        assert_eq!(resolve.try_resolve(object), Ok(resolve.resolve(object)));
+        assert!(resolve.try_resolve(object).unwrap().is_some());
+        assert_eq!(resolve.try_resolve((77, 0)), Ok(None));
+        doc.set_unread(id, Unread::Missing { id });
+        assert_eq!((&doc).try_resolve(id), Ok(None));
     }
 
     /// The object stream an object that doesn't read is in, for each reason

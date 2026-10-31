@@ -297,8 +297,8 @@ mod tests {
     use std::ops::Range;
     use std::sync::Mutex;
 
-    use pdf_objects::Resolve;
     use pdf_objects::object::ObjectId;
+    use pdf_objects::{Resolve, Why};
 
     use super::super::lazy::{files, fixtures, length_by_reference};
     use super::super::tests::{clean, compressed, objects_2_and_3, root, xref_row};
@@ -650,6 +650,71 @@ mod tests {
             assert_eq!(resolve.resolve((3, 0)), None, "{bound}");
             assert_eq!(resolve.resolve((4, 0)), None, "{bound}");
             assert_eq!(reading.into_document().unwrap(), doc, "{bound}");
+        }
+    }
+
+    /// A reading says why it gives no object, in memory and by position: of
+    /// one the file hasn't, nothing; of one that doesn't read, the kind and
+    /// its reason, which `get` gives too; and of one whose read the source
+    /// fails, that, and counts it, by either way of asking, while a read by
+    /// `get` tells its caller, uncounted. Asked again it's the object, the
+    /// one `resolve` gives, and a failure kept nothing.
+    #[test]
+    fn a_reading_says_why_and_counts_what_the_source_failed() {
+        let file = fixture::assembled(
+            "1.7",
+            &[
+                (1, b"<< /Type /Catalog >>"),
+                (2, b"[1 2 3]"),
+                (3, b"<< /A ]"),
+            ],
+            "<< /Size 4 /Root 1 0 R >>",
+        );
+        let doc = read(&file);
+        let in_memory = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        let resolve = &in_memory;
+        let two = resolve.try_resolve((2, 0)).unwrap();
+        assert_eq!(two, doc.get((2, 0)).ok());
+        assert!(std::ptr::eq(two.unwrap(), resolve.resolve((2, 0)).unwrap()));
+        assert_eq!(resolve.try_resolve((4, 0)), Ok(None));
+        let three = resolve.try_resolve((3, 0)).unwrap_err();
+        assert_eq!((three.id, three.why), ((3, 0), Why::Damaged));
+        let unread = in_memory.get((3, 0)).unwrap_err().to_string();
+        assert_eq!(three.message, format!("3 0 R doesn't read: {unread}"));
+        assert_eq!(in_memory.failed_resolves(), 0);
+        let at = find(&file, b"2 0 obj").unwrap();
+        for bound in [true, false] {
+            let source = Failing::new(&file, 1);
+            let reading = open(&source, &[], &Options::DEFAULT, bound).unwrap();
+            let resolve = &reading;
+            assert_eq!(reading.failed_resolves(), 0, "{bound}");
+            source.fail_at(at);
+            let failed = resolve.try_resolve((2, 0)).unwrap_err();
+            assert!(source.failed(), "{bound}: no read at {at}");
+            assert_eq!((failed.id, failed.why), ((2, 0), Why::Source), "{bound}");
+            assert_eq!(
+                failed.to_string(),
+                format!("2 0 R doesn't read: no byte {at}")
+            );
+            assert_eq!(reading.failed_resolves(), 1, "{bound}");
+            assert!(reading.record((2, 0)).is_none(), "{bound}");
+            source.fail_at(at);
+            assert_eq!(resolve.resolve((2, 0)), None, "{bound}");
+            assert!(source.failed(), "{bound}: no read at {at}");
+            assert_eq!(reading.failed_resolves(), 2, "{bound}");
+            source.fail_at(at);
+            assert!(failed_at(reading.get((2, 0)).unwrap_err(), at), "{bound}");
+            assert_eq!(reading.failed_resolves(), 2, "{bound}");
+            // What doesn't read and what isn't there aren't the source's.
+            assert_eq!(resolve.try_resolve((4, 0)), Ok(None), "{bound}");
+            let three = resolve.try_resolve((3, 0)).unwrap_err();
+            assert_eq!(three.why, Why::Damaged, "{bound}");
+            assert_eq!(resolve.resolve((3, 0)), None, "{bound}");
+            assert_eq!(reading.failed_resolves(), 2, "{bound}");
+            // And it reads, whichever asks first.
+            let two = resolve.try_resolve((2, 0)).unwrap();
+            assert_eq!(two, doc.get((2, 0)).ok(), "{bound}");
+            assert_eq!(reading.failed_resolves(), 2, "{bound}");
         }
     }
 
