@@ -2376,6 +2376,28 @@ fn dct_and_ccitt_data_ends_where_their_decoders_stop() {
     // bytes before it make its end two bytes short.
     let s = image(g8, &[&b"ab"[..], &whole].concat(), " EI");
     assert_eq!(first_image(&s, lim).0, &s[start..start + whole.len()]);
+    // One scan, a restart after each block but the last and a comment
+    // holding `(` before its end of image: its data ends past the first
+    // marker after the coded data that isn't a restart, the comment's, as
+    // PDFium's decoder stops there, and the image at the `EI` after the
+    // `)`; the stand-in's ends at its end of image.
+    let coded = [
+        BLOCK,
+        b"\xff\xd0",
+        BLOCK,
+        b"\xff\xd1",
+        BLOCK,
+        b"\xff\xd2",
+        BLOCK,
+        b"\xff\xfe\x00\x03(",
+    ]
+    .concat();
+    let restarts = jpeg(16, 16, b"\xff\xdd\x00\x04\x00\x01", &coded);
+    let g16 = "/W 16 /H 16 /BPC 8 /CS /G /F /DCT";
+    let s = image(g16, &restarts, " EI 0 0 m ) EI");
+    let n = restarts.len();
+    assert_eq!(first_image(&s, lim).0, &restarts[..n - 5]);
+    assert_eq!(first_image(&s, &Limits::DEFAULT).0, &restarts[..]);
     // Narrower than `/W`, or no JPEG: refused.
     let s = image("/W 9 /H 8 /BPC 8 /CS /G /F /DCT", &whole, " EI");
     assert_eq!(first_image(&s, lim).1, Missing);
