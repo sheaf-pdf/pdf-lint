@@ -282,6 +282,7 @@ dependencies = [
  "pdf-tokenizer",
  "thiserror",
  "tinyvec",
+ "twox-hash",
  "zune-jpeg",
 ]
 

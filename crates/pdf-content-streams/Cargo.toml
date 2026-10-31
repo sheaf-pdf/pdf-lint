@@ -25,6 +25,10 @@ pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1.1" }
 thiserror = "2"
 # An operation's operands, sixteen held inline before they spill to the heap.
 tinyvec = { version = "1.13", features = ["alloc"] }
+# A resource's name by what it is (`ResId`): XXH3-128 of its objects, fast
+# and the same on every build and platform, so equal resources are named
+# alike wherever content is written; its other hashes and `std` off.
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_128"] }
 # With `image-ends`: DCT data in an inline image decoded to find where it
 # ends, as PDFium decodes it; without its SIMD features (`x86`, `neon`),
 # which hold all its `unsafe`, so it builds with `unsafe_code` forbidden.

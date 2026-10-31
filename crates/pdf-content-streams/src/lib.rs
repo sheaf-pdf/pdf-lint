@@ -63,6 +63,10 @@
 //!   [`Operations::with_sink`], [`Operand::object_with`]); what's read is
 //!   the same. With none, `()`, none is looked for. One isn't told: 0x80
 //!   and 0xFF read as white-space ([`fault`] says).
+//! - **Resources by what they are** ([`Res`]): a resource content draws
+//!   with, its objects named by a 128-bit digest of them ([`ResId`],
+//!   XXH3-128), so that equal resources are written once and named alike,
+//!   however their dictionaries are written.
 //!
 //! No resolver: what's read from the file, the streams decoded, the color
 //! spaces' components and the property lists, the caller gives.
@@ -101,6 +105,7 @@ mod operand;
 mod operations;
 mod operator;
 mod page;
+mod res;
 mod scan;
 mod state;
 mod tokens;
@@ -120,6 +125,7 @@ pub use operand::{Elements, Operand, name, object};
 pub use operations::{Operation, Operations, operations};
 pub use operator::{Category, FillRule, Operands, Operator, Operators, Paint, Type};
 pub use page::{Concat, Join, Pos, Pushed, SpanAcross, TooLarge};
+pub use res::{Res, ResBody, ResId};
 pub use state::State;
 pub use tokens::{Tok, Tokens, tokens};
 
