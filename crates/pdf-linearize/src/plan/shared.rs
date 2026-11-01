@@ -3,10 +3,10 @@
 //!
 //! The walk that gave each object its [`Use`](super::Use) goes into an object
 //! twice at most, so a third page stops where the second did and learns nothing
-//! of what's under what they share. These are walks of their own, under the same
-//! stops: one for each list, marking what it's seen with a stamp so that nothing
-//! is cleared between walks. So they cost the sum over the lists of what each
-//! reaches, and stop at a cap.
+//! of what's under what they share. These are walks of their own, under the
+//! same stops: one for each list, marking what it's seen with a stamp so that
+//! nothing is cleared between walks. So they cost the sum over the lists of
+//! what each reaches, and stop at a cap.
 
 use std::ops::Range;
 
@@ -89,8 +89,8 @@ pub(super) fn lists(walks: Walks<'_>) -> Result<Lists, Error> {
 }
 
 impl Walker<'_> {
-    /// The entries of what `roots` reach, listed in order, `page` being the page
-    /// walked from, if one is, which a walk may enter though it's a stop.
+    /// The entries of what `roots` reach, listed in order, `page` being the
+    /// page walked from, if one is, which a walk may enter though it's a stop.
     fn walk(&mut self, roots: &[u32], page: Option<u32>) -> Result<Range<usize>, Error> {
         let walks = self.walks;
         let start = self.listed.len();

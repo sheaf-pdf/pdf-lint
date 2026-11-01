@@ -1,25 +1,26 @@
-//! The hint tables (ISO 32000-2, F.4), both ways: what a linearized file says of
-//! itself in its hint stream, as typed values, written to bits and read back.
+//! The hint tables (ISO 32000-2, F.4), both ways: what a linearized file says
+//! of itself in its hint stream, as typed values, written to bits and read
+//! back.
 //!
 //! A table's fields are bits, high-order first, of widths its header gives, and
 //! it starts on a byte boundary (F.4.1). F.4.1 has the fields run on regardless
-//! of bytes within a table, but what's written and read is otherwise: each run of
-//! one item across the entries ends on a byte boundary, as qpdf and PDFium read
-//! and write it and as real files have it, so the same here both ways.
+//! of bytes within a table, but what's written and read is otherwise: each run
+//! of one item across the entries ends on a byte boundary, as qpdf and PDFium
+//! read and write it and as real files have it, so the same here both ways.
 //!
 //! An entry holds what the table says, a count or a length, not the difference
-//! from the least that the bits hold, so its fields are wider than the bits' and
-//! adding the least to what's read can't overflow.
+//! from the least that the bits hold, so its fields are wider than the bits'
+//! and adding the least to what's read can't overflow.
 //!
 //! # Reading anything
 //!
 //! A table comes from a file, so its fields can say anything. Reading past the
-//! data is an error that says which bit; a width past 32 is an error before it's
-//! used; a count that needs more bits than the data holds is an error before
-//! there's room made for it; and as a width of 0 reads no bits at all, every entry
-//! is also charged against [`Limits::hint_entries`], and pages against
-//! [`Limits::pages`]. So a file of a hundred bytes can't ask for four billion of
-//! anything.
+//! data is an error that says which bit; a width past 32 is an error before
+//! it's used; a count that needs more bits than the data holds is an error
+//! before there's room made for it; and as a width of 0 reads no bits at all,
+//! every entry is also charged against [`Limits::hint_entries`], and pages
+//! against [`Limits::pages`]. So a file of a hundred bytes can't ask for four
+//! billion of anything.
 //!
 //! # Positions
 //!
@@ -29,8 +30,8 @@
 //!
 //! # What isn't here
 //!
-//! A shared object's signature (F.4.3) is a value here, kept as read and written
-//! as held, never computed: nothing's hashed.
+//! A shared object's signature (F.4.3) is a value here, kept as read and
+//! written as held, never computed: nothing's hashed.
 
 use crate::Limits;
 
@@ -111,9 +112,10 @@ pub fn position(at: u64, hint_at: u64, hint_len: u64) -> u64 {
     }
 }
 
-/// Where what a hint table says is at `position` is in the file, under a primary
-/// hint stream of `hint_len` bytes at `hint_at`: [`position`] the other way. The
-/// thing right after the stream reads as `hint_at`, where nothing else can be.
+/// Where what a hint table says is at `position` is in the file, under a
+/// primary hint stream of `hint_len` bytes at `hint_at`: [`position`] the other
+/// way. The thing right after the stream reads as `hint_at`, where nothing else
+/// can be.
 pub fn located(position: u64, hint_at: u64, hint_len: u64) -> u64 {
     match position >= hint_at {
         true => position.saturating_add(hint_len),
@@ -159,8 +161,8 @@ pub struct PageHeader {
     pub denominator: u16,
 }
 
-/// One page of the page offset hint table (F.4.2, Table F.4), the entries in the
-/// order of the pages' numbers, whichever page is the first page.
+/// One page of the page offset hint table (F.4.2, Table F.4), the entries in
+/// the order of the pages' numbers, whichever page is the first page.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PageEntry {
     /// How many objects the page has.
@@ -193,8 +195,9 @@ impl PageOffsets {
     /// least. It also takes the content offsets and lengths to be no wider
     /// together than a page's length, as Acrobat writes them, and refuses what
     /// comes after them if they aren't. Identifiers are in `id_bits`, as the
-    /// embedded file table has them in this one's width too, so it may need more
-    /// than these pages do (F.4.7). A numerator's denominator is `denominator`.
+    /// embedded file table has them in this one's width too, so it may need
+    /// more than these pages do (F.4.7). A numerator's denominator is
+    /// `denominator`.
     pub fn of(first_page_at: u32, pages: Vec<PageEntry>, id_bits: u16, denominator: u16) -> Self {
         let span = |of: &dyn Fn(&PageEntry) -> u64| {
             let values = pages.iter().map(of);
@@ -378,8 +381,8 @@ pub struct SharedHeader {
     pub first_page_entries: u32,
     /// How many entries there are in all.
     pub entries: u32,
-    /// The width of an entry's count of objects, less one, which is the width of
-    /// the greatest count, not of the greatest count less one (Table F.5).
+    /// The width of an entry's count of objects, less one, which is the width
+    /// of the greatest count, not of the greatest count less one (Table F.5).
     pub objects_bits: u16,
     /// The shortest entry's length.
     pub min_length: u32,
@@ -410,8 +413,8 @@ pub struct SharedObjects {
 impl SharedObjects {
     /// The table of `groups`, the first `first_page_entries` of them the first
     /// page's, with part 8 starting at object `first_object` at `first_at`, and
-    /// a header as narrow as they let it be, but for a bit at least for a length,
-    /// as PDFium's reader refuses a width of 0 there as it does in
+    /// a header as narrow as they let it be, but for a bit at least for a
+    /// length, as PDFium's reader refuses a width of 0 there as it does in
     /// [`PageOffsets::of`].
     pub fn of(
         first_object: u32,
@@ -506,8 +509,8 @@ impl SharedObjects {
     }
 }
 
-/// A generic hint table (F.4.5, Table F.9): one group of objects together in the
-/// file. With no objects, every field is 0.
+/// A generic hint table (F.4.5, Table F.9): one group of objects together in
+/// the file. With no objects, every field is 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Generic {
     /// The number of its first object.
@@ -924,8 +927,8 @@ impl EmbeddedFiles {
 
 /// Where each table starts in a hint stream's data, as the keys of its
 /// dictionary say (F.3.6, Table F.2), as they're read: a position that doesn't
-/// fit is for [`tables`] to refuse. Keys that aren't here, a private table's, say,
-/// aren't read.
+/// fit is for [`tables`] to refuse. Keys that aren't here, a private table's,
+/// say, aren't read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct HintKeys {
@@ -1025,8 +1028,8 @@ pub fn tables(data: &[u8], keys: &HintKeys, pages: u32, limits: &Limits) -> Resu
     })
 }
 
-/// A hint stream's data, each table read from where its key says, charged to one
-/// count of entries.
+/// A hint stream's data, each table read from where its key says, charged to
+/// one count of entries.
 struct At<'a> {
     data: &'a [u8],
     limits: &'a Limits,

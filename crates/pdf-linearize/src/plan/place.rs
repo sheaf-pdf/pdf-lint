@@ -68,8 +68,8 @@ impl<'g> Flat<'g> {
     }
 }
 
-/// The objects, as they're given their places: one list in file order, and which
-/// part of it is what.
+/// The objects, as they're given their places: one list in file order, and
+/// which part of it is what.
 struct Placing<'f, 'g> {
     flat: &'f Flat<'g>,
     /// What no walk goes into.
@@ -156,9 +156,9 @@ fn roots_of<'a>(flat: &'a Flat<'_>, group: Group) -> impl Iterator<Item = u32> +
         .filter_map(|id| flat.index(*id))
 }
 
-/// The most numbers `limits` lets a file use: one short of `u32`'s last at most,
-/// so that counting them can't overflow, what's written adding only four numbers
-/// to the objects and object streams.
+/// The most numbers `limits` lets a file use: one short of `u32`'s last at
+/// most, so that counting them can't overflow, what's written adding only four
+/// numbers to the objects and object streams.
 fn cap(limits: &Limits) -> usize {
     limits.objects.min(u32::MAX as usize - 1)
 }
@@ -394,8 +394,8 @@ pub(super) fn plan(graph: &Graph, limits: &Limits) -> Result<Plan, Error> {
     Ok(written.into_plan(flat, walked.uses, pages[first], lists))
 }
 
-/// The object streams as they're decided: each sealed by the [`group`] call that
-/// made it.
+/// The object streams as they're decided: each sealed by the [`group`] call
+/// that made it.
 struct Sealing {
     /// Each object's stream, as a place in `groups`.
     container: Vec<u32>,
@@ -588,9 +588,9 @@ impl Writing {
 
     /// The numbers (F.3.1, F.3.6). From 1, the second group: parts 7, 8 and 9's
     /// writes in file order, the main cross-reference stream, then their object
-    /// streams' members in order. After it, the first group: the dictionary, the
-    /// first-page cross-reference stream, parts 4 and 6's writes in file order,
-    /// their members, and the hint stream last.
+    /// streams' members in order. After it, the first group: the dictionary,
+    /// the first-page cross-reference stream, parts 4 and 6's writes in file
+    /// order, their members, and the hint stream last.
     fn number(&mut self, kind: Kind, limits: &Limits) -> Result<(), Error> {
         let members: usize = self.sealed.iter().map(Vec::len).sum();
         let own = match kind {

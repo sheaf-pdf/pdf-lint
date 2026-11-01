@@ -3,9 +3,9 @@
 
 /// The caps on what a graph may ask for, or a hint stream: past one, a plan is
 /// refused, or a table, with the error that says which
-/// ([`plan::Error`](crate::plan::Error), [`hint::Error`](crate::hint::Error)). A
-/// caller sets them on a copy of [`Limits::DEFAULT`] (`limits.pages = 1000`, say),
-/// as more may come.
+/// ([`plan::Error`](crate::plan::Error), [`hint::Error`](crate::hint::Error)).
+/// A caller sets them on a copy of [`Limits::DEFAULT`] (`limits.pages = 1000`,
+/// say), as more may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {

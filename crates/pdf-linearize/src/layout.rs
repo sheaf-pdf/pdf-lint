@@ -1,40 +1,42 @@
-//! The bytes around a caller's bodies: the header, the linearization dictionary,
-//! both cross-reference sections and the hint stream, and the order to write
-//! everything in (ISO 32000-2, F.3).
+//! The bytes around a caller's bodies: the header, the linearization
+//! dictionary, both cross-reference sections and the hint stream, and the order
+//! to write everything in (ISO 32000-2, F.3).
 //!
-//! A caller serializes each of [`Plan::writes`] as the plan numbers it, whole, `n 0
-//! obj` to `endobj` and a line's end, and gives [`assemble`] their lengths: nothing
-//! in a body depends on an offset, so nothing here sees one. It gives a [`Layout`],
-//! whose [`pieces`](Layout::pieces) say what's next in the file: bytes it holds, or
-//! the caller's body. The streams of its own go through the closure a caller gives,
-//! which may filter or encrypt them, so no filter or key is here.
+//! A caller serializes each of [`Plan::writes`] as the plan numbers it, whole,
+//! `n 0 obj` to `endobj` and a line's end, and gives [`assemble`] their
+//! lengths: nothing in a body depends on an offset, so nothing here sees one.
+//! It gives a [`Layout`], whose [`pieces`](Layout::pieces) say what's next in
+//! the file: bytes it holds, or the caller's body. The streams of its own go
+//! through the closure a caller gives, which may filter or encrypt them, so no
+//! filter or key is here.
 //!
 //! # The file's order
 //!
 //! The header and a comment of binary bytes (part 1), the dictionary (2), the
 //! first-page section (3), the catalog and what's wanted at open (4), the hint
-//! stream (5, which may be here or after part 6: F.3.6), the first page (6), the
-//! other pages (7), what they share (8), everything else (9) and the main section
-//! (11). No overflow hint stream (10).
+//! stream (5, which may be here or after part 6: F.3.6), the first page (6),
+//! the other pages (7), what they share (8), everything else (9) and the main
+//! section (11). No overflow hint stream (10).
 //!
 //! # Settling what depends on what
 //!
-//! The dictionary comes first and says where everything is, so it's a fixed length,
-//! padded with spaces after `endobj`, and written last. What the hint tables say
-//! doesn't depend on the hint stream's length (F.4.1). The hint stream is before
-//! the first page, so a first-page section's rows do; and under a stream the
-//! section's own length depends on what its rows filter to:
+//! The dictionary comes first and says where everything is, so it's a fixed
+//! length, padded with spaces after `endobj`, and written last. What the hint
+//! tables say doesn't depend on the hint stream's length (F.4.1). The hint
+//! stream is before the first page, so a first-page section's rows do; and
+//! under a stream the section's own length depends on what its rows filter to:
 //!
-//! - **A table** has rows of 20 bytes and room in its `/Prev` for any position, so
-//!   its length is known before anything goes in it: one pass.
-//! - **A stream** is given room first, from what its rows filter to at a first guess
-//!   of them, and the rest is laid out behind that. Then the rows are made and
-//!   filtered, and if they fit they're padded with spaces after `endobj`. If not, the
-//!   room grows and it goes round again. Each round calls the closure for the hint
-//!   stream and the section. `/W` is fixed for any file a hint table can describe,
-//!   so a row's width doesn't move between rounds; and past what any rows filter to
-//!   they fit, so a closure that's a function of its data settles: only one giving
-//!   ever-longer data doesn't, and is refused ([`Error::Unsettled`]).
+//! - **A table** has rows of 20 bytes and room in its `/Prev` for any position,
+//!   so its length is known before anything goes in it: one pass.
+//! - **A stream** is given room first, from what its rows filter to at a first
+//!   guess of them, and the rest is laid out behind that. Then the rows are
+//!   made and filtered, and if they fit they're padded with spaces after
+//!   `endobj`. If not, the room grows and it goes round again. Each round calls
+//!   the closure for the hint stream and the section. `/W` is fixed for any
+//!   file a hint table can describe, so a row's width doesn't move between
+//!   rounds; and past what any rows filter to they fit, so a closure that's a
+//!   function of its data settles: only one giving ever-longer data doesn't,
+//!   and is refused ([`Error::Unsettled`]).
 
 use std::io::Write as _;
 
@@ -44,9 +46,9 @@ use crate::hint::{
 };
 use crate::plan::{Group, Kind, Part, Plan, What};
 
-/// How long the dictionary is, with its padding: every value at its largest comes
-/// to under 130 bytes, and with any header this writes it's well within the 1,024
-/// bytes that F.3.3 keeps it to.
+/// How long the dictionary is, with its padding: every value at its largest
+/// comes to under 130 bytes, and with any header this writes it's well within
+/// the 1,024 bytes that F.3.3 keeps it to.
 const DICTIONARY: usize = 200;
 
 /// After the header, a comment of bytes past ASCII (7.5.2).
@@ -56,7 +58,8 @@ const BINARY: &[u8] = b"%\xE2\xE3\xCF\xD3\n";
 /// any position a hint table can say, and for entry 0's generation.
 const WIDTHS: [usize; 3] = [1, 4, 2];
 
-/// A first-page table's `/Prev`: room for any position, so its length doesn't move.
+/// A first-page table's `/Prev`: room for any position, so its length doesn't
+/// move.
 const PREV: usize = 20;
 
 /// What ends a first-page section: `startxref` to nowhere (F.3.4).
@@ -76,9 +79,9 @@ const LARGEST: u64 = u32::MAX as u64;
 pub struct Options<'a> {
     /// The header's version.
     pub version: (u8, u8),
-    /// The first-page section's trailer's other entries, already written, in the
-    /// numbers the plan gives: `/Info`, `/Encrypt`, `/ID` and the like. No `/Root`
-    /// or a key the section writes itself.
+    /// The first-page section's trailer's other entries, already written, in
+    /// the numbers the plan gives: `/Info`, `/Encrypt`, `/ID` and the like. No
+    /// `/Root` or a key the section writes itself.
     pub trailer: &'a [u8],
 }
 
@@ -122,7 +125,8 @@ pub struct Stream<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Encoded {
-    /// What goes in its dictionary to say so, `/Filter` and the like, as written.
+    /// What goes in its dictionary to say so, `/Filter` and the like, as
+    /// written.
     pub entries: Vec<u8>,
     /// Its data as it's to be written.
     pub data: Vec<u8>,
@@ -176,7 +180,8 @@ pub enum Error<E> {
     /// A first-page stream that wouldn't fit, however much room it was given.
     #[error("the first-page cross-reference stream wanted more room each of {ROUNDS} rounds")]
     Unsettled,
-    /// A hint table that couldn't be written, which what a plan gives can't cause.
+    /// A hint table that couldn't be written, which what a plan gives can't
+    /// cause.
     #[error("{0}")]
     Hint(hint::Error),
 }
@@ -205,8 +210,9 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// What's in the file, in order: its bytes are these, one after another. Write
-    /// them, or hand them on; a [`Piece::Body`] is the caller's to fill in.
+    /// What's in the file, in order: its bytes are these, one after another.
+    /// Write them, or hand them on; a [`Piece::Body`] is the caller's to fill
+    /// in.
     pub fn pieces(&self) -> impl Iterator<Item = Piece<'_>> {
         std::iter::once(Piece::Bytes(&self.head))
             .chain((0..self.before_hint).map(Piece::Body))
@@ -225,8 +231,8 @@ impl Layout {
         self.len == 0
     }
 
-    /// Where object `number` is, or none for a number nothing is at, or one in an
-    /// object stream.
+    /// Where object `number` is, or none for a number nothing is at, or one in
+    /// an object stream.
     pub fn position(&self, number: u32) -> Option<u64> {
         match self.rows.get(number as usize) {
             Some(Row::At(position)) => Some(*position),
@@ -255,7 +261,8 @@ impl Layout {
         self.main_section_at
     }
 
-    /// Where the main section's first entry is said to be: the dictionary's `/T`.
+    /// Where the main section's first entry is said to be: the dictionary's
+    /// `/T`.
     pub fn main_first_entry(&self) -> u64 {
         self.main_first_entry
     }
@@ -290,7 +297,8 @@ struct Places {
 }
 
 impl Places {
-    /// Where write `at` is, or the end of them, as if there were no hint stream.
+    /// Where write `at` is, or the end of them, as if there were no hint
+    /// stream.
     fn without_hint(&self, at: usize) -> u64 {
         self.bodies_at + self.starts[at]
     }
@@ -320,9 +328,9 @@ impl Places {
 /// The bytes around a plan's bodies, whose lengths are `lengths`, one per
 /// [`Plan::writes`]: `encode` says how each stream of its own stands.
 ///
-/// Refused, under an [`Error`]: not one length per write; a file past what a hint
-/// table's positions can say, 4 GiB; a refusal of `encode`'s; a first-page stream
-/// that `encode` makes longer each round.
+/// Refused, under an [`Error`]: not one length per write; a file past what a
+/// hint table's positions can say, 4 GiB; a refusal of `encode`'s; a first-page
+/// stream that `encode` makes longer each round.
 pub fn assemble<E>(
     plan: &Plan,
     lengths: &[u64],
@@ -453,8 +461,8 @@ fn grown(wanted: u64) -> u64 {
 }
 
 /// `section` padded to `room` with spaces and a line's end, before the dummy
-/// `startxref` that ends it: after a stream's `endobj`, as nothing else can move.
-/// A table's has no padding to take, its length being what it was given.
+/// `startxref` that ends it: after a stream's `endobj`, as nothing else can
+/// move. A table's has no padding to take, its length being what it was given.
 fn pad(section: &mut Vec<u8>, room: usize) {
     let padding = room - section.len();
     if padding > 0 {
@@ -499,8 +507,8 @@ fn rows(plan: &Plan, places: &Places, at: Fixed, main_at: u64) -> Vec<Row> {
     rows
 }
 
-/// `rows` as a table's lines (7.5.4). What's in an object stream can't come up: a
-/// plan puts nothing in one under a table.
+/// `rows` as a table's lines (7.5.4). What's in an object stream can't come up:
+/// a plan puts nothing in one under a table.
 fn table_rows(out: &mut Vec<u8>, rows: &[Row]) {
     for row in rows {
         let _ = match row {
@@ -584,9 +592,9 @@ fn first_stream<E>(
     Ok(out)
 }
 
-/// The main section, as a table, its trailer of only its `/Size` and a `startxref`
-/// to the first-page section (F.3.11), and the dictionary's `/T`: the line's end
-/// before its first row (Table F.1).
+/// The main section, as a table, its trailer of only its `/Size` and a
+/// `startxref` to the first-page section (F.3.11), and the dictionary's `/T`:
+/// the line's end before its first row (Table F.1).
 fn main_table(plan: &Plan, rows: &[Row], main_at: u64, first_at: u64) -> (Vec<u8>, u64) {
     let rows = &rows[..plan.dictionary_number() as usize];
     let mut out = Vec::with_capacity(rows.len() * 20 + 64);
@@ -675,8 +683,8 @@ fn hint_object(number: u32, keys: &HintKeys, encoded: &Encoded) -> Vec<u8> {
     out
 }
 
-/// The dictionary, padded, added to `out`: its values as direct objects, all but
-/// `/P` where it's the default (F.3.3, Table F.1).
+/// The dictionary, padded, added to `out`: its values as direct objects, all
+/// but `/P` where it's the default (F.3.3, Table F.1).
 fn write_dictionary(
     out: &mut Vec<u8>,
     plan: &Plan,
@@ -702,22 +710,23 @@ fn write_dictionary(
     out.push(b'\n');
 }
 
-/// As the tables want it: a position, which fits, as `LARGEST` has been checked.
+/// As the tables want it: a position, which fits, as `LARGEST` has been
+/// checked.
 fn at32(position: u64) -> u32 {
     position as u32
 }
 
-/// The tables of a file laid out as `places` has it, its hint stream's length not
-/// yet known (F.4.1), and where each is.
+/// The tables of a file laid out as `places` has it, its hint stream's length
+/// not yet known (F.4.1), and where each is.
 fn hints(plan: &Plan, places: &Places) -> Result<(Vec<u8>, HintKeys), hint::Error> {
     let mut data = Vec::new();
     let writes = plan.writes();
     let position = |at: usize| at32(places.without_hint(at));
 
     // In the pages' order, whichever is the first page: "in page order" as the
-    // thumbnail table's items are, which starts from page 0 by name (F.4.4), and as
-    // PDFium and qpdf read it. The first page's entry counts all of part 6, as what
-    // it holds is read as one.
+    // thumbnail table's items are, which starts from page 0 by name (F.4.4),
+    // and as PDFium and qpdf read it. The first page's entry counts all of part
+    // 6, as what it holds is read as one.
     let first = plan.first_page();
     let part6 = plan.part_writes(Part::FirstPage);
     let entry = |page: u32| {
@@ -739,7 +748,8 @@ fn hints(plan: &Plan, places: &Places) -> Result<(Vec<u8>, HintKeys), hint::Erro
         }
     };
     let pages: Vec<PageEntry> = (0..plan.page_count()).map(entry).collect();
-    // The embedded file table has its identifiers in this table's width (F.4.7).
+    // The embedded file table has its identifiers in this table's width
+    // (F.4.7).
     let files = (0..plan.files().len()).flat_map(|file| plan.file_shared(file));
     let most = (pages.iter().flat_map(|page| &page.shared).map(|r| r.0))
         .chain(files.copied())
@@ -747,7 +757,8 @@ fn hints(plan: &Plan, places: &Places) -> Result<(Vec<u8>, HintKeys), hint::Erro
     let id_bits = hint::id_width(most.unwrap_or(0));
     PageOffsets::of(position(part6.start), pages, id_bits, 4).write(&mut data)?;
 
-    // Part 8, or where it would be, as a reader may take a 0 here to be a fault.
+    // Part 8, or where it would be, as a reader may take a 0 here to be a
+    // fault.
     let keys_shared = data.len() as u64;
     let part8 = plan.part_writes(Part::Shared);
     let first_object = match writes.get(part8.start) {
@@ -855,9 +866,9 @@ fn hints(plan: &Plan, places: &Places) -> Result<(Vec<u8>, HintKeys), hint::Erro
     Ok((data, keys))
 }
 
-/// The embedded file table's groups: a file's own objects, with no shared objects
-/// as a group with them holds none (F.4.7), and a group of no objects for what it
-/// refers to of those.
+/// The embedded file table's groups: a file's own objects, with no shared
+/// objects as a group with them holds none (F.4.7), and a group of no objects
+/// for what it refers to of those.
 fn file_entries(plan: &Plan, places: &Places) -> Vec<FileEntry> {
     let mut entries = Vec::new();
     for (at, file) in plan.files().iter().enumerate() {

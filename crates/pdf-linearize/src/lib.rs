@@ -9,16 +9,18 @@
 //!   pages use each object is a [`Use`], and [`group`] says which objects share
 //!   an object stream by their uses; a writer that doesn't linearize has them
 //!   with no plan by [`page_uses`].
-//! - **The bytes around the bodies** ([`assemble`]): a caller writes each of the
-//!   plan's bodies, however it holds them, and gives their lengths. A [`Layout`]
-//!   has the padded dictionary, both cross-reference sections and the hint stream
-//!   as bytes, and says what's next in the file. What a stream of its own is
-//!   filtered or encrypted by is a closure, so no filter or key is here.
+//! - **The bytes around the bodies** ([`assemble`]): a caller writes each of
+//!   the plan's bodies, however it holds them, and gives their lengths. A
+//!   [`Layout`] has the padded dictionary, both cross-reference sections and
+//!   the hint stream as bytes, and says what's next in the file. What a stream
+//!   of its own is filtered or encrypted by is a closure, so no filter or key
+//!   is here.
 //! - **The hint tables** ([`hint`]): all of F.4's as typed values, written to
 //!   bits and read back, [`hint::tables`] reading any bytes under a cap.
-//! - **The check** ([`check()`]): the [`Facts`] of a file as written, as any model's
-//!   reader gives them, held against each other, to a [`Verdict`] and a [`Finding`]
-//!   for each thing wrong, by the clause it departs from and a [`Grade`].
+//! - **The check** ([`check()`]): the [`Facts`] of a file as written, as any
+//!   model's reader gives them, held against each other, to a [`Verdict`] and a
+//!   [`Finding`] for each thing wrong, by the clause it departs from and a
+//!   [`Grade`].
 #![cfg_attr(
     feature = "family",
     doc = "- **The family's documents** ([`family`], a default feature): a document of"

@@ -1,5 +1,6 @@
-//! What [`check`](crate::check()) judges, read from a [`Reading`]: its sections,
-//! its first object, its hint stream, its pages, and the graph of its objects.
+//! What [`check`](crate::check()) judges, read from a [`Reading`]: its
+//! sections, its first object, its hint stream, its pages, and the graph of its
+//! objects.
 
 use std::collections::HashSet;
 
@@ -18,8 +19,8 @@ use crate::check::{
 };
 use crate::plan::Kind;
 
-/// `value` as a check takes it: an array as a whole, unless it has a reference in
-/// it, which is what a reader can't read without the file's sections.
+/// `value` as a check takes it: an array as a whole, unless it has a reference
+/// in it, which is what a reader can't read without the file's sections.
 fn raw(value: Option<&Object>) -> Raw {
     let Some(value) = value else {
         return Raw::Absent;
@@ -140,7 +141,8 @@ fn hint<S: ByteSource>(
         let data = HintData::NotAStream;
         return Ok(Some(HintFacts::new(at, end, id.0, data)));
     };
-    // An indirect /Length follows the stream, and /H's length covers it (Table F.1).
+    // An indirect /Length follows the stream, and /H's length covers it (Table
+    // F.1).
     if let Some(length) = stream.dict.get(b"Length").and_then(Object::as_reference) {
         if let Some(after) = end_of(reading, length)? {
             end = end.max(after);
@@ -223,9 +225,9 @@ fn page_tree<S: ByteSource>(
                 break;
             }
             let dict = reading.get(parent).ok().and_then(Object::as_dict);
-            // What a page's /Parent names is a node only if it isn't a page, and holds
-            // kids or says so, as the writer has it: a page rightly holds these, and a
-            // broken file's /Parent can name its /Resources.
+            // What a page's /Parent names is a node only if it isn't a page,
+            // and holds kids or says so, as the writer has it: a page rightly
+            // holds these, and a broken file's /Parent can name its /Resources.
             let node = |dict: &&Dict| dict.has(b"Kids") || dict.has_type(b"Pages");
             let Some(dict) = dict.filter(node).filter(|_| !page_ids.contains(&parent)) else {
                 continue;
@@ -240,10 +242,11 @@ fn page_tree<S: ByteSource>(
 /// The facts of the file `reading` reads, for [`check`](crate::check()), under
 /// `limits`, kept for nobody and read by whoever asks: its first object, each
 /// section's rows, its hint stream's data, decrypted where it's encrypted and a
-/// password opened it, its page tree and the graph of its objects, by a whole read
-/// where the file says it's linearized. A file that doesn't, or whose `/L` isn't its
-/// length, has no more read than it takes to say so. It fails only when the source
-/// doesn't give its bytes ([`Error::Read`]): what's wrong with a file is a fact.
+/// password opened it, its page tree and the graph of its objects, by a whole
+/// read where the file says it's linearized. A file that doesn't, or whose `/L`
+/// isn't its length, has no more read than it takes to say so. It fails only
+/// when the source doesn't give its bytes ([`Error::Read`]): what's wrong with
+/// a file is a fact.
 pub fn facts<S: ByteSource>(reading: &Reading<S>, limits: &Limits) -> Result<Facts, Error> {
     let mut facts = Facts::new(reading.size() as u64);
     facts.header = reading.facts().header_offset.unwrap_or(0) as u64;
@@ -295,9 +298,9 @@ fn first_group_end<S: ByteSource>(
         .collect())
 }
 
-/// The file's objects as a plan takes them, in the numbers they're written at, where
-/// they read: none where no password opened it or its page tree can't be laid out,
-/// which says nothing of the file as a linearized one.
+/// The file's objects as a plan takes them, in the numbers they're written at,
+/// where they read: none where no password opened it or its page tree can't be
+/// laid out, which says nothing of the file as a linearized one.
 fn graph<S: ByteSource>(
     reading: &Reading<S>,
     facts: &Facts,
@@ -322,9 +325,9 @@ fn graph<S: ByteSource>(
         .map(|prepared| prepared.graph(Kind::Table, false, &HashSet::new())))
 }
 
-/// What [`facts`] reads of `reading`, [`check`](crate::check()) judged: a whole read
-/// where the file says it's linearized, so paid only by who asks. It fails only
-/// where [`facts`] does.
+/// What [`facts`] reads of `reading`, [`check`](crate::check()) judged: a whole
+/// read where the file says it's linearized, so paid only by who asks. It fails
+/// only where [`facts`] does.
 pub fn check<S: ByteSource, K: Sink + ?Sized>(
     reading: &Reading<S>,
     limits: &Limits,

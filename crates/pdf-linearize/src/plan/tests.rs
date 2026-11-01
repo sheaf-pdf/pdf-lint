@@ -211,8 +211,8 @@ fn each_later_page_lists_all_a_shared_object_reaches() {
 }
 
 /// Under another first page: it's part 6, and `Use::Page(0)`; the others are in
-/// order, the first skipped (F.3.8), its entry in the tables first, which is the
-/// one with no list.
+/// order, the first skipped (F.3.8), its entry in the tables first, which is
+/// the one with no list.
 #[test]
 fn another_first_page_goes_first_and_the_rest_in_order() {
     let mut graph = three_pages(Kind::Table);
@@ -327,10 +327,11 @@ fn outlines_read_first_take_what_a_later_page_reaches() {
 }
 
 /// Part 9: the tree, thumbnails by page with page 0's first whichever is the
-/// first page, what they share after them, each group in its order, what's in none
-/// of them last by number. What's placed stays: the thumbnail's own reference to a
-/// page's object, a group's to the tree or to another group's. Page 1's thumbnail
-/// reaches page 0's, so that one is what thumbnails share and page 0 has none alone.
+/// first page, what they share after them, each group in its order, what's in
+/// none of them last by number. What's placed stays: the thumbnail's own
+/// reference to a page's object, a group's to the tree or to another group's.
+/// Page 1's thumbnail reaches page 0's, so that one is what thumbnails share
+/// and page 0 has none alone.
 #[test]
 fn part_nine_is_the_tree_thumbnails_groups_and_the_rest() {
     let mut graph = Graph::new((1, 0), Kind::Table);
@@ -377,9 +378,9 @@ fn part_nine_is_the_tree_thumbnails_groups_and_the_rest() {
     assert_eq!(plan.group_writes(Group::Info), None);
 }
 
-/// Thumbnails in page order from page 0 whichever page is the first, each with what
-/// it alone reaches, each sealed in its own object streams so its entry's its own,
-/// and what several reach after the last of them.
+/// Thumbnails in page order from page 0 whichever page is the first, each with
+/// what it alone reaches, each sealed in its own object streams so its entry's
+/// its own, and what several reach after the last of them.
 #[test]
 fn thumbnails_keep_their_own_and_share_the_rest() {
     let mut graph = Graph::new((1, 0), Kind::Stream);
@@ -428,8 +429,8 @@ fn thumbnails_keep_their_own_and_share_the_rest() {
     assert_eq!(plan.containers().len(), 3);
 }
 
-/// A page's content items are its own streams': from the first in its section to
-/// the last, by where they are, whichever order it lists them.
+/// A page's content items are its own streams': from the first in its section
+/// to the last, by where they are, whichever order it lists them.
 #[test]
 fn a_pages_contents_are_a_stretch_of_its_section() {
     let mut graph = Graph::new((1, 0), Kind::Table);
@@ -452,12 +453,13 @@ fn a_pages_contents_are_a_stretch_of_its_section() {
     assert_eq!(plan.page_contents(0), first.start + 1..first.start + 3);
     let second = plan.page_writes(1);
     assert_eq!(plan.page_contents(1), second.start + 1..second.start + 3);
-    // Page 2's only stream's page 1's too, so it's in part 8, and its own has none.
+    // Page 2's only stream's page 1's too, so it's in part 8, and its own has
+    // none.
     assert_eq!(plan.page_contents(2), 0..0);
 }
 
-/// Each root of the embedded file group is a group of its own, its objects sealed
-/// apart from the others', with a list of what it refers to.
+/// Each root of the embedded file group is a group of its own, its objects
+/// sealed apart from the others', with a list of what it refers to.
 #[test]
 fn each_embedded_file_is_a_group_of_its_own() {
     let mut graph = Graph::new((1, 0), Kind::Stream);
@@ -546,9 +548,9 @@ fn a_group_lists_the_shared_entries_it_reaches() {
     );
 }
 
-/// `group` is called once per region, so a stream holds one region's alone: what
-/// a viewer has at open, the first page's, each table's, and a part 9's rest. Of
-/// a later page's, a stream of its own stays in its section.
+/// `group` is called once per region, so a stream holds one region's alone:
+/// what a viewer has at open, the first page's, each table's, and a part 9's
+/// rest. Of a later page's, a stream of its own stays in its section.
 #[test]
 fn an_object_stream_holds_one_regions_objects() {
     let mut graph = Graph::new((1, 0), Kind::Stream);
@@ -621,8 +623,8 @@ fn an_object_stream_of_two_pages_is_a_shared_object() {
     assert_eq!(plan.page_writes(2).len(), 1, "its object alone");
 }
 
-/// At most [`MEMBERS`] a stream, by number, a stream where its first member would
-/// be, its members in order at the highest numbers.
+/// At most [`MEMBERS`] a stream, by number, a stream where its first member
+/// would be, its members in order at the highest numbers.
 #[test]
 fn object_streams_fill_by_number_up_to_their_cap() {
     let mut graph = Graph::new((1, 0), Kind::Stream);
@@ -768,8 +770,8 @@ fn an_error_says_what_it_is_about() {
     );
 }
 
-/// The caps at their edges: every number counts, a stream's and the layout's own
-/// among them; the lists' entries and visits count what they cost.
+/// The caps at their edges: every number counts, a stream's and the layout's
+/// own among them; the lists' entries and visits count what they cost.
 #[test]
 fn each_cap_holds_at_its_edge() {
     let mut limits = Limits::DEFAULT;
@@ -850,8 +852,9 @@ fn a_plan_is_sent_and_shared() {
     holds::<Error>();
 }
 
-/// What a writer with no plan is told of which pages use what, by ids, is what a plan has:
-/// a page's own alone, what two share, the walk stopping at the tree and at another page.
+/// What a writer with no plan is told of which pages use what, by ids, is what
+/// a plan has: a page's own alone, what two share, the walk stopping at the
+/// tree and at another page.
 #[test]
 fn page_uses_by_id_is_what_a_plan_says() {
     let mut graph = Graph::new((1, 0), Kind::Table);

@@ -1,7 +1,8 @@
-//! What [`check`](super::check) judges: the facts of a file as written, as raw as a
-//! reader can give them, no object model's type among them. Every position is from
-//! the file's first byte, as a section's rows have them. A value the file gives is
-//! given as it stands, wrong or not: what's wrong with it is for the check to say.
+//! What [`check`](super::check) judges: the facts of a file as written, as raw
+//! as a reader can give them, no object model's type among them. Every position
+//! is from the file's first byte, as a section's rows have them. A value the
+//! file gives is given as it stands, wrong or not: what's wrong with it is for
+//! the check to say.
 
 use crate::Id;
 use crate::plan::{Graph, Kind};
@@ -136,8 +137,8 @@ pub struct SectionFacts {
     pub subsections: Vec<(u32, u32)>,
     /// Its rows, in the order written.
     pub rows: Vec<RowFacts>,
-    /// Where what it lists first is, a table's first row or its stream's object, after
-    /// where the white-space before that starts.
+    /// Where what it lists first is, a table's first row or its stream's
+    /// object, after where the white-space before that starts.
     pub first_row: Option<(u64, u64)>,
     /// The number of the stream it's written as.
     pub stream: Option<u32>,
@@ -149,8 +150,9 @@ pub struct SectionFacts {
     pub root: Raw,
     /// What the `startxref` after it gives, if one does.
     pub startxref: Option<u64>,
-    /// What a hybrid table's `/XRefStm` lists (7.5.8.4): none of a file that has
-    /// none, and what's free in the table isn't free where it's in use here.
+    /// What a hybrid table's `/XRefStm` lists (7.5.8.4): none of a file that
+    /// has none, and what's free in the table isn't free where it's in use
+    /// here.
     pub hybrid: Vec<RowFacts>,
 }
 
@@ -193,8 +195,8 @@ pub enum HintData {
 pub struct HintFacts {
     /// Where its `n g obj` starts.
     pub at: u64,
-    /// Where it ends: past its `endobj`, or an indirect `/Length`'s object's that
-    /// follows it (Table F.1).
+    /// Where it ends: past its `endobj`, or an indirect `/Length`'s object's
+    /// that follows it (Table F.1).
     pub end: u64,
     /// Its number.
     pub number: u32,
@@ -207,7 +209,8 @@ pub struct HintFacts {
 }
 
 impl HintFacts {
-    /// Hint stream `number` from `at` to `end`, holding `data`, with no keys yet.
+    /// Hint stream `number` from `at` to `end`, holding `data`, with no keys
+    /// yet.
     pub fn new(at: u64, end: u64, number: u32, data: HintData) -> HintFacts {
         HintFacts {
             at,
@@ -220,8 +223,8 @@ impl HintFacts {
     }
 }
 
-/// An attribute a page inherits (7.7.3.4), and which a linearized file has pushed
-/// down onto its pages (F.3.7, F.3.10).
+/// An attribute a page inherits (7.7.3.4), and which a linearized file has
+/// pushed down onto its pages (F.3.7, F.3.10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Attribute {
@@ -258,9 +261,9 @@ impl PageFacts {
     }
 }
 
-/// Where an object is, where a reader has read it. An object no [`Extent`] names
-/// ends where the next thing a section lists starts, which is as good but for bytes
-/// between objects, and for the end of what `/E` should end.
+/// Where an object is, where a reader has read it. An object no [`Extent`]
+/// names ends where the next thing a section lists starts, which is as good but
+/// for bytes between objects, and for the end of what `/E` should end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Extent {
@@ -279,8 +282,9 @@ impl Extent {
     }
 }
 
-/// The facts of a file as written, set on [`Facts::new`]'s: what isn't given isn't
-/// judged, or is said to be missing where a linearized file has to have it.
+/// The facts of a file as written, set on [`Facts::new`]'s: what isn't given
+/// isn't judged, or is said to be missing where a linearized file has to have
+/// it.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Facts {
@@ -301,18 +305,19 @@ pub struct Facts {
     pub hint: Option<HintFacts>,
     /// Each page, in page order: none where the page tree didn't read.
     pub pages: Vec<PageFacts>,
-    /// Each page tree node's number and what it holds that its pages inherit, once
-    /// for each key.
+    /// Each page tree node's number and what it holds that its pages inherit,
+    /// once for each key.
     pub nodes: Vec<(u32, Attribute)>,
     /// What's read of where objects end. Any may be left out.
     pub objects: Vec<Extent>,
-    /// The file's objects as a plan would take them, by the numbers they're written
-    /// at: what's then said of what each page reaches.
+    /// The file's objects as a plan would take them, by the numbers they're
+    /// written at: what's then said of what each page reaches.
     pub graph: Option<Graph>,
 }
 
 impl Facts {
-    /// A file `len` bytes long, its header first, of which nothing else is known.
+    /// A file `len` bytes long, its header first, of which nothing else is
+    /// known.
     pub fn new(len: u64) -> Facts {
         Facts {
             len,

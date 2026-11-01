@@ -1,81 +1,87 @@
-//! A [`Document`](pdf_structure::Document) written as a linearized file: the graph [`plan()`] takes
-//! built from its objects, each body written through pdf-structure's writer in
-//! the plan's numbers, and [`assemble`] around them.
+//! A [`Document`](pdf_structure::Document) written as a linearized file: the
+//! graph [`plan()`] takes built from its objects, each body written through
+//! pdf-structure's writer in the plan's numbers, and [`assemble`] around them.
 //!
 //! [`linearize`] is for a caller that holds a document, and [`linearize_bytes`]
 //! for one that holds a file: a whole parse and write again, so a convenience
 //! rather than a way past anything. Either writes every object at a new number,
 //! as Annex F has it, so anything that names one from outside the file, a
 //! signature's byte range above all, doesn't hold afterwards, as under any
-//! rewrite. [`check()`] says whether a file that says it's linearized holds, and
-//! [`facts()`] gives what that's judged from.
+//! rewrite. [`check()`] says whether a file that says it's linearized holds,
+//! and [`facts()`] gives what that's judged from.
 //!
 //! # What changes in the document
 //!
 //! - **Inheritable attributes are pushed down** (F.3.7, F.3.10): each page gets
-//!   what it inherited, as it was written, a reference staying one, and each page
-//!   tree node loses it, so a page the tree doesn't list gets what it inherited from
-//!   such a node too. A page or node that needs neither is copied as read.
+//!   what it inherited, as it was written, a reference staying one, and each
+//!   page tree node loses it, so a page the tree doesn't list gets what it
+//!   inherited from such a node too. A page or node that needs neither is
+//!   copied as read.
 //! - **What the trailer doesn't reach isn't written**, nor object streams,
 //!   cross-reference streams and a linearization dictionary, as under
-//!   [`write::document`]; nor an object only a stream's `/Length` names, which the
-//!   writer writes direct, nor a null object, nor an object that's only a reference
-//!   that ends at one of those or at nothing, a reference to any of which reads the
-//!   same as one to none (7.3.10) and is written `null`.
+//!   [`write::document`]; nor an object only a stream's `/Length` names, which
+//!   the writer writes direct, nor a null object, nor an object that's only a
+//!   reference that ends at one of those or at nothing, a reference to any of
+//!   which reads the same as one to none (7.3.10) and is written `null`.
 //! - **The header** is the document's, at least 1.5 where a stream lists the
 //!   file, unless [`Options::version`] says.
 //!
 //! # What's refused
 //!
-//! Annex F gives each page one place, and the file's numbers and hint tables then
-//! depend on which pages a viewer finds, so a tree that gives a page no place of
-//! its own isn't laid out ([`Error::PageTree`]): a place with no page at it, a page
-//! written in place or listed twice, a tree PDFium's rules and ISO's read as other
-//! pages, or a page they read an inheritable attribute of differently, or that
-//! reads otherwise going down `/Kids` from the root than up its `/Parent`s, as pushing
-//! one value down would change the other's page. So is a document no password
-//! opened ([`Error::Locked`]), whose strings and streams are still what the file
-//! holds, and whose key there's none of.
+//! Annex F gives each page one place, and the file's numbers and hint tables
+//! then depend on which pages a viewer finds, so a tree that gives a page no
+//! place of its own isn't laid out ([`Error::PageTree`]): a place with no page
+//! at it, a page written in place or listed twice, a tree PDFium's rules and
+//! ISO's read as other pages, or a page they read an inheritable attribute of
+//! differently, or that reads otherwise going down `/Kids` from the root than
+//! up its `/Parent`s, as pushing one value down would change the other's page.
+//! So is a document no password opened ([`Error::Locked`]), whose strings and
+//! streams are still what the file holds, and whose key there's none of.
 //!
 //! # Encrypted
 //!
 //! Under an [`Encryptor`], the reading's own ([`Encryptor::of`]) or a new one
-//! ([`Encryptor::create`]), every string and stream is encrypted under the number
-//! it's written at (ISO 32000-2, 7.6), the hint stream's data too; a cross-reference
-//! stream isn't (7.5.8.2), nor the encryption dictionary, nor what its values refer
-//! to (7.6.2), which part 4 holds at their new numbers (F.3.5). An object stream goes
-//! as a stream; asked to pack under an encryption that doesn't
-//! ([`Encryptor::packs`]), the file is written unpacked. An object as read is copied
-//! at its new number only where no key is made from the number (AES-256), and written
-//! anew otherwise. With no encryptor, an encrypted reading is written in the clear,
-//! as [`write::document`] writes it; [`linearize_bytes`] keeps a file's encryption.
+//! ([`Encryptor::create`]), every string and stream is encrypted under the
+//! number it's written at (ISO 32000-2, 7.6), the hint stream's data too; a
+//! cross-reference stream isn't (7.5.8.2), nor the encryption dictionary, nor
+//! what its values refer to (7.6.2), which part 4 holds at their new numbers
+//! (F.3.5). An object stream goes as a stream; asked to pack under an
+//! encryption that doesn't ([`Encryptor::packs`]), the file is written
+//! unpacked. An object as read is copied at its new number only where no key is
+//! made from the number (AES-256), and written anew otherwise. With no
+//! encryptor, an encrypted reading is written in the clear, as
+//! [`write::document`] writes it; [`linearize_bytes`] keeps a file's
+//! encryption.
 //!
-//! **Under keys made per object, every number is reused.** A section of this layout
-//! lists no number free but 0 (F.3.4, F.3.11), and its numbers run from 1 without a
-//! gap (F.3.1), so what [`Encryptor::of`] says of a file's free numbers can't hold
-//! here: none is listed, and an object may be written at one. Every object moves, so
-//! under RC4 every number's keystream now encrypts another object's plaintext. One
-//! who holds both the file read and this one has, for each number, the XOR of the two
-//! plaintexts ([`Method::Rc4`](pdf_structure::pdf_crypt::Method::Rc4)). AES-128's IVs
-//! are made from the data and the number, so nothing leaks that way. A caller who
-//! doesn't want that gives [`Encryptor::create`] a new password, whose key is new.
+//! **Under keys made per object, every number is reused.** A section of this
+//! layout lists no number free but 0 (F.3.4, F.3.11), and its numbers run from
+//! 1 without a gap (F.3.1), so what [`Encryptor::of`] says of a file's free
+//! numbers can't hold here: none is listed, and an object may be written at
+//! one. Every object moves, so under RC4 every number's keystream now encrypts
+//! another object's plaintext. One who holds both the file read and this one
+//! has, for each number, the XOR of the two plaintexts
+//! ([`Method::Rc4`](pdf_structure::pdf_crypt::Method::Rc4)). AES-128's IVs are
+//! made from the data and the number, so nothing leaks that way. A caller who
+//! doesn't want that gives [`Encryptor::create`] a new password, whose key is
+//! new.
 //!
 //! # Where everything goes
 //!
-//! Part 4 has the catalog and the values of its `/ViewerPreferences`, `/PageMode`,
-//! `/OpenAction`, `/AcroForm` (that object alone) and `/Threads` with its thread
-//! dictionaries (F.3.5). Each page's objects are found by walking from it, in the
-//! order F.3.7 recommends: `/Annots`, `/B`, `/Resources`, the rest, `/Contents`, and
-//! images and font files last, never through `/Parent` or `/Thumb`, stopping at the
-//! page tree's and the document parts' nodes. Part 9 has the groups a hint table
-//! names: the outline in the order F.3.10 has it, threads' information
-//! dictionaries, named destinations, `/Info`, the form's fields, the logical
-//! structure, renditions, and each embedded file its own. The outline goes in part
-//! 6 instead under `/PageMode /UseOutlines`.
+//! Part 4 has the catalog and the values of its `/ViewerPreferences`,
+//! `/PageMode`, `/OpenAction`, `/AcroForm` (that object alone) and `/Threads`
+//! with its thread dictionaries (F.3.5). Each page's objects are found by
+//! walking from it, in the order F.3.7 recommends: `/Annots`, `/B`,
+//! `/Resources`, the rest, `/Contents`, and images and font files last, never
+//! through `/Parent` or `/Thumb`, stopping at the page tree's and the document
+//! parts' nodes. Part 9 has the groups a hint table names: the outline in the
+//! order F.3.10 has it, threads' information dictionaries, named destinations,
+//! `/Info`, the form's fields, the logical structure, renditions, and each
+//! embedded file its own. The outline goes in part 6 instead under `/PageMode
+//! /UseOutlines`.
 //!
-//! No page's content is read, so a resource isn't placed by where a content stream
-//! first uses it, as F.3.7 would like, but where its page's `/Resources` names it.
-//! `/Encrypt` and its values are in part 4 too (F.3.5).
+//! No page's content is read, so a resource isn't placed by where a content
+//! stream first uses it, as F.3.7 would like, but where its page's `/Resources`
+//! names it. `/Encrypt` and its values are in part 4 too (F.3.5).
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -108,38 +114,40 @@ use graph::Prepared;
 pub struct Options<'a> {
     /// What lists the file: cross-reference tables by default, or streams.
     pub kind: XrefKind,
-    /// Whether what may go in an object stream goes in one, grouped by the pages
-    /// that use it. Only a stream lists a member, so under a table it's refused
-    /// ([`write::Error::PackedTable`]).
+    /// Whether what may go in an object stream goes in one, grouped by the
+    /// pages that use it. Only a stream lists a member, so under a table it's
+    /// refused ([`write::Error::PackedTable`]).
     pub pack: bool,
-    /// How what's compressed is deflated: each object stream, the hint stream and
-    /// a cross-reference stream.
+    /// How what's compressed is deflated: each object stream, the hint stream
+    /// and a cross-reference stream.
     pub deflate: Deflate,
     /// How many threads object streams are built on, at most: 0, the default,
     /// for as many as the machine runs at once, up to 8. Built on any number,
     /// they're the same bytes.
     pub threads: usize,
-    /// The version the header says: by default the document's, at least 1.5 where
-    /// a stream lists the file (7.5.8); given, it's written as given.
+    /// The version the header says: by default the document's, at least 1.5
+    /// where a stream lists the file (7.5.8); given, it's written as given.
     pub version: Option<Version>,
     /// Which page goes first.
     pub first_page: FirstPage,
     /// The plan's caps, the most pages among them.
     pub limits: Limits,
-    /// How [`linearize_bytes`] opens the file it's given: the caps it reads under and
-    /// the backend it inflates with. A caller given a file it doesn't trust lowers
-    /// them here; [`linearize`] takes a document already read.
+    /// How [`linearize_bytes`] opens the file it's given: the caps it reads
+    /// under and the backend it inflates with. A caller given a file it doesn't
+    /// trust lowers them here; [`linearize`] takes a document already read.
     pub read: bytes::Options,
-    /// A flag that, set while it runs, stops it: it's checked before each object
-    /// and object stream, and nothing's written ([`write::Error::Stopped`]).
+    /// A flag that, set while it runs, stops it: it's checked before each
+    /// object and object stream, and nothing's written
+    /// ([`write::Error::Stopped`]).
     pub stop: Option<&'a AtomicBool>,
 }
 
 impl Options<'static> {
     /// A file with tables, nothing in object streams, deflated as
-    /// [`Deflate::DEFAULT`] deflates, on as many threads as the machine runs, its
-    /// header the document's, opening where `/OpenAction` says, under
-    /// [`Limits::DEFAULT`], read under [`bytes::Options::DEFAULT`], nothing to stop it.
+    /// [`Deflate::DEFAULT`] deflates, on as many threads as the machine runs,
+    /// its header the document's, opening where `/OpenAction` says, under
+    /// [`Limits::DEFAULT`], read under [`bytes::Options::DEFAULT`], nothing to
+    /// stop it.
     pub const DEFAULT: Options<'static> = Options {
         kind: XrefKind::Table,
         pack: false,
@@ -164,9 +172,10 @@ impl Default for Options<'_> {
 #[non_exhaustive]
 pub struct Linearized {
     /// The trailer's `/ID`, when it has one: the first string the encryptor's,
-    /// else the document's, the second XXH3-128 of the bodies in file order, so the
-    /// same document writes the same bytes. A document with no first string has
-    /// none, but written under a new encryption: that has the hash for both.
+    /// else the document's, the second XXH3-128 of the bodies in file order, so
+    /// the same document writes the same bytes. A document with no first string
+    /// has none, but written under a new encryption: that has the hash for
+    /// both.
     pub id: Option<[Vec<u8>; 2]>,
     /// What's around the bodies, and where everything is, counted from the
     /// file's first byte.
@@ -211,9 +220,10 @@ pub enum PageTree {
         /// The attribute's key.
         attribute: &'static str,
     },
-    /// An inheritable attribute of a page that reads otherwise going down `/Kids`
-    /// from the root than up its `/Parent`s, where a page's `/Parent` isn't the node
-    /// that lists it, as pushing it down would change one reader's page.
+    /// An inheritable attribute of a page that reads otherwise going down
+    /// `/Kids` from the root than up its `/Parent`s, where a page's `/Parent`
+    /// isn't the node that lists it, as pushing it down would change one
+    /// reader's page.
     #[error("/{attribute} of page {page} reads otherwise going down /Kids than up /Parent")]
     Kids {
         /// The place.
@@ -237,9 +247,9 @@ pub enum Error {
     /// A trailer whose `/Root` names no dictionary.
     #[error("the trailer's /Root names no catalog")]
     NoCatalog,
-    /// A document or a file no password given opened, so there's nothing to write
-    /// its strings and streams from: whether they're encrypted or not, as an
-    /// attachment's may be where they aren't ([`Encryption::Plain`]).
+    /// A document or a file no password given opened, so there's nothing to
+    /// write its strings and streams from: whether they're encrypted or not, as
+    /// an attachment's may be where they aren't ([`Encryption::Plain`]).
     #[error("it's encrypted, and no password opened it")]
     Locked,
     /// A page tree that gives a page no place of its own.
@@ -263,20 +273,20 @@ pub enum Error {
 }
 
 /// `doc`, as a linearized file, at the end of `out`: every object it reaches
-/// written at the number a plan gives it, copied from `from`, the reading it was
-/// made of ([`Reading::to_document`]), where the rules for a copy hold
-/// ([`Body::Read`](write::Body::Read)). What's written counts its positions from where it starts in
-/// `out`, so `out` may hold other bytes before it. `encryptor` is how it's
-/// encrypted, none for in the clear, whatever `doc`'s file was (the module's
-/// "Encrypted" says what that means for its keys).
+/// written at the number a plan gives it, copied from `from`, the reading it
+/// was made of ([`Reading::to_document`]), where the rules for a copy hold
+/// ([`Body::Read`](write::Body::Read)). What's written counts its positions
+/// from where it starts in `out`, so `out` may hold other bytes before it.
+/// `encryptor` is how it's encrypted, none for in the clear, whatever `doc`'s
+/// file was (the module's "Encrypted" says what that means for its keys).
 ///
-/// Refused, with `out` as it was given, by an [`Error`]: what the module says; a
-/// table asked to pack; a trailer with no catalog, or a catalog that's a page;
-/// a document past [`Options::limits`], or a file past the 4 GiB a hint table can
-/// describe; an object at the number the encryption dictionary has in the file an
-/// `encryptor` was read from ([`write::Error::EncryptAt`]), as a whole file's write
-/// refuses; what pdf-structure's writer or the encryptor refuses of a body; and a
-/// write stopped.
+/// Refused, with `out` as it was given, by an [`Error`]: what the module says;
+/// a table asked to pack; a trailer with no catalog, or a catalog that's a
+/// page; a document past [`Options::limits`], or a file past the 4 GiB a hint
+/// table can describe; an object at the number the encryption dictionary has in
+/// the file an `encryptor` was read from ([`write::Error::EncryptAt`]), as a
+/// whole file's write refuses; what pdf-structure's writer or the encryptor
+/// refuses of a body; and a write stopped.
 pub fn linearize(
     out: &mut Vec<u8>,
     doc: &pdf_structure::Document,
@@ -288,8 +298,8 @@ pub fn linearize(
 }
 
 /// [`linearize`], `lap` told as each stage ends: `graph`, `plan`, `bodies`,
-/// `assemble` and `whole`, so a timing can say where it went. For a timing's own build:
-/// nothing of a caller's.
+/// `assemble` and `whole`, so a timing can say where it went. For a timing's
+/// own build: nothing of a caller's.
 #[cfg(any(test, feature = "timing"))]
 #[doc(hidden)]
 pub fn linearize_timed(
@@ -322,11 +332,11 @@ fn lapped(
 
 /// `bytes`, read and written again as a linearized file: `passwords` as
 /// [`Reading::open_with`] tries them, on any reading that needs one, and an
-/// encrypted file written encrypted as it was ([`Encryptor::of`]), so every number
-/// reused under its keys where they're made per object (the module's "Encrypted").
-/// Refused as [`linearize`] refuses, and where it doesn't read ([`Error::Read`]), no
-/// password opens it ([`Error::Locked`]), or its security handler can't be opened
-/// ([`write::Error::Unsupported`]).
+/// encrypted file written encrypted as it was ([`Encryptor::of`]), so every
+/// number reused under its keys where they're made per object (the module's
+/// "Encrypted"). Refused as [`linearize`] refuses, and where it doesn't read
+/// ([`Error::Read`]), no password opens it ([`Error::Locked`]), or its security
+/// handler can't be opened ([`write::Error::Unsupported`]).
 pub fn linearize_bytes(
     bytes: &[u8],
     passwords: &[Password],
@@ -350,8 +360,8 @@ fn from<S: ByteSource>(reading: &Reading<S>) -> &dyn ReadFrom {
 }
 
 /// [`linearize`]'s file, `out` from `start` on: the bodies first, where they're
-/// then moved up to make room for what goes around them, which they don't depend
-/// on. So the file is never held twice.
+/// then moved up to make room for what goes around them, which they don't
+/// depend on. So the file is never held twice.
 fn file(
     out: &mut Vec<u8>,
     start: usize,
@@ -373,8 +383,8 @@ fn file(
         }
         _ => {}
     }
-    // As a whole file's write has it: asked to pack where an encryption doesn't,
-    // it's written unpacked.
+    // As a whole file's write has it: asked to pack where an encryption
+    // doesn't, it's written unpacked.
     let pack = options.pack && encryptor.is_none_or(Encryptor::packs);
     let prepared = Prepared::of(doc, encryptor, options)?;
     let writing = Writing {
@@ -384,8 +394,8 @@ fn file(
         from,
     };
     // An object stream too big for the reader means planning again without its
-    // members, so nothing's numbered as if they were in it: each round takes some
-    // out, and there's no cost to a file without one.
+    // members, so nothing's numbered as if they were in it: each round takes
+    // some out, and there's no cost to a file without one.
     let mut alone = HashSet::new();
     let mut graph = prepared.graph(kind, pack, &alone);
     lap("graph");
@@ -457,9 +467,10 @@ struct Writing<'w, 'd> {
 }
 
 impl Writing<'_, '_> {
-    /// `then`, given what writes bodies at `plan`'s numbers, and the encryption in
-    /// those numbers, as a whole file has it, where there's one: its dictionary
-    /// at the number planned for it, and what's encrypted under each object's.
+    /// `then`, given what writes bodies at `plan`'s numbers, and the encryption
+    /// in those numbers, as a whole file has it, where there's one: its
+    /// dictionary at the number planned for it, and what's encrypted under each
+    /// object's.
     fn under<R>(
         &self,
         plan: &Plan,
@@ -504,9 +515,9 @@ fn containers(
         .map_err(Error::Write)
 }
 
-/// Each of `plan`'s writes, in file order, at the end of `out`: their lengths. The
-/// encryption dictionary is written from `encryptor`, in the numbers written, and in
-/// the clear (7.6.2).
+/// Each of `plan`'s writes, in file order, at the end of `out`: their lengths.
+/// The encryption dictionary is written from `encryptor`, in the numbers
+/// written, and in the clear (7.6.2).
 fn bodies(
     out: &mut Vec<u8>,
     prepared: &Prepared<'_>,
@@ -566,9 +577,9 @@ fn written_entries(entries: &pdf_objects::object::Dict) -> Result<Vec<u8>, Error
 }
 
 /// A stream of the layout's own, deflated: a cross-reference stream's rows each
-/// less the row above it, as a whole file's are, and left in the clear (7.5.8.2); the
-/// hint stream's data then encrypted by `encrypting`, under its number, as any
-/// stream's.
+/// less the row above it, as a whole file's are, and left in the clear
+/// (7.5.8.2); the hint stream's data then encrypted by `encrypting`, under its
+/// number, as any stream's.
 fn encoded(
     stream: Stream<'_>,
     deflate: Deflate,
@@ -602,8 +613,8 @@ fn encoded(
     Ok(Encoded::new(entries, data))
 }
 
-/// `out` from `start` on, which holds the bodies, each `lengths` long, as `layout`
-/// says the file is: from the back, as each body only moves up.
+/// `out` from `start` on, which holds the bodies, each `lengths` long, as
+/// `layout` says the file is: from the back, as each body only moves up.
 fn laid_out(out: &mut Vec<u8>, start: usize, lengths: &[u64], layout: &Layout) {
     let mut starts = Vec::with_capacity(lengths.len());
     let mut at = start;

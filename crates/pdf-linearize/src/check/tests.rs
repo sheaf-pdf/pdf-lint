@@ -1,5 +1,5 @@
-//! Each finding, from the facts of a file laid out by a plan with one thing changed:
-//! it fires for that and nothing else that isn't its own consequence.
+//! Each finding, from the facts of a file laid out by a plan with one thing
+//! changed: it fires for that and nothing else that isn't its own consequence.
 
 use super::*;
 use crate::fuzz::facts_of;
@@ -12,9 +12,9 @@ fn id(number: u32) -> Id {
     (number, 0)
 }
 
-/// Four pages, each its own object and a content stream, what all three share, what
-/// the later two share, a form's fields and a catalog, each object by what `to` makes
-/// of its number.
+/// Four pages, each its own object and a content stream, what all three share,
+/// what the later two share, a form's fields and a catalog, each object by what
+/// `to` makes of its number.
 fn graph_by(kind: Kind, to: impl Fn(u32) -> Id) -> Graph {
     let mut graph = Graph::new(to(1), kind);
     graph.object(to(1), [to(2), to(30)]);
@@ -64,7 +64,8 @@ fn findings(facts: &Facts) -> Vec<Finding> {
     findings
 }
 
-/// That `change` makes `facts` tell what `told` says, and the verdict what it should.
+/// That `change` makes `facts` tell what `told` says, and the verdict what it
+/// should.
 #[track_caller]
 fn fires(mut facts: Facts, change: impl FnOnce(&mut Facts), told: impl Fn(&Finding) -> bool) {
     change(&mut facts);
@@ -100,8 +101,8 @@ fn hint_of(facts: &mut Facts) -> &mut HintFacts {
     facts.hint.as_mut().unwrap()
 }
 
-/// `facts`' hint data's tables, changed by `change`, and written back. A table's
-/// widths stay what they were, or say so themselves.
+/// `facts`' hint data's tables, changed by `change`, and written back. A
+/// table's widths stay what they were, or say so themselves.
 fn with_tables(facts: &mut Facts, change: impl FnOnce(&mut crate::hint::Tables)) {
     let keys = {
         let hint = hint_of(facts);
@@ -407,8 +408,9 @@ fn e_isnt_held_to_a_hint_stream_after_the_first_page() {
     let Raw::Integer(length) = dict(&mut facts).h_items[1] else {
         panic!("/H");
     };
-    // Written at the file's end, though not numbered so: F.3.6 has it either way, and
-    // whatever else moved by that, the first group's last object doesn't.
+    // Written at the file's end, though not numbered so: F.3.6 has it either
+    // way, and whatever else moved by that, the first group's last object
+    // doesn't.
     let at = facts.len;
     facts.len += length as u64;
     dict(&mut facts).l = Raw::Integer(facts.len as i64);
@@ -686,8 +688,8 @@ fn the_hint_stream_and_its_length_are_last_wherever_theyre_written() {
     let RowEntry::InUse(place) = first.rows[at].entry else {
         panic!("in use");
     };
-    // An object numbered past it, as an indirect /Length written after it is, within
-    // what /H says.
+    // An object numbered past it, as an indirect /Length written after it is,
+    // within what /H says.
     first
         .rows
         .push(RowFacts::new(hint + 1, 0, RowEntry::InUse(place + 1)));
@@ -881,8 +883,8 @@ fn a_page_without_its_attributes_or_a_node_with_them_is_said() {
     );
 }
 
-/// Each finding's place and clause, one of each: its message cites the clause, and
-/// says the number its place gives.
+/// Each finding's place and clause, one of each: its message cites the clause,
+/// and says the number its place gives.
 #[test]
 fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
     use crate::check::Place::*;
@@ -1523,7 +1525,8 @@ fn a_generic_table_is_held_to_where_its_objects_are() {
     // A table of nothing says nothing.
     let found = change(|g| *g = crate::hint::Generic::default());
     assert_eq!(found, []);
-    // A count of none, where its length holds what's there: the count's said, once.
+    // A count of none, where its length holds what's there: the count's said,
+    // once.
     let found = change(|g| g.objects = 0);
     assert!(
         matches!(
@@ -1679,8 +1682,8 @@ fn embedded_files_are_held_to_where_they_are_and_the_shared_table() {
 
 #[test]
 fn a_table_overrun_is_said() {
-    // Another page's entry in the table's columns runs into the next table, which is
-    // still read from its own key.
+    // Another page's entry in the table's columns runs into the next table,
+    // which is still read from its own key.
     let mut facts = table();
     let Raw::Integer(pages) = dict(&mut facts).n else {
         panic!("/N");
@@ -1695,8 +1698,8 @@ fn a_table_overrun_is_said() {
     );
 }
 
-/// The graph, in the numbers `facts` has its objects at: the same objects a plan laid
-/// out, what each page reaches then being what it's held to.
+/// The graph, in the numbers `facts` has its objects at: the same objects a
+/// plan laid out, what each page reaches then being what it's held to.
 fn numbered(kind: Kind) -> (Facts, Graph) {
     let graph = graph(kind);
     let planned = plan(&graph, &Limits::DEFAULT).unwrap();
@@ -1763,8 +1766,8 @@ fn an_object_out_of_its_pages_section_is_said() {
     let (mut facts, _) = numbered(Kind::Table);
     let planned = plan(&graph(Kind::Table), &Limits::DEFAULT).unwrap();
     let to = |number: u32| planned.number(id(number)).unwrap();
-    // The first page reaches what no row of the first section lists, and a later page
-    // what's elsewhere.
+    // The first page reaches what no row of the first section lists, and a
+    // later page what's elsewhere.
     let mut changed = Graph::new(to(1), Kind::Table);
     changed.object(to(1), [to(2), to(30)]);
     changed.object(to(2), [to(3), to(4), to(5), to(6)]);
@@ -1796,7 +1799,8 @@ fn an_object_out_of_its_pages_section_is_said() {
         Finding::PageReaches { page: 1, number: 1 }.grade(),
         Grade::Departure
     );
-    // What the first page reaches is first, here: this one's the main section's.
+    // What the first page reaches is first, here: this one's the main
+    // section's.
     let (mut facts, graph) = numbered(Kind::Table);
     facts.graph = Some(graph);
     let first = (facts.first.as_ref().unwrap().rows.iter())
@@ -1819,8 +1823,8 @@ fn an_object_out_of_its_pages_section_is_said() {
 
 #[test]
 fn a_member_of_a_shared_object_stream_is_in_its_entry() {
-    // What only one page reaches, in an object stream it shares with another page's:
-    // part 8 has the stream, the page's list names it, F.3.1.
+    // What only one page reaches, in an object stream it shares with another
+    // page's: part 8 has the stream, the page's list names it, F.3.1.
     let mut packed = Graph::new(id(1), Kind::Stream);
     packed.object(id(1), [id(2)]);
     packed.object(id(2), [id(3), id(4), id(5)]);
@@ -1879,8 +1883,8 @@ fn a_graph_that_cant_be_planned_is_said() {
     assert!(check(&facts, &Limits::DEFAULT, &mut ()).holds);
 }
 
-/// Told none, as `()` is; counted how often it's asked, which is how far a check
-/// looks.
+/// Told none, as `()` is; counted how often it's asked, which is how far a
+/// check looks.
 #[derive(Default)]
 struct Unwanted {
     told: usize,
@@ -1947,8 +1951,8 @@ fn a_sink_that_wants_nothing_stops_looking_at_what_settles_it() {
     assert!(kept.len() > errors_first + 10, "{kept:?}");
     let mut unwanted = Unwanted::default();
     assert_eq!(check(&facts, &Limits::DEFAULT, &mut unwanted), verdict);
-    // Asked of each finding up to the first error, and of what it takes to be sure of
-    // the rest of the verdict: no more.
+    // Asked of each finding up to the first error, and of what it takes to be
+    // sure of the rest of the verdict: no more.
     assert_eq!(unwanted.told, 0);
     assert_eq!(unwanted.asked.get(), errors_first + 1);
 }

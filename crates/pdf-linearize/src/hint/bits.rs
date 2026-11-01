@@ -1,6 +1,6 @@
 //! Bits, high-order first, through bitstream-io, with what a hint table wants
-//! around them: a position to say where a read went wrong, a cap, and nothing of
-//! that crate's in what the rest of the module sees.
+//! around them: a position to say where a read went wrong, a cap, and nothing
+//! of that crate's in what the rest of the module sees.
 
 use bitstream_io::{BigEndian, BitRead, BitReader, BitWrite, BitWriter};
 
@@ -53,7 +53,8 @@ impl<'a> Reader<'a> {
             return Err(Error::Width { what, width });
         }
         let value = self.bits.read_var::<u32>(width);
-        // Reading can only fail at the data's end, a width past 32 being refused.
+        // Reading can only fail at the data's end, a width past 32 being
+        // refused.
         let value = value.map_err(|_| Error::PastEnd {
             what,
             bit: self.at,
@@ -97,8 +98,8 @@ impl<'a> Reader<'a> {
         self.at = self.at.next_multiple_of(8);
     }
 
-    /// That there are the bits for `count` things of `each` bits, before there's
-    /// room made for them.
+    /// That there are the bits for `count` things of `each` bits, before
+    /// there's room made for them.
     pub(super) fn room(&self, count: u64, each: u64, what: &'static str) -> Result<(), Error> {
         let wanted = u128::from(count) * u128::from(each);
         if wanted > u128::from(self.len - self.at) {
@@ -176,7 +177,8 @@ impl<'a> Writer<'a> {
         self.align()
     }
 
-    /// Each of `values`, less `least`, in `width` bits, then to a byte boundary.
+    /// Each of `values`, less `least`, in `width` bits, then to a byte
+    /// boundary.
     pub(super) fn less_column(
         &mut self,
         values: impl Iterator<Item = u64>,

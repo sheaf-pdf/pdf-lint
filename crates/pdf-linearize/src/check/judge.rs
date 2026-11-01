@@ -16,7 +16,8 @@ struct Settled;
 
 type Go = Result<(), Settled>;
 
-/// The test of [`Verdict::linearized`], what's told of it, and whether it passed.
+/// The test of [`Verdict::linearized`], what's told of it, and whether it
+/// passed.
 fn linearized<S: Sink + ?Sized>(facts: &Facts, sink: &mut S) -> bool {
     let Some(first) = &facts.first_object else {
         return false;
@@ -72,15 +73,16 @@ fn number(raw: Raw) -> Option<u64> {
 
 /// What a section's rows and a file's positions are to each other.
 struct Index {
-    /// What each number is, by number: the first group's before the second's where
-    /// a number's listed in both, a table's free row under what its `/XRefStm` says.
+    /// What each number is, by number: the first group's before the second's
+    /// where a number's listed in both, a table's free row under what its
+    /// `/XRefStm` says.
     rows: Vec<(u32, RowEntry)>,
     /// Every position anything listed starts at, and the file's end, in order.
     starts: Vec<u64>,
     /// Each object, where it is as if the hint stream weren't there, in order.
     places: Vec<(u64, u32)>,
-    /// Every position something starts at, as if the hint stream weren't there, in
-    /// order.
+    /// Every position something starts at, as if the hint stream weren't there,
+    /// in order.
     ends: Vec<u64>,
     hint_at: u64,
     hint_len: u64,
@@ -158,8 +160,8 @@ impl Index {
         }
     }
 
-    /// Where the object or the object stream holding `number` is, as if the hint
-    /// stream weren't there.
+    /// Where the object or the object stream holding `number` is, as if the
+    /// hint stream weren't there.
     fn placed_at(&self, number: u32) -> Option<u64> {
         let at = self.written_at(number)?;
         Some(position(at, self.hint_at, self.hint_len))
@@ -177,8 +179,8 @@ impl Index {
     }
 
     /// Of what's at `at` as if the hint stream weren't there: how many objects
-    /// `length` bytes hold, and how many bytes `objects` of them take; none where
-    /// nothing's at `at`, or fewer than `objects` follow it.
+    /// `length` bytes hold, and how many bytes `objects` of them take; none
+    /// where nothing's at `at`, or fewer than `objects` follow it.
     fn holds(&self, at: u64, length: u64, objects: u64) -> (u64, Option<u64>) {
         let from = self.places.partition_point(|&(place, _)| place < at);
         let end = at.saturating_add(length);
@@ -208,8 +210,8 @@ fn in_hint(at: u64, hint_at: u64, hint_len: u64) -> bool {
     at >= hint_at && at - hint_at < hint_len
 }
 
-/// The fewest bytes a hint stream from `at` to `end` takes, and the most: to where
-/// what follows it starts.
+/// The fewest bytes a hint stream from `at` to `end` takes, and the most: to
+/// where what follows it starts.
 fn hint_room(index: &Index, at: u64, end: u64) -> (u64, u64) {
     let least = end.saturating_sub(at);
     let most = index.next_after(end.saturating_sub(1)).saturating_sub(at);
@@ -229,8 +231,8 @@ struct Judge<'a, S: ?Sized> {
 }
 
 impl<S: Sink + ?Sized> Judge<'_, S> {
-    /// Tells `finding`, if it's wanted, and stops if it's an error and nothing more
-    /// is.
+    /// Tells `finding`, if it's wanted, and stops if it's an error and nothing
+    /// more is.
     fn say(&mut self, finding: Finding) -> Go {
         let error = finding.grade() == Grade::Error;
         if error {
@@ -274,8 +276,8 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             Raw::Absent => {}
             Raw::Reference(_) => self.say(Finding::Indirect { key: DictKey::P })?,
             raw if number(raw).is_none() => self.say(Finding::BadValue { key: DictKey::P })?,
-            // A first page that isn't one of the pages: PDFium takes the file as not
-            // linearized, and a reader has no entry to start from.
+            // A first page that isn't one of the pages: PDFium takes the file
+            // as not linearized, and a reader has no entry to start from.
             raw => {
                 if number(first.n).is_some_and(|n| n > 0 && number(raw) >= Some(n)) {
                     self.say(Finding::BadValue { key: DictKey::P })?;
@@ -300,7 +302,8 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         self.hint_extent()
     }
 
-    /// `/E`: past the first group's last object, by no more than what follows it.
+    /// `/E`: past the first group's last object, by no more than what follows
+    /// it.
     fn first_page_end(&mut self) -> Go {
         let (Some(e), Some(section)) = (number(self.first_object.e), &self.facts.first) else {
             return Ok(());
@@ -468,7 +471,8 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         for section in [first, main] {
             self.one_section(section, hint)?;
         }
-        // Past u32 for a row numbered the last there can be, which no first group follows.
+        // Past u32 for a row numbered the last there can be, which no first
+        // group follows.
         let next = (main.rows.iter())
             .map(|row| u64::from(row.number) + 1)
             .max()
@@ -479,7 +483,8 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             }
         }
         if let Some(hint) = hint {
-            // An indirect /Length follows the stream, and goes with it (Table F.1).
+            // An indirect /Length follows the stream, and goes with it (Table
+            // F.1).
             let last = (first.rows.iter())
                 .filter(|row| !self.with_hint(row))
                 .map(|row| row.number)
@@ -500,7 +505,8 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         Ok(())
     }
 
-    /// Of one section's rows: their generations, their order, what's packed last.
+    /// Of one section's rows: their generations, their order, what's packed
+    /// last.
     fn one_section(&mut self, section: &SectionFacts, hint: Option<u32>) -> Go {
         let mut packed = false;
         let mut last_at = None;
@@ -517,14 +523,16 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             }
             match row.entry {
                 RowEntry::Compressed { .. } => packed = true,
-                // The hint stream is last, wherever it's written (F.3.6), and what's
-                // in /H's extent with it, an indirect /Length (Table F.1).
+                // The hint stream is last, wherever it's written (F.3.6), and
+                // what's in /H's extent with it, an indirect /Length (Table
+                // F.1).
                 RowEntry::InUse(_) if Some(row.number) == hint || self.with_hint(row) => continue,
                 RowEntry::InUse(at) => {
                     if packed {
                         self.say(Finding::UncompressedAfterCompressed { number: row.number })?;
                     }
-                    // A section's stream is where a section is, whatever its number.
+                    // A section's stream is where a section is, whatever its
+                    // number.
                     if Some(row.number) == section.stream {
                         continue;
                     }
@@ -578,11 +586,13 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         Ok(())
     }
 
-    /// F.3.7, F.3.10: inheritable attributes pushed down; `/N`, `/O`, a page packed.
+    /// F.3.7, F.3.10: inheritable attributes pushed down; `/N`, `/O`, a page
+    /// packed.
     fn pages(&mut self) -> Go {
         let facts = self.facts;
         let first = self.first_object;
-        // With no key for what the page tree is in, there's nothing to say of it.
+        // With no key for what the page tree is in, there's nothing to say of
+        // it.
         let locked = |hint: &HintFacts| hint.data == HintData::Locked;
         if facts.pages.is_empty() && facts.hint.as_ref().is_some_and(locked) {
             return Ok(());
@@ -637,8 +647,8 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         Ok(())
     }
 
-    /// F.4.2: the page offset table: each page where adding up the lengths has it,
-    /// holding what it says and taking what it says.
+    /// F.4.2: the page offset table: each page where adding up the lengths has
+    /// it, holding what it says and taking what it says.
     fn page_table(&mut self, tables: &Tables) -> Go {
         let facts = self.facts;
         let table = &tables.pages;
@@ -668,9 +678,9 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         let mut at = first_page_at;
         for page in page_order(first, count) {
             let entry = &table.pages[page as usize];
-            // Where it is, by its object, so one wrong length isn't said of each page
-            // after it. The first is where the table says: a writer may have its page
-            // object after other objects of the part.
+            // Where it is, by its object, so one wrong length isn't said of
+            // each page after it. The first is where the table says: a writer
+            // may have its page object after other objects of the part.
             let own = number_of(page).and_then(|number| self.index.placed_at(number));
             if let Some(computed) = own.filter(|_| page != first) {
                 if computed != at {
@@ -721,8 +731,8 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         Ok(())
     }
 
-    /// F.4.3: the shared object table: its first page's entries from the first page's
-    /// object, the rest from where its header says.
+    /// F.4.3: the shared object table: its first page's entries from the first
+    /// page's object, the rest from where its header says.
     fn shared_table(&mut self, tables: &Tables) -> Go {
         let table = &tables.shared;
         let header = &table.header;
@@ -770,10 +780,10 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         Ok(())
     }
 
-    /// One stretch of objects a table names: its first object where it says, holding
-    /// what it says and taking what it says. Of none, nothing's to be where anything
-    /// says, but a length is a count that's wrong, or a length that is if nothing's
-    /// there.
+    /// One stretch of objects a table names: its first object where it says,
+    /// holding what it says and taking what it says. Of none, nothing's to be
+    /// where anything says, but a length is a count that's wrong, or a length
+    /// that is if nothing's there.
     fn stretch(
         &mut self,
         table: &'static str,
@@ -908,9 +918,9 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         Ok(())
     }
 
-    /// The tables' positions against each other (F.3.6): each ending by the next
-    /// one's start. An overflow into what's next is a writer's fault a reader of each
-    /// table from its own key doesn't see.
+    /// The tables' positions against each other (F.3.6): each ending by the
+    /// next one's start. An overflow into what's next is a writer's fault a
+    /// reader of each table from its own key doesn't see.
     fn table_ends(&mut self, tables: &Tables, keys: &HintKeys) -> Go {
         let mut written = Vec::new();
         if tables.pages.write(&mut written).is_ok() {
@@ -926,9 +936,9 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         Ok(())
     }
 
-    /// What a page reaches, where the file's graph is given: each later page's own in
-    /// its section, the first page's in the first group, and each list as long as
-    /// what's shared that it reaches.
+    /// What a page reaches, where the file's graph is given: each later page's
+    /// own in its section, the first page's in the first group, and each list
+    /// as long as what's shared that it reaches.
     fn graph(&mut self, tables: &Tables) -> Go {
         let Some(graph) = &self.facts.graph else {
             return Ok(());
@@ -976,8 +986,8 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
                 let placed = self.index.placed_at(number);
                 let inside = placed
                     .is_some_and(|placed| placed >= start && placed - start < entry.length.max(1));
-                // A member of an object stream that has others' too is in a shared
-                // entry, which is the stream's (F.3.1).
+                // A member of an object stream that has others' too is in a
+                // shared entry, which is the stream's (F.3.1).
                 let held = placed.and_then(entry_of);
                 reached.extend(held);
                 if !inside && !held.is_some_and(|held| listed.contains(&held)) {
@@ -1021,16 +1031,18 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
     }
 }
 
-/// The pages of a table of `count` in the order its entries are laid out: the first,
-/// then the rest by number. None for a table of none, which an `/N` of 0 reads as.
+/// The pages of a table of `count` in the order its entries are laid out: the
+/// first, then the rest by number. None for a table of none, which an `/N` of 0
+/// reads as.
 fn page_order(first: u64, count: u64) -> impl Iterator<Item = u64> {
     let first_of = std::iter::once(first).filter(move |_| count > 0);
     first_of.chain((0..count).filter(move |&page| page != first))
 }
 
-/// Where each entry of the shared object table starts and how long it is, in order
-/// of where it starts, with which it is. A wrong first place is the shared table's to
-/// say: from there on they're from where the first shared object is, as it holds them.
+/// Where each entry of the shared object table starts and how long it is, in
+/// order of where it starts, with which it is. A wrong first place is the
+/// shared table's to say: from there on they're from where the first shared
+/// object is, as it holds them.
 fn shared_starts(tables: &Tables, index: &Index) -> Vec<(u64, u64, u64)> {
     let header = &tables.shared.header;
     let mut at = u64::from(tables.pages.header.first_page_at);
@@ -1076,8 +1088,8 @@ fn table_key(key: &[u8]) -> Option<fn(&mut HintKeys, u64)> {
     })
 }
 
-/// What a hint stream's dictionary says of where its tables are: none without its
-/// `/S`. A key that isn't a position isn't read.
+/// What a hint stream's dictionary says of where its tables are: none without
+/// its `/S`. A key that isn't a position isn't read.
 fn hint_keys(facts: &Facts) -> Option<HintKeys> {
     let hint = facts.hint.as_ref()?;
     let mut keys = HintKeys::default();
@@ -1129,7 +1141,8 @@ pub(super) fn check<S: Sink + ?Sized>(facts: &Facts, limits: &Limits, sink: &mut
     }
     let first = facts.first_object.as_ref().expect("it's linearized");
     let mut holds = true;
-    // Past what any reader needs of it, the verdict is the same: it comes first.
+    // Past what any reader needs of it, the verdict is the same: it comes
+    // first.
     let tables = read_tables(facts, first, limits, sink, &mut holds);
     let hints_read = tables.is_some();
     let verdict = |holds| Verdict {
@@ -1143,8 +1156,9 @@ pub(super) fn check<S: Sink + ?Sized>(facts: &Facts, limits: &Limits, sink: &mut
     let item = |at: usize| first.h_items.get(at).copied().and_then(number);
     let (hint_at, hint_len) = (item(0).unwrap_or(0), item(1).unwrap_or(0));
     let mut index = Index::new(facts, hint_at, hint_len);
-    // A wrong /H is said once: what's as if the hint stream weren't there goes by
-    // the stream that's there, so it isn't said again of everything after it.
+    // A wrong /H is said once: what's as if the hint stream weren't there goes
+    // by the stream that's there, so it isn't said again of everything after
+    // it.
     if let Some(hint) = facts.hint.as_ref().filter(|hint| hint.at == hint_at) {
         let (least, most) = hint_room(&index, hint.at, hint.end);
         if hint_len < least || hint_len > most {

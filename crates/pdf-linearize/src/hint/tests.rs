@@ -1,10 +1,10 @@
-//! The tables both ways, each held to bits laid out here by hand, one field at a
-//! time with no bit reader or writer, so neither way grades the other.
+//! The tables both ways, each held to bits laid out here by hand, one field at
+//! a time with no bit reader or writer, so neither way grades the other.
 
 use super::*;
 
-/// Bits by hand: each field in its width, high-order bit first, and `Pad` to go on
-/// to the next byte.
+/// Bits by hand: each field in its width, high-order bit first, and `Pad` to go
+/// on to the next byte.
 enum Bit {
     F(u64, u32),
     Pad,
@@ -28,8 +28,8 @@ fn by_hand(fields: &[Bit]) -> Vec<u8> {
         .collect()
 }
 
-/// The table's bytes by hand, its first header fields given, its widths as here:
-/// the objects 3 bits, lengths 6, counts 2, identifiers 3, numerators 2,
+/// The table's bytes by hand, its first header fields given, its widths as
+/// here: the objects 3 bits, lengths 6, counts 2, identifiers 3, numerators 2,
 /// content offsets 4, content lengths 5.
 fn page_table_bytes() -> Vec<u8> {
     by_hand(&[
@@ -158,7 +158,8 @@ fn a_page_tables_header_is_as_narrow_as_readers_take() {
     assert_eq!(table.header.length_bits, 8);
     assert_eq!(table.header.content_at_bits, 4);
     assert_eq!(table.header.content_length_bits, 8);
-    // With nothing to tell pages apart, a bit anyway, and every entry's still read.
+    // With nothing to tell pages apart, a bit anyway, and every entry's still
+    // read.
     let table = PageOffsets::of(50, vec![entry(2, 9, 0, 0), entry(2, 9, 0, 0)], 0, 4);
     assert_eq!(table.header.objects_bits, 1);
     assert_eq!(table.header.length_bits, 1);
@@ -263,8 +264,8 @@ fn the_shared_table_reads_and_writes_as_laid_out_by_hand() {
     assert_eq!(written, bytes);
 }
 
-/// `of` has the count's width that of the greatest count, not of it less one, and
-/// a bit for a length at least.
+/// `of` has the count's width that of the greatest count, not of it less one,
+/// and a bit for a length at least.
 #[test]
 fn a_shared_tables_header_is_as_table_f5_has_it() {
     let entry = |length, objects| GroupEntry {
@@ -576,7 +577,8 @@ fn a_table_past_the_data_is_an_error() {
             ..
         })
     ));
-    // Shared at 0, as the shared table's reading anything; it's the optional one.
+    // Shared at 0, as the shared table's reading anything; it's the optional
+    // one.
     let mut keys = HintKeys::new(0);
     keys.labels = Some(u64::MAX);
     assert!(matches!(
@@ -621,9 +623,9 @@ fn a_width_past_32_is_an_error_before_its_used() {
     );
 }
 
-/// `/N` above the cap, and a count past the data, are refused by that check: not
-/// by a read that comes to the data's end, so nothing's been made room for. That
-/// a page's entries read nothing doesn't get past the charge.
+/// `/N` above the cap, and a count past the data, are refused by that check:
+/// not by a read that comes to the data's end, so nothing's been made room for.
+/// That a page's entries read nothing doesn't get past the charge.
 #[test]
 fn a_count_is_checked_before_theres_room_for_it() {
     assert_eq!(
@@ -754,8 +756,8 @@ fn a_count_is_checked_before_theres_room_for_it() {
     ));
 }
 
-/// What's charged goes on from table to table, so a stream can't ask for the cap
-/// from each.
+/// What's charged goes on from table to table, so a stream can't ask for the
+/// cap from each.
 #[test]
 fn one_count_of_entries_covers_all_the_tables() {
     let mut data = Vec::new();
@@ -780,8 +782,8 @@ fn one_count_of_entries_covers_all_the_tables() {
     );
 }
 
-/// What can't be written is refused, in its table's widths: a value that doesn't
-/// fit, one under the least.
+/// What can't be written is refused, in its table's widths: a value that
+/// doesn't fit, one under the least.
 #[test]
 fn a_value_its_widths_cant_hold_isnt_written() {
     let mut table = page_table();
@@ -812,8 +814,8 @@ fn a_value_its_widths_cant_hold_isnt_written() {
     assert!(table.write(&mut Vec::new()).is_err());
 }
 
-/// A position past a stream the far end of what a `u64` holds is no position past it, and
-/// doesn't overflow either way.
+/// A position past a stream the far end of what a `u64` holds is no position
+/// past it, and doesn't overflow either way.
 #[test]
 fn a_position_at_the_far_end_of_u64_is_itself() {
     assert_eq!(position(10, u64::MAX, 2), 10);

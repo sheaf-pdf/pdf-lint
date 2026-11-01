@@ -1,65 +1,70 @@
-//! A [`Document`] of lopdf's written as a linearized file, by plain functions over
-//! its public objects: no lopdf type goes into the engine, and nothing of the
-//! family's crates is used. [`graph`] says what [`plan()`] is told of a document,
-//! and [`linearize`] writes the file.
+//! A [`Document`] of lopdf's written as a linearized file, by plain functions
+//! over its public objects: no lopdf type goes into the engine, and nothing of
+//! the family's crates is used. [`graph`] says what [`plan()`] is told of a
+//! document, and [`linearize`] writes the file.
 //!
 //! The file is the plainest there is: cross-reference tables, nothing in object
-//! streams, the hint stream unfiltered, so nothing but lopdf is pulled in. lopdf
-//! has no public writer of one object, so a small one is here, in the plan's
-//! numbers: a reference to no object is `null` (7.3.10), a string is hexadecimal, a
-//! stream's `/Length` is direct and its data as lopdf holds it, a real as its `f32`
-//! prints, with a point. The `/ID` is as the document holds it, as lopdf's own save
-//! leaves it: a caller who changed the document says so there.
+//! streams, the hint stream unfiltered, so nothing but lopdf is pulled in.
+//! lopdf has no public writer of one object, so a small one is here, in the
+//! plan's numbers: a reference to no object is `null` (7.3.10), a string is
+//! hexadecimal, a stream's `/Length` is direct and its data as lopdf holds it,
+//! a real as its `f32` prints, with a point. The `/ID` is as the document holds
+//! it, as lopdf's own save leaves it: a caller who changed the document says so
+//! there.
 //!
 //! # Where everything goes
 //!
-//! As the family's adapter has it, from the same keys: part 4 has the catalog and the values of its `/ViewerPreferences`, `/PageMode`,
-//! `/OpenAction`, `/AcroForm` (that object alone) and `/Threads` with its thread
-//! dictionaries (F.3.5); each page's objects are found by walking from it, in the
-//! order F.3.7 recommends, images and font files last, never through `/Parent` or
-//! `/Thumb`, stopping at the page tree's and the document parts' nodes; part 9 has
-//! the groups a hint table names (F.3.10). The first page is where `/OpenAction`
-//! opens (F.3.7), else page 0, unless [`Options::first_page`] says. So a document read
-//! from one file has the numbers the family adapter gives that file, where the two read
-//! the same objects.
+//! As the family's adapter has it, from the same keys: part 4 has the catalog
+//! and the values of its `/ViewerPreferences`, `/PageMode`, `/OpenAction`,
+//! `/AcroForm` (that object alone) and `/Threads` with its thread dictionaries
+//! (F.3.5); each page's objects are found by walking from it, in the order
+//! F.3.7 recommends, images and font files last, never through `/Parent` or
+//! `/Thumb`, stopping at the page tree's and the document parts' nodes; part 9
+//! has the groups a hint table names (F.3.10). The first page is where
+//! `/OpenAction` opens (F.3.7), else page 0, unless [`Options::first_page`]
+//! says. So a document read from one file has the numbers the family adapter
+//! gives that file, where the two read the same objects.
 //!
 //! # What changes in the document
 //!
 //! Nothing in the [`Document`] given, which is only read. In what's written:
 //!
-//! - **Inheritable attributes are pushed down** (F.3.7, F.3.10): each page gets what
-//!   it inherited, as it was written, a reference staying one, and each page tree
-//!   node loses it, so a page the tree doesn't list gets what it inherited from such a
-//!   node too.
+//! - **Inheritable attributes are pushed down** (F.3.7, F.3.10): each page gets
+//!   what it inherited, as it was written, a reference staying one, and each
+//!   page tree node loses it, so a page the tree doesn't list gets what it
+//!   inherited from such a node too.
 //! - **What the trailer doesn't reach isn't written**, nor object streams,
-//!   cross-reference streams and a linearization dictionary; nor an object only a
-//!   stream's `/Length` names, nor a null object, nor an object that's only a reference
-//!   that ends at one of those or at nothing, a reference to any of which reads the
-//!   same as one to none.
+//!   cross-reference streams and a linearization dictionary; nor an object only
+//!   a stream's `/Length` names, nor a null object, nor an object that's only a
+//!   reference that ends at one of those or at nothing, a reference to any of
+//!   which reads the same as one to none.
 //!
-//! Every object moves, as Annex F has it, so anything that names one from outside
-//! the file, a signature's byte range above all, doesn't hold afterwards.
+//! Every object moves, as Annex F has it, so anything that names one from
+//! outside the file, a signature's byte range above all, doesn't hold
+//! afterwards.
 //!
 //! # What's refused
 //!
-//! - **A document that's encrypted or was** ([`Error::Encrypted`]), rather than write
-//!   it in the clear or half encrypted: [`Document::was_encrypted`], as lopdf's reader
-//!   decrypts a file the empty password opens and takes `/Encrypt` out of its trailer,
-//!   so that it looks plain, or any `/Encrypt` in the trailer. lopdf's encryption works
-//!   on a whole document under each object's own number, where every number here is
-//!   new.
-//! - **A page tree that gives a page no place of its own** ([`Error::PageTree`]), as
-//!   Annex F gives each page one, and the numbers and hint tables depend on which
-//!   pages a viewer finds: a place with no page at it, a page or node written in
-//!   place or listed twice, a node its own ancestor, a tree whose pages by ISO
-//!   32000-2's rules aren't what [`Document::get_pages`] lists, a kid those rules and
-//!   PDFium's read as different things, a page they read an inheritable attribute of
-//!   differently, or that reads otherwise going down `/Kids` from the root than up its
-//!   `/Parent`s, as pushing one value down would change the other's page; a tree past
-//!   1,024 levels or too many pages, and a value it's read by that's a chain of
-//!   references past 32 or going round, as a reader stops there.
-//! - **What can't be written**: a real that isn't finite, a stream inside another
-//!   object, a stream lopdf didn't read the data of.
+//! - **A document that's encrypted or was** ([`Error::Encrypted`]), rather than
+//!   write it in the clear or half encrypted: [`Document::was_encrypted`], as
+//!   lopdf's reader decrypts a file the empty password opens and takes
+//!   `/Encrypt` out of its trailer, so that it looks plain, or any `/Encrypt`
+//!   in the trailer. lopdf's encryption works on a whole document under each
+//!   object's own number, where every number here is new.
+//! - **A page tree that gives a page no place of its own**
+//!   ([`Error::PageTree`]), as Annex F gives each page one, and the numbers and
+//!   hint tables depend on which pages a viewer finds: a place with no page at
+//!   it, a page or node written in place or listed twice, a node its own
+//!   ancestor, a tree whose pages by ISO 32000-2's rules aren't what
+//!   [`Document::get_pages`] lists, a kid those rules and PDFium's read as
+//!   different things, a page they read an inheritable attribute of
+//!   differently, or that reads otherwise going down `/Kids` from the root than
+//!   up its `/Parent`s, as pushing one value down would change the other's
+//!   page; a tree past 1,024 levels or too many pages, and a value it's read by
+//!   that's a chain of references past 32 or going round, as a reader stops
+//!   there.
+//! - **What can't be written**: a real that isn't finite, a stream inside
+//!   another object, a stream lopdf didn't read the data of.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -76,25 +81,25 @@ use crate::{Id, Limits};
 /// The attributes a page inherits (7.7.3.4).
 const INHERITED: [&str; 4] = ["Resources", "MediaBox", "CropBox", "Rotate"];
 
-/// How many levels of nodes a tree has, from its root down, and how far up a page's
-/// `/Parent`s are followed: a tree deeper than this is refused.
+/// How many levels of nodes a tree has, from its root down, and how far up a
+/// page's `/Parent`s are followed: a tree deeper than this is refused.
 const DEPTH: usize = 1024;
 
-/// How many references a value of the tree is followed through: one past them, or
-/// going round, is refused.
+/// How many references a value of the tree is followed through: one past them,
+/// or going round, is refused.
 const HOPS: usize = 32;
 
-/// How many kids a walk looks at for each page it may list, as one that's no page costs
-/// as one that is.
+/// How many kids a walk looks at for each page it may list, as one that's no
+/// page costs as one that is.
 const KIDS_A_PAGE: usize = 4;
 
-/// How deep what's written may be nested: past it, nothing's written. lopdf's reader
-/// nests far less than this.
+/// How deep what's written may be nested: past it, nothing's written. lopdf's
+/// reader nests far less than this.
 const NESTED: usize = 256;
 
 /// The trailer keys a section writes anew or doesn't have: its links to other
-/// sections, and a cross-reference stream's dictionary's own, which is the trailer
-/// lopdf holds where a stream listed the file.
+/// sections, and a cross-reference stream's dictionary's own, which is the
+/// trailer lopdf holds where a stream listed the file.
 const SECTION_KEYS: [&[u8]; 13] = [
     b"Prev",
     b"XRefStm",
@@ -133,16 +138,17 @@ pub enum PageTree {
         /// The place.
         page: usize,
     },
-    /// The pages by ISO 32000-2's rules aren't those [`Document::get_pages`] lists:
-    /// `page` is the first that differs, or the first past the shorter's end.
+    /// The pages by ISO 32000-2's rules aren't those [`Document::get_pages`]
+    /// lists: `page` is the first that differs, or the first past the shorter's
+    /// end.
     #[error("page {page} is another page, or none, by lopdf's list than by ISO 32000-2's rules")]
     Listed {
         /// The place.
         page: usize,
     },
-    /// A kid ISO 32000-2's rules and PDFium's read as different things: a page or a node
-    /// by its `/Type` where its `/Kids` says the other, or an object that's itself a
-    /// reference, which PDFium's rules don't go through.
+    /// A kid ISO 32000-2's rules and PDFium's read as different things: a page
+    /// or a node by its `/Type` where its `/Kids` says the other, or an object
+    /// that's itself a reference, which PDFium's rules don't go through.
     #[error("page {page} is another page, or none, by PDFium's rules than by ISO 32000-2's")]
     Rules {
         /// The place.
@@ -154,8 +160,8 @@ pub enum PageTree {
         /// The place.
         page: usize,
     },
-    /// A value the tree is read by that's a chain of references past 32, or in a loop of
-    /// them, so nothing can say what it reads as.
+    /// A value the tree is read by that's a chain of references past 32, or in
+    /// a loop of them, so nothing can say what it reads as.
     #[error("{} {} R is past {HOPS} references, or in a loop of them", .id.0, .id.1)]
     Unread {
         /// What the last it followed names.
@@ -164,19 +170,21 @@ pub enum PageTree {
     /// More levels of nodes than 1,024, under the root.
     #[error("the page tree is too deep")]
     TooDeep,
-    /// More pages, nodes or kids than the most pages that's allowed gives room for.
+    /// More pages, nodes or kids than the most pages that's allowed gives room
+    /// for.
     #[error("the page tree lists too many pages")]
     TooMany,
-    /// A tree node written in place that gives a page an attribute, which can't be
-    /// taken off it.
+    /// A tree node written in place that gives a page an attribute, which can't
+    /// be taken off it.
     #[error("page {page} inherits from a page tree node written in place")]
     DirectNode {
         /// The place.
         page: usize,
     },
-    /// An inheritable attribute of a page that reads otherwise going down `/Kids` from
-    /// the root than up its `/Parent`s, where a page's `/Parent` isn't the node that
-    /// lists it, as pushing it down would change one reader's page.
+    /// An inheritable attribute of a page that reads otherwise going down
+    /// `/Kids` from the root than up its `/Parent`s, where a page's `/Parent`
+    /// isn't the node that lists it, as pushing it down would change one
+    /// reader's page.
     #[error("/{attribute} of page {page} reads otherwise going down /Kids than up /Parent")]
     Kids {
         /// The place.
@@ -184,9 +192,9 @@ pub enum PageTree {
         /// The attribute's key.
         attribute: &'static str,
     },
-    /// An inheritable attribute with a null nearer the page than a value: ISO 32000-2's
-    /// rules go past a null to the value, and PDFium's stop at it, so pushing the value
-    /// down would change one reader's page.
+    /// An inheritable attribute with a null nearer the page than a value: ISO
+    /// 32000-2's rules go past a null to the value, and PDFium's stop at it, so
+    /// pushing the value down would change one reader's page.
     #[error("/{attribute} of page {page} reads otherwise by PDFium's rules than by ISO 32000-2's")]
     Attribute {
         /// The place.
@@ -228,8 +236,8 @@ pub enum Error {
         /// The object.
         id: Id,
     },
-    /// A stream whose data lopdf didn't read, as its `/Length` didn't hold: what's
-    /// held is empty, where the file's isn't.
+    /// A stream whose data lopdf didn't read, as its `/Length` didn't hold:
+    /// what's held is empty, where the file's isn't.
     #[error("object {} {} is a stream whose data wasn't read", .id.0, .id.1)]
     UnreadStream {
         /// The object.
@@ -243,8 +251,8 @@ pub enum Error {
     },
 }
 
-/// How a file is laid out. A caller sets the fields on a copy of [`Options::DEFAULT`]
-/// (`options.first_page = FirstPage::Index(3)`, say).
+/// How a file is laid out. A caller sets the fields on a copy of
+/// [`Options::DEFAULT`] (`options.first_page = FirstPage::Index(3)`, say).
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Options {
@@ -268,19 +276,21 @@ impl Default for Options {
     }
 }
 
-/// What [`plan()`] is told of `doc`: its objects as they'd be written, each with what it
-/// refers to, as a table lists them, nothing packable. Refused as [`linearize`] is.
+/// What [`plan()`] is told of `doc`: its objects as they'd be written, each
+/// with what it refers to, as a table lists them, nothing packable. Refused as
+/// [`linearize`] is.
 pub fn graph(doc: &Document, options: &Options) -> Result<Graph, Error> {
     Ok(Prepared::of(doc, options)?.graph())
 }
 
-/// `doc`, as a linearized file, at the end of `out`: every object it reaches written
-/// at the number a plan gives it, what's written counting its positions from where it
-/// starts in `out`. It gives the [`Layout`], which says where everything is.
+/// `doc`, as a linearized file, at the end of `out`: every object it reaches
+/// written at the number a plan gives it, what's written counting its positions
+/// from where it starts in `out`. It gives the [`Layout`], which says where
+/// everything is.
 ///
-/// Refused, with `out` as it was given, by an [`Error`]: what the module says; a
-/// trailer with no catalog; a document past [`Options::limits`], or a file past the 4
-/// GiB a hint table can describe.
+/// Refused, with `out` as it was given, by an [`Error`]: what the module says;
+/// a trailer with no catalog; a document past [`Options::limits`], or a file
+/// past the 4 GiB a hint table can describe.
 pub fn linearize(out: &mut Vec<u8>, doc: &Document, options: &Options) -> Result<Layout, Error> {
     let prepared = Prepared::of(doc, options)?;
     let plan = plan(&prepared.graph(), &options.limits).map_err(Error::Plan)?;
@@ -349,7 +359,8 @@ fn trailer_entries(doc: &Document, plan: &Plan) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
-/// `object` as an indirect object numbered `at`, its references in `plan`'s numbers.
+/// `object` as an indirect object numbered `at`, its references in `plan`'s
+/// numbers.
 fn indirect(out: &mut Vec<u8>, id: Id, at: u32, object: &Object, plan: &Plan) -> Result<(), Error> {
     let _ = writeln!(out, "{at} 0 obj");
     match object {
@@ -368,8 +379,8 @@ fn indirect(out: &mut Vec<u8>, id: Id, at: u32, object: &Object, plan: &Plan) ->
     Ok(())
 }
 
-/// Whether `stream` is one lopdf's reader meant to come back to and couldn't: it holds
-/// nothing, and the `/Length` it would have made direct isn't.
+/// Whether `stream` is one lopdf's reader meant to come back to and couldn't:
+/// it holds nothing, and the `/Length` it would have made direct isn't.
 fn unread(stream: &Stream) -> bool {
     let empty = stream.start_position.is_some() && stream.content.is_empty();
     empty && !matches!(stream.dict.get(b"Length"), Ok(Object::Integer(0)))
@@ -424,8 +435,8 @@ fn written(
     Ok(())
 }
 
-/// `dict`, every entry in order, and where it's a stream's, `length` as its `/Length`,
-/// at the place it was or last.
+/// `dict`, every entry in order, and where it's a stream's, `length` as its
+/// `/Length`, at the place it was or last.
 fn dictionary(
     out: &mut Vec<u8>,
     dict: &Dictionary,
@@ -455,8 +466,8 @@ fn dictionary(
     Ok(())
 }
 
-/// `value` as a real: with a point, as without one it reads as an integer, however
-/// large (7.3.3); what's too small for a reader to hold is 0.
+/// `value` as a real: with a point, as without one it reads as an integer,
+/// however large (7.3.3); what's too small for a reader to hold is 0.
 fn real(out: &mut Vec<u8>, value: f32, id: Id) -> Result<(), Error> {
     if !value.is_finite() {
         return Err(Error::NonFinite { id });
@@ -474,7 +485,8 @@ fn real(out: &mut Vec<u8>, value: f32, id: Id) -> Result<(), Error> {
     Ok(())
 }
 
-/// `text` as a name, each byte that isn't a regular character by its code (7.3.5).
+/// `text` as a name, each byte that isn't a regular character by its code
+/// (7.3.5).
 fn name(out: &mut Vec<u8>, text: &[u8]) {
     out.push(b'/');
     for &byte in text {
@@ -487,11 +499,12 @@ fn name(out: &mut Vec<u8>, text: &[u8]) {
     }
 }
 
-/// A document ready to plan: the objects to write and what a [`Graph`] says of them.
+/// A document ready to plan: the objects to write and what a [`Graph`] says of
+/// them.
 struct Prepared<'d> {
     catalog: Id,
-    /// Each object to write, the document's own or, where something's pushed down or
-    /// taken off, a copy.
+    /// Each object to write, the document's own or, where something's pushed
+    /// down or taken off, a copy.
     bodies: Bodies<'d>,
     pages: Vec<Page>,
     page_ids: HashSet<Id>,
@@ -500,11 +513,12 @@ struct Prepared<'d> {
     open: Vec<Id>,
     groups: Vec<(Group, Vec<Id>)>,
     outlines_first: bool,
-    /// The outline's objects, whose links to each other aren't walked, as they're
-    /// given to the plan in the order they go.
+    /// The outline's objects, whose links to each other aren't walked, as
+    /// they're given to the plan in the order they go.
     outline: HashSet<Id>,
-    /// The name dictionary, of which only `/Dests` is walked, as it's given to the
-    /// plan with the named destinations and the rest have groups of their own.
+    /// The name dictionary, of which only `/Dests` is walked, as it's given to
+    /// the plan with the named destinations and the rest have groups of their
+    /// own.
     names: Option<Id>,
     /// What's named as a font file.
     font_files: HashSet<Id>,
@@ -515,9 +529,9 @@ type Bodies<'d> = BTreeMap<Id, Cow<'d, Object>>;
 
 impl<'d> Prepared<'d> {
     fn of(doc: &'d Document, options: &Options) -> Result<Prepared<'d>, Error> {
-        // What `is_encrypted` looks for, and more: it says no of an /Encrypt in place,
-        // or one that names no dictionary, which a section would then carry over the
-        // numbers it was written under.
+        // What `is_encrypted` looks for, and more: it says no of an /Encrypt in
+        // place, or one that names no dictionary, which a section would then
+        // carry over the numbers it was written under.
         if doc.was_encrypted() || doc.trailer.has(b"Encrypt") {
             return Err(Error::Encrypted);
         }
@@ -542,8 +556,8 @@ impl<'d> Prepared<'d> {
             return Err(Error::PageTree(why));
         }
         let mut tree_nodes = nodes_taken_off(doc, catalog, &tree, &page_ids, &mut bodies);
-        // A page or a node the tree doesn't list is still no object of the page that
-        // names it (F.3.7).
+        // A page or a node the tree doesn't list is still no object of the page
+        // that names it (F.3.7).
         let listed: HashSet<Id> = tree_nodes.iter().copied().collect();
         let strays: Vec<Id> = (bodies.iter())
             .filter(|(id, body)| {
@@ -580,7 +594,8 @@ impl<'d> Prepared<'d> {
         Ok(prepared)
     }
 
-    /// Part 4 and part 9's groups, and the document parts' nodes (F.3.5, F.3.10).
+    /// Part 4 and part 9's groups, and the document parts' nodes (F.3.5,
+    /// F.3.10).
     fn document_level(&mut self, doc: &'d Document, catalog: &'d Dictionary) {
         for key in [
             &b"ViewerPreferences"[..],
@@ -590,8 +605,8 @@ impl<'d> Prepared<'d> {
         ] {
             self.open.extend(reference(catalog.get(key).ok()));
         }
-        // The threads and each thread's dictionary; beads are their pages', and what
-        // a thread's /I names is a group's.
+        // The threads and each thread's dictionary; beads are their pages', and
+        // what a thread's /I names is a group's.
         if let Ok(threads) = catalog.get(b"Threads") {
             let mut thread_info = Vec::new();
             self.open.extend(reference(Some(threads)));
@@ -725,8 +740,8 @@ fn references(object: &Object, refs: &mut Vec<Id>) {
     }
 }
 
-/// What a stream's dictionary refers to, but its `/Length`, which is written direct, so
-/// an object only that names is one nothing in the file names.
+/// What a stream's dictionary refers to, but its `/Length`, which is written
+/// direct, so an object only that names is one nothing in the file names.
 fn stream_references(stream: &Stream, refs: &mut Vec<Id>) {
     for (key, value) in &stream.dict {
         if key != b"Length" {
@@ -765,8 +780,8 @@ fn reached(doc: &Document) -> HashSet<Id> {
 }
 
 /// Whether it's an object stream, a cross-reference stream or a linearization
-/// dictionary: what's in the first is written anew, and the others are the file's
-/// that was.
+/// dictionary: what's in the first is written anew, and the others are the
+/// file's that was.
 fn left_out(object: &Object) -> bool {
     match object {
         Object::Stream(stream) => stream.dict.has_type(b"ObjStm") || stream.dict.has_type(b"XRef"),
@@ -775,10 +790,10 @@ fn left_out(object: &Object) -> bool {
     }
 }
 
-/// Whether `object` has no body to write, a reference to it being written `null`: a
-/// null, what a file leaves out, and a reference whose chain ends at one of those, at
-/// no object, or back where it's been, each of which a reference to reads as a
-/// reference to none (7.3.10).
+/// Whether `object` has no body to write, a reference to it being written
+/// `null`: a null, what a file leaves out, and a reference whose chain ends at
+/// one of those, at no object, or back where it's been, each of which a
+/// reference to reads as a reference to none (7.3.10).
 fn no_body(doc: &Document, object: &Object) -> bool {
     let none = |object: &Object| matches!(object, Object::Null) || left_out(object);
     if none(object) {
@@ -818,8 +833,8 @@ fn reference(object: Option<&Object>) -> Option<Id> {
     object.and_then(|object| object.as_reference().ok())
 }
 
-/// What `value` names as what a walk starts from: itself where it's a reference, and
-/// what it refers to where it's written in place.
+/// What `value` names as what a walk starts from: itself where it's a
+/// reference, and what it refers to where it's written in place.
 fn roots(value: &Object) -> Vec<Id> {
     let mut refs = Vec::new();
     references(value, &mut refs);
@@ -840,8 +855,8 @@ fn image(object: &Object) -> bool {
         if matches!(stream.dict.get(b"Subtype"), Ok(Object::Name(subtype)) if subtype == b"Image"))
 }
 
-/// What's named as a font file: by a font descriptor, which is an object of its own,
-/// or written in place in its font.
+/// What's named as a font file: by a font descriptor, which is an object of its
+/// own, or written in place in its font.
 fn font_files(bodies: &Bodies<'_>) -> HashSet<Id> {
     let mut files = HashSet::new();
     for body in bodies.values() {
@@ -859,8 +874,9 @@ fn font_files(bodies: &Bodies<'_>) -> HashSet<Id> {
     files
 }
 
-/// An attribute a page inherited: as written, the object that holds it, none where
-/// that's written in place, and whether a null nearer the page goes before it.
+/// An attribute a page inherited: as written, the object that holds it, none
+/// where that's written in place, and whether a null nearer the page goes
+/// before it.
 #[derive(Clone, Copy)]
 struct Held<'d> {
     written: &'d Object,
@@ -895,13 +911,15 @@ struct Above<'d> {
 struct Tree<'d> {
     pages: Vec<Listed<'d>>,
     above: HashMap<Id, Above<'d>>,
-    /// The first page that reads otherwise going down `/Kids` than up `/Parent`.
+    /// The first page that reads otherwise going down `/Kids` than up
+    /// `/Parent`.
     apart: Option<PageTree>,
 }
 
-/// `written`, through the references it is, with the last it followed: none where one
-/// names no object. Past [`HOPS`], where one going round comes to as well, it doesn't
-/// read: a tree that takes that for nothing lists what a reader doesn't.
+/// `written`, through the references it is, with the last it followed: none
+/// where one names no object. Past [`HOPS`], where one going round comes to as
+/// well, it doesn't read: a tree that takes that for nothing lists what a
+/// reader doesn't.
 fn read<'d>(
     doc: &'d Document,
     written: &'d Object,
@@ -921,8 +939,8 @@ fn read<'d>(
     Ok(Some((last, at)))
 }
 
-/// What `dict`'s `key` holds, where it's there and reads as something: a null, or a
-/// reference to nothing, is absent (7.3.10).
+/// What `dict`'s `key` holds, where it's there and reads as something: a null,
+/// or a reference to nothing, is absent (7.3.10).
 fn found<'d>(
     doc: &'d Document,
     dict: &'d Dictionary,
@@ -937,8 +955,8 @@ fn found<'d>(
     })
 }
 
-/// `attributes`, past the node or page `dict`, numbered `holder`: what it holds takes
-/// the place of what's above, and a null goes before it.
+/// `attributes`, past the node or page `dict`, numbered `holder`: what it holds
+/// takes the place of what's above, and a null goes before it.
 fn through<'d>(
     doc: &'d Document,
     dict: &'d Dictionary,
@@ -968,11 +986,11 @@ fn is_null(doc: &Document, dict: &Dictionary, key: &[u8]) -> Result<bool, PageTr
     Ok(matches!(read(doc, written)?, Some((_, Object::Null))))
 }
 
-/// The tree's pages by ISO 32000-2's rules, each a page of its own, numbered, and what
-/// each inherits; which lopdf's own list of pages has to be, each kid what PDFium's
-/// rules read it as, and what each inherits what going down `/Kids` from the root reads
-/// it as. Nothing the walk reads by may fail to read, as it's a tree of other pages to a
-/// reader that stops there.
+/// The tree's pages by ISO 32000-2's rules, each a page of its own, numbered,
+/// and what each inherits; which lopdf's own list of pages has to be, each kid
+/// what PDFium's rules read it as, and what each inherits what going down
+/// `/Kids` from the root reads it as. Nothing the walk reads by may fail to
+/// read, as it's a tree of other pages to a reader that stops there.
 fn page_tree<'d>(
     doc: &'d Document,
     catalog: &'d Dictionary,
@@ -985,8 +1003,8 @@ fn page_tree<'d>(
     let written = catalog.get(b"Pages").ok();
     let root = written.map(|root| read(doc, root)).transpose()?.flatten();
     let root = root.and_then(|(_, root)| root.as_dict().ok());
-    // A root that says it's a page is the one page by ISO's rules, and lopdf's list goes
-    // under it for its kids, or has none.
+    // A root that says it's a page is the one page by ISO's rules, and lopdf's
+    // list goes under it for its kids, or has none.
     if let Some(root) = root {
         if !is_node(doc, root)? {
             return Err(PageTree::Listed { page: 0 });
@@ -1021,8 +1039,8 @@ fn page_tree<'d>(
             Some((_, Object::Dictionary(dict))) => dict,
             _ => return Err(PageTree::NoPage { page }),
         };
-        // PDFium's rules go by /Kids alone and through one reference, so past either it
-        // finds other pages than the walk here does.
+        // PDFium's rules go by /Kids alone and through one reference, so past
+        // either it finds other pages than the walk here does.
         let chain = matches!(doc.objects.get(&id), Some(Object::Reference(_)));
         let node = is_node(doc, dict)?;
         if chain || node != dict.has(b"Kids") {
@@ -1051,8 +1069,8 @@ fn page_tree<'d>(
             Ok(parent) => inherited(doc, parent, &mut above, page)?,
             Err(_) => ([None; 4], None),
         };
-        // What's its own takes it out of what it inherits; a null of its own goes
-        // before what does.
+        // What's its own takes it out of what it inherits; a null of its own
+        // goes before what does.
         let mut inherits = up;
         let mut own = [false; 4];
         for (slot, key) in own.iter_mut().zip(INHERITED) {
@@ -1074,7 +1092,8 @@ fn page_tree<'d>(
             parent,
         });
     }
-    // What lopdf's user calls the pages, or else the file's aren't what they think.
+    // What lopdf's user calls the pages, or else the file's aren't what they
+    // think.
     let mut lopdf = doc.page_iter();
     for (page, listed) in table.iter().enumerate() {
         if lopdf.next() != Some(listed.id) {
@@ -1091,8 +1110,8 @@ fn page_tree<'d>(
     })
 }
 
-/// Whether what a page holds or inherits, each as what a reader goes on to read of it,
-/// reads: a box's corners, and its `/UserUnit`.
+/// Whether what a page holds or inherits, each as what a reader goes on to read
+/// of it, reads: a box's corners, and its `/UserUnit`.
 fn values_read(
     doc: &Document,
     page: &Dictionary,
@@ -1126,8 +1145,8 @@ fn read_alike(doc: &Document, a: Option<Held<'_>>, b: Option<Held<'_>>) -> Resul
     }
 }
 
-/// Whether a kid is a node of the tree, or a page: by its `/Type`, and otherwise by
-/// whether it holds `/Kids`.
+/// Whether a kid is a node of the tree, or a page: by its `/Type`, and
+/// otherwise by whether it holds `/Kids`.
 fn is_node(doc: &Document, dict: &Dictionary) -> Result<bool, PageTree> {
     let kind = dict.get(b"Type").ok();
     let kind = kind.map(|kind| read(doc, kind)).transpose()?.flatten();
@@ -1149,9 +1168,10 @@ fn kids_of<'d>(doc: &'d Document, node: Option<&'d Dictionary>) -> Result<&'d [O
     })
 }
 
-/// What the node `written` names gives the pages under it, and the first numbered node
-/// from it: up its `/Parent` chain to a node already met and back down. Refused past
-/// [`DEPTH`], where one that goes round comes to as well, of `page`.
+/// What the node `written` names gives the pages under it, and the first
+/// numbered node from it: up its `/Parent` chain to a node already met and back
+/// down. Refused past [`DEPTH`], where one that goes round comes to as well, of
+/// `page`.
 fn inherited<'d>(
     doc: &'d Document,
     written: &'d Object,
@@ -1205,8 +1225,8 @@ fn inherited<'d>(
     Ok((attributes, parent))
 }
 
-/// Each page lacking an attribute it inherits given it as written, in a copy: the rest
-/// stay as they are.
+/// Each page lacking an attribute it inherits given it as written, in a copy:
+/// the rest stay as they are.
 fn pushed_down(bodies: &mut Bodies<'_>, table: &[Listed<'_>]) -> Result<(), Error> {
     for (page, listed) in table.iter().enumerate() {
         let Some(body) = bodies.get_mut(&listed.id) else {
@@ -1261,11 +1281,12 @@ fn nodes_taken_off(
             .map_or(&[][..], |kids| array_of(doc, kids));
         stack.extend(kids.iter().rev());
     }
-    // What a page says is its parent is a node only if it holds kids, or says so: a
-    // broken file's /Parent can name its /Resources.
+    // What a page says is its parent is a node only if it holds kids, or says
+    // so: a broken file's /Parent can name its /Resources.
     let node =
         |id: Id| dict_at(doc, id).is_some_and(|dict| dict.has(b"Kids") || dict.has_type(b"Pages"));
-    // A node met by /Kids can still have one above it that only its /Parent names.
+    // A node met by /Kids can still have one above it that only its /Parent
+    // names.
     let mut climbed = HashSet::new();
     for page in &tree.pages {
         let mut at = page.parent;
@@ -1301,10 +1322,10 @@ fn nodes_taken_off(
     nodes
 }
 
-/// Each of `strays` that says it's a page, given in a copy what it inherits from one of
-/// `nodes`, which lose it: an annotation's `/P`, say, can still name it, and nothing else
-/// would be left to give it what it had. What it inherits from anything else it still
-/// does.
+/// Each of `strays` that says it's a page, given in a copy what it inherits
+/// from one of `nodes`, which lose it: an annotation's `/P`, say, can still
+/// name it, and nothing else would be left to give it what it had. What it
+/// inherits from anything else it still does.
 fn strays_pushed_down(doc: &Document, strays: &[Id], nodes: &HashSet<Id>, bodies: &mut Bodies<'_>) {
     let reads = |dict: &'_ Dictionary, key: &[u8]| {
         let read = dict.get(key).map(|written| doc.dereference(written));
@@ -1373,8 +1394,8 @@ fn page_said(doc: &Document, id: Id, dict: Option<&Dictionary>) -> Page {
 }
 
 /// What a page refers to, in the order F.3.7 recommends: annotations, beads,
-/// resources, what else it names, its content; not its parent, nor its thumbnail, which
-/// F.3.10 has in part 9.
+/// resources, what else it names, its content; not its parent, nor its
+/// thumbnail, which F.3.10 has in part 9.
 fn page_references(dict: &Dictionary, refs: &mut Vec<Id>) {
     let mut of = |key: &[u8]| {
         if let Ok(value) = dict.get(key) {
@@ -1402,8 +1423,8 @@ fn page_references(dict: &Dictionary, refs: &mut Vec<Id>) {
     }
 }
 
-/// The place of the page that opens first: `first`'s, or where `/OpenAction` opens, if
-/// that's a page of the tree, or 0.
+/// The place of the page that opens first: `first`'s, or where `/OpenAction`
+/// opens, if that's a page of the tree, or 0.
 fn first_page(doc: &Document, catalog: &Dictionary, table: &[Listed<'_>], first: FirstPage) -> u32 {
     let action = match first {
         FirstPage::Index(index) => return index,
@@ -1416,7 +1437,8 @@ fn first_page(doc: &Document, catalog: &Dictionary, table: &[Listed<'_>], first:
     place.map_or(0, |place| place as u32)
 }
 
-/// The page object an `/OpenAction` opens at: a destination, or a `/GoTo` action's.
+/// The page object an `/OpenAction` opens at: a destination, or a `/GoTo`
+/// action's.
 fn opens_at(doc: &Document, catalog: &Dictionary, action: &Object) -> Option<Id> {
     let (_, action) = doc.dereference(action).ok()?;
     let destination = match dict_of(action) {
@@ -1429,9 +1451,9 @@ fn opens_at(doc: &Document, catalog: &Dictionary, action: &Object) -> Option<Id>
     destination_page(doc, catalog, destination)
 }
 
-/// The page object a destination names: an array's first element, by way of a name
-/// (the catalog's `/Dests`) or a string (the name dictionary's `/Dests`) where it's named
-/// (12.3.2).
+/// The page object a destination names: an array's first element, by way of a
+/// name (the catalog's `/Dests`) or a string (the name dictionary's `/Dests`)
+/// where it's named (12.3.2).
 fn destination_page(doc: &Document, catalog: &Dictionary, destination: &Object) -> Option<Id> {
     let (_, destination) = doc.dereference(destination).ok()?;
     let target = match destination {
@@ -1458,8 +1480,9 @@ fn destination_page(doc: &Document, catalog: &Dictionary, destination: &Object) 
     reference(array.as_array().ok()?.first())
 }
 
-/// The entries of the name tree at `root`, in the order the tree is written, as far
-/// as it reads: each node's own entries, then its kids, each node once (7.9.6).
+/// The entries of the name tree at `root`, in the order the tree is written, as
+/// far as it reads: each node's own entries, then its kids, each node once
+/// (7.9.6).
 fn name_tree_entries<'d>(doc: &'d Document, root: &'d Object) -> Vec<(&'d [u8], &'d Object)> {
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
@@ -1490,8 +1513,8 @@ fn name_tree_entries<'d>(doc: &'d Document, root: &'d Object) -> Vec<(&'d [u8], 
     entries
 }
 
-/// The document parts' nodes (14.12): the `/DPartRoot` dictionary and each node under
-/// it, so a page's `/DPart` stops there (F.3.7).
+/// The document parts' nodes (14.12): the `/DPartRoot` dictionary and each node
+/// under it, so a page's `/DPart` stops there (F.3.7).
 fn document_parts(doc: &Document, catalog: &Dictionary, nodes: &mut Vec<Id>) {
     let Ok(root) = catalog.get(b"DPartRoot") else {
         return;
@@ -1523,9 +1546,10 @@ fn document_parts(doc: &Document, catalog: &Dictionary, nodes: &mut Vec<Id>) {
     }
 }
 
-/// The outline's objects in the order F.3.10 has them: as a viewer shows it, then
-/// what's under a closed item, each in the order it would show if all were open. What
-/// only a broken file's `/Last` or `/Prev` reaches comes after what's beside it.
+/// The outline's objects in the order F.3.10 has them: as a viewer shows it,
+/// then what's under a closed item, each in the order it would show if all were
+/// open. What only a broken file's `/Last` or `/Prev` reaches comes after
+/// what's beside it.
 fn outline_order(doc: &Document, outlines: &Object) -> Vec<Id> {
     let (mut shown, mut hidden) = (Vec::new(), Vec::new());
     let mut seen = HashSet::new();
@@ -1624,7 +1648,8 @@ mod tests {
         let real = |value: f32| write(&Object::Real(value));
         assert_eq!(real(0.5).unwrap(), "0.5");
         assert_eq!(real(-3.25).unwrap(), "-3.25");
-        // No exponent, and without a point it would read as an integer past any.
+        // No exponent, and without a point it would read as an integer past
+        // any.
         assert_eq!(real(2.0).unwrap(), "2.0");
         assert_eq!(
             real(1e20).unwrap(),

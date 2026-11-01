@@ -21,15 +21,16 @@ const INHERITED: [(Inheritable, &str); 4] = [
     (Inheritable::Rotate, "Rotate"),
 ];
 
-/// How far up a page's `/Parent`s are followed for what it inherits, as pdf-semantics
-/// has it by default.
+/// How far up a page's `/Parent`s are followed for what it inherits, as
+/// pdf-semantics has it by default.
 const DEPTH: usize = 1024;
 
 /// The keys that name a font file (9.9).
 const FONT_FILES: [&[u8]; 3] = [b"FontFile", b"FontFile2", b"FontFile3"];
 
 /// A document ready to plan: the objects to write and what a [`Graph`] says of
-/// them, which is made again without what a plan takes out of its object streams.
+/// them, which is made again without what a plan takes out of its object
+/// streams.
 pub(crate) struct Prepared<'d> {
     catalog: ObjectId,
     /// Each object to write, by id.
@@ -42,11 +43,12 @@ pub(crate) struct Prepared<'d> {
     open: Vec<ObjectId>,
     groups: Vec<(Group, Vec<ObjectId>)>,
     outlines_first: bool,
-    /// The outline's objects, whose links to each other aren't walked, as they're
-    /// given to the plan in the order they go.
+    /// The outline's objects, whose links to each other aren't walked, as
+    /// they're given to the plan in the order they go.
     outline: HashSet<ObjectId>,
     /// The name dictionary, of which only `/Dests` is walked, as it's given to
-    /// the plan with the named destinations and the rest have groups of their own.
+    /// the plan with the named destinations and the rest have groups of their
+    /// own.
     names: Option<ObjectId>,
     /// What's named as a font file.
     font_files: HashSet<ObjectId>,
@@ -54,9 +56,9 @@ pub(crate) struct Prepared<'d> {
     /// no page of the tree, a name dictionary's templates (7.5.7), and what an
     /// encryption dictionary refers to, left in the clear.
     kept_out: HashSet<ObjectId>,
-    /// The encryption dictionary, where it's an object, by what the graph knows it
-    /// as, and what its values refer to. It has no body: it's written from the
-    /// encryptor.
+    /// The encryption dictionary, where it's an object, by what the graph knows
+    /// it as, and what its values refer to. It has no body: it's written from
+    /// the encryptor.
     dictionary: Option<(ObjectId, Vec<ObjectId>)>,
 }
 
@@ -69,8 +71,8 @@ impl<'d> Prepared<'d> {
         options: &Options<'_>,
     ) -> Result<Prepared<'d>, Error> {
         let trailer = doc.trailer.dict();
-        // The object that's the catalog, through any references to it: a section's
-        // /Root names it, and it's never packed (F.3.1).
+        // The object that's the catalog, through any references to it: a
+        // section's /Root names it, and it's never packed (F.3.1).
         let root = trailer
             .get(b"Root")
             .filter(|root| root.as_reference().is_some());
@@ -99,8 +101,8 @@ impl<'d> Prepared<'d> {
             }
             _ => None,
         };
-        // What the dictionary refers to stays in the clear, and an object stream
-        // is encrypted (7.6.2).
+        // What the dictionary refers to stays in the clear, and an object
+        // stream is encrypted (7.6.2).
         let in_the_clear = encryptor.map_or_else(Vec::new, |encryptor| {
             let ids = bodies.iter().map(|(id, _)| *id);
             ids.filter(|&id| encryptor.dictionary_object(id)).collect()
@@ -153,7 +155,8 @@ impl<'d> Prepared<'d> {
         Ok(prepared)
     }
 
-    /// Part 4 and part 9's groups, and the document parts' nodes (F.3.5, F.3.10).
+    /// Part 4 and part 9's groups, and the document parts' nodes (F.3.5,
+    /// F.3.10).
     fn document_level(&mut self, doc: &'d Document, catalog: &'d Dict, limits: &TreeLimits) {
         for key in [
             &b"ViewerPreferences"[..],
@@ -320,9 +323,10 @@ impl<'d> Prepared<'d> {
     }
 }
 
-/// What the graph knows `encryptor`'s dictionary as: the number it has in the file
-/// it was read from, and no object's here; or, for a new file's, one past every
-/// number an object has or a reference names, so that none comes to name it.
+/// What the graph knows `encryptor`'s dictionary as: the number it has in the
+/// file it was read from, and no object's here; or, for a new file's, one past
+/// every number an object has or a reference names, so that none comes to name
+/// it.
 fn dictionary_id(
     encryptor: &Encryptor,
     doc: &Document,
@@ -346,9 +350,10 @@ fn dictionary_id(
     }
 }
 
-/// What the trailer's entries and `values`, an encryption dictionary's, reach, as
-/// [`Document::reachable`] finds it: but for a stream's `/Length`, which the writer
-/// writes direct, so an object only that names is one nothing in the file names.
+/// What the trailer's entries and `values`, an encryption dictionary's, reach,
+/// as [`Document::reachable`] finds it: but for a stream's `/Length`, which the
+/// writer writes direct, so an object only that names is one nothing in the
+/// file names.
 fn reached(doc: &Document, values: &[ObjectId]) -> HashSet<ObjectId> {
     let trailer = write::trailer_entries(doc.trailer.dict(), &());
     let mut stack: Vec<ObjectId> = (trailer.entries().iter())
@@ -379,10 +384,10 @@ fn reached(doc: &Document, values: &[ObjectId]) -> HashSet<ObjectId> {
     seen
 }
 
-/// Whether `object` has no body to write, a reference to it being written `null`:
-/// a null, what a file leaves out, what's among `left`, and a reference whose chain
-/// ends at one of those, at no object, or back where it's been, each of which a
-/// reference to reads as a reference to none (7.3.10).
+/// Whether `object` has no body to write, a reference to it being written
+/// `null`: a null, what a file leaves out, what's among `left`, and a reference
+/// whose chain ends at one of those, at no object, or back where it's been,
+/// each of which a reference to reads as a reference to none (7.3.10).
 fn no_body(doc: &Document, object: &Object, left: &HashSet<ObjectId>) -> bool {
     if object.is_null() || write::left_out(object) {
         return true;
@@ -425,8 +430,8 @@ fn dict_of_mut(object: &mut Object) -> Option<&mut Dict> {
     }
 }
 
-/// What `value` names as what a walk starts from: itself where it's a reference,
-/// and what it refers to where it's written in place.
+/// What `value` names as what a walk starts from: itself where it's a
+/// reference, and what it refers to where it's written in place.
 fn roots(value: &Object) -> Vec<ObjectId> {
     match value.as_reference() {
         Some(id) => vec![id],
@@ -451,8 +456,8 @@ fn image(object: &Object) -> bool {
     }
 }
 
-/// The objects that say they're a page or a node of the tree and aren't among the
-/// pages.
+/// The objects that say they're a page or a node of the tree and aren't among
+/// the pages.
 fn strays(bodies: &[(ObjectId, Body<'_>)], pages: &HashSet<ObjectId>) -> Vec<ObjectId> {
     let tree = |dict: &Dict| dict.has_type(b"Page") || dict.has_type(b"Pages");
     (bodies.iter())
@@ -462,9 +467,9 @@ fn strays(bodies: &[(ObjectId, Body<'_>)], pages: &HashSet<ObjectId>) -> Vec<Obj
 }
 
 /// Each of `strays` that says it's a page, given in a body written anew what it
-/// inherits from one of `nodes`, which lose it: an annotation's `/P`, say, can still
-/// name it, and nothing else would be left to give it what it had. What it inherits
-/// from anything else it still does.
+/// inherits from one of `nodes`, which lose it: an annotation's `/P`, say, can
+/// still name it, and nothing else would be left to give it what it had. What
+/// it inherits from anything else it still does.
 fn strays_pushed_down(
     doc: &Document,
     strays: &[ObjectId],
@@ -533,8 +538,8 @@ fn font_files(bodies: &[(ObjectId, Body<'_>)]) -> HashSet<ObjectId> {
     files
 }
 
-/// The tree's pages, by ISO's rules, where PDFium's read the same: each a page of
-/// its own, numbered, whose inheritable attributes both read alike.
+/// The tree's pages, by ISO's rules, where PDFium's read the same: each a page
+/// of its own, numbered, whose inheritable attributes both read alike.
 fn pages_agreed<'d>(
     doc: &'d Document,
     catalog: &'d Dict,
@@ -574,9 +579,9 @@ fn pages_agreed<'d>(
 }
 
 /// Each page's inheritable attributes read going down `/Kids` from the root, as
-/// some readers take them, held to what its `/Parent`s give it, as `table` has them:
-/// where a page's `/Parent` isn't the node that lists it, the two can differ, and
-/// pushing one value down would change the other reader's page.
+/// some readers take them, held to what its `/Parent`s give it, as `table` has
+/// them: where a page's `/Parent` isn't the node that lists it, the two can
+/// differ, and pushing one value down would change the other reader's page.
 fn kids_agree(doc: &Document, catalog: &Dict, table: &Pages<'_>) -> Result<(), Error> {
     let places: HashMap<ObjectId, usize> = (table.iter().enumerate())
         .filter_map(|(place, page)| Some((page.id?, place)))
@@ -726,13 +731,14 @@ fn nodes_taken_off(
         let kids = dict.get(b"Kids").map(|kids| array_of(doc, kids));
         stack.extend(kids.unwrap_or_default().iter().rev());
     }
-    // What a page says is its parent is a node only if it holds kids, or says so:
-    // a broken file's /Parent can name its /Resources.
+    // What a page says is its parent is a node only if it holds kids, or says
+    // so: a broken file's /Parent can name its /Resources.
     let node = |id: ObjectId| {
         doc.get_dict(id)
             .is_some_and(|dict| dict.has(b"Kids") || dict.has_type(b"Pages"))
     };
-    // A node met by /Kids can still have one above it that only its /Parent names.
+    // A node met by /Kids can still have one above it that only its /Parent
+    // names.
     let mut climbed = HashSet::new();
     for page in table {
         for id in page.parents() {
@@ -787,8 +793,8 @@ fn page_said(doc: &Document, id: ObjectId, dict: Option<&Dict>) -> Page {
 }
 
 /// What a page refers to, in the order F.3.7 recommends: annotations, beads,
-/// resources, what else it names, its content; not its parent, nor its thumbnail,
-/// which F.3.10 has in part 9.
+/// resources, what else it names, its content; not its parent, nor its
+/// thumbnail, which F.3.10 has in part 9.
 fn page_references(dict: &Dict, refs: &mut Vec<ObjectId>) {
     let mut of = |key: &[u8]| {
         if let Some(value) = dict.get(key) {
@@ -823,7 +829,8 @@ fn first_page(doc: &Document, catalog: &Dict, table: &Pages<'_>, first: FirstPag
     place.map_or(0, |place| place as u32)
 }
 
-/// The page object an `/OpenAction` opens at: a destination, or a `/GoTo` action's.
+/// The page object an `/OpenAction` opens at: a destination, or a `/GoTo`
+/// action's.
 fn opens_at(doc: &Document, catalog: &Dict, action: &Object) -> Option<ObjectId> {
     let (_, action) = doc.dereference(action)?;
     let destination = match dict_of(action) {
@@ -837,8 +844,8 @@ fn opens_at(doc: &Document, catalog: &Dict, action: &Object) -> Option<ObjectId>
 }
 
 /// The page object a destination names: an array's first element, by way of a
-/// name (the catalog's `/Dests`) or a string (the name dictionary's `/Dests`) where
-/// it's named (12.3.2).
+/// name (the catalog's `/Dests`) or a string (the name dictionary's `/Dests`)
+/// where it's named (12.3.2).
 fn destination_page(doc: &Document, catalog: &Dict, destination: &Object) -> Option<ObjectId> {
     let (_, destination) = doc.dereference(destination)?;
     let target = match destination.value() {
@@ -898,10 +905,10 @@ fn document_parts(doc: &Document, catalog: &Dict, nodes: &mut Vec<ObjectId>) {
     }
 }
 
-/// The outline's objects in the order F.3.10 has them: as a viewer shows it, then
-/// what's under a closed item, each in the order it would show if all were open.
-/// What only a broken file's `/Last` or `/Prev` reaches comes after what's beside
-/// it.
+/// The outline's objects in the order F.3.10 has them: as a viewer shows it,
+/// then what's under a closed item, each in the order it would show if all were
+/// open. What only a broken file's `/Last` or `/Prev` reaches comes after
+/// what's beside it.
 fn outline_order(doc: &Document, outlines: &Object) -> Vec<ObjectId> {
     let (mut shown, mut hidden) = (Vec::new(), Vec::new());
     let mut seen = HashSet::new();

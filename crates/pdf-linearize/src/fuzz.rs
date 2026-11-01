@@ -1,11 +1,12 @@
 //! What the fuzz target checks, which unit tests check too: the promises a plan
-//! makes, on any graph, each held against a plain walk of it; what's assembled from
-//! a plan, its positions against its pieces, its tables against the plan, and the
-//! check of it clean; a hint stream of any bytes, read under small caps and written
-//! again; any facts, judged the same whatever the sink; with `family`, any bytes as a
-//! file, laid out and read back, the check of what's written clean; and with `lopdf` too,
-//! any bytes as edits to a document of lopdf's, the same of what that adapter writes. It's
-//! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
+//! makes, on any graph, each held against a plain walk of it; what's assembled
+//! from a plan, its positions against its pieces, its tables against the plan,
+//! and the check of it clean; a hint stream of any bytes, read under small caps
+//! and written again; any facts, judged the same whatever the sink; with
+//! `family`, any bytes as a file, laid out and read back, the check of what's
+//! written clean; and with `lopdf` too, any bytes as edits to a document of
+//! lopdf's, the same of what that adapter writes. It's compiled only for tests
+//! and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -82,7 +83,8 @@ impl Bytes<'_> {
 }
 
 /// The graph `data` describes: mostly one that can be planned, each thing that
-/// can't by a small chance, its numbers spread by a step so they aren't its order.
+/// can't by a small chance, its numbers spread by a step so they aren't its
+/// order.
 fn described(data: &[u8]) -> Described {
     let mut bytes = Bytes(data);
     let flags = bytes.byte();
@@ -190,7 +192,8 @@ impl Described {
     }
 
     /// Why the graph has to be refused, by the first check [`plan`] makes that
-    /// it fails. A cap can't come up on an input's graph under the default ones.
+    /// it fails. A cap can't come up on an input's graph under the default
+    /// ones.
     fn refusal(&self) -> Option<Error> {
         if self.pages.is_empty() {
             return Some(Error::NoPages);
@@ -501,9 +504,9 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
         }
     }
 
-    // Entries tile part 6, then part 8 write by write; in part 6 what a later page
-    // reaches has one of its own and nothing else is alone beside another that
-    // could join it.
+    // Entries tile part 6, then part 8 write by write; in part 6 what a later
+    // page reaches has one of its own and nothing else is alone beside another
+    // that could join it.
     let later_reach = |at: usize| match plan.writes()[at].what {
         What::Object(id) => plan.used(id).is_some_and(later),
         What::Container(c) => {
@@ -571,8 +574,8 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
             assert_eq!(plan.group_shared(group), []);
         }
     }
-    // Each root of the embedded file group: a group of its own, the writes of each
-    // what it reaches, one after another, and a list of its own.
+    // Each root of the embedded file group: a group of its own, the writes of
+    // each what it reaches, one after another, and a list of its own.
     let files: Vec<Id> = (described.groups.iter())
         .filter(|(g, _)| *g == Group::EmbeddedFile)
         .flat_map(|(_, roots)| roots.iter().copied())
@@ -691,8 +694,8 @@ fn plain(stream: Stream<'_>) -> Result<Encoded, Infallible> {
 }
 
 /// `layout` of `plan` under `lengths`: its pieces add up to where it says each
-/// thing is, the dictionary's values among them, and its tables, read back, are the
-/// plan's, each position landing on what it names.
+/// thing is, the dictionary's values among them, and its tables, read back, are
+/// the plan's, each position landing on what it names.
 fn assembled(plan: &Plan, lengths: &[u64], layout: &Layout) {
     let mut at = 0;
     let mut bodies = 0;
@@ -707,7 +710,8 @@ fn assembled(plan: &Plan, lengths: &[u64], layout: &Layout) {
                     assert_eq!(bytes.get(..5), Some(&b"%PDF-"[..]));
                 }
                 if pieces.peek().is_none() {
-                    // The main section's the last, and it starts where they end.
+                    // The main section's the last, and it starts where they
+                    // end.
                     positions.push(at);
                     assert_eq!(layout.main_section(), at);
                 }
@@ -888,9 +892,10 @@ fn assembled(plan: &Plan, lengths: &[u64], layout: &Layout) {
     }
 }
 
-/// `plan` assembled, under lengths from `data`: with each stream as it is; with a
-/// first-page stream that wants more room for a few rounds, which settles; and,
-/// on a small graph as it's costly, with one that always does, which is refused.
+/// `plan` assembled, under lengths from `data`: with each stream as it is; with
+/// a first-page stream that wants more room for a few rounds, which settles;
+/// and, on a small graph as it's costly, with one that always does, which is
+/// refused.
 fn assembles(plan: &Plan, data: &[u8]) {
     let mut lengths = data.iter().cycle().map(|byte| 16 + u64::from(*byte));
     let lengths: Vec<u64> = match data.is_empty() {
@@ -929,7 +934,8 @@ fn assembles(plan: &Plan, data: &[u8]) {
         let refused = assemble(plan, &lengths, &options, |stream| {
             let mut encoded = Encoded::plain(stream.data.to_vec());
             if stream.what == StreamKind::FirstXref {
-                // Past each round's room, and not much more: it's what this costs.
+                // Past each round's room, and not much more: it's what this
+                // costs.
                 longer = (longer + stream.data.len()) * 3 / 2 + 200;
                 encoded.data.extend(std::iter::repeat_n(0, longer));
             }
@@ -943,8 +949,9 @@ fn assembles(plan: &Plan, data: &[u8]) {
     assert!(matches!(refused, Err(layout::Error::Lengths { .. })));
 }
 
-/// Any bytes as a hint stream of a file of any number of pages, its tables at any
-/// positions, under small caps: an error, or tables that write and read the same.
+/// Any bytes as a hint stream of a file of any number of pages, its tables at
+/// any positions, under small caps: an error, or tables that write and read the
+/// same.
 pub fn tables(data: &[u8]) {
     let (mut limits, mut small) = (Limits::DEFAULT, Bytes(data));
     limits.pages = 256;
@@ -1213,8 +1220,8 @@ impl Sink for Unwanted {
     }
 }
 
-/// The same verdict whatever the sink, none told what doesn't want any, and that
-/// verdict what the findings say. What's kept is given back.
+/// The same verdict whatever the sink, none told what doesn't want any, and
+/// that verdict what the findings say. What's kept is given back.
 fn judged_alike(facts: &Facts, limits: &Limits) -> (check::Verdict, Vec<Finding>) {
     let mut kept = Vec::new();
     let verdict = check::check(facts, limits, &mut kept);
@@ -1229,16 +1236,17 @@ fn judged_alike(facts: &Facts, limits: &Limits) -> (check::Verdict, Vec<Finding>
     (verdict, kept)
 }
 
-/// What's assembled holds: the check of it finds nothing but what a plan can't help.
+/// What's assembled holds: the check of it finds nothing but what a plan can't
+/// help.
 fn clean(plan: &Plan, layout: &Layout) {
     let (verdict, findings) = judged_alike(&facts_of(plan, layout), &Limits::DEFAULT);
     assert!(verdict.linearized && verdict.holds && verdict.hints_read);
     assert_eq!(findings, [], "{plan:?}");
 }
 
-/// Any facts: judged under small caps, never panicking, the same whatever the sink.
-/// Half are what's assembled from a plan of the input, each field given a value of
-/// the input's; half are all from the input.
+/// Any facts: judged under small caps, never panicking, the same whatever the
+/// sink. Half are what's assembled from a plan of the input, each field given a
+/// value of the input's; half are all from the input.
 pub fn facts(data: &[u8]) {
     let mut limits = Limits::DEFAULT;
     limits.pages = 256;
@@ -1276,7 +1284,8 @@ fn number_from(bytes: &mut Bytes) -> u64 {
     }
 }
 
-/// A number an object has, of the input's: few, now and then the last there can be.
+/// A number an object has, of the input's: few, now and then the last there can
+/// be.
 fn object_from(bytes: &mut Bytes) -> u32 {
     match bytes.chance(16) {
         true => u32::MAX - bytes.below(2) as u32,
@@ -1378,7 +1387,8 @@ fn hint_from(bytes: &mut Bytes) -> HintFacts {
     hint
 }
 
-/// Facts from the input alone, what the rest depends on first, mostly as it should be.
+/// Facts from the input alone, what the rest depends on first, mostly as it
+/// should be.
 fn made_up(bytes: &mut Bytes) -> Facts {
     let len = number_from(bytes);
     let mut facts = Facts::new(len);
@@ -1474,12 +1484,12 @@ fn spoiled(facts: &mut Facts, bytes: &mut Bytes) {
     }
 }
 
-/// Any bytes as a file, read and written again in the three kinds: in the clear; as
-/// it's encrypted, where it is, and a password opens it; and now and then, by the
-/// input's length, under a new encryption. Where it's written, it reads linearized by
-/// its password, with the same pages, and every object the plan numbers is the same
-/// value at its number under the numbering, a stream's data the same; on any refusal,
-/// `out` as it was.
+/// Any bytes as a file, read and written again in the three kinds: in the
+/// clear; as it's encrypted, where it is, and a password opens it; and now and
+/// then, by the input's length, under a new encryption. Where it's written, it
+/// reads linearized by its password, with the same pages, and every object the
+/// plan numbers is the same value at its number under the numbering, a stream's
+/// data the same; on any refusal, `out` as it was.
 #[cfg(feature = "family")]
 pub fn over(data: &[u8]) {
     use pdf_structure::XrefKind;
@@ -1522,8 +1532,8 @@ pub fn over(data: &[u8]) {
 #[cfg(feature = "family")]
 const NEW: &str = "new";
 
-/// What [`over`] holds of `doc`, written under `encryptor` as `options` says, which
-/// `password` opens, or the empty one.
+/// What [`over`] holds of `doc`, written under `encryptor` as `options` says,
+/// which `password` opens, or the empty one.
 #[cfg(feature = "family")]
 fn written_back<S: pdf_structure::ByteSource>(
     reading: &pdf_structure::Reading<S>,
@@ -1614,8 +1624,8 @@ fn written_back<S: pdf_structure::ByteSource>(
     }
 }
 
-/// A new encryption's draws, in a fuzz body or a test alone: the input's bytes, then a
-/// counter's. It's no cryptographic generator, but says it is so that
+/// A new encryption's draws, in a fuzz body or a test alone: the input's bytes,
+/// then a counter's. It's no cryptographic generator, but says it is so that
 /// [`Encryptor::create`](pdf_structure::write::Encryptor::create) takes it.
 #[cfg(feature = "family")]
 struct Drawn<'a> {
@@ -1666,8 +1676,8 @@ impl pdf_structure::pdf_crypt::rand_core::TryRng for Drawn<'_> {
 #[cfg(feature = "family")]
 impl pdf_structure::pdf_crypt::rand_core::TryCryptoRng for Drawn<'_> {}
 
-/// Whether `written`, read back, is `value` under `planned`'s numbers: a reference
-/// to what it doesn't number reads null.
+/// Whether `written`, read back, is `value` under `planned`'s numbers: a
+/// reference to what it doesn't number reads null.
 #[cfg(feature = "family")]
 fn same_under(value: &pdf_objects::Object, written: &pdf_objects::Object, planned: &Plan) {
     use pdf_objects::{Dict, Value};
@@ -1713,8 +1723,9 @@ fn same_under(value: &pdf_objects::Object, written: &pdf_objects::Object, planne
     }
 }
 
-/// The objects [`lopdf_document`] starts from: a tree of three pages by two nodes, what
-/// they inherit, share and have alone, and an outline and a page no tree lists.
+/// The objects [`lopdf_document`] starts from: a tree of three pages by two
+/// nodes, what they inherit, share and have alone, and an outline and a page no
+/// tree lists.
 #[cfg(all(feature = "family", feature = "lopdf"))]
 fn lopdf_start() -> ::lopdf::Document {
     use ::lopdf::{Dictionary, Document, Object, Stream, dictionary};
@@ -1793,10 +1804,11 @@ fn lopdf_start() -> ::lopdf::Document {
     doc
 }
 
-/// The fuzz body for the lopdf adapter: any bytes as edits to the objects of a document of
-/// lopdf's, so its reader isn't what's under test: refused, with `out` as it was given, or
-/// written, its positions counted right, and what's written saying it's linearized and
-/// holding, nothing said but what a page doesn't have to push. It gives whether it wrote.
+/// The fuzz body for the lopdf adapter: any bytes as edits to the objects of a
+/// document of lopdf's, so its reader isn't what's under test: refused, with
+/// `out` as it was given, or written, its positions counted right, and what's
+/// written saying it's linearized and holding, nothing said but what a page
+/// doesn't have to push. It gives whether it wrote.
 #[cfg(all(feature = "family", feature = "lopdf"))]
 pub fn lopdf_document(data: &[u8]) -> bool {
     use ::lopdf::{Dictionary, Object};
@@ -1901,8 +1913,8 @@ pub fn lopdf_document(data: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    /// A plain generator: what's fuzzed only has to vary, and a seed gives the same
-    /// inputs each time.
+    /// A plain generator: what's fuzzed only has to vary, and a seed gives the
+    /// same inputs each time.
     fn generator(mut state: u64) -> impl FnMut() -> u64 {
         move || {
             state ^= state << 13;
@@ -1933,8 +1945,8 @@ mod tests {
         seeds
     }
 
-    /// Inputs of what's planned and assembled, as hint streams: 16 bytes that say
-    /// how to read them, then the data.
+    /// Inputs of what's planned and assembled, as hint streams: 16 bytes that
+    /// say how to read them, then the data.
     fn table_seeds() -> Vec<Vec<u8>> {
         let mut seeds_of = Vec::new();
         for seed in seeds() {
@@ -1953,9 +1965,9 @@ mod tests {
         seeds_of
     }
 
-    /// Files of what the family adapter treats apart: inherited attributes, a form,
-    /// an outline, threads, document parts, a thumbnail, each as read and as it
-    /// lays them out.
+    /// Files of what the family adapter treats apart: inherited attributes, a
+    /// form, an outline, threads, document parts, a thumbnail, each as read and
+    /// as it lays them out.
     #[cfg(feature = "family")]
     fn file_seeds() -> Vec<Vec<u8>> {
         let file = |objects: &[&str]| {
@@ -1999,8 +2011,8 @@ mod tests {
             "3",
         ]);
         let mut seeds = vec![all.clone()];
-        // What's only a reference to nothing, a page's /Parent that's a page, a tree
-        // whose /Kids and /Parent disagree, and a page no tree lists.
+        // What's only a reference to nothing, a page's /Parent that's a page, a
+        // tree whose /Kids and /Parent disagree, and a page no tree lists.
         let root =
             "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 9 9] /Resources << >> >>";
         let shared = "<< /Type /Page /Parent 2 0 R /X 5 0 R >>";
@@ -2054,8 +2066,8 @@ mod tests {
             options.pack = pack;
             seeds.push(crate::family::linearize_bytes(&all, &[], &options).unwrap());
         }
-        // Encrypted, by each of the handler's revisions, by the files qpdf encrypted, and
-        // as it lays them out.
+        // Encrypted, by each of the handler's revisions, by the files qpdf
+        // encrypted, and as it lays them out.
         let keys = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
         for key in ["rc4-40", "rc4-128", "aes-128", "aes-256-r5", "aes-256"] {
             let Ok(key) = std::fs::read(keys.join(format!("qpdf-{key}.pdf"))) else {
@@ -2073,8 +2085,8 @@ mod tests {
         seeds
     }
 
-    /// `plain`'s objects as a whole file under `key`'s encryption, its dictionary at a
-    /// number past them.
+    /// `plain`'s objects as a whole file under `key`'s encryption, its
+    /// dictionary at a number past them.
     #[cfg(feature = "family")]
     fn encrypted_as(key: &[u8], plain: &[u8]) -> Vec<u8> {
         use pdf_structure::bytes::{self, Reading};
@@ -2092,8 +2104,8 @@ mod tests {
         out
     }
 
-    /// The lopdf adapter's body, on random edits: a good share of them written, so that
-    /// what's held is what's been run.
+    /// The lopdf adapter's body, on random edits: a good share of them written,
+    /// so that what's held is what's been run.
     #[cfg(all(feature = "family", feature = "lopdf"))]
     #[test]
     fn what_lopdf_s_adapter_writes_of_any_document_holds() {
@@ -2130,7 +2142,8 @@ mod tests {
     }
 
     /// Writes [`seeds`] and [`table_seeds`] to the folder
-    /// `PDF_LINEARIZE_FUZZ_SEEDS` names, for `just fuzz linearize` to begin from.
+    /// `PDF_LINEARIZE_FUZZ_SEEDS` names, for `just fuzz linearize` to begin
+    /// from.
     #[test]
     #[ignore = "writes files for the fuzzer"]
     fn the_seeds_are_written() {

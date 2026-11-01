@@ -6,41 +6,41 @@
 //! ([`Part::Open`]), the hint stream and the first page ([`Part::FirstPage`])
 //! come first and take the highest numbers; then each other page with what only
 //! it uses ([`Part::Pages`]), what pages share ([`Part::Shared`]), everything
-//! else ([`Part::Other`]) and the main cross-reference section, numbered from 1.
-//! A [`Graph`] says what a plan needs to know of the objects, and nothing here
-//! sees a body: [`plan()`] gives what a caller serializes, in file order
+//! else ([`Part::Other`]) and the main cross-reference section, numbered from
+//! 1. A [`Graph`] says what a plan needs to know of the objects, and nothing
+//! here sees a body: [`plan()`] gives what a caller serializes, in file order
 //! ([`Plan::writes`]), under the numbers it gives ([`Plan::number`]).
 //!
 //! # Where an object goes
 //!
 //! [`Use`] says which pages reach an object, walking from each page and never
 //! into another page, a page tree node or what a viewer has at open. The first
-//! page's walk is kept as it went, as part 6, whatever a later page then reaches
-//! of it: an object the first page shares stays with the first page (F.3.7,
-//! F.4.3), which `Use` alone can't say. An object another page's walk alone
-//! reaches is in that page's section, and one several reach is in part 8. An
-//! object placed once stays there: part 4 is placed first, then the first page,
-//! the other pages, part 8 and part 9.
+//! page's walk is kept as it went, as part 6, whatever a later page then
+//! reaches of it: an object the first page shares stays with the first page
+//! (F.3.7, F.4.3), which `Use` alone can't say. An object another page's walk
+//! alone reaches is in that page's section, and one several reach is in part 8.
+//! An object placed once stays there: part 4 is placed first, then the first
+//! page, the other pages, part 8 and part 9.
 //!
 //! # Object streams
 //!
-//! [`group()`] is called once per region, what's packable there going to it, so a
-//! region's object streams hold only its objects and a table can name it as one
-//! stretch of the file. A stream with one later page's members alone stays in
-//! that page's section; one with several pages' or shared members is in part 8,
-//! one entry of the shared table, so what a stream holds costs a viewer one
-//! fetch. Only a cross-reference stream lists a member, so under [`Kind::Table`]
-//! nothing's packed. Each thumbnail and each embedded file is a region of its own,
-//! so its table can name it.
+//! [`group()`] is called once per region, what's packable there going to it, so
+//! a region's object streams hold only its objects and a table can name it as
+//! one stretch of the file. A stream with one later page's members alone stays
+//! in that page's section; one with several pages' or shared members is in part
+//! 8, one entry of the shared table, so what a stream holds costs a viewer one
+//! fetch. Only a cross-reference stream lists a member, so under
+//! [`Kind::Table`] nothing's packed. Each thumbnail and each embedded file is a
+//! region of its own, so its table can name it.
 //!
 //! # What a plan costs
 //!
 //! The walk and the numbers take one pass over the objects and their
-//! references, each reference found by a binary search once. Each page's list of
-//! shared objects ([`Plan::shared`]) can't come from that walk, which enters an
-//! object twice at most however many pages reach it: it's a walk of its own for
-//! each later page, the sum of what each page reaches, which is what the hint
-//! tables write, under [`Limits`].
+//! references, each reference found by a binary search once. Each page's list
+//! of shared objects ([`Plan::shared`]) can't come from that walk, which enters
+//! an object twice at most however many pages reach it: it's a walk of its own
+//! for each later page, the sum of what each page reaches, which is what the
+//! hint tables write, under [`Limits`].
 
 use std::ops::Range;
 
@@ -68,21 +68,24 @@ pub enum Kind {
     Stream,
 }
 
-/// Which page goes first, in part 6, as the dictionary's `/P` says (F.3.7): what an
-/// adapter's options take, which [`Graph::first_page`] is then told as a place.
+/// Which page goes first, in part 6, as the dictionary's `/P` says (F.3.7):
+/// what an adapter's options take, which [`Graph::first_page`] is then told as
+/// a place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum FirstPage {
-    /// The page the catalog's `/OpenAction` opens at, a destination or a `/GoTo`
-    /// action's, named or not; page 0 where it opens at no page of this file.
+    /// The page the catalog's `/OpenAction` opens at, a destination or a
+    /// `/GoTo` action's, named or not; page 0 where it opens at no page of this
+    /// file.
     #[default]
     OpenAction,
-    /// This page, from 0: past the last it's refused ([`Error::FirstPagePast`]).
+    /// This page, from 0: past the last it's refused
+    /// ([`Error::FirstPagePast`]).
     Index(u32),
 }
 
-/// The objects of a part that are grouped for a table of the hint stream, in the
-/// order they're laid out (F.3.10).
+/// The objects of a part that are grouped for a table of the hint stream, in
+/// the order they're laid out (F.3.10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Group {
@@ -181,8 +184,8 @@ impl Page {
     }
 }
 
-/// A document's objects as a plan needs them: flat, one list of references and a
-/// range of it per object. Built up by its methods, which refuse nothing;
+/// A document's objects as a plan needs them: flat, one list of references and
+/// a range of it per object. Built up by its methods, which refuse nothing;
 /// [`plan()`] does.
 #[derive(Debug, Clone)]
 pub struct Graph {
@@ -516,8 +519,8 @@ impl Plan {
         self.groups[group as usize].clone()
     }
 
-    /// Each root of [`Group::EmbeddedFile`] as its own group, in the order given
-    /// (F.4.7).
+    /// Each root of [`Group::EmbeddedFile`] as its own group, in the order
+    /// given (F.4.7).
     pub fn files(&self) -> &[FileGroup] {
         &self.files
     }

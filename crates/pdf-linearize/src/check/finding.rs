@@ -8,10 +8,12 @@ use crate::{hint, plan};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Grade {
-    /// What a reader relying on the file gets wrong: a position, a length, a count,
-    /// an identifier past its table, a value it can't read. The file doesn't hold.
+    /// What a reader relying on the file gets wrong: a position, a length, a
+    /// count, an identifier past its table, a value it can't read. The file
+    /// doesn't hold.
     Error,
-    /// Not as the standard has it, but every reader goes on, and real writers do it.
+    /// Not as the standard has it, but every reader goes on, and real writers
+    /// do it.
     Departure,
 }
 
@@ -52,8 +54,8 @@ impl std::fmt::Display for DictKey {
     }
 }
 
-/// A key of a hint stream's dictionary, as a finding owning nothing can hold it:
-/// its first bytes.
+/// A key of a hint stream's dictionary, as a finding owning nothing can hold
+/// it: its first bytes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeyName {
     bytes: [u8; 15],
@@ -90,8 +92,8 @@ impl std::fmt::Debug for KeyName {
     }
 }
 
-/// Where a [`Finding`] is said of, for a caller that points at it: as near to the bytes
-/// as the check knows them, which [`Finding::place`] gives.
+/// Where a [`Finding`] is said of, for a caller that points at it: as near to
+/// the bytes as the check knows them, which [`Finding::place`] gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Place {
@@ -118,18 +120,20 @@ pub enum Place {
     HintKey(KeyName),
 }
 
-/// One thing wrong with a file, by the clause it departs from. It owns nothing, so
-/// a sink keeps it as it is; its [`Display`](std::fmt::Display) is the whole message, with the place,
-/// a byte or a page or an entry of a table, where there's one, and [`Finding::place`]
-/// and [`Finding::clause`] give those apart.
+/// One thing wrong with a file, by the clause it departs from. It owns nothing,
+/// so a sink keeps it as it is; its [`Display`](std::fmt::Display) is the whole
+/// message, with the place, a byte or a page or an entry of a table, where
+/// there's one, and [`Finding::place`] and [`Finding::clause`] give those
+/// apart.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Finding {
-    /// `/Linearized` isn't a number whose integer part is 1 (Table F.1), so the file
-    /// isn't taken as linearized.
+    /// `/Linearized` isn't a number whose integer part is 1 (Table F.1), so the
+    /// file isn't taken as linearized.
     #[error("/Linearized isn't a number whose integer part is 1 (ISO 32000-2, Table F.1)")]
     Version,
-    /// `/L` isn't the file's length (Table F.1), so the file isn't taken as linearized.
+    /// `/L` isn't the file's length (Table F.1), so the file isn't taken as
+    /// linearized.
     #[error("/L is {l}, where the file is {len} bytes from its header (ISO 32000-2, Table F.1)")]
     LengthNotFile {
         /// What it says.
@@ -137,8 +141,8 @@ pub enum Finding {
         /// What the file is.
         len: u64,
     },
-    /// An update follows the file's linearized part (G.7), which is why `/L` isn't
-    /// its length.
+    /// An update follows the file's linearized part (G.7), which is why `/L`
+    /// isn't its length.
     #[error(
         "an update is appended, its section at byte {at}: the hints may no longer hold (ISO 32000-2, G.7)"
     )]
@@ -158,7 +162,8 @@ pub enum Finding {
         /// The key.
         key: DictKey,
     },
-    /// The dictionary starts within the first 1024 bytes and runs past them (F.3.3).
+    /// The dictionary starts within the first 1024 bytes and runs past them
+    /// (F.3.3).
     #[error("the dictionary runs on to byte {end}, past the first 1024 bytes (ISO 32000-2, F.3.3)")]
     DictionaryPast1024 {
         /// Where it ends, from the header.
@@ -241,8 +246,8 @@ pub enum Finding {
     /// The first section's `/Prev` gives no section that reads (F.3.4).
     #[error("no main section reads from the first section's /Prev (ISO 32000-2, F.3.4)")]
     NoMainSection,
-    /// The section `startxref` gives comes after the one its `/Prev` gives, as an
-    /// update's would (F.3).
+    /// The section `startxref` gives comes after the one its `/Prev` gives, as
+    /// an update's would (F.3).
     #[error(
         "the first section, at byte {first}, is after the main one, at byte {main} (ISO 32000-2, F.3)"
     )]
@@ -343,8 +348,8 @@ pub enum Finding {
         number: u32,
     },
     /// An object not in an object stream is numbered above one that is, in one
-    /// section, where they have the highest range (F.3.1). The hint stream is last by
-    /// F.3.6 and isn't one of these.
+    /// section, where they have the highest range (F.3.1). The hint stream is
+    /// last by F.3.6 and isn't one of these.
     #[error(
         "{number} isn't in an object stream, and is numbered after one that is (ISO 32000-2, F.3.1)"
     )]
@@ -367,8 +372,8 @@ pub enum Finding {
     GroupsApart {
         /// Where the first group's start.
         first: u32,
-        /// Where they should, past the last number there can be where the main section
-        /// lists that.
+        /// Where they should, past the last number there can be where the main
+        /// section lists that.
         next: u64,
     },
     /// An object is numbered after one that it's written before (F.3.1).
@@ -403,14 +408,15 @@ pub enum Finding {
         /// The key.
         key: KeyName,
     },
-    /// A value in the hint stream's dictionary but `/Length` is a reference (F.3.6).
+    /// A value in the hint stream's dictionary but `/Length` is a reference
+    /// (F.3.6).
     #[error("the hint stream's {key} is a reference, and only /Length may be (ISO 32000-2, F.3.6)")]
     HintKeyIndirect {
         /// The key.
         key: KeyName,
     },
-    /// A key F.3.6's table doesn't list, which may be a registered extension's or a
-    /// private table's: it isn't read.
+    /// A key F.3.6's table doesn't list, which may be a registered extension's
+    /// or a private table's: it isn't read.
     #[error(
         "the hint stream has {key}, which ISO 32000-2's Table F.2 doesn't list, and which isn't read"
     )]
@@ -418,7 +424,8 @@ pub enum Finding {
         /// The key.
         key: KeyName,
     },
-    /// A hint table doesn't read: past its data, or a width past 32, or past a cap.
+    /// A hint table doesn't read: past its data, or a width past 32, or past a
+    /// cap.
     #[error("the hint tables don't read: {fault} (ISO 32000-2, F.4)")]
     HintTables {
         /// Why.
@@ -455,8 +462,8 @@ pub enum Finding {
         /// The attribute.
         attribute: Attribute,
     },
-    /// The page tree didn't read, or has no pages, so nothing depending on it can
-    /// be said (F.3.7).
+    /// The page tree didn't read, or has no pages, so nothing depending on it
+    /// can be said (F.3.7).
     #[error("the page tree gives no pages, or doesn't read (ISO 32000-2, F.3.7)")]
     NoPages,
     /// The first page's object isn't among what the first section lists.
@@ -478,10 +485,10 @@ pub enum Finding {
         /// Where it is.
         computed: u64,
     },
-    /// Other objects of the first page's section come before its page object, where
-    /// that's first, and the page table has the section's start for the object's
-    /// (F.3.7, F.4.2): what a reader asks for from there, by the entry's length, is the
-    /// whole of it.
+    /// Other objects of the first page's section come before its page object,
+    /// where that's first, and the page table has the section's start for the
+    /// object's (F.3.7, F.4.2): what a reader asks for from there, by the
+    /// entry's length, is the whole of it.
     #[error(
         "the page table has the first page at {hint}, the start of its section, where its object is at {computed} as if the hint stream weren't there (ISO 32000-2, F.3.7)"
     )]
@@ -491,7 +498,8 @@ pub enum Finding {
         /// Where its object is.
         computed: u64,
     },
-    /// Adding up the page table's lengths doesn't land on a page's object (F.4.2).
+    /// Adding up the page table's lengths doesn't land on a page's object
+    /// (F.4.2).
     #[error(
         "the page table's lengths have page {page} at {hint}, where its object is at {computed} as if the hint stream weren't there (ISO 32000-2, F.4.2)"
     )]
@@ -539,8 +547,8 @@ pub enum Finding {
         /// The page's length.
         length: u64,
     },
-    /// The first page has entries for shared objects, where a viewer has them all by
-    /// `/E` (F.4.2).
+    /// The first page has entries for shared objects, where a viewer has them
+    /// all by `/E` (F.4.2).
     #[error(
         "the page table gives the first page {entries} shared objects, where it has none (ISO 32000-2, F.4.2)"
     )]
@@ -548,7 +556,8 @@ pub enum Finding {
         /// How many it gives.
         entries: u64,
     },
-    /// A page's shared object identifier is past the shared object table (F.4.2).
+    /// A page's shared object identifier is past the shared object table
+    /// (F.4.2).
     #[error(
         "the page table gives page {page} shared object {id}, where the table has {entries} (ISO 32000-2, F.4.2)"
     )]
@@ -561,7 +570,8 @@ pub enum Finding {
         entries: u32,
     },
 
-    /// More of the shared object table is the first page's than there is (F.4.3).
+    /// More of the shared object table is the first page's than there is
+    /// (F.4.3).
     #[error(
         "the shared object table gives the first page {first} of its {total} entries (ISO 32000-2, F.4.3)"
     )]
@@ -660,8 +670,8 @@ pub enum Finding {
         /// What they take.
         computed: u64,
     },
-    /// A table's shared object identifier is past the shared object table (F.4.6,
-    /// F.4.7).
+    /// A table's shared object identifier is past the shared object table
+    /// (F.4.6, F.4.7).
     #[error(
         "the {table} table gives shared object {id}, where the table has {entries} (ISO 32000-2, F.4)"
     )]
@@ -684,8 +694,8 @@ pub enum Finding {
         pages: u64,
     },
 
-    /// The objects given as the file's graph can't be planned, so what a page reaches
-    /// isn't said.
+    /// The objects given as the file's graph can't be planned, so what a page
+    /// reaches isn't said.
     #[error("what the file's objects reach can't be said (ISO 32000-2, F.3.7): {why}")]
     GraphRefused {
         /// Why.
@@ -721,8 +731,8 @@ pub enum Finding {
         /// The entry.
         entry: u64,
     },
-    /// A later page lists an entry of the shared object table that holds nothing it
-    /// reaches (F.4.2).
+    /// A later page lists an entry of the shared object table that holds
+    /// nothing it reaches (F.4.2).
     #[error(
         "page {page} lists entry {entry} of the shared object table, and reaches nothing it holds (ISO 32000-2, F.4.2)"
     )]
@@ -890,14 +900,15 @@ impl Finding {
         }
     }
 
-    /// How much it matters: [`Grade::Error`] by definition for what a reader acts on
-    /// (a position, a length, a count, an identifier past its table, a value it can't
-    /// read), [`Grade::Departure`] where real files, read by real viewers, show that
-    /// nothing goes wrong by it.
+    /// How much it matters: [`Grade::Error`] by definition for what a reader
+    /// acts on (a position, a length, a count, an identifier past its table, a
+    /// value it can't read), [`Grade::Departure`] where real files, read by
+    /// real viewers, show that nothing goes wrong by it.
     pub fn grade(&self) -> Grade {
         use Finding::*;
         match self {
-            // A reader goes on: what these leave out it fetches by the sections.
+            // A reader goes on: what these leave out it fetches by the
+            // sections.
             Updated { .. }
             | DictionaryPast1024 { .. }
             | FirstSubsections { .. }
