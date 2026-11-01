@@ -30,8 +30,7 @@ use std::fmt;
 /// A date: its year, as many of its other fields as it has, and what reading
 /// it read past. Its fields are private, so that it always writes as a date:
 /// it's had from [`read`](Self::read), [`new`](Self::new) and the `with_`
-/// methods, or the clock's [`now`](Self::now) and
-/// [`from_unix`](Self::from_unix).
+/// methods, or with the `clock` feature, `now` and `from_unix`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Date {
     year: u16,
@@ -484,7 +483,7 @@ impl Date {
     }
 
     /// What reading it read past, in the order it comes; none for a date
-    /// that's been built or set.
+    /// built, or set but for a day its month hasn't, which it says still.
     pub fn quirks(&self) -> &[Quirk] {
         &self.quirks
     }

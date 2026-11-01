@@ -966,8 +966,9 @@ mod tests {
         fixture::file("1.7", &bodies, dict! { "Root" => root }, Xref::Table)
     }
 
-    /// What the target does with `data` as a file: [`over`] through a reading
-    /// and through the document it makes, the same.
+    /// What the target does with `data` as a file, under the default options
+    /// where it has caps of its own: [`over`] through a reading and through the
+    /// document it makes, the same.
     fn a_file(data: &[u8]) -> usize {
         let Ok(reading) = Reading::open(data, &Options::DEFAULT) else {
             return 0;

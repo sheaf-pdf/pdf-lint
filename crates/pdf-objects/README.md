@@ -1,6 +1,6 @@
 # pdf-objects
 
-PDF's objects, their parser and their writer, in one small Rust crate on [pdf-tokenizer](https://crates.io/crates/pdf-tokenizer): owned, each value with where it was written, and each dictionary as written, in order and with any key written twice (ISO 32000-2, §7.3). And text strings, decoded by the spec (§7.9.2.2).
+PDF's objects, their parser and their writer, in one small Rust crate on [pdf-tokenizer](https://crates.io/crates/pdf-tokenizer): owned, each value with where it was written, and each dictionary as written, in order and with any key written twice (ISO 32000-2, §7.3). And text strings, read by the spec or PDFium's rules and written (§7.9.2.2).
 
 It's made for a reader that checks files as much as for one that shows or edits them. What was written stays, so what reads the objects can point at the bytes a value came from, see a key written twice, and say where a string departs from the spec; the parser says every fault it reads past; and the writer writes a value as the parser reads it back.
 

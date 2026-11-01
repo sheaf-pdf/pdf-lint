@@ -1,6 +1,6 @@
 # pdf-semantics
 
-PDF's common structures (ISO 32000-2, 7.7.3, 7.9 and 14.3.2), read and written, each value saying where it came from, in a small Rust crate on [pdf-objects](../pdf-objects).
+PDF's common structures (ISO 32000-2, 7.7.3, 7.9 and 14.3.2), read and written, each value saying where it came from, in a small Rust crate on [pdf-objects](https://crates.io/crates/pdf-objects).
 
 It's made for what reads a file's common structures to show them, check them or edit them, and what writes them.
 
@@ -165,7 +165,7 @@ assert_eq!(pdfa.to_string(), "PDF/A-2b");
 - **Looking a key up by `/Limits`.** A walk's `find` serves, reading what comes before the key.
 - **A page's geometry.** A page's boxes are given as they're written and followed, an empty one too: what shows of it is a caller's, by the clause or as PDFium does. Its `/Contents`, `/Annots` and other boxes are in its dictionary.
 - **A page tree written.** It's read here, and a document's writer has what numbers its nodes.
-- **A reference by its number alone.** A reference names an object by its number and its generation here, as `Resolve` takes them, where PDFium doesn't read the generation; `tests/pdfium/differ.tsv` lists it among the few places the walk reads otherwise than PDFium, each on purpose.
+- **A reference by its number alone.** A reference names an object by its number and its generation here, as `Resolve` takes them, where PDFium doesn't read the generation. It's one of the few places the walk reads otherwise than PDFium, each on purpose: a node inside itself, a `/Parent` chain that loops, a tree past the caps and none under its root are the others, which `tests/pdfium/differ.tsv` in the repository lists, not in the package.
 - **Holding a file to its claims, or writing them.** A claim is the file's own word. XMP's other properties, and a packet not in UTF-8, aren't read.
 - **A tree written in nodes.** Nodes under a root would each need an object's number, so that's for what holds a document. A flat tree is a whole one at any size.
 

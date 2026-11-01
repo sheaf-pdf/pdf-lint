@@ -170,10 +170,12 @@ fuzzing:
     RUSTFLAGS="--cfg fuzzing" cargo clippy --locked --workspace --exclude pdf-lint --lib --target-dir target/fuzzing -- -D warnings
 
 # Build the API docs, failing on warnings: with every feature on, then
-# with none, as they're published.
+# as they're published, then pdf-semantics without its clock, as pdf-lint
+# takes it, which the workspace's unified features would hide.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-semantics --no-deps --no-default-features
 
 # Build this platform's release archive in dist/, and check it runs as
 # it's unpacked, as the release workflow does each
@@ -260,16 +262,17 @@ arlington-msrv:
 # tokenizer, by ISO 32000-2's rules and PDFium's; `filters`, the filters,
 # decoding and encoding; `crypt`, pdf-crypt's security handler, new files'
 # dictionaries and a password's forms; `objects`, pdf-objects' parser, by
-# ISO 32000-2's rules and PDFium's, and its writer on what it read;
-# `structure`, pdf-structure's reader; `write`, pdf-structure's writer, on
+# ISO 32000-2's rules and PDFium's, its writer on what it read, and text
+# strings; `structure`, pdf-structure's reader; `write`, pdf-structure's writer, on
 # what its reader read; `content`, pdf-content-streams' tokens, operations,
 # faults, operator table, the balance, marked content and names over them,
 # its writer, content written again and the calls, and its splices and
 # lists written again; `semantics`, pdf-semantics' name and number trees,
-# page tree, dates and XMP claims; or `check`, the reader and the checker. `structure`, `write` and
-# `check` begin from the seeds pdf-lint's fuzz module makes, `write`'s with
-# the third byte its input has; `content` and `semantics` from those their own
-# crates' fuzz modules make. The nightly is `fuzz_toolchain`.
+# page tree, dates and XMP claims; or `check`, the reader and the checker.
+# `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
+# makes, `write`'s with the third byte its input has; `content` and `semantics`
+# from those their own crates' fuzz modules make. The nightly is
+# `fuzz_toolchain`.
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.
 fuzz target="tokenize" seconds="60":

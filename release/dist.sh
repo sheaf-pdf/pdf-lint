@@ -110,8 +110,7 @@ pdf-lint $version for $platform
 What's compiled into the binary besides this workspace's own crates
 (pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure and
 pdf-semantics, MIT OR Apache-2.0; pdf-arlington, Apache-2.0, with the
-Arlington model,
-whose NOTICE.txt is ARLINGTON-NOTICE.txt):
+Arlington model, whose NOTICE.txt is ARLINGTON-NOTICE.txt):
 
 - These crates from crates.io, each under the licence it names, its
   package's licence files after the list; the Apache License 2.0, which

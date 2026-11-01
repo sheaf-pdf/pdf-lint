@@ -21,8 +21,11 @@
 # tests run, one on new files'; `objects` calls `pdf_objects::fuzz::parse`,
 # the parser by ISO 32000-2's rules and PDFium's and the two side by side,
 # the walk of what it read's references and the writer on what it read,
-# which two stable unit tests (`random_fragments_keep_every_promise` and
-# `random_fragments_keep_every_promise_where_the_rules_part`) run;
+# and `pdf_objects::fuzz::texts`, text strings decoded by each rules and
+# encoded and read back, which three stable unit tests
+# (`random_fragments_keep_every_promise`,
+# `random_fragments_keep_every_promise_where_the_rules_part` and
+# `random_text_strings_keep_every_promise`) run;
 # `structure` calls `pdf_structure::fuzz::read_file`, the reader and the
 # document it reads, which a stable unit test
 # (`mutated_files_read_within_their_bytes_the_same_twice`) runs on mutated
@@ -54,13 +57,15 @@
 # content;
 # `semantics` calls `pdf_semantics::fuzz::walks`, its name and number trees,
 # each walked the same whatever hears its faults, what a plain walk gives,
-# and written, read back, `pdf_semantics::fuzz::dates`, a date read,
-# written and read back, and `pdf_semantics::fuzz::xmp`, a packet read the
-# same whatever hears its faults and under smaller caps, which three stable
-# unit tests
-# (`mutated_seeds_keep_every_promise`, `random_bytes_keep_every_promise`,
+# and written, read back, and its page tree by both rules,
+# `pdf_semantics::fuzz::dates`, a date read, written and read back,
+# `pdf_semantics::fuzz::xmp`, a packet read the same whatever hears its faults
+# and under smaller caps, and `pdf_semantics::fuzz::over`, a file's trees,
+# pages and metadata stream through a reading and the document it makes, which
+# three stable unit tests (`mutated_seeds_keep_every_promise`,
+# `random_bytes_keep_every_promise`,
 # `files_read_alike_through_a_reading_and_its_document`) run, the last as a
-# file over a reading and its document, as the target does;
+# file, as the target does but under the default options;
 # `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs

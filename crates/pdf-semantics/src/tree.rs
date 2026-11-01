@@ -5,7 +5,7 @@
 //! asked and no more than what's asked for needs: a node's own entries,
 //! then each of its kids', as the tree is written. Each gives a key and its
 //! value borrowed from what the resolver keeps, the value as written, so a
-//! reference stays one for the caller to follow ([`follow`]).
+//! reference stays one for the caller to follow ([`follow`](crate::follow)).
 //!
 //! What a walk can't read goes one of two ways:
 //!

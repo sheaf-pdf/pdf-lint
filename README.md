@@ -24,7 +24,7 @@ decrypts what's encrypted itself.
 | [pdf-tokenizer](crates/pdf-tokenizer) | A lossless, zero-copy PDF tokenizer, by ISO 32000-2's rules or PDFium's, needing neither `std` nor `alloc` |
 | [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept; and Flate encoded, with PNG's predictors, on miniz_oxide or zlib-rs |
 | [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler on RustCrypto's primitives: decrypting, every fault said, and encrypting for a writer, a new file's key and dictionary from randomness it's given, its keys wiped |
-| [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, their parser, by ISO 32000-2's rules or PDFium's, and their writer, which writes an encrypted file's through an encryptor: each value with where it was written, every fault said, and text strings decoded by the spec |
+| [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, their parser, by ISO 32000-2's rules or PDFium's, and their writer, which writes an encrypted file's through an encryptor: each value with where it was written, every fault said, and text strings read and written |
 | [pdf-structure](crates/pdf-structure) | PDF's file structure, read whole or each object on demand, from any thread, from memory or a file read by position: the header, cross-reference tables and streams along `/Prev`, object streams and recovery by scanning, each object through pdf-objects' parser, decrypted through pdf-crypt and decoded through pdf-filters, and so any stream's data asked for, where it was read from recorded, every choice it made said; and written, whole or as an incremental update, cross-reference sections and object streams deflated through pdf-filters, an encrypted file's objects encrypted as they're written, through pdf-crypt, by the list it decrypts by, and an object as read copied as the bytes it was read from, checked against a hash of them |
 | [pdf-content-streams](crates/pdf-content-streams) | PDF content streams read as PDFium reads them: each token with where it is, an inline image's data found by PDFium's rules, each operation with its operands, operands read as pdf-objects' values when asked, and a page's streams joined as one, every place mapped back to its stream, under caps, every error saying where, and where ISO 32000-2 reads it otherwise told to a sink; each operator typed by ISO 32000-2's Annex A, with its operands and where it may be used; a page's `q`/`Q` balance, its marked content and the resource names it uses; and content written, the same bytes for the same calls, its resources named at the end by a digest of what they are, or spliced, ranges taken out and every other byte kept, only where that can't change what's drawn after them |
 | [pdf-semantics](crates/pdf-semantics) | PDF's common structures, read and written: dates, each field saying whether it was written and each departure from the standard said, text strings, name and number trees, walked under caps, the page tree by ISO's rules or PDFium's, each page numbered as its rules number it and each value saying where it came from, and what XMP metadata claims, PDF/A, PDF/UA or PDF/VT, read by namespace under caps |
@@ -48,18 +48,18 @@ build, pdf-structure's lints for Windows and a 32-bit target, the
 tokenizer's build against `core` alone, and the minimum Rust of the
 tokenizer, the filters, pdf-crypt, pdf-objects, pdf-structure,
 pdf-content-streams, pdf-semantics and pdf-arlington, and of
-pdf-content-streams' `image-ends` feature (1.87). Its `test-pdfium` needs Python 3, and fetches
-the pinned PDFium build from GitHub unless `PDF_LINT_PDFIUM` names a
-library: [oracle/README.md](oracle/README.md) says how the crates are held
-to PDFium.
+pdf-content-streams' `image-ends` feature (1.87). Its `test-pdfium` needs
+Python 3, and fetches the pinned PDFium build from GitHub unless
+`PDF_LINT_PDFIUM` names a library: [oracle/README.md](oracle/README.md)
+says how the crates are held to PDFium.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
 objects`, `just fuzz structure`, `just fuzz write`, `just fuzz content`,
-`just fuzz semantics` and `just fuzz check` fuzz the tokenizer, by ISO 32000-2's rules and
-PDFium's, the filters, decoding and encoding, pdf-crypt's handler, new
-files' dictionaries and a password's forms, pdf-objects' parser, by ISO
-32000-2's rules and PDFium's, and its writer, pdf-structure's reader and
-writer, pdf-content-streams' tokens, operations, faults, operator table,
+`just fuzz semantics` and `just fuzz check` fuzz the tokenizer, by ISO
+32000-2's rules and PDFium's, the filters, decoding and encoding,
+pdf-crypt's handler, new files' dictionaries and a password's forms,
+pdf-objects' parser, by ISO 32000-2's rules and PDFium's, its writer and
+text strings, pdf-structure's reader and writer, pdf-content-streams' tokens, operations, faults, operator table,
 the balance, marked content and names over them, its writer, content
 written again and the calls, and its splices and lists written again,
 pdf-semantics' name and number trees, page tree, dates and XMP claims, and

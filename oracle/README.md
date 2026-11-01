@@ -4,12 +4,11 @@ pdf-tokenizer's PDFium rules (`Rules::Pdfium`, `decode::pdfium`),
 pdf-objects' (`Parser::rules`), pdf-semantics' page tree (`pages::pages`)
 and pdf-content-streams, which reads content as PDFium does throughout,
 follow PDFium's reading, which no standard writes down and which changes as
-PDFium does. So each is held to one PDFium
-build, the pin, through cases: small hand-made inputs, each asked of
-PDFium, its answer recorded beside it. A plain `cargo test` holds each
-crate to the recorded answers, without PDFium (each crate's
-`tests/pdfium.rs`); `just test-pdfium` asks every case of PDFium again and
-holds PDFium to them.
+PDFium does. So each is held to one PDFium build, the pin, through cases:
+small hand-made inputs, each asked of PDFium, its answer recorded beside
+it. A plain `cargo test` holds each crate to the recorded answers, without
+PDFium (each crate's `tests/pdfium.rs`); `just test-pdfium` asks every case
+of PDFium again and holds PDFium to them.
 
 ## The pin
 

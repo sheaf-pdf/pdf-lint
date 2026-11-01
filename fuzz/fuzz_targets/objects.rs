@@ -8,7 +8,8 @@
 //! it reads back as the same value; written through a toy encryptor,
 //! undone, it's what it wrote plainly; and written through a renumbering
 //! the input's first bytes give, it reads back as the value renumbered in
-//! memory.
+//! memory. And the same input as a text string: decoded by ISO 32000-2's
+//! rules and PDFium's, and encoded and read back.
 
 #![no_main]
 
