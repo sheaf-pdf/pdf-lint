@@ -55,7 +55,7 @@ clippy:
     cargo clippy --locked -p pdf-content-streams --features image-ends --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
-    cargo clippy --locked -p pdf-linearize --features lopdf --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-linearize --features lopdf,timing --all-targets -- -D warnings
 
 # Unit tests and doctests: the workspace's, where the filters have both
 # Flate backends, as pdf-structure's tests turn zlib-rs on; then the
@@ -339,7 +339,7 @@ fuzz target="tokenize" seconds="60":
     linearize)
         PDF_LINEARIZE_FUZZ_SEEDS="$PWD/fuzz/seeds/linearize" cargo test --locked -q -p pdf-linearize --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/linearize
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" linearize fuzz/corpus/linearize fuzz/seeds/linearize -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" linearize fuzz/corpus/linearize fuzz/seeds/linearize -- -dict=fuzz/linearize.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact

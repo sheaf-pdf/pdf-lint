@@ -9,28 +9,13 @@ use pdf_structure::write::{self, Encryptor};
 use pdf_structure::{Password, XrefKind};
 
 /// The keys of a file qpdf encrypted, each with its empty user password: one of
-/// each of the standard handler's revisions.
+/// each of the standard handler's revisions, `qpdf --encrypt` on a small clean file.
 pub const KEYS: [(&str, &[u8]); 5] = [
-    (
-        "RC4-40",
-        include_bytes!("../../../pdf-structure/tests/files/qpdf-rc4-40.pdf"),
-    ),
-    (
-        "RC4-128",
-        include_bytes!("../../../pdf-structure/tests/files/qpdf-rc4-128.pdf"),
-    ),
-    (
-        "AES-128",
-        include_bytes!("../../../pdf-structure/tests/files/qpdf-aes-128.pdf"),
-    ),
-    (
-        "AES-256 R5",
-        include_bytes!("../../../pdf-structure/tests/files/qpdf-aes-256-r5.pdf"),
-    ),
-    (
-        "AES-256",
-        include_bytes!("../../../pdf-structure/tests/files/qpdf-aes-256.pdf"),
-    ),
+    ("RC4-40", include_bytes!("../files/qpdf-rc4-40.pdf")),
+    ("RC4-128", include_bytes!("../files/qpdf-rc4-128.pdf")),
+    ("AES-128", include_bytes!("../files/qpdf-aes-128.pdf")),
+    ("AES-256 R5", include_bytes!("../files/qpdf-aes-256-r5.pdf")),
+    ("AES-256", include_bytes!("../files/qpdf-aes-256.pdf")),
 ];
 
 /// The reading of `bytes`, by the empty password or `password`.

@@ -39,10 +39,10 @@ timing = ["family"]
 [dev-dependencies]
 # A generator the tests can seed, for a new encryption's draws.
 chacha20 = { version = "0.10", default-features = false, features = ["rng"] }
-# What the family adapter's tests read back with, by the names the adapter uses.
-pdf-objects = { path = "../pdf-objects", version = "0.1" }
-pdf-semantics = { path = "../pdf-semantics", version = "0.1", default-features = false }
-pdf-structure = { path = "../pdf-structure", version = "0.1" }
+
+# docs.rs documents what the feature adds, beside the default.
+[package.metadata.docs.rs]
+features = ["lopdf"]
 
 [lints.rust]
 unsafe_code = "forbid"

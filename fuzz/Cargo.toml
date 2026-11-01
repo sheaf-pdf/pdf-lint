@@ -68,9 +68,15 @@
 # file, as the target does but under the default options;
 # `linearize` calls `pdf_linearize::fuzz::graphs`, any bytes as a graph, refused
 # for what it has or planned, every promise of the plan held against plain walks
-# of it, which a stable unit test (`fuzz_bodies_run`) runs, and
+# of it, and `tables`, the same bytes as a hint stream, which a stable unit test
+# (`fuzz_bodies_run`) runs; `facts`, the same bytes as a file's facts, judged the
+# same whatever the sink, which another
+# (`any_facts_are_judged_alike_whatever_the_sink`) runs; and
 # `pdf_linearize::fuzz::over`, the same bytes as a file, laid out and read back,
-# which another (`what_is_written_reads_back_the_same`) runs on mutated files;
+# which a third (`what_is_written_reads_back_the_same`) runs on mutated files.
+# The lopdf adapter's body, `fuzz::lopdf_document`, isn't here, its dependency not
+# being in this lock: a stable test
+# (`what_lopdf_s_adapter_writes_of_any_document_holds`) runs it;
 # `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs

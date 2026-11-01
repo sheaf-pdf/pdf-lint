@@ -1135,16 +1135,3 @@ fn many_pages_add_up() {
         }
     }
 }
-
-/// Writes every case to the folder `PDF_LINEARIZE_CASES` names, for the oracles
-/// that aren't run from here.
-#[test]
-#[ignore = "writes files for the oracles"]
-fn the_cases_are_written() {
-    let folder = std::env::var("PDF_LINEARIZE_CASES").unwrap();
-    std::fs::create_dir_all(&folder).unwrap();
-    for (name, doc) in cases::all() {
-        let path = std::path::Path::new(&folder).join(format!("{name}.pdf"));
-        std::fs::write(path, doc.written().bytes).unwrap();
-    }
-}

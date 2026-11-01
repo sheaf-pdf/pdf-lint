@@ -285,7 +285,6 @@ class Pdfium:
         lib.FPDF_CloseDocument(doc)
         return out.raw[:max(n - 2, 0)].decode("utf-16le", "replace").encode("utf-8")
 
-
     def avail(self, data, password=None):
         """A file given PDFium only as its availability API asks, its first
         1,024 bytes to start with, opened by `password` if there is one: what each

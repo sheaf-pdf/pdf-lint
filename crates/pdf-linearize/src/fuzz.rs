@@ -2054,10 +2054,9 @@ mod tests {
             options.pack = pack;
             seeds.push(crate::family::linearize_bytes(&all, &[], &options).unwrap());
         }
-        // Encrypted, by each of the handler's revisions, where the crate beside it
-        // has the files qpdf encrypted, and as it lays them out.
-        let keys =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../pdf-structure/tests/files");
+        // Encrypted, by each of the handler's revisions, by the files qpdf encrypted, and
+        // as it lays them out.
+        let keys = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/files");
         for key in ["rc4-40", "rc4-128", "aes-128", "aes-256-r5", "aes-256"] {
             let Ok(key) = std::fs::read(keys.join(format!("qpdf-{key}.pdf"))) else {
                 continue;
