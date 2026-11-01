@@ -9,17 +9,19 @@ use std::process::Command;
 
 mod cases;
 use cases::Doc;
+#[cfg(feature = "family")]
+mod written;
 
-/// What qpdf says of `doc`'s file: its exit code and all it wrote, its path as
-/// `FILE`.
-fn answer(name: &str, doc: &Doc) -> (i32, String) {
+/// What qpdf says of `bytes` by `check`: its exit code and all it wrote, the file's
+/// path as `FILE`.
+fn asked(name: &str, bytes: &[u8], check: &str) -> (i32, String) {
     let qpdf = std::env::var_os("PDF_LINT_QPDF").unwrap_or_else(|| "qpdf".into());
     let folder = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(folder).unwrap();
     let path = folder.join(format!("linearize-{name}.pdf"));
-    std::fs::write(&path, doc.written().bytes).unwrap();
+    std::fs::write(&path, bytes).unwrap();
     let output = Command::new(qpdf)
-        .arg("--check-linearization")
+        .arg(check)
         .arg(&path)
         .output()
         .expect("these tests need qpdf: install it, or name it in PDF_LINT_QPDF");
@@ -28,6 +30,11 @@ fn answer(name: &str, doc: &Doc) -> (i32, String) {
     std::fs::remove_file(&path).unwrap();
     let text = text.replace(path.to_str().unwrap(), "FILE");
     (output.status.code().expect("it exited"), text)
+}
+
+/// What qpdf's `--check-linearization` says of `doc`'s file.
+fn answer(name: &str, doc: &Doc) -> (i32, String) {
+    asked(name, &doc.written().bytes, "--check-linearization")
 }
 
 /// F.3.6 has the hint stream's number after every other in the first group, those
@@ -180,16 +187,146 @@ fn many_pages_under_another_first_page_warn_only_of_that() {
             "first page object offset mismatch",
             "object count mismatch for page ",
             "page 0 has shared identifier entries",
-            "page ",
         ];
         let warnings = text.lines().filter(|line| line.starts_with("WARNING"));
         for line in warnings {
             let line = line.strip_prefix("WARNING: FILE: ").unwrap();
+            let shared_list = line.starts_with("page ") && line.contains(": shared object ");
             assert!(
-                expected.iter().any(|start| line.starts_with(start)),
+                shared_list || expected.iter().any(|start| line.starts_with(start)),
                 "{name}: {line}"
             );
         }
         assert!(text.contains("first page object (/O) mismatch"), "{name}");
+    }
+}
+
+/// What the family adapter writes, as qpdf reads it, each warning its class, its
+/// numbers taken out, as they move with any body: each kind of a file, and what
+/// follows from where F.3.5 and qpdf's categories part, as above.
+#[cfg(feature = "family")]
+mod family {
+    use std::collections::BTreeSet;
+
+    use pdf_linearize::family::{Options, linearize_bytes};
+    use pdf_structure::XrefKind;
+
+    use super::written::{built, kinds, stream, two_pages};
+    use super::{HINT_LAST, asked};
+
+    /// `text`'s warnings, each once, its numbers `N`.
+    fn classes(text: &str) -> BTreeSet<String> {
+        let warnings = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("WARNING: FILE: "));
+        let class = |line: &str| {
+            let mut out = String::new();
+            for c in line.chars() {
+                match c.is_ascii_digit() {
+                    true if out.ends_with('N') => {}
+                    true => out.push('N'),
+                    false => out.push(c),
+                }
+            }
+            out
+        };
+        warnings.map(class).collect()
+    }
+
+    const OBJECT_COUNT: &str = "object count mismatch for page N: hint table = N; computed = N";
+    const FIRST_END: &str = "end of first page section (/E) mismatch: /E = N; computed = N..N";
+
+    /// Both of qpdf's checks on each of `kinds`' file of `objects`, each kind's
+    /// classes as `table`, `stream` or `packed` says, and no other.
+    fn holds(name: &str, bytes: &[u8], table: &[&str], packed: &[&str]) {
+        for (at, options) in kinds().iter().enumerate() {
+            let out = linearize_bytes(bytes, &[], options).unwrap();
+            let name = format!("{name}-{at}");
+            let wanted: BTreeSet<String> = (if options.pack { packed } else { table })
+                .iter()
+                .map(|class| class.to_string())
+                .collect();
+            for check in ["--check-linearization", "--check"] {
+                let (code, text) = asked(&name, &out, check);
+                assert_eq!(classes(&text), wanted, "{name} {check}: {text}");
+                assert_eq!(
+                    code,
+                    if wanted.is_empty() { 0 } else { 3 },
+                    "{name} {check}: {text}"
+                );
+                assert!(!text.contains("ERROR"), "{name} {check}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn plain_files_are_clean_in_each_kind() {
+        holds("plain", &built(&two_pages("")), &[], &[HINT_LAST]);
+        // Its second page's own and what it shares, its outline, its thumbnail.
+        let mut objects = two_pages("/Outlines 9 0 R /Dests 13 0 R /Names << /Dests 14 0 R >>");
+        objects[2] = "<< /Type /Page /Parent 2 0 R /Contents 5 0 R /Thumb 12 0 R >>".into();
+        objects[3] =
+            "<< /Type /Page /Parent 2 0 R /Contents 6 0 R /Rotate 90 /Own 15 0 R >>".into();
+        objects.push("<< /Type /Outlines /First 10 0 R /Last 11 0 R /Count 2 >>".into());
+        objects.push("<< /Title (a) /Parent 9 0 R /Next 11 0 R /Dest [3 0 R /Fit] >>".into());
+        objects.push("<< /Title (b) /Parent 9 0 R /Prev 10 0 R /Dest [4 0 R /Fit] >>".into());
+        objects.push(stream(
+            "/Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8",
+            "z",
+        ));
+        objects.push("<< /a [3 0 R /Fit] >>".into());
+        objects.push("<< /Names [(a) [4 0 R /Fit]] >>".into());
+        objects.push("<< /Type /XObject /Mine true >>".into());
+        holds("outline", &built(&objects), &[], &[HINT_LAST]);
+    }
+
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn a_form_warns_of_what_qpdf_puts_in_part_four() {
+        // A widget on each page, which qpdf's categories have with the form's
+        // dictionary, where F.3.5 has them on their pages.
+        let mut objects = two_pages("/AcroForm 9 0 R");
+        objects[2] = "<< /Type /Page /Parent 2 0 R /Contents 5 0 R /Annots [10 0 R] >>".into();
+        objects[3] = "<< /Type /Page /Parent 2 0 R /Contents 6 0 R /Annots [11 0 R] >>".into();
+        objects.push("<< /Fields [10 0 R 11 0 R] >>".into());
+        objects.push("<< /FT /Tx /Subtype /Widget /T (a) /Rect [0 0 9 9] >>".into());
+        objects.push("<< /FT /Tx /Subtype /Widget /T (b) /Rect [0 0 9 9] >>".into());
+        let form = [OBJECT_COUNT];
+        // The object stream of what's shared, which qpdf has none of.
+        let shared = "page N: shared object N: in hint table but not computed list";
+        let packed = [OBJECT_COUNT, HINT_LAST, shared];
+        holds("form", &built(&objects), &form, &packed);
+    }
+
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn another_first_page_warns_as_the_engine_s_does() {
+        let bytes = built(&two_pages("/OpenAction [4 0 R /Fit]"));
+        let first = [
+            "first page object (/O) mismatch",
+            FIRST_END,
+            "first page object offset mismatch",
+            "shared object N length mismatch: hint table = N; computed = N",
+            OBJECT_COUNT,
+            "page N has shared identifier entries",
+            "page N: shared object N: in hint table but not computed list",
+            "page N: shared object N: in computed list but not hint table",
+        ];
+        let mut packed = first.to_vec();
+        packed.push(HINT_LAST);
+        holds("first", &bytes, &first, &packed);
+    }
+
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn the_same_file_again_is_as_clean() {
+        let once = {
+            let mut options = Options::DEFAULT;
+            options.kind = XrefKind::Stream;
+            options.pack = true;
+            linearize_bytes(&built(&two_pages("")), &[], &options).unwrap()
+        };
+        holds("again", &once, &[], &[HINT_LAST]);
     }
 }

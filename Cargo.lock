@@ -392,6 +392,9 @@ name = "pdf-linearize"
 version = "0.1.0"
 dependencies = [
  "bitstream-io",
+ "pdf-objects",
+ "pdf-semantics",
+ "pdf-structure",
  "thiserror",
 ]
 

@@ -17,12 +17,13 @@ use std::sync::atomic::AtomicBool;
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_objects::serialize;
 
-use super::copy::{Copying, Member, written};
+use super::copy::{Copying, Member};
 use super::crypt::Place;
 use super::{
     Base, Bodies, Body, Deflate, Encrypting, Encryptor, Entry, Error, MEMBERS, NUMBERS, Numbering,
-    Options, Pack, ReadFrom, SECTION_KEYS, Section, Written, bodies as read, checked,
-    container as objstm, dangling, file_id, first_id, fresh, id_value, packable, stopped, usable,
+    Options, Pack, Packed, Parts, ReadFrom, Section, Written, bodies as read, checked,
+    container as objstm, dangling, file_id, first_id, fresh, id_value, packable, stopped,
+    trailer_entries, usable,
 };
 use crate::source::{Document, XrefKind};
 
@@ -173,8 +174,9 @@ pub fn document(
 
 /// Whether `obj` is one a whole file leaves out: an object stream (its
 /// members are written anew, on their own or in the write's object
-/// streams), a cross-reference stream or a linearization dictionary.
-fn left_out(obj: &Object) -> bool {
+/// streams), a cross-reference stream or a linearization dictionary, as
+/// [`document`] leaves them, and a caller laying a file out itself does.
+pub fn left_out(obj: &Object) -> bool {
     match obj.value() {
         Value::Stream(s) => s.dict.has_type(b"ObjStm") || s.dict.has_type(b"XRef"),
         Value::Dict(d) => d.has(b"Linearized"),
@@ -187,8 +189,9 @@ fn left_out(obj: &Object) -> bool {
 /// names one; and, but where `encryptor` is how `doc`'s file was
 /// encrypted, whose dictionary refers to them as it did, the objects its
 /// values refer to, as the reader reads them before it has a key (not
-/// followed further).
-fn encryption_objects(doc: &Document, encryptor: Option<&Encryptor>) -> HashSet<ObjectId> {
+/// followed further). What [`document`] leaves out by number, and a caller
+/// laying a file out itself does.
+pub fn encryption_objects(doc: &Document, encryptor: Option<&Encryptor>) -> HashSet<ObjectId> {
     let Some(encrypt) = doc.trailer.dict().get(b"Encrypt") else {
         return HashSet::new();
     };
@@ -273,7 +276,6 @@ fn file(
     }
     // What's copied, by the encryption as given.
     let copying = from.map(|from| Copying::new(from, given)).transpose()?;
-    let copying = copying.as_ref();
     // One section, whose /Encrypt is the only one: what's at a number the
     // file read named so, and this one doesn't, is encrypted.
     let whole = encryptor.map(|e| e.whole(encrypt_at));
@@ -294,6 +296,7 @@ fn file(
         _ => None,
     };
     let encrypting = encrypting.as_ref();
+    let parts = Parts::of(encrypting, from, copying, to);
 
     out.extend_from_slice(format!("%PDF-{}\n", options.version).as_bytes());
     out.extend_from_slice(super::BINARY);
@@ -301,7 +304,7 @@ fn file(
     let mut next = 1;
     // What goes in object streams, written once they're numbered: each
     // given at, written at, and its body.
-    let mut members: Vec<(ObjectId, ObjectId, &Body<'_>)> = Vec::new();
+    let mut members: Vec<Packed<'_>> = Vec::new();
     for ((id, body), &at) in bodies.iter().zip(&at) {
         stopped(options.stop)?;
         let (id, obj) = (*id, body.object());
@@ -311,7 +314,7 @@ fn file(
             members.push((id, at, body));
             continue;
         }
-        let pos = written(out, id, at, body, encrypting, from, copying, to)? - start;
+        let pos = parts.body(out, id, at, body)? - start;
         let generation = at.1;
         section.insert(
             at.0,
@@ -322,20 +325,9 @@ fn file(
         );
     }
     let given_id = first_id(trailer);
-    let mut trailer = trailer.clone();
-    for key in SECTION_KEYS {
-        trailer.remove(key);
-    }
     // The caller's entries in the numbers written, before the writer's own,
     // which are.
-    if let Some(to) = to.0 {
-        let mut renumbered = Object::from(trailer);
-        renumbered.renumber(|id| to.renumber(id));
-        trailer = match renumbered.into_value() {
-            Value::Dict(dict) => dict,
-            _ => unreachable!("a dictionary renumbered is one"),
-        };
-    }
+    let mut trailer = trailer_entries(trailer, to.0.unwrap_or(&()));
     if let Some(e) = encryptor {
         match encrypt_at {
             None => trailer.set("Encrypt", e.dictionary().clone()),
@@ -359,12 +351,9 @@ fn file(
         let packing = Packing {
             start,
             encryptor,
-            encrypting,
-            from,
-            copying,
+            parts: &parts,
             options,
             dangling: &dangling,
-            to,
         };
         next = packing.packed(out, &mut section, &members, pack, next)?;
     }
@@ -423,16 +412,12 @@ struct Packing<'w> {
     /// Where the file starts in `out`.
     start: usize,
     encryptor: Option<&'w Encryptor>,
-    encrypting: Option<&'w Encrypting<'w>>,
-    from: Option<&'w dyn ReadFrom>,
-    /// What's copied by, where `from` is given.
-    copying: Option<&'w Copying<'w>>,
+    /// What each body is written through.
+    parts: &'w Parts<'w>,
     options: &'w Options<'w>,
     /// The numbers what's written refers to and doesn't hold, which no
     /// object stream takes.
     dangling: &'w HashSet<u32>,
-    /// The renumbering.
-    to: Numbering<'w>,
 }
 
 impl Packing<'_> {
@@ -446,12 +431,11 @@ impl Packing<'_> {
         &self,
         out: &mut Vec<u8>,
         section: &mut Section,
-        members: &[(ObjectId, ObjectId, &Body<'_>)],
+        members: &[Packed<'_>],
         pack: Pack<'_>,
         mut next: u32,
     ) -> Result<u32, Error> {
-        type Packed<'m, 'b> = (ObjectId, ObjectId, &'m Body<'b>);
-        let by_number: HashMap<u32, Packed<'_, '_>> = (members.iter())
+        let by_number: HashMap<u32, Packed<'_>> = (members.iter())
             .map(|&member| (member.0.0, member))
             .collect();
         let mut numbers: Vec<u32> = by_number.keys().copied().collect();
@@ -474,7 +458,7 @@ impl Packing<'_> {
         // The numbers the members are written at, where they aren't those
         // they're given at.
         let written: Option<HashSet<u32>> =
-            (self.to.0.is_some()).then(|| members.iter().map(|(_, at, _)| at.0).collect());
+            (self.parts.renumbers()).then(|| members.iter().map(|(_, at, _)| at.0).collect());
         let member_at = |n: u32| match &written {
             Some(written) => written.contains(&n),
             None => by_number.contains_key(&n),
@@ -495,36 +479,14 @@ impl Packing<'_> {
             }
             return Ok(next);
         };
-        // Each member at the number it's written at: copied, where it's
-        // given as read and a reading is given, as its object stream is
-        // built; else its value.
-        let mut groups: Vec<(u32, Vec<(ObjectId, Member<'_>)>)> = Vec::with_capacity(given.len());
+        // Each member, given at, written at, and its body.
+        let mut groups: Vec<(u32, Vec<Packed<'_>>)> = Vec::with_capacity(given.len());
         for (n, group) in given.into_iter().zip(&grouped) {
-            let mut members = Vec::with_capacity(group.len());
-            for m in group {
-                let (id, at, body) = by_number[m];
-                let member = match (self.copying, body) {
-                    (Some(_), Body::Read { .. }) => Member::Read(id, body),
-                    _ => Member::Object(body.object()),
-                };
-                members.push((at, member));
-            }
-            groups.push((n, members));
+            groups.push((n, group.iter().map(|m| by_number[m]).collect()));
         }
-        let threads = match self.options.threads {
-            0 => std::thread::available_parallelism().map_or(1, |n| n.get().min(8)),
-            n => n,
-        };
         let options = self.options;
-        let built = containers(
-            &groups,
-            self.copying,
-            self.encrypting,
-            self.to,
-            options.deflate,
-            threads,
-            options.stop,
-        )?;
+        let built =
+            (self.parts).containers(&groups, options.deflate, options.threads, options.stop)?;
         for ((n, group), (container, numbers)) in groups.iter().zip(built.into_iter().zip(&grouped))
         {
             let Some(container) = container else {
@@ -542,9 +504,9 @@ impl Packing<'_> {
                     generation: 0,
                 },
             );
-            for (index, (id, _)) in (0..=u16::MAX).zip(group) {
+            for (index, (_, at, _)) in (0..=u16::MAX).zip(group) {
                 let entry = Entry::Compressed { stream: *n, index };
-                section.insert(id.0, entry);
+                section.insert(at.0, entry);
             }
             next = next.max(n + 1);
         }
@@ -558,11 +520,10 @@ impl Packing<'_> {
         &self,
         out: &mut Vec<u8>,
         section: &mut Section,
-        (id, at, body): (ObjectId, ObjectId, &Body<'_>),
+        (id, at, body): Packed<'_>,
     ) -> Result<(), Error> {
         stopped(self.options.stop)?;
-        let (encrypting, from, copying, to) = (self.encrypting, self.from, self.copying, self.to);
-        let pos = written(out, id, at, body, encrypting, from, copying, to)? - self.start;
+        let pos = self.parts.body(out, id, at, body)? - self.start;
         let generation = at.1;
         section.insert(
             at.0,

@@ -89,6 +89,31 @@ class M(ctypes.Structure):
     _fields_ = [(n, ctypes.c_float) for n in "abcdef"]
 
 
+class FileAvail(ctypes.Structure):
+    pass
+
+
+FileAvail._fields_ = [("version", ctypes.c_int),
+                      ("IsDataAvail", ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(FileAvail),
+                                                       ctypes.c_size_t, ctypes.c_size_t))]
+
+
+class FileAccess(ctypes.Structure):
+    _fields_ = [("len", ctypes.c_ulong),
+                ("GetBlock", ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong,
+                                              ctypes.POINTER(ctypes.c_ubyte), ctypes.c_ulong)),
+                ("param", ctypes.c_void_p)]
+
+
+class DownloadHints(ctypes.Structure):
+    pass
+
+
+DownloadHints._fields_ = [("version", ctypes.c_int),
+                          ("AddSegment", ctypes.CFUNCTYPE(None, ctypes.POINTER(DownloadHints),
+                                                          ctypes.c_size_t, ctypes.c_size_t))]
+
+
 class Pdfium:
     """A PDFium library, loaded by its path."""
 
@@ -130,6 +155,13 @@ class Pdfium:
             ("FPDFTextObj_GetFont", P, [P]),
             ("FPDFFont_GetBaseFontName", S, [P, P, S]),
             ("FPDFImageObj_GetImageDataRaw", U, [P, P, U]),
+            ("FPDFAvail_Create", P, [ctypes.POINTER(FileAvail), ctypes.POINTER(FileAccess)]),
+            ("FPDFAvail_Destroy", None, [P]),
+            ("FPDFAvail_IsLinearized", I, [P]),
+            ("FPDFAvail_IsDocAvail", I, [P, ctypes.POINTER(DownloadHints)]),
+            ("FPDFAvail_GetDocument", P, [P, ctypes.c_char_p]),
+            ("FPDFAvail_GetFirstPageNum", I, [P]),
+            ("FPDFAvail_IsPageAvail", I, [P, I, ctypes.POINTER(DownloadHints)]),
         ]:
             f = getattr(lib, name)
             f.restype, f.argtypes = res, args
@@ -254,6 +286,79 @@ class Pdfium:
         return out.raw[:max(n - 2, 0)].decode("utf-16le", "replace").encode("utf-8")
 
 
+    def avail(self, data):
+        """A file given PDFium only as its availability API asks, its first
+        1,024 bytes to start with: what each stage took, the words `avail_answer`
+        writes."""
+        lib = self.lib
+        have = bytearray(len(data))
+        got = [0]
+        wanted = []
+
+        def give(at, length):
+            length = min(length, len(data) - at)
+            if length > 0:
+                got[0] += length - sum(have[at:at + length])
+                have[at:at + length] = b"\1" * length
+
+        def is_avail(_, at, length):
+            return 1 if at + length <= len(data) and all(have[at:at + length]) else 0
+
+        def block(_, at, buffer, length):
+            if at + length > len(data):
+                return 0
+            ctypes.memmove(buffer, bytes(data[at:at + length]), length)
+            return 1
+
+        def segment(_, at, length):
+            wanted.append((at, length))
+
+        # The callbacks are kept for as long as PDFium holds them.
+        avail = FileAvail(1, FileAvail._fields_[1][1](is_avail))
+        access = FileAccess(len(data), FileAccess._fields_[1][1](block), None)
+        hints = DownloadHints(1, DownloadHints._fields_[1][1](segment))
+        give(0, 1024)
+        handle = lib.FPDFAvail_Create(ctypes.byref(avail), ctypes.byref(access))
+
+        def until(stage):
+            """Giving PDFium what it asks until the stage says other than not yet:
+            what it says, or `stuck` where it asks for nothing."""
+            for _ in range(4096):
+                del wanted[:]
+                said = stage()
+                if said != 0:
+                    return said
+                if not wanted:
+                    return "stuck"
+                for at, length in wanted:
+                    give(at, length)
+            return "stuck"
+
+        out = ["linearized", str(lib.FPDFAvail_IsLinearized(handle))]
+        said = until(lambda: lib.FPDFAvail_IsDocAvail(handle, ctypes.byref(hints)))
+        out += ["doc", str(said), "open", str(got[0])]
+        doc = lib.FPDFAvail_GetDocument(handle, None) if said == 1 else None
+        if not doc:
+            lib.FPDFAvail_Destroy(handle)
+            return out + ["no-document", "got", str(got[0]), "of", str(len(data))]
+        count = lib.FPDF_GetPageCount(doc)
+        first = lib.FPDFAvail_GetFirstPageNum(doc)
+        out += ["count", str(count), "first", str(first)]
+        for index in [first] + [p for p in range(min(count, PAGES)) if p != first]:
+            before = got[0]
+            said = until(lambda: lib.FPDFAvail_IsPageAvail(handle, index, ctypes.byref(hints)))
+            page = lib.FPDF_LoadPage(doc, index)
+            size = "null"
+            if page:
+                size = num(lib.FPDF_GetPageWidthF(page))
+                lib.FPDF_ClosePage(page)
+            out += [";", "page", str(index), str(said), "took", str(got[0] - before), "width", size]
+        out += [";", "got", str(got[0]), "of", str(len(data))]
+        lib.FPDF_CloseDocument(doc)
+        lib.FPDFAvail_Destroy(handle)
+        return out
+
+
 def content_answer(objects):
     if objects is None:
         return "no-page"
@@ -308,6 +413,8 @@ def answer(pdfium, kind, files):
         return "no-document" if text is None else "text " + esc(text)
     if kind == "pages":
         return pages_answer(pdfium.pages(files["pdf"]))
+    if kind == "avail":
+        return " ".join(pdfium.avail(files["pdf"]))
     raise SystemExit("unknown kind %r" % kind)
 
 

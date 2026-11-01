@@ -13,7 +13,23 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 bitstream-io = "4"
+pdf-objects = { path = "../pdf-objects", version = "0.1", optional = true }
+# The page tree and name trees, and not the clock.
+pdf-semantics = { path = "../pdf-semantics", version = "0.1", default-features = false, optional = true }
+pdf-structure = { path = "../pdf-structure", version = "0.1", optional = true }
 thiserror = "2"
+
+[features]
+default = ["family"]
+# `family`: linearize a document of pdf-structure's. The engine and its tests build
+# without it, with no object model.
+family = ["dep:pdf-objects", "dep:pdf-semantics", "dep:pdf-structure"]
+
+[dev-dependencies]
+# What the family adapter's tests read back with, by the names the adapter uses.
+pdf-objects = { path = "../pdf-objects", version = "0.1" }
+pdf-semantics = { path = "../pdf-semantics", version = "0.1", default-features = false }
+pdf-structure = { path = "../pdf-structure", version = "0.1" }
 
 [lints.rust]
 unsafe_code = "forbid"

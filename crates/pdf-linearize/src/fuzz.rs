@@ -1,8 +1,9 @@
 //! What the fuzz target checks, which unit tests check too: the promises a plan
 //! makes, on any graph, each held against a plain walk of it; what's assembled from
 //! a plan, its positions against its pieces and its tables against the plan; and a
-//! hint stream of any bytes, read under small caps and written again. It's compiled
-//! only for tests and under cargo-fuzz's `--cfg fuzzing`.
+//! hint stream of any bytes, read under small caps and written again; and, with
+//! `family`, any bytes as a file, laid out and read back. It's compiled only for
+//! tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -1079,6 +1080,138 @@ pub fn graphs(data: &[u8]) {
     }
 }
 
+/// Any bytes as a file, read and written again in the three kinds: where it's
+/// written, it reads linearized, with the same pages, and every object the plan
+/// numbers is the same value at its number under the numbering, a stream's data
+/// the same; on any refusal, `out` as it was.
+#[cfg(feature = "family")]
+pub fn over(data: &[u8]) {
+    use pdf_objects::Value;
+    use pdf_semantics::Rules;
+    use pdf_semantics::pages::{Inheritable, Origin, pages};
+    use pdf_structure::XrefKind;
+    use pdf_structure::bytes::{self, Reading};
+
+    use crate::family::{self, graph::Prepared};
+
+    let Ok(reading) = Reading::open(data, &bytes::Options::DEFAULT) else {
+        return;
+    };
+    let Ok(doc) = reading.to_document() else {
+        return;
+    };
+    for (kind, stream, pack) in [
+        (Kind::Table, XrefKind::Table, false),
+        (Kind::Stream, XrefKind::Stream, false),
+        (Kind::Stream, XrefKind::Stream, true),
+    ] {
+        let mut options = family::Options::DEFAULT;
+        options.kind = stream;
+        options.pack = pack;
+        options.threads = 1;
+        let mut out = b"before".to_vec();
+        let written = family::linearize(&mut out, &doc, None, Some(&reading), &options);
+        let Ok(done) = written else {
+            assert_eq!(out, b"before");
+            continue;
+        };
+        assert_eq!(out.len() as u64 - 6, done.layout.len());
+        let file = &out[6..];
+        let again = Reading::open(file, &bytes::Options::DEFAULT).expect("it reads");
+        assert!(again.facts().linearized);
+        let back = again.to_document().expect("it reads whole");
+
+        let prepared = Prepared::of(&doc, &options).expect("it was written");
+        let planned = plan(
+            &prepared.graph(kind, pack, &Default::default()),
+            &options.limits,
+        );
+        let planned = planned.expect("it was planned");
+        let limits = pdf_semantics::Limits::DEFAULT;
+        let root = back
+            .trailer
+            .dict()
+            .get(b"Root")
+            .and_then(|root| root.as_reference());
+        let catalog = root
+            .and_then(|root| back.get_dict(root))
+            .expect("it has a catalog");
+        let listed = pages(&back, catalog, Rules::Iso, &limits, &mut ()).expect("it has pages");
+        assert_eq!(listed.len(), planned.page_count() as usize);
+        for page in &listed {
+            for attribute in [
+                Inheritable::Resources,
+                Inheritable::MediaBox,
+                Inheritable::CropBox,
+                Inheritable::Rotate,
+            ] {
+                if let Some(attribute) = page.attribute(attribute) {
+                    assert_eq!(attribute.origin, Origin::Own, "it's pushed down");
+                }
+            }
+        }
+        for (id, body) in prepared.bodies() {
+            let (number, _) = planned.number(*id).expect("it was given");
+            let Ok(object) = again.get((number, 0)) else {
+                panic!("{id:?} isn't at {number}");
+            };
+            same_under(body.object(), object, &planned);
+            if let (Value::Stream(_), Value::Stream(_)) = (body.object().value(), object.value()) {
+                if let (Ok(before), Ok(after)) = (reading.data(*id), again.data((number, 0))) {
+                    assert_eq!(before, after, "{id:?}'s data");
+                }
+            }
+        }
+    }
+}
+
+/// Whether `written`, read back, is `value` under `planned`'s numbers: a reference
+/// to what it doesn't number reads null.
+#[cfg(feature = "family")]
+fn same_under(value: &pdf_objects::Object, written: &pdf_objects::Object, planned: &Plan) {
+    use pdf_objects::{Dict, Value};
+
+    let mut stack = vec![(value, written)];
+    let dicts = |a: &'_ Dict, b: &'_ Dict| {
+        assert_eq!(
+            a.iter().filter(|(key, _)| *key != b"Length").count(),
+            b.iter().filter(|(key, _)| *key != b"Length").count(),
+            "{a:?} {b:?}"
+        );
+    };
+    while let Some((a, b)) = stack.pop() {
+        match (a.value(), b.value()) {
+            (Value::Ref(id), written) => match planned.number(*id) {
+                Some(number) => assert_eq!(written, &Value::Ref(number), "{id:?}"),
+                None => assert_eq!(written, &Value::Null, "{id:?}"),
+            },
+            (Value::Array(x), Value::Array(y)) => {
+                assert_eq!(x.len(), y.len());
+                stack.extend(x.iter().zip(y));
+            }
+            (Value::Dict(x), Value::Dict(y)) => {
+                dicts(x, y);
+                let pairs = x.iter().filter(|(key, _)| *key != b"Length");
+                stack.extend(pairs.map(|(key, value)| (value, y.get(key).expect("kept"))));
+            }
+            (Value::Stream(x), Value::Stream(y)) => {
+                dicts(&x.dict, &y.dict);
+                let pairs = x.dict.iter().filter(|(key, _)| *key != b"Length");
+                stack.extend(pairs.map(|(key, value)| (value, y.dict.get(key).expect("kept"))));
+            }
+            (Value::String(x, _), Value::String(y, _)) => assert_eq!(x.as_bytes(), y.as_bytes()),
+            (Value::Real(x), Value::Real(y)) => {
+                assert!(
+                    x == y || (*x as f32) == (*y as f32) || x.is_nan(),
+                    "{x} {y}"
+                );
+            }
+            (Value::Real(x), Value::Integer(y)) => assert_eq!(*x, *y as f64),
+            (x, y) => assert_eq!(x, y),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1134,6 +1267,85 @@ mod tests {
         seeds_of
     }
 
+    /// Files of what the family adapter treats apart: inherited attributes, a form,
+    /// an outline, threads, document parts, a thumbnail, each as read and as it
+    /// lays them out.
+    #[cfg(feature = "family")]
+    fn file_seeds() -> Vec<Vec<u8>> {
+        let file = |objects: &[&str]| {
+            let mut out = b"%PDF-1.7\n".to_vec();
+            let mut rows = Vec::new();
+            for (number, object) in (1..).zip(objects) {
+                rows.push(out.len());
+                out.extend_from_slice(format!("{number} 0 obj\n{object}\nendobj\n").as_bytes());
+            }
+            let at = out.len();
+            out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+            out.extend_from_slice(b"0000000000 65535 f \n");
+            for row in rows {
+                out.extend_from_slice(format!("{row:010} 00000 n \n").as_bytes());
+            }
+            let size = objects.len() + 1;
+            let tail = format!(
+                "trailer\n<< /Size {size} /Root 1 0 R /Info 13 0 R >>\nstartxref\n{at}\n%%EOF\n"
+            );
+            out.extend_from_slice(tail.as_bytes());
+            out
+        };
+        let all = file(&[
+            "<< /Type /Catalog /Pages 2 0 R /Outlines 8 0 R /AcroForm 10 0 R /Threads [14 0 R] /DPartRoot 16 0 R /OpenAction [4 0 R /Fit] /PageMode /UseOutlines >>",
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 9 9] /Resources 7 0 R /Rotate 90 >>",
+            "<< /Type /Page /Parent 2 0 R /Contents 5 0 R /Thumb 12 0 R /DPart 17 0 R >>",
+            "<< /Type /Page /Parent 2 0 R /Contents [6 0 R] /Annots [11 0 R] /B [15 0 R] >>",
+            "<< /Length 3 >>\nstream\nq Q\nendstream",
+            "<< /Length 18 0 R >>\nstream\nQ q\nendstream",
+            "<< /Font << /F0 << /Type /Font /Subtype /Type1 /BaseFont /Courier >> >> >>",
+            "<< /First 9 0 R /Last 9 0 R /Count 1 >>",
+            "<< /Title (a) /Parent 8 0 R /Dest [3 0 R /Fit] >>",
+            "<< /Fields [11 0 R] >>",
+            "<< /FT /Tx /Subtype /Widget /T (a) /P 4 0 R >>",
+            "<< /Width 1 /Height 1 /Length 1 >>\nstream\nz\nendstream",
+            "<< /Title (t) >>",
+            "<< /F 15 0 R /I 13 0 R >>",
+            "<< /T 14 0 R /N 15 0 R /V 15 0 R /P 4 0 R /R [0 0 1 1] >>",
+            "<< /DPartRootNode 17 0 R >>",
+            "<< /DParts [[]] /Start 3 0 R >>",
+            "3",
+        ]);
+        let mut seeds = vec![all.clone()];
+        for (kind, pack) in [
+            (pdf_structure::XrefKind::Table, false),
+            (pdf_structure::XrefKind::Stream, true),
+        ] {
+            let mut options = crate::family::Options::DEFAULT;
+            options.kind = kind;
+            options.pack = pack;
+            seeds.push(crate::family::linearize_bytes(&all, &[], &options).unwrap());
+        }
+        seeds
+    }
+
+    /// The family adapter's body, on files, whole and damaged.
+    #[cfg(feature = "family")]
+    #[test]
+    fn what_is_written_reads_back_the_same() {
+        let mut random = generator(0x1234_5678_9ABC_DEF1);
+        for seed in file_seeds() {
+            over(&seed);
+            for _ in 0..200 {
+                let mut hit = seed.clone();
+                for _ in 0..1 + random() % 4 {
+                    let at = (random() % hit.len() as u64) as usize;
+                    hit[at] = (random() % 256) as u8;
+                }
+                over(&hit);
+            }
+            for cut in (0..seed.len()).step_by(61) {
+                over(&seed[..cut]);
+            }
+        }
+    }
+
     /// Writes [`seeds`] and [`table_seeds`] to the folder
     /// `PDF_LINEARIZE_FUZZ_SEEDS` names, for `just fuzz linearize` to begin from.
     #[test]
@@ -1147,6 +1359,10 @@ mod tests {
         }
         for (at, seed) in table_seeds().iter().enumerate() {
             std::fs::write(folder.join(format!("tables-{at}")), seed).unwrap();
+        }
+        #[cfg(feature = "family")]
+        for (at, seed) in file_seeds().iter().enumerate() {
+            std::fs::write(folder.join(format!("file-{at}")), seed).unwrap();
         }
     }
 

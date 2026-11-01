@@ -68,7 +68,9 @@
 # file, as the target does but under the default options;
 # `linearize` calls `pdf_linearize::fuzz::graphs`, any bytes as a graph, refused
 # for what it has or planned, every promise of the plan held against plain walks
-# of it, which a stable unit test (`fuzz_bodies_run`) runs;
+# of it, which a stable unit test (`fuzz_bodies_run`) runs, and
+# `pdf_linearize::fuzz::over`, the same bytes as a file, laid out and read back,
+# which another (`what_is_written_reads_back_the_same`) runs on mutated files;
 # `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs

@@ -44,6 +44,11 @@
 //!   that moves written anew where its bytes had it; at another number only
 //!   where its key isn't made of its number. An update passes over only
 //!   what doesn't move, nor names what does.
+//! - **For a caller that lays a file out itself** ([`Parts`]): each body and
+//!   object stream written as a whole file's are, at the numbers it gives; with
+//!   what a whole file leaves out ([`left_out`], [`encryption_objects`]), a
+//!   trailer's own entries ([`trailer_entries`]), and `/ID` ([`first_id`],
+//!   [`file_id`], [`id_value`]).
 //! - **Cross-reference sections** ([`Section`]): a whole file's one
 //!   subsection, `[0, /Size)`, every number it doesn't list written as
 //!   free; or an update's, runs of the numbers it lists, which are only
@@ -90,6 +95,7 @@ mod copy;
 mod crypt;
 mod full;
 mod objstm;
+mod parts;
 #[cfg(test)]
 pub(crate) mod tests;
 mod xref;
@@ -111,8 +117,9 @@ use crate::source::{Document, Record, XrefKind};
 
 pub use append::{Base, update};
 pub use crypt::{Encrypting, Encryptor, Unencryptable};
-pub use full::{document, full};
+pub use full::{document, encryption_objects, full, left_out};
 pub use objstm::{KeptOut, MAX_DATA, MEMBERS, container, fits, kept_out, packable};
+pub use parts::{Packed, Parts};
 pub use xref::{Entry, Section};
 
 // A reading compares a document's encryption dictionary as written too
@@ -159,8 +166,15 @@ impl Deflate {
     };
 
     /// `data`, first predicted as `predictor` says, deflated at the end of
-    /// `out`.
-    fn encode(self, data: &[u8], predictor: Prediction, out: &mut Vec<u8>) -> Result<(), Error> {
+    /// `out`: as a cross-reference stream's and an object stream's are, for a
+    /// caller writing streams of its own. Refused where pdf-filters doesn't
+    /// encode it so ([`Error::Unencodable`]).
+    pub fn encode(
+        self,
+        data: &[u8],
+        predictor: Prediction,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error> {
         let flate = Encoder::Flate {
             level: self.level,
             predictor,
@@ -270,8 +284,8 @@ pub enum Body<'a> {
 }
 
 impl Body<'_> {
-    /// The object it writes.
-    fn object(&self) -> &Object {
+    /// The object it writes: as it was read, or as it's to be written anew.
+    pub fn object(&self) -> &Object {
         match self {
             Body::New(object) | Body::Read { object, .. } => object,
         }
@@ -973,10 +987,29 @@ const SECTION_KEYS: [&[u8]; 15] = [
     b"ID",
 ];
 
+/// `trailer`'s entries a caller's own for a section it writes: all but the
+/// keys a section writes anew or doesn't have (its links to other sections, a
+/// cross-reference stream's dictionary's own, `/Encrypt` and `/ID`), each
+/// reference as `to` names it, `null` where it names none, as a whole file's
+/// are ([`full`]). `&()` names each as it is. `/Root` isn't one of those keys:
+/// a caller whose section writes it takes it out.
+pub fn trailer_entries(trailer: &Dict, to: &(dyn Renumber + Sync)) -> Dict {
+    let mut trailer = trailer.clone();
+    for key in SECTION_KEYS {
+        trailer.remove(key);
+    }
+    let mut renumbered = Object::from(trailer);
+    renumbered.renumber(|id| to.renumber(id));
+    match renumbered.into_value() {
+        Value::Dict(dict) => dict,
+        _ => unreachable!("a dictionary renumbered is one"),
+    }
+}
+
 /// `trailer`'s first `/ID` element, which an RC4 or AES-128 key is made
 /// from: the array's first element, when that's a string, however many
 /// elements the array has.
-fn first_id(trailer: &Dict) -> Option<Vec<u8>> {
+pub fn first_id(trailer: &Dict) -> Option<Vec<u8>> {
     let id = trailer.get(b"ID")?.as_array()?.first()?;
     match id.value() {
         Value::String(text, _) => text.as_bytes().map(<[u8]>::to_vec),
@@ -989,7 +1022,7 @@ fn first_id(trailer: &Dict) -> Option<Vec<u8>> {
 /// the same `/ID`. A file with no first string gets the hash for both
 /// where it's `encrypted`, which needs an `/ID` (ISO 32000-2, 14.4, has a
 /// new file's two the same), and none otherwise.
-fn file_id(kept: Option<Vec<u8>>, encrypted: bool, written: &[u8]) -> Option<[Vec<u8>; 2]> {
+pub fn file_id(kept: Option<Vec<u8>>, encrypted: bool, written: &[u8]) -> Option<[Vec<u8>; 2]> {
     if kept.is_none() && !encrypted {
         return None;
     }
@@ -1001,7 +1034,7 @@ fn file_id(kept: Option<Vec<u8>>, encrypted: bool, written: &[u8]) -> Option<[Ve
 }
 
 /// `id`, as a trailer's `/ID` value: its two strings, in hex.
-fn id_value([first, second]: &[Vec<u8>; 2]) -> Object {
+pub fn id_value([first, second]: &[Vec<u8>; 2]) -> Object {
     Object::from(vec![
         Object::hex(first.clone()),
         Object::hex(second.clone()),

@@ -27,7 +27,7 @@ fuzz_toolchain := env("FUZZ_TOOLCHAIN", "nightly")
 pdfium_build := "8125"
 
 # The crates' PDFium cases, each a crate's tests/pdfium.
-pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-content-streams/tests/pdfium crates/pdf-semantics/tests/pdfium"
+pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-content-streams/tests/pdfium crates/pdf-semantics/tests/pdfium crates/pdf-linearize/tests/pdfium"
 
 # List the recipes.
 default:
@@ -44,23 +44,27 @@ fmt:
 # binary as they're built for use, without the features only their tests
 # turn on; then the filters with zlib-rs their only Flate backend; then the
 # content streams with `image-ends`, which no other crate turns on; then
-# pdf-semantics without its clock, as pdf-lint takes it.
+# pdf-semantics without its clock, as pdf-lint takes it; then pdf-linearize's
+# engine, without its adapter.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
     cargo clippy --locked -p pdf-filters --no-default-features --features zlib-rs --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --features image-ends --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
 
 # Unit tests and doctests: the workspace's, where the filters have both
 # Flate backends, as pdf-structure's tests turn zlib-rs on; then the
 # filters' with zlib-rs alone; then the content streams' with `image-ends`;
-# then pdf-semantics' without its clock.
+# then pdf-semantics' without its clock; then pdf-linearize's engine, without
+# its adapter.
 test:
     cargo test --locked --workspace
     cargo test --locked -p pdf-filters --no-default-features --features zlib-rs
     cargo test --locked -p pdf-content-streams --features image-ends
     cargo test --locked -p pdf-semantics --no-default-features
+    cargo test --locked -p pdf-linearize --no-default-features
 
 # qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
 # pinned SHA-256 (from the release's qpdf-12.4.2.sha256), kept in target/.
@@ -174,11 +178,13 @@ fuzzing:
 
 # Build the API docs, failing on warnings: with every feature on, then
 # as they're published, then pdf-semantics without its clock, as pdf-lint
-# takes it, which the workspace's unified features would hide.
+# takes it, which the workspace's unified features would hide, then
+# pdf-linearize's engine, without its adapter.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-semantics --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-linearize --no-deps --no-default-features
 
 # Build this platform's release archive in dist/, and check it runs as
 # it's unpacked, as the release workflow does each
@@ -257,9 +263,11 @@ content-msrv:
 semantics-msrv:
     cargo +{{ semantics_msrv }} test --locked -p pdf-semantics
 
-# Test pdf-linearize on its oldest supported Rust, which must be installed.
+# Test pdf-linearize on its oldest supported Rust, which must be installed, with
+# its adapter and without.
 linearize-msrv:
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize
+    cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --no-default-features
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:
@@ -276,8 +284,8 @@ arlington-msrv:
 # its writer, content written again and the calls, and its splices and
 # lists written again; `semantics`, pdf-semantics' name and number trees,
 # page tree, dates and XMP claims; `linearize`, pdf-linearize's plan of any
-# graph, what's assembled from it, and hint tables from any bytes; or `check`,
-# the reader and the checker.
+# graph, what's assembled from it, hint tables from any bytes, and any bytes as a
+# file, laid out and read back; or `check`, the reader and the checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
 # makes, `write`'s with the third byte its input has; `content`, `semantics` and
 # `linearize` from those their own crates' fuzz modules make. The nightly is
@@ -324,7 +332,7 @@ fuzz target="tokenize" seconds="60":
     linearize)
         PDF_LINEARIZE_FUZZ_SEEDS="$PWD/fuzz/seeds/linearize" cargo test --locked -q -p pdf-linearize --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/linearize
-        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" linearize fuzz/corpus/linearize fuzz/seeds/linearize -- -max_total_time={{ seconds }} -timeout=10
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" linearize fuzz/corpus/linearize fuzz/seeds/linearize -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact

@@ -1,0 +1,14 @@
+# name	kind	files
+one-page	avail	one-page.pdf
+two-pages	avail	two-pages.pdf
+two-pages-shared	avail	two-pages-shared.pdf
+many-pages	avail	many-pages.pdf
+many-pages-shared	avail	many-pages-shared.pdf
+first-is-page-1	avail	first-is-page-1.pdf
+first-is-page-5	avail	first-is-page-5.pdf
+broken-length	avail	broken-length.pdf
+broken-width-zero	avail	broken-width-zero.pdf
+broken-hint-short	avail	broken-hint-short.pdf
+broken-hint-past	avail	broken-hint-past.pdf
+broken-shared-past	avail	broken-shared-past.pdf
+not-linearized	avail	not-linearized.pdf

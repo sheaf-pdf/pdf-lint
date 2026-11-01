@@ -16,8 +16,21 @@
 //!   filtered or encrypted by is a closure, so no filter or key is here.
 //! - **The hint tables** ([`hint`]): all of F.4's as typed values, written to
 //!   bits and read back, [`hint::tables`] reading any bytes under a cap.
+#![cfg_attr(
+    feature = "family",
+    doc = "- **The family's documents** ([`family`], a default feature): a document of"
+)]
+#![cfg_attr(
+    feature = "family",
+    doc = "  pdf-structure's, or a file's bytes, written as a linearized file: the page tree"
+)]
+#![cfg_attr(
+    feature = "family",
+    doc = "  by pdf-semantics, each body through pdf-structure's writer, copied where it can be."
+)]
 //!
-//! Its caps are one value, [`Limits`].
+//! Its caps are one value, [`Limits`]. With no features there's no object model
+//! here at all.
 
 pub use layout::{Encoded, Layout, Piece, Stream, StreamKind, assemble};
 pub use limits::Limits;
@@ -26,6 +39,8 @@ pub use plan::{
     group, plan,
 };
 
+#[cfg(feature = "family")]
+pub mod family;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
@@ -38,7 +53,7 @@ pub mod plan;
 /// tuple pdf-objects' `ObjectId` and lopdf's are.
 pub type Id = (u32, u16);
 
-/// The README's examples, run as doctests.
-#[cfg(doctest)]
+/// The README's examples, run as doctests: one of them uses `family`.
+#[cfg(all(doctest, feature = "family"))]
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;

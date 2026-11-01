@@ -2,7 +2,7 @@
 
 PDF files laid out for reading over a network (ISO 32000-2, Annex F), in a small Rust crate with no object model of its own and no I/O: a caller describes its objects as plain data, whichever model holds them.
 
-It's made for what writes PDF files a viewer can show a page of before the rest arrives, and for what checks a file that says it's one. So far it plans a file's layout and assembles what goes around a caller's bodies, the hint tables among it; what checks one is to come.
+It's made for what writes PDF files a viewer can show a page of before the rest arrives, and for what checks a file that says it's one. So far it plans a file's layout, assembles what goes around a caller's bodies, the hint tables among it, and writes a document of pdf-structure's through both; what checks one is to come.
 
 ## What it does
 
@@ -13,6 +13,10 @@ It's made for what writes PDF files a viewer can show a page of before the rest 
 
 - **The bytes around the bodies (F.3).** A caller writes each of the plan's writes, whole, however it holds them, and gives `assemble` their lengths, as nothing in a body depends on an offset. It gives a `Layout`: the header, the dictionary, the first-page section, the hint stream and the main section as bytes, whose `pieces` say what comes next in the file, those or a caller's body. The hint stream and any cross-reference streams go through a closure the caller gives, which filters or encrypts them, so no filter or key is in here. The dictionary is padded to a fixed length; a table's `/Prev` has room for any position; a stream section is given room, and goes round if what it filters to doesn't fit.
 - **The hint tables (F.4), both ways.** The page offset, shared object, thumbnail, generic, extended and embedded file tables as typed values, each `write` to bits and `read` back, and `hint::tables` for all a hint stream's dictionary says it has. Reading any bytes, a width past 32 or a field past the data is a typed `hint::Error`, and a count that wants more bits than there are is refused before there's room made for it. Each table's every item is on the byte boundary every reader and real file puts it on; every position is as if the hint stream weren't there.
+
+- **A document of the family (`family`, a default feature).** `family::linearize` writes a pdf-structure `Document`, and `family::linearize_bytes` a file's bytes, in any of three kinds: tables, streams, or streams with object streams, deflated by a `write::Deflate`. Inherited page attributes are pushed down to each page, as written, and taken off the tree's nodes. The rest is copied through pdf-structure's writer where it can be, its references renumbered in place, and its bytes otherwise as they were. The catalog's `/OpenAction` says which page goes first, or `FirstPage::Index` does. A tree that doesn't give each page a place of its own is refused by a typed `family::Error`: a page listed twice or written in place, or one that ISO's rules and PDFium's, as of chromium/8125, read differently, since the numbers and tables depend on which pages a viewer finds. An encrypted file isn't written yet. On any refusal `out` is as it was given.
+
+Without default features it's the engine alone, with no object model: `thiserror` and `bitstream-io` are all it takes.
 
 Caps are one value, `Limits`, on the numbers a file uses, its pages, the shared lists' entries and visits and the entries hint tables can ask for: past one, a typed error, so that a crafted graph where a million pages reach a million objects is refused, not run, and a hint stream of a hundred bytes can't ask for four billion of anything. Nothing panics on a graph or on a table's bytes, and references to no object count for nothing.
 
@@ -76,6 +80,38 @@ assert!(layout.position(plan.first_page_number()).unwrap() < layout.first_page_e
 // The tables read back, the second page listing the font's entry.
 let tables = hint::tables(layout.hint_data(), layout.hint_keys(), 2, &Limits::DEFAULT).unwrap();
 assert_eq!(tables.pages.pages[1].shared, [(1, 0)]);
+```
+
+And from a file's bytes, with `family`:
+
+```rust
+use pdf_linearize::family::{Options, linearize_bytes};
+use pdf_structure::XrefKind;
+
+let mut file = b"%PDF-1.7\n".to_vec();
+let mut rows = Vec::new();
+for (number, object) in [
+    (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+    (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>"),
+    (3, "<< /Type /Page /Parent 2 0 R >>"),
+] {
+    rows.push(file.len());
+    file.extend_from_slice(format!("{number} 0 obj\n{object}\nendobj\n").as_bytes());
+}
+let at = file.len();
+file.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+for row in rows {
+    file.extend_from_slice(format!("{row:010} 00000 n \n").as_bytes());
+}
+file.extend_from_slice(
+    format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{at}\n%%EOF\n").as_bytes(),
+);
+
+let mut options = Options::DEFAULT;
+options.kind = XrefKind::Stream;
+options.pack = true;
+let linearized = linearize_bytes(&file, &[], &options).unwrap();
+assert!(linearized.windows(11).any(|w| w == b"/Linearized"));
 ```
 
 ## License
