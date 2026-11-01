@@ -1034,7 +1034,7 @@ fn a_tree_past_its_depth_going_down_is_refused_as_the_family_s_is() {
 }
 
 #[test]
-fn nothing_written_leaves_the_options_unused() {
+fn what_the_options_say_is_gone_by() {
     // A first page the options name, as the family's do.
     let bytes = built(&written::two_pages(""));
     let mut options = adapter::Options::DEFAULT;

@@ -881,6 +881,8 @@ fn page_uses_by_id_is_what_a_plan_says() {
     .collect();
     let stop: HashSet<Id> = [(1, 0), (2, 0), (3, 0), (4, 0)].into_iter().collect();
     let found = page_uses(&[(3, 0), (4, 0)], &stop, |id, to| {
+        // What it stops at it doesn't ask after: that's what the stop is for.
+        assert!(id != (1, 0) && id != (2, 0), "asked of {id:?}");
         for &reference in objects.get(&id).into_iter().flatten() {
             to(reference);
         }

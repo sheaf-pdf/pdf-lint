@@ -466,3 +466,45 @@ fn a_source_that_fails_is_an_error_not_a_finding() {
         Err(family::Error::Read(bytes::Error::Io(_)))
     ));
 }
+
+/// What a page's `/Parent` names is a node to the check as it is to the writer: not a
+/// listed page, nor what has no kids and doesn't say it's one, though either holds an
+/// attribute; a node that holds one is said.
+#[test]
+fn a_node_is_what_the_writer_calls_one() {
+    let said = |objects: &[&str]| {
+        let linearized = |length: usize| format!("<< /Linearized 1 /L {length:06} >>");
+        let all = |first: &str| {
+            let mut all = vec![first];
+            all.extend_from_slice(objects);
+            written::file(&all, "/Root 2 0 R")
+        };
+        let length = all(&linearized(0)).len();
+        let bytes = all(&linearized(length));
+        let reading = Reading::open(&bytes[..], &bytes::Options::DEFAULT).unwrap();
+        let mut findings = Vec::new();
+        let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
+        assert!(verdict.linearized);
+        let held = findings.iter();
+        let held = held.filter_map(|finding| match finding {
+            Finding::NodeAttribute { number, .. } => Some(*number),
+            _ => None,
+        });
+        held.collect::<Vec<_>>()
+    };
+    let catalog = "<< /Type /Catalog /Pages 3 0 R >>";
+    let own = "/MediaBox [0 0 9 9] /Resources << >>";
+    let root = "<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 >>";
+    // A listed page with kids of its own, the other's /Parent.
+    let listed = format!("<< /Type /Page /Kids [] /Parent 3 0 R {own} >>");
+    let under = format!("<< /Type /Page /Parent 4 0 R {own} >>");
+    assert_eq!(said(&[catalog, root, &listed, &under]), [] as [u32; 0]);
+    // No page, and nothing that says it's a node.
+    let page = format!("<< /Type /Page /Parent 3 0 R {own} >>");
+    let under = format!("<< /Type /Page /Parent 6 0 R {own} >>");
+    let other = "<< /Rotate 90 >>";
+    assert_eq!(said(&[catalog, root, &page, &under, other]), [] as [u32; 0]);
+    // A node, holding one.
+    let root = "<< /Type /Pages /Kids [4 0 R] /Count 1 /Rotate 90 >>";
+    assert_eq!(said(&[catalog, root, &page]), [3]);
+}

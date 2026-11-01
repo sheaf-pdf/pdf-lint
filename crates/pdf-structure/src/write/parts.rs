@@ -22,8 +22,8 @@ pub type Packed<'a> = (ObjectId, ObjectId, &'a Body<'a>);
 /// out itself. What's around them, its numbers among it, is that caller's: the
 /// guards [`full`](super::full) keeps on a file as a whole aren't here (a number
 /// given twice, one its encryptor's file lists free, what's written where a
-/// reader looks for what's in the clear), and [`Encryptor`] says what comes of
-/// leaving each out.
+/// reader looks for what's in the clear), and [`Encryptor`](super::Encryptor)
+/// says what comes of leaving each out.
 pub struct Parts<'w> {
     encrypting: Option<&'w Encrypting<'w>>,
     from: Option<&'w dyn ReadFrom>,
@@ -37,7 +37,7 @@ impl<'w> Parts<'w> {
     /// goes, none for each at the number it's given at. What's copied follows from
     /// those: in the clear, what `from` holds in the clear; encrypted, only what's
     /// encrypted under the key it was read under, so an `encrypting` of an
-    /// [`Encryptor::of`] `from`, renumbered and made whole or not. Under any other
+    /// [`Encryptor::of`](super::Encryptor::of) `from`, renumbered and made whole or not. Under any other
     /// key each object is written anew. Refused where `from`'s source says its
     /// bytes aren't those it was read from ([`Error::Changed`]), or can't tell
     /// ([`Error::Io`]).
