@@ -13,11 +13,24 @@ pub struct Limits {
     pub tree_nodes: usize,
     /// How many levels of nodes a page tree has, from its root down, and how
     /// many nodes a `/Parent` chain has ([`pages`](crate::pages)): 1,024 by
-    /// default, as PDFium's walk goes.
+    /// default, as PDFium's walk goes. A table holds its chains, and dropping
+    /// one takes the stack as deep as it's long, so a cap raised far past this
+    /// lets a file of such a chain overflow it.
     pub page_depth: usize,
     /// How many pages a page tree lists, and how many of its nodes a walk
     /// visits: 1,048,574 by default, the most PDFium counts.
     pub pages: usize,
+    /// How many bytes of an XMP packet are read ([`xmp`](crate::xmp)): 16 MiB
+    /// by default. A packet longer than that is an error holding what they
+    /// claim.
+    pub xmp_bytes: usize,
+    /// How many levels of an XMP packet's elements are read: 256 by default.
+    pub xmp_depth: usize,
+    /// How many namespaces may be bound at once in an XMP packet, on the
+    /// elements open at any point: 256 by default, as each name read looks
+    /// through those bound. Together with [`xmp_bytes`](Limits::xmp_bytes)
+    /// that's what a packet can cost.
+    pub xmp_bindings: usize,
 }
 
 impl Limits {
@@ -27,6 +40,9 @@ impl Limits {
         tree_nodes: 100_000,
         page_depth: 1024,
         pages: 0xFFFFE,
+        xmp_bytes: 16 << 20,
+        xmp_depth: 256,
+        xmp_bindings: 256,
     };
 }
 

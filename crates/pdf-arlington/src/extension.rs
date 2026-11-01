@@ -1,7 +1,8 @@
 //! The extensions a file declares, as the model names them
 //! (INTERNAL_GRAMMAR.md, `fn:Extension`): those of the catalog's
 //! extensions dictionary (ISO 32000-2, 7.12), and the subsets its XMP
-//! metadata says it conforms to. The checker holds a file to what's under
+//! metadata says it conforms to, which it's given ([`Claims`]), as reading
+//! XML isn't this crate's. The checker holds a file to what's under
 //! the extensions it declares, as TestGrammar does to those named with its
 //! `--extensions`; it can't tell any other. Those a model names are
 //! [`Grammar::extensions`].
@@ -27,9 +28,22 @@ pub const ISO: &[(&str, i64)] = &[
     ("ISO_TS_32007", 32007),
 ];
 
+/// What a file's XMP metadata claims, of what [`declared`] reads: each value
+/// as it's written there but for the white space round it, none if it's not
+/// claimed. It's filled in a field at a time, from `Claims::default()`, as
+/// more may come.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Claims<'a> {
+    /// PDF/A's part: `pdfaid:part`.
+    pub pdfa_part: Option<&'a str>,
+    /// PDF/VT's version: `pdfvtid:GTS_PDFVTVersion`.
+    pub pdfvt_version: Option<&'a str>,
+}
+
 /// The extensions a file declares, as the model names them, from `root`,
-/// its trailer's `/Root` as written, and `metadata`, the data of its
-/// catalog's metadata stream (ISO 32000-2, 14.3.2); `resolve` gives the
+/// its trailer's `/Root` as written, and `claims`, what its catalog's
+/// metadata stream claims (ISO 32000-2, 14.3.2); `resolve` gives the
 /// object a reference names, as its own, so a reader needn't keep what
 /// it reads:
 ///
@@ -38,12 +52,12 @@ pub const ISO: &[(&str, i64)] = &[
 ///   before it;
 /// - `ETSI_PAdES`, from an `/ESIC` entry, ETSI's (EN 319 142-1);
 /// - an ISO extension of [`ISO`], from an `/ISO_` entry with its number;
-/// - `ISO_19005_3` (PDF/A-3), from XMP metadata whose `pdfaid:part` is 3,
-///   and `PDF_VT2` (PDF/VT-2), from its `pdfvtid:GTS_PDFVTVersion`.
+/// - `ISO_19005_3` (PDF/A-3), from a `pdfaid:part` of 3, and `PDF_VT2`
+///   (PDF/VT-2), from a `pdfvtid:GTS_PDFVTVersion` of `PDF/VT-2`.
 ///
 /// An entry may be one developer extensions dictionary or, from PDF 2.0,
-/// an array of them. Metadata a reader doesn't have in plain view, given
-/// as none, declares nothing.
+/// an array of them. Metadata a reader doesn't have in plain view has
+/// no claims, and declares nothing.
 ///
 /// `resolve` gives an object of its own, not a borrow, as a
 /// [`Resolve`](pdf_objects::Resolve) does for a
@@ -53,7 +67,7 @@ pub const ISO: &[(&str, i64)] = &[
 /// `Resolve` gives one by a clone: `&|id| resolver.resolve(id).cloned()`.
 pub fn declared(
     root: Option<&Object>,
-    metadata: Option<&[u8]>,
+    claims: Claims,
     resolve: &dyn Fn(ObjectId) -> Option<Object>,
 ) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
@@ -102,13 +116,11 @@ pub fn declared(
             }
         }
     }
-    if let Some(xmp) = metadata {
-        if property(xmp, b"pdfaid:part").as_deref() == Some(&b"3"[..]) {
-            names.insert("ISO_19005_3".to_string());
-        }
-        if property(xmp, b"pdfvtid:GTS_PDFVTVersion").as_deref() == Some(&b"PDF/VT-2"[..]) {
-            names.insert("PDF_VT2".to_string());
-        }
+    if claims.pdfa_part == Some("3") {
+        names.insert("ISO_19005_3".to_string());
+    }
+    if claims.pdfvt_version == Some("PDF/VT-2") {
+        names.insert("PDF_VT2".to_string());
     }
     names
 }
@@ -151,40 +163,6 @@ fn called(text: &str) -> impl Iterator<Item = String> + '_ {
     })
 }
 
-/// The value of the XMP property `name` in `xmp`, written as an attribute
-/// (`name="3"`) or an element (`<name>3</name>`), its white-space trimmed:
-/// the first written.
-fn property(xmp: &[u8], name: &[u8]) -> Option<Vec<u8>> {
-    let trim = |v: &[u8]| v.trim_ascii().to_vec();
-    let mut at = 0;
-    while let Some(i) = find(&xmp[at..], name).map(|i| at + i) {
-        at = i + name.len();
-        let rest = &xmp[at..];
-        let after = rest.trim_ascii_start();
-        if let Some(value) = after.strip_prefix(b"=") {
-            let value = value.trim_ascii_start();
-            let Some((&quote, value)) = value.split_first() else {
-                continue;
-            };
-            if quote == b'"' || quote == b'\'' {
-                let end = value.iter().position(|&b| b == quote)?;
-                return Some(trim(&value[..end]));
-            }
-        } else if let Some(value) = rest.strip_prefix(b">") {
-            let preceded = i > 0 && xmp[i - 1] == b'<';
-            if preceded {
-                let end = find(value, b"<")?;
-                return Some(trim(&value[..end]));
-            }
-        }
-    }
-    None
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -193,16 +171,16 @@ mod tests {
 
     use super::*;
 
-    /// A file's objects, its trailer's `/Root` and its metadata.
-    struct File {
+    /// A file's objects, its trailer's `/Root` and what its metadata claims.
+    struct File<'a> {
         objects: BTreeMap<ObjectId, Object>,
         root: Object,
-        metadata: Option<Vec<u8>>,
+        claims: Claims<'a>,
     }
 
-    /// A file whose catalog, object 1, has `extensions`, and `xmp` as
-    /// metadata.
-    fn declaring(extensions: Option<Dict>, xmp: Option<&str>) -> File {
+    /// A file whose catalog, object 1, has `extensions`, and metadata that
+    /// claims `claims`.
+    fn declaring(extensions: Option<Dict>, claims: Claims) -> File {
         let mut catalog = dict! { "Type" => "Catalog" };
         if let Some(extensions) = extensions {
             catalog.set("Extensions", extensions);
@@ -210,13 +188,13 @@ mod tests {
         File {
             objects: BTreeMap::from([((1, 0), catalog.into())]),
             root: Object::reference(1),
-            metadata: xmp.map(|x| x.as_bytes().to_vec()),
+            claims,
         }
     }
 
     fn names(file: &File) -> Vec<String> {
         let resolve = |id: ObjectId| file.objects.get(&id).cloned();
-        (declared(Some(&file.root), file.metadata.as_deref(), &resolve).into_iter()).collect()
+        (declared(Some(&file.root), file.claims, &resolve).into_iter()).collect()
     }
 
     fn developer(base: &str, level: i64) -> Object {
@@ -225,7 +203,10 @@ mod tests {
 
     #[test]
     fn a_file_declares_the_extensions_its_catalog_and_metadata_name() {
-        assert_eq!(names(&declaring(None, None)), Vec::<String>::new());
+        assert_eq!(
+            names(&declaring(None, Claims::default())),
+            Vec::<String>::new()
+        );
         // Adobe's level 3 and later, at 1.7; ETSI's; ISO's by number, in an
         // array, the PDF 2.0 way.
         let extensions = dict! {
@@ -235,29 +216,35 @@ mod tests {
             "XYZ" => developer("1.7", 3),
         };
         assert_eq!(
-            names(&declaring(Some(extensions), None)),
+            names(&declaring(Some(extensions), Claims::default())),
             ["ADBE_Extn3", "ETSI_PAdES", "ISO_TS_32001", "ISO_TS_32003"]
         );
         // Adobe's earlier levels, or another base version, aren't level 3.
         for adbe in [developer("1.7", 1), developer("1.6", 3)] {
             let extensions = dict! { "ADBE" => adbe };
             assert_eq!(
-                names(&declaring(Some(extensions), None)),
+                names(&declaring(Some(extensions), Claims::default())),
                 Vec::<String>::new()
             );
         }
-        // PDF/A-3 and PDF/VT-2, from XMP, as an attribute or an element.
-        let attribute = r#"<rdf:Description pdfaid:part="3" pdfaid:conformance="B"/>"#;
-        let element = "<pdfaid:part> 3 </pdfaid:part><pdfvtid:GTS_PDFVTVersion>PDF/VT-2</pdfvtid:GTS_PDFVTVersion>";
-        assert_eq!(names(&declaring(None, Some(attribute))), ["ISO_19005_3"]);
+        // PDF/A-3 and PDF/VT-2, as XMP metadata claims them.
+        let claims = |pdfa_part, pdfvt_version| Claims {
+            pdfa_part,
+            pdfvt_version,
+        };
         assert_eq!(
-            names(&declaring(None, Some(element))),
+            names(&declaring(None, claims(Some("3"), None))),
+            ["ISO_19005_3"]
+        );
+        assert_eq!(
+            names(&declaring(None, claims(Some("3"), Some("PDF/VT-2")))),
             ["ISO_19005_3", "PDF_VT2"]
         );
-        let quoted = r#"<rdf:Description pdfaid:part = '3'/>"#;
-        assert_eq!(names(&declaring(None, Some(quoted))), ["ISO_19005_3"]);
-        let a2 = r#"<rdf:Description pdfaid:part='2'/>"#;
-        assert_eq!(names(&declaring(None, Some(a2))), Vec::<String>::new());
+        // Any other part or version isn't them.
+        let others = [claims(Some("2"), None), claims(None, Some("PDF/VT-1"))];
+        for claims in others {
+            assert_eq!(names(&declaring(None, claims)), Vec::<String>::new());
+        }
     }
 
     #[test]

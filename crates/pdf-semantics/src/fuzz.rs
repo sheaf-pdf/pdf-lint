@@ -1,6 +1,6 @@
 //! What the fuzz target checks, which unit tests check too: the promises
-//! the walks and the writers of trees make, the page tree's, and dates', on
-//! any input. It's compiled only for tests and under cargo-fuzz's
+//! the walks and the writers of trees make, the page tree's, dates' and XMP's,
+//! on any input. It's compiled only for tests and under cargo-fuzz's
 //! `--cfg fuzzing`.
 
 use std::collections::BTreeMap;
@@ -11,6 +11,7 @@ use pdf_objects::{Dict, Object, ObjectId, Resolve, Rules, Unreadable, Value, Why
 use crate::date::{Date, Quirk};
 use crate::pages::{Error, Inheritable, Origin, Page, Pages, Rect, pages};
 use crate::tree::{self, names, numbers};
+use crate::xmp::{self, Claims, metadata_stream};
 use crate::{Fault, HOPS, Limits, Place, Sink, catalog, follow};
 
 /// How many values of an input are read as objects.
@@ -576,6 +577,8 @@ pub struct Over<'o> {
     pub trees: Vec<Walked<'o>>,
     /// Its pages, by ISO's rules and by PDFium's.
     pub pages: Option<[Paged<'o>; 2]>,
+    /// Its metadata stream, or why it isn't known.
+    pub metadata: Option<Result<Option<ObjectId>, Why>>,
 }
 
 /// Every tree the catalog `trailer` leads to holds, walked and held to its
@@ -586,6 +589,7 @@ pub fn over<'o, R: Resolve<'o> + ?Sized>(objects: &R, trailer: &'o Dict) -> Over
         return Over {
             trees: Vec::new(),
             pages: None,
+            metadata: None,
         };
     };
     let roots = roots(objects, catalog);
@@ -595,6 +599,7 @@ pub fn over<'o, R: Resolve<'o> + ?Sized>(objects: &R, trailer: &'o Dict) -> Over
     Over {
         trees,
         pages: Some(both_tables(objects, catalog)),
+        metadata: Some(metadata_stream(objects, catalog).map_err(|unreadable| unreadable.why)),
     }
 }
 
@@ -682,9 +687,80 @@ pub fn dates(data: &[u8]) {
     }
 }
 
+/// Each value of `claims`.
+fn claim_values(claims: &Claims) -> [&Option<String>; 6] {
+    [
+        &claims.pdfa_part,
+        &claims.pdfa_conformance,
+        &claims.pdfa_rev,
+        &claims.pdfua_part,
+        &claims.pdfua_rev,
+        &claims.pdfvt_version,
+    ]
+}
+
+/// `data` as an XMP packet:
+///
+/// - read the same whatever the sink;
+/// - an error names a place in the packet and holds what was read;
+/// - each value trimmed of ASCII's white space;
+/// - [`conformance`](Claims::conformance) what the values say, where it reads;
+/// - under smaller caps, each value it reads is what it reads under the
+///   default ones, as it reads the same up to where it stops.
+pub fn xmp(data: &[u8]) {
+    struct Told(usize);
+    impl Sink for Told {
+        fn fault(&mut self, place: Place, _: Fault) {
+            assert_eq!(place.object, None);
+            let at = place.at.expect("a place in the packet");
+            assert!(at.start <= at.end);
+            self.0 = self.0.max(at.end);
+        }
+    }
+
+    let limits = Limits::DEFAULT;
+    let mut told = Told(0);
+    let read = xmp::read(data, &limits, &mut told);
+    assert_eq!(xmp::read(data, &limits, &mut ()), read);
+    assert!(told.0 <= data.len());
+    let claims = match &read {
+        Ok(claims) => claims,
+        Err(error) => {
+            assert!(error.at <= data.len(), "{error}");
+            assert!(error.to_string().contains(&format!("{}", error.at)));
+            &error.read
+        }
+    };
+    for value in claim_values(claims).into_iter().flatten() {
+        assert_eq!(value.trim_ascii(), value);
+    }
+    if let Ok(said) = claims.conformance() {
+        assert_eq!(said.pdfa.is_some(), claims.pdfa_part.is_some());
+        assert_eq!(said.pdfua.is_some(), claims.pdfua_part.is_some());
+        if let Some(pdfa) = said.pdfa {
+            assert!(pdfa.to_string().starts_with("PDF/A-"));
+            assert!(pdfa.level.is_none_or(|level| level.is_ascii_uppercase()));
+        }
+    }
+    let mut small = limits;
+    (small.xmp_bytes, small.xmp_depth, small.xmp_bindings) = (data.len() / 2, 4, 2);
+    let mut smaller = [limits; 4];
+    smaller[0].xmp_bytes = small.xmp_bytes;
+    smaller[1].xmp_depth = small.xmp_depth;
+    smaller[2].xmp_bindings = small.xmp_bindings;
+    smaller[3] = small;
+    for limits in smaller {
+        let under = xmp::read(data, &limits, &mut ());
+        let under = under.unwrap_or_else(|error| error.read);
+        for (under, all) in claim_values(&under).into_iter().zip(claim_values(claims)) {
+            assert!(under.is_none() || under == all, "{under:?} {all:?}");
+        }
+    }
+}
+
 /// What the fuzzer begins from: objects as [`walks`] reads them, the first
-/// the trailer, in each of a tree's shapes and a page tree's; dates; and a
-/// count of seconds.
+/// the trailer, in each of a tree's shapes and a page tree's; dates; XMP
+/// packets; and a count of seconds.
 /// The seeds written for the target are each of these as a file too.
 #[must_use]
 pub fn fixtures() -> Vec<Vec<u8>> {
@@ -755,6 +831,12 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         "D:20260230",
         "D:202610+05'30",
         "D:2026102415300012x",
+        // XMP: attributes and elements, in each namespace, under other
+        // prefixes, and what's read past.
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/" pdfaid:part="3" pdfaid:conformance="B" pdfaid:rev="2012"/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#,
+        r#"<d xmlns:a="http://www.aiim.org/pdfa/ns/id/" xmlns:u="http://www.aiim.org/pdfua/ns/id/" xmlns:v="http://www.npes.org/pdfvt/ns/id/"><a:part>2</a:part><a:conformance> b </a:conformance><u:part>&#49;</u:part><u:rev><![CDATA[2014]]></u:rev><v:GTS_PDFVTVersion>PDF/VT-2</v:GTS_PDFVTVersion></d>"#,
+        r#"<!DOCTYPE d [<!ENTITY a "3">]><d a=1 b xmlns:a="http://www.aiim.org/pdfa/ns/id/" a:part="&a;" a:rev="1" a:rev="2"><a:part>&a;</a:part><a:part>3</a:part><!-- <a:part>2</a:part> --></e><a:conformance>A</a:conformance></d>"#,
+        r#"<a xmlns="http://www.aiim.org/pdfa/ns/id/" xmlns:q="u"><part>9<b/></part><q:part q:part=""><c><d><e><f><g/></f></e></d></c></q:part>"#,
     ];
     let mut seeds: Vec<Vec<u8>> = trees.map(|seed| seed.as_bytes().to_vec()).to_vec();
     seeds.push(1_792_800_000i64.to_le_bytes().to_vec());
@@ -771,7 +853,7 @@ mod tests {
 
     /// A mutation of `seed`, from `random`, as a fuzzer might make it.
     fn mutated(seed: &[u8], random: &mut impl FnMut() -> usize) -> Vec<u8> {
-        const PIECES: [&[u8]; 23] = [
+        const PIECES: [&[u8]; 30] = [
             b"[",
             b"]",
             b"<<",
@@ -795,6 +877,13 @@ mod tests {
             b"/Pages",
             b"/MediaBox",
             b"/Rotate",
+            b"<",
+            b"/>",
+            b"</a:part>",
+            b"xmlns:a=\"http://www.aiim.org/pdfa/ns/id/\"",
+            b"a:part=\"3\"",
+            b"&#51;",
+            b"&a;",
         ];
         let mut data = seed.to_vec();
         for _ in 0..1 + random() % 4 {
@@ -827,10 +916,12 @@ mod tests {
         for seed in fixtures() {
             walks(&seed);
             dates(&seed);
+            xmp(&seed);
             for _ in 0..200 {
                 let data = mutated(&seed, &mut random);
                 walks(&data);
                 dates(&data);
+                xmp(&data);
             }
         }
     }
@@ -842,6 +933,7 @@ mod tests {
             let data: Vec<u8> = (0..random() % 64).map(|_| random() as u8).collect();
             walks(&data);
             dates(&data);
+            xmp(&data);
         }
     }
 

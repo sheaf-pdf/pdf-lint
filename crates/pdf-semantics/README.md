@@ -1,6 +1,6 @@
 # pdf-semantics
 
-PDF's common structures (ISO 32000-2, 7.7.3 and 7.9), read and written, each value saying where it came from, in a small Rust crate on [pdf-objects](../pdf-objects).
+PDF's common structures (ISO 32000-2, 7.7.3, 7.9 and 14.3.2), read and written, each value saying where it came from, in a small Rust crate on [pdf-objects](../pdf-objects).
 
 It's made for what reads a file's common structures to show them, check them or edit them, and what writes them.
 
@@ -10,6 +10,7 @@ It's made for what reads a file's common structures to show them, check them or 
 - **Text strings (7.9.2.2).** `text` is pdf-objects' module: read by ISO's rules or PDFium's, every departure said, and written, as itself when PDFDocEncoding reads it back so, or in UTF-16BE.
 - **The page tree (7.7.3).** `pages::pages` lists every page in order, by one of two sets of rules, which give the same pages on a well-formed tree. PDFium's, as of chromium/8125, a development snapshot of PDFium that the crate's tests hold them to, number each page as PDFium numbers it: a kid with `/Kids` is a node whatever its `/Type`, one written in place reads as any other, one that names no dictionary has a place with no page at it, and the walk stops at the count PDFium gives, which `Pages::counted` says; where PDFium goes on past a node listed inside itself, a `/Parent` chain that loops or a tree past the caps, the walk fails instead, by a typed `pages::Error`. ISO's read on past whatever departs from the clause, each said. Either way what a page inherits comes up its `/Parent` chain: `Page::attribute` gives it as written and followed, `Page::media_box`, `crop_box`, `rotate` and `user_unit` as a value, and each says where it came from, the page, an ancestor or a default (`Origin`). A page object listed twice is two pages, and nothing's copied: what a page holds is borrowed from what the resolver keeps, its `/Contents` and `/Annots` the caller's to read from its dictionary.
 - **Name and number trees (7.9.6, 7.9.7).** `tree::names` and `tree::numbers` walk one a key and a value at a time, in the order it's written, borrowing from what the resolver keeps and reading nothing it hasn't been asked for, under caps of depth and nodes, each node read once so a loop ends. Each departure is told to a sink, and `whole` says whether anything was left unread. `tree::write_names` and `tree::write_numbers` write one flat, sorted, a key given twice refused.
+- **XMP claims (14.3.2).** `xmp::read` reads what a packet claims it conforms to, PDF/A's part, conformance and revision, PDF/UA's part and revision and PDF/VT's version, on [quick-xml](https://crates.io/crates/quick-xml): an attribute or an element, under any prefix bound to its namespace, so a prefix bound to another, a comment or CDATA holding what looks like one claims nothing. The first value of each counts, as written, so one that says nothing doesn't lose another, and `Claims::conformance` reads PDF/A's and PDF/UA's as a number and a letter. An attribute or a value that doesn't read is told to a sink and passed; XML that stops making sense, or a packet past its caps, ends the read with an `XmpError` that holds what was read. No DOCTYPE is read and no entity expanded. `xmp::metadata_stream` says which stream holds a file's packet.
 
 Whatever walks a file's objects reads them through pdf-objects' `Resolve`, so over pdf-structure's reading in memory or by position, its document, or a closure alike. `catalog` finds a file's catalog from its trailer, and `follow` follows a reference. A reader says why it gives no object, and a walk acts on it: an object that's damaged is said and passed; one past a cap the reader reads under, one that takes a password, or bytes the source didn't give end the walk with an `Unreadable`, so that a failed read never looks like an empty tree.
 
@@ -121,6 +122,26 @@ assert!(walk.whole());
 assert_eq!(walk.into_sink().0, [Fault::TreeRepeated { id: (2, 0) }]);
 ```
 
+What a file claims, from its packet, a claim elsewhere counting past an attribute that doesn't read:
+
+```rust
+use pdf_semantics::Limits;
+use pdf_semantics::xmp::{self, PdfA};
+
+let packet = br#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+    xmlns:a="http://www.aiim.org/pdfa/ns/id/" a:part="2" oops=1>
+    <a:conformance> b </a:conformance>
+    <!-- <a:part>3</a:part> -->
+</rdf:Description>"#;
+
+let claims = xmp::read(packet, &Limits::DEFAULT, &mut ()).unwrap();
+assert_eq!(claims.pdfa_part.as_deref(), Some("2"));
+assert_eq!(claims.pdfa_conformance.as_deref(), Some("b"));
+
+let pdfa: PdfA = claims.conformance().unwrap().pdfa.unwrap();
+assert_eq!(pdfa.to_string(), "PDF/A-2b");
+```
+
 ## What it doesn't do
 
 - **Comparing dates across offsets, or showing them.** A date is its fields; a calendar's arithmetic is a caller's, on what `_or_default` gives.
@@ -128,6 +149,7 @@ assert_eq!(walk.into_sink().0, [Fault::TreeRepeated { id: (2, 0) }]);
 - **A page's geometry.** A page's boxes are given as they're written and followed, an empty one too: what shows of it is a caller's, by the clause or as PDFium does. Its `/Contents`, `/Annots` and other boxes are in its dictionary.
 - **A page tree written.** It's read here, and a document's writer has what numbers its nodes.
 - **A reference by its number alone.** A reference names an object by its number and its generation here, as `Resolve` takes them, where PDFium doesn't read the generation; `tests/pdfium/differ.tsv` lists it among the few places the walk reads otherwise than PDFium, each on purpose.
+- **Holding a file to its claims, or writing them.** A claim is the file's own word. XMP's other properties, and a packet not in UTF-8, aren't read.
 - **A tree written in nodes.** Nodes under a root would each need an object's number, so that's for what holds a document. A flat tree is a whole one at any size.
 
 ## License

@@ -309,7 +309,7 @@ fn table(out: &mut Vec<u8>, first: usize, offsets: &[usize]) {
 /// catalog declares Adobe's extension level and, in its XMP metadata,
 /// PDF/A-3.
 fn xref_stream() -> Vec<u8> {
-    let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF><rdf:Description pdfaid:part="3" pdfaid:conformance="B"/></rdf:RDF></x:xmpmeta>"#;
+    let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF><rdf:Description xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/" pdfaid:part="3" pdfaid:conformance="B"/></rdf:RDF></x:xmpmeta>"#;
     let objects = [
         "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R \
          /Extensions << /ADBE << /BaseVersion /1.7 /ExtensionLevel 8 >> >> >>"
@@ -626,6 +626,17 @@ mod tests {
         fn below(&mut self, n: usize) -> usize {
             usize::try_from(self.next() % n.max(1) as u64).unwrap_or(0)
         }
+    }
+
+    /// Its metadata declares PDF/A-3, so a mutation of it reaches what's under
+    /// that, as one of a file whose prefix isn't bound doesn't.
+    #[test]
+    fn the_xref_stream_seed_declares_its_extensions() {
+        let declared = crate::extension::declared(&bytes::read(&xref_stream()));
+        assert_eq!(
+            declared.into_iter().collect::<Vec<_>>(),
+            ["ADBE_Extn3", "ISO_19005_3"]
+        );
     }
 
     #[test]

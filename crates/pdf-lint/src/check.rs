@@ -7192,7 +7192,7 @@ mod tests {
             catalog.set("Metadata", r(6));
         });
         let mut declared = declared;
-        let xmp = br#"<x:xmpmeta><rdf:Description pdfaid:part="3"/></x:xmpmeta>"#;
+        let xmp = br#"<x:xmpmeta><rdf:Description xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/" pdfaid:part="3"/></x:xmpmeta>"#;
         let metadata = dict! { "Type" => "Metadata", "Subtype" => "XML" };
         declared.push((6, Body::stream(metadata, xmp)));
         let names = |names: &[&str]| names.iter().map(|n| n.to_string()).collect();

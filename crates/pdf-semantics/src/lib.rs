@@ -15,6 +15,10 @@
 //!   by ISO's rules or PDFium's as of chromium/8125, each inherited attribute
 //!   saying which dictionary it came from, a value that's absent saying what
 //!   stands for it.
+//! - **XMP claims** ([`xmp`]): ISO 32000-2, 14.3.2. What a packet says a file
+//!   conforms to, PDF/A, PDF/UA or PDF/VT, read as XML under caps, by the
+//!   namespace each is bound to, so a prefix or a comment that merely looks
+//!   like one claims nothing.
 //!
 //! What walks a file's objects reads them through [`Resolve`], so over
 //! pdf-structure's reading, lazily or by position, over its document or a
@@ -37,6 +41,7 @@ pub mod fuzz;
 mod limits;
 pub mod pages;
 pub mod tree;
+pub mod xmp;
 
 use pdf_objects::Value;
 

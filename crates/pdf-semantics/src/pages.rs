@@ -4,7 +4,9 @@
 //! never deep on the stack.
 //!
 //! [`pages`] walks it by one of two sets of rules, and on a well-formed tree
-//! they give the same pages:
+//! they give the same pages, each object in the same place, though not always
+//! the same values: a `/MediaBox null` is one that's absent to ISO's, which
+//! inherit one, and one that's there to PDFium's, which take it for none:
 //!
 //! - **PDFium's** ([`Rules::Pdfium`]), as of chromium/8125, a development
 //!   snapshot of PDFium that the crate's tests hold them to, so that a page's

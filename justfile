@@ -266,7 +266,7 @@ arlington-msrv:
 # faults, operator table, the balance, marked content and names over them,
 # its writer, content written again and the calls, and its splices and
 # lists written again; `semantics`, pdf-semantics' name and number trees,
-# page tree and dates; or `check`, the reader and the checker. `structure`, `write` and
+# page tree, dates and XMP claims; or `check`, the reader and the checker. `structure`, `write` and
 # `check` begin from the seeds pdf-lint's fuzz module makes, `write`'s with
 # the third byte its input has; `content` and `semantics` from those their own
 # crates' fuzz modules make. The nightly is `fuzz_toolchain`.

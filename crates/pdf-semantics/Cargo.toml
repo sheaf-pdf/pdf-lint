@@ -5,8 +5,8 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF's common structures, read and written: dates, text strings, name and number trees, and the page tree by ISO's rules or PDFium's"
-keywords = ["pdf", "date", "name-tree", "iso-32000", "metadata"]
+description = "PDF's common structures, read and written: dates, text strings, name and number trees, the page tree by ISO's rules or PDFium's, and what XMP metadata claims"
+keywords = ["pdf", "xmp", "date", "page-tree", "iso-32000"]
 categories = ["parser-implementations", "date-and-time"]
 # Only what users need, so local tooling files can't end up in the package.
 include = ["/src", "/README.md", "/CHANGELOG.md"]
@@ -16,6 +16,8 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 # features, so without its time zones and what they pull in.
 chrono = { version = "0.4.45", default-features = false, optional = true }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
+# XMP's XML, with namespaces; none of its features.
+quick-xml = "0.41"
 thiserror = "2"
 
 [features]

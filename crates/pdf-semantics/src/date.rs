@@ -238,11 +238,7 @@ impl Date {
             };
             date.fields[at] = Some(in_range(value, low, high, field)?);
         }
-        if let (Some(month), Some(day)) = (date.fields[MONTH], date.fields[DAY]) {
-            if day > days_in(year, month) {
-                date.quirks.push(Quirk::ImpossibleDay);
-            }
-        }
+        date.said_of_its_day();
 
         let sign = take(&mut rest, |c| b"Z+-".contains(&c));
         let hours = two(&mut rest)
@@ -327,11 +323,24 @@ impl Date {
         }
         self.fields[at] = Some(value);
         self.quirks.clear();
+        self.said_of_its_day();
         Ok(self)
     }
 
+    /// Says [`Quirk::ImpossibleDay`] where a date read has such a day still: a
+    /// `with_` asks only of the fields it sets, and reading what it writes back
+    /// says so, so that it's the same date.
+    fn said_of_its_day(&mut self) {
+        if let (Some(month), Some(day)) = (self.fields[MONTH], self.fields[DAY]) {
+            if day > days_in(self.year, month) {
+                self.quirks.push(Quirk::ImpossibleDay);
+            }
+        }
+    }
+
     /// This date in another month, 1 to 12, which must have its day if it has
-    /// one. What reading it read past is left behind, as with each `with_`.
+    /// one. What reading it read past is left behind, as with each `with_`, but
+    /// that a day its month hasn't is still said, if another `with_` kept it.
     pub fn with_month(self, month: u8) -> Result<Date, DateError> {
         let date = self.with(MONTH, month)?;
         if date.fields[DAY].is_some_and(|day| day > days_in(date.year, month)) {
@@ -378,6 +387,7 @@ impl Date {
         }
         self.offset = Some(offset);
         self.quirks.clear();
+        self.said_of_its_day();
         Ok(self)
     }
 
@@ -1009,6 +1019,19 @@ mod tests {
         let date = date.with_offset(Offset::Utc).unwrap();
         assert_eq!(date.quirks(), []);
         assert_eq!(date.write(), "D:20261024153000Z");
+
+        // A day its month hasn't, kept, is still said, as reading what's
+        // written back says it: the date's the same one.
+        let kept = Date::read("D:20260230123000 and so on").unwrap();
+        for date in [
+            kept.clone().with_hour(1).unwrap(),
+            kept.clone().with_minute(1).unwrap(),
+            kept.clone().with_second(1).unwrap(),
+            kept.clone().with_offset(Offset::Utc).unwrap(),
+        ] {
+            assert_eq!(date.quirks(), [Quirk::ImpossibleDay]);
+            assert_eq!(Date::read(&date.write()), Ok(date));
+        }
     }
 
     #[test]

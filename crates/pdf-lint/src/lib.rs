@@ -160,6 +160,9 @@ pub mod extension {
 
     pub use pdf_arlington::extension::ISO;
 
+    use pdf_arlington::extension::Claims;
+    use pdf_semantics::{Limits, xmp};
+
     use crate::source::Source;
 
     /// Every extension the model names, in its cells and around its
@@ -173,11 +176,20 @@ pub mod extension {
     /// The extensions `source` declares, as the model names them, from its
     /// trailer's `/Root` and its metadata ([`Source::metadata`]), as
     /// pdf-arlington's [`declared`](pdf_arlington::extension::declared)
-    /// reads them.
+    /// reads them. Its metadata is read as XML by
+    /// [`pdf_semantics::xmp::read`], so a claim is one in the namespace it's
+    /// bound to; what a packet claims before anything that stops the read
+    /// counts.
     pub fn declared(source: &dyn Source) -> BTreeSet<String> {
         let resolve = |id| source.get(id).ok().cloned();
         let root = source.trailer().dict().get(b"Root");
-        pdf_arlington::extension::declared(root, source.metadata(), &resolve)
+        let read = (source.metadata())
+            .map(|xml| xmp::read(xml, &Limits::DEFAULT, &mut ()).unwrap_or_else(|error| error.read))
+            .unwrap_or_default();
+        let mut claims = Claims::default();
+        claims.pdfa_part = read.pdfa_part.as_deref();
+        claims.pdfvt_version = read.pdfvt_version.as_deref();
+        pdf_arlington::extension::declared(root, claims, &resolve)
     }
 
     #[cfg(test)]
@@ -200,9 +212,83 @@ pub mod extension {
                 dict! { "Type" => "Catalog", "Extensions" => dict! { "ISO_" => iso } },
             );
             assert_eq!(declared(&doc), BTreeSet::from(["ISO_TS_32001".to_string()]));
-            doc.metadata = Some(br#"<rdf:Description pdfaid:part="3"/>"#.to_vec());
+            doc.metadata = Some(xmp(r#"pdfaid:part="3""#));
             let both = ["ISO_19005_3", "ISO_TS_32001"].map(String::from);
             assert_eq!(declared(&doc), BTreeSet::from(both));
+        }
+
+        /// XMP metadata with `attributes` on an element that binds pdfaid's
+        /// and pdfvtid's prefixes, and then `elements`.
+        fn packet(attributes: &str, elements: &str) -> Vec<u8> {
+            format!(
+                "<rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" \
+                 xmlns:pdfvtid=\"http://www.npes.org/pdfvt/ns/id/\" {attributes}>\
+                 {elements}</rdf:Description>"
+            )
+            .into_bytes()
+        }
+
+        /// XMP metadata with `attributes` on an element that binds pdfaid's
+        /// prefix.
+        fn xmp(attributes: &str) -> Vec<u8> {
+            packet(attributes, "")
+        }
+
+        /// What a document with `packet` as its metadata declares.
+        fn from(packet: &[u8]) -> Vec<String> {
+            let mut doc = Document::new(Version::new(2, 0), dict! {});
+            doc.metadata = Some(packet.to_vec());
+            declared(&doc).into_iter().collect()
+        }
+
+        /// As an attribute or an element, with spaces round its `=` and
+        /// inside its value, in either quotes; and PDF/VT beside it.
+        #[test]
+        fn metadata_declares_by_an_attribute_or_an_element() {
+            let a3 = ["ISO_19005_3"];
+            assert_eq!(from(&xmp(r#"pdfaid:part="3" pdfaid:conformance="B""#)), a3);
+            assert_eq!(from(&xmp(r#"pdfaid:part = '3'"#)), a3);
+            assert_eq!(from(&xmp(r#"pdfaid:part=" 3 ""#)), a3);
+            assert_eq!(from(&packet("", "<pdfaid:part> 3 </pdfaid:part>")), a3);
+            let element = "<pdfaid:part> 3 </pdfaid:part>\
+                 <pdfvtid:GTS_PDFVTVersion>PDF/VT-2</pdfvtid:GTS_PDFVTVersion>";
+            assert_eq!(from(&packet("", element)), ["ISO_19005_3", "PDF_VT2"]);
+            let attribute = r#"pdfvtid:GTS_PDFVTVersion="PDF/VT-2""#;
+            assert_eq!(from(&xmp(attribute)), ["PDF_VT2"]);
+            assert_eq!(from(&xmp(r#"pdfaid:part='2'"#)), Vec::<String>::new());
+        }
+
+        /// What the reader of bytes this replaced read otherwise, each on
+        /// purpose: a claim is XML's, in its namespace.
+        #[test]
+        fn a_claim_is_read_as_xml() {
+            let nothing = Vec::<String>::new();
+            let a3 = ["ISO_19005_3"];
+            // A prefix bound to nothing, or to another namespace.
+            assert_eq!(from(br#"<d pdfaid:part="3"/>"#), nothing);
+            let other = br#"<d xmlns:pdfaid="http://example.com/" pdfaid:part="3"/>"#;
+            assert_eq!(from(other), nothing);
+            // Not markup, in a comment or CDATA.
+            assert_eq!(
+                from(&packet("", "<!-- <pdfaid:part>3</pdfaid:part> -->")),
+                nothing
+            );
+            assert_eq!(from(&packet("", r#"<!-- pdfaid:part="3" -->"#)), nothing);
+            let cdata = "<![CDATA[<pdfaid:part>3</pdfaid:part>]]>";
+            assert_eq!(from(&packet("", cdata)), nothing);
+            // After what stops the read.
+            let late = r#"</e><d xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/" pdfaid:part="3"/>"#;
+            assert_eq!(from(late.as_bytes()), nothing);
+            // But before it, it counts.
+            let early = [xmp(r#"pdfaid:part="3""#), b"</e>".to_vec()].concat();
+            assert_eq!(from(&early), a3);
+            // Under any prefix bound to its namespace, a character by its
+            // number, and an element with attributes of its own.
+            let another = br#"<d xmlns:p="http://www.aiim.org/pdfa/ns/id/" p:part="3"/>"#;
+            assert_eq!(from(another), a3);
+            assert_eq!(from(&xmp(r#"pdfaid:part="&#51;""#)), a3);
+            let attributed = r#"<pdfaid:part xml:lang="en">3</pdfaid:part>"#;
+            assert_eq!(from(&packet("", attributed)), a3);
         }
     }
 }

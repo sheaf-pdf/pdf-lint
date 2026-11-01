@@ -271,6 +271,8 @@ impl<'o, 'r, R: Resolve<'o> + ?Sized, S: Sink, K: Key<'o>> Walk<'o, 'r, R, S, K>
                 let kids = self.array(unread, "Kids")?;
                 if let Some(node) = self.path.last_mut() {
                     node.kids = kids;
+                    // What's said of a kid is in the array that holds it.
+                    node.object = self.object;
                 }
                 continue;
             }

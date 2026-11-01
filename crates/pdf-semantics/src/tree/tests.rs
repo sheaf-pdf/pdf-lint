@@ -842,6 +842,27 @@ fn a_fault_says_where_it_is() {
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
     assert_eq!(walk.into_sink().0[0].0.object, Some((2, 0)));
 
+    // A kid's in the array that holds it, an array by reference too, and so
+    // is what's said of the kid after it.
+    let objects = file(&[
+        "<< /Kids 2 0 R >>",
+        "[7 << /Limits [(a) (a)] /Names [] >> 8]",
+    ]);
+    let resolve = |id: ObjectId| objects.get(&id);
+    let mut walk = names(&resolve, &root, &Limits::DEFAULT, Kept::default());
+    walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
+    let told = walk.into_sink().0;
+    let of = |fault| {
+        told.iter()
+            .filter(move |said| said.1 == fault)
+            .map(|said| said.0.object)
+    };
+    assert_eq!(
+        of(Fault::TreeNodeNotDictionary).collect::<Vec<_>>(),
+        [Some((2, 0)); 2]
+    );
+    assert_eq!(of(Fault::TreeKidDirect).collect::<Vec<_>>(), [Some((2, 0))]);
+
     let objects = file(&["<< /Kids [<< /Limits [(a) (a)] /Kids [] >>] >>"]);
     let resolve = |id: ObjectId| objects.get(&id);
     let mut walk = names(&resolve, &root, &Limits::DEFAULT, Kept::default());

@@ -54,8 +54,10 @@
 # content;
 # `semantics` calls `pdf_semantics::fuzz::walks`, its name and number trees,
 # each walked the same whatever hears its faults, what a plain walk gives,
-# and written, read back, and `pdf_semantics::fuzz::dates`, a date read,
-# written and read back, which three stable unit tests
+# and written, read back, `pdf_semantics::fuzz::dates`, a date read,
+# written and read back, and `pdf_semantics::fuzz::xmp`, a packet read the
+# same whatever hears its faults and under smaller caps, which three stable
+# unit tests
 # (`mutated_seeds_keep_every_promise`, `random_bytes_keep_every_promise`,
 # `files_read_alike_through_a_reading_and_its_document`) run, the last as a
 # file over a reading and its document, as the target does;
