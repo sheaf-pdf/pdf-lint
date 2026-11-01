@@ -89,6 +89,35 @@ fn page_ids(doc: &Document) -> Vec<ObjectId> {
 }
 
 #[test]
+fn a_node_above_the_root_only_a_parent_names_loses_what_it_held_too() {
+    let bytes = file(
+        &[
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Parent 4 0 R /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R >>",
+            "<< /Type /Pages /Rotate 90 /MediaBox [0 0 9 9] /Resources << >> /Mine 1 >>",
+        ],
+        ROOT,
+    );
+    for options in kinds() {
+        let out = written(&bytes, &options);
+        let reading = Reading::open(&out[..], &bytes::Options::DEFAULT).unwrap();
+        let mut findings = Vec::new();
+        let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
+        assert!(verdict.holds);
+        assert_eq!(findings, []);
+        let (_, doc) = read(&out);
+        let above = doc.objects().find_map(|(_, object)| {
+            let dict = object.as_dict()?;
+            (dict.has(b"Mine") && dict.has_type(b"Pages")).then_some(dict)
+        });
+        assert!(!above.unwrap().has(b"Rotate"));
+        let page = dict_at(&doc, page_ids(&doc)[0]);
+        assert_eq!(page.get(b"Rotate").unwrap().as_integer(), Some(90));
+    }
+}
+
+#[test]
 fn each_kind_reads_back_linearized_with_the_same_pages_and_objects() {
     let bytes = built(&two_pages(""));
     for options in kinds() {

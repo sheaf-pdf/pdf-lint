@@ -585,12 +585,14 @@ fn nodes_taken_off(
         doc.get_dict(id)
             .is_some_and(|dict| dict.has(b"Kids") || dict.has_type(b"Pages"))
     };
+    // A node met by /Kids can still have one above it that only its /Parent names.
+    let mut climbed = HashSet::new();
     for page in table {
         for id in page.parents() {
-            if !seen.insert(id) {
+            if !climbed.insert(id) {
                 break;
             }
-            if !page_ids.contains(&id) && node(id) {
+            if seen.insert(id) && !page_ids.contains(&id) && node(id) {
                 nodes.push(id);
             }
         }
