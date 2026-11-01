@@ -28,6 +28,7 @@ decrypts what's encrypted itself.
 | [pdf-structure](crates/pdf-structure) | PDF's file structure, read whole or each object on demand, from any thread, from memory or a file read by position: the header, cross-reference tables and streams along `/Prev`, object streams and recovery by scanning, each object through pdf-objects' parser, decrypted through pdf-crypt and decoded through pdf-filters, and so any stream's data asked for, where it was read from recorded, every choice it made said; and written, whole or as an incremental update, cross-reference sections and object streams deflated through pdf-filters, an encrypted file's objects encrypted as they're written, through pdf-crypt, by the list it decrypts by, and an object as read copied as the bytes it was read from, checked against a hash of them |
 | [pdf-content-streams](crates/pdf-content-streams) | PDF content streams read as PDFium reads them: each token with where it is, an inline image's data found by PDFium's rules, each operation with its operands, operands read as pdf-objects' values when asked, and a page's streams joined as one, every place mapped back to its stream, under caps, every error saying where, and where ISO 32000-2 reads it otherwise told to a sink; each operator typed by ISO 32000-2's Annex A, with its operands and where it may be used; a page's `q`/`Q` balance, its marked content and the resource names it uses; and content written, the same bytes for the same calls, its resources named at the end by a digest of what they are, or spliced, ranges taken out and every other byte kept, only where that can't change what's drawn after them |
 | [pdf-semantics](crates/pdf-semantics) | PDF's common structures, read and written: dates, each field saying whether it was written and each departure from the standard said, text strings, name and number trees, walked under caps, the page tree by ISO's rules or PDFium's, each page numbered as its rules number it and each value saying where it came from, and what XMP metadata claims, PDF/A, PDF/UA or PDF/VT, read by namespace under caps |
+| [pdf-linearize](crates/pdf-linearize) | PDF files laid out for reading over a network, with no object model of its own: a graph of objects, of any model, planned into Annex F's order, numbers and object streams, with the lists of shared objects its hint tables want, under caps |
 | [pdf-arlington](crates/pdf-arlington) | The Arlington PDF Model, embedded: its tables read, and the predicates in their cells evaluated over pdf-objects' objects |
 
 ## Development
@@ -47,7 +48,7 @@ component, and Rust 1.85 and 1.87 installed: for the tokenizer's no-std
 build, pdf-structure's lints for Windows and a 32-bit target, the
 tokenizer's build against `core` alone, and the minimum Rust of the
 tokenizer, the filters, pdf-crypt, pdf-objects, pdf-structure,
-pdf-content-streams, pdf-semantics and pdf-arlington, and of
+pdf-content-streams, pdf-semantics, pdf-linearize and pdf-arlington, and of
 pdf-content-streams' `image-ends` feature (1.87). Its `test-pdfium` needs
 Python 3, and fetches the pinned PDFium build from GitHub unless
 `PDF_LINT_PDFIUM` names a library: [oracle/README.md](oracle/README.md)
@@ -55,15 +56,15 @@ says how the crates are held to PDFium.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
 objects`, `just fuzz structure`, `just fuzz write`, `just fuzz content`,
-`just fuzz semantics` and `just fuzz check` fuzz the tokenizer, by ISO
-32000-2's rules and PDFium's, the filters, decoding and encoding,
-pdf-crypt's handler, new files' dictionaries and a password's forms,
+`just fuzz semantics`, `just fuzz linearize` and `just fuzz check` fuzz the
+tokenizer, by ISO 32000-2's rules and PDFium's, the filters, decoding and
+encoding, pdf-crypt's handler, new files' dictionaries and a password's forms,
 pdf-objects' parser, by ISO 32000-2's rules and PDFium's, its writer and
 text strings, pdf-structure's reader and writer, pdf-content-streams' tokens, operations, faults, operator table,
 the balance, marked content and names over them, its writer, content
 written again and the calls, and its splices and lists written again,
-pdf-semantics' name and number trees, page tree, dates and XMP claims, and
-the reader and checker, on nightly with
+pdf-semantics' name and number trees, page tree, dates and XMP claims,
+pdf-linearize's plan of any graph, and the reader and checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
 says for how many seconds (60 by default). CI fuzzes each target the same
 way: two minutes on every pull request and push to main, and half an hour
@@ -73,8 +74,8 @@ twice a week, each run starting from the inputs the runs before it kept
 ## License
 
 pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure,
-pdf-content-streams and pdf-semantics are licensed under either of Apache
-License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT license
+pdf-content-streams, pdf-semantics and pdf-linearize are licensed under either
+of Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT license
 ([LICENSE-MIT](LICENSE-MIT)) at your option. pdf-lint and pdf-arlington
 are licensed under the Apache License, Version 2.0, as is the Arlington
 model pdf-arlington embeds.

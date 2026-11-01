@@ -2,7 +2,7 @@
 # build on nightly with libFuzzer. Locally, `just fuzz tokenize`,
 # `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
 # `just fuzz structure`, `just fuzz write`, `just fuzz content`,
-# `just fuzz semantics` or `just fuzz check`, or:
+# `just fuzz semantics`, `just fuzz linearize` or `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
@@ -66,6 +66,9 @@
 # `random_bytes_keep_every_promise`,
 # `files_read_alike_through_a_reading_and_its_document`) run, the last as a
 # file, as the target does but under the default options;
+# `linearize` calls `pdf_linearize::fuzz::graphs`, any bytes as a graph, refused
+# for what it has or planned, every promise of the plan held against plain walks
+# of it, which a stable unit test (`fuzz_bodies_run`) runs;
 # `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
@@ -88,6 +91,7 @@ pdf-content-streams = { path = "../crates/pdf-content-streams", features = ["ima
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
 # Both Flate backends, so that the filters' target runs on each.
 pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
+pdf-linearize = { path = "../crates/pdf-linearize" }
 # The library alone, without the command line's crates.
 pdf-lint = { path = "../crates/pdf-lint", default-features = false }
 pdf-objects = { path = "../crates/pdf-objects" }
@@ -149,6 +153,13 @@ bench = false
 [[bin]]
 name = "semantics"
 path = "fuzz_targets/semantics.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "linearize"
+path = "fuzz_targets/linearize.rs"
 test = false
 doc = false
 bench = false
