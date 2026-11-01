@@ -875,6 +875,29 @@ fn a_fault_says_where_it_is() {
     let mut walk = names(&resolve, &in_place, &Limits::DEFAULT, Kept::default());
     assert!(walk.next().is_none());
     assert_eq!(walk.into_sink().0[0].0.object, None);
+
+    // What's at a reference that isn't what it should be is in that object,
+    // its place being there, and what's after it back in the node.
+    let objects = file(&["<< /Kids [2 0 R 3 0 R] /Names 4 0 R >>", "7", "8", "9"]);
+    let resolve = |id: ObjectId| objects.get(&id);
+    let mut walk = names(&resolve, &root, &Limits::DEFAULT, Kept::default());
+    walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
+    let told = walk.into_sink().0;
+    let of = |wanted: fn(&Fault) -> bool| -> Vec<Option<ObjectId>> {
+        (told.iter())
+            .filter(|said| wanted(&said.1))
+            .map(|said| said.0.object)
+            .collect()
+    };
+    assert_eq!(
+        of(|fault| *fault == Fault::TreeNodeNotDictionary),
+        [Some((2, 0)), Some((3, 0))]
+    );
+    assert_eq!(
+        of(|fault| matches!(fault, Fault::TreeNotArray { .. })),
+        [Some((4, 0))]
+    );
+    assert_eq!(of(|fault| *fault == Fault::TreeBothEntries), [Some((1, 0))]);
 }
 
 #[test]

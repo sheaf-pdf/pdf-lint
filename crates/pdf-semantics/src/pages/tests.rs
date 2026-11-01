@@ -1989,6 +1989,173 @@ fn a_fault_says_where_it_is() {
         .map(|(place, _)| place.object)
         .collect();
     assert_eq!(places, [Some((3, 0)), Some((2, 0))]);
+
+    // What's said of a kid's own dictionary is in the kid's object, and of the
+    // reference to it in the node that lists it.
+    let objects = [
+        catalog_object(),
+        object(
+            2,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 5 0 R 2 0 R] /Count 4 /MediaBox [0 0 1 1] >>",
+        ),
+        object(3, "<< /Parent 2 0 R >>"),
+        object(4, "<< /Type /Foo /Parent 2 0 R >>"),
+        object(
+            5,
+            "<< /Type /Page /Parent 2 0 R /Length 0 >>\nstream\n\nendstream",
+        ),
+    ];
+    let bytes = file(&objects);
+    let document = bytes::read(&bytes);
+    let resolver = &document;
+    let catalog = document.catalog().unwrap();
+    let mut kept = Kept::default();
+    pages(&resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
+    let of = |wanted: fn(&Fault) -> bool| -> Vec<Option<ObjectId>> {
+        (kept.0.iter())
+            .filter(|(_, fault)| wanted(fault))
+            .map(|(place, _)| place.object)
+            .collect()
+    };
+    assert_eq!(
+        of(|fault| *fault == Fault::PageTreeType),
+        [Some((3, 0)), Some((4, 0))]
+    );
+    assert_eq!(
+        of(|fault| *fault == Fault::PageTreeKidNotDictionary),
+        [Some((5, 0))]
+    );
+    assert_eq!(
+        of(|fault| matches!(fault, Fault::PageTreeRepeated { .. })),
+        [Some((2, 0))]
+    );
+    assert_eq!(
+        of(|fault| matches!(fault, Fault::PageTreeCycle { .. })),
+        [Some((2, 0))]
+    );
+
+    // And what's said on the way up a /Parent chain, in the node that has it.
+    let objects = [
+        catalog_object(),
+        object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        object(3, "<< /Type /Page /Parent 4 0 R >>"),
+        object(4, "<< /Type /Pages /Parent << /Type /Pages >> >>"),
+    ];
+    let bytes = file(&objects);
+    let document = bytes::read(&bytes);
+    let resolver = &document;
+    let catalog = document.catalog().unwrap();
+    let mut kept = Kept::default();
+    pages(&resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
+    let (place, _) = (kept.0.iter())
+        .find(|(_, fault)| *fault == Fault::PageTreeParentDirect)
+        .unwrap();
+    assert_eq!(place.object, Some((4, 0)));
+}
+
+#[test]
+fn what_only_a_sink_reads_fails_no_walk() {
+    // A node's /Count and its own /Parent: read only for a sink that wants
+    // faults, so nothing that fails there can fail a walk, whatever its why.
+    let by_chain = [(7, "7 0 R")];
+    let shapes = [
+        (
+            "<< /Type /Pages /Kids [3 0 R] /Count 7 0 R >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] >>",
+            None,
+            Fault::PageTreeCount,
+        ),
+        (
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Pages /Kids [4 0 R] /Count 1 /Parent 7 0 R >>",
+            Some("<< /Type /Page /MediaBox [0 0 1 1] >>"),
+            Fault::PageTreeParent,
+        ),
+        (
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Pages /Kids [4 0 R] /Count 7 0 R /Parent 2 0 R >>",
+            Some("<< /Type /Page /Parent 3 0 R /MediaBox [0 0 1 1] >>"),
+            Fault::PageTreeCount,
+        ),
+    ];
+    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    for (root, kid, below, fault) in shapes {
+        let mut written = vec![(2, root), (3, kid)];
+        written.extend(below.map(|below| (4, below)));
+        written.extend(by_chain);
+        let objects = parsed(&written);
+        for why in [None, Some(Why::Limit), Some(Why::Locked), Some(Why::Source)] {
+            let failed = why.unwrap_or(Why::Damaged);
+            // None: 7 is the loop of references it's written as.
+            let resolver = failing(
+                &objects,
+                if why.is_some() { (7, 0) } else { (0, 0) },
+                failed,
+            );
+            let quiet = pages(&resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ());
+            let mut kept = Kept::default();
+            let told = pages(&resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut kept);
+            assert_eq!(told, quiet, "{root} {kid} {why:?}");
+            assert_eq!(told.unwrap().len(), 1, "{root} {kid} {why:?}");
+            assert!(kept.faults().contains(&fault), "{:?}", kept.faults());
+        }
+    }
+}
+
+#[test]
+fn kids_that_give_nothing_are_charged_to_the_walk() {
+    let nulls = |count: usize| "null ".repeat(count);
+    let tree = |count: usize| {
+        [
+            catalog_object(),
+            object(
+                2,
+                &format!("<< /Type /Pages /Kids [{}3 0 R] >>", nulls(count)),
+            ),
+            object(3, "<< /Type /Page /Parent 2 0 R >>"),
+        ]
+    };
+    let mut limits = Limits::DEFAULT;
+    limits.pages = 2;
+    // Four to a page: eight kids are read, and a ninth isn't. By PDFium's rules
+    // the count of the tree meets it, as the walk would stop at what's counted.
+    let read = open_with(&tree(7), Rules::Iso, &limits).pages.unwrap();
+    assert_eq!(ids(&read), [(Some((3, 0)), 0)]);
+    assert!(open_with(&tree(7), Rules::Pdfium, &limits).pages.is_ok());
+    for rules in [Rules::Iso, Rules::Pdfium] {
+        assert_eq!(
+            open_with(&tree(8), rules, &limits).pages,
+            Err(Error::TooManyPages),
+            "{rules:?}"
+        );
+    }
+
+    // One node of a great many nulls, listed a great many times: a cost that's
+    // the square of a file, under the default caps, and by no count a page's.
+    let (kids, lists) = (30_000, 30_000);
+    let objects = [
+        catalog_object(),
+        object(
+            2,
+            &format!("<< /Type /Pages /Kids [{}4 0 R] >>", "3 0 R ".repeat(lists)),
+        ),
+        object(3, &format!("<< /Type /Pages /Kids [{}] >>", nulls(kids))),
+        object(4, "<< /Type /Page /Parent 2 0 R >>"),
+    ];
+    let bytes = file(&objects);
+    let document = bytes::read(&bytes);
+    let resolver = &document;
+    let catalog = document.catalog().unwrap();
+    let started = Instant::now();
+    assert_eq!(
+        pages(&resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut ()),
+        Err(Error::TooManyPages)
+    );
+    assert_eq!(
+        pages(&resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()),
+        Err(Error::TooManyPages)
+    );
+    assert!(started.elapsed() < QUICK, "{:?}", started.elapsed());
 }
 
 #[test]

@@ -18,7 +18,8 @@ pub struct Limits {
     /// lets a file of such a chain overflow it.
     pub page_depth: usize,
     /// How many pages a page tree lists, and how many of its nodes a walk
-    /// visits: 1,048,574 by default, the most PDFium counts.
+    /// visits: 1,048,574 by default, the most PDFium counts. A walk looks at
+    /// four times as many kids, as one that's neither costs as one that is.
     pub pages: usize,
     /// How many bytes of an XMP packet are read ([`xmp`](crate::xmp)): 16 MiB
     /// by default. A packet longer than that is an error holding what they

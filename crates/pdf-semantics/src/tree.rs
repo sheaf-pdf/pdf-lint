@@ -311,12 +311,12 @@ impl<'o, 'r, R: Resolve<'o> + ?Sized, S: Sink, K: Key<'o>> Walk<'o, 'r, R, S, K>
             }
             Reached::Repeated | Reached::Damaged => return Ok(()),
         };
+        self.object = id.or(self.object);
         let Value::Dict(dict) = node.value() else {
             self.lost(node.at, Fault::TreeNodeNotDictionary);
             return Ok(());
         };
         self.nodes += 1;
-        self.object = id.or(self.object);
         let limits = if self.sink.wants() {
             if !root && id.is_none() {
                 self.say(node.at, Fault::TreeKidDirect);
@@ -380,16 +380,16 @@ impl<'o, 'r, R: Resolve<'o> + ?Sized, S: Sink, K: Key<'o>> Walk<'o, 'r, R, S, K>
             return Ok(&[]);
         };
         match self.once(written)? {
-            Reached::Object(array, id) => match array.value() {
-                Value::Array(items) => {
-                    self.object = id.or(self.object);
-                    Ok(items)
+            Reached::Object(array, id) => {
+                self.object = id.or(self.object);
+                match array.value() {
+                    Value::Array(items) => Ok(items),
+                    _ => {
+                        self.lost(array.at, Fault::TreeNotArray { key });
+                        Ok(&[])
+                    }
                 }
-                _ => {
-                    self.lost(array.at, Fault::TreeNotArray { key });
-                    Ok(&[])
-                }
-            },
+            }
             Reached::Nothing | Reached::Repeated | Reached::Damaged => Ok(&[]),
         }
     }

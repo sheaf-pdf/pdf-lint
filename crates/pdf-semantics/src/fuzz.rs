@@ -825,6 +825,14 @@ pub fn fixtures() -> Vec<Vec<u8>> {
          << /Type /Pages /Kids [] >> \
          3 0 R \
          null",
+        // A node's /Count and its own /Parent, which only a sink that wants
+        // faults reads, each a loop of references.
+        "<< /Root 2 0 R >> << /Pages 3 0 R >> \
+         << /Type /Pages /Kids [4 0 R 6 0 R] /Count 5 0 R >> \
+         << /Type /Page /Parent 3 0 R /MediaBox [0 0 1 1] >> \
+         5 0 R \
+         << /Type /Pages /Parent 5 0 R /Kids [7 0 R] /Count 1 >> \
+         << /Type /Page /MediaBox [0 0 1 1] >>",
         // Dates.
         "D:20261024153000-08'00'",
         "D:20261024153000Z00'00'",

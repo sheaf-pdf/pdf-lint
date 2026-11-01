@@ -85,6 +85,12 @@ use crate::{HOPS, too_long};
 /// The root's or a node's `/Count` is counted by if it's positive and under.
 const PDFIUM_PAGE_MAX: i64 = 0xFFFFF;
 
+/// How many kids a pass over the tree looks at, for each of [`Limits::pages`]:
+/// a kid that gives neither a page nor a node costs as one that does, and in a
+/// node listed again, adds up to the square of what's written. Those that do
+/// give one are at most two for each, as pages and nodes have that cap each.
+const KIDS_A_PAGE: usize = 4;
+
 /// The most room a table starts with, however many pages a `/Count` claims:
 /// a file of a hundred bytes can claim a million.
 const ROOM: usize = 4096;
@@ -111,6 +117,7 @@ pub fn pages<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized>(
         seen_nodes: HashSet::new(),
         pages: Vec::new(),
         visits: 0,
+        kids_looked_at: 0,
         object: None,
     };
     walk.table(catalog)?;
@@ -328,8 +335,9 @@ pub enum Error {
     /// a `/Parent` chain.
     #[error("the page tree is too deep")]
     TooDeep,
-    /// More pages or visits to nodes than [`Limits::pages`], or by PDFium's
-    /// rules, a count of the tree past what PDFium would give.
+    /// More pages or visits to nodes than [`Limits::pages`], more kids looked
+    /// at than a few times that, or by PDFium's rules, a count of the tree past
+    /// what PDFium would give.
     #[error("the page tree lists too many pages")]
     TooManyPages,
     /// A catalog with no `/Pages` that's a dictionary, or, by PDFium's rules,
@@ -425,6 +433,8 @@ struct Walk<'o, 'r, R: ?Sized, S: ?Sized> {
     pages: Vec<Page<'o>>,
     /// Nodes visited under the root.
     visits: usize,
+    /// Kids the walk has looked at.
+    kids_looked_at: usize,
     /// The numbered object what's being read is in.
     object: Option<ObjectId>,
 }
@@ -592,7 +602,7 @@ impl<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized> Walk<'o, '_, R, S> {
             total: 0,
         }];
         let mut path: HashSet<ObjectId> = id.into_iter().collect();
-        let (mut visits, mut counted) = (0, 0);
+        let (mut visits, mut kids_looked_at, mut counted) = (0, 0, 0);
         while let Some(frame) = stack.last_mut() {
             let Some(kid) = frame.kids.get(frame.next) else {
                 let (id, total) = (frame.id, frame.total);
@@ -607,6 +617,10 @@ impl<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized> Walk<'o, '_, R, S> {
                 continue;
             };
             frame.next += 1;
+            kids_looked_at += 1;
+            if kids_looked_at > self.limits.pages.saturating_mul(KIDS_A_PAGE) {
+                return Err(Error::TooManyPages);
+            }
             let Reached::Object(object, id) = self.reach(kid, 1)? else {
                 continue;
             };
@@ -676,10 +690,14 @@ impl<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized> Walk<'o, '_, R, S> {
                 if let Some(id) = id {
                     path.remove(&id);
                 }
-                self.check_count(dict, at, first)?;
+                self.check_count(dict, at, first);
                 continue;
             };
             frame.next += 1;
+            self.kids_looked_at += 1;
+            if self.kids_looked_at > self.limits.pages.saturating_mul(KIDS_A_PAGE) {
+                return Err(Error::TooManyPages);
+            }
             let holder = frame.id;
             if !self.pdfium && kid.as_reference().is_none() && !kid.is_null() {
                 self.say(kid.at, Fault::PageTreeKidDirect);
@@ -708,13 +726,19 @@ impl<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized> Walk<'o, '_, R, S> {
                 self.no_dictionary(kid, id, true)?;
                 continue;
             };
+            // What's said of the kid's own dictionary is in its object, and what's
+            // said of the reference to it below in the node that lists it.
+            let listing = self.object;
+            self.object = id.or(listing);
             if !self.pdfium && matches!(object.value(), Value::Stream(_)) {
                 self.say(object.at, Fault::PageTreeKidNotDictionary);
             }
-            match self.class(dict, object.at)? {
+            let class = self.class(dict, object.at)?;
+            self.object = listing;
+            match class {
                 Class::Page => {
                     self.object = id.or(self.object);
-                    self.check_parent(dict, object.at, holder)?;
+                    self.check_parent(dict, object.at, holder);
                     self.page(id, dict, object.at)?;
                 }
                 Class::Empty => self.push(Page::none(id))?,
@@ -739,7 +763,7 @@ impl<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized> Walk<'o, '_, R, S> {
                         }
                     }
                     self.object = id.or(self.object);
-                    self.check_parent(dict, object.at, holder)?;
+                    self.check_parent(dict, object.at, holder);
                     let kids = self.node_kids(dict, object.at)?;
                     if let Some(id) = id {
                         path.insert(id);
@@ -961,6 +985,7 @@ impl<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized> Walk<'o, '_, R, S> {
                 break;
             };
             chain.push((id, dict));
+            self.object = id.or(self.object);
             at = dict.get(b"Parent");
         }
         for (id, dict) in chain.into_iter().rev() {
@@ -1046,19 +1071,15 @@ impl<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized> Walk<'o, '_, R, S> {
     }
 
     /// Holds what `dict` says of its `/Parent` to `holder`, the node that lists
-    /// it, when a checker wants to know.
-    fn check_parent(
-        &mut self,
-        dict: &'o Dict,
-        at: Option<Span>,
-        holder: Option<ObjectId>,
-    ) -> Result<(), Error> {
+    /// it, when a checker wants to know. A walk without one never reads a node's
+    /// `/Parent`, so one that fails here fails nothing: it's that `/Parent` said.
+    fn check_parent(&mut self, dict: &'o Dict, at: Option<Span>, holder: Option<ObjectId>) {
         if !self.checking() {
-            return Ok(());
+            return;
         }
         let parent = match dict.get(b"Parent") {
-            Some(written) => match self.reach(written, HOPS)? {
-                Reached::Object(_, id) => id,
+            Some(written) => match self.reach(written, HOPS) {
+                Ok(Reached::Object(_, id)) => id,
                 _ => None,
             },
             None => None,
@@ -1066,23 +1087,23 @@ impl<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized> Walk<'o, '_, R, S> {
         if parent.is_none() || parent != holder {
             self.say(at, Fault::PageTreeParent);
         }
-        Ok(())
     }
 
     /// Holds a node's `/Count` to the pages found under it, when a checker
-    /// wants to know.
-    fn check_count(&mut self, node: &'o Dict, at: Option<Span>, first: usize) -> Result<(), Error> {
+    /// wants to know. A walk without one never reads it here, so one that fails
+    /// here fails nothing: it's that `/Count` said.
+    fn check_count(&mut self, node: &'o Dict, at: Option<Span>, first: usize) {
         if !self.checking() {
-            return Ok(());
+            return;
         }
-        let count = self
-            .found(node, b"Count")?
-            .and_then(|(_, count)| count.as_integer());
+        let count = match self.found(node, b"Count") {
+            Ok(found) => found.and_then(|(_, count)| count.as_integer()),
+            Err(_) => None,
+        };
         let under = (self.pages.len() - first) as i64;
         if count != Some(under) || under == 0 {
             self.say(at, Fault::PageTreeCount);
         }
-        Ok(())
     }
 
     fn say(&mut self, at: Option<Span>, fault: Fault) {
