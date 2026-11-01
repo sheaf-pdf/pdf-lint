@@ -58,8 +58,8 @@ fn number_of(key: &[u8]) -> i64 {
 }
 
 /// The tree at `root`, as `kind`, walked to its end through `sink`.
-fn walked<'o, R: Resolve<'o> + ?Sized>(
-    objects: &R,
+fn walked<'o, R: Resolve<'o>>(
+    objects: R,
     root: &'o Object,
     kind: Kind,
     limits: &Limits,
@@ -124,8 +124,8 @@ impl Sink for Unwanted {
 /// A recursive walk of a tree as the iterators are to walk it, to `depth`:
 /// each node's own entries, then its kids, each reached by reference once.
 /// Under no cap but depth, it's what they give.
-struct Plain<'o, 'r, R: ?Sized> {
-    objects: &'r R,
+struct Plain<'o, R> {
+    objects: R,
     kind: Kind,
     depth: usize,
     seen: std::collections::HashSet<ObjectId>,
@@ -140,7 +140,7 @@ enum Plainly<'o> {
     Failed,
 }
 
-impl<'o, R: Resolve<'o> + ?Sized> Plain<'o, '_, R> {
+impl<'o, R: Resolve<'o> + Copy> Plain<'o, R> {
     fn once(&mut self, value: &'o Object) -> Plainly<'o> {
         let mut at = value;
         let mut last = (0, 0);
@@ -261,8 +261,8 @@ impl<'o, R: Resolve<'o> + ?Sized> Plain<'o, '_, R> {
 }
 
 /// The tree at `root`, as `kind`, walked plainly to `depth`.
-fn plainly<'o, R: Resolve<'o> + ?Sized>(
-    objects: &R,
+fn plainly<'o, R: Resolve<'o> + Copy>(
+    objects: R,
     root: &'o Object,
     kind: Kind,
     depth: usize,
@@ -295,7 +295,7 @@ fn plainly<'o, R: Resolve<'o> + ?Sized>(
 ///   order, and not where they are;
 /// - and what it gave, written, reads back sorted, each key once, whole and
 ///   with no fault.
-fn a_tree<'o, R: Resolve<'o> + ?Sized>(objects: &R, root: &'o Object, kind: Kind) -> Walked<'o> {
+fn a_tree<'o, R: Resolve<'o> + Copy>(objects: R, root: &'o Object, kind: Kind) -> Walked<'o> {
     let mut kept = Kept::default();
     let full = walked(objects, root, kind, &Limits::DEFAULT, &mut kept);
     let quiet = walked(objects, root, kind, &Limits::DEFAULT, &mut ());
@@ -358,7 +358,7 @@ fn written_back(walk: &Walked, kind: Kind) {
     let root = Object::from(tree.expect("each key once, no stream a value of a tree can be"));
     let nothing = |_: ObjectId| -> Option<&Object> { None };
     let mut kept = Kept::default();
-    let back = walked(&nothing, &root, kind, &Limits::DEFAULT, &mut kept);
+    let back = walked(nothing, &root, kind, &Limits::DEFAULT, &mut kept);
     assert_eq!(kept.0, [], "written, it has no fault");
     assert!(back.whole, "written, it's whole");
     let expected: Vec<(&[u8], &Object)> = entries.into_iter().collect();
@@ -372,7 +372,7 @@ fn written_back(walk: &Walked, kind: Kind) {
     if serialize::write(&mut out, &root).is_ok() {
         if let Ok(again) = Parser::at(&out, 0).value(&mut ()) {
             let again = walked(
-                &nothing,
+                nothing,
                 &again,
                 kind,
                 &Limits::DEFAULT,
@@ -389,7 +389,7 @@ fn written_back(walk: &Walked, kind: Kind) {
 /// The trees a file's catalog holds: those of its `/Names`, `/PageLabels`,
 /// and its structure tree's `/ParentTree` and `/IDTree`, each with the kind
 /// it is. An object that doesn't read has none.
-fn roots<'o, R: Resolve<'o> + ?Sized>(objects: &R, catalog: &'o Dict) -> Vec<(Kind, &'o Object)> {
+fn roots<'o, R: Resolve<'o> + Copy>(objects: R, catalog: &'o Dict) -> Vec<(Kind, &'o Object)> {
     let dict = |value: &'o Object| follow(objects, value).ok().flatten()?.as_dict();
     let entry = |dictionary: &'o Dict, key: &[u8]| dictionary.get(key);
     let mut roots = Vec::new();
@@ -414,8 +414,8 @@ fn roots<'o, R: Resolve<'o> + ?Sized>(objects: &R, catalog: &'o Dict) -> Vec<(Ki
 /// [`Unreadable`]'s own words may differ from one resolver to another.
 pub type Paged<'o> = Result<Pages<'o>, String>;
 
-fn paged<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized>(
-    objects: &R,
+fn paged<'o, R: Resolve<'o> + Copy, S: Sink + ?Sized>(
+    objects: R,
     catalog: &'o Dict,
     rules: Rules,
     limits: &Limits,
@@ -437,8 +437,8 @@ fn paged<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized>(
 ///   what it held the first time;
 /// - what's absent is what stands for it, and what's present names where it's
 ///   from: the page's own dictionary, or a node on its `/Parent` chain.
-fn a_table<'o, R: Resolve<'o> + ?Sized>(
-    objects: &R,
+fn a_table<'o, R: Resolve<'o> + Copy>(
+    objects: R,
     catalog: &'o Dict,
     rules: Rules,
 ) -> (Paged<'o>, Vec<Fault>) {
@@ -552,7 +552,7 @@ fn let_it_hold(table: &Pages, limits: &Limits, rules: Rules) {
 
 /// The page tree under `catalog` by both rules, each held to its promises; and,
 /// where ISO's told no fault, the same pages by each, as a well-formed tree is.
-fn both_tables<'o, R: Resolve<'o> + ?Sized>(objects: &R, catalog: &'o Dict) -> [Paged<'o>; 2] {
+fn both_tables<'o, R: Resolve<'o> + Copy>(objects: R, catalog: &'o Dict) -> [Paged<'o>; 2] {
     let (iso, faults) = a_table(objects, catalog, Rules::Iso);
     let (pdfium, _) = a_table(objects, catalog, Rules::Pdfium);
     if let (Ok(by_iso), true) = (&iso, faults.is_empty()) {
@@ -584,7 +584,7 @@ pub struct Over<'o> {
 /// Every tree the catalog `trailer` leads to holds, walked and held to its
 /// promises ([`a_tree`]), and its page tree ([`both_tables`]): what each gave,
 /// for a caller to set beside the same file through another resolver.
-pub fn over<'o, R: Resolve<'o> + ?Sized>(objects: &R, trailer: &'o Dict) -> Over<'o> {
+pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) -> Over<'o> {
     let Ok(Some(catalog)) = catalog(objects, trailer) else {
         return Over {
             trees: Vec::new(),
@@ -635,13 +635,13 @@ pub fn walks(data: &[u8]) {
     let objects = values(data);
     let resolve = |id: ObjectId| objects.get(&id);
     if let Some(trailer) = objects.get(&(1, 0)).and_then(Object::as_dict) {
-        over(&resolve, trailer);
+        over(resolve, trailer);
     }
     for root in objects.values().take(ROOTS) {
-        a_tree(&resolve, root, Kind::Names);
-        a_tree(&resolve, root, Kind::Numbers);
+        a_tree(resolve, root, Kind::Names);
+        a_tree(resolve, root, Kind::Numbers);
         if let Some(catalog) = root.as_dict() {
-            let _ = both_tables(&resolve, catalog);
+            let _ = both_tables(resolve, catalog);
         }
     }
 }
@@ -708,11 +708,14 @@ fn claim_values(claims: &Claims) -> [&Option<String>; 6] {
 /// - under smaller caps, each value it reads is what it reads under the
 ///   default ones, as it reads the same up to where it stops.
 pub fn xmp(data: &[u8]) {
+    const PACKET: ObjectId = (9, 0);
+
     struct Told(usize);
     impl Sink for Told {
         fn fault(&mut self, place: Place, _: Fault) {
-            assert_eq!(place.object, None);
+            assert_eq!(place.object, Some(PACKET));
             let at = place.at.expect("a place in the packet");
+            assert_eq!(at.stream, Some(PACKET));
             assert!(at.start <= at.end);
             self.0 = self.0.max(at.end);
         }
@@ -720,8 +723,8 @@ pub fn xmp(data: &[u8]) {
 
     let limits = Limits::DEFAULT;
     let mut told = Told(0);
-    let read = xmp::read(data, &limits, &mut told);
-    assert_eq!(xmp::read(data, &limits, &mut ()), read);
+    let read = xmp::read(data, Some(PACKET), &limits, &mut told);
+    assert_eq!(xmp::read(data, None, &limits, &mut ()), read);
     assert!(told.0 <= data.len());
     let claims = match &read {
         Ok(claims) => claims,
@@ -741,6 +744,9 @@ pub fn xmp(data: &[u8]) {
             assert!(pdfa.to_string().starts_with("PDF/A-"));
             assert!(pdfa.level.is_none_or(|level| level.is_ascii_uppercase()));
         }
+        if let Some(pdfua) = said.pdfua {
+            assert!(pdfua.to_string().starts_with("PDF/UA-"));
+        }
     }
     let mut small = limits;
     (small.xmp_bytes, small.xmp_depth, small.xmp_bindings) = (data.len() / 2, 4, 2);
@@ -750,7 +756,7 @@ pub fn xmp(data: &[u8]) {
     smaller[2].xmp_bindings = small.xmp_bindings;
     smaller[3] = small;
     for limits in smaller {
-        let under = xmp::read(data, &limits, &mut ());
+        let under = xmp::read(data, None, &limits, &mut ());
         let under = under.unwrap_or_else(|error| error.read);
         for (under, all) in claim_values(&under).into_iter().zip(claim_values(claims)) {
             assert!(under.is_none() || under == all, "{under:?} {all:?}");
@@ -966,13 +972,11 @@ mod tests {
         let Ok(reading) = Reading::open(data, &Options::DEFAULT) else {
             return 0;
         };
-        let objects = &reading;
-        let read = over(&objects, reading.trailer().dict());
+        let read = over(&reading, reading.trailer().dict());
         let document = reading
             .to_document()
             .expect("bytes in memory make a document");
-        let objects = &document;
-        assert_eq!(over(&objects, document.trailer.dict()), read);
+        assert_eq!(over(&document, document.trailer.dict()), read);
         let entries: usize = read.trees.iter().map(|walk| walk.entries.len()).sum();
         let pages = read.pages.iter().flatten().flatten().map(Pages::len);
         entries + pages.sum::<usize>()

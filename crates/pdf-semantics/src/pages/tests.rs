@@ -83,8 +83,8 @@ struct Table {
     faults: Vec<Fault>,
 }
 
-fn table<'o, R: Resolve<'o> + ?Sized>(
-    objects: &R,
+fn table<'o, R: Resolve<'o> + Copy>(
+    objects: R,
     trailer: &'o Dict,
     rules: Rules,
     limits: &Limits,
@@ -113,9 +113,9 @@ fn open_with(objects: &[(u32, String)], rules: Rules, limits: &Limits) -> Table 
     let reading = Reading::open(&bytes[..], &Options::DEFAULT).unwrap();
     let source = ByPosition::new(&bytes);
     let positioned = Reading::open(&source, &Options::DEFAULT).unwrap();
-    let in_memory = table(&&reading, reading.trailer().dict(), rules, limits);
-    let by_position = table(&&positioned, positioned.trailer().dict(), rules, limits);
-    let whole = table(&&document, document.trailer.dict(), rules, limits);
+    let in_memory = table(&reading, reading.trailer().dict(), rules, limits);
+    let by_position = table(&positioned, positioned.trailer().dict(), rules, limits);
+    let whole = table(&document, document.trailer.dict(), rules, limits);
     assert_eq!(in_memory, by_position, "in memory and by position");
     assert_eq!(in_memory, whole, "a reading and a document");
     in_memory
@@ -327,7 +327,7 @@ fn a_parent_chain_is_read_no_further_than_its_cap() {
     let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let asked = std::cell::RefCell::new(Vec::new());
     let resolve = asking(&objects, &asked);
-    let walked = pages(&resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
+    let walked = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
     assert_eq!(walked, Err(Error::TooDeep));
     // The root, the page, and one past the most a chain can have.
     assert_eq!(asked.borrow().len(), 2 + 1025);
@@ -389,7 +389,7 @@ fn too_many_pages_or_none_are_typed_errors() {
     let catalog = document.catalog().unwrap();
     let started = Instant::now();
     assert_eq!(
-        pages(&resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()),
+        pages(resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()),
         Err(Error::TooManyPages)
     );
     assert!(started.elapsed() < QUICK, "{:?}", started.elapsed());
@@ -548,11 +548,11 @@ fn pages_share_what_they_hold_however_often_it_s_listed() {
     let bytes = file(&objects);
     let reading = Reading::open(&bytes[..], &Options::DEFAULT).unwrap();
     let resolver = &reading;
-    let catalog = catalog(&resolver, reading.trailer().dict())
+    let catalog = catalog(resolver, reading.trailer().dict())
         .unwrap()
         .unwrap();
     let started = Instant::now();
-    let table = pages(&resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+    let table = pages(resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
     assert!(started.elapsed() < QUICK, "{:?}", started.elapsed());
     assert_eq!(table.len(), 90_000);
     let first = table.get(0).unwrap();
@@ -581,7 +581,7 @@ fn a_page_listed_again_isn_t_read_again() {
     let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let asked = std::cell::RefCell::new(Vec::new());
     let resolve = asking(&objects, &asked);
-    let table = pages(&resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+    let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
     assert_eq!(table.len(), 3);
     let asked_for = |id| asked.borrow().iter().filter(|asked| **asked == id).count();
     assert_eq!(asked_for((9, 0)), 2, "/Resources and /MediaBox, once each");
@@ -605,7 +605,7 @@ fn pages_under_one_node_share_its_chain() {
     let document = bytes::read(&bytes);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
-    let table = pages(&resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+    let table = pages(resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
     let chain = |index: usize| table.get(index).unwrap().parent.as_ref().unwrap();
     assert!(Arc::ptr_eq(chain(0), chain(1)));
     let parents: Vec<ObjectId> = table.get(0).unwrap().parents().collect();
@@ -628,13 +628,13 @@ fn a_broken_object_every_page_names_is_read_once() {
     let source = ByPosition::new(&bytes);
     let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
     let resolver = &reading;
-    let catalog = catalog(&resolver, reading.trailer().dict())
+    let catalog = catalog(resolver, reading.trailer().dict())
         .unwrap()
         .unwrap();
     let started = Instant::now();
     let mut kept = Kept::default();
     let table = pages(
-        &resolver,
+        resolver,
         catalog,
         Rules::Pdfium,
         &Limits::DEFAULT,
@@ -706,7 +706,7 @@ fn the_root_s_count_ends_the_table_as_it_ends_pdfium_s() {
     let document = bytes::read(&bytes);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
-    let table = pages(&resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+    let table = pages(resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
     assert_eq!((table.len(), table.counted()), (1, 1_048_574));
     assert!(table.pages.capacity() <= ROOM, "{}", table.pages.capacity());
 }
@@ -885,7 +885,7 @@ fn an_attribute_says_where_it_s_from_and_what_it_s_written_as() {
     let document = bytes::read(&bytes);
     let resolver = &document;
     let catalog = document.catalog().unwrap();
-    let table = pages(&resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+    let table = pages(resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
 
     let inherited = table
         .get(0)
@@ -1168,7 +1168,7 @@ fn by_pdfium_s_rules_a_root_of_type_page_with_kids_no_array_is_page_0_of_its_cou
     let mut kept = Kept::default();
     let resolver = failing(&objects, (6, 0), Why::Damaged);
     let table = pages(
-        &resolver,
+        resolver,
         &catalog,
         Rules::Pdfium,
         &Limits::DEFAULT,
@@ -1179,13 +1179,7 @@ fn by_pdfium_s_rules_a_root_of_type_page_with_kids_no_array_is_page_0_of_its_cou
     assert_eq!(kept.faults(), [Fault::Damaged { id: (6, 0) }]);
     // One that fails the walk fails it here too.
     let resolver = failing(&objects, (6, 0), Why::Locked);
-    let walked = pages(
-        &resolver,
-        &catalog,
-        Rules::Pdfium,
-        &Limits::DEFAULT,
-        &mut (),
-    );
+    let walked = pages(resolver, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
     assert!(matches!(walked, Err(Error::Unreadable(_))), "{walked:?}");
     // By ISO's rules it's a page as well, its /Kids said.
     let objects = [
@@ -1465,7 +1459,8 @@ fn failing<'o>(
     objects: &'o BTreeMap<ObjectId, Object>,
     failing: ObjectId,
     why: Why,
-) -> impl Resolve<'o> {
+) -> impl Resolve<'o> + Copy {
+    #[derive(Clone, Copy)]
     struct Failing<'o> {
         objects: &'o BTreeMap<ObjectId, Object>,
         failing: ObjectId,
@@ -1515,7 +1510,7 @@ fn an_object_that_doesn_t_read_is_said_or_fails_the_walk_by_why() {
         for failed in [(3, 0), (5, 0), (2, 0)] {
             for why in [Why::Limit, Why::Locked, Why::Source] {
                 let resolver = failing(&objects, failed, why);
-                let walked = pages(&resolver, &catalog, rules, &Limits::DEFAULT, &mut ());
+                let walked = pages(resolver, &catalog, rules, &Limits::DEFAULT, &mut ());
                 match walked {
                     Err(Error::Unreadable(unreadable)) => {
                         assert_eq!((unreadable.id, unreadable.why), (failed, why));
@@ -1526,7 +1521,7 @@ fn an_object_that_doesn_t_read_is_said_or_fails_the_walk_by_why() {
             // Damaged, it's an object that isn't there, and it's said.
             let resolver = failing(&objects, failed, Why::Damaged);
             let mut kept = Kept::default();
-            let walked = pages(&resolver, &catalog, rules, &Limits::DEFAULT, &mut kept);
+            let walked = pages(resolver, &catalog, rules, &Limits::DEFAULT, &mut kept);
             assert!(
                 kept.faults().contains(&Fault::Damaged { id: failed }),
                 "{failed:?}: {:?}",
@@ -1541,7 +1536,7 @@ fn an_object_that_doesn_t_read_is_said_or_fails_the_walk_by_why() {
     }
     // A page damaged takes its place by PDFium's, and has none by ISO's.
     let resolver = failing(&objects, (3, 0), Why::Damaged);
-    let by = |rules| pages(&resolver, &catalog, rules, &Limits::DEFAULT, &mut ()).unwrap();
+    let by = |rules| pages(resolver, &catalog, rules, &Limits::DEFAULT, &mut ()).unwrap();
     assert_eq!(by(Rules::Pdfium).len(), 2);
     assert_eq!(by(Rules::Pdfium).get(0).unwrap().dict, None);
     assert_eq!(by(Rules::Iso).len(), 1);
@@ -1559,11 +1554,11 @@ fn a_source_that_fails_fails_the_walk_where_it_s_read() {
     let source = ByPosition::new(&bytes);
     let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
     let resolver = &reading;
-    let catalog = catalog(&resolver, reading.trailer().dict())
+    let catalog = catalog(resolver, reading.trailer().dict())
         .unwrap()
         .unwrap();
     source.failing.store(true, Ordering::Relaxed);
-    let walked = pages(&resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
+    let walked = pages(resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
     match walked {
         Err(Error::Unreadable(unreadable)) => assert_eq!(unreadable.why, Why::Source),
         other => panic!("{other:?}"),
@@ -1894,12 +1889,12 @@ fn only_a_sink_that_wants_them_has_its_checks_run() {
         asked.borrow_mut().push(id);
         objects.get(&id)
     };
-    pages(&resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ()).unwrap();
+    pages(resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ()).unwrap();
     // `()` doesn't want the /Count held to anything.
     assert!(!asked.borrow().contains(&(8, 0)), "{:?}", asked.borrow());
     asked.borrow_mut().clear();
     let mut kept = Kept::default();
-    pages(&resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
+    pages(resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
     assert!(asked.borrow().contains(&(8, 0)));
     assert_eq!(kept.faults(), [Fault::PageNoMediaBox]);
 }
@@ -1917,7 +1912,7 @@ fn a_walk_reads_nothing_past_the_count_or_any_content() {
         asked.borrow_mut().push(id);
         objects.get(&id)
     };
-    pages(&resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+    pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
     assert_eq!(*asked.borrow(), [(2, 0), (3, 0)]);
 }
 
@@ -1958,7 +1953,7 @@ fn a_fault_says_where_it_is() {
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let mut kept = Kept::default();
-    pages(&resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
+    pages(resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
     let (place, _) = (kept.0.iter())
         .find(|(_, fault)| *fault == Fault::PageTreeKidNotDictionary)
         .unwrap();
@@ -1983,7 +1978,7 @@ fn a_fault_says_where_it_is() {
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let mut kept = Kept::default();
-    pages(&resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
+    pages(resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
     let places: Vec<Option<ObjectId>> = (kept.0.iter())
         .filter(|(_, fault)| *fault == Fault::PageTreeKidNotDictionary)
         .map(|(place, _)| place.object)
@@ -2010,7 +2005,7 @@ fn a_fault_says_where_it_is() {
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let mut kept = Kept::default();
-    pages(&resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
+    pages(resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
     let of = |wanted: fn(&Fault) -> bool| -> Vec<Option<ObjectId>> {
         (kept.0.iter())
             .filter(|(_, fault)| wanted(fault))
@@ -2046,7 +2041,7 @@ fn a_fault_says_where_it_is() {
     let resolver = &document;
     let catalog = document.catalog().unwrap();
     let mut kept = Kept::default();
-    pages(&resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
+    pages(resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
     let (place, _) = (kept.0.iter())
         .find(|(_, fault)| *fault == Fault::PageTreeParentDirect)
         .unwrap();
@@ -2092,9 +2087,9 @@ fn what_only_a_sink_reads_fails_no_walk() {
                 if why.is_some() { (7, 0) } else { (0, 0) },
                 failed,
             );
-            let quiet = pages(&resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ());
+            let quiet = pages(resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ());
             let mut kept = Kept::default();
-            let told = pages(&resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut kept);
+            let told = pages(resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut kept);
             assert_eq!(told, quiet, "{root} {kid} {why:?}");
             assert_eq!(told.unwrap().len(), 1, "{root} {kid} {why:?}");
             assert!(kept.faults().contains(&fault), "{:?}", kept.faults());
@@ -2148,14 +2143,46 @@ fn kids_that_give_nothing_are_charged_to_the_walk() {
     let catalog = document.catalog().unwrap();
     let started = Instant::now();
     assert_eq!(
-        pages(&resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut ()),
+        pages(resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut ()),
         Err(Error::TooManyPages)
     );
     assert_eq!(
-        pages(&resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()),
+        pages(resolver, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()),
         Err(Error::TooManyPages)
     );
     assert!(started.elapsed() < QUICK, "{:?}", started.elapsed());
+}
+
+/// A chain far past what the stack could go down, on a page's `/Parent` under a
+/// cap raised for it: a table holds it, compares it, shows it and drops it.
+#[test]
+fn a_parent_chain_raised_past_the_stack_goes_along_in_a_loop() {
+    let length = 300_000;
+    let mut objects: BTreeMap<ObjectId, Object> = (0..length)
+        .map(|n| {
+            let parent = Object::reference(n + 11);
+            let node = Object::from(pdf_objects::dict! { "Parent" => parent });
+            ((n + 10, 0), node)
+        })
+        .collect();
+    objects.insert(
+        (2, 0),
+        parsed(&[(2, "<< /Kids [3 0 R] /Count 1 >>")])[&(2, 0)].clone(),
+    );
+    objects.insert(
+        (3, 0),
+        Object::from(pdf_objects::dict! { "Type" => "Page", "Parent" => Object::reference(10) }),
+    );
+    let resolve = |id: ObjectId| objects.get(&id);
+    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let mut limits = Limits::DEFAULT;
+    limits.page_depth = 2 * length as usize;
+    let table = pages(resolve, &catalog, Rules::Pdfium, &limits, &mut ()).unwrap();
+    let again = pages(resolve, &catalog, Rules::Pdfium, &limits, &mut ()).unwrap();
+    let page = table.get(0).unwrap();
+    assert_eq!(page.parents().count(), length as usize);
+    assert_eq!(table, again);
+    assert!(format!("{table:?}").len() > length as usize);
 }
 
 #[test]

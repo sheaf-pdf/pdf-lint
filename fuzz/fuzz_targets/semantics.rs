@@ -22,11 +22,9 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     dates(data);
     xmp(data);
     if let Ok(reading) = Reading::open(data, &options()) {
-        let objects = &reading;
-        let read = over(&objects, reading.trailer().dict());
+        let read = over(&reading, reading.trailer().dict());
         let document = reading.to_document();
         let document = document.expect("bytes in memory make a document");
-        let objects = &document;
-        assert_eq!(over(&objects, document.trailer.dict()), read);
+        assert_eq!(over(&document, document.trailer.dict()), read);
     }
 });

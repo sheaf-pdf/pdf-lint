@@ -4,7 +4,7 @@
 //!
 //! [`Date::read`] takes what a date's text says, and says in
 //! [`Date::quirks`] what it read past on the way ([`Quirk`]); what it can't
-//! read past makes it no date ([`DateError`]). A field not written is none
+//! read past makes it no date ([`Error`]). A field not written is none
 //! ([`Date::month`]), and what stands for it is 7.9.4's default
 //! ([`Date::month_or_default`]). [`Date::write`] writes the clause's form
 //! of the fields, never the bytes read.
@@ -106,7 +106,7 @@ impl fmt::Display for Field {
 /// Why a text is no date, or a field can't be set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
-pub enum DateError {
+pub enum Error {
     /// It doesn't begin `D:`.
     #[error("a date begins D:")]
     NoPrefix,
@@ -176,11 +176,11 @@ const MINUTE: usize = 3;
 const SECOND: usize = 4;
 
 /// `value` if it's in its range, for `field`.
-fn in_range(value: u8, low: u8, high: u8, field: Field) -> Result<u8, DateError> {
+fn in_range(value: u8, low: u8, high: u8, field: Field) -> Result<u8, Error> {
     if (low..=high).contains(&value) {
         Ok(value)
     } else {
-        Err(DateError::OutOfRange { field })
+        Err(Error::OutOfRange { field })
     }
 }
 
@@ -227,9 +227,9 @@ impl Date {
     /// Anything after that is read past. A field out of its range makes it no
     /// date, wherever it comes; every other departure from 7.9.4's form is one
     /// of its [`quirks`](Self::quirks).
-    pub fn read(text: &str) -> Result<Date, DateError> {
-        let text = text.strip_prefix("D:").ok_or(DateError::NoPrefix)?;
-        let (year, mut rest) = digits(text.as_bytes(), 4).ok_or(DateError::NoYear)?;
+    pub fn read(text: &str) -> Result<Date, Error> {
+        let text = text.strip_prefix("D:").ok_or(Error::NoPrefix)?;
+        let (year, mut rest) = digits(text.as_bytes(), 4).ok_or(Error::NoYear)?;
         let mut date = Date::at(year, [None; 5], None);
 
         for (at, &(field, low, high, _)) in FIELDS.iter().enumerate() {
@@ -307,19 +307,19 @@ impl Date {
     }
 
     /// A date of a year alone, 0 to 9999.
-    pub fn new(year: u16) -> Result<Date, DateError> {
+    pub fn new(year: u16) -> Result<Date, Error> {
         if year > 9999 {
-            return Err(DateError::OutOfRange { field: Field::Year });
+            return Err(Error::OutOfRange { field: Field::Year });
         }
         Ok(Date::at(year, [None; 5], None))
     }
 
     /// Sets one of [`FIELDS`], in its range and with the one before it set.
-    fn with(mut self, at: usize, value: u8) -> Result<Date, DateError> {
+    fn with(mut self, at: usize, value: u8) -> Result<Date, Error> {
         let (field, low, high, _) = FIELDS[at];
         let value = in_range(value, low, high, field)?;
         if at > 0 && self.fields[at - 1].is_none() {
-            return Err(DateError::OutOfOrder { field });
+            return Err(Error::OutOfOrder { field });
         }
         self.fields[at] = Some(value);
         self.quirks.clear();
@@ -341,47 +341,47 @@ impl Date {
     /// This date in another month, 1 to 12, which must have its day if it has
     /// one. What reading it read past is left behind, as with each `with_`, but
     /// that a day its month hasn't is still said, if another `with_` kept it.
-    pub fn with_month(self, month: u8) -> Result<Date, DateError> {
+    pub fn with_month(self, month: u8) -> Result<Date, Error> {
         let date = self.with(MONTH, month)?;
         if date.fields[DAY].is_some_and(|day| day > days_in(date.year, month)) {
-            return Err(DateError::OutOfRange { field: Field::Day });
+            return Err(Error::OutOfRange { field: Field::Day });
         }
         Ok(date)
     }
 
     /// This date on another day, one its month has; it must have a month.
-    pub fn with_day(self, day: u8) -> Result<Date, DateError> {
+    pub fn with_day(self, day: u8) -> Result<Date, Error> {
         let date = self.with(DAY, day)?;
         if date.fields[MONTH].is_some_and(|month| day > days_in(date.year, month)) {
-            return Err(DateError::OutOfRange { field: Field::Day });
+            return Err(Error::OutOfRange { field: Field::Day });
         }
         Ok(date)
     }
 
     /// This date at another hour, 0 to 23; it must have a day.
-    pub fn with_hour(self, hour: u8) -> Result<Date, DateError> {
+    pub fn with_hour(self, hour: u8) -> Result<Date, Error> {
         self.with(HOUR, hour)
     }
 
     /// This date at another minute, 0 to 59; it must have an hour.
-    pub fn with_minute(self, minute: u8) -> Result<Date, DateError> {
+    pub fn with_minute(self, minute: u8) -> Result<Date, Error> {
         self.with(MINUTE, minute)
     }
 
     /// This date at another second, 0 to 59; it must have a minute.
-    pub fn with_second(self, second: u8) -> Result<Date, DateError> {
+    pub fn with_second(self, second: u8) -> Result<Date, Error> {
         self.with(SECOND, second)
     }
 
     /// This date at another offset, hours 0 to 23 and minutes 0 to 59; it
     /// must have a second.
-    pub fn with_offset(mut self, offset: Offset) -> Result<Date, DateError> {
+    pub fn with_offset(mut self, offset: Offset) -> Result<Date, Error> {
         if let Offset::Ahead { hours, minutes } | Offset::Behind { hours, minutes } = offset {
             in_range(hours, 0, 23, Field::OffsetHours)?;
             in_range(minutes, 0, 59, Field::OffsetMinutes)?;
         }
         if self.fields[SECOND].is_none() {
-            return Err(DateError::OutOfOrder {
+            return Err(Error::OutOfOrder {
                 field: Field::Offset,
             });
         }
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn what_isnt_a_date_says_why() {
-        use DateError::{NoPrefix, NoYear, OutOfRange};
+        use Error::{NoPrefix, NoYear, OutOfRange};
         for (text, error) in [
             ("", NoPrefix),
             ("2026", NoPrefix),
@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn a_date_is_built_in_order_and_in_range() {
-        use DateError::{OutOfOrder, OutOfRange};
+        use Error::{OutOfOrder, OutOfRange};
         let date = Date::new(2024).unwrap();
         assert_eq!(date.write(), "D:2024");
         assert_eq!(Date::new(0).unwrap().write(), "D:0000");
@@ -1036,19 +1036,19 @@ mod tests {
 
     #[test]
     fn what_an_error_says_is_the_whole_message() {
-        assert_eq!(DateError::NoPrefix.to_string(), "a date begins D:");
+        assert_eq!(Error::NoPrefix.to_string(), "a date begins D:");
         assert_eq!(
-            DateError::OutOfRange {
+            Error::OutOfRange {
                 field: Field::OffsetHours
             }
             .to_string(),
             "a date's offset's hours out of its range"
         );
         assert_eq!(
-            DateError::OutOfOrder { field: Field::Day }.to_string(),
+            Error::OutOfOrder { field: Field::Day }.to_string(),
             "a date's day set before the field before it"
         );
-        let error: &dyn std::error::Error = &DateError::NoYear;
+        let error: &dyn std::error::Error = &Error::NoYear;
         assert!(error.source().is_none());
     }
 

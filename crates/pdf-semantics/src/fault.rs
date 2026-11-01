@@ -56,6 +56,13 @@ pub struct Place {
     pub at: Option<Span>,
 }
 
+impl Place {
+    /// A fault's place, for a sink to be tried on: walks make their own.
+    pub const fn new(object: Option<ObjectId>, at: Option<Span>) -> Place {
+        Place { object, at }
+    }
+}
+
 /// A place where a file's structure isn't what ISO 32000-2 says it shall
 /// be. What each does to a walk is on the walk's own doc. Each names its
 /// clause.

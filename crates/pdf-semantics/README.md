@@ -10,9 +10,9 @@ It's made for what reads a file's common structures to show them, check them or 
 - **Text strings (7.9.2.2).** `text` is pdf-objects' module: read by ISO's rules or PDFium's, every departure said, and written, as itself when PDFDocEncoding reads it back so, or in UTF-16BE.
 - **The page tree (7.7.3).** `pages::pages` lists every page in order, by one of two sets of rules, which give the same pages on a well-formed tree. PDFium's, as of chromium/8125, a development snapshot of PDFium that the crate's tests hold them to, number each page as PDFium numbers it: a kid with `/Kids` is a node whatever its `/Type`, one written in place reads as any other, one that names no dictionary has a place with no page at it, and the walk stops at the count PDFium gives, which `Pages::counted` says; where PDFium goes on past a node listed inside itself, a `/Parent` chain that loops or a tree past the caps, the walk fails instead, by a typed `pages::Error`. ISO's read on past whatever departs from the clause, each said. Either way what a page inherits comes up its `/Parent` chain: `Page::attribute` gives it as written and followed, `Page::media_box`, `crop_box`, `rotate` and `user_unit` as a value, and each says where it came from, the page, an ancestor or a default (`Origin`). A page object listed twice is two pages, and nothing's copied: what a page holds is borrowed from what the resolver keeps, its `/Contents` and `/Annots` the caller's to read from its dictionary.
 - **Name and number trees (7.9.6, 7.9.7).** `tree::names` and `tree::numbers` walk one a key and a value at a time, in the order it's written, borrowing from what the resolver keeps and reading nothing it hasn't been asked for, under caps of depth and nodes, each node read once so a loop ends. Each departure is told to a sink, and `whole` says whether anything was left unread. `tree::write_names` and `tree::write_numbers` write one flat, sorted, a key given twice refused.
-- **XMP claims (14.3.2).** `xmp::read` reads what a packet claims it conforms to, PDF/A's part, conformance and revision, PDF/UA's part and revision and PDF/VT's version, on [quick-xml](https://crates.io/crates/quick-xml): an attribute or an element, under any prefix bound to its namespace, so a prefix bound to another, a comment or CDATA holding what looks like one claims nothing. The first value of each counts, as written, so one that says nothing doesn't lose another, and `Claims::conformance` reads PDF/A's and PDF/UA's as a number and a letter. An attribute or a value that doesn't read is told to a sink and passed; XML that stops making sense, or a packet past its caps, ends the read with an `XmpError` that holds what was read. No DOCTYPE is read and no entity expanded. `xmp::metadata_stream` says which stream holds a file's packet.
+- **XMP claims (14.3.2).** `xmp::read` reads what a packet claims it conforms to, PDF/A's part, conformance and revision, PDF/UA's part and revision and PDF/VT's version, on [quick-xml](https://crates.io/crates/quick-xml): an attribute or an element, under any prefix bound to its namespace, so a prefix bound to another, a comment or CDATA holding what looks like one claims nothing. The first value of each counts, as written, so one that says nothing doesn't lose another, and `Claims::conformance` reads PDF/A's and PDF/UA's as a number and a letter. An attribute or a value that doesn't read is told to a sink and passed; XML that stops making sense, or a packet past its caps, ends the read with an `xmp::Error` that holds what was read. No DOCTYPE is read and no entity expanded. `xmp::metadata_stream` says which stream holds a file's packet.
 
-Whatever walks a file's objects reads them through pdf-objects' `Resolve`, so over pdf-structure's reading in memory or by position, its document, or a closure alike. `catalog` finds a file's catalog from its trailer, and `follow` follows a reference. A reader says why it gives no object, and a walk acts on it: an object that's damaged is said and passed; one past a cap the reader reads under, one that takes a password, or bytes the source didn't give end the walk with an `Unreadable`, so that a failed read never looks like an empty tree.
+Whatever walks a file's objects reads them through pdf-objects' `Resolve`, given by value, so `&reading` over pdf-structure's reading in memory or by position, `&document` over its document, or a closure alike. `catalog` finds a file's catalog from its trailer, and `follow` follows a reference. A reader says why it gives no object, and a walk acts on it: an object that's damaged is said and passed; one past a cap the reader reads under, one that takes a password, or bytes the source didn't give end the walk with an `Unreadable`, so that a failed read never looks like an empty tree.
 
 Where a file departs from the standard is a `Fault`, told to a `Sink` with its `Place`. `()` drops them and wants none, so what only a checker wants isn't looked for, and what's read is the same whatever the sink. Caps are one value, `Limits`.
 
@@ -48,9 +48,8 @@ A file's pages, each value saying where it came from:
 ```rust
 use std::collections::BTreeMap;
 
-use pdf_objects::{Object, ObjectId, dict};
 use pdf_semantics::pages::{Inheritable, Origin, Rect, pages};
-use pdf_semantics::{Limits, Rules};
+use pdf_semantics::{Limits, Object, ObjectId, Rules, dict};
 
 let objects = BTreeMap::from([
     ((2, 0), Object::from(dict! {
@@ -64,7 +63,7 @@ let objects = BTreeMap::from([
 let resolve = |id: ObjectId| objects.get(&id);
 let catalog = dict! { "Pages" => Object::reference(2) };
 
-let table = pages(&resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
 assert_eq!((table.len(), table.counted()), (2, 2));
 
 // Listed twice, it's two pages, the second saying so.
@@ -80,14 +79,32 @@ assert_eq!(second.crop_box().origin, Origin::Default);
 assert!(second.attribute(Inheritable::Resources).is_none());
 ```
 
-A name tree, over a closure; a resolver of a file's goes the same way:
+Over a file, a walk takes the reading or the document by reference, which says why it gives no object where a closure can't:
+
+```rust
+use pdf_semantics::pages::pages;
+use pdf_semantics::{Limits, Rules, catalog, xmp};
+use pdf_structure::bytes::{Options, Reading};
+
+let file = b"%PDF-1.7\n\
+    1 0 obj\n<< /Pages 2 0 R >>\nendobj\n\
+    2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\
+    3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n\
+    trailer\n<< /Root 1 0 R >>\n";
+let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+let root = catalog(&reading, reading.trailer().dict()).unwrap().unwrap();
+let table = pages(&reading, root, Rules::Iso, &Limits::DEFAULT, &mut ()).unwrap();
+assert_eq!(table.get(0).unwrap().id, Some((3, 0)));
+assert_eq!(xmp::metadata_stream(&reading, root), Ok(None));
+```
+
+A name tree, over a closure:
 
 ```rust
 use std::collections::BTreeMap;
 
-use pdf_objects::{Object, ObjectId, dict};
 use pdf_semantics::tree::names;
-use pdf_semantics::{Fault, Limits, Place, Sink};
+use pdf_semantics::{Fault, Limits, Object, ObjectId, Place, Sink, dict};
 
 #[derive(Default)]
 struct Faults(Vec<Fault>);
@@ -110,7 +127,7 @@ let objects = BTreeMap::from([((2, 0), Object::from(leaf))]);
 let resolve = |id: ObjectId| objects.get(&id);
 let root = Object::from(dict! { "Kids" => vec![Object::reference(2), Object::reference(2)] });
 
-let mut walk = names(&resolve, &root, &Limits::DEFAULT, Faults::default());
+let mut walk = names(resolve, &root, &Limits::DEFAULT, Faults::default());
 let (key, value) = walk.next().unwrap().unwrap();
 assert_eq!((key, value.as_reference()), (&b"a"[..], Some((7, 0))));
 let (key, value) = walk.next().unwrap().unwrap();
@@ -134,7 +151,7 @@ let packet = br#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-sy
     <!-- <a:part>3</a:part> -->
 </rdf:Description>"#;
 
-let claims = xmp::read(packet, &Limits::DEFAULT, &mut ()).unwrap();
+let claims = xmp::read(packet, None, &Limits::DEFAULT, &mut ()).unwrap();
 assert_eq!(claims.pdfa_part.as_deref(), Some("2"));
 assert_eq!(claims.pdfa_conformance.as_deref(), Some("b"));
 

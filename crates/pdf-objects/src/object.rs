@@ -10,12 +10,13 @@ use crate::text;
 /// An indirect object's number and generation.
 pub type ObjectId = (u32, u16);
 
-/// Where a value was written: a run of the file's bytes, or of an object
-/// stream's decoded data.
+/// Where a value was written: a run of the file's bytes, or of a stream's
+/// decoded data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub struct Span {
-    /// The object stream whose decoded data it's in; none for the file.
+    /// The stream whose decoded data it's in, an object stream for an object
+    /// in one; none for the file.
     pub stream: Option<ObjectId>,
     /// The offset of its first byte.
     pub start: usize,
@@ -24,8 +25,7 @@ pub struct Span {
 }
 
 impl Span {
-    /// Bytes `start..end` of the file, or of object stream `stream`'s
-    /// decoded data.
+    /// Bytes `start..end` of the file, or of stream `stream`'s decoded data.
     pub const fn new(stream: Option<ObjectId>, start: usize, end: usize) -> Span {
         Span { stream, start, end }
     }

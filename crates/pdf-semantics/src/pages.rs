@@ -46,8 +46,7 @@
 //! use std::collections::BTreeMap;
 //!
 //! use pdf_semantics::pages::{Origin, Rect, pages};
-//! use pdf_semantics::{Limits, Object, ObjectId, Rules};
-//! # use pdf_objects::dict;
+//! use pdf_semantics::{Limits, Object, ObjectId, Rules, dict};
 //!
 //! let objects = BTreeMap::from([
 //!     ((2, 0), Object::from(dict! {
@@ -61,7 +60,7 @@
 //! let resolve = |id: ObjectId| objects.get(&id);
 //! let catalog = dict! { "Pages" => Object::reference(2) };
 //!
-//! let table = pages(&resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+//! let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
 //! assert_eq!(table.len(), 1);
 //! let page = table.get(0).unwrap();
 //! assert_eq!(page.id, Some((3, 0)));
@@ -72,6 +71,7 @@
 //! ```
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -98,8 +98,8 @@ const ROOM: usize = 4096;
 /// The pages of the tree at `catalog`'s `/Pages`, by `rules`, as the module
 /// says. What departs from ISO 32000-2 is told to `sink` under ISO's rules;
 /// under PDFium's, only what doesn't read is.
-pub fn pages<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized>(
-    objects: &R,
+pub fn pages<'o, R: Resolve<'o>, S: Sink + ?Sized>(
+    objects: R,
     catalog: &'o Dict,
     rules: Rules,
     limits: &Limits,
@@ -281,6 +281,7 @@ const KEYS: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
 
 /// An inheritable attribute of a page.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct Attribute<'o> {
     /// As it's written in the dictionary that has it: a reference stays one.
     pub written: &'o Object,
@@ -292,6 +293,7 @@ pub struct Attribute<'o> {
 
 /// A value, and where it came from.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct Sourced<T> {
     /// The value.
     pub value: T,
@@ -299,13 +301,14 @@ pub struct Sourced<T> {
     pub origin: Origin,
 }
 
-/// Where a page's value came from.
+/// Where a value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Origin {
-    /// The page's own dictionary.
+    /// The dictionary it's a value of: a page's own.
     Own,
-    /// A node on its `/Parent` chain: that node's number, none for a `/Parent`
-    /// written in place.
+    /// A dictionary it's inherited from, on a `/Parent` chain: that one's
+    /// number, none for a `/Parent` written in place.
     Ancestor(Option<ObjectId>),
     /// None of them has it as a value that reads: what stands for it.
     Default,
@@ -358,11 +361,52 @@ impl From<Unreadable> for Error {
 
 /// A node on a page's `/Parent` chain, and the chain above it: pages under
 /// one node share it.
-#[derive(Debug, PartialEq, Eq)]
 struct Parent {
     /// Its number: none for one written in place.
     id: Option<ObjectId>,
     up: Option<Arc<Parent>>,
+}
+
+/// A chain is as long as [`Limits::page_depth`] lets it be, which a caller can
+/// raise, so what goes along one goes in a loop: these three aren't derived, as
+/// what's derived goes down it on the stack.
+impl Drop for Parent {
+    fn drop(&mut self) {
+        let mut up = self.up.take();
+        while let Some(Ok(mut parent)) = up.map(Arc::try_unwrap) {
+            up = parent.up.take();
+        }
+    }
+}
+
+impl PartialEq for Parent {
+    fn eq(&self, other: &Parent) -> bool {
+        let (mut a, mut b) = (self, other);
+        loop {
+            if std::ptr::eq(a, b) {
+                return true;
+            }
+            if a.id != b.id {
+                return false;
+            }
+            match (a.up.as_deref(), b.up.as_deref()) {
+                (Some(above_a), Some(above_b)) => (a, b) = (above_a, above_b),
+                (None, None) => return true,
+                _ => return false,
+            }
+        }
+    }
+}
+
+impl Eq for Parent {}
+
+impl fmt::Debug for Parent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let chain = std::iter::successors(Some(self), |parent| parent.up.as_deref());
+        f.debug_list()
+            .entries(chain.map(|parent| parent.id))
+            .finish()
+    }
 }
 
 /// What a node gives the pages under it by `/Parent`.
@@ -413,8 +457,8 @@ enum Class {
     Empty,
 }
 
-struct Walk<'o, 'r, R: ?Sized, S: ?Sized> {
-    objects: &'r R,
+struct Walk<'o, 'r, R, S: ?Sized> {
+    objects: R,
     sink: &'r mut S,
     limits: Limits,
     pdfium: bool,
@@ -439,7 +483,7 @@ struct Walk<'o, 'r, R: ?Sized, S: ?Sized> {
     object: Option<ObjectId>,
 }
 
-impl<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized> Walk<'o, '_, R, S> {
+impl<'o, R: Resolve<'o>, S: Sink + ?Sized> Walk<'o, '_, R, S> {
     /// How many references to follow: `pdfium`'s number by PDFium's rules, and
     /// any by ISO's.
     fn hops(&self, pdfium: usize) -> usize {

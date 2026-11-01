@@ -181,6 +181,17 @@ impl<'o, F: Fn(ObjectId) -> Option<&'o Object> + ?Sized> Resolve<'o> for F {
     }
 }
 
+/// A reference to any resolver, for what takes one by value, as a walk does.
+impl<'o> Resolve<'o> for &(dyn Resolve<'o> + '_) {
+    fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+        (**self).resolve(id)
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        (**self).try_resolve(id)
+    }
+}
+
 /// The README's examples, run as doctests.
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
@@ -256,5 +267,12 @@ mod tests {
         assert_eq!((why.id, why.why), ((3, 1), Why::Locked));
         assert_eq!(why.to_string(), "it wants a password");
         assert!(std::error::Error::source(&why).is_none());
+
+        // Through a `dyn Resolve`, by value, it says so still.
+        fn by_value<'o>(resolver: impl Resolve<'o>) -> Result<Option<&'o Object>, Unreadable> {
+            resolver.try_resolve((3, 1))
+        }
+        let locked = &Locked as &dyn Resolve;
+        assert_eq!(by_value(locked).unwrap_err().why, Why::Locked);
     }
 }

@@ -15,7 +15,7 @@
 //! value that doesn't, is a [`Fault`] and the walk goes on, so a claim
 //! elsewhere still counts. Past that, XML that stops making sense or a packet
 //! past its caps ([`Limits::xmp_bytes`], [`Limits::xmp_depth`],
-//! [`Limits::xmp_bindings`]) is an [`XmpError`], holding what was read before
+//! [`Limits::xmp_bindings`]) is an [`Error`], holding what was read before
 //! it. No DOCTYPE is read: an entity it declares isn't expanded, and only the
 //! five XML predefines, and character references, stand for anything.
 
@@ -24,7 +24,7 @@ use std::fmt;
 use pdf_objects::{Dict, ObjectId, Resolve, Span, Unreadable, Value};
 use quick_xml::NsReader;
 use quick_xml::encoding::EncodingError;
-use quick_xml::errors::{Error as XmlError, IllFormedError};
+use quick_xml::errors::Error as XmlError;
 use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::name::{LocalName, Namespace, NamespaceError, ResolveResult};
@@ -40,9 +40,8 @@ const PDFVT: &[u8] = b"http://www.npes.org/pdfvt/ns/id/";
 
 /// What a packet claims: the first value of each, as written but for the
 /// white space round it, and an attribute's value normalized as XML has it.
-/// A packet's values needn't say anything: `conformance=""` and `part="9"`
-/// are found in real files, so a value is held as it is, and
-/// [`Claims::conformance`] reads it.
+/// A packet's values needn't say anything, as `conformance=""` or `part="9"`,
+/// so a value is held as it is, and [`Claims::conformance`] reads it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Claims {
@@ -118,18 +117,26 @@ impl Claims {
     /// it's read. Any that says neither is an error here, where `Claims`
     /// still has the others.
     pub fn conformance(&self) -> Result<Conformance, ClaimError> {
-        let part = self.pdfa_part.as_deref().map(number).transpose()?;
+        let number = |claim, value: &Option<String>| {
+            (value.as_deref())
+                .map(|value| number(claim, value))
+                .transpose()
+        };
+        let part = number("pdfaid:part", &self.pdfa_part)?;
         let level = self.pdfa_conformance.as_deref().map(letter).transpose()?;
         Ok(Conformance {
             pdfa: part.map(|part| PdfA { part, level }),
-            pdfua: self.pdfua_part.as_deref().map(number).transpose()?,
+            pdfua: number("pdfuaid:part", &self.pdfua_part)?.map(PdfUa::new),
         })
     }
 }
 
-/// What a value of a part says.
-fn number(value: &str) -> Result<u32, ClaimError> {
-    (value.parse()).map_err(|_| ClaimError::Part(value.to_string()))
+/// What a value of a part, of the claim named `claim`, says.
+fn number(claim: &'static str, value: &str) -> Result<u32, ClaimError> {
+    (value.parse()).map_err(|_| ClaimError::Part {
+        claim,
+        value: value.to_string(),
+    })
 }
 
 /// A conformance level: one letter, upper case.
@@ -138,7 +145,9 @@ fn letter(value: &str) -> Result<char, ClaimError> {
     (chars.next())
         .filter(|c| c.is_ascii_alphabetic() && chars.next().is_none())
         .map(|c| c.to_ascii_uppercase())
-        .ok_or_else(|| ClaimError::Level(value.to_string()))
+        .ok_or_else(|| ClaimError::Level {
+            value: value.to_string(),
+        })
 }
 
 /// A file's conformance claims, read ([`Claims::conformance`]).
@@ -147,18 +156,29 @@ fn letter(value: &str) -> Result<char, ClaimError> {
 pub struct Conformance {
     /// `pdfaid:part`, with its level.
     pub pdfa: Option<PdfA>,
-    /// `pdfuaid:part`: 1 for PDF/UA-1.
-    pub pdfua: Option<u32>,
+    /// `pdfuaid:part`.
+    pub pdfua: Option<PdfUa>,
 }
 
 /// A PDF/A claim: `pdfaid:part` and `pdfaid:conformance`. PDF/A-2b is part 2,
 /// level `B`; PDF/A-4 may give no level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PdfA {
     /// The part.
     pub part: u32,
     /// The level, upper case.
     pub level: Option<char>,
+}
+
+impl PdfA {
+    /// The claim of `part` and `level`, which is taken to upper case.
+    pub fn new(part: u32, level: Option<char>) -> PdfA {
+        PdfA {
+            part,
+            level: level.map(|level| level.to_ascii_uppercase()),
+        }
+    }
 }
 
 /// As the claim is named: "PDF/A-2b", "PDF/A-4".
@@ -172,24 +192,55 @@ impl fmt::Display for PdfA {
     }
 }
 
+/// A PDF/UA claim: `pdfuaid:part`. PDF/UA-1 is part 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PdfUa {
+    /// The part.
+    pub part: u32,
+}
+
+impl PdfUa {
+    /// The claim of `part`.
+    pub const fn new(part: u32) -> PdfUa {
+        PdfUa { part }
+    }
+}
+
+/// As the claim is named: "PDF/UA-1".
+impl fmt::Display for PdfUa {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PDF/UA-{}", self.part)
+    }
+}
+
 /// A claim whose value doesn't say what it's for.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ClaimError {
     /// A part that isn't a number.
-    #[error("a part number {0:?} isn't a number")]
-    Part(String),
+    #[error("{claim} {value:?} isn't a number")]
+    Part {
+        /// Which claim it is, as it's usually prefixed: `pdfaid:part` or
+        /// `pdfuaid:part`.
+        claim: &'static str,
+        /// The value, as written.
+        value: String,
+    },
     /// A level that isn't one letter.
-    #[error("pdfaid:conformance {0:?} isn't a letter")]
-    Level(String),
+    #[error("pdfaid:conformance {value:?} isn't a letter")]
+    Level {
+        /// The value, as written.
+        value: String,
+    },
 }
 
 /// Why a packet was read no further. What it read up to there is the error's
-/// [`read`](XmpError::read), for a caller to take or leave.
+/// [`read`](Error::read), for a caller to take or leave.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("XMP metadata reads no further than byte {at}: {why}")]
 #[non_exhaustive]
-pub struct XmpError {
+pub struct Error {
     /// What it claimed before there.
     pub read: Claims,
     /// The offset in the packet where it stopped.
@@ -222,47 +273,51 @@ type Open = Option<(Claim, String)>;
 /// What `xml`, an XMP packet, claims: each claim's first value, as an
 /// attribute or an element, under any prefix bound to its namespace.
 ///
-/// `sink` hears what's read past, each [`Place`] with no object, as the
-/// packet is all it's given, and its `at` offsets in the packet:
+/// `stream` is the stream `xml` is the decoded data of, as [`metadata_stream`]
+/// gives it. `sink` hears what's read past, each [`Place`] naming that stream,
+/// as its object and as its `at`'s stream, the offsets being of its decoded
+/// data. Given none, a place has neither, as nothing says what they'd be of:
 ///
 /// - [`Fault::XmpNotUtf8`]: a mark of UTF-16 at its start; nothing's read;
 /// - [`Fault::XmpAttribute`]: an attribute that doesn't read, with no quotes
 ///   or no value or given twice. The tag's others are read, as XML's reader
 ///   can go on, but a namespace bound after one that doesn't read isn't bound;
 /// - [`Fault::XmpValue`]: a claim's value that doesn't read, with an entity
-///   that isn't one of XML's five, or that isn't UTF-8. It's as though it
-///   weren't written, so a value after it counts.
+///   that isn't one of XML's five, an `&` that starts no reference, or that
+///   isn't UTF-8. It's as though it weren't written, so a value after it
+///   counts. An `&` elsewhere in the packet's text, as in a title, is passed.
 ///
-/// An error ([`XmpError`]) holds what was read before it. A packet may end
+/// An error ([`Error`]) holds what was read before it. A packet may end
 /// with elements still open, and an element's value counts once it closes.
 // A packet's read once a file, and its error holds what's read.
 #[allow(clippy::result_large_err)]
 pub fn read<S: Sink + ?Sized>(
     xml: &[u8],
+    stream: Option<ObjectId>,
     limits: &Limits,
     sink: &mut S,
-) -> Result<Claims, XmpError> {
+) -> Result<Claims, Error> {
     let mut claims = Claims::default();
     if xml.starts_with(&[0xFE, 0xFF]) || xml.starts_with(&[0xFF, 0xFE]) {
-        tell(sink, 0, 2, Fault::XmpNotUtf8);
+        tell(sink, stream, 0, 2, Fault::XmpNotUtf8);
         return Ok(claims);
     }
     let cut = xml.len() > limits.xmp_bytes;
     let data = &xml[..xml.len().min(limits.xmp_bytes)];
     let mut reader = NsReader::from_reader(data);
+    reader.config_mut().allow_dangling_amp = true;
     (reader.resolver_mut()).set_max_declarations_per_element(limits.xmp_bindings);
+    let depth = limits.xmp_depth.min(usize::from(u16::MAX) - 1);
     // How many namespaces each element open has bound, and them all.
     let (mut levels, mut bindings): (Vec<usize>, usize) = (Vec::new(), 0);
     let mut open: Open = None;
     loop {
         let start = reader.buffer_position() as usize;
-        let stop = |read: Claims, at, why| Err(XmpError { read, at, why });
+        let stop = |read: Claims, at, why| Err(Error { read, at, why });
         let event = match reader.read_event() {
             Ok(event) => event,
             // A tag, or the like, is what a cut packet may end on.
-            Err(XmlError::Syntax(_) | XmlError::IllFormed(IllFormedError::UnclosedReference))
-                if cut =>
-            {
+            Err(XmlError::Syntax(_)) if cut => {
                 return stop(claims, data.len(), XmpWhy::TooLong);
             }
             Err(XmlError::Namespace(NamespaceError::TooManyDeclarations(_))) => {
@@ -276,7 +331,7 @@ pub fn read<S: Sink + ?Sized>(
         let end = reader.buffer_position() as usize;
         match &event {
             Event::Start(tag) | Event::Empty(tag) => {
-                if levels.len() >= limits.xmp_depth {
+                if levels.len() >= depth {
                     return stop(claims, start, XmpWhy::TooDeep);
                 }
                 let bound = bound(tag);
@@ -285,7 +340,7 @@ pub fn read<S: Sink + ?Sized>(
                 }
                 for attribute in tag.attributes() {
                     let Ok(attribute) = attribute else {
-                        tell(sink, start, end, Fault::XmpAttribute);
+                        tell(sink, stream, start, end, Fault::XmpAttribute);
                         continue;
                     };
                     let (namespace, name) = reader.resolver().resolve_attribute(attribute.key);
@@ -297,7 +352,7 @@ pub fn read<S: Sink + ?Sized>(
                     }
                     match attribute.normalized_value(quick_xml::XmlVersion::Implicit1_0) {
                         Ok(value) => claims.set(claim, &value),
-                        Err(_) => tell(sink, start, end, Fault::XmpValue),
+                        Err(_) => tell(sink, stream, start, end, Fault::XmpValue),
                     }
                 }
                 if matches!(event, Event::Start(_)) {
@@ -309,11 +364,16 @@ pub fn read<S: Sink + ?Sized>(
                         .map(|claim| (claim, String::new()));
                 }
             }
+            // Text only starts with `&` where that starts no reference.
+            Event::Text(text) if open.is_some() && text.starts_with(b"&") => {
+                open = None;
+                tell(sink, stream, start, end, Fault::XmpValue);
+            }
             Event::Text(text) if open.is_some() => {
-                push(&mut open, text.xml10_content(), sink, start, end);
+                push(&mut open, text.xml10_content(), sink, stream, start..end);
             }
             Event::CData(text) if open.is_some() => {
-                push(&mut open, text.xml10_content(), sink, start, end);
+                push(&mut open, text.xml10_content(), sink, stream, start..end);
             }
             Event::GeneralRef(reference) if open.is_some() => match character(reference) {
                 Some(value) => {
@@ -323,7 +383,7 @@ pub fn read<S: Sink + ?Sized>(
                 }
                 None => {
                     open = None;
-                    tell(sink, start, end, Fault::XmpValue);
+                    tell(sink, stream, start, end, Fault::XmpValue);
                 }
             },
             Event::End(_) => {
@@ -354,14 +414,14 @@ fn push<S: Sink + ?Sized>(
     open: &mut Open,
     text: Result<std::borrow::Cow<str>, EncodingError>,
     sink: &mut S,
-    start: usize,
-    end: usize,
+    stream: Option<ObjectId>,
+    at: std::ops::Range<usize>,
 ) {
     match (text, open.as_mut()) {
         (Ok(text), Some((_, value))) => value.push_str(&text),
         (Err(_), _) => {
             *open = None;
-            tell(sink, start, end, Fault::XmpValue);
+            tell(sink, stream, at.start, at.end, Fault::XmpValue);
         }
         (_, None) => {}
     }
@@ -381,14 +441,17 @@ fn character(reference: &BytesRef) -> Option<String> {
 }
 
 /// Tells `sink`, if it wants faults, of `fault` at bytes `start..end` of the
-/// packet.
-fn tell<S: Sink + ?Sized>(sink: &mut S, start: usize, end: usize, fault: Fault) {
+/// packet, which is the decoded data of `stream`.
+fn tell<S: Sink + ?Sized>(
+    sink: &mut S,
+    stream: Option<ObjectId>,
+    start: usize,
+    end: usize,
+    fault: Fault,
+) {
     if sink.wants() {
-        let place = Place {
-            object: None,
-            at: Some(Span::new(None, start, end)),
-        };
-        sink.fault(place, fault);
+        let at = stream.map(|id| Span::new(Some(id), start, end));
+        sink.fault(Place { object: stream, at }, fault);
     }
 }
 
@@ -396,8 +459,8 @@ fn tell<S: Sink + ?Sized>(sink: &mut S, start: usize, end: usize, fault: Fault) 
 /// decoded data is the file's packet: none where there's no `/Metadata`, or it
 /// leads to no stream. An object on the way that doesn't read says why, so a
 /// failed read doesn't look like a file with no metadata.
-pub fn metadata_stream<'o, R: Resolve<'o> + ?Sized>(
-    objects: &R,
+pub fn metadata_stream<'o, R: Resolve<'o>>(
+    objects: R,
     catalog: &'o Dict,
 ) -> Result<Option<ObjectId>, Unreadable> {
     let Some(mut at) = catalog.get(b"Metadata") else {

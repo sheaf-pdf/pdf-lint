@@ -13,6 +13,7 @@ use pdf_structure::source::Document;
 
 use super::*;
 use crate::catalog;
+use crate::follow;
 
 /// Keeps what it's told.
 #[derive(Default)]
@@ -70,7 +71,7 @@ impl<'o> Saying<'o> {
     }
 }
 
-impl<'o> Resolve<'o> for Saying<'o> {
+impl<'o> Resolve<'o> for &Saying<'o> {
     fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
         self.objects.get(&id)
     }
@@ -97,7 +98,7 @@ fn walked(objects: &[&str], limits: &Limits) -> Walked {
     let objects = file(objects);
     let resolve = |id: ObjectId| objects.get(&id);
     let root = Object::reference(1);
-    let mut walk = names(&resolve, &root, limits, Kept::default());
+    let mut walk = names(resolve, &root, limits, Kept::default());
     let keys = (walk.by_ref())
         .map(|entry| String::from_utf8_lossy(entry.unwrap().0).into_owned())
         .collect();
@@ -164,7 +165,10 @@ fn reads_a_number_tree_with_kids() {
         Xref::Table,
     );
 
-    fn entries<'o, R: Resolve<'o>>(objects: &R, trailer: &'o Dict) -> Vec<(i64, ObjectId, bool)> {
+    fn entries<'o, R: Resolve<'o> + Copy>(
+        objects: R,
+        trailer: &'o Dict,
+    ) -> Vec<(i64, ObjectId, bool)> {
         let catalog = catalog(objects, trailer).unwrap().unwrap();
         let root = catalog.get(b"PageLabels").unwrap();
         let mut walk = numbers(objects, root, &Limits::DEFAULT, ());
@@ -181,12 +185,12 @@ fn reads_a_number_tree_with_kids() {
 
     let expected = [(0, (0, 0), true), (2, (5, 0), false)];
     let document = bytes::read(&bytes);
-    assert_eq!(entries(&&document, document.trailer.dict()), expected);
+    assert_eq!(entries(&document, document.trailer.dict()), expected);
     let reading = Reading::open(&bytes[..], &Options::DEFAULT).unwrap();
-    assert_eq!(entries(&&reading, reading.trailer().dict()), expected);
+    assert_eq!(entries(&reading, reading.trailer().dict()), expected);
     let source = ByPosition::new(&bytes);
     let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
-    assert_eq!(entries(&&reading, reading.trailer().dict()), expected);
+    assert_eq!(entries(&reading, reading.trailer().dict()), expected);
 }
 
 /// A file's bytes, read a window at a time, until it's told to fail.
@@ -224,11 +228,11 @@ fn no_labels_is_none() {
     let objects = file(&["<< /Type /Catalog >>", "null"]);
     let resolve = |id: ObjectId| objects.get(&id);
     let trailer = dict! { "Root" => Object::reference(1) };
-    let catalog = catalog(&resolve, &trailer).unwrap().unwrap();
+    let catalog = catalog(resolve, &trailer).unwrap().unwrap();
     assert!(catalog.get(b"PageLabels").is_none());
     let roots = [Object::null(), Object::reference(2), Object::reference(9)];
     for root in &roots {
-        let mut walk = numbers(&resolve, root, &Limits::DEFAULT, Kept::default());
+        let mut walk = numbers(resolve, root, &Limits::DEFAULT, Kept::default());
         assert!(walk.next().is_none(), "{root:?}");
         assert!(walk.whole(), "{root:?}");
         assert_eq!(walk.into_sink().faults(), [], "{root:?}");
@@ -257,9 +261,9 @@ fn number_tree_round_trips() {
     );
     let document = bytes::read(&bytes);
     let objects = &document;
-    let catalog = catalog(&objects, document.trailer.dict()).unwrap().unwrap();
+    let catalog = catalog(objects, document.trailer.dict()).unwrap().unwrap();
     let root = catalog.get(b"PageLabels").unwrap();
-    let mut walk = numbers(&objects, root, &Limits::DEFAULT, Kept::default());
+    let mut walk = numbers(objects, root, &Limits::DEFAULT, Kept::default());
     let read: Vec<(i64, Vec<u8>)> = (walk.by_ref())
         .map(|entry| {
             let (key, value) = entry.unwrap();
@@ -294,7 +298,7 @@ fn a_name_tree_written_reads_back_sorted_with_no_fault() {
     let expected: [&[u8]; 5] = [b"", b"(a)\\\n\xFF", b"a", b"ab", b"b"];
     for root in [&root, &again] {
         let nothing = |_: ObjectId| -> Option<&Object> { None };
-        let mut walk = names(&nothing, root, &Limits::DEFAULT, Kept::default());
+        let mut walk = names(nothing, root, &Limits::DEFAULT, Kept::default());
         let keys: Vec<&[u8]> = (walk.by_ref()).map(|entry| entry.unwrap().0).collect();
         assert_eq!(keys, expected);
         assert!(walk.whole());
@@ -322,24 +326,35 @@ fn a_tree_written_is_sorted_with_each_key_once() {
 
     assert_eq!(
         write_names([(b"a".to_vec(), one.clone()), (b"a".to_vec(), one.clone())]),
-        Err(TreeError::RepeatedName { key: b"a".to_vec() })
+        Err(Error::RepeatedName { key: b"a".to_vec() })
     );
     assert_eq!(
         write_numbers([(7, one.clone()), (0, one.clone()), (7, one.clone())]),
-        Err(TreeError::RepeatedNumber { key: 7 })
+        Err(Error::RepeatedNumber { key: 7 })
     );
     let stream = Object::stream(Dict::new());
     assert_eq!(
         write_names([(b"a".to_vec(), stream.clone())]),
-        Err(TreeError::StreamValue)
+        Err(Error::StreamValue)
     );
-    assert_eq!(write_numbers([(1, stream)]), Err(TreeError::StreamValue));
+    assert_eq!(
+        write_numbers([(1, stream.clone())]),
+        Err(Error::StreamValue)
+    );
+    // One inside a value, at any depth, can't be written either.
+    let inside = Object::from(vec![Object::from(1), stream.clone()]);
+    assert_eq!(write_numbers([(1, inside)]), Err(Error::StreamValue));
+    let deep = Object::from(dict! { "A" => vec![Object::from(dict! { "B" => stream })] });
+    assert_eq!(
+        write_names([(b"a".to_vec(), deep)]),
+        Err(Error::StreamValue)
+    );
 
     let empty = write_names([]).unwrap();
     assert_eq!(empty.get(b"Names").unwrap().as_array(), Some(&[][..]));
     let empty = Object::from(empty);
     let nothing = |_: ObjectId| -> Option<&Object> { None };
-    let mut walk = names(&nothing, &empty, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(nothing, &empty, &Limits::DEFAULT, Kept::default());
     assert!(walk.next().is_none());
     assert!(walk.whole());
     assert_eq!(walk.into_sink().faults(), []);
@@ -768,7 +783,7 @@ fn a_number_tree_says_the_same_of_its_own_keys() {
     ]);
     let resolve = |id: ObjectId| objects.get(&id);
     let root = Object::reference(1);
-    let mut walk = numbers(&resolve, &root, &Limits::DEFAULT, Kept::default());
+    let mut walk = numbers(resolve, &root, &Limits::DEFAULT, Kept::default());
     let keys: Vec<i64> = (walk.by_ref()).map(|entry| entry.unwrap().0).collect();
     assert_eq!(keys, [20, 10, 5, -3]);
     assert!(!walk.whole());
@@ -803,7 +818,7 @@ fn a_key_the_reader_didn_t_give_is_said_and_lost() {
             ],
         });
         let nothing = |_: ObjectId| -> Option<&Object> { None };
-        let mut walk = names(&nothing, &root, &Limits::DEFAULT, Kept::default());
+        let mut walk = names(nothing, &root, &Limits::DEFAULT, Kept::default());
         let keys: Vec<&[u8]> = (walk.by_ref()).map(|entry| entry.unwrap().0).collect();
         assert_eq!(keys, [b"b"], "{string:?}");
         assert!(!walk.whole(), "{string:?}");
@@ -821,7 +836,7 @@ fn a_fault_says_where_it_is() {
     let objects = file(&["<< /Kids [2 0 R] >>", text]);
     let resolve = |id: ObjectId| objects.get(&id);
     let root = Object::reference(1);
-    let mut walk = names(&resolve, &root, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(resolve, &root, &Limits::DEFAULT, Kept::default());
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
     let told = walk.into_sink().0;
     let (no_limits, key) = (&told[0], &told[1]);
@@ -838,7 +853,7 @@ fn a_fault_says_where_it_is() {
     // in its parent's, and a root in place, in none.
     let objects = file(&["<< /Names 2 0 R >>", "[1 0]"]);
     let resolve = |id: ObjectId| objects.get(&id);
-    let mut walk = names(&resolve, &root, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(resolve, &root, &Limits::DEFAULT, Kept::default());
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
     assert_eq!(walk.into_sink().0[0].0.object, Some((2, 0)));
 
@@ -849,7 +864,7 @@ fn a_fault_says_where_it_is() {
         "[7 << /Limits [(a) (a)] /Names [] >> 8]",
     ]);
     let resolve = |id: ObjectId| objects.get(&id);
-    let mut walk = names(&resolve, &root, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(resolve, &root, &Limits::DEFAULT, Kept::default());
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
     let told = walk.into_sink().0;
     let of = |fault| {
@@ -865,14 +880,14 @@ fn a_fault_says_where_it_is() {
 
     let objects = file(&["<< /Kids [<< /Limits [(a) (a)] /Kids [] >>] >>"]);
     let resolve = |id: ObjectId| objects.get(&id);
-    let mut walk = names(&resolve, &root, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(resolve, &root, &Limits::DEFAULT, Kept::default());
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
     let told = walk.into_sink().0;
     assert_eq!(told[0], (told[0].0, Fault::TreeKidDirect));
     assert_eq!(told[0].0.object, Some((1, 0)));
 
     let in_place = parsed("<< >>");
-    let mut walk = names(&resolve, &in_place, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(resolve, &in_place, &Limits::DEFAULT, Kept::default());
     assert!(walk.next().is_none());
     assert_eq!(walk.into_sink().0[0].0.object, None);
 
@@ -880,7 +895,7 @@ fn a_fault_says_where_it_is() {
     // its place being there, and what's after it back in the node.
     let objects = file(&["<< /Kids [2 0 R 3 0 R] /Names 4 0 R >>", "7", "8", "9"]);
     let resolve = |id: ObjectId| objects.get(&id);
-    let mut walk = names(&resolve, &root, &Limits::DEFAULT, Kept::default());
+    let mut walk = names(resolve, &root, &Limits::DEFAULT, Kept::default());
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
     let told = walk.into_sink().0;
     let of = |wanted: fn(&Fault) -> bool| -> Vec<Option<ObjectId>> {
@@ -916,19 +931,19 @@ fn what_s_read_is_the_same_whatever_the_sink() {
         let root = Object::reference(1);
         let limits = Limits::DEFAULT;
 
-        let mut kept = names(&resolve, &root, &limits, Kept::default());
+        let mut kept = names(resolve, &root, &limits, Kept::default());
         let with_kept: Vec<_> = kept.by_ref().map(Result::unwrap).collect();
         let whole = kept.whole();
         assert!(!kept.into_sink().0.is_empty());
 
-        let mut none = names(&resolve, &root, &limits, ());
+        let mut none = names(resolve, &root, &limits, ());
         assert_eq!(
             none.by_ref().map(Result::unwrap).collect::<Vec<_>>(),
             with_kept
         );
         assert_eq!(none.whole(), whole);
 
-        let mut unwanted = names(&resolve, &root, &limits, Unwanted);
+        let mut unwanted = names(resolve, &root, &limits, Unwanted);
         assert_eq!(
             unwanted.by_ref().map(Result::unwrap).collect::<Vec<_>>(),
             with_kept
@@ -937,13 +952,13 @@ fn what_s_read_is_the_same_whatever_the_sink() {
 
         // A sink borrowed, and through `dyn`.
         let mut sink = Kept::default();
-        let mut borrowed = names(&resolve, &root, &limits, &mut sink);
+        let mut borrowed = names(resolve, &root, &limits, &mut sink);
         assert_eq!(
             borrowed.by_ref().map(Result::unwrap).collect::<Vec<_>>(),
             with_kept
         );
         let mut sink: &mut dyn Sink = &mut sink;
-        let mut through = names(&resolve, &root, &limits, &mut sink);
+        let mut through = names(resolve, &root, &limits, &mut sink);
         assert_eq!(
             through.by_ref().map(Result::unwrap).collect::<Vec<_>>(),
             with_kept
@@ -1109,11 +1124,11 @@ fn a_chain_of_references_too_long_ends_the_walk() {
     let root = Object::reference(1);
     let at = chain(31);
     let resolve = |id: ObjectId| at.get(&id);
-    let mut walk = names(&resolve, &root, &Limits::DEFAULT, ());
+    let mut walk = names(resolve, &root, &Limits::DEFAULT, ());
     assert_eq!(walk.next().unwrap().unwrap().0, b"a");
     let past = chain(32);
     let resolve = |id: ObjectId| past.get(&id);
-    let mut walk = names(&resolve, &root, &Limits::DEFAULT, ());
+    let mut walk = names(resolve, &root, &Limits::DEFAULT, ());
     assert_eq!(walk.next().unwrap().unwrap_err().why, Why::Limit);
     assert!(walk.next().is_none());
 
@@ -1123,7 +1138,7 @@ fn a_chain_of_references_too_long_ends_the_walk() {
         long.insert((at, 0), Object::reference(at + 1));
     }
     let resolve = |id: ObjectId| long.get(&id);
-    let mut walk = names(&resolve, &root, &Limits::DEFAULT, ());
+    let mut walk = names(resolve, &root, &Limits::DEFAULT, ());
     let failed = walk.next().unwrap().unwrap_err();
     assert_eq!(failed.why, Why::Limit);
     assert_eq!(
@@ -1151,11 +1166,9 @@ fn over_a_reading_the_walk_knows_why() {
     );
     let reading = Reading::open(&bytes[..], &Options::DEFAULT).unwrap();
     let objects = &reading;
-    let catalog_of = catalog(&objects, reading.trailer().dict())
-        .unwrap()
-        .unwrap();
+    let catalog_of = catalog(objects, reading.trailer().dict()).unwrap().unwrap();
     let root = catalog_of.get(b"PageLabels").unwrap();
-    let mut walk = numbers(&objects, root, &Limits::DEFAULT, Kept::default());
+    let mut walk = numbers(objects, root, &Limits::DEFAULT, Kept::default());
     let keys: Vec<i64> = (walk.by_ref()).map(|entry| entry.unwrap().0).collect();
     assert_eq!(keys, [0]);
     assert!(!walk.whole());
@@ -1168,12 +1181,10 @@ fn over_a_reading_the_walk_knows_why() {
     let source = ByPosition::new(&bytes);
     let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
     let objects = &reading;
-    let catalog_of = catalog(&objects, reading.trailer().dict())
-        .unwrap()
-        .unwrap();
+    let catalog_of = catalog(objects, reading.trailer().dict()).unwrap().unwrap();
     let root = catalog_of.get(b"PageLabels").unwrap();
     source.failing.store(true, Ordering::Relaxed);
-    let mut walk = numbers(&objects, root, &Limits::DEFAULT, Kept::default());
+    let mut walk = numbers(objects, root, &Limits::DEFAULT, Kept::default());
     let failed = walk.next().unwrap().unwrap_err();
     assert_eq!((failed.id, failed.why), ((2, 0), Why::Source));
     assert!(!walk.whole());
@@ -1196,7 +1207,7 @@ fn a_document_gives_what_its_reading_gives() {
         ],
         "<< /Root 1 0 R >>",
     );
-    fn walked<'o, R: Resolve<'o>>(objects: &R, trailer: &'o Dict) -> Read<'o> {
+    fn walked<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) -> Read<'o> {
         let catalog = catalog(objects, trailer).unwrap().unwrap();
         let root = (catalog
             .get(b"Names")
@@ -1211,7 +1222,7 @@ fn a_document_gives_what_its_reading_gives() {
         (entries, whole, walk.into_sink().faults())
     }
     let reading = Reading::open(&bytes[..], &Options::DEFAULT).unwrap();
-    let read = walked(&&reading, reading.trailer().dict());
+    let read = walked(&reading, reading.trailer().dict());
     assert_eq!(read.0.iter().map(|e| e.0).collect::<Vec<_>>(), [b"a", b"b"]);
     assert_eq!(read.0[0].1.as_reference(), Some((5, 0)));
     assert!(!read.1);
@@ -1221,10 +1232,10 @@ fn a_document_gives_what_its_reading_gives() {
     );
 
     let document: Document = bytes::read(&bytes);
-    assert_eq!(walked(&&document, document.trailer.dict()), read);
+    assert_eq!(walked(&document, document.trailer.dict()), read);
     let source = ByPosition::new(&bytes);
     let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
-    assert_eq!(walked(&&reading, reading.trailer().dict()), read);
+    assert_eq!(walked(&reading, reading.trailer().dict()), read);
 }
 
 #[test]
@@ -1239,7 +1250,7 @@ fn follow_goes_through_references_to_a_value() {
         Object::reference(5),
     );
     let (six, null) = (Object::from(6), Object::null());
-    let integer = |value| follow(&resolve, value).map(|o| o.and_then(Object::as_integer));
+    let integer = |value| follow(resolve, value).map(|o| o.and_then(Object::as_integer));
     assert_eq!(integer(&one), Ok(Some(5)));
     assert_eq!(integer(&two), Ok(Some(5)));
     assert_eq!(integer(&six), Ok(Some(6)));
@@ -1247,8 +1258,8 @@ fn follow_goes_through_references_to_a_value() {
     assert_eq!(integer(&three), Ok(None));
     assert_eq!(integer(&four), Ok(None));
     assert_eq!(integer(&five).unwrap_err().why, Why::Limit);
-    assert_eq!(follow(&resolve, &null), Ok(None), "not the null object");
-    assert_eq!(follow(&resolve, &three), Ok(None), "nor one it leads to");
+    assert_eq!(follow(resolve, &null), Ok(None), "not the null object");
+    assert_eq!(follow(resolve, &three), Ok(None), "nor one it leads to");
 
     let saying = Saying::new(&objects, &[(1, Why::Locked)]);
     let reached = follow(&saying, &two).unwrap_err();
@@ -1261,7 +1272,7 @@ fn catalog_follows_the_trailer_s_root() {
     let resolve = |id: ObjectId| objects.get(&id);
     let is = |trailer: Dict| {
         let trailer = Box::leak(Box::new(trailer));
-        catalog(&resolve, trailer).map(|c| c.is_some())
+        catalog(resolve, trailer).map(|c| c.is_some())
     };
     assert_eq!(is(dict! { "Root" => Object::reference(1) }), Ok(true));
     assert_eq!(is(dict! { "Root" => Object::reference(2) }), Ok(true));

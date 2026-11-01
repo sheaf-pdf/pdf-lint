@@ -36,7 +36,7 @@
 //! let root = Object::from(tree);
 //!
 //! let nothing = |_: ObjectId| -> Option<&Object> { None };
-//! let mut walk = names(&nothing, &root, &Limits::DEFAULT, ());
+//! let mut walk = names(nothing, &root, &Limits::DEFAULT, ());
 //! let (key, value) = walk.next().unwrap().unwrap();
 //! assert_eq!((key, value.as_integer()), (&b"a"[..], Some(1)));
 //! let (key, value) = walk.next().unwrap().unwrap();
@@ -53,42 +53,42 @@ use pdf_objects::{Dict, Object, ObjectId, Resolve, Span, Unreadable, Value, Why}
 
 use crate::fault::{Fault, Place, Sink};
 use crate::limits::Limits;
-use crate::{HOPS, follow};
+use crate::{HOPS, followed};
 
 /// The entries of the name tree at `root`, in the order the tree is written:
 /// each key's bytes and its value. `root` may be a reference, followed as a
 /// node's kids are; null, or a reference to nothing, is a tree with no
 /// entries.
-pub fn names<'o, 'r, R: Resolve<'o> + ?Sized, S: Sink>(
-    objects: &'r R,
+pub fn names<'o, R: Resolve<'o>, S: Sink>(
+    objects: R,
     root: &'o Object,
     limits: &Limits,
     sink: S,
-) -> Names<'o, 'r, R, S> {
+) -> Names<'o, R, S> {
     Names(Walk::new(objects, root, limits, sink))
 }
 
 /// The entries of the number tree at `root`, as [`names`] gives a name
 /// tree's: each key, an integer, and its value.
-pub fn numbers<'o, 'r, R: Resolve<'o> + ?Sized, S: Sink>(
-    objects: &'r R,
+pub fn numbers<'o, R: Resolve<'o>, S: Sink>(
+    objects: R,
     root: &'o Object,
     limits: &Limits,
     sink: S,
-) -> Numbers<'o, 'r, R, S> {
+) -> Numbers<'o, R, S> {
     Numbers(Walk::new(objects, root, limits, sink))
 }
 
 /// A name tree's entries, as [`names`] gives them.
-pub struct Names<'o, 'r, R: ?Sized, S>(Walk<'o, 'r, R, S, &'o [u8]>);
+pub struct Names<'o, R, S>(Walk<'o, R, S, &'o [u8]>);
 
 /// A number tree's entries, as [`numbers`] gives them.
-pub struct Numbers<'o, 'r, R: ?Sized, S>(Walk<'o, 'r, R, S, i64>);
+pub struct Numbers<'o, R, S>(Walk<'o, R, S, i64>);
 
 /// What the two iterators have in common.
 macro_rules! walks {
     ($walk:ident, $key:ty) => {
-        impl<'o, R: Resolve<'o> + ?Sized, S: Sink> Iterator for $walk<'o, '_, R, S> {
+        impl<'o, R: Resolve<'o>, S: Sink> Iterator for $walk<'o, R, S> {
             type Item = Result<($key, &'o Object), Unreadable>;
 
             fn next(&mut self) -> Option<Self::Item> {
@@ -96,9 +96,9 @@ macro_rules! walks {
             }
         }
 
-        impl<'o, R: Resolve<'o> + ?Sized, S: Sink> FusedIterator for $walk<'o, '_, R, S> {}
+        impl<'o, R: Resolve<'o>, S: Sink> FusedIterator for $walk<'o, R, S> {}
 
-        impl<'o, R: ?Sized, S> $walk<'o, '_, R, S> {
+        impl<'o, R, S> $walk<'o, R, S> {
             /// Whether every entry of the tree has been given, as far as the
             /// walk has gone: true until something leaves part of it unread.
             /// So walked to its end, true means all of it was read. A node
@@ -114,7 +114,7 @@ macro_rules! walks {
             }
         }
 
-        impl<R: ?Sized, S> fmt::Debug for $walk<'_, '_, R, S> {
+        impl<R, S> fmt::Debug for $walk<'_, R, S> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.debug_struct(stringify!($walk))
                     .field("whole", &self.0.whole)
@@ -182,8 +182,8 @@ enum Reached<'o> {
 }
 
 /// The walk, over either kind of tree.
-struct Walk<'o, 'r, R: ?Sized, S, K> {
-    objects: &'r R,
+struct Walk<'o, R, S, K> {
+    objects: R,
     sink: S,
     limits: Limits,
     /// The root, until it's asked for its first entry.
@@ -204,8 +204,8 @@ struct Walk<'o, 'r, R: ?Sized, S, K> {
     done: bool,
 }
 
-impl<'o, 'r, R: Resolve<'o> + ?Sized, S: Sink, K: Key<'o>> Walk<'o, 'r, R, S, K> {
-    fn new(objects: &'r R, root: &'o Object, limits: &Limits, sink: S) -> Walk<'o, 'r, R, S, K> {
+impl<'o, R: Resolve<'o>, S: Sink, K: Key<'o>> Walk<'o, R, S, K> {
+    fn new(objects: R, root: &'o Object, limits: &Limits, sink: S) -> Walk<'o, R, S, K> {
         Walk {
             objects,
             sink,
@@ -361,11 +361,11 @@ impl<'o, 'r, R: Resolve<'o> + ?Sized, S: Sink, K: Key<'o>> Walk<'o, 'r, R, S, K>
             walk.say(written.at, Fault::TreeBadLimits);
             None
         };
-        let limits = follow(self.objects, written).ok().flatten();
+        let limits = followed(&self.objects, written).ok().flatten();
         let [least, greatest] = limits.and_then(Object::as_array).unwrap_or_default() else {
             return bad(self);
         };
-        let key = |written| follow(self.objects, written).ok().flatten().map(K::read);
+        let key = |written| followed(&self.objects, written).ok().flatten().map(K::read);
         match (key(least), key(greatest)) {
             (Some(Ok(least)), Some(Ok(greatest))) if least <= greatest => Some((least, greatest)),
             (Some(Err(Fault::TreeKeyUnread)), _) | (_, Some(Err(Fault::TreeKeyUnread))) => None,
@@ -427,7 +427,7 @@ impl<'o, 'r, R: Resolve<'o> + ?Sized, S: Sink, K: Key<'o>> Walk<'o, 'r, R, S, K>
     /// The key written as `written`, its references followed; none when it
     /// isn't one, and said.
     fn key(&mut self, written: &'o Object) -> Result<Option<K>, Unreadable> {
-        let key = match follow(self.objects, written) {
+        let key = match followed(&self.objects, written) {
             Ok(key) => key,
             Err(unreadable) if unreadable.why == Why::Damaged => {
                 let id = unreadable.id;
@@ -484,14 +484,12 @@ impl<'o, 'r, R: Resolve<'o> + ?Sized, S: Sink, K: Key<'o>> Walk<'o, 'r, R, S, K>
 /// in the order 7.9.6 has, by their bytes. A value's form is the caller's, a
 /// reference or written in place. Reading it back gives the same entries,
 /// sorted, with no fault.
-pub fn write_names(
-    entries: impl IntoIterator<Item = (Vec<u8>, Object)>,
-) -> Result<Dict, TreeError> {
+pub fn write_names(entries: impl IntoIterator<Item = (Vec<u8>, Object)>) -> Result<Dict, Error> {
     let mut entries: Vec<_> = entries.into_iter().collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
         let key = pair[0].0.clone();
-        return Err(TreeError::RepeatedName { key });
+        return Err(Error::RepeatedName { key });
     }
     written(
         "Names",
@@ -501,12 +499,12 @@ pub fn write_names(
 
 /// `entries` written as a number tree's root: a dictionary with one `/Nums`,
 /// in ascending order (7.9.7), as [`write_names`] writes a name tree's.
-pub fn write_numbers(entries: impl IntoIterator<Item = (i64, Object)>) -> Result<Dict, TreeError> {
+pub fn write_numbers(entries: impl IntoIterator<Item = (i64, Object)>) -> Result<Dict, Error> {
     let mut entries: Vec<_> = entries.into_iter().collect();
     entries.sort_by_key(|entry| entry.0);
     if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
         let key = pair[0].0;
-        return Err(TreeError::RepeatedNumber { key });
+        return Err(Error::RepeatedNumber { key });
     }
     written(
         "Nums",
@@ -515,14 +513,11 @@ pub fn write_numbers(entries: impl IntoIterator<Item = (i64, Object)>) -> Result
 }
 
 /// A root whose `holder` holds `entries`, in their order.
-fn written(
-    holder: &str,
-    entries: impl Iterator<Item = (Object, Object)>,
-) -> Result<Dict, TreeError> {
+fn written(holder: &str, entries: impl Iterator<Item = (Object, Object)>) -> Result<Dict, Error> {
     let mut array = Vec::with_capacity(entries.size_hint().0.saturating_mul(2));
     for (key, value) in entries {
-        if matches!(value.value(), Value::Stream(_)) {
-            return Err(TreeError::StreamValue);
+        if holds_a_stream(&value) {
+            return Err(Error::StreamValue);
         }
         array.push(key);
         array.push(value);
@@ -532,10 +527,24 @@ fn written(
     Ok(root)
 }
 
+/// Whether `value` is a stream or has one inside it, however deep.
+fn holds_a_stream(value: &Object) -> bool {
+    let mut held = vec![value];
+    while let Some(value) = held.pop() {
+        match value.value() {
+            Value::Stream(_) => return true,
+            Value::Array(items) => held.extend(items),
+            Value::Dict(dict) => held.extend(dict.iter().map(|(_, value)| value)),
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Why a tree can't be written.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum TreeError {
+pub enum Error {
     /// A name tree's key given twice, which 7.9.6 doesn't let a tree hold,
     /// nor a reader tell which is meant.
     #[error("the name tree's key {key:?} is given twice")]
@@ -549,9 +558,9 @@ pub enum TreeError {
         /// The key.
         key: i64,
     },
-    /// A value that's a stream, which is written only as an indirect object
-    /// (7.3.8): give a reference to it.
-    #[error("a value of the tree is a stream, where only a reference to one can be written")]
+    /// A value that's a stream or has one inside it, which is written only as
+    /// an indirect object (7.3.8): give a reference to it.
+    #[error("a value of the tree holds a stream, where only a reference to one can be written")]
     StreamValue,
 }
 

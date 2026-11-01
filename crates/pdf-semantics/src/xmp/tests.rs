@@ -29,13 +29,21 @@ impl Kept {
 /// What a packet claims, and what was said reading it.
 fn claims_of(xml: &str) -> (Claims, Vec<Fault>) {
     let mut kept = Kept::default();
-    let claims = read(xml.as_bytes(), &Limits::DEFAULT, &mut kept).expect("it reads");
+    let claims = read(xml.as_bytes(), None, &Limits::DEFAULT, &mut kept).expect("it reads");
     (claims, kept.faults())
 }
 
 /// The PDF/A part a packet claims.
 fn part(xml: &str) -> Option<String> {
     claims_of(xml).0.pdfa_part
+}
+
+/// What a packet claiming that PDF/A part and nothing else claims.
+fn claims_with_part(value: &str) -> Claims {
+    Claims {
+        pdfa_part: some(value),
+        ..Claims::default()
+    }
 }
 
 fn some(value: &str) -> Option<String> {
@@ -72,15 +80,15 @@ fn with_xmp(xml: &str, deflate: bool) -> Vec<u8> {
 fn conformance_of(file: &[u8]) -> Result<Conformance, ClaimError> {
     let reading = Reading::open(file, &Options::DEFAULT).unwrap();
     let objects = &reading;
-    let catalog = catalog(&objects, reading.trailer().dict())
-        .unwrap()
-        .unwrap();
-    let id = metadata_stream(&objects, catalog).unwrap();
+    let catalog = catalog(objects, reading.trailer().dict()).unwrap().unwrap();
+    let id = metadata_stream(objects, catalog).unwrap();
     let Some(id) = id else {
         return Ok(Conformance::default());
     };
     let xml = reading.decoded(id).unwrap();
-    read(&xml, &Limits::DEFAULT, &mut ()).unwrap().conformance()
+    read(&xml, None, &Limits::DEFAULT, &mut ())
+        .unwrap()
+        .conformance()
 }
 
 #[test]
@@ -112,7 +120,7 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
                 part: 3,
                 level: Some('A'),
             }),
-            pdfua: Some(1),
+            pdfua: Some(PdfUa::new(1)),
         }
     );
     // PDF/A-4 gives no level; a part in another namespace is no claim.
@@ -129,11 +137,10 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
             pdfua: None,
         }
     );
-    let named = PdfA {
-        part: 4,
-        level: None,
-    };
+    let named = PdfA::new(4, None);
     assert_eq!(named.to_string(), "PDF/A-4");
+    assert_eq!(PdfA::new(2, Some('b')).to_string(), "PDF/A-2b");
+    assert_eq!(PdfUa::new(1).to_string(), "PDF/UA-1");
     assert_eq!(claims("", false).unwrap(), Conformance::default());
     let unreadable =
         "<rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"two\"/>";
@@ -298,7 +305,7 @@ fn an_attribute_that_doesn_t_read_is_passed_and_said() {
     // A quote left open has no end to its tag: that's XML's error, and what's
     // before it counts.
     let open = format!("<d {A} pdfaid:part=\"3\"/><e a='/>");
-    let error = read(open.as_bytes(), &Limits::DEFAULT, &mut ()).unwrap_err();
+    let error = read(open.as_bytes(), None, &Limits::DEFAULT, &mut ()).unwrap_err();
     assert_eq!(error.read.pdfa_part, some("3"));
     // A claim elsewhere in the packet still counts, as it does when elements
     // close round it.
@@ -313,14 +320,19 @@ fn an_attribute_that_doesn_t_read_is_passed_and_said() {
         (claims.pdfa_part, faults),
         (None, vec![Fault::XmpAttribute])
     );
-    // It's said where it is, in the packet, of no object.
+    // It's said where it is: in the stream's decoded data, as the stream's given.
     let mut kept = Kept::default();
     let xml = "<e/><d a=1/><e/>";
-    read(xml.as_bytes(), &Limits::DEFAULT, &mut kept).unwrap();
+    read(xml.as_bytes(), Some((4, 0)), &Limits::DEFAULT, &mut kept).unwrap();
     let (place, _) = kept.0[0];
-    assert_eq!(place.object, None);
+    assert_eq!(place.object, Some((4, 0)));
     let at = place.at.unwrap();
+    assert_eq!(at.stream, Some((4, 0)));
     assert_eq!(&xml[at.start..at.end], "<d a=1/>");
+    // With none given, nothing says what its offsets would be of.
+    let mut kept = Kept::default();
+    read(xml.as_bytes(), None, &Limits::DEFAULT, &mut kept).unwrap();
+    assert_eq!(kept.0[0].0, Place::new(None, None));
 }
 
 /// No DOCTYPE is read, so what it declares stands for nothing: not billions of
@@ -376,7 +388,7 @@ fn what_isn_t_utf_8_doesn_t_read() {
         let mut kept = Kept::default();
         let xml = [&mark[..], &units].concat();
         assert_eq!(
-            read(&xml, &Limits::DEFAULT, &mut kept),
+            read(&xml, None, &Limits::DEFAULT, &mut kept),
             Ok(Claims::default())
         );
         assert_eq!(kept.faults(), [Fault::XmpNotUtf8]);
@@ -384,7 +396,7 @@ fn what_isn_t_utf_8_doesn_t_read() {
         let mut kept = Kept::default();
         let bare = [&mark[..], text.as_bytes()].concat();
         assert_eq!(
-            read(&bare, &Limits::DEFAULT, &mut kept),
+            read(&bare, None, &Limits::DEFAULT, &mut kept),
             Ok(Claims::default())
         );
         assert_eq!(kept.faults(), [Fault::XmpNotUtf8]);
@@ -397,7 +409,7 @@ fn what_isn_t_utf_8_doesn_t_read() {
         let mut kept = Kept::default();
         let xml = xml.replace('~', "\u{1}").into_bytes();
         let xml: Vec<u8> = xml.iter().map(|&b| if b == 1 { 0xFF } else { b }).collect();
-        let claims = read(&xml, &Limits::DEFAULT, &mut kept).unwrap();
+        let claims = read(&xml, None, &Limits::DEFAULT, &mut kept).unwrap();
         (claims.pdfa_part, kept.faults())
     };
     assert_eq!(
@@ -422,7 +434,7 @@ fn an_error_keeps_what_was_read() {
         "<d {A} pdfaid:part=\"3\"><pdfaid:rev>2</pdfaid:rev></e>\
          <d {UA} pdfuaid:part=\"1\"/>"
     );
-    let error = read(xml.as_bytes(), &Limits::DEFAULT, &mut ()).unwrap_err();
+    let error = read(xml.as_bytes(), None, &Limits::DEFAULT, &mut ()).unwrap_err();
     assert_eq!(error.read.pdfa_part, some("3"));
     assert_eq!(error.read.pdfa_rev, some("2"));
     assert_eq!(error.read.pdfua_part, None, "what's after it isn't read");
@@ -433,23 +445,18 @@ fn an_error_keeps_what_was_read() {
     assert!(std::error::Error::source(&error).is_none());
     // Binding a prefix XML keeps for itself is such an error too.
     let xml = format!("<d {A} pdfaid:part=\"3\"/><e xmlns:xml=\"u\"/>");
-    let error = read(xml.as_bytes(), &Limits::DEFAULT, &mut ()).unwrap_err();
+    let error = read(xml.as_bytes(), None, &Limits::DEFAULT, &mut ()).unwrap_err();
     assert_eq!(error.read.pdfa_part, some("3"));
     // A tag not closed at the end is one; an element left open isn't.
     let error = read(
         format!("<d {A} pdfaid:part=\"3\"/><e").as_bytes(),
+        None,
         &Limits::DEFAULT,
         &mut (),
     );
     let error = error.unwrap_err();
     assert_eq!(error.read.pdfa_part, some("3"));
     assert!(matches!(error.why, XmpWhy::Xml(_)), "{error}");
-    let cut = read(
-        format!("<d {A}><e>&#51").as_bytes(),
-        &Limits::DEFAULT,
-        &mut (),
-    );
-    assert!(matches!(cut.unwrap_err().why, XmpWhy::Xml(_)));
     assert_eq!(part(&format!("<d {A} pdfaid:part=\"3\"><e>")), some("3"));
 }
 
@@ -462,7 +469,7 @@ fn past_a_cap_is_an_error_keeping_what_was_read() {
         set(&mut limits);
         limits
     };
-    let run = |xml: &str, limits: &Limits| read(xml.as_bytes(), limits, &mut ());
+    let run = |xml: &str, limits: &Limits| read(xml.as_bytes(), None, limits, &mut ());
 
     // Bytes: a claim that ends by the cap counts, one past it doesn't.
     let xml = format!("{claim}{}<d {UA} pdfuaid:part=\"1\"/>", " ".repeat(64));
@@ -520,7 +527,7 @@ fn past_a_cap_is_an_error_keeping_what_was_read() {
         some("1")
     );
 
-    // Bindings, by default 256 at once, wherever they're bound.
+    // Bindings, by default 128 at once, wherever they're bound.
     let binds = |from: usize, count: usize| -> String {
         (from..from + count)
             .map(|i| format!(" xmlns:q{i}=\"u\""))
@@ -532,8 +539,8 @@ fn past_a_cap_is_an_error_keeping_what_was_read() {
             .collect();
         format!("{claim}{open}{inside}")
     };
-    // `inner` binds one, so 255 over it is 256.
-    for (levels, each) in [(1, 255), (255, 1), (5, 51)] {
+    // `inner` binds one, so 127 over it is 128.
+    for (levels, each) in [(1, 127), (127, 1), (6, 21)] {
         let xml = spread(levels, each, &inner);
         assert_eq!(
             run(&xml, &Limits::DEFAULT).unwrap().pdfua_part,
@@ -541,22 +548,22 @@ fn past_a_cap_is_an_error_keeping_what_was_read() {
             "{levels} {each}"
         );
     }
-    let error = run(&spread(1, 256, &inner), &Limits::DEFAULT).unwrap_err();
+    let error = run(&spread(1, 128, &inner), &Limits::DEFAULT).unwrap_err();
     assert_eq!(error.why, XmpWhy::TooManyBindings);
-    assert_eq!(error.at, spread(1, 256, "").len());
+    assert_eq!(error.at, spread(1, 128, "").len());
     assert_eq!(
         (error.read.pdfa_part, error.read.pdfua_part),
         (some("3"), None)
     );
     // One tag alone past it, the XML reader's own count, the same; raised, it
     // lets it through.
-    let one = format!("{claim}<a{}/>", binds(0, 257));
+    let one = format!("{claim}<a{}/>", binds(0, 129));
     let error = run(&one, &Limits::DEFAULT).unwrap_err();
     assert_eq!(error.why, XmpWhy::TooManyBindings);
     assert_eq!(error.read.pdfa_part, some("3"));
-    assert!(run(&one, &limits(|l| l.xmp_bindings = 257)).is_ok());
+    assert!(run(&one, &limits(|l| l.xmp_bindings = 129)).is_ok());
     // What's closed is no longer bound.
-    let closed: String = (0..300).map(|i| format!("<a{}/>", binds(i, 200))).collect();
+    let closed: String = (0..300).map(|i| format!("<a{}/>", binds(i, 100))).collect();
     let closed = format!("{closed}{}", "<b xmlns:r=\"u\"></b>".repeat(300));
     assert!(run(&closed, &Limits::DEFAULT).is_ok());
     // A level's bindings go with it.
@@ -575,19 +582,60 @@ fn past_a_cap_is_an_error_keeping_what_was_read() {
     let default = Limits::DEFAULT;
     assert_eq!(
         (default.xmp_bytes, default.xmp_depth, default.xmp_bindings),
-        (16 << 20, 256, 256)
+        (16 << 20, 256, 128)
     );
 }
 
-/// Each cap's worst shape: their cost is the harness's to time, in a release
-/// build; this is that they're read as any other is, to the end.
+/// A bare `&` in a packet's text ends nothing, and a claim's value with one
+/// doesn't read, as an attribute's doesn't.
+#[test]
+fn a_bare_ampersand_is_read_past() {
+    // In a title, or anywhere that isn't a claim, it's nothing to the claims.
+    for text in ["AT&T", "&", "a & b", "&#51", "&; x", "a&b&c"] {
+        let xml = format!("<d {A}><t>{text}</t><pdfaid:part>3</pdfaid:part></d>");
+        assert_eq!(claims_of(&xml), (claims_with_part("3"), vec![]), "{text}");
+    }
+    // In a claim's, it's said, the value's lost, and a later one counts.
+    for value in ["3&4", "&", "3&", "&#51"] {
+        let xml =
+            format!("<d {A}><pdfaid:part>{value}</pdfaid:part><pdfaid:part>2</pdfaid:part></d>");
+        assert_eq!(
+            claims_of(&xml),
+            (claims_with_part("2"), vec![Fault::XmpValue]),
+            "{value}"
+        );
+    }
+    // A packet that ends on one has read all there is.
+    assert_eq!(part(&format!("<d {A} pdfaid:part=\"3\"/>&")), some("3"));
+    assert_eq!(
+        claims_of(&format!("<d {A}><pdfaid:part>&#51")),
+        (Claims::default(), vec![Fault::XmpValue])
+    );
+}
+
+/// The XML reader counts levels in 16 bits, so a cap raised past that stops
+/// where it can still count, however deep the packet.
+#[test]
+fn a_cap_of_depth_raised_past_the_xml_reader_s_stops_there() {
+    let mut limits = Limits::DEFAULT;
+    limits.xmp_depth = 100_000;
+    let open = "<b>".repeat(70_000);
+    let xml = format!("<d {A} pdfaid:part=\"3\">{open}<pdfaid:conformance>B</pdfaid:conformance>");
+    let error = read(xml.as_bytes(), None, &limits, &mut ()).unwrap_err();
+    assert_eq!(error.why, XmpWhy::TooDeep);
+    assert_eq!(error.read, claims_with_part("3"));
+    assert_eq!(error.at, xml.find("<b>").unwrap() + 3 * 65_533);
+}
+
+/// Each cap's worst shape, read as any other is, to the end: what it costs
+/// isn't a unit test's to time.
 #[test]
 fn the_worst_shapes_under_the_caps_read_to_the_end() {
     let mut limits = Limits::DEFAULT;
     limits.xmp_bytes = 1 << 20;
-    // An element at the last level has 255 over it, so 255 and one of them
-    // binding two.
-    for (depth, each, more) in [(64, 4, 0), (255, 1, 1), (1, 256, 0)] {
+    // The most bound at once: over levels, one to a level but the first's two,
+    // and on one tag.
+    for (depth, each, more) in [(32, 4, 0), (127, 1, 1), (1, 128, 0)] {
         let mut xml = String::new();
         for level in 0..depth {
             xml += "<a";
@@ -600,7 +648,7 @@ fn the_worst_shapes_under_the_caps_read_to_the_end() {
         while xml.len() < limits.xmp_bytes {
             xml += "<q0x0:part q0x0:part=\"\"/>";
         }
-        let error = read(xml.as_bytes(), &limits, &mut ()).unwrap_err();
+        let error = read(xml.as_bytes(), None, &limits, &mut ()).unwrap_err();
         assert_eq!(error.why, XmpWhy::TooLong);
         assert_eq!(error.read, Claims::default());
     }
@@ -615,16 +663,16 @@ fn what_s_read_is_the_same_whatever_the_sink() {
     ];
     for xml in &packets {
         let mut kept = Kept::default();
-        let told = read(xml.as_bytes(), &Limits::DEFAULT, &mut kept);
-        let quiet = read(xml.as_bytes(), &Limits::DEFAULT, &mut ());
+        let told = read(xml.as_bytes(), None, &Limits::DEFAULT, &mut kept);
+        let quiet = read(xml.as_bytes(), None, &Limits::DEFAULT, &mut ());
         assert_eq!(told, quiet, "{xml}");
     }
     let mut kept = Kept::default();
-    read(packets[0].as_bytes(), &Limits::DEFAULT, &mut kept).unwrap();
+    read(packets[0].as_bytes(), None, &Limits::DEFAULT, &mut kept).unwrap();
     assert_eq!(kept.faults(), [Fault::XmpAttribute, Fault::XmpValue]);
     // Through `&mut dyn` it's told the same.
     let dynamic: &mut dyn Sink = &mut kept;
-    read(packets[0].as_bytes(), &Limits::DEFAULT, dynamic).unwrap();
+    read(packets[0].as_bytes(), None, &Limits::DEFAULT, dynamic).unwrap();
     assert_eq!(kept.faults().len(), 4);
 }
 
@@ -641,30 +689,49 @@ fn a_claim_that_doesn_t_say_what_it_s_for_is_an_error_of_its_own() {
     };
     assert_eq!(
         of(Some("two"), None, None),
-        Err(ClaimError::Part("two".to_string()))
+        Err(ClaimError::Part {
+            claim: "pdfaid:part",
+            value: "two".to_string()
+        })
     );
     assert_eq!(
         of(None, None, Some("")),
-        Err(ClaimError::Part(String::new()))
+        Err(ClaimError::Part {
+            claim: "pdfuaid:part",
+            value: String::new()
+        })
     );
     assert_eq!(
         of(Some("2"), Some(""), None),
-        Err(ClaimError::Level(String::new()))
+        Err(ClaimError::Level {
+            value: String::new()
+        })
     );
     assert_eq!(
         of(Some("2"), Some("ab"), None),
-        Err(ClaimError::Level("ab".to_string()))
+        Err(ClaimError::Level {
+            value: "ab".to_string()
+        })
     );
     assert_eq!(
         of(Some("2"), Some("1"), None),
-        Err(ClaimError::Level("1".to_string()))
+        Err(ClaimError::Level {
+            value: "1".to_string()
+        })
     );
     assert_eq!(
-        ClaimError::Part("two".to_string()).to_string(),
-        "a part number \"two\" isn't a number"
+        ClaimError::Part {
+            claim: "pdfaid:part",
+            value: "two".to_string()
+        }
+        .to_string(),
+        "pdfaid:part \"two\" isn't a number"
     );
     assert_eq!(
-        ClaimError::Level("ab".to_string()).to_string(),
+        ClaimError::Level {
+            value: "ab".to_string()
+        }
+        .to_string(),
         "pdfaid:conformance \"ab\" isn't a letter"
     );
     // A level without a part is no claim, though it has to be one.
@@ -686,7 +753,7 @@ fn a_claim_that_doesn_t_say_what_it_s_for_is_an_error_of_its_own() {
             level: Some('U')
         })
     );
-    assert_eq!(read.pdfua, Some(1));
+    assert_eq!(read.pdfua, Some(PdfUa::new(1)));
 }
 
 #[test]
@@ -703,7 +770,7 @@ fn the_catalog_s_metadata_stream_is_found_or_says_why_not() {
         if let Some(metadata) = metadata {
             catalog.set("Metadata", metadata);
         }
-        metadata_stream(&resolve, Box::leak(Box::new(catalog)))
+        metadata_stream(resolve, Box::leak(Box::new(catalog)))
     };
     assert_eq!(of(None), Ok(None));
     assert_eq!(of(Some(Object::reference(5))), Ok(Some((5, 0))));
@@ -722,18 +789,18 @@ fn the_catalog_s_metadata_stream_is_found_or_says_why_not() {
     let resolve = |id: ObjectId| looped.get(&id);
     let catalog = dict! { "Metadata" => Object::reference(4) };
     assert_eq!(
-        metadata_stream(&resolve, &catalog).unwrap_err().why,
+        metadata_stream(resolve, &catalog).unwrap_err().why,
         Why::Limit
     );
 
     let file = with_xmp("<d/>", false);
     let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
     let objects = &reading;
-    let found = catalog_of(&objects, reading.trailer().dict());
+    let found = catalog_of(objects, reading.trailer().dict());
     assert_eq!(found, Some((4, 0)));
     let document: Document = reading.to_document().unwrap();
     let objects = &document;
-    assert_eq!(catalog_of(&objects, document.trailer.dict()), found);
+    assert_eq!(catalog_of(objects, document.trailer.dict()), found);
 
     // An object that doesn't read says so, and isn't taken for none.
     let locked = |id: ObjectId| -> Result<Option<&Object>, Unreadable> {
@@ -748,14 +815,14 @@ fn the_catalog_s_metadata_stream_is_found_or_says_why_not() {
 }
 
 /// The metadata stream of the catalog a trailer leads to.
-fn catalog_of<'o, R: Resolve<'o>>(objects: &R, trailer: &'o Dict) -> Option<ObjectId> {
+fn catalog_of<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) -> Option<ObjectId> {
     metadata_stream(objects, catalog(objects, trailer).unwrap()?).unwrap()
 }
 
 /// A resolver that says why, by a function.
 struct Failing<F>(F);
 
-impl<'o, F: Fn(ObjectId) -> Result<Option<&'o Object>, Unreadable>> Resolve<'o> for Failing<F> {
+impl<'o, F: Fn(ObjectId) -> Result<Option<&'o Object>, Unreadable>> Resolve<'o> for &Failing<F> {
     fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
         (self.0)(id).ok().flatten()
     }

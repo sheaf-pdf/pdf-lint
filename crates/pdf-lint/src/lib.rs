@@ -28,7 +28,7 @@ pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, V
 pub use pdf_arlington::{COMMIT, predicate};
 // The objects, `dict!`, versions and what resolves a reference are
 // pdf-objects'.
-pub use pdf_objects::{Resolve, Unreadable, Why, dict, object, version};
+pub use pdf_objects::{Resolve, Rules, Unreadable, Why, dict, object, version};
 // The reader, and what it reads a file into, are pdf-structure's; the
 // error a stream's data that doesn't decode cleanly gives is pdf-filters',
 // and the passwords a reader is given and its security handler are
@@ -184,7 +184,9 @@ pub mod extension {
         let resolve = |id| source.get(id).ok().cloned();
         let root = source.trailer().dict().get(b"Root");
         let read = (source.metadata())
-            .map(|xml| xmp::read(xml, &Limits::DEFAULT, &mut ()).unwrap_or_else(|error| error.read))
+            .map(|xml| {
+                xmp::read(xml, None, &Limits::DEFAULT, &mut ()).unwrap_or_else(|error| error.read)
+            })
             .unwrap_or_default();
         let mut claims = Claims::default();
         claims.pdfa_part = read.pdfa_part.as_deref();

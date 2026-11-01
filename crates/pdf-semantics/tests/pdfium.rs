@@ -135,10 +135,10 @@ fn ours(bytes: &[u8]) -> String {
         return "no-document".to_string();
     };
     let objects = &reading;
-    let Ok(Some(catalog)) = catalog(&objects, reading.trailer().dict()) else {
+    let Ok(Some(catalog)) = catalog(objects, reading.trailer().dict()) else {
         return "count 0 : null ; null".to_string();
     };
-    match pages(&objects, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()) {
+    match pages(objects, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()) {
         Ok(table) => answer(&table),
         Err(Error::NoPages) => "count 0 : null ; null".to_string(),
         Err(error) => format!("error: {error}"),

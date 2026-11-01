@@ -8624,7 +8624,7 @@ mod tests {
 
     /// The keys of the name tree `root` as pdf-semantics walks it, and whether
     /// it read all of it; what failed the walk is what's left unread.
-    fn name_tree_keys<'a, R: Resolve<'a>>(objects: &R, root: &'a Object) -> (Vec<&'a [u8]>, bool) {
+    fn name_tree_keys<'a, R: Resolve<'a>>(objects: R, root: &'a Object) -> (Vec<&'a [u8]>, bool) {
         let mut walk =
             pdf_semantics::tree::names(objects, root, &pdf_semantics::Limits::DEFAULT, ());
         let keys = walk
@@ -8644,7 +8644,7 @@ mod tests {
         root: &'a Object,
         what: &str,
     ) {
-        let (keys, whole) = name_tree_keys(&objects, root);
+        let (keys, whole) = name_tree_keys(objects, root);
         let file = FileCx::new(trailer, Version::new(1, 7), objects);
         for key in &keys {
             assert_eq!(
@@ -8802,7 +8802,7 @@ mod tests {
         let objects = parsed_objects(&["<< /Names [(a) 0 (b)] >>"]);
         let resolve = |id: ObjectId| objects.get(&id);
         let root = r(1);
-        let (keys, whole) = name_tree_keys(&&resolve, &root);
+        let (keys, whole) = name_tree_keys(resolve, &root);
         assert_eq!(keys, [b"a"]);
         assert!(!whole);
         let trailer = Dict::new();
@@ -8832,7 +8832,7 @@ mod tests {
         let reading = bytes::Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
         let objects = &reading;
         let root = r(2);
-        let (keys, whole) = name_tree_keys(&objects, &root);
+        let (keys, whole) = name_tree_keys(objects, &root);
         assert_eq!(keys, [b"a"]);
         assert!(!whole, "the walk knows why");
         let file = FileCx::new(reading.trailer().dict(), Version::new(1, 7), objects);
@@ -8851,13 +8851,13 @@ mod tests {
             let reading = bytes::Reading::open(file, &bytes::Options::DEFAULT).unwrap();
             let objects = &reading;
             let trailer = reading.trailer().dict();
-            let Ok(Some(catalog)) = pdf_semantics::catalog(&objects, trailer) else {
+            let Ok(Some(catalog)) = pdf_semantics::catalog(objects, trailer) else {
                 continue;
             };
             let Some(names) = catalog.get(b"Names") else {
                 continue;
             };
-            let Ok(Some(names)) = pdf_semantics::follow(&objects, names) else {
+            let Ok(Some(names)) = pdf_semantics::follow(objects, names) else {
                 continue;
             };
             let Some(names) = names.as_dict() else {
@@ -8872,7 +8872,7 @@ mod tests {
             let trailer = document.trailer.dict();
             let names = document.catalog().and_then(|catalog| catalog.get(b"Names"));
             let names =
-                names.and_then(|names| pdf_semantics::follow(&objects, names).ok().flatten());
+                names.and_then(|names| pdf_semantics::follow(objects, names).ok().flatten());
             for (key, root) in names
                 .and_then(Object::as_dict)
                 .into_iter()

@@ -20,15 +20,17 @@
 //!   namespace each is bound to, so a prefix or a comment that merely looks
 //!   like one claims nothing.
 //!
-//! What walks a file's objects reads them through [`Resolve`], so over
-//! pdf-structure's reading, lazily or by position, over its document or a
-//! closure alike: [`catalog`] finds where a walk starts from a trailer and
-//! [`follow`] follows a reference. A reader's own resolver says why it gives
-//! no object ([`Resolve::try_resolve`]), and a closure can't, so it reads as
-//! a reference to nothing. What a walk reads past is a [`Fault`], told to a
-//! [`Sink`], or dropped by `()`; its caps are one value, [`Limits`].
+//! What walks a file's objects reads them through [`Resolve`], given by value,
+//! so `&reading` over pdf-structure's reading, lazily or by position, `&document`
+//! over its document, or a closure alike: [`catalog`] finds where a walk starts
+//! from a trailer and [`follow`] follows a reference. A reader's own resolver
+//! says why it gives no object ([`Resolve::try_resolve`]), and a closure can't,
+//! so it reads as a reference to nothing. What a walk reads past is a [`Fault`],
+//! told to a [`Sink`], or dropped by `()`; its caps are one value, [`Limits`].
 
-pub use pdf_objects::{Dict, Object, ObjectId, Resolve, Rules, Span, Unreadable, Why, text};
+pub use pdf_objects::{
+    Dict, Object, ObjectId, Resolve, Rules, Span, Str, Stream, Unreadable, Value, Why, dict, text,
+};
 
 pub use fault::{Fault, Place, Sink};
 pub use limits::Limits;
@@ -43,8 +45,6 @@ pub mod pages;
 pub mod tree;
 pub mod xmp;
 
-use pdf_objects::Value;
-
 /// How many references a value may go through to its object.
 const HOPS: usize = 32;
 
@@ -52,7 +52,15 @@ const HOPS: usize = 32;
 /// to an object the file hasn't, which is null (ISO 32000-2, 7.3.10). An
 /// object that doesn't read gives the resolver's [`Unreadable`], and a chain
 /// of 32 references or more, which a loop of them is, one of [`Why::Limit`].
-pub fn follow<'o, R: Resolve<'o> + ?Sized>(
+pub fn follow<'o, R: Resolve<'o>>(
+    objects: R,
+    value: &'o Object,
+) -> Result<Option<&'o Object>, Unreadable> {
+    followed(&objects, value)
+}
+
+/// [`follow`], through a resolver a walk holds.
+fn followed<'o, R: Resolve<'o>>(
     objects: &R,
     value: &'o Object,
 ) -> Result<Option<&'o Object>, Unreadable> {
@@ -86,8 +94,8 @@ fn too_long(last: ObjectId) -> Unreadable {
 /// none where there's no `/Root`, or it isn't a dictionary. A reading has its
 /// trailer (`reading.trailer().dict()`), and a document too
 /// (`document.trailer.dict()`), and this finds where their walks start.
-pub fn catalog<'o, R: Resolve<'o> + ?Sized>(
-    objects: &R,
+pub fn catalog<'o, R: Resolve<'o>>(
+    objects: R,
     trailer: &'o Dict,
 ) -> Result<Option<&'o Dict>, Unreadable> {
     let Some(root) = trailer.get(b"Root") else {
