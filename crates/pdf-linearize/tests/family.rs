@@ -1037,6 +1037,17 @@ fn linearize_bytes_is_linearize_of_what_it_reads() {
     );
 }
 
+/// What opens a file is the caller's: under caps it can't read under, it's refused.
+#[test]
+fn linearize_bytes_opens_a_file_as_it_s_told() {
+    let bytes = built(&two_pages(""));
+    assert!(family::linearize_bytes(&bytes, &[], &table()).is_ok());
+    let mut options = table();
+    options.read.limits.parser.nesting = 0;
+    let refused = family::linearize_bytes(&bytes, &[], &options);
+    assert!(refused.is_err(), "{:?}", refused.map(|_| ()));
+}
+
 #[test]
 fn a_file_linearized_again_keeps_its_pages_and_drops_its_old_layout() {
     let bytes = built(&two_pages(""));

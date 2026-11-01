@@ -6,8 +6,8 @@
 //! ([`Part::Open`]), the hint stream and the first page ([`Part::FirstPage`])
 //! come first and take the highest numbers; then each other page with what only
 //! it uses ([`Part::Pages`]), what pages share ([`Part::Shared`]), everything
-//! else ([`Part::Other`]) and the main cross-reference section, numbered from
-//! 1. A [`Graph`] says what a plan needs to know of the objects, and nothing
+//! else ([`Part::Other`]) and the main cross-reference section, numbered
+//! from 1. A [`Graph`] says what a plan needs to know of the objects, and nothing
 //! here sees a body: [`plan()`] gives what a caller serializes, in file order
 //! ([`Plan::writes`]), under the numbers it gives ([`Plan::number`]).
 //!
