@@ -2,10 +2,10 @@
 // Model's checker (pdf-association/arlington-pdf-model, `TestGrammar/src`,
 // Copyright 2020-2022 PDF Association, Inc.), under the Apache License,
 // Version 2.0: `Walk::score` (from `CParsePDF::recommended_link_for_object`),
-// `Walk::array_rows` (from `CParsePDF::parse_object`'s order), `is_date`
-// (from `is_valid_pdf_date_string`) and `Class::of` (from
-// `is_second_class_pdf_name` and `is_third_class_pdf_name`). Each one's
-// doc says how it differs from TestGrammar. The notices of upstream's
+// `Walk::array_rows` (from `CParsePDF::parse_object`'s order), the tests'
+// `test_grammar_is_date` (from `is_valid_pdf_date_string`) and `Class::of`
+// (from `is_second_class_pdf_name` and `is_third_class_pdf_name`). Each
+// one's doc says how it differs from TestGrammar. The notices of upstream's
 // NOTICE.txt (pdf-arlington's `model/NOTICE.txt`) that pertain to them:
 //
 //     Copyright 2020 PDF Association, Inc. https://www.pdfa.org
@@ -117,6 +117,7 @@ use std::num::ParseIntError;
 use std::rc::Rc;
 
 use pdf_objects::Resolve;
+use pdf_semantics::date::Date;
 use pdf_structure::write::KeptOut;
 
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
@@ -3555,52 +3556,13 @@ pub(crate) fn each_reference(o: &Object, mut f: impl FnMut(ObjectId)) {
     }
 }
 
-/// Whether `text` is a date (ISO 32000-2, 7.9.4) as TestGrammar's
-/// `is_valid_pdf_date_string` reads one (`TestGrammar/src/Utils.cpp`,
-/// Copyright 2020-2022 PDF Association, Inc., Apache-2.0), ported: `D:`
-/// and a year, then as many of month, day, hour, minute and second as
-/// follow, two digits each and in range; then an offset's `Z`, `+` or
-/// `-`, its hours, an apostrophe and its minutes, each if there. Its
-/// expression is anchored only at the start, so anything after is let be.
+/// Whether `text` is a date (ISO 32000-2, 7.9.4): whether
+/// [`Date::read`](pdf_semantics::date::Date::read) reads one, which reads past
+/// what follows the date and what else departs from the clause, and not a
+/// field out of its range. A test holds it to TestGrammar's
+/// `is_valid_pdf_date_string`.
 pub fn is_date(text: &str) -> bool {
-    let Some(rest) = text.strip_prefix("D:") else {
-        return false;
-    };
-    let b = rest.as_bytes();
-    let two = |at: usize| {
-        (b.get(at..at + 2))
-            .filter(|d| d.iter().all(u8::is_ascii_digit))
-            .map(|d| u32::from(d[0] - b'0') * 10 + u32::from(d[1] - b'0'))
-    };
-    if !b
-        .get(..4)
-        .is_some_and(|year| year.iter().all(u8::is_ascii_digit))
-    {
-        return false;
-    }
-    let mut at = 4;
-    for range in [1..=12, 1..=31, 0..=23, 0..=59, 0..=59] {
-        let Some(n) = two(at) else {
-            break;
-        };
-        if !range.contains(&n) {
-            return false;
-        }
-        at += 2;
-    }
-    if b.get(at).is_some_and(|c| b"Z+-".contains(c)) {
-        at += 1;
-    }
-    if let Some(hours) = two(at) {
-        if hours > 23 {
-            return false;
-        }
-        at += 2;
-    }
-    if b.get(at) == Some(&b'\'') {
-        at += 1;
-    }
-    two(at).is_none_or(|minutes| minutes <= 59)
+    Date::read(text).is_ok()
 }
 
 /// `value` with each reference in it, `12 0 R`, as `R`.
@@ -4990,6 +4952,54 @@ mod tests {
         );
     }
 
+    /// Whether `text` is a date as TestGrammar's `is_valid_pdf_date_string`
+    /// reads one (`TestGrammar/src/Utils.cpp`, Copyright 2020-2022 PDF
+    /// Association, Inc., Apache-2.0), ported: `D:` and a year, then as many
+    /// of month, day, hour, minute and second as follow, two digits each and
+    /// in range; then an offset's `Z`, `+` or `-`, its hours, an apostrophe
+    /// and its minutes, each if there. Its expression is anchored only at the
+    /// start, so anything after is let be.
+    fn test_grammar_is_date(text: &str) -> bool {
+        let Some(rest) = text.strip_prefix("D:") else {
+            return false;
+        };
+        let b = rest.as_bytes();
+        let two = |at: usize| {
+            (b.get(at..at + 2))
+                .filter(|d| d.iter().all(u8::is_ascii_digit))
+                .map(|d| u32::from(d[0] - b'0') * 10 + u32::from(d[1] - b'0'))
+        };
+        if !b
+            .get(..4)
+            .is_some_and(|year| year.iter().all(u8::is_ascii_digit))
+        {
+            return false;
+        }
+        let mut at = 4;
+        for range in [1..=12, 1..=31, 0..=23, 0..=59, 0..=59] {
+            let Some(n) = two(at) else {
+                break;
+            };
+            if !range.contains(&n) {
+                return false;
+            }
+            at += 2;
+        }
+        if b.get(at).is_some_and(|c| b"Z+-".contains(c)) {
+            at += 1;
+        }
+        if let Some(hours) = two(at) {
+            if hours > 23 {
+                return false;
+            }
+            at += 2;
+        }
+        if b.get(at) == Some(&b'\'') {
+            at += 1;
+        }
+        two(at).is_none_or(|minutes| minutes <= 59)
+    }
+
     #[test]
     fn a_date_reads_as_test_grammar_reads_one() {
         for (date, valid) in [
@@ -5010,7 +5020,54 @@ mod tests {
             ("20261024", false),
         ] {
             assert_eq!(is_date(date), valid, "{date}");
+            assert_eq!(test_grammar_is_date(date), valid, "{date}");
         }
+    }
+
+    /// A million strings of a date's pieces, most of them dates' starts: the
+    /// range's edges, each sign, apostrophes, lone digits, what might follow.
+    #[test]
+    fn a_date_reads_as_test_grammar_reads_one_on_a_million_strings() {
+        const PIECES: &[&str] = &[
+            "00", "01", "09", "10", "12", "13", "23", "24", "28", "29", "30", "31", "32", "59",
+            "60", "99", "0", "1", "5", "9", "Z", "+", "-", "\'", "\'\'", " ", "x", "é", ":", "D:",
+        ];
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as usize
+        };
+        let (mut dates, mut others) = (0, 0);
+        let mut text = String::new();
+        for _ in 0..1_000_000 {
+            text.clear();
+            let start = next() % 16;
+            text.push_str(match start {
+                0 => "",
+                1 => "D:",
+                2 => "D:202",
+                _ => "D:2026",
+            });
+            // Fields good for most of a date's length, so that what comes
+            // after them is reached as often as what stops them.
+            if start >= 8 {
+                let good = ["10", "24", "15", "30", "00"];
+                text.extend(good.iter().copied().take(next() % 6));
+            }
+            for _ in 0..next() % 8 {
+                text.push_str(PIECES[next() % PIECES.len()]);
+            }
+            let is = test_grammar_is_date(&text);
+            assert_eq!(is_date(&text), is, "{text}");
+            if is {
+                dates += 1;
+            } else {
+                others += 1;
+            }
+        }
+        assert!(dates > 100_000 && others > 100_000, "{dates}, {others}");
     }
 
     #[test]

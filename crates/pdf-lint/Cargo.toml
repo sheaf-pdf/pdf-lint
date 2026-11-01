@@ -26,6 +26,8 @@ anyhow = { version = "1", optional = true }
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"], optional = true }
 pdf-arlington = { path = "../pdf-arlington", version = "0.1" }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
+# Dates, read without its clock, so without chrono.
+pdf-semantics = { path = "../pdf-semantics", version = "0.1", default-features = false }
 pdf-structure = { path = "../pdf-structure", version = "0.1" }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
 # The command line's too: its JSON reports.

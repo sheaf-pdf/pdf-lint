@@ -2,15 +2,16 @@
 # what CI checks.
 
 # The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects,
-# pdf-structure, pdf-content-streams and pdf-arlington support, from their
-# Cargo.toml. Only the libraries promise one: the checker ships as a binary
-# built with stable Rust.
+# pdf-structure, pdf-content-streams, pdf-semantics and pdf-arlington support,
+# from their Cargo.toml. Only the libraries promise one: the checker ships as
+# a binary built with stable Rust.
 tokenizer_msrv := `grep -m1 '^rust-version' crates/pdf-tokenizer/Cargo.toml | cut -d'"' -f2`
 filters_msrv := `grep -m1 '^rust-version' crates/pdf-filters/Cargo.toml | cut -d'"' -f2`
 crypt_msrv := `grep -m1 '^rust-version' crates/pdf-crypt/Cargo.toml | cut -d'"' -f2`
 objects_msrv := `grep -m1 '^rust-version' crates/pdf-objects/Cargo.toml | cut -d'"' -f2`
 structure_msrv := `grep -m1 '^rust-version' crates/pdf-structure/Cargo.toml | cut -d'"' -f2`
 content_msrv := `grep -m1 '^rust-version' crates/pdf-content-streams/Cargo.toml | cut -d'"' -f2`
+semantics_msrv := `grep -m1 '^rust-version' crates/pdf-semantics/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
 # pdf-content-streams' `image-ends` feature needs a newer one than the crate:
 # its fax decoder, hayro-ccitt, uses Rust 1.87's library.
@@ -32,7 +33,7 @@ default:
     @just --list --unsorted
 
 # Everything CI runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -41,20 +42,24 @@ fmt:
 # Lint every crate, with its tests and binaries; then the libraries and the
 # binary as they're built for use, without the features only their tests
 # turn on; then the filters with zlib-rs their only Flate backend; then the
-# content streams with `image-ends`, which no other crate turns on.
+# content streams with `image-ends`, which no other crate turns on; then
+# pdf-semantics without its clock, as pdf-lint takes it.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
     cargo clippy --locked -p pdf-filters --no-default-features --features zlib-rs --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --features image-ends --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
 
 # Unit tests and doctests: the workspace's, where the filters have both
 # Flate backends, as pdf-structure's tests turn zlib-rs on; then the
-# filters' with zlib-rs alone; then the content streams' with `image-ends`.
+# filters' with zlib-rs alone; then the content streams' with `image-ends`;
+# then pdf-semantics' without its clock.
 test:
     cargo test --locked --workspace
     cargo test --locked -p pdf-filters --no-default-features --features zlib-rs
     cargo test --locked -p pdf-content-streams --features image-ends
+    cargo test --locked -p pdf-semantics --no-default-features
 
 # qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
 # pinned SHA-256 (from the release's qpdf-12.4.2.sha256), kept in target/.
@@ -242,6 +247,10 @@ structure-msrv:
 content-msrv:
     cargo +{{ content_msrv }} test --locked -p pdf-content-streams
     cargo +{{ content_image_ends_msrv }} test --locked -p pdf-content-streams --features image-ends
+
+# Test pdf-semantics on its oldest supported Rust, which must be installed.
+semantics-msrv:
+    cargo +{{ semantics_msrv }} test --locked -p pdf-semantics
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:

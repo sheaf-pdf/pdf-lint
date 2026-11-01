@@ -1,0 +1,9 @@
+# Changelog
+
+## 0.1.0 (unreleased)
+
+- **Dates.** `date::Date` (ISO 32000-2, 7.9.4), its fields private so that it always writes as a date: `Date::read` reads one, or gives a `DateError` (`#[non_exhaustive]`, thiserror): `NoPrefix`, `NoYear`, or `OutOfRange` naming its `Field`. A field not written is none (`month`, `day`, `hour`, `minute`, `second`, `offset`), and `month_or_default` and the like give 7.9.4's default for it. `Offset` is `Utc`, `Ahead` or `Behind`. `Date::quirks` says what a reading read past, a `Quirk` (`#[non_exhaustive]`) each: hours without a sign, an offset before the fields it follows (whose fields then take their defaults), `Z` with an offset other than zero, an apostrophe where it doesn't belong or missing, 1.7's terminating apostrophe, a lone digit, what follows the date, and a day its month hasn't.
+- **Dates written and built.** `Date::write` writes 7.9.4's form of the fields, never the bytes read, so reading it back gives the same fields and no quirk but a day its month hasn't, which is in the clause's range and is kept. `Date::new` and `with_month`, `with_day`, `with_hour`, `with_minute`, `with_second` and `with_offset` build one, each in its range and after the field before it (`DateError::OutOfOrder`), a day being one its month has.
+- **The `clock` feature,** on by default, on chrono without its default features: `Date::from_unix`, a count of seconds as a date in UT, none before year 0 or past 9999, and `Date::now`. A crate that only reads and writes dates leaves it out, and chrono with it.
+- **Text strings.** `text` is pdf-objects' module, re-exported.
+- **Tests.** Unit tests for each field's range at its edges, every quirk, each error, the order fields are set in, the writer's forms, every short string of a date's pieces read, written and read back, and seconds read as a date at the ends of the years a date can hold.

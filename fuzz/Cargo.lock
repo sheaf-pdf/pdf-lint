@@ -319,6 +319,7 @@ version = "0.2.0"
 dependencies = [
  "pdf-arlington",
  "pdf-objects",
+ "pdf-semantics",
  "pdf-structure",
  "pdf-tokenizer",
  "thiserror",
@@ -329,6 +330,14 @@ name = "pdf-objects"
 version = "0.1.0"
 dependencies = [
  "pdf-tokenizer",
+ "thiserror",
+]
+
+[[package]]
+name = "pdf-semantics"
+version = "0.1.0"
+dependencies = [
+ "pdf-objects",
  "thiserror",
 ]
 

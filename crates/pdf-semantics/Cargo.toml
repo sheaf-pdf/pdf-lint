@@ -1,0 +1,33 @@
+[package]
+name = "pdf-semantics"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "PDF's common structures, read and written: dates, and text strings"
+keywords = ["pdf", "date", "text-string", "iso-32000", "metadata"]
+categories = ["parser-implementations", "date-and-time"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+# The clock's: a count of seconds as a calendar's date, without its default
+# features, so without its time zones and what they pull in.
+chrono = { version = "0.4.45", default-features = false, optional = true }
+pdf-objects = { path = "../pdf-objects", version = "0.1" }
+thiserror = "2"
+
+[features]
+default = ["clock"]
+# `Date::now` and `Date::from_unix`, on chrono: a crate that only reads and
+# writes dates leaves it out with `default-features = false`.
+clock = ["dep:chrono"]
+
+[dev-dependencies]
+# The tests' resolvers: a reading in memory, a reading by position, a document.
+pdf-structure = { path = "../pdf-structure", version = "0.1" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
