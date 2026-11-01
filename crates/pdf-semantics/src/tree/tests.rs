@@ -190,13 +190,13 @@ fn reads_a_number_tree_with_kids() {
 }
 
 /// A file's bytes, read a window at a time, until it's told to fail.
-struct ByPosition<'b> {
+pub(crate) struct ByPosition<'b> {
     bytes: &'b [u8],
-    failing: AtomicBool,
+    pub(crate) failing: AtomicBool,
 }
 
 impl ByPosition<'_> {
-    fn new(bytes: &[u8]) -> ByPosition<'_> {
+    pub(crate) fn new(bytes: &[u8]) -> ByPosition<'_> {
         ByPosition {
             bytes,
             failing: AtomicBool::new(false),

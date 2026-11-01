@@ -554,4 +554,4 @@ pub enum TreeError {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

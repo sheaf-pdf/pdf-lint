@@ -1,0 +1,24 @@
+# name	why pdf-semantics reads it otherwise than PDFium
+pages-kid-wrong-generation	A reference is its number and its generation here, as the resolver takes them, so 3 5 R names nothing and takes its place with no page; PDFium doesn't read the generation, so it names object 3 there.
+pages-kid-wrong-generation-no-count	As pages-kid-wrong-generation, and so the count of the tree is one less here too.
+pages-no-count-past-the-page-cap	A count of the tree past what PDFium counts is an error here, TooManyPages; PDFium gives a file no pages then.
+pages-root-kids-empty-count-2	No pages under the root is NoPages here, whatever its /Count; PDFium gives the count and loads none.
+pages-root-kids-not-an-array	No pages under the root is NoPages here, whatever its /Count; PDFium gives the count and loads none.
+pages-root-no-type-kids-a-string	No pages under the root is NoPages here, whatever its /Count; PDFium gives the count and loads none.
+pages-root-other-type-kids-a-string	No pages under the root is NoPages here, whatever its /Count; PDFium gives the count and loads none.
+pages-root-type-string-kids-a-string	No pages under the root is NoPages here, whatever its /Count; PDFium gives the count and loads none.
+pages-root-type-by-reference-to-page-kids-a-string	No pages under the root is NoPages here, whatever its /Count; PDFium gives the count and loads none.
+pages-root-page-kids-empty-count-2	No pages under the root is NoPages here, whatever its /Count; PDFium gives the count and loads none.
+pages-root-page-kids-by-reference-to-empty	No pages under the root is NoPages here, whatever its /Count; PDFium gives the count and loads none.
+pages-root-kids-by-a-chain	PDFium's /Kids is through one reference, so here too this root has no pages under it, which is NoPages here, whatever its /Count; PDFium gives the count and loads none.
+pages-self-kid	A kid listing its own holder is an error here, Cycle, on purpose; PDFium skips it, and it takes no place.
+pages-self-kid-no-count	A kid listing its own holder is an error here, Cycle, on purpose; PDFium skips it, and it takes no place.
+pages-self-kid-further-down	A kid listing its own holder is an error here, Cycle, on purpose; PDFium skips it, and it takes no place.
+pages-self-kid-further-down-no-count	A kid listing its own holder is an error here, Cycle, on purpose; PDFium skips it, and it takes no place.
+pages-cycle	A node listed inside itself is an error here, Cycle, on purpose; PDFium goes down it to its last level, and loads no page after.
+pages-cycle-no-count	A node listed inside itself is an error here, Cycle, on purpose; PDFium goes down it to its last level, and loads no page after.
+pages-cycle-of-two-no-count	A node listed inside itself is an error here, Cycle, on purpose; PDFium goes down it to its last level, and loads no page after.
+pages-parent-itself	A /Parent chain that loops is an error here, ParentLoop, on purpose; PDFium ends it quietly, keeping what it found.
+pages-parent-loop	A /Parent chain that loops is an error here, ParentLoop, on purpose; PDFium ends it quietly, keeping what it found.
+pages-parent-loop-below-a-box	A /Parent chain that loops is an error here, ParentLoop, on purpose; PDFium ends it quietly, keeping what it found.
+pages-depth-1025	A tree past the levels PDFium walks is an error here, TooDeep, on purpose; PDFium loads no page after them.

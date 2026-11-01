@@ -27,6 +27,9 @@ LONG = 64
 
 COURIER = b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>"
 FONTS = b"<< /Font << /F0 " + COURIER + b" >> >>"
+# How many pages of a file are asked for, whatever count it gives.
+PAGES = 64
+
 TYPES = {1: "text", 2: "path", 3: "image", 4: "shading", 5: "form"}
 SEGMENTS = {0: "l", 1: "c", 2: "m"}
 
@@ -101,6 +104,8 @@ class Pdfium:
             ("FPDF_ClosePage", None, [P]),
             ("FPDF_GetPageWidthF", F, [P]),
             ("FPDF_GetPageHeightF", F, [P]),
+            ("FPDF_GetPageCount", I, [P]),
+            ("FPDFPage_GetRotation", I, [P]),
             ("FPDF_GetMetaText", U, [P, ctypes.c_char_p, P, U]),
             ("FPDFPage_CountObjects", I, [P]),
             ("FPDFPage_GetObject", P, [P, I]),
@@ -215,6 +220,27 @@ class Pdfium:
         lib.FPDF_CloseDocument(doc)
         return out
 
+    def pages(self, data):
+        """What a file's page tree comes to: the count PDFium gives, then, in
+        order, each page to two past it, its width, height and quarter turns,
+        or None where it doesn't load. None for a file that doesn't open."""
+        lib = self.lib
+        buf, doc = self._doc(data)
+        if not doc:
+            return None
+        count = lib.FPDF_GetPageCount(doc)
+        pages = []
+        for index in range(min(count, PAGES) + 2):
+            page = lib.FPDF_LoadPage(doc, index)
+            if not page:
+                pages.append(None)
+                continue
+            pages.append((lib.FPDF_GetPageWidthF(page), lib.FPDF_GetPageHeightF(page),
+                          lib.FPDFPage_GetRotation(page)))
+            lib.FPDF_ClosePage(page)
+        lib.FPDF_CloseDocument(doc)
+        return count, pages
+
     def meta(self, data, tag):
         """The document's /Info entry `tag` as text, UTF-8."""
         lib = self.lib
@@ -236,6 +262,14 @@ def content_answer(objects):
 
 def size_answer(size):
     return "no-page" if size is None else "%s %s" % (num(size[0]), num(size[1]))
+
+
+def pages_answer(pages):
+    if pages is None:
+        return "no-document"
+    count, each = pages
+    return "count %d : " % count + " ; ".join(
+        "null" if p is None else "%s %s %d" % (num(p[0]), num(p[1]), p[2]) for p in each)
 
 
 def answer(pdfium, kind, files):
@@ -272,6 +306,8 @@ def answer(pdfium, kind, files):
     if kind == "info":
         text = pdfium.meta(pdf(None, info=files["obj"]), files["tag"])
         return "no-document" if text is None else "text " + esc(text)
+    if kind == "pages":
+        return pages_answer(pdfium.pages(files["pdf"]))
     raise SystemExit("unknown kind %r" % kind)
 
 

@@ -11,6 +11,13 @@ pub struct Limits {
     pub tree_depth: usize,
     /// How many nodes of a name or number tree are read: 100,000 by default.
     pub tree_nodes: usize,
+    /// How many levels of nodes a page tree has, from its root down, and how
+    /// many nodes a `/Parent` chain has ([`pages`](crate::pages)): 1,024 by
+    /// default, as PDFium's walk goes.
+    pub page_depth: usize,
+    /// How many pages a page tree lists, and how many of its nodes a walk
+    /// visits: 1,048,574 by default, the most PDFium counts.
+    pub pages: usize,
 }
 
 impl Limits {
@@ -18,6 +25,8 @@ impl Limits {
     pub const DEFAULT: Limits = Limits {
         tree_depth: 32,
         tree_nodes: 100_000,
+        page_depth: 1024,
+        pages: 0xFFFFE,
     };
 }
 

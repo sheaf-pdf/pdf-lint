@@ -11,6 +11,10 @@
 //! - **Name and number trees** ([`tree`]): ISO 32000-2, 7.9.6 and 7.9.7.
 //!   Walked a key and a value at a time under caps, a loop or a tree too
 //!   deep said, and written.
+//! - **The page tree** ([`pages`]): ISO 32000-2, 7.7.3. Every page in order,
+//!   by ISO's rules or PDFium's as of chromium/8125, each inherited attribute
+//!   saying which dictionary it came from, a value that's absent saying what
+//!   stands for it.
 //!
 //! What walks a file's objects reads them through [`Resolve`], so over
 //! pdf-structure's reading, lazily or by position, over its document or a
@@ -20,7 +24,7 @@
 //! a reference to nothing. What a walk reads past is a [`Fault`], told to a
 //! [`Sink`], or dropped by `()`; its caps are one value, [`Limits`].
 
-pub use pdf_objects::{Dict, Object, ObjectId, Resolve, Span, Unreadable, Why, text};
+pub use pdf_objects::{Dict, Object, ObjectId, Resolve, Rules, Span, Unreadable, Why, text};
 
 pub use fault::{Fault, Place, Sink};
 pub use limits::Limits;
@@ -31,6 +35,7 @@ mod fault;
 #[doc(hidden)]
 pub mod fuzz;
 mod limits;
+pub mod pages;
 pub mod tree;
 
 use pdf_objects::Value;

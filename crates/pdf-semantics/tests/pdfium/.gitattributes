@@ -1,0 +1,2 @@
+# Each case's bytes as its generator writes them: no line endings changed.
+cases/** -text

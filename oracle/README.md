@@ -1,9 +1,10 @@
 # PDFium, the oracle
 
 pdf-tokenizer's PDFium rules (`Rules::Pdfium`, `decode::pdfium`),
-pdf-objects' (`Parser::rules`) and pdf-content-streams, which reads content
-as PDFium does throughout, follow PDFium's reading, which no standard
-writes down and which changes as PDFium does. So each is held to one PDFium
+pdf-objects' (`Parser::rules`), pdf-semantics' page tree (`pages::pages`)
+and pdf-content-streams, which reads content as PDFium does throughout,
+follow PDFium's reading, which no standard writes down and which changes as
+PDFium does. So each is held to one PDFium
 build, the pin, through cases: small hand-made inputs, each asked of
 PDFium, its answer recorded beside it. A plain `cargo test` holds each
 crate to the recorded answers, without PDFium (each crate's
@@ -100,6 +101,12 @@ asked through a one-page PDF made around the case.
   of its entry under the key in `.tag`.
 - `kids`: what a page tree's `/Kids` holds (`.obj`), its one page object
   3, its answer that page's size, or `no-page`.
+- `pages`: a whole file (`.pdf`), the one kind not made around the case: it's
+  asked for its page tree. The answer is `FPDF_GetPageCount`, then, in order,
+  each page from the first to two past the last, its width, height and quarter
+  turns (`FPDFPage_GetRotation`), or `null` where it doesn't load, `;` between
+  them; past 64 pages, the first 64 and two more; `no-document` where the file
+  doesn't open.
 
 Numbers are written with nine significant digits, which read back to the
 same `f32`, and compared as `f32`s. Text and data are written byte for

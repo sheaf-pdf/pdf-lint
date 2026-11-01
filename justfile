@@ -26,7 +26,7 @@ fuzz_toolchain := env("FUZZ_TOOLCHAIN", "nightly")
 pdfium_build := "8125"
 
 # The crates' PDFium cases, each a crate's tests/pdfium.
-pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-content-streams/tests/pdfium"
+pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-content-streams/tests/pdfium crates/pdf-semantics/tests/pdfium"
 
 # List the recipes.
 default:
@@ -265,8 +265,8 @@ arlington-msrv:
 # what its reader read; `content`, pdf-content-streams' tokens, operations,
 # faults, operator table, the balance, marked content and names over them,
 # its writer, content written again and the calls, and its splices and
-# lists written again; `semantics`, pdf-semantics' name and number trees and
-# dates; or `check`, the reader and the checker. `structure`, `write` and
+# lists written again; `semantics`, pdf-semantics' name and number trees,
+# page tree and dates; or `check`, the reader and the checker. `structure`, `write` and
 # `check` begin from the seeds pdf-lint's fuzz module makes, `write`'s with
 # the third byte its input has; `content` and `semantics` from those their own
 # crates' fuzz modules make. The nightly is `fuzz_toolchain`.

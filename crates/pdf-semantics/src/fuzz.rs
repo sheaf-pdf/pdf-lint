@@ -1,13 +1,15 @@
 //! What the fuzz target checks, which unit tests check too: the promises
-//! the walks and the writers of trees make, and dates', on any input. It's
-//! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
+//! the walks and the writers of trees make, the page tree's, and dates', on
+//! any input. It's compiled only for tests and under cargo-fuzz's
+//! `--cfg fuzzing`.
 
 use std::collections::BTreeMap;
 
 use pdf_objects::parse::Parser;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Value, Why, serialize};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Rules, Unreadable, Value, Why, serialize};
 
 use crate::date::{Date, Quirk};
+use crate::pages::{Error, Inheritable, Origin, Page, Pages, Rect, pages};
 use crate::tree::{self, names, numbers};
 use crate::{Fault, HOPS, Limits, Place, Sink, catalog, follow};
 
@@ -407,17 +409,193 @@ fn roots<'o, R: Resolve<'o> + ?Sized>(objects: &R, catalog: &'o Dict) -> Vec<(Ki
     roots
 }
 
+/// What a walk of a page tree gave: the table, or what failed it as text, as an
+/// [`Unreadable`]'s own words may differ from one resolver to another.
+pub type Paged<'o> = Result<Pages<'o>, String>;
+
+fn paged<'o, R: Resolve<'o> + ?Sized, S: Sink + ?Sized>(
+    objects: &R,
+    catalog: &'o Dict,
+    rules: Rules,
+    limits: &Limits,
+    sink: &mut S,
+) -> Paged<'o> {
+    pages(objects, catalog, rules, limits, sink).map_err(|error| match error {
+        Error::Unreadable(unreadable) => format!("{:?} {:?}", unreadable.id, unreadable.why),
+        other => other.to_string(),
+    })
+}
+
+/// The promises of one walk of the page tree under `catalog`, by `rules`:
+///
+/// - what's given is the same whatever the sink, and a sink that wants none
+///   is told none;
+/// - by PDFium's rules, no fault but what doesn't read is told;
+/// - it's within the caps, and under smaller caps it's the same or an error;
+/// - each object listed again counts its repeats from 0, in order, and holds
+///   what it held the first time;
+/// - what's absent is what stands for it, and what's present names where it's
+///   from: the page's own dictionary, or a node on its `/Parent` chain.
+fn a_table<'o, R: Resolve<'o> + ?Sized>(
+    objects: &R,
+    catalog: &'o Dict,
+    rules: Rules,
+) -> (Paged<'o>, Vec<Fault>) {
+    let limits = Limits::DEFAULT;
+    let mut kept = Kept::default();
+    let full = paged(objects, catalog, rules, &limits, &mut kept);
+    let quiet = paged(objects, catalog, rules, &limits, &mut ());
+    assert_eq!(full, quiet, "the same through `()`");
+    let unwanted = paged(objects, catalog, rules, &limits, &mut Unwanted);
+    assert_eq!(full, unwanted, "the same through a sink that wants none");
+
+    if rules == Rules::Pdfium {
+        let only = |fault: &Fault| matches!(fault, Fault::Damaged { .. });
+        assert!(kept.0.iter().all(only), "{:?}", kept.0);
+    }
+    if let Ok(table) = &full {
+        let_it_hold(table, &limits, rules);
+    }
+    for (depth, count) in [
+        (1, usize::MAX),
+        (2, usize::MAX),
+        (usize::MAX, 1),
+        (usize::MAX, 3),
+    ] {
+        let mut smaller = limits;
+        if depth != usize::MAX {
+            smaller.page_depth = depth;
+        }
+        if count != usize::MAX {
+            smaller.pages = count;
+        }
+        if let Ok(cut) = paged(objects, catalog, rules, &smaller, &mut ()) {
+            assert_eq!(
+                Ok(cut),
+                full,
+                "under {depth}, {count}: all of it, or an error"
+            );
+        }
+    }
+    (full, kept.0)
+}
+
+/// The promises of a table that came to be.
+fn let_it_hold(table: &Pages, limits: &Limits, rules: Rules) {
+    assert!(table.len() <= limits.pages);
+    assert!(table.len() <= table.counted(), "{}", table.counted());
+    if rules == Rules::Iso {
+        assert_eq!(table.len(), table.counted());
+    } else {
+        assert!(!table.is_empty(), "no pages is an error");
+    }
+    let mut listed: BTreeMap<ObjectId, &Page> = BTreeMap::new();
+    let mut repeats: BTreeMap<ObjectId, u32> = BTreeMap::new();
+    for page in table {
+        assert!(page.parents().count() <= limits.page_depth);
+        match page.id {
+            Some(id) => {
+                let repeat = repeats.entry(id).or_insert(0);
+                assert_eq!(page.repeat, *repeat, "{id:?}");
+                *repeat += 1;
+                let first = listed.entry(id).or_insert(page);
+                assert_eq!(first.dict, page.dict, "{id:?}");
+                assert_eq!(first.media_box(), page.media_box(), "{id:?}");
+            }
+            None => assert_eq!(page.repeat, 0),
+        }
+        let media = page.media_box();
+        if media.origin == Origin::Default {
+            assert_eq!(media.value, Rect::LETTER);
+        }
+        let crop = page.crop_box();
+        if crop.origin == Origin::Default {
+            assert_eq!(crop.value, media.value);
+        }
+        let rotate = page.rotate();
+        if rotate.origin == Origin::Default {
+            assert_eq!(rotate.value, 0);
+        }
+        let unit = page.user_unit();
+        match unit.origin {
+            Origin::Default => assert_eq!(unit.value, 1.0),
+            _ => assert!(unit.value > 0.0),
+        }
+        for (attribute, key) in [
+            (Inheritable::Resources, &b"Resources"[..]),
+            (Inheritable::MediaBox, b"MediaBox"),
+            (Inheritable::CropBox, b"CropBox"),
+            (Inheritable::Rotate, b"Rotate"),
+        ] {
+            let Some(found) = page.attribute(attribute) else {
+                continue;
+            };
+            match found.origin {
+                Origin::Own => {
+                    let dict = page.dict.expect("what has its own has a dictionary");
+                    assert!(std::ptr::eq(dict.get(key).expect("its own"), found.written));
+                }
+                Origin::Ancestor(Some(id)) => {
+                    assert!(page.parents().any(|parent| parent == id), "{id:?}");
+                }
+                Origin::Ancestor(None) => {}
+                Origin::Default => panic!("an attribute that's found isn't a default"),
+            }
+        }
+        if page.dict.is_none() {
+            assert_eq!(page.media_box().origin, Origin::Default);
+            assert!(page.attribute(Inheritable::Resources).is_none());
+        }
+    }
+}
+
+/// The page tree under `catalog` by both rules, each held to its promises; and,
+/// where ISO's told no fault, the same pages by each, as a well-formed tree is.
+fn both_tables<'o, R: Resolve<'o> + ?Sized>(objects: &R, catalog: &'o Dict) -> [Paged<'o>; 2] {
+    let (iso, faults) = a_table(objects, catalog, Rules::Iso);
+    let (pdfium, _) = a_table(objects, catalog, Rules::Pdfium);
+    if let (Ok(by_iso), true) = (&iso, faults.is_empty()) {
+        let Ok(by_pdfium) = &pdfium else {
+            panic!("no fault by ISO's rules, and by PDFium's {pdfium:?}");
+        };
+        assert_eq!(by_iso.len(), by_pdfium.len());
+        assert_eq!(by_iso.counted(), by_pdfium.counted());
+        for (a, b) in by_iso.iter().zip(by_pdfium) {
+            assert_eq!((a.id, a.repeat), (b.id, b.repeat));
+            assert!(a.dict.zip(b.dict).is_some_and(|(a, b)| std::ptr::eq(a, b)));
+            assert!(a.parents().eq(b.parents()));
+        }
+    }
+    [iso, pdfium]
+}
+
+/// What a file's catalog comes to: its trees, and its page tree by each rules.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Over<'o> {
+    /// Each tree's walk.
+    pub trees: Vec<Walked<'o>>,
+    /// Its pages, by ISO's rules and by PDFium's.
+    pub pages: Option<[Paged<'o>; 2]>,
+}
+
 /// Every tree the catalog `trailer` leads to holds, walked and held to its
-/// promises ([`a_tree`]): what each gave, for a caller to set beside the same
-/// file through another resolver.
-pub fn over<'o, R: Resolve<'o> + ?Sized>(objects: &R, trailer: &'o Dict) -> Vec<Walked<'o>> {
+/// promises ([`a_tree`]), and its page tree ([`both_tables`]): what each gave,
+/// for a caller to set beside the same file through another resolver.
+pub fn over<'o, R: Resolve<'o> + ?Sized>(objects: &R, trailer: &'o Dict) -> Over<'o> {
     let Ok(Some(catalog)) = catalog(objects, trailer) else {
-        return Vec::new();
+        return Over {
+            trees: Vec::new(),
+            pages: None,
+        };
     };
     let roots = roots(objects, catalog);
-    (roots.into_iter().take(ROOTS))
+    let trees = (roots.into_iter().take(ROOTS))
         .map(|(kind, root)| a_tree(objects, root, kind))
-        .collect()
+        .collect();
+    Over {
+        trees,
+        pages: Some(both_tables(objects, catalog)),
+    }
 }
 
 /// `data` as a series of values, the `n`th of them object `n`, read by
@@ -446,7 +624,8 @@ fn values(data: &[u8]) -> BTreeMap<ObjectId, Object> {
 /// The fuzz target's body for the walks: `data` as objects ([`values`]), the
 /// first of them the trailer, over which [`over`] walks what its catalog
 /// holds; and the first of them, whatever they are, each walked as a root of
-/// each kind of tree ([`a_tree`]).
+/// each kind of tree ([`a_tree`]), and each dictionary as a catalog
+/// ([`both_tables`]).
 pub fn walks(data: &[u8]) {
     let objects = values(data);
     let resolve = |id: ObjectId| objects.get(&id);
@@ -456,6 +635,9 @@ pub fn walks(data: &[u8]) {
     for root in objects.values().take(ROOTS) {
         a_tree(&resolve, root, Kind::Names);
         a_tree(&resolve, root, Kind::Numbers);
+        if let Some(catalog) = root.as_dict() {
+            let _ = both_tables(&resolve, catalog);
+        }
     }
 }
 
@@ -501,7 +683,8 @@ pub fn dates(data: &[u8]) {
 }
 
 /// What the fuzzer begins from: objects as [`walks`] reads them, the first
-/// the trailer, in each of a tree's shapes; dates; and a count of seconds.
+/// the trailer, in each of a tree's shapes and a page tree's; dates; and a
+/// count of seconds.
 /// The seeds written for the target are each of these as a file too.
 #[must_use]
 pub fn fixtures() -> Vec<Vec<u8>> {
@@ -539,6 +722,33 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         // Past the depth a tree is read to, by a chain of its own.
         "<< /Root << /PageLabels 2 0 R >> >> << /Kids [3 0 R] >> << /Kids [4 0 R] >> \
          << /Kids [5 0 R] >> << /Limits [0 1] /Nums [0 0 1 1] >>",
+        // A page tree that's well formed, what it inherits at every level.
+        "<< /Root 2 0 R >> << /Type /Catalog /Pages 3 0 R >> \
+         << /Type /Pages /Kids [4 0 R 5 0 R] /Count 3 /MediaBox [0 0 612 792] /Resources 8 0 R >> \
+         << /Type /Pages /Parent 3 0 R /Kids [6 0 R 7 0 R] /Count 2 /Rotate 90 /CropBox [0 0 9 9] >> \
+         << /Type /Page /Parent 3 0 R /UserUnit 2 >> \
+         << /Type /Page /Parent 4 0 R >> \
+         << /Type /Page /Parent 4 0 R /MediaBox [1 2 3 4] /Rotate 180 >> \
+         << >>",
+        // No root /Count, a node's trusted, kids of every kind, direct, by a
+        // chain, listed twice, of another /Type.
+        "<< /Root 2 0 R >> << /Pages 3 0 R >> \
+         << /Kids [4 0 R 4 0 R << /Type /Page >> << /Kids [5 0 R] >> 6 0 R null 7 7 0 R 8 0 R 5 0 R] >> \
+         << /Parent 3 0 R /Kids [5 0 R] /Count 1 >> \
+         << /Type /Page /Parent 3 0 R >> \
+         5 0 R \
+         (a) \
+         << /Type /Foo >>",
+        // A cycle, a /Parent loop, a /Parent in place and by a chain, null over
+        // what's inherited, a /Count past the tree.
+        "<< /Root 2 0 R >> << /Pages 3 0 R >> \
+         << /Type /Pages /Kids [4 0 R 5 0 R 3 0 R] /Count 5 /Rotate 90 >> \
+         << /Type /Page /Parent 5 0 R /Rotate null >> \
+         << /Type /Pages /Parent 4 0 R /Kids [6 0 R 7 0 R] >> \
+         << /Type /Page /Parent << /Parent 8 0 R >> /CropBox 9 0 R >> \
+         << /Type /Pages /Kids [] >> \
+         3 0 R \
+         null",
         // Dates.
         "D:20261024153000-08'00'",
         "D:20261024153000Z00'00'",
@@ -561,9 +771,30 @@ mod tests {
 
     /// A mutation of `seed`, from `random`, as a fuzzer might make it.
     fn mutated(seed: &[u8], random: &mut impl FnMut() -> usize) -> Vec<u8> {
-        const PIECES: [&[u8]; 16] = [
-            b"[", b"]", b"<<", b">>", b"/Kids", b"/Names", b"/Nums", b"/Limits", b"1 0 R",
-            b"2 0 R", b"3 0 R", b"null", b"(a)", b"7", b" ", b"%",
+        const PIECES: [&[u8]; 23] = [
+            b"[",
+            b"]",
+            b"<<",
+            b">>",
+            b"/Kids",
+            b"/Names",
+            b"/Nums",
+            b"/Limits",
+            b"1 0 R",
+            b"2 0 R",
+            b"3 0 R",
+            b"null",
+            b"(a)",
+            b"7",
+            b" ",
+            b"%",
+            b"/Parent",
+            b"/Count",
+            b"/Type",
+            b"/Page",
+            b"/Pages",
+            b"/MediaBox",
+            b"/Rotate",
         ];
         let mut data = seed.to_vec();
         for _ in 0..1 + random() % 4 {
@@ -642,7 +873,9 @@ mod tests {
             .expect("bytes in memory make a document");
         let objects = &document;
         assert_eq!(over(&objects, document.trailer.dict()), read);
-        read.iter().map(|walk| walk.entries.len()).sum()
+        let entries: usize = read.trees.iter().map(|walk| walk.entries.len()).sum();
+        let pages = read.pages.iter().flatten().flatten().map(Pages::len);
+        entries + pages.sum::<usize>()
     }
 
     #[test]
@@ -656,7 +889,10 @@ mod tests {
                 a_file(&mutated(&file, &mut random));
             }
         }
-        assert!(entries > 10, "the seeds' files hold trees: {entries}");
+        assert!(
+            entries > 10,
+            "the seeds' files hold trees and pages: {entries}"
+        );
     }
 
     /// `PDF_SEMANTICS_FUZZ_SEEDS` names a folder: writes the seeds there, each

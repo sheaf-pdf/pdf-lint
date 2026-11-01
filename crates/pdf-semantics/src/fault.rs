@@ -147,4 +147,77 @@ pub enum Fault {
     /// given. Told only to a sink that wants faults.
     #[error("a key is outside its node's /Limits")]
     TreeKeyOutsideLimits,
+    /// A catalog's `/Pages` written in place, where it's an indirect reference
+    /// (7.7.2, Table 29). It's read as any other.
+    #[error("the catalog's /Pages is written in place, not as a reference")]
+    PageTreeRootDirect,
+    /// A `/Parent` on the root of the page tree (7.7.3.2, Table 30).
+    #[error("the root of the page tree has a /Parent")]
+    PageTreeRootParent,
+    /// A page tree with no pages under its root: a node has at least one kid
+    /// and a count of at least 1 (7.7.3.2, with its erratum 271).
+    #[error("the page tree has no pages")]
+    PageTreeEmpty,
+    /// A kid written in place, where `/Kids` holds indirect references
+    /// (7.7.3.2, Table 30). It's read as any other, with no number.
+    #[error("a kid of the page tree is written in place, not as a reference")]
+    PageTreeKidDirect,
+    /// A kid that's null, or a reference to nothing, or to no page object or
+    /// node (7.7.3.2, Table 30, with its erratum 271): it isn't a page, and no
+    /// page's number is taken by it. A stream, whose dictionary is read all
+    /// the same, is said too.
+    #[error("a kid of the page tree isn't a dictionary")]
+    PageTreeKidNotDictionary,
+    /// A reference that names another reference on the page tree's way, where
+    /// 7.3.10 has it name an object, and Tables 30 and 31 say what kind. It's
+    /// followed; readers differ here, PDFium stopping after one or two.
+    #[error("a reference in the page tree names another reference")]
+    PageTreeChain,
+    /// A `/Type` that doesn't say what's there (7.7.3.2, Table 30; 7.7.3.3,
+    /// Table 31): absent, or other than `/Pages` or `/Page`, so `/Kids` says
+    /// which it is; or `/Page` with `/Kids`, a page by its `/Type`; or `/Page`
+    /// at the root, the one page of the tree.
+    #[error("a /Type in the page tree doesn't say what's there")]
+    PageTreeType,
+    /// A node with no kids: `/Kids` absent, or not an array, or empty (7.7.3.2,
+    /// Table 30, with its erratum 271).
+    #[error("a node of the page tree has no kids")]
+    PageTreeNoKids,
+    /// A page or a node that the tree lists again: there's one reference to
+    /// each node (7.7.3.2). A page or a node listed again is walked again,
+    /// numbering its pages again.
+    #[error("the page tree lists {} {} R again", .id.0, .id.1)]
+    PageTreeRepeated {
+        /// The object listed again.
+        id: ObjectId,
+    },
+    /// A node listed inside itself, which by 7.7.3.2 can't be a tree. It isn't
+    /// walked again, so a walk ends.
+    #[error("the page tree lists {} {} R inside itself", .id.0, .id.1)]
+    PageTreeCycle {
+        /// The node.
+        id: ObjectId,
+    },
+    /// A `/Parent` that's absent, or isn't the node that lists it (7.7.3.2,
+    /// Table 30; 7.7.3.3, Table 31). What's inherited still comes up `/Parent`
+    /// (7.7.3.4). Told only to a sink that wants faults.
+    #[error("a /Parent isn't the node that lists it")]
+    PageTreeParent,
+    /// A `/Parent` written in place, where it's an indirect reference (7.7.3.2,
+    /// Table 30; 7.7.3.3, Table 31). It's read as any other.
+    #[error("a /Parent is written in place, not as a reference")]
+    PageTreeParentDirect,
+    /// A `/Parent` chain that comes back to itself: what's inherited stops
+    /// there (7.7.3.4).
+    #[error("a /Parent chain loops")]
+    PageTreeParentLoop,
+    /// A node's `/Count` that isn't the pages found under it, at least 1
+    /// (7.7.3.2, Table 30, with its erratum 271). It isn't what the walk goes
+    /// by. Told only to a sink that wants faults.
+    #[error("a node's /Count isn't the pages under it")]
+    PageTreeCount,
+    /// A page with no `/MediaBox`, its own or inherited, that's an array of
+    /// four (7.7.3.3, Table 31; 7.9.5). Letter stands for it.
+    #[error("a page has no /MediaBox")]
+    PageNoMediaBox,
 }
