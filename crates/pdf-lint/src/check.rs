@@ -8614,4 +8614,274 @@ mod tests {
             }
         });
     }
+
+    /// Whether `key`, a row of a container of its own, is in the name tree
+    /// `root` as `file`'s `fn:InNameTree` reads it.
+    fn in_name_tree<'a, R: Resolve<'a>>(file: &FileCx<'a, R>, root: &Object, key: &[u8]) -> Truth {
+        let container = Object::from(dict! { "T" => root.clone(), "X" => Object::bytes(key) });
+        predicate::holds("fn:InNameTree(T)", &file.at(&container, At::Key(b"X")))
+    }
+
+    /// The keys of the name tree `root` as pdf-semantics walks it, and whether
+    /// it read all of it; what failed the walk is what's left unread.
+    fn name_tree_keys<'a, R: Resolve<'a>>(objects: &R, root: &'a Object) -> (Vec<&'a [u8]>, bool) {
+        let mut walk =
+            pdf_semantics::tree::names(objects, root, &pdf_semantics::Limits::DEFAULT, ());
+        let keys = walk
+            .by_ref()
+            .filter_map(Result::ok)
+            .map(|(key, _)| key)
+            .collect();
+        (keys, walk.whole())
+    }
+
+    /// `fn:InNameTree` holds to what the walk says of the tree `root`: every
+    /// key it gives is in the tree; a key it doesn't give isn't, when it read
+    /// the whole tree, and can't be said not to be when it didn't.
+    fn held_to_the_walk<'a, R: Resolve<'a> + Copy>(
+        trailer: &'a Dict,
+        objects: R,
+        root: &'a Object,
+        what: &str,
+    ) {
+        let (keys, whole) = name_tree_keys(&objects, root);
+        let file = FileCx::new(trailer, Version::new(1, 7), objects);
+        for key in &keys {
+            assert_eq!(
+                in_name_tree(&file, root, key),
+                Truth::True,
+                "{what}: {key:?}"
+            );
+        }
+        let absent = in_name_tree(&file, root, b"\xFFnot among them");
+        if whole {
+            assert_eq!(absent, Truth::False, "{what}");
+        } else {
+            assert_ne!(absent, Truth::False, "{what}");
+        }
+    }
+
+    fn parsed_objects(objects: &[&str]) -> BTreeMap<ObjectId, Object> {
+        let parsed = |text: &&str| {
+            pdf_objects::parse::Parser::at(text.as_bytes(), 0)
+                .value(&mut ())
+                .unwrap()
+        };
+        (1..)
+            .zip(objects)
+            .map(|(n, text)| ((n, 0), parsed(text)))
+            .collect()
+    }
+
+    /// The tree each shape reads as, its root object 1: `fn:InNameTree`, which
+    /// pdf-arlington reads for itself, against pdf-semantics' walk.
+    #[test]
+    fn in_name_tree_holds_to_the_walk_of_every_shape() {
+        let leaf = "<< /Limits [(k) (k)] /Names [(k) 0] >>";
+        let shapes: &[(&str, &[&str])] = &[
+            ("flat", &["<< /Names [(a) 0 (b) 1] >>"]),
+            ("empty", &["<< /Names [] >>"]),
+            (
+                "kids",
+                &[
+                    "<< /Kids [2 0 R 3 0 R] >>",
+                    leaf,
+                    "<< /Limits [(m) (m)] /Names [(m) 0] >>",
+                ],
+            ),
+            ("both", &["<< /Names [(a) 0] /Kids [2 0 R] >>", leaf]),
+            ("neither", &["<< >>"]),
+            (
+                "a node without /Limits",
+                &["<< /Kids [2 0 R] >>", "<< /Names [(a) 0] >>"],
+            ),
+            (
+                "a root with /Limits",
+                &["<< /Limits [(a) (a)] /Names [(a) 0] >>"],
+            ),
+            ("out of order", &["<< /Names [(b) 0 (a) 0 (a) 1] >>"]),
+            (
+                "outside /Limits",
+                &[
+                    "<< /Kids [2 0 R] >>",
+                    "<< /Limits [(x) (y)] /Names [(a) 0] >>",
+                ],
+            ),
+            (
+                "a loop",
+                &[
+                    "<< /Names [(a) 0] /Kids [1 0 R 2 0 R] >>",
+                    "<< /Limits [(k) (k)] /Names [(k) 0] /Kids [1 0 R] >>",
+                ],
+            ),
+            ("listed twice", &["<< /Kids [2 0 R 2 0 R] >>", leaf]),
+            (
+                "a kid written in place",
+                &[
+                    "<< /Kids [<< /Limits [(a) (a)] /Names [(a) 0] >> 2 0 R] >>",
+                    leaf,
+                ],
+            ),
+            (
+                "by reference",
+                &[
+                    "<< /Kids 2 0 R >>",
+                    "[3 0 R]",
+                    "4 0 R",
+                    "<< /Limits [(k) (k)] /Names 5 0 R >>",
+                    "[6 0 R 0]",
+                    "(k)",
+                ],
+            ),
+            (
+                "/Names shared",
+                &[
+                    "<< /Kids [2 0 R 3 0 R] >>",
+                    "<< /Limits [(k) (k)] /Names 4 0 R >>",
+                    "<< /Limits [(k) (k)] /Names 4 0 R >>",
+                    "[(k) 0]",
+                ],
+            ),
+            ("a key of another type", &["<< /Names [1 0 (a) 0] >>"]),
+            ("a null key", &["<< /Names [null 0 (a) 0] >>"]),
+            (
+                "a key that's a reference to nothing",
+                &["<< /Names [9 0 R 0 (a) 0] >>"],
+            ),
+            (
+                "/Names not an array",
+                &["<< /Names (a) /Kids [2 0 R] >>", leaf],
+            ),
+            ("/Kids not an array", &["<< /Names [(a) 0] /Kids 5 >>"]),
+            (
+                "a kid not a dictionary",
+                &["<< /Kids [2 0 R 3 0 R] >>", "5", leaf],
+            ),
+            ("a null kid", &["<< /Kids [null 2 0 R] >>", leaf]),
+            (
+                "a kid that's a reference to nothing",
+                &["<< /Kids [9 0 R 2 0 R] >>", leaf],
+            ),
+            ("a root not a dictionary", &["5"]),
+            ("a null root", &["null"]),
+        ];
+        let trailer = Dict::new();
+        for (what, objects) in shapes {
+            let objects = parsed_objects(objects);
+            let resolve = |id: ObjectId| objects.get(&id);
+            let root = r(1);
+            held_to_the_walk(&trailer, resolve, &root, what);
+        }
+
+        // A reference to nothing at the root, and strings whose bytes the
+        // reader didn't give.
+        let objects: BTreeMap<ObjectId, Object> = BTreeMap::new();
+        let resolve = |id: ObjectId| objects.get(&id);
+        let root = r(1);
+        held_to_the_walk(&trailer, resolve, &root, "no root");
+        let unread = [Str::Encrypted(b"a".to_vec()), Str::Text("a".to_string())].map(|string| {
+            Object::from(dict! {
+                "Names" => vec![
+                    Object::new(Value::String(string, None)),
+                    Object::from(0),
+                    Object::bytes("b"),
+                    Object::from(1),
+                ],
+            })
+        });
+        for root in &unread {
+            held_to_the_walk(&trailer, resolve, root, "a key unread");
+        }
+    }
+
+    /// An odd last key, the one place the two part on what's in a tree:
+    /// `fn:InNameTree` reads it as a key with no value, and the walk, with no
+    /// value to give, says it and isn't whole.
+    #[test]
+    fn in_name_tree_reads_an_odd_last_key_where_the_walk_doesn_t() {
+        let objects = parsed_objects(&["<< /Names [(a) 0 (b)] >>"]);
+        let resolve = |id: ObjectId| objects.get(&id);
+        let root = r(1);
+        let (keys, whole) = name_tree_keys(&&resolve, &root);
+        assert_eq!(keys, [b"a"]);
+        assert!(!whole);
+        let trailer = Dict::new();
+        let file = FileCx::new(&trailer, Version::new(1, 7), &resolve);
+        assert_eq!(in_name_tree(&file, &root, b"a"), Truth::True);
+        assert_eq!(in_name_tree(&file, &root, b"b"), Truth::True);
+        assert_eq!(in_name_tree(&file, &root, b"c"), Truth::False);
+    }
+
+    /// A `/Names` that doesn't read, which only a resolver that says why can
+    /// tell from one that isn't there: the walk isn't whole, and
+    /// `fn:InNameTree`, which reads through `resolve` and can't be told, has
+    /// it as a tree without it, so a key it doesn't hold is false.
+    #[test]
+    fn in_name_tree_can_t_tell_a_names_that_doesn_t_read() {
+        let file = fixture::assembled(
+            "1.7",
+            &[
+                (1, b"<< /Names << /Dests 2 0 R >> >>"),
+                (2, b"<< /Kids [3 0 R 4 0 R] >>"),
+                (3, b"<< /Limits [(a) (a)] /Names [(a) 0] >>"),
+                (4, b"<< /Limits [(k) (k)] /Names 5 0 R >>"),
+                (5, b"[(k) 0"),
+            ],
+            "<< /Root 1 0 R >>",
+        );
+        let reading = bytes::Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let objects = &reading;
+        let root = r(2);
+        let (keys, whole) = name_tree_keys(&objects, &root);
+        assert_eq!(keys, [b"a"]);
+        assert!(!whole, "the walk knows why");
+        let file = FileCx::new(reading.trailer().dict(), Version::new(1, 7), objects);
+        assert_eq!(in_name_tree(&file, &root, b"a"), Truth::True);
+        assert_eq!(in_name_tree(&file, &root, b"k"), Truth::False);
+    }
+
+    /// The name trees of pdf-lint's fixtures, the fuzzer's seeds, over a
+    /// document and over a reading: `fn:InNameTree` holds to the walk on them.
+    #[test]
+    fn in_name_tree_holds_to_the_walk_of_the_fixtures() {
+        let mut trees = 0;
+        for (name, seed) in crate::fuzz::seeds() {
+            let file = &seed[2..];
+            let document = bytes::read(file);
+            let reading = bytes::Reading::open(file, &bytes::Options::DEFAULT).unwrap();
+            let objects = &reading;
+            let trailer = reading.trailer().dict();
+            let Ok(Some(catalog)) = pdf_semantics::catalog(&objects, trailer) else {
+                continue;
+            };
+            let Some(names) = catalog.get(b"Names") else {
+                continue;
+            };
+            let Ok(Some(names)) = pdf_semantics::follow(&objects, names) else {
+                continue;
+            };
+            let Some(names) = names.as_dict() else {
+                continue;
+            };
+            for (key, root) in names.iter() {
+                let what = format!("{name}'s {}", String::from_utf8_lossy(key));
+                held_to_the_walk(trailer, objects, root, &what);
+                trees += 1;
+            }
+            let objects = &document;
+            let trailer = document.trailer.dict();
+            let names = document.catalog().and_then(|catalog| catalog.get(b"Names"));
+            let names =
+                names.and_then(|names| pdf_semantics::follow(&objects, names).ok().flatten());
+            for (key, root) in names
+                .and_then(Object::as_dict)
+                .into_iter()
+                .flat_map(Dict::iter)
+            {
+                let what = format!("{name}'s {} of the document", String::from_utf8_lossy(key));
+                held_to_the_walk(trailer, objects, root, &what);
+            }
+        }
+        assert!(trees >= 1, "the fixtures hold name trees");
+    }
 }

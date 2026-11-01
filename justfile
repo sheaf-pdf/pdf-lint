@@ -265,10 +265,11 @@ arlington-msrv:
 # what its reader read; `content`, pdf-content-streams' tokens, operations,
 # faults, operator table, the balance, marked content and names over them,
 # its writer, content written again and the calls, and its splices and
-# lists written again; or `check`, the reader and the checker. `structure`, `write` and
+# lists written again; `semantics`, pdf-semantics' name and number trees and
+# dates; or `check`, the reader and the checker. `structure`, `write` and
 # `check` begin from the seeds pdf-lint's fuzz module makes, `write`'s with
-# the third byte its input has; `content` from those pdf-content-streams'
-# fuzz module makes. The nightly is `fuzz_toolchain`.
+# the third byte its input has; `content` and `semantics` from those their own
+# crates' fuzz modules make. The nightly is `fuzz_toolchain`.
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.
 fuzz target="tokenize" seconds="60":
@@ -303,13 +304,18 @@ fuzz target="tokenize" seconds="60":
         mkdir -p fuzz/corpus/content
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" content fuzz/corpus/content fuzz/seeds/content -- -dict=fuzz/content.dict -max_total_time={{ seconds }} -timeout=10
         ;;
+    semantics)
+        PDF_SEMANTICS_FUZZ_SEEDS="$PWD/fuzz/seeds/semantics" cargo test --locked -q -p pdf-semantics --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/semantics
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" semantics fuzz/corpus/semantics fuzz/seeds/semantics -- -dict=fuzz/semantics.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
     check)
         PDF_LINT_FUZZ_SEEDS="$PWD/fuzz/seeds/check" cargo test --locked -q -p pdf-lint --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/check
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content or check" >&2
+        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics or check" >&2
         exit 2
         ;;
     esac

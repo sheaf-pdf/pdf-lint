@@ -5,8 +5,8 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF's common structures, read and written: dates, and text strings"
-keywords = ["pdf", "date", "text-string", "iso-32000", "metadata"]
+description = "PDF's common structures, read and written: dates, text strings, and name and number trees"
+keywords = ["pdf", "date", "name-tree", "iso-32000", "metadata"]
 categories = ["parser-implementations", "date-and-time"]
 # Only what users need, so local tooling files can't end up in the package.
 include = ["/src", "/README.md", "/CHANGELOG.md"]
@@ -26,8 +26,10 @@ clock = ["dep:chrono"]
 
 [dev-dependencies]
 # The tests' resolvers: a reading in memory, a reading by position, a document.
-pdf-structure = { path = "../pdf-structure", version = "0.1" }
+pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
 
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

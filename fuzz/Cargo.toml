@@ -1,8 +1,8 @@
 # The fuzz targets, in cargo-fuzz's layout, outside the workspace: they
 # build on nightly with libFuzzer. Locally, `just fuzz tokenize`,
 # `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
-# `just fuzz structure`, `just fuzz write`, `just fuzz content` or
-# `just fuzz check`, or:
+# `just fuzz structure`, `just fuzz write`, `just fuzz content`,
+# `just fuzz semantics` or `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
@@ -52,6 +52,13 @@
 # reading as it did, which two stable unit tests (`mutated_seeds_keep_every_promise`,
 # `random_fragments_keep_every_promise`) run on mutated seeds and random
 # content;
+# `semantics` calls `pdf_semantics::fuzz::walks`, its name and number trees,
+# each walked the same whatever hears its faults, what a plain walk gives,
+# and written, read back, and `pdf_semantics::fuzz::dates`, a date read,
+# written and read back, which three stable unit tests
+# (`mutated_seeds_keep_every_promise`, `random_bytes_keep_every_promise`,
+# `files_read_alike_through_a_reading_and_its_document`) run, the last as a
+# file over a reading and its document, as the target does;
 # `check` calls
 # `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
 # unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
@@ -77,6 +84,9 @@ pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
 # The library alone, without the command line's crates.
 pdf-lint = { path = "../crates/pdf-lint", default-features = false }
 pdf-objects = { path = "../crates/pdf-objects" }
+# With its default features, so the semantics target fuzzes the clock's
+# reading of a count of seconds too.
+pdf-semantics = { path = "../crates/pdf-semantics" }
 pdf-structure = { path = "../crates/pdf-structure", features = ["fixtures"] }
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 
@@ -125,6 +135,13 @@ bench = false
 [[bin]]
 name = "content"
 path = "fuzz_targets/content.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "semantics"
+path = "fuzz_targets/semantics.rs"
 test = false
 doc = false
 bench = false
