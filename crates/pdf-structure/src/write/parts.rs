@@ -22,7 +22,8 @@ pub type Packed<'a> = (ObjectId, ObjectId, &'a Body<'a>);
 /// out itself. What's around them, its numbers among it, is that caller's: the
 /// guards [`full`](super::full) keeps on a file as a whole aren't here (a number
 /// given twice, one its encryptor's file lists free, what's written where a
-/// reader looks for what's in the clear).
+/// reader looks for what's in the clear), and [`Encryptor`] says what comes of
+/// leaving each out.
 pub struct Parts<'w> {
     encrypting: Option<&'w Encrypting<'w>>,
     from: Option<&'w dyn ReadFrom>,

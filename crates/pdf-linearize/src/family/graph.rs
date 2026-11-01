@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_semantics::pages::{Attribute, Inheritable, Origin, Pages, pages};
 use pdf_semantics::{Limits as TreeLimits, Rules, tree};
-use pdf_structure::write::{self, Body};
+use pdf_structure::write::{self, Body, Encryptor};
 use pdf_structure::{Document, Source as _};
 
 use super::{Error, FirstPage, Options, PageTree};
@@ -47,14 +47,23 @@ pub(crate) struct Prepared<'d> {
     /// What's named as a font file.
     font_files: HashSet<ObjectId>,
     /// What's never in an object stream, as only the file tells: pages that are
-    /// no page of the tree, a name dictionary's templates (7.5.7).
+    /// no page of the tree, a name dictionary's templates (7.5.7), and what an
+    /// encryption dictionary refers to, left in the clear.
     kept_out: HashSet<ObjectId>,
+    /// The encryption dictionary, where it's an object, by what the graph knows it
+    /// as, and what its values refer to. It has no body: it's written from the
+    /// encryptor.
+    dictionary: Option<(ObjectId, Vec<ObjectId>)>,
 }
 
 impl<'d> Prepared<'d> {
     /// `doc` read and its page tree's attributes pushed down, as far as nothing
-    /// refuses it.
-    pub(crate) fn of(doc: &'d Document, options: &Options<'_>) -> Result<Prepared<'d>, Error> {
+    /// refuses it, to be written under `encryptor`.
+    pub(crate) fn of(
+        doc: &'d Document,
+        encryptor: Option<&Encryptor>,
+        options: &Options<'_>,
+    ) -> Result<Prepared<'d>, Error> {
         let trailer = doc.trailer.dict();
         // The object that's the catalog, through any references to it: a section's
         // /Root names it, and it's never packed (F.3.1).
@@ -68,8 +77,12 @@ impl<'d> Prepared<'d> {
         limits.pages = limits.pages.max(options.limits.pages);
         let table = pages_agreed(doc, catalog, &limits)?;
 
-        let left = write::encryption_objects(doc, None);
-        let reached = reached(doc);
+        let left = write::encryption_objects(doc, encryptor);
+        let values: Vec<ObjectId> = encryptor.map_or_else(Vec::new, |encryptor| {
+            let values = encryptor.dictionary().entries().iter();
+            values.flat_map(|entry| entry.value.references()).collect()
+        });
+        let reached = reached(doc, &values);
         // A reference to a null object reads as one to none (7.3.10).
         let mut bodies: Vec<(ObjectId, Body<'d>)> = write::bodies(doc)
             .filter(|(id, body)| {
@@ -80,6 +93,19 @@ impl<'d> Prepared<'d> {
                     && !left.contains(id)
             })
             .collect();
+        let dictionary = match encryptor {
+            Some(encryptor) if !encryptor.direct() => {
+                let id = dictionary_id(encryptor, doc, &bodies)?;
+                Some((id, values.clone()))
+            }
+            _ => None,
+        };
+        // What the dictionary refers to stays in the clear, and an object stream
+        // is encrypted (7.6.2).
+        let in_the_clear = encryptor.map_or_else(Vec::new, |encryptor| {
+            let ids = bodies.iter().map(|(id, _)| *id);
+            ids.filter(|&id| encryptor.dictionary_object(id)).collect()
+        });
 
         let page_ids: HashSet<ObjectId> = table.iter().filter_map(|page| page.id).collect();
         pushed_down(&mut bodies, &table)?;
@@ -112,9 +138,16 @@ impl<'d> Prepared<'d> {
             outline: HashSet::new(),
             names: None,
             font_files: HashSet::new(),
-            kept_out: strays.into_iter().collect(),
+            kept_out: strays.into_iter().chain(in_the_clear).collect(),
+            dictionary,
         };
         prepared.document_level(doc, catalog, &limits);
+        // The trailer's /Encrypt and all its values (F.3.5).
+        let named = prepared.dictionary.iter().map(|(id, _)| *id);
+        let written = values.iter().copied();
+        let written = written.filter(|&id| body_of(&prepared.bodies, id).is_some());
+        let encryption: Vec<ObjectId> = named.chain(written).collect();
+        prepared.open.extend(encryption);
         prepared.font_files = font_files(&prepared.bodies);
         Ok(prepared)
     }
@@ -217,6 +250,11 @@ impl<'d> Prepared<'d> {
         body_of(&self.bodies, id)
     }
 
+    /// What the graph knows the encryption dictionary as, where it's an object.
+    pub(super) fn dictionary(&self) -> Option<ObjectId> {
+        self.dictionary.as_ref().map(|(id, _)| *id)
+    }
+
     /// The graph of it, listed by `kind`, what may be packed in object streams
     /// where `pack` says, but `alone`.
     pub(crate) fn graph(&self, kind: Kind, pack: bool, alone: &HashSet<ObjectId>) -> Graph {
@@ -234,6 +272,9 @@ impl<'d> Prepared<'d> {
             (graph.object(*id, refs.iter().copied()))
                 .packable(packable)
                 .late(late);
+        }
+        if let Some((id, values)) = &self.dictionary {
+            graph.object(*id, values.iter().copied());
         }
         self.pages.iter().for_each(|page| graph.page(page.clone()));
         graph.first_page(self.first_page);
@@ -278,13 +319,40 @@ impl<'d> Prepared<'d> {
     }
 }
 
-/// What the trailer's entries reach, as [`Document::reachable`] finds it: but for
-/// a stream's `/Length`, which the writer writes direct, so an object only that
-/// names is one nothing in the file names.
-fn reached(doc: &Document) -> HashSet<ObjectId> {
+/// What the graph knows `encryptor`'s dictionary as: the number it has in the file
+/// it was read from, and no object's here; or, for a new file's, one past every
+/// number an object has or a reference names, so that none comes to name it.
+fn dictionary_id(
+    encryptor: &Encryptor,
+    doc: &Document,
+    bodies: &[(ObjectId, Body<'_>)],
+) -> Result<ObjectId, Error> {
+    if let Some(at) = encryptor.at() {
+        return match body_of(bodies, at) {
+            Some(_) => Err(Error::Write(write::Error::EncryptAt(at.0))),
+            None => Ok(at),
+        };
+    }
+    let trailer = (doc.trailer.dict().entries().iter()).flat_map(|entry| entry.value.references());
+    let named = bodies.iter().flat_map(|(id, body)| {
+        let references = body.object().references();
+        std::iter::once(*id).chain(references)
+    });
+    let last = named.chain(trailer).map(|(n, _)| n).max().unwrap_or(0);
+    match last.checked_add(1) {
+        Some(past) => Ok((past, 0)),
+        None => Err(Error::Write(write::Error::Number(last))),
+    }
+}
+
+/// What the trailer's entries and `values`, an encryption dictionary's, reach, as
+/// [`Document::reachable`] finds it: but for a stream's `/Length`, which the writer
+/// writes direct, so an object only that names is one nothing in the file names.
+fn reached(doc: &Document, values: &[ObjectId]) -> HashSet<ObjectId> {
     let trailer = write::trailer_entries(doc.trailer.dict(), &());
     let mut stack: Vec<ObjectId> = (trailer.entries().iter())
         .flat_map(|entry| entry.value.references())
+        .chain(values.iter().copied())
         .collect();
     let mut seen: HashSet<ObjectId> = stack.iter().copied().collect();
     let mut see = |id: ObjectId, stack: &mut Vec<ObjectId>| {

@@ -51,8 +51,11 @@ pub enum Method {
     /// as a writer that renumbers its objects does: it's encrypted with
     /// that object's keystream, and the XOR of the two ciphertexts, one in
     /// each file or both in the updated one, is the XOR of the two
-    /// plaintexts, for every object moved onto another's number. A writer
-    /// that doesn't want that writes the file whole under a new AES-256
+    /// plaintexts, for every object moved onto another's number. Laid out
+    /// for reading over a network (ISO 32000-2, Annex F), a file's objects
+    /// all move, onto numbers that run from 1 without a gap, so that's every
+    /// one of them, a number its file listed free among them. A writer that
+    /// doesn't want that writes the file whole under a new AES-256
     /// encryption ([`Handler::create`]), which leaks neither way: its key
     /// is new, and its IVs differ for different data.
     Rc4,

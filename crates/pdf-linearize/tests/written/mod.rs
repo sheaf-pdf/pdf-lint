@@ -4,7 +4,57 @@
 #![allow(dead_code)]
 
 use pdf_linearize::family::Options;
-use pdf_structure::XrefKind;
+use pdf_structure::bytes::{self, Reading};
+use pdf_structure::write::{self, Encryptor};
+use pdf_structure::{Password, XrefKind};
+
+/// The keys of a file qpdf encrypted, each with its empty user password: one of
+/// each of the standard handler's revisions.
+pub const KEYS: [(&str, &[u8]); 5] = [
+    (
+        "RC4-40",
+        include_bytes!("../../../pdf-structure/tests/files/qpdf-rc4-40.pdf"),
+    ),
+    (
+        "RC4-128",
+        include_bytes!("../../../pdf-structure/tests/files/qpdf-rc4-128.pdf"),
+    ),
+    (
+        "AES-128",
+        include_bytes!("../../../pdf-structure/tests/files/qpdf-aes-128.pdf"),
+    ),
+    (
+        "AES-256 R5",
+        include_bytes!("../../../pdf-structure/tests/files/qpdf-aes-256-r5.pdf"),
+    ),
+    (
+        "AES-256",
+        include_bytes!("../../../pdf-structure/tests/files/qpdf-aes-256.pdf"),
+    ),
+];
+
+/// The reading of `bytes`, by the empty password or `password`.
+pub fn opened<'b>(bytes: &'b [u8], password: &str) -> Reading<&'b [u8]> {
+    let options = &bytes::Options::DEFAULT;
+    match password {
+        "" => Reading::open(bytes, options).unwrap(),
+        password => Reading::open_with(bytes, &[Password(password)], options).unwrap(),
+    }
+}
+
+/// `plain`'s objects as a whole file under `key`'s encryption, its dictionary at
+/// 1000, so every number from the last object's to it is listed free.
+pub fn encrypted_as(key: &[u8], plain: &[u8]) -> Vec<u8> {
+    let key = opened(key, "");
+    let encryptor = Encryptor::of(&key).unwrap().unwrap();
+    let reading = opened(plain, "");
+    let doc = reading.to_document().unwrap();
+    let mut options = write::Options::DEFAULT;
+    options.encrypt_at = Some((1000, 0));
+    let mut out = Vec::new();
+    write::document(&mut out, &doc, Some(&encryptor), Some(&reading), &options).unwrap();
+    out
+}
 
 /// A file of `objects`, numbered from 1, under a table, with `trailer` beside its
 /// `/Size`.

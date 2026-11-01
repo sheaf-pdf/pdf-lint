@@ -26,7 +26,7 @@
 )]
 #![cfg_attr(
     feature = "family",
-    doc = "  by pdf-semantics, each body through pdf-structure's writer, copied where it can be."
+    doc = "  by pdf-semantics, each body through pdf-structure's writer, copied where it can be, encrypted as the file was or under a new key."
 )]
 //!
 //! Its caps are one value, [`Limits`]. With no features there's no object model

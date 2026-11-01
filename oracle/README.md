@@ -109,7 +109,8 @@ asked through a one-page PDF made around the case.
   doesn't open.
 - `avail`: a whole file (`.pdf`), given PDFium only as its availability API
   (`FPDFAvail_*`) asks for it, from its first 1,024 bytes on, with the bytes it
-  took counted. The answer is `FPDFAvail_IsLinearized`; what `IsDocAvail` came to
+  took counted, and opened by its password (`.password`, the bytes
+  `FPDFAvail_GetDocument` is given) where there's one. The answer is `FPDFAvail_IsLinearized`; what `IsDocAvail` came to
   and the bytes taken by then; `no-document` where it doesn't load; else the count
   of pages and the first page, then, `;` between them, for the first page and then
   the others up to 64, what `IsPageAvail` came to, the bytes that took and the page's

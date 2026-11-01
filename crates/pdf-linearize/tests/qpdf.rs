@@ -15,12 +15,18 @@ mod written;
 /// What qpdf says of `bytes` by `check`: its exit code and all it wrote, the file's
 /// path as `FILE`.
 fn asked(name: &str, bytes: &[u8], check: &str) -> (i32, String) {
+    asked_by(name, bytes, check, "")
+}
+
+/// [`asked`], the file opened by `password`.
+fn asked_by(name: &str, bytes: &[u8], check: &str, password: &str) -> (i32, String) {
     let qpdf = std::env::var_os("PDF_LINT_QPDF").unwrap_or_else(|| "qpdf".into());
     let folder = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(folder).unwrap();
     let path = folder.join(format!("linearize-{name}.pdf"));
     std::fs::write(&path, bytes).unwrap();
     let output = Command::new(qpdf)
+        .arg(format!("--password={password}"))
         .arg(check)
         .arg(&path)
         .output()
@@ -208,11 +214,14 @@ fn many_pages_under_another_first_page_warn_only_of_that() {
 mod family {
     use std::collections::BTreeSet;
 
-    use pdf_linearize::family::{Options, linearize_bytes};
-    use pdf_structure::XrefKind;
+    use chacha20::ChaCha20Rng;
+    use pdf_linearize::family::{Options, linearize, linearize_bytes};
+    use pdf_structure::pdf_crypt::rand_core::SeedableRng;
+    use pdf_structure::write::Encryptor;
+    use pdf_structure::{Password, XrefKind};
 
-    use super::written::{built, kinds, stream, two_pages};
-    use super::{HINT_LAST, asked};
+    use super::written::{KEYS, built, encrypted_as, kinds, opened, stream, two_pages};
+    use super::{HINT_LAST, asked_by};
 
     /// `text`'s warnings, each once, its numbers `N`.
     fn classes(text: &str) -> BTreeSet<String> {
@@ -239,15 +248,27 @@ mod family {
     /// Both of qpdf's checks on each of `kinds`' file of `objects`, each kind's
     /// classes as `table`, `stream` or `packed` says, and no other.
     fn holds(name: &str, bytes: &[u8], table: &[&str], packed: &[&str]) {
+        let out = |options: &Options<'_>| linearize_bytes(bytes, &[], options).unwrap();
+        holds_as(name, out, "", table, packed);
+    }
+
+    /// [`holds`], of what `written` writes in each kind, opened by `password`.
+    fn holds_as(
+        name: &str,
+        written: impl Fn(&Options<'_>) -> Vec<u8>,
+        password: &str,
+        table: &[&str],
+        packed: &[&str],
+    ) {
         for (at, options) in kinds().iter().enumerate() {
-            let out = linearize_bytes(bytes, &[], options).unwrap();
+            let out = written(options);
             let name = format!("{name}-{at}");
             let wanted: BTreeSet<String> = (if options.pack { packed } else { table })
                 .iter()
                 .map(|class| class.to_string())
                 .collect();
             for check in ["--check-linearization", "--check"] {
-                let (code, text) = asked(&name, &out, check);
+                let (code, text) = asked_by(&name, &out, check, password);
                 assert_eq!(classes(&text), wanted, "{name} {check}: {text}");
                 assert_eq!(
                     code,
@@ -279,6 +300,30 @@ mod family {
         objects.push("<< /Names [(a) [4 0 R /Fit]] >>".into());
         objects.push("<< /Type /XObject /Mine true >>".into());
         holds("outline", &built(&objects), &[], &[HINT_LAST]);
+    }
+
+    #[test]
+    #[ignore = "needs qpdf: just test-qpdf"]
+    fn encrypted_files_are_as_clean_under_each_handler_and_a_new_key() {
+        let plain = built(&two_pages(""));
+        for (name, key) in KEYS {
+            let name = name.replace(' ', "-");
+            holds(&name, &encrypted_as(key, &plain), &[], &[HINT_LAST]);
+        }
+        // A new encryption, by its password: over a plain reading, and an RC4 one.
+        let prepared = Password("user").prepared().unwrap();
+        let new = Encryptor::create(&prepared, true, &mut ChaCha20Rng::seed_from_u64(15)).unwrap();
+        let sources = [plain.clone(), encrypted_as(KEYS[1].1, &plain)];
+        for (at, source) in sources.iter().enumerate() {
+            let written = |options: &Options<'_>| {
+                let reading = opened(source, "");
+                let doc = reading.to_document().unwrap();
+                let mut out = Vec::new();
+                linearize(&mut out, &doc, Some(&new), Some(&reading), options).unwrap();
+                out
+            };
+            holds_as(&format!("new-{at}"), written, "user", &[], &[HINT_LAST]);
+        }
     }
 
     #[test]

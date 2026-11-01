@@ -12,3 +12,9 @@ broken-hint-short	avail	broken-hint-short.pdf
 broken-hint-past	avail	broken-hint-past.pdf
 broken-shared-past	avail	broken-shared-past.pdf
 not-linearized	avail	not-linearized.pdf
+encrypted-qpdf-rc4	avail	encrypted-qpdf-rc4.password,encrypted-qpdf-rc4.pdf
+encrypted-qpdf-aes-256	avail	encrypted-qpdf-aes-256.password,encrypted-qpdf-aes-256.pdf
+encrypted-wrong-password	avail	encrypted-wrong-password.password,encrypted-wrong-password.pdf
+encrypted-no-password	avail	encrypted-no-password.pdf
+encrypted-written-rc4	avail	encrypted-written-rc4.password,encrypted-written-rc4.pdf
+encrypted-written-aes-256	avail	encrypted-written-aes-256.password,encrypted-written-aes-256.pdf

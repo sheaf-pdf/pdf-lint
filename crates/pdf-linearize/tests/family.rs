@@ -13,7 +13,7 @@ use pdf_objects::version::Version;
 use pdf_semantics::Rules;
 use pdf_semantics::pages::{Inheritable, Origin, pages};
 use pdf_structure::bytes::{self, Reading};
-use pdf_structure::{Document, Password, Source as _, XrefKind, write};
+use pdf_structure::{Document, Source as _, XrefKind, write};
 
 mod written;
 use written::{ROOT, built, file, kinds, stream, two_pages};
@@ -737,21 +737,6 @@ fn a_table_is_not_packed() {
     options.pack = true;
     let refused = linearized(&built(&two_pages("")), &options).unwrap_err();
     assert!(matches!(refused, Error::Write(write::Error::PackedTable)));
-}
-
-#[test]
-fn an_encrypted_reading_is_refused_for_now() {
-    // Encrypted by qpdf, with the empty password its user's.
-    let bytes = include_bytes!("../../pdf-structure/tests/files/qpdf-aes-256.pdf");
-    let (reading, doc) = read(bytes);
-    let mut out = vec![7];
-    let refused = family::linearize(&mut out, &doc, None, Some(&reading), &table()).unwrap_err();
-    assert!(matches!(refused, Error::Encrypted));
-    assert_eq!(out, [7]);
-    let refused = family::linearize_bytes(bytes, &[], &table()).unwrap_err();
-    assert!(matches!(refused, Error::Encrypted));
-    let refused = family::linearize_bytes(bytes, &[Password("wrong")], &table()).unwrap_err();
-    assert!(matches!(refused, Error::Locked));
 }
 
 #[test]

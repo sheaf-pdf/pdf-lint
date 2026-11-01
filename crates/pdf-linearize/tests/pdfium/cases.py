@@ -3,7 +3,13 @@ kind oracle/README.md describes as `avail`: a whole file, given PDFium only as i
 availability API asks for it, the answer the bytes each stage took. Every case's
 bytes are made here, by a layout of its own (ISO 32000-2, Annex F), written apart
 from the crate's so that neither grades the other; oracle/pdfium.py's `cases`
-writes them into cases/ and cases.tsv."""
+writes them into cases/ and cases.tsv. But for the encrypted ones, as this makes no
+cipher of its own: encrypted/ has many-pages encrypted by qpdf 12.4.2 (`qpdf
+--encrypt user owner 128 --use-aes=n -- --linearize --static-id`, and `256` with
+`--static-aes-iv`), and those as the crate lays them out (tests/encrypted.rs writes
+them)."""
+
+import os
 
 
 class Bits:
@@ -261,6 +267,12 @@ def plain():
     return bytes(out)
 
 
+def encrypted(name):
+    """The file of that name in encrypted/."""
+    with open(os.path.join(os.path.dirname(__file__), "encrypted", name + ".pdf"), "rb") as f:
+        return f.read()
+
+
 def cases():
     pad = [40, 2000, 3000, 4000, 900, 8000, 40, 2500]
     return [
@@ -277,4 +289,12 @@ def cases():
         ("broken-hint-past", "avail", {"pdf": linearized(pages=8, sizes=pad, broken="hint-past")}),
         ("broken-shared-past", "avail", {"pdf": linearized(pages=8, sizes=pad, broken="hint-shared-past")}),
         ("not-linearized", "avail", {"pdf": plain()}),
+        ("encrypted-qpdf-rc4", "avail", {"pdf": encrypted("qpdf-rc4"), "password": b"user"}),
+        ("encrypted-qpdf-aes-256", "avail", {"pdf": encrypted("qpdf-aes-256"), "password": b"user"}),
+        ("encrypted-wrong-password", "avail", {"pdf": encrypted("qpdf-rc4"), "password": b"wrong"}),
+        ("encrypted-no-password", "avail", {"pdf": encrypted("qpdf-rc4")}),
+        ("encrypted-written-rc4", "avail",
+         {"pdf": encrypted("written-rc4-table"), "password": b"user"}),
+        ("encrypted-written-aes-256", "avail",
+         {"pdf": encrypted("written-aes-256-packed"), "password": b"user"}),
     ]

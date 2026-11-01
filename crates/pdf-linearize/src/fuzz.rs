@@ -1080,19 +1080,19 @@ pub fn graphs(data: &[u8]) {
     }
 }
 
-/// Any bytes as a file, read and written again in the three kinds: where it's
-/// written, it reads linearized, with the same pages, and every object the plan
-/// numbers is the same value at its number under the numbering, a stream's data
-/// the same; on any refusal, `out` as it was.
+/// Any bytes as a file, read and written again in the three kinds: in the clear; as
+/// it's encrypted, where it is, and a password opens it; and now and then, by the
+/// input's length, under a new encryption. Where it's written, it reads linearized by
+/// its password, with the same pages, and every object the plan numbers is the same
+/// value at its number under the numbering, a stream's data the same; on any refusal,
+/// `out` as it was.
 #[cfg(feature = "family")]
 pub fn over(data: &[u8]) {
-    use pdf_objects::Value;
-    use pdf_semantics::Rules;
-    use pdf_semantics::pages::{Inheritable, Origin, pages};
     use pdf_structure::XrefKind;
     use pdf_structure::bytes::{self, Reading};
+    use pdf_structure::write::Encryptor;
 
-    use crate::family::{self, graph::Prepared};
+    use crate::family;
 
     let Ok(reading) = Reading::open(data, &bytes::Options::DEFAULT) else {
         return;
@@ -1100,6 +1100,11 @@ pub fn over(data: &[u8]) {
     let Ok(doc) = reading.to_document() else {
         return;
     };
+    let own = Encryptor::of(&reading).ok().flatten();
+    let new = (data.len() % 8 == 0).then(|| {
+        let password = pdf_structure::Password(NEW).prepared().ok()?;
+        Encryptor::create(&password, data.len() % 16 == 0, &mut Drawn::over(data)).ok()
+    });
     for (kind, stream, pack) in [
         (Kind::Table, XrefKind::Table, false),
         (Kind::Stream, XrefKind::Stream, false),
@@ -1109,61 +1114,155 @@ pub fn over(data: &[u8]) {
         options.kind = stream;
         options.pack = pack;
         options.threads = 1;
-        let mut out = b"before".to_vec();
-        let written = family::linearize(&mut out, &doc, None, Some(&reading), &options);
-        let Ok(done) = written else {
-            assert_eq!(out, b"before");
-            continue;
-        };
-        assert_eq!(out.len() as u64 - 6, done.layout.len());
-        let file = &out[6..];
-        let again = Reading::open(file, &bytes::Options::DEFAULT).expect("it reads");
-        assert!(again.facts().linearized);
-        let back = again.to_document().expect("it reads whole");
+        written_back(&reading, &doc, None, "", kind, &options);
+        if let Some(own) = &own {
+            written_back(&reading, &doc, Some(own), "", kind, &options);
+        }
+        if let Some(Some(new)) = &new {
+            written_back(&reading, &doc, Some(new), NEW, kind, &options);
+        }
+    }
+}
 
-        let prepared = Prepared::of(&doc, &options).expect("it was written");
-        let planned = plan(
-            &prepared.graph(kind, pack, &Default::default()),
-            &options.limits,
-        );
-        let planned = planned.expect("it was planned");
-        let limits = pdf_semantics::Limits::DEFAULT;
-        let root = back
-            .trailer
-            .dict()
-            .get(b"Root")
-            .and_then(|root| root.as_reference());
-        let catalog = root
-            .and_then(|root| back.get_dict(root))
-            .expect("it has a catalog");
-        let listed = pages(&back, catalog, Rules::Iso, &limits, &mut ()).expect("it has pages");
-        assert_eq!(listed.len(), planned.page_count() as usize);
-        for page in &listed {
-            for attribute in [
-                Inheritable::Resources,
-                Inheritable::MediaBox,
-                Inheritable::CropBox,
-                Inheritable::Rotate,
-            ] {
-                if let Some(attribute) = page.attribute(attribute) {
-                    assert_eq!(attribute.origin, Origin::Own, "it's pushed down");
-                }
+/// The password of what [`over`] writes under a new encryption.
+#[cfg(feature = "family")]
+const NEW: &str = "new";
+
+/// What [`over`] holds of `doc`, written under `encryptor` as `options` says, which
+/// `password` opens, or the empty one.
+#[cfg(feature = "family")]
+fn written_back<S: pdf_structure::ByteSource>(
+    reading: &pdf_structure::Reading<S>,
+    doc: &pdf_structure::Document,
+    encryptor: Option<&pdf_structure::write::Encryptor>,
+    password: &str,
+    kind: Kind,
+    options: &crate::family::Options<'_>,
+) {
+    use pdf_objects::Value;
+    use pdf_semantics::Rules;
+    use pdf_semantics::pages::{Inheritable, Origin, pages};
+    use pdf_structure::Encryption;
+    use pdf_structure::bytes::{self, Reading};
+    use pdf_structure::write::Encryptor;
+
+    use crate::family::{self, graph::Prepared};
+
+    let mut out = b"before".to_vec();
+    let written = family::linearize(&mut out, doc, encryptor, Some(reading), options);
+    let Ok(done) = written else {
+        assert_eq!(out, b"before");
+        return;
+    };
+    assert_eq!(out.len() as u64 - 6, done.layout.len());
+    let file = &out[6..];
+    let passwords = [pdf_structure::Password(password)];
+    let passwords: &[_] = if password.is_empty() { &[] } else { &passwords };
+    let again = Reading::open_with(file, passwords, &bytes::Options::DEFAULT).expect("it reads");
+    assert!(again.facts().linearized);
+    assert_eq!(
+        matches!(again.encryption(), Encryption::Opened { .. }),
+        encryptor.is_some(),
+        "{:?}",
+        again.encryption()
+    );
+    let back = again.to_document().expect("it reads whole");
+
+    let pack = options.pack && encryptor.is_none_or(Encryptor::packs);
+    let prepared = Prepared::of(doc, encryptor, options).expect("it was written");
+    let planned = plan(
+        &prepared.graph(kind, pack, &Default::default()),
+        &options.limits,
+    );
+    let planned = planned.expect("it was planned");
+    let limits = pdf_semantics::Limits::DEFAULT;
+    let root = back
+        .trailer
+        .dict()
+        .get(b"Root")
+        .and_then(|root| root.as_reference());
+    let catalog = root
+        .and_then(|root| back.get_dict(root))
+        .expect("it has a catalog");
+    let listed = pages(&back, catalog, Rules::Iso, &limits, &mut ()).expect("it has pages");
+    assert_eq!(listed.len(), planned.page_count() as usize);
+    for page in &listed {
+        for attribute in [
+            Inheritable::Resources,
+            Inheritable::MediaBox,
+            Inheritable::CropBox,
+            Inheritable::Rotate,
+        ] {
+            if let Some(attribute) = page.attribute(attribute) {
+                assert_eq!(attribute.origin, Origin::Own, "it's pushed down");
             }
         }
-        for (id, body) in prepared.bodies() {
-            let (number, _) = planned.number(*id).expect("it was given");
-            let Ok(object) = again.get((number, 0)) else {
-                panic!("{id:?} isn't at {number}");
-            };
-            same_under(body.object(), object, &planned);
-            if let (Value::Stream(_), Value::Stream(_)) = (body.object().value(), object.value()) {
-                if let (Ok(before), Ok(after)) = (reading.data(*id), again.data((number, 0))) {
-                    assert_eq!(before, after, "{id:?}'s data");
-                }
+    }
+    for (id, body) in prepared.bodies() {
+        let (number, _) = planned.number(*id).expect("it was given");
+        let Ok(object) = again.get((number, 0)) else {
+            panic!("{id:?} isn't at {number}");
+        };
+        same_under(body.object(), object, &planned);
+        if let (Value::Stream(_), Value::Stream(_)) = (body.object().value(), object.value()) {
+            if let (Ok(before), Ok(after)) = (reading.data(*id), again.data((number, 0))) {
+                assert_eq!(before, after, "{id:?}'s data");
             }
         }
     }
 }
+
+/// A new encryption's draws, in a fuzz body or a test alone: the input's bytes, then a
+/// counter's. It's no cryptographic generator, but says it is so that
+/// [`Encryptor::create`](pdf_structure::write::Encryptor::create) takes it.
+#[cfg(feature = "family")]
+struct Drawn<'a> {
+    data: &'a [u8],
+    counter: u8,
+}
+
+#[cfg(feature = "family")]
+impl Drawn<'_> {
+    fn over(data: &[u8]) -> Drawn<'_> {
+        Drawn { data, counter: 0 }
+    }
+}
+
+#[cfg(feature = "family")]
+impl pdf_structure::pdf_crypt::rand_core::TryRng for Drawn<'_> {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        let mut bytes = [0; 4];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        let mut bytes = [0; 8];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+        for byte in dst {
+            *byte = match self.data.split_first() {
+                Some((&first, rest)) => {
+                    self.data = rest;
+                    first
+                }
+                None => {
+                    self.counter = self.counter.wrapping_add(1);
+                    self.counter
+                }
+            };
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "family")]
+impl pdf_structure::pdf_crypt::rand_core::TryCryptoRng for Drawn<'_> {}
 
 /// Whether `written`, read back, is `value` under `planned`'s numbers: a reference
 /// to what it doesn't number reads null.
@@ -1322,7 +1421,43 @@ mod tests {
             options.pack = pack;
             seeds.push(crate::family::linearize_bytes(&all, &[], &options).unwrap());
         }
+        // Encrypted, by each of the handler's revisions, where the crate beside it
+        // has the files qpdf encrypted, and as it lays them out.
+        let keys =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../pdf-structure/tests/files");
+        for key in ["rc4-40", "rc4-128", "aes-128", "aes-256-r5", "aes-256"] {
+            let Ok(key) = std::fs::read(keys.join(format!("qpdf-{key}.pdf"))) else {
+                continue;
+            };
+            let mut encrypted = encrypted_as(&key, &all);
+            seeds.push(key);
+            let mut options = crate::family::Options::DEFAULT;
+            options.kind = pdf_structure::XrefKind::Stream;
+            options.pack = true;
+            let laid_out = crate::family::linearize_bytes(&encrypted, &[], &options);
+            seeds.push(std::mem::take(&mut encrypted));
+            seeds.push(laid_out.unwrap());
+        }
         seeds
+    }
+
+    /// `plain`'s objects as a whole file under `key`'s encryption, its dictionary at a
+    /// number past them.
+    #[cfg(feature = "family")]
+    fn encrypted_as(key: &[u8], plain: &[u8]) -> Vec<u8> {
+        use pdf_structure::bytes::{self, Reading};
+        use pdf_structure::write::{self, Encryptor};
+
+        let options = &bytes::Options::DEFAULT;
+        let key = Reading::open(key, options).unwrap();
+        let encryptor = Encryptor::of(&key).unwrap().unwrap();
+        let reading = Reading::open(plain, options).unwrap();
+        let doc = reading.to_document().unwrap();
+        let mut written = write::Options::DEFAULT;
+        written.encrypt_at = Some((100, 0));
+        let mut out = Vec::new();
+        write::document(&mut out, &doc, Some(&encryptor), Some(&reading), &written).unwrap();
+        out
     }
 
     /// The family adapter's body, on files, whole and damaged.
@@ -1332,7 +1467,7 @@ mod tests {
         let mut random = generator(0x1234_5678_9ABC_DEF1);
         for seed in file_seeds() {
             over(&seed);
-            for _ in 0..200 {
+            for _ in 0..100 {
                 let mut hit = seed.clone();
                 for _ in 0..1 + random() % 4 {
                     let at = (random() % hit.len() as u64) as usize;

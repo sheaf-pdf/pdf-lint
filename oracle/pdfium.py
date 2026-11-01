@@ -286,10 +286,10 @@ class Pdfium:
         return out.raw[:max(n - 2, 0)].decode("utf-16le", "replace").encode("utf-8")
 
 
-    def avail(self, data):
+    def avail(self, data, password=None):
         """A file given PDFium only as its availability API asks, its first
-        1,024 bytes to start with: what each stage took, the words `avail_answer`
-        writes."""
+        1,024 bytes to start with, opened by `password` if there is one: what each
+        stage took, the words `avail_answer` writes."""
         lib = self.lib
         have = bytearray(len(data))
         got = [0]
@@ -337,7 +337,7 @@ class Pdfium:
         out = ["linearized", str(lib.FPDFAvail_IsLinearized(handle))]
         said = until(lambda: lib.FPDFAvail_IsDocAvail(handle, ctypes.byref(hints)))
         out += ["doc", str(said), "open", str(got[0])]
-        doc = lib.FPDFAvail_GetDocument(handle, None) if said == 1 else None
+        doc = lib.FPDFAvail_GetDocument(handle, password) if said == 1 else None
         if not doc:
             lib.FPDFAvail_Destroy(handle)
             return out + ["no-document", "got", str(got[0]), "of", str(len(data))]
@@ -414,7 +414,7 @@ def answer(pdfium, kind, files):
     if kind == "pages":
         return pages_answer(pdfium.pages(files["pdf"]))
     if kind == "avail":
-        return " ".join(pdfium.avail(files["pdf"]))
+        return " ".join(pdfium.avail(files["pdf"], files.get("password")))
     raise SystemExit("unknown kind %r" % kind)
 
 

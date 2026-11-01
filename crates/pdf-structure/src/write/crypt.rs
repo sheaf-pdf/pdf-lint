@@ -42,6 +42,15 @@ use crate::source::Encryption;
 /// [`Encryptor::dictionary_object`] says is the encryption dictionary's;
 /// and numbers no object but that one there, as what's there is left in
 /// the clear.
+///
+/// A caller a layout binds otherwise can't keep the rule on free numbers: a
+/// linearized file's sections list none free but 0, and its numbers run from
+/// 1 without a gap (ISO 32000-2, F.3.1, F.3.4, F.3.11). It writes objects at
+/// those numbers and lists none. Moving every object, it has reused every
+/// number's key by then, not only those, under keys made per object: under
+/// RC4, what pdf-crypt's `Method::Rc4` says of an object at a number another
+/// had holds of each one. So it says so to its own callers, and points them
+/// to [`Encryptor::create`], a new key.
 #[derive(Clone)]
 pub struct Encryptor {
     handler: Handler,
