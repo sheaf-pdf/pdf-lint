@@ -60,6 +60,9 @@
 //!   taken as it was read, its [`Record`]'s; a document read whole is
 //!   copied so once a reading of its file opened again takes its objects
 //!   as its own ([`Reading::adopt`]).
+//! - **Bodies written one at a time** ([`write::Parts`]), for a caller that
+//!   lays a file out itself: each at the number it gives, under the one
+//!   encryption it's given, copied where that's the key it was read under.
 //! - **Sections and object streams written** ([`write`](mod@write)): a
 //!   whole file's cross-reference section or an update's, as a table or a
 //!   stream, a whole file's stream deflated under PNG's Up predictor; and

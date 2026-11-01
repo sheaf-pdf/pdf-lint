@@ -5200,6 +5200,87 @@ fn objects_at_offsets_are_copied_under_their_own_reading_s_encryption_alone() {
     }
 }
 
+/// What [`write::Parts`] copies follows from the one encryption it's given: a
+/// reading in the clear, written encrypted, is written anew, none of it in the
+/// clear; a reading encrypted, written under a new key, anew, none of the old
+/// key's ciphertext; under its own encryption, renumbered or made whole or not, and
+/// in the clear from a reading in the clear, copied.
+#[test]
+fn parts_copy_only_what_is_encrypted_under_the_key_it_was_read_under() {
+    use chacha20::ChaCha20Rng;
+
+    let prepared = Password("new").prepared().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(14);
+    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+
+    // Written object by object, whether each is what it was read from.
+    fn each_copied<'a, S: ByteSource + 'a>(
+        reading: &'a Reading<S>,
+        doc: &crate::Document,
+        encrypting: Option<&'a write::Encrypting<'a>>,
+    ) -> (Vec<u8>, Vec<bool>) {
+        let from: &dyn write::ReadFrom = reading;
+        let parts = write::Parts::new(encrypting, Some(from), None).unwrap();
+        let (mut all, mut copied) = (Vec::new(), Vec::new());
+        for (id, body) in write::bodies(doc) {
+            let write::Body::Read { record, .. } = &body else {
+                panic!("{id:?} is as read");
+            };
+            let mut out = Vec::new();
+            parts.body(&mut out, id, id, &body).unwrap();
+            copied.push(out.starts_with(&reading.written(record.at).unwrap()));
+            all.extend_from_slice(&out);
+        }
+        (all, copied)
+    }
+
+    // In the clear, read and written: all copied.
+    let plain = spelled();
+    let reading = open(&plain);
+    let doc = reading.to_document().unwrap();
+    let (_, copied) = each_copied(&reading, &doc, None);
+    assert!(copied.iter().all(|copied| *copied), "{copied:?}");
+
+    // In the clear, written encrypted: none copied, and nothing to read.
+    let held = &doc;
+    let encrypting = created.encrypting(doc.trailer.dict(), &held).unwrap();
+    let (out, copied) = each_copied(&reading, &doc, Some(&encrypting));
+    assert!(!copied.iter().any(|copied| *copied), "{copied:?}");
+    assert!(!holds(&out, b"48656C6C6F") && !holds(&out, b"0 0 m 1.5 l"));
+
+    for kind in KINDS_ENCRYPTED {
+        let source = written_otherwise(kind, true);
+        let reading = opened(&source, "user");
+        let doc = reading.to_document().unwrap();
+        let held = &doc;
+        let trailer = doc.trailer.dict();
+
+        // Under a new key: nothing with a string or data in it copied.
+        let encrypting = created.encrypting(trailer, &held).unwrap();
+        let (out, _) = each_copied(&reading, &doc, Some(&encrypting));
+        for text in SECRETS {
+            assert!(!in_clear(&out, text), "{kind:?}");
+        }
+        for id in [(2, 0), (3, 0)] {
+            let record = doc.record(id).unwrap();
+            let read = reading.written(record.at).unwrap();
+            assert!(!holds(&out, &read), "{kind:?}: {id:?}, the old key's");
+        }
+
+        // Under its own, made a whole file's, as it's read: copied.
+        let own = Encryptor::of(&reading).unwrap().unwrap();
+        let whole = own.whole(own.at());
+        let encrypting = whole.encrypting(trailer, &held).unwrap();
+        let (_, copied) = each_copied(&reading, &doc, Some(&encrypting));
+        assert!(copied.iter().any(|copied| *copied), "{kind:?}");
+
+        // In the clear, from what's encrypted: none copied.
+        let (out, copied) = each_copied(&reading, &doc, None);
+        assert!(!copied.iter().any(|copied| *copied), "{kind:?}: {copied:?}");
+        assert!(holds(&out, CONTENT), "{kind:?}");
+    }
+}
+
 /// Rule 2, the list: under `/EncryptMetadata false`, the document's
 /// metadata stream, its data in the clear, once the catalog names another
 /// is written anew, encrypted, under the reading's own encryption: copied,

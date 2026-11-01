@@ -72,6 +72,11 @@ pub struct Encryptor {
     /// The reading it was made of, whose objects it encrypts as the
     /// reading's file has them: none for a new file's.
     source: Option<SourceId>,
+    /// What it left in the clear in the numbers it was read in, where
+    /// [`Encryptor::renumbered`] or [`Encryptor::whole`] has made `list` another
+    /// file's, so that what's written under it says which of a reading's
+    /// objects are encrypted as they're read.
+    read_list: Option<Box<List>>,
 }
 
 /// Where an encryption dictionary was.
@@ -139,6 +144,7 @@ impl Encryptor {
                     free,
                     per_object,
                     source: Some(reading.id()),
+                    read_list: None,
                 }))
             }
             _ => Err(Error::Locked),
@@ -173,6 +179,7 @@ impl Encryptor {
             free: BTreeMap::new(),
             per_object: false,
             source: None,
+            read_list: None,
         })
     }
 
@@ -234,6 +241,7 @@ impl Encryptor {
             return Cow::Borrowed(self);
         }
         let mut whole = self.clone();
+        whole.keep_read_list();
         whole.list.dictionaries.retain(|id| !named(id));
         whole.list.sections = at.into_iter().collect();
         Cow::Owned(whole)
@@ -281,6 +289,7 @@ impl Encryptor {
             return Cow::Borrowed(self);
         }
         let mut renumbered = self.clone();
+        renumbered.keep_read_list();
         let translated =
             |ids: &HashSet<ObjectId>| ids.iter().filter_map(|&id| to.renumber(id)).collect();
         renumbered.list.dictionaries = translated(&list.dictionaries);
@@ -299,6 +308,19 @@ impl Encryptor {
     /// write under it may copy as their bytes: none for a new file's.
     pub(super) fn read_in(&self) -> Option<SourceId> {
         self.source
+    }
+
+    /// `list`, kept as what it was read in, before it's made another file's.
+    fn keep_read_list(&mut self) {
+        if self.read_list.is_none() {
+            self.read_list = Some(Box::new(self.list.clone()));
+        }
+    }
+
+    /// What it leaves in the clear in the numbers it was read in, whichever
+    /// file it's since been made for.
+    fn as_read(&self) -> &List {
+        self.read_list.as_deref().unwrap_or(&self.list)
     }
 
     /// Whether any method of its makes keys per object (RC4, AES-128: its
@@ -548,6 +570,11 @@ pub enum Unencryptable {
 }
 
 impl<'a> Encrypting<'a> {
+    /// The encryption it's of, in the numbers written.
+    pub(super) fn encryptor(&self) -> &'a Encryptor {
+        self.encryptor
+    }
+
     /// Whether object `obj`, which the reading `read` was made of read at
     /// `id`, written here at `at`, is encrypted by this as that reading
     /// decrypted it: its strings by the same rule, the list asked of each
@@ -568,7 +595,7 @@ impl<'a> Encrypting<'a> {
     where
         'a: 'o,
     {
-        let (now, then) = (&self.encryptor.list, &read.list);
+        let (now, then) = (&self.encryptor.list, read.as_read());
         if now.encrypted(at) != then.encrypted(id) {
             return false;
         }

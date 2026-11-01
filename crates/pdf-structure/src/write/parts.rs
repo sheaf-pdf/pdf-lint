@@ -9,7 +9,7 @@ use pdf_objects::serialize::Renumber;
 
 use super::copy::{Copying, Member, written};
 use super::full::containers;
-use super::{Body, Deflate, Encrypting, Encryptor, Error, Numbering, ReadFrom};
+use super::{Body, Deflate, Encrypting, Error, Numbering, ReadFrom};
 
 /// An object stream's member as [`Parts::containers`] takes it: the number it's
 /// given at, the number it's written at, and its body.
@@ -33,18 +33,20 @@ pub struct Parts<'w> {
 
 impl<'w> Parts<'w> {
     /// What writes bodies: `encrypting` what encrypts them, none for a file in
-    /// the clear; `encryptor` the encryption as it was given, a reading's before
-    /// it's renumbered or made a whole file's, which says what's copied; `from`
-    /// the reading the objects were read in; `to` where each goes, none for each
-    /// at the number it's given at. Refused where `from`'s source says its bytes
-    /// aren't those it was read from ([`Error::Changed`]), or can't tell
+    /// the clear; `from` the reading the objects were read in; `to` where each
+    /// goes, none for each at the number it's given at. What's copied follows from
+    /// those: in the clear, what `from` holds in the clear; encrypted, only what's
+    /// encrypted under the key it was read under, so an `encrypting` of an
+    /// [`Encryptor::of`] `from`, renumbered and made whole or not. Under any other
+    /// key each object is written anew. Refused where `from`'s source says its
+    /// bytes aren't those it was read from ([`Error::Changed`]), or can't tell
     /// ([`Error::Io`]).
     pub fn new(
         encrypting: Option<&'w Encrypting<'w>>,
-        encryptor: Option<&'w Encryptor>,
         from: Option<&'w dyn ReadFrom>,
         to: Option<&'w (dyn Renumber + Sync + 'w)>,
     ) -> Result<Parts<'w>, Error> {
+        let encryptor = encrypting.map(Encrypting::encryptor);
         let copying = from.map(|from| Copying::new(from, encryptor)).transpose()?;
         Ok(Parts::of(encrypting, from, copying, Numbering(to)))
     }

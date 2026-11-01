@@ -180,7 +180,8 @@ impl<'w> Copying<'w> {
         // own number, or where no key is made of the number, at any.
         let keeps = match &self.offsets {
             Offsets::No => false,
-            Offsets::Plain => true,
+            // A reading in the clear, written encrypted, is written anew.
+            Offsets::Plain => encrypting.is_none(),
             Offsets::Same { read, metadata } => {
                 (at == id || !read.per_object())
                     && encrypting.is_some_and(|e| {

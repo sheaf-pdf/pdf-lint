@@ -459,8 +459,7 @@ impl Writing<'_, '_> {
             .transpose()
             .map_err(Error::Write)?;
         let encrypting = encrypting.as_ref();
-        let parts =
-            Parts::new(encrypting, self.encryptor, self.from, Some(&to)).map_err(Error::Write)?;
+        let parts = Parts::new(encrypting, self.from, Some(&to)).map_err(Error::Write)?;
         then(&parts, now, encrypting)
     }
 }
