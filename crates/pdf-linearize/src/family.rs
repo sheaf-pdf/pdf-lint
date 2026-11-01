@@ -14,12 +14,14 @@
 //!
 //! - **Inheritable attributes are pushed down** (F.3.7, F.3.10): each page gets
 //!   what it inherited, as it was written, a reference staying one, and each page
-//!   tree node loses it. A page or node that needs neither is copied as read.
+//!   tree node loses it, so a page the tree doesn't list gets what it inherited from
+//!   such a node too. A page or node that needs neither is copied as read.
 //! - **What the trailer doesn't reach isn't written**, nor object streams,
 //!   cross-reference streams and a linearization dictionary, as under
 //!   [`write::document`]; nor an object only a stream's `/Length` names, which the
-//!   writer writes direct, nor a null object, a reference to which reads the same
-//!   as one to none (7.3.10) and is written `null`.
+//!   writer writes direct, nor a null object, nor an object that's only a reference
+//!   that ends at one of those or at nothing, a reference to any of which reads the
+//!   same as one to none (7.3.10) and is written `null`.
 //! - **The header** is the document's, at least 1.5 where a stream lists the
 //!   file, unless [`Options::version`] says.
 //!
@@ -29,7 +31,8 @@
 //! depend on which pages a viewer finds, so a tree that gives a page no place of
 //! its own isn't laid out ([`Error::PageTree`]): a place with no page at it, a page
 //! written in place or listed twice, a tree PDFium's rules and ISO's read as other
-//! pages, or a page they read an inheritable attribute of differently, as pushing
+//! pages, or a page they read an inheritable attribute of differently, or that
+//! reads otherwise going down `/Kids` from the root than up its `/Parent`s, as pushing
 //! one value down would change the other's page. So is a document no password
 //! opened ([`Error::Locked`]), whose strings and streams are still what the file
 //! holds, and whose key there's none of.
@@ -88,6 +91,7 @@ use pdf_structure::{Encryption, Password, XrefKind};
 
 use crate::Limits;
 use crate::layout::{self, Encoded, Layout, Piece, Stream, StreamKind, assemble};
+pub use crate::plan::FirstPage;
 use crate::plan::{self, Kind, Plan, What, plan};
 
 mod facts;
@@ -150,19 +154,6 @@ impl Default for Options<'_> {
     }
 }
 
-/// Which page goes first, in part 6, as the dictionary's `/P` says (F.3.7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum FirstPage {
-    /// The page the catalog's `/OpenAction` opens at, a destination or a `/GoTo`
-    /// action's, named or not; page 0 where it opens at no page of this file.
-    #[default]
-    OpenAction,
-    /// This page, from 0: past the last it's refused
-    /// ([`plan::Error::FirstPagePast`]).
-    Index(u32),
-}
-
 /// What was written, beside the file's bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -210,6 +201,16 @@ pub enum PageTree {
     /// ISO's, as pushing it down would change one reader's page.
     #[error("/{attribute} of page {page} reads otherwise by PDFium's rules than by ISO 32000-2's")]
     Attribute {
+        /// The place.
+        page: usize,
+        /// The attribute's key.
+        attribute: &'static str,
+    },
+    /// An inheritable attribute of a page that reads otherwise going down `/Kids`
+    /// from the root than up its `/Parent`s, where a page's `/Parent` isn't the node
+    /// that lists it, as pushing it down would change one reader's page.
+    #[error("/{attribute} of page {page} reads otherwise going down /Kids than up /Parent")]
+    Kids {
         /// The place.
         page: usize,
         /// The attribute's key.
@@ -282,7 +283,9 @@ pub fn linearize(
 }
 
 /// [`linearize`], `lap` told as each stage ends: `graph`, `plan`, `bodies`,
-/// `assemble` and `whole`, so a timing can say where it went.
+/// `assemble` and `whole`, so a timing can say where it went. For a timing's own build:
+/// nothing of a caller's.
+#[cfg(any(test, feature = "timing"))]
 #[doc(hidden)]
 pub fn linearize_timed(
     out: &mut Vec<u8>,

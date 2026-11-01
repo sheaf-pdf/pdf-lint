@@ -66,6 +66,19 @@ pub enum Kind {
     Stream,
 }
 
+/// Which page goes first, in part 6, as the dictionary's `/P` says (F.3.7): what an
+/// adapter's options take, which [`Graph::first_page`] is then told as a place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum FirstPage {
+    /// The page the catalog's `/OpenAction` opens at, a destination or a `/GoTo`
+    /// action's, named or not; page 0 where it opens at no page of this file.
+    #[default]
+    OpenAction,
+    /// This page, from 0: past the last it's refused ([`Error::FirstPagePast`]).
+    Index(u32),
+}
+
 /// The objects of a part that are grouped for a table of the hint stream, in the
 /// order they're laid out (F.3.10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

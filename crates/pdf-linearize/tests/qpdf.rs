@@ -395,7 +395,7 @@ mod lopdf {
     fn holds(name: &str, bytes: &[u8], wanted: &[&str]) {
         let doc = Document::load_mem(bytes).unwrap();
         let mut out = Vec::new();
-        linearize(&doc, &mut out).unwrap();
+        linearize(&mut out, &doc, &pdf_linearize::lopdf::Options::DEFAULT).unwrap();
         let wanted: BTreeSet<String> = wanted.iter().map(|class| class.to_string()).collect();
         for check in ["--check-linearization", "--check"] {
             let (code, text) = asked_by(name, &out, check, "");

@@ -9,7 +9,7 @@ use chacha20::ChaCha20Rng;
 use lopdf::{Document, Object as LopdfObject, dictionary};
 use pdf_linearize::family::{self, Options};
 use pdf_linearize::lopdf::{self as adapter, Error, PageTree};
-use pdf_linearize::plan::plan;
+use pdf_linearize::plan::{self, plan};
 use pdf_linearize::{Limits, Verdict};
 use pdf_objects::object::{Object, ObjectId, Value};
 use pdf_structure::bytes::{self, Reading};
@@ -28,7 +28,7 @@ fn loaded(bytes: &[u8]) -> Document {
 /// `bytes` read by lopdf and written by the adapter.
 fn laid_out(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
-    adapter::linearize(&loaded(bytes), &mut out).map(|_| out)
+    adapter::linearize(&mut out, &loaded(bytes), &adapter::Options::DEFAULT).map(|_| out)
 }
 
 /// What `written` holds by the check, whatever a sink wants.
@@ -237,7 +237,7 @@ fn with_info(file: Vec<u8>) -> Vec<u8> {
 fn a_file_reads_back_with_its_pages_and_objects_and_holds() {
     let bytes = built(&two_pages(""));
     let mut out = Vec::new();
-    let layout = adapter::linearize(&loaded(&bytes), &mut out).unwrap();
+    let layout = adapter::linearize(&mut out, &loaded(&bytes), &adapter::Options::DEFAULT).unwrap();
     assert_eq!(out.len() as u64, layout.len());
     holds(&out);
     let (reading, doc) = read_back(&out);
@@ -262,7 +262,7 @@ fn a_file_reads_back_with_its_pages_and_objects_and_holds() {
 fn what_s_written_doesn_t_depend_on_what_s_in_out_already() {
     let bytes = built(&two_pages(""));
     let mut out = b"before".to_vec();
-    adapter::linearize(&loaded(&bytes), &mut out).unwrap();
+    adapter::linearize(&mut out, &loaded(&bytes), &adapter::Options::DEFAULT).unwrap();
     assert_eq!(&out[..6], b"before");
     assert_eq!(out[6..], laid_out(&bytes).unwrap());
 }
@@ -277,9 +277,13 @@ fn it_writes_the_same_bytes_each_time() {
 fn its_graph_is_what_it_plans_by() {
     let bytes = built(&two_pages(""));
     let doc = loaded(&bytes);
-    let plan = plan(&adapter::graph(&doc).unwrap(), &Limits::DEFAULT).unwrap();
+    let plan = plan(
+        &adapter::graph(&doc, &adapter::Options::DEFAULT).unwrap(),
+        &Limits::DEFAULT,
+    )
+    .unwrap();
     let mut out = Vec::new();
-    let layout = adapter::linearize(&doc, &mut out).unwrap();
+    let layout = adapter::linearize(&mut out, &doc, &adapter::Options::DEFAULT).unwrap();
     let at = layout.position(plan.number((3, 0)).unwrap().0).unwrap() as usize;
     let number = plan.number((3, 0)).unwrap().0;
     assert!(out[at..].starts_with(format!("{number} 0 obj").as_bytes()));
@@ -387,7 +391,7 @@ fn inherited_attributes_go_down_to_the_pages_and_off_the_nodes() {
     let before = loaded(&bytes);
     let after = before.clone();
     let mut out = Vec::new();
-    adapter::linearize(&after, &mut out).unwrap();
+    adapter::linearize(&mut out, &after, &adapter::Options::DEFAULT).unwrap();
     assert_eq!(before.objects, after.objects);
 }
 
@@ -397,7 +401,7 @@ fn a_node_only_a_parent_names_is_one_and_loses_what_it_held() {
     let objects = [
         CATALOG,
         "<< /Type /Pages /Parent 4 0 R /Kids [3 0 R] /Count 1 >>",
-        "<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>",
+        "<< /Type /Page /Parent 2 0 R /Contents 5 0 R /Rotate 90 /MediaBox [0 0 9 9] /Resources << >> >>",
         "<< /Type /Pages /Rotate 90 /MediaBox [0 0 9 9] /Resources << >> /Mine 1 >>",
         &stream("", "0 0 m"),
     ];
@@ -432,7 +436,7 @@ fn a_parent_is_read_as_the_family_reads_one_though_it_s_a_stream_or_a_reference(
     let root = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
     let own = "/MediaBox [0 0 9 9] /Resources << >>";
     // A stream that holds /Kids is a node: nothing walks into it, and it loses what it held.
-    let page = format!("<< /Type /Page /Parent 4 0 R {own} >>");
+    let page = format!("<< /Type /Page /Parent 4 0 R /Rotate 90 {own} >>");
     let node = stream("/Kids [] /Rotate 90 /Mine 5 0 R", "data");
     let held = "<< /Mark (only the stream names this) >>";
     let bytes = file(&[CATALOG, root, &page, &node, held], ROOT);
@@ -448,10 +452,11 @@ fn a_parent_is_read_as_the_family_reads_one_though_it_s_a_stream_or_a_reference(
         page.unwrap().get(b"Rotate").unwrap(),
         &LopdfObject::Integer(90)
     );
-    // One that doesn't is no node, and keeps what a page inherits from it.
-    let page = "<< /Type /Page /Parent 4 0 R /MediaBox [0 0 9 9] >>";
-    let form = stream("/Resources << /Mine true >>", "data");
-    numbers_are_the_family_s(&file(&[CATALOG, root, page, &form], ROOT));
+    // One that doesn't is no node, and keeps what it holds.
+    let page = "<< /Type /Page /Parent 4 0 R /MediaBox [0 0 9 9] /Resources 5 0 R >>";
+    let form = stream("/Resources 5 0 R", "data");
+    let resources = "<< /Mine true >>";
+    numbers_are_the_family_s(&file(&[CATALOG, root, page, &form, resources], ROOT));
     // An object that's a reference to a node is that node.
     let page = format!("<< /Type /Page /Parent 4 0 R {own} >>");
     let node = "<< /Kids [] /Mine 6 0 R >>";
@@ -509,7 +514,7 @@ fn a_stream_s_length_by_reference_in_a_document_built_by_hand_isn_t_followed() {
     let content = doc.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
     content.dict.set("Length", length);
     let mut out = Vec::new();
-    adapter::linearize(&doc, &mut out).unwrap();
+    adapter::linearize(&mut out, &doc, &adapter::Options::DEFAULT).unwrap();
     holds(&out);
     // Hexadecimal, as a string is here.
     assert!(!out.windows(12).any(|w| w == b"6C656E677468"));
@@ -656,7 +661,7 @@ fn the_id_is_as_the_document_holds_it() {
 fn refused(objects: &[&str]) -> Error {
     let doc = loaded(&file(objects, ROOT));
     let mut out = b"given".to_vec();
-    let why = adapter::linearize(&doc, &mut out).unwrap_err();
+    let why = adapter::linearize(&mut out, &doc, &adapter::Options::DEFAULT).unwrap_err();
     assert_eq!(out, b"given");
     assert!(!why.to_string().is_empty());
     why
@@ -849,6 +854,215 @@ fn a_null_nearer_a_page_than_a_value_is_refused_as_the_family_s_is() {
 }
 
 #[test]
+fn what_going_down_kids_reads_otherwise_than_up_parent_is_refused_as_the_family_s_is() {
+    let root = "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>";
+    let node = |under: u32, width: u32| {
+        format!(
+            "<< /Type /Pages /Parent 2 0 R /Kids [{under} 0 R] /Count 1 /MediaBox [0 0 {width} {width}] >>"
+        )
+    };
+    let page = |parent: u32| format!("<< /Type /Page /Parent {parent} 0 R /Resources << >> >>");
+    let (a, b, c, d) = (node(5, 100), node(6, 200), page(4), page(3));
+    let apart = file(&[CATALOG, root, &a, &b, &c, &d], ROOT);
+    assert!(matches!(
+        laid_out(&apart),
+        Err(Error::PageTree(PageTree::Kids {
+            page: 0,
+            attribute: "MediaBox"
+        }))
+    ));
+    assert!(matches!(
+        family::linearize_bytes(&apart, &[], &Options::DEFAULT),
+        Err(family::Error::PageTree(family::PageTree::Kids {
+            page: 0,
+            attribute: "MediaBox"
+        }))
+    ));
+    // The same value at either place is what it was by either way.
+    let (a, b) = (node(5, 100), node(6, 100));
+    let alike = file(&[CATALOG, root, &a, &b, &c, &d], ROOT);
+    holds(&laid_out(&alike).unwrap());
+    same_numbers_as_the_family(&alike);
+    let above = [
+        CATALOG,
+        "<< /Type /Pages /Parent 4 0 R /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /Resources << >> >>",
+        "<< /Type /Pages /MediaBox [0 0 9 9] >>",
+    ];
+    assert!(matches!(
+        refused(&above),
+        Error::PageTree(PageTree::Kids {
+            page: 0,
+            attribute: "MediaBox"
+        })
+    ));
+}
+
+#[test]
+fn an_object_that_s_only_a_reference_to_nothing_has_no_body_and_no_entry() {
+    let root = "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 9 9] /Resources << >> >>";
+    let later = "<< /Type /Page /Parent 2 0 R /X 6 0 R >>";
+    let start = [CATALOG, root, PAGE, later, later];
+    let shapes: [&[&str]; 5] = [
+        &["99 0 R"],
+        &["7 0 R", "null"],
+        &["7 0 R", "8 0 R", "null"],
+        &["7 0 R", "6 0 R"],
+        &["7 0 R", "<< /Linearized 1 >>"],
+    ];
+    for shape in shapes {
+        let objects: Vec<&str> = start.iter().chain(shape).copied().collect();
+        let bytes = file(&objects, ROOT);
+        let out = laid_out(&bytes).unwrap();
+        holds(&out);
+        same_numbers_as_the_family(&bytes);
+        let (_, doc) = read_back(&out);
+        assert!(
+            !doc.objects().any(|(_, object)| object.is_null()),
+            "{shape:?}"
+        );
+    }
+}
+
+#[test]
+fn a_parent_that_s_a_page_keeps_what_it_holds_and_nothing_s_said_of_it() {
+    let own = "/MediaBox [0 0 9 9] /Resources << >>";
+    let root = "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>";
+    let page = format!("<< /Type /Page /Parent 2 0 R {own} >>");
+    let under_page = format!("<< /Type /Page /Parent 3 0 R {own} >>");
+    let bytes = file(&[CATALOG, root, &page, &under_page], ROOT);
+    holds(&laid_out(&bytes).unwrap());
+    same_numbers_as_the_family(&bytes);
+}
+
+#[test]
+fn a_page_the_tree_doesn_t_list_gets_what_it_inherited_from_a_node_that_loses_it() {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R /Foo 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 9 9] /Resources 5 0 R /Rotate 90 >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 3 3] /Mark (stray) >>",
+        "<< /Mark (resources) >>",
+    ];
+    let bytes = file(&objects, ROOT);
+    let out = laid_out(&bytes).unwrap();
+    holds(&out);
+    same_numbers_as_the_family(&bytes);
+    let (_, doc) = read_back(&out);
+    let stray = doc.objects().find_map(|(_, object)| {
+        let dict = object.as_dict()?;
+        (text(dict.get(b"Mark")?) == b"stray").then_some(dict)
+    });
+    let stray = stray.unwrap();
+    assert_eq!(stray.get(b"Rotate").unwrap().as_integer(), Some(90));
+    assert!(stray.has(b"Resources"));
+}
+
+/// `objects` as a file: what lopdf holds of them, the adapter's refusal, `family`'s too.
+fn refused_as_the_family_refuses(objects: &[&str]) -> Error {
+    let why = refused(objects);
+    assert!(family::linearize_bytes(&file(objects, ROOT), &[], &Options::DEFAULT).is_err());
+    why
+}
+
+#[test]
+fn what_the_tree_is_read_by_that_doesn_t_read_is_refused_as_the_family_s_is() {
+    let unread = |objects: &[&str]| {
+        assert!(
+            matches!(
+                refused_as_the_family_refuses(objects),
+                Error::PageTree(PageTree::Unread { .. })
+            ),
+            "{objects:?}"
+        );
+    };
+    let own = "/MediaBox [0 0 9 9] /Resources << >>";
+    let root = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
+    // A page's own value, in a loop, of itself and by way of another.
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 9] /Resources 4 0 R >>";
+    unread(&[CATALOG, root, page, "4 0 R"]);
+    unread(&[CATALOG, root, page, "5 0 R", "4 0 R"]);
+    // Past the chain's limit, where lopdf's own limit is further.
+    let mut chain: Vec<String> = (4..4 + 40)
+        .map(|number| format!("{} 0 R", number + 1))
+        .collect();
+    chain.push("<< >>".to_string());
+    let mut objects = vec![CATALOG, root, page];
+    objects.extend(chain.iter().map(String::as_str));
+    unread(&objects);
+    // A node's, whether or not a page takes it.
+    let node = "<< /Type /Pages /Kids [3 0 R] /Count 1 /Rotate 4 0 R >>";
+    let page = format!("<< /Type /Page /Parent 2 0 R {own} >>");
+    unread(&[CATALOG, node, &page, "4 0 R"]);
+    let root = "<< /Type /Pages /Kids [3 0 R] /Count 1 /Rotate 4 0 R >>";
+    let page = format!("<< /Type /Page /Parent 2 0 R {own} /Rotate 90 >>");
+    unread(&[CATALOG, root, &page, "4 0 R"]);
+    let root = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
+    // /Kids, /Type and a /Parent.
+    let kids = "<< /Type /Pages /Kids 4 0 R /Count 1 >>";
+    unread(&[CATALOG, kids, &page, "4 0 R"]);
+    let kind = format!("<< /Type 4 0 R /Parent 2 0 R {own} >>");
+    unread(&[CATALOG, root, &kind, "4 0 R"]);
+    let parent = format!("<< /Type /Page /Parent 4 0 R {own} >>");
+    unread(&[CATALOG, root, &parent, "4 0 R"]);
+    // A box's corner, and a unit, which a reader goes on to read.
+    let corner = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 4 0 R] /Resources << >> >>";
+    unread(&[CATALOG, root, corner, "4 0 R"]);
+    let unit = format!("<< /Type /Page /Parent 2 0 R {own} /UserUnit 4 0 R >>");
+    unread(&[CATALOG, root, &unit, "4 0 R"]);
+    // Naming nothing isn't that: it's absent.
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 9] /Resources 9 0 R >>";
+    let bytes = file(&[CATALOG, root, page], ROOT);
+    laid_out(&bytes).unwrap();
+}
+
+#[test]
+fn a_tree_past_its_depth_going_down_is_refused_as_the_family_s_is() {
+    let mut objects = vec![CATALOG.to_string()];
+    for number in 2..1100 {
+        objects.push(format!(
+            "<< /Type /Pages /Kids [{} 0 R] /Count 1 >>",
+            number + 1
+        ));
+    }
+    objects.push("<< /Type /Page /MediaBox [0 0 9 9] /Resources << >> >>".to_string());
+    let objects: Vec<&str> = objects.iter().map(String::as_str).collect();
+    assert!(matches!(
+        refused_as_the_family_refuses(&objects),
+        Error::PageTree(PageTree::TooDeep)
+    ));
+}
+
+#[test]
+fn nothing_written_leaves_the_options_unused() {
+    // A first page the options name, as the family's do.
+    let bytes = built(&written::two_pages(""));
+    let mut options = adapter::Options::DEFAULT;
+    options.first_page = adapter::FirstPage::Index(1);
+    let mut out = Vec::new();
+    adapter::linearize(&mut out, &loaded(&bytes), &options).unwrap();
+    assert!(checked(&out).0.holds);
+    let mut family = Options::DEFAULT;
+    family.first_page = family::FirstPage::Index(1);
+    let theirs = family::linearize_bytes(&bytes, &[], &family).unwrap();
+    assert_eq!(numbers(&out).len(), numbers(&theirs).len());
+    options.first_page = adapter::FirstPage::Index(2);
+    let past = adapter::linearize(&mut Vec::new(), &loaded(&bytes), &options);
+    assert!(matches!(
+        past,
+        Err(Error::Plan(plan::Error::FirstPagePast { .. }))
+    ));
+    // Caps the options lower.
+    let mut options = adapter::Options::DEFAULT;
+    options.limits.pages = 1;
+    let over = adapter::linearize(&mut Vec::new(), &loaded(&bytes), &options);
+    assert!(matches!(
+        over,
+        Err(Error::Plan(plan::Error::TooManyPages { .. }))
+    ));
+}
+
+#[test]
 fn a_chain_of_parents_too_long_to_follow_is_refused() {
     // A chain past the depth, the page at its foot; the root lists it directly.
     let mut objects = vec![
@@ -876,7 +1090,7 @@ fn no_catalog_and_no_pages_are_refused() {
     let doc = loaded(&bytes);
     let mut out = Vec::new();
     assert!(matches!(
-        adapter::linearize(&doc, &mut out),
+        adapter::linearize(&mut out, &doc, &adapter::Options::DEFAULT),
         Err(Error::NoCatalog)
     ));
     let node = "<< /Type /Pages /Kids [] /Count 0 >>";
@@ -887,11 +1101,14 @@ fn no_catalog_and_no_pages_are_refused() {
 fn refused_as_encrypted(doc: &Document) {
     let mut out = b"given".to_vec();
     assert!(matches!(
-        adapter::linearize(doc, &mut out),
+        adapter::linearize(&mut out, doc, &adapter::Options::DEFAULT),
         Err(Error::Encrypted)
     ));
     assert_eq!(out, b"given");
-    assert!(matches!(adapter::graph(doc), Err(Error::Encrypted)));
+    assert!(matches!(
+        adapter::graph(doc, &adapter::Options::DEFAULT),
+        Err(Error::Encrypted)
+    ));
 }
 
 #[test]
@@ -951,7 +1168,7 @@ fn a_real_past_what_a_file_can_hold_is_refused() {
     let mut doc = loaded(&built(&two_pages("")));
     doc.catalog_mut().unwrap().set("Bad", f32::INFINITY);
     let mut out = Vec::new();
-    let why = adapter::linearize(&doc, &mut out).unwrap_err();
+    let why = adapter::linearize(&mut out, &doc, &adapter::Options::DEFAULT).unwrap_err();
     assert!(matches!(why, Error::NonFinite { id: (1, 0) }), "{why}");
     assert!(out.is_empty());
 }
@@ -968,7 +1185,7 @@ fn a_stream_lopdf_couldn_t_read_is_refused_not_written_empty() {
     assert!(stream.content.is_empty());
     let mut out = Vec::new();
     assert!(matches!(
-        adapter::linearize(&doc, &mut out),
+        adapter::linearize(&mut out, &doc, &adapter::Options::DEFAULT),
         Err(Error::UnreadStream { id: (5, 0) })
     ));
     assert!(out.is_empty());
@@ -1005,7 +1222,7 @@ fn a_document_built_in_lopdf_is_laid_out() {
     let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
     doc.trailer.set("Root", catalog);
     let mut out = Vec::new();
-    adapter::linearize(&doc, &mut out).unwrap();
+    adapter::linearize(&mut out, &doc, &adapter::Options::DEFAULT).unwrap();
     holds(&out);
     assert!(out.starts_with(b"%PDF-1.5\n"));
 }

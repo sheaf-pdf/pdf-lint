@@ -196,6 +196,14 @@ fn what_holds_is_what_the_cases_are_there_for() {
         (findings.iter()).any(|f| matches!(f, Finding::HintNotListed { .. })),
         "{findings:?}"
     );
+    let (_, verdict, findings) = checked("broken-first-past");
+    assert!(verdict.linearized && !verdict.holds, "{findings:?}");
+    assert!(
+        findings.contains(&Finding::BadValue {
+            key: pdf_linearize::check::DictKey::P
+        }),
+        "{findings:?}"
+    );
     let (_, verdict, findings) = checked("broken-shared-past");
     assert!(verdict.linearized && !verdict.holds, "{findings:?}");
     assert!(

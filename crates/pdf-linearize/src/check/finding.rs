@@ -428,7 +428,7 @@ pub enum Finding {
     },
     /// The page tree didn't read, or has no pages, so nothing depending on it can
     /// be said (F.3.7).
-    #[error("the page tree gives no pages (ISO 32000-2, F.3.7)")]
+    #[error("the page tree gives no pages, or doesn't read (ISO 32000-2, F.3.7)")]
     NoPages,
     /// The first page's object isn't among what the first section lists.
     #[error(

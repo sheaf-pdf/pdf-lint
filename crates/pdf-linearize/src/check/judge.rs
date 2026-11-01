@@ -274,7 +274,13 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             Raw::Absent => {}
             Raw::Reference(_) => self.say(Finding::Indirect { key: DictKey::P })?,
             raw if number(raw).is_none() => self.say(Finding::BadValue { key: DictKey::P })?,
-            _ => {}
+            // A first page that isn't one of the pages: PDFium takes the file as not
+            // linearized, and a reader has no entry to start from.
+            raw => {
+                if number(first.n).is_some_and(|n| n > 0 && number(raw) >= Some(n)) {
+                    self.say(Finding::BadValue { key: DictKey::P })?;
+                }
+            }
         }
         if first.h == Raw::Array && !matches!(first.h_items.len(), 2 | 4) {
             self.say(Finding::HintItems {

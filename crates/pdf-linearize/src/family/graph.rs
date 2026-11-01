@@ -2,7 +2,7 @@
 //! down, and for each what it refers to, what it is, and where it belongs.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_semantics::pages::{Attribute, Inheritable, Origin, Pages, pages};
@@ -20,6 +20,10 @@ const INHERITED: [(Inheritable, &str); 4] = [
     (Inheritable::CropBox, "CropBox"),
     (Inheritable::Rotate, "Rotate"),
 ];
+
+/// How far up a page's `/Parent`s are followed for what it inherits, as pdf-semantics
+/// has it by default.
+const DEPTH: usize = 1024;
 
 /// The keys that name a font file (9.9).
 const FONT_FILES: [&[u8]; 3] = [b"FontFile", b"FontFile2", b"FontFile3"];
@@ -83,14 +87,9 @@ impl<'d> Prepared<'d> {
             values.flat_map(|entry| entry.value.references()).collect()
         });
         let reached = reached(doc, &values);
-        // A reference to a null object reads as one to none (7.3.10).
         let mut bodies: Vec<(ObjectId, Body<'d>)> = write::bodies(doc)
             .filter(|(id, body)| {
-                let object = body.object();
-                reached.contains(id)
-                    && !object.is_null()
-                    && !write::left_out(object)
-                    && !left.contains(id)
+                reached.contains(id) && !left.contains(id) && !no_body(doc, body.object(), &left)
             })
             .collect();
         let dictionary = match encryptor {
@@ -110,9 +109,11 @@ impl<'d> Prepared<'d> {
         let page_ids: HashSet<ObjectId> = table.iter().filter_map(|page| page.id).collect();
         pushed_down(&mut bodies, &table)?;
         let mut tree_nodes = nodes_taken_off(doc, catalog, &table, &page_ids, &mut bodies)?;
+        kids_agree(doc, catalog, &table)?;
         // A page or a node the tree doesn't list is still no object of the page
         // that names it (F.3.7), and a page isn't packed (F.3.1).
         let strays = strays(&bodies, &page_ids);
+        strays_pushed_down(doc, &strays, &tree_nodes, &mut bodies);
         let listed: HashSet<ObjectId> = tree_nodes.iter().copied().collect();
         tree_nodes.extend(strays.iter().copied().filter(|id| !listed.contains(id)));
 
@@ -378,6 +379,28 @@ fn reached(doc: &Document, values: &[ObjectId]) -> HashSet<ObjectId> {
     seen
 }
 
+/// Whether `object` has no body to write, a reference to it being written `null`:
+/// a null, what a file leaves out, what's among `left`, and a reference whose chain
+/// ends at one of those, at no object, or back where it's been, each of which a
+/// reference to reads as a reference to none (7.3.10).
+fn no_body(doc: &Document, object: &Object, left: &HashSet<ObjectId>) -> bool {
+    if object.is_null() || write::left_out(object) {
+        return true;
+    }
+    let mut seen = HashSet::new();
+    let mut at = object;
+    while let Some(id) = at.as_reference() {
+        if !seen.insert(id) || left.contains(&id) {
+            return true;
+        }
+        match doc.get(id) {
+            Ok(next) if !next.is_null() && !write::left_out(next) => at = next,
+            _ => return true,
+        }
+    }
+    false
+}
+
 /// The body of object `id`, of `bodies` by id.
 fn body_of<'b, 'd>(bodies: &'b [(ObjectId, Body<'d>)], id: ObjectId) -> Option<&'b Body<'d>> {
     let at = bodies.binary_search_by_key(&id, |(id, _)| *id).ok()?;
@@ -438,6 +461,60 @@ fn strays(bodies: &[(ObjectId, Body<'_>)], pages: &HashSet<ObjectId>) -> Vec<Obj
         .collect()
 }
 
+/// Each of `strays` that says it's a page, given in a body written anew what it
+/// inherits from one of `nodes`, which lose it: an annotation's `/P`, say, can still
+/// name it, and nothing else would be left to give it what it had. What it inherits
+/// from anything else it still does.
+fn strays_pushed_down(
+    doc: &Document,
+    strays: &[ObjectId],
+    nodes: &[ObjectId],
+    bodies: &mut [(ObjectId, Body<'_>)],
+) {
+    let nodes: HashSet<ObjectId> = nodes.iter().copied().collect();
+    let reads = |value: &Object| {
+        let read = doc.dereference(value);
+        read.is_some_and(|(_, value)| !value.is_null())
+    };
+    for id in strays {
+        let Ok(at) = bodies.binary_search_by_key(id, |(id, _)| *id) else {
+            continue;
+        };
+        let object = bodies[at].1.object();
+        let Some(dict) = dict_of(object).filter(|dict| dict.has_type(b"Page")) else {
+            continue;
+        };
+        let mut pushed = Vec::new();
+        for (_, key) in INHERITED {
+            if dict.get(key.as_bytes()).is_some_and(reads) {
+                continue;
+            }
+            let mut parent = dict.get(b"Parent");
+            for _ in 0..DEPTH {
+                let read = parent.and_then(|parent| doc.dereference(parent));
+                let Some((holder, up)) = read else { break };
+                let Some(up) = dict_of(up) else { break };
+                if let Some(written) = up.get(key.as_bytes()).filter(|written| reads(written)) {
+                    if holder.is_some_and(|holder| nodes.contains(&holder)) {
+                        pushed.push((key, written.clone()));
+                    }
+                    break;
+                }
+                parent = up.get(b"Parent");
+            }
+        }
+        if !pushed.is_empty() {
+            let mut object = object.clone();
+            if let Some(dict) = dict_of_mut(&mut object) {
+                for (key, written) in pushed {
+                    dict.set(key, written);
+                }
+            }
+            bodies[at].1 = Body::New(Cow::Owned(object));
+        }
+    }
+}
+
 /// What's named as a font file: by a font descriptor, which is an object of its
 /// own, or written in place in its font.
 fn font_files(bodies: &[(ObjectId, Body<'_>)]) -> HashSet<ObjectId> {
@@ -494,6 +571,76 @@ fn pages_agreed<'d>(
         return refused(PageTree::Rules { page });
     }
     Ok(iso)
+}
+
+/// Each page's inheritable attributes read going down `/Kids` from the root, as
+/// some readers take them, held to what its `/Parent`s give it, as `table` has them:
+/// where a page's `/Parent` isn't the node that lists it, the two can differ, and
+/// pushing one value down would change the other reader's page.
+fn kids_agree(doc: &Document, catalog: &Dict, table: &Pages<'_>) -> Result<(), Error> {
+    let places: HashMap<ObjectId, usize> = (table.iter().enumerate())
+        .filter_map(|(place, page)| Some((page.id?, place)))
+        .collect();
+    let mut seen = HashSet::new();
+    let none: [Option<&Object>; 4] = [None; 4];
+    let mut stack: Vec<(&Object, [Option<&Object>; 4])> = catalog
+        .get(b"Pages")
+        .map(|root| (root, none))
+        .into_iter()
+        .collect();
+    while let Some((kid, above)) = stack.pop() {
+        let Some((id, object)) = doc.dereference(kid) else {
+            continue;
+        };
+        let Some(dict) = dict_of(object) else {
+            continue;
+        };
+        if id.is_some_and(|id| !seen.insert(id)) {
+            continue;
+        }
+        let mut held = above;
+        for (slot, (_, key)) in held.iter_mut().zip(INHERITED) {
+            let value = dict
+                .get(key.as_bytes())
+                .and_then(|value| doc.dereference(value));
+            if let Some((_, value)) = value.filter(|(_, value)| !value.is_null()) {
+                *slot = Some(value);
+            }
+        }
+        match id.and_then(|id| places.get(&id)) {
+            Some(&page) => {
+                for (&down, (attribute, key)) in held.iter().zip(INHERITED) {
+                    let up = table.get(page).and_then(|page| page.attribute(attribute));
+                    let up = up.map(|up| up.value).filter(|up| !up.is_null());
+                    let alike = match (down, up) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => same_value(a, b),
+                        _ => false,
+                    };
+                    if !alike {
+                        let attribute = key;
+                        return Err(Error::PageTree(PageTree::Kids { page, attribute }));
+                    }
+                }
+            }
+            None => {
+                let kids = dict.get(b"Kids").map(|kids| array_of(doc, kids));
+                stack.extend(kids.unwrap_or_default().iter().rev().map(|kid| (kid, held)));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether two values are the same wherever each was written.
+fn same_value(a: &Object, b: &Object) -> bool {
+    if std::ptr::eq(a, b) {
+        return true;
+    }
+    let (mut a, mut b) = (a.clone(), b.clone());
+    a.unplace();
+    b.unplace();
+    a == b
 }
 
 /// Whether the two rules read an attribute alike. A null is none to a page by

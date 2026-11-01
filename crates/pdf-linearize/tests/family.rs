@@ -94,7 +94,7 @@ fn a_node_above_the_root_only_a_parent_names_loses_what_it_held_too() {
         &[
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Parent 4 0 R /Kids [3 0 R] /Count 1 >>",
-            "<< /Type /Page /Parent 2 0 R >>",
+            "<< /Type /Page /Parent 2 0 R /Rotate 90 /MediaBox [0 0 9 9] /Resources << >> >>",
             "<< /Type /Pages /Rotate 90 /MediaBox [0 0 9 9] /Resources << >> /Mine 1 >>",
         ],
         ROOT,
@@ -114,6 +114,205 @@ fn a_node_above_the_root_only_a_parent_names_loses_what_it_held_too() {
         assert!(!above.unwrap().has(b"Rotate"));
         let page = dict_at(&doc, page_ids(&doc)[0]);
         assert_eq!(page.get(b"Rotate").unwrap().as_integer(), Some(90));
+    }
+}
+
+#[test]
+fn what_going_down_kids_reads_otherwise_than_up_parent_is_refused() {
+    let own = "/Resources << >>";
+    let node = |under: u32, width: u32| {
+        format!(
+            "<< /Type /Pages /Parent 2 0 R /Kids [{under} 0 R] /Count 1 /MediaBox [0 0 {width} {width}] >>"
+        )
+    };
+    let page = |parent: u32| format!("<< /Type /Page /Parent {parent} 0 R {own} >>");
+    let root = "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>";
+    let catalog = "<< /Type /Catalog /Pages 2 0 R >>";
+    let refused = |objects: &[&str], wanted: usize, key: &str| {
+        let got = family::linearize_bytes(&file(objects, ROOT), &[], &table());
+        assert!(
+            matches!(
+                got,
+                Err(Error::PageTree(PageTree::Kids { page, attribute }))
+                    if page == wanted && attribute == key
+            ),
+            "{got:?}"
+        );
+    };
+    // Each node lists the page whose /Parent is the other, whose box then differs.
+    let apart = [
+        catalog,
+        root,
+        &node(5, 100),
+        &node(6, 200),
+        &page(4),
+        &page(3),
+    ];
+    refused(&apart, 0, "MediaBox");
+    // Above the root, where going down starts: by /Parent alone it's inherited.
+    let above = [
+        catalog,
+        "<< /Type /Pages /Parent 4 0 R /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /Resources << >> >>",
+        "<< /Type /Pages /MediaBox [0 0 9 9] >>",
+    ];
+    refused(&above, 0, "MediaBox");
+    // A page that names no /Parent, under a node going down gives something to.
+    let no_parent = [
+        catalog,
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 9 9] >>",
+        "<< /Type /Page /Resources << >> >>",
+    ];
+    refused(&no_parent, 0, "MediaBox");
+    // Apart, and each reads what it did: the same value, at either place.
+    let alike = [
+        catalog,
+        root,
+        &node(5, 100),
+        &node(6, 100),
+        &page(4),
+        &page(3),
+    ];
+    for options in kinds() {
+        let out = written(&file(&alike, ROOT), &options);
+        let (_, doc) = read(&out);
+        for id in page_ids(&doc) {
+            let held = dict_at(&doc, id).get(b"MediaBox").unwrap();
+            assert_eq!(held.as_array().unwrap().len(), 4);
+        }
+    }
+    // Where the pages say all they have, there's nothing to read otherwise.
+    let own_box = "<< /Type /Page /Parent 3 0 R /Resources << >> /MediaBox [0 0 7 7] >>";
+    let own_too = "<< /Type /Page /Parent 4 0 R /Resources << >> /MediaBox [0 0 8 8] >>";
+    let said = [
+        catalog,
+        root,
+        &node(6, 100),
+        &node(5, 200),
+        own_box,
+        own_too,
+    ];
+    holds_clean(&written(&file(&said, ROOT), &table()));
+}
+
+/// `out` holds, and nothing's to be said of it.
+fn holds_clean(out: &[u8]) {
+    let reading = Reading::open(out, &bytes::Options::DEFAULT).unwrap();
+    let mut findings = Vec::new();
+    let verdict = family::check(&reading, &Limits::DEFAULT, &mut findings).unwrap();
+    assert!(verdict.linearized && verdict.holds, "{findings:?}");
+    assert_eq!(findings, []);
+}
+
+#[test]
+fn an_object_that_s_only_a_reference_to_nothing_has_no_body_and_no_entry() {
+    let catalog = "<< /Type /Catalog /Pages 2 0 R >>";
+    let root = "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 9 9] /Resources << >> >>";
+    let first = "<< /Type /Page /Parent 2 0 R >>";
+    let later = "<< /Type /Page /Parent 2 0 R /X 6 0 R >>";
+    let start = [catalog, root, first, later, later];
+    // To no object; to a null; along a chain to one; round to itself, by way of another; to
+    // what a file leaves out.
+    let shapes: [&[&str]; 5] = [
+        &["99 0 R"],
+        &["7 0 R", "null"],
+        &["7 0 R", "8 0 R", "null"],
+        &["7 0 R", "6 0 R"],
+        &["7 0 R", "<< /Linearized 1 >>"],
+    ];
+    for shape in shapes {
+        let objects: Vec<&str> = start.iter().chain(shape).copied().collect();
+        let bytes = file(&objects, ROOT);
+        for options in kinds() {
+            let out = written(&bytes, &options);
+            holds_clean(&out);
+            let (_, doc) = read(&out);
+            for id in page_ids(&doc).into_iter().skip(1) {
+                assert!(dict_at(&doc, id).get(b"X").unwrap().is_null(), "{shape:?}");
+            }
+            let bare = doc.objects().any(|(_, object)| object.is_null());
+            assert!(!bare, "{shape:?}");
+        }
+    }
+    // Along a chain to something, it's what it was.
+    let objects = [
+        catalog,
+        root,
+        first,
+        later,
+        later,
+        "7 0 R",
+        "<< /Mark (kept) >>",
+    ];
+    let bytes = file(&objects, ROOT);
+    for options in kinds() {
+        let out = written(&bytes, &options);
+        holds_clean(&out);
+        let (_, doc) = read(&out);
+        let id = page_ids(&doc)[1];
+        let (_, held) = doc
+            .dereference(dict_at(&doc, id).get(b"X").unwrap())
+            .unwrap();
+        assert!(held.as_dict().unwrap().has(b"Mark"));
+    }
+}
+
+#[test]
+fn a_parent_that_s_a_page_or_no_node_keeps_what_it_holds_and_nothing_s_said_of_it() {
+    let catalog = "<< /Type /Catalog /Pages 2 0 R >>";
+    let own = "/MediaBox [0 0 9 9] /Resources << >>";
+    let root = "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>";
+    let page = format!("<< /Type /Page /Parent 2 0 R {own} >>");
+    // A listed page's /Parent is another listed page.
+    let under_page = format!("<< /Type /Page /Parent 3 0 R {own} >>");
+    let bytes = file(&[catalog, root, &page, &under_page], ROOT);
+    for options in kinds() {
+        holds_clean(&written(&bytes, &options));
+    }
+    // A /Parent that's a dictionary holding kids of no kind, a box among them.
+    let under_other = format!("<< /Type /Page /Parent 5 0 R {own} >>");
+    let other = format!("<< /Mine true {own} >>");
+    let bytes = file(&[catalog, root, &page, &under_other, &other], ROOT);
+    for options in kinds() {
+        holds_clean(&written(&bytes, &options));
+    }
+}
+
+#[test]
+fn a_page_the_tree_doesn_t_list_gets_what_it_inherited_from_a_node_that_loses_it() {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R /Foo [4 0 R 6 0 R] >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 9 9] /Resources 5 0 R /Rotate 90 >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        // Unlisted, with a box of its own, and the rest from the node.
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 3 3] /Mark (stray) >>",
+        "<< /Mark (resources) >>",
+        // Unlisted, its parent no node of the tree: what that holds it still holds.
+        "<< /Type /Page /Parent 7 0 R /Mark (other) >>",
+        "<< /Type /Pages /Rotate 180 /Mark (unlisted node) >>",
+    ];
+    let bytes = file(&objects, ROOT);
+    for options in kinds() {
+        let out = written(&bytes, &options);
+        holds_clean(&out);
+        let (_, doc) = read(&out);
+        let stray = doc.objects().find_map(|(_, object)| {
+            let dict = object.as_dict()?;
+            (dict.get(b"Mark")?.as_bytes()? == b"stray").then_some(dict)
+        });
+        let stray = stray.unwrap();
+        assert_eq!(stray.get(b"Rotate").unwrap().as_integer(), Some(90));
+        assert_eq!(stray.get(b"MediaBox").unwrap().as_array().unwrap().len(), 4);
+        let width = stray.get(b"MediaBox").unwrap().as_array().unwrap()[2].as_integer();
+        assert_eq!(width, Some(3), "its own");
+        let resources = stray.get(b"Resources").unwrap().as_reference().unwrap();
+        assert!(doc.get_dict(resources).unwrap().has(b"Mark"));
+        // Nothing's pushed down past what didn't lose it.
+        let other = doc.objects().find_map(|(_, object)| {
+            let dict = object.as_dict()?;
+            (dict.get(b"Mark")?.as_bytes()? == b"other").then_some(dict)
+        });
+        assert!(!other.unwrap().has(b"Rotate"));
     }
 }
 
@@ -585,7 +784,7 @@ fn a_page_or_node_the_tree_does_not_list_stops_a_walk() {
     let (out, done) = linearized(&built(&objects), &table()).unwrap();
     let e = done.layout.first_page_end();
     assert!(at(&out, "/Mark (annotation)") < e);
-    assert!(at(&out, "/Mark (stray page)") > e);
+    assert!(at(&out, "(stray page)") > e);
     assert!(at(&out, "/Mark (stray content)") > e);
 }
 
@@ -602,7 +801,7 @@ fn a_stray_page_and_a_template_are_never_packed() {
     let out = written(&built(&objects), &packed);
     // Each in the clear, as a member's in a deflated stream.
     assert!(at(&out, "/Mark (template)") > 0);
-    assert!(at(&out, "/Mark (stray page)") > 0);
+    assert!(at(&out, "(stray page)") > 0);
     assert!(
         !String::from_utf8_lossy(&out).contains("/Mark (font)"),
         "the font is packed"

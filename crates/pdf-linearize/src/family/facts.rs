@@ -214,6 +214,7 @@ fn page_tree<S: ByteSource>(
         facts
     });
     let listed = listed.collect();
+    let page_ids: HashSet<ObjectId> = table.iter().filter_map(|page| page.id).collect();
     let mut seen = HashSet::new();
     let mut nodes = Vec::new();
     for page in table.iter() {
@@ -222,7 +223,11 @@ fn page_tree<S: ByteSource>(
                 break;
             }
             let dict = reading.get(parent).ok().and_then(Object::as_dict);
-            let Some(dict) = dict else {
+            // What a page's /Parent names is a node only if it isn't a page, and holds
+            // kids or says so, as the writer has it: a page rightly holds these, and a
+            // broken file's /Parent can name its /Resources.
+            let node = |dict: &&Dict| dict.has(b"Kids") || dict.has_type(b"Pages");
+            let Some(dict) = dict.filter(node).filter(|_| !page_ids.contains(&parent)) else {
                 continue;
             };
             let held = INHERITED.iter().filter(|(key, _)| dict.has(key));

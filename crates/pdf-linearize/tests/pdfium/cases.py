@@ -242,6 +242,8 @@ def linearized(pages=2, first=0, shared_later=False, sizes=None, broken=None):
     declared = length + 7 if broken == "length-wrong" else length
     h_at = length + 500 if broken == "hint-past" else hint_at
     extra = b" /P %d" % first if first else b""
+    if broken == "first-past":
+        extra = b" /P %d" % (pages + 8)
     dictionary_body = (b"%d 0 obj\n<< /Linearized 1 /L %d /H [%d %d] /O %d /E %d /N %d /T %d%s >>\nendobj\n"
                        % (dictionary, declared, h_at, len(hint_body), page_at[first], first_end,
                           pages, t, extra))
@@ -291,6 +293,7 @@ def cases():
         ("broken-hint-short", "avail", {"pdf": linearized(pages=8, sizes=pad, broken="hint-short")}),
         ("broken-hint-past", "avail", {"pdf": linearized(pages=8, sizes=pad, broken="hint-past")}),
         ("broken-shared-past", "avail", {"pdf": linearized(pages=8, sizes=pad, broken="hint-shared-past")}),
+        ("broken-first-past", "avail", {"pdf": linearized(pages=1, broken="first-past")}),
         ("not-linearized", "avail", {"pdf": plain()}),
         ("encrypted-qpdf-rc4", "avail", {"pdf": encrypted("qpdf-rc4"), "password": b"user"}),
         ("encrypted-qpdf-aes-256", "avail", {"pdf": encrypted("qpdf-aes-256"), "password": b"user"}),

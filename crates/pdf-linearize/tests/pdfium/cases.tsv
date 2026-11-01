@@ -11,6 +11,7 @@ broken-width-zero	avail	broken-width-zero.pdf
 broken-hint-short	avail	broken-hint-short.pdf
 broken-hint-past	avail	broken-hint-past.pdf
 broken-shared-past	avail	broken-shared-past.pdf
+broken-first-past	avail	broken-first-past.pdf
 not-linearized	avail	not-linearized.pdf
 encrypted-qpdf-rc4	avail	encrypted-qpdf-rc4.password,encrypted-qpdf-rc4.pdf
 encrypted-qpdf-aes-256	avail	encrypted-qpdf-aes-256.password,encrypted-qpdf-aes-256.pdf
