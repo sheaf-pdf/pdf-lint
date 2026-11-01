@@ -77,6 +77,11 @@ fn fires(mut facts: Facts, change: impl FnOnce(&mut Facts), told: impl Fn(&Findi
     let error = found.iter().any(|f| f.grade() == Grade::Error);
     assert_eq!(verdict.holds, verdict.linearized && !error);
     assert!(!finding.to_string().is_empty());
+    assert!(
+        finding.to_string().contains(finding.clause()),
+        "{finding}: {}",
+        finding.clause()
+    );
 }
 
 fn dict(facts: &mut Facts) -> &mut FirstObject {
@@ -874,6 +879,351 @@ fn a_page_without_its_attributes_or_a_node_with_them_is_said() {
         |facts| facts.pages.clear(),
         |f| *f == Finding::NoPages,
     );
+}
+
+/// Each finding's place and clause, one of each: its message cites the clause, and
+/// says the number its place gives.
+#[test]
+fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
+    use crate::check::Place::*;
+    use crate::hint::Error as Fault;
+    let table = "O";
+    let key = KeyName::new(b"X");
+    let attribute = Attribute::Rotate;
+    let all: Vec<(Finding, Option<Place>)> = vec![
+        (Finding::Version, None),
+        (
+            Finding::LengthNotFile { l: 1, len: 2 },
+            Some(Key(DictKey::L)),
+        ),
+        (Finding::Updated { at: 77 }, Some(Byte(77))),
+        (Finding::BadValue { key: DictKey::P }, Some(Key(DictKey::P))),
+        (Finding::Indirect { key: DictKey::O }, Some(Key(DictKey::O))),
+        (Finding::DictionaryPast1024 { end: 1025 }, Some(Byte(1025))),
+        (Finding::HintItems { items: 3 }, Some(Key(DictKey::H))),
+        (
+            Finding::FirstPageObject {
+                o: 1,
+                page: 77,
+                computed: 2,
+            },
+            Some(Page(77)),
+        ),
+        (Finding::PageCount { n: 1, pages: 2 }, Some(Key(DictKey::N))),
+        (
+            Finding::FirstPageEnd {
+                e: 1,
+                least: 2,
+                most: 3,
+            },
+            Some(Key(DictKey::E)),
+        ),
+        (
+            Finding::MainFirstEntry {
+                t: 1,
+                least: 2,
+                most: 3,
+            },
+            Some(Key(DictKey::T)),
+        ),
+        (Finding::HintNotListed { at: 1 }, Some(Key(DictKey::H))),
+        (
+            Finding::HintExtent {
+                at: 77,
+                length: 1,
+                least: 2,
+                most: 3,
+            },
+            Some(Byte(77)),
+        ),
+        (Finding::NoSections, None),
+        (Finding::NoMainSection, None),
+        (Finding::SectionOrder { first: 77, main: 2 }, Some(Byte(77))),
+        (Finding::FirstSubsections { count: 2 }, None),
+        (Finding::FirstFree { number: 77 }, Some(Object(77))),
+        (Finding::FirstSize { size: 1, total: 2 }, None),
+        (Finding::FirstNoRoot, None),
+        (
+            Finding::FirstNotDictionary {
+                number: 77,
+                dictionary: 2,
+            },
+            Some(Object(77)),
+        ),
+        (Finding::MainSubsections { count: 2 }, None),
+        (Finding::MainFrom { from: 1 }, None),
+        (Finding::MainZeroInUse, Some(Object(0))),
+        (Finding::MainFree { number: 77 }, Some(Object(77))),
+        (Finding::MainPrev, None),
+        (
+            Finding::LastStartxref {
+                value: 77,
+                first: 2,
+            },
+            Some(Byte(77)),
+        ),
+        (Finding::CatalogCompressed { number: 77 }, Some(Object(77))),
+        (Finding::CatalogNotFirst { number: 77 }, Some(Object(77))),
+        (
+            Finding::PageCompressed {
+                page: 77,
+                number: 2,
+            },
+            Some(Page(77)),
+        ),
+        (
+            Finding::UncompressedAfterCompressed { number: 77 },
+            Some(Object(77)),
+        ),
+        (
+            Finding::Generation {
+                number: 77,
+                generation: 1,
+            },
+            Some(Object(77)),
+        ),
+        (
+            Finding::GroupsApart { first: 77, next: 2 },
+            Some(Object(77)),
+        ),
+        (Finding::NumberOutOfOrder { number: 77 }, Some(Object(77))),
+        (Finding::HintNotLast { hint: 77, last: 2 }, Some(Object(77))),
+        (Finding::HintNotAStream, None),
+        (Finding::HintUndecodable, None),
+        (Finding::HintNoShared, None),
+        (Finding::HintKeyValue { key }, Some(HintKey(key))),
+        (Finding::HintKeyIndirect { key }, Some(HintKey(key))),
+        (Finding::HintKeyOther { key }, Some(HintKey(key))),
+        (
+            Finding::HintTables {
+                fault: Fault::PastEnd {
+                    what: "a",
+                    bit: 77,
+                    bits: 2,
+                },
+            },
+            Some(HintBit(77)),
+        ),
+        (
+            Finding::HintTables {
+                fault: Fault::TableAt {
+                    table,
+                    at: 1,
+                    len: 2,
+                },
+            },
+            Some(Table(table)),
+        ),
+        (
+            Finding::HintTables {
+                fault: Fault::Width {
+                    what: "a",
+                    width: 33,
+                },
+            },
+            None,
+        ),
+        (
+            Finding::TableOverruns {
+                table,
+                end: 77,
+                next: 2,
+            },
+            Some(HintByte(77)),
+        ),
+        (
+            Finding::PageAttribute {
+                page: 77,
+                attribute,
+            },
+            Some(Page(77)),
+        ),
+        (
+            Finding::NodeAttribute {
+                number: 77,
+                attribute,
+            },
+            Some(Object(77)),
+        ),
+        (Finding::NoPages, None),
+        (Finding::FirstPageNotFirst { number: 77 }, Some(Object(77))),
+        (
+            Finding::FirstPageAt {
+                hint: 1,
+                computed: 77,
+            },
+            Some(Position(77)),
+        ),
+        (
+            Finding::FirstPageNotFirstObject {
+                hint: 1,
+                computed: 77,
+            },
+            Some(Position(77)),
+        ),
+        (
+            Finding::PageAt {
+                page: 77,
+                hint: 1,
+                computed: 2,
+            },
+            Some(Page(77)),
+        ),
+        (
+            Finding::PageObjects {
+                page: 77,
+                hint: 1,
+                computed: 2,
+            },
+            Some(Page(77)),
+        ),
+        (
+            Finding::PageLength {
+                page: 77,
+                hint: 1,
+                computed: 2,
+            },
+            Some(Page(77)),
+        ),
+        (
+            Finding::ContentPast {
+                page: 77,
+                end: 1,
+                length: 2,
+            },
+            Some(Page(77)),
+        ),
+        (Finding::FirstPageShared { entries: 1 }, None),
+        (
+            Finding::SharedIdPast {
+                page: 77,
+                id: 1,
+                entries: 2,
+            },
+            Some(Page(77)),
+        ),
+        (Finding::SharedCounts { first: 1, total: 2 }, None),
+        (
+            Finding::SharedFirstAt {
+                number: 77,
+                hint: 1,
+                computed: None,
+            },
+            Some(Object(77)),
+        ),
+        (
+            Finding::SharedObjects {
+                entry: 77,
+                hint: 1,
+                computed: 2,
+            },
+            Some(SharedEntry(77)),
+        ),
+        (
+            Finding::SharedLength {
+                entry: 77,
+                hint: 1,
+                computed: 2,
+            },
+            Some(SharedEntry(77)),
+        ),
+        (Finding::Signature { entry: 77 }, Some(SharedEntry(77))),
+        (Finding::TableObject { table, number: 77 }, Some(Object(77))),
+        (
+            Finding::TableAt {
+                table,
+                hint: 1,
+                computed: 77,
+            },
+            Some(Position(77)),
+        ),
+        (
+            Finding::TableObjects {
+                table,
+                hint: 1,
+                computed: 2,
+            },
+            Some(Table(table)),
+        ),
+        (
+            Finding::TableLength {
+                table,
+                hint: 1,
+                computed: 2,
+            },
+            Some(Table(table)),
+        ),
+        (
+            Finding::TableIdPast {
+                table,
+                id: 1,
+                entries: 2,
+            },
+            Some(Table(table)),
+        ),
+        (
+            Finding::ThumbnailPages { said: 1, pages: 2 },
+            Some(Table("T")),
+        ),
+        (
+            Finding::GraphRefused {
+                why: crate::plan::Error::NoPages,
+            },
+            None,
+        ),
+        (Finding::FirstPageReaches { number: 77 }, Some(Object(77))),
+        (
+            Finding::PageReaches {
+                page: 1,
+                number: 77,
+            },
+            Some(Object(77)),
+        ),
+        (
+            Finding::SharedNotListed { page: 77, entry: 2 },
+            Some(Page(77)),
+        ),
+        (
+            Finding::SharedNotReached { page: 77, entry: 2 },
+            Some(Page(77)),
+        ),
+    ];
+    for (finding, place) in all {
+        assert_eq!(finding.place(), place, "{finding}");
+        let said = finding.to_string();
+        assert!(
+            said.contains(finding.clause()),
+            "{said}: {}",
+            finding.clause()
+        );
+        match place {
+            Some(Page(n) | SharedEntry(n) | Byte(n) | Position(n) | HintByte(n) | HintBit(n)) => {
+                assert!(said.contains(&n.to_string()), "{said}");
+            }
+            Some(Object(n)) if n != 0 => assert!(said.contains(&n.to_string()), "{said}"),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn a_first_page_past_the_pages_is_told() {
+    let bad = |f: &Finding| *f == Finding::BadValue { key: DictKey::P };
+    for p in [2, 9] {
+        let mut facts = table();
+        let first = facts.first_object.as_mut().unwrap();
+        first.n = Raw::Integer(2);
+        first.p = Raw::Integer(p);
+        let found = findings(&facts);
+        assert!(found.iter().any(bad), "{found:?}");
+        let verdict = check(&facts, &Limits::DEFAULT, &mut ());
+        assert!(verdict.linearized && !verdict.holds);
+    }
+    let mut facts = table();
+    let first = facts.first_object.as_mut().unwrap();
+    first.n = Raw::Integer(2);
+    first.p = Raw::Integer(1);
+    assert!(!findings(&facts).iter().any(bad));
 }
 
 #[test]

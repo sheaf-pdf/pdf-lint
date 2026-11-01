@@ -126,6 +126,10 @@ pub struct Options<'a> {
     pub first_page: FirstPage,
     /// The plan's caps, the most pages among them.
     pub limits: Limits,
+    /// How [`linearize_bytes`] opens the file it's given: the caps it reads under and
+    /// the backend it inflates with. A caller given a file it doesn't trust lowers
+    /// them here; [`linearize`] takes a document already read.
+    pub read: bytes::Options,
     /// A flag that, set while it runs, stops it: it's checked before each object
     /// and object stream, and nothing's written ([`write::Error::Stopped`]).
     pub stop: Option<&'a AtomicBool>,
@@ -135,7 +139,7 @@ impl Options<'static> {
     /// A file with tables, nothing in object streams, deflated as
     /// [`Deflate::DEFAULT`] deflates, on as many threads as the machine runs, its
     /// header the document's, opening where `/OpenAction` says, under
-    /// [`Limits::DEFAULT`], nothing to stop it.
+    /// [`Limits::DEFAULT`], read under [`bytes::Options::DEFAULT`], nothing to stop it.
     pub const DEFAULT: Options<'static> = Options {
         kind: XrefKind::Table,
         pack: false,
@@ -144,6 +148,7 @@ impl Options<'static> {
         version: None,
         first_page: FirstPage::OpenAction,
         limits: Limits::DEFAULT,
+        read: bytes::Options::DEFAULT,
         stop: None,
     };
 }
@@ -279,7 +284,7 @@ pub fn linearize(
     from: Option<&dyn ReadFrom>,
     options: &Options<'_>,
 ) -> Result<Linearized, Error> {
-    linearize_timed(out, doc, encryptor, from, options, &mut |_| {})
+    lapped(out, doc, encryptor, from, options, &mut |_| {})
 }
 
 /// [`linearize`], `lap` told as each stage ends: `graph`, `plan`, `bodies`,
@@ -288,6 +293,18 @@ pub fn linearize(
 #[cfg(any(test, feature = "timing"))]
 #[doc(hidden)]
 pub fn linearize_timed(
+    out: &mut Vec<u8>,
+    doc: &pdf_structure::Document,
+    encryptor: Option<&Encryptor>,
+    from: Option<&dyn ReadFrom>,
+    options: &Options<'_>,
+    lap: &mut dyn FnMut(&'static str),
+) -> Result<Linearized, Error> {
+    lapped(out, doc, encryptor, from, options, lap)
+}
+
+/// [`linearize`], told as each stage ends.
+fn lapped(
     out: &mut Vec<u8>,
     doc: &pdf_structure::Document,
     encryptor: Option<&Encryptor>,
@@ -315,8 +332,7 @@ pub fn linearize_bytes(
     passwords: &[Password],
     options: &Options<'_>,
 ) -> Result<Vec<u8>, Error> {
-    let reading =
-        Reading::open_with(bytes, passwords, &bytes::Options::DEFAULT).map_err(Error::Read)?;
+    let reading = Reading::open_with(bytes, passwords, &options.read).map_err(Error::Read)?;
     let doc = reading.to_document().map_err(Error::Read)?;
     let encryptor = Encryptor::of(&reading).map_err(|why| match why {
         write::Error::Locked => Error::Locked,
@@ -612,4 +628,50 @@ fn laid_out(out: &mut Vec<u8>, start: usize, lengths: &[u64], layout: &Layout) {
         }
     }
     debug_assert_eq!(to, start);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stages are told in the order they end, what a timing goes by.
+    #[test]
+    fn a_timing_is_told_each_stage_in_order() {
+        let mut file = b"%PDF-1.7\n".to_vec();
+        let mut rows = Vec::new();
+        for (number, object) in [
+            (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (
+                3,
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 9] /Resources << >> >>",
+            ),
+        ] {
+            rows.push(file.len());
+            file.extend_from_slice(format!("{number} 0 obj\n{object}\nendobj\n").as_bytes());
+        }
+        let at = file.len();
+        file.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+        for row in rows {
+            file.extend_from_slice(format!("{row:010} 00000 n \n").as_bytes());
+        }
+        let tail = format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{at}\n%%EOF\n");
+        file.extend_from_slice(tail.as_bytes());
+        let reading = Reading::open(&file[..], &bytes::Options::DEFAULT).unwrap();
+        let doc = reading.to_document().unwrap();
+        let mut told = Vec::new();
+        let mut out = Vec::new();
+        linearize_timed(
+            &mut out,
+            &doc,
+            None,
+            Some(&reading),
+            &Options::DEFAULT,
+            &mut |stage| {
+                told.push(stage);
+            },
+        )
+        .unwrap();
+        assert_eq!(told, ["graph", "plan", "bodies", "assemble", "whole"]);
+    }
 }

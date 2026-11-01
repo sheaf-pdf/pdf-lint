@@ -29,6 +29,12 @@ default = ["family"]
 family = ["dep:pdf-objects", "dep:pdf-semantics", "dep:pdf-structure"]
 # `lopdf`: linearize a document of lopdf's, through its public objects alone.
 lopdf = ["dep:lopdf"]
+# pdf-filters' zlib-rs, through pdf-structure, so that `family::Options::deflate` and
+# `read` can name it.
+zlib-rs = ["pdf-structure?/zlib-rs"]
+# The stages of a write told as they end, for a timing's own build; not one to turn on
+# for use.
+timing = ["family"]
 
 [dev-dependencies]
 # A generator the tests can seed, for a new encryption's draws.

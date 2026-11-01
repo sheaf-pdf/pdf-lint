@@ -90,9 +90,38 @@ impl std::fmt::Debug for KeyName {
     }
 }
 
+/// Where a [`Finding`] is said of, for a caller that points at it: as near to the bytes
+/// as the check knows them, which [`Finding::place`] gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Place {
+    /// A byte of the file, from its first.
+    Byte(u64),
+    /// A position as a hint table has one, as if the hint stream weren't there:
+    /// [`hint::located`] gives the byte.
+    Position(u64),
+    /// A byte of the hint stream's data.
+    HintByte(u64),
+    /// A bit of the hint stream's data.
+    HintBit(u64),
+    /// An object, by its number, which the file's sections place.
+    Object(u32),
+    /// A page, by its place among the pages.
+    Page(u64),
+    /// An entry of the shared object table.
+    SharedEntry(u64),
+    /// A table of the hint stream, by its key in the stream's dictionary.
+    Table(&'static str),
+    /// A key of the linearization dictionary.
+    Key(DictKey),
+    /// A key of the hint stream's dictionary.
+    HintKey(KeyName),
+}
+
 /// One thing wrong with a file, by the clause it departs from. It owns nothing, so
 /// a sink keeps it as it is; its [`Display`](std::fmt::Display) is the whole message, with the place,
-/// a byte or a page or an entry of a table, where there's one.
+/// a byte or a page or an entry of a table, where there's one, and [`Finding::place`]
+/// and [`Finding::clause`] give those apart.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Finding {
@@ -657,7 +686,7 @@ pub enum Finding {
 
     /// The objects given as the file's graph can't be planned, so what a page reaches
     /// isn't said.
-    #[error("what the file's objects reach can't be said: {why}")]
+    #[error("what the file's objects reach can't be said (ISO 32000-2, F.3.7): {why}")]
     GraphRefused {
         /// Why.
         why: plan::Error,
@@ -706,6 +735,161 @@ pub enum Finding {
 }
 
 impl Finding {
+    /// Where it's said of: none for what's of the file as a whole.
+    pub fn place(&self) -> Option<Place> {
+        use Finding::*;
+        use Place::*;
+        Some(match *self {
+            Version
+            | NoSections
+            | NoMainSection
+            | FirstSubsections { .. }
+            | FirstSize { .. }
+            | FirstNoRoot
+            | MainSubsections { .. }
+            | MainFrom { .. }
+            | MainPrev
+            | HintNotAStream
+            | HintUndecodable
+            | HintNoShared
+            | NoPages
+            | FirstPageShared { .. }
+            | SharedCounts { .. }
+            | GraphRefused { .. } => return None,
+            HintTables { fault } => match fault {
+                hint::Error::PastEnd { bit, .. } => HintBit(bit),
+                hint::Error::TableAt { table, .. } => Table(table),
+                _ => return None,
+            },
+            LengthNotFile { .. } => Key(DictKey::L),
+            BadValue { key } | Indirect { key } => Key(key),
+            HintItems { .. } | HintNotListed { .. } => Key(DictKey::H),
+            PageCount { .. } => Key(DictKey::N),
+            FirstPageEnd { .. } => Key(DictKey::E),
+            MainFirstEntry { .. } => Key(DictKey::T),
+            Updated { at } | HintExtent { at, .. } => Byte(at),
+            DictionaryPast1024 { end } => Byte(end),
+            SectionOrder { first, .. } => Byte(first),
+            LastStartxref { value, .. } => Byte(value),
+            MainZeroInUse => Object(0),
+            FirstFree { number }
+            | FirstNotDictionary { number, .. }
+            | MainFree { number }
+            | CatalogCompressed { number }
+            | CatalogNotFirst { number }
+            | UncompressedAfterCompressed { number }
+            | Generation { number, .. }
+            | NumberOutOfOrder { number }
+            | NodeAttribute { number, .. }
+            | FirstPageNotFirst { number }
+            | SharedFirstAt { number, .. }
+            | TableObject { number, .. }
+            | FirstPageReaches { number }
+            | PageReaches { number, .. } => Object(number),
+            GroupsApart { first, .. } => Object(first),
+            HintNotLast { hint, .. } => Object(hint),
+            HintKeyValue { key } | HintKeyIndirect { key } | HintKeyOther { key } => HintKey(key),
+            TableOverruns { end, .. } => HintByte(end),
+            FirstPageObject { page, .. }
+            | PageCompressed { page, .. }
+            | PageAttribute { page, .. }
+            | PageAt { page, .. }
+            | PageObjects { page, .. }
+            | PageLength { page, .. }
+            | ContentPast { page, .. }
+            | SharedIdPast { page, .. }
+            | SharedNotListed { page, .. }
+            | SharedNotReached { page, .. } => Page(page),
+            FirstPageAt { computed, .. }
+            | FirstPageNotFirstObject { computed, .. }
+            | TableAt { computed, .. } => Position(computed),
+            SharedObjects { entry, .. } | SharedLength { entry, .. } | Signature { entry } => {
+                SharedEntry(entry)
+            }
+            TableObjects { table, .. } | TableLength { table, .. } | TableIdPast { table, .. } => {
+                Table(table)
+            }
+            ThumbnailPages { .. } => Table("T"),
+        })
+    }
+
+    /// The clause of ISO 32000-2 it departs from, as its message cites it.
+    pub fn clause(&self) -> &'static str {
+        use Finding::*;
+        match self {
+            Version
+            | LengthNotFile { .. }
+            | BadValue { .. }
+            | HintItems { .. }
+            | FirstPageObject { .. }
+            | PageCount { .. }
+            | FirstPageEnd { .. }
+            | MainFirstEntry { .. }
+            | HintNotListed { .. }
+            | HintExtent { .. } => "Table F.1",
+            Updated { .. } => "G.7",
+            Indirect { .. } | DictionaryPast1024 { .. } => "F.3.3",
+            NoSections => "7.5.8.2, F.3.4",
+            SectionOrder { .. } => "F.3",
+            NoMainSection
+            | FirstSubsections { .. }
+            | FirstFree { .. }
+            | FirstSize { .. }
+            | FirstNoRoot
+            | FirstNotDictionary { .. }
+            | CatalogNotFirst { .. }
+            | FirstPageNotFirst { .. } => "F.3.4",
+            MainSubsections { .. }
+            | MainFrom { .. }
+            | MainZeroInUse
+            | MainFree { .. }
+            | MainPrev
+            | LastStartxref { .. } => "F.3.11",
+            CatalogCompressed { .. }
+            | PageCompressed { .. }
+            | UncompressedAfterCompressed { .. }
+            | Generation { .. }
+            | GroupsApart { .. }
+            | NumberOutOfOrder { .. } => "F.3.1",
+            HintNotLast { .. }
+            | HintNotAStream
+            | HintUndecodable
+            | HintNoShared
+            | HintKeyValue { .. }
+            | HintKeyIndirect { .. }
+            | TableOverruns { .. } => "F.3.6",
+            HintKeyOther { .. } => "Table F.2",
+            HintTables { .. }
+            | TableObject { .. }
+            | TableAt { .. }
+            | TableObjects { .. }
+            | TableLength { .. }
+            | TableIdPast { .. } => "F.4",
+            PageAttribute { .. } => "F.3.7, F.3.10",
+            NodeAttribute { .. } => "F.3.10",
+            NoPages
+            | FirstPageNotFirstObject { .. }
+            | GraphRefused { .. }
+            | FirstPageReaches { .. } => "F.3.7",
+            PageReaches { .. } => "F.3.8",
+            FirstPageAt { .. }
+            | PageAt { .. }
+            | PageObjects { .. }
+            | PageLength { .. }
+            | ContentPast { .. }
+            | FirstPageShared { .. }
+            | SharedIdPast { .. }
+            | SharedNotListed { .. }
+            | SharedNotReached { .. } => "F.4.2",
+            SharedCounts { .. }
+            | SharedFirstAt { .. }
+            | SharedObjects { .. }
+            | SharedLength { .. }
+            | Signature { .. } => "F.4.3",
+            ThumbnailPages { .. } => "F.4.4",
+        }
+    }
+
     /// How much it matters: [`Grade::Error`] by definition for what a reader acts on
     /// (a position, a length, a count, an identifier past its table, a value it can't
     /// read), [`Grade::Departure`] where real files, read by real viewers, show that

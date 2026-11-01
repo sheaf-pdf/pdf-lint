@@ -230,7 +230,7 @@ pub(super) fn plan(graph: &Graph, limits: &Limits) -> Result<Plan, Error> {
     let walks: Vec<u32> = std::iter::once(pages[first])
         .chain(others.map(|(_, &at)| at))
         .collect();
-    let walked = uses::page_uses(&walks, &stop, |at| flat.refs(at));
+    let walked = uses::walk(&walks, &stop, |at| flat.refs(at));
     let uses = &walked.uses;
 
     let mut placing = Placing {
@@ -322,7 +322,7 @@ pub(super) fn plan(graph: &Graph, limits: &Limits) -> Result<Plan, Error> {
         .filter(|&(_, at)| !stopped[at as usize])
         .collect();
     let walks: Vec<u32> = thumbs.iter().map(|&(_, at)| at).collect();
-    let thumbed = uses::page_uses(&walks, &stopped, |at| flat.refs(at));
+    let thumbed = uses::walk(&walks, &stopped, |at| flat.refs(at));
     for (walk, &(page, _)) in thumbs.iter().enumerate() {
         let start = placing.list.len();
         for &at in thumbed.entered(walk) {

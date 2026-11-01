@@ -8,6 +8,7 @@ use crate::plan::{Graph, Kind};
 
 /// A value as a file writes it, for what a check wants to know of one.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub enum Raw {
     /// There's no such key.
     #[default]

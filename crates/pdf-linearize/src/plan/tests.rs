@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use super::*;
 
 /// `numbers` as ids at generation 0.
@@ -846,4 +848,47 @@ fn a_plan_is_sent_and_shared() {
     holds::<Plan>();
     holds::<Graph>();
     holds::<Error>();
+}
+
+/// What a writer with no plan is told of which pages use what, by ids, is what a plan has:
+/// a page's own alone, what two share, the walk stopping at the tree and at another page.
+#[test]
+fn page_uses_by_id_is_what_a_plan_says() {
+    let mut graph = Graph::new((1, 0), Kind::Table);
+    graph.object((1, 0), [(2, 0)]);
+    graph.object((2, 0), [(3, 0), (4, 0)]);
+    graph.object((3, 0), [(2, 0), (5, 0), (7, 0), (4, 0)]);
+    graph.object((4, 0), [(2, 0), (6, 0), (7, 0)]);
+    graph.object((5, 0), []);
+    graph.object((6, 0), []);
+    graph.object((7, 0), [(8, 1)]);
+    graph.object((8, 1), []);
+    graph.object((9, 0), [(7, 0)]);
+    graph.page(Page::new((3, 0)));
+    graph.page(Page::new((4, 0)));
+    graph.tree_node((2, 0));
+    let planned = plan(&graph, &Limits::DEFAULT).unwrap();
+
+    let objects: HashMap<Id, Vec<Id>> = [
+        ((3, 0), vec![(2, 0), (5, 0), (7, 0), (4, 0)]),
+        ((4, 0), vec![(2, 0), (6, 0), (7, 0)]),
+        ((7, 0), vec![(8, 1)]),
+    ]
+    .into_iter()
+    .collect();
+    let stop: HashSet<Id> = [(1, 0), (2, 0), (3, 0), (4, 0)].into_iter().collect();
+    let found = page_uses(&[(3, 0), (4, 0)], &stop, |id, to| {
+        for &reference in objects.get(&id).into_iter().flatten() {
+            to(reference);
+        }
+    });
+    for id in [(3, 0), (4, 0), (5, 0), (6, 0), (7, 0), (8, 1)] {
+        assert_eq!(found.get(&id).copied(), planned.used(id), "{id:?}");
+    }
+    assert_eq!(found.get(&(5, 0)), Some(&Use::Page(0)));
+    assert_eq!(found.get(&(7, 0)), Some(&Use::Shared));
+    assert_eq!(found.get(&(8, 1)), Some(&Use::Shared));
+    for id in [(1, 0), (2, 0), (9, 0)] {
+        assert_eq!(found.get(&id), None, "{id:?}");
+    }
 }

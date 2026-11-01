@@ -105,7 +105,7 @@ pub enum Error {
 /// stream of `hint_len` bytes at `hint_at`: as if the stream weren't there
 /// (F.4.1). `at` isn't within the stream, which nothing a table names can be.
 pub fn position(at: u64, hint_at: u64, hint_len: u64) -> u64 {
-    match at >= hint_at + hint_len {
+    match at >= hint_at.saturating_add(hint_len) {
         true => at - hint_len,
         false => at,
     }

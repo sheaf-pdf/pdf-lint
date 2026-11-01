@@ -53,7 +53,7 @@ pub use facts::{
     Attribute, Extent, Facts, FirstObject, HintData, HintFacts, PageFacts, Raw, RowEntry, RowFacts,
     SectionFacts,
 };
-pub use finding::{DictKey, Finding, Grade, KeyName};
+pub use finding::{DictKey, Finding, Grade, KeyName, Place};
 
 use crate::Limits;
 

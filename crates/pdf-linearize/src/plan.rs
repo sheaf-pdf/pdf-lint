@@ -52,12 +52,14 @@ mod tests;
 mod uses;
 
 pub use group::{MEMBERS, Use, group};
+pub use uses::page_uses;
 
 use crate::{Id, Limits};
 
 /// What lists a file's objects, which decides the layout's own numbers and
 /// whether anything can be packed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Kind {
     /// Cross-reference tables: nothing can be packed.
     Table,

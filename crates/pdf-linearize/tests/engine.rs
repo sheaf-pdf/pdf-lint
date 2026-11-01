@@ -263,6 +263,7 @@ fn holds(written: &Written) -> Read {
                 format!("{} 0 obj", plan.main_xref_number().unwrap())
             );
         }
+        kind => panic!("{kind:?}"),
     }
 
     // Every number once, each row what's there: `n 0 obj` where it says, or in

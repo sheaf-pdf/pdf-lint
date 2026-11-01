@@ -75,7 +75,7 @@ fn facts_of(written: &Written) -> Facts {
     let t = layout.main_first_entry();
     main.first_row = Some(match plan.kind() {
         Kind::Table => (t, t + 1),
-        Kind::Stream => (t, t),
+        _ => (t, t),
     });
     let mut section = SectionFacts::new(layout.first_section(), plan.kind());
     section.subsections = vec![(dictionary, plan.size() - dictionary)];

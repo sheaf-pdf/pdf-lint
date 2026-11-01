@@ -1,8 +1,11 @@
 //! Which pages use each object: the walk a plan starts from.
 
-use super::group::Use;
+use std::collections::{HashMap, HashSet};
 
-/// What [`page_uses`] found.
+use super::group::Use;
+use crate::Id;
+
+/// What [`walk`] found.
 #[derive(Debug)]
 pub(super) struct Walked {
     /// Each object's use, by its index.
@@ -37,11 +40,7 @@ impl Walked {
 /// turns all of it shared. The walk keeps its own stack, so a deep chain
 /// can't overflow the thread's. An object's references are gone into in
 /// their order, each one's own before the next.
-pub(super) fn page_uses<'g>(
-    pages: &[u32],
-    stop: &[bool],
-    refs: impl Fn(u32) -> &'g [u32],
-) -> Walked {
+pub(super) fn walk<'g>(pages: &[u32], stop: &[bool], refs: impl Fn(u32) -> &'g [u32]) -> Walked {
     let mut uses = vec![Use::None; stop.len()];
     let mut entered = Vec::with_capacity(stop.len());
     let mut starts = Vec::with_capacity(pages.len());
@@ -78,6 +77,43 @@ fn meet(uses: &mut [Use], stack: &mut Vec<u32>, id: u32, i: u32) {
     stack.push(id);
 }
 
+/// Which of `pages` use each object, by id, for a writer that groups objects by page
+/// ([`group`](super::group)) and has no plan to ask ([`Plan::used`](super::Plan::used)):
+/// `refs` tells each reference an object holds, and the walk from page `i` goes into what
+/// it meets but what `stop` holds other than the page walked from, so another page's link
+/// or a page's `/Parent` brings in nothing of another's. An object no page reaches isn't
+/// in the map. An object is gone into twice at most, as [`Plan`](super::Plan) has it, on a
+/// stack of its own, however many pages share what it reaches.
+pub fn page_uses(
+    pages: &[Id],
+    stop: &HashSet<Id>,
+    refs: impl Fn(Id, &mut dyn FnMut(Id)),
+) -> HashMap<Id, Use> {
+    let mut index: HashMap<Id, u32> = HashMap::with_capacity(pages.len());
+    let mut ids: Vec<Id> = Vec::with_capacity(pages.len());
+    let mut lists: Vec<Vec<u32>> = Vec::with_capacity(pages.len());
+    let mut indexed = |id: Id, ids: &mut Vec<Id>| {
+        *index.entry(id).or_insert_with(|| {
+            ids.push(id);
+            ids.len() as u32 - 1
+        })
+    };
+    let walks: Vec<u32> = pages.iter().map(|&id| indexed(id, &mut ids)).collect();
+    let is_page: HashSet<Id> = pages.iter().copied().collect();
+    while lists.len() < ids.len() {
+        let id = ids[lists.len()];
+        let mut list = Vec::new();
+        if is_page.contains(&id) || !stop.contains(&id) {
+            refs(id, &mut |to| list.push(indexed(to, &mut ids)));
+        }
+        lists.push(list);
+    }
+    let stops: Vec<bool> = ids.iter().map(|id| stop.contains(id)).collect();
+    let walked = walk(&walks, &stops, |at| &lists[at as usize]);
+    let found = ids.iter().copied().zip(walked.uses);
+    found.filter(|(_, used)| *used != Use::None).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -98,7 +134,7 @@ mod tests {
         all
     }
 
-    /// `stop` as [`page_uses`] takes it: those numbers marked, of `len`.
+    /// `stop` as [`walk`] takes it: those numbers marked, of `len`.
     fn marks(stop: &HashSet<u32>, len: usize) -> Vec<bool> {
         (0..len as u32).map(|n| stop.contains(&n)).collect()
     }
@@ -124,7 +160,7 @@ mod tests {
         let stop: HashSet<u32> = pages.iter().copied().chain([root]).collect();
         let stop = marks(&stop, references.len());
         let walked: RefCell<HashMap<u32, usize>> = RefCell::default();
-        let found = page_uses(&pages, &stop, |id| {
+        let found = walk(&pages, &stop, |id| {
             *walked.borrow_mut().entry(id).or_default() += 1;
             &references[id as usize]
         });
@@ -176,7 +212,7 @@ mod tests {
         let references = references(&objects);
         let pages = [2, 3, 4];
         let stop = marks(&HashSet::from([2, 3, 4, 1]), references.len());
-        let found = page_uses(&pages, &stop, |id| &references[id as usize]);
+        let found = walk(&pages, &stop, |id| &references[id as usize]);
         let uses = found.uses;
         let got: Vec<(u32, Use)> = (0..)
             .zip(&uses)
@@ -220,7 +256,7 @@ mod tests {
             (7, vec![2]),
         ]);
         let stop = vec![false; references.len()];
-        let found = page_uses(&[1], &stop, |id| &references[id as usize]);
+        let found = walk(&[1], &stop, |id| &references[id as usize]);
         assert_eq!(found.entered(0), [1, 2, 3, 4, 5, 6, 7]);
     }
 }

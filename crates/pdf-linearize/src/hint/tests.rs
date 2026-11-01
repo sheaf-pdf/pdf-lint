@@ -811,3 +811,12 @@ fn a_value_its_widths_cant_hold_isnt_written() {
     table.header.id_bits = 33;
     assert!(table.write(&mut Vec::new()).is_err());
 }
+
+/// A position past a stream the far end of what a `u64` holds is no position past it, and
+/// doesn't overflow either way.
+#[test]
+fn a_position_at_the_far_end_of_u64_is_itself() {
+    assert_eq!(position(10, u64::MAX, 2), 10);
+    assert_eq!(position(10, 2, u64::MAX), 10);
+    assert_eq!(located(10, 2, u64::MAX), u64::MAX);
+}

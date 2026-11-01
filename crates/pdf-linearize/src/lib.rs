@@ -7,8 +7,8 @@
 //!   Annex F's order, the new numbers and the object streams' members, a
 //!   [`Plan`], with what each page's entry in the hint tables needs. Which
 //!   pages use each object is a [`Use`], and [`group`] says which objects share
-//!   an object stream by their uses, which a writer that doesn't linearize can
-//!   use too.
+//!   an object stream by their uses; a writer that doesn't linearize has them
+//!   with no plan by [`page_uses`].
 //! - **The bytes around the bodies** ([`assemble`]): a caller writes each of the
 //!   plan's bodies, however it holds them, and gives their lengths. A [`Layout`]
 //!   has the padded dictionary, both cross-reference sections and the hint stream
@@ -47,9 +47,11 @@ pub use check::{Facts, Finding, Grade, Sink, Verdict, check};
 pub use layout::{Encoded, Layout, Piece, Stream, StreamKind, assemble};
 pub use limits::Limits;
 pub use plan::{
-    Container, FileGroup, Graph, Group, Kind, MEMBERS, Node, Page, Part, Plan, Use, What, Write,
-    group, plan,
+    Container, FileGroup, FirstPage, Graph, Group, Kind, MEMBERS, Node, Page, Part, Plan, Use,
+    What, Write, group, page_uses, plan,
 };
+#[cfg(feature = "family")]
+pub use {pdf_objects, pdf_semantics, pdf_structure};
 
 pub mod check;
 #[cfg(feature = "family")]
