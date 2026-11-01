@@ -290,6 +290,7 @@ use crate::source::{
 mod file;
 mod limits;
 mod reading;
+mod sections;
 mod window;
 
 #[cfg(any(unix, windows))]
@@ -297,6 +298,7 @@ pub use file::FileBytes;
 pub use file::Identity;
 pub use limits::{Limits, Options};
 pub use reading::{ByteSource, Error, Reading, SourceId};
+pub use sections::{FirstObject, SectionFault, SectionRow, SectionRows, Sections};
 use window::{Bytes, InMemory, Window};
 
 // How deeply arrays and dictionaries may nest in an object is the

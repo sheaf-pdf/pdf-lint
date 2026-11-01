@@ -447,7 +447,7 @@ impl<S: ByteSource> Reading<S> {
     }
 
     /// The file read by position.
-    fn by_position(&self) -> ByPosition<'_> {
+    pub(super) fn by_position(&self) -> ByPosition<'_> {
         ByPosition::new(&self.source, self.bound)
     }
 

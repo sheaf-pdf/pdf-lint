@@ -6,13 +6,16 @@
 //! stream wanting more room: its positions what its pieces add up to, its hint
 //! tables, read back, what the plan says. And the same bytes as a hint stream, read
 //! under small caps at any positions: an error, or tables that write and read the
-//! same. And the same bytes as a file, read, laid out in the three kinds and read
-//! back: pages and objects the same under the numbering, or `out` as it was.
+//! same. And the same bytes as the facts of a file: the same verdict whatever the
+//! sink. And the same bytes as a file, read, laid out in the three kinds and read
+//! back: pages and objects the same under the numbering, the check of it clean, or
+//! `out` as it was.
 
 #![no_main]
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     pdf_linearize::fuzz::graphs(data);
     pdf_linearize::fuzz::tables(data);
+    pdf_linearize::fuzz::facts(data);
     pdf_linearize::fuzz::over(data);
 });

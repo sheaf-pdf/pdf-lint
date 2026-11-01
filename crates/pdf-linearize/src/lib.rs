@@ -16,6 +16,9 @@
 //!   filtered or encrypted by is a closure, so no filter or key is here.
 //! - **The hint tables** ([`hint`]): all of F.4's as typed values, written to
 //!   bits and read back, [`hint::tables`] reading any bytes under a cap.
+//! - **The check** ([`check()`]): the [`Facts`] of a file as written, as any model's
+//!   reader gives them, held against each other, to a [`Verdict`] and a [`Finding`]
+//!   for each thing wrong, by the clause it departs from and a [`Grade`].
 #![cfg_attr(
     feature = "family",
     doc = "- **The family's documents** ([`family`], a default feature): a document of"
@@ -32,6 +35,7 @@
 //! Its caps are one value, [`Limits`]. With no features there's no object model
 //! here at all.
 
+pub use check::{Facts, Finding, Grade, Sink, Verdict, check};
 pub use layout::{Encoded, Layout, Piece, Stream, StreamKind, assemble};
 pub use limits::Limits;
 pub use plan::{
@@ -39,6 +43,7 @@ pub use plan::{
     group, plan,
 };
 
+pub mod check;
 #[cfg(feature = "family")]
 pub mod family;
 #[cfg(any(test, fuzzing))]

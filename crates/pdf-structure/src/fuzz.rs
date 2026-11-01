@@ -200,9 +200,45 @@ pub fn read_file(data: &[u8]) {
         _ => (0, data),
     };
     alike(file, &[], choice);
+    sections(file);
     if choice & 1 != 0 {
         alike(file, &[OWNER], choice);
         unlocked(file, choice);
+    }
+}
+
+/// `file`'s sections each on its own, and its first object: the same by position,
+/// kept for nobody so the same again, under the caps, each row a section says it has
+/// in it, and what's in use at a number of the sections the reader's when it read them
+/// and nothing's newer.
+fn sections(file: &[u8]) {
+    let reading = Reading::in_memory(file, &[], &options(), true, None);
+    let read = reading.sections().expect("it's in memory");
+    assert_eq!(reading.sections().expect("it's in memory"), read);
+    let first = reading.first_object().expect("it's in memory");
+    let source = Counted::new(file, 1 + file.len() / 3);
+    let by_position = Reading::open_by(&source, &[], &options(), true).expect("it's in memory");
+    assert_eq!(by_position.sections().expect("it's in memory"), read);
+    assert_eq!(by_position.first_object().expect("it's in memory"), first);
+    let mut limits = options().limits;
+    limits.sections = 1;
+    limits.entries = Some(4);
+    let mut small = options();
+    small.limits = limits;
+    let reading = Reading::in_memory(file, &[], &small, true, None);
+    let capped = reading.sections().expect("it's in memory");
+    assert!(capped.sections.len() <= 1);
+    assert!(
+        capped
+            .sections
+            .iter()
+            .all(|section| section.rows.len() <= 4)
+    );
+    for section in &read.sections {
+        let said: u64 = (section.subsections.iter())
+            .map(|&(_, count)| u64::from(count))
+            .sum();
+        assert_eq!(said, section.rows.len() as u64);
     }
 }
 

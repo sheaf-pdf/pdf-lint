@@ -7,7 +7,8 @@
 //! rather than a way past anything. Either writes every object at a new number,
 //! as Annex F has it, so anything that names one from outside the file, a
 //! signature's byte range above all, doesn't hold afterwards, as under any
-//! rewrite.
+//! rewrite. [`check()`] says whether a file that says it's linearized holds, and
+//! [`facts()`] gives what that's judged from.
 //!
 //! # What changes in the document
 //!
@@ -89,8 +90,10 @@ use crate::Limits;
 use crate::layout::{self, Encoded, Layout, Piece, Stream, StreamKind, assemble};
 use crate::plan::{self, Kind, Plan, What, plan};
 
+mod facts;
 pub(crate) mod graph;
 
+pub use facts::{check, facts};
 use graph::Prepared;
 
 /// How a file is laid out. A caller sets the fields on a copy of

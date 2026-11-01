@@ -199,6 +199,7 @@ pub struct Layout {
     hint_at: u64,
     first_section_at: u64,
     main_section_at: u64,
+    main_first_entry: u64,
     data: Vec<u8>,
     keys: HintKeys,
 }
@@ -252,6 +253,11 @@ impl Layout {
     /// Where the main section starts, the first-page section's `/Prev`.
     pub fn main_section(&self) -> u64 {
         self.main_section_at
+    }
+
+    /// Where the main section's first entry is said to be: the dictionary's `/T`.
+    pub fn main_first_entry(&self) -> u64 {
+        self.main_first_entry
     }
 
     /// The hint stream's data before the closure had it.
@@ -435,6 +441,7 @@ pub fn assemble<E>(
         hint_at,
         first_section_at,
         main_section_at: main_at,
+        main_first_entry: t,
         data,
         keys,
     })

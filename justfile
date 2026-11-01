@@ -284,8 +284,9 @@ arlington-msrv:
 # its writer, content written again and the calls, and its splices and
 # lists written again; `semantics`, pdf-semantics' name and number trees,
 # page tree, dates and XMP claims; `linearize`, pdf-linearize's plan of any
-# graph, what's assembled from it, hint tables from any bytes, and any bytes as a
-# file, laid out and read back; or `check`, the reader and the checker.
+# graph, what's assembled from it, hint tables from any bytes, any facts of a file,
+# and any bytes as a file, laid out, read back and checked; or `check`, the reader
+# and the checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
 # makes, `write`'s with the third byte its input has; `content`, `semantics` and
 # `linearize` from those their own crates' fuzz modules make. The nightly is

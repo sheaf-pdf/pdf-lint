@@ -1,13 +1,18 @@
 //! What the fuzz target checks, which unit tests check too: the promises a plan
 //! makes, on any graph, each held against a plain walk of it; what's assembled from
-//! a plan, its positions against its pieces and its tables against the plan; and a
-//! hint stream of any bytes, read under small caps and written again; and, with
-//! `family`, any bytes as a file, laid out and read back. It's compiled only for
-//! tests and under cargo-fuzz's `--cfg fuzzing`.
+//! a plan, its positions against its pieces, its tables against the plan, and the
+//! check of it clean; a hint stream of any bytes, read under small caps and written
+//! again; any facts, judged the same whatever the sink; and, with `family`, any bytes
+//! as a file, laid out and read back, the check of what's written clean. It's compiled
+//! only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 
+use crate::check::{
+    self, Facts, Finding, FirstObject, Grade, HintData, HintFacts, PageFacts, Raw, RowEntry,
+    RowFacts, SectionFacts, Sink,
+};
 use crate::hint::{self, EmbeddedFiles, Extended, Generic, HintKeys, PageOffsets};
 use crate::hint::{SharedObjects, Thumbnails};
 use crate::layout::{self, Encoded, Layout, Options, Piece, Stream, StreamKind, assemble};
@@ -898,6 +903,7 @@ fn assembles(plan: &Plan, data: &[u8]) {
     let options = Options::new((1, 7));
     let layout = assemble(plan, &lengths, &options, plain).expect("settles");
     assembled(plan, &lengths, &layout);
+    clean(plan, &layout);
 
     // Longer for some rounds; shorter after.
     let (mut calls, mut asks) = (0, 0);
@@ -914,6 +920,7 @@ fn assembles(plan: &Plan, data: &[u8]) {
     });
     let grown = grown.expect("settles");
     assembled(plan, &lengths, &grown);
+    clean(plan, &grown);
     assert_eq!(asks > 0, plan.kind() == Kind::Stream);
 
     if plan.kind() == Kind::Stream && plan.size() as usize <= SMALL {
@@ -1080,6 +1087,392 @@ pub fn graphs(data: &[u8]) {
     }
 }
 
+/// The facts `plan` and `layout` say a file has, as a reader would give them.
+pub(crate) fn facts_of(plan: &Plan, layout: &Layout) -> Facts {
+    let mut facts = Facts::new(layout.len());
+    let dictionary = plan.dictionary_number();
+    let dictionary_at = layout.position(dictionary).expect("it's written");
+    let mut first = FirstObject::new(dictionary_at, layout.first_section(), dictionary, 0);
+    let (hint_at, hint_len) = layout.hint_extent();
+    let int = |n: u64| Raw::Integer(n as i64);
+    first.linearized = Raw::Integer(1);
+    first.l = int(layout.len());
+    first.h = Raw::Array;
+    first.h_items = vec![int(hint_at), int(hint_len)];
+    first.o = Raw::Integer(i64::from(plan.first_page_number()));
+    first.e = int(layout.first_page_end());
+    first.n = Raw::Integer(i64::from(plan.page_count()));
+    first.t = int(layout.main_first_entry());
+    if plan.first_page() != 0 {
+        first.p = Raw::Integer(i64::from(plan.first_page()));
+    }
+    facts.first_object = Some(first);
+
+    let mut rows = vec![RowEntry::Free; plan.size() as usize];
+    for (number, row) in (0u32..).zip(&mut rows) {
+        if let Some(at) = layout.position(number) {
+            *row = RowEntry::InUse(at);
+        }
+    }
+    for container in plan.containers() {
+        for (index, (_, number)) in (0u32..).zip(&container.members) {
+            rows[*number as usize] = RowEntry::Compressed {
+                stream: container.number,
+                index,
+            };
+        }
+    }
+    let row_of = |number: u32| {
+        let generation = match number {
+            0 => u16::MAX,
+            _ => 0,
+        };
+        RowFacts::new(number, generation, rows[number as usize])
+    };
+    let kind = plan.kind();
+    let size = plan.size();
+    let mut main = SectionFacts::new(layout.main_section(), kind);
+    main.subsections = vec![(0, dictionary)];
+    main.rows = (0..dictionary).map(row_of).collect();
+    main.startxref = Some(layout.first_section());
+    main.stream = plan.main_xref_number();
+    main.size = Raw::Integer(i64::from(dictionary));
+    main.first_row = Some(match kind {
+        Kind::Table => (layout.main_first_entry(), layout.main_first_entry() + 1),
+        Kind::Stream => (layout.main_section(), layout.main_section()),
+    });
+    let mut section = SectionFacts::new(layout.first_section(), kind);
+    section.subsections = vec![(dictionary, size - dictionary)];
+    section.rows = (dictionary..size).map(row_of).collect();
+    section.size = Raw::Integer(i64::from(size));
+    section.prev = int(layout.main_section());
+    section.root = Raw::Reference((plan.catalog_number(), 0));
+    section.startxref = Some(0);
+    section.stream = plan.first_xref_number();
+    facts.first = Some(section);
+    facts.main = Some(main);
+
+    let mut hint = HintFacts::new(
+        hint_at,
+        hint_at + hint_len,
+        plan.hint_number(),
+        HintData::Decoded(layout.hint_data().to_vec()),
+    );
+    let keys = layout.hint_keys();
+    let optional = [
+        (&b"T"[..], keys.thumbnails),
+        (b"O", keys.outlines),
+        (b"A", keys.threads),
+        (b"E", keys.dests),
+        (b"V", keys.form),
+        (b"I", keys.info),
+        (b"C", keys.structure),
+        (b"L", keys.labels),
+        (b"R", keys.renditions),
+        (b"B", keys.files),
+    ];
+    hint.keys.push((b"S".to_vec(), int(keys.shared)));
+    for (key, at) in optional {
+        if let Some(at) = at {
+            hint.keys.push((key.to_vec(), int(at)));
+        }
+    }
+    hint.keys.push((b"Length".to_vec(), int(hint_len)));
+    facts.hint = Some(hint);
+    facts.pages = (0..plan.page_count())
+        .map(|page| {
+            let number = match page == plan.first_page() {
+                true => plan.first_page_number(),
+                false => plan.writes()[plan.page_writes(page).start].number,
+            };
+            let mut facts = PageFacts::new(Some((number, 0)));
+            facts.resources = true;
+            facts.media_box = true;
+            facts
+        })
+        .collect();
+    facts
+}
+
+/// Told none, and how often it's asked.
+#[derive(Default)]
+struct Unwanted {
+    told: usize,
+    asked: std::cell::Cell<usize>,
+}
+
+impl Sink for Unwanted {
+    fn finding(&mut self, _: Finding) {
+        self.told += 1;
+    }
+
+    fn wants(&self) -> bool {
+        self.asked.set(self.asked.get() + 1);
+        false
+    }
+}
+
+/// The same verdict whatever the sink, none told what doesn't want any, and that
+/// verdict what the findings say. What's kept is given back.
+fn judged_alike(facts: &Facts, limits: &Limits) -> (check::Verdict, Vec<Finding>) {
+    let mut kept = Vec::new();
+    let verdict = check::check(facts, limits, &mut kept);
+    assert_eq!(check::check(facts, limits, &mut ()), verdict);
+    let mut unwanted = Unwanted::default();
+    assert_eq!(check::check(facts, limits, &mut unwanted), verdict);
+    assert_eq!(unwanted.told, 0);
+    let by = &mut kept.clone() as &mut dyn Sink;
+    assert_eq!(check::check(facts, limits, by), verdict);
+    let error = kept.iter().any(|finding| finding.grade() == Grade::Error);
+    assert_eq!(verdict.holds, verdict.linearized && !error, "{kept:?}");
+    (verdict, kept)
+}
+
+/// What's assembled holds: the check of it finds nothing but what a plan can't help.
+fn clean(plan: &Plan, layout: &Layout) {
+    let (verdict, findings) = judged_alike(&facts_of(plan, layout), &Limits::DEFAULT);
+    assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+    assert_eq!(findings, [], "{plan:?}");
+}
+
+/// Any facts: judged under small caps, never panicking, the same whatever the sink.
+/// Half are what's assembled from a plan of the input, each field given a value of
+/// the input's; half are all from the input.
+pub fn facts(data: &[u8]) {
+    let mut limits = Limits::DEFAULT;
+    limits.pages = 256;
+    limits.hint_entries = 1 << 12;
+    limits.objects = 1 << 12;
+    limits.shared_entries = 1 << 12;
+    limits.shared_visits = 1 << 16;
+    let described = described(data);
+    let mut bytes = Bytes(data);
+    let choice = bytes.byte();
+    let mut facts = match plan(&described.graph(), &Limits::DEFAULT) {
+        Ok(planned) if choice & 1 == 0 && planned.size() < 2000 => {
+            let lengths = vec![16 + u64::from(choice); planned.writes().len()];
+            let options = Options::new((1, 7));
+            let layout = assemble(&planned, &lengths, &options, plain).expect("settles");
+            let mut facts = facts_of(&planned, &layout);
+            spoiled(&mut facts, &mut bytes);
+            facts
+        }
+        _ => made_up(&mut bytes),
+    };
+    if choice & 2 != 0 {
+        facts.graph = Some(described.graph());
+    }
+    judged_alike(&facts, &limits);
+}
+
+/// A number of the input's, near where numbers are and far.
+fn number_from(bytes: &mut Bytes) -> u64 {
+    match bytes.below(4) {
+        0 => bytes.below(64) as u64,
+        1 => bytes.below(1 << 16) as u64,
+        2 => u64::from_be_bytes(std::array::from_fn(|_| bytes.byte())),
+        _ => u64::from(u32::MAX) - bytes.below(8) as u64,
+    }
+}
+
+/// A number an object has, of the input's: few, now and then the last there can be.
+fn object_from(bytes: &mut Bytes) -> u32 {
+    match bytes.chance(16) {
+        true => u32::MAX - bytes.below(2) as u32,
+        false => bytes.below(64) as u32,
+    }
+}
+
+/// An `/N` of the input's: a table of none reads, as do a few pages.
+fn count_from(bytes: &mut Bytes) -> Raw {
+    match bytes.below(4) {
+        0 => Raw::Integer(0),
+        1 => Raw::Integer(bytes.below(8) as i64),
+        _ => raw_from(bytes),
+    }
+}
+
+/// A value of the input's.
+fn raw_from(bytes: &mut Bytes) -> Raw {
+    match bytes.below(8) {
+        0 => Raw::Absent,
+        1 => Raw::Real(number_from(bytes) as f64 / 3.0),
+        2 => Raw::Reference((number_from(bytes) as u32, 0)),
+        3 => Raw::Array,
+        4 => Raw::Other,
+        _ => Raw::Integer(number_from(bytes) as i64),
+    }
+}
+
+fn row_from(bytes: &mut Bytes) -> RowFacts {
+    let entry = match bytes.below(4) {
+        0 => RowEntry::Free,
+        1 => RowEntry::Compressed {
+            stream: object_from(bytes),
+            index: bytes.below(8) as u32,
+        },
+        _ => RowEntry::InUse(number_from(bytes)),
+    };
+    RowFacts::new(object_from(bytes), bytes.below(2) as u16, entry)
+}
+
+fn section_from(bytes: &mut Bytes) -> SectionFacts {
+    let kind = match bytes.below(2) {
+        0 => Kind::Table,
+        _ => Kind::Stream,
+    };
+    let mut section = SectionFacts::new(number_from(bytes), kind);
+    section.rows = (0..bytes.below(32)).map(|_| row_from(bytes)).collect();
+    section.hybrid = (0..bytes.below(4)).map(|_| row_from(bytes)).collect();
+    section.subsections = (0..bytes.below(4))
+        .map(|_| (bytes.below(64) as u32, bytes.below(64) as u32))
+        .collect();
+    section.size = raw_from(bytes);
+    section.prev = raw_from(bytes);
+    section.root = raw_from(bytes);
+    section.first_row = bytes
+        .chance(2)
+        .then(|| (number_from(bytes), number_from(bytes)));
+    section.startxref = bytes.chance(2).then(|| number_from(bytes));
+    section.stream = bytes.chance(2).then(|| bytes.below(64) as u32);
+    section
+}
+
+fn hint_from(bytes: &mut Bytes) -> HintFacts {
+    let data = match bytes.below(8) {
+        0 => HintData::Locked,
+        1 => HintData::NotAStream,
+        2 => HintData::Undecodable,
+        _ => {
+            let length = bytes.below(bytes.0.len() + 1).min(bytes.0.len());
+            let (data, rest) = bytes.0.split_at(length);
+            bytes.0 = rest;
+            HintData::Decoded(data.to_vec())
+        }
+    };
+    // The tables read only from an /S inside the data, so it's mostly that.
+    let room = match &data {
+        HintData::Decoded(data) => data.len(),
+        _ => 0,
+    };
+    let mut hint = HintFacts::new(
+        number_from(bytes),
+        number_from(bytes),
+        bytes.below(64) as u32,
+        data,
+    );
+    hint.overflow = bytes
+        .chance(4)
+        .then(|| (number_from(bytes), number_from(bytes)));
+    let keys: [&[u8]; 8] = [b"S", b"T", b"O", b"I", b"V", b"B", b"Length", b"P"];
+    for key in keys {
+        if !bytes.chance(4) {
+            let raw = match key == b"S" && !bytes.chance(4) {
+                true => Raw::Integer(bytes.below(room + 1) as i64),
+                false => raw_from(bytes),
+            };
+            hint.keys.push((key.to_vec(), raw));
+        }
+    }
+    hint
+}
+
+/// Facts from the input alone, what the rest depends on first, mostly as it should be.
+fn made_up(bytes: &mut Bytes) -> Facts {
+    let len = number_from(bytes);
+    let mut facts = Facts::new(len);
+    facts.header = bytes.below(4) as u64 * 512;
+    let mut first = FirstObject::new(
+        number_from(bytes),
+        number_from(bytes),
+        bytes.below(64) as u32,
+        bytes.below(2) as u16,
+    );
+    first.stream = bytes.chance(16);
+    first.linearized = match bytes.chance(8) {
+        true => raw_from(bytes),
+        false => Raw::Integer(1),
+    };
+    first.l = match bytes.chance(8) {
+        true => raw_from(bytes),
+        false => Raw::Integer(len.saturating_sub(facts.header) as i64),
+    };
+    first.h = match bytes.chance(8) {
+        true => raw_from(bytes),
+        false => Raw::Array,
+    };
+    first.h_items = (0..bytes.below(6)).map(|_| raw_from(bytes)).collect();
+    first.o = raw_from(bytes);
+    first.e = raw_from(bytes);
+    first.n = count_from(bytes);
+    first.t = raw_from(bytes);
+    first.p = raw_from(bytes);
+    facts.first_object = bytes
+        .chance(16)
+        .then_some(())
+        .map_or(Some(first), |()| None);
+    facts.first = (!bytes.chance(16)).then(|| section_from(bytes));
+    facts.main = (!bytes.chance(16)).then(|| section_from(bytes));
+    facts.update = bytes.chance(4).then(|| number_from(bytes));
+    facts.hint = (!bytes.chance(8)).then(|| hint_from(bytes));
+    facts.pages = (0..bytes.below(32))
+        .map(|_| {
+            let id = bytes
+                .chance(8)
+                .then_some(())
+                .map_or(Some((bytes.below(64) as u32, 0)), |()| None);
+            let mut page = PageFacts::new(id);
+            page.resources = bytes.chance(2);
+            page.media_box = bytes.chance(2);
+            page
+        })
+        .collect();
+    facts.nodes = (0..bytes.below(4))
+        .map(|_| (bytes.below(64) as u32, check::Attribute::Rotate))
+        .collect();
+    facts
+}
+
+/// What's assembled, with a few of its fields given values of the input's.
+fn spoiled(facts: &mut Facts, bytes: &mut Bytes) {
+    for _ in 0..1 + bytes.below(4) {
+        match bytes.below(16) {
+            0 => facts.len = number_from(bytes),
+            1 => facts.first = Some(section_from(bytes)),
+            2 => facts.main = Some(section_from(bytes)),
+            3 => facts.hint = Some(hint_from(bytes)),
+            4 => facts.pages.truncate(bytes.below(8)),
+            n => {
+                let Some(first) = &mut facts.first_object else {
+                    continue;
+                };
+                let raw = raw_from(bytes);
+                match n {
+                    5 => first.h_items = vec![raw, raw],
+                    6 => first.o = raw,
+                    7 => first.e = raw,
+                    8 => first.n = count_from(bytes),
+                    9 => first.t = raw,
+                    10 => first.p = raw,
+                    11 => first.linearized = raw,
+                    12 => first.l = raw,
+                    _ => {
+                        let Some(HintData::Decoded(data)) =
+                            facts.hint.as_mut().map(|hint| &mut hint.data)
+                        else {
+                            continue;
+                        };
+                        if !data.is_empty() {
+                            let at = bytes.below(data.len());
+                            data[at] = bytes.byte();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Any bytes as a file, read and written again in the three kinds: in the clear; as
 /// it's encrypted, where it is, and a password opens it; and now and then, by the
 /// input's length, under a new encryption. Where it's written, it reads linearized by
@@ -1186,6 +1579,14 @@ fn written_back<S: pdf_structure::ByteSource>(
         .expect("it has a catalog");
     let listed = pages(&back, catalog, Rules::Iso, &limits, &mut ()).expect("it has pages");
     assert_eq!(listed.len(), planned.page_count() as usize);
+    // What's written holds, nothing that says otherwise of what a page reaches.
+    let read = family::facts(&again, &Limits::DEFAULT).expect("it's in memory");
+    let (verdict, findings) = judged_alike(&read, &Limits::DEFAULT);
+    assert!(verdict.linearized && verdict.holds && verdict.hints_read);
+    assert!(
+        (findings.iter()).all(|finding| matches!(finding, Finding::PageAttribute { .. })),
+        "{findings:?}"
+    );
     for page in &listed {
         for attribute in [
             Inheritable::Resources,
@@ -1539,6 +1940,26 @@ mod tests {
             let len = (random() % 400) as usize;
             let most = [2, 8, 64, 255][round % 4];
             tables(&input(len, most, &mut random));
+        }
+    }
+
+    /// Any facts, made up and spoiled, on the seeds and on random inputs.
+    #[test]
+    fn any_facts_are_judged_alike_whatever_the_sink() {
+        for seed in seeds() {
+            facts(&seed);
+        }
+        let mut random = generator(0xDEAD_BEEF_1234_5678);
+        for round in 0..3000 {
+            let len = (random() % 2000) as usize;
+            let most = [4, 16, 64, 255][round % 4];
+            facts(&input(len, most, &mut random));
+        }
+        facts(&[]);
+        for byte in 0..=255 {
+            facts(&[byte]);
+            facts(&[byte; 40]);
+            facts(&[byte; 400]);
         }
     }
 

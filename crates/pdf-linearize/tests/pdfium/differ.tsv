@@ -1,1 +1,2 @@
 # name	why pdf-linearize reads it otherwise than PDFium
+broken-hint-past	PDFium doesn't take a /H past the file as linearized; the check takes linearized by qpdf's test, the first object and /L, and says of /H in a finding

@@ -180,8 +180,11 @@ def linearized(pages=2, first=0, shared_later=False, sizes=None, broken=None):
         low = min(group_lengths)
         group_bits = width(max(group_lengths) - low)
         bits = Bits()
+        # The first entry is the first page's three objects, one run; part 8's one each.
+        less_ones = [len(first_bodies) - 1] + [0] * (len(group_lengths) - 1)
+        count_bits = width(max(less_ones))
         for value, w in [(shared or tree, 32), (part8_at, 32), (1, 32), (len(group_lengths), 32),
-                         (1, 16), (low, 32), (group_bits, 16)]:
+                         (count_bits, 16), (low, 32), (group_bits, 16)]:
             bits.put(value, w)
         for length in group_lengths:
             bits.put(length - low, group_bits)
@@ -189,8 +192,8 @@ def linearized(pages=2, first=0, shared_later=False, sizes=None, broken=None):
         for _ in group_lengths:
             bits.put(0, 1)
         bits.align()
-        for _ in group_lengths:
-            bits.put(0, 1)
+        for less_one in less_ones:
+            bits.put(less_one, count_bits)
         bits.align()
         shared_table = bytes(bits.out)
         data = page_table + shared_table
