@@ -17,6 +17,8 @@ arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cu
 # pdf-content-streams' `image-ends` feature needs a newer one than the crate:
 # its fax decoder, hayro-ccitt, uses Rust 1.87's library.
 content_image_ends_msrv := "1.87"
+# pdf-linearize's `lopdf` feature needs a newer one than the crate: lopdf's own.
+linearize_lopdf_msrv := "1.88"
 
 # The nightly the fuzz targets build on: `nightly`, or the toolchain
 # FUZZ_TOOLCHAIN names, as CI's fuzzing pins one.
@@ -45,7 +47,7 @@ fmt:
 # turn on; then the filters with zlib-rs their only Flate backend; then the
 # content streams with `image-ends`, which no other crate turns on; then
 # pdf-semantics without its clock, as pdf-lint takes it; then pdf-linearize's
-# engine, without its adapter.
+# engine, without its adapter, and with lopdf's, which nothing else turns on.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
@@ -53,18 +55,20 @@ clippy:
     cargo clippy --locked -p pdf-content-streams --features image-ends --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-linearize --features lopdf --all-targets -- -D warnings
 
 # Unit tests and doctests: the workspace's, where the filters have both
 # Flate backends, as pdf-structure's tests turn zlib-rs on; then the
 # filters' with zlib-rs alone; then the content streams' with `image-ends`;
 # then pdf-semantics' without its clock; then pdf-linearize's engine, without
-# its adapter.
+# its adapter, and with lopdf's.
 test:
     cargo test --locked --workspace
     cargo test --locked -p pdf-filters --no-default-features --features zlib-rs
     cargo test --locked -p pdf-content-streams --features image-ends
     cargo test --locked -p pdf-semantics --no-default-features
     cargo test --locked -p pdf-linearize --no-default-features
+    cargo test --locked -p pdf-linearize --features lopdf
 
 # qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
 # pinned SHA-256 (from the release's qpdf-12.4.2.sha256), kept in target/.
@@ -98,6 +102,7 @@ test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --test qpdf -- --ignored
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --features lopdf --test qpdf -- --ignored lopdf::
 
 # PDFium, the oracle of the readers that follow PDFium's rules: a
 # development snapshot, PDFium as of chromium/8125, pdfium-binaries' Linux
@@ -263,11 +268,12 @@ content-msrv:
 semantics-msrv:
     cargo +{{ semantics_msrv }} test --locked -p pdf-semantics
 
-# Test pdf-linearize on its oldest supported Rust, which must be installed, with
-# its adapter and without.
+# Test pdf-linearize on its oldest supported Rust, with its adapter and without,
+# then with `lopdf` on that feature's, each of which must be installed.
 linearize-msrv:
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize --no-default-features
+    cargo +{{ linearize_lopdf_msrv }} test --locked -p pdf-linearize --features lopdf
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:

@@ -31,6 +31,14 @@
     feature = "family",
     doc = "  by pdf-semantics, each body through pdf-structure's writer, copied where it can be, encrypted as the file was or under a new key."
 )]
+#![cfg_attr(
+    feature = "lopdf",
+    doc = "- **lopdf's documents** ([`lopdf`](mod@lopdf), off by default): a `Document` of lopdf's written as a"
+)]
+#![cfg_attr(
+    feature = "lopdf",
+    doc = "  linearized file, by plain functions over its public objects."
+)]
 //!
 //! Its caps are one value, [`Limits`]. With no features there's no object model
 //! here at all.
@@ -52,6 +60,8 @@ pub mod fuzz;
 pub mod hint;
 pub mod layout;
 mod limits;
+#[cfg(feature = "lopdf")]
+pub mod lopdf;
 pub mod plan;
 
 /// An object's number and generation, as a caller's model holds them: the same

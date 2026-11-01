@@ -224,8 +224,10 @@ jobs:
         with:
           persist-credentials: false
       # Keep in step with rust-version in crates/pdf-linearize/Cargo.toml,
-      # which `just linearize-msrv` reads.
+      # which `just linearize-msrv` reads, and with `linearize_lopdf_msrv` in the
+      # justfile, the `lopdf` feature's, which it tests on the second.
       - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.88
       - uses: extractions/setup-just@v4
       - name: Test
         run: just linearize-msrv

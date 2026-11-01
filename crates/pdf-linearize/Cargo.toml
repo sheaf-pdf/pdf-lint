@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF files laid out for reading over a network (ISO 32000-2, Annex F): an object graph, of any object model, planned into the order and numbers a linearized file has, and the bytes around its bodies, hint tables among them"
+description = "PDF files laid out for reading over a network (ISO 32000-2, Annex F): an object graph, of any object model, planned into the order and numbers a linearized file has, the bytes around its bodies, hint tables among them, and whether a file that says it's one holds"
 keywords = ["pdf", "linearized", "fast-web-view", "iso-32000"]
 categories = ["encoding"]
 # Only what users need, so local tooling files can't end up in the package.
@@ -13,6 +13,9 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 bitstream-io = "4"
+# On lopdf's own Rust, 1.88, where the rest of the crate takes 1.85: an adapter's, off
+# by default, and without its clock, threads and the like.
+lopdf = { version = "0.45", default-features = false, optional = true }
 pdf-objects = { path = "../pdf-objects", version = "0.1", optional = true }
 # The page tree and name trees, and not the clock.
 pdf-semantics = { path = "../pdf-semantics", version = "0.1", default-features = false, optional = true }
@@ -24,6 +27,8 @@ default = ["family"]
 # `family`: linearize a document of pdf-structure's. The engine and its tests build
 # without it, with no object model.
 family = ["dep:pdf-objects", "dep:pdf-semantics", "dep:pdf-structure"]
+# `lopdf`: linearize a document of lopdf's, through its public objects alone.
+lopdf = ["dep:lopdf"]
 
 [dev-dependencies]
 # A generator the tests can seed, for a new encryption's draws.
