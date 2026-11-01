@@ -139,6 +139,7 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
     );
     let named = PdfA::new(4, None);
     assert_eq!(named.to_string(), "PDF/A-4");
+    assert_eq!(PdfA::new(2, Some('b')).level, Some('B'));
     assert_eq!(PdfA::new(2, Some('b')).to_string(), "PDF/A-2b");
     assert_eq!(PdfUa::new(1).to_string(), "PDF/UA-1");
     assert_eq!(claims("", false).unwrap(), Conformance::default());

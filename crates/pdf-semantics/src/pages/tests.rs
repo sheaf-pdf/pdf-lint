@@ -2029,6 +2029,40 @@ fn a_fault_says_where_it_is() {
         [Some((2, 0))]
     );
 
+    // Each said of the reference to a kid is in the node that lists it, whatever
+    // was said of the kid before it.
+    let objects = [
+        catalog_object(),
+        object(
+            2,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R 4 0 R] /Count 1 /MediaBox [0 0 1 1] >>",
+        ),
+        object(3, "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R] /Count 0 >>"),
+        object(4, "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] /Count 1 >>"),
+        object(5, "<< /Type /Pages /Parent 3 0 R /Kids [3 0 R] /Count 0 >>"),
+        object(6, "<< /Type /Page /Parent 4 0 R >>"),
+    ];
+    let bytes = file(&objects);
+    let document = bytes::read(&bytes);
+    let resolver = &document;
+    let catalog = document.catalog().unwrap();
+    let mut kept = Kept::default();
+    pages(resolver, catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
+    let of = |wanted: fn(&Fault) -> bool| -> Vec<Option<ObjectId>> {
+        (kept.0.iter())
+            .filter(|(_, fault)| wanted(fault))
+            .map(|(place, _)| place.object)
+            .collect()
+    };
+    assert_eq!(
+        of(|fault| matches!(fault, Fault::PageTreeCycle { .. })),
+        [Some((5, 0))]
+    );
+    assert_eq!(
+        of(|fault| *fault == Fault::PageTreeRepeated { id: (4, 0) }),
+        [Some((2, 0))]
+    );
+
     // And what's said on the way up a /Parent chain, in the node that has it.
     let objects = [
         catalog_object(),
@@ -2183,6 +2217,28 @@ fn a_parent_chain_raised_past_the_stack_goes_along_in_a_loop() {
     assert_eq!(page.parents().count(), length as usize);
     assert_eq!(table, again);
     assert!(format!("{table:?}").len() > length as usize);
+}
+
+#[test]
+fn a_parent_chain_is_compared_and_shown_by_what_it_names() {
+    let chain = |ids: &[Option<ObjectId>]| {
+        let mut up = None;
+        for id in ids.iter().rev() {
+            up = Some(Arc::new(Parent { id: *id, up }));
+        }
+        up.unwrap()
+    };
+    let (a, b) = (Some((1, 0)), Some((2, 0)));
+    assert_eq!(chain(&[a, b]), chain(&[a, b]));
+    assert_eq!(chain(&[None, b]), chain(&[None, b]));
+    assert_ne!(chain(&[a, b]), chain(&[a, a]));
+    assert_ne!(chain(&[a, b]), chain(&[a]));
+    assert_ne!(chain(&[a]), chain(&[a, b]));
+    assert_ne!(chain(&[None]), chain(&[a]));
+    assert_eq!(
+        format!("{:?}", chain(&[a, None, b])),
+        "[Some((1, 0)), None, Some((2, 0))]"
+    );
 }
 
 #[test]
