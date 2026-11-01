@@ -1,9 +1,15 @@
 //! What the fuzz target checks, which unit tests check too: the promises a plan
-//! makes, on any graph, each held against a plain walk of it. It's compiled only
-//! for tests and under cargo-fuzz's `--cfg fuzzing`.
+//! makes, on any graph, each held against a plain walk of it; what's assembled from
+//! a plan, its positions against its pieces and its tables against the plan; and a
+//! hint stream of any bytes, read under small caps and written again. It's compiled
+//! only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 
+use crate::hint::{self, EmbeddedFiles, Extended, Generic, HintKeys, PageOffsets};
+use crate::hint::{SharedObjects, Thumbnails};
+use crate::layout::{self, Encoded, Layout, Options, Piece, Stream, StreamKind, assemble};
 use crate::plan::{Error, Group, Kind, Page, Part, Plan, Use, What, plan};
 use crate::{Graph, Id, Limits, MEMBERS};
 
@@ -32,6 +38,8 @@ struct Described {
     /// The objects given, in order, each given more than once as it's listed.
     given: Vec<(Id, Object)>,
     pages: Vec<(Id, Option<Id>)>,
+    /// Each page's content streams.
+    contents: Vec<Vec<Id>>,
     first: u32,
     tree_nodes: Vec<Id>,
     open: Vec<Id>,
@@ -109,6 +117,7 @@ fn described(data: &[u8]) -> Described {
     };
     let start = 1 + bytes.below(count - page_count.min(count - 1));
     let mut pages = Vec::with_capacity(page_count);
+    let mut contents = Vec::with_capacity(page_count);
     for at in 0..page_count {
         let page = match bytes.chance(128) {
             true => pick(&mut bytes),
@@ -116,6 +125,8 @@ fn described(data: &[u8]) -> Described {
         };
         let thumb = bytes.chance(4).then(|| pick(&mut bytes));
         pages.push((page, thumb));
+        let streams = bytes.below(3);
+        contents.push((0..streams).map(|_| pick(&mut bytes)).collect());
     }
     let first = match bytes.chance(4) {
         true => bytes.below(page_count + usize::from(bytes.0.len() % 16 == 1)) as u32,
@@ -137,6 +148,7 @@ fn described(data: &[u8]) -> Described {
         catalog,
         given,
         pages,
+        contents,
         first,
         tree_nodes,
         open,
@@ -154,9 +166,10 @@ impl Described {
                 .packable(object.packable)
                 .late(object.late);
         }
-        for &(id, thumb) in &self.pages {
+        for (&(id, thumb), contents) in self.pages.iter().zip(&self.contents) {
             let mut page = Page::new(id);
             page.thumb = thumb;
+            page.contents.clone_from(contents);
             graph.page(page);
         }
         graph.first_page(self.first);
@@ -542,10 +555,7 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
             .filter(|(g, _)| *g == group)
             .flat_map(|(_, roots)| roots.iter().copied())
             .collect();
-        let lists = matches!(
-            group,
-            Group::Form | Group::Structure | Group::Renditions | Group::EmbeddedFile
-        );
+        let lists = matches!(group, Group::Form | Group::Structure | Group::Renditions);
         if lists {
             let list = list_of(&plain.reach(&roots, None));
             assert_eq!(plan.group_shared(group), list, "{group:?}");
@@ -554,7 +564,78 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
             assert_eq!(plan.group_shared(group), []);
         }
     }
+    // Each root of the embedded file group: a group of its own, the writes of each
+    // what it reaches, one after another, and a list of its own.
+    let files: Vec<Id> = (described.groups.iter())
+        .filter(|(g, _)| *g == Group::EmbeddedFile)
+        .flat_map(|(_, roots)| roots.iter().copied())
+        .filter(|id| plain.objects.contains_key(id))
+        .collect();
+    assert_eq!(plan.files().len(), files.len());
+    let mut next = plan
+        .group_writes(Group::EmbeddedFile)
+        .map(|whole| whole.start);
+    for (at, root) in files.iter().enumerate() {
+        let reach = plain.reach(&[*root], None);
+        let file = &plan.files()[at];
+        assert_eq!(file.number, plan.number(*root).unwrap().0);
+        assert_eq!(next, Some(file.writes.start), "{root:?}");
+        next = Some(file.writes.end);
+        for write in &plan.writes()[file.writes.clone()] {
+            match write.what {
+                What::Object(id) => assert!(reach.contains(&id), "{id:?}"),
+                What::Container(c) => {
+                    for (id, _) in &plan.containers()[c].members {
+                        assert!(reach.contains(id), "{id:?} in {root:?}'s stream");
+                    }
+                }
+            }
+        }
+        assert_eq!(plan.file_shared(at), list_of(&reach), "{root:?}");
+        count += plan.file_shared(at).len();
+    }
+    assert_eq!(
+        next,
+        plan.group_writes(Group::EmbeddedFile)
+            .map(|whole| whole.end)
+    );
     assert_eq!(plan.shared_entries(), count);
+
+    // Thumbnails: each's writes what it reaches, what several share theirs.
+    let thumb_reach: Vec<BTreeSet<Id>> = (described.pages.iter())
+        .map(|&(_, thumb)| plain.reach(&Vec::from_iter(thumb), None))
+        .collect();
+    let in_write = |at: usize| match plan.writes()[at].what {
+        What::Object(id) => vec![id],
+        What::Container(c) => plan.containers()[c].members.iter().map(|m| m.0).collect(),
+    };
+    for (page, reach) in thumb_reach.iter().enumerate() {
+        for at in plan.thumb_writes(page as u32) {
+            for id in in_write(at) {
+                assert!(reach.contains(&id), "{id:?} on page {page}");
+            }
+        }
+    }
+    for at in plan.thumb_shared_writes() {
+        for id in in_write(at) {
+            let reached = thumb_reach.iter().filter(|reach| reach.contains(&id));
+            assert!(reached.count() >= 2, "{id:?} shared");
+        }
+    }
+
+    // A page's contents: from the first of them in its section to the last.
+    for (page, contents) in described.contents.iter().enumerate() {
+        let section = plan.page_writes(page as u32);
+        let own: Vec<usize> = (contents.iter())
+            .filter_map(|id| by_object.get(id).copied())
+            .filter(|at| section.contains(at))
+            .collect();
+        let want = match (own.iter().min(), own.iter().max()) {
+            (Some(least), Some(most)) => *least..*most + 1,
+            _ => 0..0,
+        };
+        assert_eq!(plan.page_contents(page as u32), want, "page {page}");
+    }
 
     // What's given says the group exists, whatever's left of it.
     for group in Group::ALL {
@@ -597,6 +678,375 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
     }
 }
 
+/// A stream as it is.
+fn plain(stream: Stream<'_>) -> Result<Encoded, Infallible> {
+    Ok(Encoded::plain(stream.data.to_vec()))
+}
+
+/// `layout` of `plan` under `lengths`: its pieces add up to where it says each
+/// thing is, the dictionary's values among them, and its tables, read back, are the
+/// plan's, each position landing on what it names.
+fn assembled(plan: &Plan, lengths: &[u64], layout: &Layout) {
+    let mut at = 0;
+    let mut bodies = 0;
+    let (hint_at, hint_len) = layout.hint_extent();
+    let mut hint_seen = false;
+    let mut positions = Vec::with_capacity(lengths.len() + 1);
+    let mut pieces = layout.pieces().peekable();
+    while let Some(piece) = pieces.next() {
+        match piece {
+            Piece::Bytes(bytes) => {
+                if at == 0 {
+                    assert_eq!(bytes.get(..5), Some(&b"%PDF-"[..]));
+                }
+                if pieces.peek().is_none() {
+                    // The main section's the last, and it starts where they end.
+                    positions.push(at);
+                    assert_eq!(layout.main_section(), at);
+                }
+                if at == hint_at {
+                    hint_seen = true;
+                    assert_eq!(bytes.len() as u64, hint_len);
+                }
+                at += bytes.len() as u64;
+            }
+            Piece::Body(body) => {
+                assert_eq!(body, bodies);
+                bodies += 1;
+                positions.push(at);
+                at += lengths[body];
+            }
+        }
+    }
+    assert_eq!(bodies, lengths.len());
+    assert!(hint_seen, "the hint stream's where it says");
+    assert_eq!(at, layout.len());
+    for (body, write) in plan.writes().iter().enumerate() {
+        assert_eq!(layout.position(write.number), Some(positions[body]));
+    }
+    assert_eq!(
+        layout.first_page_end(),
+        positions[plan.part_writes(Part::FirstPage).end]
+    );
+    // Part 4, the hint stream, part 6.
+    let part6 = plan.part_writes(Part::FirstPage);
+    assert_eq!(hint_at + hint_len, positions[part6.start]);
+    assert_eq!(layout.position(plan.hint_number()), Some(hint_at));
+    assert_eq!(
+        layout.position(plan.dictionary_number()),
+        Some(layout.first_section() - 200)
+    );
+    assert_eq!(
+        plan.first_xref_number().map(|n| layout.position(n)),
+        (plan.kind() == Kind::Stream).then_some(Some(layout.first_section()))
+    );
+    assert_eq!(
+        plan.main_xref_number().map(|n| layout.position(n)),
+        (plan.kind() == Kind::Stream).then_some(Some(layout.main_section()))
+    );
+    for container in plan.containers() {
+        for (_, number) in &container.members {
+            assert_eq!(layout.position(*number), None);
+        }
+    }
+
+    // What a position in a table is: as if the hint stream weren't there.
+    let said = |write: usize| hint::position(positions[write], hint_at, hint_len);
+    let span = |range: &std::ops::Range<usize>| positions[range.end] - positions[range.start];
+    let tables = hint::tables(
+        layout.hint_data(),
+        layout.hint_keys(),
+        plan.page_count(),
+        &Limits::DEFAULT,
+    );
+    let tables = tables.expect("what's assembled reads back");
+    let header = &tables.pages.header;
+    assert_eq!(u64::from(header.first_page_at), said(part6.start));
+    assert_eq!(tables.pages.pages.len(), plan.page_count() as usize);
+    for (page, entry) in (0..plan.page_count()).zip(&tables.pages.pages) {
+        let section = match page == plan.first_page() {
+            true => part6.clone(),
+            false => plan.page_writes(page),
+        };
+        assert_eq!(entry.objects, section.len() as u64);
+        assert_eq!(entry.length, span(&section));
+        let ids: Vec<u32> = entry.shared.iter().map(|r| r.0).collect();
+        assert_eq!(ids, plan.shared(page));
+        assert!(entry.shared.iter().all(|r| r.1 == 0));
+        let contents = plan.page_contents(page);
+        assert_eq!(
+            entry.content_length,
+            match contents.is_empty() {
+                true => 0,
+                false => span(&contents),
+            }
+        );
+        if !contents.is_empty() {
+            assert_eq!(
+                entry.content_at,
+                positions[contents.start] - positions[section.start]
+            );
+        }
+    }
+    let shared = &tables.shared;
+    assert_eq!(shared.groups.len(), plan.entries().len());
+    for (group, entry) in shared.groups.iter().zip(plan.entries()) {
+        assert_eq!(group.objects, entry.len() as u64);
+        assert_eq!(group.length, span(entry));
+    }
+    let in_first = (plan.entries().iter())
+        .filter(|entry| plan.writes()[entry.start].part == Part::FirstPage)
+        .count();
+    assert_eq!(shared.header.first_page_entries as usize, in_first);
+    let part8 = plan.part_writes(Part::Shared);
+    assert_eq!(u64::from(shared.header.first_at), said(part8.start));
+    assert_ne!(shared.header.first_object, 0);
+    let generic = |table: Generic, range: std::ops::Range<usize>| {
+        assert_eq!(table.objects as usize, range.len());
+        if range.is_empty() {
+            assert_eq!(table, Generic::default());
+        } else {
+            assert_eq!(table.first_object, plan.writes()[range.start].number);
+            assert_eq!(u64::from(table.first_at), said(range.start));
+            assert_eq!(u64::from(table.length), span(&range));
+        }
+    };
+    let group = |group| plan.group_writes(group);
+    let check = |table: Option<Generic>, which| match (table, group(which)) {
+        (Some(table), Some(range)) => generic(table, range),
+        (None, None) => {}
+        other => panic!("{which:?}: {other:?}"),
+    };
+    check(tables.outlines, Group::Outlines);
+    check(tables.threads, Group::ThreadInfo);
+    check(tables.dests, Group::Dests);
+    check(tables.info, Group::Info);
+    let extended = |table: &Option<Extended>, which| match (table, group(which)) {
+        (Some(table), Some(range)) => {
+            generic(table.generic, range);
+            assert_eq!(table.shared, plan.group_shared(which));
+        }
+        (None, None) => {}
+        other => panic!("{which:?}: {other:?}"),
+    };
+    extended(&tables.form, Group::Form);
+    extended(&tables.structure, Group::Structure);
+    extended(&tables.renditions, Group::Renditions);
+    assert_eq!(tables.files.is_some(), group(Group::EmbeddedFile).is_some());
+    if let Some(files) = &tables.files {
+        let mut entries = files.groups.iter();
+        for (at, file) in plan.files().iter().enumerate() {
+            if !file.writes.is_empty() {
+                let entry = entries.next().unwrap();
+                assert_eq!(entry.number, file.number);
+                assert_eq!(entry.objects as usize, file.writes.len());
+                assert_eq!(u64::from(entry.length), span(&file.writes));
+                assert_eq!(entry.shared, []);
+            }
+            if !plan.file_shared(at).is_empty() {
+                let entry = entries.next().unwrap();
+                assert_eq!(entry.number, file.number);
+                assert_eq!((entry.objects, entry.length), (0, 0));
+                assert_eq!(entry.shared, plan.file_shared(at));
+            }
+        }
+        assert_eq!(entries.next(), None);
+    }
+    let thumbs: Vec<_> = (0..plan.page_count())
+        .map(|page| plan.thumb_writes(page))
+        .filter(|range| !range.is_empty())
+        .collect();
+    let shared_thumbs = plan.thumb_shared_writes();
+    match &tables.thumbnails {
+        None => assert!(thumbs.is_empty() && shared_thumbs.is_empty()),
+        Some(table) => {
+            assert_eq!(table.pages.len(), thumbs.len());
+            for (entry, range) in table.pages.iter().zip(&thumbs) {
+                assert_eq!(entry.objects, range.len() as u64);
+                assert_eq!(entry.length, span(range));
+            }
+            if let Some(first) = thumbs.first() {
+                assert_eq!(table.header.first_object, plan.writes()[first.start].number);
+                assert_eq!(u64::from(table.header.first_at), said(first.start));
+            }
+            assert_eq!(table.header.shared_objects as usize, shared_thumbs.len());
+            assert_eq!(u64::from(table.header.shared_length), span(&shared_thumbs));
+            let mut page = 0;
+            for entry in &table.pages {
+                page += entry.gap;
+                assert!(!plan.thumb_writes(page).is_empty());
+                page += 1;
+            }
+        }
+    }
+}
+
+/// `plan` assembled, under lengths from `data`: with each stream as it is; with a
+/// first-page stream that wants more room for a few rounds, which settles; and,
+/// on a small graph as it's costly, with one that always does, which is refused.
+fn assembles(plan: &Plan, data: &[u8]) {
+    let mut lengths = data.iter().cycle().map(|byte| 16 + u64::from(*byte));
+    let lengths: Vec<u64> = match data.is_empty() {
+        true => vec![16; plan.writes().len()],
+        false => plan
+            .writes()
+            .iter()
+            .map(|_| lengths.next().unwrap())
+            .collect(),
+    };
+    let options = Options::new((1, 7));
+    let layout = assemble(plan, &lengths, &options, plain).expect("settles");
+    assembled(plan, &lengths, &layout);
+
+    // Longer for some rounds; shorter after.
+    let (mut calls, mut asks) = (0, 0);
+    let grown = assemble(plan, &lengths, &options, |stream| {
+        let mut encoded = Encoded::plain(stream.data.to_vec());
+        if stream.what == StreamKind::FirstXref {
+            calls += 1;
+            if calls < 5 {
+                asks += 1;
+                encoded.data.extend(std::iter::repeat_n(0, 40 << calls));
+            }
+        }
+        Ok::<_, Infallible>(encoded)
+    });
+    let grown = grown.expect("settles");
+    assembled(plan, &lengths, &grown);
+    assert_eq!(asks > 0, plan.kind() == Kind::Stream);
+
+    if plan.kind() == Kind::Stream && plan.size() as usize <= SMALL {
+        let mut longer = 0;
+        let refused = assemble(plan, &lengths, &options, |stream| {
+            let mut encoded = Encoded::plain(stream.data.to_vec());
+            if stream.what == StreamKind::FirstXref {
+                // Past each round's room, and not much more: it's what this costs.
+                longer = (longer + stream.data.len()) * 3 / 2 + 200;
+                encoded.data.extend(std::iter::repeat_n(0, longer));
+            }
+            Ok::<_, Infallible>(encoded)
+        });
+        assert!(matches!(refused, Err(layout::Error::Unsettled)));
+    }
+
+    // Not one length a write.
+    let refused = assemble(plan, &lengths[1..], &options, plain);
+    assert!(matches!(refused, Err(layout::Error::Lengths { .. })));
+}
+
+/// Any bytes as a hint stream of a file of any number of pages, its tables at any
+/// positions, under small caps: an error, or tables that write and read the same.
+pub fn tables(data: &[u8]) {
+    let (mut limits, mut small) = (Limits::DEFAULT, Bytes(data));
+    limits.pages = 256;
+    limits.hint_entries = 1 << 12;
+    let pages = match small.byte() % 4 {
+        0 => small.below(8) as u32,
+        1 => small.below(300) as u32,
+        2 => u32::from_be_bytes([small.byte(), small.byte(), small.byte(), small.byte()]),
+        _ => 1,
+    };
+    let body = data.get(16..).unwrap_or(&[]);
+    let key = |small: &mut Bytes| small.below(body.len() + 2) as u64;
+    let optional = |small: &mut Bytes| small.chance(2).then(|| small.below(body.len() + 2) as u64);
+    let mut keys = HintKeys::new(key(&mut small));
+    keys.thumbnails = optional(&mut small);
+    keys.outlines = optional(&mut small);
+    keys.threads = optional(&mut small);
+    keys.dests = optional(&mut small);
+    keys.form = optional(&mut small);
+    keys.info = optional(&mut small);
+    keys.structure = optional(&mut small);
+    keys.labels = optional(&mut small);
+    keys.renditions = optional(&mut small);
+    keys.files = optional(&mut small);
+
+    let read = hint::tables(body, &keys, pages, &limits);
+    // Caps that are larger don't take back what they let through.
+    if let Ok(read) = &read {
+        let default = hint::tables(body, &keys, pages, &Limits::DEFAULT);
+        assert_eq!(default.as_ref(), Ok(read));
+    }
+    let Ok(read) = read else {
+        return;
+    };
+
+    // Each table, written and read again; then all of them, one after another,
+    // their keys where they're now, the same to `tables`.
+    let mut all = Vec::new();
+    let mut again = HintKeys::new(0);
+    let limits = &limits;
+    let id_bits = read.pages.header.id_bits;
+    let mut each = |write: &dyn Fn(&mut Vec<u8>) -> Result<(), hint::Error>| {
+        let at = all.len() as u64;
+        write(&mut all).expect("what was read writes");
+        at
+    };
+    each(&|out| read.pages.write(out));
+    again.shared = each(&|out| read.shared.write(out));
+    let generic = |table: Generic| {
+        let mut out = Vec::new();
+        table.write(&mut out).unwrap();
+        assert_eq!(Generic::read(&out, limits), Ok(table));
+    };
+    let extended = |table: &Extended| {
+        let mut out = Vec::new();
+        table.write(&mut out).unwrap();
+        assert_eq!(Extended::read(&out, limits).as_ref(), Ok(table));
+    };
+    if let Some(table) = &read.thumbnails {
+        again.thumbnails = Some(each(&|out| table.write(out)));
+    }
+    let mut one = |key: &mut Option<u64>, table: Option<Generic>| {
+        if let Some(table) = table {
+            generic(table);
+            *key = Some(each(&|out| table.write(out)));
+        }
+    };
+    let mut keys_again = again;
+    one(&mut keys_again.outlines, read.outlines);
+    one(&mut keys_again.threads, read.threads);
+    one(&mut keys_again.dests, read.dests);
+    one(&mut keys_again.info, read.info);
+    one(&mut keys_again.labels, read.labels);
+    let mut one = |key: &mut Option<u64>, table: &Option<Extended>| {
+        if let Some(table) = table {
+            extended(table);
+            *key = Some(each(&|out| table.write(out)));
+        }
+    };
+    one(&mut keys_again.form, &read.form);
+    one(&mut keys_again.structure, &read.structure);
+    one(&mut keys_again.renditions, &read.renditions);
+    if let Some(table) = &read.files {
+        keys_again.files = Some(each(&|out| table.write(out, id_bits)));
+        let mut out = Vec::new();
+        table.write(&mut out, id_bits).unwrap();
+        assert_eq!(
+            EmbeddedFiles::read(&out, id_bits, limits).as_ref(),
+            Ok(table)
+        );
+    }
+    if let Some(table) = &read.thumbnails {
+        let mut out = Vec::new();
+        table.write(&mut out).unwrap();
+        assert_eq!(Thumbnails::read(&out, limits).as_ref(), Ok(table));
+    }
+    let mut out = Vec::new();
+    read.pages.write(&mut out).unwrap();
+    assert_eq!(
+        PageOffsets::read(&out, pages, limits).as_ref(),
+        Ok(&read.pages)
+    );
+    let mut out = Vec::new();
+    read.shared.write(&mut out).unwrap();
+    assert_eq!(SharedObjects::read(&out, limits).as_ref(), Ok(&read.shared));
+    assert_eq!(
+        hint::tables(&all, &keys_again, pages, limits).as_ref(),
+        Ok(&read)
+    );
+}
+
 /// Where [`group`](crate::group) puts what's `used` so among the members of an
 /// object stream: by page, then by number.
 fn rank(used: Use) -> (u32, u32) {
@@ -613,7 +1063,8 @@ fn later(used: Use) -> bool {
 }
 
 /// Any bytes as a graph: refused for what it has, or planned, each promise of
-/// [`plan`](crate::plan()) held against plain walks of it, the same twice.
+/// [`plan`](crate::plan()) held against plain walks of it, the same twice, then
+/// assembled, each promise of [`assemble`] held against what it says.
 pub fn graphs(data: &[u8]) {
     let described = described(data);
     let graph = described.graph();
@@ -622,6 +1073,7 @@ pub fn graphs(data: &[u8]) {
             assert_eq!(described.refusal(), None, "{described:?}");
             holds(&described, &graph, &planned);
             assert_eq!(plan(&graph, &Limits::DEFAULT).as_ref(), Ok(&planned));
+            assembles(&planned, data);
         }
         Err(refused) => assert_eq!(described.refusal(), Some(refused), "{described:?}"),
     }
@@ -662,16 +1114,39 @@ mod tests {
         seeds
     }
 
-    /// Writes [`seeds`] to the folder `PDF_LINEARIZE_FUZZ_SEEDS` names, for
-    /// `just fuzz linearize` to begin from.
+    /// Inputs of what's planned and assembled, as hint streams: 16 bytes that say
+    /// how to read them, then the data.
+    fn table_seeds() -> Vec<Vec<u8>> {
+        let mut seeds_of = Vec::new();
+        for seed in seeds() {
+            let described = described(&seed);
+            let Ok(planned) = plan(&described.graph(), &Limits::DEFAULT) else {
+                continue;
+            };
+            let lengths = vec![40; planned.writes().len()];
+            let layout = assemble(&planned, &lengths, &Options::new((1, 7)), plain).unwrap();
+            let data = layout.hint_data();
+            let mut input = vec![3, 0, 0, 0];
+            input.resize(16, 0);
+            input.extend_from_slice(data);
+            seeds_of.push(input);
+        }
+        seeds_of
+    }
+
+    /// Writes [`seeds`] and [`table_seeds`] to the folder
+    /// `PDF_LINEARIZE_FUZZ_SEEDS` names, for `just fuzz linearize` to begin from.
     #[test]
     #[ignore = "writes files for the fuzzer"]
     fn the_seeds_are_written() {
         let folder = std::env::var("PDF_LINEARIZE_FUZZ_SEEDS").unwrap();
         std::fs::create_dir_all(&folder).unwrap();
+        let folder = std::path::Path::new(&folder);
         for (at, seed) in seeds().iter().enumerate() {
-            let path = std::path::Path::new(&folder).join(format!("graph-{at}"));
-            std::fs::write(path, seed).unwrap();
+            std::fs::write(folder.join(format!("graph-{at}")), seed).unwrap();
+        }
+        for (at, seed) in table_seeds().iter().enumerate() {
+            std::fs::write(folder.join(format!("tables-{at}")), seed).unwrap();
         }
     }
 
@@ -693,6 +1168,38 @@ mod tests {
         }
         // So that the promises above are what's been run, not the refusals.
         assert!(planned > 100, "{planned} of 400 were planned");
+
+        let mut read = 0;
+        for seed in table_seeds() {
+            tables(&seed);
+            read += 1;
+            // Damaged, every so often: cut off, and its fields flipped.
+            for cut in [20, 60, seed.len() / 2, seed.len() - 1] {
+                tables(&seed[..cut.min(seed.len())]);
+            }
+            for at in (16..seed.len()).step_by(7) {
+                let mut flipped = seed.clone();
+                flipped[at] ^= 0x41;
+                tables(&flipped);
+            }
+        }
+        assert!(read > 10, "{read} seeds of tables");
+        for round in 0..2000 {
+            let len = (random() % 400) as usize;
+            let most = [2, 8, 64, 255][round % 4];
+            tables(&input(len, most, &mut random));
+        }
+    }
+
+    /// An empty input is a hint stream too, and short ones and flat ones.
+    #[test]
+    fn any_bytes_are_a_hint_stream() {
+        tables(&[]);
+        for byte in 0..=255 {
+            tables(&[byte]);
+            tables(&[byte; 40]);
+            tables(&[byte; 400]);
+        }
     }
 
     /// An empty input describes a graph too, and short ones.

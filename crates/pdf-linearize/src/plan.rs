@@ -30,7 +30,8 @@
 //! that page's section; one with several pages' or shared members is in part 8,
 //! one entry of the shared table, so what a stream holds costs a viewer one
 //! fetch. Only a cross-reference stream lists a member, so under [`Kind::Table`]
-//! nothing's packed.
+//! nothing's packed. Each thumbnail and each embedded file is a region of its own,
+//! so its table can name it.
 //!
 //! # What a plan costs
 //!
@@ -39,7 +40,7 @@
 //! shared objects ([`Plan::shared`]) can't come from that walk, which enters an
 //! object twice at most however many pages reach it: it's a walk of its own for
 //! each later page, the sum of what each page reaches, which is what the hint
-//! tables will write, under [`Limits`].
+//! tables write, under [`Limits`].
 
 use std::ops::Range;
 
@@ -105,10 +106,10 @@ impl Group {
     ];
 
     /// Whether this group's table lists the shared objects it refers to
-    /// (F.4.6, F.4.7).
+    /// (F.4.6). The embedded file table does too, by the file (F.4.7).
     fn lists_shared(self) -> bool {
         use Group::*;
-        matches!(self, Form | Structure | Renditions | EmbeddedFile)
+        matches!(self, Form | Structure | Renditions)
     }
 }
 
@@ -292,6 +293,17 @@ pub struct Write {
     pub part: Part,
 }
 
+/// An embedded file stream's own group of objects, as its hint table has them
+/// (F.4.7): each root of [`Group::EmbeddedFile`] is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FileGroup {
+    /// The root's number.
+    pub number: u32,
+    /// Its writes, what no group before it took: none where it's all elsewhere.
+    pub writes: Range<usize>,
+}
+
 /// An object stream a caller packs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -381,8 +393,12 @@ pub struct Plan {
     containers: Vec<Container>,
     /// Each page's writes, by page.
     pages: Vec<Range<usize>>,
+    /// Each page's own content streams' writes, by page.
+    contents: Vec<Range<usize>>,
     /// Each page's thumbnail's writes, by page.
     thumbs: Vec<Range<usize>>,
+    /// What thumbnails share.
+    thumb_shared: Range<usize>,
     /// Each group's writes, by its place in [`Group::ALL`], if it was given.
     groups: [Option<Range<usize>>; Group::ALL.len()],
     first_page: u32,
@@ -393,6 +409,8 @@ pub struct Plan {
     listed: Vec<u32>,
     page_lists: Vec<Range<usize>>,
     group_lists: [Range<usize>; Group::ALL.len()],
+    files: Vec<FileGroup>,
+    file_lists: Vec<Range<usize>>,
     visits: u64,
     dictionary: u32,
     first_xref: Option<u32>,
@@ -448,8 +466,21 @@ impl Plan {
         self.pages[page as usize].clone()
     }
 
-    /// The writes of `page`'s thumbnail, by its place among the pages, as far
-    /// as nothing before them has it.
+    /// The writes from `page`'s first content stream to its last, by its place
+    /// among the pages, as far as they're the page's own, in its section:
+    /// none where it has no content stream there, as one in part 8 isn't its
+    /// alone (F.4.2).
+    ///
+    /// # Panics
+    ///
+    /// Past the pages.
+    pub fn page_contents(&self, page: u32) -> Range<usize> {
+        self.contents[page as usize].clone()
+    }
+
+    /// The writes of `page`'s thumbnail, by its place among the pages, what no
+    /// other thumbnail or anything before them has, and the thumbnail's object
+    /// first if it's that page's alone.
     ///
     /// # Panics
     ///
@@ -458,10 +489,22 @@ impl Plan {
         self.thumbs[page as usize].clone()
     }
 
+    /// The writes of what several thumbnails reach and nothing before them has
+    /// (F.3.10, F.4.4), after the last thumbnail's.
+    pub fn thumb_shared_writes(&self) -> Range<usize> {
+        self.thumb_shared.clone()
+    }
+
     /// The writes of `group`, or none if the graph wasn't given it.
     /// [`Group::Other`]'s is followed by what no group reached.
     pub fn group_writes(&self, group: Group) -> Option<Range<usize>> {
         self.groups[group as usize].clone()
+    }
+
+    /// Each root of [`Group::EmbeddedFile`] as its own group, in the order given
+    /// (F.4.7).
+    pub fn files(&self) -> &[FileGroup] {
+        &self.files
     }
 
     /// The entries of the shared object table (F.4.3), each as a range of
@@ -484,10 +527,19 @@ impl Plan {
     }
 
     /// The entries of the shared object table that `group` reaches, in order,
-    /// each once: for a group whose table lists them (F.4.6, F.4.7), otherwise
-    /// none.
+    /// each once: for a group whose table lists them (F.4.6), otherwise none.
     pub fn group_shared(&self, group: Group) -> &[u32] {
         &self.listed[self.group_lists[group as usize].clone()]
+    }
+
+    /// The entries of the shared object table that the embedded file at `file`
+    /// among [`files`](Plan::files) reaches, in order, each once (F.4.7).
+    ///
+    /// # Panics
+    ///
+    /// Past the files.
+    pub fn file_shared(&self, file: usize) -> &[u32] {
+        &self.listed[self.file_lists[file].clone()]
     }
 
     /// How many pages there are.
@@ -499,6 +551,11 @@ impl Plan {
     /// `/P`.
     pub fn first_page(&self) -> u32 {
         self.first_page
+    }
+
+    /// The catalog's number: a section's `/Root`.
+    pub fn catalog_number(&self) -> u32 {
+        self.writes[0].number
     }
 
     /// The first page object's number: the dictionary's `/O`.

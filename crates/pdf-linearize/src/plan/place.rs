@@ -6,7 +6,7 @@ use std::ops::Range;
 use super::group::{Use, group};
 use super::shared::{self, Lists};
 use super::uses;
-use super::{Container, Error, Graph, Group, Kind, Node, Part, Plan, What, Write};
+use super::{Container, Error, FileGroup, Graph, Group, Kind, Node, Part, Plan, What, Write};
 use crate::{Id, Limits};
 
 /// A `u32` that stands for none in a list of indices.
@@ -93,7 +93,10 @@ enum Holds {
     Nothing,
     Page(u32),
     Thumb(u32),
+    ThumbShared,
     Group(Group),
+    /// A root of [`Group::EmbeddedFile`], which that group goes on through.
+    File(u32),
 }
 
 impl Placing<'_, '_> {
@@ -307,21 +310,57 @@ pub(super) fn plan(graph: &Graph, limits: &Limits) -> Result<Plan, Error> {
     tree_nodes.iter().for_each(|&at| placing.place(at));
     placing.region(start, Part::Other, Holds::Nothing);
     seal.region(&placing, &packable, start, Use::None);
-    let thumbs = placing.list.len();
-    for (page, at) in (0..).zip(&graph.pages) {
-        let start = placing.list.len();
-        placing.walk(at.thumb.and_then(|id| flat.index(id)).into_iter());
-        placing.region(start, Part::Other, Holds::Thumb(page));
+    // What one thumbnail alone reaches is that thumbnail's; what several do, by
+    // the walk that tells a page's own from what's shared, is theirs together.
+    let mut stopped = stop.clone();
+    for (at, placed) in placing.placed.iter().enumerate() {
+        stopped[at] |= *placed;
     }
-    seal.region(&placing, &packable, thumbs, Use::None);
+    let thumbs: Vec<(u32, u32)> = (0..)
+        .zip(&graph.pages)
+        .filter_map(|(page, at)| Some((page, flat.index(at.thumb?)?)))
+        .filter(|&(_, at)| !stopped[at as usize])
+        .collect();
+    let walks: Vec<u32> = thumbs.iter().map(|&(_, at)| at).collect();
+    let thumbed = uses::page_uses(&walks, &stopped, |at| flat.refs(at));
+    for (walk, &(page, _)) in thumbs.iter().enumerate() {
+        let start = placing.list.len();
+        for &at in thumbed.entered(walk) {
+            if thumbed.uses[at as usize] == Use::Page(walk as u32) {
+                placing.place(at);
+            }
+        }
+        placing.region(start, Part::Other, Holds::Thumb(page));
+        seal.region(&placing, &packable, start, Use::None);
+    }
+    let start = placing.list.len();
+    for at in 0..objects {
+        if thumbed.uses[at] == Use::Shared {
+            placing.place(at as u32);
+        }
+    }
+    placing.region(start, Part::Other, Holds::ThumbShared);
+    seal.region(&placing, &packable, start, Use::None);
     // Each group that has a table is sealed alone; what none has goes with what
     // no group reached.
     let mut rest = None;
+    let files: Vec<u32> = roots_of(&flat, Group::EmbeddedFile).collect();
     for group in Group::ALL {
         if !given(group) || (group == Group::Outlines && graph.outlines_first) {
             continue;
         }
         let start = placing.list.len();
+        if group == Group::EmbeddedFile {
+            // Each file is a group of its own in its table (F.4.7).
+            placing.region(start, Part::Other, Holds::Group(group));
+            for &root in &files {
+                let start = placing.list.len();
+                placing.walk(std::iter::once(root));
+                placing.region(start, Part::Other, Holds::File(root));
+                seal.region(&placing, &packable, start, Use::None);
+            }
+            continue;
+        }
         placing.walk(roots_of(&flat, group));
         placing.region(start, Part::Other, Holds::Group(group));
         match group {
@@ -347,6 +386,7 @@ pub(super) fn plan(graph: &Graph, limits: &Limits) -> Result<Plan, Error> {
             true => roots_of(&flat, group).collect(),
             false => Vec::new(),
         }),
+        files: &files,
         entries: written.entries.len(),
         limits,
     })?;
@@ -397,6 +437,9 @@ struct Writing {
     pages: Vec<Range<usize>>,
     thumbs: Vec<Range<usize>>,
     groups: [Option<Range<usize>>; Group::ALL.len()],
+    thumb_shared: Range<usize>,
+    /// Each embedded file's root and writes.
+    files: Vec<(u32, Range<usize>)>,
     entries: Vec<Range<usize>>,
     /// Each write's entry, or none.
     entry: Vec<u32>,
@@ -430,6 +473,8 @@ impl Writing {
             pages: vec![0..0; graph.pages.len()],
             thumbs: vec![0..0; graph.pages.len()],
             groups: [const { None }; Group::ALL.len()],
+            thumb_shared: 0..0,
+            files: Vec::new(),
             entries: Vec::new(),
             entry: Vec::new(),
             write_of: vec![NONE; objects],
@@ -467,7 +512,14 @@ impl Writing {
                 Holds::Nothing => {}
                 Holds::Page(page) => writing.pages[page as usize] = range,
                 Holds::Thumb(page) => writing.thumbs[page as usize] = range,
+                Holds::ThumbShared => writing.thumb_shared = range,
                 Holds::Group(group) => writing.groups[group as usize] = Some(range),
+                Holds::File(root) => {
+                    if let Some(all) = &mut writing.groups[Group::EmbeddedFile as usize] {
+                        all.end = range.end;
+                    }
+                    writing.files.push((root, range));
+                }
             }
         }
         writing.sealed = seal.groups;
@@ -592,8 +644,33 @@ impl Writing {
         }
     }
 
+    /// Each page's writes from its first content stream in its section to its
+    /// last, in file order.
+    fn contents(&self, flat: &Flat) -> Vec<Range<usize>> {
+        (flat.graph.pages.iter().zip(&self.pages))
+            .map(|(page, section)| {
+                let own = (page.contents.iter())
+                    .filter_map(|id| flat.index(*id))
+                    .map(|at| self.write_of[at as usize] as usize)
+                    .filter(|write| section.contains(write));
+                let least = own.clone().min();
+                match (least, own.max()) {
+                    (Some(least), Some(most)) => least..most + 1,
+                    _ => 0..0,
+                }
+            })
+            .collect()
+    }
+
     /// The finished plan.
     fn into_plan(self, flat: Flat, uses: Vec<Use>, first: u32, lists: Lists) -> Plan {
+        let contents = self.contents(&flat);
+        let files = (self.files.into_iter())
+            .map(|(root, writes)| FileGroup {
+                number: self.numbers[root as usize],
+                writes,
+            })
+            .collect();
         let containers = (self.order.iter().zip(&self.numbered))
             .map(|(&stream, &number)| Container {
                 number,
@@ -612,12 +689,16 @@ impl Writing {
             writes: self.writes,
             containers,
             pages: self.pages,
+            contents,
             thumbs: self.thumbs,
+            thumb_shared: self.thumb_shared,
             groups: self.groups,
             entries: self.entries,
             listed: lists.listed,
             page_lists: lists.pages,
             group_lists: lists.groups,
+            files,
+            file_lists: lists.files,
             visits: lists.visits,
             dictionary: self.dictionary,
             first_xref: self.first_xref,

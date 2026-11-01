@@ -87,11 +87,13 @@ _qpdf:
     fi
 
 # The tests that set the reader, and what the writer writes, beside qpdf,
-# pdf-structure's and then the checker's in pdf-lint, which `just test`
-# leaves out as ignored, against the pinned qpdf (the corpus tests aside).
+# pdf-structure's, then the checker's in pdf-lint, then what pdf-linearize lays
+# out, which `just test` leaves out as ignored, against the pinned qpdf (the
+# corpus tests aside).
 test-qpdf: _qpdf
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-structure --lib qpdf::tests -- --ignored --skip a_corpus_ --skip the_fixtures_are_written
     PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-lint --test qpdf -- --ignored --skip a_corpus_
+    PDF_LINT_QPDF="$PWD/target/qpdf-12.4.2/bin/qpdf" cargo test --locked -p pdf-linearize --test qpdf -- --ignored
 
 # PDFium, the oracle of the readers that follow PDFium's rules: a
 # development snapshot, PDFium as of chromium/8125, pdfium-binaries' Linux
@@ -274,7 +276,8 @@ arlington-msrv:
 # its writer, content written again and the calls, and its splices and
 # lists written again; `semantics`, pdf-semantics' name and number trees,
 # page tree, dates and XMP claims; `linearize`, pdf-linearize's plan of any
-# graph; or `check`, the reader and the checker.
+# graph, what's assembled from it, and hint tables from any bytes; or `check`,
+# the reader and the checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
 # makes, `write`'s with the third byte its input has; `content`, `semantics` and
 # `linearize` from those their own crates' fuzz modules make. The nightly is

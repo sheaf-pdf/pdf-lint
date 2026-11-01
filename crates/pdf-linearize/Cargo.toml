@@ -5,13 +5,14 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF files laid out for reading over a network (ISO 32000-2, Annex F): an object graph, of any object model, planned into the order and numbers a linearized file has"
+description = "PDF files laid out for reading over a network (ISO 32000-2, Annex F): an object graph, of any object model, planned into the order and numbers a linearized file has, and the bytes around its bodies, hint tables among them"
 keywords = ["pdf", "linearized", "fast-web-view", "iso-32000"]
 categories = ["encoding"]
 # Only what users need, so local tooling files can't end up in the package.
 include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
+bitstream-io = "4"
 thiserror = "2"
 
 [lints.rust]

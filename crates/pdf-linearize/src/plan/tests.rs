@@ -325,9 +325,10 @@ fn outlines_read_first_take_what_a_later_page_reaches() {
 }
 
 /// Part 9: the tree, thumbnails by page with page 0's first whichever is the
-/// first page, each group in its order, what's in none of them last by number.
-/// What's placed stays: the thumbnail's own reference to a page's object, a
-/// group's to the tree or to another group's.
+/// first page, what they share after them, each group in its order, what's in none
+/// of them last by number. What's placed stays: the thumbnail's own reference to a
+/// page's object, a group's to the tree or to another group's. Page 1's thumbnail
+/// reaches page 0's, so that one is what thumbnails share and page 0 has none alone.
 #[test]
 fn part_nine_is_the_tree_thumbnails_groups_and_the_rest() {
     let mut graph = Graph::new((1, 0), Kind::Table);
@@ -360,17 +361,155 @@ fn part_nine_is_the_tree_thumbnails_groups_and_the_rest() {
     let plan = planned(&graph);
     assert_eq!(
         order(&plan, Part::Other),
-        [2, 51, 50, 60, 61, 70, 71, 80, 90, 91]
+        [2, 50, 51, 60, 61, 70, 71, 80, 90, 91]
     );
     let start = plan.part_writes(Part::Other).start;
-    assert_eq!(plan.thumb_writes(0), start + 1..start + 2);
-    assert_eq!(plan.thumb_writes(1), start + 2..start + 3);
+    assert!(plan.thumb_writes(0).is_empty());
+    assert_eq!(plan.thumb_writes(1), start + 1..start + 2);
+    assert_eq!(plan.thumb_shared_writes(), start + 2..start + 3);
     assert_eq!(plan.group_writes(Group::Dests), Some(start + 3..start + 5));
     assert_eq!(plan.group_writes(Group::Form), Some(start + 5..start + 7));
     assert_eq!(plan.group_writes(Group::Other), Some(start + 7..start + 10));
     let empty = plan.group_writes(Group::Renditions).unwrap();
     assert!(empty.is_empty());
     assert_eq!(plan.group_writes(Group::Info), None);
+}
+
+/// Thumbnails in page order from page 0 whichever page is the first, each with what
+/// it alone reaches, each sealed in its own object streams so its entry's its own,
+/// and what several reach after the last of them.
+#[test]
+fn thumbnails_keep_their_own_and_share_the_rest() {
+    let mut graph = Graph::new((1, 0), Kind::Stream);
+    graph.object((1, 0), []);
+    graph.object((3, 0), []);
+    graph.object((4, 0), []);
+    graph.object((5, 0), []);
+    graph.object((50, 0), ids([70, 60]));
+    graph.object((51, 0), ids([71, 60]));
+    graph.object((52, 0), []);
+    graph.object((60, 0), ids([61])).packable(true);
+    graph.object((61, 0), []).packable(true);
+    graph.object((70, 0), []).packable(true);
+    graph.object((71, 0), []).packable(true);
+    let pages = [(3, Some(50)), (4, None), (5, Some(51))];
+    for (id, thumb) in pages {
+        let mut page = Page::new((id, 0));
+        page.thumb = thumb.map(|thumb| (thumb, 0));
+        graph.page(page);
+    }
+    // A thumbnail that's a page has no writes of its own as one.
+    let mut extra = Page::new((52, 0));
+    extra.thumb = Some((3, 0));
+    graph.page(extra);
+    graph.first_page(2);
+    let plan = planned(&graph);
+    let writes = |range: std::ops::Range<usize>| -> Vec<Vec<u32>> {
+        plan.writes()[range]
+            .iter()
+            .map(|write| match write.what {
+                What::Object(id) => vec![id.0],
+                What::Container(at) => plan.containers()[at]
+                    .members
+                    .iter()
+                    .map(|m| m.0.0)
+                    .collect(),
+            })
+            .collect()
+    };
+    assert_eq!(writes(plan.thumb_writes(0)), [vec![50], vec![70]]);
+    assert_eq!(writes(plan.thumb_writes(1)), Vec::<Vec<u32>>::new());
+    assert_eq!(writes(plan.thumb_writes(2)), [vec![51], vec![71]]);
+    assert_eq!(writes(plan.thumb_writes(3)), Vec::<Vec<u32>>::new());
+    assert_eq!(writes(plan.thumb_shared_writes()), [vec![60, 61]]);
+    // Each thumbnail's own stream, then, and what they share in one.
+    assert_eq!(plan.containers().len(), 3);
+}
+
+/// A page's content items are its own streams': from the first in its section to
+/// the last, by where they are, whichever order it lists them.
+#[test]
+fn a_pages_contents_are_a_stretch_of_its_section() {
+    let mut graph = Graph::new((1, 0), Kind::Table);
+    graph.object((1, 0), []);
+    graph.object((3, 0), ids([10, 11]));
+    graph.object((4, 0), ids([12, 13, 14]));
+    graph.object((5, 0), ids([14]));
+    for at in [10, 11, 12, 13, 14] {
+        graph.object((at, 0), []);
+    }
+    let contents = [(3, vec![11, 10]), (4, vec![13, 12, 14, 99]), (5, vec![14])];
+    for (id, contents) in contents {
+        let mut page = Page::new((id, 0));
+        page.contents = contents.into_iter().map(|at| (at, 0)).collect();
+        graph.page(page);
+    }
+    let plan = planned(&graph);
+    // By where they are: the page's walk, its references' order.
+    let first = plan.page_writes(0);
+    assert_eq!(plan.page_contents(0), first.start + 1..first.start + 3);
+    let second = plan.page_writes(1);
+    assert_eq!(plan.page_contents(1), second.start + 1..second.start + 3);
+    // Page 2's only stream's page 1's too, so it's in part 8, and its own has none.
+    assert_eq!(plan.page_contents(2), 0..0);
+}
+
+/// Each root of the embedded file group is a group of its own, its objects sealed
+/// apart from the others', with a list of what it refers to.
+#[test]
+fn each_embedded_file_is_a_group_of_its_own() {
+    let mut graph = Graph::new((1, 0), Kind::Stream);
+    graph.object((1, 0), []);
+    graph.object((3, 0), ids([10]));
+    graph.object((4, 0), ids([11]));
+    graph.object((5, 0), ids([11]));
+    graph.object((10, 0), []);
+    graph.object((11, 0), []);
+    graph.object((20, 0), ids([21, 10]));
+    graph.object((21, 0), []).packable(true);
+    graph.object((30, 0), ids([31, 11]));
+    graph.object((31, 0), []).packable(true);
+    graph.object((40, 0), ids([20]));
+    for id in [3, 4, 5] {
+        graph.page(Page::new((id, 0)));
+    }
+    graph.group(Group::EmbeddedFile, ids([20, 30]));
+    graph.group(Group::EmbeddedFile, ids([40, 99]));
+    graph.group(Group::Other, []);
+    let plan = planned(&graph);
+    let whole = plan.group_writes(Group::EmbeddedFile).unwrap();
+    let [first, second, third] = plan.files() else {
+        panic!("{:?}", plan.files());
+    };
+    assert_eq!(first.number, plan.number((20, 0)).unwrap().0);
+    assert_eq!(second.number, plan.number((30, 0)).unwrap().0);
+    assert_eq!(third.number, plan.number((40, 0)).unwrap().0);
+    assert_eq!(first.writes, whole.start..whole.start + 2);
+    assert_eq!(second.writes, whole.start + 2..whole.start + 4);
+    assert_eq!(third.writes, whole.start + 4..whole.start + 5);
+    assert_eq!(whole.end, third.writes.end);
+    // Each a stream of its own, then, whatever's packable.
+    assert_eq!(plan.containers().len(), 2);
+    let entry = |id| {
+        let number = plan.number(id).unwrap().0;
+        let write = plan
+            .writes()
+            .iter()
+            .position(|w| w.number == number)
+            .unwrap();
+        plan.entries()
+            .iter()
+            .position(|e| e.contains(&write))
+            .unwrap() as u32
+    };
+    assert_eq!(plan.file_shared(0), [entry((10, 0))]);
+    assert_eq!(plan.file_shared(1), [entry((11, 0))]);
+    assert_eq!(plan.file_shared(2), [entry((10, 0))], "by what it reaches");
+    assert_eq!(plan.group_shared(Group::EmbeddedFile), []);
+    assert_eq!(
+        plan.shared_entries(),
+        3 + plan.shared(1).len() + plan.shared(2).len()
+    );
 }
 
 /// A table that lists what its group refers to: through what's a page's own,

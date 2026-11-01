@@ -1,5 +1,5 @@
 //! Each later page's list of shared objects, and each group's where its table
-//! lists them (F.4.2, F.4.6, F.4.7).
+//! lists them, an embedded file's among them (F.4.2, F.4.6, F.4.7).
 //!
 //! The walk that gave each object its [`Use`](super::Use) goes into an object
 //! twice at most, so a third page stops where the second did and learns nothing
@@ -24,6 +24,8 @@ pub(super) struct Walks<'a> {
     pub first: usize,
     /// Each group's roots, where its table lists shared objects.
     pub groups: &'a [Vec<u32>; Group::ALL.len()],
+    /// Each embedded file's root.
+    pub files: &'a [u32],
     pub entries: usize,
     pub limits: &'a Limits,
 }
@@ -33,6 +35,7 @@ pub(super) struct Lists {
     pub listed: Vec<u32>,
     pub pages: Vec<Range<usize>>,
     pub groups: [Range<usize>; Group::ALL.len()],
+    pub files: Vec<Range<usize>>,
     pub visits: u64,
 }
 
@@ -72,10 +75,15 @@ pub(super) fn lists(walks: Walks<'_>) -> Result<Lists, Error> {
             *list = walker.walk(roots, None)?;
         }
     }
+    let mut files = Vec::with_capacity(walks.files.len());
+    for &root in walks.files {
+        files.push(walker.walk(&[root], None)?);
+    }
     Ok(Lists {
         listed: walker.listed,
         pages,
         groups,
+        files,
         visits: walker.visits,
     })
 }
