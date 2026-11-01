@@ -1331,7 +1331,8 @@ fn strays_pushed_down(doc: &Document, strays: &[Id], nodes: &HashSet<Id>, bodies
         let read = dict.get(key).map(|written| doc.dereference(written));
         matches!(read, Ok(Ok((_, object))) if !matches!(object, Object::Null))
     };
-    for id in strays {
+    // One a page's /Parent makes a node is taken off with the rest.
+    for id in strays.iter().filter(|id| !nodes.contains(id)) {
         let Some(body) = bodies.get_mut(id) else {
             continue;
         };

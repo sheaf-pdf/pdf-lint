@@ -316,6 +316,22 @@ fn a_page_the_tree_doesn_t_list_gets_what_it_inherited_from_a_node_that_loses_it
     }
 }
 
+/// What says it's a page, isn't listed, and is a listed page's `/Parent` with kids is a
+/// node like any: it's given nothing to hold.
+#[test]
+fn a_stray_page_that_s_a_node_is_given_nothing() {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R /Foo 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 9 9] /Resources << >> >>",
+        "<< /Type /Page /Parent 4 0 R >>",
+        "<< /Type /Page /Parent 2 0 R /Kids [] /Mark (between) >>",
+    ];
+    let bytes = file(&objects, ROOT);
+    for options in kinds() {
+        holds_clean(&written(&bytes, &options));
+    }
+}
+
 #[test]
 fn each_kind_reads_back_linearized_with_the_same_pages_and_objects() {
     let bytes = built(&two_pages(""));

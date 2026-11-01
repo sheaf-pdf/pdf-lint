@@ -958,6 +958,21 @@ fn a_page_the_tree_doesn_t_list_gets_what_it_inherited_from_a_node_that_loses_it
     assert!(stray.has(b"Resources"));
 }
 
+/// What says it's a page, isn't listed, and is a listed page's `/Parent` with kids is a
+/// node like any: it's given nothing to hold.
+#[test]
+fn a_stray_page_that_s_a_node_is_given_nothing() {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R /Foo 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 9 9] /Resources << >> >>",
+        "<< /Type /Page /Parent 4 0 R >>",
+        "<< /Type /Page /Parent 2 0 R /Kids [] /Mark (between) >>",
+    ];
+    let bytes = file(&objects, ROOT);
+    holds(&laid_out(&bytes).unwrap());
+    same_numbers_as_the_family(&bytes);
+}
+
 /// `objects` as a file: what lopdf holds of them, the adapter's refusal, `family`'s too.
 fn refused_as_the_family_refuses(objects: &[&str]) -> Error {
     let why = refused(objects);

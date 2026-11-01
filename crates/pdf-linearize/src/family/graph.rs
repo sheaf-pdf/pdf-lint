@@ -481,7 +481,8 @@ fn strays_pushed_down(
         let read = doc.dereference(value);
         read.is_some_and(|(_, value)| !value.is_null())
     };
-    for id in strays {
+    // One a page's /Parent makes a node is taken off with the rest.
+    for id in strays.iter().filter(|id| !nodes.contains(id)) {
         let Ok(at) = bodies.binary_search_by_key(id, |(id, _)| *id) else {
             continue;
         };
