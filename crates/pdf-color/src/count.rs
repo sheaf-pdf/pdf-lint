@@ -42,6 +42,9 @@ const MOST_UNDERLYING: u32 = 16;
 /// An object that's [`Why::Damaged`] isn't there, as it isn't for PDFium; any
 /// other failure to read one is the `Err`, whole.
 ///
+/// A count where a cap was met can't be told from one of a space that doesn't
+/// load: [`counted`] says which it is.
+///
 /// ```
 /// use pdf_color::{Limits, Object, ObjectId, components};
 ///
@@ -66,22 +69,52 @@ pub fn components<'o, R: Resolve<'o>>(
     value: &'o Object,
     limits: &Limits,
 ) -> Result<Option<u32>, Unreadable> {
-    walked(objects, value, limits).map(|(count, _)| count)
+    counted(objects, value, limits).map(|counted| counted.count)
 }
 
-/// What [`components`] gives, and whether a cap ended a branch of it.
-pub(crate) fn walked<'o, R: Resolve<'o>>(
+/// What [`counted`] gives: a space's count, and whether it's sure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Counted {
+    /// What [`components`] gives.
+    pub count: Option<u32>,
+    /// Whether a cap of [`Limits`] ended a branch of it, so that `count` is what
+    /// that branch not loading makes it, which may not be what PDFium counts.
+    pub capped: bool,
+}
+
+/// What [`components`] gives, and whether a cap ended a branch of it, for a
+/// caller that acts on where an image's data ends and would refuse what it can't
+/// be sure of, or read it again under larger caps.
+///
+/// ```
+/// use pdf_color::{Limits, Object, ObjectId, counted};
+///
+/// let nested = Object::from(vec![Object::from(vec![Object::from("DeviceGray")])]);
+/// let nothing = |_: ObjectId| None;
+/// let whole = counted(nothing, &nested, &Limits::DEFAULT).unwrap();
+/// assert_eq!((whole.count, whole.capped), (Some(1), false));
+///
+/// let mut limits = Limits::DEFAULT;
+/// limits.space_depth = 0;
+/// let cut = counted(nothing, &nested, &limits).unwrap();
+/// assert_eq!((cut.count, cut.capped), (Some(3), true));
+/// ```
+pub fn counted<'o, R: Resolve<'o>>(
     objects: R,
     value: &'o Object,
     limits: &Limits,
-) -> Result<(Option<u32>, bool), Unreadable> {
+) -> Result<Counted, Unreadable> {
     let mut walk = Walk::within(objects, limits, 0);
     let count = match walk.hop(value)? {
         Some(at) => Some(walk.top(at, 0)?.map_or(UNLOADED, |space| space.components)),
         None if walk.capped => Some(UNLOADED),
         None => None,
     };
-    Ok((count, walk.capped))
+    Ok(Counted {
+        count,
+        capped: walk.capped,
+    })
 }
 
 /// Object `id`, or none where it isn't there: one that's [`Why::Damaged`] is
@@ -1222,14 +1255,14 @@ mod tests {
         let mut small = Limits::DEFAULT;
         small.space_depth = 63;
         assert_eq!(components(resolve, &value, &small), Ok(Some(3)));
-        assert!(walked(resolve, &value, &small).unwrap().1);
+        assert!(super::counted(resolve, &value, &small).unwrap().capped);
         let (value, objects) = chain(65);
         let resolve = |id: ObjectId| objects.get(&id);
         assert_eq!(components(resolve, &value, &Limits::DEFAULT), Ok(Some(3)));
         let mut large = Limits::DEFAULT;
         large.space_depth = 65;
         assert_eq!(components(resolve, &value, &large), Ok(Some(4)));
-        assert!(!walked(resolve, &value, &large).unwrap().1);
+        assert!(!super::counted(resolve, &value, &large).unwrap().capped);
     }
 
     /// A resolver over `objects` that counts what it's asked.

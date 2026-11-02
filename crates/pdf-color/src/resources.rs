@@ -54,9 +54,17 @@ fn dictionary<'o, R: Resolve<'o>>(
 
 impl<'o> Spaces<'o> {
     /// The `/ColorSpace` dictionary of `resources`, a page's or a form's
-    /// `/Resources` as written, or none where there's no such thing. A form
-    /// with none uses its page's, as PDFium reads it, so none is what its
-    /// reader asks.
+    /// `/Resources` as written, or none where there's no such thing: for a page
+    /// from pdf-semantics that's its `Attribute::written`, not its `value`, which
+    /// has been followed, past where PDFium stops. What a form draws in, as PDFium
+    /// reads it, is two rules. A form with no `/Resources` takes what holds it, the
+    /// parent form's or the page's. A form with `/Resources` and none here takes
+    /// the page's, whatever holds it. So none is what its reader asks.
+    ///
+    /// This is PDFium's reading, and it tells nothing: `/Resources` through three
+    /// references, which 7.3.10 allows, a damaged `/ColorSpace` and a stream given
+    /// for a dictionary are each just what they are here, with no fault. An ISO
+    /// check of a resources dictionary reads the dictionary itself.
     ///
     /// `resources` and its `/ColorSpace` may each be a dictionary or a stream,
     /// each through at most two references: through three, or in a loop, as
@@ -65,8 +73,7 @@ impl<'o> Spaces<'o> {
     /// failure to read one is the `Err`, whole.
     ///
     /// ```
-    /// use pdf_color::{Limits, Object, ObjectId, Spaces, components};
-    /// use pdf_objects::dict;
+    /// use pdf_color::{Limits, Object, ObjectId, Spaces, components, dict};
     ///
     /// let resources = Object::from(dict! { "ColorSpace" => dict! { "A" => "DeviceCMYK" } });
     /// let nothing = |_: ObjectId| None;

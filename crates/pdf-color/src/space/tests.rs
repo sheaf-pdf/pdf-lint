@@ -6,10 +6,11 @@ use std::collections::BTreeMap;
 
 use pdf_objects::parse::Parser;
 use pdf_objects::{ObjectId, Unreadable, Why};
+use pdf_structure::bytes::{Options, Reading};
 
 use super::*;
-use crate::components;
 use crate::fault::{Fault, Place};
+use crate::{components, counted};
 
 /// A white point, as a CIE-based dictionary has it.
 const CAL: &str = "<< /WhitePoint [0.95 1 1.08] >>";
@@ -776,7 +777,7 @@ fn a_colorant_by_reference_is_a_colorant() {
     let space = space.unwrap();
     assert_eq!(faults, []);
     assert_eq!(space.colorants().collect::<Vec<_>>(), [b"A", b"B"]);
-    assert_eq!(space.colorants().len(), 2);
+    assert_eq!(space.colorants().count(), 2);
     assert_eq!(space.components(), Some(2));
 
     let (space, _) = read("[/Separation 5 0 R /DeviceGray 6 0 R]", &["/A", TINT_1]);
@@ -917,7 +918,7 @@ fn what_a_space_holds_is_read_through_its_references() {
     assert!(attributes.mixing_hints.is_some());
     let process = attributes.process.as_ref().unwrap();
     assert_eq!(process.space.as_deref(), Some(&Space::DeviceCMYK));
-    assert_eq!(process.components[0], b"Cyan");
+    assert_eq!(process.components[0], Some(&b"Cyan"[..]));
     assert_eq!(process.components.len(), 4);
 }
 
@@ -1165,6 +1166,313 @@ fn a_fault_says_where_it_is() {
     assert_eq!(kept[0].0, Place::new(None, direct.at));
 }
 
+/// A file of `objects`, the first of them object 5, its page's resources object
+/// 3's, and where each object is written, by number.
+fn laid_out(objects: &[&str]) -> (Vec<u8>, BTreeMap<u32, std::ops::Range<u32>>) {
+    let head = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    ];
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 9] >>";
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let (mut offsets, mut at) = (Vec::new(), BTreeMap::new());
+    let bodies = head.iter().chain([&page, &"null"]).chain(objects);
+    for (body, number) in bodies.zip(1..) {
+        offsets.push(out.len());
+        out.extend(format!("{number} 0 obj\n").as_bytes());
+        let start = out.len() as u32;
+        out.extend(body.as_bytes());
+        at.insert(number, start..out.len() as u32);
+        out.extend(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes());
+    for offset in &offsets {
+        out.extend(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    let size = offsets.len() + 1;
+    let trailer = format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+    out.extend(trailer.as_bytes());
+    (out, at)
+}
+
+/// Each `(fault, object)` told of object 5, read as a space from a file of
+/// `objects`, each span checked to be in the object its place names.
+fn told_in(objects: &[&str]) -> Vec<(Fault, u32)> {
+    let (bytes, at) = laid_out(objects);
+    let reading = Reading::open(&bytes, &Options::DEFAULT).unwrap();
+    let start = Object::reference(5);
+    let space_at: &Object = Box::leak(Box::new(start));
+    let mut faults = Vec::new();
+    Space::read(&reading, space_at, &Limits::DEFAULT, &mut faults).unwrap();
+    faults_placed(&faults, &at)
+}
+
+/// Each fault of `faults` and the object it's told in, each span in that object.
+fn faults_placed(
+    faults: &[(Place, Fault)],
+    at: &BTreeMap<u32, std::ops::Range<u32>>,
+) -> Vec<(Fault, u32)> {
+    let placed = faults.iter().map(|(place, fault)| {
+        let object = place
+            .object
+            .unwrap_or_else(|| panic!("{fault:?} in none"))
+            .0;
+        let span = place
+            .at
+            .unwrap_or_else(|| panic!("{fault:?} written nowhere"));
+        let within = &at[&object];
+        assert!(
+            within.start <= span.start as u32 && span.end as u32 <= within.end,
+            "{fault:?}: {span:?} isn't in object {object}, at {within:?}"
+        );
+        (*fault, object)
+    });
+    placed.collect()
+}
+
+#[test]
+fn a_fault_of_what_a_reference_led_to_is_in_that_object() {
+    let separation = "[/Separation 6 0 R /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]";
+    let cases: [(&[&str], (Fault, u32)); 11] = [
+        (
+            &[
+                "[/ICCBased 6 0 R]",
+                "<< /N 7 0 R /Length 0 >>\nstream\n\nendstream",
+                "2",
+            ],
+            (Fault::IccComponents, 7),
+        ),
+        (
+            &["[/Indexed /DeviceGray 6 0 R <00>]", "500"],
+            (Fault::Hival, 6),
+        ),
+        (
+            &["[/Indexed /DeviceGray 0 6 0 R]", "7"],
+            (Fault::LookupKind, 6),
+        ),
+        (&["[6 0 R /DeviceGray]", "7"], (Fault::NotASpace, 6)),
+        (&["6 0 R", "7"], (Fault::NotASpace, 6)),
+        (&["6 0 R", "7 0 R", "/DeviceGray"], (Fault::Chained, 5)),
+        (&[separation, "7"], (Fault::ColorantName, 6)),
+        (
+            &[
+                "[/DeviceN [6 0 R] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>]",
+                "7",
+            ],
+            (Fault::ColorantName, 6),
+        ),
+        (
+            &[
+                "[/DeviceN [/A] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >> << /Subtype 6 0 R >>]",
+                "7",
+            ],
+            (Fault::AttributesSubtype, 6),
+        ),
+        (
+            &[
+                "[/DeviceN [/A] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >> << /MixingHints 6 0 R >>]",
+                "7",
+            ],
+            (Fault::NotADictionary, 6),
+        ),
+        (
+            &[
+                "[/DeviceN [/A] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >> << /Colorants 6 0 R >>]",
+                "<< /A /DeviceGray >>",
+            ],
+            (Fault::ColorantNotSeparation, 6),
+        ),
+    ];
+    for (objects, want) in cases {
+        let told = told_in(objects);
+        assert!(told.contains(&want), "{objects:?}: {told:?}");
+    }
+
+    // A reference to nothing is told of the reference, in what it's written in,
+    // through a chain too.
+    let told = told_in(&["[/Indexed /DeviceGray 6 0 R <00>]", "7 0 R", "99 0 R"]);
+    assert!(told.contains(&(Fault::Chained, 6)), "{told:?}");
+    assert!(told.contains(&(Fault::Hival, 5)), "{told:?}");
+}
+
+#[test]
+fn separations_are_told_in_the_object_colorants_is_in() {
+    let tint = "<< /FunctionType 2 /Domain [0 1] /N 1 >>";
+    let in_place =
+        format!("[/DeviceN [/A] /DeviceGray {tint} << /Colorants << /A /DeviceGray >> >>]");
+    let by_reference = format!("[/DeviceN [/A] /DeviceGray {tint} << /Colorants 6 0 R >>]");
+    let attributes = format!("[/DeviceN [/A] /DeviceGray {tint} 6 0 R]");
+    let cases: [(&[&str], u32); 3] = [
+        (&[&in_place], 5),
+        (&[&by_reference, "<< /A /DeviceGray >>"], 6),
+        (&[&attributes, "<< /Colorants << /A /DeviceGray >> >>"], 6),
+    ];
+    for (objects, want) in cases {
+        let (bytes, at) = laid_out(objects);
+        let reading = Reading::open(&bytes, &Options::DEFAULT).unwrap();
+        let value: &Object = Box::leak(Box::new(Object::reference(5)));
+        let mut faults = Vec::new();
+        let space = Space::read(&reading, value, &Limits::DEFAULT, &mut faults).unwrap();
+        let by_read = faults_placed(&faults, &at);
+        assert_eq!(
+            by_read,
+            [(Fault::ColorantNotSeparation, want)],
+            "{objects:?}"
+        );
+
+        let Some(Space::DeviceN(device_n)) = space else {
+            panic!("not DeviceN");
+        };
+        let mut faults = Vec::new();
+        let attributes = device_n.attributes.unwrap();
+        attributes
+            .separations(&reading, &Limits::DEFAULT, &mut faults)
+            .unwrap();
+        assert_eq!(faults_placed(&faults, &at), by_read, "{objects:?}");
+    }
+}
+
+#[test]
+fn a_stream_held_can_have_its_data_asked_for() {
+    let objects = [
+        "[/Indexed 6 0 R 0 7 0 R]",
+        "[/ICCBased 8 0 R]",
+        "9 0 R",
+        "<< /N 1 /Length 1 >>\nstream\np\nendstream",
+        "<< /Length 1 >>\nstream\nq\nendstream",
+    ];
+    let (bytes, _) = laid_out(&objects);
+    let reading = Reading::open(&bytes, &Options::DEFAULT).unwrap();
+    let value: &Object = Box::leak(Box::new(Object::reference(5)));
+    let space = Space::read(&reading, value, &Limits::DEFAULT, &mut ());
+    let Ok(Some(Space::Indexed(indexed))) = space else {
+        panic!("not Indexed");
+    };
+    let Some(Lookup::Stream { stream, id, .. }) = indexed.lookup else {
+        panic!("no stream");
+    };
+    assert_eq!(id, Some((9, 0)), "the object a chain ended in");
+    assert_eq!(reading.decoded(id.unwrap()).unwrap(), b"q");
+    assert!(stream.dict.has(b"Length"));
+    let Some(Space::ICCBased(icc)) = indexed.base.as_deref() else {
+        panic!("no ICCBased");
+    };
+    assert_eq!(icc.id, Some((8, 0)));
+    assert_eq!(reading.decoded(icc.id.unwrap()).unwrap(), b"p");
+
+    // A stream that has no number has none to say.
+    let file = file("[/ICCBased 5 0 R]", &["<< /Length 0 /N 1 >>"]);
+    let (space, _) = read_under(file, &Limits::DEFAULT);
+    let Some(Space::ICCBased(icc)) = space else {
+        panic!("not ICCBased");
+    };
+    assert_eq!(icc.id, Some((5, 0)));
+    let built = Object::from(vec![
+        Object::from("ICCBased"),
+        Object::stream(pdf_objects::dict! { "N" => 1 }),
+    ]);
+    let built: &Object = Box::leak(Box::new(built));
+    let nothing = |_: ObjectId| None;
+    let space = Space::read(nothing, built, &Limits::DEFAULT, &mut ());
+    let Ok(Some(Space::ICCBased(icc))) = space else {
+        panic!("not ICCBased");
+    };
+    assert_eq!((icc.id, icc.n), (None, Some(1)));
+}
+
+#[test]
+fn a_name_keeps_its_position_among_a_space_s_colorants() {
+    let (space, faults) = read("[/DeviceN [/A 7 /B] /DeviceRGB 5 0 R]", &[TINT_1]);
+    assert!(faults.contains(&Fault::ColorantName), "{faults:?}");
+    let space = space.unwrap();
+    let Space::DeviceN(device_n) = &space else {
+        panic!("not DeviceN");
+    };
+    let held = [Some(&b"A"[..]), None, Some(&b"B"[..])];
+    assert_eq!(device_n.names, held);
+    assert_eq!(device_n.components, Some(3));
+    let named: Vec<&[u8]> = space.colorants().collect();
+    assert_eq!(named, [&b"A"[..], &b"B"[..]]);
+
+    let attributes = "<< /Process << /ColorSpace /DeviceRGB /Components [/R 7 /B] >> >>";
+    let text = format!("[/DeviceN [/R] /DeviceGray 5 0 R {attributes}]");
+    let (space, _) = read(&text, &[TINT_1]);
+    let Some(Space::DeviceN(device_n)) = space else {
+        panic!("not DeviceN");
+    };
+    let process = device_n.attributes.unwrap().process.unwrap();
+    assert_eq!(process.components, [Some(&b"R"[..]), None, Some(&b"B"[..])]);
+}
+
+/// A DeviceN space whose tint is `n` stitching functions by reference, each holding
+/// the next, and then a function of one output.
+fn stitched_by_reference(n: u32) -> File {
+    let kids: Vec<String> = (0..n)
+        .map(|at| {
+            let kid = 6 + at;
+            format!("<< /FunctionType 3 /Domain [0 1] /Functions [{kid} 0 R] /Bounds [] /Encode [0 1] >>")
+        })
+        .chain([TINT_1.to_string()])
+        .collect();
+    let kids: Vec<&str> = kids.iter().map(String::as_str).collect();
+    file("[/DeviceN [/A] /DeviceGray 5 0 R]", &kids)
+}
+
+#[test]
+fn a_tint_past_the_depth_is_told_where_components_meets_it() {
+    let at = stitched_by_reference(63);
+    let resolve = |id: ObjectId| at.objects.get(&id);
+    let (space, faults) = read_under(at, &Limits::DEFAULT);
+    assert_eq!(faults, []);
+    let read = counted(resolve, at.value, &Limits::DEFAULT).unwrap();
+    assert_eq!((read.count, read.capped), (Some(1), false));
+    assert_eq!(space.unwrap().components(), Some(1));
+
+    let past = stitched_by_reference(64);
+    let resolve = |id: ObjectId| past.objects.get(&id);
+    let (space, faults) = read_under(past, &Limits::DEFAULT);
+    assert_eq!(faults, [Fault::TooDeep]);
+    let read = counted(resolve, past.value, &Limits::DEFAULT).unwrap();
+    assert_eq!((read.count, read.capped), (Some(3), true));
+    assert_eq!(space.unwrap().components(), Some(1));
+}
+
+/// The promise's condition, as each reading spends its own: `components` spends one
+/// budget on an alternate and a tint, where a typed space's checks have their own.
+#[test]
+fn each_reading_spends_its_own_visits() {
+    let at = |kids: usize| {
+        let functions = "7 0 R ".repeat(kids);
+        let (bounds, encode) = ("0 ".repeat(kids - 1), "0 1 ".repeat(kids));
+        let wide = format!(
+            "<< /FunctionType 3 /Domain [0 1] /Functions [{functions}] /Bounds [{bounds}] /Encode [{encode}] >>"
+        );
+        file(
+            "[/DeviceN [/A] 6 0 R 5 0 R]",
+            &[&wide, "/DeviceGray", TINT_1],
+        )
+    };
+    let under = at(4094);
+    let resolve = |id: ObjectId| under.objects.get(&id);
+    let read = counted(resolve, under.value, &Limits::DEFAULT).unwrap();
+    assert_eq!((read.count, read.capped), (Some(1), false));
+    let (_, faults) = read_under(under, &Limits::DEFAULT);
+    assert_eq!(faults, []);
+
+    let met = at(4095);
+    let resolve = |id: ObjectId| met.objects.get(&id);
+    let read = counted(resolve, met.value, &Limits::DEFAULT).unwrap();
+    assert_eq!((read.count, read.capped), (Some(3), true));
+    let (space, faults) = read_under(met, &Limits::DEFAULT);
+    assert_eq!(faults, [], "no cap met by this one");
+    assert_eq!(space.unwrap().components(), Some(1));
+
+    let past = at(4096);
+    let (_, faults) = read_under(past, &Limits::DEFAULT);
+    assert_eq!(faults, [Fault::TooManyVisits]);
+}
+
 #[test]
 fn separations_are_read_on_asking() {
     let text = "[/DeviceN [/A] /DeviceGray 5 0 R << /Colorants 6 0 R >>]";
@@ -1214,6 +1522,7 @@ fn separations_are_read_on_asking() {
     let error = attributes.separations(resolver, &Limits::DEFAULT, &mut ());
     assert_eq!(error.unwrap_err().why, Why::Source);
     let empty = Attributes {
+        colorants_in: None,
         subtype: None,
         colorants: None,
         process: None,

@@ -494,6 +494,65 @@ def cases():
     form_case("form-color-space-through-three", b"/Resources << /ColorSpace 6 0 R >>", PAGE_HAS,
               [b"7 0 R", b"8 0 R", b"<< /X /DeviceGray >>"])
 
+    # A form in a form: with no /Resources, what holds it; with /Resources and no
+    # /ColorSpace, the page's; with its own, its own.
+    def nested_form_case(name, outer_res, inner_res):
+        head = b"/Type /XObject /Subtype /Form /BBox [0 0 9 9] "
+        forms = [stream(head + outer_res, b"/B Do"), stream(head + inner_res, image(b"/X"))]
+        res_case(name, b"<< /XObject << /A 5 0 R >> /ColorSpace << /X /DeviceRGB >> >>", forms,
+                 content=b"/A Do")
+
+    OUTER_HAS = b"/Resources << /ColorSpace << /X /DeviceCMYK >> /XObject << /B 6 0 R >> >>"
+    OUTER_NONE = b"/Resources << /XObject << /B 6 0 R >> >>"
+    nested_form_case("form-nested-no-resources", OUTER_HAS, b"")
+    nested_form_case("form-nested-empty-resources", OUTER_HAS, b"/Resources << >>")
+    nested_form_case("form-nested-empty-color-spaces", OUTER_HAS, b"/Resources << /ColorSpace << >> >>")
+    nested_form_case("form-nested-outer-names-none", OUTER_NONE, b"")
+
+    # Nested in place: PDFium's parser stops 64 levels from the object's root, this
+    # file's reader 256, so what's between counts otherwise.
+    def nested(n):
+        return b"[" * n + b"/DeviceCMYK" + b"]" * n
+
+    for n in [60, 61, 62, 63, 64, 65]:
+        named("one-nested-%d" % n, nested(n))
+    named("one-nested-300", nested(300))
+    for n in [59, 60, 63, 64]:
+        named("pattern-nested-%d" % n, b"[/Pattern " + nested(n) + b"]")
+    for n in [63, 64, 65]:
+        named("ref-nested-%d" % n, b"5 0 R", [nested(n)])
+
+    # A stitching function costs PDFium's parser two levels, nested in place.
+    def stitching(kid):
+        return b"<< /FunctionType 3 /Domain [0 1] /Functions [" + kid + b"] /Bounds [] /Encode [0 1] >>"
+
+    def stitched(n):
+        function = F2_1
+        for _ in range(n):
+            function = stitching(function)
+        return function
+
+    for n in [28, 29]:
+        named("device-n-stitching-in-place-%d" % n, b"[/DeviceN [/A] /DeviceGray " + stitched(n) + b"]")
+    for n in [30, 31]:
+        named("ref-device-n-stitching-in-place-%d" % n, b"5 0 R",
+              [b"[/DeviceN [/A] /DeviceGray " + stitched(n) + b"]"])
+
+    # By reference there's no parser to stop it, but the caps.
+    for n in [63, 64]:
+        kids = [stitching(b"%d 0 R" % (6 + i)) for i in range(n)]
+        named("device-n-stitching-by-ref-%d" % n, b"[/DeviceN [/A] /DeviceGray 5 0 R]", kids + [F2_1])
+    KIDS = 4095
+    wide = (b"<< /FunctionType 3 /Domain [0 1] /Functions [" + b"7 0 R " * KIDS + b"] /Bounds ["
+            + b"0 " * (KIDS - 1) + b"] /Encode [" + b"0 1 " * KIDS + b"] >>")
+    named("device-n-stitching-visits-4095", b"[/DeviceN [/A] 6 0 R 5 0 R]", [wide, b"/DeviceGray", F2_1])
+
+    # A stream's form, as each reader of the file takes it.
+    icc = b"[/ICCBased 5 0 R]"
+    named("icc-stream-space-after-keyword", icc, [b"<< /N 4 /Length 3 >>\nstream abc\nendstream"])
+    named("icc-no-endstream", icc, [b"<< /N 4 /Length 3 >>\nstream\nabc"])
+    named("icc-no-endstream-no-length", icc, [b"<< /N 4 >>\nstream\nabc"])
+
     # A page naming several, drawn in turn: what a reader of its content has.
     several = (b"<< /ColorSpace << /Icc [/ICCBased 5 0 R] /Cmyk /DeviceCMYK /Gray 6 0 R"
                b" /Idx [/Indexed /DeviceRGB 1 (abcdef)]"

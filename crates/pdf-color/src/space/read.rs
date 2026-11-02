@@ -27,11 +27,11 @@ enum Reached<'o> {
     Stopped,
 }
 
-/// An array of names: those that are, and how many elements it has, whatever
-/// they are.
+/// An array of names: each element's, by its position, and how many elements it
+/// has, whatever they are.
 #[derive(Default)]
 struct Names<'o> {
-    names: Vec<&'o [u8]>,
+    names: Vec<Option<&'o [u8]>>,
     elements: usize,
 }
 
@@ -141,7 +141,8 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
         while let Some(id) = object.as_reference() {
             followed += 1;
             if followed == 2 {
-                self.say(written.at, Fault::Chained);
+                // In the object that's a reference, which is on the path by now.
+                self.say(object.at, Fault::Chained);
             }
             if self.path.contains(&id) {
                 self.say(object.at, Fault::Loop);
@@ -170,8 +171,10 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
         Ok(Reached::At(object))
     }
 
-    /// `read`, of what `written` leads to, with its references on the path; none
-    /// where it leads nowhere, `nothing` told if it's a reference to nothing.
+    /// `read`, of what `written` leads to, with its references on the path, so a
+    /// fault said of what it's given is said in the object it's written in; none
+    /// where it leads nowhere, `nothing` told, of `written`, if it's a reference to
+    /// nothing.
     fn entered<T>(
         &mut self,
         written: &'o Object,
@@ -182,6 +185,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
         let read = match self.through(written) {
             Ok(Reached::At(object)) => read(self, object),
             Ok(Reached::Nothing) => {
+                self.path.truncate(mark);
                 if let Some(fault) = nothing {
                     self.say(written.at, fault);
                 }
@@ -194,7 +198,9 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
         read
     }
 
-    /// What `written` leads to, `nothing` told if it's a reference to nothing.
+    /// What `written` leads to, `nothing` told if it's a reference to nothing. Its
+    /// references are off the path again, so a fault said of what it's given is
+    /// said of `written`; one said of what it leads to is said in [`Reader::entered`].
     fn value(
         &mut self,
         written: &'o Object,
@@ -237,11 +243,14 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
                         reader.say(object.at, Fault::NotASpace);
                         return Ok(None);
                     };
-                    let Some(family) = reader.value(first, Some(Fault::NotASpace))? else {
-                        return Ok(None);
-                    };
-                    let Some(name) = family.as_name() else {
-                        reader.say(family.at, Fault::NotASpace);
+                    let family =
+                        reader.entered(first, Some(Fault::NotASpace), |reader, family| {
+                            if family.as_name().is_none() {
+                                reader.say(family.at, Fault::NotASpace);
+                            }
+                            Ok(family.as_name())
+                        })?;
+                    let Some(name) = family else {
                         return Ok(None);
                     };
                     reader.named(name, parts, object.at, depth)
@@ -459,6 +468,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
         depth: usize,
     ) -> Result<Icc<'o>, Unreadable> {
         let none = Icc {
+            id: None,
             stream: None,
             n: None,
             alternate: None,
@@ -493,6 +503,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
                 });
             }
             Ok(Some(Icc {
+                id: written.as_reference().and(reader.path.last().copied()),
                 stream: Some(stream),
                 n,
                 alternate: alternate.map(Box::new),
@@ -511,18 +522,19 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
             self.say(at, Fault::IccComponents);
             return Ok(None);
         };
-        let Some(number) = self.value(n, Some(Fault::IccComponents))? else {
-            return Ok(None);
-        };
-        match number.as_integer() {
-            Some(1) => Ok(Some(1)),
-            Some(3) => Ok(Some(3)),
-            Some(4) => Ok(Some(4)),
-            _ => {
-                self.say(number.at, Fault::IccComponents);
-                Ok(None)
-            }
-        }
+        self.entered(
+            n,
+            Some(Fault::IccComponents),
+            |reader, number| match number.as_integer() {
+                Some(1) => Ok(Some(1)),
+                Some(3) => Ok(Some(3)),
+                Some(4) => Ok(Some(4)),
+                _ => {
+                    reader.say(number.at, Fault::IccComponents);
+                    Ok(None)
+                }
+            },
+        )
     }
 
     /// An Indexed space's parameters.
@@ -562,30 +574,31 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
 
     /// An Indexed space's high value.
     fn hival(&mut self, written: &'o Object) -> Result<Option<u8>, Unreadable> {
-        let Some(number) = self.value(written, Some(Fault::Hival))? else {
-            return Ok(None);
-        };
-        let hival = number.as_integer().and_then(|n| u8::try_from(n).ok());
-        if hival.is_none() {
-            self.say(number.at, Fault::Hival);
-        }
-        Ok(hival)
+        self.entered(written, Some(Fault::Hival), |reader, number| {
+            let hival = number.as_integer().and_then(|n| u8::try_from(n).ok());
+            if hival.is_none() {
+                reader.say(number.at, Fault::Hival);
+            }
+            Ok(hival)
+        })
     }
 
     /// An Indexed space's table.
     fn lookup(&mut self, written: &'o Object) -> Result<Option<Lookup<'o>>, Unreadable> {
-        let Some(table) = self.value(written, Some(Fault::LookupKind))? else {
-            return Ok(None);
-        };
-        let lookup = match table.value() {
-            Value::String(string, _) => Some(Lookup::String(string)),
-            Value::Stream(stream) => Some(Lookup::Stream(stream)),
-            _ => None,
-        };
-        if lookup.is_none() {
-            self.say(table.at, Fault::LookupKind);
-        }
-        Ok(lookup)
+        self.entered(written, Some(Fault::LookupKind), |reader, table| {
+            let lookup = match table.value() {
+                Value::String(string, _) => Some(Lookup::String(string)),
+                Value::Stream(stream) => Some(Lookup::Stream {
+                    stream,
+                    id: written.as_reference().and(reader.path.last().copied()),
+                }),
+                _ => None,
+            };
+            if lookup.is_none() {
+                reader.say(table.at, Fault::LookupKind);
+            }
+            Ok(lookup)
+        })
     }
 
     /// Whether a table, a string whose bytes a reader gave, is as long as its base
@@ -641,7 +654,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
         };
         let alternate = self.alternate(parts, at, depth)?;
         let outputs = alternate.as_deref().and_then(Space::components);
-        let tint = self.tint(parts, at, Some(1), outputs);
+        let tint = self.tint(parts, at, Some(1), outputs, depth);
         Ok(Separation {
             name,
             alternate,
@@ -655,14 +668,13 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
         written: &'o Object,
         fault: Fault,
     ) -> Result<Option<&'o [u8]>, Unreadable> {
-        let Some(name) = self.value(written, Some(fault))? else {
-            return Ok(None);
-        };
-        let bytes = name.as_name();
-        if bytes.is_none() {
-            self.say(name.at, fault);
-        }
-        Ok(bytes)
+        self.entered(written, Some(fault), |reader, name| {
+            let bytes = name.as_name();
+            if bytes.is_none() {
+                reader.say(name.at, fault);
+            }
+            Ok(bytes)
+        })
     }
 
     /// A Separation or DeviceN space's alternate, the third element of each.
@@ -684,28 +696,33 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
 
     /// A Separation or DeviceN space's tint transform, as written, the fourth
     /// element of each: what's checked of it takes `inputs` and gives `outputs`,
-    /// where they're known.
+    /// where they're known, a level below its space at `depth`.
     fn tint(
         &mut self,
         parts: &'o [Object],
         at: Option<Span>,
         inputs: Option<u32>,
         outputs: Option<u32>,
+        depth: usize,
     ) -> Option<&'o Object> {
         let tint = self.element(parts, 3, at);
         if let Some(tint) = tint {
-            self.check(|reader| reader.check_tint(tint, inputs, outputs));
+            self.check(|reader| reader.check_tint(tint, inputs, outputs, depth + 1));
         }
         tint
     }
 
     /// Whether a tint transform loads, as PDFium loads one, and takes and gives
-    /// what its space says.
+    /// what its space says. It's walked from `depth`, the level [`components`]
+    /// walks it from, so that this tells a cap on depth where that meets it.
+    ///
+    /// [`components`]: crate::components
     fn check_tint(
         &mut self,
         written: &'o Object,
         inputs: Option<u32>,
         outputs: Option<u32>,
+        depth: usize,
     ) -> Result<(), Unreadable> {
         let no_function = Fault::TintNotFunction;
         self.entered(written, Some(no_function), |reader, object| {
@@ -721,7 +738,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
                 damaged: &damaged,
             };
             let mut walk = Walk::within(noting, reader.limits, reader.checks);
-            let shape = function::shape(&mut walk, Some(hop), 0)?;
+            let shape = function::shape(&mut walk, Some(hop), depth)?;
             let (spent, capped) = (walk.spent(), walk.capped());
             reader.checks = spent;
             if let Some(id) = damaged.get() {
@@ -766,7 +783,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
         let components = u32::try_from(elements).ok().filter(|count| *count > 0);
         let alternate = self.alternate(parts, at, depth)?;
         let outputs = alternate.as_deref().and_then(Space::components);
-        let tint = self.tint(parts, at, components, outputs);
+        let tint = self.tint(parts, at, components, outputs, depth);
         let attributes = match parts.get(4) {
             Some(written) if !written.is_null() => self.attributes(written, &names, depth)?,
             _ => None,
@@ -786,9 +803,9 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
         })
     }
 
-    /// The names `written` is an array of, each through its references. Each spends
-    /// a visit, by reference or in place, so that an array of many, shared, can't
-    /// make a space's memory the square of its file's.
+    /// The names `written` is an array of, each through its references, each by
+    /// its position. Each spends a visit, by reference or in place, so that an array
+    /// of many, shared, can't make a space's memory the square of its file's.
     fn names(
         &mut self,
         written: &'o Object,
@@ -805,9 +822,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
                 if part.as_reference().is_none() && !reader.spend(part.at) {
                     break;
                 }
-                if let Some(name) = reader.colorant(part, not_name)? {
-                    names.push(name);
-                }
+                names.push(reader.colorant(part, not_name)?);
             }
             let elements = parts.len();
             Ok(Some(Names { names, elements }))
@@ -815,8 +830,14 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
     }
 
     /// What's checked of a DeviceN space's names alone.
-    fn check_names(&mut self, written: Option<&'o Object>, names: &[&'o [u8]], nchannel: bool) {
+    fn check_names(
+        &mut self,
+        written: Option<&'o Object>,
+        names: &[Option<&'o [u8]>],
+        nchannel: bool,
+    ) {
         let at = written.and_then(|written| written.at);
+        let names: Vec<&'o [u8]> = names.iter().flatten().copied().collect();
         let is = |of: Colorant| names.iter().any(|name| Colorant::of(name) == of);
         if is(Colorant::All) {
             self.say(at, Fault::AllInDeviceN);
@@ -824,7 +845,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
         if nchannel && is(Colorant::None) {
             self.say(at, Fault::NoneInNChannel);
         }
-        let mut sorted = names.to_vec();
+        let mut sorted = names;
         sorted.sort_unstable();
         let repeated = sorted
             .windows(2)
@@ -839,7 +860,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
     fn attributes(
         &mut self,
         written: &'o Object,
-        names: &[&'o [u8]],
+        names: &[Option<&'o [u8]>],
         depth: usize,
     ) -> Result<Option<Attributes<'o>>, Unreadable> {
         self.entered(written, None, |reader, object| {
@@ -851,14 +872,17 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
                 return Ok(None);
             };
             let subtype = reader.subtype(dict)?;
-            let colorants = reader.dictionary(dict, b"Colorants")?;
-            let mixing_hints = reader.dictionary(dict, b"MixingHints")?;
+            let held = reader.dictionary(dict, b"Colorants")?;
+            let (colorants, colorants_in) = held.unzip();
+            let colorants_in = colorants_in.flatten();
+            let mixing_hints = reader.dictionary(dict, b"MixingHints")?.unzip().0;
             let process = match entry_of(dict, b"Process") {
                 Some(process) => reader.process(process, depth)?,
                 None => None,
             };
             if let Some(colorants) = colorants {
                 reader.check(|reader| {
+                    reader.enter(colorants_in);
                     for entry in colorants.last_entries() {
                         if !reader.spend(entry.value.at) {
                             break;
@@ -872,9 +896,9 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
                 let listed = process
                     .as_ref()
                     .map_or(&[][..], |p| p.components.as_slice());
-                let undefined = names.iter().any(|name| {
+                let undefined = names.iter().flatten().any(|name| {
                     Colorant::of(name) == Colorant::Spot
-                        && !listed.contains(name)
+                        && !listed.contains(&Some(*name))
                         && colorants.is_none_or(|colorants| !colorants.has(name))
                 });
                 if undefined {
@@ -884,6 +908,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
             Ok(Some(Attributes {
                 subtype,
                 colorants,
+                colorants_in,
                 process,
                 mixing_hints,
             }))
@@ -895,39 +920,50 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
         let Some(written) = entry_of(dict, b"Subtype") else {
             return Ok(None);
         };
-        let Some(name) = self.value(written, None)? else {
-            return Ok(None);
-        };
-        if name.is_null() {
-            return Ok(None);
-        }
-        let subtype = match name.as_name() {
-            Some(b"DeviceN") => Some(Subtype::DeviceN),
-            Some(b"NChannel") => Some(Subtype::NChannel),
-            _ => None,
-        };
-        if subtype.is_none() {
-            self.say(name.at, Fault::AttributesSubtype);
-        }
-        Ok(subtype)
+        self.entered(written, None, |reader, name| {
+            if name.is_null() {
+                return Ok(None);
+            }
+            let subtype = match name.as_name() {
+                Some(b"DeviceN") => Some(Subtype::DeviceN),
+                Some(b"NChannel") => Some(Subtype::NChannel),
+                _ => None,
+            };
+            if subtype.is_none() {
+                reader.say(name.at, Fault::AttributesSubtype);
+            }
+            Ok(subtype)
+        })
     }
 
-    /// The dictionary an attributes dictionary has under `key`.
-    fn dictionary(&mut self, dict: &'o Dict, key: &[u8]) -> Result<Option<&'o Dict>, Unreadable> {
+    /// The dictionary an attributes dictionary has under `key`, and the object
+    /// it's written in.
+    fn dictionary(
+        &mut self,
+        dict: &'o Dict,
+        key: &[u8],
+    ) -> Result<Option<(&'o Dict, Option<ObjectId>)>, Unreadable> {
         let Some(written) = entry_of(dict, key) else {
             return Ok(None);
         };
-        let Some(object) = self.value(written, None)? else {
-            return Ok(None);
-        };
-        if object.is_null() {
-            return Ok(None);
+        self.entered(written, None, |reader, object| {
+            if object.is_null() {
+                return Ok(None);
+            }
+            let held = object.as_dict();
+            if held.is_none() {
+                reader.say(object.at, Fault::NotADictionary);
+            }
+            Ok(held.map(|held| (held, reader.path.last().copied())))
+        })
+    }
+
+    /// Puts the object what's read next is written in on the path, unless that's
+    /// where it is already.
+    fn enter(&mut self, object: Option<ObjectId>) {
+        if object.is_some() && self.path.last().copied() != object {
+            self.path.extend(object);
         }
-        let held = object.as_dict();
-        if held.is_none() {
-            self.say(object.at, Fault::NotADictionary);
-        }
-        Ok(held)
     }
 
     /// A process dictionary.
@@ -998,11 +1034,13 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
         Ok(space)
     }
 
-    /// Each of `colorants`' entries, under one budget.
+    /// Each of `colorants`' entries, written in `object`, under one budget.
     pub(super) fn separations(
         &mut self,
         colorants: &'o Dict,
+        object: Option<ObjectId>,
     ) -> Result<Vec<ColorantSpace<'o>>, Unreadable> {
+        self.enter(object);
         let mut spaces = Vec::new();
         for entry in colorants.last_entries() {
             if !self.spend(entry.value.at) {

@@ -1,15 +1,16 @@
 //! A color space as ISO 32000-2 says it (8.6), typed: its family, the spaces it
-//! holds and its colorants, each departure a [`Fault`] told to a [`Sink`]. Nothing
-//! here converts a color, opens a profile or evaluates a function.
+//! holds and its colorants, each departure a [`Fault`](crate::Fault) told to a
+//! [`Sink`]. Nothing here converts a color, opens a profile or evaluates a function.
 //!
 //! [`Space::read`] is the other reading from [`components`](crate::components),
 //! which is PDFium's and takes what ISO's doesn't. The two are tied by a promise:
-//! a value that gives a space with no fault told has the same count by both, but
-//! for a Pattern space over more than 16 components, which no clause refuses and
-//! PDFium does. It's why a reference to a reference is a fault, and a tint
-//! transform that doesn't load.
+//! a value read with a sink that wants faults, none told, has the same count by
+//! both, where [`counted`](crate::counted) meets no cap, but for a Pattern space
+//! over more than 16 components, which no clause refuses and PDFium does. It's why
+//! a reference to a reference is a fault, a tint transform that doesn't load, and a
+//! white point that PDFium's 32-bit reading makes 0.
 
-use pdf_objects::{Dict, Object, Resolve, Str, Stream, Unreadable};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Str, Stream, Unreadable};
 
 use crate::fault::Sink;
 use crate::limits::Limits;
@@ -157,6 +158,11 @@ pub struct Cie<'o> {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Icc<'o> {
+    /// The number of its stream, the object a reference to it ended in, which is
+    /// what a reader asks for a stream's data by, and what an encrypted stream's
+    /// key depends on (`Reading::data`, `Reading::decoded`). None for a stream that
+    /// isn't numbered, as only a value built in memory can be.
+    pub id: Option<ObjectId>,
     /// Its stream.
     pub stream: Option<&'o Stream>,
     /// `/N`, where it's 1, 3 or 4.
@@ -184,7 +190,16 @@ pub enum Lookup<'o> {
     /// A string.
     String(&'o Str),
     /// A stream, whose data isn't read.
-    Stream(&'o Stream),
+    #[non_exhaustive]
+    Stream {
+        /// The stream.
+        stream: &'o Stream,
+        /// Its number, the object a reference to it ended in, which is what a
+        /// reader asks for a stream's data by, and what an encrypted stream's key
+        /// depends on (`Reading::data`, `Reading::decoded`). None for a stream that
+        /// isn't numbered, as only a value built in memory can be.
+        id: Option<ObjectId>,
+    },
 }
 
 /// A Separation space's parameters (8.6.6.4).
@@ -204,9 +219,11 @@ pub struct Separation<'o> {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct DeviceN<'o> {
-    /// Its colorants, each through its references. An element that isn't a name
-    /// has none here, and past [`Limits::space_visits`] the rest have none.
-    pub names: Vec<&'o [u8]>,
+    /// Its colorants, each through its references, by position, so that `names[i]`
+    /// is component `i`'s: none for an element that isn't a name. Past
+    /// [`Limits::space_visits`] the rest aren't kept, so it can be shorter than
+    /// [`components`](DeviceN::components).
+    pub names: Vec<Option<&'o [u8]>>,
     /// How many components it has: as many as its array of names has elements,
     /// whatever they are, as PDFium counts them; none where it has none.
     pub components: Option<u32>,
@@ -228,6 +245,8 @@ pub struct Attributes<'o> {
     /// `/Colorants`: each entry a Separation space, read on asking
     /// ([`Attributes::separations`]).
     pub colorants: Option<&'o Dict>,
+    /// The object `/Colorants` is written in, for what's told of it on asking.
+    colorants_in: Option<ObjectId>,
     /// `/Process`.
     pub process: Option<Process<'o>>,
     /// `/MixingHints`, left to who blends (Table 72).
@@ -261,8 +280,10 @@ pub enum Subtype {
 pub struct Process<'o> {
     /// `/ColorSpace`.
     pub space: Option<Box<Space<'o>>>,
-    /// `/Components`, each through its references.
-    pub components: Vec<&'o [u8]>,
+    /// `/Components`, each through its references, by position: none for an
+    /// element that isn't a name, and past [`Limits::space_visits`] the rest aren't
+    /// kept.
+    pub components: Vec<Option<&'o [u8]>>,
 }
 
 /// What a colorant's name says of it (8.6.6.4, 8.6.6.5). A name alone can't say
@@ -314,22 +335,20 @@ impl Colorant {
 /// space's names, none of any other ([`Space::colorants`]).
 #[derive(Debug, Clone)]
 pub struct Colorants<'a, 'o> {
-    names: std::slice::Iter<'a, &'o [u8]>,
+    names: std::slice::Iter<'a, Option<&'o [u8]>>,
 }
 
 impl<'o> Iterator for Colorants<'_, 'o> {
     type Item = &'o [u8];
 
     fn next(&mut self) -> Option<&'o [u8]> {
-        self.names.next().copied()
+        self.names.by_ref().find_map(|name| *name)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.names.size_hint()
+        (0, self.names.size_hint().1)
     }
 }
-
-impl ExactSizeIterator for Colorants<'_, '_> {}
 
 impl<'o> Space<'o> {
     /// The color space `value` says, a name, an array or a reference to one, as
@@ -337,10 +356,12 @@ impl<'o> Space<'o> {
     /// looked for where it wants none: `()` pays only to read what a [`Space`]
     /// holds.
     ///
-    /// None where there's no space to speak of: a value of no family, or a
-    /// reference to nothing. A name that isn't a family is one of them, as outside
-    /// a content stream a space isn't named: [`Spaces`](crate::Spaces) looks a
-    /// name up, and a reader of `cs` applies `DefaultGray` and the like (8.6.5.6).
+    /// None where there's no space to speak of: a value of no family, one that's
+    /// neither a name nor an array, a reference to nothing, or where a loop, a cap
+    /// or a damaged object stops the reading at the top. With `()` a caller can't
+    /// tell these apart. A name that isn't a family is one of them, as outside a
+    /// content stream a space isn't named: [`Spaces`](crate::Spaces) looks a name
+    /// up, and a reader of `cs` applies `DefaultGray` and the like (8.6.5.6).
     ///
     /// What's read is the same whatever the sink, an `Err` included. An object
     /// that's [`Why::Damaged`](crate::Why::Damaged) isn't there, and it's told as
@@ -397,6 +418,10 @@ impl<'o> Space<'o> {
     /// [`components`](DeviceN::components); and for Pattern one more than its
     /// underlying space's, for the pattern's name, or 1 (8.7.3.3, 8.6.8). None
     /// where what it's read from is at fault.
+    ///
+    /// It's a count of what was read. Read with `()`, which has no fault looked
+    /// for, it says nothing of whether the space loads: `/CalGray` alone counts 1
+    /// here, and PDFium's 3 by [`components`](crate::components).
     pub fn components(&self) -> Option<u32> {
         match self {
             Space::DeviceGray | Space::CalGray(_) => Some(1),
@@ -429,13 +454,12 @@ impl<'o> Space<'o> {
         }
     }
 
-    /// A Separation space's colorant, or a DeviceN space's names: none of any
-    /// other. Allocates nothing.
+    /// A Separation space's colorant, or a DeviceN space's names, those that are
+    /// names: none of any other. Allocates nothing. A colorant's position among a
+    /// DeviceN space's is [`DeviceN::names`]'.
     pub fn colorants(&self) -> Colorants<'_, 'o> {
-        let names: &[&'o [u8]] = match self {
-            Space::Separation(Separation {
-                name: Some(name), ..
-            }) => std::slice::from_ref(name),
+        let names: &[Option<&'o [u8]>] = match self {
+            Space::Separation(separation) => std::slice::from_ref(&separation.name),
             Space::DeviceN(device_n) => &device_n.names,
             _ => &[],
         };
@@ -454,7 +478,9 @@ impl<'o> Attributes<'o> {
     /// Read on asking, as [`Space::read`] holds only the dictionary: under one
     /// [`Limits::space_visits`] for the whole of it, past which the rest aren't
     /// given. Any failure to read but [`Why::Damaged`](crate::Why::Damaged) is the
-    /// `Err`.
+    /// `Err`. A fault's [`Place::object`](crate::Place::object) is the object
+    /// `/Colorants` is written in, or what an entry leads to, as [`Space::read`]
+    /// tells it.
     pub fn separations<R: Resolve<'o>, S: Sink + ?Sized>(
         &self,
         objects: R,
@@ -464,6 +490,6 @@ impl<'o> Attributes<'o> {
         let Some(colorants) = self.colorants else {
             return Ok(Vec::new());
         };
-        Reader::new(objects, limits, sink).separations(colorants)
+        Reader::new(objects, limits, sink).separations(colorants, self.colorants_in)
     }
 }

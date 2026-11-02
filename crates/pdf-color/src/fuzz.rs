@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use pdf_objects::parse::Parser;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Why};
 
-use crate::count::walked;
+use crate::count::counted;
 use crate::{Family, Fault, Limits, Place, Sink, Space, Spaces, components};
 
 /// How many values of an input are read as objects.
@@ -109,7 +109,8 @@ fn a_value<'o, R: Resolve<'o> + Copy>(objects: R, value: &'o Object, most: u32) 
         objects,
         asked: &asked,
     };
-    let (count, capped) = walked(counting, value, &Limits::DEFAULT).expect("nothing fails");
+    let read = counted(counting, value, &Limits::DEFAULT).expect("nothing fails");
+    let (count, capped) = (read.count, read.capped);
     assert!(asked.get() <= Limits::DEFAULT.space_visits);
     match count {
         Some(count) => assert!((1..=most.max(17)).contains(&count), "{count} of {value:?}"),
@@ -133,7 +134,8 @@ fn a_value<'o, R: Resolve<'o> + Copy>(objects: R, value: &'o Object, most: u32) 
             asked: &asked,
         };
         let small = limits(depth, visits);
-        let (under, met) = walked(counting, value, &small).expect("nothing fails");
+        let read = counted(counting, value, &small).expect("nothing fails");
+        let (under, met) = (read.count, read.capped);
         assert!(
             asked.get() <= visits,
             "{} of {visits} on {value:?}",
@@ -236,7 +238,8 @@ fn a_space<'o, R: Resolve<'o> + Copy>(objects: R, value: &'o Object) {
 
     if faults.is_empty() {
         let space = plain.as_ref().expect("no space without a fault");
-        let (count, capped) = walked(objects, value, &defaults).expect("nothing fails");
+        let read = counted(objects, value, &defaults).expect("nothing fails");
+        let (count, capped) = (read.count, read.capped);
         let over = |under: &Space<'o>| under.components().is_some_and(|n| n > 16);
         if !capped && !matches!(space, Space::Pattern(Some(under)) if over(under)) {
             assert!(space.components().is_some(), "{value:?}");
@@ -246,11 +249,15 @@ fn a_space<'o, R: Resolve<'o> + Copy>(objects: R, value: &'o Object) {
     if let Some(space) = &plain {
         let family = space.family();
         assert!(family.is_device() ^ family.is_cie() ^ family.is_special());
-        assert_eq!(space.colorants().count(), space.colorants().len());
         match space {
-            Space::Separation(_) => assert!(space.colorants().len() <= 1),
-            Space::DeviceN(_) => {}
-            _ => assert_eq!(space.colorants().len(), 0),
+            Space::Separation(_) => assert!(space.colorants().count() <= 1),
+            Space::DeviceN(device_n) => {
+                let named = device_n.names.iter().flatten().count();
+                assert_eq!(space.colorants().count(), named);
+                let most = device_n.components.map_or(0, |n| n as usize);
+                assert!(device_n.names.len() <= most, "{value:?}");
+            }
+            _ => assert_eq!(space.colorants().count(), 0),
         }
     }
 
@@ -398,8 +405,8 @@ fn typed<'o, R: Resolve<'o> + Copy>(objects: R, object: &'o Object) -> Result<Ty
 }
 
 /// Every object of a file numbered up to its `trailer`'s `/Size`, to [`NUMBERS`],
-/// counted and typed, and its resources read: what each gave, for a caller to set beside
-/// the same file through another resolver.
+/// counted and typed, and its resources read: what each gave, for a caller to set
+/// beside the same file through another resolver.
 pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) -> Vec<Counted<'o>> {
     let size = trailer
         .get(b"Size")

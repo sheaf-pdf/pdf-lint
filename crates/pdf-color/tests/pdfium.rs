@@ -10,15 +10,15 @@
 //! images, each in a space its resources name. PDFium's answer is a word for
 //! each image: how many components it sized the image by, or `none` where it has
 //! no space for it, so an image of 1 component of 1 bit. Here each is the name
-//! the content asks for, looked up as a reader of content looks it up: in a form's
-//! own `/ColorSpace` dictionary, if it's drawn in a form that has one, else its
-//! page's.
+//! the content asks for, looked up as a reader of content looks it up: in the
+//! `/ColorSpace` dictionary of the resources its form has, or else what holds that
+//! form has, and if those resources have none, in its page's.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pdf_color::{Limits, Object, Resolve, Space, Spaces, components};
+use pdf_color::{Limits, Object, Resolve, Space, Spaces, components, counted};
 use pdf_objects::parse::Parser;
 use pdf_structure::bytes::{Options, Reading};
 
@@ -83,20 +83,27 @@ fn word<'o, R: Resolve<'o> + Copy>(objects: R, spaces: Option<Spaces<'o>>, name:
 
 /// The answer for the images of `file`, over `objects`: object 3 is the page, by
 /// `cases.py`, and one that doesn't read, as a file's bytes can't under this
-/// reader's rules, has no resources; object 5 a form, if it's one.
+/// reader's rules, has no resources; object 5 a form, if it's one, and object 6
+/// the form drawn in that, if it's one.
 fn answer<'o, R: Resolve<'o> + Copy>(objects: R, file: &[u8]) -> String {
     let page: Option<&'o Object> = objects.resolve((3, 0));
     let resources = page
         .and_then(Object::as_dict)
         .and_then(|d| d.get(b"Resources"));
     let page_spaces = Spaces::read(objects, resources).expect("the case's objects read");
-    let form = (objects.resolve((5, 0)))
-        .and_then(Object::as_stream)
-        .filter(|stream| stream.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Form"));
-    let form_spaces = form.and_then(|form| {
-        Spaces::read(objects, form.dict.get(b"Resources")).expect("the case's objects read")
-    });
-    let spaces = form_spaces.or(page_spaces);
+    let form = |number| {
+        (objects.resolve((number, 0)))
+            .and_then(Object::as_stream)
+            .filter(|stream| stream.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Form"))
+    };
+    let (outer, inner) = (form(5), form(5).and(form(6)));
+    let chosen = [outer, inner]
+        .into_iter()
+        .flatten()
+        .fold(resources, |holds, form| {
+            form.dict.get(b"Resources").or(holds)
+        });
+    let spaces = (Spaces::read(objects, chosen).expect("the case's objects read")).or(page_spaces);
     let words: Vec<String> = (asked(file).into_iter())
         .map(|name| word(objects, spaces, name))
         .collect();
@@ -162,19 +169,21 @@ fn named_values<'o, R: Resolve<'o> + Copy>(objects: R) -> Vec<&'o Object> {
         let spaces = Spaces::read(objects, resources).ok().flatten();
         spaces.into_iter().flat_map(|spaces| spaces.iter())
     };
-    let page: Option<&'o Object> = objects.resolve((3, 0));
-    let form: Option<&'o Object> = objects.resolve((5, 0));
     let dict = |object: &'o Object| object.as_dict().or(object.as_stream().map(|s| &s.dict));
-    let on_page = page.and_then(dict).and_then(|d| d.get(b"Resources"));
-    let on_form = form.and_then(dict).and_then(|d| d.get(b"Resources"));
-    let mut values: Vec<&'o Object> = of(on_page).map(|named| named.value).collect();
-    values.extend(of(on_form).map(|named| named.value));
+    let on = |number| {
+        let holder: Option<&'o Object> = objects.resolve((number, 0));
+        holder.and_then(dict).and_then(|d| d.get(b"Resources"))
+    };
+    let mut values: Vec<&'o Object> = of(on(3)).map(|named| named.value).collect();
+    values.extend(of(on(5)).map(|named| named.value));
+    values.extend(of(on(6)).map(|named| named.value));
     values
 }
 
 /// The promise between the two readings, on every value the cases write: a space
-/// read with no fault told counts as [`components`] counts it, but for a Pattern
-/// space over more than 16; and what a sink wants never changes what's read.
+/// read with no fault told counts as [`components`] counts it, where it meets no
+/// cap, but for a Pattern space over more than 16; and what a sink wants never
+/// changes what's read.
 #[test]
 fn a_space_with_no_fault_told_counts_as_it_counts() {
     let (mut well_formed, mut told) = (0, 0);
@@ -196,9 +205,9 @@ fn a_space_with_no_fault_told_counts_as_it_counts() {
             let space = space.unwrap_or_else(|| panic!("{name}: none, with no fault told"));
             let over = matches!(space.base(), Some(under) if space.family().name() == "Pattern"
                 && under.components().is_some_and(|n| n > 16));
-            if !over {
-                let count = components(&reading, value, limits).expect("a case reads");
-                assert_eq!(space.components(), count, "{name}: {value:?}");
+            let read = counted(&reading, value, limits).expect("a case reads");
+            if !over && !read.capped {
+                assert_eq!(space.components(), read.count, "{name}: {value:?}");
             }
         }
     }

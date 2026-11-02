@@ -10,3 +10,18 @@ value-wrong-generation	A reference is its number and its generation here, as the
 icc-wrong-generation	As value-wrong-generation, so the ICCBased space has no stream, and doesn't load.
 white-point-x-exponent	The page doesn't read: this file's reader refuses a word that's no number or keyword in a dictionary, so there are no resources; PDFium ends the array at it, and the white point is too short.
 white-point-y-exponent	As white-point-x-exponent.
+one-nested-61	This file's reader holds a value nested in place to 256 levels, and PDFium's parser stops at 64 from the object's root, its page and two dictionaries among them: the array PDFium makes of it is cut short, and loads no space. Resolve doesn't say how deep in its object a value was written, so space_depth counts from the value.
+one-nested-62	As one-nested-61.
+one-nested-63	As one-nested-61.
+one-nested-64	As one-nested-61.
+one-nested-300	Past 256 levels this file's reader refuses the page's object, so there are no resources; PDFium's parser stops at 64, and the rest of the object reads on, as one-nested-61.
+pattern-nested-60	As one-nested-61: what PDFium's parser cut short doesn't load, so its Pattern space has no underlying space, of 1 component.
+pattern-nested-63	As pattern-nested-60.
+ref-nested-64	As one-nested-61, counted from the root of the object the reference names.
+device-n-stitching-in-place-29	As one-nested-61, a stitching function costing PDFium's parser two levels, its dictionary and its /Functions array: the function PDFium makes of it doesn't load, and nor does the space. Nothing tells it here: by every check of this crate this is a well-formed space.
+ref-device-n-stitching-in-place-31	As device-n-stitching-in-place-29, counted from the root of the object the reference names.
+device-n-stitching-by-ref-64	Past Limits::space_depth a branch doesn't load, so a tint of 64 stitching functions, each by reference, doesn't; PDFium goes as deep as its stack does. Fault::TooDeep is told of it, and counted says it's capped.
+device-n-stitching-visits-4095	Past Limits::space_visits a branch doesn't load, so a tint whose 4,095 subfunctions take the last of its visits doesn't; PDFium has no such cap. counted says it's capped, and Space::read, whose checks have a budget of their own, tells nothing here until 4,096.
+icc-stream-space-after-keyword	What a stream is, is the file's reader's: this one reads a space after the keyword as what comes before the data, a stream; PDFium's reads no stream, and the space doesn't load.
+icc-no-endstream	What a stream is, is the file's reader's: with no endstream before endobj this one has the object damaged, and the space doesn't load; PDFium's reads a stream, and only its dictionary is asked of.
+icc-no-endstream-no-length	As icc-no-endstream.

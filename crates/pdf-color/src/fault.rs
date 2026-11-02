@@ -106,7 +106,10 @@ pub enum Fault {
     /// A CalGray, CalRGB or Lab dictionary's `/WhitePoint` that isn't three
     /// numbers with the first and last above 0 and the second 1 (8.6.5.2,
     /// Table 62; 8.6.5.3, Table 63; 8.6.5.4, Table 64). Three numbers are held
-    /// whatever they are.
+    /// whatever they are. So is told, past ISO 32000-2, a first or last above 0
+    /// that PDFium's 32-bit reading makes 0, as `[99999999999 1 1]`: PDFium loads no
+    /// such space, and a space with no fault told counts as it counts
+    /// ([`Space`](crate::Space)).
     #[error("a /WhitePoint isn't three numbers, the first and last above 0, the second 1")]
     WhitePoint,
     /// A `/BlackPoint` that isn't three numbers of at least 0 (Tables 62 to
