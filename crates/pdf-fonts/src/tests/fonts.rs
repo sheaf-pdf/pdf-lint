@@ -3937,6 +3937,13 @@ fn what_skrifa_reads_otherwise_is_unknown() {
     });
     assert!(!exact && second.is_some());
     assert_eq!(first, None);
+    // And a composite of it, which draws nothing and isn't a composite of empty glyphs.
+    let mut program = truetype_program();
+    let (glyf, _) = sfnt_table(&program, b"glyf");
+    program[glyf + 36] = 0x7f;
+    let mut pdf = Pdf::default();
+    let font = identity_truetype(&mut pdf, program);
+    assert_eq!(font_of(&pdf, font).char_box(5), None);
 }
 
 /// A CMap name PDFium doesn't know has no text of its CIDs, its CMap being one it never

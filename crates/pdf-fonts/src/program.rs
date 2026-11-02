@@ -648,8 +648,8 @@ fn draw_glyf(font: &FontRef<'_>, gid: u32, glyphs: u32, most: (u64, u8)) -> (Dra
     let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
     let drawn = match glyph.draw(settings, &mut pen) {
         // A glyph with data that isn't a composite of empty ones, and no point drawn,
-        // doesn't parse here. Whether FreeType fails it too, by a parser of its own, can't
-        // be told, and this draws it as nothing.
+        // doesn't parse here, or a component doesn't. Whether FreeType fails it too, by a
+        // parser of its own, can't be told, and skrifa draws it as nothing.
         Ok(_) if pen.bbox.is_none() && (points > 0 || nodes == 1) => Drawn::Unknown,
         Ok(_) => pen.bbox().map_or(Drawn::Unknown, Drawn::Box),
         Err(_) => Drawn::Unknown,
@@ -742,8 +742,14 @@ fn composite_glyphs(
             }
             Some(drawn)
         }
-        Ok(Some(Glyph::Simple(simple))) => Some((1, simple.num_points() as u64)),
-        _ => Some((1, 0)),
+        // What doesn't parse, contours and no points among it, is counted a point it can't
+        // draw, so a composite of it and empty glyphs isn't taken for one that draws nothing.
+        Ok(Some(Glyph::Simple(simple))) => match simple.num_points() as u64 {
+            0 if simple.number_of_contours() != 0 => Some((1, 1)),
+            points => Some((1, points)),
+        },
+        Ok(None) => Some((1, 0)),
+        Err(_) => Some((1, 1)),
     };
     counted.insert((gid, depth), n);
     n
