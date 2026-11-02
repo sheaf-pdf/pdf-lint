@@ -50,3 +50,8 @@ program-cid-chain-space-below	As program-cid-chain-past-own, a codespace from th
 program-cid-chain-wmode-below	As program-cid-chain-past-own, a /WMode from the one it uses.
 program-otto-keyed-no-cmap	A Unicode charmap made from names, two glyphs having one: FreeType's sort leaves one of them first, which isn't said here, so that code's box is none.
 program-otto-keyed-no-cmap-tt	As program-otto-keyed-no-cmap.
+program-t1-masters-build-char-past	A glyph whose charstring fails to evaluate has its box unknown here, none, where FreeType fails to load it and PDFium has every side -1; which failure of read-fonts' interpreter is FreeType's too isn't told apart.
+program-t1-masters-build-char-base	As program-t1-masters-build-char-past: /BuildCharArray is a private dictionary's, so this one's othersubr fails.
+program-t1-masters-build-char-len-only	As program-t1-masters-build-char-past: /lenBuildCharArray gives no array.
+program-cff-operations-past	read-fonts evaluates no charstring past a million operations, so this glyph's box is unknown here, none, where FreeType has no such bound and PDFium draws it, empty.
+program-cid-composite-2049	skrifa draws no composite past 2,048 components, so this glyph's box is unknown here, none, where FreeType has no such bound and PDFium draws it.

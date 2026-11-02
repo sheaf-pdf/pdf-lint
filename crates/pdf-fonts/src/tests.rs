@@ -299,45 +299,203 @@ fn glyph_names_read_as_text() {
     assert_eq!(name_code_point(b"\xff"), None);
 }
 
-/// A Type 1 program with procedures `levels` deep.
-fn type1_nested(levels: usize) -> Vec<u8> {
+/// What the crate says it gives, by those names; and pdf-objects' and pdf-content-streams'
+/// own types, what it re-exports of them.
+#[test]
+fn the_crate_s_names_are_there() {
+    #[allow(unused_imports)]
+    use crate::{
+        Decoded, Descendant, Encoding, Error, Fault, Font, FontApprox, FontId, FontKind,
+        FontMetrics, FontProgram, FontScope, Fonts, Limits, Place, Rect, Sink, Std14, Streams,
+        VerticalMetrics, With, cp1252, glyph_text, name_code_point,
+        type1::{Charstrings, scan},
+    };
+    fn same<T>(_: fn(&T) -> &T) {}
+    same::<pdf_objects::Dict>(|d: &crate::Dict| d);
+    same::<pdf_objects::Object>(|d: &crate::Object| d);
+    same::<pdf_objects::ObjectId>(|d: &crate::ObjectId| d);
+    same::<pdf_objects::Span>(|d: &crate::Span| d);
+    same::<pdf_objects::Unreadable>(|d: &crate::Unreadable| d);
+    same::<pdf_objects::Why>(|d: &crate::Why| d);
+    same::<pdf_content_streams::Limits>(|d: &crate::pdf_content_streams::Limits| d);
+    fn resolves<'o, R: pdf_objects::Resolve<'o>>() {}
+    fn also<'o, R: crate::Resolve<'o>>() {
+        resolves::<R>();
+    }
+    let _ = also::<fn(crate::ObjectId) -> Option<&'static crate::Object>>;
+}
+
+/// [`fixture::type1_program`] with `clear` in its clear text, before `/PaintType`.
+fn type1_holding(clear: &str) -> Vec<u8> {
     let program = fixture::type1_program();
     let at = program.windows(4).position(|w| w == b"/Pai").unwrap();
-    let nested = format!(
-        "/Nested {}{}def\n",
-        "{ ".repeat(levels),
-        "} ".repeat(levels)
-    );
-    [&program[..at], nested.as_bytes(), &program[at..]].concat()
+    [&program[..at], clear.as_bytes(), b"\n", &program[at..]].concat()
 }
 
-/// A Type 1 program whose procedures nest as deep as the scan allows is
-/// read; one a level deeper isn't, and neither is one past a smaller cap.
+/// A Type 1 program's clear text read as read-fonts' parser reads it: by what each of
+/// these holds, it finds `eexec` and the charstrings behind it, or doesn't. Each is what a
+/// parser that reads a procedure by its tokens, or looks past an integer by its tokens,
+/// reads otherwise; `programs` holds it to read-fonts' own reading.
 #[test]
-fn type1_procedures_nest_within_the_scan_s_depth() {
+fn type1_tokens_are_read_as_read_fonts_reads_them() {
+    let cases: &[(&str, bool, &str)] = &[
+        ("/N { { } } def", true, "spaces inside braces"),
+        ("/N {{}} def", true, "no spaces"),
+        ("/N { % {\n } def", true, "a brace in a comment"),
+        ("/N { (}) } def", true, "a brace in a string"),
+        ("/N { (\\)}) } def", true, "an escape in a string"),
+        ("/N { ( } def", false, "a string unended in a procedure"),
+        ("/N { { } def", false, "a procedure unended"),
+        (
+            "/N (a)/N (b)/O def",
+            true,
+            "a string followed at once by a name",
+        ),
+        (
+            "/N (a)currentfile eexec",
+            false,
+            "`eexec` straight after a string, what follows it no program",
+        ),
+        ("% currentfile eexec\n/N def", true, "`eexec` in a comment"),
+        ("/N (currentfile eexec) def", true, "`eexec` in a string"),
+    ];
     let limits = Limits::DEFAULT;
-    let depth = limits.proc_depth;
-    assert!(type1::scan(&type1_nested(depth), &limits).is_some());
-    assert!(type1::scan(&type1_nested(depth + 1), &limits).is_none());
-    let smaller = Limits {
-        proc_depth: 3,
-        ..limits
+    for (clear, read, what) in cases {
+        let program = type1_holding(clear);
+        assert_eq!(
+            type1::scan(&program, &limits).is_some(),
+            *read,
+            "{what}: {clear}"
+        );
+        #[cfg(feature = "programs")]
+        assert_eq!(
+            skrifa::raw::ps::type1::Type1Font::new(&program).is_ok(),
+            *read,
+            "read-fonts, {what}: {clear}"
+        );
+    }
+    // A string's `)` and what's straight after it: a key read as a key.
+    let empty = fixture::type1_empty_glyph();
+    let private = [
+        b"/lenIV -1 def\n/X (a)/CharStrings 1 dict dup begin\n/.notdef ".to_vec(),
+        format!("{} RD ", empty.len()).into_bytes(),
+        empty,
+        b" ND\nend\n".to_vec(),
+    ]
+    .concat();
+    let program = fixture::type1_private(b"", &private);
+    assert!(type1::scan(&program, &limits).is_some());
+    #[cfg(feature = "programs")]
+    assert!(skrifa::raw::ps::type1::Type1Font::new(&program).is_ok());
+    // However deep its procedures nest, and however many integers run together, each is
+    // read in time that grows as the program does, and it stays a program.
+    for program in [
+        type1_holding(&format!(
+            "/N {}{}def",
+            "{ ".repeat(1 << 16),
+            "} ".repeat(1 << 16)
+        )),
+        fixture::type1_integers_program(1 << 16),
+    ] {
+        assert!(type1::scan(&program, &limits).is_some());
+    }
+}
+
+/// An integer before `RD` or `-|` is a binary blob's length, only where nothing but
+/// whitespace is between them, as read-fonts looks ahead.
+#[test]
+fn a_type1_blob_s_length_is_followed_only_by_whitespace() {
+    let glyph = |between: &str| {
+        let data = fixture::type1_empty_glyph();
+        let private = [
+            b"/lenIV -1 def\n/CharStrings 1 dict dup begin\n/.notdef ".to_vec(),
+            format!("{}{between}RD ", data.len()).into_bytes(),
+            data,
+            b" ND\nend\n".to_vec(),
+        ]
+        .concat();
+        fixture::type1_private(b"", &private)
     };
-    assert!(type1::scan(&type1_nested(3), &smaller).is_some());
-    assert!(type1::scan(&type1_nested(4), &smaller).is_none());
+    let limits = Limits::DEFAULT;
+    assert!(type1::scan(&glyph(" "), &limits).is_some());
+    assert!(type1::scan(&glyph(" \t\r\n "), &limits).is_some());
+    assert!(type1::scan(&glyph(" % a comment\n"), &limits).is_none());
 }
 
-/// A Type 1 program whose integers run as long as the scan reads ahead of
-/// is read; one an integer longer isn't, nor a run of a hundred thousand,
-/// which the scan refuses within its stack.
+/// A glyph's name that isn't UTF-8 is its bytes as Latin-1, as read-fonts keeps it, and
+/// two names that come to one are a name given twice.
 #[test]
-fn type1_integers_run_within_the_scan_s_lookahead() {
-    use fixture::type1_integers_program as type1_integers;
+fn a_type1_name_s_bytes_as_read_fonts_keeps_them() {
+    let empty = fixture::type1_empty_glyph();
+    let program = |names: &[&[u8]]| {
+        let mut private = b"/lenIV -1 def\n/CharStrings 1 dict dup begin\n".to_vec();
+        for name in names {
+            private.extend([b"/", *name].concat());
+            private.extend(format!(" {} RD ", empty.len()).bytes());
+            private.extend(&empty);
+            private.extend(b" ND\n");
+        }
+        private.extend(b"end\n");
+        fixture::type1_private(b"", &private)
+    };
     let limits = Limits::DEFAULT;
-    let ahead = limits.ints_ahead;
-    assert!(type1::scan(&type1_integers(ahead), &limits).is_some());
-    assert!(type1::scan(&type1_integers(ahead + 1), &limits).is_none());
-    assert!(type1::scan(&type1_integers(100_000), &limits).is_none());
+    let found = type1::scan(&program(&[b"caf\xe9", b"plain"]), &limits).unwrap();
+    assert!(found.get("caf\u{e9}".as_bytes()).unwrap().is_some());
+    assert!(!found.contains_key(&b"caf\xe9"[..]));
+    assert!(found.get(&b"plain"[..]).unwrap().is_some());
+    let found = type1::scan(&program(&[b"caf\xe9", "caf\u{e9}".as_bytes()]), &limits).unwrap();
+    assert_eq!(found.get("caf\u{e9}".as_bytes()), Some(&None));
+}
+
+/// The names of an `/Encoding` count, each among all the glyphs, as read-fonts looks for
+/// each among them one by one, whichever form it has; a real one's are within what's
+/// allowed, and past that it isn't read.
+#[test]
+fn a_type1_encoding_s_names_are_counted_among_its_glyphs() {
+    let limits = Limits::DEFAULT;
+    assert!(type1::scan(&fixture::type1_lookups_program(256), &limits).is_some());
+    assert!(type1::scan(&fixture::type1_lookups_program(3000), &limits).is_none());
+    let glyphs = 3000;
+    let names: Vec<String> = (0..glyphs).map(|g| format!("g{g}")).collect();
+    let empty = fixture::type1_empty_glyph();
+    let program = |clear: String| {
+        fixture::type1_with(
+            clear.as_bytes(),
+            (names.iter()).map(|name| (name.as_str(), empty.clone())),
+        )
+    };
+    let in_a_map = |n: usize| {
+        format!(
+            "/Encoding 256 array\n{}readonly def",
+            "dup 0 /nope put\n".repeat(n)
+        )
+    };
+    assert!(type1::scan(&program(in_a_map(256)), &limits).is_some());
+    assert!(type1::scan(&program(in_a_map(glyphs)), &limits).is_none());
+    // A map's codes and an array's names come to the same.
+    let in_an_array = |n: usize| format!("/Encoding [{}] def", "/nope ".repeat(n));
+    assert!(type1::scan(&program(in_an_array(256)), &limits).is_some());
+    assert!(type1::scan(&program(in_an_array(glyphs)), &limits).is_none());
+    // What's no name ends an array, and `def` a map.
+    let cut = format!("/Encoding [ 1 {}] def", "/nope ".repeat(glyphs));
+    assert!(type1::scan(&program(cut), &limits).is_some());
+    let ended = format!("/Encoding 256 array def {}", "1 /nope ".repeat(glyphs));
+    assert!(type1::scan(&program(ended), &limits).is_some());
+    // A predefined one looks nothing up, nor a name that follows no key.
+    assert!(type1::scan(&program("/Encoding StandardEncoding def".into()), &limits).is_some());
+    let unkeyed = format!("[{}]", "/nope ".repeat(glyphs));
+    assert!(type1::scan(&program(unkeyed), &limits).is_some());
+    // Each is counted: two of what one may have aren't read.
+    assert!(type1::scan(&program(in_an_array(800)), &limits).is_some());
+    let twice = format!("{0} {0}", in_an_array(800));
+    assert!(type1::scan(&program(twice), &limits).is_none());
+    // A glyph is a glyph, whatever its name: read-fonts goes through them all.
+    let clear = in_an_array(glyphs);
+    let once = fixture::type1_with(
+        clear.as_bytes(),
+        std::iter::repeat_n(("g", empty.clone()), glyphs),
+    );
+    assert!(type1::scan(&once, &limits).is_none());
 }
 
 /// What a scan finds: each charstring by name, decrypted and past `lenIV`'s bytes.

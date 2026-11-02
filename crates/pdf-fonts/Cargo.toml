@@ -23,7 +23,7 @@ thiserror = "2"
 hayro-cmap = { version = "0.1", optional = true }
 # With `programs`: a font's program read, TrueType's by skrifa, CFF's and Type 1's by
 # what it has of read-fonts.
-skrifa = { version = "0.44", default-features = false, features = ["std"], optional = true }
+skrifa = { version = "0.49", default-features = false, features = ["std"], optional = true }
 
 # Adobe's predefined CMaps, off by default for the Rust they need: without
 # them, a font's predefined CMap reads as one the build hasn't.

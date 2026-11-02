@@ -996,6 +996,9 @@ def programs():
     font("tt-codes", b"TrueType", b"FontFile2", tt, given, s=b"(ABCDg \x01)")
     font("cff-codes", b"Type1", b"FontFile3", cff, given, s=b"(ABDg \x01)")
     font("t1-codes", b"Type1", b"FontFile", t1, given, s=b"(ABDg \x01)")
+    # A charstring within read-fonts' million operations and past them; FreeType has none.
+    font("cff-operations-within", b"Type1", b"FontFile3", program("cff-moving-6"), given)
+    font("cff-operations-past", b"Type1", b"FontFile3", program("cff-moving-7"), given)
     # Units per em.
     font("tt-upem-2048", b"TrueType", b"FontFile2", upem(tt, 2048), given)
     font("tt-upem-16", b"TrueType", b"FontFile2", upem(tt, 16), given)
@@ -1107,6 +1110,93 @@ def programs():
                                                b"dup 98 /a73 put readonly def")
     font("t1-own-dingbat", b"Type1", b"FontFile", dingbat, sym, b"", b"(Ab)")
     font("t1-std-symbolic", b"Type1", b"FontFile", t1, sym, b"", b"(Ag \x01)")
+    # A Type 1 program's tokens, as FreeType's parser reads them: nothing here keeps its
+    # glyphs from it, however a reader's lookahead or depth might.
+    def holding(clear):
+        return t1.replace(b"/PaintType", clear + b"\n/PaintType")
+
+    for name, clear in [
+        ("proc-spaced", b"/N { { } } def"),
+        ("proc-tight", b"/N {{}} def"),
+        ("proc-deep", b"/N " + b"{ " * 40 + b"} " * 40 + b"def"),
+        ("proc-comment", b"/N { % {\n } def"),
+        ("proc-string", b"/N { (}) } def"),
+        ("proc-escape", b"/N { (\\)}) } def"),
+        ("ints-many", b"1 " * 400),
+        ("string-tight", b"/N (a)/O def"),
+        ("eexec-comment", b"% currentfile eexec\n/N def"),
+        ("eexec-string", b"/N (currentfile eexec) def"),
+    ]:
+        font("t1-tokens-" + name, b"Type1", b"FontFile", holding(clear), non)
+
+    # Its private part, as a reader comes to it: its text decrypted, changed, encrypted.
+    def crypt(data, decrypting):
+        key, out = 55665, bytearray()
+        for b in data:
+            c = b ^ (key >> 8)
+            out.append(c)
+            key = (((b if decrypting else c) + key) * 52845 + 22719) & 0xFFFF
+        return bytes(out)
+
+    def in_private(old, new):
+        at = t1.index(b"eexec\n") + 6
+        private = crypt(t1[at:], True)
+        assert old in private
+        return t1[:at] + crypt(private.replace(old, new), False)
+
+    font("t1-tokens-string-before-key", b"Type1", b"FontFile",
+         in_private(b"2 index /CharStrings", b"/X (a)/CharStrings"), non)
+    # A multiple master font's weights and BuildCharArray, read by a glyph's othersubrs.
+    def number(v):
+        if -107 <= v <= 107:
+            return bytes([v + 139])
+        if 108 <= v <= 1131:
+            return bytes([((v - 108) >> 8) + 247, (v - 108) & 255])
+        if -1131 <= v <= -108:
+            return bytes([((-v - 108) >> 8) + 251, (-v - 108) & 255])
+        return b"\xff" + v.to_bytes(4, "big", signed=True)
+
+    def charstring(*parts):
+        plain = b"\0\0\0\0" + b"".join(number(p) if isinstance(p, int) else p for p in parts)
+        key, out = 4330, bytearray()
+        for b in plain:
+            c = b ^ (key >> 8)
+            out.append(c)
+            key = ((c + key) * 52845 + 22719) & 0xFFFF
+        return bytes(out)
+
+    other, pop, hsbw, rmoveto, hline, vline, close, end = b"\x0c\x10", b"\x0c\x11", b"\x0d", b"\x15", b"\x06", b"\x07", b"\x09", b"\x0e"
+
+    def masters(glyph, build=b"", in_private=b""):
+        clear = (b"/WeightVector [0.25 0.75] def /BlendAxisTypes [/Weight] def "
+                 b"/BlendDesignPositions [[0] [1]] def /BlendDesignMap [[[100 0][900 1]]] def " + build)
+        at = t1.index(b"eexec\n") + 6
+        private = crypt(t1[at:], True)
+        start = private.index(b"/g ")
+        finish = private.index(b" ND", start)
+        private = private[:start] + b"/g " + str(len(glyph)).encode() + b" RD " + glyph + private[finish:]
+        private = private.replace(b"/BlueValues", in_private + b"\n/BlueValues")
+        return t1[:at].replace(b"/PaintType", clear + b"\n/PaintType") + crypt(private, False)
+
+    draw = (0, rmoveto, 300, hline, 200, vline, -300, hline, close, end)
+    font("t1-masters-blend", b"MMType1", b"FontFile",
+         masters(charstring(0, 500, hsbw, 100, 40, 2, 14, other, pop, *draw)), non)
+    stored = charstring(0, 500, hsbw, 120, 2, 2, 24, other, 2, 1, 25, other, pop, *draw)
+    array = b"/BuildCharArray [0 0 0 0] def"
+    font("t1-masters-build-char", b"MMType1", b"FontFile", masters(stored, b"", array), non)
+    font("t1-masters-weights-stored", b"MMType1", b"FontFile",
+         masters(charstring(0, 500, hsbw, 0, 1, 19, other, 1, 1, 25, other, pop, *draw), b"", array), non)
+    font("t1-masters-build-char-past", b"MMType1", b"FontFile",
+         masters(charstring(0, 500, hsbw, 120, 4, 2, 24, other, *draw), b"", array), non)
+    # FreeType's is a private dictionary's alone, and read-fonts' a base dictionary's alone.
+    font("t1-masters-build-char-base", b"MMType1", b"FontFile", masters(stored, array), non)
+    font("t1-masters-build-char-len-only", b"MMType1", b"FontFile",
+         masters(stored, b"", b"/lenBuildCharArray 4 def"), non)
+    # A glyph's name that isn't UTF-8, by /Differences and by its bytes.
+    latin = in_private(b"/g ", b"/caf\xe9 ")
+    font("t1-name-not-utf8", b"Type1", b"FontFile", latin, non, b"/Encoding << /Differences [103 /caf#E9] >> ")
+    twice = in_private(b"/g ", b"/caf\xc3\xa9 ")
+    font("t1-name-utf8", b"Type1", b"FontFile", twice, non, b"/Encoding << /Differences [103 /caf#C3#A9] >> ")
     font("cff-std-symbolic", b"Type1", b"FontFile3", cff, sym, b"", b"(Ag \x01)")
     # A standard 14 font's name, past a tag or not, over its own program.
     for name, base in [("named-symbol", b"/Symbol"), ("named-tagged-symbol", b"/ABCDEF+Symbol"),
@@ -1173,6 +1263,12 @@ def programs():
     # one it doesn't give nothing.
     cid_font("keyed", b"CIDFontType0", b"FontFile3", cid, b"", b"<000500070002>")
     cid_font("keyed-as-type2", b"CIDFontType2", b"FontFile3", cid, b"", b"<000500070002>")
+    # A top dictionary's matrix and a font dictionary's, as FreeType combines them.
+    for name in ["top", "font", "both-one", "one-both", "both-two", "both-sheared"]:
+        cid_font("keyed-matrix-" + name, b"CIDFontType0", b"FontFile3", program("cid-cff-" + name), b"", b"<000500070002>")
+    # A composite at skrifa's bound on components and past it; FreeType has none.
+    cid_font("composite-2048", b"CIDFontType2", b"FontFile2", program("composite-2048"), b"", b"<0000>")
+    cid_font("composite-2049", b"CIDFontType2", b"FontFile2", program("composite-2049"), b"", b"<0000>")
     cid_font("keyed-map", b"CIDFontType0", b"FontFile3", cid, b"/CIDToGIDMap 30 0 R ", b"<00010002>", extra={30: stream(b"", b"\0\0\0\5\0\7")})
     # What a CMap takes from one it uses, told by a CID's glyph: PDFium reads none, a code
     # past its own ranges CID 0, its codespace and /WMode its own.

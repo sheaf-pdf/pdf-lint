@@ -663,6 +663,8 @@ program-tt-flip-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 
 program-tt-codes	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0044 1500 0 box 50 0 450 700 loose 0 -200 500 800 ; 0067 2000 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 3000 0 box 50 0 450 700 loose 0 -200 450 800
 program-cff-codes	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
 program-t1-codes	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-cff-operations-within	0041 0 0 box 0 0 10 10 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 0 0 500 1 loose 0 -200 500 800
+program-cff-operations-past	0041 0 0 box 0 0 10 10 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 0 0 500 1 loose 0 -200 500 800
 program-tt-upem-2048	0041 0 0 box 0 0 293 366 loose 0 -200 500 800 ; 0042 500 0 box 24 0 171 146 loose 0 -200 500 800 ; 0067 1000 0 box 10 -97 234 273 loose 0 -200 500 800
 program-tt-upem-16	0041 0 0 box 0 0 37500 46875 loose 0 -200 37500 46875 ; 0042 500 0 box 3125 0 21875 18750 loose 0 -200 21875 18750 ; 0067 1000 0 box 1250 -12499 30000 35000 loose 0 -12499 30000 35000
 program-tt-upem-16384	0041 0 0 box 0 0 37 46 loose 0 -200 500 800 ; 0042 500 0 box 3 0 21 18 loose 0 -200 500 800 ; 0067 1000 0 box 1 -11 29 34 loose 0 -200 500 800
@@ -895,6 +897,25 @@ program-t1-own-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0067 500
 program-t1-own-win	0061 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0062 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0063 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1500 0 box 0 0 600 750 loose 0 -200 600 800
 program-t1-own-dingbat	0041 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 25a0 500 0 box 20 -199 480 560 loose 0 -200 500 800
 program-t1-std-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 1500 0 box 0 0 0 1 loose 0 0 0 1
+program-t1-tokens-proc-spaced	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-proc-tight	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-proc-deep	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-proc-comment	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-proc-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-proc-escape	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-ints-many	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-string-tight	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-eexec-comment	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-eexec-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-string-before-key	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-masters-blend	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 130 0 430 200 loose 0 -200 500 800
+program-t1-masters-build-char	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 120 0 420 200 loose 0 -200 500 800
+program-t1-masters-weights-stored	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 0 0 300 200 loose 0 -200 500 800
+program-t1-masters-build-char-past	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box -1 -1 499 0 loose -1 -200 500 800
+program-t1-masters-build-char-base	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box -1 -1 499 0 loose -1 -200 500 800
+program-t1-masters-build-char-len-only	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box -1 -1 499 0 loose -1 -200 500 800
+program-t1-name-not-utf8	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-name-utf8	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
 program-cff-std-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 1500 0 box 0 0 0 1 loose 0 0 0 1
 program-t1-named-symbol	0391 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 03b3 500 0 box 0 0 500 1 loose 0 -200 500 800
 program-tt-named-symbol	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
@@ -1006,6 +1027,14 @@ program-cid-t1	0001 0 0 box 0 0 600 1 loose 0 -200 600 800 ; 0002 600 0 box 0 0 
 program-cid-cff	0001 0 0 box 0 0 600 1 loose 0 -200 600 800 ; 0002 600 0 box 0 0 600 761 loose 0 -200 600 800
 program-cid-keyed	0005 0 0 box 0 0 600 761 loose 0 -200 700 800 ; 0007 700 0 box 0 0 600 761 loose 0 -200 1000 800 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
 program-cid-keyed-as-type2	0005 0 0 box 0 0 600 761 loose 0 -200 700 800 ; 0007 700 0 box 0 0 600 761 loose 0 -200 1000 800 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-matrix-top	0005 0 0 box 0 0 1200 1523 loose 0 -200 1200 1523 ; 0007 700 0 box 0 0 1200 1523 loose 0 -200 1200 1523 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-matrix-font	0005 0 0 box 0 0 1200 1523 loose 0 -200 1200 1523 ; 0007 700 0 box 0 0 1200 1523 loose 0 -200 1200 1523 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-matrix-both-one	0005 0 0 box 0 0 600 761 loose 0 -200 700 800 ; 0007 700 0 box 0 0 600 761 loose 0 -200 1000 800 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-matrix-one-both	0005 0 0 box 0 0 1000 1015 loose 0 -200 1000 1015 ; 0007 700 0 box 0 0 1000 1015 loose 0 -200 1000 1015 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-matrix-both-two	0005 0 0 box 0 0 1 1 loose 0 -200 700 800 ; 0007 700 0 box 0 0 1 1 loose 0 -200 1000 800 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-matrix-both-sheared	0005 0 0 box 0 0 1 1 loose 0 -200 700 800 ; 0007 700 0 box 0 0 1 1 loose 0 -200 1000 800 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-composite-2048	0000 0 0 box 0 0 600 761 loose 0 -200 1000 800
+program-cid-composite-2049	0000 0 0 box 0 0 600 761 loose 0 -200 1000 800
 program-cid-keyed-map	0001 0 0 box 0 0 600 761 loose 0 -200 600 800 ; 0002 600 0 box 0 0 600 761 loose 0 -200 600 800
 program-cid-chain-past-own	0001 0 0 box 20 -199 480 568 loose 0 -200 500 800 ; 0002 500 0 box 50 0 450 710 loose 0 -200 1000 800 ; 0003 1500 0 box 50 0 450 710 loose 0 -200 1000 800
 program-cid-chain-space-below	4142 0 0 box 50 0 450 710 loose 0 -200 1000 800

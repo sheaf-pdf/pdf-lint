@@ -3040,15 +3040,14 @@ fn heights_from_the_program_where_the_descriptor_lacks_them() {
 #[cfg(feature = "programs")]
 #[test]
 fn malformed_programs_fall_back() {
-    use crate::fixture::{cff_program, truetype_program, type1_integers_program, type1_program};
+    use crate::fixture::{cff_program, truetype_program, type1_lookups_program, type1_program};
     let half = |p: Vec<u8>| p[..p.len() / 2].to_vec();
     let programs = [
         ("TrueType", "FontFile2", half(truetype_program())),
         ("TrueType", "FontFile2", b"\0\x01\0\0garbage".to_vec()),
         ("Type1", "FontFile3", half(cff_program())),
         ("Type1", "FontFile", half(type1_program())),
-        ("Type1", "FontFile", super::type1_nested(17)),
-        ("Type1", "FontFile", type1_integers_program(100_000)),
+        ("Type1", "FontFile", type1_lookups_program(3000)),
         ("Type1", "FontFile3", b"\xff\xd8\xff\xe0 a JPEG".to_vec()),
     ];
     for (subtype, key, program) in programs {
@@ -3180,6 +3179,84 @@ fn programs_past_their_work_are_unknown() {
     assert_eq!(bomb.char_box(0), None);
     assert_eq!(bomb.char_box(6), Some(rect(0.0, 0.0, 600.0, 761.0)));
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+/// skrifa draws 2,048 components of a composite and no more, nested or not, whatever
+/// the limits say: so that's the limit by default, where FreeType has none and PDFium
+/// draws one past it. Empty components it doesn't count, the limit does: they cost a
+/// look-up each.
+#[cfg(feature = "programs")]
+#[test]
+fn a_composite_s_components_end_at_skrifa_s_bound() {
+    use crate::fixture::composite_of_program;
+    let read = |(groups, leaves, empties), limits: Limits| {
+        let mut pdf = Pdf::default();
+        let program = composite_of_program(groups, leaves, empties);
+        let file = pdf.add_object(Stream::new(dict! {}, program));
+        let descriptor = pdf.add_object(dict! { "Flags" => 4, "FontFile2" => file });
+        let font = type0(
+            &mut pdf,
+            "Identity-H".into(),
+            dict! { "Subtype" => "CIDFontType2", "FontDescriptor" => descriptor },
+        );
+        let mut budget = BUDGET;
+        Font::read(&pdf, &font, &limits, &mut budget, &mut ()).unwrap()
+    };
+    let boxed = |shape, limits| read(shape, limits).char_box(0);
+    let triangle = Some(rect(0.0, 0.0, 600.0, 761.0));
+    let default = Limits::DEFAULT;
+    assert_eq!(default.composite_glyphs, 2049);
+    let mut raised = default;
+    raised.composite_glyphs = 1 << 12;
+    for limits in [default, raised] {
+        assert_eq!(boxed((40, 8, 0), limits), triangle);
+        assert_eq!(boxed((0, 2048, 0), limits), triangle);
+        assert_eq!(boxed((40, 9, 0), limits), None);
+        assert_eq!(boxed((0, 2049, 0), limits), None);
+    }
+    assert_eq!(boxed((0, 1, 2047), default), triangle);
+    assert_eq!(boxed((0, 1, 2048), default), None);
+    assert_eq!(boxed((0, 1, 2048), raised), triangle);
+    // Past the limit, what's charged is what's counted; past skrifa's bound alone, a
+    // raised limit charges what it would have drawn.
+    let charged = |limits| {
+        let mut budget = BUDGET;
+        let font = read((0, 2049, 0), limits);
+        font.charge_outlines(&[0, 0], |_| true, &mut budget)
+            .unwrap();
+        BUDGET - budget
+    };
+    assert_eq!(charged(raised), charged(default) + 2050 + 3 * 2049);
+}
+
+/// read-fonts evaluates a glyph's charstring for a million operations, each number and
+/// operator one, whatever its fuel: past that a box is unknown, where FreeType has no
+/// such bound and PDFium draws it.
+#[cfg(feature = "programs")]
+#[test]
+fn a_charstring_ends_at_read_fonts_operations() {
+    use crate::fixture::{long_cff_program, moving_cff_program};
+    let boxed = |program: Vec<u8>, limits: Limits| {
+        let mut pdf = Pdf::default();
+        let font = over_program(&mut pdf, "Type1", "FontFile3", program, 32, None);
+        let mut budget = BUDGET;
+        let read = Font::read(&pdf, &font, &limits, &mut budget, &mut ()).unwrap();
+        (read.program(), read.char_box(65))
+    };
+    let mut fuelled = Limits::DEFAULT;
+    fuelled.font_fuel = usize::MAX;
+    fuelled.glyph_fuel = usize::MAX;
+    for limits in [Limits::DEFAULT, fuelled] {
+        for (program, known) in [
+            (long_cff_program(499_999), true),
+            (long_cff_program(500_000), false),
+            (moving_cff_program(6), true),
+            (moving_cff_program(7), false),
+        ] {
+            let (read, drawn) = boxed(program, limits);
+            assert_eq!((read, drawn.is_some()), (FontProgram::Read, known));
+        }
+    }
 }
 
 /// What a program decompresses to is charged to the budget its font is
@@ -3524,7 +3601,7 @@ fn a_lower_case_with_no_glyph_takes_its_capital_s() {
 }
 
 /// Each of a program's bounds is what's in `Limits`: under smaller ones, what's past them
-/// is unknown; and a Type 1 program past `proc_depth` is refused before read-fonts has it.
+/// is unknown; and a Type 1 program past `type1_work` is refused before read-fonts has it.
 #[cfg(feature = "programs")]
 #[test]
 fn a_program_s_bounds_are_the_limits() {
@@ -3591,17 +3668,25 @@ fn a_program_s_bounds_are_the_limits() {
     assert!(composite(limits, 5).is_some());
     assert!(read("TrueType", "FontFile2", truetype_program(), limits).outlined());
 
+    // An accented character's components are looked up among all the glyphs: charged, so
+    // that drawing one in a font of many glyphs doesn't cost what the glyphs do.
+    use crate::fixture::type1_accents_program as accents;
+    let limits = Limits::DEFAULT;
+    let boxed = |program| read("Type1", "FontFile", program, limits).char_box(65);
+    assert!(boxed(accents(100, 64)).is_some());
+    assert!(boxed(accents(30_000, 2)).is_some());
+    assert_eq!(boxed(accents(30_000, 6)), None);
+
     let mut limits = Limits::DEFAULT;
-    limits.proc_depth = 1;
-    let nested = super::type1_nested(2);
+    let lookups = crate::fixture::type1_lookups_program(100);
     assert_eq!(
-        read("Type1", "FontFile", nested.clone(), limits).program(),
-        FontProgram::Malformed
-    );
-    limits.proc_depth = 2;
-    assert_eq!(
-        read("Type1", "FontFile", nested, limits).program(),
+        read("Type1", "FontFile", lookups.clone(), limits).program(),
         FontProgram::Read
+    );
+    limits.type1_work = 0;
+    assert_eq!(
+        read("Type1", "FontFile", lookups, limits).program(),
+        FontProgram::Malformed
     );
 }
 
@@ -3689,16 +3774,43 @@ fn without_the_feature_a_font_reads_as_for_text() {
 /// can't call the builders: each program by the name the file has.
 fn programs_written() -> Vec<(&'static str, Vec<u8>)> {
     use crate::fixture::{
-        OpenType, cff_program, cid_cff_program, opentype_cid_program, opentype_program,
-        truetype_program, type1_of, type1_program,
+        OpenType, cff_program, cid_cff_program, cid_cff_with, composite_of_program,
+        moving_cff_program, opentype_cid_program, opentype_program, truetype_program, type1_of,
+        type1_program,
     };
     let of = |post_names, cmap| OpenType { post_names, cmap };
+    let thousandth = ["0.001", "0", "0", "0.001", "0", "0"];
+    let two_thousandths = ["0.002", "0", "0", "0.002", "0", "0"];
+    let one = ["1", "0", "0", "1", "0", "0"];
+    let sheared = ["0.001", "0", "0.0005", "0.001", "0", "0"];
     vec![
         ("truetype", truetype_program()),
+        ("composite-2048", composite_of_program(40, 8, 0)),
+        ("composite-2049", composite_of_program(40, 9, 0)),
         ("cff", cff_program()),
+        ("cff-moving-6", moving_cff_program(6)),
+        ("cff-moving-7", moving_cff_program(7)),
         ("type1", type1_program()),
         ("type1-dingbat", type1_of("a73")),
         ("cid-cff", cid_cff_program()),
+        ("cid-cff-top", cid_cff_with(Some(two_thousandths), None)),
+        ("cid-cff-font", cid_cff_with(None, Some(two_thousandths))),
+        (
+            "cid-cff-both-one",
+            cid_cff_with(Some(thousandth), Some(one)),
+        ),
+        (
+            "cid-cff-one-both",
+            cid_cff_with(Some(one), Some(thousandth)),
+        ),
+        (
+            "cid-cff-both-two",
+            cid_cff_with(Some(thousandth), Some(two_thousandths)),
+        ),
+        (
+            "cid-cff-both-sheared",
+            cid_cff_with(Some(sheared), Some(two_thousandths)),
+        ),
         ("otto", opentype_program(of(false, true))),
         ("otto-post-names", opentype_program(of(true, true))),
         ("otto-no-cmap", opentype_program(of(false, false))),

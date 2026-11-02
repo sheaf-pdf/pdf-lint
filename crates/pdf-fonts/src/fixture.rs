@@ -260,6 +260,20 @@ pub fn cff_program() -> Vec<u8> {
     cff(&[vec![14], vec![14], cff_a(), cff_g()], &[1, 34, 72], &[])
 }
 
+/// A CFF dictionary's real number, as its digits are written.
+fn real(number: &str) -> Vec<u8> {
+    let nibble = |c: char| match c {
+        '.' => 0xa,
+        '-' => 0xe,
+        digit => digit.to_digit(10).unwrap() as u8,
+    };
+    let mut nibbles: Vec<u8> = number.chars().map(nibble).collect();
+    nibbles.push(0xf);
+    nibbles.push(0xf);
+    let bytes = nibbles.chunks_exact(2).map(|n| n[0] << 4 | n[1]);
+    std::iter::once(30).chain(bytes).collect()
+}
+
 /// A CFF glyph's charstring: `A`, [`truetype_program`]'s outline.
 fn cff_a() -> Vec<u8> {
     [
@@ -291,6 +305,12 @@ fn cff_g() -> Vec<u8> {
 /// A CID-keyed CFF (`/FontFile3 /CIDFontType0C`) of 1000 units an em: glyph 0 `.notdef`,
 /// empty, glyph 1 `A` and glyph 2 `g`, its charset giving both CID 5; glyph 3 `A` as CID 7.
 pub fn cid_cff_program() -> Vec<u8> {
+    cid_cff_with(None, None)
+}
+
+/// [`cid_cff_program`] with a `/FontMatrix` of these numbers in its top dictionary and
+/// in its font dictionary.
+pub fn cid_cff_with(top_matrix: Option<[&str; 6]>, font_matrix: Option<[&str; 6]>) -> Vec<u8> {
     let index = |items: &[Vec<u8>]| -> Vec<u8> {
         let mut out = (items.len() as u16).to_be_bytes().to_vec();
         out.push(4);
@@ -311,13 +331,26 @@ pub fn cid_cff_program() -> Vec<u8> {
     let fd_select: Vec<u8> = vec![0, 0, 0, 0, 0];
     let glyphs = index(&[vec![14], cff_a(), cff_g(), cff_a()]);
     let private = [cs(&[0]), vec![21]].concat();
-    let font_dict = |private_at: usize| [int(private.len()), int(private_at), vec![18]].concat();
+    let matrix = |numbers: Option<[&str; 6]>| match numbers {
+        Some(numbers) => [numbers.map(real).concat(), vec![12, 7]].concat(),
+        None => Vec::new(),
+    };
+    let font_dict = |private_at: usize| {
+        [
+            matrix(font_matrix),
+            int(private.len()),
+            int(private_at),
+            vec![18],
+        ]
+        .concat()
+    };
     let top = |charset_at: usize, select_at: usize, glyphs_at: usize, array_at: usize| {
         [
             int(391),
             int(392),
             int(0),
             vec![12, 30],
+            matrix(top_matrix),
             int(charset_at),
             vec![15],
             int(select_at),
@@ -354,9 +387,42 @@ pub fn cid_cff_program() -> Vec<u8> {
 /// `levels` calls the next eight times, the last drawing a line: at ten,
 /// its work past any glyph's fuel.
 pub fn heavy_cff_program(levels: i32) -> Vec<u8> {
+    let leaf = [cs(&[10, 10]), vec![5, 11]].concat();
+    let a = [cs(&[0, 0]), vec![21], cs(&[-107]), vec![10, 14]].concat();
+    nested_cff(levels, leaf, a)
+}
+
+/// [`heavy_cff_program`] whose last level moves nowhere and whose `A` draws one
+/// line once they've run: its operations can pass read-fonts' bound with few
+/// points and a box to tell. At six levels, about 210,000 operations; at seven,
+/// 1.68 million.
+pub fn moving_cff_program(levels: i32) -> Vec<u8> {
+    let leaf = [cs(&[0, 0]), vec![21, 11]].concat();
+    let a = [
+        cs(&[0, 0]),
+        vec![21],
+        cs(&[-107]),
+        vec![10],
+        cs(&[10, 10]),
+        vec![5, 14],
+    ]
+    .concat();
+    nested_cff(levels, leaf, a)
+}
+
+/// A bare CFF whose `A` is `moves` of a `hmoveto` in a row, then its end: `2 * moves + 1`
+/// operations, with no subroutine.
+pub fn long_cff_program(moves: usize) -> Vec<u8> {
+    let a = [[139, 22].repeat(moves), vec![14]].concat();
+    cff(&[vec![14], vec![14], a], &[1, 34], &[])
+}
+
+/// A bare CFF of `a`, as its `A`, and `levels` subroutines, each calling the next
+/// eight times, the last `leaf`.
+fn nested_cff(levels: i32, leaf: Vec<u8>, a: Vec<u8>) -> Vec<u8> {
     let subrs: Vec<Vec<u8>> = (0..levels)
         .map(|k| match k + 1 == levels {
-            true => [cs(&[10, 10]), vec![5, 11]].concat(),
+            true => leaf.clone(),
             false => [cs(&[k + 1 - 107]), vec![10]]
                 .concat()
                 .repeat(8)
@@ -365,7 +431,6 @@ pub fn heavy_cff_program(levels: i32) -> Vec<u8> {
                 .collect(),
         })
         .collect();
-    let a = [cs(&[0, 0]), vec![21], cs(&[-107]), vec![10, 14]].concat();
     cff(&[vec![14], vec![14], a], &[1, 34], &subrs)
 }
 
@@ -390,9 +455,36 @@ pub fn composite_bomb_program() -> Vec<u8> {
         (300, 750, true),
         (600, 0, true),
     ]));
+    composite_font(&glyphs)
+}
+
+/// A TrueType program whose glyph 0 is a composite of glyph 1 `groups` times, of
+/// glyph 2 `leaves` times and of glyph 3 `empties` times; glyph 1 is of glyph 2 fifty
+/// times, glyph 2 a triangle, glyph 3 empty. So `51 * groups + leaves` components
+/// that aren't empty, nested, in few bytes.
+pub fn composite_of_program(groups: usize, leaves: usize, empties: usize) -> Vec<u8> {
+    let of = |glyph: i16, times: usize| {
+        let mut components = be(&[0x0023, glyph, 0, 0]).repeat(times);
+        components.extend(be(&[0x0003, 2, 0, 0]));
+        components
+    };
+    let mut root = be(&[-1, 0, 0, 600, 750]);
+    root.extend(be(&[0x0023, 1, 0, 0]).repeat(groups));
+    root.extend(be(&[0x0023, 3, 0, 0]).repeat(empties));
+    // The last component, without MORE_COMPONENTS, is one of the leaves.
+    root.extend(of(2, leaves - 1));
+    let mut group = be(&[-1, 0, 0, 600, 750]);
+    group.extend(of(2, 49));
+    let triangle = simple_glyph(&[(0, 0, true), (300, 750, true), (600, 0, true)]);
+    composite_font(&[root, group, triangle, Vec::new()])
+}
+
+/// A TrueType program of `glyphs`, as they're given.
+fn composite_font(glyphs: &[Vec<u8>]) -> Vec<u8> {
+    let count = glyphs.len() as i16;
     let mut glyf = Vec::new();
     let mut loca = Vec::new();
-    for glyph in &glyphs {
+    for glyph in glyphs {
         loca.extend((glyf.len() as u32).to_be_bytes());
         glyf.extend(glyph);
         glyf.resize(glyf.len().next_multiple_of(4), 0);
@@ -410,15 +502,15 @@ pub fn composite_bomb_program() -> Vec<u8> {
     .concat();
     let hhea = [
         &0x0001_0000u32.to_be_bytes()[..],
-        &be(&[800, -200, 0, 600, 0, 0, 600, 1, 0, 0, 0, 0, 0, 0, 0, 7]),
+        &be(&[800, -200, 0, 600, 0, 0, 600, 1, 0, 0, 0, 0, 0, 0, 0, count]),
     ]
     .concat();
     let maxp = [
         &0x0001_0000u32.to_be_bytes()[..],
-        &be(&[7, 3, 1, 3, 1, 2, 0, 0, 0, 0, 0, 0, 50, 7]),
+        &be(&[count, 3, 1, 3, 1, 2, 0, 0, 0, 0, 0, 0, 50, 7]),
     ]
     .concat();
-    let hmtx = be(&[600, 0].repeat(7));
+    let hmtx = be(&[600, 0].repeat(glyphs.len()));
     sfnt(&mut [
         (*b"glyf", glyf),
         (*b"head", head),
@@ -574,12 +666,84 @@ pub fn type1_of(g: &str) -> Vec<u8> {
     .concat()
 }
 
-/// [`type1_program`] with `n` integers in a row in its clear text, which
-/// read-fonts reads ahead of one by one.
+/// [`type1_program`] with `n` integers in a row in its clear text.
 pub fn type1_integers_program(n: usize) -> Vec<u8> {
     let program = type1_program();
     let at = program.windows(4).position(|w| w == b"/Pai").unwrap();
     [&program[..at], "1 ".repeat(n).as_bytes(), &program[at..]].concat()
+}
+
+/// A Type 1 program of `clear` in its clear text and glyphs given as their names and
+/// plain charstrings, none encrypted (`lenIV` -1), `/Encoding` left to `clear`.
+pub fn type1_with<'a>(
+    clear: &[u8],
+    glyphs: impl IntoIterator<Item = (&'a str, Vec<u8>)>,
+) -> Vec<u8> {
+    let mut private = b"dup /Private 8 dict dup begin\n/lenIV -1 def\n\
+        2 index /CharStrings 4 dict dup begin\n"
+        .to_vec();
+    for (name, data) in glyphs {
+        private.extend(format!("/{name} {} RD ", data.len()).bytes());
+        private.extend(data);
+        private.extend(b" ND\n");
+    }
+    private.extend(b"end\nend\n");
+    type1_private(clear, &private)
+}
+
+/// A Type 1 program of `clear` in its clear text and `private` encrypted after it.
+pub fn type1_private(clear: &[u8], private: &[u8]) -> Vec<u8> {
+    [
+        &b"%!PS-AdobeFont-1.0: Fix 001.000\n11 dict begin\n/FontName /Fix def\n\
+           /FontMatrix [0.001 0 0 0.001 0 0] readonly def\n"[..],
+        clear,
+        b"\ncurrentdict end\ncurrentfile eexec\n",
+        &encrypt(&[&[0u8; 4][..], private].concat(), 55665),
+    ]
+    .concat()
+}
+
+/// A Type 1 charstring of a width of 500 that draws nothing.
+pub fn type1_empty_glyph() -> Vec<u8> {
+    [cs(&[0, 500]), vec![13, 14]].concat()
+}
+
+/// A Type 1 program of `n` glyphs, each named by `name`'s number, and an `/Encoding` of `n`
+/// names, none of them a glyph's, each of which read-fonts looks for among them all.
+pub fn type1_lookups_program(n: usize) -> Vec<u8> {
+    let names: Vec<String> = (0..n).map(|g| format!("g{g}")).collect();
+    let empty = type1_empty_glyph();
+    let clear = format!("/Encoding [{}] def", "/nope ".repeat(n));
+    type1_with(
+        clear.as_bytes(),
+        (names.iter()).map(|name| (name.as_str(), empty.clone())),
+    )
+}
+
+/// A Type 1 program of `A`, `glyphs` glyphs, `B` and `C`, `A` accented `accents` times
+/// over, by `seac`, of `B` and `C`: each time, read-fonts looks each of them up among all
+/// the glyphs by their names, to the last.
+pub fn type1_accents_program(glyphs: usize, accents: usize) -> Vec<u8> {
+    let names: Vec<String> = (0..glyphs).map(|g| format!("g{g}")).collect();
+    let empty = type1_empty_glyph();
+    let accented = [
+        cs(&[0, 500]),
+        vec![13],
+        [cs(&[0, 0, 0, 66, 67]), vec![12, 6]]
+            .concat()
+            .repeat(accents),
+        vec![14],
+    ]
+    .concat();
+    let rest = names.iter().map(|name| (name.as_str(), empty.clone()));
+    let ends = [("B", empty.clone()), ("C", empty.clone())];
+    type1_with(
+        b"/Encoding StandardEncoding def",
+        [(".notdef", empty.clone()), ("A", accented)]
+            .into_iter()
+            .chain(rest)
+            .chain(ends),
+    )
 }
 
 /// An OpenType program of [`truetype_program`]'s tables but `glyf`, [`cff_program`]

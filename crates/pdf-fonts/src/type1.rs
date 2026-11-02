@@ -2,52 +2,86 @@
 //! tokens as read-fonts' `Type1Font` reads them (`RawDicts`, its `Parser`),
 //! counted, and its charstrings by glyph name, which read-fonts keeps to itself.
 //!
-//! read-fonts 0.41 reads a program by recursion, and its work grows faster
-//! than the program does. The scan here reads the program as it would,
-//! bounding the depth of what it reads ([`Limits::proc_depth`],
-//! [`Limits::ints_ahead`]) and counting its work ([`Limits::type1_work`]), so
-//! that a reader of programs need hand it only a program within all three. The
-//! charstrings found can be evaluated through read-fonts' interpreter within
-//! fuel of the caller's own.
+//! read-fonts reads a program's tokens in time that grows as the program does, but
+//! for its `/Encoding`, each of whose names it looks for among all the glyphs, one by
+//! one, however many it's given. The scan counts that with its own reading
+//! ([`Limits::type1_work`]), so that a reader of programs need hand it only a program
+//! within that. The charstrings found can be evaluated through read-fonts'
+//! interpreter within fuel of the caller's own, and a multiple master font's
+//! `/BuildCharArray` is read where FreeType reads it, the private dictionary, for it.
 
 use std::collections::HashMap;
 
 use crate::Limits;
 
 /// A Type 1 program's charstrings by glyph name, each decrypted and past
-/// its `lenIV` bytes, as read-fonts reads them (`read_charstrings`): None
-/// for a name the program gives twice, whose glyph can't be told from another's
-/// by name. A program without `.notdef` has the one read-fonts makes up.
+/// its `lenIV` bytes, as read-fonts reads them (`read_charstrings`): a name
+/// that isn't UTF-8 by its bytes as Latin-1 (`decode_name`), None for a name
+/// the program gives twice, whose glyph can't be told from another's by
+/// name. A program without `.notdef` has the one read-fonts makes up.
 pub type Charstrings = HashMap<Vec<u8>, Option<Vec<u8>>>;
 
 /// `data`, a Type 1 program, scanned as read-fonts reads it: its
-/// charstrings, where its procedures nest within [`Limits::proc_depth`], reading
-/// it costs within [`Limits::type1_work`] and its integers run within
-/// [`Limits::ints_ahead`]; None where not, or where read-fonts wouldn't read it
-/// either: no header, no `eexec`, no `/CharStrings`.
+/// charstrings, where reading it costs within [`Limits::type1_work`]; None where
+/// not, or where read-fonts wouldn't read it either: no header, no `eexec`, no
+/// `/CharStrings`.
 pub fn scan(data: &[u8], limits: &Limits) -> Option<Charstrings> {
+    read(data, limits).map(|scanned| scanned.charstrings)
+}
+
+/// What [`scan`] reads of a program.
+pub(crate) struct Scanned {
+    pub(crate) charstrings: Charstrings,
+    /// How long its private dictionary's `/BuildCharArray` is, as FreeType reads it
+    /// (`parse_buildchar`): read-fonts looks for it in the base dictionary, where
+    /// FreeType doesn't.
+    #[cfg_attr(not(feature = "programs"), allow(dead_code))]
+    pub(crate) build_char_len: usize,
+}
+
+/// `data` scanned, as [`scan`] says.
+pub(crate) fn read(data: &[u8], limits: &Limits) -> Option<Scanned> {
     let fuel = (limits.type1_work).saturating_mul(data.len().max(1 << 14));
-    let mut parser = Parser::new(data, fuel, limits);
+    let mut parser = Parser::new(data, fuel);
     let (base, private) = dicts(data, &mut parser)?;
-    let mut parser = Parser::new(base, parser.fuel, limits);
-    while parser.next(0).ok()?.is_some() {}
-    let mut parser = Parser::new(&private, parser.fuel, limits);
+    let mut parser = Parser::new(base, parser.fuel);
+    let mut encodings = Vec::new();
+    while let Some(token) = parser.next().ok()? {
+        if token == Token::Name(b"Encoding") {
+            encodings.push(parser.pos);
+        }
+    }
+    let mut parser = Parser::new(&private, parser.fuel);
     let mut len_iv = 4;
     let mut found = None;
+    let mut build_char_len = 0;
     loop {
-        match parser.next(0).ok()? {
+        match parser.next().ok()? {
             None => break,
-            Some(Token::Name(b"lenIV")) => match parser.next(0).ok()? {
+            Some(Token::Name(b"lenIV")) => match parser.next().ok()? {
                 Some(Token::Int(n)) => len_iv = n,
                 _ => return None,
             },
             Some(Token::Name(b"CharStrings")) if found.is_none() => {
                 found = Some(parser.charstrings(len_iv)?);
             }
+            Some(Token::Name(b"BuildCharArray")) => build_char_len = parser.array_len().ok()?,
             Some(_) => {}
         }
     }
-    found
+    let (found, glyphs) = found?;
+    // Which of them read-fonts reads rests on what it takes for a value before it: each
+    // is counted, as a program has one or two.
+    let mut fuel = parser.fuel;
+    for at in encodings {
+        let mut parser = Parser::new(base.get(at..)?, fuel);
+        let names = parser.encoding_names().ok()?;
+        fuel = parser.fuel.checked_sub(names.saturating_mul(glyphs))?;
+    }
+    Some(Scanned {
+        charstrings: found,
+        build_char_len,
+    })
 }
 
 /// The program's base dictionary and its private one decrypted, as
@@ -139,38 +173,25 @@ enum Token<'a> {
     Other,
 }
 
-/// Past [`Limits::proc_depth`] or [`Limits::ints_ahead`], or out of fuel.
+/// Out of fuel.
 struct Refused;
 
 #[derive(Clone)]
 struct Parser<'a> {
     data: &'a [u8],
     pos: usize,
-    /// Bytes it may yet read as tokens.
+    /// Bytes it may yet read as tokens, and names an encoding may yet look up.
     fuel: usize,
-    /// How many integers it's reading ahead of.
-    ahead: usize,
-    /// [`Limits::proc_depth`].
-    proc_depth: usize,
-    /// [`Limits::ints_ahead`].
-    ints_ahead: usize,
 }
 
 impl<'a> Parser<'a> {
-    fn new(data: &'a [u8], fuel: usize, limits: &Limits) -> Parser<'a> {
-        Parser {
-            data,
-            pos: 0,
-            fuel,
-            ahead: 0,
-            proc_depth: limits.proc_depth,
-            ints_ahead: limits.ints_ahead,
-        }
+    fn new(data: &'a [u8], fuel: usize) -> Parser<'a> {
+        Parser { data, pos: 0, fuel }
     }
 
-    /// The next token, read as read-fonts reads it, `depth` procedures in:
-    /// None at the end, or where read-fonts would stop.
-    fn next(&mut self, depth: usize) -> Result<Option<Token<'a>>, Refused> {
+    /// The next token, read as read-fonts reads it: None at the end, or where
+    /// read-fonts would stop.
+    fn next(&mut self) -> Result<Option<Token<'a>>, Refused> {
         loop {
             if !self.skip_whitespace()? {
                 return Ok(None);
@@ -181,7 +202,7 @@ impl<'a> Parser<'a> {
             };
             match c {
                 b'%' => self.skip_line()?,
-                b'{' => return self.proc(depth + 1),
+                b'{' => return self.proc(),
                 b'(' => return self.string(),
                 b'<' if self.peek_byte() == Some(b'<') => self.pos += 1,
                 b'<' => return self.hex_string(),
@@ -215,15 +236,7 @@ impl<'a> Parser<'a> {
                     };
                     // An integer followed by `RD` or `-|` is the length of
                     // the binary blob after them and a space.
-                    let mut ahead = self.clone();
-                    ahead.ahead += 1;
-                    if ahead.ahead > self.ints_ahead {
-                        return Err(Refused);
-                    }
-                    let following = ahead.next(depth)?;
-                    self.fuel = ahead.fuel;
-                    if matches!(following, Some(Token::Raw(b"RD" | b"-|"))) {
-                        self.next(depth)?;
+                    if self.blob_start()? {
                         self.pos += 1;
                         let end = self.pos.checked_add(int as usize);
                         let Some(blob) = end.and_then(|end| self.data.get(self.pos..end)) else {
@@ -239,23 +252,41 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A procedure's tokens, read as read-fonts reads them (`read_proc`):
-    /// a byte, and a token where that byte doesn't end it.
-    fn proc(&mut self, depth: usize) -> Result<Option<Token<'a>>, Refused> {
-        if depth > self.proc_depth {
-            return Err(Refused);
+    /// Whether what follows is `RD` or `-|`, passed over if so, as read-fonts
+    /// looks ahead (`accept_blob_start`): by its bytes, past whitespace alone, so
+    /// that a comment there ends the integer.
+    fn blob_start(&mut self) -> Result<bool, Refused> {
+        let start_at = self.pos;
+        self.skip_whitespace()?;
+        let start = self.pos;
+        self.skip_until(|c| is_whitespace(c) || is_special(c))?;
+        if matches!(self.data.get(start..self.pos), Some(b"RD" | b"-|")) {
+            return Ok(true);
         }
-        loop {
-            match self.next_byte()? {
-                None => return Ok(None),
-                Some(b'}') => return Ok(Some(Token::Other)),
-                Some(_) => {}
+        self.pos = start_at;
+        Ok(false)
+    }
+
+    /// A procedure's bytes to its `}`, read as read-fonts reads them (`read_proc`):
+    /// its braces counted, past comments and literal strings; none where it's not
+    /// ended.
+    fn proc(&mut self) -> Result<Option<Token<'a>>, Refused> {
+        let mut depth = 1usize;
+        while let Some(c) = self.next_byte()? {
+            match c {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(Some(Token::Other));
+                    }
+                }
+                b'%' => self.skip_line()?,
+                b'(' if self.string()?.is_none() => return Ok(None),
+                _ => {}
             }
-            if self.next(depth)?.is_none() {
-                return Ok(None);
-            }
-            self.skip_whitespace()?;
         }
+        Ok(None)
     }
 
     /// A literal string's bytes, its parentheses balanced, a backslash
@@ -268,7 +299,6 @@ impl<'a> Parser<'a> {
                 b')' => {
                     depth -= 1;
                     if depth == 0 {
-                        self.pos += 1;
                         return Ok(Some(Token::Other));
                     }
                 }
@@ -293,7 +323,7 @@ impl<'a> Parser<'a> {
     /// (`find_eexec_data`): past the whitespace after the token, to a
     /// carriage return that no line feed follows before it.
     fn eexec(&mut self) -> Option<usize> {
-        while let Some(token) = self.next(0).ok()? {
+        while let Some(token) = self.next().ok()? {
             if token != Token::Raw(b"eexec") {
                 continue;
             }
@@ -325,31 +355,34 @@ impl<'a> Parser<'a> {
     }
 
     /// `/CharStrings`' entries, as read-fonts reads them
-    /// (`read_charstrings`), decrypted with `len_iv`.
-    fn charstrings(&mut self, len_iv: i64) -> Option<Charstrings> {
-        let Some(Token::Int(count)) = self.next(0).ok()? else {
+    /// (`read_charstrings`), decrypted with `len_iv`; and how many it gave, a
+    /// name given twice twice.
+    fn charstrings(&mut self, len_iv: i64) -> Option<(Charstrings, usize)> {
+        let Some(Token::Int(count)) = self.next().ok()? else {
             return None;
         };
         usize::try_from(count).ok()?;
         let mut found = Charstrings::new();
+        let mut glyphs = 0usize;
         let ends = |p: &Parser<'_>| {
             p.peek_byte()
                 .is_some_and(|c| is_whitespace(c) || is_special(c))
         };
-        while let Some(token) = self.next(0).ok()? {
+        while let Some(token) = self.next().ok()? {
             match token {
                 Token::Raw(b"end") if ends(self) => break,
                 Token::Raw(b"def") if ends(self) && !found.is_empty() => break,
                 Token::Name(name) => {
-                    let Some(Token::Binary(data)) = self.next(0).ok()? else {
+                    let Some(Token::Binary(data)) = self.next().ok()? else {
                         return None;
                     };
+                    glyphs += 1;
                     let plain = match usize::try_from(len_iv) {
                         Ok(skip) => decrypt(data, CHARSTRING_SEED, skip),
                         Err(_) => data.to_vec(),
                     };
                     found
-                        .entry(name.to_vec())
+                        .entry(decoded_name(name))
                         .and_modify(|twice| *twice = None)
                         .or_insert(Some(plain));
                 }
@@ -361,7 +394,58 @@ impl<'a> Parser<'a> {
         found
             .entry(b".notdef".to_vec())
             .or_insert(Some(vec![0x8B, 0xF7, 0xE1, 0x0D, 0x0E]));
-        Some(found)
+        Some((found, glyphs + 1))
+    }
+
+    /// How many tokens an array holds, it being next, to its `]`: 0 for what's no array
+    /// or isn't ended, which is left where it stops.
+    fn array_len(&mut self) -> Result<usize, Refused> {
+        let mut ahead = self.clone();
+        if ahead.next()? != Some(Token::Raw(b"[")) {
+            return Ok(0);
+        }
+        let mut len = 0;
+        loop {
+            match ahead.next()? {
+                Some(Token::Raw(b"]")) => {
+                    *self = ahead;
+                    return Ok(len);
+                }
+                Some(_) => len += 1,
+                None => return Ok(0),
+            }
+        }
+    }
+
+    /// How many names an `/Encoding`'s value has read-fonts look for, it being next
+    /// (`read_encoding`): an array's, to its end or what's no name, or a map's, code and
+    /// name, to its `def`, whether or not they're codes it has.
+    fn encoding_names(&mut self) -> Result<usize, Refused> {
+        let mut names = 0usize;
+        match self.next()? {
+            Some(Token::Raw(b"[")) => {
+                let mut ahead = self.clone();
+                if ahead.next()? == Some(Token::Raw(b"[")) {
+                    *self = ahead;
+                }
+                while let Some(Token::Name(_)) = self.next()? {
+                    names += 1;
+                }
+                Ok(names)
+            }
+            Some(Token::Int(_)) => loop {
+                match self.next()? {
+                    None | Some(Token::Raw(b"def")) => return Ok(names),
+                    Some(Token::Int(_)) => {
+                        if let Some(Token::Name(_)) = self.next()? {
+                            names += 1;
+                        }
+                    }
+                    Some(_) => {}
+                }
+            },
+            _ => Ok(0),
+        }
     }
 
     fn burn(&mut self, n: usize) -> Result<(), Refused> {
@@ -415,6 +499,20 @@ impl<'a> Parser<'a> {
             count += 1;
         }
         Ok(count + 1)
+    }
+}
+
+/// A glyph's name as read-fonts keeps it (`decode_name`): a name that isn't UTF-8 by
+/// its bytes as Latin-1.
+pub(crate) fn decoded_name(name: &[u8]) -> Vec<u8> {
+    match std::str::from_utf8(name) {
+        Ok(_) => name.to_vec(),
+        Err(_) => name
+            .iter()
+            .copied()
+            .map(char::from)
+            .collect::<String>()
+            .into_bytes(),
     }
 }
 

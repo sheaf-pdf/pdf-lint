@@ -20,8 +20,9 @@
 //! Programs are untrusted, so their work is bounded: a TrueType glyph's
 //! composites and points are counted before skrifa draws it; a CFF or
 //! Type 1 glyph's charstrings are evaluated within fuel, its share of the
-//! font's; and a Type 1 program is scanned ahead of read-fonts, and read
-//! once ([`type1`]). A glyph or a font past its bound has
+//! font's, an accented character's components charged for being looked up; and a
+//! Type 1 program is scanned ahead of read-fonts, and read once ([`type1`]). A
+//! glyph or a font past its bound has
 //! its boxes unknown. What a program decompresses to is charged to the
 //! budget its font is read within, and so is what drawing its glyphs
 //! costs ([`Face::draw`]).
@@ -33,17 +34,16 @@ use std::sync::{Mutex, PoisonError};
 use skrifa::MetadataProvider;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
+use skrifa::raw::model::Error as PsError;
 use skrifa::raw::ps::cff::CffFontRef;
 use skrifa::raw::ps::cff::index::Index;
-use skrifa::raw::ps::cs::{self, CharstringContext, CharstringKind, CommandSink};
-use skrifa::raw::ps::encoding::PredefinedEncoding;
-use skrifa::raw::ps::error::Error as PsError;
-use skrifa::raw::ps::transform::{FontMatrix, ScaledFontMatrix, combine_scaled};
+use skrifa::raw::ps::charstring::{self, CharstringContext, CharstringKind, CommandSink};
 use skrifa::raw::ps::type1::Type1Font;
+use skrifa::raw::ps::{FontMatrix, PredefinedEncoding};
 use skrifa::raw::tables::cmap::{CmapSubtable, PlatformId};
 use skrifa::raw::tables::glyf::{Anchor, Glyph};
 use skrifa::raw::types::{CFF_SFNT_VERSION, Fixed, GlyphId, Tag};
-use skrifa::raw::{FileRef, FontRead, FontRef, ReadError, TableProvider};
+use skrifa::raw::{FileRef, FontRead, FontRef, TableProvider};
 
 use crate::font::{Base, OwnText, Simple, SimpleMap};
 use crate::{Encoding, Limits, Rect, glyph_text, name_code_point, type1};
@@ -75,8 +75,8 @@ pub(crate) struct Face {
     /// The most glyphs a TrueType glyph's composites may draw, and how deep.
     composites: (u64, u8),
     /// A Type 1 program read, once, as it's opened: read-fonts' font, and
-    /// its charstrings as the scan found them ([`type1::scan`]).
-    type1: Option<(Type1Font, type1::Charstrings)>,
+    /// what the scan found of it ([`type1::scan`]).
+    type1: Option<(Type1Font, type1::Scanned)>,
     /// A bare CID-keyed CFF's glyph by CID, as FreeType maps them
     /// (`cff_charset_cid_to_gindex`): the first its charset gives the CID,
     /// None where none does. FreeType keeps none for one in an OpenType font, whose
@@ -108,7 +108,7 @@ enum View<'a> {
     },
     Type1 {
         font: &'a Type1Font,
-        charstrings: &'a type1::Charstrings,
+        scanned: &'a type1::Scanned,
     },
 }
 
@@ -179,9 +179,11 @@ impl Face {
                 }
             }
             // Scanned first, as read-fonts reads it, so it's handed only a
-            // program it reads within bounds.
+            // program it reads within bounds, and its charstrings are had for fuel of
+            // ours: read-fonts' own evaluation of a glyph, whose charstrings it keeps,
+            // bounds its operations and not what its accents and subroutines read.
             Format::Type1 => {
-                let charstrings = type1::scan(&data, limits)?;
+                let scanned = type1::read(&data, limits)?;
                 let font = Type1Font::new(&data).ok()?;
                 let bbox = font.bbox();
                 face.bbox = rounded_out([bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max]);
@@ -190,9 +192,9 @@ impl Face {
                 let units = u16::try_from(font.upem());
                 face.units = units.is_ok();
                 face.upem = units.unwrap_or(1000);
-                face.exact &= face.units && charstrings_agree(&font, &charstrings);
+                face.exact &= face.units && charstrings_agree(&font, &scanned.charstrings);
                 face.fuel = fuel(font.num_glyphs());
-                face.type1 = Some((font, charstrings));
+                face.type1 = Some((font, scanned));
             }
         }
         face.data = data.into_boxed_slice();
@@ -278,7 +280,7 @@ impl Face {
     /// The program open, borrowing its bytes, or its Type 1 font read.
     fn view(&self) -> Option<View<'_>> {
         match &self.type1 {
-            Some((font, charstrings)) => Some(View::Type1 { font, charstrings }),
+            Some((font, scanned)) => Some(View::Type1 { font, scanned }),
             None => view(&self.data, self.format, self.upem),
         }
     }
@@ -362,7 +364,7 @@ impl Face {
         match view {
             View::Glyf(font) => draw_glyf(font, gid, self.glyphs, self.composites),
             View::Cff { cff, .. } => draw_cff(cff, self.cids.as_deref(), gid, self.upem, self.fuel),
-            View::Type1 { font, charstrings } => draw_type1(font, charstrings, gid, self.fuel),
+            View::Type1 { font, scanned } => draw_type1(font, scanned, gid, self.fuel),
         }
     }
 }
@@ -611,7 +613,9 @@ fn draw_glyf(font: &FontRef<'_>, gid: u32, glyphs: u32, most: (u64, u8)) -> (Dra
         Some(drawn) => drawn,
     };
     // skrifa draws no more points than a `u16` counts, failing a glyph
-    // past that only once it's made room for them all.
+    // past that only once it's made room for them all. Its own bound on
+    // components, `MAX_COMPOSITE_EDGES`, is why `outlines.get` can say none
+    // of a glyph within `most` that a caller has raised.
     if nodes > most.0 || points > u64::from(u16::MAX) {
         return (Drawn::Unknown, read);
     }
@@ -690,7 +694,7 @@ fn composite_glyphs(
         Ok(Some(Glyph::Composite(composite))) => {
             let mut drawn = (1u64, 0u64);
             for component in composite.components() {
-                let glyph = u32::from(component.glyph.to_u16());
+                let glyph = component.glyph.to_u32();
                 let Some((nodes, points)) =
                     composite_glyphs(loca, glyf, (glyphs, most), glyph, depth + 1, counted, read)
                 else {
@@ -917,23 +921,9 @@ fn draw_cff(
     let (matrix, scale) = match (cff.is_cid(), subfont.matrix()) {
         (true, Some(&sub)) => {
             let sub = match top {
-                Some(top) => {
-                    let scaling = match top.scale > 1 && sub.scale > 1 {
-                        true => top.scale.min(sub.scale),
-                        false => 1,
-                    };
-                    ScaledFontMatrix {
-                        matrix: combine_scaled(&top.matrix, &sub.matrix, scaling),
-                        scale: mul_div(
-                            i64::from(sub.scale),
-                            i64::from(top.scale),
-                            i64::from(scaling),
-                        ) as i32,
-                    }
-                }
-                None => sub,
-            }
-            .normalize();
+                Some(top) => top.combine(&sub),
+                None => sub.normalize(),
+            };
             let scale = (sub.scale != top_units)
                 .then(|| mul_div(0x10000, i64::from(top_units), i64::from(sub.scale)));
             (Some(sub.matrix), scale)
@@ -951,7 +941,7 @@ fn draw_cff(
             None => return (Drawn::Unknown, 0),
         },
     };
-    let Ok(charstring) = cff.charstrings().get(gid as usize) else {
+    let Some(charstring) = cff.charstrings().get(gid as usize) else {
         return (Drawn::Unknown, 0);
     };
     let context = Type2 {
@@ -969,7 +959,8 @@ fn draw_cff(
 
 /// `charstring` evaluated in `context`, `left` its fuel, what's left of
 /// `fuel` once the charstring's charged: its points' box, or unknown where
-/// it fails or runs out of fuel; and how much of `fuel` it spent.
+/// it fails, runs out of fuel or passes the evaluator's own million
+/// operations (FreeType's has no such bound); and how much of `fuel` it spent.
 fn evaluated(
     context: &impl CharstringContext,
     left: &Fuel,
@@ -977,10 +968,11 @@ fn evaluated(
     fuel: usize,
     sink: &mut Points,
 ) -> (Drawn, usize) {
-    let drawn = match left.0.get() > 0 && cs::evaluate(context, None, charstring, sink).is_ok() {
-        true => Drawn::Box(sink.bbox()),
-        false => Drawn::Unknown,
-    };
+    let drawn =
+        match left.0.get() > 0 && charstring::evaluate(context, None, charstring, sink).is_ok() {
+            true => Drawn::Box(sink.bbox()),
+            false => Drawn::Unknown,
+        };
     (drawn, fuel - left.0.get())
 }
 
@@ -1001,20 +993,26 @@ fn cids(cff: &CffFontRef<'_>) -> Option<Box<[Option<u16>]>> {
 }
 
 /// Charstring a glyph may yet evaluate, in bytes: its subroutines and
-/// accented components count as they're called.
+/// accented components count as they're called, and looking a component up.
 struct Fuel(Cell<usize>);
 
 impl Fuel {
     /// `data`, once it's charged; an error past what's left.
     fn burn<'d>(&self, data: &'d [u8]) -> Result<&'d [u8], PsError> {
-        match self.0.get().checked_sub(data.len()) {
+        self.spend(data.len())?;
+        Ok(data)
+    }
+
+    /// `n` charged; an error past what's left.
+    fn spend(&self, n: usize) -> Result<(), PsError> {
+        match self.0.get().checked_sub(n) {
             Some(left) if left > 0 => {
                 self.0.set(left);
-                Ok(data)
+                Ok(())
             }
             _ => {
                 self.0.set(0);
-                Err(PsError::Read(ReadError::OutOfBounds))
+                Err(PsError::LimitExceeded)
             }
         }
     }
@@ -1036,16 +1034,16 @@ impl CharstringContext for Type2<'_, '_> {
     /// An accented character's base and accent, by standard code, as
     /// read-fonts finds them: through the charset, or ISOAdobe's.
     fn seac_components(&self, base_code: i32, accent_code: i32) -> Result<[&[u8]; 2], PsError> {
-        let charset = self.cff.charset().ok_or(PsError::MissingCharset)?;
+        let charset = self.cff.charset().ok_or(PsError::MissingResource)?;
         let charstring = |code: i32| {
             let sid = u8::try_from(code)
                 .ok()
                 .and_then(|c| PredefinedEncoding::Standard.sid(c));
             let gid = sid
-                .and_then(|sid| charset.glyph_id(sid).ok())
-                .ok_or(PsError::InvalidSeacCode(code))?;
-            self.fuel
-                .burn(self.cff.charstrings().get(gid.to_u32() as usize)?)
+                .and_then(|sid| charset.glyph_id(sid))
+                .ok_or(PsError::InvalidOperation)?;
+            let found = self.cff.charstrings().get(gid.to_u32() as usize);
+            self.fuel.burn(found.ok_or(PsError::Malformed)?)
         };
         let accent = charstring(accent_code)?;
         Ok([charstring(base_code)?, accent])
@@ -1053,36 +1051,32 @@ impl CharstringContext for Type2<'_, '_> {
 
     fn global_subr(&self, index: i32) -> Result<&[u8], PsError> {
         let globals = self.cff.global_subrs();
-        self.fuel
-            .burn(globals.get((index + globals.subr_bias()) as usize)?)
+        let found = globals.get((index + globals.subr_bias()) as usize);
+        self.fuel.burn(found.ok_or(PsError::Malformed)?)
     }
 
     fn subr(&self, index: i32) -> Result<&[u8], PsError> {
-        self.fuel
-            .burn(self.subrs.get((index + self.subrs.subr_bias()) as usize)?)
+        let found = self.subrs.get((index + self.subrs.subr_bias()) as usize);
+        self.fuel.burn(found.ok_or(PsError::Malformed)?)
     }
 }
 
 /// A Type 1 glyph's box, its charstring, as the program gives it by the
 /// glyph's name, evaluated within `fuel` bytes; with it, the charstring
 /// evaluated.
-fn draw_type1(
-    font: &Type1Font,
-    charstrings: &type1::Charstrings,
-    gid: u32,
-    fuel: usize,
-) -> (Drawn, usize) {
+fn draw_type1(font: &Type1Font, scanned: &type1::Scanned, gid: u32, fuel: usize) -> (Drawn, usize) {
     if gid >= font.num_glyphs() {
         return (Drawn::Missing, 0);
     }
     let found = font
         .glyph_name(GlyphId::new(gid))
-        .and_then(|n| charstrings.get(n.as_bytes()));
+        .and_then(|n| scanned.charstrings.get(n.as_bytes()));
     let Some(Some(charstring)) = found else {
         return (Drawn::Unknown, 0);
     };
     let context = Type1 {
         font,
+        build_char_len: scanned.build_char_len,
         fuel: Fuel(Cell::new(fuel.saturating_sub(charstring.len()))),
     };
     let mut sink = Points {
@@ -1116,6 +1110,7 @@ fn charstrings_agree(font: &Type1Font, charstrings: &type1::Charstrings) -> bool
 /// each subroutine and component charged.
 struct Type1<'f> {
     font: &'f Type1Font,
+    build_char_len: usize,
     fuel: Fuel,
 }
 
@@ -1124,13 +1119,19 @@ impl CharstringContext for Type1<'_> {
         CharstringKind::Type1
     }
 
+    /// An accented character's components, each looked up among all the glyphs by its
+    /// name, one by one, and a charstring may ask for as many as it has room for: a
+    /// look-up is a far smaller thing than a byte of charstring evaluated, so a sixteenth
+    /// of a byte a glyph, and one in a font of the most glyphs a charstring can name is
+    /// within [`Limits::glyph_fuel`].
     fn seac_components(&self, base_code: i32, accent_code: i32) -> Result<[&[u8]; 2], PsError> {
+        self.fuel.spend(self.font.num_glyphs() as usize / 8)?;
         let [base, accent] = self.font.seac_components(base_code, accent_code)?;
         Ok([self.fuel.burn(base)?, self.fuel.burn(accent)?])
     }
 
     fn global_subr(&self, _: i32) -> Result<&[u8], PsError> {
-        Err(PsError::MissingSubroutines)
+        Err(PsError::MissingResource)
     }
 
     fn subr(&self, index: i32) -> Result<&[u8], PsError> {
@@ -1139,6 +1140,10 @@ impl CharstringContext for Type1<'_> {
 
     fn weight_vector(&self) -> &[Fixed] {
         self.font.weight_vector()
+    }
+
+    fn build_char_len(&self) -> usize {
+        self.build_char_len
     }
 }
 
@@ -1839,10 +1844,13 @@ impl<'a> Charmaps<'a> {
         name_text(&self.named[at].1)
     }
 
-    /// `FT_Get_Name_Index`: the first glyph of that name, 0 for none.
+    /// `FT_Get_Name_Index`: the first glyph of that name, 0 for none, a name that's
+    /// not UTF-8 also as read-fonts keeps a Type 1 glyph's.
     fn name_gid(&self, name: &[u8]) -> Gid {
         let gid = match self.glyph_names {
-            true => self.names.get(name).copied().unwrap_or(0),
+            true => (self.names.get(name).copied())
+                .or_else(|| self.names.get(&type1::decoded_name(name)[..]).copied())
+                .unwrap_or(0),
             false => 0,
         };
         Gid::of(gid)
@@ -2138,8 +2146,7 @@ fn cff_encoding(cff: &CffFontRef<'_>) -> Option<(u16, Box<[u32; 256]>)> {
     let top = skrifa::raw::tables::cff::Cff::read(data.into())
         .ok()?
         .top_dicts()
-        .get(0)
-        .ok()?;
+        .get(0)?;
     let offset = (skrifa::raw::ps::cff::dict::entries(top, None))
         .filter_map(Result::ok)
         .find_map(|e| match e {

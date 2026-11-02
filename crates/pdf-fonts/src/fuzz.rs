@@ -12,9 +12,10 @@ use pdf_objects::parse::Parser;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Why, dict};
 
 use crate::fixture::{
-    OpenType, cff_program, cid_cff_program, composite_bomb_program, heavy_cff_program,
-    loca_past_end_program, opentype_cid_program, opentype_program, truetype_program,
-    type1_integers_program, type1_program,
+    OpenType, cff_program, cid_cff_program, composite_bomb_program, composite_of_program,
+    heavy_cff_program, loca_past_end_program, long_cff_program, moving_cff_program,
+    opentype_cid_program, opentype_program, truetype_program, type1_accents_program,
+    type1_integers_program, type1_lookups_program, type1_program,
 };
 use crate::predefined::{Collection, scheme};
 use crate::type1::scan;
@@ -43,36 +44,16 @@ pub fn type1(data: &[u8]) {
         // The one `.notdef` a program may have made up for it is 5 bytes.
         assert!(held <= data.len() + 5, "{held} of {}", data.len());
     }
-    // A smaller cap on depth alone would do all the work over again.
-    let smaller = [
-        Limits {
-            proc_depth: 2,
-            type1_work: 4,
+    for type1_work in [4, 1, 0] {
+        let limits = Limits {
+            type1_work,
             ..limits
-        },
-        Limits {
-            ints_ahead: 2,
-            ..limits
-        },
-        Limits {
-            type1_work: 1,
-            ..limits
-        },
-        Limits {
-            proc_depth: 0,
-            ints_ahead: 0,
-            type1_work: 0,
-            ..limits
-        },
-    ];
-    for limits in smaller {
+        };
         if let Some(under) = scan(data, &limits) {
             assert_eq!(Some(under), read);
         }
     }
     let larger = Limits {
-        proc_depth: 2 * limits.proc_depth,
-        ints_ahead: 2 * limits.ints_ahead,
         type1_work: 2 * limits.type1_work,
         ..limits
     };
@@ -673,7 +654,7 @@ fn program_fixtures() -> Vec<Vec<u8>> {
         post_names: true,
         cmap: false,
     };
-    let programs: [(&str, &str, Vec<u8>); 10] = [
+    let programs: [(&str, &str, Vec<u8>); 15] = [
         ("TrueType", "FontFile2", truetype_program()),
         ("Type1", "FontFile3", cff_program()),
         ("Type1", "FontFile3", cid_cff_program()),
@@ -681,9 +662,14 @@ fn program_fixtures() -> Vec<Vec<u8>> {
         ("Type1", "FontFile3", opentype_cid_program(names)),
         ("Type1", "FontFile", type1_program()),
         ("Type1", "FontFile3", heavy_cff_program(4)),
+        ("Type1", "FontFile3", moving_cff_program(3)),
+        ("Type1", "FontFile3", long_cff_program(8)),
         ("TrueType", "FontFile2", composite_bomb_program()),
+        ("TrueType", "FontFile2", composite_of_program(1, 1, 1)),
         ("Type1", "FontFile3", loca_past_end_program()),
         ("MMType1", "FontFile", type1_integers_program(8)),
+        ("Type1", "FontFile", type1_accents_program(4, 4)),
+        ("Type1", "FontFile", type1_lookups_program(16)),
     ];
     let mut out = Vec::new();
     for (subtype, key, program) in programs {
