@@ -71,9 +71,11 @@
 # file, as the target does but under the default options;
 # `color` calls `pdf_color::fuzz::counts`, each of its first objects counted, the
 # count within what it could be, within every cap, the same under larger and
-# smaller caps where none was met and a failing resolver's reason kept, and read
-# as resources, the same by name as in order, and `pdf_color::fuzz::over`, what a
-# file's objects count and name through a reading and the document it makes,
+# smaller caps where none was met and a failing resolver's reason kept, read as
+# a typed space, the same whatever the sink, a failing read included, counting as
+# it was counted where no fault was told and no cap met, and read as resources,
+# the same by name as in order, and `pdf_color::fuzz::over`, what a file's objects
+# count, say as typed spaces and name through a reading and the document it makes,
 # which three stable unit tests (`mutated_seeds_keep_every_promise`,
 # `random_bytes_keep_every_promise`,
 # `files_read_alike_through_a_reading_and_its_document`) run, the last as a file,

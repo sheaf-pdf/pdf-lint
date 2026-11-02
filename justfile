@@ -292,11 +292,12 @@ arlington-msrv:
 # strings; `structure`, pdf-structure's reader; `write`, pdf-structure's writer, on
 # what its reader read; `content`, pdf-content-streams' tokens, operations,
 # faults, operator table, the balance, marked content and names over them,
-# its writer, content written again and the calls, and its splices and
-# lists written again; `semantics`, pdf-semantics' name and number trees,
+# its writer, content written again and the calls, its splices and lists
+# written again, and an image's color space counted alike in its dictionary
+# and in the resources; `semantics`, pdf-semantics' name and number trees,
 # page tree, dates and XMP claims; `color`, pdf-color's count of a space's
-# components, its typed spaces and what a resources dictionary names; `linearize`, pdf-linearize's
-# plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
+# components, its typed spaces and what a resources dictionary names;
+# `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; or `check`, the reader
 # and the checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module

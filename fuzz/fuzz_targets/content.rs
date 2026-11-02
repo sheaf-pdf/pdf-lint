@@ -15,8 +15,9 @@
 //! reading as they did, and the writer's calls its bytes choose read back
 //! as written; and its marked ranges at the top taken out, alone and
 //! together, and their lists written again without a tool's keys, alone
-//! and with what's taken out, what's kept reading as it did. With the `image-ends` feature, which the fuzz
-//! crate turns on, it's read with an inline image's DCT and CCITTFax data
+//! and with what's taken out, what's kept reading as it did; and an image's
+//! color space counted alike in its dictionary and in the resources, under any
+//! caps on either. With the `image-ends` feature, which the fuzz crate turns on, it's read with an inline image's DCT and CCITTFax data
 //! decoded to find where it ends, and its tokens tile it read by the
 //! stand-in too.
 

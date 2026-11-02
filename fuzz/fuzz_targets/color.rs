@@ -3,7 +3,7 @@
 //! the same under larger and smaller caps where none was met and a failing
 //! resolver's reason kept; each read as a typed space, the same whatever the
 //! sink, a read that fails included, and counting as it was counted where no
-//! fault was told; and each read as resources, the same by name as in order; and
+//! fault was told and no cap met; and each read as resources, the same by name as in order; and
 //! read as a file, what every object counts, says and names over a reading and
 //! the document it makes the same.
 

@@ -58,9 +58,8 @@ says how the crates are held to PDFium.
 
 `just fuzz tokenize`, `just fuzz filters`, `just fuzz crypt`, `just fuzz
 objects`, `just fuzz structure`, `just fuzz write`, `just fuzz content`,
-`just fuzz semantics`, `just fuzz color`, `just fuzz linearize` and `just fuzz
-check` fuzz the
-tokenizer, by ISO 32000-2's rules and PDFium's, the filters, decoding and
+`just fuzz semantics`, `just fuzz color`, `just fuzz linearize` and
+`just fuzz check` fuzz the tokenizer, by ISO 32000-2's rules and PDFium's, the filters, decoding and
 encoding, pdf-crypt's handler, new files' dictionaries and a password's forms,
 pdf-objects' parser, by ISO 32000-2's rules and PDFium's, its writer and
 text strings, pdf-structure's reader and writer, pdf-content-streams' tokens, operations, faults, operator table,
@@ -68,9 +67,8 @@ the balance, marked content and names over them, its writer, content
 written again and the calls, its splices and lists written again, and an
 image's color space counted alike in its dictionary and in the resources,
 pdf-semantics' name and number trees, page tree, dates and XMP claims,
-pdf-color's count of a space's components, its typed spaces and what a resources
-dictionary names,
-pdf-linearize's plan of any graph, what's assembled from it, hint tables from
+pdf-color's count of a space's components, its typed spaces and what a
+resources dictionary names, pdf-linearize's plan of any graph, what's assembled from it, hint tables from
 any bytes, any facts of a file, and any bytes as a file laid out, read back and
 checked, and the reader and checker, on nightly with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); a second argument
