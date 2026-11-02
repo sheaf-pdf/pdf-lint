@@ -7,7 +7,7 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use pdf_objects::{Dict, Object, Str, Value, dict};
+use pdf_objects::{Dict, Object, ObjectId, Str, Value, dict};
 use pdf_tokenizer::decode;
 
 use crate::data::{RunLength, Searched, a85_stop, ei_scan, find};
@@ -86,6 +86,7 @@ const LIMITS: Limits = Limits::DEFAULT;
 /// ([`written_again`]); the writer's calls its bytes choose read back
 /// as written ([`calls`]); and its marked ranges taken out, and their
 /// lists written again, reading as the splice promises ([`spliced`]).
+/// An array in it counted alike in an image and in resources ([`spaced`]).
 /// Panics on a broken promise.
 pub fn content(data: &[u8]) {
     let res = ResCx::new([
@@ -161,6 +162,69 @@ pub fn content(data: &[u8]) {
     written_again(data, &res, &Limits::DEFAULT);
     calls(data);
     spliced(data);
+    spaced(data, limits);
+}
+
+/// A resolver of nothing, for what holds no reference: content has none, so
+/// it's never asked.
+fn nothing<'o>(id: ObjectId) -> Option<&'o Object> {
+    panic!("{id:?} asked of nothing")
+}
+
+/// How much of `row` bytes an image read by `res` under `limits` takes for its
+/// data, drawn in `cs`, and whether `cs` was read whole as its color space.
+fn drawn(cs: &[u8], row: usize, res: &ResCx, limits: &Limits) -> (bool, Option<usize>) {
+    let data = vec![b'a'; row];
+    let content = [b"BI /W 1 /H 1 /BPC 8 /CS ", cs, b" ID ", &data, b" EI Q"].concat();
+    let op = operations(&content, res, limits)
+        .next()
+        .and_then(Result::ok);
+    let image = op.as_ref().and_then(Operation::inline_image);
+    let whole = (image.as_ref().and_then(|image| image.entry(b"ColorSpace")))
+        .is_some_and(|entry| entry.bytes() == cs);
+    (whole, image.map(|image| image.data().len()))
+}
+
+/// Checks an array in `data`, its first, as an inline image's color space and
+/// as one a resources dictionary names ([`ResCx::read`]): each counts what
+/// [`pdf_color::components`] counts, so an image drawn in the one ends where
+/// an image drawn in the other does, under any caps on color spaces.
+fn spaced(data: &[u8], limits: &Limits) {
+    let Some(at) = data.iter().position(|&b| b == b'[') else {
+        return;
+    };
+    let none = ResCx::none();
+    let Some(Ok((_, Tok::Operand(array)))) = tokens(&data[at..], &none, limits).next() else {
+        return;
+    };
+    let Some(space) = object(array, limits) else {
+        return;
+    };
+    let want = pdf_color::components(nothing, &space, &limits.color)
+        .expect("nothing to fail")
+        .expect("a value that's no reference counts");
+    let resources = Object::from(dict! { "ColorSpace" => dict! { "X" => space } });
+    let res = ResCx::read(nothing, Some(&resources), limits).expect("nothing to fail");
+    assert_eq!(res, ResCx::new([(b"X".to_vec(), want)]), "counted alike");
+    let row = want as usize;
+    let by_name = drawn(b"/X", row, &res, limits);
+    assert_eq!(by_name, (true, Some(row)), "sized by its name");
+    // Where the array, written as a key's value, is read as it was alone.
+    let in_place = drawn(array, row, &none, limits);
+    if in_place.0 {
+        assert_eq!(in_place, by_name, "sized by its array");
+    }
+    let mut small = *limits;
+    for (depth, visits) in [(0, 0), (1, 1), (2, 8)] {
+        small.color.space_depth = depth;
+        small.color.space_visits = visits;
+        let res = ResCx::read(nothing, Some(&resources), &small).expect("nothing to fail");
+        let in_place = drawn(array, row, &none, &small);
+        if in_place.0 {
+            let by_name = drawn(b"/X", row, &res, &small);
+            assert_eq!(in_place.1, by_name.1, "alike under small caps");
+        }
+    }
 }
 
 /// Checks the searches the tokens make in `s`'s bytes, and their skims,
@@ -2000,9 +2064,9 @@ pub(crate) fn stored(data: &[u8], last: bool) -> Vec<u8> {
 /// into, and around forms drawn, and lists with a tool's own keys
 /// ([`KEYS`]); a lone `BI` whose would-be dictionary a range is in, and an
 /// ASCIIHex image whose `>` a range holds in a comment, which taking the
-/// range out would make read otherwise; and a color of 32 components and
-/// a pattern, more operands than an operation holds inline: the fuzz
-/// target's seeds.
+/// range out would make read otherwise; images in a color space written as
+/// an array; and a color of 32 components and a pattern, more operands than
+/// an operation holds inline: the fuzz target's seeds.
 pub fn fixtures() -> Vec<Vec<u8>> {
     let image = |dict: &str, data: &[u8]| {
         [format!("q BI {dict} ID ").as_bytes(), data, b"\nEI Q\n"].concat()
@@ -2078,6 +2142,12 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         // out, the image would run on to the last `EI`.
         b"BI /W 1 /H 1 /CS /G /BPC 8 /F /AHx ID 41 EI /A BMC % > (\n EMC 0 0 9 9 re f <41> Tj EI"
             .to_vec(),
+        image("/W 1 /H 1 /BPC 8 /CS [/Pattern /DeviceRGB]", b"a EI"),
+        image(
+            "/W 1 /H 1 /BPC 8 /CS [/CalGray <</WhitePoint [1 1 1]>>]",
+            b"a",
+        ),
+        image("/W 3 /H 1 /BPC 8 /CS [/Separation /X /G]", b" EI"),
         format!("q /CS0 cs {components}/P0 scn 0 0 9 9 re f Q\n").into_bytes(),
     ]
 }

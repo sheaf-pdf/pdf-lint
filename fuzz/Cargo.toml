@@ -53,7 +53,9 @@
 # bumped in the same places, and its marked ranges at the top taken out,
 # alone, together and by splice_each, and their lists written again
 # without a tool's keys, alone and with what's taken out, what's kept
-# reading as it did, which two stable unit tests (`mutated_seeds_keep_every_promise`,
+# reading as it did, and an array in it counted alike as an inline image's
+# color space and as one the resources name, under any caps on either,
+# which two stable unit tests (`mutated_seeds_keep_every_promise`,
 # `random_fragments_keep_every_promise`) run on mutated seeds and random
 # content;
 # `semantics` calls `pdf_semantics::fuzz::walks`, its name and number trees,

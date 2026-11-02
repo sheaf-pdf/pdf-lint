@@ -9,9 +9,11 @@
 //! driven by hand.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::ops::Range;
 
-use pdf_objects::{Form, Object, Str, Value, dict};
+use pdf_objects::parse::Parser;
+use pdf_objects::{Form, Object, ObjectId, Resolve, Rules, Str, Unreadable, Value, Why, dict};
 
 use crate::fault::{Fault, Sink};
 use crate::fuzz::{
@@ -787,6 +789,205 @@ fn assert_image(dict: &str, data: &[u8], res: &ResCx) {
     assert_tiles(&s, res, &Limits::DEFAULT);
 }
 
+/// `text` as one value, by PDFium's rules; `extra` read as objects 5 on, a
+/// dictionary with `/Length` a stream.
+fn parsed(text: &str) -> Object {
+    let mut parser = Parser::at(text.as_bytes(), 0).rules(Rules::Pdfium);
+    (parser.value(&mut ())).unwrap_or_else(|e| panic!("{text}: {e}"))
+}
+
+fn objects_from_5(extra: &[&str]) -> BTreeMap<ObjectId, Object> {
+    (extra.iter().zip(5..))
+        .map(|(text, n)| {
+            let object = parsed(text);
+            let stream = (object.as_dict())
+                .filter(|dict| dict.has(b"Length"))
+                .map(|dict| Object::stream(dict.clone()));
+            ((n, 0), stream.unwrap_or(object))
+        })
+        .collect()
+}
+
+/// `resources` read, `extra` its objects, under the default caps.
+fn res_cx(resources: &str, extra: &[&str]) -> ResCx {
+    let (resources, objects) = (parsed(resources), objects_from_5(extra));
+    let resolve = |id: ObjectId| objects.get(&id);
+    ResCx::read(resolve, Some(&resources), &Limits::DEFAULT).unwrap()
+}
+
+/// `ResCx` of these names and counts.
+fn counted(names: &[(&str, u32)]) -> ResCx {
+    ResCx::new(names.iter().map(|&(n, c)| (n.as_bytes().to_vec(), c)))
+}
+
+#[test]
+fn color_spaces_count_their_components() {
+    let resources = "<< /ColorSpace 7 0 R >>";
+    let spaces = "<< /Icc [/ICCBased 5 0 R] /Cmyk /DeviceCMYK /Gray 6 0 R
+        /Idx [/Indexed /DeviceRGB 1 (abcdef)]
+        /N2 [/DeviceN [/a /b] /DeviceRGB << /FunctionType 2 /Domain [0 1] /N 1 /C0 [0 0 0] >>]
+        /Lab [/Lab << /WhitePoint [1 1 1] >>] /Odd 7 >>";
+    let res = res_cx(resources, &["<< /Length 0 /N 4 >>", "/DeviceGray", spaces]);
+    let want = counted(&[
+        ("Icc", 4),
+        ("Cmyk", 4),
+        ("Gray", 1),
+        ("Idx", 1),
+        ("N2", 2),
+        ("Lab", 3),
+        ("Odd", 3),
+    ]);
+    assert_eq!(res, want);
+    let nothing = |_: ObjectId| None;
+    assert_eq!(
+        ResCx::read(nothing, None, &Limits::DEFAULT),
+        Ok(ResCx::none())
+    );
+    // An image in one is sized by it.
+    assert_image("/W 1 /H 1 /BPC 8 /CS /Icc", b" EI ", &res);
+}
+
+#[test]
+fn a_name_with_no_space_there_is_left_out() {
+    // Not read as 3: PDFium has no space at all, so one bit of one component.
+    let res = res_cx("<< /ColorSpace << /X 99 0 R /Y /DeviceCMYK >> >>", &[]);
+    assert_eq!(res, counted(&[("Y", 4)]));
+    assert_image("/W 8 /H 1 /BPC 8 /CS /X", b"a", &res);
+    // What's there and doesn't load is 3.
+    let res = res_cx("<< /ColorSpace << /X 5 0 R >> >>", &["null"]);
+    assert_eq!(res, counted(&[("X", 3)]));
+}
+
+#[test]
+fn resources_are_reached_as_pdfium_reaches_them() {
+    let x = counted(&[("X", 4)]);
+    let spaces = "<< /X /DeviceCMYK >>";
+    let of = "<< /ColorSpace 5 0 R >>";
+    // A stream's dictionary, for `/Resources` or for `/ColorSpace`.
+    let stream = "<< /Length 0 /ColorSpace << /X /DeviceCMYK >> >>";
+    assert_eq!(res_cx("5 0 R", &[stream]), x);
+    let stream = res_cx(of, &["<< /Length 0 /X /DeviceCMYK >>"]);
+    assert_eq!(stream, counted(&[("X", 4), ("Length", 3)]));
+    // Through two references, and no more, and that's no error.
+    assert_eq!(res_cx(of, &["6 0 R", spaces]), x);
+    assert_eq!(res_cx(of, &["6 0 R", "7 0 R", spaces]), ResCx::none());
+    assert_eq!(res_cx("5 0 R", &["5 0 R"]), ResCx::none());
+    // No dictionary at all.
+    assert_eq!(res_cx("<< >>", &[]), ResCx::none());
+    assert_eq!(res_cx("<< /ColorSpace [/X] >>", &[]), ResCx::none());
+    assert_eq!(res_cx("/ColorSpace", &[]), ResCx::none());
+    // A key's last entry, and an empty key isn't one.
+    let twice = "<< /ColorSpace << /X /G /X /DeviceCMYK /Y /G / /G >> >>";
+    assert_eq!(res_cx(twice, &[]), counted(&[("X", 4), ("Y", 1)]));
+}
+
+/// A resolver that fails on every object, as `why` says.
+#[derive(Clone, Copy)]
+struct Failing(Why);
+
+impl<'o> Resolve<'o> for Failing {
+    fn resolve(&self, _: ObjectId) -> Option<&'o Object> {
+        None
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        Err(Unreadable::new(id, self.0, "it fails"))
+    }
+}
+
+#[test]
+fn a_read_that_fails_is_the_err_whole() {
+    let read = |why, text: &str| {
+        let resources = parsed(text);
+        ResCx::read(Failing(why), Some(&resources), &Limits::DEFAULT)
+    };
+    let shapes = [
+        // `/Resources`, `/ColorSpace`, an entry, and what an entry holds.
+        "5 0 R",
+        "<< /ColorSpace 5 0 R >>",
+        "<< /ColorSpace << /Y /G /X 5 0 R >> >>",
+        "<< /ColorSpace << /X [/ICCBased 5 0 R] >> >>",
+    ];
+    for why in [Why::Limit, Why::Locked, Why::Source] {
+        for shape in shapes {
+            let e = read(why, shape).unwrap_err();
+            assert_eq!((e.id, e.why), ((5, 0), why), "{shape}");
+        }
+    }
+    // What's damaged isn't there.
+    assert_eq!(read(Why::Damaged, shapes[0]), Ok(ResCx::none()));
+    assert_eq!(read(Why::Damaged, shapes[1]), Ok(ResCx::none()));
+    assert_eq!(read(Why::Damaged, shapes[2]), Ok(counted(&[("Y", 1)])));
+    assert_eq!(read(Why::Damaged, shapes[3]), Ok(counted(&[("X", 3)])));
+}
+
+#[test]
+fn limits_color_caps_what_is_counted() {
+    let mut low = Limits::DEFAULT;
+    low.color.space_depth = 0;
+    // In the resources: an underlying space past the cap doesn't load.
+    let resources = parsed("<< /ColorSpace << /X [/Pattern /DeviceRGB] >> >>");
+    let nothing = |_: ObjectId| None;
+    assert_eq!(
+        ResCx::read(nothing, Some(&resources), &low),
+        Ok(counted(&[("X", 1)]))
+    );
+    // And in an image's array, the same.
+    let content = b"BI /W 1 /H 1 /BPC 8 /CS [/Pattern /DeviceRGB] ID abcd EI Q";
+    assert_eq!(image_data(content, &Limits::DEFAULT), b"abcd");
+    assert_eq!(image_data(content, &low), b"a");
+}
+
+/// The data of the inline image first in `s`, read under `lim`.
+fn image_data<'a>(s: &'a [u8], lim: &Limits) -> &'a [u8] {
+    let none = ResCx::none();
+    let op = operations(s, &none, lim).next().unwrap().unwrap();
+    &s[op.inline_image().unwrap().data()]
+}
+
+#[test]
+fn an_images_array_is_counted_as_the_resources_would_count_it() {
+    let rows: [(&str, usize); 20] = [
+        ("[/DeviceGray]", 1),
+        ("[/CMYK]", 4),
+        ("[/Foo]", 3),
+        ("[/DeviceCMYK 1]", 3),
+        ("[/G 1]", 3),
+        ("[/CalGray 7]", 3),
+        ("[/CalGray << /WhitePoint [1 1 1] >>]", 1),
+        ("[/CalGrayX << /WhitePoint [1 1 1] >>]", 1),
+        ("[(CalGray) << /WhitePoint [1 1 1] >>]", 1),
+        ("[/ICCBased << /N 4 >>]", 3),
+        ("[/Indexed /DeviceRGB 1]", 3),
+        ("[/Indexed /DeviceRGB 1 <00>]", 1),
+        ("[/IndexedX /RGB 1 <00>]", 1),
+        ("[/Separation /X]", 3),
+        ("[/Separation /None]", 1),
+        ("[/Pattern]", 1),
+        ("[/Pattern /DeviceRGB]", 4),
+        ("[/Pattern /CMYK]", 5),
+        ("[/Pattern /G 7]", 2),
+        ("[/Pattern /Pattern]", 3),
+    ];
+    let none = ResCx::none();
+    for (array, want) in rows {
+        let data = &b"abcdefgh"[..want];
+        assert_image(&format!("/W 1 /H 1 /BPC 8 /CS {array}"), data, &none);
+        let named = res_cx(&format!("<< /ColorSpace << /X {array} >> >>"), &[]);
+        assert_eq!(named, counted(&[("X", want as u32)]), "{array}");
+        assert_image("/W 1 /H 1 /BPC 8 /CS /X", data, &named);
+    }
+    // What isn't an array has 3, and an array past `Limits::values` reads as
+    // nothing, so it too.
+    assert_image("/W 1 /H 1 /BPC 8 /CS << /A 1 >>", b"abc", &none);
+    assert_image("/W 1 /H 1 /BPC 8 /CS (DeviceGray)", b"abc", &none);
+    let mut low = Limits::DEFAULT;
+    low.values = 1;
+    let content = b"BI /W 1 /H 1 /BPC 8 /CS [/G] ID abc EI Q";
+    assert_eq!(image_data(content, &low), b"abc");
+    assert_eq!(image_data(content, &Limits::DEFAULT), b"a");
+}
+
 #[test]
 fn unfiltered_data_is_its_exact_size() {
     let none = ResCx::none();
@@ -1016,9 +1217,11 @@ fn inline_images_read_as_pdfium_reads_them() {
         (one(&format!("{gray} /F [[/AHx]]"), "41>"), "ID 41>", 1),
         (one(&format!("{gray} /F [foo /AHx]"), "41>"), "41>", 1),
         (one(&format!("{gray} /F [) /AHx]"), "41>"), "41>", 1),
-        // A color space's array alike: its family its first element that's
-        // an object, and a DeviceN space's colorants, an array inside it,
-        // none, so one of 3 components, PDFium's for what it can't make out.
+        // A color space's array alike: a word that's no object isn't in it,
+        // so this is an array of one; and the colorants of a DeviceN space,
+        // an array inside it, open none and its first `]` ends it, so that's
+        // no DeviceN space, and of 3 components, PDFium's for what doesn't
+        // load.
         (
             one("/W 3 /H 1 /BPC 8 /CS [foo /DeviceGray]", "abcdefghi"),
             "abc",

@@ -52,8 +52,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdf_content_streams::pdf_objects::parse::Parser;
-use pdf_content_streams::pdf_objects::{Dict, Object, Rules, Str, Value};
-use pdf_content_streams::{ImageStream, Limits, Operand, ResCx, family_components, operations};
+use pdf_content_streams::pdf_objects::{Dict, Object, ObjectId, Rules, Str, Value};
+use pdf_content_streams::{ImageStream, Limits, Operand, ResCx, operations};
 
 /// A case's text or data longer than this is written by its length and
 /// FNV-1a 64 hash, as the oracle writes it.
@@ -185,16 +185,18 @@ struct Point {
 /// The page's resources, as PDFium's object parser reads them.
 struct Res {
     fonts: HashMap<Vec<u8>, Vec<u8>>,
-    spaces: Vec<(Vec<u8>, u32)>,
+    spaces: ResCx,
 }
 
 impl Res {
     fn read(bytes: &[u8]) -> Res {
-        let dict = Parser::at(bytes, 0)
+        let read = Parser::at(bytes, 0)
             .rules(Rules::Pdfium)
             .value(&mut ())
-            .ok()
-            .and_then(|o| o.as_dict().cloned())
+            .ok();
+        let dict = (read.as_ref())
+            .and_then(Object::as_dict)
+            .cloned()
             .unwrap_or_default();
         let sub = |key: &[u8]| -> Dict {
             dict.get(key)
@@ -208,16 +210,9 @@ impl Res {
                 Some((k.to_vec(), base.to_vec()))
             })
             .collect();
-        let spaces = (sub(b"ColorSpace").iter())
-            .filter_map(|(k, v)| {
-                let family = match v.value() {
-                    Value::Name(n) => n.clone(),
-                    Value::Array(a) => a.first()?.as_name()?.to_vec(),
-                    _ => return None,
-                };
-                Some((k.to_vec(), family_components(&family)))
-            })
-            .collect();
+        // The resources are written in place, with no objects of their own.
+        let nothing = |_: ObjectId| None;
+        let spaces = ResCx::read(nothing, read.as_ref(), &Limits::DEFAULT).unwrap();
         Res { fonts, spaces }
     }
 }
@@ -420,10 +415,10 @@ impl Reader<'_> {
     }
 
     fn read(&mut self, content: &[u8]) {
-        let res = ResCx::new(self.res.spaces.iter().cloned());
+        let res = self.res;
         let lim = self.lim;
         let mut fast: Option<[f32; 6]> = None;
-        for op in operations(content, &res, &lim) {
+        for op in operations(content, &res.spaces, &lim) {
             let Ok(op) = op else { break };
             let n = |i: usize| op.arg(i).map_or(0.0, |o| o.number());
             let count = op.operands().len();

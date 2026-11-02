@@ -327,6 +327,7 @@ version = "0.1.0"
 dependencies = [
  "hayro-ccitt",
  "memchr",
+ "pdf-color",
  "pdf-filters",
  "pdf-objects",
  "pdf-tokenizer",

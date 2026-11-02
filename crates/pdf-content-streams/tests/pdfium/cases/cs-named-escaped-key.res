@@ -1,0 +1,1 @@
+<< /ColorSpace << /#58 /DeviceCMYK >> >>

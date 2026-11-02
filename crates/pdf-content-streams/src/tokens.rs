@@ -61,7 +61,8 @@ pub enum Tok<'a> {
 ///   as PDFium reads an integer from it, in 32 bits (a real cut to its
 ///   whole part, `true` 1, what's no number 0). With no color space, an
 ///   image mask's, one bit of one component; a name `res` doesn't have
-///   reads as none, as in PDFium.
+///   reads as none, as in PDFium. An array is counted as PDFium counts it,
+///   as one the resources named would be ([`ResCx::read`]).
 /// - `/AHx` to its `>`, `/A85` past the first byte that's none of its
 ///   digits or the white-space it passes over (its `~`, and a `>` after
 ///   it), and `/RL` to its end-of-data byte, as PDFium's decoders end

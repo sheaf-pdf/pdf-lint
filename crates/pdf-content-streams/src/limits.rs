@@ -28,7 +28,9 @@ pub struct Limits {
     /// reads as none. What a value holds in memory grows with its count
     /// of values more than with its bytes (an empty array is two bytes
     /// written, and tens in memory), so this caps that. 2^25 by default,
-    /// as pdf-objects' parser has it.
+    /// as pdf-objects' parser has it. An inline image's color space written
+    /// as an array is read so, and past it counts as one that doesn't load,
+    /// 3 components.
     pub values: usize,
     /// An inline image's data, in bytes: 64 MiB by default.
     pub inline_image: usize,
@@ -70,6 +72,10 @@ pub struct Limits {
     /// ([`CodedEnds`]). Turning the feature on changes nothing until a
     /// reading asks for it here.
     pub coded_ends: CodedEnds,
+    /// The caps a color space is counted under, in an inline image's array
+    /// and by [`ResCx::read`](crate::ResCx::read): past one, a branch of it
+    /// doesn't load, as [`pdf_color::Limits`] says, and that's no error.
+    pub color: pdf_color::Limits,
 }
 
 /// How an inline image's DCT and CCITTFax data's end is found
@@ -104,6 +110,7 @@ impl Limits {
         image_ends: 256 << 20,
         content: 256 << 20,
         coded_ends: CodedEnds::StandIn,
+        color: pdf_color::Limits::DEFAULT,
     };
 }
 

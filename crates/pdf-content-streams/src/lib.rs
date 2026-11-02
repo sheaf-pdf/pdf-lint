@@ -13,8 +13,10 @@
 //!   ends it. An inline image's dictionary is read as PDFium's
 //!   `Handle_BeginImage` structures it, a `BI` with a keyword where a key
 //!   should be no image but an operator of its own; and its data is found
-//!   by PDFium's `ReadInlineStream` rules, from the components of the
-//!   color spaces the caller gives ([`ResCx`]): Flate and LZW data decoded
+//!   by PDFium's `ReadInlineStream` rules, from the components of its color
+//!   space, an array in its dictionary or a name in the resources, each
+//!   counted by [pdf-color](https://crates.io/crates/pdf-color) as PDFium
+//!   counts it ([`ResCx`]): Flate and LZW data decoded
 //!   to where the decoder stops reading it, as PDFium decodes it, by
 //!   [pdf-filters](https://crates.io/crates/pdf-filters), Flate on
 //!   zlib-rs; DCT and CCITTFax data, which PDFium decodes too, by a
@@ -85,10 +87,11 @@
 //!   without some of its keys ([`without_keys`]), made with what's taken
 //!   out and read again together ([`Spliced::streams`]).
 //!
-//! No resolver: what's read from the file, the streams decoded, the color
-//! spaces' components and the property lists, the caller gives; and the
-//! writer reads a resources dictionary's references through the caller's
-//! [`Resolve`](pdf_objects::Resolve) ([`Reserved::read`]).
+//! Reading content takes no resolver: what's read from the file, the streams
+//! decoded, the color spaces' components and the property lists, the caller
+//! gives. A resources dictionary's references are read through the caller's
+//! [`Resolve`](pdf_objects::Resolve), for its color spaces' components
+//! ([`ResCx::read`]) and by the writer ([`Reserved::read`]).
 //!
 //! # Features
 //!
@@ -136,9 +139,13 @@ mod write;
 /// with.
 pub use pdf_objects;
 
+/// pdf-color, whose [`Limits`](pdf_color::Limits) [`Limits::color`] is:
+/// named through it, it's the version this crate is built with.
+pub use pdf_color;
+
 pub use balance::{Balance, balance};
 pub use error::{Error, ErrorKind};
-pub use inline::{ImageStream, InlineImage, ResCx, family_components};
+pub use inline::{ImageStream, InlineImage, ResCx};
 pub use limits::{CodedEnds, Limits};
 pub use marked::{Marked, MarkedEvent, MarkedNest, Properties, Props, marked};
 pub use names::{Kept, NameSet, ResKind, kept, names_used};

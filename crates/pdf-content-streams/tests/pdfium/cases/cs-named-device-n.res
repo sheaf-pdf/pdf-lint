@@ -1,0 +1,1 @@
+<< /ColorSpace << /X [/DeviceN [/A /B /C] /DeviceGray << /FunctionType 2 /Domain [0 1] /N 1 >>] >> >>

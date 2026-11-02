@@ -1,0 +1,1 @@
+<< /ColorSpace << /X [/Indexed /DeviceRGB 1 <00>] >> >>

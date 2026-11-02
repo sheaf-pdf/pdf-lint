@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
 
+use pdf_color::Spaces;
 use pdf_filters::{Backend, Faults, Predictor, decode_prefix_into};
+use pdf_objects::{Object, ObjectId, Resolve, Unreadable};
 use pdf_tokenizer::decode::{self, pdfium};
 use pdf_tokenizer::is_white_space;
 
@@ -16,14 +18,15 @@ use crate::data::{Places, RunLength, Searched, a85_end, a85_stop, ei_scan, find}
 use crate::error::{Error, ErrorKind};
 use crate::fault::{self, Fault, Sink};
 use crate::limits::{CodedEnds, Limits};
-use crate::operand::{Operand, WORD, hex, iso_name, literal, name};
+use crate::operand::{Operand, WORD, hex, iso_name, literal, name, object};
 use crate::scan::{
     Event, Raw, TOP, UNCAPPED, Visit, elements, is_number, is_space, next_raw, walk,
 };
 
 /// What reading content needs of the resources it's drawn with: how many
 /// components each named color space has, which sizes an unfiltered
-/// inline image drawn in one ([`tokens`](crate::tokens)).
+/// inline image drawn in one ([`tokens`](crate::tokens)). [`ResCx::read`]
+/// counts them from a resources dictionary, as PDFium counts them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResCx {
     spaces: HashMap<Vec<u8>, u32>,
@@ -35,36 +38,70 @@ impl ResCx {
         ResCx::default()
     }
 
-    /// Color spaces by name, each with its components: each name as a
-    /// `/ColorSpace` dictionary's key, its `#` escapes decoded as PDFium
-    /// decodes them (pdf-objects reads a key so by PDFium's rules), as an
-    /// image's color space is looked up by its name read so. A key read by
-    /// ISO 32000-2's rules, as pdf-structure reads a file, is the same
-    /// name wherever the two readings of it agree: where it has no `#` that
-    /// ISO reads otherwise and is no longer than PDFium reads
-    /// ([`Fault::Name`], [`Fault::Long`]). Where it's otherwise, the key's
-    /// bytes as written (pdf-objects' `Entry::key_at`), read by
-    /// [`name`](crate::name), give PDFium's. PDFium
-    /// counts a space named by a family alone as [`family_components`]
-    /// does, an array by its first element the same, but an ICCBased
-    /// space by its stream's `/N` (1, 3 or 4, and 3 otherwise) and a
-    /// DeviceN space by its colorants' names (3 when there are none), and
-    /// 3 for what it can't make out.
+    /// The color spaces `resources` names, a page's or a form's `/Resources`
+    /// as written, each with its components as PDFium counts them
+    /// ([`pdf_color::components`]), under `limits.color`: none where it has no
+    /// `/ColorSpace` dictionary as PDFium reaches one
+    /// ([`Spaces`](pdf_color::Spaces)), and no entry for a name whose value is
+    /// a reference to nothing, as PDFium has no space there. An object that's
+    /// [`Why::Damaged`](pdf_objects::Why::Damaged) isn't there, and any other
+    /// failure to read one is the `Err`, whole. Each name is a key as the
+    /// reader of the file read it; [`ResCx::new`] says where that's not
+    /// PDFium's.
+    ///
+    /// A form with no `/ColorSpace` dictionary of its own draws in its
+    /// page's, as PDFium reads it: [`Spaces::read`](pdf_color::Spaces::read)
+    /// asks that. Nothing is kept between calls, so a caller reading many
+    /// pages of the same resources can hold what this gives.
+    ///
+    /// ```
+    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, dict};
+    /// use pdf_content_streams::{Limits, ResCx, operations};
+    ///
+    /// let space = Object::from(vec![Object::from("Pattern"), Object::from("DeviceRGB")]);
+    /// let resources = Object::from(dict! { "ColorSpace" => dict! { "CS0" => space } });
+    /// let nothing = |_: ObjectId| None;
+    /// let res = ResCx::read(nothing, Some(&resources), &Limits::DEFAULT).unwrap();
+    /// assert_eq!(res, ResCx::new([(b"CS0".to_vec(), 4)]));
+    ///
+    /// // An image drawn in it is sized by it, four components of 8 bits.
+    /// let content = b"BI /W 1 /H 1 /BPC 8 /CS /CS0 ID EI x EI Q";
+    /// let mut read = operations(content, &res, &Limits::DEFAULT);
+    /// let image = read.next().unwrap().unwrap().inline_image().unwrap();
+    /// assert_eq!(&content[image.data()], b"EI x");
+    /// ```
+    pub fn read<'o, R: Resolve<'o> + Copy>(
+        objects: R,
+        resources: Option<&'o Object>,
+        limits: &Limits,
+    ) -> Result<ResCx, Unreadable> {
+        let Some(named) = Spaces::read(objects, resources)? else {
+            return Ok(ResCx::none());
+        };
+        let mut spaces = HashMap::new();
+        for space in named.iter() {
+            if let Some(count) = pdf_color::components(objects, space.value, &limits.color)? {
+                spaces.insert(space.key.to_vec(), count);
+            }
+        }
+        Ok(ResCx { spaces })
+    }
+
+    /// Color spaces by name, each with its components, which
+    /// [`ResCx::read`] counts: each name as a `/ColorSpace` dictionary's
+    /// key, its `#` escapes decoded as PDFium decodes them (pdf-objects
+    /// reads a key so by PDFium's rules), as an image's color space is
+    /// looked up by its name read so. A key read by ISO 32000-2's rules, as
+    /// pdf-structure reads a file, is the same name wherever the two
+    /// readings of it agree: where it has no `#` that ISO reads otherwise
+    /// and is no longer than PDFium reads ([`Fault::Name`],
+    /// [`Fault::Long`]). Where it's otherwise, the key's bytes as written
+    /// (pdf-objects' `Entry::key_at`, [`pdf_color::Named::key_at`]), read by
+    /// [`name`](crate::name), give PDFium's.
     pub fn new(spaces: impl IntoIterator<Item = (Vec<u8>, u32)>) -> ResCx {
         ResCx {
             spaces: spaces.into_iter().collect(),
         }
-    }
-}
-
-/// The components a color space family has with no more said: what a
-/// name in the resources, or an array's first element, gives. PDFium
-/// gives what it can't load 3.
-pub fn family_components(family: &[u8]) -> u32 {
-    match family {
-        b"G" | b"DeviceGray" | b"CalGray" | b"I" | b"Indexed" | b"Separation" | b"Pattern" => 1,
-        b"CMYK" | b"DeviceCMYK" => 4,
-        _ => 3,
     }
 }
 
@@ -615,15 +652,19 @@ impl<'a, 'r> Images<'a, 'r> {
         if cs.first() != Some(&b'[') {
             return Some(3);
         }
-        // Its family, the array's first element that's an object, as
-        // PDFium reads the array ([`elements`]). A DeviceN space names its
-        // colorants in an array, its second element, which an array here
-        // never holds, as PDFium opens none in an array outside a
-        // dictionary: so it's one PDFium can't make out, as
-        // `family_components` counts it.
-        let first = elements(cs).into_iter().find(|&(_, object)| object);
-        let family = first.and_then(|(first, _)| name(first));
-        Some(family.map_or(3, |family| family_components(&family).into()))
+        // An array is the object PDFium's parser holds ([`object`]), counted
+        // as a resources dictionary's would be. A DeviceN space names its
+        // colorants in an array, which an array here never holds, as PDFium
+        // opens none in an array outside a dictionary: so it's one that
+        // doesn't load. It holds no reference, as content has none to read,
+        // so nothing is ever asked of the resolver, and what that could
+        // answer, none or a failure, can't come.
+        let Some(space) = object(cs, &self.lim) else {
+            return Some(3);
+        };
+        let nothing = |_: ObjectId| None;
+        let count = pdf_color::components(nothing, &space, &self.lim.color);
+        Some(count.ok().flatten().map_or(3, u64::from))
     }
 
     /// Where an image's Flate or LZW data from `start` ends, as PDFium's

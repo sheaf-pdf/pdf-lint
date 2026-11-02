@@ -1,0 +1,1 @@
+<< /ColorSpace << /X /Y /Y /DeviceCMYK >> >>
