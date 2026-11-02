@@ -284,9 +284,12 @@ impl Face {
             let room = font.table_data(Tag::new(b"hmtx")).map_or(0, |t| t.len());
             self.exact &= matches!(head.index_to_loc_format(), 0 | 1);
             self.exact &= metrics != 0 && metrics <= room;
-            // FreeType reads a `cmap` as far as it goes, where read-fonts refuses one whose
-            // records don't fit, so which glyph a code draws isn't known.
-            self.exact &= font.cmap().is_ok() || font.table_data(Tag::new(b"cmap")).is_none();
+            // FreeType reads a `cmap` as far as it goes, where read-fonts has none of one
+            // whose records don't fit, so which glyph a code draws isn't known.
+            self.exact &= match font.cmap() {
+                Ok(cmap) => usize::from(cmap.num_tables()) == cmap.encoding_records().len(),
+                Err(_) => font.table_data(Tag::new(b"cmap")).is_none(),
+            };
         }
         Some(())
     }

@@ -3214,8 +3214,6 @@ fn a_composite_s_components_end_at_skrifa_s_bound() {
         assert_eq!(boxed((40, 9, 0), limits), None);
         assert_eq!(boxed((0, 2049, 0), limits), None);
     }
-    // A composite of empty glyphs draws nothing, as an empty glyph does, and isn't unknown.
-    assert_eq!(boxed((0, 0, 3), default), Some(Rect::default()));
     assert_eq!(boxed((0, 1, 2047), default), triangle);
     assert_eq!(boxed((0, 1, 2048), default), None);
     assert_eq!(boxed((0, 1, 2048), raised), triangle);
@@ -3925,6 +3923,13 @@ fn what_skrifa_reads_otherwise_is_unknown() {
         p[cmap + 2..cmap + 4].copy_from_slice(&[1, 1]);
     };
     assert_eq!(patched(&records), (true, None, None));
+    // A composite of an empty glyph draws nothing, as an empty glyph does, and isn't unknown.
+    let mut program = truetype_program();
+    let (glyf, len) = sfnt_table(&program, b"glyf");
+    program[glyf + len - 7] = 3;
+    let mut pdf = Pdf::default();
+    let font = identity_truetype(&mut pdf, program);
+    assert_eq!(font_of(&pdf, font).char_box(5), Some(Rect::default()));
     // Glyph 1's contours past what it holds: still a font of boxes, this one unknown.
     let (exact, first, second) = patched(&|p| {
         let (glyf, _) = sfnt_table(p, b"glyf");

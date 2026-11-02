@@ -1043,7 +1043,8 @@ def programs():
         font("tt-hmetrics-" + name, b"TrueType", b"FontFile2", tt[:at + 34] + struct.pack(">H", value) + tt[at + 36:], given)
     at, _ = sfnt_table(tt, b"cmap")
     font("tt-cmap-count", b"TrueType", b"FontFile2", tt[:at + 2] + b"\1\1" + tt[at + 4:], given, s=b"(AB g)")
-    at, _ = sfnt_table(tt, b"glyf")
+    at, length = sfnt_table(tt, b"glyf")
+    font("tt-composite-of-empty", b"TrueType", b"FontFile2", tt[:at + length - 7] + b"\3" + tt[at + length - 6:], given, s=b"(CA)")
     font("tt-glyph-broken", b"TrueType", b"FontFile2", tt[:at + 36] + b"\x7f" + tt[at + 37:], given, s=b"(! A)")
 
     # Units per em.
