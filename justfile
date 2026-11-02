@@ -81,6 +81,7 @@ test:
     cargo test --locked -p pdf-linearize --features lopdf
     cargo test --locked -p pdf-fonts --features structure,predefined-cmaps
     cargo test --locked -p pdf-fonts --no-default-features
+    cargo test --locked -p pdf-fonts --no-default-features --features structure --test pdfium
 
 # qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
 # pinned SHA-256 (from the release's qpdf-12.4.2.sha256), kept in target/.

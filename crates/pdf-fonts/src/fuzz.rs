@@ -385,7 +385,8 @@ pub(crate) fn digest(font: &Font) -> String {
     );
     assert!(none == 0 && most >= all && (font.outlined() || all == usize::MAX));
     let more = format!(
-        "{:?} {:?} {:?} {extent:?} {:?} {:?} {:?} {:?} {:?} {}\n",
+        "{} {:?} {:?} {:?} {extent:?} {:?} {:?} {:?} {:?} {:?} {}\n",
+        font.loaded(),
         font.kind(),
         font.approx(),
         font.metrics(),
@@ -698,8 +699,8 @@ fn program_fixtures() -> Vec<Vec<u8>> {
 }
 
 /// What the fuzzer begins from, and the tests run on: Type 1 programs, as written
-/// and in a PFB's segments, integers in a row past and within the caps, names of
-/// each kind, and a font of each kind in its parts.
+/// and in a PFB's segments, integers in a row, names of each kind, and a font of each
+/// kind in its parts.
 pub fn fixtures() -> Vec<Vec<u8>> {
     let program = type1_program();
     let eexec = program.windows(6).position(|w| w == b"eexec\n").unwrap() + 6;
@@ -723,7 +724,6 @@ pub fn fixtures() -> Vec<Vec<u8>> {
         pfb,
         [&program[..eexec], &hex[..]].concat(),
         type1_integers_program(8),
-        type1_integers_program(257),
         b"%!PS-AdobeFont-1.0: F\n/N { { { } } } def\n(a(b)\\)) <41> << >> [ ] % c\n\
           8#17 2#1 currentfile eexec\n"
             .to_vec(),

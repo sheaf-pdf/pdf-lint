@@ -90,8 +90,14 @@ impl<T: Copy> Ranges<T> {
 pub(crate) struct CidMap {
     codespace: Vec<(Vec<u8>, Vec<u8>)>,
     pub(crate) scheme: Scheme,
-    /// Each range's first code and the CID it maps to.
+    /// Each range's first code and the CID it maps to, of those that end within 16 bits,
+    /// which are the only ones that map a code within them, as PDFium's table holds only
+    /// those (`CPDF_CMapParser::HandleCid`).
     pub(crate) cids: Ranges<(u32, u32)>,
+    /// The others, by where they end, for the codes past 16 bits alone: first, last and
+    /// the CID the first maps to. A code is in the first that ends at or past it, or in
+    /// none, as PDFium looks it up (`CPDF_CMap::CIDFromCharCode`).
+    beyond: Vec<(u32, u32, u32)>,
     /// The predefined CMap it uses but Identity, for the codes it maps none of.
     base: Option<&'static predefined::CMap>,
     pub(crate) vertical: bool,
@@ -154,7 +160,7 @@ impl CidMap {
                 cut(id, unknown);
                 break;
             };
-            chain.push(data);
+            chain.push((id, data));
             if let Some(uses) = stream.dict.get(b"UseCMap") {
                 match (uses.as_reference(), uses.as_name()) {
                     (Some(id), _) => next = Some(id),
@@ -166,16 +172,23 @@ impl CidMap {
         let mut map = CidMap::default();
         let mut ranges = Vec::new();
         if let Some(name) = base {
-            map.uses(reader, name, &mut ranges, unknown);
+            let last = chain.last().map(|&(id, _)| id);
+            map.uses(reader, last, name, &mut ranges, unknown);
         }
-        for data in chain.iter().skip(1).rev() {
-            map.parse(reader, data, &mut ranges, unknown);
+        for (id, data) in chain.iter().skip(1).rev() {
+            map.parse(reader, *id, data, &mut ranges, unknown);
         }
         *unknown |= !ranges.is_empty() || !map.codespace.is_empty() || map.vertical;
-        if let Some(data) = chain.first() {
-            map.parse(reader, data, &mut ranges, unknown);
+        if let Some((id, data)) = chain.first() {
+            map.parse(reader, *id, data, &mut ranges, unknown);
         }
-        map.cids = Ranges::new(&ranges, true);
+        let (within, beyond): (Vec<_>, Vec<_>) = ranges.iter().partition(|r| r.1 <= 0xffff);
+        map.cids = Ranges::new(&within, true);
+        map.beyond = beyond
+            .iter()
+            .map(|&(lo, hi, (_, cid))| (lo, hi, cid))
+            .collect();
+        map.beyond.sort_by_key(|range| range.1);
         map.scheme = match map.codespace.len() {
             0 => Scheme::TwoBytes,
             1 if map.codespace[0].0.len() == 2 => Scheme::TwoBytes,
@@ -183,6 +196,18 @@ impl CidMap {
             _ => Scheme::Mixed,
         };
         Ok(map)
+    }
+
+    /// The range that maps `code`, its first code and the CID that maps to: one within
+    /// 16 bits for a code within them, the last given that covers it, and for a code past
+    /// them the first of [`CidMap::beyond`] that ends at or past it.
+    pub(crate) fn range_of(&self, code: u32) -> Option<(u32, u32)> {
+        if code <= 0xffff {
+            return self.cids.get(code);
+        }
+        let i = self.beyond.partition_point(|range| range.1 < code);
+        let &(first, _, cid) = self.beyond.get(i)?;
+        (first <= code).then_some((first, cid))
     }
 
     /// The CID its predefined base maps `code` to, by the code's length as its
@@ -206,12 +231,13 @@ impl CidMap {
         }
     }
 
-    /// The mappings of `data`, a CMap, onto `ranges`: its codespace ranges,
+    /// The mappings of `data`, the CMap stream `id`, onto `ranges`: its codespace ranges,
     /// `cidrange`s and `cidchar`s, its `/WMode`, and the predefined CMap its
     /// `usecmap` names; read as far as it lexes.
     fn parse<'o, O: Resolve<'o> + Streams, S: Sink + ?Sized>(
         &mut self,
         reader: &Reader<'_, O, S>,
+        id: ObjectId,
         data: &[u8],
         ranges: &mut Vec<CidRange>,
         unknown: &mut bool,
@@ -254,7 +280,7 @@ impl CidMap {
                 }
                 b"usecmap" => {
                     if let Some(name) = operation_name(&operation, 0) {
-                        self.uses(reader, &name, ranges, unknown);
+                        self.uses(reader, Some(id), &name, ranges, unknown);
                     }
                 }
                 _ => {}
@@ -262,13 +288,14 @@ impl CidMap {
         }
     }
 
-    /// The predefined CMap `name` used, under what's mapped after it: Identity's
-    /// codespace and CIDs; another's CIDs, where the build has it, for the codes
+    /// The predefined CMap `name` used by the stream `by`, under what's mapped after it:
+    /// Identity's codespace and CIDs; another's CIDs, where the build has it, for the codes
     /// nothing else maps. PDFium maps those to CID 0, so either is guessed (`unknown`),
     /// as one the build hasn't is.
     fn uses<'o, O: Resolve<'o> + Streams, S: Sink + ?Sized>(
         &mut self,
         reader: &Reader<'_, O, S>,
+        by: Option<ObjectId>,
         name: &[u8],
         ranges: &mut Vec<CidRange>,
         unknown: &mut bool,
@@ -279,7 +306,7 @@ impl CidMap {
         } else {
             let bundled = predefined::bundled(name);
             if bundled.is_none() {
-                reader.tell(None, None, Fault::PredefinedUnknown);
+                reader.tell(by, None, Fault::PredefinedUnknown);
             }
             self.base = bundled.or(self.base);
         }

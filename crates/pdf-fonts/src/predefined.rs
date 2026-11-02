@@ -66,7 +66,7 @@ impl Collection {
         }
     }
 
-    /// The CMap from its CIDs to their text: Adobe-<collection>-UCS2.
+    /// The CMap from its CIDs to their text: `Adobe-<collection>-UCS2`.
     #[cfg(feature = "predefined-cmaps")]
     pub(crate) fn to_unicode(self) -> Option<&'static CMap> {
         bundled(match self {

@@ -75,7 +75,7 @@ pub(crate) struct Face {
     /// The most glyphs a TrueType glyph's composites may draw, and how deep.
     composites: (u64, u8),
     /// A Type 1 program read, once, as it's opened: read-fonts' font, and
-    /// what the scan found of it ([`type1::scan`]).
+    /// what the scan found of it ([`type1::read`]).
     type1: Option<(Type1Font, type1::Scanned)>,
     /// A bare CID-keyed CFF's glyph by CID, as FreeType maps them
     /// (`cff_charset_cid_to_gindex`): the first its charset gives the CID,
@@ -209,6 +209,7 @@ impl Face {
         let head = font.head().ok()?;
         let hhea = font.hhea().ok()?;
         font.hmtx().ok()?;
+        let hhea_metrics = hhea.number_of_h_metrics();
         self.upem = head.units_per_em();
         if !(16..=16384).contains(&self.upem) {
             return None;
@@ -274,6 +275,19 @@ impl Face {
             _ => hhea,
         };
         self.exact &= !tricky(font, named);
+        if self.format == Format::Glyf {
+            // FreeType takes a `loca` as long for any format but 0, read-fonts only for
+            // 1; and with long metrics that don't fit `hmtx`, or none, FreeType reads on
+            // as far as the table goes where skrifa has no glyph's side bearing, which
+            // places its outline.
+            let metrics = usize::from(hhea_metrics) * 4;
+            let room = font.table_data(Tag::new(b"hmtx")).map_or(0, |t| t.len());
+            self.exact &= matches!(head.index_to_loc_format(), 0 | 1);
+            self.exact &= metrics != 0 && metrics <= room;
+            // FreeType reads a `cmap` as far as it goes, where read-fonts refuses one whose
+            // records don't fit, so which glyph a code draws isn't known.
+            self.exact &= font.cmap().is_ok() || font.table_data(Tag::new(b"cmap")).is_none();
+        }
         Some(())
     }
 
@@ -580,6 +594,9 @@ const TRICK_NAMES: [&str; 20] = [
 /// FreeType fails it (`load_truetype_glyph`). With it, what drawing it cost
 /// ([`Face::draw`]).
 fn draw_glyf(font: &FontRef<'_>, gid: u32, glyphs: u32, most: (u64, u8)) -> (Drawn, usize) {
+    if gid >= glyphs {
+        return (Drawn::Missing, 0);
+    }
     let located = font.loca(None).ok().zip(font.glyf().ok());
     let Some((loca, glyf)) = located else {
         return (Drawn::Unknown, 0);
@@ -627,6 +644,10 @@ fn draw_glyf(font: &FontRef<'_>, gid: u32, glyphs: u32, most: (u64, u8)) -> (Dra
     let mut pen = Pen::default();
     let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
     let drawn = match glyph.draw(settings, &mut pen) {
+        // A glyph with data that isn't a composite of empty ones, and no point drawn,
+        // doesn't parse here. Whether FreeType fails it too, by a parser of its own, can't
+        // be told, and this draws it as nothing.
+        Ok(_) if pen.bbox.is_none() && (points > 0 || nodes == 1) => Drawn::Unknown,
         Ok(_) => pen.bbox().map_or(Drawn::Unknown, Drawn::Box),
         Err(_) => Drawn::Unknown,
     };
@@ -673,23 +694,27 @@ fn composite_glyphs(
     glyf: &skrifa::raw::tables::glyf::Glyf<'_>,
     (glyphs, most): (u32, u8),
     gid: u32,
-    depth: u8,
-    counted: &mut HashMap<(u32, u8), Option<(u64, u64)>>,
+    depth: u16,
+    counted: &mut HashMap<(u32, u16), Option<(u64, u64)>>,
     read: &mut usize,
 ) -> Option<(u64, u64)> {
     if gid >= glyphs {
         return None;
     }
-    if depth > most {
+    if depth > u16::from(most) {
         return Some((u64::MAX, 0));
     }
     if let Some(&n) = counted.get(&(gid, depth)) {
         return n;
     }
+    // What's read of the table for it: an entry past the table reads nothing, whatever
+    // it claims.
     let (start, end) = (loca.get_raw(gid as usize), loca.get_raw(gid as usize + 1));
+    let table = glyf.offset_data().len();
     *read += end
         .zip(start)
-        .map_or(0, |(e, s)| e.saturating_sub(s) as usize);
+        .filter(|&(e, s)| s <= e && e as usize <= table)
+        .map_or(0, |(e, s)| (e - s) as usize);
     let n = match loca.get_glyf(GlyphId::new(gid), glyf) {
         Ok(Some(Glyph::Composite(composite))) => {
             let mut drawn = (1u64, 0u64);

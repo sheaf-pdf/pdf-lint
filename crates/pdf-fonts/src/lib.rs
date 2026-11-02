@@ -3,11 +3,11 @@
 //! - **A file's font, as read** ([`Font`]): from its dictionary, over a [`Resolve`] for
 //!   its objects and [`Streams`] for its streams' data, the codes a string is in it,
 //!   each code's CID, width, vertical metrics and text, and how high its glyphs reach,
-//!   each as PDFium reads them, what no real writer writes included. What it can't know it guesses, and says
-//!   ([`FontApprox`]); what isn't as ISO 32000-2 has it is told to a [`Sink`]
-//!   ([`Fault`]), what's read being the same whatever the sink. It fails only where its
-//!   streams decompress past the budget it's read within, or where what it reads
-//!   doesn't read for a reason that's the caller's ([`Error`]).
+//!   each as PDFium reads them, what no real writer writes included. What it can't know
+//!   it guesses, and says ([`FontApprox`]); what isn't as ISO 32000-2 has it is told to a
+//!   [`Sink`] ([`Fault`]), what's read being the same whatever the sink. It fails only
+//!   where its streams decompress past the budget it's read within, or where what it
+//!   reads doesn't read for a reason that's the caller's ([`Error`]).
 //! - **Each font read once** ([`Fonts`], [`FontScope`]): those that are objects, by
 //!   number, kept for every page that draws in them, and charged to each.
 //! - **Simple fonts' encodings and glyph names** ([`Encoding`], [`glyph_text`],
@@ -16,20 +16,17 @@
 //!   Dingbats Glyph List.
 //! - **The standard 14 fonts** ([`Std14`]): the names PDFium takes for each, and
 //!   each one's widths, boxes and heights, from Adobe's metrics.
-//! - **Type 1 tokens** ([`type1::scan`]): a Type 1 program read as far as its
-//!   charstrings by glyph name, bounded by [`Limits`].
-//!
 //! - **Programs,** with the `programs` feature, on by default, through skrifa: each
 //!   glyph's outline box ([`Font::char_box`]), a font's heights where its descriptor
 //!   lacks them, and the text of the codes PDFium's encoding leaves to its program, as
 //!   PDFium's FreeType gives them, each bounded by [`Limits`] and charged to the budget
-//!   ([`FontProgram`]). Without it, and in [`Fonts::for_text`], none's read: a glyph's box
-//!   from one is none, its heights are guessed, and those codes' text by its font's name.
+//!   ([`FontProgram`]). Without it, in [`Font::read_for_text`] and in
+//!   [`Fonts::for_text`], none's read: a glyph's box from one is none, its heights are
+//!   guessed, and those codes' text by its font's name.
 //!
-//! Nothing panics on what it's given. With the `structure`
-//! feature, a pdf-structure `&Reading` gives a font its objects and streams; with
-//! `predefined-cmaps`, a Type 0 font's predefined CMap is Adobe's, where without it it
-//! reads as one the build hasn't.
+//! Nothing panics on what a file holds. With the `structure` feature, a pdf-structure
+//! `&Reading` gives a font its objects and streams; with `predefined-cmaps`, a Type 0
+//! font's predefined CMap is Adobe's, where without it it reads as one the build hasn't.
 //!
 //! ```
 //! use pdf_fonts::{Decoded, Font, Limits, Object, ObjectId, With};
@@ -55,7 +52,8 @@
 //!
 //! The metrics and the glyph lists are Adobe's, each under its own terms, in the
 //! file itself. [`Std14::NOTICE`] is the metrics' notice, for a binary's list of
-//! notices, and the README says what a binary must carry.
+//! notices, and the README says what a binary must carry, of what's taken from
+//! FreeType and of what the features pull in too.
 
 pub use pdf_content_streams;
 pub use pdf_objects::{Dict, Object, ObjectId, Resolve, Span, Unreadable, Why};
@@ -92,7 +90,8 @@ mod std14;
 mod streams;
 #[cfg(test)]
 mod tests;
-pub mod type1;
+#[cfg_attr(not(feature = "programs"), allow(dead_code))]
+mod type1;
 
 /// The README's examples, run as doctests.
 #[cfg(doctest)]

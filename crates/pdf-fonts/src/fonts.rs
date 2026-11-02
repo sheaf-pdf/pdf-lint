@@ -18,6 +18,9 @@ use crate::{Decoded, Error, Limits, Streams};
 /// Each font's program is read with it, for its glyphs' boxes, its heights and what
 /// its encoding leaves to it of its text, and charged to the budget it's read within;
 /// but by fonts made for text ([`Fonts::for_text`]), which read none.
+///
+/// It's meant to be used under one [`Limits`]: a font it holds is given as it was first
+/// read, whatever limits are asked for later, and its CID glyphs are drawn under those.
 #[derive(Debug, Default)]
 pub struct Fonts {
     read: Mutex<HashMap<ObjectId, Arc<Font>>>,
@@ -159,7 +162,8 @@ pub struct FontScope<'f> {
     stock: Option<FontId>,
 }
 
-/// A font an interpretation picked: its place among its [`FontScope`]'s.
+/// A font an interpretation picked: its place among its [`FontScope`]'s, and good only
+/// for that scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FontId(u32);
 
@@ -229,6 +233,11 @@ impl FontScope<'_> {
     }
 
     /// The font `font` is.
+    ///
+    /// # Panics
+    ///
+    /// Where `font` isn't one of this scope's: another scope's id may panic, or name
+    /// another font.
     pub fn get(&self, font: FontId) -> &Font {
         &self.picked[font.0 as usize]
     }

@@ -10,10 +10,11 @@
 //! from where the string starts. A kind's `-heights` adds how far the first
 //! character's loose box reaches from its origin, for a font whose heights aren't left
 //! to a face PDFium substitutes, and its `-boxes` each character's box and loose box,
-//! for one whose glyphs are a program it embeds. Here the characters are made as PDFium's text page
-//! makes them, which isn't [`Font`]'s to say: a code with no text is its own text, one
-//! the same as a code just before it at the same place isn't kept, nor a space after a
-//! space, and nothing's kept of a string that takes up no room.
+//! for one whose glyphs are a program it embeds. Here the characters are made as PDFium's
+//! text page makes them, which isn't [`Font`]'s to say: a code with no text is its own
+//! text, one the same as a code just before it at the same place isn't kept, nor a space
+//! after a space, and nothing's kept of a string that takes up no room. A case whose name
+//! begins `predefined-` or `program-` wants the feature that reads it.
 
 use std::collections::HashMap;
 use std::fs;
@@ -214,10 +215,11 @@ fn ours(bytes: &[u8], kind: &str) -> String {
     let mut faults = Vec::new();
     let font = Font::read(&reading, dict, &Limits::DEFAULT, &mut budget, &mut faults)
         .expect("the case's objects read");
-    // PDFium doesn't load such a font, and draws nothing in it.
-    let loaded =
-        !(faults.iter()).any(|(_, fault)| matches!(fault, Fault::DescendantFonts | Fault::CMap));
-    if !loaded || takes_no_room(&font, &shown) {
+    // PDFium doesn't load such a font, and draws nothing in it. Each is told.
+    let told =
+        (faults.iter()).any(|(_, fault)| matches!(fault, Fault::DescendantFonts | Fault::CMap));
+    assert_eq!(font.loaded(), !told, "whether it's loaded, by its faults");
+    if !font.loaded() || takes_no_room(&font, &shown) {
         return "none".to_string();
     }
     let characters = characters(&font, &shown, tw);
@@ -286,6 +288,9 @@ fn every_case_reads_as_pdfium_reads_it() {
             "{name}: a kind this test doesn't read"
         );
         if name.starts_with("predefined-") && !cfg!(feature = "predefined-cmaps") {
+            continue;
+        }
+        if name.starts_with("program-") && !cfg!(feature = "programs") {
             continue;
         }
         let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();

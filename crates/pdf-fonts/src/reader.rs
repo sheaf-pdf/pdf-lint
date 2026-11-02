@@ -124,11 +124,11 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink + ?Sized> Reader<'_, O, S> {
     }
 
     /// What PDFium's float accessor reads of `value` ([`float_of`]), told where it's
-    /// no number.
-    pub(crate) fn float(&self, value: &'o Object) -> f32 {
+    /// no number as being in `object`.
+    pub(crate) fn float(&self, value: &'o Object, object: Option<ObjectId>) -> f32 {
         let seen = self.seen(value);
         if seen.and_then(Object::as_number).is_none() {
-            self.tell(None, Some(value), Fault::NotANumber);
+            self.tell(object, Some(value), Fault::NotANumber);
         }
         seen.map_or(0.0, float_of)
     }
@@ -159,8 +159,8 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink + ?Sized> Reader<'_, O, S> {
 
     /// [`Reader::float`] of `array`'s element `i`, as PDFium's `GetFloatAt`: 0 past
     /// its end.
-    pub(crate) fn float_at(&self, array: &'o [Object], i: usize) -> f32 {
-        array.get(i).map_or(0.0, |value| self.float(value))
+    pub(crate) fn float_at(&self, array: &'o [Object], i: usize, object: Option<ObjectId>) -> f32 {
+        array.get(i).map_or(0.0, |value| self.float(value, object))
     }
 
     /// The bytes of the name or the string `dict`'s `key` is, as PDFium's

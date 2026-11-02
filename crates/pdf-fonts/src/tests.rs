@@ -308,7 +308,6 @@ fn the_crate_s_names_are_there() {
         Decoded, Descendant, Encoding, Error, Fault, Font, FontApprox, FontId, FontKind,
         FontMetrics, FontProgram, FontScope, Fonts, Limits, Place, Rect, Sink, Std14, Streams,
         VerticalMetrics, With, cp1252, glyph_text, name_code_point,
-        type1::{Charstrings, scan},
     };
     fn same<T>(_: fn(&T) -> &T) {}
     same::<pdf_objects::Dict>(|d: &crate::Dict| d);

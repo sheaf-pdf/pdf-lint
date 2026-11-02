@@ -71,8 +71,8 @@ impl Place {
 }
 
 /// A place where a font isn't what ISO 32000-2 says it is, which a reading comes
-/// to and goes on past. Each names its clause, but for the last two, which are of
-/// the file rather than its font.
+/// to and goes on past. Each names its clause, but for the last, which is of the file
+/// rather than its font.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
@@ -99,8 +99,9 @@ pub enum Fault {
     NotANumber,
     /// An `/Encoding` or `/BaseEncoding` that's no base encoding's name, or an
     /// `/Encoding` that's neither that nor a dictionary (9.6.5.1). The font's own
-    /// encoding is read. `MacExpertEncoding` is a base encoding, though it's only read
-    /// as PDFium reads the name, as WinAnsiEncoding, and not in a dictionary.
+    /// encoding is read. `MacExpertEncoding` is a base encoding, which reads as
+    /// WinAnsiEncoding as PDFium reads it by name, and as `/BaseEncoding` where the program
+    /// is TrueType; anywhere else it's unread.
     #[error("an /Encoding that's no encoding")]
     Encoding,
     /// A `/Differences` value that's neither a number nor a name, or a name at a

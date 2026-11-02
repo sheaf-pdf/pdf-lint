@@ -17,12 +17,11 @@ pub struct Limits {
     /// How long a CMap's chain by `/UseCMap` may be, past which what's read of it
     /// is guessed. 512 by default.
     pub cmaps: usize,
-    /// What reading a Type 1 program may cost, past which
-    /// [`type1::scan`](crate::type1::scan) refuses it: this many times its size, or
-    /// times 16 KiB if it's smaller, in bytes read as tokens, and in names of its
-    /// `/Encoding` looked for among its glyphs, each glyph a name. 64 by default: a
-    /// real program's 256 names at most, over glyphs of at least 16 bytes each, cost
-    /// about 16 times its size.
+    /// What reading a Type 1 program may cost, past which it's refused, as a program that
+    /// doesn't read: this many times its size, or times 16 KiB if it's smaller, in bytes
+    /// read as tokens, and in names of its `/Encoding` looked for among its glyphs, each
+    /// glyph a name. 64 by default: a real program's 256 names at most, over glyphs of at
+    /// least 16 bytes each, cost about 16 times its size.
     pub type1_work: usize,
     /// How much charstring a program's glyphs may evaluate, in bytes, shared out
     /// between them: each glyph its share, but no less than
@@ -38,7 +37,8 @@ pub struct Limits {
     /// components than that, empty ones aside, whatever's set here, so raising it draws
     /// no more of them. A real composite draws a few.
     pub composite_glyphs: u64,
-    /// How deep a TrueType glyph's composites may nest. 32 by default.
+    /// How deep a TrueType glyph's composites may nest. 32 by default. skrifa draws none
+    /// nested deeper than 64, whatever's set here.
     pub composite_depth: u8,
 }
 

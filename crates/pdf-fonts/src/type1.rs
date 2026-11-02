@@ -19,17 +19,15 @@ use crate::Limits;
 /// that isn't UTF-8 by its bytes as Latin-1 (`decode_name`), None for a name
 /// the program gives twice, whose glyph can't be told from another's by
 /// name. A program without `.notdef` has the one read-fonts makes up.
-pub type Charstrings = HashMap<Vec<u8>, Option<Vec<u8>>>;
+pub(crate) type Charstrings = HashMap<Vec<u8>, Option<Vec<u8>>>;
 
-/// `data`, a Type 1 program, scanned as read-fonts reads it: its
-/// charstrings, where reading it costs within [`Limits::type1_work`]; None where
-/// not, or where read-fonts wouldn't read it either: no header, no `eexec`, no
-/// `/CharStrings`.
-pub fn scan(data: &[u8], limits: &Limits) -> Option<Charstrings> {
+/// [`read`]'s charstrings alone.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn scan(data: &[u8], limits: &Limits) -> Option<Charstrings> {
     read(data, limits).map(|scanned| scanned.charstrings)
 }
 
-/// What [`scan`] reads of a program.
+/// What [`read`] finds of a program.
 pub(crate) struct Scanned {
     pub(crate) charstrings: Charstrings,
     /// How long its private dictionary's `/BuildCharArray` is, as FreeType reads it
@@ -39,7 +37,9 @@ pub(crate) struct Scanned {
     pub(crate) build_char_len: usize,
 }
 
-/// `data` scanned, as [`scan`] says.
+/// `data`, a Type 1 program, scanned as read-fonts reads it: its charstrings, where
+/// reading it costs within [`Limits::type1_work`]; None where not, or where read-fonts
+/// wouldn't read it either: no header, no `eexec`, no `/CharStrings`.
 pub(crate) fn read(data: &[u8], limits: &Limits) -> Option<Scanned> {
     let fuel = (limits.type1_work).saturating_mul(data.len().max(1 << 14));
     let mut parser = Parser::new(data, fuel);

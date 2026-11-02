@@ -556,8 +556,24 @@ def type0():
     e("e0-stream", b"21 0 R", {21: stream(b"", cmap)}, b"(ABC)")
     e("e0-stream-chain", b"21 0 R", {21: b"22 0 R", 22: stream(b"", cmap)}, b"(ABC)")
     e("e0-unknown", b"/Foo-H")
+    # A name PDFium doesn't know has no CID's text, whichever collection the CIDFont orders.
+    japan1 = b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Foo /DW 800 /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 2 >> >>"
+    e("e0-unknown-japan1", b"/Foo", {20: japan1}, b"<00010002>")
+    e("e0-unknown-japan1-h", b"/Foo-H", {20: japan1}, b"<00010002>")
     e("e0-cid-16-bits", b"21 0 R", {21: stream(b"", b"begincmap 1 begincodespacerange <00> <ff> endcodespacerange "
                                                   b"1 begincidrange <41> <43> 65601 endcidrange endcmap")}, b"(ABC)")
+    # A range that ends past 16 bits maps no code within them, and past them the first by
+    # its end does; within them the last wins.
+    wide = b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Foo /DW 500 /W [0 [100 101 102 103 104 105 106 107 108 109]] >>"
+    mixed = b"begincmap 2 begincodespacerange <00> <7f> <80000000> <ffffffff> endcodespacerange "
+    two = b"begincmap 1 begincodespacerange <0000> <ffff> endcodespacerange "
+    e("cmap-past-16-bits-two", b"21 0 R", {20: wide, 21: stream(b"", two + b"1 begincidrange <00000041> <00010041> 1 endcidrange endcmap")}, b"<00410042>")
+    e("cmap-past-16-bits-mixed", b"21 0 R", {20: wide, 21: stream(b"", mixed + b"1 begincidrange <00000041> <00010041> 1 endcidrange endcmap")}, b"<4142>")
+    e("cmap-past-16-bits-by-end", b"21 0 R", {20: wide, 21: stream(b"", mixed + b"2 begincidrange <80000005> <80000009> 1 <80000000> <80000006> 2 endcidrange endcmap")},
+      b"<80000005800000068000000780000009>")
+    e("cmap-past-16-bits-char", b"21 0 R", {20: wide, 21: stream(b"", mixed + b"1 begincidchar <80000005> 3 endcidchar 1 begincidrange <80000005> <80000006> 1 endcidrange endcmap")},
+      b"<8000000580000006>")
+    e("cmap-within-16-bits-last", b"21 0 R", {20: wide, 21: stream(b"", two + b"2 begincidrange <0041> <0042> 1 <0042> <0043> 3 endcidrange endcmap")}, b"<004100420043>")
     case("e0-none", b"<< /Type /Font /Subtype /Type0 /BaseFont /Foo /DescendantFonts [20 0 R] >>", {20: cid}, s)
     e("codes-short", b"/Identity-H", s=b"<0041004200>")
 
@@ -663,7 +679,10 @@ def type0():
     crossing = stream(b"", b"begincmap 1 begincodespacerange <0000> <ffff> endcodespacerange 2 beginbfrange <0041> <0041> <0420> <00ff> <0100> [<0416> <0417>] endbfrange endcmap")
     for name, to in [("t0-past-low-byte-identity", whole), ("t0-past-low-byte", moved), ("t0-past-low-byte-array", crossing)]:
         t0_miss(name, b"/Identity-H", b"Identity", b"<004101000416>", {21: to})
-    # A CID of the predefined CMaps: the bundle's, Adobe's current ones.
+    # A CID of the predefined CMaps: the bundle's, Adobe's current ones; ASCII among them.
+    japan = b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Foo /W [93 [701] 95 [702] 99 [703] 100 [704]] /DW 500 /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 2 >> >>"
+    case("predefined-cid-uni-jis-ascii", b"<< /Type /Font /Subtype /Type0 /BaseFont /Foo /Encoding /UniJIS-UTF16-H /DescendantFonts [20 0 R] >>",
+         {20: japan}, s=b"<007c007e00410042>")
     case("predefined-cid-uni-gb-a0", b"<< /Type /Font /Subtype /Type0 /BaseFont /Foo /Encoding /UniGB-UTF16-H /DescendantFonts [20 0 R] >>",
          {20: b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Foo /DW 500 /W [1 [700]] /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >> >>"},
          s=b"<00a000410042>")
@@ -999,6 +1018,34 @@ def programs():
     # A charstring within read-fonts' million operations and past them; FreeType has none.
     font("cff-operations-within", b"Type1", b"FontFile3", program("cff-moving-6"), given)
     font("cff-operations-past", b"Type1", b"FontFile3", program("cff-moving-7"), given)
+    # A glyph past the program, by a code made a glyph where it has no charmap: what FreeType
+    # fails, in a font of Windows' symbols, where 0x41 is past its six.
+    no_cmap = tt.replace(b"cmap", b"cmaq", 1)
+    symbolic = b"/Flags 4 " + bbox
+    font("tt-no-cmap-past", b"TrueType", b"FontFile2", no_cmap, symbolic, keys=b"", s=b"(\x01\x02AB)",
+         widths=b"/FirstChar 0 /LastChar 255 /Widths [" + b" ".join([b"500"] * 256) + b"] ")
+    font("tt-no-cmap-names", b"TrueType", b"FontFile2", no_cmap, given, s=b"(AB g)")
+    # A `loca` entry past its table reads as an empty glyph, and costs nothing.
+    at, _ = sfnt_table(tt, b"loca")
+    for entry in (1, 2, 3):
+        font("tt-loca-past-%d" % entry, b"TrueType", b"FontFile2",
+             tt[:at + 4 * entry] + b"\x7f" + tt[at + 4 * entry + 1:], given, s=b"(AB g)")
+    # What skrifa reads otherwise than FreeType, so unknown here: a format of `loca` that's
+    # neither, long metrics that don't fit `hmtx`, or none, a glyph that doesn't parse. A
+    # code of one font's a character of what's known, as rows of differ.tsv say.
+    at, _ = sfnt_table(tt, b"head")
+    for name, value in [("2", b"\0\2"), ("minus", b"\xff\xff")]:
+        font("tt-loca-format-" + name, b"TrueType", b"FontFile2", tt[:at + 50] + value + tt[at + 52:], given)
+    at, _ = sfnt_table(tt, b"hhea")
+    for name, value in [("0", 0), ("past", 7), ("far-past", 65535)]:
+        font("tt-hmetrics-" + name, b"TrueType", b"FontFile2", tt[:at + 34] + struct.pack(">H", value) + tt[at + 36:], given)
+    for name, value in [("1", 1), ("all", 6)]:
+        font("tt-hmetrics-" + name, b"TrueType", b"FontFile2", tt[:at + 34] + struct.pack(">H", value) + tt[at + 36:], given)
+    at, _ = sfnt_table(tt, b"cmap")
+    font("tt-cmap-count", b"TrueType", b"FontFile2", tt[:at + 2] + b"\1\1" + tt[at + 4:], given, s=b"(AB g)")
+    at, _ = sfnt_table(tt, b"glyf")
+    font("tt-glyph-broken", b"TrueType", b"FontFile2", tt[:at + 36] + b"\x7f" + tt[at + 37:], given, s=b"(! A)")
+
     # Units per em.
     font("tt-upem-2048", b"TrueType", b"FontFile2", upem(tt, 2048), given)
     font("tt-upem-16", b"TrueType", b"FontFile2", upem(tt, 16), given)

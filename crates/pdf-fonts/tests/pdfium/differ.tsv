@@ -55,3 +55,11 @@ program-t1-masters-build-char-base	As program-t1-masters-build-char-past: /Build
 program-t1-masters-build-char-len-only	As program-t1-masters-build-char-past: /lenBuildCharArray gives no array.
 program-cff-operations-past	read-fonts evaluates no charstring past a million operations, so this glyph's box is unknown here, none, where FreeType has no such bound and PDFium draws it, empty.
 program-cid-composite-2049	skrifa draws no composite past 2,048 components, so this glyph's box is unknown here, none, where FreeType has no such bound and PDFium draws it.
+predefined-cid-uni-jis-ascii	As predefined-cid-uni-gb-a0, in ASCII: U+007C and U+007E in UniJIS-UTF16-H are CIDs 99 and 100 here, Adobe's current CMap's, where PDFium's own table has 93 and 95, so their widths differ where /W gives those CIDs others.
+program-tt-loca-format-2	read-fonts reads a `loca` as long only for a format of 1, where FreeType does for any but 0, so what skrifa would draw isn't what FreeType does: every box is unknown here, none, and said (`approx().boxes`).
+program-tt-loca-format-minus	As program-tt-loca-format-2.
+program-tt-hmetrics-0	skrifa has no glyph's side bearing where `hhea` says no long metrics, where FreeType has 0, so what it would draw is placed otherwise: every box is unknown here, none, and said (`approx().boxes`).
+program-tt-hmetrics-past	skrifa has no glyph's side bearing where the long metrics `hhea` says don't fit `hmtx`, where FreeType reads on as far as the table goes: every box is unknown here, none, and said (`approx().boxes`).
+program-tt-hmetrics-far-past	As program-tt-hmetrics-past.
+program-tt-glyph-broken	A glyph with data that draws no point doesn't parse here, and its box is unknown, none: FreeType fails this one, as PDFium's box of no glyph says, but whether it fails each such isn't told.
+program-tt-cmap-count	read-fonts refuses a `cmap` whose records don't fit, where FreeType reads on as far as the table goes, so which glyph a code draws isn't known: every box is unknown here, none, and said (`approx().boxes`).

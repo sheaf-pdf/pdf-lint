@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF fonts read: codes, CIDs, widths, heights and text as PDFium reads them, encodings and glyph names, the standard 14's metrics, Type 1 tokens, predefined CMaps, programs' glyph boxes"
+description = "PDF fonts read: codes, CIDs, widths, heights and text as PDFium reads them, encodings and glyph names, the standard 14's metrics, predefined CMaps, programs' glyph boxes"
 keywords = ["pdf", "font", "encoding", "cmap", "iso-32000"]
 categories = ["parser-implementations", "text-processing"]
 # Only what users need, so local tooling files can't end up in the package.
@@ -25,10 +25,10 @@ hayro-cmap = { version = "0.1", optional = true }
 # what it has of read-fonts.
 skrifa = { version = "0.49", default-features = false, features = ["std"], optional = true }
 
-# Adobe's predefined CMaps, off by default for the Rust they need: without
-# them, a font's predefined CMap reads as one the build hasn't.
 [features]
 default = ["programs"]
+# Adobe's predefined CMaps, off by default for the Rust they need: without
+# them, a font's predefined CMap reads as one the build hasn't.
 predefined-cmaps = ["dep:hayro-cmap"]
 # A font's program read, for its glyphs' boxes and its heights, and the text of what its
 # encoding leaves to it. Without it, as `Fonts::for_text` reads.

@@ -3770,6 +3770,426 @@ fn without_the_feature_a_font_reads_as_for_text() {
     }
 }
 
+/// Where table `tag` of an SFNT is, and how long.
+#[cfg(feature = "programs")]
+fn sfnt_table(program: &[u8], tag: &[u8; 4]) -> (usize, usize) {
+    let tables = u16::from_be_bytes([program[4], program[5]]) as usize;
+    (0..tables)
+        .map(|i| &program[12 + 16 * i..28 + 16 * i])
+        .find(|record| &record[..4] == tag)
+        .map(|record| {
+            let word = |at: usize| u32::from_be_bytes(record[at..at + 4].try_into().unwrap());
+            (word(8) as usize, word(12) as usize)
+        })
+        .expect("the table")
+}
+
+/// A TrueType `program` over `pdf`, as a Type 0 font in Identity, each CID its glyph.
+#[cfg(feature = "programs")]
+fn identity_truetype(pdf: &mut Pdf, program: Vec<u8>) -> Dict {
+    let file = pdf.add_object(Stream::new(dict! {}, program));
+    let descriptor = pdf.add_object(dict! { "Flags" => 4, "FontFile2" => file });
+    type0(
+        pdf,
+        "Identity-H".into(),
+        dict! { "Subtype" => "CIDFontType2", "FontDescriptor" => descriptor },
+    )
+}
+
+/// A `loca` entry past its table charges what's read, none of it, however far it
+/// claims: a font of a few hundred bytes is no more than it holds.
+#[cfg(feature = "programs")]
+#[test]
+fn a_loca_entry_past_its_table_charges_nothing() {
+    use crate::fixture::truetype_program;
+    let read = |patch: Option<usize>, budget: &mut usize| {
+        let mut program = truetype_program();
+        let (loca, _) = sfnt_table(&program, b"loca");
+        if let Some(entry) = patch {
+            program[loca + 4 * entry] = 0x7f;
+        }
+        let mut pdf = Pdf::default();
+        let file = pdf.add_object(Stream::new(dict! {}, program));
+        let descriptor = dict! { "Flags" => 32, "FontFile2" => file };
+        let font = dict! {
+            "Subtype" => "TrueType", "BaseFont" => "Fix", "Encoding" => "WinAnsiEncoding",
+            "FontDescriptor" => descriptor, "FirstChar" => 65, "Widths" => vec![Object::from(500)],
+        };
+        Font::read(&pdf, &font, &Limits::DEFAULT, budget, &mut ()).map(|font| font.cost())
+    };
+    let whole = read(None, &mut BUDGET.clone()).unwrap();
+    for entry in 1..=6 {
+        let mut budget = 1 << 16;
+        let cost = read(Some(entry), &mut budget).expect("what it holds is within this");
+        assert!(cost <= whole, "entry {entry}: {cost} past {whole}");
+    }
+}
+
+/// A composite of itself ends at any depth a `Limits` can say, 255 among them: past it its
+/// box is unknown.
+#[cfg(feature = "programs")]
+#[test]
+fn a_composite_of_itself_ends_at_any_depth() {
+    use crate::fixture::truetype_program;
+    let mut program = truetype_program();
+    let (glyf, len) = sfnt_table(&program, b"glyf");
+    // Glyph 5, the program's composite, the last ten bytes but for its one component's
+    // flags, is made a component of itself.
+    let component = glyf + len - 8;
+    assert_eq!(program[component..component + 2], [0, 1]);
+    program[component..component + 2].copy_from_slice(&[0, 5]);
+    let mut pdf = Pdf::default();
+    let font = identity_truetype(&mut pdf, program);
+    for depth in [0, 1, 32, 254, u8::MAX] {
+        let limits = Limits {
+            composite_depth: depth,
+            ..Limits::DEFAULT
+        };
+        let mut budget = BUDGET;
+        let read = Font::read(&pdf, &font, &limits, &mut budget, &mut ()).unwrap();
+        assert_eq!(read.char_box(5), None, "at a depth of {depth}");
+    }
+}
+
+/// A glyph past the program's fails as FreeType fails it, where nothing's a program's
+/// empty glyph: PDFium's box of no glyph, for a code made a glyph where the program has no
+/// charmap.
+#[cfg(feature = "programs")]
+#[test]
+fn a_glyph_past_the_program_is_none() {
+    use crate::fixture::truetype_program;
+    let mut program = truetype_program();
+    let (at, _) = (0..20)
+        .map(|i| &program[12 + 16 * i..])
+        .position(|record| record.starts_with(b"cmap"))
+        .map(|i| (12 + 16 * i, ()))
+        .unwrap();
+    program[at + 3] = b'q';
+    let mut pdf = Pdf::default();
+    let file = pdf.add_object(Stream::new(dict! {}, program));
+    let descriptor = dict! { "Flags" => 4, "FontFile2" => file };
+    let font = dict! {
+        "Subtype" => "TrueType", "BaseFont" => "ABCDEF+Fix", "FontDescriptor" => descriptor,
+        "FirstChar" => 0, "Widths" => vec![Object::from(500); 256],
+    };
+    let read = font_of(&pdf, font);
+    // Glyph 1 is the program's, and 65 is past its six.
+    assert!(read.char_box(1).is_some_and(|b| b.y1 > 0.0));
+    assert_eq!(read.char_box(65), Some(rect(-1.0, -1.0, -1.0, -1.0)));
+}
+
+/// What FreeType and skrifa read otherwise is said, so a box is unknown and not wrong: a
+/// `loca` of a format that's neither, long metrics that don't fit `hmtx` or none, and a
+/// glyph that doesn't parse.
+#[cfg(feature = "programs")]
+#[test]
+fn what_skrifa_reads_otherwise_is_unknown() {
+    use crate::fixture::truetype_program;
+    let patched = |patch: &dyn Fn(&mut Vec<u8>)| {
+        let mut program = truetype_program();
+        patch(&mut program);
+        let mut pdf = Pdf::default();
+        let font = identity_truetype(&mut pdf, program);
+        let read = font_of(&pdf, font);
+        (read.approx().boxes, read.char_box(1), read.char_box(2))
+    };
+    let (exact, first, second) = patched(&|_| {});
+    assert!(!exact && first.is_some() && second.is_some());
+    let format = |value: i16| {
+        move |p: &mut Vec<u8>| {
+            let (head, _) = sfnt_table(p, b"head");
+            p[head + 50..head + 52].copy_from_slice(&value.to_be_bytes());
+        }
+    };
+    let metrics = |value: u16| {
+        move |p: &mut Vec<u8>| {
+            let (hhea, _) = sfnt_table(p, b"hhea");
+            p[hhea + 34..hhea + 36].copy_from_slice(&value.to_be_bytes());
+        }
+    };
+    assert!(patched(&format(0)).0 == exact || patched(&format(1)).0 == exact);
+    for inexact in [patched(&format(2)), patched(&format(-1))] {
+        assert_eq!(inexact, (true, None, None));
+    }
+    for k in [0, 7, u16::MAX] {
+        assert_eq!(patched(&metrics(k)), (true, None, None), "{k}");
+    }
+    for k in [1, 6] {
+        assert!(!patched(&metrics(k)).0, "{k}");
+    }
+    // Glyph 1's contours past what it holds: still a font of boxes, this one unknown.
+    let (exact, first, second) = patched(&|p| {
+        let (glyf, _) = sfnt_table(p, b"glyf");
+        p[glyf + 36] = 0x7f;
+    });
+    assert!(!exact && second.is_some());
+    assert_eq!(first, None);
+}
+
+/// A CMap name PDFium doesn't know has no text of its CIDs, its CMap being one it never
+/// loaded, whichever collection its CIDFont orders; Identity has.
+#[test]
+fn a_name_pdfium_does_not_know_has_no_cid_s_text() {
+    let mut pdf = Pdf::default();
+    let japan1 = dict! {
+        "CIDSystemInfo" => dict! {
+            "Registry" => Object::string("Adobe"), "Ordering" => Object::string("Japan1"),
+        },
+    };
+    for name in ["Foo", "FooV"] {
+        let font = type0(&mut pdf, name.into(), japan1.clone());
+        let read = font_of(&pdf, font);
+        assert_eq!(read.code_text(1), None);
+        assert_eq!(read.cid(1), Some(1));
+        assert_eq!(read.is_vertical(), name.ends_with('V'));
+    }
+    #[cfg(feature = "predefined-cmaps")]
+    {
+        let font = type0(&mut pdf, "Identity-H".into(), japan1);
+        assert!(font_of(&pdf, font).code_text(1).is_some());
+    }
+}
+
+/// A range ending past 16 bits maps only codes past them, by where it ends, as PDFium's
+/// table holds only those within them; and within them the last given wins.
+#[test]
+fn a_cmap_s_ranges_past_16_bits_are_apart() {
+    let read = |cmap: &str| {
+        let mut pdf = Pdf::default();
+        let cmap = pdf.add_object(Stream::new(dict! {}, cmap.as_bytes().to_vec()));
+        let font = type0(&mut pdf, cmap.into(), dict! { "Subtype" => "CIDFontType2" });
+        font_of(&pdf, font)
+    };
+    let mixed = "2 begincodespacerange <00> <ff> <00000000> <ffffffff> endcodespacerange ";
+    let font = read(&format!(
+        "{mixed} 1 begincidrange <00000042> <00010042> 1 endcidrange"
+    ));
+    assert_eq!(font.cid(0x42), Some(0));
+    assert_eq!(font.cid(0x1_0042), Some(1));
+    let font = read(&format!(
+        "{mixed} 1 begincidchar <414141> 12 endcidchar \
+         1 begincidrange <00414141> <00414142> 65536 endcidrange"
+    ));
+    assert_eq!(font.cid(0x41_4141), Some(12));
+    assert_eq!(font.cid(0x41_4142), Some(1));
+    let font = read(&format!(
+        "{mixed} 2 begincidrange <0041> <0042> 7 <0042> <0043> 9 endcidrange"
+    ));
+    assert_eq!(font.cid(0x42), Some(9));
+    assert_eq!(font.cid(0x41), Some(7));
+    // Its first past its last holds only what's past it, nothing.
+    let font = read(&format!(
+        "{mixed} 1 begincidrange <00050000> <00040000> 3 endcidrange"
+    ));
+    assert_eq!(font.cid(0x4_8000), Some(0));
+}
+
+/// Whether PDFium loads a font is said wherever it's read, as what's told says, and through
+/// `Fonts`, which tells nothing.
+#[test]
+fn whether_a_font_is_loaded_is_said() {
+    let mut pdf = Pdf::default();
+    let cid_font = pdf.add_object(dict! { "Subtype" => "CIDFontType2" });
+    let type0 = |encoding: Option<Object>, fonts: Option<Object>| {
+        let mut font = dict! { "Subtype" => "Type0", "BaseFont" => "Foo" };
+        if let Some(encoding) = encoding {
+            font.set("Encoding", encoding);
+        }
+        if let Some(fonts) = fonts {
+            font.set("DescendantFonts", fonts);
+        }
+        font
+    };
+    let one = || Some(Object::from(vec![Object::from(cid_font)]));
+    let identity = || Some(Object::from("Identity-H"));
+    let cases = [
+        (type0(identity(), one()), true),
+        (type0(Some("Foo".into()), one()), true),
+        (type0(Some(5.into()), one()), false),
+        (type0(None, one()), false),
+        (type0(identity(), None), false),
+        (
+            type0(identity(), Some(Object::from(Vec::<Object>::new()))),
+            false,
+        ),
+        (
+            dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+            true,
+        ),
+        (dict! { "Subtype" => "TrueType", "BaseFont" => "Foo" }, true),
+        (dict! { "Subtype" => "Type3" }, true),
+    ];
+    for (font, loaded) in cases {
+        let refused = told(&pdf, &font)
+            .iter()
+            .any(|(_, fault)| matches!(fault, Fault::DescendantFonts | Fault::CMap));
+        assert_eq!(refused, !loaded, "{font:?}");
+        assert_eq!(font_of(&pdf, font.clone()).loaded(), loaded, "{font:?}");
+        let written = Object::from(font);
+        let read = Fonts::default().get(&pdf, &written, &Limits::DEFAULT, &mut BUDGET.clone());
+        assert_eq!(read.unwrap().unwrap().loaded(), loaded);
+    }
+}
+
+/// A font read for text reads no program, whatever the build's features, and tells what
+/// else it comes to.
+#[test]
+fn a_font_read_for_text_reads_no_program() {
+    use crate::fixture::truetype_program;
+    let mut pdf = Pdf::default();
+    let file = pdf.add_object(Stream::new(dict! {}, truetype_program()));
+    let bad = pdf.add_object(Stream::new(dict! {}, vec![0u8; 8]));
+    let lim = &Limits::DEFAULT;
+    for program in [file, bad] {
+        let descriptor = dict! { "Flags" => 4, "FontFile2" => program };
+        let font = dict! {
+            "Subtype" => "TrueType", "BaseFont" => "Fix", "FontDescriptor" => descriptor,
+            "FirstChar" => "A", "Widths" => vec![Object::from(500)],
+        };
+        let (mut one, mut other) = (BUDGET, BUDGET);
+        let mut faults = Vec::new();
+        let text = Font::read_for_text(&pdf, &font, lim, &mut one, &mut faults).unwrap();
+        let written = Object::from(font);
+        let kept = Fonts::for_text()
+            .get(&pdf, &written, lim, &mut other)
+            .unwrap();
+        assert_eq!(digest(&text), digest(&kept.unwrap()));
+        assert_eq!((one, other), (BUDGET, BUDGET));
+        assert_eq!(text.program(), FontProgram::None);
+        assert!(!text.outlined() && text.approx().boxes);
+        let faults: Vec<_> = faults.into_iter().map(|(_, fault)| fault).collect();
+        assert!(faults.contains(&Fault::FirstChar) && !faults.contains(&Fault::ProgramMalformed));
+    }
+}
+
+/// A fault in what's numbered says the object it's in: an encoding dictionary, its
+/// `/Differences`, a `/Widths`, a Type 3 font's, a `/W`, a `/W2`, a `/DW2`, a box.
+#[test]
+fn a_fault_says_the_numbered_object_it_is_in() {
+    let mut pdf = Pdf::default();
+    let not_a_number: Object = "x".into();
+    let widths = pdf.add_object(vec![not_a_number.clone()]);
+    let differences = pdf.add_object(vec![Object::from(true)]);
+    let encoding = pdf.add_object(dict! {
+        "BaseEncoding" => "Foo", "Differences" => differences,
+    });
+    let bare = pdf.add_object(dict! { "Differences" => vec![Object::from(true)] });
+    let named = pdf.add_object(Object::from("Foo"));
+    let places = |pdf: &Pdf, font: Dict| -> Vec<(Fault, Option<ObjectId>)> {
+        told(pdf, &font)
+            .into_iter()
+            .map(|(place, fault)| (fault, place.object))
+            .collect()
+    };
+    let told_of = places(
+        &pdf,
+        dict! {
+            "Subtype" => "Type1", "BaseFont" => "Foo", "Encoding" => encoding,
+            "FirstChar" => 65, "LastChar" => 65, "Widths" => widths,
+        },
+    );
+    assert!(
+        told_of.contains(&(Fault::NotANumber, Some(widths))),
+        "{told_of:?}"
+    );
+    assert!(
+        told_of.contains(&(Fault::Encoding, Some(encoding))),
+        "{told_of:?}"
+    );
+    assert!(
+        told_of.contains(&(Fault::Differences, Some(differences))),
+        "{told_of:?}"
+    );
+    let told_of = places(
+        &pdf,
+        dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "Encoding" => bare },
+    );
+    assert!(
+        told_of.contains(&(Fault::Differences, Some(bare))),
+        "{told_of:?}"
+    );
+    let told_of = places(
+        &pdf,
+        dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "Encoding" => named },
+    );
+    assert!(
+        told_of.contains(&(Fault::Encoding, Some(named))),
+        "{told_of:?}"
+    );
+    // In the font's own dictionary, a list written there names none.
+    let told_of = places(
+        &pdf,
+        dict! {
+            "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "FirstChar" => 65, "Widths" => vec![not_a_number.clone()],
+        },
+    );
+    assert!(told_of.contains(&(Fault::NotANumber, None)), "{told_of:?}");
+    let told_of = places(
+        &pdf,
+        dict! {
+            "Subtype" => "Type3", "FontMatrix" => widths, "FirstChar" => 65, "Widths" => widths,
+        },
+    );
+    assert!(
+        told_of.contains(&(Fault::NotANumber, Some(widths))),
+        "{told_of:?}"
+    );
+    let matrix = pdf.add_object(vec![not_a_number.clone(); 6]);
+    let told_of = places(&pdf, dict! { "Subtype" => "Type3", "FontMatrix" => matrix });
+    assert!(
+        told_of.contains(&(Fault::NotANumber, Some(matrix))),
+        "{told_of:?}"
+    );
+    let w = pdf.add_object(vec![Object::from(1), not_a_number.clone(), Object::from(2)]);
+    let dw2 = pdf.add_object(vec![not_a_number.clone(), Object::from(1)]);
+    let cid_font = pdf.add_object(dict! {
+        "Subtype" => "CIDFontType2", "W" => w, "W2" => w, "DW2" => dw2,
+    });
+    let told_of = places(
+        &pdf,
+        dict! {
+            "Subtype" => "Type0", "Encoding" => "Identity-V",
+            "DescendantFonts" => vec![Object::from(cid_font)],
+        },
+    );
+    assert!(
+        told_of.contains(&(Fault::NotANumber, Some(w))),
+        "{told_of:?}"
+    );
+    assert!(
+        told_of.contains(&(Fault::NotANumber, Some(dw2))),
+        "{told_of:?}"
+    );
+}
+
+/// What reads a file implements `Streams` on itself and `Resolve` on a reference to it, as
+/// `Resolve` needs to give what it holds, and a font is read over the reference.
+#[test]
+fn streams_go_on_the_type_and_a_font_is_read_over_a_reference() {
+    struct Source {
+        objects: HashMap<ObjectId, Object>,
+    }
+    impl<'o> Resolve<'o> for &'o Source {
+        fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+            let source: &'o Source = self;
+            source.objects.get(&id)
+        }
+    }
+    impl Streams for Source {
+        fn decoded(&self, _: ObjectId, _: usize) -> Decoded {
+            Decoded::None
+        }
+    }
+    let source = Source {
+        objects: HashMap::new(),
+    };
+    let font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" };
+    let mut budget = BUDGET;
+    let read = Font::read(&source, &font, &Limits::DEFAULT, &mut budget, &mut ()).unwrap();
+    assert_eq!(read.width(u32::from(b'A')), 667.0);
+}
+
 /// `tests/pdfium/programs`, for `tests/pdfium/cases.py`, whose files are Python's and so
 /// can't call the builders: each program by the name the file has.
 fn programs_written() -> Vec<(&'static str, Vec<u8>)> {

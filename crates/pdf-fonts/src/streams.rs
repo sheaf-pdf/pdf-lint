@@ -1,20 +1,29 @@
-//! A stream's data, which a font reads and [`Resolve`](crate::Resolve) doesn't
+//! A stream's data, which a font reads and [`Resolve`] doesn't
 //! give: its `/ToUnicode`, a CMap and those it uses, its CharProcs.
 
 use pdf_objects::{Object, ObjectId, Resolve, Unreadable};
 
 /// What gives a stream's data, decrypted and decoded, for a font to read: what
-/// reads a file implements this and [`Resolve`] both, and [`With`] makes one of a
-/// resolver and a function. With the `structure` feature, a pdf-structure
-/// `&Reading` is one.
+/// reads a file implements this, a reference to it being one too, and [`Resolve`], and a
+/// font is read over the reference. [`With`] makes one of a resolver and a function. With
+/// the `structure` feature, a pdf-structure `Reading` is one.
 ///
-/// A caller's cache of what's decoded goes behind this. A font doesn't trust what
-/// it's given: [`Decoded::Data`] longer than was asked for is
+/// A caller's cache of what's decoded goes behind this, a hit copied into
+/// [`Decoded::Data`], which a font keeps or drops as it likes. A font doesn't trust what
+/// it's given: data longer than was asked for is
 /// [`Error::TooLarge`](crate::Error::TooLarge).
 pub trait Streams {
     /// Stream `id`'s data, at most `limit` bytes of it. `id` is the stream's own
     /// number: a font has followed any reference to it.
     fn decoded(&self, id: ObjectId, limit: usize) -> Decoded;
+}
+
+/// A reference to what gives a stream's data gives it, as a font is read over a reference
+/// for its objects' lifetime.
+impl<S: Streams + ?Sized> Streams for &S {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Decoded {
+        (**self).decoded(id, limit)
+    }
 }
 
 /// What [`Streams::decoded`] says of a stream.
@@ -93,7 +102,7 @@ mod reading {
     /// takes are [`Decoded::Unreadable`]; an object that's not a stream, one
     /// [`Why::Damaged`], and filters the reader doesn't take are
     /// [`Decoded::None`].
-    impl<S: ByteSource> Streams for &Reading<S> {
+    impl<S: ByteSource> Streams for Reading<S> {
         fn decoded(&self, id: ObjectId, limit: usize) -> Decoded {
             match self.try_resolve(id) {
                 Ok(Some(_)) => {}
