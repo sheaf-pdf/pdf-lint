@@ -59,10 +59,15 @@ outside its package, so they move with it:
 
 - `cases.py`, the generator: every case's bytes, written in it from
   literals and Python's standard library. Nothing comes from another
-  file. Flate data is written as stored blocks (`zlib.compress(data, 0)`),
+  file, but for pdf-fonts' `programs/` (below). Flate data is written as stored blocks (`zlib.compress(data, 0)`),
   whose bytes every zlib writes alike. No two cases' names are alike but
   for case, as a file system that ignores case would keep one file for
   both.
+- `programs/`, pdf-fonts' alone: the font programs its `cases.py` reads,
+  which Python can't build. The crate's builders make them by hand; its
+  ignored test `the_programs_are_written` writes them, then
+  `oracle/pdfium.py cases --write` the cases, and
+  `the_programs_are_the_builders` holds them to the builders.
 - `cases/` and `cases.tsv`: what the generator writes, each case's files
   (`NAME.EXT`) and a line naming it, its kind and its files. Line endings
   in `cases/` are kept as written (`.gitattributes`).

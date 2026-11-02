@@ -81,10 +81,13 @@
 # `files_read_alike_through_a_reading_and_its_document`) run, the last as a file,
 # as the target does but under the default options;
 # `fonts` calls `pdf_fonts::fuzz::type1`, any bytes scanned as a Type 1 program,
-# holding no more than it was given, and under other caps the same or refused, and `pdf_fonts::fuzz::names`, an input's words read as glyphs' and
-# fonts' names, and its bytes as codes in each encoding, which two stable unit
-# tests (`mutated_seeds_keep_every_promise`, `random_bytes_keep_every_promise`)
-# run;
+# holding no more than it was given, and under other caps the same or refused;
+# `pdf_fonts::fuzz::names`, an input's words read as glyphs' and fonts' names,
+# and its bytes as codes in each encoding; `fonts`, its parts read as a font, a
+# program among them; and `over`, as a file, each font in it the same; which four
+# stable unit tests (`mutated_seeds_keep_every_promise`,
+# `random_bytes_keep_every_promise`, `the_fonts_among_the_seeds_read`,
+# `files_read_alike_through_a_reading_and_a_map`) run;
 # `linearize` calls `pdf_linearize::fuzz::graphs`, any bytes as a graph, refused
 # for what it has or planned, every promise of the plan held against plain walks
 # of it, and `tables`, the same bytes as a hint stream, which a stable unit test
