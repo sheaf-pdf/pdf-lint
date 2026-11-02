@@ -1,6 +1,7 @@
 //! What the fuzz target checks, which unit tests check too: the promises a Type 1
-//! program's scan, a glyph's or a font's name and a font's reading make, on any
-//! input. It's compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
+//! program's scan, a glyph's or a font's name and a font's reading, its program's
+//! included, make, on any input. It's compiled only for tests and under cargo-fuzz's
+//! `--cfg fuzzing`.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -10,7 +11,11 @@ use pdf_objects::object::Stream;
 use pdf_objects::parse::Parser;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Why, dict};
 
-use crate::fixture::{type1_integers_program, type1_program};
+use crate::fixture::{
+    OpenType, cff_program, cid_cff_program, composite_bomb_program, heavy_cff_program,
+    loca_past_end_program, opentype_cid_program, opentype_program, truetype_program,
+    type1_integers_program, type1_program,
+};
 use crate::predefined::{Collection, scheme};
 use crate::type1::scan;
 use crate::{
@@ -185,7 +190,7 @@ fn values(part: &[u8], first: u32, rest: u32, objects: &mut BTreeMap<ObjectId, O
 /// `data`'s parts as a file's objects, each where it's there: its font dictionary, 1,
 /// and its descendant's, 2, each with values after it, from 10 and from 30, for
 /// either to refer to; a `/ToUnicode`, 3; a CMap or a CharProc, 4, which uses 6 by
-/// its `/UseCMap`; a program, 5, unread as yet; and a CMap or a `/CIDToGIDMap`, 6. A
+/// its `/UseCMap`; a program, 5; and a CMap or a `/CIDToGIDMap`, 6. A
 /// reference at 9 to the font.
 fn objects_of(data: &[u8]) -> BTreeMap<ObjectId, Object> {
     let parts = font_parts(data);
@@ -342,10 +347,19 @@ pub(crate) fn digest(font: &Font) -> String {
         if code > 255 {
             assert!(!font.width_guessed(code));
         }
-        // No program's read yet, so none says.
-        assert_eq!(font.char_box(code), None);
+        let char_box = font.char_box(code);
+        if let Some(r) = char_box {
+            for side in [r.x0, r.y0, r.x1, r.y1] {
+                assert!(side.is_nan() || side.abs() <= extent, "{side} {extent}");
+            }
+        }
+        // None says what no program read, or what a program's boxes aren't known to be
+        // PDFium's: what's past a CIDFont's map draws nothing, whatever its program.
+        if !font.outlined() || font.approx().boxes && font.byte_widths().is_some() {
+            assert_eq!(char_box, None);
+        }
         format!(
-            "{:?} {width:?} {:?} {:?} {:?} {:?} {:?} {:?}\n",
+            "{:?} {width:?} {:?} {:?} {char_box:?} {:?} {:?} {:?} {:?}\n",
             font.cid(code),
             font.width_guessed(code),
             font.vertical(code),
@@ -376,18 +390,30 @@ pub(crate) fn digest(font: &Font) -> String {
         font.codes(s).any(|(_, code)| font.width_guessed(code))
     );
     assert_eq!(font.is_vertical(), font.vertical(0x41).is_some());
-    assert!(!font.outlined());
-    assert_eq!(font.program(), crate::FontProgram::None);
-    let mut left = 0;
-    assert_eq!(font.charge_outlines(s, |_| true, &mut left), Ok(()));
+    let read = font.program() == crate::FontProgram::Read;
+    assert!(read || !font.outlined());
+    assert!(cfg!(feature = "programs") || font.program() == crate::FontProgram::None);
+    // Showing what's drawn already costs what its first charge says, and nothing after.
+    let (mut none, mut all, mut most) = (0, usize::MAX, usize::MAX);
+    assert_eq!(font.charge_outlines(s, |_| false, &mut none), Ok(()));
+    assert_eq!(font.charge_outlines(s, |_| true, &mut all), Ok(()));
+    let mut seen = std::collections::HashSet::new();
+    assert_eq!(
+        font.charge_outlines(s, |glyph| seen.insert(glyph), &mut most),
+        Ok(())
+    );
+    assert!(none == 0 && most >= all && (font.outlined() || all == usize::MAX));
     let more = format!(
-        "{:?} {:?} {:?} {extent:?} {:?} {:?} {:?}\n",
+        "{:?} {:?} {:?} {extent:?} {:?} {:?} {:?} {:?} {:?} {}\n",
         font.kind(),
         font.approx(),
         font.metrics(),
         font.cost(),
         split,
         font.text(s),
+        font.program(),
+        font.outlined(),
+        usize::MAX - all,
     );
     out.push_str(&more);
     out
@@ -636,6 +662,53 @@ fn font_fixtures() -> Vec<Vec<u8>> {
             b"<< /Subtype /CIDFontType2 /W [0 2147483647 500 0 4294967295 7] >>",
         ]),
     ]
+    .into_iter()
+    .chain(program_fixtures())
+    .collect()
+}
+
+/// A font over each of the programs built by hand, simple and a CIDFont's.
+fn program_fixtures() -> Vec<Vec<u8>> {
+    let names = OpenType {
+        post_names: true,
+        cmap: false,
+    };
+    let programs: [(&str, &str, Vec<u8>); 10] = [
+        ("TrueType", "FontFile2", truetype_program()),
+        ("Type1", "FontFile3", cff_program()),
+        ("Type1", "FontFile3", cid_cff_program()),
+        ("Type1", "FontFile3", opentype_program(names)),
+        ("Type1", "FontFile3", opentype_cid_program(names)),
+        ("Type1", "FontFile", type1_program()),
+        ("Type1", "FontFile3", heavy_cff_program(4)),
+        ("TrueType", "FontFile2", composite_bomb_program()),
+        ("Type1", "FontFile3", loca_past_end_program()),
+        ("MMType1", "FontFile", type1_integers_program(8)),
+    ];
+    let mut out = Vec::new();
+    for (subtype, key, program) in programs {
+        for flags in [32, 4] {
+            let font = format!(
+                "<< /Subtype /{subtype} /BaseFont /Fix /FirstChar 32 /Widths [250 300] \
+                 /Encoding << /Differences [65 /A /g] >> /FontDescriptor \
+                 << /Flags {flags} /{key} 5 0 R >> /ToUnicode 3 0 R >>"
+            );
+            out.push(parts(&[font.as_bytes(), b"", b"", b"", &program, b""]));
+        }
+        let descendant = format!(
+            "<< /Subtype /CIDFontType2 /BaseFont /Fix /W [1 [500]] /CIDToGIDMap 6 0 R \
+             /FontDescriptor << /Flags 4 /{key} 5 0 R >> >>"
+        );
+        out.push(parts(&[
+            b"<< /Subtype /Type0 /Encoding /Identity-H /DescendantFonts [2 0 R] >>",
+            descendant.as_bytes(),
+            b"",
+            b"",
+            &program,
+            b"\0\x01\0\x02",
+        ]));
+    }
+    out
 }
 
 /// What the fuzzer begins from, and the tests run on: Type 1 programs, as written

@@ -209,12 +209,6 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink + ?Sized> Reader<'_, O, S> {
         self.array(dict.get(key)?)
     }
 
-    /// The stream `dict`'s `key` is, as PDFium's `GetStreamFor`: its reference
-    /// followed, and no further.
-    pub(crate) fn stream_for(&self, dict: &'o Dict, key: &[u8]) -> Option<&'o Stream> {
-        self.hop(dict.get(key)?)?.as_stream()
-    }
-
     /// The stream object `id` is, with its own number, which is what its data is
     /// asked for by; none where it's anything else, a reference among them.
     pub(crate) fn stream(&self, id: ObjectId) -> Option<(ObjectId, &'o Stream)> {

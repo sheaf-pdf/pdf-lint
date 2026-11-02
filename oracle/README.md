@@ -141,6 +141,10 @@ asked through a one-page PDF made around the case.
   a face's, and the font's heights its own, so that no answer rests on a face PDFium
   substitutes.
 
+- `fonts-boxes`: as `fonts`, for a font whose glyphs are a program it embeds, and after
+  each character's origin its `FPDFText_GetCharBox` (`box`) and its
+  `FPDFText_GetLooseCharBox` (`loose`), each left, bottom, right and top from that origin.
+
 Numbers are written with nine significant digits, which read back to the
 same `f32`, and compared as `f32`s. Text and data are written byte for
 byte, printable ASCII as it is and any other byte, and `%`, as `%XX`; none

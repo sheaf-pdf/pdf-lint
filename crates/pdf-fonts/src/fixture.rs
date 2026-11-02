@@ -1,10 +1,515 @@
 //! Font programs built by hand, for the tests and the fuzz seeds: what a program
 //! needs of each format and no more.
 
+/// A TrueType program of 1000 units an em, its glyphs, each an outline's
+/// box, as FreeType loads it unscaled:
+///
+/// | glyph | for | outline | advance |
+/// |---|---|---|---|
+/// | 0 | `.notdef` | a box, 50..450 × 0..700 | 500 |
+/// | 1 | `A` | a triangle, 0..600 × 0..750 | 600 |
+/// | 2 | `g` | 20..480 × -200..500, an off-curve point at 250,560 | 500 |
+/// | 3 | space | empty | 250 |
+/// | 4 | `B` | 100..400 × 0..300, its left side bearing 50, so drawn at 50..350 | 450 |
+/// | 5 | `C` | glyph 1 moved by 100,50: 100..700 × 50..800 | 700 |
+///
+/// Its `cmap` (3,1) maps `A`, `B`, `C`, `g` and the space; its `head`'s box
+/// is 0..700 × -200..800 and its `hhea` ascender and descender 800 and
+/// -200; it names no glyph (`post` 3).
+pub fn truetype_program() -> Vec<u8> {
+    let rect = |x0: i16, y0: i16, x1: i16, y1: i16| {
+        vec![
+            (x0, y0, true),
+            (x1, y0, true),
+            (x1, y1, true),
+            (x0, y1, true),
+        ]
+    };
+    let glyphs = [
+        simple_glyph(&rect(50, 0, 450, 700)),
+        simple_glyph(&[(0, 0, true), (300, 750, true), (600, 0, true)]),
+        simple_glyph(&[
+            (20, -200, true),
+            (480, -200, true),
+            (480, 500, true),
+            (250, 560, false),
+            (20, 500, true),
+        ]),
+        Vec::new(),
+        simple_glyph(&rect(100, 0, 400, 300)),
+        // A composite: glyph 1, its offsets words and x and y.
+        [
+            &be(&[-1i16, 100, 50, 700, 800])[..],
+            &be(&[0x0003, 1, 100, 50]),
+        ]
+        .concat(),
+    ];
+    let metrics: [(i16, i16); 6] = [
+        (500, 50),
+        (600, 0),
+        (500, 20),
+        (250, 0),
+        (450, 50),
+        (700, 100),
+    ];
+    let mut glyf = Vec::new();
+    let mut loca = Vec::new();
+    for glyph in &glyphs {
+        loca.extend((glyf.len() as u32).to_be_bytes());
+        glyf.extend(glyph);
+        glyf.resize(glyf.len().next_multiple_of(4), 0);
+    }
+    loca.extend((glyf.len() as u32).to_be_bytes());
+    let maxp = [
+        &0x0001_0000u32.to_be_bytes()[..],
+        &be(&[6, 5, 1, 3, 1, 2, 0, 0, 0, 0, 0, 0, 1, 1]),
+    ]
+    .concat();
+    let hmtx: Vec<u8> = metrics.iter().flat_map(|&(w, lsb)| be(&[w, lsb])).collect();
+    sfnt(&mut [
+        (
+            *b"cmap",
+            cmap(&[(0x20, 3), (0x41, 1), (0x42, 4), (0x43, 5), (0x67, 2)]),
+        ),
+        (*b"glyf", glyf),
+        (*b"head", head()),
+        (*b"hhea", hhea(6)),
+        (*b"hmtx", hmtx),
+        (*b"loca", loca),
+        (*b"maxp", maxp),
+        (*b"post", post_3()),
+    ])
+}
+
+/// A `head` of 1000 units an em, its box 0..700 × -200..800.
+fn head() -> Vec<u8> {
+    [
+        &0x0001_0000u32.to_be_bytes()[..],
+        &0x0001_0000u32.to_be_bytes(),
+        &0u32.to_be_bytes(),
+        &0x5F0F_3CF5u32.to_be_bytes(),
+        &be(&[0, 1000]),
+        &[0; 16],
+        &be(&[0, -200, 700, 800, 0, 8, 2, 1, 0]),
+    ]
+    .concat()
+}
+
+/// An `hhea`, its ascender and descender 800 and -200, for `metrics` glyphs' metrics.
+fn hhea(metrics: i16) -> Vec<u8> {
+    [
+        &0x0001_0000u32.to_be_bytes()[..],
+        &be(&[
+            800, -200, 0, 700, 0, 0, 700, 1, 0, 0, 0, 0, 0, 0, 0, metrics,
+        ]),
+    ]
+    .concat()
+}
+
+/// A `post` of version 3, that names no glyph.
+fn post_3() -> Vec<u8> {
+    [&0x0003_0000u32.to_be_bytes()[..], &[0; 28]].concat()
+}
+
+/// A `post` of version 2 naming glyphs 0 to 3, by their numbers in the standard Macintosh
+/// order: `.notdef`, the space, `g` and `A`.
+fn post_2() -> Vec<u8> {
+    [
+        &0x0002_0000u32.to_be_bytes()[..],
+        &[0; 28],
+        &be(&[4, 0, 3, 74, 36]),
+    ]
+    .concat()
+}
+
+/// What an OpenType program built by hand is told by: whether its `post` names its glyphs,
+/// the other way about from its CFF, or names none, and whether it has its `cmap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenType {
+    pub post_names: bool,
+    pub cmap: bool,
+}
+
+/// An OpenType program of [`cff_program`]'s glyphs, by its charset's names (`post` 3 where
+/// `post_names` is false, as most have) and its standard encoding, its `cmap` (3,1) mapping
+/// only `A`.
+pub fn opentype_program(of: OpenType) -> Vec<u8> {
+    opentype(cff_program(), of)
+}
+
+/// An OpenType program of [`cid_cff_program`]'s glyphs, as [`opentype_program`].
+pub fn opentype_cid_program(of: OpenType) -> Vec<u8> {
+    opentype(cid_cff_program(), of)
+}
+
+/// An `OTTO` SFNT of `cff`, a CFF of four glyphs, its advances 500.
+fn opentype(cff: Vec<u8>, of: OpenType) -> Vec<u8> {
+    let maxp = [&0x0000_5000u32.to_be_bytes()[..], &be(&[4])].concat();
+    let hmtx = [500i16, 0].repeat(4);
+    let post = match of.post_names {
+        true => post_2(),
+        false => post_3(),
+    };
+    let mut tables = vec![
+        (*b"CFF ", cff),
+        (*b"head", head()),
+        (*b"hhea", hhea(4)),
+        (*b"hmtx", be(&hmtx)),
+        (*b"maxp", maxp),
+        (*b"post", post),
+    ];
+    if of.cmap {
+        tables.push((*b"cmap", cmap(&[(0x41, 2)])));
+    }
+    sfnt_tagged(*b"OTTO", &mut tables)
+}
+
+/// Big-endian 16-bit numbers.
+fn be(values: &[i16]) -> Vec<u8> {
+    values.iter().flat_map(|v| v.to_be_bytes()).collect()
+}
+
+/// A simple glyph of one contour through `points`, each its x, its y and
+/// whether it's on the curve, its coordinates each a word.
+fn simple_glyph(points: &[(i16, i16, bool)]) -> Vec<u8> {
+    let xs = points.iter().map(|p| p.0);
+    let ys = points.iter().map(|p| p.1);
+    let bbox = [
+        xs.clone().min(),
+        ys.clone().min(),
+        xs.clone().max(),
+        ys.clone().max(),
+    ]
+    .map(Option::unwrap_or_default);
+    let mut glyph = be(&[
+        1,
+        bbox[0],
+        bbox[1],
+        bbox[2],
+        bbox[3],
+        points.len() as i16 - 1,
+        0,
+    ]);
+    glyph.extend(points.iter().map(|p| u8::from(p.2)));
+    let mut last = (0, 0);
+    let mut x = Vec::new();
+    let mut y = Vec::new();
+    for &(px, py, _) in points {
+        x.push(px - last.0);
+        y.push(py - last.1);
+        last = (px, py);
+    }
+    glyph.extend(be(&x));
+    glyph.extend(be(&y));
+    glyph
+}
+
+/// A `cmap` of one (3,1) subtable of format 4 mapping each code point to
+/// its glyph, a segment each.
+fn cmap(map: &[(u16, u16)]) -> Vec<u8> {
+    let segments = map.len() + 1;
+    let ends: Vec<u16> = map.iter().map(|m| m.0).chain([0xFFFF]).collect();
+    let deltas: Vec<u16> = map
+        .iter()
+        .map(|m| m.1.wrapping_sub(m.0))
+        .chain([1])
+        .collect();
+    let mut table: Vec<u8> = Vec::new();
+    let length = 16 + segments * 8;
+    for v in [4, length as u16, 0, (segments * 2) as u16, 0, 0, 0] {
+        table.extend(v.to_be_bytes());
+    }
+    for v in ends.iter().chain([&0]).chain(&ends).chain(&deltas) {
+        table.extend(v.to_be_bytes());
+    }
+    table.extend(vec![0; segments * 2]);
+    [&[0, 0, 0, 1, 0, 3, 0, 1, 0, 0, 0, 12][..], &table].concat()
+}
+
+/// A TrueType SFNT of `tables`, in order of their tags.
+fn sfnt(tables: &mut [([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    sfnt_tagged(0x0001_0000u32.to_be_bytes(), tables)
+}
+
+/// An SFNT of `tables`, in order of their tags, its format's tag `tag`.
+fn sfnt_tagged(tag: [u8; 4], tables: &mut [([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    tables.sort_by_key(|t| t.0);
+    let n = tables.len() as u16;
+    let mut out = [&tag[..], &be(&[n as i16, 0, 0, 0])].concat();
+    let mut offset = 12 + 16 * tables.len();
+    let mut data = Vec::new();
+    for (tag, table) in tables.iter() {
+        out.extend(tag);
+        out.extend(0u32.to_be_bytes());
+        out.extend((offset as u32).to_be_bytes());
+        out.extend((table.len() as u32).to_be_bytes());
+        data.extend(table);
+        data.resize(data.len().next_multiple_of(4), 0);
+        offset = 12 + 16 * tables.len() + data.len();
+    }
+    out.extend(data);
+    out
+}
+
+/// A bare CFF program (`/FontFile3 /Type1C`) of 1000 units an em, its
+/// glyphs `.notdef` and the space empty, `A` and `g` [`truetype_program`]'s
+/// outlines (its `g`'s off-curve point two control points of a curve, at
+/// 380,560 and 250,560), by its charset's names, in the standard
+/// encoding; its `FontBBox` 0..600 × -200..750.
+pub fn cff_program() -> Vec<u8> {
+    cff(&[vec![14], vec![14], cff_a(), cff_g()], &[1, 34, 72], &[])
+}
+
+/// A CFF glyph's charstring: `A`, [`truetype_program`]'s outline.
+fn cff_a() -> Vec<u8> {
+    [
+        cs(&[0, 0]),
+        vec![21],
+        cs(&[300, 750]),
+        vec![5],
+        cs(&[300, -750]),
+        vec![5, 14],
+    ]
+    .concat()
+}
+
+/// A CFF glyph's charstring: `g`, [`truetype_program`]'s outline.
+fn cff_g() -> Vec<u8> {
+    [
+        cs(&[20, -200]),
+        vec![21],
+        cs(&[460, 0]),
+        vec![5],
+        cs(&[0, 700]),
+        vec![5],
+        cs(&[-100, 60, -130, 0, -130, -60]),
+        vec![8, 14],
+    ]
+    .concat()
+}
+
+/// A CID-keyed CFF (`/FontFile3 /CIDFontType0C`) of 1000 units an em: glyph 0 `.notdef`,
+/// empty, glyph 1 `A` and glyph 2 `g`, its charset giving both CID 5; glyph 3 `A` as CID 7.
+pub fn cid_cff_program() -> Vec<u8> {
+    let index = |items: &[Vec<u8>]| -> Vec<u8> {
+        let mut out = (items.len() as u16).to_be_bytes().to_vec();
+        out.push(4);
+        let mut at = 1u32;
+        for item in items.iter().map(|i| i.len() as u32).chain([0]) {
+            out.extend(at.to_be_bytes());
+            at += item;
+        }
+        out.extend(items.concat());
+        out
+    };
+    let int = |v: usize| [&[29u8][..], &(v as i32).to_be_bytes()].concat();
+    let header = [1u8, 0, 4, 4];
+    let names = index(&[b"Fix".to_vec()]);
+    let strings = index(&[b"Adobe".to_vec(), b"Identity".to_vec()]);
+    let globals = vec![0u8, 0];
+    let charset: Vec<u8> = [0u8, 0, 5, 0, 5, 0, 7].to_vec();
+    let fd_select: Vec<u8> = vec![0, 0, 0, 0, 0];
+    let glyphs = index(&[vec![14], cff_a(), cff_g(), cff_a()]);
+    let private = [cs(&[0]), vec![21]].concat();
+    let font_dict = |private_at: usize| [int(private.len()), int(private_at), vec![18]].concat();
+    let top = |charset_at: usize, select_at: usize, glyphs_at: usize, array_at: usize| {
+        [
+            int(391),
+            int(392),
+            int(0),
+            vec![12, 30],
+            int(charset_at),
+            vec![15],
+            int(select_at),
+            vec![12, 37],
+            int(glyphs_at),
+            vec![17],
+            int(array_at),
+            vec![12, 36],
+        ]
+        .concat()
+    };
+    let top_len = index(&[top(0, 0, 0, 0)]).len();
+    let charset_at = header.len() + names.len() + top_len + strings.len() + globals.len();
+    let select_at = charset_at + charset.len();
+    let glyphs_at = select_at + fd_select.len();
+    let private_at = glyphs_at + glyphs.len();
+    let array_at = private_at + private.len();
+    [
+        &header[..],
+        &names,
+        &index(&[top(charset_at, select_at, glyphs_at, array_at)]),
+        &strings,
+        &globals,
+        &charset,
+        &fd_select,
+        &glyphs,
+        &private,
+        &index(&[font_dict(private_at)]),
+    ]
+    .concat()
+}
+
+/// A bare CFF whose `A` calls its first subroutine, each of whose
+/// `levels` calls the next eight times, the last drawing a line: at ten,
+/// its work past any glyph's fuel.
+pub fn heavy_cff_program(levels: i32) -> Vec<u8> {
+    let subrs: Vec<Vec<u8>> = (0..levels)
+        .map(|k| match k + 1 == levels {
+            true => [cs(&[10, 10]), vec![5, 11]].concat(),
+            false => [cs(&[k + 1 - 107]), vec![10]]
+                .concat()
+                .repeat(8)
+                .into_iter()
+                .chain([11])
+                .collect(),
+        })
+        .collect();
+    let a = [cs(&[0, 0]), vec![21], cs(&[-107]), vec![10, 14]].concat();
+    cff(&[vec![14], vec![14], a], &[1, 34], &subrs)
+}
+
+/// A TrueType program whose glyph 0 is a composite of glyph 1 fifty
+/// times, glyph 1 of glyph 2 fifty times, and so on to glyph 6, a
+/// triangle: 50⁶ glyphs drawn for one.
+pub fn composite_bomb_program() -> Vec<u8> {
+    let component = |glyph: i16| be(&[0x0023, glyph, 0, 0]);
+    let mut glyphs: Vec<Vec<u8>> = (1..7)
+        .map(|next| {
+            let mut glyph = be(&[-1, 0, 0, 600, 750]);
+            for _ in 0..49 {
+                glyph.extend(component(next));
+            }
+            // The last component, without MORE_COMPONENTS.
+            glyph.extend(be(&[0x0003, next, 0, 0]));
+            glyph
+        })
+        .collect();
+    glyphs.push(simple_glyph(&[
+        (0, 0, true),
+        (300, 750, true),
+        (600, 0, true),
+    ]));
+    let mut glyf = Vec::new();
+    let mut loca = Vec::new();
+    for glyph in &glyphs {
+        loca.extend((glyf.len() as u32).to_be_bytes());
+        glyf.extend(glyph);
+        glyf.resize(glyf.len().next_multiple_of(4), 0);
+    }
+    loca.extend((glyf.len() as u32).to_be_bytes());
+    let head = [
+        &0x0001_0000u32.to_be_bytes()[..],
+        &0x0001_0000u32.to_be_bytes(),
+        &0u32.to_be_bytes(),
+        &0x5F0F_3CF5u32.to_be_bytes(),
+        &be(&[0, 1000]),
+        &[0; 16],
+        &be(&[0, 0, 600, 750, 0, 8, 2, 1, 0]),
+    ]
+    .concat();
+    let hhea = [
+        &0x0001_0000u32.to_be_bytes()[..],
+        &be(&[800, -200, 0, 600, 0, 0, 600, 1, 0, 0, 0, 0, 0, 0, 0, 7]),
+    ]
+    .concat();
+    let maxp = [
+        &0x0001_0000u32.to_be_bytes()[..],
+        &be(&[7, 3, 1, 3, 1, 2, 0, 0, 0, 0, 0, 0, 50, 7]),
+    ]
+    .concat();
+    let hmtx = be(&[600, 0].repeat(7));
+    sfnt(&mut [
+        (*b"glyf", glyf),
+        (*b"head", head),
+        (*b"hhea", hhea),
+        (*b"hmtx", hmtx),
+        (*b"loca", loca),
+        (*b"maxp", maxp),
+    ])
+}
+
+/// A CFF of `charstrings`, `sids` its glyphs' names after `.notdef`, and
+/// `subrs` its local subroutines.
+fn cff(charstrings: &[Vec<u8>], sids: &[u16], subrs: &[Vec<u8>]) -> Vec<u8> {
+    let index = |items: &[Vec<u8>]| -> Vec<u8> {
+        if items.is_empty() {
+            return vec![0, 0];
+        }
+        let mut out = (items.len() as u16).to_be_bytes().to_vec();
+        out.push(4);
+        let mut at = 1u32;
+        for item in items.iter().map(|i| i.len() as u32).chain([0]) {
+            out.extend(at.to_be_bytes());
+            at += item;
+        }
+        out.extend(items.concat());
+        out
+    };
+    // Operands of five bytes each, so the dictionary's size doesn't depend
+    // on them.
+    let int = |v: i32| [&[29u8][..], &v.to_be_bytes()].concat();
+    let private = match subrs.is_empty() {
+        true => [cs(&[0]), vec![21]].concat(),
+        // Its subroutines just after it, 8 bytes on.
+        false => [int(8), vec![19], cs(&[0]), vec![21]].concat(),
+    };
+    // Its box, then where its charset, charstrings and private dictionary
+    // are.
+    let top = |charset: usize, charstrings: usize, private_at: usize| {
+        let at = |v: usize| int(v as i32);
+        let small = |v: i16| [&[28u8][..], &v.to_be_bytes()].concat();
+        let bbox = [small(0), small(-200), small(600), small(750), vec![5]].concat();
+        let private = [int(private.len() as i32), at(private_at), vec![18]].concat();
+        [
+            bbox,
+            at(charset),
+            vec![15],
+            at(charstrings),
+            vec![17],
+            private,
+        ]
+        .concat()
+    };
+    let header = [1u8, 0, 4, 4];
+    let names = index(&[b"Fix".to_vec()]);
+    let top_at = header.len() + names.len();
+    let after_top = top_at + index(&[top(0, 0, 0)]).len() + index(&[]).len() + index(&[]).len();
+    let charset: Vec<u8> = [
+        &[0u8][..],
+        &sids
+            .iter()
+            .flat_map(|s| s.to_be_bytes())
+            .collect::<Vec<_>>(),
+    ]
+    .concat();
+    let charstrings_at = after_top + charset.len();
+    let glyphs = index(charstrings);
+    let private_at = charstrings_at + glyphs.len();
+    let top = top(after_top, charstrings_at, private_at);
+    [
+        &header[..],
+        &names,
+        &index(&[top]),
+        &index(&[]),
+        &index(&[]),
+        &charset,
+        &glyphs,
+        &private,
+        &index(subrs),
+    ]
+    .concat()
+}
+
 /// A Type 1 program (`/FontFile`): clear text, then its private dictionary
-/// and charstrings encrypted (`eexec`, `lenIV` 4): `.notdef`, `space`, `A` and
-/// `g`, `g`'s side bearing 20, in the standard encoding.
+/// and charstrings encrypted (`eexec`, `lenIV` 4), its glyphs and box
+/// [`cff_program`]'s, `g`'s side bearing 20, in the standard encoding.
 pub fn type1_program() -> Vec<u8> {
+    type1_of("g")
+}
+
+/// [`type1_program`], its `g` by another name.
+pub fn type1_of(g: &str) -> Vec<u8> {
     let charstring = |sbw: [i32; 2], ops: Vec<u8>| -> Vec<u8> {
         let plain = [vec![0; 4], cs(&sbw), vec![13], ops, vec![14]].concat();
         encrypt(&plain, 4330)
@@ -28,7 +533,7 @@ pub fn type1_program() -> Vec<u8> {
             ),
         ),
         (
-            "g",
+            g,
             charstring(
                 [20, 500],
                 [
@@ -75,6 +580,32 @@ pub fn type1_integers_program(n: usize) -> Vec<u8> {
     let program = type1_program();
     let at = program.windows(4).position(|w| w == b"/Pai").unwrap();
     [&program[..at], "1 ".repeat(n).as_bytes(), &program[at..]].concat()
+}
+
+/// An OpenType program of [`truetype_program`]'s tables but `glyf`, [`cff_program`]
+/// its `CFF `, and its `loca` empty, its record's offset past the end of
+/// the program and of every other table's.
+pub fn loca_past_end_program() -> Vec<u8> {
+    let program = truetype_program();
+    let at = |at: usize| u32::from_be_bytes(program[at..at + 4].try_into().unwrap()) as usize;
+    let records =
+        (0..usize::from(u16::from_be_bytes([program[4], program[5]]))).map(|i| 12 + 16 * i);
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = records
+        .map(|r| {
+            let tag: [u8; 4] = program[r..r + 4].try_into().unwrap();
+            (tag, program[at(r + 8)..at(r + 8) + at(r + 12)].to_vec())
+        })
+        .filter(|(tag, _)| tag != b"glyf")
+        .map(|(tag, table)| (tag, if &tag == b"loca" { Vec::new() } else { table }))
+        .chain([(*b"CFF ", cff_program())])
+        .collect();
+    let mut out = sfnt_tagged(*b"OTTO", &mut tables);
+    let loca = (0..tables.len())
+        .map(|i| 12 + 16 * i)
+        .find(|&r| &out[r..r + 4] == b"loca")
+        .unwrap();
+    out[loca + 8..loca + 12].copy_from_slice(&0xFFFF_FF00u32.to_be_bytes());
+    out
 }
 
 /// `plain` encrypted as Type 1 encrypts it, from `key`.

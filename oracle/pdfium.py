@@ -160,6 +160,8 @@ class Pdfium:
             ("FPDFText_GetUnicode", ctypes.c_uint, [P, I]),
             ("FPDFText_GetCharOrigin", I, [P, I, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)]),
             ("FPDFText_GetLooseCharBox", I, [P, I, ctypes.POINTER(FSRect)]),
+            ("FPDFText_GetCharBox", I, [P, I, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+                                        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)]),
             ("FPDFTextObj_GetText", U, [P, P, P, U]),
             ("FPDFTextObj_GetFontSize", I, [P, pf]),
             ("FPDFTextObj_GetFont", P, [P]),
@@ -274,11 +276,12 @@ class Pdfium:
         lib.FPDF_CloseDocument(doc)
         return out
 
-    def text_chars(self, data, heights):
+    def text_chars(self, data, heights, boxes=False):
         """The page's characters as its text page has them, each its character
-        and origin, which is from (0, 100), the fonts' cases' start; and with
-        `heights`, how far the first's loose box reaches from its origin. None
-        where the page doesn't load."""
+        and origin, which is from (0, 100), the fonts' cases' start; with
+        `heights`, how far the first's loose box reaches from its origin; and with
+        `boxes`, after each its box and its loose box from its origin. None where
+        the page doesn't load."""
         lib = self.lib
         buf, doc = self._doc(data)
         page = lib.FPDF_LoadPage(doc, 0) if doc else None
@@ -293,7 +296,19 @@ class Pdfium:
             x, y = ctypes.c_double(), ctypes.c_double()
             lib.FPDFText_GetCharOrigin(tp, i, ctypes.byref(x), ctypes.byref(y))
             first_y = y.value if i == 0 else first_y
-            out.append("%04x %s %s" % (lib.FPDFText_GetUnicode(tp, i), num(x.value), num(y.value - 100)))
+            line = "%04x %s %s" % (lib.FPDFText_GetUnicode(tp, i), num(x.value), num(y.value - 100))
+            if boxes:
+                left, right, bottom, top = (ctypes.c_double() for _ in range(4))
+                lib.FPDFText_GetCharBox(tp, i, ctypes.byref(left), ctypes.byref(right),
+                                        ctypes.byref(bottom), ctypes.byref(top))
+                loose = FSRect()
+                lib.FPDFText_GetLooseCharBox(tp, i, ctypes.byref(loose))
+                line += " box %s %s %s %s loose %s %s %s %s" % (
+                    num(left.value - x.value), num(bottom.value - y.value),
+                    num(right.value - x.value), num(top.value - y.value),
+                    num(loose.left - x.value), num(loose.bottom - y.value),
+                    num(loose.right - x.value), num(loose.top - y.value))
+            out.append(line)
         if heights and out:
             box = FSRect()
             lib.FPDFText_GetLooseCharBox(tp, 0, ctypes.byref(box))
@@ -490,8 +505,8 @@ def answer(pdfium, kind, files):
         return " ".join(pdfium.avail(files["pdf"], files.get("password")))
     if kind == "spaces":
         return spaces_answer(pdfium.image_sizes(files["pdf"]))
-    if kind in ("fonts", "fonts-heights"):
-        return content_answer(pdfium.text_chars(files["pdf"], kind == "fonts-heights"))
+    if kind in ("fonts", "fonts-heights", "fonts-boxes"):
+        return content_answer(pdfium.text_chars(files["pdf"], kind == "fonts-heights", kind == "fonts-boxes"))
     raise SystemExit("unknown kind %r" % kind)
 
 

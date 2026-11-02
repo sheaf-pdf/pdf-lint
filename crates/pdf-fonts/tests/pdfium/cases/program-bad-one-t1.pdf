@@ -1,0 +1,57 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200000 20000] /Contents 4 0 R /Resources << /Font << /F0 10 0 R >> >> >>
+endobj
+4 0 obj
+<<  /Length 36 >>
+stream
+BT /F0 1000 Tf 0 100 Td (ABgä) Tj ET
+endstream
+endobj
+10 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Fix /FirstChar 32 /LastChar 103 /Widths [500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500 500] /FontDescriptor 21 0 R >>
+endobj
+20 0 obj
+<<  /Length 1 >>
+stream
+
+endstream
+endobj
+21 0 obj
+<< /Flags 32 /FontFile2 20 0 R >>
+endobj
+xref
+0 22
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000247 00000 n 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000334 00000 n 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000748 00000 n 
+0000000800 00000 n 
+trailer
+<< /Size 22 /Root 1 0 R >>
+startxref
+850
+%%EOF

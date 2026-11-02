@@ -9,7 +9,8 @@
 //! answer is what PDFium's text page says of each character: its text and its origin
 //! from where the string starts. A kind's `-heights` adds how far the first
 //! character's loose box reaches from its origin, for a font whose heights aren't left
-//! to a face PDFium substitutes. Here the characters are made as PDFium's text page
+//! to a face PDFium substitutes, and its `-boxes` each character's box and loose box,
+//! for one whose glyphs are a program it embeds. Here the characters are made as PDFium's text page
 //! makes them, which isn't [`Font`]'s to say: a code with no text is its own text, one
 //! the same as a code just before it at the same place isn't kept, nor a space after a
 //! space, and nothing's kept of a string that takes up no room.
@@ -19,7 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdf_fonts::pdf_content_streams::{Limits as ContentLimits, ResCx, operations};
-use pdf_fonts::{Fault, Font, FontKind, Limits, Resolve};
+use pdf_fonts::{Fault, Font, FontKind, Limits, Rect, Resolve};
 use pdf_structure::bytes::{Options, Reading};
 
 /// The most characters back a text page looks for the same code at the same place
@@ -106,20 +107,84 @@ fn characters(font: &Font, shown: &[u8], tw: f32) -> Vec<Character> {
     out
 }
 
-/// Whether a text page keeps nothing of `shown` in a Type 3 font, whose glyphs' boxes
-/// are all it knows of the room a string takes up.
+/// The box PDFium has for `code`, its glyph's own, where it's known: a Type 3 font's, or
+/// that of a program it read.
+fn own_box(font: &Font, code: u32) -> Option<Rect> {
+    match font.outlined() {
+        true => font.char_box(code),
+        false => font.glyph_box(code),
+    }
+}
+
+/// Whether a text page keeps nothing of `shown` in a Type 3 font or one whose program
+/// was read, whose glyphs' boxes are all it knows of the room a string takes up
+/// (`CPDF_TextObject::CalcPositionDataInternal`).
 fn takes_no_room(font: &Font, shown: &[u8]) -> bool {
-    if font.kind() != FontKind::Type3 {
+    if font.kind() != FontKind::Type3 && !font.outlined() {
         return false;
     }
     let (mut low, mut high, mut at) = (f32::INFINITY, f32::NEG_INFINITY, 0.0f32);
     for (_, code) in font.codes(shown) {
-        let b = font.glyph_box(code).unwrap_or_default();
-        low = low.min(at + b.x0);
-        high = high.max(at + b.x1);
-        at += font.width(code);
+        let b = own_box(font, code).unwrap_or_default();
+        match font.vertical(code) {
+            Some(v) => {
+                low = low.min(b.x0 - v.vx);
+                high = high.max(b.x1 - v.vx);
+            }
+            None => {
+                low = low.min(at + b.x0);
+                high = high.max(at + b.x1);
+                at += font.width(code);
+            }
+        }
     }
     (high - low).abs() < 0.0001
+}
+
+/// A character's box on a text page, from its origin (`ProcessTextObjectItems`), and its
+/// loose box (`GetLooseBounds`), as left, bottom, right and top; at a font size of 1000 a
+/// glyph unit is a unit. A box of no height is one unit high, and one of no width its
+/// character's width wide.
+fn boxes(font: &Font, code: u32) -> ([f32; 4], [f32; 4]) {
+    let glyph = own_box(font, code).unwrap_or_default();
+    let width = match font.vertical(code) {
+        Some(v) => v.w1,
+        None => font.width(code),
+    };
+    let [mut left, mut bottom, mut right, mut top] = [glyph.x0, glyph.y0, glyph.x1, glyph.y1];
+    if (top - bottom).abs() < 0.0001 {
+        top = bottom + 1.0;
+    }
+    if (right - left).abs() < 0.0001 {
+        right = left + width;
+    }
+    // `TransformRect` normalizes it: a vertical advance is below 0.
+    if right < left {
+        (left, right) = (right, left);
+    }
+    if top < bottom {
+        (bottom, top) = (top, bottom);
+    }
+    let tight = [left, bottom, right, top];
+    if left >= right || bottom >= top {
+        return (tight, tight);
+    }
+    let metrics = font.metrics();
+    let spanned = match font.vertical(code) {
+        Some(v) => Some([v.vx - 500.0, v.vy + v.w1, v.vx + 500.0, v.vy]),
+        // Normalized too: an `/Ascent` below `/Descent` is only the other way up.
+        None if metrics.ascent != metrics.descent => Some([
+            0.0,
+            metrics.descent.min(metrics.ascent),
+            width,
+            metrics.descent.max(metrics.ascent),
+        ]),
+        None => None,
+    };
+    let loose = spanned.map_or(tight, |[l, b, r, t]| {
+        [l.min(left), b.min(bottom), r.max(right), t.max(top)]
+    });
+    (tight, loose)
 }
 
 /// The answer for the file `bytes`, of the kind `kind`, over a reading of it.
@@ -157,7 +222,16 @@ fn ours(bytes: &[u8], kind: &str) -> String {
     }
     let characters = characters(&font, &shown, tw);
     let mut words: Vec<String> = (characters.iter())
-        .map(|c| format!("{:04x} {} {}", c.unicode, c.x, c.y))
+        .map(|c| {
+            let word = format!("{:04x} {} {}", c.unicode, c.x, c.y);
+            if kind != "fonts-boxes" {
+                return word;
+            }
+            let (tight, loose) = boxes(&font, c.code);
+            let [a, b, c, d] = tight;
+            let [e, f, g, h] = loose;
+            format!("{word} box {a} {b} {c} {d} loose {e} {f} {g} {h}")
+        })
         .collect();
     if words.is_empty() {
         return "none".to_string();
@@ -169,7 +243,7 @@ fn ours(bytes: &[u8], kind: &str) -> String {
         }
         // A character's loose box is the font's heights, or its own box where they're
         // one, over its own box, a line high where that has no height.
-        let glyph = font.glyph_box(characters[0].code).unwrap_or_default();
+        let glyph = own_box(&font, characters[0].code).unwrap_or_default();
         let (bottom, top) = match glyph.y0 == glyph.y1 {
             true => (glyph.y0, glyph.y0 + 1.0),
             false => (glyph.y0, glyph.y1),

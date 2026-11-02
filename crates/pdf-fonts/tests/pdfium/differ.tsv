@@ -36,3 +36,17 @@ predefined-cid-uni-gb-a0	A predefined CMap's CIDs are Adobe's current CMap's, in
 tu-past-low-byte	A range is read to its last code, on purpose, as what writers mean by it, <0000> <FFFF> <0000> most of all; PDFium reads its last code's low byte alone, so past that its text is the code's own, the same for that one, not for this.
 t0-past-low-byte	As tu-past-low-byte, of two-byte codes.
 t0-past-low-byte-array	As tu-past-low-byte, of an array: writers of subsets cross a byte so, and PDFium, whose last code is then below the first, loses the block whole.
+program-t1-enc-pdfdoc	A program's glyph by an encoding with no table here isn't said: its box is none, where PDFium has its table of PDFDocEncoding's or MacExpertEncoding's names.
+program-t1-enc-pdfdoc-symbolic	As program-t1-enc-pdfdoc.
+program-cff-enc-pdfdoc	As program-t1-enc-pdfdoc.
+program-cff-enc-pdfdoc-symbolic	As program-t1-enc-pdfdoc.
+program-tt-enc-pdfdoc	As program-t1-enc-pdfdoc.
+program-base-expert	As program-t1-enc-pdfdoc.
+program-tt-map-mac-c1	A program's Mac charmap's text at 0xC1 is the inverted exclamation mark, where PDFium's table has the pound sign, on purpose.
+program-cid-chain-past-own	A CMap's /UseCMap and usecmap are read, on purpose, as ISO 32000-2's 9.7.5.3 has them, so a code past its own ranges has the CID the one it uses gives; PDFium reads neither, and gives such a code CID 0. Font::approx says the codes are guessed.
+program-cid-chain-identity-usecmap	As program-cid-chain-past-own, by usecmap and Identity.
+program-cid-chain-identity-name	As program-cid-chain-past-own, by /UseCMap and Identity's name.
+program-cid-chain-space-below	As program-cid-chain-past-own, a codespace from the one it uses.
+program-cid-chain-wmode-below	As program-cid-chain-past-own, a /WMode from the one it uses.
+program-otto-keyed-no-cmap	A Unicode charmap made from names, two glyphs having one: FreeType's sort leaves one of them first, which isn't said here, so that code's box is none.
+program-otto-keyed-no-cmap-tt	As program-otto-keyed-no-cmap.

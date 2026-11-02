@@ -117,10 +117,11 @@ impl CidMap {
     /// The CMap stream `id`, over the CMaps it uses: the stream its `/UseCMap`
     /// names, followed while they're streams it hasn't read yet, at most
     /// [`Limits::cmaps`] of them, each decompressed within `budget`; and the
-    /// predefined CMap one names, by name or by `usecmap`. PDFium uses none of
-    /// them, so what they map but Identity sets `unknown`, as does a predefined
-    /// CMap the build hasn't, a stream of the chain that can't be read, or one past
-    /// the cap.
+    /// predefined CMap one names, by name or by `usecmap`. That's the standard's
+    /// reading (ISO 32000-2, 9.7.5.3); PDFium uses none of them, and gives a code past
+    /// the stream's own ranges CID 0, so anything taken from them sets `unknown`, as
+    /// does a predefined CMap the build hasn't, a stream of the chain that can't be
+    /// read, or one past the cap.
     pub(crate) fn read<'o, O: Resolve<'o> + Streams, S: Sink + ?Sized>(
         reader: &Reader<'_, O, S>,
         id: ObjectId,
@@ -167,7 +168,11 @@ impl CidMap {
         if let Some(name) = base {
             map.uses(reader, name, &mut ranges, unknown);
         }
-        for data in chain.iter().rev() {
+        for data in chain.iter().skip(1).rev() {
+            map.parse(reader, data, &mut ranges, unknown);
+        }
+        *unknown |= !ranges.is_empty() || !map.codespace.is_empty() || map.vertical;
+        if let Some(data) = chain.first() {
             map.parse(reader, data, &mut ranges, unknown);
         }
         map.cids = Ranges::new(&ranges, true);
@@ -259,7 +264,7 @@ impl CidMap {
 
     /// The predefined CMap `name` used, under what's mapped after it: Identity's
     /// codespace and CIDs; another's CIDs, where the build has it, for the codes
-    /// nothing else maps, which PDFium maps to CID 0, so that's guessed (`unknown`),
+    /// nothing else maps. PDFium maps those to CID 0, so either is guessed (`unknown`),
     /// as one the build hasn't is.
     fn uses<'o, O: Resolve<'o> + Streams, S: Sink + ?Sized>(
         &mut self,
@@ -277,8 +282,8 @@ impl CidMap {
                 reader.tell(None, None, Fault::PredefinedUnknown);
             }
             self.base = bundled.or(self.base);
-            *unknown = true;
         }
+        *unknown = true;
     }
 }
 

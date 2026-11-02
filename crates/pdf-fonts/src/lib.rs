@@ -19,8 +19,14 @@
 //! - **Type 1 tokens** ([`type1::scan`]): a Type 1 program read as far as its
 //!   charstrings by glyph name, bounded by [`Limits`].
 //!
-//! No font program is read yet ([`FontProgram`]), so a glyph's box from one is none and
-//! its heights are guessed. Nothing panics on what it's given. With the `structure`
+//! - **Programs,** with the `programs` feature, on by default, through skrifa: each
+//!   glyph's outline box ([`Font::char_box`]), a font's heights where its descriptor
+//!   lacks them, and the text of the codes PDFium's encoding leaves to its program, as
+//!   PDFium's FreeType gives them, each bounded by [`Limits`] and charged to the budget
+//!   ([`FontProgram`]). Without it, and in [`Fonts::for_text`], none's read: a glyph's box
+//!   from one is none, its heights are guessed, and those codes' text by its font's name.
+//!
+//! Nothing panics on what it's given. With the `structure`
 //! feature, a pdf-structure `&Reading` gives a font its objects and streams; with
 //! `predefined-cmaps`, a Type 0 font's predefined CMap is Adobe's, where without it it
 //! reads as one the build hasn't.
@@ -79,6 +85,8 @@ mod fonts;
 pub mod fuzz;
 mod limits;
 mod predefined;
+#[cfg_attr(not(feature = "programs"), path = "no_program.rs")]
+mod program;
 mod reader;
 mod std14;
 mod streams;

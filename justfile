@@ -285,8 +285,8 @@ semantics-msrv:
 color-msrv:
     cargo +{{ color_msrv }} test --locked -p pdf-color
 
-# Test pdf-fonts on its oldest supported Rust, as it's published, with a reading of
-# a file and with no feature, which must be installed.
+# Test pdf-fonts on its oldest supported Rust, as it's published, skrifa among it, with
+# a reading of a file and with no feature, which must be installed.
 fonts-msrv:
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features structure
@@ -322,7 +322,7 @@ arlington-msrv:
 # page tree, dates and XMP claims; `color`, pdf-color's count of a space's
 # components, its typed spaces and what a resources dictionary names; `fonts`,
 # pdf-fonts' scan of a Type 1 program, under any caps, its reading of names, and its
-# reading of a font, on any parts and in a file;
+# reading of a font, its program among them, on any parts and in a file;
 # `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; or `check`, the reader
 # and the checker.

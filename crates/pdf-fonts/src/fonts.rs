@@ -15,9 +15,9 @@ use crate::{Decoded, Error, Limits, Streams};
 /// a font kept would be told to no one twice, so who wants faults calls
 /// [`Font::read`].
 ///
-/// Each font's program is read with it, for its glyphs' boxes and its heights, and
-/// charged to the budget it's read within; but by fonts made for text
-/// ([`Fonts::for_text`]), which read none, as text needs none.
+/// Each font's program is read with it, for its glyphs' boxes, its heights and what
+/// its encoding leaves to it of its text, and charged to the budget it's read within;
+/// but by fonts made for text ([`Fonts::for_text`]), which read none.
 #[derive(Debug, Default)]
 pub struct Fonts {
     read: Mutex<HashMap<ObjectId, Arc<Font>>>,
@@ -46,7 +46,9 @@ impl Fonts {
     /// Fonts read for the text their strings are and where their glyphs are placed,
     /// and no more: no program is read, nor charged to a budget, so each glyph's box
     /// is its metrics' alone, and heights a program would give are guessed
-    /// ([`FontApprox`](crate::FontApprox)).
+    /// ([`FontApprox`](crate::FontApprox)). So is the text of a code PDFium's encoding
+    /// leaves to a program, by the font's name, as a symbolic font with no `/ToUnicode`
+    /// for that code and no encoding of a name comes to.
     pub fn for_text() -> Fonts {
         Fonts {
             for_text: true,

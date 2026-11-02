@@ -10,7 +10,14 @@ content, 10 the font, and any others as it says. A case whose name begins
 Each reader's value is written each way its accessor in PDFium tells apart: a
 number, a real, true, what's no number, past 32 bits, by a reference, a chain and
 a reference to nothing. What's asked of a font with no /Widths is its widths by an
-own face only for the standard 14; nothing here rests on the system's fonts."""
+own face only for the standard 14; nothing here rests on the system's fonts.
+
+`programs()` reads the programs built by hand from programs/, beside this file: the
+crate's `the_programs_are_written` writes them, and `the_programs_are_the_builders`
+holds them to what builds them."""
+
+import os
+import struct
 
 ROWS = []
 
@@ -893,10 +900,382 @@ def type3():
         t(name, matrix + keys + keys_ag, objects, s=b"(Az)", kind="fonts-heights")
 
 
+def program(name):
+    """A program built by hand, as tests/pdfium/programs has it (`the_programs_are_written`)."""
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "programs")
+    with open(os.path.join(folder, name), "rb") as f:
+        return f.read()
+
+
+def sfnt_table(data, tag):
+    """Where table `tag` of an SFNT is, and how long."""
+    count = struct.unpack(">H", data[4:6])[0]
+    for i in range(count):
+        record = 12 + 16 * i
+        if data[record:record + 4] == tag:
+            at, length = struct.unpack(">II", data[record + 8:record + 16])
+            return at, length
+    raise KeyError(tag)
+
+
+def charmap(data, platform, encoding):
+    """A TrueType program with its one `cmap` subtable under other ids."""
+    at, _ = sfnt_table(data, b"cmap")
+    out = bytearray(data)
+    out[at + 4:at + 8] = struct.pack(">HH", platform, encoding)
+    return bytes(out)
+
+
+def upem(data, units):
+    """A TrueType program with another unitsPerEm in its `head`."""
+    at, _ = sfnt_table(data, b"head")
+    out = bytearray(data)
+    out[at + 18:at + 20] = struct.pack(">H", units)
+    return bytes(out)
+
+
+def retagged(data, tag, extra):
+    """An SFNT of `data`'s tables and `extra`'s, under `tag`."""
+    count = struct.unpack(">H", data[4:6])[0]
+    tables = {}
+    for i in range(count):
+        record = 12 + 16 * i
+        at, length = struct.unpack(">II", data[record + 8:record + 16])
+        tables[data[record:record + 4]] = data[at:at + length]
+    tables.update(extra)
+    out = tag + struct.pack(">HHHH", len(tables), 0, 0, 0)
+    at = 12 + 16 * len(tables)
+    body = b""
+    for name in sorted(tables):
+        out += name + struct.pack(">III", 0, at + len(body), len(tables[name]))
+        body += tables[name] + b"\0" * (-len(tables[name]) % 4)
+    return out + body
+
+
+def programs():
+    # Each of the programs built by hand, each by what a code draws of it, its box and
+    # its loose box; nothing rests on a face PDFium substitutes.
+    tt, cff, t1, cid = program("truetype"), program("cff"), program("type1"), program("cid-cff")
+    fifty = b" ".join([b"500"] * 72)
+
+    def font(name, subtype, key, data, descriptor=b"/Flags 32 ", keys=b"/Encoding /WinAnsiEncoding ", s=b"(ABg)",
+             base=b"/Fix", widths=None, extra=None, file_dict=b"", kind="fonts-boxes"):
+        objects = {20: stream(file_dict, data), 21: b"<< /Type /FontDescriptor " + descriptor + b"/" + key + b" 20 0 R >>"}
+        objects.update(extra or {})
+        w = widths if widths is not None else b"/FirstChar 32 /LastChar 103 /Widths [" + fifty + b"] "
+        case("program-" + name, b"<< /Type /Font /Subtype /" + subtype + b" /BaseFont " + base + b" " + w + keys
+             + b"/FontDescriptor 21 0 R >>", objects, s, kind)
+
+    bbox = b"/FontBBox [0 -200 700 800] /Ascent 800 /Descent -200 "
+    given = b"/Flags 32 " + bbox
+    # Each format by each key: told apart by its bytes, whichever key names it.
+    for name, sub, key, data in [
+        ("tt", b"TrueType", b"FontFile2", tt),
+        ("tt-as-file", b"TrueType", b"FontFile", tt),
+        ("tt-as-file3", b"TrueType", b"FontFile3", tt),
+        ("tt-subtype-type1", b"Type1", b"FontFile2", tt),
+        ("tt-subtype-mm", b"MMType1", b"FontFile2", tt),
+        ("cff", b"Type1", b"FontFile3", cff),
+        ("cff-as-file", b"Type1", b"FontFile", cff),
+        ("cff-subtype-tt", b"TrueType", b"FontFile3", cff),
+        ("t1", b"Type1", b"FontFile", t1),
+        ("t1-as-file2", b"Type1", b"FontFile2", t1),
+        ("t1-subtype-tt", b"TrueType", b"FontFile", t1),
+        ("t1-subtype-mm", b"MMType1", b"FontFile", t1),
+    ]:
+        font(name, sub, key, data, given)
+        font(name + "-no-box", sub, key, data, b"/Flags 32 /Ascent 900 /Descent -100 ")
+        font(name + "-no-heights", sub, key, data, b"/Flags 32 /FontBBox [0 -300 1000 1000] ")
+        font(name + "-nothing", sub, key, data, b"/Flags 32 ")
+    # A flipped box isn't held to; and with no heights, `A`'s top and `g`'s bottom over it.
+    flip = b"/Flags 32 /FontBBox [0 800 700 -200] "
+    font("tt-flip", b"TrueType", b"FontFile2", tt, flip + b"/Ascent 900 /Descent -300 ")
+    font("tt-flip-no-heights", b"TrueType", b"FontFile2", tt, flip)
+    # What a code that names no glyph draws, each kind of glyph, a space; and codes past
+    # /Widths.
+    font("tt-codes", b"TrueType", b"FontFile2", tt, given, s=b"(ABCDg \x01)")
+    font("cff-codes", b"Type1", b"FontFile3", cff, given, s=b"(ABDg \x01)")
+    font("t1-codes", b"Type1", b"FontFile", t1, given, s=b"(ABDg \x01)")
+    # Units per em.
+    font("tt-upem-2048", b"TrueType", b"FontFile2", upem(tt, 2048), given)
+    font("tt-upem-16", b"TrueType", b"FontFile2", upem(tt, 16), given)
+    font("tt-upem-16384", b"TrueType", b"FontFile2", upem(tt, 16384), given)
+    # Those FreeType refuses, so drawn in a substitute, and asked for no box.
+    for name, units in [("tt-upem-15", 15), ("tt-upem-16385", 16385), ("tt-upem-0", 0)]:
+        font(name, b"TrueType", b"FontFile2", upem(tt, units), given, kind="fonts")
+
+    # /FontFile, /FontFile2 and /FontFile3 by GetStreamFor, the first that's a stream.
+    for name, descriptor, extra in [
+        ("key-file-first", b"/Flags 32 /FontFile2 30 0 R ", {30: stream(b"", t1)}),
+        ("key-not-stream", b"/Flags 32 /FontFile2 30 0 R ", {30: b"<< >>"}),
+    ]:
+        font(name, b"TrueType", b"FontFile", tt, descriptor, extra=extra)
+    for name, value, extra, kind in [
+        ("key-chain", b"31 0 R", {31: b"30 0 R", 30: stream(b"", tt)}, "fonts"),
+        ("key-chain-next", b"31 0 R /FontFile3 30 0 R", {31: b"32 0 R", 32: stream(b"", t1), 30: stream(b"", tt)}, "fonts-boxes"),
+        ("key-dangling", b"99 0 R /FontFile3 30 0 R", {30: stream(b"", tt)}, "fonts-boxes"),
+        ("key-number", b"7 /FontFile3 30 0 R", {30: stream(b"", tt)}, "fonts-boxes"),
+        ("key-dict", b"<< /Length 0 >> /FontFile3 30 0 R", {30: stream(b"", tt)}, "fonts-boxes"),
+    ]:
+        case("program-" + name, b"<< /Type /Font /Subtype /TrueType /BaseFont /Fix /FirstChar 32 /LastChar 103 /Widths ["
+             + fifty + b"] /Encoding /WinAnsiEncoding /FontDescriptor 21 0 R >>",
+             {**extra, 21: b"<< /Flags 32 /FontFile " + value + b" >>"}, b"(ABg)", kind)
+
+    # A program FreeType doesn't load: as PDFium reads a font with none. Asked for what
+    # doesn't rest on a substitute: its text and advance.
+    for name, data in [
+        ("bad-empty", b""),
+        ("bad-garbage", b"garbage"),
+        ("bad-tt-cut", tt[:64]),
+        ("bad-one", b"\x01"),
+    ]:
+        objects = {20: stream(b"", data)}
+        for flags, tag in [(b"32", b""), (b"4", b"-symbolic")]:
+            objects[21] = b"<< /Flags " + flags + b" /FontFile2 20 0 R >>"
+            for sub, tag2 in [(b"TrueType", b""), (b"Type1", b"-t1")]:
+                case("program-" + name + tag.decode() + tag2.decode(),
+                     b"<< /Type /Font /Subtype /" + sub + b" /BaseFont /Fix /FirstChar 32 /LastChar 103 /Widths ["
+                     + fifty + b"] /FontDescriptor 21 0 R >>", dict(objects), b"(ABg\xe4)")
+
+    # /Encoding by GetDirectObjectFor, what's read of it by LoadPDFEncoding: what each code
+    # draws says what it named, in a Type 1 program, by its glyph's name.
+    sym = b"/Flags 4 " + bbox
+    non = b"/Flags 32 " + bbox
+    s = b"(ABg)"
+    diffs = b"<< /Differences [65 /g /A] >>"
+    for name, keys, extra in [
+        ("enc-ref", b"/Encoding 30 0 R ", {30: b"/WinAnsiEncoding"}),
+        ("enc-chain", b"/Encoding 30 0 R ", {30: b"31 0 R", 31: b"/WinAnsiEncoding"}),
+        ("enc-dict-ref", b"/Encoding 30 0 R ", {30: diffs}),
+        ("enc-dict-chain", b"/Encoding 30 0 R ", {30: b"31 0 R", 31: diffs}),
+        ("enc-dangling", b"/Encoding 99 0 R ", None),
+        ("enc-string", b"/Encoding (WinAnsiEncoding) ", None),
+        ("enc-number", b"/Encoding 7 ", None),
+        ("enc-stream", b"/Encoding 30 0 R ", {30: stream(b"/Differences [65 /g]", b"")}),
+        ("enc-unknown", b"/Encoding /Foo ", None),
+        ("enc-mac", b"/Encoding /MacRomanEncoding ", None),
+        ("enc-expert", b"/Encoding /MacExpertEncoding ", None),
+        ("enc-pdfdoc", b"/Encoding /PDFDocEncoding ", None),
+        ("base-win", b"/Encoding << /BaseEncoding /WinAnsiEncoding >> ", None),
+        ("base-ref", b"/Encoding << /BaseEncoding 30 0 R /Differences [103 /A] >> ", {30: b"/WinAnsiEncoding"}),
+        ("base-chain", b"/Encoding << /BaseEncoding 30 0 R /Differences [103 /A] >> ", {30: b"31 0 R", 31: b"/WinAnsiEncoding"}),
+        ("base-string", b"/Encoding << /BaseEncoding (WinAnsiEncoding) /Differences [103 /A] >> ", None),
+        ("base-number", b"/Encoding << /BaseEncoding 7 /Differences [103 /A] >> ", None),
+        ("base-unknown", b"/Encoding << /BaseEncoding /Foo /Differences [103 /A] >> ", None),
+        ("diff", b"/Encoding " + diffs + b" ", None),
+        ("diff-ref", b"/Encoding << /Differences 30 0 R >> ", {30: b"[65 /g /A]"}),
+        ("diff-chain", b"/Encoding << /Differences 30 0 R >> ", {30: b"31 0 R", 31: b"[65 /g /A]"}),
+        ("diff-dangling", b"/Encoding << /Differences 99 0 R >> ", None),
+        ("diff-empty", b"/Encoding << /Differences [] >> ", None),
+        ("diff-elem-ref", b"/Encoding << /Differences [65 30 0 R /A] >> ", {30: b"/g"}),
+        ("diff-elem-chain", b"/Encoding << /Differences [65 30 0 R /A] >> ", {30: b"31 0 R", 31: b"/g"}),
+        ("diff-code-ref", b"/Encoding << /Differences [30 0 R /g /A] >> ", {30: b"65"}),
+        ("diff-code-real", b"/Encoding << /Differences [65.9 /g /A] >> ", None),
+        ("diff-code-string", b"/Encoding << /Differences [65 (x) /g /A] >> ", None),
+        ("diff-code-true", b"/Encoding << /Differences [true /A 65 /g /A] >> ", None),
+        ("diff-unknown-glyph", b"/Encoding << /Differences [65 /nosuch] >> ", None),
+        ("diff-empty-name", b"/Encoding << /Differences [65 / /A] >> ", None),
+        ("none", b"", None),
+    ]:
+        for head, data, sub, key in [
+            ("t1-", t1, b"Type1", b"FontFile"),
+            ("cff-", cff, b"Type1", b"FontFile3"),
+            ("tt-", tt, b"TrueType", b"FontFile2"),
+        ]:
+            font(head + name, sub, key, data, non, keys, s, extra=extra)
+            font(head + name + "-symbolic", sub, key, data, sym, keys, s, extra=extra)
+
+    # A /Differences of nothing is one all the same: not the charmaps' WinAnsiEncoding.
+    font("diff-empty-win", b"TrueType", b"FontFile2", tt, sym, b"/Encoding << /BaseEncoding /WinAnsiEncoding /Differences [] >> ", b"(A\x80)")
+    font("diff-none-win", b"TrueType", b"FontFile2", tt, sym, b"/Encoding << /BaseEncoding /WinAnsiEncoding >> ", b"(A\x80)")
+    # A dictionary with no base, by whether PDFium's face is an SFNT, not its /Subtype.
+    only = b"/Encoding << /Differences [103 /A] >> "
+    font("subtype-type1-tt-dict", b"Type1", b"FontFile2", tt, sym, only)
+    font("subtype-tt-t1-dict", b"TrueType", b"FontFile", t1, sym, only)
+    font("subtype-tt-cff-dict", b"TrueType", b"FontFile3", cff, sym, only)
+    # A program's own encoding: Type 1, the text and glyph of what a symbolic font's
+    # encoding leaves to it.
+    custom = t1.replace(b"/Encoding StandardEncoding def",
+                        b"/Encoding 256 array 0 1 255 {1 index exch /.notdef put} for "
+                        b"dup 97 /A put dup 98 /g put dup 99 /space put readonly def")
+    font("t1-own-symbolic", b"Type1", b"FontFile", custom, sym, b"", b"(abcA)")
+    font("t1-own-nonsymbolic", b"Type1", b"FontFile", custom, non, b"", b"(abcA)")
+    font("t1-own-diff", b"Type1", b"FontFile", custom, sym, b"/Encoding << /Differences [97 /g] >> ", b"(abcA)")
+    font("t1-own-win", b"Type1", b"FontFile", custom, sym, b"/Encoding /WinAnsiEncoding ", b"(abcA)")
+    dingbat = program("type1-dingbat").replace(b"/Encoding StandardEncoding def",
+                                               b"/Encoding 256 array 0 1 255 {1 index exch /.notdef put} for "
+                                               b"dup 98 /a73 put readonly def")
+    font("t1-own-dingbat", b"Type1", b"FontFile", dingbat, sym, b"", b"(Ab)")
+    font("t1-std-symbolic", b"Type1", b"FontFile", t1, sym, b"", b"(Ag \x01)")
+    font("cff-std-symbolic", b"Type1", b"FontFile3", cff, sym, b"", b"(Ag \x01)")
+    # A standard 14 font's name, past a tag or not, over its own program.
+    for name, base in [("named-symbol", b"/Symbol"), ("named-tagged-symbol", b"/ABCDEF+Symbol"),
+                       ("named-dingbats", b"/ZapfDingbats"), ("named-tagged-dingbats", b"/ABCDEF+ZapfDingbats"),
+                       ("named-courier", b"/Courier"), ("named-tagged-courier", b"/ABCDEF+Courier")]:
+        for flags, tag in [(sym, ""), (non, "-nonsymbolic")]:
+            font("t1-" + name + tag, b"Type1", b"FontFile", t1, flags, b"", b"(Ag)", base=base)
+            font("tt-" + name + tag, b"TrueType", b"FontFile2", tt, flags, b"", b"(Ag)", base=base)
+            font("cff-" + name + tag, b"Type1", b"FontFile3", cff, flags, b"", b"(Ag)", base=base)
+    # A TrueType program's charmaps: the glyph and text LoadGlyphMap comes to by each,
+    # by what's read of the encoding, and which one DetermineEncoding moves it to.
+    mac = charmap(tt, 1, 0)
+    symbol = charmap(tt, 3, 0)
+    uni = charmap(tt, 0, 3)
+    all_codes = b"(ABCg \xb0\xe4\xf0)"
+    for head, data in [("mac", mac), ("symbol", symbol), ("uni", uni), ("win", tt)]:
+        for name, keys in [
+            ("", b""),
+            ("-win", b"/Encoding /WinAnsiEncoding "),
+            ("-mac", b"/Encoding /MacRomanEncoding "),
+            ("-dict", b"/Encoding << /Differences [65 /g] >> "),
+            ("-win-diff", b"/Encoding << /BaseEncoding /WinAnsiEncoding /Differences [65 /g] >> "),
+            ("-mac-diff", b"/Encoding << /BaseEncoding /MacRomanEncoding /Differences [65 /g] >> "),
+        ]:
+            font("tt-map-" + head + name, b"TrueType", b"FontFile2", data, sym, keys, all_codes)
+            font("tt-map-" + head + name + "-nonsymbolic", b"TrueType", b"FontFile2", data, non, keys, all_codes)
+        font("tt-map-" + head + "-named-symbol", b"TrueType", b"FontFile2", data, sym, b"", all_codes, base=b"/Symbol")
+    font("tt-map-mac-c1", b"TrueType", b"FontFile2", mac, sym, b"", b"(\xc1)")
+    font("base-expert", b"Type1", b"FontFile", t1, non, b"/Encoding << /BaseEncoding /MacExpertEncoding >> ", s)
+    # A /ToUnicode for a glyph its name doesn't find, and its text.
+    tu = {30: stream(b"", b"1 beginbfchar <41> <0067> endbfchar")}
+    font("tt-to-unicode", b"TrueType", b"FontFile2", tt, non, b"/Encoding << /Differences [65 /nosuch] >> /ToUnicode 30 0 R ", extra=tu)
+    # A font of capitals only: a lower case with no glyph of its own takes its capital's
+    # glyph and width.
+    caps = b"/Flags 65568 " + bbox
+    w = b"/FirstChar 65 /LastChar 97 /Widths [" + b"700 " + b"0 " * 31 + b"300] "
+    font("t1-caps", b"Type1", b"FontFile", t1, caps, b"", b"(Aa)", widths=w)
+    font("t1-caps-notdef", b"Type1", b"FontFile", t1, caps, b"/Encoding << /Differences [97 /.notdef] >> ", b"(Aa)", widths=w)
+    font("t1-caps-space", b"Type1", b"FontFile", t1, caps, b"/Encoding << /Differences [97 /space] >> ", b"(Aa)", widths=w)
+    font("tt-caps", b"TrueType", b"FontFile2", tt, caps, b"", b"(Aa)", widths=w)
+    # A CIDFont: Identity, and a CID's glyph by its /CIDToGIDMap, none past it.
+    def cid_font(name, sub, key, data, descendant=b"", s=b"<00010002000300040005>", extra=None, descriptor=bbox, encoding=b"/Identity-H", kind="fonts-boxes"):
+        objects = {20: stream(b"", data), 21: b"<< /Flags 4 " + descriptor + b"/" + key + b" 20 0 R >>",
+                   22: b"<< /Type /Font /Subtype /" + sub + b" /BaseFont /Fix /FontDescriptor 21 0 R /W [1 [600 500 250 450 700]] "
+                   + descendant + b">>"}
+        objects.update(extra or {})
+        case("program-cid-" + name, b"<< /Type /Font /Subtype /Type0 /BaseFont /Fix /Encoding " + encoding
+             + b" /DescendantFonts [22 0 R] >>", objects, s, kind)
+
+    cid_font("tt", b"CIDFontType2", b"FontFile2", tt)
+    cid_font("tt-identity", b"CIDFontType2", b"FontFile2", tt, b"/CIDToGIDMap /Identity ")
+    cid_font("tt-map", b"CIDFontType2", b"FontFile2", tt, b"/CIDToGIDMap 30 0 R ", extra={30: stream(b"", b"\0\0\0\2\0\1")})
+    cid_font("tt-map-past", b"CIDFontType2", b"FontFile2", tt, b"/CIDToGIDMap 30 0 R ", b"<00030001>", extra={30: stream(b"", b"\0\0\0\2")})
+    cid_font("tt-map-chain", b"CIDFontType2", b"FontFile2", tt, b"/CIDToGIDMap 30 0 R ", extra={30: b"31 0 R", 31: stream(b"", b"\0\0\0\2\0\1")})
+    cid_font("tt-map-dict", b"CIDFontType2", b"FontFile2", tt, b"/CIDToGIDMap << >> ")
+    cid_font("tt-past-glyphs", b"CIDFontType2", b"FontFile2", tt, b"", b"<00010009>")
+    cid_font("tt-no-heights", b"CIDFontType2", b"FontFile2", tt, descriptor=b"/FontBBox [0 -300 1000 1000] ")
+    cid_font("tt-no-box", b"CIDFontType2", b"FontFile2", tt, descriptor=b"/Ascent 900 /Descent -100 ")
+    cid_font("tt-nothing", b"CIDFontType2", b"FontFile2", tt, descriptor=b"")
+    cid_font("cff-as-type2", b"CIDFontType2", b"FontFile3", cff, b"", b"<00010002>")
+    cid_font("t1", b"CIDFontType0", b"FontFile", t1, b"", b"<00010002>")
+    cid_font("cff", b"CIDFontType0", b"FontFile3", cff, b"", b"<00010002>")
+    # A CID-keyed CFF: a CID's glyph by its charset, the lowest glyph of a CID given twice,
+    # one it doesn't give nothing.
+    cid_font("keyed", b"CIDFontType0", b"FontFile3", cid, b"", b"<000500070002>")
+    cid_font("keyed-as-type2", b"CIDFontType2", b"FontFile3", cid, b"", b"<000500070002>")
+    cid_font("keyed-map", b"CIDFontType0", b"FontFile3", cid, b"/CIDToGIDMap 30 0 R ", b"<00010002>", extra={30: stream(b"", b"\0\0\0\5\0\7")})
+    # What a CMap takes from one it uses, told by a CID's glyph: PDFium reads none, a code
+    # past its own ranges CID 0, its codespace and /WMode its own.
+    space_two = b"1 begincodespacerange <0000> <ffff> endcodespacerange "
+    def chained(name, top, below, s=b"<000100020003>", top_keys=b"/UseCMap 31 0 R"):
+        cid_font("chain-" + name, b"CIDFontType2", b"FontFile2", tt, b"", s, encoding=b"30 0 R",
+                 extra={30: stream(top_keys, b"begincmap " + top + b" endcmap"), 31: stream(b"", b"begincmap " + below + b" endcmap")})
+    own = space_two + b"1 begincidchar <0001> 2 endcidchar"
+    chained("past-own", own, space_two + b"1 begincidrange <0002> <0005> 1 endcidrange")
+    chained("space-below", b"1 begincidrange <41> <42> 1 endcidrange", b"1 begincodespacerange <00> <ff> endcodespacerange", b"(AB)")
+    chained("wmode-below", own, b"/WMode 1 def", b"<00010001>")
+    chained("nothing-below", own, b"")
+    chained("identity-usecmap", b"/Identity-H usecmap " + own, b"", top_keys=b"")
+    chained("identity-name", own, b"", top_keys=b"/UseCMap /Identity-H")
+    # An OpenType font's CFF: its names by its charset, whatever its `post` says, and a
+    # Unicode charmap of them or of its `post`'s; its encoding's charmap; a CID as its glyph.
+    otto = program("otto")
+    cid_otto, cid_otto_named = program("cid-otto"), program("cid-otto-post-names")
+    codes = b"(ABDg \x01)"
+    for head, data in [
+        ("otto", otto),
+        ("otto-post-names", program("otto-post-names")),
+        ("otto-no-cmap", program("otto-no-cmap")),
+        ("otto-post-names-no-cmap", program("otto-post-names-no-cmap")),
+        ("otto-map-mac", charmap(otto, 1, 0)),
+        ("otto-map-symbol", charmap(otto, 3, 0)),
+        ("otto-map-uni", charmap(otto, 0, 3)),
+        ("otto-map-ucs4", charmap(otto, 3, 10)),
+    ]:
+        for name, keys in [
+            ("", b""),
+            ("-win", b"/Encoding /WinAnsiEncoding "),
+            ("-mac", b"/Encoding /MacRomanEncoding "),
+            ("-diff", b"/Encoding << /Differences [65 /g /A] >> "),
+        ]:
+            font(head + name, b"Type1", b"FontFile3", data, non, keys, codes)
+            font(head + name + "-symbolic", b"Type1", b"FontFile3", data, sym, keys, codes)
+            font(head + name + "-tt", b"TrueType", b"FontFile3", data, non, keys, codes)
+            font(head + name + "-tt-symbolic", b"TrueType", b"FontFile3", data, sym, keys, codes)
+    # A name of no glyph that says its code point: by the Unicode charmap alone, so what's
+    # beside a UCS-4 one, which is no reason to leave the CFF's names out of one.
+    uni = b"/Encoding << /Differences [103 /uni0067] >> "
+    for name, data in [("otto", otto), ("otto-no-cmap", program("otto-no-cmap")), ("otto-map-ucs4", charmap(otto, 3, 10))]:
+        font(name + "-uni-name", b"Type1", b"FontFile3", data, non, uni, b"(Ag)")
+        font(name + "-uni-name-tt", b"TrueType", b"FontFile3", data, non, uni, b"(Ag)")
+    font("otto-subtype", b"Type1", b"FontFile3", otto, non, b"/Encoding /WinAnsiEncoding ", codes, file_dict=b"/Subtype /OpenType")
+    font("otto-as-file2", b"TrueType", b"FontFile2", otto, non, b"/Encoding /WinAnsiEncoding ", codes)
+    font("otto-as-file", b"Type1", b"FontFile", otto, non, b"/Encoding /WinAnsiEncoding ", codes)
+    # Units per em, as a TrueType's; its heights and box where the descriptor lacks them.
+    font("otto-upem-2048", b"Type1", b"FontFile3", upem(otto, 2048), non, b"/Encoding /WinAnsiEncoding ", codes)
+    font("otto-no-heights", b"Type1", b"FontFile3", otto, b"/Flags 32 ", b"/Encoding /WinAnsiEncoding ", codes)
+    # Which tag says which reader: a CFF under TrueType's tags or TrueType's outlines under
+    # `OTTO` isn't loaded, so asked for its text alone; with both tables, the tag's.
+    glyf_at, glyf_len = sfnt_table(tt, b"glyf")
+    loca_at, loca_len = sfnt_table(tt, b"loca")
+    cff_at, cff_len = sfnt_table(otto, b"CFF ")
+    with_glyf = {b"glyf": tt[glyf_at:glyf_at + glyf_len], b"loca": tt[loca_at:loca_at + loca_len]}
+    with_cff = {b"CFF ": otto[cff_at:cff_at + cff_len]}
+    for name, data in [
+        ("cff-tag-1", b"\0\1\0\0" + otto[4:]),
+        ("cff-tag-2", b"\0\2\0\0" + otto[4:]),
+        ("cff-tag-true", b"true" + otto[4:]),
+        ("cff-tag-typ1", b"typ1" + otto[4:]),
+        ("tt-tag-otto", b"OTTO" + tt[4:]),
+        ("tt-tag-typ1", b"typ1" + tt[4:]),
+    ]:
+        for tag, flags in [("", non), ("-symbolic", sym)]:
+            font(name + tag, b"TrueType", b"FontFile2", data, flags, b"", s, kind="fonts")
+    font("tt-tag-true", b"TrueType", b"FontFile2", b"true" + tt[4:], non, b"/Encoding /WinAnsiEncoding ", s)
+    font("tt-tag-2", b"TrueType", b"FontFile2", b"\0\2\0\0" + tt[4:], non, b"/Encoding /WinAnsiEncoding ", s)
+    font("both-tag-1", b"TrueType", b"FontFile2", retagged(tt, b"\0\1\0\0", with_cff), non, b"/Encoding /WinAnsiEncoding ", s)
+    font("both-tag-otto", b"TrueType", b"FontFile2", retagged(otto, b"OTTO", with_glyf), non, b"/Encoding /WinAnsiEncoding ", s)
+    # A CID-keyed one: a CID is its glyph, not by its charset, where a bare one's is.
+    cid_font("otto", b"CIDFontType0", b"FontFile3", otto, b"", b"<000100020003>")
+    cid_font("otto-keyed", b"CIDFontType0", b"FontFile3", cid_otto, b"", b"<000100020003>")
+    cid_font("otto-keyed-past", b"CIDFontType0", b"FontFile3", cid_otto, b"", b"<000500070009>")
+    cid_font("otto-keyed-as-type2", b"CIDFontType2", b"FontFile3", cid_otto, b"", b"<000100020003>")
+    cid_font("otto-keyed-map", b"CIDFontType2", b"FontFile3", cid_otto, b"/CIDToGIDMap 30 0 R ", b"<00010002>", extra={30: stream(b"", b"\0\0\0\3\0\2")})
+    # In a simple font: names by CID as strings only where its `post` says it has any, and a
+    # Unicode charmap of them where there's none else.
+    keyed_codes = b"($&A)"
+    # And what a symbolic font's encoding leaves to it, its glyph's name only where it has one.
+    font("otto-keyed-text-symbolic", b"Type1", b"FontFile3", cid_otto, sym, b"", b"(A)")
+    font("otto-keyed-post-names-text-symbolic", b"Type1", b"FontFile3", cid_otto_named, sym, b"", b"(A)")
+    for name, data in [("", cid_otto), ("-post-names", cid_otto_named), ("-no-cmap", program("cid-otto-no-cmap"))]:
+        font("otto-keyed" + name, b"Type1", b"FontFile3", data, non, b"/Encoding /WinAnsiEncoding ", keyed_codes)
+        font("otto-keyed" + name + "-symbolic", b"Type1", b"FontFile3", data, sym, b"/Encoding /WinAnsiEncoding ", keyed_codes)
+        font("otto-keyed" + name + "-tt", b"TrueType", b"FontFile3", data, non, b"/Encoding /WinAnsiEncoding ", keyed_codes)
+    # Vertical: the box from its origin over the line, and a string of no room.
+    cid_font("vertical", b"CIDFontType2", b"FontFile2", tt, b"", b"<00010002>", encoding=b"/Identity-V")
+    cid_font("vertical-space", b"CIDFontType2", b"FontFile2", tt, b"", b"<0003>", encoding=b"/Identity-V")
+    # An empty glyph among others: its box's width, the advance's, is below 0, and normalized.
+    cid_font("vertical-empty", b"CIDFontType2", b"FontFile2", tt, b"", b"<00010003>", encoding=b"/Identity-V")
+    # An /Ascent below /Descent: a loose box is normalized too.
+    font("tt-ascent-under", b"TrueType", b"FontFile2", tt, b"/Flags 32 /FontBBox [0 -200 700 800] /Ascent -100 /Descent 200 ")
+    font("tt-ascent-under-far", b"TrueType", b"FontFile2", tt, b"/Flags 32 /FontBBox [0 -1200 700 1000] /Ascent -1000 /Descent 0 ")
+
+
 def cases():
     del ROWS[:]
     simple()
     heights()
     type0()
     type3()
+    programs()
     return list(ROWS)

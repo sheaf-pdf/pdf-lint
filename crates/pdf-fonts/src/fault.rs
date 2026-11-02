@@ -140,8 +140,9 @@ pub enum Fault {
     /// hasn't, whose codes are guessed.
     #[error("a predefined CMap this reading doesn't have")]
     PredefinedUnknown,
-    /// A program that doesn't read as its format (9.9). Its glyphs' boxes and its
-    /// heights are guessed.
+    /// A program that doesn't read as its format (9.9), or that's past
+    /// [`Limits`](crate::Limits). It reads as no program at all, as PDFium reads one
+    /// FreeType doesn't load, its glyphs' boxes and its heights guessed.
     #[error("a font program that doesn't read")]
     ProgramMalformed,
     /// A reference to a reference (7.3.10), which ISO 32000-2 allows and PDFium
