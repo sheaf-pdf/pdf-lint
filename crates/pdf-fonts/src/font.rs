@@ -7,9 +7,22 @@
 //!
 //! Every metric is in glyph units: thousandths of text space at a font size of 1,
 //! as `/Widths` gives them; a Type 3 font's are its glyph space through its
-//! `/FontMatrix`. What PDFium reads as whole numbers (widths, `Ascent` and
-//! `Descent`, a `/FontBBox`) is read whole, cut to its whole part, as PDFium cuts
-//! it.
+//! `/FontMatrix`.
+//!
+//! Each value of a dictionary is read by what PDFium's accessor for it does, as of
+//! chromium/8125, however far that is from ISO 32000-2. A whole number is `true` as
+//! 1, what's no number 0, a real cut from its 32-bit float, and past 32 bits 0, and
+//! it's held as PDFium holds it: a simple font's widths in 16 bits, a CID font's in
+//! 32 and its `/DW` and vertical metrics in 16. A reference is followed once, for a
+//! number, an array or a stream, and one to a reference is then none; a dictionary
+//! has a reference more, and a stream's will do. So what no real writer writes reads
+//! as what PDFium lays out, and the font's reading doesn't part from it for what's
+//! hostile.
+//!
+//! Text is where it parts on purpose, where PDFium's is the worse: a name of joined
+//! parts is the Adobe Glyph List's text, a Dingbats name is text only in a ZapfDingbats
+//! font, WinAnsiEncoding's 0xA0 and 0xAD are Windows-1252's, a Type 3 font's names are
+//! read for text as a simple font's are, and a CID's text is Adobe's UCS2 CMap's.
 //!
 //! Every array is read within its own length: a `/W` range of 2³¹ CIDs is one range,
 //! as it's written, not 2³¹ widths. What a font's streams decompress to (its
@@ -27,7 +40,7 @@ use pdf_objects::{Dict, Object, ObjectId, Resolve};
 
 use crate::cmap::{CMap, CidMap, Ranges, Scheme, number, two_bytes};
 use crate::predefined::{self, BfString, Collection, Split};
-use crate::reader::{Reader, dict_of};
+use crate::reader::Reader;
 use crate::{Encoding, Error, Fault, Limits, Sink, Std14, Streams, glyph_text};
 
 /// A rectangle, in glyph units unless it says otherwise: thousandths of text
@@ -121,7 +134,8 @@ pub enum FontKind {
     Type1,
     /// `/MMType1`.
     MMType1,
-    /// `/TrueType`.
+    /// `/TrueType`. One PDFium reads as GBK, by its name, has its codes by GBK-EUC-H
+    /// and no `/Widths` read.
     TrueType,
     /// `/Type3`.
     Type3,
@@ -143,11 +157,11 @@ pub enum Descendant {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FontApprox {
-    /// Its codes' CIDs may not be PDFium's: a predefined CMap that the build
-    /// hasn't or PDFium doesn't know, its codes split by its `/ToUnicode` codespace
-    /// and their CIDs unknown, or none; or an embedded CMap that uses a predefined
-    /// one but Identity, which this reads and PDFium doesn't, or whose chain can't
-    /// be read whole.
+    /// Its codes' CIDs may not be PDFium's: a predefined CMap that the build hasn't,
+    /// its codes split by its `/ToUnicode` codespace and their CIDs unknown; an
+    /// `/Encoding` that's neither a name nor a stream, which PDFium doesn't load; or
+    /// an embedded CMap that uses a predefined one but Identity, which this reads and
+    /// PDFium doesn't, or whose chain can't be read whole.
     pub codes: bool,
     /// Its widths: a simple font without `/Widths` that isn't one of the standard 14
     /// drawn without a program, or a Type 0 font without a CIDFont.
@@ -237,7 +251,7 @@ pub struct Font {
     /// chain and its CharProcs, each once.
     cost: usize,
     decoder: Decoder,
-    /// A Type 0 font's codes' text where it has no `/ToUnicode`.
+    /// A Type 0 font's codes' text where its `/ToUnicode` has none.
     cid_text: Option<CidText>,
     approx: FontApprox,
 }
@@ -261,7 +275,7 @@ enum Codes {
     Unknown,
 }
 
-/// A Type 0 font's codes' text where it has no `/ToUnicode`, as PDFium reads it
+/// A Type 0 font's codes' text where its `/ToUnicode` has none, as PDFium reads it
 /// (`CPDF_CIDFont::GetUnicodeFromCharCode`): a UCS2 or UTF16 CMap's codes are their
 /// own; Identity's and another predefined CMap's CIDs, of a collection of Adobe's,
 /// are what that collection's UCS2 CMap maps them to, the collection the predefined
@@ -279,6 +293,8 @@ enum Widths {
     Simple(Box<[f32; 256]>),
     /// A CID font's `/W`, by CID, and `/DW` for the CIDs it doesn't give.
     Cid { w: Ranges<[f32; 1]>, dw: f32 },
+    /// A TrueType font PDFium reads as GBK.
+    Gbk,
 }
 
 #[derive(Debug)]
@@ -423,18 +439,21 @@ impl Font {
             }
     }
 
-    /// The CID `code` selects in a Type 0 font: itself in Identity, or what the CMap
-    /// maps it to, 0 where it maps it to none: an embedded one, over a predefined one
-    /// it uses; a predefined one by the code's length as PDFium sizes it
-    /// (`CPDF_CMap::GetCharSize`), two bytes in one of two bytes each, else by its
-    /// value. None for a simple font, or where the CMap is unknown.
+    /// The CID `code` selects in a Type 0 font, in 16 bits, as PDFium holds one: itself
+    /// in Identity, or what the CMap maps it to, 0 where it maps it to none: an embedded
+    /// one, over a predefined one it uses; a predefined one by the code's length as
+    /// PDFium sizes it (`CPDF_CMap::GetCharSize`), two bytes in one of two bytes each,
+    /// else by its value. None for a simple font, or where the CMap is unknown.
     pub fn cid(&self, code: u32) -> Option<u32> {
         match &self.codes {
             Codes::Identity => Some(code),
             Codes::Embedded(map) => Some(match map.cids.get(code) {
-                Some((lo, cid)) => cid.wrapping_add(code - lo),
+                Some((lo, cid)) => cid.wrapping_add(code - lo) & 0xffff,
                 None => map.base_cid(code).unwrap_or(0),
             }),
+            // Below the space, what Adobe's CMaps call `.notdef`, which PDFium's own
+            // tables don't hold, so its CID is 0.
+            Codes::Predefined { .. } if code < 0x20 => Some(0),
             Codes::Predefined { map, scheme } => {
                 let len = match scheme.split {
                     Split::Lead(_) if code < 0x100 => 1,
@@ -447,7 +466,8 @@ impl Font {
     }
 
     /// How far `code` advances in horizontal writing, before character and word
-    /// spacing: its `/Widths` entry, or its CID's `/W` or `/DW`.
+    /// spacing: its `/Widths` entry, as the 16 bits PDFium holds it in, 0xFFFF being
+    /// none, or its CID's `/W` or `/DW`.
     pub fn width(&self, code: u32) -> f32 {
         match &self.widths {
             Widths::Simple(widths) => widths.get(code as usize).copied().unwrap_or(0.0),
@@ -455,6 +475,12 @@ impl Font {
                 Some([width]) => width,
                 None => *dw,
             },
+            // PDFium's fixed widths for a font it reads as GBK (`ansi_widths_fixed_`).
+            Widths::Gbk if code < 0x80 => match (32..127).contains(&code) {
+                true => 500.0,
+                false => 0.0,
+            },
+            Widths::Gbk => 1000.0,
         }
     }
 
@@ -489,9 +515,9 @@ impl Font {
         }
     }
 
-    /// Where it writes vertically, how `code`'s glyph is placed: its CID's `/W2`, else
-    /// `/DW2`'s advance and height, centred on its width as PDFium centres it. None
-    /// where it writes horizontally.
+    /// Where it writes vertically, how `code`'s glyph is placed, each number in 16 bits
+    /// as PDFium holds it: its CID's `/W2`, else `/DW2`'s advance and height, centred on
+    /// its width as PDFium centres it. None where it writes horizontally.
     pub fn vertical(&self, code: u32) -> Option<VerticalMetrics> {
         let vertical = self.vertical.as_ref()?;
         let given = self.cid(code).and_then(|c| vertical.w2.get(c));
@@ -499,7 +525,7 @@ impl Font {
             Some([w1, vx, vy]) => VerticalMetrics { w1, vx, vy },
             None => VerticalMetrics {
                 w1: vertical.w1,
-                vx: (self.width(code) / 2.0).trunc(),
+                vx: f32::from((self.width(code) / 2.0).trunc() as i32 as i16),
                 vy: vertical.vy,
             },
         })
@@ -548,43 +574,49 @@ impl Font {
     }
 
     /// The text `code` is: its `/ToUnicode` mapping, or a simple font's encoding's; in
-    /// a Type 0 font without a `/ToUnicode`, the code's, or its CID's in its
-    /// collection, as PDFium reads them.
+    /// a Type 0 font, failing a mapping, the code's, or its CID's in its collection,
+    /// as PDFium reads them.
     pub fn code_text(&self, code: u32) -> Option<Cow<'_, str>> {
-        match self.cid_text {
-            Some(cid_text) => self.cid_text(cid_text, code),
-            None => self.decoder.code_text(code),
-        }
+        (self.decoder.code_text(code)).or_else(|| self.cid_text(self.cid_text?, code))
     }
 
     /// The text `s`, a string shown in it, is: each code's ([`Font::code_text`]), its
     /// codes split as text is read, by its `/ToUnicode`'s codespace ranges where a
-    /// composite font's encoding isn't Identity, or as they're drawn ([`Font::codes`])
-    /// where a Type 0 font's text is its codes' or CIDs'. None where it doesn't say
-    /// the text of one of them.
+    /// composite font has one and its encoding isn't Identity, or as they're drawn
+    /// ([`Font::codes`]) where a Type 0 font's text is only its codes' or CIDs'. None
+    /// where it doesn't say the text of one of them.
     ///
     /// CID 0, `.notdef`, which a code the CMap maps no CID takes, has none here, though
     /// PDFium reads Adobe's U+FFFD for it ([`Font::code_text`]): a string of such codes
     /// is told from another by its bytes, not taken for the same text.
     pub fn text(&self, s: &[u8]) -> Option<String> {
         let Some(cid_text) = self.cid_text else {
-            return self.decoder.text(s);
+            return self.decoder.text(s, |_| None);
         };
+        if self.decoder.to_unicode {
+            return (self.decoder).text(s, |code| self.string_cid_text(cid_text, code));
+        }
         let mut text = String::new();
         for (_, code) in self.codes(s) {
-            match cid_text {
-                CidText::Code => text.push(char::from_u32(code).filter(|&c| c != '\0')?),
-                CidText::Cid(to_unicode) => {
-                    let cid = self.cid(code).filter(|&cid| cid != 0)?;
-                    match to_unicode.lookup_bf_string(cid)? {
-                        BfString::Char(c) if c != '\0' => text.push(c),
-                        BfString::String(s) if s != "\0" => text.push_str(&s),
-                        _ => return None,
-                    }
+            text.push_str(&self.string_cid_text(cid_text, code)?);
+        }
+        Some(text)
+    }
+
+    /// The text `code` is in a string by `cid_text`: what [`Font::cid_text`] says, but
+    /// none for CID 0.
+    fn string_cid_text(&self, cid_text: CidText, code: u32) -> Option<String> {
+        match cid_text {
+            CidText::Code => Some(String::from(char::from_u32(code).filter(|&c| c != '\0')?)),
+            CidText::Cid(to_unicode) => {
+                let cid = self.cid(code).filter(|&cid| cid != 0)?;
+                match to_unicode.lookup_bf_string(cid)? {
+                    BfString::Char(c) if c != '\0' => Some(String::from(c)),
+                    BfString::String(s) if s != "\0" => Some(s),
+                    _ => None,
                 }
             }
         }
-        Some(text)
     }
 
     /// The text `code` is by `cid_text`: the code, or its CID's mapping; none for the
@@ -611,6 +643,7 @@ impl Font {
         let widths: Vec<f32> = match &self.widths {
             Widths::Simple(widths) => widths.to_vec(),
             Widths::Cid { w, dw } => w.pieces.iter().map(|p| p.2[0]).chain([*dw]).collect(),
+            Widths::Gbk => vec![1000.0],
         };
         let vertical = self.vertical.iter().flat_map(|v| {
             let w2 = v.w2.pieces.iter().flat_map(|p| p.2);
@@ -624,7 +657,8 @@ impl Font {
     }
 }
 
-/// `font` by its `/Subtype`, its `/ToUnicode` read first.
+/// `font` by its `/Subtype`, as PDFium's `CPDF_Font::Create` takes it, its
+/// `/ToUnicode` read first.
 fn read_kind<'o, O, S>(
     reader: &Reader<'_, O, S>,
     font: &'o Dict,
@@ -635,18 +669,23 @@ where
     O: Resolve<'o> + Streams,
     S: Sink + ?Sized,
 {
-    let decoder = Decoder::read(reader, font, budget)?;
-    let subtype = reader.get_name(font, b"Subtype");
-    Ok(match subtype {
-        Some(b"Type0") => type0(reader, font, decoder, budget, programs)?,
-        Some(b"Type3") => type3(reader, font, decoder, budget)?,
-        Some(b"MMType1") => simple(reader, font, FontKind::MMType1, decoder, programs),
-        Some(b"TrueType") => simple(reader, font, FontKind::TrueType, decoder, programs),
-        _ => {
+    let subtype = reader.byte_string(font, b"Subtype");
+    let gbk = subtype == Some(b"TrueType") && reads_as_gbk(reader, font);
+    let by_cid = gbk || subtype == Some(b"Type0");
+    let encoded = (!by_cid).then(|| Encoded::read(reader, font, subtype));
+    let decoder = Decoder::read(reader, font, encoded.as_ref(), budget)?;
+    let simple_as = |kind, decoder, encoded| simple(reader, font, kind, decoder, encoded, programs);
+    Ok(match (subtype, encoded) {
+        (Some(b"Type0"), _) => type0(reader, font, decoder, budget, programs)?,
+        (_, None) => gbk_font(reader, font, decoder, programs),
+        (Some(b"Type3"), Some(encoded)) => type3(reader, font, decoder, &encoded, budget)?,
+        (Some(b"MMType1"), Some(encoded)) => simple_as(FontKind::MMType1, decoder, &encoded),
+        (Some(b"TrueType"), Some(encoded)) => simple_as(FontKind::TrueType, decoder, &encoded),
+        (_, Some(encoded)) => {
             if subtype != Some(b"Type1") {
                 reader.tell(None, font.get(b"Subtype"), Fault::Subtype);
             }
-            simple(reader, font, FontKind::Type1, decoder, programs)
+            simple_as(FontKind::Type1, decoder, &encoded)
         }
     })
 }
@@ -663,40 +702,139 @@ fn referred(dict: &Dict, key: &[u8]) -> Option<ObjectId> {
     dict.get(key)?.as_reference()
 }
 
-/// A Type 1, MMType1 or TrueType font.
+/// A `/Flags` bit: a symbolic font (ISO 32000-2, 9.8.2).
+const SYMBOLIC: i32 = 1 << 2;
+/// A `/Flags` bit: a nonsymbolic font (ISO 32000-2, 9.8.2).
+const NONSYMBOLIC: i32 = 1 << 5;
+/// A `/Flags` bit: a font of capitals only (ISO 32000-2, 9.8.2).
+const ALL_CAP: i32 = 1 << 16;
+
+/// Whether a descriptor embeds a program, as PDFium's `LoadFontDescriptor` looks: one
+/// of its three keys is a stream.
+fn embeds<'o, O, S>(reader: &Reader<'_, O, S>, descriptor: Option<&'o Dict>) -> bool
+where
+    O: Resolve<'o> + Streams,
+    S: Sink + ?Sized,
+{
+    descriptor.is_some_and(|d| {
+        [&b"FontFile"[..], b"FontFile2", b"FontFile3"]
+            .iter()
+            .any(|key| reader.stream_for(d, key).is_some())
+    })
+}
+
+/// The standard 14 font `name` is, as what's read as Type 1 takes it
+/// (`CFX_StandardFont::GetStandardFontIndex`), which, as a face is chosen and
+/// [`Std14::named`] isn't, doesn't read past a subset's tag.
+fn standard_named(name: &[u8]) -> Option<Std14> {
+    Std14::named(name).filter(|_| name.get(6) != Some(&b'+'))
+}
+
+/// Whether it's one of PDFium's fixed-pitch standard fonts.
+fn fixed_pitch(font: Std14) -> bool {
+    matches!(
+        font,
+        Std14::Courier | Std14::CourierBold | Std14::CourierOblique | Std14::CourierBoldOblique
+    )
+}
+
+/// What PDFium holds where a simple font has no width: `/Widths` read as 16 bits may
+/// come to the same, and it's 0 then too.
+const NO_WIDTH: u16 = 0xffff;
+
+/// The codes a font of capitals only draws as the code 32 before them, as PDFium's
+/// `LoadCommon` has it.
+const LOWER_CASE: [std::ops::RangeInclusive<usize>; 3] = [0x61..=0x7a, 0xe0..=0xf6, 0xf8..=0xfd];
+
+/// A simple font's `/Widths`, as PDFium's `LoadCharWidths` reads them into a table of
+/// 16 bits: from `/FirstChar` as far as `/LastChar` or its end, or as far as its end
+/// where `/LastChar` is 0 or past it, `start`, or `/MissingWidth` where it has one, at
+/// every other code. Each number is read as PDFium's accessors read it, and what comes
+/// to [`NO_WIDTH`] is none.
+fn given_widths<'o, O, S>(
+    reader: &Reader<'_, O, S>,
+    font: &'o Dict,
+    widths: &'o [Object],
+    start: u16,
+    descriptor: Option<&'o Dict>,
+    descriptor_id: Option<ObjectId>,
+) -> [u16; 256]
+where
+    O: Resolve<'o> + Streams,
+    S: Sink + ?Sized,
+{
+    let missing = descriptor
+        .and_then(|d| d.get(b"MissingWidth"))
+        .map(|value| reader.integer(value, descriptor_id) as u16);
+    let mut table = [missing.unwrap_or(start); 256];
+    let integer = |key: &[u8]| match font.get(key) {
+        Some(value) => {
+            let (integer, number) = reader.integer_and_whether_a_number(value);
+            if !number {
+                reader.tell(None, Some(value), Fault::NotANumber);
+            }
+            (integer, number)
+        }
+        None => (0, false),
+    };
+    let (first, first_given) = integer(b"FirstChar");
+    let (last, last_given) = integer(b"LastChar");
+    if !first_given || !(0..256).contains(&first) {
+        reader.tell(None, font.get(b"FirstChar"), Fault::FirstChar);
+    }
+    if first_given && last_given && widths.len() as i64 != i64::from(last) - i64::from(first) + 1 {
+        reader.tell(None, font.get(b"Widths"), Fault::WidthsLength);
+    }
+    // Each goes into a `size_t`, so one below 0 is past any code.
+    let (first, last) = (first as usize, last as usize);
+    if first < 256 {
+        let end = first + widths.len();
+        let last = match last {
+            0 => end.wrapping_sub(1),
+            last if last >= end => end.wrapping_sub(1),
+            last => last,
+        };
+        let count = (last.min(255) + 1).saturating_sub(first);
+        for (i, slot) in table[first..].iter_mut().take(count).enumerate() {
+            *slot = reader.integer_at(widths, i, None) as u16;
+        }
+    }
+    table
+}
+
+/// A Type 1, MMType1 or TrueType font (`CPDF_FaceBasedSimpleFont::LoadCommon`). A font
+/// of capitals only has its lower case drawn as those, and advance as those, but where
+/// it embeds a program, which isn't read.
 fn simple<'o, O, S>(
     reader: &Reader<'_, O, S>,
     font: &'o Dict,
     kind: FontKind,
     decoder: Decoder,
+    encoded: &Encoded<'o>,
     programs: bool,
 ) -> Font
 where
     O: Resolve<'o> + Streams,
     S: Sink + ?Sized,
 {
-    let descriptor = reader.get_dict(font, b"FontDescriptor");
+    let descriptor = encoded.descriptor;
     let descriptor_id = referred(font, b"FontDescriptor");
-    let embedded = descriptor.is_some_and(|d| {
-        [&b"FontFile"[..], b"FontFile2", b"FontFile3"]
-            .iter()
-            .any(|key| d.has(key))
+    let embedded = encoded.embedded;
+    // What PDFium draws it in (`CFX_FontMapper::FindSubstFace`): Symbol, as TrueType, only
+    // where its `/Flags` say it's symbolic.
+    let std14 = encoded.base_font.and_then(Std14::named).filter(|&std14| {
+        std14 != Std14::Symbol || kind != FontKind::TrueType || encoded.flags & SYMBOLIC != 0
     });
-    let std14 = reader.get_name(font, b"BaseFont").and_then(Std14::named);
+    let lower_cased = encoded.flags & ALL_CAP != 0 && !embedded;
     let mut approx = FontApprox::default();
     // A standard 14 glyph's metrics where no program is embedded, by the name its
-    // encoding gives it: Symbol and ZapfDingbats in their own encoding always, as
-    // PDFium reads them. A glyph Adobe's metrics give no box (but the space's) or
+    // encoding gives it. A glyph Adobe's metrics give no box (but the space's) or
     // haven't, or whose width PDFium's face gives otherwise, is guessed, and has none.
-    let afm = std14.map(|std14| {
+    let mut afm = std14.map(|std14| {
         let own = std14.own();
-        let mut encoded = Encoded::read(reader, font, Some(own), false);
-        if own != Encoding::Standard {
-            encoded.base = Some(own);
-        }
         // A code whose glyph the font hasn't draws as the space does, as in PDFium.
         let glyph = |code: u8| {
-            let name = encoded.glyph(code)?;
+            let name = encoded.glyph_in(code, own)?;
             let bbox = std14.glyph_box(name)?;
             let drawn =
                 (name == "space" || bbox != Rect::default()) && !std14.drawn_otherwise(name);
@@ -707,45 +845,35 @@ where
             glyph(code as u8).unwrap_or(space)
         }))
     });
-    let given = reader.get_array(font, b"Widths");
+    if let (Some(afm), true) = (&mut afm, lower_cased) {
+        for code in LOWER_CASE.into_iter().flatten() {
+            afm[code] = afm[code - 32];
+        }
+    }
+    let given = reader.array_for(font, b"Widths");
     let has_widths = given.is_some();
     let widths = match given {
         Some(widths) => {
-            let missing = descriptor
-                .and_then(|d| reader.get_whole(d, b"MissingWidth", descriptor_id))
-                .unwrap_or(0.0);
-            let mut table = Box::new([missing; 256]);
-            let first = reader.get_whole(font, b"FirstChar", None);
-            let last = reader.get_whole(font, b"LastChar", None);
-            if !first.is_some_and(|first| (0.0..256.0).contains(&first)) {
-                reader.tell(None, font.get(b"FirstChar"), Fault::FirstChar);
-            }
-            if let Some((first, last)) = first.zip(last) {
-                if widths.len() as f32 != last - first + 1.0 {
-                    reader.tell(None, font.get(b"Widths"), Fault::WidthsLength);
+            // What PDFium reads as Type 1 of the fixed-pitch standard fonts starts at
+            // their pitch.
+            let fixed = kind != FontKind::TrueType
+                && encoded
+                    .base_font
+                    .and_then(standard_named)
+                    .is_some_and(fixed_pitch);
+            let start = if fixed { 600 } else { NO_WIDTH };
+            let mut table = given_widths(reader, font, widths, start, descriptor, descriptor_id);
+            if lower_cased {
+                for code in LOWER_CASE.into_iter().flatten() {
+                    if table[code - 32] != 0 {
+                        table[code] = table[code - 32];
+                    }
                 }
             }
-            let first = first.unwrap_or(0.0);
-            let last = last.unwrap_or(0.0);
-            // From `/FirstChar` to `/LastChar`, or as far as `/Widths` goes where
-            // `/LastChar` is 0 or past it.
-            if (0.0..256.0).contains(&first) && !widths.is_empty() {
-                let first = first as usize;
-                let end = first + widths.len() - 1;
-                let last = if last == 0.0 || last >= end as f32 {
-                    end
-                } else {
-                    last.max(0.0) as usize
-                };
-                for code in first..=last.min(255) {
-                    let width = &widths[code - first];
-                    table[code] = reader.whole(width).unwrap_or_else(|| {
-                        reader.tell(None, Some(width), Fault::NotANumber);
-                        0.0
-                    });
-                }
-            }
-            table
+            Box::new(table.map(|width| match width {
+                NO_WIDTH => 0.0,
+                width => f32::from(width),
+            }))
         }
         None => match &afm {
             Some(afm) => {
@@ -785,6 +913,87 @@ where
     }
 }
 
+/// The first four bytes of a `/BaseFont` that PDFium reads as GBK in a TrueType font
+/// with no TrueType program (`kChineseFontNames`): 宋体, 楷体, 黑体, 仿宋 and 新宋,
+/// themselves in GBK.
+const GBK_NAMES: [&[u8]; 5] = [
+    b"\xCB\xCE\xCC\xE5",
+    b"\xBF\xAC\xCC\xE5",
+    b"\xBA\xDA\xCC\xE5",
+    b"\xB7\xC2\xCB\xCE",
+    b"\xD0\xC2\xCB\xCE",
+];
+
+/// Whether a TrueType font is one PDFium reads as GBK (`CPDF_Font::Create`).
+fn reads_as_gbk<'o, O, S>(reader: &Reader<'_, O, S>, font: &'o Dict) -> bool
+where
+    O: Resolve<'o> + Streams,
+    S: Sink + ?Sized,
+{
+    let tagged = reader
+        .byte_string(font, b"BaseFont")
+        .and_then(|name| name.get(..4))
+        .is_some_and(|tag| GBK_NAMES.contains(&tag));
+    let programmed = || {
+        reader
+            .dict(font, b"FontDescriptor")
+            .is_some_and(|d| d.has(b"FontFile2"))
+    };
+    tagged && !programmed()
+}
+
+/// A TrueType font PDFium reads as GBK (`CPDF_CIDFont::LoadGB2312`): its codes by
+/// GBK-EUC-H, its `/Widths` not read. Where the build hasn't that CMap, its codes are
+/// guessed.
+fn gbk_font<'o, O, S>(
+    reader: &Reader<'_, O, S>,
+    font: &'o Dict,
+    decoder: Decoder,
+    programs: bool,
+) -> Font
+where
+    O: Resolve<'o> + Streams,
+    S: Sink + ?Sized,
+{
+    let mut approx = FontApprox {
+        boxes: true,
+        ..FontApprox::default()
+    };
+    let name = b"GBK-EUC-H";
+    let known = predefined::scheme(name).zip(predefined::bundled(name));
+    let (codes, cid_text) = match known {
+        Some((scheme, map)) => (
+            Codes::Predefined { map, scheme },
+            scheme.collection.to_unicode().map(CidText::Cid),
+        ),
+        None => {
+            reader.tell(None, font.get(b"BaseFont"), Fault::PredefinedUnknown);
+            approx.codes = true;
+            (Codes::Unknown, None)
+        }
+    };
+    let descriptor = reader.dict(font, b"FontDescriptor");
+    let descriptor_id = referred(font, b"FontDescriptor");
+    let (metrics, guessed) = heights(reader, descriptor, descriptor_id, None);
+    approx.heights = guessed;
+    Font {
+        id: None,
+        kind: FontKind::TrueType,
+        cid_text,
+        codes,
+        widths: Widths::Gbk,
+        vertical: None,
+        metrics,
+        boxes: None,
+        program: read_program(programs),
+        guessed: [0; 4],
+        extent: 0.0,
+        cost: 0,
+        decoder,
+        approx,
+    }
+}
+
 /// 256 bits, a code each, those `set` says set.
 fn bits(set: impl Iterator<Item = bool>) -> [u64; 4] {
     let mut bits = [0; 4];
@@ -794,13 +1003,14 @@ fn bits(set: impl Iterator<Item = bool>) -> [u64; 4] {
     bits
 }
 
-/// A Type 3 font: its glyphs drawn by its CharProcs, in glyph space its `/FontMatrix`
-/// maps to text space, the identity where it has none, as in PDFium. Its CharProcs
-/// decompress within `budget`.
+/// A Type 3 font (`CPDF_Type3Font::Load`): its glyphs drawn by its CharProcs, in glyph
+/// space its `/FontMatrix` maps to text space, the identity where it has none or one
+/// not of six numbers, as in PDFium. Its CharProcs decompress within `budget`.
 fn type3<'o, O, S>(
     reader: &Reader<'_, O, S>,
     font: &'o Dict,
     decoder: Decoder,
+    encoded: &Encoded<'o>,
     budget: &mut usize,
 ) -> Result<Font, Error>
 where
@@ -808,36 +1018,33 @@ where
     S: Sink + ?Sized,
 {
     let matrix = reader
-        .get_array(font, b"FontMatrix")
-        .and_then(|m| affine(reader, m))
-        .unwrap_or(Affine::IDENTITY);
+        .array_for(font, b"FontMatrix")
+        .filter(|m| m.len() == 6)
+        .map_or(Affine::IDENTITY, |m| Affine {
+            a: reader.float_at(m, 0),
+            b: reader.float_at(m, 1),
+            c: reader.float_at(m, 2),
+            d: reader.float_at(m, 3),
+            e: reader.float_at(m, 4),
+            f: reader.float_at(m, 5),
+        });
     // The box in glyph units as PDFium keeps it (`CPDF_Type3Font::Load`): its left,
     // bottom, right and top as given, scaled by the matrix's `a` and `d` only, in
     // thousandths, each cut to a whole number, so a matrix that turns glyph space over
     // leaves the top below the bottom; none where that leaves all four 0.
     let given = reader
-        .get_array(font, b"FontBBox")
-        .and_then(|b| {
-            let [l, b, r, t] = b.get(..4)? else {
-                return None;
-            };
-            let n = |o| reader.number_of(o);
-            Some([
-                (n(l)?, matrix.a),
-                (n(b)?, matrix.d),
-                (n(r)?, matrix.a),
-                (n(t)?, matrix.d),
-            ])
+        .array_for(font, b"FontBBox")
+        .map(|b| {
+            [(0, matrix.a), (1, matrix.d), (2, matrix.a), (3, matrix.d)]
+                .map(|(i, scale)| (reader.float_at(b, i) * scale * 1000.0) as i32 as f32)
         })
-        .map(|sides| sides.map(|(v, scale)| (v * scale * 1000.0).trunc()))
         .filter(|sides| *sides != [0.0; 4]);
     let bbox = given.map(|[l, b, r, t]| Rect::new(l, b, r, t));
     let mut approx = FontApprox::default();
     // Each code's CharProc, None where it has none: each stream read once however many
     // codes and names draw it.
-    let encoded = Encoded::read(reader, font, None, false);
-    let char_procs = reader.get_dict(font, b"CharProcs");
-    let mut read: HashMap<ObjectId, Option<CharProc>> = HashMap::new();
+    let char_procs = reader.dict(font, b"CharProcs");
+    let mut read: HashMap<ObjectId, Option<Option<CharProc>>> = HashMap::new();
     let mut procs: [Option<Option<CharProc>>; 256] = [None; 256];
     for (code, slot) in procs.iter_mut().enumerate() {
         let id = encoded
@@ -846,27 +1053,34 @@ where
         let Some(id) = id else {
             continue;
         };
-        *slot = Some(match read.get(&id) {
+        *slot = match read.get(&id) {
             Some(proc) => *proc,
             None => {
-                let proc = char_proc(reader, id, budget)?;
+                let proc = match reader.stream(id) {
+                    Some(_) => Some(char_proc(reader, id, budget)?),
+                    None => None,
+                };
                 read.insert(id, proc);
                 proc
             }
-        });
+        };
     }
-    let xunit = matrix.a.hypot(matrix.b);
+    // PDFium's `CFX_Matrix::GetXUnit`.
+    let xunit = match (matrix.a, matrix.b) {
+        (a, 0.0) => a.abs(),
+        (0.0, b) => b.abs(),
+        (a, b) => a.hypot(b),
+    };
     let mut widths = Box::new([0.0; 256]);
-    let first = reader.get_whole(font, b"FirstChar", None).unwrap_or(0.0);
-    if let Some(given) = reader.get_array(font, b"Widths") {
-        if (0.0..256.0).contains(&first) {
-            let first = first as usize;
-            for (slot, w) in widths[first..].iter_mut().zip(given) {
-                *slot = (reader.number_of(w).unwrap_or(0.0) * matrix.a * 1000.0).round();
+    let first = reader.integer_for(font, b"FirstChar", 0, None);
+    if (0..256).contains(&first) {
+        if let Some(given) = reader.array_for(font, b"Widths") {
+            for (slot, w) in widths[first as usize..].iter_mut().zip(given) {
+                *slot = (reader.float(w) * matrix.a * 1000.0).round() as i32 as f32;
             }
-        } else {
-            reader.tell(None, font.get(b"FirstChar"), Fault::FirstChar);
         }
+    } else {
+        reader.tell(None, font.get(b"FirstChar"), Fault::FirstChar);
     }
     // A code `/Widths` gives no width advances as its CharProc says, in thousandths
     // rounded, then through the matrix, rounded on by a half and cut, as PDFium has it
@@ -874,7 +1088,8 @@ where
     for (width, proc) in widths.iter_mut().zip(&procs) {
         if *width == 0.0 {
             if let Some(Some(proc)) = proc {
-                *width = ((proc.wx * 1000.0).round() * xunit + 0.5).trunc();
+                let thousandths = (proc.wx * 1000.0).round() as i32;
+                *width = (thousandths as f32 * xunit + 0.5) as i32 as f32;
             }
         }
     }
@@ -888,7 +1103,7 @@ where
         Some([_, bottom, _, top]) => {
             let mut edge = |code: usize, side: fn(Rect) -> f32, of_box: f32| match procs[code] {
                 None => of_box,
-                Some(proc) => match proc.and_then(|p| glyph_units(matrix, p.bbox?)) {
+                Some(proc) => match proc.and_then(|p| glyph_units(matrix, p.bbox)) {
                     Some(r) => side(r),
                     None => {
                         approx.heights = true;
@@ -916,7 +1131,7 @@ where
     };
     let boxes = procs.map(|proc| match proc {
         None => Some(Rect::default()),
-        Some(proc) => match proc.and_then(|p| glyph_units(matrix, p.bbox?)) {
+        Some(proc) => match proc.and_then(|p| glyph_units(matrix, p.bbox)) {
             Some(b) => Some(b),
             None => {
                 approx.boxes |= bbox.is_none();
@@ -942,12 +1157,12 @@ where
     })
 }
 
-/// What a Type 3 glyph's CharProc says of it first: `wx wy d0`, or `wx wy llx lly urx
-/// ury d1`, with its box's numbers in that order.
+/// What a Type 3 glyph's CharProc says of it: `wx wy d0`, or `wx wy llx lly urx ury
+/// d1`, with its box's numbers in that order, all 0 where it says none.
 #[derive(Debug, Clone, Copy)]
 struct CharProc {
     wx: f32,
-    bbox: Option<[f32; 4]>,
+    bbox: [f32; 4],
 }
 
 /// A `d1` box, `[llx, lly, urx, ury]`, in glyph units as PDFium keeps it
@@ -968,9 +1183,8 @@ fn glyph_units(matrix: Affine, d1: [f32; 4]) -> Option<Rect> {
     ))
 }
 
-/// CharProc `id`'s first operator, lexed alone, from its content decompressed within
-/// `budget`, which it takes its size from. None when it's neither `d0` nor `d1`, or
-/// can't be read.
+/// What CharProc `id`, its own number, says of its glyph, from its content decompressed
+/// within `budget`, which it takes its size from. None where it can't be read.
 fn char_proc<'o, O, S>(
     reader: &Reader<'_, O, S>,
     id: ObjectId,
@@ -980,33 +1194,45 @@ where
     O: Resolve<'o> + Streams,
     S: Sink + ?Sized,
 {
-    let Some(data) = reader.decompressed(id, budget)? else {
+    let Some(data) = reader.charged(id, budget)? else {
         return Ok(None);
     };
-    Ok(first_operator(&data, reader.limits))
+    Ok(Some(said_of_glyph(&data, reader.limits)))
 }
 
-/// What `data`, a CharProc's content, says first ([`CharProc`]).
-fn first_operator(data: &[u8], limits: &Limits) -> Option<CharProc> {
+/// What `data`, a CharProc's content, says of its glyph ([`CharProc`]), as PDFium
+/// takes it (`Handle_SetCharWidth`, `Handle_SetCachedDevice`): wherever in it a `d0` or
+/// a `d1` is, each over what one before it said, a `d0` leaving a box that was said;
+/// a number by `GetNumber`, so what's no number or isn't there is 0.
+fn said_of_glyph(data: &[u8], limits: &Limits) -> CharProc {
     let none = ResCx::none();
-    let operation = operations(data, &none, &limits.content).next()?.ok()?;
-    let n = |i: usize| Some(operation.arg(i)?.object(&limits.content)?.as_number()? as f32);
-    match operation.name() {
-        b"d0" => Some(CharProc {
-            wx: n(1)?,
-            bbox: None,
-        }),
-        b"d1" => Some(CharProc {
-            wx: n(5)?,
-            bbox: Some([n(3)?, n(2)?, n(1)?, n(0)?]),
-        }),
-        _ => None,
+    let mut said = [0.0; 6];
+    for operation in operations(data, &none, &limits.content) {
+        let Ok(operation) = operation else {
+            break;
+        };
+        let n = |i: usize| operation.arg(i).map_or(0.0, |operand| operand.number());
+        match operation.name() {
+            b"d0" => (said[0], said[1]) = (n(1), n(0)),
+            b"d1" => said = std::array::from_fn(|i| n(5 - i)),
+            _ => {}
+        }
+    }
+    let [wx, _, llx, lly, urx, ury] = said;
+    CharProc {
+        wx,
+        bbox: [llx, lly, urx, ury],
     }
 }
 
 /// A Type 0 font: its codes by its `/Encoding` CMap, its CIDs' widths by its CIDFont.
 /// An embedded CMap's chain decompresses within `budget`; a predefined CMap is read
-/// where the build has it and PDFium knows it.
+/// where the build has it and PDFium knows it. A name it doesn't know is read as
+/// PDFium reads it, two bytes each, each its CID.
+///
+/// PDFium doesn't load a font with no `/Encoding` of a name or a stream, or with other
+/// than one CIDFont, and draws nothing in it. Each is told ([`Fault::CMap`],
+/// [`Fault::DescendantFonts`]), and read as far as it reads.
 fn type0<'o, O, S>(
     reader: &Reader<'_, O, S>,
     font: &'o Dict,
@@ -1019,16 +1245,15 @@ where
     S: Sink + ?Sized,
 {
     let mut approx = FontApprox::default();
-    // PDFium reads a Type 0 font with one CIDFont, and no other.
-    let fonts = reader.get_array(font, b"DescendantFonts");
+    let fonts = reader.array_for(font, b"DescendantFonts");
     let cid_font = fonts
         .filter(|fonts| fonts.len() == 1)
-        .and_then(|fonts| dict_of(reader.direct(&fonts[0])?));
+        .and_then(|fonts| reader.dict_at(&fonts[0]));
     let cid_font_id = fonts.and_then(|fonts| fonts.first()?.as_reference());
     if cid_font.is_none() {
         reader.tell(None, font.get(b"DescendantFonts"), Fault::DescendantFonts);
     }
-    let subtype = cid_font.and_then(|f| reader.get_name(f, b"Subtype"));
+    let subtype = cid_font.and_then(|f| reader.byte_string(f, b"Subtype"));
     let descendant = match subtype {
         Some(b"CIDFontType0") => Descendant::CidFontType0,
         Some(b"CIDFontType2") => Descendant::CidFontType2,
@@ -1040,7 +1265,7 @@ where
         }
     };
     let encoding = font.get(b"Encoding");
-    let written = encoding.map(|e| (e.as_reference(), reader.direct(e).map(Object::value)));
+    let written = encoding.map(|e| (e.as_reference(), reader.hop(e).map(Object::value)));
     let (codes, vertical) = match written {
         Some((_, Some(Value::Name(n)))) if n == b"Identity-H" => (Codes::Identity, false),
         Some((_, Some(Value::Name(n)))) if n == b"Identity-V" => (Codes::Identity, true),
@@ -1052,13 +1277,18 @@ where
         // A predefined CMap writes vertically where its name ends in V, as PDFium
         // reads it.
         Some((_, Some(Value::Name(n)))) => {
-            let known = predefined::scheme(n).zip(predefined::bundled(n));
-            let codes = match known {
-                Some((scheme, map)) => Codes::Predefined { map, scheme },
+            let codes = match predefined::scheme(n) {
+                Some(scheme) => match predefined::bundled(n) {
+                    Some(map) => Codes::Predefined { map, scheme },
+                    None => {
+                        reader.tell(None, encoding, Fault::PredefinedUnknown);
+                        approx.codes = true;
+                        Codes::Unknown
+                    }
+                },
                 None => {
                     reader.tell(None, encoding, Fault::PredefinedUnknown);
-                    approx.codes = true;
-                    Codes::Unknown
+                    Codes::Identity
                 }
             };
             (codes, n.ends_with(b"V"))
@@ -1071,8 +1301,8 @@ where
     };
     let widths = match cid_font {
         Some(f) => Widths::Cid {
-            w: cid_ranges(reader, f, b"W", cid_font_id),
-            dw: reader.get_whole(f, b"DW", cid_font_id).unwrap_or(1000.0),
+            w: cid_ranges(reader, f, b"W", cid_font_id, |n| n as f32),
+            dw: f32::from(reader.integer_for(f, b"DW", 1000, cid_font_id) as i16),
         },
         None => {
             approx.widths = true;
@@ -1083,27 +1313,26 @@ where
         }
     };
     let vertical = vertical.then(|| {
-        let dw2 = cid_font.and_then(|f| reader.get_array(f, b"DW2"));
-        let at = |i: usize| dw2.and_then(|d| reader.whole(d.get(i)?));
+        let dw2 = cid_font.and_then(|f| reader.array_for(f, b"DW2"));
+        let at =
+            |i: usize, default: i32| dw2.map_or(default, |d| reader.integer_at(d, i, cid_font_id));
         VerticalWidths {
             w2: cid_font
-                .map(|f| cid_ranges(reader, f, b"W2", cid_font_id))
+                .map(|f| cid_ranges(reader, f, b"W2", cid_font_id, |n| f32::from(n as i16)))
                 .unwrap_or_default(),
-            vy: at(0).unwrap_or(880.0),
-            w1: at(1).unwrap_or(-1000.0),
+            vy: f32::from(at(0, 880) as i16),
+            w1: f32::from(at(1, -1000) as i16),
         }
     });
-    let descriptor = cid_font.and_then(|f| reader.get_dict(f, b"FontDescriptor"));
+    let descriptor = cid_font.and_then(|f| reader.dict(f, b"FontDescriptor"));
     let descriptor_id = cid_font.and_then(|f| referred(f, b"FontDescriptor"));
     approx.boxes = true;
     // Identity's collection is the one its CIDFont orders.
     let ordered = || {
-        let info = reader.get_dict(cid_font?, b"CIDSystemInfo")?;
-        let ordering = reader.direct(info.get(b"Ordering")?)?;
-        Collection::ordered(ordering.as_bytes().or_else(|| ordering.as_name())?)
+        let info = reader.dict(cid_font?, b"CIDSystemInfo")?;
+        Collection::ordered(reader.byte_string(info, b"Ordering")?)
     };
     let cid_text = match &codes {
-        _ if decoder.to_unicode => None,
         Codes::Predefined { scheme, .. } if scheme.unicode => Some(CidText::Code),
         Codes::Predefined { scheme, .. } => scheme.collection.to_unicode().map(CidText::Cid),
         Codes::Identity => ordered().and_then(Collection::to_unicode).map(CidText::Cid),
@@ -1133,10 +1362,10 @@ where
 /// `GetLooseBounds`, from `CPDF_Font::LoadFontDescriptor` and `CheckFontMetrics`), and
 /// whether they're guessed: with a descriptor whose `/FontBBox` isn't all 0, its
 /// `Ascent` and `Descent`, a `Descent` over 10 read as below the baseline, within the
-/// box. Else PDFium takes them from the face it draws in, one it substitutes, its own
-/// for the standard 14 or the system's, which varies by OS, and they're guessed: the
-/// descriptor's, else the standard 14 font's AFM's, else the box's top and bottom, else
-/// an em above and a quarter below.
+/// box where its top is above its bottom. Else PDFium takes them from the face it draws
+/// in, one it substitutes, its own for the standard 14 or the system's, which varies by
+/// OS, and they're guessed: the descriptor's, else the standard 14 font's AFM's, else
+/// the box's top and bottom, else an em above and a quarter below.
 fn heights<'o, O, S>(
     reader: &Reader<'_, O, S>,
     descriptor: Option<&'o Dict>,
@@ -1147,30 +1376,35 @@ where
     O: Resolve<'o> + Streams,
     S: Sink + ?Sized,
 {
-    let get = |key: &[u8]| descriptor.and_then(|d| reader.get_whole(d, key, descriptor_id));
+    let get = |key: &[u8]| descriptor.map_or(0, |d| reader.integer_for(d, key, 0, descriptor_id));
     let own = descriptor
-        .and_then(|d| reader.get_array(d, b"FontBBox"))
-        .and_then(|b| rect(reader, b))
-        .filter(|b| *b != Rect::default());
-    let ascent = get(b"Ascent").unwrap_or(0.0);
-    let descent = get(b"Descent").map_or(0.0, |d| if d > 10.0 { -d } else { d });
-    let given = ascent != 0.0 || descent != 0.0;
-    let within = |bbox: Option<Rect>, (ascent, descent): (f32, f32)| match bbox {
-        Some(b) if b.y1 > b.y0 => (ascent.min(b.y1), descent.max(b.y0)),
+        .and_then(|d| reader.array_for(d, b"FontBBox"))
+        .map(|b| [0, 1, 2, 3].map(|i| reader.integer_at(b, i, descriptor_id) as f32))
+        .filter(|sides| *sides != [0.0; 4]);
+    let ascent = get(b"Ascent");
+    let descent = match get(b"Descent") {
+        descent if descent > 10 => -descent,
+        descent => descent,
+    };
+    let given = ascent != 0 || descent != 0;
+    let (ascent, descent) = (ascent as f32, descent as f32);
+    let within = |(ascent, descent): (f32, f32)| match own {
+        Some([_, bottom, _, top]) if top > bottom => (ascent.min(top), descent.max(bottom)),
         _ => (ascent, descent),
     };
-    let bbox = own.or(std14.and_then(|f| f.metrics().bbox));
-    let (ascent, descent) = match (own, given, std14) {
-        (Some(_), true, _) => within(own, (ascent, descent)),
+    let own_box = own.map(|[l, b, r, t]| Rect::new(l, b, r, t));
+    let bbox = own_box.or(std14.and_then(|f| f.metrics().bbox));
+    let (ascent, descent) = match (own_box, given, std14) {
+        (Some(_), true, _) => within((ascent, descent)),
         (_, true, _) => (ascent, descent),
         (_, false, Some(std14)) => {
             let m = std14.metrics();
-            within(own, (m.ascent, m.descent))
+            within((m.ascent, m.descent))
         }
         (Some(b), false, None) => (b.y1, b.y0),
         (None, false, None) => (GUESSED.ascent, GUESSED.descent),
     };
-    let exact = own.is_some() && given;
+    let exact = own_box.is_some() && given;
     let metrics = FontMetrics {
         ascent,
         descent,
@@ -1179,46 +1413,52 @@ where
     (metrics, !exact || ascent == descent)
 }
 
-/// A CIDFont's `/W` or `/W2`, the first range given for a CID winning, as in PDFium.
+/// A CIDFont's `/W` or `/W2`, the first range given for a CID winning, as in PDFium,
+/// each number as `hold` holds it.
 fn cid_ranges<'o, O, S, const N: usize>(
     reader: &Reader<'_, O, S>,
     cid_font: &'o Dict,
     key: &[u8],
     cid_font_id: Option<ObjectId>,
+    hold: fn(i32) -> f32,
 ) -> Ranges<[f32; N]>
 where
     O: Resolve<'o> + Streams,
     S: Sink + ?Sized,
 {
-    let array = reader.get_array(cid_font, key).unwrap_or_default();
+    let array = reader.array_for(cid_font, key).unwrap_or_default();
     let cut = match key {
         b"W" => Fault::W,
         _ => Fault::W2,
     };
     let cut = |at: &Object| reader.tell(cid_font_id, Some(at), cut);
-    Ranges::new(&metrics_array(reader, array, cut), false)
+    Ranges::new(&metrics_array(reader, array, cid_font_id, cut, hold), false)
 }
 
-/// A `/W` or `/W2` array's entries, read as PDFium reads them: `c [v …]` gives `c` and
-/// the CIDs after it values in turn, and `first last v` gives the range one; `N` numbers
-/// a value. An array where a range's last CID should be ends it, `cut` told, and a range
-/// that starts below 0 starts at 0.
+/// A `/W` or `/W2` array's entries, read as PDFium's `LoadMetricsArray` reads them:
+/// `c [v …]` gives `c` and the CIDs after it values in turn, and `first last v` gives
+/// the range one; `N` numbers a value. An array where a range's last CID should be ends
+/// it, `cut` told; an element that's a reference to nothing is passed over; a CID below
+/// 0 is none, one before an array's values included, so what follows it is still the
+/// CID it would be.
 fn metrics_array<'o, O, S, const N: usize>(
     reader: &Reader<'_, O, S>,
     array: &'o [Object],
+    object: Option<ObjectId>,
     cut: impl Fn(&Object),
+    hold: fn(i32) -> f32,
 ) -> Vec<(u32, u32, [f32; N])>
 where
     O: Resolve<'o> + Streams,
     S: Sink + ?Sized,
 {
-    let cid = |n: i64| n.clamp(0, i64::from(u32::MAX)) as u32;
+    let cid = |n: i32| n.max(0) as u32;
     let mut out = Vec::new();
     let mut first = None;
     let mut last = None;
     let mut values = Vec::with_capacity(N);
     for item in array {
-        let Some(item) = reader.direct(item) else {
+        let Some(item) = reader.hop(item) else {
             continue;
         };
         if let Some(list) = item.as_array() {
@@ -1226,23 +1466,27 @@ where
                 cut(item);
                 return out;
             };
-            let mut at = cid(start);
-            for chunk in list.chunks(N) {
-                let value = std::array::from_fn(|k| {
-                    let v = chunk.get(k).and_then(|v| reader.whole(v));
-                    v.unwrap_or(0.0)
+            // Past what an `int` holds, PDFium passes it over.
+            if i64::from(start) + list.len() as i64 > i64::from(i32::MAX) {
+                continue;
+            }
+            for (at, chunk) in (start..).zip(list.chunks(N)) {
+                let value = std::array::from_fn(|k| match chunk.get(k) {
+                    Some(v) => hold(reader.integer(v, object)),
+                    None => hold(0),
                 });
-                out.push((at, at, value));
-                at = at.saturating_add(1);
+                if at >= 0 {
+                    out.push((cid(at), cid(at), value));
+                }
             }
             continue;
         }
-        let n = reader.integer(item).unwrap_or(0);
+        let n = reader.integer(item, object);
         match (first, last) {
             (None, _) => first = Some(n),
             (Some(_), None) => last = Some(n),
             (Some(lo), Some(hi)) => {
-                values.push(n as f32);
+                values.push(hold(n));
                 if values.len() == N {
                     if hi >= 0 {
                         let value = std::array::from_fn(|k| values[k]);
@@ -1257,105 +1501,183 @@ where
     out
 }
 
-/// An array's first four numbers, each whole, as a rectangle.
-fn rect<'o, O, S>(reader: &Reader<'_, O, S>, array: &'o [Object]) -> Option<Rect>
-where
-    O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
-{
-    let [l, b, r, t] = array.get(..4)? else {
-        return None;
-    };
-    let n = |o| reader.whole(o);
-    Some(Rect::new(n(l)?, n(b)?, n(r)?, n(t)?))
-}
-
-/// A matrix's six numbers.
-fn affine<'o, O, S>(reader: &Reader<'_, O, S>, array: &'o [Object]) -> Option<Affine>
-where
-    O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
-{
-    let [a, b, c, d, e, f] = array.get(..6)? else {
-        return None;
-    };
-    let n = |o| reader.number_of(o);
-    Some(Affine {
-        a: n(a)?,
-        b: n(b)?,
-        c: n(c)?,
-        d: n(d)?,
-        e: n(e)?,
-        f: n(f)?,
-    })
-}
-
 /// A simple font's encoding as written: its base encoding, and the glyphs its
-/// `/Differences` name over it.
+/// `/Differences` name over it; and of its descriptor what that rests on.
 struct Encoded<'a> {
-    /// Its `/Encoding`'s or `/BaseEncoding`'s, or the font's own.
+    /// PDFium's base encoding, none where that's the font program's own.
     base: Option<Encoding>,
     differences: [Option<&'a [u8]>; 256],
+    /// Its descriptor, where it's read one.
+    descriptor: Option<&'a Dict>,
+    /// Its `/BaseFont`.
+    base_font: Option<&'a [u8]>,
+    /// Its descriptor's `/Flags`, PDFium's default where it has none.
+    flags: i32,
+    /// Whether its descriptor embeds a program.
+    embedded: bool,
 }
 
 impl<'a> Encoded<'a> {
-    /// `font`'s encoding, `own` its base where it names none it knows; what's at fault
-    /// in it told where `tell` says, as a font's encoding is read more than once.
+    /// The encoding of `font`, of `subtype`, as PDFium's `CPDF_Type1Font::Load` and
+    /// `LoadCommon` come to it for what's read as Type 1 or TrueType, and
+    /// `CPDF_Type3Font::Load` for Type 3, what's at fault in it told.
     fn read<O, S>(
         reader: &Reader<'_, O, S>,
         font: &'a Dict,
-        own: Option<Encoding>,
-        tell: bool,
+        subtype: Option<&'a [u8]>,
+    ) -> Encoded<'a>
+    where
+        O: Resolve<'a> + Streams,
+        S: Sink + ?Sized,
+    {
+        if subtype == Some(b"Type3") {
+            let start = Encoded {
+                base: None,
+                differences: [None; 256],
+                descriptor: None,
+                base_font: None,
+                flags: 0,
+                embedded: false,
+            };
+            return start.load(reader, font, false, false, false);
+        }
+        let descriptor = reader.dict(font, b"FontDescriptor");
+        let embedded = embeds(reader, descriptor);
+        let true_type = subtype == Some(b"TrueType");
+        let name = reader.byte_string(font, b"BaseFont");
+        let std14 = name.and_then(standard_named).filter(|_| !true_type);
+        let symbol_font = matches!(std14, Some(Std14::Symbol | Std14::ZapfDingbats));
+        let flags = match (descriptor, std14) {
+            (Some(d), _) => {
+                let id = referred(font, b"FontDescriptor");
+                reader.integer_for(d, b"Flags", NONSYMBOLIC, id)
+            }
+            (None, Some(_)) if symbol_font => SYMBOLIC,
+            (None, Some(_)) => NONSYMBOLIC,
+            (None, None) => 0,
+        };
+        let base = match std14 {
+            Some(Std14::Symbol) => Some(Encoding::Symbol),
+            Some(Std14::ZapfDingbats) => Some(Encoding::ZapfDingbats),
+            Some(_) if flags & NONSYMBOLIC != 0 => Some(Encoding::Standard),
+            _ => None,
+        };
+        let base = match flags & SYMBOLIC {
+            0 => Some(Encoding::Standard),
+            _ => base,
+        };
+        // PDFium's name for the font takes off a subset's tag where it embeds a program.
+        let bare = name.map(|name| match (embedded, name.get(6)) {
+            (true, Some(b'+')) => &name[7..],
+            _ => name,
+        });
+        let symbol_named = std14 == Some(Std14::Symbol) || bare == Some(b"Symbol");
+        let start = Encoded {
+            base,
+            differences: [None; 256],
+            descriptor,
+            base_font: name,
+            flags,
+            embedded,
+        };
+        start.load(reader, font, true, symbol_named, true_type && embedded)
+    }
+
+    /// PDFium's `LoadPDFEncoding` on what it starts from, `simple` for a font that's
+    /// read as Type 1 or TrueType; `true_type` is whether it's drawn in a TrueType
+    /// program, which so far is what its `/Subtype` says of one it embeds.
+    /// `MacExpertEncoding` and `PDFDocEncoding` in a dictionary, which PDFium has tables
+    /// of, leave the base as it was.
+    fn load<O, S>(
+        mut self,
+        reader: &Reader<'_, O, S>,
+        font: &'a Dict,
+        simple: bool,
+        symbol_named: bool,
+        true_type: bool,
     ) -> Encoded<'a>
     where
         O: Resolve<'a> + Streams,
         S: Sink + ?Sized,
     {
         let written = font.get(b"Encoding");
-        let encoding = written.and_then(|e| reader.direct(e));
-        let base_of = |name: &'a Object| {
-            let named = name.as_name().and_then(Encoding::named);
-            if tell && named.is_none() && name.as_name() != Some(b"MacExpertEncoding") {
-                reader.tell(None, Some(name), Fault::Encoding);
-            }
-            named
-        };
-        let (base, differences) = match encoding.map(|e| (e, e.value())) {
-            Some((e, Value::Name(_))) => (base_of(e).or(own), None),
-            Some((_, Value::Dict(d))) => {
-                let base = d.get(b"BaseEncoding").and_then(base_of);
-                let differences = d.get(b"Differences").and_then(|o| reader.direct(o));
-                let differences = differences.and_then(Object::as_array);
-                (base.or(own), differences)
-            }
-            other => {
-                if tell && written.is_some() && other.is_some() {
-                    reader.tell(None, written, Fault::Encoding);
+        let encoding = written.and_then(|e| reader.hop(e));
+        let own = matches!(self.base, Some(Encoding::Symbol | Encoding::ZapfDingbats));
+        let symbolic = self.flags & SYMBOLIC != 0;
+        let mut differences = None;
+        match encoding.map(|e| (e, e.value())) {
+            None => {
+                if simple && symbol_named {
+                    self.base = Some(Encoding::Symbol);
+                } else if simple && !self.embedded && self.base.is_none() {
+                    self.base = Some(Encoding::WinAnsi);
                 }
-                (own, None)
             }
-        };
-        let mut names: [Option<&[u8]>; 256] = [None; 256];
-        let mut code = 0;
-        for item in differences.into_iter().flatten() {
-            match item.value() {
-                Value::Integer(c) => code = *c,
-                Value::Name(n) => {
-                    match usize::try_from(code).ok().and_then(|c| names.get_mut(c)) {
-                        Some(slot) => *slot = Some(n),
-                        None if tell => reader.tell(None, Some(item), Fault::Differences),
+            Some((e, Value::Name(name))) => {
+                if !own && !(symbolic && symbol_named) {
+                    match &name[..] {
+                        b"MacExpertEncoding" => self.base = Some(Encoding::WinAnsi),
+                        name => self.named_base(reader, name, Some(e)),
+                    }
+                } else if !own && !true_type {
+                    self.base = Some(Encoding::Symbol);
+                }
+            }
+            Some((_, Value::Dict(d))) => {
+                if !own {
+                    match reader.byte_string(d, b"BaseEncoding") {
+                        Some(b"MacExpertEncoding") if true_type => {
+                            self.base = Some(Encoding::WinAnsi);
+                        }
+                        Some(b"MacExpertEncoding") => {}
+                        Some(name) => self.named_base(reader, name, d.get(b"BaseEncoding")),
+                        None if d.has(b"BaseEncoding") => {
+                            reader.tell(None, d.get(b"BaseEncoding"), Fault::Encoding);
+                        }
                         None => {}
                     }
-                    code = code.saturating_add(1);
                 }
-                Value::Real(_) => {}
-                _ if tell => reader.tell(None, Some(item), Fault::Differences),
-                _ => {}
+                if (!self.embedded || true_type) && self.base.is_none() {
+                    self.base = Some(Encoding::Standard);
+                }
+                differences = d.get(b"Differences").and_then(|v| reader.array(v));
+            }
+            Some(_) => reader.tell(None, written, Fault::Encoding),
+        }
+        // PDFium's code is 32 bits unsigned, so a negative number comes back round to 0
+        // after as many names as it's below it.
+        let mut code = 0u32;
+        for item in differences.into_iter().flatten() {
+            let Some(element) = reader.hop(item) else {
+                continue;
+            };
+            match element.as_name() {
+                Some(name) => {
+                    match self.differences.get_mut(code as usize) {
+                        // An empty name leaves the code to its base encoding.
+                        Some(slot) => *slot = Some(name).filter(|name| !name.is_empty()),
+                        None => reader.tell(None, Some(item), Fault::Differences),
+                    }
+                    code = code.wrapping_add(1);
+                }
+                None => code = reader.integer_telling(element, None, Fault::Differences) as u32,
             }
         }
-        Encoded {
-            base,
-            differences: names,
+        self
+    }
+
+    /// `name`'s base encoding where PDFium's `GetPredefinedEncoding` knows it, told
+    /// where it's no encoding's at all, leaving the base as it is otherwise.
+    fn named_base<O, S>(&mut self, reader: &Reader<'_, O, S>, name: &[u8], at: Option<&'a Object>)
+    where
+        O: Resolve<'a> + Streams,
+        S: Sink + ?Sized,
+    {
+        match name {
+            b"WinAnsiEncoding" => self.base = Some(Encoding::WinAnsi),
+            b"MacRomanEncoding" => self.base = Some(Encoding::MacRoman),
+            b"StandardEncoding" => {}
+            _ => reader.tell(None, at, Fault::Encoding),
         }
     }
 
@@ -1368,9 +1690,23 @@ impl<'a> Encoded<'a> {
         }
     }
 
-    /// [`Encoded::glyph_name`], where it's text.
-    fn glyph(&self, code: u8) -> Option<&'a str> {
-        std::str::from_utf8(self.glyph_name(code)?).ok()
+    /// [`Encoded::glyph_name`], where it's text, `own` the base where it has none.
+    fn glyph_in(&self, code: u8, own: Encoding) -> Option<&'a str> {
+        match self.differences[code as usize] {
+            Some(name) => std::str::from_utf8(name).ok(),
+            None => self.base.unwrap_or(own).glyph(code),
+        }
+    }
+}
+
+/// Where PDFium's table of a Symbol font's codes differs from its glyphs' names by the
+/// Adobe Glyph List: it has the Greek letters, the list the increment, ohm and micro.
+fn symbol_table_greek(code: u8) -> Option<char> {
+    match code {
+        0x44 => Some('\u{394}'),
+        0x57 => Some('\u{3a9}'),
+        0x6d => Some('\u{3bc}'),
+        _ => None,
     }
 }
 
@@ -1389,10 +1725,12 @@ struct Decoder {
 }
 
 impl Decoder {
-    /// `font`'s, its `/ToUnicode` decompressed within `budget`, charged to it.
+    /// `font`'s, its `/ToUnicode` decompressed within `budget`, charged to it; `encoded`
+    /// its encoding where it's a simple font.
     fn read<'o, O, S>(
         reader: &Reader<'_, O, S>,
         font: &'o Dict,
+        encoded: Option<&Encoded<'o>>,
         budget: &mut usize,
     ) -> Result<Decoder, Error>
     where
@@ -1412,18 +1750,23 @@ impl Decoder {
         }
         Ok(Decoder {
             to_unicode: cmap.is_some(),
-            ..Decoder::new(reader, font, cmap.unwrap_or_default())
+            ..Decoder::new(reader, font, encoded, cmap.unwrap_or_default())
         })
     }
 
-    fn new<'o, O, S>(reader: &Reader<'_, O, S>, font: &'o Dict, cmap: CMap) -> Decoder
+    fn new<'o, O, S>(
+        reader: &Reader<'_, O, S>,
+        font: &'o Dict,
+        encoded: Option<&Encoded<'o>>,
+        cmap: CMap,
+    ) -> Decoder
     where
         O: Resolve<'o> + Streams,
         S: Sink + ?Sized,
     {
-        let name = |key: &[u8]| reader.get_name(font, key);
-        if name(b"Subtype") == Some(b"Type0") {
-            let identity = matches!(name(b"Encoding"), Some(b"Identity-H" | b"Identity-V"));
+        let Some(encoded) = encoded else {
+            let name = font.get(b"Encoding").and_then(|e| reader.hop(e)?.as_name());
+            let identity = matches!(name, Some(b"Identity-H" | b"Identity-V"));
             return Decoder {
                 width: 2,
                 ranged: !identity && cmap.has_codespace(),
@@ -1431,24 +1774,43 @@ impl Decoder {
                 cmap,
                 encoded: None,
             };
-        }
-        // A subset's name has a tag: ABCDEF+Symbol.
-        let base = name(b"BaseFont").map(|n| match n.iter().position(|&c| c == b'+') {
-            Some(6) => &n[7..],
-            _ => n,
-        });
-        let own = match base {
-            Some(b) if b.starts_with(b"Symbol") => Some(Encoding::Symbol),
-            Some(b"ZapfDingbats" | b"Dingbats") => Some(Encoding::ZapfDingbats),
-            _ => matches!(name(b"Subtype"), Some(b"Type1" | b"MMType1"))
-                .then_some(Encoding::Standard),
         };
-        let Encoded { base, differences } = Encoded::read(reader, font, own, true);
-        let dingbats = own == Some(Encoding::ZapfDingbats);
+        let type1 = !matches!(
+            reader.byte_string(font, b"Subtype"),
+            Some(b"TrueType" | b"Type3")
+        );
+        // PDFium reads `.notdef` as the space in what it reads as Type 1 of no symbols,
+        // as it draws it (`CPDF_Type1Font::LoadGlyphMap`).
+        let notdef_is_space = type1 && encoded.flags & SYMBOLIC == 0;
+        // What PDFium leaves to a program, which isn't read, is taken for what's like
+        // most programs' own encodings by the font's name.
+        let bare = encoded.base_font.map(|name| match name.get(6) {
+            Some(b'+') => &name[7..],
+            _ => name,
+        });
+        let by_name = match bare {
+            Some(name) if name.starts_with(b"Symbol") => Some(Encoding::Symbol),
+            Some(b"ZapfDingbats" | b"Dingbats") => Some(Encoding::ZapfDingbats),
+            _ => type1.then_some(Encoding::Standard),
+        };
+        let base = encoded.base.or(by_name);
+        let dingbats =
+            Some(Encoding::ZapfDingbats) == by_name || Some(Encoding::ZapfDingbats) == encoded.base;
+        // A TrueType font named Symbol with no program, not said to be of no symbols, reads
+        // by PDFium's table of codes, where others read by glyph names
+        // (`CPDF_TrueTypeFont::LoadGlyphMap`).
+        let by_table = !type1
+            && reader.byte_string(font, b"Subtype") == Some(b"TrueType")
+            && encoded.base == Some(Encoding::Symbol)
+            && !encoded.embedded
+            && encoded.flags & NONSYMBOLIC == 0;
         let encoded = (0..=255u8)
-            .map(|code| match differences[code as usize] {
+            .map(|code| match encoded.differences[code as usize] {
+                Some(b".notdef") if notdef_is_space => Some(String::from(" ")),
                 Some(n) => glyph_text(std::str::from_utf8(n).ok()?, dingbats),
-                None => base?.text(code),
+                None => (by_table.then(|| symbol_table_greek(code)).flatten())
+                    .map(String::from)
+                    .or_else(|| base?.text(code)),
             })
             .collect();
         Decoder {
@@ -1460,8 +1822,9 @@ impl Decoder {
         }
     }
 
-    /// `s`'s codes as text: None when the font doesn't say the text of one of them.
-    fn text(&self, s: &[u8]) -> Option<String> {
+    /// `s`'s codes as text, `missed` saying a code's it has none for: None when the font
+    /// doesn't say the text of one of them.
+    fn text(&self, s: &[u8], missed: impl Fn(u32) -> Option<String>) -> Option<String> {
         let mut out = String::new();
         let mut at = 0;
         while at < s.len() {
@@ -1469,7 +1832,10 @@ impl Decoder {
             let len = self.code_len(rest).clamp(1, rest.len());
             let code = number(&rest[..len]);
             at += len;
-            out.push_str(&self.code_text(code)?);
+            match self.code_text(code) {
+                Some(text) => out.push_str(&text),
+                None => out.push_str(&missed(code)?),
+            }
         }
         Some(out)
     }

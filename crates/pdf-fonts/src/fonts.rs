@@ -81,7 +81,7 @@ impl Fonts {
         }
         let mut none = ();
         let reader = Reader::new(objects, limits, &mut none);
-        let dict = reader.direct(font).and_then(dict_of);
+        let dict = reader.hop(font).and_then(dict_of);
         if let Some(unreadable) = reader.failure() {
             return Err(unreadable.into());
         }
@@ -185,8 +185,8 @@ impl FontScope<'_> {
         let mut none = ();
         let reader = Reader::new(objects, limits, &mut none);
         let written = resources
-            .and_then(|r| dict_of(reader.direct(r)?))
-            .and_then(|r| reader.get_dict(r, b"Font"))
+            .and_then(|r| reader.dict_of_value(r))
+            .and_then(|r| reader.dict(r, b"Font"))
             .and_then(|f| f.get(name));
         if let Some(unreadable) = reader.failure() {
             return Err(unreadable.into());

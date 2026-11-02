@@ -87,10 +87,10 @@ impl Std14 {
     }
 
     /// The standard 14 font `base_font`, a font's `/BaseFont`, names, as
-    /// PDFium reads one (`CFX_StandardFont::GetStandardFontIndex`): after
-    /// a subset's tag (`ABCDEF+`), one of the 14 names or an alternate
-    /// PDFium takes for one (`Arial,Bold`, `TimesNewRomanPSMT`), in any
-    /// case. None for any other name.
+    /// PDFium draws one (`CFX_StandardFont::GetStandardFontIndex`, in its font
+    /// mapper): after a subset's tag (`ABCDEF+`), one of the 14 names or an
+    /// alternate PDFium takes for one (`Arial,Bold`, `TimesNewRomanPSMT`), in
+    /// any case. None for any other name.
     pub fn named(base_font: &[u8]) -> Option<Std14> {
         let name = match base_font.iter().position(|&c| c == b'+') {
             Some(6) => &base_font[7..],

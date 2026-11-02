@@ -3,7 +3,7 @@
 //! - **A file's font, as read** ([`Font`]): from its dictionary, over a [`Resolve`] for
 //!   its objects and [`Streams`] for its streams' data, the codes a string is in it,
 //!   each code's CID, width, vertical metrics and text, and how high its glyphs reach,
-//!   each as PDFium reads them. What it can't know it guesses, and says
+//!   each as PDFium reads them, what no real writer writes included. What it can't know it guesses, and says
 //!   ([`FontApprox`]); what isn't as ISO 32000-2 has it is told to a [`Sink`]
 //!   ([`Fault`]), what's read being the same whatever the sink. It fails only where its
 //!   streams decompress past the budget it's read within, or where what it reads

@@ -33,6 +33,11 @@ structure = ["dep:pdf-structure"]
 # The tests' files, and a reading of them.
 pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
 
+# Each case over a reading of its file, held to PDFium's recorded answer.
+[[test]]
+name = "pdfium"
+required-features = ["structure"]
+
 # docs.rs documents what the feature adds, beside the default.
 [package.metadata.docs.rs]
 features = ["structure", "predefined-cmaps"]

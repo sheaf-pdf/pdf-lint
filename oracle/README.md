@@ -2,7 +2,8 @@
 
 pdf-tokenizer's PDFium rules (`Rules::Pdfium`, `decode::pdfium`),
 pdf-objects' (`Parser::rules`), pdf-semantics' page tree (`pages::pages`),
-pdf-color's count of a space's components (`components`) and
+pdf-color's count of a space's components (`components`), pdf-fonts' reading
+of a font (`Font`) and
 pdf-content-streams, which reads content as PDFium does throughout, follow
 PDFium's reading, which no standard writes down and which changes as PDFium
 does; pdf-linearize lays files out for PDFium's availability API, among
@@ -125,6 +126,20 @@ asked through a one-page PDF made around the case.
   says what they were: the answer is a word for each image, in order, that size
   over 8, or `none` for the 1 byte of an image with no color space (`raw:N`, a
   size neither makes; `no-images`; `no-page`).
+
+- `fonts`: a whole file (`.pdf`), whose first page shows one string in one font from
+  (0, 100), at a size of 1000, where the text page gives a glyph unit as a unit: the
+  answer is, for each character of the text page, its `FPDFText_GetUnicode` in hex and
+  the x and y of its origin from there, `;` between them (`none`; `no-page`). A text
+  page isn't the font's: it drops a code at much the same place as itself shortly
+  before it, a space after a space, and all of a string that takes up no room, so
+  a case's string is of different codes, a width among them.
+
+- `fonts-heights`: as `fonts`, and after them `top` and `bottom`, how far the first
+  character's `FPDFText_GetLooseCharBox` reaches from its origin: the font's heights,
+  over that character's own box. A case's first character is one with none, as it's
+  a face's, and the font's heights its own, so that no answer rests on a face PDFium
+  substitutes.
 
 Numbers are written with nine significant digits, which read back to the
 same `f32`, and compared as `f32`s. Text and data are written byte for

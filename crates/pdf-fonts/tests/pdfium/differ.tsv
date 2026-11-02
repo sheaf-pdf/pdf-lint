@@ -1,0 +1,38 @@
+# name	why pdf-fonts reads it otherwise than PDFium
+exp	The font's object doesn't read: this file's reader refuses a word that's no number or keyword in an array, as 1e12 is; PDFium ends the array at it, so /Widths is empty.
+winansi-a0	WinAnsiEncoding's text at 0xA0 and 0xAD is Windows-1252's, U+00A0 and U+00AD, on purpose, where PDFium's is the glyph's, the space and the hyphen. Their widths are PDFium's.
+win-a0-widths	As winansi-a0.
+win-ad-widths	As winansi-a0.
+diff-lig	A name of parts joined by an underscore is the Adobe Glyph List's text, on purpose, here fi; PDFium reads no name of more than one code point, so its text is the code's.
+diff-dingbat	A Dingbats name is text only in a ZapfDingbats font, on purpose, as ISO 32000-2 lists it; PDFium's one table holds both lists, so /a1 in a Latin font is U+2701 there.
+enc-pdfdoc	PDFDocEncoding is no font's encoding by ISO 32000-2 and isn't read, so the font's own stands; PDFium has a table of it.
+base-pdfdoc	As enc-pdfdoc.
+base-macexpert	MacExpertEncoding's small capitals and old-style figures aren't read, so the font's own stands; PDFium has a table of it, and its text is the table's, or what the codes it hasn't draw.
+win-none-widths	The Euro, in Helvetica with no /Widths: Adobe's width, said to be guessed (Font::width_guessed), as PDFium's own face has it wider and Adobe gives it no box.
+predefined-low-gbk-euc-h	A CID's text is Adobe's UCS2 CMap's, here U+2002 for the code 0x20's CID; PDFium's own table, which differs from it at some twelve thousand CIDs, has U+0020.
+predefined-low-90ms-rksj-h	As predefined-low-gbk-euc-h.
+predefined-low-eten-b5-h	As predefined-low-gbk-euc-h.
+predefined-low-gb-euc-h	As predefined-low-gbk-euc-h.
+t3-enc-other-names	A Type 3 font's text is its glyphs' names', as a simple font's is, on purpose, here B for code 65; PDFium reads none from a Type 3 font's encoding, so its text is the code's.
+t3-text	As t3-enc-other-names.
+t3-w-rounds-otherwise	An Object holds a real as an f64, so 1.00000005960464478 comes to its 32-bit float by rounding the f64, 1; PDFium parses the digits to a float itself, a step past it.
+cmap-literal	A CMap is lexed as content, so a literal string is a code here; PDFium's word parser takes only a hex string for one, so (A) maps nothing.
+cmap-hex-odd	As cmap-literal: a hex string of an odd number of digits has its last digit's 0 here, so <4> is the code 0x40; PDFium's word parser reads it as the code 4.
+tu-literal-code	As cmap-literal, of a /ToUnicode CMap.
+tu-one-byte-dest	A destination of one byte is that byte's character, on purpose, where a writer meant it so; PDFium's word parser makes no character of fewer than four digits, so the code's stands.
+symbol-tt-none	A TrueType font named Symbol that doesn't say it's symbolic has no /Widths, and PDFium draws it in a face it substitutes, whose widths aren't Adobe's: they're 0 here, and said to be guessed (FontApprox::widths).
+symbol-tt-win	As symbol-tt-none.
+tu-stream-dict-in-dict	The stream doesn't read: this file's reader refuses a dictionary with a key that's no name, here a dictionary in a dictionary; PDFium passes over what's no name, so the one inside is the stream's.
+tu-ffff-first-many	PDFium keeps U+FFFF as its mark for a value of several units, so a real U+FFFF reads as the CMap's first such value, here fi, for a code that says nothing of it. Here it's no text, so the encoding's, as PDFium's is where the CMap has none.
+tu-empty-range	A range to no text is no text for each of its codes here; PDFium counts up from nothing for the codes after its first, so U+0001, U+0002 and on, which are no text a file means.
+tu-name-range	As tu-empty-range: PDFium reads a name in a range as no text.
+tu-name-dest-listed	A glyph name as a destination is the Adobe Glyph List's text, on purpose, here B; PDFium's word parser makes no text of a name, so the encoding's stands.
+tu-one-byte-range	As tu-one-byte-dest, of a range, counted up from that byte's character.
+tu-lone-surrogate	A value that's half a surrogate pair is U+FFFD, as a string here can't hold it; PDFium's characters are 16-bit units, so it gives the unit.
+tu-lone-surrogate-range	As tu-lone-surrogate: each code of the range, none counted up from U+FFFD.
+tu-pair	A surrogate pair is the one character it means here; PDFium keeps a /ToUnicode's value as 16-bit units, so its text page has two characters, of the same text.
+tu-pair-range	As tu-pair, each code of the range.
+predefined-cid-uni-gb-a0	A predefined CMap's CIDs are Adobe's current CMap's, in the bundle: U+00A0 in UniGB-UTF16-H is CID 1 here, where PDFium's own older table has no such code, so it's CID 0 and its width /DW's.
+tu-past-low-byte	A range is read to its last code, on purpose, as what writers mean by it, <0000> <FFFF> <0000> most of all; PDFium reads its last code's low byte alone, so past that its text is the code's own, the same for that one, not for this.
+t0-past-low-byte	As tu-past-low-byte, of two-byte codes.
+t0-past-low-byte-array	As tu-past-low-byte, of an array: writers of subsets cross a byte so, and PDFium, whose last code is then below the first, loses the block whole.

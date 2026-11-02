@@ -12,7 +12,8 @@ use std::sync::OnceLock;
 pub enum Encoding {
     /// StandardEncoding, the Latin fonts' own (ISO 32000-2, D.2).
     Standard,
-    /// Windows-1252's characters, by the names PDF gives them (ISO 32000-2, D.2).
+    /// Windows-1252's characters, by the names PDF gives them, and the bullet at
+    /// the codes above the space it leaves empty (ISO 32000-2, D.2).
     WinAnsi,
     /// MacRomanEncoding (ISO 32000-2, D.2).
     MacRoman,
@@ -46,11 +47,12 @@ impl Encoding {
         }
     }
 
-    /// The text `code` draws. WinAnsi's is Windows-1252's exactly, so its
-    /// second space and hyphen, 0xA0 and 0xAD, are U+00A0 and U+00AD.
+    /// The text `code` draws. WinAnsi's is Windows-1252's where that has one,
+    /// so its second space and hyphen, 0xA0 and 0xAD, are U+00A0 and U+00AD,
+    /// and else its glyph's: the bullet of a code it has no other use for.
     pub fn text(self, code: u8) -> Option<String> {
-        match self {
-            Encoding::WinAnsi => cp1252(code).map(String::from),
+        match (self, cp1252(code)) {
+            (Encoding::WinAnsi, Some(c)) => Some(String::from(c)),
             _ => glyph_text(self.glyph(code)?, self == Encoding::ZapfDingbats),
         }
     }
@@ -173,6 +175,8 @@ fn tables() -> &'static Tables {
         };
         let win_ansi_names = table(0x20, WIN_ANSI);
         let mut mac_roman_names = win_ansi_names;
+        // WinAnsi's bullet, which draws where it has no glyph, isn't MacRoman's.
+        mac_roman_names[0x7f] = None;
         names(&mut mac_roman_names, 0x80, MAC_ROMAN_HIGH);
         Tables {
             agl: list(include_str!("../assets/glyphlist.txt")),
@@ -248,11 +252,11 @@ const WIN_ANSI: &str = "
     at A B C D E F G H I J K L M N O
     P Q R S T U V W X Y Z bracketleft backslash bracketright asciicircum underscore
     grave a b c d e f g h i j k l m n o
-    p q r s t u v w x y z braceleft bar braceright asciitilde -
-    Euro - quotesinglbase florin quotedblbase ellipsis dagger daggerdbl
-        circumflex perthousand Scaron guilsinglleft OE - Zcaron -
-    - quoteleft quoteright quotedblleft quotedblright bullet endash emdash
-        tilde trademark scaron guilsinglright oe - zcaron Ydieresis
+    p q r s t u v w x y z braceleft bar braceright asciitilde bullet
+    Euro bullet quotesinglbase florin quotedblbase ellipsis dagger daggerdbl
+        circumflex perthousand Scaron guilsinglleft OE bullet Zcaron bullet
+    bullet quoteleft quoteright quotedblleft quotedblright bullet endash emdash
+        tilde trademark scaron guilsinglright oe bullet zcaron Ydieresis
     space exclamdown cent sterling currency yen brokenbar section
         dieresis copyright ordfeminine guillemotleft logicalnot hyphen registered macron
     degree plusminus twosuperior threesuperior acute mu paragraph periodcentered
@@ -268,8 +272,8 @@ const WIN_ANSI: &str = "
 ";
 
 /// MacRomanEncoding's glyphs from 0x80, sixteen a line, with the Mac OS
-/// symbols Annex D leaves out but for the Apple logo; below, it's
-/// WinAnsi's.
+/// symbols Annex D leaves out, the Apple logo among them, as PDFium's table
+/// has it; below, it's WinAnsi's.
 const MAC_ROMAN_HIGH: &str = "
     Adieresis Aring Ccedilla Eacute Ntilde Odieresis Udieresis aacute
         agrave acircumflex adieresis atilde aring ccedilla eacute egrave
@@ -285,7 +289,7 @@ const MAC_ROMAN_HIGH: &str = "
         ydieresis Ydieresis fraction currency guilsinglleft guilsinglright fi fl
     daggerdbl periodcentered quotesinglbase quotedblbase perthousand Acircumflex Ecircumflex Aacute
         Edieresis Egrave Iacute Icircumflex Idieresis Igrave Oacute Ocircumflex
-    - Ograve Uacute Ucircumflex Ugrave dotlessi circumflex tilde
+    apple Ograve Uacute Ucircumflex Ugrave dotlessi circumflex tilde
         macron breve dotaccent ring cedilla hungarumlaut ogonek caron
 ";
 

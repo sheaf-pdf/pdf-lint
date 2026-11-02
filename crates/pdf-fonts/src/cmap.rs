@@ -6,12 +6,12 @@
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashSet};
 
 use pdf_content_streams::{Operand, Operation, ResCx, operations};
 use pdf_objects::{ObjectId, Resolve};
 
-use crate::predefined;
+use crate::predefined::{self, BfString, Collection};
 use crate::reader::Reader;
 use crate::{Error, Fault, Limits, Sink, Streams, glyph_text};
 
@@ -386,87 +386,191 @@ pub(crate) fn number(bytes: &[u8]) -> u32 {
     bytes.iter().fold(0u32, |c, &b| c << 8 | u32::from(b))
 }
 
-/// A `/ToUnicode` CMap.
+/// A `/ToUnicode` CMap, its mappings read as PDFium's `CPDF_ToUnicodeMap` takes them:
+/// a code at most 16 bits, a later mapping over an earlier, a block whose count isn't
+/// the mappings it holds, or that holds what's no mapping, taken not at all.
 #[derive(Debug, Default)]
 pub(crate) struct CMap {
     /// Codespace ranges, each its first and last code, both as long as the codes
     /// in it.
     codespace: Vec<(Vec<u8>, Vec<u8>)>,
-    /// Codes mapped one at a time.
-    chars: HashMap<u32, String>,
-    /// Ranges whose text counts up from their first code's, by first code: first,
-    /// last, the first code's text.
-    ranges: Vec<(u32, u32, Vec<char>)>,
+    /// What codes are mapped to, by range: the range's first code, and where its
+    /// destination is in `units` and how long.
+    mapped: Ranges<(u32, u32, u32)>,
+    /// The destinations' UTF-16 units, one after another.
+    units: Vec<u16>,
+    /// The collection whose CIDs a code none of these maps is read as, where the CMap
+    /// names one's Adobe-*-UCS2.
+    base: Option<Collection>,
 }
+
+/// Mappings as they're given, the first code, the last, and [`CMap::mapped`]'s value.
+type Given = Vec<(u32, u32, (u32, u32, u32))>;
 
 impl CMap {
     /// The mappings of `bytes`, a CMap; read as far as it lexes.
     pub(crate) fn parse(bytes: &[u8], limits: &Limits) -> CMap {
         let mut cmap = CMap::default();
+        let mut given = Given::new();
+        let mut begun = None;
         let none = ResCx::none();
         for operation in operations(bytes, &none, &limits.content) {
             let Ok(operation) = operation else {
                 break;
             };
+            // A block's count is what's before its `begin`, its mappings what's before
+            // its `end`, with nothing between them.
+            let count = begun.take();
             match operation.name() {
                 b"endcodespacerange" => cmap.codespace.extend(codespace(&operation, limits)),
-                b"endbfchar" => {
-                    let args: Vec<_> = operation.operands().collect();
-                    for pair in args.chunks_exact(2) {
-                        let read = code(&pair[0], limits).zip(destination(&pair[1], limits));
-                        if let Some((c, text)) = read {
-                            cmap.chars.insert(c, text);
-                        }
-                    }
-                }
-                b"endbfrange" => {
-                    let args: Vec<_> = operation.operands().collect();
-                    for range in args.chunks_exact(3) {
-                        let (Some(lo), Some(hi)) =
-                            (code(&range[0], limits), code(&range[1], limits))
-                        else {
-                            continue;
-                        };
-                        if lo > hi {
-                            continue;
-                        }
-                        let Some(text) = range[2].object(&limits.content) else {
-                            continue;
-                        };
-                        if let Some(s) = text.as_bytes() {
-                            cmap.ranges.push((lo, hi, utf16(s).chars().collect()));
-                        } else if let Some(items) = text.as_array() {
-                            let texts = items.iter().filter_map(|i| i.as_bytes().map(utf16));
-                            for (c, text) in (lo..=hi).zip(texts) {
-                                cmap.chars.insert(c, text);
-                            }
-                        }
-                    }
-                }
-                _ => {}
+                b"beginbfchar" | b"beginbfrange" => begun = Some(block_count(&operation, limits)),
+                b"endbfchar" => cmap.bfchars(&operation, count, &mut given, limits),
+                b"endbfrange" => cmap.bfranges(&operation, count, &mut given, limits),
+                _ => cmap.names_collection(&operation),
             }
         }
-        cmap.ranges.sort_by_key(|r| r.0);
+        cmap.mapped = Ranges::new(&given, true);
         cmap
     }
 
-    /// The text `code` maps to: its own mapping, or the range it's in, the range's
-    /// text with its last character counted up.
+    /// A `bfchar` block's mappings, where it holds `count` of them and each code is
+    /// one. A destination of no text maps nothing.
+    fn bfchars(
+        &mut self,
+        block: &Operation,
+        count: Option<usize>,
+        given: &mut Given,
+        limits: &Limits,
+    ) {
+        let args: Vec<_> = block.operands().collect();
+        if count.is_none_or(|count| count.checked_mul(2) != Some(args.len())) {
+            return;
+        }
+        let codes: Option<Vec<u32>> = (args.chunks_exact(2))
+            .map(|pair| source_code(&pair[0], limits).filter(|&c| c <= LAST_CODE))
+            .collect();
+        for (code, pair) in codes.into_iter().flatten().zip(args.chunks_exact(2)) {
+            let units = destination(&pair[1], limits);
+            self.map_each(code, units.as_deref(), given);
+        }
+    }
+
+    /// A `bfrange` block's mappings, where it holds `count` of them and each is one.
+    /// PDFium's last code of a range is its first's but for the low byte, and an array
+    /// has a destination for each of those. Here a range is read to its last code where
+    /// that's past it, on purpose: writers map `<0000> <FFFF> <0000>`, where PDFium's text
+    /// is the same, by a code's own, and subsets' ranges cross a byte, whose blocks it
+    /// loses. An array shorter than that is read by the low byte, as PDFium's.
+    fn bfranges(
+        &mut self,
+        block: &Operation,
+        count: Option<usize>,
+        given: &mut Given,
+        limits: &Limits,
+    ) {
+        let args: Vec<_> = block.operands().collect();
+        if count.is_none_or(|count| count.checked_mul(3) != Some(args.len())) {
+            return;
+        }
+        let mut ranges = Vec::with_capacity(args.len() / 3);
+        for range in args.chunks_exact(3) {
+            let (Some(lo), Some(last)) = (
+                source_code(&range[0], limits),
+                source_code(&range[1], limits),
+            ) else {
+                return;
+            };
+            let to = range[2].object(&limits.content);
+            let items = to.as_ref().and_then(|to| to.as_array());
+            let whole = (lo..=LAST_CODE).contains(&last)
+                && items.is_none_or(|items| items.len() as u32 == last - lo + 1);
+            let hi = if whole {
+                last
+            } else {
+                lo & !0xff | last & 0xff
+            };
+            if lo > LAST_CODE || hi > LAST_CODE || lo > hi {
+                return;
+            }
+            if items.is_some_and(|items| items.len() as u32 != hi - lo + 1) {
+                return;
+            }
+            ranges.push((lo, hi, to));
+        }
+        for (lo, hi, to) in ranges {
+            let to = to.as_ref();
+            if let Some(items) = to.and_then(|to| to.as_array()) {
+                for (code, item) in (lo..=hi).zip(items) {
+                    let units = item.as_bytes().map(utf16_units);
+                    self.map_each(code, units.as_deref(), given);
+                }
+            } else {
+                // A destination of no text maps its range to no text.
+                let units = to.and_then(|to| to.as_bytes()).map(utf16_units);
+                let at = self.keep(units.as_deref().unwrap_or_default());
+                given.push((lo, hi, (lo, at.0, at.1)));
+            }
+        }
+    }
+
+    /// `code` mapped to `units`, unless there's no text in them.
+    fn map_each(&mut self, code: u32, units: Option<&[u16]>, given: &mut Given) {
+        if let Some(units) = units.filter(|units| !units.is_empty()) {
+            let at = self.keep(units);
+            given.push((code, code, (code, at.0, at.1)));
+        }
+    }
+
+    /// `units` kept, where they are and how many.
+    fn keep(&mut self, units: &[u16]) -> (u32, u32) {
+        let at = self.units.len() as u32;
+        self.units.extend_from_slice(units);
+        (at, units.len() as u32)
+    }
+
+    /// The collection one of `operation`'s operands names, by the name of its
+    /// Adobe-*-UCS2, wherever that's said, as PDFium takes it.
+    fn names_collection(&mut self, operation: &Operation) {
+        for operand in operation.operands() {
+            let collection = operand.name().and_then(|name| match &name[..] {
+                b"Adobe-GB1-UCS2" => Some(Collection::Gb1),
+                b"Adobe-CNS1-UCS2" => Some(Collection::Cns1),
+                b"Adobe-Japan1-UCS2" => Some(Collection::Japan1),
+                b"Adobe-Korea1-UCS2" => Some(Collection::Korea1),
+                _ => None,
+            });
+            self.base = collection.or(self.base);
+        }
+    }
+
+    /// The text `code` maps to, by the last mapping of it, a range's with its last
+    /// unit counted up. By PDFium's rule, where units are kept apart: one unit alone
+    /// is 16 bits, U+FFFF of it no text; a lone surrogate, which `str` can't hold, is
+    /// U+FFFD. Failing a mapping, its text as a CID of the collection the CMap names.
     pub(crate) fn get(&self, code: u32) -> Option<Cow<'_, str>> {
-        if let Some(text) = self.chars.get(&code) {
-            return Some(Cow::Borrowed(text));
+        let Some((first, at, len)) = self.mapped.get(code) else {
+            let cid = code & 0xffff;
+            return match self.base?.to_unicode()?.lookup_bf_string(cid)? {
+                BfString::Char(c) => Some(Cow::Owned(String::from(c))),
+                BfString::String(s) => Some(Cow::Owned(s)),
+            };
+        };
+        let units = &self.units[at as usize..(at + len) as usize];
+        let (&last, before) = units.split_last()?;
+        let last = u32::from(last) + (code - first);
+        if before.is_empty() {
+            let unit = last & 0xffff;
+            return (unit != 0xffff).then(|| {
+                let c = char::from_u32(unit).unwrap_or(char::REPLACEMENT_CHARACTER);
+                Cow::Owned(String::from(c))
+            });
         }
-        let i = self
-            .ranges
-            .partition_point(|r| r.0 <= code)
-            .checked_sub(1)?;
-        let (lo, hi, first) = &self.ranges[i];
-        if code > *hi {
-            return None;
-        }
-        let (last, rest) = first.split_last()?;
-        let last = char::from_u32(u32::from(*last).checked_add(code - lo)?)?;
-        Some(Cow::Owned(rest.iter().chain([&last]).collect()))
+        let Ok(last) = u16::try_from(last) else {
+            let mut text = decoded(before.iter().copied());
+            text.extend(char::from_u32(last));
+            return Some(Cow::Owned(text));
+        };
+        Some(Cow::Owned(decoded(before.iter().copied().chain([last]))))
     }
 
     /// Whether its codespace says how long a code is.
@@ -480,21 +584,49 @@ impl CMap {
     }
 }
 
-/// A `bfchar` destination's text: a string's UTF-16, or a glyph name's.
-fn destination(operand: &Operand, limits: &Limits) -> Option<String> {
-    let destination = operand.object(&limits.content)?;
-    if let Some(s) = destination.as_bytes() {
-        return Some(utf16(s));
-    }
-    glyph_text(std::str::from_utf8(destination.as_name()?).ok()?, false)
+/// The last code a `/ToUnicode` CMap maps (PDFium's `kCidLimit`).
+const LAST_CODE: u32 = 0xffff;
+
+/// The count a `beginbfchar` or `beginbfrange` says of its block; what's no count, 0.
+fn block_count(begin: &Operation, limits: &Limits) -> usize {
+    (begin.arg(0))
+        .and_then(|count| count.object(&limits.content)?.as_integer())
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(0)
 }
 
-/// A CMap destination string's text: UTF-16BE, or one byte's code.
-fn utf16(s: &[u8]) -> String {
-    if let [b] = s {
-        return char::from(*b).to_string();
+/// The code a string operand of a `/ToUnicode` CMap is, of any length its value fits
+/// 32 bits in; a string of nothing is none.
+fn source_code(operand: &Operand, limits: &Limits) -> Option<u32> {
+    let string = operand.object(&limits.content)?;
+    let string = string.as_bytes().filter(|string| !string.is_empty())?;
+    string
+        .iter()
+        .try_fold(0u32, |c, &b| c.checked_mul(256)?.checked_add(u32::from(b)))
+}
+
+/// A `bfchar` destination's UTF-16 units: a string's, or a glyph name's text's.
+fn destination(operand: &Operand, limits: &Limits) -> Option<Vec<u16>> {
+    let destination = operand.object(&limits.content)?;
+    if let Some(s) = destination.as_bytes() {
+        return Some(utf16_units(s));
     }
-    let units = s.chunks_exact(2).map(|u| u16::from_be_bytes([u[0], u[1]]));
+    let name = std::str::from_utf8(destination.as_name()?).ok()?;
+    Some(glyph_text(name, false)?.encode_utf16().collect())
+}
+
+/// A CMap destination string's units: UTF-16BE, or one byte's code.
+fn utf16_units(s: &[u8]) -> Vec<u16> {
+    if let [b] = s {
+        return vec![u16::from(*b)];
+    }
+    s.chunks_exact(2)
+        .map(|u| u16::from_be_bytes([u[0], u[1]]))
+        .collect()
+}
+
+/// UTF-16 units' text, a lone surrogate U+FFFD.
+fn decoded(units: impl Iterator<Item = u16>) -> String {
     char::decode_utf16(units)
         .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect()

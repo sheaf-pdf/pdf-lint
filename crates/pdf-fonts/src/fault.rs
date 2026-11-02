@@ -87,26 +87,30 @@ pub enum Fault {
     /// (9.6.2.1). It's read for as long as both go on.
     #[error("a /Widths of another length than /FirstChar and /LastChar say")]
     WidthsLength,
-    /// A `/FirstChar` that's no byte's code, or none where a `/Widths` is given
-    /// (9.6.2.1). A code past a byte's has no width from `/Widths`, and none given is
-    /// read as 0.
+    /// A `/FirstChar` that's no byte's code, no number, or none where a `/Widths` is
+    /// given (9.6.2.1). A code past a byte's has no width from `/Widths`, and what's no
+    /// number is read as PDFium reads it.
     #[error("a /FirstChar that's no code")]
     FirstChar,
-    /// A width, or a descriptor's metric, that's no number (9.6.2.1, 9.7.4.3,
-    /// 9.8.1). It's read as none, or 0.
+    /// A width, or a descriptor's metric or `/Flags`, that's no number (9.6.2.1,
+    /// 9.7.4.3, 9.8.1). It's read as PDFium reads what's no number: `true` as 1, and
+    /// anything else 0, a reference to nothing among them.
     #[error("a font's metric isn't a number")]
     NotANumber,
     /// An `/Encoding` or `/BaseEncoding` that's no base encoding's name, or an
     /// `/Encoding` that's neither that nor a dictionary (9.6.5.1). The font's own
-    /// encoding is read.
+    /// encoding is read. `MacExpertEncoding` is a base encoding, though it's only read
+    /// as PDFium reads the name, as WinAnsiEncoding, and not in a dictionary.
     #[error("an /Encoding that's no encoding")]
     Encoding,
     /// A `/Differences` value that's neither a number nor a name, or a name at a
-    /// code past 255 (9.6.5.1). It's passed over.
+    /// code past 255 (9.6.5.1). What's neither sets the code as PDFium reads it, `true`
+    /// to 1 and anything else to 0; a name past 255 names nothing, and the code goes on
+    /// from it.
     #[error("a /Differences value that's neither a code nor a glyph's name")]
     Differences,
     /// A Type 0 font's `/DescendantFonts` that's not one CIDFont (9.7.6.1). It's
-    /// read as having none.
+    /// read as having none. PDFium doesn't load such a font, and draws nothing in it.
     #[error("a /DescendantFonts that's not one CIDFont")]
     DescendantFonts,
     /// A `/W` with an array where a range's last CID goes (9.7.4.3). It's read
@@ -118,7 +122,7 @@ pub enum Fault {
     #[error("a /W2 cut short by an array")]
     W2,
     /// A Type 0 font's `/Encoding` that's neither a name nor a stream (9.7.6.1).
-    /// Its codes are guessed.
+    /// Its codes are guessed. PDFium doesn't load such a font, and draws nothing in it.
     #[error("a Type 0 font's /Encoding is neither a name nor a stream")]
     CMap,
     /// A CMap's `/UseCMap` chain that can't be read whole: a stream that doesn't
@@ -130,9 +134,10 @@ pub enum Fault {
     /// is read as with none.
     #[error("a /ToUnicode that's no stream")]
     ToUnicode,
-    /// A CMap named that this reading doesn't have: one PDFium doesn't know, one
-    /// that isn't predefined (9.7.5.2), or one a build without the
-    /// `predefined-cmaps` feature hasn't. Its codes are guessed.
+    /// A CMap named that this reading doesn't have: one that isn't predefined
+    /// (9.7.5.2), or one PDFium doesn't know, whose codes are two bytes each, each its
+    /// CID, as PDFium reads them; or one a build without the `predefined-cmaps` feature
+    /// hasn't, whose codes are guessed.
     #[error("a predefined CMap this reading doesn't have")]
     PredefinedUnknown,
     /// A program that doesn't read as its format (9.9). Its glyphs' boxes and its
@@ -140,7 +145,8 @@ pub enum Fault {
     #[error("a font program that doesn't read")]
     ProgramMalformed,
     /// A reference to a reference (7.3.10), which ISO 32000-2 allows and PDFium
-    /// mostly doesn't follow.
+    /// follows only to a dictionary, or a number or a string in a value it has already
+    /// followed one to. Where it doesn't, what it leads to reads as none.
     #[error("a reference to a reference")]
     Chained,
     /// An object a font reads doesn't read ([`Why::Damaged`](crate::Why::Damaged)).

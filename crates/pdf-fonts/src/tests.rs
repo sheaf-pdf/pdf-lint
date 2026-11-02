@@ -61,9 +61,10 @@ fn widths_equal_the_afm() {
             mapped += 1;
         }
         let expected = match font {
-            // Printable ASCII, 27 of 0x80–0x9F, and 0xA0–0xFF.
+            // Printable ASCII, 0x7F's bullet, 0x80–0x9F with the bullet where it has
+            // nothing else, and 0xA0–0xFF.
             Std14::Symbol | Std14::ZapfDingbats => codes.len(),
-            _ => 95 + 27 + 96,
+            _ => 95 + 1 + 32 + 96,
         };
         assert_eq!(mapped, expected, "{font:?}");
         assert_eq!(font.afm().len(), widths.len(), "{font:?}");
@@ -100,7 +101,11 @@ fn each_table_equals_its_afm() {
     assert_eq!(Encoding::Standard.glyph(0x27), Some("quoteright"));
     assert_eq!(Encoding::WinAnsi.glyph(0x27), Some("quotesingle"));
     assert_eq!(Encoding::MacRoman.glyph(0x80), Some("Adieresis"));
-    assert_eq!(Encoding::MacRoman.glyph(0xf0), None);
+    assert_eq!(Encoding::MacRoman.glyph(0xf0), Some("apple"));
+    assert_eq!(Encoding::MacRoman.text(0xf0).as_deref(), Some("\u{f8ff}"));
+    // WinAnsi's bullet at 0x7f is its own, though MacRoman's low half is the same.
+    assert_eq!(Encoding::WinAnsi.glyph(0x7f), Some("bullet"));
+    assert_eq!(Encoding::MacRoman.glyph(0x7f), None);
 }
 
 /// A table's text is its glyphs': `A` in the Latin encodings, a Greek letter
@@ -125,19 +130,26 @@ fn encodings_give_their_glyphs_text() {
     assert_eq!(Encoding::named(b"Symbol"), None);
 }
 
-/// WinAnsiEncoding is Windows-1252 exactly, all 256 codes: each character it
-/// draws is its code's text, and a control code or an empty one has none.
+/// WinAnsiEncoding is Windows-1252 at all 256 codes: each character it draws is its
+/// code's text, and a control code has none, but that the codes above the space it
+/// leaves empty draw the bullet (ISO 32000-2, D.2).
 #[test]
 fn win_ansi_is_cp1252_both_ways() {
     for code in 0..=255u8 {
         let c = cp1252_chart(code);
         let drawn = c.filter(|c| !c.is_control());
+        let unused = code > 0x20 && drawn.is_none();
+        let text = match unused {
+            true => Some("•".to_string()),
+            false => drawn.map(String::from),
+        };
+        assert_eq!(Encoding::WinAnsi.text(code), text, "{code:#x}");
+        assert_eq!(cp1252(code), drawn, "{code:#x}");
         assert_eq!(
-            Encoding::WinAnsi.text(code),
-            drawn.map(String::from),
+            Encoding::WinAnsi.glyph(code) == Some("bullet"),
+            unused || code == 0x95,
             "{code:#x}"
         );
-        assert_eq!(cp1252(code), drawn, "{code:#x}");
     }
     // The second space and the soft hyphen are their own.
     assert_eq!(Encoding::WinAnsi.text(0xa0).as_deref(), Some("\u{a0}"));

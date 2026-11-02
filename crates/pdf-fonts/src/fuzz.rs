@@ -124,13 +124,15 @@ fn a_name(name: &[u8]) {
     }
 }
 
-/// A code in every encoding: its text is its glyph's, or Windows-1252's.
+/// A code in every encoding: its text is its glyph's, or Windows-1252's where that
+/// has one.
 fn codes(code: u8) {
     use Encoding::{MacRoman, Standard, Symbol, WinAnsi, ZapfDingbats};
     for encoding in [Standard, WinAnsi, MacRoman, Symbol, ZapfDingbats] {
         let (glyph, text) = (encoding.glyph(code), encoding.text(code));
         if encoding == WinAnsi {
-            assert_eq!(text, cp1252(code).map(String::from));
+            let glyph_s = glyph.and_then(|name| glyph_text(name, false));
+            assert_eq!(text, cp1252(code).map(String::from).or(glyph_s));
         } else {
             assert_eq!(glyph.is_none(), text.is_none(), "{encoding:?} {code:#x}");
         }
