@@ -751,12 +751,55 @@ impl<S: ByteSource> Reading<S> {
     /// holding what did, a stream cut off at the limit among them
     /// ([`Error::Decode`]).
     pub fn decoded(&self, id: ObjectId) -> Result<Vec<u8>, Error> {
+        self.decoded_up_to(id, self.reader.limits.stream)
+    }
+
+    /// The data of stream `id` decoded as [`Reading::decoded`] decodes it, up
+    /// to `limit` bytes or [`Limits::stream`](super::Limits::stream), whichever
+    /// is less, for a caller with a budget of its own: a stream isn't decoded
+    /// far past what it could take. The limit holds for a stream without
+    /// filters too, which [`Reading::decoded`] gives whole: its data past the
+    /// limit is cut off there, an error as a stream decoded past it is
+    /// ([`Error::Decode`], with [`Fault::Limit`](pdf_filters::Fault::Limit)).
+    ///
+    /// ```
+    /// use pdf_structure::bytes::{Error, Options, Reading};
+    /// use pdf_structure::pdf_filters::Fault;
+    ///
+    /// let file = b"%PDF-1.7\n1 0 obj\n<< /Length 6 >>\nstream\nabcdef\nendstream\nendobj\n\
+    ///     trailer\n<< /Size 2 >>\n%%EOF\n";
+    /// let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    /// assert_eq!(reading.decoded_within((1, 0), 6).unwrap(), b"abcdef");
+    /// let Err(Error::Decode(cut)) = reading.decoded_within((1, 0), 5) else {
+    ///     panic!("past its limit");
+    /// };
+    /// assert_eq!(cut.data, b"abcde");
+    /// assert_eq!(cut.faults, [(0, Fault::Limit)]);
+    /// ```
+    pub fn decoded_within(&self, id: ObjectId, limit: usize) -> Result<Vec<u8>, Error> {
+        let limit = limit.min(self.reader.limits.stream);
+        match self.decoded_up_to(id, limit) {
+            // Only a stream with no filters comes back longer than its limit.
+            Ok(mut data) if data.len() > limit => {
+                data.truncate(limit);
+                data.shrink_to_fit();
+                Err(Error::Decode(pdf_filters::Error {
+                    data,
+                    faults: vec![(0, pdf_filters::Fault::Limit)],
+                }))
+            }
+            decoded => decoded,
+        }
+    }
+
+    /// [`Reading::decoded`], each filter's output up to `limit` bytes.
+    fn decoded_up_to(&self, id: ObjectId, limit: usize) -> Result<Vec<u8>, Error> {
         match self.source.whole() {
             Some(file) => {
-                let Ok(decoded) = self.decoded_in(InMemory(file), id);
+                let Ok(decoded) = self.decoded_in(InMemory(file), id, limit);
                 decoded
             }
-            None => self.decoded_in(self.by_position(), id).map_err(Error::Io)?,
+            None => (self.decoded_in(self.by_position(), id, limit)).map_err(Error::Io)?,
         }
     }
 
@@ -794,11 +837,12 @@ impl<S: ByteSource> Reading<S> {
         })
     }
 
-    /// [`Reading::decoded`], of `file`.
+    /// [`Reading::decoded_up_to`], of `file`.
     fn decoded_in<'f, F: Bytes<'f>>(
         &'f self,
         file: F,
         id: ObjectId,
+        limit: usize,
     ) -> Result<Result<Vec<u8>, Error>, F::Error> {
         let (stream, data) = match self.data_in(file, id)? {
             Ok(read) => read,
@@ -824,8 +868,7 @@ impl<S: ByteSource> Reading<S> {
         }
         Ok(match filters {
             Ok(filters) => {
-                let (limit, flate) = (reader.limits.stream, reader.flate);
-                pdf_filters::decode(&data, &filters, limit, flate).map_err(Error::Decode)
+                pdf_filters::decode(&data, &filters, limit, reader.flate).map_err(Error::Decode)
             }
             Err(why) => Err(Error::Filters(why)),
         })

@@ -160,7 +160,6 @@ impl Std14 {
     /// The encoding of its own a font of its name is read in, where nothing says
     /// otherwise: StandardEncoding for the twelve Latin ones, Symbol's and
     /// ZapfDingbats' their own.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn own(self) -> Encoding {
         match self {
             Std14::Symbol => Encoding::Symbol,

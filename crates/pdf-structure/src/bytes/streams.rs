@@ -858,3 +858,68 @@ fn a_streams_data_handed_out_leaves_the_reading_the_whole_read() {
     assert!(reading.get((2, 0)).is_ok());
     assert_eq!(reading.reader.budget.load(Ordering::Relaxed), 0);
 }
+
+/// `decoded_within` at its limit and a byte past it, filtered and not, in
+/// memory and by position; never past the reading's own limit; and what
+/// `decoded` gives is as it was, an unfiltered stream past the reading's limit
+/// whole.
+#[test]
+fn decoded_within_holds_its_limit_for_a_stream_with_or_without_filters() {
+    let plain = b"0123456789";
+    let objects = [
+        (1, Body::stream(dict! {}, plain)),
+        (
+            2,
+            Body::stream(dict! { "Filter" => "FlateDecode" }, &fixture::zlib(plain)),
+        ),
+        (3, dict! { "Not" => "a stream" }.into()),
+    ];
+    let file = fixture::file("1.7", &objects, dict! {}, fixture::Xref::Table);
+    let by_position = fuzz::Counted::new(&file, 16);
+    let cut = |decoded: Result<Vec<u8>, Error>, kept: &[u8], stream: &str| match decoded {
+        Err(Error::Decode(error)) => {
+            assert_eq!(error.data, kept, "{stream}");
+            assert!(
+                error.faults.iter().any(|(_, fault)| *fault == Fault::Limit),
+                "{stream}: {:?}",
+                error.faults
+            );
+        }
+        other => panic!("{stream}: {other:?}"),
+    };
+    let reading = open(&file, &[], &Options::DEFAULT);
+    let positioned = Reading::open(&by_position, &Options::DEFAULT).unwrap();
+    for id in [(1, 0), (2, 0)] {
+        let stream = format!("{id:?}");
+        assert_eq!(reading.decoded(id).unwrap(), plain, "{stream}");
+        assert_eq!(reading.decoded_within(id, 10).unwrap(), plain, "{stream}");
+        assert_eq!(reading.decoded_within(id, 11).unwrap(), plain, "{stream}");
+        assert_eq!(
+            positioned.decoded_within(id, 10).unwrap(),
+            plain,
+            "{stream}"
+        );
+        cut(reading.decoded_within(id, 9), &plain[..9], &stream);
+        cut(positioned.decoded_within(id, 9), &plain[..9], &stream);
+        cut(reading.decoded_within(id, 0), b"", &stream);
+    }
+    // A stream without filters says its limit at filter 0.
+    let Err(Error::Decode(error)) = reading.decoded_within((1, 0), 9) else {
+        panic!("past its limit");
+    };
+    assert_eq!(error.faults, [(0, Fault::Limit)]);
+    assert!(matches!(
+        reading.decoded_within((3, 0), 9),
+        Err(Error::NotAStream { id: (3, 0) })
+    ));
+
+    // The reading's own limit is the most any caller's can be, and `decoded`
+    // goes on giving a stream without filters whole.
+    let mut options = Options::DEFAULT;
+    options.limits.stream = 4;
+    let small = open(&file, &[], &options);
+    cut(small.decoded_within((1, 0), 100), &plain[..4], "(1, 0)");
+    cut(small.decoded_within((2, 0), 100), &plain[..4], "(2, 0)");
+    assert_eq!(small.decoded((1, 0)).unwrap(), plain);
+    cut(small.decoded((2, 0)), &plain[..4], "(2, 0)");
+}

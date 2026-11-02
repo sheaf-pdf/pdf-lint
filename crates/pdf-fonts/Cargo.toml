@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "PDF fonts read: simple fonts' encodings and glyph names, the standard 14's names and metrics, Type 1 tokens, predefined CMaps"
+description = "PDF fonts read: codes, CIDs, widths, heights and text as PDFium reads them, encodings and glyph names, the standard 14's metrics, Type 1 tokens, predefined CMaps"
 keywords = ["pdf", "font", "encoding", "cmap", "iso-32000"]
 categories = ["parser-implementations", "text-processing"]
 # Only what users need, so local tooling files can't end up in the package.
@@ -13,7 +13,11 @@ categories = ["parser-implementations", "text-processing"]
 include = ["/src", "/assets", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
+pdf-content-streams = { path = "../pdf-content-streams", version = "0.1" }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
+# With `structure`: a reading of a file gives a font its streams.
+pdf-structure = { path = "../pdf-structure", version = "0.1", optional = true }
+thiserror = "2"
 # With `predefined-cmaps`: Adobe's predefined CMaps, from its bundle alone,
 # never a file's bytes. It needs Rust 1.87.
 hayro-cmap = { version = "0.1", optional = true }
@@ -22,10 +26,16 @@ hayro-cmap = { version = "0.1", optional = true }
 # them, a font's predefined CMap reads as one the build hasn't.
 [features]
 predefined-cmaps = ["dep:hayro-cmap"]
+# `Streams` for pdf-structure's `&Reading`, for who reads a file by it.
+structure = ["dep:pdf-structure"]
+
+[dev-dependencies]
+# The tests' files, and a reading of them.
+pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
 
 # docs.rs documents what the feature adds, beside the default.
 [package.metadata.docs.rs]
-features = ["predefined-cmaps"]
+features = ["structure", "predefined-cmaps"]
 
 [lints.rust]
 unsafe_code = "forbid"

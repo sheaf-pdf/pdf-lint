@@ -7,6 +7,8 @@ use super::afm::Afm;
 use super::fixture;
 use super::*;
 
+mod fonts;
+
 /// An AFM's widths and codes, read here as plainly as it can be: each
 /// `C <code> ; WX <width> ; N <name>` line.
 fn afm(text: &str) -> (HashMap<&str, f32>, HashMap<u8, &str>) {

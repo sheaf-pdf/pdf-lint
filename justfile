@@ -53,8 +53,8 @@ fmt:
 # content streams with `image-ends`, which no other crate turns on; then
 # pdf-semantics without its clock, as pdf-lint takes it; then pdf-linearize's
 # engine, without its adapter, and with lopdf's, which nothing else turns on; then
-# pdf-fonts with Adobe's predefined CMaps, which nothing else turns on, and with
-# no feature at all.
+# pdf-fonts with a reading of a file and Adobe's predefined CMaps, which nothing
+# else turns on, and with no feature at all.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
@@ -63,15 +63,15 @@ clippy:
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --features lopdf,timing --all-targets -- -D warnings
-    cargo clippy --locked -p pdf-fonts --features predefined-cmaps --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-fonts --features structure,predefined-cmaps --all-targets -- -D warnings
     cargo clippy --locked -p pdf-fonts --no-default-features --all-targets -- -D warnings
 
 # Unit tests and doctests: the workspace's, where the filters have both
 # Flate backends, as pdf-structure's tests turn zlib-rs on; then the
 # filters' with zlib-rs alone; then the content streams' with `image-ends`;
 # then pdf-semantics' without its clock; then pdf-linearize's engine, without
-# its adapter, and with lopdf's; then pdf-fonts' with Adobe's predefined CMaps,
-# and with no feature at all.
+# its adapter, and with lopdf's; then pdf-fonts' with a reading of a file and Adobe's
+# predefined CMaps, and with no feature at all.
 test:
     cargo test --locked --workspace
     cargo test --locked -p pdf-filters --no-default-features --features zlib-rs
@@ -79,7 +79,7 @@ test:
     cargo test --locked -p pdf-semantics --no-default-features
     cargo test --locked -p pdf-linearize --no-default-features
     cargo test --locked -p pdf-linearize --features lopdf
-    cargo test --locked -p pdf-fonts --features predefined-cmaps
+    cargo test --locked -p pdf-fonts --features structure,predefined-cmaps
     cargo test --locked -p pdf-fonts --no-default-features
 
 # qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
@@ -285,10 +285,11 @@ semantics-msrv:
 color-msrv:
     cargo +{{ color_msrv }} test --locked -p pdf-color
 
-# Test pdf-fonts on its oldest supported Rust, as it's published and with no
-# feature, which must be installed.
+# Test pdf-fonts on its oldest supported Rust, as it's published, with a reading of
+# a file and with no feature, which must be installed.
 fonts-msrv:
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts
+    cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --features structure
     cargo +{{ fonts_msrv }} test --locked -p pdf-fonts --no-default-features
 
 # Test pdf-fonts with `predefined-cmaps` on that feature's oldest Rust, which must
@@ -320,7 +321,8 @@ arlington-msrv:
 # and in the resources; `semantics`, pdf-semantics' name and number trees,
 # page tree, dates and XMP claims; `color`, pdf-color's count of a space's
 # components, its typed spaces and what a resources dictionary names; `fonts`,
-# pdf-fonts' scan of a Type 1 program, under any caps, and its reading of names;
+# pdf-fonts' scan of a Type 1 program, under any caps, its reading of names, and its
+# reading of a font, on any parts and in a file;
 # `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; or `check`, the reader
 # and the checker.

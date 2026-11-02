@@ -13,7 +13,34 @@
 use std::sync::OnceLock;
 
 #[cfg(feature = "predefined-cmaps")]
-use hayro_cmap::{CMap, CMapName, load_embedded};
+pub(crate) use hayro_cmap::{BfString, CMap};
+#[cfg(feature = "predefined-cmaps")]
+use hayro_cmap::{CMapName, load_embedded};
+
+/// No CMap, in a build without the feature: nothing can be one, so a font's
+/// reading has no code of its own for which it is.
+#[cfg(not(feature = "predefined-cmaps"))]
+#[derive(Debug)]
+pub(crate) enum CMap {}
+
+#[cfg(not(feature = "predefined-cmaps"))]
+impl CMap {
+    pub(crate) fn lookup_cid_code(&self, _: u32, _: u8) -> Option<u32> {
+        match *self {}
+    }
+
+    pub(crate) fn lookup_bf_string(&self, _: u32) -> Option<BfString> {
+        match *self {}
+    }
+}
+
+/// What a CID's text is, in the shape hayro-cmap gives it.
+#[cfg(not(feature = "predefined-cmaps"))]
+#[allow(dead_code)]
+pub(crate) enum BfString {
+    Char(char),
+    String(String),
+}
 
 /// A CID character collection PDFium maps CIDs to text in (its
 /// `CIDSet`), Adobe's.
@@ -48,6 +75,12 @@ impl Collection {
             Collection::Japan1 => b"Adobe-Japan1-UCS2",
             Collection::Korea1 => b"Adobe-Korea1-UCS2",
         })
+    }
+
+    /// None, in a build without the feature.
+    #[cfg(not(feature = "predefined-cmaps"))]
+    pub(crate) fn to_unicode(self) -> Option<&'static CMap> {
+        None
     }
 }
 
@@ -235,6 +268,12 @@ pub(crate) fn bundled(name: &[u8]) -> Option<&'static CMap> {
     let i = BUNDLED.iter().position(|n| *n == name)?;
     let parse = || CMap::parse(load_embedded(CMapName::from_bytes(name))?, load_embedded);
     PARSED[i].get_or_init(parse).as_ref()
+}
+
+/// None, in a build without the feature.
+#[cfg(not(feature = "predefined-cmaps"))]
+pub(crate) fn bundled(_: &[u8]) -> Option<&'static CMap> {
+    None
 }
 
 #[cfg(test)]
