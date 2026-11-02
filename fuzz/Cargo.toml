@@ -2,7 +2,8 @@
 # build on nightly with libFuzzer. Locally, `just fuzz tokenize`,
 # `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
 # `just fuzz structure`, `just fuzz write`, `just fuzz content`,
-# `just fuzz semantics`, `just fuzz linearize` or `just fuzz check`, or:
+# `just fuzz semantics`, `just fuzz color`, `just fuzz linearize` or
+# `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
@@ -66,6 +67,15 @@
 # `random_bytes_keep_every_promise`,
 # `files_read_alike_through_a_reading_and_its_document`) run, the last as a
 # file, as the target does but under the default options;
+# `color` calls `pdf_color::fuzz::counts`, each of its first objects counted, the
+# count within what it could be, within every cap, the same under larger and
+# smaller caps where none was met and a failing resolver's reason kept, and read
+# as resources, the same by name as in order, and `pdf_color::fuzz::over`, what a
+# file's objects count and name through a reading and the document it makes,
+# which three stable unit tests (`mutated_seeds_keep_every_promise`,
+# `random_bytes_keep_every_promise`,
+# `files_read_alike_through_a_reading_and_its_document`) run, the last as a file,
+# as the target does but under the default options;
 # `linearize` calls `pdf_linearize::fuzz::graphs`, any bytes as a graph, refused
 # for what it has or planned, every promise of the plan held against plain walks
 # of it, and `tables`, the same bytes as a hint stream, which a stable unit test
@@ -96,6 +106,7 @@ libfuzzer-sys = "0.4"
 # With `image-ends`, so the content target can read with DCT and CCITTFax
 # data decoded to find where an inline image's ends, as it asks to.
 pdf-content-streams = { path = "../crates/pdf-content-streams", features = ["image-ends"] }
+pdf-color = { path = "../crates/pdf-color" }
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
 # Both Flate backends, so that the filters' target runs on each.
 pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
@@ -161,6 +172,13 @@ bench = false
 [[bin]]
 name = "semantics"
 path = "fuzz_targets/semantics.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "color"
+path = "fuzz_targets/color.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,12 @@
+# name	why pdf-color counts it otherwise than PDFium
+device-n-f0-short	A function is read by its dictionary alone, so a sampled function whose data is shorter than its /Size says loads here; PDFium decodes the stream, finds it short, and loads no space.
+device-n-f4-bad	A function is read by its dictionary alone, so a PostScript function that doesn't parse loads here; PDFium parses the stream, and loads no space.
+depth-array-chain-65	Past Limits::space_depth a branch doesn't load, so 65 arrays of one, each by reference, count as what doesn't load; PDFium goes as deep as its stack does.
+depth-array-chain-70	As depth-array-chain-65.
+white-point-y-rounds-up-from-half	An Object holds a real as an f64, so 1.00000005960464478, just past halfway between two 32-bit floats, reaches the f64 of that half, which rounds to even, 1; PDFium parses the bytes straight to a 32-bit float, the one above 1. Resolve gives no number's bytes.
+white-point-x-plus-past-31-bits	An Object doesn't keep an integer's sign, so +3000000000 is held as 3000000000 is, a number; PDFium holds an integer written with a sign in 31 bits, and past them it's 0.
+key-bad-escape-by-its-value	A key is the bytes the file's reader read: /X#G1 is itself here, by ISO's reading, not the X and byte 1 that PDFium makes of it, so /X#01 doesn't find it. A caller with the file's bytes reads a key from Named::key_at.
+value-wrong-generation	A reference is its number and its generation here, as the resolver takes them, so 5 1 R names nothing, and there's no entry; PDFium doesn't read the generation, so it names object 5.
+icc-wrong-generation	As value-wrong-generation, so the ICCBased space has no stream, and doesn't load.
+white-point-x-exponent	The page doesn't read: this file's reader refuses a word that's no number or keyword in a dictionary, so there are no resources; PDFium ends the array at it, and the white point is too short.
+white-point-y-exponent	As white-point-x-exponent.

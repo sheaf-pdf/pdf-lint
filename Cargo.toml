@@ -1,8 +1,9 @@
 [workspace]
 resolver = "3"
 # pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure,
-# pdf-content-streams, pdf-semantics, pdf-linearize and pdf-arlington inherit
-# nothing from here, so each can move to a repository of its own unchanged.
+# pdf-content-streams, pdf-semantics, pdf-color, pdf-linearize and pdf-arlington
+# inherit nothing from here, so each can move to a repository of its own
+# unchanged.
 members = [
     "crates/pdf-tokenizer",
     "crates/pdf-filters",
@@ -11,6 +12,7 @@ members = [
     "crates/pdf-structure",
     "crates/pdf-content-streams",
     "crates/pdf-semantics",
+    "crates/pdf-color",
     "crates/pdf-linearize",
     "crates/pdf-arlington",
     "crates/pdf-lint",

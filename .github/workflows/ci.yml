@@ -216,6 +216,20 @@ jobs:
       - name: Test
         run: just semantics-msrv
 
+  color-msrv:
+    name: Color spaces on their minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in crates/pdf-color/Cargo.toml,
+      # which `just color-msrv` reads.
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just color-msrv
+
   linearize-msrv:
     name: Linearization on its minimum Rust
     runs-on: ubuntu-latest

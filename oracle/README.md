@@ -1,10 +1,11 @@
 # PDFium, the oracle
 
 pdf-tokenizer's PDFium rules (`Rules::Pdfium`, `decode::pdfium`),
-pdf-objects' (`Parser::rules`), pdf-semantics' page tree (`pages::pages`)
-and pdf-content-streams, which reads content as PDFium does throughout,
-follow PDFium's reading, which no standard writes down and which changes as
-PDFium does; pdf-linearize lays files out for PDFium's availability API, among
+pdf-objects' (`Parser::rules`), pdf-semantics' page tree (`pages::pages`),
+pdf-color's count of a space's components (`components`) and
+pdf-content-streams, which reads content as PDFium does throughout, follow
+PDFium's reading, which no standard writes down and which changes as PDFium
+does; pdf-linearize lays files out for PDFium's availability API, among
 others. So each is held to one PDFium build, the pin, through cases:
 small hand-made inputs, each asked of PDFium, its answer recorded beside
 it. A plain `cargo test` holds each crate to the recorded answers, without
@@ -117,6 +118,13 @@ asked through a one-page PDF made around the case.
   the others up to 64, what `IsPageAvail` came to, the bytes that took and the page's
   width, or `null` where it doesn't load; and the bytes got of the file's. `stuck`
   is a stage that says not yet and asks for nothing.
+
+- `spaces`: a whole file (`.pdf`), whose first page draws inline images, there or
+  in a form, each 8 samples wide, one high, of 8 bits, unfiltered, in a color space
+  the resources name. PDFium sizes such an image by the components it counts, so its raw size
+  says what they were: the answer is a word for each image, in order, that size
+  over 8, or `none` for the 1 byte of an image with no color space (`raw:N`, a
+  size neither makes; `no-images`; `no-page`).
 
 Numbers are written with nine significant digits, which read back to the
 same `f32`, and compared as `f32`s. Text and data are written byte for

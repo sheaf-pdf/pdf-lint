@@ -135,6 +135,8 @@ class Pdfium:
             ("FPDFPage_CountObjects", I, [P]),
             ("FPDFPage_GetObject", P, [P, I]),
             ("FPDFPageObj_GetType", I, [P]),
+            ("FPDFFormObj_CountObjects", I, [P]),
+            ("FPDFFormObj_GetObject", P, [P, U]),
             ("FPDFPageObj_GetMatrix", I, [P, ctypes.POINTER(M)]),
             ("FPDFPageObj_CountMarks", I, [P]),
             ("FPDFPageObj_GetMark", P, [P, U]),
@@ -237,6 +239,32 @@ class Pdfium:
             ok = lib.FPDFPageObjMark_GetParamIntValue(lib.FPDFPageObj_GetMark(o, k), b"MCID", ctypes.byref(v))
             out += ["mcid", str(v.value) if ok else "-"]
         return " ".join(out)
+
+    def image_sizes(self, data):
+        """The raw size of each of the page's images, those in its forms
+        among them, in order; None where the page doesn't load."""
+        lib = self.lib
+        buf, doc = self._doc(data)
+        page = lib.FPDF_LoadPage(doc, 0) if doc else None
+        if not page:
+            if doc:
+                lib.FPDF_CloseDocument(doc)
+            return None
+        out = []
+
+        def walk(o):
+            kind = TYPES.get(lib.FPDFPageObj_GetType(o))
+            if kind == "image":
+                out.append(lib.FPDFImageObj_GetImageDataRaw(o, None, 0))
+            elif kind == "form":
+                for i in range(lib.FPDFFormObj_CountObjects(o)):
+                    walk(lib.FPDFFormObj_GetObject(o, i))
+
+        for i in range(lib.FPDFPage_CountObjects(page)):
+            walk(lib.FPDFPage_GetObject(page, i))
+        lib.FPDF_ClosePage(page)
+        lib.FPDF_CloseDocument(doc)
+        return out
 
     def size(self, data):
         """The page's width and height; None where it doesn't load."""
@@ -368,6 +396,15 @@ def size_answer(size):
     return "no-page" if size is None else "%s %s" % (num(size[0]), num(size[1]))
 
 
+def spaces_answer(sizes):
+    """Each image's components, as 8 samples of 8 bits each took: `none` for
+    the 1 byte of an image with no color space."""
+    if sizes is None:
+        return "no-page"
+    words = ["none" if n == 1 else str(n // 8) if n % 8 == 0 else "raw:%d" % n for n in sizes]
+    return " ".join(words) or "no-images"
+
+
 def pages_answer(pages):
     if pages is None:
         return "no-document"
@@ -414,6 +451,8 @@ def answer(pdfium, kind, files):
         return pages_answer(pdfium.pages(files["pdf"]))
     if kind == "avail":
         return " ".join(pdfium.avail(files["pdf"], files.get("password")))
+    if kind == "spaces":
+        return spaces_answer(pdfium.image_sizes(files["pdf"]))
     raise SystemExit("unknown kind %r" % kind)
 
 

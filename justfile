@@ -2,8 +2,8 @@
 # what CI checks.
 
 # The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects,
-# pdf-structure, pdf-content-streams, pdf-semantics, pdf-linearize and
-# pdf-arlington support, from their Cargo.toml. Only the libraries promise one:
+# pdf-structure, pdf-content-streams, pdf-semantics, pdf-color, pdf-linearize
+# and pdf-arlington support, from their Cargo.toml. Only the libraries promise one:
 # the checker ships as a binary built with stable Rust.
 tokenizer_msrv := `grep -m1 '^rust-version' crates/pdf-tokenizer/Cargo.toml | cut -d'"' -f2`
 filters_msrv := `grep -m1 '^rust-version' crates/pdf-filters/Cargo.toml | cut -d'"' -f2`
@@ -12,6 +12,7 @@ objects_msrv := `grep -m1 '^rust-version' crates/pdf-objects/Cargo.toml | cut -d
 structure_msrv := `grep -m1 '^rust-version' crates/pdf-structure/Cargo.toml | cut -d'"' -f2`
 content_msrv := `grep -m1 '^rust-version' crates/pdf-content-streams/Cargo.toml | cut -d'"' -f2`
 semantics_msrv := `grep -m1 '^rust-version' crates/pdf-semantics/Cargo.toml | cut -d'"' -f2`
+color_msrv := `grep -m1 '^rust-version' crates/pdf-color/Cargo.toml | cut -d'"' -f2`
 linearize_msrv := `grep -m1 '^rust-version' crates/pdf-linearize/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
 # pdf-content-streams' `image-ends` feature needs a newer one than the crate:
@@ -29,14 +30,14 @@ fuzz_toolchain := env("FUZZ_TOOLCHAIN", "nightly")
 pdfium_build := "8125"
 
 # The crates' PDFium cases, each a crate's tests/pdfium.
-pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-content-streams/tests/pdfium crates/pdf-semantics/tests/pdfium crates/pdf-linearize/tests/pdfium"
+pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfium crates/pdf-content-streams/tests/pdfium crates/pdf-semantics/tests/pdfium crates/pdf-color/tests/pdfium crates/pdf-linearize/tests/pdfium"
 
 # List the recipes.
 default:
     @just --list --unsorted
 
 # Everything CI runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv linearize-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv linearize-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -268,6 +269,10 @@ content-msrv:
 semantics-msrv:
     cargo +{{ semantics_msrv }} test --locked -p pdf-semantics
 
+# Test pdf-color on its oldest supported Rust, which must be installed.
+color-msrv:
+    cargo +{{ color_msrv }} test --locked -p pdf-color
+
 # Test pdf-linearize on its oldest supported Rust, with its adapter and without,
 # then with `lopdf` on that feature's, each of which must be installed.
 linearize-msrv:
@@ -289,14 +294,15 @@ arlington-msrv:
 # faults, operator table, the balance, marked content and names over them,
 # its writer, content written again and the calls, and its splices and
 # lists written again; `semantics`, pdf-semantics' name and number trees,
-# page tree, dates and XMP claims; `linearize`, pdf-linearize's plan of any
-# graph, what's assembled from it, hint tables from any bytes, any facts of a file,
+# page tree, dates and XMP claims; `color`, pdf-color's count of a space's
+# components and what a resources dictionary names; `linearize`, pdf-linearize's
+# plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; or `check`, the reader
 # and the checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
-# makes, `write`'s with the third byte its input has; `content`, `semantics` and
-# `linearize` from those their own crates' fuzz modules make. The nightly is
-# `fuzz_toolchain`.
+# makes, `write`'s with the third byte its input has; `content`, `semantics`,
+# `color` and `linearize` from those their own crates' fuzz modules make. The
+# nightly is `fuzz_toolchain`.
 # cargo-fuzz otherwise builds for the target it was itself built for,
 # which may be musl, where the sanitizer can't run.
 fuzz target="tokenize" seconds="60":
@@ -336,6 +342,11 @@ fuzz target="tokenize" seconds="60":
         mkdir -p fuzz/corpus/semantics
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" semantics fuzz/corpus/semantics fuzz/seeds/semantics -- -dict=fuzz/semantics.dict -max_total_time={{ seconds }} -timeout=10
         ;;
+    color)
+        PDF_COLOR_FUZZ_SEEDS="$PWD/fuzz/seeds/color" cargo test --locked -q -p pdf-color --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/color
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" color fuzz/corpus/color fuzz/seeds/color -- -dict=fuzz/color.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
     linearize)
         PDF_LINEARIZE_FUZZ_SEEDS="$PWD/fuzz/seeds/linearize" cargo test --locked -q -p pdf-linearize --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/linearize
@@ -347,7 +358,7 @@ fuzz target="tokenize" seconds="60":
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, linearize or check" >&2
+        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, linearize or check" >&2
         exit 2
         ;;
     esac
