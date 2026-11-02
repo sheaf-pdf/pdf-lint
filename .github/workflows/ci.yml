@@ -230,6 +230,22 @@ jobs:
       - name: Test
         run: just color-msrv
 
+  fonts-msrv:
+    name: Fonts on their minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in crates/pdf-fonts/Cargo.toml, which
+      # `just fonts-msrv` reads, and with `fonts_cmaps_msrv` in the justfile, the
+      # `predefined-cmaps` feature's, which `just fonts-cmaps-msrv` tests on.
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.87
+      - uses: extractions/setup-just@v4
+      - name: Test
+        run: just fonts-msrv fonts-cmaps-msrv
+
   linearize-msrv:
     name: Linearization on its minimum Rust
     runs-on: ubuntu-latest

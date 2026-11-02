@@ -2,8 +2,8 @@
 # build on nightly with libFuzzer. Locally, `just fuzz tokenize`,
 # `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
 # `just fuzz structure`, `just fuzz write`, `just fuzz content`,
-# `just fuzz semantics`, `just fuzz color`, `just fuzz linearize` or
-# `just fuzz check`, or:
+# `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`,
+# `just fuzz linearize` or `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
@@ -80,6 +80,11 @@
 # `random_bytes_keep_every_promise`,
 # `files_read_alike_through_a_reading_and_its_document`) run, the last as a file,
 # as the target does but under the default options;
+# `fonts` calls `pdf_fonts::fuzz::type1`, any bytes scanned as a Type 1 program,
+# holding no more than it was given, and under other caps the same or refused, and `pdf_fonts::fuzz::names`, an input's words read as glyphs' and
+# fonts' names, and its bytes as codes in each encoding, which two stable unit
+# tests (`mutated_seeds_keep_every_promise`, `random_bytes_keep_every_promise`)
+# run;
 # `linearize` calls `pdf_linearize::fuzz::graphs`, any bytes as a graph, refused
 # for what it has or planned, every promise of the plan held against plain walks
 # of it, and `tables`, the same bytes as a hint stream, which a stable unit test
@@ -114,6 +119,8 @@ pdf-color = { path = "../crates/pdf-color" }
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
 # Both Flate backends, so that the filters' target runs on each.
 pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
+# With `predefined-cmaps`, so a name that's a predefined CMap's reaches its bundle.
+pdf-fonts = { path = "../crates/pdf-fonts", features = ["predefined-cmaps"] }
 pdf-linearize = { path = "../crates/pdf-linearize" }
 # The library alone, without the command line's crates.
 pdf-lint = { path = "../crates/pdf-lint", default-features = false }
@@ -183,6 +190,13 @@ bench = false
 [[bin]]
 name = "color"
 path = "fuzz_targets/color.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fonts"
+path = "fuzz_targets/fonts.rs"
 test = false
 doc = false
 bench = false

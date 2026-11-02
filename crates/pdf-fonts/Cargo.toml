@@ -1,0 +1,34 @@
+[package]
+name = "pdf-fonts"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "PDF fonts read: simple fonts' encodings and glyph names, the standard 14's names and metrics, Type 1 tokens, predefined CMaps"
+keywords = ["pdf", "font", "encoding", "cmap", "iso-32000"]
+categories = ["parser-implementations", "text-processing"]
+# Only what users need, so local tooling files can't end up in the package.
+# `assets` holds the fonts' data, each file with its own terms in it.
+include = ["/src", "/assets", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+pdf-objects = { path = "../pdf-objects", version = "0.1" }
+# With `predefined-cmaps`: Adobe's predefined CMaps, from its bundle alone,
+# never a file's bytes. It needs Rust 1.87.
+hayro-cmap = { version = "0.1", optional = true }
+
+# Adobe's predefined CMaps, off by default for the Rust they need: without
+# them, a font's predefined CMap reads as one the build hasn't.
+[features]
+predefined-cmaps = ["dep:hayro-cmap"]
+
+# docs.rs documents what the feature adds, beside the default.
+[package.metadata.docs.rs]
+features = ["predefined-cmaps"]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

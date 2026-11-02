@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [tokenize, filters, crypt, objects, structure, write, content, semantics, color, linearize, check]
+        target: [tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, linearize, check]
     steps:
       - uses: actions/checkout@v7
         with:
