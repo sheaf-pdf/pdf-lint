@@ -75,13 +75,7 @@ pub(crate) fn walked<'o, R: Resolve<'o>>(
     value: &'o Object,
     limits: &Limits,
 ) -> Result<(Option<u32>, bool), Unreadable> {
-    let mut walk = Walk {
-        objects,
-        limits,
-        visits: 0,
-        path: Vec::new(),
-        capped: false,
-    };
+    let mut walk = Walk::within(objects, limits, 0);
     let count = match walk.hop(value)? {
         Some(at) => Some(walk.top(at, 0)?.map_or(UNLOADED, |space| space.components)),
         None if walk.capped => Some(UNLOADED),
@@ -210,8 +204,8 @@ fn integer(object: &Object) -> i32 {
 ///
 /// An `Object`'s real is an `f64`, parsed by the reader's rules, where PDFium
 /// parses the bytes to a float itself: a real of many digits can round
-/// otherwise (`0.99999999999`).
-fn float(object: &Object) -> f32 {
+/// otherwise (`1.00000005960464478`).
+pub(crate) fn float(object: &Object) -> f32 {
     match object.value() {
         Value::Integer(n) => match held(*n) {
             Number32::Unsigned(n) => n as f32,
@@ -222,7 +216,28 @@ fn float(object: &Object) -> f32 {
     }
 }
 
-impl<'o, R: Resolve<'o>> Walk<'_, R> {
+impl<'l, 'o, R: Resolve<'o>> Walk<'l, R> {
+    /// A walk with `visits` already spent, by one that goes on from there.
+    pub(crate) fn within(objects: R, limits: &'l Limits, visits: usize) -> Walk<'l, R> {
+        Walk {
+            objects,
+            limits,
+            visits,
+            path: Vec::new(),
+            capped: false,
+        }
+    }
+
+    /// The visits spent so far, those it was given among them.
+    pub(crate) fn spent(&self) -> usize {
+        self.visits
+    }
+
+    /// Whether a cap ended a branch.
+    pub(crate) fn capped(&self) -> bool {
+        self.capped
+    }
+
     /// Object `id`, a visit spent on it; past the cap, none.
     fn lookup(&mut self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
         if !self.spend() {

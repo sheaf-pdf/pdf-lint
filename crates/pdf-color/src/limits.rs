@@ -20,6 +20,12 @@ pub struct Limits {
     /// exponent; here, past this, it doesn't load. It's per space, not per
     /// dictionary of them, so a large dictionary of honest spaces is never
     /// cut.
+    ///
+    /// A typed [`Space`](crate::Space) also spends one on each name it keeps
+    /// and each entry of `/Colorants` it reads, so what it holds is bounded
+    /// too; past it the rest of them aren't kept. What only a check reads has
+    /// as many again of its own, so a sink that wants faults reads the same
+    /// space as `()`.
     pub space_visits: usize,
 }
 

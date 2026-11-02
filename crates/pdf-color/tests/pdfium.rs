@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pdf_color::{Limits, Object, Resolve, Spaces, components};
+use pdf_color::{Limits, Object, Resolve, Space, Spaces, components};
 use pdf_objects::parse::Parser;
 use pdf_structure::bytes::{Options, Reading};
 
@@ -153,4 +153,54 @@ fn every_case_counts_alike_over_a_document() {
         let document = reading.to_document().expect("a case makes a document");
         assert_eq!(answer(&document, &bytes), ours(&bytes), "{name}");
     }
+}
+
+/// Every name a case's page or form has in its resources, by its value: the values
+/// a table of what PDFium reads has written out.
+fn named_values<'o, R: Resolve<'o> + Copy>(objects: R) -> Vec<&'o Object> {
+    let of = |resources| {
+        let spaces = Spaces::read(objects, resources).ok().flatten();
+        spaces.into_iter().flat_map(|spaces| spaces.iter())
+    };
+    let page: Option<&'o Object> = objects.resolve((3, 0));
+    let form: Option<&'o Object> = objects.resolve((5, 0));
+    let dict = |object: &'o Object| object.as_dict().or(object.as_stream().map(|s| &s.dict));
+    let on_page = page.and_then(dict).and_then(|d| d.get(b"Resources"));
+    let on_form = form.and_then(dict).and_then(|d| d.get(b"Resources"));
+    let mut values: Vec<&'o Object> = of(on_page).map(|named| named.value).collect();
+    values.extend(of(on_form).map(|named| named.value));
+    values
+}
+
+/// The promise between the two readings, on every value the cases write: a space
+/// read with no fault told counts as [`components`] counts it, but for a Pattern
+/// space over more than 16; and what a sink wants never changes what's read.
+#[test]
+fn a_space_with_no_fault_told_counts_as_it_counts() {
+    let (mut well_formed, mut told) = (0, 0);
+    for case in rows(&set().join("cases.tsv")) {
+        let name = &case[0];
+        let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+        let reading = Reading::open(&bytes, &Options::DEFAULT).expect("a case opens");
+        for value in named_values(&reading) {
+            let limits = &Limits::DEFAULT;
+            let mut faults = Vec::new();
+            let space = Space::read(&reading, value, limits, &mut faults).expect("a case reads");
+            let plain = Space::read(&reading, value, limits, &mut ()).expect("a case reads");
+            assert_eq!(space, plain, "{name}");
+            if !faults.is_empty() {
+                told += 1;
+                continue;
+            }
+            well_formed += 1;
+            let space = space.unwrap_or_else(|| panic!("{name}: none, with no fault told"));
+            let over = matches!(space.base(), Some(under) if space.family().name() == "Pattern"
+                && under.components().is_some_and(|n| n > 16));
+            if !over {
+                let count = components(&reading, value, limits).expect("a case reads");
+                assert_eq!(space.components(), count, "{name}: {value:?}");
+            }
+        }
+    }
+    assert!(well_formed > 50 && told > 200, "{well_formed}, {told}");
 }

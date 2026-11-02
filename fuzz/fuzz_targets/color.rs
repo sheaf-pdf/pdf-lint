@@ -1,9 +1,11 @@
 //! A file's color spaces, on any bytes: read as a series of objects, the first
 //! of them each counted, its count within what it could be, within every cap,
 //! the same under larger and smaller caps where none was met and a failing
-//! resolver's reason kept, and each read as resources, the same by name as in
-//! order; and read as a file, what every object counts and names over a reading
-//! and the document it makes the same.
+//! resolver's reason kept; each read as a typed space, the same whatever the
+//! sink, a read that fails included, and counting as it was counted where no
+//! fault was told; and each read as resources, the same by name as in order; and
+//! read as a file, what every object counts, says and names over a reading and
+//! the document it makes the same.
 
 #![no_main]
 

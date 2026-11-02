@@ -1,6 +1,6 @@
 //! What the fuzz target checks, which unit tests check too: the promises the
-//! count and a resources dictionary's names make, on any input. It's compiled
-//! only for tests and under cargo-fuzz's `--cfg fuzzing`.
+//! count, a resources dictionary's names and a typed space make, on any input.
+//! It's compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -9,7 +9,7 @@ use pdf_objects::parse::Parser;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Why};
 
 use crate::count::walked;
-use crate::{Limits, Spaces, components};
+use crate::{Family, Fault, Limits, Place, Sink, Space, Spaces, components};
 
 /// How many values of an input are read as objects.
 const OBJECTS: usize = 4096;
@@ -172,6 +172,129 @@ fn a_value<'o, R: Resolve<'o> + Copy>(objects: R, value: &'o Object, most: u32) 
     }
 }
 
+/// A resolver over `objects` that fails, for `why`, each number `every` divides.
+#[derive(Clone, Copy)]
+struct FailingSome<R> {
+    objects: R,
+    every: u32,
+    why: Why,
+}
+
+impl<'o, R: Resolve<'o>> Resolve<'o> for FailingSome<R> {
+    fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+        self.try_resolve(id).ok().flatten()
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        if id.0 % self.every == 0 {
+            return Err(Unreadable::new(id, self.why, "made to fail"));
+        }
+        self.objects.try_resolve(id)
+    }
+}
+
+/// A sink that wants nothing, and that's told nothing.
+struct Unwanted;
+
+impl Sink for Unwanted {
+    fn fault(&mut self, _: Place, fault: Fault) {
+        panic!("told {fault:?}, wanting none");
+    }
+
+    fn wants(&self) -> bool {
+        false
+    }
+}
+
+/// `value` as a typed space, over `objects`, and held to its promises: the same
+/// whatever the sink, what `()` looks up within its cap and a sink's within twice
+/// that; a space or none with a fault told; and, the one between the two readings,
+/// a space with no fault told counts by [`Space::components`] as [`components`]
+/// does, where no cap ended a branch of that, but for a Pattern space over more
+/// than 16. And failing reads, of some objects or all, alike under every sink.
+fn a_space<'o, R: Resolve<'o> + Copy>(objects: R, value: &'o Object) {
+    let defaults = Limits::DEFAULT;
+    let asked = Cell::new(0);
+    let counting = Counting {
+        objects,
+        asked: &asked,
+    };
+    let plain = Space::read(counting, value, &defaults, &mut ()).expect("nothing fails");
+    assert!(asked.get() <= defaults.space_visits, "{value:?}");
+    asked.set(0);
+    let mut faults = Vec::new();
+    let told = Space::read(counting, value, &defaults, &mut faults).expect("nothing fails");
+    assert!(asked.get() <= 2 * defaults.space_visits, "{value:?}");
+    assert_eq!(told, plain, "{value:?}");
+    let unwanted = Space::read(objects, value, &defaults, &mut Unwanted);
+    assert_eq!(unwanted.as_ref(), Ok(&plain), "{value:?}");
+    let by_dyn: &mut dyn Sink = &mut ();
+    assert_eq!(
+        Space::read(objects, value, &defaults, by_dyn),
+        Ok(plain.clone())
+    );
+
+    if faults.is_empty() {
+        let space = plain.as_ref().expect("no space without a fault");
+        let (count, capped) = walked(objects, value, &defaults).expect("nothing fails");
+        let over = |under: &Space<'o>| under.components().is_some_and(|n| n > 16);
+        if !capped && !matches!(space, Space::Pattern(Some(under)) if over(under)) {
+            assert!(space.components().is_some(), "{value:?}");
+            assert_eq!(space.components(), count, "the promise: {value:?}");
+        }
+    }
+    if let Some(space) = &plain {
+        let family = space.family();
+        assert!(family.is_device() ^ family.is_cie() ^ family.is_special());
+        assert_eq!(space.colorants().count(), space.colorants().len());
+        match space {
+            Space::Separation(_) => assert!(space.colorants().len() <= 1),
+            Space::DeviceN(_) => {}
+            _ => assert_eq!(space.colorants().len(), 0),
+        }
+    }
+
+    for (depth, visits) in [(0, 0), (1, 1), (2, 8), (3, 64)] {
+        let small = limits(depth, visits);
+        asked.set(0);
+        let under = Space::read(counting, value, &small, &mut ()).expect("nothing fails");
+        assert!(
+            asked.get() <= visits,
+            "{} of {visits} on {value:?}",
+            asked.get()
+        );
+        let mut told = Vec::new();
+        asked.set(0);
+        let by_sink = Space::read(counting, value, &small, &mut told).expect("nothing fails");
+        assert!(
+            asked.get() <= 2 * visits,
+            "{} of 2 x {visits} on {value:?}",
+            asked.get()
+        );
+        assert_eq!(by_sink, under, "{value:?} under {small:?}");
+    }
+
+    for why in [Why::Damaged, Why::Limit, Why::Locked, Why::Source] {
+        for every in [1, 2, 3] {
+            let failing = FailingSome {
+                objects,
+                every,
+                why,
+            };
+            let plain = Space::read(failing, value, &defaults, &mut ());
+            let mut faults = Vec::new();
+            let told = Space::read(failing, value, &defaults, &mut faults);
+            assert_eq!(told, plain, "{value:?} by {why:?}");
+            let unwanted = Space::read(failing, value, &defaults, &mut Unwanted);
+            assert_eq!(unwanted, plain, "{value:?} by {why:?}");
+            if let Err(error) = plain {
+                assert!(why != Why::Damaged, "{error:?}");
+                assert_eq!(error.why, why);
+            }
+        }
+    }
+}
+
 /// What a resources dictionary names, each with what it counts as, or why a
 /// lookup failed; or why looking for the dictionary did.
 pub type Names<'o> = Result<Option<Vec<(&'o [u8], Result<Option<u32>, Why>)>>, Why>;
@@ -206,7 +329,8 @@ fn a_resources<'o, R: Resolve<'o> + Copy>(objects: R, resources: Option<&'o Obje
 }
 
 /// The fuzz target's body for what's held in memory: `data` as objects
-/// ([`values`]), the first of them each counted, and each read as resources.
+/// ([`values`]), the first of them each counted, each read as a typed space, and
+/// each read as resources.
 pub fn counts(data: &[u8]) {
     let objects = values(data);
     let resolve = |id: ObjectId| objects.get(&id);
@@ -214,6 +338,7 @@ pub fn counts(data: &[u8]) {
     let most = u32::try_from(longest).unwrap_or(u32::MAX);
     for value in objects.values().take(VALUES) {
         a_value(resolve, value, most);
+        a_space(resolve, value);
         a_resources(resolve, Some(value)).expect("nothing fails");
     }
     assert_eq!(a_resources(resolve, None), Ok(None));
@@ -235,6 +360,16 @@ fn longest_array(value: &Object) -> usize {
     }
 }
 
+/// A typed space's family and count, and what's told of it. A fault's place isn't
+/// here: it's what a reader has and a document needn't.
+#[derive(Debug, PartialEq)]
+pub struct Typed {
+    /// Its family and count, if it's a space.
+    pub space: Option<(Family, Option<u32>)>,
+    /// What's told of it.
+    pub faults: Vec<Fault>,
+}
+
 /// What a file's objects count as: for each number, its object, if it reads, as
 /// a value and as resources, and what it holds under `/Resources`.
 #[derive(Debug, PartialEq)]
@@ -243,14 +378,27 @@ pub struct Counted<'o> {
     pub number: u32,
     /// What it counts as a value, or why a lookup of it failed.
     pub count: Result<Option<u32>, Why>,
+    /// What it says as a typed space, or why a lookup of it failed.
+    pub space: Result<Typed, Why>,
     /// What it names, read as resources.
     pub spaces: Names<'o>,
     /// What it names under its `/Resources`.
     pub named: Names<'o>,
 }
 
+/// `object` as a typed space, as [`Counted::space`] has it.
+fn typed<'o, R: Resolve<'o> + Copy>(objects: R, object: &'o Object) -> Result<Typed, Why> {
+    let mut faults = Vec::new();
+    let space = Space::read(objects, object, &Limits::DEFAULT, &mut faults);
+    let space = space.map_err(|unreadable| unreadable.why)?;
+    Ok(Typed {
+        space: space.map(|space| (space.family(), space.components())),
+        faults: faults.into_iter().map(|(_, fault)| fault).collect(),
+    })
+}
+
 /// Every object of a file numbered up to its `trailer`'s `/Size`, to [`NUMBERS`],
-/// counted, and its resources read: what each gave, for a caller to set beside
+/// counted and typed, and its resources read: what each gave, for a caller to set beside
 /// the same file through another resolver.
 pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) -> Vec<Counted<'o>> {
     let size = trailer
@@ -266,6 +414,7 @@ pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) -> Vec<Cou
                 counted.push(Counted {
                     number,
                     count: components(objects, object, &Limits::DEFAULT).map_err(|e| e.why),
+                    space: typed(objects, object),
                     spaces: a_resources(objects, Some(object)),
                     named: a_resources(objects, holds),
                 });
@@ -274,6 +423,7 @@ pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) -> Vec<Cou
             Err(unreadable) => counted.push(Counted {
                 number,
                 count: Err(unreadable.why),
+                space: Err(unreadable.why),
                 spaces: Ok(None),
                 named: Ok(None),
             }),
@@ -322,6 +472,33 @@ pub fn fixtures() -> Vec<Vec<u8>> {
          << /FunctionType 3 /Domain [0 1] /Functions [13 0 R 13 0 R] /Bounds [0] /Encode [0 1 0 1] >> \
          << /FunctionType 3 /Domain [0 1] /Functions [14 0 R 14 0 R] /Bounds [0] /Encode [0 1 0 1] >> \
          << /FunctionType 2 /Domain [0 1] /N 1 >>",
+        // What a typed space reads and checks: each parameter by reference, an
+        // NChannel space's attributes, and each of them at fault.
+        "<< /Root 2 0 R /Size 24 >> \
+         << /Pages 3 0 R >> \
+         << /Kids [4 0 R] /Count 1 >> \
+         << /Type /Page /Parent 3 0 R /Resources << /ColorSpace 5 0 R >> >> \
+         << /A 6 0 R /B [/DeviceN 7 0 R 8 0 R 9 0 R 10 0 R] /C [/CalRGB 11 0 R] /D [/Lab 12 0 R] \
+            /E [/Indexed /CalGray 256 (short)] /F [/ICCBased 13 0 R] /G [/DeviceN [/All /A /A] 14 0 R 9 0 R << /Subtype /NChannel >>] \
+            /H [/Separation /Cyan /Pattern 15 0 R] /I [/DeviceN [/None] /DeviceCMYK 9 0 R << /Subtype /NChannel /Colorants << /X /DeviceGray >> >>] \
+            /J [/Pattern /Pattern] /K /RGB >> \
+         [/Separation 16 0 R /DeviceCMYK 15 0 R] \
+         [16 0 R /Black /None] \
+         /DeviceGray \
+         << /Length 0 /FunctionType 4 /Domain [0 1 0 1 0 1] /Range [0 1] >> \
+         << /Subtype /NChannel /Colorants 17 0 R /Process 18 0 R /MixingHints << /Solidities << /Default 1 >> >> >> \
+         << /WhitePoint [19 0 R 1 1] /BlackPoint [0 0 -1] /Gamma [1 1] /Matrix [1 0 0] >> \
+         << /WhitePoint [1 1 1] /Range [1 0 0 1] >> \
+         << /Length 0 /N 3 /Alternate [/ICCBased 13 0 R] /Range [0 1] >> \
+         [/DeviceGray 1] \
+         << /FunctionType 2 /Domain [0 1] /N 1 /C0 [0 0 0 0] /C1 [1 1 1 1] >> \
+         /Spot \
+         << /Spot [/Separation /Spot /DeviceGray 20 0 R] /Other [/Separation /Wrong /DeviceGray 20 0 R] >> \
+         << /ColorSpace /DeviceCMYK /Components [/Cyan /Magenta /Yellow 21 0 R] >> \
+         22 0 R \
+         << /FunctionType 2 /Domain [0 1] /N 1 >> \
+         /Black \
+         0.9",
         // What PDFium's accessors read, a shape each.
         "<< /Length 0 /N 4.7 >> [/ICCBased 1 0 R] << /Length 0 /N true >> [/ICCBased 3 0 R] \
          [/CalGray << /WhitePoint [1 0.99999999 1] >>] [/CalGrayX << /WhitePoint [1 1 1] >>] \

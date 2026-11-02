@@ -295,7 +295,7 @@ arlington-msrv:
 # its writer, content written again and the calls, and its splices and
 # lists written again; `semantics`, pdf-semantics' name and number trees,
 # page tree, dates and XMP claims; `color`, pdf-color's count of a space's
-# components and what a resources dictionary names; `linearize`, pdf-linearize's
+# components, its typed spaces and what a resources dictionary names; `linearize`, pdf-linearize's
 # plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; or `check`, the reader
 # and the checker.
