@@ -1,7 +1,8 @@
 //! What the fuzz target checks, which unit tests check too: the promises
 //! the tokens, the operations, the faults and the operator table and its
 //! states make, the balance, marked content and names over them, the
-//! writer's, and the splice's and the lists written again, on any input.
+//! writer's, the splice's and the lists written again, and an image's color
+//! space counted alike in its dictionary and in the resources, on any input.
 //! It's compiled only for tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use std::borrow::Cow;
@@ -200,12 +201,17 @@ fn spaced(data: &[u8], limits: &Limits) {
     let Some(space) = object(array, limits) else {
         return;
     };
-    let want = pdf_color::components(nothing, &space, &limits.color)
-        .expect("nothing to fail")
-        .expect("a value that's no reference counts");
+    let read = pdf_color::counted(nothing, &space, &limits.color).expect("nothing to fail");
+    let want = read.count.expect("a value that's no reference counts");
     let resources = Object::from(dict! { "ColorSpace" => dict! { "X" => space } });
     let res = ResCx::read(nothing, Some(&resources), limits).expect("nothing to fail");
-    assert_eq!(res, ResCx::new([(b"X".to_vec(), want)]), "counted alike");
+    let whole = ResCx::new([(b"X".to_vec(), want)]);
+    assert_eq!(res.spaces, whole.spaces, "counted alike");
+    assert_eq!(
+        res.capped().count(),
+        usize::from(read.capped),
+        "capped alike"
+    );
     let row = want as usize;
     let by_name = drawn(b"/X", row, &res, limits);
     assert_eq!(by_name, (true, Some(row)), "sized by its name");

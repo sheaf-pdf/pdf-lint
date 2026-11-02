@@ -29,7 +29,9 @@ use crate::scan::{
 /// counts them from a resources dictionary, as PDFium counts them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResCx {
-    spaces: HashMap<Vec<u8>, u32>,
+    pub(crate) spaces: HashMap<Vec<u8>, u32>,
+    /// The names a cap of `Limits::color` was met for, in the order read.
+    capped: Vec<Vec<u8>>,
 }
 
 impl ResCx {
@@ -47,12 +49,22 @@ impl ResCx {
     /// [`Why::Damaged`](pdf_objects::Why::Damaged) isn't there, and any other
     /// failure to read one is the `Err`, whole. Each name is a key as the
     /// reader of the file read it; [`ResCx::new`] says where that's not
-    /// PDFium's.
+    /// PDFium's. A page's comes from pdf-semantics as its `Attribute::written`,
+    /// not its `value`, which has been followed, past where PDFium stops.
     ///
-    /// A form with no `/ColorSpace` dictionary of its own draws in its
-    /// page's, as PDFium reads it: [`Spaces::read`](pdf_color::Spaces::read)
-    /// asks that. Nothing is kept between calls, so a caller reading many
-    /// pages of the same resources can hold what this gives.
+    /// A form's choice of resources, its own, or what holds it, or its page's,
+    /// is PDFium's two rules, which [`Spaces::read`](pdf_color::Spaces::read)
+    /// says. Nothing is kept between calls, so a caller reading many pages of
+    /// the same resources can hold what this gives.
+    ///
+    /// Past a cap of `limits.color` a branch of a space doesn't load, with no
+    /// error, so it counts as that makes it, mostly 3, and an unfiltered
+    /// image drawn in it ends by that: [`ResCx::capped`] names them, for a
+    /// caller that acts on where an image ends and would refuse what it can't
+    /// be sure of. The cost has no cap of its own: it's the entries, times
+    /// [`space_visits`](pdf_color::Limits::space_visits), times what each
+    /// visit scans, and a caller reading untrusted files bounds it by its
+    /// own means for now.
     ///
     /// ```
     /// use pdf_content_streams::pdf_objects::{Object, ObjectId, dict};
@@ -78,13 +90,39 @@ impl ResCx {
         let Some(named) = Spaces::read(objects, resources)? else {
             return Ok(ResCx::none());
         };
-        let mut spaces = HashMap::new();
+        let (mut spaces, mut capped) = (HashMap::new(), Vec::new());
         for space in named.iter() {
-            if let Some(count) = pdf_color::components(objects, space.value, &limits.color)? {
+            let read = pdf_color::counted(objects, space.value, &limits.color)?;
+            if read.capped {
+                capped.push(space.key.to_vec());
+            }
+            if let Some(count) = read.count {
                 spaces.insert(space.key.to_vec(), count);
             }
         }
-        Ok(ResCx { spaces })
+        Ok(ResCx { spaces, capped })
+    }
+
+    /// The names [`ResCx::read`] met a cap of `Limits::color` for, whose
+    /// counts are what a branch not loading makes them, and may not be what
+    /// PDFium counts: empty but for a space nested or spread far past anything
+    /// written honestly, and always of [`ResCx::new`] and [`ResCx::none`].
+    ///
+    /// ```
+    /// use pdf_content_streams::pdf_objects::{Object, ObjectId, dict};
+    /// use pdf_content_streams::{Limits, ResCx};
+    ///
+    /// let nested = Object::from(vec![Object::from(vec![Object::from("DeviceGray")])]);
+    /// let resources = Object::from(dict! { "ColorSpace" => dict! { "CS0" => nested } });
+    /// let nothing = |_: ObjectId| None;
+    /// let mut limits = Limits::DEFAULT;
+    /// assert_eq!(ResCx::read(nothing, Some(&resources), &limits).unwrap().capped().count(), 0);
+    /// limits.color.space_depth = 0;
+    /// let read = ResCx::read(nothing, Some(&resources), &limits).unwrap();
+    /// assert_eq!(read.capped().collect::<Vec<_>>(), [b"CS0"]);
+    /// ```
+    pub fn capped(&self) -> impl Iterator<Item = &[u8]> {
+        self.capped.iter().map(Vec::as_slice)
     }
 
     /// Color spaces by name, each with its components, which
@@ -101,6 +139,7 @@ impl ResCx {
     pub fn new(spaces: impl IntoIterator<Item = (Vec<u8>, u32)>) -> ResCx {
         ResCx {
             spaces: spaces.into_iter().collect(),
+            capped: Vec::new(),
         }
     }
 }

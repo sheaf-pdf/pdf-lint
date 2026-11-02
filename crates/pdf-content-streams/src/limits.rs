@@ -2,9 +2,10 @@
 //! inline images end: one value for all of them.
 
 /// The caps on reading content: past one, it can't be read, and reading
-/// stops with an [`Error`](crate::Error) saying which and where; and how
-/// an inline image's DCT and CCITTFax data's end is found
-/// ([`Limits::coded_ends`]). A caller sets them on a copy of
+/// stops with an [`Error`](crate::Error) saying which and where, but for
+/// [`Limits::values`] and [`Limits::color`], whose values read otherwise,
+/// and no error says so; and how an inline image's DCT and CCITTFax data's
+/// end is found ([`Limits::coded_ends`]). A caller sets them on a copy of
 /// [`Limits::DEFAULT`] (`limits.operands = 64`, say), as more may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -74,7 +75,10 @@ pub struct Limits {
     pub coded_ends: CodedEnds,
     /// The caps a color space is counted under, in an inline image's array
     /// and by [`ResCx::read`](crate::ResCx::read): past one, a branch of it
-    /// doesn't load, as [`pdf_color::Limits`] says, and that's no error.
+    /// doesn't load, as [`pdf_color::Limits`] says, and that's no error, so
+    /// the image is sized by that count and may end where PDFium's doesn't.
+    /// [`ResCx::capped`](crate::ResCx::capped) names the spaces it was met
+    /// for; of an array in an image, [`pdf_color::counted`] says.
     pub color: pdf_color::Limits,
 }
 

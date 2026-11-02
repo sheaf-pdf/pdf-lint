@@ -789,13 +789,13 @@ fn assert_image(dict: &str, data: &[u8], res: &ResCx) {
     assert_tiles(&s, res, &Limits::DEFAULT);
 }
 
-/// `text` as one value, by PDFium's rules; `extra` read as objects 5 on, a
-/// dictionary with `/Length` a stream.
+/// `text` as one value, by PDFium's rules.
 fn parsed(text: &str) -> Object {
     let mut parser = Parser::at(text.as_bytes(), 0).rules(Rules::Pdfium);
     (parser.value(&mut ())).unwrap_or_else(|e| panic!("{text}: {e}"))
 }
 
+/// `extra` read as objects 5 on, a dictionary with `/Length` a stream.
 fn objects_from_5(extra: &[&str]) -> BTreeMap<ObjectId, Object> {
     (extra.iter().zip(5..))
         .map(|(text, n)| {
@@ -928,10 +928,12 @@ fn limits_color_caps_what_is_counted() {
     // In the resources: an underlying space past the cap doesn't load.
     let resources = parsed("<< /ColorSpace << /X [/Pattern /DeviceRGB] >> >>");
     let nothing = |_: ObjectId| None;
-    assert_eq!(
-        ResCx::read(nothing, Some(&resources), &low),
-        Ok(counted(&[("X", 1)]))
-    );
+    let read = ResCx::read(nothing, Some(&resources), &low).unwrap();
+    assert_eq!(read.spaces, counted(&[("X", 1)]).spaces);
+    // And that's said, of the name it was met for.
+    assert_eq!(read.capped().collect::<Vec<_>>(), [b"X"]);
+    let whole = ResCx::read(nothing, Some(&resources), &Limits::DEFAULT).unwrap();
+    assert_eq!(whole, counted(&[("X", 4)]));
     // And in an image's array, the same.
     let content = b"BI /W 1 /H 1 /BPC 8 /CS [/Pattern /DeviceRGB] ID abcd EI Q";
     assert_eq!(image_data(content, &Limits::DEFAULT), b"abcd");
@@ -2518,7 +2520,9 @@ fn many_flate_images_decode_in_one_pass() {
     let read = tokens(&s, &ResCx::none(), &Limits::DEFAULT).count();
     let took = started.elapsed();
     assert_eq!(read, 50_000 + (2 << 20));
-    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    // Well past what one pass takes, with pdf-filters unoptimized too, and short
+    // of the tail's length for each image, about 200 GB read.
+    assert!(took < std::time::Duration::from_secs(10), "{took:?}");
 }
 
 /// The default caps, an image's DCT and CCITTFax data's end found by

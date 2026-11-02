@@ -108,9 +108,12 @@ pub enum SpliceError {
 /// CCITTFax data's end by the stand-in, or decoded
 /// ([`Limits::coded_ends`]). A splice judged by one reading holds for that
 /// one: a caller that wants what PDFium draws asks for the decoders'
-/// (`CodedEnds::Decoded`, with the `image-ends` feature). Content that
-/// can't be read under `limits` is refused with its error
-/// ([`SpliceError::Read`]).
+/// (`CodedEnds::Decoded`, with the `image-ends` feature). So too an image's
+/// size: past a cap of [`Limits::color`] its color space counts as one that
+/// doesn't load, with no error, and it's judged by the end that gives. A
+/// caller that wouldn't splice on that looks at
+/// [`ResCx::capped`](crate::ResCx::capped) first. Content that can't be read
+/// under `limits` is refused with its error ([`SpliceError::Read`]).
 ///
 /// What's kept must read as it did, as how a token is read may depend on
 /// what's after it: a `BI` with a keyword where its dictionary's key
