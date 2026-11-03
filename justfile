@@ -50,16 +50,16 @@ fmt:
 # Lint every crate, with its tests and binaries; then the libraries and the
 # binary as they're built for use, without the features only their tests
 # turn on; then the filters with zlib-rs their only Flate backend; then the
-# content streams with `image-ends`, which no other crate turns on; then
-# pdf-semantics without its clock, as pdf-lint takes it; then pdf-linearize's
-# engine, without its adapter, and with lopdf's, which nothing else turns on; then
+# content streams without `image-ends`, which pdf-lint turns on in every
+# workspace build; then pdf-semantics without its clock, as pdf-lint takes
+# it; then pdf-linearize's engine, without its adapter, and with lopdf's, which nothing else turns on; then
 # pdf-fonts with a reading of a file and Adobe's predefined CMaps, which nothing
 # else turns on, and with no feature at all.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
     cargo clippy --locked -p pdf-filters --no-default-features --features zlib-rs --all-targets -- -D warnings
-    cargo clippy --locked -p pdf-content-streams --features image-ends --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-content-streams --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-linearize --features lopdf,timing --all-targets -- -D warnings
@@ -67,15 +67,16 @@ clippy:
     cargo clippy --locked -p pdf-fonts --no-default-features --all-targets -- -D warnings
 
 # Unit tests and doctests: the workspace's, where the filters have both
-# Flate backends, as pdf-structure's tests turn zlib-rs on; then the
-# filters' with zlib-rs alone; then the content streams' with `image-ends`;
-# then pdf-semantics' without its clock; then pdf-linearize's engine, without
+# Flate backends, as pdf-structure's tests turn zlib-rs on, and the content
+# streams `image-ends`, as pdf-lint turns it on; then the filters' with
+# zlib-rs alone; then the content streams' without `image-ends`; then
+# pdf-semantics' without its clock; then pdf-linearize's engine, without
 # its adapter, and with lopdf's; then pdf-fonts' with a reading of a file and Adobe's
 # predefined CMaps, and with no feature at all.
 test:
     cargo test --locked --workspace
     cargo test --locked -p pdf-filters --no-default-features --features zlib-rs
-    cargo test --locked -p pdf-content-streams --features image-ends
+    cargo test --locked -p pdf-content-streams
     cargo test --locked -p pdf-semantics --no-default-features
     cargo test --locked -p pdf-linearize --no-default-features
     cargo test --locked -p pdf-linearize --features lopdf
@@ -195,12 +196,14 @@ fuzzing:
     RUSTFLAGS="--cfg fuzzing" cargo clippy --locked --workspace --exclude pdf-lint --lib --target-dir target/fuzzing -- -D warnings
 
 # Build the API docs, failing on warnings: with every feature on, then
-# as they're published, then pdf-semantics without its clock, as pdf-lint
+# as they're published, then pdf-content-streams without `image-ends`,
+# which pdf-lint turns on, and pdf-semantics without its clock, as pdf-lint
 # takes it, which the workspace's unified features would hide, then
 # pdf-linearize's engine, without its adapter, then pdf-fonts with no feature.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-content-streams --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-semantics --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-linearize --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features

@@ -17,6 +17,7 @@ use anyhow::{Context, Result, bail};
 use clap::builder::{OsStringValueParser, TypedValueParser};
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser};
+use pdf_lint::bytes::Opened;
 use pdf_lint::pdf_crypt::Password;
 use pdf_lint::{
     Allowances, Class, Document, Encryption, Exempt, Finding, Grammar, Hold, Made, Options, Report,
@@ -290,11 +291,11 @@ struct Setup {
     model: String,
 }
 
-/// The file `--baseline` names: its bytes, read, and its report at each
-/// version a file is checked at, as each is first asked for.
+/// The file `--baseline` names: its bytes, read beside its reading, and its
+/// report at each version a file is checked at, as each is first asked for.
 struct Baseline {
-    data: Vec<u8>,
-    doc: Document,
+    /// Its bytes are its reading's source.
+    file: Opened<Vec<u8>>,
     /// What it's checked with, as the files are, but its version.
     options: Options,
     reports: Mutex<BTreeMap<Version, Arc<Report>>>,
@@ -311,7 +312,7 @@ impl Baseline {
                 paths: true,
                 ..self.options.clone()
             };
-            Arc::new(check(&self.doc, &Hold::All(Made::Merged), &options))
+            Arc::new(check(&self.file, &Hold::All(Made::Merged), &options))
         });
         Arc::clone(report)
     }
@@ -534,15 +535,14 @@ fn run(mut args: Args) -> Result<ExitCode> {
         Some(path) => {
             let data =
                 std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let doc = bytes::read_opened(&data, password(&args).as_slice());
-            if let Some(why) = locked(&doc, args.password.is_some()) {
+            let file = opened(data, password(&args).as_slice(), &bytes::Options::DEFAULT);
+            if let Some(why) = locked(&file, args.password.is_some()) {
                 bail!("--baseline {}: {why}", path.display());
             }
             let reports = Mutex::new(BTreeMap::new());
             let options = against(&args, None);
             Some(Baseline {
-                data,
-                doc,
+                file,
                 options,
                 reports,
             })
@@ -629,6 +629,16 @@ fn checked_in_order(setup: &Setup, mut report: impl FnMut(Checked) -> bool) {
     });
 }
 
+/// `data` read whole beside its reading, opened by `passwords` under
+/// `options`, which in memory can't fail.
+fn opened<S: bytes::ByteSource>(
+    data: S,
+    passwords: &[Password],
+    options: &bytes::Options,
+) -> Opened<S> {
+    Opened::new(data, passwords, options).expect("a file in memory reads")
+}
+
 /// `--password`'s, as the reader takes it, which tries it in each of its
 /// encodings; none without it.
 fn password(args: &Args) -> Option<Password<'_>> {
@@ -669,7 +679,11 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
         Ok(data) => data,
         Err(e) => return unread(path, &e.to_string(), args.json),
     };
-    let doc = bytes::read_opened(&data, password(args).as_slice());
+    let doc = opened(
+        &data[..],
+        password(args).as_slice(),
+        &bytes::Options::DEFAULT,
+    );
     if let Some(why) = locked(&doc, args.password.is_some()) {
         return unread(path, why, args.json);
     }
@@ -688,7 +702,9 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             let report = check(&doc, hold, &options);
             // An incremental update of the baseline begins with its bytes.
             let against = match baseline {
-                Some(b) if data.starts_with(&b.data) => Against::Number(b.report(checked_as)),
+                Some(b) if data.starts_with(b.file.reading().source()) => {
+                    Against::Number(b.report(checked_as))
+                }
                 Some(b) => Against::Path(b.report(checked_as)),
                 None => Against::Nothing,
             };
@@ -700,7 +716,9 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
         }
         (true, Some(update)) => {
             let password = password(args);
-            let previous = bytes::read_from_opened(&data, password.as_slice(), update.previous);
+            let mut as_of = bytes::Options::DEFAULT;
+            as_of.section = Some(update.previous);
+            let previous = opened(&data[..], password.as_slice(), &as_of);
             let made = |id| match previous.contains(id) {
                 true => Made::Merged,
                 false => Made::Built,

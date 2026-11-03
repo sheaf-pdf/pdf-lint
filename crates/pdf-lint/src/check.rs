@@ -63,6 +63,12 @@
 //! its data not encrypted. After the walk, which tells which objects are
 //! pages.
 //!
+//! Then the content of each page, form, pattern and Type 3 glyph the walk
+//! reached, where the source gives streams' data decoded
+//! ([`Source::decoded_within`]): each unit of it read once, within
+//! [`Options::content_budget`], as PDFium reads content, with no rule held
+//! to it yet.
+//!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
 //! under another is as if it weren't in the model, as in TestGrammar
@@ -127,6 +133,8 @@ use crate::source::{Origin, Revision, Source, Trailer, Warning};
 use crate::text;
 use crate::version::Version;
 
+mod content;
+
 /// How deeply direct objects may nest in an indirect one before the walk
 /// stops going in. A real file nests a few.
 pub const NESTING: usize = 64;
@@ -150,6 +158,11 @@ const SHOWN: usize = 80;
 
 /// How many bytes of a name or string a finding's value shows.
 const TOKEN: usize = 80;
+
+/// How many bytes of content streams a check of a file decodes in all,
+/// unless [`Options::content_budget`] says another: 2 GiB. Past it, no more
+/// content is read.
+pub const CONTENT_BUDGET: usize = 2 << 30;
 
 /// How a writer made an object it wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -304,6 +317,10 @@ pub struct Options {
     /// (`ETSI_PAdES`), besides those it declares
     /// ([`extension::declared`](crate::extension::declared)).
     pub extensions: BTreeSet<String>,
+    /// How many bytes of content streams to decode in all, for the
+    /// content the walk reaches, through a source that gives streams'
+    /// data ([`Source::decoded_within`]): none for [`CONTENT_BUDGET`].
+    pub content_budget: Option<usize>,
 }
 
 /// Which held objects a key the model doesn't list is a finding in.
@@ -792,6 +809,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         marked: &marked,
         revision: None,
         containers: Vec::new(),
+        holders: Vec::new(),
         report: Report {
             findings,
             unchecked,
@@ -823,6 +841,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     walk.revisions();
     walk.excuse();
     walk.packed();
+    walk.content(options.content_budget.unwrap_or(CONTENT_BUDGET));
     walk.unreached();
     walk.read_as(source.warnings());
     walk.report
@@ -1212,6 +1231,9 @@ struct Walk<'a> {
     /// The file's object streams, by number ([`Walk::object_streams`]),
     /// which [`Walk::packed`] looks in.
     containers: Vec<ObjectId>,
+    /// What the walk reached that holds content, in the order it reached
+    /// them, which [`Walk::content`] reads.
+    holders: Vec<content::Holder<'a>>,
     report: Report,
 }
 
@@ -1462,6 +1484,7 @@ impl<'a> Walk<'a> {
     /// Checks `v`'s keys or elements, and when it's held, that it has those
     /// its table requires and no key twice.
     fn visit(&mut self, v: Visit<'a>) {
+        self.note_content(&v);
         let made = self.made(v.holder);
         let also = v.also.map(|table| v.as_(table));
         if made.is_some() {

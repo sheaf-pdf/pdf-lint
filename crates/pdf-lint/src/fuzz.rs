@@ -1,14 +1,15 @@
 //! What the fuzz target checks, which a unit test checks too: on any
-//! bytes, a file is read and checked without a panic, in the same way
-//! twice, with every finding's bytes inside what was read; and set against
-//! its previous revision, when it has an incremental update. It reads
-//! under small limits ([`options`]), so that a run tries more inputs. It's
-//! compiled only for tests and under cargo-fuzz's `--cfg fuzzing`, with
-//! [`seeds`], files for the fuzzer to begin from.
+//! bytes, a file is read beside its reading, so that its content is read
+//! too, and checked without a panic, in the same way twice, with every
+//! finding's bytes inside what was read; and set against its previous
+//! revision, when it has an incremental update. It reads under small limits
+//! ([`options`], and 4 MiB of content in [`setting`]), so that a run tries
+//! more inputs. It's compiled only for tests and under cargo-fuzz's
+//! `--cfg fuzzing`, with [`seeds`], files for the fuzzer to begin from.
 
 use std::collections::BTreeSet;
 
-use crate::bytes;
+use crate::bytes::{self, Opened};
 use crate::check::{Exempt, Hold, Made, Options, UnlistedIn, check};
 use crate::object::Span;
 use crate::pdf_crypt;
@@ -25,14 +26,12 @@ pub fn options() -> bytes::Options {
     options
 }
 
-/// `file` read whole under [`options`], as of the cross-reference section
-/// at `section` when there's one.
-fn read(file: &[u8], section: Option<usize>) -> Document {
+/// `file` read whole under [`options`], its reading kept beside it, as of
+/// the cross-reference section at `section` when there's one.
+fn read(file: &[u8], section: Option<usize>) -> Opened<&[u8]> {
     let mut options = options();
     options.section = section;
-    bytes::Reading::open(file, &options)
-        .and_then(bytes::Reading::into_document)
-        .expect("a file in memory reads")
+    Opened::new(file, &[], &options).expect("a file in memory reads")
 }
 
 /// The fuzz target's body: `data`'s first two bytes choose how the file
@@ -78,7 +77,8 @@ pub fn check_file(data: &[u8]) {
 /// or only every other one; as one table an object; deprecations found;
 /// unlisted keys found in built objects, all or none; at the file's
 /// version, 1.0's or 2.0's; with paths recorded; under some extensions;
-/// with keys exempt.
+/// with keys exempt. Its content within 4 MiB decoded, so that a check
+/// keeps within the fuzz target's time for an input.
 pub fn setting(choice: u16, doc: &Document) -> (Hold, Options) {
     let bit = |n: u16| choice & (1 << n) != 0;
     let made = if bit(0) { Made::Built } else { Made::Merged };
@@ -118,6 +118,7 @@ pub fn setting(choice: u16, doc: &Document) -> (Hold, Options) {
             false => BTreeSet::new(),
             true => names.iter().map(|name| name.to_string()).collect(),
         },
+        content_budget: Some(4 << 20),
     };
     (hold, options)
 }
@@ -708,6 +709,26 @@ mod tests {
             bytes::read(&update[2..]).update.is_some(),
             "the update is one"
         );
+    }
+
+    /// Each seed read beside its reading is the whole read, as
+    /// `bytes::read_opened` reads it, and under the fuzz target's limits as a
+    /// reading taken whole reads it; and with its content read, a check finds
+    /// what one of its document alone finds.
+    #[test]
+    fn the_seeds_read_alike_beside_their_readings() {
+        for (name, seed) in seeds() {
+            let file = &seed[2..];
+            let opened = Opened::new(file, &[], &bytes::Options::DEFAULT).unwrap();
+            assert_eq!(*opened, bytes::read_opened(file, &[]), "{name}");
+            let whole = bytes::Reading::open(file, &options())
+                .and_then(bytes::Reading::into_document)
+                .unwrap();
+            assert_eq!(*read(file, None), whole, "{name}");
+            let hold = Hold::All(Made::Merged);
+            let checked = |source: &dyn Source| check(source, &hold, &Options::default());
+            assert_eq!(checked(&opened), checked(&*opened), "{name}");
+        }
     }
 
     /// The fuzz target's checks on the seeds, each mutated many times as a

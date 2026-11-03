@@ -637,6 +637,7 @@ dependencies = [
  "anyhow",
  "clap",
  "pdf-arlington",
+ "pdf-content-streams",
  "pdf-crypt",
  "pdf-objects",
  "pdf-semantics",
