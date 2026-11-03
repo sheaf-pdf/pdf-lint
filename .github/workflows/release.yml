@@ -105,7 +105,7 @@ jobs:
           cat > notes.md <<'EOF'
           Each archive holds `pdf-lint`, which decodes and decrypts by itself, needing nothing beside it: unpack it anywhere. The Linux binaries are static. Beside each archive, its SHA-256.
 
-          What's compiled in, each crate and its licence, the Rust standard library and, on Linux, musl, has its notices in `THIRD-PARTY-NOTICES.txt`, `RUST-NOTICES.html` and `MUSL-COPYRIGHT`.
+          What's compiled in, each crate and its licence, the Rust standard library and, on Linux, musl, has its notices in `THIRD-PARTY-NOTICES.txt`, `RUST-NOTICES.html` and `MUSL-COPYRIGHT`. The font metrics compiled in, Adobe's Core 14 AFMs, go with the file Adobe distributes them with, `ADOBE-AFM-NOTICE.html`.
 
           The Arlington PDF Model it checks against is embedded: its NOTICE.txt is `ARLINGTON-NOTICE.txt`, and what the embedded copy corrects and adds, where the model contradicts ISO 32000-2 or lacks what a reference defines, is `ARLINGTON-CORRECTIONS.tsv` and `ARLINGTON-ADDITIONS/`. `pdf-lint --version` says the model's commit and hash.
           EOF

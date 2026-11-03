@@ -1,7 +1,7 @@
 //! Reading a file from its bytes, beside its reading, and checking it, its
-//! content among it, on any bytes: no panic, the same twice, every
-//! finding's bytes inside what was read, and its content moving nothing a
-//! check of the document alone finds.
+//! content and its fonts among it, on any bytes: no panic, the same twice,
+//! every finding's bytes inside what was read, and its content and its
+//! fonts' streams moving nothing else a check of the document alone finds.
 
 #![no_main]
 

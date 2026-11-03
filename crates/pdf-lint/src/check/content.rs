@@ -1969,14 +1969,14 @@ mod tests {
         asked
     }
 
-    /// Every content stream the walk reaches is asked for once: a page's
-    /// one; each of an array's, direct or through a reference; one two
-    /// pages share with the resources they inherit, once; a form's, a
+    /// Every content stream the walk reaches is asked for once by content:
+    /// a page's one; each of an array's, direct or through a reference; one
+    /// two pages share with the resources they inherit, once; a form's, a
     /// pattern's, each glyph's; and what isn't content, or isn't reached
     /// as it, never. A glyph's is asked for once more, by its font's read,
     /// which reads it for its `d0` or `d1`.
     #[test]
-    fn each_content_stream_reached_is_asked_for_once() {
+    fn each_content_stream_reached_is_asked_for_once_by_content() {
         let fonts = "/Font << /T3 30 0 R >>";
         let resources =
             format!("/Resources << /XObject << /Fm 20 0 R >> /Pattern << /P 21 0 R >> {fonts} >>");

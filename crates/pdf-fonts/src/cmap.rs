@@ -152,8 +152,7 @@ impl CidMap {
                 cut(id, unknown);
                 break;
             };
-            // A stream past the cap: the chain is ours to cut, not the file's
-            // fault.
+            // A stream past the cap: the chain is ours to cut, not the file's fault.
             if chain.len() >= reader.limits.cmaps {
                 reader.tell(Some(id), None, Fault::TooManyCMaps);
                 *unknown = true;

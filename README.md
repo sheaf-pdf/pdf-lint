@@ -3,8 +3,8 @@
 Checks PDF files against the
 [Arlington PDF Model](https://github.com/pdf-association/arlington-pdf-model),
 the PDF Association's machine-readable grammar of ISO 32000-2, and their
-content against ISO 32000-2 itself, and points each finding at the bytes
-it's about.
+content, common structures, color spaces and fonts against ISO 32000-2
+itself, and points each finding at the bytes it's about.
 
 It's made for tools that write PDFs. Most files in the wild break some
 rule somewhere, so it can hold to the model only what your tool wrote:

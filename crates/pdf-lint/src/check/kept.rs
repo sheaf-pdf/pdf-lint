@@ -10,7 +10,8 @@ use std::mem::{self, Discriminant};
 use crate::object::{ObjectId, Span};
 
 /// Where a kept fault is: the numbered object it's in, and where what's at
-/// fault was written, when the reader knows, as each crate's place has them.
+/// fault was written, when the reader knows, as each crate's place has
+/// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Where {
     /// The numbered object it's in.

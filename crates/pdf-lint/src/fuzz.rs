@@ -1,18 +1,17 @@
-//! What the fuzz target checks, which a unit test checks too: on any
-//! bytes, a file is read beside its reading, so that its content is read
-//! too, and checked without a panic, in the same way twice, with every
-//! finding's bytes inside what was read, the file or a stream's decoded
-//! data, an object stream's as the document holds it and a content
-//! stream's or the metadata stream's as the reading decodes it again; what
-//! its content finds, and what its fonts' streams say of their text and
-//! what their reads find, moving nothing else a check of its document alone
-//! finds, which reads no stream's data ([`streams_alone`]); and set against
-//! its previous
-//! revision, when it has an incremental update. It reads under small
-//! limits ([`options`], and 4 MiB of content and 4 MiB of fonts' streams in
-//! [`setting`]), so that a run tries more inputs. It's compiled only for
-//! tests and under cargo-fuzz's `--cfg fuzzing`, with [`seeds`], files for
-//! the fuzzer to begin from.
+//! What the fuzz target checks, which a unit test checks too: on any bytes,
+//! a file is read beside its reading, so that its content is read too, and
+//! checked without a panic, in the same way twice, with every finding's
+//! bytes inside what was read, the file or a stream's decoded data, an
+//! object stream's as the document holds it and a content stream's or the
+//! metadata stream's as the reading decodes it again; what its content
+//! finds, and what its fonts' streams say of their text and what their
+//! reads find, moving nothing else a check of its document alone finds,
+//! which reads no stream's data ([`streams_alone`]); and set against its
+//! previous revision, when it has an incremental update. It reads under
+//! small limits ([`options`], and 4 MiB of content and 4 MiB of fonts'
+//! streams in [`setting`]), so that a run tries more inputs. It's compiled
+//! only for tests and under cargo-fuzz's `--cfg fuzzing`, with [`seeds`],
+//! files for the fuzzer to begin from.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -253,26 +252,25 @@ fn within(
     len.is_some_and(|len| at.start <= at.end && at.end <= len)
 }
 
-/// Files for the fuzzer to begin from, each with its name, made for it:
-/// a page with an annotation and its appearance; an interactive form with
-/// a field merged with its widget, a radio group and a hide action; a
+/// Files for the fuzzer to begin from, each with its name, made for it: a
+/// page with an annotation and its appearance; an interactive form with a
+/// field merged with its widget, a radio group and a hide action; a
 /// structure tree, a name tree and a number tree; a page tree with each
 /// fault the walk can't say that ISO's reading of it tells, but a tree of
-/// no pages; a page tree a viewer reads otherwise, by its count, a page
-/// and a page's box; a name tree whose keys are out of order; XMP metadata
-/// with an attribute that doesn't read; a color space, a font, a DeviceN
-/// space and a halftone with something in each for the color space and
-/// font rules to find, and the model's functions of colorants and Latin
-/// characters; content of each kind the check
-/// reads, two pages sharing an array of streams, a form, a pattern and a
-/// Type 3 font's glyphs, with something in it for each rule of content to
-/// find, and a page's content encrypted; a cross-reference stream with
-/// extensions declared and XMP metadata; an object stream whose header
-/// starts two objects inside another's bytes; an incremental update; and
-/// encrypted files, one of them with an object stream whose data isn't
-/// encrypted, so that its objects' strings are in the clear.
-/// Each begins with the two bytes that choose how it's checked, all
-/// clear, as the `check` and `structure` targets take them; the `write`
+/// no pages; a page tree a viewer reads otherwise, by its count, a page and
+/// a page's box; a name tree whose keys are out of order; XMP metadata with
+/// an attribute that doesn't read; a color space, a font, a DeviceN space
+/// and a halftone with something in each for the color space and font rules
+/// to find, and the model's functions of colorants and Latin characters;
+/// content of each kind the check reads, two pages sharing an array of
+/// streams, a form, a pattern and a Type 3 font's glyphs, with something in
+/// it for each rule of content to find, and a page's content encrypted; a
+/// cross-reference stream with extensions declared and XMP metadata; an
+/// object stream whose header starts two objects inside another's bytes; an
+/// incremental update; and encrypted files, one of them with an object
+/// stream whose data isn't encrypted, so that its objects' strings are in
+/// the clear. Each begins with the two bytes that choose how it's checked,
+/// all clear, as the `check` and `structure` targets take them; the `write`
 /// target's take a third ([`write_seeds`]).
 pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
     let page = [
@@ -372,9 +370,9 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         stream("/Type /Metadata /Subtype /XML", xmp),
     ];
     // A TrueType font of 94 widths for 95 codes, drawing Latin letters,
-    // whose descriptor lacks /CapHeight; an Indexed space's table of 3 bytes
-    // for 6; an NChannel space of a spot colorant without /Colorants; and a
-    // Type 5 halftone with /All among its colorants.
+    // whose descriptor lacks /CapHeight; an Indexed space's table of 3
+    // bytes for 6; an NChannel space of a spot colorant without /Colorants;
+    // and a Type 5 halftone with /All among its colorants.
     let widths = vec!["500"; 94].join(" ");
     let screen =
         "<< /Type /Halftone /HalftoneType 1 /Frequency 60 /Angle 45 /SpotFunction /Round >>";
