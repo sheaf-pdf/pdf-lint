@@ -66,8 +66,11 @@
 //! Then the content of each page, form, pattern and Type 3 glyph the walk
 //! reached, where the source gives streams' data decoded
 //! ([`Source::decoded_within`]): each unit of it read once, within
-//! [`Options::content_budget`], as PDFium reads content, with no rule held
-//! to it yet.
+//! [`Options::content_budget`], as PDFium reads content, and held to ISO
+//! 32000-2 where it's held: its `q`s and `Q`s balanced ([`Rule::Balance`]),
+//! its marked content ended ([`Rule::Marked`]), and read as ISO reads it,
+//! to its end ([`Rule::Content`]). One that isn't read, its data not
+//! decoded cleanly, is counted as not checked.
 //!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
@@ -93,8 +96,12 @@
 //! as [`Options::unlisted`] says), a key the model doesn't list that isn't
 //! exempt ([`Rule::Unlisted`]); a
 //! key written twice ([`Rule::Duplicate`]); what the reader had to
-//! choose how to read ([`Rule::Reader`]); and what an object stream holds
-//! that it mustn't ([`Rule::Packed`]). A check whose predicate can't be
+//! choose how to read ([`Rule::Reader`]); what an object stream holds
+//! that it mustn't ([`Rule::Packed`]); and in content, `q`s left open or a
+//! `Q` with nothing saved ([`Rule::Balance`]), marked content left open or
+//! an `EMC` ending none ([`Rule::Marked`]), and where ISO 32000-2 reads it
+//! otherwise than PDFium, or what stops reading it ([`Rule::Content`]),
+//! each kind once in a unit of content. A check whose predicate can't be
 //! told, or uses a function the evaluator doesn't support, or reads a
 //! string's bytes the reader didn't give, is counted as not made
 //! ([`Report::unchecked`]), and every key the model doesn't list is
@@ -544,6 +551,28 @@ pub enum Rule {
     /// 7.5.7 keeps out too, can't be read from one: its entry has no
     /// generation (7.5.8.3).
     Packed,
+    /// Content whose `q`s and `Q`s don't balance (ISO 32000-2, 8.4.2: a
+    /// page's streams read as one, a form's, a pattern's or a glyph's
+    /// alone): `q`s left open at the end, counted, at the first of them, and
+    /// a `Q` with nothing saved to restore, at the first, with how many. Not
+    /// where reading stopped short of the end ([`Rule::Content`]), for what's
+    /// left open there: the end isn't known. Its table and key are those of
+    /// what holds the content, `PageObject` and `Contents`, a form's or a
+    /// pattern's and `-`, a Type 3 font's and the glyph's name; in the stream
+    /// its bytes are in, at them in its decoded data.
+    Balance,
+    /// Marked content that doesn't end (ISO 32000-2, 14.6.1), a `BMC` or
+    /// `BDC` left open at the end, counted, at the first of them; and an
+    /// `EMC` ending none, at the first, with how many. Where and as
+    /// [`Rule::Balance`].
+    Marked,
+    /// Content as ISO 32000-2 reads it otherwise than it's read, as PDFium
+    /// reads it, each kind of place once in a unit of content, its value the
+    /// first's (pdf-content-streams' `Fault`), with how many; and what stops
+    /// content's reading, a string, an array, a dictionary or an inline image
+    /// that doesn't end and the like, at it, after which no more is read.
+    /// Where and as [`Rule::Balance`].
+    Content,
 }
 
 /// A rule a held object breaks.
@@ -677,6 +706,12 @@ pub struct Report {
     /// With [`Options::paths`], the path of every held value the walk
     /// reached, as a finding's is written.
     pub paths: BTreeSet<String>,
+    /// Units of content read, of those held: a page's streams as one, or a
+    /// form's, a pattern's or a Type 3 glyph's alone; none where the source
+    /// gives no stream's data ([`Source::decoded_within`]), so that none
+    /// read is told from none found in. One whose data doesn't decode
+    /// cleanly isn't read, and is counted in [`Report::unchecked`].
+    pub content: usize,
 }
 
 /// The objects of `source` that `hold` names, held to the model: each
@@ -684,10 +719,12 @@ pub struct Report {
 /// writes it, and then from each object stream, at the file's version
 /// unless `options` says another; and each earlier revision's trailer
 /// ([`Source::revisions`]) when every object is held, or, a
-/// cross-reference stream, when `hold` names its number; and what each
-/// object stream held holds that it mustn't ([`Rule::Packed`]). A trailer
-/// the reader couldn't read so is a finding, and the walk starts from what
-/// it made of the file instead.
+/// cross-reference stream, when `hold` names its number; what each
+/// object stream held holds that it mustn't ([`Rule::Packed`]); and, where
+/// `source` gives streams' data decoded ([`Source::decoded_within`]), the
+/// content of what's held ([`Rule::Balance`], [`Rule::Marked`],
+/// [`Rule::Content`]). A trailer the reader couldn't read so is a finding,
+/// and the walk starts from what it made of the file instead.
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     let version = options.version.unwrap_or_else(|| file_version(source));
     let written = source.trailer();
@@ -978,14 +1015,17 @@ enum Place {
 /// What a finding is, for [`Report::beyond`], [`Report::since`] and
 /// [`Report::by_path`]: its table, key, rule and value, the value's
 /// references' numbers aside, which a rewrite renumbers, and a reader's
-/// finding's numbers aside, its offsets; for a key that came in later than
-/// the file's version, any value, as its value isn't what's wrong; and for
-/// an object nothing reaches, the object alone, as which object's
-/// reference to it is named follows the objects' numbers and keys' order.
+/// finding's numbers aside, its offsets, and a content finding's, its
+/// counts, offsets and lengths, and how many times its kind was found; for
+/// a key that came in later than the file's version, any value, as its
+/// value isn't what's wrong; and for an object nothing reaches, the object
+/// alone, as which object's reference to it is named follows the objects'
+/// numbers and keys' order.
 fn like(f: &Finding) -> (String, String, Rule, String) {
     let value = match f.rule {
         Rule::TooNew => String::new(),
         Rule::Reader => f.value.chars().filter(|c| !c.is_ascii_digit()).collect(),
+        rule if content::counted(rule) => content::uncounted(&f.value),
         _ => numberless(&f.value),
     };
     match f.rule {
@@ -3725,6 +3765,9 @@ impl Rule {
         Rule::Duplicate,
         Rule::Reader,
         Rule::Packed,
+        Rule::Balance,
+        Rule::Marked,
+        Rule::Content,
     ];
 
     /// Its name, as findings and allowances write it.
@@ -3745,6 +3788,9 @@ impl Rule {
             Rule::Duplicate => "duplicate",
             Rule::Reader => "reader",
             Rule::Packed => "packed",
+            Rule::Balance => "balance",
+            Rule::Marked => "marked",
+            Rule::Content => "content",
         }
     }
 
@@ -3878,6 +3924,7 @@ impl fmt::Display for Report {
         for ((table, key), n) in &self.deprecated {
             writeln!(f, "  deprecated: {table}/{key}: {n}")?;
         }
+        writeln!(f, "  content read: {}", self.content)?;
         for ((table, key), n) in &self.ignored {
             writeln!(f, "  ignored: {table}/{key}: {n}")?;
         }
@@ -6923,7 +6970,7 @@ mod tests {
     }
 
     /// Each rule is the one its name names, as an allowance names it, and
-    /// `packed`, the newest, is last.
+    /// content's, the newest, are last.
     #[test]
     fn each_rule_is_named_by_its_name() {
         for &rule in Rule::ALL {
@@ -6931,7 +6978,10 @@ mod tests {
             assert_eq!(rule.to_string(), rule.name());
         }
         assert_eq!(Rule::named("packed"), Some(Rule::Packed));
-        assert_eq!(Rule::ALL.last(), Some(&Rule::Packed));
+        let content = [Rule::Balance, Rule::Marked, Rule::Content];
+        assert!(Rule::ALL.ends_with(&content));
+        let names: Vec<_> = content.iter().map(|r| r.name()).collect();
+        assert_eq!(names, ["balance", "marked", "content"]);
         assert_eq!(Rule::named("Packed"), None);
     }
 

@@ -1,17 +1,19 @@
 //! What the fuzz target checks, which a unit test checks too: on any
 //! bytes, a file is read beside its reading, so that its content is read
 //! too, and checked without a panic, in the same way twice, with every
-//! finding's bytes inside what was read; and set against its previous
+//! finding's bytes inside what was read, the file or a stream's decoded
+//! data, an object stream's as the document holds it and a content
+//! stream's as the reading decodes it again; and set against its previous
 //! revision, when it has an incremental update. It reads under small limits
 //! ([`options`], and 4 MiB of content in [`setting`]), so that a run tries
 //! more inputs. It's compiled only for tests and under cargo-fuzz's
 //! `--cfg fuzzing`, with [`seeds`], files for the fuzzer to begin from.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytes::{self, Opened};
 use crate::check::{Exempt, Hold, Made, Options, UnlistedIn, check};
-use crate::object::Span;
+use crate::object::{ObjectId, Span};
 use crate::pdf_crypt;
 use crate::pdf_crypt::writer::{Kind, Settings};
 use crate::source::{Document, Source};
@@ -50,10 +52,11 @@ pub fn check_file(data: &[u8]) {
         check(&doc, &hold, &options),
         "a check is the same twice"
     );
+    let mut lengths = BTreeMap::new();
     for finding in &report.findings {
         if let Some(at) = finding.at {
             assert!(
-                within(&doc, file, at),
+                within(&doc, file, at, &mut lengths),
                 "{finding}: its bytes are out of what was read"
             );
         }
@@ -124,11 +127,24 @@ pub fn setting(choice: u16, doc: &Document) -> (Hold, Options) {
 }
 
 /// Whether `at` is inside what was read: the file, or the decoded data of
-/// the stream it's in.
-fn within(doc: &Document, file: &[u8], at: Span) -> bool {
+/// the stream it's in, an object stream's as `doc` holds it, else as its
+/// reading decodes it, as content is read, each stream's length kept in
+/// `lengths` once it's decoded.
+fn within(
+    doc: &Opened<&[u8]>,
+    file: &[u8],
+    at: Span,
+    lengths: &mut BTreeMap<ObjectId, Option<usize>>,
+) -> bool {
     let len = match at.stream {
         None => Some(file.len()),
-        Some(stream) => doc.decoded.get(&stream).map(Vec::len),
+        Some(stream) => match doc.decoded.get(&stream) {
+            Some(data) => Some(data.len()),
+            None => *lengths.entry(stream).or_insert_with(|| {
+                let decoded = doc.reading().decoded_within(stream, usize::MAX);
+                decoded.ok().map(|data| data.len())
+            }),
+        },
     };
     len.is_some_and(|len| at.start <= at.end && at.end <= len)
 }
@@ -713,8 +729,10 @@ mod tests {
 
     /// Each seed read beside its reading is the whole read, as
     /// `bytes::read_opened` reads it, and under the fuzz target's limits as a
-    /// reading taken whole reads it; and with its content read, a check finds
-    /// what one of its document alone finds.
+    /// reading taken whole reads it; and with its content read, which is
+    /// clean, a check finds what one of its document alone finds, and says
+    /// how many units of content it read, where one of its document alone
+    /// reads none.
     #[test]
     fn the_seeds_read_alike_beside_their_readings() {
         for (name, seed) in seeds() {
@@ -727,7 +745,17 @@ mod tests {
             assert_eq!(*read(file, None), whole, "{name}");
             let hold = Hold::All(Made::Merged);
             let checked = |source: &dyn Source| check(source, &hold, &Options::default());
-            assert_eq!(checked(&opened), checked(&*opened), "{name}");
+            let (mut beside, alone) = (checked(&opened), checked(&*opened));
+            // The page's content and its annotation's appearance; the
+            // structure's page.
+            let read = match name {
+                "page" => 2,
+                "structure" => 1,
+                _ => 0,
+            };
+            assert_eq!((beside.content, alone.content), (read, 0), "{name}");
+            beside.content = 0;
+            assert_eq!(beside, alone, "{name}");
         }
     }
 

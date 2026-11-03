@@ -2171,3 +2171,67 @@ fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
     ]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// A page whose content leaves a `q` open: its finding is in its content
+/// stream, printed with its bytes there decoded, and `--full` says how much
+/// content was read. Checked against itself, it's carried; so it is by an
+/// update that rewrites the page and leaves its content as it was, and one
+/// that adds a stream to it tells what that stream brings.
+#[test]
+fn content_findings_are_set_against_what_came_before_as_any() {
+    let dir = folder();
+    let page =
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Contents 4 0 R >>";
+    let content = "<< /Length 9 >>\nstream\nq 0 0 m S\nendstream";
+    let original = file(&[CATALOG, PAGES, page, content]);
+    let path = written(&dir, "content.pdf", &original);
+    let path = path.to_str().unwrap();
+    let out = run(&[path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let open = "- balance: PageObject/Contents at Root/Pages/Kids[0]/Contents, in 4 0 R (merged): \
+                1 q left open at the end [bytes 0..1 of 4 0 R's data]\n    \
+                | q   (of 4 0 R's data, decoded)\n";
+    assert!(stdout.ends_with(open), "{stdout}");
+    assert!(stdout.contains("objects checked, 1 findings\n"), "{stdout}");
+    // The whole report: its first line as ever, and how much was read.
+    let out = run(&["--full", path]);
+    let full = text(&out.stdout);
+    let lines: Vec<_> = full.lines().collect();
+    assert!(lines[1].starts_with("  Arlington: ") && lines[1].contains("; 1 findings; "));
+    assert!(lines.contains(&"    content read: 1"), "{full}");
+    let out = run(&["--format", "json", path]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["content_streams"], json!(1));
+    assert_eq!(report["findings"][0]["at"]["stream"], json!([4, 0]));
+
+    // Against itself, all carried.
+    let out = run(&["--baseline", path, path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 findings, 1 carried"), "{stdout}");
+
+    // An update that rewrites the page, its content as it was: carried.
+    let rotated = page.replace("/Resources", "/Rotate 90 /Resources");
+    let update = updated(&original, &[(3, rotated.as_str())]);
+    let rotated = written(&dir, "content-rotated.pdf", &update);
+    let out = run(&["--last-update", rotated.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 findings, 1 carried"), "{stdout}");
+
+    // One that adds a stream after it, restoring one state more than it
+    // saves: that's the update's, in its stream; the `q` is no longer open.
+    let added = page.replace("/Contents 4 0 R", "/Contents [4 0 R 5 0 R]");
+    let stream = "<< /Length 3 >>\nstream\nQ Q\nendstream";
+    let update = updated(&original, &[(3, added.as_str()), (5, stream)]);
+    let added = written(&dir, "content-added.pdf", &update);
+    let out = run(&["--last-update", added.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let restored = "- balance: PageObject/Contents at Root/Pages/Kids[0]/Contents[1], in 5 0 R \
+                    (merged): Q with nothing saved to restore [bytes 2..3 of 5 0 R's data]\n    \
+                    | Q   (of 5 0 R's data, decoded)\n";
+    assert!(stdout.ends_with(restored), "{stdout}");
+    assert!(stdout.contains("objects checked, 1 findings\n"), "{stdout}");
+}

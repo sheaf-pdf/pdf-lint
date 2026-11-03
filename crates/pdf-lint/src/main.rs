@@ -20,8 +20,8 @@ use clap::{ArgAction, CommandFactory, Parser};
 use pdf_lint::bytes::Opened;
 use pdf_lint::pdf_crypt::Password;
 use pdf_lint::{
-    Allowances, Class, Document, Encryption, Exempt, Finding, Grammar, Hold, Made, Options, Report,
-    Span, UnlistedIn, Version, bytes, check, file_version, use_model,
+    Allowances, Class, Document, Encryption, Exempt, Finding, Grammar, Hold, Made, ObjectId,
+    Options, Report, Source, Span, UnlistedIn, Version, bytes, check, file_version, use_model,
 };
 use serde::Serialize;
 use serde_json::ser::{CharEscape, CompactFormatter, Formatter};
@@ -785,6 +785,9 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             let _ = writeln!(out, "  {line}");
         }
     }
+    // The content stream a finding before was in, decoded again for its
+    // bytes: findings in one stream come together.
+    let mut content: Option<(ObjectId, Vec<u8>)> = None;
     for finding in &shown {
         let _ = writeln!(out, "- {finding}");
         match finding.at {
@@ -797,7 +800,21 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
                     ..
                 },
             ) => {
-                if let Some(decoded) = doc.decoded.get(&(n, g)) {
+                // An object stream's data, which the document holds; else a
+                // content stream's, which the reading decodes again, as
+                // content was read.
+                let decoded = match doc.decoded.get(&(n, g)) {
+                    Some(decoded) => Some(&decoded[..]),
+                    None => {
+                        if content.as_ref().is_none_or(|(id, _)| *id != (n, g)) {
+                            content = (doc.decoded_within((n, g), usize::MAX))
+                                .and_then(Result::ok)
+                                .map(|data| ((n, g), data));
+                        }
+                        content.as_ref().map(|(_, data)| &data[..])
+                    }
+                };
+                if let Some(decoded) = decoded {
                     let _ = writeln!(
                         out,
                         "    | {}   (of {n} {g} R's data, decoded)",
@@ -938,6 +955,7 @@ fn json(
         deprecated: (report.deprecated.iter())
             .map(|((table, key), &count)| Count { table, key, count })
             .collect(),
+        content_streams: report.content,
         ignored: (report.ignored.iter())
             .map(|((table, key), &count)| Count { table, key, count })
             .collect(),
@@ -980,6 +998,9 @@ struct Line<'a> {
     not_checked: Vec<NotChecked<'a>>,
     unlisted: Vec<Unlisted<'a>>,
     deprecated: Vec<Count<'a>>,
+    /// How many units of content were read: a page's streams as one, a
+    /// form's, a pattern's or a glyph's alone.
+    content_streams: usize,
     ignored: Vec<Count<'a>>,
     no_table: usize,
     ties: usize,
@@ -1003,7 +1024,7 @@ struct Found<'a> {
 }
 
 /// Where a finding's bytes are: in the file, or in the decoded data of the
-/// object stream `stream`, `[n,g]`.
+/// stream `stream`, `[n,g]`, an object stream or a content stream.
 #[derive(Serialize)]
 struct At {
     stream: Option<(u32, u16)>,
