@@ -568,8 +568,14 @@ pub enum Unread {
 
 impl Unread {
     /// What [`Resolve::try_resolve`] says of object `id`, which doesn't read
-    /// for this: none where the file hasn't it, or else why.
-    pub(crate) fn unreadable<'o>(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+    /// for this: none where the file hasn't it ([`Unread::Missing`]), or else
+    /// why, as a [`Document`]'s and a [`Reading`](crate::Reading)'s say it, so
+    /// that a resolver over any [`Source`] can. Its [`Why`] is
+    /// [`Why::Damaged`], [`Why::Limit`] (past a cap the reader parses or
+    /// decodes under) or [`Why::Locked`] (in an object stream that takes a
+    /// password, or doesn't decrypt); never [`Why::Source`], which a reading
+    /// gives of its own bytes, before there's an `Unread` to say.
+    pub fn unreadable<'o>(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
         if let Unread::Missing { .. } = self {
             return Ok(None);
         }
