@@ -105,7 +105,8 @@
 //! inherits them from, a category's own object), and is then told as the
 //! first held holder's, else as the first's, all of it: made as that holder
 //! is, else as the stream its finding is in, else as the first held stream,
-//! else as its resources. So what an update writes is told with the unit
+//! else, held by its resources alone, as merged, as neither its holder nor
+//! its content was written. So what an update writes is told with the unit
 //! it's in, and [`Report::since`] carries what the revision before had in
 //! the same stream, and what a stream the update wrote brings is its own.
 //! Units come in the order the walk reached their first holders;
@@ -126,8 +127,9 @@
 //! nothing read uses is counted as not checked. Each counted
 //! ([`Report::unused`]), and found with [`Options::unused`]: in the
 //! category's object, else its resources', else the one they're in, where
-//! that's held, or where a held unit has it, made as that is; at the walk's
-//! way to the resources and the name's key.
+//! that's held, or, as merged, where a held unit has it, the dictionary not
+//! having been written; at the walk's way to the resources and the name's
+//! key.
 //!
 //! [`Options::content_budget`]: super::Options::content_budget
 //! [`Options::unused`]: super::Options::unused
@@ -326,10 +328,11 @@ struct Category<'a> {
     /// Whether every unit of content it's a category of was read to its
     /// end, so that what isn't used is told.
     told: bool,
-    /// How it's made where its object isn't held but a unit of content
-    /// that has it is: as that unit is, as what the unit's content uses
-    /// is what's unused in it.
-    made: Option<Made>,
+    /// Whether a unit of content held has it, as what that content uses
+    /// is what's unused in it: then, where its object isn't held, it's
+    /// told as merged, as that dictionary wasn't written, so that what
+    /// was unused in it before is carried.
+    held: bool,
 }
 
 /// The categories of resources the units of a file's content name, as
@@ -1284,16 +1287,19 @@ impl<'a> Walk<'a> {
             let holder = &holders[*i];
             // Held where what holds it is, or one of its streams, or what
             // its resources are written in, as an update that writes any of
-            // them can change what its content finds.
-            let written = self.resources_made(unit, lookup, &categories);
+            // them can change what its content finds; held by its resources
+            // alone, as merged, as neither what holds it nor its content
+            // was written, so that what they had is carried.
+            let written = self.resources_held(unit, lookup, &categories);
+            let written = written.then_some(Made::Merged);
             let made = (self.made(holder.holder))
                 .or_else(|| (unit.streams.iter()).find_map(|&(id, _)| self.made(Some(id))))
                 .or(written);
             let held = made.is_some();
-            if let (Some(made), Lookup::In(found)) = (made, lookup) {
+            if let (true, Lookup::In(found)) = (held, lookup) {
                 for &(_, found) in found {
                     if let Ok(c) = found {
-                        categories.all[c].made.get_or_insert(made);
+                        categories.all[c].held = true;
                     }
                 }
             }
@@ -1373,7 +1379,8 @@ impl<'a> Walk<'a> {
             let (Some(_), Some(object)) = (category.identity, category.object) else {
                 continue;
             };
-            let Some(made) = self.made(Some(object)).or(category.made) else {
+            let merged = category.held.then_some(Made::Merged);
+            let Some(made) = self.made(Some(object)).or(merged) else {
                 continue;
             };
             let (kind, key) = (category.kind, category_key(category.kind));
@@ -1494,7 +1501,7 @@ impl<'a> Walk<'a> {
                     trail,
                     used,
                     told: true,
-                    made: None,
+                    held: false,
                 }
             };
             found.push((kind, Ok(categories.add(identity, make))));
@@ -1505,7 +1512,8 @@ impl<'a> Walk<'a> {
     /// A finding of `rule`, `value`, at `at` in `unit`'s `content`, told as
     /// `holder`'s: in the stream it starts in, at its bytes in that
     /// stream's data, made as the holder is, else as that stream is, else as
-    /// the unit's first held stream, else as its resources are, `written`.
+    /// the unit's first held stream, else `written`, merged where it's held
+    /// by its resources alone.
     /// Its table and key the holder's, or for a name of a `category` of
     /// resources, `Resource` and the category.
     #[allow(clippy::too_many_arguments)]
@@ -1647,16 +1655,16 @@ impl<'a> Walk<'a> {
         (!object.is_null()).then_some(Resources { id, object })
     }
 
-    /// How the objects `unit`'s resources are written in, as `lookup` has
-    /// them in `categories`, are made, the first of them held: its
-    /// `/Resources`' own, else the one the walk reached them in (a page
-    /// tree node's, for resources a page inherits), and each category's.
-    fn resources_made(
+    /// Whether an object `unit`'s resources are written in, as `lookup` has
+    /// them in `categories`, is held: its `/Resources`' own, else the one
+    /// the walk reached them in (a page tree node's, for resources a page
+    /// inherits), and each category's.
+    fn resources_held(
         &self,
         unit: &Unit<'a>,
         lookup: &Lookup,
         categories: &Categories<'a>,
-    ) -> Option<Made> {
+    ) -> bool {
         let own = unit.resources.and_then(|resources| {
             let reached = self.resources_at.get(&ptr::from_ref(resources.object));
             (resources.id).or_else(|| reached.and_then(|reached| reached.holder))
@@ -1666,7 +1674,8 @@ impl<'a> Walk<'a> {
             Lookup::Without | Lookup::Untold(_) => &[],
         };
         let of = (each.iter()).filter_map(|&(_, found)| categories.all[found.ok()?].object);
-        own.into_iter().chain(of).find_map(|id| self.made(Some(id)))
+        let mut objects = own.into_iter().chain(of);
+        objects.any(|id| self.made(Some(id)).is_some())
     }
 
     /// `unit`'s streams decoded and joined, each asked for no more than
@@ -3749,11 +3758,11 @@ mod tests {
 
     /// An unused resource is found and counted where the object it's in is
     /// held, made as it's held: the category's own object, else its
-    /// resources', else the one that holds them; or where content that has
-    /// it is held, made as that is; and neither where none is. A name the
+    /// resources', else the one that holds them; or, as merged, where
+    /// content that has it is held; and neither where none is. A name the
     /// resources lack is found as content's findings are, where its page or
-    /// its stream is held, or what its resources are written in, all of the
-    /// content then.
+    /// its stream is held, or, as merged, what its resources are written
+    /// in, all of the content then.
     #[test]
     fn resource_and_unused_findings_are_held_as_their_objects_are() {
         let content = || stream("", "/X1 Do");
@@ -3808,11 +3817,16 @@ mod tests {
         );
         assert_eq!(
             found(&category, &[(3, built)]),
-            (vec![(30, built)], 1, vec![(10, built)])
+            (vec![(30, merged)], 1, vec![(10, built)])
         );
-        let both = (vec![(40, built)], 1, vec![(10, built)]);
-        assert_eq!(found(&own, &[(40, built)]), both);
-        assert_eq!(found(&own, &[(3, built)]), both);
+        assert_eq!(
+            found(&own, &[(40, built)]),
+            (vec![(40, built)], 1, vec![(10, merged)])
+        );
+        assert_eq!(
+            found(&own, &[(3, built)]),
+            (vec![(40, merged)], 1, vec![(10, built)])
+        );
     }
 
     /// A category one of whose units of content isn't read, its data not

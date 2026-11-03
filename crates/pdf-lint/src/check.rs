@@ -577,8 +577,8 @@ pub enum Rule {
     /// holds the content, `PageObject` and `Contents`, a form's or a
     /// pattern's and `-`, a Type 3 font's and the glyph's name; in the
     /// stream its bytes are in, at them in its decoded data. Held where what
-    /// holds the content is, or a stream of it, or what its resources are
-    /// written in.
+    /// holds the content is, or a stream of it, or, as merged, what its
+    /// resources are written in.
     Balance,
     /// Marked content that doesn't end (ISO 32000-2, 14.6.1), a `BMC` or
     /// `BDC` left open at the end, counted, at the first of them; and an
@@ -648,8 +648,8 @@ pub enum Rule {
     /// checked, nor can any category such a unit's names could be in, where
     /// its resources, or a category of them, can't be told. In the
     /// category's object, else its resources', else the object they're in,
-    /// held where that is, or where a unit of content held has it, made as
-    /// that is; its table `Resource` and its key the category, at the name's
+    /// held where that is, or, as merged, where a unit of content held has
+    /// it; its table `Resource` and its key the category, at the name's
     /// key, its value the name.
     Unused,
     /// Content as ISO 32000-2 reads it otherwise than it's read, as PDFium
