@@ -69,6 +69,19 @@
 //! tree deeper or with more nodes than is read) is counted as not checked,
 //! once a tree for each, where its root is held; what was read before it is
 //! found all the same.
+//!
+//! What the packet's read told is a [`Rule::Xmp`] finding, last: a mark of
+//! UTF-16 it begins with, an attribute and a claim's value that don't read
+//! as XML, each kind once, at its first place, with how many times, and
+//! XML that stops the read, at the byte it stops at, in the XML reader's
+//! words; in the catalog's metadata stream, at the bytes in its data,
+//! held where it is, its path the stream's where the walk first visited it
+//! as `Metadata` ([`Walk::note_structure`]), `-` where it didn't. A packet
+//! longer, deeper or binding more namespaces at once than is read is
+//! counted as not checked, once, where the stream is held. Where the stream
+//! isn't known, as for a document given its packet with no `/Metadata`,
+//! what the packet tells has no object to be in, and is counted so, once,
+//! where the catalog is held.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -77,7 +90,7 @@ use std::rc::Rc;
 
 use pdf_semantics::pages::{self, Page, Pages, Rect, pages};
 use pdf_semantics::tree::{names, numbers};
-use pdf_semantics::{Fault, Limits, Place, Sink};
+use pdf_semantics::{Fault, Limits, Place, Sink, xmp};
 
 use super::content::times;
 use super::{Finding, Objects, REFERENCES, Rule, Trail, Visit, Walk, entry_at};
@@ -570,6 +583,42 @@ const MODEL: [Rule; 8] = [
     Rule::Unlisted,
 ];
 
+/// What the catalog's XMP packet told, read once for the extensions the
+/// file declares ([`extension::read`](crate::extension::read)), which
+/// [`Walk::structures`] finds in.
+#[derive(Default)]
+pub(crate) struct Packet {
+    /// The stream it's the data of, as [`xmp::metadata_stream`] names it:
+    /// none where that isn't known, as for a document given its packet with
+    /// no `/Metadata` to name the stream, or where there's no packet.
+    pub(crate) stream: Option<ObjectId>,
+    /// Its length.
+    pub(crate) len: usize,
+    /// What it told, each place in that stream, at bytes of its data.
+    pub(crate) kept: Kept,
+    /// What stopped it being read, if anything did.
+    pub(crate) stopped: Option<xmp::Error>,
+}
+
+/// Why a packet isn't read whole, other than for the file's faults: it's
+/// longer than pdf-semantics reads ([`Limits::xmp_bytes`]).
+const XMP_LONG: &str = "a packet longer than it's read";
+
+/// Why a packet isn't read whole: it nests deeper than pdf-semantics reads
+/// ([`Limits::xmp_depth`]).
+const XMP_DEEP: &str = "a packet nested deeper than it's read";
+
+/// Why a packet isn't read whole: it binds more namespaces at once than
+/// pdf-semantics reads ([`Limits::xmp_bindings`]).
+const XMP_BINDINGS: &str = "a packet binding more namespaces at once than are read";
+
+/// Why a packet isn't read whole, for another reason its reader gives.
+const XMP_UNREAD: &str = "a packet read no further, for another reason";
+
+/// Why what a packet tells isn't found: the stream it's the data of isn't
+/// known, so it has no object to be in.
+const XMP_UNPLACED: &str = "the packet's stream isn't known";
+
 impl<'a> Walk<'a> {
     /// Keeps `root`, the visit of a name tree's root when `names`, else a
     /// number tree's, the value of `key` of its row, for
@@ -592,15 +641,25 @@ impl<'a> Walk<'a> {
 
     /// Keeps where the walk first visited `v`'s object as one of the page
     /// tree's tables, by its number, or, the root written in place, by
-    /// none, as pdf-semantics places what's in it: the path and table of
-    /// what [`Walk::structures`] finds there. Not in an earlier revision's
+    /// none, as pdf-semantics places what's in it; and, the packet's stream
+    /// first visited as `Metadata`, where: the path and table of what
+    /// [`Walk::structures`] finds there. Not in an earlier revision's
     /// trailer.
     pub(super) fn note_structure(&mut self, v: &Visit<'a>) {
         let table = v.table.name.as_str();
-        if self.revision.is_some() || !PAGE_TREE.contains(&table) {
+        if self.revision.is_some() {
             return;
         }
         let id = v.id();
+        if table == "Metadata" {
+            if id.is_some() && id == self.packet.stream && self.packet_at.is_none() {
+                self.packet_at = Some(v.trail.clone());
+            }
+            return;
+        }
+        if !PAGE_TREE.contains(&table) {
+            return;
+        }
         if id.is_none() && table != "PageTreeNodeRoot" {
             return;
         }
@@ -612,10 +671,10 @@ impl<'a> Walk<'a> {
 
     /// Finds what the page tree's walk by ISO's rules, and each name and
     /// number tree's, read through pdf-semantics, tell that the walk
-    /// doesn't say, and where the page tree's walk by PDFium's rules parts
-    /// from ISO's: the page tree first, then PDFium's, then the trees from
-    /// their roots in the order the walk reached them: see the module's
-    /// documentation.
+    /// doesn't say, where the page tree's walk by PDFium's rules parts from
+    /// ISO's, and what the XMP packet's read told: the page tree first,
+    /// then PDFium's, then the trees from their roots in the order the walk
+    /// reached them, then the packet: see the module's documentation.
     pub(super) fn structures(&mut self) {
         let PageTree {
             kept,
@@ -632,6 +691,8 @@ impl<'a> Walk<'a> {
         for root in &roots {
             self.tree_told(root, &mut told);
         }
+        let packet = mem::take(&mut self.packet);
+        self.packet_told(packet, catalog);
     }
 
     /// The catalog's number, which what the page tree's walks tell in no
@@ -841,18 +902,94 @@ impl<'a> Walk<'a> {
             }
         }
     }
+
+    /// Finds what the XMP packet's read told, `packet`, each kind once, and
+    /// XML that stopped it, at the byte it stopped at, a [`Rule::Xmp`]
+    /// finding in the packet's stream, held where that is; and counts what
+    /// else stopped it, a cap, as not checked, where the stream is held, and
+    /// what it told where its stream isn't known, once, where `catalog` is.
+    fn packet_told(&mut self, packet: Packet, catalog: Option<ObjectId>) {
+        let Packet {
+            stream,
+            len,
+            kept,
+            stopped,
+        } = packet;
+        let mut told: Vec<(Option<Span>, String)> = (kept.told().iter())
+            .filter(|(_, fault, _)| {
+                matches!(
+                    fault,
+                    Fault::XmpNotUtf8 | Fault::XmpAttribute | Fault::XmpValue
+                )
+            })
+            .map(|(place, fault, n)| (place.at, times(&fault.to_string(), *n)))
+            .collect();
+        let mut unread = None;
+        if let Some(stopped) = stopped {
+            match stopped.why {
+                xmp::XmpWhy::Xml(words) => {
+                    let (start, end) = (stopped.at.min(len), stopped.at.saturating_add(1).min(len));
+                    let at = stream.map(|id| Span::new(Some(id), start, end));
+                    told.push((at, format!("XMP metadata isn't XML: {words}")));
+                }
+                xmp::XmpWhy::TooLong => unread = Some(XMP_LONG),
+                xmp::XmpWhy::TooDeep => unread = Some(XMP_DEEP),
+                xmp::XmpWhy::TooManyBindings => unread = Some(XMP_BINDINGS),
+                _ => unread = Some(XMP_UNREAD),
+            }
+        }
+        // Where the stream isn't known, the catalog, whose /Metadata the
+        // packet is, holds what's counted of it.
+        let Some(made) = self.made(stream.or(catalog)) else {
+            return;
+        };
+        match stream {
+            Some(id) => {
+                let (path, table) = match &self.packet_at {
+                    Some(trail) => (trail.path(), "Metadata".to_string()),
+                    None => ("-".to_string(), "-".to_string()),
+                };
+                for (at, value) in told {
+                    self.report.findings.push(Finding {
+                        object: Some(id),
+                        made,
+                        path: path.clone(),
+                        table: table.clone(),
+                        key: "-".to_string(),
+                        rule: Rule::Xmp,
+                        value,
+                        at,
+                        revision: None,
+                    });
+                }
+            }
+            None if !told.is_empty() => {
+                self.unchecked("-", XMP_UNPLACED.to_string(), "Metadata", "-");
+            }
+            None => {}
+        }
+        if let Some(why) = unread {
+            self.unchecked("-", why.to_string(), "Metadata", "-");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    //! What's kept of a walk's faults; and what's found of a tree's, where,
-    //! and as whose, and what's counted.
+    //! What's kept of a walk's faults; and what's found of a tree's, the
+    //! page tree's and the packet's, where, and as whose, and what's
+    //! counted.
+
+    use std::collections::BTreeSet;
 
     use pdf_structure::fixture;
 
     use super::super::{Hold, Made, Options, Report, check};
     use super::*;
     use crate::bytes;
+    use crate::dict;
+    use crate::source::Document;
+    use crate::version::Version;
 
     /// A fault's place in `object`, at no bytes in particular.
     fn at(object: Option<ObjectId>) -> Place {
@@ -2340,6 +2477,298 @@ mod tests {
         assert_eq!(values(mixed.since(&a4)), own);
         assert_eq!(values(mixed.by_path(&a4)), own);
         assert_eq!(values(mixed.beyond(&[&a4])), own);
+    }
+
+    /// XMP metadata whose namespaces are bound and whose `rdf:Description`
+    /// claims PDF/A-2b by its attributes.
+    const XMP: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                       xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description \
+                       xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"2\" \
+                       pdfaid:conformance=\"B\"/></rdf:RDF></x:xmpmeta>";
+
+    /// A file of a page whose catalog's `/Metadata` is 4 0 R, a metadata
+    /// stream of `data`, its dictionary's entries besides `more`.
+    fn metadata(data: &[u8], more: &str) -> Vec<u8> {
+        let stream = [
+            format!(
+                "<< /Type /Metadata /Subtype /XML {more} /Length {} >>\nstream\n",
+                data.len()
+            )
+            .into_bytes(),
+            data.to_vec(),
+            b"\nendstream".to_vec(),
+        ]
+        .concat();
+        let page = page("2 0 R");
+        let objects: [(u32, &[u8]); 4] = [
+            (1, b"<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>"),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (3, page.as_bytes()),
+            (4, &stream),
+        ];
+        fixture::assembled("1.7", &objects, "<< /Size 5 /Root 1 0 R >>")
+    }
+
+    /// Each XMP finding of `file`'s check, holding what `hold` does, as
+    /// [`found`] gives a tree finding, but its bytes those of `data`, the
+    /// packet, in its stream, 4 0 R.
+    fn xmp_found(file: &[u8], data: &[u8], hold: &Hold) -> Vec<Found> {
+        let report = checked(file, hold, &Options::default());
+        (report.findings.iter())
+            .filter(|f| f.rule == Rule::Xmp)
+            .map(|f| {
+                let at = f.at.expect("an XMP finding is at bytes");
+                assert_eq!(at.stream, Some((4, 0)), "{report}");
+                (
+                    f.object.map(|(n, _)| n),
+                    f.path.clone(),
+                    format!("{}/{}", f.table, f.key),
+                    f.value.clone(),
+                    String::from_utf8_lossy(&data[at.start..at.end]).into_owned(),
+                    f.made,
+                )
+            })
+            .collect()
+    }
+
+    /// An XMP finding of [`xmp_found`]'s, in 4 0 R as merged.
+    fn packet_finding(value: &str, bytes: &str) -> Found {
+        tree(4, "Root/Metadata", "Metadata/-", value, bytes)
+    }
+
+    /// `XMP` with `from` replaced by `to`.
+    fn xmp_with(from: &str, to: &str) -> Vec<u8> {
+        assert!(XMP.contains(from));
+        XMP.replace(from, to).into_bytes()
+    }
+
+    const ATTRIBUTE: &str = "an attribute in XMP metadata doesn't read";
+    const VALUE: &str = "a value in XMP metadata doesn't read";
+
+    /// What the packet's read tells is found once each, in the metadata
+    /// stream, at its bytes in the stream's data, its path the stream's,
+    /// its table `Metadata` and its key `-`: a mark of UTF-16 it begins
+    /// with, at the mark; an attribute with no quotes, at its tag; a
+    /// claim's value with an entity that isn't XML's, at its tag; and XML
+    /// that stops the read, at the byte it stops at, in the XML reader's
+    /// words. A packet that reads, and one in a stream that's filtered, so
+    /// not in plain view, have nothing found. Two of a kind are one
+    /// finding, with how many times, and the kinds come in the order first
+    /// told, what stops the read last.
+    #[test]
+    fn what_a_packets_read_tells_is_found_once_a_kind_at_its_bytes() {
+        let tag = |xmp: &[u8]| {
+            let xmp = String::from_utf8_lossy(xmp).into_owned();
+            let start = xmp.find("<rdf:Description").unwrap();
+            let end = start + xmp[start..].find("/>").unwrap() + 2;
+            xmp[start..end].to_string()
+        };
+        let utf16: Vec<u8> = [0xFE, 0xFF]
+            .into_iter()
+            .chain(XMP.encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        let unquoted = xmp_with(r#"pdfaid:conformance="B""#, "pdfaid:conformance=B");
+        let entity = xmp_with(r#"pdfaid:part="2""#, r#"pdfaid:part="&two;""#);
+        let misnested = xmp_with("</rdf:RDF>", "</rdf:RFD>");
+        let words = "XMP metadata isn't XML: ill-formed document: expected `</rdf:RDF>`, \
+                     but `</rdf:RFD>` was found";
+        let shapes = [
+            (
+                utf16,
+                packet_finding(
+                    "XMP metadata begins with a mark of UTF-16, not as UTF-8",
+                    "\u{FFFD}\u{FFFD}",
+                ),
+            ),
+            (unquoted.clone(), packet_finding(ATTRIBUTE, &tag(&unquoted))),
+            (entity.clone(), packet_finding(VALUE, &tag(&entity))),
+            (misnested.clone(), packet_finding(words, "<")),
+        ];
+        for (data, expected) in shapes {
+            let file = metadata(&data, "");
+            assert_eq!(xmp_found(&file, &data, &ALL), [expected]);
+            let report = checked(&file, &ALL, &Options::default());
+            let rows = (report.unchecked.keys()).filter(|u| u.table == "Metadata");
+            assert_eq!(rows.count(), 0, "{report}");
+        }
+        // The read stops at `</rdf:RFD>`, its first byte.
+        let at = String::from_utf8_lossy(&misnested)
+            .find("</rdf:RFD>")
+            .unwrap();
+        let report = checked(&metadata(&misnested, ""), &ALL, &Options::default());
+        let stops = report
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::Xmp)
+            .unwrap();
+        assert_eq!(stops.at, Some(Span::new(Some((4, 0)), at, at + 1)));
+        let clean = metadata(XMP.as_bytes(), "");
+        assert_eq!(xmp_found(&clean, XMP.as_bytes(), &ALL), []);
+        let deflated = fixture::zlib(&misnested);
+        let filtered = metadata(&deflated, "/Filter /FlateDecode");
+        assert_eq!(xmp_found(&filtered, &deflated, &ALL), []);
+
+        let both = [
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><a b=1/><c d=2/>",
+            "<e xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"&two;\"/>",
+            "</x:xmpmeta></f>",
+        ]
+        .concat();
+        let e = both.find("<e ").unwrap();
+        let e = &both[e..e + both[e..].find("/>").unwrap() + 2];
+        let found = xmp_found(&metadata(both.as_bytes(), ""), both.as_bytes(), &ALL);
+        let values: Vec<_> = found.iter().map(|f| (f.3.as_str(), f.4.as_str())).collect();
+        let twice = format!("{ATTRIBUTE}, 2 times");
+        let words = "XMP metadata isn't XML: ill-formed document: close tag `</f>` does not \
+                     match any open tag";
+        assert_eq!(
+            values,
+            [(twice.as_str(), "<a b=1/>"), (VALUE, e), (words, "<")]
+        );
+    }
+
+    /// A packet longer, nested deeper or binding more namespaces at once
+    /// than is read isn't read whole, which is counted as not checked, once,
+    /// where its stream is held, and not where it isn't; what was told
+    /// before is found all the same: here, 257 elements one inside another,
+    /// past the 256 read, after an attribute with no quotes; and an element
+    /// binding 129 namespaces, past the 128 read.
+    #[test]
+    fn a_packet_past_what_s_read_is_counted_what_was_read_found() {
+        let deep = ["<a b=1/>", &"<e>".repeat(257), &"</e>".repeat(257)].concat();
+        let file = metadata(deep.as_bytes(), "");
+        let rows = |report: &Report| -> Vec<(String, usize)> {
+            (report.unchecked.iter())
+                .filter(|(u, _)| {
+                    (u.column, u.table.as_str(), u.key.as_str()) == ("-", "Metadata", "-")
+                })
+                .map(|(u, &n)| (u.why.clone(), n))
+                .collect()
+        };
+        let report = checked(&file, &ALL, &Options::default());
+        assert_eq!(rows(&report), [(XMP_DEEP.to_string(), 1)]);
+        assert_eq!(
+            xmp_found(&file, deep.as_bytes(), &ALL),
+            [packet_finding(ATTRIBUTE, "<a b=1/>")]
+        );
+        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        assert_eq!(
+            rows(&checked(&file, &only(4), &Options::default())).len(),
+            1
+        );
+        assert_eq!(rows(&checked(&file, &only(1), &Options::default())), []);
+        assert_eq!(xmp_found(&file, deep.as_bytes(), &only(1)), []);
+
+        let bound = |n: usize| -> Vec<u8> {
+            let bound: String = (0..n)
+                .map(|i| format!(" xmlns:p{i}=\"http://example.com/{i}\""))
+                .collect();
+            format!("<e{bound}/>").into_bytes()
+        };
+        let wide = checked(&metadata(&bound(129), ""), &ALL, &Options::default());
+        assert_eq!(rows(&wide), [(XMP_BINDINGS.to_string(), 1)]);
+        let within = checked(&metadata(&bound(128), ""), &ALL, &Options::default());
+        assert_eq!(rows(&within), []);
+    }
+
+    /// A document given its packet with no `/Metadata` to name the stream
+    /// has what the packet tells counted as not checked, once, where the
+    /// catalog is held, and nothing found, as it has no object to be in;
+    /// a packet that tells nothing isn't counted. What the packet claims is
+    /// the same with a fault as without: here, a fault beside PDF/A-3.
+    #[test]
+    fn a_packet_whose_stream_isnt_known_is_counted_not_found() {
+        let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
+        doc.insert(
+            1,
+            dict! { "Type" => "Catalog", "Pages" => Object::reference(2) },
+        );
+        let kids = vec![Object::reference(3)];
+        doc.insert(2, dict! { "Type" => "Pages", "Kids" => kids, "Count" => 1 });
+        let page = dict! {
+            "Type" => "Page",
+            "Parent" => Object::reference(2),
+            "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(612), Object::from(792)],
+            "Resources" => dict! {},
+        };
+        doc.insert(3, page);
+        let unplaced = |report: &Report| {
+            (report.unchecked.iter())
+                .filter(|(u, _)| u.why == XMP_UNPLACED)
+                .map(|(u, &n)| (u.column, u.table.clone(), u.key.clone(), n))
+                .collect::<Vec<_>>()
+        };
+        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        let claims = |attributes: &str| {
+            format!(
+                "<rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" {attributes}/>"
+            )
+            .into_bytes()
+        };
+        let a3 = BTreeSet::from(["ISO_19005_3".to_string()]);
+        for (packet, told) in [
+            (claims(r#"pdfaid:part="3""#), false),
+            (claims(r#"pdfaid:part="3" x=y"#), true),
+            (
+                [claims(r#"pdfaid:part="3""#), b"</e>".to_vec()].concat(),
+                true,
+            ),
+        ] {
+            doc.metadata = Some(packet);
+            let report = check(&doc, &ALL, &Options::default());
+            let xmp = (report.findings.iter()).filter(|f| f.rule == Rule::Xmp);
+            assert_eq!(xmp.count(), 0, "{report}");
+            let row = ("-", "Metadata".to_string(), "-".to_string(), 1);
+            let expected = if told { vec![row] } else { vec![] };
+            assert_eq!(unplaced(&report), expected, "{report}");
+            assert_eq!(report.extensions, a3, "{report}");
+            let held = check(&doc, &only(1), &Options::default());
+            assert_eq!(unplaced(&held).len(), usize::from(told));
+            assert_eq!(unplaced(&check(&doc, &only(2), &Options::default())), []);
+        }
+        // A file's packet, with a fault and without, declares the same.
+        let a3 = |attributes: &str| {
+            let data = xmp_with(r#"pdfaid:part="2""#, attributes);
+            let data = String::from_utf8(data)
+                .unwrap()
+                .replace(r#"pdfaid:conformance="B""#, "");
+            checked(&metadata(data.as_bytes(), ""), &ALL, &Options::default()).extensions
+        };
+        assert_eq!(a3(r#"pdfaid:part="3" x=y"#), a3(r#"pdfaid:part="3""#));
+        assert!(a3(r#"pdfaid:part="3" x=y"#).contains("ISO_19005_3"));
+    }
+
+    /// An XMP finding is carried by a like one whatever its numbers and
+    /// count, by number, by path and from a source: an attribute that
+    /// doesn't read twice by one once. One of another kind is the file's own.
+    #[test]
+    fn an_xmp_finding_is_carried_whatever_its_count() {
+        let report = |data: &str| {
+            let options = Options {
+                paths: true,
+                ..Options::default()
+            };
+            checked(&metadata(data.as_bytes(), ""), &ALL, &options)
+        };
+        let values = |found: Vec<&Finding>| -> Vec<String> {
+            (found.into_iter())
+                .filter(|f| f.rule == Rule::Xmp)
+                .map(|f| f.value.clone())
+                .collect()
+        };
+        let (once, twice) = (report("<a b=1/>"), report("<a b=1/><c d=2/>"));
+        assert_eq!(
+            values(twice.findings.iter().collect()),
+            [format!("{ATTRIBUTE}, 2 times")]
+        );
+        let none = Vec::<String>::new();
+        assert_eq!(values(twice.since(&once)), none, "{twice}");
+        assert_eq!(values(twice.by_path(&once)), none, "{twice}");
+        assert_eq!(values(twice.beyond(&[&once])), none, "{twice}");
+        let other = report(r#"<e xmlns:p="http://www.aiim.org/pdfa/ns/id/" p:part="&two;"/>"#);
+        assert_eq!(values(other.since(&once)), [VALUE]);
+        assert_eq!(values(other.by_path(&once)), [VALUE]);
+        assert_eq!(values(other.beyond(&[&once])), [VALUE]);
     }
 
     /// Of each kind in each object, the first told and its place, and how

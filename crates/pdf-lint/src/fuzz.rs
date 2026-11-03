@@ -219,10 +219,13 @@ fn within(
 /// Files for the fuzzer to begin from, each with its name, made for it:
 /// a page with an annotation and its appearance; an interactive form with
 /// a field merged with its widget, a radio group and a hide action; a
-/// structure tree, a name tree and a number tree; content of each kind the
-/// check reads, two pages sharing an array of streams, a form, a pattern
-/// and a Type 3 font's glyphs, with something in it for each rule of
-/// content to find, and a page's content encrypted; a cross-reference
+/// structure tree, a name tree and a number tree; a page tree with each
+/// fault the walk can't say that ISO's reading of it tells, but a tree of
+/// no pages; a name tree whose keys are out of order; XMP metadata with an
+/// attribute that doesn't read; content of each kind the check reads, two
+/// pages sharing an array of streams, a form, a pattern and a Type 3 font's
+/// glyphs, with something in it for each rule of content to find, and a
+/// page's content encrypted; a cross-reference
 /// stream with extensions declared and XMP metadata; an object stream
 /// whose header starts two objects inside another's bytes; an incremental
 /// update; and encrypted files, one of them with an object stream whose
@@ -291,11 +294,42 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
          /U <c537d2828205039ff59b444fcf97f0f10021446990b9e4114071a4d9104984c1> >>",
     ]
     .map(String::from);
+    let leaf = |parent: &str| {
+        format!("<< /Type /Page /Parent {parent} /MediaBox [0 0 612 792] /Resources << >> >>")
+    };
+    let page_tree = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Parent 2 0 R /Kids [3 0 R 3 0 R 4 0 R 5 0 R 7 0 R] /Count 9 >>"
+            .to_string(),
+        leaf("2 0 R"),
+        "<< /Type /Pages /Parent 2 0 R /Kids [4 0 R 6 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /Kids [8 0 R] /Count 1 >>".to_string(),
+        leaf("2 0 R"),
+        "9 0 R".to_string(),
+        leaf("5 0 R"),
+        leaf("2 0 R"),
+    ];
+    let name_tree = [
+        "<< /Type /Catalog /Pages 2 0 R /Names << /Dests 4 0 R >> >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        leaf("2 0 R"),
+        "<< /Names [(b) [3 0 R /Fit] (a) [3 0 R /XYZ 0 792 null]] >>".to_string(),
+    ];
+    let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/" pdfaid:part="3" pdfaid:conformance=B/></rdf:RDF></x:xmpmeta>"#;
+    let metadata = [
+        "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        leaf("2 0 R"),
+        stream("/Type /Metadata /Subtype /XML", xmp),
+    ];
     let id = "<0123456789abcdef0123456789abcdef>";
     let mut seeds = vec![
         ("page", file(&page, "").0),
         ("form", file(&form, "").0),
         ("structure", file(&structure, "").0),
+        ("page-tree", file(&page_tree, "").0),
+        ("name-tree", file(&name_tree, "").0),
+        ("xmp", file(&metadata, "").0),
         ("content", content()),
         ("content-encrypted", encrypted_content()),
         ("xref-stream", xref_stream()),
@@ -809,6 +843,10 @@ fn update() -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// The rules that find what's in the common structures: name and number
+    /// trees, the page tree, a viewer's pages, and XMP metadata.
+    const STRUCTURES: [Rule; 4] = [Rule::Tree, Rule::PageTree, Rule::Viewer, Rule::Xmp];
+
     /// A small, fast generator of bytes, the same each run.
     struct Random(u64);
 
@@ -855,6 +893,23 @@ mod tests {
             assert_eq!(on, inside, "{name}: {:?}", doc.warnings);
             let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
             assert!(report.objects() > 3, "{name}: {report}");
+            // The common structures' seeds find what they're made to, and
+            // the rest nothing of theirs.
+            let structures: BTreeSet<&str> = (report.findings.iter())
+                .filter(|f| STRUCTURES.contains(&f.rule))
+                .map(|f| f.rule.name())
+                .collect();
+            let made: &[_] = match name {
+                "page-tree" => &["page-tree"],
+                "name-tree" => &["tree"],
+                "xmp" => &["xmp"],
+                _ => &[],
+            };
+            assert_eq!(
+                structures.into_iter().collect::<Vec<_>>(),
+                made,
+                "{name}: {report}"
+            );
             check_file(&seed);
         }
         // Those that open, open, and their object stream reads.

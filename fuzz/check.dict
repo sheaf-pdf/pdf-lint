@@ -1,8 +1,9 @@
 # What PDF files are made of, for libFuzzer's -dict with the check and
 # structure targets: their structure's keywords and the names the checker
-# looks for first; and what holds content and what content is made of, its
-# operators that open and close what it checks, those that name resources,
-# and a byte PDFium reads as white-space.
+# looks for first, a page's boxes, the tree of named destinations, and the
+# mark of UTF-16 XMP metadata isn't to begin with; and what holds content
+# and what content is made of, its operators that open and close what it
+# checks, those that name resources, and a byte PDFium reads as white-space.
 "obj"
 "endobj"
 "stream\x0a"
@@ -46,6 +47,8 @@
 "/Parent"
 "/Count"
 "/MediaBox"
+"/CropBox"
+"/Rotate"
 "/Resources"
 "/Contents"
 "/Annots"
@@ -62,6 +65,7 @@
 "/DR"
 "/DA"
 "/Names"
+"/Dests"
 "/Nums"
 "/Limits"
 "/StructTreeRoot"
@@ -74,6 +78,7 @@
 "/Metadata"
 "pdfaid:part=\"3\""
 "xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\""
+"\xfe\xff"
 "/XObject"
 "/Form"
 "/BBox"

@@ -91,6 +91,11 @@
 //! a viewer's reading, not ISO 32000-2's, is a [`Rule::Viewer`] finding,
 //! each kind once in a file; where an object of the page tree doesn't
 //! read, the two aren't set side by side, which is counted as not checked.
+//! Last, the catalog's XMP packet, as it's read for the extensions the
+//! file declares (14.3.2): what that read tells of it, and XML that stops
+//! it, a [`Rule::Xmp`] finding in its metadata stream, at the bytes in its
+//! data, each kind once; a packet longer or deeper than is read counted as
+//! not checked, as is one whose stream isn't known.
 //!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
@@ -113,7 +118,8 @@
 //! ([`Rule::Special`]); a reference to no object ([`Rule::Unresolved`]); a
 //! malformed name or number tree ([`Rule::Tree`]); a page tree that breaks
 //! 7.7.3 where the model can't say so ([`Rule::PageTree`]), and where a
-//! viewer's pages part from it ([`Rule::Viewer`]); a held object the
+//! viewer's pages part from it ([`Rule::Viewer`]); XMP metadata that
+//! breaks 14.3.2 ([`Rule::Xmp`]); a held object the
 //! walk never reached ([`Rule::Unreached`]); in an object built whole (or
 //! as [`Options::unlisted`] says), a key the model doesn't list that isn't
 //! exempt ([`Rule::Unlisted`]); a
@@ -172,7 +178,7 @@ use crate::version::Version;
 mod content;
 mod structure;
 
-pub(crate) use structure::Kept;
+pub(crate) use structure::Packet;
 
 /// How deeply direct objects may nest in an indirect one before the walk
 /// stops going in. A real file nests a few.
@@ -751,6 +757,27 @@ pub enum Rule {
     /// is counted as not checked, its column `-`, its table
     /// `PageTreeNodeRoot` and its key `-`, where the catalog is held.
     Viewer,
+    /// XMP metadata that breaks ISO 32000-2 14.3.2, as pdf-semantics reads
+    /// the packet of the catalog's metadata stream for the extensions a
+    /// file declares, where the stream is in plain view, unfiltered and
+    /// unencrypted: a mark of UTF-16 it begins with, where it's encoded as
+    /// UTF-8 (with its erratum 296), an attribute that doesn't read as XML,
+    /// and a claim's value that doesn't, each kind once, at its first place,
+    /// its value pdf-semantics' words with how many times; and XML that
+    /// stops it being read, at the byte it stops at, its value the XML
+    /// reader's words, after which nothing more is read. In the metadata
+    /// stream, held where that is, at the bytes in its data; its path the
+    /// stream's where the walk first visited it as `Metadata`, its table
+    /// `Metadata` and its key `-`, `-` and `-` where it didn't. A packet
+    /// longer, nested deeper or binding more namespaces at once than
+    /// pdf-semantics reads is counted as not checked, its column and key
+    /// `-`, its table `Metadata`, where the stream is held, and what was read
+    /// before is found all the same. A packet whose stream isn't known, as a
+    /// document's given its packet with no `/Metadata` to name the stream,
+    /// has what it tells counted so, once, and what stops it too, where the
+    /// catalog is held, never found in no object. What it claims is read the
+    /// same whatever it tells.
+    Xmp,
 }
 
 /// A rule a held object breaks.
@@ -786,7 +813,8 @@ pub struct Finding {
     /// Where its bytes were written, when the reader knows: a key and its
     /// value, an array's element, the dictionary that lacks a key, the
     /// object nothing reaches; or an operation or a name in a content
-    /// stream, at its bytes in the stream's decoded data, which
+    /// stream, or what's wrong in an XMP packet in its metadata stream, at
+    /// its bytes in the stream's decoded data, which
     /// [`Source::decoded_within`] gives (where [`Source::decoded`] gives an
     /// object stream's).
     pub at: Option<Span>,
@@ -833,7 +861,9 @@ pub enum Class {
 /// or number tree not read whole for what isn't the file's fault, its
 /// column `-`, its table and key the row's whose value its root is; or the
 /// page tree not read so, or a viewer's pages not set beside it, its column
-/// and key `-`, its table `PageTreeNodeRoot`.
+/// and key `-`, its table `PageTreeNodeRoot`; or an XMP packet not read
+/// whole, or whose stream isn't known, its column and key `-`, its table
+/// `Metadata`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Unchecked {
     /// The column whose cell it is.
@@ -847,7 +877,9 @@ pub struct Unchecked {
     /// budget), or why a name in it can't be looked up, or a resource told;
     /// for a tree, or the page tree, why it isn't read whole (an object of
     /// it that takes a password), or why a viewer's pages aren't set beside
-    /// the page tree's (an object of it that doesn't read).
+    /// the page tree's (an object of it that doesn't read); for an XMP
+    /// packet, why it isn't read whole (it nests deeper than is read), or
+    /// that what it tells can't be placed, its stream not known.
     pub why: String,
     pub table: String,
     pub key: String,
@@ -869,7 +901,9 @@ pub struct Report {
     /// looked up, and resources that can't be told used or not; name and
     /// number trees whose roots are held not read whole for what isn't the
     /// file's fault, and the page tree, or a viewer's pages not set beside
-    /// it, where its catalog is held; by why.
+    /// it, where its catalog is held; and the XMP packet not read whole,
+    /// where its stream is held, or whose stream isn't known, where the
+    /// catalog is; by why.
     pub unchecked: BTreeMap<Unchecked, usize>,
     /// Keys and elements of held objects the model doesn't list.
     pub unlisted: BTreeMap<Unlisted, usize>,
@@ -965,7 +999,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     // read.
     let (page_tree, pages) = structure::page_trees(source, trailer);
     // The packet, read once: for the extensions declared, and its faults.
-    let (mut extensions, ..) = crate::extension::read(source);
+    let (mut extensions, packet) = crate::extension::read(source);
     extensions.extend(options.extensions.iter().cloned());
     let checked_under = extensions.clone();
     // What every predicate of the file is evaluated in, once.
@@ -1069,6 +1103,8 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         page_tree,
         page_tree_at: HashMap::new(),
         roots: Vec::new(),
+        packet,
+        packet_at: None,
         report: Report {
             findings,
             unchecked,
@@ -1242,17 +1278,17 @@ enum Place {
 /// counts, offsets and lengths, and how many times its kind was found, but
 /// an operator's name, `d0` not `d1`, in an operator's or operands'; a
 /// tree finding's references' numbers and how many times its kind was
-/// found; and a page tree or a viewer finding's numbers, and how many
-/// times its kind was found; for a key that came in later than the file's
-/// version, any value, as its value isn't what's wrong; and for an object
-/// nothing reaches, the object alone, as which object's reference to it is
-/// named follows the objects' numbers and keys' order.
+/// found; and a page tree, a viewer or an XMP finding's numbers, and how
+/// many times its kind was found; for a key that came in later than the
+/// file's version, any value, as its value isn't what's wrong; and for an
+/// object nothing reaches, the object alone, as which object's reference
+/// to it is named follows the objects' numbers and keys' order.
 fn like(f: &Finding) -> (String, String, Rule, String) {
     let value = match f.rule {
         Rule::TooNew => String::new(),
         Rule::Reader => f.value.chars().filter(|c| !c.is_ascii_digit()).collect(),
         Rule::Tree => numberless(structure::uncounted(&f.value)),
-        Rule::PageTree | Rule::Viewer => content::uncounted(f.rule, &f.value),
+        Rule::PageTree | Rule::Viewer | Rule::Xmp => content::uncounted(f.rule, &f.value),
         rule if content::counted(rule, &f.key) => content::uncounted(rule, &f.value),
         _ => numberless(&f.value),
     };
@@ -1529,6 +1565,12 @@ struct Walk<'a> {
     /// Each name and number tree's root the walk reached, in the order it
     /// reached them, which [`Walk::structures`] reads again.
     roots: Vec<structure::Root<'a>>,
+    /// What the catalog's XMP packet told, read for the extensions the file
+    /// declares, which [`Walk::structures`] finds in.
+    packet: structure::Packet,
+    /// Where the walk first visited the packet's stream, when it did so as
+    /// `Metadata`: the path of the packet's findings.
+    packet_at: Option<Rc<Trail<'a>>>,
     report: Report,
 }
 
@@ -4033,6 +4075,7 @@ impl Rule {
         Rule::Content,
         Rule::PageTree,
         Rule::Viewer,
+        Rule::Xmp,
     ];
 
     /// Its name, as findings and allowances write it.
@@ -4062,6 +4105,7 @@ impl Rule {
             Rule::Content => "content",
             Rule::PageTree => "page-tree",
             Rule::Viewer => "viewer",
+            Rule::Xmp => "xmp",
         }
     }
 
@@ -7293,6 +7337,7 @@ mod tests {
             Rule::Content,
             Rule::PageTree,
             Rule::Viewer,
+            Rule::Xmp,
         ];
         assert!(Rule::ALL.ends_with(&newest));
         let names: Vec<_> = newest.iter().map(|r| r.name()).collect();
@@ -7307,7 +7352,8 @@ mod tests {
                 "unused",
                 "content",
                 "page-tree",
-                "viewer"
+                "viewer",
+                "xmp"
             ]
         );
         assert_eq!(Rule::named("Packed"), None);

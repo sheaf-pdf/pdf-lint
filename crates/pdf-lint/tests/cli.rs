@@ -2303,3 +2303,39 @@ fn resources_lacking_are_found_and_unused_ones_found_when_asked() {
     assert_eq!(out.status.code(), Some(0), "{stdout}");
     assert!(stdout.contains("0 findings, 2 carried"), "{stdout}");
 }
+
+/// What's wrong in a file's XMP metadata is a finding in its metadata
+/// stream, printed with its bytes there, which are the stream's data, as
+/// it's unfiltered; the JSON says the stream; and against itself it's
+/// carried.
+#[test]
+fn an_xmp_finding_is_printed_with_the_packets_bytes() {
+    let dir = folder();
+    let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:Description pdfaid:part=3/></x:xmpmeta>"#;
+    let metadata = format!(
+        "<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n{xmp}\nendstream",
+        xmp.len()
+    );
+    let catalog = "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>";
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let path = written(&dir, "xmp.pdf", &file(&[catalog, PAGES, page, &metadata]));
+    let path = path.to_str().unwrap();
+    let out = run(&[path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let found = "- xmp: Metadata/- at Root/Metadata, in 4 0 R (merged): an attribute in XMP \
+                 metadata doesn't read [bytes 36..68 of 4 0 R's data]\n    \
+                 | <rdf:Description pdfaid:part=3/>   (of 4 0 R's data, decoded)\n";
+    assert!(stdout.ends_with(found), "{stdout}");
+    assert!(stdout.contains("objects checked, 1 findings\n"), "{stdout}");
+    let out = run(&["--format", "json", path]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["findings"][0]["rule"], json!("xmp"));
+    assert_eq!(report["findings"][0]["at"]["stream"], json!([4, 0]));
+
+    // Against itself, carried.
+    let out = run(&["--baseline", path, path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 findings, 1 carried"), "{stdout}");
+}

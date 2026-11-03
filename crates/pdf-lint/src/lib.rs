@@ -25,7 +25,10 @@
 //! say what's wrong; the pages the page tree's walk reads are what the
 //! model's `fn:NumberOfPages` and `fn:PageProperty` read, and where PDFium
 //! reads other pages than ISO's, or reads their sizes otherwise, is told as
-//! a viewer's reading ([`check()`] says how).
+//! a viewer's reading. The catalog's XMP metadata, read for the extensions
+//! a file declares, is held to ISO 32000-2 too: what isn't UTF-8 or XML as
+//! 14.3.2 has it is told at its bytes in the metadata stream ([`check()`]
+//! says how).
 
 pub mod allowance;
 pub mod check;
@@ -180,7 +183,7 @@ pub mod extension {
     use pdf_arlington::extension::Claims;
     use pdf_semantics::{Limits, xmp};
 
-    use crate::check::{Kept, Objects};
+    use crate::check::{Objects, Packet};
     use crate::source::Source;
 
     /// Every extension the model names, in its cells and around its
@@ -203,28 +206,35 @@ pub mod extension {
     }
 
     /// What `source`'s metadata says, its packet read once: the extensions
-    /// it declares, as [`declared`] gives them; what [`xmp::read`] told of
-    /// the packet, kept, each place naming the catalog's metadata stream
-    /// where that's known ([`xmp::metadata_stream`]), at bytes of its data;
-    /// and what stopped the read, if anything did, after which nothing
-    /// counts.
-    pub(crate) fn read(source: &dyn Source) -> (BTreeSet<String>, Kept, Option<xmp::Error>) {
+    /// it declares, as [`declared`] gives them; and the packet as read: the
+    /// catalog's metadata stream it's the data of, where that's known
+    /// ([`xmp::metadata_stream`]), what [`xmp::read`] told of it, kept,
+    /// each place naming that stream, at bytes of its data, and what stopped
+    /// the read, if anything did, after which nothing counts. An object on
+    /// the way to the stream that doesn't read leaves it not known.
+    pub(crate) fn read(source: &dyn Source) -> (BTreeSet<String>, Packet) {
         let resolve = |id| source.get(id).ok().cloned();
         let trailer = source.trailer().dict();
-        let mut kept = Kept::default();
-        let packet = match source.metadata() {
+        let mut packet = Packet::default();
+        let result = match source.metadata() {
             Some(xml) => {
                 let catalog = pdf_semantics::catalog(Objects(source), trailer)
                     .ok()
                     .flatten();
-                let stream = catalog
+                packet.stream = catalog
                     .and_then(|catalog| xmp::metadata_stream(Objects(source), catalog).ok())
                     .flatten();
-                Some(xmp::read(xml, stream, &Limits::DEFAULT, &mut kept))
+                packet.len = xml.len();
+                Some(xmp::read(
+                    xml,
+                    packet.stream,
+                    &Limits::DEFAULT,
+                    &mut packet.kept,
+                ))
             }
             None => None,
         };
-        let read = match &packet {
+        let read = match &result {
             Some(Ok(claims)) => Some(claims),
             Some(Err(error)) => Some(&error.read),
             None => None,
@@ -233,7 +243,8 @@ pub mod extension {
         claims.pdfa_part = read.and_then(|read| read.pdfa_part.as_deref());
         claims.pdfvt_version = read.and_then(|read| read.pdfvt_version.as_deref());
         let declared = pdf_arlington::extension::declared(trailer.get(b"Root"), claims, &resolve);
-        (declared, kept, packet.and_then(Result::err))
+        packet.stopped = result.and_then(Result::err);
+        (declared, packet)
     }
 
     #[cfg(test)]
@@ -284,9 +295,10 @@ pub mod extension {
 
         /// A packet read once, for what it declares and what it tells: with
         /// faults, the same claims as [`declared`]'s, and as without them;
-        /// each fault kept in the catalog's metadata stream, at its bytes
-        /// there, or in no object where no catalog names the stream; and what
-        /// stops the read, what's claimed before it counted.
+        /// each fault kept in the catalog's metadata stream, which the packet
+        /// names, at its bytes there, or in no object where no catalog names
+        /// the stream, which it leaves not known; and what stops the read,
+        /// what's claimed before it counted.
         #[test]
         fn a_packet_read_once_declares_as_declared_and_keeps_its_faults() {
             let vt = "<pdfvtid:GTS_PDFVTVersion>PDF/VT-2</pdfvtid:GTS_PDFVTVersion>";
@@ -304,13 +316,15 @@ pub mod extension {
             for (data, faults) in [(&clean, 0), (&faulty, 1)] {
                 doc.insert(5, stream(data));
                 doc.metadata = Some(data.clone());
-                let (claimed, kept, stopped) = read(&doc);
+                let (claimed, got) = read(&doc);
                 assert_eq!(claimed, BTreeSet::from(both.clone()));
                 assert_eq!(claimed, declared(&doc));
                 assert_eq!(claimed, quietly(&doc));
-                assert!(stopped.is_none());
-                assert_eq!(kept.told().len(), faults);
-                for (place, fault, count) in kept.told() {
+                assert_eq!(got.stream, Some((5, 0)));
+                assert_eq!(got.len, data.len());
+                assert!(got.stopped.is_none());
+                assert_eq!(got.kept.told().len(), faults);
+                for (place, fault, count) in got.kept.told() {
                     assert_eq!(*fault, Fault::XmpAttribute);
                     assert_eq!(*count, 1);
                     assert_eq!(place.object, Some((5, 0)));
@@ -322,17 +336,23 @@ pub mod extension {
             // With no catalog to name its stream, a fault's in no object.
             let mut alone = Document::new(Version::new(2, 0), dict! {});
             alone.metadata = Some(faulty.clone());
-            let (claimed, kept, _) = read(&alone);
+            let (claimed, got) = read(&alone);
             assert_eq!(claimed, BTreeSet::from(both.clone()));
-            assert_eq!(kept.told().len(), 1);
-            assert_eq!(kept.told()[0].0, Place::new(None, None));
+            assert_eq!(got.stream, None);
+            assert_eq!(got.kept.told().len(), 1);
+            assert_eq!(got.kept.told()[0].0, Place::new(None, None));
             // What stops the read, with what's claimed before it.
             let stops = [packet(r#"pdfaid:part="3""#, ""), b"</e>".to_vec()].concat();
             alone.metadata = Some(stops);
-            let (claimed, _, stopped) = read(&alone);
+            let (claimed, got) = read(&alone);
             assert_eq!(claimed, BTreeSet::from(["ISO_19005_3".to_string()]));
             assert_eq!(claimed, quietly(&alone));
-            assert!(matches!(stopped.unwrap().why, xmp::XmpWhy::Xml(_)));
+            assert!(matches!(got.stopped.unwrap().why, xmp::XmpWhy::Xml(_)));
+            // With no packet, nothing.
+            alone.metadata = None;
+            let (_, none) = read(&alone);
+            assert_eq!((none.stream, none.len), (None, 0));
+            assert!(none.kept.told().is_empty() && none.stopped.is_none());
         }
 
         /// XMP metadata with `attributes` on an element that binds pdfaid's
