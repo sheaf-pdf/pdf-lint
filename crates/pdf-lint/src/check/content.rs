@@ -3052,6 +3052,13 @@ mod tests {
         );
         // What a stream opens and a later one closes below is closed.
         assert_eq!(found_in_page(&["q", "q", "Q Q"]), []);
+        // A fault too, and what one stream leaves open and another the
+        // same.
+        let closer = |n, i| at(Rule::Content, n, Some(i), ") closes nothing", ")");
+        let faults: Vec<_> = (found_in_page(&["BT ) ET", "BT ) ET"]).into_iter())
+            .filter(|found| found.0 == Rule::Content)
+            .collect();
+        assert_eq!(faults, [closer(10, 0), closer(11, 1)]);
         let two = "2 BMC or BDC left open at the end";
         assert_eq!(
             found_in_page(&["/A BMC", "EMC /B BMC /C BMC", "/D BMC"]),
