@@ -80,8 +80,12 @@
 //! The common structures are read through pdf-semantics: before the walk,
 //! the page tree (ISO 32000-2, 7.7.3), by ISO's rules and by PDFium's, from
 //! the catalog the trailer as written leads to; after the content, each name
-//! and number tree the walk reached (7.9.6, 7.9.7), from its root. No rule
-//! is held to what they tell yet.
+//! and number tree the walk reached in the newest revision (7.9.6, 7.9.7),
+//! from its root, what that tells of it that the walk doesn't say a
+//! [`Rule::Tree`] finding, each kind once in each object it's in, at its
+//! first place there, with how many times, and a tree not read whole for
+//! what isn't the file's fault counted as not checked. No rule is held to
+//! what the page tree's walks tell yet.
 //!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
@@ -540,7 +544,26 @@ pub enum Rule {
     /// newest cross-reference section doesn't give.
     Unresolved,
     /// A name or number tree's node that breaks ISO 32000-2 7.9.6 or
-    /// 7.9.7.
+    /// 7.9.7. As the walk reads the tree: a root with neither `/Kids` nor
+    /// its entries, or with `/Limits`; a node with both, or under the root
+    /// without `/Limits`; an odd last key, a key of another type than the
+    /// tree's, a value of no table; `/Kids` or the entries not an array, a
+    /// kid that isn't a dictionary. And of what pdf-semantics' walk of the
+    /// tree tells, what the walk doesn't say: a node reached again, by a
+    /// loop or from two parents, in the node that lists it; a kid written
+    /// in place, not as a reference; `/Limits` that aren't the node's least
+    /// and greatest keys; a key not past the one before it, or outside the
+    /// `/Limits` of a node over it; and a node under the root with neither
+    /// `/Kids` nor entries. Each of those once in each object it's in, at
+    /// its first place there, its value pdf-semantics' words with how many
+    /// times; what's in a root written in place is in the object that holds
+    /// it, and held where that is. Its table and key the row's whose value
+    /// the root is, its path the root's. A tree pdf-semantics doesn't read
+    /// whole for what isn't the file's fault, an object that takes a
+    /// password or is past a cap, a key whose bytes the reader didn't give,
+    /// a tree deeper or with more nodes than it reads, is counted as not
+    /// checked, once for each, where its root is held; what was read of it
+    /// is found all the same.
     Tree,
     /// A key or element of a [`Made::Built`] object that the model
     /// doesn't list ([`Unlisted`]), and isn't a second- or third-class
@@ -747,7 +770,9 @@ pub enum Class {
 /// `-`; or content that can't be, its column `-`: a unit of it not read,
 /// its table and key a finding in it would have, a resource name that
 /// can't be looked up, the holder's table and `Resources`, and a resource
-/// that can't be told used or not, `Resource` and its category.
+/// that can't be told used or not, `Resource` and its category; or a name
+/// or number tree not read whole for what isn't the file's fault, its
+/// column `-`, its table and key the row's whose value its root is.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Unchecked {
     /// The column whose cell it is.
@@ -758,7 +783,9 @@ pub struct Unchecked {
     /// be checked: a later revision whose numbers aren't known, or the
     /// revisions not kept; for content, why it isn't read (a content
     /// stream that doesn't decode cleanly, content past the file's
-    /// budget), or why a name in it can't be looked up, or a resource told.
+    /// budget), or why a name in it can't be looked up, or a resource told;
+    /// for a tree, why it isn't read whole (an object of it that takes a
+    /// password).
     pub why: String,
     pub table: String,
     pub key: String,
@@ -775,10 +802,11 @@ pub struct Report {
     /// Keys and elements of held objects checked against their rows.
     pub keys: usize,
     /// Checks not made, for a predicate that can't be told; earlier
-    /// revisions' trailers held that can't be checked; and content held
-    /// that can't be: units of it not read, resource names in it that
-    /// can't be looked up, and resources that can't be told used or not;
-    /// by why.
+    /// revisions' trailers held that can't be checked; content held that
+    /// can't be: units of it not read, resource names in it that can't be
+    /// looked up, and resources that can't be told used or not; and name
+    /// and number trees whose roots are held not read whole for what isn't
+    /// the file's fault; by why.
     pub unchecked: BTreeMap<Unchecked, usize>,
     /// Keys and elements of held objects the model doesn't list.
     pub unlisted: BTreeMap<Unlisted, usize>,
@@ -1141,15 +1169,17 @@ enum Place {
 /// references' numbers aside, which a rewrite renumbers, and a reader's
 /// finding's numbers aside, its offsets, and a content finding's, its
 /// counts, offsets and lengths, and how many times its kind was found, but
-/// an operator's name, `d0` not `d1`, in an operator's or operands'; for
-/// a key that came in later than the file's version, any value, as its
-/// value isn't what's wrong; and for an object nothing reaches, the object
-/// alone, as which object's reference to it is named follows the objects'
-/// numbers and keys' order.
+/// an operator's name, `d0` not `d1`, in an operator's or operands'; and a
+/// tree finding's references' numbers and how many times its kind was
+/// found; for a key that came in later than the file's version, any value,
+/// as its value isn't what's wrong; and for an object nothing reaches, the
+/// object alone, as which object's reference to it is named follows the
+/// objects' numbers and keys' order.
 fn like(f: &Finding) -> (String, String, Rule, String) {
     let value = match f.rule {
         Rule::TooNew => String::new(),
         Rule::Reader => f.value.chars().filter(|c| !c.is_ascii_digit()).collect(),
+        Rule::Tree => numberless(structure::uncounted(&f.value)),
         rule if content::counted(rule, &f.key) => content::uncounted(rule, &f.value),
         _ => numberless(&f.value),
     };
@@ -2642,9 +2672,6 @@ impl<'a> Walk<'a> {
             let Value::Dict(dict) = node.value() else {
                 continue;
             };
-            if is_root {
-                self.note_root(node, node_id, names);
-            }
             let here = Visit {
                 object: node,
                 holder: node_id.or(from.holder),
@@ -2658,6 +2685,9 @@ impl<'a> Walk<'a> {
                 loose: from.loose,
                 also: None,
             };
+            if is_root {
+                self.note_root(&here, names, &row.key);
+            }
             let made = self.made(here.holder);
             // What's wrong with the node, as a tree finding unless said.
             let mut wrong = Vec::new();
@@ -9163,5 +9193,44 @@ mod tests {
         }
         assert!(objects.try_resolve((1, 0)).unwrap().is_some());
         assert_eq!(objects.try_resolve((9, 0)), Ok(None));
+    }
+
+    /// A tree one of whose nodes takes a password the reader wasn't given,
+    /// in an object stream nothing decodes, is counted as not checked, once,
+    /// its table and key the root's row's, where the root is held; and what
+    /// was read of it before is found all the same.
+    #[test]
+    fn a_tree_whose_node_takes_a_password_is_counted_what_was_read_found() {
+        let mut file = Sections::new("1.7");
+        file.object(1, "<< /Type /Catalog /Pages 2 0 R /PageLabels 5 0 R >>");
+        file.object(2, PAGES);
+        file.object(5, "<< /Kids [6 0 R 7 0 R] >>");
+        file.object(6, "<< /Limits [1 0] /Nums [0 << /S /D >>] >>");
+        let locked = "<< /Limits [2 2] /Nums [2 << /S /r >>] >>";
+        file.object_stream(10, "", &[(7, locked)]);
+        let trailer = "/Root 1 0 R /Encrypt << /Filter /Standard /V 2 >>";
+        let at = file.stream(11, &[0, 1, 2, 5, 6, 7, 10], trailer);
+        file.end(at);
+        let unread = |report: &Report| -> Vec<_> {
+            (report.unchecked.iter())
+                .filter(|(u, _)| (u.column, u.table.as_str()) == ("-", "Catalog"))
+                .map(|(u, &n)| (u.why.clone(), u.key.clone(), n))
+                .collect()
+        };
+        let password = "a tree with an object that takes a password".to_string();
+        let report = checked_as(&file.out, &Hold::All(Made::Merged));
+        let bad = "a node's /Limits isn't its least and greatest keys";
+        let trees: Vec<_> = (found(&report).into_iter())
+            .filter(|f| f.3 == Rule::Tree)
+            .collect();
+        assert_eq!(
+            trees,
+            [(Some(6), "Catalog", "PageLabels", Rule::Tree, bad)],
+            "{report}"
+        );
+        let counted = [(password, "PageLabels".to_string(), 1)];
+        assert_eq!(unread(&report), counted, "{report}");
+        let six = Hold::Only(BTreeMap::from([((6, 0), Made::Merged)]));
+        assert_eq!(unread(&checked_as(&file.out, &six)), []);
     }
 }

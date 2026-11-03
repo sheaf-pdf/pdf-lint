@@ -664,7 +664,7 @@ impl Depth {
 }
 
 /// `what`, and how many times it's found when that's more than once.
-fn times(what: &str, n: usize) -> String {
+pub(super) fn times(what: &str, n: usize) -> String {
     match n {
         1 => what.to_string(),
         n => format!("{what}, {n} times"),
