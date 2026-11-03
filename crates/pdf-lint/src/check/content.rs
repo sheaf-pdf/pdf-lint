@@ -1973,7 +1973,8 @@ mod tests {
     /// one; each of an array's, direct or through a reference; one two
     /// pages share with the resources they inherit, once; a form's, a
     /// pattern's, each glyph's; and what isn't content, or isn't reached
-    /// as it, never.
+    /// as it, never. A glyph's is asked for once more, by its font's read,
+    /// which reads it for its `d0` or `d1`.
     #[test]
     fn each_content_stream_reached_is_asked_for_once() {
         let fonts = "/Font << /T3 30 0 R >>";
@@ -2022,7 +2023,8 @@ mod tests {
             (31, stream("", "9 0 d0 0 0 9 9 re f")),
             (32, stream("", "9 0 0 0 9 9 d1 0 0 9 9 re f")),
         ]);
-        assert_eq!(streams(&file(&objects)), [10, 11, 12, 14, 20, 21, 31, 32]);
+        let asked = [10, 11, 12, 14, 20, 21, 31, 31, 32, 32];
+        assert_eq!(streams(&file(&objects)), asked);
     }
 
     /// A stream two pages share is read once for each resources it's read

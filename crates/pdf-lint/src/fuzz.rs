@@ -7,9 +7,9 @@
 //! its content finds moving nothing a check of its document alone finds;
 //! and set against its previous revision, when it has an incremental
 //! update. It reads under small limits ([`options`], and 4 MiB of content
-//! in [`setting`]), so that a run tries more inputs. It's compiled only for
-//! tests and under cargo-fuzz's `--cfg fuzzing`, with [`seeds`], files for
-//! the fuzzer to begin from.
+//! and 4 MiB of fonts' streams in [`setting`]), so that a run tries more
+//! inputs. It's compiled only for tests and under cargo-fuzz's `--cfg
+//! fuzzing`, with [`seeds`], files for the fuzzer to begin from.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -84,8 +84,8 @@ pub fn check_file(data: &[u8]) {
 /// unlisted keys found in built objects, all or none; at the file's
 /// version, 1.0's or 2.0's; with paths recorded; under some extensions;
 /// with keys exempt; unused resources found. Its content within 4 MiB
-/// decoded, so that a check keeps within the fuzz target's time for an
-/// input.
+/// decoded, and its fonts' streams within 4 MiB, so that a check keeps
+/// within the fuzz target's time for an input.
 pub fn setting(choice: u16, doc: &Document) -> (Hold, Options) {
     let bit = |n: u16| choice & (1 << n) != 0;
     let made = if bit(0) { Made::Built } else { Made::Merged };
@@ -127,6 +127,7 @@ pub fn setting(choice: u16, doc: &Document) -> (Hold, Options) {
             true => names.iter().map(|name| name.to_string()).collect(),
         },
         content_budget: Some(4 << 20),
+        font_budget: Some(4 << 20),
     };
     (hold, options)
 }

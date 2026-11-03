@@ -29,6 +29,9 @@
 //! a file declares, is held to ISO 32000-2 too: what isn't UTF-8 or XML as
 //! 14.3.2 has it is told at its bytes in the metadata stream ([`check()`]
 //! says how).
+//!
+//! Each color space and font the walk reaches is read again, through
+//! pdf-color and pdf-fonts, the fonts for their text, no program read.
 
 pub mod allowance;
 pub mod check;
@@ -249,7 +252,7 @@ pub mod extension {
 
     #[cfg(test)]
     mod tests {
-        use pdf_semantics::{Fault, Place};
+        use pdf_semantics::Fault;
 
         use super::*;
         use crate::dict;
@@ -340,7 +343,8 @@ pub mod extension {
             assert_eq!(claimed, BTreeSet::from(both.clone()));
             assert_eq!(got.stream, None);
             assert_eq!(got.kept.told().len(), 1);
-            assert_eq!(got.kept.told()[0].0, Place::new(None, None));
+            let place = got.kept.told()[0].0;
+            assert_eq!((place.object, place.at), (None, None));
             // What stops the read, with what's claimed before it.
             let stops = [packet(r#"pdfaid:part="3""#, ""), b"</e>".to_vec()].concat();
             alone.metadata = Some(stops);

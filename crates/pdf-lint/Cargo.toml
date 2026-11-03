@@ -25,11 +25,18 @@ anyhow = { version = "1", optional = true }
 # newer clap in the lock means taking them again.
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"], optional = true }
 pdf-arlington = { path = "../pdf-arlington", version = "0.1" }
+# Color spaces read as ISO 32000-2 has them: each the walk reaches, its
+# faults kept. pdf-content-streams depends on it too, for its own reading.
+pdf-color = { path = "../pdf-color", version = "0.1" }
 # Content streams read as their checks read them: every page's, form's,
 # pattern's and Type 3 glyph's the walk reaches. With `image-ends`, so that an
 # inline image's DCT and CCITTFax data ends where PDFium's decoders end it,
 # not where the stand-in guesses.
 pdf-content-streams = { path = "../pdf-content-streams", version = "0.1", features = ["image-ends"] }
+# Fonts read for text, each the walk reaches, its faults kept. Without its
+# features: no program is read, so neither skrifa nor the code taken from
+# FreeType is compiled in, and no predefined CMap, so nor is hayro-cmap.
+pdf-fonts = { path = "../pdf-fonts", version = "0.1", default-features = false }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
 # Dates and XMP claims, read without its clock, so without chrono.
 pdf-semantics = { path = "../pdf-semantics", version = "0.1", default-features = false }

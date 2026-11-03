@@ -3,7 +3,8 @@
 # changelog and license, and the NOTICE.txt of the Arlington model it
 # embeds, with the cells it corrects in it and the rows it adds
 # (pdf-arlington's model/corrections.tsv and model/additions); the
-# notices of what's compiled in (below); checks it runs
+# notices of what's compiled in (below), Adobe's for the font metrics
+# among them; checks it runs
 # (release/smoke.sh); and packs it.
 # The layout, pdf-lint-<version>-<platform>/pdf-lint[.exe] and a .sha256
 # beside the archive, is what setup-pdf-lint unpacks: keep it.
@@ -78,7 +79,43 @@ cargo fetch --locked --target "$target" --quiet
 registry=$(unix "${CARGO_HOME:-$HOME/.cargo}")/registry/src
 crates=$(cargo tree --locked -e normal,no-proc-macro --target "$target" -p pdf-lint --prefix none \
     --format '{p}|{l}' | sed 's/ (\*)$//' | sort -u |
-    grep -vE '^(pdf-lint|pdf-tokenizer|pdf-filters|pdf-crypt|pdf-objects|pdf-structure|pdf-content-streams|pdf-color|pdf-semantics|pdf-arlington) v')
+    grep -vE '^(pdf-lint|pdf-tokenizer|pdf-filters|pdf-crypt|pdf-objects|pdf-structure|pdf-content-streams|pdf-color|pdf-fonts|pdf-semantics|pdf-arlington) v')
+
+# pdf-fonts as pdf-lint's build compiles it, by the features it's built
+# with: neither `programs`, whose code is in part FreeType's, under the
+# FTL, and which brings in skrifa, nor `predefined-cmaps`, which brings in
+# hayro-cmap's CMaps. Their notices aren't taken here, so a build that
+# turns either on stops here until they are.
+features=$(cargo tree --locked -e normal --target "$target" -p pdf-lint -i pdf-fonts --depth 0 --format '{f}') ||
+    fail "pdf-fonts isn't in pdf-lint's build"
+case ",$features," in
+*,programs,* | *,predefined-cmaps,*)
+    fail "pdf-lint's build turns on pdf-fonts' features $features, whose notices (FreeType's, skrifa's, hayro-cmap's) aren't taken" ;;
+esac
+
+# pdf-fonts' data, compiled in whole: Adobe's Core 14 font metrics, which
+# go with the file Adobe distributes them with, as its paragraph, which
+# each carries on its third line too, has it; and the Adobe Glyph List and
+# the ITC Zapf Dingbats Glyph List, under the BSD 3-Clause license each
+# one's header holds, the same text in both, said once. Each read as text,
+# whatever line ends a checkout gave it.
+assets=$root/crates/pdf-fonts/assets
+cp "$assets/afm/MustRead.html" "$out/$name/ADOBE-AFM-NOTICE.html"
+paragraph() {
+    sed -n '3s/^Comment //p' "$1" | tr -d '\r'
+}
+afm=$(paragraph "$assets/afm/Helvetica.afm")
+for file in "$assets"/afm/*.afm; do
+    [ "$(paragraph "$file")" = "$afm" ] || fail "$file doesn't carry Adobe's paragraph on its third line"
+done
+grep -qF "$afm" "$assets/afm/MustRead.html" || fail "the metrics' MustRead.html doesn't hold their paragraph"
+# A glyph list's licence: its header's lines between its first two rules.
+licence() {
+    awk '{ sub(/\r$/, "") } /^# -+$/ { if (++rules == 2) exit; next } rules == 1 { sub(/^# ?/, ""); print }' "$1"
+}
+glyphs=$(licence "$assets/glyphlist.txt")
+[ -n "$glyphs" ] && [ "$glyphs" = "$(licence "$assets/zapfdingbats.txt")" ] ||
+    fail "the glyph lists' headers don't hold one licence"
 texts=$(mktemp)
 table=
 # The names' column as wide as the longest name, 15 at least.
@@ -109,7 +146,9 @@ pdf-lint $version for $platform
 
 What's compiled into the binary besides this workspace's own crates
 (pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure,
-pdf-content-streams, pdf-color and pdf-semantics, MIT OR Apache-2.0;
+pdf-content-streams, pdf-color, pdf-fonts and pdf-semantics, MIT OR
+Apache-2.0, pdf-fonts as it's compiled in here, without the code its
+package's FTL is for, which only its programs feature compiles;
 pdf-arlington, Apache-2.0, with the Arlington model, whose NOTICE.txt is
 ARLINGTON-NOTICE.txt):
 
@@ -118,6 +157,14 @@ ARLINGTON-NOTICE.txt):
   most offer, is LICENSE-APACHE beside this file.
 
 $table
+- Adobe's Core 14 font metrics, in pdf-fonts, whole, with their
+  copyright notices, on the terms of Adobe's paragraph, which goes with
+  them as ADOBE-AFM-NOTICE.html, the file Adobe distributes them with:
+
+$afm
+
+- The Adobe Glyph List and the ITC Zapf Dingbats Glyph List, in
+  pdf-fonts, under the BSD 3-Clause license, its text after the list.
 - The Rust standard library, and what it's built from: RUST-NOTICES.html.
 END
     if [ -n "$musl" ]; then
@@ -133,6 +180,7 @@ END
             printf '\n\n==== %s, of %s\n\n' "$(basename "$path")" "$crates"
             cat "$path"
         done
+    printf '\n\n==== %s\n\n%s\n' "The licence in glyphlist.txt's and zapfdingbats.txt's headers, of pdf-fonts" "$glyphs"
 } >"$out/$name/THIRD-PARTY-NOTICES.txt"
 rm -f "$texts"
 

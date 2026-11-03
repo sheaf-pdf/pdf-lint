@@ -87,8 +87,7 @@
 //! what the packet tells has no object to be in, and is counted so, once,
 //! where the catalog is held.
 
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::mem::{self, Discriminant};
 use std::rc::Rc;
 
@@ -97,6 +96,7 @@ use pdf_semantics::tree::{names, numbers};
 use pdf_semantics::{Fault, Limits, Place, Sink, xmp};
 
 use super::content::times;
+use super::kept::Kept;
 use super::{Finding, Objects, REFERENCES, Rule, Trail, Visit, Walk, entry_at};
 use crate::object::{Dict, Object, ObjectId, Span};
 use crate::source::Source;
@@ -105,51 +105,6 @@ use crate::{Rules, Unreadable, Why};
 /// What the structures are read under: pdf-semantics' caps, which ISO
 /// 32000-2 doesn't set.
 const LIMITS: Limits = Limits::DEFAULT;
-
-/// Keeps, of each kind of fault in each object, the first told, where it
-/// was, and how many were told, in the order each was first told: what a
-/// finding needs, so that what's kept grows with the objects and kinds of
-/// fault, never with the faults, which a file can make millions of (a
-/// `/Names` of a million keys out of order, a `/Kids` listing one page a
-/// million times). One told again at the bytes its kind was last told at
-/// in the object is the same fault read again, as the page tree's walk
-/// reads a page's `/Parent` for the node it names and again for what it
-/// inherits, and isn't counted again; one at no bytes known always is.
-#[derive(Default)]
-pub(crate) struct Kept {
-    /// Each object's kind: its first fault, where, and how many.
-    told: Vec<(Place, Fault, usize)>,
-    /// The bytes each of `told` was last told at.
-    last: Vec<Option<Span>>,
-    /// Where each object's kind is in `told`, only looked up.
-    index: HashMap<(Option<ObjectId>, Discriminant<Fault>), usize>,
-}
-
-impl Sink for Kept {
-    fn fault(&mut self, at: Place, fault: Fault) {
-        match self.index.entry((at.object, mem::discriminant(&fault))) {
-            Entry::Occupied(kind) => {
-                let i = *kind.get();
-                if at.at.is_none() || at.at != self.last[i] {
-                    self.told[i].2 += 1;
-                    self.last[i] = at.at;
-                }
-            }
-            Entry::Vacant(kind) => {
-                kind.insert(self.told.len());
-                self.told.push((at, fault, 1));
-                self.last.push(at.at);
-            }
-        }
-    }
-}
-
-impl Kept {
-    /// What's kept, in the order each was first told.
-    pub(crate) fn told(&self) -> &[(Place, Fault, usize)] {
-        &self.told
-    }
-}
 
 /// Notes whether a walk told of an object that doesn't read
 /// ([`Fault::Damaged`]), the one fault a walk by PDFium's rules tells, and
@@ -247,7 +202,7 @@ pub(super) fn uncounted(value: &str) -> &str {
 #[derive(Default)]
 pub(super) struct PageTree<'a> {
     /// What it told of what's found, or stops a check.
-    kept: Kept,
+    kept: Kept<Fault>,
     /// Why it stopped: an object on the way that takes a password or is
     /// past a cap, or a tree deeper or with more pages than is read.
     unread: Option<&'static str>,
@@ -264,7 +219,7 @@ pub(super) struct PageTree<'a> {
 /// a reference that names another, an object that doesn't read and what
 /// isn't checked; so that a kind's first and its count are of those, and
 /// never of one it doesn't find by what the fault holds.
-struct PageFaults<'k>(&'k mut Kept);
+struct PageFaults<'k>(&'k mut Kept<Fault>);
 
 impl Sink for PageFaults<'_> {
     fn fault(&mut self, at: Place, fault: Fault) {
@@ -678,7 +633,7 @@ pub(crate) struct Packet {
     /// Its length.
     pub(crate) len: usize,
     /// What it told, each place in that stream, at bytes of its data.
-    pub(crate) kept: Kept,
+    pub(crate) kept: Kept<Fault>,
     /// What stopped it being read, if anything did.
     pub(crate) stopped: Option<xmp::Error>,
 }
@@ -813,7 +768,7 @@ impl<'a> Walk<'a> {
     /// faults, as not checked, each once, where the catalog is held.
     fn page_tree_told(
         &mut self,
-        kept: &Kept,
+        kept: &Kept<Fault>,
         unread: Option<&'static str>,
         catalog: Option<ObjectId>,
         root: Option<&Dict>,
@@ -1092,7 +1047,7 @@ impl<'a> Walk<'a> {
 
 #[cfg(test)]
 mod tests {
-    //! What's kept of a walk's faults; and what's found of a tree's, the
+    //! What's noted of a walk's faults; and what's found of a tree's, the
     //! page tree's and the packet's, where, and as whose, and what's
     //! counted.
 
@@ -3000,46 +2955,6 @@ mod tests {
         assert_eq!(values(other.since(&once)), [VALUE]);
         assert_eq!(values(other.by_path(&once)), [VALUE]);
         assert_eq!(values(other.beyond(&[&once])), [VALUE]);
-    }
-
-    /// Of each kind in each object, the first told and its place, and how
-    /// many, in the order each kind was first told there: a kind told in
-    /// another object is another, and a kind's fields don't part it.
-    #[test]
-    fn kept_is_each_kind_s_first_in_each_object_with_how_many() {
-        let mut kept = Kept::default();
-        let first = Place::new(Some((3, 0)), Some(crate::object::Span::new(None, 5, 9)));
-        kept.fault(first, Fault::PageTreeRepeated { id: (5, 0) });
-        kept.fault(at(Some((3, 0))), Fault::TreeKeyOrder);
-        kept.fault(at(Some((3, 0))), Fault::PageTreeRepeated { id: (6, 0) });
-        kept.fault(at(Some((4, 0))), Fault::PageTreeRepeated { id: (5, 0) });
-        kept.fault(at(None), Fault::TreeKeyOrder);
-        for _ in 0..1000 {
-            kept.fault(at(Some((3, 0))), Fault::TreeKeyOrder);
-        }
-        kept.fault(at(None), Fault::TreeKeyOrder);
-        assert_eq!(
-            kept.told(),
-            [
-                (first, Fault::PageTreeRepeated { id: (5, 0) }, 2),
-                (at(Some((3, 0))), Fault::TreeKeyOrder, 1001),
-                (at(Some((4, 0))), Fault::PageTreeRepeated { id: (5, 0) }, 1),
-                (at(None), Fault::TreeKeyOrder, 2),
-            ]
-        );
-        assert_eq!(kept.index.len(), 4);
-
-        // Told again at the bytes its kind was last told at in the object,
-        // as a walk reads a value twice, it's once; at other bytes, or at
-        // none known, again.
-        let mut kept = Kept::default();
-        let bytes = |start| Place::new(Some((2, 0)), Some(Span::new(None, start, start + 5)));
-        for start in [10, 10, 20, 10, 10] {
-            kept.fault(bytes(start), Fault::PageTreeChain);
-        }
-        kept.fault(at(Some((2, 0))), Fault::PageTreeChain);
-        kept.fault(at(Some((2, 0))), Fault::PageTreeChain);
-        assert_eq!(kept.told(), [(bytes(10), Fault::PageTreeChain, 5)]);
     }
 
     /// Only an object that doesn't read is noted: the one fault PDFium's

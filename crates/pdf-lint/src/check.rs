@@ -100,6 +100,14 @@
 //! namespaces at once than is read counted as not checked, as is one whose
 //! stream isn't known.
 //!
+//! Then each color space and font the walk reached in the newest revision,
+//! as one of the model's color space or font tables, is read again, in the
+//! order it reached them: each space through pdf-color, as ISO 32000-2 has
+//! it (8.6), and each font through pdf-fonts, for its text, no program read
+//! (9.5 to 9.10), its streams decoded where the source gives their data,
+//! within [`Options::font_budget`]. What each read tells is kept; none of it
+//! is found yet.
+//!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
 //! under another is as if it weren't in the model, as in TestGrammar
@@ -178,7 +186,10 @@ use crate::source::{Origin, Revision, Source, Trailer, Warning};
 use crate::text;
 use crate::version::Version;
 
+mod color;
 mod content;
+mod fonts;
+mod kept;
 mod structure;
 
 pub(crate) use structure::Packet;
@@ -211,6 +222,12 @@ const TOKEN: usize = 80;
 /// unless [`Options::content_budget`] says another: 2 GiB. Past it, no more
 /// content is read.
 pub const CONTENT_BUDGET: usize = 2 << 30;
+
+/// How many bytes of fonts' streams a check of a file decodes in all, their
+/// `/ToUnicode`s, embedded CMaps and Type 3 glyphs, unless
+/// [`Options::font_budget`] says another: 256 MiB. A font whose streams
+/// decode past what's left of it isn't read.
+pub const FONT_BUDGET: usize = 256 << 20;
 
 /// How a writer made an object it wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -372,6 +389,10 @@ pub struct Options {
     /// content the walk reaches, through a source that gives streams'
     /// data ([`Source::decoded_within`]): none for [`CONTENT_BUDGET`].
     pub content_budget: Option<usize>,
+    /// How many bytes of fonts' streams to decode in all, for the fonts the
+    /// walk reaches, through a source that gives streams' data
+    /// ([`Source::decoded_within`]): none for [`FONT_BUDGET`].
+    pub font_budget: Option<usize>,
 }
 
 /// Which held objects a key the model doesn't list is a finding in.
@@ -981,7 +1002,9 @@ pub struct Report {
 /// from the catalog the trailer as written leads to, by ISO's rules
 /// ([`Rule::PageTree`]) and set beside PDFium's ([`Rule::Viewer`]), each
 /// name and number tree the walk reaches, read again from its root
-/// ([`Rule::Tree`]), and the catalog's XMP packet ([`Rule::Xmp`]). A
+/// ([`Rule::Tree`]), and the catalog's XMP packet ([`Rule::Xmp`]); and each
+/// color space and font the walk reaches, read again through pdf-color and
+/// pdf-fonts, the fonts' streams within [`Options::font_budget`]. A
 /// trailer the reader couldn't read so is a finding, and the walk starts
 /// from what it made of the file instead.
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
@@ -1122,6 +1145,8 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         roots: Vec::new(),
         packet,
         packet_at: None,
+        spaces: Vec::new(),
+        fonts: Vec::new(),
         report: Report {
             findings,
             unchecked,
@@ -1155,6 +1180,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     walk.packed();
     walk.content(options.content_budget.unwrap_or(CONTENT_BUDGET));
     walk.structures();
+    walk.graphics(options.font_budget.unwrap_or(FONT_BUDGET));
     walk.unreached();
     walk.read_as(source.warnings());
     walk.report
@@ -1343,6 +1369,7 @@ pub fn file_version(source: &dyn Source) -> Version {
 /// ([`Unread::unreadable`]).
 ///
 /// [`Unread::unreadable`]: crate::source::Unread::unreadable
+#[derive(Clone, Copy)]
 pub(crate) struct Objects<'a>(pub(crate) &'a dyn Source);
 
 impl<'a> Resolve<'a> for Objects<'a> {
@@ -1591,7 +1618,24 @@ struct Walk<'a> {
     /// Where the walk first visited the packet's stream, when it did so as
     /// `Metadata`: the path of the packet's findings.
     packet_at: Option<Rc<Trail<'a>>>,
+    /// Each color space the walk reached as one of the model's color space
+    /// tables in the newest revision, in the order it reached them, which
+    /// [`Walk::graphics`] reads again.
+    spaces: Vec<Graphic<'a>>,
+    /// Each font the walk reached as one of the model's font tables in the
+    /// newest revision, in the order it reached them, which
+    /// [`Walk::graphics`] reads again.
+    fonts: Vec<Graphic<'a>>,
     report: Report,
+}
+
+/// A color space or a font the walk reached ([`Walk::note_graphics`]),
+/// which [`Walk::graphics`] reads again.
+struct Graphic<'a> {
+    /// The value it was reached as, as written.
+    object: &'a Object,
+    /// Its number, where it's an indirect object.
+    id: Option<ObjectId>,
 }
 
 /// A dictionary, stream or array to check, as a table.
@@ -1843,6 +1887,7 @@ impl<'a> Walk<'a> {
     fn visit(&mut self, v: Visit<'a>) {
         self.note_content(&v);
         self.note_structure(&v);
+        self.note_graphics(&v);
         let made = self.made(v.holder);
         let also = v.also.map(|table| v.as_(table));
         if made.is_some() {
@@ -3493,6 +3538,36 @@ impl<'a> Walk<'a> {
                     .push(packed_in(stream, made, value, first));
             }
         }
+    }
+
+    /// Keeps `v` for [`Walk::graphics`] when it's a visit of one of the
+    /// model's color space tables, or of its font tables: by the value and
+    /// its number. Not in an earlier revision's trailer, whose objects are
+    /// the file's where no later revision wrote them, as the walk from the
+    /// trailer reaches them.
+    fn note_graphics(&mut self, v: &Visit<'a>) {
+        if self.revision.is_some() {
+            return;
+        }
+        let table = v.table.name.as_str();
+        let reached = || Graphic {
+            object: v.object,
+            id: v.id(),
+        };
+        if color::SPACES.contains(&table) {
+            self.spaces.push(reached());
+        } else if fonts::FONTS.contains(&table) {
+            self.fonts.push(reached());
+        }
+    }
+
+    /// Reads again each color space and font the walk reached, in the
+    /// order it reached them, the spaces first, through pdf-color and
+    /// pdf-fonts, the fonts' streams within `budget` bytes decoded in all:
+    /// see the module's documentation.
+    fn graphics(&mut self, budget: usize) {
+        self.spaces();
+        self.fonts(budget);
     }
 
     /// The held objects the walk never reached, each a [`Rule::Unreached`]
