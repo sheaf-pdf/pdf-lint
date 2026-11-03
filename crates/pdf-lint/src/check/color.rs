@@ -8,30 +8,34 @@
 //! Of what it tells, what the walk can't say is a [`Rule::ColorSpace`]
 //! finding, where the walk found nothing by the model's rules
 //! ([`MODEL`](super::MODEL)) in that object at that key
-//! ([`Walk::find_told`]): each kind once in each object, whichever
-//! space's read tells it, at its first place there, its value pdf-color's
-//! words with how many times; in the fault's object, else the space's,
-//! else the one the space is written in, held where that is. Its key is
-//! the dictionary's key the kind is about, where it's one ([`kind_key`]),
-//! an element a space lacks at that element, a family's name told at an
-//! array at `0` ([`of_the_name`]), as the model's `missing` and `value`
-//! are at the key, the element or the name, and any other at the entry or
-//! element whose value holds its bytes ([`holding`]). Two more things the
-//! walk says where the key doesn't match: what an object, as a whole, is
-//! of, which a read reaches through a reference, the walk checks at the
-//! key holding the reference; and a space of a family that may not be
-//! where it is, the model links to the tables of those that may alone, so
-//! the walk finds its family's name a value the table it takes it for
-//! doesn't have ([`of_a_family`]). Its path and table are the object's
-//! where the walk first visited it as a color space table or one of what a
-//! space holds ([`PARTS`]), else the space's. An object that doesn't read
-//! is never told, nor what a read tells at the bytes it tells of one at
-//! ([`Faults`]): it's the reader's, and the model's `unresolved`. What
-//! stops a space being read whole that isn't the file's fault (an object
-//! that takes a password or is past a cap, a space nested deeper or
-//! looking up more than is read) is counted as not checked, once a space
-//! for each, where the space, or what it's written in, is held; what was
-//! read before it is found all the same.
+//! ([`Walk::find_told`]): each kind once in each object, whichever space's
+//! read tells it, at its first place there, its value pdf-color's words
+//! with how many times it's told there, what the walk found among them; in
+//! the fault's object, else the space's, else the one the space is written
+//! in, held where that is. Its key is the dictionary's key the kind is
+//! about, where it's one ([`kind_key`]), an element a space lacks at that
+//! element, a family's name told at an array at `0` ([`of_the_name`]), as
+//! the model's `missing` and `value` are at the key, the element or the
+//! name, and any other at the entry or element whose value holds its bytes
+//! ([`holding`]). Three more things the walk says where the key doesn't
+//! match: what an object, as a whole, is of, which a read reaches through a
+//! reference, the walk checks at the key holding the reference; a space of
+//! a family that may not be where it is, the model links to the tables of
+//! those that may alone, so the walk finds its family's name a value the
+//! table it takes it for doesn't have ([`of_a_family`]); and what an array
+//! at a key is as a whole, its count and its elements, the walk finds at or
+//! inside the array, whose elements the model checks each
+//! ([`of_the_elements`]). Its path and table are those of the dictionary or
+//! array its key is written in, in place too, where the walk first visited
+//! it as a color space table or one of what a space holds ([`PARTS`]), else
+//! the object's, else the space's ([`Walk::path_and_table`]). An object
+//! that doesn't read is never told, nor what a read tells at the bytes it
+//! tells of one at ([`Faults`]): it's the reader's, and the model's
+//! `unresolved`. What stops a space being read whole that isn't the file's
+//! fault (an object that takes a password or is past a cap, a space nested
+//! deeper or looking up more than is read) is counted as not checked, once
+//! a space for each, where the space, or what it's written in, is held;
+//! what was read before it is found all the same.
 
 use std::collections::HashSet;
 use std::mem::{self, Discriminant};
@@ -40,7 +44,7 @@ use pdf_color::{Fault, Limits, Space};
 
 use super::content::times;
 use super::kept::Kept;
-use super::told::{Told, holding};
+use super::told::{Keyed, Told, holding};
 use super::{Finding, Graphic, Made, Objects, REFERENCES, Rule, Walk};
 use crate::object::{Object, ObjectId, Span};
 use crate::{Unreadable, Why};
@@ -169,6 +173,25 @@ fn of_the_name(fault: Fault) -> bool {
     )
 }
 
+/// Whether `fault` is of what an array at its key is as a whole, its
+/// count and its elements, each of which the model checks: a CIE-based
+/// space's `/WhitePoint`, `/BlackPoint`, `/Gamma` and `/Matrix`, a Lab
+/// `/Range`, a profile's `/Range` and a process dictionary's
+/// `/Components`. Told at the array or at an element, it gives way to what
+/// the walk finds there, which says it ([`Told::inside`]).
+fn of_the_elements(fault: Fault) -> bool {
+    matches!(
+        fault,
+        Fault::WhitePoint
+            | Fault::BlackPoint
+            | Fault::Gamma
+            | Fault::Matrix
+            | Fault::LabRange
+            | Fault::IccRange
+            | Fault::ProcessComponents
+    )
+}
+
 /// Whether `fault` is of what family a space that another holds is: an
 /// Indexed space's base, an alternate, a Pattern space's underlying space,
 /// a process dictionary's space, a profile's alternate and a `/Colorants`
@@ -187,7 +210,7 @@ fn of_a_family(fault: Fault) -> bool {
     )
 }
 
-impl Walk<'_> {
+impl<'a> Walk<'a> {
     /// Reads each color space the walk reached, in the order it reached
     /// them, and finds what each read tells that the walk can't say: see
     /// the module's documentation.
@@ -222,7 +245,8 @@ impl Walk<'_> {
                     _ => {
                         let object = place.object.or(space.id).or(space.holder);
                         if let Some(made) = self.made(object) {
-                            tells.push(self.told(space, object, made, place.at, fault, n));
+                            let told = self.space_told(space, object, made, place.at, fault, n);
+                            tells.push(told);
                         }
                     }
                 }
@@ -242,21 +266,19 @@ impl Walk<'_> {
     /// as `made`, at `at`: at the key [`kind_key`] gives it, an element
     /// absent at it, a family's name told at an array's bytes at `0`
     /// ([`of_the_name`]), and any other at the key [`holding`] gives, in
-    /// its object, `-` where none holds it; its path and table the object's
-    /// first visit as a space or one of [`PARTS`], else the space's.
-    fn told(
+    /// its object, `-` where none holds it; its path and table those of
+    /// what that key is written in, as the walk visited it as a space or
+    /// one of [`PARTS`], else the space's ([`Walk::path_and_table`]).
+    fn space_told(
         &self,
-        space: &Graphic<'_>,
+        space: &Graphic<'a>,
         object: Option<ObjectId>,
         made: Made,
         at: Option<Span>,
         fault: Fault,
         n: usize,
     ) -> Told<Discriminant<Fault>> {
-        let written = match object {
-            Some(id) => self.source.get(id).ok(),
-            None => Some(&self.source.trailer().object),
-        };
+        let written = self.written(object);
         let held = written
             .zip(at)
             .map(|(written, at)| (holding(written, at), written, at));
@@ -265,15 +287,15 @@ impl Walk<'_> {
             let there = held.as_ref().map_or(*written, |&(_, value)| value);
             (there.at == Some(*at)).then_some(there)
         });
-        let key = match (kind_key(&fault), fault) {
-            (Some(key), _) => key.to_string(),
-            (None, Fault::Missing { element }) => element.to_string(),
+        let (key, keyed) = match (kind_key(&fault), fault) {
+            (Some(key), _) => (key.to_string(), Keyed::Entry(key)),
+            (None, Fault::Missing { element }) => (element.to_string(), Keyed::Element),
             _ if of_the_name(fault) && there.is_some_and(|o| o.as_array().is_some()) => {
-                "0".to_string()
+                ("0".to_string(), Keyed::Element)
             }
             _ => match held.as_ref().and_then(|(held, ..)| held.as_ref()) {
-                Some((key, _)) => key.clone(),
-                None => "-".to_string(),
+                Some((key, _)) => (key.clone(), Keyed::Holding),
+                None => ("-".to_string(), Keyed::Holding),
             },
         };
         let whole = object.filter(|_| {
@@ -291,9 +313,11 @@ impl Walk<'_> {
             }
             Some((object, space.as_array()?.first()?.at?))
         });
-        let (path, table) = match object.and_then(|id| self.spaces_at.get(&id)) {
-            Some(first) => (first.trail.path(), first.table),
-            None => (space.trail.path(), space.table),
+        let first = object.and_then(|id| self.spaces_at.get(&id));
+        let (path, table) = self.path_and_table(object, written, at, keyed, first, space);
+        let inside = match of_the_elements(fault) {
+            true => self.value_at(object, at),
+            false => None,
         };
         let finding = Finding {
             object,
@@ -311,6 +335,7 @@ impl Walk<'_> {
             kind: mem::discriminant(&fault),
             whole,
             family,
+            inside,
         }
     }
 }
@@ -547,8 +572,8 @@ pub(super) mod tests {
         }
     }
 
-    /// A file at 1.7 of a catalog, object 1, its page tree, 2, and its page,
-    /// 3, whose `/ColorSpace` resources hold `spaces` as written, and
+    /// A file at 1.7 of a catalog, object 1, its page tree, 2, and its
+    /// page, 3, whose `/ColorSpace` resources hold `spaces` as written, and
     /// `objects` besides, each its number and as written.
     fn spaces(spaces: &str, objects: &[(u32, &str)]) -> Vec<u8> {
         let page = format!(
@@ -653,8 +678,9 @@ pub(super) mod tests {
     /// What pdf-color tells of a space that the walk can't say is found
     /// once, at its bytes, at its key and in its object: the array's
     /// number, the profile's or the function's, or, written in place, its
-    /// holder's; its path and table its object's as the walk first visited
-    /// it as a space or as what a space holds, else the space's.
+    /// holder's; its path and table those of what its key is written in, a
+    /// dictionary written in place too, as the walk first visited it as a
+    /// space or as what a space holds, else the space's.
     #[test]
     fn what_a_space_s_read_tells_that_the_walk_can_t_is_found_once_at_its_key() {
         let (two, tint) = tint_of_two();
@@ -786,27 +812,29 @@ pub(super) mod tests {
                     "1",
                 )],
             ),
-            // A CalGray dictionary's black point and white point.
+            // A CalGray dictionary's black point and white point of four
+            // numbers, which the model lists three of, at the dictionary
+            // written in place in the space.
             (
                 spaces(
-                    "/CS0 [/CalGray << /WhitePoint [0.9505 1 1.089] /BlackPoint [-1 0 0] >>] \
-                     /CS1 [/CalGray << /WhitePoint [0.9505 2 1.089] >>]",
+                    "/CS0 [/CalGray << /WhitePoint [0.9505 1 1.089] /BlackPoint [0 0 0 0] >>] \
+                     /CS1 [/CalGray << /WhitePoint [0.9505 1 1.089 1] >>]",
                     &[],
                 ),
                 vec![
                     told(
                         3,
-                        "CS0",
-                        "CalGrayColorSpace/BlackPoint",
+                        "CS0[1]",
+                        "CalGrayDict/BlackPoint",
                         Fault::BlackPoint,
-                        "[-1 0 0]",
+                        "[0 0 0 0]",
                     ),
                     told(
                         3,
-                        "CS1",
-                        "CalGrayColorSpace/WhitePoint",
+                        "CS1[1]",
+                        "CalGrayDict/WhitePoint",
                         Fault::WhitePoint,
-                        "[0.9505 2 1.089]",
+                        "[0.9505 1 1.089 1]",
                     ),
                 ],
             ),
@@ -850,8 +878,8 @@ pub(super) mod tests {
                 spaces(&nchannel("/Gold /Silver", &undefined), &[(two, &tint)]),
                 vec![told(
                     3,
-                    "CS0",
-                    "DeviceNColorSpace/Colorants",
+                    "CS0[4]",
+                    "DeviceNDict/Colorants",
                     Fault::ColorantUndefined,
                     &undefined,
                 )],
@@ -867,8 +895,8 @@ pub(super) mod tests {
                 ),
                 vec![told(
                     3,
-                    "CS0",
-                    "DeviceNColorSpace/Components",
+                    "CS0[4]/Process",
+                    "DeviceNProcess/Components",
                     Fault::ProcessComponents,
                     "[/Cyan /Magenta]",
                 )],
@@ -1017,11 +1045,12 @@ pub(super) mod tests {
 
     /// A kind about one key of its dictionary is at that key, whether the
     /// key is absent, which the model finds `missing`, or written, which it
-    /// doesn't say, the dictionary in place in the space or an object of its
-    /// own: a CIE-based space's `/WhitePoint`, a process dictionary's
-    /// `/ColorSpace` and `/Components`, and an NChannel space's
-    /// `/Colorants`; and a profile's `/N`, absent and written, the model's
-    /// either way.
+    /// doesn't say, the dictionary in place in the space or an object of
+    /// its own, its path and table the dictionary's either way: a CIE-based
+    /// space's `/WhitePoint`, a process dictionary's `/ColorSpace` and
+    /// `/Components`, and an NChannel space's `/Colorants`; and a profile's
+    /// `/N`, absent and written, the model's either way. A `/WhitePoint`
+    /// the model finds a value of, an element 0, is the model's.
     #[test]
     fn a_kind_about_a_key_is_at_it_absent_or_written() {
         // Each dictionary in place, and as object 13.
@@ -1038,27 +1067,24 @@ pub(super) mod tests {
             assert!(model(file).contains(&said), "{}", report(file, &ALL));
             assert_eq!(found(file, &ALL), []);
         }
-        let [in_place, own] = both(&cal_rgb, "<< /WhitePoint [0 1 1] >>");
+        for (file, n) in both(&cal_rgb, "<< /WhitePoint [0 1 1] >>")
+            .iter()
+            .zip([3, 13])
+        {
+            let said = (Some(n), "WhitepointArray/0".to_string(), Rule::Value);
+            assert!(model(file).contains(&said), "{}", report(file, &ALL));
+            assert_eq!(found(file, &ALL), []);
+        }
+        let [in_place, own] = both(&cal_rgb, "<< /WhitePoint [0.95 1 1.09 1] >>");
         let white = Fault::WhitePoint;
+        let point = "[0.95 1 1.09 1]";
         assert_eq!(
             found(&in_place, &ALL),
-            [told(
-                3,
-                "CS0",
-                "CalRGBColorSpace/WhitePoint",
-                white,
-                "[0 1 1]"
-            )]
+            [told(3, "CS0[1]", "CalRGBDict/WhitePoint", white, point)]
         );
         assert_eq!(
             found(&own, &ALL),
-            [told(
-                13,
-                "CS0[1]",
-                "CalRGBDict/WhitePoint",
-                white,
-                "[0 1 1]"
-            )]
+            [told(13, "CS0[1]", "CalRGBDict/WhitePoint", white, point)]
         );
 
         let process = |dict: &str| {
@@ -1087,8 +1113,8 @@ pub(super) mod tests {
             found(&in_place, &ALL),
             [told(
                 3,
-                "CS0",
-                "DeviceNColorSpace/Components",
+                "CS0[4]/Process",
+                "DeviceNProcess/Components",
                 fault,
                 "[/Cyan]"
             )]
@@ -1104,9 +1130,9 @@ pub(super) mod tests {
             )]
         );
         // Lab, of three components, which no process dictionary may have:
-        // the model links its /ColorSpace to the tables of the others alone,
-        // and finds the family's name the table the walk takes it for
-        // doesn't have.
+        // the model links its /ColorSpace to the tables of the others
+        // alone, and finds the family's name the table the walk takes it
+        // for doesn't have.
         let lab = "<< /ColorSpace [/Lab << /WhitePoint [1 1 1] >>] /Components [/L /A /B] >>";
         for (file, n) in both(&process, lab).iter().zip([3, 13]) {
             let report = report(file, &ALL);
@@ -1142,12 +1168,11 @@ pub(super) mod tests {
                     }
                 }
                 Some(key) => {
-                    let table = format!("DeviceNColorSpace/{key}");
+                    let table = format!("DeviceNDict/{key}");
                     assert_eq!(
                         found(&in_place, &ALL),
-                        [told(3, "CS0", &table, undefined, &dict)]
+                        [told(3, "CS0[4]", &table, undefined, &dict)]
                     );
-                    let table = format!("DeviceNDict/{key}");
                     assert_eq!(
                         found(&own, &ALL),
                         [told(13, "CS0[4]", &table, undefined, &dict)]
@@ -1157,9 +1182,74 @@ pub(super) mod tests {
         }
     }
 
-    /// What two spaces' reads tell in one object is told once, by the first:
-    /// a space two pages' resources share, and an Indexed space's base the
-    /// walk reaches alone too, each read again.
+    /// A kind of what an array at its key is as a whole, its count and its
+    /// elements, isn't told where the walk found something at or inside the
+    /// array, whose elements the model checks each: a CalRGB space's
+    /// `/WhitePoint` with a first element that's 0, a second that isn't 1,
+    /// one short, one a string, one a reference to nothing; a
+    /// `/BlackPoint` below 0; a `/Gamma` short; a `/Matrix` short or with a
+    /// string; and a profile's `/Range` with a string. Each with the
+    /// dictionary written in place in the space, an object of its own, and,
+    /// the array an object of its own, through a reference to it.
+    #[test]
+    fn what_the_walk_finds_in_an_array_a_kind_is_of_says_it() {
+        let white = "/WhitePoint [0.95 1 1.09]";
+        for (key, array, with) in [
+            ("WhitePoint", "[0 1 1]", ""),
+            ("WhitePoint", "[0.95 2 1.09]", ""),
+            ("WhitePoint", "[0.95 1]", ""),
+            ("WhitePoint", "[0.95 1 (x)]", ""),
+            ("WhitePoint", "[0.95 1 99 0 R]", ""),
+            ("BlackPoint", "[-1 0 0]", white),
+            ("Gamma", "[1 1]", white),
+            ("Matrix", "[1 0 0 0 1 0 0 0]", white),
+            ("Matrix", "[1 0 0 0 1 0 0 0 (x)]", white),
+        ] {
+            let entries = format!("{with} /{key} {array}");
+            let by_reference = format!("{with} /{key} 14 0 R");
+            let files = [
+                (spaces(&format!("/CS0 [/CalRGB << {entries} >>]"), &[]), 3),
+                (
+                    spaces(
+                        "/CS0 [/CalRGB 13 0 R]",
+                        &[(13, &format!("<< {entries} >>"))],
+                    ),
+                    13,
+                ),
+                (
+                    spaces(
+                        "/CS0 [/CalRGB 13 0 R]",
+                        &[(13, &format!("<< {by_reference} >>")), (14, array)],
+                    ),
+                    14,
+                ),
+            ];
+            for (file, n) in files {
+                let report = report(&file, &ALL);
+                let inside = |f: &Finding| f.object == Some((n, 0)) && f.rule != Rule::ColorSpace;
+                assert!(
+                    report.findings.iter().any(inside),
+                    "{key} {array}: {report}"
+                );
+                assert_eq!(found(&file, &ALL), [], "{key} {array}: {report}");
+            }
+        }
+        let profile = spaces(
+            "/CS0 [/ICCBased 11 0 R]",
+            &[(11, &stream("/N 1 /Range [0 (x)]", "x"))],
+        );
+        let said = (Some(11), "ArrayOfNumbersGeneral/1".to_string(), Rule::Type);
+        assert!(
+            model(&profile).contains(&said),
+            "{}",
+            report(&profile, &ALL)
+        );
+        assert_eq!(found(&profile, &ALL), []);
+    }
+
+    /// What two spaces' reads tell in one object is told once, by the
+    /// first: a space two pages' resources share, and an Indexed space's
+    /// base the walk reaches alone too, each read again.
     #[test]
     fn what_two_reads_tell_in_one_object_is_told_once() {
         let page = |resources: &str| {

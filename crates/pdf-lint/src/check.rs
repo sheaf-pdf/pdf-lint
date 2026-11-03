@@ -109,18 +109,18 @@
 //! can't say, where it found nothing by the model's rules in that object at
 //! that key, is a [`Rule::ColorSpace`] finding, and what a font's tells a
 //! [`Rule::Font`] finding, each kind once in each object it's in, at its
-//! first place there, with how many times; a space or a font not read
-//! whole for a password or a cap, or a font past the budget, is counted as
-//! not checked. The fonts a
-//! descriptor's `/CapHeight` is asked of are read before the walk, within
-//! the same budget, each once: a TrueType font, or a Type 0 font's first
-//! descendant, whose descriptor lacks it, which ISO 32000-2 requires of a
-//! font with Latin characters (9.8.1, Table 120). It has them where a code
-//! it draws has a letter of the Latin script in its text; the predicates
-//! read that (`fn:FontHasLatinChars`), and where the fonts don't say, a
-//! `/ToUnicode` not read among it, it's counted as not checked, as before.
-//! The model's colorant functions read a DeviceN space's names and a
-//! halftone's keys as pdf-color reads a colorant's name.
+//! first place there, with how many times; a space or a font not read whole
+//! for a password or a cap, or a font past the budget, is counted as not
+//! checked. The fonts a descriptor's `/CapHeight` is asked of are read
+//! before the walk, within the same budget, each once: a TrueType font, or
+//! a Type 0 font's first descendant, whose descriptor lacks it, which ISO
+//! 32000-2 requires of a font with Latin characters (9.8.1, Table 120). It
+//! has them where a code it draws has a letter of the Latin script in its
+//! text; the predicates read that (`fn:FontHasLatinChars`), and where the
+//! fonts don't say, a `/ToUnicode` not read among it, it's counted as not
+//! checked, as before. The model's colorant functions read a DeviceN
+//! space's names and a halftone's keys as pdf-color reads a colorant's
+//! name.
 //!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
@@ -136,40 +136,38 @@
 //! from a later version than the file's ([`Rule::TooNew`]); a key, type or
 //! value deprecated by the file's version, when asked for
 //! ([`Rule::Deprecated`], [`Options::deprecations`], else counted only:
-//! [`Report::deprecated`]); a value
-//! its row doesn't list ([`Rule::Value`]); a value direct where it must be
-//! an indirect reference, or the reverse ([`Rule::Indirect`],
-//! [`Rule::Direct`]); a SpecialCase that comes to false
-//! ([`Rule::Special`]); a reference to no object ([`Rule::Unresolved`]); a
-//! malformed name or number tree ([`Rule::Tree`]); a page tree that breaks
-//! 7.7.3 where the model can't say so ([`Rule::PageTree`]), and where a
-//! viewer's pages part from it ([`Rule::Viewer`]); XMP metadata that
-//! breaks 14.3.2 ([`Rule::Xmp`]); a color space that breaks 8.6 where the
-//! model can't say so ([`Rule::ColorSpace`]), and a font that breaks 9.6
-//! to 9.10 ([`Rule::Font`]); a held object the
-//! walk never reached ([`Rule::Unreached`]); in an object built whole (or
-//! as [`Options::unlisted`] says), a key the model doesn't list that isn't
-//! exempt ([`Rule::Unlisted`]); a
-//! key written twice ([`Rule::Duplicate`]); what the reader had to
-//! choose how to read ([`Rule::Reader`]); what an object stream holds
-//! that it mustn't ([`Rule::Packed`]); and in content, `q`s left open or a
-//! `Q` with nothing saved ([`Rule::Balance`]), marked content left open or
-//! an `EMC` ending none ([`Rule::Marked`]), an operator where the graphics
-//! object content is in doesn't allow it, a word that's no operator outside
-//! `BX` and `EX`, or content ending inside an object ([`Rule::Operator`]),
-//! operands not as many or not of the types their operator takes
-//! ([`Rule::Operands`]), a resource name its resources lack
-//! ([`Rule::Resource`]), and where ISO 32000-2 reads it otherwise than
+//! [`Report::deprecated`]); a value its row doesn't list ([`Rule::Value`]);
+//! a value direct where it must be an indirect reference, or the reverse
+//! ([`Rule::Indirect`], [`Rule::Direct`]); a SpecialCase that comes to
+//! false ([`Rule::Special`]); a reference to no object
+//! ([`Rule::Unresolved`]); a malformed name or number tree
+//! ([`Rule::Tree`]); a page tree that breaks 7.7.3 where the model can't
+//! say so ([`Rule::PageTree`]), and where a viewer's pages part from it
+//! ([`Rule::Viewer`]); XMP metadata that breaks 14.3.2 ([`Rule::Xmp`]); a
+//! color space that breaks 8.6 where the model can't say so
+//! ([`Rule::ColorSpace`]), and a font that breaks 9.6 to 9.10
+//! ([`Rule::Font`]); a held object the walk never reached
+//! ([`Rule::Unreached`]); in an object built whole (or as
+//! [`Options::unlisted`] says), a key the model doesn't list that isn't
+//! exempt ([`Rule::Unlisted`]); a key written twice ([`Rule::Duplicate`]);
+//! what the reader had to choose how to read ([`Rule::Reader`]); what an
+//! object stream holds that it mustn't ([`Rule::Packed`]); and in content,
+//! `q`s left open or a `Q` with nothing saved ([`Rule::Balance`]), marked
+//! content left open or an `EMC` ending none ([`Rule::Marked`]), an
+//! operator where the graphics object content is in doesn't allow it, a
+//! word that's no operator outside `BX` and `EX`, or content ending inside
+//! an object ([`Rule::Operator`]), operands not as many or not of the types
+//! their operator takes ([`Rule::Operands`]), a resource name its resources
+//! lack ([`Rule::Resource`]), and where ISO 32000-2 reads it otherwise than
 //! PDFium, or what stops reading it ([`Rule::Content`]), each kind once in
 //! each stream of a unit of content; a resource none of the content read
-//! uses, when asked
-//! for ([`Rule::Unused`]). A check whose predicate can't be
-//! told, or uses a function the evaluator doesn't support, or reads a
+//! uses, when asked for ([`Rule::Unused`]). A check whose predicate can't
+//! be told, or uses a function the evaluator doesn't support, or reads a
 //! string's bytes the reader didn't give, is counted as not made
-//! ([`Report::unchecked`]), and every key the model doesn't list is
-//! counted with what kind of name it is ([`Report::unlisted`]); in an
-//! object merged over a source's, by default never failed, as TestGrammar
-//! reports it as information: it may be the source's.
+//! ([`Report::unchecked`]), and every key the model doesn't list is counted
+//! with what kind of name it is ([`Report::unlisted`]); in an object merged
+//! over a source's, by default never failed, as TestGrammar reports it as
+//! information: it may be the source's.
 //!
 //! Each finding says where its bytes were written ([`Finding::at`]), when
 //! the reader knows: a key and its value, an array's element, a dictionary
@@ -845,105 +843,126 @@ pub enum Rule {
     /// `/Colorants` has no entry for, a `/Colorants` entry that's a
     /// Separation space of another colorant, and a process dictionary's
     /// `/Components` not a name for each of its space's components. Each
-    /// where the walk found nothing by the model's rules ([`Rule::Missing`],
+    /// where the walk found nothing by the model's rules
+    /// ([`Rule::Missing`], [`Rule::Type`], [`Rule::Value`],
+    /// [`Rule::Indirect`], [`Rule::Direct`], [`Rule::Special`],
+    /// [`Rule::Unresolved`], [`Rule::Unlisted`]) in that object at that
+    /// key, so that what the model says, a profile without `/N`, an Indexed
+    /// space's high value past 255, a family of no name, a reference to
+    /// nothing, isn't told again; nor what an object reached through a
+    /// reference is as a whole, a profile that isn't a stream, where the
+    /// walk found something at a reference to it; nor what an array at its
+    /// key is, its count and its elements, a `/WhitePoint`, `/BlackPoint`,
+    /// `/Gamma` or `/Matrix`, a Lab or a profile's `/Range`, or a process
+    /// dictionary's `/Components`, where the walk found something at or
+    /// inside the array, whose elements the model checks each; nor a space
+    /// of a family that may not be where it is, an Indexed space's base, an
+    /// alternate or a Pattern space's underlying space that's a special
+    /// space, Lab for a process, written as an array, where the walk found
+    /// its family's name one the table it takes it for hasn't; nor an
+    /// object that doesn't read, which is the reader's, nor what a read
+    /// tells of it, a tint transform with a subfunction that doesn't read,
+    /// which doesn't load. Its key is the dictionary's key the kind is
+    /// about, where it's one (`WhitePoint`, `N` for a profile's count,
+    /// `Alternate`, `Range`, `ColorSpace` and `Components` of a process
+    /// dictionary, `Colorants`, `Subtype` of an attributes dictionary),
+    /// told there though the key is absent, an element the space lacks at
+    /// that element, a family's name told at an array at `0`, and any other
+    /// at the entry or element whose value holds its bytes, in its object,
+    /// `-` where none does or they aren't known. Each kind once in each
+    /// object it's in, whichever space's read tells it, at its first place
+    /// there, its value pdf-color's words with how many times it's told
+    /// there, what the walk found among them, so that where the walk found
+    /// something at its first place, it isn't told in that object, and one
+    /// after that the model can't say is missed; in the object it's in,
+    /// else the space's, else the one the space is written in, held where
+    /// that is. Its path and table those of what its key is written in, a
+    /// dictionary or an array, written in place too, where the walk first
+    /// visited it as a color space table or one of what a space holds (a
+    /// profile stream, a CIE-based space's dictionary, a DeviceN space's
+    /// attributes, process, colorants and mixing hints, a function), else
+    /// the object's, else the space's. A space nested deeper than pdf-color
+    /// reads one, or looking up more, and one with an object that takes a
+    /// password, is past a cap or whose bytes the source didn't give, so
+    /// isn't read whole, is counted as not checked, once for each, its
+    /// column and key `-`, its table the space's, where the space, or the
+    /// object it's written in, is held; what was read of it is found all
+    /// the same.
+    ColorSpace,
+    /// A font that breaks ISO 32000-2 (9.6.2.1, 9.6.5, 9.7.4.3, 9.7.5.3,
+    /// 9.7.6.1, 9.10.3, 7.3.10), as pdf-fonts reads each the walk reached
+    /// in the newest revision as one of the model's font tables, for its
+    /// text, no program read, where the model can't say so: a simple font
+    /// with no `/Widths` that isn't one of the standard 14, where the model
+    /// doesn't ask one, as of a TrueType font before PDF 2.0; a `/Widths`
+    /// of another length than `/FirstChar` and `/LastChar` say, where the
+    /// model doesn't hold it, as of a TrueType or MMType1 font; a
+    /// `/FirstChar` that's no byte's code, or none where a `/Widths` is; a
+    /// `/Differences` name at a code past 255; a `/DescendantFonts` that's
+    /// not one CIDFont; a `/W` or `/W2` cut short by an array where a
+    /// range's last CID goes; a `/ToUnicode` stream that doesn't decode; a
+    /// CMap's `/UseCMap` chain that comes back to a CMap of it, or with a
+    /// stream that doesn't decode, in that stream; and a reference that
+    /// names another reference, in the object it leads to. Each where the
+    /// walk found nothing by the model's rules ([`Rule::Missing`],
     /// [`Rule::Type`], [`Rule::Value`], [`Rule::Indirect`],
     /// [`Rule::Direct`], [`Rule::Special`], [`Rule::Unresolved`],
     /// [`Rule::Unlisted`]) in that object at that key, so that what the
-    /// model says, a profile without `/N`, an Indexed space's high value
-    /// past 255, a family of no name, a reference to nothing, isn't told
-    /// again; nor what an object reached through a reference is as a whole,
-    /// a profile that isn't a stream, where the walk found something at a
-    /// reference to it; nor a space of a family that may not be where it is,
-    /// an Indexed space's base, an alternate or a Pattern space's underlying
-    /// space that's a special space, Lab for a process, written as an array,
-    /// where the walk found its family's name one the table it takes it for
-    /// hasn't; nor an object that doesn't read, which is the reader's, nor
-    /// what a read tells of it, a tint transform with a subfunction that
-    /// doesn't read, which doesn't load. Its
-    /// key is the dictionary's key the kind is about, where it's one
-    /// (`WhitePoint`, `N` for a profile's count, `Alternate`, `Range`,
-    /// `ColorSpace` and `Components` of a process dictionary, `Colorants`,
-    /// `Subtype` of an attributes dictionary), told there though the key is
-    /// absent, an element the space lacks at that element, a family's name
-    /// told at an array at `0`, and any other at the entry or element whose
-    /// value holds its bytes, in its object, `-` where none does or they
-    /// aren't known. Each kind once in each object it's in, whichever
-    /// space's read tells it, at its first place there, its value
-    /// pdf-color's words with how many times; in the object it's in, else
-    /// the space's, else the one the space is written in, held where that
-    /// is. Its path and table the object's where the walk first visited it
-    /// as a color space table or one of what a space holds (a profile
-    /// stream, a CIE-based space's dictionary, a DeviceN space's attributes,
-    /// process, colorants and mixing hints, a function), else the space's. A
-    /// space nested deeper than pdf-color reads one, or looking up more, and
-    /// one with an object that takes a password, is past a cap or whose
-    /// bytes the source didn't give, so isn't read whole, is counted as not
-    /// checked, once for each, its column and key `-`, its table the
-    /// space's, where the space, or the object it's written in, is held;
-    /// what was read of it is found all the same.
-    ColorSpace,
-    /// A font that breaks ISO 32000-2 (9.6.2.1, 9.6.5, 9.7.4.3, 9.7.5.3,
-    /// 9.7.6.1, 9.10.3, 7.3.10), as pdf-fonts reads each the walk reached in
-    /// the newest revision as one of the model's font tables, for its text,
-    /// no program read, where the model can't say so: a simple font with no
-    /// `/Widths` that isn't one of the standard 14, where the model doesn't
-    /// ask one, as of a TrueType font before PDF 2.0; a `/Widths` of another
-    /// length than `/FirstChar` and `/LastChar` say, where the model doesn't
-    /// hold it, as of a TrueType or MMType1 font; a `/FirstChar` that's no
-    /// byte's code, or none where a `/Widths` is; a `/Differences` name at a
-    /// code past 255; a `/DescendantFonts` that's not one CIDFont; a `/W` or
-    /// `/W2` cut short by an array where a range's last CID goes; a
-    /// `/ToUnicode` stream that doesn't decode; a CMap's `/UseCMap` chain
-    /// that comes back to a CMap of it, or with a stream that doesn't
-    /// decode, in that stream; and a reference that names another reference,
-    /// in the object it leads to. Each where the walk found nothing by the
-    /// model's rules ([`Rule::Missing`], [`Rule::Type`], [`Rule::Value`],
-    /// [`Rule::Indirect`], [`Rule::Direct`], [`Rule::Special`],
-    /// [`Rule::Unresolved`], [`Rule::Unlisted`]) in that object at that
-    /// key, so that what the model says, a Type 1 font's `/Widths` missing
-    /// or of another length, an `/Encoding` or `/BaseEncoding` that's no
-    /// encoding's name, a `/Differences` value that's a string, a metric
-    /// that's no number, a `/ToUnicode` that's no stream, a `/Subtype`
-    /// that's no font's, a reference to nothing, isn't told again; nor what
-    /// an object reached through a reference is as a whole, an `/Encoding`
-    /// that's a reference to another name, where the walk found something
-    /// at a reference to it. Never told: an object that doesn't read, which
-    /// is the reader's, nor what's told of a value that refers to one, a
-    /// `/DescendantFonts` naming a CIDFont that doesn't read, or to a
-    /// reference, which PDFium follows no further where ISO 32000-2 follows
-    /// it to its end; a `/UseCMap` to what isn't a stream the file has,
-    /// which the walk says at the `/UseCMap`; a predefined CMap the reading
-    /// hasn't, the build's or PDFium's, a name no CMap has being the model's
-    /// `value`. Nor is a font read whose `/Subtype` names no kind of font as
-    /// ISO 32000-2 and pdf-fonts both read it, absent, no font's or a
-    /// string, which the walk says, or a reference to a reference, which ISO
-    /// 32000-2 follows to its end and pdf-fonts no further than the first:
-    /// what pdf-fonts would read it as, a Type 1 font, as PDFium does, or
-    /// the kind a string spells, is a guess, so what it would tell, a Type 0
-    /// font's `/Widths` missing, isn't of the font the walk took it for. Its
-    /// key is the font dictionary's key the kind is about, where it's one
-    /// (`Widths`, `FirstChar`, `Subtype`, `ToUnicode`, `DescendantFonts`,
-    /// `Encoding` for a Type 0 font's CMap), told there though the key is
-    /// absent, and any other at the entry or element whose value holds its
-    /// bytes, in its object, `-` where none does or they aren't known. Each
-    /// kind once in each object it's in, whichever font's read tells it, at
-    /// its first place there, its value pdf-fonts' words with how many
-    /// times; in the object it's in, a descriptor, a CIDFont, an encoding, a
-    /// CMap, else the font's, else the one the font is written in, held
-    /// where that is. Its path and table the object's where the walk first
-    /// visited it as a font table or one of what a font holds (a descriptor,
-    /// a Type 0 font's descendants, a CIDFont and its widths, a CMap, an
-    /// encoding and its differences, widths, a `/ToUnicode`), else the
-    /// font's. A font with an object that takes a password, is past a cap or
-    /// whose bytes the source didn't give, whose streams decode past what's
-    /// left of the file's budget for them ([`Options::font_budget`]), or
-    /// with a CMap chain longer than pdf-fonts reads, so isn't read whole,
-    /// is counted as not checked, once for each, its column and key `-`, its
-    /// table the font's, where the font, or the object it's written in, is
-    /// held; what was read of it before is found all the same, but what's
-    /// told once an object doesn't read, which the read goes on past as if
-    /// it weren't there, isn't. A font that asks a stream's data of a source
-    /// that gives none, as a document alone, isn't read, nor counted.
+    /// model says, a Type 1 font's `/Widths` missing or of another length,
+    /// an `/Encoding` or `/BaseEncoding` that's no encoding's name, a
+    /// `/Differences` value that's a string, a metric that's no number, a
+    /// `/ToUnicode` that's no stream, a `/Subtype` that's no font's, a
+    /// reference to nothing, isn't told again; nor what an object reached
+    /// through a reference is as a whole, an `/Encoding` that's a reference
+    /// to another name, where the walk found something at a reference to
+    /// it; nor a `/DescendantFonts` that's not one CIDFont, empty, of a
+    /// number or of a reference to nothing, where the walk found something
+    /// at or inside the array. Never told: an object that doesn't read,
+    /// which is the reader's, nor what's told of a value that refers to
+    /// one, a `/DescendantFonts` naming a CIDFont that doesn't read, or to
+    /// a reference, which PDFium follows no further where ISO 32000-2
+    /// follows it to its end; a `/ToUnicode` or a CMap through filters the
+    /// reader doesn't take, as one that doesn't decode or a chain that
+    /// can't be read whole, the font counted instead; a `/UseCMap` to what
+    /// isn't a stream the file has, which the walk says at the `/UseCMap`;
+    /// a predefined CMap the reading hasn't, the build's or PDFium's, a
+    /// name no CMap has being the model's `value`. Nor is a font read whose
+    /// `/Subtype` names no kind of font as ISO 32000-2 and pdf-fonts both
+    /// read it, absent, no font's or a string, which the walk says, or a
+    /// reference to a reference, which ISO 32000-2 follows to its end and
+    /// pdf-fonts no further than the first: what pdf-fonts would read it
+    /// as, a Type 1 font, as PDFium does, or the kind a string spells, is a
+    /// guess, so what it would tell, a Type 0 font's `/Widths` missing,
+    /// isn't of the font the walk took it for. Its key is the font
+    /// dictionary's key the kind is about, where it's one (`Widths`,
+    /// `FirstChar`, `Subtype`, `ToUnicode`, `DescendantFonts`, `Encoding`
+    /// for a Type 0 font's CMap), told there though the key is absent, and
+    /// any other at the entry or element whose value holds its bytes, in
+    /// its object, `-` where none does or they aren't known. Each kind once
+    /// in each object it's in, whichever font's read tells it, at its first
+    /// place there, its value pdf-fonts' words with how many times it's
+    /// told there, what the walk found among them, so that where the walk
+    /// found something at its first place, it isn't told in that object,
+    /// and one after that the model can't say is missed; in the object it's
+    /// in, a descriptor, a CIDFont, an encoding, a CMap, else the font's,
+    /// else the one the font is written in, held where that is. Its path
+    /// and table those of what its key is written in, a dictionary or an
+    /// array, written in place too, where the walk first visited it as a
+    /// font table or one of what a font holds (a descriptor, a Type 0
+    /// font's descendants, a CIDFont and its widths, a CMap, an encoding
+    /// and its differences, widths, a `/ToUnicode`), else the object's,
+    /// else the font's. A font with an object that takes a password, is
+    /// past a cap or whose bytes the source didn't give, whose streams
+    /// decode past what's left of the file's budget for them
+    /// ([`Options::font_budget`]), with a stream through filters the reader
+    /// doesn't take, or with a CMap chain longer than pdf-fonts reads, so
+    /// isn't read whole, is counted as not checked, once for each, its
+    /// column and key `-`, its table the font's, where the font, or the
+    /// object it's written in, is held; what was read of it before is found
+    /// all the same, but what's told once an object doesn't read, which the
+    /// read goes on past as if it weren't there, isn't. A font that asks a
+    /// stream's data of a source that gives none, as a document alone,
+    /// isn't read, nor counted.
     Font,
 }
 
@@ -1144,9 +1163,12 @@ pub struct Report {
 /// ([`Rule::Tree`]), and the catalog's XMP packet ([`Rule::Xmp`]); and each
 /// color space and font the walk reaches, read again through pdf-color
 /// ([`Rule::ColorSpace`]) and pdf-fonts ([`Rule::Font`]), the fonts'
-/// streams within [`Options::font_budget`], those
-/// whose descriptor lacks `/CapHeight` read before the walk, as the
-/// predicates read which fonts have Latin characters (`fn:FontHasLatinChars`).
+/// streams within [`Options::font_budget`], those whose descriptor lacks
+/// `/CapHeight` read before the walk, as the predicates read which fonts
+/// have Latin characters (`fn:FontHasLatinChars`). Where `source` gives no
+/// stream's data, as a document alone doesn't, a font that asks one isn't
+/// read, and nothing in the report counts it, where [`Report::content`]
+/// says that no content was read.
 /// A trailer the reader couldn't read so is a finding, and the walk starts
 /// from what it made of the file instead.
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
@@ -1297,6 +1319,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         spaces_at: HashMap::new(),
         fonts: Vec::new(),
         fonts_at: HashMap::new(),
+        parts_in: HashMap::new(),
         fonts_read,
         report: Report {
             findings,
@@ -1351,14 +1374,14 @@ impl Report {
     /// rule and value, the value's references' numbers aside, which a
     /// rewrite renumbers (and a reader's finding's numbers aside, its
     /// offsets; a content finding's counts, offsets and how many times, but
-    /// an operator's name; a page tree, a viewer, an XMP, a color space or a
-    /// font finding's numbers and how many times; a tree finding's how many
-    /// times); for a key that came in later than the file's version, any
-    /// value, as its value isn't what's wrong. A merged object keeps the
-    /// keys of the source dictionary it's emitted over, faults and all, and
-    /// a fault the source has is the file's, carried; a built object is the
-    /// writer's whole, and never excused. The sources are best checked at
-    /// this file's version ([`Options::version`]). A like finding in any
+    /// an operator's name; a page tree, a viewer, an XMP, a color space or
+    /// a font finding's numbers and how many times; a tree finding's how
+    /// many times); for a key that came in later than the file's version,
+    /// any value, as its value isn't what's wrong. A merged object keeps
+    /// the keys of the source dictionary it's emitted over, faults and all,
+    /// and a fault the source has is the file's, carried; a built object is
+    /// the writer's whole, and never excused. The sources are best checked
+    /// at this file's version ([`Options::version`]). A like finding in any
     /// object of a source carries it, not only in the one the merged object
     /// was emitted over, which no [`Hold`] records: a fault written into a
     /// merged object is missed when some object of the same table in a
@@ -1500,9 +1523,8 @@ fn like(f: &Finding) -> (String, String, Rule, String) {
 
 /// The model's rules that say what's wrong at a key, which a fault told of
 /// a file's part read again, only where the walk found nothing in its
-/// object at its key, gives way to: a page tree's
-/// ([`Walk::structures`]), a color space's and a font's
-/// ([`Walk::graphics`]).
+/// object at its key, gives way to: a page tree's ([`Walk::structures`]), a
+/// color space's and a font's ([`Walk::graphics`]).
 const MODEL: [Rule; 8] = [
     Rule::Missing,
     Rule::Type,
@@ -1805,6 +1827,12 @@ struct Walk<'a> {
     /// tables or of what a font holds, by number, which [`Walk::graphics`]
     /// gives what it finds in the object the path and table of.
     fonts_at: HashMap<ObjectId, Visited<'a>>,
+    /// Where the walk first visited each value written in place as one of
+    /// the model's color space or font tables, or of what a space or a font
+    /// holds, by the numbered object it's written in and its bytes, which
+    /// [`Walk::graphics`] gives what it finds in the value the path and
+    /// table of.
+    parts_in: HashMap<(Option<ObjectId>, Span), Visited<'a>>,
     /// The fonts read before the walk, for which fonts have Latin
     /// characters, which [`Walk::graphics`] takes as read.
     fonts_read: fonts::Read,
@@ -3742,11 +3770,13 @@ impl<'a> Walk<'a> {
     /// model's color space tables, or of its font tables: by the value, its
     /// number, what it's written in, its table and the walk's way to it.
     /// And keeps where the walk first visited an object, by its number, as
-    /// a color space table or one of what a space holds
-    /// ([`color::PARTS`]), and as a font table or one of what a font holds
-    /// ([`fonts::PARTS`]): the path and table of what's found in it. Not in
-    /// an earlier revision's trailer, whose objects are the file's where no
-    /// later revision wrote them, as the walk from the trailer reaches them.
+    /// a color space table or one of what a space holds ([`color::PARTS`]),
+    /// and as a font table or one of what a font holds ([`fonts::PARTS`]),
+    /// and a value written in place as one of those, by the object it's in
+    /// and its bytes: the path and table of what's found in it. Not in an
+    /// earlier revision's trailer, whose objects are the file's where no
+    /// later revision wrote them, as the walk from the trailer reaches
+    /// them.
     fn note_graphics(&mut self, v: &Visit<'a>) {
         if self.revision.is_some() {
             return;
@@ -3766,17 +3796,23 @@ impl<'a> Walk<'a> {
         } else if font {
             self.fonts.push(reached());
         }
-        let Some(id) = v.id() else {
-            return;
-        };
         let visited = || Visited {
             table,
             trail: v.trail.clone(),
         };
-        if space || color::PARTS.contains(&table) {
-            self.spaces_at.entry(id).or_insert_with(visited);
-        } else if font || fonts::PARTS.contains(&table) {
-            self.fonts_at.entry(id).or_insert_with(visited);
+        let of_a_space = space || color::PARTS.contains(&table);
+        let of_a_font = font || fonts::PARTS.contains(&table);
+        match (v.id(), v.object.at) {
+            (Some(id), _) if of_a_space => {
+                self.spaces_at.entry(id).or_insert_with(visited);
+            }
+            (Some(id), _) if of_a_font => {
+                self.fonts_at.entry(id).or_insert_with(visited);
+            }
+            (None, Some(at)) if of_a_space || of_a_font => {
+                self.parts_in.entry((v.holder, at)).or_insert_with(visited);
+            }
+            _ => {}
         }
     }
 

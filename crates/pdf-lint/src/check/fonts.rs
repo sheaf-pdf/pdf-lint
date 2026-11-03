@@ -15,30 +15,36 @@
 //!
 //! Of what it tells, what the walk can't say is a [`Rule::Font`] finding,
 //! where the walk found nothing by the model's rules in that object at that
-//! key, nor at a reference to the object it's of as a whole
+//! key, nor at a reference to the object it's of as a whole, nor, for a
+//! `/DescendantFonts` that's not one CIDFont, at or inside the array
 //! ([`Walk::find_told`]): each kind once in each object, whichever font's
 //! read tells it, at its first place there, its value pdf-fonts' words
-//! with how many times; in the fault's object, a descriptor, a CIDFont, an
-//! encoding, a CMap, else the font's, else the one the font is written in,
-//! held where that is. Its key is the font dictionary's key the kind is
-//! about, where it's one ([`kind_key`]), as the model's `missing` is at the
-//! key, and any other at the entry or element whose value holds its bytes
-//! ([`holding`]). Its path and table are the object's where the walk first
-//! visited it as a font table or one of what a font holds ([`PARTS`]),
-//! else the font's. Never told: an object that doesn't read, the reader's
-//! and the model's `unresolved`, nor what's told of a value that refers to
-//! one, or to a reference, which PDFium follows no further where ISO
-//! 32000-2 does ([`Walk::of_the_unread`]); a `/UseCMap` to what isn't a
-//! stream the file has, which the walk says at the `/UseCMap`; a predefined
-//! CMap the reading hasn't, a name no CMap has being the model's `value`;
-//! and a program's fault, as none is read. Nor is a font read whose
-//! `/Subtype` names no kind of font as ISO 32000-2 and pdf-fonts both read
-//! it, which pdf-fonts would read as a Type 1 font, a guess
+//! with how many times it's told there, what the walk found among them; in
+//! the fault's object, a descriptor, a CIDFont, an encoding, a CMap, else
+//! the font's, else the one the font is written in, held where that is.
+//! Its key is the font dictionary's key the kind is about, where it's one
+//! ([`kind_key`]), as the model's `missing` is at the key, and any other at
+//! the entry or element whose value holds its bytes ([`holding`]). Its path
+//! and table are those of the dictionary or array its key is written in,
+//! in place too, where the walk first visited it as a font table or one of
+//! what a font holds ([`PARTS`]), else the object's, else the font's
+//! ([`Walk::path_and_table`]). Never told: an object that doesn't read, the
+//! reader's and the model's `unresolved`, nor what's told of a value that
+//! refers to one, or to a reference, which PDFium follows no further where
+//! ISO 32000-2 does ([`Walk::of_the_unread`]); a stream through filters the
+//! reader doesn't take, as a `/ToUnicode` that doesn't decode or a CMap
+//! chain that can't be read whole, which is counted; a `/UseCMap` to what
+//! isn't a stream the file has, which the walk says at the `/UseCMap`; a
+//! predefined CMap the reading hasn't, a name no CMap has being the model's
+//! `value`; and a program's fault, as none is read. Nor is a font read
+//! whose `/Subtype` names no kind of font as ISO 32000-2 and pdf-fonts both
+//! read it, which pdf-fonts would read as a Type 1 font, a guess
 //! ([`of_a_kind`]). What stops a font being read whole that isn't the
 //! file's fault (an object that takes a password or is past a cap, streams
-//! past the budget, a CMap chain longer than is read) is counted as not
-//! checked, once a font for each, where the font, or what it's written in,
-//! is held; what was read before it is found all the same.
+//! past the budget, a stream through filters the reader doesn't take, a
+//! CMap chain longer than is read) is counted as not checked, once a font
+//! for each, where the font, or what it's written in, is held; what was
+//! read before it is found all the same.
 //!
 //! Before the walk, the fonts the model's `fn:FontHasLatinChars()` asks of
 //! are read ([`latin`]): what a font descriptor's `/CapHeight` is required
@@ -50,7 +56,7 @@
 //! [`Source::decoded_within`]: crate::source::Source::decoded_within
 //! [`FileCx::latin`]: crate::FileCx::latin
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::mem::{self, Discriminant};
 use std::ops::RangeInclusive;
@@ -61,7 +67,7 @@ use unicode_script::{Script, UnicodeScript};
 
 use super::content::times;
 use super::kept::Kept;
-use super::told::{Told, holding, written_at};
+use super::told::{Keyed, Told, holding, written_at};
 use super::{Finding, Graphic, Made, NESTING, Objects, REFERENCES, Rule, Walk};
 use crate::bytes::{self, Unfiltered};
 use crate::object::{Dict, Object, ObjectId, Span, Value};
@@ -83,8 +89,8 @@ pub(super) const FONTS: [&str; 5] = [
 /// The model's tables of what a font holds: a descriptor of each kind, a
 /// Type 0 font's descendants, its CIDFont, the CIDFont's widths and its
 /// CMap, a simple font's encoding, its differences and its widths, and a
-/// `/ToUnicode`. Where the walk first visits an object as one of them, or as
-/// a font, is the path and table of what's found in it.
+/// `/ToUnicode`. Where the walk first visits an object as one of them, or
+/// as a font, is the path and table of what's found in it.
 pub(super) const PARTS: [&str; 15] = [
     "FontDescriptorType1",
     "FontDescriptorTrueType",
@@ -135,6 +141,10 @@ const BUDGET: &str = "a font whose streams decode past the file's budget for fon
 /// Why a font isn't read whole: a CMap's `/UseCMap` chain is longer than
 /// pdf-fonts reads ([`Limits::cmaps`]).
 const CMAPS: &str = "a font with a CMap chain longer than is read";
+
+/// Why a font isn't read whole: a stream of it, a `/ToUnicode`, a CMap or a
+/// glyph, is through filters the reader doesn't take ([`decoded`]).
+const UNFILTERED: &str = "a font with a stream through filters the reader doesn't take";
 
 /// Why a font isn't read whole, given what stopped its read.
 fn unread(error: &Error) -> &'static str {
@@ -231,10 +241,10 @@ impl<'a> Resolve<'a> for Noting<'a, '_> {
 }
 
 /// What a font's read tells, kept ([`Kept`]), until an object it reads
-/// doesn't read for what isn't the file's fault (`failed`): its read goes on
-/// as if the object weren't there, so what it tells after, a `/ToUnicode`
-/// that takes a password told as one that doesn't decode, is of a font
-/// without it, and isn't kept.
+/// doesn't read for what isn't the file's fault (`failed`): its read goes
+/// on as if the object weren't there, so what it tells after, a
+/// `/ToUnicode` that takes a password told as one that doesn't decode, is
+/// of a font without it, and isn't kept.
 struct Cut<'c> {
     kept: &'c mut Kept<Fault>,
     failed: &'c Cell<bool>,
@@ -248,6 +258,15 @@ impl pdf_fonts::Sink for Cut<'_> {
     }
 }
 
+/// What a font's read asked of a source's streams that what it read
+/// rests on ([`decoded`]): whether the source gave no stream's data, and
+/// which streams it gave none of for filters the reader doesn't take.
+#[derive(Default)]
+struct Asked {
+    ungiven: Cell<bool>,
+    unfiltered: RefCell<HashSet<ObjectId>>,
+}
+
 /// Stream `id`'s data, at most `limit` bytes of it, as `source` gives it
 /// ([`Source::decoded_within`]), said as pdf-fonts' [`Streams`] for a
 /// pdf-structure `Reading` says a reading's: a stream that decodes in part
@@ -257,18 +276,13 @@ impl pdf_fonts::Sink for Cut<'_> {
 /// as the predicates' resolver says of an object that doesn't read
 /// ([`Objects`]); what isn't there or isn't a stream, what doesn't read,
 /// and filters the reader doesn't take, [`Decoded::None`]. A source that
-/// gives no stream's data, as a document alone doesn't, gives none, which
-/// `ungiven` notes, so that what's read without it isn't taken for the
-/// file's.
+/// gives no stream's data, as a document alone doesn't, gives none, and a
+/// stream through filters the reader doesn't take none, which `asked`
+/// notes, so that what's read without them isn't taken for the file's.
 ///
 /// [`Source::decoded_within`]: crate::source::Source::decoded_within
 /// [`Streams`]: pdf_fonts::Streams
-pub(super) fn decoded(
-    source: &dyn Source,
-    id: ObjectId,
-    limit: usize,
-    ungiven: &Cell<bool>,
-) -> Decoded {
+fn decoded(source: &dyn Source, id: ObjectId, limit: usize, asked: &Asked) -> Decoded {
     match Objects(source).try_resolve(id) {
         Ok(Some(_)) => {}
         Ok(None) => return Decoded::None,
@@ -280,7 +294,7 @@ pub(super) fn decoded(
         Decoded::Unreadable(Unreadable::new(id, why, message))
     };
     let Some(decoded) = source.decoded_within(id, limit) else {
-        ungiven.set(true);
+        asked.ungiven.set(true);
         return Decoded::None;
     };
     match decoded {
@@ -303,8 +317,21 @@ pub(super) fn decoded(
         Err(error @ bytes::Error::Filters(Unfiltered::Filters { .. })) => {
             unreadable(Why::Limit, &error)
         }
+        Err(bytes::Error::Filters(_)) => {
+            asked.unfiltered.borrow_mut().insert(id);
+            Decoded::None
+        }
         Err(_) => Decoded::None,
     }
+}
+
+/// A font's read ([`read`]): what it gave, what it told, kept, and the
+/// streams it asked for whose filters the reader doesn't take, which it
+/// read on without.
+pub(super) struct Taken {
+    font: Result<Font, Error>,
+    kept: Kept<Fault>,
+    unfiltered: HashSet<ObjectId>,
 }
 
 /// `font`, a font dictionary of `source`'s, read for text within what's
@@ -312,18 +339,14 @@ pub(super) fn decoded(
 /// read for what isn't the file's fault ([`Cut`]); none where it asked a
 /// stream's data of a source that gives none ([`decoded`]), as what it read
 /// then isn't the file's font.
-fn read<'a>(
-    source: &'a dyn Source,
-    font: &'a Dict,
-    budget: &mut usize,
-) -> Option<(Result<Font, Error>, Kept<Fault>)> {
-    let (ungiven, failed) = (Cell::new(false), Cell::new(false));
+fn read<'a>(source: &'a dyn Source, font: &'a Dict, budget: &mut usize) -> Option<Taken> {
+    let (asked, failed) = (Asked::default(), Cell::new(false));
     let objects = Noting {
         objects: Objects(source),
         failed: &failed,
     };
     let streams = With::new(objects, |id, limit| {
-        let decoded = decoded(source, id, limit, &ungiven);
+        let decoded = decoded(source, id, limit, &asked);
         if let Decoded::Unreadable(_) = decoded {
             failed.set(true);
         }
@@ -335,7 +358,11 @@ fn read<'a>(
         failed: &failed,
     };
     let read = Font::read_for_text(streams, font, &LIMITS, budget, &mut cut);
-    (!ungiven.get()).then_some((read, kept))
+    (!asked.ungiven.get()).then(|| Taken {
+        font: read,
+        kept,
+        unfiltered: asked.unfiltered.into_inner(),
+    })
 }
 
 /// A font as it's kept once read: by its number, where it's an indirect
@@ -352,7 +379,7 @@ pub(super) enum Key {
 /// The fonts [`latin`] read, each by its [`Key`], with what its read told,
 /// for the pass after the walk; none where it asked a stream's data of a
 /// source that gives none.
-pub(super) type Read = HashMap<Key, Option<(Result<Font, Error>, Kept<Fault>)>>;
+pub(super) type Read = HashMap<Key, Option<Taken>>;
 
 /// Which font descriptors' fonts have Latin characters, as the model's
 /// `fn:FontHasLatinChars()` reads it, of each descriptor it's asked of,
@@ -365,9 +392,10 @@ pub(super) type Read = HashMap<Key, Option<(Result<Font, Error>, Kept<Fault>)>>;
 /// [`Font::read_for_text`], within what's left of `budget`. Its font has
 /// Latin characters where a code it draws has a letter of the Latin script
 /// in its text ([`latin_in`]), and hasn't where a code it draws has text
-/// and none has one; nothing is said of it where no code has text, or the
-/// read fails, so the function can't be told. A descriptor two fonts name
-/// has them where either has.
+/// and none has one; nothing is said of it where no code has text, the
+/// read fails, or a stream it asked for is through filters the reader
+/// doesn't take, so the function can't be told. A descriptor two fonts
+/// name has them where either has.
 pub(super) fn latin(source: &dyn Source, budget: &mut usize) -> (Latin, Read) {
     let (mut latin, mut read) = (Latin::default(), Read::new());
     for id in source.ids() {
@@ -385,7 +413,12 @@ pub(super) fn latin(source: &dyn Source, budget: &mut usize) -> (Latin, Read) {
                         };
                         let font =
                             (read.entry(key)).or_insert_with(|| self::read(source, d, budget));
-                        if let Some((Ok(font), _)) = font
+                        if let Some(Taken {
+                            font: Ok(font),
+                            unfiltered,
+                            ..
+                        }) = font
+                            && unfiltered.is_empty()
                             && let Some(has) = latin_in(source, d, font, composite)
                         {
                             latin.insert(descriptor_id, descriptor.at, has);
@@ -504,7 +537,7 @@ fn given_widths(source: &dyn Source, font: &Dict) -> Option<RangeInclusive<u32>>
     let end = first.saturating_add(widths.len() as i64);
     let last = match integer(b"LastChar") {
         Some(last) if last > 0 && last < end => last,
-        _ => end - 1,
+        _ => end.saturating_sub(1),
     };
     // None where the first is below 0, which is past any code, as PDFium
     // reads it into a `size_t`, or the last is.
@@ -533,7 +566,7 @@ fn refers(value: &Object, unread: impl Fn(ObjectId) -> bool) -> bool {
     false
 }
 
-impl Walk<'_> {
+impl<'a> Walk<'a> {
     /// Reads each font the walk reached, in the order it reached them, its
     /// streams within `budget` bytes decoded in all, but those [`latin`]
     /// read already, which are as it read them, and finds what each read
@@ -563,15 +596,26 @@ impl Walk<'_> {
             };
             // Not read, as it asked a stream's data of a source that gives
             // none: not checked, as content isn't there.
-            let Some((result, kept)) = taken else {
+            let Some(Taken {
+                font: result,
+                kept,
+                unfiltered,
+            }) = taken
+            else {
                 continue;
             };
             let mut stops: Vec<&str> = result.err().iter().map(unread).collect();
+            if !unfiltered.is_empty() {
+                stops.push(UNFILTERED);
+            }
+            // What doesn't read, and what the reader doesn't decode, which
+            // what's told of it is of.
             let damaged: HashSet<ObjectId> = (kept.told().iter())
                 .filter_map(|(_, fault, _)| match fault {
                     Fault::Damaged { id } => Some(*id),
                     _ => None,
                 })
+                .chain(unfiltered.iter().copied())
                 .collect();
             for &(place, fault, n) in kept.told() {
                 match fault {
@@ -582,8 +626,12 @@ impl Walk<'_> {
                     // program's, which isn't read.
                     Fault::Damaged { .. } | Fault::PredefinedUnknown | Fault::ProgramMalformed => {}
                     // In what a /UseCMap names: where that's not a stream
-                    // the file has, the walk says so at the /UseCMap.
-                    Fault::UseCMap if !self.a_stream(place.object) => {}
+                    // the file has, the walk says so at the /UseCMap; where
+                    // it's through filters the reader doesn't take, it's
+                    // counted.
+                    Fault::UseCMap
+                        if !self.a_stream(place.object)
+                            || place.object.is_some_and(|id| unfiltered.contains(&id)) => {}
                     _ => {
                         let object = place.object.or(font.id).or(font.holder);
                         if self.of_the_unread(object, place.at, &damaged) {
@@ -613,21 +661,19 @@ impl Walk<'_> {
 
     /// Whether what's written at `at` in `object` is, or holds in place, a
     /// reference to an object of `damaged`, which the read told doesn't
-    /// read, or to one that's a reference itself: what's told of it is the
-    /// reader's, which the walk says (`unresolved`), or what's made of a
-    /// reference to a reference by following it once, as PDFium does, where
-    /// ISO 32000-2 follows it to its end (7.3.10).
+    /// read or the reader doesn't decode, or to one that's a reference
+    /// itself: what's told of it is the reader's, which the walk says
+    /// (`unresolved`) or which is counted, or what's made of a reference to
+    /// a reference by following it once, as PDFium does, where ISO 32000-2
+    /// follows it to its end (7.3.10).
     fn of_the_unread(
         &self,
         object: Option<ObjectId>,
         at: Option<Span>,
         damaged: &HashSet<ObjectId>,
     ) -> bool {
-        let written = match object {
-            Some(id) => self.source.get(id).ok(),
-            None => Some(&self.source.trailer().object),
-        };
-        let Some(there) = written
+        let Some(there) = self
+            .written(object)
             .zip(at)
             .and_then(|(written, at)| written_at(written, at))
         else {
@@ -640,39 +686,41 @@ impl Walk<'_> {
 
     /// What `fault` is, told `n` times by `font`'s read, in `object`, made
     /// as `made`, at `at`: at the key [`kind_key`] gives it, and any other
-    /// at the key [`holding`] gives, in its object, `-` where none holds it;
-    /// its path and table the object's first visit as a font or one of
-    /// [`PARTS`], else the font's.
+    /// at the key [`holding`] gives, in its object, `-` where none holds
+    /// it; its path and table those of what that key is written in, as the
+    /// walk visited it as a font or one of [`PARTS`], else the font's
+    /// ([`Walk::path_and_table`]).
     fn font_told(
         &self,
-        font: &Graphic<'_>,
+        font: &Graphic<'a>,
         object: Option<ObjectId>,
         made: Made,
         at: Option<Span>,
         fault: Fault,
         n: usize,
     ) -> Told<Discriminant<Fault>> {
-        let written = match object {
-            Some(id) => self.source.get(id).ok(),
-            None => Some(&self.source.trailer().object),
-        };
+        let written = self.written(object);
         let held = written
             .zip(at)
             .map(|(written, at)| (holding(written, at), written, at));
-        let key = match kind_key(&fault) {
-            Some(key) => key.to_string(),
+        let (key, keyed) = match kind_key(&fault) {
+            Some(key) => (key.to_string(), Keyed::Entry(key)),
             None => match held.as_ref().and_then(|(held, ..)| held.as_ref()) {
-                Some((key, _)) => key.clone(),
-                None => "-".to_string(),
+                Some((key, _)) => (key.clone(), Keyed::Holding),
+                None => ("-".to_string(), Keyed::Holding),
             },
         };
         let whole = object.filter(|_| {
             held.as_ref()
                 .is_some_and(|(held, written, at)| held.is_none() && written.at == Some(*at))
         });
-        let (path, table) = match object.and_then(|id| self.fonts_at.get(&id)) {
-            Some(first) => (first.trail.path(), first.table),
-            None => (font.trail.path(), font.table),
+        let first = object.and_then(|id| self.fonts_at.get(&id));
+        let (path, table) = self.path_and_table(object, written, at, keyed, first, font);
+        // Not one CIDFont: what the walk finds of the array's elements, or
+        // of its count, says it.
+        let inside = match fault {
+            Fault::DescendantFonts => self.value_at(object, at),
+            _ => None,
         };
         let finding = Finding {
             object,
@@ -690,6 +738,7 @@ impl Walk<'_> {
             kind: mem::discriminant(&fault),
             whole,
             family: None,
+            inside,
         }
     }
 }
@@ -719,8 +768,16 @@ mod tests {
     /// What [`decoded`] gives of stream `id` of `source`, within `limit`,
     /// and whether it noted that the source gives no stream's data.
     fn asked(source: &dyn Source, id: ObjectId, limit: usize) -> (Decoded, bool) {
-        let ungiven = Cell::new(false);
-        (decoded(source, id, limit, &ungiven), ungiven.get())
+        let asked = Asked::default();
+        (decoded(source, id, limit, &asked), asked.ungiven.get())
+    }
+
+    /// Whether [`decoded`] noted stream `id` of `source` as through filters
+    /// the reader doesn't take.
+    fn unfiltered(source: &dyn Source, id: ObjectId) -> bool {
+        let asked = Asked::default();
+        decoded(source, id, 100, &asked);
+        asked.unfiltered.into_inner().contains(&id)
     }
 
     /// Why what [`asked`] gave doesn't read, where it's that.
@@ -778,13 +835,14 @@ mod tests {
 
         let font = read.get((1, 0)).unwrap().as_dict().unwrap();
         let mut budget = PLAIN.len();
-        let (font_read, kept) = super::read(&read, font, &mut budget).unwrap();
-        assert_eq!(font_read.unwrap().code_text(0x41).as_deref(), Some("A"));
-        assert!(kept.told().is_empty());
+        let taken = super::read(&read, font, &mut budget).unwrap();
+        assert_eq!(taken.font.unwrap().code_text(0x41).as_deref(), Some("A"));
+        assert!(taken.kept.told().is_empty());
+        assert!(taken.unfiltered.is_empty());
         assert_eq!(budget, 0);
         let mut budget = PLAIN.len() - 1;
-        let (too_large, _) = super::read(&read, font, &mut budget).unwrap();
-        assert_eq!(too_large.err(), Some(Error::TooLarge));
+        let too_large = super::read(&read, font, &mut budget).unwrap();
+        assert_eq!(too_large.font.err(), Some(Error::TooLarge));
         let mut budget = PLAIN.len();
         assert!(super::read(read.document(), font, &mut budget).is_none());
         let plain = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" };
@@ -792,8 +850,8 @@ mod tests {
     }
 
     /// A stream that decodes in part is what decoded; none where nothing
-    /// did, or the reader doesn't take its filters; past the reader's cap on
-    /// filters, a cap's.
+    /// did, or the reader doesn't take its filters, which is noted; past
+    /// the reader's cap on filters, a cap's.
     #[test]
     fn a_stream_that_doesn_t_decode_whole() {
         let many: Vec<Object> = (0..26).map(|_| Object::from("ASCIIHexDecode")).collect();
@@ -819,6 +877,8 @@ mod tests {
         assert_eq!(asked(&read, (2, 0), 100), (Decoded::None, false));
         assert_eq!(asked(&read, (3, 0), 100), (Decoded::None, false));
         assert_eq!(why(asked(&read, (5, 0), 100)), Why::Limit);
+        let noted: Vec<bool> = [1, 2, 3, 5].map(|n| unfiltered(&read, (n, 0))).into();
+        assert_eq!(noted, [false, false, true, false]);
     }
 
     /// A locked file's stream takes a password, whether it's an object of
@@ -843,7 +903,7 @@ mod tests {
         assert_eq!(why(asked(&locked, (2, 0), 100)), Why::Locked);
         let font = locked.get((1, 0)).unwrap().as_dict().unwrap();
         let mut budget = 100;
-        let (font_read, _) = super::read(&locked, font, &mut budget).unwrap();
+        let font_read = super::read(&locked, font, &mut budget).unwrap().font;
         let Err(Error::Unreadable(unreadable)) = font_read else {
             panic!("{font_read:?}");
         };
@@ -1080,9 +1140,10 @@ mod tests {
     /// has a Latin letter in its text, and not where it has one; it isn't
     /// where the codes it draws have text and none has one, though its
     /// encoding names Latin letters at codes it gives no width, or a width
-    /// of 0; and
-    /// where no code has text, a symbolic font that embeds its program,
-    /// without an encoding or a `/ToUnicode`, it can't be told, as before.
+    /// of 0; and where no code has text, a symbolic font that embeds its
+    /// program, without an encoding or a `/ToUnicode`, it can't be told, as
+    /// before, nor where it draws no code, or its `/ToUnicode` is through a
+    /// filter the reader doesn't take.
     #[test]
     fn a_truetype_font_without_cap_height_is_found_where_it_draws_latin_letters() {
         let a_font = |font: Dict, flags, with_cap_height| {
@@ -1148,6 +1209,31 @@ mod tests {
         let mut no_widths = han(r(5));
         no_widths.remove(b"Widths");
         assert_eq!(a_font(no_widths, 32, false), missing(5, truetype_table));
+        // A /FirstChar the least of 64 bits, no /LastChar, and no width in
+        // its /Widths: no code drawn, so it can't be told.
+        let mut least = truetype(Some(Object::from("WinAnsiEncoding")), 0, &[], r(5));
+        least.set("FirstChar", i64::MIN);
+        least.remove(b"LastChar");
+        assert_eq!(a_font(least, 32, false), unmade(truetype_table));
+        // A /ToUnicode through a filter the reader doesn't take: what's
+        // read without it isn't the font's text, so it can't be told.
+        let mut unfiltered = win_ansi(r(5));
+        unfiltered.set("ToUnicode", r(6));
+        let objects = on_a_page(
+            dict! { "F1" => r(4) },
+            vec![
+                (4, unfiltered.into()),
+                (5, descriptor(32, false).into()),
+                (
+                    6,
+                    Body::stream(dict! { "Filter" => "JBIG2Decode" }, b"data"),
+                ),
+            ],
+        );
+        assert_eq!(
+            cap_height(&checked("1.7", &objects)),
+            unmade(truetype_table)
+        );
     }
 
     /// A Type 0 font's descendant's descriptor without `/CapHeight` is
@@ -1297,8 +1383,8 @@ mod tests {
         }
     }
 
-    /// A file at `version` of a catalog, object 1, its page tree, 2, and its
-    /// page, 3, whose `/Font` resources hold `fonts` as written, and
+    /// A file at `version` of a catalog, object 1, its page tree, 2, and
+    /// its page, 3, whose `/Font` resources hold `fonts` as written, and
     /// `objects` besides, each its number and as written.
     fn fonts(version: &str, fonts: &str, objects: &[(u32, &str)]) -> Vec<u8> {
         let page = format!(
@@ -1482,10 +1568,11 @@ mod tests {
         objects.iter().map(|(n, o)| (*n, o.as_str())).collect()
     }
 
-    /// What pdf-fonts tells of a font that the walk can't say is found once,
-    /// at its key and in its object: the font's number, its CIDFont's, its
-    /// encoding's, a CMap's, the array a chain leads to; its path and table
-    /// its object's as the walk first visited it as a font or as what a
+    /// What pdf-fonts tells of a font that the walk can't say is found
+    /// once, at its key and in its object: the font's number, its
+    /// CIDFont's, its encoding's, a CMap's, the array a chain leads to; its
+    /// path and table those of what its key is written in, an array written
+    /// in place too, as the walk first visited it as a font or as what a
     /// font holds, else the font's.
     #[test]
     fn what_a_font_s_read_tells_that_the_walk_can_t_is_found_once_at_its_key() {
@@ -1537,8 +1624,8 @@ mod tests {
             ),
             [told(
                 6,
-                "F1/Encoding",
-                "Encoding/1",
+                "F1/Encoding/Differences",
+                "ArrayOfDifferences/1",
                 Fault::Differences,
                 "/A"
             )]
@@ -1599,8 +1686,8 @@ mod tests {
             cid("/Identity-H", "/W [1 2 [500]]", &[]),
             [told(
                 6,
-                "F1/DescendantFonts[0]",
-                "FontCIDType2/2",
+                "F1/DescendantFonts[0]/W",
+                "ArrayOfCIDGlyphMetricsW/2",
                 Fault::W,
                 "[500]"
             )]
@@ -1609,8 +1696,8 @@ mod tests {
             cid("/Identity-V", "/W2 [1 2 [-1000 500 880]]", &[]),
             [told(
                 6,
-                "F1/DescendantFonts[0]",
-                "FontCIDType2/2",
+                "F1/DescendantFonts[0]/W2",
+                "ArrayOfCIDGlyphMetricsW2/2",
                 Fault::W2,
                 "[-1000 500 880]"
             )]
@@ -1628,8 +1715,8 @@ mod tests {
             [told(8, "F1/Encoding", "CMapStream/-", Fault::UseCMap, "")]
         );
         // A CMap a /UseCMap names that doesn't decode, in it: the model
-        // links a /UseCMap's stream to no table of a font's, so its path and
-        // table are the font's.
+        // links a /UseCMap's stream to no table of a font's, so its path
+        // and table are the font's.
         let broken = cmap_of("Nine", "/Filter /ASCIIHexDecode", "zz");
         assert_eq!(
             cid(
@@ -1645,14 +1732,17 @@ mod tests {
     /// at the key it's at, in place or through a reference: a Type 1 font's
     /// `/Widths` or `/FirstChar` missing, or its `/Widths` of another
     /// length, and a TrueType font's `/Widths` missing at 2.0; a Type 0
-    /// font's `/DescendantFonts` missing; an `/Encoding` or `/BaseEncoding` that's no encoding's name, by
-    /// a reference too; a `/Differences` value that's a string; a metric
-    /// that's no number in a `/W`; a `/ToUnicode` that's no stream; a
-    /// `/UseCMap` to nothing or to a dictionary, which pdf-fonts tells in
-    /// what it names; a CIDFont's `/Subtype` that's no CIDFont's; a name
-    /// that's no predefined CMap's; and what's told of a value that refers
-    /// to an object that doesn't read. A predefined CMap the build hasn't is
-    /// nobody's.
+    /// font's `/DescendantFonts` missing, or empty, of a number or of a
+    /// reference to nothing, which the walk finds at its element, written
+    /// in place or an object of its own, or, where a key the model doesn't
+    /// list is a finding, of two; an `/Encoding` or `/BaseEncoding` that's
+    /// no encoding's name, by a reference too; a `/Differences` value
+    /// that's a string; a metric that's no number in a `/W`; a `/ToUnicode`
+    /// that's no stream; a `/UseCMap` to nothing or to a dictionary, which
+    /// pdf-fonts tells in what it names; a CIDFont's `/Subtype` that's no
+    /// CIDFont's; a name that's no predefined CMap's; and what's told of a
+    /// value that refers to an object that doesn't read. A predefined CMap
+    /// the build hasn't is nobody's.
     #[test]
     fn what_the_walk_says_of_a_font_is_found_by_it_alone() {
         let simple = |version: &str, font: String, more: &[(u32, &str)]| {
@@ -1663,6 +1753,12 @@ mod tests {
         let cid = |encoding: &str, entries: &str, more: &[(u32, String)]| {
             let mut objects = written_type0(encoding, entries);
             objects.extend_from_slice(more);
+            fonts("1.7", "/F1 4 0 R", &borrowed(&objects))
+        };
+        // A Type 0 font whose /DescendantFonts is `entry`.
+        let descendants = |entry: &str| {
+            let mut objects = written_type0("/Identity-H", "");
+            objects[0].1 = objects[0].1.replace("/DescendantFonts [6 0 R]", entry);
             fonts("1.7", "/F1 4 0 R", &borrowed(&objects))
         };
         // Each file, and the object, table and key, and rule of what the
@@ -1764,12 +1860,29 @@ mod tests {
                 (Some(4), "FontType0/Encoding", Rule::Value),
             ),
             (
+                descendants(""),
+                (Some(4), "FontType0/DescendantFonts", Rule::Missing),
+            ),
+            (
+                descendants("/DescendantFonts []"),
+                (Some(4), "ArrayOfDescendantFonts/0", Rule::Missing),
+            ),
+            (
+                descendants("/DescendantFonts [5]"),
+                (Some(4), "ArrayOfDescendantFonts/0", Rule::Type),
+            ),
+            (
+                descendants("/DescendantFonts [99 0 R]"),
+                (Some(4), "ArrayOfDescendantFonts/0", Rule::Unresolved),
+            ),
+            (
                 {
                     let mut objects = written_type0("/Identity-H", "");
-                    objects[0].1 = objects[0].1.replace("/DescendantFonts [6 0 R]", "");
+                    objects[0].1 = objects[0].1.replace("[6 0 R]", "8 0 R");
+                    objects.push((8, "[]".to_string()));
                     fonts("1.7", "/F1 4 0 R", &borrowed(&objects))
                 },
-                (Some(4), "FontType0/DescendantFonts", Rule::Missing),
+                (Some(8), "ArrayOfDescendantFonts/0", Rule::Missing),
             ),
         ];
         for (i, (file, said)) in cases.iter().enumerate() {
@@ -1779,6 +1892,17 @@ mod tests {
             assert!(model(file).contains(&said), "case {i}: {report}");
             assert_eq!(found(file, &ALL), [], "case {i}: {report}");
         }
+
+        // A /DescendantFonts of two, which the model lists one of: the
+        // walk's alone where a key it doesn't list is a finding, as of an
+        // object built, and found where it isn't.
+        let two = descendants("/DescendantFonts [6 0 R 6 0 R]");
+        let built = Hold::All(Made::Built);
+        let checked = report(&two, &built);
+        let unlisted = |f: &Finding| f.rule == Rule::Unlisted && f.key == "1";
+        assert!(checked.findings.iter().any(unlisted), "{checked}");
+        assert_eq!(found(&two, &built), [], "{checked}");
+        assert_eq!(found(&two, &ALL).len(), 1);
 
         // A predefined CMap the build hasn't: nothing found, by either.
         let gbk = cid("/GBK-EUC-H", "", &[]);
@@ -1807,6 +1931,69 @@ mod tests {
         assert_eq!(found(&damaged, &ALL), []);
     }
 
+    /// A `/ToUnicode` or an embedded CMap through filters the reader
+    /// doesn't take isn't told as one that doesn't decode, nor its chain as
+    /// one that can't be read whole, whether the walk finds its `/Filter`
+    /// no filter's name or one the reader doesn't decode: the font is
+    /// counted as not checked. Through a filter it takes whose data doesn't
+    /// decode, it's told, and isn't counted.
+    #[test]
+    fn a_font_s_stream_through_filters_the_reader_doesn_t_take_is_counted() {
+        let to_unicode = |filter: &str, data: &str| {
+            let font = calibri("TrueType", &format!("{WIDTHS} /ToUnicode 6 0 R"));
+            let to_unicode = stream(&format!("/Filter /{filter}"), data);
+            fonts(
+                "1.7",
+                "/F1 4 0 R",
+                &[(4, &font), DESCRIPTOR, (6, &to_unicode)],
+            )
+        };
+        let cmap = |filter: &str| {
+            let mut objects = written_type0("8 0 R", "");
+            let data = "1 begincodespacerange <0000> <FFFF> endcodespacerange";
+            objects.push((8, cmap_of("Eight", &format!("/Filter /{filter}"), data)));
+            fonts("1.7", "/F1 4 0 R", &borrowed(&objects))
+        };
+        let plain = "1 beginbfchar <41> <0041> endbfchar";
+        let cases = [
+            (to_unicode("FooDecode", plain), "FontTrueType"),
+            (to_unicode("JBIG2Decode", plain), "FontTrueType"),
+            (cmap("FooDecode"), "FontType0"),
+            (cmap("JBIG2Decode"), "FontType0"),
+        ];
+        for (i, (file, table)) in cases.iter().enumerate() {
+            let checked = report(file, &ALL);
+            assert_eq!(found_in(file, &checked), [], "case {i}: {checked}");
+            assert_eq!(
+                unread_fonts(&checked),
+                [(UNFILTERED, *table, 1)],
+                "case {i}: {checked}"
+            );
+        }
+        let said = (
+            Some(6),
+            "ToUnicodeCMapStream/Filter".to_string(),
+            Rule::Value,
+        );
+        assert!(model(&cases[0].0).contains(&said));
+        let said = (Some(8), "CMapStream/Filter".to_string(), Rule::Value);
+        assert!(model(&cases[2].0).contains(&said));
+
+        let broken = to_unicode("ASCIIHexDecode", "zz");
+        let checked = report(&broken, &ALL);
+        assert_eq!(
+            found_in(&broken, &checked),
+            [told(
+                4,
+                "F1",
+                "FontTrueType/ToUnicode",
+                Fault::ToUnicode,
+                "6 0 R"
+            )]
+        );
+        assert_eq!(unread_fonts(&checked), []);
+    }
+
     /// A font whose `/Subtype` names no kind of font as ISO 32000-2 and
     /// pdf-fonts both read it isn't read, nor counted, so nothing of the
     /// kind pdf-fonts would read it as is found: a Type 0 font whose
@@ -1833,8 +2020,8 @@ mod tests {
             found(&type0("/Subtype /Type0"), &ALL),
             [told(
                 6,
-                "F1/DescendantFonts[0]",
-                "FontCIDType2/2",
+                "F1/DescendantFonts[0]/W",
+                "ArrayOfCIDGlyphMetricsW/2",
                 Fault::W,
                 "[500]"
             )]
@@ -1972,8 +2159,8 @@ mod tests {
             found(&locked, &ALL),
             [told(
                 6,
-                "F1/Encoding",
-                "Encoding/1",
+                "F1/Encoding/Differences",
+                "ArrayOfDifferences/1",
                 Fault::Differences,
                 "/A"
             )]
@@ -2029,7 +2216,10 @@ mod tests {
             [(BUDGET, "FontType1", 1)],
             "{checked}"
         );
-        let past = |n, path: &str| told(n, path, "FontType1/1", Fault::Differences, "/A");
+        let past = |n, font: &str| {
+            let path = format!("{font}/Encoding/Differences");
+            told(n, &path, "ArrayOfDifferences/1", Fault::Differences, "/A")
+        };
         assert_eq!(found_in(&two, &checked), [past(4, "F1"), past(5, "F2")]);
         // Within the budget, both read.
         assert_eq!(unread_fonts(&report(&two, &ALL)), []);
@@ -2063,8 +2253,8 @@ mod tests {
             found(&file, &ALL),
             [told(
                 7,
-                "F1/Encoding",
-                "Encoding/1",
+                "F1/Encoding/Differences",
+                "ArrayOfDifferences/1",
                 Fault::Differences,
                 "/A"
             )]
