@@ -50,7 +50,9 @@ use crate::grammar::{At, Table, Wrap, WrapFn, split, version};
 /// which ISO 32000-2 makes a fully qualified one, so that it would fail
 /// every hide action naming a field below the top. The embedded model's
 /// corrections put `fn:IsFullyQualifiedFieldName` in its place, which
-/// this crate defines, not INTERNAL_GRAMMAR.md.
+/// this crate defines, not INTERNAL_GRAMMAR.md. `fn:NumberOfPages` and
+/// `fn:PageProperty` read the pages a [`FileCx`] is given
+/// ([`FileCx::pages`]), and can't be told without them.
 pub const SUPPORTED: &[&str] = &[
     "fn:AlwaysUnencrypted",
     "fn:ArrayLength",
@@ -81,7 +83,9 @@ pub const SUPPORTED: &[&str] = &[
     "fn:NoCycle",
     "fn:Not",
     "fn:NotStandard14Font",
+    "fn:NumberOfPages",
     "fn:PageContainsStructContentItems",
+    "fn:PageProperty",
     "fn:RectHeight",
     "fn:RectWidth",
     "fn:RequiredValue",
@@ -285,6 +289,9 @@ pub struct FileCx<'a, R: ?Sized = dyn Resolve<'a> + 'a> {
     /// The form's fields' fully qualified names, as
     /// `fn:IsFullyQualifiedFieldName` reads them: once.
     fields: Fields,
+    /// The file's pages' dictionaries, in order, as `fn:NumberOfPages` and
+    /// `fn:PageProperty` read them, when given ([`FileCx::pages`]).
+    pages: Option<&'a [&'a Dict]>,
     /// An indirect object; none for one the file hasn't, which is null
     /// (ISO 32000-2, 7.3.10). Last, so that a `FileCx` of any resolver is
     /// read through one of `dyn Resolve` ([`Cx`]'s).
@@ -307,6 +314,7 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
             trees: Trees::default(),
             structure: Structure::default(),
             fields: Fields::default(),
+            pages: None,
             resolve,
         }
     }
@@ -323,6 +331,18 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
     #[must_use = "it gives the FileCx back, with the extensions"]
     pub fn extensions(mut self, extensions: &'a BTreeSet<String>) -> FileCx<'a, R> {
         self.extensions = extensions;
+        self
+    }
+
+    /// The file's pages, in order, as ISO 32000-2 numbers them (7.7.3):
+    /// what `fn:NumberOfPages()` counts and `fn:PageProperty` reads, each
+    /// page's dictionary as its resolver gives it, so that a reference to a
+    /// page is known as the page it names. Unless given, neither can be
+    /// told. A page tree's walk gives them, as pdf-semantics' `pages` does
+    /// by ISO's rules.
+    #[must_use = "it gives the FileCx back, with the pages"]
+    pub fn pages(mut self, pages: &'a [&'a Dict]) -> FileCx<'a, R> {
+        self.pages = Some(pages);
         self
     }
 
@@ -372,6 +392,7 @@ impl<R: ?Sized> fmt::Debug for FileCx<'_, R> {
             .field("trees", &self.trees)
             .field("structure", &self.structure)
             .field("fields", &self.fields)
+            .field("pages", &self.pages.map(<[_]>::len))
             .finish_non_exhaustive()
     }
 }
@@ -1401,8 +1422,16 @@ impl Scalar {
 /// `a op b`: names, strings and booleans compared for equality, numbers
 /// also in order, an integer standing for a number (INTERNAL_GRAMMAR.md,
 /// "Validation of predicates"); unknown for anything else, or a side that
-/// can't be read.
+/// can't be read. `==` with what `fn:PageProperty` reads of each element of
+/// an array holds where one is equal ([`any_equal`]).
 fn compare(op: Cmp, a: &Expr, b: &Expr, cx: &Cx) -> Tri {
+    if op == Cmp::Eq {
+        for (one, other) in [(a, b), (b, a)] {
+            if let Some(each) = each(other, cx) {
+                return any_equal(one, &each, format!("{a}{}{b}", op.symbol()), cx);
+            }
+        }
+    }
     let (x, y) = match (operand(a, cx), operand(b, cx)) {
         (Ok(x), Ok(y)) => (x, y),
         (Err(why), _) | (_, Err(why)) => return Tri::Unknown(why),
@@ -1466,6 +1495,11 @@ fn operand(e: &Expr, cx: &Cx) -> Result<Scalar, String> {
                 .and_then(|n| i64::try_from(n).ok())
                 .map(Scalar::Int)
                 .ok_or_else(|| f.clone()),
+            ("fn:NumberOfPages", []) => pages(f, cx).map(|pages| Scalar::Int(pages.len() as i64)),
+            ("fn:PageProperty", _) => match page_property(f, args, cx)? {
+                Property::One(Some(o)) => scalar(o).ok_or_else(|| f.clone()),
+                _ => Err(f.clone()),
+            },
             _ => Err(f.clone()),
         },
         Expr::Arith(first, rest) => arithmetic(e, first, rest, cx),
@@ -1496,15 +1530,160 @@ fn rect(k: &Expr, cx: &Cx) -> Result<[f64; 4], String> {
         .ok_or_else(|| k.to_string())
 }
 
-/// The array at `k`, a key or path.
+/// The array at `k`, a key or path, or a page's that `fn:PageProperty`
+/// reads.
 fn array<'c>(k: &Expr, cx: &Cx<'c, '_>) -> Result<&'c [Object], String> {
     match k {
         Expr::Path(p) if !p.value => match walk(p, &p.keys, cx)?.map(|o| o.value()) {
             Some(Value::Array(a)) => Ok(a),
             _ => Err(p.text.clone()),
         },
+        Expr::Call(f, args) if f == "fn:PageProperty" => match page_property(f, args, cx)? {
+            Property::One(Some(o)) => match o.value() {
+                Value::Array(a) => Ok(a),
+                _ => Err(f.clone()),
+            },
+            _ => Err(f.clone()),
+        },
         Expr::Call(f, _) => Err(f.clone()),
         _ => Err(k.to_string()),
+    }
+}
+
+/// This file's pages, as `fn:NumberOfPages` and `fn:PageProperty` (`f`)
+/// read them ([`FileCx::pages`]); `f` where they weren't given, and in a
+/// row whose `parent::` is a target dictionary, which makes the row's a
+/// target under another's `/T`: ISO 32000-2 12.6.4.4 makes each target on
+/// the way the current document in turn, so the pages it means are another
+/// document's, not this file's.
+fn pages<'c>(f: &str, cx: &Cx<'c, '_>) -> Result<&'c [&'c Dict], String> {
+    match cx.file.pages {
+        Some(pages) if !under_target(cx) => Ok(pages),
+        _ => Err(f.to_string()),
+    }
+}
+
+/// Whether the row's `parent::` is a target dictionary (ISO 32000-2,
+/// 12.6.4.4, Table 205): one with `/R`, which an action, with `/S`, hasn't.
+fn under_target(cx: &Cx) -> bool {
+    let Some(&parent) = cx.parents.first() else {
+        return false;
+    };
+    let has = |key: &[u8]| value_at(parent, At::Key(key), cx).is_some();
+    has(b"R") && !has(b"S")
+}
+
+/// The page `page`, `fn:PageProperty`'s (`f`) first argument, names: an
+/// index, from 0, written or at a path (`@P`), or a reference to a page at
+/// a path, the page whose dictionary it resolves to. `f` for a string (a
+/// named destination), an index past the pages, or what's no page; the
+/// path as written where it has nothing.
+fn page<'c>(f: &str, page: &Expr, cx: &Cx<'c, '_>) -> Result<&'c Dict, String> {
+    let pages = pages(f, cx)?;
+    let index = |i: i64| usize::try_from(i).ok().and_then(|i| pages.get(i)).copied();
+    let found = match page {
+        Expr::Int(i) => index(*i),
+        Expr::Path(p) if p.value => match walk(p, &p.keys, cx)? {
+            Some(o) => match o.value() {
+                Value::Integer(i) => index(*i),
+                _ => {
+                    (o.as_dict()).and_then(|d| pages.iter().copied().find(|&p| std::ptr::eq(p, d)))
+                }
+            },
+            None => return Err(p.text.clone()),
+        },
+        _ => None,
+    };
+    found.ok_or_else(|| f.to_string())
+}
+
+/// What `fn:PageProperty(page, path)` reads (INTERNAL_GRAMMAR.md's
+/// "Predicates (declarative functions)"): `path`, its keys and indices from
+/// the page's dictionary.
+enum Property<'c> {
+    /// What's at the path; none where a key or an element isn't there.
+    One(Option<&'c Object>),
+    /// Where a key follows an array, what each of its elements has at the
+    /// rest of the path: `Annots::@NM`, each annotation's `/NM`.
+    Each(Vec<Option<&'c Object>>),
+}
+
+/// What `fn:PageProperty` (`f`) of `args` reads: its page's ([`page`]),
+/// along its path from the page's dictionary, as [`walk`] goes along one,
+/// but that a key after an array is each element's ([`Property::Each`]),
+/// as INTERNAL_GRAMMAR.md's own example (`fn:PageProperty(@P,Annots::@NM)`)
+/// means; past that, a key into an array can't be told, as anywhere. `f`
+/// for a path that isn't the page's own keys.
+fn page_property<'c>(f: &str, args: &[Expr], cx: &Cx<'c, '_>) -> Result<Property<'c>, String> {
+    let [page_at, Expr::Path(path)] = args else {
+        return Err(f.to_string());
+    };
+    let Some((first, rest)) = path.keys.split_first() else {
+        return Err(f.to_string());
+    };
+    if path.base != Base::Here || path.keys.iter().any(|k| wild(k)) {
+        return Err(f.to_string());
+    }
+    let along = |mut at: Option<&'c Object>, keys: &[String]| {
+        for key in keys {
+            at = match at {
+                Some(o) => step(o, key, cx).ok_or_else(|| path.text.clone())?,
+                None => None,
+            };
+        }
+        Ok::<_, String>(at)
+    };
+    let mut at = (page(f, page_at, cx)?.get(first.as_bytes())).and_then(|o| deref(o, cx));
+    for (i, key) in rest.iter().enumerate() {
+        let Some(o) = at else {
+            break;
+        };
+        match o.value() {
+            Value::Array(elements) if key.parse::<usize>().is_err() => {
+                let each = (elements.iter())
+                    .map(|element| along(deref(element, cx), &rest[i..]))
+                    .collect::<Result<_, _>>()?;
+                return Ok(Property::Each(each));
+            }
+            _ => at = step(o, key, cx).ok_or_else(|| path.text.clone())?,
+        }
+    }
+    Ok(Property::One(at))
+}
+
+/// What `e`, a side of `==`, reads of each element of an array, where it's
+/// `fn:PageProperty` with a key after an array in its path.
+fn each<'c>(e: &Expr, cx: &Cx<'c, '_>) -> Option<Vec<Option<&'c Object>>> {
+    match e {
+        Expr::Group(inner) => each(inner, cx),
+        Expr::Call(f, args) if f == "fn:PageProperty" => match page_property(f, args, cx) {
+            Ok(Property::Each(each)) => Some(each),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `one==` what an array's elements have (`each`): it holds where one's is
+/// equal, an element without it being no match; it doesn't where none is,
+/// unless one's can't be compared (another type, or a string whose bytes
+/// the reader didn't give), when it can't be told, for `text`.
+fn any_equal(one: &Expr, each: &[Option<&Object>], text: String, cx: &Cx) -> Tri {
+    let x = match operand(one, cx) {
+        Ok(x) => x,
+        Err(why) => return Tri::Unknown(why),
+    };
+    let mut told = true;
+    for value in each.iter().flatten() {
+        match scalar(value).and_then(|y| equal(&x, &y)) {
+            Some(true) => return Tri::Is(true),
+            Some(false) => {}
+            None => told = false,
+        }
+    }
+    match told {
+        true => Tri::Is(false),
+        false => Tri::Unknown(text),
     }
 }
 
@@ -2628,6 +2807,8 @@ mod tests {
         size: Option<usize>,
         /// The extensions it's checked under.
         extensions: BTreeSet<String>,
+        /// Its pages, when given, each its object's number.
+        pages: Option<Vec<u32>>,
     }
 
     /// No extensions.
@@ -2643,6 +2824,7 @@ mod tests {
                 objects,
                 size: None,
                 extensions: BTreeSet::new(),
+                pages: None,
             }
         }
 
@@ -2673,6 +2855,14 @@ mod tests {
             let file = FileCx::new(&self.trailer, v(version), &resolve)
                 .size(self.size)
                 .extensions(&self.extensions);
+            let pages: Option<Vec<&Dict>> = (self.pages.as_ref()).map(|pages| {
+                let page = |n| self.objects[&(n, 0)].as_dict().unwrap();
+                pages.iter().map(|&n| page(n)).collect()
+            });
+            let file = match &pages {
+                Some(pages) => file.pages(pages),
+                None => file,
+            };
             f(&file.at(container, at).parents(parents).defaults(defaults))
         }
 
@@ -3170,6 +3360,114 @@ mod tests {
             holds_in(&file, &x, "1.7", "fn:Eval(fn:IsEncryptedWrapper())"),
             unknown("fn:IsEncryptedWrapper")
         );
+    }
+
+    /// `fn:NumberOfPages()` counts the pages a [`FileCx`] is given, and
+    /// `fn:PageProperty` reads a page's own keys, a key after an array each
+    /// element's for `==`, as the model's target dictionary asks them: its
+    /// `/P` past the pages and within; its `/A` an index past the page's
+    /// `/Annots` and within, and a string equal to one annotation's `/NM`, to
+    /// none, and to none where one's can't be compared. A page named by a
+    /// string, a named destination, or by an index past the pages, can't be
+    /// told, nor can a page without `/Annots`; a reference names the page
+    /// it resolves to, and one to no page none. Neither function can be told
+    /// without the pages, nor in a target under another's `/T`, whose pages
+    /// are another document's (ISO 32000-2, 12.6.4.4), though under an
+    /// action's they're this file's.
+    #[test]
+    fn the_page_functions_read_the_pages_given() {
+        let annotation = |nm: Option<Object>| {
+            let mut annotation = dict! { "Subtype" => "Text" };
+            if let Some(nm) = nm {
+                annotation.set("NM", nm);
+            }
+            Object::from(annotation)
+        };
+        let page = |annots: Option<Vec<u32>>| {
+            let mut page = dict! { "Type" => "Page" };
+            if let Some(annots) = annots {
+                let annots: Vec<_> = annots.into_iter().map(Object::reference).collect();
+                page.set("Annots", annots);
+            }
+            Object::from(page)
+        };
+        let mut file = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [
+                (1, dict! { "Type" => "Catalog" }.into()),
+                (3, page(Some(vec![5, 6]))),
+                (4, page(None)),
+                (5, annotation(Some(Object::string("one")))),
+                (6, annotation(None)),
+                (7, annotation(Some(Object::from(5)))),
+                (8, page(Some(vec![6, 7]))),
+            ],
+        );
+        let target = |p: Object, a: Object| Object::from(dict! { "R" => "C", "P" => p, "A" => a });
+        let action = Object::from(dict! { "S" => "GoToE", "T" => Object::null() });
+        let embedded = Object::from(dict! { "R" => "C", "N" => Object::string("x") });
+        let item = |key: &[u8], i: usize| &row("Target", key).possible_values[i][0].item;
+        let (p, a, nm) = (item(b"P", 0), item(b"A", 0), item(b"A", 1));
+        assert_eq!(p, "fn:Eval((@P>=0) && (@P<fn:NumberOfPages()))");
+        assert_eq!(nm, "fn:Eval(@A==fn:PageProperty(@P,Annots::@NM))");
+        let is = |file: &File, target: &Object, parents: &[&Object], text: &str| {
+            file.eval(target, At::Key(b"A"), parents, "1.7", |cx| holds(text, cx))
+        };
+        let pages = unknown("fn:NumberOfPages");
+        let property = unknown("fn:PageProperty");
+        let first = target(0.into(), 1.into());
+        assert_eq!(is(&file, &first, &[&action], p), pages, "not given");
+        assert_eq!(is(&file, &first, &[&action], a), property, "not given");
+
+        file.pages = Some(vec![3, 4, 8]);
+        let of = |p: i64, a: Object| target(p.into(), a);
+        for (target, met) in [
+            (of(2, 0.into()), Truth::True),
+            (of(3, 0.into()), Truth::False),
+            (of(-1, 0.into()), Truth::False),
+        ] {
+            assert_eq!(is(&file, &target, &[&action], p), met, "{target:?}");
+            assert_eq!(is(&file, &target, &[], p), met, "no parent");
+        }
+        for (target, met) in [
+            (of(0, 1.into()), Truth::True),
+            (of(0, 2.into()), Truth::False),
+            (of(1, 0.into()), property.clone()),
+            (of(3, 0.into()), property.clone()),
+        ] {
+            assert_eq!(is(&file, &target, &[&action], a), met, "{target:?}");
+        }
+        for (target, met) in [
+            (of(0, Object::string("one")), Truth::True),
+            (of(0, Object::string("two")), Truth::False),
+            (of(1, Object::string("one")), property.clone()),
+            (
+                of(2, Object::string("one")),
+                unknown("@A==fn:PageProperty(@P,Annots::@NM)"),
+            ),
+        ] {
+            assert_eq!(is(&file, &target, &[&action], nm), met, "{target:?}");
+        }
+        let named = target(Object::string("chapter"), 0.into());
+        assert_eq!(
+            is(&file, &named, &[&action], a),
+            property,
+            "a named destination"
+        );
+
+        let nested = target(5.into(), 0.into());
+        assert_eq!(is(&file, &nested, &[&embedded], p), pages, "under a target");
+        assert_eq!(
+            is(&file, &first, &[&embedded], a),
+            property,
+            "under a target"
+        );
+        assert_eq!(is(&file, &nested, &[&action], p), Truth::False);
+
+        let at = |pg: u32| Object::from(dict! { "Pg" => Object::reference(pg) });
+        let length = "fn:Eval(fn:ArrayLength(fn:PageProperty(@Pg,Annots))==2)";
+        assert_eq!(holds_in(&file, &at(3), "1.7", length), Truth::True);
+        assert_eq!(holds_in(&file, &at(5), "1.7", length), property, "no page");
     }
 
     /// `fn:NoCycle`, the model's on an object stream's `/Extends`: the key
