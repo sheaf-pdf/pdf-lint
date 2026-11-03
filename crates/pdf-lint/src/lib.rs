@@ -173,6 +173,7 @@ pub mod extension {
     use pdf_arlington::extension::Claims;
     use pdf_semantics::{Limits, xmp};
 
+    use crate::check::{Kept, Objects};
     use crate::source::Source;
 
     /// Every extension the model names, in its cells and around its
@@ -191,21 +192,47 @@ pub mod extension {
     /// bound to; what a packet claims before anything that stops the read
     /// counts.
     pub fn declared(source: &dyn Source) -> BTreeSet<String> {
+        read(source).0
+    }
+
+    /// What `source`'s metadata says, its packet read once: the extensions
+    /// it declares, as [`declared`] gives them; what [`xmp::read`] told of
+    /// the packet, kept, each place naming the catalog's metadata stream
+    /// where that's known ([`xmp::metadata_stream`]), at bytes of its data;
+    /// and what stopped the read, if anything did, after which nothing
+    /// counts.
+    pub(crate) fn read(source: &dyn Source) -> (BTreeSet<String>, Kept, Option<xmp::Error>) {
         let resolve = |id| source.get(id).ok().cloned();
-        let root = source.trailer().dict().get(b"Root");
-        let read = (source.metadata())
-            .map(|xml| {
-                xmp::read(xml, None, &Limits::DEFAULT, &mut ()).unwrap_or_else(|error| error.read)
-            })
-            .unwrap_or_default();
+        let trailer = source.trailer().dict();
+        let mut kept = Kept::default();
+        let packet = match source.metadata() {
+            Some(xml) => {
+                let catalog = pdf_semantics::catalog(Objects(source), trailer)
+                    .ok()
+                    .flatten();
+                let stream = catalog
+                    .and_then(|catalog| xmp::metadata_stream(Objects(source), catalog).ok())
+                    .flatten();
+                Some(xmp::read(xml, stream, &Limits::DEFAULT, &mut kept))
+            }
+            None => None,
+        };
+        let read = match &packet {
+            Some(Ok(claims)) => Some(claims),
+            Some(Err(error)) => Some(&error.read),
+            None => None,
+        };
         let mut claims = Claims::default();
-        claims.pdfa_part = read.pdfa_part.as_deref();
-        claims.pdfvt_version = read.pdfvt_version.as_deref();
-        pdf_arlington::extension::declared(root, claims, &resolve)
+        claims.pdfa_part = read.and_then(|read| read.pdfa_part.as_deref());
+        claims.pdfvt_version = read.and_then(|read| read.pdfvt_version.as_deref());
+        let declared = pdf_arlington::extension::declared(trailer.get(b"Root"), claims, &resolve);
+        (declared, kept, packet.and_then(Result::err))
     }
 
     #[cfg(test)]
     mod tests {
+        use pdf_semantics::{Fault, Place};
+
         use super::*;
         use crate::dict;
         use crate::object::Object;
@@ -224,9 +251,81 @@ pub mod extension {
                 dict! { "Type" => "Catalog", "Extensions" => dict! { "ISO_" => iso } },
             );
             assert_eq!(declared(&doc), BTreeSet::from(["ISO_TS_32001".to_string()]));
+            assert_eq!(declared(&doc), quietly(&doc));
             doc.metadata = Some(xmp(r#"pdfaid:part="3""#));
             let both = ["ISO_19005_3", "ISO_TS_32001"].map(String::from);
             assert_eq!(declared(&doc), BTreeSet::from(both));
+            assert_eq!(declared(&doc), quietly(&doc));
+        }
+
+        /// What `doc` declares, its packet read with no stream and a sink that
+        /// wants no faults, so none is looked for: what [`declared`] gives,
+        /// which reads it with both, as neither changes what's read.
+        fn quietly(doc: &Document) -> BTreeSet<String> {
+            let resolve = |id| doc.get(id).ok().cloned();
+            let read = (doc.metadata())
+                .map(|xml| {
+                    xmp::read(xml, None, &Limits::DEFAULT, &mut ())
+                        .unwrap_or_else(|error| error.read)
+                })
+                .unwrap_or_default();
+            let mut claims = Claims::default();
+            claims.pdfa_part = read.pdfa_part.as_deref();
+            claims.pdfvt_version = read.pdfvt_version.as_deref();
+            pdf_arlington::extension::declared(doc.trailer.dict().get(b"Root"), claims, &resolve)
+        }
+
+        /// A packet read once, for what it declares and what it tells: with
+        /// faults, the same claims as [`declared`]'s, and as without them;
+        /// each fault kept in the catalog's metadata stream, at its bytes
+        /// there, or in no object where no catalog names the stream; and what
+        /// stops the read, what's claimed before it counted.
+        #[test]
+        fn a_packet_read_once_declares_as_declared_and_keeps_its_faults() {
+            let vt = "<pdfvtid:GTS_PDFVTVersion>PDF/VT-2</pdfvtid:GTS_PDFVTVersion>";
+            let faulty = packet(r#"pdfaid:part="3" x=y"#, vt);
+            let clean = packet(r#"pdfaid:part="3""#, vt);
+            let mut doc =
+                Document::new(Version::new(2, 0), dict! { "Root" => Object::reference(1) });
+            let catalog = dict! { "Type" => "Catalog", "Metadata" => Object::reference(5) };
+            doc.insert(1, catalog);
+            let stream = |data: &[u8]| {
+                let dict = dict! { "Type" => "Metadata", "Subtype" => "XML" };
+                crate::object::Stream::new(dict, data.to_vec())
+            };
+            let both = ["ISO_19005_3", "PDF_VT2"].map(String::from);
+            for (data, faults) in [(&clean, 0), (&faulty, 1)] {
+                doc.insert(5, stream(data));
+                doc.metadata = Some(data.clone());
+                let (claimed, kept, stopped) = read(&doc);
+                assert_eq!(claimed, BTreeSet::from(both.clone()));
+                assert_eq!(claimed, declared(&doc));
+                assert_eq!(claimed, quietly(&doc));
+                assert!(stopped.is_none());
+                assert_eq!(kept.told().len(), faults);
+                for (place, fault, count) in kept.told() {
+                    assert_eq!(*fault, Fault::XmpAttribute);
+                    assert_eq!(*count, 1);
+                    assert_eq!(place.object, Some((5, 0)));
+                    let at = place.at.unwrap();
+                    assert_eq!(at.stream, Some((5, 0)));
+                    assert!(data[at.start..at.end].starts_with(b"<rdf:Description"));
+                }
+            }
+            // With no catalog to name its stream, a fault's in no object.
+            let mut alone = Document::new(Version::new(2, 0), dict! {});
+            alone.metadata = Some(faulty.clone());
+            let (claimed, kept, _) = read(&alone);
+            assert_eq!(claimed, BTreeSet::from(both.clone()));
+            assert_eq!(kept.told().len(), 1);
+            assert_eq!(kept.told()[0].0, Place::new(None, None));
+            // What stops the read, with what's claimed before it.
+            let stops = [packet(r#"pdfaid:part="3""#, ""), b"</e>".to_vec()].concat();
+            alone.metadata = Some(stops);
+            let (claimed, _, stopped) = read(&alone);
+            assert_eq!(claimed, BTreeSet::from(["ISO_19005_3".to_string()]));
+            assert_eq!(claimed, quietly(&alone));
+            assert!(matches!(stopped.unwrap().why, xmp::XmpWhy::Xml(_)));
         }
 
         /// XMP metadata with `attributes` on an element that binds pdfaid's
@@ -246,11 +345,15 @@ pub mod extension {
             packet(attributes, "")
         }
 
-        /// What a document with `packet` as its metadata declares.
+        /// What a document with `packet` as its metadata declares, which is
+        /// what it declared read quietly.
         fn from(packet: &[u8]) -> Vec<String> {
             let mut doc = Document::new(Version::new(2, 0), dict! {});
             doc.metadata = Some(packet.to_vec());
-            declared(&doc).into_iter().collect()
+            let declared = declared(&doc);
+            let quiet = quietly(&doc);
+            assert_eq!(declared, quiet, "{}", String::from_utf8_lossy(packet));
+            declared.into_iter().collect()
         }
 
         /// As an attribute or an element, with spaces round its `=` and

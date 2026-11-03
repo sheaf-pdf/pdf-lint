@@ -77,6 +77,12 @@
 //! hold that none of it uses ([`Rule::Unused`]), when asked for
 //! ([`Options::unused`]), else counted only ([`Report::unused`]).
 //!
+//! The common structures are read through pdf-semantics: before the walk,
+//! the page tree (ISO 32000-2, 7.7.3), by ISO's rules and by PDFium's, from
+//! the catalog the trailer as written leads to; after the content, each name
+//! and number tree the walk reached (7.9.6, 7.9.7), from its root. No rule
+//! is held to what they tell yet.
+//!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
 //! under another is as if it weren't in the model, as in TestGrammar
@@ -141,7 +147,7 @@ use std::fmt::{self, Write as _};
 use std::num::ParseIntError;
 use std::rc::Rc;
 
-use pdf_objects::Resolve;
+use pdf_objects::{Resolve, Unreadable};
 use pdf_semantics::date::Date;
 use pdf_structure::write::KeptOut;
 
@@ -153,6 +159,9 @@ use crate::text;
 use crate::version::Version;
 
 mod content;
+mod structure;
+
+pub(crate) use structure::Kept;
 
 /// How deeply direct objects may nest in an indirect one before the walk
 /// stops going in. A real file nests a few.
@@ -860,7 +869,10 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         .table(name)
         .expect("the model has the trailers' tables");
     let id = written.stream;
-    let mut extensions = crate::extension::declared(source);
+    // The page tree, by ISO's rules and by PDFium's, before the walk.
+    structure::page_trees(source, trailer);
+    // The packet, read once: for the extensions declared, and its faults.
+    let (mut extensions, ..) = crate::extension::read(source);
     extensions.extend(options.extensions.iter().cloned());
     let checked_under = extensions.clone();
     // What every predicate of the file is evaluated in, once.
@@ -957,6 +969,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         containers: Vec::new(),
         holders: Vec::new(),
         resources_at: HashMap::new(),
+        roots: Vec::new(),
         report: Report {
             findings,
             unchecked,
@@ -989,6 +1002,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     walk.excuse();
     walk.packed();
     walk.content(options.content_budget.unwrap_or(CONTENT_BUDGET));
+    walk.structures();
     walk.unreached();
     walk.read_as(source.warnings());
     walk.report
@@ -1164,12 +1178,24 @@ pub fn file_version(source: &dyn Source) -> Version {
 }
 
 /// A file's objects, as the predicates resolve a reference: an object that
-/// doesn't read is none, as one the file hasn't is.
-struct Objects<'a>(&'a dyn Source);
+/// doesn't read is none, as one the file hasn't is. Asked why, as the
+/// common structures' walks ask ([`structure`]) and the predicates never
+/// do, it says it as a document's own resolver does
+/// ([`Unread::unreadable`]).
+///
+/// [`Unread::unreadable`]: crate::source::Unread::unreadable
+pub(crate) struct Objects<'a>(pub(crate) &'a dyn Source);
 
 impl<'a> Resolve<'a> for Objects<'a> {
     fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
         self.0.get(id).ok()
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'a Object>, Unreadable> {
+        match self.0.get(id) {
+            Ok(object) => Ok(Some(object)),
+            Err(why) => why.unreadable(id),
+        }
     }
 }
 
@@ -1390,6 +1416,9 @@ struct Walk<'a> {
     /// Where the walk reached each resources dictionary, by where the
     /// source holds it, which [`Walk::content`] tells `unused` by.
     resources_at: HashMap<*const Object, content::Reached<'a>>,
+    /// Each name and number tree's root the walk reached, in the order it
+    /// reached them, which [`Walk::structures`] reads again.
+    roots: Vec<structure::Root<'a>>,
     report: Report,
 }
 
@@ -2613,6 +2642,9 @@ impl<'a> Walk<'a> {
             let Value::Dict(dict) = node.value() else {
                 continue;
             };
+            if is_root {
+                self.note_root(node, node_id, names);
+            }
             let here = Visit {
                 object: node,
                 holder: node_id.or(from.holder),
@@ -9096,5 +9128,40 @@ mod tests {
             }
         }
         assert!(trees >= 1, "the fixtures hold name trees");
+    }
+
+    /// The file's objects as the predicates and the common structures'
+    /// walks resolve them say why one doesn't read as a document's own
+    /// resolver does: none for one the file hasn't; `Damaged` for one that
+    /// doesn't parse; `Locked` for one in an object stream a password the
+    /// reader wasn't given locks; and the object for one that reads. Without
+    /// why, as the predicates ask, each is none but the one that reads.
+    #[test]
+    fn the_objects_say_why_one_doesnt_read_as_a_document_does() {
+        use crate::Why;
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG);
+        file.object(2, PAGES);
+        file.object(3, "<< /Type /Pages /Kids [ >>");
+        file.object_stream(10, "", &[(4, "<< /Type /Page >>")]);
+        let trailer = "/Root 1 0 R /Encrypt << /Filter /Standard /V 2 >>";
+        let at = file.stream(11, &[0, 1, 2, 3, 4, 10], trailer);
+        file.end(at);
+        let doc = bytes::read(&file.out);
+        let (own, objects) = (&doc, Objects(&doc));
+        let whys = [
+            ((1, 0), None),
+            ((3, 0), Some(Why::Damaged)),
+            ((4, 0), Some(Why::Locked)),
+            ((9, 0), None),
+        ];
+        for (id, why) in whys {
+            let said = own.try_resolve(id);
+            assert_eq!(said.as_ref().err().map(|e| e.why), why, "{id:?}: {said:?}");
+            assert_eq!(objects.try_resolve(id), said, "{id:?}");
+            assert_eq!(objects.resolve(id), said.ok().flatten(), "{id:?}");
+        }
+        assert!(objects.try_resolve((1, 0)).unwrap().is_some());
+        assert_eq!(objects.try_resolve((9, 0)), Ok(None));
     }
 }
