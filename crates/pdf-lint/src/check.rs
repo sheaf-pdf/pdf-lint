@@ -110,8 +110,9 @@
 //! operands not as many or not of the types their operator takes
 //! ([`Rule::Operands`]), a resource name its resources lack
 //! ([`Rule::Resource`]), and where ISO 32000-2 reads it otherwise than
-//! PDFium, or what stops reading it ([`Rule::Content`]), each kind once in a
-//! unit of content; a resource none of the content read uses, when asked
+//! PDFium, or what stops reading it ([`Rule::Content`]), each kind once in
+//! each stream of a unit of content; a resource none of the content read
+//! uses, when asked
 //! for ([`Rule::Unused`]). A check whose predicate can't be
 //! told, or uses a function the evaluator doesn't support, or reads a
 //! string's bytes the reader didn't give, is counted as not made
@@ -568,12 +569,16 @@ pub enum Rule {
     /// Content whose `q`s and `Q`s don't balance (ISO 32000-2, 8.4.2: a
     /// page's streams read as one, a form's, a pattern's or a glyph's
     /// alone): `q`s left open at the end, counted, at the first of them, and
-    /// a `Q` with nothing saved to restore, at the first, with how many. Not
-    /// where reading stopped short of the end ([`Rule::Content`]), for what's
-    /// left open there: the end isn't known. Its table and key are those of
-    /// what holds the content, `PageObject` and `Contents`, a form's or a
-    /// pattern's and `-`, a Type 3 font's and the glyph's name; in the stream
-    /// its bytes are in, at them in its decoded data.
+    /// a `Q` with nothing saved to restore, at the first, with how many;
+    /// each once in each of a page's streams it's in, so what one stream
+    /// leaves open, or closes with nothing open, is its own. Not where
+    /// reading stopped short of the end ([`Rule::Content`]), for what's left
+    /// open there: the end isn't known. Its table and key are those of what
+    /// holds the content, `PageObject` and `Contents`, a form's or a
+    /// pattern's and `-`, a Type 3 font's and the glyph's name; in the
+    /// stream its bytes are in, at them in its decoded data. Held where what
+    /// holds the content is, or a stream of it, or what its resources are
+    /// written in.
     Balance,
     /// Marked content that doesn't end (ISO 32000-2, 14.6.1), a `BMC` or
     /// `BDC` left open at the end, counted, at the first of them; and an
@@ -588,14 +593,14 @@ pub enum Rule {
     /// (7.8.2); an `EX` with no `BX` open, and `BX` left open at the end;
     /// and content that ends inside a graphics object, at where it began,
     /// or a glyph description with no `d0` or `d1`, all of it. Each kind
-    /// once in a unit of content, by the operator and where content is, a
-    /// word by itself, with how many times, at its first; past 32 kinds, one
-    /// finding more says how many more. After an operator that's refused,
-    /// content is where it was, but that a glyph description goes on at the
-    /// content stream level, `ET` ends what it's in, and `BT`, `m` or `re`
-    /// in a path object begins its own, the path abandoned. The end isn't
-    /// found where reading stopped short of it ([`Rule::Content`]). Where
-    /// and as [`Rule::Balance`].
+    /// once in each stream of a unit of content, by the operator and where
+    /// content is, a word by itself, with how many times, at its first;
+    /// past 32 kinds in a unit, one finding more says how many more. After
+    /// an operator that's refused, content is where it was, but that a
+    /// glyph description goes on at the content stream level, `ET` ends
+    /// what it's in, and `BT`, `m` or `re` in a path object begins its own,
+    /// the path abandoned. The end isn't found where reading stopped short
+    /// of it ([`Rule::Content`]). Where and as [`Rule::Balance`].
     Operator,
     /// An operation whose operands aren't as many as its operator takes, or
     /// one of which isn't of the type it takes (ISO 32000-2, Annex A, and
@@ -603,10 +608,10 @@ pub enum Rule {
     /// as written: an integer is a number without a point; `SC` and `sc`
     /// take 1, 3 or 4 numbers, as a color space they may set has
     /// components, and `SCN` and `scn` one operand at least, numbers but a
-    /// pattern's name last. Each kind once in a unit, by the operator and
-    /// whether it's the count or a type, its value the first's, with how
-    /// many times; past 32 kinds, one finding more says how many more.
-    /// Where and as [`Rule::Balance`].
+    /// pattern's name last. Each kind once in each stream of a unit, by the
+    /// operator and whether it's the count or a type, its value the
+    /// first's, with how many times; past 32 kinds in a unit, one finding
+    /// more says how many more. Where and as [`Rule::Balance`].
     Operands,
     /// A resource name content uses that its resources don't have in that
     /// category (ISO 32000-2, 7.8.3, Table 34): `Tf`'s font, `Do`'s
@@ -622,11 +627,12 @@ pub enum Rule {
     /// so. Where they can't be told, a form, a pattern or a glyph with none
     /// of its own (which would use the page's), resources or a category
     /// that isn't a dictionary, or a reference to nothing, the name isn't
-    /// found lacking, and is counted as not checked. Each name once in a
-    /// unit of content, at its first use, its value the name as written and
-    /// the operator (`/F1 (Tf)`); past 32, one finding more says how many
-    /// more. Its table `Resource` and its key the category; in the stream
-    /// and at the path as [`Rule::Balance`].
+    /// found lacking, and is counted as not checked. Each name once in each
+    /// stream of a unit of content, at its first use, its value the name as
+    /// written and the operator (`/F1 (Tf)`); past 32 in a unit, one finding
+    /// more, its key `-`, says how many more. Its table `Resource` and its
+    /// key the category; in the stream, at the path and held as
+    /// [`Rule::Balance`].
     Resource,
     /// A resource nothing in the content read uses: a name in a category of
     /// resources (ISO 32000-2, 7.8.3) that no unit of content they're the
@@ -639,16 +645,20 @@ pub enum Rule {
     /// content with resources that can't be told uses is used in every
     /// category of its kind; and a category one of whose units isn't read,
     /// or isn't read to its end, can't be told, its names counted as not
-    /// checked. In the category's object, else its resources', else the
-    /// object they're in; its table `Resource` and its key the category, at
-    /// the name's key, its value the name.
+    /// checked, nor can any category such a unit's names could be in, where
+    /// its resources, or a category of them, can't be told. In the
+    /// category's object, else its resources', else the object they're in,
+    /// held where that is, or where a unit of content held has it, made as
+    /// that is; its table `Resource` and its key the category, at the name's
+    /// key, its value the name.
     Unused,
     /// Content as ISO 32000-2 reads it otherwise than it's read, as PDFium
-    /// reads it, each kind of place once in a unit of content, its value the
-    /// first's (pdf-content-streams' `Fault`), with how many; and what stops
-    /// content's reading, a string, an array, a dictionary or an inline image
-    /// that doesn't end and the like, at it, after which no more is read.
-    /// Where and as [`Rule::Balance`].
+    /// reads it, each kind of place once in each stream of a unit of
+    /// content, its value the first's (pdf-content-streams' `Fault`), with
+    /// how many, past 32 kinds in a unit one finding more saying how many
+    /// more; and what stops content's reading, a string, an array, a
+    /// dictionary or an inline image that doesn't end and the like, at it,
+    /// after which no more is read. Where and as [`Rule::Balance`].
     Content,
 }
 
@@ -1111,7 +1121,7 @@ fn like(f: &Finding) -> (String, String, Rule, String) {
     let value = match f.rule {
         Rule::TooNew => String::new(),
         Rule::Reader => f.value.chars().filter(|c| !c.is_ascii_digit()).collect(),
-        rule if content::counted(rule) => content::uncounted(rule, &f.value),
+        rule if content::counted(rule, &f.key) => content::uncounted(rule, &f.value),
         _ => numberless(&f.value),
     };
     match f.rule {

@@ -16,26 +16,30 @@
 //!
 //! The streams' data comes decoded from the source
 //! ([`Source::decoded_within`]): a reader that gives none, as a document
-//! alone doesn't, has no content read at all. A file's content is read
-//! within a budget of decoded bytes ([`Options::content_budget`]), each
-//! stream asked for no more than is left of it, what a stream that doesn't
-//! decode cleanly held spent too, so that a bomb cut short spends it as one
-//! read whole does; past it, no more is read. A unit whose data doesn't
-//! decode cleanly, or past the budget, isn't read, and is counted as not
-//! checked ([`Report::unchecked`]), its column `-`: a part of it would find
-//! what the rest undoes. Each unit is read as PDFium reads content, through
-//! pdf-content-streams, with every place ISO 32000-2 reads it otherwise kept
-//! as it's read.
+//! alone doesn't, has no content read at all, as it says of the first
+//! stream it's asked for. A file's content is read within a budget of
+//! decoded bytes ([`Options::content_budget`]), each stream asked for no
+//! more than is left of it, what a stream that doesn't decode cleanly held
+//! spent too, so that a bomb cut short spends it as one read whole does;
+//! past it, no more is read. A unit whose data doesn't decode cleanly, or
+//! that the source doesn't give, or past the budget, isn't read, and is
+//! counted as not checked ([`Report::unchecked`]), its column `-`: a part of
+//! it would find what the rest undoes. Each unit is read as PDFium reads
+//! content, through pdf-content-streams, with every place ISO 32000-2 reads
+//! it otherwise kept as it's read.
 //!
-//! What a unit's reading finds, each kind of it once in the unit, at its
-//! first place, with how many times it's found, and past [`KINDS`] kinds of
-//! a rule, one finding more saying how many more:
+//! What a unit's reading finds, each kind of it once in each of the unit's
+//! streams it's found in, at its first place there, with how many times it's
+//! found there, and past [`KINDS`] kinds of a rule in the unit, one finding
+//! more saying how many more:
 //!
 //! - **`q`s left open** at the end, and a **`Q` with nothing saved** to
 //!   restore (8.4.2; [`Rule::Balance`]): counted by how deep the saved
 //!   states are, kept at 0 when a `Q` comes with none saved, so that the
 //!   first `q` left open is the last taken with none saved before it, as
-//!   pdf-content-streams' `Balance` counts them.
+//!   pdf-content-streams' `Balance` counts them; and of each stream, those
+//!   it leaves open, the first of them the last it took at the lowest it
+//!   went, as deep as no later stream goes below.
 //! - **Marked content left open** at the end, `BMC` or `BDC`, and an **`EMC`
 //!   ending none** (14.6.1; [`Rule::Marked`]), counted the same way, every
 //!   `BMC` and `BDC` opening a range, however deep, as its `MarkedNest` reads
@@ -51,9 +55,10 @@
 //!   no `d0` or `d1`, all of it. After an operator that's refused, content
 //!   is where it was, but that a glyph description goes on at the content
 //!   stream level, the operator taken there, as after its `d0`; `ET` ends
-//!   what it's in; and `BT`, `m` or `re` in a path object begins its own object, the
-//!   path abandoned: a rule of the checker's, so that one mistake is one
-//!   finding, and what's refused after it is only said to be.
+//!   what it's in; and `BT`, `m` or `re` in a path object begins its own
+//!   object, the path abandoned: a rule of the checker's, so that one
+//!   mistake is one finding, and what's refused after it is only said to
+//!   be.
 //! - **Operands that aren't as Annex A's table has them**
 //!   ([`Rule::Operands`]): how many, else the first of them whose type
 //!   isn't its operator's, told from its bytes as written, an integer a
@@ -80,10 +85,10 @@
 //!   ([`Rule::Content`]), by the kind of [`Fault`], its text the first's: the
 //!   tokens' and the operations' own, 0x80 and 0xFF read as white-space
 //!   among them, and what's inside an array or a dictionary among the
-//!   operands, which reading it as an object tells. A
-//!   dictionary PDFium reads as none is told twice, so: as no dictionary, by
-//!   the tokens, and as what makes it none (a key that's no name, a key with
-//!   no value, a word that's no object), by its reading.
+//!   operands, which reading it as an object tells. A dictionary PDFium
+//!   reads as none is told twice, so: as no dictionary, by the tokens, and
+//!   as what makes it none (a key that's no name, a key with no value, a
+//!   word that's no object), by its reading.
 //! - **What stops reading** ([`Rule::Content`]): a string, an array, a
 //!   dictionary or an inline image that doesn't end, operands past the cap,
 //!   and the like. What came before it stands, but where the content ends
@@ -95,12 +100,15 @@
 //! by, under a page `Contents` or `Contents[1]`, under a font `CharProcs`
 //! and the glyph's name; its table the holder's, and its key `Contents`,
 //! `-` for a form's or a pattern's own data, or the glyph's name. A unit is
-//! held when a holder of it is, or one of its streams, and is then told as
-//! the first held holder's, else as the first's, all of it: made as that
-//! holder is, else as the stream its finding is in, else as the first held
-//! stream. So what an update writes is told with the unit it's in, and
-//! [`Report::since`] carries what the revision before had in the same
-//! stream. Units come in the order the walk reached their first holders;
+//! held when a holder of it is, or one of its streams, or what its
+//! resources are written in (its `/Resources`, the page tree node a page
+//! inherits them from, a category's own object), and is then told as the
+//! first held holder's, else as the first's, all of it: made as that holder
+//! is, else as the stream its finding is in, else as the first held stream,
+//! else as its resources. So what an update writes is told with the unit
+//! it's in, and [`Report::since`] carries what the revision before had in
+//! the same stream, and what a stream the update wrote brings is its own.
+//! Units come in the order the walk reached their first holders;
 //! in a unit, the rules in [`Rule::ALL`]'s order, and each rule's kinds by
 //! where they're first found. A `resource` finding's table is `Resource`
 //! and its key the category.
@@ -113,11 +121,13 @@
 //! category is one by the object it is, else by its resources' object and
 //! its key, else by where it was written, so that a name any unit uses is
 //! used; one a unit of which isn't read, or isn't read to its end, can't be
-//! told, and what it holds that nothing read uses is counted as not
-//! checked. Each counted ([`Report::unused`]), and found with
-//! [`Options::unused`]: in the category's object, else its resources',
-//! else the one they're in, where that's held, at the walk's way to the
-//! resources and the name's key.
+//! told, nor can any where such a unit's names could be in any (its
+//! resources, or a category of them, can't be told), and what it holds that
+//! nothing read uses is counted as not checked. Each counted
+//! ([`Report::unused`]), and found with [`Options::unused`]: in the
+//! category's object, else its resources', else the one they're in, where
+//! that's held, or where a held unit has it, made as that is; at the walk's
+//! way to the resources and the name's key.
 //!
 //! [`Options::content_budget`]: super::Options::content_budget
 //! [`Options::unused`]: super::Options::unused
@@ -148,7 +158,7 @@ use pdf_content_streams::{
     State, Type,
 };
 
-use super::{Finding, Rule, Step, TOKEN, Trail, Visit, Walk};
+use super::{Finding, Made, Rule, Step, TOKEN, Trail, Visit, Walk};
 use crate::bytes;
 use crate::object::{Dict, Object, ObjectId, Span, Value};
 use crate::pdf_filters;
@@ -176,6 +186,10 @@ const TOO_LARGE: &str = "content decoded past what's read of one unit";
 
 /// Why a unit isn't read: a stream of it doesn't decode cleanly.
 const DECODE: &str = "a content stream that doesn't decode cleanly";
+
+/// Why a unit isn't read: the source gives no data of a stream of it,
+/// though it gave another's.
+const UNGIVEN: &str = "a content stream whose data the source doesn't give";
 
 /// Why a resource name isn't looked up: a form, a pattern or a glyph has no
 /// resources of its own, where it would use its page's.
@@ -312,6 +326,10 @@ struct Category<'a> {
     /// Whether every unit of content it's a category of was read to its
     /// end, so that what isn't used is told.
     told: bool,
+    /// How it's made where its object isn't held but a unit of content
+    /// that has it is: as that unit is, as what the unit's content uses
+    /// is what's unused in it.
+    made: Option<Made>,
 }
 
 /// The categories of resources the units of a file's content name, as
@@ -390,13 +408,30 @@ impl<'a> Categories<'a> {
     }
 
     /// The categories of `lookup` not told, as a unit of content they're
-    /// the categories of isn't read to its end.
+    /// the categories of isn't read to its end; and where what it names can
+    /// be in none that can be told, its resources not, or a category of
+    /// them not, every category of what it may name, as which it would use
+    /// isn't known.
     fn untell(&mut self, lookup: &Lookup) {
-        if let Lookup::In(categories) = lookup {
-            for &(_, found) in categories {
-                if let Ok(i) = found {
-                    self.all[i].told = false;
+        match lookup {
+            Lookup::Without => {}
+            Lookup::Untold(_) => self.untell_all(None),
+            Lookup::In(categories) => {
+                for &(kind, found) in categories {
+                    match found {
+                        Ok(i) => self.all[i].told = false,
+                        Err(_) => self.untell_all(Some(kind)),
+                    }
                 }
+            }
+        }
+    }
+
+    /// Every category of `kind`, or of every kind, not told.
+    fn untell_all(&mut self, kind: Option<ResKind>) {
+        for category in &mut self.all {
+            if kind.is_none_or(|kind| category.kind == kind) {
+                category.told = false;
             }
         }
     }
@@ -426,41 +461,87 @@ impl Unit<'_> {
 enum Read {
     /// Decoded, and joined.
     Joined(Concat<'static>),
-    /// Not read, and why: a stream doesn't decode cleanly, or the unit is
-    /// past the budget, or past what content's reading joins.
+    /// Not read, and why: a stream doesn't decode cleanly, or the source
+    /// doesn't give it, or the unit is past the budget, or past what
+    /// content's reading joins.
     Unread(&'static str),
-    /// The source gives no stream's data.
+    /// The source gives no stream's data: it gave none of the first asked.
     NoData,
 }
 
-/// A kind of fault, as it's told: the first of it, where it is, and how
-/// many times it's told.
+/// A kind of fault, as it's told in one of a unit's streams: the first of
+/// it there, where it is, and how many times it's told there.
 struct Told<'c> {
     fault: Fault<'c>,
+    /// The stream, by its place among the unit's.
+    stream: u32,
     at: Range<usize>,
     count: usize,
 }
 
-/// Each kind of place ISO 32000-2 reads content otherwise, as it's told:
-/// its first, the one that starts first, and how many, in the order the
-/// kinds are first told. A kind is a [`Fault`]'s variant, so that what's
-/// kept is as many as there are kinds, however many are told.
-#[derive(Default)]
-struct Faults<'c>(Vec<Told<'c>>);
+/// Each kind of place ISO 32000-2 reads content otherwise, as it's told in
+/// each of a unit's streams: its first there, the one that starts first,
+/// and how many, in the order the kinds are first told, for the first
+/// [`KINDS`]; past them, how many more, of any kind, and where the first
+/// of those is. A kind is a [`Fault`]'s variant, so that what's kept is
+/// bounded, however many are told.
+struct Faults<'c> {
+    content: &'c Concat<'c>,
+    told: Vec<Told<'c>>,
+    more: usize,
+    past: Option<Range<usize>>,
+}
 
 impl<'c> Faults<'c> {
-    /// `count` more of `fault`'s kind, `fault` at `at` its first if none of
-    /// the kind starts before it.
+    /// None yet, of `content`.
+    fn new(content: &'c Concat<'c>) -> Faults<'c> {
+        Faults {
+            content,
+            told: Vec::new(),
+            more: 0,
+            past: None,
+        }
+    }
+
+    /// `count` more of `fault`'s kind in the stream `at` starts in, `fault`
+    /// at `at` its first there if none of the kind there starts before it.
     fn add(&mut self, at: Range<usize>, fault: Fault<'c>, count: usize) {
-        let kind = mem::discriminant(&fault);
-        match (self.0.iter_mut()).find(|told| mem::discriminant(&told.fault) == kind) {
-            Some(told) => {
-                told.count += count;
-                if at.start < told.at.start {
-                    (told.fault, told.at) = (fault, at);
-                }
+        let (kind, stream) = (mem::discriminant(&fault), self.content.pos(at.start).stream);
+        let kept = (self.told.iter_mut())
+            .find(|told| told.stream == stream && mem::discriminant(&told.fault) == kind);
+        if let Some(told) = kept {
+            told.count += count;
+            if at.start < told.at.start {
+                (told.fault, told.at) = (fault, at);
             }
-            None => self.0.push(Told { fault, at, count }),
+        } else if self.told.len() < KINDS {
+            let told = Told {
+                fault,
+                stream,
+                at,
+                count,
+            };
+            self.told.push(told);
+        } else {
+            self.past_kinds(at, count);
+        }
+    }
+
+    /// `count` more past the kinds told apart, at `at`.
+    fn past_kinds(&mut self, at: Range<usize>, count: usize) {
+        self.more += count;
+        if self.past.as_ref().is_none_or(|past| at.start < past.start) {
+            self.past = Some(at);
+        }
+    }
+
+    /// What `other`, of the same content, told, added to what this did.
+    fn merge(&mut self, other: Faults<'c>) {
+        for told in other.told {
+            self.add(told.at, told.fault, told.count);
+        }
+        if let Some(at) = other.past {
+            self.past_kinds(at, other.more);
         }
     }
 }
@@ -471,15 +552,29 @@ impl<'c> Sink<'c> for Faults<'c> {
     }
 }
 
-/// How deep what content opens and closes goes, `q` and `Q`, or `BMC` or
-/// `BDC` and `EMC`, kept at 0 when a closer comes with none open: the
-/// first left open at the end is the last opener taken at 0, and each
+/// How deep what content opens and closes goes, `q` and `Q`, `BMC` or
+/// `BDC` and `EMC`, or `BX` and `EX`, kept at 0 when a closer comes with
+/// none open; and, in each of a unit's streams that opens or closes, how
+/// low it goes there. What a stream leaves open at the end is what it
+/// opened above that low, as far as no later stream goes below it, the
+/// first of it the last opener the stream took at that low; and each
 /// closer at 0 has nothing to close. So it's counted without keeping a
 /// place for each opener.
 #[derive(Debug, Default)]
 struct Depth {
     depth: usize,
-    /// Where the last opener taken at 0 is.
+    runs: Vec<Run>,
+}
+
+/// What content opens and closes in one of a unit's streams.
+#[derive(Debug)]
+struct Run {
+    /// The stream, by its place among the unit's.
+    stream: u32,
+    /// How deep it is at its lowest in the stream, and at its end.
+    low: usize,
+    end: usize,
+    /// Where the last opener taken at `low` is.
     open: Option<Range<usize>>,
     /// The closers with nothing open, and where the first is.
     closers: usize,
@@ -487,39 +582,81 @@ struct Depth {
 }
 
 impl Depth {
-    /// An opener at `at`.
-    fn open(&mut self, at: Range<usize>) {
-        if self.depth == 0 {
-            self.open = Some(at);
+    /// The run of `stream`, begun where it isn't the last's.
+    fn run(&mut self, stream: u32) -> &mut Run {
+        if self.runs.last().is_none_or(|run| run.stream != stream) {
+            self.runs.push(Run {
+                stream,
+                low: self.depth,
+                end: self.depth,
+                open: None,
+                closers: 0,
+                closer: None,
+            });
         }
-        self.depth = self.depth.saturating_add(1);
+        self.runs.last_mut().expect("the stream's run is the last")
     }
 
-    /// A closer at `at`.
-    fn close(&mut self, at: Range<usize>) {
-        match self.depth {
-            0 => {
-                self.closers += 1;
-                self.closer.get_or_insert(at);
-            }
-            _ => self.depth -= 1,
+    /// An opener at `at`, in `stream`.
+    fn open(&mut self, stream: u32, at: Range<usize>) {
+        let (was, depth) = (self.depth, self.depth.saturating_add(1));
+        let run = self.run(stream);
+        if was == run.low {
+            run.open = Some(at);
         }
+        run.end = depth;
+        self.depth = depth;
     }
 
-    /// What it finds, each with where it is: openers left open at the end,
-    /// `open` saying what they are, unless reading `stopped`, as then the
-    /// end isn't known; and closers with nothing open, `closer` saying
-    /// what one is. By where each is.
-    fn found(&self, stopped: bool, open: &str, closer: &str) -> Vec<(Range<usize>, String)> {
+    /// A closer at `at`, in `stream`.
+    fn close(&mut self, stream: u32, at: Range<usize>) {
+        let (none, depth) = (self.depth == 0, self.depth.saturating_sub(1));
+        let run = self.run(stream);
+        if none {
+            run.closers += 1;
+            run.closer.get_or_insert(at);
+        } else if depth < run.low {
+            (run.low, run.open) = (depth, None);
+        }
+        run.end = depth;
+        self.depth = depth;
+    }
+
+    /// What it finds, by stream, each with whether it's openers, where the
+    /// first is and how many: openers left open at the end, unless reading
+    /// `stopped`, as then the end isn't known; and closers with nothing
+    /// open. By where each is.
+    fn found(&self, stopped: bool) -> Vec<(bool, u32, Range<usize>, usize)> {
         let mut found = Vec::new();
-        if let Some(at) = self.open.clone().filter(|_| self.depth > 0 && !stopped) {
-            found.push((at, format!("{} {open}", self.depth)));
+        // How low content goes in the streams after the one read.
+        let mut after = usize::MAX;
+        for run in self.runs.iter().rev() {
+            let left = run.end.min(after).saturating_sub(run.low);
+            if let (false, Some(at), 1..) = (stopped, &run.open, left) {
+                found.push((true, run.stream, at.clone(), left));
+            }
+            if let Some(at) = &run.closer {
+                found.push((false, run.stream, at.clone(), run.closers));
+            }
+            after = after.min(run.low);
         }
-        if let Some(at) = self.closer.clone() {
-            found.push((at, times(closer, self.closers)));
-        }
-        found.sort_by_key(|(at, _)| at.start);
+        found.sort_by_key(|(_, _, at, _)| at.start);
         found
+    }
+
+    /// What it finds as one rule's findings, each kind once in each
+    /// stream: openers left open, `open` saying what they are, counted
+    /// first (`2 q left open at the end`), unless reading `stopped`; and
+    /// closers with nothing open, `closer` saying what one is.
+    fn told(&self, stopped: bool, open: &str, closer: &str) -> Vec<(Range<usize>, String)> {
+        let mut kinds = Kinds::default();
+        for (opener, stream, at, n) in self.found(stopped) {
+            match opener {
+                true => kinds.add_n((true, stream), at, n, many, || open.to_string()),
+                false => kinds.add_n((false, stream), at, n, times, || closer.to_string()),
+            }
+        }
+        kinds.found()
     }
 }
 
@@ -531,12 +668,28 @@ fn times(what: &str, n: usize) -> String {
     }
 }
 
+/// How many of `what` there are, before it, always, as what's left open
+/// at the end is counted.
+fn many(what: &str, n: usize) -> String {
+    format!("{n} {what}")
+}
+
+/// What a rule finds past the kinds it tells apart in a unit: how many
+/// more, of any kind.
+fn more(n: usize) -> String {
+    format!("{n} more, of kinds past the first {KINDS}")
+}
+
+/// How a kind's value says how many times it's found: [`times`] or
+/// [`many`].
+type Shown = fn(&str, usize) -> String;
+
 /// Each kind of what a rule finds in a unit, as it's found: the first of
 /// each, where it is and what it says, and how many times it's found, for
 /// the first [`KINDS`] kinds; past them, how many more are found, of any
 /// kind, and where the first of those is.
 struct Kinds<K> {
-    kinds: Vec<(K, Range<usize>, String, usize)>,
+    kinds: Vec<(K, Range<usize>, String, usize, Shown)>,
     more: usize,
     past: Option<Range<usize>>,
 }
@@ -554,12 +707,25 @@ impl<K> Default for Kinds<K> {
 impl<K: PartialEq> Kinds<K> {
     /// One of `kind` at `at`, saying `value` if it's the first.
     fn add(&mut self, kind: K, at: Range<usize>, value: impl FnOnce() -> String) {
+        self.add_n(kind, at, 1, times, value);
+    }
+
+    /// `n` of `kind` at `at`, saying `value` if it's the first, with how
+    /// many as `shown` says it.
+    fn add_n(
+        &mut self,
+        kind: K,
+        at: Range<usize>,
+        n: usize,
+        shown: Shown,
+        value: impl FnOnce() -> String,
+    ) {
         if let Some(kept) = self.kinds.iter_mut().find(|kept| kept.0 == kind) {
-            kept.3 += 1;
+            kept.3 += n;
         } else if self.kinds.len() < KINDS {
-            self.kinds.push((kind, at, value(), 1));
+            self.kinds.push((kind, at, value(), n, shown));
         } else {
-            self.more += 1;
+            self.more += n;
             self.past.get_or_insert(at);
         }
     }
@@ -567,9 +733,12 @@ impl<K: PartialEq> Kinds<K> {
     /// What it found, each kind at its first, with how many times, by
     /// where each is; then how many more, past the kinds told apart.
     fn found(self) -> Vec<(Range<usize>, String)> {
-        (self.told().into_iter())
-            .map(|(_, at, value, n)| (at, times(&value, n)))
-            .collect()
+        let mut found: Vec<_> = (self.kinds.into_iter())
+            .map(|(_, at, value, n, shown)| (at, shown(&value, n)))
+            .collect();
+        found.sort_by_key(|(at, _)| at.start);
+        found.extend(self.past.map(|at| (at, more(self.more))));
+        found
     }
 
     /// What it found, in [`Kinds::found`]'s order, each kind with its first
@@ -577,13 +746,10 @@ impl<K: PartialEq> Kinds<K> {
     /// with that, once.
     fn told(self) -> Vec<(Option<K>, Range<usize>, String, usize)> {
         let mut found: Vec<_> = (self.kinds.into_iter())
-            .map(|(kind, at, value, n)| (Some(kind), at, value, n))
+            .map(|(kind, at, value, n, _)| (Some(kind), at, value, n))
             .collect();
         found.sort_by_key(|(_, at, ..)| at.start);
-        if let Some(at) = self.past {
-            let more = format!("{} more, of kinds past the first {KINDS}", self.more);
-            found.push((None, at, more, 1));
-        }
+        found.extend(self.past.map(|at| (None, at, more(self.more), 1)));
         found
     }
 }
@@ -883,13 +1049,16 @@ fn pass(
     look: &mut dyn FnMut(ResKind, &[u8]) -> Looked,
 ) -> Found {
     let (mut saved, mut marked) = (Depth::default(), Depth::default());
-    let (mut faults, mut inside) = (Faults::default(), Faults::default());
+    let (mut faults, mut inside) = (Faults::new(content), Faults::new(content));
     let (mut placed, mut operands) = (Kinds::default(), Kinds::default());
     let mut named = Kinds::default();
     // `BX` and `EX`, and where content is, with where the graphics object
     // it's in began.
     let (mut compat, mut state, mut begun) = (Depth::default(), start, 0..0);
     let mut stop: Option<Error> = None;
+    // Each kind is told apart in each stream it's in, by the stream's place
+    // among the unit's.
+    let stream = |at: &Range<usize>| content.pos(at.start).stream;
     for read in content.operations(res, limits).with_sink(&mut faults) {
         let op = match read {
             Ok(op) => op,
@@ -898,18 +1067,19 @@ fn pass(
                 break;
             }
         };
+        let at = op.range();
         match op.name() {
-            b"q" => saved.open(op.range()),
-            b"Q" => saved.close(op.range()),
-            b"BMC" | b"BDC" => marked.open(op.range()),
-            b"EMC" => marked.close(op.range()),
-            b"BX" => compat.open(op.range()),
+            b"q" => saved.open(stream(&at), at.clone()),
+            b"Q" => saved.close(stream(&at), at.clone()),
+            b"BMC" | b"BDC" => marked.open(stream(&at), at.clone()),
+            b"EMC" => marked.close(stream(&at), at.clone()),
+            b"BX" => compat.open(stream(&at), at.clone()),
             b"EX" => {
                 if compat.depth == 0 {
                     let unopened = || "EX with no BX open".to_string();
-                    placed.add(Placed::Unopened, op.range(), unopened);
+                    placed.add((Placed::Unopened, stream(&at)), at.clone(), unopened);
                 }
-                compat.close(op.range());
+                compat.close(stream(&at), at.clone());
             }
             _ => {}
         }
@@ -922,23 +1092,25 @@ fn pass(
                     let word = word(op.name());
                     format!("{word}, an operator ISO 32000-2 doesn't define, outside BX and EX")
                 };
-                placed.add(Placed::Unknown(op.name()), op.range(), unknown);
+                let kind = (Placed::Unknown(op.name()), stream(&at));
+                placed.add(kind, at.clone(), unknown);
                 resumed(state, &op)
             }
             (_, Some(next)) => next,
             (_, None) => {
                 let refused = || refused(state, &op);
-                placed.add(Placed::Refused(state, operator), op.range(), refused);
+                let kind = (Placed::Refused(state, operator), stream(&at));
+                placed.add(kind, at.clone(), refused);
                 resumed(state, &op)
             }
         };
         if next != state && matches!(next, State::Path | State::Text) {
-            begun = op.range();
+            begun = at.clone();
         }
         state = next;
         if let Some(wrong) = wrong(&op, operator) {
-            let kind = (operator, mem::discriminant(&wrong));
-            operands.add(kind, op.range(), || said(&op, wrong));
+            let kind = ((operator, mem::discriminant(&wrong)), stream(&at));
+            operands.add(kind, at.clone(), || said(&op, wrong));
         }
         if let Some((kind, _)) = op.resource()
             && let Some(written) = written(&op)
@@ -948,7 +1120,8 @@ fn pass(
             if matches!(looked, Looked::Lacking | Looked::Without) {
                 let none = looked == Looked::Without;
                 let value = || lacking(&written, &op, none);
-                named.add((kind, name), written.range(), value);
+                let at = written.range();
+                named.add(((kind, name), stream(&at)), at, value);
             }
         }
         for operand in op.operands() {
@@ -960,13 +1133,13 @@ fn pass(
     // Where content ends, unless reading stopped, as the end isn't known:
     // in an object, at where it began; or where a glyph description was to
     // begin, all of it.
-    let open = compat.open.clone().filter(|_| compat.depth > 0);
-    if let (None, Some(at)) = (&stop, open) {
-        let open = || format!("{} BX left open at the end", compat.depth);
-        placed.add(Placed::Open, at, open);
+    let stopped = stop.is_some();
+    for (_, s, at, n) in compat.found(stopped).into_iter().filter(|found| found.0) {
+        let open = || "BX left open at the end".to_string();
+        placed.add_n((Placed::Open, s), at, n, many, open);
     }
     let ends = match (state, object(state)) {
-        _ if stop.is_some() => None,
+        _ if stopped => None,
         (State::GlyphStart, _) => Some((
             0..content.bytes().len(),
             "a glyph description with no d0 or d1".to_string(),
@@ -975,12 +1148,10 @@ fn pass(
         _ => None,
     };
     if let Some((at, ends)) = ends {
-        placed.add(Placed::Ends(state), at, || ends);
+        placed.add((Placed::Ends(state), stream(&at)), at, || ends);
     }
-    for told in inside.0 {
-        faults.add(told.at, told.fault, told.count);
-    }
-    let mut found: Vec<(Range<usize>, String)> = (faults.0.into_iter())
+    faults.merge(inside);
+    let mut found: Vec<(Range<usize>, String)> = (faults.told.into_iter())
         .map(|told| (told.at, times(&told.fault.to_string(), told.count)))
         .collect();
     if let Some(error) = stop {
@@ -988,14 +1159,14 @@ fn pass(
         found.push((error.at..content.bytes().len(), value));
     }
     found.sort_by_key(|(at, _)| at.start);
-    let stopped = stop.is_some();
+    found.extend(faults.past.map(|at| (at, more(faults.more))));
     Found {
-        balance: saved.found(
+        balance: saved.told(
             stopped,
             "q left open at the end",
             "Q with nothing saved to restore",
         ),
-        marked: marked.found(
+        marked: marked.told(
             stopped,
             "BMC or BDC left open at the end",
             "EMC ending no marked content",
@@ -1005,7 +1176,7 @@ fn pass(
         // A name's value says nothing of how many times it's used, so that
         // what's alike is by the name alone.
         resource: (named.told().into_iter())
-            .map(|(kind, at, value, _)| (at, value, kind.map(|(kind, _)| kind)))
+            .map(|(kind, at, value, _)| (at, value, kind.map(|((kind, _), _)| kind)))
             .collect(),
         content: found,
         stopped,
@@ -1105,12 +1276,28 @@ impl<'a> Walk<'a> {
         let limits = limits();
         let none = ResCx::none();
         let mut spaces = HashMap::new();
-        let mut left = budget;
+        let mut budget = Budget {
+            left: budget,
+            gives: false,
+        };
         for ((i, unit), lookup) in units.iter().zip(&lookups) {
             let holder = &holders[*i];
-            let held = self.made(holder.holder).is_some()
-                || (unit.streams.iter()).any(|&(id, _)| self.made(Some(id)).is_some());
-            let content = match self.read(unit, &limits, &mut left) {
+            // Held where what holds it is, or one of its streams, or what
+            // its resources are written in, as an update that writes any of
+            // them can change what its content finds.
+            let written = self.resources_made(unit, lookup, &categories);
+            let made = (self.made(holder.holder))
+                .or_else(|| (unit.streams.iter()).find_map(|&(id, _)| self.made(Some(id))))
+                .or(written);
+            let held = made.is_some();
+            if let (Some(made), Lookup::In(found)) = (made, lookup) {
+                for &(_, found) in found {
+                    if let Ok(c) = found {
+                        categories.all[c].made.get_or_insert(made);
+                    }
+                }
+            }
+            let content = match self.read(unit, &limits, &mut budget) {
                 Read::Joined(content) => content,
                 Read::Unread(why) => {
                     if held {
@@ -1155,16 +1342,17 @@ impl<'a> Walk<'a> {
             ];
             for (rule, found) in rules {
                 for (at, value) in found {
-                    self.found_in(holder, unit, &content, rule, at, value, None);
+                    self.found_in(holder, unit, &content, written, rule, at, value, None);
                 }
             }
             for (at, value, kind) in found.resource {
                 let key = kind.map_or_else(|| "-".to_string(), category_key);
                 let rule = Rule::Resource;
-                self.found_in(holder, unit, &content, rule, at, value, Some(key));
+                self.found_in(holder, unit, &content, written, rule, at, value, Some(key));
             }
             for (at, value) in found.content {
-                self.found_in(holder, unit, &content, Rule::Content, at, value, None);
+                let rule = Rule::Content;
+                self.found_in(holder, unit, &content, written, rule, at, value, None);
             }
             for why in untold {
                 self.unchecked("-", why.to_string(), holder.table, "Resources");
@@ -1185,7 +1373,7 @@ impl<'a> Walk<'a> {
             let (Some(_), Some(object)) = (category.identity, category.object) else {
                 continue;
             };
-            let Some(made) = self.made(Some(object)) else {
+            let Some(made) = self.made(Some(object)).or(category.made) else {
                 continue;
             };
             let (kind, key) = (category.kind, category_key(category.kind));
@@ -1306,6 +1494,7 @@ impl<'a> Walk<'a> {
                     trail,
                     used,
                     told: true,
+                    made: None,
                 }
             };
             found.push((kind, Ok(categories.add(identity, make))));
@@ -1316,14 +1505,16 @@ impl<'a> Walk<'a> {
     /// A finding of `rule`, `value`, at `at` in `unit`'s `content`, told as
     /// `holder`'s: in the stream it starts in, at its bytes in that
     /// stream's data, made as the holder is, else as that stream is, else as
-    /// the unit's first held stream. Its table and key the holder's, or for
-    /// a name of a `category` of resources, `Resource` and the category.
+    /// the unit's first held stream, else as its resources are, `written`.
+    /// Its table and key the holder's, or for a name of a `category` of
+    /// resources, `Resource` and the category.
     #[allow(clippy::too_many_arguments)]
     fn found_in(
         &mut self,
         holder: &Holder<'a>,
         unit: &Unit<'a>,
         content: &Concat,
+        written: Option<Made>,
         rule: Rule,
         at: Range<usize>,
         value: String,
@@ -1335,7 +1526,8 @@ impl<'a> Walk<'a> {
         };
         let made = (self.made(holder.holder))
             .or_else(|| self.made(Some(stream)))
-            .or_else(|| (unit.streams.iter()).find_map(|&(id, _)| self.made(Some(id))));
+            .or_else(|| (unit.streams.iter()).find_map(|&(id, _)| self.made(Some(id))))
+            .or(written);
         let Some(made) = made else {
             return;
         };
@@ -1455,41 +1647,90 @@ impl<'a> Walk<'a> {
         (!object.is_null()).then_some(Resources { id, object })
     }
 
+    /// How the objects `unit`'s resources are written in, as `lookup` has
+    /// them in `categories`, are made, the first of them held: its
+    /// `/Resources`' own, else the one the walk reached them in (a page
+    /// tree node's, for resources a page inherits), and each category's.
+    fn resources_made(
+        &self,
+        unit: &Unit<'a>,
+        lookup: &Lookup,
+        categories: &Categories<'a>,
+    ) -> Option<Made> {
+        let own = unit.resources.and_then(|resources| {
+            let reached = self.resources_at.get(&ptr::from_ref(resources.object));
+            (resources.id).or_else(|| reached.and_then(|reached| reached.holder))
+        });
+        let each = match lookup {
+            Lookup::In(found) => found.as_slice(),
+            Lookup::Without | Lookup::Untold(_) => &[],
+        };
+        let of = (each.iter()).filter_map(|&(_, found)| categories.all[found.ok()?].object);
+        own.into_iter().chain(of).find_map(|id| self.made(Some(id)))
+    }
+
     /// `unit`'s streams decoded and joined, each asked for no more than
-    /// what's left of `left`, and what each held spent from it.
-    fn read(&self, unit: &Unit<'a>, limits: &Limits, left: &mut usize) -> Read {
+    /// what's left of `budget`, and what each held spent from it.
+    fn read(&self, unit: &Unit<'a>, limits: &Limits, budget: &mut Budget) -> Read {
         let mut join = Join::new(limits);
         for &(id, _) in &unit.streams {
-            if *left == 0 {
+            // Once the source is known to give streams' data, none is asked
+            // for past the budget.
+            if budget.left == 0 && budget.gives {
                 return Read::Unread(BUDGET);
             }
-            let within = join.room().min(*left);
+            let within = join.room().min(budget.left);
             let decoded = match self.source.decoded_within(id, within) {
-                None => return Read::NoData,
+                // A source that gives no stream's data, as a document alone,
+                // says so of the first it's asked for.
+                None if !budget.gives => return Read::NoData,
+                None => return Read::Unread(UNGIVEN),
                 Some(decoded) => decoded,
             };
+            budget.gives = true;
             let data = match decoded {
-                Ok(data) => data,
+                Ok(data) if data.len() <= within => data,
+                // More than it was asked for is cut off at the limit, as a
+                // stream past it is.
+                Ok(_) => {
+                    budget.left -= within;
+                    return Read::Unread(past(budget.left));
+                }
                 // What decoded before a fault, or up to the limit that cut
                 // it off, is spent as if it read.
                 Err(bytes::Error::Decode(cut)) => {
-                    *left = left.saturating_sub(cut.data.len());
+                    budget.left = budget.left.saturating_sub(cut.data.len());
                     let limit = (cut.faults.iter()).any(|&(_, f)| f == pdf_filters::Fault::Limit);
-                    return Read::Unread(match (limit, *left) {
-                        (true, 0) => BUDGET,
-                        (true, _) => TOO_LARGE,
-                        (false, _) => DECODE,
+                    return Read::Unread(match limit {
+                        true => past(budget.left),
+                        false => DECODE,
                     });
                 }
                 Err(error) => return Read::Unread(unread(&error)),
             };
-            *left = left.saturating_sub(data.len());
+            budget.left -= data.len();
             // Never past the room it was asked within.
             if join.push(&data).is_err() {
                 return Read::Unread(TOO_LARGE);
             }
         }
         Read::Joined(join.finish())
+    }
+}
+
+/// What's left of a file's budget of decoded content, and whether its
+/// source has given a stream's data yet.
+struct Budget {
+    left: usize,
+    gives: bool,
+}
+
+/// Why a unit cut off at a limit isn't read, `left` of the budget being
+/// left: the budget, where that's spent, else what's read of one unit.
+fn past(left: usize) -> &'static str {
+    match left {
+        0 => BUDGET,
+        _ => TOO_LARGE,
     }
 }
 
@@ -1533,14 +1774,17 @@ fn way_key(way: Way) -> String {
     }
 }
 
-/// Whether `rule`'s findings are content's, whose values say how many times
-/// a kind was found and where content's bytes are, which [`super::like`]
-/// sets aside.
-pub(super) fn counted(rule: Rule) -> bool {
-    matches!(
-        rule,
-        Rule::Balance | Rule::Marked | Rule::Operator | Rule::Operands | Rule::Content
-    )
+/// Whether a finding of `rule` at `key` is content's whose value says how
+/// many times a kind was found and where content's bytes are, which
+/// [`super::like`] sets aside: every rule's but `resource`'s, whose value
+/// is a name, and `unused`'s; and `resource`'s past the kinds it tells
+/// apart, its key `-`, which says how many more.
+pub(super) fn counted(rule: Rule, key: &str) -> bool {
+    match rule {
+        Rule::Balance | Rule::Marked | Rule::Operator | Rule::Operands | Rule::Content => true,
+        Rule::Resource => key == "-",
+        _ => false,
+    }
 }
 
 /// `value`, a content finding's of `rule`, with its digits left out, and
@@ -1584,10 +1828,12 @@ mod tests {
     use crate::version::Version;
 
     /// A source that answers as the one it wraps, and keeps each stream it's
-    /// asked the data of, and within how much.
+    /// asked the data of, and within how much; but gives none of
+    /// `without`'s.
     struct Counting<'s> {
         source: &'s dyn Source,
         asked: RefCell<Vec<(ObjectId, usize)>>,
+        without: Option<ObjectId>,
     }
 
     impl Source for Counting<'_> {
@@ -1645,7 +1891,10 @@ mod tests {
             limit: usize,
         ) -> Option<Result<Vec<u8>, bytes::Error>> {
             self.asked.borrow_mut().push((id, limit));
-            self.source.decoded_within(id, limit)
+            match Some(id) == self.without {
+                true => None,
+                false => self.source.decoded_within(id, limit),
+            }
         }
     }
 
@@ -1692,6 +1941,7 @@ mod tests {
         let counting = Counting {
             source: &opened,
             asked: RefCell::new(Vec::new()),
+            without: None,
         };
         let options = Options {
             content_budget: budget,
@@ -1817,9 +2067,10 @@ mod tests {
 
     /// Each stream is asked for within what's left of the budget, and of
     /// what content's reading joins, the less; once none of the budget is
-    /// left, no unit after is asked for. A stream cut off by it spends what
-    /// it held, as one read whole would; and so does one that doesn't decode
-    /// cleanly.
+    /// left, no unit after is asked for, and with none from the start, the
+    /// first is asked for nothing, so that a source that gives none says
+    /// so. A stream cut off by it spends what it held, as one read whole
+    /// would; and so does one that doesn't decode cleanly.
     #[test]
     fn content_is_read_within_its_budget() {
         let file = three_pages(stream("", &"q Q ".repeat(5)));
@@ -1836,7 +2087,7 @@ mod tests {
         // The second cut off, spending what's left.
         assert_eq!(asked_within(Some(25)), [((10, 0), 25), ((11, 0), 15)]);
         assert_eq!(asked_within(Some(10)), [((10, 0), 10)]);
-        assert_eq!(asked_within(Some(0)), []);
+        assert_eq!(asked_within(Some(0)), [((10, 0), 0)]);
         // Hex data without its `>`, all of it decoded, and a fault.
         let hex: String = (b"q Q ".repeat(5).iter())
             .map(|b| format!("{b:02x}"))
@@ -1858,6 +2109,7 @@ mod tests {
         let counting = Counting {
             source: &doc,
             asked: RefCell::new(Vec::new()),
+            without: None,
         };
         check(&counting, &Hold::All(Made::Merged), &Options::default());
         let room = Limits::DEFAULT.content;
@@ -1871,7 +2123,7 @@ mod tests {
         let opened = Opened::new(file, &[], &bytes::Options::DEFAULT).unwrap();
         let report = check(&opened, hold, &Options::default());
         (report.findings.iter())
-            .filter(|f| counted(f.rule))
+            .filter(|f| counted(f.rule, &f.key))
             .map(|f| {
                 let at = f.at.unwrap();
                 let data = opened.decoded_within(at.stream.unwrap(), usize::MAX);
@@ -2109,29 +2361,44 @@ mod tests {
                     Ok(_) => {}
                 }
                 match op.name() {
-                    b"q" => saved.open(op.range()),
-                    b"Q" => saved.close(op.range()),
-                    b"BMC" | b"BDC" => marked.open(op.range()),
-                    b"EMC" => marked.close(op.range()),
+                    b"q" => saved.open(0, op.range()),
+                    b"Q" => saved.close(0, op.range()),
+                    b"BMC" | b"BDC" => marked.open(0, op.range()),
+                    b"EMC" => marked.close(0, op.range()),
                     _ => {}
                 }
             }
-            let open = i32::try_from(saved.depth).unwrap();
-            let closers = i32::try_from(saved.closers).unwrap();
-            assert_eq!(open, balance.net - balance.min_prefix, "{content}");
+            // What's left open and the closers with nothing open, each with
+            // where the first is and how many, of the one stream.
+            let ends = |depth: &Depth| {
+                let (mut open, mut closers) = (None, None);
+                for (opener, stream, at, n) in depth.found(false) {
+                    assert_eq!(stream, 0, "{content}");
+                    match opener {
+                        true => open = Some((at.start, n)),
+                        false => closers = Some((at.start, n)),
+                    }
+                }
+                (open, closers)
+            };
+            let (open, closers) = ends(&saved);
+            let left = open.map_or(0, |(_, n)| n);
+            assert_eq!(left, saved.depth, "{content}");
+            let left = i32::try_from(left).unwrap();
+            assert_eq!(left, balance.net - balance.min_prefix, "{content}");
+            let closers = i32::try_from(closers.map_or(0, |(_, n)| n)).unwrap();
             assert_eq!(closers, -balance.min_prefix, "{content}");
-            assert_eq!(saved.open.is_some(), content.contains('q'), "{content}");
-            assert_eq!(
-                (marked.closers, marked.closer.map(|r| r.start)),
-                (emcs, first_emc)
-            );
-            assert_eq!(marked.depth, nest.open().len(), "{content}");
+            let taken = saved.runs.first().is_some_and(|run| run.open.is_some());
+            assert_eq!(taken, content.contains('q'), "{content}");
+            let (open, closers) = ends(&marked);
+            let closers = closers.map_or((0, None), |(at, n)| (n, Some(at)));
+            assert_eq!(closers, (emcs, first_emc));
+            assert_eq!(open.map_or(0, |(_, n)| n), nest.open().len(), "{content}");
             let left = match nest.done() {
                 Err(e) => Some(e.at),
                 Ok(_) => None,
             };
-            let first = marked.open.clone().filter(|_| marked.depth > 0);
-            assert_eq!(first.map(|r| r.start), left, "{content}");
+            assert_eq!(open.map(|(at, _)| at), left, "{content}");
         }
         let deep = format!("{}{}", "/T BMC ".repeat(600), "EMC ".repeat(600));
         let joined = Concat::new(&[deep.as_bytes()]);
@@ -2753,6 +3020,106 @@ mod tests {
         assert_eq!(values(after.since(&before)), [d0.replace("d0", "d1")]);
     }
 
+    /// A kind is told apart in each of a page's streams it's found in, at its
+    /// first there, with how many there: so what one stream leaves open at
+    /// the end is its own, and an update that writes one stream answers for
+    /// what it brings, though another of the page's streams had its kind.
+    #[test]
+    fn a_kind_is_found_once_in_each_stream_it_is_in() {
+        let saved = "Q with nothing saved to restore";
+        let thrice = "Q with nothing saved to restore, 3 times";
+        let level = "n at the content stream level";
+        assert_eq!(
+            found_in_page(&["Q 0 0 m S", "Q Q Q n 0 0 m S"]),
+            [
+                at(Rule::Balance, 10, Some(0), saved, "Q"),
+                at(Rule::Balance, 11, Some(1), thrice, "Q"),
+                at(Rule::Operator, 11, Some(1), level, "n"),
+            ]
+        );
+        let open = "1 q left open at the end";
+        assert_eq!(
+            found_in_page(&["q", "q"]),
+            [
+                at(Rule::Balance, 10, Some(0), open, "q"),
+                at(Rule::Balance, 11, Some(1), open, "q"),
+            ]
+        );
+        // The second `q` closed by the next stream's `Q`, the first not.
+        assert_eq!(
+            found_in_page(&["q q", "Q", ""]),
+            [at(Rule::Balance, 10, Some(0), open, "q")]
+        );
+        // What a stream opens and a later one closes below is closed.
+        assert_eq!(found_in_page(&["q", "q", "Q Q"]), []);
+        let two = "2 BMC or BDC left open at the end";
+        assert_eq!(
+            found_in_page(&["/A BMC", "EMC /B BMC /C BMC", "/D BMC"]),
+            [
+                at(Rule::Marked, 11, Some(1), two, "/B BMC"),
+                at(Rule::Marked, 12, Some(2), &two.replace('2', "1"), "/D BMC"),
+            ]
+        );
+        // An update that writes the second stream alone: what it brings is
+        // its own, the first's carried.
+        let report = |streams: &[&str]| {
+            let file = page_of(streams, &[]);
+            let opened = Opened::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+            check(&opened, &Hold::All(Made::Merged), &Options::default())
+        };
+        let before = report(&["Q 0 0 m S", "0 0 m S"]);
+        let after = report(&["Q 0 0 m S", "Q Q Q n 0 0 m S"]);
+        let since: Vec<_> = (after.since(&before).into_iter())
+            .map(|f| (f.object.unwrap().0, f.value.as_str()))
+            .collect();
+        assert_eq!(since, [(11, thrice), (11, level)]);
+    }
+
+    /// Content is held where what its resources are written in is, as an
+    /// update that writes them alone can make a name lack; and found in all
+    /// the same, a finding its stream had before carried. A page's inherited
+    /// resources are written in the page tree node they're in.
+    #[test]
+    fn content_is_held_where_its_resources_are() {
+        let report = |resources: &str, font: &str, held: Option<u32>| {
+            let mut objects = tree("3 0 R", resources);
+            objects.extend([
+                (3, page("/Contents 10 0 R")),
+                (10, stream("", "q BT /F1 9 Tf (a) Tj ET")),
+                (40, format!("<< /Font << /{font} 50 0 R >> >>")),
+                (50, FONT.to_string()),
+            ]);
+            let file = file(&objects);
+            let opened = Opened::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let hold = match held {
+                Some(n) => Hold::Only([((n, 0), Made::Merged)].into()),
+                None => Hold::All(Made::Merged),
+            };
+            check(&opened, &hold, &Options::default())
+        };
+        let found = |found: Vec<&Finding>| -> Vec<(u32, Rule, String)> {
+            (found.into_iter())
+                .filter(|f| matches!(f.rule, Rule::Balance | Rule::Resource))
+                .map(|f| (f.object.unwrap().0, f.rule, f.value.clone()))
+                .collect()
+        };
+        let before = report("/Resources 40 0 R", "F1", None);
+        let open = (10, Rule::Balance, "1 q left open at the end".to_string());
+        assert_eq!(found(before.findings.iter().collect()), vec![open.clone()]);
+        // The resources, 40, written alone, without the font.
+        let after = report("/Resources 40 0 R", "F2", Some(40));
+        let lacks = (10, Rule::Resource, "/F1 (Tf)".to_string());
+        let all = found(after.findings.iter().collect());
+        assert_eq!(all, [open.clone(), lacks.clone()]);
+        assert_eq!(found(after.since(&before)), [lacks]);
+        // Inherited from the page tree node, 2, which holds them, and not
+        // held by what they name.
+        let direct = "/Resources << /Font << /F2 50 0 R >> >>";
+        let held = |n| found(report(direct, "F1", Some(n)).findings.iter().collect());
+        assert_eq!(held(2).len(), 2);
+        assert_eq!(held(50), []);
+    }
+
     /// Two pages share a stream, with the same resources: it's read once,
     /// as the first held page's, made as it is; else as the stream is, at
     /// the first page's path; and with neither held, it's found in by
@@ -2938,7 +3305,8 @@ mod tests {
         assert_eq!(found(&file), [at(Rule::Balance, 10, None, open, "q")]);
         let opened = Opened::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
         let alone = check(&*opened, &Hold::All(Made::Merged), &Options::default());
-        assert!(!alone.findings.iter().any(|f| counted(f.rule)), "{alone}");
+        let content = alone.findings.iter().any(|f| counted(f.rule, &f.key));
+        assert!(!content, "{alone}");
     }
 
     /// A Type 1 font, for resources that hold one.
@@ -3373,9 +3741,11 @@ mod tests {
 
     /// An unused resource is found and counted where the object it's in is
     /// held, made as it's held: the category's own object, else its
-    /// resources', else the one that holds them; and neither where it
-    /// isn't. A name the resources lack is found as content's findings are,
-    /// where its page or its stream is held.
+    /// resources', else the one that holds them; or where content that has
+    /// it is held, made as that is; and neither where none is. A name the
+    /// resources lack is found as content's findings are, where its page or
+    /// its stream is held, or what its resources are written in, all of the
+    /// content then.
     #[test]
     fn resource_and_unused_findings_are_held_as_their_objects_are() {
         let content = || stream("", "/X1 Do");
@@ -3421,19 +3791,20 @@ mod tests {
         );
         assert_eq!(
             found(&direct, &[(10, merged)]),
-            (vec![], 0, vec![(10, merged)])
+            (vec![(3, merged)], 1, vec![(10, merged)])
         );
         assert_eq!(found(&direct, &[(50, built)]), (vec![], 0, vec![]));
         assert_eq!(
             found(&category, &[(30, merged)]),
-            (vec![(30, merged)], 1, vec![])
+            (vec![(30, merged)], 1, vec![(10, merged)])
         );
         assert_eq!(
             found(&category, &[(3, built)]),
-            (vec![], 0, vec![(10, built)])
+            (vec![(30, built)], 1, vec![(10, built)])
         );
-        assert_eq!(found(&own, &[(40, built)]), (vec![(40, built)], 1, vec![]));
-        assert_eq!(found(&own, &[(3, built)]), (vec![], 0, vec![(10, built)]));
+        let both = (vec![(40, built)], 1, vec![(10, built)]);
+        assert_eq!(found(&own, &[(40, built)]), both);
+        assert_eq!(found(&own, &[(3, built)]), both);
     }
 
     /// A category one of whose units of content isn't read, its data not
@@ -3501,5 +3872,110 @@ mod tests {
         assert_eq!(values(other.since(&before)), new);
         assert_eq!(values(other.by_path(&before)), new);
         assert_eq!(values(other.beyond(&[&before])), new);
+        // Past 32 names, what says how many more is carried whatever the
+        // count, as no name is in it.
+        let names = |n: usize, again: &str| -> String {
+            let used: String = (0..n).map(|i| format!("/X{i} 9 Tf ")).collect();
+            format!("BT {used}{again}ET")
+        };
+        let before = report(&names(34, ""), "F2");
+        let more = format!("2 more, of kinds past the first {KINDS}");
+        assert!(values(before.findings.iter().collect()).contains(&more));
+        let after = report(&names(34, "/X33 9 Tf "), "F2");
+        assert_eq!(values(after.since(&before)), Vec::<String>::new());
+    }
+
+    /// Where a unit of content whose names can be in any category, as it has
+    /// no resources of its own, isn't read to its end, no category is told:
+    /// what each holds that nothing read uses is counted as not checked,
+    /// not found unused, as the unit may use it.
+    #[test]
+    fn content_with_no_resources_not_read_tells_no_category() {
+        let report = |form: &str| {
+            let form = format!("/Type /XObject /Subtype /Form /BBox [0 0 9 9] {form}");
+            let resources = "/Resources << /Font << /F1 50 0 R >> /XObject << /Fm 20 0 R >> >>";
+            let mut objects = tree("3 0 R", resources);
+            objects.extend([
+                (3, page("/Contents 10 0 R")),
+                (10, stream("", "/Fm Do")),
+                (20, stream(&form, "BT /F1 9 Tf (a) Tj ET")),
+                (50, FONT.to_string()),
+            ]);
+            let file = file(&objects);
+            let opened = Opened::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let options = Options {
+                unused: true,
+                ..Options::default()
+            };
+            check(&opened, &Hold::All(Made::Merged), &options)
+        };
+        let read = report("");
+        assert_eq!(read.unused, BTreeMap::new());
+        assert_eq!(not_made(&read, UNTOLD), []);
+        let unread = report("/Filter /FlateDecode");
+        assert_eq!(unread.unused, BTreeMap::new());
+        assert!(!unread.findings.iter().any(|f| f.rule == Rule::Unused));
+        let font = [("Resource".to_string(), "Font".to_string(), 1)];
+        assert_eq!(not_made(&unread, UNTOLD), font);
+    }
+
+    /// A source that gives a stream's data but not another's: the unit that
+    /// one is in isn't read, counted as not checked, and the rest are, the
+    /// resources' unused names after them; and a document alone, with none
+    /// of the budget, is still checked as one with no content read.
+    #[test]
+    fn a_stream_the_source_doesnt_give_is_counted_as_not_checked() {
+        let resources = "/Resources << /Font << /Spare 50 0 R >> >>";
+        let mut objects = tree("3 0 R 4 0 R 5 0 R", resources);
+        objects.extend([
+            (3, page("/Contents 10 0 R")),
+            (4, page("/Contents 11 0 R")),
+            (5, page("/Contents 12 0 R")),
+            (10, stream("", "q Q")),
+            (11, stream("", "q Q")),
+            (12, stream("", "q")),
+            (50, FONT.to_string()),
+        ]);
+        let file = file(&objects);
+        let opened = Opened::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let check_without = |n| {
+            let without = Counting {
+                source: &opened,
+                asked: RefCell::new(Vec::new()),
+                without: Some((n, 0)),
+            };
+            let report = check(&without, &Hold::All(Made::Merged), &Options::default());
+            let found: Vec<_> = (report.findings.iter())
+                .filter(|f| counted(f.rule, &f.key))
+                .map(|f| f.object.unwrap().0)
+                .collect();
+            let not_given: Vec<_> = (report.unchecked.iter())
+                .filter(|(u, _)| u.why == UNGIVEN)
+                .map(|(u, n)| (u.table.clone(), *n))
+                .collect();
+            (found, not_given, report.content, report.unused)
+        };
+        let unused = BTreeMap::from([(("Resource".to_string(), "Font".to_string()), 1)]);
+        let (found, not_given, content, counted) = check_without(11);
+        assert_eq!((found, content), (vec![12], 2));
+        assert_eq!(not_given, [("PageObject".to_string(), 1)]);
+        assert_eq!(counted, BTreeMap::new());
+        let (found, not_given, content, counted) = check_without(12);
+        assert_eq!((found, content, counted), (vec![], 2, BTreeMap::new()));
+        assert_eq!(not_given, [("PageObject".to_string(), 1)]);
+        // The first asked for: as a source that gives none.
+        let (found, not_given, content, counted) = check_without(10);
+        assert_eq!((found, not_given, content), (vec![], vec![], 0));
+        assert_eq!(counted, BTreeMap::new());
+        let (.., counted) = check_without(99);
+        assert_eq!(counted, unused);
+        // A document alone, none of the budget given it.
+        let options = Options {
+            content_budget: Some(0),
+            ..Options::default()
+        };
+        let alone = check(&*opened, &Hold::All(Made::Merged), &options);
+        let plain = check(&*opened, &Hold::All(Made::Merged), &Options::default());
+        assert_eq!(alone, plain);
     }
 }
