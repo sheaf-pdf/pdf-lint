@@ -85,7 +85,7 @@ pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure,
 pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts and pdf-linearize are licensed under
 either of Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT license
 ([LICENSE-MIT](LICENSE-MIT)) at your option, pdf-fonts' data under the terms each
-of its files carries, and what it takes from FreeType under FreeType's
-([its README](crates/pdf-fonts/README.md#license)). pdf-lint and
+of its files carries, and what it takes from FreeType under FreeType's,
+[`FTL.TXT`](crates/pdf-fonts/FTL.TXT) ([its README](crates/pdf-fonts/README.md#license)). pdf-lint and
 pdf-arlington are licensed under the Apache License, Version 2.0, as is the Arlington
 model pdf-arlington embeds.

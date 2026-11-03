@@ -1,5 +1,5 @@
-//! Adobe's Core 14 font metrics (`assets/afm`, each file with Adobe's notice in
-//! it): each glyph's advance and box, and the font's heights.
+//! Adobe's Core 14 font metrics (`assets/afm`, with Adobe's `MustRead.html`, and
+//! each file with its notice in it): each glyph's advance and box, and the font's heights.
 
 use std::collections::HashMap;
 

@@ -52,8 +52,9 @@
 //!
 //! The metrics and the glyph lists are Adobe's, each under its own terms, in the
 //! file itself. [`Std14::NOTICE`] is the metrics' notice, for a binary's list of
-//! notices, and the README says what a binary must carry, of what's taken from
-//! FreeType and of what the features pull in too.
+//! notices. What's taken from FreeType is under `FTL.TXT`, and the README says
+//! what that is, and what a binary must carry of it and of what the features pull
+//! in too.
 
 pub use pdf_content_streams;
 pub use pdf_objects::{Dict, Object, ObjectId, Resolve, Span, Unreadable, Why};

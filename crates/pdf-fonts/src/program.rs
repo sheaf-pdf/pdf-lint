@@ -1,3 +1,7 @@
+// Parts of this file translate FreeType's code, Copyright (C) 1996-2023 by David
+// Turner, Robert Wilhelm, and Werner Lemberg, under the FreeType Project License:
+// `FTL.TXT`, and the crate's README for which parts.
+
 //! The programs fonts embed: `/FontFile`, `/FontFile2` or `/FontFile3`, read as
 //! PDFium's FreeType reads them, for what only a program says: each glyph's outline
 //! box (`CPDF_Font::GetCharBBox`), a font's heights where its descriptor lacks them
@@ -13,7 +17,8 @@
 //! heights are guessed, as without a program. A code is
 //! mapped to its glyph as PDFium maps it (`LoadGlyphMap`,
 //! `GlyphFromCharCode`), through the encoding and FreeType's charmaps, its
-//! format 2 and 4 `cmap`s read its way, and the glyphs' names; where that
+//! format 2 and 4 `cmap`s read its way (translated from its code, under `FTL.TXT`,
+//! as the README lists), and the glyphs' names; where that
 //! rests on what isn't modelled (an encoding with no table here, two glyphs
 //! one code point names), the code's box is unknown.
 //!

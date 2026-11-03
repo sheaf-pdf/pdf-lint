@@ -178,6 +178,17 @@ fn standard_14_by_pdfium_s_names() {
     }
 }
 
+/// The two files whose terms ask that they go with what they cover: Adobe's, with
+/// its notice as each AFM has it, and FreeType's, whole.
+#[test]
+fn the_notice_files_are_carried() {
+    let must_read = include_str!("../assets/afm/MustRead.html");
+    assert!(must_read.contains(Std14::NOTICE));
+    let ftl = include_str!("../FTL.TXT");
+    assert!(ftl.starts_with("                    The FreeType Project LICENSE"));
+    assert!(ftl.ends_with("--- end of FTL.TXT ---\n"));
+}
+
 /// Each AFM carries Adobe's notice as it's written and its own copyright, on both
 /// the lines Adobe put it, and its second line says what was changed: the terms
 /// the data is taken under.
