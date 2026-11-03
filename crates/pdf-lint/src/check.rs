@@ -105,16 +105,21 @@
 //! order it reached them: each space through pdf-color, as ISO 32000-2 has
 //! it (8.6), and each font through pdf-fonts, for its text, no program read
 //! (9.5 to 9.10), its streams decoded where the source gives their data,
-//! within [`Options::font_budget`]. What each read tells is kept; none of it
-//! is found yet. The fonts a descriptor's `/CapHeight` is asked of are read
-//! before the walk, within the same budget, each once: a TrueType font, or a
-//! Type 0 font's first descendant, whose descriptor lacks it, which ISO
-//! 32000-2 requires of a font with Latin characters (9.8.1, Table 120). It
-//! has them where a code it draws has a letter of the Latin script in its
-//! text; the predicates read that (`fn:FontHasLatinChars`), and where the
-//! fonts don't say, a `/ToUnicode` not read among it, it's counted as not
-//! checked, as before. The model's colorant functions read a DeviceN space's
-//! names and a halftone's keys as pdf-color reads a colorant's name.
+//! within [`Options::font_budget`]. What a space's read tells that the walk
+//! can't say, where it found nothing by the model's rules in that object at
+//! that key, is a [`Rule::ColorSpace`] finding, each kind once in each
+//! object it's in, at its first place there, with how many times; a space
+//! not read whole for a password or a cap is counted as not checked. What a
+//! font's read tells is kept; none of it is found yet. The fonts a
+//! descriptor's `/CapHeight` is asked of are read before the walk, within
+//! the same budget, each once: a TrueType font, or a Type 0 font's first
+//! descendant, whose descriptor lacks it, which ISO 32000-2 requires of a
+//! font with Latin characters (9.8.1, Table 120). It has them where a code
+//! it draws has a letter of the Latin script in its text; the predicates
+//! read that (`fn:FontHasLatinChars`), and where the fonts don't say, a
+//! `/ToUnicode` not read among it, it's counted as not checked, as before.
+//! The model's colorant functions read a DeviceN space's names and a
+//! halftone's keys as pdf-color reads a colorant's name.
 //!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
@@ -138,7 +143,8 @@
 //! malformed name or number tree ([`Rule::Tree`]); a page tree that breaks
 //! 7.7.3 where the model can't say so ([`Rule::PageTree`]), and where a
 //! viewer's pages part from it ([`Rule::Viewer`]); XMP metadata that
-//! breaks 14.3.2 ([`Rule::Xmp`]); a held object the
+//! breaks 14.3.2 ([`Rule::Xmp`]); a color space that breaks 8.6 where the
+//! model can't say so ([`Rule::ColorSpace`]); a held object the
 //! walk never reached ([`Rule::Unreached`]); in an object built whole (or
 //! as [`Options::unlisted`] says), a key the model doesn't list that isn't
 //! exempt ([`Rule::Unlisted`]); a
@@ -820,6 +826,57 @@ pub enum Rule {
     /// catalog is held, never found in no object. What it claims is read the
     /// same whatever it tells.
     Xmp,
+    /// A color space that breaks ISO 32000-2 (8.6.3 to 8.6.6.5, 8.7.3.3),
+    /// as pdf-color reads each the walk reached in the newest revision as
+    /// one of the model's color space tables, where the model can't say so:
+    /// an Indexed space's lookup table a string not as long as its base and
+    /// high value say, a profile's `/Alternate` of another count of
+    /// components, a tint transform that doesn't take and give what its
+    /// space does, a space that reaches itself, a reference that names
+    /// another reference, elements past a family's, a `/WhitePoint`,
+    /// `/BlackPoint`, `/Gamma`, `/Matrix` or Lab `/Range` that isn't what
+    /// its family has, a colorant named twice, `All` in a DeviceN space,
+    /// `None` in an NChannel one, an NChannel space's spot colorant that
+    /// `/Colorants` has no entry for, a `/Colorants` entry that's a
+    /// Separation space of another colorant, and a process dictionary's
+    /// `/Components` not a name for each of its space's components. Each
+    /// where the walk found nothing by the model's rules ([`Rule::Missing`],
+    /// [`Rule::Type`], [`Rule::Value`], [`Rule::Indirect`],
+    /// [`Rule::Direct`], [`Rule::Special`], [`Rule::Unresolved`],
+    /// [`Rule::Unlisted`]) in that object at that key, so that what the
+    /// model says, a profile without `/N`, an Indexed space's high value
+    /// past 255, a family of no name, a reference to nothing, isn't told
+    /// again; nor what an object reached through a reference is as a whole,
+    /// a profile that isn't a stream, where the walk found something at a
+    /// reference to it; nor a space of a family that may not be where it is,
+    /// an Indexed space's base, an alternate or a Pattern space's underlying
+    /// space that's a special space, Lab for a process, written as an array,
+    /// where the walk found its family's name one the table it takes it for
+    /// hasn't; nor an object that doesn't read, which is the reader's, nor
+    /// what a read tells of it, a tint transform with a subfunction that
+    /// doesn't read, which doesn't load. Its
+    /// key is the dictionary's key the kind is about, where it's one
+    /// (`WhitePoint`, `N` for a profile's count, `Alternate`, `Range`,
+    /// `ColorSpace` and `Components` of a process dictionary, `Colorants`,
+    /// `Subtype` of an attributes dictionary), told there though the key is
+    /// absent, an element the space lacks at that element, a family's name
+    /// told at an array at `0`, and any other at the entry or element whose
+    /// value holds its bytes, in its object, `-` where none does or they
+    /// aren't known. Each kind once in each object it's in, whichever
+    /// space's read tells it, at its first place there, its value
+    /// pdf-color's words with how many times; in the object it's in, else
+    /// the space's, else the one the space is written in, held where that
+    /// is. Its path and table the object's where the walk first visited it
+    /// as a color space table or one of what a space holds (a profile
+    /// stream, a CIE-based space's dictionary, a DeviceN space's attributes,
+    /// process, colorants and mixing hints, a function), else the space's. A
+    /// space nested deeper than pdf-color reads one, or looking up more, and
+    /// one with an object that takes a password, is past a cap or whose
+    /// bytes the source didn't give, so isn't read whole, is counted as not
+    /// checked, once for each, its column and key `-`, its table the
+    /// space's, where the space, or the object it's written in, is held;
+    /// what was read of it is found all the same.
+    ColorSpace,
 }
 
 /// A rule a held object breaks.
@@ -943,9 +1000,10 @@ pub struct Report {
     /// looked up, and resources that can't be told used or not; name and
     /// number trees whose roots are held not read whole for what isn't the
     /// file's fault, and the page tree, or a viewer's pages not set beside
-    /// it, where its catalog is held; and the XMP packet not read whole,
-    /// where its stream is held, or whose stream isn't known, where the
-    /// catalog is; by why.
+    /// it, where its catalog is held; the XMP packet not read whole, where
+    /// its stream is held, or whose stream isn't known, where the catalog
+    /// is; and color spaces not read whole for what isn't the file's
+    /// fault, where each, or what it's written in, is held; by why.
     pub unchecked: BTreeMap<Unchecked, usize>,
     /// Keys and elements of held objects the model doesn't list.
     pub unlisted: BTreeMap<Unlisted, usize>,
@@ -1012,8 +1070,9 @@ pub struct Report {
 /// ([`Rule::PageTree`]) and set beside PDFium's ([`Rule::Viewer`]), each
 /// name and number tree the walk reaches, read again from its root
 /// ([`Rule::Tree`]), and the catalog's XMP packet ([`Rule::Xmp`]); and each
-/// color space and font the walk reaches, read again through pdf-color and
-/// pdf-fonts, the fonts' streams within [`Options::font_budget`], those
+/// color space and font the walk reaches, read again through pdf-color
+/// ([`Rule::ColorSpace`]) and pdf-fonts, the fonts' streams within
+/// [`Options::font_budget`], those
 /// whose descriptor lacks `/CapHeight` read before the walk, as the
 /// predicates read which fonts have Latin characters (`fn:FontHasLatinChars`).
 /// A trailer the reader couldn't read so is a finding, and the walk starts
@@ -1163,6 +1222,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         packet,
         packet_at: None,
         spaces: Vec::new(),
+        spaces_at: HashMap::new(),
         fonts: Vec::new(),
         fonts_read,
         report: Report {
@@ -1218,9 +1278,9 @@ impl Report {
     /// rule and value, the value's references' numbers aside, which a
     /// rewrite renumbers (and a reader's finding's numbers aside, its
     /// offsets; a content finding's counts, offsets and how many times, but
-    /// an operator's name; a page tree, a viewer or an XMP finding's numbers
-    /// and how many times; a tree finding's how many times); for a key that
-    /// came in later than the file's version, any
+    /// an operator's name; a page tree, a viewer, an XMP or a color space
+    /// finding's numbers and how many times; a tree finding's how many
+    /// times); for a key that came in later than the file's version, any
     /// value, as its value isn't what's wrong. A merged object keeps the
     /// keys of the source dictionary it's emitted over, faults and all, and
     /// a fault the source has is the file's, carried; a built object is the
@@ -1342,17 +1402,20 @@ enum Place {
 /// counts, offsets and lengths, and how many times its kind was found, but
 /// an operator's name, `d0` not `d1`, in an operator's or operands'; a
 /// tree finding's references' numbers and how many times its kind was
-/// found; and a page tree, a viewer or an XMP finding's numbers, and how
-/// many times its kind was found; for a key that came in later than the
-/// file's version, any value, as its value isn't what's wrong; and for an
-/// object nothing reaches, the object alone, as which object's reference
-/// to it is named follows the objects' numbers and keys' order.
+/// found; and a page tree, a viewer, an XMP or a color space finding's
+/// numbers, and how many times its kind was found; for a key that came in
+/// later than the file's version, any value, as its value isn't what's
+/// wrong; and for an object nothing reaches, the object alone, as which
+/// object's reference to it is named follows the objects' numbers and
+/// keys' order.
 fn like(f: &Finding) -> (String, String, Rule, String) {
     let value = match f.rule {
         Rule::TooNew => String::new(),
         Rule::Reader => f.value.chars().filter(|c| !c.is_ascii_digit()).collect(),
         Rule::Tree => numberless(structure::uncounted(&f.value)),
-        Rule::PageTree | Rule::Viewer | Rule::Xmp => content::uncounted(f.rule, &f.value),
+        Rule::PageTree | Rule::Viewer | Rule::Xmp | Rule::ColorSpace => {
+            content::uncounted(f.rule, &f.value)
+        }
         rule if content::counted(rule, &f.key) => content::uncounted(rule, &f.value),
         _ => numberless(&f.value),
     };
@@ -1361,6 +1424,21 @@ fn like(f: &Finding) -> (String, String, Rule, String) {
         _ => (f.table.clone(), f.key.clone(), f.rule, value),
     }
 }
+
+/// The model's rules that say what's wrong at a key, which a fault told of
+/// a file's part read again, only where the walk found nothing in its
+/// object at its key, gives way to: a page tree's
+/// ([`Walk::structures`]) and a color space's ([`Walk::graphics`]).
+const MODEL: [Rule; 8] = [
+    Rule::Missing,
+    Rule::Type,
+    Rule::Value,
+    Rule::Indirect,
+    Rule::Direct,
+    Rule::Special,
+    Rule::Unresolved,
+    Rule::Unlisted,
+];
 
 /// The file's version: its header's (1.4 when it has none that reads), or
 /// its catalog's `/Version` when that's later.
@@ -1640,6 +1718,11 @@ struct Walk<'a> {
     /// tables in the newest revision, in the order it reached them, which
     /// [`Walk::graphics`] reads again.
     spaces: Vec<Graphic<'a>>,
+    /// Where the walk first visited each object as one of the model's color
+    /// space tables or of what a space holds, by number, which
+    /// [`Walk::graphics`] gives what it finds in the object the path and
+    /// table of.
+    spaces_at: HashMap<ObjectId, color::Visited<'a>>,
     /// Each font the walk reached as one of the model's font tables in the
     /// newest revision, in the order it reached them, which
     /// [`Walk::graphics`] reads again.
@@ -1657,6 +1740,13 @@ struct Graphic<'a> {
     object: &'a Object,
     /// Its number, where it's an indirect object.
     id: Option<ObjectId>,
+    /// The numbered object it is or is written in: none for a table's
+    /// trailer.
+    holder: Option<ObjectId>,
+    /// The table it was reached as.
+    table: &'static str,
+    /// The walk's way to it.
+    trail: Rc<Trail<'a>>,
 }
 
 /// A dictionary, stream or array to check, as a table.
@@ -3562,10 +3652,13 @@ impl<'a> Walk<'a> {
     }
 
     /// Keeps `v` for [`Walk::graphics`] when it's a visit of one of the
-    /// model's color space tables, or of its font tables: by the value and
-    /// its number. Not in an earlier revision's trailer, whose objects are
-    /// the file's where no later revision wrote them, as the walk from the
-    /// trailer reaches them.
+    /// model's color space tables, or of its font tables: by the value, its
+    /// number, what it's written in, its table and the walk's way to it.
+    /// And keeps where the walk first visited an object, by its number, as
+    /// a color space table or one of what a space holds
+    /// ([`color::PARTS`]): the path and table of what's found in it. Not in
+    /// an earlier revision's trailer, whose objects are the file's where no
+    /// later revision wrote them, as the walk from the trailer reaches them.
     fn note_graphics(&mut self, v: &Visit<'a>) {
         if self.revision.is_some() {
             return;
@@ -3574,11 +3667,23 @@ impl<'a> Walk<'a> {
         let reached = || Graphic {
             object: v.object,
             id: v.id(),
+            holder: v.holder,
+            table,
+            trail: v.trail.clone(),
         };
-        if color::SPACES.contains(&table) {
+        let space = color::SPACES.contains(&table);
+        if space {
             self.spaces.push(reached());
         } else if fonts::FONTS.contains(&table) {
             self.fonts.push(reached());
+        }
+        if let Some(id) = v.id()
+            && (space || color::PARTS.contains(&table))
+        {
+            (self.spaces_at.entry(id)).or_insert_with(|| color::Visited {
+                table,
+                trail: v.trail.clone(),
+            });
         }
     }
 
@@ -4192,6 +4297,7 @@ impl Rule {
         Rule::PageTree,
         Rule::Viewer,
         Rule::Xmp,
+        Rule::ColorSpace,
     ];
 
     /// Its name, as findings and allowances write it.
@@ -4222,6 +4328,7 @@ impl Rule {
             Rule::PageTree => "page-tree",
             Rule::Viewer => "viewer",
             Rule::Xmp => "xmp",
+            Rule::ColorSpace => "color-space",
         }
     }
 
@@ -7435,7 +7542,8 @@ mod tests {
     }
 
     /// Each rule is the one its name names, as an allowance names it, and
-    /// content's, the newest, are last.
+    /// the newest, content's, the common structures' and color spaces',
+    /// are last.
     #[test]
     fn each_rule_is_named_by_its_name() {
         for &rule in Rule::ALL {
@@ -7443,7 +7551,8 @@ mod tests {
             assert_eq!(rule.to_string(), rule.name());
         }
         assert_eq!(Rule::named("packed"), Some(Rule::Packed));
-        // Content's rules, then the common structures', the newest last.
+        // Content's rules, then the common structures', then color spaces',
+        // the newest last.
         let newest = [
             Rule::Balance,
             Rule::Marked,
@@ -7455,6 +7564,7 @@ mod tests {
             Rule::PageTree,
             Rule::Viewer,
             Rule::Xmp,
+            Rule::ColorSpace,
         ];
         assert!(Rule::ALL.ends_with(&newest));
         let names: Vec<_> = newest.iter().map(|r| r.name()).collect();
@@ -7470,7 +7580,8 @@ mod tests {
                 "content",
                 "page-tree",
                 "viewer",
-                "xmp"
+                "xmp",
+                "color-space"
             ]
         );
         assert_eq!(Rule::named("Packed"), None);

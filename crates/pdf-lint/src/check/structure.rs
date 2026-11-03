@@ -97,7 +97,7 @@ use pdf_semantics::{Fault, Limits, Place, Sink, xmp};
 
 use super::content::times;
 use super::kept::Kept;
-use super::{Finding, Objects, REFERENCES, Rule, Trail, Visit, Walk, entry_at};
+use super::{Finding, MODEL, Objects, REFERENCES, Rule, Trail, Visit, Walk, entry_at};
 use crate::object::{Dict, Object, ObjectId, Span};
 use crate::source::Source;
 use crate::{Rules, Unreadable, Why};
@@ -606,20 +606,6 @@ fn page_tree_key(fault: &Fault) -> Option<(&'static str, bool)> {
 /// The keys a page tree fault told only where the walk found nothing is at
 /// ([`page_tree_key`]).
 const KEYS: [&str; 4] = ["Parent", "Type", "Kids", "Count"];
-
-/// The model's rules that say what's wrong at a key, which a page tree
-/// fault told only where the walk found nothing ([`page_tree_key`]) gives
-/// way to.
-const MODEL: [Rule; 8] = [
-    Rule::Missing,
-    Rule::Type,
-    Rule::Value,
-    Rule::Indirect,
-    Rule::Direct,
-    Rule::Special,
-    Rule::Unresolved,
-    Rule::Unlisted,
-];
 
 /// What the catalog's XMP packet told, read once for the extensions the
 /// file declares ([`extension::read`](crate::extension::read)), which
