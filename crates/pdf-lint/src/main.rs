@@ -316,11 +316,9 @@ impl Baseline {
     fn report(&self, version: Version) -> Arc<Report> {
         let mut reports = self.reports.lock().unwrap_or_else(PoisonError::into_inner);
         let report = reports.entry(version).or_insert_with(|| {
-            let options = Options {
-                version: Some(version),
-                paths: true,
-                ..self.options.clone()
-            };
+            let mut options = self.options.clone();
+            options.version = Some(version);
+            options.paths = true;
             Arc::new(check(&self.file, &Hold::All(Made::Merged), &options))
         });
         Arc::clone(report)
@@ -703,10 +701,8 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
     let checked_as = args.pdf_version.unwrap_or(version);
     // The file's own check, and what it's set against, which is held as
     // merged, so that only the file's findings take its exempt keys.
-    let options = Options {
-        exempt: exempt.clone(),
-        ..against(args, Some(checked_as))
-    };
+    let mut options = against(args, Some(checked_as));
+    options.exempt = exempt.clone();
     let (report, against) = match (args.last_update, &doc.document().update) {
         (false, _) => {
             let report = check(&doc, hold, &options);
@@ -851,15 +847,14 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
 /// whether deprecations and unused resources are findings, and the
 /// extensions it's checked under besides those it declares.
 fn against(args: &Args, version: Option<Version>) -> Options {
-    Options {
-        version,
-        one_table: args.one_table,
-        unlisted: args.unlisted,
-        deprecations: args.deprecations,
-        unused: args.unused,
-        extensions: args.named.clone(),
-        ..Options::default()
-    }
+    let mut options = Options::default();
+    options.version = version;
+    options.one_table = args.one_table;
+    options.unlisted = args.unlisted;
+    options.deprecations = args.deprecations;
+    options.unused = args.unused;
+    options.extensions = args.named.clone();
+    options
 }
 
 /// A file that couldn't be read or checked, and why: said on standard

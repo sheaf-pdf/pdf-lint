@@ -365,8 +365,11 @@ pub enum HoldError {
     },
 }
 
-/// What a check is told besides the file and what it holds.
+/// What a check is told besides the file and what it holds. Outside the
+/// crate, one starts from [`Options::default`] and its fields are set on
+/// it, so that an option to come isn't a breaking change.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Options {
     /// Check at this version, not the file's (its header's, or its
     /// catalog's `/Version` when later: [`file_version`]). A file a writer
