@@ -31,7 +31,11 @@
 //! says how).
 //!
 //! Each color space and font the walk reaches is read again, through
-//! pdf-color and pdf-fonts, the fonts for their text, no program read.
+//! pdf-color and pdf-fonts, the fonts for their text, no program read. What
+//! the model asks that only they can say is read through them too: which
+//! fonts have Latin characters, read before the walk, that a descriptor's
+//! `/CapHeight` is required of, and what a DeviceN space's or a halftone's
+//! colorants' names say of them.
 
 pub mod allowance;
 pub mod check;
@@ -57,7 +61,7 @@ pub use pdf_objects::{Resolve, Rules, Unreadable, Why, dict, object, version};
 // and the passwords a reader is given and its security handler are
 // pdf-crypt's.
 pub use pdf_structure::{bytes, pdf_crypt, pdf_filters, source};
-pub use predicate::{Cx, FileCx, Gate, Reference, Since, Truth};
+pub use predicate::{Cx, FileCx, Gate, Latin, Reference, Since, Truth};
 pub use source::{Document, Encryption, Revision, Source, Trailer, Update, Warning};
 pub use version::Version;
 

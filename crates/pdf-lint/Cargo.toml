@@ -46,6 +46,9 @@ pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 thiserror = "2"
+# Unicode's Script property: which scripts a font's text is in, as a
+# descriptor's /CapHeight is asked of a font with Latin characters.
+unicode-script = "0.5.8"
 # The command line's too: `--password` held so that it's wiped when it's
 # dropped.
 zeroize = { version = "1.9", optional = true }

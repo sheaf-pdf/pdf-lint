@@ -106,7 +106,15 @@
 //! it (8.6), and each font through pdf-fonts, for its text, no program read
 //! (9.5 to 9.10), its streams decoded where the source gives their data,
 //! within [`Options::font_budget`]. What each read tells is kept; none of it
-//! is found yet.
+//! is found yet. The fonts a descriptor's `/CapHeight` is asked of are read
+//! before the walk, within the same budget, each once: a TrueType font, or a
+//! Type 0 font's first descendant, whose descriptor lacks it, which ISO
+//! 32000-2 requires of a font with Latin characters (9.8.1, Table 120). It
+//! has them where a code it draws has a letter of the Latin script in its
+//! text; the predicates read that (`fn:FontHasLatinChars`), and where the
+//! fonts don't say, a `/ToUnicode` not read among it, it's counted as not
+//! checked, as before. The model's colorant functions read a DeviceN space's
+//! names and a halftone's keys as pdf-color reads a colorant's name.
 //!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
@@ -390,7 +398,8 @@ pub struct Options {
     /// data ([`Source::decoded_within`]): none for [`CONTENT_BUDGET`].
     pub content_budget: Option<usize>,
     /// How many bytes of fonts' streams to decode in all, for the fonts the
-    /// walk reaches, through a source that gives streams' data
+    /// walk reaches and those read before it for which have Latin
+    /// characters, through a source that gives streams' data
     /// ([`Source::decoded_within`]): none for [`FONT_BUDGET`].
     pub font_budget: Option<usize>,
 }
@@ -1004,8 +1013,10 @@ pub struct Report {
 /// name and number tree the walk reaches, read again from its root
 /// ([`Rule::Tree`]), and the catalog's XMP packet ([`Rule::Xmp`]); and each
 /// color space and font the walk reaches, read again through pdf-color and
-/// pdf-fonts, the fonts' streams within [`Options::font_budget`]. A
-/// trailer the reader couldn't read so is a finding, and the walk starts
+/// pdf-fonts, the fonts' streams within [`Options::font_budget`], those
+/// whose descriptor lacks `/CapHeight` read before the walk, as the
+/// predicates read which fonts have Latin characters (`fn:FontHasLatinChars`).
+/// A trailer the reader couldn't read so is a finding, and the walk starts
 /// from what it made of the file instead.
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     let version = options.version.unwrap_or_else(|| file_version(source));
@@ -1042,10 +1053,16 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     let (mut extensions, packet) = crate::extension::read(source);
     extensions.extend(options.extensions.iter().cloned());
     let checked_under = extensions.clone();
+    // Which fonts have Latin characters, before the walk, which the
+    // predicates read; the fonts read for it, within the file's budget, are
+    // the pass's after.
+    let mut font_budget = options.font_budget.unwrap_or(FONT_BUDGET);
+    let (latin, fonts_read) = fonts::latin(source, &mut font_budget);
     // What every predicate of the file is evaluated in, once.
     let file = FileCx::new(trailer, version, Objects(source))
         .size(source.size())
-        .extensions(&extensions);
+        .extensions(&extensions)
+        .latin(&latin);
     let file = match &pages {
         Some(pages) => file.pages(pages),
         None => file,
@@ -1147,6 +1164,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         packet_at: None,
         spaces: Vec::new(),
         fonts: Vec::new(),
+        fonts_read,
         report: Report {
             findings,
             unchecked,
@@ -1180,7 +1198,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     walk.packed();
     walk.content(options.content_budget.unwrap_or(CONTENT_BUDGET));
     walk.structures();
-    walk.graphics(options.font_budget.unwrap_or(FONT_BUDGET));
+    walk.graphics(font_budget);
     walk.unreached();
     walk.read_as(source.warnings());
     walk.report
@@ -1626,6 +1644,9 @@ struct Walk<'a> {
     /// newest revision, in the order it reached them, which
     /// [`Walk::graphics`] reads again.
     fonts: Vec<Graphic<'a>>,
+    /// The fonts read before the walk, for which fonts have Latin
+    /// characters, which [`Walk::graphics`] takes as read.
+    fonts_read: fonts::Read,
     report: Report,
 }
 
@@ -6982,12 +7003,12 @@ mod tests {
     /// direct in it ask nothing the predicates keep once read for a file
     /// (a name tree's keys, the structure tree's content items, the form's
     /// fields' names), nor what a file's `FileCx` is given of its newest
-    /// revision alone (its pages): its predicates are evaluated over the
-    /// objects its revision had, some not read, and a part kept from a
-    /// reading that met one would answer a later evaluation as if it
-    /// hadn't, as the newest revision's pages would. Nor is any of them a
-    /// tree. A value that must be indirect, or is a stream, is, and isn't
-    /// gone on to.
+    /// revision alone (its pages, and which fonts have Latin characters):
+    /// its predicates are evaluated over the objects its revision had, some
+    /// not read, and a part kept from a reading that met one would answer a
+    /// later evaluation as if it hadn't, as the newest revision's pages and
+    /// fonts would. Nor is any of them a tree. A value that must be
+    /// indirect, or is a stream, is, and isn't gone on to.
     #[test]
     fn an_earlier_trailers_direct_values_reach_nothing_the_predicates_keep() {
         let kept = [
@@ -6997,6 +7018,7 @@ mod tests {
             "fn:IsFullyQualifiedFieldName",
             "fn:NumberOfPages",
             "fn:PageProperty",
+            "fn:FontHasLatinChars",
         ];
         let mut seen = BTreeSet::new();
         let mut tables = vec!["FileTrailer", "XRefStream"];

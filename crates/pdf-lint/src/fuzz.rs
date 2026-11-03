@@ -4,17 +4,21 @@
 //! finding's bytes inside what was read, the file or a stream's decoded
 //! data, an object stream's as the document holds it and a content
 //! stream's or the metadata stream's as the reading decodes it again; what
-//! its content finds moving nothing a check of its document alone finds;
-//! and set against its previous revision, when it has an incremental
-//! update. It reads under small limits ([`options`], and 4 MiB of content
-//! and 4 MiB of fonts' streams in [`setting`]), so that a run tries more
-//! inputs. It's compiled only for tests and under cargo-fuzz's `--cfg
-//! fuzzing`, with [`seeds`], files for the fuzzer to begin from.
+//! its content finds, and what its fonts' streams say of their text,
+//! moving nothing else a check of its document alone finds, which reads no
+//! stream's data ([`streams_alone`]); and set against its previous
+//! revision, when it has an incremental update. It reads under small
+//! limits ([`options`], and 4 MiB of content and 4 MiB of fonts' streams in
+//! [`setting`]), so that a run tries more inputs. It's compiled only for
+//! tests and under cargo-fuzz's `--cfg fuzzing`, with [`seeds`], files for
+//! the fuzzer to begin from.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytes::{self, WithReading};
-use crate::check::{Exempt, Finding, Hold, Made, Options, Report, Rule, UnlistedIn, check};
+use crate::check::{
+    Exempt, Finding, Hold, Made, Options, Report, Rule, Unchecked, UnlistedIn, check,
+};
 use crate::object::{ObjectId, Span};
 use crate::pdf_crypt;
 use crate::pdf_crypt::writer::{Kind, Settings};
@@ -54,7 +58,7 @@ pub fn check_file(data: &[u8]) {
         check(&doc, &hold, &options),
         "a check is the same twice"
     );
-    content_alone(&report, &check(doc.document(), &hold, &options));
+    streams_alone(&report, &check(doc.document(), &hold, &options));
     let mut lengths = BTreeMap::new();
     for finding in &report.findings {
         if let Some(at) = finding.at {
@@ -143,28 +147,53 @@ const CONTENT: [Rule; 7] = [
     Rule::Content,
 ];
 
+/// Whether `finding` is a font descriptor's `/CapHeight` missing: what
+/// the model's `fn:FontHasLatinChars()` decides, which a font's
+/// `/ToUnicode` can, read beside a reading alone.
+fn cap_height(finding: &Finding) -> bool {
+    finding.rule == Rule::Missing
+        && finding.key == "CapHeight"
+        && finding.table.starts_with("FontDescriptor")
+}
+
+/// Whether `row` is one `fn:FontHasLatinChars()` stood in the way of.
+fn latin_row(row: &Unchecked) -> bool {
+    row.why == "fn:FontHasLatinChars"
+}
+
 /// That `beside`, a check of a file read beside its reading, is `alone`, a
-/// check of its document alone, which reads no content, and content's own:
-/// the same findings but content's rules', in the same order; the same
-/// rows not checked, but content's, their column `-`, added; and the same
-/// counts, but units of content read and unused resources, which `alone`
-/// has none of. So what content finds moves nothing else.
-fn content_alone(beside: &Report, alone: &Report) {
+/// check of its document alone, which reads no stream's data, and what
+/// streams' data tells: content's own, and what a font's `/ToUnicode`,
+/// embedded CMap or glyphs say of whether it has Latin characters. The
+/// same findings but content's rules' and a font descriptor's `missing
+/// CapHeight`, in the same order, and alone's of those beside too; the
+/// same rows not checked, but content's, their column `-`, added, and
+/// `fn:FontHasLatinChars`'s, as many or fewer; and the same counts, but
+/// units of content read and unused resources, which `alone` has none of.
+/// So what content finds, and what a font's streams say of its text, moves
+/// nothing else; nor color spaces, which no stream's data says.
+fn streams_alone(beside: &Report, alone: &Report) {
     let others = |report: &Report| -> Vec<Finding> {
         (report.findings.iter())
-            .filter(|f| !CONTENT.contains(&f.rule))
+            .filter(|f| !CONTENT.contains(&f.rule) && !cap_height(f))
             .cloned()
             .collect()
     };
     assert_eq!(
         others(beside),
         others(alone),
-        "content moves no other finding"
+        "streams' data moves no other finding"
     );
     assert!(
         (alone.findings.iter()).all(|f| !CONTENT.contains(&f.rule)),
         "content found where none is read"
     );
+    for finding in alone.findings.iter().filter(|f| cap_height(f)) {
+        assert!(
+            beside.findings.contains(finding),
+            "{finding}: found alone, where the fonts' streams aren't read"
+        );
+    }
     assert_eq!(
         (alone.content, alone.unused.len()),
         (0, 0),
@@ -172,6 +201,10 @@ fn content_alone(beside: &Report, alone: &Report) {
     );
     for (row, &n) in &beside.unchecked {
         let was = alone.unchecked.get(row).copied().unwrap_or(0);
+        if latin_row(row) {
+            assert!(n <= was, "{row:?} not checked more times");
+            continue;
+        }
         assert!(n >= was, "{row:?} not checked fewer times");
         assert!(
             n == was || row.column == "-",
@@ -180,7 +213,7 @@ fn content_alone(beside: &Report, alone: &Report) {
     }
     for row in alone.unchecked.keys() {
         assert!(
-            beside.unchecked.contains_key(row),
+            beside.unchecked.contains_key(row) || latin_row(row),
             "{row:?} not checked alone"
         );
     }
@@ -191,7 +224,7 @@ fn content_alone(beside: &Report, alone: &Report) {
         unused: BTreeMap::new(),
         ..report.clone()
     };
-    assert_eq!(rest(beside), rest(alone), "content moves no count");
+    assert_eq!(rest(beside), rest(alone), "streams' data moves no count");
 }
 
 /// Whether `at` is inside what was read: the file, or the decoded data of
@@ -976,11 +1009,12 @@ mod tests {
 
     /// Each seed read beside its reading is the whole read, as
     /// `bytes::read_opened` reads it, and under the fuzz target's limits as a
-    /// reading taken whole reads it; and with its content read, a check
-    /// finds what one of its document alone finds and content's own, and
-    /// says how many units of content it read, where one of its document
-    /// alone reads none. The content seeds' content has each rule of
-    /// content finding something; the rest is clean.
+    /// reading taken whole reads it; and with its streams' data read, a
+    /// check finds what one of its document alone finds and content's own
+    /// and what its fonts' streams say ([`streams_alone`]), and says how
+    /// many units of content it read, where one of its document alone reads
+    /// none. The content seeds' content has each rule of content finding
+    /// something; the rest is clean.
     #[test]
     fn the_seeds_read_alike_beside_their_readings() {
         for (name, seed) in seeds() {
@@ -1008,7 +1042,7 @@ mod tests {
                 _ => 0,
             };
             assert_eq!((beside.content, alone.content), (read, 0), "{name}");
-            content_alone(&beside, &alone);
+            streams_alone(&beside, &alone);
             let found: BTreeSet<&str> = (beside.findings.iter())
                 .filter(|f| CONTENT.contains(&f.rule))
                 .map(|f| f.rule.name())
@@ -1026,6 +1060,112 @@ mod tests {
                 "{name}: {beside}"
             );
         }
+    }
+
+    /// A Type 0 font's `/ToUnicode`, read beside its reading, says its text
+    /// is Latin, so its descriptor's `/CapHeight` is missing; its document
+    /// alone reads no stream's data, so there it can't be told, and is
+    /// counted beside another's that has no `/ToUnicode`, counted both
+    /// ways: what [`streams_alone`] sets aside, and nothing else moves.
+    #[test]
+    fn a_font_s_text_read_beside_its_reading_and_alone() {
+        use pdf_structure::fixture::{self, Body, Xref};
+
+        use crate::dict;
+        use crate::object::Object;
+
+        let r = Object::reference;
+        let numbers =
+            |n: &[i64]| Object::from(n.iter().map(|&n| Object::from(n)).collect::<Vec<_>>());
+        // A Type 0 font, object `n`, its CIDFont `n + 1`, its descriptor
+        // `n + 2`, and its `/ToUnicode` `n + 3`, mapping a code to `A`,
+        // where it has one.
+        let type0 = |n: u32, to_unicode: bool| {
+            let mut font = dict! {
+                "Type" => "Font",
+                "Subtype" => "Type0",
+                "BaseFont" => "Batang",
+                "Encoding" => "Identity-H",
+                "DescendantFonts" => vec![r(n + 1)],
+            };
+            let info = dict! {
+                "Registry" => Object::string("Adobe"),
+                "Ordering" => Object::string("Identity"),
+                "Supplement" => 0,
+            };
+            let cid_font = dict! {
+                "Type" => "Font",
+                "Subtype" => "CIDFontType2",
+                "BaseFont" => "Batang",
+                "CIDSystemInfo" => info,
+                "FontDescriptor" => r(n + 2),
+                "CIDToGIDMap" => "Identity",
+            };
+            let descriptor = dict! {
+                "Type" => "FontDescriptor",
+                "FontName" => "Batang",
+                "Flags" => 4,
+                "FontBBox" => numbers(&[-200, -200, 1000, 900]),
+                "ItalicAngle" => 0,
+                "Ascent" => 900,
+                "Descent" => -200,
+                "StemV" => 80,
+            };
+            let mut objects = Vec::new();
+            if to_unicode {
+                font.set("ToUnicode", r(n + 3));
+                let cmap = b"1 begincodespacerange <0000> <FFFF> endcodespacerange \
+                             1 beginbfchar <0001> <0041> endbfchar";
+                objects.push((n + 3, Body::stream(dict! {}, cmap)));
+            }
+            objects.extend([
+                (n, font.into()),
+                (n + 1, cid_font.into()),
+                (n + 2, descriptor.into()),
+            ]);
+            objects
+        };
+        let fonts = dict! { "F1" => r(4), "F2" => r(8) };
+        let mut objects: Vec<(u32, Body)> = vec![
+            (1, dict! { "Type" => "Catalog", "Pages" => r(2) }.into()),
+            (
+                2,
+                dict! { "Type" => "Pages", "Kids" => vec![r(3)], "Count" => 1 }.into(),
+            ),
+            (
+                3,
+                dict! {
+                    "Type" => "Page",
+                    "Parent" => r(2),
+                    "MediaBox" => numbers(&[0, 0, 612, 792]),
+                    "Resources" => dict! { "Font" => fonts },
+                }
+                .into(),
+            ),
+        ];
+        objects.extend(type0(4, true));
+        objects.extend(type0(8, false));
+        let file = fixture::file("1.7", &objects, dict! { "Root" => r(1) }, Xref::Table);
+        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let (hold, options) = (Hold::All(Made::Merged), Options::default());
+        let (beside, alone) = (
+            check(&read, &hold, &options),
+            check(read.document(), &hold, &options),
+        );
+        let missing = |report: &Report| -> Vec<Option<ObjectId>> {
+            let found = report.findings.iter().filter(|f| cap_height(f));
+            found.map(|f| f.object).collect()
+        };
+        let latin = |report: &Report| -> Vec<(String, usize)> {
+            let rows = report.unchecked.iter().filter(|(row, _)| latin_row(row));
+            rows.map(|(row, &n)| (row.table.clone(), n)).collect()
+        };
+        let table = "FontDescriptorCIDType2".to_string();
+        assert_eq!(missing(&beside), [Some((6, 0))]);
+        assert_eq!(latin(&beside), [(table.clone(), 1)]);
+        assert_eq!(missing(&alone), []);
+        assert_eq!(latin(&alone), [(table, 2)]);
+        streams_alone(&beside, &alone);
     }
 
     /// The fuzz target's checks on the seeds, each mutated many times as a
