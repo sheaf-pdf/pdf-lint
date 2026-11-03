@@ -70,9 +70,12 @@
 //! 32000-2 where it's held: its `q`s and `Q`s balanced ([`Rule::Balance`]),
 //! its marked content ended ([`Rule::Marked`]), each operator where it may
 //! be used ([`Rule::Operator`]) and with the operands it takes
-//! ([`Rule::Operands`]), and read as ISO reads it, to its end
+//! ([`Rule::Operands`]), each resource name it uses in its resources
+//! ([`Rule::Resource`]), and read as ISO reads it, to its end
 //! ([`Rule::Content`]). One that isn't read, its data not decoded cleanly,
-//! is counted as not checked.
+//! is counted as not checked. Then what the resources of the content read
+//! hold that none of it uses ([`Rule::Unused`]), when asked for
+//! ([`Options::unused`]), else counted only ([`Report::unused`]).
 //!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
@@ -105,9 +108,11 @@
 //! object content is in doesn't allow it, a word that's no operator outside
 //! `BX` and `EX`, or content ending inside an object ([`Rule::Operator`]),
 //! operands not as many or not of the types their operator takes
-//! ([`Rule::Operands`]), and where ISO 32000-2 reads it otherwise than
+//! ([`Rule::Operands`]), a resource name its resources lack
+//! ([`Rule::Resource`]), and where ISO 32000-2 reads it otherwise than
 //! PDFium, or what stops reading it ([`Rule::Content`]), each kind once in a
-//! unit of content. A check whose predicate can't be
+//! unit of content; a resource none of the content read uses, when asked
+//! for ([`Rule::Unused`]). A check whose predicate can't be
 //! told, or uses a function the evaluator doesn't support, or reads a
 //! string's bytes the reader didn't give, is counted as not made
 //! ([`Report::unchecked`]), and every key the model doesn't list is
@@ -326,6 +331,9 @@ pub struct Options {
     /// value ([`Rule::Deprecated`]); else it's counted only
     /// ([`Report::deprecated`]).
     pub deprecations: bool,
+    /// Find each resource nothing in the content read uses
+    /// ([`Rule::Unused`]); else it's counted only ([`Report::unused`]).
+    pub unused: bool,
     /// Extensions to check the file under, as the model names them
     /// (`ETSI_PAdES`), besides those it declares
     /// ([`extension::declared`](crate::extension::declared)).
@@ -600,6 +608,41 @@ pub enum Rule {
     /// many times; past 32 kinds, one finding more says how many more.
     /// Where and as [`Rule::Balance`].
     Operands,
+    /// A resource name content uses that its resources don't have in that
+    /// category (ISO 32000-2, 7.8.3, Table 34): `Tf`'s font, `Do`'s
+    /// XObject, `gs`'s graphics state, `sh`'s shading, `cs`'s, `CS`'s and
+    /// an inline image's color space but the device spaces and `/Pattern`,
+    /// `scn`'s and `SCN`'s pattern, and `BDC`'s and `DP`'s property list.
+    /// The name is read as ISO 32000-2 reads it, as written, and the
+    /// resources' keys too, so a name PDFium reads otherwise (`/F#3G`,
+    /// which it reads as `F0`) is looked up as ISO reads it, a `content`
+    /// finding saying where the readings part. The resources are a page's,
+    /// its own or inherited, a form's or a pattern's own, and a glyph's own
+    /// or its font's; a page with none lacks every name, its value saying
+    /// so. Where they can't be told, a form, a pattern or a glyph with none
+    /// of its own (which would use the page's), resources or a category
+    /// that isn't a dictionary, or a reference to nothing, the name isn't
+    /// found lacking, and is counted as not checked. Each name once in a
+    /// unit of content, at its first use, its value the name as written and
+    /// the operator (`/F1 (Tf)`); past 32, one finding more says how many
+    /// more. Its table `Resource` and its key the category; in the stream
+    /// and at the path as [`Rule::Balance`].
+    Resource,
+    /// A resource nothing in the content read uses: a name in a category of
+    /// resources (ISO 32000-2, 7.8.3) that no unit of content they're the
+    /// resources of names. Found with [`Options::unused`], else counted
+    /// only ([`Report::unused`]). A category is one dictionary however many
+    /// units of content name it, by the object it is, else by the
+    /// resources' object and its key, else by where it was written, so a
+    /// name used by any of them is used. `DefaultGray`, `DefaultRGB` and
+    /// `DefaultCMYK` are used without being named (8.6.5.6); a name that
+    /// content with resources that can't be told uses is used in every
+    /// category of its kind; and a category one of whose units isn't read,
+    /// or isn't read to its end, can't be told, its names counted as not
+    /// checked. In the category's object, else its resources', else the
+    /// object they're in; its table `Resource` and its key the category, at
+    /// the name's key, its value the name.
+    Unused,
     /// Content as ISO 32000-2 reads it otherwise than it's read, as PDFium
     /// reads it, each kind of place once in a unit of content, its value the
     /// first's (pdf-content-streams' `Fault`), with how many; and what stops
@@ -746,6 +789,10 @@ pub struct Report {
     /// read is told from none found in. One whose data doesn't decode
     /// cleanly isn't read, and is counted in [`Report::unchecked`].
     pub content: usize,
+    /// Resources of held objects that nothing in the content read uses, by
+    /// table and key, `Resource` and the category: findings too with
+    /// [`Options::unused`].
+    pub unused: BTreeMap<(String, String), usize>,
 }
 
 /// The objects of `source` that `hold` names, held to the model: each
@@ -757,8 +804,10 @@ pub struct Report {
 /// object stream held holds that it mustn't ([`Rule::Packed`]); and, where
 /// `source` gives streams' data decoded ([`Source::decoded_within`]), the
 /// content of what's held ([`Rule::Balance`], [`Rule::Marked`],
-/// [`Rule::Content`]). A trailer the reader couldn't read so is a finding,
-/// and the walk starts from what it made of the file instead.
+/// [`Rule::Operator`], [`Rule::Operands`], [`Rule::Resource`],
+/// [`Rule::Content`]) and the resources it doesn't use ([`Rule::Unused`]).
+/// A trailer the reader couldn't read so is a finding, and the walk starts
+/// from what it made of the file instead.
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     let version = options.version.unwrap_or_else(|| file_version(source));
     let written = source.trailer();
@@ -867,6 +916,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         unlisted_findings: options.unlisted,
         extensions: &extensions,
         deprecations: options.deprecations,
+        unused: options.unused,
         field_keys: match options.one_table {
             true => Vec::new(),
             false => field_keys(),
@@ -881,6 +931,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         revision: None,
         containers: Vec::new(),
         holders: Vec::new(),
+        resources_at: HashMap::new(),
         report: Report {
             findings,
             unchecked,
@@ -1268,6 +1319,8 @@ struct Walk<'a> {
     unlisted_findings: UnlistedIn,
     /// [`Options::deprecations`].
     deprecations: bool,
+    /// [`Options::unused`].
+    unused: bool,
     /// [`Report::extensions`].
     extensions: &'a BTreeSet<String>,
     /// The keys only field tables list, not the widget's: a widget with
@@ -1309,6 +1362,9 @@ struct Walk<'a> {
     /// What the walk reached that holds content, in the order it reached
     /// them, which [`Walk::content`] reads.
     holders: Vec<content::Holder<'a>>,
+    /// Where the walk reached each resources dictionary, by where the
+    /// source holds it, which [`Walk::content`] tells `unused` by.
+    resources_at: HashMap<*const Object, content::Reached<'a>>,
     report: Report,
 }
 
@@ -3804,6 +3860,8 @@ impl Rule {
         Rule::Marked,
         Rule::Operator,
         Rule::Operands,
+        Rule::Resource,
+        Rule::Unused,
         Rule::Content,
     ];
 
@@ -3829,6 +3887,8 @@ impl Rule {
             Rule::Marked => "marked",
             Rule::Operator => "operator",
             Rule::Operands => "operands",
+            Rule::Resource => "resource",
+            Rule::Unused => "unused",
             Rule::Content => "content",
         }
     }
@@ -3964,6 +4024,9 @@ impl fmt::Display for Report {
             writeln!(f, "  deprecated: {table}/{key}: {n}")?;
         }
         writeln!(f, "  content read: {}", self.content)?;
+        for ((table, key), n) in &self.unused {
+            writeln!(f, "  unused: {table}/{key}: {n}")?;
+        }
         for ((table, key), n) in &self.ignored {
             writeln!(f, "  ignored: {table}/{key}: {n}")?;
         }
@@ -7022,13 +7085,17 @@ mod tests {
             Rule::Marked,
             Rule::Operator,
             Rule::Operands,
+            Rule::Resource,
+            Rule::Unused,
             Rule::Content,
         ];
         assert!(Rule::ALL.ends_with(&content));
         let names: Vec<_> = content.iter().map(|r| r.name()).collect();
         assert_eq!(
             names,
-            ["balance", "marked", "operator", "operands", "content"]
+            [
+                "balance", "marked", "operator", "operands", "resource", "unused", "content"
+            ]
         );
         assert_eq!(Rule::named("Packed"), None);
     }

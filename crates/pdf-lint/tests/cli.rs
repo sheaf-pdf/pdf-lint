@@ -2235,3 +2235,66 @@ fn content_findings_are_set_against_what_came_before_as_any() {
     assert!(stdout.ends_with(restored), "{stdout}");
     assert!(stdout.contains("objects checked, 1 findings\n"), "{stdout}");
 }
+
+/// A name content uses that its resources lack is a finding, in the content
+/// stream, at the name; a resource nothing uses is counted, in `--full` and
+/// the JSON, and with `--unused` a finding too, at its key, which a
+/// baseline of the same file carries.
+#[test]
+fn resources_lacking_are_found_and_unused_ones_found_when_asked() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << /Font << /F1 6 0 R >> \
+                /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>";
+    let content = "<< /Length 24 >>\nstream\nBT /F1 9 Tf /F2 9 Tf ET\nendstream";
+    let image = "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray \
+                 /BitsPerComponent 8 /Length 1 >>\nstream\nx\nendstream";
+    let font = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+    let path = written(
+        &dir,
+        "resources.pdf",
+        &file(&[CATALOG, PAGES, page, content, image, font]),
+    );
+    let path = path.to_str().unwrap();
+    let lacking = "- resource: Resource/Font at Root/Pages/Kids[0]/Contents, in 4 0 R (merged): \
+                   /F2 (Tf) [bytes 12..15 of 4 0 R's data]\n    \
+                   | /F2   (of 4 0 R's data, decoded)\n";
+    let out = run(&[path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.ends_with(lacking), "{stdout}");
+    assert!(stdout.contains("objects checked, 1 findings\n"), "{stdout}");
+    let out = run(&["--full", path]);
+    let full = text(&out.stdout);
+    assert!(
+        full.contains("\n    unused: Resource/XObject: 1\n"),
+        "{full}"
+    );
+
+    let out = run(&["--unused", path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("objects checked, 2 findings\n"), "{stdout}");
+    let unused = "- unused: Resource/XObject at Root/Pages/Kids[0]/Resources/XObject/Im, in 3 0 R \
+                  (merged): /Im [bytes ";
+    let (_, after) = stdout.split_once(lacking).unwrap();
+    assert!(after.starts_with(unused), "{stdout}");
+    assert!(after.contains("\n    | /Im\n"), "{stdout}");
+
+    let out = run(&["--unused", "--format", "json", path]);
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains(r#","content_streams":1,"unused":[{"table":"Resource","key":"XObject","count":1}],"ignored":"#),
+        "{stdout}"
+    );
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rules: Vec<_> = (report["findings"].as_array().unwrap().iter())
+        .map(|f| f["rule"].as_str().unwrap())
+        .collect();
+    assert_eq!(rules, ["resource", "unused"]);
+
+    // Against itself, both carried.
+    let out = run(&["--unused", "--baseline", path, path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 findings, 2 carried"), "{stdout}");
+}

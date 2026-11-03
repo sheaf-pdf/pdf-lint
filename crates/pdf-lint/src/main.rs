@@ -109,6 +109,13 @@ struct Cli {
     deprecations: bool,
     #[arg(
         long,
+        help = "find each resource the content read never uses, as a\n\
+                font or an image its resources name for nothing (by\n\
+                default, counted only); not --unlisted's keys"
+    )]
+    unused: bool,
+    #[arg(
+        long,
         value_name = "E",
         allow_hyphen_values = true,
         help = "check each FILE under these extensions too, besides\n\
@@ -266,6 +273,7 @@ struct Args {
     one_table: bool,
     unlisted: UnlistedIn,
     deprecations: bool,
+    unused: bool,
     /// `--extensions` as written: the names.
     extensions: Vec<String>,
     /// The extensions it names, checked against the model's.
@@ -432,6 +440,7 @@ fn args() -> Result<Args, clap::Error> {
         one_table: cli.one_table,
         unlisted,
         deprecations: cli.deprecations,
+        unused: cli.unused,
         extensions,
         named: BTreeSet::new(),
         allow: cli.allow,
@@ -836,14 +845,15 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
 /// What a file, and what it's set against, are checked with, as the
 /// command line says, at `version`: how many tables an object is checked
 /// as, which objects a key the model doesn't list is a finding in,
-/// whether deprecations are findings, and the extensions it's checked
-/// under besides those it declares.
+/// whether deprecations and unused resources are findings, and the
+/// extensions it's checked under besides those it declares.
 fn against(args: &Args, version: Option<Version>) -> Options {
     Options {
         version,
         one_table: args.one_table,
         unlisted: args.unlisted,
         deprecations: args.deprecations,
+        unused: args.unused,
         extensions: args.named.clone(),
         ..Options::default()
     }
@@ -956,6 +966,9 @@ fn json(
             .map(|((table, key), &count)| Count { table, key, count })
             .collect(),
         content_streams: report.content,
+        unused: (report.unused.iter())
+            .map(|((table, key), &count)| Count { table, key, count })
+            .collect(),
         ignored: (report.ignored.iter())
             .map(|((table, key), &count)| Count { table, key, count })
             .collect(),
@@ -1001,6 +1014,8 @@ struct Line<'a> {
     /// How many units of content were read: a page's streams as one, a
     /// form's, a pattern's or a glyph's alone.
     content_streams: usize,
+    /// Resources nothing in the content read uses, by table and key.
+    unused: Vec<Count<'a>>,
     ignored: Vec<Count<'a>>,
     no_table: usize,
     ties: usize,
@@ -1044,7 +1059,8 @@ struct Unlisted<'a> {
     count: usize,
 }
 
-/// A key, by table, and how many times: one deprecated, or ignored.
+/// A key, by table, and how many times: one deprecated, an unused
+/// resource's category, or one ignored.
 #[derive(Serialize)]
 struct Count<'a> {
     table: &'a str,

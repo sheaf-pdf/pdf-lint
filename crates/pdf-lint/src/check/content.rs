@@ -61,6 +61,21 @@
 //!   space they can set has components, and `SCN` and `scn` one at least,
 //!   numbers but a pattern's name last. The operations are PDFium's, so a
 //!   closer that closes nothing, an operand to PDFium, is counted.
+//! - **A resource name its resources lack** ([`Rule::Resource`]): the
+//!   name an operation that names one uses, as pdf-content-streams'
+//!   `resource` tells (`Tf`'s font, `Do`'s XObject, a color space but the
+//!   device spaces and `/Pattern`, ...), as written, read as ISO 32000-2
+//!   reads a name (7.3.5), as the resources' keys are read, looked up in
+//!   its category (7.8.3). The resources are read through any references,
+//!   and a category that isn't there, or is null, lacks every name, as
+//!   does a page with no resources at all; a name whose value is null
+//!   isn't there, and one that refers to nothing is, the walk finding the
+//!   reference. Where what a name is in can't be told, a form's, a
+//!   pattern's or a glyph's with no resources of its own, which would use
+//!   its page's, or resources or a category that isn't a dictionary or
+//!   refers to nothing, no name lacks, and the unit is counted as not
+//!   checked. Each name once, at its first use, as written: an inline
+//!   image's `/I` is `I`, which PDFium looks up as `Indexed`.
 //! - **Each place ISO 32000-2 reads the content otherwise** than PDFium does
 //!   ([`Rule::Content`]), by the kind of [`Fault`], its text the first's: the
 //!   tokens' and the operations' own, and what's inside an array or a
@@ -86,21 +101,41 @@
 //! [`Report::since`] carries what the revision before had in the same
 //! stream. Units come in the order the walk reached their first holders;
 //! in a unit, the rules in [`Rule::ALL`]'s order, and each rule's kinds by
-//! where they're first found.
+//! where they're first found. A `resource` finding's table is `Resource`
+//! and its key the category.
+//!
+//! Then, of the categories of resources the units have, each once, as
+//! they're first met, and in each its entries' order, the names no unit
+//! uses ([`Rule::Unused`]), but `DefaultGray`, `DefaultRGB` and
+//! `DefaultCMYK`, used without being named (8.6.5.6), and those content
+//! whose resources can't be told uses, which may be any category's. A
+//! category is one by the object it is, else by its resources' object and
+//! its key, else by where it was written, so that a name any unit uses is
+//! used; one a unit of which isn't read, or isn't read to its end, can't be
+//! told, and what it holds that nothing read uses is counted as not
+//! checked. Each counted ([`Report::unused`]), and found with
+//! [`Options::unused`]: in the category's object, else its resources',
+//! else the one they're in, where that's held, at the walk's way to the
+//! resources and the name's key.
 //!
 //! [`Options::content_budget`]: super::Options::content_budget
+//! [`Options::unused`]: super::Options::unused
 //! [`Report::since`]: super::Report::since
 //! [`Report::unchecked`]: super::Report::unchecked
+//! [`Report::unused`]: super::Report::unused
 //! [`Rule::ALL`]: super::Rule::ALL
 //! [`Rule::Balance`]: super::Rule::Balance
 //! [`Rule::Content`]: super::Rule::Content
 //! [`Rule::Marked`]: super::Rule::Marked
 //! [`Rule::Operands`]: super::Rule::Operands
 //! [`Rule::Operator`]: super::Rule::Operator
+//! [`Rule::Resource`]: super::Rule::Resource
+//! [`Rule::Unused`]: super::Rule::Unused
 //! [`Source::decoded_within`]: crate::source::Source::decoded_within
 
-use std::collections::HashMap;
+use std::borrow::Cow;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::ops::Range;
 use std::ptr;
@@ -108,8 +143,8 @@ use std::rc::Rc;
 
 use pdf_content_streams::fault::{Fault, Sink};
 use pdf_content_streams::{
-    CodedEnds, Concat, Error, Join, Limits, Operand, Operands, Operation, Operator, ResCx, State,
-    Type,
+    CodedEnds, Concat, Error, Join, Limits, Operand, Operands, Operation, Operator, ResCx, ResKind,
+    State, Type,
 };
 
 use super::{Finding, Rule, Step, TOKEN, Trail, Visit, Walk};
@@ -140,6 +175,26 @@ const TOO_LARGE: &str = "content decoded past what's read of one unit";
 
 /// Why a unit isn't read: a stream of it doesn't decode cleanly.
 const DECODE: &str = "a content stream that doesn't decode cleanly";
+
+/// Why a resource name isn't looked up: a form, a pattern or a glyph has no
+/// resources of its own, where it would use its page's.
+const UNOWNED: &str = "a resource name in content with no resources of its own";
+
+/// Why a resource name isn't looked up: its unit's resources aren't a
+/// dictionary.
+const DAMAGED: &str = "a resource name in resources that aren't a dictionary";
+
+/// Why a resource name isn't looked up: its category isn't a dictionary, or
+/// refers to nothing.
+const CATEGORY: &str = "a resource name in a category that isn't a dictionary";
+
+/// Why a resource isn't told used or not: content that has it among its
+/// resources isn't read, or isn't read to its end.
+const UNTOLD: &str = "a resource content not read may use";
+
+/// The color spaces content uses without naming them, whatever space it
+/// sets (ISO 32000-2, 8.6.5.6): never unused.
+const DEFAULTS: &[&[u8]] = &[b"DefaultGray", b"DefaultRGB", b"DefaultCMYK"];
 
 /// What the walk reached that holds content, kept for the content pass
 /// ([`Walk::content`]), in the order the walk reached them.
@@ -186,8 +241,164 @@ enum Way<'a> {
 /// starts.
 struct Unit<'a> {
     streams: Vec<(ObjectId, Way<'a>)>,
-    resources: Option<&'a Object>,
+    resources: Option<Resources<'a>>,
     start: State,
+}
+
+/// A unit's resources: the value they are, their references followed, and
+/// the indirect object it is, if it's one.
+#[derive(Clone, Copy)]
+struct Resources<'a> {
+    id: Option<ObjectId>,
+    object: &'a Object,
+}
+
+/// Where the walk reached a resources dictionary, as it's first reached as
+/// one: the indirect object it is or is in, and the way to it.
+pub(super) struct Reached<'a> {
+    holder: Option<ObjectId>,
+    trail: Rc<Trail<'a>>,
+}
+
+/// Where a unit's resource names are looked up.
+enum Lookup {
+    /// In none: a page with no resources, which lacks every name.
+    Without,
+    /// In none that can be told, and why.
+    Untold(&'static str),
+    /// In each category its resources have, by kind: one of
+    /// [`Categories`]', or why its names can't be told. A category not
+    /// among them, or null, lacks every name.
+    In(Vec<(ResKind, Result<usize, &'static str>)>),
+}
+
+/// What a resource name content uses is, looked up in its unit's resources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Looked {
+    There,
+    /// Not in its category.
+    Lacking,
+    /// Not there, as the unit has no resources at all.
+    Without,
+    /// Not told, as its resources or its category can't be.
+    Untold,
+}
+
+/// What tells one category of resources from another, for `unused`: the
+/// object it is; else its resources' object and its key; else where it was
+/// written. One that has none of these, built in memory, isn't told.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Identity {
+    Object(ObjectId),
+    Key(ObjectId, ResKind),
+    At(Span),
+}
+
+/// A dictionary of a category of resources, as content's names are looked
+/// up in it and `unused` tells it.
+struct Category<'a> {
+    kind: ResKind,
+    dict: &'a Dict,
+    /// What it is, if that can be told.
+    identity: Option<Identity>,
+    /// The object a finding of it is in.
+    object: Option<ObjectId>,
+    /// The way to it: its resources', then its key.
+    trail: Rc<Trail<'a>>,
+    /// Each name it holds whose value isn't null, and whether content read
+    /// uses it.
+    used: HashMap<&'a [u8], bool>,
+    /// Whether every unit of content it's a category of was read to its
+    /// end, so that what isn't used is told.
+    told: bool,
+}
+
+/// The categories of resources the units of a file's content name, as
+/// first met, each once.
+#[derive(Default)]
+struct Categories<'a> {
+    all: Vec<Category<'a>>,
+    by: HashMap<Identity, usize>,
+    /// Every name the categories of each kind hold.
+    names: HashMap<ResKind, HashSet<&'a [u8]>>,
+    /// Those of them that content whose resources can't be told uses: used
+    /// in every category of the kind, as which it's looked up in isn't
+    /// known.
+    spared: HashMap<ResKind, HashSet<&'a [u8]>>,
+}
+
+impl<'a> Categories<'a> {
+    /// The category `identity` tells, made by `make` if it's new, as one
+    /// none tells always is.
+    fn add(&mut self, identity: Option<Identity>, make: impl FnOnce() -> Category<'a>) -> usize {
+        if let Some(i) = identity.and_then(|identity| self.by.get(&identity)) {
+            return *i;
+        }
+        let category = make();
+        let names = self.names.entry(category.kind).or_default();
+        names.extend(category.used.keys().copied());
+        let i = self.all.len();
+        if let Some(identity) = identity {
+            self.by.insert(identity, i);
+        }
+        self.all.push(category);
+        i
+    }
+
+    /// `name`, of `kind`, used by content whose resources can't be told:
+    /// used wherever a category of its kind holds it.
+    fn spare(&mut self, kind: ResKind, name: &[u8]) {
+        if let Some(&held) = self.names.get(&kind).and_then(|names| names.get(name)) {
+            self.spared.entry(kind).or_default().insert(held);
+        }
+    }
+
+    /// What `name`, of `kind`, is in `lookup`, marked used where it's
+    /// there; and why it can't be told, where it can't, kept in `untold`.
+    fn look(
+        &mut self,
+        lookup: &Lookup,
+        kind: ResKind,
+        name: &[u8],
+        untold: &mut Vec<&'static str>,
+    ) -> Looked {
+        let found = match lookup {
+            Lookup::Without => return Looked::Without,
+            Lookup::Untold(why) => Err(*why),
+            Lookup::In(categories) => match categories.iter().find(|(k, _)| *k == kind) {
+                None => return Looked::Lacking,
+                Some((_, found)) => *found,
+            },
+        };
+        match found {
+            Ok(i) => match self.all[i].used.get_mut(name) {
+                Some(used) => {
+                    *used = true;
+                    Looked::There
+                }
+                None => Looked::Lacking,
+            },
+            Err(why) => {
+                if !untold.contains(&why) {
+                    untold.push(why);
+                }
+                self.spare(kind, name);
+                Looked::Untold
+            }
+        }
+    }
+
+    /// The categories of `lookup` not told, as a unit of content they're
+    /// the categories of isn't read to its end.
+    fn untell(&mut self, lookup: &Lookup) {
+        if let Lookup::In(categories) = lookup {
+            for &(_, found) in categories {
+                if let Ok(i) = found {
+                    self.all[i].told = false;
+                }
+            }
+        }
+    }
 }
 
 /// What tells one unit from another: its streams, in order; its resources,
@@ -204,7 +415,7 @@ impl Unit<'_> {
     fn key(&self) -> Key {
         Key {
             streams: self.streams.iter().map(|&(id, _)| id).collect(),
-            resources: self.resources.map(ptr::from_ref),
+            resources: self.resources.map(|r| ptr::from_ref(r.object)),
             start: self.start,
         }
     }
@@ -355,15 +566,62 @@ impl<K: PartialEq> Kinds<K> {
     /// What it found, each kind at its first, with how many times, by
     /// where each is; then how many more, past the kinds told apart.
     fn found(self) -> Vec<(Range<usize>, String)> {
-        let mut found: Vec<_> = (self.kinds.into_iter())
+        (self.told().into_iter())
             .map(|(_, at, value, n)| (at, times(&value, n)))
+            .collect()
+    }
+
+    /// What it found, in [`Kinds::found`]'s order, each kind with its first
+    /// value and how many times it's found; and none for how many more,
+    /// with that, once.
+    fn told(self) -> Vec<(Option<K>, Range<usize>, String, usize)> {
+        let mut found: Vec<_> = (self.kinds.into_iter())
+            .map(|(kind, at, value, n)| (Some(kind), at, value, n))
             .collect();
-        found.sort_by_key(|(at, _)| at.start);
+        found.sort_by_key(|(_, at, ..)| at.start);
         if let Some(at) = self.past {
             let more = format!("{} more, of kinds past the first {KINDS}", self.more);
-            found.push((at, more));
+            found.push((None, at, more, 1));
         }
         found
+    }
+}
+
+/// The operand an operation that names a resource
+/// ([`Operation::resource`]) names it by, as written: `Tf`'s font, the
+/// operand before its size; an inline image's color space, under its
+/// `/ColorSpace` or `/CS`; the last operand of the rest.
+fn written<'c>(op: &Operation<'c>) -> Option<Operand<'c>> {
+    if let Some(image) = op.inline_image() {
+        return image.entry(b"ColorSpace");
+    }
+    match op.name() {
+        b"Tf" => op.arg(1),
+        _ => op.arg(0),
+    }
+}
+
+/// The name `written` is, without its `/`, as ISO 32000-2 reads it (7.3.5),
+/// as a file's keys are read: a `#` an escape only before two hex digits,
+/// every byte kept. None when it isn't one.
+fn iso_name(written: &[u8]) -> Option<Cow<'_, [u8]>> {
+    let name = written.strip_prefix(b"/")?;
+    match (name.iter()).all(|&b| b != b'#' && pdf_tokenizer::is_regular(b)) {
+        true => Some(Cow::Borrowed(name)),
+        false => Some(Cow::Owned(
+            pdf_tokenizer::decode::name(written).bytes().collect(),
+        )),
+    }
+}
+
+/// What a `resource` finding says of the name `written` that `op` uses and
+/// its resources lack, the unit having `none` at all if so: the name as
+/// written, and the operator.
+fn lacking(written: &Operand, op: &Operation, none: bool) -> String {
+    let (name, operator) = (word(written.bytes()), word(op.name()));
+    match none {
+        true => format!("{name} ({operator}), and it has no resources"),
+        false => format!("{name} ({operator})"),
     }
 }
 
@@ -576,7 +834,11 @@ struct Found {
     marked: Vec<(Range<usize>, String)>,
     operator: Vec<(Range<usize>, String)>,
     operands: Vec<(Range<usize>, String)>,
+    /// Each with the category its name lacks from, none for how many more.
+    resource: Vec<(Range<usize>, String, Option<ResKind>)>,
     content: Vec<(Range<usize>, String)>,
+    /// Whether reading stopped before the end.
+    stopped: bool,
 }
 
 /// What content is read under: pdf-content-streams' caps, an inline
@@ -608,12 +870,21 @@ fn kind(table: &str, object: &Object, id: Option<ObjectId>) -> Option<Kind> {
 /// images' color spaces, under `limits`: its operations, to their end or to
 /// what stops them, each `q` and `Q`, each `BMC`, `BDC` and `EMC`, each
 /// stepping where content is, among the graphics objects, its operands
-/// held to its operator's, and each array and dictionary among them read
-/// as an object, for what's inside it; and what each rule finds of it.
-fn pass(content: &Concat, start: State, res: &ResCx, limits: &Limits) -> Found {
+/// held to its operator's, the resource it names, if any, as ISO 32000-2
+/// reads the name, looked up by `look`, and each array and dictionary among
+/// its operands read as an object, for what's inside it; and what each rule
+/// finds of it.
+fn pass(
+    content: &Concat,
+    start: State,
+    res: &ResCx,
+    limits: &Limits,
+    look: &mut dyn FnMut(ResKind, &[u8]) -> Looked,
+) -> Found {
     let (mut saved, mut marked) = (Depth::default(), Depth::default());
     let (mut faults, mut inside) = (Faults::default(), Faults::default());
     let (mut placed, mut operands) = (Kinds::default(), Kinds::default());
+    let mut named = Kinds::default();
     // `BX` and `EX`, and where content is, with where the graphics object
     // it's in began.
     let (mut compat, mut state, mut begun) = (Depth::default(), start, 0..0);
@@ -668,6 +939,17 @@ fn pass(content: &Concat, start: State, res: &ResCx, limits: &Limits) -> Found {
             let kind = (operator, mem::discriminant(&wrong));
             operands.add(kind, op.range(), || said(&op, wrong));
         }
+        if let Some((kind, _)) = op.resource()
+            && let Some(written) = written(&op)
+            && let Some(name) = iso_name(written.bytes())
+        {
+            let looked = look(kind, &name);
+            if matches!(looked, Looked::Lacking | Looked::Without) {
+                let none = looked == Looked::Without;
+                let value = || lacking(&written, &op, none);
+                named.add((kind, name), written.range(), value);
+            }
+        }
         for operand in op.operands() {
             if operand.is_array() || operand.is_dict() {
                 operand.object_with(limits, &mut inside);
@@ -719,7 +1001,13 @@ fn pass(content: &Concat, start: State, res: &ResCx, limits: &Limits) -> Found {
         ),
         operator: placed.found(),
         operands: operands.found(),
+        // A name's value says nothing of how many times it's used, so that
+        // what's alike is by the name alone.
+        resource: (named.told().into_iter())
+            .map(|(kind, at, value, _)| (at, value, kind.map(|(kind, _)| kind)))
+            .collect(),
         content: found,
+        stopped,
     }
 }
 
@@ -757,9 +1045,17 @@ impl<'a> Walk<'a> {
     /// Keeps `v` for the content pass when it holds content. Not in an
     /// earlier revision's trailer, whose objects are the file's where no
     /// later revision wrote them, as the walk from the trailer reaches them.
+    /// And keeps where it's reached a resources dictionary, the first time,
+    /// for the findings of `unused`.
     pub(super) fn note_content(&mut self, v: &Visit<'a>) {
         if self.revision.is_some() {
             return;
+        }
+        if v.table.name == "Resource" {
+            (self.resources_at.entry(ptr::from_ref(v.object))).or_insert_with(|| Reached {
+                holder: v.holder,
+                trail: v.trail.clone(),
+            });
         }
         if let Some(kind) = kind(&v.table.name, v.object, v.id()) {
             self.holders.push(Holder {
@@ -799,11 +1095,17 @@ impl<'a> Walk<'a> {
                 }
             }
         }
+        // Where each unit's names are looked up, its categories each once,
+        // as first met.
+        let mut categories = Categories::default();
+        let lookups: Vec<Lookup> = (units.iter())
+            .map(|(i, unit)| self.lookup(&holders[*i], unit, &mut categories))
+            .collect();
         let limits = limits();
         let none = ResCx::none();
         let mut spaces = HashMap::new();
         let mut left = budget;
-        for (i, unit) in &units {
+        for ((i, unit), lookup) in units.iter().zip(&lookups) {
             let holder = &holders[*i];
             let held = self.made(holder.holder).is_some()
                 || (unit.streams.iter()).any(|&(id, _)| self.made(Some(id)).is_some());
@@ -814,25 +1116,32 @@ impl<'a> Walk<'a> {
                         let key = way_key(unit.streams[0].1);
                         self.unchecked("-", why.to_string(), holder.table, &key);
                     }
+                    categories.untell(lookup);
                     continue;
                 }
                 Read::NoData => return,
             };
             // Only an inline image is sized by the resources' color spaces,
             // so they're read only where one may be, once for each.
+            let resources = unit.resources.map(|r| r.object);
             let res = match content.bytes().windows(2).any(|w| w == b"BI") {
                 false => &none,
                 true => {
                     let source = self.source;
                     let objects = move |id| source.get(id).ok();
-                    (spaces.entry(unit.resources.map(ptr::from_ref))).or_insert_with(|| {
+                    (spaces.entry(resources.map(ptr::from_ref))).or_insert_with(|| {
                         // A closure can't say why an object doesn't read,
                         // so this never fails.
-                        ResCx::read(objects, unit.resources, &limits).unwrap_or_default()
+                        ResCx::read(objects, resources, &limits).unwrap_or_default()
                     })
                 }
             };
-            let found = pass(&content, unit.start, res, &limits);
+            let mut untold = Vec::new();
+            let mut look = |kind, name: &[u8]| categories.look(lookup, kind, name, &mut untold);
+            let found = pass(&content, unit.start, res, &limits, &mut look);
+            if found.stopped {
+                categories.untell(lookup);
+            }
             if !held {
                 continue;
             }
@@ -842,20 +1151,173 @@ impl<'a> Walk<'a> {
                 (Rule::Marked, found.marked),
                 (Rule::Operator, found.operator),
                 (Rule::Operands, found.operands),
-                (Rule::Content, found.content),
             ];
             for (rule, found) in rules {
                 for (at, value) in found {
-                    self.found_in(holder, unit, &content, rule, at, value);
+                    self.found_in(holder, unit, &content, rule, at, value, None);
                 }
             }
+            for (at, value, kind) in found.resource {
+                let key = kind.map_or_else(|| "-".to_string(), category_key);
+                let rule = Rule::Resource;
+                self.found_in(holder, unit, &content, rule, at, value, Some(key));
+            }
+            for (at, value) in found.content {
+                self.found_in(holder, unit, &content, Rule::Content, at, value, None);
+            }
+            for why in untold {
+                self.unchecked("-", why.to_string(), holder.table, "Resources");
+            }
         }
+        self.unused(&categories);
+    }
+
+    /// What's in `categories` that no content read uses, in the order
+    /// they were met and each one's entries' order: the names of each
+    /// whose object is held but those content uses, those it uses where
+    /// what's used can't be told, and the default color spaces. Each
+    /// counted, a finding with [`Options::unused`](super::Options::unused);
+    /// of a category one of whose units wasn't read to its end, counted as
+    /// not checked. One that can't be told apart from another isn't told.
+    fn unused(&mut self, categories: &Categories<'a>) {
+        for category in &categories.all {
+            let (Some(_), Some(object)) = (category.identity, category.object) else {
+                continue;
+            };
+            let Some(made) = self.made(Some(object)) else {
+                continue;
+            };
+            let (kind, key) = (category.kind, category_key(category.kind));
+            let spared = categories.spared.get(&kind);
+            for entry in category.dict.last_entries() {
+                let name = &entry.key[..];
+                match category.used.get(name) {
+                    Some(false) => {}
+                    _ => continue,
+                }
+                let default = kind == ResKind::ColorSpace && DEFAULTS.contains(&name);
+                if default || spared.is_some_and(|spared| spared.contains(name)) {
+                    continue;
+                }
+                if !category.told {
+                    self.unchecked("-", UNTOLD.to_string(), "Resource", &key);
+                    continue;
+                }
+                let at = ("Resource".to_string(), key.clone());
+                *self.report.unused.entry(at).or_default() += 1;
+                if !self.unused {
+                    continue;
+                }
+                let trail = Rc::new(Trail {
+                    up: Some(category.trail.clone()),
+                    step: Step::Key(name),
+                    object: &entry.value,
+                });
+                let shown = String::from_utf8_lossy(&name[..name.len().min(TOKEN)]);
+                self.report.findings.push(Finding {
+                    object: Some(object),
+                    made,
+                    path: trail.path(),
+                    table: "Resource".to_string(),
+                    key: key.clone(),
+                    rule: Rule::Unused,
+                    value: format!("/{shown}"),
+                    at: entry.key_at.or(entry.value.at),
+                    revision: None,
+                });
+            }
+        }
+    }
+
+    /// Where `unit`'s resource names are looked up, `holder`'s, its
+    /// categories added to `categories` as they're met, in its resources'
+    /// order: none for a page with no resources at all, and none that can be
+    /// told for a form's, a pattern's or a glyph's with none of its own, as
+    /// it would use the page's, or for resources that aren't a dictionary;
+    /// a category, its references followed, that isn't a dictionary or
+    /// refers to nothing can't be told, and one that's null is as if it
+    /// weren't there (ISO 32000-2, 7.3.7).
+    fn lookup(
+        &self,
+        holder: &Holder<'a>,
+        unit: &Unit<'a>,
+        categories: &mut Categories<'a>,
+    ) -> Lookup {
+        let Some(resources) = unit.resources else {
+            return match holder.kind {
+                Kind::Page => Lookup::Without,
+                Kind::Own(_) | Kind::Glyphs => Lookup::Untold(UNOWNED),
+            };
+        };
+        let Value::Dict(dict) = resources.object.value() else {
+            return Lookup::Untold(DAMAGED);
+        };
+        let reached = self.resources_at.get(&ptr::from_ref(resources.object));
+        let mut found = Vec::new();
+        for entry in dict.last_entries() {
+            let Some(&kind) = (ResKind::ALL.iter()).find(|kind| kind.key() == entry.key.as_slice())
+            else {
+                continue;
+            };
+            let (id, value) = match self.resolve(&entry.value) {
+                Ok((_, value)) if value.is_null() => continue,
+                Ok(found) => found,
+                Err(_) => {
+                    found.push((kind, Err(CATEGORY)));
+                    continue;
+                }
+            };
+            let Value::Dict(names) = value.value() else {
+                found.push((kind, Err(CATEGORY)));
+                continue;
+            };
+            let identity = match (id, resources.id) {
+                (Some(id), _) => Some(Identity::Object(id)),
+                (None, Some(id)) => Some(Identity::Key(id, kind)),
+                (None, None) => value.at.map(Identity::At),
+            };
+            let make = || {
+                let used = (names.last_entries())
+                    .filter(|e| !matches!(self.resolve(&e.value), Ok((_, v)) if v.is_null()))
+                    .map(|e| (&e.key[..], false))
+                    .collect();
+                let object = (id.or(resources.id))
+                    .or_else(|| reached.and_then(|r| r.holder))
+                    .or(holder.holder);
+                let up = match reached {
+                    Some(reached) => reached.trail.clone(),
+                    None => Rc::new(Trail {
+                        up: Some(holder.trail.clone()),
+                        step: Step::Key(b"Resources"),
+                        object: resources.object,
+                    }),
+                };
+                let trail = Rc::new(Trail {
+                    up: Some(up),
+                    step: Step::Key(&entry.key),
+                    object: value,
+                });
+                Category {
+                    kind,
+                    dict: names,
+                    identity,
+                    object,
+                    trail,
+                    used,
+                    told: true,
+                }
+            };
+            found.push((kind, Ok(categories.add(identity, make))));
+        }
+        Lookup::In(found)
     }
 
     /// A finding of `rule`, `value`, at `at` in `unit`'s `content`, told as
     /// `holder`'s: in the stream it starts in, at its bytes in that
     /// stream's data, made as the holder is, else as that stream is, else as
-    /// the unit's first held stream.
+    /// the unit's first held stream. Its table and key the holder's, or for
+    /// a name of a `category` of resources, `Resource` and the category.
+    #[allow(clippy::too_many_arguments)]
     fn found_in(
         &mut self,
         holder: &Holder<'a>,
@@ -864,6 +1326,7 @@ impl<'a> Walk<'a> {
         rule: Rule,
         at: Range<usize>,
         value: String,
+        category: Option<String>,
     ) {
         let (i, at) = placed(content, at);
         let Some(&(stream, way)) = unit.streams.get(i) else {
@@ -875,12 +1338,16 @@ impl<'a> Walk<'a> {
         let Some(made) = made else {
             return;
         };
+        let (table, key) = match category {
+            Some(category) => ("Resource".to_string(), category),
+            None => (holder.table.to_string(), way_key(way)),
+        };
         self.report.findings.push(Finding {
             object: Some(stream),
             made,
             path: path(holder, way),
-            table: holder.table.to_string(),
-            key: way_key(way),
+            table,
+            key,
             rule,
             value,
             at: Some(Span::new(Some(stream), at.start, at.end)),
@@ -899,7 +1366,10 @@ impl<'a> Walk<'a> {
         let units = match holder.kind {
             Kind::Page => {
                 let streams = self.contents(dict);
-                let resources = self.inheritable(dict, b"Resources");
+                // Its own, else the nearest `/Parent`'s, as an inheritable
+                // key's value is found.
+                let resources = (self.resources(dict))
+                    .or_else(|| self.up(dict, |parent| self.resources(parent)));
                 let start = State::ContentStream;
                 vec![Unit {
                     streams,
@@ -975,11 +1445,13 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// `dict`'s own `/Resources`, its references followed; a null is none.
-    fn resources(&self, dict: &'a Dict) -> Option<&'a Object> {
+    /// `dict`'s own `/Resources`, its references followed, and the object
+    /// they are where they're indirect; a null is none, and so is a
+    /// reference to nothing.
+    fn resources(&self, dict: &'a Dict) -> Option<Resources<'a>> {
         let raw = dict.get(b"Resources")?;
-        let (_, resources) = self.resolve(raw).ok()?;
-        (!resources.is_null()).then_some(resources)
+        let (id, object) = self.resolve(raw).ok()?;
+        (!object.is_null()).then_some(Resources { id, object })
     }
 
     /// `unit`'s streams decoded and joined, each asked for no more than
@@ -1045,6 +1517,11 @@ fn path<'a>(holder: &Holder<'a>, way: Way<'a>) -> String {
     trail.path()
 }
 
+/// A category's key in `/Resources`, as a finding names it.
+fn category_key(kind: ResKind) -> String {
+    String::from_utf8_lossy(kind.key()).into_owned()
+}
+
 /// The key a finding in a stream reached by `way` is at: its holder's
 /// `Contents`, `-` for its own data, or a glyph's name.
 fn way_key(way: Way) -> String {
@@ -1092,6 +1569,7 @@ mod tests {
     //! found in them, where, and as whose.
 
     use std::cell::RefCell;
+    use std::collections::BTreeMap;
 
     use pdf_structure::fixture;
 
@@ -2430,5 +2908,567 @@ mod tests {
         let opened = Opened::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
         let alone = check(&*opened, &Hold::All(Made::Merged), &Options::default());
         assert!(!alone.findings.iter().any(|f| counted(f.rule)), "{alone}");
+    }
+
+    /// A Type 1 font, for resources that hold one.
+    const FONT: &str = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+
+    /// A file of one page, object 3, whose content is `content`, object 10,
+    /// with `more` in its dictionary, its resources among it, and `objects`
+    /// besides, each its number and body.
+    fn resourced(more: &str, content: String, objects: &[(u32, &str)]) -> Vec<u8> {
+        let mut all = tree("3 0 R", "");
+        all.push((3, page(&format!("/Contents 10 0 R {more}"))));
+        all.push((10, content));
+        all.extend(objects.iter().map(|&(n, body)| (n, body.to_string())));
+        file(&all)
+    }
+
+    /// What a check of `file` finds of `rule`, every object held and unused
+    /// resources found: each finding's object, path, table and key, value,
+    /// and its bytes, in its stream's decoded data or in the file; and the
+    /// report.
+    #[allow(clippy::type_complexity)]
+    fn found_by(rule: Rule, file: &[u8]) -> (Vec<(u32, String, String, String, String)>, Report) {
+        let opened = Opened::new(file, &[], &bytes::Options::DEFAULT).unwrap();
+        let options = Options {
+            unused: true,
+            ..Options::default()
+        };
+        let report = check(&opened, &Hold::All(Made::Merged), &options);
+        let found = (report.findings.iter())
+            .filter(|f| f.rule == rule)
+            .map(|f| {
+                let bytes = match f.at {
+                    Some(
+                        at @ Span {
+                            stream: Some(id), ..
+                        },
+                    ) => {
+                        let data = opened.decoded_within(id, usize::MAX).unwrap().unwrap();
+                        data[at.start..at.end].to_vec()
+                    }
+                    Some(at) => file[at.start..at.end].to_vec(),
+                    None => Vec::new(),
+                };
+                (
+                    f.object.unwrap().0,
+                    f.path.clone(),
+                    format!("{}/{}", f.table, f.key),
+                    f.value.clone(),
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                )
+            })
+            .collect();
+        (found, report)
+    }
+
+    /// What `rule` finds in `file`, as [`found_by`] has it: each finding's
+    /// table and key, value and bytes.
+    fn named(rule: Rule, file: &[u8]) -> Vec<(String, String, String)> {
+        (found_by(rule, file).0.into_iter())
+            .map(|(_, _, at, value, bytes)| (at, value, bytes))
+            .collect()
+    }
+
+    /// A finding's table and key, value and bytes.
+    fn lacks(at: &str, value: &str, bytes: &str) -> (String, String, String) {
+        (at.to_string(), value.to_string(), bytes.to_string())
+    }
+
+    /// The checks `report` didn't make for `why`: each table and key, and
+    /// how many.
+    fn not_made(report: &Report, why: &str) -> Vec<(String, String, usize)> {
+        (report.unchecked.iter())
+            .filter(|(u, _)| u.why == why)
+            .map(|(u, &n)| (u.table.clone(), u.key.clone(), n))
+            .collect()
+    }
+
+    /// The name a resource is looked up by is the operand `resource()`
+    /// names it by: for each operator that names one, PDFium's reading of
+    /// the operand is `resource()`'s name, but for an inline image's
+    /// abbreviation, which `resource()` gives as the space it stands for,
+    /// `I` as `Indexed`. ISO's reading of it, the key looked up, decodes
+    /// `#41`. What names no resource, a device space, `/Pattern` or an
+    /// inline image's abbreviation of one, isn't looked up.
+    #[test]
+    fn the_name_looked_up_is_the_operand_resource_names() {
+        let content: &[u8] = b"/F#41 9 Tf /X#41 Do /G#41 gs /S#41 sh /C#41 cs /C#41 CS \
+            /P#41 scn 0 /P#41 SCN /T /P#41 BDC EMC /T /P#41 DP \
+            BI /CS /C#41 /W 1 /H 1 /BPC 8 /F /AHx ID 00> EI \
+            BI /ColorSpace /I /W 1 /H 1 /BPC 8 /F /AHx ID 00> EI \
+            /DeviceRGB cs /Pattern CS 0.5 scn BI /CS /G /W 1 /H 1 /BPC 8 /F /AHx ID 00> EI";
+        let (res, limits) = (ResCx::none(), limits());
+        let mut named = Vec::new();
+        for op in pdf_content_streams::operations(content, &res, &limits) {
+            let op = op.unwrap();
+            let Some((kind, name)) = op.resource() else {
+                continue;
+            };
+            let written = written(&op).unwrap();
+            let pdfium = pdf_content_streams::name(written.bytes()).unwrap();
+            let operator = String::from_utf8_lossy(op.name());
+            match written.bytes() {
+                b"/I" => assert_eq!(&*name, b"Indexed"),
+                _ => assert_eq!(pdfium, name, "{operator}"),
+            }
+            let iso = iso_name(written.bytes()).unwrap().into_owned();
+            named.push((kind, String::from_utf8(iso).unwrap()));
+        }
+        let named: Vec<(ResKind, &str)> = named.iter().map(|(k, n)| (*k, n.as_str())).collect();
+        assert_eq!(
+            named,
+            [
+                (ResKind::Font, "FA"),
+                (ResKind::XObject, "XA"),
+                (ResKind::ExtGState, "GA"),
+                (ResKind::Shading, "SA"),
+                (ResKind::ColorSpace, "CA"),
+                (ResKind::ColorSpace, "CA"),
+                (ResKind::Pattern, "PA"),
+                (ResKind::Pattern, "PA"),
+                (ResKind::Properties, "PA"),
+                (ResKind::Properties, "PA"),
+                (ResKind::ColorSpace, "CA"),
+                (ResKind::ColorSpace, "I"),
+            ]
+        );
+        // ISO's reading: a `#` before what aren't two hex digits is itself.
+        assert_eq!(iso_name(b"/F#3G").as_deref(), Some(&b"F#3G"[..]));
+        assert_eq!(iso_name(b"/F#30").as_deref(), Some(&b"F0"[..]));
+        assert_eq!(iso_name(b"12"), None);
+    }
+
+    /// A name each operator that names a resource uses, which its category
+    /// lacks, is found, once in a unit, at the name as written, its table
+    /// `Resource` and its key the category, in the content stream; the
+    /// device spaces and `/Pattern` are no resources. A page with no
+    /// resources at all, its own or its parents', lacks every name it uses.
+    #[test]
+    fn a_name_its_resources_lack_is_found_by_each_operator() {
+        let content = "/F1 9 Tf /X1 Do /G1 gs /S1 sh /C1 cs /C2 CS /P1 scn 0 0 0 /P2 SCN \
+                       /T /M1 BDC EMC /T /M2 DP BI /CS /C3 /W 1 /H 1 /BPC 8 /F /AHx ID 00> EI \
+                       /DeviceGray cs /Pattern cs /DeviceCMYK CS \
+                       BI /CS /RGB /W 1 /H 1 /BPC 8 /F /AHx ID 00> EI /F1 12 Tf";
+        let resources = "/Resources << /ProcSet [/PDF] >>";
+        let file = resourced(resources, stream("", content), &[]);
+        assert_eq!(
+            named(Rule::Resource, &file),
+            [
+                lacks("Resource/Font", "/F1 (Tf)", "/F1"),
+                lacks("Resource/XObject", "/X1 (Do)", "/X1"),
+                lacks("Resource/ExtGState", "/G1 (gs)", "/G1"),
+                lacks("Resource/Shading", "/S1 (sh)", "/S1"),
+                lacks("Resource/ColorSpace", "/C1 (cs)", "/C1"),
+                lacks("Resource/ColorSpace", "/C2 (CS)", "/C2"),
+                lacks("Resource/Pattern", "/P1 (scn)", "/P1"),
+                lacks("Resource/Pattern", "/P2 (SCN)", "/P2"),
+                lacks("Resource/Properties", "/M1 (BDC)", "/M1"),
+                lacks("Resource/Properties", "/M2 (DP)", "/M2"),
+                lacks("Resource/ColorSpace", "/C3 (BI)", "/C3"),
+            ]
+        );
+        let (found, _) = found_by(Rule::Resource, &file);
+        assert_eq!(
+            (found[0].0, found[0].1.as_str()),
+            (10, "Root/Pages/Kids[0]/Contents")
+        );
+        let none = resourced("", stream("", "/F1 9 Tf /F1 9 Tf /F2 9 Tf"), &[]);
+        let without = "and it has no resources";
+        assert_eq!(
+            named(Rule::Resource, &none),
+            [
+                lacks("Resource/Font", &format!("/F1 (Tf), {without}"), "/F1"),
+                lacks("Resource/Font", &format!("/F2 (Tf), {without}"), "/F2"),
+            ]
+        );
+    }
+
+    /// Resources are read as ISO 32000-2 has them, not as PDFium reads
+    /// them: through any references, three among them, as 7.3.10 lets them
+    /// be, their names there. What should be a dictionary and isn't,
+    /// resources or a category, a stream given for one, a number, an array,
+    /// or a category that refers to nothing, has names that can't be told:
+    /// none is found lacking, and each unit that looks one up is counted as
+    /// not checked, by why.
+    #[test]
+    fn resources_are_read_through_references_and_never_lack_where_damaged() {
+        let chain = [
+            (40, "41 0 R"),
+            (41, "42 0 R"),
+            (42, "<< /Font 43 0 R /ColorSpace 45 0 R >>"),
+            (43, "44 0 R"),
+            (44, "<< /F1 50 0 R >>"),
+            (45, "46 0 R"),
+            (46, "47 0 R"),
+            (47, "<< /CS1 [/CalGray << /WhitePoint [1 1 1] >>] >>"),
+            (50, FONT),
+        ];
+        let used = stream("", "/F1 9 Tf /F2 9 Tf /CS1 cs /CS2 cs");
+        let file = resourced("/Resources 40 0 R", used, &chain);
+        assert_eq!(
+            named(Rule::Resource, &file),
+            [
+                lacks("Resource/Font", "/F2 (Tf)", "/F2"),
+                lacks("Resource/ColorSpace", "/CS2 (cs)", "/CS2"),
+            ]
+        );
+        let tf = stream("", "/F1 9 Tf /F2 9 Tf");
+        let as_stream = stream("/Font << /F1 50 0 R >>", "");
+        let fonts_as_stream = stream("/F1 50 0 R", "");
+        let cases = [
+            ("/Resources 40 0 R", tf.clone(), as_stream.as_str(), DAMAGED),
+            ("/Resources 5", tf.clone(), "null", DAMAGED),
+            (
+                "/Resources << /Font 40 0 R >>",
+                tf.clone(),
+                &fonts_as_stream,
+                CATEGORY,
+            ),
+            ("/Resources << /Font [/F1] >>", tf.clone(), "null", CATEGORY),
+            (
+                "/Resources << /Font 99 0 R >>",
+                tf.clone(),
+                "null",
+                CATEGORY,
+            ),
+            (
+                "/Resources << /ColorSpace 5 >>",
+                stream("", "/C1 cs"),
+                "null",
+                CATEGORY,
+            ),
+        ];
+        for (resources, content, forty, why) in cases {
+            let file = resourced(resources, content, &[(40, forty), (50, FONT)]);
+            let (found, report) = found_by(Rule::Resource, &file);
+            assert_eq!(found, [], "{resources}");
+            let counted = [("PageObject".to_string(), "Resources".to_string(), 1)];
+            assert_eq!(not_made(&report, why), counted, "{resources}");
+        }
+    }
+
+    /// A category the resources don't have, or that's null, lacks every
+    /// name, and so does a name whose value is null (ISO 32000-2, 7.3.7);
+    /// but a name that refers to nothing is there, the walk finding its
+    /// reference unresolved, and no `resource` finding is made of it.
+    #[test]
+    fn a_category_absent_or_null_lacks_and_a_reference_to_nothing_is_there() {
+        let tf = || stream("", "/F1 9 Tf");
+        let lacking = [lacks("Resource/Font", "/F1 (Tf)", "/F1")];
+        for resources in [
+            "/Resources << >>",
+            "/Resources << /Font null >>",
+            "/Resources << /Font 40 0 R >>",
+            "/Resources << /Font << /F1 null >> >>",
+            "/Resources << /Font << /F1 40 0 R >> >>",
+        ] {
+            let file = resourced(resources, tf(), &[(40, "null")]);
+            assert_eq!(named(Rule::Resource, &file), lacking, "{resources}");
+        }
+        let nothing = resourced("/Resources << /Font << /F1 99 0 R >> >>", tf(), &[]);
+        assert_eq!(named(Rule::Resource, &nothing), []);
+        let unresolved: Vec<_> = (named(Rule::Unresolved, &nothing).into_iter())
+            .map(|(at, value, _)| (at, value))
+            .collect();
+        assert_eq!(unresolved.len(), 1, "{unresolved:?}");
+        assert!(unresolved[0].1.contains("99 0 R"), "{unresolved:?}");
+    }
+
+    /// Names are read as ISO 32000-2 reads them, content's and the
+    /// resources' keys alike, where PDFium reads a `#` before what aren't
+    /// two hex digits otherwise: `/F#3G` is `F#3G`, not PDFium's `F0`, so
+    /// in content it lacks from resources that have `/F0`, a `content`
+    /// finding saying where the readings part, and as a key it doesn't
+    /// hold the `/F0` content uses, a `reader` finding saying so; `/F#30` is
+    /// `F0` to both, either way.
+    #[test]
+    fn names_are_read_as_iso_reads_them_on_both_sides() {
+        let checked = |key: &str, used: &str| {
+            let resources = format!("/Resources << /Font << {key} 50 0 R >> >>");
+            let content = stream("", &format!("BT {used} 9 Tf (a) Tj ET"));
+            let file = resourced(&resources, content, &[(50, FONT)]);
+            let values = |rule| -> Vec<String> {
+                (named(rule, &file).into_iter())
+                    .map(|(_, value, _)| value)
+                    .collect()
+            };
+            (
+                named(Rule::Resource, &file),
+                values(Rule::Content),
+                values(Rule::Reader),
+            )
+        };
+        let (lacking, content, reader) = checked("/F0", "/F#3G");
+        assert_eq!(lacking, [lacks("Resource/Font", "/F#3G (Tf)", "/F#3G")]);
+        assert_eq!(content.len(), 1, "{content:?}");
+        assert!(content[0].starts_with("the name /F#3G has"), "{content:?}");
+        assert_eq!(reader, Vec::<String>::new());
+        let (lacking, content, reader) = checked("/F#3G", "/F0");
+        assert_eq!(lacking, [lacks("Resource/Font", "/F0 (Tf)", "/F0")]);
+        assert_eq!(content, Vec::<String>::new());
+        assert_eq!(reader.len(), 1, "{reader:?}");
+        for (key, used) in [("/F0", "/F#30"), ("/F#30", "/F0")] {
+            let (lacking, content, reader) = checked(key, used);
+            assert_eq!(lacking, [], "{key} {used}");
+            assert_eq!((content, reader), (vec![], vec![]), "{key} {used}");
+        }
+    }
+
+    /// An inline image's `/I`, which PDFium looks up as `Indexed`, the
+    /// space it abbreviates, is looked up as written, `I`: 8.9.7's
+    /// abbreviations are of a space's family, not of a name the resources
+    /// map.
+    #[test]
+    fn an_inline_images_i_is_looked_up_as_written() {
+        let image = || stream("", "BI /CS /I /W 1 /H 1 /BPC 8 /F /AHx ID 00> EI");
+        let space = "[/Indexed /DeviceRGB 0 <000000>]";
+        let with = |key: &str| {
+            let resources = format!("/Resources << /ColorSpace << /{key} {space} >> >>");
+            named(Rule::Resource, &resourced(&resources, image(), &[]))
+        };
+        assert_eq!(
+            with("Indexed"),
+            [lacks("Resource/ColorSpace", "/I (BI)", "/I")]
+        );
+        assert_eq!(with("I"), []);
+    }
+
+    /// A name in resources two pages inherit, one of them using it, is
+    /// used; one neither uses is found unused, in the page tree's node that
+    /// holds the resources, at its path and its key, and counted, in the
+    /// report's display too; and without [`Options::unused`], counted only.
+    #[test]
+    fn a_shared_resources_name_one_page_uses_is_used() {
+        let image = stream(
+            "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray \
+             /BitsPerComponent 8",
+            "x",
+        );
+        let resources = "/Resources << /XObject << /Im 20 0 R /Spare 21 0 R >> >>";
+        let mut objects = tree("3 0 R 4 0 R", resources);
+        objects.extend([
+            (3, page("/Contents 10 0 R")),
+            (4, page("/Contents 11 0 R")),
+            (10, stream("", "q 9 0 0 9 0 0 cm /Im Do Q")),
+            (11, stream("", "0 0 m 9 9 l S")),
+            (20, image.clone()),
+            (21, image),
+        ]);
+        let file = file(&objects);
+        let (found, report) = found_by(Rule::Unused, &file);
+        let spare = (
+            2,
+            "Root/Pages/Resources/XObject/Spare".to_string(),
+            "Resource/XObject".to_string(),
+            "/Spare".to_string(),
+            "/Spare".to_string(),
+        );
+        assert_eq!(found, [spare]);
+        let counted: BTreeMap<_, _> = [(("Resource".to_string(), "XObject".to_string()), 1)].into();
+        assert_eq!(report.unused, counted);
+        assert!(
+            (report.to_string()).contains("\n  unused: Resource/XObject: 1\n"),
+            "{report}"
+        );
+        let opened = Opened::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let report = check(&opened, &Hold::All(Made::Merged), &Options::default());
+        assert!(!report.findings.iter().any(|f| f.rule == Rule::Unused));
+        assert_eq!(report.unused, counted);
+    }
+
+    /// A category that's an object of its own is one category, whatever
+    /// resources hold it: a page's and a form's that share their fonts use
+    /// what either uses, and the one neither uses is found once, in that
+    /// object, at the path the walk first reached it by.
+    #[test]
+    fn an_indirect_category_two_resources_share_is_one() {
+        let form = stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 9 9] /Resources << /Font 30 0 R >>",
+            "BT /F2 9 Tf (a) Tj ET",
+        );
+        let resources = "/Resources << /Font 30 0 R /XObject << /Fm 20 0 R >> >>";
+        let content = stream("", "BT /F1 9 Tf (a) Tj ET /Fm Do");
+        let fonts = "<< /F1 50 0 R /F2 50 0 R /F3 50 0 R >>";
+        let file = resourced(resources, content, &[(20, &form), (30, fonts), (50, FONT)]);
+        let (found, _) = found_by(Rule::Unused, &file);
+        let f3 = (
+            30,
+            "Root/Pages/Kids[0]/Resources/Font/F3".to_string(),
+            "Resource/Font".to_string(),
+            "/F3".to_string(),
+            "/F3".to_string(),
+        );
+        assert_eq!(found, [f3]);
+    }
+
+    /// A form with no resources of its own would use its page's, which
+    /// isn't told here: its names aren't found lacking, it's counted as not
+    /// checked, and what it uses is used in every category of its kind.
+    #[test]
+    fn a_form_with_no_resources_spares_what_it_uses() {
+        let form = stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 9 9]",
+            "BT /F1 9 Tf (a) Tj ET",
+        );
+        let resources =
+            "/Resources << /Font << /F1 50 0 R /F2 50 0 R >> /XObject << /Fm 20 0 R >> >>";
+        let file = resourced(resources, stream("", "/Fm Do"), &[(20, &form), (50, FONT)]);
+        let (found, report) = found_by(Rule::Unused, &file);
+        let unused: Vec<_> = found.iter().map(|f| f.3.as_str()).collect();
+        assert_eq!(unused, ["/F2"]);
+        assert_eq!(named(Rule::Resource, &file), []);
+        let counted = [("XObjectFormType1".to_string(), "Resources".to_string(), 1)];
+        assert_eq!(not_made(&report, UNOWNED), counted);
+    }
+
+    /// `DefaultGray`, `DefaultRGB` and `DefaultCMYK` are used by content
+    /// that sets a device space, without being named (ISO 32000-2,
+    /// 8.6.5.6): never unused.
+    #[test]
+    fn the_default_spaces_are_never_unused() {
+        let cal = "<< /WhitePoint [1 1 1] >>";
+        let resources = format!(
+            "/Resources << /ColorSpace << /DefaultRGB [/CalRGB {cal}] /DefaultGray [/CalGray {cal}] \
+             /DefaultCMYK [/ICCBased 60 0 R] /Spare [/CalGray {cal}] >> >>"
+        );
+        let file = resourced(&resources, stream("", "1 0 0 rg 0 0 9 9 re f"), &[]);
+        let unused: Vec<_> = (found_by(Rule::Unused, &file).0.into_iter())
+            .map(|f| f.3)
+            .collect();
+        assert_eq!(unused, ["/Spare"]);
+    }
+
+    /// An unused resource is found and counted where the object it's in is
+    /// held, made as it's held: the category's own object, else its
+    /// resources', else the one that holds them; and neither where it
+    /// isn't. A name the resources lack is found as content's findings are,
+    /// where its page or its stream is held.
+    #[test]
+    fn resource_and_unused_findings_are_held_as_their_objects_are() {
+        let content = || stream("", "/X1 Do");
+        let fonts = "<< /F1 50 0 R >>";
+        let direct = resourced(
+            "/Resources << /Font << /F1 50 0 R >> >>",
+            content(),
+            &[(50, FONT)],
+        );
+        let category = resourced(
+            "/Resources << /Font 30 0 R >>",
+            content(),
+            &[(30, fonts), (50, FONT)],
+        );
+        let resources = "<< /Font << /F1 50 0 R >> >>";
+        let own = resourced(
+            "/Resources 40 0 R",
+            content(),
+            &[(40, resources), (50, FONT)],
+        );
+        let found = |file: &[u8], held: &[(u32, Made)]| {
+            let opened = Opened::new(file, &[], &bytes::Options::DEFAULT).unwrap();
+            let options = Options {
+                unused: true,
+                ..Options::default()
+            };
+            let hold = Hold::Only(held.iter().map(|&(n, made)| ((n, 0), made)).collect());
+            let report = check(&opened, &hold, &options);
+            let of = |rule| -> Vec<(u32, Made)> {
+                (report.findings.iter())
+                    .filter(|f| f.rule == rule)
+                    .map(|f| (f.object.unwrap().0, f.made))
+                    .collect()
+            };
+            let counted: usize = report.unused.values().sum();
+            (of(Rule::Unused), counted, of(Rule::Resource))
+        };
+        let built = Made::Built;
+        let merged = Made::Merged;
+        assert_eq!(
+            found(&direct, &[(3, built)]),
+            (vec![(3, built)], 1, vec![(10, built)])
+        );
+        assert_eq!(
+            found(&direct, &[(10, merged)]),
+            (vec![], 0, vec![(10, merged)])
+        );
+        assert_eq!(found(&direct, &[(50, built)]), (vec![], 0, vec![]));
+        assert_eq!(
+            found(&category, &[(30, merged)]),
+            (vec![(30, merged)], 1, vec![])
+        );
+        assert_eq!(
+            found(&category, &[(3, built)]),
+            (vec![], 0, vec![(10, built)])
+        );
+        assert_eq!(found(&own, &[(40, built)]), (vec![(40, built)], 1, vec![]));
+        assert_eq!(found(&own, &[(3, built)]), (vec![], 0, vec![(10, built)]));
+    }
+
+    /// A category one of whose units of content isn't read, its data not
+    /// decoding cleanly, or isn't read to its end, can't be told: what it
+    /// holds that nothing read uses is counted as not checked, a name each,
+    /// and not found; another page's use of it is a use all the same.
+    #[test]
+    fn a_category_of_content_not_read_whole_is_untold() {
+        let resources = "/Resources << /Font << /F1 50 0 R /F2 50 0 R /F3 50 0 R >> >>";
+        for (second, untold) in [
+            (stream("/Filter /FlateDecode", "not zlib"), 2),
+            (stream("", "BT /F2 9 Tf (a) Tj ET (abc"), 1),
+        ] {
+            let mut objects = tree("3 0 R 4 0 R", resources);
+            objects.extend([
+                (3, page("/Contents 10 0 R")),
+                (4, page("/Contents 11 0 R")),
+                (10, stream("", "BT /F1 9 Tf (a) Tj ET")),
+                (11, second),
+                (50, FONT.to_string()),
+            ]);
+            let (found, report) = found_by(Rule::Unused, &file(&objects));
+            assert_eq!(found, []);
+            assert_eq!(report.unused, BTreeMap::new());
+            let counted = [("Resource".to_string(), "Font".to_string(), untold)];
+            assert_eq!(not_made(&report, UNTOLD), counted);
+        }
+    }
+
+    /// `resource` and `unused` findings are alike by their names: a report
+    /// with the same name lacking, and the same unused, carries them, by
+    /// number, by path and from a source, wherever and however often the
+    /// name is used; another name is the file's own.
+    #[test]
+    fn resource_and_unused_findings_are_carried_by_their_names() {
+        let report = |content: &str, spare: &str| {
+            let resources = format!("/Resources << /Font << /F1 50 0 R /{spare} 50 0 R >> >>");
+            let file = resourced(&resources, stream("", content), &[(50, FONT)]);
+            let opened = Opened::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let options = Options {
+                unused: true,
+                paths: true,
+                ..Options::default()
+            };
+            check(&opened, &Hold::All(Made::Merged), &options)
+        };
+        let values = |found: Vec<&Finding>| -> Vec<String> {
+            (found.into_iter())
+                .filter(|f| matches!(f.rule, Rule::Resource | Rule::Unused))
+                .map(|f| f.value.clone())
+                .collect()
+        };
+        let before = report("BT /F1 9 Tf (a) Tj /F9 9 Tf (b) Tj ET", "F2");
+        let all: Vec<&Finding> = before.findings.iter().collect();
+        assert_eq!(values(all), ["/F9 (Tf)", "/F2"]);
+        let after = report(
+            "0 0 m 9 9 l S BT /F1 9 Tf /F9 12 Tf (b) Tj /F9 9 Tf (c) Tj ET",
+            "F2",
+        );
+        assert_eq!(values(after.since(&before)), Vec::<String>::new());
+        assert_eq!(values(after.by_path(&before)), Vec::<String>::new());
+        assert_eq!(values(after.beyond(&[&before])), Vec::<String>::new());
+        let other = report("BT /F1 9 Tf (a) Tj /F8 9 Tf (b) Tj ET", "F3");
+        let new = ["/F8 (Tf)", "/F3"];
+        assert_eq!(values(other.since(&before)), new);
+        assert_eq!(values(other.by_path(&before)), new);
+        assert_eq!(values(other.beyond(&[&before])), new);
     }
 }

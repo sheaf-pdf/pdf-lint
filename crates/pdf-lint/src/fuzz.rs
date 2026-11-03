@@ -80,8 +80,9 @@ pub fn check_file(data: &[u8]) {
 /// or only every other one; as one table an object; deprecations found;
 /// unlisted keys found in built objects, all or none; at the file's
 /// version, 1.0's or 2.0's; with paths recorded; under some extensions;
-/// with keys exempt. Its content within 4 MiB decoded, so that a check
-/// keeps within the fuzz target's time for an input.
+/// with keys exempt; unused resources found. Its content within 4 MiB
+/// decoded, so that a check keeps within the fuzz target's time for an
+/// input.
 pub fn setting(choice: u16, doc: &Document) -> (Hold, Options) {
     let bit = |n: u16| choice & (1 << n) != 0;
     let made = if bit(0) { Made::Built } else { Made::Merged };
@@ -117,6 +118,7 @@ pub fn setting(choice: u16, doc: &Document) -> (Hold, Options) {
             _ => UnlistedIn::Built,
         },
         deprecations: bit(3),
+        unused: bit(11),
         extensions: match bit(10) {
             false => BTreeSet::new(),
             true => names.iter().map(|name| name.to_string()).collect(),
