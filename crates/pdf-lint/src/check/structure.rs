@@ -9,8 +9,8 @@
 //! the content. The trees are read after it: each root the walk reached as
 //! a name or number tree in the newest revision, once, in the order it
 //! reached them, a root with a number given by it, so that what's told of
-//! the root is in its object.
-//! Each reads the file's objects as the predicates resolve them
+//! the root is in its object. Each reads the file's objects as the
+//! predicates resolve them
 //! ([`Objects`]), which says why one doesn't read as a document's own
 //! resolver does, so that an object that takes a password or is past a cap
 //! ends a walk, where one that doesn't parse is the file's fault. What each
@@ -34,24 +34,27 @@
 //! being read whole that isn't the file's fault (an object that takes a
 //! password or is past a cap, a tree deeper or with more pages than is
 //! read) is counted as not checked, once, where the catalog is held, and the
-//! predicates are given no pages.
+//! predicates are given no pages; so is a node's `/Count` or `/Parent` that
+//! doesn't read so, which isn't checked.
 //!
-//! The pages the walk by PDFium's rules reads, as of chromium/8125, are set
-//! beside ISO's, where both read a table of them, or PDFium's finds none,
-//! a count of 0, and neither met an object that doesn't read: where they
-//! part is a [`Rule::Viewer`] finding, a viewer's reading, not ISO
-//! 32000-2's. Each kind once in a file: the count, at the root's `/Count`;
-//! the first page, of those both count, a viewer has another object at or
-//! no page, with how many, at the tree's page there; and the first page
-//! that's the same object to both, a viewer loading it, whose media box,
-//! crop box or rotation a viewer reads otherwise, with how many, at that
-//! page; held where it is, its path and table as a page tree finding's. A
-//! walk by PDFium's rules that stops, at a node listed inside itself, a
-//! `/Parent` chain that loops, a cap or a password, is pdf-semantics'
-//! choice, not PDFium's reading, and compares nothing; where an object of
-//! the tree doesn't read, what either makes of it is the reader's, and
-//! they aren't set side by side, which is counted as not checked, once,
-//! where the catalog is held.
+//! The pages the walk by PDFium's rules reads, at the build pdf-semantics'
+//! tests hold it to, are set beside ISO's, where both read a table of them,
+//! or PDFium's finds no page under the root, which PDFium counts all the
+//! same ([`pages::counted`]), and neither met an object that doesn't read:
+//! where they part is a [`Rule::Viewer`] finding, a viewer's reading, not
+//! ISO 32000-2's. Each kind once in a file: the count, at the root's
+//! `/Count`; the first page, of those both count, a viewer has another
+//! object at or no page, with how many, at the tree's page there; and the
+//! first page that's the same object to both, a viewer loading it, whose
+//! media box, crop box or rotation a viewer reads otherwise, as PDFium
+//! takes a box of no area, with how many, at that page; held where it is,
+//! its path and table as a page tree finding's. A walk by PDFium's rules
+//! that stops at a node listed inside itself or a `/Parent` chain that
+//! loops is pdf-semantics' choice, not PDFium's reading, and compares
+//! nothing; where an object of the tree doesn't read, what either makes of
+//! it is the reader's, and they aren't set side by side, nor where a cap or
+//! a password stops PDFium's walk alone, which is counted as not checked,
+//! once, where the catalog is held.
 //!
 //! Of what a tree's walk tells, what [`Walk::tree`] doesn't say is a
 //! [`Rule::Tree`] finding: a node reached again, a kid written in place,
@@ -66,9 +69,10 @@
 //! alone, as the walk checks the node as the first's. What stops a tree
 //! being read whole that isn't the file's fault (an object that takes a
 //! password or is past a cap, a key whose bytes the reader didn't give, a
-//! tree deeper or with more nodes than is read) is counted as not checked,
-//! once a tree for each, where its root is held; what was read before it is
-//! found all the same.
+//! tree deeper or with more nodes than is read, and `/Limits` that don't
+//! read for a password or a cap, which aren't checked) is counted as not
+//! checked, once a tree for each, where its root is held; what was read
+//! before it is found all the same.
 //!
 //! What the packet's read told is a [`Rule::Xmp`] finding, last: a mark of
 //! UTF-16 it begins with, an attribute and a claim's value that don't read
@@ -241,32 +245,93 @@ pub(super) fn uncounted(value: &str) -> &str {
 /// [`Walk::structures`] finds in, and why it didn't read the tree whole,
 /// where that isn't the file's fault.
 #[derive(Default)]
-pub(super) struct PageTree {
-    /// What it told.
+pub(super) struct PageTree<'a> {
+    /// What it told of what's found, or stops a check.
     kept: Kept,
     /// Why it stopped: an object on the way that takes a password or is
     /// past a cap, or a tree deeper or with more pages than is read.
     unread: Option<&'static str>,
     /// Where the walk by PDFium's rules parts from it.
     viewer: Viewer,
+    /// The root, where it's written in the catalog, as the catalog holds
+    /// it: what the walk tells in no object is in it, but at the catalog's
+    /// `/Pages` itself.
+    root: Option<&'a Object>,
+}
+
+/// The faults of the page tree's walk by ISO's rules that
+/// [`Walk::structures`] reads, kept: those it can find ([`page_tree_key`]),
+/// a reference that names another, an object that doesn't read and what
+/// isn't checked; so that a kind's first and its count are of those, and
+/// never of one it doesn't find by what the fault holds.
+struct PageFaults<'k>(&'k mut Kept);
+
+impl Sink for PageFaults<'_> {
+    fn fault(&mut self, at: Place, fault: Fault) {
+        let read = matches!(
+            fault,
+            Fault::PageTreeChain | Fault::Damaged { .. } | Fault::Unchecked { .. }
+        );
+        if read || page_tree_key(&fault).is_some() {
+            self.0.fault(at, fault);
+        }
+    }
 }
 
 /// Where a viewer's pages, as the page tree's walk by PDFium's rules reads
 /// them, part from the walk's by ISO's ([`page_trees`]), which
-/// [`Walk::structures`] finds as [`Rule::Viewer`]; and whether they weren't
-/// set side by side, an object of the tree not reading.
+/// [`Walk::structures`] finds as [`Rule::Viewer`]; and why they weren't set
+/// side by side, where they weren't.
 #[derive(Default)]
 pub(super) struct Viewer {
     /// Each kind they part by, in turn: where, its key, and what it says.
     parted: Vec<(Place, &'static str, String)>,
-    /// Whether an object of the tree doesn't read, so that what either
-    /// walk makes of it is the reader's, and they weren't set side by side.
-    unread: bool,
+    /// Why they weren't set side by side, where that's counted: an object
+    /// of the tree that doesn't read, so that what either walk makes of it
+    /// is the reader's; or a cap or a password that stopped the walk by
+    /// PDFium's rules.
+    unread: Option<&'static str>,
+}
+
+impl Viewer {
+    /// Not set side by side, for `why`.
+    fn unread(why: &'static str) -> Viewer {
+        Viewer {
+            parted: Vec::new(),
+            unread: Some(why),
+        }
+    }
+
+    /// What `stopped` the walk by PDFium's rules makes of the two: a cap,
+    /// a password or the source counted; a node listed inside itself or a
+    /// `/Parent` chain that loops, where pdf-semantics stops and PDFium goes
+    /// on, nothing, as the page tree's findings say each.
+    fn stopped(stopped: &pages::Error) -> Viewer {
+        match stopped {
+            pages::Error::Unreadable(unreadable) => Viewer::unread(match unreadable.why {
+                Why::Locked => VIEWER_LOCKED,
+                Why::Limit => VIEWER_CAPPED,
+                _ => VIEWER_UNREAD,
+            }),
+            pages::Error::TooDeep | pages::Error::TooManyPages => Viewer::unread(VIEWER_CAPPED),
+            _ => Viewer::default(),
+        }
+    }
 }
 
 /// Why a viewer's pages aren't set beside the tree's: an object of the
 /// tree doesn't read, so that what either walk makes of it is the reader's.
 const VIEWER_UNREAD: &str = "a viewer's pages beside a page tree with an object that doesn't read";
+
+/// Why a viewer's pages aren't set beside the tree's: an object on the way
+/// takes a password the reader wasn't given.
+const VIEWER_LOCKED: &str =
+    "a viewer's pages beside a page tree with an object that takes a password";
+
+/// Why a viewer's pages aren't set beside the tree's: the walk by PDFium's
+/// rules is past a cap it's read under, an object's, the tree's depth or
+/// its pages.
+const VIEWER_CAPPED: &str = "a viewer's pages beside a page tree past a cap it's read under";
 
 /// Where the walk first visited an object of the page tree as one of its
 /// tables ([`Walk::note_structure`]).
@@ -328,7 +393,7 @@ fn pages_unread(why: Why) -> Option<&'static str> {
 pub(super) fn page_trees<'a>(
     source: &'a dyn Source,
     trailer: &'a Dict,
-) -> (PageTree, Option<Vec<&'a Dict>>) {
+) -> (PageTree<'a>, Option<Vec<&'a Dict>>) {
     let mut tree = PageTree::default();
     let catalog = match pdf_semantics::catalog(Objects(source), trailer) {
         Ok(Some(catalog)) => catalog,
@@ -338,12 +403,13 @@ pub(super) fn page_trees<'a>(
             return (tree, None);
         }
     };
+    tree.root = root(source, catalog).and_then(|(id, root)| id.is_none().then_some(root));
     let iso = pages(
         Objects(source),
         catalog,
         Rules::Iso,
         &LIMITS,
-        &mut tree.kept,
+        &mut PageFaults(&mut tree.kept),
     );
     let mut damage = Damage::default();
     let pdfium = pages(
@@ -366,45 +432,49 @@ pub(super) fn page_trees<'a>(
         }
     };
     // PDFium's pages are set beside ISO's where its walk reads a table, or
-    // finds none; where it stops otherwise, at a node listed inside itself,
-    // a loop, a cap or a password, pdf-semantics chose it should, which is
-    // none of PDFium's reading. Not where an object doesn't read, which is
-    // the reader's.
+    // finds no page under the root, which PDFium counts all the same; where
+    // it stops otherwise, at a node listed inside itself, a loop, a cap or a
+    // password, pdf-semantics chose it should, which is none of PDFium's
+    // reading. Not where an object doesn't read, which is the reader's.
     let damaged =
         (tree.kept.told().iter()).any(|(_, fault, _)| matches!(fault, Fault::Damaged { .. }));
     tree.viewer = match pdfium {
-        Ok(_) | Err(pages::Error::NoPages) if damaged || damage.told => Viewer {
-            parted: Vec::new(),
-            unread: true,
-        },
+        Ok(_) | Err(pages::Error::NoPages) if damaged || damage.told => {
+            Viewer::unread(VIEWER_UNREAD)
+        }
         Ok(viewer) => Viewer {
-            parted: parted(source, catalog, &read, Some(&viewer)),
-            unread: false,
+            parted: parted(source, catalog, &read, Some(&viewer), viewer.counted()),
+            unread: None,
         },
-        Err(pages::Error::NoPages) => Viewer {
-            parted: parted(source, catalog, &read, None),
-            unread: false,
+        Err(pages::Error::NoPages) => match pages::counted(Objects(source), catalog, &LIMITS) {
+            Ok(counted) => Viewer {
+                parted: parted(source, catalog, &read, None, counted),
+                unread: None,
+            },
+            Err(stopped) => Viewer::stopped(&stopped),
         },
-        Err(_) => Viewer::default(),
+        Err(stopped) => Viewer::stopped(&stopped),
     };
     let dicts = read.iter().filter_map(|page| page.dict).collect();
     (tree, Some(dicts))
 }
 
-/// Where `viewer`'s pages, read by PDFium's rules (none for none, a count
-/// of 0), part from `tree`'s, read by ISO's from `catalog`: each kind once,
-/// where it is, its key and what it says. The count, at the root's
-/// `/Count`, else the root; the first page, of those both count, that a
-/// viewer has another object at or no page, with how many, at the tree's
-/// page there, else, one written in place, the root; and the first page
-/// that's the same object to both, a viewer loading it, whose media box,
-/// crop box or rotation a viewer reads otherwise, the first of those that
-/// is, with how many, at that page's key, else the page, or the root.
+/// Where `viewer`'s pages, read by PDFium's rules (none for none under the
+/// root), and the count PDFium gives, `counted`, part from `tree`'s, read
+/// by ISO's from `catalog`: each kind once, where it is, its key and what it
+/// says. The count, at the root's `/Count`, else the root; the first page,
+/// of those both count, that a viewer has another object at or no page,
+/// with how many, at the tree's page there, else, one written in place, the
+/// root; and the first page that's the same object to both, a viewer
+/// loading it, whose media box, crop box or rotation a viewer reads
+/// otherwise, the first of those that is, with how many, at that page's
+/// key, else the page, or the root.
 fn parted<'a>(
     source: &'a dyn Source,
     catalog: &'a Dict,
     tree: &Pages<'a>,
     viewer: Option<&Pages<'a>>,
+    counted: usize,
 ) -> Vec<(Place, &'static str, String)> {
     let (root, written) = match root(source, catalog) {
         Some((id, root)) => (id, Some(root)),
@@ -423,7 +493,6 @@ fn parted<'a>(
         None => Place::new(root, root_at),
     };
     let mut parted = Vec::new();
-    let counted = viewer.map_or(0, Pages::counted);
     if counted != tree.len() {
         let count = (written.and_then(Object::as_dict))
             .and_then(|root| root.entry(b"Count"))
@@ -501,13 +570,20 @@ fn same(page: &Page<'_>, theirs: &Page<'_>) -> bool {
 
 /// Where a viewer reads `page`'s size otherwise than the tree does, of the
 /// same page, the first that differs of its media box, crop box and
-/// rotation: its key, what it is, and each one's.
+/// rotation: its key, what it is, and each one's. A viewer's boxes are as
+/// PDFium takes them: a media box of no area US Letter, and a crop box of
+/// no area the media box.
 fn sizes(
     page: &Page<'_>,
     theirs: &Page<'_>,
 ) -> Option<(&'static str, &'static str, String, String)> {
-    let media = (page.media_box().value, theirs.media_box().value);
-    let crop = (page.crop_box().value, theirs.crop_box().value);
+    let shown = |rect: Rect, or: Rect| if no_area(rect) { or } else { rect };
+    let their_media = shown(theirs.media_box().value, Rect::LETTER);
+    let media = (page.media_box().value, their_media);
+    let crop = (
+        page.crop_box().value,
+        shown(theirs.crop_box().value, their_media),
+    );
     let rotate = (page.rotate().value, theirs.rotate().value);
     let rect = |rect: Rect| rect.0.map(|n| n.to_string()).join(" ");
     Some(if media.0 != media.1 {
@@ -520,6 +596,13 @@ fn sizes(
     } else {
         return None;
     })
+}
+
+/// Whether `rect` has no area, as PDFium holds a box, in `f32`s: its two
+/// edges across or its two up and down at one place.
+fn no_area(Rect([a, b, c, d]): Rect) -> bool {
+    let at = |x: f64, y: f64| x as f32 == y as f32;
+    at(a, c) || at(b, d)
 }
 
 /// `page`'s object, as a finding says it: its reference, or that it's
@@ -640,10 +723,12 @@ impl<'a> Walk<'a> {
     }
 
     /// Keeps where the walk first visited `v`'s object as one of the page
-    /// tree's tables, by its number, or, the root written in place, by
+    /// tree's tables, by its number, or, the root written in the catalog, by
     /// none, as pdf-semantics places what's in it; and, the packet's stream
     /// first visited as `Metadata`, where: the path and table of what
-    /// [`Walk::structures`] finds there. Not in an earlier revision's
+    /// [`Walk::structures`] finds there. The root written in place is the
+    /// catalog's, by what it is: a node written in place elsewhere, as a
+    /// page's `/Parent` may be, isn't it. Not in an earlier revision's
     /// trailer.
     pub(super) fn note_structure(&mut self, v: &Visit<'a>) {
         let table = v.table.name.as_str();
@@ -660,7 +745,8 @@ impl<'a> Walk<'a> {
         if !PAGE_TREE.contains(&table) {
             return;
         }
-        if id.is_none() && table != "PageTreeNodeRoot" {
+        let root = self.page_tree.root;
+        if id.is_none() && !root.is_some_and(|root| std::ptr::eq(root, v.object)) {
             return;
         }
         (self.page_tree_at.entry(id)).or_insert_with(|| Visited {
@@ -680,9 +766,11 @@ impl<'a> Walk<'a> {
             kept,
             unread,
             viewer,
+            root,
         } = mem::take(&mut self.page_tree);
         let catalog = self.catalog();
-        self.page_tree_told(&kept, unread, catalog);
+        let root = root.and_then(Object::as_dict);
+        self.page_tree_told(&kept, unread, catalog, root);
         self.viewer_told(viewer, catalog);
         let roots = mem::take(&mut self.roots);
         // Each numbered object's kinds told, so that a node two trees
@@ -719,14 +807,16 @@ impl<'a> Walk<'a> {
 
     /// Finds what the page tree's walk by ISO's rules told, `kept`, that
     /// the walk doesn't say, each kind once in each object, a
-    /// [`Rule::PageTree`] finding, what's in no object in `catalog`; and
-    /// counts what stopped it reading the tree whole, `unread`, but the
-    /// file's faults, as not checked, where the catalog is held.
+    /// [`Rule::PageTree`] finding, what's in no object in `catalog`, or in
+    /// `root`, the root written in it; and counts what stopped it reading
+    /// the tree whole, `unread`, and what it couldn't check, but the file's
+    /// faults, as not checked, each once, where the catalog is held.
     fn page_tree_told(
         &mut self,
         kept: &Kept,
         unread: Option<&'static str>,
         catalog: Option<ObjectId>,
+        root: Option<&Dict>,
     ) {
         // What the walk found by the model's rules, where a kind is told
         // only where it found nothing.
@@ -735,10 +825,18 @@ impl<'a> Walk<'a> {
             .filter_map(|f| Some((f.object, KEYS.into_iter().find(|&k| k == f.key)?)))
             .collect();
         let mut told = HashSet::new();
+        let mut stops: Vec<_> = unread.into_iter().collect();
         for &(place, fault, n) in kept.told() {
             let object = place.object.or(catalog);
             let key = match fault {
-                Fault::PageTreeChain => self.key_holding(object, place.at),
+                Fault::PageTreeChain => {
+                    let root = root.filter(|_| place.object.is_none());
+                    self.key_holding(object, root, place.at)
+                }
+                Fault::Unchecked { why, .. } => {
+                    stops.extend(pages_unread(why));
+                    continue;
+                }
                 _ => match page_tree_key(&fault) {
                     Some((key, true)) if found.contains(&(object, key)) => continue,
                     Some((key, _)) => key.to_string(),
@@ -764,10 +862,12 @@ impl<'a> Walk<'a> {
                 revision: None,
             });
         }
-        if let Some(why) = unread
-            && self.made(catalog).is_some()
-        {
-            self.unchecked("-", why.to_string(), "PageTreeNodeRoot", "-");
+        if self.made(catalog).is_some() {
+            stops.sort_unstable();
+            stops.dedup();
+            for why in stops {
+                self.unchecked("-", why.to_string(), "PageTreeNodeRoot", "-");
+            }
         }
     }
 
@@ -775,7 +875,8 @@ impl<'a> Walk<'a> {
     /// `viewer`, each kind once, a [`Rule::Viewer`] finding where it is,
     /// what's in no object in `catalog`, its path and table as a page tree
     /// finding's; and counts the two not set side by side, an object of the
-    /// tree not reading, as not checked, where the catalog is held.
+    /// tree not reading, or a cap or a password stopping PDFium's, as not
+    /// checked, where the catalog is held.
     fn viewer_told(&mut self, viewer: Viewer, catalog: Option<ObjectId>) {
         for (place, key, value) in viewer.parted {
             let object = place.object.or(catalog);
@@ -795,15 +896,23 @@ impl<'a> Walk<'a> {
                 revision: None,
             });
         }
-        if viewer.unread && self.made(catalog).is_some() {
-            let why = VIEWER_UNREAD.to_string();
-            self.unchecked("-", why, "PageTreeNodeRoot", "-");
+        if let Some(why) = viewer.unread
+            && self.made(catalog).is_some()
+        {
+            self.unchecked("-", why.to_string(), "PageTreeNodeRoot", "-");
         }
     }
 
-    /// The key of `object`'s dictionary whose value holds the bytes `at`,
-    /// as written: `-` where none does, or where they aren't known.
-    fn key_holding(&self, object: Option<ObjectId>, at: Option<Span>) -> String {
+    /// The key whose value holds the bytes `at`, as written: of `within`,
+    /// a dictionary written in `object`, where one of its keys does, else of
+    /// `object`'s own dictionary; `-` where none does, or where they aren't
+    /// known.
+    fn key_holding(
+        &self,
+        object: Option<ObjectId>,
+        within: Option<&Dict>,
+        at: Option<Span>,
+    ) -> String {
         let dict = match object {
             Some(id) => self.source.get(id).ok().and_then(Object::as_dict),
             None => Some(self.trailer),
@@ -811,15 +920,17 @@ impl<'a> Walk<'a> {
         let holds = |value: Span, at: Span| {
             value.stream == at.stream && value.start <= at.start && at.end <= value.end
         };
-        let (Some(dict), Some(at)) = (dict, at) else {
+        let Some(at) = at else {
             return "-".to_string();
         };
-        (dict.entries().iter())
-            .find(|entry| entry.value.at.is_some_and(|value| holds(value, at)))
-            .map_or_else(
-                || "-".to_string(),
-                |entry| String::from_utf8_lossy(&entry.key).into_owned(),
-            )
+        let key = |dict: &Dict| {
+            (dict.entries().iter())
+                .find(|entry| entry.value.at.is_some_and(|value| holds(value, at)))
+                .map(|entry| String::from_utf8_lossy(&entry.key).into_owned())
+        };
+        (within.and_then(key))
+            .or_else(|| dict.and_then(key))
+            .unwrap_or_else(|| "-".to_string())
     }
 
     /// Finds what pdf-semantics' walk of `root`'s tree tells that
@@ -849,7 +960,7 @@ impl<'a> Walk<'a> {
         // node with neither is the root, which the walk says.
         let has = |dict: &Dict, key: &[u8]| dict.get(key).is_some_and(|o| !o.is_null());
         let bare = (root.object.as_dict()).is_some_and(|d| !has(d, b"Kids") && !has(d, entries));
-        let mut unread: Vec<_> = ended.map(unread).into_iter().collect();
+        let mut stops: Vec<_> = ended.map(unread).into_iter().collect();
         for &(place, fault, n) in kept.told() {
             match fault {
                 Fault::TreeRepeated { .. }
@@ -859,15 +970,20 @@ impl<'a> Walk<'a> {
                 | Fault::TreeKeyOutsideLimits => {}
                 Fault::TreeNoEntries if !bare => {}
                 Fault::TreeTooDeep => {
-                    unread.push(DEEP);
+                    stops.push(DEEP);
                     continue;
                 }
                 Fault::TreeTooManyNodes => {
-                    unread.push(NODES);
+                    stops.push(NODES);
                     continue;
                 }
                 Fault::TreeKeyUnread => {
-                    unread.push(KEY);
+                    stops.push(KEY);
+                    continue;
+                }
+                // /Limits past a cap or a password, so not checked.
+                Fault::Unchecked { why, .. } => {
+                    stops.push(unread(why));
                     continue;
                 }
                 // The walk says the rest, and an object that doesn't read.
@@ -895,9 +1011,9 @@ impl<'a> Walk<'a> {
             });
         }
         if self.made(root.holder).is_some() {
-            unread.sort_unstable();
-            unread.dedup();
-            for why in unread {
+            stops.sort_unstable();
+            stops.dedup();
+            for why in stops {
                 self.unchecked("-", why.to_string(), root.table, root.key);
             }
         }
@@ -1877,6 +1993,70 @@ mod tests {
         );
     }
 
+    /// What pdf-semantics tells in no object is the catalog's, its path
+    /// and table the root's where that's written in the catalog, and none
+    /// else's: a chain at the catalog's `/Pages`, at its key there, `-` and
+    /// `-` though a page's `/Parent` is a node written in place, which the
+    /// walk visits as a root too; and a chain in the root's own `/Kids`,
+    /// written in the catalog, at the root's key, `Kids`.
+    #[test]
+    fn what_s_in_no_object_is_the_root_written_in_the_catalog_s_alone() {
+        let chained = "<< /Type /Catalog /Pages 7 0 R >>";
+        let two = node("null", "3 0 R", "1");
+        let in_place = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
+        let shapes = [
+            (
+                paged(&[(1, chained), (7, "2 0 R"), (2, &two), (3, &page("2 0 R"))]),
+                tree(1, "-", "-/Pages", CHAIN, "7 0 R"),
+            ),
+            (
+                paged(&[(1, chained), (7, "2 0 R"), (2, &two), (3, &page(in_place))]),
+                tree(1, "-", "-/Pages", CHAIN, "7 0 R"),
+            ),
+            (
+                paged(&[
+                    (
+                        1,
+                        "<< /Type /Catalog /Pages << /Type /Pages /Kids [4 0 R] /Count 1 >> >>",
+                    ),
+                    (4, "3 0 R"),
+                    (3, &page("1 0 R")),
+                ]),
+                tree(1, ROOT, "PageTreeNodeRoot/Kids", CHAIN, "4 0 R"),
+            ),
+        ];
+        for (file, expected) in shapes {
+            assert_eq!(page_tree_found(&file), [expected]);
+        }
+    }
+
+    /// A kind is found by the first of its faults that's found, whatever
+    /// came before it that isn't: a node listed in place, where no
+    /// `/Parent` can name what lists it, and then by a numbered node its
+    /// `/Parent` doesn't name, is found as the second, as it is the other
+    /// way round.
+    #[test]
+    fn a_fault_not_found_doesnt_stand_for_its_kind() {
+        let five = node("2 0 R", "3 0 R", "1");
+        let in_place = node("2 0 R", "5 0 R", "1");
+        let four = node("2 0 R", "5 0 R", "1");
+        let parent = "a /Parent isn't 4 0 R, the node that lists it";
+        for kids in [format!("{in_place} 4 0 R"), format!("4 0 R {in_place}")] {
+            let file = paged(&[
+                (2, &node("null", &kids, "2")),
+                (4, &four),
+                (5, &five),
+                (3, &page("5 0 R")),
+            ]);
+            let found: Vec<_> = (page_tree_found(&file).into_iter())
+                .filter(|f| f.2 == "PageTreeNode/Parent")
+                .collect();
+            // The first visit of 5 is under the first kid either way.
+            let path = "Root/Pages/Kids[0]/Kids[0]";
+            assert_eq!(found, [tree(5, path, "PageTreeNode/Parent", parent, &five)]);
+        }
+    }
+
     /// Only what's in an object held is found: a page's `/Parent`, in the
     /// page held, not in the node that lists it; and of a node listed
     /// twice, only what's in the node held.
@@ -2146,19 +2326,22 @@ mod tests {
 
     /// Where a viewer's pages part from the tree's, each kind is found
     /// once, in a viewer's words, where it is: the count, a `/Count` more
-    /// or less than the pages the tree lists, and a root with no `/Kids`,
-    /// which a viewer takes for its one page, at the root's `/Count`; the
+    /// or less than the pages the tree lists, a root with no `/Kids`,
+    /// which a viewer takes for its one page, and a tree with no page under
+    /// its root, which a viewer counts by the root's `/Count`, or a node's
+    /// where the root has none, at the root's `/Count`, else the root; the
     /// pages, a kid that's null, an integer or a reference to nothing,
     /// which a viewer gives a place with no page, a node with no `/Kids`,
     /// which a viewer reads as a leaf it doesn't load, a kid that's a
     /// reference to a reference, which a viewer reads as no page, a page
     /// whose `/Type` a viewer doesn't load, two pages a viewer has none at,
-    /// and
-    /// a node whose `/Type` is `/Page`, which the tree takes for its page,
-    /// at the tree's page, or the root, for one written in place; and the
-    /// sizes, a `/MediaBox` of null over an inherited one, on one page and
-    /// on two, one through a reference to a reference, which a viewer reads
-    /// as none, a `/CropBox` of null over an inherited one, and a
+    /// and a node whose `/Type` is `/Page`, which the tree takes for its
+    /// page, at the tree's page, or the root, for one written in place; and
+    /// the sizes, a `/MediaBox` of null over an inherited one, on one page
+    /// and on two, one through a reference to a reference, which a viewer
+    /// reads as none, a `/CropBox` of null over an inherited one, a
+    /// `/MediaBox` of no area, which a viewer takes for Letter, a
+    /// `/CropBox` of no area, which a viewer takes for the media box, and a
     /// `/Rotate` through three references, which a viewer reads two of, at
     /// the page's key.
     #[test]
@@ -2180,6 +2363,9 @@ mod tests {
         let crop = "<< /Type /Pages /Kids [3 0 R] /Count 1 /CropBox [0 0 300 300] >>";
         let crop_null = page_with("2 0 R", "/MediaBox [0 0 612 792] /CropBox null");
         let rotate = page_with("2 0 R", "/MediaBox [0 0 612 792] /Rotate 4 0 R");
+        let no_count = "<< /Type /Pages /Kids [4 0 R] >>";
+        let flat_media = page_with("2 0 R", "/MediaBox [0 0 0 0] /Resources << >>");
+        let flat_crop = page_with("2 0 R", &format!("{A4} /CropBox [10 10 300 10]"));
         let shapes: Vec<(Vec<u8>, Found)> = vec![
             (
                 paged(&[(2, &node("null", "3 0 R", "3")), (3, &page("2 0 R"))]),
@@ -2196,6 +2382,31 @@ mod tests {
             (
                 paged(&[(2, "<< /Type /Pages /Count 0 >>")]),
                 at_count("/Count 0", "1 page, where the tree lists 0"),
+            ),
+            (
+                paged(&[(2, &node("null", "", "5"))]),
+                at_count("/Count 5", "5 pages, where the tree lists 0"),
+            ),
+            (
+                paged(&[(2, &node("null", "", "1"))]),
+                at_count("/Count 1", "1 page, where the tree lists 0"),
+            ),
+            (
+                paged(&[
+                    (2, &node("null", "4 0 R", "2")),
+                    (4, &node("2 0 R", "", "0")),
+                ]),
+                at_count("/Count 2", "2 pages, where the tree lists 0"),
+            ),
+            (
+                paged(&[(2, no_count), (4, &node("2 0 R", "", "3"))]),
+                tree(
+                    2,
+                    ROOT,
+                    "PageTreeNodeRoot/Count",
+                    "a viewer counts 3 pages, where the tree lists 0",
+                    no_count,
+                ),
             ),
             (kids("null 3 0 R"), page_three(second, NO_PAGE)),
             (kids("5 3 0 R"), page_three(second, NO_PAGE)),
@@ -2287,6 +2498,26 @@ mod tests {
                     "PageObject/CropBox",
                     "page 1's crop box is 0 0 300 300, where a viewer's is 0 0 612 792",
                     "/CropBox null",
+                ),
+            ),
+            (
+                paged(&[(2, &two), (3, &flat_media)]),
+                tree(
+                    3,
+                    KID,
+                    "PageObject/MediaBox",
+                    "page 1's media box is 0 0 0 0, where a viewer's is 0 0 612 792",
+                    "/MediaBox [0 0 0 0]",
+                ),
+            ),
+            (
+                paged(&[(2, &two), (3, &flat_crop)]),
+                tree(
+                    3,
+                    KID,
+                    "PageObject/CropBox",
+                    "page 1's crop box is 10 10 300 10, where a viewer's is 0 0 595 842",
+                    "/CropBox [10 10 300 10]",
                 ),
             ),
             (

@@ -86,16 +86,19 @@
 //! reached in the newest revision (7.9.6, 7.9.7), from its root, what that
 //! tells of it that the walk doesn't say a [`Rule::Tree`] finding; each kind
 //! once in each object it's in, at its first place there, with how many
-//! times, and a tree not read whole for what isn't the file's fault counted
+//! times, and a tree not read whole for what isn't the file's fault, or
+//! with what a check reads that a password or a cap keeps unread, counted
 //! as not checked. Between the two, where PDFium's pages part from ISO's,
 //! a viewer's reading, not ISO 32000-2's, is a [`Rule::Viewer`] finding,
 //! each kind once in a file; where an object of the page tree doesn't
-//! read, the two aren't set side by side, which is counted as not checked.
+//! read, or a password or a cap stops PDFium's walk alone, the two aren't
+//! set side by side, which is counted as not checked.
 //! Last, the catalog's XMP packet, as it's read for the extensions the
 //! file declares (14.3.2): what that read tells of it, and XML that stops
 //! it, a [`Rule::Xmp`] finding in its metadata stream, at the bytes in its
-//! data, each kind once; a packet longer or deeper than is read counted as
-//! not checked, as is one whose stream isn't known.
+//! data, each kind once; a packet longer, deeper or binding more
+//! namespaces at once than is read counted as not checked, as is one whose
+//! stream isn't known.
 //!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
@@ -574,9 +577,10 @@ pub enum Rule {
     /// the root is, its path the root's. A tree pdf-semantics doesn't read
     /// whole for what isn't the file's fault, an object that takes a
     /// password or is past a cap, a key whose bytes the reader didn't give,
-    /// a tree deeper or with more nodes than it reads, is counted as not
-    /// checked, once for each, where its root is held; what was read of it
-    /// is found all the same.
+    /// a tree deeper or with more nodes than it reads, and one whose
+    /// `/Limits` don't read for a password or a cap, so aren't checked, is
+    /// counted as not checked, once for each, where its root is held; what
+    /// was read of it is found all the same.
     Tree,
     /// A key or element of a [`Made::Built`] object that the model
     /// doesn't list ([`Unlisted`]), and isn't a second- or third-class
@@ -730,14 +734,19 @@ pub enum Rule {
     /// `PageTreeNode` or `PageObject`, `-` and `-` where it didn't. A tree
     /// pdf-semantics doesn't read whole for what isn't the file's fault, an
     /// object of it that takes a password or is past a cap, a tree deeper
-    /// or with more pages than it reads, is counted as not checked, its
-    /// column `-`, its table `PageTreeNodeRoot` and its key `-`, where the
-    /// catalog is held; what was read of it is found all the same.
+    /// or with more pages than it reads, and a node's `/Count` or `/Parent`
+    /// that doesn't read for a password or a cap, so isn't checked, is
+    /// counted as not checked, once for each, its column `-`, its table
+    /// `PageTreeNodeRoot` and its key `-`, where the catalog is held; what
+    /// was read of it is found all the same.
     PageTree,
-    /// Where a viewer's pages part from the page tree's: PDFium's, as of
-    /// chromium/8125, as pdf-semantics' walk by its rules reads them, set
-    /// beside its walk by ISO's ([`Rule::PageTree`]'s), a viewer's reading,
-    /// not ISO 32000-2's. Each kind once in a file: the count, how many
+    /// Where a viewer's pages part from the page tree's: PDFium's, at the
+    /// build pdf-semantics' tests hold its walk by PDFium's rules to, as
+    /// that walk reads them, set beside its walk by ISO's
+    /// ([`Rule::PageTree`]'s), a viewer's reading, not ISO 32000-2's. A
+    /// viewer's boxes are as PDFium takes them: a media box of no area US
+    /// Letter, a crop box of no area the media box. Each kind once in a
+    /// file: the count, how many
     /// pages a viewer counts where the tree lists another number, at the
     /// root's `/Count`, else the root, its key `Count`; the pages, the
     /// first page, of those both count, that a viewer has another object at
@@ -748,22 +757,25 @@ pub enum Rule {
     /// first of `MediaBox`, `CropBox` and `Rotate` that's read otherwise.
     /// Held where it is, its path and table as a [`Rule::PageTree`]
     /// finding's. Compared only where both walks read a table of pages, or
-    /// a viewer's finds none, a count of 0: a viewer's walk that stops at a
-    /// node listed inside itself, a `/Parent` chain that loops, a cap or a
-    /// password is pdf-semantics' choice, not PDFium's reading, and
-    /// compares nothing; `/UserUnit`, which both read alike, isn't
-    /// compared. Where an object of the tree doesn't read, what either
-    /// makes of it is the reader's, and they aren't set side by side, which
-    /// is counted as not checked, its column `-`, its table
-    /// `PageTreeNodeRoot` and its key `-`, where the catalog is held.
+    /// a viewer's finds no page under the root, which it counts all the
+    /// same, by the root's `/Count` or a node's under it: a viewer's walk
+    /// that stops at a node listed inside itself or a `/Parent` chain that
+    /// loops is pdf-semantics' choice, not PDFium's reading, and compares
+    /// nothing; `/UserUnit`, which both read alike, isn't compared. Where an
+    /// object of the tree doesn't read, what either makes of it is the
+    /// reader's, and they aren't set side by side; nor where a cap or a
+    /// password stops a viewer's walk alone. Each is counted as not
+    /// checked, its column `-`, its table `PageTreeNodeRoot` and its key
+    /// `-`, where the catalog is held.
     Viewer,
     /// XMP metadata that breaks ISO 32000-2 14.3.2, as pdf-semantics reads
     /// the packet of the catalog's metadata stream for the extensions a
     /// file declares, where the stream is in plain view, unfiltered and
-    /// unencrypted: a mark of UTF-16 it begins with, where it's encoded as
-    /// UTF-8 (with its erratum 296), an attribute that doesn't read as XML,
-    /// and a claim's value that doesn't, each kind once, at its first place,
-    /// its value pdf-semantics' words with how many times; and XML that
+    /// unencrypted, whatever the file's version, as content is: a mark of
+    /// UTF-16 it begins with, where it's to be UTF-8 (with its erratum
+    /// 296), an attribute that doesn't read as XML, and a claim's value
+    /// that doesn't, each kind once, at its first place, its value
+    /// pdf-semantics' words with how many times; and XML that
     /// stops it being read, at the byte it stops at, its value the XML
     /// reader's words, after which nothing more is read. In the metadata
     /// stream, held where that is, at the bytes in its data; its path the
@@ -964,8 +976,13 @@ pub struct Report {
 /// `source` gives streams' data decoded ([`Source::decoded_within`]), the
 /// content of what's held ([`Rule::Balance`], [`Rule::Marked`],
 /// [`Rule::Operator`], [`Rule::Operands`], [`Rule::Resource`],
-/// [`Rule::Content`]) and the resources it doesn't use ([`Rule::Unused`]).
-/// A trailer the reader couldn't read so is a finding, and the walk starts
+/// [`Rule::Content`]) and the resources it doesn't use ([`Rule::Unused`]);
+/// and the common structures, read through pdf-semantics: the page tree,
+/// from the catalog the trailer as written leads to, by ISO's rules
+/// ([`Rule::PageTree`]) and set beside PDFium's ([`Rule::Viewer`]), each
+/// name and number tree the walk reaches, read again from its root
+/// ([`Rule::Tree`]), and the catalog's XMP packet ([`Rule::Xmp`]). A
+/// trailer the reader couldn't read so is a finding, and the walk starts
 /// from what it made of the file instead.
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     let version = options.version.unwrap_or_else(|| file_version(source));
@@ -1156,7 +1173,10 @@ impl Report {
     /// the trailer that no source has one like, of the same table, key,
     /// rule and value, the value's references' numbers aside, which a
     /// rewrite renumbers (and a reader's finding's numbers aside, its
-    /// offsets); for a key that came in later than the file's version, any
+    /// offsets; a content finding's counts, offsets and how many times, but
+    /// an operator's name; a page tree, a viewer or an XMP finding's numbers
+    /// and how many times; a tree finding's how many times); for a key that
+    /// came in later than the file's version, any
     /// value, as its value isn't what's wrong. A merged object keeps the
     /// keys of the source dictionary it's emitted over, faults and all, and
     /// a fault the source has is the file's, carried; a built object is the
@@ -1557,7 +1577,7 @@ struct Walk<'a> {
     resources_at: HashMap<*const Object, content::Reached<'a>>,
     /// What the page tree's walk by ISO's rules told, and where the walk by
     /// PDFium's parts from it, which [`Walk::structures`] finds in.
-    page_tree: structure::PageTree,
+    page_tree: structure::PageTree<'a>,
     /// Where the walk first visited each object of the page tree as one of
     /// its tables, by number, and its root written in place, by none, which
     /// [`Walk::structures`] gives the page tree's findings the paths of.
@@ -9404,6 +9424,126 @@ mod tests {
         assert_eq!(unread(&report), counted, "{report}");
         let six = Hold::Only(BTreeMap::from([((6, 0), Made::Merged)]));
         assert_eq!(unread(&checked_as(&file.out, &six)), []);
+    }
+
+    /// What only a check reads that takes a password the reader wasn't
+    /// given, in an object stream nothing decodes, is counted as not
+    /// checked, never found as the fault it was checked for: a root's
+    /// `/Count`, a page tree row, where the catalog is held, and a viewer's
+    /// row too, as a viewer goes by it; a tree node's `/Limits`, and a key
+    /// of them, a tree row, where the root is held. Read in plain view,
+    /// none is counted, and neither file has a finding of its own.
+    #[test]
+    fn what_only_a_check_reads_that_takes_a_password_is_counted_not_found() {
+        let locked = |plain: bool, catalog: &str, two: &str, more: &[(u32, &str)], seven| {
+            let mut file = Sections::new("1.7");
+            file.object(1, catalog);
+            file.object(2, two);
+            let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>";
+            file.object(3, page);
+            for &(n, body) in more {
+                file.object(n, body);
+            }
+            let mut numbers = vec![0, 1, 2, 3, 7];
+            numbers.extend(more.iter().map(|&(n, _)| n));
+            let trailer = match plain {
+                true => {
+                    file.object(7, seven);
+                    "/Root 1 0 R".to_string()
+                }
+                false => {
+                    file.object_stream(10, "", &[(7, seven)]);
+                    numbers.push(10);
+                    "/Root 1 0 R /Encrypt << /Filter /Standard /V 2 >>".to_string()
+                }
+            };
+            numbers.sort_unstable();
+            let at = file.stream(11, &numbers, &trailer);
+            file.end(at);
+            file.out
+        };
+        let counted = |report: &Report| -> Vec<_> {
+            (report.unchecked.iter())
+                .filter(|(u, _)| u.column == "-")
+                .filter(|(u, _)| matches!(u.table.as_str(), "PageTreeNodeRoot" | "Catalog"))
+                .map(|(u, &n)| (u.why.clone(), u.table.clone(), u.key.clone(), n))
+                .collect()
+        };
+        /// A row counted as not checked: why, its table and key, how many.
+        type Row = (String, String, String, usize);
+        let row = |why: &str, table: &str, key: &str| -> Row {
+            (why.to_string(), table.to_string(), key.to_string(), 1)
+        };
+        let structures = |report: &Report| {
+            (report.findings.iter())
+                .filter(|f| matches!(f.rule, Rule::PageTree | Rule::Viewer | Rule::Tree))
+                .map(|f| f.value.clone())
+                .collect::<Vec<_>>()
+        };
+        let catalog = "<< /Type /Catalog /Pages 2 0 R >>";
+        let count = "<< /Type /Pages /Kids [3 0 R] /Count 7 0 R >>";
+        let labels = "<< /Type /Catalog /Pages 2 0 R /PageLabels 5 0 R >>";
+        let pages = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
+        let root = [(5, "<< /Kids [6 0 R] >>")];
+        let limits = [root[0], (6, "<< /Limits 7 0 R /Nums [0 << /S /D >>] >>")];
+        let key = [
+            root[0],
+            (6, "<< /Limits [7 0 R 0] /Nums [0 << /S /D >>] >>"),
+        ];
+        /// The catalog, the root, the objects besides, object 7 and the rows.
+        type Shape<'s> = (&'s str, &'s str, &'s [(u32, &'s str)], &'s str, Vec<Row>);
+        let shapes: [Shape; 3] = [
+            (
+                catalog,
+                count,
+                &[],
+                "1",
+                vec![
+                    row(
+                        "a page tree with an object that takes a password",
+                        "PageTreeNodeRoot",
+                        "-",
+                    ),
+                    row(
+                        "a viewer's pages beside a page tree with an object that takes a password",
+                        "PageTreeNodeRoot",
+                        "-",
+                    ),
+                ],
+            ),
+            (
+                labels,
+                pages,
+                &limits,
+                "[0 0]",
+                vec![row(
+                    "a tree with an object that takes a password",
+                    "Catalog",
+                    "PageLabels",
+                )],
+            ),
+            (
+                labels,
+                pages,
+                &key,
+                "0",
+                vec![row(
+                    "a tree with an object that takes a password",
+                    "Catalog",
+                    "PageLabels",
+                )],
+            ),
+        ];
+        for (catalog, two, more, seven, rows) in shapes {
+            let file = locked(false, catalog, two, more, seven);
+            let report = checked_as(&file, &Hold::All(Made::Merged));
+            assert_eq!(structures(&report), [] as [String; 0], "{report}");
+            assert_eq!(counted(&report), rows, "{report}");
+            let plain = locked(true, catalog, two, more, seven);
+            let report = checked_as(&plain, &Hold::All(Made::Merged));
+            assert_eq!(structures(&report), [] as [String; 0], "{report}");
+            assert_eq!(counted(&report), [], "{report}");
+        }
     }
 
     /// A page tree one of whose kids takes a password the reader wasn't
