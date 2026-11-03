@@ -46,17 +46,17 @@ use pdf_objects::{Dict, Form, Object, ObjectId, Resolve, Span, Str, Value, Versi
 use crate::grammar::{At, Table, Wrap, WrapFn, split, version};
 
 /// The functions [`required`], [`holds`] and [`reference()`] evaluate;
-/// `fn:RequiredValue` through [`required_value`]. Not `fn:IsFieldName`:
-/// the model asks it, a partial field name, of a hide action's `/T`,
-/// which ISO 32000-2 makes a fully qualified one, so that it would fail
-/// every hide action naming a field below the top. The embedded model's
-/// corrections put `fn:IsFullyQualifiedFieldName` in its place, which
-/// this crate defines, not INTERNAL_GRAMMAR.md. `fn:NumberOfPages` and
+/// `fn:RequiredValue` through [`required_value`]. Not `fn:IsFieldName`: the
+/// model asks it, a partial field name, of a hide action's `/T`, which ISO
+/// 32000-2 makes a fully qualified one, so that it would fail every hide
+/// action naming a field below the top. The embedded model's corrections
+/// put `fn:IsFullyQualifiedFieldName` in its place, which this crate
+/// defines, not INTERNAL_GRAMMAR.md. `fn:NumberOfPages` and
 /// `fn:PageProperty` read the pages a [`FileCx`] is given
-/// ([`FileCx::pages`]), and can't be told without them; `fn:FontHasLatinChars`
-/// reads what a [`FileCx`] is told of the fonts ([`FileCx::latin`]), and
-/// can't be told without it. The colorant functions read a colorant's name
-/// as pdf-color does ([`Colorant::of`]).
+/// ([`FileCx::pages`]), and can't be told without them;
+/// `fn:FontHasLatinChars` reads what a [`FileCx`] is told of the fonts
+/// ([`FileCx::latin`]), and can't be told without it. The colorant
+/// functions read a colorant's name as pdf-color does ([`Colorant::of`]).
 pub const SUPPORTED: &[&str] = &[
     "fn:AlwaysUnencrypted",
     "fn:ArrayLength",
@@ -426,8 +426,7 @@ impl<R: ?Sized> fmt::Debug for FileCx<'_, R> {
 /// written, as the structure tree's content items are. Of one it isn't said
 /// of, the function can't be told. A [`FileCx`] reads it where it's given
 /// ([`FileCx::latin`]), so it serves one file.
-#[derive(Debug, Default)]
-#[non_exhaustive]
+#[derive(Debug, Clone, Default)]
 pub struct Latin {
     /// What's said of those that are indirect objects, by number.
     ids: HashMap<ObjectId, bool>,
@@ -436,12 +435,13 @@ pub struct Latin {
 }
 
 impl Latin {
-    /// Says of `descriptor`, object `id` where it's one, whether its font
-    /// has Latin characters; said of twice, it has where either says so.
-    /// One of no number that has no span, built in memory, can't be known
-    /// again, and nothing is said of it.
-    pub fn insert(&mut self, descriptor: &Object, id: Option<ObjectId>, latin: bool) {
-        let said = match (id, descriptor.at) {
+    /// Says whether the font of the descriptor that's object `id`, by its
+    /// number alone, or without one of that written at `at`, has Latin
+    /// characters, as [`Latin::get`] finds it; said of twice, it has where
+    /// either says so. Of one of no number that has no span, built in
+    /// memory, nothing is said, as it can't be found again.
+    pub fn insert(&mut self, id: Option<ObjectId>, at: Option<Span>, latin: bool) {
+        let said = match (id, at) {
             (Some(id), _) => self.ids.entry(id).or_insert(false),
             (None, Some(at)) => self.spans.entry(at).or_insert(false),
             (None, None) => return,
@@ -452,7 +452,7 @@ impl Latin {
     /// What's said of the descriptor that's object `id`, by its number
     /// alone, or without one of that written at `at`; none where nothing
     /// is.
-    fn of(&self, id: Option<ObjectId>, at: Option<Span>) -> Option<bool> {
+    pub fn get(&self, id: Option<ObjectId>, at: Option<Span>) -> Option<bool> {
         match (id, at) {
             (Some(id), _) => self.ids.get(&id).copied(),
             (None, Some(at)) => self.spans.get(&at).copied(),
@@ -1223,7 +1223,7 @@ fn not_standard_14(cx: &Cx) -> bool {
 /// ([`FileCx::latin`]): by the container's number where [`Cx::id`] gives
 /// it, else by where it was written. Unknown where nothing is said of it.
 fn has_latin(f: &str, cx: &Cx) -> Tri {
-    let said = (cx.file.latin).and_then(|latin| latin.of(cx.id, cx.container.at));
+    let said = (cx.file.latin).and_then(|latin| latin.get(cx.id, cx.container.at));
     said.map_or_else(|| Tri::Unknown(f.to_string()), Tri::Is)
 }
 
@@ -1237,8 +1237,8 @@ fn has_latin(f: &str, cx: &Cx) -> Tri {
 /// dictionary lists among its `/Components`, which are the space's process
 /// colorants, any other being a spot one, which its `/Colorants` is
 /// required for (8.6.6.5, Tables 70 and 71); a `/Process` or `/Components`
-/// that doesn't read lists none. True where one element is one; false where every element is a
-/// name and none is; else unknown.
+/// that doesn't read lists none. True where one element is one; false where
+/// every element is a name and none is; else unknown.
 fn has_colorant(f: &str, k: &Expr, cx: &Cx, spot: bool) -> Tri {
     let Ok(names) = array(k, cx) else {
         return Tri::Unknown(f.to_string());
@@ -5095,9 +5095,10 @@ mod tests {
     /// `fn:HasSpotColorants` and `fn:HasProcessColorants` read a DeviceN
     /// space's names, `parent::1` from its attributes, each through its
     /// references: a spot colorant any name but the four of CMYK, `All` and
-    /// `None`, and those the attributes' process dictionary lists; a process
-    /// one the four. Each true where a name is one, false where every
-    /// element is a name and none is, and unknown where one isn't a name.
+    /// `None`, and those the attributes' process dictionary lists; a
+    /// process one the four. Each true where a name is one, false where
+    /// every element is a name and none is, and unknown where one isn't a
+    /// name.
     #[test]
     fn a_device_n_space_s_names_say_its_spot_and_process_colorants() {
         let file = File::new(
@@ -5210,11 +5211,11 @@ mod tests {
 
     /// The model's DeviceN attributes ask `/Colorants` where an NChannel
     /// space names a spot colorant, and `/Process` where it names a process
-    /// one (ISO 32000-2, 8.6.6.5, Table 70): neither where it names none, or
-    /// where its process dictionary lists the names. `/Colorants`' version
-    /// predicate is vacant before PDF 1.6, which leaves the function alone,
-    /// as the evaluator reduces it everywhere: there a spot asks it of any
-    /// DeviceN space.
+    /// one (ISO 32000-2, 8.6.6.5, Table 70): neither where it names none,
+    /// or where its process dictionary lists the names. `/Colorants`'
+    /// version predicate is vacant before PDF 1.6, which leaves the
+    /// function alone, as the evaluator reduces it everywhere: there a spot
+    /// asks it of any DeviceN space.
     #[test]
     fn a_device_n_space_s_colorants_and_process_are_required_by_its_names() {
         let file = bare();
@@ -5280,8 +5281,8 @@ mod tests {
 
     /// `fn:KeyNameIsColorant()` holds for a Type 5 halftone's other keys
     /// where they name a colorant, a primary component or a spot one, by
-    /// name: any but `All` and `None` (ISO 32000-2, 10.6.5.6). At an array's
-    /// element, its value's name; unknown where it's no name.
+    /// name: any but `All` and `None` (ISO 32000-2, 10.6.5.6). At an
+    /// array's element, its value's name; unknown where it's no name.
     #[test]
     fn a_halftone_s_keys_name_colorants_but_all_and_none() {
         let file = bare();
@@ -5317,8 +5318,9 @@ mod tests {
     /// [`Cx::id`] gives it, else by where it was written; true where either
     /// telling of it twice says so. Unknown where it isn't told, as it is
     /// where nothing is given, and of a descriptor told of by its number
-    /// alone where the row gives none; and the model's TrueType descriptor's
-    /// `/CapHeight` required by it.
+    /// alone where the row gives none; and the model's TrueType
+    /// descriptor's `/CapHeight` required by it. What's said is what
+    /// [`Latin::get`] finds again, in a copy too.
     #[test]
     fn a_font_has_latin_characters_as_its_file_is_told() {
         let file = bare();
@@ -5337,12 +5339,19 @@ mod tests {
             Object::from(dict! {}),
         );
         let mut latin = Latin::default();
-        latin.insert(&indirect, Some((5, 0)), true);
-        latin.insert(&direct, None, false);
-        latin.insert(&other, Some((6, 0)), false);
-        latin.insert(&other, Some((6, 0)), true);
-        latin.insert(&other, Some((6, 0)), false);
-        latin.insert(&unplaced, None, true);
+        latin.insert(Some((5, 0)), indirect.at, true);
+        latin.insert(None, direct.at, false);
+        latin.insert(Some((6, 0)), other.at, false);
+        latin.insert(Some((6, 0)), other.at, true);
+        latin.insert(Some((6, 0)), other.at, false);
+        latin.insert(None, unplaced.at, true);
+        // What's said is found again, in a copy too.
+        let copy = latin.clone();
+        assert_eq!(copy.get(Some((5, 0)), None), Some(true));
+        assert_eq!(copy.get(None, direct.at), Some(false));
+        assert_eq!(copy.get(Some((6, 0)), descriptor(90).at), Some(true));
+        assert_eq!(copy.get(None, indirect.at), None);
+        assert_eq!(copy.get(None, None), None);
         let text = "fn:Eval(fn:FontHasLatinChars())";
         let has = |file: &FileCx, container: &Object, id: Option<ObjectId>| {
             let cx = file.at(container, At::Key(b"CapHeight"));

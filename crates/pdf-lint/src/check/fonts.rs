@@ -388,7 +388,7 @@ pub(super) fn latin(source: &dyn Source, budget: &mut usize) -> (Latin, Read) {
                         if let Some((Ok(font), _)) = font
                             && let Some(has) = latin_in(source, d, font, composite)
                         {
-                            latin.insert(descriptor, descriptor_id, has);
+                            latin.insert(descriptor_id, descriptor.at, has);
                         }
                     }
                     d
