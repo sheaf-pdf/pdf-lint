@@ -148,8 +148,10 @@ impl CidMap {
                 reader.tell(Some(id), None, Fault::UseCMap);
                 break;
             }
+            // Past the cap, the chain is ours to cut, not the file's fault.
             if chain.len() >= reader.limits.cmaps {
-                cut(id, unknown);
+                reader.tell(Some(id), None, Fault::TooManyCMaps);
+                *unknown = true;
                 break;
             }
             let Some((id, stream)) = reader.stream(id) else {

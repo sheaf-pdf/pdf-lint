@@ -912,6 +912,81 @@ fn a_cmap_chain_read_in_part_is_guessed() {
     assert!(read(&lim));
 }
 
+/// What's told of a CMap's chain that can't be read whole: a chain back to a
+/// CMap read, a loop, as the file's `UseCMap`, in the CMap it names again; and a
+/// chain longer than [`Limits::cmaps`] as the cap's `TooManyCMaps`, in the first
+/// CMap past it, and no `UseCMap`, the chain read up to it.
+#[test]
+fn a_cmap_chain_s_loop_and_its_cap_are_told_apart() {
+    let mut pdf = Pdf::default();
+    let program = || b"1 begincidrange <00> <FF> 0 endcidrange".to_vec();
+    let first = pdf.new_object_id();
+    let second = pdf.add_object(Stream::new(dict! { "UseCMap" => first }, Vec::new()));
+    pdf.objects.insert(
+        first,
+        Stream::new(dict! { "UseCMap" => second }, program()).into(),
+    );
+    let looped = type0(
+        &mut pdf,
+        first.into(),
+        dict! { "Subtype" => "CIDFontType2" },
+    );
+    assert_eq!(
+        told(&pdf, &looped),
+        [(Place::new(Some(first), None), Fault::UseCMap)]
+    );
+
+    // 513 CMaps, each using the one before: the first read is the last added.
+    let mut next = pdf.add_object(Stream::new(dict! {}, Vec::new()));
+    let past = next;
+    for _ in 1..Limits::DEFAULT.cmaps {
+        next = pdf.add_object(Stream::new(dict! { "UseCMap" => next }, Vec::new()));
+    }
+    next = pdf.add_object(Stream::new(dict! { "UseCMap" => next }, program()));
+    let long = type0(&mut pdf, next.into(), dict! { "Subtype" => "CIDFontType2" });
+    assert_eq!(
+        told(&pdf, &long),
+        [(Place::new(Some(past), None), Fault::TooManyCMaps)]
+    );
+    assert!(font_of(&pdf, long.clone()).approx().codes);
+    assert_eq!(
+        Fault::TooManyCMaps.to_string(),
+        "a CMap's /UseCMap chain longer than is read"
+    );
+    // One fewer is read whole.
+    let whole = (pdf.objects.get(&next).and_then(Object::as_stream))
+        .and_then(|cmap| cmap.dict.get(b"UseCMap")?.as_reference())
+        .unwrap();
+    let whole = type0(
+        &mut pdf,
+        whole.into(),
+        dict! { "Subtype" => "CIDFontType2" },
+    );
+    assert_eq!(told(&pdf, &whole), []);
+}
+
+/// A `/ToUnicode` that's a stream whose data doesn't decode is told as one that's
+/// no stream is, in words that say both, and its text read as with none.
+#[test]
+fn a_to_unicode_that_doesn_t_decode_is_told() {
+    let mut pdf = Pdf::default();
+    let map = b"1 beginbfchar <41> <0416> endbfchar".to_vec();
+    let to_unicode = pdf.add_object(Stream::new(dict! {}, map));
+    let font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "ToUnicode" => to_unicode };
+    let undecoded = With::new(&pdf, |_, _| Decoded::None);
+    let mut told = Vec::new();
+    let mut budget = BUDGET;
+    let read = Font::read(undecoded, &font, &Limits::DEFAULT, &mut budget, &mut told).unwrap();
+    assert_eq!(read.code_text(0x41).as_deref(), Some("A"));
+    let at = font.get(b"ToUnicode").and_then(|value| value.at);
+    assert_eq!(told, [(Place::new(None, at), Fault::ToUnicode)]);
+    assert_eq!(
+        Fault::ToUnicode.to_string(),
+        "a /ToUnicode that's no stream, or doesn't decode"
+    );
+    assert_eq!(font_of(&pdf, font).code_text(0x41).as_deref(), Some("Ж"));
+}
+
 /// A Type 3 font: its widths and boxes through a `/FontMatrix` that isn't
 /// a thousandth; a glyph's box from its CharProc's `d1`, else the
 /// font's `/FontBBox`; a width `/Widths` doesn't give from its CharProc;

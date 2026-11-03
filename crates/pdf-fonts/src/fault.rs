@@ -127,13 +127,18 @@ pub enum Fault {
     #[error("a Type 0 font's /Encoding is neither a name nor a stream")]
     CMap,
     /// A CMap's `/UseCMap` chain that can't be read whole: a stream that doesn't
-    /// read, a loop, or one past [`Limits::cmaps`](crate::Limits::cmaps) (9.7.5.3).
-    /// What's read of it is.
+    /// read, or a loop (9.7.5.3). What's read of it is. A chain past
+    /// [`Limits::cmaps`](crate::Limits::cmaps) is [`Fault::TooManyCMaps`].
     #[error("a CMap's /UseCMap chain can't be read whole")]
     UseCMap,
+    /// A CMap's `/UseCMap` chain longer than
+    /// [`Limits::cmaps`](crate::Limits::cmaps): a cap of this reading's, which ISO
+    /// 32000-2 doesn't set. What's read of it is, and its codes are guessed past it.
+    #[error("a CMap's /UseCMap chain longer than is read")]
+    TooManyCMaps,
     /// A `/ToUnicode` that's no stream, or one that doesn't decode (9.10.3). Text
     /// is read as with none.
-    #[error("a /ToUnicode that's no stream")]
+    #[error("a /ToUnicode that's no stream, or doesn't decode")]
     ToUnicode,
     /// A CMap named that this reading doesn't have: one that isn't predefined
     /// (9.7.5.2), or one PDFium doesn't know, whose codes are two bytes each, each its

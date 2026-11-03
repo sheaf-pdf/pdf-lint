@@ -15,7 +15,8 @@ pub struct Limits {
     /// The caps on lexing a CMap or a CharProc, as content.
     pub content: pdf_content_streams::Limits,
     /// How long a CMap's chain by `/UseCMap` may be, past which what's read of it
-    /// is guessed. 512 by default.
+    /// is guessed, and told as [`Fault::TooManyCMaps`](crate::Fault::TooManyCMaps).
+    /// 512 by default.
     pub cmaps: usize,
     /// What reading a Type 1 program may cost, past which it's refused, as a program that
     /// doesn't read: this many times its size, or times 16 KiB if it's smaller, in bytes
