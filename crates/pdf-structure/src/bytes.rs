@@ -21,7 +21,7 @@
 //! is read so, in order, into a [`Document`] ([`read`],
 //! [`Reading::into_document`]), or into one beside the reading, which hands
 //! out what the document doesn't hold, a stream's data among it
-//! ([`Reading::to_document`]); read on demand, on any thread, only what's
+//! ([`Reading::to_document`], and [`Opened`], the two together); read on demand, on any thread, only what's
 //! asked for is. Each object read records where it was found
 //! ([`Record`]). Its bytes are in memory, or a file is read by position
 //! ([`FileBytes`], or any [`ByteSource`] that doesn't hold its bytes), a
@@ -289,6 +289,7 @@ use crate::source::{
 
 mod file;
 mod limits;
+mod opened;
 mod reading;
 mod sections;
 mod window;
@@ -297,6 +298,7 @@ mod window;
 pub use file::FileBytes;
 pub use file::Identity;
 pub use limits::{Limits, Options};
+pub use opened::Opened;
 pub use reading::{ByteSource, Error, Reading, SourceId};
 pub use sections::{FirstObject, SectionFault, SectionRow, SectionRows, Sections};
 use window::{Bytes, InMemory, Window};

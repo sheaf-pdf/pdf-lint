@@ -13,7 +13,7 @@ use pdf_objects::parse;
 use pdf_objects::version::Version;
 use pdf_objects::{Resolve, Unreadable, Why};
 
-use crate::bytes::{SourceId, Undecoded, Unfiltered, Unindexed};
+use crate::bytes::{Error, SourceId, Undecoded, Unfiltered, Unindexed};
 
 /// A file, as a reader read it.
 pub trait Source {
@@ -72,6 +72,17 @@ pub trait Source {
     fn in_the_clear(&self, stream: ObjectId) -> bool {
         let _ = stream;
         false
+    }
+    /// Stream `id`'s data decoded through its filters, at most `limit`
+    /// bytes, decrypted as the reader decrypts it, or why it isn't, as
+    /// [`Reading::decoded_within`](crate::bytes::Reading::decoded_within)
+    /// gives it: none where the reader doesn't give streams' data, as a
+    /// document alone doesn't, its streams' data being where it was written.
+    /// A document read beside its reading ([`Opened`](crate::bytes::Opened))
+    /// gives it.
+    fn decoded_within(&self, id: ObjectId, limit: usize) -> Option<Result<Vec<u8>, Error>> {
+        let _ = (id, limit);
+        None
     }
 }
 
