@@ -20,7 +20,8 @@
 //!   `tsv/latest` read whole.
 //! - **The predicates** ([`predicate`]): the language in the cells parsed,
 //!   and evaluated on an object where it sits ([`Cx`], a row of a file's
-//!   [`FileCx`]), what can't be told said so, never guessed.
+//!   [`FileCx`]), what only a reader of the fonts can say given to it
+//!   ([`Latin`]), what can't be told said so, never guessed.
 //! - **Extensions:** those a file declares, from its catalog and its XMP
 //!   metadata ([`extension`]), and those a model names
 //!   ([`Grammar::extensions`]).
@@ -34,7 +35,7 @@ pub mod predicate;
 pub use pdf_objects;
 
 pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped};
-pub use predicate::{Cx, FileCx, Gate, Reference, Since, Truth};
+pub use predicate::{Cx, FileCx, Gate, Latin, Reference, Since, Truth};
 
 /// The upstream commit the embedded model is (`model/SOURCE.md`).
 pub const COMMIT: &str = "d148fee5a0cb6dcacadf58c09ed842e32847024d";

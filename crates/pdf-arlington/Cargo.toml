@@ -14,6 +14,9 @@ categories = ["parser-implementations", "development-tools::testing"]
 include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
+# What a colorant's name says of it, which the colorant functions read, so
+# that the family reads a colorant one way.
+pdf-color = { path = "../pdf-color", version = "0.1" }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
 thiserror = "2"
 # XXH64, which names a model by its tables' bytes, without the crate's other

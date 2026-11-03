@@ -40,6 +40,7 @@ use std::num::ParseIntError;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
+use pdf_color::Colorant;
 use pdf_objects::{Dict, Form, Object, ObjectId, Resolve, Span, Str, Value, Version};
 
 use crate::grammar::{At, Table, Wrap, WrapFn, split, version};
@@ -52,7 +53,10 @@ use crate::grammar::{At, Table, Wrap, WrapFn, split, version};
 /// corrections put `fn:IsFullyQualifiedFieldName` in its place, which
 /// this crate defines, not INTERNAL_GRAMMAR.md. `fn:NumberOfPages` and
 /// `fn:PageProperty` read the pages a [`FileCx`] is given
-/// ([`FileCx::pages`]), and can't be told without them.
+/// ([`FileCx::pages`]), and can't be told without them; `fn:FontHasLatinChars`
+/// reads what a [`FileCx`] is told of the fonts ([`FileCx::latin`]), and
+/// can't be told without it. The colorant functions read a colorant's name
+/// as pdf-color does ([`Colorant::of`]).
 pub const SUPPORTED: &[&str] = &[
     "fn:AlwaysUnencrypted",
     "fn:ArrayLength",
@@ -67,6 +71,9 @@ pub const SUPPORTED: &[&str] = &[
     "fn:Eval",
     "fn:Extension",
     "fn:FileSize",
+    "fn:FontHasLatinChars",
+    "fn:HasProcessColorants",
+    "fn:HasSpotColorants",
     "fn:Ignore",
     "fn:ImageIsStructContentItem",
     "fn:InKeyMap",
@@ -78,6 +85,7 @@ pub const SUPPORTED: &[&str] = &[
     "fn:IsPDFVersion",
     "fn:IsPresent",
     "fn:IsRequired",
+    "fn:KeyNameIsColorant",
     "fn:MustBeDirect",
     "fn:MustBeIndirect",
     "fn:NoCycle",
@@ -292,6 +300,9 @@ pub struct FileCx<'a, R: ?Sized = dyn Resolve<'a> + 'a> {
     /// The file's pages' dictionaries, in order, as `fn:NumberOfPages` and
     /// `fn:PageProperty` read them, when given ([`FileCx::pages`]).
     pages: Option<&'a [&'a Dict]>,
+    /// Which font descriptors' fonts have Latin characters, as
+    /// `fn:FontHasLatinChars` reads them, when given ([`FileCx::latin`]).
+    latin: Option<&'a Latin>,
     /// An indirect object; none for one the file hasn't, which is null
     /// (ISO 32000-2, 7.3.10). Last, so that a `FileCx` of any resolver is
     /// read through one of `dyn Resolve` ([`Cx`]'s).
@@ -315,6 +326,7 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
             structure: Structure::default(),
             fields: Fields::default(),
             pages: None,
+            latin: None,
             resolve,
         }
     }
@@ -343,6 +355,15 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
     #[must_use = "it gives the FileCx back, with the pages"]
     pub fn pages(mut self, pages: &'a [&'a Dict]) -> FileCx<'a, R> {
         self.pages = Some(pages);
+        self
+    }
+
+    /// What `fn:FontHasLatinChars()` reads: which font descriptors' fonts
+    /// have Latin characters ([`Latin`]), as only a reader of the fonts can
+    /// say. Unless given, it can't be told.
+    #[must_use = "it gives the FileCx back, with what's said of the fonts"]
+    pub fn latin(mut self, latin: &'a Latin) -> FileCx<'a, R> {
+        self.latin = Some(latin);
         self
     }
 
@@ -393,7 +414,50 @@ impl<R: ?Sized> fmt::Debug for FileCx<'_, R> {
             .field("structure", &self.structure)
             .field("fields", &self.fields)
             .field("pages", &self.pages.map(<[_]>::len))
+            .field("latin", &self.latin.is_some())
             .finish_non_exhaustive()
+    }
+}
+
+/// Which font descriptors' fonts have Latin characters, as
+/// `fn:FontHasLatinChars()` reads them (ISO 32000-2, 9.8.1, Table 120's
+/// `/CapHeight`): what only a reader of the fonts can say, given for each
+/// descriptor it's said of, known by its number, else by where it was
+/// written, as the structure tree's content items are. Of one it isn't said
+/// of, the function can't be told. A [`FileCx`] reads it where it's given
+/// ([`FileCx::latin`]), so it serves one file.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct Latin {
+    /// What's said of those that are indirect objects, by number.
+    ids: HashMap<ObjectId, bool>,
+    /// What's said of those written directly, by where they were written.
+    spans: HashMap<Span, bool>,
+}
+
+impl Latin {
+    /// Says of `descriptor`, object `id` where it's one, whether its font
+    /// has Latin characters; said of twice, it has where either says so.
+    /// One of no number that has no span, built in memory, can't be known
+    /// again, and nothing is said of it.
+    pub fn insert(&mut self, descriptor: &Object, id: Option<ObjectId>, latin: bool) {
+        let said = match (id, descriptor.at) {
+            (Some(id), _) => self.ids.entry(id).or_insert(false),
+            (None, Some(at)) => self.spans.entry(at).or_insert(false),
+            (None, None) => return,
+        };
+        *said |= latin;
+    }
+
+    /// What's said of the descriptor that's object `id`, by its number
+    /// alone, or without one of that written at `at`; none where nothing
+    /// is.
+    fn of(&self, id: Option<ObjectId>, at: Option<Span>) -> Option<bool> {
+        match (id, at) {
+            (Some(id), _) => self.ids.get(&id).copied(),
+            (None, Some(at)) => self.spans.get(&at).copied(),
+            (None, None) => None,
+        }
     }
 }
 
@@ -1116,6 +1180,10 @@ fn call(f: &str, args: &[Expr], cx: &Cx) -> Tri {
             other => other,
         },
         ("fn:NotStandard14Font", []) => Tri::Is(not_standard_14(cx)),
+        ("fn:FontHasLatinChars", []) => has_latin(f, cx),
+        ("fn:HasSpotColorants", [k]) => has_colorant(f, k, cx, true),
+        ("fn:HasProcessColorants", [k]) => has_colorant(f, k, cx, false),
+        ("fn:KeyNameIsColorant", []) => key_is_colorant(f, cx),
         ("fn:NoCycle", []) => no_cycle(f, cx),
         // A note to readers, which asks nothing of the value: the row is
         // ignored when the condition holds, or always, or only meaningful
@@ -1147,6 +1215,90 @@ fn not_standard_14(cx: &Cx) -> bool {
     name(b"Type") == Some(b"Font")
         && name(b"Subtype") == Some(b"Type1")
         && !name(b"BaseFont").is_some_and(|base| STANDARD_14.iter().any(|f| f.as_bytes() == base))
+}
+
+/// Whether the row's container, a font descriptor, is one whose font has
+/// Latin characters (`fn:FontHasLatinChars`), which ISO 32000-2 requires
+/// `/CapHeight` of (9.8.1, Table 120), as its [`FileCx`] is told
+/// ([`FileCx::latin`]): by the container's number where [`Cx::id`] gives
+/// it, else by where it was written. Unknown where nothing is said of it.
+fn has_latin(f: &str, cx: &Cx) -> Tri {
+    let said = (cx.file.latin).and_then(|latin| latin.of(cx.id, cx.container.at));
+    said.map_or_else(|| Tri::Unknown(f.to_string()), Tri::Is)
+}
+
+/// Whether the array at `k`, a DeviceN space's names (`parent::1` from its
+/// attributes dictionary), names a spot colorant (`spot`,
+/// `fn:HasSpotColorants`) or a process one (`fn:HasProcessColorants`), each
+/// element through its references, its name read by [`Colorant::of`]. A
+/// process colorant is one of the four of a CMYK device. A spot colorant is
+/// any other name but `All` and `None`, which name no colorant (ISO
+/// 32000-2, 8.6.6.4), and but those the row's container's process
+/// dictionary lists among its `/Components`, which are the space's process
+/// colorants, any other being a spot one, which its `/Colorants` is
+/// required for (8.6.6.5, Tables 70 and 71); a `/Process` or `/Components`
+/// that doesn't read lists none. True where one element is one; false where every element is a
+/// name and none is; else unknown.
+fn has_colorant(f: &str, k: &Expr, cx: &Cx, spot: bool) -> Tri {
+    let Ok(names) = array(k, cx) else {
+        return Tri::Unknown(f.to_string());
+    };
+    let process = match spot {
+        true => process_components(cx),
+        false => Vec::new(),
+    };
+    let mut unknown = false;
+    for name in names {
+        let Some(name) = deref(name, cx).and_then(Object::as_name) else {
+            unknown = true;
+            continue;
+        };
+        let colorant = Colorant::of(name);
+        let is = match spot {
+            true => colorant == Colorant::Spot && !process.contains(&name),
+            false => colorant.is_process(),
+        };
+        if is {
+            return Tri::Is(true);
+        }
+    }
+    match unknown {
+        true => Tri::Unknown(f.to_string()),
+        false => Tri::Is(false),
+    }
+}
+
+/// The names the row's container's `/Process` dictionary lists among its
+/// `/Components` (ISO 32000-2, 8.6.6.5, Table 71), each through its
+/// references: none where either doesn't read, and none of an element
+/// that isn't a name.
+fn process_components<'c>(cx: &Cx<'c, '_>) -> Vec<&'c [u8]> {
+    let components = value_at(cx.container, At::Key(b"Process"), cx)
+        .and_then(|process| value_at(process, At::Key(b"Components"), cx));
+    match components.map(Object::value) {
+        Some(Value::Array(components)) => (components.iter())
+            .filter_map(|c| deref(c, cx).and_then(Object::as_name))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether the row's key names a colorant (`fn:KeyNameIsColorant`), as each
+/// of a Type 5 halftone's keys but its own does, a primary color component
+/// or a spot colorant (ISO 32000-2, 10.6.5.6): any name but `All` and
+/// `None`, which name none (8.6.6.4), read by [`Colorant::of`]. At an
+/// array's element, the element's value where it's a name; unknown where
+/// it isn't.
+fn key_is_colorant(f: &str, cx: &Cx) -> Tri {
+    let name = match cx.at {
+        At::Key(key) => Some(key),
+        At::Index(_) => value_at(cx.container, cx.at, cx).and_then(Object::as_name),
+    };
+    match name.map(Colorant::of) {
+        Some(Colorant::All | Colorant::None) => Tri::Is(false),
+        Some(_) => Tri::Is(true),
+        None => Tri::Unknown(f.to_string()),
+    }
 }
 
 /// Whether the row's key, followed from the row's container through each
@@ -3342,8 +3494,8 @@ mod tests {
         assert_eq!(holds_in(&file, &x(1), "1.7", decided), Truth::True);
         assert_eq!(fully(1, decided), unknown("fn:IsEncryptedWrapper"));
         assert_eq!(
-            fully(1, "fn:Eval((@X==1) && fn:Not(fn:FontHasLatinChars()))"),
-            unknown("fn:FontHasLatinChars"),
+            fully(1, "fn:Eval((@X==1) && fn:Not(fn:IsEncryptedWrapper()))"),
+            unknown("fn:IsEncryptedWrapper"),
             "however deep"
         );
         assert_eq!(fully(1, "fn:Eval((@X>=0) && (@X<=1))"), Truth::True);
@@ -4609,8 +4761,8 @@ mod tests {
         // A condition that calls what isn't supported never decides the
         // note, and leaves whether it's ignored unknown.
         assert_eq!(
-            ignored(&x(dict! {}), "1.7", "fn:Ignore(fn:FontHasLatinChars())"),
-            (Truth::True, Some(unknown("fn:FontHasLatinChars")))
+            ignored(&x(dict! {}), "1.7", "fn:Ignore(fn:IsEncryptedWrapper())"),
+            (Truth::True, Some(unknown("fn:IsEncryptedWrapper")))
         );
         assert_eq!(ignored(&x(dict! {}), "1.7", "fn:Eval(@A==1)").1, None);
     }
@@ -4638,8 +4790,11 @@ mod tests {
             Some((unknown("@CFM"), "128".to_string()))
         );
         assert_eq!(
-            required(filter("V2"), "fn:RequiredValue(fn:FontHasLatinChars(),128)"),
-            Some((unknown("fn:FontHasLatinChars"), "128".to_string()))
+            required(
+                filter("V2"),
+                "fn:RequiredValue(fn:IsEncryptedWrapper(),128)"
+            ),
+            Some((unknown("fn:IsEncryptedWrapper"), "128".to_string()))
         );
         assert_eq!(required(filter("V2"), "fn:Eval(@Length>=40)"), None);
     }
@@ -4906,6 +5061,322 @@ mod tests {
         assert_eq!(at(&font("ArialMT"), "1.7"), Truth::True);
         let untyped = Object::from(dict! { "Subtype" => "Type1", "BaseFont" => "ArialMT" });
         assert_eq!(at(&untyped, "1.7"), Truth::False, "not /Type /Font");
+    }
+
+    /// A DeviceN space of `names` over DeviceCMYK, its attributes
+    /// `attributes`.
+    fn device_n(names: Object, attributes: Dict) -> Object {
+        let tint = dict! { "FunctionType" => 2, "Domain" => integers([0, 1]), "N" => 1 };
+        let space = vec![
+            Object::from("DeviceN"),
+            names,
+            Object::from("DeviceCMYK"),
+            tint.into(),
+            attributes.into(),
+        ];
+        space.into()
+    }
+
+    /// Names, as an array.
+    fn names(names: &[&str]) -> Object {
+        let names: Vec<Object> = names.iter().map(|&n| Object::from(n)).collect();
+        names.into()
+    }
+
+    /// `text` held of the attributes dictionary of `space`, a DeviceN
+    /// space, at `key`, reached through the space, in `file` at `version`.
+    fn of_attributes(file: &File, space: &Object, key: &[u8], version: &str, text: &str) -> Truth {
+        let attributes = &space.as_array().unwrap()[4];
+        file.eval(attributes, At::Key(key), &[space], version, |cx| {
+            holds(text, cx)
+        })
+    }
+
+    /// `fn:HasSpotColorants` and `fn:HasProcessColorants` read a DeviceN
+    /// space's names, `parent::1` from its attributes, each through its
+    /// references: a spot colorant any name but the four of CMYK, `All` and
+    /// `None`, and those the attributes' process dictionary lists; a process
+    /// one the four. Each true where a name is one, false where every
+    /// element is a name and none is, and unknown where one isn't a name.
+    #[test]
+    fn a_device_n_space_s_names_say_its_spot_and_process_colorants() {
+        let file = File::new(
+            dict! { "Root" => Object::reference(1) },
+            [
+                (1, dict! { "Type" => "Catalog" }.into()),
+                (2, Object::from("PANTONE 300 C")),
+                (3, names(&["Cyan", "Spot"])),
+            ],
+        );
+        let (spot, process) = (
+            "fn:Eval(fn:HasSpotColorants(parent::1))",
+            "fn:Eval(fn:HasProcessColorants(parent::1))",
+        );
+        let both = |names: Object, attributes: Dict| {
+            let space = device_n(names, attributes);
+            let is = |text| of_attributes(&file, &space, b"X", "1.7", text);
+            (is(spot), is(process))
+        };
+        let (t, f) = (Truth::True, Truth::False);
+        let cmyk = ["Cyan", "Magenta", "Yellow", "Black"];
+        assert_eq!(both(names(&cmyk), dict! {}), (f.clone(), t.clone()));
+        assert_eq!(
+            both(names(&["Cyan", "PANTONE 300 C"]), dict! {}),
+            (t.clone(), t.clone())
+        );
+        assert_eq!(both(names(&["Orange"]), dict! {}), (t.clone(), f.clone()));
+        assert_eq!(
+            both(names(&["All", "None"]), dict! {}),
+            (f.clone(), f.clone()),
+            "All and None name no colorant"
+        );
+        assert_eq!(
+            both(vec![Object::reference(2)].into(), dict! {}),
+            (t.clone(), f.clone()),
+            "a name through its reference"
+        );
+        assert_eq!(
+            both(Object::reference(3), dict! {}),
+            (t.clone(), t.clone()),
+            "the names through their reference"
+        );
+        assert_eq!(both(names(&[]), dict! {}), (f.clone(), f.clone()));
+        // An element that isn't a name can't be told, unless another
+        // element decides.
+        let unknown_both = (
+            unknown("fn:HasSpotColorants"),
+            unknown("fn:HasProcessColorants"),
+        );
+        let odd = |name: &str| vec![Object::from(1), Object::from(name)].into();
+        assert_eq!(
+            both(odd("Black"), dict! {}),
+            (unknown_both.0.clone(), t.clone())
+        );
+        assert_eq!(
+            both(odd("Orange"), dict! {}),
+            (t.clone(), unknown_both.1.clone())
+        );
+        assert_eq!(
+            both(vec![Object::reference(9)].into(), dict! {}),
+            unknown_both,
+            "a reference to nothing"
+        );
+        assert_eq!(
+            both(Object::from("Cyan"), dict! {}),
+            unknown_both,
+            "no array"
+        );
+
+        // The names a process dictionary lists are the space's process
+        // colorants, not spot ones: an RGB process's Red, Green and Blue.
+        let rgb = ["Red", "Green", "Blue"];
+        let process_of = |components: Object| {
+            dict! {
+                "Subtype" => "NChannel",
+                "Process" => dict! { "ColorSpace" => "DeviceRGB", "Components" => components },
+            }
+        };
+        assert_eq!(
+            both(names(&rgb), process_of(names(&rgb))),
+            (f.clone(), f.clone())
+        );
+        assert_eq!(
+            both(
+                names(&["Red", "Green", "Blue", "Gold"]),
+                process_of(names(&rgb))
+            ),
+            (t.clone(), f.clone()),
+            "Gold isn't listed"
+        );
+        assert_eq!(
+            both(names(&rgb), dict! {}),
+            (t.clone(), f.clone()),
+            "nothing lists them"
+        );
+        assert_eq!(
+            both(names(&rgb), process_of(Object::reference(9))),
+            (t.clone(), f.clone()),
+            "Components that doesn't read lists none"
+        );
+        let unread = dict! { "Process" => Object::reference(9) };
+        assert_eq!(both(names(&rgb), unread), (t.clone(), f.clone()));
+        let named = dict! { "Process" => dict! { "Components" => Object::reference(3) } };
+        assert_eq!(
+            both(names(&["Spot", "Gold"]), named),
+            (t, f),
+            "Spot listed, through its reference; Gold not"
+        );
+    }
+
+    /// The model's DeviceN attributes ask `/Colorants` where an NChannel
+    /// space names a spot colorant, and `/Process` where it names a process
+    /// one (ISO 32000-2, 8.6.6.5, Table 70): neither where it names none, or
+    /// where its process dictionary lists the names. `/Colorants`' version
+    /// predicate is vacant before PDF 1.6, which leaves the function alone,
+    /// as the evaluator reduces it everywhere: there a spot asks it of any
+    /// DeviceN space.
+    #[test]
+    fn a_device_n_space_s_colorants_and_process_are_required_by_its_names() {
+        let file = bare();
+        let (colorants, process) = (
+            &row("DeviceNDict", b"Colorants").required,
+            &row("DeviceNDict", b"Process").required,
+        );
+        let at = |names: &[&str], attributes: Dict, version: &str| {
+            let space = device_n(self::names(names), attributes);
+            let required = |key: &[u8], cell: &str| {
+                let attributes = &space.as_array().unwrap()[4];
+                file.eval(attributes, At::Key(key), &[&space], version, |cx| {
+                    required(cell, cx)
+                })
+            };
+            (
+                required(b"Colorants", colorants),
+                required(b"Process", process),
+            )
+        };
+        let nchannel = || dict! { "Subtype" => "NChannel" };
+        let (t, f) = (Truth::True, Truth::False);
+        assert_eq!(
+            at(&["Cyan", "Gold"], nchannel(), "1.7"),
+            (t.clone(), t.clone()),
+            "{colorants}; {process}"
+        );
+        let cmyk = ["Cyan", "Magenta", "Yellow", "Black"];
+        assert_eq!(at(&cmyk, nchannel(), "1.7"), (f.clone(), t.clone()));
+        assert_eq!(
+            at(&["PANTONE 300 C", "PANTONE 485 C"], nchannel(), "2.0"),
+            (t.clone(), f.clone())
+        );
+        let rgb = ["Red", "Green", "Blue"];
+        let over_rgb = dict! {
+            "Subtype" => "NChannel",
+            "Process" => dict! { "ColorSpace" => "DeviceRGB", "Components" => names(&rgb) },
+        };
+        assert_eq!(
+            at(&rgb, over_rgb, "1.7"),
+            (f.clone(), f.clone()),
+            "the process dictionary lists them"
+        );
+        // A DeviceN space, not NChannel: neither, from 1.6.
+        let device_n = || dict! { "Subtype" => "DeviceN" };
+        assert_eq!(at(&["Gold"], device_n(), "1.7"), (f.clone(), f.clone()));
+        // No /Subtype, which a Required cell takes no default for: what the
+        // names decide, else unknown.
+        assert_eq!(
+            at(&rgb, dict! {}, "1.7"),
+            (unknown("@Subtype"), f.clone()),
+            "no process colorant"
+        );
+        assert_eq!(
+            at(&["Cyan"], dict! {}, "1.7"),
+            (f.clone(), unknown("@Subtype")),
+            "no spot colorant"
+        );
+        // Before 1.6, the function alone.
+        assert_eq!(at(&["Gold"], dict! {}, "1.3"), (t, f.clone()));
+        assert_eq!(at(&cmyk, device_n(), "1.3"), (f.clone(), f));
+    }
+
+    /// `fn:KeyNameIsColorant()` holds for a Type 5 halftone's other keys
+    /// where they name a colorant, a primary component or a spot one, by
+    /// name: any but `All` and `None` (ISO 32000-2, 10.6.5.6). At an array's
+    /// element, its value's name; unknown where it's no name.
+    #[test]
+    fn a_halftone_s_keys_name_colorants_but_all_and_none() {
+        let file = bare();
+        let special = &row("HalftoneType5", b"*").special_case[0];
+        let halftone = Object::from(dict! {
+            "Type" => "Halftone",
+            "HalftoneType" => 5,
+            "Default" => dict! {},
+            "Cyan" => dict! {},
+        });
+        let at =
+            |key: &[u8]| file.eval(&halftone, At::Key(key), &[], "1.7", |cx| holds(special, cx));
+        for key in ["Cyan", "Black", "Gray", "Red", "Spot1", "PANTONE 300 C"] {
+            assert_eq!(at(key.as_bytes()), Truth::True, "{special}: {key}");
+        }
+        assert_eq!(at(b"All"), Truth::False);
+        assert_eq!(at(b"None"), Truth::False);
+
+        let elements = vec![Object::from("Cyan"), Object::from("All"), Object::from(1)].into();
+        let at = |i| {
+            file.eval(&elements, At::Index(i), &[], "1.7", |cx| {
+                holds("fn:Eval(fn:KeyNameIsColorant())", cx)
+            })
+        };
+        assert_eq!(
+            [at(0), at(1), at(2)],
+            [Truth::True, Truth::False, unknown("fn:KeyNameIsColorant")]
+        );
+    }
+
+    /// `fn:FontHasLatinChars()` says what a [`FileCx`] is told of the
+    /// descriptor, the row's container ([`Latin`]): by its number where
+    /// [`Cx::id`] gives it, else by where it was written; true where either
+    /// telling of it twice says so. Unknown where it isn't told, as it is
+    /// where nothing is given, and of a descriptor told of by its number
+    /// alone where the row gives none; and the model's TrueType descriptor's
+    /// `/CapHeight` required by it.
+    #[test]
+    fn a_font_has_latin_characters_as_its_file_is_told() {
+        let file = bare();
+        let resolve = |id: ObjectId| file.objects.get(&id);
+        let descriptor = |at: usize| {
+            Object::from(dict! { "Type" => "FontDescriptor", "FontName" => "F" }).at(Span::new(
+                None,
+                at,
+                at + 10,
+            ))
+        };
+        let (indirect, direct, other, unplaced) = (
+            descriptor(10),
+            descriptor(30),
+            descriptor(50),
+            Object::from(dict! {}),
+        );
+        let mut latin = Latin::default();
+        latin.insert(&indirect, Some((5, 0)), true);
+        latin.insert(&direct, None, false);
+        latin.insert(&other, Some((6, 0)), false);
+        latin.insert(&other, Some((6, 0)), true);
+        latin.insert(&other, Some((6, 0)), false);
+        latin.insert(&unplaced, None, true);
+        let text = "fn:Eval(fn:FontHasLatinChars())";
+        let has = |file: &FileCx, container: &Object, id: Option<ObjectId>| {
+            let cx = file.at(container, At::Key(b"CapHeight"));
+            holds(text, &id.map_or(cx, |id| cx.id(id)))
+        };
+        let told = FileCx::new(&file.trailer, v("1.7"), &resolve).latin(&latin);
+        assert_eq!(has(&told, &indirect, Some((5, 0))), Truth::True);
+        assert_eq!(has(&told, &direct, None), Truth::False);
+        assert_eq!(has(&told, &other, Some((6, 0))), Truth::True, "said twice");
+        let none = unknown("fn:FontHasLatinChars");
+        assert_eq!(
+            has(&told, &direct, Some((7, 0))),
+            none,
+            "by its number alone"
+        );
+        assert_eq!(
+            has(&told, &indirect, None),
+            none,
+            "by its number, not its span"
+        );
+        assert_eq!(has(&told, &unplaced, None), none, "of no number or span");
+        assert_eq!(has(&told, &descriptor(70), None), none, "not told");
+        let untold = FileCx::new(&file.trailer, v("1.7"), &resolve);
+        assert_eq!(has(&untold, &indirect, Some((5, 0))), none);
+        assert!(format!("{told:?}").contains("latin: true"), "{told:?}");
+        assert!(format!("{untold:?}").contains("latin: false"));
+
+        let cell = &row("FontDescriptorTrueType", b"CapHeight").required;
+        let required = |container: &Object, id| {
+            let cx = told.at(container, At::Key(b"CapHeight")).id(id);
+            super::required(cell, &cx)
+        };
+        assert_eq!(required(&indirect, (5, 0)), Truth::True, "{cell}");
+        assert_eq!(required(&other, (8, 0)), none);
     }
 
     #[test]
