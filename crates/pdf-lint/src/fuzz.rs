@@ -4,9 +4,10 @@
 //! finding's bytes inside what was read, the file or a stream's decoded
 //! data, an object stream's as the document holds it and a content
 //! stream's or the metadata stream's as the reading decodes it again; what
-//! its content finds, and what its fonts' streams say of their text,
-//! moving nothing else a check of its document alone finds, which reads no
-//! stream's data ([`streams_alone`]); and set against its previous
+//! its content finds, and what its fonts' streams say of their text and
+//! what their reads find, moving nothing else a check of its document alone
+//! finds, which reads no stream's data ([`streams_alone`]); and set against
+//! its previous
 //! revision, when it has an incremental update. It reads under small
 //! limits ([`options`], and 4 MiB of content and 4 MiB of fonts' streams in
 //! [`setting`]), so that a run tries more inputs. It's compiled only for
@@ -163,19 +164,21 @@ fn latin_row(row: &Unchecked) -> bool {
 
 /// That `beside`, a check of a file read beside its reading, is `alone`, a
 /// check of its document alone, which reads no stream's data, and what
-/// streams' data tells: content's own, and what a font's `/ToUnicode`,
-/// embedded CMap or glyphs say of whether it has Latin characters. The
-/// same findings but content's rules' and a font descriptor's `missing
-/// CapHeight`, in the same order, and alone's of those beside too; the
-/// same rows not checked, but content's, their column `-`, added, and
-/// `fn:FontHasLatinChars`'s, as many or fewer; and the same counts, but
-/// units of content read and unused resources, which `alone` has none of.
-/// So what content finds, and what a font's streams say of its text, moves
-/// nothing else; nor color spaces, which no stream's data says.
+/// streams' data tells: content's own, what a font's `/ToUnicode`, embedded
+/// CMap or glyphs say of whether it has Latin characters, and what the
+/// read of a font that asks one finds, which alone doesn't read. The same
+/// findings but content's rules', `font`'s and a font descriptor's
+/// `missing CapHeight`, in the same order, and alone's of the last beside
+/// too; the same rows not checked, but content's and the fonts', their
+/// column `-`, added, and `fn:FontHasLatinChars`'s, as many or fewer; and
+/// the same counts, but units of content read and unused resources, which
+/// `alone` has none of. So what content finds, and what a font's streams
+/// say of it, moves nothing else; nor color spaces, which no stream's data
+/// says.
 fn streams_alone(beside: &Report, alone: &Report) {
     let others = |report: &Report| -> Vec<Finding> {
         (report.findings.iter())
-            .filter(|f| !CONTENT.contains(&f.rule) && !cap_height(f))
+            .filter(|f| !CONTENT.contains(&f.rule) && f.rule != Rule::Font && !cap_height(f))
             .cloned()
             .collect()
     };
@@ -208,7 +211,7 @@ fn streams_alone(beside: &Report, alone: &Report) {
         assert!(n >= was, "{row:?} not checked fewer times");
         assert!(
             n == was || row.column == "-",
-            "{row:?} not checked for content"
+            "{row:?} not checked for content or a font"
         );
     }
     for row in alone.unchecked.keys() {
@@ -257,7 +260,10 @@ fn within(
 /// fault the walk can't say that ISO's reading of it tells, but a tree of
 /// no pages; a page tree a viewer reads otherwise, by its count, a page
 /// and a page's box; a name tree whose keys are out of order; XMP metadata
-/// with an attribute that doesn't read; content of each kind the check
+/// with an attribute that doesn't read; a color space, a font, a DeviceN
+/// space and a halftone with something in each for the color space and
+/// font rules to find, and the model's functions of colorants and Latin
+/// characters; content of each kind the check
 /// reads, two pages sharing an array of streams, a form, a pattern and a
 /// Type 3 font's glyphs, with something in it for each rule of content to
 /// find, and a page's content encrypted; a cross-reference stream with
@@ -365,6 +371,31 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         leaf("2 0 R"),
         stream("/Type /Metadata /Subtype /XML", xmp),
     ];
+    // A TrueType font of 94 widths for 95 codes, drawing Latin letters,
+    // whose descriptor lacks /CapHeight; an Indexed space's table of 3 bytes
+    // for 6; an NChannel space of a spot colorant without /Colorants; and a
+    // Type 5 halftone with /All among its colorants.
+    let widths = vec!["500"; 94].join(" ");
+    let screen =
+        "<< /Type /Halftone /HalftoneType 1 /Frequency 60 /Angle 45 /SpotFunction /Round >>";
+    let graphics = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << \
+         /Font << /F1 4 0 R >> /ColorSpace << /CS0 [/Indexed /DeviceRGB 1 <000000>] \
+         /CS1 [/DeviceN [/Spot1] /DeviceCMYK 6 0 R << /Subtype /NChannel >>] >> \
+         /ExtGState << /GS0 << /Type /ExtGState /HT 7 0 R >> >> >> >>"
+            .to_string(),
+        format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /Arial /FirstChar 32 /LastChar 126 \
+             /Widths [{widths}] /Encoding /WinAnsiEncoding /FontDescriptor 5 0 R >>"
+        ),
+        "<< /Type /FontDescriptor /FontName /Arial /Flags 32 /FontBBox [-200 -200 1000 900] \
+         /ItalicAngle 0 /Ascent 900 /Descent -200 /StemV 80 >>"
+            .to_string(),
+        "<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>".to_string(),
+        format!("<< /Type /Halftone /HalftoneType 5 /Default {screen} /All {screen} >>"),
+    ];
     let id = "<0123456789abcdef0123456789abcdef>";
     let mut seeds = vec![
         ("page", file(&page, "").0),
@@ -374,6 +405,7 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         ("viewer", file(&viewer, "").0),
         ("name-tree", file(&name_tree, "").0),
         ("xmp", file(&metadata, "").0),
+        ("graphics", file(&graphics, "").0),
         ("content", content()),
         ("content-encrypted", encrypted_content()),
         ("xref-stream", xref_stream()),
@@ -955,6 +987,33 @@ mod tests {
                 made,
                 "{name}: {report}"
             );
+            // The graphics' seed finds what it's made to, of the color
+            // space and font rules and of the model's functions, and the
+            // rest nothing of theirs.
+            let graphics: BTreeSet<(&str, String)> = (report.findings.iter())
+                .filter(|f| {
+                    matches!(f.rule, Rule::ColorSpace | Rule::Font)
+                        || (f.rule == Rule::Missing
+                            && ["CapHeight", "Colorants"].contains(&&*f.key))
+                        || (f.rule == Rule::Special && f.table == "HalftoneType5")
+                })
+                .map(|f| (f.rule.name(), format!("{}/{}", f.table, f.key)))
+                .collect();
+            let made: &[(&str, &str)] = match name {
+                "graphics" => &[
+                    ("color-space", "IndexedColorSpace/3"),
+                    ("font", "FontTrueType/Widths"),
+                    ("missing", "DeviceNDict/Colorants"),
+                    ("missing", "FontDescriptorTrueType/CapHeight"),
+                    ("special", "HalftoneType5/All"),
+                ],
+                _ => &[],
+            };
+            let made: BTreeSet<(&str, String)> = made
+                .iter()
+                .map(|&(rule, at)| (rule, at.to_string()))
+                .collect();
+            assert_eq!(graphics, made, "{name}: {report}");
             check_file(&seed);
         }
         // Those that open, open, and their object stream reads.
@@ -1165,6 +1224,46 @@ mod tests {
         assert_eq!(latin(&beside), [(table.clone(), 1)]);
         assert_eq!(missing(&alone), []);
         assert_eq!(latin(&alone), [(table, 2)]);
+        streams_alone(&beside, &alone);
+    }
+
+    /// A Type 3 font's `/FirstChar` past a byte's codes is found beside its
+    /// reading; its document alone gives no glyph's data, so there the font
+    /// isn't read, and nothing of it is found: what [`streams_alone`] sets
+    /// aside, and nothing else moves.
+    #[test]
+    fn a_type_3_font_read_beside_its_reading_and_alone() {
+        let glyph = stream("", "1000 0 d0");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+             /Resources << /Font << /T3 4 0 R >> >> >>",
+            "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 5 0 R >> \
+             /Encoding << /Type /Encoding /Differences [97 /a] >> \
+             /FirstChar 300 /LastChar 300 /Widths [1000] /Resources << >> >>",
+            &glyph,
+        ];
+        let (file, _) = file(&objects, "");
+        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let (hold, options) = (Hold::All(Made::Merged), Options::default());
+        let (beside, alone) = (
+            check(&read, &hold, &options),
+            check(read.document(), &hold, &options),
+        );
+        let fonts = |report: &Report| -> Vec<(Option<ObjectId>, String)> {
+            let found = report.findings.iter().filter(|f| f.rule == Rule::Font);
+            found
+                .map(|f| (f.object, format!("{}/{}", f.table, f.key)))
+                .collect()
+        };
+        assert_eq!(
+            fonts(&beside),
+            [(Some((4, 0)), "FontType3/FirstChar".to_string())],
+            "{beside}"
+        );
+        assert_eq!(fonts(&alone), [], "{alone}");
         streams_alone(&beside, &alone);
     }
 

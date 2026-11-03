@@ -6,8 +6,9 @@
 //! kept ([`Kept`]), each read run to its end.
 //!
 //! Of what it tells, what the walk can't say is a [`Rule::ColorSpace`]
-//! finding, where the walk found nothing by the model's rules ([`MODEL`])
-//! in that object at that key: each kind once in each object, whichever
+//! finding, where the walk found nothing by the model's rules
+//! ([`MODEL`](super::MODEL)) in that object at that key
+//! ([`Walk::find_told`]): each kind once in each object, whichever
 //! space's read tells it, at its first place there, its value pdf-color's
 //! words with how many times; in the fault's object, else the space's,
 //! else the one the space is written in, held where that is. Its key is
@@ -34,14 +35,14 @@
 
 use std::collections::HashSet;
 use std::mem::{self, Discriminant};
-use std::rc::Rc;
 
 use pdf_color::{Fault, Limits, Space};
 
 use super::content::times;
 use super::kept::Kept;
-use super::{Finding, Graphic, MODEL, Made, Objects, REFERENCES, Rule, Trail, Walk, entry_at};
-use crate::object::{Object, ObjectId, Span, Value};
+use super::told::{Told, holding};
+use super::{Finding, Graphic, Made, Objects, REFERENCES, Rule, Walk};
+use crate::object::{Object, ObjectId, Span};
 use crate::{Unreadable, Why};
 
 /// The model's color space tables: what the walk reaches as one is a color
@@ -83,15 +84,6 @@ pub(super) const PARTS: [&str; 12] = [
 /// What color spaces are read under: pdf-color's caps, which ISO 32000-2
 /// doesn't set.
 const LIMITS: Limits = Limits::DEFAULT;
-
-/// Where the walk first visited an object as a color space table or one of
-/// [`PARTS`] ([`Walk::note_graphics`]).
-pub(super) struct Visited<'a> {
-    /// The table.
-    pub(super) table: &'static str,
-    /// The walk's way to it, the path of its findings.
-    pub(super) trail: Rc<Trail<'a>>,
-}
 
 /// Why a space isn't read whole, other than for the file's faults: an
 /// object of it takes a password the reader wasn't given.
@@ -148,43 +140,6 @@ fn kind_key(fault: &Fault) -> Option<&'static str> {
     })
 }
 
-/// The innermost entry or element written in `value`, through what's
-/// written in place in it, whose value holds the bytes `at`: its key or
-/// position, and that value. None where none does.
-fn holding(value: &Object, at: Span) -> Option<(String, &Object)> {
-    let holds = |o: &Object| {
-        (o.at).is_some_and(|v| v.stream == at.stream && v.start <= at.start && at.end <= v.end)
-    };
-    let mut held = None;
-    let mut here = value;
-    loop {
-        let entries = match here.value() {
-            Value::Dict(dict) => Some(dict),
-            Value::Stream(stream) => Some(&stream.dict),
-            _ => None,
-        };
-        let next = match (entries, here.value()) {
-            (Some(dict), _) => (dict.entries().iter())
-                .find(|entry| holds(&entry.value))
-                .map(|entry| {
-                    (
-                        String::from_utf8_lossy(&entry.key).into_owned(),
-                        &entry.value,
-                    )
-                }),
-            (None, Value::Array(array)) => (array.iter().enumerate())
-                .find(|(_, element)| holds(element))
-                .map(|(i, element)| (i.to_string(), element)),
-            (None, _) => None,
-        };
-        let Some((key, value)) = next else {
-            return held;
-        };
-        here = value;
-        held = Some((key, value));
-    }
-}
-
 /// What a space's read tells, kept ([`Kept`]), and where it tells of an
 /// object that doesn't read ([`Fault::Damaged`]): what it tells at those
 /// bytes is of that object, as a tint transform with a subfunction that
@@ -202,22 +157,6 @@ impl pdf_color::Sink for Faults {
         }
         self.kept.fault(at, fault);
     }
-}
-
-/// What a space's read told, as it's found where the walk found nothing at
-/// its key ([`Walk::spaces`]).
-struct Told {
-    finding: Finding,
-    /// Its kind, told once in each object.
-    kind: Discriminant<Fault>,
-    /// The numbered object whose value, as a whole, it's of, which a read
-    /// reaches by a reference: the walk checks what a reference leads to at
-    /// the key holding the reference.
-    whole: Option<ObjectId>,
-    /// Where the family's name of the space it's of is written, the object
-    /// and the bytes of its element 0, for a kind of what family a space
-    /// is ([`of_a_family`]) told at an array.
-    family: Option<(Option<ObjectId>, Span)>,
 }
 
 /// Whether `fault` is of a family's name, which a space that's an array
@@ -248,24 +187,6 @@ fn of_a_family(fault: Fault) -> bool {
     )
 }
 
-/// The value of the entry or element written in `value`, through what's
-/// written in place in it, whose entry, its key and value together, or
-/// element is at the bytes `at`, as the walk's findings are.
-fn written_at(value: &Object, at: Span) -> Option<&Object> {
-    let here = holding(value, at).map_or(value, |(_, value)| value);
-    if here.at == Some(at) {
-        return Some(here);
-    }
-    let dict = match here.value() {
-        Value::Dict(dict) => dict,
-        Value::Stream(stream) => &stream.dict,
-        _ => return None,
-    };
-    (dict.entries().iter())
-        .find(|entry| entry_at(entry) == Some(at))
-        .map(|entry| &entry.value)
-}
-
 impl Walk<'_> {
     /// Reads each color space the walk reached, in the order it reached
     /// them, and finds what each read tells that the walk can't say: see
@@ -274,7 +195,7 @@ impl Walk<'_> {
         let spaces = mem::take(&mut self.spaces);
         // What each read tells, in order: found once all are read, against
         // the walk's findings.
-        let mut tells: Vec<Told> = Vec::new();
+        let mut tells: Vec<Told<Discriminant<Fault>>> = Vec::new();
         for space in &spaces {
             // Given by its number, the read starts in the space's object.
             let reference;
@@ -314,49 +235,7 @@ impl Walk<'_> {
                 }
             }
         }
-        if tells.is_empty() {
-            return;
-        }
-        // What the walk found by the model's rules, where each is told only
-        // if the walk found nothing: at its key in its object; of an object
-        // as a whole, at a reference to it; and of a space's family, at its
-        // family's name.
-        let model = || {
-            (self.report.findings.iter())
-                .filter(|f| f.revision.is_none() && MODEL.contains(&f.rule))
-        };
-        let found: HashSet<(Option<ObjectId>, &str)> =
-            model().map(|f| (f.object, f.key.as_str())).collect();
-        let sited: HashSet<(Option<ObjectId>, Span)> =
-            match tells.iter().any(|t| t.family.is_some()) {
-                true => model().filter_map(|f| Some((f.object, f.at?))).collect(),
-                false => HashSet::new(),
-            };
-        let wholes: HashSet<ObjectId> = tells.iter().filter_map(|t| t.whole).collect();
-        let referred: HashSet<ObjectId> = match wholes.is_empty() {
-            true => HashSet::new(),
-            false => model()
-                .filter_map(|f| {
-                    let written = self.source.get(f.object?).ok()?;
-                    written_at(written, f.at?)?.as_reference()
-                })
-                .filter(|id| wholes.contains(id))
-                .collect(),
-        };
-        // Each object's kinds told, so that what two spaces' reads tell, a
-        // space and its base, is told once.
-        let mut told = HashSet::new();
-        let new: Vec<Finding> = (tells.into_iter())
-            .filter(|t| {
-                let f = &t.finding;
-                !found.contains(&(f.object, f.key.as_str()))
-                    && !t.whole.is_some_and(|id| referred.contains(&id))
-                    && !t.family.is_some_and(|site| sited.contains(&site))
-                    && told.insert((f.object, t.kind))
-            })
-            .map(|t| t.finding)
-            .collect();
-        self.report.findings.extend(new);
+        self.find_told(tells);
     }
 
     /// What `fault` is, told `n` times by `space`'s read, in `object`, made
@@ -373,7 +252,7 @@ impl Walk<'_> {
         at: Option<Span>,
         fault: Fault,
         n: usize,
-    ) -> Told {
+    ) -> Told<Discriminant<Fault>> {
         let written = match object {
             Some(id) => self.source.get(id).ok(),
             None => Some(&self.source.trailer().object),
@@ -437,7 +316,7 @@ impl Walk<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     //! What's found of the color spaces the walk reaches, where, and as
     //! whose, and what's counted; and the model's functions of colorants, a
     //! DeviceN space's and a halftone's, as a check of a file evaluates
@@ -1316,7 +1195,11 @@ mod tests {
     /// `packed`, each its number and as written, in object stream 20, with
     /// cross-reference stream 21 listing them all, `trailer`'s entries
     /// among its own.
-    fn packed(objects: &[(u32, &str)], packed: &[(u32, &str)], trailer: &str) -> Vec<u8> {
+    pub(in crate::check) fn packed(
+        objects: &[(u32, &str)],
+        packed: &[(u32, &str)],
+        trailer: &str,
+    ) -> Vec<u8> {
         let mut file = b"%PDF-1.7\n".to_vec();
         let mut entries = std::collections::BTreeMap::new();
         for &(n, body) in objects {

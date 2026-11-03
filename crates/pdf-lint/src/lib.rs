@@ -32,7 +32,7 @@
 //!
 //! Each color space and font the walk reaches is read again, through
 //! pdf-color and pdf-fonts, the fonts for their text, no program read, and
-//! a space held to ISO 32000-2 where the model can't say what's wrong
+//! each held to ISO 32000-2 where the model can't say what's wrong
 //! ([`check()`] says how). What the model asks that only they can say is
 //! read through them too: which fonts have Latin characters, read before
 //! the walk, that a descriptor's `/CapHeight` is required of, and what a

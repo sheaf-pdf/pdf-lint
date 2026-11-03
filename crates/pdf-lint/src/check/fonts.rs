@@ -8,8 +8,37 @@
 //! ([`Source::decoded_within`]), as a font reads a reading's ([`decoded`]),
 //! the file's fonts' within one budget. A source that gives no stream's
 //! data, as a document alone doesn't, leaves a font that asks one unread,
-//! as it leaves content. What the read tells is kept ([`Kept`]); none of it
-//! is found yet.
+//! as it leaves content. What the read tells is kept ([`Kept`]), each read
+//! run to its end; but once an object it reads doesn't read for what isn't
+//! the file's fault, a password or a cap, the read goes on as if it weren't
+//! there, and what it tells after isn't kept ([`Cut`]).
+//!
+//! Of what it tells, what the walk can't say is a [`Rule::Font`] finding,
+//! where the walk found nothing by the model's rules in that object at that
+//! key, nor at a reference to the object it's of as a whole
+//! ([`Walk::find_told`]): each kind once in each object, whichever font's
+//! read tells it, at its first place there, its value pdf-fonts' words
+//! with how many times; in the fault's object, a descriptor, a CIDFont, an
+//! encoding, a CMap, else the font's, else the one the font is written in,
+//! held where that is. Its key is the font dictionary's key the kind is
+//! about, where it's one ([`kind_key`]), as the model's `missing` is at the
+//! key, and any other at the entry or element whose value holds its bytes
+//! ([`holding`]). Its path and table are the object's where the walk first
+//! visited it as a font table or one of what a font holds ([`PARTS`]),
+//! else the font's. Never told: an object that doesn't read, the reader's
+//! and the model's `unresolved`, nor what's told of a value that refers to
+//! one, or to a reference, which PDFium follows no further where ISO
+//! 32000-2 does ([`Walk::of_the_unread`]); a `/UseCMap` to what isn't a
+//! stream the file has, which the walk says at the `/UseCMap`; a predefined
+//! CMap the reading hasn't, a name no CMap has being the model's `value`;
+//! and a program's fault, as none is read. Nor is a font read whose
+//! `/Subtype` names no kind of font as ISO 32000-2 and pdf-fonts both read
+//! it, which pdf-fonts would read as a Type 1 font, a guess
+//! ([`of_a_kind`]). What stops a font being read whole that isn't the
+//! file's fault (an object that takes a password or is past a cap, streams
+//! past the budget, a CMap chain longer than is read) is counted as not
+//! checked, once a font for each, where the font, or what it's written in,
+//! is held; what was read before it is found all the same.
 //!
 //! Before the walk, the fonts the model's `fn:FontHasLatinChars()` asks of
 //! are read ([`latin`]): what a font descriptor's `/CapHeight` is required
@@ -22,18 +51,20 @@
 //! [`FileCx::latin`]: crate::FileCx::latin
 
 use std::cell::Cell;
-use std::collections::HashMap;
-use std::mem;
+use std::collections::{HashMap, HashSet};
+use std::mem::{self, Discriminant};
 use std::ops::RangeInclusive;
 use std::ptr;
 
 use pdf_fonts::{Decoded, Error, Fault, Font, Limits, With};
 use unicode_script::{Script, UnicodeScript};
 
+use super::content::times;
 use super::kept::Kept;
-use super::{NESTING, Objects, REFERENCES, Walk};
+use super::told::{Told, holding, written_at};
+use super::{Finding, Graphic, Made, NESTING, Objects, REFERENCES, Rule, Walk};
 use crate::bytes::{self, Unfiltered};
-use crate::object::{Dict, Object, ObjectId, Value};
+use crate::object::{Dict, Object, ObjectId, Span, Value};
 use crate::pdf_filters;
 use crate::source::Source;
 use crate::{Latin, Resolve, Unreadable, Why};
@@ -49,9 +80,173 @@ pub(super) const FONTS: [&str; 5] = [
     "FontType0",
 ];
 
+/// The model's tables of what a font holds: a descriptor of each kind, a
+/// Type 0 font's descendants, its CIDFont, the CIDFont's widths and its
+/// CMap, a simple font's encoding, its differences and its widths, and a
+/// `/ToUnicode`. Where the walk first visits an object as one of them, or as
+/// a font, is the path and table of what's found in it.
+pub(super) const PARTS: [&str; 15] = [
+    "FontDescriptorType1",
+    "FontDescriptorTrueType",
+    "FontDescriptorType3",
+    "FontDescriptorCIDType0",
+    "FontDescriptorCIDType2",
+    "ArrayOfDescendantFonts",
+    "FontCIDType0",
+    "FontCIDType2",
+    "ArrayOfCIDGlyphMetricsW",
+    "ArrayOfCIDGlyphMetricsW2",
+    "CMapStream",
+    "Encoding",
+    "ArrayOfDifferences",
+    "ArrayOfNumbersGeneral",
+    "ToUnicodeCMapStream",
+];
+
+/// The kinds of font a font dictionary's `/Subtype` names (ISO 32000-2,
+/// 9.5).
+const KINDS: [&[u8]; 5] = [b"Type1", b"MMType1", b"TrueType", b"Type3", b"Type0"];
+
 /// What fonts are read under: pdf-fonts' caps, which ISO 32000-2 doesn't
 /// set.
 const LIMITS: Limits = Limits::DEFAULT;
+
+/// Why a font isn't read whole, other than for the file's faults: an object
+/// of it takes a password the reader wasn't given.
+const LOCKED: &str = "a font with an object that takes a password";
+
+/// Why a font isn't read whole: an object of it is past a cap the reader
+/// reads under.
+const CAPPED: &str = "a font with an object past a cap it's read under";
+
+/// Why a font isn't read whole: the source didn't give an object's bytes.
+const UNGIVEN: &str = "a font with an object whose bytes the source didn't give";
+
+/// Why a font isn't read whole: an object of it doesn't read, for another
+/// reason a reader gives.
+const UNREAD: &str = "a font with an object that doesn't read";
+
+/// Why a font isn't read whole: its streams decode past what's left of the
+/// file's budget for fonts' streams ([`FONT_BUDGET`]).
+///
+/// [`FONT_BUDGET`]: super::FONT_BUDGET
+const BUDGET: &str = "a font whose streams decode past the file's budget for fonts' streams";
+
+/// Why a font isn't read whole: a CMap's `/UseCMap` chain is longer than
+/// pdf-fonts reads ([`Limits::cmaps`]).
+const CMAPS: &str = "a font with a CMap chain longer than is read";
+
+/// Why a font isn't read whole, given what stopped its read.
+fn unread(error: &Error) -> &'static str {
+    match error {
+        Error::TooLarge => BUDGET,
+        Error::Unreadable(unreadable) => match unreadable.why {
+            Why::Locked => LOCKED,
+            Why::Limit => CAPPED,
+            Why::Source => UNGIVEN,
+            _ => UNREAD,
+        },
+        _ => UNREAD,
+    }
+}
+
+/// The key of a font dictionary a kind of fault is about, where it's about
+/// one, which it's told at whether or not the key is written: a fault of a
+/// key absent is told at no bytes, where the model's `missing` is at the
+/// key. None for the rest, told at the bytes they're of ([`holding`]).
+fn kind_key(fault: &Fault) -> Option<&'static str> {
+    Some(match fault {
+        Fault::NoWidths | Fault::WidthsLength => "Widths",
+        Fault::FirstChar => "FirstChar",
+        Fault::Subtype => "Subtype",
+        Fault::ToUnicode => "ToUnicode",
+        Fault::DescendantFonts => "DescendantFonts",
+        Fault::CMap => "Encoding",
+        _ => return None,
+    })
+}
+
+/// The name `font`'s `/Subtype` is, as ISO 32000-2 and pdf-fonts both read
+/// it: written in place, or through one reference. None where it's absent
+/// or no name, a string among them, which pdf-fonts reads as the name it
+/// spells, as PDFium does, or a name through a reference to a reference,
+/// which ISO 32000-2 follows to its end (7.3.10) and pdf-fonts no further
+/// than the first; `Err` where the reference leads to an object that
+/// doesn't read for what isn't the file's fault.
+fn subtype<'a>(source: &'a dyn Source, font: &'a Dict) -> Result<Option<&'a [u8]>, Unreadable> {
+    let Some(written) = font.get(b"Subtype") else {
+        return Ok(None);
+    };
+    let named = match written.as_reference() {
+        Some(id) => match Objects(source).try_resolve(id) {
+            Err(unreadable) if unreadable.why != Why::Damaged => return Err(unreadable),
+            resolved => resolved.ok().flatten(),
+        },
+        None => Some(written),
+    };
+    Ok(named.and_then(Object::as_name))
+}
+
+/// Whether `font` is read: where its `/Subtype` names a kind of font
+/// ([`KINDS`]) as ISO 32000-2 and pdf-fonts both read it ([`subtype`]).
+/// pdf-fonts reads a font whose `/Subtype` is absent or no font's as a
+/// Type 1 font, as PDFium does, and so one whose `/Subtype` is a reference
+/// to a reference; one whose `/Subtype` is a string it reads as the kind
+/// the string spells. What it tells of either is of a kind it guessed, not
+/// of the font the walk took it for, whose `/Subtype` the walk says: of a
+/// Type 0 font, its `/Widths` missing and its CMap no encoding. Where the
+/// reference leads to an object that doesn't read for what isn't the
+/// file's fault, the font is read, which goes on past it, and is counted
+/// ([`Cut`]).
+fn of_a_kind(source: &dyn Source, font: &Dict) -> bool {
+    match subtype(source, font) {
+        Ok(kind) => kind.is_some_and(|kind| KINDS.contains(&kind)),
+        Err(_) => true,
+    }
+}
+
+/// The file's objects as [`Objects`] gives them, `failed` set where one
+/// doesn't read for what isn't the file's fault, which a font's read goes
+/// on past as if it weren't there ([`Error::Unreadable`]).
+#[derive(Clone, Copy)]
+struct Noting<'a, 'c> {
+    objects: Objects<'a>,
+    failed: &'c Cell<bool>,
+}
+
+impl<'a> Resolve<'a> for Noting<'a, '_> {
+    fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
+        self.try_resolve(id).ok().flatten()
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'a Object>, Unreadable> {
+        let resolved = self.objects.try_resolve(id);
+        if let Err(unreadable) = &resolved
+            && unreadable.why != Why::Damaged
+        {
+            self.failed.set(true);
+        }
+        resolved
+    }
+}
+
+/// What a font's read tells, kept ([`Kept`]), until an object it reads
+/// doesn't read for what isn't the file's fault (`failed`): its read goes on
+/// as if the object weren't there, so what it tells after, a `/ToUnicode`
+/// that takes a password told as one that doesn't decode, is of a font
+/// without it, and isn't kept.
+struct Cut<'c> {
+    kept: &'c mut Kept<Fault>,
+    failed: &'c Cell<bool>,
+}
+
+impl pdf_fonts::Sink for Cut<'_> {
+    fn fault(&mut self, at: pdf_fonts::Place, fault: Fault) {
+        if !self.failed.get() {
+            self.kept.fault(at, fault);
+        }
+    }
+}
 
 /// Stream `id`'s data, at most `limit` bytes of it, as `source` gives it
 /// ([`Source::decoded_within`]), said as pdf-fonts' [`Streams`] for a
@@ -113,20 +308,33 @@ pub(super) fn decoded(
 }
 
 /// `font`, a font dictionary of `source`'s, read for text within what's
-/// left of `budget`, what it tells kept; none where it asked a stream's data
-/// of a source that gives none ([`decoded`]), as what it read then isn't
-/// the file's font.
+/// left of `budget`, what it tells kept until an object it reads doesn't
+/// read for what isn't the file's fault ([`Cut`]); none where it asked a
+/// stream's data of a source that gives none ([`decoded`]), as what it read
+/// then isn't the file's font.
 fn read<'a>(
     source: &'a dyn Source,
     font: &'a Dict,
     budget: &mut usize,
 ) -> Option<(Result<Font, Error>, Kept<Fault>)> {
-    let ungiven = Cell::new(false);
-    let streams = With::new(Objects(source), |id, limit| {
-        decoded(source, id, limit, &ungiven)
+    let (ungiven, failed) = (Cell::new(false), Cell::new(false));
+    let objects = Noting {
+        objects: Objects(source),
+        failed: &failed,
+    };
+    let streams = With::new(objects, |id, limit| {
+        let decoded = decoded(source, id, limit, &ungiven);
+        if let Decoded::Unreadable(_) = decoded {
+            failed.set(true);
+        }
+        decoded
     });
     let mut kept = Kept::default();
-    let read = Font::read_for_text(streams, font, &LIMITS, budget, &mut kept);
+    let mut cut = Cut {
+        kept: &mut kept,
+        failed: &failed,
+    };
+    let read = Font::read_for_text(streams, font, &LIMITS, budget, &mut cut);
     (!ungiven.get()).then_some((read, kept))
 }
 
@@ -202,15 +410,15 @@ pub(super) fn latin(source: &dyn Source, budget: &mut usize) -> (Latin, Read) {
 
 /// The descriptor `font` is asked `fn:FontHasLatinChars()` of, where it's
 /// a font whose descriptor is, and lacks `/CapHeight`, absent or null: a
-/// TrueType font's own, or a Type 0 font's first descendant's; with the
-/// number its references end at, where it's an indirect object, and
-/// whether the font is a Type 0 one.
+/// TrueType font's own, or a Type 0 font's first descendant's, its kind
+/// by its `/Subtype` as ISO 32000-2 and pdf-fonts both read it
+/// ([`subtype`]); with the number its references end at, where it's an
+/// indirect object, and whether the font is a Type 0 one.
 fn asked<'a>(
     source: &'a dyn Source,
     font: &'a Dict,
 ) -> Option<(&'a Object, Option<ObjectId>, bool)> {
-    let (_, subtype) = through(source, font.get(b"Subtype")?)?;
-    let (holder, composite) = match subtype.as_name()? {
+    let (holder, composite) = match subtype(source, font).ok().flatten()? {
         b"TrueType" => (font, false),
         b"Type0" => {
             let (_, descendants) = through(source, font.get(b"DescendantFonts")?)?;
@@ -307,27 +515,181 @@ fn given_widths(source: &dyn Source, font: &Dict) -> Option<RangeInclusive<u32>>
     Some(first..=last)
 }
 
+/// Whether `value`, or what's written in place in it no deeper than
+/// [`NESTING`], is a reference to an object `unread` says doesn't read as
+/// ISO 32000-2 reads it.
+fn refers(value: &Object, unread: impl Fn(ObjectId) -> bool) -> bool {
+    let mut stack = vec![(value, 0)];
+    while let Some((o, depth)) = stack.pop() {
+        match o.value() {
+            Value::Ref(id) if unread(*id) => return true,
+            Value::Array(a) if depth < NESTING => stack.extend(a.iter().map(|e| (e, depth + 1))),
+            Value::Dict(d) if depth < NESTING => {
+                stack.extend(d.iter().map(|(_, v)| (v, depth + 1)))
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 impl Walk<'_> {
     /// Reads each font the walk reached, in the order it reached them, its
     /// streams within `budget` bytes decoded in all, but those [`latin`]
-    /// read already, which are as it read them: see the module's
-    /// documentation.
+    /// read already, which are as it read them, and finds what each read
+    /// tells that the walk can't say: see the module's documentation.
     pub(super) fn fonts(&mut self, budget: usize) {
         let fonts = mem::take(&mut self.fonts);
         let mut read = mem::take(&mut self.fonts_read);
         let mut left = budget;
+        // What each read tells, in order: found once all are read, against
+        // the walk's findings.
+        let mut tells: Vec<Told<Discriminant<Fault>>> = Vec::new();
         for font in &fonts {
             let Some(dict) = font.object.as_dict() else {
                 continue;
             };
+            // Of a kind pdf-fonts would guess: not read, nor counted.
+            if !of_a_kind(self.source, dict) {
+                continue;
+            }
             let key = match font.id {
                 Some(id) => Key::Id(id),
                 None => Key::Kept(ptr::from_ref(font.object)),
             };
-            let _ = match read.remove(&key) {
-                Some(kept) => kept,
+            let taken = match read.remove(&key) {
+                Some(taken) => taken,
                 None => self::read(self.source, dict, &mut left),
             };
+            // Not read, as it asked a stream's data of a source that gives
+            // none: not checked, as content isn't there.
+            let Some((result, kept)) = taken else {
+                continue;
+            };
+            let mut stops: Vec<&str> = result.err().iter().map(unread).collect();
+            let damaged: HashSet<ObjectId> = (kept.told().iter())
+                .filter_map(|(_, fault, _)| match fault {
+                    Fault::Damaged { id } => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            for &(place, fault, n) in kept.told() {
+                match fault {
+                    Fault::TooManyCMaps => stops.push(CMAPS),
+                    // The reader's, which the walk says (`unresolved`); a
+                    // predefined CMap the build or PDFium hasn't, of which
+                    // a name that's no CMap's is the model's `value`; a
+                    // program's, which isn't read.
+                    Fault::Damaged { .. } | Fault::PredefinedUnknown | Fault::ProgramMalformed => {}
+                    // In what a /UseCMap names: where that's not a stream
+                    // the file has, the walk says so at the /UseCMap.
+                    Fault::UseCMap if !self.a_stream(place.object) => {}
+                    _ => {
+                        let object = place.object.or(font.id).or(font.holder);
+                        if self.of_the_unread(object, place.at, &damaged) {
+                            continue;
+                        }
+                        if let Some(made) = self.made(object) {
+                            tells.push(self.font_told(font, object, made, place.at, fault, n));
+                        }
+                    }
+                }
+            }
+            if self.made(font.id.or(font.holder)).is_some() {
+                stops.sort_unstable();
+                stops.dedup();
+                for why in stops {
+                    self.unchecked("-", why.to_string(), font.table, "-");
+                }
+            }
+        }
+        self.find_told(tells);
+    }
+
+    /// Whether `object` is a stream the source has.
+    fn a_stream(&self, object: Option<ObjectId>) -> bool {
+        object.is_some_and(|id| (self.source.get(id)).is_ok_and(|o| o.as_stream().is_some()))
+    }
+
+    /// Whether what's written at `at` in `object` is, or holds in place, a
+    /// reference to an object of `damaged`, which the read told doesn't
+    /// read, or to one that's a reference itself: what's told of it is the
+    /// reader's, which the walk says (`unresolved`), or what's made of a
+    /// reference to a reference by following it once, as PDFium does, where
+    /// ISO 32000-2 follows it to its end (7.3.10).
+    fn of_the_unread(
+        &self,
+        object: Option<ObjectId>,
+        at: Option<Span>,
+        damaged: &HashSet<ObjectId>,
+    ) -> bool {
+        let written = match object {
+            Some(id) => self.source.get(id).ok(),
+            None => Some(&self.source.trailer().object),
+        };
+        let Some(there) = written
+            .zip(at)
+            .and_then(|(written, at)| written_at(written, at))
+        else {
+            return false;
+        };
+        refers(there, |id| {
+            damaged.contains(&id) || (self.source.get(id)).is_ok_and(|o| o.as_reference().is_some())
+        })
+    }
+
+    /// What `fault` is, told `n` times by `font`'s read, in `object`, made
+    /// as `made`, at `at`: at the key [`kind_key`] gives it, and any other
+    /// at the key [`holding`] gives, in its object, `-` where none holds it;
+    /// its path and table the object's first visit as a font or one of
+    /// [`PARTS`], else the font's.
+    fn font_told(
+        &self,
+        font: &Graphic<'_>,
+        object: Option<ObjectId>,
+        made: Made,
+        at: Option<Span>,
+        fault: Fault,
+        n: usize,
+    ) -> Told<Discriminant<Fault>> {
+        let written = match object {
+            Some(id) => self.source.get(id).ok(),
+            None => Some(&self.source.trailer().object),
+        };
+        let held = written
+            .zip(at)
+            .map(|(written, at)| (holding(written, at), written, at));
+        let key = match kind_key(&fault) {
+            Some(key) => key.to_string(),
+            None => match held.as_ref().and_then(|(held, ..)| held.as_ref()) {
+                Some((key, _)) => key.clone(),
+                None => "-".to_string(),
+            },
+        };
+        let whole = object.filter(|_| {
+            held.as_ref()
+                .is_some_and(|(held, written, at)| held.is_none() && written.at == Some(*at))
+        });
+        let (path, table) = match object.and_then(|id| self.fonts_at.get(&id)) {
+            Some(first) => (first.trail.path(), first.table),
+            None => (font.trail.path(), font.table),
+        };
+        let finding = Finding {
+            object,
+            made,
+            path,
+            table: table.to_string(),
+            key,
+            rule: Rule::Font,
+            value: times(&fault.to_string(), n),
+            at,
+            revision: None,
+        };
+        Told {
+            finding,
+            kind: mem::discriminant(&fault),
+            whole,
+            family: None,
         }
     }
 }
@@ -916,5 +1278,897 @@ mod tests {
             &crate::check::Options::default(),
         );
         assert_eq!(cap_height(&report), unmade("FontDescriptorCIDType2"));
+        // Its read is counted as not checked, and what it tells once the
+        // stream doesn't read, a /ToUnicode as if it didn't decode, isn't
+        // found.
+        assert_eq!(unread_fonts(&report), [(LOCKED, "FontType0", 1)]);
+        assert!(
+            report.findings.iter().all(|f| f.rule != Rule::Font),
+            "{report}"
+        );
+    }
+
+    /// Every table the walk names what a font holds by is the model's, so a
+    /// fault in an object first visited as one has its path.
+    #[test]
+    fn each_part_table_is_the_model_s() {
+        for name in PARTS {
+            assert!(crate::grammar().table(name).is_some(), "{name}");
+        }
+    }
+
+    /// A file at `version` of a catalog, object 1, its page tree, 2, and its
+    /// page, 3, whose `/Font` resources hold `fonts` as written, and
+    /// `objects` besides, each its number and as written.
+    fn fonts(version: &str, fonts: &str, objects: &[(u32, &str)]) -> Vec<u8> {
+        let page = format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << \
+             {fonts} >> >> >>"
+        );
+        let mut all: Vec<(u32, &[u8])> = vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (3, page.as_bytes()),
+        ];
+        all.extend(objects.iter().map(|&(n, body)| (n, body.as_bytes())));
+        let size = all.iter().map(|&(n, _)| n).max().unwrap_or(0) + 1;
+        fixture::assembled(version, &all, &format!("<< /Size {size} /Root 1 0 R >>"))
+    }
+
+    /// A stream of `entries` and `data`, as written.
+    fn stream(entries: &str, data: &str) -> String {
+        let length = data.len();
+        format!("<< {entries} /Length {length} >>\nstream\n{data}\nendstream")
+    }
+
+    /// Every object held, as merged.
+    const ALL: Hold = Hold::All(Made::Merged);
+
+    /// `file` read beside its reading and checked, holding what `hold`
+    /// does, under `options`.
+    fn report_with(file: &[u8], hold: &Hold, options: &crate::check::Options) -> Report {
+        let read = WithReading::new(file, &[], &Options::DEFAULT).unwrap();
+        check(&read, hold, options)
+    }
+
+    /// [`report_with`] the default options.
+    fn report(file: &[u8], hold: &Hold) -> Report {
+        report_with(file, hold, &crate::check::Options::default())
+    }
+
+    /// A font finding, as [`found`] gives it.
+    type Found = (Option<u32>, String, String, String, String);
+
+    /// Each font finding of `report`, of `file`: its object's number, path,
+    /// table and key, value, and the bytes it's at in the file or a
+    /// stream's data, `-` there.
+    fn found_in(file: &[u8], report: &Report) -> Vec<Found> {
+        (report.findings.iter())
+            .filter(|f| f.rule == Rule::Font)
+            .map(|f| {
+                let at = match f.at {
+                    Some(at) if at.stream.is_none() => {
+                        String::from_utf8_lossy(&file[at.start..at.end]).into_owned()
+                    }
+                    Some(_) => "-".to_string(),
+                    None => String::new(),
+                };
+                (
+                    f.object.map(|(n, _)| n),
+                    f.path.clone(),
+                    format!("{}/{}", f.table, f.key),
+                    f.value.clone(),
+                    at,
+                )
+            })
+            .collect()
+    }
+
+    /// [`found_in`] `file`'s check, holding what `hold` does.
+    fn found(file: &[u8], hold: &Hold) -> Vec<Found> {
+        found_in(file, &report(file, hold))
+    }
+
+    /// A finding of [`found`]'s, in object `n`, at the path from the page's
+    /// `/Font` (`F1/Widths`), of the row `table`, of `fault` told once, at
+    /// `bytes`.
+    fn told(n: u32, path: &str, table: &str, fault: Fault, bytes: &str) -> Found {
+        (
+            Some(n),
+            format!("Root/Pages/Kids[0]/Resources/Font/{path}"),
+            table.to_string(),
+            fault.to_string(),
+            bytes.to_string(),
+        )
+    }
+
+    /// The model's findings of `file`'s check, every object held: each
+    /// one's object's number, table and key, and rule.
+    fn model(file: &[u8]) -> Vec<(Option<u32>, String, Rule)> {
+        let report = report(file, &ALL);
+        (report.findings.iter())
+            .filter(|f| f.rule != Rule::Font)
+            .map(|f| {
+                (
+                    f.object.map(|(n, _)| n),
+                    format!("{}/{}", f.table, f.key),
+                    f.rule,
+                )
+            })
+            .collect()
+    }
+
+    /// The rows a check counts as not checked for a font: why, its table,
+    /// and how many.
+    fn unread_fonts(report: &Report) -> Vec<(&str, &str, usize)> {
+        (report.unchecked.iter())
+            .filter(|(u, _)| u.column == "-" && u.key == "-" && u.why.starts_with("a font"))
+            .map(|(u, &n)| (u.why.as_str(), u.table.as_str(), n))
+            .collect()
+    }
+
+    /// A descriptor, object 5, with a `/CapHeight`, so that nothing is
+    /// asked of its font's text.
+    const DESCRIPTOR: (u32, &str) = (
+        5,
+        "<< /Type /FontDescriptor /FontName /Calibri /Flags 32 /FontBBox [0 0 1000 1000] \
+         /ItalicAngle 0 /Ascent 900 /Descent -200 /CapHeight 700 /StemV 80 >>",
+    );
+
+    /// A font of `subtype` named Calibri, which isn't one of the standard
+    /// 14, its descriptor [`DESCRIPTOR`], and `entries` besides.
+    fn calibri(subtype: &str, entries: &str) -> String {
+        format!(
+            "<< /Type /Font /Subtype /{subtype} /BaseFont /Calibri /FontDescriptor 5 0 R \
+             {entries} >>"
+        )
+    }
+
+    /// Three codes from the space, with a width each.
+    const WIDTHS: &str = "/FirstChar 32 /LastChar 34 /Widths [500 500 500]";
+
+    /// A Type 0 font, object 4, in `encoding`, of CIDFont object 6, its
+    /// descriptor 7; and the CIDFont with `entries` besides.
+    fn written_type0(encoding: &str, entries: &str) -> Vec<(u32, String)> {
+        vec![
+            (
+                4,
+                format!(
+                    "<< /Type /Font /Subtype /Type0 /BaseFont /Batang /Encoding {encoding} \
+                     /DescendantFonts [6 0 R] >>"
+                ),
+            ),
+            (
+                6,
+                format!(
+                    "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Batang /CIDSystemInfo \
+                     << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
+                     /FontDescriptor 7 0 R /CIDToGIDMap /Identity {entries} >>"
+                ),
+            ),
+            (
+                7,
+                "<< /Type /FontDescriptor /FontName /Batang /Flags 4 /FontBBox [0 0 1000 1000] \
+                 /ItalicAngle 0 /Ascent 900 /Descent -200 /CapHeight 700 /StemV 80 >>"
+                    .to_string(),
+            ),
+        ]
+    }
+
+    /// A CMap stream named `name`, of codes of two bytes, `/UseCMap`
+    /// `uses` where it's given.
+    fn cmap(name: &str, uses: Option<&str>) -> String {
+        let uses = uses.map(|u| format!("/UseCMap {u}")).unwrap_or_default();
+        cmap_of(
+            name,
+            &uses,
+            "1 begincodespacerange <0000> <FFFF> endcodespacerange",
+        )
+    }
+
+    /// A CMap stream named `name`, with `entries` besides, of `data`.
+    fn cmap_of(name: &str, entries: &str, data: &str) -> String {
+        stream(
+            &format!(
+                "/Type /CMap /CMapName /{name} /CIDSystemInfo << /Registry (Adobe) /Ordering \
+                 (Identity) /Supplement 0 >> {entries}"
+            ),
+            data,
+        )
+    }
+
+    /// `objects`, made of what [`written_type0`] and the like give.
+    fn borrowed(objects: &[(u32, String)]) -> Vec<(u32, &str)> {
+        objects.iter().map(|(n, o)| (*n, o.as_str())).collect()
+    }
+
+    /// What pdf-fonts tells of a font that the walk can't say is found once,
+    /// at its key and in its object: the font's number, its CIDFont's, its
+    /// encoding's, a CMap's, the array a chain leads to; its path and table
+    /// its object's as the walk first visited it as a font or as what a
+    /// font holds, else the font's.
+    #[test]
+    fn what_a_font_s_read_tells_that_the_walk_can_t_is_found_once_at_its_key() {
+        let one = |font: String, more: &[(u32, &str)]| {
+            let mut objects = vec![(4, font.as_str()), DESCRIPTOR];
+            objects.extend_from_slice(more);
+            found(&fonts("1.7", "/F1 4 0 R", &objects), &ALL)
+        };
+        // A TrueType font with no /Widths, which the model asks only of a
+        // Type 1 font, at 1.7.
+        assert_eq!(
+            one(calibri("TrueType", ""), &[]),
+            [told(4, "F1", "FontTrueType/Widths", Fault::NoWidths, "")]
+        );
+        // A TrueType font's /Widths of another length than its codes.
+        assert_eq!(
+            one(
+                calibri("TrueType", "/FirstChar 32 /LastChar 34 /Widths [500 500]"),
+                &[]
+            ),
+            [told(
+                4,
+                "F1",
+                "FontTrueType/Widths",
+                Fault::WidthsLength,
+                "[500 500]"
+            )]
+        );
+        // A /FirstChar past a byte's codes.
+        assert_eq!(
+            one(
+                calibri("TrueType", "/FirstChar 300 /LastChar 300 /Widths [500]"),
+                &[]
+            ),
+            [told(
+                4,
+                "F1",
+                "FontTrueType/FirstChar",
+                Fault::FirstChar,
+                "300"
+            )]
+        );
+        // A /Differences name past 255, in its encoding's object.
+        let encoding = "<< /Type /Encoding /Differences [300 /A] >>";
+        assert_eq!(
+            one(
+                calibri("TrueType", &format!("{WIDTHS} /Encoding 6 0 R")),
+                &[(6, encoding)]
+            ),
+            [told(
+                6,
+                "F1/Encoding",
+                "Encoding/1",
+                Fault::Differences,
+                "/A"
+            )]
+        );
+        // A /ToUnicode that doesn't decode.
+        let broken = stream("/Filter /ASCIIHexDecode", "zz");
+        assert_eq!(
+            one(
+                calibri("TrueType", &format!("{WIDTHS} /ToUnicode 6 0 R")),
+                &[(6, &broken)]
+            ),
+            [told(
+                4,
+                "F1",
+                "FontTrueType/ToUnicode",
+                Fault::ToUnicode,
+                "6 0 R"
+            )]
+        );
+        // A reference to a reference at /Widths, in the array it leads to,
+        // at no bytes; what PDFium makes of it, no /Widths, isn't told.
+        assert_eq!(
+            one(
+                calibri("TrueType", "/FirstChar 32 /LastChar 34 /Widths 6 0 R"),
+                &[(6, "7 0 R"), (7, "[500 500 500]")]
+            ),
+            [told(
+                7,
+                "F1/Widths",
+                "ArrayOfNumbersGeneral/-",
+                Fault::Chained,
+                ""
+            )]
+        );
+
+        let cid = |encoding: &str, entries: &str, more: &[(u32, String)]| {
+            let mut objects = written_type0(encoding, entries);
+            objects.extend_from_slice(more);
+            found(&fonts("1.7", "/F1 4 0 R", &borrowed(&objects)), &ALL)
+        };
+        // A /DescendantFonts of two.
+        let mut two = written_type0("/Identity-H", "");
+        two[0].1 = two[0].1.replace("[6 0 R]", "[6 0 R 6 0 R]");
+        assert_eq!(
+            found(&fonts("1.7", "/F1 4 0 R", &borrowed(&two)), &ALL),
+            [told(
+                4,
+                "F1",
+                "FontType0/DescendantFonts",
+                Fault::DescendantFonts,
+                "[6 0 R 6 0 R]"
+            )]
+        );
+        // A /W and a /W2 cut short by an array where a range's last CID
+        // goes, at that array, in the CIDFont; a /W2 is read where the font
+        // writes vertically.
+        assert_eq!(
+            cid("/Identity-H", "/W [1 2 [500]]", &[]),
+            [told(
+                6,
+                "F1/DescendantFonts[0]",
+                "FontCIDType2/2",
+                Fault::W,
+                "[500]"
+            )]
+        );
+        assert_eq!(
+            cid("/Identity-V", "/W2 [1 2 [-1000 500 880]]", &[]),
+            [told(
+                6,
+                "F1/DescendantFonts[0]",
+                "FontCIDType2/2",
+                Fault::W2,
+                "[-1000 500 880]"
+            )]
+        );
+        // A CMap chain that loops, in the CMap it comes back to.
+        assert_eq!(
+            cid(
+                "8 0 R",
+                "",
+                &[
+                    (8, cmap("Eight", Some("9 0 R"))),
+                    (9, cmap("Nine", Some("8 0 R")))
+                ]
+            ),
+            [told(8, "F1/Encoding", "CMapStream/-", Fault::UseCMap, "")]
+        );
+        // A CMap a /UseCMap names that doesn't decode, in it: the model
+        // links a /UseCMap's stream to no table of a font's, so its path and
+        // table are the font's.
+        let broken = cmap_of("Nine", "/Filter /ASCIIHexDecode", "zz");
+        assert_eq!(
+            cid(
+                "8 0 R",
+                "",
+                &[(8, cmap("Eight", Some("9 0 R"))), (9, broken)]
+            ),
+            [told(9, "F1", "FontType0/-", Fault::UseCMap, "")]
+        );
+    }
+
+    /// What the walk says of a font by the model's rules isn't told again,
+    /// at the key it's at, in place or through a reference: a Type 1 font's
+    /// `/Widths` or `/FirstChar` missing, or its `/Widths` of another
+    /// length, and a TrueType font's `/Widths` missing at 2.0; a Type 0
+    /// font's `/DescendantFonts` missing; an `/Encoding` or `/BaseEncoding` that's no encoding's name, by
+    /// a reference too; a `/Differences` value that's a string; a metric
+    /// that's no number in a `/W`; a `/ToUnicode` that's no stream; a
+    /// `/UseCMap` to nothing or to a dictionary, which pdf-fonts tells in
+    /// what it names; a CIDFont's `/Subtype` that's no CIDFont's; a name
+    /// that's no predefined CMap's; and what's told of a value that refers
+    /// to an object that doesn't read. A predefined CMap the build hasn't is
+    /// nobody's.
+    #[test]
+    fn what_the_walk_says_of_a_font_is_found_by_it_alone() {
+        let simple = |version: &str, font: String, more: &[(u32, &str)]| {
+            let mut objects = vec![(4, font.as_str()), DESCRIPTOR];
+            objects.extend_from_slice(more);
+            fonts(version, "/F1 4 0 R", &objects)
+        };
+        let cid = |encoding: &str, entries: &str, more: &[(u32, String)]| {
+            let mut objects = written_type0(encoding, entries);
+            objects.extend_from_slice(more);
+            fonts("1.7", "/F1 4 0 R", &borrowed(&objects))
+        };
+        // Each file, and the object, table and key, and rule of what the
+        // walk finds there.
+        type Said<'a> = (Option<u32>, &'a str, Rule);
+        let encoding = |entries: &str| format!("<< /Type /Encoding {entries} >>");
+        let to_nothing = cmap("Eight", Some("9 0 R"));
+        let cases: Vec<(Vec<u8>, Said)> = vec![
+            (
+                simple("1.7", calibri("Type1", ""), &[]),
+                (Some(4), "FontType1/Widths", Rule::Missing),
+            ),
+            (
+                simple(
+                    "1.7",
+                    calibri("Type1", "/LastChar 34 /Widths [500 500 500]"),
+                    &[],
+                ),
+                (Some(4), "FontType1/FirstChar", Rule::Missing),
+            ),
+            (
+                simple("2.0", calibri("TrueType", ""), &[]),
+                (Some(4), "FontTrueType/Widths", Rule::Missing),
+            ),
+            (
+                simple(
+                    "1.7",
+                    calibri("Type1", "/FirstChar 32 /LastChar 34 /Widths [500 500]"),
+                    &[],
+                ),
+                (Some(4), "FontType1/Widths", Rule::Special),
+            ),
+            (
+                simple(
+                    "1.7",
+                    calibri("TrueType", &format!("{WIDTHS} /Encoding /Foo")),
+                    &[],
+                ),
+                (Some(4), "FontTrueType/Encoding", Rule::Value),
+            ),
+            (
+                simple(
+                    "1.7",
+                    calibri("TrueType", &format!("{WIDTHS} /Encoding 6 0 R")),
+                    &[(6, "/Foo")],
+                ),
+                (Some(4), "FontTrueType/Encoding", Rule::Value),
+            ),
+            (
+                simple(
+                    "1.7",
+                    calibri("TrueType", &format!("{WIDTHS} /Encoding 6 0 R")),
+                    &[(6, &encoding("/BaseEncoding /Foo"))],
+                ),
+                (Some(6), "Encoding/BaseEncoding", Rule::Value),
+            ),
+            (
+                simple(
+                    "1.7",
+                    calibri("TrueType", &format!("{WIDTHS} /Encoding 6 0 R")),
+                    &[(6, &encoding("/Differences [32 (x)]"))],
+                ),
+                (Some(6), "ArrayOfDifferences/1", Rule::Type),
+            ),
+            (
+                simple(
+                    "1.7",
+                    calibri("TrueType", &format!("{WIDTHS} /ToUnicode /Identity-H")),
+                    &[],
+                ),
+                (Some(4), "FontTrueType/ToUnicode", Rule::Type),
+            ),
+            (
+                cid("/Identity-H", "/W [1 [500 (x)]]", &[]),
+                (Some(6), "ArrayOfNumbersGeneral/1", Rule::Type),
+            ),
+            (
+                cid("8 0 R", "", &[(8, to_nothing.clone())]),
+                (Some(8), "CMapStream/UseCMap", Rule::Unresolved),
+            ),
+            (
+                cid(
+                    "8 0 R",
+                    "",
+                    &[(8, to_nothing.clone()), (9, "<< >>".to_string())],
+                ),
+                (Some(8), "CMapStream/UseCMap", Rule::Type),
+            ),
+            (
+                {
+                    let mut objects = written_type0("/Identity-H", "");
+                    objects[1].1 = objects[1].1.replace("/CIDFontType2", "/CIDFontType9");
+                    fonts("1.7", "/F1 4 0 R", &borrowed(&objects))
+                },
+                (Some(6), "FontCIDType0/Subtype", Rule::Value),
+            ),
+            (
+                cid("/Foo", "", &[]),
+                (Some(4), "FontType0/Encoding", Rule::Value),
+            ),
+            (
+                {
+                    let mut objects = written_type0("/Identity-H", "");
+                    objects[0].1 = objects[0].1.replace("/DescendantFonts [6 0 R]", "");
+                    fonts("1.7", "/F1 4 0 R", &borrowed(&objects))
+                },
+                (Some(4), "FontType0/DescendantFonts", Rule::Missing),
+            ),
+        ];
+        for (i, (file, said)) in cases.iter().enumerate() {
+            let (object, key, rule) = *said;
+            let said = (object, key.to_string(), rule);
+            let report = report(file, &ALL);
+            assert!(model(file).contains(&said), "case {i}: {report}");
+            assert_eq!(found(file, &ALL), [], "case {i}: {report}");
+        }
+
+        // A predefined CMap the build hasn't: nothing found, by either.
+        let gbk = cid("/GBK-EUC-H", "", &[]);
+        let checked = report(&gbk, &ALL);
+        assert_eq!(found(&gbk, &ALL), [], "{checked}");
+        assert!(
+            (checked.findings.iter()).all(|f| f.key != "Encoding"),
+            "{checked}"
+        );
+
+        // A CIDFont that doesn't read: the reader's, and what's told of the
+        // /DescendantFonts naming it, not one CIDFont, isn't told either.
+        let mut objects = written_type0("/Identity-H", "");
+        objects[1].1 = "]".to_string();
+        let damaged = fonts("1.7", "/F1 4 0 R", &borrowed(&objects));
+        let said = (
+            Some(4),
+            "ArrayOfDescendantFonts/0".to_string(),
+            Rule::Unresolved,
+        );
+        assert!(
+            model(&damaged).contains(&said),
+            "{}",
+            report(&damaged, &ALL)
+        );
+        assert_eq!(found(&damaged, &ALL), []);
+    }
+
+    /// A font whose `/Subtype` names no kind of font as ISO 32000-2 and
+    /// pdf-fonts both read it isn't read, nor counted, so nothing of the
+    /// kind pdf-fonts would read it as is found: a Type 0 font whose
+    /// `/Subtype` is misspelt or absent, where its read as a Type 1 font
+    /// would tell its `/Widths` missing and `/Identity-H` no encoding; a
+    /// dictionary that's no font at all, written in place or an object of
+    /// its own; and a string, which it would read as a TrueType font where
+    /// the walk takes a Type 3 one; each beside what the walk says of the
+    /// `/Subtype`. Nor one through a reference to a reference, which ISO
+    /// 32000-2 follows to a TrueType font's and pdf-fonts doesn't, so what
+    /// would be found of that is missed, and its descriptor's `/CapHeight`
+    /// can't be told. Through one reference it's read; and where that leads
+    /// to an object that takes a password, it's read and counted.
+    #[test]
+    fn a_font_whose_subtype_names_no_kind_of_font_isn_t_read() {
+        // A Type 0 font, its /Subtype as `subtype` writes it, its CIDFont's
+        // /W cut short.
+        let type0 = |subtype: &str| {
+            let mut objects = written_type0("/Identity-H", "/W [1 2 [500]]");
+            objects[0].1 = objects[0].1.replace("/Subtype /Type0", subtype);
+            fonts("1.7", "/F1 4 0 R", &borrowed(&objects))
+        };
+        assert_eq!(
+            found(&type0("/Subtype /Type0"), &ALL),
+            [told(
+                6,
+                "F1/DescendantFonts[0]",
+                "FontCIDType2/2",
+                Fault::W,
+                "[500]"
+            )]
+        );
+        // A string where a name goes, which pdf-fonts reads as the name it
+        // spells, as PDFium does, where the walk takes the font for a Type
+        // 3 one: a /FirstChar past a byte's codes is what its read would
+        // tell.
+        let string = calibri("TrueType", "/FirstChar 300 /LastChar 300 /Widths [500]")
+            .replace("/Subtype /TrueType", "/Subtype (TrueType)");
+        type Said<'a> = (Option<u32>, &'a str, Rule);
+        let cases: Vec<(Vec<u8>, Said)> = vec![
+            (
+                type0("/Subtype /TypeO"),
+                (Some(4), "FontType0/Subtype", Rule::Value),
+            ),
+            (type0(""), (Some(4), "FontType0/Subtype", Rule::Missing)),
+            (
+                fonts("1.7", "/F1 << >>", &[]),
+                (Some(3), "FontType1/Subtype", Rule::Missing),
+            ),
+            (
+                fonts("1.7", "/F1 4 0 R", &[(4, "<< /Value 1 >>")]),
+                (Some(4), "FontType1/Subtype", Rule::Missing),
+            ),
+            (
+                fonts("1.7", "/F1 4 0 R", &[(4, &string), DESCRIPTOR]),
+                (Some(4), "FontType3/Subtype", Rule::Type),
+            ),
+        ];
+        for (i, (file, said)) in cases.iter().enumerate() {
+            let (object, key, rule) = *said;
+            let said = (object, key.to_string(), rule);
+            let checked = report(file, &ALL);
+            assert!(model(file).contains(&said), "case {i}: {checked}");
+            assert_eq!(found_in(file, &checked), [], "case {i}: {checked}");
+            assert_eq!(unread_fonts(&checked), [], "case {i}: {checked}");
+        }
+
+        // A TrueType font with no /Widths at 1.7, its /Subtype `subtype`,
+        // and `more` besides.
+        let truetype = |subtype: &str, more: &[(u32, &str)]| {
+            let font = calibri("TrueType", "").replace("/Subtype /TrueType", subtype);
+            let mut objects = vec![(4, font.as_str()), DESCRIPTOR];
+            objects.extend_from_slice(more);
+            fonts("1.7", "/F1 4 0 R", &objects)
+        };
+        let no_widths = [told(4, "F1", "FontTrueType/Widths", Fault::NoWidths, "")];
+        assert_eq!(
+            found(&truetype("/Subtype 8 0 R", &[(8, "/TrueType")]), &ALL),
+            no_widths
+        );
+        let chained = truetype("/Subtype 8 0 R", &[(8, "9 0 R"), (9, "/TrueType")]);
+        let checked = report(&chained, &ALL);
+        assert_eq!(found_in(&chained, &checked), [], "{checked}");
+        assert_eq!(unread_fonts(&checked), [], "{checked}");
+
+        // Its descriptor without /CapHeight, the font drawing A in
+        // WinAnsiEncoding.
+        let descriptor = DESCRIPTOR.1.replace("/CapHeight 700 ", "");
+        let latin = |subtype: &str, more: &[(u32, &str)]| {
+            let entries = "/FirstChar 65 /LastChar 65 /Widths [500] /Encoding /WinAnsiEncoding";
+            let font = calibri("TrueType", entries).replace("/Subtype /TrueType", subtype);
+            let mut objects = vec![(4, font.as_str()), (5, descriptor.as_str())];
+            objects.extend_from_slice(more);
+            cap_height(&report(&fonts("1.7", "/F1 4 0 R", &objects), &ALL))
+        };
+        let table = "FontDescriptorTrueType";
+        assert_eq!(
+            latin("/Subtype 8 0 R", &[(8, "/TrueType")]),
+            missing(5, table)
+        );
+        assert_eq!(
+            latin("/Subtype 8 0 R", &[(8, "9 0 R"), (9, "/TrueType")]),
+            unmade(table)
+        );
+
+        // Its /Subtype in an object stream of a file the reader can't open.
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << \
+                    /Font << /F1 4 0 R >> >> >>";
+        let font = calibri("TrueType", WIDTHS).replace("/Subtype /TrueType", "/Subtype 8 0 R");
+        let objects = [
+            (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (3, page),
+            (4, &font),
+            DESCRIPTOR,
+        ];
+        let trailer = "/Root 1 0 R /Encrypt << /Filter /Standard /V 2 >>";
+        let locked = super::super::color::tests::packed(&objects, &[(8, "/TrueType")], trailer);
+        let checked = report(&locked, &ALL);
+        assert_eq!(found_in(&locked, &checked), [], "{checked}");
+        assert_eq!(
+            unread_fonts(&checked),
+            [(LOCKED, "FontType1", 1)],
+            "{checked}"
+        );
+    }
+
+    /// A font not read whole for what isn't the file's fault is counted as
+    /// not checked, once, its table the font's, where the font or what it's
+    /// written in is held, and what was read of it before is found all the
+    /// same: one whose `/ToUnicode` is in an object stream of a file the
+    /// reader can't open, whose read goes on as if it weren't there, and
+    /// what it tells after isn't found; a CMap chain past 512; and fonts
+    /// past the file's budget for their streams, those before it read.
+    #[test]
+    fn a_font_not_read_whole_for_what_isnt_the_file_s_fault_is_counted() {
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << \
+                    /Font << /F1 4 0 R >> >> >>";
+        // Its /Differences read before its /ToUnicode, and its /FirstChar
+        // after.
+        let font = calibri(
+            "TrueType",
+            "/FirstChar 300 /LastChar 300 /Widths [500] /Encoding 6 0 R /ToUnicode 11 0 R",
+        );
+        let objects = [
+            (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (3, page),
+            (4, &font),
+            DESCRIPTOR,
+            (6, "<< /Type /Encoding /Differences [300 /A] >>"),
+        ];
+        let trailer = "/Root 1 0 R /Encrypt << /Filter /Standard /V 2 >>";
+        let to_unicode = stream("", "1 beginbfchar <41> <0041> endbfchar");
+        let locked = super::super::color::tests::packed(&objects, &[(11, &to_unicode)], trailer);
+        let checked = report(&locked, &ALL);
+        assert_eq!(
+            unread_fonts(&checked),
+            [(LOCKED, "FontTrueType", 1)],
+            "{checked}"
+        );
+        assert_eq!(
+            found(&locked, &ALL),
+            [told(
+                6,
+                "F1/Encoding",
+                "Encoding/1",
+                Fault::Differences,
+                "/A"
+            )]
+        );
+        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        assert_eq!(unread_fonts(&report(&locked, &only(4))).len(), 1);
+        assert_eq!(unread_fonts(&report(&locked, &only(3))), []);
+
+        // CMaps 8 to 520, each using the next.
+        let chain: Vec<(u32, String)> = (8..521)
+            .map(|n| (n, cmap(&format!("C{n}"), Some(&format!("{} 0 R", n + 1)))))
+            .collect();
+        let mut objects = written_type0("8 0 R", "");
+        objects.extend(chain);
+        let long = fonts("1.7", "/F1 4 0 R", &borrowed(&objects));
+        let checked = report(&long, &ALL);
+        assert_eq!(
+            unread_fonts(&checked),
+            [(CMAPS, "FontType0", 1)],
+            "{checked}"
+        );
+        assert_eq!(found_in(&long, &checked), []);
+
+        // Two fonts, each a /ToUnicode of 36 bytes and a /Differences name
+        // past 255, within 40 bytes: the second's read stops at its
+        // /ToUnicode, after its /Differences.
+        let differences = "/Encoding << /Differences [300 /A] >>";
+        let font = |to_unicode: u32| {
+            format!(
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica {differences} /ToUnicode \
+                 {to_unicode} 0 R >>"
+            )
+        };
+        let (first, second) = (font(6), font(7));
+        let to_unicode = stream("", "1 beginbfchar <41> <0041> endbfchar");
+        let two = fonts(
+            "1.7",
+            "/F1 4 0 R /F2 5 0 R",
+            &[
+                (4, &first),
+                (5, &second),
+                (6, &to_unicode),
+                (7, &to_unicode),
+            ],
+        );
+        let options = crate::check::Options {
+            font_budget: Some(40),
+            ..crate::check::Options::default()
+        };
+        let checked = report_with(&two, &ALL, &options);
+        assert_eq!(
+            unread_fonts(&checked),
+            [(BUDGET, "FontType1", 1)],
+            "{checked}"
+        );
+        let past = |n, path: &str| told(n, path, "FontType1/1", Fault::Differences, "/A");
+        assert_eq!(found_in(&two, &checked), [past(4, "F1"), past(5, "F2")]);
+        // Within the budget, both read.
+        assert_eq!(unread_fonts(&report(&two, &ALL)), []);
+    }
+
+    /// What two fonts' reads tell in one object is told once, by the first:
+    /// an encoding two fonts share, and a font two pages share, which the
+    /// walk reaches and reads once.
+    #[test]
+    fn what_two_reads_tell_in_one_object_is_told_once() {
+        let page = |fonts: &str| {
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font \
+                 << {fonts} >> >> >>"
+            )
+        };
+        let (first, second) = (page("/F1 4 0 R /F2 6 0 R"), page("/F1 4 0 R"));
+        let font = calibri("TrueType", &format!("{WIDTHS} /Encoding 7 0 R"));
+        let objects: [(u32, &[u8]); 8] = [
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, b"<< /Type /Pages /Kids [3 0 R 8 0 R] /Count 2 >>"),
+            (3, first.as_bytes()),
+            (8, second.as_bytes()),
+            (4, font.as_bytes()),
+            (6, font.as_bytes()),
+            (DESCRIPTOR.0, DESCRIPTOR.1.as_bytes()),
+            (7, b"<< /Type /Encoding /Differences [300 /A] >>"),
+        ];
+        let file = fixture::assembled("1.7", &objects, "<< /Size 9 /Root 1 0 R >>");
+        assert_eq!(
+            found(&file, &ALL),
+            [told(
+                7,
+                "F1/Encoding",
+                "Encoding/1",
+                Fault::Differences,
+                "/A"
+            )]
+        );
+    }
+
+    /// A font's finding is found where its object is held: a font of its
+    /// own, held or not, whatever holds its page; one written in place,
+    /// where its page is.
+    #[test]
+    fn a_font_s_finding_is_held_where_its_object_is() {
+        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        let short = "/FirstChar 32 /LastChar 34 /Widths [500 500]";
+        let font = calibri("TrueType", short);
+        let own = fonts("1.7", "/F1 4 0 R", &[(4, &font), DESCRIPTOR]);
+        let length = Fault::WidthsLength;
+        let told_at = |n| told(n, "F1", "FontTrueType/Widths", length, "[500 500]");
+        assert_eq!(found(&own, &only(4)), [told_at(4)]);
+        assert_eq!(found(&own, &only(3)), []);
+        let in_place = fonts("1.7", &format!("/F1 {font}"), &[DESCRIPTOR]);
+        assert_eq!(found(&in_place, &only(3)), [told_at(3)]);
+        assert_eq!(found(&in_place, &only(2)), []);
+    }
+
+    /// A font finding is carried by a like one, whose count differs: by
+    /// number, by path and from a source; one of a kind the earlier report
+    /// hasn't is the file's own.
+    #[test]
+    fn a_font_finding_is_carried_whatever_its_count() {
+        let report = |names: &str, widths: &str| {
+            let options = crate::check::Options {
+                paths: true,
+                ..crate::check::Options::default()
+            };
+            let font = calibri(
+                "TrueType",
+                &format!("{widths} /Encoding << /Differences [300 {names}] >>"),
+            );
+            let file = fonts("1.7", "/F1 4 0 R", &[(4, &font), DESCRIPTOR]);
+            report_with(&file, &ALL, &options)
+        };
+        fn values(found: Vec<&Finding>) -> Vec<&str> {
+            (found.into_iter())
+                .filter(|f| f.rule == Rule::Font)
+                .map(|f| f.value.as_str())
+                .collect()
+        }
+        let differences = Fault::Differences.to_string();
+        let none = Fault::NoWidths.to_string();
+        let before = report("/A /B", "");
+        let after = report("/A", WIDTHS);
+        let twice = format!("{differences}, 2 times");
+        assert_eq!(
+            values(before.findings.iter().collect()),
+            [twice.as_str(), &none],
+            "{before}"
+        );
+        assert_eq!(
+            values(after.findings.iter().collect()),
+            [differences.as_str()],
+            "{after}"
+        );
+        assert_eq!(values(after.since(&before)), Vec::<&str>::new());
+        assert_eq!(values(after.by_path(&before)), Vec::<&str>::new());
+        assert_eq!(values(after.beyond(&[&before])), Vec::<&str>::new());
+        assert_eq!(values(before.since(&after)), [none.as_str()]);
+        assert_eq!(values(before.by_path(&after)), [none.as_str()]);
+        assert_eq!(values(before.beyond(&[&after])), [none.as_str()]);
+    }
+
+    /// A font read before the walk, as its descriptor lacks `/CapHeight`,
+    /// isn't read again after it: its streams decode within the budget
+    /// once, its `/ToUnicode` giving a code it draws a Latin letter, and
+    /// what its read tells is found once.
+    #[test]
+    fn a_font_read_before_the_walk_isn_t_read_again() {
+        let descriptor = DESCRIPTOR.1.replace("/CapHeight 700 ", "");
+        let font = calibri(
+            "TrueType",
+            "/FirstChar 32 /LastChar 34 /Widths [500 500] /Encoding /WinAnsiEncoding \
+             /ToUnicode 6 0 R",
+        );
+        let to_unicode = stream("", "1 beginbfchar <20> <0041> endbfchar");
+        let file = fonts(
+            "1.7",
+            "/F1 4 0 R",
+            &[(4, &font), (5, &descriptor), (6, &to_unicode)],
+        );
+        let options = crate::check::Options {
+            font_budget: Some(36),
+            ..crate::check::Options::default()
+        };
+        let checked = report_with(&file, &ALL, &options);
+        assert_eq!(unread_fonts(&checked), [], "{checked}");
+        assert_eq!(cap_height(&checked), missing(5, "FontDescriptorTrueType"));
+        assert_eq!(
+            found_in(&file, &checked),
+            [told(
+                4,
+                "F1",
+                "FontTrueType/Widths",
+                Fault::WidthsLength,
+                "[500 500]"
+            )]
+        );
     }
 }
