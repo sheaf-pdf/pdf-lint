@@ -915,7 +915,8 @@ fn a_cmap_chain_read_in_part_is_guessed() {
 /// What's told of a CMap's chain that can't be read whole: a chain back to a
 /// CMap read, a loop, as the file's `UseCMap`, in the CMap it names again; and a
 /// chain longer than [`Limits::cmaps`] as the cap's `TooManyCMaps`, in the first
-/// CMap past it, and no `UseCMap`, the chain read up to it.
+/// CMap past it, and no `UseCMap`, the chain read up to it; but one as long as the
+/// cap that ends in a reference to nothing as the file's `UseCMap`.
 #[test]
 fn a_cmap_chain_s_loop_and_its_cap_are_told_apart() {
     let mut pdf = Pdf::default();
@@ -963,6 +964,20 @@ fn a_cmap_chain_s_loop_and_its_cap_are_told_apart() {
         dict! { "Subtype" => "CIDFontType2" },
     );
     assert_eq!(told(&pdf, &whole), []);
+
+    // 512 CMaps, the last using an object the file hasn't: no longer than the
+    // cap, so the file's `UseCMap`, in what it names, and no `TooManyCMaps`.
+    let nothing = (99_999, 0);
+    let mut next = pdf.add_object(Stream::new(dict! { "UseCMap" => nothing }, Vec::new()));
+    for _ in 2..Limits::DEFAULT.cmaps {
+        next = pdf.add_object(Stream::new(dict! { "UseCMap" => next }, Vec::new()));
+    }
+    next = pdf.add_object(Stream::new(dict! { "UseCMap" => next }, program()));
+    let dangling = type0(&mut pdf, next.into(), dict! { "Subtype" => "CIDFontType2" });
+    assert_eq!(
+        told(&pdf, &dangling),
+        [(Place::new(Some(nothing), None), Fault::UseCMap)]
+    );
 }
 
 /// A `/ToUnicode` that's a stream whose data doesn't decode is told as one that's

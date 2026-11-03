@@ -1,7 +1,8 @@
-//! Where a font departs from ISO 32000-2. A font's reading goes on past each
-//! [`Fault`], told to a [`Sink`] with where it is. Nothing told changes what's
-//! read: the font given is the same whatever the sink, an `Err` included, and a
-//! sink that doesn't want faults, `()`, has none looked for.
+//! Where a font departs from ISO 32000-2, and where its reading meets a cap of
+//! its own. A font's reading goes on past each [`Fault`], told to a [`Sink`] with
+//! where it is. Nothing told changes what's read: the font given is the same
+//! whatever the sink, an `Err` included, and a sink that doesn't want faults,
+//! `()`, has none looked for.
 
 use pdf_objects::{ObjectId, Span};
 
@@ -70,9 +71,10 @@ impl Place {
     }
 }
 
-/// A place where a font isn't what ISO 32000-2 says it is, which a reading comes
-/// to and goes on past. Each names its clause, but for the last, which is of the file
-/// rather than its font.
+/// A place where a font isn't what ISO 32000-2 says it is, or where its reading
+/// meets a cap of its own, which a reading comes to and goes on past. Each names its
+/// clause, but [`Fault::TooManyCMaps`], a cap that ISO 32000-2 doesn't set, which
+/// says nothing of the file, and the last, which is of the file rather than its font.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
@@ -131,9 +133,10 @@ pub enum Fault {
     /// [`Limits::cmaps`](crate::Limits::cmaps) is [`Fault::TooManyCMaps`].
     #[error("a CMap's /UseCMap chain can't be read whole")]
     UseCMap,
-    /// A CMap's `/UseCMap` chain longer than
+    /// A CMap's `/UseCMap` chain of more streams than
     /// [`Limits::cmaps`](crate::Limits::cmaps): a cap of this reading's, which ISO
-    /// 32000-2 doesn't set. What's read of it is, and its codes are guessed past it.
+    /// 32000-2 doesn't set, told in the first stream past it. What's read of it is,
+    /// and its codes are guessed past it.
     #[error("a CMap's /UseCMap chain longer than is read")]
     TooManyCMaps,
     /// A `/ToUnicode` that's no stream, or one that doesn't decode (9.10.3). Text

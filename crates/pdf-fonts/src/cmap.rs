@@ -148,16 +148,17 @@ impl CidMap {
                 reader.tell(Some(id), None, Fault::UseCMap);
                 break;
             }
-            // Past the cap, the chain is ours to cut, not the file's fault.
+            let Some((id, stream)) = reader.stream(id) else {
+                cut(id, unknown);
+                break;
+            };
+            // A stream past the cap: the chain is ours to cut, not the file's
+            // fault.
             if chain.len() >= reader.limits.cmaps {
                 reader.tell(Some(id), None, Fault::TooManyCMaps);
                 *unknown = true;
                 break;
             }
-            let Some((id, stream)) = reader.stream(id) else {
-                cut(id, unknown);
-                break;
-            };
             let Some(data) = reader.charged(id, budget)? else {
                 cut(id, unknown);
                 break;
