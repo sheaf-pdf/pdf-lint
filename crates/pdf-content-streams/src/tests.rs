@@ -1886,6 +1886,87 @@ fn pdfiums_white_space_has_0x80_and_0xff() {
     assert_eq!(faults(&page), [(2..6, across)]);
 }
 
+/// Where 0x80 or 0xFF is read as white-space, it's told, each byte, in
+/// the order faults keep: between tokens, at the end, inside an array or a
+/// dictionary, in an inline image's dictionary as far as ISO 32000-2's
+/// runs, and between its data and its `EI`, but among tokens there, told
+/// whole; not in a string, a comment or an image's data, nor as the byte
+/// after `ID`, nor after an object that ends an image's dictionary.
+#[test]
+fn bytes_pdfium_reads_as_white_space_are_told() {
+    let high = |s: &[u8], at: usize| {
+        let words = format!(
+            "0x{:02X} is white-space here and a regular character to ISO 32000-2",
+            s[at]
+        );
+        (at..at + 1, words)
+    };
+    let s = b"1 2 3 4\x80re\xfff";
+    assert_eq!(told(s), [high(s, 7), high(s, 10)]);
+    let s = b"/F0\x8010\xffTf Q\x80";
+    assert_eq!(told(s), [high(s, 3), high(s, 6), high(s, 11)]);
+    // Inside an array or a dictionary, and before what PDFium ends sooner.
+    let s = b"[(a)\x80-250\xff(b)]TJ /P <</MCID\x800>> BDC";
+    assert_eq!(told(s), [high(s, 4), high(s, 9), high(s, 27)]);
+    let s = b"[[1]\x80 2] TJ";
+    assert_eq!(
+        told(s),
+        [
+            (
+                1..2,
+                "[ opens no array here, inside an array, and one to ISO 32000-2".to_string()
+            ),
+            high(s, 4),
+            (7..8, "] closes nothing".to_string()),
+        ]
+    );
+    let s = b"<</A\xff1 2>> BDC";
+    let none = "<</A\u{fffd}1 2 is no dictionary here, where ISO 32000-2 reads one";
+    assert_eq!(told(s)[..2], [high(s, 4), (0..8, none.to_string())]);
+    // A byte like any other in a string, a hex string or a comment.
+    assert_eq!(told(b"(\x80\xff)Tj %\x80\nQ"), []);
+    let words = "the hex string <41\u{fffd}42> has a byte that's no hex digit";
+    assert_eq!(told(b"<41\x8042> Tj"), [(0..7, words.to_string())]);
+
+    // An inline image's dictionary, to its `ID`, and from where its data
+    // ends to its `EI`; not its data, nor the byte after its `ID`.
+    let s = b"BI /W 1\x80/H\xff1 /BPC 8 /CS /G ID x\x80EI Q";
+    assert_eq!(told(s), [high(s, 7), high(s, 10), high(s, 31)]);
+    assert_eq!(told(b"BI /W 2 /H 1 /BPC 8 /CS /G ID \x80\xff EI"), []);
+    // Among tokens between its data and its `EI`, told whole, not.
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G ID x\x80y\x80z\x80EI";
+    let between = "y\u{fffd}z is between an inline image's data and its EI".to_string();
+    assert_eq!(told(s), [high(s, 31), (32..35, between), high(s, 35)]);
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G ID\x80x EI";
+    let after = "an inline image's ID has no white-space after it".to_string();
+    assert_eq!(told(s), [(27..29, after)]);
+    // Past an `ID` written as a key's value, ISO's dictionary has ended.
+    let s = b"BI /W 1 /A ID /H\x801\xff/BPC 8 /CS /G ID x EI";
+    let no_value = "the key /A has no value".to_string();
+    assert_eq!(told(s), [(8..10, no_value)]);
+    // An object that ends its dictionary, its data after one byte more.
+    let s = b"BI /W 1 /H 1 /BPC 8 /CS /G 7\x80x EI";
+    let ends = "7 ends an inline image's dictionary, where a key is written".to_string();
+    assert_eq!(told(s), [(27..28, ends)]);
+
+    // In the order of their ends with what a page's joins divide.
+    let page = Concat::new(&[b"\x80 %c", b"x\n\xffQ"]);
+    let s = page.bytes();
+    assert_eq!(
+        faults(&page),
+        [
+            (0..1, Fault::HighByte { written: &s[0..1] }),
+            (2..6, Fault::Across { written: &s[2..6] }),
+            (7..8, Fault::HighByte { written: &s[7..8] }),
+        ]
+    );
+    let none = ResCx::none();
+    let mut unwanted = Unwanted::default();
+    let read = tokens(b"q\x80Q [1\xff2]", &none, &Limits::DEFAULT).with_sink(&mut unwanted);
+    assert_eq!(read.count(), 3);
+    assert_eq!(unwanted.0, []);
+}
+
 #[test]
 fn errors_say_where() {
     let lim = &Limits::DEFAULT;
@@ -2794,13 +2875,20 @@ fn a_filters_own_end_of_data_is_iso_s_data() {
         b" EI",
     ]
     .concat();
+    // Past the data, its pattern's bytes as tokens, its 0x80 white-space.
     let eob = s.len() - b"\x08\x00\x80 EI".len();
     assert_eq!(
         told_with(&s, &DECODED),
-        one(
-            eob..eob + 1,
-            "\u{8} is between an inline image's data and its EI"
-        )
+        [
+            (
+                eob..eob + 1,
+                "\u{8} is between an inline image's data and its EI".to_string()
+            ),
+            (
+                eob + 2..eob + 3,
+                "0x80 is white-space here and a regular character to ISO 32000-2".to_string()
+            ),
+        ]
     );
     // Its end of image's last byte past PDFium's end.
     let whole = jpeg(8, 8, b"", BLOCK);
@@ -4398,7 +4486,7 @@ fn faults_change_nothing() {
 #[test]
 fn a_sink_that_wants_none_is_told_none() {
     let s: &[u8] =
-        b"q --5 <4G> /A#2 { ) <</K 1 2 /M>> BI /W 1 /H 1 /BPC 8 /CS /G /L 3 7 x 1 EI BI foo 1";
+        b"q --5 \x80 <4G> /A#2 { ) <</K 1 2 /M>> BI /W 1 /H 1 /BPC 8 /CS /G /L 3 7 x 1 EI BI foo 1";
     let page = Concat::new(&[s, b"(a", b"b) Tj %c", b"Q\n1 2"]);
     let kinds: Vec<_> = faults(&page)
         .iter()
@@ -4410,12 +4498,13 @@ fn a_sink_that_wants_none_is_told_none() {
                 .to_string()
         })
         .collect();
-    // A token's own, an inline image's, the joins' and the operands' at
-    // the end.
+    // A token's own, white-space's, an inline image's, the joins' and the
+    // operands' at the end.
     assert_eq!(
         kinds,
         [
             "Number",
+            "HighByte",
             "HexString",
             "Name",
             "Brace",
@@ -4508,16 +4597,17 @@ fn no_fault_where_iso_reads_alike() {
     // the images but the DeviceN space's, whose colorants' array PDFium
     // doesn't open; the seeds less those with strays and with what PDFium
     // ends sooner, an image's Flate data at its start among them, with
-    // tokens before an image's `EI`, and with a lone `BI`; and pages of
-    // streams split between tokens.
+    // tokens before an image's `EI`, with a lone `BI`, and with 0x80 and
+    // 0xFF read as white-space; and pages of streams split between tokens.
     let nested = PAGE.windows(5).position(|w| w == b"[1 [2").unwrap();
     let mut inputs = moved_inputs();
-    let sooner: [&[u8]; 5] = [
+    let sooner: [&[u8]; 6] = [
         b"{ } ) ]",
         b">> n",
         b"ID x EI\n\n",
         b"EIxyz EI EMC Q",
         b"/BPC 8 ID x EI Q",
+        b"\nQ\xff",
     ];
     inputs.retain(|s| s != PAGE && !sooner.iter().any(|end| s.ends_with(end)));
     inputs.retain(|s| !s.windows(10).any(|w| w == b"[/DeviceN "));

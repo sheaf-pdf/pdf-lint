@@ -408,9 +408,10 @@ impl<'a, 'r> Images<'a, 'r> {
     /// The inline image whose `BI` is at `bi`, or none, where a keyword
     /// is written for its dictionary's key ([`Image`]). Where ISO 32000-2
     /// would read an image otherwise, `sink` is told, if it wants: its
-    /// dictionary's tokens' own faults and its entries', as they're read;
-    /// then, the image read, its keys', what ends its dictionary, its
-    /// `ID`'s, its length's and what's before its `EI`. Where finding its
+    /// dictionary's tokens' own faults, its entries' and its white-space's,
+    /// as they're read; then, the image read, its keys', what ends its
+    /// dictionary, its `ID`'s, its length's and what's before its `EI`,
+    /// white-space among it. Where finding its
     /// data's end would cost more than is left of
     /// [`Limits::image_ends`] for the reading, an error at `bi`
     /// ([`ErrorKind::ImageEnds`]).
@@ -534,7 +535,9 @@ impl<'a, 'r> Images<'a, 'r> {
     /// ends ISO's alone is [`image_dict`]'s to tell); a length that ends
     /// its data elsewhere than ISO's data ends, at `iso`: `data`'s end, or
     /// past it where a decoder ends the data short of the filter's own end
-    /// of data; tokens between there and its `EI`, which ends at `end`.
+    /// of data; tokens between there and its `EI`, which ends at `end`, and
+    /// 0x80 and 0xFF in the white-space from there to it, which ISO asks
+    /// before `EI` (8.9.7), but among those tokens, which are told whole.
     /// ISO's dictionary is read to its first `ID` ([`ImageDict::iso`]).
     #[allow(clippy::too_many_arguments)]
     fn faults(
@@ -560,7 +563,7 @@ impl<'a, 'r> Images<'a, 'r> {
             Ends::Object(object) => {
                 let written = &s[object.clone()];
                 fault::token(written, object.start, sink);
-                fault::nesting(s, object.start, |at, fault| sink.fault(at, fault));
+                fault::nesting(s, object.clone(), |at, fault| sink.fault(at, fault));
                 sink.fault(object.clone(), Fault::DictEnd { written });
             }
             Ends::Id(id) if !dict.ended() && !ascii && !space_after(s, id) => {
@@ -585,12 +588,19 @@ impl<'a, 'r> Images<'a, 'r> {
         }
         // What's between ISO's data and `EI`, the first token to the last:
         // the tokens from the data's end, read as the walk to `EI` read
-        // them, from where ISO's data ends.
+        // them, from where ISO's data ends; and 0x80 and 0xFF in the
+        // white-space from there to the first and from the last to `EI`,
+        // what's between them told whole.
         let mut between: Option<Range<usize>> = None;
+        let mut before_ei = None;
         let mut at = data.end;
         while let Some(Ok((r, _))) = next_raw(s, at, self.lim.depth) {
             if r.end == end && &s[r.clone()] == b"EI" {
+                before_ei = Some(at..r.start);
                 break;
+            }
+            if between.is_none() {
+                spaces_from(s, at..r.start, iso, sink);
             }
             at = r.end;
             if r.end > iso {
@@ -601,6 +611,9 @@ impl<'a, 'r> Images<'a, 'r> {
         if let Some(between) = between {
             let written = &s[between.clone()];
             sink.fault(between, Fault::BeforeEi { written });
+        }
+        if let Some(gap) = before_ei {
+            spaces_from(s, gap, iso, sink);
         }
     }
 
@@ -1347,8 +1360,10 @@ pub(crate) enum Image {
 /// or what PDFium reads as no object (a keyword, `ID` among them, a
 /// closer, a brace or a dictionary that's none), which takes the key out.
 /// Where ISO 32000-2 would read it otherwise, `sink` is told, if it wants:
-/// each key's and value's own faults, where PDFium ends a value before ISO
-/// would among them ([`fault::nesting`]), a key with a `#` escape ISO
+/// 0x80 and 0xFF in the white-space before each key and each value, to the
+/// first `ID`, where ISO's dictionary ends ([`fault::spaces`]); each key's
+/// and value's own faults, where PDFium ends a value before ISO would, and
+/// 0x80 and 0xFF inside it, among them ([`fault::nesting`]), a key with a `#` escape ISO
 /// reads as an image's, a word that's no object as a value, a key whose
 /// value is `ID`, which ends ISO's dictionary, and, the first such `ID`,
 /// its own white-space after it where ISO asks it ([`Fault::AfterId`]);
@@ -1371,6 +1386,10 @@ fn image_dict<'a>(
     let (mut filter, mut ended): ([Option<Range<usize>>; 2], bool) = ([None, None], false);
     loop {
         let (key, kind) = next_raw(s, at, depth).ok_or(unterminated)??;
+        // The white-space before it, while it's ISO's dictionary's.
+        if sink.wants() && !ended {
+            fault::spaces(s, at..key.start, |at, fault| sink.fault(at, fault));
+        }
         match kind {
             Raw::Op if &s[key.clone()] == b"ID" => return Ok(Ends::Id(key)),
             Raw::Op => return Ok(Ends::Keyword(key)),
@@ -1385,10 +1404,15 @@ fn image_dict<'a>(
         let written = &s[value.clone()];
         let id = matches!(kind, Raw::Op) && written == b"ID";
         if sink.wants() {
+            if id {
+                let written = &s[key.clone()];
+                sink.fault(key.clone(), Fault::NoValue { written });
+            }
+            if !ended {
+                fault::spaces(s, key.end..value.start, |at, fault| sink.fault(at, fault));
+            }
             match kind {
                 _ if id => {
-                    let written = &s[key.clone()];
-                    sink.fault(key.clone(), Fault::NoValue { written });
                     let [full, short] = filter.clone();
                     if !ended && !ascii(s, short.or(full)) && !space_after(s, &value) {
                         sink.fault(value.clone(), Fault::AfterId);
@@ -1397,7 +1421,7 @@ fn image_dict<'a>(
                 Raw::Op => sink.fault(value.clone(), Fault::Keyword { written }),
                 Raw::Operand { .. } => {
                     fault::token(written, value.start, sink);
-                    fault::nesting(s, value.start, |at, fault| sink.fault(at, fault));
+                    fault::nesting(s, value.clone(), |at, fault| sink.fault(at, fault));
                 }
             }
         }
@@ -1441,6 +1465,22 @@ fn ascii(s: &[u8], f: Option<Range<usize>>) -> bool {
 /// reads it (7.2.3).
 fn space_after(s: &[u8], id: &Range<usize>) -> bool {
     s.get(id.end).is_some_and(|&c| is_white_space(c))
+}
+
+/// Each 0x80 and 0xFF in the white-space of `gap`, which is between
+/// tokens, from `from` on, told to `sink` ([`fault::spaces`]): what's
+/// before `from` is ISO 32000-2's image data.
+fn spaces_from<'a>(
+    s: &'a [u8],
+    gap: Range<usize>,
+    from: usize,
+    sink: &mut (impl Sink<'a> + ?Sized),
+) {
+    fault::spaces(s, gap, |at, fault| {
+        if at.start >= from {
+            sink.fault(at, fault);
+        }
+    });
 }
 
 /// An inline image's key at `r`, a name: where ISO 32000-2 would read it

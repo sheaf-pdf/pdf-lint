@@ -9,12 +9,12 @@ use std::borrow::Cow;
 use std::ops::Range;
 
 use pdf_objects::{Dict, Object, ObjectId, Str, Value, dict};
-use pdf_tokenizer::decode;
+use pdf_tokenizer::{Kind, decode};
 
 use crate::data::{RunLength, Searched, a85_stop, ei_scan, find};
 use crate::fault::{Fault, Sink};
 use crate::inline::{Walks, ei_from};
-use crate::scan::{Raw, UNCAPPED, next_raw, next_raw_walked};
+use crate::scan::{Raw, UNCAPPED, next_raw, next_raw_walked, tokenizer};
 use crate::{
     Balance, Blend, Color, Concat, ContentWriter, Error, ErrorKind, FillRule, GState, ImageStream,
     Join, Limits, LineCap, LineJoin, MarkedEvent, MarkedNest, NameSet, Operand, Operation,
@@ -1358,9 +1358,10 @@ fn assert_rewritten(content: &Concat, res: &ResCx, rewritten: &[Cow<[u8]>]) {
 /// inside the content, what it borrows what's where it is, and they come
 /// in the order of their ends; and each `BI`'s dictionary ends where
 /// PDFium's walk of it ends, told where an object ends it or it's no
-/// image ([`dict_ends`]). Every operand read with a sink
-/// ([`faulted_operand`]) reads as it does without. Through a sink that
-/// wants none, none is told.
+/// image ([`dict_ends`]); and 0x80 and 0xFF read as white-space are told
+/// where they are, and are white-space to the reading ([`high_bytes`]).
+/// Every operand read with a sink ([`faulted_operand`]) reads as it does
+/// without. Through a sink that wants none, none is told.
 pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
     let s = content.bytes();
     let plain: Vec<_> = content.tokens(res, limits).collect();
@@ -1370,6 +1371,7 @@ pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
     in_order(s, &kept.0);
     divided(content, &plain, &kept.0);
     dict_ends(s, &plain, &kept.0, limits);
+    high_bytes(content, res, limits, &plain, &kept.0);
     // The operands after the last operator or inline image, if no error
     // ends the tokens.
     let at_end: Vec<Range<usize>> = match plain.last() {
@@ -1482,6 +1484,116 @@ fn divided(content: &Concat, tokens: &Read, faults: &[(Range<usize>, Fault)]) {
     }
 }
 
+/// The 0x80 and 0xFF that a read of `content` into `tokens` told among
+/// `faults` as read as white-space ([`Fault::HighByte`]): none in an
+/// operator, a string or an inline image's data; every one in the
+/// white-space between the tokens told, none in a comment, where no error
+/// stops reading before the next token; and each told is white-space to
+/// the reading indeed: with a space in its place, the tokens are where they
+/// were, of the same kinds, and the faults told the same, those aside. That
+/// last for those before the first image's data, as a decoder may look at
+/// what's after its data's end.
+fn high_bytes(
+    content: &Concat,
+    res: &ResCx,
+    limits: &Limits,
+    tokens: &Read,
+    faults: &[(Range<usize>, Fault)],
+) {
+    let s = content.bytes();
+    let told: Vec<usize> = (faults.iter())
+        .filter(|(_, f)| matches!(f, Fault::HighByte { .. }))
+        .map(|(at, _)| at.start)
+        .collect();
+    let string = |w: &[u8]| {
+        w.first() == Some(&b'(') || (w.first() == Some(&b'<') && w.get(1) != Some(&b'<'))
+    };
+    for (r, tok) in tokens.iter().flatten() {
+        let inside = match tok {
+            Tok::Op(_) => r.clone(),
+            Tok::Operand(w) if string(w) => r.clone(),
+            Tok::InlineImage(data) => data.clone(),
+            Tok::Operand(_) => continue,
+        };
+        let at = told.iter().find(|at| inside.contains(at));
+        assert!(at.is_none(), "{at:?} told in {inside:?}");
+    }
+    let mut gap = 0;
+    let ends = tokens
+        .iter()
+        .map(|t| t.as_ref().ok().map(|(r, _)| r.clone()));
+    let next = ends.chain([Some(s.len()..s.len())]);
+    for r in next.map_while(|r| r) {
+        let mut white = tokenizer(s, gap);
+        while let Some(token) = white.next().filter(|t| t.start < r.start) {
+            for (i, &c) in token.bytes.iter().enumerate() {
+                let at = token.start + i;
+                if c == 0x80 || c == 0xFF {
+                    let space = token.kind == Kind::Space;
+                    assert_eq!(told.contains(&at), space, "{at} told as white-space");
+                }
+            }
+        }
+        gap = r.end;
+    }
+    // Those before the first image's data, read as spaces.
+    let first = (tokens.iter().flatten())
+        .find_map(|(_, t)| match t {
+            Tok::InlineImage(data) => Some(data.start),
+            _ => None,
+        })
+        .unwrap_or(s.len());
+    let spaced: Vec<usize> = told.into_iter().filter(|&at| at < first).collect();
+    if spaced.is_empty() {
+        return;
+    }
+    let streams: Vec<Vec<u8>> = (0..content.stream_count())
+        .map(|i| {
+            let range = content.range(i);
+            let mut stream = content.stream(i).to_vec();
+            for at in spaced.iter().filter(|at| range.contains(at)) {
+                stream[at - range.start] = b' ';
+            }
+            stream
+        })
+        .collect();
+    let streams: Vec<&[u8]> = streams.iter().map(Vec::as_slice).collect();
+    let again = Concat::new(&streams);
+    let shape = |t: &Result<(Range<usize>, Tok), Error>| {
+        t.clone().map(|(r, tok)| match tok {
+            Tok::Op(_) => (r, 0, None),
+            Tok::Operand(_) => (r, 1, None),
+            Tok::InlineImage(data) => (r, 2, Some(data)),
+        })
+    };
+    let mut kept = Collected::default();
+    let read: Vec<_> = again.tokens(res, limits).with_sink(&mut kept).collect();
+    let (was, now): (Vec<_>, Vec<_>) = (
+        tokens.iter().map(shape).collect(),
+        read.iter().map(shape).collect(),
+    );
+    assert_eq!(now, was, "the same tokens with spaces for those told");
+    // Each fault where it is, and its kind, as its variant's name.
+    let kinds = |faults: &[(Range<usize>, Fault)]| -> Vec<(Range<usize>, String)> {
+        let spaced = |at: &Range<usize>, f: &Fault| {
+            matches!(f, Fault::HighByte { .. }) && spaced.contains(&at.start)
+        };
+        (faults.iter())
+            .filter(|(at, f)| !spaced(at, f))
+            .map(|(at, f)| {
+                let kind = format!("{f:?}");
+                let kind = kind.split([' ', '{']).next().unwrap_or_default();
+                (at.clone(), kind.to_string())
+            })
+            .collect()
+    };
+    assert_eq!(
+        kinds(&kept.0),
+        kinds(faults),
+        "the same faults with spaces for those told"
+    );
+}
+
 /// What ends the dictionary of the inline image whose `BI` is at `bi`, as
 /// PDFium's `Handle_BeginImage` reads it, written out: from after `BI`, a
 /// name and the token after it, its value, and so on, until what's where
@@ -1558,6 +1670,7 @@ fn in_order(s: &[u8], faults: &[(Range<usize>, Fault)]) {
             | Fault::Long { written }
             | Fault::Closer { written }
             | Fault::Brace { written }
+            | Fault::HighByte { written }
             | Fault::Keyword { written }
             | Fault::Key { written }
             | Fault::NoValue { written }
@@ -1582,6 +1695,7 @@ fn in_order(s: &[u8], faults: &[(Range<usize>, Fault)]) {
                 );
             }
             Fault::Long { written } => assert!(written.len() > 255, "{fault:?}"),
+            Fault::HighByte { written } => assert!(matches!(written, [0x80 | 0xFF]), "{fault:?}"),
             _ => {}
         }
         assert!(!fault.to_string().is_empty());
@@ -2071,8 +2185,9 @@ pub(crate) fn stored(data: &[u8], last: bool) -> Vec<u8> {
 /// ([`KEYS`]); a lone `BI` whose would-be dictionary a range is in, and an
 /// ASCIIHex image whose `>` a range holds in a comment, which taking the
 /// range out would make read otherwise; images in a color space written as
-/// an array; and a color of 32 components and a pattern, more operands than
-/// an operation holds inline: the fuzz target's seeds.
+/// an array; 0x80 and 0xFF where PDFium reads white-space; and a color of
+/// 32 components and a pattern, more operands than an operation holds
+/// inline: the fuzz target's seeds.
 pub fn fixtures() -> Vec<Vec<u8>> {
     let image = |dict: &str, data: &[u8]| {
         [format!("q BI {dict} ID ").as_bytes(), data, b"\nEI Q\n"].concat()
@@ -2154,6 +2269,13 @@ pub fn fixtures() -> Vec<Vec<u8>> {
             b"a",
         ),
         image("/W 3 /H 1 /BPC 8 /CS [/Separation /X /G]", b" EI"),
+        // 0x80 and 0xFF where PDFium reads white-space and ISO 32000-2 doesn't:
+        // between tokens, in an array, a dictionary and an image's
+        // dictionary, after its `ID` and before its `EI`; and in a string and
+        // a comment, where both read a byte.
+        b"q\x801 0 0 1 9 9\xffcm [(a)\x80-2\xff(b)] TJ /P <</MCID\x800>> BDC EMC\n\
+          BI /W 1\x80/H 1 /BPC 8 /CS /G ID\x80x\xffEI (\x80\xff) Tj %\x80\nQ\xff"
+            .to_vec(),
         format!("q /CS0 cs {components}/P0 scn 0 0 9 9 re f Q\n").into_bytes(),
     ]
 }

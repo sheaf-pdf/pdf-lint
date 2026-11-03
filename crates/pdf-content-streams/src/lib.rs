@@ -66,8 +66,7 @@
 //!   rules would read the bytes another way than PDFium's, told with where
 //!   it is to a sink the caller gives ([`Tokens::with_sink`],
 //!   [`Operations::with_sink`], [`Operand::object_with`]); what's read is
-//!   the same. With none, `()`, none is looked for. One isn't told: 0x80
-//!   and 0xFF read as white-space ([`fault`] says).
+//!   the same. With none, `()`, none is looked for.
 //! - **Resources by what they are** ([`Res`]): a resource content draws
 //!   with, its objects named by a 128-bit digest of them ([`ResId`],
 //!   XXH3-128), so that equal resources are written once and named alike,

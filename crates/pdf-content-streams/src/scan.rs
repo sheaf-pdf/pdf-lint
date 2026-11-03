@@ -147,6 +147,21 @@ pub(crate) enum Event<'a> {
     Unmade,
 }
 
+impl<'a> Event<'a> {
+    /// The token read, but for [`Unmade`](Event::Unmade), which reads none.
+    pub(crate) fn token(&self) -> Option<Token<'a>> {
+        match *self {
+            Event::Leaf(token)
+            | Event::Word(token)
+            | Event::Open(token)
+            | Event::Key(token)
+            | Event::NotKey(token)
+            | Event::Close(token) => Some(token),
+            Event::Unmade => None,
+        }
+    }
+}
+
 /// What's told each step of a [`walk`]; `()` heeds none.
 pub(crate) trait Visit<'a> {
     fn visit(&mut self, event: Event<'a>);

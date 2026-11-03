@@ -209,9 +209,10 @@ pub struct Tokens<'a, 'r, S = ()> {
     /// pushed with that keyword, its dictionary not read again.
     lone: Vec<(usize, usize)>,
     /// The faults of the operand being read where PDFium ends what it
-    /// holds before ISO 32000-2 would, held to be told in the order of
-    /// their ends with what [`across`](Tokens::across) tells of it, the
-    /// last to be told first.
+    /// holds before ISO 32000-2 would, or of the white-space before a
+    /// token, held to be told in the order of their ends with what a join
+    /// divides of it ([`across`](Tokens::across), [`gap`](Tokens::gap)),
+    /// the last to be told first.
     held: Vec<(Range<usize>, Fault<'a>)>,
     sink: S,
 }
@@ -233,10 +234,10 @@ impl<'a, S: Sink<'a>> FusedIterator for Tokens<'a, '_, S> {}
 impl<'a, 'r, S> Tokens<'a, 'r, S> {
     /// The same tokens, from where these are, with where ISO 32000-2 would
     /// read them otherwise told to `sink` ([`fault`](crate::fault)): a
-    /// token's own faults, an inline image's, and, over a page's streams
-    /// joined, a string, a comment or an inline image that runs from one
-    /// into the next. A sink borrowed, `&mut S`, is one, so it can be read
-    /// after.
+    /// token's own faults, an inline image's, 0x80 and 0xFF read as
+    /// white-space, and, over a page's streams joined, a string, a comment
+    /// or an inline image that runs from one into the next. A sink
+    /// borrowed, `&mut S`, is one, so it can be read after.
     ///
     /// ```
     /// use pdf_content_streams::fault::{Fault, Sink};
@@ -316,7 +317,7 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
     /// would read it otherwise; once, and nothing after an error.
     pub(crate) fn finish(&mut self) {
         if std::mem::take(&mut self.ended) && self.sink.wants() {
-            self.divided(self.at..self.s.len(), true);
+            self.gap(self.at..self.s.len());
         }
     }
 
@@ -338,7 +339,7 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
         let gap = self.at;
         self.at = r.end;
         if self.sink.wants() {
-            self.divided(gap..r.start, true);
+            self.gap(gap..r.start);
         }
         if self
             .lone
@@ -395,7 +396,7 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
         if self.sink.wants() {
             if let Tok::Operand(written) = tok {
                 fault::token(written, r.start, &mut self.sink);
-                fault::nesting(s, r.start, |at, fault| self.held.push((at, fault)));
+                fault::nesting(s, r.clone(), |at, fault| self.held.push((at, fault)));
                 self.held.reverse();
             }
             self.across(r.clone(), None);
@@ -404,6 +405,20 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
             }
         }
         Some(Ok((r, tok)))
+    }
+
+    /// What's between tokens at `gap`, white-space and comments, told where
+    /// ISO 32000-2 would read it otherwise: each 0x80 and 0xFF in its
+    /// white-space ([`Fault::HighByte`]), and what a join divides
+    /// ([`divided`](Tokens::divided)), in the order of their ends.
+    fn gap(&mut self, gap: Range<usize>) {
+        let s = self.s;
+        fault::spaces(s, gap.clone(), |at, fault| self.held.push((at, fault)));
+        self.held.reverse();
+        self.divided(gap, true);
+        while let Some((at, fault)) = self.held.pop() {
+            self.sink.fault(at, fault);
+        }
     }
 
     /// The next join not yet passed: the space before a stream.

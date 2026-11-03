@@ -25,6 +25,11 @@
 //!   same, as the image is read; and a `BI` that begins none,
 //!   [`LoneBi`](Fault::LoneBi), as reading passes the keyword that makes
 //!   it one.
+//! - **White-space's** ([`HighByte`](Fault::HighByte), 0x80 and 0xFF, which
+//!   are white-space to PDFium and regular characters to ISO 32000-2,
+//!   7.2.3): the same, as reading passes the white-space between tokens,
+//!   inside an array or a dictionary among it, and in an inline image's
+//!   dictionary, as far as ISO's runs, and between its data and its `EI`.
 //! - **A page's** ([`Across`](Fault::Across)): the same, over a page's
 //!   streams joined ([`Concat::tokens`](crate::Concat::tokens),
 //!   [`Concat::operations`](crate::Concat::operations)).
@@ -41,21 +46,21 @@
 //! Each is told once, as reading passes its end: faults come in the order
 //! of their ends.
 //!
-//! One reading isn't told: 0x80 and 0xFF are white-space to PDFium and
-//! regular bytes to ISO 32000-2 (7.2.3), so where one is outside a string,
-//! a comment or an inline image's data, ISO reads a word or a name on over
-//! it, or a word of its own. Only as the byte after an inline image's `ID`
-//! is it told, as [`AfterId`](Fault::AfterId): ISO's white-space isn't
-//! there.
+//! Where 0x80 or 0xFF is outside a string, a comment or an inline image's
+//! data, ISO reads a word or a name on over it, or a word of its own: a
+//! [`HighByte`](Fault::HighByte) each. As the byte after an inline image's
+//! `ID`, where ISO asks white-space, it's an [`AfterId`](Fault::AfterId)
+//! alone, not both.
 
 use std::borrow::Cow;
 use std::ops::Range;
 
+use memchr::memchr2;
 use pdf_tokenizer::decode::{self, NumberError, pdfium};
-use pdf_tokenizer::is_white_space;
+use pdf_tokenizer::{Kind, is_white_space};
 
 use crate::operand::{STRING, WORD};
-use crate::scan::{Event, TOP, UNCAPPED, Visit, is_number, walk};
+use crate::scan::{Event, TOP, UNCAPPED, Visit, is_number, tokenizer, walk};
 
 /// Where faults are told: a checker keeps them; `()` drops them, and
 /// wants none, so none is looked for. A fault borrows from `'a`, the
@@ -203,6 +208,28 @@ pub enum Fault<'a> {
     #[error("{} is a delimiter here and a regular character to ISO 32000-2", shown(.written))]
     Brace {
         /// The brace.
+        written: &'a [u8],
+    },
+    /// A byte 0x80 or 0xFF where content's white-space is: white-space
+    /// here, as PDFium reads it, ending a word or a name, and passed over
+    /// between tokens; to ISO 32000-2 a regular character, part of the word
+    /// or the name beside it, or a word of its own (7.2.3, a definition,
+    /// neither a "shall" nor a "should"). Told for each such byte between
+    /// tokens, inside an array or a dictionary, in an inline image's
+    /// dictionary as far as ISO's runs, to its first `ID`, and between its
+    /// data, where ISO ends it, and its `EI`, which ISO has after optional
+    /// white-space (8.9.7), but among tokens there, which
+    /// [`BeforeEi`](Fault::BeforeEi) tells whole. Not in a string or a
+    /// comment, where it's a byte like any other, nor in an image's data.
+    /// Nor as the white-space byte
+    /// before an image's data, after its `ID` or the object that ends its
+    /// dictionary: that's [`AfterId`](Fault::AfterId) where ISO asks
+    /// white-space there, the data's first byte where ISO asks none, and
+    /// after an object, [`DictEnd`](Fault::DictEnd)'s, where ISO reads the
+    /// dictionary on.
+    #[error("{} is white-space here and a regular character to ISO 32000-2", byte(.written))]
+    HighByte {
+        /// The byte.
         written: &'a [u8],
     },
     /// A word that's no object where an object is written: an element of
@@ -396,6 +423,13 @@ fn shown(written: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(&written[..written.len().min(40)])
 }
 
+/// A byte in hex, `0x80`, for [`Fault::HighByte`]'s text.
+fn byte(written: &[u8]) -> String {
+    written
+        .first()
+        .map_or_else(String::new, |b| format!("0x{b:02X}"))
+}
+
 /// What's wrong with a name, for [`Fault::Name`]'s text.
 fn name_fault(stray: bool, nul: bool) -> &'static str {
     match (stray, nul) {
@@ -448,38 +482,94 @@ pub(crate) fn token<'a>(written: &'a [u8], at: usize, sink: &mut (impl Sink<'a> 
     read
 }
 
+/// Each 0x80 and 0xFF in `gap`'s white-space, told to `tell` in order
+/// ([`Fault::HighByte`]): `gap` is white-space and comments, as between
+/// tokens, read from its start by PDFium's rules, where 0x80 and 0xFF are
+/// white-space; a comment's bytes are its own. Nothing is read where `gap`
+/// holds neither byte.
+pub(crate) fn spaces<'a>(
+    s: &'a [u8],
+    gap: Range<usize>,
+    mut tell: impl FnMut(Range<usize>, Fault<'a>),
+) {
+    if s.get(gap.clone())
+        .is_none_or(|g| memchr2(0x80, 0xFF, g).is_none())
+    {
+        return;
+    }
+    let mut tokens = tokenizer(s, gap.start);
+    while tokens.offset() < gap.end {
+        let Some(token) = tokens.next() else {
+            return;
+        };
+        if token.kind != Kind::Space {
+            continue;
+        }
+        for (i, &c) in token.bytes.iter().enumerate() {
+            let at = token.start + i;
+            if at >= gap.end {
+                return;
+            }
+            if c == 0x80 || c == 0xFF {
+                let written = &s[at..at + 1];
+                tell(at..at + 1, Fault::HighByte { written });
+            }
+        }
+    }
+}
+
 /// Where PDFium ends what an array or a dictionary token holds before ISO
-/// 32000-2 would, `at` where the token starts in `s`, each told to `tell`
-/// as reading passes its end: a `[` it drops ([`Fault::NestedArray`]),
-/// and a dictionary it reads as none ([`Fault::NoDict`]). Nothing for any
-/// other token. The token was read under a cap on depth, so nothing in it
-/// is deeper.
-pub(crate) fn nesting<'a>(s: &'a [u8], at: usize, tell: impl FnMut(Range<usize>, Fault<'a>)) {
+/// 32000-2 would, `token` where it is in `s`, each told to `tell` as
+/// reading passes its end: a `[` it drops ([`Fault::NestedArray`]), a
+/// dictionary it reads as none ([`Fault::NoDict`]), and 0x80 or 0xFF in
+/// the white-space between what it holds ([`Fault::HighByte`]). Nothing for
+/// any other token. The token was read under a cap on depth, so nothing in
+/// it is deeper. Where it holds neither byte, its arrays' elements are
+/// skimmed, as reading them first did.
+pub(crate) fn nesting<'a>(
+    s: &'a [u8],
+    token: Range<usize>,
+    tell: impl FnMut(Range<usize>, Fault<'a>),
+) {
+    let at = token.start;
     let rest = s.get(at..).unwrap_or_default();
     if !(rest.starts_with(b"[") || rest.starts_with(b"<<")) {
         return;
     }
+    let high = s
+        .get(token)
+        .is_some_and(|t| memchr2(0x80, 0xFF, t).is_some());
     let mut nesting = Nesting {
         s,
         tell,
         open: Vec::new(),
         last: at,
+        high,
+        gap: at,
     };
-    walk(s, at, TOP, UNCAPPED, true, &mut nesting);
+    walk(s, at, TOP, UNCAPPED, !high, &mut nesting);
 }
 
 /// What [`nesting`] tells as a walk reads a token: each array or
 /// dictionary open, a dictionary by where it starts, and where the last
-/// word read ends.
+/// word read ends; and, where the token holds 0x80 or 0xFF (`high`), where
+/// the last token read ends, so that the white-space before the next is
+/// read as it is.
 struct Nesting<'a, T> {
     s: &'a [u8],
     tell: T,
     open: Vec<Option<usize>>,
     last: usize,
+    high: bool,
+    gap: usize,
 }
 
 impl<'a, T: FnMut(Range<usize>, Fault<'a>)> Visit<'a> for Nesting<'a, T> {
     fn visit(&mut self, event: Event<'a>) {
+        if let (true, Some(token)) = (self.high, event.token()) {
+            spaces(self.s, self.gap..token.start, &mut self.tell);
+            self.gap = token.end();
+        }
         match event {
             Event::Open(token) => {
                 let dict = token.bytes.starts_with(b"<<");

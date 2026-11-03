@@ -78,8 +78,9 @@
 //!   image's `/I` is `I`, which PDFium looks up as `Indexed`.
 //! - **Each place ISO 32000-2 reads the content otherwise** than PDFium does
 //!   ([`Rule::Content`]), by the kind of [`Fault`], its text the first's: the
-//!   tokens' and the operations' own, and what's inside an array or a
-//!   dictionary among the operands, which reading it as an object tells. A
+//!   tokens' and the operations' own, 0x80 and 0xFF read as white-space
+//!   among them, and what's inside an array or a dictionary among the
+//!   operands, which reading it as an object tells. A
 //!   dictionary PDFium reads as none is told twice, so: as no dictionary, by
 //!   the tokens, and as what makes it none (a key that's no name, a key with
 //!   no value, a word that's no object), by its reading.
@@ -2277,6 +2278,36 @@ mod tests {
             found
                 .iter()
                 .all(|f| matches!(f.0, Rule::Content | Rule::Operands))
+        );
+    }
+
+    /// A 0x80 or 0xFF that content's reading takes for white-space, where
+    /// ISO 32000-2 reads a regular character, is a kind of fault like any:
+    /// found once a unit, at the first, with how many; one in a string
+    /// isn't, and the rest read as they would with a space there.
+    #[test]
+    fn bytes_read_as_white_space_are_found_once_a_unit() {
+        let data: &[u8] = b"q\x80Q 0 0 m\xff9 9 l S BT (\x80) Tj ET";
+        let mut objects: Vec<(u32, Vec<u8>)> = (tree("3 0 R", "/Resources << >>").into_iter())
+            .map(|(n, body)| (n, body.into_bytes()))
+            .collect();
+        objects.push((3, page("/Contents 10 0 R").into_bytes()));
+        let head = format!("<< /Length {} >>\nstream\n", data.len());
+        objects.push((10, [head.as_bytes(), data, b"\nendstream"].concat()));
+        let objects: Vec<(u32, &[u8])> = (objects.iter())
+            .map(|(n, body)| (*n, body.as_slice()))
+            .collect();
+        let file = fixture::assembled("1.7", &objects, "<< /Size 100 /Root 1 0 R >>");
+        let value = "0x80 is white-space here and a regular character to ISO 32000-2, 2 times";
+        assert_eq!(
+            found(&file),
+            [(
+                Rule::Content,
+                10,
+                "Root/Pages/Kids[0]/Contents".to_string(),
+                value.to_string(),
+                "\u{fffd}".to_string()
+            )]
         );
     }
 
