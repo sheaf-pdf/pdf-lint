@@ -87,7 +87,10 @@
 //! tells of it that the walk doesn't say a [`Rule::Tree`] finding; each kind
 //! once in each object it's in, at its first place there, with how many
 //! times, and a tree not read whole for what isn't the file's fault counted
-//! as not checked. No rule is held to what PDFium's walk tells yet.
+//! as not checked. Between the two, where PDFium's pages part from ISO's,
+//! a viewer's reading, not ISO 32000-2's, is a [`Rule::Viewer`] finding,
+//! each kind once in a file; where an object of the page tree doesn't
+//! read, the two aren't set side by side, which is counted as not checked.
 //!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
@@ -109,7 +112,8 @@
 //! [`Rule::Direct`]); a SpecialCase that comes to false
 //! ([`Rule::Special`]); a reference to no object ([`Rule::Unresolved`]); a
 //! malformed name or number tree ([`Rule::Tree`]); a page tree that breaks
-//! 7.7.3 where the model can't say so ([`Rule::PageTree`]); a held object the
+//! 7.7.3 where the model can't say so ([`Rule::PageTree`]), and where a
+//! viewer's pages part from it ([`Rule::Viewer`]); a held object the
 //! walk never reached ([`Rule::Unreached`]); in an object built whole (or
 //! as [`Options::unlisted`] says), a key the model doesn't list that isn't
 //! exempt ([`Rule::Unlisted`]); a
@@ -724,6 +728,29 @@ pub enum Rule {
     /// column `-`, its table `PageTreeNodeRoot` and its key `-`, where the
     /// catalog is held; what was read of it is found all the same.
     PageTree,
+    /// Where a viewer's pages part from the page tree's: PDFium's, as of
+    /// chromium/8125, as pdf-semantics' walk by its rules reads them, set
+    /// beside its walk by ISO's ([`Rule::PageTree`]'s), a viewer's reading,
+    /// not ISO 32000-2's. Each kind once in a file: the count, how many
+    /// pages a viewer counts where the tree lists another number, at the
+    /// root's `/Count`, else the root, its key `Count`; the pages, the
+    /// first page, of those both count, that a viewer has another object at
+    /// or no page, with how many, at the tree's page there, else the root,
+    /// its key `-`; and the sizes, the first page that's the same object to
+    /// both, a viewer loading it, whose media box, crop box or rotation a
+    /// viewer reads otherwise, with how many, at that page, its key the
+    /// first of `MediaBox`, `CropBox` and `Rotate` that's read otherwise.
+    /// Held where it is, its path and table as a [`Rule::PageTree`]
+    /// finding's. Compared only where both walks read a table of pages, or
+    /// a viewer's finds none, a count of 0: a viewer's walk that stops at a
+    /// node listed inside itself, a `/Parent` chain that loops, a cap or a
+    /// password is pdf-semantics' choice, not PDFium's reading, and
+    /// compares nothing; `/UserUnit`, which both read alike, isn't
+    /// compared. Where an object of the tree doesn't read, what either
+    /// makes of it is the reader's, and they aren't set side by side, which
+    /// is counted as not checked, its column `-`, its table
+    /// `PageTreeNodeRoot` and its key `-`, where the catalog is held.
+    Viewer,
 }
 
 /// A rule a held object breaks.
@@ -805,8 +832,8 @@ pub enum Class {
 /// that can't be told used or not, `Resource` and its category; or a name
 /// or number tree not read whole for what isn't the file's fault, its
 /// column `-`, its table and key the row's whose value its root is; or the
-/// page tree not read so, its column and key `-`, its table
-/// `PageTreeNodeRoot`.
+/// page tree not read so, or a viewer's pages not set beside it, its column
+/// and key `-`, its table `PageTreeNodeRoot`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Unchecked {
     /// The column whose cell it is.
@@ -819,7 +846,8 @@ pub struct Unchecked {
     /// stream that doesn't decode cleanly, content past the file's
     /// budget), or why a name in it can't be looked up, or a resource told;
     /// for a tree, or the page tree, why it isn't read whole (an object of
-    /// it that takes a password).
+    /// it that takes a password), or why a viewer's pages aren't set beside
+    /// the page tree's (an object of it that doesn't read).
     pub why: String,
     pub table: String,
     pub key: String,
@@ -840,7 +868,8 @@ pub struct Report {
     /// can't be: units of it not read, resource names in it that can't be
     /// looked up, and resources that can't be told used or not; name and
     /// number trees whose roots are held not read whole for what isn't the
-    /// file's fault, and the page tree, where its catalog is held; by why.
+    /// file's fault, and the page tree, or a viewer's pages not set beside
+    /// it, where its catalog is held; by why.
     pub unchecked: BTreeMap<Unchecked, usize>,
     /// Keys and elements of held objects the model doesn't list.
     pub unlisted: BTreeMap<Unlisted, usize>,
@@ -1213,17 +1242,17 @@ enum Place {
 /// counts, offsets and lengths, and how many times its kind was found, but
 /// an operator's name, `d0` not `d1`, in an operator's or operands'; a
 /// tree finding's references' numbers and how many times its kind was
-/// found; and a page tree finding's numbers, and how many times its kind
-/// was found; for a key that came in later than the file's version, any value,
-/// as its value isn't what's wrong; and for an object nothing reaches, the
-/// object alone, as which object's reference to it is named follows the
-/// objects' numbers and keys' order.
+/// found; and a page tree or a viewer finding's numbers, and how many
+/// times its kind was found; for a key that came in later than the file's
+/// version, any value, as its value isn't what's wrong; and for an object
+/// nothing reaches, the object alone, as which object's reference to it is
+/// named follows the objects' numbers and keys' order.
 fn like(f: &Finding) -> (String, String, Rule, String) {
     let value = match f.rule {
         Rule::TooNew => String::new(),
         Rule::Reader => f.value.chars().filter(|c| !c.is_ascii_digit()).collect(),
         Rule::Tree => numberless(structure::uncounted(&f.value)),
-        Rule::PageTree => content::uncounted(f.rule, &f.value),
+        Rule::PageTree | Rule::Viewer => content::uncounted(f.rule, &f.value),
         rule if content::counted(rule, &f.key) => content::uncounted(rule, &f.value),
         _ => numberless(&f.value),
     };
@@ -1490,8 +1519,8 @@ struct Walk<'a> {
     /// Where the walk reached each resources dictionary, by where the
     /// source holds it, which [`Walk::content`] tells `unused` by.
     resources_at: HashMap<*const Object, content::Reached<'a>>,
-    /// What the page tree's walk by ISO's rules told, which
-    /// [`Walk::structures`] finds in.
+    /// What the page tree's walk by ISO's rules told, and where the walk by
+    /// PDFium's parts from it, which [`Walk::structures`] finds in.
     page_tree: structure::PageTree,
     /// Where the walk first visited each object of the page tree as one of
     /// its tables, by number, and its root written in place, by none, which
@@ -4003,6 +4032,7 @@ impl Rule {
         Rule::Unused,
         Rule::Content,
         Rule::PageTree,
+        Rule::Viewer,
     ];
 
     /// Its name, as findings and allowances write it.
@@ -4031,6 +4061,7 @@ impl Rule {
             Rule::Unused => "unused",
             Rule::Content => "content",
             Rule::PageTree => "page-tree",
+            Rule::Viewer => "viewer",
         }
     }
 
@@ -7261,6 +7292,7 @@ mod tests {
             Rule::Unused,
             Rule::Content,
             Rule::PageTree,
+            Rule::Viewer,
         ];
         assert!(Rule::ALL.ends_with(&newest));
         let names: Vec<_> = newest.iter().map(|r| r.name()).collect();
@@ -7274,7 +7306,8 @@ mod tests {
                 "resource",
                 "unused",
                 "content",
-                "page-tree"
+                "page-tree",
+                "viewer"
             ]
         );
         assert_eq!(Rule::named("Packed"), None);
