@@ -3,6 +3,8 @@
 //! changes what's read: the values given are the same whatever the sink,
 //! and a sink that doesn't want faults, `()`, has none looked for.
 
+use std::fmt;
+
 use pdf_objects::{ObjectId, Span};
 
 /// Where faults are told: a checker keeps them; `()` drops them, and wants
@@ -208,8 +210,12 @@ pub enum Fault {
     /// A `/Parent` that's absent, or isn't the node that lists it (7.7.3.2,
     /// Table 30; 7.7.3.3, Table 31). What's inherited still comes up `/Parent`
     /// (7.7.3.4). Told only to a sink that wants faults.
-    #[error("a /Parent isn't the node that lists it")]
-    PageTreeParent,
+    #[error(fmt = parent_said)]
+    PageTreeParent {
+        /// The node that lists it; none where that node is written in place,
+        /// which no `/Parent` can name.
+        lister: Option<ObjectId>,
+    },
     /// A `/Parent` written in place, where it's an indirect reference (7.7.3.2,
     /// Table 30; 7.7.3.3, Table 31). It's read as any other.
     #[error("a /Parent is written in place, not as a reference")]
@@ -221,8 +227,14 @@ pub enum Fault {
     /// A node's `/Count` that isn't the pages found under it, at least 1
     /// (7.7.3.2, Table 30, with its erratum 271). It isn't what the walk goes
     /// by. Told only to a sink that wants faults.
-    #[error("a node's /Count isn't the pages under it")]
-    PageTreeCount,
+    #[error(fmt = count_said)]
+    PageTreeCount {
+        /// The `/Count` as written, its references followed, where it's an
+        /// integer; none where it's absent or isn't one.
+        count: Option<i64>,
+        /// How many pages the walk found under the node.
+        under: usize,
+    },
     /// A page with no `/MediaBox`, its own or inherited, that's an array of
     /// four (7.7.3.3, Table 31; 7.9.5). Letter stands for it.
     #[error("a page has no /MediaBox")]
@@ -240,4 +252,35 @@ pub enum Fault {
     /// isn't read, or bytes that aren't UTF-8. It's as though it weren't written.
     #[error("a value in XMP metadata doesn't read")]
     XmpValue,
+}
+
+/// What [`Fault::PageTreeParent`] says: the node that lists it, by its number,
+/// or that it's written in place.
+fn parent_said(lister: &Option<ObjectId>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match lister {
+        Some((n, g)) => write!(f, "a /Parent isn't {n} {g} R, the node that lists it"),
+        None => f.write_str("a /Parent isn't the node that lists it, which is written in place"),
+    }
+}
+
+/// What [`Fault::PageTreeCount`] says: the count as written, where it's an
+/// integer, beside the pages under the node.
+fn count_said(count: &Option<i64>, under: &usize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let one = *under == 1;
+    match count {
+        Some(count) => {
+            let pages = if one { "page" } else { "pages" };
+            write!(
+                f,
+                "a node's /Count is {count}, with {under} {pages} under it"
+            )
+        }
+        None => {
+            let are = if one { "is" } else { "are" };
+            write!(
+                f,
+                "a node's /Count isn't a number of pages: {under} {are} under it"
+            )
+        }
+    }
 }

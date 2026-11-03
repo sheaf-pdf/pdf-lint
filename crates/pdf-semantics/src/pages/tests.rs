@@ -1665,8 +1665,10 @@ fn by_iso_s_rules_a_kid_in_place_is_read_and_said() {
     assert_eq!(list, [FIVE, (None, 0), SIX, FOUR]);
     assert!(faults.contains(&Fault::PageTreeKidDirect), "{faults:?}");
     // The kid in place has no /Parent, and the count of the root is off by it.
-    assert!(faults.contains(&Fault::PageTreeParent));
-    assert!(faults.contains(&Fault::PageTreeCount));
+    let lister = Some((3, 0));
+    assert!(faults.contains(&Fault::PageTreeParent { lister }));
+    let count = Some(3);
+    assert!(faults.contains(&Fault::PageTreeCount { count, under: 4 }));
 }
 
 #[test]
@@ -1715,26 +1717,49 @@ fn by_iso_s_rules_each_departure_of_a_node_is_said() {
         &format!("<< {kids} /Kids null >>"),
         Fault::PageTreeNoKids,
     );
-    // A /Count that isn't what's under it, at any node.
+    // A /Count that isn't what's under it, at any node, as written where it's
+    // an integer.
     let node = "/Type /Pages /Parent 2 0 R /Kids [5 0 R 6 0 R]";
-    for count in ["/Count 1", "/Count 3", "", "/Count 2.0", "/Count (2)"] {
-        said(3, &format!("<< {node} {count} >>"), Fault::PageTreeCount);
+    let counts = [
+        ("/Count 1", Some(1)),
+        ("/Count 3", Some(3)),
+        ("", None),
+        ("/Count 2.0", None),
+        ("/Count (2)", None),
+    ];
+    for (written, count) in counts {
+        let fault = Fault::PageTreeCount { count, under: 2 };
+        said(3, &format!("<< {node} {written} >>"), fault);
     }
     // One right by a reference is right.
     let mut objects = well_formed();
     objects[2].1 = format!("<< {node} /Count 8 0 R >>");
     objects.push(object(8, "2"));
     assert_eq!(iso(&objects).1, []);
-    // A /Parent that isn't the holder, or isn't there, of a node or a page.
+    // A /Parent that isn't the holder, or isn't there, of a node or a page,
+    // each the holder's.
     let kids = "/Type /Pages /Kids [5 0 R 6 0 R] /Count 2";
-    said(3, &format!("<< {kids} >>"), Fault::PageTreeParent);
+    let (root, node) = (Some((2, 0)), Some((3, 0)));
+    said(
+        3,
+        &format!("<< {kids} >>"),
+        Fault::PageTreeParent { lister: root },
+    );
     said(
         3,
         &format!("<< {kids} /Parent 4 0 R >>"),
-        Fault::PageTreeParent,
+        Fault::PageTreeParent { lister: root },
     );
-    said(5, "<< /Type /Page >>", Fault::PageTreeParent);
-    said(5, "<< /Type /Page /Parent 2 0 R >>", Fault::PageTreeParent);
+    said(
+        5,
+        "<< /Type /Page >>",
+        Fault::PageTreeParent { lister: node },
+    );
+    said(
+        5,
+        "<< /Type /Page /Parent 2 0 R >>",
+        Fault::PageTreeParent { lister: node },
+    );
     // /Parent written in place.
     said(
         5,
@@ -1799,7 +1824,8 @@ fn by_iso_s_rules_the_count_doesn_t_end_the_table() {
     ];
     let (list, faults) = iso(&objects);
     assert_eq!(list.len(), 3);
-    assert_eq!(faults, [Fault::PageTreeCount]);
+    let count = Some(1);
+    assert_eq!(faults, [Fault::PageTreeCount { count, under: 3 }]);
     assert_eq!(open(&objects).unwrap().len(), 1);
     let table = open_with(&objects, Rules::Iso, &Limits::DEFAULT);
     assert_eq!(table.counted, 3);
@@ -1819,6 +1845,115 @@ fn by_iso_s_rules_a_node_s_count_is_of_what_s_under_it_alone() {
         object(5, "<< /Type /Page /Parent 4 0 R >>"),
     ];
     assert_eq!(iso(&objects).1, []);
+}
+
+#[test]
+fn by_iso_s_rules_a_count_and_a_parent_say_what_the_walk_found() {
+    // A node's /Count as written where it's an integer, and the pages under
+    // it, one page said as one.
+    let cases = [
+        (
+            "/Count 1",
+            "5 0 R 6 0 R",
+            Some(1),
+            2,
+            "is 1, with 2 pages under it",
+        ),
+        (
+            "/Count 3",
+            "5 0 R",
+            Some(3),
+            1,
+            "is 3, with 1 page under it",
+        ),
+        (
+            "/Count 8 0 R",
+            "5 0 R",
+            Some(0),
+            1,
+            "is 0, with 1 page under it",
+        ),
+        (
+            "/Count (1)",
+            "5 0 R",
+            None,
+            1,
+            "isn't a number of pages: 1 is under it",
+        ),
+        (
+            "",
+            "5 0 R 6 0 R",
+            None,
+            2,
+            "isn't a number of pages: 2 are under it",
+        ),
+    ];
+    for (written, kids, count, under, said) in cases {
+        let mut objects = well_formed();
+        objects[2].1 = format!("<< /Type /Pages /Parent 2 0 R /Kids [{kids}] {written} >>");
+        objects.push(object(8, "0"));
+        let (_, faults) = iso(&objects);
+        let fault = Fault::PageTreeCount { count, under };
+        assert!(faults.contains(&fault), "{written}: {faults:?}");
+        assert_eq!(fault.to_string(), format!("a node's /Count {said}"));
+    }
+    // An empty tree's root, which counts none.
+    let objects = [
+        catalog_object(),
+        object(2, "<< /Type /Pages /Kids [] /Count 0 >>"),
+    ];
+    let empty = Fault::PageTreeCount {
+        count: Some(0),
+        under: 0,
+    };
+    assert!(iso(&objects).1.contains(&empty));
+    assert_eq!(
+        empty.to_string(),
+        "a node's /Count is 0, with 0 pages under it"
+    );
+
+    // A /Parent that isn't the node that lists it, which has a number.
+    let (_, faults) = iso_with(3, "<< /Type /Pages /Kids [5 0 R 6 0 R] /Count 2 >>");
+    let numbered = Fault::PageTreeParent {
+        lister: Some((2, 0)),
+    };
+    assert_eq!(
+        faults.iter().filter(|fault| **fault == numbered).count(),
+        1,
+        "{faults:?}"
+    );
+    assert_eq!(
+        numbered.to_string(),
+        "a /Parent isn't 2 0 R, the node that lists it"
+    );
+    // Under a node written in place, a kid or the root, no /Parent can name
+    // it: the page's says so, and the kid's own names the root.
+    let in_place = Fault::PageTreeParent { lister: None };
+    let objects = [
+        catalog_object(),
+        object(
+            2,
+            "<< /Type /Pages /Kids [<< /Type /Pages /Kids [3 0 R] /Count 1 >>] /Count 1 /MediaBox [0 0 1 1] >>",
+        ),
+        object(3, "<< /Type /Page /Parent 2 0 R >>"),
+    ];
+    let (list, faults) = iso(&objects);
+    assert_eq!(list, [(Some((3, 0)), 0)]);
+    assert!(faults.contains(&in_place), "{faults:?}");
+    assert!(faults.contains(&numbered), "{faults:?}");
+    let objects = [
+        object(
+            1,
+            "<< /Type /Catalog /Pages << /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 1 1] >> >>",
+        ),
+        object(3, "<< /Type /Page /Parent 2 0 R >>"),
+    ];
+    let (_, faults) = iso(&objects);
+    assert!(faults.contains(&in_place), "{faults:?}");
+    assert_eq!(
+        in_place.to_string(),
+        "a /Parent isn't the node that lists it, which is written in place"
+    );
 }
 
 #[test]
@@ -2092,19 +2227,27 @@ fn what_only_a_sink_reads_fails_no_walk() {
             "<< /Type /Pages /Kids [3 0 R] /Count 7 0 R >>",
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] >>",
             None,
-            Fault::PageTreeCount,
+            Fault::PageTreeCount {
+                count: None,
+                under: 1,
+            },
         ),
         (
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
             "<< /Type /Pages /Kids [4 0 R] /Count 1 /Parent 7 0 R >>",
             Some("<< /Type /Page /MediaBox [0 0 1 1] >>"),
-            Fault::PageTreeParent,
+            Fault::PageTreeParent {
+                lister: Some((2, 0)),
+            },
         ),
         (
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
             "<< /Type /Pages /Kids [4 0 R] /Count 7 0 R /Parent 2 0 R >>",
             Some("<< /Type /Page /Parent 3 0 R /MediaBox [0 0 1 1] >>"),
-            Fault::PageTreeCount,
+            Fault::PageTreeCount {
+                count: None,
+                under: 1,
+            },
         ),
     ];
     let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);

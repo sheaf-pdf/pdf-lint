@@ -1129,7 +1129,7 @@ impl<'o, R: Resolve<'o>, S: Sink + ?Sized> Walk<'o, '_, R, S> {
             None => None,
         };
         if parent.is_none() || parent != holder {
-            self.say(at, Fault::PageTreeParent);
+            self.say(at, Fault::PageTreeParent { lister: holder });
         }
     }
 
@@ -1144,9 +1144,9 @@ impl<'o, R: Resolve<'o>, S: Sink + ?Sized> Walk<'o, '_, R, S> {
             Ok(found) => found.and_then(|(_, count)| count.as_integer()),
             Err(_) => None,
         };
-        let under = (self.pages.len() - first) as i64;
-        if count != Some(under) || under == 0 {
-            self.say(at, Fault::PageTreeCount);
+        let under = self.pages.len() - first;
+        if count != Some(under as i64) || under == 0 {
+            self.say(at, Fault::PageTreeCount { count, under });
         }
     }
 
