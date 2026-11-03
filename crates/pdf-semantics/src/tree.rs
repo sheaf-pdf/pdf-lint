@@ -354,22 +354,42 @@ impl<'o, R: Resolve<'o>, S: Sink, K: Key<'o>> Walk<'o, R, S, K> {
     }
 
     /// A node's `/Limits`, none where they aren't known; what's wrong with
-    /// them said, as a sink's the only one that asks.
+    /// them said, as a sink's the only one that asks. Where they don't read
+    /// past a cap or for a password, they aren't checked, and that's said.
     fn bounds(&mut self, node: &'o Dict) -> Option<(K, K)> {
         let written = node.get(b"Limits")?;
         let bad = |walk: &mut Self| {
             walk.say(written.at, Fault::TreeBadLimits);
             None
         };
-        let limits = followed(&self.objects, written).ok().flatten();
+        let limits = self.for_check(written).ok()?;
         let [least, greatest] = limits.and_then(Object::as_array).unwrap_or_default() else {
             return bad(self);
         };
-        let key = |written| followed(&self.objects, written).ok().flatten().map(K::read);
-        match (key(least), key(greatest)) {
+        let (least, greatest) = (self.for_check(least), self.for_check(greatest));
+        let (Ok(least), Ok(greatest)) = (least, greatest) else {
+            return None;
+        };
+        match (least.map(K::read), greatest.map(K::read)) {
             (Some(Ok(least)), Some(Ok(greatest))) if least <= greatest => Some((least, greatest)),
             (Some(Err(Fault::TreeKeyUnread)), _) | (_, Some(Err(Fault::TreeKeyUnread))) => None,
             _ => bad(self),
+        }
+    }
+
+    /// `written` followed for a check, which nothing else reads: none where
+    /// it names nothing or doesn't read, which the check holds as wrong; an
+    /// error where an object on the way is past a cap or takes a password,
+    /// said as not checked.
+    fn for_check(&mut self, written: &'o Object) -> Result<Option<&'o Object>, ()> {
+        match followed(&self.objects, written) {
+            Ok(object) => Ok(object),
+            Err(unreadable) if unreadable.why == Why::Damaged => Ok(None),
+            Err(unreadable) => {
+                let (id, why) = (unreadable.id, unreadable.why);
+                self.say(written.at, Fault::Unchecked { id, why });
+                Err(())
+            }
         }
     }
 

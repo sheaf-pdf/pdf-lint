@@ -105,6 +105,44 @@ pub fn pages<'o, R: Resolve<'o>, S: Sink + ?Sized>(
     limits: &Limits,
     sink: &mut S,
 ) -> Result<Pages<'o>, Error> {
+    let walk = walked(objects, catalog, rules, limits, sink)?;
+    if walk.pdfium && walk.pages.is_empty() {
+        return Err(Error::NoPages);
+    }
+    let counted = walk.count.unwrap_or(walk.pages.len());
+    Ok(Pages {
+        pages: walk.pages,
+        counted,
+    })
+}
+
+/// The count of pages PDFium gives the tree at `catalog`'s `/Pages`, as
+/// [`Pages::counted`] is under [`Rules::Pdfium`], also where [`pages`] by
+/// those rules gives [`Error::NoPages`] for no page under the root: PDFium
+/// gives its count all the same, the root's `/Count` where it goes by one,
+/// and loads no page. 0 where the catalog has no `/Pages` that's a
+/// dictionary; any other error as [`pages`] gives it.
+pub fn counted<'o, R: Resolve<'o>>(
+    objects: R,
+    catalog: &'o Dict,
+    limits: &Limits,
+) -> Result<usize, Error> {
+    match walked(objects, catalog, Rules::Pdfium, limits, &mut ()) {
+        Ok(walk) => Ok(walk.count.unwrap_or(walk.pages.len())),
+        Err(Error::NoPages) => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
+/// The tree at `catalog`'s `/Pages` walked by `rules`, as [`pages`] walks
+/// it, but by PDFium's rules a walk that found no page under the root.
+fn walked<'o, 'r, R: Resolve<'o>, S: Sink + ?Sized>(
+    objects: R,
+    catalog: &'o Dict,
+    rules: Rules,
+    limits: &Limits,
+    sink: &'r mut S,
+) -> Result<Walk<'o, 'r, R, S>, Error> {
     let mut walk = Walk {
         objects,
         sink,
@@ -121,11 +159,7 @@ pub fn pages<'o, R: Resolve<'o>, S: Sink + ?Sized>(
         object: None,
     };
     walk.table(catalog)?;
-    let counted = walk.count.unwrap_or(walk.pages.len());
-    Ok(Pages {
-        pages: walk.pages,
-        counted,
-    })
+    Ok(walk)
 }
 
 /// A file's pages, in order, as [`pages`] gives them.
@@ -142,7 +176,8 @@ impl<'o> Pages<'o> {
     }
 
     /// Whether it lists none, which only ISO's rules can give: PDFium's make
-    /// that [`Error::NoPages`].
+    /// that [`Error::NoPages`], and [`counted`](fn@counted) says what PDFium
+    /// counts then.
     pub fn is_empty(&self) -> bool {
         self.pages.is_empty()
     }
@@ -344,7 +379,7 @@ pub enum Error {
     #[error("the page tree lists too many pages")]
     TooManyPages,
     /// A catalog with no `/Pages` that's a dictionary, or, by PDFium's rules,
-    /// no pages under it.
+    /// no pages under it, though PDFium may count some ([`counted`](fn@counted)).
     #[error("the file has no pages")]
     NoPages,
     /// An object on the way past a cap, that takes a password, or whose bytes
@@ -559,11 +594,7 @@ impl<'o, R: Resolve<'o>, S: Sink + ?Sized> Walk<'o, '_, R, S> {
         };
         self.object = id;
         if self.pdfium {
-            self.walk_pdfium_root(id, root, object.at)?;
-            if self.pages.is_empty() {
-                return Err(Error::NoPages);
-            }
-            return Ok(());
+            return self.walk_pdfium_root(id, root, object.at);
         }
         if id.is_none() {
             self.say(object.at, Fault::PageTreeRootDirect);
@@ -1116,7 +1147,8 @@ impl<'o, R: Resolve<'o>, S: Sink + ?Sized> Walk<'o, '_, R, S> {
 
     /// Holds what `dict` says of its `/Parent` to `holder`, the node that lists
     /// it, when a checker wants to know. A walk without one never reads a node's
-    /// `/Parent`, so one that fails here fails nothing: it's that `/Parent` said.
+    /// `/Parent`, so one that fails here fails nothing: one that doesn't read is
+    /// that `/Parent` said, and one past a cap or a password isn't checked.
     fn check_parent(&mut self, dict: &'o Dict, at: Option<Span>, holder: Option<ObjectId>) {
         if !self.checking() {
             return;
@@ -1124,7 +1156,8 @@ impl<'o, R: Resolve<'o>, S: Sink + ?Sized> Walk<'o, '_, R, S> {
         let parent = match dict.get(b"Parent") {
             Some(written) => match self.reach(written, HOPS) {
                 Ok(Reached::Object(_, id)) => id,
-                _ => None,
+                Ok(_) => None,
+                Err(stopped) => return self.unchecked(written.at, stopped),
             },
             None => None,
         };
@@ -1135,18 +1168,31 @@ impl<'o, R: Resolve<'o>, S: Sink + ?Sized> Walk<'o, '_, R, S> {
 
     /// Holds a node's `/Count` to the pages found under it, when a checker
     /// wants to know. A walk without one never reads it here, so one that fails
-    /// here fails nothing: it's that `/Count` said.
+    /// here fails nothing: one that doesn't read is that `/Count` said, and one
+    /// past a cap or a password isn't checked.
     fn check_count(&mut self, node: &'o Dict, at: Option<Span>, first: usize) {
         if !self.checking() {
             return;
         }
         let count = match self.found(node, b"Count") {
             Ok(found) => found.and_then(|(_, count)| count.as_integer()),
-            Err(_) => None,
+            Err(stopped) => {
+                let written = node.get(b"Count").and_then(|count| count.at);
+                return self.unchecked(written.or(at), stopped);
+            }
         };
         let under = self.pages.len() - first;
         if count != Some(under as i64) || under == 0 {
             self.say(at, Fault::PageTreeCount { count, under });
+        }
+    }
+
+    /// Says that what a check reads at `at` wasn't checked, as `stopped`, an
+    /// object on the way past a cap or that takes a password, has it.
+    fn unchecked(&mut self, at: Option<Span>, stopped: Error) {
+        if let Error::Unreadable(unreadable) = stopped {
+            let (id, why) = (unreadable.id, unreadable.why);
+            self.say(at, Fault::Unchecked { id, why });
         }
     }
 

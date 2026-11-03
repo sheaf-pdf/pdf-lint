@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pdf_semantics::pages::{Error, Origin, Page, Pages, Rect, pages};
+use pdf_semantics::pages::{Error, Origin, Page, Pages, Rect, counted, pages};
 use pdf_semantics::{Limits, Rules, catalog};
 use pdf_structure::bytes::{Options, Reading};
 
@@ -175,5 +175,53 @@ fn every_case_reads_as_pdfium_reads_it() {
             wrong.push(format!("{name}: in differ.tsv but no case"));
         }
     }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The count PDFium's answer gives.
+fn count_of(answer: &str) -> Option<usize> {
+    answer
+        .strip_prefix("count ")?
+        .split(' ')
+        .next()?
+        .parse()
+        .ok()
+}
+
+#[test]
+fn where_no_page_is_under_the_root_the_count_is_pdfiums() {
+    let recorded = recorded();
+    let mut wrong = Vec::new();
+    let mut none_under = 0;
+    for case in rows(&set().join("cases.tsv")) {
+        let name = &case[0];
+        let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+        let Ok(reading) = Reading::open(&bytes[..], &Options::DEFAULT) else {
+            continue;
+        };
+        let objects = &reading;
+        let Ok(Some(catalog)) = catalog(objects, reading.trailer().dict()) else {
+            continue;
+        };
+        let walked = pages(objects, catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
+        let ours = counted(objects, catalog, &Limits::DEFAULT);
+        match walked {
+            Err(Error::NoPages) => {
+                none_under += 1;
+                let theirs = recorded.get(name).and_then(|answer| count_of(answer));
+                if ours.as_ref().ok() != theirs.as_ref() {
+                    wrong.push(format!("{name}: PDFium counts {theirs:?}, here {ours:?}"));
+                }
+            }
+            Ok(table) if ours != Ok(table.counted()) => {
+                wrong.push(format!(
+                    "{name}: the table counts {}, here {ours:?}",
+                    table.counted()
+                ));
+            }
+            _ => {}
+        }
+    }
+    assert!(none_under > 0, "a case with no page under its root");
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

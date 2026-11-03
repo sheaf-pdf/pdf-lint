@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use pdf_objects::{ObjectId, Span};
+use pdf_objects::{ObjectId, Span, Why};
 
 /// Where faults are told: a checker keeps them; `()` drops them, and wants
 /// none, so none is looked for. A fault owns nothing, so a sink can keep it
@@ -78,6 +78,21 @@ pub enum Fault {
     Damaged {
         /// The object.
         id: ObjectId,
+    },
+    /// An object only a check reads, a page tree node's `/Count` or a
+    /// `/Parent`, or a name or number tree node's `/Limits` or a key of
+    /// them, that doesn't read for what isn't the file's fault: past a cap
+    /// the reader reads under, for a password, or as the source didn't give
+    /// its bytes. It's no departure from ISO 32000-2: what the object holds
+    /// isn't checked, and the walk goes on, as only the check reads it. Told
+    /// only to a sink that wants faults.
+    #[error(fmt = unchecked_said)]
+    Unchecked {
+        /// The object.
+        id: ObjectId,
+        /// Why it doesn't read: [`Why::Limit`], [`Why::Locked`] or
+        /// [`Why::Source`].
+        why: Why,
     },
     /// A node, or an array of one, that the tree reaches by reference for
     /// a second time, by a loop or by two parents: each node has one place
@@ -263,11 +278,27 @@ fn parent_said(lister: &Option<ObjectId>, f: &mut fmt::Formatter<'_>) -> fmt::Re
     }
 }
 
+/// What [`Fault::Unchecked`] says: the object, and why it doesn't read.
+fn unchecked_said(id: &ObjectId, why: &Why, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let (n, g) = id;
+    let what = match why {
+        Why::Limit => "is past a cap it's read under",
+        Why::Locked => "takes a password",
+        Why::Source => "wasn't given by the source",
+        _ => "doesn't read",
+    };
+    write!(f, "{n} {g} R {what}, so what it holds isn't checked")
+}
+
 /// What [`Fault::PageTreeCount`] says: the count as written, where it's an
-/// integer, beside the pages under the node.
+/// integer, beside the pages under the node; where it's those pages, as it
+/// can be only for none, that a node has at least one.
 fn count_said(count: &Option<i64>, under: &usize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let one = *under == 1;
     match count {
+        Some(0) if *under == 0 => f.write_str(
+            "a node's /Count is 0, with no pages under it, where a node has at least one",
+        ),
         Some(count) => {
             let pages = if one { "page" } else { "pages" };
             write!(

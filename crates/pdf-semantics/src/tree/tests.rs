@@ -986,12 +986,17 @@ fn limits_are_read_only_for_a_sink_that_wants_them() {
     assert_eq!(walk.count(), 1);
     assert_eq!(told.asked.get(), 3, "and /Limits");
 
+    // What doesn't read is bad /Limits; past a cap or a password, unchecked.
     for why in [Why::Damaged, Why::Limit, Why::Locked, Why::Source] {
         let saying = Saying::new(&objects, &[(3, why)]);
         let mut walk = names(&saying, &root, &Limits::DEFAULT, Kept::default());
         assert_eq!(walk.by_ref().map(Result::unwrap).count(), 1, "{why:?}");
         assert!(walk.whole(), "{why:?}");
-        assert_eq!(walk.into_sink().faults(), [Fault::TreeBadLimits], "{why:?}");
+        let said = match why {
+            Why::Damaged => Fault::TreeBadLimits,
+            why => Fault::Unchecked { id: (3, 0), why },
+        };
+        assert_eq!(walk.into_sink().faults(), [said], "{why:?}");
     }
 }
 
@@ -1107,6 +1112,53 @@ fn what_doesn_t_read_is_said_or_ends_the_walk() {
     let saying = Saying::new(&objects, &[(1, Why::Locked)]);
     let mut walk = numbers(&saying, &root, &Limits::DEFAULT, ());
     assert_eq!(walk.next().unwrap().unwrap_err().why, Why::Locked);
+}
+
+#[test]
+fn limits_that_don_t_read_past_a_cap_or_a_password_aren_t_checked() {
+    // /Limits by reference, and a key of them by reference: object 3.
+    let shapes: [&[&str]; 2] = [
+        &[
+            "<< /Kids [2 0 R] >>",
+            "<< /Limits 3 0 R /Names [(a) 0] >>",
+            "[(b) (b)]",
+        ],
+        &[
+            "<< /Kids [2 0 R] >>",
+            "<< /Limits [3 0 R (b)] /Names [(a) 0] >>",
+            "(b)",
+        ],
+    ];
+    let root = Object::reference(1);
+    for objects in shapes {
+        let objects = file(objects);
+        for why in [Why::Limit, Why::Locked, Why::Source] {
+            let saying = Saying::new(&objects, &[(3, why)]);
+            let mut walk = names(&saying, &root, &Limits::DEFAULT, Kept::default());
+            let keys: Vec<&[u8]> = (walk.by_ref()).map(|entry| entry.unwrap().0).collect();
+            assert_eq!(keys, [b"a"], "{why:?}");
+            assert!(walk.whole(), "{why:?}");
+            let unchecked = Fault::Unchecked { id: (3, 0), why };
+            // Not held to the /Limits it couldn't read, so not outside them.
+            assert_eq!(walk.into_sink().faults(), [unchecked], "{why:?}");
+            let quiet = names(&saying, &root, &Limits::DEFAULT, ());
+            let keys: Vec<&[u8]> = quiet.map(|entry| entry.unwrap().0).collect();
+            assert_eq!(keys, [b"a"], "the same with no sink, {why:?}");
+        }
+        // Damaged, they're /Limits that don't read, the file's fault.
+        let saying = Saying::new(&objects, &[(3, Why::Damaged)]);
+        let mut walk = names(&saying, &root, &Limits::DEFAULT, Kept::default());
+        assert_eq!(walk.by_ref().count(), 1);
+        assert_eq!(walk.into_sink().faults(), [Fault::TreeBadLimits]);
+    }
+    let said = Fault::Unchecked {
+        id: (3, 0),
+        why: Why::Locked,
+    };
+    assert_eq!(
+        said.to_string(),
+        "3 0 R takes a password, so what it holds isn't checked"
+    );
 }
 
 #[test]

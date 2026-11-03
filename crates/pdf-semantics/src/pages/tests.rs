@@ -129,6 +129,125 @@ fn tree_error(objects: &[(u32, String)]) -> Error {
     open(objects).unwrap_err()
 }
 
+#[test]
+fn a_count_or_a_parent_past_a_cap_or_a_password_isn_t_checked() {
+    // The root's /Count is 6 0 R; node 4's /Parent, 7 0 R, isn't on a page's
+    // way up, as page 5 names the root.
+    let objects = parsed(&[
+        (2, "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 6 0 R >>"),
+        (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] >>"),
+        (4, "<< /Type /Pages /Parent 7 0 R /Kids [5 0 R] /Count 1 >>"),
+        (5, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] >>"),
+        (6, "2"),
+        (7, "2 0 R"),
+    ]);
+    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    for (failed, why) in [
+        ((6, 0), Why::Locked),
+        ((7, 0), Why::Limit),
+        ((6, 0), Why::Source),
+    ] {
+        let resolver = failing(&objects, failed, why);
+        let mut kept = Kept::default();
+        let walked = pages(resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut kept);
+        assert_eq!(
+            walked.map(|table| table.len()),
+            Ok(2),
+            "{failed:?}, {why:?}"
+        );
+        let faults = kept.faults();
+        let unchecked = Fault::Unchecked { id: failed, why };
+        assert_eq!(
+            faults.iter().filter(|fault| **fault == unchecked).count(),
+            1,
+            "{faults:?}"
+        );
+        // Neither said as a count or a parent that's wrong.
+        let count = |fault: &Fault| matches!(fault, Fault::PageTreeCount { .. });
+        let parent = Fault::PageTreeParent {
+            lister: Some((2, 0)),
+        };
+        match failed {
+            (6, 0) => assert!(!faults.iter().any(count), "{faults:?}"),
+            _ => assert!(!faults.contains(&parent), "{faults:?}"),
+        }
+        let quiet = pages(resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ());
+        assert_eq!(
+            quiet.map(|table| table.len()),
+            Ok(2),
+            "the same with no sink"
+        );
+    }
+    // By PDFium's rules, the root's /Count is what it goes by, which fails it.
+    let resolver = failing(&objects, (6, 0), Why::Locked);
+    let walked = pages(resolver, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
+    assert!(matches!(walked, Err(Error::Unreadable(_))), "{walked:?}");
+    // A count that doesn't read is the count said.
+    let resolver = failing(&objects, (6, 0), Why::Damaged);
+    let mut kept = Kept::default();
+    pages(resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
+    let not_a_number = Fault::PageTreeCount {
+        count: None,
+        under: 2,
+    };
+    assert!(kept.faults().contains(&not_a_number), "{:?}", kept.faults());
+}
+
+#[test]
+fn pdfium_s_count_is_given_where_it_loads_no_page_under_the_root() {
+    let cases = [
+        ("<< /Type /Pages /Kids [] /Count 5 >>", None, 5),
+        ("<< /Type /Pages /Kids [] /Count 1 >>", None, 1),
+        ("<< /Type /Pages /Kids [] /Count 0 >>", None, 0),
+        ("<< /Type /Pages /Kids [] >>", None, 0),
+        ("<< /Type /Pages /Kids (x) /Count 2 >>", None, 2),
+        // A node under the root whose /Count PDFium counts by, no page in it.
+        (
+            "<< /Type /Pages /Kids [3 0 R] /Count 2 >>",
+            Some("<< /Type /Pages /Kids [] /Count 0 >>"),
+            2,
+        ),
+        (
+            "<< /Type /Pages /Kids [3 0 R] >>",
+            Some("<< /Type /Pages /Kids [] /Count 3 >>"),
+            3,
+        ),
+    ];
+    for (root, node, count) in cases {
+        let mut objects = vec![(2, root)];
+        objects.extend(node.map(|node| (3, node)));
+        let objects = parsed(&objects);
+        let resolve = |id: ObjectId| objects.get(&id);
+        let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+        let walked = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
+        assert_eq!(walked, Err(Error::NoPages), "{root}");
+        assert_eq!(
+            counted(resolve, &catalog, &Limits::DEFAULT),
+            Ok(count),
+            "{root}"
+        );
+    }
+    // Where it loads one, the table's count; where there's no root, none.
+    let objects = parsed(&[
+        (2, "<< /Type /Pages /Kids [3 0 R] /Count 4 >>"),
+        (3, "<< /Type /Page /Parent 2 0 R >>"),
+    ]);
+    let resolve = |id: ObjectId| objects.get(&id);
+    let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
+    let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
+    assert_eq!(
+        counted(resolve, &catalog, &Limits::DEFAULT),
+        Ok(table.counted())
+    );
+    assert_eq!(table.counted(), 4);
+    let nowhere = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(9))]);
+    assert_eq!(counted(resolve, &nowhere, &Limits::DEFAULT), Ok(0));
+    // A cap or a password fails it as it fails the walk.
+    let resolver = failing(&objects, (3, 0), Why::Locked);
+    let failed = counted(resolver, &catalog, &Limits::DEFAULT);
+    assert!(matches!(failed, Err(Error::Unreadable(_))), "{failed:?}");
+}
+
 fn ids(pages: &[Held]) -> Vec<(Option<ObjectId>, u32)> {
     pages.iter().map(|page| (page.id, page.repeat)).collect()
 }
@@ -1909,7 +2028,15 @@ fn by_iso_s_rules_a_count_and_a_parent_say_what_the_walk_found() {
     assert!(iso(&objects).1.contains(&empty));
     assert_eq!(
         empty.to_string(),
-        "a node's /Count is 0, with 0 pages under it"
+        "a node's /Count is 0, with no pages under it, where a node has at least one"
+    );
+    let wrong = Fault::PageTreeCount {
+        count: Some(5),
+        under: 0,
+    };
+    assert_eq!(
+        wrong.to_string(),
+        "a node's /Count is 5, with 0 pages under it"
     );
 
     // A /Parent that isn't the node that lists it, which has a number.
@@ -2221,6 +2348,8 @@ fn a_fault_says_where_it_is() {
 fn what_only_a_sink_reads_fails_no_walk() {
     // A node's /Count and its own /Parent: read only for a sink that wants
     // faults, so nothing that fails there can fail a walk, whatever its why.
+    // What doesn't read is the count or the parent said; past a cap or a
+    // password, as a loop of references is past one, it isn't checked.
     let by_chain = [(7, "7 0 R")];
     let shapes = [
         (
@@ -2256,7 +2385,14 @@ fn what_only_a_sink_reads_fails_no_walk() {
         written.extend(below.map(|below| (4, below)));
         written.extend(by_chain);
         let objects = parsed(&written);
-        for why in [None, Some(Why::Limit), Some(Why::Locked), Some(Why::Source)] {
+        let all = [
+            None,
+            Some(Why::Damaged),
+            Some(Why::Limit),
+            Some(Why::Locked),
+            Some(Why::Source),
+        ];
+        for why in all {
             let failed = why.unwrap_or(Why::Damaged);
             // None: 7 is the loop of references it's written as.
             let resolver = failing(
@@ -2269,7 +2405,15 @@ fn what_only_a_sink_reads_fails_no_walk() {
             let told = pages(resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut kept);
             assert_eq!(told, quiet, "{root} {kid} {why:?}");
             assert_eq!(told.unwrap().len(), 1, "{root} {kid} {why:?}");
-            assert!(kept.faults().contains(&fault), "{:?}", kept.faults());
+            let faults = kept.faults();
+            if why == Some(Why::Damaged) {
+                assert!(faults.contains(&fault), "{faults:?}");
+                continue;
+            }
+            let why = why.unwrap_or(Why::Limit);
+            let unchecked = Fault::Unchecked { id: (7, 0), why };
+            assert!(faults.contains(&unchecked), "{root} {kid}: {faults:?}");
+            assert!(!faults.contains(&fault), "{root} {kid}: {faults:?}");
         }
     }
 }
