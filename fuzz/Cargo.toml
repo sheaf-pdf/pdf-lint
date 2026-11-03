@@ -42,10 +42,12 @@
 # its number as PDFium reads it and as an object, and its operations its
 # tokens grouped, and again under small caps, what finding inline images'
 # ends may cost among them, its faults the same through any sink, where an
-# object ends an inline image's dictionary and each lone `BI` told, each
-# operation typed and stepped through the states, its balance, marked
-# content and names its steppers', its searches for an inline image's end
-# and its walks past one to `EI`, remembered or not, and its skims of
+# object ends an inline image's dictionary and each lone `BI` told, and
+# each 0x80 and 0xFF read as white-space between tokens told, a space in
+# its place reading the same, each operation typed and stepped through the
+# states, its balance, marked content and names its steppers', its
+# searches for an inline image's end and its walks past one to `EI`,
+# remembered or not, and its skims of
 # arrays and dictionaries the same as plain ones', its DCT and CCITTFax
 # data decoded, with the `image-ends` feature, and read by the stand-in
 # too, its operations written again reading as they did, and the writer's
@@ -100,9 +102,11 @@
 # being in this lock: a stable test
 # (`what_lopdf_s_adapter_writes_of_any_document_holds`) runs it;
 # `check` calls
-# `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
-# unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
-# on mutated seeds.
+# `pdf_lint::fuzz::check_file`, the reader and the checker, content read
+# beside the document and moving nothing a check of the document alone
+# finds, which a stable unit test
+# (`mutated_files_check_within_their_bytes_the_same_twice`) runs on mutated
+# seeds.
 [package]
 name = "pdf-tokenizer-fuzz"
 version = "0.0.0"

@@ -52,9 +52,10 @@ fmt:
 # turn on; then the filters with zlib-rs their only Flate backend; then the
 # content streams without `image-ends`, which pdf-lint turns on in every
 # workspace build; then pdf-semantics without its clock, as pdf-lint takes
-# it; then pdf-linearize's engine, without its adapter, and with lopdf's, which nothing else turns on; then
-# pdf-fonts with a reading of a file and Adobe's predefined CMaps, which nothing
-# else turns on, and with no feature at all.
+# it; then pdf-linearize's engine, without its adapter, and with lopdf's,
+# which nothing else turns on; then pdf-fonts with a reading of a file and
+# Adobe's predefined CMaps, which nothing else turns on, and with no
+# feature at all.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings

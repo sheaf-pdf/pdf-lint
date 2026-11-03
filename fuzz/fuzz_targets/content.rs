@@ -5,21 +5,23 @@
 //! them, the same up to the cap's error; each read through a sink that
 //! keeps its faults the same, the faults inside it in the order of their
 //! ends, where an object ends an inline image's dictionary and each lone
-//! `BI` told; each operation typed and stepped through the graphics
-//! objects' states; its `q`/`Q` balance, marked content and resource names
-//! what their steppers give, an operation at a time, and what it keeps with
-//! its ranges taken out, those at the top and every one, in no order and
-//! overlapping; and its searches for an inline image's end and its walks
-//! past one to `EI`, remembered or not, and its skims of arrays and
-//! dictionaries, what plain ones find; its operations written again
-//! reading as they did, and the writer's calls its bytes choose read back
-//! as written; and its marked ranges at the top taken out, alone and
-//! together, and their lists written again without a tool's keys, alone
-//! and with what's taken out, what's kept reading as it did; and an image's
-//! color space counted alike in its dictionary and in the resources, under any
-//! caps on either. With the `image-ends` feature, which the fuzz crate turns on, it's read with an inline image's DCT and CCITTFax data
-//! decoded to find where it ends, and its tokens tile it read by the
-//! stand-in too.
+//! `BI` told, and each 0x80 and 0xFF read as white-space between tokens
+//! told, a space in its place reading the same; each operation typed and
+//! stepped through the graphics objects' states; its `q`/`Q` balance,
+//! marked content and resource names what their steppers give, an operation
+//! at a time, and what it keeps with its ranges taken out, those at the top
+//! and every one, in no order and overlapping; and its searches for an
+//! inline image's end and its walks past one to `EI`, remembered or not,
+//! and its skims of arrays and dictionaries, what plain ones find; its
+//! operations written again reading as they did, and the writer's calls its
+//! bytes choose read back as written; and its marked ranges at the top
+//! taken out, alone and together, and their lists written again without a
+//! tool's keys, alone and with what's taken out, what's kept reading as it
+//! did; and an image's color space counted alike in its dictionary and in
+//! the resources, under any caps on either. With the `image-ends` feature,
+//! which the fuzz crate turns on, it's read with an inline image's DCT and
+//! CCITTFax data decoded to find where it ends, and its tokens tile it read
+//! by the stand-in too.
 
 #![no_main]
 

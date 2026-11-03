@@ -411,10 +411,9 @@ impl<'a, 'r> Images<'a, 'r> {
     /// dictionary's tokens' own faults, its entries' and its white-space's,
     /// as they're read; then, the image read, its keys', what ends its
     /// dictionary, its `ID`'s, its length's and what's before its `EI`,
-    /// white-space among it. Where finding its
-    /// data's end would cost more than is left of
-    /// [`Limits::image_ends`] for the reading, an error at `bi`
-    /// ([`ErrorKind::ImageEnds`]).
+    /// white-space among it. Where finding its data's end would cost more
+    /// than is left of [`Limits::image_ends`] for the reading, an error at
+    /// `bi` ([`ErrorKind::ImageEnds`]).
     pub(crate) fn read(&mut self, bi: usize, sink: &mut impl Sink<'a>) -> Result<Image, Error> {
         let s = self.s;
         let unterminated = Error {
@@ -1363,12 +1362,12 @@ pub(crate) enum Image {
 /// 0x80 and 0xFF in the white-space before each key and each value, to the
 /// first `ID`, where ISO's dictionary ends ([`fault::spaces`]); each key's
 /// and value's own faults, where PDFium ends a value before ISO would, and
-/// 0x80 and 0xFF inside it, among them ([`fault::nesting`]), a key with a `#` escape ISO
-/// reads as an image's, a word that's no object as a value, a key whose
-/// value is `ID`, which ends ISO's dictionary, and, the first such `ID`,
-/// its own white-space after it where ISO asks it ([`Fault::AfterId`]);
-/// not what ends PDFium's, which is the image's to tell
-/// ([`Images::read`]).
+/// 0x80 and 0xFF inside it, among them ([`fault::nesting`]), a key with a
+/// `#` escape ISO reads as an image's, a word that's no object as a value,
+/// a key whose value is `ID`, which ends ISO's dictionary, and, the first
+/// such `ID`, its own white-space after it where ISO asks it
+/// ([`Fault::AfterId`]); not what ends PDFium's, which is the image's to
+/// tell ([`Images::read`]).
 fn image_dict<'a>(
     s: &'a [u8],
     bi: usize,

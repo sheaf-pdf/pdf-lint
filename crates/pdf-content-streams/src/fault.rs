@@ -221,12 +221,11 @@ pub enum Fault<'a> {
     /// white-space (8.9.7), but among tokens there, which
     /// [`BeforeEi`](Fault::BeforeEi) tells whole. Not in a string or a
     /// comment, where it's a byte like any other, nor in an image's data.
-    /// Nor as the white-space byte
-    /// before an image's data, after its `ID` or the object that ends its
-    /// dictionary: that's [`AfterId`](Fault::AfterId) where ISO asks
-    /// white-space there, the data's first byte where ISO asks none, and
-    /// after an object, [`DictEnd`](Fault::DictEnd)'s, where ISO reads the
-    /// dictionary on.
+    /// Nor as the white-space byte before an image's data, after its `ID`
+    /// or the object that ends its dictionary: that's
+    /// [`AfterId`](Fault::AfterId) where ISO asks white-space there, the
+    /// data's first byte where ISO asks none, and after an object,
+    /// [`DictEnd`](Fault::DictEnd)'s, where ISO reads the dictionary on.
     #[error("{} is white-space here and a regular character to ISO 32000-2", byte(.written))]
     HighByte {
         /// The byte.

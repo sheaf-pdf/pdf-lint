@@ -5,10 +5,11 @@
 //! data, an object stream's as the document holds it and a content
 //! stream's as the reading decodes it again; what its content finds moving
 //! nothing a check of its document alone finds; and set against its
-//! previous revision, when it has an incremental update. It reads under small limits
-//! ([`options`], and 4 MiB of content in [`setting`]), so that a run tries
-//! more inputs. It's compiled only for tests and under cargo-fuzz's
-//! `--cfg fuzzing`, with [`seeds`], files for the fuzzer to begin from.
+//! previous revision, when it has an incremental update. It reads under
+//! small limits ([`options`], and 4 MiB of content in [`setting`]), so
+//! that a run tries more inputs. It's compiled only for tests and under
+//! cargo-fuzz's `--cfg fuzzing`, with [`seeds`], files for the fuzzer to
+//! begin from.
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -1,8 +1,8 @@
 # pdf-lint
 
-Checks PDF files against the [Arlington PDF Model](https://github.com/pdf-association/arlington-pdf-model), the PDF Association's machine-readable grammar of ISO 32000-2: for every object, which keys it may have, their types, which are required, the values they may take, and the PDF version each came in or was deprecated in.
+Checks PDF files against the [Arlington PDF Model](https://github.com/pdf-association/arlington-pdf-model), the PDF Association's machine-readable grammar of ISO 32000-2: for every object, which keys it may have, their types, which are required, the values they may take, and the PDF version each came in or was deprecated in; and their content, which the model doesn't describe, against ISO 32000-2 itself.
 
-It's a command line and a library. It reads a file from its bytes, through [pdf-structure](../pdf-structure)'s reader, on [pdf-tokenizer](../pdf-tokenizer), so every finding says which bytes it's about. The reader decodes object streams and cross-reference streams itself, through [pdf-filters](../pdf-filters), and reads their objects from the decoded data, placed in it. What's encrypted it decrypts itself, through [pdf-crypt](../pdf-crypt), by the password it's given: an encrypted file's object streams, before they're decoded, and its strings where they are.
+It's a command line and a library. It reads a file from its bytes, through [pdf-structure](../pdf-structure)'s reader, on [pdf-tokenizer](../pdf-tokenizer), so every finding says which bytes it's about. The reader decodes object streams and cross-reference streams itself, through [pdf-filters](../pdf-filters), and reads their objects from the decoded data, placed in it; and decodes each content stream the walk reaches, read through [pdf-content-streams](../pdf-content-streams). What's encrypted it decrypts itself, through [pdf-crypt](../pdf-crypt), by the password it's given: an encrypted file's object streams and content streams, before they're decoded, and its strings where they are.
 
 ## What it checks
 
@@ -60,10 +60,10 @@ The library has the rest: `Report::since` matches by number (an earlier revision
 ## The command line
 
 ```text
-Checks each FILE against the Arlington PDF Model, reading it from its
-bytes, and prints each finding with the bytes it's at. It decodes object
-streams and cross-reference streams, and decrypts what's encrypted,
-itself.
+Checks each FILE against the Arlington PDF Model, and its content against
+ISO 32000-2, reading it from its bytes, and prints each finding with the
+bytes it's at. It decodes object streams, cross-reference streams and
+content streams, and decrypts what's encrypted, itself.
 
 Usage: pdf-lint [OPTIONS] <FILE>...
 
@@ -132,7 +132,7 @@ It exits 0 when every file is clean, 1 when there are findings, and 2
 when a file can't be read or the command line is wrong.
 ```
 
-A file that can't be read doesn't stop the others being checked. An encrypted file that won't open with the password given, none or `--password`'s, is one that can't be read, and says so: what its object streams hold would be missing, and its strings ciphertext. `--password` is tried as the owner's and the user's: in its SASLprep form (RFC 4013), which revisions 5 and 6 take, where that isn't the password as typed; as typed (UTF-8), as a writer that skips SASLprep sets it; then, composed (NFC), in each single-byte encoding that has every character of it, as a writer may have set it for revisions 2 to 4; those the file's revision takes first. The empty password isn't tried once one is given. A file that encrypts only its embedded files (its strings and streams `/Identity`) needs none. One whose security handler the reader can't open (the public-key handler, or a dictionary the standard handler doesn't take) is checked with its strings ciphertext and its object streams unread, a `reader` finding saying why. A FILE of `-` is standard input, named `-` in the report and in an allowance. A finding in an object stream is printed with its bytes from the stream's decoded data, and so is one in content, from the content stream's. With `--pdf-version`, the summary says the version a file was checked as beside its own, and an allowance's version is matched against the one it was checked as.
+A file that can't be read doesn't stop the others being checked. An encrypted file that won't open with the password given, none or `--password`'s, is one that can't be read, and says so: what its object streams hold would be missing, its content unread, and its strings ciphertext. `--password` is tried as the owner's and the user's: in its SASLprep form (RFC 4013), which revisions 5 and 6 take, where that isn't the password as typed; as typed (UTF-8), as a writer that skips SASLprep sets it; then, composed (NFC), in each single-byte encoding that has every character of it, as a writer may have set it for revisions 2 to 4; those the file's revision takes first. The empty password isn't tried once one is given. A file that encrypts only its embedded files (its strings and streams `/Identity`) needs none. One whose security handler the reader can't open (the public-key handler, or a dictionary the standard handler doesn't take) is checked with its strings ciphertext and its object streams unread, a `reader` finding saying why. A FILE of `-` is standard input, named `-` in the report and in an allowance. A finding in an object stream is printed with its bytes from the stream's decoded data, and so is one in content, from the content stream's. With `--pdf-version`, the summary says the version a file was checked as beside its own, and an allowance's version is matched against the one it was checked as.
 
 With `--format json`, each file's report is a line of JSON. Every line says which version of pdf-lint wrote it and against which model, so a report can always be read against what made it. It has:
 

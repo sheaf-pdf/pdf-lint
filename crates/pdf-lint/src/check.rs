@@ -680,7 +680,11 @@ pub struct Finding {
     /// The table and key of the row it breaks; for an unreached object,
     /// those of the object that references it, `-` for none; `-` and `-`
     /// for the reader's; `ObjectStream` and `-` for a [`Rule::Packed`]
-    /// one.
+    /// one; for content's, those of what holds the content, `PageObject`
+    /// and `Contents`, a form's or a pattern's table and `-`, `FontType3`
+    /// and the glyph's name; and `Resource` and the category for a
+    /// [`Rule::Resource`] or [`Rule::Unused`] one, `-` for the finding past
+    /// a unit's 32 names.
     pub table: String,
     pub key: String,
     pub rule: Rule,
@@ -690,7 +694,10 @@ pub struct Finding {
     pub value: String,
     /// Where its bytes were written, when the reader knows: a key and its
     /// value, an array's element, the dictionary that lacks a key, the
-    /// object nothing reaches.
+    /// object nothing reaches; or an operation or a name in a content
+    /// stream, at its bytes in the stream's decoded data, which
+    /// [`Source::decoded_within`] gives (where [`Source::decoded`] gives an
+    /// object stream's).
     pub at: Option<Span>,
     /// The earlier revision whose trailer it's in, a table's or a
     /// cross-reference stream, or in what's direct in it, counted from the
@@ -728,7 +735,10 @@ pub enum Class {
 
 /// A check a predicate that can't be told stood in the way of; or an
 /// earlier revision's trailer that can't be checked, its column and key
-/// `-`.
+/// `-`; or content that can't be, its column `-`: a unit of it not read,
+/// its table and key a finding in it would have, a resource name that
+/// can't be looked up, the holder's table and `Resources`, and a resource
+/// that can't be told used or not, `Resource` and its category.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Unchecked {
     /// The column whose cell it is.
@@ -737,7 +747,9 @@ pub struct Unchecked {
     /// (`fn:IsMeaningful`), a value that can't be read (`@Type`), or a
     /// string's bytes the reader didn't give; for a trailer, why it can't
     /// be checked: a later revision whose numbers aren't known, or the
-    /// revisions not kept.
+    /// revisions not kept; for content, why it isn't read (a content
+    /// stream that doesn't decode cleanly, content past the file's
+    /// budget), or why a name in it can't be looked up, or a resource told.
     pub why: String,
     pub table: String,
     pub key: String,
@@ -753,8 +765,11 @@ pub struct Report {
     pub checked: BTreeMap<String, usize>,
     /// Keys and elements of held objects checked against their rows.
     pub keys: usize,
-    /// Checks not made, for a predicate that can't be told; and earlier
-    /// revisions' trailers held that can't be checked, by why.
+    /// Checks not made, for a predicate that can't be told; earlier
+    /// revisions' trailers held that can't be checked; and content held
+    /// that can't be: units of it not read, resource names in it that
+    /// can't be looked up, and resources that can't be told used or not;
+    /// by why.
     pub unchecked: BTreeMap<Unchecked, usize>,
     /// Keys and elements of held objects the model doesn't list.
     pub unlisted: BTreeMap<Unlisted, usize>,

@@ -1,5 +1,6 @@
 //! The command line: each file read from its bytes and checked against the
-//! Arlington PDF Model, each finding printed with the bytes it's at.
+//! Arlington PDF Model, and its content against ISO 32000-2, each finding
+//! printed with the bytes it's at.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -30,10 +31,10 @@ use zeroize::Zeroizing;
 /// What `--help` says before the usage. clap wraps nothing, so this and
 /// each option's help are broken by hand, within 80 columns.
 const ABOUT: &str = "\
-Checks each FILE against the Arlington PDF Model, reading it from its
-bytes, and prints each finding with the bytes it's at. It decodes object
-streams and cross-reference streams, and decrypts what's encrypted,
-itself.";
+Checks each FILE against the Arlington PDF Model, and its content against
+ISO 32000-2, reading it from its bytes, and prints each finding with the
+bytes it's at. It decodes object streams, cross-reference streams and
+content streams, and decrypts what's encrypted, itself.";
 
 /// What `--help` says after the options.
 const EXITS: &str = "\
@@ -657,7 +658,7 @@ fn password(args: &Args) -> Option<Password<'_>> {
 /// Why `doc` isn't checked, when it's encrypted and no password it was
 /// given opens it (`password` says whether one was), though it encrypts
 /// its strings or streams: what's in its object streams would be missing,
-/// and its strings ciphertext.
+/// its content unread, and its strings ciphertext.
 fn locked(doc: &Document, password: bool) -> Option<&'static str> {
     (doc.encryption == Encryption::Locked).then_some(match password {
         false => "it needs a password: give it with --password",
