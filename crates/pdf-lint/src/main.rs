@@ -796,8 +796,9 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             let _ = writeln!(out, "  {line}");
         }
     }
-    // The content stream a finding before was in, decoded again for its
-    // bytes: findings in one stream come together.
+    // The stream a finding before was in, content's or the metadata
+    // stream's, decoded again for its bytes: findings in one stream come
+    // together.
     let mut content: Option<(ObjectId, Vec<u8>)> = None;
     for finding in &shown {
         let _ = writeln!(out, "- {finding}");
@@ -812,8 +813,8 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
                 },
             ) => {
                 // An object stream's data, which the document holds; else a
-                // content stream's, which the reading decodes again, as
-                // content was read.
+                // content stream's or the metadata stream's, which the
+                // reading decodes again, as content was read.
                 let decoded = match doc.document().decoded.get(&(n, g)) {
                     Some(decoded) => Some(&decoded[..]),
                     None => {

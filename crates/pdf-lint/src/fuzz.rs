@@ -3,13 +3,13 @@
 //! too, and checked without a panic, in the same way twice, with every
 //! finding's bytes inside what was read, the file or a stream's decoded
 //! data, an object stream's as the document holds it and a content
-//! stream's as the reading decodes it again; what its content finds moving
-//! nothing a check of its document alone finds; and set against its
-//! previous revision, when it has an incremental update. It reads under
-//! small limits ([`options`], and 4 MiB of content in [`setting`]), so
-//! that a run tries more inputs. It's compiled only for tests and under
-//! cargo-fuzz's `--cfg fuzzing`, with [`seeds`], files for the fuzzer to
-//! begin from.
+//! stream's or the metadata stream's as the reading decodes it again; what
+//! its content finds moving nothing a check of its document alone finds;
+//! and set against its previous revision, when it has an incremental
+//! update. It reads under small limits ([`options`], and 4 MiB of content
+//! in [`setting`]), so that a run tries more inputs. It's compiled only for
+//! tests and under cargo-fuzz's `--cfg fuzzing`, with [`seeds`], files for
+//! the fuzzer to begin from.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -221,15 +221,16 @@ fn within(
 /// a field merged with its widget, a radio group and a hide action; a
 /// structure tree, a name tree and a number tree; a page tree with each
 /// fault the walk can't say that ISO's reading of it tells, but a tree of
-/// no pages; a name tree whose keys are out of order; XMP metadata with an
-/// attribute that doesn't read; content of each kind the check reads, two
-/// pages sharing an array of streams, a form, a pattern and a Type 3 font's
-/// glyphs, with something in it for each rule of content to find, and a
-/// page's content encrypted; a cross-reference
-/// stream with extensions declared and XMP metadata; an object stream
-/// whose header starts two objects inside another's bytes; an incremental
-/// update; and encrypted files, one of them with an object stream whose
-/// data isn't encrypted, so that its objects' strings are in the clear.
+/// no pages; a page tree a viewer reads otherwise, by its count, a page
+/// and a page's box; a name tree whose keys are out of order; XMP metadata
+/// with an attribute that doesn't read; content of each kind the check
+/// reads, two pages sharing an array of streams, a form, a pattern and a
+/// Type 3 font's glyphs, with something in it for each rule of content to
+/// find, and a page's content encrypted; a cross-reference stream with
+/// extensions declared and XMP metadata; an object stream whose header
+/// starts two objects inside another's bytes; an incremental update; and
+/// encrypted files, one of them with an object stream whose data isn't
+/// encrypted, so that its objects' strings are in the clear.
 /// Each begins with the two bytes that choose how it's checked, all
 /// clear, as the `check` and `structure` targets take them; the `write`
 /// target's take a third ([`write_seeds`]).
@@ -309,6 +310,14 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         leaf("5 0 R"),
         leaf("2 0 R"),
     ];
+    // A viewer counts 3, has no page where the null is, and reads the first
+    // page's null box as none, not the root's.
+    let viewer = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R null 4 0 R] /Count 3 /MediaBox [0 0 595 842] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox null /Resources << >> >>".to_string(),
+        leaf("2 0 R"),
+    ];
     let name_tree = [
         "<< /Type /Catalog /Pages 2 0 R /Names << /Dests 4 0 R >> >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
@@ -328,6 +337,7 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         ("form", file(&form, "").0),
         ("structure", file(&structure, "").0),
         ("page-tree", file(&page_tree, "").0),
+        ("viewer", file(&viewer, "").0),
         ("name-tree", file(&name_tree, "").0),
         ("xmp", file(&metadata, "").0),
         ("content", content()),
@@ -901,6 +911,7 @@ mod tests {
                 .collect();
             let made: &[_] = match name {
                 "page-tree" => &["page-tree"],
+                "viewer" => &["page-tree", "viewer"],
                 "name-tree" => &["tree"],
                 "xmp" => &["xmp"],
                 _ => &[],
