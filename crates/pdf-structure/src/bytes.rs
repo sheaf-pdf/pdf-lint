@@ -21,13 +21,13 @@
 //! is read so, in order, into a [`Document`] ([`read`],
 //! [`Reading::into_document`]), or into one beside the reading, which hands
 //! out what the document doesn't hold, a stream's data among it
-//! ([`Reading::to_document`], and [`Opened`], the two together); read on demand, on any thread, only what's
-//! asked for is. Each object read records where it was found
-//! ([`Record`]). Its bytes are in memory, or a file is read by position
-//! ([`FileBytes`], or any [`ByteSource`] that doesn't hold its bytes), a
-//! window at a time from where each read starts, larger while what's read
-//! runs to the window's end, so that each read reads what it would of the
-//! whole file.
+//! ([`Reading::to_document`], and [`WithReading`], the two together); read
+//! on demand, on any thread, only what's asked for is. Each object read
+//! records where it was found ([`Record`]). Its bytes are in memory, or a
+//! file is read by position ([`FileBytes`], or any [`ByteSource`] that
+//! doesn't hold its bytes), a window at a time from where each read starts,
+//! larger while what's read runs to the window's end, so that each read
+//! reads what it would of the whole file.
 //!
 //! It decodes cross-reference streams and object streams from their own
 //! data, through [`pdf_filters`]: a stream up to [`Limits::stream`] bytes,
@@ -289,19 +289,19 @@ use crate::source::{
 
 mod file;
 mod limits;
-mod opened;
 mod reading;
 mod sections;
 mod window;
+mod with_reading;
 
 #[cfg(any(unix, windows))]
 pub use file::FileBytes;
 pub use file::Identity;
 pub use limits::{Limits, Options};
-pub use opened::Opened;
 pub use reading::{ByteSource, Error, Reading, SourceId};
 pub use sections::{FirstObject, SectionFault, SectionRow, SectionRows, Sections};
 use window::{Bytes, InMemory, Window};
+pub use with_reading::WithReading;
 
 // How deeply arrays and dictionaries may nest in an object is the
 // parser's, pdf-objects'.

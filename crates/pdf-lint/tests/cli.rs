@@ -1062,6 +1062,7 @@ fn pdf_version_checks_a_file_as_another_version() {
     );
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report.get("deprecations"), Some(&json!(false)));
+    assert_eq!(report.get("unused_findings"), Some(&json!(false)));
     assert_eq!(
         report.get("deprecated"),
         Some(&json!([
@@ -2202,7 +2203,7 @@ fn content_findings_are_set_against_what_came_before_as_any() {
     assert!(lines.contains(&"    content read: 1"), "{full}");
     let out = run(&["--format", "json", path]);
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(report["content_streams"], json!(1));
+    assert_eq!(report["content_read"], json!(1));
     assert_eq!(report["findings"][0]["at"]["stream"], json!([4, 0]));
 
     // Against itself, all carried.
@@ -2283,7 +2284,11 @@ fn resources_lacking_are_found_and_unused_ones_found_when_asked() {
     let out = run(&["--unused", "--format", "json", path]);
     let stdout = text(&out.stdout);
     assert!(
-        stdout.contains(r#","content_streams":1,"unused":[{"table":"Resource","key":"XObject","count":1}],"ignored":"#),
+        stdout.contains(r#","content_read":1,"unused":[{"table":"Resource","key":"XObject","count":1}],"ignored":"#),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(r#","deprecations":false,"unused_findings":true,"extensions":"#),
         "{stdout}"
     );
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();

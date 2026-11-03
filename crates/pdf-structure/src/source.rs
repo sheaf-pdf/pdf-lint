@@ -76,10 +76,16 @@ pub trait Source {
     /// Stream `id`'s data decoded through its filters, at most `limit`
     /// bytes, decrypted as the reader decrypts it, or why it isn't, as
     /// [`Reading::decoded_within`](crate::bytes::Reading::decoded_within)
-    /// gives it: none where the reader doesn't give streams' data, as a
-    /// document alone doesn't, its streams' data being where it was written.
-    /// A document read beside its reading ([`Opened`](crate::bytes::Opened))
-    /// gives it.
+    /// gives it. Data past `limit` is an [`Error::Decode`] holding what
+    /// decoded up to it, [`Fault::Limit`](crate::pdf_filters::Fault::Limit)
+    /// among its faults, never the data cut short as if it were whole; a
+    /// stream the reader can't give the data of, as it has a filter the
+    /// reader doesn't take, is an error saying why ([`Error::Filters`]).
+    /// None where the reader doesn't give streams' data, as a document alone
+    /// doesn't, its streams' data being where it was written: then none of
+    /// any stream, so that a caller asking for one learns it of all. A
+    /// document read beside its reading
+    /// ([`WithReading`](crate::bytes::WithReading)) gives it.
     fn decoded_within(&self, id: ObjectId, limit: usize) -> Option<Result<Vec<u8>, Error>> {
         let _ = (id, limit);
         None

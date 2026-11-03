@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use clap::builder::{OsStringValueParser, TypedValueParser};
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser};
-use pdf_lint::bytes::Opened;
+use pdf_lint::bytes::WithReading;
 use pdf_lint::pdf_crypt::Password;
 use pdf_lint::{
     Allowances, Class, Document, Encryption, Exempt, Finding, Grammar, Hold, Made, ObjectId,
@@ -303,7 +303,7 @@ struct Setup {
 /// report at each version a file is checked at, as each is first asked for.
 struct Baseline {
     /// Its bytes are its reading's source.
-    file: Opened<Vec<u8>>,
+    file: WithReading<Vec<u8>>,
     /// What it's checked with, as the files are, but its version.
     options: Options,
     reports: Mutex<BTreeMap<Version, Arc<Report>>>,
@@ -544,8 +544,8 @@ fn run(mut args: Args) -> Result<ExitCode> {
         Some(path) => {
             let data =
                 std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let file = opened(data, password(&args).as_slice(), &bytes::Options::DEFAULT);
-            if let Some(why) = locked(&file, args.password.is_some()) {
+            let file = with_reading(data, password(&args).as_slice(), &bytes::Options::DEFAULT);
+            if let Some(why) = locked(file.document(), args.password.is_some()) {
                 bail!("--baseline {}: {why}", path.display());
             }
             let reports = Mutex::new(BTreeMap::new());
@@ -640,12 +640,12 @@ fn checked_in_order(setup: &Setup, mut report: impl FnMut(Checked) -> bool) {
 
 /// `data` read whole beside its reading, opened by `passwords` under
 /// `options`, which in memory can't fail.
-fn opened<S: bytes::ByteSource>(
+fn with_reading<S: bytes::ByteSource>(
     data: S,
     passwords: &[Password],
     options: &bytes::Options,
-) -> Opened<S> {
-    Opened::new(data, passwords, options).expect("a file in memory reads")
+) -> WithReading<S> {
+    WithReading::new(data, passwords, options).expect("a file in memory reads")
 }
 
 /// `--password`'s, as the reader takes it, which tries it in each of its
@@ -688,12 +688,12 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
         Ok(data) => data,
         Err(e) => return unread(path, &e.to_string(), args.json),
     };
-    let doc = opened(
+    let doc = with_reading(
         &data[..],
         password(args).as_slice(),
         &bytes::Options::DEFAULT,
     );
-    if let Some(why) = locked(&doc, args.password.is_some()) {
+    if let Some(why) = locked(doc.document(), args.password.is_some()) {
         return unread(path, why, args.json);
     }
     let version = file_version(&doc);
@@ -706,7 +706,7 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
         exempt: exempt.clone(),
         ..against(args, Some(checked_as))
     };
-    let (report, against) = match (args.last_update, &doc.update) {
+    let (report, against) = match (args.last_update, &doc.document().update) {
         (false, _) => {
             let report = check(&doc, hold, &options);
             // An incremental update of the baseline begins with its bytes.
@@ -727,8 +727,8 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             let password = password(args);
             let mut as_of = bytes::Options::DEFAULT;
             as_of.section = Some(update.previous);
-            let previous = opened(&data[..], password.as_slice(), &as_of);
-            let made = |id| match previous.contains(id) {
+            let previous = with_reading(&data[..], password.as_slice(), &as_of);
+            let made = |id| match previous.document().contains(id) {
                 true => Made::Merged,
                 false => Made::Built,
             };
@@ -757,6 +757,7 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             args.one_table,
             args.unlisted,
             args.deprecations,
+            args.unused,
             model,
             &report,
             &shown,
@@ -812,7 +813,7 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
                 // An object stream's data, which the document holds; else a
                 // content stream's, which the reading decodes again, as
                 // content was read.
-                let decoded = match doc.decoded.get(&(n, g)) {
+                let decoded = match doc.document().decoded.get(&(n, g)) {
                     Some(decoded) => Some(&decoded[..]),
                     None => {
                         if content.as_ref().is_none_or(|(id, _)| *id != (n, g)) {
@@ -899,6 +900,7 @@ fn json(
     one_table: bool,
     unlisted: UnlistedIn,
     deprecations: bool,
+    unused: bool,
     model: &str,
     report: &Report,
     shown: &[&Finding],
@@ -913,6 +915,7 @@ fn json(
         one_table,
         unlisted_in: unlisted.name(),
         deprecations,
+        unused_findings: unused,
         extensions: &report.extensions,
         model,
         objects: report.objects(),
@@ -965,7 +968,7 @@ fn json(
         deprecated: (report.deprecated.iter())
             .map(|((table, key), &count)| Count { table, key, count })
             .collect(),
-        content_streams: report.content,
+        content_read: report.content,
         unused: (report.unused.iter())
             .map(|((table, key), &count)| Count { table, key, count })
             .collect(),
@@ -984,8 +987,9 @@ fn json(
 /// wrote it, the file's version, the version it was checked as, whether as
 /// one table an object (`--one-table`), which held objects a key the model
 /// doesn't list is a finding in (`--unlisted`), whether deprecations are
-/// findings (`--deprecations`), the extensions it was checked under, and
-/// the model's hash, `model`; its findings, each with where its bytes are;
+/// findings (`--deprecations`), whether unused resources are
+/// (`--unused`), the extensions it was checked under, and the model's
+/// hash, `model`; its findings, each with where its bytes are;
 /// how many were left out as carried and as allowed; and the counts
 /// `--full` prints. The fields are in the order the line has them.
 #[derive(Serialize)]
@@ -999,6 +1003,7 @@ struct Line<'a> {
     one_table: bool,
     unlisted_in: &'a str,
     deprecations: bool,
+    unused_findings: bool,
     extensions: &'a BTreeSet<String>,
     model: &'a str,
     objects: usize,
@@ -1013,7 +1018,7 @@ struct Line<'a> {
     deprecated: Vec<Count<'a>>,
     /// How many units of content were read: a page's streams as one, a
     /// form's, a pattern's or a glyph's alone.
-    content_streams: usize,
+    content_read: usize,
     /// Resources nothing in the content read uses, by table and key.
     unused: Vec<Count<'a>>,
     ignored: Vec<Count<'a>>,

@@ -1,8 +1,7 @@
-//! A file read whole with its reading kept beside it ([`Opened`]): a
+//! A file read whole with its reading kept beside it ([`WithReading`]): a
 //! document that hands out what a document doesn't hold, its streams' data.
 
 use std::fmt;
-use std::ops::Deref;
 
 use pdf_crypt::Password;
 use pdf_objects::object::{Object, ObjectId};
@@ -11,57 +10,63 @@ use pdf_objects::version::Version;
 use super::{ByteSource, Error, Options, Reading};
 use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread, Warning};
 
-/// A file read whole, with its reading kept beside it: a [`Document`],
-/// which it derefs to, that hands out what a document doesn't hold. Made by
-/// [`Opened::new`], which opens the file as [`Reading::open_with`] opens it
-/// and makes its document at once ([`Reading::to_document`]), so that the
-/// document is the whole read, [`read_opened`](super::read_opened)'s of the
-/// same bytes, whatever is asked of the reading after.
+/// A file read whole, with its reading kept beside it: a [`Document`]
+/// ([`WithReading::document`]) that hands out what a document doesn't hold.
+/// Made by [`WithReading::new`], which opens the file as
+/// [`Reading::open_with`] opens it and makes its document at once
+/// ([`Reading::to_document`]), so that the document is the whole read,
+/// [`read_opened`](super::read_opened)'s of the same bytes, whatever is
+/// asked of the reading after.
 ///
 /// As a [`Source`] it answers as its document does, in every answer but
 /// one, which a document alone doesn't give: a stream's data decoded
-/// ([`Source::decoded_within`]), by the reading ([`Reading::decoded_within`]),
-/// decrypted in an encrypted file it opened and decoded through the
-/// stream's filters, at most the limit asked for or
+/// ([`Source::decoded_within`]), by the reading
+/// ([`Reading::decoded_within`]), decrypted in an encrypted file it opened
+/// and decoded through the stream's filters, at most the limit asked for or
 /// [`Limits::stream`](super::Limits::stream), whichever is less. What's
 /// decoded isn't kept, nor counted against the reading's budget; the stream
-/// itself is kept by the reading, as [`Reading::get`] keeps an object, beside
-/// the document's copy of it.
+/// itself is kept by the reading, as [`Reading::get`] keeps an object,
+/// beside the document's copy of it. It isn't its document: what takes a
+/// `&Document` is given that, which gives no stream's data.
 ///
 /// ```
 /// use pdf_structure::Source;
-/// use pdf_structure::bytes::{Opened, Options, read_opened};
+/// use pdf_structure::bytes::{Options, WithReading, read_opened};
 ///
 /// let file = b"%PDF-1.7\n1 0 obj\n<< /Length 6 >>\nstream\nabcdef\nendstream\nendobj\n\
 ///     trailer\n<< /Size 2 >>\n%%EOF\n";
-/// let opened = Opened::new(&file[..], &[], &Options::DEFAULT).unwrap();
-/// assert_eq!(*opened, read_opened(file, &[]));
-/// assert_eq!(opened.decoded_within((1, 0), 6).unwrap().unwrap(), b"abcdef");
+/// let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
+/// assert_eq!(*read.document(), read_opened(file, &[]));
+/// assert_eq!(read.decoded_within((1, 0), 6).unwrap().unwrap(), b"abcdef");
 /// // Its document alone gives none.
-/// assert!((*opened).decoded_within((1, 0), 6).is_none());
+/// assert!(read.document().decoded_within((1, 0), 6).is_none());
 /// ```
-pub struct Opened<S> {
+pub struct WithReading<S> {
     reading: Reading<S>,
     document: Document,
 }
 
-impl<S> fmt::Debug for Opened<S> {
+impl<S> fmt::Debug for WithReading<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Opened")
+        f.debug_struct("WithReading")
             .field("reading", &self.reading)
             .finish_non_exhaustive()
     }
 }
 
-impl<S: ByteSource> Opened<S> {
+impl<S: ByteSource> WithReading<S> {
     /// The file `source` holds, opened by `passwords` under `options`, as
     /// [`Reading::open_with`] opens it, and read whole beside its reading, as
     /// [`Reading::to_document`] reads it. It fails only when the source
     /// doesn't give the bytes asked of it ([`Error::Io`]): in memory, never.
-    pub fn new(source: S, passwords: &[Password], options: &Options) -> Result<Opened<S>, Error> {
+    pub fn new(
+        source: S,
+        passwords: &[Password],
+        options: &Options,
+    ) -> Result<WithReading<S>, Error> {
         let reading = Reading::open_with(source, passwords, options)?;
         let document = reading.to_document()?;
-        Ok(Opened { reading, document })
+        Ok(WithReading { reading, document })
     }
 
     /// The reading kept beside the document, which hands out what the
@@ -70,22 +75,19 @@ impl<S: ByteSource> Opened<S> {
         &self.reading
     }
 
+    /// The document read whole, which gives no stream's data.
+    pub fn document(&self) -> &Document {
+        &self.document
+    }
+
     /// The document, the reading dropped.
     pub fn into_document(self) -> Document {
         self.document
     }
 }
 
-impl<S> Deref for Opened<S> {
-    type Target = Document;
-
-    fn deref(&self) -> &Document {
-        &self.document
-    }
-}
-
 /// Its document's answers, and a stream's data decoded by its reading.
-impl<S: ByteSource> Source for Opened<S> {
+impl<S: ByteSource> Source for WithReading<S> {
     fn ids(&self) -> Vec<ObjectId> {
         Source::ids(&self.document)
     }
@@ -197,13 +199,14 @@ mod tests {
     fn an_opened_file_answers_as_its_document_and_decodes_as_its_reading() {
         let mut streams = 0;
         for (name, file, passwords) in files() {
-            let opened = Opened::new(&file[..], &passwords, &Options::DEFAULT).unwrap();
+            let opened = WithReading::new(&file[..], &passwords, &Options::DEFAULT).unwrap();
             let whole = read_opened(&file, &passwords);
-            assert_eq!(*opened, whole, "{name}");
-            assert_eq!(answers(&opened), answers(&*opened), "{name}");
+            assert_eq!(*opened.document(), whole, "{name}");
+            assert_eq!(answers(&opened), answers(opened.document()), "{name}");
             let reading = Reading::open_with(&file[..], &passwords, &Options::DEFAULT).unwrap();
+            let alone = opened.document();
             for id in Source::ids(&opened) {
-                assert!((*opened).decoded_within(id, STREAM).is_none(), "{name}");
+                assert!(alone.decoded_within(id, STREAM).is_none(), "{name}");
                 for limit in [STREAM, 1] {
                     let decoded = opened.decoded_within(id, limit).map(shown);
                     let read = shown(reading.decoded_within(id, limit));

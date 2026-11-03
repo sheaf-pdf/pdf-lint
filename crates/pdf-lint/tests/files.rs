@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use pdf_lint::bytes::{self, Opened, read_opened};
+use pdf_lint::bytes::{self, WithReading, read_opened};
 use pdf_lint::pdf_crypt::{Encoding, Password};
 use pdf_lint::{Document, Encryption, Form, Hold, Made, Object, Options, Str, Value, check};
 
@@ -100,7 +100,7 @@ fn the_compressed_file_checks_clean() {
     assert_eq!(report.findings, [], "{report}");
     assert_eq!(report.checked.get("AnnotText"), Some(&1), "{report}");
     assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
-    let opened = Opened::new(&data[..], &[], &bytes::Options::DEFAULT).unwrap();
+    let opened = WithReading::new(&data[..], &[], &bytes::Options::DEFAULT).unwrap();
     let report = check(&opened, &Hold::All(Made::Merged), &Options::default());
     assert_eq!(
         (&report.findings[..], report.content),

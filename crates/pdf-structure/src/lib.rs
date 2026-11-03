@@ -25,14 +25,14 @@
 //!   when it's first asked for, kept or not, from any thread, each object
 //!   stream decoded once; read whole, it's the [`Document`], by the same
 //!   code, the reading taken or kept beside it, to hand out what the
-//!   document doesn't hold ([`Opened`], the two together, a [`Source`] that
-//!   gives a stream's data decoded). Any stream's data is handed out when it's
-//!   asked for, decrypted in an encrypted file, and decoded. Its bytes are
-//!   in memory, or a file is read by position, a window at a time
-//!   ([`FileBytes`]), whose [`Identity`], holding the file open, tells
-//!   whether it's changed. Where each object was read from is a
-//!   [`Record`], and what the file's header and sections say of it, as
-//!   written, its [`Facts`].
+//!   document doesn't hold ([`WithReading`], the two together, a
+//!   [`Source`] that gives a stream's data decoded). Any stream's data is
+//!   handed out when it's asked for, decrypted in an encrypted file, and
+//!   decoded. Its bytes are in memory, or a file is read by position, a
+//!   window at a time ([`FileBytes`]), whose [`Identity`], holding the
+//!   file open, tells whether it's changed. Where each object was read
+//!   from is a [`Record`], and what the file's header and sections say of
+//!   it, as written, its [`Facts`].
 //! - **Every choice said:** what the reader had to choose how to read is a
 //!   [`Warning`], with its object and where.
 //! - **Object streams and cross-reference streams decoded** from their own
@@ -105,7 +105,7 @@ pub mod write;
 
 #[cfg(any(unix, windows))]
 pub use bytes::FileBytes;
-pub use bytes::{ByteSource, Error, Identity, Limits, Opened, Options, Reading, SourceId};
+pub use bytes::{ByteSource, Error, Identity, Limits, Options, Reading, SourceId, WithReading};
 pub use pdf_crypt;
 pub use pdf_crypt::{Encoded, Encoding, Password};
 pub use pdf_filters;

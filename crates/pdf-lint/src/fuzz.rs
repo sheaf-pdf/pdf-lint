@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::bytes::{self, Opened};
+use crate::bytes::{self, WithReading};
 use crate::check::{Exempt, Finding, Hold, Made, Options, Report, Rule, UnlistedIn, check};
 use crate::object::{ObjectId, Span};
 use crate::pdf_crypt;
@@ -31,10 +31,10 @@ pub fn options() -> bytes::Options {
 
 /// `file` read whole under [`options`], its reading kept beside it, as of
 /// the cross-reference section at `section` when there's one.
-fn read(file: &[u8], section: Option<usize>) -> Opened<&[u8]> {
+fn read(file: &[u8], section: Option<usize>) -> WithReading<&[u8]> {
     let mut options = options();
     options.section = section;
-    Opened::new(file, &[], &options).expect("a file in memory reads")
+    WithReading::new(file, &[], &options).expect("a file in memory reads")
 }
 
 /// The fuzz target's body: `data`'s first two bytes choose how the file
@@ -46,14 +46,14 @@ pub fn check_file(data: &[u8]) {
         _ => (0, data),
     };
     let doc = read(file, None);
-    let (hold, options) = setting(choice, &doc);
+    let (hold, options) = setting(choice, doc.document());
     let report = check(&doc, &hold, &options);
     assert_eq!(
         report,
         check(&doc, &hold, &options),
         "a check is the same twice"
     );
-    content_alone(&report, &check(&*doc, &hold, &options));
+    content_alone(&report, &check(doc.document(), &hold, &options));
     let mut lengths = BTreeMap::new();
     for finding in &report.findings {
         if let Some(at) = finding.at {
@@ -65,7 +65,7 @@ pub fn check_file(data: &[u8]) {
     }
     let _ = report.to_string();
     let _ = report.objects();
-    if let Some(update) = &doc.update {
+    if let Some(update) = &doc.document().update {
         let previous = read(file, Some(update.previous));
         let options = Options {
             paths: true,
@@ -197,14 +197,14 @@ fn content_alone(beside: &Report, alone: &Report) {
 /// reading decodes it, as content is read, each stream's length kept in
 /// `lengths` once it's decoded.
 fn within(
-    doc: &Opened<&[u8]>,
+    doc: &WithReading<&[u8]>,
     file: &[u8],
     at: Span,
     lengths: &mut BTreeMap<ObjectId, Option<usize>>,
 ) -> bool {
     let len = match at.stream {
         None => Some(file.len()),
-        Some(stream) => match doc.decoded.get(&stream) {
+        Some(stream) => match doc.document().decoded.get(&stream) {
             Some(data) => Some(data.len()),
             None => *lengths.entry(stream).or_insert_with(|| {
                 let decoded = doc.reading().decoded_within(stream, usize::MAX);
@@ -917,19 +917,19 @@ mod tests {
     fn the_seeds_read_alike_beside_their_readings() {
         for (name, seed) in seeds() {
             let file = &seed[2..];
-            let opened = Opened::new(file, &[], &bytes::Options::DEFAULT).unwrap();
-            assert_eq!(*opened, bytes::read_opened(file, &[]), "{name}");
+            let opened = WithReading::new(file, &[], &bytes::Options::DEFAULT).unwrap();
+            assert_eq!(*opened.document(), bytes::read_opened(file, &[]), "{name}");
             let whole = bytes::Reading::open(file, &options())
                 .and_then(bytes::Reading::into_document)
                 .unwrap();
-            assert_eq!(*read(file, None), whole, "{name}");
+            assert_eq!(*read(file, None).document(), whole, "{name}");
             let hold = Hold::All(Made::Merged);
             let options = Options {
                 unused: true,
                 ..Options::default()
             };
             let checked = |source: &dyn Source| check(source, &hold, &options);
-            let (beside, alone) = (checked(&opened), checked(&*opened));
+            let (beside, alone) = (checked(&opened), checked(opened.document()));
             // The page's content and its annotation's appearance; the
             // structure's page; the two pages' one unit, the form, the
             // pattern and the two glyphs; the encrypted page.

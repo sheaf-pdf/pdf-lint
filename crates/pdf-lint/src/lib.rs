@@ -12,7 +12,7 @@
 //!
 //! What the walk reaches that holds content, each page, form XObject,
 //! tiling pattern and Type 3 glyph, has its content read too, where the
-//! source gives streams' data ([`bytes::Opened`]), as PDFium reads it,
+//! source gives streams' data ([`bytes::WithReading`]), as PDFium reads it,
 //! through pdf-content-streams, and held to ISO 32000-2 itself, which the
 //! model doesn't describe: `q` and `Q` balanced, marked content ended,
 //! each operator where the graphics objects allow it and with the operands
