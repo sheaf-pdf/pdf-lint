@@ -1138,6 +1138,9 @@ impl<'o, S: ByteSource> Resolve<'o> for &'o Reading<S> {
                 }
             },
         };
-        got.map_or_else(|why| why.unreadable(id), |object| Ok(Some(object)))
+        got.map_or_else(
+            |why| why.unreadable(id).map_or(Ok(None), Err),
+            |object| Ok(Some(object)),
+        )
     }
 }

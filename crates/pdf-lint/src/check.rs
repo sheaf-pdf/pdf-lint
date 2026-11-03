@@ -1333,7 +1333,7 @@ impl<'a> Resolve<'a> for Objects<'a> {
     fn try_resolve(&self, id: ObjectId) -> Result<Option<&'a Object>, Unreadable> {
         match self.0.get(id) {
             Ok(object) => Ok(Some(object)),
-            Err(why) => why.unreadable(id),
+            Err(why) => why.unreadable(id).map_or(Ok(None), Err),
         }
     }
 }

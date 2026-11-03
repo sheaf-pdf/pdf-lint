@@ -567,20 +567,21 @@ pub enum Unread {
 }
 
 impl Unread {
-    /// What [`Resolve::try_resolve`] says of object `id`, which doesn't read
-    /// for this: none where the file hasn't it ([`Unread::Missing`]), or else
-    /// why, as a [`Document`]'s and a [`Reading`](crate::Reading)'s say it, so
-    /// that a resolver over any [`Source`] can. Its [`Why`] is
+    /// Why object `id`, which doesn't read for this, doesn't, as
+    /// [`Resolve::try_resolve`] gives it: none where the file hasn't it
+    /// ([`Unread::Missing`]), which `try_resolve` gives as no object, and
+    /// else as a [`Document`]'s and a [`Reading`](crate::Reading)'s say it,
+    /// so that a resolver over any [`Source`] can. Its [`Why`] is
     /// [`Why::Damaged`], [`Why::Limit`] (past a cap the reader parses or
     /// decodes under) or [`Why::Locked`] (in an object stream that takes a
     /// password, or doesn't decrypt); never [`Why::Source`], which a reading
     /// gives of its own bytes, before there's an `Unread` to say.
-    pub fn unreadable<'o>(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+    pub fn unreadable(&self, id: ObjectId) -> Option<Unreadable> {
         if let Unread::Missing { .. } = self {
-            return Ok(None);
+            return None;
         }
         let message = format!("{} {} R doesn't read: {self}", id.0, id.1);
-        Err(Unreadable::new(id, self.why(), message))
+        Some(Unreadable::new(id, self.why(), message))
     }
 
     /// What kind of failure it is. Every kind of failure is named here, so
@@ -1140,7 +1141,7 @@ impl<'o> Resolve<'o> for &'o Document {
         let doc: &'o Document = self;
         match doc.objects.get(&id) {
             Some(Ok((object, _))) => Ok(Some(object)),
-            Some(Err(why)) => why.unreadable(id),
+            Some(Err(why)) => why.unreadable(id).map_or(Ok(None), Err),
             None => Ok(None),
         }
     }
