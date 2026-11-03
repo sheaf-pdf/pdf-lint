@@ -5,15 +5,36 @@
 //! ([`extension::read`](crate::extension::read)).
 //!
 //! The page tree is walked before the walk from the trailer, from the
-//! catalog the trailer as written leads to. The trees are read after the
-//! content: each root the walk reached as a name or number tree in the
-//! newest revision, once, in the order it reached them, a root with a
-//! number given by it, so that what's told of the root is in its object.
+//! catalog the trailer as written leads to, and what it told is found after
+//! the content. The trees are read after it: each root the walk reached as
+//! a name or number tree in the newest revision, once, in the order it
+//! reached them, a root with a number given by it, so that what's told of
+//! the root is in its object.
 //! Each reads the file's objects as the predicates resolve them
 //! ([`Objects`]), which says why one doesn't read as a document's own
 //! resolver does, so that an object that takes a password or is past a cap
 //! ends a walk, where one that doesn't parse is the file's fault. What each
 //! tells is kept ([`Kept`]), each walked to its end.
+//!
+//! The pages ISO's walk reads, where it reads the tree whole, are what the
+//! predicates' `fn:NumberOfPages` and `fn:PageProperty` read. Of what it
+//! tells, what the walk can't say is a [`Rule::PageTree`] finding: a page
+//! or a node listed again, a node listed inside itself, a `/Parent` chain
+//! that loops, and a reference that names another reference, always; a
+//! root's `/Parent`, a `/Parent` that isn't the numbered node listing it, a
+//! `/Type` that doesn't say what's there, a tree of no pages, and a node's
+//! `/Count` that's an integer other than the pages under it, where the walk
+//! found nothing by the model's rules in that object at that key. The rest
+//! the walk says, or the object's own fault there. Each kind once in each
+//! object it's in, at its first place there, its value the fault's words
+//! with how many times; what's in no object, the root written in the
+//! catalog, in the catalog's, held where that is; its path and table the
+//! object's where the walk first visited it as one of the tree's tables
+//! ([`Walk::note_structure`]), `-` where it didn't. What stops the tree
+//! being read whole that isn't the file's fault (an object that takes a
+//! password or is past a cap, a tree deeper or with more pages than is
+//! read) is counted as not checked, once, where the catalog is held, and the
+//! predicates are given no pages.
 //!
 //! Of what a tree's walk tells, what [`Walk::tree`] doesn't say is a
 //! [`Rule::Tree`] finding: a node reached again, a kid written in place,
@@ -37,13 +58,13 @@ use std::collections::{HashMap, HashSet};
 use std::mem::{self, Discriminant};
 use std::rc::Rc;
 
-use pdf_semantics::pages::pages;
+use pdf_semantics::pages::{self, pages};
 use pdf_semantics::tree::{names, numbers};
 use pdf_semantics::{Fault, Limits, Place, Sink};
 
 use super::content::times;
 use super::{Finding, Objects, Rule, Trail, Visit, Walk};
-use crate::object::{Dict, Object, ObjectId};
+use crate::object::{Dict, Object, ObjectId, Span};
 use crate::source::Source;
 use crate::{Rules, Unreadable, Why};
 
@@ -56,11 +77,16 @@ const LIMITS: Limits = Limits::DEFAULT;
 /// finding needs, so that what's kept grows with the objects and kinds of
 /// fault, never with the faults, which a file can make millions of (a
 /// `/Names` of a million keys out of order, a `/Kids` listing one page a
-/// million times).
+/// million times). One told again at the bytes its kind was last told at
+/// in the object is the same fault read again, as the page tree's walk
+/// reads a page's `/Parent` for the node it names and again for what it
+/// inherits, and isn't counted again; one at no bytes known always is.
 #[derive(Default)]
 pub(crate) struct Kept {
     /// Each object's kind: its first fault, where, and how many.
     told: Vec<(Place, Fault, usize)>,
+    /// The bytes each of `told` was last told at.
+    last: Vec<Option<Span>>,
     /// Where each object's kind is in `told`, only looked up.
     index: HashMap<(Option<ObjectId>, Discriminant<Fault>), usize>,
 }
@@ -68,10 +94,17 @@ pub(crate) struct Kept {
 impl Sink for Kept {
     fn fault(&mut self, at: Place, fault: Fault) {
         match self.index.entry((at.object, mem::discriminant(&fault))) {
-            Entry::Occupied(kind) => self.told[*kind.get()].2 += 1,
+            Entry::Occupied(kind) => {
+                let i = *kind.get();
+                if at.at.is_none() || at.at != self.last[i] {
+                    self.told[i].2 += 1;
+                    self.last[i] = at.at;
+                }
+            }
             Entry::Vacant(kind) => {
                 kind.insert(self.told.len());
                 self.told.push((at, fault, 1));
+                self.last.push(at.at);
             }
         }
     }
@@ -174,15 +207,94 @@ pub(super) fn uncounted(value: &str) -> &str {
     }
 }
 
+/// What the page tree's walk by ISO's rules told ([`page_trees`]), which
+/// [`Walk::structures`] finds in, and why it didn't read the tree whole,
+/// where that isn't the file's fault.
+#[derive(Default)]
+pub(super) struct PageTree {
+    /// What it told.
+    kept: Kept,
+    /// Why it stopped: an object on the way that takes a password or is
+    /// past a cap, or a tree deeper or with more pages than is read.
+    unread: Option<&'static str>,
+}
+
+/// Where the walk first visited an object of the page tree as one of its
+/// tables ([`Walk::note_structure`]).
+pub(super) struct Visited<'a> {
+    /// The table, `PageTreeNodeRoot`, `PageTreeNode` or `PageObject`.
+    table: &'static str,
+    /// The walk's way to it, the path of its findings.
+    trail: Rc<Trail<'a>>,
+}
+
+/// The page tree's tables, as the walk reaches what it's made of.
+const PAGE_TREE: [&str; 3] = ["PageTreeNodeRoot", "PageTreeNode", "PageObject"];
+
+/// Why the page tree isn't read whole, other than for the file's faults:
+/// an object of it takes a password the reader wasn't given.
+const PAGES_LOCKED: &str = "a page tree with an object that takes a password";
+
+/// Why the page tree isn't read whole: an object of it is past a cap the
+/// reader reads under, or a chain of references to it is longer than is
+/// followed.
+const PAGES_CAPPED: &str = "a page tree with an object past a cap it's read under";
+
+/// Why the page tree isn't read whole: the source didn't give an object's
+/// bytes.
+const PAGES_UNGIVEN: &str = "a page tree with an object whose bytes the source didn't give";
+
+/// Why the page tree isn't read whole: an object of it doesn't read, for
+/// another reason a reader gives.
+const PAGES_UNREAD: &str = "a page tree with an object that doesn't read";
+
+/// Why the page tree isn't read whole: it goes deeper than pdf-semantics
+/// reads one ([`Limits::page_depth`]).
+const PAGES_DEEP: &str = "a page tree deeper than it's read";
+
+/// Why the page tree isn't read whole: it has more pages, or nodes, than
+/// pdf-semantics reads of one ([`Limits::pages`]).
+const PAGES_MANY: &str = "a page tree with more pages than are read";
+
+/// Why the page tree isn't read whole, given why an object of it didn't
+/// read: none where that's the file's fault, an object that doesn't parse,
+/// which the walk finds.
+fn pages_unread(why: Why) -> Option<&'static str> {
+    match why {
+        Why::Damaged => None,
+        Why::Locked => Some(PAGES_LOCKED),
+        Why::Limit => Some(PAGES_CAPPED),
+        Why::Source => Some(PAGES_UNGIVEN),
+        _ => Some(PAGES_UNREAD),
+    }
+}
+
 /// Walks the page tree that `trailer`'s catalog leads to, by ISO's rules,
 /// what it tells kept, and by PDFium's, noting whether an object didn't
-/// read; each to its end.
-pub(super) fn page_trees(source: &dyn Source, trailer: &Dict) {
-    let Ok(Some(catalog)) = pdf_semantics::catalog(Objects(source), trailer) else {
-        return;
+/// read; each to its end. Gives what ISO's walk told, and the dictionaries
+/// of its pages, in order, where it read the tree whole: which ISO's rules
+/// always give each page. A catalog that isn't there, or a tree with no
+/// `/Pages` to walk, gives none, which the walk finds.
+pub(super) fn page_trees<'a>(
+    source: &'a dyn Source,
+    trailer: &'a Dict,
+) -> (PageTree, Option<Vec<&'a Dict>>) {
+    let mut tree = PageTree::default();
+    let catalog = match pdf_semantics::catalog(Objects(source), trailer) {
+        Ok(Some(catalog)) => catalog,
+        Ok(None) => return (tree, None),
+        Err(unreadable) => {
+            tree.unread = pages_unread(unreadable.why);
+            return (tree, None);
+        }
     };
-    let mut kept = Kept::default();
-    let _ = pages(Objects(source), catalog, Rules::Iso, &LIMITS, &mut kept);
+    let iso = pages(
+        Objects(source),
+        catalog,
+        Rules::Iso,
+        &LIMITS,
+        &mut tree.kept,
+    );
     let mut damage = Damage::default();
     let _ = pages(
         Objects(source),
@@ -191,7 +303,65 @@ pub(super) fn page_trees(source: &dyn Source, trailer: &Dict) {
         &LIMITS,
         &mut damage,
     );
+    let read = match iso {
+        Ok(read) => read,
+        Err(stopped) => {
+            tree.unread = match stopped {
+                pages::Error::Unreadable(unreadable) => pages_unread(unreadable.why),
+                pages::Error::TooDeep => Some(PAGES_DEEP),
+                pages::Error::TooManyPages => Some(PAGES_MANY),
+                _ => None,
+            };
+            return (tree, None);
+        }
+    };
+    let dicts = read.iter().filter_map(|page| page.dict).collect();
+    (tree, Some(dicts))
 }
+
+/// Of what the page tree's walk by ISO's rules tells, each kind
+/// [`Walk::structures`] finds, but a reference that names another, which
+/// it finds at the key holding it: the key it's at, and whether it's found
+/// only where the walk found nothing by the model's rules ([`MODEL`]) in
+/// that object at that key. None for what the walk says, or the object's
+/// own fault there: a root or a kid written in place, a kid that isn't a
+/// dictionary, a node with no kids, a `/Parent` written in place, or under
+/// a node written in place, which no `/Parent` can name, a page with no
+/// `/MediaBox`, an object that doesn't read; and a `/Count` that isn't an
+/// integer, or is the pages under it, an empty tree's 0, which
+/// [`Fault::PageTreeEmpty`] says.
+fn page_tree_key(fault: &Fault) -> Option<(&'static str, bool)> {
+    Some(match *fault {
+        Fault::PageTreeRepeated { .. } | Fault::PageTreeCycle { .. } => ("Kids", false),
+        Fault::PageTreeParentLoop => ("Parent", false),
+        Fault::PageTreeRootParent | Fault::PageTreeParent { lister: Some(_) } => ("Parent", true),
+        Fault::PageTreeType => ("Type", true),
+        Fault::PageTreeEmpty => ("Kids", true),
+        Fault::PageTreeCount {
+            count: Some(count),
+            under,
+        } if usize::try_from(count).ok() != Some(under) => ("Count", true),
+        _ => return None,
+    })
+}
+
+/// The keys a page tree fault told only where the walk found nothing is at
+/// ([`page_tree_key`]).
+const KEYS: [&str; 4] = ["Parent", "Type", "Kids", "Count"];
+
+/// The model's rules that say what's wrong at a key, which a page tree
+/// fault told only where the walk found nothing ([`page_tree_key`]) gives
+/// way to.
+const MODEL: [Rule; 8] = [
+    Rule::Missing,
+    Rule::Type,
+    Rule::Value,
+    Rule::Indirect,
+    Rule::Direct,
+    Rule::Special,
+    Rule::Unresolved,
+    Rule::Unlisted,
+];
 
 impl<'a> Walk<'a> {
     /// Keeps `root`, the visit of a name tree's root when `names`, else a
@@ -213,11 +383,32 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// Reads each name and number tree the walk reached through
-    /// pdf-semantics' trees, from its root, in the order the walk reached
-    /// them, and finds what they tell that [`Walk::tree`] doesn't: see the
-    /// module's documentation.
+    /// Keeps where the walk first visited `v`'s object as one of the page
+    /// tree's tables, by its number, or, the root written in place, by
+    /// none, as pdf-semantics places what's in it: the path and table of
+    /// what [`Walk::structures`] finds there. Not in an earlier revision's
+    /// trailer.
+    pub(super) fn note_structure(&mut self, v: &Visit<'a>) {
+        let table = v.table.name.as_str();
+        if self.revision.is_some() || !PAGE_TREE.contains(&table) {
+            return;
+        }
+        let id = v.id();
+        if id.is_none() && table != "PageTreeNodeRoot" {
+            return;
+        }
+        (self.page_tree_at.entry(id)).or_insert_with(|| Visited {
+            table,
+            trail: v.trail.clone(),
+        });
+    }
+
+    /// Finds what the page tree's walk by ISO's rules, and each name and
+    /// number tree's, read through pdf-semantics, tell that the walk
+    /// doesn't say, the page tree first, then the trees from their roots in
+    /// the order the walk reached them: see the module's documentation.
     pub(super) fn structures(&mut self) {
+        self.page_tree_told();
         let roots = mem::take(&mut self.roots);
         // Each numbered object's kinds told, so that a node two trees
         // share is told of once.
@@ -225,6 +416,87 @@ impl<'a> Walk<'a> {
         for root in &roots {
             self.tree_told(root, &mut told);
         }
+    }
+
+    /// Finds what the page tree's walk by ISO's rules told that the walk
+    /// doesn't say, each kind once in each object, a [`Rule::PageTree`]
+    /// finding; and counts what stopped it reading the tree whole, but the
+    /// file's faults, as not checked, where the catalog is held.
+    fn page_tree_told(&mut self) {
+        let tree = mem::take(&mut self.page_tree);
+        // The catalog's number: what's told in no object is in the root
+        // written in it, or at its /Pages; a catalog written in the trailer
+        // is in what the trailer is.
+        let catalog = match self.trailer.get(b"Root").map(|root| self.resolve(root)) {
+            Some(Ok((id, _))) => id.or(self.trailer_id),
+            Some(Err(id)) => Some(id),
+            None => self.trailer_id,
+        };
+        // What the walk found by the model's rules, where a kind is told
+        // only where it found nothing.
+        let found: HashSet<(Option<ObjectId>, &'static str)> = (self.report.findings.iter())
+            .filter(|f| f.revision.is_none() && MODEL.contains(&f.rule))
+            .filter_map(|f| Some((f.object, KEYS.into_iter().find(|&k| k == f.key)?)))
+            .collect();
+        let mut told = HashSet::new();
+        for &(place, fault, n) in tree.kept.told() {
+            let object = place.object.or(catalog);
+            let key = match fault {
+                Fault::PageTreeChain => self.key_holding(object, place.at),
+                _ => match page_tree_key(&fault) {
+                    Some((key, true)) if found.contains(&(object, key)) => continue,
+                    Some((key, _)) => key.to_string(),
+                    None => continue,
+                },
+            };
+            if !told.insert((object, mem::discriminant(&fault))) {
+                continue;
+            }
+            let Some(made) = self.made(object) else {
+                continue;
+            };
+            let (path, table) = match self.page_tree_at.get(&place.object) {
+                Some(at) => (at.trail.path(), at.table.to_string()),
+                None => ("-".to_string(), "-".to_string()),
+            };
+            self.report.findings.push(Finding {
+                object,
+                made,
+                path,
+                table,
+                key,
+                rule: Rule::PageTree,
+                value: times(&fault.to_string(), n),
+                at: place.at,
+                revision: None,
+            });
+        }
+        if let Some(why) = tree.unread
+            && self.made(catalog).is_some()
+        {
+            self.unchecked("-", why.to_string(), "PageTreeNodeRoot", "-");
+        }
+    }
+
+    /// The key of `object`'s dictionary whose value holds the bytes `at`,
+    /// as written: `-` where none does, or where they aren't known.
+    fn key_holding(&self, object: Option<ObjectId>, at: Option<Span>) -> String {
+        let dict = match object {
+            Some(id) => self.source.get(id).ok().and_then(Object::as_dict),
+            None => Some(self.trailer),
+        };
+        let holds = |value: Span, at: Span| {
+            value.stream == at.stream && value.start <= at.start && at.end <= value.end
+        };
+        let (Some(dict), Some(at)) = (dict, at) else {
+            return "-".to_string();
+        };
+        (dict.entries().iter())
+            .find(|entry| entry.value.at.is_some_and(|value| holds(value, at)))
+            .map_or_else(
+                || "-".to_string(),
+                |entry| String::from_utf8_lossy(&entry.key).into_owned(),
+            )
     }
 
     /// Finds what pdf-semantics' walk of `root`'s tree tells that
@@ -363,9 +635,15 @@ mod tests {
     /// object's number, path, table and key, value, the bytes it's at in
     /// the file, and how its object was made.
     fn found(file: &[u8], hold: &Hold) -> Vec<Found> {
+        found_by(Rule::Tree, file, hold)
+    }
+
+    /// Each finding of `rule` of `file`'s check, as [`found`] gives a tree
+    /// finding.
+    fn found_by(rule: Rule, file: &[u8], hold: &Hold) -> Vec<Found> {
         let report = checked(file, hold, &Options::default());
         (report.findings.iter())
-            .filter(|f| f.rule == Rule::Tree)
+            .filter(|f| f.rule == rule)
             .map(|f| {
                 let at = f.at.map(|at| &file[at.start..at.end]).unwrap_or_default();
                 (
@@ -746,6 +1024,694 @@ mod tests {
         assert_eq!(unread_trees(&report), [], "{report}");
     }
 
+    /// A file of a catalog, object 1, of the page tree at 2, unless
+    /// `objects` writes 1 too, and `objects`, each its number and body.
+    fn paged(objects: &[(u32, &str)]) -> Vec<u8> {
+        let mut all: Vec<(u32, &[u8])> = Vec::new();
+        if !objects.iter().any(|&(n, _)| n == 1) {
+            all.push((1, b"<< /Type /Catalog /Pages 2 0 R >>"));
+        }
+        all.extend(objects.iter().map(|&(n, body)| (n, body.as_bytes())));
+        all.sort_by_key(|&(n, _)| n);
+        let size = all.iter().map(|&(n, _)| n).max().unwrap_or(0) + 1;
+        fixture::assembled("1.7", &all, &format!("<< /Size {size} /Root 1 0 R >>"))
+    }
+
+    /// A page whose `/Parent` is `parent`, with `boxes` for its
+    /// `/MediaBox` and `/Resources`.
+    fn page_with(parent: &str, boxes: &str) -> String {
+        format!("<< /Type /Page /Parent {parent} {boxes} >>")
+    }
+
+    /// A page whose `/Parent` is `parent`, with a box and resources.
+    fn page(parent: &str) -> String {
+        page_with(parent, "/MediaBox [0 0 612 792] /Resources << >>")
+    }
+
+    /// A node whose `/Parent` is `parent`, listing `kids`, its `/Count`
+    /// `count`.
+    fn node(parent: &str, kids: &str, count: &str) -> String {
+        format!("<< /Type /Pages /Parent {parent} /Kids [{kids}] /Count {count} >>")
+    }
+
+    /// Each page tree finding of `file`'s check, every object held.
+    fn page_tree_found(file: &[u8]) -> Vec<Found> {
+        found_by(Rule::PageTree, file, &ALL)
+    }
+
+    const ROOT: &str = "Root/Pages";
+    const KID: &str = "Root/Pages/Kids[0]";
+    const CHAIN: &str = "a reference in the page tree names another reference";
+    const TYPE: &str = "a /Type in the page tree doesn't say what's there";
+
+    /// Each kind of fault pdf-semantics' walk of the page tree by ISO's
+    /// rules tells that the walk can't is found once, in the object it's
+    /// in, at its bytes there, its path and table the object's as the walk
+    /// first visited it in the tree: a `/Count` more and less than the
+    /// pages under the root, and a node's; a node listed inside itself,
+    /// its `/Count` then other than what's under it; a page and a node
+    /// listed again, the node's page again in it; a `/Parent` that isn't
+    /// the node listing the page, and a `/Parent` chain that loops; a
+    /// root's `/Parent`; an empty tree, once, its `/Count` of 0 no finding;
+    /// a node whose `/Type` is `/Page`, which the walk takes for a page; a
+    /// reference to a reference, a kid, a `/Parent` and a box, at the key
+    /// that holds it, told once though the walk reads a `/Parent` twice;
+    /// and a root written in the catalog, its faults in the catalog.
+    #[test]
+    fn what_the_page_trees_walk_tells_that_the_walk_cant_is_found_once() {
+        let two = node("null", "3 0 R", "1");
+        let shapes: Vec<(Vec<u8>, Vec<Found>)> = vec![
+            (
+                paged(&[(2, &node("null", "3 0 R", "3")), (3, &page("2 0 R"))]),
+                vec![tree(
+                    2,
+                    ROOT,
+                    "PageTreeNodeRoot/Count",
+                    "a node's /Count is 3, with 1 page under it",
+                    &node("null", "3 0 R", "3"),
+                )],
+            ),
+            (
+                paged(&[
+                    (2, &node("null", "3 0 R 4 0 R", "1")),
+                    (3, &page("2 0 R")),
+                    (4, &page("2 0 R")),
+                ]),
+                vec![tree(
+                    2,
+                    ROOT,
+                    "PageTreeNodeRoot/Count",
+                    "a node's /Count is 1, with 2 pages under it",
+                    &node("null", "3 0 R 4 0 R", "1"),
+                )],
+            ),
+            (
+                paged(&[
+                    (2, &node("null", "4 0 R", "1")),
+                    (4, &node("2 0 R", "3 0 R", "2")),
+                    (3, &page("4 0 R")),
+                ]),
+                vec![tree(
+                    4,
+                    KID,
+                    "PageTreeNode/Count",
+                    "a node's /Count is 2, with 1 page under it",
+                    &node("2 0 R", "3 0 R", "2"),
+                )],
+            ),
+            (
+                paged(&[
+                    (2, &node("null", "4 0 R 3 0 R", "1")),
+                    (4, &node("2 0 R", "2 0 R", "1")),
+                    (3, &page("2 0 R")),
+                ]),
+                vec![
+                    tree(
+                        4,
+                        KID,
+                        "PageTreeNode/Kids",
+                        "the page tree lists 2 0 R inside itself",
+                        "2 0 R",
+                    ),
+                    tree(
+                        4,
+                        KID,
+                        "PageTreeNode/Count",
+                        "a node's /Count is 1, with 0 pages under it",
+                        &node("2 0 R", "2 0 R", "1"),
+                    ),
+                ],
+            ),
+            (
+                paged(&[(2, &node("null", "3 0 R 3 0 R", "2")), (3, &page("2 0 R"))]),
+                vec![tree(
+                    2,
+                    ROOT,
+                    "PageTreeNodeRoot/Kids",
+                    "the page tree lists 3 0 R again",
+                    "3 0 R",
+                )],
+            ),
+            (
+                paged(&[
+                    (2, &node("null", "4 0 R 4 0 R", "2")),
+                    (4, &node("2 0 R", "3 0 R", "1")),
+                    (3, &page("4 0 R")),
+                ]),
+                vec![
+                    tree(
+                        2,
+                        ROOT,
+                        "PageTreeNodeRoot/Kids",
+                        "the page tree lists 4 0 R again",
+                        "4 0 R",
+                    ),
+                    tree(
+                        4,
+                        KID,
+                        "PageTreeNode/Kids",
+                        "the page tree lists 3 0 R again",
+                        "3 0 R",
+                    ),
+                ],
+            ),
+            (
+                paged(&[
+                    (2, &node("null", "4 0 R", "1")),
+                    (4, &node("2 0 R", "3 0 R", "1")),
+                    (3, &page("2 0 R")),
+                ]),
+                vec![tree(
+                    3,
+                    "Root/Pages/Kids[0]/Kids[0]",
+                    "PageObject/Parent",
+                    "a /Parent isn't 4 0 R, the node that lists it",
+                    &page("2 0 R"),
+                )],
+            ),
+            (
+                paged(&[
+                    (2, &two),
+                    (3, &page("4 0 R")),
+                    (4, &node("5 0 R", "3 0 R", "1")),
+                    (5, &node("4 0 R", "4 0 R", "1")),
+                ]),
+                vec![
+                    tree(
+                        3,
+                        KID,
+                        "PageObject/Parent",
+                        "a /Parent isn't 2 0 R, the node that lists it",
+                        &page("4 0 R"),
+                    ),
+                    tree(
+                        5,
+                        "Root/Pages/Kids[0]/Parent/Parent",
+                        "PageTreeNode/Parent",
+                        "a /Parent chain loops",
+                        "4 0 R",
+                    ),
+                ],
+            ),
+            (
+                paged(&[
+                    (2, &node("4 0 R", "3 0 R", "1")),
+                    (3, &page("2 0 R")),
+                    (4, &node("null", "2 0 R", "1")),
+                ]),
+                vec![tree(
+                    2,
+                    ROOT,
+                    "PageTreeNodeRoot/Parent",
+                    "the root of the page tree has a /Parent",
+                    &node("4 0 R", "3 0 R", "1"),
+                )],
+            ),
+            (
+                paged(&[(2, "<< /Type /Pages /Kids [] /Count 0 >>")]),
+                vec![tree(
+                    2,
+                    ROOT,
+                    "PageTreeNodeRoot/Kids",
+                    "the page tree has no pages",
+                    "<< /Type /Pages /Kids [] /Count 0 >>",
+                )],
+            ),
+            (
+                paged(&[
+                    (2, &node("null", "4 0 R", "1")),
+                    (4, "<< /Type /Page /Parent 2 0 R /Kids [3 0 R] /Count 1 >>"),
+                    (3, &page("4 0 R")),
+                ]),
+                vec![tree(
+                    4,
+                    KID,
+                    "PageObject/Type",
+                    TYPE,
+                    "<< /Type /Page /Parent 2 0 R /Kids [3 0 R] /Count 1 >>",
+                )],
+            ),
+            (
+                paged(&[
+                    (2, &node("null", "4 0 R", "1")),
+                    (3, &page("2 0 R")),
+                    (4, "3 0 R"),
+                ]),
+                vec![tree(2, ROOT, "PageTreeNodeRoot/Kids", CHAIN, "4 0 R")],
+            ),
+            (
+                paged(&[(2, &two), (3, &page("4 0 R")), (4, "2 0 R")]),
+                vec![tree(3, KID, "PageObject/Parent", CHAIN, "4 0 R")],
+            ),
+            (
+                paged(&[
+                    (2, &two),
+                    (3, &page_with("2 0 R", "/MediaBox 4 0 R /Resources << >>")),
+                    (4, "5 0 R"),
+                    (5, "[0 0 595 842]"),
+                ]),
+                vec![tree(3, KID, "PageObject/MediaBox", CHAIN, "4 0 R")],
+            ),
+            (
+                paged(&[
+                    (
+                        1,
+                        "<< /Type /Catalog /Pages << /Type /Pages /Kids [3 0 R] /Count 2 >> >>",
+                    ),
+                    (3, &page("1 0 R")),
+                ]),
+                vec![tree(
+                    1,
+                    ROOT,
+                    "PageTreeNodeRoot/Count",
+                    "a node's /Count is 2, with 1 page under it",
+                    "<< /Type /Pages /Kids [3 0 R] /Count 2 >>",
+                )],
+            ),
+        ];
+        for (file, expected) in shapes {
+            assert_eq!(page_tree_found(&file), expected);
+        }
+    }
+
+    /// What the walk says of a page tree, or of the object a fault is in,
+    /// is found by it alone, though pdf-semantics' walk tells a fault too:
+    /// each shape's own finding, and no page tree finding. A `/Count`
+    /// absent or a real, a node's `/Kids` empty or absent, the root's
+    /// absent; a `/Type` absent, of another name, or `/Page` at the root; a
+    /// kid written in place, null, an integer, a reference to nothing or a
+    /// stream; a `/Parent` absent or written in place, and a root written
+    /// in place, whose pages' `/Parent`s can't name it; a page with no
+    /// `/MediaBox`, or one of three numbers.
+    #[test]
+    fn what_the_walk_says_of_a_page_tree_is_found_by_it_alone() {
+        let one = node("null", "3 0 R", "1");
+        let pages = |root: &str, three: &str| paged(&[(2, root), (3, three)]);
+        let kids = |kids: &str| paged(&[(2, &node("null", kids, "1")), (3, &page("2 0 R"))]);
+        let empty = |kid: &str| {
+            paged(&[
+                (2, &node("null", "4 0 R 3 0 R", "1")),
+                (3, &page("2 0 R")),
+                (4, kid),
+            ])
+        };
+        let shapes = [
+            (
+                pages("<< /Type /Pages /Kids [3 0 R] >>", &page("2 0 R")),
+                (2, "PageTreeNodeRoot", "Count", Rule::Missing),
+            ),
+            (
+                pages(&node("null", "3 0 R", "1.0"), &page("2 0 R")),
+                (2, "PageTreeNodeRoot", "Count", Rule::Type),
+            ),
+            (
+                empty("<< /Type /Pages /Parent 2 0 R /Kids [] /Count 0 >>"),
+                (4, "PageTreeNode", "Kids", Rule::Special),
+            ),
+            (
+                empty("<< /Type /Pages /Parent 2 0 R /Count 0 >>"),
+                (4, "PageTreeNode", "Kids", Rule::Missing),
+            ),
+            (
+                paged(&[(2, "<< /Type /Pages /Count 0 >>")]),
+                (2, "PageTreeNodeRoot", "Kids", Rule::Missing),
+            ),
+            (
+                pages(
+                    &one,
+                    "<< /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>",
+                ),
+                (3, "PageObject", "Type", Rule::Missing),
+            ),
+            (
+                pages(
+                    &one,
+                    "<< /Type /Foo /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>",
+                ),
+                (3, "PageObject", "Type", Rule::Value),
+            ),
+            (
+                paged(&[(
+                    2,
+                    "<< /Type /Page /MediaBox [0 0 612 792] /Resources << >> >>",
+                )]),
+                (2, "PageTreeNodeRoot", "Type", Rule::Value),
+            ),
+            (
+                paged(&[(2, &node("null", &page("2 0 R"), "1"))]),
+                (2, "ArrayOfPageTreeNodeKids", "0", Rule::Indirect),
+            ),
+            (
+                kids("null 3 0 R"),
+                (2, "ArrayOfPageTreeNodeKids", "0", Rule::Type),
+            ),
+            (
+                kids("5 3 0 R"),
+                (2, "ArrayOfPageTreeNodeKids", "0", Rule::Type),
+            ),
+            (
+                kids("9 0 R 3 0 R"),
+                (2, "ArrayOfPageTreeNodeKids", "0", Rule::Unresolved),
+            ),
+            (
+                pages(
+                    &one,
+                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> /Length 0 >>\nstream\n\nendstream",
+                ),
+                (2, "ArrayOfPageTreeNodeKids", "0", Rule::Type),
+            ),
+            (
+                pages(
+                    &one,
+                    "<< /Type /Page /MediaBox [0 0 612 792] /Resources << >> >>",
+                ),
+                (3, "PageObject", "Parent", Rule::Missing),
+            ),
+            (
+                pages(&one, &page(&one)),
+                (3, "PageObject", "Parent", Rule::Indirect),
+            ),
+            (
+                paged(&[
+                    (1, &format!("<< /Type /Catalog /Pages {one} >>")),
+                    (3, &page("1 0 R")),
+                ]),
+                (1, "Catalog", "Pages", Rule::Indirect),
+            ),
+            (
+                pages(&one, &page_with("2 0 R", "/Resources << >>")),
+                (3, "PageObject", "MediaBox", Rule::Missing),
+            ),
+            (
+                pages(
+                    &one,
+                    &page_with("2 0 R", "/MediaBox [0 0 612] /Resources << >>"),
+                ),
+                (3, "PageObject", "MediaBox", Rule::Type),
+            ),
+        ];
+        for (file, (n, table, key, rule)) in shapes {
+            let report = checked(&file, &ALL, &Options::default());
+            let own = (report.findings.iter()).any(|f| {
+                (f.object, f.table.as_str(), f.key.as_str(), f.rule)
+                    == (Some((n, 0)), table, key, rule)
+            });
+            assert!(own, "{table}/{key} {rule}: {report}");
+            let told: Vec<_> = (report.findings.iter())
+                .filter(|f| f.rule == Rule::PageTree)
+                .collect();
+            assert!(told.is_empty(), "{report}");
+        }
+    }
+
+    /// A root's `/Parent`, a key the model doesn't list there, is a page
+    /// tree finding in an object merged, where the walk counts it alone;
+    /// and in one built, where the walk lets it be as the root is reached
+    /// again, by its page's `/Parent`, as a node, whose table lists it. In a
+    /// root built that nothing reaches again, the walk finds it unlisted,
+    /// and it isn't told again; the tree's emptiness is, at its own key.
+    #[test]
+    fn a_roots_parent_is_found_once_unlisted_where_the_walk_finds_it() {
+        let told = |file: &[u8], hold: &Hold| -> Vec<(String, Rule, String)> {
+            let report = checked(file, hold, &Options::default());
+            (report.findings.iter())
+                .filter(|f| f.object == Some((2, 0)))
+                .map(|f| (f.key.clone(), f.rule, f.value.clone()))
+                .collect()
+        };
+        let parent = || "Parent".to_string();
+        let said = "the root of the page tree has a /Parent".to_string();
+        let file = paged(&[
+            (2, &node("4 0 R", "3 0 R", "1")),
+            (3, &page("2 0 R")),
+            (4, &node("null", "2 0 R", "1")),
+        ]);
+        let found = [(parent(), Rule::PageTree, said.clone())];
+        assert_eq!(told(&file, &ALL), found);
+        assert_eq!(told(&file, &Hold::All(Made::Built)), found);
+
+        let empty = node("4 0 R", "", "0");
+        let file = paged(&[(2, &empty), (4, &node("null", "2 0 R", "1"))]);
+        let none = (
+            "Kids".to_string(),
+            Rule::PageTree,
+            "the page tree has no pages".to_string(),
+        );
+        let merged = told(&file, &ALL);
+        assert_eq!(merged, [(parent(), Rule::PageTree, said), none.clone()]);
+        let built = told(&file, &Hold::All(Made::Built));
+        let four = "<< /Count 1 /Kids [2 0 R] /Parent null /Type /Pages >>";
+        assert_eq!(built, [(parent(), Rule::Unlisted, four.to_string()), none]);
+    }
+
+    /// What's found in an object of the page tree the walk first visited
+    /// as another table, here the catalog, which its `/Pages` names, has
+    /// `-` for its path and table, as the walk reached it as none of the
+    /// tree's.
+    #[test]
+    fn what_the_walk_reached_as_another_table_has_no_path() {
+        let catalog = "<< /Type /Catalog /Pages 1 0 R >>";
+        let file = paged(&[(1, catalog)]);
+        assert_eq!(
+            page_tree_found(&file),
+            [tree(1, "-", "-/Type", TYPE, catalog)]
+        );
+    }
+
+    /// Only what's in an object held is found: a page's `/Parent`, in the
+    /// page held, not in the node that lists it; and of a node listed
+    /// twice, only what's in the node held.
+    #[test]
+    fn what_s_in_a_page_tree_object_not_held_isnt_found() {
+        let held = |ns: &[u32]| Hold::Only(ns.iter().map(|&n| ((n, 0), Made::Merged)).collect());
+        let wrong = paged(&[
+            (2, &node("null", "4 0 R", "1")),
+            (4, &node("2 0 R", "3 0 R", "1")),
+            (3, &page("2 0 R")),
+        ]);
+        let parent = tree(
+            3,
+            "Root/Pages/Kids[0]/Kids[0]",
+            "PageObject/Parent",
+            "a /Parent isn't 4 0 R, the node that lists it",
+            &page("2 0 R"),
+        );
+        assert_eq!(found_by(Rule::PageTree, &wrong, &held(&[3])), [parent]);
+        assert_eq!(found_by(Rule::PageTree, &wrong, &held(&[1, 2, 4])), []);
+        let twice = paged(&[
+            (2, &node("null", "4 0 R 4 0 R", "2")),
+            (4, &node("2 0 R", "3 0 R", "1")),
+            (3, &page("4 0 R")),
+        ]);
+        let again = tree(
+            4,
+            KID,
+            "PageTreeNode/Kids",
+            "the page tree lists 3 0 R again",
+            "3 0 R",
+        );
+        assert_eq!(found_by(Rule::PageTree, &twice, &held(&[4])), [again]);
+    }
+
+    /// A page tree finding is carried by a like one whatever its numbers
+    /// and count: a `/Count` of 3 by one of 5, by number, by path and from
+    /// a source; a page listed again twice by one listed again once. One of
+    /// another kind is the file's own.
+    #[test]
+    fn a_page_tree_finding_is_carried_whatever_its_numbers() {
+        let report = |two: &str| {
+            let options = Options {
+                paths: true,
+                ..Options::default()
+            };
+            checked(&paged(&[(2, two), (3, &page("2 0 R"))]), &ALL, &options)
+        };
+        let values = |found: Vec<&Finding>| -> Vec<String> {
+            found.into_iter().map(|f| f.value.clone()).collect()
+        };
+        let carried = |after: &Report, before: &Report| {
+            assert_eq!(values(after.since(before)), Vec::<String>::new(), "{after}");
+            assert_eq!(
+                values(after.by_path(before)),
+                Vec::<String>::new(),
+                "{after}"
+            );
+            assert_eq!(
+                values(after.beyond(&[before])),
+                Vec::<String>::new(),
+                "{after}"
+            );
+        };
+        let three = report(&node("null", "3 0 R", "3"));
+        let five = report(&node("null", "3 0 R", "5"));
+        assert_eq!(
+            values(five.findings.iter().collect()),
+            ["a node's /Count is 5, with 1 page under it"]
+        );
+        carried(&five, &three);
+        let again = report(&node("null", "3 0 R 3 0 R", "2"));
+        let twice = report(&node("null", "3 0 R 3 0 R 3 0 R", "3"));
+        assert_eq!(
+            values(twice.findings.iter().collect()),
+            ["the page tree lists 3 0 R again, 2 times"]
+        );
+        carried(&twice, &again);
+        let own = ["the page tree lists 3 0 R again"];
+        assert_eq!(values(again.since(&three)), own);
+        assert_eq!(values(again.by_path(&three)), own);
+        assert_eq!(values(again.beyond(&[&three])), own);
+    }
+
+    /// The rows a check counts as not checked for the page tree: why, and
+    /// how many.
+    fn unread_pages(report: &Report) -> Vec<(&str, usize)> {
+        (report.unchecked.iter())
+            .filter(|(u, _)| {
+                (u.column, u.table.as_str(), u.key.as_str()) == ("-", "PageTreeNodeRoot", "-")
+            })
+            .map(|(u, &n)| (u.why.as_str(), n))
+            .collect()
+    }
+
+    /// A page tree deeper than pdf-semantics reads, 1,025 nodes from the
+    /// root down, is counted as not checked, once, where the catalog is
+    /// held, and what was told before is found: a page listed again at the
+    /// root, before its node goes down. A tree read whole isn't counted.
+    #[test]
+    fn a_page_tree_deeper_than_its_read_is_counted_what_was_read_found() {
+        let (first, last) = (10, 10 + 1023);
+        let mut nodes: Vec<(u32, String)> = (first..last)
+            .map(|n| {
+                (
+                    n,
+                    node(&format!("{} 0 R", n - 1), &format!("{} 0 R", n + 1), "1"),
+                )
+            })
+            .collect();
+        nodes[0].1 = node("2 0 R", "11 0 R", "1");
+        nodes.push((last, node(&format!("{} 0 R", last - 1), "", "0")));
+        let mut objects: Vec<(u32, &str)> =
+            nodes.iter().map(|(n, body)| (*n, body.as_str())).collect();
+        let root = node("null", "3 0 R 3 0 R 10 0 R", "3");
+        let leaf = page("2 0 R");
+        objects.extend([(2, root.as_str()), (3, leaf.as_str())]);
+        let deep = paged(&objects);
+        let again = tree(
+            2,
+            ROOT,
+            "PageTreeNodeRoot/Kids",
+            "the page tree lists 3 0 R again",
+            "3 0 R",
+        );
+        assert_eq!(page_tree_found(&deep), [again]);
+        let report = checked(&deep, &ALL, &Options::default());
+        assert_eq!(unread_pages(&report), [(PAGES_DEEP, 1)], "{report}");
+        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        let report = checked(&deep, &only(1), &Options::default());
+        assert_eq!(unread_pages(&report), [(PAGES_DEEP, 1)], "{report}");
+        let report = checked(&deep, &only(2), &Options::default());
+        assert_eq!(unread_pages(&report), [], "{report}");
+
+        let whole = paged(&[(2, &node("null", "3 0 R", "1")), (3, &page("2 0 R"))]);
+        let report = checked(&whole, &ALL, &Options::default());
+        assert_eq!(unread_pages(&report), [], "{report}");
+        assert_eq!(report.findings, [], "{report}");
+    }
+
+    /// The model's target dictionary (ISO 32000-2, 12.6.4.4), at a GoToE
+    /// action's `/T`, asks `fn:NumberOfPages()` of its `/P` and
+    /// `fn:PageProperty` of its `/A`, over the pages the page tree's walk
+    /// gives: `/P` past them a `value` finding, within them none; `/A` an
+    /// index past the page's `/Annots` and within, and a string equal to an
+    /// annotation's `/NM` and to none. A `/P` that's a string, a named
+    /// destination, leaves `/A` untold, counted; a target under another's
+    /// `/T`, of another document's pages, is counted, never found, its `/P`
+    /// past this file's; and a file whose pages aren't read leaves both
+    /// counted.
+    #[test]
+    fn a_targets_page_and_annotation_are_held_to_the_pages_read() {
+        let file = |p: &str, a: &str, pages: bool| {
+            let catalog = match pages {
+                true => "<< /Type /Catalog /Pages 2 0 R /OpenAction 20 0 R >>",
+                false => "<< /Type /Catalog /OpenAction 20 0 R >>",
+            };
+            let target = format!("<< /R /C /P {p} /A {a} /T 22 0 R >>");
+            let leaf = page_with(
+                "2 0 R",
+                "/MediaBox [0 0 612 792] /Resources << >> /Annots [5 0 R]",
+            );
+            paged(&[
+                (1, catalog),
+                (2, &node("null", "3 0 R", "1")),
+                (3, &leaf),
+                (
+                    5,
+                    "<< /Type /Annot /Subtype /Text /Rect [0 0 1 1] /NM (one) /P 3 0 R >>",
+                ),
+                (20, "<< /S /GoToE /D (x) /T 21 0 R >>"),
+                (21, &target),
+                (22, "<< /R /C /N (x) /T 23 0 R >>"),
+                (23, "<< /R /C /P 7 /A 0 >>"),
+            ])
+        };
+        // Each finding in a target, and each check not made there.
+        let target = |p: &str, a: &str, pages: bool| {
+            let report = checked(&file(p, a, pages), &ALL, &Options::default());
+            let found: Vec<_> = (report.findings.iter())
+                .filter(|f| f.table == "Target")
+                .map(|f| {
+                    (
+                        f.object.map(|(n, _)| n),
+                        f.key.clone(),
+                        f.rule,
+                        f.value.clone(),
+                    )
+                })
+                .collect();
+            let counted: Vec<_> = (report.unchecked.iter())
+                .filter(|(u, _)| u.table == "Target")
+                .map(|(u, &n)| (u.column, u.why.clone(), u.key.clone(), n))
+                .collect();
+            (found, counted)
+        };
+        // The checks not made, `/P`'s for want of the pages, and `/A`'s,
+        // in how many targets each.
+        let untold = |p: usize, a: usize| {
+            let row =
+                |why: &str, key: &str, n| ("PossibleValues", why.to_string(), key.to_string(), n);
+            let rows = [
+                row("fn:NumberOfPages", "P", p),
+                row("fn:PageProperty", "A", a),
+            ];
+            rows.into_iter().filter(|row| row.3 > 0).collect::<Vec<_>>()
+        };
+        let p_past = "1 (not one of fn:Eval((@P>=0) && (@P<fn:NumberOfPages())))";
+        let a_past =
+            "1 (not one of fn:Eval((@A>=0) && (@A<fn:ArrayLength(fn:PageProperty(@P,Annots)))))";
+        let a_none = "(two) (not one of fn:Eval(@A==fn:PageProperty(@P,Annots::@NM)))";
+        let value =
+            |key: &str, said: &str| (Some(21), key.to_string(), Rule::Value, said.to_string());
+        // The nested target's two, alone.
+        assert_eq!(target("0", "0", true), (vec![], untold(1, 1)));
+        assert_eq!(
+            target("1", "0", true),
+            (vec![value("P", p_past)], untold(1, 2))
+        );
+        assert_eq!(
+            target("0", "1", true),
+            (vec![value("A", a_past)], untold(1, 1))
+        );
+        assert_eq!(target("0", "(one)", true), (vec![], untold(1, 1)));
+        assert_eq!(
+            target("0", "(two)", true),
+            (vec![value("A", a_none)], untold(1, 1))
+        );
+        let (found, counted) = target("(chapter)", "0", true);
+        assert!(found.iter().all(|f| f.1 == "P"), "{found:?}");
+        assert_eq!(counted, untold(1, 2));
+        assert_eq!(target("0", "0", false), (vec![], untold(2, 2)));
+    }
+
     /// Of each kind in each object, the first told and its place, and how
     /// many, in the order each kind was first told there: a kind told in
     /// another object is another, and a kind's fields don't part it.
@@ -772,6 +1738,18 @@ mod tests {
             ]
         );
         assert_eq!(kept.index.len(), 4);
+
+        // Told again at the bytes its kind was last told at in the object,
+        // as a walk reads a value twice, it's once; at other bytes, or at
+        // none known, again.
+        let mut kept = Kept::default();
+        let bytes = |start| Place::new(Some((2, 0)), Some(Span::new(None, start, start + 5)));
+        for start in [10, 10, 20, 10, 10] {
+            kept.fault(bytes(start), Fault::PageTreeChain);
+        }
+        kept.fault(at(Some((2, 0))), Fault::PageTreeChain);
+        kept.fault(at(Some((2, 0))), Fault::PageTreeChain);
+        assert_eq!(kept.told(), [(bytes(10), Fault::PageTreeChain, 5)]);
     }
 
     /// Only an object that doesn't read is noted: the one fault PDFium's

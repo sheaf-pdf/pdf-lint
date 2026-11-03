@@ -19,6 +19,12 @@
 //! it takes, each resource name in the resources, what they hold that
 //! nothing uses, and each place ISO reads the content otherwise than
 //! PDFium ([`check()`] says how).
+//!
+//! The page tree, and each name and number tree the walk reaches, are read
+//! through pdf-semantics too, and held to ISO 32000-2 where the model can't
+//! say what's wrong; the pages the page tree's walk reads are what the
+//! model's `fn:NumberOfPages` and `fn:PageProperty` read ([`check()`]
+//! says how).
 
 pub mod allowance;
 pub mod check;

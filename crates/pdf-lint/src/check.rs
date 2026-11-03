@@ -79,13 +79,15 @@
 //!
 //! The common structures are read through pdf-semantics: before the walk,
 //! the page tree (ISO 32000-2, 7.7.3), by ISO's rules and by PDFium's, from
-//! the catalog the trailer as written leads to; after the content, each name
-//! and number tree the walk reached in the newest revision (7.9.6, 7.9.7),
-//! from its root, what that tells of it that the walk doesn't say a
-//! [`Rule::Tree`] finding, each kind once in each object it's in, at its
-//! first place there, with how many times, and a tree not read whole for
-//! what isn't the file's fault counted as not checked. No rule is held to
-//! what the page tree's walks tell yet.
+//! the catalog the trailer as written leads to, the pages ISO's reads given
+//! to the predicates (`fn:NumberOfPages`, `fn:PageProperty`); after the
+//! content, what ISO's walk told of the tree that the walk can't say a
+//! [`Rule::PageTree`] finding, then each name and number tree the walk
+//! reached in the newest revision (7.9.6, 7.9.7), from its root, what that
+//! tells of it that the walk doesn't say a [`Rule::Tree`] finding; each kind
+//! once in each object it's in, at its first place there, with how many
+//! times, and a tree not read whole for what isn't the file's fault counted
+//! as not checked. No rule is held to what PDFium's walk tells yet.
 //!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
@@ -106,7 +108,8 @@
 //! an indirect reference, or the reverse ([`Rule::Indirect`],
 //! [`Rule::Direct`]); a SpecialCase that comes to false
 //! ([`Rule::Special`]); a reference to no object ([`Rule::Unresolved`]); a
-//! malformed name or number tree ([`Rule::Tree`]); a held object the
+//! malformed name or number tree ([`Rule::Tree`]); a page tree that breaks
+//! 7.7.3 where the model can't say so ([`Rule::PageTree`]); a held object the
 //! walk never reached ([`Rule::Unreached`]); in an object built whole (or
 //! as [`Options::unlisted`] says), a key the model doesn't list that isn't
 //! exempt ([`Rule::Unlisted`]); a
@@ -692,6 +695,35 @@ pub enum Rule {
     /// dictionary or an inline image that doesn't end and the like, at it,
     /// after which no more is read. Where and as [`Rule::Balance`].
     Content,
+    /// A page tree that breaks ISO 32000-2 7.7.3, as pdf-semantics' walk of
+    /// it by ISO's rules reads it, from the catalog the trailer as written
+    /// leads to, where the model can't say so: a page or a node the tree
+    /// lists again, or a node listed inside itself, in the node that lists
+    /// it, its key `Kids`; a `/Parent` chain that loops, `Parent`; and a
+    /// reference that names another reference, at the key whose value holds
+    /// it. And where the walk found nothing by the model's rules
+    /// ([`Rule::Missing`], [`Rule::Type`], [`Rule::Value`],
+    /// [`Rule::Indirect`], [`Rule::Direct`], [`Rule::Special`],
+    /// [`Rule::Unresolved`], [`Rule::Unlisted`]) in that object at that
+    /// key: a `/Parent` on the root, or one that isn't the node listing it,
+    /// where that has a number, `Parent`; a `/Type` that doesn't say what's
+    /// there, `Type`; a tree with no pages, `Kids`; and a node's `/Count`
+    /// that's an integer other than the pages under it, `Count`. What the
+    /// walk says of each other fault, or of the object's own there, isn't
+    /// told again: a root or a kid written in place, a kid that isn't a
+    /// dictionary, a node with no kids, a `/Parent` written in place, a
+    /// page with no `/MediaBox`, an object that doesn't read. Each kind once
+    /// in each object it's in, at its first place there, its value
+    /// pdf-semantics' words with how many times; what's in no object, the
+    /// root written in the catalog, in the catalog's. Its path and table
+    /// the object's where the walk first visited it as `PageTreeNodeRoot`,
+    /// `PageTreeNode` or `PageObject`, `-` and `-` where it didn't. A tree
+    /// pdf-semantics doesn't read whole for what isn't the file's fault, an
+    /// object of it that takes a password or is past a cap, a tree deeper
+    /// or with more pages than it reads, is counted as not checked, its
+    /// column `-`, its table `PageTreeNodeRoot` and its key `-`, where the
+    /// catalog is held; what was read of it is found all the same.
+    PageTree,
 }
 
 /// A rule a held object breaks.
@@ -772,7 +804,9 @@ pub enum Class {
 /// can't be looked up, the holder's table and `Resources`, and a resource
 /// that can't be told used or not, `Resource` and its category; or a name
 /// or number tree not read whole for what isn't the file's fault, its
-/// column `-`, its table and key the row's whose value its root is.
+/// column `-`, its table and key the row's whose value its root is; or the
+/// page tree not read so, its column and key `-`, its table
+/// `PageTreeNodeRoot`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Unchecked {
     /// The column whose cell it is.
@@ -784,8 +818,8 @@ pub struct Unchecked {
     /// revisions not kept; for content, why it isn't read (a content
     /// stream that doesn't decode cleanly, content past the file's
     /// budget), or why a name in it can't be looked up, or a resource told;
-    /// for a tree, why it isn't read whole (an object of it that takes a
-    /// password).
+    /// for a tree, or the page tree, why it isn't read whole (an object of
+    /// it that takes a password).
     pub why: String,
     pub table: String,
     pub key: String,
@@ -804,9 +838,9 @@ pub struct Report {
     /// Checks not made, for a predicate that can't be told; earlier
     /// revisions' trailers held that can't be checked; content held that
     /// can't be: units of it not read, resource names in it that can't be
-    /// looked up, and resources that can't be told used or not; and name
-    /// and number trees whose roots are held not read whole for what isn't
-    /// the file's fault; by why.
+    /// looked up, and resources that can't be told used or not; name and
+    /// number trees whose roots are held not read whole for what isn't the
+    /// file's fault, and the page tree, where its catalog is held; by why.
     pub unchecked: BTreeMap<Unchecked, usize>,
     /// Keys and elements of held objects the model doesn't list.
     pub unlisted: BTreeMap<Unlisted, usize>,
@@ -897,8 +931,10 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         .table(name)
         .expect("the model has the trailers' tables");
     let id = written.stream;
-    // The page tree, by ISO's rules and by PDFium's, before the walk.
-    structure::page_trees(source, trailer);
+    // The page tree, by ISO's rules and by PDFium's, before the walk: what
+    // ISO's tells, and its pages, where it read them, which the predicates
+    // read.
+    let (page_tree, pages) = structure::page_trees(source, trailer);
     // The packet, read once: for the extensions declared, and its faults.
     let (mut extensions, ..) = crate::extension::read(source);
     extensions.extend(options.extensions.iter().cloned());
@@ -907,6 +943,10 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     let file = FileCx::new(trailer, version, Objects(source))
         .size(source.size())
         .extensions(&extensions);
+    let file = match &pages {
+        Some(pages) => file.pages(pages),
+        None => file,
+    };
     // The earlier revisions' trailers held, and what each one's predicates
     // are evaluated in: its trailer, the objects that revision had, and
     // the file's length, as where a revision ended isn't recorded. Those
@@ -997,6 +1037,8 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         containers: Vec::new(),
         holders: Vec::new(),
         resources_at: HashMap::new(),
+        page_tree,
+        page_tree_at: HashMap::new(),
         roots: Vec::new(),
         report: Report {
             findings,
@@ -1169,9 +1211,10 @@ enum Place {
 /// references' numbers aside, which a rewrite renumbers, and a reader's
 /// finding's numbers aside, its offsets, and a content finding's, its
 /// counts, offsets and lengths, and how many times its kind was found, but
-/// an operator's name, `d0` not `d1`, in an operator's or operands'; and a
+/// an operator's name, `d0` not `d1`, in an operator's or operands'; a
 /// tree finding's references' numbers and how many times its kind was
-/// found; for a key that came in later than the file's version, any value,
+/// found; and a page tree finding's numbers, and how many times its kind
+/// was found; for a key that came in later than the file's version, any value,
 /// as its value isn't what's wrong; and for an object nothing reaches, the
 /// object alone, as which object's reference to it is named follows the
 /// objects' numbers and keys' order.
@@ -1180,6 +1223,7 @@ fn like(f: &Finding) -> (String, String, Rule, String) {
         Rule::TooNew => String::new(),
         Rule::Reader => f.value.chars().filter(|c| !c.is_ascii_digit()).collect(),
         Rule::Tree => numberless(structure::uncounted(&f.value)),
+        Rule::PageTree => content::uncounted(f.rule, &f.value),
         rule if content::counted(rule, &f.key) => content::uncounted(rule, &f.value),
         _ => numberless(&f.value),
     };
@@ -1446,6 +1490,13 @@ struct Walk<'a> {
     /// Where the walk reached each resources dictionary, by where the
     /// source holds it, which [`Walk::content`] tells `unused` by.
     resources_at: HashMap<*const Object, content::Reached<'a>>,
+    /// What the page tree's walk by ISO's rules told, which
+    /// [`Walk::structures`] finds in.
+    page_tree: structure::PageTree,
+    /// Where the walk first visited each object of the page tree as one of
+    /// its tables, by number, and its root written in place, by none, which
+    /// [`Walk::structures`] gives the page tree's findings the paths of.
+    page_tree_at: HashMap<Option<ObjectId>, structure::Visited<'a>>,
     /// Each name and number tree's root the walk reached, in the order it
     /// reached them, which [`Walk::structures`] reads again.
     roots: Vec<structure::Root<'a>>,
@@ -1700,6 +1751,7 @@ impl<'a> Walk<'a> {
     /// its table requires and no key twice.
     fn visit(&mut self, v: Visit<'a>) {
         self.note_content(&v);
+        self.note_structure(&v);
         let made = self.made(v.holder);
         let also = v.also.map(|table| v.as_(table));
         if made.is_some() {
@@ -3950,6 +4002,7 @@ impl Rule {
         Rule::Resource,
         Rule::Unused,
         Rule::Content,
+        Rule::PageTree,
     ];
 
     /// Its name, as findings and allowances write it.
@@ -3977,6 +4030,7 @@ impl Rule {
             Rule::Resource => "resource",
             Rule::Unused => "unused",
             Rule::Content => "content",
+            Rule::PageTree => "page-tree",
         }
     }
 
@@ -5890,6 +5944,7 @@ mod tests {
                     Rule::Missing,
                     "absent"
                 ),
+                NO_PAGES,
             ],
             "{report}"
         );
@@ -5919,7 +5974,7 @@ mod tests {
             ..Options::default()
         };
         let report = check(&doc, &Hold::All(Made::Built), &options);
-        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(walked(&report), [NO_PAGES], "{report}");
         assert_eq!(report.checked.get("ObjectStream"), Some(&4), "{report}");
         let paths: Vec<_> = (report.paths.iter())
             .filter(|path| path.contains(" R"))
@@ -5937,7 +5992,8 @@ mod tests {
             specials,
             [
                 (Some(20), "20 0 R", "Extends", Rule::Special),
-                (Some(21), "21 0 R", "Extends", Rule::Special)
+                (Some(21), "21 0 R", "Extends", Rule::Special),
+                (Some(2), "Root/Pages", "Kids", Rule::PageTree),
             ],
             "{report}"
         );
@@ -5954,7 +6010,7 @@ mod tests {
         doc.insert(10, Object::stream(container));
         doc.insert(5, 0);
         let report = check(&doc, &Hold::All(Made::Built), &Options::default());
-        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(walked(&report), [NO_PAGES], "{report}");
         assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
     }
 
@@ -6184,6 +6240,19 @@ mod tests {
     const CATALOG: &str = "<< /Type /Catalog /Pages 2 0 R >>";
     const PAGES: &str = "<< /Type /Pages /Kids [] /Count 0 >>";
 
+    /// What an empty page tree, object 2 of [`bare`]'s documents and of
+    /// [`PAGES`]' files, is found as ([`walked`]): a tree of no pages (ISO
+    /// 32000-2, 7.7.3.2, erratum 271), which a test that holds every
+    /// finding of one expects.
+    const NO_PAGES: Walked = (
+        Some(2),
+        "Root/Pages",
+        "PageTreeNodeRoot",
+        "Kids",
+        Rule::PageTree,
+        "the page tree has no pages",
+    );
+
     /// The checks not made, each its column, why, table and key, and how
     /// many.
     fn not_made(report: &Report) -> Vec<(&str, &str, &str, &str, usize)> {
@@ -6230,7 +6299,7 @@ mod tests {
                 ..Options::default()
             };
             let report = check(&doc, &hold, &options);
-            assert_eq!(walked(&report), [missing], "{report}");
+            assert_eq!(walked(&report), [missing, NO_PAGES], "{report}");
             let found = &report.findings[0];
             assert_eq!((found.made, found.revision), (Made::Merged, Some(1)));
             let at = found.at.unwrap();
@@ -6241,7 +6310,7 @@ mod tests {
         }
         let some = Hold::Only(BTreeMap::from([((2, 0), Made::Merged)]));
         let report = check(&doc, &some, &Options::default());
-        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(walked(&report), [NO_PAGES], "{report}");
         assert_eq!(report.checked.get("FileTrailer"), Some(&1), "{report}");
 
         // Its /Prev past the file's end, which the reader can't follow.
@@ -6258,7 +6327,10 @@ mod tests {
         let prev = "99999 (not one of fn:Eval((@Prev>=0) && (@Prev<=fn:FileSize())))";
         assert_eq!(
             found,
-            [(None, "trailer 1", "FileTrailer", "Prev", Rule::Value, prev)],
+            [
+                (None, "trailer 1", "FileTrailer", "Prev", Rule::Value, prev),
+                NO_PAGES
+            ],
             "{report}"
         );
     }
@@ -6340,9 +6412,12 @@ mod tests {
         let doc = bytes::read(&file.out);
         let only = |n| Hold::Only(BTreeMap::from([((n, 0), Made::Built)]));
         let id = (Some(3), "3 0 R", "XRefStream", "ID", Rule::Type, "(abc)");
-        for hold in [Hold::All(Made::Built), only(3)] {
+        for (hold, found) in [
+            (Hold::All(Made::Built), &[id, NO_PAGES][..]),
+            (only(3), &[id]),
+        ] {
             let report = check(&doc, &hold, &Options::default());
-            assert_eq!(walked(&report), [id], "{report}");
+            assert_eq!(walked(&report), found, "{report}");
             let found = &report.findings[0];
             assert_eq!((found.made, found.revision), (Made::Merged, Some(1)));
             for table in [
@@ -6389,6 +6464,7 @@ mod tests {
                     Rule::Direct,
                     "4 0 R"
                 ),
+                NO_PAGES,
                 (Some(4), "-", "-", "-", Rule::Unreached, "6"),
             ],
             "{report}"
@@ -6420,7 +6496,7 @@ mod tests {
             Rule::Unresolved,
             "9 0 R",
         );
-        assert_eq!(walked(&report), [info], "{report}");
+        assert_eq!(walked(&report), [info, NO_PAGES], "{report}");
         assert_eq!(not_made(&report), [], "{report}");
     }
 
@@ -6466,6 +6542,7 @@ mod tests {
                     Rule::Special,
                     special.as_str()
                 ),
+                NO_PAGES,
                 unreached,
             ],
             "{report}"
@@ -6473,7 +6550,7 @@ mod tests {
         assert_eq!(not_made(&report), [], "{report}");
 
         let report = checked_as(&written(true), &Hold::All(Made::Merged));
-        assert_eq!(walked(&report), [unreached], "{report}");
+        assert_eq!(walked(&report), [NO_PAGES, unreached], "{report}");
         assert_eq!(
             not_made(&report),
             [
@@ -6512,7 +6589,7 @@ mod tests {
         };
         file.end(first);
         let report = checked_as(&file.out, &Hold::All(Made::Merged));
-        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(walked(&report), [NO_PAGES], "{report}");
         assert_eq!(report.checked.get("FileTrailer"), Some(&1), "{report}");
 
         file.object(2, PAGES);
@@ -6521,7 +6598,7 @@ mod tests {
         let doc = bytes::read(&file.out);
         assert_eq!(doc.revisions.len(), 2);
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
-        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(walked(&report), [NO_PAGES], "{report}");
         assert_eq!(report.checked.get("FileTrailer"), Some(&2), "{report}");
     }
 
@@ -6543,7 +6620,7 @@ mod tests {
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
         assert_eq!(doc.revisions.len(), 2);
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
-        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(walked(&report), [NO_PAGES], "{report}");
         assert_eq!(report.checked.get("FileTrailer"), Some(&2), "{report}");
         assert_eq!(report.checked.get("XRefStream"), None, "{report}");
     }
@@ -6583,6 +6660,7 @@ mod tests {
         assert_eq!(
             found,
             [
+                NO_PAGES,
                 (
                     Some(5),
                     "-",
@@ -6627,11 +6705,13 @@ mod tests {
         let found: Vec<_> = (walked(&report).into_iter())
             .map(|(object, path, table, key, rule, _)| (object, path, table, key, rule))
             .collect();
+        let (object, path, table, key, rule, _) = NO_PAGES;
         assert_eq!(
             found,
             [
                 (Some(7), "7 0 R", "XRefStream", "Type", Rule::Missing),
                 (Some(7), "7 0 R", "XRefStream", "W", Rule::Missing),
+                (object, path, table, key, rule),
             ],
             "{report}"
         );
@@ -6731,11 +6811,13 @@ mod tests {
     /// The tables an earlier revision's trailer reaches through what's
     /// direct in it ask nothing the predicates keep once read for a file
     /// (a name tree's keys, the structure tree's content items, the form's
-    /// fields' names): its predicates are evaluated over the objects its
-    /// revision had, some not read, and a part kept from a reading that
-    /// met one would answer a later evaluation as if it hadn't. Nor is any
-    /// of them a tree. A value that must be indirect, or is a stream, is,
-    /// and isn't gone on to.
+    /// fields' names), nor what a file's `FileCx` is given of its newest
+    /// revision alone (its pages): its predicates are evaluated over the
+    /// objects its revision had, some not read, and a part kept from a
+    /// reading that met one would answer a later evaluation as if it
+    /// hadn't, as the newest revision's pages would. Nor is any of them a
+    /// tree. A value that must be indirect, or is a stream, is, and isn't
+    /// gone on to.
     #[test]
     fn an_earlier_trailers_direct_values_reach_nothing_the_predicates_keep() {
         let kept = [
@@ -6743,6 +6825,8 @@ mod tests {
             "fn:ImageIsStructContentItem",
             "fn:PageContainsStructContentItems",
             "fn:IsFullyQualifiedFieldName",
+            "fn:NumberOfPages",
+            "fn:PageProperty",
         ];
         let mut seen = BTreeSet::new();
         let mut tables = vec!["FileTrailer", "XRefStream"];
@@ -7167,7 +7251,8 @@ mod tests {
             assert_eq!(rule.to_string(), rule.name());
         }
         assert_eq!(Rule::named("packed"), Some(Rule::Packed));
-        let content = [
+        // Content's rules, then the common structures', the newest last.
+        let newest = [
             Rule::Balance,
             Rule::Marked,
             Rule::Operator,
@@ -7175,13 +7260,21 @@ mod tests {
             Rule::Resource,
             Rule::Unused,
             Rule::Content,
+            Rule::PageTree,
         ];
-        assert!(Rule::ALL.ends_with(&content));
-        let names: Vec<_> = content.iter().map(|r| r.name()).collect();
+        assert!(Rule::ALL.ends_with(&newest));
+        let names: Vec<_> = newest.iter().map(|r| r.name()).collect();
         assert_eq!(
             names,
             [
-                "balance", "marked", "operator", "operands", "resource", "unused", "content"
+                "balance",
+                "marked",
+                "operator",
+                "operands",
+                "resource",
+                "unused",
+                "content",
+                "page-tree"
             ]
         );
         assert_eq!(Rule::named("Packed"), None);
@@ -9232,5 +9325,65 @@ mod tests {
         assert_eq!(unread(&report), counted, "{report}");
         let six = Hold::Only(BTreeMap::from([((6, 0), Made::Merged)]));
         assert_eq!(unread(&checked_as(&file.out, &six)), []);
+    }
+
+    /// A page tree one of whose kids takes a password the reader wasn't
+    /// given, in an object stream nothing decodes, is counted as not
+    /// checked, once, where the catalog is held, and what was told of it
+    /// before is found all the same: a page listed again. Its pages not
+    /// read, a target's page and annotation can't be told, counted.
+    #[test]
+    fn a_page_tree_whose_kid_takes_a_password_is_counted_what_was_read_found() {
+        let mut file = Sections::new("1.7");
+        file.object(1, "<< /Type /Catalog /Pages 2 0 R /OpenAction 20 0 R >>");
+        file.object(2, "<< /Type /Pages /Kids [3 0 R 3 0 R 4 0 R] /Count 3 >>");
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>";
+        file.object(3, page);
+        file.object(
+            20,
+            "<< /S /GoToE /D [3 0 R /Fit] /T << /R /C /P 0 /A 0 >> >>",
+        );
+        file.object_stream(10, "", &[(4, page)]);
+        let trailer = "/Root 1 0 R /Encrypt << /Filter /Standard /V 2 >>";
+        let at = file.stream(11, &[0, 1, 2, 3, 4, 10, 20], trailer);
+        file.end(at);
+        let counted = |report: &Report| -> Vec<_> {
+            (report.unchecked.iter())
+                .filter(|(u, _)| matches!(u.table.as_str(), "PageTreeNodeRoot" | "Target"))
+                .map(|(u, &n)| (u.column, u.why.clone(), u.table.clone(), u.key.clone(), n))
+                .collect()
+        };
+        let row = |column, why: &str, table: &str, key: &str| {
+            (
+                column,
+                why.to_string(),
+                table.to_string(),
+                key.to_string(),
+                1,
+            )
+        };
+        let password = "a page tree with an object that takes a password";
+        let report = checked_as(&file.out, &Hold::All(Made::Merged));
+        let told: Vec<_> = (found(&report).into_iter())
+            .filter(|f| f.3 == Rule::PageTree)
+            .collect();
+        let again = "the page tree lists 3 0 R again";
+        let found_again = (Some(2), "PageTreeNodeRoot", "Kids", Rule::PageTree, again);
+        assert_eq!(told, [found_again], "{report}");
+        assert_eq!(
+            counted(&report),
+            [
+                row("-", password, "PageTreeNodeRoot", "-"),
+                row("PossibleValues", "fn:NumberOfPages", "Target", "P"),
+                row("PossibleValues", "fn:PageProperty", "Target", "A"),
+            ],
+            "{report}"
+        );
+        let only = |n| Hold::Only(BTreeMap::from([((n, 0), Made::Merged)]));
+        let report = checked_as(&file.out, &only(2));
+        assert_eq!(counted(&report), [], "{report}");
+        let report = checked_as(&file.out, &only(1));
+        let catalog = [row("-", password, "PageTreeNodeRoot", "-")];
+        assert_eq!(counted(&report), catalog, "{report}");
     }
 }
