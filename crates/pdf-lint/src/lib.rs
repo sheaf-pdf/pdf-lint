@@ -9,6 +9,16 @@
 //! README.md, "TSV Data Overview"; the rules for each column are
 //! INTERNAL_GRAMMAR.md's "TSV file rules" and "TSV Data Fields", from
 //! "Column 1 - Key" to "Column 11 - Link". [`grammar()`] reads them.
+//!
+//! What the walk reaches that holds content, each page, form XObject,
+//! tiling pattern and Type 3 glyph, has its content read too, where the
+//! source gives streams' data ([`bytes::Opened`]), as PDFium reads it,
+//! through pdf-content-streams, and held to ISO 32000-2 itself, which the
+//! model doesn't describe: `q` and `Q` balanced, marked content ended,
+//! each operator where the graphics objects allow it and with the operands
+//! it takes, each resource name in the resources, what they hold that
+//! nothing uses, and each place ISO reads the content otherwise than
+//! PDFium ([`check()`] says how).
 
 pub mod allowance;
 pub mod check;

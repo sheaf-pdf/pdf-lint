@@ -3,8 +3,9 @@
 //! too, and checked without a panic, in the same way twice, with every
 //! finding's bytes inside what was read, the file or a stream's decoded
 //! data, an object stream's as the document holds it and a content
-//! stream's as the reading decodes it again; and set against its previous
-//! revision, when it has an incremental update. It reads under small limits
+//! stream's as the reading decodes it again; what its content finds moving
+//! nothing a check of its document alone finds; and set against its
+//! previous revision, when it has an incremental update. It reads under small limits
 //! ([`options`], and 4 MiB of content in [`setting`]), so that a run tries
 //! more inputs. It's compiled only for tests and under cargo-fuzz's
 //! `--cfg fuzzing`, with [`seeds`], files for the fuzzer to begin from.
@@ -12,7 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytes::{self, Opened};
-use crate::check::{Exempt, Hold, Made, Options, UnlistedIn, check};
+use crate::check::{Exempt, Finding, Hold, Made, Options, Report, Rule, UnlistedIn, check};
 use crate::object::{ObjectId, Span};
 use crate::pdf_crypt;
 use crate::pdf_crypt::writer::{Kind, Settings};
@@ -52,6 +53,7 @@ pub fn check_file(data: &[u8]) {
         check(&doc, &hold, &options),
         "a check is the same twice"
     );
+    content_alone(&report, &check(&*doc, &hold, &options));
     let mut lengths = BTreeMap::new();
     for finding in &report.findings {
         if let Some(at) = finding.at {
@@ -128,6 +130,68 @@ pub fn setting(choice: u16, doc: &Document) -> (Hold, Options) {
     (hold, options)
 }
 
+/// The rules that find what's in content, and nothing else.
+const CONTENT: [Rule; 7] = [
+    Rule::Balance,
+    Rule::Marked,
+    Rule::Operator,
+    Rule::Operands,
+    Rule::Resource,
+    Rule::Unused,
+    Rule::Content,
+];
+
+/// That `beside`, a check of a file read beside its reading, is `alone`, a
+/// check of its document alone, which reads no content, and content's own:
+/// the same findings but content's rules', in the same order; the same
+/// rows not checked, but content's, their column `-`, added; and the same
+/// counts, but units of content read and unused resources, which `alone`
+/// has none of. So what content finds moves nothing else.
+fn content_alone(beside: &Report, alone: &Report) {
+    let others = |report: &Report| -> Vec<Finding> {
+        (report.findings.iter())
+            .filter(|f| !CONTENT.contains(&f.rule))
+            .cloned()
+            .collect()
+    };
+    assert_eq!(
+        others(beside),
+        others(alone),
+        "content moves no other finding"
+    );
+    assert!(
+        (alone.findings.iter()).all(|f| !CONTENT.contains(&f.rule)),
+        "content found where none is read"
+    );
+    assert_eq!(
+        (alone.content, alone.unused.len()),
+        (0, 0),
+        "none read alone"
+    );
+    for (row, &n) in &beside.unchecked {
+        let was = alone.unchecked.get(row).copied().unwrap_or(0);
+        assert!(n >= was, "{row:?} not checked fewer times");
+        assert!(
+            n == was || row.column == "-",
+            "{row:?} not checked for content"
+        );
+    }
+    for row in alone.unchecked.keys() {
+        assert!(
+            beside.unchecked.contains_key(row),
+            "{row:?} not checked alone"
+        );
+    }
+    let rest = |report: &Report| Report {
+        findings: Vec::new(),
+        unchecked: BTreeMap::new(),
+        content: 0,
+        unused: BTreeMap::new(),
+        ..report.clone()
+    };
+    assert_eq!(rest(beside), rest(alone), "content moves no count");
+}
+
 /// Whether `at` is inside what was read: the file, or the decoded data of
 /// the stream it's in, an object stream's as `doc` holds it, else as its
 /// reading decodes it, as content is read, each stream's length kept in
@@ -154,9 +218,12 @@ fn within(
 /// Files for the fuzzer to begin from, each with its name, made for it:
 /// a page with an annotation and its appearance; an interactive form with
 /// a field merged with its widget, a radio group and a hide action; a
-/// structure tree, a name tree and a number tree; a cross-reference stream
-/// with extensions declared and XMP metadata; an object stream whose
-/// header starts two objects inside another's bytes; an incremental
+/// structure tree, a name tree and a number tree; content of each kind the
+/// check reads, two pages sharing an array of streams, a form, a pattern
+/// and a Type 3 font's glyphs, with something in it for each rule of
+/// content to find, and a page's content encrypted; a cross-reference
+/// stream with extensions declared and XMP metadata; an object stream
+/// whose header starts two objects inside another's bytes; an incremental
 /// update; and encrypted files, one of them with an object stream whose
 /// data isn't encrypted, so that its objects' strings are in the clear.
 /// Each begins with the two bytes that choose how it's checked, all
@@ -228,6 +295,8 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         ("page", file(&page, "").0),
         ("form", file(&form, "").0),
         ("structure", file(&structure, "").0),
+        ("content", content()),
+        ("content-encrypted", encrypted_content()),
         ("xref-stream", xref_stream()),
         ("object-streams", object_streams(true)),
         ("object-streams-lzw", object_streams(false)),
@@ -286,7 +355,7 @@ fn stream(entries: &str, data: &str) -> String {
 
 /// A file of these objects' bodies, numbered from 1, with a table, and
 /// `trailer`'s entries in the trailer too; and where its table is.
-fn file(objects: &[String], trailer: &str) -> (Vec<u8>, usize) {
+fn file(objects: &[impl AsRef<[u8]>], trailer: &str) -> (Vec<u8>, usize) {
     let mut out = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
     let offsets = body(&mut out, objects, 1);
     let at = out.len();
@@ -300,11 +369,13 @@ fn file(objects: &[String], trailer: &str) -> (Vec<u8>, usize) {
 }
 
 /// Writes `objects`, numbered from `first`, and gives where each began.
-fn body(out: &mut Vec<u8>, objects: &[String], first: usize) -> Vec<usize> {
+fn body(out: &mut Vec<u8>, objects: &[impl AsRef<[u8]>], first: usize) -> Vec<usize> {
     let mut offsets = Vec::new();
     for (i, object) in objects.iter().enumerate() {
         offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", first + i).as_bytes());
+        out.extend_from_slice(format!("{} 0 obj\n", first + i).as_bytes());
+        out.extend_from_slice(object.as_ref());
+        out.extend_from_slice(b"\nendobj\n");
     }
     offsets
 }
@@ -504,18 +575,8 @@ enum Packing {
 /// object stream compressed, and encrypted as `packing` says (by a crypt
 /// filter only where `kind` has them).
 fn opens(kind: Kind, packing: Packing) -> Vec<u8> {
-    let id = b"0123456789abcdef";
-    let settings = Settings {
-        kind,
-        user: b"",
-        owner: b"owner",
-        p: -4,
-        id,
-        encrypt_metadata: true,
-    };
-    let values = pdf_crypt::writer::dictionary(&settings);
-    let handler = pdf_crypt::Handler::open(&values, id, &[]).expect("the writer's opens");
-    let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let id = ID;
+    let (values, handler) = encryption(kind);
     let lang =
         pdf_crypt::writer::encrypt_string(&handler, (1, 0), b"en", [1; 16]).unwrap_or_default();
     let objects = "2 0 3 42 << /Type /Pages /Kids [3 0 R] /Count 1 >>\n\
@@ -565,6 +626,49 @@ fn opens(kind: Kind, packing: Packing) -> Vec<u8> {
         row(1, five, 0),
     ]
     .concat();
+    let streams = match packing {
+        Packing::Streams => "/StdCF",
+        _ => "/Identity",
+    };
+    let entries = entries(&values, streams);
+    let dict = format!(
+        "<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R /Encrypt << {entries} >> /ID [<{0}> <{0}>] /Length {1} >>",
+        hex(id),
+        rows.len()
+    );
+    out.extend_from_slice(format!("5 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes());
+    out
+}
+
+/// The file identifier the encrypted seeds are written with.
+const ID: &[u8; 16] = b"0123456789abcdef";
+
+/// The encryption dictionary's values for `kind` with the empty user
+/// password, and the handler that opens it, under [`ID`].
+fn encryption(kind: Kind) -> (pdf_crypt::Dictionary, pdf_crypt::Handler) {
+    let settings = Settings {
+        kind,
+        user: b"",
+        owner: b"owner",
+        p: -4,
+        id: ID,
+        encrypt_metadata: true,
+    };
+    let values = pdf_crypt::writer::dictionary(&settings);
+    let handler = pdf_crypt::Handler::open(&values, ID, &[]).expect("the writer's opens");
+    (values, handler)
+}
+
+/// Bytes in hex.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// An encryption dictionary's entries for `values`, its crypt filter, where
+/// it has one, `/StdCF` for strings and `streams` for streams.
+fn entries(values: &pdf_crypt::Dictionary, streams: &str) -> String {
     let mut entries = format!("/Filter /Standard /V {} /R {} /P -4", values.v, values.r);
     if let Some(length) = values.length {
         entries.push_str(&format!(" /Length {length}"));
@@ -583,23 +687,96 @@ fn opens(kind: Kind, packing: Packing) -> Vec<u8> {
     }
     if let Some(filter) = values.crypt_filters.first() {
         let method = String::from_utf8_lossy(filter.method.as_deref().unwrap_or_default());
-        let streams = match packing {
-            Packing::Streams => "/StdCF",
-            _ => "/Identity",
-        };
         entries.push_str(&format!(
             " /CF << /StdCF << /CFM /{method} >> >> /StmF {streams} /StrF /StdCF"
         ));
     }
-    let dict = format!(
-        "<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R /Encrypt << {entries} >> /ID [<{0}> <{0}>] /Length {1} >>",
-        hex(id),
-        rows.len()
-    );
-    out.extend_from_slice(format!("5 0 obj\n{dict}\nstream\n").as_bytes());
-    out.extend_from_slice(&rows);
-    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes());
-    out
+    entries
+}
+
+/// A file whose two pages share their content, an array of two streams
+/// that `q` and marked content run across, under the resources the page
+/// tree gives them: a form XObject drawn, a tiling pattern painted with, a
+/// Type 3 font's two glyphs shown, an inline image, an ExtGState nothing
+/// uses; and something for each rule of content to find: in the form a
+/// name its resources lack and a `q` left open, in the pattern an `EMC`
+/// ending none, in a glyph a `d0` of one operand and an `EX` with no `BX`
+/// open, and a byte 0x80 that reads as white-space.
+fn content() -> Vec<u8> {
+    let stream = |entries: &str, data: &[u8]| -> Vec<u8> {
+        let mut out = format!("<< {entries} /Length {} >>\nstream\n", data.len()).into_bytes();
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\nendstream");
+        out
+    };
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /Resources << \
+          /Font << /F1 9 0 R /T3 10 0 R >> /XObject << /Fm 7 0 R >> \
+          /Pattern << /P1 8 0 R >> /ExtGState << /G0 << /CA 0.5 >> >> >> >>"
+            .to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [5 0 R 6 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [5 0 R 6 0 R] >>".to_vec(),
+        stream(
+            "",
+            b"q /Pattern cs /P1 scn 0 0 m 9 9 l S BT /F1 12 Tf 72 720 Td (Hi) Tj ET \
+              /Span <</MCID 0>> BDC",
+        ),
+        stream(
+            "",
+            b"EMC /Fm Do BT /T3 9 Tf (ab) Tj ET\x80BI /W 2 /H 1 /BPC 8 /CS /G ID ab EI Q",
+        ),
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 9 9] /Resources << /XObject << /Im1 11 0 R >> >>",
+            b"q /Im1 Do Q /Gone gs 0 0 9 9 re f q",
+        ),
+        stream(
+            "/PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 9 9] /XStep 9 /YStep 9 /Resources << >>",
+            b"0 0 9 9 re f EMC",
+        ),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 9 9] /FontMatrix [0.001 0 0 0.001 0 0] \
+          /CharProcs << /a 12 0 R /b 13 0 R >> /Encoding << /Type /Encoding /Differences [97 /a /b] >> \
+          /FirstChar 97 /LastChar 98 /Widths [9 9] /Resources << >> >>"
+            .to_vec(),
+        stream(
+            "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8",
+            b"x",
+        ),
+        stream("", b"9 0 0 0 9 9 d1 0 0 9 9 re f"),
+        stream("", b"9 d0 EX"),
+    ];
+    file(&objects, "").0
+}
+
+/// A file encrypted as AES-128 with the empty user password, so that it
+/// opens, whose page's content is compressed and encrypted, a `Q` with
+/// nothing saved among it.
+fn encrypted_content() -> Vec<u8> {
+    let (values, handler) = encryption(Kind::Aes128);
+    let content = b"q 0 0 1 rg 0 0 9 9 re f BT /F1 9 Tf (In secret) Tj ET Q Q";
+    let deflated = pdf_structure::fixture::zlib(content);
+    let data = pdf_crypt::writer::encrypt_stream(&handler, (4, 0), &deflated, None, [4; 16])
+        .unwrap_or_default();
+    let mut stream = format!(
+        "<< /Filter /FlateDecode /Length {} >>\nstream\n",
+        data.len()
+    )
+    .into_bytes();
+    stream.extend_from_slice(&data);
+    stream.extend_from_slice(b"\nendstream");
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        stream,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        format!("<< {} >>", entries(&values, "/StdCF")).into_bytes(),
+    ];
+    let trailer = format!("/Encrypt 6 0 R /ID [<{0}> <{0}>]", hex(ID));
+    file(&objects, &trailer).0
 }
 
 /// A file and an incremental update of it, which rewrites its page and
@@ -731,10 +908,11 @@ mod tests {
 
     /// Each seed read beside its reading is the whole read, as
     /// `bytes::read_opened` reads it, and under the fuzz target's limits as a
-    /// reading taken whole reads it; and with its content read, which is
-    /// clean, a check finds what one of its document alone finds, and says
-    /// how many units of content it read, where one of its document alone
-    /// reads none.
+    /// reading taken whole reads it; and with its content read, a check
+    /// finds what one of its document alone finds and content's own, and
+    /// says how many units of content it read, where one of its document
+    /// alone reads none. The content seeds' content has each rule of
+    /// content finding something; the rest is clean.
     #[test]
     fn the_seeds_read_alike_beside_their_readings() {
         for (name, seed) in seeds() {
@@ -746,18 +924,39 @@ mod tests {
                 .unwrap();
             assert_eq!(*read(file, None), whole, "{name}");
             let hold = Hold::All(Made::Merged);
-            let checked = |source: &dyn Source| check(source, &hold, &Options::default());
-            let (mut beside, alone) = (checked(&opened), checked(&*opened));
+            let options = Options {
+                unused: true,
+                ..Options::default()
+            };
+            let checked = |source: &dyn Source| check(source, &hold, &options);
+            let (beside, alone) = (checked(&opened), checked(&*opened));
             // The page's content and its annotation's appearance; the
-            // structure's page.
+            // structure's page; the two pages' one unit, the form, the
+            // pattern and the two glyphs; the encrypted page.
             let read = match name {
                 "page" => 2,
-                "structure" => 1,
+                "structure" | "content-encrypted" => 1,
+                "content" => 5,
                 _ => 0,
             };
             assert_eq!((beside.content, alone.content), (read, 0), "{name}");
-            beside.content = 0;
-            assert_eq!(beside, alone, "{name}");
+            content_alone(&beside, &alone);
+            let found: BTreeSet<&str> = (beside.findings.iter())
+                .filter(|f| CONTENT.contains(&f.rule))
+                .map(|f| f.rule.name())
+                .collect();
+            let want: &[_] = match name {
+                "content" => &[
+                    "balance", "content", "marked", "operands", "operator", "resource", "unused",
+                ],
+                "content-encrypted" => &["balance"],
+                _ => &[],
+            };
+            assert_eq!(
+                found.into_iter().collect::<Vec<_>>(),
+                want,
+                "{name}: {beside}"
+            );
         }
     }
 
