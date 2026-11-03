@@ -28,7 +28,8 @@
 //! as it's read.
 //!
 //! What a unit's reading finds, each kind of it once in the unit, at its
-//! first place, with how many times it's found:
+//! first place, with how many times it's found, and past [`KINDS`] kinds of
+//! a rule, one finding more saying how many more:
 //!
 //! - **`q`s left open** at the end, and a **`Q` with nothing saved** to
 //!   restore (8.4.2; [`Rule::Balance`]): counted by how deep the saved
@@ -39,6 +40,27 @@
 //!   ending none** (14.6.1; [`Rule::Marked`]), counted the same way, every
 //!   `BMC` and `BDC` opening a range, however deep, as its `MarkedNest` reads
 //!   them below its cap on depth.
+//! - **An operator where content is that it may not be used in**, among
+//!   the graphics objects of 8.2's Figure 9 ([`Rule::Operator`]), each
+//!   operation stepping pdf-content-streams' `State`, a glyph from where its
+//!   `d0` or `d1` must be (9.6.4); a **word Annex A doesn't name**, outside
+//!   `BX` and `EX`, inside which it's passed over (7.8.2), each word a kind
+//!   of its own; an **`EX` with no `BX` open**, and **`BX` left open** at the
+//!   end, counted as `q` is; and **content that ends inside a graphics
+//!   object**, at the operation that began it, or a glyph description with
+//!   no `d0` or `d1`, all of it. After an operator that's refused, content
+//!   is where it was, but that a glyph description goes on at the content
+//!   stream level, the operator taken there, as after its `d0`; `ET` ends
+//!   what it's in; and `BT`, `m` or `re` in a path object begins its own object, the
+//!   path abandoned: a rule of the checker's, so that one mistake is one
+//!   finding, and what's refused after it is only said to be.
+//! - **Operands that aren't as Annex A's table has them**
+//!   ([`Rule::Operands`]): how many, else the first of them whose type
+//!   isn't its operator's, told from its bytes as written, an integer a
+//!   number without a point; `SC` and `sc` 1, 3 or 4 numbers, as many as a
+//!   space they can set has components, and `SCN` and `scn` one at least,
+//!   numbers but a pattern's name last. The operations are PDFium's, so a
+//!   closer that closes nothing, an operand to PDFium, is counted.
 //! - **Each place ISO 32000-2 reads the content otherwise** than PDFium does
 //!   ([`Rule::Content`]), by the kind of [`Fault`], its text the first's: the
 //!   tokens' and the operations' own, and what's inside an array or a
@@ -49,7 +71,8 @@
 //! - **What stops reading** ([`Rule::Content`]): a string, an array, a
 //!   dictionary or an inline image that doesn't end, operands past the cap,
 //!   and the like. What came before it stands, but where the content ends
-//!   isn't known, so nothing left open at the end is found.
+//!   isn't known, so nothing left open at the end is found, nor content
+//!   ending inside an object.
 //!
 //! A finding is in the stream its first byte is in, at offsets in that
 //! stream's decoded data, cut at its end; at the path its holder reached it
@@ -72,6 +95,8 @@
 //! [`Rule::Balance`]: super::Rule::Balance
 //! [`Rule::Content`]: super::Rule::Content
 //! [`Rule::Marked`]: super::Rule::Marked
+//! [`Rule::Operands`]: super::Rule::Operands
+//! [`Rule::Operator`]: super::Rule::Operator
 //! [`Source::decoded_within`]: crate::source::Source::decoded_within
 
 use std::collections::HashMap;
@@ -82,9 +107,12 @@ use std::ptr;
 use std::rc::Rc;
 
 use pdf_content_streams::fault::{Fault, Sink};
-use pdf_content_streams::{CodedEnds, Concat, Error, Join, Limits, ResCx, State};
+use pdf_content_streams::{
+    CodedEnds, Concat, Error, Join, Limits, Operand, Operands, Operation, Operator, ResCx, State,
+    Type,
+};
 
-use super::{Finding, Rule, Step, Trail, Visit, Walk};
+use super::{Finding, Rule, Step, TOKEN, Trail, Visit, Walk};
 use crate::bytes;
 use crate::object::{Dict, Object, ObjectId, Span, Value};
 use crate::pdf_filters;
@@ -97,6 +125,11 @@ use crate::pdf_filters;
 /// load, and an unfiltered image drawn in it may end where PDFium's
 /// doesn't; no honest space comes near it.
 const SPACE_VISITS: usize = 256;
+
+/// How many kinds of what a rule finds a unit's findings tell apart: past
+/// them, one more finding says how many more there are, so that what
+/// hostile content makes of a report is bounded.
+const KINDS: usize = 32;
 
 /// Why a unit isn't read: the file's budget of decoded content is spent.
 const BUDGET: &str = "content past the file's budget of decoded content";
@@ -286,11 +319,263 @@ fn times(what: &str, n: usize) -> String {
     }
 }
 
+/// Each kind of what a rule finds in a unit, as it's found: the first of
+/// each, where it is and what it says, and how many times it's found, for
+/// the first [`KINDS`] kinds; past them, how many more are found, of any
+/// kind, and where the first of those is.
+struct Kinds<K> {
+    kinds: Vec<(K, Range<usize>, String, usize)>,
+    more: usize,
+    past: Option<Range<usize>>,
+}
+
+impl<K> Default for Kinds<K> {
+    fn default() -> Kinds<K> {
+        Kinds {
+            kinds: Vec::new(),
+            more: 0,
+            past: None,
+        }
+    }
+}
+
+impl<K: PartialEq> Kinds<K> {
+    /// One of `kind` at `at`, saying `value` if it's the first.
+    fn add(&mut self, kind: K, at: Range<usize>, value: impl FnOnce() -> String) {
+        if let Some(kept) = self.kinds.iter_mut().find(|kept| kept.0 == kind) {
+            kept.3 += 1;
+        } else if self.kinds.len() < KINDS {
+            self.kinds.push((kind, at, value(), 1));
+        } else {
+            self.more += 1;
+            self.past.get_or_insert(at);
+        }
+    }
+
+    /// What it found, each kind at its first, with how many times, by
+    /// where each is; then how many more, past the kinds told apart.
+    fn found(self) -> Vec<(Range<usize>, String)> {
+        let mut found: Vec<_> = (self.kinds.into_iter())
+            .map(|(_, at, value, n)| (at, times(&value, n)))
+            .collect();
+        found.sort_by_key(|(at, _)| at.start);
+        if let Some(at) = self.past {
+            let more = format!("{} more, of kinds past the first {KINDS}", self.more);
+            found.push((at, more));
+        }
+        found
+    }
+}
+
+/// A kind of what [`Rule::Operator`] finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placed<'c> {
+    /// An operator where content is, which it may not be used in.
+    Refused(State, Operator),
+    /// A word Annex A doesn't name, outside `BX` and `EX`: each word its
+    /// own kind.
+    Unknown(&'c [u8]),
+    /// An `EX` with no `BX` open.
+    Unopened,
+    /// `BX` left open at the end.
+    Open,
+    /// Content that ends where it is, inside a graphics object, or a
+    /// glyph description that never has its `d0` or `d1`.
+    Ends(State),
+}
+
+/// What's wrong with an operation's operands: they aren't as many as its
+/// operator takes, or, as many, one isn't of the type it takes. Its
+/// variant is the kind [`Rule::Operands`] tells apart.
+#[derive(Debug, Clone, Copy)]
+enum Wrong {
+    /// How many it takes.
+    Count(Takes),
+    /// Which, from 0, and the type it takes, as a finding names it.
+    Type(usize, &'static str),
+}
+
+/// How many operands an operator takes.
+#[derive(Debug, Clone, Copy)]
+enum Takes {
+    Exactly(usize),
+    /// 1, 3 or 4, `SC`'s and `sc`'s.
+    Components,
+    /// One at least, `SCN`'s and `scn`'s.
+    OneAtLeast,
+}
+
+/// The graphics object content is in at `state`, as a finding names it:
+/// none at the content stream level or where a glyph description begins.
+fn object(state: State) -> Option<&'static str> {
+    match state {
+        State::Path => Some("a path object"),
+        State::ClippingPath => Some("a clipping path object"),
+        State::Text => Some("a text object"),
+        State::InlineImage => Some("an inline image object"),
+        _ => None,
+    }
+}
+
+/// A word as a finding shows it: its first [`TOKEN`] bytes, `…` where
+/// there are more.
+fn word(written: &[u8]) -> String {
+    let shown = String::from_utf8_lossy(&written[..written.len().min(TOKEN)]);
+    match written.len() > TOKEN {
+        true => format!("{shown}…"),
+        false => shown.into_owned(),
+    }
+}
+
+/// What a finding says of `op`, refused at `state`: where it is, or for
+/// `d0` and `d1`, allowed only first in a glyph description, that it isn't
+/// there.
+fn refused(state: State, op: &Operation) -> String {
+    let name = word(op.name());
+    match (op.operator(), state, object(state)) {
+        (Operator::GlyphWidth | Operator::GlyphWidthBox, ..) => {
+            format!("{name} where it isn't first in a glyph description")
+        }
+        (_, State::ContentStream, _) => format!("{name} at the content stream level"),
+        (_, State::GlyphStart, _) => {
+            format!("{name} first in a glyph description, before d0 or d1")
+        }
+        (_, _, Some(object)) => format!("{name} in {object}"),
+        _ => format!("{name} where content is"),
+    }
+}
+
+/// Where content goes on after `op`, refused at `state`: where it was, as
+/// what's refused changes nothing, but that a glyph description whose
+/// first operator isn't `d0` or `d1` goes on at the content stream level,
+/// `op` taken there where it may be, as if one had come before it; `ET`
+/// ends what it's in, back at the level; and `BT`, `m` or `re` in a path
+/// object begins its own, the path abandoned. A painting operator ends a
+/// path wherever it is, so it's refused only where there's none to end. A
+/// rule of the checker's, for how many findings one mistake makes.
+fn resumed(state: State, op: &Operation) -> State {
+    let level = || {
+        State::ContentStream
+            .step(op)
+            .unwrap_or(State::ContentStream)
+    };
+    match (state, op.operator()) {
+        (State::GlyphStart, _) => level(),
+        (_, Operator::EndText) => State::ContentStream,
+        (
+            State::Path | State::ClippingPath,
+            Operator::BeginText | Operator::Move | Operator::Rect,
+        ) => level(),
+        _ => state,
+    }
+}
+
+/// What a finding says of an operand that isn't of the type it should be.
+fn what(operand: &Operand) -> &'static str {
+    match operand.bytes() {
+        _ if operand.is_number() && operand.bytes().contains(&b'.') => "a real number",
+        _ if operand.is_number() => "an integer",
+        _ if operand.is_name() => "a name",
+        _ if operand.is_string() => "a string",
+        _ if operand.is_array() => "an array",
+        _ if operand.is_dict() => "a dictionary",
+        b"true" | b"false" => "a boolean",
+        b"null" => "null",
+        _ => "no object",
+    }
+}
+
+/// Whether `operand`, as written, is of type `of`: an integer a number
+/// written without a point; a type this checker doesn't know, any.
+fn is(operand: &Operand, of: Type) -> bool {
+    match of {
+        Type::Number => operand.is_number(),
+        Type::Integer => operand.is_number() && !operand.bytes().contains(&b'.'),
+        Type::Name => operand.is_name(),
+        Type::String => operand.is_string(),
+        Type::Array => operand.is_array(),
+        Type::NameOrDict => operand.is_name() || operand.is_dict(),
+        _ => true,
+    }
+}
+
+/// A type as a finding names it.
+fn named(of: Type) -> &'static str {
+    match of {
+        Type::Number => "a number",
+        Type::Integer => "an integer",
+        Type::Name => "a name",
+        Type::String => "a string",
+        Type::Array => "an array",
+        Type::NameOrDict => "a name or a dictionary",
+        _ => "another type",
+    }
+}
+
+/// What's wrong with `op`'s operands, by Annex A's table: how many there
+/// are, else the first of them that isn't of its type, an operator's own
+/// type by place; `SC` and `sc` take 1, 3 or 4 numbers, as many as a space
+/// they can set has components, and `SCN` and `scn` one operand at least,
+/// numbers but a pattern's name last. None for a word Annex A doesn't name,
+/// whose operands aren't known. `operator` is `op`'s.
+fn wrong(op: &Operation, operator: Operator) -> Option<Wrong> {
+    let n = op.operands().len();
+    match operator.operands()? {
+        Operands::Fixed(types) if n != types.len() => {
+            Some(Wrong::Count(Takes::Exactly(types.len())))
+        }
+        Operands::Fixed(types) => (op.operands().zip(types).enumerate())
+            .find(|(_, (operand, of))| !is(operand, **of))
+            .map(|(i, (_, &of))| Wrong::Type(i, named(of))),
+        Operands::Components if !matches!(n, 1 | 3 | 4) => Some(Wrong::Count(Takes::Components)),
+        Operands::Components => (op.operands())
+            .position(|operand| !operand.is_number())
+            .map(|i| Wrong::Type(i, "a number")),
+        Operands::ComponentsOrPattern if n == 0 => Some(Wrong::Count(Takes::OneAtLeast)),
+        Operands::ComponentsOrPattern => (op.operands().enumerate())
+            .find(|(i, operand)| !(operand.is_number() || (i + 1 == n && operand.is_name())))
+            .map(|(i, _)| match i + 1 == n {
+                true => Wrong::Type(i, "a number or a name"),
+                false => Wrong::Type(i, "a number"),
+            }),
+        _ => None,
+    }
+}
+
+/// What a finding says of `op`'s operands, `wrong` as they are: what its
+/// operator takes, and how many it has, so that the values of a kind differ
+/// in their digits alone; or which isn't of its type, what it is and what
+/// it should be.
+fn said(op: &Operation, wrong: Wrong) -> String {
+    let name = word(op.name());
+    match wrong {
+        Wrong::Count(takes) => {
+            let takes = match takes {
+                Takes::Exactly(0) => "no operands".to_string(),
+                Takes::Exactly(1) => "1 operand".to_string(),
+                Takes::Exactly(k) => format!("{k} operands"),
+                Takes::Components => "1, 3 or 4 operands".to_string(),
+                Takes::OneAtLeast => "1 operand at least".to_string(),
+            };
+            format!("{name} takes {takes}, not {}", op.operands().len())
+        }
+        Wrong::Type(i, of) => {
+            let is = op
+                .operands()
+                .nth(i)
+                .map_or("none", |operand| what(&operand));
+            format!("{name}'s operand {} is {is}, not {of}", i + 1)
+        }
+    }
+}
+
 /// What one unit's reading found, by rule: each a place in the unit's
 /// content, joined, and its value.
 struct Found {
     balance: Vec<(Range<usize>, String)>,
     marked: Vec<(Range<usize>, String)>,
+    operator: Vec<(Range<usize>, String)>,
+    operands: Vec<(Range<usize>, String)>,
     content: Vec<(Range<usize>, String)>,
 }
 
@@ -319,14 +604,19 @@ fn kind(table: &str, object: &Object, id: Option<ObjectId>) -> Option<Kind> {
     }
 }
 
-/// Reads `content`, with `res` for its inline images' color spaces, under
-/// `limits`: its operations, to their end or to what stops them, each `q`
-/// and `Q`, each `BMC`, `BDC` and `EMC`, and each array and dictionary
-/// among their operands read as an object, for what's inside it; and what
-/// each rule finds of it.
-fn pass(content: &Concat, res: &ResCx, limits: &Limits) -> Found {
+/// Reads `content`, which begins at `start`, with `res` for its inline
+/// images' color spaces, under `limits`: its operations, to their end or to
+/// what stops them, each `q` and `Q`, each `BMC`, `BDC` and `EMC`, each
+/// stepping where content is, among the graphics objects, its operands
+/// held to its operator's, and each array and dictionary among them read
+/// as an object, for what's inside it; and what each rule finds of it.
+fn pass(content: &Concat, start: State, res: &ResCx, limits: &Limits) -> Found {
     let (mut saved, mut marked) = (Depth::default(), Depth::default());
     let (mut faults, mut inside) = (Faults::default(), Faults::default());
+    let (mut placed, mut operands) = (Kinds::default(), Kinds::default());
+    // `BX` and `EX`, and where content is, with where the graphics object
+    // it's in began.
+    let (mut compat, mut state, mut begun) = (Depth::default(), start, 0..0);
     let mut stop: Option<Error> = None;
     for read in content.operations(res, limits).with_sink(&mut faults) {
         let op = match read {
@@ -341,13 +631,68 @@ fn pass(content: &Concat, res: &ResCx, limits: &Limits) -> Found {
             b"Q" => saved.close(op.range()),
             b"BMC" | b"BDC" => marked.open(op.range()),
             b"EMC" => marked.close(op.range()),
+            b"BX" => compat.open(op.range()),
+            b"EX" => {
+                if compat.depth == 0 {
+                    let unopened = || "EX with no BX open".to_string();
+                    placed.add(Placed::Unopened, op.range(), unopened);
+                }
+                compat.close(op.range());
+            }
             _ => {}
+        }
+        let operator = op.operator();
+        let next = match (operator, state.step(&op)) {
+            // Passed over inside `BX` and `EX` (7.8.2).
+            (Operator::Other, _) if compat.depth > 0 => state,
+            (Operator::Other, _) => {
+                let unknown = || {
+                    let word = word(op.name());
+                    format!("{word}, an operator ISO 32000-2 doesn't define, outside BX and EX")
+                };
+                placed.add(Placed::Unknown(op.name()), op.range(), unknown);
+                resumed(state, &op)
+            }
+            (_, Some(next)) => next,
+            (_, None) => {
+                let refused = || refused(state, &op);
+                placed.add(Placed::Refused(state, operator), op.range(), refused);
+                resumed(state, &op)
+            }
+        };
+        if next != state && matches!(next, State::Path | State::Text) {
+            begun = op.range();
+        }
+        state = next;
+        if let Some(wrong) = wrong(&op, operator) {
+            let kind = (operator, mem::discriminant(&wrong));
+            operands.add(kind, op.range(), || said(&op, wrong));
         }
         for operand in op.operands() {
             if operand.is_array() || operand.is_dict() {
                 operand.object_with(limits, &mut inside);
             }
         }
+    }
+    // Where content ends, unless reading stopped, as the end isn't known:
+    // in an object, at where it began; or where a glyph description was to
+    // begin, all of it.
+    let open = compat.open.clone().filter(|_| compat.depth > 0);
+    if let (None, Some(at)) = (&stop, open) {
+        let open = || format!("{} BX left open at the end", compat.depth);
+        placed.add(Placed::Open, at, open);
+    }
+    let ends = match (state, object(state)) {
+        _ if stop.is_some() => None,
+        (State::GlyphStart, _) => Some((
+            0..content.bytes().len(),
+            "a glyph description with no d0 or d1".to_string(),
+        )),
+        (_, Some(object)) => Some((begun, format!("content ends in {object}"))),
+        _ => None,
+    };
+    if let Some((at, ends)) = ends {
+        placed.add(Placed::Ends(state), at, || ends);
     }
     for told in inside.0 {
         faults.add(told.at, told.fault, told.count);
@@ -372,6 +717,8 @@ fn pass(content: &Concat, res: &ResCx, limits: &Limits) -> Found {
             "BMC or BDC left open at the end",
             "EMC ending no marked content",
         ),
+        operator: placed.found(),
+        operands: operands.found(),
         content: found,
     }
 }
@@ -485,7 +832,7 @@ impl<'a> Walk<'a> {
                     })
                 }
             };
-            let found = pass(&content, res, &limits);
+            let found = pass(&content, unit.start, res, &limits);
             if !held {
                 continue;
             }
@@ -493,6 +840,8 @@ impl<'a> Walk<'a> {
             let rules = [
                 (Rule::Balance, found.balance),
                 (Rule::Marked, found.marked),
+                (Rule::Operator, found.operator),
+                (Rule::Operands, found.operands),
                 (Rule::Content, found.content),
             ];
             for (rule, found) in rules {
@@ -710,14 +1059,26 @@ fn way_key(way: Way) -> String {
 /// a kind was found and where content's bytes are, which [`super::like`]
 /// sets aside.
 pub(super) fn counted(rule: Rule) -> bool {
-    matches!(rule, Rule::Balance | Rule::Marked | Rule::Content)
+    matches!(
+        rule,
+        Rule::Balance | Rule::Marked | Rule::Operator | Rule::Operands | Rule::Content
+    )
 }
 
-/// `value`, a content finding's, with its digits left out, and the count it
-/// ends with, `, 3 times`, so that a count, an offset or a length doesn't
-/// tell two findings apart.
-pub(super) fn uncounted(value: &str) -> String {
-    let digitless: String = value.chars().filter(|c| !c.is_ascii_digit()).collect();
+/// `value`, a content finding's of `rule`, with its digits left out, and
+/// the count it ends with, `, 3 times`, so that a count, an offset or a
+/// length doesn't tell two findings apart; but an operator's findings keep
+/// a word's own digits, `d0`'s and `d1`'s, so that its name does.
+pub(super) fn uncounted(rule: Rule, value: &str) -> String {
+    let words = matches!(rule, Rule::Operator | Rule::Operands);
+    let mut word = false;
+    let digitless: String = (value.chars())
+        .filter(|&c| {
+            let kept = !c.is_ascii_digit() || (words && word);
+            word = c.is_alphabetic() || (word && c.is_ascii_digit());
+            kept
+        })
+        .collect();
     match digitless.strip_suffix(",  times") {
         Some(uncounted) => uncounted.to_string(),
         None => digitless,
@@ -1394,18 +1755,23 @@ mod tests {
     /// how many: a token's own, an inline image's, the operations', and
     /// what's inside an array or a dictionary, read as an object; and a
     /// dictionary that's none, told as no dictionary and as what makes it
-    /// none. By where each is first.
+    /// none. By where each is first. The operations are as PDFium cuts
+    /// them, a closer that closes nothing an operand, so their operands'
+    /// count is.
     #[test]
     fn each_kind_of_fault_is_found_once_a_unit() {
         let content = "BT ) [(a) foo] TJ ET \
                        BI /W 1 /H 1 /CS /G /BPC 8 /L 5 ID x EI \
                        /P <</MCID 0 1>> BDC EMC ) 0 0 m S 1 2";
         let found = found_in_page(&[content]);
-        let values: Vec<(&str, &str)> = (found.iter())
-            .map(|(_, _, _, value, bytes)| (value.as_str(), bytes.as_str()))
-            .collect();
+        let values = |rule| -> Vec<(&str, &str)> {
+            (found.iter())
+                .filter(|(of, ..)| *of == rule)
+                .map(|(_, _, _, value, bytes)| (value.as_str(), bytes.as_str()))
+                .collect()
+        };
         assert_eq!(
-            values,
+            values(Rule::Content),
             [
                 (") closes nothing, 3 times", ")"),
                 ("foo is no object, where one is written", "foo"),
@@ -1421,7 +1787,461 @@ mod tests {
                 ("2 operands at the end that no operator takes", "1 2"),
             ]
         );
-        assert!(found.iter().all(|f| f.0 == Rule::Content));
+        assert_eq!(
+            values(Rule::Operands),
+            [
+                ("TJ takes 1 operand, not 2", ") [(a) foo] TJ"),
+                ("BDC takes 2 operands, not 3", "/P <</MCID 0 1>> BDC"),
+                ("m takes 2 operands, not 3", ") 0 0 m"),
+            ]
+        );
+        assert!(
+            found
+                .iter()
+                .all(|f| matches!(f.0, Rule::Content | Rule::Operands))
+        );
+    }
+
+    /// What `rule` finds in `file`: each finding's value and bytes.
+    fn found_of(rule: Rule, file: &[u8]) -> Vec<(String, String)> {
+        (found(file).into_iter())
+            .filter(|(of, ..)| *of == rule)
+            .map(|(_, _, _, value, bytes)| (value, bytes))
+            .collect()
+    }
+
+    /// What `rule` finds in a page of one stream, `content`.
+    fn in_page(rule: Rule, content: &str) -> Vec<(String, String)> {
+        found_of(rule, &page_of(&[content], &[]))
+    }
+
+    /// A finding's value and bytes.
+    fn told(value: &str, bytes: &str) -> (String, String) {
+        (value.to_string(), bytes.to_string())
+    }
+
+    /// A file of a page that shows text in a Type 3 font, whose one glyph,
+    /// `a`, object 31, is `glyph`.
+    fn glyph_file(glyph: &str) -> Vec<u8> {
+        let font = "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 9 9] /FontMatrix [1 0 0 1 0 0] \
+                    /CharProcs << /a 31 0 R >> /Encoding << /Differences [97 /a] >> \
+                    /FirstChar 97 /LastChar 97 /Widths [9] /Resources << >> >>";
+        let mut objects = tree("3 0 R", "/Resources << /Font << /T3 30 0 R >> >>");
+        objects.extend([
+            (3, page("/Contents 10 0 R")),
+            (10, stream("", "BT /T3 9 Tf (a) Tj ET")),
+            (30, font.to_string()),
+            (31, stream("", glyph)),
+        ]);
+        file(&objects)
+    }
+
+    /// Each graphics object refuses what Figure 9 doesn't allow in it, by
+    /// the operator and where content is: one finding each, at the
+    /// operation, its operands with it. What it allows is no finding.
+    #[test]
+    fn each_state_refuses_what_figure_9_doesnt_allow_in_it() {
+        let allowed = "q 1 0 0 1 9 9 cm 1 w 0 g /T BMC 0 0 m 9 9 l 0 9 9 0 re W n EMC \
+                       BT /F1 9 Tf 1 0 0 1 0 0 Tm (a) Tj [(b)] TJ 0 g ET \
+                       /Sh sh /Im Do BX EX Q";
+        assert_eq!(in_page(Rule::Operator, allowed), []);
+        let refused = [
+            // The content stream level.
+            ("(a) Tj", "Tj at the content stream level", "(a) Tj"),
+            ("9 9 l", "l at the content stream level", "9 9 l"),
+            ("n", "n at the content stream level", "n"),
+            ("ET", "ET at the content stream level", "ET"),
+            ("W", "W at the content stream level", "W"),
+            // A path object.
+            ("0 0 m 1 g 9 9 l f", "g in a path object", "1 g"),
+            (
+                "0 0 m 1 0 0 1 9 9 cm f",
+                "cm in a path object",
+                "1 0 0 1 9 9 cm",
+            ),
+            ("0 0 m /Im Do f", "Do in a path object", "/Im Do"),
+            ("0 0 m (a) Tj f", "Tj in a path object", "(a) Tj"),
+            // A clipping path object.
+            ("0 0 m W 9 9 l n", "l in a clipping path object", "9 9 l"),
+            ("0 0 m W* q n", "q in a clipping path object", "q"),
+            // A text object.
+            (
+                "BT 1 0 0 1 9 9 cm ET",
+                "cm in a text object",
+                "1 0 0 1 9 9 cm",
+            ),
+            ("BT /Im Do ET", "Do in a text object", "/Im Do"),
+            ("BT /Sh sh ET", "sh in a text object", "/Sh sh"),
+            ("BT BT ET", "BT in a text object", "BT"),
+            (
+                "BT 9 0 d0 ET",
+                "d0 where it isn't first in a glyph description",
+                "9 0 d0",
+            ),
+        ];
+        for (content, value, bytes) in refused {
+            assert_eq!(
+                in_page(Rule::Operator, content),
+                [told(value, bytes)],
+                "{content}"
+            );
+        }
+        // An operator in two places is two kinds.
+        assert_eq!(
+            in_page(Rule::Operator, "(a) Tj 0 0 m (b) Tj f (c) Tj"),
+            [
+                told("Tj at the content stream level, 2 times", "(a) Tj"),
+                told("Tj in a path object", "(b) Tj"),
+            ]
+        );
+    }
+
+    /// The errata let a text object hold the general graphics state, `q`
+    /// and `Q` among it, and marked content (9.4.1, 14.6.1): none of it is
+    /// refused there.
+    #[test]
+    fn the_errata_allow_q_and_marked_content_in_a_text_object() {
+        let content = "BT q /F1 9 Tf 2 w 1 J Q /T BMC (a) Tj EMC /T /P MP ET";
+        assert_eq!(in_page(Rule::Operator, content), []);
+    }
+
+    /// An inline image may begin at the content stream level alone: in a
+    /// text object it's refused, the whole image its bytes, and content
+    /// goes on in the text object. A `BI` that begins none, as PDFium reads
+    /// it, is refused where an image may not begin, and found as no image
+    /// wherever it is.
+    #[test]
+    fn an_inline_image_or_a_lone_bi_in_a_text_object_is_refused() {
+        let image = "BI /W 1 /H 1 /CS /G /BPC 8 ID x EI";
+        assert_eq!(in_page(Rule::Operator, image), []);
+        assert_eq!(
+            in_page(Rule::Operator, &format!("BT {image} (a) Tj ET")),
+            [told("BI in a text object", image)]
+        );
+        let lone = "BI /W 1 Q";
+        assert_eq!(in_page(Rule::Operator, &format!("q {lone}")), []);
+        let file = page_of(&[&format!("BT q {lone} ET")], &[]);
+        assert_eq!(
+            found_of(Rule::Operator, &file),
+            [told("BI in a text object", "BI")]
+        );
+        let no_image = "BI /W 1 Q begins no inline image, a keyword where a key is written";
+        assert_eq!(
+            found_of(Rule::Content, &file),
+            [told(no_image, "BI /W 1 Q")]
+        );
+    }
+
+    /// A word Annex A doesn't name is found outside `BX` and `EX`, each
+    /// word its own kind, and passed over inside them, however they nest; an
+    /// `EX` with no `BX` open, and `BX` left open at the end, are found too.
+    #[test]
+    fn a_word_annex_a_doesnt_name_is_passed_over_only_inside_bx_and_ex() {
+        let foo = "foo, an operator ISO 32000-2 doesn't define, outside BX and EX";
+        assert_eq!(in_page(Rule::Operator, "1 foo"), [told(foo, "1 foo")]);
+        assert_eq!(in_page(Rule::Operator, "BX 1 foo EX"), []);
+        assert_eq!(
+            in_page(Rule::Operator, "BX BX foo EX foo EX foo"),
+            [told(foo, "foo")]
+        );
+        let bar = "bar, an operator ISO 32000-2 doesn't define, outside BX and EX";
+        assert_eq!(
+            in_page(Rule::Operator, "foo bar foo"),
+            [told(&format!("{foo}, 2 times"), "foo"), told(bar, "bar")]
+        );
+        // Not refused where content is besides: an unknown word only.
+        assert_eq!(
+            in_page(Rule::Operator, "0 0 m foo 9 9 l f"),
+            [told(foo, "foo")]
+        );
+        assert_eq!(
+            in_page(Rule::Operator, "EX q EX Q"),
+            [told("EX with no BX open, 2 times", "EX")]
+        );
+        assert_eq!(
+            in_page(Rule::Operator, "BX BX foo EX"),
+            [told("1 BX left open at the end", "BX")]
+        );
+        // A long word is shown cut.
+        let long = "w".repeat(TOKEN + 1);
+        let shown = format!("{}…", &long[..TOKEN]);
+        let value = &in_page(Rule::Operator, &long)[0].0;
+        assert!(
+            value.starts_with(&format!("{shown}, an operator")),
+            "{value}"
+        );
+    }
+
+    /// A glyph description's first operator is `d0` or `d1`, and they're
+    /// allowed nowhere else: one that begins otherwise is refused at its
+    /// first, and goes on at the content stream level, as after `d0`; one
+    /// with no operator at all has no `d0` or `d1`, all of it the finding.
+    #[test]
+    fn a_glyph_description_begins_with_d0_or_d1_alone() {
+        let glyph = |data: &str| found_of(Rule::Operator, &glyph_file(data));
+        assert_eq!(glyph("9 0 d0 0 0 9 9 re f"), []);
+        assert_eq!(glyph("9 0 0 0 9 9 d1 0 0 9 9 re f"), []);
+        let d0 = "d0 where it isn't first in a glyph description";
+        assert_eq!(
+            glyph("0 0 9 9 re f 9 0 d0"),
+            [
+                told(
+                    "re first in a glyph description, before d0 or d1",
+                    "0 0 9 9 re"
+                ),
+                told(d0, "9 0 d0"),
+            ]
+        );
+        assert_eq!(
+            glyph("q 9 0 d0 Q"),
+            [
+                told("q first in a glyph description, before d0 or d1", "q"),
+                told(d0, "9 0 d0"),
+            ]
+        );
+        let d1 = "d1 where it isn't first in a glyph description";
+        assert_eq!(glyph("9 0 d0 9 0 0 0 9 9 d1"), [told(d1, "9 0 0 0 9 9 d1")]);
+        assert_eq!(
+            glyph(""),
+            [told("a glyph description with no d0 or d1", "")]
+        );
+        // Where it's the whole glyph's.
+        let found = found(&glyph_file(""));
+        let path = "Root/Pages/Resources/Font/T3/CharProcs/a";
+        assert_eq!((found[0].1, found[0].2.as_str()), (31, path));
+        // A page's.
+        assert_eq!(in_page(Rule::Operator, "9 0 d0"), [told(d0, "9 0 d0")]);
+    }
+
+    /// After an operator that's refused, content is where it was; but `BT`,
+    /// `m` or `re` in a path object begins its own object, the path
+    /// abandoned, and `ET` ends what it's in: so one mistake is one
+    /// finding.
+    #[test]
+    fn content_goes_on_where_it_was_after_a_refused_operator() {
+        let cases = [
+            ("0 0 m BT (a) Tj ET", "BT in a path object", "BT"),
+            (
+                "0 0 m W 0 0 m 9 9 l f",
+                "m in a clipping path object",
+                "0 0 m",
+            ),
+            (
+                "0 0 m W 0 0 9 9 re f",
+                "re in a clipping path object",
+                "0 0 9 9 re",
+            ),
+            ("0 0 m ET 1 g", "ET in a path object", "ET"),
+            (
+                "0 0 m 1 g 2 g 9 9 l f",
+                "g in a path object, 2 times",
+                "1 g",
+            ),
+        ];
+        for (content, value, bytes) in cases {
+            assert_eq!(
+                in_page(Rule::Operator, content),
+                [told(value, bytes)],
+                "{content}"
+            );
+        }
+        // A path in a text object is refused, and the text object goes on.
+        assert_eq!(
+            in_page(Rule::Operator, "BT 0 0 m 9 9 l f (a) Tj ET"),
+            [
+                told("m in a text object", "0 0 m"),
+                told("l in a text object", "9 9 l"),
+                told("f in a text object", "f"),
+            ]
+        );
+    }
+
+    /// Content that ends inside a graphics object is found at where it
+    /// began, across a page's streams as one; not where reading stopped
+    /// before the end, which isn't known.
+    #[test]
+    fn content_ending_inside_an_object_is_found_where_it_began() {
+        let ends = [
+            ("1 g 0 0 m 9 9 l", "content ends in a path object", "0 0 m"),
+            ("BT (a) Tj", "content ends in a text object", "BT"),
+            (
+                "0 0 9 9 re W",
+                "content ends in a clipping path object",
+                "0 0 9 9 re",
+            ),
+        ];
+        for (content, value, bytes) in ends {
+            assert_eq!(
+                in_page(Rule::Operator, content),
+                [told(value, bytes)],
+                "{content}"
+            );
+        }
+        let file = |streams: &[&str]| found_of(Rule::Operator, &page_of(streams, &[]));
+        assert_eq!(file(&["BT", "(a) Tj ET"]), []);
+        assert_eq!(
+            file(&["q BT", "(a) Tj"]),
+            [told("content ends in a text object", "BT")]
+        );
+        assert_eq!(in_page(Rule::Operator, "BX BT (abc"), []);
+        assert_eq!(in_page(Rule::Operator, "BX 0 0 m [1"), []);
+        // What came before a stop stands.
+        assert_eq!(
+            in_page(Rule::Operator, "n BT (abc"),
+            [told("n at the content stream level", "n")]
+        );
+    }
+
+    /// Each operation's operands are held to its operator's in Annex A's
+    /// table: how many, then each one's type, as written; `SC` and `sc`
+    /// take 1, 3 or 4 numbers, `SCN` and `scn` numbers but a name last. A
+    /// word Annex A doesn't name takes any.
+    #[test]
+    fn operands_are_as_many_as_their_operator_takes_and_of_its_types() {
+        let wrong = [
+            ("1 2 3 m", "m takes 2 operands, not 3"),
+            ("(a) m", "m takes 2 operands, not 1"),
+            ("m", "m takes 2 operands, not 0"),
+            ("(a) 1 m", "m's operand 1 is a string, not a number"),
+            ("1 2 3 re", "re takes 4 operands, not 3"),
+            ("1 q", "q takes no operands, not 1"),
+            ("1.5 J", "J's operand 1 is a real number, not an integer"),
+            ("9 /F1 Tf", "Tf's operand 1 is an integer, not a name"),
+            (
+                "/T (x) BDC",
+                "BDC's operand 2 is a string, not a name or a dictionary",
+            ),
+            ("true 0 d", "d's operand 1 is a boolean, not an array"),
+            ("[1] null d", "d's operand 2 is null, not a number"),
+            ("1 2 SC", "SC takes 1, 3 or 4 operands, not 2"),
+            ("1 2 3 4 5 sc", "sc takes 1, 3 or 4 operands, not 5"),
+            ("/P sc", "sc's operand 1 is a name, not a number"),
+            ("scn", "scn takes 1 operand at least, not 0"),
+            ("/P 0.5 scn", "scn's operand 1 is a name, not a number"),
+            (
+                "1 (x) SCN",
+                "SCN's operand 2 is a string, not a number or a name",
+            ),
+            (
+                "1 BI /W 1 /H 1 /CS /G /BPC 8 ID x EI",
+                "BI takes no operands, not 1",
+            ),
+        ];
+        for (content, value) in wrong {
+            assert_eq!(
+                in_page(Rule::Operands, content),
+                [told(value, content)],
+                "{content}"
+            );
+        }
+        let right = [
+            "0 0 m 1 2 l h S",
+            "1 J -2 j 1.5 w [1 2] 0 d [] 0.5 d",
+            "/F1 9 Tf BT 1 2 (a) \" (b) ' [(c) 1] TJ ET",
+            "/T /P BDC EMC /T <</MCID 0>> BDC EMC /T MP /T /P DP",
+            "0.5 SC 1 2 3 sc 0 0 0 1 SC",
+            "/P1 scn 0.5 /P1 scn 1 2 3 4 5 6 7 SCN 1 SCN",
+            "1 2 foo",
+        ];
+        for content in right {
+            assert_eq!(in_page(Rule::Operands, content), [], "{content}");
+        }
+    }
+
+    /// One kind is one finding, however many times it's found, saying how
+    /// many: of a refused operator, and of operands.
+    #[test]
+    fn a_kind_found_many_times_is_one_finding() {
+        let many = "n ".repeat(40_000);
+        assert_eq!(
+            in_page(Rule::Operator, &many),
+            [told("n at the content stream level, 40000 times", "n")]
+        );
+        let many = "1 q ".repeat(1_000);
+        assert_eq!(
+            in_page(Rule::Operands, &many),
+            [told("q takes no operands, not 1, 1000 times", "1 q")]
+        );
+    }
+
+    /// Past 32 kinds of a rule in a unit, one finding more, at the first
+    /// past them, says how many more there are, of any kind: a kind told
+    /// apart already is still counted as itself.
+    #[test]
+    fn past_32_kinds_one_finding_says_how_many_more() {
+        let words: Vec<String> = (0..40).map(|i| format!("w{i}")).collect();
+        let content = format!("{} w0 w39", words.join(" "));
+        let found = in_page(Rule::Operator, &content);
+        assert_eq!(found.len(), KINDS + 1);
+        let unknown = ", an operator ISO 32000-2 doesn't define, outside BX and EX";
+        assert_eq!(found[0], told(&format!("w0{unknown}, 2 times"), "w0"));
+        assert_eq!(found[31], told(&format!("w31{unknown}"), "w31"));
+        let more = format!("9 more, of kinds past the first {KINDS}");
+        assert_eq!(found[KINDS], told(&more, "w32"));
+        // Operands alike: every operator Annex A names but an inline
+        // image's, with eight operands, which none takes but `SCN` and
+        // `scn`, which take any number.
+        let named: Vec<&str> = (Operator::ALL.iter())
+            .filter_map(|op| op.name())
+            .filter(|name| !matches!(*name, "BI" | "ID" | "EI" | "SCN" | "scn"))
+            .collect();
+        let content: String = (named.iter())
+            .map(|name| format!("1 2 3 4 5 6 7 8 {name}\n"))
+            .collect();
+        let found = in_page(Rule::Operands, &content);
+        assert_eq!(found.len(), KINDS + 1);
+        let more = format!(
+            "{} more, of kinds past the first {KINDS}",
+            named.len() - KINDS
+        );
+        assert_eq!(found[KINDS].0, more);
+    }
+
+    /// An operator's findings are alike whatever their counts, but for the
+    /// operator's own digits: `d0` is not `d1`, nor `d`.
+    #[test]
+    fn an_operators_findings_are_carried_by_its_name() {
+        let operator = |value: &str| uncounted(Rule::Operator, value);
+        assert_eq!(
+            operator("n at the content stream level, 40000 times"),
+            operator("n at the content stream level")
+        );
+        assert_eq!(
+            operator("2 BX left open at the end"),
+            operator("1 BX left open at the end")
+        );
+        let d0 = "d0 where it isn't first in a glyph description";
+        assert_ne!(operator(d0), operator(&d0.replace("d0", "d1")));
+        let operands = |value: &str| uncounted(Rule::Operands, value);
+        assert_eq!(
+            operands("m takes 2 operands, not 3"),
+            operands("m takes 2 operands, not 0, 2 times")
+        );
+        assert_ne!(
+            operands("d1 takes 6 operands, not 5"),
+            operands("d takes 2 operands, not 5")
+        );
+        assert_ne!(
+            operands("d0's operand 1 is a name, not a number"),
+            operands("d1's operand 1 is a name, not a number")
+        );
+        // Through the reports: a second `n` is carried, a `d1` where a `d0`
+        // was isn't.
+        let report = |content: &str| {
+            let file = page_of(&[content], &[]);
+            let opened = Opened::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+            check(&opened, &Hold::All(Made::Merged), &Options::default())
+        };
+        let values = |found: Vec<&Finding>| -> Vec<String> {
+            found.into_iter().map(|f| f.value.clone()).collect()
+        };
+        let before = report("n 9 0 d0");
+        assert_eq!(
+            values(report("n n 9 0 d0").since(&before)),
+            Vec::<String>::new()
+        );
+        let after = report("n 9 0 0 0 9 9 d1");
+        assert_eq!(values(after.since(&before)), [d0.replace("d0", "d1")]);
     }
 
     /// Two pages share a stream, with the same resources: it's read once,

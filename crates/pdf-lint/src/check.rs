@@ -68,9 +68,11 @@
 //! ([`Source::decoded_within`]): each unit of it read once, within
 //! [`Options::content_budget`], as PDFium reads content, and held to ISO
 //! 32000-2 where it's held: its `q`s and `Q`s balanced ([`Rule::Balance`]),
-//! its marked content ended ([`Rule::Marked`]), and read as ISO reads it,
-//! to its end ([`Rule::Content`]). One that isn't read, its data not
-//! decoded cleanly, is counted as not checked.
+//! its marked content ended ([`Rule::Marked`]), each operator where it may
+//! be used ([`Rule::Operator`]) and with the operands it takes
+//! ([`Rule::Operands`]), and read as ISO reads it, to its end
+//! ([`Rule::Content`]). One that isn't read, its data not decoded cleanly,
+//! is counted as not checked.
 //!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
@@ -99,9 +101,13 @@
 //! choose how to read ([`Rule::Reader`]); what an object stream holds
 //! that it mustn't ([`Rule::Packed`]); and in content, `q`s left open or a
 //! `Q` with nothing saved ([`Rule::Balance`]), marked content left open or
-//! an `EMC` ending none ([`Rule::Marked`]), and where ISO 32000-2 reads it
-//! otherwise than PDFium, or what stops reading it ([`Rule::Content`]),
-//! each kind once in a unit of content. A check whose predicate can't be
+//! an `EMC` ending none ([`Rule::Marked`]), an operator where the graphics
+//! object content is in doesn't allow it, a word that's no operator outside
+//! `BX` and `EX`, or content ending inside an object ([`Rule::Operator`]),
+//! operands not as many or not of the types their operator takes
+//! ([`Rule::Operands`]), and where ISO 32000-2 reads it otherwise than
+//! PDFium, or what stops reading it ([`Rule::Content`]), each kind once in a
+//! unit of content. A check whose predicate can't be
 //! told, or uses a function the evaluator doesn't support, or reads a
 //! string's bytes the reader didn't give, is counted as not made
 //! ([`Report::unchecked`]), and every key the model doesn't list is
@@ -566,6 +572,34 @@ pub enum Rule {
     /// `EMC` ending none, at the first, with how many. Where and as
     /// [`Rule::Balance`].
     Marked,
+    /// An operator where content is that ISO 32000-2 doesn't allow it in,
+    /// among the graphics objects of 8.2 (Figure 9: a path object, a text
+    /// object, the content stream level between them), and `d0` or `d1`
+    /// anywhere but first in a Type 3 glyph description (9.6.4), or another
+    /// operator there; a word Annex A doesn't name, outside `BX` and `EX`
+    /// (7.8.2); an `EX` with no `BX` open, and `BX` left open at the end;
+    /// and content that ends inside a graphics object, at where it began,
+    /// or a glyph description with no `d0` or `d1`, all of it. Each kind
+    /// once in a unit of content, by the operator and where content is, a
+    /// word by itself, with how many times, at its first; past 32 kinds, one
+    /// finding more says how many more. After an operator that's refused,
+    /// content is where it was, but that a glyph description goes on at the
+    /// content stream level, `ET` ends what it's in, and `BT`, `m` or `re`
+    /// in a path object begins its own, the path abandoned. The end isn't
+    /// found where reading stopped short of it ([`Rule::Content`]). Where
+    /// and as [`Rule::Balance`].
+    Operator,
+    /// An operation whose operands aren't as many as its operator takes, or
+    /// one of which isn't of the type it takes (ISO 32000-2, Annex A, and
+    /// the clause defining each operator; 7.8.2, that none is left over),
+    /// as written: an integer is a number without a point; `SC` and `sc`
+    /// take 1, 3 or 4 numbers, as a color space they may set has
+    /// components, and `SCN` and `scn` one operand at least, numbers but a
+    /// pattern's name last. Each kind once in a unit, by the operator and
+    /// whether it's the count or a type, its value the first's, with how
+    /// many times; past 32 kinds, one finding more says how many more.
+    /// Where and as [`Rule::Balance`].
+    Operands,
     /// Content as ISO 32000-2 reads it otherwise than it's read, as PDFium
     /// reads it, each kind of place once in a unit of content, its value the
     /// first's (pdf-content-streams' `Fault`), with how many; and what stops
@@ -1016,7 +1050,8 @@ enum Place {
 /// [`Report::by_path`]: its table, key, rule and value, the value's
 /// references' numbers aside, which a rewrite renumbers, and a reader's
 /// finding's numbers aside, its offsets, and a content finding's, its
-/// counts, offsets and lengths, and how many times its kind was found; for
+/// counts, offsets and lengths, and how many times its kind was found, but
+/// an operator's name, `d0` not `d1`, in an operator's or operands'; for
 /// a key that came in later than the file's version, any value, as its
 /// value isn't what's wrong; and for an object nothing reaches, the object
 /// alone, as which object's reference to it is named follows the objects'
@@ -1025,7 +1060,7 @@ fn like(f: &Finding) -> (String, String, Rule, String) {
     let value = match f.rule {
         Rule::TooNew => String::new(),
         Rule::Reader => f.value.chars().filter(|c| !c.is_ascii_digit()).collect(),
-        rule if content::counted(rule) => content::uncounted(&f.value),
+        rule if content::counted(rule) => content::uncounted(rule, &f.value),
         _ => numberless(&f.value),
     };
     match f.rule {
@@ -3767,6 +3802,8 @@ impl Rule {
         Rule::Packed,
         Rule::Balance,
         Rule::Marked,
+        Rule::Operator,
+        Rule::Operands,
         Rule::Content,
     ];
 
@@ -3790,6 +3827,8 @@ impl Rule {
             Rule::Packed => "packed",
             Rule::Balance => "balance",
             Rule::Marked => "marked",
+            Rule::Operator => "operator",
+            Rule::Operands => "operands",
             Rule::Content => "content",
         }
     }
@@ -6978,10 +7017,19 @@ mod tests {
             assert_eq!(rule.to_string(), rule.name());
         }
         assert_eq!(Rule::named("packed"), Some(Rule::Packed));
-        let content = [Rule::Balance, Rule::Marked, Rule::Content];
+        let content = [
+            Rule::Balance,
+            Rule::Marked,
+            Rule::Operator,
+            Rule::Operands,
+            Rule::Content,
+        ];
         assert!(Rule::ALL.ends_with(&content));
         let names: Vec<_> = content.iter().map(|r| r.name()).collect();
-        assert_eq!(names, ["balance", "marked", "content"]);
+        assert_eq!(
+            names,
+            ["balance", "marked", "operator", "operands", "content"]
+        );
         assert_eq!(Rule::named("Packed"), None);
     }
 
