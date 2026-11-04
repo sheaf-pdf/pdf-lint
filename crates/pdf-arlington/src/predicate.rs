@@ -892,12 +892,20 @@ pub fn gate(wraps: &[Wrap], file: Version, extensions: &BTreeSet<String>) -> Gat
 /// `check_everything` reads); the checker's rules read SpecialCase and
 /// PossibleValues so.
 pub fn holds_fully(text: &str, cx: &Cx) -> Truth {
-    match &*parsed(text, cx.file.grammar) {
-        Ok(expr) => match unsupported(expr) {
+    let fully = |parse: &Result<Expr, Error>, unsupported: Option<&str>| match parse {
+        Ok(expr) => match unsupported {
             Some(f) => Truth::Unknown(f.to_string()),
             None => truth(expr, cx).truth(true),
         },
         Err(_) => Truth::Unknown(text.to_string()),
+    };
+    let kept = (cx.file.grammar).and_then(|grammar| grammar.parses().find(text));
+    match kept {
+        Some(kept) => fully(&kept.parse, kept.unsupported.as_deref()),
+        None => {
+            let parse = parse(text);
+            fully(&parse, parse.as_ref().ok().and_then(unsupported))
+        }
     }
 }
 
@@ -1046,6 +1054,9 @@ struct Kept {
     hash: u64,
     text: Box<str>,
     parse: Result<Expr, Error>,
+    /// The first function in its parse that isn't [`SUPPORTED`], as
+    /// [`holds_fully`] reads it.
+    unsupported: Option<Box<str>>,
 }
 
 impl Parses {
@@ -1065,6 +1076,11 @@ impl Parses {
     /// `text` parsed, when it's kept, or there's room to keep it: parsed the
     /// first time it's asked for, and kept.
     fn get(&self, text: &str) -> Option<&Result<Expr, Error>> {
+        self.find(text).map(|kept| &kept.parse)
+    }
+
+    /// `text` kept, or kept now, when there's room to keep it.
+    fn find(&self, text: &str) -> Option<&Kept> {
         let hash = self.hasher.hash_one(text);
         let last = self.slots.len() - 1;
         // Any of the hash's bits will do, where a usize has fewer.
@@ -1078,15 +1094,18 @@ impl Parses {
                 // its own, which is then read as any other's.
                 None => slot.get_or_init(|| {
                     self.taken.fetch_add(1, Relaxed);
+                    let parse = parse(text);
+                    let unsupported = parse.as_ref().ok().and_then(unsupported).map(Box::from);
                     Box::new(Kept {
                         hash,
                         text: text.into(),
-                        parse: parse(text),
+                        parse,
+                        unsupported,
                     })
                 }),
             };
             if kept.hash == hash && *kept.text == *text {
-                return Some(&kept.parse);
+                return Some(kept);
             }
             at = (at + 1) & last;
         }
@@ -4823,8 +4842,12 @@ mod tests {
             let texts = texts(model);
             let (mut keys, mut held, mut failed) = (0, 0, 0);
             for &text in &texts {
+                let fresh = parse(text);
+                let first = fresh.as_ref().ok().and_then(unsupported);
+                let found = parses.find(text).unwrap();
+                assert_eq!(found.unsupported.as_deref(), first, "{name}: {text:?}");
                 let kept = parses.get(text).unwrap();
-                assert_eq!(*kept, parse(text), "{name}: {text:?}");
+                assert_eq!(*kept, fresh, "{name}: {text:?}");
                 keys += text.len();
                 match kept {
                     Ok(e) => held += heap(e),
