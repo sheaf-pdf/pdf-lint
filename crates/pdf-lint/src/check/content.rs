@@ -2582,6 +2582,36 @@ mod tests {
         );
     }
 
+    /// What's inside an array or a dictionary among the operands is found
+    /// as reading it as an object finds it, an element's, a key's or a
+    /// value's own faults among it, each kind once, at its first, with how
+    /// many, however deep.
+    #[test]
+    fn whats_inside_an_operand_is_found_as_reading_it_finds_it() {
+        let content = "BT [(a) 1.2.3 (b) --4] TJ [<4G> 2 /F#3G] TJ ET \
+                       /P <</A [1 [3.4.5 (x)]] /B <</C 99999999999>>>> BDC EMC";
+        let found = found_in_page(&[content]);
+        let values: Vec<(&str, &str)> = (found.iter())
+            .filter(|(of, ..)| *of == Rule::Content)
+            .map(|(_, _, _, value, bytes)| (value.as_str(), bytes.as_str()))
+            .collect();
+        assert_eq!(
+            values,
+            [
+                (
+                    "1.2.3 is a number here and a keyword to ISO 32000-2, 3 times",
+                    "1.2.3"
+                ),
+                ("the hex string <4G> has a byte that's no hex digit", "<4G>"),
+                (
+                    "the name /F#3G has a # without two hex digits after it, which readers read differently",
+                    "/F#3G"
+                ),
+                ("99999999999 is past the numbers read here", "99999999999"),
+            ]
+        );
+    }
+
     /// A 0x80 or 0xFF that content's reading takes for white-space, where
     /// ISO 32000-2 reads a regular character, is a kind of fault like any:
     /// found once a unit, at the first, with how many; one in a string
