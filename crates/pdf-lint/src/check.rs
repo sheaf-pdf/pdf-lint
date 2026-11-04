@@ -243,7 +243,7 @@ mod structure;
 mod told;
 
 use reading::{Readings, Reads};
-use rows::rows;
+use rows::{Rows, rows};
 pub(crate) use structure::Packet;
 
 /// How deeply direct objects may nest in an indirect one before the walk
@@ -2584,7 +2584,7 @@ impl<'a> Walk<'a> {
                 }
                 self.refer(raw, v.table, key);
                 let table = grammar().table(table).expect("the model has the table");
-                self.reach(v, step, (id, value), &[table], parents, &[]);
+                self.reach(v, step, (id, value), &[rows(table)], parents, &[]);
                 return;
             }
         };
@@ -2940,7 +2940,7 @@ impl<'a> Walk<'a> {
         row: &'static Row,
         i: usize,
         parents: &[&'a Object],
-        also: &[&'static Table],
+        also: &[&'static Rows],
     ) {
         if self.revision.is_some() && found.0.is_some() {
             return;
@@ -2963,9 +2963,9 @@ impl<'a> Walk<'a> {
     /// `table`'s, that their version predicates let in at the file's
     /// version; all of them when those let in none, as TestGrammar's walk
     /// always takes all (its `get_full_linkset`).
-    fn links(&self, table: &'static Table, row: &'static Row, i: usize) -> Vec<&'static Table> {
+    fn links(&self, table: &'static Table, row: &'static Row, i: usize) -> Vec<&'static Rows> {
         let (links, tables) = (&row.link[i], rows(table).links(row, i));
-        let allowed: Vec<&Table> = (links.iter().zip(tables))
+        let allowed: Vec<&'static Rows> = (links.iter().zip(tables))
             .filter(|(l, _)| {
                 predicate::gate(&l.wraps, self.version, self.extensions) != Gate::Excluded
             })
@@ -2993,9 +2993,9 @@ impl<'a> Walk<'a> {
         from: &Visit<'a>,
         step: Step<'a>,
         (id, value): (Option<ObjectId>, &'a Object),
-        links: &[&'static Table],
+        links: &[&'static Rows],
         parents: &[&'a Object],
-        also: &[&'static Table],
+        also: &[&'static Rows],
     ) {
         if self.revision.is_some() && id.is_some() {
             return;
@@ -3177,7 +3177,7 @@ impl<'a> Walk<'a> {
         match name {
             Some(name) => table(name),
             None => {
-                let fields: Vec<&'static Table> = FIELDS.into_iter().map(table).collect();
+                let fields: Vec<&'static Rows> = FIELDS.map(|name| rows(table(name))).into();
                 (self.choose((id, object), &fields, parents)).map_or(table("Field"), |(t, _)| t)
             }
         }
@@ -3191,24 +3191,24 @@ impl<'a> Walk<'a> {
     fn choose(
         &self,
         (id, object): (Option<ObjectId>, &'a Object),
-        links: &[&'static Table],
+        links: &[&'static Rows],
         parents: &[&'a Object],
     ) -> Option<(&'static Table, bool)> {
         // Where TestGrammar scores an array against a dictionary's table
         // too, and one as long as the table has rows took it (a structure
         // parent tree's array of 19, a structure element's 19 rows), only
         // the tables of the object's kind are scored, when there are any.
-        let fitting: Vec<&'static Table> = (links.iter().copied())
-            .filter(|table| fits(object, table))
+        let fitting: Vec<&'static Rows> = (links.iter().copied())
+            .filter(|keyed| fits(object, keyed))
             .collect();
         let links = if fitting.is_empty() { links } else { &fitting };
         if let [only] = links {
-            return Some((only, false));
+            return Some((only.table(), false));
         }
         let mut best: Option<(&'static Table, i32)> = None;
         let mut tie = false;
-        for &table in links {
-            let score = self.score((id, object), table, parents);
+        for &keyed in links {
+            let (table, score) = (keyed.table(), self.score((id, object), keyed, parents));
             #[cfg(any(test, fuzzing))]
             assert_eq!(
                 score,
@@ -3258,9 +3258,10 @@ impl<'a> Walk<'a> {
     fn score(
         &self,
         (id, object): (Option<ObjectId>, &'a Object),
-        table: &'static Table,
+        keyed: &'static Rows,
         parents: &[&'a Object],
     ) -> i32 {
+        let table = keyed.table();
         let (dict, array) = match object.value() {
             Value::Dict(d) => (Some(d), None),
             Value::Stream(s) => (Some(&s.dict), None),
@@ -3268,7 +3269,7 @@ impl<'a> Walk<'a> {
             _ => return 0,
         };
         // Each row's entry, the dictionary's entries walked once.
-        let entries = dict.map(|dict| rows(table).entries(dict));
+        let entries = dict.map(|dict| keyed.entries(dict));
         let rows = &table.rows;
         let mut score = 0;
         if let Some(array) = array
@@ -4685,8 +4686,7 @@ fn universal(table: &str) -> bool {
 /// elements (its keys indices, repeating rows' `1*` or the wildcard), a
 /// dictionary or stream of a table of keys; a table of the wildcard alone,
 /// either.
-fn fits(object: &Object, table: &'static Table) -> bool {
-    let rows = rows(table);
+fn fits(object: &Object, rows: &Rows) -> bool {
     match object.value() {
         Value::Array(_) => !rows.keyed,
         Value::Dict(_) | Value::Stream(_) => !rows.elements,
@@ -5778,7 +5778,7 @@ mod tests {
                                 0 => &[],
                                 _ => &[catalog],
                             };
-                            let by_entries = walk.score((*id, object), table, parents);
+                            let by_entries = walk.score((*id, object), rows(table), parents);
                             let by_rows = walk.score_by_rows((*id, object), table, parents);
                             let at = (&table.name, version, n);
                             assert_eq!(by_entries, by_rows, "{at:?}: {}", render(object));
