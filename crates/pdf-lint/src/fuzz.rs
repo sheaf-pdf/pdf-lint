@@ -4,10 +4,13 @@
 //! bytes inside what was read, the file or a stream's decoded data, an
 //! object stream's as the document holds it and a content stream's or the
 //! metadata stream's as the reading decodes it again; what its content
-//! finds, and what its fonts' streams say of their text and what their
-//! reads find, moving nothing else a check of its document alone finds,
-//! which reads no stream's data ([`streams_alone`]); and set against its
-//! previous revision, when it has an incremental update. It reads under
+//! finds, what its fonts' streams say of their text and what their reads
+//! find, and what an earlier revision's objects that a later one wrote
+//! over or freed tell, read as that revision was written, moving nothing
+//! else a check of its document alone finds, which reads no stream's data
+//! and no earlier revision ([`reading_alone`]); and set against its
+//! previous revision, read as it was written, when it has an incremental
+//! update. It reads under
 //! small limits ([`options`], and 4 MiB of content and 4 MiB of fonts'
 //! streams in [`setting`]), so that a run tries more inputs. It's compiled
 //! only for tests and under cargo-fuzz's `--cfg fuzzing`, with [`seeds`],
@@ -17,12 +20,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytes::{self, WithReading};
 use crate::check::{
-    Exempt, Finding, Hold, Made, Options, Report, Rule, Unchecked, UnlistedIn, check,
+    Exempt, Finding, Hold, Made, Options, Report, Rule, Unchecked, UnlistedIn, WRITTEN_OVER, check,
+    check_with_reading,
 };
 use crate::object::{ObjectId, Span};
 use crate::pdf_crypt;
 use crate::pdf_crypt::writer::{Kind, Settings};
-use crate::source::{Document, Source};
+use crate::source::{Document, Source, Update};
 use crate::version::Version;
 
 /// The limits the fuzz target reads under: a stream decodes to at most
@@ -42,6 +46,18 @@ fn read(file: &[u8], section: Option<usize>) -> WithReading<&[u8]> {
     WithReading::new(file, &[], &options).expect("a file in memory reads")
 }
 
+/// The revision `update` of `doc`, `file` read, follows, read as
+/// [`read`] reads: its bytes up to where it ends, as it was written, or,
+/// where that isn't known, the file as of the section the update follows,
+/// as the command line's `--last-update` reads it.
+fn previous<'f>(file: &'f [u8], doc: &Document, update: &Update) -> WithReading<&'f [u8]> {
+    let revision = doc.revisions.iter().find(|r| r.at == update.previous);
+    match revision.and_then(|r| r.end) {
+        Some((_, end)) => read(&file[..end], None),
+        None => read(file, Some(update.previous)),
+    }
+}
+
 /// The fuzz target's body: `data`'s first two bytes choose how the file
 /// after them is held and checked ([`setting`]), and the rest is the file,
 /// read under [`options`].
@@ -52,13 +68,13 @@ pub fn check_file(data: &[u8]) {
     };
     let doc = read(file, None);
     let (hold, options) = setting(choice, doc.document());
-    let report = check(&doc, &hold, &options);
+    let report = check_with_reading(&doc, &hold, &options);
     assert_eq!(
         report,
-        check(&doc, &hold, &options),
+        check_with_reading(&doc, &hold, &options),
         "a check is the same twice"
     );
-    streams_alone(&report, &check(doc.document(), &hold, &options));
+    reading_alone(&report, &check(doc.document(), &hold, &options));
     let mut lengths = BTreeMap::new();
     for finding in &report.findings {
         if let Some(at) = finding.at {
@@ -71,12 +87,12 @@ pub fn check_file(data: &[u8]) {
     let _ = report.to_string();
     let _ = report.objects();
     if let Some(update) = &doc.document().update {
-        let previous = read(file, Some(update.previous));
+        let previous = previous(file, doc.document(), update);
         let options = Options {
             paths: true,
             ..options
         };
-        let before = check(&previous, &Hold::All(Made::Merged), &options);
+        let before = check_with_reading(&previous, &Hold::All(Made::Merged), &options);
         let _ = report.since(&before);
         let _ = report.by_path(&before);
         let _ = report.beyond(&[&before]);
@@ -161,31 +177,85 @@ fn latin_row(row: &Unchecked) -> bool {
     row.why == "fn:FontHasLatinChars"
 }
 
-/// That `beside`, a check of a file read beside its reading, is `alone`, a
-/// check of its document alone, which reads no stream's data, and what
-/// streams' data tells: content's own, what a font's `/ToUnicode`, embedded
-/// CMap or glyphs say of whether it has Latin characters, and what the
-/// read of a font that asks one finds, which alone doesn't read. The same
-/// findings but content's rules', `font`'s and a font descriptor's
-/// `missing CapHeight`, in the same order, and alone's of the last beside
-/// too; the same rows not checked, but content's and the fonts', their
-/// column `-`, added, and `fn:FontHasLatinChars`'s, as many or fewer; and
-/// the same counts, but units of content read and unused resources, which
-/// `alone` has none of. So what content finds, and what a font's streams
-/// say of it, moves nothing else; nor color spaces, which no stream's data
-/// says.
-fn streams_alone(beside: &Report, alone: &Report) {
+/// That `beside`, a check of a file beside its reading
+/// ([`check_with_reading`]), is `alone`, a check of its document alone,
+/// which reads no stream's data and no earlier revision's objects, and what
+/// those tell.
+///
+/// What streams' data tells: content's own, what a font's `/ToUnicode`,
+/// embedded CMap or glyphs say of whether it has Latin characters, and
+/// what the read of a font that asks one finds, which alone doesn't read.
+/// The same findings but content's rules', `font`'s and a font
+/// descriptor's `missing CapHeight`, in the same order, and alone's of the
+/// last beside too; the same rows not checked, but content's and the
+/// fonts', their column `-`, added, and `fn:FontHasLatinChars`'s, as many
+/// or fewer; and the same counts, but units of content read and unused
+/// resources, which `alone` has none of. Nor color spaces, which no
+/// stream's data says.
+///
+/// What an earlier revision's objects that a later revision wrote over or
+/// freed tell, read as that revision had them, only in an earlier trailer,
+/// where alone counts a check not made for that ([`WRITTEN_OVER`]): at a
+/// table and key where alone counts one, the findings in an earlier
+/// trailer, the other rows not checked and the keys deprecated or ignored
+/// may be others, the object read checked as its row asks; and those rows
+/// as many or fewer. A key no row lists, counted unlisted alone, is
+/// unlisted beside too, its finding the object's value, not the reference,
+/// but where the walk checks that object as a metadata stream or as
+/// associated files, which no row lists either (`Metadata`, `AF`): there
+/// it's a key checked, not unlisted. So the keys checked are as many, but
+/// one more for each of those, and at most one fewer for each reference
+/// read, as a null is no entry.
+fn reading_alone(beside: &Report, alone: &Report) {
+    // Where alone counts an earlier revision's object not read, by table
+    // and key, and how many references to one it counts so.
+    let over: BTreeSet<(&str, &str)> = (alone.unchecked.keys())
+        .filter(|row| row.why == WRITTEN_OVER)
+        .map(|row| (row.table.as_str(), row.key.as_str()))
+        .collect();
+    let read_at = |table: &str, key: &str| over.contains(&(table, key));
+    let references = |report: &Report| -> usize {
+        (report.unchecked.iter())
+            .filter(|(row, _)| row.why == WRITTEN_OVER && row.column == "Type")
+            .map(|(_, &n)| n)
+            .sum()
+    };
+    // The keys the walk checks a value of as a table no row names.
+    let unrowed = |key: &str| ["Metadata", "AF"].contains(&key);
+    let earlier = |f: &Finding| {
+        f.revision.is_some() && (read_at(&f.table, &f.key) || f.rule == Rule::Unlisted)
+    };
     let others = |report: &Report| -> Vec<Finding> {
         (report.findings.iter())
             .filter(|f| !CONTENT.contains(&f.rule) && f.rule != Rule::Font && !cap_height(f))
+            .filter(|f| !earlier(f))
             .cloned()
             .collect()
     };
     assert_eq!(
         others(beside),
         others(alone),
-        "streams' data moves no other finding"
+        "streams' data and earlier revisions' objects move no other finding"
     );
+    let unlisted = |report: &Report| -> Vec<(Option<usize>, String, String, String)> {
+        (report.findings.iter())
+            .filter(|f| f.revision.is_some() && f.rule == Rule::Unlisted)
+            .map(|f| (f.revision, f.path.clone(), f.table.clone(), f.key.clone()))
+            .collect()
+    };
+    let (now, was) = (unlisted(beside), unlisted(alone));
+    let rowed = |found: &[(Option<usize>, String, String, String)]| -> Vec<_> {
+        found.iter().filter(|f| !unrowed(&f.3)).cloned().collect()
+    };
+    assert_eq!(
+        rowed(&now),
+        rowed(&was),
+        "an earlier trailer's keys are unlisted alike"
+    );
+    for f in now.iter().filter(|f| unrowed(&f.3)) {
+        let times = |found: &[_]| found.iter().filter(|g| *g == f).count();
+        assert!(times(&now) <= times(&was), "{f:?} unlisted beside");
+    }
     assert!(
         (alone.findings.iter()).all(|f| !CONTENT.contains(&f.rule)),
         "content found where none is read"
@@ -203,8 +273,11 @@ fn streams_alone(beside: &Report, alone: &Report) {
     );
     for (row, &n) in &beside.unchecked {
         let was = alone.unchecked.get(row).copied().unwrap_or(0);
-        if latin_row(row) {
+        if latin_row(row) || row.why == WRITTEN_OVER {
             assert!(n <= was, "{row:?} not checked more times");
+            continue;
+        }
+        if read_at(&row.table, &row.key) {
             continue;
         }
         assert!(n >= was, "{row:?} not checked fewer times");
@@ -215,18 +288,65 @@ fn streams_alone(beside: &Report, alone: &Report) {
     }
     for row in alone.unchecked.keys() {
         assert!(
-            beside.unchecked.contains_key(row) || latin_row(row),
+            beside.unchecked.contains_key(row)
+                || latin_row(row)
+                || row.why == WRITTEN_OVER
+                || read_at(&row.table, &row.key),
             "{row:?} not checked alone"
         );
     }
+    let elsewhere = |counts: &BTreeMap<(String, String), usize>| -> Vec<((String, String), usize)> {
+        (counts.iter())
+            .filter(|((table, key), _)| !read_at(table, key))
+            .map(|(at, &n)| (at.clone(), n))
+            .collect()
+    };
+    assert_eq!(
+        elsewhere(&beside.deprecated),
+        elsewhere(&alone.deprecated),
+        "earlier revisions' objects move no other deprecation"
+    );
+    assert_eq!(
+        elsewhere(&beside.ignored),
+        elsewhere(&alone.ignored),
+        "earlier revisions' objects move no other key ignored"
+    );
+    let mut checked = 0;
+    for (key, &n) in &alone.unlisted {
+        let now = beside.unlisted.get(key).copied().unwrap_or(0);
+        assert!(
+            now == n || (now < n && unrowed(&key.key)),
+            "{key:?} unlisted {now} times, not {n}"
+        );
+        checked += n - now;
+    }
+    for key in beside.unlisted.keys() {
+        assert!(alone.unlisted.contains_key(key), "{key:?} unlisted beside");
+    }
+    let read = (references(alone)).checked_sub(references(beside));
+    let read = read.expect("references to earlier revisions' objects read, not more not read");
+    let most = alone.keys + checked;
+    assert!(
+        beside.keys <= most && beside.keys + read >= most,
+        "{} keys checked, not {most} or up to {read} fewer",
+        beside.keys
+    );
     let rest = |report: &Report| Report {
         findings: Vec::new(),
         unchecked: BTreeMap::new(),
+        keys: 0,
+        unlisted: BTreeMap::new(),
+        deprecated: BTreeMap::new(),
+        ignored: BTreeMap::new(),
         content: 0,
         unused: BTreeMap::new(),
         ..report.clone()
     };
-    assert_eq!(rest(beside), rest(alone), "streams' data moves no count");
+    assert_eq!(
+        rest(beside),
+        rest(alone),
+        "streams' data and earlier revisions' objects move no other count"
+    );
 }
 
 /// Whether `at` is inside what was read: the file, or the decoded data of
@@ -1066,12 +1186,13 @@ mod tests {
 
     /// Each seed read beside its reading is the whole read, as
     /// `bytes::read_opened` reads it, and under the fuzz target's limits as a
-    /// reading taken whole reads it; and with its streams' data read, a
-    /// check finds what one of its document alone finds and content's own
-    /// and what its fonts' streams say ([`streams_alone`]), and says how
-    /// many units of content it read, where one of its document alone reads
-    /// none. The content seeds' content has each rule of content finding
-    /// something; the rest is clean.
+    /// reading taken whole reads it; and checked beside its reading
+    /// ([`check_with_reading`]), its streams' data read, a check finds what
+    /// one of its document alone finds and content's own and what its
+    /// fonts' streams say ([`reading_alone`]), and says how many units of
+    /// content it read, where one of its document alone reads none. The
+    /// content seeds' content has each rule of content finding something;
+    /// the rest is clean.
     #[test]
     fn the_seeds_read_alike_beside_their_readings() {
         for (name, seed) in seeds() {
@@ -1087,8 +1208,10 @@ mod tests {
                 unused: true,
                 ..Options::default()
             };
-            let checked = |source: &dyn Source| check(source, &hold, &options);
-            let (beside, alone) = (checked(&opened), checked(opened.document()));
+            let (beside, alone) = (
+                check_with_reading(&opened, &hold, &options),
+                check(opened.document(), &hold, &options),
+            );
             // The page's content and its annotation's appearance; the
             // structure's page; the two pages' one unit, the form, the
             // pattern and the two glyphs; the encrypted page.
@@ -1099,7 +1222,7 @@ mod tests {
                 _ => 0,
             };
             assert_eq!((beside.content, alone.content), (read, 0), "{name}");
-            streams_alone(&beside, &alone);
+            reading_alone(&beside, &alone);
             let found: BTreeSet<&str> = (beside.findings.iter())
                 .filter(|f| CONTENT.contains(&f.rule))
                 .map(|f| f.rule.name())
@@ -1123,7 +1246,7 @@ mod tests {
     /// is Latin, so its descriptor's `/CapHeight` is missing; its document
     /// alone reads no stream's data, so there it can't be told, and is
     /// counted beside another's that has no `/ToUnicode`, counted both
-    /// ways: what [`streams_alone`] sets aside, and nothing else moves.
+    /// ways: what [`reading_alone`] sets aside, and nothing else moves.
     #[test]
     fn a_font_s_text_read_beside_its_reading_and_alone() {
         use pdf_structure::fixture::{self, Body, Xref};
@@ -1206,7 +1329,7 @@ mod tests {
         let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
         let (hold, options) = (Hold::All(Made::Merged), Options::default());
         let (beside, alone) = (
-            check(&read, &hold, &options),
+            check_with_reading(&read, &hold, &options),
             check(read.document(), &hold, &options),
         );
         let missing = |report: &Report| -> Vec<Option<ObjectId>> {
@@ -1222,12 +1345,12 @@ mod tests {
         assert_eq!(latin(&beside), [(table.clone(), 1)]);
         assert_eq!(missing(&alone), []);
         assert_eq!(latin(&alone), [(table, 2)]);
-        streams_alone(&beside, &alone);
+        reading_alone(&beside, &alone);
     }
 
     /// A Type 3 font's `/FirstChar` past a byte's codes is found beside its
     /// reading; its document alone gives no glyph's data, so there the font
-    /// isn't read, and nothing of it is found: what [`streams_alone`] sets
+    /// isn't read, and nothing of it is found: what [`reading_alone`] sets
     /// aside, and nothing else moves.
     #[test]
     fn a_type_3_font_read_beside_its_reading_and_alone() {
@@ -1247,7 +1370,7 @@ mod tests {
         let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
         let (hold, options) = (Hold::All(Made::Merged), Options::default());
         let (beside, alone) = (
-            check(&read, &hold, &options),
+            check_with_reading(&read, &hold, &options),
             check(read.document(), &hold, &options),
         );
         let fonts = |report: &Report| -> Vec<(Option<ObjectId>, String)> {
@@ -1262,7 +1385,60 @@ mod tests {
             "{beside}"
         );
         assert_eq!(fonts(&alone), [], "{alone}");
-        streams_alone(&beside, &alone);
+        reading_alone(&beside, &alone);
+    }
+
+    /// An earlier revision's `/Info`, an array that a later revision wrote
+    /// again as a dictionary, is a `type` finding in its trailer beside the
+    /// file's reading, read as that revision was written, and alone is
+    /// counted as not checked: what [`reading_alone`] sets aside, and
+    /// nothing else moves. The fuzz target's checks hold of it under each
+    /// hold, its revision before read as it was written.
+    #[test]
+    fn an_earlier_revisions_object_read_beside_its_reading_and_alone() {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+            "[1 2]",
+        ];
+        let (mut file, previous) = file(&objects, "/Info 4 0 R");
+        let offsets = body(&mut file, &["<< /Title (New) >>"], 4);
+        let at = file.len();
+        table(&mut file, 4, &offsets);
+        file.extend_from_slice(
+            format!(
+                "trailer\n<< /Size 5 /Root 1 0 R /Info 4 0 R /Prev {previous} >>\nstartxref\n{at}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let (hold, options) = (Hold::All(Made::Merged), Options::default());
+        let (beside, alone) = (
+            check_with_reading(&read, &hold, &options),
+            check(read.document(), &hold, &options),
+        );
+        let earlier = |report: &Report| -> Vec<(Rule, String, String)> {
+            let found = report.findings.iter().filter(|f| f.revision.is_some());
+            found
+                .map(|f| (f.rule, f.path.clone(), f.value.clone()))
+                .collect()
+        };
+        let info = (Rule::Type, "trailer 1".to_string(), "[1 2]".to_string());
+        assert_eq!(earlier(&beside), [info], "{beside}");
+        assert_eq!(earlier(&alone), [], "{alone}");
+        let over = |report: &Report| -> usize {
+            let rows = report
+                .unchecked
+                .iter()
+                .filter(|(row, _)| row.why == WRITTEN_OVER);
+            rows.map(|(_, &n)| n).sum()
+        };
+        assert_eq!((over(&beside), over(&alone)), (0, 1));
+        reading_alone(&beside, &alone);
+        for choice in [0u16, 1, 2, 3, 1 << 9] {
+            check_file(&[&choice.to_le_bytes()[..], &file].concat());
+        }
     }
 
     /// The fuzz target's checks on the seeds, each mutated many times as a

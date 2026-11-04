@@ -53,9 +53,14 @@
 //! cross-reference stream's from its number. Each goes on to nothing
 //! indirect and marks nothing it refers to, as what a revision refers to
 //! is the file's where no later revision wrote it again, which the walk
-//! from the trailer checks; and a reference in it to an object a later
-//! revision wrote over or freed isn't followed, as what that revision had
-//! there isn't read: what needs the object is counted as not made.
+//! from the trailer checks. A reference in it to an object a later
+//! revision wrote over or freed is read as that revision had it, from the
+//! file as the revision was written, its bytes up to where it ends, where
+//! the check has the file's reading ([`check_with_reading`]), and is
+//! checked as its row asks; where it hasn't, or the object doesn't read
+//! there, what needs the object is counted as not made. To its predicates
+//! the file's length (`fn:FileSize`) is where its revision ends, where
+//! that's known, as the file was that long once the revision was written.
 //!
 //! Then, of each object stream held, what it holds that it mustn't
 //! ([`Rule::Packed`]): what ISO 32000-2 7.5.7 keeps out of one, and in a
@@ -193,6 +198,7 @@ use pdf_objects::{Resolve, Unreadable};
 use pdf_semantics::date::Date;
 use pdf_structure::write::KeptOut;
 
+use crate::bytes::{ByteSource, WithReading};
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::predicate::{self, Cx, FileCx, Gate, Reference, Since, TOLERANCE, Truth};
@@ -204,9 +210,11 @@ mod color;
 mod content;
 mod fonts;
 mod kept;
+mod reading;
 mod structure;
 mod told;
 
+use reading::{Readings, Reads};
 pub(crate) use structure::Packet;
 
 /// How deeply direct objects may nest in an indirect one before the walk
@@ -1173,8 +1181,46 @@ pub struct Report {
 /// read, and nothing in the report counts it, where [`Report::content`]
 /// says that no content was read.
 /// A trailer the reader couldn't read so is a finding, and the walk starts
-/// from what it made of the file instead.
+/// from what it made of the file instead. What only a file's reading gives,
+/// what an earlier revision had at a number a later one wrote over or
+/// freed, [`check_with_reading`] reads too.
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
+    check_in(source, None, hold, options)
+}
+
+/// [`check`] of `file`, and what only its reading gives a check: in an
+/// earlier revision's trailer (ISO 32000-2, 7.5.6), what that revision had
+/// at a number a later revision wrote over or freed, read from the file as
+/// the revision was written, its bytes up to where it ends
+/// ([`Revision::end`]), as [`Reading::prefix`](crate::bytes::Reading::prefix)
+/// opens them; so its type, and what follows from it, is checked, where
+/// [`check`] counts it as not checked. Each revision's is opened the first
+/// time one of its objects is asked for, and kept for the check: at most
+/// 256 of them, the newest first, their cross-reference entries in all at
+/// most four times what the file's reading may list
+/// ([`Limits::entries`](crate::bytes::Limits::entries)), each under the
+/// file's reading's limits but a 64th of its budget
+/// ([`Limits::budget`](crate::bytes::Limits::budget)), so that what they
+/// decode and keep is at most four times what the file's may. Past either,
+/// for a revision whose end isn't known, and where the object doesn't read
+/// there, it's counted as not checked, as [`check`] counts it.
+pub fn check_with_reading<S: ByteSource>(
+    file: &WithReading<S>,
+    hold: &Hold,
+    options: &Options,
+) -> Report {
+    let readings = Readings::new(file);
+    check_in(file, Some(&readings), hold, options)
+}
+
+/// [`check`] of `source`, with what `reads` gives of what only a file's
+/// reading has, where it's given ([`check_with_reading`]).
+fn check_in(
+    source: &dyn Source,
+    reads: Option<&dyn Reads>,
+    hold: &Hold,
+    options: &Options,
+) -> Report {
     let version = options.version.unwrap_or_else(|| file_version(source));
     let written = source.trailer();
     let mut findings = Vec::new();
@@ -1224,10 +1270,10 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         None => file,
     };
     // The earlier revisions' trailers held, and what each one's predicates
-    // are evaluated in: its trailer, the objects that revision had, and
-    // the file's length, as where a revision ended isn't recorded. Those
-    // before a revision whose numbers aren't known are counted as not
-    // checked, as are a file's whose revisions the reader didn't keep.
+    // are evaluated in: its trailer, the objects that revision had, and its
+    // length, where it ends, else the file's. Those before a revision whose
+    // numbers aren't known are counted as not checked, as are a file's
+    // whose revisions the reader didn't keep.
     let revisions = source.revisions();
     let first = first_known(revisions);
     let (held, untold): (Vec<_>, Vec<_>) =
@@ -1265,12 +1311,14 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
             };
             let as_of = AsOf {
                 source,
+                reads,
                 written: &written_since,
                 revision,
                 marked: &marked,
             };
+            let end = revisions[revision - 1].end.map(|(_, end)| end);
             let file = FileCx::new(dict, version, as_of)
-                .size(source.size())
+                .size(end.or(source.size()))
                 .extensions(&extensions);
             Earlier {
                 revision,
@@ -1308,6 +1356,7 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
         file,
         earlier,
         written: &written_since,
+        reads,
         marked: &marked,
         revision: None,
         containers: Vec::new(),
@@ -1582,24 +1631,31 @@ impl<'a> Resolve<'a> for Objects<'a> {
 
 /// A file's objects as an earlier revision had them, as the predicates of
 /// its trailer resolve a reference: the file's, where no later revision
-/// lists the number, as none wrote it over or freed it; else none, and the
-/// evaluation marked, which can't then be told, as what the revision had
-/// there isn't read.
+/// lists the number, as none wrote it over or freed it; else what the
+/// file's reading gives of the file as that revision was written
+/// ([`Walk::reads`]), and where it gives none, none, and the evaluation
+/// marked, which can't then be told, as what the revision had there isn't
+/// read.
 struct AsOf<'a> {
     source: &'a dyn Source,
+    /// [`Walk::reads`].
+    reads: Option<&'a dyn Reads>,
     /// [`Walk::written`].
     written: &'a HashMap<u32, usize>,
     /// Which revision, counted from the first as 1.
     revision: usize,
-    /// Set when an object written over since is asked for.
+    /// Set when an object written over since is asked for and isn't read.
     marked: &'a Cell<bool>,
 }
 
 impl<'a> Resolve<'a> for AsOf<'a> {
     fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
         if written_since(self.written, self.revision, id) {
-            self.marked.set(true);
-            return None;
+            let earlier = (self.reads).and_then(|reads| reads.earlier(self.revision, id));
+            if earlier.is_none() {
+                self.marked.set(true);
+            }
+            return earlier;
         }
         self.source.get(id).ok()
     }
@@ -1716,8 +1772,9 @@ impl Untold for (Truth, Option<Truth>) {
 }
 
 /// Why a check on an earlier revision's trailer isn't made, when it needs
-/// an object a later revision wrote over or freed.
-const WRITTEN_OVER: &str = "an earlier revision's object, written over or freed since";
+/// an object a later revision wrote over or freed, which isn't read as
+/// that revision had it.
+pub(crate) const WRITTEN_OVER: &str = "an earlier revision's object, written over or freed since";
 
 /// A walk of one file.
 struct Walk<'a> {
@@ -1779,8 +1836,12 @@ struct Walk<'a> {
     /// Only where an earlier trailer is held, or names an encryption
     /// dictionary.
     written: &'a HashMap<u32, usize>,
+    /// What the file's reading gives of each earlier revision's objects at
+    /// those numbers, read from the file as it was written, where the
+    /// check has one ([`check_with_reading`]).
+    reads: Option<&'a dyn Reads>,
     /// Set when an evaluation in an earlier revision's trailer asks for an
-    /// object written over or freed since ([`AsOf`]).
+    /// object written over or freed since that isn't read ([`AsOf`]).
     marked: &'a Cell<bool>,
     /// Which of [`Walk::earlier`] the walk is in the trailer of, while it
     /// visits it: a reference resolves to the object that revision had, a
@@ -2329,8 +2390,9 @@ impl<'a> Walk<'a> {
 
     /// The entry `raw` at `at` in an earlier revision's trailer, `v`'s held
     /// object, on `row` of its table, written at `written`: a reference to
-    /// an object a later revision wrote over or freed, which isn't read, as
-    /// what the revision had there isn't. What doesn't need the object is
+    /// an object a later revision wrote over or freed, which isn't read as
+    /// the revision had it: no reading of the file is given, or none of the
+    /// revision is, or it doesn't read there. What doesn't need the object is
     /// checked, the key's versions and whether it may be a reference (where
     /// the row's types ask the same); its type, and so all that follows
     /// from it, is counted as not made.
@@ -3538,10 +3600,13 @@ impl<'a> Walk<'a> {
     }
 
     /// `raw` with its references followed, at most [`REFERENCES`]: the
-    /// number of the object it's in, if it's an indirect object, and it.
-    /// The number of one the file hasn't, or of the last of a chain too
-    /// long, is the error; in an earlier revision's trailer, of one written
-    /// over or freed since too.
+    /// number of the object it's in, if it's an indirect object, and it. In
+    /// an earlier revision's trailer, each that a later revision wrote over
+    /// or freed is followed in that revision as it was written, where the
+    /// file's reading gives it ([`Walk::reads`]). The number of one the file
+    /// hasn't, or of the last of a chain too long, is the error; in an
+    /// earlier revision's trailer, of one written over or freed since that
+    /// isn't read too.
     fn resolve<'o>(&self, raw: &'o Object) -> Result<(Option<ObjectId>, &'o Object), ObjectId>
     where
         'a: 'o,
@@ -3551,10 +3616,10 @@ impl<'a> Walk<'a> {
             let Value::Ref(to) = *at.value() else {
                 return Ok((id, at));
             };
-            if self.written_since(to) {
-                return Err(to);
-            }
-            at = self.source.get(to).map_err(|_| to)?;
+            at = match self.written_since(to) {
+                true => self.as_it_was(to).ok_or(to)?,
+                false => self.source.get(to).map_err(|_| to)?,
+            };
             id = Some(to);
         }
         Err(id.unwrap_or((0, 0)))
@@ -3564,6 +3629,14 @@ impl<'a> Walk<'a> {
     /// later revision wrote over or freed.
     fn written_since(&self, id: ObjectId) -> bool {
         (self.revision).is_some_and(|i| written_since(self.written, self.earlier[i].revision, id))
+    }
+
+    /// In an earlier revision's trailer, object `id` as that revision had
+    /// it, read from the file as the revision was written, where the file's
+    /// reading gives it ([`Walk::reads`]).
+    fn as_it_was(&self, id: ObjectId) -> Option<&'a Object> {
+        let revision = self.earlier[self.revision?].revision;
+        self.reads?.earlier(revision, id)
     }
 
     /// Whether `key` is exempt from being found unlisted.
@@ -6103,10 +6176,10 @@ mod tests {
     }
 
     /// A finding's object, path, table, key, rule and value.
-    type Walked<'a> = (Option<u32>, &'a str, &'a str, &'a str, Rule, &'a str);
+    pub(super) type Walked<'a> = (Option<u32>, &'a str, &'a str, &'a str, Rule, &'a str);
 
     /// Each finding's object, path, table, key, rule and value.
-    fn walked(report: &Report) -> Vec<Walked<'_>> {
+    pub(super) fn walked(report: &Report) -> Vec<Walked<'_>> {
         (report.findings.iter())
             .map(|f| {
                 let object = f.object.map(|(n, _)| n);
@@ -6541,8 +6614,8 @@ mod tests {
     /// object at its number as given, or in an object stream, and each
     /// section a table or a cross-reference stream listing the numbers
     /// given, those written and not freed in use, the rest free.
-    struct Sections {
-        out: Vec<u8>,
+    pub(super) struct Sections {
+        pub(super) out: Vec<u8>,
         /// Where each object written and not freed starts.
         at: BTreeMap<u32, usize>,
         /// Each object written in an object stream and not freed: the
@@ -6551,7 +6624,7 @@ mod tests {
     }
 
     impl Sections {
-        fn new(version: &str) -> Sections {
+        pub(super) fn new(version: &str) -> Sections {
             Sections {
                 out: format!("%PDF-{version}\n").into_bytes(),
                 at: BTreeMap::new(),
@@ -6560,7 +6633,7 @@ mod tests {
         }
 
         /// Object `n`, `body` as written.
-        fn object(&mut self, n: u32, body: &str) -> &mut Sections {
+        pub(super) fn object(&mut self, n: u32, body: &str) -> &mut Sections {
             self.packed.remove(&n);
             self.at.insert(n, self.out.len());
             let object = format!("{n} 0 obj\n{body}\nendobj\n");
@@ -6572,11 +6645,33 @@ mod tests {
         /// `/Type`, `/N`, `/First` and `/Length`, of `members`, each its
         /// number and as written, a line each, which only a
         /// cross-reference stream lists.
-        fn object_stream(
+        pub(super) fn object_stream(
             &mut self,
             n: u32,
             entries: &str,
             members: &[(u32, &str)],
+        ) -> &mut Sections {
+            self.packing(n, entries, members, false)
+        }
+
+        /// [`Sections::object_stream`] with no more entries, its data
+        /// written in hex through `/ASCIIHexDecode`, which a reader decodes,
+        /// and so counts against its budget.
+        pub(super) fn hex_object_stream(
+            &mut self,
+            n: u32,
+            members: &[(u32, &str)],
+        ) -> &mut Sections {
+            self.packing(n, "", members, true)
+        }
+
+        /// [`Sections::object_stream`], its data in hex where `hex` says.
+        fn packing(
+            &mut self,
+            n: u32,
+            entries: &str,
+            members: &[(u32, &str)],
+            hex: bool,
         ) -> &mut Sections {
             let (mut header, mut data) = (String::new(), String::new());
             for &(m, body) in members {
@@ -6585,10 +6680,18 @@ mod tests {
                 data.push('\n');
             }
             let (count, first) = (members.len(), header.len());
-            let length = first + data.len();
+            let plain = format!("{header}{data}");
+            let (data, filter) = match hex {
+                false => (plain, ""),
+                true => {
+                    let hex: String = plain.bytes().map(|b| format!("{b:02x}")).collect();
+                    (hex + ">", " /Filter /ASCIIHexDecode")
+                }
+            };
+            let length = data.len();
             let body = format!(
-                "<< /Type /ObjStm /N {count} /First {first} /Length {length}{entries} >>\n\
-                 stream\n{header}{data}\nendstream"
+                "<< /Type /ObjStm /N {count} /First {first} /Length {length}{filter}{entries} >>\n\
+                 stream\n{data}\nendstream"
             );
             self.object(n, &body);
             for (i, &(m, _)) in members.iter().enumerate() {
@@ -6599,7 +6702,7 @@ mod tests {
         }
 
         /// Object `n` freed, as the next section lists it.
-        fn free(&mut self, n: u32) -> &mut Sections {
+        pub(super) fn free(&mut self, n: u32) -> &mut Sections {
             self.at.remove(&n);
             self.packed.remove(&n);
             self
@@ -6607,7 +6710,7 @@ mod tests {
 
         /// A table of `numbers`, each a subsection of its own, and its
         /// trailer, `trailer`'s entries; where it starts.
-        fn table(&mut self, numbers: &[u32], trailer: &str) -> usize {
+        pub(super) fn table(&mut self, numbers: &[u32], trailer: &str) -> usize {
             let xref = self.out.len();
             let mut table = String::from("xref\n");
             for &n in numbers {
@@ -6626,7 +6729,7 @@ mod tests {
         /// Cross-reference stream `n`, listing `numbers` and itself, its
         /// rows unfiltered, with `trailer`'s entries, `/Length` among them
         /// when they have one; where it starts.
-        fn stream(&mut self, n: u32, numbers: &[u32], trailer: &str) -> usize {
+        pub(super) fn stream(&mut self, n: u32, numbers: &[u32], trailer: &str) -> usize {
             let xref = self.out.len();
             self.at.insert(n, xref);
             let mut listed = numbers.to_vec();
@@ -6661,7 +6764,7 @@ mod tests {
         }
 
         /// `startxref`, giving `at`, and `%%EOF`.
-        fn end(&mut self, at: usize) -> &mut Sections {
+        pub(super) fn end(&mut self, at: usize) -> &mut Sections {
             let end = format!("startxref\n{at}\n%%EOF\n");
             self.out.extend_from_slice(end.as_bytes());
             self
@@ -6669,14 +6772,14 @@ mod tests {
     }
 
     /// A catalog, object 1, of an empty page tree, object 2.
-    const CATALOG: &str = "<< /Type /Catalog /Pages 2 0 R >>";
-    const PAGES: &str = "<< /Type /Pages /Kids [] /Count 0 >>";
+    pub(super) const CATALOG: &str = "<< /Type /Catalog /Pages 2 0 R >>";
+    pub(super) const PAGES: &str = "<< /Type /Pages /Kids [] /Count 0 >>";
 
     /// What an empty page tree, object 2 of [`bare`]'s documents and of
     /// [`PAGES`]' files, is found as ([`walked`]): a tree of no pages (ISO
     /// 32000-2, 7.7.3.2, erratum 271), which a test that holds every
     /// finding of one expects.
-    const NO_PAGES: Walked = (
+    pub(super) const NO_PAGES: Walked = (
         Some(2),
         "Root/Pages",
         "PageTreeNodeRoot",
@@ -6687,7 +6790,7 @@ mod tests {
 
     /// The checks not made, each its column, why, table and key, and how
     /// many.
-    fn not_made(report: &Report) -> Vec<(&str, &str, &str, &str, usize)> {
+    pub(super) fn not_made(report: &Report) -> Vec<(&str, &str, &str, &str, usize)> {
         (report.unchecked.iter())
             .map(|(u, &n)| {
                 (
@@ -6705,8 +6808,9 @@ mod tests {
     /// `trailer K`, K its revision counted from the first, its findings in
     /// no object: one that lacks `/Size`, held as merged with every object
     /// however they're held, and with some objects held not at all; and
-    /// one whose `/Prev` is past the file's end, which its predicates read
-    /// as the file's length.
+    /// one whose `/Prev` is past the file's end, and so past where its
+    /// revision ends, which its predicates read as the file's length
+    /// (`fn:FileSize`).
     #[test]
     fn an_earlier_revisions_trailer_is_checked_from_its_revision() {
         let mut file = Sections::new("1.7");
@@ -6867,11 +6971,12 @@ mod tests {
     }
 
     /// A reference in an earlier revision's trailer to an object a later
-    /// revision wrote over or freed isn't followed, as what that revision
-    /// had there isn't read: its type, and what follows from it, is counted
-    /// as not made, never a finding, and what needs no object is checked,
-    /// as that it be direct. One to an object no revision lists doesn't
-    /// resolve, as it didn't then.
+    /// revision wrote over or freed isn't followed by [`check`], which has
+    /// no reading of the file to read what that revision had there: its
+    /// type, and what follows from it, is counted as not made, never a
+    /// finding, and what needs no object is checked, as that it be direct.
+    /// One to an object no revision lists doesn't resolve, as it didn't
+    /// then.
     #[test]
     fn a_reference_in_an_earlier_trailer_to_an_object_written_over_since_isnt_followed() {
         let mut file = Sections::new("1.7");
@@ -6937,7 +7042,7 @@ mod tests {
     /// that the information dictionary have `/ModDate` where the catalog
     /// has `/PieceInfo`, reads its catalog and information dictionary, the
     /// update's not; and where a later revision wrote over the catalog, it
-    /// can't be told, counted as not made.
+    /// can't be told by [`check`], counted as not made.
     #[test]
     fn an_earlier_trailers_predicates_read_the_objects_its_revision_had() {
         let catalog =

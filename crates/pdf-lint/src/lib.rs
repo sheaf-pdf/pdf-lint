@@ -37,6 +37,11 @@
 //! read through them too: which fonts have Latin characters, read before
 //! the walk, that a descriptor's `/CapHeight` is required of, and what a
 //! DeviceN space's or a halftone's colorants' names say of them.
+//!
+//! Each earlier revision's trailer is checked as an incremental update left
+//! it, and given the file's reading ([`check_with_reading`]), what it
+//! refers to that a later revision wrote over or freed is read as that
+//! revision had it, from the file as the revision was written.
 
 pub mod allowance;
 pub mod check;
@@ -46,7 +51,7 @@ pub mod fuzz;
 pub use allowance::{Allowance, AllowanceError, Allowances};
 pub use check::{
     Class, Exempt, ExemptError, Finding, Hold, HoldError, Made, Options, Report, Rule, Unchecked,
-    Unlisted, UnlistedIn, check, file_version,
+    Unlisted, UnlistedIn, check, check_with_reading, file_version,
 };
 // `grammar` is the module and the function both.
 pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, grammar, use_model};

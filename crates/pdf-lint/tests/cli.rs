@@ -2098,6 +2098,103 @@ fn an_earlier_revisions_trailer_isnt_the_updates() {
     assert_eq!(against, last);
 }
 
+/// A cross-reference stream, object `n`, of `rows`, each an object's
+/// number and where it starts, and itself, at the end of `out`, under
+/// `trailer`'s entries, then `startxref` and `%%EOF`; where it starts.
+fn xref_stream(out: &mut Vec<u8>, n: u32, rows: &[(u32, usize)], trailer: &str) -> usize {
+    let at = out.len();
+    let mut listed = rows.to_vec();
+    listed.push((n, at));
+    let index: String = listed.iter().map(|(m, _)| format!("{m} 1 ")).collect();
+    let data: Vec<u8> = (listed.iter())
+        .flat_map(|&(_, offset)| [&[1][..], &(offset as u32).to_be_bytes(), &[0, 0]].concat())
+        .collect();
+    let dict = format!(
+        "<< /Type /XRef /Size 5 /W [1 4 2] /Index [{index}] /Root 1 0 R{trailer} /Length {} >>",
+        data.len()
+    );
+    out.extend_from_slice(format!("{n} 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&data);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{at}\n%%EOF\n").as_bytes());
+    at
+}
+
+/// The revision an update follows is read as it was written, its bytes up
+/// to where it ends, its own length to its predicates (`fn:FileSize`): a
+/// cross-reference stream whose `/Prev` is past where its revision ends,
+/// though not past the file's end, is a `value` finding in the file
+/// checked whole, in that revision's trailer, from the stream's number;
+/// and `--last-update`, where the update writes the stream's number again
+/// and so holds it, carries it from the revision before, where it's the
+/// trailer.
+#[test]
+fn an_updates_revision_before_is_read_as_it_was_written() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let rotated = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Rotate 90 /Resources << >> >>";
+    // The first revision, its /Prev five digits, and where it ends; then a
+    // comment, and the update's page.
+    let first = |prev: usize| {
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut rows = Vec::new();
+        for (n, body) in [(1, CATALOG), (2, PAGES), (3, page)] {
+            rows.push((n, out.len()));
+            out.extend_from_slice(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+        }
+        let at = xref_stream(&mut out, 4, &rows, &format!(" /Prev {prev:05}"));
+        let end = out.len();
+        out.extend_from_slice(b"% the first revision's /Prev\n");
+        (out, at, end)
+    };
+    let (_, _, end) = first(99999);
+    // Three bytes into the comment, which no section starts at.
+    let prev = end + 3;
+    let (mut file, at, again) = first(prev);
+    assert_eq!(again, end);
+    let three = file.len();
+    file.extend_from_slice(format!("3 0 obj\n{rotated}\nendobj\n").as_bytes());
+    xref_stream(&mut file, 4, &[(3, three)], &format!(" /Prev {at}"));
+    let path = written(&dir, "prev-past.pdf", &file);
+    let path = path.to_str().unwrap();
+
+    // Whole: the first revision's /Prev, from the stream's number, and
+    // the section it gives, which doesn't read.
+    let out = run(&["--format", "json", path]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let found: Vec<_> = (report["findings"].as_array().unwrap().iter())
+        .map(|f| {
+            (
+                f["rule"].clone(),
+                f["table"].clone(),
+                f["key"].clone(),
+                f["path"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (
+                json!("value"),
+                json!("XRefStream"),
+                json!("Prev"),
+                json!("4 0 R")
+            ),
+            (json!("reader"), json!("-"), json!("-"), json!("-")),
+        ],
+        "{report}"
+    );
+    let value = format!("{prev} (not one of fn:Eval((@Prev>=0) && (@Prev<=fn:FileSize())))");
+    assert_eq!(report["findings"][0]["value"], json!(value));
+    // The update's: both carried from the revision before, read as it was
+    // written, whose own /Prev is past its end too.
+    let out = run(&["--last-update", "--format", "json", path]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["findings"], json!([]), "{report}");
+    assert_eq!(report["carried"], json!(2), "{report}");
+    assert_eq!(report["tables"]["XRefStream"], json!(2), "{report}");
+}
+
 #[test]
 fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
     let dir = folder();

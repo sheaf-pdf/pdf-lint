@@ -22,7 +22,8 @@ use pdf_lint::bytes::WithReading;
 use pdf_lint::pdf_crypt::Password;
 use pdf_lint::{
     Allowances, Class, Document, Encryption, Exempt, Finding, Grammar, Hold, Made, ObjectId,
-    Options, Report, Source, Span, UnlistedIn, Version, bytes, check, file_version, use_model,
+    Options, Report, Source, Span, UnlistedIn, Version, bytes, check_with_reading, file_version,
+    use_model,
 };
 use serde::Serialize;
 use serde_json::ser::{CharEscape, CompactFormatter, Formatter};
@@ -319,7 +320,11 @@ impl Baseline {
             let mut options = self.options.clone();
             options.version = Some(version);
             options.paths = true;
-            Arc::new(check(&self.file, &Hold::All(Made::Merged), &options))
+            Arc::new(check_with_reading(
+                &self.file,
+                &Hold::All(Made::Merged),
+                &options,
+            ))
         });
         Arc::clone(report)
     }
@@ -705,7 +710,7 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
     options.exempt = exempt.clone();
     let (report, against) = match (args.last_update, &doc.document().update) {
         (false, _) => {
-            let report = check(&doc, hold, &options);
+            let report = check_with_reading(&doc, hold, &options);
             // An incremental update of the baseline begins with its bytes.
             let against = match baseline {
                 Some(b) if data.starts_with(b.file.reading().source()) => {
@@ -721,18 +726,29 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             return unread(path, why, args.json);
         }
         (true, Some(update)) => {
+            // The revision before: its bytes up to where it ends, as it was
+            // written, else the file as of its section.
             let password = password(args);
-            let mut as_of = bytes::Options::DEFAULT;
-            as_of.section = Some(update.previous);
-            let previous = with_reading(&data[..], password.as_slice(), &as_of);
+            let revisions = &doc.document().revisions;
+            let end = (revisions.iter().find(|r| r.at == update.previous)).and_then(|r| r.end);
+            let previous = match end {
+                Some((_, end)) => {
+                    with_reading(&data[..end], password.as_slice(), &bytes::Options::DEFAULT)
+                }
+                None => {
+                    let mut as_of = bytes::Options::DEFAULT;
+                    as_of.section = Some(update.previous);
+                    with_reading(&data[..], password.as_slice(), &as_of)
+                }
+            };
             let made = |id| match previous.document().contains(id) {
                 true => Made::Merged,
                 false => Made::Built,
             };
             let hold = Hold::Only(update.objects.iter().map(|&id| (id, made(id))).collect());
             let at_version = against(args, Some(checked_as));
-            let before = check(&previous, &Hold::All(Made::Merged), &at_version);
-            let report = check(&doc, &hold, &options);
+            let before = check_with_reading(&previous, &Hold::All(Made::Merged), &at_version);
+            let report = check_with_reading(&doc, &hold, &options);
             (report, Against::Number(Arc::new(before)))
         }
     };

@@ -7,7 +7,9 @@ use std::process::Command;
 
 use pdf_lint::bytes::{self, WithReading, read_opened};
 use pdf_lint::pdf_crypt::{Encoding, Password};
-use pdf_lint::{Document, Encryption, Form, Hold, Made, Object, Options, Str, Value, check};
+use pdf_lint::{
+    Document, Encryption, Form, Hold, Made, Object, Options, Str, Value, check, check_with_reading,
+};
 
 /// Each fixture's name, whether its dictionaries are in object streams,
 /// and whether it's encrypted, with the empty user password and `owner`
@@ -90,8 +92,8 @@ fn each_file_qpdf_wrote_reads_whole_by_the_reader_alone() {
 
 /// The file whose dictionaries are in object streams, read by the reader
 /// alone, checks clean, its text annotation checked once, and its object
-/// stream too; and read beside its reading, its content too, its
-/// annotation's appearance.
+/// stream too; and checked beside its reading, as the command line checks
+/// it, its content too, its annotation's appearance.
 #[test]
 fn the_compressed_file_checks_clean() {
     let data = std::fs::read(fixture("qpdf-compressed")).unwrap();
@@ -101,7 +103,7 @@ fn the_compressed_file_checks_clean() {
     assert_eq!(report.checked.get("AnnotText"), Some(&1), "{report}");
     assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
     let opened = WithReading::new(&data[..], &[], &bytes::Options::DEFAULT).unwrap();
-    let report = check(&opened, &Hold::All(Made::Merged), &Options::default());
+    let report = check_with_reading(&opened, &Hold::All(Made::Merged), &Options::default());
     assert_eq!(
         (&report.findings[..], report.content),
         (&[][..], 1),
