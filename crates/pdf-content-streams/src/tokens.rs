@@ -314,6 +314,7 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
     /// The next token, as [`next`](Iterator::next) gives it, but at the
     /// end with the white-space after the last token not yet looked at
     /// for faults ([`finish`](Tokens::finish)).
+    #[inline]
     pub(crate) fn step(&mut self) -> Option<Result<(Range<usize>, Tok<'a>), Error>> {
         if self.done {
             return None;
@@ -336,6 +337,7 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
         &mut self.sink
     }
 
+    #[inline]
     fn token(&mut self) -> Option<Result<(Range<usize>, Tok<'a>), Error>> {
         let s = self.s;
         let (r, kind) = match next_raw(s, self.at, self.lim.depth) {
