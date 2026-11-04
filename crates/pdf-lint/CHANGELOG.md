@@ -62,6 +62,7 @@
 - **An earlier revision's reading dropped after its walk.** Each earlier revision's reading, opened the first time its trailer's walk asks for an object it had, is dropped once that walk is over, what was asked of it kept for the check, where every one was kept to the check's end; it's never opened again, so the caps on how many are opened and what they list count as before. A file of many revisions checks in less memory. Every report is unchanged.
 - **The objects read with fewer tokens.** pdf-objects' parser reads an array's element from the token the array looked at for its `]`, and looks for a reference's `R` only after two integers, so a whole read of a file tokenizes less. Every report is unchanged.
 - **Numbers read by their bytes.** pdf-tokenizer reads an integer's digits itself, and a short decimal by one exact division, where both took the word's text, so the reader and the content checks read numbers faster. Every report is unchanged.
+- **A stream's object read once.** Each content stream and other stream the check decodes is taken from the document it reads, where the reading read its object again and kept it beside the document's, so a file of many pages is checked in less memory and time. Every report is unchanged.
 
 ## 0.2.0 (unreleased)
 

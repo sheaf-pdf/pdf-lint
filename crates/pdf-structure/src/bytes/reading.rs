@@ -910,24 +910,69 @@ impl<S: ByteSource> Reading<S> {
 
     /// [`Reading::decoded`], each filter's output up to `limit` bytes.
     fn decoded_up_to(&self, id: ObjectId, limit: usize) -> Result<Vec<u8>, Error> {
+        self.decoded_as(id, None, limit)
+    }
+
+    /// [`Reading::decoded_within`], the stream `object`, where it's given:
+    /// what [`Reading::get`] gives of `id`, as a document read whole from
+    /// this reading holds it, read again otherwise and kept.
+    pub(super) fn decoded_within_as<'f>(
+        &'f self,
+        id: ObjectId,
+        object: Result<&'f Object, &Unread>,
+        limit: usize,
+    ) -> Result<Vec<u8>, Error> {
+        let limit = limit.min(self.reader.limits.stream);
+        match self.decoded_as(id, Some(object), limit) {
+            // Only a stream with no filters comes back longer than its limit.
+            Ok(mut data) if data.len() > limit => {
+                data.truncate(limit);
+                data.shrink_to_fit();
+                Err(Error::Decode(pdf_filters::Error {
+                    data,
+                    faults: vec![(0, pdf_filters::Fault::Limit)],
+                }))
+            }
+            decoded => decoded,
+        }
+    }
+
+    /// [`Reading::decoded_up_to`], the stream `object` where it's given.
+    fn decoded_as<'f>(
+        &'f self,
+        id: ObjectId,
+        object: Option<Result<&'f Object, &Unread>>,
+        limit: usize,
+    ) -> Result<Vec<u8>, Error> {
         match self.source.whole() {
             Some(file) => {
-                let Ok(decoded) = self.decoded_in(InMemory(file), id, limit);
+                let Ok(decoded) = self.decoded_in(InMemory(file), id, object, limit);
                 decoded
             }
-            None => (self.decoded_in(self.by_position(), id, limit)).map_err(Error::Io)?,
+            None => (self.decoded_in(self.by_position(), id, object, limit)).map_err(Error::Io)?,
         }
     }
 
     /// Stream `id`, and its data, as [`Reading::data`] gives it, of `file`.
     fn data_in<'f, F: Bytes<'f>>(&'f self, file: F, id: ObjectId) -> Result<Handed<'f>, F::Error> {
+        let object = self.reader.get(file, id)?;
+        self.data_of(file, id, object.as_ref().map(|o| *o))
+    }
+
+    /// [`Reading::data_in`], the stream `object`, what reading `id` gives.
+    fn data_of<'f, F: Bytes<'f>>(
+        &'f self,
+        file: F,
+        id: ObjectId,
+        object: Result<&'f Object, &Unread>,
+    ) -> Result<Handed<'f>, F::Error> {
         let reader = &self.reader;
-        let stream = match reader.get(file, id)? {
+        let stream = match object {
             Ok(object) => match object.value() {
                 Value::Stream(stream) => stream,
                 _ => return Ok(Err(Error::NotAStream { id })),
             },
-            Err(why) => return Ok(Err(Error::Unread(why))),
+            Err(why) => return Ok(Err(Error::Unread(why.clone()))),
         };
         let crypt = match reader.crypt(file, id, &stream.dict)? {
             Ok(crypt) => crypt,
@@ -953,14 +998,19 @@ impl<S: ByteSource> Reading<S> {
         })
     }
 
-    /// [`Reading::decoded_up_to`], of `file`.
+    /// [`Reading::decoded_as`], of `file`.
     fn decoded_in<'f, F: Bytes<'f>>(
         &'f self,
         file: F,
         id: ObjectId,
+        object: Option<Result<&'f Object, &Unread>>,
         limit: usize,
     ) -> Result<Result<Vec<u8>, Error>, F::Error> {
-        let (stream, data) = match self.data_in(file, id)? {
+        let handed = match object {
+            Some(object) => self.data_of(file, id, object)?,
+            None => self.data_in(file, id)?,
+        };
+        let (stream, data) = match handed {
             Ok(read) => read,
             Err(error) => return Ok(Err(error)),
         };

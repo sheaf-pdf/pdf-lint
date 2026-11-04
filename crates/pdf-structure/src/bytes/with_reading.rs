@@ -24,10 +24,11 @@ use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread, 
 /// ([`Reading::decoded_within`]), decrypted in an encrypted file it opened
 /// and decoded through the stream's filters, at most the limit asked for or
 /// [`Limits::stream`](super::Limits::stream), whichever is less. What's
-/// decoded isn't kept, nor counted against the reading's budget; the stream
-/// itself is kept by the reading, as [`Reading::get`] keeps an object,
-/// beside the document's copy of it. It isn't its document: what takes a
-/// `&Document` is given that, which gives no stream's data.
+/// decoded isn't kept, nor counted against the reading's budget; and the
+/// stream is the document's, which is what the reading reads at its number,
+/// so the reading doesn't read it again, nor keep a copy of it beside the
+/// document's. It isn't its document: what takes a `&Document` is given
+/// that, which gives no stream's data.
 ///
 /// ```
 /// use pdf_structure::Source;
@@ -137,7 +138,11 @@ impl<S: ByteSource> Source for WithReading<S> {
     }
 
     fn decoded_within(&self, id: ObjectId, limit: usize) -> Option<Result<Vec<u8>, Error>> {
-        Some(self.reading.decoded_within(id, limit))
+        let object = Source::get(&self.document, id);
+        Some(
+            self.reading
+                .decoded_within_as(id, object.as_ref().map(|o| *o), limit),
+        )
     }
 }
 
@@ -205,13 +210,25 @@ mod tests {
             assert_eq!(answers(&opened), answers(opened.document()), "{name}");
             let reading = Reading::open_with(&file[..], &passwords, &Options::DEFAULT).unwrap();
             let alone = opened.document();
-            for id in Source::ids(&opened) {
+            let ids = Source::ids(&opened);
+            // And what it doesn't list: a number past them all, and one of
+            // its objects at another generation.
+            let unlisted = [(u32::MAX, 0)].into_iter();
+            let others = ids.first().map(|&(n, g)| (n, g.wrapping_add(1)));
+            for id in ids.iter().copied().chain(unlisted).chain(others) {
                 assert!(alone.decoded_within(id, STREAM).is_none(), "{name}");
+                // Decoding a stream keeps nothing of it in the reading.
+                let kept = opened.reading().record(id).is_some();
                 for limit in [STREAM, 1] {
                     let decoded = opened.decoded_within(id, limit).map(shown);
                     let read = shown(reading.decoded_within(id, limit));
                     assert_eq!(decoded, Some(read), "{name}: {id:?} within {limit}");
                 }
+                assert_eq!(
+                    opened.reading().record(id).is_some(),
+                    kept,
+                    "{name}: {id:?}"
+                );
                 streams += usize::from(matches!(
                     opened.get(id).map(Object::value),
                     Ok(pdf_objects::object::Value::Stream(_))
