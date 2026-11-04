@@ -45,38 +45,70 @@ pub(crate) fn tokenizer(s: &[u8], at: usize) -> Tokenizer<'_, Pdfium> {
 
 /// The token from `from` on, past white-space and comments; None at the
 /// end. An array or a dictionary is read as PDFium reads it ([`walk`]),
-/// skimming what it holds where PDFium judges nothing of it.
+/// skimming what it holds where PDFium judges nothing of it; a token that
+/// opens neither is read as the walk reads one where an operand is,
+/// without entering it.
 pub(crate) fn next_raw(
     s: &[u8],
     from: usize,
     depth: usize,
 ) -> Option<Result<(Range<usize>, Raw), Error>> {
-    raw(s, from, depth, true)
+    raw(s, from, depth, true, true)
 }
 
-/// [`next_raw`], an array read by walking every token it holds, not by
-/// skimming them: what the fuzz body holds the skim to.
+/// [`next_raw`], every token read by the walk: an array's by walking every
+/// token it holds, not by skimming them, and one that opens nothing by
+/// entering the walk, not before it. What the fuzz body holds the skim and
+/// the shortcut to, from where each token is read, so the tokens and every
+/// fault they tell are the walk's.
 #[cfg(any(test, fuzzing))]
 pub(crate) fn next_raw_walked(
     s: &[u8],
     from: usize,
     depth: usize,
 ) -> Option<Result<(Range<usize>, Raw), Error>> {
-    raw(s, from, depth, false)
+    raw(s, from, depth, false, false)
 }
 
 /// [`next_raw`], skimming an array's tokens where PDFium judges nothing
-/// of them if `skim`.
+/// of them if `skim`, and reading a token that opens nothing before the
+/// walk if `leaf`.
 fn raw(
     s: &[u8],
     from: usize,
     depth: usize,
     skim: bool,
+    leaf: bool,
 ) -> Option<Result<(Range<usize>, Raw), Error>> {
     let mut tokens = tokenizer(s, from);
     let token = tokens.next_significant()?;
     if token.kind == Kind::Keyword && !matches!(token.bytes, b"true" | b"false" | b"null") {
         return Some(Ok((token.range(), Raw::Op)));
+    }
+    // A token that opens nothing, read here as the walk reads one at the
+    // top: a string that doesn't end an error where it starts, an object
+    // that holds none an object, and a closer, a brace or `>` a word that's
+    // none. Only an array or a dictionary is walked.
+    let operand = |object| Some(Ok((token.range(), Raw::Operand { object })));
+    match token.kind {
+        _ if !leaf => {}
+        Kind::ArrayOpen | Kind::DictOpen => {}
+        Kind::String { closed: false } => {
+            let (at, kind) = (token.start, ErrorKind::String);
+            return Some(Err(Error { at, kind }));
+        }
+        Kind::HexString { closed: false } => {
+            let (at, kind) = (token.start, ErrorKind::HexString);
+            return Some(Err(Error { at, kind }));
+        }
+        // `true`, `false` and `null` the only keywords left.
+        Kind::Integer
+        | Kind::Real
+        | Kind::Name
+        | Kind::String { .. }
+        | Kind::HexString { .. }
+        | Kind::Keyword => return operand(true),
+        _ => return operand(false),
     }
     Some(
         walk_from(s, token, tokens, TOP, depth, skim, &mut ()).map(|read| {

@@ -1974,13 +1974,21 @@ fn number(operand: &Operand) {
 /// array, dictionary or string it starts as one, and as the name it is,
 /// decoded, when it's one; an inline image is `BI` to `EI`, its data
 /// inside it and under the cap. Each token's range is mapped to a span of
-/// the streams and back.
+/// the streams and back. And each, or its error, read from where it's read
+/// as a walk of every token reads it, is the same: a token that opens
+/// nothing, read before the walk, and an array's tokens, skimmed, are the
+/// walk's, so every fault the tokens tell of them is too.
 fn tiled<'a>(content: &'a Concat, res: &ResCx, limits: &Limits) -> Read<'a> {
     let s = content.bytes();
     let mut at = 0;
     let mut read = Vec::new();
     let mut lexed = content.tokens(res, limits);
     for token in lexed.by_ref() {
+        // Each token, or its error, as the walk reads it from where it's
+        // read: the shortcut for one that opens nothing, and the skim, the
+        // walk's.
+        let walked = next_raw_walked(s, at, limits.depth);
+        assert_eq!(next_raw(s, at, limits.depth), walked, "from {at}");
         let Ok((r, tok)) = &token else {
             assert!(lexed.next().is_none(), "nothing after an error");
             read.push(token);
