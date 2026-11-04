@@ -368,18 +368,36 @@ pub enum NumberError {
 /// The integer `bytes` are written as: digits, with an optional sign (ISO
 /// 32000-2, 7.3.3).
 pub fn integer(bytes: &[u8]) -> Result<i64, NumberError> {
-    if word(bytes) != Kind::Integer {
+    let (negative, digits) = match bytes {
+        [b'-', digits @ ..] => (true, digits),
+        [b'+', digits @ ..] => (false, digits),
+        digits => (false, digits),
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
         return Err(NumberError::NotANumber);
     }
-    let text = core::str::from_utf8(bytes).map_err(|_| NumberError::NotANumber)?;
-    // Only digits and a sign are left, so a failure is an overflow.
-    text.parse().map_err(|_| NumberError::Overflow)
+    // Toward the sign, so that `i64::MIN`, one further from 0 than
+    // `i64::MAX`, is read; past either end, an overflow.
+    let mut value: i64 = 0;
+    for &b in digits {
+        let digit = i64::from(b - b'0');
+        value = (value.checked_mul(10))
+            .and_then(|v| match negative {
+                true => v.checked_sub(digit),
+                false => v.checked_add(digit),
+            })
+            .ok_or(NumberError::Overflow)?;
+    }
+    Ok(value)
 }
 
 /// The number `bytes` are written as, an integer or a real, as an `f64`
 /// (ISO 32000-2, 7.3.3). Forms Rust reads but PDF doesn't write, such as
 /// `1e5` or `inf`, aren't numbers.
 pub fn number(bytes: &[u8]) -> Result<f64, NumberError> {
+    if let Some(value) = short_decimal(bytes) {
+        return Ok(value);
+    }
     if !matches!(word(bytes), Kind::Integer | Kind::Real) {
         return Err(NumberError::NotANumber);
     }
@@ -390,6 +408,44 @@ pub fn number(bytes: &[u8]) -> Result<f64, NumberError> {
     } else {
         Err(NumberError::Overflow)
     }
+}
+
+/// The powers of ten an `f64` holds exactly, 10^0 to 10^22.
+const TENS: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
+/// The number `bytes` are written as, where it's short enough to read
+/// exactly by one division: digits, at most one point among them and an
+/// optional sign, the digits read as an integer no more than 2^53 and at
+/// most 22 of them after the point. Both that integer and the power of ten
+/// it's divided by are then `f64`s exactly, and the quotient is rounded
+/// once, to the nearest, as a decimal's reading is: the `f64` the decimal
+/// is read as. None otherwise, for [`number`]'s whole reading.
+fn short_decimal(bytes: &[u8]) -> Option<f64> {
+    let (negative, rest) = match bytes {
+        [b'-', rest @ ..] => (true, rest),
+        [b'+', rest @ ..] => (false, rest),
+        rest => (false, rest),
+    };
+    let (mut digits, mut value, mut point) = (0, 0u64, None);
+    for &b in rest {
+        match b {
+            b'0'..=b'9' if digits < 19 => {
+                value = value * 10 + u64::from(b - b'0');
+                digits += 1;
+            }
+            b'.' if point.is_none() => point = Some(digits),
+            _ => return None,
+        }
+    }
+    let after = digits - point.unwrap_or(digits);
+    if digits == 0 || value > 1 << 53 || after >= TENS.len() {
+        return None;
+    }
+    let value = value as f64 / TENS[after];
+    Some(if negative { -value } else { value })
 }
 
 impl<'a> Token<'a> {
@@ -469,6 +525,8 @@ impl<'a> Token<'a> {
 mod tests {
     extern crate std;
 
+    use std::format;
+    use std::vec;
     use std::vec::Vec;
 
     use crate::decode::{self, How, NumberError, Piece, Pieces};
@@ -718,6 +776,137 @@ mod tests {
         huge[399] = b'.';
         assert_eq!(token(&huge).number(), Err(NumberError::Overflow));
         assert_eq!(token(b"/Name").number(), Err(NumberError::NotANumber));
+    }
+
+    /// [`decode::integer`] as it was: by the tokenizer's word, then Rust's
+    /// reading of the text.
+    fn integer_by_text(bytes: &[u8]) -> Result<i64, NumberError> {
+        if crate::tokenizer::word(bytes) != crate::Kind::Integer {
+            return Err(NumberError::NotANumber);
+        }
+        let text = core::str::from_utf8(bytes).map_err(|_| NumberError::NotANumber)?;
+        text.parse().map_err(|_| NumberError::Overflow)
+    }
+
+    /// [`decode::number`] as it was, every number by Rust's reading.
+    fn number_by_text(bytes: &[u8]) -> Result<f64, NumberError> {
+        if !matches!(
+            crate::tokenizer::word(bytes),
+            crate::Kind::Integer | crate::Kind::Real
+        ) {
+            return Err(NumberError::NotANumber);
+        }
+        let text = core::str::from_utf8(bytes).map_err(|_| NumberError::NotANumber)?;
+        let value: f64 = text.parse().map_err(|_| NumberError::NotANumber)?;
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(NumberError::Overflow)
+        }
+    }
+
+    /// `bytes` read both ways, the same: the integer, and the number to the
+    /// bit (so `-0` is told from `0`).
+    fn read_alike(bytes: &[u8]) {
+        assert_eq!(decode::integer(bytes), integer_by_text(bytes), "{bytes:?}");
+        let bits = |n: Result<f64, NumberError>| n.map(f64::to_bits);
+        assert_eq!(
+            bits(decode::number(bytes)),
+            bits(number_by_text(bytes)),
+            "{bytes:?}"
+        );
+    }
+
+    /// Every word of up to six bytes of digits, signs, points, `e`, a
+    /// letter and a space reads as Rust read its text; and the edges:
+    /// `i64`'s ends and past them, 2^53 and either side of it, 19 and 20
+    /// digits, 22 and 23 after the point, with each sign, long words, and
+    /// 20,000 words of up to 30 bytes made by xorshift from a seed.
+    #[test]
+    fn a_number_read_by_its_bytes_is_what_its_text_reads_as() {
+        const ALPHABET: &[u8] = b"0159.+-ex ";
+        let mut word = Vec::new();
+        let mut count = 0;
+        fn each(word: &mut Vec<u8>, left: usize, count: &mut usize) {
+            read_alike(word);
+            *count += 1;
+            if left == 0 {
+                return;
+            }
+            for &b in ALPHABET {
+                word.push(b);
+                each(word, left - 1, count);
+                word.pop();
+            }
+        }
+        each(&mut word, 6, &mut count);
+        assert_eq!(count, 1_111_111);
+        let edges = [
+            "9223372036854775807",
+            "9223372036854775808",
+            "-9223372036854775808",
+            "-9223372036854775809",
+            "00000000000000000000009",
+            "9007199254740992",
+            "9007199254740993",
+            "9007199254740991",
+            "900719925474099.2",
+            "900719925474099.3",
+            ".9007199254740993",
+            "1234567890123456789",
+            "12345678901234567890",
+            "1.234567890123456789",
+            "0.0000000000000000000001",
+            "0.00000000000000000000001",
+            ".1234567890123456789012",
+            "1.2345678901234567890123",
+            "0.1",
+            "0.3",
+            "2.675",
+            "0",
+            "-0",
+            "-0.",
+            "-.0",
+            "+0.0",
+            "1.",
+            ".",
+            "-",
+            "+.",
+            "--1",
+            "1..",
+            "1.2.3",
+        ];
+        for edge in edges {
+            for sign in ["", "-", "+"] {
+                read_alike(format!("{sign}{edge}").as_bytes());
+            }
+        }
+        for len in [300, 308, 309, 310, 400] {
+            let mut long = vec![b'9'; len];
+            read_alike(&long);
+            long[len / 2] = b'.';
+            read_alike(&long);
+        }
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..20_000 {
+            let len = (next() % 31) as usize;
+            let word: Vec<u8> = (0..len)
+                .map(|_| match next() % 16 {
+                    0 => b'.',
+                    1 => b'-',
+                    2 => b'+',
+                    3 => b'e',
+                    _ => b'0' + (next() % 10) as u8,
+                })
+                .collect();
+            read_alike(&word);
+        }
     }
 
     /// Each error says what the bytes aren't, word for word.
