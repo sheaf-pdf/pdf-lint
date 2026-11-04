@@ -1334,7 +1334,7 @@ mod tests {
             // its revision had it, none counted as not checked.
             let linearized = match name {
                 "linearized" => Some(Linearized::Holds),
-                "linearized-updated" => Some(Linearized::Updated),
+                "linearized-updated" => Some(Linearized::Updated { held: true }),
                 _ => None,
             };
             assert_eq!(beside.linearized, linearized, "{name}: {beside}");

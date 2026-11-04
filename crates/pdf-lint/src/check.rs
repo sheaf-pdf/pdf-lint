@@ -635,7 +635,9 @@ pub enum Rule {
     /// A value its row's SpecialCase comes to false for.
     Special,
     /// A held object the walk never reached, and not under a key the
-    /// model doesn't list.
+    /// model doesn't list, nor a linearized file's hint stream, which its
+    /// linearization dictionary names by where it's written (ISO 32000-2,
+    /// F.3.6).
     Unreached,
     /// A reference to an object the file hasn't, or a trailer the file's
     /// newest cross-reference section doesn't give.
@@ -1010,37 +1012,38 @@ pub enum Rule {
     /// pdf-linearize's check judges it from the file's reading, where the
     /// check has one ([`check_with_reading`]): a file whose first object, a
     /// dictionary, not a stream, with `/Linearized`, starting within 1,024
-    /// bytes of the header, says it's linearized, and whose `/Linearized`
-    /// is a number whose integer part is 1 and `/L` its length, its
-    /// sections, hint
-    /// tables, first page, numbers and what each page reaches held to what
-    /// they say of each other. What a reader relying on the file gets
-    /// wrong, a position, a length, a count, an identifier past its table,
-    /// a value it can't read, is found; a departure that readers get past,
-    /// as writers do it, only with [`Options::departures`], else counted
+    /// bytes of the header, says it's linearized, and whose `/Linearized` is
+    /// a number whose integer part is 1 and `/L` its length, its sections,
+    /// hint tables, first page, numbers and what each page reaches held to
+    /// what they say of each other. What a reader relying on the file gets
+    /// wrong, a position, a length, a count, an identifier past its table, a
+    /// value it can't read, is found; a departure that readers get past, as
+    /// writers do it, only with [`Options::departures`], else counted
     /// ([`Report::departures`]). Of a file linearized as first written and
     /// updated after ([`Rule::Updated`]), the same of the file as first
     /// written, its bytes up to `/L`, read as a file of their own, where a
     /// place in a stream's data whose number a later revision lists has no
-    /// bytes, as the file's stream there is another. Of a file whose first
-    /// object says so but isn't taken for linearized otherwise, a
-    /// `/Linearized` that isn't a number whose integer part is 1, an `/L`
-    /// that's no direct integer, or an `/L`
-    /// that's neither the file's length nor its first revision's, is found,
-    /// and where an update follows, that it does, a departure. Each kind
-    /// once, at its first place, its
-    /// value pdf-linearize's words, which cite the clause, with how many
-    /// times it's told; in the linearization dictionary's object, its table
-    /// `LinearizationParameterDict` and its path the dictionary's, held
-    /// where that is. Its key is the dictionary's key it's of, a value of
-    /// it wrong (`/O`, `/H`'s length) among it, at that entry's bytes, or
+    /// bytes, as the file's stream there is another; and where a later
+    /// revision wrote the dictionary's number again, so that the object
+    /// there is another, the first revision's, in no object
+    /// ([`Finding::revision`] 1), held where every object is, as merged. Of
+    /// a file whose first object says so but isn't taken for linearized
+    /// otherwise, a `/Linearized` that isn't a number whose integer part is
+    /// 1, an `/L` that's no direct integer, or an `/L` that's neither the
+    /// file's length nor its first revision's, is found, and where an update
+    /// follows, that it does, a departure. Each kind once, at its first
+    /// place, its value pdf-linearize's words, which cite the clause, with
+    /// how many times it's told; in the linearization dictionary's object,
+    /// its table `LinearizationParameterDict` and its path the dictionary's,
+    /// held where that is. Its key is the dictionary's key it's of, a value
+    /// of it wrong (`/O`, `/H`'s length) among it, at that entry's bytes, or
     /// the dictionary's where it's absent; `H` for what's of the hint
     /// stream, a page's entries in its tables among it, at the byte of its
-    /// decoded data a table it's of starts at, at its dictionary's entry,
-    /// or at the file's byte a position it gives is at; and `-` for what's
-    /// of an object, at its record, an attribute a page doesn't say itself
-    /// at the page's, of a byte of the file, at that byte, and of the file
-    /// as a whole, at the dictionary. What's wrong with `/Linearized`, `/L`,
+    /// decoded data a table it's of starts at, at its dictionary's entry, or
+    /// at the file's byte a position it gives is at; and `-` for what's of
+    /// an object, at its record, an attribute a page doesn't say itself at
+    /// the page's, of a byte of the file, at that byte, and of the file as a
+    /// whole, at the dictionary. What's wrong with `/Linearized`, `/L`,
     /// `/O`, `/E`, `/N`, `/T` or `/H` as a value, missing, of another type
     /// or a reference, is found only where the walk found nothing by the
     /// model's rules ([`Rule::Missing`], [`Rule::Type`], [`Rule::Value`],
@@ -1062,9 +1065,10 @@ pub enum Rule {
     /// follows. An update voids a linearization, and the file is read as
     /// an ordinary one (ISO 32000-2, F.1, Table F.1). Found once, in the
     /// newest trailer, its table and key `-`, at its bytes, so that the
-    /// update answers for it, held as the trailer is; and what's wrong with
-    /// the linearization as first written is found as a linearized file's
-    /// is ([`Rule::Linearization`]).
+    /// update answers for it, held as the trailer is, alike whichever
+    /// trailer's table it's in; and what's wrong with the linearization as
+    /// first written is found as a linearized file's is
+    /// ([`Rule::Linearization`]).
     Updated,
 }
 
@@ -1253,10 +1257,10 @@ pub struct Report {
     pub departures: BTreeMap<(String, String), usize>,
     /// Whether the file is linearized (ISO 32000-2, Annex F), and whether
     /// its linearization holds ([`Rule::Linearization`]), or was linearized
-    /// as first written and updated after ([`Rule::Updated`]), or isn't
-    /// taken for linearized, whatever's held: none where its first object
-    /// doesn't say it's linearized, or where the check had no reading
-    /// ([`check`]).
+    /// as first written and updated after ([`Rule::Updated`]), and whether
+    /// it held then, or isn't taken for linearized, whatever's held: none
+    /// where its first object doesn't say it's linearized, or where the
+    /// check had no reading ([`check`]).
     pub linearized: Option<Linearized>,
 }
 
@@ -1272,8 +1276,13 @@ pub enum Linearized {
     Fails,
     /// Linearized as first written, and voided by an update after it
     /// ([`Rule::Updated`]): what's wrong with it as first written is
-    /// found, whether or not it held then.
-    Updated,
+    /// found, where that's held.
+    Updated {
+        /// Whether it held as first written, no error found in it then,
+        /// whatever's held: false too where the file as first written
+        /// wasn't read, as the source didn't give its bytes.
+        held: bool,
+    },
     /// Its first object says it's linearized, and it isn't taken for one,
     /// nor was it as first written.
     NotTaken,
@@ -1286,7 +1295,7 @@ impl Linearized {
         match self {
             Linearized::Holds => "holds",
             Linearized::Fails => "fails",
-            Linearized::Updated => "updated",
+            Linearized::Updated { .. } => "updated",
             Linearized::NotTaken => "not-taken",
         }
     }
@@ -1489,6 +1498,7 @@ fn check_in(
         reached: HashMap::new(),
         referrers: HashMap::new(),
         under_unlisted: HashSet::new(),
+        hint_streams: HashSet::new(),
         one_table: options.one_table,
         unlisted_findings: options.unlisted,
         extensions: &extensions,
@@ -1705,9 +1715,11 @@ enum Place {
 /// found; and a page tree, a viewer, an XMP, a color space, a font or a
 /// linearization finding's numbers, and how many times its kind was found;
 /// for a key that came in later than the file's version, any value, as its
-/// value isn't what's wrong; and for an object nothing reaches, the object
+/// value isn't what's wrong; for an object nothing reaches, the object
 /// alone, as which object's reference to it is named follows the objects'
-/// numbers and keys' order.
+/// numbers and keys' order; and for an update that voids a linearization,
+/// not which trailer's table it's in, a table's or a cross-reference
+/// stream's, as each update chooses its own.
 fn like(f: &Finding) -> (String, String, Rule, String) {
     let value = match f.rule {
         Rule::TooNew => String::new(),
@@ -1724,7 +1736,7 @@ fn like(f: &Finding) -> (String, String, Rule, String) {
         _ => numberless(&f.value),
     };
     match f.rule {
-        Rule::Unreached => ("-".to_string(), "-".to_string(), f.rule, value),
+        Rule::Unreached | Rule::Updated => ("-".to_string(), "-".to_string(), f.rule, value),
         _ => (f.table.clone(), f.key.clone(), f.rule, value),
     }
 }
@@ -1958,6 +1970,9 @@ struct Walk<'a> {
     referrers: HashMap<ObjectId, (&'static str, String)>,
     /// The objects referenced under keys the model doesn't list.
     under_unlisted: HashSet<ObjectId>,
+    /// The hint streams the file's linearization dictionary names by where
+    /// they're written ([`hint_streams`]), which nothing refers to.
+    hint_streams: HashSet<ObjectId>,
     /// [`Options::one_table`].
     one_table: bool,
     /// [`Options::unlisted`].
@@ -2270,7 +2285,8 @@ impl<'a> Walk<'a> {
     /// refer to it, so the walk from the trailer reaches none. One the walk
     /// reached as another table stays that, reached again as this, as an
     /// object stream does. Any other dictionary with `/Linearized` isn't
-    /// visited, nor unreached ([`left_out`]).
+    /// visited, nor unreached ([`left_out`]); nor are the hint streams this
+    /// one names by where they're written ([`hint_streams`]).
     fn linearization_dictionary(&mut self) {
         let source = self.source;
         let Some((id, object)) = first_object(source) else {
@@ -2279,6 +2295,7 @@ impl<'a> Walk<'a> {
         if !linearization(object) {
             return;
         }
+        self.hint_streams = hint_streams(source, object);
         let table = grammar()
             .table("LinearizationParameterDict")
             .expect("the model has the linearization dictionary's table");
@@ -4103,7 +4120,8 @@ impl<'a> Walk<'a> {
 
     /// The held objects the walk never reached, each a [`Rule::Unreached`]
     /// finding but those referenced under a key the model doesn't list,
-    /// and the file's own structures it doesn't visit ([`left_out`]): an
+    /// a linearized file's hint streams ([`hint_streams`]), and the file's
+    /// own structures it doesn't visit ([`left_out`]): an
     /// object stream it visits, and what it refers to is reached through
     /// it, as through any object. Its table and key are those it was
     /// referenced under in an object walked, else the key of a held object
@@ -4118,7 +4136,10 @@ impl<'a> Walk<'a> {
         };
         let mut left = Vec::new();
         for (id, made) in held {
-            if self.reached.contains_key(&id) || self.under_unlisted.contains(&id) {
+            if self.reached.contains_key(&id)
+                || self.under_unlisted.contains(&id)
+                || self.hint_streams.contains(&id)
+            {
                 continue;
             }
             match self.source.get(id) {
@@ -4309,6 +4330,30 @@ fn object_stream(object: &Object) -> bool {
 /// the trailers name instead.
 fn linearization(object: &Object) -> bool {
     matches!(object.value(), Value::Dict(d) if d.has(b"Linearized"))
+}
+
+/// The hint streams `dict`, a file's linearization dictionary, names by
+/// where they're written, the offsets `/H` gives first and third (ISO
+/// 32000-2, F.3.6, Table F.1): each stream whose record starts at one of
+/// those bytes of the file's own. Nothing refers to one.
+fn hint_streams(source: &dyn Source, dict: &Object) -> HashSet<ObjectId> {
+    let items = (dict.as_dict())
+        .and_then(|d| d.get(b"H"))
+        .and_then(Object::as_array)
+        .unwrap_or_default();
+    let offsets: Vec<usize> = (items.iter().step_by(2).take(2))
+        .filter_map(|item| usize::try_from(item.as_integer()?).ok())
+        .collect();
+    if offsets.is_empty() {
+        return HashSet::new();
+    }
+    (source.ids().into_iter())
+        .filter(|&id| {
+            (source.record(id))
+                .is_some_and(|r| r.at.stream.is_none() && offsets.contains(&r.at.start))
+        })
+        .filter(|&id| matches!(source.get(id).map(Object::value), Ok(Value::Stream(_))))
+        .collect()
 }
 
 /// The object whose record starts first in the file's own bytes, not an

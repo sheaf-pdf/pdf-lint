@@ -166,7 +166,7 @@ fn what_qpdf_linearizes_then_updated_is_found_so() {
             assert_eq!(found, [Rule::Updated], "{test}, {streams}: {report}");
             assert_eq!(
                 report.linearized,
-                Some(Linearized::Updated),
+                Some(Linearized::Updated { held: true }),
                 "{test}, {streams}"
             );
         }
