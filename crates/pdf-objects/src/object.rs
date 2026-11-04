@@ -727,7 +727,8 @@ impl Shadowed {
             }
             return Shadowed::Few(mask);
         }
-        let mut seen = HashSet::new();
+        // Every key goes in, so the set is made with room for them all.
+        let mut seen = HashSet::with_capacity(entries.len());
         let mut shadowed = HashSet::new();
         for (i, entry) in entries.iter().enumerate().rev() {
             if !seen.insert(entry.key.as_slice()) {
