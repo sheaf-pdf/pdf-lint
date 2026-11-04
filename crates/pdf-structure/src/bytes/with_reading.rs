@@ -148,7 +148,7 @@ impl<S: ByteSource> Source for WithReading<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::lazy::files;
+    use super::super::lazy::{files, fixtures};
     use super::super::{STREAM, read_opened};
     use super::*;
 
@@ -236,6 +236,8 @@ mod tests {
             }
             assert_eq!(opened.into_document(), whole, "{name}");
         }
-        assert!(streams > 50, "{streams}");
+        // The writer's files, and qpdf's where they are.
+        let floor = if fixtures() { 50 } else { 30 };
+        assert!(streams > floor, "{streams}");
     }
 }

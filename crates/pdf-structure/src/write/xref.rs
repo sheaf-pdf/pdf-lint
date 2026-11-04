@@ -71,6 +71,15 @@ struct Row {
     generation: u16,
 }
 
+/// `n` in decimal over the whole of `field`, zeros first, as `{:0w$}`
+/// writes it where `n` has at most as many digits as `field` is long.
+fn digits(field: &mut [u8], mut n: u64) {
+    for digit in field.iter_mut().rev() {
+        *digit = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+}
+
 impl Section {
     /// A full write's, of at least `size` numbers, its positions counted
     /// from 0, where a whole file's header is. Its one subsection lists
@@ -148,8 +157,15 @@ impl Section {
                     out.truncate(start);
                     return Err(Error::TooFar(row.field));
                 }
-                let kind = if row.kind == 1 { 'n' } else { 'f' };
-                let _ = writeln!(out, "{:010} {:05} {kind} ", row.field, row.generation);
+                // Ten digits, a space, five, a space, the kind, a space and
+                // a newline: twenty bytes (7.5.4).
+                let mut line = *b"0000000000 00000 n \n";
+                digits(&mut line[..10], row.field);
+                digits(&mut line[11..16], u64::from(row.generation));
+                if row.kind != 1 {
+                    line[17] = b'f';
+                }
+                out.extend_from_slice(&line);
             }
         }
         trailer.set("Size", i64::from(self.size));
@@ -339,5 +355,46 @@ impl Section {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::digits;
+
+    /// A number written by its digits is what `{:0w$}` writes of it, for a
+    /// table's ten-digit fields and its five-digit generations: at the edges,
+    /// every generation, and offsets made at random below 10^10.
+    #[test]
+    fn a_number_written_by_its_digits_is_its_decimal_with_zeros_first() {
+        let check = |n: u64, width: usize| {
+            let mut field = vec![b'x'; width];
+            digits(&mut field, n);
+            assert_eq!(field, format!("{n:0width$}").into_bytes(), "{n} in {width}");
+        };
+        for n in [
+            0,
+            1,
+            9,
+            10,
+            99,
+            100,
+            65_535,
+            99_999,
+            1_000_000_000,
+            9_999_999_999,
+        ] {
+            check(n, 10);
+        }
+        for n in 0..=u16::MAX {
+            check(u64::from(n), 5);
+        }
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        for _ in 0..100_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            check(state % 10_000_000_000, 10);
+        }
     }
 }
