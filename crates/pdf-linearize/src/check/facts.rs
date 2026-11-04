@@ -61,6 +61,18 @@ pub struct FirstObject {
 }
 
 impl FirstObject {
+    /// Whether its `/Linearized` is a number whose integer part is 1, the
+    /// version the check takes (Table F.1): where it isn't, the check tells
+    /// [`Finding::Version`](super::Finding::Version), and the file isn't
+    /// taken as linearized.
+    pub fn version_one(&self) -> bool {
+        match self.linearized {
+            Raw::Integer(version) => version == 1,
+            Raw::Real(version) => version.floor() == 1.0,
+            _ => false,
+        }
+    }
+
     /// An object `number` and `generation` from `at` to `end`, with none of the
     /// keys yet.
     pub fn new(at: u64, end: u64, number: u32, generation: u16) -> FirstObject {
@@ -332,5 +344,26 @@ impl Facts {
             objects: Vec::new(),
             graph: None,
         }
+    }
+
+    /// Its first object, where it says the file is linearized as the check
+    /// takes a claim before it tells anything: a dictionary, not a stream,
+    /// with `/Linearized`, starting within 1024 bytes of the header. Of a
+    /// file with none, the check tells nothing.
+    pub fn claim(&self) -> Option<&FirstObject> {
+        super::judge::claim(self)
+    }
+
+    /// Where the primary hint stream is and how long, as the check has a
+    /// hint table's positions as if it weren't there, the extent
+    /// [`hint::located`](crate::hint::located) gives a position's byte by:
+    /// `/H`'s first two items, each 0 where it isn't a non-negative integer;
+    /// but where the stream listed at that offset takes fewer bytes than
+    /// that length, or more than it may, to where what's listed after it
+    /// starts, the most it may, as the check then tells `/H`'s length once
+    /// ([`Finding::HintExtent`](super::Finding::HintExtent)) and places the
+    /// rest by the stream that's there.
+    pub fn hint_extent(&self) -> (u64, u64) {
+        super::judge::hint_extent(self)
     }
 }

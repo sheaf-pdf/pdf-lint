@@ -100,7 +100,8 @@ pub enum Place {
     /// A byte of the file, from its first.
     Byte(u64),
     /// A position as a hint table has one, as if the hint stream weren't there:
-    /// [`hint::located`] gives the byte.
+    /// [`hint::located`] gives the byte, under the hint stream's extent the
+    /// check places it by, [`Facts::hint_extent`](super::Facts::hint_extent).
     Position(u64),
     /// A byte of the hint stream's data.
     HintByte(u64),
@@ -583,7 +584,8 @@ pub enum Finding {
     },
     /// The shared object table's first object isn't where it says (F.4.3).
     #[error(
-        "the shared object table has its first object past the first page, {number}, at {hint}, where it's at {computed:?} as if the hint stream weren't there (ISO 32000-2, F.4.3)"
+        "the shared object table has its first object past the first page, {number}, at {hint}, {} (ISO 32000-2, F.4.3)",
+        placed(.computed)
     )]
     SharedFirstAt {
         /// Its number.
@@ -744,14 +746,22 @@ pub enum Finding {
     },
 }
 
+/// Where an object is as if the hint stream weren't there, as
+/// [`Finding::SharedFirstAt`] says it: at a position, or listed nowhere.
+fn placed(computed: &Option<u64>) -> String {
+    match computed {
+        Some(at) => format!("where it's at {at} as if the hint stream weren't there"),
+        None => "where nothing lists it in use".to_string(),
+    }
+}
+
 impl Finding {
     /// Where it's said of: none for what's of the file as a whole.
     pub fn place(&self) -> Option<Place> {
         use Finding::*;
         use Place::*;
         Some(match *self {
-            Version
-            | NoSections
+            NoSections
             | NoMainSection
             | FirstSubsections { .. }
             | FirstSize { .. }
@@ -771,13 +781,15 @@ impl Finding {
                 hint::Error::TableAt { table, .. } => Table(table),
                 _ => return None,
             },
+            Version => Key(DictKey::Linearized),
             LengthNotFile { .. } => Key(DictKey::L),
             BadValue { key } | Indirect { key } => Key(key),
-            HintItems { .. } | HintNotListed { .. } => Key(DictKey::H),
+            HintItems { .. } | HintNotListed { .. } | HintExtent { .. } => Key(DictKey::H),
             PageCount { .. } => Key(DictKey::N),
             FirstPageEnd { .. } => Key(DictKey::E),
             MainFirstEntry { .. } => Key(DictKey::T),
-            Updated { at } | HintExtent { at, .. } => Byte(at),
+            FirstPageObject { .. } => Key(DictKey::O),
+            Updated { at } => Byte(at),
             DictionaryPast1024 { end } => Byte(end),
             SectionOrder { first, .. } => Byte(first),
             LastStartxref { value, .. } => Byte(value),
@@ -795,14 +807,13 @@ impl Finding {
             | SharedFirstAt { number, .. }
             | TableObject { number, .. }
             | FirstPageReaches { number }
-            | PageReaches { number, .. } => Object(number),
+            | PageReaches { number, .. }
+            | PageCompressed { number, .. } => Object(number),
             GroupsApart { first, .. } => Object(first),
             HintNotLast { hint, .. } => Object(hint),
             HintKeyValue { key } | HintKeyIndirect { key } | HintKeyOther { key } => HintKey(key),
             TableOverruns { end, .. } => HintByte(end),
-            FirstPageObject { page, .. }
-            | PageCompressed { page, .. }
-            | PageAttribute { page, .. }
+            PageAttribute { page, .. }
             | PageAt { page, .. }
             | PageObjects { page, .. }
             | PageLength { page, .. }

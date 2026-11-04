@@ -8,12 +8,13 @@
 //! object is.
 //!
 //! A file says it's linearized as pdf-linearize takes it to before it tells
-//! anything ([`claimed`]): its first object a dictionary, not a stream, with
-//! `/Linearized`, starting within 1,024 bytes of its header. One that
+//! anything ([`Facts::claim`]): its first object a dictionary, not a stream,
+//! with `/Linearized`, starting within 1,024 bytes of its header. One that
 //! doesn't has nothing told, and no verdict
 //! ([`Report::linearized`](super::Report::linearized)). One that's
-//! linearized by pdf-linearize's test, its `/Linearized` 1 and its `/L` its
-//! length, has what the check tells found, and the verdict, holds or fails,
+//! linearized by pdf-linearize's test, its `/Linearized` a number whose
+//! integer part is 1 and its `/L` its length, has what the check tells
+//! found, and the verdict, holds or fails,
 //! by whether an error is among it. One linearized as first written and
 //! updated after ([`first_written`]), its `/L` its first revision's, has
 //! that found ([`Rule::Updated`]), in the newest trailer, so that the update
@@ -47,11 +48,11 @@
 //! the source didn't give, are counted as not checked, once, where the
 //! dictionary is held.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use pdf_linearize::check::{DictKey, Facts, FirstObject, Grade, HintData, Place, Raw, RowEntry};
+use pdf_linearize::check::{Facts, Grade, HintData, Place, Raw};
 use pdf_linearize::hint::located;
-use pdf_linearize::{Finding as Fault, Kind, Limits, Verdict};
+use pdf_linearize::{Finding as Fault, Limits, Verdict};
 
 use super::content::times;
 use super::kept::{Kept, Where};
@@ -76,16 +77,6 @@ const LOCKED: &str = "a linearization whose hint stream's data isn't decrypted";
 /// facts are read from.
 const UNGIVEN: &str = "a linearization whose bytes the source didn't give";
 
-/// The first object `facts` give, where it says the file is linearized, as
-/// pdf-linearize's check takes a claim before it tells anything: a
-/// dictionary, not a stream, with `/Linearized`, starting within the first
-/// 1,024 bytes from the header.
-fn claimed(facts: &Facts) -> Option<&FirstObject> {
-    let first = facts.first_object.as_ref()?;
-    let within = first.at.saturating_sub(facts.header) < 1024;
-    (!first.stream && first.linearized != Raw::Absent && within).then_some(first)
-}
-
 /// Whether `fault` is of what the model holds the dictionary to as well:
 /// a value of it missing, of another type or a reference, or `/H`'s count
 /// of items. It gives way to what the walk found by the model's rules.
@@ -98,20 +89,17 @@ fn of_the_model(fault: &Fault) -> bool {
 
 /// How many bytes of the file were linearized as first written, where an
 /// update after them voids that (ISO 32000-2, F.1, Table F.1): of a claim
-/// whose `/Linearized` pdf-linearize takes, its integer part 1, and whose
-/// `/L` is an integer that isn't the file's length from its header, but
+/// whose `/Linearized` pdf-linearize takes
+/// ([`FirstObject::version_one`](pdf_linearize::check::FirstObject::version_one)),
+/// and whose `/L` is an integer that isn't the file's length from its
+/// header, but
 /// that ends the first of `revisions` from there, at the `%%EOF` after its
 /// last section or past the line end right after it ([`Revision::end`]),
 /// and a later revision after it. None otherwise.
 fn first_written(facts: &Facts, revisions: &[Revision]) -> Option<usize> {
     let first = facts.first_object.as_ref()?;
-    let version = match first.linearized {
-        Raw::Integer(version) => version == 1,
-        Raw::Real(version) => version.floor() == 1.0,
-        _ => false,
-    };
     let len = facts.header.checked_add(number(Some(&first.l))?)?;
-    if !version || len == facts.len || revisions.len() < 2 {
+    if !first.version_one() || len == facts.len || revisions.len() < 2 {
         return None;
     }
     let len = usize::try_from(len).ok()?;
@@ -119,18 +107,9 @@ fn first_written(facts: &Facts, revisions: &[Revision]) -> Option<usize> {
     (end.eof()..=end.line()).contains(&len).then_some(len)
 }
 
-/// Where `fault` is said of, as pdf-linearize places it, but that a
-/// `/Linearized` not 1 is of that key's value, which pdf-linearize places
-/// nowhere, as the file isn't taken for linearized.
-fn place(fault: &Fault) -> Option<Place> {
-    match fault {
-        Fault::Version => Some(Place::Key(DictKey::Linearized)),
-        _ => fault.place(),
-    }
-}
-
 /// The key a finding at `place` is told at: the dictionary's key it's of,
-/// `H` for what's of the hint stream, `-` for the rest.
+/// `H` for what's of the hint stream, a page's entry in its tables among
+/// it, `-` for the rest.
 fn key(place: Option<Place>) -> String {
     match place {
         Some(Place::Key(key)) => key.to_string().trim_start_matches('/').to_string(),
@@ -153,50 +132,6 @@ fn number(raw: Option<&Raw>) -> Option<u64> {
         Some(&Raw::Integer(n)) => u64::try_from(n).ok(),
         _ => None,
     }
-}
-
-/// Where the hint stream is and how long, as pdf-linearize's check places a
-/// hint table's positions as if it weren't there ([`located`]): `/H`'s
-/// offset and length, each 0 where it isn't a non-negative integer, but for
-/// a length outside what the stream listed at that offset takes, from past
-/// its `endobj` to where what's listed after it starts: then the most it
-/// takes, as the check tells `/H`'s length wrong once and places the rest by
-/// the stream that's there (Table F.1).
-fn extent(facts: &Facts) -> (u64, u64) {
-    let items = facts.first_object.as_ref().map_or(&[][..], |f| &f.h_items);
-    let at = number(items.first()).unwrap_or(0);
-    let length = number(items.get(1)).unwrap_or(0);
-    let Some(hint) = facts.hint.as_ref().filter(|h| h.at == at) else {
-        return (at, length);
-    };
-    let least = hint.end.saturating_sub(at);
-    let next = next_after(facts, hint.end.saturating_sub(1));
-    let most = next.saturating_sub(at).max(least);
-    match (least..=most).contains(&length) {
-        true => (at, length),
-        false => (at, most),
-    }
-}
-
-/// Where the first thing after byte `at` starts of what the sections list,
-/// each table section's `xref` and the file's end, as pdf-linearize's check
-/// takes them: of a number listed more than once, only its first row, the
-/// first section's before the main one's and a hybrid's stream's before its
-/// table's.
-fn next_after(facts: &Facts, at: u64) -> u64 {
-    let sections = || facts.first.iter().chain(&facts.main);
-    let mut listed = HashSet::new();
-    let rows = (sections().flat_map(|s| s.hybrid.iter().chain(&s.rows)))
-        .filter(|row| listed.insert(row.number))
-        .filter_map(|row| match row.entry {
-            RowEntry::InUse(start) => Some(start),
-            _ => None,
-        });
-    let tables = (sections().filter(|s| s.kind == Kind::Table)).map(|s| s.at);
-    (rows.chain(tables).chain([facts.len]))
-        .filter(|&start| start > at)
-        .min()
-        .unwrap_or(u64::MAX)
 }
 
 /// The file a linearization's facts are read of, as the places they give
@@ -270,7 +205,7 @@ struct Places<'a> {
     /// first time a place in it is asked for.
     data: Option<Option<(ObjectId, usize)>>,
     /// Where the hint stream is and how long, as a hint table's positions
-    /// are as if it weren't there from ([`extent`]).
+    /// are as if it weren't there from ([`Facts::hint_extent`]).
     stream: (u64, u64),
     /// Where each of the hint stream's tables starts in its data, by its key
     /// in the stream's dictionary, the page offset table at 0.
@@ -278,6 +213,8 @@ struct Places<'a> {
     /// Each number's object, by number, read the first time an object's
     /// place is asked for.
     numbers: Option<HashMap<u32, ObjectId>>,
+    /// Each page's object's number, in page order, where it has one.
+    pages: Vec<Option<u32>>,
 }
 
 impl<'a> Places<'a> {
@@ -303,9 +240,25 @@ impl<'a> Places<'a> {
             dict: source.object(dict),
             hint: hint.map(|h| h.number),
             data: None,
-            stream: extent(facts),
+            stream: facts.hint_extent(),
             tables,
             numbers: None,
+            pages: (facts.pages.iter()).map(|p| p.id.map(|(n, _)| n)).collect(),
+        }
+    }
+
+    /// Where `fault` is said of, as pdf-linearize places it, but that what
+    /// a page doesn't say itself, which it places at the page by its place
+    /// among the pages, is of the page's object, or of the file as a whole
+    /// where the page has none of its own: a page by its place is its
+    /// entry in the hint tables otherwise.
+    fn of(&self, fault: &Fault) -> Option<Place> {
+        match *fault {
+            Fault::PageAttribute { page, .. } => {
+                let page = usize::try_from(page).ok().and_then(|p| self.pages.get(p));
+                page.copied().flatten().map(Place::Object)
+            }
+            _ => fault.place(),
         }
     }
 
@@ -414,7 +367,7 @@ struct Faults<'a> {
 
 impl pdf_linearize::Sink for Faults<'_> {
     fn finding(&mut self, finding: Fault) {
-        let at = self.places.at(place(&finding));
+        let at = self.places.at(self.places.of(&finding));
         let at = Where {
             object: Some(self.object),
             at,
@@ -447,7 +400,7 @@ impl<'a> Walk<'a> {
                 return;
             }
         };
-        let Some(first) = claimed(&facts) else {
+        let Some(first) = facts.claim() else {
             return;
         };
         let id = (first.number, first.generation);
@@ -540,7 +493,7 @@ impl<'a> Walk<'a> {
         let mut found: Vec<Result<Finding, usize>> = Vec::new();
         let mut tells = Vec::new();
         for (i, &(at, fault, n)) in faults.kept.told().iter().enumerate() {
-            let key = key(place(&fault));
+            let key = key(faults.places.of(&fault));
             if fault.grade() != Grade::Error && !self.departures {
                 let at = (TABLE.to_string(), key);
                 *self.report.departures.entry(at).or_default() += n;
@@ -597,7 +550,6 @@ mod tests {
     //! so that a change keeps its length; and those files updated after, by
     //! pdf-structure's writer.
 
-    use pdf_linearize::check::{HintFacts, RowFacts, SectionFacts};
     use pdf_linearize::family::{self, linearize_bytes};
     use pdf_linearize::hint::{PageOffsets, SharedObjects};
     use pdf_structure::fixture::{self, Body, Xref};
@@ -844,8 +796,8 @@ mod tests {
     /// it's of and its bytes: the dictionary's `/E`, `/T` and `/N` at their
     /// entries; a page's count and the page table at `H`, at the hint
     /// stream's data's first byte, where the page offset table is, a
-    /// position at the file's byte it's at; `/H`'s length at the byte it
-    /// gives; what doesn't read of the hint tables, at the dictionary; and
+    /// position at the file's byte it's at; `/H`'s length at `/H`'s entry;
+    /// what doesn't read of the hint tables, at the dictionary; and
     /// a shared entry's length at the shared object table's first byte in
     /// the data. A page's length wrong is told of that page and of where
     /// the next one is, as pdf-linearize tells it.
@@ -890,7 +842,7 @@ mod tests {
         assert_eq!(at(&n), both);
         let h = written_as(&file, "/H [473 166]", "/H [473 199]");
         let value = "/H's length from byte 473 is 199, where the hint stream takes 165 to 166 (ISO 32000-2, Table F.1)";
-        assert_eq!(at(&h), one("-", value, Some(Span::new(None, 473, 474))));
+        assert_eq!(at(&h), one("H", value, entry(&h, "/H [473 199]")));
         let s = written_as(&file, "/S 48", "/S 47");
         let value = "the hint tables don't read: a shared entry's count of objects's width is 1024 bits, past 32 (ISO 32000-2, F.4)";
         let whole = Some(Span::new(None, 23, 88));
@@ -945,6 +897,54 @@ mod tests {
         assert_eq!(position.at, Some(Span::new(None, 639, 640)), "{report}");
     }
 
+    /// What's wrong with one of the dictionary's values is at that key,
+    /// though pdf-linearize says it of a page: `/O` not the first page's
+    /// object, at `/O`'s entry, before what follows of the first page's
+    /// object taken by it. What a page doesn't say itself is of the
+    /// page's object, at its record, its key `-`: a departure, counted
+    /// there, and found when asked for.
+    #[test]
+    fn whats_of_a_value_or_of_a_page_is_at_that_key_or_the_pages_object() {
+        let file = linearized(&three_pages(), &[]);
+        let facts = facts(&file);
+        let Raw::Integer(o) = facts.first_object.as_ref().unwrap().o else {
+            panic!("/O is an integer");
+        };
+        // Another number as long.
+        let other = o ^ 1;
+        let (old, new) = (format!("/O {o} "), format!("/O {other} "));
+        let changed = written_as(&file, &old, &new);
+        let report = checked(&changed);
+        let value = format!("/O is {other}, where page 0's object is {o} (ISO 32000-2, Table F.1)");
+        let at = entry(&changed, new.trim_end());
+        // The first page's place told after it, as pdf-linearize takes the
+        // first page's object by `/O`.
+        assert_eq!(told(&report)[0], ("O", value.as_str(), at), "{report}");
+        assert!(told(&report)[1..].iter().all(|f| f.0 == "H"), "{report}");
+        assert_eq!(report.linearized, Some(Linearized::Fails));
+        // The second page not saying its `/MediaBox` itself.
+        let (page, _) = facts.pages[1].id.unwrap();
+        let object = find(&file, format!("\n{page} 0 obj").as_bytes()) + 1;
+        let media_box = object + find(&file[object..], b"/MediaBox");
+        let mut bare = file.clone();
+        bare[media_box..media_box + 9].copy_from_slice(b"/MediaBoz");
+        let report = checked(&bare);
+        assert_eq!(told(&report), [], "{report}");
+        assert_eq!(report.linearized, Some(Linearized::Holds));
+        let counted = BTreeMap::from([((TABLE.to_string(), "-".to_string()), 1)]);
+        assert_eq!(report.departures, counted, "{report}");
+        let asked = Options {
+            departures: true,
+            ..Options::default()
+        };
+        let report = checked_with(&bare, &asked);
+        let read = WithReading::new(&bare[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let record = read.document().record((page, 0)).map(|r| r.at);
+        assert_eq!(record.map(|at| at.start), Some(object));
+        let value = "page 1 doesn't say its MediaBox itself (ISO 32000-2, F.3.7, F.3.10)";
+        assert_eq!(told(&report), [("-", value, record)], "{report}");
+    }
+
     /// A position is at the file's byte it's at as pdf-linearize places it,
     /// whatever `/H` says of the hint stream's length: where it says more
     /// than the stream may take, or less than it takes, or isn't an
@@ -981,93 +981,6 @@ mod tests {
                 "{h}: {report}"
             );
         }
-    }
-
-    /// The most pdf-linearize's check says the hint stream takes, where it
-    /// tells `/H`'s length wrong.
-    fn told_most(facts: &Facts) -> Option<u64> {
-        let mut found = Vec::new();
-        pdf_linearize::check(facts, &LIMITS, &mut found);
-        found.iter().find_map(|fault| match *fault {
-            Fault::HintExtent { most, .. } => Some(most),
-            _ => None,
-        })
-    }
-
-    /// The hint stream's extent a position is placed by is the one
-    /// pdf-linearize's check places it by: `/H`'s offset and length where
-    /// the stream listed there takes that length, else the most it takes,
-    /// to where the next thing listed starts, which the check's finding of
-    /// `/H`'s length says too: of a number listed twice its first row, a
-    /// hybrid's stream's before its table's, a table section's `xref` and
-    /// the file's end among what's listed.
-    #[test]
-    fn the_hint_streams_extent_is_the_one_pdf_linearize_places_positions_by() {
-        let row = |number, at| RowFacts::new(number, 0, RowEntry::InUse(at));
-        let int = Raw::Integer;
-        // A file of 1,000 bytes, its hint stream 2 from 100 to 140, object 5
-        // next, at 300.
-        let mut facts = Facts::new(1000);
-        let mut first = FirstObject::new(9, 90, 1, 0);
-        first.linearized = int(1);
-        first.l = int(1000);
-        first.h = Raw::Array;
-        facts.first_object = Some(first);
-        let mut section = SectionFacts::new(950, Kind::Table);
-        section.rows = vec![row(1, 9), row(2, 100), row(5, 300)];
-        facts.first = Some(section);
-        let mut main = SectionFacts::new(900, Kind::Stream);
-        main.rows = vec![row(3, 500)];
-        facts.main = Some(main);
-        let data = HintData::Decoded(Vec::new());
-        facts.hint = Some(HintFacts::new(100, 140, 2, data));
-        let h = |facts: &mut Facts, items: &[Raw]| {
-            facts.first_object.as_mut().unwrap().h_items = items.to_vec();
-        };
-        for (items, placed) in [
-            (vec![int(100), int(40)], (100, 40)),
-            (vec![int(100), int(200)], (100, 200)),
-            (vec![int(100), int(39)], (100, 200)),
-            (vec![int(100), int(201)], (100, 200)),
-            (vec![int(100), int(-40)], (100, 200)),
-            (vec![int(100), Raw::Real(40.0)], (100, 200)),
-            (vec![int(100)], (100, 200)),
-            // No stream listed where `/H` says, or its offset no integer:
-            // as it says, 0 for what isn't one.
-            (vec![int(99), int(7)], (99, 7)),
-            (vec![Raw::Real(100.0), int(7)], (0, 7)),
-        ] {
-            h(&mut facts, &items);
-            assert_eq!(extent(&facts), placed, "{items:?}");
-        }
-        let most = |facts: &mut Facts| {
-            h(facts, &[int(100), int(999)]);
-            let (_, most) = extent(facts);
-            assert_eq!(Some(most), told_most(facts));
-            most
-        };
-        assert_eq!(most(&mut facts), 200);
-        // 5 listed again, nearer, by the main section: its first row stands.
-        facts.main.as_mut().unwrap().rows.push(row(5, 150));
-        assert_eq!(most(&mut facts), 200);
-        // A hybrid's stream listing 4 where its table has it free: the
-        // stream's row stands.
-        let section = facts.first.as_mut().unwrap();
-        section.hybrid = vec![row(4, 250)];
-        section.rows.push(RowFacts::new(4, 0, RowEntry::Free));
-        assert_eq!(most(&mut facts), 150);
-        // The main section a table at 200, before them.
-        let main = facts.main.as_mut().unwrap();
-        (main.at, main.kind) = (200, Kind::Table);
-        assert_eq!(most(&mut facts), 100);
-        // 6 right at the stream's end: it takes its own bytes, no more.
-        facts.first.as_mut().unwrap().rows.push(row(6, 140));
-        assert_eq!(most(&mut facts), 40);
-        // Nothing listed after the stream, no table after it: to the end.
-        let section = facts.first.as_mut().unwrap();
-        (section.kind, section.rows, section.hybrid) = (Kind::Stream, vec![row(2, 100)], vec![]);
-        facts.main = None;
-        assert_eq!(most(&mut facts), 900);
     }
 
     /// The file `file`, its later pages each listing the first page's shared

@@ -16,29 +16,25 @@ struct Settled;
 
 type Go = Result<(), Settled>;
 
+/// [`Facts::claim`](super::Facts::claim).
+pub(super) fn claim(facts: &Facts) -> Option<&FirstObject> {
+    let first = facts.first_object.as_ref()?;
+    let within = first.at.saturating_sub(facts.header) < 1024;
+    (!first.stream && first.linearized != Raw::Absent && within).then_some(first)
+}
+
 /// The test of [`Verdict::linearized`], what's told of it, and whether it
 /// passed.
 fn linearized<S: Sink + ?Sized>(facts: &Facts, sink: &mut S) -> bool {
-    let Some(first) = &facts.first_object else {
+    let Some(first) = claim(facts) else {
         return false;
     };
-    if first.stream
-        || first.linearized == Raw::Absent
-        || first.at.saturating_sub(facts.header) >= 1024
-    {
-        return false;
-    }
     let mut tell = |finding| {
         if sink.wants() {
             sink.finding(finding);
         }
     };
-    let version = match first.linearized {
-        Raw::Integer(version) => version == 1,
-        Raw::Real(version) => version.floor() == 1.0,
-        _ => false,
-    };
-    if !version {
+    if !first.version_one() {
         tell(Finding::Version);
         return false;
     }
@@ -216,6 +212,34 @@ fn hint_room(index: &Index, at: u64, end: u64) -> (u64, u64) {
     let least = end.saturating_sub(at);
     let most = index.next_after(end.saturating_sub(1)).saturating_sub(at);
     (least, most.max(least))
+}
+
+/// `/H`'s offset and length, each 0 where it isn't a non-negative integer.
+fn h_extent(first: &FirstObject) -> (u64, u64) {
+    let item = |at: usize| first.h_items.get(at).copied().and_then(number);
+    (item(0).unwrap_or(0), item(1).unwrap_or(0))
+}
+
+/// Where the hint stream is and how long, as a table's positions are as if
+/// it weren't there, given `/H`'s offset and length, `h`, and `index` of
+/// where things start: `h`, but where the stream listed at its offset takes
+/// fewer bytes than that length, or more than it may, the most it may.
+fn placing(facts: &Facts, h: (u64, u64), index: &Index) -> (u64, u64) {
+    let (at, length) = h;
+    let Some(hint) = facts.hint.as_ref().filter(|hint| hint.at == at) else {
+        return h;
+    };
+    let (least, most) = hint_room(index, hint.at, hint.end);
+    match length < least || length > most {
+        true => (at, most),
+        false => h,
+    }
+}
+
+/// [`Facts::hint_extent`](super::Facts::hint_extent).
+pub(super) fn hint_extent(facts: &Facts) -> (u64, u64) {
+    let h = facts.first_object.as_ref().map_or((0, 0), h_extent);
+    placing(facts, h, &Index::new(facts, h.0, h.1))
 }
 
 /// How a check goes.
@@ -1153,17 +1177,14 @@ pub(super) fn check<S: Sink + ?Sized>(facts: &Facts, limits: &Limits, sink: &mut
     if !holds && !sink.wants() {
         return verdict(false);
     }
-    let item = |at: usize| first.h_items.get(at).copied().and_then(number);
-    let (hint_at, hint_len) = (item(0).unwrap_or(0), item(1).unwrap_or(0));
-    let mut index = Index::new(facts, hint_at, hint_len);
+    let h = h_extent(first);
+    let mut index = Index::new(facts, h.0, h.1);
     // A wrong /H is said once: what's as if the hint stream weren't there goes
     // by the stream that's there, so it isn't said again of everything after
     // it.
-    if let Some(hint) = facts.hint.as_ref().filter(|hint| hint.at == hint_at) {
-        let (least, most) = hint_room(&index, hint.at, hint.end);
-        if hint_len < least || hint_len > most {
-            index = Index::new(facts, hint_at, most);
-        }
+    let (hint_at, hint_len) = placing(facts, h, &index);
+    if hint_len != h.1 {
+        index = Index::new(facts, hint_at, hint_len);
     }
     let mut judge = Judge {
         facts,

@@ -1009,8 +1009,10 @@ pub enum Rule {
     /// A linearized file that doesn't hold to ISO 32000-2's Annex F, as
     /// pdf-linearize's check judges it from the file's reading, where the
     /// check has one ([`check_with_reading`]): a file whose first object, a
-    /// dictionary with `/Linearized` within its first 1,024 bytes, says
-    /// it's linearized, and whose `/L` is its length, its sections, hint
+    /// dictionary, not a stream, with `/Linearized`, starting within 1,024
+    /// bytes of the header, says it's linearized, and whose `/Linearized`
+    /// is a number whose integer part is 1 and `/L` its length, its
+    /// sections, hint
     /// tables, first page, numbers and what each page reaches held to what
     /// they say of each other. What a reader relying on the file gets
     /// wrong, a position, a length, a count, an identifier past its table,
@@ -1022,20 +1024,23 @@ pub enum Rule {
     /// place in a stream's data whose number a later revision lists has no
     /// bytes, as the file's stream there is another. Of a file whose first
     /// object says so but isn't taken for linearized otherwise, a
-    /// `/Linearized` not 1, an `/L` that's no direct integer, or an `/L`
+    /// `/Linearized` that isn't a number whose integer part is 1, an `/L`
+    /// that's no direct integer, or an `/L`
     /// that's neither the file's length nor its first revision's, is found,
     /// and where an update follows, that it does, a departure. Each kind
     /// once, at its first place, its
     /// value pdf-linearize's words, which cite the clause, with how many
     /// times it's told; in the linearization dictionary's object, its table
     /// `LinearizationParameterDict` and its path the dictionary's, held
-    /// where that is. Its key is the dictionary's key it's of, at that
-    /// entry's bytes, or the dictionary's where it's absent; `H` for what's
-    /// of the hint stream, at the byte of its decoded data a table it's of
-    /// starts at, at its dictionary's entry, or at the file's byte a
-    /// position it gives is at; and `-` for what's of an object, at its
-    /// record, of a byte of the file, at that byte, and of the file as a
-    /// whole, at the dictionary. What's wrong with `/Linearized`, `/L`,
+    /// where that is. Its key is the dictionary's key it's of, a value of
+    /// it wrong (`/O`, `/H`'s length) among it, at that entry's bytes, or
+    /// the dictionary's where it's absent; `H` for what's of the hint
+    /// stream, a page's entries in its tables among it, at the byte of its
+    /// decoded data a table it's of starts at, at its dictionary's entry,
+    /// or at the file's byte a position it gives is at; and `-` for what's
+    /// of an object, at its record, an attribute a page doesn't say itself
+    /// at the page's, of a byte of the file, at that byte, and of the file
+    /// as a whole, at the dictionary. What's wrong with `/Linearized`, `/L`,
     /// `/O`, `/E`, `/N`, `/T` or `/H` as a value, missing, of another type
     /// or a reference, is found only where the walk found nothing by the
     /// model's rules ([`Rule::Missing`], [`Rule::Type`], [`Rule::Value`],
@@ -1049,8 +1054,9 @@ pub enum Rule {
     Linearization,
     /// A file linearized as first written and updated after, where the
     /// check has its reading ([`check_with_reading`]): its first object, a
-    /// dictionary with `/Linearized` 1 within its first 1,024 bytes, says
-    /// it's linearized, its `/L` isn't the file's length but its first
+    /// dictionary, not a stream, with `/Linearized`, a number whose integer
+    /// part is 1, starting within 1,024 bytes of the header, says it's
+    /// linearized, its `/L` isn't the file's length but its first
     /// revision's, from its header to the `%%EOF` that ends it or past the
     /// line end right after ([`Revision::end`]), and a later revision
     /// follows. An update voids a linearization, and the file is read as

@@ -521,6 +521,179 @@ fn an_overflow_streams_length_is_held_too() {
     );
 }
 
+/// The claim a caller reads (`Facts::claim`) is the one the check takes
+/// before it tells anything: a dictionary with `/Linearized`, not a stream,
+/// starting 1,023 bytes past the header but not 1,024, whatever comes before
+/// the header.
+#[test]
+fn a_claim_is_the_one_the_check_takes() {
+    let told = |facts: &Facts| {
+        let mut found = Vec::new();
+        check(facts, &Limits::DEFAULT, &mut found);
+        !found.is_empty()
+    };
+    let claimed = |facts: &Facts| facts.claim().is_some();
+    for header in [0, 300] {
+        for (at, taken) in [(1022, true), (1023, true), (1024, false), (1025, false)] {
+            let mut facts = table();
+            facts.header = header;
+            dict(&mut facts).at = header + at;
+            // `/L` the file's from the header, so a claim taken is linearized,
+            // and the dictionary run past 1024 bytes, said whenever it's taken.
+            dict(&mut facts).l = Raw::Integer((facts.len - header) as i64);
+            dict(&mut facts).end = header + 1100;
+            assert_eq!(claimed(&facts), taken, "{header} {at}");
+            assert_eq!(told(&facts), taken, "{header} {at}");
+            assert_eq!(
+                check(&facts, &Limits::DEFAULT, &mut ()).linearized,
+                taken,
+                "{header} {at}"
+            );
+        }
+    }
+    let mut facts = table();
+    assert!(claimed(&facts));
+    dict(&mut facts).stream = true;
+    assert!(!claimed(&facts) && !told(&facts));
+    let mut facts = table();
+    dict(&mut facts).linearized = Raw::Absent;
+    assert!(!claimed(&facts) && !told(&facts));
+    // A version the check doesn't take is a claim all the same, and told.
+    dict(&mut facts).linearized = Raw::Integer(2);
+    assert!(claimed(&facts) && told(&facts));
+    facts.first_object = None;
+    assert!(!claimed(&facts));
+}
+
+/// The version a caller reads (`FirstObject::version_one`) is the one the
+/// check takes: a number whose integer part is 1, and nothing else, where
+/// anything else is `Version`.
+#[test]
+fn the_version_one_is_the_one_the_check_takes() {
+    for (raw, one) in [
+        (Raw::Integer(1), true),
+        (Raw::Real(1.0), true),
+        (Raw::Real(1.9), true),
+        (Raw::Real(0.9), false),
+        (Raw::Integer(2), false),
+        (Raw::Real(2.0), false),
+        (Raw::Integer(0), false),
+        (Raw::Other, false),
+        (Raw::Reference((1, 0)), false),
+    ] {
+        let mut facts = table();
+        dict(&mut facts).linearized = raw;
+        assert_eq!(dict(&mut facts).version_one(), one, "{raw:?}");
+        let told = findings(&facts).contains(&Finding::Version);
+        assert_eq!(told, !one, "{raw:?}");
+    }
+}
+
+/// The hint stream's extent a caller places a position by
+/// (`Facts::hint_extent`) is the one the check places it by: `/H`'s offset
+/// and length where the stream listed there takes that length, else the
+/// most it takes, to where the next thing listed starts, which the check's
+/// `HintExtent` says too: of a number listed twice its first row, a hybrid's
+/// stream's before its table's, a table section's `xref` and the file's end
+/// among what's listed.
+#[test]
+fn the_hint_extent_is_the_one_the_check_places_positions_by() {
+    let row = |number, at| RowFacts::new(number, 0, RowEntry::InUse(at));
+    let int = Raw::Integer;
+    // A file of 1,000 bytes, its hint stream 2 from 100 to 140, object 5 next,
+    // at 300.
+    let mut facts = Facts::new(1000);
+    let mut first = FirstObject::new(9, 90, 1, 0);
+    first.linearized = int(1);
+    first.l = int(1000);
+    first.h = Raw::Array;
+    facts.first_object = Some(first);
+    let mut section = SectionFacts::new(950, Kind::Table);
+    section.rows = vec![row(1, 9), row(2, 100), row(5, 300)];
+    facts.first = Some(section);
+    let mut main = SectionFacts::new(900, Kind::Stream);
+    main.rows = vec![row(3, 500)];
+    facts.main = Some(main);
+    let data = HintData::Decoded(Vec::new());
+    facts.hint = Some(HintFacts::new(100, 140, 2, data));
+    let h = |facts: &mut Facts, items: &[Raw]| {
+        dict(facts).h_items = items.to_vec();
+    };
+    for (items, placed) in [
+        (vec![int(100), int(40)], (100, 40)),
+        (vec![int(100), int(200)], (100, 200)),
+        (vec![int(100), int(39)], (100, 200)),
+        (vec![int(100), int(201)], (100, 200)),
+        (vec![int(100), int(-40)], (100, 200)),
+        (vec![int(100), Raw::Real(40.0)], (100, 200)),
+        (vec![int(100)], (100, 200)),
+        // No stream listed where `/H` says, or its offset no integer: as it
+        // says, 0 for what isn't one.
+        (vec![int(99), int(7)], (99, 7)),
+        (vec![Raw::Real(100.0), int(7)], (0, 7)),
+    ] {
+        h(&mut facts, &items);
+        assert_eq!(facts.hint_extent(), placed, "{items:?}");
+    }
+    let most = |facts: &mut Facts| {
+        h(facts, &[int(100), int(999)]);
+        let (_, most) = facts.hint_extent();
+        let told = findings(facts).iter().find_map(|finding| match *finding {
+            Finding::HintExtent { most, .. } => Some(most),
+            _ => None,
+        });
+        assert_eq!(Some(most), told);
+        most
+    };
+    assert_eq!(most(&mut facts), 200);
+    // 5 listed again, nearer, by the main section: its first row stands.
+    main_section(&mut facts).rows.push(row(5, 150));
+    assert_eq!(most(&mut facts), 200);
+    // A hybrid's stream listing 4 where its table has it free: the stream's
+    // row stands.
+    let section = first_section(&mut facts);
+    section.hybrid = vec![row(4, 250)];
+    section.rows.push(RowFacts::new(4, 0, RowEntry::Free));
+    assert_eq!(most(&mut facts), 150);
+    // The main section a table at 200, before them.
+    let main = main_section(&mut facts);
+    (main.at, main.kind) = (200, Kind::Table);
+    assert_eq!(most(&mut facts), 100);
+    // 6 right at the stream's end: it takes its own bytes, no more.
+    first_section(&mut facts).rows.push(row(6, 140));
+    assert_eq!(most(&mut facts), 40);
+    // Nothing listed after the stream, no table after it: to the end.
+    let section = first_section(&mut facts);
+    (section.kind, section.rows, section.hybrid) = (Kind::Stream, vec![row(2, 100)], vec![]);
+    facts.main = None;
+    assert_eq!(most(&mut facts), 900);
+    // No first object: nothing's said of /H, and 0 for both.
+    facts.first_object = None;
+    assert_eq!(facts.hint_extent(), (0, 0));
+}
+
+/// The shared object table's first object, placed wrong, says where it is,
+/// or that nothing lists it in use.
+#[test]
+fn the_shared_tables_first_object_says_where_it_is() {
+    let at = |computed| {
+        let finding = Finding::SharedFirstAt {
+            number: 7,
+            hint: 100,
+            computed,
+        };
+        finding.to_string()
+    };
+    assert_eq!(
+        at(Some(90)),
+        "the shared object table has its first object past the first page, 7, at 100, where it's at 90 as if the hint stream weren't there (ISO 32000-2, F.4.3)"
+    );
+    assert_eq!(
+        at(None),
+        "the shared object table has its first object past the first page, 7, at 100, where nothing lists it in use (ISO 32000-2, F.4.3)"
+    );
+}
+
 #[test]
 fn sections_missing_are_told() {
     fires(
@@ -893,7 +1066,7 @@ fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
     let key = KeyName::new(b"X");
     let attribute = Attribute::Rotate;
     let all: Vec<(Finding, Option<Place>)> = vec![
-        (Finding::Version, None),
+        (Finding::Version, Some(Key(DictKey::Linearized))),
         (
             Finding::LengthNotFile { l: 1, len: 2 },
             Some(Key(DictKey::L)),
@@ -909,7 +1082,7 @@ fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
                 page: 77,
                 computed: 2,
             },
-            Some(Page(77)),
+            Some(Key(DictKey::O)),
         ),
         (Finding::PageCount { n: 1, pages: 2 }, Some(Key(DictKey::N))),
         (
@@ -936,7 +1109,7 @@ fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
                 least: 2,
                 most: 3,
             },
-            Some(Byte(77)),
+            Some(Key(DictKey::H)),
         ),
         (Finding::NoSections, None),
         (Finding::NoMainSection, None),
@@ -971,7 +1144,7 @@ fn a_finding_says_where_and_by_what_clause_apart_from_its_message() {
                 page: 77,
                 number: 2,
             },
-            Some(Page(77)),
+            Some(Object(2)),
         ),
         (
             Finding::UncompressedAfterCompressed { number: 77 },
