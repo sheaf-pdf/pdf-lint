@@ -6,7 +6,8 @@
 # checks, those that name resources, and a byte PDFium reads as white-space;
 # and what fonts and color spaces are made of, the keys and names their
 # reads and the model's functions of Latin characters and colorants look
-# for.
+# for; and a linearization dictionary's keys, which say where what's
+# linearized ends, which an update follows.
 "obj"
 "endobj"
 "stream\x0a"
@@ -134,3 +135,7 @@
 "/Process"
 "/HalftoneType"
 "/All"
+"/L"
+"/H"
+"/E"
+"/O"

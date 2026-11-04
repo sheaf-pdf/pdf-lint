@@ -696,7 +696,8 @@ fn an_object_stream_is_held_as_any_object() {
 /// object is, by its number: `--last-update` holds none of it where the
 /// update doesn't write its number, and where the update does, listing it
 /// where it was, holds it, and carries a fault in it from the revision
-/// before, which had it.
+/// before, which had it. Its `/L` is no revision's length, which the
+/// linearization's check finds there too.
 #[test]
 fn the_last_update_holds_a_linearization_dictionary_where_it_writes_its_number() {
     let dir = folder();
@@ -730,7 +731,12 @@ fn the_last_update_holds_a_linearization_dictionary_where_it_writes_its_number()
     let paged = updated(&original, &[(3, rotated)]);
     let whole = report(&[], "linearized-paged.pdf", &paged);
     let found = &whole["findings"];
-    assert_eq!(found.as_array().unwrap().len(), 1, "{whole}");
+    assert_eq!(found.as_array().unwrap().len(), 2, "{whole}");
+    assert_eq!(
+        (&found[1]["rule"], &found[1]["key"]),
+        (&json!("linearization"), &json!("L")),
+        "{whole}"
+    );
     assert_eq!(
         (&found[0]["table"], &found[0]["key"], &found[0]["path"]),
         (
@@ -766,7 +772,8 @@ fn the_last_update_holds_a_linearization_dictionary_where_it_writes_its_number()
     );
     let last = report(&["--last-update"], "linearized-listed.pdf", &listed);
     assert_eq!(last["findings"], json!([]), "{last}");
-    assert_eq!(last["carried"], json!(1), "{last}");
+    // The `/E` and the `/L`, alike but for its digits.
+    assert_eq!(last["carried"], json!(2), "{last}");
     let tables = &last["tables"];
     assert_eq!(tables["LinearizationParameterDict"], json!(1), "{last}");
     assert_eq!(tables["ArrayOf_2Integers"], json!(1), "{last}");
@@ -2593,4 +2600,176 @@ fn a_linearizations_departures_are_counted_and_found_when_asked() {
     let plain = written(&dir, "plain.pdf", &file(&[CATALOG, PAGES]));
     let report = json(&["--format", "json", plain.to_str().unwrap()]);
     assert_eq!(report["linearized"], json!(null));
+}
+
+/// A file of one page linearized by pdf-linearize, its `/E` made 1 and
+/// zeros, so that it isn't where the first page ends: an error (ISO
+/// 32000-2, Table F.1); and its linearization dictionary's number and
+/// where it starts, its first object.
+fn linearized_wrongly() -> (Vec<u8>, u32, usize) {
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let plain = file(&[CATALOG, PAGES, page]);
+    let options = pdf_linearize::family::Options::DEFAULT;
+    let mut out = pdf_linearize::family::linearize_bytes(&plain, &[], &options).unwrap();
+    let find = |bytes: &[u8], what: &[u8]| (bytes.windows(what.len())).position(|w| w == what);
+    let e = find(&out, b"/E ").unwrap() + 3;
+    let digits = out[e..].iter().take_while(|b| b.is_ascii_digit()).count();
+    out[e] = b'1';
+    out[e + 1..e + digits].fill(b'0');
+    let obj = find(&out, b" 0 obj").unwrap();
+    let start = out[..obj]
+        .iter()
+        .rposition(|b| !b.is_ascii_digit())
+        .unwrap()
+        + 1;
+    let n = text(&out[start..obj]).parse().unwrap();
+    (out, n, start)
+}
+
+/// `file`, as [`linearized_wrongly`] makes it, with an incremental update
+/// after it, by hand: its catalog written again with a `/PageLayout`, and,
+/// where `listed` gives the linearization dictionary's number and where it
+/// is, that number listed there, so that `--last-update` holds it.
+fn linearized_updated(file: &[u8], listed: Option<(u32, usize)>) -> Vec<u8> {
+    use pdf_lint::Source;
+    let doc = pdf_lint::bytes::read(file);
+    let trailer = doc.trailer.dict();
+    let root = trailer.get(b"Root").and_then(|r| r.as_reference()).unwrap();
+    let pages = (doc.get(root).unwrap().as_dict().unwrap().get(b"Pages"))
+        .and_then(|p| p.as_reference())
+        .unwrap();
+    let size = trailer.get(b"Size").and_then(|s| s.as_integer()).unwrap();
+    let text = String::from_utf8_lossy(file);
+    let previous = text.rsplit("startxref").next().unwrap();
+    let previous: usize = previous.split_whitespace().next().unwrap().parse().unwrap();
+    let mut out = file.to_vec();
+    let at = out.len();
+    out.extend_from_slice(
+        format!(
+            "{} 0 obj\n<< /Type /Catalog /Pages {} 0 R /PageLayout /SinglePage >>\nendobj\n",
+            root.0, pages.0
+        )
+        .as_bytes(),
+    );
+    let xref = out.len();
+    let mut rows = vec![(root.0, at)];
+    rows.extend(listed);
+    rows.sort_unstable();
+    let mut table = String::from("xref\n0 1\n0000000000 65535 f \n");
+    for (n, offset) in rows {
+        table.push_str(&format!("{n} 1\n{offset:010} 00000 n \n"));
+    }
+    out.extend_from_slice(table.as_bytes());
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {size} /Root {} 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n",
+            root.0
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// The rules, tables and keys of a JSON report's findings, in order.
+fn rules(report: &Value) -> Vec<(String, String, String)> {
+    (report["findings"].as_array().unwrap().iter())
+        .map(|f| {
+            let field = |name: &str| f[name].as_str().unwrap().to_string();
+            (field("rule"), field("table"), field("key"))
+        })
+        .collect()
+}
+
+/// A linearized file updated after: checked whole, that the update voids
+/// the linearization is found, in the trailer, and what's wrong with the
+/// linearization as first written, in its dictionary, its verdict that it's
+/// updated. `--last-update` finds the first, which the update answers for,
+/// and of an update that lists the dictionary's number where it was, so
+/// holds it, carries the second, which the revision before, the file as
+/// linearized, has.
+#[test]
+fn an_update_after_a_linearization_answers_for_voiding_it() {
+    let dir = folder();
+    let report = |args: &[&str], name: &str, bytes: &[u8]| -> Value {
+        let path = written(&dir, name, bytes);
+        let args = [args, &["--format", "json", path.to_str().unwrap()]].concat();
+        serde_json::from_slice(&run(&args).stdout).unwrap()
+    };
+    let (original, n, at) = linearized_wrongly();
+    let as_written = report(&[], "linearized.pdf", &original);
+    let wrong = |table: &str| {
+        (
+            "linearization".to_string(),
+            table.to_string(),
+            "E".to_string(),
+        )
+    };
+    let voided = (
+        "updated".to_string(),
+        "FileTrailer".to_string(),
+        "-".to_string(),
+    );
+    let lin = wrong("LinearizationParameterDict");
+    assert!(rules(&as_written).contains(&lin), "{as_written}");
+    assert_eq!(as_written["linearized"], json!("fails"));
+    let updated = linearized_updated(&original, None);
+    let whole = report(&[], "linearized-updated.pdf", &updated);
+    let found = rules(&whole);
+    assert!(found.contains(&lin) && found.contains(&voided), "{whole}");
+    assert_eq!(whole["linearized"], json!("updated"));
+    let last = report(&["--last-update"], "linearized-updated.pdf", &updated);
+    assert_eq!(rules(&last), std::slice::from_ref(&voided), "{last}");
+    assert_eq!(last["carried"], json!(0), "{last}");
+    assert_eq!(last["linearized"], json!("updated"));
+
+    let listing = linearized_updated(&original, Some((n, at)));
+    let last = report(&["--last-update"], "linearized-listing.pdf", &listing);
+    assert_eq!(rules(&last), [voided], "{last}");
+    assert_eq!(last["carried"], json!(1), "{last}");
+    let tables = &last["tables"];
+    assert_eq!(tables["LinearizationParameterDict"], json!(1), "{last}");
+}
+
+/// A linearized file's update, set against the file as linearized by
+/// `--baseline`, finds that it voids the linearization, and carries what's
+/// wrong with the linearization as first written, by number, as the
+/// baseline has it; and an allowance of `updated` leaves the first out,
+/// what's wrong with the linearization still found.
+#[test]
+fn an_update_after_a_linearization_is_set_against_its_baseline_and_allowed() {
+    let dir = folder();
+    let (original, _, _) = linearized_wrongly();
+    let base = written(&dir, "linearized.pdf", &original);
+    let updated = linearized_updated(&original, None);
+    let path = written(&dir, "linearized-updated.pdf", &updated);
+    let path = path.to_str().unwrap();
+    let json = |args: &[&str]| -> Value {
+        let out = run(&[args, &["--format", "json", path]].concat());
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let voided = (
+        "updated".to_string(),
+        "FileTrailer".to_string(),
+        "-".to_string(),
+    );
+    let lin = (
+        "linearization".to_string(),
+        "LinearizationParameterDict".to_string(),
+        "E".to_string(),
+    );
+    let whole = json(&[]);
+    let carried = rules(&whole).len() - 1;
+    let report = json(&["--baseline", base.to_str().unwrap()]);
+    assert_eq!(rules(&report), std::slice::from_ref(&voided), "{report}");
+    assert_eq!(report["carried"], json!(carried), "{report}");
+
+    let allow = written(
+        &dir,
+        "allow.tsv",
+        b"# test\nFileTrailer\t-\tupdated\t*\t*\tthe test's\n",
+    );
+    let report = json(&["--allow", allow.to_str().unwrap()]);
+    let found = rules(&report);
+    assert!(found.contains(&lin) && !found.contains(&voided), "{report}");
+    assert_eq!(report["allowed"], json!(1), "{report}");
 }

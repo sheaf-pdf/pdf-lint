@@ -49,7 +49,9 @@
 //! to ISO 32000-2's Annex F through pdf-linearize's check: its sections, its
 //! hint tables, its first page and what each page reaches, against what
 //! they say of each other, told as one finding a kind, and whether it holds
-//! ([`Report::linearized`]).
+//! ([`Report::linearized`]); one linearized as first written and updated
+//! after has that told, which voids the linearization (F.1), and is held
+//! to the annex as it was first written.
 
 pub mod allowance;
 pub mod check;

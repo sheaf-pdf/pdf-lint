@@ -14,9 +14,20 @@
 //! ([`Report::linearized`](super::Report::linearized)). One that's
 //! linearized by pdf-linearize's test, its `/Linearized` 1 and its `/L` its
 //! length, has what the check tells found, and the verdict, holds or fails,
-//! by whether an error is among it; one that isn't taken for linearized has
-//! only what's wrong with `/Linearized` or `/L` as a value found, and no
-//! verdict.
+//! by whether an error is among it. One linearized as first written and
+//! updated after ([`first_written`]), its `/L` its first revision's, has
+//! that found ([`Rule::Updated`]), in the newest trailer, so that the update
+//! answers for it, and what the check tells of the file as first written,
+//! its first bytes read as a file of their own
+//! ([`Reads::first_written`](super::reading::Reads::first_written)), found
+//! as a linearized file's is, of what's held, where a place in a stream's
+//! data whose number a later revision lists has no bytes; its verdict, that
+//! it's updated. What pdf-linearize says of the whole, that `/L` isn't its
+//! length and an update follows, isn't found, as that's what `updated`
+//! says. One that isn't taken for linearized otherwise has what the check
+//! tells of it found, what's wrong with `/Linearized` or `/L` as a value,
+//! an `/L` that isn't the file's length nor its first revision's, and an
+//! update after it, a departure; its verdict, that it isn't taken.
 //!
 //! What the check tells is a [`Rule::Linearization`] finding, an error
 //! always ([`Grade::Error`]) and a departure that readers get past only
@@ -27,26 +38,27 @@
 //! `LinearizationParameterDict` and its path the dictionary's, at its first
 //! place ([`Places`]), its value pdf-linearize's words, which cite the
 //! clause, with how many times it was told, every one counted
-//! ([`Kept::keep_each`]), held where the dictionary is. What's wrong with one of the dictionary's values as a value, or
-//! `/H`'s count of items, is what the model holds the dictionary to too:
-//! it's found only where the walk found nothing by the model's rules in
-//! the dictionary at that key, or for `/H`'s count, at or inside its array
-//! ([`Walk::find_told`]). A hint stream whose data is encrypted and not
-//! decrypted, and a file whose bytes the source didn't give, are counted as
-//! not checked, once, where the dictionary is held.
+//! ([`Kept::keep_each`]), held where the dictionary is. What's wrong with
+//! one of the dictionary's values as a value, or `/H`'s count of items, is
+//! what the model holds the dictionary to too: it's found only where the
+//! walk found nothing by the model's rules in the dictionary at that key,
+//! or for `/H`'s count, at or inside its array ([`Walk::find_told`]). A hint
+//! stream whose data is encrypted and not decrypted, and a file whose bytes
+//! the source didn't give, are counted as not checked, once, where the
+//! dictionary is held.
 
 use std::collections::{HashMap, HashSet};
 
 use pdf_linearize::check::{DictKey, Facts, FirstObject, Grade, HintData, Place, Raw, RowEntry};
 use pdf_linearize::hint::located;
-use pdf_linearize::{Finding as Fault, Kind, Limits};
+use pdf_linearize::{Finding as Fault, Kind, Limits, Verdict};
 
 use super::content::times;
 use super::kept::{Kept, Where};
 use super::told::Told;
 use super::{Finding, Linearized, Rule, Walk, entry_at, first_object, linearization, object_path};
 use crate::object::{Object, ObjectId, Span, Value};
-use crate::source::Source;
+use crate::source::{Revision, Source};
 
 /// The table a linearization's findings are in: the model's for the
 /// dictionary that says a file is linearized (Table F.1).
@@ -84,13 +96,27 @@ fn of_the_model(fault: &Fault) -> bool {
     )
 }
 
-/// Whether `fault` is told of a file that says it's linearized and isn't
-/// taken for one: what's wrong with `/Linearized` or `/L` as a value.
-fn of_a_claim(fault: &Fault) -> bool {
-    matches!(
-        fault,
-        Fault::Version | Fault::BadValue { .. } | Fault::Indirect { .. }
-    )
+/// How many bytes of the file were linearized as first written, where an
+/// update after them voids that (ISO 32000-2, F.1, Table F.1): of a claim
+/// whose `/Linearized` pdf-linearize takes, its integer part 1, and whose
+/// `/L` is an integer that isn't the file's length from its header, but
+/// that ends the first of `revisions` from there, at the `%%EOF` after its
+/// last section or past the line end right after it ([`Revision::end`]),
+/// and a later revision after it. None otherwise.
+fn first_written(facts: &Facts, revisions: &[Revision]) -> Option<usize> {
+    let first = facts.first_object.as_ref()?;
+    let version = match first.linearized {
+        Raw::Integer(version) => version == 1,
+        Raw::Real(version) => version.floor() == 1.0,
+        _ => false,
+    };
+    let len = facts.header.checked_add(number(Some(&first.l))?)?;
+    if !version || len == facts.len || revisions.len() < 2 {
+        return None;
+    }
+    let len = usize::try_from(len).ok()?;
+    let (eof, line) = revisions.first()?.end?;
+    (eof..=line).contains(&len).then_some(len)
 }
 
 /// Where `fault` is said of, as pdf-linearize places it, but that a
@@ -173,11 +199,69 @@ fn next_after(facts: &Facts, at: u64) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// The file a linearization's facts are read of, as the places they give
+/// are found in it ([`Places`]): the file the check reads, or the file as
+/// it was first written, read as a file of its own
+/// ([`Reads::first_written`](super::reading::Reads::first_written)).
+pub(super) trait Placing {
+    /// How many bytes it has.
+    fn size(&self) -> usize;
+
+    /// Each object it lists, by number and generation.
+    fn ids(&self) -> Vec<ObjectId>;
+
+    /// Object `id`, where it reads.
+    fn object(&self, id: ObjectId) -> Option<&Object>;
+
+    /// Where object `id` was read from, its bytes.
+    fn record(&self, id: ObjectId) -> Option<Span>;
+
+    /// Stream `id`'s data, decoded, where it decodes cleanly.
+    fn decoded(&self, id: ObjectId) -> Option<Vec<u8>>;
+}
+
+/// The file the check reads, as its source has it.
+struct Checked<'a>(&'a dyn Source);
+
+impl Placing for Checked<'_> {
+    fn size(&self) -> usize {
+        self.0.size().unwrap_or(0)
+    }
+
+    fn ids(&self) -> Vec<ObjectId> {
+        self.0.ids()
+    }
+
+    fn object(&self, id: ObjectId) -> Option<&Object> {
+        self.0.get(id).ok()
+    }
+
+    fn record(&self, id: ObjectId) -> Option<Span> {
+        self.0.record(id).map(|record| record.at)
+    }
+
+    fn decoded(&self, id: ObjectId) -> Option<Vec<u8>> {
+        self.0.decoded_within(id, usize::MAX)?.ok()
+    }
+}
+
+/// Whether one of `later`, revisions after the one a linearization's facts
+/// are of, lists number `n`, or may: one whose numbers aren't known.
+fn listed_in(later: &[Revision], n: u32) -> bool {
+    (later.iter())
+        .any(|r| (r.numbers.as_ref()).is_none_or(|numbers| numbers.binary_search(&n).is_ok()))
+}
+
 /// Where each place pdf-linearize gives a finding is in the file, as a
 /// finding has its bytes ([`Places::at`]).
 struct Places<'a> {
-    source: &'a dyn Source,
-    /// The linearization dictionary, as the file has it at its number.
+    source: &'a dyn Placing,
+    /// The revisions after the one the facts are of: a place in a stream's
+    /// data whose number one of them lists has no bytes, as the file's
+    /// stream at that number is another.
+    later: &'a [Revision],
+    /// The linearization dictionary, as the file the facts are of has it
+    /// at its number.
     dict: Option<&'a Object>,
     /// The hint stream's number, where something's listed at `/H`.
     hint: Option<u32>,
@@ -198,8 +282,14 @@ struct Places<'a> {
 
 impl<'a> Places<'a> {
     /// The places of what `facts`, of the file `source` reads, say, its
-    /// linearization dictionary `dict`.
-    fn new(source: &'a dyn Source, facts: &Facts, dict: Option<&'a Object>) -> Places<'a> {
+    /// linearization dictionary the object at `dict`, `later` the
+    /// revisions after it.
+    fn new(
+        source: &'a dyn Placing,
+        later: &'a [Revision],
+        facts: &Facts,
+        dict: ObjectId,
+    ) -> Places<'a> {
         let hint = facts.hint.as_ref();
         let mut tables = vec![(b"page offset".to_vec(), 0)];
         for (key, raw) in hint.iter().flat_map(|h| &h.keys) {
@@ -209,7 +299,8 @@ impl<'a> Places<'a> {
         }
         Places {
             source,
-            dict,
+            later,
+            dict: source.object(dict),
             hint: hint.map(|h| h.number),
             data: None,
             stream: extent(facts),
@@ -230,9 +321,17 @@ impl<'a> Places<'a> {
     }
 
     /// The bytes `place` gives, as the module says: none where there are
-    /// none, or they're past what was read.
+    /// none, they're past what was read, or they're in the data of a
+    /// stream whose number a later revision lists.
     fn at(&mut self, place: Option<Place>) -> Option<Span> {
-        let len = self.source.size().unwrap_or(0);
+        let at = self.placed(place)?;
+        let later = |(n, _): ObjectId| listed_in(self.later, n);
+        (!at.stream.is_some_and(later)).then_some(at)
+    }
+
+    /// The bytes `place` gives in the file the facts are of.
+    fn placed(&mut self, place: Option<Place>) -> Option<Span> {
+        let len = self.source.size();
         let byte = |at: u64| {
             let at = usize::try_from(at).ok().filter(|&at| at < len)?;
             Some(Span::new(None, at, at + 1))
@@ -261,7 +360,7 @@ impl<'a> Places<'a> {
             }
             Some(Place::HintKey(key)) => {
                 let id = self.id(self.hint?)?;
-                let written = self.source.get(id).ok()?;
+                let written = self.source.object(id)?;
                 let Value::Stream(stream) = written.value() else {
                     return None;
                 };
@@ -275,7 +374,7 @@ impl<'a> Places<'a> {
             }
             Some(Place::Object(n)) => {
                 let id = self.id(n)?;
-                self.source.record(id).map(|record| record.at)
+                self.source.record(id)
             }
             Some(Place::Byte(at)) => byte(at),
             _ => dict,
@@ -295,10 +394,7 @@ impl<'a> Places<'a> {
         if self.data.is_none() {
             let id = self.hint.and_then(|n| self.id(n));
             let source = self.source;
-            self.data = Some(id.and_then(|id| {
-                let data = source.decoded_within(id, usize::MAX)?.ok()?;
-                Some((id, data.len()))
-            }));
+            self.data = Some(id.and_then(|id| Some((id, source.decoded(id)?.len()))));
         }
         let (id, len) = self.data.flatten()?;
         let at = usize::try_from(at).ok().filter(|&at| at < len)?;
@@ -332,7 +428,9 @@ impl<'a> Walk<'a> {
     /// check judges it, where the check has the file's reading: what it
     /// tells found, and its verdict
     /// ([`Report::linearized`](super::Report::linearized)), as the module's
-    /// documentation says.
+    /// documentation says. Of a file linearized as first written and
+    /// updated after, that it was ([`Rule::Updated`]), and what the check
+    /// tells of the file as first written.
     pub(super) fn linearized(&mut self) {
         let Some(reads) = self.reads else {
             return;
@@ -343,10 +441,8 @@ impl<'a> Walk<'a> {
                 // The source failing, which a file in memory never does:
                 // counted where the file's first object would be told of.
                 let first = first_object(self.source).filter(|&(_, o)| linearization(o));
-                if let Some((id, _)) = first
-                    && self.made(Some(id)).is_some()
-                {
-                    self.unchecked("-", UNGIVEN.to_string(), TABLE, "-");
+                if let Some((id, _)) = first {
+                    self.ungiven(id);
                 }
                 return;
             }
@@ -355,21 +451,78 @@ impl<'a> Walk<'a> {
             return;
         };
         let id = (first.number, first.generation);
-        let dict = self.source.get(id).ok();
+        let revisions = self.source.revisions();
+        if let Some(len) = first_written(&facts, revisions) {
+            self.report.linearized = Some(Linearized::Updated);
+            self.updated(len, revisions);
+            match reads.first_written(len) {
+                Ok((facts, file)) => {
+                    let places = Places::new(file, &revisions[1..], &facts, id);
+                    self.judged(&facts, places, id);
+                }
+                Err(_) => self.ungiven(id),
+            }
+            return;
+        }
+        let newest = Checked(self.source);
+        let places = Places::new(&newest, &[], &facts, id);
+        let verdict = self.judged(&facts, places, id);
+        self.report.linearized = Some(match (verdict.linearized, verdict.holds) {
+            (false, _) => Linearized::NotTaken,
+            (true, true) => Linearized::Holds,
+            (true, false) => Linearized::Fails,
+        });
+    }
+
+    /// That the file was linearized as first written, its first `len`
+    /// bytes, and that the update after them, the second of `revisions`,
+    /// voids that ([`Rule::Updated`]): in the newest trailer, its table and
+    /// key `-`, at its bytes, held as the trailer is.
+    fn updated(&mut self, len: usize, revisions: &[Revision]) {
+        let Some(made) = self.made(self.trailer_id) else {
+            return;
+        };
+        let written = &self.source.trailer().object;
+        let table = match written.value() {
+            Value::Stream(_) => "XRefStream",
+            _ => "FileTrailer",
+        };
+        let at = revisions.get(1).map_or(0, |r| r.at);
+        self.report.findings.push(Finding {
+            object: self.trailer_id,
+            made,
+            path: "trailer".to_string(),
+            table: table.to_string(),
+            key: "-".to_string(),
+            rule: Rule::Updated,
+            value: format!(
+                "the file was linearized as first written, its first {len} bytes; the update after it, its section at byte {at}, voids that: it's read as an ordinary file (ISO 32000-2, F.1, Table F.1)"
+            ),
+            at: written.at,
+            revision: None,
+        });
+    }
+
+    /// Counted as not checked, where the linearization dictionary, `id`, is
+    /// held: the bytes its facts are read from that the source didn't give.
+    fn ungiven(&mut self, id: ObjectId) {
+        if self.made(Some(id)).is_some() {
+            self.unchecked("-", UNGIVEN.to_string(), TABLE, "-");
+        }
+    }
+
+    /// What pdf-linearize's check tells of `facts`, at `places`, found as
+    /// the module says, where the linearization dictionary, `id`, is held;
+    /// and its verdict.
+    fn judged(&mut self, facts: &Facts, places: Places<'_>, id: ObjectId) -> Verdict {
         let mut faults = Faults {
             kept: Kept::default(),
-            places: Places::new(self.source, &facts, dict),
+            places,
             object: id,
         };
-        let verdict = pdf_linearize::check(&facts, &LIMITS, &mut faults);
-        if verdict.linearized {
-            self.report.linearized = Some(match verdict.holds {
-                true => Linearized::Holds,
-                false => Linearized::Fails,
-            });
-        }
+        let verdict = pdf_linearize::check(facts, &LIMITS, &mut faults);
         let Some(made) = self.made(Some(id)) else {
-            return;
+            return verdict;
         };
         let locked = facts
             .hint
@@ -378,15 +531,15 @@ impl<'a> Walk<'a> {
         if verdict.linearized && locked {
             self.unchecked("-", LOCKED.to_string(), TABLE, "-");
         }
+        // The dictionary as the walk read it, for what the model holds it
+        // to: the file's, at its number.
+        let dict = self.source.get(id).ok();
         // What's found, in the order told: each kind's finding, or, of what
         // the model holds the dictionary to, its place among what's found
         // where the walk found nothing.
         let mut found: Vec<Result<Finding, usize>> = Vec::new();
         let mut tells = Vec::new();
         for (i, &(at, fault, n)) in faults.kept.told().iter().enumerate() {
-            if !verdict.linearized && !of_a_claim(&fault) {
-                continue;
-            }
             let key = key(place(&fault));
             if fault.grade() != Grade::Error && !self.departures {
                 let at = (TABLE.to_string(), key);
@@ -432,6 +585,7 @@ impl<'a> Walk<'a> {
             Err(i) => stood.remove(&i),
         });
         self.report.findings.extend(found);
+        verdict
     }
 }
 
@@ -440,13 +594,14 @@ mod tests {
     //! What's found of a linearized file's linearization, where, and as
     //! whose: files linearized by pdf-linearize, a byte changed in each, or
     //! a value of its hint tables, the hint stream's data stored as it is,
-    //! so that a change keeps its length.
+    //! so that a change keeps its length; and those files updated after, by
+    //! pdf-structure's writer.
 
     use pdf_linearize::check::{HintFacts, RowFacts, SectionFacts};
     use pdf_linearize::family::{self, linearize_bytes};
     use pdf_linearize::hint::{PageOffsets, SharedObjects};
     use pdf_structure::fixture::{self, Body, Xref};
-    use pdf_structure::write::Deflate;
+    use pdf_structure::write::{self, Base, Deflate};
 
     use super::*;
     use crate::bytes::{self, WithReading};
@@ -658,8 +813,7 @@ mod tests {
     /// departure counted, and its linearization dictionary is its first
     /// object, as `--full` says too. Its document alone, which a check
     /// reads no linearization of, has no verdict; nor has the file before
-    /// it was linearized, nor one whose `/L` isn't its length, which isn't
-    /// taken for linearized.
+    /// it was linearized.
     #[test]
     fn a_linearized_file_that_holds_has_nothing_found() {
         let file = linearized(&three_pages(), &[]);
@@ -683,10 +837,6 @@ mod tests {
         assert!(!alone.to_string().contains("linearized:"));
         let before = checked(&three_pages());
         assert_eq!((told(&before), before.linearized), (vec![], None));
-        // An `/L` that isn't the file's length: not taken for linearized,
-        // so nothing of it is held to Annex F.
-        let longer = checked(&written_as(&file, "/L 1805", "/L 1806"));
-        assert_eq!((told(&longer), longer.linearized), (vec![], None));
     }
 
     /// Each error pdf-linearize's check tells is found once, in the
@@ -981,10 +1131,11 @@ mod tests {
 
     /// What the model holds the dictionary to that pdf-linearize says too
     /// is found by the model alone: an `/L` that's no integer (`type`), so
-    /// that the file isn't taken for linearized and has no verdict; a
-    /// `/Linearized` not 1 (`value`), likewise; and an `/H` of three items,
-    /// the model's `missing` inside the array, at `ArrayOf_4Integers`' `3`,
-    /// what else pdf-linearize says of that `/H` found.
+    /// that the file isn't taken for linearized, and nothing else is found
+    /// of it; a `/Linearized` not 1 (`value`), likewise; and an `/H` of
+    /// three items, the model's `missing` inside the array, at
+    /// `ArrayOf_4Integers`' `3`, what else pdf-linearize says of that `/H`
+    /// found.
     #[test]
     fn what_the_model_finds_in_the_dictionary_isnt_found_again() {
         let file = linearized(&three_pages(), &[]);
@@ -995,13 +1146,14 @@ mod tests {
                 .collect()
         };
         let report = checked(&written_as(&file, "/L 1805", "/L (xx)"));
-        assert_eq!((told(&report), report.linearized), (vec![], None));
+        let not_taken = Some(Linearized::NotTaken);
+        assert_eq!((told(&report), report.linearized), (vec![], not_taken));
         assert_eq!(
             model(&report),
             [(TABLE.to_string(), "L".to_string(), Rule::Type)]
         );
         let report = checked(&written_as(&file, "/Linearized 1", "/Linearized 2"));
-        assert_eq!((told(&report), report.linearized), (vec![], None));
+        assert_eq!((told(&report), report.linearized), (vec![], not_taken));
         assert_eq!(
             model(&report),
             [(TABLE.to_string(), "Linearized".to_string(), Rule::Value)]
@@ -1092,5 +1244,298 @@ mod tests {
             key: "-".to_string(),
         };
         assert_eq!(report.unchecked.get(&row), Some(&1), "{report}");
+    }
+
+    /// `file` with an update after it, by pdf-structure's writer: its
+    /// catalog written again with a `/PageLayout`, and `more`, each object
+    /// at its number.
+    fn updated_with(file: &[u8], more: &[(ObjectId, Object)]) -> Vec<u8> {
+        let reading = bytes::Reading::open(file, &bytes::Options::DEFAULT).unwrap();
+        let root = (reading.trailer().dict().get(b"Root"))
+            .and_then(Object::as_reference)
+            .unwrap();
+        let mut catalog = reading.get(root).unwrap().clone();
+        catalog
+            .as_dict_mut()
+            .unwrap()
+            .set("PageLayout", "SinglePage");
+        let bodies = [(root, &catalog)]
+            .into_iter()
+            .chain(more.iter().map(|(id, o)| (*id, o)));
+        let bodies = bodies.map(|(id, object)| (id, write::Body::from(object)));
+        let base = Base::of(&reading).unwrap();
+        let mut out = file.to_vec();
+        write::update(
+            &mut out,
+            &base,
+            bodies,
+            None,
+            None,
+            &write::Options::DEFAULT,
+        )
+        .unwrap();
+        out
+    }
+
+    fn updated(file: &[u8]) -> Vec<u8> {
+        updated_with(file, &[])
+    }
+
+    /// A finding's object, path, table, key, how it's made and value.
+    type Voided<'r> = (Option<ObjectId>, &'r str, &'r str, &'r str, Made, &'r str);
+
+    /// The findings of [`Rule::Updated`], as [`Voided`] has them.
+    fn voided(report: &Report) -> Vec<Voided<'_>> {
+        (report.findings.iter())
+            .filter(|f| f.rule == Rule::Updated)
+            .map(|f| {
+                let (path, table, key) = (f.path.as_str(), f.table.as_str(), f.key.as_str());
+                (f.object, path, table, key, f.made, f.value.as_str())
+            })
+            .collect()
+    }
+
+    /// What [`Rule::Updated`] says of `file`, linearized as its first
+    /// `len` bytes, and updated after.
+    fn updated_value(file: &[u8], len: usize) -> String {
+        let reading = bytes::Reading::open(file, &bytes::Options::DEFAULT).unwrap();
+        let at = reading.revisions()[1].at;
+        format!(
+            "the file was linearized as first written, its first {len} bytes; the update after it, its section at byte {at}, voids that: it's read as an ordinary file (ISO 32000-2, F.1, Table F.1)"
+        )
+    }
+
+    /// A file linearized, then updated: that it was is found once, in the
+    /// newest trailer, from it, its table's and key `-`, merged, at the
+    /// trailer's bytes; the file as first written holds, so nothing of its
+    /// linearization is found, nor what pdf-linearize says of the whole,
+    /// that `/L` isn't its length and an update follows; and its verdict is
+    /// that it's updated. Updated again, it's found once all the same, of
+    /// the first update. Its document alone has neither. Updated otherwise,
+    /// its section elsewhere, it's alike, its digits aside. (The hint
+    /// stream, which nothing refers to, is unreached, as in any linearized
+    /// file.)
+    #[test]
+    fn a_linearized_file_updated_after_is_found_so_and_held_as_first_written() {
+        let file = linearized(&three_pages(), &[]);
+        let once = updated(&file);
+        let report = checked(&once);
+        let value = updated_value(&once, file.len());
+        let trailer = bytes::read(&once).trailer;
+        let table = match trailer.object.value() {
+            Value::Stream(_) => "XRefStream",
+            _ => "FileTrailer",
+        };
+        let found = (
+            trailer.stream,
+            "trailer",
+            table,
+            "-",
+            Made::Merged,
+            value.as_str(),
+        );
+        assert_eq!(voided(&report), [found], "{report}");
+        let finding = report.findings.iter().find(|f| f.rule == Rule::Updated);
+        assert_eq!(finding.unwrap().at, trailer.object.at);
+        assert_eq!(told(&report), [], "{report}");
+        // But for the hint stream, which nothing refers to, as before.
+        let rules: Vec<_> = report.findings.iter().map(|f| f.rule).collect();
+        assert_eq!(rules, [Rule::Updated, Rule::Unreached], "{report}");
+        assert!(report.departures.is_empty(), "{report}");
+        assert_eq!(report.linearized, Some(Linearized::Updated));
+        assert!(report.to_string().contains("  linearized: updated\n"));
+        let twice = updated(&once);
+        let again = checked(&twice);
+        assert_eq!(voided(&again).len(), 1, "{again}");
+        assert_eq!(voided(&again)[0].5, updated_value(&once, file.len()));
+        assert_eq!(told(&again), [], "{again}");
+        assert_eq!(again.linearized, Some(Linearized::Updated));
+        let read = WithReading::new(&once[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let alone = check(
+            read.document(),
+            &Hold::All(Made::Merged),
+            &Options::default(),
+        );
+        assert_eq!((voided(&alone), alone.linearized), (vec![], None));
+        // Another update, its section at another byte, is alike: what one
+        // check of it found, another carries.
+        let other = updated_with(&file, &[((99, 0), dict! { "Other" => 1 }.into())]);
+        let other = checked(&other);
+        assert_ne!(voided(&other)[0].5, voided(&report)[0].5);
+        let since = other.since(&report);
+        assert!(since.iter().all(|f| f.rule != Rule::Updated), "{since:?}");
+    }
+
+    /// A hint table's error as first written is found after an update as
+    /// before it, at the same bytes of the hint stream's data, beside that
+    /// the update voids the linearization; and, where the update writes
+    /// over the hint stream's number, at none, as the file's stream at that
+    /// number is the update's.
+    #[test]
+    fn an_error_as_first_written_is_found_after_an_update() {
+        let file = linearized(&three_pages(), &[]);
+        // Page 1's length one byte more than its objects take.
+        let file = with_hint_data(&file, |facts, data| {
+            pages_changed(facts, data, |table| {
+                let least = u64::from(table.header.min_length);
+                let page = &mut table.pages[1];
+                page.length = least + ((page.length - least) ^ 1);
+            });
+        });
+        let before = checked(&file);
+        assert_eq!(before.linearized, Some(Linearized::Fails));
+        assert_eq!(told(&before).len(), 3, "{before}");
+        let report = checked(&updated(&file));
+        assert_eq!(told(&report), told(&before), "{report}");
+        assert_eq!(voided(&report).len(), 1, "{report}");
+        assert_eq!(report.linearized, Some(Linearized::Updated));
+        let hint = facts(&file).hint.unwrap().number;
+        let over = updated_with(&file, &[((hint, 0), dict! { "Hint" => 1 }.into())]);
+        let report = checked(&over);
+        let unplaced: Vec<_> = (told(&before).into_iter())
+            .map(|(key, value, _)| (key, value, None))
+            .collect();
+        assert_eq!(told(&report), unplaced, "{report}");
+        assert_eq!(voided(&report).len(), 1, "{report}");
+    }
+
+    /// A first revision whose `/L` counts the CR of the CR LF after its
+    /// `%%EOF`, not the LF, is the file as first written all the same, and
+    /// what follows it an update that voids it; the file as first written
+    /// is its bytes up to `/L`, so it holds.
+    #[test]
+    fn an_l_that_counts_a_cr_before_an_lf_ends_the_first_revision() {
+        let mut file = linearized(&three_pages(), &[]);
+        assert!(file.ends_with(b"%%EOF\n"));
+        let len = file.len();
+        file.insert(len - 1, b'\r');
+        let report = checked(&updated(&file));
+        assert_eq!(told(&report), [], "{report}");
+        let value = updated_value(&updated(&file), len);
+        assert_eq!(voided(&report).len(), 1, "{report}");
+        assert_eq!(voided(&report)[0].5, value);
+        assert_eq!(report.linearized, Some(Linearized::Updated));
+    }
+
+    /// A claim that isn't taken has what pdf-linearize tells of it found:
+    /// a file of one revision with a NUL after its `%%EOF` line, which the
+    /// reader says too, whose `/L` isn't the file's length, nor is
+    /// anything updated after it; one whose `/L` is past the file's
+    /// length; and updated, that `/L` isn't its length still, and that an
+    /// update follows, a departure, found only when asked for. Its verdict
+    /// is that it isn't taken.
+    #[test]
+    fn a_claim_not_taken_has_what_pdf_linearize_tells_of_it_found() {
+        let file = linearized(&three_pages(), &[]);
+        let not_taken = Some(Linearized::NotTaken);
+        let nul = [&file[..], b"\0"].concat();
+        let report = checked(&nul);
+        let length = |len: usize| {
+            let value = format!(
+                "/L is 1805, where the file is {len} bytes from its header (ISO 32000-2, Table F.1)"
+            );
+            ("L".to_string(), value, entry(&file, "/L 1805"))
+        };
+        let told_owned = |report: &Report| -> Vec<(String, String, Option<Span>)> {
+            (told(report).into_iter())
+                .map(|(key, value, at)| (key.to_string(), value.to_string(), at))
+                .collect()
+        };
+        assert_eq!(told_owned(&report), [length(1806)], "{report}");
+        assert!(
+            (report.findings.iter()).any(|f| f.rule == Rule::Reader),
+            "{report}"
+        );
+        assert_eq!((voided(&report), report.linearized), (vec![], not_taken));
+        let past = written_as(&file, "/L 1805", "/L 1806");
+        let report = checked(&past);
+        let value =
+            "/L is 1806, where the file is 1805 bytes from its header (ISO 32000-2, Table F.1)";
+        assert_eq!(told(&report), [("L", value, entry(&past, "/L 1806"))]);
+        assert_eq!((voided(&report), report.linearized), (vec![], not_taken));
+        assert!(report.departures.is_empty(), "{report}");
+        // Updated: `/L` is no revision's length, and an update follows.
+        let past = updated(&past);
+        let report = checked(&past);
+        let value = format!(
+            "/L is 1806, where the file is {} bytes from its header (ISO 32000-2, Table F.1)",
+            past.len()
+        );
+        let at = entry(&past, "/L 1806");
+        assert_eq!(told(&report), [("L", value.as_str(), at)], "{report}");
+        let counted = BTreeMap::from([((TABLE.to_string(), "-".to_string()), 1)]);
+        assert_eq!(report.departures, counted, "{report}");
+        assert_eq!((voided(&report), report.linearized), (vec![], not_taken));
+        let asked = Options {
+            departures: true,
+            ..Options::default()
+        };
+        let report = checked_with(&past, &asked);
+        let update = bytes::Reading::open(&past[..], &bytes::Options::DEFAULT).unwrap();
+        let section = update.revisions()[1].at;
+        let departure = format!(
+            "an update is appended, its section at byte {section}: the hints may no longer hold (ISO 32000-2, G.7)"
+        );
+        let byte = Some(Span::new(None, section, section + 1));
+        assert_eq!(
+            told(&report),
+            [("L", value.as_str(), at), ("-", departure.as_str(), byte)],
+            "{report}"
+        );
+    }
+
+    /// A hold of an update's objects alone holds that it voids the
+    /// linearization, in the trailer, held as the trailer is, and not what's
+    /// wrong with the linearization as first written, in its dictionary,
+    /// which it doesn't hold; its verdict is the file's whatever's held.
+    #[test]
+    fn a_hold_of_an_update_holds_that_it_voids_the_linearization() {
+        let file = written_as(&linearized(&three_pages(), &[]), "/E 923", "/E 123");
+        let once = updated(&file);
+        let update = bytes::read(&once).update.unwrap();
+        let hold = Hold::Only(update.objects.iter().map(|&id| (id, Made::Built)).collect());
+        let read = WithReading::new(&once[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let report = check_with_reading(&read, &hold, &Options::default());
+        assert_eq!(voided(&report).len(), 1, "{report}");
+        assert_eq!(voided(&report)[0].4, Made::Merged);
+        assert_eq!(told(&report), [], "{report}");
+        assert_eq!(report.linearized, Some(Linearized::Updated));
+        let all = checked(&once);
+        assert_eq!(told(&all).len(), 1, "{all}");
+        assert_eq!(told(&all)[0].0, "E", "{all}");
+    }
+
+    /// What's of an object in the linearization as first written is at its
+    /// record there, in the file's bytes, which an update leaves as they
+    /// were, though the update writes that object anew: the hint stream at
+    /// generation 1, a departure, found when asked for at its record before
+    /// the update and after it alike.
+    #[test]
+    fn an_objects_place_as_first_written_is_its_record_then() {
+        let mut file = linearized(&three_pages(), &[]);
+        let hint = facts(&file).hint.unwrap();
+        let row = format!("{:010} 00000 n", hint.at);
+        let row = find(&file, row.as_bytes()) + "0000000000 0000".len();
+        file[row] = b'1';
+        let at = hint.at as usize + find(&file[hint.at as usize..], b" 0 obj") + 1;
+        file[at] = b'1';
+        let asked = Options {
+            departures: true,
+            ..Options::default()
+        };
+        let generation = |report: &Report| -> Vec<Option<Span>> {
+            (report.findings.iter())
+                .filter(|f| f.value.contains("at generation 1"))
+                .map(|f| f.at)
+                .collect()
+        };
+        let before = checked_with(&file, &asked);
+        let record = generation(&before);
+        assert_eq!(record.len(), 1, "{before}");
+        assert_eq!(record[0].map(|at| at.start), Some(hint.at as usize));
+        let over = updated_with(&file, &[((hint.number, 1), dict! { "Hint" => 1 }.into())]);
+        let after = checked_with(&over, &asked);
+        assert_eq!(generation(&after), record, "{after}");
+        assert_eq!(after.linearized, Some(Linearized::Updated));
     }
 }

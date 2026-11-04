@@ -145,8 +145,13 @@
 //! else it's counted only ([`Report::departures`]): each kind once, in the
 //! linearization dictionary's object, at its first place, with how many
 //! times. What it says of the dictionary's values gives way to what the
-//! walk found there by the model's rules. Whether the linearization holds
-//! is [`Report::linearized`].
+//! walk found there by the model's rules. A file linearized as first
+//! written, its `/L` its first revision's length, and updated after, has
+//! that found, in the newest trailer ([`Rule::Updated`]), as an update
+//! voids a linearization (F.1), and its linearization as first written
+//! judged as a linearized file's is, of the file's bytes up to `/L` read as
+//! a file of their own. Whether the linearization holds is
+//! [`Report::linearized`].
 //!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
@@ -1011,9 +1016,16 @@ pub enum Rule {
     /// wrong, a position, a length, a count, an identifier past its table,
     /// a value it can't read, is found; a departure that readers get past,
     /// as writers do it, only with [`Options::departures`], else counted
-    /// ([`Report::departures`]). Of a file whose first object says so but
-    /// isn't taken for linearized, a `/Linearized` not 1 or an `/L` that's
-    /// no direct integer is found. Each kind once, at its first place, its
+    /// ([`Report::departures`]). Of a file linearized as first written and
+    /// updated after ([`Rule::Updated`]), the same of the file as first
+    /// written, its bytes up to `/L`, read as a file of their own, where a
+    /// place in a stream's data whose number a later revision lists has no
+    /// bytes, as the file's stream there is another. Of a file whose first
+    /// object says so but isn't taken for linearized otherwise, a
+    /// `/Linearized` not 1, an `/L` that's no direct integer, or an `/L`
+    /// that's neither the file's length nor its first revision's, is found,
+    /// and where an update follows, that it does, a departure. Each kind
+    /// once, at its first place, its
     /// value pdf-linearize's words, which cite the clause, with how many
     /// times it's told; in the linearization dictionary's object, its table
     /// `LinearizationParameterDict` and its path the dictionary's, held
@@ -1035,6 +1047,19 @@ pub enum Rule {
     /// counted as not checked, its column and key `-`, where the dictionary
     /// is held, as is a file whose bytes the source didn't give.
     Linearization,
+    /// A file linearized as first written and updated after, where the
+    /// check has its reading ([`check_with_reading`]): its first object, a
+    /// dictionary with `/Linearized` 1 within its first 1,024 bytes, says
+    /// it's linearized, its `/L` isn't the file's length but its first
+    /// revision's, from its header to the `%%EOF` that ends it or past the
+    /// line end right after ([`Revision::end`]), and a later revision
+    /// follows. An update voids a linearization, and the file is read as
+    /// an ordinary one (ISO 32000-2, F.1, Table F.1). Found once, in the
+    /// newest trailer, its table and key `-`, at its bytes, so that the
+    /// update answers for it, held as the trailer is; and what's wrong with
+    /// the linearization as first written is found as a linearized file's
+    /// is ([`Rule::Linearization`]).
+    Updated,
 }
 
 /// A rule a held object breaks.
@@ -1221,9 +1246,10 @@ pub struct Report {
     /// ([`Rule::Linearization`]).
     pub departures: BTreeMap<(String, String), usize>,
     /// Whether the file is linearized (ISO 32000-2, Annex F), and whether
-    /// its linearization holds ([`Rule::Linearization`]), whatever's held:
-    /// none where its first object doesn't say it's linearized, where it
-    /// isn't taken for linearized, or where the check had no reading
+    /// its linearization holds ([`Rule::Linearization`]), or was linearized
+    /// as first written and updated after ([`Rule::Updated`]), or isn't
+    /// taken for linearized, whatever's held: none where its first object
+    /// doesn't say it's linearized, or where the check had no reading
     /// ([`check`]).
     pub linearized: Option<Linearized>,
 }
@@ -1238,9 +1264,12 @@ pub enum Linearized {
     /// Linearized, and an error found in its linearization
     /// ([`Rule::Linearization`]).
     Fails,
-    /// Linearized as first written, and voided by an update after it.
+    /// Linearized as first written, and voided by an update after it
+    /// ([`Rule::Updated`]): what's wrong with it as first written is
+    /// found, whether or not it held then.
     Updated,
-    /// Its first object says it's linearized, and it isn't taken for one.
+    /// Its first object says it's linearized, and it isn't taken for one,
+    /// nor was it as first written.
     NotTaken,
 }
 
@@ -1312,7 +1341,11 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
 /// F), as pdf-linearize's check judges it from the file's reading, under
 /// that crate's own caps, a whole read of the file among what it reads
 /// where the file is linearized ([`Rule::Linearization`],
-/// [`Report::linearized`]).
+/// [`Report::linearized`]); or, of one linearized as first written and
+/// updated after, that it was ([`Rule::Updated`]), and whether it held as
+/// first written, judged so of the file's first bytes, up to where its
+/// `/L` says, read as a file of their own under the file's reading's own
+/// limits.
 pub fn check_with_reading<S: ByteSource>(
     file: &WithReading<S>,
     hold: &Hold,
@@ -1679,7 +1712,8 @@ fn like(f: &Finding) -> (String, String, Rule, String) {
         | Rule::Xmp
         | Rule::ColorSpace
         | Rule::Font
-        | Rule::Linearization => content::uncounted(f.rule, &f.value),
+        | Rule::Linearization
+        | Rule::Updated => content::uncounted(f.rule, &f.value),
         rule if content::counted(rule, &f.key) => content::uncounted(rule, &f.value),
         _ => numberless(&f.value),
     };
@@ -4682,6 +4716,7 @@ impl Rule {
         Rule::ColorSpace,
         Rule::Font,
         Rule::Linearization,
+        Rule::Updated,
     ];
 
     /// Its name, as findings and allowances write it.
@@ -4715,6 +4750,7 @@ impl Rule {
             Rule::ColorSpace => "color-space",
             Rule::Font => "font",
             Rule::Linearization => "linearization",
+            Rule::Updated => "updated",
         }
     }
 
@@ -7868,8 +7904,9 @@ mod tests {
     /// one with Table F.1's keys, each of a type and value the model has, has
     /// no finding, and is counted, and so is its `/H`, an array of two
     /// integers, or of four. It needn't hold: its `/L` here isn't the file's
-    /// length. The file without it has two objects fewer, and its seven keys
-    /// and two elements.
+    /// length, which beside its reading is the one finding, of the
+    /// linearization, which isn't taken. The file without it has two
+    /// objects fewer, and its seven keys and two elements.
     #[test]
     fn a_linearization_dictionary_is_checked_from_its_number() {
         let (table, two, four) = (
@@ -7887,8 +7924,17 @@ mod tests {
         };
         let alone = check(&doc, &Hold::All(Made::Built), &options);
         let beside = check_with_reading(&read, &Hold::All(Made::Built), &options);
+        let told: Vec<_> = (beside.findings.iter())
+            .map(|f| (f.rule, f.key.as_str()))
+            .collect();
+        assert_eq!(told, [(Rule::Linearization, "L")], "{beside}");
+        assert_eq!(beside.linearized, Some(Linearized::NotTaken));
         for report in [&alone, &beside] {
-            assert_eq!(report.findings, [], "{report}");
+            let walked = report
+                .findings
+                .iter()
+                .filter(|f| f.rule != Rule::Linearization);
+            assert_eq!(walked.count(), 0, "{report}");
             assert_eq!(report.unlisted, BTreeMap::new(), "{report}");
             assert_eq!(report.unchecked, BTreeMap::new(), "{report}");
             assert_eq!(report.checked.get(table), Some(&1), "{report}");
@@ -8214,7 +8260,7 @@ mod tests {
 
     /// Each rule is the one its name names, as an allowance names it, and
     /// the newest, content's, the common structures', color spaces',
-    /// fonts' and a linearization's, are last.
+    /// fonts', a linearization's and an update's after it, are last.
     #[test]
     fn each_rule_is_named_by_its_name() {
         for &rule in Rule::ALL {
@@ -8223,7 +8269,8 @@ mod tests {
         }
         assert_eq!(Rule::named("packed"), Some(Rule::Packed));
         // Content's rules, then the common structures', then color spaces',
-        // fonts' and a linearization's, the newest last.
+        // fonts', a linearization's and an update's after it, the newest
+        // last.
         let newest = [
             Rule::Balance,
             Rule::Marked,
@@ -8238,6 +8285,7 @@ mod tests {
             Rule::ColorSpace,
             Rule::Font,
             Rule::Linearization,
+            Rule::Updated,
         ];
         assert!(Rule::ALL.ends_with(&newest));
         let names: Vec<_> = newest.iter().map(|r| r.name()).collect();
@@ -8256,7 +8304,8 @@ mod tests {
                 "xmp",
                 "color-space",
                 "font",
-                "linearization"
+                "linearization",
+                "updated"
             ]
         );
         assert_eq!(Rule::named("Packed"), None);

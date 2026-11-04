@@ -14,6 +14,7 @@ use pdf_lint::{
     Document, Finding, Hold, Linearized, Made, Options, Rule, check, check_with_reading,
 };
 use pdf_structure::qpdf::Qpdf;
+use pdf_structure::write;
 
 /// qpdf, which these tests need: `PDF_LINT_QPDF`, else `qpdf` on the
 /// `PATH`. They're ignored, so that `cargo test` needs no qpdf, and run by
@@ -114,6 +115,58 @@ fn what_qpdf_linearizes_holds() {
             assert_eq!(
                 report.linearized,
                 Some(Linearized::Holds),
+                "{test}, {streams}"
+            );
+        }
+    }
+}
+
+/// What qpdf linearizes, with object streams and without, then updated by
+/// pdf-structure's writer, its catalog written again: that the update voids
+/// the linearization is found, once, and the file as first written holds,
+/// so nothing of its linearization is.
+#[test]
+#[ignore = "needs qpdf: just test-qpdf"]
+fn what_qpdf_linearizes_then_updated_is_found_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = std::env::var_os("PDF_LINT_QPDF").unwrap_or_else(|| "qpdf".into());
+    for test in ["qpdf-plain", "qpdf-compressed"] {
+        let path = fixture(test);
+        qpdf(&path);
+        for streams in ["disable", "generate"] {
+            let out = dir.path().join(format!("{test}-{streams}.pdf"));
+            let status = std::process::Command::new(&program)
+                .arg("--linearize")
+                .arg(format!("--object-streams={streams}"))
+                .args([&path, &out])
+                .status()
+                .unwrap();
+            assert!(status.success(), "{test}, {streams}: qpdf {status}");
+            let data = std::fs::read(&out).unwrap();
+            let reading = bytes::Reading::open(&data[..], &bytes::Options::DEFAULT).unwrap();
+            let root = (reading.trailer().dict().get(b"Root"))
+                .and_then(|r| r.as_reference())
+                .unwrap();
+            let mut catalog = reading.get(root).unwrap().clone();
+            catalog
+                .as_dict_mut()
+                .unwrap()
+                .set("PageLayout", "SinglePage");
+            let base = write::Base::of(&reading).unwrap();
+            let bodies = [(root, write::Body::from(&catalog))];
+            let options = write::Options::DEFAULT;
+            let mut updated = data.clone();
+            write::update(&mut updated, &base, bodies, None, None, &options).unwrap();
+            let read = WithReading::new(&updated[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let report = check_with_reading(&read, &Hold::All(Made::Merged), &Options::default());
+            let found: Vec<_> = (report.findings.iter())
+                .filter(|f| matches!(f.rule, Rule::Linearization | Rule::Updated))
+                .map(|f| f.rule)
+                .collect();
+            assert_eq!(found, [Rule::Updated], "{test}, {streams}: {report}");
+            assert_eq!(
+                report.linearized,
+                Some(Linearized::Updated),
                 "{test}, {streams}"
             );
         }

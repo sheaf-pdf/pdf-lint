@@ -7,9 +7,10 @@
 //! finds, what its fonts' streams say of their text and what their reads
 //! find, what an earlier revision's objects that a later one wrote over or
 //! freed tell, read as that revision was written, and what a linearized
-//! file's linearization is, moving nothing else a check of its document
-//! alone finds, which reads no stream's data, no earlier revision and no
-//! linearization ([`reading_alone`]); and set against its
+//! file's linearization is, or was before an update voided it, moving
+//! nothing else a check of its document alone finds, which reads no
+//! stream's data, no earlier revision and no linearization
+//! ([`reading_alone`]); and set against its
 //! previous revision, read as it was written, when it has an incremental
 //! update. It reads under
 //! small limits ([`options`], and 4 MiB of content and 4 MiB of fonts'
@@ -19,12 +20,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use pdf_structure::write;
+
 use crate::bytes::{self, WithReading};
 use crate::check::{
     Exempt, Finding, Hold, Made, Options, Report, Rule, Unchecked, UnlistedIn, WRITTEN_OVER, check,
     check_with_reading,
 };
-use crate::object::{ObjectId, Span};
+use crate::object::{Object, ObjectId, Span};
 use crate::pdf_crypt;
 use crate::pdf_crypt::writer::{Kind, Settings};
 use crate::source::{Document, Source, Update};
@@ -211,7 +214,8 @@ fn latin_row(row: &Unchecked) -> bool {
 /// read, as a null is no entry.
 ///
 /// What a linearized file's linearization is: its findings
-/// ([`Rule::Linearization`]), its rows not checked, their column `-`, its
+/// ([`Rule::Linearization`]), that an update voided it
+/// ([`Rule::Updated`]), its rows not checked, their column `-`, its
 /// departures counted and its verdict, of which alone has none.
 fn reading_alone(beside: &Report, alone: &Report) {
     // Where alone counts an earlier revision's object not read, by table
@@ -235,7 +239,7 @@ fn reading_alone(beside: &Report, alone: &Report) {
     let others = |report: &Report| -> Vec<Finding> {
         (report.findings.iter())
             .filter(|f| !CONTENT.contains(&f.rule) && f.rule != Rule::Font && !cap_height(f))
-            .filter(|f| f.rule != Rule::Linearization)
+            .filter(|f| !matches!(f.rule, Rule::Linearization | Rule::Updated))
             .filter(|f| !earlier(f))
             .cloned()
             .collect()
@@ -280,7 +284,7 @@ fn reading_alone(beside: &Report, alone: &Report) {
         "none read alone"
     );
     assert!(
-        (alone.findings.iter()).all(|f| f.rule != Rule::Linearization)
+        (alone.findings.iter()).all(|f| !matches!(f.rule, Rule::Linearization | Rule::Updated))
             && alone.departures.is_empty()
             && alone.linearized.is_none(),
         "a linearization judged where no reading is"
@@ -403,9 +407,12 @@ fn within(
 /// it for each rule of content to find, and a page's content encrypted; a
 /// cross-reference stream with extensions declared and XMP metadata; an
 /// object stream whose header starts two objects inside another's bytes; an
-/// incremental update; and encrypted files, one of them with an object
-/// stream whose data isn't encrypted, so that its objects' strings are in
-/// the clear. Each begins with the two bytes that choose how it's checked,
+/// incremental update, and one that writes again the information
+/// dictionary the earlier trailer names; the page linearized, its
+/// linearization holding, and then updated, which voids it; and encrypted
+/// files, one of them with an object stream whose data isn't encrypted, so
+/// that its objects' strings are in the clear. Each begins with the two
+/// bytes that choose how it's checked,
 /// all clear, as the `check` and `structure` targets take them; the `write`
 /// target's take a third ([`write_seeds`]).
 pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
@@ -531,6 +538,7 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         format!("<< /Type /Halftone /HalftoneType 5 /Default {screen} /All {screen} >>"),
     ];
     let id = "<0123456789abcdef0123456789abcdef>";
+    let (linearized, linearized_updated) = linearized(&page);
     let mut seeds = vec![
         ("page", file(&page, "").0),
         ("form", file(&form, "").0),
@@ -547,6 +555,9 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         ("object-streams-lzw", object_streams(false)),
         ("object-streams-overlapping", overlapping()),
         ("update", update()),
+        ("update-info", info_written_again()),
+        ("linearized", linearized),
+        ("linearized-updated", linearized_updated),
         (
             "encrypted",
             file(&encrypted, &format!("/Encrypt 4 0 R /ID [{id} {id}]")).0,
@@ -1049,9 +1060,66 @@ fn update() -> Vec<u8> {
     out
 }
 
+/// A file whose first revision's trailer names an information dictionary,
+/// and an incremental update that writes that dictionary again: so that the
+/// earlier trailer's `/Info` is read as its revision had it.
+fn info_written_again() -> Vec<u8> {
+    let original = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        "<< /Title (First) >>",
+    ];
+    let (mut out, previous) = file(&original, "/Info 4 0 R");
+    let offsets = body(&mut out, &["<< /Title (Second) /Author (A) >>"], 4);
+    let at = out.len();
+    table(&mut out, 4, &offsets);
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size 5 /Root 1 0 R /Info 4 0 R /Prev {previous} >>\nstartxref\n{at}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// A file of `objects` linearized by pdf-linearize, its linearization
+/// holding; and that file with an incremental update after it, by
+/// pdf-structure's writer, its catalog written again with a `/PageLayout`,
+/// which voids the linearization as first written.
+fn linearized(objects: &[impl AsRef<[u8]>]) -> (Vec<u8>, Vec<u8>) {
+    let (plain, _) = file(objects, "");
+    let options = pdf_linearize::family::Options::DEFAULT;
+    let linearized =
+        pdf_linearize::family::linearize_bytes(&plain, &[], &options).expect("the seed linearizes");
+    let reading = bytes::Reading::open(&linearized[..], &bytes::Options::DEFAULT)
+        .expect("a file in memory reads");
+    let root = (reading.trailer().dict().get(b"Root"))
+        .and_then(Object::as_reference)
+        .expect("it has a catalog");
+    let mut catalog = reading.get(root).expect("its catalog reads").clone();
+    if let Some(dict) = catalog.as_dict_mut() {
+        dict.set("PageLayout", "SinglePage");
+    }
+    let base = write::Base::of(&reading).expect("it can be updated");
+    let mut updated = linearized.clone();
+    let bodies = [(root, write::Body::from(&catalog))];
+    write::update(
+        &mut updated,
+        &base,
+        bodies,
+        None,
+        None,
+        &write::Options::DEFAULT,
+    )
+    .expect("the update is written");
+    (linearized, updated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check::Linearized;
 
     /// The rules that find what's in the common structures: name and number
     /// trees, the page tree, a viewer's pages, and XMP metadata.
@@ -1148,6 +1216,24 @@ mod tests {
                 .map(|&(rule, at)| (rule, at.to_string()))
                 .collect();
             assert_eq!(graphics, made, "{name}: {report}");
+            // A document alone has no reading, so no linearization is
+            // judged, nor is an earlier revision's object that a later one
+            // wrote again read: the information dictionary and the catalog
+            // the updates write again, which their earlier trailers name,
+            // are counted as not checked.
+            let judged = (report.findings.iter())
+                .any(|f| matches!(f.rule, Rule::Linearization | Rule::Updated));
+            assert!(!judged && report.linearized.is_none(), "{name}: {report}");
+            let over: Vec<_> = (report.unchecked.iter())
+                .filter(|(row, _)| row.why == WRITTEN_OVER)
+                .map(|(row, &n)| (row.column, row.key.as_str(), n))
+                .collect();
+            let counted: &[_] = match name {
+                "update-info" => &[("Type", "Info", 1)],
+                "linearized-updated" => &[("Required", "Info", 1), ("Type", "Root", 1)],
+                _ => &[],
+            };
+            assert_eq!(over, counted, "{name}: {report}");
             check_file(&seed);
         }
         // Those that open, open, and their object stream reads.
@@ -1208,7 +1294,9 @@ mod tests {
     /// fonts' streams say ([`reading_alone`]), and says how many units of
     /// content it read, where one of its document alone reads none. The
     /// content seeds' content has each rule of content finding something;
-    /// the rest is clean.
+    /// the rest is clean. Beside its reading, the linearized seed holds,
+    /// the one updated after has that found, and the earlier trailers'
+    /// objects written again since are read as their revisions had them.
     #[test]
     fn the_seeds_read_alike_beside_their_readings() {
         for (name, seed) in seeds() {
@@ -1232,13 +1320,35 @@ mod tests {
             // structure's page; the two pages' one unit, the form, the
             // pattern and the two glyphs; the encrypted page.
             let read = match name {
-                "page" => 2,
+                "page" | "linearized" | "linearized-updated" => 2,
                 "structure" | "content-encrypted" => 1,
                 "content" => 5,
                 _ => 0,
             };
             assert_eq!((beside.content, alone.content), (read, 0), "{name}");
             reading_alone(&beside, &alone);
+            // The linearized seed holds, and nothing of its linearization
+            // is found; updated, that the update voids it is, once, and the
+            // linearization as first written holds; and what an earlier
+            // trailer names that a later revision wrote again is read as
+            // its revision had it, none counted as not checked.
+            let linearized = match name {
+                "linearized" => Some(Linearized::Holds),
+                "linearized-updated" => Some(Linearized::Updated),
+                _ => None,
+            };
+            assert_eq!(beside.linearized, linearized, "{name}: {beside}");
+            let judged: Vec<_> = (beside.findings.iter())
+                .filter(|f| matches!(f.rule, Rule::Linearization | Rule::Updated))
+                .map(|f| f.rule)
+                .collect();
+            let voided: &[_] = match name {
+                "linearized-updated" => &[Rule::Updated],
+                _ => &[],
+            };
+            assert_eq!(judged, voided, "{name}: {beside}");
+            let over = (beside.unchecked.keys()).any(|row| row.why == WRITTEN_OVER);
+            assert!(!over, "{name}: {beside}");
             let found: BTreeSet<&str> = (beside.findings.iter())
                 .filter(|f| CONTENT.contains(&f.rule))
                 .map(|f| f.rule.name())

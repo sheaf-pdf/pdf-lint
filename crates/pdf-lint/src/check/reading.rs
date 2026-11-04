@@ -3,14 +3,16 @@
 //! revision had at a number a later revision wrote over or freed, read
 //! from the file as that revision was written ([`Reading::prefix`]); and
 //! the facts of the file's linearization, as pdf-linearize reads them from
-//! its bytes ([`family::facts`]).
+//! its bytes ([`family::facts`]), or from the file as it was first
+//! written, where an update after its linearization voids it.
 
 use std::cell::{Cell, OnceCell};
 
 use pdf_linearize::family;
 
+use super::linearization::Placing;
 use crate::bytes::{ByteSource, Limits, Prefix, Reading, WithReading};
-use crate::object::{Object, ObjectId};
+use crate::object::{Object, ObjectId, Span};
 use crate::source::{Revision, Source};
 
 /// How many earlier revisions' readings a check opens at most, the newest
@@ -43,6 +45,19 @@ pub(super) trait Reads {
     /// whole read. Read anew each time it's asked; an error only where the
     /// source doesn't give the bytes asked of it.
     fn linearization(&self) -> Result<pdf_linearize::Facts, family::Error>;
+
+    /// The file's first `len` bytes, read as a file of their own under the
+    /// file's reading's own limits ([`Reading::prefix`]), and the facts
+    /// pdf-linearize judges them by, as [`Reads::linearization`] reads
+    /// them: at the end of the first revision, the file as it was first
+    /// written, for its linearization as that. Opened the first time it's
+    /// asked for, and kept, a check asking for one length alone; its facts
+    /// read anew each time. An error only where the source doesn't give
+    /// the bytes asked of it.
+    fn first_written(
+        &self,
+        len: usize,
+    ) -> Result<(pdf_linearize::Facts, &dyn Placing), family::Error>;
 }
 
 /// The file as an earlier revision was written, read: its first bytes, as
@@ -71,6 +86,11 @@ pub(super) struct Readings<'f, S> {
     opened: Cell<usize>,
     /// How many entries those list in all.
     entries: Cell<usize>,
+    /// The file as it was first written, for its linearization, under the
+    /// file's reading's own limits, once it's been asked for
+    /// ([`Reads::first_written`]): no reading of an earlier revision's
+    /// objects, and none of the caps theirs are under.
+    first: OnceCell<AsWritten<'f, S>>,
 }
 
 impl<'f, S: ByteSource> Readings<'f, S> {
@@ -91,6 +111,7 @@ impl<'f, S: ByteSource> Readings<'f, S> {
             each: revisions.iter().map(|_| OnceCell::new()).collect(),
             opened: Cell::new(0),
             entries: Cell::new(0),
+            first: OnceCell::new(),
         }
     }
 
@@ -121,6 +142,48 @@ impl<S: ByteSource> Reads for Readings<'_, S> {
 
     fn linearization(&self) -> Result<pdf_linearize::Facts, family::Error> {
         family::facts(self.reading, &pdf_linearize::Limits::DEFAULT)
+    }
+
+    fn first_written(
+        &self,
+        len: usize,
+    ) -> Result<(pdf_linearize::Facts, &dyn Placing), family::Error> {
+        let first = match self.first.get() {
+            Some(first) => first,
+            None => {
+                let limits = self.reading.limits();
+                let opened = (self.reading.prefix(len, limits)).map_err(family::Error::Read)?;
+                self.first.get_or_init(|| opened)
+            }
+        };
+        let facts = family::facts(first, &pdf_linearize::Limits::DEFAULT)?;
+        Ok((facts, first))
+    }
+}
+
+/// A file's reading, as a linearization's places are found in it: each
+/// object read and kept as [`Reading::get`] reads it, so that its record is
+/// known.
+impl<S: ByteSource> Placing for Reading<S> {
+    fn size(&self) -> usize {
+        Reading::size(self)
+    }
+
+    fn ids(&self) -> Vec<ObjectId> {
+        Reading::ids(self).collect()
+    }
+
+    fn object(&self, id: ObjectId) -> Option<&Object> {
+        self.get(id).ok()
+    }
+
+    fn record(&self, id: ObjectId) -> Option<Span> {
+        self.get(id).ok()?;
+        Reading::record(self, id).map(|record| record.at)
+    }
+
+    fn decoded(&self, id: ObjectId) -> Option<Vec<u8>> {
+        self.decoded_within(id, usize::MAX).ok()
     }
 }
 
