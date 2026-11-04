@@ -1429,13 +1429,17 @@ pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
 }
 
 /// An operand read with a sink that keeps its faults reads as it does
-/// without, its faults inside it, in the order of their ends; a sink that
-/// wants none is told none; and an operand that's no array or
-/// dictionary, whose faults are its token's, has none told here.
+/// without, its faults inside it, in the order of their ends, and told
+/// with no object made the same, in the same order; a sink that wants
+/// none is told none; and an operand that's no array or dictionary, whose
+/// faults are its token's, has none told here.
 fn faulted_operand(s: &[u8], operand: &Operand, limits: &Limits) {
     let mut kept = Collected::default();
     let read = operand.object_with(limits, &mut kept);
     assert_eq!(read, operand.object(limits), "the same object");
+    let mut told = Collected::default();
+    operand.faults_with(limits, &mut told);
+    assert_eq!(told.0, kept.0, "the same faults with no object made");
     let r = operand.range();
     for (at, _) in &kept.0 {
         assert!(r.start <= at.start && at.end <= r.end, "{at:?} in {r:?}");
@@ -1446,6 +1450,7 @@ fn faulted_operand(s: &[u8], operand: &Operand, limits: &Limits) {
     }
     let mut unwanted = Unwanted::default();
     operand.object_with(limits, &mut unwanted);
+    operand.faults_with(limits, &mut unwanted);
     assert!(unwanted.0.is_empty(), "none told where none is wanted");
 }
 

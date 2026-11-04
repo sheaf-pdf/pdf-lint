@@ -4707,6 +4707,66 @@ fn a_sink_that_wants_none_is_told_none() {
     assert!(!Sink::wants(&()));
 }
 
+/// What's inside an operand, told with no object made
+/// ([`Operand::faults_with`]), is what reading it as an object tells
+/// ([`Operand::object_with`]): the same faults in the same order at the
+/// same places, of every operand of the moved tests' contents and the
+/// fuzz target's seeds, and of arrays and dictionaries holding each kind
+/// of fault, keys with no value, keys that are no names, and words that
+/// are no objects, at any depth; under the default caps, a cap on depth of
+/// two and on values of three, past which nothing more is told; and a
+/// sink that wants none is told none.
+#[test]
+fn an_operands_faults_told_with_no_object_made_are_its_readings() {
+    let res = ResCx::new([(b"CS3".to_vec(), 3)]);
+    let mut inputs = moved_inputs();
+    inputs.extend(
+        [
+            &b"[(a\rb) <4G> /F#3G 1.2.3 4294967296 --5 ) } x [1] (c)] TJ"[..],
+            b"[<< /A 1.2.3 /B >> << /C 1 2 >> << (k) 1 >> << /D x >>] d",
+            b"/P <</A [1 [2 /N#00 [3 <<>> ]]] /B <</C 1e5 /D (x\ry)>> /E>> BDC",
+            b"/P <</A <</B <</C <</D 9999999999>>>>>>>> /F --1>> BDC",
+            b"[1 2 3 4 5 6 --7 (8\r) <9x>] TJ [/a#4 /b /c] TJ",
+        ]
+        .map(<[u8]>::to_vec),
+    );
+    let mut long = b"[".to_vec();
+    long.extend_from_slice(&b"9".repeat(300));
+    long.extend_from_slice(b" (");
+    long.extend_from_slice(&b"\\".repeat(17_000));
+    long.extend_from_slice(b") /");
+    long.extend_from_slice(&b"n".repeat(300));
+    long.extend_from_slice(b"] TJ");
+    inputs.push(long);
+    let caps = [
+        Limits::DEFAULT,
+        deep(2),
+        Limits {
+            values: 3,
+            ..Limits::DEFAULT
+        },
+    ];
+    let mut operands = 0;
+    for s in &inputs {
+        for lim in &caps {
+            let page = Concat::new(&[s]);
+            for op in page.operations(&res, lim).flatten() {
+                for operand in op.operands() {
+                    let (mut read, mut told) = (Collected::default(), Collected::default());
+                    operand.object_with(lim, &mut read);
+                    operand.faults_with(lim, &mut told);
+                    assert_eq!(told.0, read.0, "{operand:?} under {lim:?}");
+                    let mut unwanted = Unwanted::default();
+                    operand.faults_with(lim, &mut unwanted);
+                    assert_eq!(unwanted.0, [], "{operand:?}");
+                    operands += usize::from(!read.0.is_empty());
+                }
+            }
+        }
+    }
+    assert!(operands > 20, "{operands} operands told something");
+}
+
 /// A sink borrowed, and a `dyn` one, are sinks.
 #[test]
 fn a_dyn_sink_is_a_sink() {

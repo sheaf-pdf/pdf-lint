@@ -165,17 +165,48 @@ impl<'a> Operand<'a> {
         limits: &Limits,
         sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Option<Object> {
-        let mut read = Reading {
-            s: self.bytes,
-            base: self.at,
-            values: limits.values,
-            past: false,
-            sink,
-            open: Vec::new(),
-            read: None,
-        };
+        let mut read = Reading::new(self, limits, sink, true);
         walk(self.bytes, 0, TOP, limits.depth, false, &mut read)?.ok()?;
         read.read?
+    }
+
+    /// What's inside it, told to `sink` as
+    /// [`object_with`](Operand::object_with) tells it, with no object made:
+    /// the same faults, in the same order, at the same places, under the
+    /// same caps, for a reader that wants the faults alone. Nothing is
+    /// read into an object, so a string's bytes aren't read, nor a name's
+    /// escapes decoded, and nothing is kept.
+    ///
+    /// ```
+    /// use pdf_content_streams::fault::{Fault, Sink};
+    /// use pdf_content_streams::{Limits, ResCx, operations};
+    /// use std::ops::Range;
+    ///
+    /// #[derive(Default)]
+    /// struct Collected<'a>(Vec<(Range<usize>, Fault<'a>)>);
+    /// impl<'a> Sink<'a> for Collected<'a> {
+    ///     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>) {
+    ///         self.0.push((at, fault));
+    ///     }
+    /// }
+    ///
+    /// let content = b"[(a) 1.2.3 (b)] TJ";
+    /// let res = ResCx::none();
+    /// let limits = Limits::DEFAULT;
+    /// let tj = operations(content, &res, &limits).next().unwrap().unwrap();
+    /// let (mut told, mut read) = (Collected::default(), Collected::default());
+    /// tj.arg(0).unwrap().faults_with(&limits, &mut told);
+    /// tj.arg(0).unwrap().object_with(&limits, &mut read);
+    /// assert_eq!(told.0, [(5..10, Fault::Number { written: b"1.2.3" })]);
+    /// assert_eq!(told.0, read.0);
+    /// ```
+    pub fn faults_with(&self, limits: &Limits, sink: &mut (impl Sink<'a> + ?Sized)) {
+        // What doesn't want faults is told none.
+        if !sink.wants() {
+            return;
+        }
+        let mut read = Reading::new(self, limits, sink, false);
+        walk(self.bytes, 0, TOP, limits.depth, false, &mut read);
     }
 
     /// An array's elements, as written, each where it is, in order, as
@@ -386,7 +417,7 @@ pub fn object(operand: &[u8], limits: &Limits) -> Option<Object> {
 /// An operand being read as an object, built from a [`walk`]'s steps:
 /// where it is in the content, how many more values it may hold, the sink
 /// told where ISO 32000-2 would read what's inside it otherwise, what's
-/// open, and what's read.
+/// open, and what's read, if it's made.
 struct Reading<'a, 's, S: ?Sized> {
     /// The operand's bytes.
     s: &'a [u8],
@@ -401,8 +432,30 @@ struct Reading<'a, 's, S: ?Sized> {
     /// Each array or dictionary open, the outermost first.
     open: Vec<Partial>,
     /// What's read, once it is: an object, or None for what's none. None
-    /// throughout once it's read more values than it may.
+    /// throughout once it's read more values than it may, and where it
+    /// isn't made.
     read: Option<Option<Object>>,
+    /// Whether what's read is made, or only told where ISO 32000-2 reads
+    /// it otherwise: what's open, the values counted and a key's place are
+    /// kept either way, as what's told depends on them, and nothing else.
+    make: bool,
+}
+
+impl<'a, 's, S: Sink<'a> + ?Sized> Reading<'a, 's, S> {
+    /// None read yet of `operand`, under `limits`' cap on values, told to
+    /// `sink`, made if `make`.
+    fn new(operand: &Operand<'a>, limits: &Limits, sink: &'s mut S, make: bool) -> Self {
+        Reading {
+            s: operand.bytes,
+            base: operand.at,
+            values: limits.values,
+            past: false,
+            sink,
+            open: Vec::new(),
+            read: None,
+            make,
+        }
+    }
 }
 
 /// An array or a dictionary being read: what it holds so far, and a
@@ -432,7 +485,8 @@ impl<'a, S: Sink<'a> + ?Sized> Visit<'a> for Reading<'a, '_, S> {
         match event {
             Event::Leaf(token) => {
                 self.inside(token);
-                self.put(leaf(token));
+                let value = if self.make { leaf(token) } else { None };
+                self.put(value);
             }
             Event::Word(token) => {
                 // A key with no value: `>>` read for it.
@@ -454,7 +508,10 @@ impl<'a, S: Sink<'a> + ?Sized> Visit<'a> for Reading<'a, '_, S> {
             }),
             Event::Key(token) => {
                 self.inside(token);
-                let key = name(token.bytes).map_or_else(Vec::new, Cow::into_owned);
+                let key = match self.make {
+                    true => name(token.bytes).map_or_else(Vec::new, Cow::into_owned),
+                    false => Vec::new(),
+                };
                 let place = token.range();
                 if let Some(Partial::Dict(_, pending)) = self.open.last_mut() {
                     *pending = Some((key, place));
@@ -478,7 +535,8 @@ impl<'a, S: Sink<'a> + ?Sized> Visit<'a> for Reading<'a, '_, S> {
                     Some(Partial::Dict(dict, _)) => Value::Dict(dict),
                     None => return,
                 };
-                self.put(Some(Object::new(value)));
+                let value = self.make.then(|| Object::new(value));
+                self.put(value);
             }
             Event::Unmade => {
                 self.open.pop();
