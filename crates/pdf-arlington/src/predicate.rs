@@ -37,7 +37,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::hash::{BuildHasher, RandomState};
+use std::hash::BuildHasher;
 use std::num::ParseIntError;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -45,6 +45,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use pdf_color::Colorant;
 use pdf_objects::{Dict, Form, Object, ObjectId, Resolve, Span, Str, Value, Version};
+use rustc_hash::FxBuildHasher;
 
 use crate::grammar::{At, Grammar, Table, Wrap, WrapFn, split, version};
 
@@ -1044,9 +1045,6 @@ pub(crate) struct Parses {
     /// How many it's kept: past its room by a text a thread at most, where
     /// threads take slots at once.
     taken: AtomicUsize,
-    /// The texts' hashes, keyed afresh for each model as std's `HashMap`
-    /// keys its own.
-    hasher: RandomState,
 }
 
 /// A text kept, with its hash and its parse.
@@ -1069,7 +1067,6 @@ impl Parses {
             slots: (0..2 * room).map(|_| OnceLock::new()).collect(),
             room,
             taken: AtomicUsize::new(0),
-            hasher: RandomState::new(),
         }
     }
 
@@ -1081,7 +1078,10 @@ impl Parses {
 
     /// `text` kept, or kept now, when there's room to keep it.
     fn find(&self, text: &str) -> Option<&Kept> {
-        let hash = self.hasher.hash_one(text);
+        // The Fx hash, unkeyed: the texts are the model's rows' and the
+        // caller's own, never a file's, and a run of slots ends at the first
+        // free one or the slots' count, whatever they are.
+        let hash = FxBuildHasher.hash_one(text);
         let last = self.slots.len() - 1;
         // Any of the hash's bits will do, where a usize has fewer.
         let mut at = hash as usize & last;

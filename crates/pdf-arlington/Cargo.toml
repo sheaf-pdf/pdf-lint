@@ -18,6 +18,8 @@ include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md"]
 # that the family reads a colorant one way.
 pdf-color = { path = "../pdf-color", version = "0.1" }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
+# The hash a kept predicate is found by, rustc's: quick on short texts.
+rustc-hash = { version = "2.1", default-features = false }
 thiserror = "2"
 # XXH64, which names a model by its tables' bytes, without the crate's other
 # hashes, its random seeds or std.
