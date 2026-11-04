@@ -257,8 +257,8 @@ pub fn facts<S: ByteSource>(reading: &Reading<S>, limits: &Limits) -> Result<Fac
 /// The facts of the file `read` holds, as [`facts`] reads them of its reading
 /// ([`WithReading::reading`]), but the graph of its objects, which is made of
 /// the document read whole beside it ([`WithReading::document`]) rather than
-/// of a whole read made again: the same facts, as that document is the reading's
-/// whole read.
+/// of a whole read made again: the same facts, as that document is the
+/// reading's whole read.
 pub fn facts_with_reading<S: ByteSource>(
     read: &WithReading<S>,
     limits: &Limits,

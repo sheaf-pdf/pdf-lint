@@ -1533,7 +1533,8 @@ pub fn over(data: &[u8]) {
 const NEW: &str = "new";
 
 /// What [`over`] holds of `doc`, written under `encryptor` as `options` says,
-/// which `password` opens, or the empty one.
+/// which `password` opens, or the empty one: among it, that its facts read
+/// whole beside its reading are those of its reading alone.
 #[cfg(feature = "family")]
 fn written_back<S: pdf_structure::ByteSource>(
     reading: &pdf_structure::Reading<S>,
@@ -1547,7 +1548,7 @@ fn written_back<S: pdf_structure::ByteSource>(
     use pdf_semantics::Rules;
     use pdf_semantics::pages::{Inheritable, Origin, pages};
     use pdf_structure::Encryption;
-    use pdf_structure::bytes::{self, Reading};
+    use pdf_structure::bytes::{self, Reading, WithReading};
     use pdf_structure::write::Encryptor;
 
     use crate::family::{self, graph::Prepared};
@@ -1592,6 +1593,10 @@ fn written_back<S: pdf_structure::ByteSource>(
     assert_eq!(listed.len(), planned.page_count() as usize);
     // What's written holds, nothing that says otherwise of what a page reaches.
     let read = family::facts(&again, &Limits::DEFAULT).expect("it's in memory");
+    // The same facts of it read whole beside its reading.
+    let whole = WithReading::new(file, passwords, &bytes::Options::DEFAULT).expect("it reads");
+    let beside = family::facts_with_reading(&whole, &Limits::DEFAULT).expect("it's in memory");
+    assert_eq!(format!("{beside:?}"), format!("{read:?}"));
     let (verdict, findings) = judged_alike(&read, &Limits::DEFAULT);
     assert!(verdict.linearized && verdict.holds && verdict.hints_read);
     assert!(
@@ -1808,11 +1813,12 @@ fn lopdf_start() -> ::lopdf::Document {
 /// document of lopdf's, so its reader isn't what's under test: refused, with
 /// `out` as it was given, or written, its positions counted right, and what's
 /// written saying it's linearized and holding, nothing said but what a page
-/// doesn't have to push. It gives whether it wrote.
+/// doesn't have to push, its facts the same read whole beside its reading as of
+/// its reading alone. It gives whether it wrote.
 #[cfg(all(feature = "family", feature = "lopdf"))]
 pub fn lopdf_document(data: &[u8]) -> bool {
     use ::lopdf::{Dictionary, Object};
-    use pdf_structure::bytes::{self, Reading};
+    use pdf_structure::bytes::{self, Reading, WithReading};
 
     use crate::family;
 
@@ -1897,6 +1903,10 @@ pub fn lopdf_document(data: &[u8]) -> bool {
     let reading = Reading::open(file, &bytes::Options::DEFAULT).expect("it reads");
     assert!(reading.facts().linearized);
     let read = family::facts(&reading, &Limits::DEFAULT).expect("it's in memory");
+    // The same facts of it read whole beside its reading.
+    let whole = WithReading::new(file, &[], &bytes::Options::DEFAULT).expect("it reads");
+    let beside = family::facts_with_reading(&whole, &Limits::DEFAULT).expect("it's in memory");
+    assert_eq!(format!("{beside:?}"), format!("{read:?}"));
     let (verdict, findings) = judged_alike(&read, &Limits::DEFAULT);
     assert!(
         verdict.linearized && verdict.holds && verdict.hints_read,
