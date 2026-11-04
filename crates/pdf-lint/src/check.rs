@@ -637,7 +637,7 @@ pub enum Rule {
     /// A held object the walk never reached, and not under a key the
     /// model doesn't list, nor a linearized file's hint stream, which its
     /// linearization dictionary names by where it's written (ISO 32000-2,
-    /// F.3.6).
+    /// F.3.6), or what it refers to.
     Unreached,
     /// A reference to an object the file hasn't, or a trailer the file's
     /// newest cross-reference section doesn't give.
@@ -1971,7 +1971,8 @@ struct Walk<'a> {
     /// The objects referenced under keys the model doesn't list.
     under_unlisted: HashSet<ObjectId>,
     /// The hint streams the file's linearization dictionary names by where
-    /// they're written ([`hint_streams`]), which nothing refers to.
+    /// they're written, which nothing refers to, and what they refer to
+    /// ([`hint_streams`]).
     hint_streams: HashSet<ObjectId>,
     /// [`Options::one_table`].
     one_table: bool,
@@ -4120,8 +4121,9 @@ impl<'a> Walk<'a> {
 
     /// The held objects the walk never reached, each a [`Rule::Unreached`]
     /// finding but those referenced under a key the model doesn't list,
-    /// a linearized file's hint streams ([`hint_streams`]), and the file's
-    /// own structures it doesn't visit ([`left_out`]): an
+    /// a linearized file's hint streams and what they refer to
+    /// ([`hint_streams`]), and the file's own structures it doesn't visit
+    /// ([`left_out`]): an
     /// object stream it visits, and what it refers to is reached through
     /// it, as through any object. Its table and key are those it was
     /// referenced under in an object walked, else the key of a held object
@@ -4335,7 +4337,9 @@ fn linearization(object: &Object) -> bool {
 /// The hint streams `dict`, a file's linearization dictionary, names by
 /// where they're written, the offsets `/H` gives first and third (ISO
 /// 32000-2, F.3.6, Table F.1): each stream whose record starts at one of
-/// those bytes of the file's own. Nothing refers to one.
+/// those bytes of the file's own; and what their dictionaries refer to, a
+/// `/Length` written indirect. Nothing refers to a hint stream, and the
+/// walk visits none.
 fn hint_streams(source: &dyn Source, dict: &Object) -> HashSet<ObjectId> {
     let items = (dict.as_dict())
         .and_then(|d| d.get(b"H"))
@@ -4347,13 +4351,21 @@ fn hint_streams(source: &dyn Source, dict: &Object) -> HashSet<ObjectId> {
     if offsets.is_empty() {
         return HashSet::new();
     }
-    (source.ids().into_iter())
-        .filter(|&id| {
-            (source.record(id))
-                .is_some_and(|r| r.at.stream.is_none() && offsets.contains(&r.at.start))
-        })
-        .filter(|&id| matches!(source.get(id).map(Object::value), Ok(Value::Stream(_))))
-        .collect()
+    let mut found = HashSet::new();
+    for id in source.ids() {
+        let at = source.record(id).map(|r| r.at);
+        if !at.is_some_and(|at| at.stream.is_none() && offsets.contains(&at.start)) {
+            continue;
+        }
+        let object = source.get(id).ok();
+        if let Some(stream) = object.filter(|o| matches!(o.value(), Value::Stream(_))) {
+            found.insert(id);
+            each_reference(stream, |id| {
+                found.insert(id);
+            });
+        }
+    }
+    found
 }
 
 /// The object whose record starts first in the file's own bytes, not an
@@ -8017,6 +8029,44 @@ mod tests {
         assert_eq!(report.checked.get(four), Some(&1), "{report}");
         assert_eq!(report.checked.get(two), None, "{report}");
         assert_eq!(report.keys, without.keys + 11, "{report}");
+    }
+
+    /// A linearized file's hint stream, which its linearization dictionary
+    /// names by where it's written (`/H`), and what it refers to, its
+    /// `/Length`, aren't unreached, in a check of its document and beside
+    /// its reading alike, though nothing refers to the stream; an object
+    /// `/H` names that's no stream is, as is any other object nothing
+    /// refers to, and what a stream nothing names refers to.
+    #[test]
+    fn a_hint_stream_and_what_it_refers_to_are_never_unreached() {
+        let hint = "<< /S 36 /Length 9 0 R >>\nstream\n0123456789\nendstream";
+        let first = LINEARIZATION.replace("[500 100]", "[00000 100]");
+        let more = [(5, hint), (9, "10"), (8, "<< /Orphan 1 >>")];
+        // `/H` at object `n`'s `n g obj`, as many digits as before.
+        let named = |n: u32| {
+            let mut file = first_written(&first, &more);
+            let at = find(&file, format!("\n{n} 0 obj").as_bytes()) + 1;
+            let h = find(&file, b"[00000 100]") + 1;
+            file[h..h + 5].copy_from_slice(format!("{at:05}").as_bytes());
+            file
+        };
+        let unreached = |file: &[u8]| -> Vec<Vec<ObjectId>> {
+            let read = WithReading::new(file, &[], &bytes::Options::DEFAULT).unwrap();
+            let hold = Hold::All(Made::Built);
+            let reports = [
+                check(read.document(), &hold, &Options::default()),
+                check_with_reading(&read, &hold, &Options::default()),
+            ];
+            (reports.iter())
+                .map(|report| {
+                    let found = report.findings.iter().filter(|f| f.rule == Rule::Unreached);
+                    found.filter_map(|f| f.object).collect()
+                })
+                .collect()
+        };
+        assert_eq!(unreached(&named(5)), [vec![(8, 0)], vec![(8, 0)]]);
+        let all = vec![(5, 0), (8, 0), (9, 0)];
+        assert_eq!(unreached(&named(8)), [all.clone(), all]);
     }
 
     /// A file's linearization dictionary is held to Table F.1 as the model
