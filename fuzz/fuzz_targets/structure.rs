@@ -7,9 +7,11 @@
 //! read, each stream's data and decoded data as in memory; pruned, what
 //! it reaches the same, and an object added at a number none held; and
 //! its revision before an update, and the file opened by the owner's
-//! password, as the input's first bytes choose, the same. A resolver says of
-//! each object what `get` says, in memory and by position, and counts no
-//! failed read.
+//! password, as the input's first bytes choose, the same. A resolver says
+//! of each object what `get` says, in memory and by position, and counts no
+//! failed read. Each revision ends past a `%%EOF` and its line's end, and
+//! the file as each was written, its bytes up to there, reads the same
+//! twice and by position as in memory.
 
 #![no_main]
 

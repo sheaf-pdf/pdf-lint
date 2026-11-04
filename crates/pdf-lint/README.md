@@ -269,7 +269,7 @@ The model's `tsv/latest` is embedded at a pinned upstream commit, which `--versi
 - a variable-text field's own `/DR`, which PDF 1.4 defines (Table 8.51) and the model has no row for, is added to the text and choice field tables, obsolete from PDF 1.5 (the 1.7 reference's implementation note 118), so deprecated there (counted only, unless `--deprecations` makes it a finding);
 - the PDF 1.0 `Encoding` resource, a dictionary of named encodings as Acrobat writes one in a form's `/DR`, is linked to `EncodingMap`, an added table of them, where the model checks it as one encoding.
 
-`--model <DIR>` checks against a `tsv/latest` checkout as it is instead, upstream's own or a newer one, which must read whole: every row, and every table a row links to (`Grammar::load`), and the five tables the checker reads by name (`use_model`, `grammar::NAMED`). The JSON report's `model` tells them apart: the embedded model's hash is of its tables with the corrections made, and a checkout of the same commit has upstream's.
+`--model <DIR>` checks against a `tsv/latest` checkout as it is instead, upstream's own or a newer one, which must read whole: every row, and every table a row links to (`Grammar::load`), and the six tables the checker reads by name (`use_model`, `grammar::NAMED`). The JSON report's `model` tells them apart: the embedded model's hash is of its tables with the corrections made, and a checkout of the same commit has upstream's.
 
 ## License
 

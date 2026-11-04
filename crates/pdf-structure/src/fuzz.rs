@@ -1,22 +1,21 @@
-//! What the fuzz target checks, which a unit test checks too: on any
-//! bytes, a file is read without a panic, in the same way twice, with
-//! every place the reading gives inside what was read; read on demand, in
-//! an order the input chooses, it's the whole read, so long as no stream
-//! either decodes reaches the budget, and made a document with the reading
-//! kept, at a point the input chooses, it's the reading's whole read
-//! after; read by position, a window at a time from a first window the
-//! input chooses, it's the whole read, and each stream's data and decoded
-//! data are as in memory; pruned, it reaches what it did, and an object
-//! added to it is at a number none held; and so are its revision before an
-//! incremental update, and the file opened by an owner's password; a
-//! resolver says of each object what `get` says, in memory and by position;
-//! each revision ends past a `%%EOF` and its line's end, and the file as it
-//! was written, its bytes up to there, reads the same twice and by position
-//! as in memory; and
-//! opened by a wrong password, then unlocked by the owner's, it's the file
-//! opened by the owner's. It reads under small limits, so that a run tries
-//! more inputs. It's compiled only for tests and under cargo-fuzz's
-//! `--cfg fuzzing`.
+//! What the fuzz target checks, which a unit test checks too: on any bytes,
+//! a file is read without a panic, in the same way twice, with every place
+//! the reading gives inside what was read; read on demand, in an order the
+//! input chooses, it's the whole read, so long as no stream either decodes
+//! reaches the budget, and made a document with the reading kept, at a
+//! point the input chooses, it's the reading's whole read after; read by
+//! position, a window at a time from a first window the input chooses, it's
+//! the whole read, and each stream's data and decoded data are as in
+//! memory; pruned, it reaches what it did, and an object added to it is at
+//! a number none held; and so are its revision before an incremental
+//! update, and the file opened by an owner's password; a resolver says of
+//! each object what `get` says, in memory and by position; each revision
+//! ends past a `%%EOF` and its line's end, and the file as it was written,
+//! its bytes up to there, reads the same twice and by position as in
+//! memory; and opened by a wrong password, then unlocked by the owner's,
+//! it's the file opened by the owner's. It reads under small limits, so
+//! that a run tries more inputs. It's compiled only for tests and under
+//! cargo-fuzz's `--cfg fuzzing`.
 //!
 //! And what the `write` target checks ([`write_file`]): a file read is
 //! written whole and as an update, under a renumbering the input picks or

@@ -8,15 +8,13 @@
 //! find, what an earlier revision's objects that a later one wrote over or
 //! freed tell, read as that revision was written, and what a linearized
 //! file's linearization is, or was before an update voided it, moving
-//! nothing else a check of its document alone finds, which reads no
-//! stream's data, no earlier revision and no linearization
-//! ([`reading_alone`]); and set against its
-//! previous revision, read as it was written, when it has an incremental
-//! update. It reads under
-//! small limits ([`options`], and 4 MiB of content and 4 MiB of fonts'
-//! streams in [`setting`]), so that a run tries more inputs. It's compiled
-//! only for tests and under cargo-fuzz's `--cfg fuzzing`, with [`seeds`],
-//! files for the fuzzer to begin from.
+//! nothing else a check of its document alone finds, which reads no stream's
+//! data, no earlier revision and no linearization ([`reading_alone`]); and
+//! set against its previous revision, read as it was written, when it has an
+//! incremental update. It reads under small limits ([`options`], and 4 MiB
+//! of content and 4 MiB of fonts' streams in [`setting`]), so that a run
+//! tries more inputs. It's compiled only for tests and under cargo-fuzz's
+//! `--cfg fuzzing`, with [`seeds`], files for the fuzzer to begin from.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -105,12 +103,11 @@ pub fn check_file(data: &[u8]) {
 
 /// How `choice`'s bits hold and check `doc`: every object built or merged,
 /// or only every other one; as one table an object; deprecations found;
-/// unlisted keys found in built objects, all or none; at the file's
-/// version, 1.0's or 2.0's; with paths recorded; under some extensions;
-/// with keys exempt; unused resources found; a linearization's departures
-/// found. Its content within 4 MiB
-/// decoded, and its fonts' streams within 4 MiB, so that a check keeps
-/// within the fuzz target's time for an input.
+/// unlisted keys found in built objects, all or none; at the file's version,
+/// 1.0's or 2.0's; with paths recorded; under some extensions; with keys
+/// exempt; unused resources found; a linearization's departures found. Its
+/// content within 4 MiB decoded, and its fonts' streams within 4 MiB, so
+/// that a check keeps within the fuzz target's time for an input.
 pub fn setting(choice: u16, doc: &Document) -> (Hold, Options) {
     let bit = |n: u16| choice & (1 << n) != 0;
     let made = if bit(0) { Made::Built } else { Made::Merged };
@@ -407,14 +404,13 @@ fn within(
 /// it for each rule of content to find, and a page's content encrypted; a
 /// cross-reference stream with extensions declared and XMP metadata; an
 /// object stream whose header starts two objects inside another's bytes; an
-/// incremental update, and one that writes again the information
-/// dictionary the earlier trailer names; the page linearized, its
-/// linearization holding, and then updated, which voids it; and encrypted
-/// files, one of them with an object stream whose data isn't encrypted, so
-/// that its objects' strings are in the clear. Each begins with the two
-/// bytes that choose how it's checked,
-/// all clear, as the `check` and `structure` targets take them; the `write`
-/// target's take a third ([`write_seeds`]).
+/// incremental update, and one that writes again the information dictionary
+/// the earlier trailer names; the page linearized, its linearization
+/// holding, and then updated, which voids it; and encrypted files, one of
+/// them with an object stream whose data isn't encrypted, so that its
+/// objects' strings are in the clear. Each begins with the two bytes that
+/// choose how it's checked, all clear, as the `check` and `structure`
+/// targets take them; the `write` target's take a third ([`write_seeds`]).
 pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
     let page = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
