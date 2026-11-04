@@ -391,8 +391,16 @@ fn check_integer(token: &Token<'_>) {
 
 /// Checks that a number is a finite `f64` when its integer part has 308
 /// digits or fewer, and too large when it has 310 or more: `f64::MAX` is
-/// about 1.8e308.
+/// about 1.8e308. And that it's the `f64` Rust reads its text as, to the
+/// bit, and too large where that isn't finite, however it's read.
 fn check_number(token: &Token<'_>) {
+    let text = core::str::from_utf8(token.bytes).ok();
+    let expected = match text.and_then(|text| text.parse::<f64>().ok()) {
+        Some(value) if value.is_finite() => Ok(value.to_bits()),
+        Some(_) => Err(NumberError::Overflow),
+        None => Err(NumberError::NotANumber),
+    };
+    assert_eq!(token.number().map(f64::to_bits), expected, "{text:?}");
     let unsigned = token
         .bytes
         .strip_prefix(b"-")

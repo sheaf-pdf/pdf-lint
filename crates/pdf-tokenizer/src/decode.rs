@@ -422,8 +422,15 @@ const TENS: [f64; 23] = [
 /// most 22 of them after the point. Both that integer and the power of ten
 /// it's divided by are then `f64`s exactly, and the quotient is rounded
 /// once, to the nearest, as a decimal's reading is: the `f64` the decimal
-/// is read as. None otherwise, for [`number`]'s whole reading.
+/// is read as. None otherwise, for [`number`]'s whole reading; and None
+/// always on x86 without SSE2, whose x87 division rounds to a 64-bit
+/// significand and then again to an `f64`'s, so that a quotient may be
+/// rounded twice, where the whole reading sets the x87's precision for
+/// its own division.
 fn short_decimal(bytes: &[u8]) -> Option<f64> {
+    if cfg!(all(target_arch = "x86", not(target_feature = "sse2"))) {
+        return None;
+    }
     let (negative, rest) = match bytes {
         [b'-', rest @ ..] => (true, rest),
         [b'+', rest @ ..] => (false, rest),
