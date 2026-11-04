@@ -9034,6 +9034,34 @@ mod tests {
         assert_eq!(findings(&tabbed, &named), (vec![], names(&["ADBE_Extn3"])));
     }
 
+    /// A row's SinceVersion is read under each file's own extensions: two
+    /// files checked in turn, one declaring PDF/A-3 in its XMP metadata and
+    /// one not, each find the catalog's `/AF` (since 1.7 under PDF/A-3,
+    /// else 2.0) as its own declaration has it, whichever is checked first.
+    #[test]
+    fn files_checked_in_turn_each_read_a_rows_since_under_their_extensions() {
+        let undeclared = changed(clean(), 1, |catalog| {
+            catalog.set("AF", Vec::<Object>::new())
+        });
+        let mut declared = changed(undeclared.clone(), 1, |catalog| {
+            catalog.set("Metadata", r(6))
+        });
+        let xmp = br#"<x:xmpmeta><rdf:Description xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/" pdfaid:part="3"/></x:xmpmeta>"#;
+        let metadata = dict! { "Type" => "Metadata", "Subtype" => "XML" };
+        declared.push((6, Body::stream(metadata, xmp)));
+        let too_new = |objects: &[(u32, Body)]| {
+            let report = checked(objects);
+            (report.findings.iter()).any(|f| {
+                (f.table.as_str(), f.key.as_str(), f.rule) == ("Catalog", "AF", Rule::TooNew)
+            })
+        };
+        for _ in 0..2 {
+            assert!(!too_new(&declared), "declared");
+            assert!(too_new(&undeclared), "undeclared");
+        }
+        assert!(!too_new(&declared), "declared again");
+    }
+
     #[test]
     fn a_key_later_than_the_files_version_is_found() {
         let opacity = changed(clean(), 4, |annot| annot.set("CA", 0.5));
