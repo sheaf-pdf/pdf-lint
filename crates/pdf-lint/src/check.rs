@@ -1076,8 +1076,9 @@ pub enum Rule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Finding {
-    /// The indirect object it's in: none for a table's trailer, or the
-    /// file as a whole.
+    /// The indirect object it's in: none for a table's trailer, the file
+    /// as a whole, or a linearization dictionary as first written whose
+    /// number a later revision wrote again ([`Rule::Linearization`]).
     pub object: Option<ObjectId>,
     pub made: Made,
     /// Where the walk reached it: from the trailer,

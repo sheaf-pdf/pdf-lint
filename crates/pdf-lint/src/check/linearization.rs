@@ -14,21 +14,21 @@
 //! ([`Report::linearized`](super::Report::linearized)). One that's
 //! linearized by pdf-linearize's test, its `/Linearized` a number whose
 //! integer part is 1 and its `/L` its length, has what the check tells
-//! found, and the verdict, holds or fails,
-//! by whether an error is among it. One linearized as first written and
-//! updated after ([`first_written`]), its `/L` its first revision's, has
-//! that found ([`Rule::Updated`]), in the newest trailer, so that the update
-//! answers for it, and what the check tells of the file as first written,
-//! its first bytes read as a file of their own
+//! found, and the verdict, holds or fails, by whether an error is among it.
+//! One linearized as first written and updated after ([`first_written`]),
+//! its `/L` its first revision's, has that found ([`Rule::Updated`]), in the
+//! newest trailer, so that the update answers for it, and what the check
+//! tells of the file as first written, its first bytes read as a file of
+//! their own
 //! ([`Reads::first_written`](super::reading::Reads::first_written)), found
 //! as a linearized file's is, of what's held, where a place in a stream's
 //! data whose number a later revision lists has no bytes; its verdict, that
 //! it's updated. What pdf-linearize says of the whole, that `/L` isn't its
-//! length and an update follows, isn't found, as that's what `updated`
-//! says. One that isn't taken for linearized otherwise has what the check
-//! tells of it found, what's wrong with `/Linearized` or `/L` as a value,
-//! an `/L` that isn't the file's length nor its first revision's, and an
-//! update after it, a departure; its verdict, that it isn't taken.
+//! length and an update follows, isn't found, as that's what `updated` says.
+//! One that isn't taken for linearized otherwise has what the check tells of
+//! it found, what's wrong with `/Linearized` or `/L` as a value, an `/L`
+//! that isn't the file's length nor its first revision's, and an update
+//! after it, a departure; its verdict, that it isn't taken.
 //!
 //! What the check tells is a [`Rule::Linearization`] finding, an error
 //! always ([`Grade::Error`]) and a departure that readers get past only
@@ -39,14 +39,16 @@
 //! `LinearizationParameterDict` and its path the dictionary's, at its first
 //! place ([`Places`]), its value pdf-linearize's words, which cite the
 //! clause, with how many times it was told, every one counted
-//! ([`Kept::keep_each`]), held where the dictionary is. What's wrong with
-//! one of the dictionary's values as a value, or `/H`'s count of items, is
-//! what the model holds the dictionary to too: it's found only where the
-//! walk found nothing by the model's rules in the dictionary at that key,
-//! or for `/H`'s count, at or inside its array ([`Walk::find_told`]). A hint
-//! stream whose data is encrypted and not decrypted, and a file whose bytes
-//! the source didn't give, are counted as not checked, once, where the
-//! dictionary is held.
+//! ([`Kept::keep_each`]), held where the dictionary is; where a later
+//! revision wrote the dictionary's number again, so that the object there is
+//! another, the first revision's, in no object, held where every object is
+//! ([`Whose`]). What's wrong with one of the dictionary's values as a value,
+//! or `/H`'s count of items, is what the model holds the dictionary to too:
+//! it's found only where the walk found nothing by the model's rules in the
+//! dictionary at that key, or for `/H`'s count, at or inside its array
+//! ([`Walk::find_told`]). A hint stream whose data is encrypted and not
+//! decrypted, and a file whose bytes the source didn't give, are counted as
+//! not checked, once, where the dictionary is held.
 
 use std::collections::HashMap;
 
@@ -94,10 +96,9 @@ fn of_the_model(fault: &Fault) -> bool {
 /// whose `/Linearized` pdf-linearize takes
 /// ([`FirstObject::version_one`](pdf_linearize::check::FirstObject::version_one)),
 /// and whose `/L` is an integer that isn't the file's length from its
-/// header, but
-/// that ends the first of `revisions` from there, at the `%%EOF` after its
-/// last section or past the line end right after it ([`Revision::end`]),
-/// and a later revision after it. None otherwise.
+/// header, but that ends the first of `revisions` from there, at the
+/// `%%EOF` after its last section or past the line end right after it
+/// ([`Revision::end`]), and a later revision after it. None otherwise.
 fn first_written(facts: &Facts, revisions: &[Revision]) -> Option<usize> {
     let first = facts.first_object.as_ref()?;
     let len = facts.header.checked_add(number(Some(&first.l))?)?;
