@@ -2197,6 +2197,7 @@ struct Decoder {
     ranged: bool,
     /// Whether its font's `/ToUnicode` is a stream it read, whatever that maps.
     to_unicode: bool,
+    /// What its `/ToUnicode` maps: a CMap of nothing where none was read.
     cmap: CMap,
     /// A simple font's codes, by its encoding.
     encoded: Option<Box<[Option<String>]>>,
@@ -2331,12 +2332,15 @@ impl Decoder {
 
     /// The text `code` is: its `/ToUnicode` mapping, or its encoding's.
     fn code_text(&self, code: u32) -> Option<Cow<'_, str>> {
-        match self.cmap.get(code) {
-            Some(text) => Some(text),
-            None => Some(Cow::Borrowed(
-                self.encoded.as_ref()?.get(code as usize)?.as_deref()?,
-            )),
+        // With no `/ToUnicode` read, its CMap is one of nothing, which maps no code.
+        if self.to_unicode {
+            if let Some(text) = self.cmap.get(code) {
+                return Some(text);
+            }
         }
+        Some(Cow::Borrowed(
+            self.encoded.as_ref()?.get(code as usize)?.as_deref()?,
+        ))
     }
 
     /// How many bytes the code `rest` starts with takes: the codespace range it's in, or
