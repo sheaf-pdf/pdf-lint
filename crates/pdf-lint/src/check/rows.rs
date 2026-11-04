@@ -22,6 +22,11 @@ pub(super) struct Rows {
     starts: Box<[u32; 258]>,
     /// The wildcard's place, `*`, where the table has one.
     wildcard: Option<usize>,
+    /// Whether a row's key is a key: not the wildcard, nor an element's
+    /// ([`element`]).
+    pub(super) keyed: bool,
+    /// Whether a row is an element's.
+    pub(super) elements: bool,
     /// Each row's links' tables, of each of its types, in the order the
     /// row lists them: found the first time they're asked for.
     links: Box<[OnceLock<Links>]>,
@@ -78,6 +83,8 @@ impl Rows {
             keys: keys.into_boxed_slice(),
             starts,
             wildcard: rows.iter().position(|row| row.key == "*"),
+            keyed: (rows.iter()).any(|row| row.key != "*" && !element(row)),
+            elements: rows.iter().any(element),
             links: rows.iter().map(|_| OnceLock::new()).collect(),
         }
     }
@@ -142,6 +149,13 @@ impl Rows {
     }
 }
 
+/// Whether `row` is an array's element's: its key an index, or a
+/// repeating row's `1*`.
+fn element(row: &Row) -> bool {
+    let index = row.key.strip_suffix('*').unwrap_or(&row.key);
+    !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Where `key`'s first byte's keys are in [`Rows::keys`], an empty key's
 /// first.
 fn first(key: &[u8]) -> usize {
@@ -183,13 +197,27 @@ mod tests {
     use crate::grammar::At;
 
     /// Every table's rows by key are its rows, each found under its key as
-    /// the table finds it, and a key of no row is the wildcard's; and each
-    /// row's links, of each type, are the tables they name, in order.
+    /// the table finds it, and a key of no row is the wildcard's; whether
+    /// it has keys and elements is as its rows say; and each row's links, of
+    /// each type, are the tables they name, in order.
     #[test]
     fn every_tables_rows_are_found_by_their_keys_as_the_table_finds_them() {
         for table in grammar().tables() {
             let rows = rows(table);
             assert!(std::ptr::eq(rows.table, table), "{}", table.name);
+            // As the walk read them a row at a time.
+            let element = |row: &Row| {
+                let index = row.key.strip_suffix('*').unwrap_or(&row.key);
+                !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())
+            };
+            let keyed = |row: &Row| row.key != "*" && !element(row);
+            assert_eq!(rows.keyed, table.rows.iter().any(keyed), "{}", table.name);
+            assert_eq!(
+                rows.elements,
+                table.rows.iter().any(element),
+                "{}",
+                table.name
+            );
             assert_eq!(rows.keys.len(), table.rows.len(), "{}", table.name);
             assert_eq!(
                 rows.starts[257] as usize,

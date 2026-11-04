@@ -4685,15 +4685,11 @@ fn universal(table: &str) -> bool {
 /// elements (its keys indices, repeating rows' `1*` or the wildcard), a
 /// dictionary or stream of a table of keys; a table of the wildcard alone,
 /// either.
-fn fits(object: &Object, table: &Table) -> bool {
-    let element = |row: &Row| {
-        let index = row.key.strip_suffix('*').unwrap_or(&row.key);
-        !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())
-    };
-    let keyed = |row: &Row| row.key != "*" && !element(row);
+fn fits(object: &Object, table: &'static Table) -> bool {
+    let rows = rows(table);
     match object.value() {
-        Value::Array(_) => !table.rows.iter().any(keyed),
-        Value::Dict(_) | Value::Stream(_) => !table.rows.iter().any(element),
+        Value::Array(_) => !rows.keyed,
+        Value::Dict(_) | Value::Stream(_) => !rows.elements,
         _ => true,
     }
 }
