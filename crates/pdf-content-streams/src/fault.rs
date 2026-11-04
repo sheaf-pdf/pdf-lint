@@ -38,10 +38,11 @@
 //! - **What's inside an array or a dictionary**: each element's, key's
 //!   and value's own, and [`Key`](Fault::Key),
 //!   [`Keyword`](Fault::Keyword) and [`NoValue`](Fault::NoValue), when
-//!   it's read ([`Operand::object_with`](crate::Operand::object_with)):
-//!   reading it is what finds them. A dictionary one of them makes none is
-//!   the token's to tell ([`NoDict`](Fault::NoDict)), with where PDFium's
-//!   reading of it stops.
+//!   it's read ([`Operand::object_with`](crate::Operand::object_with), or
+//!   [`Operand::faults_with`](crate::Operand::faults_with) with no object
+//!   made): reading it is what finds them. A dictionary one of them makes
+//!   none is the token's to tell ([`NoDict`](Fault::NoDict)), with where
+//!   PDFium's reading of it stops.
 //!
 //! Each is told once, as reading passes its end: faults come in the order
 //! of their ends.
