@@ -287,8 +287,8 @@ use crate::crypt::{self, Eff, Get, List, Stream, follow, is_xref};
 use crate::filter;
 pub use crate::filter::Unfiltered;
 use crate::source::{
-    DataExtent, Document, Encryption, Facts, Held, Origin, Record, Revision, Trailer, Unread,
-    Update, Warning, XrefKind,
+    DataExtent, Document, Encryption, Facts, Held, Origin, Record, Revision, RevisionEnd, Trailer,
+    Unread, Update, Warning, XrefKind,
 };
 
 mod file;
@@ -1042,7 +1042,7 @@ struct Section {
     hybrid: bool,
     /// Where the `%%EOF` after the `startxref` that follows it ends, and
     /// where that line does ([`eof_after`]).
-    end: Option<(usize, usize)>,
+    end: Option<RevisionEnd>,
 }
 
 fn span(start: usize, end: usize) -> Span {
@@ -1070,12 +1070,13 @@ fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// at byte `at`, in window `w` (ISO 32000-2, 7.5.5): past the five bytes
 /// `%%EOF` of the comment after the `startxref` that follows it, and past
 /// a CR LF, CR or LF right after them, the same where none follows. Only
-/// white-space comes between `startxref` and its offset, digits alone, and
-/// between that and `%%EOF`: none where anything else does, a comment or
-/// a NUL among it, so that every end is where a reader that looks back
-/// from each `%%EOF` for `startxref` and its offset finds one. The window
-/// is touched where what's looked at runs to its end.
-fn eof_after(w: &Window<'_>, at: usize) -> Option<(usize, usize)> {
+/// ASCII white-space (space, HT, LF, FF and CR, not the NUL PDF counts too:
+/// ISO 32000-2, 7.2.3) comes between `startxref` and its offset, digits
+/// alone, and between that and `%%EOF`: none where anything else does, a
+/// comment or a NUL among it, so that every end is where a reader that
+/// looks back from each `%%EOF` for `startxref` and its offset finds one.
+/// The window is touched where what's looked at runs to its end.
+fn eof_after(w: &Window<'_>, at: usize) -> Option<RevisionEnd> {
     let mut t = w.tokenizer(at);
     if !is_keyword(w.significant(&mut t).as_ref(), b"startxref") {
         return None;
@@ -1114,7 +1115,7 @@ fn eof_after(w: &Window<'_>, at: usize) -> Option<(usize, usize)> {
         _ => 0,
     };
     let end = w.place(eof + 5);
-    Some((end, end + line))
+    RevisionEnd::new(end, end + line)
 }
 
 /// How many cross-reference entries the reader reads of a file `len`
@@ -4268,10 +4269,10 @@ mod tests {
     /// its trailer, a cross-reference stream's or a table's, and the
     /// numbers its sections list, in use or free, but 0, the first's none;
     /// the last's trailer the document's; a file of one section's, ending
-    /// where the file does. A linearized file's two sections
-    /// are one revision, and an update after it another; a file scanned
-    /// has none. Read as of an earlier section, the revisions up to it; and
-    /// a reading on demand, the whole read's.
+    /// where the file does. A linearized file's two sections are one
+    /// revision, and an update after it another; a file scanned has none.
+    /// Read as of an earlier section, the revisions up to it; and a reading
+    /// on demand, the whole read's.
     #[test]
     fn each_revision_is_kept_with_its_trailer_and_the_numbers_it_lists() {
         // One section.
@@ -4283,7 +4284,7 @@ mod tests {
         let file = fixture::file("1.7", &base, root(), Xref::Table);
         let doc = read(&file);
         let one = Revision::new(startxref(&file), doc.trailer.clone(), None);
-        let one = one.ending((file.len() - 1, file.len()));
+        let one = one.ending(RevisionEnd::new(file.len() - 1, file.len()).unwrap());
         assert_eq!(doc.revisions, [one]);
 
         // A cross-reference stream, its stream object 4; then an update

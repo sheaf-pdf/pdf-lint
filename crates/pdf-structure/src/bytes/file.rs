@@ -226,6 +226,7 @@ mod tests {
     use super::super::{ByteSource, Options, Reading, read};
     use super::*;
     use crate::fixture::{self, Xref};
+    use crate::source::RevisionEnd;
 
     /// A file of the test's own, in a folder of its own in the temp
     /// folder, removed with the file when it's dropped.
@@ -308,8 +309,9 @@ mod tests {
         assert_eq!(reading.revisions(), in_memory.revisions());
         let ends: Vec<_> = reading.revisions().iter().map(|r| r.end).collect();
         let (length, all) = (base.len(), bytes.len());
-        assert_eq!(ends, [Some((length - 1, length)), Some((all - 1, all))]);
-        for (_, end) in ends.into_iter().flatten() {
+        let ended = |eof, line| RevisionEnd::new(eof, line);
+        assert_eq!(ends, [ended(length - 1, length), ended(all - 1, all)]);
+        for end in ends.into_iter().flatten().map(RevisionEnd::line) {
             let prefix = reading.prefix(end, reading.limits()).unwrap();
             assert!(prefix.source().whole().is_none());
             let expected = in_memory.prefix(end, in_memory.limits()).unwrap();

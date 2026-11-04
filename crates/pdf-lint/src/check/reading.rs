@@ -121,7 +121,7 @@ impl<'f, S: ByteSource> Readings<'f, S> {
     /// take them past that, which counts them, so that none is opened
     /// after.
     fn open(&self, i: usize) -> Option<AsWritten<'f, S>> {
-        let (_, end) = self.revisions.get(i)?.end?;
+        let end = self.revisions.get(i)?.end?.line();
         if self.opened.get() >= READINGS || self.entries.get() >= self.most {
             return None;
         }
@@ -204,6 +204,7 @@ mod tests {
     use crate::dict;
     use crate::object::{Str, Value};
     use crate::pdf_crypt::Password;
+    use crate::source::RevisionEnd;
 
     /// `file` read beside its reading under `options`, and checked so and
     /// as its document alone, every object held as merged.
@@ -603,7 +604,10 @@ mod tests {
         assert_eq!(again, end);
         assert!(prev < file.len());
         let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
-        assert_eq!(read.document().revisions[0].end, Some((end - 1, end)));
+        assert_eq!(
+            read.document().revisions[0].end,
+            RevisionEnd::new(end - 1, end)
+        );
         let value = format!("{prev} (not one of fn:Eval((@Prev>=0) && (@Prev<=fn:FileSize())))");
         let prev = (
             None,

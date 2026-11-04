@@ -682,6 +682,7 @@ impl<S: ByteSource> Reading<S> {
     /// asked of it ([`Error::Io`]).
     ///
     /// ```
+    /// use pdf_structure::RevisionEnd;
     /// use pdf_structure::bytes::{Options, Reading};
     ///
     /// let first = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
@@ -693,16 +694,20 @@ impl<S: ByteSource> Reading<S> {
     /// let file = [&first[..], &update[..]].concat();
     /// let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
     /// let ends: Vec<_> = reading.revisions().iter().map(|r| r.end).collect();
-    /// assert_eq!(ends, [Some((146, 147)), Some((285, 286))]);
+    /// let end = |eof, line| RevisionEnd::new(eof, line);
+    /// assert_eq!(ends, [end(146, 147), end(285, 286)]);
     /// let before = reading.prefix(147, reading.limits()).unwrap();
     /// assert_eq!(before.revisions(), &reading.revisions()[..1]);
     /// let catalog = before.get((1, 0)).unwrap().as_dict().unwrap();
     /// assert!(!catalog.has(b"Lang"));
     /// ```
     pub fn prefix(&self, len: usize, limits: &Limits) -> Result<Reading<Prefix<&S>>, Error> {
-        let mut options = Options::DEFAULT;
-        options.limits = *limits;
-        options.flate = self.reader.flate;
+        // Every option named, so that one more has its say here.
+        let options = Options {
+            limits: *limits,
+            section: None,
+            flate: self.reader.flate,
+        };
         let source = Prefix::new(&self.source, len);
         let mut prefix = Reading::open_by(source, &[], &options, self.bound)?;
         let reader = &self.reader;

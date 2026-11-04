@@ -400,11 +400,41 @@ pub struct Revision {
     /// first-page section's own `startxref` and `%%EOF` may be left out:
     /// Annex F), and past a CR LF, CR or LF right after that `%%EOF`, the
     /// same where none follows (7.5.5, 7.5.6). The file as the revision was
-    /// written is its bytes up to the second
-    /// ([`Reading::prefix`](crate::bytes::Reading::prefix)). None where no
-    /// `startxref` follows that section, or anything but white-space comes
-    /// between its offset and a `%%EOF`, a comment among it.
-    pub end: Option<(usize, usize)>,
+    /// written is its bytes up to the line's end ([`RevisionEnd::line`],
+    /// [`Reading::prefix`](crate::bytes::Reading::prefix)). None where no
+    /// `startxref` follows that section, or anything but ASCII white-space
+    /// (space, HT, LF, FF and CR, not the NUL PDF counts too) comes between
+    /// `startxref` and its offset, digits alone, or between that and a
+    /// `%%EOF`, a comment among it.
+    pub end: Option<RevisionEnd>,
+}
+
+/// Where a revision's bytes end ([`Revision::end`]): past its `%%EOF`, and
+/// past the end of that line, never before the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RevisionEnd {
+    eof: usize,
+    line: usize,
+}
+
+impl RevisionEnd {
+    /// The end of a revision whose `%%EOF` ends at `eof`, on a line that
+    /// ends at `line`: none where `line` is before `eof`.
+    pub fn new(eof: usize, line: usize) -> Option<RevisionEnd> {
+        (eof <= line).then_some(RevisionEnd { eof, line })
+    }
+
+    /// Where its `%%EOF` ends: past those five bytes.
+    pub fn eof(self) -> usize {
+        self.eof
+    }
+
+    /// Where the `%%EOF`'s line ends: past a CR LF, CR or LF right after
+    /// it, or at it where none follows. The file as the revision was
+    /// written is its bytes up to here.
+    pub fn line(self) -> usize {
+        self.line
+    }
 }
 
 /// How a cross-reference section is written.
@@ -671,7 +701,7 @@ impl Revision {
     /// It, ending at `end` ([`Revision::end`]): past its `%%EOF`, and past
     /// the end of that line.
     #[must_use = "it gives the Revision back, with where it ends"]
-    pub fn ending(self, end: (usize, usize)) -> Revision {
+    pub fn ending(self, end: RevisionEnd) -> Revision {
         Revision {
             end: Some(end),
             ..self
@@ -1667,10 +1697,15 @@ mod tests {
         let later = Revision::new(120, trailer, Some(numbers.clone()));
         assert_eq!(later.numbers, Some(numbers));
         assert_ne!(first, later);
-        let ended = first.clone().ending((100, 102));
-        assert_eq!(ended.end, Some((100, 102)));
+        let end = RevisionEnd::new(100, 102).unwrap();
+        assert_eq!((end.eof(), end.line()), (100, 102));
+        let ended = first.clone().ending(end);
+        assert_eq!(ended.end, Some(end));
         assert_eq!((ended.at, &ended.trailer), (first.at, &first.trailer));
         assert_ne!(ended, first);
+        // A line's end before its `%%EOF`'s is none; at it, an end.
+        assert_eq!(RevisionEnd::new(102, 100), None);
+        assert_eq!(RevisionEnd::new(100, 100).map(RevisionEnd::line), Some(100));
     }
 
     /// A reader of its own, implementing `Source`'s five methods alone,

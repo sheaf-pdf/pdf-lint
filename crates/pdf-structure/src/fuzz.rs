@@ -234,9 +234,10 @@ fn revisions(file: &[u8], passwords: &[Password]) {
             .expect("it's in memory")
     };
     for revision in reading.revisions() {
-        let Some((eof, line)) = revision.end else {
+        let Some(end) = revision.end else {
             continue;
         };
+        let (eof, line) = (end.eof(), end.line());
         assert!(
             eof <= line && line <= eof + 2 && line <= file.len(),
             "{eof} {line}"

@@ -740,8 +740,8 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             let password = password(args);
             let revisions = &doc.document().revisions;
             let end = (revisions.iter().find(|r| r.at == update.previous)).and_then(|r| r.end);
-            let previous = match end {
-                Some((_, end)) => {
+            let previous = match end.map(|end| end.line()) {
+                Some(end) => {
                     with_reading(&data[..end], password.as_slice(), &bytes::Options::DEFAULT)
                 }
                 None => {

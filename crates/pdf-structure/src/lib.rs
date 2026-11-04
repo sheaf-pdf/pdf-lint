@@ -115,8 +115,8 @@ pub use pdf_crypt::{Encoded, Encoding, Password};
 pub use pdf_filters;
 pub use pdf_objects;
 pub use source::{
-    DataExtent, Document, Encryption, Facts, Origin, Record, Revision, Source, Trailer, Unread,
-    Update, Warning, XrefKind,
+    DataExtent, Document, Encryption, Facts, Origin, Record, Revision, RevisionEnd, Source,
+    Trailer, Unread, Update, Warning, XrefKind,
 };
 
 /// The README's examples, run as doctests.

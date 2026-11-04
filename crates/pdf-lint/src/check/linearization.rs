@@ -115,8 +115,8 @@ fn first_written(facts: &Facts, revisions: &[Revision]) -> Option<usize> {
         return None;
     }
     let len = usize::try_from(len).ok()?;
-    let (eof, line) = revisions.first()?.end?;
-    (eof..=line).contains(&len).then_some(len)
+    let end = revisions.first()?.end?;
+    (end.eof()..=end.line()).contains(&len).then_some(len)
 }
 
 /// Where `fault` is said of, as pdf-linearize places it, but that a

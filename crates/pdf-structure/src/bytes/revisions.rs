@@ -16,7 +16,12 @@ use crate::fuzz::{Counted, open};
 
 /// Where each of `file`'s revisions ends, the first first, as read whole.
 fn ends(file: &[u8]) -> Vec<Option<(usize, usize)>> {
-    read(file).revisions.iter().map(|r| r.end).collect()
+    let pair = |end: RevisionEnd| (end.eof(), end.line());
+    read(file)
+        .revisions
+        .iter()
+        .map(|r| r.end.map(pair))
+        .collect()
 }
 
 /// [`clean`]'s objects with a table, cut after its `startxref`'s offset,
@@ -306,7 +311,8 @@ fn each_revisions_prefix_is_the_file_as_it_was_written() {
     let revisions = reading.revisions();
     assert_eq!(revisions.len(), 3);
     for (k, revision) in revisions.iter().enumerate() {
-        let (eof, line) = revision.end.unwrap();
+        let end = revision.end.unwrap();
+        let (eof, line) = (end.eof(), end.line());
         let prefix = reading.prefix(line, reading.limits()).unwrap();
         assert_eq!(prefix.size(), line, "{k}");
         assert!(prefix.warnings().is_empty(), "{k}: {:?}", prefix.warnings());
@@ -330,7 +336,7 @@ fn each_revisions_prefix_is_the_file_as_it_was_written() {
         assert!(cut.warnings().is_empty(), "{k}: {:?}", cut.warnings());
         assert_eq!(cut.revisions()[..k], revisions[..k], "{k}");
         let newest = cut.revisions().last().unwrap();
-        assert_eq!(newest.end, Some((eof, eof)), "{k}");
+        assert_eq!(newest.end, RevisionEnd::new(eof, eof), "{k}");
         assert_eq!(newest.trailer, revision.trailer, "{k}");
         assert_eq!(
             cut.into_document().unwrap().objects().count(),
@@ -339,7 +345,7 @@ fn each_revisions_prefix_is_the_file_as_it_was_written() {
     }
     // Into the third revision's body: the second's, and the bytes after its
     // last `%%EOF`, its line's end and seven more, said.
-    let (_, second) = revisions[1].end.unwrap();
+    let second = revisions[1].end.unwrap().line();
     let prefix = reading.prefix(second + 7, reading.limits()).unwrap();
     assert_eq!(prefix.revisions(), &revisions[..2]);
     let said = prefix.warnings();
@@ -349,7 +355,7 @@ fn each_revisions_prefix_is_the_file_as_it_was_written() {
         "{said:?}"
     );
     // Short of the first's `%%EOF`: its section read, its end not known.
-    let (eof, _) = revisions[0].end.unwrap();
+    let eof = revisions[0].end.unwrap().eof();
     let prefix = reading.prefix(eof - 1, reading.limits()).unwrap();
     let first = &prefix.revisions()[0];
     assert_eq!(
@@ -373,7 +379,7 @@ fn a_prefix_reads_under_the_limits_its_given() {
     let (file, _) = updated(file, 6, five);
     let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
     assert!(reading.get((3, 0)).is_ok());
-    let (_, end) = reading.revisions()[0].end.unwrap();
+    let end = reading.revisions()[0].end.unwrap().line();
     let full = reading.prefix(end, reading.limits()).unwrap();
     assert_eq!(full.limits(), reading.limits());
     assert!(full.get((3, 0)).is_ok());
@@ -396,7 +402,7 @@ fn a_prefix_by_position_is_the_prefix_in_memory() {
     let (file, _) = three_revisions();
     let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
     for revision in reading.revisions() {
-        let (_, end) = revision.end.unwrap();
+        let end = revision.end.unwrap().line();
         let in_memory = reading.prefix(end, reading.limits()).unwrap();
         let in_memory = in_memory.into_document().unwrap();
         for first in [1, 3, 8, 21, 64, 4096] {
@@ -453,7 +459,7 @@ fn an_encrypted_files_prefix_is_opened_by_its_readings_handler() {
             let by = Some((1, Encoding::Utf8));
             let opened = Encryption::Opened { owner, by };
             assert_eq!(reading.encryption(), &opened, "{kind:?}");
-            let (_, end) = reading.revisions()[0].end.unwrap();
+            let end = reading.revisions()[0].end.unwrap().line();
             assert_eq!(end, base.len());
             let prefix = reading.prefix(end, reading.limits()).unwrap();
             assert_eq!(prefix.encryption(), &opened, "{kind:?} {password}");
@@ -490,7 +496,7 @@ fn a_prefix_encrypted_otherwise_is_opened_as_any_file() {
     let file = encrypted_updated(&base, "fedcba9876543210");
     let reading = Reading::open_with(&file[..], &user, &Options::DEFAULT).unwrap();
     assert_eq!(reading.encryption(), &opened);
-    assert_eq!(reading.revisions()[0].end, Some((end - 1, end)));
+    assert_eq!(reading.revisions()[0].end, RevisionEnd::new(end - 1, end));
     let prefix = reading.prefix(end, reading.limits()).unwrap();
     assert_eq!(prefix.encryption(), &Encryption::Locked);
     // Another encryption dictionary: its permissions another.

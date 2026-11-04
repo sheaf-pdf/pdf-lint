@@ -228,7 +228,7 @@ use crate::bytes::{ByteSource, WithReading};
 use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::predicate::{self, Cx, FileCx, Gate, Reference, Since, TOLERANCE, Truth};
-use crate::source::{Origin, Revision, Source, Trailer, Warning};
+use crate::source::{Origin, Revision, RevisionEnd, Source, Trailer, Warning};
 use crate::text;
 use crate::version::Version;
 
@@ -1458,7 +1458,7 @@ fn check_in(
                 revision,
                 marked: &marked,
             };
-            let end = revisions[revision - 1].end.map(|(_, end)| end);
+            let end = revisions[revision - 1].end.map(RevisionEnd::line);
             let file = FileCx::new(dict, version, as_of)
                 .size(end.or(source.size()))
                 .extensions(&extensions);

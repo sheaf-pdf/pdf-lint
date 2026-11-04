@@ -30,7 +30,7 @@ use crate::check::{
 use crate::object::{Object, ObjectId, Span};
 use crate::pdf_crypt;
 use crate::pdf_crypt::writer::{Kind, Settings};
-use crate::source::{Document, Source, Update};
+use crate::source::{Document, RevisionEnd, Source, Update};
 use crate::version::Version;
 
 /// The limits the fuzz target reads under: a stream decodes to at most
@@ -56,8 +56,8 @@ fn read(file: &[u8], section: Option<usize>) -> WithReading<&[u8]> {
 /// as the command line's `--last-update` reads it.
 fn previous<'f>(file: &'f [u8], doc: &Document, update: &Update) -> WithReading<&'f [u8]> {
     let revision = doc.revisions.iter().find(|r| r.at == update.previous);
-    match revision.and_then(|r| r.end) {
-        Some((_, end)) => read(&file[..end], None),
+    match revision.and_then(|r| r.end).map(RevisionEnd::line) {
+        Some(end) => read(&file[..end], None),
         None => read(file, Some(update.previous)),
     }
 }
