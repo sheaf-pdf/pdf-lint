@@ -33,17 +33,20 @@
 //! fn:SinceVersion(1.7,Y)` is `Y` at 1.7 and asks nothing at 1.3. Each
 //! column's reader says what a vacant predicate comes to there.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::hash::{BuildHasher, RandomState};
 use std::num::ParseIntError;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use pdf_color::Colorant;
 use pdf_objects::{Dict, Form, Object, ObjectId, Resolve, Span, Str, Value, Version};
 
-use crate::grammar::{At, Table, Wrap, WrapFn, split, version};
+use crate::grammar::{At, Grammar, Table, Wrap, WrapFn, split, version};
 
 /// The functions [`required`], [`holds`] and [`reference()`] evaluate;
 /// `fn:RequiredValue` through [`required_value`]. Not `fn:IsFieldName`: the
@@ -247,12 +250,14 @@ pub enum Truth {
 
 /// What every row of one file is evaluated in: the trailer, the version,
 /// how a reference resolves (`R`, any [`Resolve`]), the file's length and
-/// the extensions it's checked under; and what the predicates read of the
-/// file as a whole (its name trees' keys, its structure tree's content
-/// items, its form's fields' names), kept inside it once read, the first
-/// kept where two threads read one at once. [`FileCx::at`] makes a row's
-/// [`Cx`] from it. It's shared across threads when its resolver is `Sync`,
-/// each thread making its rows' [`Cx`]s there.
+/// the extensions it's checked under, and the model the rows are of, when
+/// it's given one ([`FileCx::grammar`]), which keeps their predicates
+/// parsed; and what the predicates read of the file as a whole (its name
+/// trees' keys, its structure tree's content items, its form's fields'
+/// names), kept inside it once read, the first kept where two threads read
+/// one at once. [`FileCx::at`] makes a row's [`Cx`] from it. It's shared
+/// across threads when its resolver is `Sync`, each thread making its
+/// rows' [`Cx`]s there.
 ///
 /// Its type names its resolver: one made from a closure is of the
 /// closure's type, and one over a document or a reading of that
@@ -303,6 +308,9 @@ pub struct FileCx<'a, R: ?Sized = dyn Resolve<'a> + 'a> {
     /// Which font descriptors' fonts have Latin characters, as
     /// `fn:FontHasLatinChars` reads them, when given ([`FileCx::latin`]).
     latin: Option<&'a Latin>,
+    /// The model whose rows' predicates it's asked, which parses each once,
+    /// when given ([`FileCx::grammar`]).
+    grammar: Option<&'a Grammar>,
     /// An indirect object; none for one the file hasn't, which is null
     /// (ISO 32000-2, 7.3.10). Last, so that a `FileCx` of any resolver is
     /// read through one of `dyn Resolve` ([`Cx`]'s).
@@ -327,6 +335,7 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
             fields: Fields::default(),
             pages: None,
             latin: None,
+            grammar: None,
             resolve,
         }
     }
@@ -367,6 +376,19 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
         self
     }
 
+    /// The model whose rows' cells it's asked of: each predicate in them is
+    /// then parsed once, the first time a `FileCx` given the model asks,
+    /// and kept with the model for every file and thread after, where
+    /// unless given each is parsed every time it's asked. The answers are
+    /// the same either way. The model keeps as many texts as it has rows,
+    /// near enough, more than its rows' cells hold: past that, a text it
+    /// hasn't is parsed every time, and not kept.
+    #[must_use = "it gives the FileCx back, with the model"]
+    pub fn grammar(mut self, grammar: &'a Grammar) -> FileCx<'a, R> {
+        self.grammar = Some(grammar);
+        self
+    }
+
     /// The row at `at` in `container`, the dictionary, array or stream its
     /// value is in: reached through no parents, with no defaults, and of
     /// no number, until [`Cx::parents`], [`Cx::defaults`] and [`Cx::id`]
@@ -402,6 +424,17 @@ impl<'a> FileCx<'a> {
     }
 }
 
+/// What's read the same whatever its resolver.
+impl<R: ?Sized> FileCx<'_, R> {
+    /// A SinceVersion cell read as [`since`] reads it, under the extensions
+    /// the file's checked under ([`FileCx::extensions`]), and through its
+    /// model when it's given one ([`FileCx::grammar`]). The file's own: it
+    /// says another where another file is checked under other extensions.
+    pub fn since(&self, cell: &str) -> Since {
+        since_in(cell, self.extensions, self.grammar)
+    }
+}
+
 /// Its parts but its resolver, which needn't be one that can be shown.
 impl<R: ?Sized> fmt::Debug for FileCx<'_, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -415,6 +448,7 @@ impl<R: ?Sized> fmt::Debug for FileCx<'_, R> {
             .field("fields", &self.fields)
             .field("pages", &self.pages.map(<[_]>::len))
             .field("latin", &self.latin.is_some())
+            .field("grammar", &self.grammar)
             .finish_non_exhaustive()
     }
 }
@@ -719,7 +753,8 @@ pub fn required(cell: &str, cx: &Cx) -> Truth {
         "FALSE" => return Truth::False,
         _ => {}
     }
-    let Ok(Expr::Call(f, args)) = parse(cell) else {
+    let expr = parsed(cell, cx.file.grammar);
+    let Ok(Expr::Call(f, args)) = &*expr else {
         return Truth::Unknown(cell.to_string());
     };
     match (f.as_str(), &args[..]) {
@@ -733,8 +768,8 @@ pub fn required(cell: &str, cx: &Cx) -> Truth {
 /// among its PossibleValues. Met when nothing in it applies at the file's
 /// version.
 pub fn holds(text: &str, cx: &Cx) -> Truth {
-    match parse(text) {
-        Ok(expr) => truth(&expr, cx).truth(true),
+    match &*parsed(text, cx.file.grammar) {
+        Ok(expr) => truth(expr, cx).truth(true),
         Err(_) => Truth::Unknown(text.to_string()),
     }
 }
@@ -750,7 +785,8 @@ pub fn reference(cell: &str, cx: &Cx) -> Reference {
         "FALSE" => return Reference::Either,
         _ => {}
     }
-    let Ok(Expr::Call(f, args)) = parse(cell) else {
+    let expr = parsed(cell, cx.file.grammar);
+    let Ok(Expr::Call(f, args)) = &*expr else {
         return Reference::Unknown(cell.to_string());
     };
     let must = match f.as_str() {
@@ -776,13 +812,19 @@ pub fn reference(cell: &str, cx: &Cx) -> Reference {
 /// X is one of `extensions`; or `fn:Eval(fn:Extension(X,v) || w)`, an
 /// extension's from `v` and standard from `w`, the earlier of the two
 /// when X is one of `extensions`, else `w` (TestGrammar without X in its
-/// `--extensions`).
+/// `--extensions`). [`FileCx::since`] reads it under a file's extensions.
 pub fn since(cell: &str, extensions: &BTreeSet<String>) -> Since {
+    since_in(cell, extensions, None)
+}
+
+/// [`since`], parsing as `grammar` keeps its rows' predicates, when given.
+fn since_in(cell: &str, extensions: &BTreeSet<String>, grammar: Option<&Grammar>) -> Since {
     if let Some(v) = version(cell) {
         return Since::In(v);
     }
     let unread = || Since::Unknown(cell.to_string());
-    let Ok(Expr::Call(f, args)) = parse(cell) else {
+    let expr = parsed(cell, grammar);
+    let Ok(Expr::Call(f, args)) = &*expr else {
         return unread();
     };
     let under = |name: &Path| extensions.contains(&name.text);
@@ -850,10 +892,10 @@ pub fn gate(wraps: &[Wrap], file: Version, extensions: &BTreeSet<String>) -> Gat
 /// `check_everything` reads); the checker's rules read SpecialCase and
 /// PossibleValues so.
 pub fn holds_fully(text: &str, cx: &Cx) -> Truth {
-    match parse(text) {
-        Ok(expr) => match unsupported(&expr) {
+    match &*parsed(text, cx.file.grammar) {
+        Ok(expr) => match unsupported(expr) {
             Some(f) => Truth::Unknown(f.to_string()),
-            None => truth(&expr, cx).truth(true),
+            None => truth(expr, cx).truth(true),
         },
         Err(_) => Truth::Unknown(text.to_string()),
     }
@@ -865,7 +907,8 @@ pub fn holds_fully(text: &str, cx: &Cx) -> Truth {
 /// [`holds_fully`] reads a predicate, and the value, as the model writes
 /// it. None for any other item.
 pub fn required_value(text: &str, cx: &Cx) -> Option<(Truth, String)> {
-    let Ok(Expr::Call(f, args)) = parse(text) else {
+    let expr = parsed(text, cx.file.grammar);
+    let Ok(Expr::Call(f, args)) = &*expr else {
         return None;
     };
     let [condition, value] = &args[..] else {
@@ -886,8 +929,11 @@ pub fn required_value(text: &str, cx: &Cx) -> Option<(Truth, String)> {
 /// `fn:IsMeaningful` when its condition doesn't. False where the note
 /// doesn't apply at the file's version; none for any other SpecialCase.
 pub fn ignored(text: &str, cx: &Cx) -> Option<Truth> {
-    let expr = parse(text).ok()?;
-    note(&expr, cx).map(|ignored| ignored.truth(false))
+    let expr = parsed(text, cx.file.grammar);
+    let Ok(expr) = &*expr else {
+        return None;
+    };
+    note(expr, cx).map(|ignored| ignored.truth(false))
 }
 
 /// [`ignored`] of `e`: vacant where the note doesn't apply.
@@ -946,6 +992,8 @@ fn unsupported(e: &Expr) -> Option<&str> {
 /// `text`, the whole of it, parsed. An [`Error`] says the predicate, then
 /// what stopped it and where.
 pub fn parse(text: &str) -> Result<Expr, Error> {
+    #[cfg(test)]
+    PARSED.with(|n| n.set(n.get() + 1));
     let mut p = Parser {
         text,
         at: 0,
@@ -959,6 +1007,107 @@ pub fn parse(text: &str) -> Result<Expr, Error> {
         });
     }
     Ok(expr)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`parse`] has run on this thread: so the tests see
+    /// the parses a model keeps used, each test on its own thread.
+    static PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The predicates asked through a model, by a [`FileCx`] given it, each
+/// parsed the first time it's asked for, on whichever thread asks, and
+/// kept, the first parse where two threads ask at once. A parse is a
+/// function of its text alone, so one kept is what parsing it again gives,
+/// an error too. It keeps a text as it's first asked, so a run pays for the
+/// texts it asks and no others; it has room for as many as the model has
+/// rows, rounded up to a power of two and 32 at the least (more than the
+/// texts its rows' cells hold), and past that a text it hasn't is parsed
+/// each time, and not kept: it's bounded by the model.
+pub(crate) struct Parses {
+    /// Twice its room, so one is always free. A text is kept in the first
+    /// free slot from where its hash falls, going on past each that holds
+    /// another's; a slot once taken is never given up, so a text kept is
+    /// found before the first free slot from its hash, or it isn't kept.
+    slots: Box<[OnceLock<Box<Kept>>]>,
+    /// How many texts it keeps.
+    room: usize,
+    /// How many it's kept: past its room by a text a thread at most, where
+    /// threads take slots at once.
+    taken: AtomicUsize,
+    /// The texts' hashes, keyed afresh for each model as std's `HashMap`
+    /// keys its own.
+    hasher: RandomState,
+}
+
+/// A text kept, with its hash and its parse.
+struct Kept {
+    hash: u64,
+    text: Box<str>,
+    parse: Result<Expr, Error>,
+}
+
+impl Parses {
+    /// Room for the predicates asked through `grammar`, none of them kept
+    /// yet.
+    pub(crate) fn of(grammar: &Grammar) -> Parses {
+        let rows: usize = grammar.tables().map(|table| table.rows.len()).sum();
+        let room = rows.max(32).next_power_of_two();
+        Parses {
+            slots: (0..2 * room).map(|_| OnceLock::new()).collect(),
+            room,
+            taken: AtomicUsize::new(0),
+            hasher: RandomState::new(),
+        }
+    }
+
+    /// `text` parsed, when it's kept, or there's room to keep it: parsed the
+    /// first time it's asked for, and kept.
+    fn get(&self, text: &str) -> Option<&Result<Expr, Error>> {
+        let hash = self.hasher.hash_one(text);
+        let last = self.slots.len() - 1;
+        // Any of the hash's bits will do, where a usize has fewer.
+        let mut at = hash as usize & last;
+        for _ in 0..self.slots.len() {
+            let slot = &self.slots[at];
+            let kept = match slot.get() {
+                Some(kept) => kept,
+                None if self.taken.load(Relaxed) >= self.room => return None,
+                // Taken for `text`, unless another thread takes it first for
+                // its own, which is then read as any other's.
+                None => slot.get_or_init(|| {
+                    self.taken.fetch_add(1, Relaxed);
+                    Box::new(Kept {
+                        hash,
+                        text: text.into(),
+                        parse: parse(text),
+                    })
+                }),
+            };
+            if kept.hash == hash && *kept.text == *text {
+                return Some(&kept.parse);
+            }
+            at = (at + 1) & last;
+        }
+        None
+    }
+
+    /// The texts it keeps.
+    #[cfg(test)]
+    fn kept(&self) -> BTreeSet<&str> {
+        let slots = self.slots.iter().filter_map(OnceLock::get);
+        slots.map(|kept| &*kept.text).collect()
+    }
+}
+
+/// `text` parsed: as `grammar` keeps it, when it's kept or there's room to
+/// keep it; else, or without a grammar, afresh.
+fn parsed<'g>(text: &str, grammar: Option<&'g Grammar>) -> Cow<'g, Result<Expr, Error>> {
+    match grammar.and_then(|grammar| grammar.parses().get(text)) {
+        Some(kept) => Cow::Borrowed(kept),
+        None => Cow::Owned(parse(text)),
+    }
 }
 
 /// Why a predicate doesn't parse ([`parse`]): each says the predicate as
@@ -2982,40 +3131,50 @@ mod tests {
 
         /// What `f` says of the row at `at` in `container`, reached through
         /// `parents`, in this file at `version`.
-        fn eval<T>(
+        fn eval<T: PartialEq + fmt::Debug>(
             &self,
             container: &Object,
             at: At,
             parents: &[&Object],
             version: &str,
-            f: impl FnOnce(&Cx) -> T,
+            f: impl Fn(&Cx) -> T,
         ) -> T {
             self.eval_with(None, container, at, parents, version, f)
         }
 
-        /// [`File::eval`] with `defaults`, as for a SpecialCase.
-        fn eval_with<T>(
+        /// [`File::eval`] with `defaults`, as for a SpecialCase. It says
+        /// the same through a [`FileCx`] given the embedded model, which
+        /// keeps its rows' predicates parsed, and one given none.
+        fn eval_with<T: PartialEq + fmt::Debug>(
             &self,
             defaults: Option<&Table>,
             container: &Object,
             at: At,
             parents: &[&Object],
             version: &str,
-            f: impl FnOnce(&Cx) -> T,
+            f: impl Fn(&Cx) -> T,
         ) -> T {
             let resolve = |id: ObjectId| self.objects.get(&id);
-            let file = FileCx::new(&self.trailer, v(version), &resolve)
-                .size(self.size)
-                .extensions(&self.extensions);
             let pages: Option<Vec<&Dict>> = (self.pages.as_ref()).map(|pages| {
                 let page = |n| self.objects[&(n, 0)].as_dict().unwrap();
                 pages.iter().map(|&n| page(n)).collect()
             });
-            let file = match &pages {
-                Some(pages) => file.pages(pages),
-                None => file,
-            };
-            f(&file.at(container, at).parents(parents).defaults(defaults))
+            let [alone, given] = [None, Some(Grammar::embedded())].map(|grammar| {
+                let file = FileCx::new(&self.trailer, v(version), &resolve)
+                    .size(self.size)
+                    .extensions(&self.extensions);
+                let file = match grammar {
+                    Some(grammar) => file.grammar(grammar),
+                    None => file,
+                };
+                let file = match &pages {
+                    Some(pages) => file.pages(pages),
+                    None => file,
+                };
+                f(&file.at(container, at).parents(parents).defaults(defaults))
+            });
+            assert_eq!(given, alone, "through the model's parses and without");
+            alone
         }
 
         /// What `f` says over one [`FileCx`] of this file at `version`,
@@ -4578,11 +4737,481 @@ mod tests {
 
     #[test]
     fn a_file_over_a_sync_resolver_is_send_and_sync() {
-        fn shared<T: Send + Sync>(_: &T) {}
+        fn shared<T: Send + Sync + ?Sized>(_: &T) {}
         let file = bare();
         let resolve = |id: ObjectId| file.objects.get(&id);
         shared(&FileCx::new(&file.trailer, v("1.7"), resolve));
         shared(&FileCx::new(&file.trailer, v("1.7"), &resolve));
+        // Given a model, which keeps its rows' predicates parsed.
+        let model = Grammar::embedded();
+        shared(model);
+        shared(&FileCx::new(&file.trailer, v("1.7"), &resolve).grammar(model));
+    }
+
+    /// How many times [`parse`] has run on this thread so far.
+    fn parsed_so_far() -> usize {
+        PARSED.with(|n| n.get())
+    }
+
+    /// The model in `model/tsv/latest`, upstream's as it is, read anew: so
+    /// what it keeps parsed is its own, of no other test's asking.
+    fn loaded() -> Grammar {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("model/tsv/latest");
+        Grammar::load(&dir).unwrap()
+    }
+
+    /// The heap `e` holds, by its allocations' capacities.
+    fn heap(e: &Expr) -> usize {
+        let each = |items: &[Expr]| items.iter().map(heap).sum::<usize>();
+        match e {
+            Expr::Call(f, args) => f.capacity() + args.capacity() * size_of::<Expr>() + each(args),
+            Expr::Group(inner) => size_of::<Expr>() + heap(inner),
+            Expr::And(items) | Expr::Or(items) => {
+                items.capacity() * size_of::<Expr>() + each(items)
+            }
+            Expr::Cmp(_, a, b) => 2 * size_of::<Expr>() + heap(a) + heap(b),
+            Expr::Arith(first, rest) => {
+                let terms = rest.iter().map(|(_, e)| heap(e)).sum::<usize>();
+                size_of::<Expr>()
+                    + heap(first)
+                    + rest.capacity() * size_of::<(Arith, Expr)>()
+                    + terms
+            }
+            Expr::Path(p) => {
+                let keys = p.keys.iter().map(String::capacity).sum::<usize>();
+                p.keys.capacity() * size_of::<String>() + keys + p.text.capacity()
+            }
+            Expr::Real(s) | Expr::Str(s) => s.capacity(),
+            Expr::Int(_) | Expr::Bool(_) | Expr::Null => 0,
+        }
+    }
+
+    /// Every text the seven functions parse from `model`'s rows' cells, as
+    /// the model splits them: its SinceVersion but a version, its Required
+    /// and each IndirectReference but `TRUE` and `FALSE`, each SpecialCase,
+    /// and each PossibleValues item, the version predicates around it taken
+    /// off.
+    fn texts(model: &Grammar) -> BTreeSet<&str> {
+        let asked = |cell: &&String| !matches!(cell.as_str(), "TRUE" | "FALSE");
+        let mut texts = BTreeSet::new();
+        for row in model.tables().flat_map(|table| &table.rows) {
+            let since = Some(&row.since_version).filter(|cell| version(cell).is_none());
+            let values = row.possible_values.iter().flatten();
+            let cells = (since.into_iter())
+                .chain(Some(&row.required).filter(asked))
+                .chain(row.indirect_reference.iter().filter(asked))
+                .chain(&row.special_case)
+                .chain(values.map(|value| &value.item));
+            texts.extend(cells.map(String::as_str));
+        }
+        texts
+    }
+
+    /// What a model keeps of its rows' predicates is what parsing each
+    /// again gives, an error too, for the embedded model and for upstream's
+    /// as it is; and how many there are, that it has room for them, and
+    /// what they take. Upstream's, read anew, keeps those it's asked and no
+    /// other.
+    #[test]
+    fn a_models_parses_are_its_rows_predicates_parsed_afresh() {
+        let upstream = loaded();
+        for (name, model, count, fresh) in [
+            ("upstream's", &upstream, 1491, true),
+            ("embedded", Grammar::embedded(), 1492, false),
+        ] {
+            let parses = model.parses();
+            let texts = texts(model);
+            let (mut keys, mut held, mut failed) = (0, 0, 0);
+            for &text in &texts {
+                let kept = parses.get(text).unwrap();
+                assert_eq!(*kept, parse(text), "{name}: {text:?}");
+                keys += text.len();
+                match kept {
+                    Ok(e) => held += heap(e),
+                    // About what an error's strings hold.
+                    Err(e) => {
+                        failed += 1;
+                        held += e.to_string().len();
+                    }
+                }
+            }
+            if fresh {
+                assert_eq!(parses.kept(), texts, "{name}");
+            }
+            let slot = size_of::<OnceLock<Box<Kept>>>();
+            println!(
+                "{name} model: {} predicates kept, {failed} that don't parse, room for {}; their \
+                 texts {keys} bytes, the slots {} bytes ({} of {slot}), what's kept of each {} \
+                 bytes, their parses about {held} bytes",
+                texts.len(),
+                parses.room,
+                parses.slots.len() * slot,
+                parses.slots.len(),
+                size_of::<Kept>(),
+            );
+            assert_eq!(texts.len(), count, "{name}");
+            assert!(parses.room >= 2 * count, "{name}: room for {}", parses.room);
+        }
+    }
+
+    /// An object of `table`'s kind with a value for each of its rows, each
+    /// 1: an array of an element each, or a dictionary of each key.
+    fn filled(table: &Table) -> Object {
+        if table.rows.iter().any(|row| index(row).is_some()) {
+            return integers(table.rows.iter().map(|_| 1));
+        }
+        let keys = table.rows.iter().filter(|row| row.key != "*");
+        keys.map(|row| (row.key.as_bytes(), 1))
+            .collect::<Dict>()
+            .into()
+    }
+
+    /// The element a table's row of an array is, a repeating row's first.
+    fn index(row: &Row) -> Option<usize> {
+        let n = row.key.strip_suffix('*').unwrap_or(&row.key);
+        let digits = !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+        digits.then(|| n.parse().unwrap())
+    }
+
+    /// What each of the seven functions says of each text `row`'s cells
+    /// give it, as `Debug` writes it, in a row of `file` at `at` in
+    /// `container`, with `defaults`: its SinceVersion through the file
+    /// ([`FileCx::since`]); its Required; each IndirectReference; each
+    /// SpecialCase by [`holds`], [`holds_fully`] and [`ignored`]; and each
+    /// PossibleValues item by [`required_value`] and [`holds_fully`]. Beside
+    /// each, how many times it parsed, and whether it parses its text when
+    /// it parses afresh (but `TRUE` and `FALSE`, and a version).
+    fn asked(
+        row: &Row,
+        file: &FileCx,
+        container: &Object,
+        at: At,
+        defaults: Option<&Table>,
+    ) -> Vec<(String, usize, bool)> {
+        let cx = file.at(container, at).defaults(defaults);
+        let mut said = Vec::new();
+        let mut ask = |text: &str, answer: &dyn Fn(&str) -> String, parses: bool| {
+            let before = parsed_so_far();
+            let answer = answer(text);
+            said.push((answer, parsed_so_far() - before, parses));
+        };
+        let cell = |text: &str| !matches!(text, "TRUE" | "FALSE");
+        let since = &row.since_version;
+        ask(
+            since,
+            &|t| format!("{:?}", file.since(t)),
+            version(since).is_none(),
+        );
+        ask(
+            &row.required,
+            &|t| format!("{:?}", required(t, &cx)),
+            cell(&row.required),
+        );
+        for text in &row.indirect_reference {
+            ask(text, &|t| format!("{:?}", reference(t, &cx)), cell(text));
+        }
+        for text in &row.special_case {
+            ask(text, &|t| format!("{:?}", holds(t, &cx)), true);
+            ask(text, &|t| format!("{:?}", holds_fully(t, &cx)), true);
+            ask(text, &|t| format!("{:?}", ignored(t, &cx)), true);
+        }
+        for item in row.possible_values.iter().flatten() {
+            ask(
+                &item.item,
+                &|t| format!("{:?}", required_value(t, &cx)),
+                true,
+            );
+            ask(&item.item, &|t| format!("{:?}", holds_fully(t, &cx)), true);
+        }
+        said
+    }
+
+    /// [`asked`] of every row of every table of `model`, each in a
+    /// container [`filled`] for its table, or empty, at `version`, under
+    /// `extensions`, through a [`FileCx`] given `model`, or none.
+    fn asked_of_every_row(
+        model: &Grammar,
+        given: bool,
+        filled_in: bool,
+        version: &str,
+        extensions: &BTreeSet<String>,
+        defaults: bool,
+    ) -> Vec<(String, usize, bool)> {
+        let file = bare();
+        let resolve = |id: ObjectId| file.objects.get(&id);
+        let cx = FileCx::new(&file.trailer, v(version), &resolve).extensions(extensions);
+        let cx = if given { cx.grammar(model) } else { cx };
+        let mut said = Vec::new();
+        for table in model.tables() {
+            let container = match filled_in {
+                true => filled(table),
+                false => Dict::new().into(),
+            };
+            for row in &table.rows {
+                let at = match index(row) {
+                    Some(i) => At::Index(i),
+                    None if container.as_array().is_some() => At::Index(table.rows.len()),
+                    None => At::Key(row.key.as_bytes()),
+                };
+                let defaults = defaults.then_some(table);
+                said.extend(asked(row, &cx, &container, at, defaults));
+            }
+        }
+        said
+    }
+
+    /// Each of the seven functions says the same of every text of every
+    /// row of every table through a [`FileCx`] given the model and one
+    /// given none, filled in or not, under no extension or every one the
+    /// model names; and through the model it parses each text the first
+    /// time any file asks, and then never, where without it each is parsed
+    /// every time. Upstream's model, read anew, parses each of its texts
+    /// once the first time through, and keeps them and no other.
+    #[test]
+    fn the_seven_say_the_same_of_every_row_through_the_models_parses_and_without() {
+        let upstream = loaded();
+        for (name, model, fresh) in [
+            ("upstream's", &upstream, true),
+            ("embedded", Grammar::embedded(), false),
+        ] {
+            let all = model.extensions();
+            let none = none();
+            // The first time through: each text parsed once at most, and
+            // a model no other test asks parses each of its texts once.
+            let first = asked_of_every_row(model, true, true, "2.0", &all, false);
+            let parsed: usize = first.iter().map(|(_, n, _)| n).sum();
+            assert!(first.iter().all(|(_, n, _)| *n <= 1), "{name}");
+            if fresh {
+                assert_eq!(parsed, texts(model).len(), "{name}");
+                assert_eq!(model.parses().kept(), texts(model), "{name}");
+            }
+            for (filled_in, version, extensions, defaults) in [
+                (true, "2.0", &all, true),
+                (false, "1.7", &none, false),
+                (true, "1.4", &none, true),
+            ] {
+                let at = format!("{name}, {version}, {} extensions", extensions.len());
+                let given =
+                    asked_of_every_row(model, true, filled_in, version, extensions, defaults);
+                let alone =
+                    asked_of_every_row(model, false, filled_in, version, extensions, defaults);
+                assert_eq!(given.len(), alone.len(), "{at}");
+                for ((given, n, _), (alone, m, parses)) in given.iter().zip(&alone) {
+                    assert_eq!(given, alone, "{at}");
+                    if !defaults {
+                        assert_eq!(*n, 0, "{at}: {given} parsed through the model");
+                        assert_eq!(*m, usize::from(*parses), "{at}: {alone} parsed afresh");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A SinceVersion read through a [`FileCx`] is read under its
+    /// extensions as [`since`] reads it under them, given the model or
+    /// not: under none, each the model names alone, and all of them.
+    #[test]
+    fn a_files_since_is_since_under_its_extensions() {
+        let model = Grammar::embedded();
+        let all = model.extensions();
+        let each = all.iter().map(|e| BTreeSet::from([e.clone()]));
+        let sets: Vec<BTreeSet<String>> = [none(), all.clone()].into_iter().chain(each).collect();
+        let file = bare();
+        let resolve = |id: ObjectId| file.objects.get(&id);
+        let mut extended = 0;
+        for extensions in &sets {
+            let alone = FileCx::new(&file.trailer, v("2.0"), &resolve).extensions(extensions);
+            let given = FileCx::new(&file.trailer, v("2.0"), &resolve)
+                .extensions(extensions)
+                .grammar(model);
+            for row in model.tables().flat_map(|table| &table.rows) {
+                let cell = &row.since_version;
+                let said = since(cell, extensions);
+                assert_eq!(alone.since(cell), said, "{cell} under {extensions:?}");
+                assert_eq!(given.since(cell), said, "{cell} under {extensions:?}");
+                extended += usize::from(said != since(cell, &none()));
+            }
+        }
+        assert!(extended > 0, "an extension moves some row's SinceVersion");
+    }
+
+    /// A model of the test's own, whose cells' predicates don't parse:
+    /// each kept as the error parsing it gives, and each function answers
+    /// through it as without it, unknown by the text, or nothing for
+    /// `fn:RequiredValue` and the notes to readers.
+    #[test]
+    fn a_models_predicates_that_dont_parse_answer_through_it_as_without() {
+        let dir = tempfile::Builder::new()
+            .prefix("pdf-arlington-parses-")
+            .tempdir()
+            .unwrap();
+        let cells = [
+            "Rotate",
+            "integer",
+            "fn:Extension(A=1)",
+            "",
+            "fn:IsRequired(@Rotate=1)",
+            "fn:MustBeDirect(@Rotate=1)",
+            "FALSE",
+            "0",
+            "[fn:Eval(@Rotate=1),fn:RequiredValue(@Rotate=1,90),a:b,90]",
+            "[fn:Eval(@Rotate=0)]",
+            "",
+            "",
+        ];
+        let header = grammar::HEADER.join("\t");
+        let text = format!("{header}\n{}\n", cells.join("\t"));
+        std::fs::write(dir.path().join("T.tsv"), text).unwrap();
+        let model = Grammar::load(dir.path()).unwrap();
+        let row = model.table("T").unwrap().row(At::Key(b"Rotate")).unwrap();
+        let values: Vec<&str> = (row.possible_values[0].iter())
+            .map(|v| v.item.as_str())
+            .collect();
+        let (eval, value, plain) = (values[0], values[1], values[2]);
+        let special = row.special_case[0].as_str();
+        let unread = [
+            row.since_version.as_str(),
+            &row.required,
+            &row.indirect_reference[0],
+            special,
+            eval,
+            value,
+            plain,
+        ];
+        for text in unread {
+            assert!(parse(text).is_err(), "{text:?} parses");
+            assert_eq!(model.parses().get(text), Some(&parse(text)), "{text:?}");
+        }
+        assert_eq!(model.parses().kept(), BTreeSet::from(unread));
+
+        let page = Object::from(dict! { "Rotate" => 90 });
+        let trailer = Dict::new();
+        let resolve = |_: ObjectId| None;
+        let alone = FileCx::new(&trailer, v("2.0"), &resolve);
+        let given = FileCx::new(&trailer, v("2.0"), &resolve).grammar(&model);
+        for file in [&alone, &given] {
+            let cx = file
+                .at(&page, At::Key(b"Rotate"))
+                .defaults(Some(model.table("T").unwrap()));
+            assert_eq!(
+                file.since(&row.since_version),
+                Since::Unknown(row.since_version.clone())
+            );
+            assert_eq!(required(&row.required, &cx), unknown(&row.required));
+            let indirect = &row.indirect_reference[0];
+            assert_eq!(
+                reference(indirect, &cx),
+                Reference::Unknown(indirect.clone())
+            );
+            assert_eq!(holds(special, &cx), unknown(special));
+            assert_eq!(holds_fully(special, &cx), unknown(special));
+            assert_eq!(ignored(special, &cx), None);
+            assert_eq!(holds_fully(eval, &cx), unknown(eval));
+            for item in [eval, value, plain] {
+                assert_eq!(required_value(item, &cx), None, "{item}");
+            }
+        }
+    }
+
+    /// A text that isn't one of the model's rows' predicates, asked through
+    /// a [`FileCx`] given the model, is kept as a row's is: parsed the first
+    /// time, and never again.
+    #[test]
+    fn a_text_not_of_the_models_rows_is_kept_as_a_rows_is() {
+        let model = loaded();
+        let file = bare();
+        let resolve = |id: ObjectId| file.objects.get(&id);
+        let given = FileCx::new(&file.trailer, v("1.7"), &resolve).grammar(&model);
+        let catalog = &file.objects[&(1, 0)];
+        let text = "fn:Eval(@Type==Catalog) && fn:IsPresent(Nonesuch)";
+        assert!(!texts(&model).contains(text), "{text} is a row's");
+        for n in [1, 0, 0] {
+            let before = parsed_so_far();
+            let cx = given.at(catalog, At::Key(b"Type"));
+            assert_eq!(holds(text, &cx), Truth::False);
+            assert_eq!(parsed_so_far() - before, n);
+        }
+        assert_eq!(model.parses().kept(), BTreeSet::from([text]));
+    }
+
+    /// A model keeps as many texts as it has room for, and past that
+    /// parses each it hasn't every time it's asked, and keeps it not,
+    /// those it has still read as kept.
+    #[test]
+    fn past_its_room_a_model_parses_a_text_each_time_and_keeps_it_not() {
+        let dir = tempfile::Builder::new()
+            .prefix("pdf-arlington-room-")
+            .tempdir()
+            .unwrap();
+        let cells = [
+            "Rotate", "integer", "1.0", "", "FALSE", "FALSE", "FALSE", "0", "", "", "", "",
+        ];
+        let header = grammar::HEADER.join("\t");
+        let text = format!("{header}\n{}\n", cells.join("\t"));
+        std::fs::write(dir.path().join("T.tsv"), text).unwrap();
+        let model = Grammar::load(dir.path()).unwrap();
+        let room = model.parses().room;
+        assert_eq!(room, 32, "a model of one row");
+        let page = Object::from(dict! { "Rotate" => 90 });
+        let trailer = Dict::new();
+        let resolve = |_: ObjectId| None;
+        let given = FileCx::new(&trailer, v("2.0"), &resolve).grammar(&model);
+        let cx = given.at(&page, At::Key(b"Rotate"));
+        let texts: Vec<String> = (0..=room).map(|n| format!("@Rotate=={n}")).collect();
+        let ask = |text: &str| {
+            let before = parsed_so_far();
+            let truth = match text {
+                "@Rotate==90" => Truth::True,
+                _ => Truth::False,
+            };
+            assert_eq!(holds(text, &cx), truth, "{text}");
+            parsed_so_far() - before
+        };
+        for text in &texts[..room] {
+            assert_eq!(ask(text), 1, "{text}");
+        }
+        let past = &texts[room];
+        for _ in 0..3 {
+            assert_eq!(ask(past), 1, "{past}");
+        }
+        for text in &texts[..room] {
+            assert_eq!(ask(text), 0, "{text}");
+        }
+        let kept: BTreeSet<&str> = texts[..room].iter().map(String::as_str).collect();
+        assert_eq!(model.parses().kept(), kept);
+    }
+
+    /// Eight threads asking one text of a model at once, through one
+    /// [`FileCx`] given it, parse it once between them, and each reads the
+    /// one parse kept.
+    #[test]
+    fn threads_asking_one_text_of_a_model_at_once_parse_it_once() {
+        let model = loaded();
+        let rotate = model.table("PageObject").unwrap().row(At::Key(b"Rotate"));
+        let text = rotate.unwrap().possible_values[0][0].item.as_str();
+        assert_eq!(text, "fn:Eval((@Rotate mod 90)==0)");
+        let file = bare();
+        let resolve = |id: ObjectId| file.objects.get(&id);
+        let shared = FileCx::new(&file.trailer, v("2.0"), &resolve).grammar(&model);
+        let page = Object::from(dict! { "Type" => "Page", "Rotate" => 180 });
+        let start = Barrier::new(8);
+        let said: Vec<(usize, usize)> = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        let before = parsed_so_far();
+                        let cx = shared.at(&page, At::Key(b"Rotate"));
+                        assert_eq!(holds_fully(text, &cx), Truth::True);
+                        let kept = model.parses().get(text).unwrap();
+                        (parsed_so_far() - before, kept as *const _ as usize)
+                    })
+                })
+                .collect();
+            threads.into_iter().map(|t| t.join().unwrap()).collect()
+        });
+        assert_eq!(said.iter().map(|&(n, _)| n).sum::<usize>(), 1, "{said:?}");
+        assert!(said.iter().all(|&(_, at)| at == said[0].1), "{said:?}");
     }
 
     /// The rows a thread makes of `file`, each by [`FileCx::at`]: three keys

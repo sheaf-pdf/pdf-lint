@@ -15,6 +15,8 @@ use std::sync::OnceLock;
 use pdf_objects::Version;
 use twox_hash::XxHash64;
 
+use crate::predicate::Parses;
+
 pub(crate) mod model {
     include!(concat!(env!("OUT_DIR"), "/model.rs"));
 }
@@ -87,6 +89,10 @@ pub struct Grammar {
     tables: BTreeMap<String, Table>,
     /// Its tables' files' XXH64 ([`Grammar::hash`]).
     hash: u64,
+    /// Its rows' predicates, each parsed the first time it's asked for:
+    /// made the first time a [`FileCx`](crate::FileCx) given the model asks
+    /// ([`Grammar::parses`]), so a caller that never gives one pays nothing.
+    parses: OnceLock<Parses>,
 }
 
 /// How many tables it has, and its hash: each [`Table`] shows its own
@@ -500,7 +506,17 @@ impl Grammar {
                 }
             }
         }
-        Ok(Grammar { tables, hash })
+        Ok(Grammar {
+            tables,
+            hash,
+            parses: OnceLock::new(),
+        })
+    }
+
+    /// Its rows' predicates, each parsed the first time it's asked for, on
+    /// whichever thread asks: made the first time it's asked for.
+    pub(crate) fn parses(&self) -> &Parses {
+        self.parses.get_or_init(|| Parses::of(self))
     }
 
     /// What names the model, as reports give it: XXH64, seed 0, of each
@@ -1087,6 +1103,29 @@ mod tests {
                 "the sanity check's {len} bytes, seed {seed}"
             );
         }
+    }
+
+    /// A model keeps its rows' predicates parsed only once a file given it
+    /// asks one: a file given none, or given it but asking nothing, makes
+    /// nothing of it.
+    #[test]
+    fn a_models_parses_are_made_the_first_time_a_file_given_it_asks() {
+        use crate::predicate::{self, FileCx, Truth};
+        use pdf_objects::{Dict, Object, ObjectId, dict};
+
+        let model = Grammar::load(&dir().join("tsv/latest")).unwrap();
+        let rotate = model.table("PageObject").unwrap().row(At::Key(b"Rotate"));
+        let text = &rotate.unwrap().possible_values[0][0].item;
+        let (trailer, page) = (Dict::new(), Object::from(dict! { "Rotate" => 90 }));
+        let resolve = |_: ObjectId| None;
+        let holds =
+            |file: &FileCx| predicate::holds_fully(text, &file.at(&page, At::Key(b"Rotate")));
+        let alone = FileCx::new(&trailer, Version::new(2, 0), &resolve);
+        assert_eq!(holds(&alone), Truth::True);
+        let given = FileCx::new(&trailer, Version::new(2, 0), &resolve).grammar(&model);
+        assert!(model.parses.get().is_none(), "made before it's asked");
+        assert_eq!(holds(&given), Truth::True);
+        assert!(model.parses.get().is_some(), "not made when asked");
     }
 
     #[test]

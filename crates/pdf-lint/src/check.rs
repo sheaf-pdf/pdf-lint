@@ -1422,7 +1422,8 @@ fn check_in(
     let file = FileCx::new(trailer, version, Objects(source))
         .size(source.size())
         .extensions(&extensions)
-        .latin(&latin);
+        .latin(&latin)
+        .grammar(grammar());
     let file = match &pages {
         Some(pages) => file.pages(pages),
         None => file,
@@ -1477,7 +1478,8 @@ fn check_in(
             let end = revisions[revision - 1].end.map(RevisionEnd::line);
             let file = FileCx::new(dict, version, as_of)
                 .size(end.or(source.size()))
-                .extensions(&extensions);
+                .extensions(&extensions)
+                .grammar(grammar());
             Earlier {
                 revision,
                 trailer,
@@ -2533,9 +2535,9 @@ impl<'a> Walk<'a> {
                 return;
             }
         };
-        let (row, extension) = walked(v.table, row, self.extensions);
-        let also = (also)
-            .and_then(|(also, row)| Some((also, walked(also.table, row, self.extensions).0?)));
+        let (row, extension) = walked(v.table, row, &self.file);
+        let also =
+            (also).and_then(|(also, row)| Some((also, walked(also.table, row, &self.file).0?)));
         let (v, row, also) = match (row, also) {
             (Some(row), also) => (v, row, also),
             (None, Some((other, row))) => (other, row, None),
@@ -2628,7 +2630,7 @@ impl<'a> Walk<'a> {
     ) {
         let key = at_text(at);
         let table = &v.table.name;
-        let row = match walked(v.table, row, self.extensions) {
+        let row = match walked(v.table, row, &self.file) {
             (Some(row), _) => row,
             (None, extension) => {
                 self.unlisted(v, at, key, extension, raw, written, made);
@@ -2794,7 +2796,7 @@ impl<'a> Walk<'a> {
         value: &Object,
         written: Option<Span>,
     ) {
-        match predicate::since(&row.since_version, self.extensions) {
+        match self.file.since(&row.since_version) {
             Since::In(since) if since > self.version => {
                 let value = format!("{} (since {since})", render(value));
                 self.find(v, made, Rule::TooNew, &v.table.name, key, value, written);
@@ -3590,7 +3592,7 @@ impl<'a> Walk<'a> {
     /// SinceVersion, nor an extension's key (TestGrammar's
     /// `IsValidForPDFVersion`); else as its Required cell says.
     fn required(&self, row: &Row, cx: &Cx) -> Truth {
-        match predicate::since(&row.since_version, self.extensions) {
+        match self.file.since(&row.since_version) {
             Since::In(v) if self.version >= v => predicate::required(&row.required, cx),
             _ => Truth::False,
         }
@@ -3929,7 +3931,7 @@ impl<'a> Walk<'a> {
                 continue;
             };
             let at = At::Key(&key);
-            if !(again.iter()).any(|t| walked(t, t.row(at), self.extensions).0.is_some()) {
+            if !(again.iter()).any(|t| walked(t, t.row(at), &self.file).0.is_some()) {
                 continue;
             }
             if let Some(n) = self.report.unlisted.get_mut(&unlisted) {
@@ -4510,16 +4512,16 @@ fn field_keys() -> Vec<&'static [u8]> {
     keys
 }
 
-/// `table`'s `row` as the walk takes it, under `extensions`: the row of
-/// another extension is no row (TestGrammar without it in its
-/// `--extensions`), but the table's wildcard, if it has one; and that
-/// extension's name.
+/// `table`'s `row` as the walk takes it, under the extensions `file` is
+/// checked under: the row of another extension is no row (TestGrammar
+/// without it in its `--extensions`), but the table's wildcard, if it has
+/// one; and that extension's name.
 fn walked(
     table: &'static Table,
     row: Option<&'static Row>,
-    extensions: &BTreeSet<String>,
+    file: &FileCx,
 ) -> (Option<&'static Row>, Option<String>) {
-    let since = |row: &Row| predicate::since(&row.since_version, extensions);
+    let since = |row: &Row| file.since(&row.since_version);
     match row.map(|row| (row, since(row))) {
         Some((_, Since::Extension(name))) => {
             let wildcard = (table.row(At::Key(b"*")))
