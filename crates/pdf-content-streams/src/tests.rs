@@ -363,6 +363,118 @@ fn a_number_is_one_word() {
     }
 }
 
+/// A number word's fault told from its bytes, where they say it, is the
+/// one reading it both ways tells: of every word of up to five digits,
+/// signs and points, and at the edges where the bytes stop saying, an
+/// integer of nine digits and of ten, about 2^31 and 2^32, with a sign and
+/// without, leading zeros among them, and a real of 38 digits before its
+/// point and of 39, about where an `f32` rounds to infinity, and with a
+/// long fraction. Where the bytes say, so does the reading; past 2^31 and
+/// at 39 digits, they don't, and the reading's fault is the one told.
+#[test]
+fn a_number_words_fault_told_by_its_bytes_is_the_one_read() {
+    use crate::fault::{self, number, number_by_bytes, number_read};
+    let alphabet = b"0123456789+-.";
+    let mut words: Vec<Vec<u8>> = vec![Vec::new()];
+    let mut from = 0;
+    for _ in 0..5 {
+        let to = words.len();
+        for i in from..to {
+            for &b in alphabet {
+                let word = [&words[i][..], &[b]].concat();
+                words.push(word);
+            }
+        }
+        from = to;
+    }
+    let words = words.split_off(1);
+    let edges: Vec<String> = [
+        "999999999",
+        "+999999999",
+        "-999999999",
+        "000000000",
+        "1000000000",
+        "0000000001",
+        "2147483647",
+        "+2147483647",
+        "-2147483647",
+        "2147483648",
+        "+2147483648",
+        "-2147483648",
+        "-2147483649",
+        "4294967295",
+        "4294967296",
+        "+4294967295",
+        "9223372036854775807",
+        "9223372036854775808",
+        "-9223372036854775808",
+        "-9223372036854775809",
+    ]
+    .into_iter()
+    .map(String::from)
+    .chain(["", "+", "-"].into_iter().flat_map(|sign| {
+        [
+            format!("{sign}{}.5", "9".repeat(38)),
+            format!("{sign}{}.", "9".repeat(39)),
+            format!("{sign}{}.0", "1".repeat(39)),
+            format!("{sign}340282346638528859811704183484516925440.0"),
+            format!("{sign}340282356779733661637539395458142568447.9"),
+            format!("{sign}340282356779733661637539395458142568448.0"),
+            format!("{sign}0{}.0", "9".repeat(38)),
+            format!("{sign}.{}", "9".repeat(300)),
+            format!("{sign}1.{}", "0".repeat(300)),
+            format!("{sign}{}.0", "9".repeat(309)),
+        ]
+    }))
+    .collect();
+    let mut said = (0, 0);
+    for word in words
+        .iter()
+        .map(Vec::as_slice)
+        .chain(edges.iter().map(String::as_bytes))
+    {
+        let shown = String::from_utf8_lossy(word);
+        let read = number_read(word);
+        assert_eq!(number(word), read, "{shown}");
+        match number_by_bytes(word) {
+            Some(told) => {
+                assert_eq!(told, read, "{shown}");
+                said.0 += 1;
+            }
+            None => said.1 += 1,
+        }
+    }
+    assert!(said.0 > 300_000 && said.1 > 0, "{said:?}");
+    // Where the bytes stop saying: an integer past nine digits, a real past
+    // 38 before its point.
+    for (word, by_bytes) in [
+        (&b"+999999999"[..], true),
+        (b"2147483648", false),
+        (b"+2147483648", false),
+        (b"-2147483648", false),
+        (b"0000000001", false),
+    ] {
+        assert_eq!(number_by_bytes(word).is_some(), by_bytes, "{word:?}");
+    }
+    let past = |w: &'static str| {
+        Some(fault::Fault::OutOfRange {
+            written: w.as_bytes(),
+        })
+    };
+    assert_eq!(number(b"2147483648"), None);
+    assert_eq!(number(b"-2147483648"), None);
+    assert_eq!(number(b"+2147483648"), past("+2147483648"));
+    assert_eq!(number(b"4294967296"), past("4294967296"));
+    let nines = format!("{}.0", "9".repeat(39));
+    let nines: &'static str = nines.leak();
+    assert_eq!(number_by_bytes(nines.as_bytes()), None);
+    assert_eq!(number(nines.as_bytes()), past(nines));
+    let edge = "340282356779733661637539395458142568447.9";
+    assert_eq!(number(edge.as_bytes()), None);
+    let edge = "340282356779733661637539395458142568448.0";
+    assert_eq!(number(edge.as_bytes()), past(edge));
+}
+
 /// Whether a word is a number, told from its bytes, is what its first
 /// token, read by PDFium's rules, tells: of every word of up to three
 /// bytes, each byte a digit, a sign, a point, white-space of either rules,

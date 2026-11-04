@@ -12,7 +12,7 @@ use pdf_objects::{Dict, Object, ObjectId, Str, Value, dict};
 use pdf_tokenizer::{Kind, decode};
 
 use crate::data::{RunLength, Searched, a85_stop, ei_scan, find};
-use crate::fault::{Fault, Sink};
+use crate::fault::{self, Fault, Sink};
 use crate::inline::{Walks, ei_from};
 use crate::scan::{Raw, UNCAPPED, next_raw, next_raw_walked, tokenizer};
 use crate::{
@@ -1946,11 +1946,19 @@ fn operand(s: &[u8], operand: &Operand, limits: &Limits) {
 /// what's no number word; and for a word of no more than the 255 bytes
 /// PDFium reads that ISO 32000-2 reads as a number too, ISO's value, an
 /// integer in `i32`'s range exactly and a real to an `f32`'s precision.
+/// Its fault, where its bytes tell it, is the one reading it tells.
 fn number(operand: &Operand) {
     let (bytes, n) = (operand.bytes(), operand.number());
     if !operand.is_number() {
         assert_eq!(n, 0.0, "{operand:?} is no number");
         return;
+    }
+    if let Some(told) = fault::number_by_bytes(bytes) {
+        assert_eq!(
+            told,
+            fault::number_read(bytes),
+            "{operand:?}'s fault by its bytes"
+        );
     }
     if bytes.len() > 255 {
         return;

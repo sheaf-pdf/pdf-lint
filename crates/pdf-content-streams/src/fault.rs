@@ -602,8 +602,48 @@ impl<'a, T: FnMut(Range<usize>, Fault<'a>)> Visit<'a> for Nesting<'a, T> {
 /// one past what's read here, each judged on the whole word as pdf-tokenizer
 /// reads a number by ISO's rules, an integer, or a real when it has a
 /// point: an integer PDFium reads otherwise, outside its 32 bits, or a
-/// real it reads as infinite, past an `f32`; or one past 64 bits.
-fn number(written: &[u8]) -> Option<Fault<'_>> {
+/// real it reads as infinite, past an `f32`; or one past 64 bits. Told
+/// from the word's bytes alone ([`number_by_bytes`]) where they say, and
+/// otherwise by reading it both ways ([`number_read`]).
+pub(crate) fn number(written: &[u8]) -> Option<Fault<'_>> {
+    match number_by_bytes(written) {
+        Some(fault) => fault,
+        None => number_read(written),
+    }
+}
+
+/// A number word's fault ([`number`]), `written` digits, signs and points
+/// alone, where its bytes say it without reading its value; None where
+/// they don't. A word ISO 32000-2 doesn't write as a number, a sign
+/// after its first byte, a second point or no digit, is one
+/// ([`Fault::Number`]); an integer of nine digits at most is none, as
+/// below 2^31 it's the integer PDFium reads, with a sign or without; and a
+/// real of 38 digits at most before its point is none, as below 10^38 it's
+/// within an `f32`'s range and a 64-bit float's. Past those, it's read.
+pub(crate) fn number_by_bytes(written: &[u8]) -> Option<Option<Fault<'_>>> {
+    let body = match written {
+        [b'+' | b'-', body @ ..] => body,
+        body => body,
+    };
+    let (mut point, mut digits) = (None, 0usize);
+    for (i, &c) in body.iter().enumerate() {
+        match c {
+            b'0'..=b'9' => digits += 1,
+            b'.' if point.is_none() => point = Some(i),
+            _ => return Some(Some(Fault::Number { written })),
+        }
+    }
+    match point {
+        _ if digits == 0 => Some(Some(Fault::Number { written })),
+        None if digits <= 9 => Some(None),
+        Some(whole) if whole <= 38 => Some(None),
+        _ => None,
+    }
+}
+
+/// A number word's fault ([`number`]), read both ways: by ISO 32000-2's
+/// rules, as pdf-tokenizer reads a number, and by PDFium's.
+pub(crate) fn number_read(written: &[u8]) -> Option<Fault<'_>> {
     let past = Fault::OutOfRange { written };
     if written.contains(&b'.') {
         return match decode::number(written) {
