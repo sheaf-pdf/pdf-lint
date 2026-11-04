@@ -238,10 +238,12 @@ mod fonts;
 mod kept;
 mod linearization;
 mod reading;
+mod rows;
 mod structure;
 mod told;
 
 use reading::{Readings, Reads};
+use rows::rows;
 pub(crate) use structure::Packet;
 
 /// How deeply direct objects may nest in an indirect one before the walk
@@ -1379,6 +1381,35 @@ fn check_in(
     hold: &Hold,
     options: &Options,
 ) -> Report {
+    walking(source, reads, hold, options, |walk, font_budget| {
+        walk.run();
+        walk.object_streams();
+        walk.run();
+        walk.linearization_dictionary();
+        walk.run();
+        walk.revisions();
+        walk.excuse();
+        walk.packed();
+        walk.content(options.content_budget.unwrap_or(CONTENT_BUDGET));
+        walk.structures();
+        walk.graphics(font_budget);
+        walk.linearized();
+        walk.unreached();
+        walk.read_as(source.warnings());
+        std::mem::take(&mut walk.report)
+    })
+}
+
+/// `f` of the walk of `source` that [`check_in`] makes, its trailer queued
+/// and nothing visited yet, and of what the file's font budget has left once
+/// the fonts are read for which have Latin characters.
+fn walking<R>(
+    source: &dyn Source,
+    reads: Option<&dyn Reads>,
+    hold: &Hold,
+    options: &Options,
+    f: impl FnOnce(&mut Walk, usize) -> R,
+) -> R {
     let version = options.version.unwrap_or_else(|| file_version(source));
     let written = source.trailer();
     let mut findings = Vec::new();
@@ -1560,21 +1591,7 @@ fn check_in(
         loose: false,
         also: None,
     });
-    walk.run();
-    walk.object_streams();
-    walk.run();
-    walk.linearization_dictionary();
-    walk.run();
-    walk.revisions();
-    walk.excuse();
-    walk.packed();
-    walk.content(options.content_budget.unwrap_or(CONTENT_BUDGET));
-    walk.structures();
-    walk.graphics(font_budget);
-    walk.linearized();
-    walk.unreached();
-    walk.read_as(source.warnings());
-    walk.report
+    f(&mut walk, font_budget)
 }
 
 impl Report {
@@ -2419,8 +2436,8 @@ impl<'a> Walk<'a> {
         if let Some(dict) = v.object.as_dict() {
             for entry in dict.last_entries() {
                 let at = At::Key(&entry.key);
-                let row = v.table.row(at);
-                let also = also.as_ref().map(|also| (also, also.table.row(at)));
+                let row = rows(v.table).row(&entry.key);
+                let also = (also.as_ref()).map(|also| (also, rows(also.table).row(&entry.key)));
                 let (raw, written) = (&entry.value, entry_at(entry));
                 self.entry(&v, at, row, raw, written, made, &parents, also);
             }
@@ -3191,6 +3208,13 @@ impl<'a> Walk<'a> {
         let mut tie = false;
         for &table in links {
             let score = self.score((id, object), table, parents);
+            #[cfg(any(test, fuzzing))]
+            assert_eq!(
+                score,
+                self.score_by_rows((id, object), table, parents),
+                "{}: the score as each row's key is looked up",
+                table.name
+            );
             match best {
                 Some((_, least)) if score > least => {}
                 Some((_, least)) if score == least => tie = true,
@@ -3231,6 +3255,114 @@ impl<'a> Walk<'a> {
     /// the push button taken. Both are read as the rules read them: what
     /// can't be told counts as allowed.
     fn score(
+        &self,
+        (id, object): (Option<ObjectId>, &'a Object),
+        table: &'static Table,
+        parents: &[&'a Object],
+    ) -> i32 {
+        let (dict, array) = match object.value() {
+            Value::Dict(d) => (Some(d), None),
+            Value::Stream(s) => (Some(&s.dict), None),
+            Value::Array(a) => (None, Some(a)),
+            _ => return 0,
+        };
+        // Each row's entry, the dictionary's entries walked once.
+        let entries = dict.map(|dict| rows(table).entries(dict));
+        let rows = &table.rows;
+        let mut score = 0;
+        if let Some(array) = array
+            && array.len() == rows.len()
+            && rows.last().is_some_and(|row| !row.key.contains('*'))
+        {
+            score -= 20;
+        }
+        let mut found = 0;
+        let mut bad = false;
+        for (place, row) in rows.iter().enumerate() {
+            let (at, entry) = match (&entries, array) {
+                (Some(entries), _) => (At::Key(row.key.as_bytes()), entries.get(place)),
+                (_, Some(array)) => match index(&row.key) {
+                    Some(i) => (At::Index(i), array.get(i)),
+                    None => continue,
+                },
+                (None, None) => return 0,
+            };
+            let entry = (entry.and_then(|e| self.resolve(e).ok()))
+                .map(|(_, e)| e)
+                .filter(|e| array.is_some() || !e.is_null());
+            let Some(entry) = entry else {
+                continue;
+            };
+            found += 1;
+            let required = self
+                .with_cx((id, object), at, parents, None, |cx| self.required(row, cx))
+                == Truth::True;
+            let decisive = matches!(row.key.as_str(), "Type" | "Subtype" | "S");
+            let first = array.is_some() && row.key == "0";
+            let typed = row.r#type.iter().position(|t| {
+                (t.wraps.iter())
+                    .all(|w| w.func != WrapFn::Extension || self.extensions.contains(&w.arg))
+                    && self.matches(entry, t.item)
+            });
+            let Some(i) = typed else {
+                score += if decisive {
+                    20
+                } else if first {
+                    3
+                } else {
+                    1
+                };
+                bad |= required;
+                continue;
+            };
+            let special = &row.special_case[i];
+            let allowed = !matches!(
+                self.with_cx((id, object), at, parents, Some(table), |cx| {
+                    self.values(row, i, entry, cx)
+                }),
+                Values::Not(_)
+            ) && (special.is_empty()
+                || self.with_cx((id, object), at, parents, Some(table), |cx| {
+                    predicate::holds_fully(special, cx)
+                }) != Truth::False);
+            if allowed {
+                score += if decisive || matches!(row.key.as_str(), "Parent" | "TransformMethod") {
+                    -80
+                } else if first && required {
+                    -60
+                } else if first {
+                    -20
+                } else if required {
+                    -10
+                } else {
+                    -4
+                };
+            } else {
+                score += if decisive {
+                    10
+                } else if first {
+                    7
+                } else {
+                    5
+                };
+                bad |= required;
+            }
+            if version(&row.deprecated_in).is_some_and(|v| self.version >= v) {
+                score += 8;
+            }
+        }
+        if !bad {
+            score -= 8 * found;
+        }
+        score + (-10.0 * f64::from(found) / rows.len() as f64) as i32
+    }
+
+    /// [`Walk::score`] as it was first written, each row's entry looked up
+    /// by its key in the dictionary: kept for the tests and the fuzz
+    /// target, which hold the two to the same score at every table the
+    /// walk chooses among.
+    #[cfg(any(test, fuzzing))]
+    fn score_by_rows(
         &self,
         (id, object): (Option<ObjectId>, &'a Object),
         table: &'static Table,
@@ -3532,11 +3664,12 @@ impl<'a> Walk<'a> {
     /// Whether `v`'s dictionary has each key its table requires, for an
     /// inheritable one on a `/Parent` if not on it.
     fn required_keys(&mut self, v: &Visit<'a>, dict: &'a Dict, made: Made, parents: &[&'a Object]) {
-        for row in &v.table.rows {
+        let entries = rows(v.table).entries(dict);
+        for (place, row) in v.table.rows.iter().enumerate() {
             // A wildcard is never required (INTERNAL_GRAMMAR.md, "Column 5
             // - Required").
             let key = row.key.as_bytes();
-            if row.key.ends_with('*') || self.present(dict.get(key)) {
+            if row.key.ends_with('*') || self.present(entries.get(place)) {
                 continue;
             }
             match self.with_cx((v.id(), v.object), At::Key(key), parents, None, |cx| {
@@ -5506,6 +5639,156 @@ mod tests {
         assert_eq!(report.findings, [], "{report}");
         assert_eq!(report.two_contexts, 1, "{report}");
         assert_eq!(report.checked.get("BorderStyle"), None, "{report}");
+    }
+
+    /// Random numbers, by xorshift from a seed, as the crates' tests have
+    /// them.
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, below: usize) -> usize {
+            (self.next() % below as u64) as usize
+        }
+    }
+
+    /// The extensions the model names: each `fn:Extension` of a
+    /// SinceVersion cell, a type's, a value's or a link's.
+    fn the_models_extensions() -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for row in grammar().tables().flat_map(|table| &table.rows) {
+            if let Some(rest) = row.since_version.split("fn:Extension(").nth(1) {
+                let end = rest.find([',', ')']).unwrap_or(rest.len());
+                names.insert(rest[..end].to_string());
+            }
+            let wraps = (row.r#type.iter().flat_map(|t| &t.wraps))
+                .chain(row.possible_values.iter().flatten().flat_map(|v| &v.wraps))
+                .chain(row.link.iter().flatten().flat_map(|l| &l.wraps));
+            for wrap in wraps.filter(|w| w.func == WrapFn::Extension) {
+                names.insert(wrap.arg.clone());
+            }
+        }
+        names
+    }
+
+    /// For `table`, `n` dictionaries and streams made by `random` of its
+    /// rows' keys, the wildcard's, `0`, `1*` and keys of no row, some
+    /// written twice: their values null, of each simple kind, one of the
+    /// names its rows take, an array, a dictionary, or a reference to an
+    /// object of [`scored_file`] or to none; each with a number or not.
+    fn dictionaries(
+        random: &mut Random,
+        table: &Table,
+        n: usize,
+    ) -> Vec<(Option<ObjectId>, Object)> {
+        let mut keys: Vec<&[u8]> = table.rows.iter().map(|row| row.key.as_bytes()).collect();
+        keys.extend([&b"*"[..], b"0", b"1*", b"NoSuchKey", b"Type"]);
+        let mut names: Vec<&str> = (table.rows.iter())
+            .flat_map(|row| row.possible_values.iter().flatten())
+            .map(|v| v.item.as_str())
+            .filter(|v| !v.starts_with("fn:") && !v.starts_with(['\'', '[']))
+            .collect();
+        names.extend(["Catalog", "Page", "Annot", "Font", "XObject", "Form"]);
+        let value = |random: &mut Random| -> Object {
+            match random.below(12) {
+                0 => Value::Null.into(),
+                1 => Object::from(random.below(2) == 0),
+                2 => Object::from(random.below(100) as i64 - 10),
+                3 => Object::from(random.below(100) as f64 / 4.0),
+                4 | 5 => Object::from(names[random.below(names.len())]),
+                6 => text("a string"),
+                7 => numbers(&[0, 0, 10, 10][..2 + 2 * random.below(2)]),
+                8 => dict! { "Type" => names[random.below(names.len())] }.into(),
+                // 2 a null, 3 an integer, 4 a dictionary; 9 none.
+                _ => r([1, 2, 3, 4, 9][random.below(5)]),
+            }
+        };
+        (0..n)
+            .map(|_| {
+                let mut dict = Dict::new();
+                for _ in 0..random.below(14) {
+                    let key = keys[random.below(keys.len())];
+                    let v = value(random);
+                    dict.push(key, v);
+                    if random.below(6) == 0 {
+                        let v = value(random);
+                        dict.push(key, v);
+                    }
+                }
+                let id = (random.below(2) == 0).then_some((5, 0));
+                let object = match random.below(4) {
+                    0 => Object::stream(dict),
+                    _ => Object::from(dict),
+                };
+                (id, object)
+            })
+            .collect()
+    }
+
+    /// A file for [`dictionaries`]' references: object 2 is null, 3 an
+    /// integer and 4 a dictionary.
+    fn scored_file() -> Vec<u8> {
+        let objects = vec![
+            (1, dict! { "Type" => "Catalog", "Pages" => r(5) }.into()),
+            (2, Object::from(Value::Null).into()),
+            (3, Object::from(7).into()),
+            (4, dict! { "Type" => "Font" }.into()),
+            (
+                5,
+                dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into(),
+            ),
+        ];
+        written("1.7", &objects, Xref::Table)
+    }
+
+    /// Every table scores dictionaries made from a seed as it did looking
+    /// each row's key up: keys written twice (the last entry the row's),
+    /// nulls (absent from a dictionary), references to nothing, the
+    /// wildcard's and a repeating row's key written as such, and keys of no
+    /// row; at three versions, under no extension and under every one the
+    /// model names; given a parent or none.
+    #[test]
+    fn every_table_scores_a_dictionary_as_by_each_rows_key() {
+        let bytes = scored_file();
+        let doc = bytes::read(&bytes);
+        let catalog = doc.get((1, 0)).unwrap();
+        let mut random = Random(0x9e37_79b9_7f4a_7c15);
+        let made: Vec<_> = (grammar().tables())
+            .map(|table| (table, dictionaries(&mut random, table, 24)))
+            .collect();
+        let made = &made;
+        for version in [Version::new(1, 4), Version::new(1, 7), Version::new(2, 0)] {
+            for extensions in [BTreeSet::new(), the_models_extensions()] {
+                let options = Options {
+                    version: Some(version),
+                    extensions,
+                    ..Options::default()
+                };
+                let mut scored = 0;
+                walking(&doc, None, &Hold::All(Made::Built), &options, |walk, _| {
+                    for (table, dictionaries) in made {
+                        for (n, (id, object)) in dictionaries.iter().enumerate() {
+                            let parents: &[&Object] = match n % 2 {
+                                0 => &[],
+                                _ => &[catalog],
+                            };
+                            let by_entries = walk.score((*id, object), table, parents);
+                            let by_rows = walk.score_by_rows((*id, object), table, parents);
+                            let at = (&table.name, version, n);
+                            assert_eq!(by_entries, by_rows, "{at:?}: {}", render(object));
+                            scored += 1;
+                        }
+                    }
+                });
+                assert_eq!(scored, 24 * grammar().tables().count());
+            }
+        }
     }
 
     #[test]
