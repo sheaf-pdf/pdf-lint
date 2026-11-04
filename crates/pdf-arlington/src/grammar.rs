@@ -84,7 +84,9 @@ pub const HEADER: [&str; 12] = [
     "Note",
 ];
 
-/// The model: its tables, by name.
+/// The model: its tables, by name; and, once a [`FileCx`](crate::FileCx)
+/// given it asks, the predicates asked through it, each parsed once and kept
+/// for as long as the model is ([`FileCx::grammar`](crate::FileCx::grammar)).
 pub struct Grammar {
     tables: BTreeMap<String, Table>,
     /// Its tables' files' XXH64 ([`Grammar::hash`]).
@@ -416,7 +418,10 @@ impl Grammar {
     /// [`COMMIT`](crate::COMMIT), with the [`corrections`] made and the
     /// [`additions`] added, read the first time it's asked for. Panics,
     /// naming the file and line, when it doesn't read, which its tests
-    /// rule out.
+    /// rule out. It's one for the process, so what it keeps of the
+    /// predicates asked through it
+    /// ([`FileCx::grammar`](crate::FileCx::grammar)) is kept for the
+    /// process, and every file and thread shares it.
     pub fn embedded() -> &'static Grammar {
         EMBEDDED.get_or_init(|| {
             Grammar::from_files(model::TABLES.iter().map(|&(name, text)| File {

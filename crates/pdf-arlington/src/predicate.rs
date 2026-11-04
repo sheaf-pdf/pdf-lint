@@ -381,9 +381,13 @@ impl<'a, R: Resolve<'a>> FileCx<'a, R> {
     /// then parsed once, the first time a `FileCx` given the model asks,
     /// and kept with the model for every file and thread after, where
     /// unless given each is parsed every time it's asked. The answers are
-    /// the same either way. The model keeps as many texts as it has rows,
-    /// near enough, more than its rows' cells hold: past that, a text it
-    /// hasn't is parsed every time, and not kept.
+    /// the same either way. The model keeps every text asked through a
+    /// `FileCx` given it, first come, a caller's own as well as its rows'
+    /// cells, up to as many as it has rows, near enough, more than its
+    /// rows' cells hold: past that, a text it hasn't is parsed every time,
+    /// and not kept. So a caller's own texts take room from the rows', and
+    /// are kept as long as the model is: [`Grammar::embedded`]'s, for the
+    /// process, shared by every file and thread.
     #[must_use = "it gives the FileCx back, with the model"]
     pub fn grammar(mut self, grammar: &'a Grammar) -> FileCx<'a, R> {
         self.grammar = Some(grammar);
