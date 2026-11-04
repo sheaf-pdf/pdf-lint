@@ -90,8 +90,11 @@ impl ResCx {
         let Some(named) = Spaces::read(objects, resources)? else {
             return Ok(ResCx::none());
         };
-        let (mut spaces, mut capped) = (HashMap::new(), Vec::new());
-        for space in named.iter() {
+        let named = named.iter();
+        // Room for every name at once, as most count: as many as the dictionary's entries.
+        let room = named.size_hint().1.unwrap_or_default();
+        let (mut spaces, mut capped) = (HashMap::with_capacity(room), Vec::new());
+        for space in named {
             let read = pdf_color::counted(objects, space.value, &limits.color)?;
             if read.capped {
                 capped.push(space.key.to_vec());
