@@ -8941,6 +8941,24 @@ mod tests {
         fixture::assembled("1.7", &bodies, &format!("<< /Size {size} /Root 1 0 R >>"))
     }
 
+    /// An object that entries refer to and that's never reached, a null
+    /// that the key's row doesn't take, is found unreached under the first
+    /// entry that refers to it: its table and key.
+    #[test]
+    fn an_object_two_entries_refer_to_and_nothing_reaches_is_the_firsts() {
+        let mut objects = changed(clean(), 1, |catalog| {
+            catalog.set("Lang", r(6));
+            catalog.set("PageMode", r(6));
+        });
+        objects.push((6, Object::from(Value::Null).into()));
+        let report = checked(&objects);
+        let found: Vec<_> = (report.findings.iter())
+            .filter(|f| f.rule == Rule::Unreached)
+            .map(|f| (f.object, f.table.as_str(), f.key.as_str()))
+            .collect();
+        assert_eq!(found, [(Some((6, 0)), "Catalog", "Lang")], "{report}");
+    }
+
     #[test]
     fn a_streams_referenced_length_is_reached() {
         let bytes = length_referenced(Object::from(15), &[]);
