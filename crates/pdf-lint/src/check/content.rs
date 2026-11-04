@@ -538,6 +538,18 @@ impl<'c> Faults<'c> {
         }
     }
 
+    /// Whether `other` keeps what this does: each kind told, its first,
+    /// where, and how many, in the same order, and how many more.
+    #[cfg(any(test, fuzzing))]
+    fn same(&self, other: &Faults<'c>) -> bool {
+        let told = |faults: &Faults<'c>| -> Vec<_> {
+            (faults.told.iter())
+                .map(|t| (t.fault, t.stream, t.at.clone(), t.count))
+                .collect()
+        };
+        told(self) == told(other) && (self.more, &self.past) == (other.more, &other.past)
+    }
+
     /// What `other`, of the same content, told, added to what this did.
     fn merge(&mut self, other: Faults<'c>) {
         for told in other.told {
@@ -1042,8 +1054,8 @@ fn kind(table: &str, object: &Object, id: Option<ObjectId>) -> Option<Kind> {
 /// stepping where content is, among the graphics objects, its operands
 /// held to its operator's, the resource it names, if any, as ISO 32000-2
 /// reads the name, looked up by `look`, and each array and dictionary among
-/// its operands read as an object, for what's inside it; and what each rule
-/// finds of it.
+/// its operands read for what's inside it, as reading it as an object tells
+/// that, with no object made; and what each rule finds of it.
 fn pass(
     content: &Concat,
     start: State,
@@ -1053,6 +1065,10 @@ fn pass(
 ) -> Found {
     let (mut saved, mut marked) = (Depth::default(), Depth::default());
     let (mut faults, mut inside) = (Faults::new(content), Faults::new(content));
+    // What reading each operand as an object tells, where `inside` is told
+    // it with none made: held to be the same.
+    #[cfg(any(test, fuzzing))]
+    let mut made = Faults::new(content);
     let (mut placed, mut operands) = (Kinds::default(), Kinds::default());
     let mut named = Kinds::default();
     // `BX` and `EX`, and where content is, with where the graphics object
@@ -1129,10 +1145,17 @@ fn pass(
         }
         for operand in op.operands() {
             if operand.is_array() || operand.is_dict() {
-                operand.object_with(limits, &mut inside);
+                operand.faults_with(limits, &mut inside);
+                #[cfg(any(test, fuzzing))]
+                operand.object_with(limits, &mut made);
             }
         }
     }
+    #[cfg(any(test, fuzzing))]
+    assert!(
+        inside.same(&made),
+        "what's inside the operands, told as read"
+    );
     // Where content ends, unless reading stopped, as the end isn't known:
     // in an object, at where it began; or where a glyph description was to
     // begin, all of it.
