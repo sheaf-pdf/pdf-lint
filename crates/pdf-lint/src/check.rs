@@ -3887,7 +3887,14 @@ impl<'a> Walk<'a> {
                 continue;
             }
             listed.push(item.item.as_str());
-            let truth = if let Some((holds, needed)) = predicate::required_value(&item.item, cx) {
+            // A constant is no `fn:RequiredValue`, which is a predicate.
+            let function = item.item.starts_with("fn:");
+            let truth = if !function {
+                match is_value(&item.item, value) {
+                    true => Truth::True,
+                    false => Truth::False,
+                }
+            } else if let Some((holds, needed)) = predicate::required_value(&item.item, cx) {
                 let is = is_value(&needed, value);
                 match holds {
                     Truth::True if required.is_none() => {
@@ -3899,12 +3906,8 @@ impl<'a> Walk<'a> {
                     _ => {}
                 }
                 if is { Truth::True } else { Truth::False }
-            } else if item.item.starts_with("fn:") {
-                predicate::holds_fully(&item.item, cx)
-            } else if is_value(&item.item, value) {
-                Truth::True
             } else {
-                Truth::False
+                predicate::holds_fully(&item.item, cx)
             };
             match (truth, gate) {
                 (Truth::True, Gate::AllowedDeprecated(from)) => {
@@ -5789,6 +5792,30 @@ mod tests {
                 assert_eq!(scored, 24 * grammar().tables().count());
             }
         }
+    }
+
+    /// A PossibleValues item that's a constant, not a predicate, is no
+    /// `fn:RequiredValue`, so the walk reads it as a constant alone: every
+    /// such item of every row of the model.
+    #[test]
+    fn a_constant_among_the_models_possible_values_is_no_required_value() {
+        let (trailer, resolve) = (Dict::new(), |_: ObjectId| None);
+        let file = FileCx::new(&trailer, Version::new(2, 0), &resolve).grammar(grammar());
+        let container = Object::from(Dict::new());
+        let mut constants = 0;
+        for table in grammar().tables() {
+            for row in &table.rows {
+                let cx = file.at(&container, At::Key(row.key.as_bytes()));
+                for item in row.possible_values.iter().flatten() {
+                    if !item.item.starts_with("fn:") {
+                        let at = (&table.name, &row.key, &item.item);
+                        assert_eq!(predicate::required_value(&item.item, &cx), None, "{at:?}");
+                        constants += 1;
+                    }
+                }
+            }
+        }
+        assert!(constants > 1000, "{constants}");
     }
 
     #[test]
