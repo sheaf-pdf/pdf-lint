@@ -642,6 +642,7 @@ dependencies = [
  "pdf-content-streams",
  "pdf-crypt",
  "pdf-fonts",
+ "pdf-linearize",
  "pdf-objects",
  "pdf-semantics",
  "pdf-structure",

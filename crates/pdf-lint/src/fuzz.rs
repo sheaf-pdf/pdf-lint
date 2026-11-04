@@ -5,10 +5,11 @@
 //! object stream's as the document holds it and a content stream's or the
 //! metadata stream's as the reading decodes it again; what its content
 //! finds, what its fonts' streams say of their text and what their reads
-//! find, and what an earlier revision's objects that a later one wrote
-//! over or freed tell, read as that revision was written, moving nothing
-//! else a check of its document alone finds, which reads no stream's data
-//! and no earlier revision ([`reading_alone`]); and set against its
+//! find, what an earlier revision's objects that a later one wrote over or
+//! freed tell, read as that revision was written, and what a linearized
+//! file's linearization is, moving nothing else a check of its document
+//! alone finds, which reads no stream's data, no earlier revision and no
+//! linearization ([`reading_alone`]); and set against its
 //! previous revision, read as it was written, when it has an incremental
 //! update. It reads under
 //! small limits ([`options`], and 4 MiB of content and 4 MiB of fonts'
@@ -103,7 +104,8 @@ pub fn check_file(data: &[u8]) {
 /// or only every other one; as one table an object; deprecations found;
 /// unlisted keys found in built objects, all or none; at the file's
 /// version, 1.0's or 2.0's; with paths recorded; under some extensions;
-/// with keys exempt; unused resources found. Its content within 4 MiB
+/// with keys exempt; unused resources found; a linearization's departures
+/// found. Its content within 4 MiB
 /// decoded, and its fonts' streams within 4 MiB, so that a check keeps
 /// within the fuzz target's time for an input.
 pub fn setting(choice: u16, doc: &Document) -> (Hold, Options) {
@@ -142,6 +144,7 @@ pub fn setting(choice: u16, doc: &Document) -> (Hold, Options) {
         },
         deprecations: bit(3),
         unused: bit(11),
+        departures: bit(12),
         extensions: match bit(10) {
             false => BTreeSet::new(),
             true => names.iter().map(|name| name.to_string()).collect(),
@@ -179,8 +182,8 @@ fn latin_row(row: &Unchecked) -> bool {
 
 /// That `beside`, a check of a file beside its reading
 /// ([`check_with_reading`]), is `alone`, a check of its document alone,
-/// which reads no stream's data and no earlier revision's objects, and what
-/// those tell.
+/// which reads no stream's data, no earlier revision's objects and no
+/// linearization, and what those tell.
 ///
 /// What streams' data tells: content's own, what a font's `/ToUnicode`,
 /// embedded CMap or glyphs say of whether it has Latin characters, and
@@ -206,6 +209,10 @@ fn latin_row(row: &Unchecked) -> bool {
 /// it's a key checked, not unlisted. So the keys checked are as many, but
 /// one more for each of those, and at most one fewer for each reference
 /// read, as a null is no entry.
+///
+/// What a linearized file's linearization is: its findings
+/// ([`Rule::Linearization`]), its rows not checked, their column `-`, its
+/// departures counted and its verdict, of which alone has none.
 fn reading_alone(beside: &Report, alone: &Report) {
     // Where alone counts an earlier revision's object not read, by table
     // and key, and how many references to one it counts so.
@@ -228,6 +235,7 @@ fn reading_alone(beside: &Report, alone: &Report) {
     let others = |report: &Report| -> Vec<Finding> {
         (report.findings.iter())
             .filter(|f| !CONTENT.contains(&f.rule) && f.rule != Rule::Font && !cap_height(f))
+            .filter(|f| f.rule != Rule::Linearization)
             .filter(|f| !earlier(f))
             .cloned()
             .collect()
@@ -270,6 +278,12 @@ fn reading_alone(beside: &Report, alone: &Report) {
         (alone.content, alone.unused.len()),
         (0, 0),
         "none read alone"
+    );
+    assert!(
+        (alone.findings.iter()).all(|f| f.rule != Rule::Linearization)
+            && alone.departures.is_empty()
+            && alone.linearized.is_none(),
+        "a linearization judged where no reading is"
     );
     for (row, &n) in &beside.unchecked {
         let was = alone.unchecked.get(row).copied().unwrap_or(0);
@@ -340,6 +354,8 @@ fn reading_alone(beside: &Report, alone: &Report) {
         ignored: BTreeMap::new(),
         content: 0,
         unused: BTreeMap::new(),
+        departures: BTreeMap::new(),
+        linearized: None,
         ..report.clone()
     };
     assert_eq!(
@@ -1438,6 +1454,50 @@ mod tests {
         reading_alone(&beside, &alone);
         for choice in [0u16, 1, 2, 3, 1 << 9] {
             check_file(&[&choice.to_le_bytes()[..], &file].concat());
+        }
+    }
+
+    /// A file linearized by pdf-linearize, its `/E` written wrong: beside
+    /// its reading, a `linearization` finding and the verdict that it
+    /// fails; alone, neither, which is what [`reading_alone`] sets aside,
+    /// and nothing else moves. The fuzz target's checks hold of it under
+    /// each setting, departures found among them.
+    #[test]
+    fn a_linearization_read_beside_its_reading_and_alone() {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        ];
+        let (plain, _) = file(&objects, "");
+        let options = pdf_linearize::family::Options::DEFAULT;
+        let mut linearized = pdf_linearize::family::linearize_bytes(&plain, &[], &options).unwrap();
+        let e = (linearized.windows(3).position(|w| w == b"/E ")).unwrap() + 3;
+        let digits = linearized[e..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        linearized[e] = b'1';
+        linearized[e + 1..e + digits].fill(b'0');
+        let read = WithReading::new(&linearized[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let (hold, options) = (Hold::All(Made::Merged), Options::default());
+        let (beside, alone) = (
+            check_with_reading(&read, &hold, &options),
+            check(read.document(), &hold, &options),
+        );
+        let found = |report: &Report| -> Vec<String> {
+            let found = report
+                .findings
+                .iter()
+                .filter(|f| f.rule == Rule::Linearization);
+            found.map(|f| f.key.clone()).collect()
+        };
+        assert_eq!(found(&beside), ["E"], "{beside}");
+        assert_eq!(beside.linearized, Some(crate::check::Linearized::Fails));
+        assert_eq!((found(&alone), alone.linearized), (vec![], None));
+        reading_alone(&beside, &alone);
+        for choice in [0u16, 1, 2, 3, 1 << 9, 1 << 12, 1 << 12 | 1] {
+            check_file(&[&choice.to_le_bytes()[..], &linearized].concat());
         }
     }
 

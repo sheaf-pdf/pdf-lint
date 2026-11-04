@@ -79,7 +79,7 @@ cargo fetch --locked --target "$target" --quiet
 registry=$(unix "${CARGO_HOME:-$HOME/.cargo}")/registry/src
 crates=$(cargo tree --locked -e normal,no-proc-macro --target "$target" -p pdf-lint --prefix none \
     --format '{p}|{l}' | sed 's/ (\*)$//' | sort -u |
-    grep -vE '^(pdf-lint|pdf-tokenizer|pdf-filters|pdf-crypt|pdf-objects|pdf-structure|pdf-content-streams|pdf-color|pdf-fonts|pdf-semantics|pdf-arlington) v')
+    grep -vE '^(pdf-lint|pdf-tokenizer|pdf-filters|pdf-crypt|pdf-objects|pdf-structure|pdf-content-streams|pdf-color|pdf-fonts|pdf-semantics|pdf-linearize|pdf-arlington) v')
 
 # pdf-fonts as pdf-lint's build compiles it, by the features it's built
 # with: neither `programs`, whose code is in part FreeType's, under the
@@ -146,11 +146,11 @@ pdf-lint $version for $platform
 
 What's compiled into the binary besides this workspace's own crates
 (pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure,
-pdf-content-streams, pdf-color, pdf-fonts and pdf-semantics, MIT OR
-Apache-2.0, pdf-fonts as it's compiled in here, without the code its
-package's FTL is for, which only its programs feature compiles;
-pdf-arlington, Apache-2.0, with the Arlington model, whose NOTICE.txt is
-ARLINGTON-NOTICE.txt):
+pdf-content-streams, pdf-color, pdf-fonts, pdf-semantics and
+pdf-linearize, MIT OR Apache-2.0, pdf-fonts as it's compiled in here,
+without the code its package's FTL is for, which only its programs
+feature compiles; pdf-arlington, Apache-2.0, with the Arlington model,
+whose NOTICE.txt is ARLINGTON-NOTICE.txt):
 
 - These crates from crates.io, each under the licence it names, its
   package's licence files after the list; the Apache License 2.0, which

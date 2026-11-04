@@ -44,6 +44,12 @@
 //! revision had it, from the file as the revision was written. Each object
 //! stream, and a linearized file's linearization dictionary, which nothing
 //! in the model links to, is checked from its number.
+//!
+//! Given the file's reading too, a file that says it's linearized is held
+//! to ISO 32000-2's Annex F through pdf-linearize's check: its sections, its
+//! hint tables, its first page and what each page reaches, against what
+//! they say of each other, told as one finding a kind, and whether it holds
+//! ([`Report::linearized`]).
 
 pub mod allowance;
 pub mod check;
@@ -52,8 +58,8 @@ pub mod fuzz;
 
 pub use allowance::{Allowance, AllowanceError, Allowances};
 pub use check::{
-    Class, Exempt, ExemptError, Finding, Hold, HoldError, Made, Options, Report, Rule, Unchecked,
-    Unlisted, UnlistedIn, check, check_with_reading, file_version,
+    Class, Exempt, ExemptError, Finding, Hold, HoldError, Linearized, Made, Options, Report, Rule,
+    Unchecked, Unlisted, UnlistedIn, check, check_with_reading, file_version,
 };
 // `grammar` is the module and the function both.
 pub use grammar::{ArlType, At, Grammar, Row, Table, Wrap, WrapFn, Wrapped, grammar, use_model};

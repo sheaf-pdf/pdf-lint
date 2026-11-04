@@ -2461,11 +2461,11 @@ fn resources_lacking_are_found_and_unused_ones_found_when_asked() {
     let out = run(&["--unused", "--format", "json", path]);
     let stdout = text(&out.stdout);
     assert!(
-        stdout.contains(r#","content_read":1,"unused":[{"table":"Resource","key":"XObject","count":1}],"ignored":"#),
+        stdout.contains(r#","content_read":1,"linearized":null,"unused":[{"table":"Resource","key":"XObject","count":1}],"departures":[],"ignored":"#),
         "{stdout}"
     );
     assert!(
-        stdout.contains(r#","deprecations":false,"unused_findings":true,"extensions":"#),
+        stdout.contains(r#","deprecations":false,"unused_findings":true,"departure_findings":false,"extensions":"#),
         "{stdout}"
     );
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -2515,4 +2515,82 @@ fn an_xmp_finding_is_printed_with_the_packets_bytes() {
     let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "{stdout}");
     assert!(stdout.contains("0 findings, 1 carried"), "{stdout}");
+}
+
+/// A file of one page linearized by pdf-linearize, its hint stream's row
+/// and object at generation 1, where Annex F has all at 0: a departure
+/// readers get past (ISO 32000-2, F.3.1), and the linearization holds.
+fn generation_1() -> (Vec<u8>, usize) {
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let plain = file(&[CATALOG, PAGES, page]);
+    let options = pdf_linearize::family::Options::DEFAULT;
+    let mut out = pdf_linearize::family::linearize_bytes(&plain, &[], &options).unwrap();
+    let find = |bytes: &[u8], what: &[u8]| (bytes.windows(what.len())).position(|w| w == what);
+    let items = find(&out, b"/H [").unwrap() + 4;
+    let at = text(&out[items..items + 12]);
+    let at: usize = at.split_whitespace().next().unwrap().parse().unwrap();
+    let row = format!("{at:010} 00000 n");
+    let row = find(&out, row.as_bytes()).unwrap() + "0000000000 0000".len();
+    out[row] = b'1';
+    let generation = at + find(&out[at..], b" 0 obj").unwrap() + 1;
+    out[generation] = b'1';
+    (out, at)
+}
+
+/// A linearized file's departure from Annex F that readers get past is
+/// counted, in `--full` and the JSON, and with `--departures` found, in its
+/// linearization dictionary, at the object it's of; the JSON says the
+/// linearization holds, and whether departures are found.
+#[test]
+fn a_linearizations_departures_are_counted_and_found_when_asked() {
+    let dir = folder();
+    let (bytes, at) = generation_1();
+    let path = written(&dir, "linearized.pdf", &bytes);
+    let path = path.to_str().unwrap();
+    let out = run(&["--full", path]);
+    let full = text(&out.stdout);
+    assert!(full.contains("\n    linearized: holds\n"), "{full}");
+    assert!(
+        full.contains("\n    departures: LinearizationParameterDict/-: 1\n"),
+        "{full}"
+    );
+    assert!(!full.contains("- linearization:"), "{full}");
+
+    let out = run(&["--departures", path]);
+    let stdout = text(&out.stdout);
+    let (_, after) = stdout.split_once("- linearization: ").expect(&stdout);
+    // The dictionary is the file's first object, 2 0 R as pdf-linearize
+    // numbers this one.
+    assert!(
+        after.starts_with("LinearizationParameterDict/- at 2 0 R, in 2 0 R (merged): "),
+        "{stdout}"
+    );
+    assert!(after.contains(&format!("[bytes {at}..")), "{stdout}");
+    assert!(
+        after.contains(" at generation 1, where all are at 0 (ISO 32000-2, F.3.1)"),
+        "{stdout}"
+    );
+
+    let json = |args: &[&str]| -> Value {
+        let out = run(args);
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let report = json(&["--format", "json", path]);
+    assert_eq!(report["departure_findings"], json!(false));
+    assert_eq!(report["linearized"], json!("holds"));
+    assert_eq!(
+        report["departures"],
+        json!([{"table": "LinearizationParameterDict", "key": "-", "count": 1}])
+    );
+    let report = json(&["--departures", "--format", "json", path]);
+    assert_eq!(report["departure_findings"], json!(true));
+    assert_eq!(report["departures"], json!([]));
+    let rules: Vec<_> = (report["findings"].as_array().unwrap().iter())
+        .map(|f| f["rule"].as_str().unwrap())
+        .collect();
+    assert!(rules.contains(&"linearization"), "{report}");
+    // A file that isn't linearized has no verdict.
+    let plain = written(&dir, "plain.pdf", &file(&[CATALOG, PAGES]));
+    let report = json(&["--format", "json", plain.to_str().unwrap()]);
+    assert_eq!(report["linearized"], json!(null));
 }

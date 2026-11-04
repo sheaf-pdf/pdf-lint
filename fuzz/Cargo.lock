@@ -483,6 +483,7 @@ dependencies = [
  "pdf-color",
  "pdf-content-streams",
  "pdf-fonts",
+ "pdf-linearize",
  "pdf-objects",
  "pdf-semantics",
  "pdf-structure",

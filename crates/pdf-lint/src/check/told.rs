@@ -1,12 +1,13 @@
 //! What a read of a color space or a font tells that the walk can't say,
-//! found where the walk found nothing by the model's rules ([`MODEL`]):
-//! in the fault's object at its key, at a reference to the object it's of
-//! as a whole, at the family's name of the space it's of, or in the value
-//! it's of where the model checks its elements each; each kind once in
-//! each object, in the order told ([`Walk::find_told`]). A kind told at its
-//! bytes is at the entry or element whose value holds them ([`holding`]),
-//! its path and table those of what that entry or element is written in
-//! ([`Walk::path_and_table`]).
+//! and what pdf-linearize's check says of a linearization dictionary's
+//! values, found where the walk found nothing by the model's rules
+//! ([`MODEL`]): in the fault's object at its key, at a reference to the
+//! object it's of as a whole, at the family's name of the space it's of, or
+//! in the value it's of where the model checks its elements each; each kind
+//! once in each object, in the order told ([`Walk::find_told`]). A kind
+//! told at its bytes is at the entry or element whose value holds them
+//! ([`holding`]), its path and table those of what that entry or element is
+//! written in ([`Walk::path_and_table`]).
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -209,8 +210,17 @@ impl<'a> Walk<'a> {
     /// so that what two reads tell, a space and its base, or two fonts of
     /// one descriptor, is found once.
     pub(super) fn find_told<K: Copy + Eq + Hash>(&mut self, tells: Vec<Told<K>>) {
+        let new: Vec<Finding> = (self.found_told(tells).into_iter())
+            .map(|t| t.finding)
+            .collect();
+        self.report.findings.extend(new);
+    }
+
+    /// Those of `tells` that [`Walk::find_told`] finds, in order, each with
+    /// its kind.
+    pub(super) fn found_told<K: Copy + Eq + Hash>(&self, tells: Vec<Told<K>>) -> Vec<Told<K>> {
         if tells.is_empty() {
-            return;
+            return tells;
         }
         let model = || {
             (self.report.findings.iter())
@@ -246,7 +256,7 @@ impl<'a> Walk<'a> {
                 .collect(),
         };
         let mut told = HashSet::new();
-        let new: Vec<Finding> = (tells.into_iter())
+        (tells.into_iter())
             .filter(|t| {
                 let f = &t.finding;
                 !found.contains(&(f.object, f.key.as_str()))
@@ -255,8 +265,6 @@ impl<'a> Walk<'a> {
                     && !t.inside.is_some_and(said_inside)
                     && told.insert((f.object, t.kind))
             })
-            .map(|t| t.finding)
-            .collect();
-        self.report.findings.extend(new);
+            .collect()
     }
 }

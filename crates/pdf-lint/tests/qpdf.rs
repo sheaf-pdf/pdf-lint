@@ -9,7 +9,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Instant;
 
-use pdf_lint::{Document, Finding, Hold, Made, Options, Rule, check};
+use pdf_lint::bytes::{self, WithReading};
+use pdf_lint::{
+    Document, Finding, Hold, Linearized, Made, Options, Rule, check, check_with_reading,
+};
 use pdf_structure::qpdf::Qpdf;
 
 /// qpdf, which these tests need: `PDF_LINT_QPDF`, else `qpdf` on the
@@ -78,6 +81,42 @@ fn a_file_checks_through_qpdf_alone_as_through_its_bytes() {
         let alone = qpdf.read().unwrap();
         // Checked, the two read alike, but for where.
         assert_eq!(findings(&bytes), findings(&alone), "{test}");
+    }
+}
+
+/// What qpdf linearizes, with object streams and without, holds by the
+/// check pdf-lint makes of it beside its reading: it's linearized, and no
+/// error of its linearization is found.
+#[test]
+#[ignore = "needs qpdf: just test-qpdf"]
+fn what_qpdf_linearizes_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = std::env::var_os("PDF_LINT_QPDF").unwrap_or_else(|| "qpdf".into());
+    for test in ["qpdf-plain", "qpdf-compressed"] {
+        let path = fixture(test);
+        qpdf(&path);
+        for streams in ["disable", "generate"] {
+            let out = dir.path().join(format!("{test}-{streams}.pdf"));
+            let status = std::process::Command::new(&program)
+                .arg("--linearize")
+                .arg(format!("--object-streams={streams}"))
+                .args([&path, &out])
+                .status()
+                .unwrap();
+            assert!(status.success(), "{test}, {streams}: qpdf {status}");
+            let data = std::fs::read(&out).unwrap();
+            let read = WithReading::new(&data[..], &[], &bytes::Options::DEFAULT).unwrap();
+            let report = check_with_reading(&read, &Hold::All(Made::Merged), &Options::default());
+            let found: Vec<_> = (report.findings.iter())
+                .filter(|f| f.rule == Rule::Linearization)
+                .collect();
+            assert!(found.is_empty(), "{test}, {streams}: {report}");
+            assert_eq!(
+                report.linearized,
+                Some(Linearized::Holds),
+                "{test}, {streams}"
+            );
+        }
     }
 }
 

@@ -1,9 +1,13 @@
 //! What only a file's reading gives a check, beside the document read from
 //! it ([`check_with_reading`](super::check_with_reading)): what an earlier
 //! revision had at a number a later revision wrote over or freed, read
-//! from the file as that revision was written ([`Reading::prefix`]).
+//! from the file as that revision was written ([`Reading::prefix`]); and
+//! the facts of the file's linearization, as pdf-linearize reads them from
+//! its bytes ([`family::facts`]).
 
 use std::cell::{Cell, OnceCell};
+
+use pdf_linearize::family;
 
 use crate::bytes::{ByteSource, Limits, Prefix, Reading, WithReading};
 use crate::object::{Object, ObjectId};
@@ -31,6 +35,14 @@ pub(super) trait Reads {
     /// had it, read from the file as that revision was written; none where
     /// it isn't read there, or the revision isn't.
     fn earlier(&self, revision: usize, id: ObjectId) -> Option<&Object>;
+
+    /// The facts pdf-linearize judges a linearized file by, read from the
+    /// file's reading under its own caps (`Limits::DEFAULT`): the first
+    /// object, and where that says the file's linearized, its sections, its
+    /// hint stream's data, its page tree and the graph of its objects, by a
+    /// whole read. Read anew each time it's asked; an error only where the
+    /// source doesn't give the bytes asked of it.
+    fn linearization(&self) -> Result<pdf_linearize::Facts, family::Error>;
 }
 
 /// The file as an earlier revision was written, read: its first bytes, as
@@ -105,6 +117,10 @@ impl<S: ByteSource> Reads for Readings<'_, S> {
         let i = revision.checked_sub(1)?;
         let reading = self.each.get(i)?.get_or_init(|| self.open(i)).as_ref()?;
         reading.get(id).ok()
+    }
+
+    fn linearization(&self) -> Result<pdf_linearize::Facts, family::Error> {
+        family::facts(self.reading, &pdf_linearize::Limits::DEFAULT)
     }
 }
 

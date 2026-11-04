@@ -1,7 +1,9 @@
 //! What a reading of a file's parts told, kept as a finding needs it: the
 //! common structures' through pdf-semantics, a color space's through
 //! pdf-color and a font's through pdf-fonts, each crate's faults by a sink
-//! of its own ([`Kept`]), each place as pdf-lint holds it ([`Where`]).
+//! of its own ([`Kept`]), each place as pdf-lint holds it ([`Where`]); and
+//! what pdf-linearize's check of a linearized file told, each place given
+//! its bytes by the check's own sink ([`Kept::keep_each`]).
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -81,10 +83,25 @@ impl<F> Default for Kept<F> {
 impl<F> Kept<F> {
     /// Keeps `fault`, told at `at`, as the type's documentation says.
     fn keep(&mut self, at: Where, fault: F) {
+        self.kept(at, fault, false);
+    }
+
+    /// Keeps `fault`, told at `at`, as [`Kept::keep`] does, but counted
+    /// however many times its kind is told at the same bytes: for a check
+    /// that tells each fault once, as pdf-linearize's does, where two told
+    /// at one place are two, as two pages' entries in a hint table, each
+    /// at the table's first byte.
+    pub(crate) fn keep_each(&mut self, at: Where, fault: F) {
+        self.kept(at, fault, true);
+    }
+
+    /// Keeps `fault`, told at `at`: one told again at the bytes its kind was
+    /// last told at in the object counted only where `each`.
+    fn kept(&mut self, at: Where, fault: F, each: bool) {
         match self.index.entry((at.object, mem::discriminant(&fault))) {
             Entry::Occupied(kind) => {
                 let i = *kind.get();
-                if at.at.is_none() || at.at != self.last[i] {
+                if each || at.at.is_none() || at.at != self.last[i] {
                     self.told[i].2 += 1;
                     self.last[i] = at.at;
                 }
@@ -184,6 +201,34 @@ mod tests {
         kept.fault(at(Some((2, 0))), Fault::PageTreeChain);
         kept.fault(at(Some((2, 0))), Fault::PageTreeChain);
         assert_eq!(kept.told(), [(bytes(10).into(), Fault::PageTreeChain, 5)]);
+    }
+
+    /// Kept each, a kind told again at the bytes it was last told at in the
+    /// object is counted again, as a check that tells each fault once has
+    /// it; what's kept is otherwise as [`Kept::keep`] keeps it: of each kind
+    /// in each object the first, where, and how many, in the order each was
+    /// first told.
+    #[test]
+    fn kept_each_counts_a_kind_told_again_at_the_same_bytes() {
+        let bytes = |start| Where {
+            object: Some((2, 0)),
+            at: Some(Span::new(None, start, start + 5)),
+        };
+        let mut kept = Kept::default();
+        for start in [10, 10, 20, 10] {
+            kept.keep_each(bytes(start), Fault::PageTreeChain);
+        }
+        kept.keep_each(kept_at(Some((2, 0))), Fault::PageTreeChain);
+        kept.keep_each(kept_at(Some((3, 0))), Fault::PageTreeChain);
+        kept.keep_each(kept_at(Some((2, 0))), Fault::TreeKeyOrder);
+        assert_eq!(
+            kept.told(),
+            [
+                (bytes(10), Fault::PageTreeChain, 5),
+                (kept_at(Some((3, 0))), Fault::PageTreeChain, 1),
+                (kept_at(Some((2, 0))), Fault::TreeKeyOrder, 1),
+            ]
+        );
     }
 
     /// What's kept of two kinds of a crate's faults, `a` and `b`, each told

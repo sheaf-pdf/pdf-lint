@@ -118,6 +118,13 @@ struct Cli {
     unused: bool,
     #[arg(
         long,
+        help = "find a linearized file's departures from Annex F\n\
+                that readers get past, as its errors are (by default,\n\
+                counted only)"
+    )]
+    departures: bool,
+    #[arg(
+        long,
         value_name = "E",
         allow_hyphen_values = true,
         help = "check each FILE under these extensions too, besides\n\
@@ -276,6 +283,7 @@ struct Args {
     unlisted: UnlistedIn,
     deprecations: bool,
     unused: bool,
+    departures: bool,
     /// `--extensions` as written: the names.
     extensions: Vec<String>,
     /// The extensions it names, checked against the model's.
@@ -445,6 +453,7 @@ fn args() -> Result<Args, clap::Error> {
         unlisted,
         deprecations: cli.deprecations,
         unused: cli.unused,
+        departures: cli.departures,
         extensions,
         named: BTreeSet::new(),
         allow: cli.allow,
@@ -771,6 +780,7 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             args.unlisted,
             args.deprecations,
             args.unused,
+            args.departures,
             model,
             &report,
             &shown,
@@ -860,8 +870,9 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
 /// What a file, and what it's set against, are checked with, as the
 /// command line says, at `version`: how many tables an object is checked
 /// as, which objects a key the model doesn't list is a finding in,
-/// whether deprecations and unused resources are findings, and the
-/// extensions it's checked under besides those it declares.
+/// whether deprecations, unused resources and a linearization's departures
+/// are findings, and the extensions it's checked under besides those it
+/// declares.
 fn against(args: &Args, version: Option<Version>) -> Options {
     let mut options = Options::default();
     options.version = version;
@@ -869,6 +880,7 @@ fn against(args: &Args, version: Option<Version>) -> Options {
     options.unlisted = args.unlisted;
     options.deprecations = args.deprecations;
     options.unused = args.unused;
+    options.departures = args.departures;
     options.extensions = args.named.clone();
     options
 }
@@ -914,6 +926,7 @@ fn json(
     unlisted: UnlistedIn,
     deprecations: bool,
     unused: bool,
+    departures: bool,
     model: &str,
     report: &Report,
     shown: &[&Finding],
@@ -929,6 +942,7 @@ fn json(
         unlisted_in: unlisted.name(),
         deprecations,
         unused_findings: unused,
+        departure_findings: departures,
         extensions: &report.extensions,
         model,
         objects: report.objects(),
@@ -982,7 +996,11 @@ fn json(
             .map(|((table, key), &count)| Count { table, key, count })
             .collect(),
         content_read: report.content,
+        linearized: report.linearized.map(|l| l.name()),
         unused: (report.unused.iter())
+            .map(|((table, key), &count)| Count { table, key, count })
+            .collect(),
+        departures: (report.departures.iter())
             .map(|((table, key), &count)| Count { table, key, count })
             .collect(),
         ignored: (report.ignored.iter())
@@ -1001,7 +1019,8 @@ fn json(
 /// one table an object (`--one-table`), which held objects a key the model
 /// doesn't list is a finding in (`--unlisted`), whether deprecations are
 /// findings (`--deprecations`), whether unused resources are
-/// (`--unused`), the extensions it was checked under, and the model's
+/// (`--unused`), whether a linearization's departures are
+/// (`--departures`), the extensions it was checked under, and the model's
 /// hash, `model`; its findings, each with where its bytes are;
 /// how many were left out as carried and as allowed; and the counts
 /// `--full` prints. The fields are in the order the line has them.
@@ -1017,6 +1036,7 @@ struct Line<'a> {
     unlisted_in: &'a str,
     deprecations: bool,
     unused_findings: bool,
+    departure_findings: bool,
     extensions: &'a BTreeSet<String>,
     model: &'a str,
     objects: usize,
@@ -1032,8 +1052,14 @@ struct Line<'a> {
     /// How many units of content were read: a page's streams as one, a
     /// form's, a pattern's or a glyph's alone.
     content_read: usize,
+    /// Whether the file is linearized, and whether that holds: `holds`,
+    /// `fails`, `updated` or `not-taken`, null where it doesn't say it's
+    /// linearized.
+    linearized: Option<&'a str>,
     /// Resources nothing in the content read uses, by table and key.
     unused: Vec<Count<'a>>,
+    /// A linearization's departures from Annex F, by table and key.
+    departures: Vec<Count<'a>>,
     ignored: Vec<Count<'a>>,
     no_table: usize,
     ties: usize,
@@ -1078,7 +1104,7 @@ struct Unlisted<'a> {
 }
 
 /// A key, by table, and how many times: one deprecated, an unused
-/// resource's category, or one ignored.
+/// resource's category, a linearization's departures, or one ignored.
 #[derive(Serialize)]
 struct Count<'a> {
     table: &'a str,

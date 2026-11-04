@@ -135,6 +135,19 @@
 //! space's names and a halftone's keys as pdf-color reads a colorant's
 //! name.
 //!
+//! Then, where the check has the file's reading ([`check_with_reading`]),
+//! whether a file that says it's linearized holds (ISO 32000-2, Annex F),
+//! as pdf-linearize's check judges it from the file's bytes: its sections,
+//! its hint tables, its first page and what each page reaches, held to
+//! what they say of each other. What a reader relying on the file gets
+//! wrong is a [`Rule::Linearization`] finding, and so is a departure from
+//! Annex F that readers get past when asked for ([`Options::departures`]),
+//! else it's counted only ([`Report::departures`]): each kind once, in the
+//! linearization dictionary's object, at its first place, with how many
+//! times. What it says of the dictionary's values gives way to what the
+//! walk found there by the model's rules. Whether the linearization holds
+//! is [`Report::linearized`].
+//!
 //! A file is checked under the extensions it declares, as the model
 //! names them ([`extension::declared`](crate::extension::declared)): what's
 //! under another is as if it weren't in the model, as in TestGrammar
@@ -218,6 +231,7 @@ mod color;
 mod content;
 mod fonts;
 mod kept;
+mod linearization;
 mod reading;
 mod structure;
 mod told;
@@ -415,6 +429,10 @@ pub struct Options {
     /// Find each resource nothing in the content read uses
     /// ([`Rule::Unused`]); else it's counted only ([`Report::unused`]).
     pub unused: bool,
+    /// Find a linearized file's departures from ISO 32000-2's Annex F that
+    /// readers get past ([`Rule::Linearization`]), as its errors are; else
+    /// they're counted only ([`Report::departures`]).
+    pub departures: bool,
     /// Extensions to check the file under, as the model names them
     /// (`ETSI_PAdES`), besides those it declares
     /// ([`extension::declared`](crate::extension::declared)).
@@ -983,6 +1001,40 @@ pub enum Rule {
     /// stream's data of a source that gives none, as a document alone,
     /// isn't read, nor counted.
     Font,
+    /// A linearized file that doesn't hold to ISO 32000-2's Annex F, as
+    /// pdf-linearize's check judges it from the file's reading, where the
+    /// check has one ([`check_with_reading`]): a file whose first object, a
+    /// dictionary with `/Linearized` within its first 1,024 bytes, says
+    /// it's linearized, and whose `/L` is its length, its sections, hint
+    /// tables, first page, numbers and what each page reaches held to what
+    /// they say of each other. What a reader relying on the file gets
+    /// wrong, a position, a length, a count, an identifier past its table,
+    /// a value it can't read, is found; a departure that readers get past,
+    /// as writers do it, only with [`Options::departures`], else counted
+    /// ([`Report::departures`]). Of a file whose first object says so but
+    /// isn't taken for linearized, a `/Linearized` not 1 or an `/L` that's
+    /// no direct integer is found. Each kind once, at its first place, its
+    /// value pdf-linearize's words, which cite the clause, with how many
+    /// times it's told; in the linearization dictionary's object, its table
+    /// `LinearizationParameterDict` and its path the dictionary's, held
+    /// where that is. Its key is the dictionary's key it's of, at that
+    /// entry's bytes, or the dictionary's where it's absent; `H` for what's
+    /// of the hint stream, at the byte of its decoded data a table it's of
+    /// starts at, at its dictionary's entry, or at the file's byte a
+    /// position it gives is at; and `-` for what's of an object, at its
+    /// record, of a byte of the file, at that byte, and of the file as a
+    /// whole, at the dictionary. What's wrong with `/Linearized`, `/L`,
+    /// `/O`, `/E`, `/N`, `/T` or `/H` as a value, missing, of another type
+    /// or a reference, is found only where the walk found nothing by the
+    /// model's rules ([`Rule::Missing`], [`Rule::Type`], [`Rule::Value`],
+    /// [`Rule::Indirect`], [`Rule::Direct`], [`Rule::Special`],
+    /// [`Rule::Unresolved`], [`Rule::Unlisted`]) in the dictionary at that
+    /// key; and `/H`'s count of items only where it found nothing at `H` or
+    /// at or inside the array, whose elements the model checks each. A hint
+    /// stream whose data is encrypted and not decrypted, so not read, is
+    /// counted as not checked, its column and key `-`, where the dictionary
+    /// is held, as is a file whose bytes the source didn't give.
+    Linearization,
 }
 
 /// A rule a held object breaks.
@@ -1162,6 +1214,47 @@ pub struct Report {
     /// table and key, `Resource` and the category: findings too with
     /// [`Options::unused`].
     pub unused: BTreeMap<(String, String), usize>,
+    /// A linearized file's departures from ISO 32000-2's Annex F that
+    /// readers get past, where its linearization dictionary is held, by
+    /// table and key, `LinearizationParameterDict` and the key each is told
+    /// at, each departure once: findings too with [`Options::departures`]
+    /// ([`Rule::Linearization`]).
+    pub departures: BTreeMap<(String, String), usize>,
+    /// Whether the file is linearized (ISO 32000-2, Annex F), and whether
+    /// its linearization holds ([`Rule::Linearization`]), whatever's held:
+    /// none where its first object doesn't say it's linearized, where it
+    /// isn't taken for linearized, or where the check had no reading
+    /// ([`check`]).
+    pub linearized: Option<Linearized>,
+}
+
+/// What a file that says it's linearized is (ISO 32000-2, Annex F), as
+/// [`Report::linearized`] has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Linearized {
+    /// Linearized, and no error found in its linearization.
+    Holds,
+    /// Linearized, and an error found in its linearization
+    /// ([`Rule::Linearization`]).
+    Fails,
+    /// Linearized as first written, and voided by an update after it.
+    Updated,
+    /// Its first object says it's linearized, and it isn't taken for one.
+    NotTaken,
+}
+
+impl Linearized {
+    /// Its name, as the JSON report writes it: `holds`, `fails`, `updated`
+    /// or `not-taken`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Linearized::Holds => "holds",
+            Linearized::Fails => "fails",
+            Linearized::Updated => "updated",
+            Linearized::NotTaken => "not-taken",
+        }
+    }
 }
 
 /// The objects of `source` that `hold` names, held to the model: each
@@ -1192,7 +1285,8 @@ pub struct Report {
 /// A trailer the reader couldn't read so is a finding, and the walk starts
 /// from what it made of the file instead. What only a file's reading gives,
 /// what an earlier revision had at a number a later one wrote over or
-/// freed, [`check_with_reading`] reads too.
+/// freed, and whether a linearized file's linearization holds,
+/// [`check_with_reading`] reads too.
 pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
     check_in(source, None, hold, options)
 }
@@ -1213,6 +1307,12 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
 /// decode and keep is at most four times what the file's may. Past either,
 /// for a revision whose end isn't known, and where the object doesn't read
 /// there, it's counted as not checked, as [`check`] counts it.
+///
+/// And whether a file that says it's linearized holds (ISO 32000-2, Annex
+/// F), as pdf-linearize's check judges it from the file's reading, under
+/// that crate's own caps, a whole read of the file among what it reads
+/// where the file is linearized ([`Rule::Linearization`],
+/// [`Report::linearized`]).
 pub fn check_with_reading<S: ByteSource>(
     file: &WithReading<S>,
     hold: &Hold,
@@ -1355,6 +1455,7 @@ fn check_in(
         extensions: &extensions,
         deprecations: options.deprecations,
         unused: options.unused,
+        departures: options.departures,
         field_keys: match options.one_table {
             true => Vec::new(),
             false => field_keys(),
@@ -1418,6 +1519,7 @@ fn check_in(
     walk.content(options.content_budget.unwrap_or(CONTENT_BUDGET));
     walk.structures();
     walk.graphics(font_budget);
+    walk.linearized();
     walk.unreached();
     walk.read_as(source.warnings());
     walk.report
@@ -1437,13 +1539,13 @@ impl Report {
     /// rule and value, the value's references' numbers aside, which a
     /// rewrite renumbers (and a reader's finding's numbers aside, its
     /// offsets; a content finding's counts, offsets and how many times, but
-    /// an operator's name; a page tree, a viewer, an XMP, a color space or
-    /// a font finding's numbers and how many times; a tree finding's how
-    /// many times); for a key that came in later than the file's version,
-    /// any value, as its value isn't what's wrong. A merged object keeps
-    /// the keys of the source dictionary it's emitted over, faults and all,
-    /// and a fault the source has is the file's, carried; a built object is
-    /// the writer's whole, and never excused. The sources are best checked
+    /// an operator's name; a page tree, a viewer, an XMP, a color space, a
+    /// font or a linearization finding's numbers and how many times; a tree
+    /// finding's how many times); for a key that came in later than the
+    /// file's version, any value, as its value isn't what's wrong. A merged
+    /// object keeps the keys of the source dictionary it's emitted over,
+    /// faults and all, and a fault the source has is the file's, carried; a
+    /// built object is the writer's whole, and never excused. The sources are best checked
     /// at this file's version ([`Options::version`]). A like finding in any
     /// object of a source carries it, not only in the one the merged object
     /// was emitted over, which no [`Hold`] records: a fault written into a
@@ -1561,20 +1663,23 @@ enum Place {
 /// counts, offsets and lengths, and how many times its kind was found, but
 /// an operator's name, `d0` not `d1`, in an operator's or operands'; a
 /// tree finding's references' numbers and how many times its kind was
-/// found; and a page tree, a viewer, an XMP, a color space or a font
-/// finding's numbers, and how many times its kind was found; for a key
-/// that came in later than the file's version, any value, as its value
-/// isn't what's wrong; and for an object nothing reaches, the object alone,
-/// as which object's reference to it is named follows the objects' numbers
-/// and keys' order.
+/// found; and a page tree, a viewer, an XMP, a color space, a font or a
+/// linearization finding's numbers, and how many times its kind was found;
+/// for a key that came in later than the file's version, any value, as its
+/// value isn't what's wrong; and for an object nothing reaches, the object
+/// alone, as which object's reference to it is named follows the objects'
+/// numbers and keys' order.
 fn like(f: &Finding) -> (String, String, Rule, String) {
     let value = match f.rule {
         Rule::TooNew => String::new(),
         Rule::Reader => f.value.chars().filter(|c| !c.is_ascii_digit()).collect(),
         Rule::Tree => numberless(structure::uncounted(&f.value)),
-        Rule::PageTree | Rule::Viewer | Rule::Xmp | Rule::ColorSpace | Rule::Font => {
-            content::uncounted(f.rule, &f.value)
-        }
+        Rule::PageTree
+        | Rule::Viewer
+        | Rule::Xmp
+        | Rule::ColorSpace
+        | Rule::Font
+        | Rule::Linearization => content::uncounted(f.rule, &f.value),
         rule if content::counted(rule, &f.key) => content::uncounted(rule, &f.value),
         _ => numberless(&f.value),
     };
@@ -1821,6 +1926,8 @@ struct Walk<'a> {
     deprecations: bool,
     /// [`Options::unused`].
     unused: bool,
+    /// [`Options::departures`].
+    departures: bool,
     /// [`Report::extensions`].
     extensions: &'a BTreeSet<String>,
     /// The keys only field tables list, not the widget's: a widget with
@@ -2119,7 +2226,7 @@ impl<'a> Walk<'a> {
     /// Queues the file's linearization dictionary (ISO 32000-2, F.3.3) as
     /// `LinearizationParameterDict`, from its number: the object whose
     /// record starts first in the file's bytes ([`first_object`]), where
-    /// it's a dictionary with `/Linearized` ([`linearization`]). Nothing may
+    /// it's a dictionary with `/Linearized` ([`linearization()`]). Nothing may
     /// refer to it, so the walk from the trailer reaches none. One the walk
     /// reached as another table stays that, reached again as this, as an
     /// object stream does. Any other dictionary with `/Linearized` isn't
@@ -4574,6 +4681,7 @@ impl Rule {
         Rule::Xmp,
         Rule::ColorSpace,
         Rule::Font,
+        Rule::Linearization,
     ];
 
     /// Its name, as findings and allowances write it.
@@ -4606,6 +4714,7 @@ impl Rule {
             Rule::Xmp => "xmp",
             Rule::ColorSpace => "color-space",
             Rule::Font => "font",
+            Rule::Linearization => "linearization",
         }
     }
 
@@ -4740,8 +4849,14 @@ impl fmt::Display for Report {
             writeln!(f, "  deprecated: {table}/{key}: {n}")?;
         }
         writeln!(f, "  content read: {}", self.content)?;
+        if let Some(linearized) = self.linearized {
+            writeln!(f, "  linearized: {}", linearized.name())?;
+        }
         for ((table, key), n) in &self.unused {
             writeln!(f, "  unused: {table}/{key}: {n}")?;
+        }
+        for ((table, key), n) in &self.departures {
+            writeln!(f, "  departures: {table}/{key}: {n}")?;
         }
         for ((table, key), n) in &self.ignored {
             writeln!(f, "  ignored: {table}/{key}: {n}")?;
@@ -8098,8 +8213,8 @@ mod tests {
     }
 
     /// Each rule is the one its name names, as an allowance names it, and
-    /// the newest, content's, the common structures', color spaces' and
-    /// fonts', are last.
+    /// the newest, content's, the common structures', color spaces',
+    /// fonts' and a linearization's, are last.
     #[test]
     fn each_rule_is_named_by_its_name() {
         for &rule in Rule::ALL {
@@ -8107,8 +8222,8 @@ mod tests {
             assert_eq!(rule.to_string(), rule.name());
         }
         assert_eq!(Rule::named("packed"), Some(Rule::Packed));
-        // Content's rules, then the common structures', then color spaces'
-        // and fonts', the newest last.
+        // Content's rules, then the common structures', then color spaces',
+        // fonts' and a linearization's, the newest last.
         let newest = [
             Rule::Balance,
             Rule::Marked,
@@ -8122,6 +8237,7 @@ mod tests {
             Rule::Xmp,
             Rule::ColorSpace,
             Rule::Font,
+            Rule::Linearization,
         ];
         assert!(Rule::ALL.ends_with(&newest));
         let names: Vec<_> = newest.iter().map(|r| r.name()).collect();
@@ -8139,7 +8255,8 @@ mod tests {
                 "viewer",
                 "xmp",
                 "color-space",
-                "font"
+                "font",
+                "linearization"
             ]
         );
         assert_eq!(Rule::named("Packed"), None);
