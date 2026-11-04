@@ -775,10 +775,24 @@ impl<'a> Parser<'a> {
         sink: &mut (impl Sink<'a> + ?Sized),
         depth: usize,
     ) -> Result<Object, Error> {
+        let token = call.significant(t).ok_or(Error::End)?;
+        self.read_from(token, t, call, sink, depth)
+    }
+
+    /// The value `token` starts, `t` past it, as [`Parser::read`] reads it:
+    /// for an array's element, whose first token the array has looked at
+    /// already for its `]`.
+    fn read_from<R: RuleSet>(
+        &self,
+        token: Token<'a>,
+        t: &mut Tokenizer<'a, R>,
+        call: &mut Call,
+        sink: &mut (impl Sink<'a> + ?Sized),
+        depth: usize,
+    ) -> Result<Object, Error> {
         // Settled where the rules are fixed in `R`, as they are.
         let rules = t.rules();
         let pdfium = rules == Rules::Pdfium;
-        let token = call.significant(t).ok_or(Error::End)?;
         // Only a value reaches a limit: a token that can't start one is
         // the error it is, below, as it is without them.
         if starts_value(&token) {
@@ -797,9 +811,11 @@ impl<'a> Parser<'a> {
                 let generation = call
                     .significant(&mut look)
                     .filter(|g| g.kind == Kind::Integer);
-                let r = call
-                    .significant(&mut look)
-                    .filter(|r| is_keyword(Some(r), b"R"));
+                // `R` is looked for only after an integer: after any other
+                // token there's no reference, whatever follows it.
+                let r = generation.and_then(|_| {
+                    (call.significant(&mut look)).filter(|r| is_keyword(Some(r), b"R"))
+                });
                 if let (Some(g), Some(r)) = (generation, r) {
                     let number = integer(&token, rules).and_then(|n| u32::try_from(n).ok());
                     let generation = integer(&g, rules).and_then(|g| u16::try_from(g).ok());
@@ -881,7 +897,10 @@ impl<'a> Parser<'a> {
                             let at = self.span(token.start, close.end());
                             return Ok(Object::new(Value::Array(array)).at(at));
                         }
-                        Some(_) => array.push(self.read(t, call, sink, depth + 1)?),
+                        Some(element) => {
+                            *t = look;
+                            array.push(self.read_from(element, t, call, sink, depth + 1)?);
+                        }
                         None => {
                             return Err(Error::Array {
                                 at: self.place(token.start),
@@ -2101,6 +2120,50 @@ mod tests {
         // Whole, it has its `/Length`'s.
         let (o, kept) = indirect(file, |head| head.declared(17).unwrap());
         assert!(o.is_ok() && kept.faults.is_empty());
+    }
+
+    /// A number with no integer after it is no reference, whatever comes
+    /// next, so the parser looks no further for `R`: a window that ends in
+    /// the token after the next isn't short, and reads the number as the
+    /// whole input does. After an integer, it looks, and a window cut in
+    /// what follows is short, as `R` may be there.
+    #[test]
+    fn a_number_with_no_integer_after_it_is_read_without_looking_for_r() {
+        const BASE: usize = 1_000_000;
+        let file = b"1 /A 2345 ";
+        let whole = Parser::at(file, 0).value(&mut ()).unwrap();
+        for cut in [6, 7, 8] {
+            let mut window = Parser::at(&file[..cut], 0).window(BASE, false);
+            let value = window.value(&mut ()).unwrap();
+            assert_eq!(value.value(), whole.value(), "{cut}");
+            assert_eq!(window.offset(), BASE + 1);
+        }
+        let file = b"1 0 2345 ";
+        for cut in [6, 7, 8] {
+            let mut window = Parser::at(&file[..cut], 0).window(BASE, false);
+            assert!(
+                matches!(window.value(&mut ()), Err(Error::Short { .. })),
+                "{cut}"
+            );
+        }
+        // An array's elements, each read once from where it looked for `]`.
+        let (array, _) = value(b"[1 /A 2 0 R 3 [4] (5)]");
+        let elements = array.unwrap().into_value();
+        let Value::Array(elements) = elements else {
+            panic!("an array");
+        };
+        let kinds: Vec<_> = elements.iter().map(|e| e.value().clone()).collect();
+        assert_eq!(
+            kinds,
+            [
+                Value::Integer(1),
+                Value::Name(b"A".to_vec()),
+                Value::Ref((2, 0)),
+                Value::Integer(3),
+                Value::Array(vec![Object::from(4).at(Span::new(None, 15, 16))]),
+                Value::String(Str::Bytes(b"5".to_vec()), Some(Form::Literal)),
+            ]
+        );
     }
 
     /// Each of the tests' inputs read in every window, cut at every byte,
