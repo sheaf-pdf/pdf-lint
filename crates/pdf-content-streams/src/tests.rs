@@ -4829,6 +4829,89 @@ fn an_operands_faults_told_with_no_object_made_are_its_readings() {
     assert!(operands > 20, "{operands} operands told something");
 }
 
+/// An operand that opens nothing is read as the walk reads it at the top,
+/// and told nothing, under each cap on values and depth: every word of up
+/// to three bytes of what starts or ends a token, a number or a keyword,
+/// and those longer that each kind of token reads as, closed and not.
+#[test]
+fn an_operand_that_opens_nothing_is_read_as_the_walk_reads_it() {
+    const ALPHABET: &[u8] = b"()<>[]{}/%#.+-07e lnrstu\r\n";
+    let mut words: Vec<Vec<u8>> = vec![Vec::new()];
+    for len in 1..=3 {
+        let mut word = vec![0usize; len];
+        loop {
+            words.push(word.iter().map(|&i| ALPHABET[i]).collect());
+            let Some(at) = word.iter().rposition(|&i| i + 1 < ALPHABET.len()) else {
+                break;
+            };
+            word[at] += 1;
+            word[at + 1..].fill(0);
+        }
+    }
+    words.extend(
+        [
+            &b"true"[..],
+            b"false",
+            b"null",
+            b"truex",
+            b"nul",
+            b"(abc)",
+            b"(a(b)c",
+            b"(a\\)",
+            b"<414>",
+            b"<41 4G>",
+            b"<41",
+            b"/A#41",
+            b"/A#4",
+            b"/",
+            b"1.5",
+            b"--5",
+            b".5.",
+            b"4294967296",
+            b"9999999999999999999999",
+            b"[1 2]",
+            b"<</A 1>>",
+            b"<<",
+            b"]",
+            b">>",
+            b"Tj",
+            b"   ",
+            b"% x\n5",
+            b"% x",
+            b"5 6",
+        ]
+        .map(<[u8]>::to_vec),
+    );
+    let caps = [
+        Limits::DEFAULT,
+        Limits {
+            values: 0,
+            ..Limits::DEFAULT
+        },
+        Limits {
+            values: 1,
+            ..Limits::DEFAULT
+        },
+        deep(0),
+    ];
+    let mut read = 0;
+    for word in &words {
+        let operand = Operand::new(word, 0..word.len());
+        for lim in &caps {
+            let (mut fast, mut walked) = (Collected::default(), Collected::default());
+            let got = operand.object_with(lim, &mut fast);
+            let want = operand.walked(lim, &mut walked);
+            assert_eq!(
+                (&got, &fast.0),
+                (&want, &walked.0),
+                "{word:?} under {lim:?}"
+            );
+            read += usize::from(got.is_some());
+        }
+    }
+    assert!(read > 1000, "{read} read");
+}
+
 /// A sink borrowed, and a `dyn` one, are sinks.
 #[test]
 fn a_dyn_sink_is_a_sink() {

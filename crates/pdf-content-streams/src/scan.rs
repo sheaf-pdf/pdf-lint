@@ -253,7 +253,7 @@ struct Open {
 }
 
 /// [`walk`], from its first token, `first`, `tokens` reading on after it.
-fn walk_from<'a>(
+pub(crate) fn walk_from<'a>(
     s: &'a [u8],
     first: Token<'a>,
     mut tokens: Tokenizer<'a, Pdfium>,

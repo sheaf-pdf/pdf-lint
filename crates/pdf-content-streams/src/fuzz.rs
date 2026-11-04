@@ -1429,7 +1429,8 @@ pub(crate) fn faulted(content: &Concat, res: &ResCx, limits: &Limits) {
 }
 
 /// An operand read with a sink that keeps its faults reads as it does
-/// without, its faults inside it, in the order of their ends, and told
+/// without, and as the walk reads it, whatever it opens, the same faults
+/// told; its faults inside it, in the order of their ends, and told
 /// with no object made the same, in the same order; a sink that wants
 /// none is told none; and an operand that's no array or dictionary, whose
 /// faults are its token's, has none told here.
@@ -1437,6 +1438,13 @@ fn faulted_operand(s: &[u8], operand: &Operand, limits: &Limits) {
     let mut kept = Collected::default();
     let read = operand.object_with(limits, &mut kept);
     assert_eq!(read, operand.object(limits), "the same object");
+    let mut walked = Collected::default();
+    let by_walk = operand.walked(limits, &mut walked);
+    assert_eq!(
+        (&read, &kept.0),
+        (&by_walk, &walked.0),
+        "what the walk reads"
+    );
     let mut told = Collected::default();
     operand.faults_with(limits, &mut told);
     assert_eq!(told.0, kept.0, "the same faults with no object made");

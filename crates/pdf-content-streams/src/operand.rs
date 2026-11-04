@@ -13,7 +13,7 @@ use pdf_tokenizer::{Kind, Token};
 
 use crate::fault::{self, Fault, Read, Sink};
 use crate::limits::Limits;
-use crate::scan::{Event, TOP, Visit, element, is_number, walk};
+use crate::scan::{Event, TOP, Visit, element, is_number, tokenizer, walk, walk_from};
 
 /// An operand as written, and where it is in the content read: what an
 /// operation's operands are
@@ -161,6 +161,48 @@ impl<'a> Operand<'a> {
     /// assert_eq!(mcid, Some(Object::from(0)));
     /// ```
     pub fn object_with(
+        &self,
+        limits: &Limits,
+        sink: &mut (impl Sink<'a> + ?Sized),
+    ) -> Option<Object> {
+        // What opens nothing is read where it starts, as the walk reads it at
+        // the top, where nothing inside it is told: an object that holds
+        // none, if a value may be read; none for a string that doesn't end or
+        // a word that's no object.
+        let mut tokens = tokenizer(self.bytes, 0);
+        let first = tokens.next_significant()?;
+        let one = limits.values > 0;
+        match first.kind {
+            Kind::ArrayOpen | Kind::DictOpen => {}
+            Kind::String { closed: false } | Kind::HexString { closed: false } => return None,
+            Kind::Integer
+            | Kind::Real
+            | Kind::Name
+            | Kind::String { .. }
+            | Kind::HexString { .. } => return one.then(|| leaf(first)).flatten(),
+            Kind::Keyword if matches!(first.bytes, b"true" | b"false" | b"null") => {
+                return one.then(|| leaf(first)).flatten();
+            }
+            _ => return None,
+        }
+        let mut read = Reading::new(self, limits, sink, true);
+        walk_from(
+            self.bytes,
+            first,
+            tokens,
+            TOP,
+            limits.depth,
+            false,
+            &mut read,
+        )
+        .ok()?;
+        read.read?
+    }
+
+    /// [`Operand::object_with`] by the walk, whatever it opens: what the
+    /// tests and the fuzz body hold its reading of what opens nothing to.
+    #[cfg(any(test, fuzzing))]
+    pub(crate) fn walked(
         &self,
         limits: &Limits,
         sink: &mut (impl Sink<'a> + ?Sized),
