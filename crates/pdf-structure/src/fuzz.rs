@@ -10,7 +10,9 @@
 //! added to it is at a number none held; and so are its revision before an
 //! incremental update, and the file opened by an owner's password; a
 //! resolver says of each object what `get` says, in memory and by position;
-//! and
+//! each revision ends past a `%%EOF` and its line's end, and the file as it
+//! was written, its bytes up to there, reads the same twice and by position
+//! as in memory; and
 //! opened by a wrong password, then unlocked by the owner's, it's the file
 //! opened by the owner's. It reads under small limits, so that a run tries
 //! more inputs. It's compiled only for tests and under cargo-fuzz's
@@ -189,11 +191,14 @@ pub fn open<S: ByteSource>(
 /// and decoded data are as in memory. Pruned, what its trailer reaches is
 /// the same, and every object it keeps is among it, and an object added
 /// is at a number no entry held (`pruned`). When the file has an
-/// incremental update, so is the revision before it ([`Options::section`]);
-/// and with the choice's lowest bit set, so is the file opened by the
-/// owner's password `owner`, and its revision before an update, and the
-/// file opened by a wrong password, then unlocked by the owner's
-/// (`unlocked`). Panics on a broken promise.
+/// incremental update, so is the revision before it ([`Options::section`]).
+/// Each revision ends past a `%%EOF` and its line's end, and its bytes up
+/// to there read as a file of their own the same twice and by position as
+/// in memory (`revisions`). And with the choice's lowest bit set, so is the
+/// file opened by the owner's password `owner`, and its revision before an
+/// update, and so are its revisions, and the file opened by a wrong
+/// password, then unlocked by the owner's (`unlocked`). Panics on a broken
+/// promise.
 pub fn read_file(data: &[u8]) {
     let (choice, file) = match data {
         [a, b, file @ ..] => (u16::from_le_bytes([*a, *b]), file),
@@ -201,9 +206,49 @@ pub fn read_file(data: &[u8]) {
     };
     alike(file, &[], choice);
     sections(file);
+    revisions(file, &[]);
     if choice & 1 != 0 {
         alike(file, &[OWNER], choice);
+        revisions(file, &[OWNER]);
         unlocked(file, choice);
+    }
+}
+
+/// Where each of `file`'s revisions ends, read under [`options`] and opened
+/// by `passwords`: within the file, past the five bytes `%%EOF`, then past
+/// a line's end, CR LF, CR or LF, or none; and each end's prefix, the file
+/// as that revision was written, read whole the same twice, and by
+/// position as in memory. What else of a well-formed file's revisions and
+/// prefixes holds, the unit tests hold: of any bytes, an earlier revision
+/// can end after a later one, as a `/Prev` chain that turns back on itself
+/// makes, and a prefix can read another chain, as a `startxref` that gives
+/// another section's offset makes.
+fn revisions(file: &[u8], passwords: &[Password]) {
+    let reading = Reading::in_memory(file, passwords, &options(), true, None);
+    let source = Counted::new(file, 1 + file.len() / 3);
+    let by_position = open(&source, passwords, &options(), true).expect("it's in memory");
+    let whole = |len: usize| {
+        let prefix = reading.prefix(len, reading.limits());
+        prefix
+            .and_then(Reading::into_document)
+            .expect("it's in memory")
+    };
+    for revision in reading.revisions() {
+        let Some((eof, line)) = revision.end else {
+            continue;
+        };
+        assert!(
+            eof <= line && line <= eof + 2 && line <= file.len(),
+            "{eof} {line}"
+        );
+        assert_eq!(file.get(eof.saturating_sub(5)..eof), Some(&b"%%EOF"[..]));
+        assert!(file[eof..line].iter().all(|b| matches!(b, b'\r' | b'\n')));
+        let read = whole(line);
+        assert_eq!(read, whole(line), "a prefix reads the same twice");
+        let prefix = by_position.prefix(line, by_position.limits());
+        let by = prefix.and_then(Reading::into_document);
+        let by = by.expect("bytes in memory are read by position without fail");
+        assert_eq!(by, read, "a prefix by position is the prefix in memory");
     }
 }
 

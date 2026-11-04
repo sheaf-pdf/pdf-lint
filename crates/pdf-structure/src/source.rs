@@ -53,7 +53,10 @@ pub trait Source {
     /// The file's revisions, the first first, when the reader read its
     /// cross-reference sections: the last is the newest, whose trailer is
     /// [`Source::trailer`]'s. A checker tells what a later revision wrote
-    /// over of an earlier one's by its [`Revision::numbers`].
+    /// over of an earlier one's by its [`Revision::numbers`], and reads the
+    /// file as an earlier one was written from its bytes up to its
+    /// [`Revision::end`]
+    /// ([`Reading::prefix`](crate::bytes::Reading::prefix)).
     fn revisions(&self) -> &[Revision] {
         &[]
     }
@@ -373,7 +376,8 @@ pub struct Facts {
 /// written, or what an incremental update added after it. A linearized
 /// file's first-page cross-reference section and the main one its `/Prev`
 /// gives, later in the file, are one revision (Annex F). A reader outside
-/// the crate makes one by [`Revision::new`].
+/// the crate makes one by [`Revision::new`], and says where it ends by
+/// [`Revision::ending`].
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Revision {
@@ -390,6 +394,17 @@ pub struct Revision {
     /// revisions before it can't then be told, so a checker checks none of
     /// their trailers.
     pub numbers: Option<Box<[u32]>>,
+    /// Where its bytes end, when the reader found it: past the `%%EOF`
+    /// after the `startxref` that follows its last-written section, the one
+    /// furthest into the file (a linearized revision's main section, whose
+    /// first-page section's own `startxref` and `%%EOF` may be left out:
+    /// Annex F), and past a CR LF, CR or LF right after that `%%EOF`, the
+    /// same where none follows (7.5.5, 7.5.6). The file as the revision was
+    /// written is its bytes up to the second
+    /// ([`Reading::prefix`](crate::bytes::Reading::prefix)). None where no
+    /// `startxref` follows that section, or anything but white-space comes
+    /// between its offset and a `%%EOF`, a comment among it.
+    pub end: Option<(usize, usize)>,
 }
 
 /// How a cross-reference section is written.
@@ -642,12 +657,24 @@ impl Update {
 impl Revision {
     /// The revision whose newest cross-reference section starts at `at`,
     /// under `trailer`, its sections listing `numbers` (none for the
-    /// first).
+    /// first), where it ends not known. Each field `Revision` gains has a
+    /// setter of its own, so this stays as it is.
     pub fn new(at: usize, trailer: Trailer, numbers: Option<Box<[u32]>>) -> Revision {
         Revision {
             at,
             trailer,
             numbers,
+            end: None,
+        }
+    }
+
+    /// It, ending at `end` ([`Revision::end`]): past its `%%EOF`, and past
+    /// the end of that line.
+    #[must_use = "it gives the Revision back, with where it ends"]
+    pub fn ending(self, end: (usize, usize)) -> Revision {
+        Revision {
+            end: Some(end),
+            ..self
         }
     }
 }
@@ -1626,19 +1653,24 @@ mod tests {
         }
     }
 
-    /// A reader outside the crate makes a revision, as it does an update.
+    /// A reader outside the crate makes a revision, as it does an update,
+    /// and says where it ends.
     #[test]
     fn a_revision_is_made_outside_the_crate_by_new() {
         let trailer = Trailer::new(dict! { "Size" => 3 }.into());
         let first = Revision::new(9, trailer.clone(), None);
         assert_eq!(
-            (first.at, &first.trailer, &first.numbers),
-            (9, &trailer, &None)
+            (first.at, &first.trailer, &first.numbers, first.end),
+            (9, &trailer, &None, None)
         );
         let numbers: Box<[u32]> = Box::new([2, 5]);
         let later = Revision::new(120, trailer, Some(numbers.clone()));
         assert_eq!(later.numbers, Some(numbers));
         assert_ne!(first, later);
+        let ended = first.clone().ending((100, 102));
+        assert_eq!(ended.end, Some((100, 102)));
+        assert_eq!((ended.at, &ended.trailer), (first.at, &first.trailer));
+        assert_ne!(ended, first);
     }
 
     /// A reader of its own, implementing `Source`'s five methods alone,

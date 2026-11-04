@@ -3,16 +3,17 @@
 //! written ([`Span`]), dictionaries as written with any key written twice,
 //! and every choice it had to make a [`Warning`]. It reads the header,
 //! `startxref`, the cross-reference tables and streams along their `/Prev`
-//! chain, each revision they make kept with its trailer ([`Revision`]),
-//! and each object at the offset they give, a stream's data by its
-//! `/Length` when that ends at `endstream`. Where the sections don't read,
-//! it finds the objects by scanning the file, and says so. An object that
-//! doesn't read says why ([`Unread`]): it doesn't parse, its offset holds
-//! another, or the object stream it's in doesn't decode ([`Undecoded`],
-//! its filters [`Unfiltered`]) or doesn't say where it is ([`Unindexed`]).
-//! One read from an object stream that starts inside the bytes of another
-//! read from it, where the stream's header puts it, is read all the same,
-//! and said.
+//! chain, each revision they make kept with its trailer and where its
+//! bytes end, past the `%%EOF` after its last-written section's
+//! `startxref` ([`Revision`]), and each object at the offset they give, a
+//! stream's data by its `/Length` when that ends at `endstream`. Where the
+//! sections don't read, it finds the objects by scanning the file, and
+//! says so. An object that doesn't read says why ([`Unread`]): it doesn't
+//! parse, its offset holds another, or the object stream it's in doesn't
+//! decode ([`Undecoded`], its filters [`Unfiltered`]) or doesn't say where
+//! it is ([`Unindexed`]). One read from an object stream that starts
+//! inside the bytes of another read from it, where the stream's header
+//! puts it, is read all the same, and said.
 //!
 //! A file is read one way, by a [`Reading`]: opened, its header,
 //! cross-reference sections and trailer read and its security handler
@@ -27,7 +28,10 @@
 //! file is read by position ([`FileBytes`], or any [`ByteSource`] that
 //! doesn't hold its bytes), a window at a time from where each read starts,
 //! larger while what's read runs to the window's end, so that each read
-//! reads what it would of the whole file.
+//! reads what it would of the whole file. The file as an earlier revision
+//! was written is its bytes up to that revision's end ([`Prefix`]), which
+//! a reading opens as a file of their own, by its own security handler
+//! where they're encrypted as its file is ([`Reading::prefix`]).
 //!
 //! It decodes cross-reference streams and object streams from their own
 //! data, through [`pdf_filters`]: a stream up to [`Limits::stream`] bytes,
@@ -298,7 +302,7 @@ mod with_reading;
 pub use file::FileBytes;
 pub use file::Identity;
 pub use limits::{Limits, Options};
-pub use reading::{ByteSource, Error, Reading, SourceId};
+pub use reading::{ByteSource, Error, Prefix, Reading, SourceId};
 pub use sections::{FirstObject, SectionFault, SectionRow, SectionRows, Sections};
 use window::{Bytes, InMemory, Window};
 pub use with_reading::WithReading;
@@ -318,7 +322,8 @@ pub const STREAM: usize = 256 << 20;
 /// How many bytes the streams the reader decodes in a reading of a file
 /// may decode to in all, unless it's given other [`Limits`]; more is cut
 /// off. (The file read again as of an earlier section, by [`read_from`],
-/// is a reading of its own.)
+/// or as an earlier revision was written, by [`Reading::prefix`], is a
+/// reading of its own.)
 pub const BUDGET: usize = 1 << 30;
 
 /// What a cross-reference section says of an object number.
@@ -877,7 +882,9 @@ struct Reader {
 /// An encrypted file's encryption dictionary as the file stores it, its
 /// strings as written, where it is, and the first `/ID` element its
 /// handler opens by: what a writer writes the file encrypted as it was
-/// by ([`Reading::stored`]).
+/// by ([`Reading::stored`]); and the dictionary's values, which a reading
+/// of an earlier revision of the file is opened by its handler by where
+/// they're its own ([`Reading::prefix`]).
 pub(crate) struct Stored {
     /// The dictionary.
     pub(crate) dict: Dict,
@@ -885,6 +892,8 @@ pub(crate) struct Stored {
     pub(crate) at: Option<ObjectId>,
     /// The file's first `/ID` element, empty where it hasn't one.
     pub(crate) id: Vec<u8>,
+    /// The dictionary's values, its handler's, which are no secret.
+    pub(crate) values: pdf_crypt::Dictionary,
 }
 
 /// What a reading of an encrypted file no password opened keeps to open
@@ -992,6 +1001,10 @@ type Rows = BTreeMap<u32, (u16, XrefEntry)>;
 /// read from; or why it doesn't read.
 type Indirect = Result<(ObjectId, Object, Record), Unread>;
 
+/// A cross-reference stream read at an offset: its number, it, and where
+/// its bytes end; or why it isn't one.
+type XrefStream = Result<(ObjectId, Object, usize), String>;
+
 /// What reading an object in use gave, when an entry in use lists it.
 type InUse<'r> = Option<Result<&'r Object, &'r Unread>>;
 
@@ -1027,6 +1040,9 @@ struct Section {
     stream: Option<(usize, ObjectId, Object)>,
     /// Whether it's a table whose trailer gives an `/XRefStm`.
     hybrid: bool,
+    /// Where the `%%EOF` after the `startxref` that follows it ends, and
+    /// where that line does ([`eof_after`]).
+    end: Option<(usize, usize)>,
 }
 
 fn span(start: usize, end: usize) -> Span {
@@ -1048,6 +1064,57 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).rposition(|w| w == needle)
+}
+
+/// Where a revision ends whose last-written cross-reference section ends
+/// at byte `at`, in window `w` (ISO 32000-2, 7.5.5): past the five bytes
+/// `%%EOF` of the comment after the `startxref` that follows it, and past
+/// a CR LF, CR or LF right after them, the same where none follows. Only
+/// white-space comes between `startxref` and its offset, digits alone, and
+/// between that and `%%EOF`: none where anything else does, a comment or
+/// a NUL among it, so that every end is where a reader that looks back
+/// from each `%%EOF` for `startxref` and its offset finds one. The window
+/// is touched where what's looked at runs to its end.
+fn eof_after(w: &Window<'_>, at: usize) -> Option<(usize, usize)> {
+    let mut t = w.tokenizer(at);
+    if !is_keyword(w.significant(&mut t).as_ref(), b"startxref") {
+        return None;
+    }
+    let bytes = w.bytes;
+    // The next byte not of `kind` from `i`, the window touched where they
+    // run to its end.
+    let past = |mut i: usize, kind: fn(&u8) -> bool| {
+        while bytes.get(i).is_some_and(kind) {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            w.touch();
+        }
+        i
+    };
+    let digits = past(t.offset(), u8::is_ascii_whitespace);
+    let after = past(digits, u8::is_ascii_digit);
+    let offset = std::str::from_utf8(&bytes[digits..after]).ok()?;
+    offset.parse::<u64>().ok()?;
+    let eof = past(after, u8::is_ascii_whitespace);
+    let marker = bytes.get(eof..).unwrap_or_default();
+    if !marker.starts_with(b"%%EOF") {
+        if b"%%EOF".starts_with(marker) {
+            w.touch();
+        }
+        return None;
+    }
+    let line = match &marker[5..] {
+        [b'\r', b'\n', ..] => 2,
+        [b'\r'] | [] => {
+            w.touch();
+            marker.len() - 5
+        }
+        [b'\r' | b'\n', ..] => 1,
+        _ => 0,
+    };
+    let end = w.place(eof + 5);
+    Some((end, end + line))
 }
 
 /// How many cross-reference entries the reader reads of a file `len`
@@ -1148,8 +1215,9 @@ fn decode(
 impl Reader {
     /// The file `file` is, opened: its header, its cross-reference sections
     /// along `/Prev` from `startxref`'s (or from `options.section`, as of
-    /// which it's read, without looking for `%%EOF`), or the objects found
-    /// by scanning when they don't read, its `%%EOF`, and its encryption
+    /// which it's read, without looking for the file's last `%%EOF`), and
+    /// where each revision they make ends, or the objects found by scanning
+    /// when they don't read, its last `%%EOF`, and its encryption
     /// dictionary, its security handler opened with `passwords`, each in
     /// each of its encodings, which aren't kept. `decoder` decodes the
     /// cross-reference streams the reader is made not to.
@@ -1267,14 +1335,49 @@ impl Reader {
         };
         let handler = Handler::open(&lock.values, &lock.id, passwords)?;
         let lock = self.lock.take().expect("kept");
+        self.encryption = self.unlocked(&lock, handler);
+        Ok(())
+    }
+
+    /// The file opened by `handler`, another reading's, when no password
+    /// has, as [`Reader::unlock`] opens it, and its encryption `encryption`,
+    /// the other reading's: where the encryption dictionary's values are
+    /// `values` and the first `/ID` element `id`, which the handler's key is
+    /// made from with the password (ISO 32000-2, 7.6.4.3), so that its key
+    /// is this file's too, as when the other reading is of the same file as
+    /// a later revision wrote it. Otherwise, or opened, or not encrypted,
+    /// it's as it was.
+    fn key(
+        &mut self,
+        handler: &Handler,
+        values: &pdf_crypt::Dictionary,
+        id: &[u8],
+        encryption: &Encryption,
+    ) {
+        if self.handler.is_some() || !self.list.encrypts {
+            return;
+        }
+        let ours = |lock: &mut Box<Lock>| lock.values == *values && lock.id == id;
+        let Some(lock) = self.lock.take_if(ours) else {
+            return;
+        };
+        self.unlocked(&lock, handler.clone());
+        self.encryption = encryption.clone();
+    }
+
+    /// The file opened by `handler`, which opens what `lock` kept of it:
+    /// what it read and decoded dropped, to be read again decrypted, its
+    /// budget what opening the file left, and what's wrong with `/Perms`
+    /// among what it warned of opening the file; how it's encrypted.
+    fn unlocked(&mut self, lock: &Lock, handler: Handler) -> Encryption {
         let mut warnings = std::mem::take(&mut self.opened);
         let at = lock.perms;
-        self.encryption = self.settle(&lock.values, Ok(handler), &[], lock.own, &mut warnings, at);
+        let encryption = self.settle(&lock.values, Ok(handler), &[], lock.own, &mut warnings, at);
         self.opened = warnings;
         self.empty_slots();
         self.budget.store(lock.budget, Ordering::Relaxed);
         self.reached.store(lock.reached, Ordering::Relaxed);
-        Ok(())
+        encryption
     }
 
     /// Where object number `n`'s entry is among the entries.
@@ -2189,7 +2292,9 @@ impl Reader {
     }
 
     /// The sections from the one at `offset` along their `/Prev` chain, as
-    /// [`Reader::sections`] reads them from `startxref`'s.
+    /// [`Reader::sections`] reads them from `startxref`'s; and the
+    /// revisions they make, each ending where its last-written section's
+    /// `%%EOF` does ([`eof_after`]).
     fn sections_from<'f, F: Bytes<'f>>(
         &mut self,
         file: F,
@@ -2373,6 +2478,13 @@ impl Reader {
             if begins {
                 revisions.push(Revision::new(offsets[i], section.trailer, None));
             }
+            // A revision ends where its last-written section does, the one
+            // furthest into the file, read last: a linearized file's main
+            // section, as its first-page section's `startxref` and `%%EOF`
+            // may be left out (ISO 32000-2, F.3.4).
+            if let Some(revision) = revisions.last_mut() {
+                revision.end = section.end;
+            }
         }
         let Some(trailer) = trailer else {
             return Ok(Err("no section".to_string()));
@@ -2415,7 +2527,7 @@ impl Reader {
             At::Table(Ok((mut section, xref_stm))) => {
                 if let Some(at) = xref_stm {
                     section.stream = match self.xref_stream(file, cx, at)? {
-                        Ok((id, object)) => Some((at, id, object)),
+                        Ok((id, object, _)) => Some((at, id, object)),
                         Err(why) => {
                             let message =
                                 format!("its /XRefStm, at byte {at}, doesn't read: {why}");
@@ -2428,7 +2540,7 @@ impl Reader {
             }
             At::Table(Err(why)) => Ok(Err(why)),
             At::Stream => {
-                let (id, object) = match self.xref_stream(file, cx, offset)? {
+                let (id, object, after) = match self.xref_stream(file, cx, offset)? {
                     Ok(stream) => stream,
                     Err(why) => return Ok(Err(why)),
                 };
@@ -2436,6 +2548,7 @@ impl Reader {
                     .as_dict()
                     .and_then(|d| d.get(b"Prev"))
                     .and_then(offset_of);
+                let end = file.read_from(cx, after, 0, |w, _| Ok(eof_after(w, after)))?;
                 Ok(Ok(Section {
                     trailer: Trailer {
                         stream: Some(id),
@@ -2446,6 +2559,7 @@ impl Reader {
                     table: BTreeMap::new(),
                     stream: Some((offset, id, object)),
                     hybrid: false,
+                    end,
                 }))
             }
             At::Neither => Ok(Err(format!(
@@ -2533,8 +2647,8 @@ impl Reader {
             );
             cx.warn(None, Some(at), message);
         }
-        let trailer =
-            (w.parser(w.place(t.offset())).limits(self.limits.parser)).value(&mut cx.warned(None));
+        let mut parser = w.parser(w.place(t.offset())).limits(self.limits.parser);
+        let trailer = parser.value(&mut cx.warned(None));
         let trailer = w.parsed(trailer).map_err(|e| e.to_string())?;
         let Some(dict) = trailer.as_dict() else {
             return Err("the trailer isn't a dictionary".to_string());
@@ -2551,18 +2665,20 @@ impl Reader {
             table: entries,
             stream: None,
             hybrid: xref_stm.is_some(),
+            end: eof_after(w, parser.offset()),
         };
         Ok((section, xref_stm))
     }
 
-    /// The cross-reference stream at `offset`: a stream, `/Type /XRef`.
+    /// The cross-reference stream at `offset`: a stream, `/Type /XRef`; and
+    /// where its bytes end, past its `endobj`.
     fn xref_stream<'f, F: Bytes<'f>>(
         &self,
         file: F,
         cx: &mut Cx,
         offset: usize,
-    ) -> Result<Result<(ObjectId, Object), String>, F::Error> {
-        let (id, object, _) = match self.indirect(file, cx, offset, None)? {
+    ) -> Result<XrefStream, F::Error> {
+        let (id, object, record) = match self.indirect(file, cx, offset, None)? {
             Ok(read) => read,
             Err(why) => return Ok(Err(why.to_string())),
         };
@@ -2578,7 +2694,7 @@ impl Reader {
                 id.0, id.1
             )));
         }
-        Ok(Ok((id, object)))
+        Ok(Ok((id, object, record.at.end)))
     }
 
     /// The rows of cross-reference stream `id`, written at `offset`, read
@@ -3133,6 +3249,7 @@ impl Reader {
             dict: dict.clone(),
             at: own,
             id: id.clone(),
+            values: values.clone(),
         }));
         // Each password in each of its encodings, and which password each
         // is of.
@@ -3738,6 +3855,8 @@ fn holds_linearization<'f, F: Bytes<'f>>(
 #[cfg(test)]
 pub(crate) mod lazy;
 #[cfg(test)]
+mod revisions;
+#[cfg(test)]
 pub(crate) mod streams;
 #[cfg(test)]
 mod words;
@@ -4030,7 +4149,7 @@ mod tests {
     }
 
     /// Where the last `startxref` points, in `file`.
-    fn startxref(file: &[u8]) -> usize {
+    pub(super) fn startxref(file: &[u8]) -> usize {
         let at = rfind(file, b"startxref").unwrap() + 9;
         let digits: String = (file[at..].iter())
             .skip_while(|b| b.is_ascii_whitespace())
@@ -4113,7 +4232,7 @@ mod tests {
     /// section, after it, which its `/Prev` gives: one revision, written
     /// before the main section's (Annex F). With where its first section
     /// starts, what its `startxref` gives.
-    fn linearized() -> (Vec<u8>, usize) {
+    pub(super) fn linearized() -> (Vec<u8>, usize) {
         let mut file = b"%PDF-1.7\n".to_vec();
         let one = file.len();
         file.extend_from_slice(b"1 0 obj\n<< /Type /Catalog >>\nendobj\n");
@@ -4131,7 +4250,7 @@ mod tests {
 
     /// `file` with an update appended, writing object `n` and listing it
     /// alone, after the section at `prev`; and where its section starts.
-    fn updated(mut file: Vec<u8>, n: u32, prev: usize) -> (Vec<u8>, usize) {
+    pub(super) fn updated(mut file: Vec<u8>, n: u32, prev: usize) -> (Vec<u8>, usize) {
         let at = file.len();
         file.extend_from_slice(format!("{n} 0 obj\n<< /N {n} >>\nendobj\n").as_bytes());
         let xref = file.len();
@@ -4148,7 +4267,8 @@ mod tests {
     /// Each revision, the first first: where its newest section starts,
     /// its trailer, a cross-reference stream's or a table's, and the
     /// numbers its sections list, in use or free, but 0, the first's none;
-    /// the last's trailer the document's. A linearized file's two sections
+    /// the last's trailer the document's; a file of one section's, ending
+    /// where the file does. A linearized file's two sections
     /// are one revision, and an update after it another; a file scanned
     /// has none. Read as of an earlier section, the revisions up to it; and
     /// a reading on demand, the whole read's.
@@ -4163,6 +4283,7 @@ mod tests {
         let file = fixture::file("1.7", &base, root(), Xref::Table);
         let doc = read(&file);
         let one = Revision::new(startxref(&file), doc.trailer.clone(), None);
+        let one = one.ending((file.len() - 1, file.len()));
         assert_eq!(doc.revisions, [one]);
 
         // A cross-reference stream, its stream object 4; then an update

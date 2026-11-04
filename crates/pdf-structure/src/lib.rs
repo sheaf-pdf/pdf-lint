@@ -49,7 +49,9 @@
 //!   [`Encryption`] says whether the file opened, and by which password.
 //!   What's decrypted and what's left as written is listed in [`bytes`].
 //! - **A revision before an update** read as the file was then
-//!   ([`bytes::read_from`]).
+//!   ([`bytes::read_from`]), or the file as a revision was written, its
+//!   bytes up to the revision's end ([`Revision::end`]) read as a file of
+//!   their own ([`Reading::prefix`], [`Prefix`]).
 //! - **Whole files and updates written** ([`write::full`],
 //!   [`write::document`], [`write::update`]): numbered objects, a
 //!   document's among them, as a whole file, its objects in object streams
@@ -105,7 +107,9 @@ pub mod write;
 
 #[cfg(any(unix, windows))]
 pub use bytes::FileBytes;
-pub use bytes::{ByteSource, Error, Identity, Limits, Options, Reading, SourceId, WithReading};
+pub use bytes::{
+    ByteSource, Error, Identity, Limits, Options, Prefix, Reading, SourceId, WithReading,
+};
 pub use pdf_crypt;
 pub use pdf_crypt::{Encoded, Encoding, Password};
 pub use pdf_filters;

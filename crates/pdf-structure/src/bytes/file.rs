@@ -222,7 +222,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::super::tests::{clean, root};
+    use super::super::tests::{clean, root, startxref};
     use super::super::{ByteSource, Options, Reading, read};
     use super::*;
     use crate::fixture::{self, Xref};
@@ -293,6 +293,31 @@ mod tests {
         }
         assert!(streams > 1, "{streams}");
         assert_eq!(reading.into_document().unwrap(), doc);
+    }
+
+    /// A file of two revisions read by position: the first's prefix, the
+    /// file as it was before its update, read by position too, is the same
+    /// prefix of the file in memory; and the second's is the file.
+    #[test]
+    fn a_files_revisions_read_by_position_are_as_in_memory() {
+        let base = fixture::file("1.7", &clean(), root(), Xref::Stream);
+        let (bytes, _) = super::super::tests::updated(base.clone(), 6, startxref(&base));
+        let temp = Temp::new("prefix", &bytes);
+        let reading = Reading::open(temp.open(), &Options::DEFAULT).unwrap();
+        let in_memory = Reading::open(&bytes[..], &Options::DEFAULT).unwrap();
+        assert_eq!(reading.revisions(), in_memory.revisions());
+        let ends: Vec<_> = reading.revisions().iter().map(|r| r.end).collect();
+        let (length, all) = (base.len(), bytes.len());
+        assert_eq!(ends, [Some((length - 1, length)), Some((all - 1, all))]);
+        for (_, end) in ends.into_iter().flatten() {
+            let prefix = reading.prefix(end, reading.limits()).unwrap();
+            assert!(prefix.source().whole().is_none());
+            let expected = in_memory.prefix(end, in_memory.limits()).unwrap();
+            assert_eq!(prefix.revisions(), expected.revisions());
+            let (read, expected) = (prefix.into_document(), expected.into_document());
+            assert_eq!(read.unwrap(), expected.unwrap(), "{end}");
+        }
+        assert_eq!(read(&base), read(&bytes[..length]));
     }
 
     /// A file changed in place after it's opened isn't unchanged, by a

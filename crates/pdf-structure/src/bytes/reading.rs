@@ -16,7 +16,7 @@ use pdf_objects::version::Version;
 use pdf_objects::{Resolve, Unreadable, Why};
 
 use super::window::{ByPosition, Bytes, InMemory};
-use super::{Crypt, Decode, Options, Reader, Stored, Unfiltered, Whole, XrefEntry};
+use super::{Crypt, Decode, Limits, Options, Reader, Stored, Unfiltered, Whole, XrefEntry};
 use crate::crypt::{List, is_xref};
 use crate::filter;
 use crate::source::{
@@ -78,10 +78,16 @@ pub trait ByteSource: Send + Sync {
 /// `bytes` in `range`, or an error when it runs past them.
 fn within(bytes: &[u8], range: Range<usize>) -> io::Result<Cow<'_, [u8]>> {
     let (start, end, len) = (range.start, range.end, bytes.len());
-    bytes.get(range).map(Cow::Borrowed).ok_or_else(|| {
-        let message = format!("bytes {start}..{end} aren't within the {len} there are");
-        io::Error::new(io::ErrorKind::UnexpectedEof, message)
-    })
+    bytes
+        .get(range)
+        .map(Cow::Borrowed)
+        .ok_or_else(|| past(start, end, len))
+}
+
+/// What a read of bytes `start..end` of `len` is, which runs past them.
+fn past(start: usize, end: usize, len: usize) -> io::Error {
+    let message = format!("bytes {start}..{end} aren't within the {len} there are");
+    io::Error::new(io::ErrorKind::UnexpectedEof, message)
 }
 
 impl ByteSource for [u8] {
@@ -140,6 +146,56 @@ macro_rules! forward {
 }
 
 forward!(&S, Box<S>, Arc<S>);
+
+/// A source's first `len` bytes, as a source of their own: at a revision's
+/// end ([`Revision::end`]), the file as that revision was written, which
+/// [`Reading::prefix`] reads. They're read as the source reads them, in
+/// memory where it holds them, else by position, its first window and
+/// whether it's unchanged the source's; a read past them is an error, as
+/// one past a source's own bytes is.
+#[derive(Debug, Clone)]
+pub struct Prefix<S> {
+    source: S,
+    len: usize,
+}
+
+impl<S: ByteSource> Prefix<S> {
+    /// `source`'s first `len` bytes: all of them, where it has no more.
+    pub fn new(source: S, len: usize) -> Prefix<S> {
+        let len = len.min(source.len());
+        Prefix { source, len }
+    }
+
+    /// The source they're the first bytes of.
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+}
+
+impl<S: ByteSource> ByteSource for Prefix<S> {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn whole(&self) -> Option<&[u8]> {
+        self.source.whole()?.get(..self.len)
+    }
+
+    fn read_at(&self, range: Range<usize>) -> io::Result<Cow<'_, [u8]>> {
+        match range.end <= self.len {
+            true => self.source.read_at(range),
+            false => Err(past(range.start, range.end, self.len)),
+        }
+    }
+
+    fn first_window(&self) -> usize {
+        self.source.first_window()
+    }
+
+    fn unchanged(&self) -> io::Result<bool> {
+        self.source.unchanged()
+    }
+}
 
 /// Which reading a [`Record`] is of ([`Record::source`]): each reading has
 /// its own, unique in the process, which each record it makes holds, so
@@ -293,7 +349,8 @@ fn outside(span: &Span) -> String {
 /// object's first window reaches a byte past the next offset the
 /// cross-references list, so that an object as it should be is one read.
 /// The header is read from the file's start, `startxref` and the last
-/// `%%EOF` back from its end, and each section at its offset; a file whose
+/// `%%EOF` back from its end, and each section at its offset, with the
+/// `startxref` and `%%EOF` after it, where its revision ends; a file whose
 /// sections don't read is read whole, to be scanned. Where the source
 /// fails ([`Error::Io`]), the call keeps nothing of what it was reading,
 /// but an object it read whole on the way, and asked again it reads again.
@@ -600,6 +657,60 @@ impl<S: ByteSource> Reading<S> {
     /// The file's length in bytes.
     pub fn size(&self) -> usize {
         self.source.len()
+    }
+
+    /// The caps it reads under, as it was opened with them
+    /// ([`Options::limits`]).
+    pub fn limits(&self) -> &Limits {
+        &self.reader.limits
+    }
+
+    /// The file's first `len` bytes, read as a file of their own, from
+    /// their last `startxref`, under `limits` (this reading's,
+    /// [`Reading::limits`], or less) and this reading's Flate backend: at a
+    /// revision's end ([`Revision::end`]), the file as that revision was
+    /// written, opened lazily as any reading is, with a budget of its own.
+    /// Read by position as this reading is, or in memory. Encrypted by an
+    /// encryption dictionary whose values and first `/ID` element are those
+    /// this reading opened its file by, where the empty password doesn't
+    /// open it, it's opened by this reading's security handler, its
+    /// [`Encryption`] this reading's, so that no password is asked for or
+    /// kept: the key a password makes is made from those and the password
+    /// (ISO 32000-2, 7.6.4.3). Otherwise it's opened as [`Reading::open`]
+    /// opens a file, by the empty password, and [`Reading::unlock`] opens it
+    /// by another. It fails only where the source doesn't give the bytes
+    /// asked of it ([`Error::Io`]).
+    ///
+    /// ```
+    /// use pdf_structure::bytes::{Options, Reading};
+    ///
+    /// let first = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
+    ///     xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+    ///     trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n45\n%%EOF\n";
+    /// let update = b"1 0 obj\n<< /Type /Catalog /Lang (en) >>\nendobj\n\
+    ///     xref\n1 1\n0000000147 00000 n \n\
+    ///     trailer\n<< /Size 2 /Root 1 0 R /Prev 45 >>\nstartxref\n194\n%%EOF\n";
+    /// let file = [&first[..], &update[..]].concat();
+    /// let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+    /// let ends: Vec<_> = reading.revisions().iter().map(|r| r.end).collect();
+    /// assert_eq!(ends, [Some((146, 147)), Some((285, 286))]);
+    /// let before = reading.prefix(147, reading.limits()).unwrap();
+    /// assert_eq!(before.revisions(), &reading.revisions()[..1]);
+    /// let catalog = before.get((1, 0)).unwrap().as_dict().unwrap();
+    /// assert!(!catalog.has(b"Lang"));
+    /// ```
+    pub fn prefix(&self, len: usize, limits: &Limits) -> Result<Reading<Prefix<&S>>, Error> {
+        let mut options = Options::DEFAULT;
+        options.limits = *limits;
+        options.flate = self.reader.flate;
+        let source = Prefix::new(&self.source, len);
+        let mut prefix = Reading::open_by(source, &[], &options, self.bound)?;
+        let reader = &self.reader;
+        if let (Some(handler), Some(stored)) = (&reader.handler, &reader.stored) {
+            let (values, id) = (&stored.values, &stored.id);
+            prefix.reader.key(handler, values, id, &reader.encryption);
+        }
+        Ok(prefix)
     }
 
     /// What the reader warned of in what it has read so far, in the order
