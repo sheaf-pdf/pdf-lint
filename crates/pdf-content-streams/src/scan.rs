@@ -481,8 +481,19 @@ pub(crate) fn element(array: &[u8], at: &mut usize) -> Option<Walked> {
 }
 
 /// Whether a word is a number, as PDFium tells one: digits, signs and
-/// points only, an integer or a real by PDFium's rules.
+/// points only, an integer or a real by PDFium's rules. Its bytes are
+/// looked at, not read as a token: a word of those bytes alone is the
+/// one token they read as, of one of those kinds, and any other byte
+/// makes the first token another kind or ends it short of the word.
 pub(crate) fn is_number(word: &[u8]) -> bool {
+    !word.is_empty() && (word.iter()).all(|&c| matches!(c, b'0'..=b'9' | b'+' | b'-' | b'.'))
+}
+
+/// [`is_number`] as the word's first token tells it: of the kind PDFium's
+/// rules make a number, and the whole word. What a test holds the bytes'
+/// look to.
+#[cfg(test)]
+pub(crate) fn is_number_token(word: &[u8]) -> bool {
     tokenizer(word, 0).next().is_some_and(|t| {
         matches!(t.kind, Kind::Integer | Kind::Real) && t.bytes.len() == word.len()
     })

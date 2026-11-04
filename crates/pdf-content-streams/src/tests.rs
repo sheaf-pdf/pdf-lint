@@ -363,6 +363,56 @@ fn a_number_is_one_word() {
     }
 }
 
+/// Whether a word is a number, told from its bytes, is what its first
+/// token, read by PDFium's rules, tells: of every word of up to three
+/// bytes, each byte a digit, a sign, a point, white-space of either rules,
+/// a delimiter, or a regular byte of another kind, and of words of up to
+/// 24 such bytes made by xorshift from a seed.
+#[test]
+fn a_numbers_bytes_tell_it_as_its_token_does() {
+    use crate::scan::{is_number, is_number_token};
+    let bytes = b"09+-. \t\0\x80\xff()<>[]{}/%eE#x";
+    let mut words: Vec<Vec<u8>> = vec![Vec::new()];
+    for len in 1..=3 {
+        let last: Vec<Vec<u8>> = words
+            .iter()
+            .filter(|w| w.len() == len - 1)
+            .cloned()
+            .collect();
+        for word in last {
+            for &b in bytes {
+                words.push([&word[..], &[b]].concat());
+            }
+        }
+    }
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    for _ in 0..20_000 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let len = (x % 25) as usize;
+        // Most bytes of a number's, so that long numbers are among them.
+        let word = (0..len)
+            .map(|i| {
+                let pick = (x >> (i % 8 * 8)) as usize;
+                match pick % 4 {
+                    0 => bytes[pick / 4 % bytes.len()],
+                    _ => b"0123456789+-."[pick / 4 % 13],
+                }
+            })
+            .collect();
+        words.push(word);
+    }
+    for word in &words {
+        assert_eq!(
+            is_number(word),
+            is_number_token(word),
+            "{}",
+            String::from_utf8_lossy(word)
+        );
+    }
+}
+
 /// An operand's number as PDFium's content parser reads it (`GetNumber`),
 /// an `f32`: a number word as `FX_Number` holds it, by its first 255 bytes,
 /// and 0 for what's no number. The words and values a reader of content by
