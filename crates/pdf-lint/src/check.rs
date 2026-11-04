@@ -1358,9 +1358,10 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
 /// there, it's counted as not checked, as [`check`] counts it.
 ///
 /// And whether a file that says it's linearized holds (ISO 32000-2, Annex
-/// F), as pdf-linearize's check judges it from the file's reading, under
-/// that crate's own caps, a whole read of the file among what it reads
-/// where the file is linearized ([`Rule::Linearization`],
+/// F), as pdf-linearize's check judges it from the file's reading and the
+/// document read whole beside it (pdf-linearize's
+/// `family::facts_with_reading`), under that crate's own caps, so the file
+/// isn't read whole again ([`Rule::Linearization`],
 /// [`Report::linearized`]); or, of one linearized as first written and
 /// updated after, that it was ([`Rule::Updated`]), and whether it held as
 /// first written, judged so of the file's first bytes, up to where its
