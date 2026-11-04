@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use crate::grammar::{Row, Table, grammar};
+use crate::grammar::{Row, Table, Wrapped, grammar};
 use crate::object::{Dict, Object};
 
 /// A table's rows by their keys.
@@ -22,7 +22,13 @@ pub(super) struct Rows {
     starts: Box<[u32; 258]>,
     /// The wildcard's place, `*`, where the table has one.
     wildcard: Option<usize>,
+    /// Each row's links' tables, of each of its types, in the order the
+    /// row lists them: found the first time they're asked for.
+    links: Box<[OnceLock<Links>]>,
 }
+
+/// A row's links' tables, of each of its types.
+type Links = Box<[Box<[&'static Table]>]>;
 
 /// How many rows a table has at most for [`Rows::entries`] to give their
 /// entries without allocating: more than any of the model's has.
@@ -72,6 +78,7 @@ impl Rows {
             keys: keys.into_boxed_slice(),
             starts,
             wildcard: rows.iter().position(|row| row.key == "*"),
+            links: rows.iter().map(|_| OnceLock::new()).collect(),
         }
     }
 
@@ -89,6 +96,26 @@ impl Rows {
     pub(super) fn row(&self, key: &[u8]) -> Option<&'static Row> {
         let place = self.place(key).or(self.wildcard);
         place.map(|place| &self.table.rows[place])
+    }
+
+    /// The tables `row`'s `i`th type links to, in the order it lists them,
+    /// found by their names the first time the row's are asked for. `row`
+    /// is one of the table's.
+    pub(super) fn links(&self, row: &'static Row, i: usize) -> &[&'static Table] {
+        let place = (self.place(row.key.as_bytes()))
+            .filter(|&place| std::ptr::eq(&self.table.rows[place], row))
+            .expect("a row of the table");
+        let each = self.links[place].get_or_init(|| {
+            let table = |link: &Wrapped<String>| {
+                grammar()
+                    .table(&link.item)
+                    .expect("the loader checks that every link names a table")
+            };
+            (row.link.iter())
+                .map(|links| links.iter().map(table).collect())
+                .collect()
+        });
+        &each[i]
     }
 
     /// Each of the rows' values in `dict`, by the row's place, walking its
@@ -156,7 +183,8 @@ mod tests {
     use crate::grammar::At;
 
     /// Every table's rows by key are its rows, each found under its key as
-    /// the table finds it, and a key of no row is the wildcard's.
+    /// the table finds it, and a key of no row is the wildcard's; and each
+    /// row's links, of each type, are the tables they name, in order.
     #[test]
     fn every_tables_rows_are_found_by_their_keys_as_the_table_finds_them() {
         for table in grammar().tables() {
@@ -175,6 +203,17 @@ mod tests {
                 assert_eq!(found, Some(std::ptr::from_ref(row)), "{}", table.name);
                 let by_table = table.row(At::Key(key)).map(std::ptr::from_ref);
                 assert_eq!(found, by_table, "{}/{}", table.name, row.key);
+            }
+            for (row, i) in
+                (table.rows.iter()).flat_map(|row| (0..row.link.len()).map(move |i| (row, i)))
+            {
+                let named = (row.link[i].iter())
+                    .map(|link| std::ptr::from_ref(grammar().table(&link.item).unwrap()));
+                let found = rows
+                    .links(row, i)
+                    .iter()
+                    .map(|&table| std::ptr::from_ref(table));
+                assert!(found.eq(named), "{}/{} {i}", table.name, row.key);
             }
             for key in [&b"NoSuchKey"[..], b"", b"*", b"0", b"1*"] {
                 let found = rows.row(key).map(std::ptr::from_ref);

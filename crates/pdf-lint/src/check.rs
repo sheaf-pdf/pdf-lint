@@ -225,7 +225,7 @@ use pdf_semantics::date::Date;
 use pdf_structure::write::KeptOut;
 
 use crate::bytes::{ByteSource, WithReading};
-use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
+use crate::grammar::{ArlType, At, Row, Table, WrapFn, grammar, version};
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::predicate::{self, Cx, FileCx, Gate, Reference, Since, TOLERANCE, Truth};
 use crate::source::{Origin, Revision, RevisionEnd, Source, Trailer, Warning};
@@ -2434,10 +2434,12 @@ impl<'a> Walk<'a> {
         }
         let parents = v.trail.parents();
         if let Some(dict) = v.object.as_dict() {
+            let (keyed, also_keyed) = (rows(v.table), also.as_ref().map(|also| rows(also.table)));
             for entry in dict.last_entries() {
                 let at = At::Key(&entry.key);
-                let row = rows(v.table).row(&entry.key);
-                let also = (also.as_ref()).map(|also| (also, rows(also.table).row(&entry.key)));
+                let row = keyed.row(&entry.key);
+                let also = (also.as_ref().zip(also_keyed))
+                    .map(|(also, keyed)| (also, keyed.row(&entry.key)));
                 let (raw, written) = (&entry.value, entry_at(entry));
                 self.entry(&v, at, row, raw, written, made, &parents, also);
             }
@@ -2609,10 +2611,10 @@ impl<'a> Walk<'a> {
         self.once(first);
         let found = (id, value);
         match (typed, also) {
-            (Some(i), Some((_, other, Some(j)))) => {
+            (Some(i), Some((also, other, Some(j)))) => {
                 let links = match other.r#type[j].item {
                     ArlType::Array | ArlType::Dictionary | ArlType::Stream => {
-                        self.links(&other.link[j])
+                        self.links(also.table, other, j)
                     }
                     _ => Vec::new(),
                 };
@@ -2946,7 +2948,7 @@ impl<'a> Walk<'a> {
         match row.r#type[i].item {
             ArlType::NameTree | ArlType::NumberTree => self.tree(v, step, found, row, i, parents),
             ArlType::Array | ArlType::Dictionary | ArlType::Stream => {
-                let links = self.links(&row.link[i]);
+                let links = self.links(v.table, row, i);
                 self.reach(v, step, found, &links, parents, also)
             }
             _ => {
@@ -2957,21 +2959,20 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The tables of a type's links that their version predicates let in
-    /// at the file's version; all of them when those let in none, as
-    /// TestGrammar's walk always takes all (its `get_full_linkset`).
-    fn links(&self, links: &'static [Wrapped<String>]) -> Vec<&'static Table> {
-        let table = |l: &Wrapped<String>| {
-            grammar()
-                .table(&l.item)
-                .expect("the loader checks that every link names a table")
-        };
-        let allowed: Vec<&Table> = (links.iter())
-            .filter(|l| predicate::gate(&l.wraps, self.version, self.extensions) != Gate::Excluded)
-            .map(table)
+    /// The tables of the links of `row`'s `i`th type, `row` one of
+    /// `table`'s, that their version predicates let in at the file's
+    /// version; all of them when those let in none, as TestGrammar's walk
+    /// always takes all (its `get_full_linkset`).
+    fn links(&self, table: &'static Table, row: &'static Row, i: usize) -> Vec<&'static Table> {
+        let (links, tables) = (&row.link[i], rows(table).links(row, i));
+        let allowed: Vec<&Table> = (links.iter().zip(tables))
+            .filter(|(l, _)| {
+                predicate::gate(&l.wraps, self.version, self.extensions) != Gate::Excluded
+            })
+            .map(|(_, &table)| table)
             .collect();
         if allowed.is_empty() {
-            links.iter().map(table).collect()
+            tables.to_vec()
         } else {
             allowed
         }
@@ -3483,7 +3484,7 @@ impl<'a> Walk<'a> {
         parents: &[&'a Object],
     ) {
         let ty = row.r#type[i].item;
-        let links = self.links(&row.link[i]);
+        let links = self.links(from.table, row, i);
         let (entries, names): (&[u8], _) = match ty {
             ArlType::NameTree => (b"Names", true),
             _ => (b"Nums", false),
