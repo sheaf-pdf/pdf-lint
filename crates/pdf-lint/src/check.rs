@@ -48,6 +48,14 @@
 //! each is visited from its own number, an `/Extends` meeting the one it
 //! names reached already.
 //!
+//! Then the file's linearization dictionary (ISO 32000-2, F.3.3), from its
+//! number, as `LinearizationParameterDict`: the object whose record starts
+//! first in the file's bytes, where it's a dictionary with `/Linearized`,
+//! which nothing may refer to. Its values are held to Table F.1 as the
+//! model has it, whether or not the linearization holds. Another dictionary
+//! with `/Linearized`, later in the file or in an object stream, is no
+//! file's linearization dictionary, and isn't visited, nor told unreached.
+//!
 //! Then each earlier revision's trailer (ISO 32000-2, 7.5.6), the newest
 //! first, as the newest is: a table's from `trailer 1`, the first's, a
 //! cross-reference stream's from its number. Each goes on to nothing
@@ -1158,10 +1166,11 @@ pub struct Report {
 
 /// The objects of `source` that `hold` names, held to the model: each
 /// reached from the trailer as the file's newest cross-reference section
-/// writes it, and then from each object stream, at the file's version
-/// unless `options` says another; and each earlier revision's trailer
-/// ([`Source::revisions`]) when every object is held, or, a
-/// cross-reference stream, when `hold` names its number; what each
+/// writes it, and then from each object stream and from a linearized
+/// file's linearization dictionary, its first object (ISO 32000-2, F.3.3),
+/// at the file's version unless `options` says another; and each earlier
+/// revision's trailer ([`Source::revisions`]) when every object is held,
+/// or, a cross-reference stream, when `hold` names its number; what each
 /// object stream held holds that it mustn't ([`Rule::Packed`]); and, where
 /// `source` gives streams' data decoded ([`Source::decoded_within`]), the
 /// content of what's held ([`Rule::Balance`], [`Rule::Marked`],
@@ -1400,6 +1409,8 @@ fn check_in(
     });
     walk.run();
     walk.object_streams();
+    walk.run();
+    walk.linearization_dictionary();
     walk.run();
     walk.revisions();
     walk.excuse();
@@ -2103,6 +2114,48 @@ impl<'a> Walk<'a> {
                 also: None,
             });
         }
+    }
+
+    /// Queues the file's linearization dictionary (ISO 32000-2, F.3.3) as
+    /// `LinearizationParameterDict`, from its number: the object whose
+    /// record starts first in the file's bytes ([`first_object`]), where
+    /// it's a dictionary with `/Linearized` ([`linearization`]). Nothing may
+    /// refer to it, so the walk from the trailer reaches none. One the walk
+    /// reached as another table stays that, reached again as this, as an
+    /// object stream does. Any other dictionary with `/Linearized` isn't
+    /// visited, nor unreached ([`left_out`]).
+    fn linearization_dictionary(&mut self) {
+        let source = self.source;
+        let Some((id, object)) = first_object(source) else {
+            return;
+        };
+        if !linearization(object) {
+            return;
+        }
+        let table = grammar()
+            .table("LinearizationParameterDict")
+            .expect("the model has the linearization dictionary's table");
+        if let Some(first) = self.reached.get(&id).copied().flatten() {
+            if self.made(Some(id)).is_some() {
+                self.reached_again(id, first, table);
+            }
+            return;
+        }
+        self.reached.insert(id, Some(table.name.as_str()));
+        let trail = Rc::new(Trail {
+            up: None,
+            step: Step::Object(id),
+            object,
+        });
+        self.queue.push_back(Visit {
+            object,
+            holder: Some(id),
+            table,
+            trail,
+            depth: 0,
+            loose: false,
+            also: None,
+        });
     }
 
     /// Visits each earlier revision's trailer held ([`Walk::earlier`]), the
@@ -4080,7 +4133,8 @@ fn unknown_bytes(value: &Object, ty: ArlType) -> bool {
 /// Whether `object` is one of the file's own structures, which nothing
 /// reaches and the walk doesn't visit: a cross-reference stream, a
 /// linearization dictionary. An object stream it visits
-/// ([`Walk::object_streams`]).
+/// ([`Walk::object_streams`]), and the file's own linearization
+/// dictionary, its first object ([`Walk::linearization_dictionary`]).
 fn left_out(object: &Object) -> bool {
     match object.value() {
         Value::Stream(s) => s.dict.get(b"Type").and_then(Object::as_name) == Some(b"XRef"),
@@ -4108,6 +4162,22 @@ fn object_stream(object: &Object) -> bool {
 /// the trailers name instead.
 fn linearization(object: &Object) -> bool {
     matches!(object.value(), Value::Dict(d) if d.has(b"Linearized"))
+}
+
+/// The object whose record starts first in the file's own bytes, not an
+/// object stream's data, with the number it's at: where a linearized
+/// file's linearization dictionary is, the first object in its body (ISO
+/// 32000-2, F.3.3). None where the source records no object's place
+/// ([`Source::record`]), as a document built doesn't.
+fn first_object(source: &dyn Source) -> Option<(ObjectId, &Object)> {
+    let ids = source.ids();
+    let first = (ids.into_iter())
+        .filter_map(|id| {
+            let at = source.record(id)?.at;
+            at.stream.is_none().then_some((at.start, id))
+        })
+        .min()?;
+    Some((first.1, source.get(first.1).ok()?))
 }
 
 /// Whether the keyword `stream` comes next in `data` from `end`, past
@@ -7649,6 +7719,253 @@ mod tests {
         let doc = bytes::read(&file.out);
         assert!(!doc.facts.linearized);
         assert_eq!(packed_of(&doc, Made::Merged), []);
+    }
+
+    /// A linearization dictionary each of whose keys is of the type and
+    /// value Table F.1 has it (ISO 32000-2, F.3.3), as the model has them:
+    /// whether they hold of the file is no matter to the walk.
+    const LINEARIZATION: &str = "<< /Linearized 1 /L 1000 /H [500 100] /O 3 /E 400 /N 1 /T 900 >>";
+
+    /// A page tree of one page, [`PAGE`], object 3.
+    const ONE_PAGE: &str = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
+
+    /// A file whose first object is `first`, object 4, then a catalog, a
+    /// page tree of one page and the page, and `more`, each its number and
+    /// as written, with a table.
+    fn first_written(first: &str, more: &[(u32, &str)]) -> Vec<u8> {
+        let mut file = Sections::new("1.7");
+        file.object(4, first);
+        file.object(1, CATALOG).object(2, ONE_PAGE).object(3, PAGE);
+        let mut numbers = vec![0, 1, 2, 3, 4];
+        for &(n, body) in more {
+            file.object(n, body);
+            numbers.push(n);
+        }
+        let size = numbers.iter().max().unwrap() + 1;
+        let at = file.table(&numbers, &format!("/Size {size} /Root 1 0 R"));
+        file.end(at);
+        file.out
+    }
+
+    /// A file's linearization dictionary, its first object, is checked from
+    /// its number as `LinearizationParameterDict`, though nothing refers to
+    /// it, in a check of its document and of it beside its reading alike:
+    /// one with Table F.1's keys, each of a type and value the model has, has
+    /// no finding, and is counted, and so is its `/H`, an array of two
+    /// integers, or of four. It needn't hold: its `/L` here isn't the file's
+    /// length. The file without it has two objects fewer, and its seven keys
+    /// and two elements.
+    #[test]
+    fn a_linearization_dictionary_is_checked_from_its_number() {
+        let (table, two, four) = (
+            "LinearizationParameterDict",
+            "ArrayOf_2Integers",
+            "ArrayOf_4Integers",
+        );
+        let file = first_written(LINEARIZATION, &[]);
+        let doc = bytes::read(&file);
+        assert!(!doc.facts.linearized);
+        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let options = Options {
+            paths: true,
+            ..Options::default()
+        };
+        let alone = check(&doc, &Hold::All(Made::Built), &options);
+        let beside = check_with_reading(&read, &Hold::All(Made::Built), &options);
+        for report in [&alone, &beside] {
+            assert_eq!(report.findings, [], "{report}");
+            assert_eq!(report.unlisted, BTreeMap::new(), "{report}");
+            assert_eq!(report.unchecked, BTreeMap::new(), "{report}");
+            assert_eq!(report.checked.get(table), Some(&1), "{report}");
+            assert_eq!(report.checked.get(two), Some(&1), "{report}");
+            let from: Vec<_> = (report.paths.iter())
+                .filter(|p| p.starts_with("4 0 R"))
+                .collect();
+            assert_eq!(from, ["4 0 R", "4 0 R/H"], "{:?}", report.paths);
+        }
+        assert_eq!(alone.checked, beside.checked);
+        assert_eq!(alone.keys, beside.keys);
+
+        let mut without = Sections::new("1.7");
+        without
+            .object(1, CATALOG)
+            .object(2, ONE_PAGE)
+            .object(3, PAGE);
+        let at = without.table(&[0, 1, 2, 3], "/Size 4 /Root 1 0 R");
+        without.end(at);
+        let without = checked_as(&without.out, &Hold::All(Made::Built));
+        assert_eq!(without.findings, [], "{without}");
+        assert_eq!(alone.objects(), without.objects() + 2, "{alone}{without}");
+        assert_eq!(alone.keys, without.keys + 9, "{alone}{without}");
+
+        let four_of = LINEARIZATION.replace("[500 100]", "[500 100 600 50]");
+        let report = checked_as(&first_written(&four_of, &[]), &Hold::All(Made::Built));
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get(table), Some(&1), "{report}");
+        assert_eq!(report.checked.get(four), Some(&1), "{report}");
+        assert_eq!(report.checked.get(two), None, "{report}");
+        assert_eq!(report.keys, without.keys + 11, "{report}");
+    }
+
+    /// A file's linearization dictionary is held to Table F.1 as the model
+    /// has it, its findings in it, from its number: an `/L` that's a
+    /// string is of the wrong type, and the `/E` the model holds to it
+    /// can't be told; an `/E` of 0, a value the model doesn't allow; an
+    /// `/H` that's a reference, where its value must be direct, though the
+    /// array it refers to is checked; a key Table F.1 doesn't list, unlisted
+    /// as `--unlisted` says; and an `/H` of three integers, which the walk
+    /// takes for four, missing the last.
+    #[test]
+    fn a_linearization_dictionary_is_held_to_its_table() {
+        let (table, two, four) = (
+            "LinearizationParameterDict",
+            "ArrayOf_2Integers",
+            "ArrayOf_4Integers",
+        );
+        let merged = Hold::All(Made::Merged);
+        let string = LINEARIZATION.replace("/L 1000", "/L (x)");
+        let file = first_written(&string, &[]);
+        let report = checked_as(&file, &merged);
+        let found = [(Some(4), "4 0 R", table, "L", Rule::Type, "(x)")];
+        assert_eq!(walked(&report), found, "{report}");
+        let at = report.findings[0].at.unwrap();
+        assert_eq!(&file[at.start..at.end], b"/L (x)");
+        let unmade = [("PossibleValues", "@E<=@L", table, "E", 1)];
+        assert_eq!(not_made(&report), unmade, "{report}");
+
+        let zero = LINEARIZATION.replace("/E 400", "/E 0");
+        let file = first_written(&zero, &[]);
+        let report = checked_as(&file, &merged);
+        let value = "0 (not one of fn:Eval((@E>0) && (@E<=@L)))";
+        let found = [(Some(4), "4 0 R", table, "E", Rule::Value, value)];
+        assert_eq!(walked(&report), found, "{report}");
+        let at = report.findings[0].at.unwrap();
+        assert_eq!(&file[at.start..at.end], b"/E 0");
+
+        let reference = LINEARIZATION.replace("[500 100]", "5 0 R");
+        let file = first_written(&reference, &[(5, "[500 100]")]);
+        let report = checked_as(&file, &merged);
+        let found = [(Some(4), "4 0 R", table, "H", Rule::Direct, "5 0 R")];
+        assert_eq!(walked(&report), found, "{report}");
+        let at = report.findings[0].at.unwrap();
+        assert_eq!(&file[at.start..at.end], b"/H 5 0 R");
+        assert_eq!(report.checked.get(two), Some(&1), "{report}");
+
+        let unlisted_key = LINEARIZATION.replace(" >>", " /Foo 1 >>");
+        let doc = bytes::read(&first_written(&unlisted_key, &[]));
+        let foo = unlisted(table, "Foo", Class::Other);
+        let report = check(&doc, &merged, &Options::default());
+        assert_eq!(report.findings, [], "{report}");
+        let counted = BTreeMap::from([(foo, 1)]);
+        assert_eq!(report.unlisted, counted, "{report}");
+        let found = [(Some(4), "4 0 R", table, "Foo", Rule::Unlisted, "1")];
+        let built = check(&doc, &Hold::All(Made::Built), &Options::default());
+        assert_eq!(walked(&built), found, "{built}");
+        let all = Options {
+            unlisted: UnlistedIn::All,
+            ..Options::default()
+        };
+        let report = check(&doc, &merged, &all);
+        assert_eq!(walked(&report), found, "{report}");
+        let never = Options {
+            unlisted: UnlistedIn::Never,
+            ..Options::default()
+        };
+        let report = check(&doc, &Hold::All(Made::Built), &never);
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.unlisted, counted, "{report}");
+
+        let three = LINEARIZATION.replace("[500 100]", "[1 2 3]");
+        let file = first_written(&three, &[]);
+        let report = checked_as(&file, &merged);
+        let found = [(Some(4), "4 0 R/H", four, "3", Rule::Missing, "absent")];
+        assert_eq!(walked(&report), found, "{report}");
+        let at = report.findings[0].at.unwrap();
+        assert_eq!(&file[at.start..at.end], b"[1 2 3]");
+        assert_eq!(report.checked.get(four), Some(&1), "{report}");
+    }
+
+    /// Only a file's first object, where it's a dictionary with
+    /// `/Linearized`, is its linearization dictionary (ISO 32000-2, F.3.3),
+    /// and only that is checked as one: a dictionary with `/Linearized`
+    /// later in the file isn't checked, nor unreached, as before, though
+    /// its `/E` is 0; nor is one in an object stream, which is no object of
+    /// the file's bytes, though it's the first object's, and which is told
+    /// as an object stream mustn't hold it, as before; and a first object
+    /// without `/Linearized` that nothing refers to is unreached, as before.
+    #[test]
+    fn only_the_files_first_object_is_its_linearization_dictionary() {
+        let table = "LinearizationParameterDict";
+        let zero = LINEARIZATION.replace("/E 400", "/E 0");
+        let mut file = Sections::new("1.7");
+        file.object(1, CATALOG).object(2, ONE_PAGE).object(3, PAGE);
+        file.object(4, &zero);
+        let at = file.table(&[0, 1, 2, 3, 4], "/Size 5 /Root 1 0 R");
+        file.end(at);
+        let report = checked_as(&file.out, &Hold::All(Made::Built));
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get(table), None, "{report}");
+        assert_eq!(report.two_contexts, 0, "{report}");
+
+        let mut file = Sections::new("1.7");
+        file.object_stream(10, "", &[(4, &zero)]);
+        file.object(1, CATALOG).object(2, ONE_PAGE).object(3, PAGE);
+        let at = file.stream(11, &[0, 1, 2, 3, 4, 10], "/Root 1 0 R");
+        file.end(at);
+        let doc = bytes::read(&file.out);
+        let report = check(&doc, &Hold::All(Made::Built), &Options::default());
+        assert_eq!(
+            walked(&report),
+            [(
+                Some(10),
+                "10 0 R",
+                "ObjectStream",
+                "-",
+                Rule::Packed,
+                "4 0 R, a linearization dictionary"
+            )],
+            "{report}"
+        );
+        assert_eq!(report.checked.get(table), None, "{report}");
+        assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
+
+        let file = first_written("<< /Foo 1 >>", &[]);
+        let report = checked_as(&file, &Hold::All(Made::Built));
+        let found = [(Some(4), "-", "-", "-", Rule::Unreached, "<< /Foo 1 >>")];
+        assert_eq!(walked(&report), found, "{report}");
+        assert_eq!(report.checked.get(table), None, "{report}");
+    }
+
+    /// A file's linearization dictionary is held as any object is, by its
+    /// number: found in, and counted, where its number is held, and not
+    /// where it isn't, nor unreached. One the walk reached first as
+    /// another table, as the trailer's `/Info`, stays that, reached again
+    /// as this.
+    #[test]
+    fn a_linearization_dictionary_is_held_by_its_number() {
+        let zero = LINEARIZATION.replace("/E 400", "/E 0");
+        let doc = bytes::read(&first_written(&zero, &[]));
+        let table = "LinearizationParameterDict";
+        let held = Hold::Only(BTreeMap::from([((4, 0), Made::Built)]));
+        let report = check(&doc, &held, &Options::default());
+        let value = "0 (not one of fn:Eval((@E>0) && (@E<=@L)))";
+        let found = [(Some(4), "4 0 R", table, "E", Rule::Value, value)];
+        assert_eq!(walked(&report), found, "{report}");
+        assert_eq!(report.checked.get(table), Some(&1), "{report}");
+        let not = Hold::Only(BTreeMap::from([((1, 0), Made::Built)]));
+        let report = check(&doc, &not, &Options::default());
+        assert_eq!(report.findings, [], "{report}");
+        assert_eq!(report.checked.get(table), None, "{report}");
+
+        let mut file = Sections::new("1.7");
+        file.object(4, &zero);
+        file.object(1, CATALOG).object(2, ONE_PAGE).object(3, PAGE);
+        let at = file.table(&[0, 1, 2, 3, 4], "/Size 5 /Root 1 0 R /Info 4 0 R");
+        file.end(at);
+        let report = checked_as(&file.out, &Hold::All(Made::Built));
+        assert_eq!(report.checked.get(table), None, "{report}");
+        assert_eq!(report.checked.get("DocInfo"), Some(&1), "{report}");
+        assert_eq!(report.two_contexts, 1, "{report}");
     }
 
     /// An encryption dictionary for [`ID`], of `kind`, its user password

@@ -692,6 +692,86 @@ fn an_object_stream_is_held_as_any_object() {
     assert!(stdout.contains("\n    | /Bogus 1\n"), "{stdout}");
 }
 
+/// A file's linearization dictionary, its first object, is held as any
+/// object is, by its number: `--last-update` holds none of it where the
+/// update doesn't write its number, and where the update does, listing it
+/// where it was, holds it, and carries a fault in it from the revision
+/// before, which had it.
+#[test]
+fn the_last_update_holds_a_linearization_dictionary_where_it_writes_its_number() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let rotated = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Rotate 90 /Resources << >> >>";
+    // Object 4, written first, its /E of 0 a value Table F.1 doesn't allow.
+    let linearization = "<< /Linearized 1 /L 1000 /H [500 100] /O 3 /E 0 /N 1 /T 900 >>";
+    let mut original = b"%PDF-1.7\n".to_vec();
+    let mut at = [0; 5];
+    for (n, body) in [(4, linearization), (1, CATALOG), (2, PAGES), (3, page)] {
+        at[n] = original.len();
+        original.extend_from_slice(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+    }
+    let previous = original.len();
+    let mut table = String::from("xref\n0 5\n0000000000 65535 f \n");
+    for offset in &at[1..] {
+        table.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    table.push_str(&format!(
+        "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{previous}\n%%EOF\n"
+    ));
+    original.extend_from_slice(table.as_bytes());
+    let report = |args: &[&str], name: &str, bytes: &[u8]| -> Value {
+        let path = written(&dir, name, bytes);
+        let args = [args, &["--format", "json", path.to_str().unwrap()]].concat();
+        serde_json::from_slice(&run(&args).stdout).unwrap()
+    };
+    let value = "0 (not one of fn:Eval((@E>0) && (@E<=@L)))";
+
+    // An update that writes the page alone.
+    let paged = updated(&original, &[(3, rotated)]);
+    let whole = report(&[], "linearized-paged.pdf", &paged);
+    let found = &whole["findings"];
+    assert_eq!(found.as_array().unwrap().len(), 1, "{whole}");
+    assert_eq!(
+        (&found[0]["table"], &found[0]["key"], &found[0]["path"]),
+        (
+            &json!("LinearizationParameterDict"),
+            &json!("E"),
+            &json!("4 0 R")
+        ),
+        "{whole}"
+    );
+    assert_eq!(found[0]["value"], json!(value), "{whole}");
+    assert_eq!(whole["tables"]["LinearizationParameterDict"], json!(1));
+    let last = report(&["--last-update"], "linearized-paged.pdf", &paged);
+    assert_eq!(last["findings"], json!([]), "{last}");
+    assert_eq!(last["carried"], json!(0), "{last}");
+    assert_eq!(
+        last["tables"].get("LinearizationParameterDict"),
+        None,
+        "{last}"
+    );
+
+    // One that lists the dictionary's number too, where it was.
+    let mut listed = original.clone();
+    let three = listed.len();
+    listed.extend_from_slice(format!("3 0 obj\n{rotated}\nendobj\n").as_bytes());
+    let xref = listed.len();
+    let four = at[4];
+    listed.extend_from_slice(
+        format!(
+            "xref\n0 1\n0000000000 65535 f \n3 2\n{three:010} 00000 n \n{four:010} 00000 n \n\
+             trailer\n<< /Size 5 /Root 1 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    let last = report(&["--last-update"], "linearized-listed.pdf", &listed);
+    assert_eq!(last["findings"], json!([]), "{last}");
+    assert_eq!(last["carried"], json!(1), "{last}");
+    let tables = &last["tables"];
+    assert_eq!(tables["LinearizationParameterDict"], json!(1), "{last}");
+    assert_eq!(tables["ArrayOf_2Integers"], json!(1), "{last}");
+}
+
 /// The page [`holding`]'s object stream holds, its resources object 6.
 const HELD_PAGE: &str = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources 6 0 R >>";
 

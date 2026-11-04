@@ -41,7 +41,9 @@
 //! Each earlier revision's trailer is checked as an incremental update left
 //! it, and given the file's reading ([`check_with_reading`]), what it
 //! refers to that a later revision wrote over or freed is read as that
-//! revision had it, from the file as the revision was written.
+//! revision had it, from the file as the revision was written. Each object
+//! stream, and a linearized file's linearization dictionary, which nothing
+//! in the model links to, is checked from its number.
 
 pub mod allowance;
 pub mod check;
@@ -85,14 +87,17 @@ pub mod grammar {
 
     /// The tables the checker reads by name, which a model must have: the
     /// trailer's two; the object streams', which nothing in the model links
-    /// to but an object stream, so the checker visits each as it; and
-    /// those it checks a metadata stream and associated files as where the
-    /// model has no row for them. A slice, not an array of a fixed length,
-    /// so a table can come without a breaking release.
+    /// to but an object stream, so the checker visits each as it; the
+    /// linearization dictionary's, which nothing links to, which the
+    /// checker visits a linearized file's as; and those it checks a
+    /// metadata stream and associated files as where the model has no row
+    /// for them. A slice, not an array of a fixed length, so a table can
+    /// come without a breaking release.
     pub const NAMED: &[&str] = &[
         "FileTrailer",
         "XRefStream",
         "ObjectStream",
+        "LinearizationParameterDict",
         "Metadata",
         "ArrayOfFileSpecifications",
     ];
@@ -492,6 +497,29 @@ mod tests {
         assert_eq!(
             format!("{e:#}"),
             "it has no ObjectStream table, which the checker reads by name"
+        );
+    }
+
+    /// A model with every table the checker reads by name but the
+    /// linearization dictionary's is refused, naming it: the checker visits
+    /// a linearized file's as it.
+    #[test]
+    fn a_model_without_the_linearization_dictionarys_table_is_refused() {
+        let dir = tempfile::Builder::new()
+            .prefix("pdf-lint-model-")
+            .tempdir()
+            .unwrap();
+        let header = grammar::HEADER.join("\t");
+        let row = "Rotate\tinteger\t1.0\t\tFALSE\tFALSE\tTRUE\t0\t\t\t\t";
+        let named = grammar::NAMED.iter();
+        for table in named.filter(|&&t| t != "LinearizationParameterDict") {
+            let path = dir.path().join(format!("{table}.tsv"));
+            std::fs::write(path, format!("{header}\n{row}\n")).unwrap();
+        }
+        let e = use_model(Grammar::load(dir.path()).unwrap()).unwrap_err();
+        assert_eq!(
+            format!("{e:#}"),
+            "it has no LinearizationParameterDict table, which the checker reads by name"
         );
     }
 
