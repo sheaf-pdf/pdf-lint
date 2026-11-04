@@ -58,6 +58,7 @@
 - **A table's kind read once.** Whether a table is of an array's elements or a dictionary's keys, by which the walk leaves out the tables an object can't be of before it scores the rest, is read from its rows once, with its index of them, where its rows were read again at each object. Every report is unchanged.
 - **Text made only for findings.** The walk borrows each entry's key as text where it's UTF-8, copying it only where a finding or the object it refers to keeps it, where it copied it twice for every entry; and lists the values a row allows only where a value is none of them, for the finding, where it listed them at every value checked. Every report is unchanged.
 - **Content's operands read for their faults alone.** The content pass reads what's inside each array and dictionary among the operands for the places ISO 32000-2 reads it otherwise with pdf-content-streams' `Operand::faults_with`, which tells what reading it as an object tells without making the object, where it read each as an object and dropped it. The tests and the fuzz target's body hold the two alike at every pass. Every report is unchanged.
+- **A linearized file read whole once.** The linearization check takes pdf-linearize's facts of the file read whole beside its reading (`family::facts_with_reading`), the graph of its objects made of the document the check reads, where it read the whole file again for it, and held the two documents at once. The tests and the fuzz target's body read the facts both ways and hold them alike. Every report is unchanged.
 
 ## 0.2.0 (unreleased)
 

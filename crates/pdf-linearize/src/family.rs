@@ -8,7 +8,8 @@
 //! as Annex F has it, so anything that names one from outside the file, a
 //! signature's byte range above all, doesn't hold afterwards, as under any
 //! rewrite. [`check()`] says whether a file that says it's linearized holds,
-//! and [`facts()`] gives what that's judged from.
+//! and [`facts()`] gives what that's judged from, [`facts_with_reading`] of a
+//! file read whole beside its reading.
 //!
 //! # What changes in the document
 //!
@@ -103,7 +104,7 @@ use crate::plan::{self, Kind, Plan, What, plan};
 mod facts;
 pub(crate) mod graph;
 
-pub use facts::{check, facts};
+pub use facts::{check, facts, facts_with_reading};
 use graph::Prepared;
 
 /// How a file is laid out. A caller sets the fields on a copy of

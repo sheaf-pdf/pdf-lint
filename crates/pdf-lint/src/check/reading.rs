@@ -3,8 +3,10 @@
 //! revision had at a number a later revision wrote over or freed, read
 //! from the file as that revision was written ([`Reading::prefix`]); and
 //! the facts of the file's linearization, as pdf-linearize reads them from
-//! its bytes ([`family::facts`]), or from the file as it was first
-//! written, where an update after its linearization voids it.
+//! its bytes and the document read beside them
+//! ([`family::facts_with_reading`]), or from the file as it was first
+//! written ([`family::facts`]), where an update after its linearization
+//! voids it.
 
 use std::cell::{Cell, OnceCell};
 
@@ -41,9 +43,10 @@ pub(super) trait Reads {
     /// The facts pdf-linearize judges a linearized file by, read from the
     /// file's reading under its own caps (`Limits::DEFAULT`): the first
     /// object, and where that says the file's linearized, its sections, its
-    /// hint stream's data, its page tree and the graph of its objects, by a
-    /// whole read. Read anew each time it's asked; an error only where the
-    /// source doesn't give the bytes asked of it.
+    /// hint stream's data, its page tree and the graph of its objects, of
+    /// the document read whole beside the reading. Read anew each time it's
+    /// asked; an error only where the source doesn't give the bytes asked of
+    /// it.
     fn linearization(&self) -> Result<pdf_linearize::Facts, family::Error>;
 
     /// The file's first `len` bytes, read as a file of their own under the
@@ -73,6 +76,8 @@ type AsWritten<'f, S> = Reading<Prefix<&'f S>>;
 /// reading's limits but its budget, of which each has a [`SHARE`]th; past
 /// either, and for a revision whose end isn't known, none is read.
 pub(super) struct Readings<'f, S> {
+    /// The file read whole beside its reading.
+    file: &'f WithReading<S>,
     reading: &'f Reading<S>,
     revisions: &'f [Revision],
     /// Each one's limits.
@@ -104,6 +109,7 @@ impl<'f, S: ByteSource> Readings<'f, S> {
         let listable = (reading.limits().entries).unwrap_or_else(|| reading.size().max(1 << 20));
         let revisions = Source::revisions(file);
         Readings {
+            file,
             reading,
             revisions,
             limits,
@@ -141,7 +147,16 @@ impl<S: ByteSource> Reads for Readings<'_, S> {
     }
 
     fn linearization(&self) -> Result<pdf_linearize::Facts, family::Error> {
-        family::facts(self.reading, &pdf_linearize::Limits::DEFAULT)
+        let limits = pdf_linearize::Limits::DEFAULT;
+        let facts = family::facts_with_reading(self.file, &limits);
+        // The facts of a whole read made again, as the document beside the
+        // reading is its whole read: the same, in every test and fuzz input.
+        #[cfg(any(test, fuzzing))]
+        {
+            let again = family::facts(self.reading, &limits);
+            assert_eq!(format!("{facts:?}"), format!("{again:?}"));
+        }
+        facts
     }
 
     fn first_written(

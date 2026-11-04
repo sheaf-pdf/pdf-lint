@@ -7,8 +7,10 @@ use std::collections::HashSet;
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
 use pdf_semantics::pages::pages;
 use pdf_semantics::{Limits as TreeLimits, Rules, catalog};
-use pdf_structure::bytes::{self, ByteSource, Reading, SectionRow, SectionRows, XrefEntry};
-use pdf_structure::{Encryption, XrefKind};
+use pdf_structure::bytes::{
+    self, ByteSource, Reading, SectionRow, SectionRows, WithReading, XrefEntry,
+};
+use pdf_structure::{Document, Encryption, XrefKind};
 
 use super::graph::Prepared;
 use super::{Error, FirstPage, Options};
@@ -246,8 +248,31 @@ fn page_tree<S: ByteSource>(
 /// read where the file says it's linearized. A file that doesn't, or whose `/L`
 /// isn't its length, has no more read than it takes to say so. It fails only
 /// when the source doesn't give its bytes ([`Error::Read`]): what's wrong with
-/// a file is a fact.
+/// a file is a fact. A caller that holds the file read whole beside its reading
+/// gives that ([`facts_with_reading`]), so it isn't read whole again.
 pub fn facts<S: ByteSource>(reading: &Reading<S>, limits: &Limits) -> Result<Facts, Error> {
+    facts_of(reading, None, limits)
+}
+
+/// The facts of the file `read` holds, as [`facts`] reads them of its reading
+/// ([`WithReading::reading`]), but the graph of its objects, which is made of
+/// the document read whole beside it ([`WithReading::document`]) rather than
+/// of a whole read made again: the same facts, as that document is the reading's
+/// whole read.
+pub fn facts_with_reading<S: ByteSource>(
+    read: &WithReading<S>,
+    limits: &Limits,
+) -> Result<Facts, Error> {
+    facts_of(read.reading(), Some(read.document()), limits)
+}
+
+/// [`facts`], the graph made of `whole` where it's given, `reading`'s whole
+/// read, else of a whole read made now.
+fn facts_of<S: ByteSource>(
+    reading: &Reading<S>,
+    whole: Option<&Document>,
+    limits: &Limits,
+) -> Result<Facts, Error> {
     let mut facts = Facts::new(reading.size() as u64);
     facts.header = reading.facts().header_offset.unwrap_or(0) as u64;
     let first = reading.first_object().map_err(Error::Read)?;
@@ -268,7 +293,7 @@ pub fn facts<S: ByteSource>(reading: &Reading<S>, limits: &Limits) -> Result<Fac
     facts.pages = pages;
     facts.nodes = nodes;
     facts.objects = first_group_end(reading, &facts)?;
-    facts.graph = graph(reading, &facts, limits)?;
+    facts.graph = graph(reading, whole, &facts, limits)?;
     Ok(facts)
 }
 
@@ -300,9 +325,11 @@ fn first_group_end<S: ByteSource>(
 
 /// The file's objects as a plan takes them, in the numbers they're written at,
 /// where they read: none where no password opened it or its page tree can't be
-/// laid out, which says nothing of the file as a linearized one.
+/// laid out, which says nothing of the file as a linearized one. Of `whole`,
+/// `reading`'s whole read, where it's given, else of one made now.
 fn graph<S: ByteSource>(
     reading: &Reading<S>,
+    whole: Option<&Document>,
     facts: &Facts,
     limits: &Limits,
 ) -> Result<Option<crate::Graph>, Error> {
@@ -310,7 +337,14 @@ fn graph<S: ByteSource>(
         Encryption::None | Encryption::Opened { .. } => {}
         _ => return Ok(None),
     }
-    let doc = reading.to_document().map_err(Error::Read)?;
+    let made;
+    let doc = match whole {
+        Some(doc) => doc,
+        None => {
+            made = reading.to_document().map_err(Error::Read)?;
+            &made
+        }
+    };
     let mut options = Options::DEFAULT;
     options.limits = *limits;
     let first_page = facts
@@ -321,7 +355,7 @@ fn graph<S: ByteSource>(
             _ => 0,
         });
     options.first_page = FirstPage::Index(first_page);
-    Ok((Prepared::of(&doc, None, &options).ok())
+    Ok((Prepared::of(doc, None, &options).ok())
         .map(|prepared| prepared.graph(Kind::Table, false, &HashSet::new())))
 }
 

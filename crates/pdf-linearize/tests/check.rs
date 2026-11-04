@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use pdf_linearize::check::{Attribute, Facts, HintData};
 use pdf_linearize::family::{self, Options};
 use pdf_linearize::{Finding, Grade, Limits, Verdict};
-use pdf_structure::bytes::{self, ByteSource, Reading};
+use pdf_structure::bytes::{self, ByteSource, Reading, WithReading, XrefEntry};
 use pdf_structure::write::{Deflate, Encryptor};
 use pdf_structure::{Password, XrefKind};
 
@@ -405,6 +405,69 @@ fn another_first_page_holds_by_what_p_says() {
         assert!(verdict.linearized && verdict.holds, "{findings:?}");
         assert_eq!(findings, [], "page {page}");
     }
+}
+
+/// Each linearized file here, read whole beside its reading, has the facts its
+/// reading has: what's written in each kind, one packed into object streams among
+/// them, and encrypted under each key, and the cases PDFium's answers are held at,
+/// each by its password, broken and locked ones among them. Its graph is the
+/// reading's whole read's, not a document like it.
+#[test]
+fn a_file_read_whole_beside_its_reading_has_its_readings_facts() {
+    let mut files: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
+    for (kind, pack) in kinds() {
+        files.push((
+            format!("{kind:?} {pack}"),
+            laid_out(&plain(), kind, pack),
+            None,
+        ));
+    }
+    for (name, key) in KEYS {
+        let file = encrypted_as(key, &plain());
+        let reading = opened(&file, "");
+        let encryptor = Encryptor::of(&reading).unwrap().unwrap();
+        let doc = reading.to_document().unwrap();
+        for (kind, pack) in kinds() {
+            let mut options = Options::DEFAULT;
+            options.kind = kind;
+            options.pack = pack;
+            let mut out = Vec::new();
+            family::linearize(&mut out, &doc, Some(&encryptor), Some(&reading), &options).unwrap();
+            files.push((format!("{name} {kind:?} {pack}"), out, Some(String::new())));
+        }
+    }
+    let cases = format!("{}/tests/pdfium/cases", env!("CARGO_MANIFEST_DIR"));
+    for entry in std::fs::read_dir(&cases).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "pdf") {
+            continue;
+        }
+        let password = std::fs::read_to_string(path.with_extension("password")).ok();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        files.push((name, std::fs::read(&path).unwrap(), password));
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let (mut graphs, mut packed) = (0, 0);
+    for (name, file, password) in &files {
+        let passwords: Vec<Password> = password.iter().map(|p| Password(p.trim_end())).collect();
+        let read = WithReading::new(&file[..], &passwords, &bytes::Options::DEFAULT).unwrap();
+        let with = family::facts_with_reading(&read, &Limits::DEFAULT).unwrap();
+        let reading = Reading::open_with(&file[..], &passwords, &bytes::Options::DEFAULT).unwrap();
+        let alone = family::facts(&reading, &Limits::DEFAULT).unwrap();
+        assert_eq!(format!("{with:?}"), format!("{alone:?}"), "{name}");
+        // And of the reading the document was read beside, asked after it.
+        let again = family::facts(read.reading(), &Limits::DEFAULT).unwrap();
+        assert_eq!(format!("{with:?}"), format!("{again:?}"), "{name}");
+        graphs += usize::from(with.graph.is_some());
+        let member =
+            |(_, _, entry): (u32, u16, XrefEntry)| matches!(entry, XrefEntry::Compressed { .. });
+        packed += usize::from(with.graph.is_some() && reading.entries().any(member));
+    }
+    let counts = (files.len(), graphs, packed);
+    assert!(
+        counts.0 >= 38 && counts.1 >= 34 && counts.2 >= 7,
+        "{counts:?}"
+    );
 }
 
 /// A file's bytes given only a window at a time.
