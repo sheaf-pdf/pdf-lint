@@ -820,11 +820,11 @@ impl Font {
     fn extent_of_metrics(&self) -> f32 {
         let widths: Vec<f32> = match &self.widths {
             Widths::Simple(widths) => widths.to_vec(),
-            Widths::Cid { w, dw } => w.pieces.iter().map(|p| p.2[0]).chain([*dw]).collect(),
+            Widths::Cid { w, dw } => w.values().map(|value| value[0]).chain([*dw]).collect(),
             Widths::Gbk => vec![1000.0],
         };
         let vertical = self.vertical.iter().flat_map(|v| {
-            let w2 = v.w2.pieces.iter().flat_map(|p| p.2);
+            let w2 = v.w2.values().flat_map(|value| *value);
             w2.chain([v.vy, v.w1])
         });
         let heights = [self.metrics.ascent, self.metrics.descent];

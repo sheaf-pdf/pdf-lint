@@ -21,8 +21,11 @@ use crate::{Error, Fault, Limits, Sink, Streams, glyph_text};
 /// those of the CMap that uses another, win.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Ranges<T> {
-    /// Disjoint, in order: first, last, value.
-    pub(crate) pieces: Vec<(u32, u32, T)>,
+    /// Each piece's last, the pieces disjoint and in order: what a code is looked
+    /// up in, apart from the rest so the search reads them alone.
+    lasts: Vec<u32>,
+    /// Each piece's first and value, beside its last.
+    pieces: Vec<(u32, T)>,
 }
 
 impl<T: Copy> Ranges<T> {
@@ -42,7 +45,7 @@ impl<T: Copy> Ranges<T> {
         // on top; those that have ended are passed over.
         let mut covering = BinaryHeap::new();
         let mut next = starts.iter().peekable();
-        let mut pieces: Vec<(u32, u32, T)> = Vec::new();
+        let (mut lasts, mut pieces): (Vec<u32>, Vec<(u32, T)>) = (Vec::new(), Vec::new());
         let mut winners: Vec<usize> = Vec::new();
         for pair in bounds.windows(2) {
             let (at, end) = (pair[0], pair[1]);
@@ -64,23 +67,29 @@ impl<T: Copy> Ranges<T> {
             };
             let (lo, hi) = (at as u32, (end - 1) as u32);
             let joins = winners.last() == Some(&i)
-                && pieces.last().is_some_and(|p| u64::from(p.1) + 1 == at);
-            match pieces.last_mut() {
-                Some(piece) if joins => piece.1 = hi,
+                && lasts.last().is_some_and(|&last| u64::from(last) + 1 == at);
+            match lasts.last_mut() {
+                Some(last) if joins => *last = hi,
                 _ => {
-                    pieces.push((lo, hi, ranges[i].2));
+                    lasts.push(hi);
+                    pieces.push((lo, ranges[i].2));
                     winners.push(i);
                 }
             }
         }
-        Ranges { pieces }
+        Ranges { lasts, pieces }
     }
 
     /// The value of the range `code` is in.
     pub(crate) fn get(&self, code: u32) -> Option<T> {
-        let i = self.pieces.partition_point(|p| p.1 < code);
-        let &(lo, _, value) = self.pieces.get(i)?;
+        let i = self.lasts.partition_point(|&last| last < code);
+        let &(lo, value) = self.pieces.get(i)?;
         (lo <= code).then_some(value)
+    }
+
+    /// Each piece's value, in order.
+    pub(crate) fn values(&self) -> impl Iterator<Item = &T> {
+        self.pieces.iter().map(|(_, value)| value)
     }
 }
 
@@ -664,4 +673,54 @@ fn decoded(units: impl Iterator<Item = u16>) -> String {
     char::decode_utf16(units)
         .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A xorshift's next number, from a seed that isn't 0.
+    fn next(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// Each code of `codes` given the value of the range that wins it, as the ranges
+    /// say plainly: of those whose first and last hold it, the first given or the last.
+    #[test]
+    fn a_code_is_given_the_value_of_the_range_that_wins_it() {
+        let mut state = 0x9e37_79b9_7f4a_7c15;
+        let near = |state: &mut u64, base: u32| base.wrapping_add((next(state) % 48) as u32);
+        for round in 0..400 {
+            // Codes near 0 or near the top of 32 bits, so ranges overlap, join and end
+            // at the last code there is.
+            let base = if round % 4 == 3 { u32::MAX - 47 } else { 0 };
+            let ranges: Vec<(u32, u32, u32)> = (0..next(&mut state) % 12)
+                .map(|i| {
+                    let (a, b) = (near(&mut state, base), near(&mut state, base));
+                    // Some backwards, which are none; some of one value, which join.
+                    let shared = next(&mut state) % 3 == 0;
+                    (a, b, if shared { 7 } else { i as u32 })
+                })
+                .collect();
+            for last_wins in [false, true] {
+                let made = Ranges::new(&ranges, last_wins);
+                assert_eq!(made.lasts.len(), made.pieces.len());
+                for (i, &(first, _)) in made.pieces.iter().enumerate() {
+                    assert!(first <= made.lasts[i]);
+                    assert!(i == 0 || made.lasts[i - 1] < first);
+                }
+                for code in (0..48).map(|k| base.wrapping_add(k)) {
+                    let mut covering = ranges.iter().filter(|r| r.0 <= code && code <= r.1);
+                    let wins = match last_wins {
+                        true => covering.next_back(),
+                        false => covering.next(),
+                    };
+                    assert_eq!(made.get(code), wins.map(|r| r.2), "{ranges:?} {code}");
+                }
+            }
+        }
+    }
 }
