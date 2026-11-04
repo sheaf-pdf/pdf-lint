@@ -1346,7 +1346,8 @@ pub fn check(source: &dyn Source, hold: &Hold, options: &Options) -> Report {
 /// ([`Revision::end`]), as [`Reading::prefix`](crate::bytes::Reading::prefix)
 /// opens them; so its type, and what follows from it, is checked, where
 /// [`check`] counts it as not checked. Each revision's is opened the first
-/// time one of its objects is asked for, and kept for the check: at most
+/// time one of its objects is asked for, and dropped once its trailer's
+/// walk is over, what was asked of it kept for the check: at most
 /// 256 of them, the newest first, their cross-reference entries in all at
 /// most four times what the file's reading may list
 /// ([`Limits::entries`](crate::bytes::Limits::entries)), each under the
@@ -2390,6 +2391,10 @@ impl<'a> Walk<'a> {
                 also: None,
             });
             self.run();
+            // Nothing asks for the revision's objects again.
+            if let Some(reads) = self.reads {
+                reads.done(revision);
+            }
         }
         self.revision = None;
     }

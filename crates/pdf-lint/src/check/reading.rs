@@ -1,14 +1,16 @@
 //! What only a file's reading gives a check, beside the document read from
 //! it ([`check_with_reading`](super::check_with_reading)): what an earlier
 //! revision had at a number a later revision wrote over or freed, read
-//! from the file as that revision was written ([`Reading::prefix`]); and
+//! from the file as that revision was written ([`Reading::prefix`]), each
+//! revision's reading dropped once its trailer's walk is over; and
 //! the facts of the file's linearization, as pdf-linearize reads them from
 //! its bytes and the document read beside them
 //! ([`family::facts_with_reading`]), or from the file as it was first
 //! written ([`family::facts`]), where an update after its linearization
 //! voids it.
 
-use std::cell::{Cell, OnceCell};
+use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::HashMap;
 
 use pdf_linearize::family;
 
@@ -37,8 +39,14 @@ const SHARE: usize = 64;
 pub(super) trait Reads {
     /// Object `id` as revision `revision`, counted from the first as 1,
     /// had it, read from the file as that revision was written; none where
-    /// it isn't read there, or the revision isn't.
+    /// it isn't read there, or the revision isn't, or its walk is over
+    /// ([`Reads::done`]) and `id` wasn't asked for before.
     fn earlier(&self, revision: usize, id: ObjectId) -> Option<&Object>;
+
+    /// That the walk of revision `revision`'s trailer is over, so nothing
+    /// asks for one of its objects again: its reading is dropped, and what
+    /// was asked of it kept, never opened again.
+    fn done(&self, revision: usize);
 
     /// The facts pdf-linearize judges a linearized file by, read from the
     /// file's reading under its own caps (`Limits::DEFAULT`): the first
@@ -70,7 +78,8 @@ type AsWritten<'f, S> = Reading<Prefix<&'f S>>;
 /// The earlier revisions of a file read beside it: each the file's bytes
 /// up to where the revision ends ([`Revision::end`]), opened as a file of
 /// their own by the file's reading ([`Reading::prefix`]) the first time one
-/// of its objects is asked for, and kept for the check. At most
+/// of its objects is asked for, and dropped once its trailer's walk is over
+/// ([`Reads::done`]), what was asked of it kept for the check. At most
 /// [`READINGS`] of them, their entries in all at most [`ENTRIES`] times what
 /// the file's reading may list ([`Limits::entries`]), each under the file's
 /// reading's limits but its budget, of which each has a [`SHARE`]th; past
@@ -84,18 +93,68 @@ pub(super) struct Readings<'f, S> {
     limits: Limits,
     /// How many entries they may list in all.
     most: usize,
-    /// Each revision's reading, the first first, once it's been asked for;
-    /// none where it isn't read.
-    each: Box<[OnceCell<Option<AsWritten<'f, S>>>]>,
+    /// Each revision's reading, the first first, as it stands.
+    each: Box<[RefCell<Opened<AsWritten<'f, S>>>]>,
     /// How many have been opened.
     opened: Cell<usize>,
     /// How many entries those list in all.
     entries: Cell<usize>,
+    /// What each revision's reading gave of each object asked of it, by the
+    /// revision's place among them and the object: where among `kept`, or
+    /// none where it didn't read.
+    asked: RefCell<HashMap<(usize, ObjectId), Option<usize>>>,
+    /// Each object an earlier revision's reading gave, kept for the check.
+    kept: Kept,
     /// The file as it was first written, for its linearization, under the
     /// file's reading's own limits, once it's been asked for
     /// ([`Reads::first_written`]): no reading of an earlier revision's
     /// objects, and none of the caps theirs are under.
     first: OnceCell<AsWritten<'f, S>>,
+}
+
+/// An earlier revision's reading, as it stands.
+enum Opened<R> {
+    /// Not asked for yet.
+    Not,
+    /// Opened, and its walk not over.
+    Open(R),
+    /// Not read, or its walk is over: never opened again.
+    Closed,
+}
+
+/// Objects kept, each where it was put while the store grows: in chunks of
+/// slots, each set once, the `k`th chunk of `16 << k`, made as the slots
+/// before it fill, so a slot is never moved and what's handed out of it
+/// stands as long as the store.
+#[derive(Default)]
+struct Kept {
+    chunks: [OnceCell<Box<[OnceCell<Object>]>>; 32],
+    /// How many are kept.
+    len: Cell<usize>,
+}
+
+impl Kept {
+    /// Where slot `i` is: its chunk, and its place there.
+    fn place(i: usize) -> (usize, usize) {
+        let k = (i / 16 + 1).ilog2() as usize;
+        (k, i - 16 * ((1 << k) - 1))
+    }
+
+    /// `object` kept, and where.
+    fn keep(&self, object: Object) -> usize {
+        let i = self.len.get();
+        let (k, at) = Kept::place(i);
+        let chunk = self.chunks[k].get_or_init(|| (0..16 << k).map(|_| OnceCell::new()).collect());
+        let _ = chunk[at].set(object);
+        self.len.set(i + 1);
+        i
+    }
+
+    /// The object kept at `i`.
+    fn get(&self, i: usize) -> Option<&Object> {
+        let (k, at) = Kept::place(i);
+        self.chunks.get(k)?.get()?.get(at)?.get()
+    }
 }
 
 impl<'f, S: ByteSource> Readings<'f, S> {
@@ -114,9 +173,14 @@ impl<'f, S: ByteSource> Readings<'f, S> {
             revisions,
             limits,
             most: listable.saturating_mul(ENTRIES),
-            each: revisions.iter().map(|_| OnceCell::new()).collect(),
+            each: revisions
+                .iter()
+                .map(|_| RefCell::new(Opened::Not))
+                .collect(),
             opened: Cell::new(0),
             entries: Cell::new(0),
+            asked: RefCell::default(),
+            kept: Kept::default(),
             first: OnceCell::new(),
         }
     }
@@ -142,8 +206,27 @@ impl<'f, S: ByteSource> Readings<'f, S> {
 impl<S: ByteSource> Reads for Readings<'_, S> {
     fn earlier(&self, revision: usize, id: ObjectId) -> Option<&Object> {
         let i = revision.checked_sub(1)?;
-        let reading = self.each.get(i)?.get_or_init(|| self.open(i)).as_ref()?;
-        reading.get(id).ok()
+        let each = self.each.get(i)?;
+        if let Some(&at) = self.asked.borrow().get(&(i, id)) {
+            return self.kept.get(at?);
+        }
+        let mut opened = each.borrow_mut();
+        if let Opened::Not = *opened {
+            *opened = self.open(i).map_or(Opened::Closed, Opened::Open);
+        }
+        let object = match &*opened {
+            Opened::Open(reading) => reading.object_unkept(id).ok(),
+            _ => None,
+        };
+        let at = object.map(|(object, _)| self.kept.keep(object));
+        self.asked.borrow_mut().insert((i, id), at);
+        self.kept.get(at?)
+    }
+
+    fn done(&self, revision: usize) {
+        if let Some(each) = revision.checked_sub(1).and_then(|i| self.each.get(i)) {
+            *each.borrow_mut() = Opened::Closed;
+        }
     }
 
     fn linearization(&self) -> Result<pdf_linearize::Facts, family::Error> {
@@ -214,7 +297,7 @@ mod tests {
     use crate::bytes;
     use crate::check::tests::{CATALOG, NO_PAGES, PAGES, Sections, Walked, not_made, walked};
     use crate::check::{
-        Hold, Made, Options, Report, Rule, WRITTEN_OVER, check, check_with_reading,
+        self, Hold, Made, Options, Report, Rule, WRITTEN_OVER, check, check_with_reading,
     };
     use crate::dict;
     use crate::object::{Str, Value};
@@ -430,6 +513,79 @@ mod tests {
         let counted = |n| [("Type", WRITTEN_OVER, "FileTrailer", "Info", n)];
         assert_eq!(not_made(&beside), counted(1), "{beside}");
         assert_eq!(not_made(&alone), counted(257), "{alone}");
+    }
+
+    /// A revision's reading is dropped once its walk is over, and never
+    /// opened again: what was asked of it before is what it gave, at the
+    /// same place, and what wasn't is none. So of 257 earlier revisions,
+    /// the newest asked for twice, once after its walk, the 256 newest are
+    /// still read, and the first isn't.
+    #[test]
+    fn a_revisions_reading_is_dropped_once_its_walk_is_over_and_never_opened_again() {
+        let file = many(257);
+        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let readings = Readings::new(&read);
+        let info = readings.earlier(257, (5, 0)).unwrap();
+        assert!(matches!(*readings.each[256].borrow(), Opened::Open(_)));
+        readings.done(257);
+        assert!(matches!(*readings.each[256].borrow(), Opened::Closed));
+        assert!(std::ptr::eq(readings.earlier(257, (5, 0)).unwrap(), info));
+        assert!(readings.earlier(257, (1, 0)).is_none());
+        assert_eq!(readings.opened.get(), 1);
+        for revision in (2..=256).rev() {
+            assert!(readings.earlier(revision, (5, 0)).is_some(), "{revision}");
+            readings.done(revision);
+        }
+        assert!(readings.earlier(1, (5, 0)).is_none());
+        assert_eq!(readings.opened.get(), READINGS);
+        // The newest's reading is the file's, never asked for.
+        let (newest, earlier) = readings.each.split_last().unwrap();
+        assert!(
+            earlier
+                .iter()
+                .all(|each| matches!(*each.borrow(), Opened::Closed))
+        );
+        assert!(matches!(*newest.borrow(), Opened::Not));
+    }
+
+    /// A check drops each earlier revision's reading as its trailer's walk
+    /// ends, and finds what it found keeping them.
+    #[test]
+    fn a_check_drops_each_earlier_revisions_reading_after_its_walk() {
+        let file = info_again("[1 2]", "<< /Title (New) >>");
+        let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
+        let readings = Readings::new(&read);
+        let hold = Hold::All(Made::Merged);
+        let report = check::check_in(&read, Some(&readings), &hold, &Options::default());
+        assert!(matches!(*readings.each[0].borrow(), Opened::Closed));
+        assert_eq!(readings.opened.get(), 1);
+        assert!(readings.kept.len.get() > 0);
+        assert_eq!(report, both(&file, &bytes::Options::DEFAULT).0);
+    }
+
+    /// What's kept stays where it was put as more is: across the chunks'
+    /// edges, each object read back is the one put there, at its place.
+    #[test]
+    fn what_an_earlier_reading_gave_stays_where_it_was_kept() {
+        let kept = Kept::default();
+        let at: Vec<*const Object> = (0..1_000)
+            .map(|n: i64| ptr_of(kept.get(kept.keep(Object::from(n))).unwrap()))
+            .collect();
+        for (n, &at) in at.iter().enumerate() {
+            let object = kept.get(n).unwrap();
+            assert!(std::ptr::eq(object, at), "{n}");
+            assert_eq!(object.as_integer(), Some(n as i64));
+        }
+        assert!(kept.get(1_000).is_none());
+        let places: Vec<_> = [0, 15, 16, 47, 48, 111, 112].map(Kept::place).into();
+        assert_eq!(
+            places,
+            [(0, 0), (0, 15), (1, 0), (1, 31), (2, 0), (2, 63), (3, 0)]
+        );
+    }
+
+    fn ptr_of(object: &Object) -> *const Object {
+        object
     }
 
     /// The entries the earlier revisions' readings list are at most four
