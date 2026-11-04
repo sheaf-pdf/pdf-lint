@@ -2129,6 +2129,68 @@ fn bytes_pdfium_reads_as_white_space_are_told() {
     assert_eq!(unwanted.0, []);
 }
 
+/// Each 0x80 and 0xFF between tokens is told wherever it is in the
+/// content: the gaps before the first are read for none, and those after
+/// it each where it is, past one in a string or a comment, which isn't
+/// told, to the white-space after the last token; and over streams
+/// joined, beside what a join divides, the gaps without a join not read
+/// for one.
+#[test]
+fn every_high_byte_between_tokens_is_told_past_the_first() {
+    let s = b"q 1 0 0 1 0 0 cm \x80Q (\x80) \xffq %\x80\n Q\x80 BT ET q\xffQ\xff";
+    let page = Concat::new(&[s]);
+    let high = |at: usize| {
+        (
+            at..at + 1,
+            Fault::HighByte {
+                written: &s[at..at + 1],
+            },
+        )
+    };
+    assert_eq!(
+        faults(&page),
+        [high(17), high(24), high(32), high(41), high(43)]
+    );
+    // A run of content before any, and after the last, none told.
+    let mut long = b"q ".repeat(500);
+    long.extend_from_slice(b"\x80Q ");
+    long.extend_from_slice(&b"q Q ".repeat(500));
+    let page = Concat::new(&[&long]);
+    let s = page.bytes();
+    assert_eq!(
+        faults(&page),
+        [(
+            1000..1001,
+            Fault::HighByte {
+                written: &s[1000..1001]
+            }
+        )]
+    );
+    // Over streams joined: a join that divides a comment told where it is
+    // among the high bytes, the gaps with none not read for one.
+    let page = Concat::new(&[b"q \x80Q %c", b"x\n\xffQ q", b"Q \xff"]);
+    let s = page.bytes();
+    assert_eq!(
+        faults(&page),
+        [
+            (2..3, Fault::HighByte { written: &s[2..3] }),
+            (5..9, Fault::Across { written: &s[5..9] }),
+            (
+                10..11,
+                Fault::HighByte {
+                    written: &s[10..11]
+                }
+            ),
+            (
+                17..18,
+                Fault::HighByte {
+                    written: &s[17..18]
+                }
+            ),
+        ]
+    );
+}
+
 #[test]
 fn errors_say_where() {
     let lim = &Limits::DEFAULT;

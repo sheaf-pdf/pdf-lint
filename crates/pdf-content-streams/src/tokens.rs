@@ -5,6 +5,7 @@
 use std::iter::FusedIterator;
 use std::ops::Range;
 
+use memchr::memchr2;
 use pdf_tokenizer::{Kind, is_white_space};
 
 use crate::error::{Error, ErrorKind};
@@ -174,6 +175,7 @@ pub fn tokens<'a, 'r>(s: &'a [u8], res: &'r ResCx, limits: &Limits) -> Tokens<'a
         join: 0,
         lone: Vec::new(),
         held: Vec::new(),
+        high: None,
         sink: (),
     }
 }
@@ -214,6 +216,13 @@ pub struct Tokens<'a, 'r, S = ()> {
     /// divides of it ([`across`](Tokens::across), [`gap`](Tokens::gap)),
     /// the last to be told first.
     held: Vec<(Range<usize>, Fault<'a>)>,
+    /// Where the content was last looked at for 0x80 or 0xFF from, the
+    /// start of a gap, and where the first of them is from there, or the
+    /// content's end where there's none: looked for over the rest of the
+    /// content again once a gap starts past it (or before where it was
+    /// looked from), so that a gap that ends before it, holding neither,
+    /// isn't read for them. None before the first look.
+    high: Option<(usize, usize)>,
     sink: S,
 }
 
@@ -279,6 +288,7 @@ impl<'a, 'r, S> Tokens<'a, 'r, S> {
             join: self.join,
             lone: self.lone,
             held: self.held,
+            high: self.high,
             sink,
         }
     }
@@ -409,11 +419,24 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
 
     /// What's between tokens at `gap`, white-space and comments, told where
     /// ISO 32000-2 would read it otherwise: each 0x80 and 0xFF in its
-    /// white-space ([`Fault::HighByte`]), and what a join divides
-    /// ([`divided`](Tokens::divided)), in the order of their ends.
+    /// white-space ([`Fault::HighByte`]), looked for only where the content
+    /// holds one before the gap's end ([`high`](Tokens::high)), and what a
+    /// join divides ([`divided`](Tokens::divided)), in the order of their
+    /// ends.
     fn gap(&mut self, gap: Range<usize>) {
         let s = self.s;
-        fault::spaces(s, gap.clone(), |at, fault| self.held.push((at, fault)));
+        let high = match self.high {
+            Some((from, high)) if (from..=high).contains(&gap.start) => high,
+            _ => {
+                let rest = s.get(gap.start..).unwrap_or_default();
+                let high = memchr2(0x80, 0xFF, rest).map_or(s.len(), |i| gap.start + i);
+                self.high = Some((gap.start, high));
+                high
+            }
+        };
+        if high < gap.end {
+            fault::spaces(s, gap.clone(), |at, fault| self.held.push((at, fault)));
+        }
         self.held.reverse();
         self.divided(gap, true);
         while let Some((at, fault)) = self.held.pop() {
@@ -484,6 +507,12 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
     /// holds, and only as far as its last.
     fn divided(&mut self, region: Range<usize>, tell: bool) -> bool {
         let s = self.s;
+        // With no join in it, nothing is divided, and it isn't read: what
+        // the loop's first look finds, before a tokenizer is made.
+        self.pass(region.start);
+        if region.start >= region.end || !self.next_join().is_some_and(|join| join < region.end) {
+            return false;
+        }
         let mut found = false;
         let mut tokens = tokenizer(s, region.start);
         loop {
