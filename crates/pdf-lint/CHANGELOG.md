@@ -56,6 +56,7 @@
 - **A row's constant values read as constants.** Where a row lists the values its key may take, each that's a constant, a name or a number, not a predicate, is matched as one alone, where pdf-arlington's `required_value` was asked of it first, which gives nothing for a constant. Every report is unchanged.
 - **A row's links found once.** The tables a row's type links to are found by their names the first time the walk follows the row, each with its own index of rows, and kept with the table's index of its rows for the run, where each was looked up among the model's tables by its name each time a value was followed, and its index again as each was scored; which of them the file's version lets in is still read for each file. Every report is unchanged.
 - **A table's kind read once.** Whether a table is of an array's elements or a dictionary's keys, by which the walk leaves out the tables an object can't be of before it scores the rest, is read from its rows once, with its index of them, where its rows were read again at each object. Every report is unchanged.
+- **Text made only for findings.** The walk borrows each entry's key as text where it's UTF-8, copying it only where a finding or the object it refers to keeps it, where it copied it twice for every entry; and lists the values a row allows only where a value is none of them, for the finding, where it listed them at every value checked. Every report is unchanged.
 
 ## 0.2.0 (unreleased)
 

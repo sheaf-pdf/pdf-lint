@@ -214,6 +214,7 @@
 //! objects nested at most [`NESTING`] deep in one; `/Parent` chains at most
 //! the page tree's depth.
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{self, Write as _};
@@ -225,7 +226,7 @@ use pdf_semantics::date::Date;
 use pdf_structure::write::KeptOut;
 
 use crate::bytes::{ByteSource, WithReading};
-use crate::grammar::{ArlType, At, Row, Table, WrapFn, grammar, version};
+use crate::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version};
 use crate::object::{Dict, Entry, Object, ObjectId, Span, Str, Value};
 use crate::predicate::{self, Cx, FileCx, Gate, Reference, Since, TOLERANCE, Truth};
 use crate::source::{Origin, Revision, RevisionEnd, Source, Trailer, Warning};
@@ -2532,7 +2533,7 @@ impl<'a> Walk<'a> {
         parents: &[&'a Object],
         also: Option<(&Visit<'a>, Option<&'static Row>)>,
     ) {
-        let key = at_text(at);
+        let key = at_str(at);
         let step = match at {
             At::Key(key) => Step::Key(key),
             At::Index(i) => Step::Index(i),
@@ -2569,6 +2570,7 @@ impl<'a> Walk<'a> {
                     (At::Key(b"AF"), Value::Array(_)) => "ArrayOfFileSpecifications",
                     _ => {
                         if let Some(made) = made {
+                            let key = key.into_owned();
                             self.unlisted(v, at, key, extension, value, written, made);
                         }
                         if self.revision.is_none() {
@@ -2582,13 +2584,13 @@ impl<'a> Walk<'a> {
                 if made.is_some() {
                     self.report.keys += 1;
                 }
-                self.refer(raw, v.table, key);
+                self.refer(raw, v.table, &key);
                 let table = grammar().table(table).expect("the model has the table");
                 self.reach(v, step, (id, value), &[rows(table)], parents, &[]);
                 return;
             }
         };
-        self.refer(raw, v.table, key.clone());
+        self.refer(raw, v.table, &key);
         // A dictionary's null entry is no entry (ISO 32000-2, 7.3.7), unless
         // its row allows null.
         let null = |row: &Row| row.r#type.iter().any(|t| t.item == ArlType::Null);
@@ -2917,12 +2919,12 @@ impl<'a> Walk<'a> {
     /// Notes that `raw`, when it's a reference, was seen under `key` of
     /// an object walked as `table`; not in an earlier revision's trailer,
     /// which marks nothing it refers to.
-    fn refer(&mut self, raw: &Object, table: &'static Table, key: String) {
+    fn refer(&mut self, raw: &Object, table: &'static Table, key: &str) {
         if self.revision.is_some() {
             return;
         }
         if let Value::Ref(to) = *raw.value() {
-            (self.referrers.entry(to)).or_insert_with(|| (table.name.as_str(), key));
+            (self.referrers.entry(to)).or_insert_with(|| (table.name.as_str(), key.to_string()));
         }
     }
 
@@ -3557,7 +3559,7 @@ impl<'a> Walk<'a> {
                 }
             }
             if let Some(raw) = dict.get(entries) {
-                self.refer(raw, from.table, row.key.clone());
+                self.refer(raw, from.table, &row.key);
                 match self.resolve(raw).map(|(_, o)| o.value()) {
                     Ok(Value::Array(pairs)) => {
                         for (k, pair) in pairs.chunks(2).enumerate() {
@@ -3581,7 +3583,7 @@ impl<'a> Walk<'a> {
                                     continue;
                                 }
                             };
-                            self.refer(value, from.table, row.key.clone());
+                            self.refer(value, from.table, &row.key);
                             match self.resolve(value) {
                                 Ok((vid, v))
                                     if matches!(
@@ -3624,11 +3626,11 @@ impl<'a> Walk<'a> {
                 }
             }
             if let Some(raw) = dict.get(b"Kids") {
-                self.refer(raw, from.table, row.key.clone());
+                self.refer(raw, from.table, &row.key);
                 match self.resolve(raw).map(|(_, o)| o.value()) {
                     Ok(Value::Array(kids)) => {
                         for (i, kid) in kids.iter().enumerate() {
-                            self.refer(kid, from.table, row.key.clone());
+                            self.refer(kid, from.table, &row.key);
                             match self.resolve(kid) {
                                 Ok((kid_id, kid)) if matches!(kid.value(), Value::Dict(_)) => {
                                     let depth = if kid_id.is_some() { 0 } else { depth + 1 };
@@ -3881,14 +3883,15 @@ impl<'a> Walk<'a> {
         if matches!(value.value(), Value::String(Str::Encrypted(_), _)) {
             return Values::Unknown("the string's bytes".to_string());
         }
-        let (mut listed, mut met, mut unknown) = (Vec::new(), None, None);
+        let (mut met, mut unknown) = (None, None);
         let mut required = None;
+        let gate =
+            |item: &Wrapped<String>| predicate::gate(&item.wraps, self.version, self.extensions);
         for item in items {
-            let gate = predicate::gate(&item.wraps, self.version, self.extensions);
+            let gate = gate(item);
             if gate == Gate::Excluded {
                 continue;
             }
-            listed.push(item.item.as_str());
             // A constant is no `fn:RequiredValue`, which is a predicate.
             let function = item.item.starts_with("fn:");
             let truth = if !function {
@@ -3926,7 +3929,12 @@ impl<'a> Walk<'a> {
             (Some((false, needed, item)), _, _) => Values::Required(needed, item),
             (_, Some(why), _) => Values::Unknown(why),
             (_, None, Some(met)) => met,
-            (_, None, None) => Values::Not(listed),
+            (_, None, None) => Values::Not(
+                (items.iter())
+                    .filter(|item| gate(item) != Gate::Excluded)
+                    .map(|item| item.item.as_str())
+                    .collect(),
+            ),
         }
     }
 
@@ -4699,6 +4707,14 @@ fn fits(object: &Object, rows: &Rows) -> bool {
 fn index(key: &str) -> Option<usize> {
     let digits = key.bytes().take_while(u8::is_ascii_digit).count();
     key[..digits].parse().ok()
+}
+
+/// A key or element as findings name it, borrowed where it can be.
+fn at_str(at: At<'_>) -> Cow<'_, str> {
+    match at {
+        At::Key(key) => String::from_utf8_lossy(key),
+        At::Index(i) => Cow::Owned(i.to_string()),
+    }
 }
 
 /// A key or element as findings name it.
