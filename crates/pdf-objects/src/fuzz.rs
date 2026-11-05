@@ -355,8 +355,9 @@ impl Sink<'_> for Own {
 /// The first token of `input` from `at`, by `rules`, that isn't
 /// white-space or a comment.
 fn significant(input: &[u8], at: usize, rules: Rules) -> Option<Token<'_>> {
-    (Tokenizer::at(input, at).with_rules(rules))
-        .find(|t| !matches!(t.kind, Kind::Space | Kind::Comment))
+    Tokenizer::at(input, at)
+        .with_rules(rules)
+        .next_significant()
 }
 
 /// How `data`'s first five bytes say to read the rest, and the rest: with

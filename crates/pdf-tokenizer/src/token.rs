@@ -98,13 +98,24 @@ impl Token<'_> {
     pub fn range(&self) -> Range<usize> {
         self.start..self.end()
     }
+
+    /// Whether it's the keyword `word`: a [`Kind::Keyword`] whose bytes are
+    /// `word`, as `obj`, `R`, `endstream` and a content stream's operators
+    /// are. A token of any other kind isn't, whatever its bytes.
+    pub fn is_keyword(&self, word: &[u8]) -> bool {
+        self.kind == Kind::Keyword && self.bytes == word
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use core::mem::size_of;
+    use std::vec::Vec;
 
     use super::{Kind, Token};
+    use crate::Tokenizer;
 
     /// A kind is one byte, so a table can be indexed by it, and a token is
     /// four words: the kind and `closed` share the first.
@@ -114,5 +125,57 @@ mod tests {
         assert_eq!(size_of::<Token<'_>>(), 4 * size_of::<usize>());
         assert_eq!(Kind::Space as usize, 0);
         assert_eq!(Kind::Data as usize, 15);
+    }
+
+    /// A token is the keyword `word` by its kind and its bytes together: not
+    /// a token of any other kind with the same bytes, and not a keyword of
+    /// other bytes, a prefix or an extension of `word` included.
+    #[test]
+    fn a_keyword_is_its_kind_and_its_bytes_together() {
+        const KINDS: [Kind; 16] = [
+            Kind::Space,
+            Kind::Comment,
+            Kind::Integer,
+            Kind::Real,
+            Kind::Name,
+            Kind::LiteralString,
+            Kind::HexString,
+            Kind::ArrayOpen,
+            Kind::ArrayClose,
+            Kind::DictOpen,
+            Kind::DictClose,
+            Kind::BraceOpen,
+            Kind::BraceClose,
+            Kind::Keyword,
+            Kind::Junk,
+            Kind::Data,
+        ];
+        for (i, kind) in KINDS.into_iter().enumerate() {
+            assert_eq!(kind as usize, i, "every kind, once");
+            let token = Token {
+                kind,
+                closed: true,
+                start: 0,
+                bytes: b"obj",
+            };
+            assert_eq!(token.is_keyword(b"obj"), kind == Kind::Keyword, "{kind:?}");
+            assert!(!token.is_keyword(b"ob"), "{kind:?}");
+            assert!(!token.is_keyword(b"objx"), "{kind:?}");
+            assert!(!token.is_keyword(b""), "{kind:?}");
+        }
+        // From the tokenizer: the keyword among a name, a string and junk of
+        // the same bytes.
+        let input = b"1 0 obj /obj (obj) obj) objx";
+        let words: Vec<_> = Tokenizer::new(input)
+            .filter(|t| t.is_keyword(b"obj"))
+            .map(|t| t.start)
+            .collect();
+        assert_eq!(words, [4, 19]);
+        assert_eq!(
+            Tokenizer::new(b"endobj")
+                .next()
+                .map(|t| t.is_keyword(b"obj")),
+            Some(false)
+        );
     }
 }

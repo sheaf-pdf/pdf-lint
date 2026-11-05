@@ -82,11 +82,30 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
         self.pos
     }
 
+    /// The input, whole: the bytes it tokenizes, from their start, whatever
+    /// offset it was made at or has reached.
+    pub const fn input(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// What's left: the input from the next token's offset
+    /// ([`offset`](Self::offset)) to its end, and empty once every token is
+    /// out. With [`input`](Self::input), a reader needn't carry the slice
+    /// beside the tokenizer.
+    pub const fn remaining(&self) -> &'a [u8] {
+        // `pos` is never past the end. Were a bug to put it there, nothing
+        // would be left, and the tokenizer would still not panic.
+        match self.bytes.split_at_checked(self.pos) {
+            Some((_, rest)) => rest,
+            None => &[],
+        }
+    }
+
     /// One end of line, CR LF, LF or CR, as a [`Kind::Space`] token, if one
     /// is next: what ends the line a `stream` keyword is on. ISO 32000-2
     /// allows CR LF or LF there, and the token's bytes say which came.
     pub fn eol(&mut self) -> Option<Token<'a>> {
-        let len = match self.rest() {
+        let len = match self.remaining() {
             [b'\r', b'\n', ..] => 2,
             [b'\n' | b'\r', ..] => 1,
             _ => return None,
@@ -98,7 +117,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// what separates an inline image's `ID` from its data. White-space by
     /// the tokenizer's rules, so 0x80 and 0xFF too by PDFium's.
     pub fn space_byte(&mut self) -> Option<Token<'a>> {
-        match self.rest() {
+        match self.remaining() {
             [b, ..] if self.rules().is_white_space(*b) => Some(self.take(Kind::Space, 1)),
             _ => None,
         }
@@ -107,7 +126,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// The next `len` bytes, or as many as are left, as one [`Kind::Data`]
     /// token: a stream's data, when the caller trusts its `/Length`.
     pub fn data(&mut self, len: usize) -> Token<'a> {
-        let len = len.min(self.rest().len());
+        let len = len.min(self.remaining().len());
         self.take(Kind::Data, len)
     }
 
@@ -120,7 +139,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// wants a marker only after white-space, or only before a delimiter,
     /// finds it itself and calls [`data`](Self::data).
     pub fn data_until(&mut self, marker: &[u8]) -> Token<'a> {
-        let rest = self.rest();
+        let rest = self.remaining();
         let len = memmem::find(rest, marker).unwrap_or(rest.len());
         self.take(Kind::Data, len)
     }
@@ -142,9 +161,9 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     pub fn next_significant(&mut self) -> Option<Token<'a>> {
         let rules = self.rules();
         loop {
-            let space = run(self.rest(), |b| rules.is_white_space(b));
+            let space = run(self.remaining(), |b| rules.is_white_space(b));
             self.pos += space;
-            let rest = self.rest();
+            let rest = self.remaining();
             // The token function itself, inlined here as in `next`: a call
             // a token fewer.
             let (kind, closed, len) = match rules {
@@ -186,7 +205,11 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// ```
     pub fn skim(&mut self) -> Option<Token<'a>> {
         loop {
-            let Some(i) = self.rest().iter().position(|&b| class(b) & SKIMMED != 0) else {
+            let Some(i) = self
+                .remaining()
+                .iter()
+                .position(|&b| class(b) & SKIMMED != 0)
+            else {
                 self.pos = self.bytes.len();
                 return None;
             };
@@ -205,14 +228,10 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
         }
     }
 
-    fn rest(&self) -> &'a [u8] {
-        self.bytes.get(self.pos..).unwrap_or_default()
-    }
-
     /// The next `len` bytes as a closed token of `kind`. `len` is never
     /// more than what's left.
     fn take(&mut self, kind: Kind, len: usize) -> Token<'a> {
-        self.token(self.rest(), kind, true, len)
+        self.token(self.remaining(), kind, true, len)
     }
 
     /// The first `len` bytes of `rest`, which is what's left, as a token of
@@ -244,7 +263,7 @@ impl<'a, R: RuleSet> Iterator for Tokenizer<'a, R> {
         // Each set of rules is a loop of its own. Fixed in the type, the
         // rules are settled when this is compiled; chosen as it runs, they
         // cost a branch a token.
-        let rest = self.rest();
+        let rest = self.remaining();
         let (kind, closed, len) = match self.rules() {
             Rules::Iso => next_token::<false>(rest)?,
             Rules::Pdfium => next_token::<true>(rest)?,
@@ -253,7 +272,7 @@ impl<'a, R: RuleSet> Iterator for Tokenizer<'a, R> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let left = self.rest().len();
+        let left = self.remaining().len();
         (usize::from(left > 0), Some(left))
     }
 }
@@ -960,7 +979,7 @@ mod tests {
         let read = std::panic::catch_unwind(|| {
             let mut tokens = Tokenizer::new(b"abc");
             tokens.pos = 1;
-            let rest = tokens.rest();
+            let rest = tokens.remaining();
             let token = tokens.token(rest, Kind::Keyword, true, 5);
             (token.start, token.bytes, tokens.offset(), tokens.next())
         });
@@ -1320,5 +1339,55 @@ mod tests {
         let mut held = Vec::with_capacity(upper);
         held.extend(tokens);
         assert!(held.len() <= upper && held.capacity() == upper);
+    }
+
+    /// `input` is the whole input and `remaining` what's left of it from the
+    /// next token's offset: from any offset, past the end included, after
+    /// each token, and after each other way of moving on; so a reader can
+    /// read what's left itself.
+    #[test]
+    fn input_and_remaining_are_the_input_and_what_is_left() {
+        let input = b"1 0 obj<</L 3>>stream\r\nabc\nendstream [(a) %c\n] (";
+        for offset in 0..=input.len() + 2 {
+            let mut tokens = Tokenizer::at(input, offset);
+            assert_eq!(tokens.input(), input);
+            assert_eq!(tokens.remaining(), &input[offset.min(input.len())..]);
+            while let Some(token) = tokens.next() {
+                assert_eq!(tokens.input(), input);
+                assert_eq!(tokens.remaining(), &input[token.end()..]);
+                assert_eq!(tokens.remaining(), &input[tokens.offset()..]);
+            }
+            assert_eq!(tokens.remaining(), b"");
+            assert_eq!(tokens.input(), input);
+        }
+        // As a reader takes a stream, then through the passes, under each
+        // set of rules.
+        let mut tokens = Tokenizer::new(input).with_rules(Rules::Pdfium);
+        assert!(tokens.any(|t| t.bytes == b"stream"));
+        assert_eq!(tokens.remaining(), &input[21..]);
+        assert_eq!(tokens.eol().map(|t| t.bytes), Some(&b"\r\n"[..]));
+        assert_eq!(tokens.remaining(), &input[23..]);
+        assert_eq!(tokens.data_until(b"endstream").bytes, b"abc\n");
+        assert_eq!(tokens.remaining(), &input[27..]);
+        assert_eq!(
+            tokens.next_significant().map(|t| t.bytes),
+            Some(&b"endstream"[..])
+        );
+        assert_eq!(tokens.remaining(), &input[36..]);
+        let mut fixed = Tokenizer::at(input, 36).with_rules(Pdfium);
+        assert_eq!(fixed.skim().map(|t| t.kind), Some(Kind::ArrayOpen));
+        assert_eq!(fixed.remaining(), &input[38..]);
+        assert_eq!(fixed.data(3).bytes, b"(a)");
+        assert_eq!(fixed.remaining(), &input[41..]);
+        assert_eq!(fixed.space_byte().map(|t| t.bytes), Some(&b" "[..]));
+        assert_eq!(fixed.remaining(), b"%c\n] (");
+        assert_eq!(fixed.skim().map(|t| t.kind), Some(Kind::ArrayClose));
+        assert_eq!(fixed.remaining(), b" (");
+        assert_eq!(
+            fixed.skim().map(|t| (t.kind, t.closed)),
+            Some((Kind::LiteralString, false))
+        );
+        assert_eq!(fixed.remaining(), b"");
+        assert_eq!(fixed.input(), input);
     }
 }

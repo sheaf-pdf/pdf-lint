@@ -193,9 +193,9 @@ Text strings (PDFDocEncoding, and UTF-16BE or UTF-8 with a byte-order mark) are 
 
 ## The API
 
-- `Tokenizer::new(bytes)` and `Tokenizer::at(bytes, offset)`: an iterator of `Token`s, by ISO 32000-2's rules. Cloning one is cheap, so a clone can look ahead.
+- `Tokenizer::new(bytes)` and `Tokenizer::at(bytes, offset)`: an iterator of `Token`s, by ISO 32000-2's rules. Cloning one is cheap, so a clone can look ahead. `offset()` is where the next token starts, `input()` the whole input and `remaining()` what's left of it from there, so a reader needn't carry the slice beside the tokenizer.
 - `with_rules(Pdfium)` or `with_rules(Rules::Pdfium)`, and `rules()`: the rules it follows from its next token on, fixed in its type (`Iso`, the default, or `Pdfium`) or chosen as it runs (`Rules`). `Rules::is_white_space` and `is_regular` say a byte's class under each.
-- `Token { kind, closed, start, bytes }`: `bytes` is a slice of the input, `range()` says where it is, and `closed` is false only for a literal or hexadecimal string whose closing delimiter didn't come.
+- `Token { kind, closed, start, bytes }`: `bytes` is a slice of the input, `range()` says where it is, `closed` is false only for a literal or hexadecimal string whose closing delimiter didn't come, and `is_keyword(word)` says whether it's the keyword `word`, by its kind and its bytes together.
 - `Kind`: the lexical kinds, one byte each, and `Data` for bytes the caller measured.
 - `eol()`, `space_byte()`, `data(len)` and `data_until(marker)`: for the data after `stream` and `ID`.
 - `next_significant()`: the next token that's neither white-space nor a comment, with no token made of what it passes. `skim()`: the next that opens or closes an array or a dictionary, or a string that doesn't close, looking only at the bytes that could start one; from an opener, skimming on to the closer that balances it passes all it holds.

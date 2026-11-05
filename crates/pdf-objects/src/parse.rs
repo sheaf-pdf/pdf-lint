@@ -1353,7 +1353,7 @@ fn starts_value(token: &Token) -> bool {
 }
 
 fn is_keyword(token: Option<&Token>, word: &[u8]) -> bool {
-    token.is_some_and(|t| t.kind == Kind::Keyword && t.bytes == word)
+    token.is_some_and(|t| t.is_keyword(word))
 }
 
 /// A name's or string's value, its escapes decoded, in a buffer reserved

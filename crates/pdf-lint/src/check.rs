@@ -4544,10 +4544,8 @@ fn first_object(source: &dyn Source) -> Option<(ObjectId, &Object)> {
 /// value, that's a stream's dictionary, as a reader tells a stream in the
 /// file (ISO 32000-2, 7.3.8.1).
 fn stream_follows(data: &[u8], end: usize) -> bool {
-    use pdf_tokenizer::{Kind, Tokenizer};
-    (Tokenizer::at(data, end))
-        .find(|token| !matches!(token.kind, Kind::Space | Kind::Comment))
-        .is_some_and(|token| token.kind == Kind::Keyword && token.bytes == b"stream")
+    use pdf_tokenizer::Tokenizer;
+    (Tokenizer::at(data, end).next_significant()).is_some_and(|token| token.is_keyword(b"stream"))
 }
 
 /// The objects the trailers name as the file's encryption dictionary, by
