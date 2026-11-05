@@ -11,7 +11,7 @@ use std::ops::Range;
 use pdf_color::Spaces;
 use pdf_filters::{Backend, Faults, Predictor, decode_prefix_into};
 use pdf_objects::{Object, ObjectId, Resolve, Unreadable};
-use pdf_tokenizer::decode::{self, pdfium};
+use pdf_tokenizer::decode::{self, NumberError, pdfium};
 use pdf_tokenizer::is_white_space;
 
 use crate::data::{Places, RunLength, Searched, a85_end, a85_stop, ei_scan, find};
@@ -1513,9 +1513,14 @@ fn integer(value: &[u8]) -> i32 {
 }
 
 /// A length, as ISO 32000-2 writes a number (7.3.3): a non-negative one
-/// under 2^32, a real's whole part.
+/// under 2^32, a real's whole part; a real too small to hold is 0.
 fn int(number: &[u8]) -> Option<u64> {
-    let value = decode::number(number).ok()?;
+    let value = match decode::number(number) {
+        Ok(value) => value,
+        // Too small to hold: a real whose whole part is 0.
+        Err(NumberError::Underflow) => 0.0,
+        Err(_) => return None,
+    };
     (0.0..4_294_967_296.0)
         .contains(&value)
         .then_some(value as u64)

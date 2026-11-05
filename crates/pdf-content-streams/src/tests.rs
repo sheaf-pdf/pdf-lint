@@ -3608,6 +3608,24 @@ fn an_inline_image_is_one_operation() {
     assert_eq!((i.dict(), i.data()), (2..22, 24..26));
 }
 
+/// An inline image's `/L` too small to hold, `0.` and 400 zeros and a `1`,
+/// which pdf-tokenizer reads as `NumberError::Underflow`, is a real whose
+/// whole part is 0: a length of 0, which the data is compared with.
+#[test]
+fn a_length_too_small_to_hold_is_zero() {
+    let mut s = b"BI /W 1 /H 1 /BPC 8 /CS /G /L 0.".to_vec();
+    s.extend(std::iter::repeat_n(b'0', 400));
+    s.extend_from_slice(b"1 ID x EI");
+    let op = operations_of(&s, &ResCx::none(), &Limits::DEFAULT)
+        .remove(0)
+        .unwrap();
+    assert_eq!(op.inline_image().unwrap().length(), Some(0));
+    let page = Concat::new(&[&s]);
+    let found = faults(&page);
+    let told = (place(&s, b"x"), Fault::ImageLength { given: 0, read: 1 });
+    assert!(found.contains(&told), "{found:?}");
+}
+
 #[test]
 fn operands_at_the_end_are_no_operation() {
     assert_eq!(ops(b"q 1 2"), [(&b"q"[..], vec![])]);

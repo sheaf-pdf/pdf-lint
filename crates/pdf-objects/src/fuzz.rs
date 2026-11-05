@@ -8,7 +8,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 
-use pdf_tokenizer::decode::{self, pdfium};
+use pdf_tokenizer::decode::{self, NumberError, pdfium};
 use pdf_tokenizer::{Kind, Pdfium, Rules, Token, Tokenizer};
 
 use crate::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value};
@@ -325,7 +325,15 @@ fn read_otherwise(token: &Token) -> bool {
             };
             long || decode::integer(bytes).ok() != pdfium
         }
-        Kind::Real => long || decode::number(bytes).ok() != Some(pdfium::real(bytes)),
+        Kind::Real => {
+            // Too small to hold: zero, as the parser reads it.
+            let iso = match decode::number(bytes) {
+                Ok(x) => Some(x),
+                Err(NumberError::Underflow) => Some(0.0),
+                Err(_) => None,
+            };
+            long || iso != Some(pdfium::real(bytes))
+        }
         Kind::Name => long || !pdfium::name(bytes).eq(decode::name(bytes).bytes()),
         Kind::LiteralString => !pdfium::literal(bytes).eq(decode::literal(bytes).bytes()),
         Kind::HexString => !pdfium::hex(bytes).eq(decode::hex(bytes).bytes()),
