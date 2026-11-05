@@ -182,7 +182,7 @@ Text strings (PDFDocEncoding, and UTF-16BE or UTF-8 with a byte-order mark) are 
 - **Validators and linters** that report syntax as written: a duplicate dictionary key, `1.0` where an integer belongs, a name's escapes, the end of line after `stream`, a cross-reference offset that misses its object. A parser that normalizes has already thrown these away.
 - **Parsers with different policies** over one lexical layer: a strict one that fails on damage and a forgiving one that recovers, sharing the same tokens.
 - **Editors and incremental writers** that must leave the bytes they don't change exactly as they were.
-- **Recovery and forensics:** scanning a damaged file for `n g obj` headers when its cross-reference table is wrong.
+- **Recovery and forensics:** scanning a damaged file for `n g obj` headers when its cross-reference table is wrong. One cost to know there: a literal string that never closes runs to the end of the input, so a recovery that tokenizes from many offsets in turn, each inside such a string, pays the rest of the input at each, O(n) an offset. The remedy is a bound: tokenize `&bytes[..limit]` from each offset, and a string that reaches the slice's end is one cut short, as the slice promise says.
 - **Content streams,** which use the same syntax, with operators as keywords.
 
 ## What it isn't
@@ -200,7 +200,7 @@ Text strings (PDFDocEncoding, and UTF-16BE or UTF-8 with a byte-order mark) are 
 - `eol()`, `space_byte()`, `data(len)` and `data_until(marker)`: for the data after `stream` and `ID`.
 - `next_significant()`: the next token that's neither white-space nor a comment, with no token made of what it passes. `skim()`: the next that opens or closes an array or a dictionary, or a string that doesn't close, looking only at the bytes that could start one; from an opener, skimming on to the closer that balances it passes all it holds.
 - `is_white_space`, `is_delimiter` and `is_regular`: ISO 32000-2's three classes of byte.
-- `token.pieces()`, `token.verbatim()`, `token.integer()` and `token.number()`: what a token stands for. A value's bytes are `pieces().bytes()`, never longer than the token, and `verbatim()` borrows them as written when nothing needs decoding. `decode::name`, `literal`, `hex`, `integer` and `number` decode bytes from elsewhere.
+- `token.pieces()`, `token.verbatim()`, `token.integer()` and `token.number()`: what a token stands for. A value's bytes are `pieces().bytes()`, never longer than the token, and `verbatim()` borrows them as written when nothing needs decoding. `decode::name`, `literal`, `hex`, `integer` and `number` decode bytes from elsewhere; given a name's or a string's bytes without their opener, they read them as the inside of a value already open.
 - `decode::pdfium::number`, `real`, `name`, `literal` and `hex`: what bytes stand for as PDFium reads them.
 
 `Kind` and `NumberError` are exhaustive on purpose: a match on every kind, or every error, is checked by the compiler, so a new variant of either is a breaking release. `How` and `Rules` are `#[non_exhaustive]`: a quirk is found in files, not designed, and a set of rules is a reader's to ask for, so either may come in a minor release, and a match on them needs a wildcard.

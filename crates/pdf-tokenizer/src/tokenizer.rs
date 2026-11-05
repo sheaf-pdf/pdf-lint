@@ -1254,4 +1254,35 @@ mod tests {
             );
         }
     }
+
+    /// A clone looks ahead: it yields the tokens the original would, from
+    /// where the original is, and moves nothing of the original.
+    #[test]
+    fn a_clone_looks_ahead_and_leaves_the_original_where_it_was() {
+        let input = b"/Kids [3 0 R] (a) % c\n<41>";
+        let mut tokens = Tokenizer::new(input);
+        assert_eq!(tokens.next().map(|t| t.bytes), Some(&b"/Kids"[..]));
+        let before = tokens.offset();
+        let mut ahead = tokens.clone();
+        // `Iterator::take`: the tokenizer has a `take` of its own.
+        let looked: Vec<Token<'_>> = Iterator::take(ahead.by_ref(), 3).collect();
+        assert_eq!(looked.len(), 3);
+        assert_eq!(ahead.offset(), looked[2].end());
+        assert_eq!(tokens.offset(), before, "the original hasn't moved");
+        assert_eq!(
+            tokens.next(),
+            Some(looked[0]),
+            "and gives what the clone saw first"
+        );
+        assert!(tokens.clone().eq(Tokenizer::at(input, tokens.offset())));
+        let rest: Vec<_> = tokens.clone().collect();
+        assert_eq!(rest.len(), tokens.count());
+        // Rules chosen as it runs, the same; and the passes look ahead too.
+        let mut chosen = Tokenizer::new(input).with_rules(Rules::Pdfium);
+        chosen.next();
+        let mut peek = chosen.clone();
+        assert_eq!(peek.next_significant().map(|t| t.bytes), Some(&b"["[..]));
+        assert_eq!(chosen.offset(), 5);
+        assert_eq!(chosen.next().map(|t| t.kind), Some(Kind::Space));
+    }
 }

@@ -143,7 +143,9 @@ pub struct Pieces<'a> {
     base: usize,
     pos: usize,
     syntax: Syntax,
-    /// A literal string's parentheses still open, its first included.
+    /// A literal string's parentheses still open, its first included: one
+    /// from the start when the bytes don't begin with it, the inside of a
+    /// string already open.
     depth: usize,
     /// Whether the value's closing delimiter has come.
     closed: bool,
@@ -157,30 +159,45 @@ enum Syntax {
 }
 
 /// The pieces of a name's bytes, `/` included (ISO 32000-2, 7.3.5).
+/// Without it, they're the inside of a name: `name(b"abc")` is three plain
+/// bytes, and a `/` among them is invalid, as it is in any name's body.
 pub fn name(bytes: &[u8]) -> Pieces<'_> {
     Pieces::new(bytes, 0, Syntax::Name)
 }
 
 /// The pieces of a literal string's bytes, parentheses included (ISO
-/// 32000-2, 7.3.4.2).
+/// 32000-2, 7.3.4.2). Without the opening one, they're the inside of a
+/// string already open: a `(` among them opens a nested pair as it would
+/// inside any string, a `)` that balances no `(` closes the string, and
+/// anything after that is invalid. `literal(b"a(b)c")` is five plain
+/// bytes; `literal(b"a)b")` is `a`, a closing delimiter and an invalid
+/// `b`.
 pub fn literal(bytes: &[u8]) -> Pieces<'_> {
     Pieces::new(bytes, 0, Syntax::Literal)
 }
 
 /// The pieces of a hexadecimal string's bytes, `<` and `>` included (ISO
-/// 32000-2, 7.3.4.3).
+/// 32000-2, 7.3.4.3). Without the `<`, they're the inside of a string
+/// already open: `hex(b"4142")` is two escapes, `A` and `B`, and
+/// `hex(b">")` a closing delimiter.
 pub fn hex(bytes: &[u8]) -> Pieces<'_> {
     Pieces::new(bytes, 0, Syntax::Hex)
 }
 
 impl<'a> Pieces<'a> {
     fn new(bytes: &'a [u8], base: usize, syntax: Syntax) -> Self {
+        // Bytes without their opening parenthesis are the inside of a
+        // string that's open already.
+        let depth = match syntax {
+            Syntax::Literal if bytes.first() != Some(&b'(') => 1,
+            _ => 0,
+        };
         Pieces {
             bytes,
             base,
             pos: 0,
             syntax,
-            depth: 0,
+            depth,
             closed: false,
         }
     }
@@ -323,17 +340,17 @@ fn escape(after: &[u8]) -> (usize, Option<u8>, How) {
 }
 
 /// A literal string's value as written, when nothing in it needs decoding:
-/// what's inside its parentheses (the first and the one that balances it)
-/// holds no backslash and no CR, and nothing comes after the one that
-/// balances it.
+/// what's inside its parentheses (the first, when the bytes begin with it,
+/// and the one that balances it) holds no backslash and no CR, and nothing
+/// comes after the one that balances it. Bytes without their opening
+/// parenthesis are the inside of a string already open, as [`literal`]
+/// reads them.
 fn literal_verbatim(bytes: &[u8]) -> Option<&[u8]> {
     if memchr2(b'\\', b'\r', bytes).is_some() {
         return None;
     }
-    let (start, mut depth) = match bytes.first() {
-        Some(b'(') => (1, 1usize),
-        _ => (0, 0),
-    };
+    let start = usize::from(bytes.first() == Some(&b'('));
+    let mut depth = 1usize;
     let mut at = start;
     while let Some(i) = bytes.get(at..).and_then(|rest| memchr2(b'(', b')', rest)) {
         at += i;
@@ -1065,19 +1082,8 @@ mod tests {
     #[test]
     fn verbatim_by_a_search_is_verbatim_by_the_pieces() {
         use crate::Kind;
-        let inputs: [&[u8]; 9] = [
-            b"/Type/A#20B/#/ x\x80",
-            b"(a (b) c)(a)b)()(",
-            b"(a\\) (a\r\nb) (\\(\\)) ((a)) (a)) )(",
-            b"<41 4G> <> < > <<>> >",
-            b"/A)(B(C) (D)E",
-            b"(\x80\xff/[]{}%) [<a>]",
-            b"/a#2 /a#20 /#00",
-            b"",
-            b")))(((",
-        ];
         let kinds = [Kind::Name, Kind::LiteralString, Kind::HexString];
-        for input in inputs {
+        for input in VERBATIM_INPUTS {
             for start in 0..=input.len() {
                 for end in start..=input.len() {
                     for kind in kinds {
@@ -1116,10 +1122,70 @@ mod tests {
         );
         assert_eq!(
             scanned(Kind::LiteralString, b"a)b"),
-            Some(&b"a)b"[..]),
-            "no open, no close"
+            None,
+            "without its `(`, a string is open already: the `)` closes it"
         );
+        assert_eq!(scanned(Kind::LiteralString, b"a)"), Some(&b"a"[..]));
+        assert_eq!(scanned(Kind::LiteralString, b"a(b)c"), Some(&b"a(b)c"[..]));
         assert_eq!(scanned(Kind::HexString, b">"), Some(&b""[..]));
         assert_eq!(scanned(Kind::HexString, b"<<"), None);
     }
+
+    /// Bytes given to the free decoders without their opener are the inside
+    /// of a value already open: a `)` that balances no `(` closes a literal
+    /// string, and a `(` nests as inside any string.
+    #[test]
+    fn bytes_without_their_opener_are_the_inside_of_a_value() {
+        let pieces = |pieces: Pieces<'_>| pieces.map(|p| (p.byte, p.how)).collect::<Vec<_>>();
+        let plain = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|&b| (Some(b), How::Plain))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pieces(decode::literal(b"a(b)c")), plain(b"a(b)c"));
+        assert_eq!(
+            pieces(decode::literal(b"a)b")),
+            [
+                (Some(b'a'), How::Plain),
+                (None, How::Delimiter),
+                (None, How::Invalid),
+            ]
+        );
+        assert_eq!(pieces(decode::literal(b")")), [(None, How::Delimiter)]);
+        assert!(pieces(decode::literal(b"")).is_empty());
+        // With its opener, as before: the `)` that balances it closes it.
+        let mut whole = vec![(None, How::Delimiter)];
+        whole.extend(plain(b"a(b)c"));
+        whole.push((None, How::Delimiter));
+        assert_eq!(pieces(decode::literal(b"(a(b)c)")), whole);
+        assert_eq!(
+            pieces(decode::hex(b"4142")),
+            [(Some(b'A'), How::Escape), (Some(b'B'), How::Escape)]
+        );
+        assert_eq!(pieces(decode::hex(b">")), [(None, How::Delimiter)]);
+        assert_eq!(
+            pieces(decode::hex(b"41>")),
+            [(Some(b'A'), How::Escape), (None, How::Delimiter)]
+        );
+        assert!(pieces(decode::name(b"")).is_empty());
+        assert_eq!(pieces(decode::name(b"abc")), plain(b"abc"));
+        assert_eq!(pieces(decode::name(b"a/b"))[1], (None, How::Invalid));
+        // The offsets are the bytes', as for any bytes given.
+        let at: Vec<_> = decode::literal(b"a)b").map(|p| p.at).collect();
+        assert_eq!(at, [0..1, 1..2, 2..3]);
+    }
+
+    /// The inputs the verbatim and size tests take every run of bytes of.
+    const VERBATIM_INPUTS: [&[u8]; 9] = [
+        b"/Type/A#20B/#/ x\x80",
+        b"(a (b) c)(a)b)()(",
+        b"(a\\) (a\r\nb) (\\(\\)) ((a)) (a)) )(",
+        b"<41 4G> <> < > <<>> >",
+        b"/A)(B(C) (D)E",
+        b"(\x80\xff/[]{}%) [<a>]",
+        b"/a#2 /a#20 /#00",
+        b"",
+        b")))(((",
+    ];
 }
