@@ -1,6 +1,7 @@
 //! The tokenizer: a position in the input, and the rules for where each
 //! kind of token ends.
 
+use core::fmt;
 use core::iter::FusedIterator;
 
 use memchr::{memchr, memchr2, memchr3, memmem};
@@ -29,7 +30,7 @@ use crate::token::{Kind, Token};
 /// them with [`eol`](Self::eol) or [`space_byte`](Self::space_byte), then
 /// the data with [`data`](Self::data) or [`data_until`](Self::data_until).
 #[must_use = "a tokenizer is lazy: it reads nothing until a token is asked for"]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Tokenizer<'a, R: RuleSet = Iso> {
     bytes: &'a [u8],
     /// Never past the end of `bytes`.
@@ -62,6 +63,18 @@ impl<'a> Tokenizer<'a> {
             pos,
             rules: Iso,
         }
+    }
+}
+
+impl<R: RuleSet + fmt::Debug> fmt::Debug for Tokenizer<'_, R> {
+    /// Where it is, the input's length and its rules; not the input, which
+    /// may be a whole file.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tokenizer")
+            .field("offset", &self.pos)
+            .field("input", &format_args!("{} bytes", self.bytes.len()))
+            .field("rules", &self.rules)
+            .finish()
     }
 }
 
@@ -454,6 +467,24 @@ mod tests {
     use std::vec::Vec;
 
     use crate::{Iso, Kind, Pdfium, Rules, Token, Tokenizer, fuzz};
+
+    /// `Debug` says where the tokenizer is, the input's length and its
+    /// rules, not the input: it doesn't grow with the bytes.
+    #[test]
+    fn debug_says_where_it_is_not_the_input() {
+        let input = [b'a'; 1000];
+        let mut tokens = Tokenizer::new(&input);
+        assert_eq!(
+            std::format!("{tokens:?}"),
+            "Tokenizer { offset: 0, input: 1000 bytes, rules: Iso }"
+        );
+        tokens.next();
+        let shown = std::format!("{:?}", tokens.clone().with_rules(Rules::Pdfium));
+        assert_eq!(
+            shown,
+            "Tokenizer { offset: 1000, input: 1000 bytes, rules: Pdfium }"
+        );
+    }
 
     /// `input`'s tokens, each kind and its bytes, checked by the fuzz
     /// target's body, whole and cut at every byte: so each token's `closed`

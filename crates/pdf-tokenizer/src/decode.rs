@@ -245,7 +245,7 @@ impl FusedIterator for QuirksIter {}
 /// pieces, or value bytes, than bytes: `size_hint` gives a piece at least
 /// while bytes are left, and at most as many as the bytes left.
 #[must_use = "pieces are lazy: nothing is decoded until one is asked for"]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Pieces<'a> {
     bytes: &'a [u8],
     base: usize,
@@ -314,8 +314,8 @@ impl<'a> Pieces<'a> {
     /// left, which the iterator's `size_hint` gives as its upper bound, so
     /// a buffer of that length holds them without growing. Cloning it is
     /// cheap, as cloning the pieces is.
-    pub fn bytes(self) -> impl FusedIterator<Item = u8> + Clone + 'a {
-        self.filter_map(|piece| piece.byte)
+    pub fn bytes(self) -> Bytes<'a> {
+        Bytes(self)
     }
 
     /// The bytes from the next piece on.
@@ -430,6 +430,67 @@ impl Iterator for Pieces<'_> {
 
 // `pos` only grows, and `next` gives nothing once it reaches the end.
 impl FusedIterator for Pieces<'_> {}
+
+impl fmt::Debug for Pieces<'_> {
+    /// The syntax, where the bytes left are, and the string's state; not
+    /// the bytes, which may be a whole file's.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let from = self.base + self.pos.min(self.bytes.len());
+        f.debug_struct("Pieces")
+            .field("syntax", &self.syntax)
+            .field("left", &(from..self.base + self.bytes.len()))
+            .field("depth", &self.depth)
+            .field("closed", &self.closed)
+            .finish()
+    }
+}
+
+/// The bytes of a name's or a string's value as ISO 32000-2 reads them,
+/// in order, from [`Pieces::bytes`]: each piece's byte, the pieces that
+/// stand for none (delimiters, line continuations, a hex string's
+/// white-space) passed over. Never more than the bytes left to decode,
+/// which `size_hint` gives as its upper bound: a buffer of that length
+/// holds them without growing. A type of its own, as
+/// [`pdfium::Bytes`] is, so a reader can hold it or name it.
+#[must_use = "the bytes are lazy: nothing is decoded until one is asked for"]
+#[derive(Clone)]
+pub struct Bytes<'a>(Pieces<'a>);
+
+// Each method is a hint to inline, as `core`'s own adapters' are
+// (`filter_map`'s, which this replaces), so that a consumer's loop over
+// the bytes is one loop over the pieces.
+impl Iterator for Bytes<'_> {
+    type Item = u8;
+
+    #[inline]
+    fn next(&mut self) -> Option<u8> {
+        self.0.find_map(|piece| piece.byte)
+    }
+
+    /// At most one a byte left.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.0.size_hint().1)
+    }
+
+    /// One pass over the pieces, as `count`, `for_each` and `last` fold.
+    #[inline]
+    fn fold<B, F: FnMut(B, u8) -> B>(self, init: B, mut f: F) -> B {
+        self.0.fold(init, |acc, piece| match piece.byte {
+            Some(byte) => f(acc, byte),
+            None => acc,
+        })
+    }
+}
+
+// The pieces are fused.
+impl FusedIterator for Bytes<'_> {}
+
+impl fmt::Debug for Bytes<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Bytes").field(&self.0).finish()
+    }
+}
 
 /// A literal string's escape: `after` is what follows its backslash, and
 /// the length counts the backslash.
@@ -722,6 +783,7 @@ impl<'a> Token<'a> {
 mod tests {
     extern crate std;
 
+    use core::iter::FusedIterator;
     use std::format;
     use std::vec;
     use std::vec::Vec;
@@ -1187,6 +1249,36 @@ mod tests {
         assert!(ordinary.iter().all(|how| !how.is_quirk()), "{ordinary:?}");
         assert!(quirks.iter().all(|how| how.is_quirk()), "{quirks:?}");
         assert_eq!(How::ALL.last(), Some(&How::Invalid));
+    }
+
+    /// `Debug` of the pieces, and of the bytes they give, says the syntax
+    /// and where the bytes left are, not the bytes: it doesn't grow with
+    /// them. `Bytes` is a type a reader can hold: fused, and `Clone`.
+    #[test]
+    fn debug_says_where_the_pieces_are_not_the_bytes() {
+        fn held<I: FusedIterator<Item = u8> + Clone>(bytes: I) -> I {
+            bytes
+        }
+        let mut input = vec![b'('];
+        input.extend_from_slice(&[b'a'; 1000]);
+        let mut pieces = decode::literal(&input);
+        assert_eq!(
+            format!("{pieces:?}"),
+            "Pieces { syntax: Literal, left: 0..1001, depth: 0, closed: false }"
+        );
+        pieces.next();
+        let bytes = held(pieces.bytes());
+        assert_eq!(
+            format!("{bytes:?}"),
+            "Bytes(Pieces { syntax: Literal, left: 1..1001, depth: 1, closed: false })"
+        );
+        assert_eq!(bytes.size_hint(), (0, Some(1000)));
+        assert_eq!(bytes.count(), 1000);
+        let token = Tokenizer::at(b"  /Name", 2).next().unwrap();
+        assert_eq!(
+            format!("{:?}", token.pieces().unwrap()),
+            "Pieces { syntax: Name, left: 2..7, depth: 0, closed: false }"
+        );
     }
 
     #[test]

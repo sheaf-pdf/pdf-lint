@@ -24,6 +24,7 @@
 //! assert!(pdfium::hex(b"<4G1>").eq(*b"A"));
 //! ```
 
+use core::fmt;
 use core::iter::FusedIterator;
 
 /// A number as PDFium holds one (its `FX_Number`), from a number word by
@@ -148,7 +149,7 @@ fn decimal(bytes: &[u8]) -> &str {
 /// `size_hint` gives as its upper bound: a buffer of that length holds
 /// them without growing.
 #[must_use = "the bytes are lazy: nothing is decoded until one is asked for"]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Bytes<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -335,6 +336,17 @@ impl Iterator for Bytes<'_> {
 
 impl FusedIterator for Bytes<'_> {}
 
+impl fmt::Debug for Bytes<'_> {
+    /// The syntax and where the bytes left are; not the bytes, which may
+    /// be a whole file's.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Bytes")
+            .field("syntax", &self.syntax)
+            .field("left", &(self.pos.min(self.bytes.len())..self.bytes.len()))
+            .finish()
+    }
+}
+
 /// A hex digit's value, and 0 for a byte that isn't one, as PDFium reads it.
 fn digit(b: u8) -> u8 {
     match b {
@@ -349,10 +361,28 @@ fn digit(b: u8) -> u8 {
 mod tests {
     extern crate std;
 
+    use std::format;
+    use std::vec;
     use std::vec::Vec;
 
     use super::{Number, hex, literal, name, number, real};
     use crate::{Rules, Tokenizer, decode, fuzz};
+
+    /// `Debug` says the syntax and where the bytes left are, not the bytes:
+    /// it doesn't grow with them.
+    #[test]
+    fn debug_says_where_the_bytes_are_not_the_bytes() {
+        let mut input = vec![b'<'];
+        input.extend_from_slice(&[b'4'; 1000]);
+        let mut bytes = hex(&input);
+        assert_eq!(format!("{bytes:?}"), "Bytes { syntax: Hex, left: 1..1001 }");
+        assert_eq!(bytes.next(), Some(0x44));
+        assert_eq!(format!("{bytes:?}"), "Bytes { syntax: Hex, left: 3..1001 }");
+        assert_eq!(
+            format!("{:?}", name(b"/a")),
+            "Bytes { syntax: Name, left: 1..2 }"
+        );
+    }
 
     /// The one token `input` is by PDFium's rules, checked as the fuzz
     /// target checks it.
