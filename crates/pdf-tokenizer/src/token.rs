@@ -71,6 +71,30 @@ pub enum Kind {
     Data,
 }
 
+impl Kind {
+    /// Every kind, in the order of their discriminants: `ALL[kind as usize]`
+    /// is `kind`. So a table with an entry a kind is `[T; Kind::ALL.len()]`,
+    /// indexed by `kind as usize`.
+    pub const ALL: &[Kind] = &[
+        Kind::Space,
+        Kind::Comment,
+        Kind::Integer,
+        Kind::Real,
+        Kind::Name,
+        Kind::LiteralString,
+        Kind::HexString,
+        Kind::ArrayOpen,
+        Kind::ArrayClose,
+        Kind::DictOpen,
+        Kind::DictClose,
+        Kind::BraceOpen,
+        Kind::BraceClose,
+        Kind::Keyword,
+        Kind::Junk,
+        Kind::Data,
+    ];
+}
+
 /// A token: its kind, whether it closed, where it starts, and its bytes as
 /// written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -148,31 +172,23 @@ mod tests {
         assert_eq!((END, RANGE), (5, 2..5));
     }
 
+    /// `Kind::ALL` is every kind, each at the index of its discriminant, so
+    /// a table indexed by `kind as usize` has an entry a kind; `Data`, the
+    /// last variant, is its last.
+    #[test]
+    fn all_lists_every_kind_in_order() {
+        for (i, &kind) in Kind::ALL.iter().enumerate() {
+            assert_eq!(kind as usize, i, "{kind:?}");
+        }
+        assert_eq!(Kind::ALL.last(), Some(&Kind::Data));
+    }
+
     /// A token is the keyword `word` by its kind and its bytes together: not
     /// a token of any other kind with the same bytes, and not a keyword of
     /// other bytes, a prefix or an extension of `word` included.
     #[test]
     fn a_keyword_is_its_kind_and_its_bytes_together() {
-        const KINDS: [Kind; 16] = [
-            Kind::Space,
-            Kind::Comment,
-            Kind::Integer,
-            Kind::Real,
-            Kind::Name,
-            Kind::LiteralString,
-            Kind::HexString,
-            Kind::ArrayOpen,
-            Kind::ArrayClose,
-            Kind::DictOpen,
-            Kind::DictClose,
-            Kind::BraceOpen,
-            Kind::BraceClose,
-            Kind::Keyword,
-            Kind::Junk,
-            Kind::Data,
-        ];
-        for (i, kind) in KINDS.into_iter().enumerate() {
-            assert_eq!(kind as usize, i, "every kind, once");
+        for &kind in Kind::ALL {
             let token = Token {
                 kind,
                 closed: true,

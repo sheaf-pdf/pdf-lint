@@ -78,7 +78,8 @@ pub enum How {
 }
 
 impl How {
-    /// Every `How`, in order: the ordinary ones first, the quirks after.
+    /// Every `How`, in the order of their discriminants (`ALL[how as usize]`
+    /// is `how`): the ordinary ones first, the quirks after.
     pub const ALL: &[How] = &[
         How::Delimiter,
         How::Plain,
@@ -113,7 +114,8 @@ impl How {
 /// iterator of `How`s (`collect`, `extend`), or from two sets (`|`, `|=`).
 /// A `How` that isn't a quirk ([`How::is_quirk`]) is never in one: putting
 /// it in does nothing. [`iter`](Self::iter), or `for how in quirks`, gives
-/// the quirks in [`How::ALL`]'s order.
+/// the quirks in [`How::ALL`]'s order. [`EMPTY`](Self::EMPTY) is the set of
+/// none, a `const`, so a set is built in a constant too.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Quirks(u16);
 
@@ -121,6 +123,10 @@ pub struct Quirks(u16);
 const _: () = assert!(How::ALL.len() <= u16::BITS as usize);
 
 impl Quirks {
+    /// No quirks: what `Quirks::default()` is, as a `const`, so a set is
+    /// built in a constant by [`insert`](Self::insert).
+    pub const EMPTY: Quirks = Quirks(0);
+
     /// Whether `how` is among them.
     #[must_use]
     pub const fn contains(self, how: How) -> bool {
@@ -187,7 +193,7 @@ impl Extend<How> for Quirks {
 impl FromIterator<How> for Quirks {
     /// The quirks among `hows`; a `How` that isn't one is ignored.
     fn from_iter<I: IntoIterator<Item = How>>(hows: I) -> Quirks {
-        let mut quirks = Quirks::default();
+        let mut quirks = Quirks::EMPTY;
         quirks.extend(hows);
         quirks
     }
@@ -320,7 +326,7 @@ impl<'a> Pieces<'a> {
     /// The quirks among the pieces left.
     #[must_use]
     pub fn quirks(self) -> Quirks {
-        self.fold(Quirks::default(), |mut quirks, piece| {
+        self.fold(Quirks::EMPTY, |mut quirks, piece| {
             quirks.insert(piece.how);
             quirks
         })
@@ -1454,6 +1460,20 @@ mod tests {
         joined_in_place |= stray;
         assert_eq!(joined_in_place, joined);
         assert_eq!(quirks | decode::Quirks::default(), quirks);
+        // Built in a constant, from the empty set.
+        const NAME_FAULTS: decode::Quirks = {
+            let mut set = decode::Quirks::EMPTY;
+            set.insert(How::StrayHash);
+            set.insert(How::NulEscape);
+            set.insert(How::Plain);
+            set
+        };
+        assert_eq!(
+            NAME_FAULTS.iter().collect::<Vec<_>>(),
+            [How::StrayHash, How::NulEscape]
+        );
+        assert_eq!(decode::Quirks::EMPTY, decode::Quirks::default());
+        assert!(decode::Quirks::EMPTY.is_empty());
         // Every quirk at once: `How::ALL`'s quirks, in its order.
         let all: decode::Quirks = How::ALL.iter().copied().collect();
         let every_quirk: Vec<How> = How::ALL.iter().copied().filter(|h| h.is_quirk()).collect();

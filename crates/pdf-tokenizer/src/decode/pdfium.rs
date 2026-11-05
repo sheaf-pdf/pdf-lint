@@ -28,6 +28,10 @@ use core::iter::FusedIterator;
 
 /// A number as PDFium holds one (its `FX_Number`), from a number word by
 /// [`number`]: one of three, by how the word is written.
+///
+/// Exhaustive on purpose: PDFium holds a number as one of these three, so
+/// a match on all three is checked by the compiler; a fourth would be a
+/// breaking release.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Number {
     /// A word without a point that doesn't start with a sign: the digits
