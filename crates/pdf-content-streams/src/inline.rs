@@ -91,7 +91,8 @@ impl ResCx {
             return Ok(ResCx::none());
         };
         let named = named.iter();
-        // Room for every name at once, as most count: as many as the dictionary's entries.
+        // Room for every name at once, as most count: as many as the
+        // dictionary's entries.
         let room = named.size_hint().1.unwrap_or_default();
         let (mut spaces, mut capped) = (HashMap::with_capacity(room), Vec::new());
         for space in named {
