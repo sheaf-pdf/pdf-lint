@@ -14,7 +14,7 @@ It's made for what reads a file's common structures to show them, check them or 
 
 Whatever walks a file's objects reads them through pdf-objects' `Resolve`, given by value, so `&reading` over pdf-structure's reading in memory or by position, `&document` over its document, or a closure alike. `catalog` finds a file's catalog from its trailer, and `follow` follows a reference. A reader says why it gives no object, and a walk acts on it: an object that's damaged is said and passed; one past a cap the reader reads under, one that takes a password, or bytes the source didn't give end the walk with an `Unreadable`, so that a failed read never looks like an empty tree.
 
-Where a file departs from the standard is a `Fault`, told to a `Sink` with its `Place`. `()` drops them and wants none, so what only a checker wants isn't looked for, and what's read is the same whatever the sink. Caps are one value, `Limits`.
+Where a file departs from the standard is a `Fault`, told to a sink with its place: pdf-objects' `fault::Sink<Fault>` and `fault::Place`, which pdf-color's and pdf-fonts' faults are told to as well, so that one sink can take all three. `()` drops them and wants none, so what only a checker wants isn't looked for, and what's read is the same whatever the sink; a `Vec<(Place, Fault)>` keeps each with its place. Caps are one value, `Limits`.
 
 ## The `clock` feature
 
@@ -103,13 +103,14 @@ A name tree, over a closure:
 ```rust
 use std::collections::BTreeMap;
 
+use pdf_objects::fault::{Place, Sink};
 use pdf_semantics::tree::names;
-use pdf_semantics::{Fault, Limits, Object, ObjectId, Place, Sink, dict};
+use pdf_semantics::{Fault, Limits, Object, ObjectId, dict};
 
 #[derive(Default)]
 struct Faults(Vec<Fault>);
 
-impl Sink for Faults {
+impl Sink<Fault> for Faults {
     fn fault(&mut self, _: Place, fault: Fault) {
         self.0.push(fault);
     }

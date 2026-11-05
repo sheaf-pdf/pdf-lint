@@ -7,8 +7,9 @@
 //!   well-formed by ISO's rules; no stream is decoded and no function evaluated.
 //! - **The spaces, typed, as ISO 32000-2 says them** ([`Space`]): a value's
 //!   [`Family`], its components, its base or alternate space and its colorants,
-//!   each departure a [`Fault`] told to a [`Sink`], and looked for only for one
-//!   that wants them. A space read with a sink that wants faults, none told,
+//!   each departure a [`Fault`] told to pdf-objects'
+//!   [`Sink`](pdf_objects::fault::Sink), and looked for only for one that wants
+//!   them. A space read with a sink that wants faults, none told,
 //!   counts by [`Space::components`] as [`components`] counts it, where
 //!   [`counted`] meets no cap, but for a Pattern space over more than 16
 //!   components, which no clause refuses and PDFium does.
@@ -34,7 +35,7 @@ pub use pdf_objects::{
 };
 
 pub use count::{Counted, components, counted};
-pub use fault::{Fault, Place, Sink};
+pub use fault::Fault;
 pub use limits::Limits;
 pub use resources::{Named, Spaces};
 pub use space::{

@@ -10,9 +10,10 @@
 //! a reference to a reference is a fault, a tint transform that doesn't load, and a
 //! white point that PDFium's 32-bit reading makes 0.
 
+use pdf_objects::fault::Sink;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Str, Stream, Unreadable};
 
-use crate::fault::Sink;
+use crate::fault::Fault;
 use crate::limits::Limits;
 
 use read::Reader;
@@ -386,7 +387,7 @@ impl<'o> Space<'o> {
     /// Space::read(nothing, &short, &Limits::DEFAULT, &mut faults).unwrap();
     /// assert_eq!(faults[0].1, Fault::LookupLength);
     /// ```
-    pub fn read<R: Resolve<'o>, S: Sink + ?Sized>(
+    pub fn read<R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         objects: R,
         value: &'o Object,
         limits: &Limits,
@@ -478,10 +479,10 @@ impl<'o> Attributes<'o> {
     /// Read on asking, as [`Space::read`] holds only the dictionary: under one
     /// [`Limits::space_visits`] for the whole of it, past which the rest aren't
     /// given. Any failure to read but [`Why::Damaged`](crate::Why::Damaged) is the
-    /// `Err`. A fault's [`Place::object`](crate::Place::object) is the object
-    /// `/Colorants` is written in, or what an entry leads to, as [`Space::read`]
-    /// tells it.
-    pub fn separations<R: Resolve<'o>, S: Sink + ?Sized>(
+    /// `Err`. A fault's [`Place::object`](pdf_objects::fault::Place::object) is
+    /// the object `/Colorants` is written in, or what an entry leads to, as
+    /// [`Space::read`] tells it.
+    pub fn separations<R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         &self,
         objects: R,
         limits: &Limits,

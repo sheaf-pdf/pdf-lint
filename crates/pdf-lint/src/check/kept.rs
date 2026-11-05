@@ -1,19 +1,22 @@
 //! What a reading of a file's parts told, kept as a finding needs it: the
 //! common structures' through pdf-semantics, a color space's through
-//! pdf-color and a font's through pdf-fonts, each crate's faults by a sink
-//! of its own ([`Kept`]), each place as pdf-lint holds it ([`Where`]); and
-//! what pdf-linearize's check of a linearized file told, each place given
-//! its bytes by the check's own sink ([`Kept::keep_each`]).
+//! pdf-color and a font's through pdf-fonts, each crate's faults by the one
+//! sink ([`Kept`]), pdf-objects' `Sink` over whichever crate's fault, each
+//! place as pdf-lint holds it ([`Where`]); and what pdf-linearize's check
+//! of a linearized file told, each place given its bytes by the check's own
+//! sink ([`Kept::keep_each`]).
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::mem::{self, Discriminant};
 
+use pdf_objects::fault::{Place, Sink};
+
 use crate::object::{ObjectId, Span};
 
 /// Where a kept fault is: the numbered object it's in, and where what's at
-/// fault was written, when the reader knows, as each crate's place has
-/// them.
+/// fault was written, when the reader knows, as pdf-objects' place, which
+/// each crate tells, has them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Where {
     /// The numbered object it's in.
@@ -22,26 +25,8 @@ pub(crate) struct Where {
     pub(crate) at: Option<Span>,
 }
 
-impl From<pdf_semantics::Place> for Where {
-    fn from(place: pdf_semantics::Place) -> Where {
-        Where {
-            object: place.object,
-            at: place.at,
-        }
-    }
-}
-
-impl From<pdf_color::Place> for Where {
-    fn from(place: pdf_color::Place) -> Where {
-        Where {
-            object: place.object,
-            at: place.at,
-        }
-    }
-}
-
-impl From<pdf_fonts::Place> for Where {
-    fn from(place: pdf_fonts::Place) -> Where {
+impl From<Place> for Where {
+    fn from(place: Place) -> Where {
         Where {
             object: place.object,
             at: place.at,
@@ -120,20 +105,9 @@ impl<F> Kept<F> {
     }
 }
 
-impl pdf_semantics::Sink for Kept<pdf_semantics::Fault> {
-    fn fault(&mut self, at: pdf_semantics::Place, fault: pdf_semantics::Fault) {
-        self.keep(at.into(), fault);
-    }
-}
-
-impl pdf_color::Sink for Kept<pdf_color::Fault> {
-    fn fault(&mut self, at: pdf_color::Place, fault: pdf_color::Fault) {
-        self.keep(at.into(), fault);
-    }
-}
-
-impl pdf_fonts::Sink for Kept<pdf_fonts::Fault> {
-    fn fault(&mut self, at: pdf_fonts::Place, fault: pdf_fonts::Fault) {
+/// Keeps each crate's faults alike, whichever crate's `F` is.
+impl<F> Sink<F> for Kept<F> {
+    fn fault(&mut self, at: Place, fault: F) {
         self.keep(at.into(), fault);
     }
 }
@@ -145,7 +119,7 @@ mod tests {
 
     use std::fmt::Debug;
 
-    use pdf_semantics::{Fault, Place, Sink};
+    use pdf_semantics::Fault;
 
     use super::*;
 
@@ -286,13 +260,16 @@ mod tests {
         kept.told().to_vec()
     }
 
-    /// Each crate's faults are kept alike, through the sink of its own: of
-    /// each kind in each object the first, where, and how many, one told
-    /// again at its kind's last bytes there not counted again, in the order
-    /// each was first told.
+    /// Each crate's faults are kept alike, through the one sink: of each
+    /// kind in each object the first, where, and how many, one told again
+    /// at its kind's last bytes there not counted again, in the order each
+    /// was first told.
     #[test]
     fn each_crate_s_faults_are_kept_alike() {
-        fn alike<F: Copy + PartialEq + Debug>(a: F, b: F, tell: fn(&mut Kept<F>, Where, F)) {
+        fn alike<F: Copy + PartialEq + Debug>(a: F, b: F) {
+            let tell: fn(&mut Kept<F>, Where, F) = |kept, at, fault| {
+                Sink::fault(kept, Place::new(at.object, at.at), fault);
+            };
             let first = Where {
                 object: Some(ObjectId::new(3, 0)),
                 at: Some(Span::new(None, 10, 15)),
@@ -305,28 +282,8 @@ mod tests {
             ];
             assert_eq!(kept_of(a, b, tell), expected);
         }
-        alike(
-            Fault::PageTreeChain,
-            Fault::TreeKeyOrder,
-            |kept, at, fault| {
-                Sink::fault(kept, Place::new(at.object, at.at), fault);
-            },
-        );
-        alike(
-            pdf_color::Fault::LookupLength,
-            pdf_color::Fault::Hival,
-            |kept, at, fault| {
-                let place = pdf_color::Place::new(at.object, at.at);
-                pdf_color::Sink::fault(kept, place, fault);
-            },
-        );
-        alike(
-            pdf_fonts::Fault::NoWidths,
-            pdf_fonts::Fault::W,
-            |kept, at, fault| {
-                let place = pdf_fonts::Place::new(at.object, at.at);
-                pdf_fonts::Sink::fault(kept, place, fault);
-            },
-        );
+        alike(Fault::PageTreeChain, Fault::TreeKeyOrder);
+        alike(pdf_color::Fault::LookupLength, pdf_color::Fault::Hival);
+        alike(pdf_fonts::Fault::NoWidths, pdf_fonts::Fault::W);
     }
 }

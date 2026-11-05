@@ -7,6 +7,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use pdf_objects::fault::Place;
 use pdf_objects::object::Stream;
 use pdf_objects::parse::Parser;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Why, dict};
@@ -20,8 +21,8 @@ use crate::fixture::{
 use crate::predefined::{Collection, scheme};
 use crate::type1::scan;
 use crate::{
-    Decoded, Encoding, Error, Fault, Font, Fonts, Limits, Place, Std14, Streams, cp1252,
-    glyph_text, name_code_point,
+    Decoded, Encoding, Error, Fault, Font, Fonts, Limits, Std14, Streams, cp1252, glyph_text,
+    name_code_point,
 };
 
 /// How many of an input's words are read as names, as a run of the target

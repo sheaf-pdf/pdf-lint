@@ -18,7 +18,7 @@ const QUICK: Duration = Duration::from_secs(10);
 #[derive(Default)]
 struct Kept(Vec<(Place, Fault)>);
 
-impl Sink for Kept {
+impl Sink<Fault> for Kept {
     fn fault(&mut self, at: Place, fault: Fault) {
         self.0.push((at, fault));
     }

@@ -11,9 +11,9 @@ use crate::reader::{Reader, dict_of};
 use crate::{Decoded, Error, Limits, Streams};
 
 /// A source's fonts, each read once: those that are objects by number, kept for
-/// every page that draws in them. Nothing is told to a [`Sink`](crate::Sink) here:
-/// a font kept would be told to no one twice, so who wants faults calls
-/// [`Font::read`].
+/// every page that draws in them. Nothing is told to a
+/// [`Sink`](pdf_objects::fault::Sink) here: a font kept would be told to no one
+/// twice, so who wants faults calls [`Font::read`].
 ///
 /// Each font's program is read with it, for its glyphs' boxes, its heights and what
 /// its encoding leaves to it of its text, and charged to the budget it's read within;

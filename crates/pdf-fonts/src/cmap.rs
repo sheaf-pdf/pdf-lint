@@ -9,11 +9,12 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
 
 use pdf_content_streams::{Operand, Operation, ResCx, operations};
+use pdf_objects::fault::Sink;
 use pdf_objects::{ObjectId, Resolve};
 
 use crate::predefined::{self, BfString, Collection};
 use crate::reader::Reader;
-use crate::{Error, Fault, Limits, Sink, Streams, glyph_text};
+use crate::{Error, Fault, Limits, Streams, glyph_text};
 
 /// Values for ranges of codes or CIDs, kept as the ranges they're given in, so a
 /// range of 2³¹ costs what a range of one does. Where ranges overlap, the first
@@ -137,7 +138,7 @@ impl CidMap {
     /// the stream's own ranges CID 0, so anything taken from them sets `unknown`, as
     /// does a predefined CMap the build hasn't, a stream of the chain that can't be
     /// read, or one past the cap.
-    pub(crate) fn read<'o, O: Resolve<'o> + Streams, S: Sink + ?Sized>(
+    pub(crate) fn read<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized>(
         reader: &Reader<'_, O, S>,
         id: ObjectId,
         unknown: &mut bool,
@@ -245,7 +246,7 @@ impl CidMap {
     /// The mappings of `data`, the CMap stream `id`, onto `ranges`: its codespace ranges,
     /// `cidrange`s and `cidchar`s, its `/WMode`, and the predefined CMap its
     /// `usecmap` names; read as far as it lexes.
-    fn parse<'o, O: Resolve<'o> + Streams, S: Sink + ?Sized>(
+    fn parse<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized>(
         &mut self,
         reader: &Reader<'_, O, S>,
         id: ObjectId,
@@ -303,7 +304,7 @@ impl CidMap {
     /// Identity's codespace and CIDs; another's CIDs, where the build has it, for the codes
     /// nothing else maps. PDFium maps those to CID 0, so either is guessed (`unknown`),
     /// as one the build hasn't is.
-    fn uses<'o, O: Resolve<'o> + Streams, S: Sink + ?Sized>(
+    fn uses<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized>(
         &mut self,
         reader: &Reader<'_, O, S>,
         by: Option<ObjectId>,

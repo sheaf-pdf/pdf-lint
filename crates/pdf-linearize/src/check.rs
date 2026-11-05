@@ -61,6 +61,12 @@ use crate::Limits;
 /// Where findings are told: `Vec<Finding>` keeps them; `()` drops them and
 /// wants none, so none is looked for past what the verdict needs. A sink
 /// borrowed, `&mut S` or `&mut dyn Sink`, is a sink too.
+///
+/// It's the check's own, not pdf-objects'
+/// [`fault::Sink`](pdf_objects::fault::Sink), which a reader of a file's
+/// objects tells with the object a fault is in: a finding is of the file's
+/// layout, and carries a place of its own ([`Finding::place`]), a key, a
+/// byte of the file or a hint table's byte or bit, so it's told whole.
 pub trait Sink {
     /// One thing wrong with the file.
     fn finding(&mut self, finding: Finding);

@@ -19,7 +19,7 @@ use crate::follow;
 #[derive(Default)]
 struct Kept(Vec<(Place, Fault)>);
 
-impl Sink for Kept {
+impl Sink<Fault> for Kept {
     fn fault(&mut self, at: Place, fault: Fault) {
         self.0.push((at, fault));
     }
@@ -34,7 +34,7 @@ impl Kept {
 /// A sink that wants no faults, and fails if it's told one.
 struct Unwanted;
 
-impl Sink for Unwanted {
+impl Sink<Fault> for Unwanted {
     fn fault(&mut self, _: Place, fault: Fault) {
         panic!("{fault} told to a sink that wants none");
     }
@@ -974,7 +974,7 @@ fn what_s_read_is_the_same_whatever_the_sink() {
             borrowed.by_ref().map(Result::unwrap).collect::<Vec<_>>(),
             with_kept
         );
-        let mut sink: &mut dyn Sink = &mut sink;
+        let mut sink: &mut dyn Sink<Fault> = &mut sink;
         let mut through = names(resolve, &root, &limits, &mut sink);
         assert_eq!(
             through.by_ref().map(Result::unwrap).collect::<Vec<_>>(),

@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::parse::Parser;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Rules, Unreadable, Value, Why, serialize};
 
@@ -12,7 +13,7 @@ use crate::date::{Date, Quirk};
 use crate::pages::{Error, Inheritable, Origin, Page, Pages, Rect, pages};
 use crate::tree::{self, names, numbers};
 use crate::xmp::{self, Claims, metadata_stream};
-use crate::{Fault, HOPS, Limits, Place, Sink, catalog, follow};
+use crate::{Fault, HOPS, Limits, catalog, follow};
 
 /// How many values of an input are read as objects.
 const OBJECTS: usize = 4096;
@@ -63,7 +64,7 @@ fn walked<'o, R: Resolve<'o>>(
     root: &'o Object,
     kind: Kind,
     limits: &Limits,
-    sink: &mut dyn Sink,
+    sink: &mut dyn Sink<Fault>,
 ) -> Walked<'o> {
     let mut entries = Vec::new();
     let mut failed = None;
@@ -102,7 +103,7 @@ fn walked<'o, R: Resolve<'o>>(
 #[derive(Debug, Default)]
 struct Kept(Vec<Fault>);
 
-impl Sink for Kept {
+impl Sink<Fault> for Kept {
     fn fault(&mut self, _: Place, fault: Fault) {
         self.0.push(fault);
     }
@@ -111,7 +112,7 @@ impl Sink for Kept {
 /// Wants no faults, and fails if it's told one.
 struct Unwanted;
 
-impl Sink for Unwanted {
+impl Sink<Fault> for Unwanted {
     fn fault(&mut self, _: Place, fault: Fault) {
         panic!("{fault} told to a sink that wants none");
     }
@@ -414,7 +415,7 @@ fn roots<'o, R: Resolve<'o> + Copy>(objects: R, catalog: &'o Dict) -> Vec<(Kind,
 /// [`Unreadable`]'s own words may differ from one resolver to another.
 pub type Paged<'o> = Result<Pages<'o>, String>;
 
-fn paged<'o, R: Resolve<'o> + Copy, S: Sink + ?Sized>(
+fn paged<'o, R: Resolve<'o> + Copy, S: Sink<Fault> + ?Sized>(
     objects: R,
     catalog: &'o Dict,
     rules: Rules,
@@ -711,7 +712,7 @@ pub fn xmp(data: &[u8]) {
     const PACKET: ObjectId = ObjectId::new(9, 0);
 
     struct Told(usize);
-    impl Sink for Told {
+    impl Sink<Fault> for Told {
         fn fault(&mut self, place: Place, _: Fault) {
             assert_eq!(place.object, Some(PACKET));
             let at = place.at.expect("a place in the packet");

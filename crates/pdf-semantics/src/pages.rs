@@ -75,9 +75,10 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Rules, Span, Unreadable, Value, Why};
 
-use crate::fault::{Fault, Place, Sink};
+use crate::fault::Fault;
 use crate::limits::Limits;
 use crate::{HOPS, too_long};
 
@@ -98,7 +99,7 @@ const ROOM: usize = 4096;
 /// The pages of the tree at `catalog`'s `/Pages`, by `rules`, as the module
 /// says. What departs from ISO 32000-2 is told to `sink` under ISO's rules;
 /// under PDFium's, only what doesn't read is.
-pub fn pages<'o, R: Resolve<'o>, S: Sink + ?Sized>(
+pub fn pages<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     objects: R,
     catalog: &'o Dict,
     rules: Rules,
@@ -136,7 +137,7 @@ pub fn counted<'o, R: Resolve<'o>>(
 
 /// The tree at `catalog`'s `/Pages` walked by `rules`, as [`pages`] walks
 /// it, but by PDFium's rules a walk that found no page under the root.
-fn walked<'o, 'r, R: Resolve<'o>, S: Sink + ?Sized>(
+fn walked<'o, 'r, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     objects: R,
     catalog: &'o Dict,
     rules: Rules,
@@ -518,7 +519,7 @@ struct Walk<'o, 'r, R, S: ?Sized> {
     object: Option<ObjectId>,
 }
 
-impl<'o, R: Resolve<'o>, S: Sink + ?Sized> Walk<'o, '_, R, S> {
+impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
     /// How many references to follow: `pdfium`'s number by PDFium's rules, and
     /// any by ISO's.
     fn hops(&self, pdfium: usize) -> usize {
@@ -1198,11 +1199,7 @@ impl<'o, R: Resolve<'o>, S: Sink + ?Sized> Walk<'o, '_, R, S> {
 
     fn say(&mut self, at: Option<Span>, fault: Fault) {
         if self.sink.wants() {
-            let place = Place {
-                object: self.object,
-                at,
-            };
-            self.sink.fault(place, fault);
+            self.sink.fault(Place::new(self.object, at), fault);
         }
     }
 }

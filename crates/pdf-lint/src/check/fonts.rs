@@ -63,6 +63,7 @@ use std::ops::RangeInclusive;
 use std::ptr;
 
 use pdf_fonts::{Decoded, Error, Fault, Font, Limits, With};
+use pdf_objects::fault::{Place, Sink};
 use unicode_script::{Script, UnicodeScript};
 
 use super::content::times;
@@ -250,8 +251,8 @@ struct Cut<'c> {
     failed: &'c Cell<bool>,
 }
 
-impl pdf_fonts::Sink for Cut<'_> {
-    fn fault(&mut self, at: pdf_fonts::Place, fault: Fault) {
+impl Sink<Fault> for Cut<'_> {
+    fn fault(&mut self, at: Place, fault: Fault) {
         if !self.failed.get() {
             self.kept.fault(at, fault);
         }

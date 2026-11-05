@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pdf_objects::dict;
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::Stream;
 
 use super::afm;
@@ -2645,7 +2646,7 @@ impl Streams for Counting<'_, '_> {
 /// A sink that says it wants none, and fails if it's told any.
 struct Unwanting;
 
-impl Sink for Unwanting {
+impl Sink<Fault> for Unwanting {
     fn fault(&mut self, _: Place, fault: Fault) {
         panic!("told {fault:?}");
     }
@@ -2699,7 +2700,7 @@ fn told(pdf: &Pdf, dict: &Dict) -> Vec<(Place, Fault)> {
     let read = Font::read(pdf, dict, &Limits::DEFAULT, &mut kept, &mut told);
     let without = Font::read(pdf, dict, &Limits::DEFAULT, &mut none, &mut ());
     let mut borrowed = Vec::new();
-    let mut dynamic: &mut dyn Sink = &mut borrowed;
+    let mut dynamic: &mut dyn Sink<Fault> = &mut borrowed;
     let mut again = BUDGET;
     let by_dyn = Font::read(pdf, dict, &Limits::DEFAULT, &mut again, &mut dynamic);
     assert_eq!(digest(&read.unwrap()), digest(&without.unwrap()));

@@ -14,7 +14,7 @@ const VT: &str = "xmlns:pdfvtid=\"http://www.npes.org/pdfvt/ns/id/\"";
 #[derive(Default)]
 struct Kept(Vec<(Place, Fault)>);
 
-impl Sink for Kept {
+impl Sink<Fault> for Kept {
     fn fault(&mut self, at: Place, fault: Fault) {
         self.0.push((at, fault));
     }
@@ -678,7 +678,7 @@ fn what_s_read_is_the_same_whatever_the_sink() {
     read(packets[0].as_bytes(), None, &Limits::DEFAULT, &mut kept).unwrap();
     assert_eq!(kept.faults(), [Fault::XmpAttribute, Fault::XmpValue]);
     // Through `&mut dyn` it's told the same.
-    let dynamic: &mut dyn Sink = &mut kept;
+    let dynamic: &mut dyn Sink<Fault> = &mut kept;
     read(packets[0].as_bytes(), None, &Limits::DEFAULT, dynamic).unwrap();
     assert_eq!(kept.faults().len(), 4);
 }

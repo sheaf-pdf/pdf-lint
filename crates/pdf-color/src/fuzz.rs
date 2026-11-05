@@ -5,11 +5,12 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::parse::Parser;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Why};
 
 use crate::count::counted;
-use crate::{Family, Fault, Limits, Place, Sink, Space, Spaces, components};
+use crate::{Family, Fault, Limits, Space, Spaces, components};
 
 /// How many values of an input are read as objects.
 const OBJECTS: usize = 4096;
@@ -198,7 +199,7 @@ impl<'o, R: Resolve<'o>> Resolve<'o> for FailingSome<R> {
 /// A sink that wants nothing, and that's told nothing.
 struct Unwanted;
 
-impl Sink for Unwanted {
+impl Sink<Fault> for Unwanted {
     fn fault(&mut self, _: Place, fault: Fault) {
         panic!("told {fault:?}, wanting none");
     }
@@ -230,7 +231,7 @@ fn a_space<'o, R: Resolve<'o> + Copy>(objects: R, value: &'o Object) {
     assert_eq!(told, plain, "{value:?}");
     let unwanted = Space::read(objects, value, &defaults, &mut Unwanted);
     assert_eq!(unwanted.as_ref(), Ok(&plain), "{value:?}");
-    let by_dyn: &mut dyn Sink = &mut ();
+    let by_dyn: &mut dyn Sink<Fault> = &mut ();
     assert_eq!(
         Space::read(objects, value, &defaults, by_dyn),
         Ok(plain.clone())

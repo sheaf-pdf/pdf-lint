@@ -91,9 +91,10 @@ use std::collections::HashSet;
 use std::mem::{self, Discriminant};
 use std::rc::Rc;
 
+use pdf_objects::fault::{Place, Sink};
 use pdf_semantics::pages::{self, Page, Pages, Rect, pages};
 use pdf_semantics::tree::{names, numbers};
-use pdf_semantics::{Fault, Limits, Place, Sink, xmp};
+use pdf_semantics::{Fault, Limits, xmp};
 
 use super::content::times;
 use super::kept::Kept;
@@ -115,7 +116,7 @@ struct Damage {
     told: bool,
 }
 
-impl Sink for Damage {
+impl Sink<Fault> for Damage {
     fn fault(&mut self, _: Place, fault: Fault) {
         self.told |= matches!(fault, Fault::Damaged { .. });
     }
@@ -221,7 +222,7 @@ pub(super) struct PageTree<'a> {
 /// never of one it doesn't find by what the fault holds.
 struct PageFaults<'k>(&'k mut Kept<Fault>);
 
-impl Sink for PageFaults<'_> {
+impl Sink<Fault> for PageFaults<'_> {
     fn fault(&mut self, at: Place, fault: Fault) {
         let read = matches!(
             fault,

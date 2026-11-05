@@ -66,9 +66,18 @@
 //!   ([`Resolve::try_resolve`], [`Unreadable`]); and walked
 //!   ([`Object::references`]), a value's in the order written, with a stack
 //!   of the walk's own.
+//! - **Faults, told with where they are** ([`fault`]): one
+//!   [`fault::Sink`] and one [`fault::Place`] for every reader of a file's
+//!   objects, each reader's faults a type of its own, so that one sink can
+//!   take several readers' and `()` drops them and wants none, so none is
+//!   looked for. Three keep a sink of their own, as what they tell isn't
+//!   placed by an object, each saying why: the parser's
+//!   ([`parse::Sink`]), a content stream's reader's, and a linearized
+//!   file's check's.
 //!
 //! [`dict!`] builds a dictionary from keys and values.
 
+pub mod fault;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;

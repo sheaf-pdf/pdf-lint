@@ -4,12 +4,13 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use pdf_objects::fault::Place;
 use pdf_objects::parse::Parser;
 use pdf_objects::{ObjectId, Unreadable, Why};
 use pdf_structure::bytes::{Options, Reading};
 
 use super::*;
-use crate::fault::{Fault, Place};
+use crate::fault::Fault;
 use crate::{components, counted};
 
 /// A white point, as a CIE-based dictionary has it.
@@ -79,7 +80,7 @@ impl Resolve<'static> for Asked<'_> {
 /// A sink that wants no faults, and that's told none.
 struct Unwanted;
 
-impl Sink for Unwanted {
+impl Sink<Fault> for Unwanted {
     fn fault(&mut self, _: Place, fault: Fault) {
         panic!("told {fault:?}, wanting none");
     }
@@ -104,7 +105,7 @@ fn read_under(file: File, limits: &Limits) -> (Option<Space<'static>>, Vec<Fault
         Space::read(resolve, file.value, limits, &mut Unwanted).unwrap(),
         space
     );
-    let dynamic: &mut dyn Sink = &mut ();
+    let dynamic: &mut dyn Sink<Fault> = &mut ();
     assert_eq!(
         Space::read(resolve, file.value, limits, dynamic).unwrap(),
         space

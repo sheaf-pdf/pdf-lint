@@ -4,10 +4,11 @@
 
 use std::cell::RefCell;
 
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::{Stream, Value};
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Why};
 
-use crate::{Decoded, Error, Fault, Limits, Place, Sink, Streams};
+use crate::{Decoded, Error, Fault, Limits, Streams};
 
 /// One font's reading: its objects, its caps and its sink, and the first object
 /// that didn't read for a reason that's the caller's to know.
@@ -23,7 +24,7 @@ pub(crate) struct Reader<'c, O, S: ?Sized> {
     failed: RefCell<Option<Unreadable>>,
 }
 
-impl<'c, O, S: Sink + ?Sized> Reader<'c, O, S> {
+impl<'c, O, S: Sink<Fault> + ?Sized> Reader<'c, O, S> {
     pub(crate) fn new(objects: O, limits: &'c Limits, sink: &'c mut S) -> Reader<'c, O, S> {
         Reader {
             objects,
@@ -53,7 +54,7 @@ impl<'c, O, S: Sink + ?Sized> Reader<'c, O, S> {
     }
 }
 
-impl<'o, O: Resolve<'o> + Streams, S: Sink + ?Sized> Reader<'_, O, S> {
+impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> Reader<'_, O, S> {
     /// Object `id`; None where it isn't there, or doesn't read.
     fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
         match self.objects.try_resolve(id) {

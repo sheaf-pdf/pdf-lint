@@ -41,6 +41,7 @@ use std::collections::HashSet;
 use std::mem::{self, Discriminant};
 
 use pdf_color::{Fault, Limits, Space};
+use pdf_objects::fault::{Place, Sink};
 
 use super::content::times;
 use super::kept::Kept;
@@ -154,8 +155,8 @@ struct Faults {
     damaged: HashSet<(Option<ObjectId>, Span)>,
 }
 
-impl pdf_color::Sink for Faults {
-    fn fault(&mut self, at: pdf_color::Place, fault: Fault) {
+impl Sink<Fault> for Faults {
+    fn fault(&mut self, at: Place, fault: Fault) {
         if let (Fault::Damaged { .. }, Some(bytes)) = (fault, at.at) {
             self.damaged.insert((at.object, bytes));
         }

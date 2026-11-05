@@ -42,6 +42,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use pdf_content_streams::{ResCx, operations};
+use pdf_objects::fault::Sink;
 use pdf_objects::object::Value;
 use pdf_objects::{Dict, Object, ObjectId, Resolve};
 
@@ -49,7 +50,7 @@ use crate::cmap::{CMap, CidMap, Ranges, Scheme, number, two_bytes};
 use crate::predefined::{self, BfString, Collection, Split};
 use crate::program::{CidGlyphs, Face};
 use crate::reader::Reader;
-use crate::{Encoding, Error, Fault, Limits, Sink, Std14, Streams, glyph_text};
+use crate::{Encoding, Error, Fault, Limits, Std14, Streams, glyph_text};
 
 /// A rectangle, in glyph units unless it says otherwise: thousandths of text
 /// space at a font size of 1. Normalized, `x0 <= x1` and `y0 <= y1`.
@@ -448,7 +449,7 @@ impl Font {
     ) -> Result<Font, Error>
     where
         O: Resolve<'o> + Streams + Copy,
-        S: Sink + ?Sized,
+        S: Sink<Fault> + ?Sized,
     {
         Font::read_as(objects, font, limits, budget, sink, true)
     }
@@ -468,7 +469,7 @@ impl Font {
     ) -> Result<Font, Error>
     where
         O: Resolve<'o> + Streams + Copy,
-        S: Sink + ?Sized,
+        S: Sink<Fault> + ?Sized,
     {
         Font::read_as(objects, font, limits, budget, sink, false)
     }
@@ -484,7 +485,7 @@ impl Font {
     ) -> Result<Font, Error>
     where
         O: Resolve<'o> + Streams + Copy,
-        S: Sink + ?Sized,
+        S: Sink<Fault> + ?Sized,
     {
         let reader = Reader::new(objects, limits, sink);
         let mut left = *budget;
@@ -861,7 +862,7 @@ fn read_kind<'o, O, S>(
 ) -> Result<Font, Error>
 where
     O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
+    S: Sink<Fault> + ?Sized,
 {
     let subtype = reader.byte_string(font, b"Subtype");
     let gbk = subtype == Some(b"TrueType") && reads_as_gbk(reader, font);
@@ -940,7 +941,7 @@ fn read_program<'o, O, S>(
 ) -> Result<Embedded, Error>
 where
     O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
+    S: Sink<Fault> + ?Sized,
 {
     let file = descriptor.and_then(|d| {
         [&b"FontFile"[..], b"FontFile2", b"FontFile3"]
@@ -1052,7 +1053,7 @@ fn given_widths<'o, O, S>(
 ) -> [u16; 256]
 where
     O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
+    S: Sink<Fault> + ?Sized,
 {
     let missing = descriptor
         .and_then(|d| d.get(b"MissingWidth"))
@@ -1108,7 +1109,7 @@ fn simple<'o, O, S>(
 ) -> Result<Font, Error>
 where
     O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
+    S: Sink<Fault> + ?Sized,
 {
     let descriptor = encoded.descriptor;
     let descriptor_id = referred(font, b"FontDescriptor");
@@ -1265,7 +1266,7 @@ const GBK_NAMES: [&[u8]; 5] = [
 fn reads_as_gbk<'o, O, S>(reader: &Reader<'_, O, S>, font: &'o Dict) -> bool
 where
     O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
+    S: Sink<Fault> + ?Sized,
 {
     let tagged = reader
         .byte_string(font, b"BaseFont")
@@ -1285,7 +1286,7 @@ where
 fn gbk_font<'o, O, S>(reader: &Reader<'_, O, S>, font: &'o Dict, decoder: Decoder) -> Font
 where
     O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
+    S: Sink<Fault> + ?Sized,
 {
     let mut approx = FontApprox {
         boxes: true,
@@ -1349,7 +1350,7 @@ fn type3<'o, O, S>(
 ) -> Result<Font, Error>
 where
     O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
+    S: Sink<Fault> + ?Sized,
 {
     let in_matrix = referred(font, b"FontMatrix");
     let matrix = reader
@@ -1532,7 +1533,7 @@ fn char_proc<'o, O, S>(
 ) -> Result<Option<CharProc>, Error>
 where
     O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
+    S: Sink<Fault> + ?Sized,
 {
     let Some(data) = reader.charged(id, budget)? else {
         return Ok(None);
@@ -1583,7 +1584,7 @@ fn type0<'o, O, S>(
 ) -> Result<Font, Error>
 where
     O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
+    S: Sink<Fault> + ?Sized,
 {
     let mut approx = FontApprox::default();
     let fonts = reader.array_for(font, b"DescendantFonts");
@@ -1769,7 +1770,7 @@ fn heights<'o, O, S>(
 ) -> (FontMetrics, bool)
 where
     O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
+    S: Sink<Fault> + ?Sized,
 {
     let get = |key: &[u8]| descriptor.map_or(0, |d| reader.integer_for(d, key, 0, descriptor_id));
     let own = descriptor
@@ -1854,7 +1855,7 @@ fn cid_ranges<'o, O, S, const N: usize>(
 ) -> Ranges<[f32; N]>
 where
     O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
+    S: Sink<Fault> + ?Sized,
 {
     let array = reader.array_for(cid_font, key).unwrap_or_default();
     let cut = match key {
@@ -1881,7 +1882,7 @@ fn metrics_array<'o, O, S, const N: usize>(
 ) -> Vec<(u32, u32, [f32; N])>
 where
     O: Resolve<'o> + Streams,
-    S: Sink + ?Sized,
+    S: Sink<Fault> + ?Sized,
 {
     let cid = |n: i32| n.max(0) as u32;
     let mut out = Vec::new();
@@ -1967,7 +1968,7 @@ impl<'a> Encoded<'a> {
     ) -> Encoded<'a>
     where
         O: Resolve<'a> + Streams,
-        S: Sink + ?Sized,
+        S: Sink<Fault> + ?Sized,
     {
         if subtype == Some(b"Type3") {
             let start = Encoded {
@@ -2044,7 +2045,7 @@ impl<'a> Encoded<'a> {
     ) -> Encoded<'a>
     where
         O: Resolve<'a> + Streams,
-        S: Sink + ?Sized,
+        S: Sink<Fault> + ?Sized,
     {
         let written = font.get(b"Encoding");
         let encoding = written.and_then(|e| reader.hop(e));
@@ -2132,7 +2133,7 @@ impl<'a> Encoded<'a> {
         object: Option<ObjectId>,
     ) where
         O: Resolve<'a> + Streams,
-        S: Sink + ?Sized,
+        S: Sink<Fault> + ?Sized,
     {
         match name {
             b"WinAnsiEncoding" => self.base = Some(Encoding::WinAnsi),
@@ -2214,7 +2215,7 @@ impl Decoder {
     ) -> Result<Decoder, Error>
     where
         O: Resolve<'o> + Streams,
-        S: Sink + ?Sized,
+        S: Sink<Fault> + ?Sized,
     {
         let written = font.get(b"ToUnicode");
         let cmap = match written.and_then(Object::as_reference) {
@@ -2241,7 +2242,7 @@ impl Decoder {
     ) -> Decoder
     where
         O: Resolve<'o> + Streams,
-        S: Sink + ?Sized,
+        S: Sink<Fault> + ?Sized,
     {
         let Some(encoded) = encoded else {
             let name = font.get(b"Encoding").and_then(|e| reader.hop(e)?.as_name());

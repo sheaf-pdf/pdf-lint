@@ -1,75 +1,15 @@
 //! Where a font departs from ISO 32000-2, and where its reading meets a cap of
-//! its own. A font's reading goes on past each [`Fault`], told to a [`Sink`] with
-//! where it is. Nothing told changes what's read: the font given is the same
-//! whatever the sink, an `Err` included, and a sink that doesn't want faults,
-//! `()`, has none looked for.
+//! its own. A font's reading goes on past each [`Fault`], told to a sink,
+//! pdf-objects' [`Sink<Fault>`](pdf_objects::fault::Sink), with where it is, a
+//! [`Place`](pdf_objects::fault::Place): the numbered object it's in, where
+//! that's another than the font dictionary, which a reading is given as a
+//! dictionary (its descriptor, its CIDFont, a CMap's stream, an object that
+//! doesn't read), and where it was written. Nothing told changes what's read:
+//! the font given is the same whatever the sink, an `Err` included, and a sink
+//! that doesn't want faults, `()`, has none looked for; a `Vec` keeps each with
+//! its place.
 
-use pdf_objects::{ObjectId, Span};
-
-/// Where faults are told: a checker keeps them; `()` drops them, and wants none,
-/// so none is looked for. A fault owns nothing, so a sink can keep it as it is. A
-/// sink borrowed, `&mut S` or `&mut dyn Sink`, is a sink too, and a `Vec` keeps
-/// each with its place.
-pub trait Sink {
-    /// A fault at `at`.
-    fn fault(&mut self, at: Place, fault: Fault);
-
-    /// Whether faults are wanted. A sink that doesn't want them is told none.
-    /// True unless a sink says otherwise; asked as a reading goes.
-    fn wants(&self) -> bool {
-        true
-    }
-}
-
-/// Drops every fault, and wants none, so none is looked for.
-impl Sink for () {
-    #[inline]
-    fn fault(&mut self, _: Place, _: Fault) {}
-
-    #[inline]
-    fn wants(&self) -> bool {
-        false
-    }
-}
-
-/// Tells the sink it borrows, and wants what it wants.
-impl<S: Sink + ?Sized> Sink for &mut S {
-    #[inline]
-    fn fault(&mut self, at: Place, fault: Fault) {
-        (**self).fault(at, fault);
-    }
-
-    #[inline]
-    fn wants(&self) -> bool {
-        (**self).wants()
-    }
-}
-
-/// Keeps each fault with its place, in the order they were told.
-impl Sink for Vec<(Place, Fault)> {
-    fn fault(&mut self, at: Place, fault: Fault) {
-        self.push((at, fault));
-    }
-}
-
-/// Where a [`Fault`] is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Place {
-    /// The numbered object it's in, where that's another than the font
-    /// dictionary, which a reading is given as a dictionary: its descriptor, its
-    /// CIDFont, a CMap's stream, an object that doesn't read.
-    pub object: Option<ObjectId>,
-    /// Where what's at fault was written, when the reader knows.
-    pub at: Option<Span>,
-}
-
-impl Place {
-    /// A fault's place, for a sink to be tried on: a reading makes its own.
-    pub const fn new(object: Option<ObjectId>, at: Option<Span>) -> Place {
-        Place { object, at }
-    }
-}
+use pdf_objects::ObjectId;
 
 /// A place where a font isn't what ISO 32000-2 says it is, or where its reading
 /// meets a cap of its own, which a reading comes to and goes on past. Each names its

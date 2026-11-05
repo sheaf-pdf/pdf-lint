@@ -89,6 +89,12 @@ impl Default for Limits {
 /// it, and wants none, so none is looked for. A fault borrows from `'a`,
 /// the data the parser reads, so a sink can keep it as it is. A sink
 /// borrowed, `&mut S` or `&mut dyn Sink`, is a sink too.
+///
+/// It's the parser's own, not the [`fault::Sink`](crate::fault::Sink) a
+/// reader of a file's objects tells: a fault borrows the data parsed, and
+/// is placed by a [`Span`] alone, as the object it's in, where it's in one,
+/// is the caller's to know. A reader that calls the parser tells its own
+/// faults of what it's told, at their places.
 pub trait Sink<'a> {
     /// A fault at `at`, which the parser read past.
     fn fault(&mut self, at: Span, fault: Fault<'a>);

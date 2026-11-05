@@ -26,13 +26,15 @@
 //! from a trailer and [`follow`] follows a reference. A reader's own resolver
 //! says why it gives no object ([`Resolve::try_resolve`]), and a closure can't,
 //! so it reads as a reference to nothing. What a walk reads past is a [`Fault`],
-//! told to a [`Sink`], or dropped by `()`; its caps are one value, [`Limits`].
+//! told to pdf-objects' [`Sink`](pdf_objects::fault::Sink) with its
+//! [`Place`](pdf_objects::fault::Place), or dropped by `()`; its caps are one
+//! value, [`Limits`].
 
 pub use pdf_objects::{
     Dict, Object, ObjectId, Resolve, Rules, Span, Str, Stream, Unreadable, Value, Why, dict, text,
 };
 
-pub use fault::{Fault, Place, Sink};
+pub use fault::Fault;
 pub use limits::Limits;
 
 pub mod date;
