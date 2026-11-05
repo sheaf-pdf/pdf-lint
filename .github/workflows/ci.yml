@@ -148,7 +148,12 @@ jobs:
   # The tokenizer's public API against the version published on crates.io:
   # a break the version doesn't allow fails. cargo-semver-checks comes as a
   # prebuilt binary at a pinned version, as the fuzz workflow's cargo-fuzz
-  # does, so its own Rust requirement binds nothing of the crate's.
+  # does, so its own Rust requirement binds nothing of the crate's. It
+  # reads rustdoc's JSON, whose format moves with Rust, and each release of
+  # it reads the formats current when it was built, so the toolchain is
+  # pinned beside it, as the fuzz workflow pins nightly beside cargo-fuzz:
+  # the two pins move together, the tool to its newest release and the
+  # toolchain to the stable that release was built against.
   tokenizer-semver:
     name: Tokenizer against its published API
     runs-on: ubuntu-latest
@@ -156,7 +161,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-semver-checks@0.51.0

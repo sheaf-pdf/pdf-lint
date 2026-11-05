@@ -116,13 +116,14 @@ mod tests {
 
     /// The README is shown on crates.io and docs.rs, where a path beside
     /// the crate reaches nothing: its licence links are the repository's
-    /// URLs, and no link of it climbs out of the crate.
+    /// URLs, the manifest's `repository` and the file, and no link of it
+    /// climbs out of the crate.
     #[test]
     fn the_readmes_licence_links_reach_the_files() {
         let readme = include_str!("../README.md");
+        let repository = env!("CARGO_PKG_REPOSITORY");
         for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
-            let link =
-                std::format!("[{file}](https://github.com/sheaf-pdf/pdf-lint/blob/main/{file})");
+            let link = std::format!("[{file}]({repository}/blob/main/{file})");
             assert!(
                 readme.contains(&link),
                 "{file}'s link isn't the repository's URL"

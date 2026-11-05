@@ -275,7 +275,12 @@ tokenizer-package:
         echo "the package holds more than its sources, README, CHANGELOG, manifest and lock (above)" >&2
         exit 1
     fi
-    if grep -q '^\[\[bench\]\]' "$dir"/package/pdf-tokenizer-*/Cargo.toml; then
+    manifest=("$dir"/package/pdf-tokenizer-*/Cargo.toml)
+    if [ "${#manifest[@]}" -ne 1 ] || [ ! -f "${manifest[0]}" ]; then
+        echo "no packaged manifest under $dir/package to read" >&2
+        exit 1
+    fi
+    if grep -q '^\[\[bench\]\]' "${manifest[0]}"; then
         echo "the packaged manifest declares a benchmark the package doesn't hold" >&2
         exit 1
     fi
