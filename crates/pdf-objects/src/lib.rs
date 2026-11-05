@@ -192,11 +192,12 @@ pub enum Why {
     /// document read whole hasn't, which holds the file's objects and not
     /// its streams' data: then it's read beside what read it.
     Source,
-    /// It's a stream through a filter the reader doesn't decode, as an
-    /// image's data may be (ISO 32000-2, 7.4.1): its data is there as
-    /// written, for a decoder that takes that filter, and nothing else of
-    /// the stream is wrong. Only what gives a stream's data says it
-    /// ([`Streams::decoded`]); a resolver never does.
+    /// It's a stream whose filters the reader doesn't decode: through a
+    /// filter it doesn't take, as an image's data may be (ISO 32000-2,
+    /// 7.4.1), its data there as written for a decoder that takes that
+    /// filter; or with a `/Filter` or `/DecodeParms` it can't take as
+    /// written, which is the file's to fix. Only what gives a stream's data
+    /// says it ([`Streams::decoded`]); a resolver never does.
     Filter,
 }
 

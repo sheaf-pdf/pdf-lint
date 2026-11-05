@@ -601,7 +601,11 @@ impl<S: ByteSource> Reading<S> {
     /// references through `resolve` reads such an object as null: the count
     /// is how a caller learns that something may have read so, where nothing
     /// after it would say, and it may ask again. A read by [`Reading::get`]
-    /// says so to its caller, and isn't counted. In memory, always 0.
+    /// says so to its caller, and isn't counted. A stream's data as a viewer
+    /// takes it ([`Streams::decoded`]) reads the stream's object as
+    /// `try_resolve` does, counted so, and its data as [`Reading::data`]
+    /// does, not counted, both said to its caller ([`Why::Source`]). In
+    /// memory, always 0.
     pub fn failed_resolves(&self) -> u64 {
         self.failed_resolves.load(Ordering::Relaxed)
     }
@@ -1329,9 +1333,11 @@ impl<'o, S: ByteSource> Resolve<'o> for &'o Reading<S> {
 /// reader was given opens, one whose security handler it can't open, a
 /// stream the encryption dictionary refers to or one that doesn't decrypt
 /// cleanly, [`Why::Locked`]; a source that didn't give the bytes,
-/// [`Why::Source`]; through a filter the reader doesn't decode, or with
-/// parameters it doesn't take, [`Why::Filter`]; and what isn't a stream,
-/// isn't there, or decodes to nothing, [`Why::Damaged`].
+/// [`Why::Source`]; through a filter the reader doesn't decode, or with a
+/// `/Filter` or `/DecodeParms` it doesn't take as written ([`Unfiltered`]'s
+/// other kinds), [`Why::Filter`]; and what isn't a stream, isn't there, or
+/// whose decode fails before it gives a byte, [`Why::Damaged`]. A stream
+/// that decodes cleanly to nothing is given, empty.
 ///
 /// On a `Reading` its own [`Reading::decoded`], which takes no limit, is
 /// what `decoded` names: this one is `Streams::decoded(&reading, id,

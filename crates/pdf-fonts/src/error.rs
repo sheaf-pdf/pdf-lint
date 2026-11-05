@@ -15,8 +15,8 @@ pub enum Error {
     TooLarge,
     /// An object or a stream a font reads doesn't read, for a reason that isn't
     /// the font's: anything but [`Why::Damaged`](crate::Why::Damaged), which is
-    /// an object that isn't there or a stream whose data decodes to nothing,
-    /// and [`Why::Filter`](crate::Why::Filter), a stream through a filter the
+    /// an object that isn't there or a stream whose decode fails before it gives a
+    /// byte, and [`Why::Filter`](crate::Why::Filter), a stream whose filters the
     /// reader doesn't decode, each read as none; nor a stream's
     /// [`Why::Limit`](crate::Why::Limit), which is [`Error::TooLarge`]. A
     /// locked file, a source that failed or a cap met is the caller's to know,

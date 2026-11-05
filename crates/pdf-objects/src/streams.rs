@@ -32,12 +32,14 @@ use crate::{Resolve, Unreadable};
 pub trait Streams {
     /// Stream `id`'s data, at most `limit` bytes of it; or why there's none:
     /// [`Why::Damaged`](crate::Why::Damaged) where it isn't a stream, doesn't
-    /// read, or decodes to nothing; [`Why::Limit`](crate::Why::Limit) past
-    /// `limit`, or past a cap the reader reads under;
-    /// [`Why::Locked`](crate::Why::Locked) where it takes a password the
-    /// reader wasn't given, or doesn't decrypt;
+    /// read, or its decode fails before it gives a byte (a stream that
+    /// decodes cleanly to nothing is empty data, not this);
+    /// [`Why::Limit`](crate::Why::Limit) past `limit`, or past a cap the
+    /// reader reads under; [`Why::Locked`](crate::Why::Locked) where it takes
+    /// a password the reader wasn't given, or doesn't decrypt;
     /// [`Why::Filter`](crate::Why::Filter) through a filter the reader doesn't
-    /// decode; [`Why::Source`](crate::Why::Source) where the source of the
+    /// decode, or with a `/Filter` or `/DecodeParms` it can't take as written;
+    /// [`Why::Source`](crate::Why::Source) where the source of the
     /// file's bytes didn't give them, or the reader has none, as a document
     /// alone hasn't. `id` is the stream's own number: a caller has followed
     /// any reference to it.

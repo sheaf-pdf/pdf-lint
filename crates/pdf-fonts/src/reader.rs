@@ -232,8 +232,8 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> Reader<'_, O, S> {
 
     /// The content of stream `id`, its own number, decompressed within `budget`
     /// and charged to it: every stream a font reads goes through here. None where
-    /// it doesn't decode: its data decodes to nothing, or isn't there
-    /// ([`Why::Damaged`]), or is through a filter the reader doesn't decode
+    /// it doesn't decode: its decode fails before it gives a byte, or it isn't there
+    /// ([`Why::Damaged`]), or its filters are ones the reader doesn't decode
     /// ([`Why::Filter`]), what the font makes of having none being what's told.
     /// Too large past `budget`, or past a cap of what gives it ([`Why::Limit`]),
     /// whatever gave it.

@@ -199,16 +199,11 @@ pub fn encrypted(
     let user = [pdf_crypt::Encoded::verbatim(settings.user)];
     let handler =
         pdf_crypt::Handler::open(&values, settings.id, &user).expect("the writer's opens");
-    let encrypt = |ObjectId {
-                       number: n,
-                       generation: g,
-                   }: ObjectId,
-                   data: &[u8],
-                   stream: bool| {
-        let iv = [n as u8; 16];
+    let encrypt = |id: ObjectId, data: &[u8], stream: bool| {
+        let iv = [id.number as u8; 16];
         match stream {
-            true => writer::encrypt_stream(&handler, (n, g), data, None, iv),
-            false => writer::encrypt_string(&handler, (n, g), data, iv),
+            true => writer::encrypt_stream(&handler, id.into(), data, None, iv),
+            false => writer::encrypt_string(&handler, id.into(), data, iv),
         }
         .expect("the writer's own method")
     };

@@ -1,8 +1,8 @@
 //! What [`check`](super::check) judges: the facts of a file as written, as raw
-//! as a reader can give them, no object model's type among them. Every position
-//! is from the file's first byte, as a section's rows have them. A value the
-//! file gives is given as it stands, wrong or not: what's wrong with it is for
-//! the check to say.
+//! as a reader can give them, no document model's type among them, an object by
+//! its pdf-objects [`ObjectId`]. Every position is from the file's first byte,
+//! as a section's rows have them. A value the file gives is given as it stands,
+//! wrong or not: what's wrong with it is for the check to say.
 
 use crate::plan::{Graph, Kind};
 use pdf_objects::ObjectId;

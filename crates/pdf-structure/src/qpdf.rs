@@ -184,12 +184,9 @@ impl Qpdf {
             .map(String::from),
         );
         args.push(format!("--decode-level={}", self.level));
-        args.extend(ids.iter().map(
-            |ObjectId {
-                 number: n,
-                 generation: g,
-             }| format!("--json-object={n},{g}"),
-        ));
+        args.extend(
+            (ids.iter()).map(|id| format!("--json-object={},{}", id.number, id.generation)),
+        );
         args.push(self.file.display().to_string());
         args
     }

@@ -1076,10 +1076,12 @@ mod through_streams {
         assert_eq!(asked(&small, ObjectId::new(3, 0), 1000), Err(Why::Limit));
     }
 
-    /// A stream that decodes in part is what decoded, as PDFium takes it; damaged
-    /// where nothing did, or where it isn't a stream or there; through a filter the
-    /// reader can't decode, the filter's, by its name; and listing more filters than
-    /// the reader takes, past its cap.
+    /// A stream that decodes in part is what decoded, as PDFium takes it, and one
+    /// that decodes cleanly to nothing is empty; damaged where its decode fails
+    /// before it gives a byte, or where it isn't a stream or there; through a filter
+    /// the reader can't decode, the filter's, by its name, and so with a `/Filter`
+    /// it can't take as written; and listing more filters than the reader takes,
+    /// past its cap.
     #[test]
     fn what_doesn_t_decode_whole() {
         let many: Vec<Object> = (0..26).map(|_| Object::from("ASCIIHexDecode")).collect();
@@ -1099,6 +1101,12 @@ mod through_streams {
             (4, dict! { "Not" => "a stream" }.into()),
             (5, Body::stream(dict! { "Filter" => many }, b"41>")),
             (6, Body::Object(Object::from(2))),
+            (7, Body::stream(dict! {}, b"")),
+            (
+                8,
+                Body::stream(dict! { "Filter" => "FlateDecode" }, &fixture::zlib(b"")),
+            ),
+            (9, Body::stream(dict! { "Filter" => 5 }, b"data")),
         ];
         let file = fixture::file("1.7", &objects, dict! {}, Xref::Table);
         let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
@@ -1114,6 +1122,14 @@ mod through_streams {
         let said = Streams::decoded(&reading, ObjectId::new(3, 0), 100).unwrap_err();
         assert!(said.message.contains("/JBIG2Decode"), "{said}");
         assert_eq!(asked(&reading, ObjectId::new(5, 0), 100), Err(Why::Limit));
+        for n in [7, 8] {
+            assert_eq!(
+                asked(&reading, ObjectId::new(n, 0), 100),
+                Ok(Vec::new()),
+                "{n}"
+            );
+        }
+        assert_eq!(asked(&reading, ObjectId::new(9, 0), 100), Err(Why::Filter));
     }
 
     /// An object that doesn't parse is damaged, as its resolver says; one past a cap

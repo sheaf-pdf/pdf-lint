@@ -885,9 +885,10 @@ impl Document {
     }
 
     /// Each object that reads whose id is in `range`, by number: a
-    /// number's every generation, `n`'s, is `ObjectId::new(n, 0)..=ObjectId::new(n, u16::MAX)`.
-    /// Panics where [`BTreeMap::range`] does: a range that starts after it
-    /// ends, or starts and ends at one id it leaves out.
+    /// number's every generation, `n`'s, is
+    /// `ObjectId::new(n, 0)..=ObjectId::new(n, u16::MAX)`. Panics where
+    /// [`BTreeMap::range`] does: a range that starts after it ends, or
+    /// starts and ends at one id it leaves out.
     pub fn range(
         &self,
         range: impl RangeBounds<ObjectId>,

@@ -1,4 +1,4 @@
-//! Small files written from hand-written bodies, with no object model: what both
+//! Small files written from hand-written bodies, with no document model: what both
 //! the tests of what's written and the tests against qpdf go through. Each is
 //! built from outside the crate, as a caller of any model builds one, so a way in
 //! that's missing doesn't compile.
