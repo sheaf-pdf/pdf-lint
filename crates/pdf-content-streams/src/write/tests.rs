@@ -507,10 +507,10 @@ fn names_are_bound_at_the_end() {
     // The header's name, taken by something else in the page's
     // resources: the next name up. Bound to the header's own list, it
     // stays.
-    let same = (1, 0);
+    let same = ObjectId::new(1, 0);
     let objects = BTreeMap::from([
         (same, Object::from(list("Header"))),
-        ((2, 0), Object::from(same)),
+        (ObjectId::new(2, 0), Object::from(same)),
     ]);
     let taken = |bound: Object| {
         let resources = Object::from(dict! {
@@ -522,9 +522,9 @@ fn names_are_bound_at_the_end() {
         (list("Other").into(), true),
         (Object::from(same), false),
         (list("Header").into(), false),
-        (Object::from((99, 0)), true),
+        (Object::from(ObjectId::new(99, 0)), true),
         // A reference to a reference, followed.
-        (Object::from((2, 0)), false),
+        (Object::from(ObjectId::new(2, 0)), false),
     ] {
         let mut w = ContentWriter::new();
         draw(&mut w);
@@ -573,16 +573,16 @@ fn resources_by_reference_are_followed() {
     // Objects 1 to 9 each refer to the next; 10 is the category, 11 the
     // resources, 12 a stream of the category.
     let mut objects: BTreeMap<ObjectId, Object> = (1..10)
-        .map(|n| ((n, 0), Object::reference(n + 1)))
+        .map(|n| (ObjectId::new(n, 0), Object::reference(n + 1)))
         .collect();
-    objects.insert((10, 0), Object::from(category.clone()));
+    objects.insert(ObjectId::new(10, 0), Object::from(category.clone()));
     objects.insert(
-        (11, 0),
+        ObjectId::new(11, 0),
         Object::from(dict! { "Properties" => Object::reference(10) }),
     );
     let mut stream = Stream::default();
     stream.dict = category;
-    objects.insert((12, 0), Object::from(stream));
+    objects.insert(ObjectId::new(12, 0), Object::from(stream));
     let bumped = |resources: Object| {
         let (_, needs) = w.named(&reserved(&objects, &resources));
         needs.0[0].name != name
@@ -616,12 +616,15 @@ fn a_placed_stream_is_told_by_its_reference_alone() {
     };
     for (object, by_digest) in [
         (stream(Data::At(Span::new(None, 10, 20))), false),
-        (stream(Data::At(Span::new(Some((4, 0)), 0, 7))), false),
+        (
+            stream(Data::At(Span::new(Some(ObjectId::new(4, 0)), 0, 7))),
+            false,
+        ),
         (stream(Data::Unplaced), false),
         (stream(Data::Bytes(b"q\n".to_vec())), true),
         (Object::from(vec![stream(Data::Unplaced)]), false),
     ] {
-        let objects = BTreeMap::from([((5, 0), object.clone())]);
+        let objects = BTreeMap::from([(ObjectId::new(5, 0), object.clone())]);
         let bound = |res: &Res| {
             let named = name(res, &Reserved::default());
             let resources = Object::from(dict! {
@@ -634,7 +637,7 @@ fn a_placed_stream_is_told_by_its_reference_alone() {
         let (named, kept) = bound(&res);
         assert_eq!(name(&res, &kept) == named, by_digest, "{object:?}");
         // By its number, always.
-        let res = Res::written((5, 0));
+        let res = Res::written(ObjectId::new(5, 0));
         let (named, kept) = bound(&res);
         assert_eq!(name(&res, &kept), named, "{object:?}");
     }
@@ -653,14 +656,14 @@ fn each_object_names_bind_is_read_once() {
         name
     };
     let big = Object::from((0..10_000).map(Object::from).collect::<Vec<_>>());
-    let mut objects = BTreeMap::from([((5, 0), big)]);
+    let mut objects = BTreeMap::from([(ObjectId::new(5, 0), big)]);
     let mut names = Dict::new();
     for i in 0..200u32 {
         // Half bound straight to object 5, half through one of their own.
         let to = match i % 2 {
             0 => 5,
             _ => {
-                objects.insert((100 + i, 0), Object::reference(5));
+                objects.insert(ObjectId::new(100 + i, 0), Object::reference(5));
                 100 + i
             }
         };
@@ -670,7 +673,7 @@ fn each_object_names_bind_is_read_once() {
     let resources = Object::from(dict! { "XObject" => names });
     let five = Cell::new(0);
     let resolve = |id: ObjectId| {
-        five.set(five.get() + usize::from(id == (5, 0)));
+        five.set(five.get() + usize::from(id == ObjectId::new(5, 0)));
         objects.get(&id)
     };
     let kept = Reserved::read(&resolve, Some(&resources));
@@ -687,7 +690,7 @@ fn each_object_names_bind_is_read_once() {
     // A name of the writer's binding the very resource, through a
     // reference of its own, is used again.
     let mut w = ContentWriter::new();
-    w.draw(Res::of([objects[&(5, 0)].clone()]));
+    w.draw(Res::of([objects[&ObjectId::new(5, 0)].clone()]));
     let (_, needs) = w.named(&Reserved::default());
     let mut bound = Dict::new();
     bound.push(&needs.0[0].name, Object::reference(101));
@@ -700,7 +703,7 @@ fn each_object_names_bind_is_read_once() {
 /// after another, each borrowed for its call alone.
 #[test]
 fn a_resolver_reads_resources_made_after_it() {
-    let objects = BTreeMap::from([((1, 0), Object::from(list("Header")))]);
+    let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(list("Header")))]);
     let resolve = |id: ObjectId| objects.get(&id);
     let mut read = 0;
     for name in ["ShAAAAAA", "ShAAAAAB"] {
@@ -716,7 +719,7 @@ fn a_resolver_reads_resources_made_after_it() {
 /// its own.
 #[test]
 fn a_resource_in_two_categories_is_a_need_in_each() {
-    let form = Res::written((7, 0));
+    let form = Res::written(ObjectId::new(7, 0));
     let mut w = ContentWriter::new();
     w.draw(form.clone());
     w.begin_text();
@@ -763,20 +766,20 @@ fn needs_are_one_a_resource_in_first_use_order() {
     let (helvetica, zapf) = (font("Helvetica"), font("ZapfDingbats"));
     let mut w = ContentWriter::new();
     w.font(helvetica.clone(), 9.0);
-    w.draw(Res::written((7, 0)));
+    w.draw(Res::written(ObjectId::new(7, 0)));
     w.font(zapf.clone(), 9.0);
     w.font(helvetica.clone(), 10.0);
-    w.draw(Res::written((7, 0)));
-    w.draw(Res::written((8, 0)));
+    w.draw(Res::written(ObjectId::new(7, 0)));
+    w.draw(Res::written(ObjectId::new(8, 0)));
     let (text, needs) = written(w);
     let kinds: Vec<_> = needs.0.iter().map(|n| (n.kind, &n.res.body)).collect();
     assert_eq!(
         kinds,
         [
             (ResKind::Font, &helvetica.body),
-            (ResKind::XObject, &ResBody::Written((7, 0))),
+            (ResKind::XObject, &ResBody::Written(ObjectId::new(7, 0))),
             (ResKind::Font, &zapf.body),
-            (ResKind::XObject, &ResBody::Written((8, 0))),
+            (ResKind::XObject, &ResBody::Written(ObjectId::new(8, 0))),
         ]
     );
     let name = |i: usize| String::from_utf8_lossy(&needs.0[i].name).into_owned();
@@ -798,7 +801,7 @@ fn needs_are_one_a_resource_in_first_use_order() {
 fn the_names_kept_are_taken_and_forgotten() {
     let mut w = ContentWriter::new();
     w.begin_marked("Artifact", list("Header"));
-    w.draw(Res::written((3, 0)));
+    w.draw(Res::written(ObjectId::new(3, 0)));
     let (_, needs) = w.named(&Reserved::default());
     let resources = Object::from(dict! { "Font" => dict! { "F1" => Object::reference(1) } });
     let mut kept = reserved(&BTreeMap::new(), &resources);
@@ -821,11 +824,11 @@ fn the_names_kept_are_taken_and_forgotten() {
     assert_eq!(kept.names().count(), 2);
     // Taken for another resource, a name is bumped; forgotten, it's free.
     let mut other = ContentWriter::new();
-    other.draw(Res::written((4, 0)));
+    other.draw(Res::written(ObjectId::new(4, 0)));
     let (_, own) = other.named(&Reserved::default());
     let mut taken = Reserved::default();
     taken.take(&ResourceNeeds(vec![Need {
-        res: Res::written((5, 0)),
+        res: Res::written(ObjectId::new(5, 0)),
         ..own.0[0].clone()
     }]));
     assert_eq!(other.named(&taken).1.0[0].name, next(&own.0[0].name));
@@ -837,7 +840,7 @@ fn the_names_kept_are_taken_and_forgotten() {
 #[test]
 fn an_image_fills_its_target() {
     let mut w = ContentWriter::new();
-    w.image(Res::written((6, 0)), 1.0, 2.0, 3.0, 4.0);
+    w.image(Res::written(ObjectId::new(6, 0)), 1.0, 2.0, 3.0, 4.0);
     let (text, needs) = written(w);
     let name = String::from_utf8_lossy(&needs.0[0].name);
     assert_eq!(text, format!("q\n3 0 0 4 1 2 cm\n/{name} Do\nQ\n"));
@@ -929,7 +932,7 @@ fn what_each_call_writes_reads_back_as_written() {
     w.begin_tagged(tags[1]);
     w.begin_marked(tags[2], header.clone());
     w.gstate(state);
-    w.draw(Res::written((9, 0)));
+    w.draw(Res::written(ObjectId::new(9, 0)));
     w.dash(&[3.0, 1.0 / 3.0], 2.0);
     w.transform([1.5, -0.25, 0.0, 1.0, 1e6, -7.0]);
     let (content, needs) = w.finish(&Reserved::default());
@@ -986,7 +989,7 @@ fn what_each_call_writes_reads_back_as_written() {
     let given: Vec<_> = needs.0.iter().map(|n| (n.kind, n.name.clone())).collect();
     assert_eq!(named, given);
     let res: Vec<_> = needs.0.iter().map(|n| &n.res).collect();
-    let written_9 = Res::written((9, 0));
+    let written_9 = Res::written(ObjectId::new(9, 0));
     assert_eq!(
         res,
         [&helvetica, &Res::dict(header), &state.res(), &written_9]

@@ -363,17 +363,14 @@ fn by_position(
 /// file hasn't it; or why it doesn't read, in the same words. No resolve
 /// found the source failing, and none was counted.
 fn said_as_got<S: ByteSource>(reading: &Reading<S>) {
-    for id in reading.ids().chain([(u32::MAX, 0)]) {
+    for id in reading.ids().chain([ObjectId::new(u32::MAX, 0)]) {
         let said = reading.try_resolve(id);
         match (&said, reading.get(id)) {
             (Ok(Some(object)), Ok(got)) => assert!(std::ptr::eq(*object, got), "{id:?}"),
             (Ok(None), Err(Error::Unread(Unread::Missing { .. }))) => {}
             (Err(why), Err(Error::Unread(unread))) => {
                 assert_eq!(why.id, id);
-                assert_eq!(
-                    why.message,
-                    format!("{} {} R doesn't read: {unread}", id.0, id.1)
-                );
+                assert_eq!(why.message, format!("{id} R doesn't read: {unread}"));
             }
             (said, got) => panic!("{id:?} resolves to {said:?}, and reads as {got:?}"),
         }
@@ -385,17 +382,14 @@ fn said_as_got<S: ByteSource>(reading: &Reading<S>) {
 /// [`said_as_got`], of a document and [`Source::get`].
 fn said_of_document(doc: &Document) {
     let resolve = doc;
-    for id in doc.ids().into_iter().chain([(u32::MAX, 0)]) {
+    for id in doc.ids().into_iter().chain([ObjectId::new(u32::MAX, 0)]) {
         let said = resolve.try_resolve(id);
         match (&said, doc.get(id)) {
             (Ok(Some(object)), Ok(got)) => assert!(std::ptr::eq(*object, got), "{id:?}"),
             (Ok(None), Err(Unread::Missing { .. })) => {}
             (Err(why), Err(unread)) => {
                 assert_eq!(why.id, id);
-                assert_eq!(
-                    why.message,
-                    format!("{} {} R doesn't read: {unread}", id.0, id.1)
-                );
+                assert_eq!(why.message, format!("{id} R doesn't read: {unread}"));
             }
             (said, got) => panic!("{id:?} resolves to {said:?}, and reads as {got:?}"),
         }
@@ -509,7 +503,7 @@ fn ordered<S: ByteSource>(reading: &Reading<S>, choice: u16) -> Vec<ObjectId> {
                 .filter(|(_, _, entry)| matches!(entry, XrefEntry::Compressed { .. }))
                 .map(|(n, _, _)| n)
                 .collect();
-            ids.sort_by_key(|id| members.binary_search(&id.0).is_err());
+            ids.sort_by_key(|id| members.binary_search(&id.number).is_err());
         }
     }
     ids
@@ -615,11 +609,11 @@ fn pruned(doc: &Document) {
         "each id taken unreached"
     );
     for mut doc in [doc.clone(), pruned] {
-        let held: HashSet<u32> = doc.ids().into_iter().map(|(n, _)| n).collect();
+        let held: HashSet<u32> = doc.ids().into_iter().map(|id| id.number).collect();
         let (one, two) = (doc.add(Object::null()), doc.add(Object::null()));
         for id in [one, two] {
             assert!(
-                id.0 != 0 && id.1 == 0 && !held.contains(&id.0),
+                id.number != 0 && id.generation == 0 && !held.contains(&id.number),
                 "{id:?} added"
             );
         }
@@ -747,18 +741,23 @@ impl Renumbering {
         let map = match (byte & 0x7f) % 5 {
             1 => ids.iter().map(|&id| (id, id)).collect(),
             2 => {
-                let numbers = ids.iter().rev().map(|id| id.0);
+                let numbers = ids.iter().rev().map(|id| id.number);
                 (ids.iter().zip(numbers))
-                    .map(|(&id, n)| (id, (n, id.1)))
+                    .map(|(&id, n)| (id, ObjectId::new(n, id.generation)))
                     .collect()
             }
             3 => {
-                let top = (ids.iter().map(|id| id.0))
+                let top = (ids.iter().map(|id| id.number))
                     .chain(free.iter().copied())
                     .max();
                 let past = top.unwrap_or(0).saturating_add(1);
                 (ids.iter())
-                    .map(|&(n, g)| ((n, g), (n.saturating_add(past), g)))
+                    .map(|&id| {
+                        (
+                            id,
+                            ObjectId::new(id.number.saturating_add(past), id.generation),
+                        )
+                    })
                     .collect()
             }
             4 => {
@@ -768,7 +767,7 @@ impl Renumbering {
                     while free.contains(&next) {
                         next += 1;
                     }
-                    map.insert(id, (next, 0));
+                    map.insert(id, ObjectId::new(next, 0));
                     next += 1;
                 }
                 map
@@ -818,16 +817,16 @@ impl Renumbering {
             stays.extend(e.at());
             stays.extend(e.dictionary().iter().flat_map(|(_, v)| v.references()));
         }
-        let numbers: BTreeSet<u32> = stays.iter().map(|id| id.0).collect();
-        let mut next = (map.values().map(|at| at.0.saturating_add(1)))
+        let numbers: BTreeSet<u32> = stays.iter().map(|id| id.number).collect();
+        let mut next = (map.values().map(|at| at.number.saturating_add(1)))
             .chain([size])
             .max()
             .unwrap_or(size);
         for (id, at) in &mut map {
             if stays.contains(id) {
                 *at = *id;
-            } else if numbers.contains(&at.0) {
-                *at = (next, at.1);
+            } else if numbers.contains(&at.number) {
+                *at = ObjectId::new(next, at.generation);
                 next = next.saturating_add(1);
             }
         }
@@ -840,7 +839,7 @@ impl Renumbering {
     /// The last number a whole file of `doc` writes an object at, under it.
     fn last(&self, doc: &Document) -> u32 {
         (doc.objects().filter_map(|(id, _)| self.at(id)))
-            .map(|id| id.0)
+            .map(|id| id.number)
             .max()
             .unwrap_or(0)
     }
@@ -888,7 +887,7 @@ fn compared(data: &[u8]) -> [bool; 3] {
     if renumbering.0.is_some() {
         options.renumber = Some(&to);
     }
-    let last = doc.objects().next_back().map_or(0, |(id, _)| id.0);
+    let last = doc.objects().next_back().map_or(0, |(id, _)| id.number);
     let listed = last < LISTED && renumbering.last(&doc) < LISTED;
     let mut compared = [false; 3];
     if listed {
@@ -1109,7 +1108,7 @@ fn updated(
         assert_eq!(written.base.renumbered, renumbering.0.is_some());
         for (at, object) in doc.objects() {
             let moves = to(at) != Some(at) || object.references().any(|r| to(r) != Some(r));
-            let listed = written.section.lists(to(at).expect("numbered").0);
+            let listed = written.section.lists(to(at).expect("numbered").number);
             assert_eq!(
                 listed,
                 at == id || moves,
@@ -1564,8 +1563,14 @@ mod tests {
         let doc = bytes::read(&updated());
         assert!(doc.update.is_some(), "the update is one");
         let doc = bytes::read(&in_an_object_stream());
-        let at = doc.get((3, 0)).map(|o| o.at.and_then(|at| at.stream));
-        assert_eq!(at, Ok(Some((4, 0))), "the page is in the object stream");
+        let at = doc
+            .get(ObjectId::new(3, 0))
+            .map(|o| o.at.and_then(|at| at.stream));
+        assert_eq!(
+            at,
+            Ok(Some(ObjectId::new(4, 0))),
+            "the page is in the object stream"
+        );
 
         let mut random = Random(0x9e37_79b9_7f4a_7c15);
         let fragments: &[&[u8]] = &[

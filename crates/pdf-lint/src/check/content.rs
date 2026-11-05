@@ -1848,7 +1848,10 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
 
+    use pdf_objects::Streams;
     use pdf_structure::fixture;
+
+    use crate::{Unreadable, Why};
 
     use pdf_content_streams::{Balance, ErrorKind, MarkedNest, Properties};
 
@@ -1860,12 +1863,22 @@ mod tests {
     use crate::version::Version;
 
     /// A source that answers as the one it wraps, and keeps each stream it's
-    /// asked the data of, and within how much; but gives none of
+    /// asked the data of, either way, and within how much; but gives none of
     /// `without`'s.
     struct Counting<'s> {
         source: &'s dyn Source,
         asked: RefCell<Vec<(ObjectId, usize)>>,
         without: Option<ObjectId>,
+    }
+
+    impl Streams for Counting<'_> {
+        fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+            self.asked.borrow_mut().push((id, limit));
+            match Some(id) == self.without {
+                true => Err(Unreadable::new(id, Why::Source, "not given")),
+                false => Streams::decoded(self.source, id, limit),
+            }
+        }
     }
 
     impl Source for Counting<'_> {
@@ -1885,7 +1898,7 @@ mod tests {
             self.source.header_version()
         }
 
-        fn warnings(&self) -> &[Warning] {
+        fn warnings(&self) -> Cow<'_, [Warning]> {
             self.source.warnings()
         }
 
@@ -1893,7 +1906,7 @@ mod tests {
             self.source.size()
         }
 
-        fn metadata(&self) -> Option<&[u8]> {
+        fn metadata(&self) -> Option<Cow<'_, [u8]>> {
             self.source.metadata()
         }
 
@@ -1901,8 +1914,8 @@ mod tests {
             self.source.record(id)
         }
 
-        fn decoded(&self, stream: ObjectId) -> Option<&[u8]> {
-            self.source.decoded(stream)
+        fn held(&self, stream: ObjectId) -> Option<&[u8]> {
+            self.source.held(stream)
         }
 
         fn revisions(&self) -> &[Revision] {
@@ -1986,7 +1999,7 @@ mod tests {
     /// The streams of [`asked`], sorted, every object held.
     fn streams(file: &[u8]) -> Vec<u32> {
         let mut asked: Vec<u32> = (asked(file, &Hold::All(Made::Merged), None).into_iter())
-            .map(|((n, _), _)| n)
+            .map(|(id, _)| id.number)
             .collect();
         asked.sort_unstable();
         asked
@@ -2077,12 +2090,12 @@ mod tests {
             (10, stream("", "q Q")),
             (11, stream("", "q Q")),
         ]);
-        let hold = Hold::Only([((3, 0), Made::Built)].into());
+        let hold = Hold::Only([(ObjectId::new(3, 0), Made::Built)].into());
         let mut asked: Vec<ObjectId> = (asked(&file(&objects), &hold, None).into_iter())
             .map(|(id, _)| id)
             .collect();
         asked.sort_unstable();
-        assert_eq!(asked, [(10, 0), (11, 0)]);
+        assert_eq!(asked, [ObjectId::new(10, 0), ObjectId::new(11, 0)]);
     }
 
     /// Three pages of a stream each: 10 bytes, `second`, and 30 bytes.
@@ -2111,24 +2124,40 @@ mod tests {
         let hold = Hold::All(Made::Merged);
         let asked_within = |budget| asked(&file, &hold, budget);
         let room = Limits::DEFAULT.content;
-        let each = [((10, 0), room), ((11, 0), room), ((12, 0), room)];
+        let each = [
+            (ObjectId::new(10, 0), room),
+            (ObjectId::new(11, 0), room),
+            (ObjectId::new(12, 0), room),
+        ];
         assert_eq!(asked_within(None), each);
         assert_eq!(asked_within(Some(CONTENT_BUDGET)), each);
-        let all = [((10, 0), 100), ((11, 0), 90), ((12, 0), 70)];
+        let all = [
+            (ObjectId::new(10, 0), 100),
+            (ObjectId::new(11, 0), 90),
+            (ObjectId::new(12, 0), 70),
+        ];
         assert_eq!(asked_within(Some(100)), all);
         // Spent whole by the first two.
-        assert_eq!(asked_within(Some(30)), [((10, 0), 30), ((11, 0), 20)]);
+        assert_eq!(
+            asked_within(Some(30)),
+            [(ObjectId::new(10, 0), 30), (ObjectId::new(11, 0), 20)]
+        );
         // The second cut off, spending what's left.
-        assert_eq!(asked_within(Some(25)), [((10, 0), 25), ((11, 0), 15)]);
-        assert_eq!(asked_within(Some(10)), [((10, 0), 10)]);
-        assert_eq!(asked_within(Some(0)), [((10, 0), 0)]);
+        assert_eq!(
+            asked_within(Some(25)),
+            [(ObjectId::new(10, 0), 25), (ObjectId::new(11, 0), 15)]
+        );
+        assert_eq!(asked_within(Some(10)), [(ObjectId::new(10, 0), 10)]);
+        assert_eq!(asked_within(Some(0)), [(ObjectId::new(10, 0), 0)]);
         // Hex data without its `>`, all of it decoded, and a fault.
         let hex: String = (b"q Q ".repeat(5).iter())
             .map(|b| format!("{b:02x}"))
             .collect();
         let faulty = three_pages(stream("/Filter /ASCIIHexDecode", &hex));
         let opened = WithReading::new(&faulty[..], &[], &bytes::Options::DEFAULT).unwrap();
-        let Some(Err(bytes::Error::Decode(error))) = opened.decoded_within((11, 0), 100) else {
+        let Some(Err(bytes::Error::Decode(error))) =
+            opened.decoded_within(ObjectId::new(11, 0), 100)
+        else {
             panic!("hex data without its end decodes with a fault");
         };
         assert_eq!(error.data.len(), 20);
@@ -2147,7 +2176,7 @@ mod tests {
         };
         check(&counting, &Hold::All(Made::Merged), &Options::default());
         let room = Limits::DEFAULT.content;
-        assert_eq!(counting.asked.into_inner(), [((10, 0), room)]);
+        assert_eq!(counting.asked.into_inner(), [(ObjectId::new(10, 0), room)]);
     }
 
     /// What a check of `file`, read beside its reading, holding what `hold`
@@ -2163,7 +2192,7 @@ mod tests {
                 let data = opened.decoded_within(at.stream.unwrap(), usize::MAX);
                 let data = data.unwrap().unwrap();
                 let bytes = String::from_utf8_lossy(&data[at.start..at.end]).into_owned();
-                let object = f.object.unwrap().0;
+                let object = f.object.unwrap().number;
                 (
                     f.rule,
                     f.made,
@@ -2340,14 +2369,14 @@ mod tests {
             [
                 (
                     Rule::Balance,
-                    Some((31, 0)),
+                    Some(ObjectId::new(31, 0)),
                     "Root/Pages/Resources/Font/T3/CharProcs/a",
                     "FontType3",
                     "a"
                 ),
                 (
                     Rule::Balance,
-                    Some((21, 0)),
+                    Some(ObjectId::new(21, 0)),
                     "Root/Pages/Resources/Pattern/P",
                     "PatternType1",
                     "-"
@@ -3141,7 +3170,7 @@ mod tests {
         let before = report(&["Q 0 0 m S", "0 0 m S"]);
         let after = report(&["Q 0 0 m S", "Q Q Q n 0 0 m S"]);
         let since: Vec<_> = (after.since(&before).into_iter())
-            .map(|f| (f.object.unwrap().0, f.value.as_str()))
+            .map(|f| (f.object.unwrap().number, f.value.as_str()))
             .collect();
         assert_eq!(since, [(11, thrice), (11, level)]);
     }
@@ -3163,7 +3192,7 @@ mod tests {
             let file = file(&objects);
             let opened = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
             let hold = match held {
-                Some(n) => Hold::Only([((n, 0), Made::Merged)].into()),
+                Some(n) => Hold::Only([(ObjectId::new(n, 0), Made::Merged)].into()),
                 None => Hold::All(Made::Merged),
             };
             check(&opened, &hold, &Options::default())
@@ -3171,7 +3200,7 @@ mod tests {
         let found = |found: Vec<&Finding>| -> Vec<(u32, Rule, String)> {
             (found.into_iter())
                 .filter(|f| matches!(f.rule, Rule::Balance | Rule::Resource))
-                .map(|f| (f.object.unwrap().0, f.rule, f.value.clone()))
+                .map(|f| (f.object.unwrap().number, f.rule, f.value.clone()))
                 .collect()
         };
         let before = report("/Resources 40 0 R", "F1", None);
@@ -3206,7 +3235,12 @@ mod tests {
         let file = file(&objects);
         let open = "1 q left open at the end".to_string();
         let held = |objects: &[(u32, Made)]| {
-            let hold = Hold::Only(objects.iter().map(|&(n, made)| ((n, 0), made)).collect());
+            let hold = Hold::Only(
+                objects
+                    .iter()
+                    .map(|&(n, made)| (ObjectId::new(n, 0), made))
+                    .collect(),
+            );
             let found: Vec<_> = (found_held(&file, &hold).into_iter())
                 .map(|(rule, made, n, path, value, _)| (rule, made, n, path, value))
                 .collect();
@@ -3304,7 +3338,7 @@ mod tests {
             not_checked(&all, Some(5)),
             (vec![unchecked(DECODE), unchecked(BUDGET)], 0)
         );
-        let second = Hold::Only([((4, 0), Made::Built)].into());
+        let second = Hold::Only([(ObjectId::new(4, 0), Made::Built)].into());
         assert_eq!(not_checked(&second, None), (vec![], 1));
         assert_eq!(not_checked(&second, Some(5)), (vec![unchecked(BUDGET)], 0));
         // The column `-`.
@@ -3423,7 +3457,7 @@ mod tests {
                     None => Vec::new(),
                 };
                 (
-                    f.object.unwrap().0,
+                    f.object.unwrap().number,
                     f.path.clone(),
                     format!("{}/{}", f.table, f.key),
                     f.value.clone(),
@@ -3844,12 +3878,16 @@ mod tests {
                 unused: true,
                 ..Options::default()
             };
-            let hold = Hold::Only(held.iter().map(|&(n, made)| ((n, 0), made)).collect());
+            let hold = Hold::Only(
+                held.iter()
+                    .map(|&(n, made)| (ObjectId::new(n, 0), made))
+                    .collect(),
+            );
             let report = check(&opened, &hold, &options);
             let of = |rule| -> Vec<(u32, Made)> {
                 (report.findings.iter())
                     .filter(|f| f.rule == rule)
-                    .map(|f| (f.object.unwrap().0, f.made))
+                    .map(|f| (f.object.unwrap().number, f.made))
                     .collect()
             };
             let counted: usize = report.unused.values().sum();
@@ -4019,12 +4057,15 @@ mod tests {
             let without = Counting {
                 source: &opened,
                 asked: RefCell::new(Vec::new()),
-                without: Some((n, 0)),
+                without: Some(ObjectId {
+                    number: n,
+                    generation: 0,
+                }),
             };
             let report = check(&without, &Hold::All(Made::Merged), &Options::default());
             let found: Vec<_> = (report.findings.iter())
                 .filter(|f| counted(f.rule, &f.key))
-                .map(|f| f.object.unwrap().0)
+                .map(|f| f.object.unwrap().number)
                 .collect();
             let not_given: Vec<_> = (report.unchecked.iter())
                 .filter(|(u, _)| u.why == UNGIVEN)

@@ -271,7 +271,7 @@ impl<'d> Prepared<'d> {
             let packable = pack
                 && !alone.contains(id)
                 && !self.kept_out.contains(id)
-                && write::packable((id.0, 0), object);
+                && write::packable(ObjectId::new(id.number, 0), object);
             let late = self.font_files.contains(id) || image(object);
             (graph.object(*id, refs.iter().copied()))
                 .packable(packable)
@@ -334,7 +334,7 @@ fn dictionary_id(
 ) -> Result<ObjectId, Error> {
     if let Some(at) = encryptor.at() {
         return match body_of(bodies, at) {
-            Some(_) => Err(Error::Write(write::Error::EncryptAt(at.0))),
+            Some(_) => Err(Error::Write(write::Error::EncryptAt(at.number))),
             None => Ok(at),
         };
     }
@@ -343,9 +343,12 @@ fn dictionary_id(
         let references = body.object().references();
         std::iter::once(*id).chain(references)
     });
-    let last = named.chain(trailer).map(|(n, _)| n).max().unwrap_or(0);
+    let last = named.chain(trailer).map(|id| id.number).max().unwrap_or(0);
     match last.checked_add(1) {
-        Some(past) => Ok((past, 0)),
+        Some(past) => Ok(ObjectId {
+            number: past,
+            generation: 0,
+        }),
         None => Err(Error::Write(write::Error::Number(last))),
     }
 }

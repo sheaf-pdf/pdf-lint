@@ -380,13 +380,13 @@ mod tests {
         assert!(reading.trailer().unwritten.is_none());
         let opened = source.read();
         assert!(opened <= 5 * 4096, "{opened} bytes read to open it");
-        assert!(reading.get((1, 0)).is_ok());
+        assert!(reading.get(ObjectId::new(1, 0)).is_ok());
         let read = source.read();
         assert!(
             read < opened + (8 << 10),
             "{read} bytes read to read its catalog"
         );
-        assert!(reading.get((3, 0)).is_ok());
+        assert!(reading.get(ObjectId::new(3, 0)).is_ok());
         assert!(source.read() > 8 << 20);
         assert_eq!(reading.into_document().unwrap(), read_opened(&file, &[]));
     }
@@ -627,13 +627,19 @@ mod tests {
             "<< /Size 4 /Root 1 0 R >>",
         );
         let doc = read(&file);
-        assert!(doc.get((3, 0)).is_err());
+        assert!(doc.get(ObjectId::new(3, 0)).is_err());
         let in_memory = Reading::open(&file[..], &Options::DEFAULT).unwrap();
         let resolve = &in_memory;
-        assert_eq!(resolve.resolve((2, 0)), doc.get((2, 0)).ok());
-        assert!(in_memory.record((2, 0)).is_some());
         assert_eq!(
-            (resolve.resolve((3, 0)), resolve.resolve((4, 0))),
+            resolve.resolve(ObjectId::new(2, 0)),
+            doc.get(ObjectId::new(2, 0)).ok()
+        );
+        assert!(in_memory.record(ObjectId::new(2, 0)).is_some());
+        assert_eq!(
+            (
+                resolve.resolve(ObjectId::new(3, 0)),
+                resolve.resolve(ObjectId::new(4, 0))
+            ),
             (None, None)
         );
         let at = find(&file, b"2 0 obj").unwrap();
@@ -642,13 +648,17 @@ mod tests {
             let reading = open(&source, &[], &Options::DEFAULT, bound).unwrap();
             let resolve = &reading;
             source.fail_at(at);
-            assert_eq!(resolve.resolve((2, 0)), None, "{bound}");
+            assert_eq!(resolve.resolve(ObjectId::new(2, 0)), None, "{bound}");
             assert!(source.failed(), "{bound}: no read at {at}");
-            assert!(reading.record((2, 0)).is_none(), "{bound}");
-            assert_eq!(resolve.resolve((2, 0)), doc.get((2, 0)).ok(), "{bound}");
-            assert!(reading.record((2, 0)).is_some(), "{bound}");
-            assert_eq!(resolve.resolve((3, 0)), None, "{bound}");
-            assert_eq!(resolve.resolve((4, 0)), None, "{bound}");
+            assert!(reading.record(ObjectId::new(2, 0)).is_none(), "{bound}");
+            assert_eq!(
+                resolve.resolve(ObjectId::new(2, 0)),
+                doc.get(ObjectId::new(2, 0)).ok(),
+                "{bound}"
+            );
+            assert!(reading.record(ObjectId::new(2, 0)).is_some(), "{bound}");
+            assert_eq!(resolve.resolve(ObjectId::new(3, 0)), None, "{bound}");
+            assert_eq!(resolve.resolve(ObjectId::new(4, 0)), None, "{bound}");
             assert_eq!(reading.into_document().unwrap(), doc, "{bound}");
         }
     }
@@ -657,8 +667,11 @@ mod tests {
     /// one the file hasn't, nothing; of one that doesn't read, the kind and
     /// its reason, which `get` gives too; and of one whose read the source
     /// fails, that, and counts it, by either way of asking, while a read by
-    /// `get` tells its caller, uncounted. Asked again it's the object, the
-    /// one `resolve` gives, and a failure kept nothing.
+    /// `get` tells its caller, uncounted. As a [`Source`], it says why as
+    /// `get` does, the source's failure as [`Unread::Source`], which a
+    /// resolver over any source says as the reading's own does; uncounted
+    /// too. Asked again it's the object, the one `resolve` gives, and a
+    /// failure kept nothing.
     #[test]
     fn a_reading_says_why_and_counts_what_the_source_failed() {
         let file = fixture::assembled(
@@ -673,14 +686,26 @@ mod tests {
         let doc = read(&file);
         let in_memory = Reading::open(&file[..], &Options::DEFAULT).unwrap();
         let resolve = &in_memory;
-        let two = resolve.try_resolve((2, 0)).unwrap();
-        assert_eq!(two, doc.get((2, 0)).ok());
-        assert!(std::ptr::eq(two.unwrap(), resolve.resolve((2, 0)).unwrap()));
-        assert_eq!(resolve.try_resolve((4, 0)), Ok(None));
-        let three = resolve.try_resolve((3, 0)).unwrap_err();
-        assert_eq!((three.id, three.why), ((3, 0), Why::Damaged));
-        let unread = in_memory.get((3, 0)).unwrap_err().to_string();
+        let two = resolve.try_resolve(ObjectId::new(2, 0)).unwrap();
+        assert_eq!(two, doc.get(ObjectId::new(2, 0)).ok());
+        assert!(std::ptr::eq(
+            two.unwrap(),
+            resolve.resolve(ObjectId::new(2, 0)).unwrap()
+        ));
+        assert_eq!(resolve.try_resolve(ObjectId::new(4, 0)), Ok(None));
+        let three = resolve.try_resolve(ObjectId::new(3, 0)).unwrap_err();
+        assert_eq!((three.id, three.why), (ObjectId::new(3, 0), Why::Damaged));
+        let unread = in_memory.get(ObjectId::new(3, 0)).unwrap_err().to_string();
         assert_eq!(three.message, format!("3 0 R doesn't read: {unread}"));
+        let said = Source::get(&in_memory, ObjectId::new(3, 0)).unwrap_err();
+        assert_eq!(said, *doc.unread().next().unwrap().1);
+        assert_eq!(said.unreadable(ObjectId::new(3, 0)), Some(three));
+        assert_eq!(
+            Source::get(&in_memory, ObjectId::new(4, 0)),
+            Err(Unread::Missing {
+                id: ObjectId::new(4, 0)
+            })
+        );
         assert_eq!(in_memory.failed_resolves(), 0);
         let at = find(&file, b"2 0 obj").unwrap();
         for bound in [true, false] {
@@ -689,31 +714,56 @@ mod tests {
             let resolve = &reading;
             assert_eq!(reading.failed_resolves(), 0, "{bound}");
             source.fail_at(at);
-            let failed = resolve.try_resolve((2, 0)).unwrap_err();
+            let failed = resolve.try_resolve(ObjectId::new(2, 0)).unwrap_err();
             assert!(source.failed(), "{bound}: no read at {at}");
-            assert_eq!((failed.id, failed.why), ((2, 0), Why::Source), "{bound}");
+            assert_eq!(
+                (failed.id, failed.why),
+                (ObjectId::new(2, 0), Why::Source),
+                "{bound}"
+            );
             assert_eq!(
                 failed.to_string(),
                 format!("2 0 R doesn't read: no byte {at}")
             );
             assert_eq!(reading.failed_resolves(), 1, "{bound}");
-            assert!(reading.record((2, 0)).is_none(), "{bound}");
+            assert!(reading.record(ObjectId::new(2, 0)).is_none(), "{bound}");
             source.fail_at(at);
-            assert_eq!(resolve.resolve((2, 0)), None, "{bound}");
+            assert_eq!(resolve.resolve(ObjectId::new(2, 0)), None, "{bound}");
             assert!(source.failed(), "{bound}: no read at {at}");
             assert_eq!(reading.failed_resolves(), 2, "{bound}");
             source.fail_at(at);
-            assert!(failed_at(reading.get((2, 0)).unwrap_err(), at), "{bound}");
+            assert!(
+                failed_at(reading.get(ObjectId::new(2, 0)).unwrap_err(), at),
+                "{bound}"
+            );
+            assert_eq!(reading.failed_resolves(), 2, "{bound}");
+            source.fail_at(at);
+            let unread = Source::get(&reading, ObjectId::new(2, 0)).unwrap_err();
+            assert!(source.failed(), "{bound}: no read at {at}");
+            let message = format!("no byte {at}");
+            assert_eq!(unread, Unread::Source { message }, "{bound}");
+            assert_eq!(unread.container(), None, "{bound}");
+            assert_eq!(
+                unread.unreadable(ObjectId::new(2, 0)),
+                Some(failed),
+                "{bound}"
+            );
+            assert!(reading.record(ObjectId::new(2, 0)).is_none(), "{bound}");
             assert_eq!(reading.failed_resolves(), 2, "{bound}");
             // What doesn't read and what isn't there aren't the source's.
-            assert_eq!(resolve.try_resolve((4, 0)), Ok(None), "{bound}");
-            let three = resolve.try_resolve((3, 0)).unwrap_err();
+            assert_eq!(
+                resolve.try_resolve(ObjectId::new(4, 0)),
+                Ok(None),
+                "{bound}"
+            );
+            let three = resolve.try_resolve(ObjectId::new(3, 0)).unwrap_err();
             assert_eq!(three.why, Why::Damaged, "{bound}");
-            assert_eq!(resolve.resolve((3, 0)), None, "{bound}");
+            assert_eq!(resolve.resolve(ObjectId::new(3, 0)), None, "{bound}");
             assert_eq!(reading.failed_resolves(), 2, "{bound}");
             // And it reads, whichever asks first.
-            let two = resolve.try_resolve((2, 0)).unwrap();
-            assert_eq!(two, doc.get((2, 0)).ok(), "{bound}");
+            let two = resolve.try_resolve(ObjectId::new(2, 0)).unwrap();
+            assert_eq!(two, doc.get(ObjectId::new(2, 0)).ok(), "{bound}");
+            assert_eq!(Source::get(&reading, ObjectId::new(2, 0)).ok(), two);
             assert_eq!(reading.failed_resolves(), 2, "{bound}");
         }
     }
@@ -723,7 +773,7 @@ mod tests {
     fn an_object_whose_read_fails_keeps_nothing_and_reads_again() {
         let file = fixture::file("1.7", &clean(), root(), Xref::Table);
         let at = find(&file, b"2 0 obj").unwrap();
-        fails_and_reads_again(&file, (2, 0), at);
+        fails_and_reads_again(&file, ObjectId::new(2, 0), at);
     }
 
     /// A stream whose `/Length` by reference fails to read keeps nothing,
@@ -732,7 +782,7 @@ mod tests {
     fn a_stream_whose_length_by_reference_fails_to_read_keeps_nothing() {
         let file = length_by_reference();
         let at = find(&file, b"4 0 obj").unwrap();
-        fails_and_reads_again(&file, (3, 0), at);
+        fails_and_reads_again(&file, ObjectId::new(3, 0), at);
     }
 
     /// An object in an object stream whose `/Filter` is a reference that
@@ -742,7 +792,7 @@ mod tests {
     fn an_object_streams_filter_by_reference_that_fails_to_read_keeps_nothing() {
         let file = filter_by_reference();
         let at = find(&file, b"6 0 obj").unwrap();
-        fails_and_reads_again(&file, (3, 0), at);
+        fails_and_reads_again(&file, ObjectId::new(3, 0), at);
     }
 
     /// An object in an object stream whose data fails to read keeps
@@ -752,7 +802,7 @@ mod tests {
         let (file, _) = compressed(false);
         let at = find(&file, b"4 0 obj").unwrap();
         let at = at + find(&file[at..], b"stream\n").unwrap() + b"stream\n".len();
-        fails_and_reads_again(&file, (3, 0), at);
+        fails_and_reads_again(&file, ObjectId::new(3, 0), at);
     }
 
     /// An object in an object stream whose data fails to read: the object
@@ -801,18 +851,24 @@ mod tests {
             let reading = open(&source, &[], &Options::DEFAULT, bound).unwrap();
             assert!(reading.warnings().is_empty(), "{bound}");
             source.fail_at(at);
-            assert!(failed_at(reading.get((3, 0)).unwrap_err(), at), "{bound}");
+            assert!(
+                failed_at(reading.get(ObjectId::new(3, 0)).unwrap_err(), at),
+                "{bound}"
+            );
             assert!(source.failed(), "{bound}");
             let warnings = reading.warnings();
             let [warning] = &warnings[..] else {
                 panic!("{bound}: {warnings:?}");
             };
-            assert_eq!(warning.object, Some((4, 0)), "{bound}");
+            assert_eq!(warning.object, Some(ObjectId::new(4, 0)), "{bound}");
             assert_eq!(warning.message, "4 0 obj has no endobj", "{bound}");
-            assert!(reading.record((4, 0)).is_some(), "{bound}");
-            assert!(reading.record((3, 0)).is_none(), "{bound}");
+            assert!(reading.record(ObjectId::new(4, 0)).is_some(), "{bound}");
+            assert!(reading.record(ObjectId::new(3, 0)).is_none(), "{bound}");
             assert!((reading.reader.containers.values()).all(|c| c.get().is_none()));
-            assert_eq!(reading.get((3, 0)).unwrap(), whole.get((3, 0)).unwrap());
+            assert_eq!(
+                reading.get(ObjectId::new(3, 0)).unwrap(),
+                whole.get(ObjectId::new(3, 0)).unwrap()
+            );
             assert_eq!(reading.into_document().unwrap(), whole, "{bound}");
         }
     }
@@ -859,7 +915,8 @@ mod tests {
     }
 
     /// The catalog's metadata, whose data fails to read, isn't given, and
-    /// asked again it is; and so are the bytes at a span.
+    /// asked again it is, through [`Source`] as by the reading's own,
+    /// which says why; and so are the bytes at a span.
     #[test]
     fn metadata_and_bytes_that_fail_to_read_are_given_when_asked_again() {
         let file = fixture::assembled(
@@ -879,6 +936,11 @@ mod tests {
         source.fail_at(at);
         assert!(failed_at(reading.metadata().unwrap_err(), at));
         assert_eq!(reading.metadata().unwrap().as_deref(), Some(&b"hello"[..]));
+        source.fail_at(at);
+        assert_eq!(Source::metadata(&reading), None);
+        assert!(source.failed());
+        let metadata = Source::metadata(&reading);
+        assert_eq!(metadata.as_deref(), Some(&b"hello"[..]));
         source.fail_at(at);
         assert!(failed_at(reading.bytes(span(at, at + 5)).unwrap_err(), at));
         assert_eq!(reading.bytes(span(at, at + 5)).unwrap(), &b"hello"[..]);
@@ -914,14 +976,23 @@ mod tests {
             let source = Failing::new(&file, 4096);
             let reading = open(&source, &[], &Options::DEFAULT, bound).unwrap();
             source.fail_at(at);
-            assert!(failed_at(reading.data((2, 0)).unwrap_err(), at));
-            assert_eq!(reading.data((2, 0)).unwrap(), data);
+            assert!(failed_at(
+                reading.data(ObjectId::new(2, 0)).unwrap_err(),
+                at
+            ));
+            assert_eq!(reading.data(ObjectId::new(2, 0)).unwrap(), data);
             source.fail_at(at);
-            assert!(failed_at(reading.decoded((2, 0)).unwrap_err(), at));
+            assert!(failed_at(
+                reading.decoded(ObjectId::new(2, 0)).unwrap_err(),
+                at
+            ));
             source.fail_at(filter);
-            assert!(failed_at(reading.decoded((2, 0)).unwrap_err(), filter));
+            assert!(failed_at(
+                reading.decoded(ObjectId::new(2, 0)).unwrap_err(),
+                filter
+            ));
             assert!(source.failed());
-            assert_eq!(reading.decoded((2, 0)).unwrap(), b"hello");
+            assert_eq!(reading.decoded(ObjectId::new(2, 0)).unwrap(), b"hello");
             assert_eq!(reading.into_document().unwrap(), read(&file));
         }
     }

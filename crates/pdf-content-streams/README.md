@@ -110,7 +110,7 @@ assert_eq!(content, want.as_bytes());
 // A page whose resources bind that name to another font, object 1: the
 // next name up.
 let objects = [Object::from(dict! { "Type" => "Font", "BaseFont" => "Courier" })];
-let resolve = |id: ObjectId| objects.get((id.0 as usize).checked_sub(1)?);
+let resolve = |id: ObjectId| objects.get((id.number as usize).checked_sub(1)?);
 let resources = Object::from(dict! { "Font" => dict! { name.as_str() => Object::reference(1) } });
 let (_, renamed) = w.named(&Reserved::read(&resolve, Some(&resources)));
 assert_ne!(renamed.0[0].name, needs.0[0].name);

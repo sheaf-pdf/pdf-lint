@@ -473,7 +473,11 @@ mod tests {
         let counted = ("Type", WRITTEN_OVER, "FileTrailer", "Info", 1);
         assert_eq!(not_made(&beside), [counted], "{beside}");
         assert_eq!(beside, alone);
-        assert!(Readings::new(&read).earlier(1, (5, 0)).is_none());
+        assert!(
+            Readings::new(&read)
+                .earlier(1, ObjectId::new(5, 0))
+                .is_none()
+        );
     }
 
     /// A file of `earlier` revisions, each writing `/Info`, object 5, an
@@ -505,9 +509,12 @@ mod tests {
         assert_eq!(read.document().revisions.len(), 258);
         let readings = Readings::new(&read);
         for revision in (2..=257).rev() {
-            assert!(readings.earlier(revision, (5, 0)).is_some(), "{revision}");
+            assert!(
+                readings.earlier(revision, ObjectId::new(5, 0)).is_some(),
+                "{revision}"
+            );
         }
-        assert!(readings.earlier(1, (5, 0)).is_none());
+        assert!(readings.earlier(1, ObjectId::new(5, 0)).is_none());
         assert_eq!(readings.opened.get(), READINGS);
         let (beside, alone) = both(&file, &bytes::Options::DEFAULT);
         let counted = |n| [("Type", WRITTEN_OVER, "FileTrailer", "Info", n)];
@@ -525,18 +532,24 @@ mod tests {
         let file = many(257);
         let read = WithReading::new(&file[..], &[], &bytes::Options::DEFAULT).unwrap();
         let readings = Readings::new(&read);
-        let info = readings.earlier(257, (5, 0)).unwrap();
+        let info = readings.earlier(257, ObjectId::new(5, 0)).unwrap();
         assert!(matches!(*readings.each[256].borrow(), Opened::Open(_)));
         readings.done(257);
         assert!(matches!(*readings.each[256].borrow(), Opened::Closed));
-        assert!(std::ptr::eq(readings.earlier(257, (5, 0)).unwrap(), info));
-        assert!(readings.earlier(257, (1, 0)).is_none());
+        assert!(std::ptr::eq(
+            readings.earlier(257, ObjectId::new(5, 0)).unwrap(),
+            info
+        ));
+        assert!(readings.earlier(257, ObjectId::new(1, 0)).is_none());
         assert_eq!(readings.opened.get(), 1);
         for revision in (2..=256).rev() {
-            assert!(readings.earlier(revision, (5, 0)).is_some(), "{revision}");
+            assert!(
+                readings.earlier(revision, ObjectId::new(5, 0)).is_some(),
+                "{revision}"
+            );
             readings.done(revision);
         }
-        assert!(readings.earlier(1, (5, 0)).is_none());
+        assert!(readings.earlier(1, ObjectId::new(5, 0)).is_none());
         assert_eq!(readings.opened.get(), READINGS);
         // The newest's reading is the file's, never asked for.
         let (newest, earlier) = readings.each.split_last().unwrap();
@@ -604,10 +617,13 @@ mod tests {
         let readings = Readings::new(&read);
         assert_eq!(readings.most, 36);
         for revision in (2..=5).rev() {
-            assert!(readings.earlier(revision, (5, 0)).is_some(), "{revision}");
+            assert!(
+                readings.earlier(revision, ObjectId::new(5, 0)).is_some(),
+                "{revision}"
+            );
         }
         assert_eq!(readings.entries.get(), 36);
-        assert!(readings.earlier(1, (5, 0)).is_none());
+        assert!(readings.earlier(1, ObjectId::new(5, 0)).is_none());
         assert_eq!(readings.opened.get(), 4);
         let (beside, alone) = both(&file, &options);
         let counted = |n| [("Type", WRITTEN_OVER, "FileTrailer", "Info", n)];
@@ -642,8 +658,8 @@ mod tests {
         let read = WithReading::new(&file.out[..], &[], &options).unwrap();
         let readings = Readings::new(&read);
         assert_eq!(readings.limits.budget, rows + 8);
-        assert!(readings.earlier(1, (5, 0)).is_none());
-        assert!(readings.earlier(1, (1, 0)).is_some());
+        assert!(readings.earlier(1, ObjectId::new(5, 0)).is_none());
+        assert!(readings.earlier(1, ObjectId::new(1, 0)).is_some());
         let counted = ("Type", WRITTEN_OVER, "XRefStream", "Info", 1);
         let (beside, _) = both(&file.out, &options);
         assert_eq!(not_made(&beside), [counted], "{beside}");
@@ -715,13 +731,23 @@ mod tests {
         );
         assert_eq!(read.document().revisions.len(), 2);
         let readings = Readings::new(&read);
-        let info = readings.earlier(1, (5, 0)).unwrap().as_dict().unwrap();
+        let info = readings
+            .earlier(1, ObjectId::new(5, 0))
+            .unwrap()
+            .as_dict()
+            .unwrap();
         let title = info.get(b"Title").unwrap().value();
         assert!(
             matches!(title, Value::String(Str::Bytes(b), _) if b == b"Old"),
             "{title:?}"
         );
-        assert!(readings.earlier(1, (6, 0)).unwrap().as_dict().is_some());
+        assert!(
+            readings
+                .earlier(1, ObjectId::new(6, 0))
+                .unwrap()
+                .as_dict()
+                .is_some()
+        );
         let hold = Hold::All(Made::Merged);
         let beside = check_with_reading(&read, &hold, &Options::default());
         let alone = check(read.document(), &hold, &Options::default());

@@ -2647,12 +2647,12 @@ fn linearized_updated(file: &[u8], listed: Option<(u32, usize)>) -> Vec<u8> {
     out.extend_from_slice(
         format!(
             "{} 0 obj\n<< /Type /Catalog /Pages {} 0 R /PageLayout /SinglePage >>\nendobj\n",
-            root.0, pages.0
+            root.number, pages.number
         )
         .as_bytes(),
     );
     let xref = out.len();
-    let mut rows = vec![(root.0, at)];
+    let mut rows = vec![(root.number, at)];
     rows.extend(listed);
     rows.sort_unstable();
     let mut table = String::from("xref\n0 1\n0000000000 65535 f \n");
@@ -2663,7 +2663,7 @@ fn linearized_updated(file: &[u8], listed: Option<(u32, usize)>) -> Vec<u8> {
     out.extend_from_slice(
         format!(
             "trailer\n<< /Size {size} /Root {} 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n",
-            root.0
+            root.number
         )
         .as_bytes(),
     );

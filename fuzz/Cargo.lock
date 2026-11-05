@@ -460,7 +460,6 @@ dependencies = [
  "hayro-cmap",
  "pdf-content-streams",
  "pdf-objects",
- "pdf-structure",
  "skrifa",
  "thiserror",
 ]

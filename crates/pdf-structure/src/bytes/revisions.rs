@@ -326,7 +326,7 @@ fn each_revisions_prefix_is_the_file_as_it_was_written() {
         assert!(!ids.is_empty());
         for id in ids {
             let own = prefix.get(id).unwrap();
-            match later.contains(&id.0) {
+            match later.contains(&id.number) {
                 false => assert_eq!(own, reading.get(id).unwrap(), "{k}: {id:?}"),
                 true => assert_ne!(own, reading.get(id).unwrap(), "{k}: {id:?}"),
             }
@@ -378,20 +378,20 @@ fn a_prefix_reads_under_the_limits_its_given() {
     let five = startxref(&file);
     let (file, _) = updated(file, 6, five);
     let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-    assert!(reading.get((3, 0)).is_ok());
+    assert!(reading.get(ObjectId::new(3, 0)).is_ok());
     let end = reading.revisions()[0].end.unwrap().line();
     let full = reading.prefix(end, reading.limits()).unwrap();
     assert_eq!(full.limits(), reading.limits());
-    assert!(full.get((3, 0)).is_ok());
+    assert!(full.get(ObjectId::new(3, 0)).is_ok());
     // The cross-reference stream's 24 bytes of rows, then 40 for the object
     // stream.
     let mut limits = *reading.limits();
     limits.budget = 24 + 40;
     let small = reading.prefix(end, &limits).unwrap();
     assert_eq!(small.limits(), &limits);
-    assert!(small.get((1, 0)).is_ok());
-    assert!(small.get((3, 0)).is_err());
-    assert!(reading.get((3, 0)).is_ok());
+    assert!(small.get(ObjectId::new(1, 0)).is_ok());
+    assert!(small.get(ObjectId::new(3, 0)).is_err());
+    assert!(reading.get(ObjectId::new(3, 0)).is_ok());
 }
 
 /// A reading by position gives the prefixes a reading in memory does, in
@@ -464,14 +464,17 @@ fn an_encrypted_files_prefix_is_opened_by_its_readings_handler() {
             let prefix = reading.prefix(end, reading.limits()).unwrap();
             assert_eq!(prefix.encryption(), &opened, "{kind:?} {password}");
             assert!(prefix.warnings().is_empty(), "{:?}", prefix.warnings());
-            let note = prefix.get((4, 0)).unwrap().as_dict().unwrap();
+            let note = prefix.get(ObjectId::new(4, 0)).unwrap().as_dict().unwrap();
             let contents = note.get(b"Contents").unwrap().value();
             assert!(
                 matches!(contents, Value::String(Str::Bytes(b), _) if b == b"A note"),
                 "{kind:?}: {contents:?}"
             );
             for n in 1..=5 {
-                let (own, whole) = (prefix.get((n, 0)), reading.get((n, 0)));
+                let (own, whole) = (
+                    prefix.get(ObjectId::new(n, 0)),
+                    reading.get(ObjectId::new(n, 0)),
+                );
                 assert_eq!(own.unwrap(), whole.unwrap(), "{kind:?} {n}");
             }
         }

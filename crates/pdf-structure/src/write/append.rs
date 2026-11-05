@@ -344,7 +344,7 @@ pub fn update<'a>(
         Some(_) => {
             for (id, body) in bodies {
                 match held(id, &body)? && stays(id, body.object()) {
-                    true => passed.push(id.0),
+                    true => passed.push(id.number),
                     false => kept.push((id, body)),
                 }
             }
@@ -382,7 +382,7 @@ fn appended(
     if !matched(base, encryptor) {
         return Err(Error::Unmatched);
     }
-    let encrypt_at = encryptor.and_then(Encryptor::at).map(|at| at.0);
+    let encrypt_at = encryptor.and_then(Encryptor::at).map(|at| at.number);
     let to = Numbering(options.renumber);
     let written_at = checked(bodies, to, encrypt_at, encryptor, passed)?;
     // The encryption dictionaries and what they refer to stay where the
@@ -422,9 +422,9 @@ fn appended(
             copying.as_ref(),
             to,
         )?;
-        let generation = written_at.1;
+        let generation = written_at.generation;
         section.insert(
-            written_at.0,
+            written_at.number,
             Entry::InUse {
                 offset: pos,
                 generation,

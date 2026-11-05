@@ -111,7 +111,7 @@ fn file(objects: &[(u32, Object)]) -> Vec<u8> {
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut section = Section::full(0);
     for (num, obj) in std::iter::once(&(1, catalog())).chain(objects) {
-        let pos = serialize::indirect(&mut out, (*num, 0), obj).unwrap();
+        let pos = serialize::indirect(&mut out, ObjectId::new(*num, 0), obj).unwrap();
         section.insert(
             *num,
             Entry::InUse {
@@ -122,7 +122,7 @@ fn file(objects: &[(u32, Object)]) -> Vec<u8> {
     }
     let pos = out.len();
     section
-        .table(&mut out, dict! { "Root" => (1, 0) }, pos)
+        .table(&mut out, dict! { "Root" => ObjectId::new(1, 0) }, pos)
         .unwrap();
     out
 }
@@ -134,7 +134,7 @@ fn file(objects: &[(u32, Object)]) -> Vec<u8> {
 fn nan_and_infinities_in_a_trailer_are_refused() {
     for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let mut out = b"%PDF-1.7\n".to_vec();
-        let trailer = dict! { "Root" => (1, 0), "Odd" => x };
+        let trailer = dict! { "Root" => ObjectId::new(1, 0), "Odd" => x };
         assert_eq!(
             Section::full(2).table(&mut out, trailer.clone(), 9),
             Err(Error::Serialize(serialize::Error::NonFinite { id: None }))
@@ -142,7 +142,7 @@ fn nan_and_infinities_in_a_trailer_are_refused() {
         assert_eq!(
             Section::full(2).stream(&mut out, 2, trailer, 9, Deflate::DEFAULT),
             Err(Error::Serialize(serialize::Error::NonFinite {
-                id: Some((2, 0))
+                id: Some(ObjectId::new(2, 0))
             }))
         );
         assert_eq!(out, b"%PDF-1.7\n", "nothing written");
@@ -157,7 +157,7 @@ fn nan_and_infinities_in_a_trailer_are_refused() {
 fn a_full_table_links_its_free_entries() {
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut section = Section::full(4);
-    let one = serialize::indirect(&mut out, (1, 0), &catalog()).unwrap();
+    let one = serialize::indirect(&mut out, ObjectId::new(1, 0), &catalog()).unwrap();
     section.insert(
         1,
         Entry::InUse {
@@ -165,7 +165,7 @@ fn a_full_table_links_its_free_entries() {
             generation: 0,
         },
     );
-    let three = serialize::indirect(&mut out, (3, 2), &Object::from(3)).unwrap();
+    let three = serialize::indirect(&mut out, ObjectId::new(3, 2), &Object::from(3)).unwrap();
     section.insert(
         3,
         Entry::InUse {
@@ -179,7 +179,7 @@ fn a_full_table_links_its_free_entries() {
     section.insert(5, Entry::Free { generation: 1 });
     let pos = out.len();
     section
-        .table(&mut out, dict! { "Root" => (1, 0) }, pos)
+        .table(&mut out, dict! { "Root" => ObjectId::new(1, 0) }, pos)
         .unwrap();
     let want = format!(
         "xref\n0 6\n\
@@ -196,8 +196,11 @@ fn a_full_table_links_its_free_entries() {
     assert!(sound(&pdf));
     assert_eq!(newest(&pdf).1, XrefKind::Table);
     assert_eq!(size(&pdf), 6);
-    assert_eq!(pdf.ids().collect::<Vec<_>>(), [(1, 0), (3, 2)]);
-    assert_eq!(value(&pdf, (3, 2)), Object::from(3));
+    assert_eq!(
+        pdf.ids().collect::<Vec<_>>(),
+        [ObjectId::new(1, 0), ObjectId::new(3, 2)]
+    );
+    assert_eq!(value(&pdf, ObjectId::new(3, 2)), Object::from(3));
 }
 
 #[test]
@@ -207,7 +210,7 @@ fn appended_runs_free_deleted_objects_with_the_next_generation() {
     let prev = newest(&base).0;
     let mut section = Section::append(size(&base), 0);
     let marked = Object::from(dict! { "Type" => "Catalog", "Marked" => true });
-    let one = serialize::indirect(&mut out, (1, 0), &marked).unwrap();
+    let one = serialize::indirect(&mut out, ObjectId::new(1, 0), &marked).unwrap();
     section.insert(
         1,
         Entry::InUse {
@@ -216,7 +219,7 @@ fn appended_runs_free_deleted_objects_with_the_next_generation() {
         },
     );
     section.insert(3, Entry::Free { generation: 1 });
-    let five = serialize::indirect(&mut out, (5, 0), &Object::from(5)).unwrap();
+    let five = serialize::indirect(&mut out, ObjectId::new(5, 0), &Object::from(5)).unwrap();
     section.insert(
         5,
         Entry::InUse {
@@ -225,7 +228,7 @@ fn appended_runs_free_deleted_objects_with_the_next_generation() {
         },
     );
     let pos = out.len();
-    let trailer = dict! { "Root" => (1, 0), "Prev" => prev as i64 };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0), "Prev" => prev as i64 };
     section.table(&mut out, trailer, pos).unwrap();
     let want = format!(
         "xref\n0 2\n\
@@ -244,10 +247,10 @@ fn appended_runs_free_deleted_objects_with_the_next_generation() {
     assert!(sound(&pdf));
     assert_eq!(pdf.facts().sections, 2);
     assert_eq!(size(&pdf), 6);
-    assert_eq!(value(&pdf, (1, 0)), marked);
-    assert_eq!(value(&pdf, (2, 0)), Object::from(2));
-    assert!(pdf.get((3, 0)).is_err());
-    assert_eq!(value(&pdf, (5, 0)), Object::from(5));
+    assert_eq!(value(&pdf, ObjectId::new(1, 0)), marked);
+    assert_eq!(value(&pdf, ObjectId::new(2, 0)), Object::from(2));
+    assert!(pdf.get(ObjectId::new(3, 0)).is_err());
+    assert_eq!(value(&pdf, ObjectId::new(5, 0)), Object::from(5));
 }
 
 /// Read from its header, as PDFium, pdf.js and qpdf read positions: the
@@ -260,7 +263,7 @@ fn positions_count_from_the_header() {
     assert_eq!(open(&out).facts().header_offset, Some(100));
     let base = open(&out[100..]);
     let mut section = Section::append(size(&base), 100);
-    let pos = serialize::indirect(&mut out, (2, 0), &Object::from(22)).unwrap();
+    let pos = serialize::indirect(&mut out, ObjectId::new(2, 0), &Object::from(22)).unwrap();
     section.insert(
         2,
         Entry::InUse {
@@ -269,15 +272,15 @@ fn positions_count_from_the_header() {
         },
     );
     let pos = out.len();
-    let trailer = dict! { "Root" => (1, 0), "Prev" => newest(&base).0 as i64 };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0), "Prev" => newest(&base).0 as i64 };
     section.table(&mut out, trailer, pos).unwrap();
     assert!(out.ends_with(format!("startxref\n{}\n%%EOF\n", pos - 100).as_bytes()));
     let pdf = open(&out[100..]);
     assert!(sound(&pdf));
-    assert_eq!(value(&pdf, (2, 0)), Object::from(22));
+    assert_eq!(value(&pdf, ObjectId::new(2, 0)), Object::from(22));
     let scanned = open(&out);
     assert!(scanned.trailer().unwritten.is_some());
-    assert_eq!(value(&scanned, (2, 0)), Object::from(22));
+    assert_eq!(value(&scanned, ObjectId::new(2, 0)), Object::from(22));
 }
 
 #[test]
@@ -355,7 +358,7 @@ fn an_xref_stream_lists_its_index() {
     let mut section = Section::full(0);
     let mut at = Vec::new();
     for (num, obj) in [(1, catalog()), (2, Object::from(2)), (3, Object::from(3))] {
-        let pos = serialize::indirect(&mut out, (num, 0), &obj).unwrap();
+        let pos = serialize::indirect(&mut out, ObjectId::new(num, 0), &obj).unwrap();
         section.insert(
             num,
             Entry::InUse {
@@ -370,7 +373,7 @@ fn an_xref_stream_lists_its_index() {
         .stream(
             &mut out,
             4,
-            dict! { "Root" => (1, 0) },
+            dict! { "Root" => ObjectId::new(1, 0) },
             pos,
             Deflate::DEFAULT,
         )
@@ -380,7 +383,7 @@ fn an_xref_stream_lists_its_index() {
     assert!(sound(&base));
     assert_eq!(newest(&base).1, XrefKind::Stream);
     assert_eq!(size(&base), 5);
-    let (index, w, got) = rows(&base, (4, 0));
+    let (index, w, got) = rows(&base, ObjectId::new(4, 0));
     assert_eq!(index, [0, 5]);
     // As wide as the largest offset, the stream's own, needs.
     assert_eq!(w, [1, if pos < 256 { 1 } else { 2 }, 2]);
@@ -395,7 +398,7 @@ fn an_xref_stream_lists_its_index() {
 
     // An append: 2 rewritten, 3 deleted, and the stream as 5.
     let mut section = Section::append(size(&base), 0);
-    let two = serialize::indirect(&mut out, (2, 0), &Object::from(22)).unwrap();
+    let two = serialize::indirect(&mut out, ObjectId::new(2, 0), &Object::from(22)).unwrap();
     section.insert(
         2,
         Entry::InUse {
@@ -405,7 +408,7 @@ fn an_xref_stream_lists_its_index() {
     );
     section.insert(3, Entry::Free { generation: 1 });
     let pos = out.len();
-    let trailer = dict! { "Root" => (1, 0), "Prev" => newest(&base).0 as i64 };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0), "Prev" => newest(&base).0 as i64 };
     section
         .stream(&mut out, 5, trailer, pos, Deflate::DEFAULT)
         .unwrap();
@@ -414,7 +417,7 @@ fn an_xref_stream_lists_its_index() {
     assert_eq!(newest(&pdf).1, XrefKind::Stream);
     assert_eq!(pdf.facts().sections, 2);
     assert_eq!(size(&pdf), 6);
-    let (index, _, got) = rows(&pdf, (5, 0));
+    let (index, _, got) = rows(&pdf, ObjectId::new(5, 0));
     assert_eq!(index, [0, 1, 2, 2, 5, 1]);
     let want = [
         [0, 3, 65535],
@@ -423,7 +426,7 @@ fn an_xref_stream_lists_its_index() {
         [1, pos as u64, 0],
     ];
     assert_eq!(got, want);
-    assert_eq!(value(&pdf, (2, 0)), Object::from(22));
+    assert_eq!(value(&pdf, ObjectId::new(2, 0)), Object::from(22));
 }
 
 /// A full write's cross-reference stream is deflated under the PNG Up
@@ -440,7 +443,7 @@ fn a_full_xref_stream_is_compressed_with_the_up_predictor() {
         } else {
             Object::from(num)
         };
-        let pos = serialize::indirect(&mut out, (num, 0), &obj).unwrap();
+        let pos = serialize::indirect(&mut out, ObjectId::new(num, 0), &obj).unwrap();
         section.insert(
             num,
             Entry::InUse {
@@ -455,7 +458,7 @@ fn a_full_xref_stream_is_compressed_with_the_up_predictor() {
         .stream(
             &mut out,
             201,
-            dict! { "Root" => (1, 0) },
+            dict! { "Root" => ObjectId::new(1, 0) },
             pos,
             Deflate::DEFAULT,
         )
@@ -463,7 +466,7 @@ fn a_full_xref_stream_is_compressed_with_the_up_predictor() {
     let pdf = open(&out);
     assert!(sound(&pdf));
     assert_eq!(size(&pdf), 202);
-    let (index, w, got) = rows(&pdf, (201, 0));
+    let (index, w, got) = rows(&pdf, ObjectId::new(201, 0));
     assert_eq!(index, [0, 202]);
     assert_eq!(w, [1, 2, 2]);
     let want: Vec<[u64; 3]> = std::iter::once([0, 0, 65535])
@@ -471,7 +474,7 @@ fn a_full_xref_stream_is_compressed_with_the_up_predictor() {
         .chain([[1, pos as u64, 0]])
         .collect();
     assert_eq!(got, want);
-    let stored = pdf.data((201, 0)).unwrap();
+    let stored = pdf.data(ObjectId::new(201, 0)).unwrap();
     assert!(
         stored.len() < got.len() * 5,
         "{} bytes for {} rows of 5",
@@ -479,7 +482,7 @@ fn a_full_xref_stream_is_compressed_with_the_up_predictor() {
         got.len()
     );
     for num in 2..=200 {
-        assert_eq!(value(&pdf, (num, 0)), Object::from(num));
+        assert_eq!(value(&pdf, ObjectId::new(num, 0)), Object::from(num));
     }
 }
 
@@ -508,7 +511,7 @@ fn packed(num: u32, container: &Stream, members: &[u32], deflate: Deflate) -> Ve
     let mut section = Section::full(0);
     let container = Object::from(container.clone());
     for (n, obj) in [(1, catalog()), (num, container)] {
-        let pos = serialize::indirect(&mut out, (n, 0), &obj).unwrap();
+        let pos = serialize::indirect(&mut out, ObjectId::new(n, 0), &obj).unwrap();
         section.insert(
             n,
             Entry::InUse {
@@ -522,7 +525,7 @@ fn packed(num: u32, container: &Stream, members: &[u32], deflate: Deflate) -> Ve
     }
     let pos = out.len();
     let own = section.size();
-    let trailer = dict! { "Root" => (1, 0) };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0) };
     section
         .stream(&mut out, own, trailer, pos, deflate)
         .unwrap();
@@ -575,11 +578,14 @@ fn packable_leaves_out_what_iso_7_5_7_does() {
         ),
     ];
     for (what, obj) in &never {
-        assert!(!write::packable((5, 0), obj), "{what}");
+        assert!(!write::packable(ObjectId::new(5, 0), obj), "{what}");
     }
     let catalog = catalog();
-    assert!(write::packable((5, 0), &catalog));
-    assert!(!write::packable((5, 1), &catalog), "generation 1");
+    assert!(write::packable(ObjectId::new(5, 0), &catalog));
+    assert!(
+        !write::packable(ObjectId::new(5, 1), &catalog),
+        "generation 1"
+    );
     let packs = [
         ("a catalog", catalog),
         ("an integer", Object::from(7)),
@@ -587,21 +593,21 @@ fn packable_leaves_out_what_iso_7_5_7_does() {
         ("a string", bytes(b"text")),
         (
             "an array",
-            Object::from(vec![Object::from((2, 0)), Object::from(1.5)]),
+            Object::from(vec![Object::from(ObjectId::new(2, 0)), Object::from(1.5)]),
         ),
-        ("a reference", Object::from((3, 0))),
+        ("a reference", Object::from(ObjectId::new(3, 0))),
         (
             "a signature field's widget",
             dict(dict! {
                 "Type" => "Annot",
                 "Subtype" => "Widget",
                 "FT" => "Sig",
-                "V" => (9, 0),
+                "V" => ObjectId::new(9, 0),
             }),
         ),
         (
             "a button field",
-            dict(dict! { "FT" => "Btn", "V" => (9, 0) }),
+            dict(dict! { "FT" => "Btn", "V" => ObjectId::new(9, 0) }),
         ),
         (
             "a /Filter name alone",
@@ -613,7 +619,7 @@ fn packable_leaves_out_what_iso_7_5_7_does() {
         ),
     ];
     for (what, obj) in &packs {
-        assert!(write::packable((5, 0), obj), "{what}");
+        assert!(write::packable(ObjectId::new(5, 0), obj), "{what}");
     }
 }
 
@@ -637,32 +643,40 @@ fn kept_out_tells_what_iso_7_5_7_keeps_out_by_the_object_alone() {
     });
     let linearization = dict(dict! { "Linearized" => 1, "L" => 1000 });
     let cases = [
-        ((5, 0), stream(dict! {}), Some(KeptOut::Stream)),
+        (ObjectId::new(5, 0), stream(dict! {}), Some(KeptOut::Stream)),
         (
-            (5, 0),
+            ObjectId::new(5, 0),
             stream(dict! { "Type" => "XRef" }),
             Some(KeptOut::Stream),
         ),
         (
-            (5, 0),
+            ObjectId::new(5, 0),
             stream(dict! { "Type" => "ObjStm" }),
             Some(KeptOut::Stream),
         ),
-        ((5, 2), stream(dict! {}), Some(KeptOut::Stream)),
-        ((5, 1), catalog(), Some(KeptOut::Generation)),
-        ((5, 1), encryption.clone(), Some(KeptOut::Generation)),
-        ((5, 0), encryption, Some(KeptOut::Encryption)),
-        ((5, 0), linearization, Some(KeptOut::Linearization)),
-        ((5, 0), catalog(), None),
-        ((5, 0), Object::from(7), None),
-        ((5, 0), dict(dict! { "Type" => "Page" }), None),
+        (ObjectId::new(5, 2), stream(dict! {}), Some(KeptOut::Stream)),
+        (ObjectId::new(5, 1), catalog(), Some(KeptOut::Generation)),
         (
-            (5, 0),
+            ObjectId::new(5, 1),
+            encryption.clone(),
+            Some(KeptOut::Generation),
+        ),
+        (ObjectId::new(5, 0), encryption, Some(KeptOut::Encryption)),
+        (
+            ObjectId::new(5, 0),
+            linearization,
+            Some(KeptOut::Linearization),
+        ),
+        (ObjectId::new(5, 0), catalog(), None),
+        (ObjectId::new(5, 0), Object::from(7), None),
+        (ObjectId::new(5, 0), dict(dict! { "Type" => "Page" }), None),
+        (
+            ObjectId::new(5, 0),
             dict(dict! { "Filter" => "Standard", "O" => bytes(b"o") }),
             None,
         ),
         (
-            (5, 0),
+            ObjectId::new(5, 0),
             dict(dict! { "Type" => "Sig", "Filter" => "Adobe.PPKLite" }),
             None,
         ),
@@ -705,7 +719,9 @@ fn a_container_lists_each_member_where_it_is() {
         (3, literal(b"two\nlines (")),
         (
             7,
-            Object::from(dict! { "Kids" => vec![Object::from((4, 0)), Object::null()] }),
+            Object::from(
+                dict! { "Kids" => vec![Object::from(ObjectId::new(4, 0)), Object::null()] },
+            ),
         ),
         (8, Object::from(-0.5)),
         (11, Object::from(true)),
@@ -742,11 +758,16 @@ fn a_container_lists_each_member_where_it_is() {
     let packed = (read.entries()).filter(|(_, _, e)| matches!(e, XrefEntry::Compressed { .. }));
     assert_eq!(packed.count(), 7);
     for (num, obj) in &members {
-        assert_eq!(value(&read, (*num, 0)), *obj, "object {num}");
+        assert_eq!(value(&read, ObjectId::new(*num, 0)), *obj, "object {num}");
     }
 
     let mut out = Vec::new();
-    serialize::indirect(&mut out, (20, 0), &Object::from(stream.clone())).unwrap();
+    serialize::indirect(
+        &mut out,
+        ObjectId::new(20, 0),
+        &Object::from(stream.clone()),
+    )
+    .unwrap();
     let length = format!("/Length {}>>", stream.data.bytes().unwrap().len());
     assert!(
         out.windows(length.len()).any(|w| w == length.as_bytes()),
@@ -755,7 +776,7 @@ fn a_container_lists_each_member_where_it_is() {
     );
     let reread = open(&file(&[(20, Object::from(stream))]));
     let length = reread
-        .get((20, 0))
+        .get(ObjectId::new(20, 0))
         .unwrap()
         .as_stream()
         .unwrap()
@@ -763,7 +784,7 @@ fn a_container_lists_each_member_where_it_is() {
         .get(b"Length");
     assert_eq!(
         length.and_then(Object::as_integer),
-        Some(reread.data((20, 0)).unwrap().len() as i64)
+        Some(reread.data(ObjectId::new(20, 0)).unwrap().len() as i64)
     );
 }
 
@@ -800,7 +821,7 @@ fn a_type_2_entry_is_written_as_its_container_and_place() {
     ];
     let mut at = Vec::new();
     for (num, obj) in objects {
-        let pos = serialize::indirect(&mut out, (num, 0), &obj).unwrap();
+        let pos = serialize::indirect(&mut out, ObjectId::new(num, 0), &obj).unwrap();
         section.insert(
             num,
             Entry::InUse {
@@ -818,14 +839,14 @@ fn a_type_2_entry_is_written_as_its_container_and_place() {
         .stream(
             &mut out,
             8,
-            dict! { "Root" => (1, 0) },
+            dict! { "Root" => ObjectId::new(1, 0) },
             pos,
             Deflate::DEFAULT,
         )
         .unwrap();
     let base = open(&out);
     assert!(sound(&base));
-    let (index, _, got) = rows(&base, (8, 0));
+    let (index, _, got) = rows(&base, ObjectId::new(8, 0));
     assert_eq!(index, [0, 9]);
     let want = [
         [0, 2, 65535],
@@ -839,7 +860,7 @@ fn a_type_2_entry_is_written_as_its_container_and_place() {
         [1, pos as u64, 0],
     ];
     assert_eq!(got, want);
-    for (id, obj) in [((5, 0), &five), ((6, 0), &six)] {
+    for (id, obj) in [(ObjectId::new(5, 0), &five), (ObjectId::new(6, 0), &six)] {
         assert_eq!(value(&base, id), *obj);
     }
 
@@ -851,7 +872,12 @@ fn a_type_2_entry_is_written_as_its_container_and_place() {
     let base = open(&out[100..]);
     let mut section = Section::append(size(&base), 100);
     let sixty = Object::from(dict! { "Six" => 60 });
-    let pos = serialize::indirect(&mut out, (10, 0), &container(&[(6, sixty.clone())])).unwrap();
+    let pos = serialize::indirect(
+        &mut out,
+        ObjectId::new(10, 0),
+        &container(&[(6, sixty.clone())]),
+    )
+    .unwrap();
     section.insert(
         10,
         Entry::InUse {
@@ -867,18 +893,18 @@ fn a_type_2_entry_is_written_as_its_container_and_place() {
         },
     );
     let pos = out.len();
-    let trailer = dict! { "Root" => (1, 0), "Prev" => newest(&base).0 as i64 };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0), "Prev" => newest(&base).0 as i64 };
     section
         .stream(&mut out, 11, trailer, pos, Deflate::DEFAULT)
         .unwrap();
     let pdf = open(&out[100..]);
     assert!(sound(&pdf));
     assert_eq!(pdf.facts().sections, 2);
-    let (index, _, got) = rows(&pdf, (11, 0));
+    let (index, _, got) = rows(&pdf, ObjectId::new(11, 0));
     assert_eq!(index, [6, 1, 10, 2]);
     assert_eq!(got[0], [2, 10, 0]);
-    assert_eq!(value(&pdf, (5, 0)), five);
-    assert_eq!(value(&pdf, (6, 0)), sixty);
+    assert_eq!(value(&pdf, ObjectId::new(5, 0)), five);
+    assert_eq!(value(&pdf, ObjectId::new(6, 0)), sixty);
 }
 
 /// A table can't list an object stream's member: it's refused, and
@@ -902,7 +928,7 @@ fn a_table_refuses_a_packed_entry() {
     );
     let mut out = b"%PDF-1.7\n".to_vec();
     assert_eq!(
-        section.table(&mut out, dict! { "Root" => (1, 0) }, 20),
+        section.table(&mut out, dict! { "Root" => ObjectId::new(1, 0) }, 20),
         Err(Error::Packed(5))
     );
     assert_eq!(out, b"%PDF-1.7\n", "nothing written");
@@ -1093,7 +1119,7 @@ fn deflated_on_either_backend_at_any_level_each_reads_back() {
                 let pdf = Reading::open(&file[..], &options).unwrap();
                 assert!(pdf.trailer().unwritten.is_none() && pdf.warnings().is_empty());
                 for (num, obj) in &members {
-                    let read = unplaced(pdf.get((*num, 0)).unwrap());
+                    let read = unplaced(pdf.get(ObjectId::new(*num, 0)).unwrap());
                     assert_eq!(read, *obj, "{level:?} on {backend:?}, read on {flate:?}");
                 }
             }
@@ -1360,12 +1386,13 @@ pub(crate) fn source(dict: Dict, direct: bool) -> Vec<u8> {
     let id = Object::hex(ID);
     let mut trailer = dict! { "Root" => Object::reference(1), "ID" => vec![id.clone(), id] };
     let mut out = b"%PDF-1.7\n".to_vec();
-    let one = serialize::indirect(&mut out, (1, 0), &catalog()).unwrap();
+    let one = serialize::indirect(&mut out, ObjectId::new(1, 0), &catalog()).unwrap();
     let mut rows = format!("xref\n0 2\n0000000000 65535 f \n{one:010} 00000 n \n");
     match direct {
         true => trailer.set("Encrypt", dict),
         false => {
-            let at = serialize::indirect(&mut out, (ENCRYPT, 0), &Object::from(dict)).unwrap();
+            let at = serialize::indirect(&mut out, ObjectId::new(ENCRYPT, 0), &Object::from(dict))
+                .unwrap();
             rows += &format!("{ENCRYPT} 1\n{at:010} 00000 n \n");
             trailer.set("Encrypt", Object::reference(ENCRYPT));
         }
@@ -1492,14 +1519,15 @@ pub(crate) fn encrypted_by(
 ) -> Vec<u8> {
     let resolve = |id: ObjectId| {
         (objects.iter())
-            .find(|(n, _)| (*n, 0) == id)
+            .find(|(n, _)| ObjectId::new(*n, 0) == id)
             .map(|(_, o)| o)
     };
     let encrypting = encryptor.encrypting(trailer, &resolve).unwrap();
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut section = Section::full(0);
     for (num, obj) in objects {
-        let pos = serialize::indirect_with(&mut out, (*num, 0), obj, &encrypting).unwrap();
+        let pos =
+            serialize::indirect_with(&mut out, ObjectId::new(*num, 0), obj, &encrypting).unwrap();
         section.insert(
             *num,
             Entry::InUse {
@@ -1514,11 +1542,11 @@ pub(crate) fn encrypted_by(
     match encryptor.direct() {
         true => trailer.set("Encrypt", dict),
         false => {
-            let at = encryptor.at().unwrap_or((last + 1, 0));
+            let at = encryptor.at().unwrap_or(ObjectId::new(last + 1, 0));
             let pos = serialize::indirect(&mut out, at, &Object::from(dict)).unwrap();
-            let generation = at.1;
+            let generation = at.generation;
             section.insert(
-                at.0,
+                at.number,
                 Entry::InUse {
                     offset: pos,
                     generation,
@@ -1637,7 +1665,7 @@ pub(crate) fn assert_reads_to(
     );
     let whole = bytes::read_opened(bytes, &[Password("user")]);
     for (num, plain) in objects {
-        let id = (*num, 0);
+        let id = ObjectId::new(*num, 0);
         let lazy = reading.get(id).unwrap();
         let eager = whole.get(id).unwrap();
         assert!(same(lazy, plain), "{name}, lazily: {id:?}: {lazy:?}");
@@ -1710,11 +1738,15 @@ fn objects_encrypt_alike_every_time() {
     let (plain, trailer) = plaintext();
     for kind in [Kind::Rc4By128, Kind::Aes128, Kind::Aes256] {
         let crypt = encryptor_of(&source(dictionary_of(kind, true), false));
-        let resolve = |id: ObjectId| (plain.iter()).find(|(n, _)| (*n, 0) == id).map(|(_, o)| o);
+        let resolve = |id: ObjectId| {
+            (plain.iter())
+                .find(|(n, _)| ObjectId::new(*n, 0) == id)
+                .map(|(_, o)| o)
+        };
         let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
         let encrypt = |num: u32, obj: &Object| {
             let mut out = Vec::new();
-            serialize::indirect_with(&mut out, (num, 0), obj, &encrypting).unwrap();
+            serialize::indirect_with(&mut out, ObjectId::new(num, 0), obj, &encrypting).unwrap();
             out
         };
         // Every object, twice, and on two threads.
@@ -1746,15 +1778,19 @@ fn ivs_are_keyed_by_what_the_object_is() {
     let (plain, trailer) = plaintext();
     for kind in [Kind::Aes128, Kind::Aes256R5, Kind::Aes256] {
         let crypt = encryptor_of(&source(dictionary_of(kind, true), false));
-        let resolve = |id: ObjectId| (plain.iter()).find(|(n, _)| (*n, 0) == id).map(|(_, o)| o);
+        let resolve = |id: ObjectId| {
+            (plain.iter())
+                .find(|(n, _)| ObjectId::new(*n, 0) == id)
+                .map(|(_, o)| o)
+        };
         let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
         let iv = |id: ObjectId, value: &[u8]| encrypting.string(id, value).unwrap()[..16].to_vec();
-        let first = iv((5, 0), b"a value");
-        assert_eq!(iv((5, 0), b"a value"), first, "{kind:?}");
+        let first = iv(ObjectId::new(5, 0), b"a value");
+        assert_eq!(iv(ObjectId::new(5, 0), b"a value"), first, "{kind:?}");
         for other in [
-            iv((6, 0), b"a value"),
-            iv((5, 1), b"a value"),
-            iv((5, 0), b"another value"),
+            iv(ObjectId::new(6, 0), b"a value"),
+            iv(ObjectId::new(5, 1), b"a value"),
+            iv(ObjectId::new(5, 0), b"another value"),
         ] {
             assert_ne!(other, first, "{kind:?}");
         }
@@ -1766,7 +1802,8 @@ fn ivs_are_keyed_by_what_the_object_is() {
             Object::from(dict! { "Type" => "Catalog", "V" => lit(b"a value") }),
         )];
         for (num, obj) in &objects {
-            let pos = serialize::indirect_with(&mut file, (*num, 0), obj, &encrypting).unwrap();
+            let pos = serialize::indirect_with(&mut file, ObjectId::new(*num, 0), obj, &encrypting)
+                .unwrap();
             section.insert(
                 *num,
                 Entry::InUse {
@@ -1778,14 +1815,15 @@ fn ivs_are_keyed_by_what_the_object_is() {
         let at = crypt.at().unwrap();
         let pos = serialize::indirect(&mut file, at, &Object::from(crypt.dictionary().clone()));
         section.insert(
-            at.0,
+            at.number,
             Entry::InUse {
                 offset: pos.unwrap(),
                 generation: 0,
             },
         );
         let id = Object::hex(ID);
-        let trailer = dict! { "Root" => (1, 0), "Encrypt" => at, "ID" => vec![id.clone(), id] };
+        let trailer =
+            dict! { "Root" => ObjectId::new(1, 0), "Encrypt" => at, "ID" => vec![id.clone(), id] };
         let pos = file.len();
         section.table(&mut file, trailer, pos).unwrap();
         assert_decrypts_to(&objects, &file, &format!("{kind:?}"));
@@ -1796,7 +1834,11 @@ fn ivs_are_keyed_by_what_the_object_is() {
 fn xref_streams_metadata_and_the_encrypt_dict_stay_plain() {
     let (plain, trailer) = listed();
     let crypt = encryptor_of(&source(dictionary_of(Kind::Aes128, false), false));
-    let resolve = |id: ObjectId| (plain.iter()).find(|(n, _)| (*n, 0) == id).map(|(_, o)| o);
+    let resolve = |id: ObjectId| {
+        (plain.iter())
+            .find(|(n, _)| ObjectId::new(*n, 0) == id)
+            .map(|(_, o)| o)
+    };
     let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
     let written = |id: ObjectId, obj: &Object| {
         let mut out = Vec::new();
@@ -1815,26 +1857,32 @@ fn xref_streams_metadata_and_the_encrypt_dict_stay_plain() {
         },
         vec![1, 0, 0, 0],
     );
-    stays((20, 0), &Object::from(xref));
+    stays(ObjectId::new(20, 0), &Object::from(xref));
     let at = crypt.at().unwrap();
     let encrypt = Object::from(crypt.dictionary().clone());
     stays(at, &encrypt);
     // A dictionary shaped as the encryption dictionary at a number that
     // isn't one is encrypted: the list tells them by number.
-    assert!(!holds(&written((21, 0), &encrypt), b"/O ("), "by number");
+    assert!(
+        !holds(&written(ObjectId::new(21, 0), &encrypt), b"/O ("),
+        "by number"
+    );
     // The document's metadata stream's data under /EncryptMetadata false,
     // but not its dictionary's strings, nor a page's metadata.
     let (metadata, xmp) = (plain.iter())
         .find(|(n, _)| *n == 5)
-        .map(|(n, o)| ((*n, 0), o))
+        .map(|(n, o)| (ObjectId::new(*n, 0), o))
         .unwrap();
     let bytes = written(metadata, xmp);
     assert!(holds(&bytes, XMP) && !in_clear(&bytes, METADATA_STRING));
     let page_xmp = &plain.iter().find(|(n, _)| *n == 14).unwrap().1;
-    assert!(!in_clear(&written((14, 0), page_xmp), PAGE_XMP));
+    assert!(!in_clear(
+        &written(ObjectId::new(14, 0), page_xmp),
+        PAGE_XMP
+    ));
     // A signature's /Contents, but not its other strings.
     let signature = &plain.iter().find(|(n, _)| *n == 8).unwrap().1;
-    let bytes = written((8, 0), signature);
+    let bytes = written(ObjectId::new(8, 0), signature);
     assert!(holds(&bytes, SIGNATURE_WRITTEN));
     assert!(!holds(&bytes, b"D:20261016120000Z"));
 
@@ -1859,7 +1907,12 @@ fn in_clear_finds_a_string_written_in_hex() {
         case(&mut member);
         let container = write::container(&[(1, member.clone())], Deflate::DEFAULT).unwrap();
         let mut packed = Vec::new();
-        serialize::indirect(&mut packed, (2, 0), &Object::from(container.unwrap())).unwrap();
+        serialize::indirect(
+            &mut packed,
+            ObjectId::new(2, 0),
+            &Object::from(container.unwrap()),
+        )
+        .unwrap();
         [member, packed]
     };
     let [plain, packed] = file(Form::Hex, |_| {});
@@ -1936,7 +1989,11 @@ fn each_method_writes_what_the_reader_decrypts_and_nothing_else_in_the_clear() {
                 "{name}"
             );
             let last = (plain.len() + 1) as u32;
-            assert_eq!(back.at(), Some(crypt.at().unwrap_or((last, 0))), "{name}");
+            assert_eq!(
+                back.at(),
+                Some(crypt.at().unwrap_or(ObjectId::new(last, 0))),
+                "{name}"
+            );
             assert_eq!(back.packs(), crypt.packs(), "{name}");
         }
     }
@@ -1956,11 +2013,11 @@ fn a_container_is_encrypted_whole_where_the_method_packs() {
         if !packs {
             continue;
         }
-        let trailer = dict! { "Root" => (1, 0) };
+        let trailer = dict! { "Root" => ObjectId::new(1, 0) };
         let objects = [(1, catalog())];
         let resolve = |id: ObjectId| {
             (objects.iter())
-                .find(|(n, _)| (*n, 0) == id)
+                .find(|(n, _)| ObjectId::new(*n, 0) == id)
                 .map(|(_, o)| o)
         };
         let encrypting = method.encryptor.encrypting(&trailer, &resolve).unwrap();
@@ -1968,7 +2025,8 @@ fn a_container_is_encrypted_whole_where_the_method_packs() {
         let mut section = Section::full(0);
         let container = container(&members);
         for (num, obj) in [(1, catalog()), (9, container)] {
-            let pos = serialize::indirect_with(&mut out, (num, 0), &obj, &encrypting).unwrap();
+            let pos = serialize::indirect_with(&mut out, ObjectId::new(num, 0), &obj, &encrypting)
+                .unwrap();
             section.insert(
                 num,
                 Entry::InUse {
@@ -1981,11 +2039,11 @@ fn a_container_is_encrypted_whole_where_the_method_packs() {
             section.insert(*num, Entry::Compressed { stream: 9, index });
         }
         let mut trailer = trailer.clone();
-        let at = method.encryptor.at().unwrap_or((20, 0));
+        let at = method.encryptor.at().unwrap_or(ObjectId::new(20, 0));
         let dict = Object::from(method.encryptor.dictionary().clone());
         let pos = serialize::indirect(&mut out, at, &dict).unwrap();
         section.insert(
-            at.0,
+            at.number,
             Entry::InUse {
                 offset: pos,
                 generation: 0,
@@ -2007,7 +2065,12 @@ fn a_container_is_encrypted_whole_where_the_method_packs() {
         );
         let reading = opened(&out, "user");
         for (num, obj) in &members {
-            assert_eq!(value(&reading, (*num, 0)), *obj, "{}", method.name);
+            assert_eq!(
+                value(&reading, ObjectId::new(*num, 0)),
+                *obj,
+                "{}",
+                method.name
+            );
         }
         assert!(sound(&reading), "{}: {:?}", method.name, reading.warnings());
     }
@@ -2022,7 +2085,7 @@ fn an_encryptor_isnt_had_of_a_locked_plain_or_unsupported_reading() {
     let plain = fixture::file(
         "1.7",
         &[(1, Body::from(dict! { "Type" => "Catalog" }))],
-        dict! { "Root" => (1, 0) },
+        dict! { "Root" => ObjectId::new(1, 0) },
         Xref::Table,
     );
     assert!(Encryptor::of(&opened(&plain, "user")).unwrap().is_none());
@@ -2095,7 +2158,7 @@ fn a_direct_encryption_dictionary_is_its_own_with_no_number() {
 #[test]
 fn what_cant_be_encrypted_is_refused_and_nothing_written() {
     let crypt = encryptor_of(&source(dictionary_of(Kind::Aes128, true), false));
-    let trailer = dict! { "Root" => (1, 0) };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0) };
     let resolve = |_: ObjectId| None;
     let encrypting = crypt.encrypting(&trailer, &resolve).unwrap();
     let unknown = dict! {
@@ -2103,7 +2166,13 @@ fn what_cant_be_encrypted_is_refused_and_nothing_written() {
         "DecodeParms" => dict! { "Name" => "Nonesuch" },
     };
     let mut out = b"%PDF-1.7\n".to_vec();
-    let refused = serialize::indirect_stream_with(&mut out, (3, 0), &unknown, b"data", &encrypting);
+    let refused = serialize::indirect_stream_with(
+        &mut out,
+        ObjectId::new(3, 0),
+        &unknown,
+        b"data",
+        &encrypting,
+    );
     let fault = Fault::Method {
         name: "Nonesuch".to_string(),
     };
@@ -2111,13 +2180,19 @@ fn what_cant_be_encrypted_is_refused_and_nothing_written() {
     assert_eq!(
         refused,
         Err(Refused::Encrypt {
-            id: (3, 0),
+            id: ObjectId::new(3, 0),
             why: why.clone()
         })
     );
     assert_eq!(out, b"%PDF-1.7\n", "nothing written");
     let error = Error::from(refused.unwrap_err());
-    assert_eq!(error, Error::Encrypt { id: (3, 0), why });
+    assert_eq!(
+        error,
+        Error::Encrypt {
+            id: ObjectId::new(3, 0),
+            why
+        }
+    );
     assert_eq!(
         error.to_string(),
         "object 3 0 can't be encrypted: its crypt filter's method or name, /Nonesuch, isn't one"
@@ -2131,24 +2206,28 @@ fn what_cant_be_encrypted_is_refused_and_nothing_written() {
         dict! { "Type" => "EmbeddedFile" },
         b"data".to_vec(),
     ));
-    let refused = serialize::indirect_with(&mut out, (3, 0), &embedded, &encrypting);
+    let refused = serialize::indirect_with(&mut out, ObjectId::new(3, 0), &embedded, &encrypting);
     let why = Unencryptable::Unsaid;
     assert_eq!(
         refused,
         Err(Refused::Encrypt {
-            id: (3, 0),
+            id: ObjectId::new(3, 0),
             why: why.clone()
         })
     );
     assert_eq!(out, b"%PDF-1.7\n", "nothing written");
     assert_eq!(
-        Error::Encrypt { id: (3, 0), why }.to_string(),
+        Error::Encrypt {
+            id: ObjectId::new(3, 0),
+            why
+        }
+        .to_string(),
         "object 3 0 can't be encrypted: it's an embedded file's data, and the encryption \
          dictionary's /EFF, which says how that's encrypted, isn't a name"
     );
     // A stream an encryption dictionary refers to, which the writer leaves
     // whole in the clear, as the reader does.
-    let at = (ENCRYPT, 0);
+    let at = ObjectId::new(ENCRYPT, 0);
     assert!(encrypting.clear(at, Some(&dict! {}), true));
     let asked = encrypting.stream(at, &dict! {}, b"data");
     assert_eq!(asked, Err(Unencryptable::Dictionary));
@@ -2167,7 +2246,7 @@ const KINDS: [XrefKind; 2] = [XrefKind::Table, XrefKind::Stream];
 /// `objects`, each at its number, generation 0, as a write's bodies.
 fn bodies(objects: &[(u32, Object)]) -> Vec<(ObjectId, write::Body<'_>)> {
     (objects.iter())
-        .map(|(n, o)| ((*n, 0), write::Body::from(o)))
+        .map(|(n, o)| (ObjectId::new(*n, 0), write::Body::from(o)))
         .collect()
 }
 
@@ -2205,7 +2284,7 @@ fn whole(
 
 /// The number past every one of `objects`'.
 fn past(objects: &[(u32, Object)]) -> ObjectId {
-    (objects.iter().map(|(n, _)| n + 1).max().unwrap_or(1), 0)
+    ObjectId::new(objects.iter().map(|(n, _)| n + 1).max().unwrap_or(1), 0)
 }
 
 /// `objects` written whole under `trailer` with a cross-reference stream,
@@ -2243,7 +2322,7 @@ fn read_back(bytes: &[u8], encrypted: bool) -> Reading<Arc<[u8]>> {
 }
 
 /// [`plaintext`]'s page.
-const PAGE: ObjectId = (4, 0);
+const PAGE: ObjectId = ObjectId::new(4, 0);
 
 /// `source`, opened by `password`, read whole, its page turned (its
 /// `/Rotate` 90), and written whole under its own encryption, a section
@@ -2402,11 +2481,11 @@ fn page_apart(page: u32) -> impl Fn(&[u32]) -> Vec<Vec<u32>> + Sync {
 #[test]
 fn type_2_entries_read_back_lazily_and_eagerly() {
     let (plain, trailer) = plaintext();
-    let older = (14, 1);
+    let older = ObjectId::new(14, 1);
     let generation = Object::from(dict! { "Generation" => 1 });
     let mut given = bodies(&plain);
     given.push((older, write::Body::from(&generation)));
-    let groups = page_apart(PAGE.0);
+    let groups = page_apart(PAGE.number);
     let mut pack = write::Pack::DEFAULT;
     pack.groups = Some(&groups);
     let mut bytes = Vec::new();
@@ -2416,7 +2495,7 @@ fn type_2_entries_read_back_lazily_and_eagerly() {
     assert!(sound(&pdf), "{:?}", pdf.warnings());
     assert_eq!(newest(&pdf).1, XrefKind::Stream);
     let xref = pdf.facts().max_stream.unwrap();
-    let (index, _, got) = rows(&pdf, (xref, 0));
+    let (index, _, got) = rows(&pdf, ObjectId::new(xref, 0));
     assert_eq!(index, [0, i64::from(xref) + 1]);
     let eager = bytes::read(&bytes);
     let mut stayed = std::collections::BTreeSet::new();
@@ -2424,14 +2503,14 @@ fn type_2_entries_read_back_lazily_and_eagerly() {
         std::collections::BTreeMap::new();
     let all = plain
         .iter()
-        .map(|(n, o)| ((*n, 0), o))
+        .map(|(n, o)| (ObjectId::new(*n, 0), o))
         .chain([(older, &generation)]);
     for (id, obj) in all.clone() {
         assert!(same(pdf.get(id).unwrap(), obj), "{id:?}");
         assert!(same(eager.get(id).unwrap(), obj), "whole: {id:?}");
-        match got[id.0 as usize] {
+        match got[id.number as usize] {
             [1, _, generation] => {
-                assert_eq!(generation, u64::from(id.1), "{id:?}");
+                assert_eq!(generation, u64::from(id.generation), "{id:?}");
                 stayed.insert(id);
             }
             [2, container, index] => containers.entry(container).or_default().push((index, id)),
@@ -2455,7 +2534,11 @@ fn type_2_entries_read_back_lazily_and_eagerly() {
     assert_eq!(containers.len(), 2);
     for (&container, members) in &containers {
         assert_eq!(got[container as usize][0], 1, "{container}");
-        let stream = pdf.get((container as u32, 0)).unwrap().as_stream().unwrap();
+        let stream = pdf
+            .get(ObjectId::new(container as u32, 0))
+            .unwrap()
+            .as_stream()
+            .unwrap();
         assert!(stream.dict.has_type(b"ObjStm"), "{container}");
         let n = stream.dict.get(b"N").unwrap().as_integer().unwrap();
         assert_eq!(n, members.len() as i64, "{container}");
@@ -2463,7 +2546,11 @@ fn type_2_entries_read_back_lazily_and_eagerly() {
         assert_eq!(places, (0..n as u64).collect::<Vec<_>>(), "{container}");
     }
     let first = *containers.keys().next().unwrap();
-    assert_eq!(got[PAGE.0 as usize], [2, first, 0], "the page's is first");
+    assert_eq!(
+        got[PAGE.number as usize],
+        [2, first, 0],
+        "the page's is first"
+    );
 }
 
 /// [`plaintext`] with `count` more objects, from 14, each a dictionary
@@ -2472,7 +2559,7 @@ fn with_many(count: u32) -> (Vec<(u32, Object)>, Dict) {
     let (mut plain, trailer) = plaintext();
     let many: Vec<Object> = (14..14 + count).map(Object::reference).collect();
     for (n, obj) in &mut plain {
-        if (*n, 0) == PAGE {
+        if ObjectId::new(*n, 0) == PAGE {
             let quarter = many[..count as usize / 4].to_vec();
             obj.as_dict_mut().unwrap().set("Many", quarter);
         }
@@ -2519,14 +2606,17 @@ fn containers_build_alike_on_one_thread_and_on_eight() {
     let objects: Vec<(ObjectId, Object)> = (1..=4000)
         .map(|n| {
             let text = lit(format!("object {n}").as_bytes());
-            ((n, 0), Object::from(dict! { "N" => n, "Text" => text }))
+            (
+                ObjectId::new(n, 0),
+                Object::from(dict! { "N" => n, "Text" => text }),
+            )
         })
         .collect();
     let groups: Vec<(u32, Vec<(ObjectId, super::copy::Member<'_>)>)> = (5000..)
         .zip(objects.chunks(100))
         .map(|(n, part)| (n, part.iter().map(|(id, o)| (*id, o.into())).collect()))
         .collect();
-    let trailer = dict! { "Root" => (1, 0) };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0) };
     // The catalog given, which says which stream is the metadata where
     // `/EncryptMetadata false` leaves it in the clear.
     let resolve = |id: ObjectId| (objects.iter()).find(|(at, _)| *at == id).map(|(_, o)| o);
@@ -2610,7 +2700,7 @@ fn containers_encrypt_once_as_the_reader_decrypts() {
         );
         let pdf = assert_reads_to(&plain, &bytes, true, name);
         let xref = pdf.facts().max_stream.unwrap();
-        let (_, _, got) = rows(&pdf, (xref, 0));
+        let (_, _, got) = rows(&pdf, ObjectId::new(xref, 0));
         let packed = (plain.iter())
             .filter(|(n, _)| got[*n as usize][0] == 2)
             .count();
@@ -2698,13 +2788,13 @@ fn packed_from(
     encryptor: Option<&Encryptor>,
 ) -> Result<Vec<u8>, Error> {
     let id = Object::hex(ID);
-    let trailer = dict! { "Root" => (1, 0), "ID" => vec![id.clone(), id] };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0), "ID" => vec![id.clone(), id] };
     let groups = page_apart(3);
     let mut pack = write::Pack::DEFAULT;
     pack.groups = Some(&groups);
     pack.reuse = reuse;
     let mut options = options(XrefKind::Stream, Some(pack));
-    options.encrypt_at = Some((6, 0));
+    options.encrypt_at = Some(ObjectId::new(6, 0));
     options.xref_from = xref_from;
     let mut out = Vec::new();
     write::full(
@@ -2751,7 +2841,7 @@ fn containers_take_the_source_s_numbers_first() {
         assert!(sound(&pdf), "{name}: {:?}", pdf.warnings());
         assert_eq!(pdf.facts().max_stream, Some(xref), "{name}");
         assert_eq!(size(&pdf), xref + 1, "{name}");
-        let (_, _, got) = rows(&pdf, (xref, 0));
+        let (_, _, got) = rows(&pdf, ObjectId::new(xref, 0));
         // The page's object stream, then the rest's: 1, 2 and 10 to 107;
         // 108 to 207; and 208 to 259.
         let containers = [3, 1, 108, 208].map(|n| got[n][1] as u32);
@@ -2762,7 +2852,10 @@ fn containers_take_the_source_s_numbers_first() {
         }
         assert_eq!(got[4][0], 1, "{name}: the stream");
         for (n, obj) in &objects {
-            assert!(same(pdf.get((*n, 0)).unwrap(), obj), "{name}: {n}");
+            assert!(
+                same(pdf.get(ObjectId::new(*n, 0)).unwrap(), obj),
+                "{name}: {n}"
+            );
         }
     }
 }
@@ -2786,7 +2879,7 @@ fn packing_runs_out_of_numbers_writes_plain() {
     let pdf = open(&bytes);
     assert!(sound(&pdf), "{:?}", pdf.warnings());
     assert_eq!(pdf.facts().max_stream, Some(last));
-    let (_, _, got) = rows(&pdf, (last, 0));
+    let (_, _, got) = rows(&pdf, ObjectId::new(last, 0));
     assert_eq!(got[3], [2, u64::from(last - 4), 0]);
     assert_eq!(got[259], [2, u64::from(last - 1), 51]);
 
@@ -2797,7 +2890,7 @@ fn packing_runs_out_of_numbers_writes_plain() {
     assert!(sound(&pdf), "{:?}", pdf.warnings());
     assert_eq!(pdf.facts().max_stream, Some(last - 3));
     for (n, obj) in &objects {
-        assert!(same(pdf.get((*n, 0)).unwrap(), obj), "{n}");
+        assert!(same(pdf.get(ObjectId::new(*n, 0)).unwrap(), obj), "{n}");
     }
 }
 
@@ -2822,7 +2915,7 @@ fn a_container_past_what_the_reader_takes_is_written_plain() {
     assert!(sound(&pdf), "{:?}", pdf.warnings());
     let xref = pdf.facts().max_stream.unwrap();
     assert_eq!(xref, 264);
-    let (_, _, got) = rows(&pdf, (xref, 0));
+    let (_, _, got) = rows(&pdf, ObjectId::new(xref, 0));
     for n in [1, 2].into_iter().chain(10..108) {
         assert_eq!(got[n][0], 1, "{n}");
     }
@@ -2831,9 +2924,16 @@ fn a_container_past_what_the_reader_takes_is_written_plain() {
         assert_eq!(got[n][0], 1, "{n}");
         assert_eq!(got[first], [2, n as u64, 0], "{first}");
     }
-    assert_eq!(object_streams_of(&pdf), [(260, 0), (262, 0), (263, 0)]);
+    assert_eq!(
+        object_streams_of(&pdf),
+        [
+            ObjectId::new(260, 0),
+            ObjectId::new(262, 0),
+            ObjectId::new(263, 0)
+        ]
+    );
     for (n, obj) in &objects {
-        assert!(same(pdf.get((*n, 0)).unwrap(), obj), "{n}");
+        assert!(same(pdf.get(ObjectId::new(*n, 0)).unwrap(), obj), "{n}");
     }
 }
 
@@ -2841,7 +2941,7 @@ fn a_container_past_what_the_reader_takes_is_written_plain() {
 /// whole file with one, asked to pack, is refused.
 #[test]
 fn a_table_layout_refuses_to_pack() {
-    let trailer = dict! { "Root" => (1, 0) };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0) };
     let mut out = b"before".to_vec();
     let options = options(XrefKind::Table, Some(write::Pack::DEFAULT));
     let e = write::full(&mut out, [], &trailer, None, None, &options).unwrap_err();
@@ -2867,14 +2967,14 @@ fn a_full_write_keeps_the_trailer_but_the_bases_sections() {
     doc.insert(3, linearized);
     doc.insert(4, Object::from(objstm));
     doc.insert(5, Object::from(xref));
-    doc.set((6, 2), Object::from(6));
+    doc.set(ObjectId::new(6, 2), Object::from(6));
     let id = Object::hex(ID);
     let mut base = dict! {
-        "Root" => (1, 0),
-        "Info" => (2, 0),
+        "Root" => ObjectId::new(1, 0),
+        "Info" => ObjectId::new(2, 0),
         "Custom" => "Kept",
         "ID" => vec![id.clone(), id],
-        "Encrypt" => (9, 0),
+        "Encrypt" => ObjectId::new(9, 0),
     };
     for key in ["Prev", "XRefStm", "Size", "Length", "DL"] {
         base.set(key, 1000);
@@ -2907,9 +3007,21 @@ fn a_full_write_keeps_the_trailer_but_the_bases_sections() {
         // The linearization dictionary and the base's streams left out, and
         // the stream this section is, when it's one, listed.
         let (mut ids, own): (_, &[&[u8]]) = match kind {
-            XrefKind::Table => (vec![(1, 0), (2, 0), (6, 2)], &[b"Size"]),
+            XrefKind::Table => (
+                vec![
+                    ObjectId::new(1, 0),
+                    ObjectId::new(2, 0),
+                    ObjectId::new(6, 2),
+                ],
+                &[b"Size"],
+            ),
             XrefKind::Stream => (
-                vec![(1, 0), (2, 0), (6, 2), (7, 0)],
+                vec![
+                    ObjectId::new(1, 0),
+                    ObjectId::new(2, 0),
+                    ObjectId::new(6, 2),
+                    ObjectId::new(7, 0),
+                ],
                 &[
                     b"Size",
                     b"Type",
@@ -2932,7 +3044,7 @@ fn a_full_write_keeps_the_trailer_but_the_bases_sections() {
             [b"Custom".as_slice(), b"ID", b"Info", b"Root"],
             "{kind:?}"
         );
-        let past = ids.pop().unwrap().0 + 1;
+        let past = ids.pop().unwrap().number + 1;
         assert_eq!(size(&pdf), past, "{kind:?}");
         assert_eq!(
             trailer.get(b"Custom").and_then(Object::as_name),
@@ -2955,9 +3067,11 @@ fn a_full_write_keeps_the_trailer_but_the_bases_sections() {
 /// body at 0, which heads the free list, where no section lists it.
 #[test]
 fn a_number_past_what_a_file_may_use_isnt_written() {
-    let trailer = dict! { "Root" => (1, 0) };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0) };
     let catalog = catalog();
-    let given = |at: u32| [(1, 0), (at, 0)].map(|id| (id, write::Body::from(&catalog)));
+    let given = |at: u32| {
+        [ObjectId::new(1, 0), ObjectId::new(at, 0)].map(|id| (id, write::Body::from(&catalog)))
+    };
     let write = |at: u32, kind, xref_from| {
         let mut options = options(kind, None);
         options.xref_from = xref_from;
@@ -2984,12 +3098,16 @@ fn an_update_lists_only_what_it_writes() {
     // Object 3 at generation 4; 2 rewritten, 4 added.
     let mut file = b"%PDF-1.7\n".to_vec();
     let mut full = Section::full(0);
-    let objects = [((1, 0), catalog()), ((2, 0), 2.into()), ((3, 4), 3.into())];
+    let objects = [
+        (ObjectId::new(1, 0), catalog()),
+        (ObjectId::new(2, 0), 2.into()),
+        (ObjectId::new(3, 4), 3.into()),
+    ];
     for (id, obj) in objects {
         let pos = serialize::indirect(&mut file, id, &obj).unwrap();
-        let generation = id.1;
+        let generation = id.generation;
         full.insert(
-            id.0,
+            id.number,
             Entry::InUse {
                 offset: pos,
                 generation,
@@ -2997,18 +3115,23 @@ fn an_update_lists_only_what_it_writes() {
         );
     }
     let pos = file.len();
-    full.table(&mut file, dict! { "Root" => (1, 0) }, pos)
+    full.table(&mut file, dict! { "Root" => ObjectId::new(1, 0) }, pos)
         .unwrap();
     let (twenty_two, four) = (Object::from(22), Object::from(4));
-    let given =
-        || [((2, 0), &twenty_two), ((4, 0), &four)].map(|(id, o)| (id, write::Body::from(o)));
+    let given = || {
+        [
+            (ObjectId::new(2, 0), &twenty_two),
+            (ObjectId::new(4, 0), &four),
+        ]
+        .map(|(id, o)| (id, write::Body::from(o)))
+    };
     for kind in KINDS {
         let mut base = write::Base::new(
             file.len(),
             newest(&open(&file)).0,
             4,
             kind,
-            dict! { "Root" => (1, 0) },
+            dict! { "Root" => ObjectId::new(1, 0) },
         );
         base.ends_line = true;
         let mut options = write::Options::DEFAULT;
@@ -3027,9 +3150,9 @@ fn an_update_lists_only_what_it_writes() {
         assert_eq!(newest(&pdf), (update.start, kind));
         assert_eq!(pdf.facts().sections, 2, "{kind:?}");
         assert_eq!(size(&pdf), update.size, "{kind:?}");
-        assert_eq!(value(&pdf, (2, 0)), Object::from(22));
-        assert_eq!(value(&pdf, (3, 4)), Object::from(3));
-        assert_eq!(value(&pdf, (4, 0)), Object::from(4));
+        assert_eq!(value(&pdf, ObjectId::new(2, 0)), Object::from(22));
+        assert_eq!(value(&pdf, ObjectId::new(3, 4)), Object::from(3));
+        assert_eq!(value(&pdf, ObjectId::new(4, 0)), Object::from(4));
         // Neither an /ID nor /Encrypt, with none to keep.
         let trailer = pdf.trailer().dict();
         assert!(!trailer.has(b"ID") && !trailer.has(b"Encrypt"));
@@ -3043,7 +3166,7 @@ fn an_update_lists_only_what_it_writes() {
             }
             XrefKind::Stream => {
                 assert_eq!(update.size, 6);
-                let (index, _, _) = rows(&pdf, (5, 0));
+                let (index, _, _) = rows(&pdf, ObjectId::new(5, 0));
                 assert_eq!(index, [2, 1, 4, 2], "{kind:?}");
             }
         }
@@ -3117,7 +3240,7 @@ fn a_file_with_a_100_byte_prefix_appends() {
         assert_eq!(written.start, newest(&open(&appended)).0, "{kind:?}");
         // Its section's positions are the file's, past the prefix, where
         // its start counts from the header.
-        let Some(Entry::InUse { offset, .. }) = written.section.get(PAGE.0) else {
+        let Some(Entry::InUse { offset, .. }) = written.section.get(PAGE.number) else {
             panic!("{kind:?}: no page")
         };
         assert!(after_prefix[offset..].starts_with(b"4 0 obj"), "{kind:?}");
@@ -3129,7 +3252,7 @@ fn a_file_with_a_100_byte_prefix_appends() {
         assert_eq!(pdf.facts().header_offset, Some(PREFIX.len()), "{kind:?}");
         assert!(pdf.trailer().unwritten.is_some(), "scanned: {kind:?}");
         for (n, _) in &plain {
-            let id = (*n, 0);
+            let id = ObjectId::new(*n, 0);
             assert_eq!(
                 handed(&pdf, id),
                 handed(&unprefixed, id),
@@ -3269,7 +3392,7 @@ fn a_base_numbered_to_the_last_number_isnt_appended_to() {
         dict! { "Type" => "Page", "Parent" => r(2), "MediaBox" => media },
     ];
     for (num, dict) in (1..).zip(objects) {
-        let pos = serialize::indirect(&mut file, (num, 0), &dict.into()).unwrap();
+        let pos = serialize::indirect(&mut file, ObjectId::new(num, 0), &dict.into()).unwrap();
         rows.push(1);
         rows.extend_from_slice(&(pos as u32).to_be_bytes());
         rows.extend_from_slice(&[0, 0]);
@@ -3283,16 +3406,16 @@ fn a_base_numbered_to_the_last_number_isnt_appended_to() {
         "Root" => r(1),
     };
     let stream = Object::from(Stream::new(xref, rows));
-    serialize::indirect(&mut file, (u32::MAX, 0), &stream).unwrap();
+    serialize::indirect(&mut file, ObjectId::new(u32::MAX, 0), &stream).unwrap();
     file.extend_from_slice(format!("startxref\n{start}\n%%EOF\n").as_bytes());
     let reading = open(&file);
     assert_eq!(reading.facts().max_stream, Some(u32::MAX));
     let base = write::Base::of(&reading).unwrap();
     assert_eq!(base.size, u32::MAX);
-    let mut page = reading.get((3, 0)).unwrap().clone();
+    let mut page = reading.get(ObjectId::new(3, 0)).unwrap().clone();
     page.as_dict_mut().unwrap().set("Rotate", 90);
     let mut out = file.clone();
-    let given = [((3, 0), write::Body::from(&page))];
+    let given = [(ObjectId::new(3, 0), write::Body::from(&page))];
     let refused = write::update(
         &mut out,
         &base,
@@ -3418,14 +3541,19 @@ fn an_encrypted_object_stream_base_rewrites() {
 /// it, as its stream method leaves it; and a cross-reference stream.
 fn packed_in_the_clear(encryptor: &Encryptor) -> Vec<u8> {
     let (plain, trailer) = plaintext();
-    let resolve = |id: ObjectId| (plain.iter()).find(|(n, _)| (*n, 0) == id).map(|(_, o)| o);
+    let resolve = |id: ObjectId| {
+        (plain.iter())
+            .find(|(n, _)| ObjectId::new(*n, 0) == id)
+            .map(|(_, o)| o)
+    };
     let encrypting = encryptor.encrypting(&trailer, &resolve).unwrap();
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut section = Section::full(0);
     let (streams, members): (Vec<_>, Vec<_>) =
         plain.iter().partition(|(_, o)| o.as_stream().is_some());
     for (num, obj) in streams {
-        let pos = serialize::indirect_with(&mut out, (*num, 0), obj, &encrypting).unwrap();
+        let pos =
+            serialize::indirect_with(&mut out, ObjectId::new(*num, 0), obj, &encrypting).unwrap();
         section.insert(
             *num,
             Entry::InUse {
@@ -3436,7 +3564,8 @@ fn packed_in_the_clear(encryptor: &Encryptor) -> Vec<u8> {
     }
     let members: Vec<(u32, Object)> = members.into_iter().cloned().collect();
     let container = container(&members);
-    let pos = serialize::indirect_with(&mut out, (20, 0), &container, &encrypting).unwrap();
+    let pos =
+        serialize::indirect_with(&mut out, ObjectId::new(20, 0), &container, &encrypting).unwrap();
     section.insert(
         20,
         Entry::InUse {
@@ -3452,7 +3581,7 @@ fn packed_in_the_clear(encryptor: &Encryptor) -> Vec<u8> {
     let pos =
         serialize::indirect(&mut out, at, &Object::from(encryptor.dictionary().clone())).unwrap();
     section.insert(
-        at.0,
+        at.number,
         Entry::InUse {
             offset: pos,
             generation: 0,
@@ -3551,7 +3680,7 @@ fn assert_rewrites(file: &[u8], password: &str, name: &str) {
             }
             let record = doc.record(id).unwrap();
             let copied_ = copied(&out, &written, record, &reading, id);
-            let at = matches!(written.section.get(id.0), Some(Entry::InUse { .. }));
+            let at = matches!(written.section.get(id.number), Some(Entry::InUse { .. }));
             let copyable = record.origin == crate::Origin::File
                 && record.endobj
                 && (record.data).is_none_or(|d| d.declared && !d.indirect_length);
@@ -3751,7 +3880,7 @@ fn a_decrypting_write_and_a_new_revision_6_read_back() {
             .dict()
             .get(b"Encrypt")
             .and_then(Object::as_reference);
-        assert_eq!(encrypt, Some((ENCRYPT, 0)), "{}", method.name);
+        assert_eq!(encrypt, Some(ObjectId::new(ENCRYPT, 0)), "{}", method.name);
         let mut rng = ChaCha20Rng::seed_from_u64(9);
         let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
         for (way, encryptor) in [("decrypted", None), ("created", Some(&created))] {
@@ -3764,9 +3893,12 @@ fn a_decrypting_write_and_a_new_revision_6_read_back() {
                 None => open(&out),
             };
             assert!(sound(&back), "{name}: {:?}", back.warnings());
-            assert!(!back.ids().any(|id| id == (ENCRYPT, 0)), "{name}");
+            assert!(
+                !back.ids().any(|id| id == ObjectId::new(ENCRYPT, 0)),
+                "{name}"
+            );
             for (n, obj) in &plain {
-                let id = (*n, 0);
+                let id = ObjectId::new(*n, 0);
                 assert!(same(back.get(id).unwrap(), obj), "{name}: {id:?}");
                 if let Some(s) = obj.as_stream() {
                     assert_eq!(
@@ -3817,7 +3949,7 @@ fn a_decrypting_write_and_a_new_revision_6_read_back() {
 fn title_written(file: &[u8]) -> Vec<u8> {
     let locked = open(file);
     assert_eq!(locked.encryption(), &Encryption::Locked);
-    let info = locked.get((13, 0)).unwrap().as_dict().unwrap();
+    let info = locked.get(ObjectId::new(13, 0)).unwrap().as_dict().unwrap();
     match info.get(b"Title").unwrap().value() {
         Value::String(Str::Encrypted(bytes), _) => bytes.clone(),
         other => panic!("{other:?}"),
@@ -3842,12 +3974,12 @@ fn an_rc4_update_leaks_the_xor_of_what_changed() {
     {
         let source = encrypted_by(&method.encryptor, &plain, &trailer, XrefKind::Table);
         let reading = opened(&source, "user");
-        let mut info = reading.get((13, 0)).unwrap().clone();
+        let mut info = reading.get(ObjectId::new(13, 0)).unwrap().clone();
         info.as_dict_mut().unwrap().set("Title", lit(CHANGED));
         let base = write::Base::of(&reading).unwrap();
         let encryptor = Encryptor::of(&reading).unwrap();
         let mut out = source.clone();
-        let given = [((13, 0), write::Body::from(&info))];
+        let given = [(ObjectId::new(13, 0), write::Body::from(&info))];
         let options = write::Options::DEFAULT;
         write::update(&mut out, &base, given, encryptor.as_ref(), None, &options).unwrap();
         let (was, now) = (title_written(&source), title_written(&out));
@@ -3869,7 +4001,7 @@ fn a_body_at_a_number_the_file_lists_free_is_refused_where_keys_are_per_object()
         (1, Body::from(dict! { "Type" => "Catalog" })),
         (3, Body::from(dict! { "N" => 3 })),
     ];
-    let root = dict! { "Root" => (1, 0) };
+    let root = dict! { "Root" => ObjectId::new(1, 0) };
     let two = Object::from(dict! { "New" => lit(b"a new object") });
     let catalog = catalog();
     let kinds = [
@@ -3890,14 +4022,14 @@ fn a_body_at_a_number_the_file_lists_free_is_refused_where_keys_are_per_object()
         let encryptor = Encryptor::of(&reading).unwrap();
         let base = write::Base::of(&reading).unwrap();
         for generation in [0, 1] {
-            let id = (2, generation);
+            let id = ObjectId::new(2, generation);
             let mut out = file.clone();
             let given = [(id, write::Body::from(&two))];
             let options = write::Options::DEFAULT;
             let updated = write::update(&mut out, &base, given, encryptor.as_ref(), None, &options);
             let mut whole = b"held".to_vec();
             let given = [
-                ((1, 0), write::Body::from(&catalog)),
+                (ObjectId::new(1, 0), write::Body::from(&catalog)),
                 (id, write::Body::from(&two)),
             ];
             let written = write::full(&mut whole, given, &root, encryptor.as_ref(), None, &options);
@@ -3924,8 +4056,8 @@ fn a_body_at_a_number_the_file_lists_free_is_refused_where_keys_are_per_object()
     let prepared = Password("user").prepared().unwrap();
     let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
     let given = [
-        ((1, 0), write::Body::from(&catalog)),
-        ((2, 0), write::Body::from(&two)),
+        (ObjectId::new(1, 0), write::Body::from(&catalog)),
+        (ObjectId::new(2, 0), write::Body::from(&two)),
     ];
     let mut out = Vec::new();
     write::full(
@@ -3937,14 +4069,14 @@ fn a_body_at_a_number_the_file_lists_free_is_refused_where_keys_are_per_object()
         &write::Options::DEFAULT,
     )
     .unwrap();
-    assert_eq!(value(&opened(&out, "user"), (2, 0)), two);
+    assert_eq!(value(&opened(&out, "user"), ObjectId::new(2, 0)), two);
     let plain = fixture::file("1.7", &objects, root.clone(), Xref::Table);
     let reading = open(&plain);
     let base = write::Base::of(&reading).unwrap();
     let mut out = plain.clone();
-    let given = [((2, 0), write::Body::from(&two))];
+    let given = [(ObjectId::new(2, 0), write::Body::from(&two))];
     write::update(&mut out, &base, given, None, None, &write::Options::DEFAULT).unwrap();
-    assert_eq!(value(&open(&out), (2, 0)), two);
+    assert_eq!(value(&open(&out), ObjectId::new(2, 0)), two);
 }
 
 /// A whole file written under its reading's encryption lists each number
@@ -3960,7 +4092,7 @@ fn a_whole_file_lists_its_reading_s_free_numbers_at_their_generations() {
         (1, Body::from(dict! { "Type" => "Catalog" })),
         (3, Body::from(dict! { "N" => 3 })),
     ];
-    let root = dict! { "Root" => (1, 0) };
+    let root = dict! { "Root" => ObjectId::new(1, 0) };
     let kinds = [
         (Kind::Rc4By40, true),
         (Kind::Rc4By128, true),
@@ -4001,8 +4133,8 @@ fn a_whole_file_lists_its_reading_s_free_numbers_at_their_generations() {
                 "{name}, {layout:?}"
             );
             assert_eq!(
-                value(&back, (3, 0)),
-                value(&reading, (3, 0)),
+                value(&back, ObjectId::new(3, 0)),
+                value(&reading, ObjectId::new(3, 0)),
                 "{name}, {layout:?}"
             );
         }
@@ -4024,7 +4156,11 @@ fn encrypting_without_the_catalog_where_metadata_is_in_the_clear_is_refused() {
     let none = |_: ObjectId| -> Option<&Object> { None };
     let refused = clear.encryptor.encrypting(&trailer, &none).err();
     assert_eq!(refused, Some(Error::Catalog(root)));
-    let resolve = |id: ObjectId| (plain.iter()).find(|(n, _)| (*n, 0) == id).map(|(_, o)| o);
+    let resolve = |id: ObjectId| {
+        (plain.iter())
+            .find(|(n, _)| ObjectId::new(*n, 0) == id)
+            .map(|(_, o)| o)
+    };
     assert!(clear.encryptor.encrypting(&trailer, &resolve).is_ok());
 }
 
@@ -4046,8 +4182,14 @@ fn a_renumbered_file_laid_out_by_a_caller_leaves_its_metadata_in_the_clear() {
         let own = Encryptor::of(&reading).unwrap().unwrap();
         let doc = reading.to_document().unwrap();
         let swap = |id: ObjectId| match id {
-            (5, 0) => Some((3, 0)),
-            (3, 0) => Some((5, 0)),
+            ObjectId {
+                number: 5,
+                generation: 0,
+            } => Some(ObjectId::new(3, 0)),
+            ObjectId {
+                number: 3,
+                generation: 0,
+            } => Some(ObjectId::new(5, 0)),
             id => Some(id),
         };
         let renumbered = own.renumbered(&swap);
@@ -4055,13 +4197,24 @@ fn a_renumbered_file_laid_out_by_a_caller_leaves_its_metadata_in_the_clear() {
         let (trailer, resolve) = (doc.trailer.dict(), &&doc);
         let renumbering = whole.encrypting_renumbered(trailer, resolve, &swap);
         let encrypting = renumbering.unwrap();
-        let dict_of = |n: u32| doc.get((n, 0)).unwrap().as_stream().unwrap().dict.clone();
-        let content = encrypting.stream((5, 0), &dict_of(3), CONTENT).unwrap();
-        let metadata = encrypting.stream((3, 0), &dict_of(5), XMP).unwrap();
+        let dict_of = |n: u32| {
+            doc.get(ObjectId::new(n, 0))
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .dict
+                .clone()
+        };
+        let content = encrypting
+            .stream(ObjectId::new(5, 0), &dict_of(3), CONTENT)
+            .unwrap();
+        let metadata = encrypting
+            .stream(ObjectId::new(3, 0), &dict_of(5), XMP)
+            .unwrap();
         assert_ne!(content.as_ref(), CONTENT, "{name}: the content, at 5");
         assert_eq!(metadata.as_ref(), XMP, "{name}: the metadata, at 3");
         let held = whole.encrypting(trailer, resolve).unwrap();
-        let metadata = held.stream((5, 0), &dict_of(5), XMP).unwrap();
+        let metadata = held.stream(ObjectId::new(5, 0), &dict_of(5), XMP).unwrap();
         assert_eq!(metadata.as_ref(), XMP, "{name}: the metadata, held at 5");
         let none = |_: ObjectId| -> Option<&Object> { None };
         let refused = whole.encrypting_renumbered(trailer, &none, &swap).err();
@@ -4079,7 +4232,11 @@ fn an_object_at_a_moved_encryption_dictionary_s_number_is_encrypted() {
     let methods = methods();
     for method in standard(&methods) {
         let name = method.name;
-        assert_eq!(method.encryptor.at(), Some((ENCRYPT, 0)), "{name}");
+        assert_eq!(
+            method.encryptor.at(),
+            Some(ObjectId::new(ENCRYPT, 0)),
+            "{name}"
+        );
         let objects = [
             (1, catalog()),
             (
@@ -4088,9 +4245,9 @@ fn an_object_at_a_moved_encryption_dictionary_s_number_is_encrypted() {
             ),
         ];
         let mut options = write::Options::DEFAULT;
-        options.encrypt_at = Some((50, 0));
+        options.encrypt_at = Some(ObjectId::new(50, 0));
         let mut out = Vec::new();
-        let trailer = dict! { "Root" => (1, 0) };
+        let trailer = dict! { "Root" => ObjectId::new(1, 0) };
         write::full(
             &mut out,
             bodies(&objects),
@@ -4107,9 +4264,13 @@ fn an_object_at_a_moved_encryption_dictionary_s_number_is_encrypted() {
                 .dict()
                 .get(b"Encrypt")
                 .and_then(Object::as_reference),
-            Some((50, 0))
+            Some(ObjectId::new(50, 0))
         );
-        assert_eq!(value(&back, (ENCRYPT, 0)), objects[1].1, "{name}");
+        assert_eq!(
+            value(&back, ObjectId::new(ENCRYPT, 0)),
+            objects[1].1,
+            "{name}"
+        );
     }
 }
 
@@ -4215,7 +4376,7 @@ fn a_base_is_a_reading_s_file_as_its_last_section_says() {
     let stream = fixture::file(
         "1.7",
         &[(1, Body::from(dict! { "Type" => "Catalog" }))],
-        dict! { "Root" => (1, 0) },
+        dict! { "Root" => ObjectId::new(1, 0) },
         Xref::Stream,
     );
     let reading = open(&stream);
@@ -4290,7 +4451,7 @@ fn a_second_update_goes_after_the_first_s_written_base() {
     assert_eq!(first.base.source, base.source);
     assert!(first.base.holds(&out[..]).unwrap());
     let info = Object::from(dict! { "Title" => lit(b"the second") });
-    let given = [((13, 0), write::Body::from(&info))];
+    let given = [(ObjectId::new(13, 0), write::Body::from(&info))];
     let second = write::update(&mut out, &first.base, given, None, None, &options)
         .unwrap()
         .unwrap();
@@ -4300,7 +4461,7 @@ fn a_second_update_goes_after_the_first_s_written_base() {
     assert!(sound(&pdf), "{:?}", pdf.warnings());
     assert_eq!(pdf.facts().sections, 3);
     assert_eq!(newest(&pdf), (second.start, XrefKind::Stream));
-    assert_eq!(value(&pdf, (13, 0)), info);
+    assert_eq!(value(&pdf, ObjectId::new(13, 0)), info);
     assert_eq!(
         value(&pdf, PAGE)
             .as_dict()
@@ -4405,14 +4566,14 @@ fn a_stream_s_data_where_it_was_written_is_its_own_reading_s_alone() {
         .encryptor;
     let source = encrypted_by(aes, &plain, &trailer, XrefKind::Table);
     let reading = opened(&source, "user");
-    let content = reading.get((3, 0)).unwrap().clone();
+    let content = reading.get(ObjectId::new(3, 0)).unwrap().clone();
     assert!(content.as_stream().unwrap().data.at().is_some());
     let catalog = catalog();
-    let root = dict! { "Root" => (1, 0) };
+    let root = dict! { "Root" => ObjectId::new(1, 0) };
     let given = |at: u32| {
         [
-            ((1, 0), write::Body::from(&catalog)),
-            ((at, 0), write::Body::from(&content)),
+            (ObjectId::new(1, 0), write::Body::from(&catalog)),
+            (ObjectId::new(at, 0), write::Body::from(&content)),
         ]
     };
     let options = write::Options::DEFAULT;
@@ -4428,7 +4589,7 @@ fn a_stream_s_data_where_it_was_written_is_its_own_reading_s_alone() {
         )
         .unwrap();
         let back = read_back(&out, encryptor.is_some());
-        assert_eq!(back.data((3, 0)).unwrap().as_ref(), CONTENT);
+        assert_eq!(back.data(ObjectId::new(3, 0)).unwrap().as_ref(), CONTENT);
         assert_eq!(holds(&out, CONTENT), encryptor.is_none());
     }
     let other = whole(&plain, &trailer, XrefKind::Stream, None);
@@ -4438,7 +4599,7 @@ fn a_stream_s_data_where_it_was_written_is_its_own_reading_s_alone() {
     for (at, from) in refusals {
         let mut out = b"held".to_vec();
         let refused = write::full(&mut out, given(at), &root, None, from, &options);
-        assert_eq!(refused, Err(Error::Placed((at, 0))));
+        assert_eq!(refused, Err(Error::Placed(ObjectId::new(at, 0))));
         assert_eq!(out, b"held");
     }
 }
@@ -4453,39 +4614,55 @@ fn a_stream_of_another_file_is_written_from_its_bytes_once_unplaced() {
     let stream = |data: &[u8]| Object::from(Stream::new(dict! {}, data.to_vec()));
     let (a, b) = (file(&[(3, stream(b"aaaa"))]), file(&[(3, stream(b"bbbb"))]));
     let (a, b) = (open(&a), open(&b));
-    let content = a.get((3, 0)).unwrap().clone();
+    let content = a.get(ObjectId::new(3, 0)).unwrap().clone();
     let at = content.as_stream().unwrap().data.at();
-    assert_eq!(at, b.get((3, 0)).unwrap().as_stream().unwrap().data.at());
+    assert_eq!(
+        at,
+        b.get(ObjectId::new(3, 0))
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .data
+            .at()
+    );
     let catalog = catalog();
-    let root = dict! { "Root" => (1, 0) };
+    let root = dict! { "Root" => ObjectId::new(1, 0) };
     let options = write::Options::DEFAULT;
     let written = |content: &Object, out: &mut Vec<u8>| {
         let bodies = [
-            ((1, 0), write::Body::from(&catalog)),
-            ((3, 0), write::Body::from(content)),
+            (ObjectId::new(1, 0), write::Body::from(&catalog)),
+            (ObjectId::new(3, 0), write::Body::from(content)),
         ];
         write::full(out, bodies, &root, None, Some(&b), &options)
     };
     // As read: written from the other file's bytes, at the same place.
     let mut out = Vec::new();
     written(&content, &mut out).unwrap();
-    assert_eq!(open(&out).data((3, 0)).unwrap().as_ref(), b"bbbb");
+    assert_eq!(
+        open(&out).data(ObjectId::new(3, 0)).unwrap().as_ref(),
+        b"bbbb"
+    );
     // Unplaced, it has no data to write.
     let mut unplaced = content.clone();
     unplaced.unplace();
     let mut out = b"held".to_vec();
     let refused = written(&unplaced, &mut out);
-    let data = serialize::Error::Data { id: Some((3, 0)) };
+    let data = serialize::Error::Data {
+        id: Some(ObjectId::new(3, 0)),
+    };
     assert_eq!(refused, Err(Error::Serialize(data)));
     assert_eq!(out, b"held");
     // Its data given first as its bytes, from its own file's reading.
     let mut moved = content.clone();
-    let bytes = a.data((3, 0)).unwrap().into_owned();
+    let bytes = a.data(ObjectId::new(3, 0)).unwrap().into_owned();
     moved.as_stream_mut().unwrap().set_bytes(bytes);
     moved.unplace();
     let mut out = Vec::new();
     written(&moved, &mut out).unwrap();
-    assert_eq!(open(&out).data((3, 0)).unwrap().as_ref(), b"aaaa");
+    assert_eq!(
+        open(&out).data(ObjectId::new(3, 0)).unwrap().as_ref(),
+        b"aaaa"
+    );
 }
 
 /// A document built in memory is written whole, its objects at their
@@ -4535,7 +4712,7 @@ fn every_refusal_writes_nothing() {
         b"data".to_vec(),
     ));
     fn at(n: u32, o: &Object) -> (ObjectId, write::Body<'_>) {
-        ((n, 0), write::Body::from(o))
+        (ObjectId::new(n, 0), write::Body::from(o))
     }
     let stop = AtomicBool::new(true);
     let mut stopped = write::Options::DEFAULT;
@@ -4548,7 +4725,7 @@ fn every_refusal_writes_nothing() {
         options(XrefKind::Stream, Some(pack))
     }
     let mut encrypt_at = write::Options::DEFAULT;
-    encrypt_at.encrypt_at = Some((1, 0));
+    encrypt_at.encrypt_at = Some(ObjectId::new(1, 0));
     /// A whole file's bodies, encryptor, options, and the refusal.
     type Whole<'a> = (
         Vec<(ObjectId, write::Body<'a>)>,
@@ -4570,7 +4747,10 @@ fn every_refusal_writes_nothing() {
             Error::Number(write::NUMBERS),
         ),
         (
-            vec![at(1, &catalog), ((1, 1), write::Body::from(&catalog))],
+            vec![
+                at(1, &catalog),
+                (ObjectId::new(1, 1), write::Body::from(&catalog)),
+            ],
             None,
             write::Options::DEFAULT,
             Error::Twice(1),
@@ -4599,20 +4779,24 @@ fn every_refusal_writes_nothing() {
             vec![at(1, &catalog), at(2, &nan)],
             None,
             write::Options::DEFAULT,
-            Error::Serialize(serialize::Error::NonFinite { id: Some((2, 0)) }),
+            Error::Serialize(serialize::Error::NonFinite {
+                id: Some(ObjectId::new(2, 0)),
+            }),
         ),
         (
             vec![at(1, &catalog), at(2, &nan)],
             None,
             packed(&|n: &[u32]| vec![n.to_vec()]),
-            Error::Serialize(serialize::Error::NonFinite { id: Some((2, 0)) }),
+            Error::Serialize(serialize::Error::NonFinite {
+                id: Some(ObjectId::new(2, 0)),
+            }),
         ),
         (
             vec![at(1, &catalog), at(2, &unknown)],
             Some(by_name("AES-128")),
             write::Options::DEFAULT,
             Error::Encrypt {
-                id: (2, 0),
+                id: ObjectId::new(2, 0),
                 why: Unencryptable::Fault(Fault::Method {
                     name: "Nonesuch".to_string(),
                 }),
@@ -4622,7 +4806,7 @@ fn every_refusal_writes_nothing() {
             vec![at(1, &catalog)],
             Some(by_name("metadata in the clear")),
             write::Options::DEFAULT,
-            Error::Catalog((12, 0)),
+            Error::Catalog(ObjectId::new(12, 0)),
         ),
     ];
     for (given, encryptor, options, want) in wholes {
@@ -4693,7 +4877,7 @@ fn an_update_under_another_file_s_encryptor_is_refused() {
         (1, Body::from(dict! { "Type" => "Catalog" })),
         (2, Body::from(dict! { "Title" => lit(b"secret") })),
     ];
-    let root = dict! { "Root" => (1, 0) };
+    let root = dict! { "Root" => ObjectId::new(1, 0) };
     let changed = Object::from(dict! { "Title" => lit(b"changed") });
     for kind in [Kind::Rc4By128, Kind::Aes128, Kind::Aes256] {
         let name = format!("{kind:?}");
@@ -4704,7 +4888,7 @@ fn an_update_under_another_file_s_encryptor_is_refused() {
         let (theirs, ours) = (encryptor_of(&b), encryptor_of(&a));
         assert_eq!(theirs.at(), ours.at(), "{name}");
         let base = write::Base::of(&opened(&a, "user")).unwrap();
-        let given = [((2, 0), write::Body::from(&changed))];
+        let given = [(ObjectId::new(2, 0), write::Body::from(&changed))];
         let mut out = a.clone();
         let options = &write::Options::DEFAULT;
         let refused = write::update(&mut out, &base, given.clone(), Some(&theirs), None, options);
@@ -4712,7 +4896,11 @@ fn an_update_under_another_file_s_encryptor_is_refused() {
         assert_eq!(out, a, "{name}");
         let owner = Encryptor::of(&opened(&a, "owner")).unwrap();
         write::update(&mut out, &base, given, owner.as_ref(), None, options).unwrap();
-        assert_eq!(value(&opened(&out, "user"), (2, 0)), changed, "{name}");
+        assert_eq!(
+            value(&opened(&out, "user"), ObjectId::new(2, 0)),
+            changed,
+            "{name}"
+        );
     }
     let catalog = Object::from(dict! { "Type" => "Catalog", "Lang" => lit(b"en") });
     let a = source(dictionary_of(Kind::Aes128, true), true);
@@ -4732,7 +4920,7 @@ fn an_update_under_another_file_s_encryptor_is_refused() {
     ];
     for base in bases {
         let mut out = a.clone();
-        let given = [((1, 0), write::Body::from(&catalog))];
+        let given = [(ObjectId::new(1, 0), write::Body::from(&catalog))];
         let options = &write::Options::DEFAULT;
         let refused = write::update(&mut out, &base, given, Some(&theirs), None, options);
         assert_eq!(refused, Err(Error::Unmatched));
@@ -4759,7 +4947,7 @@ fn an_encryption_dictionary_s_objects_stay_out_of_object_streams() {
         (41, filters.clone()),
     ];
     for (num, obj) in &objects {
-        at.push(serialize::indirect(&mut out, (*num, 0), obj).unwrap());
+        at.push(serialize::indirect(&mut out, ObjectId::new(*num, 0), obj).unwrap());
     }
     let mut source_trailer = trailer.clone();
     source_trailer.set("Encrypt", Object::reference(ENCRYPT));
@@ -4773,9 +4961,9 @@ fn an_encryption_dictionary_s_objects_stay_out_of_object_streams() {
     serialize::write(&mut out, &Object::from(source_trailer)).unwrap();
     out.extend_from_slice(format!("\nstartxref\n{xref}\n%%EOF\n").as_bytes());
     let encryptor = encryptor_of(&out);
-    assert!(encryptor.dictionary_object((41, 0)));
+    assert!(encryptor.dictionary_object(ObjectId::new(41, 0)));
     // By its shape alone, it may go in one.
-    assert!(write::packable((41, 0), &filters));
+    assert!(write::packable(ObjectId::new(41, 0), &filters));
 
     let (mut plain, trailer) = plaintext();
     plain.push((41, filters));
@@ -4784,7 +4972,7 @@ fn an_encryption_dictionary_s_objects_stay_out_of_object_streams() {
     assert!(matches!(pdf.encryption(), Encryption::Opened { .. }));
     assert!(sound(&pdf), "{:?}", pdf.warnings());
     let xref = pdf.facts().max_stream.unwrap();
-    let (_, _, got) = rows(&pdf, (xref, 0));
+    let (_, _, got) = rows(&pdf, ObjectId::new(xref, 0));
     assert_eq!(got[41][0], 1, "on its own");
     assert_eq!(got[13][0], 2, "the Info dictionary is packed");
     assert_reads_to(&plain, &bytes, true, "/CF by reference");
@@ -4803,7 +4991,7 @@ fn an_earlier_revision_s_encryption_dictionary_is_written_whole_as_any_object() 
     let base = write::Base::of(&earlier).unwrap();
     // An update that names the same dictionary, again, as object 41.
     let mut section = Section::append(base.size, 0);
-    let pos = serialize::indirect(&mut file, (41, 0), &Object::from(dict)).unwrap();
+    let pos = serialize::indirect(&mut file, ObjectId::new(41, 0), &Object::from(dict)).unwrap();
     section.insert(
         41,
         Entry::InUse {
@@ -4819,10 +5007,13 @@ fn an_earlier_revision_s_encryption_dictionary_is_written_whole_as_any_object() 
 
     let reading = opened(&file, "user");
     assert!(matches!(reading.encryption(), Encryption::Opened { .. }));
-    let was = value(&reading, (ENCRYPT, 0));
+    let was = value(&reading, ObjectId::new(ENCRYPT, 0));
     let doc = reading.to_document().unwrap();
     let encryptor = Encryptor::of(&reading).unwrap();
-    assert_eq!(encryptor.as_ref().and_then(Encryptor::at), Some((41, 0)));
+    assert_eq!(
+        encryptor.as_ref().and_then(Encryptor::at),
+        Some(ObjectId::new(41, 0))
+    );
     let mut whole = Vec::new();
     let options = write::Options::DEFAULT;
     write::document(
@@ -4836,13 +5027,13 @@ fn an_earlier_revision_s_encryption_dictionary_is_written_whole_as_any_object() 
     let back = opened(&whole, "user");
     assert!(sound(&back), "{:?}", back.warnings());
     assert_eq!(
-        value(&back, (ENCRYPT, 0)),
+        value(&back, ObjectId::new(ENCRYPT, 0)),
         was,
         "the earlier dictionary as it was"
     );
     // Its strings encrypted: what was in the clear isn't, as written.
     let o = |pdf: &Reading<Arc<[u8]>>| {
-        pdf.get((ENCRYPT, 0))
+        pdf.get(ObjectId::new(ENCRYPT, 0))
             .unwrap()
             .as_dict()
             .unwrap()
@@ -4861,7 +5052,7 @@ fn an_earlier_revision_s_encryption_dictionary_is_written_whole_as_any_object() 
     // An update after the file keeps naming it, so leaves it in the clear.
     let base = write::Base::of(&reading).unwrap();
     let mut updated = file.clone();
-    let given = [((ENCRYPT, 0), write::Body::from(&was))];
+    let given = [(ObjectId::new(ENCRYPT, 0), write::Body::from(&was))];
     write::update(
         &mut updated,
         &base,
@@ -4872,9 +5063,9 @@ fn an_earlier_revision_s_encryption_dictionary_is_written_whole_as_any_object() 
     )
     .unwrap();
     let back = opened(&updated, "user");
-    assert_eq!(value(&back, (ENCRYPT, 0)), was);
+    assert_eq!(value(&back, ObjectId::new(ENCRYPT, 0)), was);
     let mut clear = Vec::new();
-    serialize::indirect(&mut clear, (ENCRYPT, 0), &was).unwrap();
+    serialize::indirect(&mut clear, ObjectId::new(ENCRYPT, 0), &was).unwrap();
     assert!(holds(&updated[file.len()..], &clear), "written as it is");
 }
 
@@ -4921,14 +5112,21 @@ fn a_reference_to_no_object_names_none_of_the_writer_s_own() {
     let mut objects = numbered();
     let gone = vec![Object::reference(260), Object::reference(261)];
     objects[4].1.as_dict_mut().unwrap().set("Gone", gone);
-    let trailer = dict! { "Root" => (1, 0), "Missing" => Object::reference(262) };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0), "Missing" => Object::reference(262) };
     let bytes = whole_packed(&objects, &trailer, None, None);
     let pdf = open(&bytes);
     assert!(sound(&pdf), "{:?}", pdf.warnings());
-    assert_eq!(object_streams_of(&pdf), [(263, 0), (264, 0), (265, 0)]);
+    assert_eq!(
+        object_streams_of(&pdf),
+        [
+            ObjectId::new(263, 0),
+            ObjectId::new(264, 0),
+            ObjectId::new(265, 0)
+        ]
+    );
     assert_eq!(pdf.facts().max_stream, Some(266));
     for n in 260..263 {
-        assert!(pdf.get((n, 0)).is_err(), "{n} is no object");
+        assert!(pdf.get(ObjectId::new(n, 0)).is_err(), "{n} is no object");
     }
     // A new encryption's dictionary, past every object, passes over them
     // too.
@@ -4952,7 +5150,7 @@ fn a_reference_to_no_object_names_none_of_the_writer_s_own() {
         .dict()
         .get(b"Encrypt")
         .and_then(Object::as_reference);
-    assert_eq!(encrypt, Some((263, 0)));
+    assert_eq!(encrypt, Some(ObjectId::new(263, 0)));
     // And an update's cross-reference stream.
     let file = whole(&objects, &trailer, XrefKind::Stream, None);
     let reading = open(&file);
@@ -4964,7 +5162,7 @@ fn a_reference_to_no_object_names_none_of_the_writer_s_own() {
         .unwrap()
         .set("Later", Object::reference(264));
     let mut updated = file.clone();
-    let given = [((1, 0), write::Body::from(&catalog))];
+    let given = [(ObjectId::new(1, 0), write::Body::from(&catalog))];
     let written = write::update(&mut updated, &base, given, None, None, &options)
         .unwrap()
         .unwrap();
@@ -4974,7 +5172,7 @@ fn a_reference_to_no_object_names_none_of_the_writer_s_own() {
     );
     let pdf = open(&updated);
     assert!(sound(&pdf), "{:?}", pdf.warnings());
-    assert!(pdf.get((264, 0)).is_err());
+    assert!(pdf.get(ObjectId::new(264, 0)).is_err());
 }
 
 // Copies (`write::Body::Read`): an object as read, written as the bytes
@@ -5018,7 +5216,7 @@ fn copied<S: ByteSource>(
     id: ObjectId,
 ) -> bool {
     let bytes = reading.written(record.at).unwrap();
-    match written.section.get(id.0) {
+    match written.section.get(id.number) {
         Some(Entry::InUse { offset: pos, .. }) => out[pos..].starts_with(&bytes),
         _ => false,
     }
@@ -5047,9 +5245,9 @@ fn an_object_as_read_is_copied_as_the_bytes_it_was_read_from() {
         let options = options(kind, None);
         let written = write::document(&mut out, &doc, None, Some(&reading), &options).unwrap();
         for (n, _) in SPELLED {
-            let record = doc.record((n, 0)).unwrap();
+            let record = doc.record(ObjectId::new(n, 0)).unwrap();
             assert!(
-                copied(&out, &written, record, &reading, (n, 0)),
+                copied(&out, &written, record, &reading, ObjectId::new(n, 0)),
                 "{kind:?}: {n}"
             );
         }
@@ -5070,13 +5268,19 @@ fn with_no_reading_given_an_object_as_read_is_written_anew() {
     let reading = open(&file);
     let mut doc = reading.to_document().unwrap();
     // The stream's data given as bytes, as there's no reading to read it.
-    let data = reading.data((6, 0)).unwrap().into_owned();
-    let dict = doc.get((6, 0)).unwrap().as_stream().unwrap().dict.clone();
-    doc.set((6, 0), Stream::new(dict, data));
+    let data = reading.data(ObjectId::new(6, 0)).unwrap().into_owned();
+    let dict = doc
+        .get(ObjectId::new(6, 0))
+        .unwrap()
+        .as_stream()
+        .unwrap()
+        .dict
+        .clone();
+    doc.set(ObjectId::new(6, 0), Stream::new(dict, data));
     assert!(
         SPELLED[..5]
             .iter()
-            .all(|(n, _)| doc.record((*n, 0)).is_some())
+            .all(|(n, _)| doc.record(ObjectId::new(*n, 0)).is_some())
     );
     let mut out = Vec::new();
     let options = options(XrefKind::Table, None);
@@ -5107,7 +5311,7 @@ fn a_record_of_another_reading_than_the_one_given_is_refused() {
     let options = options(XrefKind::Table, None);
     let mut out = Vec::new();
     let refused = write::document(&mut out, &doc, None, Some(&second), &options);
-    assert_eq!(refused, Err(Error::Elsewhere((1, 0))));
+    assert_eq!(refused, Err(Error::Elsewhere(ObjectId::new(1, 0))));
     assert!(out.is_empty());
     let mut base = write::Base::of(&second).unwrap();
     base.source = None;
@@ -5120,7 +5324,7 @@ fn a_record_of_another_reading_than_the_one_given_is_refused() {
         Some(&second),
         &options,
     );
-    assert_eq!(refused, Err(Error::Elsewhere((1, 0))));
+    assert_eq!(refused, Err(Error::Elsewhere(ObjectId::new(1, 0))));
     assert_eq!(updated, file);
     write::document(&mut out, &doc, None, Some(&first), &options).unwrap();
 }
@@ -5184,7 +5388,7 @@ fn objects_at_offsets_are_copied_under_their_own_reading_s_encryption_alone() {
             let back = opened(&out, password);
             assert!(sound(&back), "{name}: {:?}", back.warnings());
             for (n, _) in &plain {
-                let id = (*n, 0);
+                let id = ObjectId::new(*n, 0);
                 let record = doc.record(id).unwrap();
                 let was = copied(&out, &written, record, &reading, id);
                 assert_eq!(was, copies, "{name}: {id:?}");
@@ -5261,7 +5465,7 @@ fn parts_copy_only_what_is_encrypted_under_the_key_it_was_read_under() {
         for text in SECRETS {
             assert!(!in_clear(&out, text), "{kind:?}");
         }
-        for id in [(2, 0), (3, 0)] {
+        for id in [ObjectId::new(2, 0), ObjectId::new(3, 0)] {
             let record = doc.record(id).unwrap();
             let read = reading.written(record.at).unwrap();
             assert!(!holds(&out, &read), "{kind:?}: {id:?}, the old key's");
@@ -5344,10 +5548,10 @@ fn a_copy_is_of_its_own_number_and_object_or_refused() {
     };
     // At another number.
     let mut given: Vec<_> = write::bodies(&doc).collect();
-    given.push(((9, 0), read_as(&doc, (4, 0))));
+    given.push((ObjectId::new(9, 0), read_as(&doc, ObjectId::new(4, 0))));
     assert_eq!(
         write(given.clone(), &table).err(),
-        Some(Error::Elsewhere((9, 0)))
+        Some(Error::Elsewhere(ObjectId::new(9, 0)))
     );
     // So too under a new encryption, which copies nothing at an offset.
     let prepared = Password("user").prepared().unwrap();
@@ -5362,36 +5566,45 @@ fn a_copy_is_of_its_own_number_and_object_or_refused() {
         Some(&reading),
         &table,
     );
-    assert_eq!(refused.err(), Some(Error::Elsewhere((9, 0))));
+    assert_eq!(refused.err(), Some(Error::Elsewhere(ObjectId::new(9, 0))));
     assert!(out.is_empty());
     // And by an update after the reading's file, with or without it.
     let base = write::Base::of(&reading).unwrap();
     let from: &dyn write::ReadFrom = &reading;
     for from in [Some(from), None] {
         let mut out = file.clone();
-        let given = [((9, 0), read_as(&doc, (4, 0)))];
+        let given = [(ObjectId::new(9, 0), read_as(&doc, ObjectId::new(4, 0)))];
         let refused = write::update(&mut out, &base, given, None, from, &table);
-        assert_eq!(refused, Err(Error::Elsewhere((9, 0))));
+        assert_eq!(refused, Err(Error::Elsewhere(ObjectId::new(9, 0))));
         assert_eq!(out, file);
     }
     // With another object's record.
     let given: Vec<_> = (write::bodies(&doc))
         .map(|(id, body)| match id {
-            (4, 0) => {
-                let object = Cow::Borrowed(doc.get((5, 0)).unwrap());
-                let record = Cow::Borrowed(doc.record((4, 0)).unwrap());
+            ObjectId {
+                number: 4,
+                generation: 0,
+            } => {
+                let object = Cow::Borrowed(doc.get(ObjectId::new(5, 0)).unwrap());
+                let record = Cow::Borrowed(doc.record(ObjectId::new(4, 0)).unwrap());
                 (id, write::Body::Read { object, record })
             }
             _ => (id, body),
         })
         .collect();
-    assert_eq!(write(given, &table).err(), Some(Error::Elsewhere((4, 0))));
+    assert_eq!(
+        write(given, &table).err(),
+        Some(Error::Elsewhere(ObjectId::new(4, 0)))
+    );
     // Edited, written anew with the edit.
-    let mut page = doc.get((3, 0)).unwrap().clone();
+    let mut page = doc.get(ObjectId::new(3, 0)).unwrap().clone();
     page.as_dict_mut().unwrap().set("Rotate", 90);
     let given: Vec<_> = (write::bodies(&doc))
         .map(|(id, body)| match id {
-            (3, 0) => {
+            ObjectId {
+                number: 3,
+                generation: 0,
+            } => {
                 let record = Cow::Borrowed(doc.record(id).unwrap());
                 let object = Cow::Borrowed(&page);
                 (id, write::Body::Read { object, record })
@@ -5402,11 +5615,11 @@ fn a_copy_is_of_its_own_number_and_object_or_refused() {
     let (out, _) = write(given.clone(), &table).unwrap();
     assert!(!holds(&out, b"1.50"));
     let back = open(&out);
-    assert_eq!(value(&back, (3, 0)), unplaced(&page));
+    assert_eq!(value(&back, ObjectId::new(3, 0)), unplaced(&page));
     let mut out = file.clone();
     let written = write::update(&mut out, &base, given, None, Some(&reading), &table);
     assert!(written.unwrap().unwrap().section.lists(3));
-    assert_eq!(value(&open(&out), (3, 0)), unplaced(&page));
+    assert_eq!(value(&open(&out), ObjectId::new(3, 0)), unplaced(&page));
 
     // In an object stream, given another member's place.
     let packed = members_spelled();
@@ -5415,14 +5628,17 @@ fn a_copy_is_of_its_own_number_and_object_or_refused() {
     let pack = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
     let given: Vec<_> = (write::bodies(&doc))
         .map(|(id, body)| match id {
-            (5, 0) => (id, read_as(&doc, (4, 0))),
+            ObjectId {
+                number: 5,
+                generation: 0,
+            } => (id, read_as(&doc, ObjectId::new(4, 0))),
             _ => (id, body),
         })
         .collect();
     let mut out = Vec::new();
     let trailer = doc.trailer.dict();
     let refused = write::full(&mut out, given, trailer, None, Some(&reading), &pack);
-    assert_eq!(refused, Err(Error::Elsewhere((5, 0))));
+    assert_eq!(refused, Err(Error::Elsewhere(ObjectId::new(5, 0))));
     assert!(out.is_empty());
 }
 
@@ -5454,14 +5670,14 @@ fn members_spelled_as(members: &[(u32, &[u8])]) -> Vec<u8> {
     let mediabox = [0, 0, 612, 792].map(Object::from).to_vec();
     let page = dict! {
         "Type" => "Page",
-        "Parent" => (2, 0),
+        "Parent" => ObjectId::new(2, 0),
         "MediaBox" => mediabox,
         "Resources" => Dict::new(),
     };
     let objects = [
         (
             1,
-            Object::from(dict! { "Type" => "Catalog", "Pages" => (2, 0) }),
+            Object::from(dict! { "Type" => "Catalog", "Pages" => ObjectId::new(2, 0) }),
         ),
         (
             2,
@@ -5473,7 +5689,7 @@ fn members_spelled_as(members: &[(u32, &[u8])]) -> Vec<u8> {
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut section = Section::full(0);
     for (n, obj) in &objects {
-        let pos = serialize::indirect(&mut out, (*n, 0), obj).unwrap();
+        let pos = serialize::indirect(&mut out, ObjectId::new(*n, 0), obj).unwrap();
         section.insert(
             *n,
             Entry::InUse {
@@ -5488,7 +5704,7 @@ fn members_spelled_as(members: &[(u32, &[u8])]) -> Vec<u8> {
     }
     let pos = out.len();
     let own = section.size();
-    let trailer = dict! { "Root" => (1, 0) };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0) };
     section
         .stream(&mut out, own, trailer, pos, Deflate::DEFAULT)
         .unwrap();
@@ -5540,7 +5756,7 @@ fn an_object_without_endobj_isn_t_copied() {
     file[endobj..endobj + 6].fill(b' ');
     let reading = open(&file);
     let doc = reading.to_document().unwrap();
-    assert!(!doc.record((5, 0)).unwrap().endobj);
+    assert!(!doc.record(ObjectId::new(5, 0)).unwrap().endobj);
     let mut out = Vec::new();
     let options = options(XrefKind::Table, None);
     let written = write::document(&mut out, &doc, None, Some(&reading), &options).unwrap();
@@ -5548,13 +5764,16 @@ fn an_object_without_endobj_isn_t_copied() {
     assert!(copied(
         &out,
         &written,
-        doc.record((4, 0)).unwrap(),
+        doc.record(ObjectId::new(4, 0)).unwrap(),
         &reading,
-        (4, 0)
+        ObjectId::new(4, 0)
     ));
     let back = open(&out);
     assert!(sound(&back), "{:?}", back.warnings());
-    assert_eq!(handed(&back, (5, 0)), handed(&reading, (5, 0)));
+    assert_eq!(
+        handed(&back, ObjectId::new(5, 0)),
+        handed(&reading, ObjectId::new(5, 0))
+    );
 }
 
 /// Rule 6: a stream whose `/Length` is a reference, or isn't how long its
@@ -5574,7 +5793,7 @@ fn a_stream_whose_length_is_a_reference_or_wrong_isn_t_copied() {
         let file = spelled_as(&objects);
         let reading = open(&file);
         let doc = reading.to_document().unwrap();
-        let data = doc.record((6, 0)).unwrap().data.unwrap();
+        let data = doc.record(ObjectId::new(6, 0)).unwrap().data.unwrap();
         assert!(!data.declared || data.indirect_length, "{name}");
         let mut out = Vec::new();
         let options = options(XrefKind::Table, None);
@@ -5583,13 +5802,16 @@ fn a_stream_whose_length_is_a_reference_or_wrong_isn_t_copied() {
         assert!(copied(
             &out,
             &written,
-            doc.record((3, 0)).unwrap(),
+            doc.record(ObjectId::new(3, 0)).unwrap(),
             &reading,
-            (3, 0)
+            ObjectId::new(3, 0)
         ));
         let back = open(&out);
         assert!(sound(&back), "{name}: {:?}", back.warnings());
-        let (got, was) = (handed(&back, (6, 0)), handed(&reading, (6, 0)));
+        let (got, was) = (
+            handed(&back, ObjectId::new(6, 0)),
+            handed(&reading, ObjectId::new(6, 0)),
+        );
         assert_alike(&got, &was, name);
         let stream = got.as_stream().unwrap();
         let len = stream.data.bytes().unwrap().len() as i64;
@@ -5633,7 +5855,11 @@ fn a_member_is_copied_into_an_object_stream_and_alone_written_anew() {
         let back = open(&out);
         assert!(sound(&back), "{name}: {:?}", back.warnings());
         for (n, _) in MEMBERS_SPELLED {
-            assert_eq!(value(&back, (n, 0)), value(&reading, (n, 0)), "{name}: {n}");
+            assert_eq!(
+                value(&back, ObjectId::new(n, 0)),
+                value(&reading, ObjectId::new(n, 0)),
+                "{name}: {n}"
+            );
         }
         let data = object_streams_data(&back);
         for (n, bytes) in MEMBERS_SPELLED {
@@ -5670,7 +5896,11 @@ fn members_are_copied_into_object_streams_under_any_encryption() {
         assert!(sound(&back), "{name}: {:?}", back.warnings());
         let data = object_streams_data(&back);
         for (n, bytes) in MEMBERS_SPELLED {
-            assert_eq!(value(&back, (n, 0)), value(&reading, (n, 0)), "{name}: {n}");
+            assert_eq!(
+                value(&back, ObjectId::new(n, 0)),
+                value(&reading, ObjectId::new(n, 0)),
+                "{name}: {n}"
+            );
             assert!(holds(&data, bytes), "{name}: {n}");
         }
     };
@@ -5715,19 +5945,19 @@ fn a_copy_whose_bytes_changed_since_they_were_read_is_refused() {
     write::document(&mut out, &doc, None, Some(&reading), &options).unwrap();
     // `1.50`'s `5`, in the page.
     let at = (file.windows(4).position(|w| w == b"1.50")).unwrap() + 2;
-    let page = doc.record((3, 0)).unwrap().at;
+    let page = doc.record(ObjectId::new(3, 0)).unwrap().at;
     assert!(page.start < at && at < page.end);
     source.flip(at);
     let mut out = Vec::new();
     let refused = write::document(&mut out, &doc, None, Some(&reading), &options);
-    assert_eq!(refused, Err(Error::Changed(Some((3, 0)))));
+    assert_eq!(refused, Err(Error::Changed(Some(ObjectId::new(3, 0)))));
     assert!(out.is_empty());
     let mut base = write::Base::of(&reading).unwrap();
     base.source = None;
     let mut updated = file.clone();
     let given = write::bodies(&doc);
     let refused = write::update(&mut updated, &base, given, None, Some(&reading), &options);
-    assert_eq!(refused, Err(Error::Changed(Some((3, 0)))));
+    assert_eq!(refused, Err(Error::Changed(Some(ObjectId::new(3, 0)))));
     assert_eq!(updated, file);
     // A byte of the table, which nothing copied holds.
     let xref = (file.windows(5).rposition(|w| w == b"xref\n")).unwrap();
@@ -5777,7 +6007,10 @@ fn a_file_changed_since_it_was_read_refuses_the_write_before_a_byte() {
     assert_eq!(refused, Err(Error::Changed(None)));
     assert_eq!(updated, file);
     // Given no reading, nothing's read of it, so nothing's asked.
-    let given = [((1, 0), write::Body::from(doc.get((1, 0)).unwrap()))];
+    let given = [(
+        ObjectId::new(1, 0),
+        write::Body::from(doc.get(ObjectId::new(1, 0)).unwrap()),
+    )];
     let trailer = doc.trailer.dict();
     write::full(&mut out, given, trailer, None, None, &options).unwrap();
 }
@@ -5807,7 +6040,9 @@ fn an_update_writes_what_of_a_document_changed_since_it_was_read() {
     assert_eq!(none, Ok(None));
     assert_eq!(out, file);
     let listed = |w: &write::Written| (1..8).filter(|&n| w.section.lists(n)).collect::<Vec<u32>>();
-    doc.get_dict_mut((3, 0)).unwrap().set("Rotate", 90);
+    doc.get_dict_mut(ObjectId::new(3, 0))
+        .unwrap()
+        .set("Rotate", 90);
     let first = write::update(
         &mut out,
         &base,
@@ -5819,7 +6054,11 @@ fn an_update_writes_what_of_a_document_changed_since_it_was_read() {
     .unwrap()
     .unwrap();
     assert_eq!(listed(&first), [3]);
-    let array = doc.get_mut((5, 0)).unwrap().as_array_mut().unwrap();
+    let array = doc
+        .get_mut(ObjectId::new(5, 0))
+        .unwrap()
+        .as_array_mut()
+        .unwrap();
     array.push(Object::from(4));
     let second = write::bodies(&doc);
     let second = write::update(
@@ -5864,15 +6103,17 @@ fn by(map: &Map) -> impl Fn(ObjectId) -> Option<ObjectId> + Sync + '_ {
 /// Every one of `ids`, ascending, at the number of the one as far from the
 /// end as it is from the start, at its own generation.
 fn reversed(ids: &[ObjectId]) -> Map {
-    let numbers = ids.iter().rev().map(|id| id.0);
+    let numbers = ids.iter().rev().map(|id| id.number);
     (ids.iter().zip(numbers))
-        .map(|(&id, n)| (id, (n, id.1)))
+        .map(|(&id, n)| (id, ObjectId::new(n, id.generation)))
         .collect()
 }
 
 /// Every one of `ids` `past` on.
 fn shifted(ids: &[ObjectId], past: u32) -> Map {
-    ids.iter().map(|&(n, g)| ((n, g), (n + past, g))).collect()
+    ids.iter()
+        .map(|&id| (id, ObjectId::new(id.number + past, id.generation)))
+        .collect()
 }
 
 /// `ids`, ascending, numbered from 1 at generation 0, one `alike` gives an
@@ -5895,7 +6136,7 @@ fn dense(
         while free.contains(&next) {
             next += 1;
         }
-        map.insert(id, (next, 0));
+        map.insert(id, ObjectId::new(next, 0));
         next += 1;
     }
     map
@@ -6008,7 +6249,7 @@ fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike()
         let free: std::collections::BTreeSet<u32> = (encryptor.iter())
             .flat_map(|e| e.free_numbers().map(|(n, _)| n))
             .collect();
-        let top = (ids.iter().map(|id| id.0))
+        let top = (ids.iter().map(|id| id.number))
             .chain(free.iter().copied())
             .max()
             .unwrap()
@@ -6071,7 +6312,7 @@ fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike()
                     };
                     let was = copied(&unrenumbered, &unrenumbered_written, record, &reading, id);
                     let at = to(id).unwrap();
-                    let Some(Entry::InUse { offset, .. }) = written.section.get(at.0) else {
+                    let Some(Entry::InUse { offset, .. }) = written.section.get(at.number) else {
                         continue;
                     };
                     if was && (at == id || !per_object) {
@@ -6099,7 +6340,7 @@ fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike()
                     false => assert_eq!(again, out, "{name}: through document"),
                     true => {
                         let later = alike.keys().next().unwrap();
-                        let twice = Error::WrittenTwice(map[later].0);
+                        let twice = Error::WrittenTwice(map[later].number);
                         assert_eq!(through, Err(twice), "{name}");
                         assert!(again.is_empty(), "{name}");
                     }
@@ -6115,7 +6356,7 @@ fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike()
                 Some(*id) == encrypt || referred
             };
             let plain: Vec<ObjectId> = kept.iter().copied().filter(|id| !left(id)).collect();
-            let up = |(n, g): ObjectId| Some((n + write::NUMBERS, g));
+            let up = |id: ObjectId| Some(ObjectId::new(id.number + write::NUMBERS, id.generation));
             let given: Vec<(ObjectId, Object)> = (plain.iter())
                 .map(|&id| {
                     let mut o = handed(&reading, id);
@@ -6126,7 +6367,9 @@ fn every_test_file_is_written_whole_under_each_renumbering_and_read_back_alike()
             let mut trailer = Object::from(doc.trailer.dict().clone());
             trailer.renumber(up);
             let trailer = trailer.as_dict().unwrap().clone();
-            let down = |(n, g): ObjectId| n.checked_sub(write::NUMBERS).map(|n| (n, g));
+            let down = |id: ObjectId| {
+                (id.number.checked_sub(write::NUMBERS)).map(|n| ObjectId::new(n, id.generation))
+            };
             let mut moved = options;
             moved.renumber = Some(&down);
             let mut out = Vec::new();
@@ -6180,7 +6423,19 @@ fn a_copy_under_a_renumbering_is_its_bytes_but_its_header_and_the_references_mov
     // 2, 4, 6 and 7 move ten on; 1, 3 and 5 stay; 9 is no object's.
     let moves = |n: u32| n % 2 == 0 || n == 7;
     let map: Map = (ids.iter())
-        .map(|&(n, g)| ((n, g), (if moves(n) { n + 10 } else { n }, g)))
+        .map(|&id| {
+            (
+                id,
+                ObjectId::new(
+                    if moves(id.number) {
+                        id.number + 10
+                    } else {
+                        id.number
+                    },
+                    id.generation,
+                ),
+            )
+        })
         .collect();
     let to = by(&map);
     let want: [(u32, &[u8]); 7] = [
@@ -6231,53 +6486,71 @@ fn a_copy_under_a_renumbering_is_its_bytes_but_its_header_and_the_references_mov
 fn a_renumbering_that_writes_an_object_nowhere_or_twice_is_refused() {
     let catalog = catalog();
     let three = Object::from(dict! { "N" => 3 });
-    let trailer = dict! { "Root" => (1, 0) };
-    let at = |n: u32, o| ((n, 0), write::Body::from(o));
+    let trailer = dict! { "Root" => ObjectId::new(1, 0) };
+    let at = |n: u32, o| (ObjectId::new(n, 0), write::Body::from(o));
     let methods = methods();
     let created = &methods
         .iter()
         .find(|m| m.name == "AES-256 created")
         .unwrap();
     let mut encrypt_at = write::Options::DEFAULT;
-    encrypt_at.encrypt_at = Some((7, 0));
+    encrypt_at.encrypt_at = Some(ObjectId::new(7, 0));
     let cases: Vec<(Map, Vec<_>, Option<&Encryptor>, write::Options<'_>, Error)> = vec![
         (
-            Map::from([((1, 0), (1, 0))]),
+            Map::from([(ObjectId::new(1, 0), ObjectId::new(1, 0))]),
             vec![at(1, &catalog), at(3, &three)],
             None,
             write::Options::DEFAULT,
-            Error::Unnumbered((3, 0)),
+            Error::Unnumbered(ObjectId::new(3, 0)),
         ),
         (
-            Map::from([((1, 0), (1, 0)), ((3, 0), (1, 0))]),
+            Map::from([
+                (ObjectId::new(1, 0), ObjectId::new(1, 0)),
+                (ObjectId::new(3, 0), ObjectId::new(1, 0)),
+            ]),
             vec![at(1, &catalog), at(3, &three)],
             None,
             write::Options::DEFAULT,
             Error::WrittenTwice(1),
         ),
         (
-            Map::from([((1, 0), (1, 0)), ((1, 1), (2, 0))]),
-            vec![at(1, &catalog), ((1, 1), write::Body::from(&three))],
+            Map::from([
+                (ObjectId::new(1, 0), ObjectId::new(1, 0)),
+                (ObjectId::new(1, 1), ObjectId::new(2, 0)),
+            ]),
+            vec![
+                at(1, &catalog),
+                (ObjectId::new(1, 1), write::Body::from(&three)),
+            ],
             None,
             write::Options::DEFAULT,
             Error::Twice(1),
         ),
         (
-            Map::from([((1, 0), (1, 0)), ((3, 0), (0, 0))]),
+            Map::from([
+                (ObjectId::new(1, 0), ObjectId::new(1, 0)),
+                (ObjectId::new(3, 0), ObjectId::new(0, 0)),
+            ]),
             vec![at(1, &catalog), at(3, &three)],
             None,
             write::Options::DEFAULT,
             Error::Number(0),
         ),
         (
-            Map::from([((1, 0), (1, 0)), ((3, 0), (write::NUMBERS, 0))]),
+            Map::from([
+                (ObjectId::new(1, 0), ObjectId::new(1, 0)),
+                (ObjectId::new(3, 0), ObjectId::new(write::NUMBERS, 0)),
+            ]),
             vec![at(1, &catalog), at(3, &three)],
             None,
             write::Options::DEFAULT,
             Error::Number(write::NUMBERS),
         ),
         (
-            Map::from([((1, 0), (1, 0)), ((3, 0), (7, 0))]),
+            Map::from([
+                (ObjectId::new(1, 0), ObjectId::new(1, 0)),
+                (ObjectId::new(3, 0), ObjectId::new(7, 0)),
+            ]),
             vec![at(1, &catalog), at(3, &three)],
             Some(&created.encryptor),
             encrypt_at,
@@ -6293,7 +6566,7 @@ fn a_renumbering_that_writes_an_object_nowhere_or_twice_is_refused() {
         assert_eq!(out, b"held", "{want}");
     }
     assert_eq!(
-        Error::Unnumbered((3, 0)).to_string(),
+        Error::Unnumbered(ObjectId::new(3, 0)).to_string(),
         "object 3 0 is given, and the renumbering gives it no number to be written at"
     );
     assert_eq!(Error::Twice(1).to_string(), "object 1 is given twice");
@@ -6302,10 +6575,13 @@ fn a_renumbering_that_writes_an_object_nowhere_or_twice_is_refused() {
         "two objects would be written at object number 1"
     );
     // Given past the numbers a file may use, written below them.
-    let far = (write::NUMBERS + 5, 0);
+    let far = ObjectId::new(write::NUMBERS + 5, 0);
     let mut moved = catalog.clone();
     moved.as_dict_mut().unwrap().set("Far", Object::from(far));
-    let map = Map::from([((1, 0), (1, 0)), (far, (2, 0))]);
+    let map = Map::from([
+        (ObjectId::new(1, 0), ObjectId::new(1, 0)),
+        (far, ObjectId::new(2, 0)),
+    ]);
     let to = by(&map);
     let mut options = write::Options::DEFAULT;
     options.renumber = Some(&to);
@@ -6313,16 +6589,27 @@ fn a_renumbering_that_writes_an_object_nowhere_or_twice_is_refused() {
     let given = [at(1, &moved), (far, write::Body::from(&three))];
     write::full(&mut out, given, &trailer, None, None, &options).unwrap();
     let back = open(&out);
-    assert_eq!(value(&back, (2, 0)), three);
-    let named = back.get((1, 0)).unwrap().as_dict().unwrap().get(b"Far");
-    assert_eq!(named.and_then(Object::as_reference), Some((2, 0)));
+    assert_eq!(value(&back, ObjectId::new(2, 0)), three);
+    let named = back
+        .get(ObjectId::new(1, 0))
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(b"Far");
+    assert_eq!(
+        named.and_then(Object::as_reference),
+        Some(ObjectId::new(2, 0))
+    );
     // Through `document`, two alike streams at one number.
     let file = shared();
     let reading = open(&file);
     let doc = reading.to_document().unwrap();
     let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
     let alike = alike_streams(&reading, &ids);
-    assert_eq!(alike, Map::from([((7, 0), (6, 0))]));
+    assert_eq!(
+        alike,
+        Map::from([(ObjectId::new(7, 0), ObjectId::new(6, 0))])
+    );
     let map = dense(&ids, |id| alike.get(&id).copied(), &Default::default());
     let to = by(&map);
     let mut options = write::Options::DEFAULT;
@@ -6346,21 +6633,26 @@ fn a_reference_the_renumbering_names_none_of_is_written_null() {
     let objects = [
         (
             1,
-            Object::from(dict! { "Type" => "Catalog", "Gone" => (9, 0), "Kept" => (30, 0) }),
+            Object::from(
+                dict! { "Type" => "Catalog", "Gone" => ObjectId::new(9, 0), "Kept" => ObjectId::new(30, 0) },
+            ),
         ),
         (
             2,
-            Object::from(Stream::new(dict! { "Gone" => (9, 0) }, b"data".to_vec())),
+            Object::from(Stream::new(
+                dict! { "Gone" => ObjectId::new(9, 0) },
+                b"data".to_vec(),
+            )),
         ),
         (3, Object::from(vec![Object::reference(9), Object::from(3)])),
     ];
-    let trailer = dict! { "Root" => (1, 0), "Info" => (9, 0) };
+    let trailer = dict! { "Root" => ObjectId::new(1, 0), "Info" => ObjectId::new(9, 0) };
     // 1 to 3 stay; 30, which nothing holds, is written as 4; 9 is no
     // object's.
     let map: Map = [1, 2, 3]
-        .map(|n| ((n, 0), (n, 0)))
+        .map(|n| (ObjectId::new(n, 0), ObjectId::new(n, 0)))
         .into_iter()
-        .chain([((30, 0), (4, 0))])
+        .chain([(ObjectId::new(30, 0), ObjectId::new(4, 0))])
         .collect();
     let to = by(&map);
     let mut rng = ChaCha20Rng::seed_from_u64(14);
@@ -6386,16 +6678,16 @@ fn a_reference_the_renumbering_names_none_of_is_written_null() {
         .unwrap();
         let back = opened(&out, "user");
         assert!(sound(&back), "{name}: {:?}", back.warnings());
-        let catalog = back.get((1, 0)).unwrap().as_dict().unwrap();
+        let catalog = back.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
         assert!(catalog.get(b"Gone").unwrap().is_null(), "{name}");
         assert_eq!(
             catalog.get(b"Kept").and_then(Object::as_reference),
-            Some((4, 0)),
+            Some(ObjectId::new(4, 0)),
             "{name}"
         );
-        let stream = back.get((2, 0)).unwrap().as_stream().unwrap();
+        let stream = back.get(ObjectId::new(2, 0)).unwrap().as_stream().unwrap();
         assert!(stream.dict.get(b"Gone").unwrap().is_null(), "{name}");
-        let array = back.get((3, 0)).unwrap().as_array().unwrap();
+        let array = back.get(ObjectId::new(3, 0)).unwrap().as_array().unwrap();
         assert!(array[0].is_null(), "{name}");
         let info = back.trailer().dict().get(b"Info").unwrap();
         assert!(info.is_null(), "{name}: {info:?}");
@@ -6404,14 +6696,14 @@ fn a_reference_the_renumbering_names_none_of_is_written_null() {
             "{name}"
         );
         // 4, named and not written, taken by none of the writer's own.
-        assert!(back.get((4, 0)).is_err(), "{name}");
+        assert!(back.get(ObjectId::new(4, 0)).is_err(), "{name}");
         assert!(!written.section.lists(4), "{name}");
         if encryptor.is_some() {
             let encrypt = back.trailer().dict().get(b"Encrypt").unwrap();
-            assert_eq!(encrypt.as_reference(), Some((5, 0)), "{name}");
+            assert_eq!(encrypt.as_reference(), Some(ObjectId::new(5, 0)), "{name}");
         }
         if pack.is_some() {
-            assert_eq!(object_streams_of(&back), [(5, 0)], "{name}");
+            assert_eq!(object_streams_of(&back), [ObjectId::new(5, 0)], "{name}");
             assert_eq!(back.facts().max_stream, Some(6), "{name}");
         }
     }
@@ -6428,8 +6720,8 @@ fn written_anew_renumbered_is_the_value_renumbered_written() {
     let encryptors = (methods.iter())
         .filter(|m| ["RC4-128", "AES-128", "AES-256 R6"].contains(&m.name))
         .map(|m| (m.name, Some(&m.encryptor)));
-    let ids: Vec<ObjectId> = (plain.iter().map(|(n, _)| (*n, 0)))
-        .chain([(ENCRYPT, 0)])
+    let ids: Vec<ObjectId> = (plain.iter().map(|(n, _)| ObjectId::new(*n, 0)))
+        .chain([ObjectId::new(ENCRYPT, 0)])
         .collect();
     for (name, encryptor) in std::iter::once(("plain", None)).chain(encryptors) {
         let ways = [
@@ -6461,7 +6753,7 @@ fn written_anew_renumbered_is_the_value_renumbered_written() {
                 .map(|(n, o)| {
                     let mut o = o.clone();
                     o.renumber(&to);
-                    (to((*n, 0)).unwrap(), o)
+                    (to(ObjectId::new(*n, 0)).unwrap(), o)
                 })
                 .collect();
             let mut held = Object::from(trailer.clone());
@@ -6492,7 +6784,7 @@ fn written_anew_renumbered_is_the_value_renumbered_written() {
 #[test]
 fn groups_are_given_the_numbers_objects_are_given_at() {
     let (plain, trailer) = with_many(20);
-    let ids: Vec<ObjectId> = plain.iter().map(|(n, _)| (*n, 0)).collect();
+    let ids: Vec<ObjectId> = plain.iter().map(|(n, _)| ObjectId::new(*n, 0)).collect();
     let map = shifted(&ids, 100);
     let to = by(&map);
     let seen = std::sync::Mutex::new(Vec::new());
@@ -6507,7 +6799,7 @@ fn groups_are_given_the_numbers_objects_are_given_at() {
     let mut out = Vec::new();
     write::full(&mut out, bodies(&plain), &trailer, None, None, &options).unwrap();
     let packed: Vec<u32> = (plain.iter())
-        .filter(|(n, o)| write::packable((*n, 0), o))
+        .filter(|(n, o)| write::packable(ObjectId::new(*n, 0), o))
         .map(|(n, _)| *n)
         .collect();
     assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&packed));
@@ -6553,7 +6845,7 @@ fn an_update_after_a_renumbered_whole_file_is_given_its_numbers() {
     assert!(base.renumbered);
     assert_eq!(
         base.trailer.get(b"Root").and_then(Object::as_reference),
-        Some(map[&(1, 0)])
+        Some(map[&ObjectId::new(1, 0)])
     );
     let plain = write::Options::DEFAULT;
     for from in [Some(&reading as &dyn write::ReadFrom), None] {
@@ -6564,7 +6856,7 @@ fn an_update_after_a_renumbered_whole_file_is_given_its_numbers() {
     }
     let built = Object::from(dict! { "Built" => true });
     let mut updated = out.clone();
-    let given = [((3, 0), write::Body::from(&built))];
+    let given = [(ObjectId::new(3, 0), write::Body::from(&built))];
     let refused = write::update(
         &mut updated,
         base,
@@ -6579,8 +6871,14 @@ fn an_update_after_a_renumbered_whole_file_is_given_its_numbers() {
     assert!(second.unwrap().base.renumbered);
     let back = open(&updated);
     assert!(sound(&back), "{:?}", back.warnings());
-    assert_eq!(value(&back, (3, 0)), built);
-    assert_moved(&reading, &back, &[(1, 0), (2, 0)], &to, "updated");
+    assert_eq!(value(&back, ObjectId::new(3, 0)), built);
+    assert_moved(
+        &reading,
+        &back,
+        &[ObjectId::new(1, 0), ObjectId::new(2, 0)],
+        &to,
+        "updated",
+    );
     assert_eq!(
         Error::Renumbered.to_string(),
         "the file was written under a renumbering, so an update after it is given objects at its \
@@ -6605,17 +6903,21 @@ fn an_update_after_a_renumbered_whole_file_is_given_its_numbers() {
         let written =
             write::document(&mut out, &doc, Some(&own), Some(&reading), &options).unwrap();
         let renumbered = own.renumbered(&to);
-        assert_eq!(renumbered.at(), Some(map[&(ENCRYPT, 0)]), "{name}");
+        assert_eq!(
+            renumbered.at(),
+            Some(map[&ObjectId::new(ENCRYPT, 0)]),
+            "{name}"
+        );
         assert_eq!(
             written.base.encryption.as_ref().map(as_written),
             Some(as_written(renumbered.dictionary())),
             "{name}"
         );
-        let mut info = handed(&reading, (13, 0));
+        let mut info = handed(&reading, ObjectId::new(13, 0));
         info.as_dict_mut()
             .unwrap()
             .set("Title", lit(b"a title updated"));
-        let at = map[&(13, 0)];
+        let at = map[&ObjectId::new(13, 0)];
         let given = [(at, write::Body::from(&info))];
         let mut refused = out.clone();
         let wrong = write::update(
@@ -6642,7 +6944,13 @@ fn an_update_after_a_renumbered_whole_file_is_given_its_numbers() {
         let back = opened(&updated, "user");
         assert!(sound(&back), "{name}: {:?}", back.warnings());
         assert_eq!(value(&back, at), info, "{name}");
-        assert_moved(&reading, &back, &[(4, 0), (5, 0)], &to, name);
+        assert_moved(
+            &reading,
+            &back,
+            &[ObjectId::new(4, 0), ObjectId::new(5, 0)],
+            &to,
+            name,
+        );
     }
 }
 
@@ -6668,8 +6976,8 @@ fn each_method_writes_whole_renumbered_with_nothing_in_the_clear() {
         let kept = written_of(&doc);
         let free: std::collections::BTreeSet<u32> = own.free_numbers().map(|(n, _)| n).collect();
         let mut swapped: Map = ids.iter().map(|&id| (id, id)).collect();
-        swapped.insert((ENCRYPT, 0), (13, 0));
-        swapped.insert((13, 0), (ENCRYPT, 0));
+        swapped.insert(ObjectId::new(ENCRYPT, 0), ObjectId::new(13, 0));
+        swapped.insert(ObjectId::new(13, 0), ObjectId::new(ENCRYPT, 0));
         let maps = [
             ("reversed", reversed(&ids)),
             ("shifted", shifted(&ids, ENCRYPT + 1)),
@@ -6777,7 +7085,7 @@ fn with_filters_by_reference(kind: Kind, direct: bool) -> Vec<u8> {
         }
     }
     for (n, o) in &objects {
-        let pos = serialize::indirect(&mut out, (*n, 0), o).unwrap();
+        let pos = serialize::indirect(&mut out, ObjectId::new(*n, 0), o).unwrap();
         section.insert(
             *n,
             Entry::InUse {
@@ -6789,7 +7097,10 @@ fn with_filters_by_reference(kind: Kind, direct: bool) -> Vec<u8> {
     let pos = out.len();
     section.table(&mut out, source_trailer, pos).unwrap();
     let encryptor = encryptor_of(&out);
-    assert!(encryptor.dictionary_object((41, 0)), "{kind:?}");
+    assert!(
+        encryptor.dictionary_object(ObjectId::new(41, 0)),
+        "{kind:?}"
+    );
     plain.retain(|(n, _)| *n != 41);
     plain.push((41, filters));
     encrypted_by(&encryptor, &plain, &trailer, XrefKind::Table)
@@ -6818,8 +7129,8 @@ fn an_encryption_dictionary_s_referent_moves_in_the_clear() {
         let doc = reading.to_document().unwrap();
         let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
         let mut map: Map = ids.iter().map(|&id| (id, id)).collect();
-        map.insert((41, 0), (50, 0));
-        map.insert((13, 0), (41, 0));
+        map.insert(ObjectId::new(41, 0), ObjectId::new(50, 0));
+        map.insert(ObjectId::new(13, 0), ObjectId::new(41, 0));
         let to = by(&map);
         for (kind, pack) in [
             (XrefKind::Table, None),
@@ -6844,7 +7155,7 @@ fn an_encryption_dictionary_s_referent_moves_in_the_clear() {
                 }
             };
             let cf = stored.get(b"CF").and_then(Object::as_reference);
-            assert_eq!(cf, Some((50, 0)), "{name}");
+            assert_eq!(cf, Some(ObjectId::new(50, 0)), "{name}");
             let direct_back = Encryptor::of(&back).unwrap().unwrap().direct();
             assert_eq!(direct_back, direct, "{name}");
         }
@@ -6872,8 +7183,8 @@ fn a_renumbering_that_puts_an_object_at_a_referent_s_number_is_refused() {
         let own = Encryptor::of(&reading).unwrap().unwrap();
         let doc = reading.to_document().unwrap();
         let mut map: Map = doc.objects().map(|(id, _)| (id, id)).collect();
-        map.insert((41, 0), (50, 0));
-        map.insert((13, 0), (50, 0));
+        map.insert(ObjectId::new(41, 0), ObjectId::new(50, 0));
+        map.insert(ObjectId::new(13, 0), ObjectId::new(50, 0));
         let to = by(&map);
         for (xref, pack) in [
             (XrefKind::Table, None),
@@ -6884,11 +7195,11 @@ fn a_renumbering_that_puts_an_object_at_a_referent_s_number_is_refused() {
             options.renumber = Some(&to);
             // Each left out, and what's then written.
             let cases = [
-                ([41, ENCRYPT], Err(Error::Moved((41, 0)))),
+                ([41, ENCRYPT], Err(Error::Moved(ObjectId::new(41, 0)))),
                 ([13, ENCRYPT], Ok(())),
             ];
             for (left, want) in cases {
-                let bodies = write::bodies(&doc).filter(|(id, _)| !left.contains(&id.0));
+                let bodies = write::bodies(&doc).filter(|(id, _)| !left.contains(&id.number));
                 let mut out = b"held".to_vec();
                 let trailer = doc.trailer.dict();
                 let written = write::full(
@@ -6932,14 +7243,15 @@ fn no_object_of_the_writer_s_own_is_at_a_referent_s_number() {
             let name = format!("{kind:?}, /CF at {moved:?}");
             let mut map: Map = ids.iter().map(|&id| (id, id)).collect();
             if let Some(n) = moved {
-                map.insert((41, 0), (n, 0));
+                map.insert(ObjectId::new(41, 0), ObjectId::new(n, 0));
             }
             let to = by(&map);
             let mut options = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
             if moved.is_some() {
                 options.renumber = Some(&to);
             }
-            let bodies = write::bodies(&doc).filter(|(id, _)| id.0 != 41 && id.0 != ENCRYPT);
+            let bodies =
+                write::bodies(&doc).filter(|(id, _)| id.number != 41 && id.number != ENCRYPT);
             let mut out = Vec::new();
             let trailer = doc.trailer.dict();
             let written = write::full(
@@ -6967,7 +7279,7 @@ fn a_renumbering_onto_a_free_number_is_refused_where_keys_are_per_object() {
         (1, Body::from(dict! { "Type" => "Catalog" })),
         (3, Body::from(dict! { "N" => 3 })),
     ];
-    let root = dict! { "Root" => (1, 0) };
+    let root = dict! { "Root" => ObjectId::new(1, 0) };
     for (kind, refused) in [
         (Kind::Rc4By40, true),
         (Kind::Rc4By128, true),
@@ -6980,7 +7292,10 @@ fn a_renumbering_onto_a_free_number_is_refused_where_keys_are_per_object() {
         let reading = opened(&file, "user");
         let encryptor = Encryptor::of(&reading).unwrap();
         let doc = reading.to_document().unwrap();
-        let map = Map::from([((1, 0), (1, 0)), ((3, 0), (2, 0))]);
+        let map = Map::from([
+            (ObjectId::new(1, 0), ObjectId::new(1, 0)),
+            (ObjectId::new(3, 0), ObjectId::new(2, 0)),
+        ]);
         let to = by(&map);
         let mut options = write::Options::DEFAULT;
         options.renumber = Some(&to);
@@ -6988,14 +7303,18 @@ fn a_renumbering_onto_a_free_number_is_refused_where_keys_are_per_object() {
         let written = write::document(&mut out, &doc, encryptor.as_ref(), Some(&reading), &options);
         match refused {
             true => {
-                assert_eq!(written, Err(Error::Free((2, 0))), "{name}");
+                assert_eq!(written, Err(Error::Free(ObjectId::new(2, 0))), "{name}");
                 assert_eq!(out, b"held", "{name}");
             }
             false => {
                 written.unwrap();
                 let back = opened(&out[4..], "user");
                 assert!(sound(&back), "{name}: {:?}", back.warnings());
-                assert_eq!(value(&back, (2, 0)), value(&reading, (3, 0)), "{name}");
+                assert_eq!(
+                    value(&back, ObjectId::new(2, 0)),
+                    value(&reading, ObjectId::new(3, 0)),
+                    "{name}"
+                );
             }
         }
     }
@@ -7018,11 +7337,16 @@ fn an_rc4_renumbering_leaks_the_xor_of_what_moved() {
         (2, Body::from(dict! { "Title" => lit(ONE) })),
         (3, Body::from(dict! { "Title" => lit(TWO) })),
     ];
-    let root = dict! { "Root" => (1, 0) };
+    let root = dict! { "Root" => ObjectId::new(1, 0) };
     let xor = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(a, b)| a ^ b).collect::<Vec<u8>>();
     let title = |file: &[u8], n: u32| {
         let locked = open(file);
-        let dict = locked.get((n, 0)).unwrap().as_dict().unwrap().clone();
+        let dict = locked
+            .get(ObjectId::new(n, 0))
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .clone();
         match dict.get(b"Title").unwrap().value() {
             Value::String(Str::Encrypted(bytes), _) => bytes.clone(),
             other => panic!("{other:?}"),
@@ -7033,7 +7357,11 @@ fn an_rc4_renumbering_leaks_the_xor_of_what_moved() {
         let reading = opened(&file, "user");
         let encryptor = Encryptor::of(&reading).unwrap();
         let doc = reading.to_document().unwrap();
-        let map = Map::from([((1, 0), (1, 0)), ((2, 0), (3, 0)), ((3, 0), (2, 0))]);
+        let map = Map::from([
+            (ObjectId::new(1, 0), ObjectId::new(1, 0)),
+            (ObjectId::new(2, 0), ObjectId::new(3, 0)),
+            (ObjectId::new(3, 0), ObjectId::new(2, 0)),
+        ]);
         let to = by(&map);
         let mut options = write::Options::DEFAULT;
         options.renumber = Some(&to);
@@ -7041,7 +7369,7 @@ fn an_rc4_renumbering_leaks_the_xor_of_what_moved() {
         write::document(&mut out, &doc, encryptor.as_ref(), Some(&reading), &options).unwrap();
         let back = opened(&out, "user");
         let got = back
-            .get((2, 0))
+            .get(ObjectId::new(2, 0))
             .unwrap()
             .as_dict()
             .unwrap()
@@ -7065,7 +7393,11 @@ fn an_rc4_renumbering_leaks_the_xor_of_what_moved() {
             &swapped,
         );
         let back = opened(&updated, "user");
-        assert_eq!(value(&back, (2, 0)), value(&reading, (3, 0)), "{kind:?}");
+        assert_eq!(
+            value(&back, ObjectId::new(2, 0)),
+            value(&reading, ObjectId::new(3, 0)),
+            "{kind:?}"
+        );
         let leaks = xor(&title(&file, 2), &title(&updated, 2)) == xor(ONE, TWO);
         assert_eq!(leaks, kind == Kind::Rc4By128, "{kind:?}, updated");
     }
@@ -7104,7 +7436,7 @@ fn copy_of<S: ByteSource>(
     let mut runs: Vec<(usize, usize, Vec<u8>)> = Vec::new();
     if record.origin == crate::Origin::File && at != record.id {
         let header = bytes.windows(3).position(|w| w == b"obj").unwrap() + 3;
-        runs.push((0, header, format!("{} {} obj", at.0, at.1).into_bytes()));
+        runs.push((0, header, format!("{at} obj").into_bytes()));
     }
     let mut references = Vec::new();
     placed(object, &mut references);
@@ -7112,7 +7444,7 @@ fn copy_of<S: ByteSource>(
         let named = to(id);
         if named != Some(id) {
             let text = match named {
-                Some((n, g)) => format!("{n} {g} R"),
+                Some(id) => format!("{id} R"),
                 None => "null".to_string(),
             };
             let run = (span.start - record.at.start, span.end - record.at.start);
@@ -7253,14 +7585,14 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
     let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
     // 5, 6 and 7 move; 9 is no object's.
     let mut map: Map = ids.iter().map(|&id| (id, id)).collect();
-    map.extend([5, 6, 7].map(|n| ((n, 0), (n + 10, 0))));
+    map.extend([5, 6, 7].map(|n| (ObjectId::new(n, 0), ObjectId::new(n + 10, 0))));
     let to = by(&map);
     let mut renumbered = options(XrefKind::Table, None);
     renumbered.renumber = Some(&to);
     let plain = options(XrefKind::Table, None);
     // Object `n` as read, but as `edit` changes its dictionary's places.
     let edited = |n: u32, edit: &dyn Fn(&mut Dict)| {
-        let mut object = doc.get((n, 0)).unwrap().clone();
+        let mut object = doc.get(ObjectId::new(n, 0)).unwrap().clone();
         match object.as_written_mut() {
             Value::Dict(dict) => edit(dict),
             Value::Stream(stream) => edit(&mut stream.dict),
@@ -7270,15 +7602,15 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
         object
     };
     let span_of = |n: u32, key: &[u8]| -> Span {
-        let object = doc.get((n, 0)).unwrap();
+        let object = doc.get(ObjectId::new(n, 0)).unwrap();
         let value = object.as_dict().unwrap().get(key).unwrap();
         match value.value() {
             Value::Array(array) => array[0].at.unwrap(),
             _ => value.at.unwrap(),
         }
     };
-    let past = doc.record((3, 0)).unwrap().at.end;
-    let data = doc.record((8, 0)).unwrap().data.unwrap().at;
+    let past = doc.record(ObjectId::new(3, 0)).unwrap().at.end;
+    let data = doc.record(ObjectId::new(8, 0)).unwrap().data.unwrap().at;
     let string = (file.windows(8).position(|w| w == b"(15 0 R)")).unwrap() + 2;
     let inside = Span::new(None, string, string + 5);
     let cases: Vec<(&str, u32, Object)> = vec![
@@ -7321,7 +7653,7 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
             "one that reads as another",
             3,
             edited(3, &|d| {
-                *d.get_mut(b"Contents").unwrap().as_written_mut() = Value::Ref((7, 0))
+                *d.get_mut(b"Contents").unwrap().as_written_mut() = Value::Ref(ObjectId::new(7, 0))
             }),
         ),
         (
@@ -7337,9 +7669,9 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
     ];
     for (name, n, object) in &cases {
         let given = |object: &Object| -> Vec<(ObjectId, write::Body<'_>)> {
-            let record = Cow::Borrowed(doc.record((*n, 0)).unwrap());
+            let record = Cow::Borrowed(doc.record(ObjectId::new(*n, 0)).unwrap());
             (write::bodies(&doc))
-                .map(|(id, body)| match id == (*n, 0) {
+                .map(|(id, body)| match id == ObjectId::new(*n, 0) {
                     true => (
                         id,
                         write::Body::Read {
@@ -7361,7 +7693,11 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
             Some(&reading),
             &renumbered,
         );
-        assert_eq!(refused, Err(Error::Elsewhere((*n, 0))), "{name}");
+        assert_eq!(
+            refused,
+            Err(Error::Elsewhere(ObjectId::new(*n, 0))),
+            "{name}"
+        );
         assert!(out.is_empty(), "{name}");
         // Without a renumbering, copied as it was read.
         let written = write::full(
@@ -7373,8 +7709,11 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
             &plain,
         )
         .unwrap();
-        let record = doc.record((*n, 0)).unwrap();
-        assert!(copied(&out, &written, record, &reading, (*n, 0)), "{name}");
+        let record = doc.record(ObjectId::new(*n, 0)).unwrap();
+        assert!(
+            copied(&out, &written, record, &reading, ObjectId::new(*n, 0)),
+            "{name}"
+        );
     }
 
     // A member's, with no place.
@@ -7386,13 +7725,16 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
     let to = by(&map);
     let mut pack = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
     pack.renumber = Some(&to);
-    let mut member = doc.get((5, 0)).unwrap().clone();
+    let mut member = doc.get(ObjectId::new(5, 0)).unwrap().clone();
     match member.as_written_mut() {
         Value::Array(array) => array[2].at = None,
         other => panic!("{other:?}"),
     }
     let given = (write::bodies(&doc)).map(|(id, body)| match id {
-        (5, 0) => (
+        ObjectId {
+            number: 5,
+            generation: 0,
+        } => (
             id,
             write::Body::Read {
                 object: Cow::Borrowed(&member),
@@ -7404,7 +7746,7 @@ fn a_copy_whose_references_aren_t_where_its_bytes_have_them_is_refused() {
     let mut out = Vec::new();
     let trailer = doc.trailer.dict();
     let refused = write::full(&mut out, given, trailer, None, Some(&reading), &pack);
-    assert_eq!(refused, Err(Error::Elsewhere((5, 0))));
+    assert_eq!(refused, Err(Error::Elsewhere(ObjectId::new(5, 0))));
     assert!(out.is_empty());
 }
 
@@ -7432,16 +7774,25 @@ fn copies_go_to_new_numbers_where_keys_aren_t_made_of_them() {
             let doc = reading.to_document().unwrap();
             let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
             let kept = written_of(&doc);
-            let top = ids.iter().map(|id| id.0).max().unwrap() + 1;
+            let top = ids.iter().map(|id| id.number).max().unwrap() + 1;
             let halved: Map = (ids.iter())
-                .map(|&(n, g)| ((n, g), if n % 2 == 0 { (n, g) } else { (n + top, g) }))
+                .map(|&id| {
+                    (
+                        id,
+                        if id.number % 2 == 0 {
+                            id
+                        } else {
+                            ObjectId::new(id.number + top, id.generation)
+                        },
+                    )
+                })
                 .collect();
             let encrypt = (doc.trailer.dict().get(b"Encrypt"))
                 .and_then(Object::as_reference)
                 .unwrap();
             let mut swapped: Map = ids.iter().map(|&id| (id, id)).collect();
-            swapped.insert(encrypt, (13, 0));
-            swapped.insert((13, 0), encrypt);
+            swapped.insert(encrypt, ObjectId::new(13, 0));
+            swapped.insert(ObjectId::new(13, 0), encrypt);
             let maps = [
                 ("shifted", shifted(&ids, top)),
                 ("halved", halved),
@@ -7467,7 +7818,8 @@ fn copies_go_to_new_numbers_where_keys_aren_t_made_of_them() {
                             continue;
                         };
                         let at = to(id).unwrap();
-                        let Some(Entry::InUse { offset, .. }) = written.section.get(at.0) else {
+                        let Some(Entry::InUse { offset, .. }) = written.section.get(at.number)
+                        else {
                             continue;
                         };
                         let copy = copy_of(&reading, record, object, at, &to);
@@ -7505,7 +7857,7 @@ fn copies_go_to_new_numbers_where_keys_aren_t_made_of_them() {
 fn moving(pdf: &Reading<Arc<[u8]>>, moves: &[(u32, u32)]) -> Map {
     let mut map: Map = pdf.ids().map(|id| (id, id)).collect();
     for &(from, to) in moves {
-        map.insert((from, 0), (to, 0));
+        map.insert(ObjectId::new(from, 0), ObjectId::new(to, 0));
     }
     map
 }
@@ -7589,7 +7941,7 @@ fn an_update_under_a_renumbering_writes_what_moves_and_what_names_it() {
         // The stream file's cross-reference stream.
         let xref: Vec<u32> = (doc.objects())
             .filter(|(_, o)| o.as_stream().is_some_and(|s| s.dict.has_type(b"XRef")))
-            .map(|(id, _)| id.0)
+            .map(|(id, _)| id.number)
             .collect();
         let want = [&[2, 7][..], &xref, &[top, top + 1, top + 2]].concat();
         assert_eq!(listed_numbers(&written), want, "{name}");
@@ -7598,11 +7950,11 @@ fn an_update_under_a_renumbering_writes_what_moves_and_what_names_it() {
                 panic!("{name}: {id:?} is as read");
             };
             let at = to(id).unwrap();
-            if !written.section.lists(at.0) {
+            if !written.section.lists(at.number) {
                 continue;
             }
             let copy = copy_of(&reading, record, object, at, &to);
-            let got = listed_at(&out, &written, at.0);
+            let got = listed_at(&out, &written, at.number);
             assert!(got.starts_with(&copy), "{name}: {id:?} at {at:?}");
         }
         assert!(written.base.renumbered, "{name}");
@@ -7611,7 +7963,7 @@ fn an_update_under_a_renumbering_writes_what_moves_and_what_names_it() {
             .trailer
             .get(b"Root")
             .and_then(Object::as_reference);
-        assert_eq!(root, Some((top, 0)), "{name}");
+        assert_eq!(root, Some(ObjectId::new(top, 0)), "{name}");
         let back = open(&out);
         assert!(sound(&back), "{name}: {:?}", back.warnings());
         assert_eq!(back.facts().sections, 2, "{name}");
@@ -7621,14 +7973,18 @@ fn an_update_under_a_renumbering_writes_what_moves_and_what_names_it() {
                 .get(key)
                 .and_then(Object::as_reference)
         };
-        assert_eq!(named(b"Root"), Some((top, 0)), "{name}");
-        assert_eq!(named(b"Custom"), Some((top + 2, 0)), "{name}");
+        assert_eq!(named(b"Root"), Some(ObjectId::new(top, 0)), "{name}");
+        assert_eq!(named(b"Custom"), Some(ObjectId::new(top + 2, 0)), "{name}");
         let ids: Vec<ObjectId> = (doc.objects())
             .filter(|(_, o)| o.as_stream().is_none_or(|s| !s.dict.has_type(b"XRef")))
             .map(|(id, _)| id)
             .collect();
         assert_moved(&reading, &back, &ids, &to, name);
-        for id in [(1, 0), (3, 0), (4, 0)] {
+        for id in [
+            ObjectId::new(1, 0),
+            ObjectId::new(3, 0),
+            ObjectId::new(4, 0),
+        ] {
             assert_eq!(handed(&back, id), handed(&reading, id), "{name}: {id:?}");
         }
     }
@@ -7680,11 +8036,11 @@ fn each_method_updates_renumbered_copying_where_keys_aren_t_made_of_numbers() {
                     continue;
                 };
                 let at = to(id).unwrap();
-                if !written.section.lists(at.0) {
+                if !written.section.lists(at.number) {
                     continue;
                 }
                 let copy = copy_of(&reading, record, object, at, &to);
-                let copied = listed_at(&out, &written, at.0).starts_with(&copy);
+                let copied = listed_at(&out, &written, at.number).starts_with(&copy);
                 assert_eq!(copied, at == id || !per_object, "{name}: {id:?} at {at:?}");
                 moved += usize::from(copied && at != id);
             }
@@ -7705,8 +8061,8 @@ fn each_method_updates_renumbered_copying_where_keys_aren_t_made_of_numbers() {
                 assert!(sound(&back), "{name}: {:?}", back.warnings());
                 let trailer = back.trailer().dict();
                 let named = |key: &[u8]| trailer.get(key).and_then(Object::as_reference);
-                assert_eq!(named(b"Root"), Some((top, 0)), "{name}");
-                assert_eq!(named(b"Info"), Some((top + 3, 0)), "{name}");
+                assert_eq!(named(b"Root"), Some(ObjectId::new(top, 0)), "{name}");
+                assert_eq!(named(b"Info"), Some(ObjectId::new(top + 3, 0)), "{name}");
                 assert_eq!(
                     trailer.get(b"Encrypt").map(unplaced),
                     encrypt.as_ref().map(unplaced)
@@ -7739,7 +8095,7 @@ fn each_method_updates_renumbered_with_nothing_in_the_clear() {
         let encrypt = own.at().unwrap();
         let moves: Vec<(u32, u32)> = (reading.ids())
             .filter(|&id| id != encrypt)
-            .map(|(n, _)| (n, n + base.size))
+            .map(|ObjectId { number: n, .. }| (n, n + base.size))
             .collect();
         let map = moving(&reading, &moves);
         let to = by(&map);
@@ -7751,7 +8107,7 @@ fn each_method_updates_renumbered_with_nothing_in_the_clear() {
             Some(&reading),
             &map,
         );
-        assert!(!written.section.lists(encrypt.0), "{name}");
+        assert!(!written.section.lists(encrypt.number), "{name}");
         for (text, encrypted) in listed_rows(&method) {
             let said = String::from_utf8_lossy(text);
             assert_eq!(
@@ -7784,7 +8140,7 @@ fn an_update_under_the_identity_is_the_update_under_none() {
         let doc = reading.to_document().unwrap();
         let mut out = Vec::new();
         write::document(&mut out, &doc, None, Some(&reading), &options(kind, None)).unwrap();
-        sources.push((format!("spelled, {kind:?}"), out, "", (3, 0)));
+        sources.push((format!("spelled, {kind:?}"), out, "", ObjectId::new(3, 0)));
     }
     let methods = methods();
     for method in &methods {
@@ -7815,7 +8171,7 @@ fn an_update_under_the_identity_is_the_update_under_none() {
             )
             .unwrap()
             .unwrap();
-            assert_eq!(listed_numbers(&written), [changed.0], "{name}");
+            assert_eq!(listed_numbers(&written), [changed.number], "{name}");
             assert_eq!(written.base.renumbered, renumber.is_some(), "{name}");
             ways.push(out);
         }
@@ -7833,13 +8189,13 @@ fn an_update_under_the_identity_is_the_update_under_none() {
 /// AES-256.
 #[test]
 fn a_second_update_after_a_renumbered_one_is_given_the_numbers_it_wrote() {
-    let mut sources = vec![("plain".to_string(), spelled(), "", (1, 0))];
+    let mut sources = vec![("plain".to_string(), spelled(), "", ObjectId::new(1, 0))];
     for kind in [Kind::Aes128, Kind::Aes256] {
         sources.push((
             format!("{kind:?}"),
             written_otherwise(kind, true),
             "user",
-            (12, 0),
+            ObjectId::new(12, 0),
         ));
     }
     for (name, file, password, catalog) in sources {
@@ -7848,7 +8204,7 @@ fn a_second_update_after_a_renumbered_one_is_given_the_numbers_it_wrote() {
         let doc = reading.to_document().unwrap();
         let base = write::Base::of(&reading).unwrap();
         let top = base.size;
-        let first_map = moving(&reading, &[(catalog.0, top)]);
+        let first_map = moving(&reading, &[(catalog.number, top)]);
         let (first_out, first) = updated_under(
             &file,
             &base,
@@ -7869,11 +8225,11 @@ fn a_second_update_after_a_renumbered_one_is_given_the_numbers_it_wrote() {
         }
         // The catalog as the file has it now, at its number there, edited.
         let after = opened(&first_out, password);
-        let mut edited = after.get((top, 0)).unwrap().clone();
+        let mut edited = after.get(ObjectId::new(top, 0)).unwrap().clone();
         edited.as_dict_mut().unwrap().set("Lang", lit(b"en"));
         let next = first.base.size;
         let second_map = moving(&after, &[(top, next)]);
-        let given = [((top, 0), write::Body::from(&edited))];
+        let given = [(ObjectId::new(top, 0), write::Body::from(&edited))];
         let (out, second) = updated_under(
             &first_out,
             &first.base,
@@ -7892,12 +8248,16 @@ fn a_second_update_after_a_renumbered_one_is_given_the_numbers_it_wrote() {
             .dict()
             .get(b"Root")
             .and_then(Object::as_reference);
-        assert_eq!(root, Some((next, 0)), "{name}");
+        assert_eq!(root, Some(ObjectId::new(next, 0)), "{name}");
         let mut want = handed(&reading, catalog);
         want.as_dict_mut().unwrap().set("Lang", lit(b"en"));
-        assert_alike(&handed(&back, (next, 0)), &want, &name);
+        assert_alike(&handed(&back, ObjectId::new(next, 0)), &want, &name);
         assert_eq!(handed(&back, catalog), handed(&reading, catalog), "{name}");
-        assert_eq!(handed(&back, (top, 0)), handed(&after, (top, 0)), "{name}");
+        assert_eq!(
+            handed(&back, ObjectId::new(top, 0)),
+            handed(&after, ObjectId::new(top, 0)),
+            "{name}"
+        );
     }
 }
 
@@ -7920,7 +8280,7 @@ fn with_cf_at_41(kind: Kind) -> Vec<u8> {
         (ENCRYPT, Object::from(dict)),
     ];
     for (n, o) in &objects {
-        let pos = serialize::indirect(&mut out, (*n, 0), o).unwrap();
+        let pos = serialize::indirect(&mut out, ObjectId::new(*n, 0), o).unwrap();
         let entry = Entry::InUse {
             offset: pos,
             generation: 0,
@@ -7930,7 +8290,7 @@ fn with_cf_at_41(kind: Kind) -> Vec<u8> {
     let pos = out.len();
     section.table(&mut out, source_trailer, pos).unwrap();
     let encryptor = encryptor_of(&out);
-    assert!(encryptor.dictionary_object((41, 0)));
+    assert!(encryptor.dictionary_object(ObjectId::new(41, 0)));
     plain.push((41, filters));
     encrypted_by(&encryptor, &plain, &trailer, XrefKind::Table)
 }
@@ -7947,7 +8307,7 @@ fn with_cf_at_41(kind: Kind) -> Vec<u8> {
 /// elsewhere. Under AES-128 and AES-256, and plain.
 #[test]
 fn an_update_that_moves_what_stays_where_it_is_is_refused() {
-    let encrypt = (ENCRYPT, 0);
+    let encrypt = ObjectId::new(ENCRYPT, 0);
     for kind in [Kind::Aes128, Kind::Aes256] {
         let file = with_cf_at_41(kind);
         let reading = opened(&file, "user");
@@ -7957,13 +8317,14 @@ fn an_update_that_moves_what_stays_where_it_is_is_refused() {
         let top = base.size;
         let all = || write::bodies(&doc).collect::<Vec<_>>();
         let without = |numbers: &[u32]| {
-            (write::bodies(&doc).filter(|(id, _)| !numbers.contains(&id.0))).collect::<Vec<_>>()
+            (write::bodies(&doc).filter(|(id, _)| !numbers.contains(&id.number)))
+                .collect::<Vec<_>>()
         };
         // The Info moved too, so that something's written.
         let mut nameless = moving(&reading, &[(13, top)]);
         nameless.remove(&encrypt);
         let mut cf_nameless = moving(&reading, &[(13, top)]);
-        cf_nameless.remove(&(41, 0));
+        cf_nameless.remove(&ObjectId::new(41, 0));
         let cases = [
             (
                 "the dictionary moved",
@@ -7981,7 +8342,7 @@ fn an_update_that_moves_what_stays_where_it_is_is_refused() {
                 "its /CF moved",
                 moving(&reading, &[(41, top)]),
                 without(&[ENCRYPT]),
-                Error::Moved((41, 0)),
+                Error::Moved(ObjectId::new(41, 0)),
             ),
             (
                 "its /CF moved, it given",
@@ -7993,13 +8354,13 @@ fn an_update_that_moves_what_stays_where_it_is_is_refused() {
                 "its /CF named none",
                 cf_nameless,
                 without(&[ENCRYPT, 41]),
-                Error::Moved((41, 0)),
+                Error::Moved(ObjectId::new(41, 0)),
             ),
             (
                 "the Info at its /CF's",
                 moving(&reading, &[(13, 41)]),
                 without(&[41]),
-                Error::Moved((41, 0)),
+                Error::Moved(ObjectId::new(41, 0)),
             ),
             (
                 "the Info at its number",
@@ -8037,9 +8398,9 @@ fn an_update_that_moves_what_stays_where_it_is_is_refused() {
     let doc = reading.to_document().unwrap();
     let base = write::Base::of(&reading).unwrap();
     let mut unnumbered = moving(&reading, &[]);
-    unnumbered.remove(&(3, 0));
+    unnumbered.remove(&ObjectId::new(3, 0));
     let mut elsewhere = moving(&reading, &[]);
-    elsewhere.insert((5, 1), (base.size, 0));
+    elsewhere.insert(ObjectId::new(5, 1), ObjectId::new(base.size, 0));
     // Each case's renumbering, and the array given again, at a generation.
     let cases = [
         (
@@ -8052,7 +8413,7 @@ fn an_update_that_moves_what_stays_where_it_is_is_refused() {
             "the page named none",
             unnumbered,
             None,
-            Error::Unnumbered((3, 0)),
+            Error::Unnumbered(ObjectId::new(3, 0)),
         ),
         (
             "the array given twice, moved",
@@ -8068,7 +8429,7 @@ fn an_update_that_moves_what_stays_where_it_is_is_refused() {
         options.renumber = Some(&to);
         let mut given: Vec<_> = write::bodies(&doc).collect();
         if let Some(generation) = generation {
-            given.push(((5, generation), write::Body::from(&again)));
+            given.push((ObjectId::new(5, generation), write::Body::from(&again)));
         }
         let mut out = file.clone();
         let got = write::update(&mut out, &base, given, None, Some(&reading), &options);
@@ -8217,7 +8578,7 @@ fn a_document_read_whole_is_written_through_a_reading_that_takes_it() {
             let base = write::Base::of(&reading).unwrap();
             let moves: Vec<(u32, u32)> = ([Some(root), stream].into_iter().flatten())
                 .zip(base.size..)
-                .map(|(id, n)| (id.0, n))
+                .map(|(id, n)| (id.number, n))
                 .collect();
             let map = moving(&reading, &moves);
             // Before it's taken, its records are another reading's.
@@ -8313,14 +8674,19 @@ fn a_document_a_reading_doesn_t_read_alike_isn_t_taken() {
     not_taken(
         &open(&members_spelled()),
         &doc,
-        Some((1, 0)),
+        Some(ObjectId::new(1, 0)),
         "another file",
     );
     // A byte of an object flipped: its real, `1.50`, now `1.51`.
     let at = file.windows(4).position(|w| w == b"1.50").unwrap() + 3;
     let mut flipped = file.clone();
     flipped[at] = b'1';
-    not_taken(&open(&flipped), &doc, Some((3, 0)), "a byte flipped");
+    not_taken(
+        &open(&flipped),
+        &doc,
+        Some(ObjectId::new(3, 0)),
+        "a byte flipped",
+    );
     open(&file).adopt(&mut doc.clone()).unwrap();
     // Not encrypted, as the reader reads a null `/Encrypt` and one naming no
     // object.
@@ -8379,9 +8745,10 @@ fn a_document_a_reading_doesn_t_read_alike_isn_t_taken() {
         let dict = Object::from(dictionary_of(kind, true));
         let named = |n: u32| {
             let mut out = b"%PDF-1.7\n".to_vec();
-            let one = serialize::indirect(&mut out, (1, 0), &catalog()).unwrap();
-            let first = serialize::indirect(&mut out, (ENCRYPT, 0), &dict).unwrap();
-            let second = serialize::indirect(&mut out, (ENCRYPT + 1, 0), &dict).unwrap();
+            let one = serialize::indirect(&mut out, ObjectId::new(1, 0), &catalog()).unwrap();
+            let first = serialize::indirect(&mut out, ObjectId::new(ENCRYPT, 0), &dict).unwrap();
+            let second =
+                serialize::indirect(&mut out, ObjectId::new(ENCRYPT + 1, 0), &dict).unwrap();
             let xref = out.len();
             out.extend_from_slice(
                 format!(
@@ -8487,8 +8854,13 @@ fn a_document_isn_t_taken_by_a_reading_opened_otherwise() {
     let under = |options| Reading::open(Arc::<[u8]>::from(&file[..]), options).unwrap();
     let doc = under(&shallow).into_document().unwrap();
     let unread: Vec<ObjectId> = doc.unread().map(|(id, _)| id).collect();
-    assert_eq!(unread, [(2, 0), (3, 0)]);
-    not_taken(&open(&file), &doc, Some((2, 0)), "nested past a limit");
+    assert_eq!(unread, [ObjectId::new(2, 0), ObjectId::new(3, 0)]);
+    not_taken(
+        &open(&file),
+        &doc,
+        Some(ObjectId::new(2, 0)),
+        "nested past a limit",
+    );
     under(&shallow).adopt(&mut doc.clone()).unwrap();
 }
 

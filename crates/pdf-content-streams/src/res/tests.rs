@@ -27,7 +27,7 @@ fn every_kind() -> Object {
     let nested = dict! {
         "B" => dict! { "C" => Object::null() },
         "A" => vec![Object::from(1), Object::from(2)],
-        "Z" => Object::from((3, 1)),
+        "Z" => Object::from(ObjectId::new(3, 1)),
     };
     Object::from(vec![
         Object::null(),
@@ -56,8 +56,8 @@ fn every_kind() -> Object {
         Object::from(nested),
         Object::from(Stream::new(dict! { "Filter" => "AHx" }, b"41>".to_vec())),
         Object::from(Stream::new(Dict::new(), Vec::new())),
-        Object::from((7, 0)),
-        Object::from((u32::MAX, u16::MAX)),
+        Object::from(ObjectId::new(7, 0)),
+        Object::from(ObjectId::new(u32::MAX, u16::MAX)),
     ])
 }
 
@@ -78,7 +78,7 @@ fn digests_of_resources_as_writers_build_them_are_pinned() {
     assert_eq!(Res::dict(gstate).id, pinned);
 
     let pinned = ResId(0x43f0d2ed6dff504a255aa16751823034);
-    assert_eq!(Res::written((7, 0)).id, pinned);
+    assert_eq!(Res::written(ObjectId::new(7, 0)).id, pinned);
 
     let q = Object::from(Stream::new(Dict::new(), b"q\n".to_vec()));
     let pinned = ResId(0x003dfd866ae26b2ca535f8c218113750);
@@ -133,18 +133,18 @@ fn every_kind_of_value_is_fed_apart() {
         Object::from(dict! { "a" => Object::null() }),
         Object::from(dict! { "a" => "b" }),
         Object::from(dict! { "ab" => Object::null() }),
-        Object::from((1, 0)),
-        Object::from((0, 1)),
-        Object::from((1, 1)),
+        Object::from(ObjectId::new(1, 0)),
+        Object::from(ObjectId::new(0, 1)),
+        Object::from(ObjectId::new(1, 1)),
         stream(length(1), Data::Bytes(b"a".to_vec())),
         stream(Dict::new(), Data::Bytes(b"a".to_vec())),
         stream(length(1), Data::Bytes(b"b".to_vec())),
         stream(length(1), at(None, 0, 1)),
         stream(length(1), at(None, 1, 2)),
         stream(length(1), at(None, 0, 2)),
-        stream(length(1), at(Some((5, 0)), 0, 1)),
-        stream(length(1), at(Some((5, 1)), 0, 1)),
-        stream(length(1), at(Some((6, 0)), 0, 1)),
+        stream(length(1), at(Some(ObjectId::new(5, 0)), 0, 1)),
+        stream(length(1), at(Some(ObjectId::new(5, 1)), 0, 1)),
+        stream(length(1), at(Some(ObjectId::new(6, 0)), 0, 1)),
         stream(length(1), Data::Unplaced),
         stream(Dict::new(), Data::Unplaced),
     ];
@@ -223,16 +223,16 @@ fn a_resource_is_named_by_what_it_is() {
     assert_eq!(res, Res::of(objects));
     assert_eq!(res, Res::of(vec![Object::from(list)]));
 
-    let written = Res::written((7, 0));
-    assert_eq!(written.body, ResBody::Written((7, 0)));
-    assert_eq!(written.id, id(Object::from((7, 0))));
-    assert_ne!(written.id, Res::written((7, 1)).id);
-    assert_ne!(written.id, Res::written((8, 0)).id);
+    let written = Res::written(ObjectId::new(7, 0));
+    assert_eq!(written.body, ResBody::Written(ObjectId::new(7, 0)));
+    assert_eq!(written.id, id(Object::from(ObjectId::new(7, 0))));
+    assert_ne!(written.id, Res::written(ObjectId::new(7, 1)).id);
+    assert_ne!(written.id, Res::written(ObjectId::new(8, 0)).id);
 
     // Two objects a resource reaches, in order.
     let font = || {
         let program = Object::from(Stream::new(Dict::new(), b"glyphs".to_vec()));
-        let descriptor = dict! { "FontFile2" => Object::from((1, 0)) };
+        let descriptor = dict! { "FontFile2" => Object::from(ObjectId::new(1, 0)) };
         vec![Object::from(descriptor), program]
     };
     let mut reversed = font();

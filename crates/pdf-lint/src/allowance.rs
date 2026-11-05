@@ -313,11 +313,12 @@ impl Allowance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ObjectId;
     use crate::check::Made;
 
     fn finding(table: &str, key: &str, rule: Rule) -> Finding {
         Finding {
-            object: Some((6, 0)),
+            object: Some(ObjectId::new(6, 0)),
             made: Made::Built,
             path: "Root/AcroForm/Fields[0]".to_string(),
             table: table.to_string(),

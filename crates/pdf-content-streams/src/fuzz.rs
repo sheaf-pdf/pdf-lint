@@ -881,7 +881,7 @@ pub fn calls(data: &[u8]) {
                 // too: a resource in two categories.
                 let font = match input.below(fonts.len() + 1) {
                     i if i < fonts.len() => fonts[i].clone(),
-                    _ => Res::written((1, 0)),
+                    _ => Res::written(ObjectId::new(1, 0)),
                 };
                 let size = input.number();
                 want.push((
@@ -928,7 +928,10 @@ pub fn calls(data: &[u8]) {
                 want.push((b"Tj", vec![Arg::Codes(codes)]));
             }
             27 | 28 => {
-                let form = Res::written((u32::from(input.byte().unwrap_or(0) % 4) + 1, 0));
+                let form = Res::written(ObjectId::new(
+                    u32::from(input.byte().unwrap_or(0) % 4) + 1,
+                    0,
+                ));
                 let drawn = Arg::Res(ResKind::XObject, form.id);
                 if call % 32 == 27 {
                     w.draw(form);

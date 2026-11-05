@@ -223,13 +223,13 @@ fn the_encryption_dictionary_is_in_part_four_written_from_the_encryptor() {
             let number = (back.trailer().dict().get(b"Encrypt").unwrap())
                 .as_reference()
                 .unwrap();
-            assert_ne!(number, (1000, 0), "{name}: it's where it was");
+            assert_ne!(number, ObjectId::new(1000, 0), "{name}: it's where it was");
             // Between the first section and the hint stream, which part 6 follows.
-            let at = done.layout.position(number.0).unwrap();
+            let at = done.layout.position(number.number).unwrap();
             assert!(done.layout.first_section() < at, "{name}");
             assert!(at < done.layout.hint_extent().0, "{name}");
             assert!(matches!(
-                back.entries().find(|(n, ..)| *n == number.0),
+                back.entries().find(|(n, ..)| *n == number.number),
                 Some((_, _, XrefEntry::InUse { .. }))
             ));
             // As it's stored, each string as written, not encrypted.
@@ -314,7 +314,7 @@ fn under_rc4_each_number_s_keystream_encrypts_another_object_and_under_aes_it_do
         let (out, _) = own(&bytes, "", &Options::DEFAULT).unwrap();
         let after = opened(&out, "").to_document().unwrap();
         let mark_at = |doc: &Document, n: u32| {
-            let object = doc.get((n, 0)).ok()?;
+            let object = doc.get(ObjectId::new(n, 0)).ok()?;
             let dict = match object.value() {
                 Value::Dict(dict) => dict,
                 Value::Stream(stream) => &stream.dict,
@@ -406,8 +406,10 @@ fn under_aes_256_an_object_as_read_is_copied_at_its_new_number() {
         // and all, or written anew under another key.
         let before = reading.to_document().unwrap();
         let font = marked(&before, "secret 07");
-        let XrefEntry::InUse { offset, .. } =
-            (reading.entries()).find(|(n, ..)| *n == font.0).unwrap().2
+        let XrefEntry::InUse { offset, .. } = (reading.entries())
+            .find(|(n, ..)| *n == font.number)
+            .unwrap()
+            .2
         else {
             panic!("{name}");
         };
@@ -417,7 +419,7 @@ fn under_aes_256_an_object_as_read_is_copied_at_its_new_number() {
         let body = &text[header..to];
         let content = marked(&before, "secret 05");
         let XrefEntry::InUse { offset, .. } = (reading.entries())
-            .find(|(n, ..)| *n == content.0)
+            .find(|(n, ..)| *n == content.number)
             .unwrap()
             .2
         else {
@@ -462,10 +464,10 @@ fn a_metadata_stream_under_encrypt_metadata_false_is_in_the_clear_at_its_new_num
         let root = doc.trailer.dict().get(b"Root").unwrap().as_reference();
         let catalog = doc.get_dict(root.unwrap()).unwrap();
         let metadata = catalog.get(b"Metadata").unwrap().as_reference().unwrap();
-        assert_ne!(metadata, (10, 0), "it's moved");
+        assert_ne!(metadata, ObjectId::new(10, 0), "it's moved");
         assert_eq!(&*back.data(metadata).unwrap(), METADATA.as_bytes());
         // At the number the file names, not the one it was at.
-        let at = done.layout.position(metadata.0).unwrap() as usize;
+        let at = done.layout.position(metadata.number).unwrap() as usize;
         let to = (at + 80 + METADATA.len()).min(out.len());
         assert!(holds(&out[at..to], METADATA.as_bytes()));
 
@@ -504,7 +506,7 @@ fn a_new_encryption_is_given_a_number_and_part_four() {
             let number = (back.trailer().dict().get(b"Encrypt").unwrap())
                 .as_reference()
                 .unwrap();
-            let at = done.layout.position(number.0).unwrap();
+            let at = done.layout.position(number.number).unwrap();
             assert!(done.layout.first_section() < at, "{name}");
             assert!(at < done.layout.hint_extent().0, "{name}");
             // What the file read had as its dictionary isn't carried.
@@ -722,7 +724,7 @@ fn what_the_dictionary_refers_to_is_in_part_four_in_the_clear_and_at_its_new_num
             false,
             |dict| {
                 in_hex(dict);
-                dict.set("O", Object::from((5, 0)));
+                dict.set("O", Object::from(ObjectId::new(5, 0)));
             },
             &[&value],
         );
@@ -732,7 +734,7 @@ fn what_the_dictionary_refers_to_is_in_part_four_in_the_clear_and_at_its_new_num
             "{name}"
         );
         let encryptor = Encryptor::of(&reading).unwrap().unwrap();
-        assert!(encryptor.dictionary_object((5, 0)), "{name}");
+        assert!(encryptor.dictionary_object(ObjectId::new(5, 0)), "{name}");
         for options in kinds() {
             let (out, done) = own(&bytes, "", &options).unwrap();
             let back = opened(&out, "");
@@ -744,7 +746,7 @@ fn what_the_dictionary_refers_to_is_in_part_four_in_the_clear_and_at_its_new_num
             let value = held.get(b"O").unwrap().as_reference().unwrap();
             // In part 4, on its own, whatever may be packed, as written.
             assert_eq!(back.get(value).unwrap().as_bytes(), Some(&o[..]), "{name}");
-            let at = done.layout.position(value.0).unwrap();
+            let at = done.layout.position(value.number).unwrap();
             assert!(done.layout.first_section() < at, "{name}");
             assert!(at < done.layout.hint_extent().0, "{name}");
             assert!(holds(&out, hex.as_bytes()), "{name}");
@@ -838,8 +840,8 @@ fn an_object_at_an_earlier_dictionary_s_number_is_encrypted_as_any_is() {
     let reading = opened(&bytes, "");
     assert!(matches!(reading.encryption(), Encryption::Opened { .. }));
     let encryptor = Encryptor::of(&reading).unwrap().unwrap();
-    assert!(encryptor.dictionary_object((5, 0)));
-    assert_eq!(encryptor.at(), Some((4, 0)));
+    assert!(encryptor.dictionary_object(ObjectId::new(5, 0)));
+    assert_eq!(encryptor.at(), Some(ObjectId::new(4, 0)));
     let (out, _) = own(&bytes, "", &Options::DEFAULT).unwrap();
     assert!(!holds(&out, text.as_bytes()), "it's in the clear");
     let back = opened(&out, "");
@@ -854,7 +856,7 @@ fn an_object_at_an_earlier_dictionary_s_number_is_encrypted_as_any_is() {
 fn an_object_at_the_number_an_encryptor_writes_its_dictionary_at_is_refused() {
     let key = opened(KEYS[4].1, "");
     let encryptor = Encryptor::of(&key).unwrap().unwrap();
-    let (n, _) = encryptor.at().unwrap();
+    let ObjectId { number: n, .. } = encryptor.at().unwrap();
     // Numbers up to the dictionary's, so one of them is at it.
     let mut objects = secrets("");
     while objects.len() < n as usize {
@@ -925,7 +927,7 @@ fn what_names_the_dictionary_of_the_file_read_names_what_s_written_or_nothing() 
         false,
         |dict| {
             in_hex(dict);
-            dict.set("O", Object::from((5, 0)));
+            dict.set("O", Object::from(ObjectId::new(5, 0)));
         },
         &[&value],
     );

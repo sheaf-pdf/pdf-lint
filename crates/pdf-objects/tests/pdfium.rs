@@ -26,7 +26,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdf_objects::parse::Parser;
-use pdf_objects::{Object, Rules, Value, text};
+use pdf_objects::{Object, ObjectId, Rules, Value, text};
 
 /// A case's text or data longer than this is written by its length and
 /// FNV-1a 64 hash, as the oracle writes it.
@@ -166,7 +166,7 @@ fn kids(bytes: &[u8]) -> String {
         .and_then(|a| a.as_array())
         .and_then(|a| a.first());
     match first.and_then(Object::as_reference) {
-        Some((3, _)) => "50 60".to_string(),
+        Some(ObjectId { number: 3, .. }) => "50 60".to_string(),
         _ => "no-page".to_string(),
     }
 }

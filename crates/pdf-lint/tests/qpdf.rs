@@ -203,7 +203,7 @@ fn a_corpus_checks_alike_through_qpdf_alone() {
     let like = |f: &Finding| {
         let object = f
             .object
-            .map_or("the trailer".to_string(), |(n, g)| format!("{n} {g} R"));
+            .map_or("the trailer".to_string(), |id| format!("{id} R"));
         format!("{} {}/{} in {object}", f.rule, f.table, f.key)
     };
     let findings = |doc: &Document| {

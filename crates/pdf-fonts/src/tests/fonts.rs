@@ -2,12 +2,14 @@
 //! what's charged, what fails and what's told; and over a reading of a file, every
 //! way a stream's data may come to a font.
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use pdf_objects::dict;
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::Stream;
+use pdf_objects::{Streams, With, dict};
 
 use super::afm;
 use crate::fuzz::digest;
@@ -28,7 +30,7 @@ struct Pdf {
 impl Pdf {
     fn new_object_id(&mut self) -> ObjectId {
         self.last += 1;
-        (self.last, 0)
+        ObjectId::new(self.last, 0)
     }
 
     fn add_object(&mut self, object: impl Into<Object>) -> ObjectId {
@@ -46,15 +48,8 @@ impl<'o> Resolve<'o> for &'o Pdf {
 }
 
 impl Streams for &Pdf {
-    fn decoded(&self, id: ObjectId, limit: usize) -> Decoded {
-        let Some(stream) = self.objects.get(&id).and_then(Object::as_stream) else {
-            return Decoded::None;
-        };
-        let data = stream.data.bytes().unwrap_or_default();
-        match data.len() > limit {
-            true => Decoded::TooLarge,
-            false => Decoded::Data(data.to_vec()),
-        }
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        self.decoded_by(id, limit)
     }
 }
 
@@ -819,10 +814,24 @@ fn reading_a_font_is_charged_to_its_budget() {
     let mut scope = fonts.scope();
     let mut budget = 10 * cost;
     for name in [&b"R1"[..], b"R2", b"R1", b"D1", b"D1"] {
-        let picked = scope.font(&pdf, (1, 0), Some(&resources), name, lim, &mut budget);
+        let picked = scope.font(
+            &pdf,
+            ObjectId::new(1, 0),
+            Some(&resources),
+            name,
+            lim,
+            &mut budget,
+        );
         assert!(picked.unwrap().is_some());
     }
-    let picked = scope.font(&pdf, (2, 0), Some(&resources), b"D1", lim, &mut budget);
+    let picked = scope.font(
+        &pdf,
+        ObjectId::new(2, 0),
+        Some(&resources),
+        b"D1",
+        lim,
+        &mut budget,
+    );
     assert!(picked.unwrap().is_some());
     // R1 and R2 once, and D1 once for each owner it's picked by.
     assert_eq!(budget, 7 * cost);
@@ -967,7 +976,7 @@ fn a_cmap_chain_s_loop_and_its_cap_are_told_apart() {
 
     // 512 CMaps, the last using an object the file hasn't: no longer than the
     // cap, so the file's `UseCMap`, in what it names, and no `TooManyCMaps`.
-    let nothing = (99_999, 0);
+    let nothing = ObjectId::new(99_999, 0);
     let mut next = pdf.add_object(Stream::new(dict! { "UseCMap" => nothing }, Vec::new()));
     for _ in 2..Limits::DEFAULT.cmaps {
         next = pdf.add_object(Stream::new(dict! { "UseCMap" => next }, Vec::new()));
@@ -988,7 +997,9 @@ fn a_to_unicode_that_doesn_t_decode_is_told() {
     let map = b"1 beginbfchar <41> <0416> endbfchar".to_vec();
     let to_unicode = pdf.add_object(Stream::new(dict! {}, map));
     let font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "ToUnicode" => to_unicode };
-    let undecoded = With::new(&pdf, |_, _| Decoded::None);
+    let undecoded = With::new(&pdf, |id, _| {
+        Err(Unreadable::new(id, Why::Damaged, "it decodes to nothing"))
+    });
     let mut told = Vec::new();
     let mut budget = BUDGET;
     let read = Font::read(undecoded, &font, &Limits::DEFAULT, &mut budget, &mut told).unwrap();
@@ -1185,7 +1196,7 @@ fn fonts_are_read_once() {
         &by_ref,
         &get(&helvetica.into(), budget).unwrap()
     ));
-    let (page, other) = ((1, 0), (2, 0));
+    let (page, other) = (ObjectId::new(1, 0), ObjectId::new(2, 0));
     let mut pick = |scope: &mut FontScope<'_>, owner, name: &[u8]| {
         let picked = scope.font(&pdf, owner, Some(&resources), name, lim, budget);
         picked.unwrap()
@@ -1332,15 +1343,23 @@ impl<'o> Resolve<'o> for Failing<'o> {
 }
 
 impl Streams for Failing<'_> {
-    fn decoded(&self, id: ObjectId, limit: usize) -> Decoded {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         self.pdf.decoded_by(id, limit)
     }
 }
 
 impl Pdf {
-    fn decoded_by(&self, id: ObjectId, limit: usize) -> Decoded {
-        let pdf = self;
-        Streams::decoded(&pdf, id, limit)
+    /// Stream `id`'s data, lent, as `Streams` gives it of a map: none of what's no
+    /// stream, and too large past `limit`.
+    fn decoded_by(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        let Some(stream) = self.objects.get(&id).and_then(Object::as_stream) else {
+            return Err(Unreadable::new(id, Why::Damaged, "no such stream"));
+        };
+        let data = stream.data.bytes().unwrap_or_default();
+        match data.len() > limit {
+            true => Err(Unreadable::new(id, Why::Limit, "past the limit")),
+            false => Ok(Cow::Borrowed(data)),
+        }
     }
 }
 
@@ -1491,7 +1510,7 @@ fn fonts_and_their_scope_say_why_a_font_doesn_t_read() {
             let mut budget = 100;
             let picked = fonts.scope().font(
                 objects,
-                (1000, 0),
+                ObjectId::new(1000, 0),
                 Some(&resources),
                 b"F1",
                 lim,
@@ -1523,57 +1542,60 @@ fn fonts_and_their_scope_say_why_a_font_doesn_t_read() {
 }
 
 /// A font trusts no `Streams`: what's given past what was asked is too large, the
-/// budget as it was, and what's given within it is charged; too large and none are
-/// what they say; and what a stream's source says of why is the `Err`, or for
-/// `Why::Damaged` no stream.
+/// budget as it was, and what's given within it is charged; past a cap of what gives
+/// it (`Why::Limit`) is too large too, as past the budget is; what takes a password or
+/// a source that failed is the `Err`; and a stream that's damaged, or through a filter
+/// the reader doesn't decode, is none, what the font makes of none told and nothing of
+/// the stream's own.
 #[test]
 fn a_font_holds_a_streams_to_what_it_asked() {
     let mut pdf = Pdf::default();
     let to_unicode = pdf.add_object(Stream::new(dict! {}, Vec::new()));
     let font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "ToUnicode" => to_unicode };
     let lim = &Limits::DEFAULT;
-    let read = |given: &dyn Fn(usize) -> Decoded, budget: &mut usize| {
+    type Given<'g> = &'g dyn Fn(usize) -> Result<Vec<u8>, Unreadable>;
+    let read = |given: Given, budget: &mut usize, told: &mut Vec<(Place, Fault)>| {
         let asked = Cell::new(None);
         let objects = With::new(&pdf, |id, limit| {
             assert_eq!(id, to_unicode);
             asked.set(Some(limit));
             given(limit)
         });
-        let read = Font::read(objects, &font, lim, budget, &mut ());
+        let read = Font::read(objects, &font, lim, budget, told);
         (read, asked.get())
     };
-    let many = |_: usize| Decoded::Data(vec![b' '; 100]);
+    let many = |_: usize| Ok(vec![b' '; 100]);
     for over in [0, 1, 99] {
         let mut budget = over;
-        let (font, asked) = read(&many, &mut budget);
+        let (font, asked) = read(&many, &mut budget, &mut Vec::new());
         assert_eq!(font.err(), Some(Error::TooLarge));
         assert_eq!((budget, asked), (over, Some(over)));
     }
     let mut budget = 100;
-    let (font, asked) = read(&many, &mut budget);
+    let (font, asked) = read(&many, &mut budget, &mut Vec::new());
     assert_eq!(font.unwrap().cost(), 100);
     assert_eq!((budget, asked), (0, Some(100)));
 
+    let given = |why: Why| move |_: usize| Err(Unreadable::new(to_unicode, why, "no"));
     let mut budget = 100;
-    let (font, _) = read(&|_| Decoded::TooLarge, &mut budget);
+    let (font, _) = read(&given(Why::Limit), &mut budget, &mut Vec::new());
     assert_eq!(font.err(), Some(Error::TooLarge));
     assert_eq!(budget, 100);
-    let (font, _) = read(&|_| Decoded::None, &mut budget);
-    assert_eq!(font.unwrap().cost(), 0);
-    assert_eq!(budget, 100);
-
-    for why in [Why::Limit, Why::Locked, Why::Source] {
-        let unreadable = Unreadable::new(to_unicode, why, "no");
-        let given = |_: usize| Decoded::Unreadable(unreadable.clone());
+    for why in [Why::Locked, Why::Source] {
         let mut budget = 100;
-        let (font, _) = read(&given, &mut budget);
-        assert_eq!(font.err(), Some(Error::Unreadable(unreadable.clone())));
+        let (font, _) = read(&given(why), &mut budget, &mut Vec::new());
+        let unreadable = Unreadable::new(to_unicode, why, "no");
+        assert_eq!(font.err(), Some(Error::Unreadable(unreadable)));
         assert_eq!(budget, 100);
     }
-    let unreadable = Unreadable::new(to_unicode, Why::Damaged, "no");
-    let given = |_: usize| Decoded::Unreadable(unreadable.clone());
-    let (font, _) = read(&given, &mut budget);
-    assert_eq!(font.unwrap().cost(), 0);
+    for why in [Why::Damaged, Why::Filter] {
+        let mut told = Vec::new();
+        let (font, _) = read(&given(why), &mut budget, &mut told);
+        assert_eq!(font.unwrap().cost(), 0);
+        assert_eq!(budget, 100);
+        let faults: Vec<Fault> = told.into_iter().map(|(_, fault)| fault).collect();
+        assert_eq!(faults, [Fault::ToUnicode], "{why:?}");
+    }
 }
 
 /// A stream a font reads is asked for by its own number, as a reading says of a
@@ -2623,7 +2645,7 @@ impl<'o> Resolve<'o> for Counting<'_, 'o> {
 }
 
 impl Streams for Counting<'_, '_> {
-    fn decoded(&self, id: ObjectId, limit: usize) -> Decoded {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         self.pdf.decoded_by(id, limit)
     }
 }
@@ -2631,7 +2653,7 @@ impl Streams for Counting<'_, '_> {
 /// A sink that says it wants none, and fails if it's told any.
 struct Unwanting;
 
-impl Sink for Unwanting {
+impl Sink<Fault> for Unwanting {
     fn fault(&mut self, _: Place, fault: Fault) {
         panic!("told {fault:?}");
     }
@@ -2685,7 +2707,7 @@ fn told(pdf: &Pdf, dict: &Dict) -> Vec<(Place, Fault)> {
     let read = Font::read(pdf, dict, &Limits::DEFAULT, &mut kept, &mut told);
     let without = Font::read(pdf, dict, &Limits::DEFAULT, &mut none, &mut ());
     let mut borrowed = Vec::new();
-    let mut dynamic: &mut dyn Sink = &mut borrowed;
+    let mut dynamic: &mut dyn Sink<Fault> = &mut borrowed;
     let mut again = BUDGET;
     let by_dyn = Font::read(pdf, dict, &Limits::DEFAULT, &mut again, &mut dynamic);
     assert_eq!(digest(&read.unwrap()), digest(&without.unwrap()));
@@ -2877,10 +2899,16 @@ fn faults_are_told_where_they_are() {
     assert_eq!(faults(&pdf, usecmap), [Fault::PredefinedUnknown]);
 
     // Each says what it is, the whole of it, and no source.
-    let said = Fault::Damaged { id: (7, 0) };
+    let said = Fault::Damaged {
+        id: ObjectId::new(7, 0),
+    };
     assert_eq!(said.to_string(), "object 7 0 doesn't read");
     assert!(std::error::Error::source(&said).is_none());
-    let error = Error::Unreadable(Unreadable::new((7, 0), Why::Locked, "7 0 R is locked"));
+    let error = Error::Unreadable(Unreadable::new(
+        ObjectId::new(7, 0),
+        Why::Locked,
+        "7 0 R is locked",
+    ));
     assert_eq!(error.to_string(), "7 0 R is locked");
     assert!(std::error::Error::source(&error).is_none());
 }
@@ -3029,7 +3057,7 @@ fn program_font(
         false => Fonts::for_text(),
     };
     let mut budget = BUDGET;
-    let font = Object::reference(fonts.1[name].0);
+    let font = Object::reference(fonts.1[name].number);
     read.get(&fonts.0, &font, &Limits::DEFAULT, &mut budget)
         .unwrap()
         .unwrap()
@@ -3377,7 +3405,7 @@ fn a_program_is_charged_to_the_budget() {
     assert_eq!(budget, charged - 1);
     let mut budget = 0;
     let text = Fonts::for_text();
-    let by_ref = Object::reference(f.1["PT"].0);
+    let by_ref = Object::reference(f.1["PT"].number);
     assert!(text.get(&f.0, &by_ref, lim, &mut budget).unwrap().is_some());
 
     let (mut pdf, names) = program_fonts();
@@ -3813,7 +3841,7 @@ fn for_text_reads_no_program() {
     let f = program_fonts();
     for name in ["PT", "PC", "P1", "PI", "PN", "PZ", "PS"] {
         let mut budget = 0;
-        let font = Object::reference(f.1[name].0);
+        let font = Object::reference(f.1[name].number);
         let read = Fonts::for_text()
             .get(&f.0, &font, &Limits::DEFAULT, &mut budget)
             .unwrap()
@@ -4287,8 +4315,8 @@ fn streams_go_on_the_type_and_a_font_is_read_over_a_reference() {
         }
     }
     impl Streams for Source {
-        fn decoded(&self, _: ObjectId, _: usize) -> Decoded {
-            Decoded::None
+        fn decoded(&self, id: ObjectId, _: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+            Err(Unreadable::new(id, Why::Damaged, "no streams"))
         }
     }
     let source = Source {
@@ -4498,8 +4526,9 @@ fn the_programs_are_the_builders() {
     }
 }
 
-/// Every way a stream's data may come to a font from a reading of a file.
-#[cfg(feature = "structure")]
+/// A font over a reading of a file: what it's charged, and what it comes to where a
+/// stream it reads doesn't read, doesn't decode or is past a cap, as pdf-structure's
+/// `Streams` for a `Reading` says of each (whose own tests hold what it says).
 mod reading {
     use std::borrow::Cow;
     use std::io;
@@ -4507,22 +4536,11 @@ mod reading {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use pdf_structure::Password;
-    use pdf_structure::bytes::{ByteSource, Options, Reading};
+    use pdf_structure::bytes::{ByteSource, Options, Reading, WithReading};
     use pdf_structure::fixture::{self, Body, Xref};
     use pdf_structure::pdf_crypt::writer::{Kind, Settings};
 
     use super::*;
-
-    fn asked<S: ByteSource>(reading: &Reading<S>, id: ObjectId, limit: usize) -> Decoded {
-        Streams::decoded(&reading, id, limit)
-    }
-
-    fn unreadable(decoded: Decoded) -> Why {
-        match decoded {
-            Decoded::Unreadable(unreadable) => unreadable.why,
-            other => panic!("{other:?}"),
-        }
-    }
 
     const PLAIN: &[u8] = b"1 beginbfchar <41> <0041> endbfchar";
 
@@ -4537,8 +4555,7 @@ mod reading {
         }
     }
 
-    /// The objects of a file with a font: its `/ToUnicode` object 2, and a stream of
-    /// its data through each way, object 3 Flate's.
+    /// The objects of a file with a font, object 1, and its `/ToUnicode`, object 2.
     fn objects() -> Vec<(u32, Body)> {
         vec![
             (
@@ -4547,199 +4564,105 @@ mod reading {
                     .into(),
             ),
             (2, Body::stream(dict! {}, PLAIN)),
-            (
-                3,
-                Body::stream(dict! { "Filter" => "FlateDecode" }, &fixture::zlib(PLAIN)),
-            ),
         ]
     }
 
     fn font_of_reading<S: ByteSource>(
         reading: &Reading<S>,
         budget: &mut usize,
+        told: &mut Vec<(Place, Fault)>,
     ) -> Result<Font, Error> {
-        let font = reading.get((1, 0)).unwrap().as_dict().unwrap();
-        Font::read(reading, font, &Limits::DEFAULT, budget, &mut ())
+        let font = reading.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
+        Font::read(reading, font, &Limits::DEFAULT, budget, told)
     }
 
-    /// A stream within its limit is its data; past it too large, each by a byte, with
-    /// filters and without; and past the reading's own limit, whatever's asked.
+    /// A font over a reading is charged what its streams decoded, and fails a byte
+    /// short, its budget as it was; and so is one over the file read whole beside its
+    /// reading, which is a resolver and a `Streams` as one.
     #[test]
-    fn data_within_and_past_the_limit() {
+    fn a_font_is_charged_what_it_decoded() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
         let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-        for id in [(2, 0), (3, 0)] {
-            let at = PLAIN.len();
-            assert_eq!(
-                asked(&reading, id, at),
-                Decoded::Data(PLAIN.to_vec()),
-                "{id:?}"
-            );
-            assert_eq!(asked(&reading, id, at - 1), Decoded::TooLarge, "{id:?}");
-            assert_eq!(asked(&reading, id, 0), Decoded::TooLarge, "{id:?}");
-        }
-        let mut options = Options::DEFAULT;
-        options.limits.stream = 4;
-        let small = Reading::open(&file[..], &options).unwrap();
-        assert_eq!(asked(&small, (2, 0), 1000), Decoded::TooLarge);
-        assert_eq!(asked(&small, (3, 0), 1000), Decoded::TooLarge);
-
-        // And a font over it is charged what it decoded, and fails a byte short.
         let mut budget = PLAIN.len();
-        let font = font_of_reading(&reading, &mut budget).unwrap();
+        let font = font_of_reading(&reading, &mut budget, &mut Vec::new()).unwrap();
         assert_eq!(budget, 0);
         assert_eq!(font.code_text(0x41).as_deref(), Some("A"));
         let mut budget = PLAIN.len() - 1;
-        let font = font_of_reading(&reading, &mut budget);
+        let font = font_of_reading(&reading, &mut budget, &mut Vec::new());
         assert_eq!(font.err(), Some(Error::TooLarge));
+        assert_eq!(budget, PLAIN.len() - 1);
+
+        let with = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
+        let dict = (&with).resolve(ObjectId::new(1, 0)).unwrap();
+        let dict = dict.as_dict().unwrap();
+        let read =
+            |budget: &mut usize| Font::read(&with, dict, &Limits::DEFAULT, budget, &mut Vec::new());
+        let mut budget = PLAIN.len();
+        let font = read(&mut budget).unwrap();
+        assert_eq!(budget, 0);
+        assert_eq!(font.code_text(0x41).as_deref(), Some("A"));
+        let mut budget = PLAIN.len() - 1;
+        assert_eq!(read(&mut budget).err(), Some(Error::TooLarge));
         assert_eq!(budget, PLAIN.len() - 1);
     }
 
-    /// A stream that decodes in part is what decoded, as PDFium takes it; none where
-    /// nothing did; what the reader can't decode by its filters, or isn't a stream or
-    /// there, is none; a stream listing more filters than the reader takes is past
-    /// its cap.
+    /// A `/ToUnicode` whose data decodes to nothing, or is through a filter the reader
+    /// doesn't decode, is read as none, what's told of it the font's own; one listing
+    /// more filters than the reader takes is past a cap, and the font too large.
     #[test]
-    fn what_doesn_t_decode_whole() {
+    fn what_doesn_t_decode_is_none_and_past_a_cap_too_large() {
         let many: Vec<Object> = (0..26).map(|_| Object::from("ASCIIHexDecode")).collect();
-        let objects = vec![
-            (
-                1,
-                Body::stream(dict! { "Filter" => "ASCIIHexDecode" }, b"4142 zz"),
-            ),
-            (
-                2,
-                Body::stream(dict! { "Filter" => "ASCIIHexDecode" }, b"zz"),
-            ),
-            (
-                3,
-                Body::stream(dict! { "Filter" => "JBIG2Decode" }, b"data"),
-            ),
-            (4, dict! { "Not" => "a stream" }.into()),
-            (5, Body::stream(dict! { "Filter" => many }, b"41>")),
-            (6, Body::Object(Object::from(2))),
+        let to_unicode = [
+            dict! { "Filter" => "ASCIIHexDecode" },
+            dict! { "Filter" => "JBIG2Decode" },
+            dict! { "Filter" => many },
         ];
-        let file = fixture::file("1.7", &objects, dict! {}, Xref::Table);
-        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-        assert_eq!(asked(&reading, (1, 0), 100), Decoded::Data(b"AB".to_vec()));
-        assert_eq!(asked(&reading, (2, 0), 100), Decoded::None);
-        assert_eq!(asked(&reading, (3, 0), 100), Decoded::None);
-        assert_eq!(asked(&reading, (4, 0), 100), Decoded::None);
-        assert_eq!(asked(&reading, (99, 0), 100), Decoded::None);
-        assert_eq!(asked(&reading, (6, 0), 100), Decoded::None);
-        assert_eq!(unreadable(asked(&reading, (5, 0), 100)), Why::Limit);
+        let read = |dict: Dict, data: &[u8]| {
+            let mut objects = objects();
+            objects[1] = (2, Body::stream(dict, data));
+            let file = fixture::file("1.7", &objects, dict! {}, Xref::Table);
+            let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+            let (mut budget, mut told) = (100, Vec::new());
+            let font = font_of_reading(&reading, &mut budget, &mut told);
+            let told: Vec<Fault> = told.into_iter().map(|(_, fault)| fault).collect();
+            let text = font.map(|font| font.code_text(0x41).map(Cow::into_owned));
+            (text, budget, told)
+        };
+        let [nothing, unfiltered, capped] = to_unicode;
+        for (dict, data) in [(nothing, &b"zz"[..]), (unfiltered, b"data")] {
+            let (text, budget, told) = read(dict, data);
+            assert_eq!(text, Ok(Some("A".into())));
+            // Its `/ToUnicode`'s, and its `/Widths`', which it hasn't.
+            assert_eq!(
+                (budget, told),
+                (100, vec![Fault::ToUnicode, Fault::NoWidths])
+            );
+        }
+        let (text, budget, _) = read(capped, b"41>");
+        assert_eq!((text, budget), (Err(Error::TooLarge), 100));
     }
 
-    /// An object that doesn't parse is none, as it isn't there; one past a cap the
-    /// reader reads under says so.
+    /// A locked file's font isn't made up, and its budget is as it was; opened, it's
+    /// read.
     #[test]
-    fn what_the_resolver_says_of_it_first() {
-        let deep = [
-            "[".repeat(pdf_structure::bytes::NESTING + 8),
-            "]".repeat(pdf_structure::bytes::NESTING + 8),
-        ]
-        .concat();
-        let objects: [(u32, &[u8]); 2] = [(1, b"<< /Unended ("), (2, deep.as_bytes())];
-        let file = fixture::assembled("1.7", &objects, "<< /Size 3 >>");
-        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-        assert!(matches!(
-            Resolve::try_resolve(&&reading, (1, 0)),
-            Err(Unreadable {
-                why: Why::Damaged,
-                ..
-            })
-        ));
-        assert_eq!(asked(&reading, (1, 0), 100), Decoded::None);
-        assert_eq!(unreadable(asked(&reading, (2, 0), 100)), Why::Limit);
-    }
-
-    /// A locked file's stream is locked, and a font that reads it isn't made up; opened,
-    /// it's read. A stream that doesn't decrypt, in a file that's open, and one of a
-    /// handler the reader can't open say so too.
-    #[test]
-    fn a_locked_file_s_streams() {
-        let mut objects = objects();
-        objects.push((
-            4,
-            Body::stream(
-                dict! {
-                    "Filter" => vec![Object::from("Crypt")],
-                    "DecodeParms" => vec![Object::from(dict! { "Name" => "Undefined" })],
-                },
-                b"data",
-            ),
-        ));
-        let file = fixture::encrypted(&settings(b"user"), &objects, dict! {});
+    fn a_locked_file_s_font_isn_t_made_up() {
+        let file = fixture::encrypted(&settings(b"user"), &objects(), dict! {});
         let locked = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-        assert_eq!(unreadable(asked(&locked, (2, 0), 100)), Why::Locked);
         let mut budget = 100;
-        let font = font_of_reading(&locked, &mut budget);
+        let font = font_of_reading(&locked, &mut budget, &mut Vec::new());
         let Err(Error::Unreadable(unreadable_font)) = font else {
             panic!("{font:?}");
         };
         assert_eq!(
             (unreadable_font.id, unreadable_font.why),
-            ((2, 0), Why::Locked)
+            (ObjectId::new(2, 0), Why::Locked)
         );
         assert_eq!(budget, 100);
 
         let opened = Reading::open_with(&file[..], &[Password("user")], &Options::DEFAULT).unwrap();
         let mut budget = 100;
-        let font = font_of_reading(&opened, &mut budget).unwrap();
+        let font = font_of_reading(&opened, &mut budget, &mut Vec::new()).unwrap();
         assert_eq!(font.code_text(0x41).as_deref(), Some("A"));
-        assert!(matches!(
-            opened.decoded_within((4, 0), 100),
-            Err(pdf_structure::Error::Decrypt(_))
-        ));
-        assert_eq!(unreadable(asked(&opened, (4, 0), 100)), Why::Locked);
-
-        let at = file.windows(9).position(|w| w == b"/Standard").unwrap();
-        let other = [&file[..at], b"/Standarx", &file[at + 9..]].concat();
-        let unopened = Reading::open(&other[..], &Options::DEFAULT).unwrap();
-        assert!(matches!(
-            unopened.decoded_within((2, 0), 100),
-            Err(pdf_structure::Error::Unsupported)
-        ));
-        assert_eq!(unreadable(asked(&unopened, (2, 0), 100)), Why::Locked);
-    }
-
-    /// A stream the encryption dictionary refers to isn't handed out, as it may be
-    /// ciphertext.
-    #[test]
-    fn a_stream_the_encryption_dictionary_refers_to() {
-        let mut objects = objects();
-        objects.push((7, Body::stream(dict! {}, b"abc")));
-        let mut file = fixture::encrypted(&settings(b""), &objects, dict! {});
-        // The encryption dictionary, the next object, written again in an update so
-        // that it refers to the stream.
-        let find = |file: &[u8], what: &[u8]| {
-            let at = file.windows(what.len()).rposition(|w| w == what);
-            at.unwrap_or_else(|| panic!("{}", what.escape_ascii()))
-        };
-        let start = find(&file, b"8 0 obj\n");
-        let end = start + find(&file[start..], b"endobj");
-        let own = String::from_utf8_lossy(&file[start..end]).into_owned();
-        assert!(own.contains("/Length 256"), "{own}");
-        let own = own.replacen("/Length 256", "/Length 7 0 R", 1);
-        let prev = find(&file, b"xref\n0 ");
-        let at = file.len();
-        file.extend_from_slice(format!("{own}endobj\n").as_bytes());
-        let xref = file.len();
-        file.extend_from_slice(
-            format!(
-                "xref\n8 1\n{at:010} 00000 n \ntrailer\n<< /Size 9 /Encrypt 8 0 R \
-                 /ID [(0123456789abcdef) (0123456789abcdef)] /Prev {prev} >>\n\
-                 startxref\n{xref}\n%%EOF\n"
-            )
-            .as_bytes(),
-        );
-        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-        let got = reading.decoded_within((7, 0), 100);
-        assert!(
-            matches!(got, Err(pdf_structure::Error::Encrypted)),
-            "{got:?}"
-        );
-        assert_eq!(unreadable(asked(&reading, (7, 0), 100)), Why::Locked);
     }
 
     /// A file read by position, whose source fails once it's told to.
@@ -4765,10 +4688,10 @@ mod reading {
         }
     }
 
-    /// A source that fails is `Why::Source`, whether it fails an object's read or its
-    /// data's, and asked again once it gives them it's read.
+    /// A font whose stream's data the source fails to give is the source's to know,
+    /// its budget as it was; given them again, it's read.
     #[test]
-    fn a_source_that_fails() {
+    fn a_font_whose_source_fails() {
         let bytes = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
         let source = Failing {
             bytes,
@@ -4776,35 +4699,19 @@ mod reading {
         };
         let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
         let fail = |on: bool| source.failing.store(on, Ordering::Relaxed);
-
+        // The objects read and kept, their data's read is what fails.
+        assert!(reading.get(ObjectId::new(2, 0)).is_ok());
+        assert!(reading.get(ObjectId::new(1, 0)).is_ok());
         fail(true);
-        assert_eq!(unreadable(asked(&reading, (2, 0), 100)), Why::Source);
-        let got = Resolve::try_resolve(&&reading, (3, 0));
-        assert!(matches!(
-            got,
-            Err(Unreadable {
-                why: Why::Source,
-                ..
-            })
-        ));
-        fail(false);
-        // The object read and kept, its data's read is what fails.
-        assert!(reading.get((2, 0)).is_ok());
-        assert!(reading.get((1, 0)).is_ok());
-        fail(true);
-        assert!(matches!(
-            reading.decoded_within((2, 0), 100),
-            Err(pdf_structure::Error::Io(_))
-        ));
-        assert_eq!(unreadable(asked(&reading, (2, 0), 100)), Why::Source);
         let mut budget = 100;
-        let font = font_of_reading(&reading, &mut budget);
+        let font = font_of_reading(&reading, &mut budget, &mut Vec::new());
         assert!(
             matches!(&font, Err(Error::Unreadable(u)) if u.why == Why::Source),
             "{font:?}"
         );
         assert_eq!(budget, 100);
         fail(false);
-        assert_eq!(asked(&reading, (2, 0), 100), Decoded::Data(PLAIN.to_vec()));
+        let font = font_of_reading(&reading, &mut budget, &mut Vec::new()).unwrap();
+        assert_eq!(font.code_text(0x41).as_deref(), Some("A"));
     }
 }

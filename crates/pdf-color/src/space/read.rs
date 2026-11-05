@@ -5,10 +5,11 @@
 
 use std::cell::Cell;
 
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::{Dict, Entry, Object, ObjectId, Resolve, Span, Unreadable, Value, Why};
 
 use crate::count::{Hop, Walk, float};
-use crate::fault::{Fault, Place, Sink};
+use crate::fault::Fault;
 use crate::function;
 use crate::limits::Limits;
 
@@ -92,7 +93,7 @@ fn entry_of<'o>(dict: &'o Dict, key: &[u8]) -> Option<&'o Object> {
     dict.get(key).filter(|value| !value.is_null())
 }
 
-impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
+impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
     pub(super) fn new(objects: R, limits: &'l Limits, sink: &'l mut S) -> Reader<'l, R, S> {
         Reader {
             objects,
@@ -111,7 +112,7 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink + ?Sized> Reader<'l, R, S> {
     fn say(&mut self, at: Option<Span>, fault: Fault) {
         if self.sink.wants() {
             let object = self.path.last().copied();
-            self.sink.fault(Place { object, at }, fault);
+            self.sink.fault(Place::new(object, at), fault);
         }
     }
 

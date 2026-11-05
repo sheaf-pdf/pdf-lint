@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::group::Use;
-use crate::Id;
+use pdf_objects::ObjectId;
 
 /// What [`walk`] found.
 #[derive(Debug)]
@@ -86,21 +86,21 @@ fn meet(uses: &mut [Use], stack: &mut Vec<u32>, id: u32, i: u32) {
 /// the map. An object is gone into twice at most, as [`Plan`](super::Plan) has
 /// it, on a stack of its own, however many pages share what it reaches.
 pub fn page_uses(
-    pages: &[Id],
-    stop: &HashSet<Id>,
-    refs: impl Fn(Id, &mut dyn FnMut(Id)),
-) -> HashMap<Id, Use> {
-    let mut index: HashMap<Id, u32> = HashMap::with_capacity(pages.len());
-    let mut ids: Vec<Id> = Vec::with_capacity(pages.len());
+    pages: &[ObjectId],
+    stop: &HashSet<ObjectId>,
+    refs: impl Fn(ObjectId, &mut dyn FnMut(ObjectId)),
+) -> HashMap<ObjectId, Use> {
+    let mut index: HashMap<ObjectId, u32> = HashMap::with_capacity(pages.len());
+    let mut ids: Vec<ObjectId> = Vec::with_capacity(pages.len());
     let mut lists: Vec<Vec<u32>> = Vec::with_capacity(pages.len());
-    let mut indexed = |id: Id, ids: &mut Vec<Id>| {
+    let mut indexed = |id: ObjectId, ids: &mut Vec<ObjectId>| {
         *index.entry(id).or_insert_with(|| {
             ids.push(id);
             ids.len() as u32 - 1
         })
     };
     let walks: Vec<u32> = pages.iter().map(|&id| indexed(id, &mut ids)).collect();
-    let is_page: HashSet<Id> = pages.iter().copied().collect();
+    let is_page: HashSet<ObjectId> = pages.iter().copied().collect();
     while lists.len() < ids.len() {
         let id = ids[lists.len()];
         let mut list = Vec::new();

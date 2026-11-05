@@ -67,6 +67,13 @@ use crate::scan::{Event, TOP, UNCAPPED, Visit, is_number, tokenizer, walk};
 /// wants none, so none is looked for. A fault borrows from `'a`, the
 /// content read, so a sink can keep it as it is. A sink borrowed, `&mut
 /// S` or `&mut dyn Sink`, is a sink too.
+///
+/// It's this crate's own, not pdf-objects'
+/// [`fault::Sink`](pdf_objects::fault::Sink), which a reader of a file's
+/// objects tells with the object a fault is in: a fault here borrows the
+/// content, and is placed by offsets into what was read, which only a
+/// page's streams, joined, map back to a stream and its bytes
+/// ([`Concat::pos`](crate::Concat::pos)).
 pub trait Sink<'a> {
     /// A fault at `at`, offsets into the content read.
     fn fault(&mut self, at: Range<usize>, fault: Fault<'a>);

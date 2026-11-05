@@ -6,16 +6,18 @@ use crate::fuzz::facts_of;
 use crate::hint::{EmbeddedFiles, FileEntry, Generic, ThumbEntry, Thumbnails};
 use crate::layout::{Encoded, Options, assemble};
 use crate::plan::{Graph, Group, Kind, Page, plan};
-use crate::{Id, Limits};
+use pdf_objects::ObjectId;
 
-fn id(number: u32) -> Id {
-    (number, 0)
+use crate::Limits;
+
+fn id(number: u32) -> ObjectId {
+    ObjectId::new(number, 0)
 }
 
 /// Four pages, each its own object and a content stream, what all three share,
 /// what the later two share, a form's fields and a catalog, each object by what
 /// `to` makes of its number.
-fn graph_by(kind: Kind, to: impl Fn(u32) -> Id) -> Graph {
+fn graph_by(kind: Kind, to: impl Fn(u32) -> ObjectId) -> Graph {
     let mut graph = Graph::new(to(1), kind);
     graph.object(to(1), [to(2), to(30)]);
     graph.object(to(2), [to(3), to(4), to(5), to(6)]);
@@ -235,7 +237,7 @@ fn a_length_of_another_type_is_told_and_one_by_reference_too() {
     dict(&mut facts).l = Raw::Real(10.0);
     assert_eq!(findings(&facts), [Finding::BadValue { key: DictKey::L }]);
     let mut facts = table();
-    dict(&mut facts).l = Raw::Reference((1, 0));
+    dict(&mut facts).l = Raw::Reference(ObjectId::new(1, 0));
     assert_eq!(findings(&facts), [Finding::Indirect { key: DictKey::L }]);
 }
 
@@ -288,7 +290,7 @@ fn each_key_missing_or_by_reference_is_told() {
         );
         fires(
             table(),
-            |facts| set(dict(facts), Raw::Reference((1, 0))),
+            |facts| set(dict(facts), Raw::Reference(ObjectId::new(1, 0))),
             |f| *f == Finding::Indirect { key },
         );
     }
@@ -299,7 +301,7 @@ fn each_key_missing_or_by_reference_is_told() {
     );
     fires(
         table(),
-        |facts| dict(facts).p = Raw::Reference((1, 0)),
+        |facts| dict(facts).p = Raw::Reference(ObjectId::new(1, 0)),
         |f| *f == Finding::Indirect { key: DictKey::P },
     );
 }
@@ -318,7 +320,7 @@ fn h_items_are_told() {
     );
     fires(
         table(),
-        |facts| dict(facts).h_items[1] = Raw::Reference((1, 0)),
+        |facts| dict(facts).h_items[1] = Raw::Reference(ObjectId::new(1, 0)),
         |f| *f == Finding::Indirect { key: DictKey::H },
     );
 }
@@ -579,7 +581,7 @@ fn the_version_one_is_the_one_the_check_takes() {
         (Raw::Real(2.0), false),
         (Raw::Integer(0), false),
         (Raw::Other, false),
-        (Raw::Reference((1, 0)), false),
+        (Raw::Reference(ObjectId::new(1, 0)), false),
     ] {
         let mut facts = table();
         dict(&mut facts).linearized = raw;
@@ -880,7 +882,9 @@ fn the_hint_stream_and_its_length_are_last_wherever_theyre_written() {
 #[test]
 fn whats_packed_that_cant_be_is_told() {
     let facts = table();
-    let Some(Raw::Reference((number, _))) = facts.first.as_ref().map(|first| first.root) else {
+    let Some(Raw::Reference(ObjectId { number, .. })) =
+        facts.first.as_ref().map(|first| first.root)
+    else {
         panic!("/Root");
     };
     fires(
@@ -901,11 +905,11 @@ fn whats_packed_that_cant_be_is_told() {
     );
     fires(
         table(),
-        |facts| first_section(facts).root = Raw::Reference((1, 0)),
+        |facts| first_section(facts).root = Raw::Reference(ObjectId::new(1, 0)),
         |f| *f == Finding::CatalogNotFirst { number: 1 },
     );
     let mut facts = table();
-    let (number, _) = facts.pages[1].id.unwrap();
+    let ObjectId { number, .. } = facts.pages[1].id.unwrap();
     let main = main_section(&mut facts);
     let row = main
         .rows
@@ -947,7 +951,7 @@ fn the_hint_stream_is_told_of() {
     );
     fires(
         table(),
-        |facts| hint_of(facts).keys[0].1 = Raw::Reference((1, 0)),
+        |facts| hint_of(facts).keys[0].1 = Raw::Reference(ObjectId::new(1, 0)),
         |f| matches!(f, Finding::HintKeyIndirect { key } if key.as_bytes() == b"S"),
     );
     fires(
@@ -962,7 +966,7 @@ fn an_indirect_length_is_no_finding() {
     let mut facts = table();
     let keys = &mut hint_of(&mut facts).keys;
     let length = keys.iter_mut().find(|(key, _)| key == b"Length").unwrap();
-    length.1 = Raw::Reference((1, 0));
+    length.1 = Raw::Reference(ObjectId::new(1, 0));
     assert_eq!(findings(&facts), []);
 }
 
@@ -1404,7 +1408,7 @@ fn a_first_page_past_the_pages_is_told() {
 #[test]
 fn the_first_pages_object_not_listed_first_is_told() {
     let mut facts = table();
-    let (number, _) = facts.pages[0].id.unwrap();
+    let ObjectId { number, .. } = facts.pages[0].id.unwrap();
     let first = first_section(&mut facts);
     let at = first
         .rows

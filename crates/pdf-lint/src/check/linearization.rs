@@ -246,7 +246,9 @@ impl<'a> Places<'a> {
             stream: facts.hint_extent(),
             tables,
             numbers: None,
-            pages: (facts.pages.iter()).map(|p| p.id.map(|(n, _)| n)).collect(),
+            pages: (facts.pages.iter())
+                .map(|p| p.id.map(|id| id.number))
+                .collect(),
         }
     }
 
@@ -270,7 +272,7 @@ impl<'a> Places<'a> {
         let source = self.source;
         let numbers = self.numbers.get_or_insert_with(|| {
             (source.ids().into_iter())
-                .map(|(n, g)| (n, (n, g)))
+                .map(|id| (id.number, id))
                 .collect()
         });
         numbers.get(&n).copied()
@@ -281,7 +283,7 @@ impl<'a> Places<'a> {
     /// stream whose number a later revision lists.
     fn at(&mut self, place: Option<Place>) -> Option<Span> {
         let at = self.placed(place)?;
-        let later = |(n, _): ObjectId| listed_in(self.later, n);
+        let later = |id: ObjectId| listed_in(self.later, id.number);
         (!at.stream.is_some_and(later)).then_some(at)
     }
 
@@ -419,7 +421,7 @@ impl<'a> Walk<'a> {
         let Some(first) = facts.claim() else {
             return;
         };
-        let id = (first.number, first.generation);
+        let id = ObjectId::new(first.number, first.generation);
         let revisions = self.source.revisions();
         // The object at the dictionary's number is the dictionary where its
         // record starts where the first object does, else a later
@@ -806,7 +808,7 @@ mod tests {
     /// `file` give.
     fn hint_byte(file: &[u8], at: usize) -> Option<Span> {
         let number = facts(file).hint.unwrap().number;
-        Some(Span::new(Some((number, 0)), at, at + 1))
+        Some(Span::new(Some(ObjectId::new(number, 0)), at, at + 1))
     }
 
     /// A file linearized by pdf-linearize holds: nothing is found of it, no
@@ -860,7 +862,7 @@ mod tests {
     #[test]
     fn each_error_is_found_once_in_the_dictionary_at_its_key_and_bytes() {
         let file = linearized(&three_pages(), &[]);
-        let dict = (7, 0);
+        let dict = ObjectId::new(7, 0);
         let at = |changed: &[u8]| -> Vec<(String, String, Option<Span>)> {
             let report = checked(changed);
             assert_eq!(report.linearized, Some(Linearized::Fails), "{report}");
@@ -979,7 +981,7 @@ mod tests {
         assert!(told(&report)[1..].iter().all(|f| f.0 == "H"), "{report}");
         assert_eq!(report.linearized, Some(Linearized::Fails));
         // The second page not saying its `/MediaBox` itself.
-        let (page, _) = facts.pages[1].id.unwrap();
+        let ObjectId { number: page, .. } = facts.pages[1].id.unwrap();
         let object = find(&file, format!("\n{page} 0 obj").as_bytes()) + 1;
         let media_box = object + find(&file[object..], b"/MediaBox");
         let mut bare = file.clone();
@@ -995,7 +997,7 @@ mod tests {
         };
         let report = checked_with(&bare, &asked);
         let read = WithReading::new(&bare[..], &[], &bytes::Options::DEFAULT).unwrap();
-        let record = read.document().record((page, 0)).map(|r| r.at);
+        let record = read.document().record(ObjectId::new(page, 0)).map(|r| r.at);
         assert_eq!(record.map(|at| at.start), Some(object));
         let value = "page 1 doesn't say its MediaBox itself (ISO 32000-2, F.3.7, F.3.10)";
         assert_eq!(told(&report), [("-", value, record)], "{report}");
@@ -1110,7 +1112,7 @@ mod tests {
         let file = linearized(&three_pages(), &[]);
         let model = |report: &Report| -> Vec<(String, String, Rule)> {
             (report.findings.iter())
-                .filter(|f| f.object == Some((7, 0)))
+                .filter(|f| f.object == Some(ObjectId::new(7, 0)))
                 .map(|f| (f.table.clone(), f.key.clone(), f.rule))
                 .collect()
         };
@@ -1160,13 +1162,13 @@ mod tests {
             let hold = Hold::Only([(id, Made::Built)].into());
             check_with_reading(&read, &hold, &Options::default())
         };
-        let dict = only((7, 0));
+        let dict = only(ObjectId::new(7, 0));
         assert_eq!(told(&dict).len(), 1, "{dict}");
         assert_eq!(dict.findings[0].made, Made::Built);
         assert_eq!(dict.departures.values().sum::<usize>(), 4);
         assert_eq!(dict.linearized, Some(Linearized::Fails));
         let hint = facts(&file).hint.unwrap().number;
-        for other in [(1, 0), (hint, 0)] {
+        for other in [ObjectId::new(1, 0), ObjectId::new(hint, 0)] {
             let report = only(other);
             assert_eq!(told(&report), [], "{report}");
             assert!(report.departures.is_empty());
@@ -1193,7 +1195,7 @@ mod tests {
         let read = bytes::Reading::open(&plain[..], &bytes::Options::DEFAULT).unwrap();
         let doc = read.to_document().unwrap();
         let objects: Vec<(u32, Body)> = (doc.ids().into_iter())
-            .map(|id| (id.0, Body::from(doc.get(id).unwrap().clone())))
+            .map(|id| (id.number, Body::from(doc.get(id).unwrap().clone())))
             .collect();
         let encrypted = fixture::encrypted(&settings, &objects, dict! { "Root" => r(1) });
         let user = [crate::pdf_crypt::Password("user")];
@@ -1335,7 +1337,10 @@ mod tests {
         assert_eq!((voided(&alone), alone.linearized), (vec![], None));
         // Another update, its section at another byte, is alike: what one
         // check of it found, another carries.
-        let other = updated_with(&file, &[((99, 0), dict! { "Other" => 1 }.into())]);
+        let other = updated_with(
+            &file,
+            &[(ObjectId::new(99, 0), dict! { "Other" => 1 }.into())],
+        );
         let other = checked(&other);
         assert_ne!(voided(&other)[0].5, voided(&report)[0].5);
         let since = other.since(&report);
@@ -1366,7 +1371,10 @@ mod tests {
         assert_eq!(voided(&report).len(), 1, "{report}");
         assert_eq!(report.linearized, Some(Linearized::Updated { held: false }));
         let hint = facts(&file).hint.unwrap().number;
-        let over = updated_with(&file, &[((hint, 0), dict! { "Hint" => 1 }.into())]);
+        let over = updated_with(
+            &file,
+            &[(ObjectId::new(hint, 0), dict! { "Hint" => 1 }.into())],
+        );
         let report = checked(&over);
         let unplaced: Vec<_> = (told(&before).into_iter())
             .map(|(key, value, _)| (key, value, None))
@@ -1378,7 +1386,11 @@ mod tests {
         let unreached = (report.findings.iter())
             .filter(|f| f.rule == Rule::Unreached)
             .map(|f| f.object);
-        assert_eq!(unreached.collect::<Vec<_>>(), [Some((hint, 0))], "{report}");
+        assert_eq!(
+            unreached.collect::<Vec<_>>(),
+            [Some(ObjectId::new(hint, 0))],
+            "{report}"
+        );
     }
 
     /// An update that writes the linearization dictionary's number again
@@ -1392,7 +1404,10 @@ mod tests {
     fn a_dictionary_written_over_leaves_its_findings_to_the_first_revision() {
         let file = written_as(&linearized(&three_pages(), &[]), "/E 923", "/E 123");
         let dict = facts(&file).first_object.unwrap().number;
-        let over = updated_with(&file, &[((dict, 0), dict! { "Foo" => 1 }.into())]);
+        let over = updated_with(
+            &file,
+            &[(ObjectId::new(dict, 0), dict! { "Foo" => 1 }.into())],
+        );
         let report = checked(&over);
         let found: Vec<_> = (report.findings.iter())
             .filter(|f| f.rule == Rule::Linearization)
@@ -1420,14 +1435,18 @@ mod tests {
             .map(|f| f.object);
         let hint = facts(&file).hint.unwrap().number;
         let unreached: Vec<_> = unreached.collect();
-        assert_eq!(unreached, [Some((dict, 0)), Some((hint, 0))], "{report}");
+        assert_eq!(
+            unreached,
+            [Some(ObjectId::new(dict, 0)), Some(ObjectId::new(hint, 0))],
+            "{report}"
+        );
         // Held by the number alone, as built, or the update's objects: none
         // of the linearization's, which neither wrote; the verdict stands.
         let read = WithReading::new(&over[..], &[], &bytes::Options::DEFAULT).unwrap();
         let update = bytes::read(&over).update.unwrap();
         let theirs = update.objects.iter().map(|&id| (id, Made::Built)).collect();
         for hold in [
-            Hold::Only([((dict, 0), Made::Built)].into()),
+            Hold::Only([(ObjectId::new(dict, 0), Made::Built)].into()),
             Hold::Only(theirs),
         ] {
             let report = check_with_reading(&read, &hold, &Options::default());
@@ -1593,7 +1612,10 @@ mod tests {
         let record = generation(&before);
         assert_eq!(record.len(), 1, "{before}");
         assert_eq!(record[0].map(|at| at.start), Some(hint.at as usize));
-        let over = updated_with(&file, &[((hint.number, 1), dict! { "Hint" => 1 }.into())]);
+        let over = updated_with(
+            &file,
+            &[(ObjectId::new(hint.number, 1), dict! { "Hint" => 1 }.into())],
+        );
         let after = checked_with(&over, &asked);
         assert_eq!(generation(&after), record, "{after}");
         assert_eq!(after.linearized, Some(Linearized::Updated { held: true }));
