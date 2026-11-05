@@ -83,8 +83,9 @@ jobs:
       - name: Lint for x86_64-pc-windows-gnu and wasm32-unknown-unknown
         run: just structure-cross
 
-  # The tokenizer's own promises: no std, no alloc, and its oldest Rust.
-  # None of these jobs needs qpdf, and none ever will.
+  # The tokenizer's own promises: no std, no alloc, its oldest Rust, what
+  # its package holds, and its API against the version published. None of
+  # these jobs needs qpdf, and none ever will.
   tokenizer-no-std:
     name: Tokenizer without std
     runs-on: ubuntu-latest
@@ -128,6 +129,40 @@ jobs:
       - uses: extractions/setup-just@v4
       - name: Test
         run: just tokenizer-msrv
+
+  # The tokenizer packaged as a publish would, in a fresh target directory,
+  # and what the package holds checked: its sources, README, CHANGELOG,
+  # manifest and lock, nothing else, no benchmark among them.
+  tokenizer-package:
+    name: Tokenizer packaged as a publish would
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Package, and check what the package holds
+        run: just tokenizer-package
+
+  # The tokenizer's public API against the version published on crates.io:
+  # a break the version doesn't allow fails. cargo-semver-checks comes as a
+  # prebuilt binary at a pinned version, as the fuzz workflow's cargo-fuzz
+  # does, so its own Rust requirement binds nothing of the crate's.
+  tokenizer-semver:
+    name: Tokenizer against its published API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks@0.51.0
+      - uses: extractions/setup-just@v4
+      - name: Check the API against the version published
+        run: just tokenizer-semver
 
   filters-msrv:
     name: Filters on their minimum Rust

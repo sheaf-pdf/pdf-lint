@@ -5,8 +5,10 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
+homepage = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-tokenizer"
 description = "A lossless, zero-copy PDF tokenizer that never rejects and never repairs"
-keywords = ["pdf", "lexer", "tokenizer", "no-std"]
+keywords = ["pdf", "lexer", "tokenizer", "no-std", "iso-32000"]
 categories = ["parser-implementations", "no-std::no-alloc"]
 # Only what users need, so local tooling files can't end up in the package.
 include = ["/src", "/README.md", "/CHANGELOG.md"]

@@ -114,6 +114,23 @@ mod tests {
         assert!(fuzz::walk(SMALL_FILE, 0) > 100);
     }
 
+    /// The README is shown on crates.io and docs.rs, where a path beside
+    /// the crate reaches nothing: its licence links are the repository's
+    /// URLs, and no link of it climbs out of the crate.
+    #[test]
+    fn the_readmes_licence_links_reach_the_files() {
+        let readme = include_str!("../README.md");
+        for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
+            let link =
+                std::format!("[{file}](https://github.com/sheaf-pdf/pdf-lint/blob/main/{file})");
+            assert!(
+                readme.contains(&link),
+                "{file}'s link isn't the repository's URL"
+            );
+        }
+        assert!(!readme.contains("](../"), "a link climbs out of the crate");
+    }
+
     /// The small file cut at every byte, read from its start and from
     /// inside it: only the last token, which reaches the cut, can come out
     /// otherwise than the whole file's.
