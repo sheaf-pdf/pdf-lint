@@ -376,12 +376,12 @@ impl Encryptor {
         let moved = (dictionaries.iter().copied()).filter(|&id| to.at(id) != Some(id));
         let mut numbers: BTreeMap<u32, ObjectId> = BTreeMap::new();
         for &id in dictionaries {
-            let least = numbers.entry(id.0).or_insert(id);
+            let least = numbers.entry(id.number).or_insert(id);
             *least = id.min(*least);
         }
         let onto = (written.into_iter())
             .filter(|(given, at)| given != at)
-            .filter_map(|(_, at)| numbers.get(&at.0).copied());
+            .filter_map(|(_, at)| numbers.get(&at.number).copied());
         moved.chain(onto).min()
     }
 
@@ -420,7 +420,7 @@ impl Encryptor {
     /// dictionary's, or what one refers to: what's at them is left in the
     /// clear, so the writer numbers no object of its own there.
     pub(super) fn dictionary_numbers(&self) -> impl Iterator<Item = u32> + '_ {
-        self.list.dictionaries.iter().map(|id| id.0)
+        self.list.dictionaries.iter().map(|id| id.number)
     }
 
     /// Whether `/EncryptMetadata false` leaves the document's metadata
@@ -638,7 +638,7 @@ impl Encrypt for Encrypting<'_> {
             return Ok(Cow::Borrowed(text));
         }
         let handler = &self.encryptor.handler;
-        (handler.encrypt_string(id, &context(id), text))
+        (handler.encrypt_string(id.into(), &context(id), text))
             .map(Cow::Owned)
             .map_err(Unencryptable::Fault)
     }
@@ -671,7 +671,7 @@ impl Encrypt for Encrypting<'_> {
                 if matches!(method, Method::Identity | Method::None) {
                     return Ok(Cow::Borrowed(data));
                 }
-                (handler.encrypt_stream(id, &context(id), data, Some(method)))
+                (handler.encrypt_stream(id.into(), &context(id), data, Some(method)))
                     .map(Cow::Owned)
                     .map_err(Unencryptable::Fault)
             }
@@ -696,7 +696,12 @@ fn per_object(handler: &Handler, dict: &Dict) -> bool {
 
 /// What AES's IV for a string or stream's data of object `id` is derived
 /// from beside the data: `n g obj`, as the object is written.
-fn context((n, g): ObjectId) -> Vec<u8> {
+fn context(
+    ObjectId {
+        number: n,
+        generation: g,
+    }: ObjectId,
+) -> Vec<u8> {
     let mut context = Vec::with_capacity(20);
     serialize::decimal(&mut context, n.into());
     context.push(b' ');

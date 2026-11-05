@@ -125,7 +125,7 @@ impl Decode for Nothing {
 fn an_object_stream_that_isnt_a_stream_says_so() {
     let file = packed(b"<< /Type /ObjStm /N 2 /First 8 >>", "");
     assert_eq!(
-        why(&read(&file), (2, 0)),
+        why(&read(&file), ObjectId::new(2, 0)),
         "its object stream 4 0 R doesn't decode: it isn't a stream"
     );
 }
@@ -142,7 +142,7 @@ fn an_object_streams_own_crypt_filter_in_a_file_no_password_opens_says_so() {
     let doc = read(&packed(&body, &encrypt(kind, "Identity", "Identity")));
     assert_eq!(doc.encryption, Encryption::Plain);
     assert_eq!(
-        why(&doc, (2, 0)),
+        why(&doc, ObjectId::new(2, 0)),
         "its object stream 4 0 R doesn't decode: its own /Crypt filter, /StdCF, encrypts it, and no password the reader was given opens the file"
     );
 }
@@ -160,9 +160,9 @@ fn an_object_stream_whose_data_doesnt_decrypt_says_so_and_why() {
         said(&doc),
         ["its data doesn't decrypt cleanly: its AES ciphertext has no whole block past its IV"]
     );
-    assert_eq!(doc.warnings[0].object, Some((4, 0)));
+    assert_eq!(doc.warnings[0].object, Some(ObjectId::new(4, 0)));
     assert_eq!(
-        why(&doc, (2, 0)),
+        why(&doc, ObjectId::new(2, 0)),
         "its object stream 4 0 R doesn't decode: its data doesn't decrypt: its AES ciphertext has no whole block past its IV"
     );
 }
@@ -179,7 +179,7 @@ fn startxref_inside_another_word_says_where() {
     let doc = read(&file);
     let why = format!("startxref at byte {at} is inside another word");
     assert_eq!(doc.trailer.unwritten, Some(why));
-    assert!(doc.get((1, 0)).is_ok());
+    assert!(doc.get(ObjectId::new(1, 0)).is_ok());
 }
 
 #[test]
@@ -244,7 +244,7 @@ fn a_cross_reference_stream_a_decoder_doesnt_decode_says_its_filters() {
             format!("its cross-reference stream is compressed ({shown}), and nothing decodes it");
         assert_eq!(doc.trailer.unwritten, Some(why), "{filter}");
         // Decoded by a decoder to data not its rows' length.
-        let doc = read_through(&file, &BTreeMap::from([((2, 0), vec![0; 3])]));
+        let doc = read_through(&file, &BTreeMap::from([(ObjectId::new(2, 0), vec![0; 3])]));
         let why = "decoded, it's 3 bytes, not the 12 its /W and /Index make: the decoder may have decoded another object 2 0 R";
         assert_eq!(doc.trailer.unwritten.as_deref(), Some(why), "{filter}");
     }
@@ -312,7 +312,7 @@ fn an_object_stream_of_a_file_nothing_opens_says_nothing_decodes_it() {
     let body = container("/Type /ObjStm /N 2 /First 8", MEMBERS);
     let doc = read(&packed(&body, " /Encrypt << /Filter /Standard /V 2 >>"));
     assert_eq!(
-        why(&doc, (2, 0)),
+        why(&doc, ObjectId::new(2, 0)),
         "it's in object stream 4 0 R, and nothing decodes that"
     );
 }
@@ -325,7 +325,7 @@ fn an_object_that_runs_to_where_a_fault_cut_its_object_stream_off_says_so() {
     let body = container("/Type /ObjStm /N 2 /First 8 /Filter /FlateDecode", cut);
     let doc = read(&packed(&body, ""));
     assert_eq!(
-        why(&doc, (3, 0)),
+        why(&doc, ObjectId::new(3, 0)),
         "it runs to where a fault cut object stream 4 0 R's data off, so it may be cut short"
     );
 }
@@ -348,8 +348,8 @@ fn an_object_streams_header_that_doesnt_read_says_why_for_its_objects() {
     for (dict, data, said) in cases {
         let body = container(&format!("/Type /ObjStm {dict}"), data);
         let doc = read(&packed(&body, ""));
-        assert_eq!(why(&doc, (2, 0)), said);
-        assert_eq!(why(&doc, (3, 0)), said);
+        assert_eq!(why(&doc, ObjectId::new(2, 0)), said);
+        assert_eq!(why(&doc, ObjectId::new(3, 0)), said);
     }
 }
 
@@ -370,7 +370,7 @@ fn an_object_streams_filters_the_reader_doesnt_take_say_why() {
         let body = container(&format!("/Type /ObjStm /N 2 /First 8 {filter}"), MEMBERS);
         let doc = read(&packed(&body, ""));
         let said = format!("its object stream 4 0 R doesn't decode: {said}");
-        assert_eq!(why(&doc, (2, 0)), said, "{filter}");
+        assert_eq!(why(&doc, ObjectId::new(2, 0)), said, "{filter}");
     }
 }
 

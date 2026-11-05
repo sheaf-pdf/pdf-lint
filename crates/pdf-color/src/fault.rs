@@ -254,7 +254,7 @@ pub enum Fault {
     /// A reference to an object the file lists but whose bytes aren't that
     /// object, or that doesn't lead to it: read as no object, as 7.3.10 has a
     /// reference to nothing, though the file meant one.
-    #[error("{} {} R doesn't read", .id.0, .id.1)]
+    #[error("{id} R doesn't read")]
     Damaged {
         /// The object.
         id: ObjectId,

@@ -1160,7 +1160,9 @@ mod tests {
             // But where objects start inside another's bytes, the second
             // page and the page tree's resources, inside the first page.
             let inside: &[_] = match name {
-                "object-streams-overlapping" => &[Some((6, 0)), Some((5, 0))],
+                "object-streams-overlapping" => {
+                    &[Some(ObjectId::new(6, 0)), Some(ObjectId::new(5, 0))]
+                }
                 _ => &[],
             };
             let on: Vec<_> = doc.warnings.iter().map(|w| w.object).collect();
@@ -1244,12 +1246,13 @@ mod tests {
             );
             assert!(opened, "{name}: {:?}", doc.encryption);
             assert_eq!(
-                doc.get((3, 0)).map(|o| o.at.and_then(|at| at.stream)),
-                Ok(Some((4, 0))),
+                doc.get(ObjectId::new(3, 0))
+                    .map(|o| o.at.and_then(|at| at.stream)),
+                Ok(Some(ObjectId::new(4, 0))),
                 "{name}"
             );
             let lang = doc
-                .get((1, 0))
+                .get(ObjectId::new(1, 0))
                 .ok()
                 .and_then(|o| o.as_dict()?.get(b"Lang").cloned());
             let en = crate::object::Value::String(
@@ -1260,7 +1263,7 @@ mod tests {
             // The one whose object stream leaves its annotation's string in
             // the clear is recorded so, and found.
             let clear = name == "encrypted-in-the-clear";
-            let left: BTreeSet<_> = clear.then_some((4, 0)).into_iter().collect();
+            let left: BTreeSet<_> = clear.then_some(ObjectId::new(4, 0)).into_iter().collect();
             assert_eq!(doc.in_the_clear, left, "{name}");
             let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
             let packed: Vec<_> = (report.findings.iter())
@@ -1463,7 +1466,7 @@ mod tests {
             rows.map(|(row, &n)| (row.table.clone(), n)).collect()
         };
         let table = "FontDescriptorCIDType2".to_string();
-        assert_eq!(missing(&beside), [Some((6, 0))]);
+        assert_eq!(missing(&beside), [Some(ObjectId::new(6, 0))]);
         assert_eq!(latin(&beside), [(table.clone(), 1)]);
         assert_eq!(missing(&alone), []);
         assert_eq!(latin(&alone), [(table, 2)]);
@@ -1503,7 +1506,7 @@ mod tests {
         };
         assert_eq!(
             fonts(&beside),
-            [(Some((4, 0)), "FontType3/FirstChar".to_string())],
+            [(Some(ObjectId::new(4, 0)), "FontType3/FirstChar".to_string())],
             "{beside}"
         );
         assert_eq!(fonts(&alone), [], "{alone}");

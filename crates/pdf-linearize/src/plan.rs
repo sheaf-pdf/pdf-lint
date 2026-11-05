@@ -54,7 +54,9 @@ mod uses;
 pub use group::{MEMBERS, Use, group};
 pub use uses::page_uses;
 
-use crate::{Id, Limits};
+use pdf_objects::ObjectId;
+
+use crate::Limits;
 
 /// What lists a file's objects, which decides the layout's own numbers and
 /// whether anything can be packed.
@@ -135,7 +137,7 @@ impl Group {
 /// more of it.
 #[derive(Debug, Clone)]
 pub struct Node {
-    id: Id,
+    id: ObjectId,
     refs: Range<usize>,
     packable: bool,
     late: bool,
@@ -164,18 +166,18 @@ impl Node {
 #[non_exhaustive]
 pub struct Page {
     /// The page object.
-    pub id: Id,
+    pub id: ObjectId,
     /// Its content streams, in order.
-    pub contents: Vec<Id>,
+    pub contents: Vec<ObjectId>,
     /// Its thumbnail image, which goes in part 9 and which the page's walk
     /// doesn't go into, so it isn't among the page object's references
     /// (F.3.10).
-    pub thumb: Option<Id>,
+    pub thumb: Option<ObjectId>,
 }
 
 impl Page {
     /// The page at object `id`, with no content streams or thumbnail said yet.
-    pub fn new(id: Id) -> Page {
+    pub fn new(id: ObjectId) -> Page {
         Page {
             id,
             contents: Vec::new(),
@@ -189,22 +191,22 @@ impl Page {
 /// [`plan()`] does.
 #[derive(Debug, Clone)]
 pub struct Graph {
-    catalog: Id,
+    catalog: ObjectId,
     kind: Kind,
     nodes: Vec<Node>,
-    refs: Vec<Id>,
+    refs: Vec<ObjectId>,
     pages: Vec<Page>,
     first_page: u32,
-    tree_nodes: Vec<Id>,
-    open: Vec<Id>,
-    groups: Vec<(Group, Vec<Id>)>,
+    tree_nodes: Vec<ObjectId>,
+    open: Vec<ObjectId>,
+    groups: Vec<(Group, Vec<ObjectId>)>,
     outlines_first: bool,
 }
 
 impl Graph {
     /// A graph of nothing yet, with `catalog` as its catalog, to be listed by
     /// `kind`.
-    pub fn new(catalog: Id, kind: Kind) -> Graph {
+    pub fn new(catalog: ObjectId, kind: Kind) -> Graph {
         Graph {
             catalog,
             kind,
@@ -222,7 +224,7 @@ impl Graph {
     /// Object `id`, referring to `refs`, in the order a page wants them read
     /// (F.3.7): each object once. A reference to no object given here counts
     /// for nothing, as such a reference reads as null.
-    pub fn object(&mut self, id: Id, refs: impl IntoIterator<Item = Id>) -> &mut Node {
+    pub fn object(&mut self, id: ObjectId, refs: impl IntoIterator<Item = ObjectId>) -> &mut Node {
         let start = self.refs.len();
         self.refs.extend(refs);
         self.nodes.push(Node {
@@ -248,21 +250,21 @@ impl Graph {
 
     /// A page tree or document part node (given as a page, it's a page): no
     /// walk goes into it, and it's in part 9 (F.3.7, F.3.10).
-    pub fn tree_node(&mut self, id: Id) {
+    pub fn tree_node(&mut self, id: ObjectId) {
         self.tree_nodes.push(id);
     }
 
     /// An object a viewer wants at open, placed in part 4 in the order given,
     /// after the catalog, and not gone into (F.3.5), so a page's walk stops at
     /// it and no page names it (given as a page, it's a page).
-    pub fn open(&mut self, id: Id) {
+    pub fn open(&mut self, id: ObjectId) {
         self.open.push(id);
     }
 
     /// What `roots` reach, of what's left when the pages are placed, under the
     /// same stops as a page's walk: laid out as `group`. Being given at all
     /// says the thing exists, even with nothing left to it (F.3.6).
-    pub fn group(&mut self, group: Group, roots: impl IntoIterator<Item = Id>) {
+    pub fn group(&mut self, group: Group, roots: impl IntoIterator<Item = ObjectId>) {
         self.groups.push((group, roots.into_iter().collect()));
     }
 
@@ -294,7 +296,7 @@ pub enum Part {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum What {
     /// The object with this id in the caller's graph.
-    Object(Id),
+    Object(ObjectId),
     /// An object stream, by its place in [`Plan::containers`].
     Container(usize),
 }
@@ -330,7 +332,7 @@ pub struct Container {
     pub number: u32,
     /// Its members in the order they're packed, each with the number it's
     /// listed at.
-    pub members: Vec<(Id, u32)>,
+    pub members: Vec<(ObjectId, u32)>,
 }
 
 /// Why a graph can't be planned.
@@ -341,21 +343,21 @@ pub enum Error {
     #[error("no pages: a linearized file has a first page (ISO 32000-2, F.3.7)")]
     NoPages,
     /// A page given twice, which Annex F can't give two places.
-    #[error("page object {} {} is given twice", .0.0, .0.1)]
-    PageRepeated(Id),
+    #[error("page object {0} is given twice")]
+    PageRepeated(ObjectId),
     /// A page with no object.
-    #[error("page {} {} isn't among the objects", .0.0, .0.1)]
-    NoPage(Id),
+    #[error("page {0} isn't among the objects")]
+    NoPage(ObjectId),
     /// A catalog with no object.
-    #[error("the catalog, {} {}, isn't among the objects", .0.0, .0.1)]
-    NoCatalog(Id),
+    #[error("the catalog, {0}, isn't among the objects")]
+    NoCatalog(ObjectId),
     /// The catalog given as a page, which belongs in part 4 as a catalog and in
     /// a page's section as a page.
-    #[error("the catalog, {} {}, is given as a page", .0.0, .0.1)]
-    CatalogIsPage(Id),
+    #[error("the catalog, {0}, is given as a page")]
+    CatalogIsPage(ObjectId),
     /// An object given twice.
-    #[error("object {} {} is given twice", .0.0, .0.1)]
-    ObjectRepeated(Id),
+    #[error("object {0} is given twice")]
+    ObjectRepeated(ObjectId),
     /// [`Graph::first_page`] past the pages.
     #[error("the first page is page {index}, of {pages}")]
     FirstPagePast {
@@ -365,8 +367,8 @@ pub enum Error {
         pages: usize,
     },
     /// A packable object under [`Kind::Table`]: only a stream lists a member.
-    #[error("object {} {} may be packed, which cross-reference tables can't list", .0.0, .0.1)]
-    PackedTable(Id),
+    #[error("object {0} may be packed, which cross-reference tables can't list")]
+    PackedTable(ObjectId),
     /// More pages than [`Limits::pages`].
     #[error("{pages} pages, past the cap of {limit}")]
     TooManyPages {
@@ -404,7 +406,7 @@ pub enum Error {
 pub struct Plan {
     kind: Kind,
     /// Every object's id, sorted, with its number and use at the same place.
-    ids: Vec<Id>,
+    ids: Vec<ObjectId>,
     numbers: Vec<u32>,
     uses: Vec<Use>,
     writes: Vec<Write>,
@@ -444,15 +446,15 @@ impl Plan {
 
     /// The number and generation `id` is written at, or none for an id that
     /// names no object, a reference to which a writer writes as null.
-    pub fn number(&self, id: Id) -> Option<Id> {
+    pub fn number(&self, id: ObjectId) -> Option<ObjectId> {
         let at = self.ids.binary_search(&id).ok()?;
-        Some((self.numbers[at], 0))
+        Some(ObjectId::new(self.numbers[at], 0))
     }
 
     /// Which pages use `id`, or none for an id that names no object. The first
     /// page is always `Use::Page(0)`, then the others count from 1 in page
     /// order, so under another first page a page's `Use` isn't its place.
-    pub fn used(&self, id: Id) -> Option<Use> {
+    pub fn used(&self, id: ObjectId) -> Option<Use> {
         let at = self.ids.binary_search(&id).ok()?;
         Some(self.uses[at])
     }

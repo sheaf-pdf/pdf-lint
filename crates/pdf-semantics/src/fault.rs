@@ -74,7 +74,7 @@ pub enum Fault {
     /// A reference to an object the file lists but whose bytes aren't that
     /// object, or that doesn't lead to it: read as no object, as 7.3.10 has
     /// a reference to nothing, though the file meant one.
-    #[error("{} {} R doesn't read", .id.0, .id.1)]
+    #[error("{id} R doesn't read")]
     Damaged {
         /// The object.
         id: ObjectId,
@@ -97,7 +97,7 @@ pub enum Fault {
     /// A node, or an array of one, that the tree reaches by reference for
     /// a second time, by a loop or by two parents: each node has one place
     /// in a tree (7.9.6). It isn't read again, so nothing's lost.
-    #[error("the tree reaches {} {} R again", .id.0, .id.1)]
+    #[error("the tree reaches {id} R again")]
     TreeRepeated {
         /// The object it reaches again.
         id: ObjectId,
@@ -210,14 +210,14 @@ pub enum Fault {
     /// A page or a node that the tree lists again: there's one reference to
     /// each node (7.7.3.2). A page or a node listed again is walked again,
     /// numbering its pages again.
-    #[error("the page tree lists {} {} R again", .id.0, .id.1)]
+    #[error("the page tree lists {id} R again")]
     PageTreeRepeated {
         /// The object listed again.
         id: ObjectId,
     },
     /// A node listed inside itself, which by 7.7.3.2 can't be a tree. It isn't
     /// walked again, so a walk ends.
-    #[error("the page tree lists {} {} R inside itself", .id.0, .id.1)]
+    #[error("the page tree lists {id} R inside itself")]
     PageTreeCycle {
         /// The node.
         id: ObjectId,
@@ -273,21 +273,20 @@ pub enum Fault {
 /// or that it's written in place.
 fn parent_said(lister: &Option<ObjectId>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match lister {
-        Some((n, g)) => write!(f, "a /Parent isn't {n} {g} R, the node that lists it"),
+        Some(id) => write!(f, "a /Parent isn't {id} R, the node that lists it"),
         None => f.write_str("a /Parent isn't the node that lists it, which is written in place"),
     }
 }
 
 /// What [`Fault::Unchecked`] says: the object, and why it doesn't read.
 fn unchecked_said(id: &ObjectId, why: &Why, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let (n, g) = id;
     let what = match why {
         Why::Limit => "is past a cap it's read under",
         Why::Locked => "takes a password",
         Why::Source => "wasn't given by the source",
         _ => "doesn't read",
     };
-    write!(f, "{n} {g} R {what}, so what it holds isn't checked")
+    write!(f, "{id} R {what}, so what it holds isn't checked")
 }
 
 /// What [`Fault::PageTreeCount`] says: the count as written, where it's an

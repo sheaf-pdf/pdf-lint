@@ -186,7 +186,7 @@ mod tests {
             catalog.set("Extensions", extensions);
         }
         File {
-            objects: BTreeMap::from([((1, 0), catalog.into())]),
+            objects: BTreeMap::from([(ObjectId::new(1, 0), catalog.into())]),
             root: Object::reference(1),
             claims,
         }

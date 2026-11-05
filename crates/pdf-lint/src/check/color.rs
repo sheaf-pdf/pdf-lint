@@ -621,7 +621,7 @@ pub(super) mod tests {
             .map(|f| {
                 let at = f.at.map(|at| &file[at.start..at.end]).unwrap_or_default();
                 (
-                    f.object.map(|(n, _)| n),
+                    f.object.map(|id| id.number),
                     f.path.clone(),
                     format!("{}/{}", f.table, f.key),
                     f.value.clone(),
@@ -652,7 +652,7 @@ pub(super) mod tests {
             .filter(|f| f.rule != Rule::ColorSpace)
             .map(|f| {
                 (
-                    f.object.map(|(n, _)| n),
+                    f.object.map(|id| id.number),
                     format!("{}/{}", f.table, f.key),
                     f.rule,
                 )
@@ -1036,8 +1036,9 @@ pub(super) mod tests {
         ];
         for (i, (file, n)) in families.iter().enumerate() {
             let report = report(file, &ALL);
-            let named =
-                |f: &Finding| f.object == Some((*n, 0)) && f.rule == Rule::Value && f.key == "0";
+            let named = |f: &Finding| {
+                f.object == Some(ObjectId::new(*n, 0)) && f.rule == Rule::Value && f.key == "0"
+            };
             assert!(report.findings.iter().any(named), "family {i}: {report}");
             assert_eq!(found(file, &ALL), [], "family {i}: {report}");
         }
@@ -1136,8 +1137,9 @@ pub(super) mod tests {
         let lab = "<< /ColorSpace [/Lab << /WhitePoint [1 1 1] >>] /Components [/L /A /B] >>";
         for (file, n) in both(&process, lab).iter().zip([3, 13]) {
             let report = report(file, &ALL);
-            let named =
-                |f: &Finding| f.object == Some((n, 0)) && f.rule == Rule::Value && f.key == "0";
+            let named = |f: &Finding| {
+                f.object == Some(ObjectId::new(n, 0)) && f.rule == Rule::Value && f.key == "0"
+            };
             assert!(report.findings.iter().any(named), "{report}");
             assert_eq!(found(file, &ALL), [], "{report}");
         }
@@ -1226,7 +1228,9 @@ pub(super) mod tests {
             ];
             for (file, n) in files {
                 let report = report(&file, &ALL);
-                let inside = |f: &Finding| f.object == Some((n, 0)) && f.rule != Rule::ColorSpace;
+                let inside = |f: &Finding| {
+                    f.object == Some(ObjectId::new(n, 0)) && f.rule != Rule::ColorSpace
+                };
                 assert!(
                     report.findings.iter().any(inside),
                     "{key} {array}: {report}"
@@ -1375,7 +1379,7 @@ pub(super) mod tests {
                 "/x"
             )]
         );
-        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        let only = |n| Hold::Only([(ObjectId::new(n, 0), Made::Merged)].into());
         assert_eq!(unread_spaces(&report(&locked, &only(10))).len(), 1);
         assert_eq!(unread_spaces(&report(&locked, &only(3))), []);
 
@@ -1425,7 +1429,7 @@ pub(super) mod tests {
     /// where its page is.
     #[test]
     fn a_space_s_finding_is_held_where_its_object_is() {
-        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        let only = |n| Hold::Only([(ObjectId::new(n, 0), Made::Merged)].into());
         let own = spaces("/CS0 10 0 R", &[(10, "[/Indexed /DeviceRGB 1 <000000>]")]);
         let lookup = Fault::LookupLength;
         let short = told(10, "CS0", "IndexedColorSpace/3", lookup, "<000000>");

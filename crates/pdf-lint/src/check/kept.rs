@@ -165,24 +165,54 @@ mod tests {
     #[test]
     fn kept_is_each_kind_s_first_in_each_object_with_how_many() {
         let mut kept = Kept::default();
-        let first = Place::new(Some((3, 0)), Some(crate::object::Span::new(None, 5, 9)));
-        kept.fault(first, Fault::PageTreeRepeated { id: (5, 0) });
-        kept.fault(at(Some((3, 0))), Fault::TreeKeyOrder);
-        kept.fault(at(Some((3, 0))), Fault::PageTreeRepeated { id: (6, 0) });
-        kept.fault(at(Some((4, 0))), Fault::PageTreeRepeated { id: (5, 0) });
+        let first = Place::new(
+            Some(ObjectId::new(3, 0)),
+            Some(crate::object::Span::new(None, 5, 9)),
+        );
+        kept.fault(
+            first,
+            Fault::PageTreeRepeated {
+                id: ObjectId::new(5, 0),
+            },
+        );
+        kept.fault(at(Some(ObjectId::new(3, 0))), Fault::TreeKeyOrder);
+        kept.fault(
+            at(Some(ObjectId::new(3, 0))),
+            Fault::PageTreeRepeated {
+                id: ObjectId::new(6, 0),
+            },
+        );
+        kept.fault(
+            at(Some(ObjectId::new(4, 0))),
+            Fault::PageTreeRepeated {
+                id: ObjectId::new(5, 0),
+            },
+        );
         kept.fault(at(None), Fault::TreeKeyOrder);
         for _ in 0..1000 {
-            kept.fault(at(Some((3, 0))), Fault::TreeKeyOrder);
+            kept.fault(at(Some(ObjectId::new(3, 0))), Fault::TreeKeyOrder);
         }
         kept.fault(at(None), Fault::TreeKeyOrder);
         assert_eq!(
             kept.told(),
             [
-                (first.into(), Fault::PageTreeRepeated { id: (5, 0) }, 2),
-                (kept_at(Some((3, 0))), Fault::TreeKeyOrder, 1001),
                 (
-                    kept_at(Some((4, 0))),
-                    Fault::PageTreeRepeated { id: (5, 0) },
+                    first.into(),
+                    Fault::PageTreeRepeated {
+                        id: ObjectId::new(5, 0)
+                    },
+                    2
+                ),
+                (
+                    kept_at(Some(ObjectId::new(3, 0))),
+                    Fault::TreeKeyOrder,
+                    1001
+                ),
+                (
+                    kept_at(Some(ObjectId::new(4, 0))),
+                    Fault::PageTreeRepeated {
+                        id: ObjectId::new(5, 0)
+                    },
                     1
                 ),
                 (kept_at(None), Fault::TreeKeyOrder, 2),
@@ -194,12 +224,17 @@ mod tests {
         // as a walk reads a value twice, it's once; at other bytes, or at
         // none known, again.
         let mut kept = Kept::default();
-        let bytes = |start| Place::new(Some((2, 0)), Some(Span::new(None, start, start + 5)));
+        let bytes = |start| {
+            Place::new(
+                Some(ObjectId::new(2, 0)),
+                Some(Span::new(None, start, start + 5)),
+            )
+        };
         for start in [10, 10, 20, 10, 10] {
             kept.fault(bytes(start), Fault::PageTreeChain);
         }
-        kept.fault(at(Some((2, 0))), Fault::PageTreeChain);
-        kept.fault(at(Some((2, 0))), Fault::PageTreeChain);
+        kept.fault(at(Some(ObjectId::new(2, 0))), Fault::PageTreeChain);
+        kept.fault(at(Some(ObjectId::new(2, 0))), Fault::PageTreeChain);
         assert_eq!(kept.told(), [(bytes(10).into(), Fault::PageTreeChain, 5)]);
     }
 
@@ -211,22 +246,22 @@ mod tests {
     #[test]
     fn kept_each_counts_a_kind_told_again_at_the_same_bytes() {
         let bytes = |start| Where {
-            object: Some((2, 0)),
+            object: Some(ObjectId::new(2, 0)),
             at: Some(Span::new(None, start, start + 5)),
         };
         let mut kept = Kept::default();
         for start in [10, 10, 20, 10] {
             kept.keep_each(bytes(start), Fault::PageTreeChain);
         }
-        kept.keep_each(kept_at(Some((2, 0))), Fault::PageTreeChain);
-        kept.keep_each(kept_at(Some((3, 0))), Fault::PageTreeChain);
-        kept.keep_each(kept_at(Some((2, 0))), Fault::TreeKeyOrder);
+        kept.keep_each(kept_at(Some(ObjectId::new(2, 0))), Fault::PageTreeChain);
+        kept.keep_each(kept_at(Some(ObjectId::new(3, 0))), Fault::PageTreeChain);
+        kept.keep_each(kept_at(Some(ObjectId::new(2, 0))), Fault::TreeKeyOrder);
         assert_eq!(
             kept.told(),
             [
                 (bytes(10), Fault::PageTreeChain, 5),
-                (kept_at(Some((3, 0))), Fault::PageTreeChain, 1),
-                (kept_at(Some((2, 0))), Fault::TreeKeyOrder, 1),
+                (kept_at(Some(ObjectId::new(3, 0))), Fault::PageTreeChain, 1),
+                (kept_at(Some(ObjectId::new(2, 0))), Fault::TreeKeyOrder, 1),
             ]
         );
     }
@@ -237,16 +272,16 @@ mod tests {
     /// none, `a` in object 4, and `b` in no object.
     fn kept_of<F: Copy>(a: F, b: F, tell: fn(&mut Kept<F>, Where, F)) -> Vec<(Where, F, usize)> {
         let bytes = |start| Where {
-            object: Some((3, 0)),
+            object: Some(ObjectId::new(3, 0)),
             at: Some(Span::new(None, start, start + 5)),
         };
         let mut kept = Kept::default();
         tell(&mut kept, bytes(10), a);
-        tell(&mut kept, kept_at(Some((3, 0))), b);
+        tell(&mut kept, kept_at(Some(ObjectId::new(3, 0))), b);
         tell(&mut kept, bytes(10), a);
         tell(&mut kept, bytes(20), a);
-        tell(&mut kept, kept_at(Some((3, 0))), a);
-        tell(&mut kept, kept_at(Some((4, 0))), a);
+        tell(&mut kept, kept_at(Some(ObjectId::new(3, 0))), a);
+        tell(&mut kept, kept_at(Some(ObjectId::new(4, 0))), a);
         tell(&mut kept, kept_at(None), b);
         kept.told().to_vec()
     }
@@ -259,13 +294,13 @@ mod tests {
     fn each_crate_s_faults_are_kept_alike() {
         fn alike<F: Copy + PartialEq + Debug>(a: F, b: F, tell: fn(&mut Kept<F>, Where, F)) {
             let first = Where {
-                object: Some((3, 0)),
+                object: Some(ObjectId::new(3, 0)),
                 at: Some(Span::new(None, 10, 15)),
             };
             let expected = [
                 (first, a, 3),
-                (kept_at(Some((3, 0))), b, 1),
-                (kept_at(Some((4, 0))), a, 1),
+                (kept_at(Some(ObjectId::new(3, 0))), b, 1),
+                (kept_at(Some(ObjectId::new(4, 0))), a, 1),
                 (kept_at(None), b, 1),
             ];
             assert_eq!(kept_of(a, b, tell), expected);

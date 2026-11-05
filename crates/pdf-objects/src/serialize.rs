@@ -151,8 +151,7 @@ impl Error {
 
 /// " in object n g", when `id` is known, for an error's text.
 fn in_object(id: &Option<ObjectId>) -> String {
-    id.map(|(n, g)| format!(" in object {n} {g}"))
-        .unwrap_or_default()
+    id.map(|id| format!(" in object {id}")).unwrap_or_default()
 }
 
 /// What encrypts an encrypted file's strings and streams' data as the
@@ -253,7 +252,7 @@ pub enum Refused<E> {
     Write(Error),
     /// A string or a stream's data of object `id` the encryptor doesn't
     /// encrypt, and why.
-    #[error("object {} {} can't be encrypted: {why}", id.0, id.1)]
+    #[error("object {id} can't be encrypted: {why}")]
     Encrypt {
         /// The object.
         id: ObjectId,
@@ -304,14 +303,14 @@ impl<E> Refused<E> {
 /// ```
 /// use std::collections::BTreeMap;
 ///
-/// use pdf_objects::{Object, dict, serialize};
+/// use pdf_objects::{Object, ObjectId, dict, serialize};
 ///
-/// let page = Object::from(dict! { "Parent" => (2, 0), "Annots" => (9, 0) });
+/// let page = Object::from(dict! { "Parent" => ObjectId::new(2, 0), "Annots" => ObjectId::new(9, 0) });
 /// // Object 2 is written as object 1, and object 9 not at all.
-/// let to = BTreeMap::from([((2, 0), (1, 0))]);
+/// let to = BTreeMap::from([(ObjectId::new(2, 0), ObjectId::new(1, 0))]);
 /// let renumber = |id| to.get(&id).copied();
 /// let mut out = Vec::new();
-/// serialize::indirect_renumbered(&mut out, (3, 0), &page, &(), &renumber).unwrap();
+/// serialize::indirect_renumbered(&mut out, ObjectId::new(3, 0), &page, &(), &renumber).unwrap();
 /// assert_eq!(out, b"3 0 obj\n<</Parent 1 0 R/Annots null>>\nendobj\n");
 /// ```
 pub trait Renumber {
@@ -642,10 +641,10 @@ fn integer(out: &mut Vec<u8>, n: i64) {
 }
 
 /// `id`'s number and generation, as `n g`.
-fn reference(out: &mut Vec<u8>, (n, g): ObjectId) {
-    decimal(out, n.into());
+fn reference(out: &mut Vec<u8>, id: ObjectId) {
+    decimal(out, id.number.into());
     out.push(b' ');
-    decimal(out, g.into());
+    decimal(out, id.generation.into());
 }
 
 /// `b` as two uppercase hex digits, as `{b:02X}` formats it.
@@ -893,7 +892,7 @@ mod tests {
     fn file(objects: &[(u32, Object)]) -> Vec<u8> {
         let mut out = Vec::new();
         for (num, obj) in objects {
-            indirect(&mut out, (*num, 0), obj).unwrap();
+            indirect(&mut out, ObjectId::new(*num, 0), obj).unwrap();
         }
         out
     }
@@ -901,7 +900,7 @@ mod tests {
     /// `obj` written as object 2 of a file, and read back.
     fn round_trip(obj: &Object) -> Object {
         open(&file(&[(2, obj.clone())]))
-            .get((2, 0))
+            .get(ObjectId::new(2, 0))
             .unwrap()
             .clone()
     }
@@ -981,16 +980,20 @@ mod tests {
                 Object::from(dict! { "Rect" => vec![Object::from(x)] }),
             ]);
             assert_eq!(
-                indirect(&mut out, (7, 0), &deep),
-                Err(Error::NonFinite { id: Some((7, 0)) })
+                indirect(&mut out, ObjectId::new(7, 0), &deep),
+                Err(Error::NonFinite {
+                    id: Some(ObjectId::new(7, 0))
+                })
             );
             let stream = Stream::new(
                 dict! { "Decode" => vec![Object::from(x)] },
                 b"data".to_vec(),
             );
             assert_eq!(
-                indirect(&mut out, (8, 1), &Object::from(stream)),
-                Err(Error::NonFinite { id: Some((8, 1)) })
+                indirect(&mut out, ObjectId::new(8, 1), &Object::from(stream)),
+                Err(Error::NonFinite {
+                    id: Some(ObjectId::new(8, 1))
+                })
             );
             assert_eq!(out, b"%PDF-1.7\n", "nothing written");
         }
@@ -999,7 +1002,10 @@ mod tests {
             "a real that isn't a finite number"
         );
         assert_eq!(
-            Error::NonFinite { id: Some((7, 0)) }.to_string(),
+            Error::NonFinite {
+                id: Some(ObjectId::new(7, 0))
+            }
+            .to_string(),
             "a real that isn't a finite number in object 7 0"
         );
     }
@@ -1029,7 +1035,7 @@ mod tests {
             Object::from(dict! {
                 "True" => true,
                 "Null" => Object::null(),
-                "Ref" => (3, 0),
+                "Ref" => ObjectId::new(3, 0),
                 "Neg" => -1,
                 "Mixed" => vec![
                     name(b"A"),
@@ -1038,7 +1044,7 @@ mod tests {
                     Object::from(2.5),
                     Object::from(false),
                     Object::null(),
-                    Object::from((3, 0)),
+                    Object::from(ObjectId::new(3, 0)),
                     literal(b"s"),
                 ],
             }),
@@ -1049,22 +1055,28 @@ mod tests {
         let mut unsaid = Stream::new(dict! {}, content.clone());
         unsaid.dict.remove(b"Length");
         let mut indirect = Stream::new(dict! {}, content.clone());
-        indirect.dict.set("Length", Object::from((9, 0)));
+        indirect
+            .dict
+            .set("Length", Object::from(ObjectId::new(9, 0)));
         let pdf = open(&file(&[
             (2, values.clone()),
             (3, Object::from(long)),
             (4, Object::from(unsaid)),
             (5, Object::from(indirect)),
         ]));
-        assert_eq!(pdf.get((2, 0)).unwrap(), &values);
-        for id in [(3, 0), (4, 0), (5, 0)] {
+        assert_eq!(pdf.get(ObjectId::new(2, 0)).unwrap(), &values);
+        for id in [
+            ObjectId::new(3, 0),
+            ObjectId::new(4, 0),
+            ObjectId::new(5, 0),
+        ] {
             let s = pdf.get(id).unwrap().as_stream().unwrap();
             assert_eq!(s.data.bytes(), Some(content.as_slice()), "{id:?}");
             let length = s.dict.get(b"Length").unwrap();
             assert_eq!(length, &Object::from(content.len() as i64), "{id:?}");
         }
         assert_eq!(
-            pdf.get((3, 0))
+            pdf.get(ObjectId::new(3, 0))
                 .unwrap()
                 .as_stream()
                 .unwrap()
@@ -1092,8 +1104,13 @@ mod tests {
         for i in integers {
             assert_eq!(written(&Object::from(i)), format!("{i}"));
         }
-        for id in [(0, 0), (7, 0), (10, 1), (u32::MAX, u16::MAX)] {
-            let (n, g) = id;
+        for id in [
+            ObjectId::new(0, 0),
+            ObjectId::new(7, 0),
+            ObjectId::new(10, 1),
+            ObjectId::new(u32::MAX, u16::MAX),
+        ] {
+            let (n, g) = (id.number, id.generation);
             assert_eq!(written(&Object::from(id)), format!("{n} {g} R"));
             let mut out = Vec::new();
             indirect(&mut out, id, &Object::null()).unwrap();
@@ -1192,7 +1209,7 @@ mod tests {
             ),
         ];
         for (refused, error, said) in cases {
-            let within = error.within((7, 2));
+            let within = error.within(ObjectId::new(7, 2));
             assert_eq!(error.to_string(), said);
             assert_eq!(within.to_string(), format!("{said} in object 7 2"));
             // Alone, and after what the writer would write.
@@ -1203,10 +1220,17 @@ mod tests {
             let mut out = b"%PDF-1.7\n".to_vec();
             for obj in [&refused, &after] {
                 assert_eq!(write(&mut out, obj), Err(error), "{said}");
-                assert_eq!(indirect(&mut out, (7, 2), obj), Err(within), "{said}");
+                assert_eq!(
+                    indirect(&mut out, ObjectId::new(7, 2), obj),
+                    Err(within),
+                    "{said}"
+                );
             }
             let dict = dict! { "B" => refused };
-            assert_eq!(indirect_stream(&mut out, (7, 2), &dict, b""), Err(within));
+            assert_eq!(
+                indirect_stream(&mut out, ObjectId::new(7, 2), &dict, b""),
+                Err(within)
+            );
             assert_eq!(out, b"%PDF-1.7\n", "nothing written: {said}");
         }
     }
@@ -1216,15 +1240,18 @@ mod tests {
     #[test]
     fn a_streams_data_given_apart_is_written_as_it_would_be_held() {
         let data = b"\x00binary\nendstream\n".to_vec();
-        let dict = dict! { "Kind" => "Test", "Length" => Object::from((9, 0)) };
+        let dict = dict! { "Kind" => "Test", "Length" => Object::from(ObjectId::new(9, 0)) };
         let held = Object::from(Stream {
             dict: dict.clone(),
             data: Data::Bytes(data.clone()),
         });
         let mut written = b"%PDF-1.7\n".to_vec();
-        assert_eq!(indirect(&mut written, (4, 1), &held), Ok(9));
+        assert_eq!(indirect(&mut written, ObjectId::new(4, 1), &held), Ok(9));
         let mut apart = b"%PDF-1.7\n".to_vec();
-        assert_eq!(indirect_stream(&mut apart, (4, 1), &dict, &data), Ok(9));
+        assert_eq!(
+            indirect_stream(&mut apart, ObjectId::new(4, 1), &dict, &data),
+            Ok(9)
+        );
         assert_eq!(apart, written);
         assert!(
             apart.ends_with(b"/Length 18>>\nstream\n\x00binary\nendstream\n\nendstream\nendobj\n")
@@ -1353,7 +1380,7 @@ mod tests {
                 5 => {
                     let n = [0, 1, u32::MAX, self.next() as u32][self.below(4)];
                     let g = [0, 1, u16::MAX, self.next() as u16][self.below(4)];
-                    Object::from((n, g))
+                    Object::from(ObjectId::new(n, g))
                 }
                 6 => Object::from(Vec::new()),
                 7 => Object::from(self.array(budget, depth - 1)),
@@ -1437,7 +1464,7 @@ mod tests {
         }
 
         fn id(&mut self) -> ObjectId {
-            (self.next() as u32, self.next() as u16)
+            ObjectId::new(self.next() as u32, self.next() as u16)
         }
     }
 
@@ -1594,7 +1621,7 @@ mod tests {
     #[test]
     fn what_an_encryptor_gives_is_written_and_a_streams_length_is_its() {
         let toy = fuzz::Toy::default();
-        let id = (7, 1);
+        let id = ObjectId::new(7, 1);
         let hex = Object::hex(b"ab");
         let dict = dict! { "Length" => 1, "S" => Object::string("x(y"), "H" => hex, "Length" => 2 };
         let mut out = Vec::new();
@@ -1636,8 +1663,8 @@ mod tests {
         let xref = dict! { "Type" => "XRef", "ID" => vec![Object::string("an /ID")] };
         let xref_stream = Object::from(Stream::new(xref.clone(), vec![1, 0, 0]));
         for (id, obj) in [
-            ((10, 0), Object::from(signature.clone())),
-            ((3, 0), xref_stream),
+            (ObjectId::new(10, 0), Object::from(signature.clone())),
+            (ObjectId::new(3, 0), xref_stream),
         ] {
             let toy = fuzz::Toy::default();
             let mut out = Vec::new();
@@ -1647,7 +1674,7 @@ mod tests {
         }
         // A signature's /Contents, both, as written; its /M encrypted.
         let toy = fuzz::Toy::default();
-        let id = (3, 0);
+        let id = ObjectId::new(3, 0);
         let mut out = Vec::new();
         indirect_with(&mut out, id, &Object::from(signature), &toy).unwrap();
         let text = String::from_utf8_lossy(&out);
@@ -1671,7 +1698,7 @@ mod tests {
             refuse: Some(b"secret".to_vec()),
             ..fuzz::Toy::default()
         };
-        let id = (7, 2);
+        let id = ObjectId::new(7, 2);
         let deep = Object::from(vec![
             Object::from(1),
             Object::from(dict! { "A" => Object::string("secret") }),
@@ -1731,15 +1758,15 @@ mod tests {
                 let mut read = Parser::at(&out, 0).value(&mut ()).unwrap();
                 fuzz::unplace(&mut read, &out);
                 assert_eq!(read, deepest);
-                assert!(indirect(&mut Vec::new(), (1, 0), &deepest).is_ok());
+                assert!(indirect(&mut Vec::new(), ObjectId::new(1, 0), &deepest).is_ok());
                 // One deeper: the writer refuses it, and the parser refuses
                 // it written by hand, staying where it was.
                 let past = wrap(deepest);
                 let nested = Error::Nested { id: None, limit };
                 assert_eq!(write(&mut Vec::new(), &past), Err(nested));
                 assert_eq!(
-                    indirect(&mut Vec::new(), (1, 0), &past),
-                    Err(nested.within((1, 0)))
+                    indirect(&mut Vec::new(), ObjectId::new(1, 0), &past),
+                    Err(nested.within(ObjectId::new(1, 0)))
                 );
                 let text = [open, &out, close].concat();
                 let mut parser = Parser::at(&text, 0);
@@ -1760,13 +1787,19 @@ mod tests {
     /// isn't asked. Through `()`, as the writers without one write.
     #[test]
     fn each_reference_is_written_as_the_renumbering_names_it() {
-        let to = |(n, g): ObjectId| match n {
-            1 => Some((5, 2)),
+        let to = |id: ObjectId| match id.number {
+            1 => Some(ObjectId::new(5, 2)),
             2 => None,
-            _ => Some((n, g)),
+            _ => Some(id),
         };
-        let refs = vec![Object::from((1, 0)), Object::from((2, 0)), Object::from(7)];
-        let obj = Object::from(dict! { "A" => (1, 0), "B" => (2, 0), "C" => (3, 0), "K" => refs });
+        let refs = vec![
+            Object::from(ObjectId::new(1, 0)),
+            Object::from(ObjectId::new(2, 0)),
+            Object::from(7),
+        ];
+        let obj = Object::from(
+            dict! { "A" => ObjectId::new(1, 0), "B" => ObjectId::new(2, 0), "C" => ObjectId::new(3, 0), "K" => refs },
+        );
         let renumbered = |obj: &Object| {
             let mut out = Vec::new();
             write_renumbered(&mut out, obj, &to).unwrap();
@@ -1776,8 +1809,8 @@ mod tests {
             renumbered(&obj),
             "<</A 5 2 R/B null/C 3 0 R/K[5 2 R null 7]>>"
         );
-        assert_eq!(renumbered(&Object::from((2, 0))), "null");
-        assert_eq!(renumbered(&Object::from((1, 0))), "5 2 R");
+        assert_eq!(renumbered(&Object::from(ObjectId::new(2, 0))), "null");
+        assert_eq!(renumbered(&Object::from(ObjectId::new(1, 0))), "5 2 R");
         // A `dyn Fn`, and `()`, which is the writer without one.
         let dynamic: &dyn Fn(ObjectId) -> Option<ObjectId> = &to;
         let mut out = Vec::new();
@@ -1789,24 +1822,30 @@ mod tests {
 
         // As an indirect object, at the number given.
         let mut out = Vec::new();
-        assert_eq!(indirect_renumbered(&mut out, (1, 0), &obj, &(), &to), Ok(0));
+        assert_eq!(
+            indirect_renumbered(&mut out, ObjectId::new(1, 0), &obj, &(), &to),
+            Ok(0)
+        );
         let want = format!("1 0 obj\n{}\nendobj\n", renumbered(&obj));
         assert_eq!(String::from_utf8(out).unwrap(), want);
-        let dict = dict! { "Length" => (1, 0), "F" => (1, 0), "G" => vec![Object::from((2, 0))] };
+        let dict = dict! { "Length" => ObjectId::new(1, 0), "F" => ObjectId::new(1, 0), "G" => vec![Object::from(ObjectId::new(2, 0))] };
         let mut out = Vec::new();
-        indirect_stream_renumbered(&mut out, (2, 0), &dict, b"1 0 R", &(), &to).unwrap();
+        indirect_stream_renumbered(&mut out, ObjectId::new(2, 0), &dict, b"1 0 R", &(), &to)
+            .unwrap();
         let want = "2 0 obj\n<</Length 5/F 5 2 R/G[null]>>\nstream\n1 0 R\nendstream\nendobj\n";
         assert_eq!(String::from_utf8(out).unwrap(), want);
 
         // Refused as the writer refuses, the error naming the number
         // written, nothing written.
-        let nan = Object::from(dict! { "A" => (1, 0), "N" => f64::NAN });
+        let nan = Object::from(dict! { "A" => ObjectId::new(1, 0), "N" => f64::NAN });
         let mut out = b"%PDF-1.7\n".to_vec();
         let refused = Error::NonFinite { id: None };
         assert_eq!(write_renumbered(&mut out, &nan, &to), Err(refused));
-        let refused = Refused::Write(Error::NonFinite { id: Some((9, 0)) });
+        let refused = Refused::Write(Error::NonFinite {
+            id: Some(ObjectId::new(9, 0)),
+        });
         assert_eq!(
-            indirect_renumbered(&mut out, (9, 0), &nan, &(), &to),
+            indirect_renumbered(&mut out, ObjectId::new(9, 0), &nan, &(), &to),
             Err(refused)
         );
         assert_eq!(out, b"%PDF-1.7\n", "nothing written");
@@ -1904,25 +1943,38 @@ mod tests {
     #[test]
     fn an_encryptor_is_given_the_number_an_object_is_written_at() {
         // Held at 3, written at 8, a reference to itself among it.
-        let to = |(n, g): ObjectId| Some(if n == 3 { (8, 0) } else { (n, g) });
-        let page = Object::from(dict! { "Self" => (3, 0), "S" => Object::string("ab") });
+        let to = |id: ObjectId| {
+            Some(if id.number == 3 {
+                ObjectId::new(8, 0)
+            } else {
+                id
+            })
+        };
+        let page =
+            Object::from(dict! { "Self" => ObjectId::new(3, 0), "S" => Object::string("ab") });
         let toy = fuzz::Toy::default();
         let mut out = Vec::new();
-        indirect_renumbered(&mut out, (8, 0), &page, &toy, &to).unwrap();
+        indirect_renumbered(&mut out, ObjectId::new(8, 0), &page, &toy, &to).unwrap();
         let tag = "\0\0\0\x08\0\0";
         let want = format!("8 0 obj\n<</Self 8 0 R/S({tag}ba)>>\nendobj\n");
         assert_eq!(String::from_utf8_lossy(&out), want);
-        assert_eq!(*toy.seen.borrow(), [((8, 0), b"ab".to_vec(), false)]);
+        assert_eq!(
+            *toy.seen.borrow(),
+            [(ObjectId::new(8, 0), b"ab".to_vec(), false)]
+        );
         let toy = fuzz::Toy::default();
         let mut out = Vec::new();
-        let dict = dict! { "Self" => (3, 0) };
-        indirect_stream_renumbered(&mut out, (8, 0), &dict, b"cd", &toy, &to).unwrap();
-        assert_eq!(*toy.seen.borrow(), [((8, 0), b"cd".to_vec(), true)]);
+        let dict = dict! { "Self" => ObjectId::new(3, 0) };
+        indirect_stream_renumbered(&mut out, ObjectId::new(8, 0), &dict, b"cd", &toy, &to).unwrap();
+        assert_eq!(
+            *toy.seen.borrow(),
+            [(ObjectId::new(8, 0), b"cd".to_vec(), true)]
+        );
         // The toy leaves an object written at a multiple of 5 as it is,
         // whatever it was held at.
         let toy = fuzz::Toy::default();
         let mut out = Vec::new();
-        indirect_renumbered(&mut out, (10, 0), &page, &toy, &to).unwrap();
+        indirect_renumbered(&mut out, ObjectId::new(10, 0), &page, &toy, &to).unwrap();
         let want = "10 0 obj\n<</Self 8 0 R/S(ab)>>\nendobj\n";
         assert_eq!(String::from_utf8_lossy(&out), want);
         assert!(toy.seen.borrow().is_empty());

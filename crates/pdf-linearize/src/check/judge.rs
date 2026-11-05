@@ -6,6 +6,8 @@ use super::{
     Attribute, DictKey, Facts, Finding, FirstObject, HintData, HintFacts, Raw, RowEntry, RowFacts,
     SectionFacts, Sink, Verdict,
 };
+use pdf_objects::ObjectId;
+
 use crate::Limits;
 use crate::check::{Grade, KeyName};
 use crate::hint::{self, HintKeys, Tables, position};
@@ -518,7 +520,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
                 self.say(Finding::HintNotLast { hint, last })?;
             }
         }
-        if let Raw::Reference((number, _)) = first.root {
+        if let Raw::Reference(ObjectId { number, .. }) = first.root {
             if matches!(self.index.row(number), Some(RowEntry::Compressed { .. })) {
                 self.say(Finding::CatalogCompressed { number })?;
             }
@@ -635,21 +637,21 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             .ok()
             .and_then(|at| facts.pages.get(at));
         if let (Raw::Integer(o), Some(id)) = (first.o, first_page.and_then(|page| page.id)) {
-            if u32::try_from(o) != Ok(id.0) {
+            if u32::try_from(o) != Ok(id.number) {
                 self.say(Finding::FirstPageObject {
                     o,
                     page,
-                    computed: id.0,
+                    computed: id.number,
                 })?;
             }
             if let Some(section) = &facts.first {
-                if !section.rows.iter().any(|row| row.number == id.0) {
-                    self.say(Finding::FirstPageNotFirst { number: id.0 })?;
+                if !section.rows.iter().any(|row| row.number == id.number) {
+                    self.say(Finding::FirstPageNotFirst { number: id.number })?;
                 }
             }
         }
         for (at, page) in (0u64..).zip(&facts.pages) {
-            if let Some((number, _)) = page.id {
+            if let Some(ObjectId { number, .. }) = page.id {
                 if matches!(self.index.row(number), Some(RowEntry::Compressed { .. })) {
                     self.say(Finding::PageCompressed { page: at, number })?;
                 }
@@ -679,7 +681,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         let first_page_at = u64::from(table.header.first_page_at);
         let number_of = |page: u64| {
             let page = usize::try_from(page).ok()?;
-            facts.pages.get(page)?.id.map(|id| id.0)
+            facts.pages.get(page)?.id.map(|id| id.number)
         };
         let first_number = (number(self.first_object.o))
             .and_then(|o| u32::try_from(o).ok())
@@ -973,7 +975,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         };
         let writes = plan.writes();
         let number_of = |write: usize| match writes[write].what {
-            What::Object(id) => Some(id.0),
+            What::Object(id) => Some(id.number),
             What::Container(_) => None,
         };
         if let Some(first) = &self.facts.first {
@@ -1046,7 +1048,7 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             let page = page as usize;
             let own = (self.facts.pages.get(page))
                 .and_then(|page| page.id)
-                .and_then(|id| self.index.placed_at(id.0));
+                .and_then(|id| self.index.placed_at(id.number));
             at = own.unwrap_or(at);
             starts[page] = at;
             at = at.saturating_add(table.pages[page].length);

@@ -27,7 +27,7 @@ It's made for a reader that checks files as much as for one that shows them. Whe
 ## An example
 
 ```rust
-use pdf_structure::pdf_objects::Object;
+use pdf_structure::pdf_objects::{Object, ObjectId};
 use pdf_structure::{Source, bytes};
 
 // Two objects, then a cross-reference table saying where each starts.
@@ -47,7 +47,7 @@ let doc = bytes::read(&file);
 assert_eq!(doc.trailer.unwritten, None, "read by its table");
 
 // An object by its number, and where it was written.
-let pages = doc.get((2, 0)).unwrap();
+let pages = doc.get(ObjectId::new(2, 0)).unwrap();
 let count = pages.as_dict().unwrap().get(b"Count").and_then(Object::as_integer);
 assert_eq!(count, Some(0));
 let at = pages.at.unwrap();
@@ -65,19 +65,20 @@ The same file read on demand, from bytes shared across threads, an object read w
 use std::sync::Arc;
 
 use pdf_structure::{Options, Origin, Reading};
+use pdf_structure::pdf_objects::ObjectId;
 
 let file = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
     xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
     trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n45\n%%EOF\n";
 let bytes: Arc<[u8]> = Arc::from(&file[..]);
 let reading = Reading::open(bytes, &Options::DEFAULT).unwrap();
-assert_eq!(reading.ids().collect::<Vec<_>>(), [(1, 0)]);
+assert_eq!(reading.ids().collect::<Vec<_>>(), [ObjectId::new(1, 0)]);
 
 // Read on another thread, and kept.
 std::thread::scope(|scope| {
-    scope.spawn(|| assert!(reading.get((1, 0)).is_ok()));
+    scope.spawn(|| assert!(reading.get(ObjectId::new(1, 0)).is_ok()));
 });
-let record = reading.record((1, 0)).unwrap();
+let record = reading.record(ObjectId::new(1, 0)).unwrap();
 assert_eq!(record.origin, Origin::File);
 assert_eq!(&file[record.at.start..record.at.end], b"1 0 obj\n<< /Type /Catalog >>\nendobj");
 
@@ -113,7 +114,7 @@ println!("the same file: {same}");
 A document built in memory, followed from its catalog, and pruned of what its trailer doesn't reach:
 
 ```rust
-use pdf_structure::pdf_objects::{Object, dict, version::Version};
+use pdf_structure::pdf_objects::{Object, ObjectId, dict, version::Version};
 use pdf_structure::{Document, Source};
 
 let mut doc = Document::new(Version::new(1, 7), dict! { "Size" => 1 });
@@ -121,7 +122,7 @@ let kids: Vec<Object> = Vec::new();
 let pages = doc.add(dict! { "Type" => "Pages", "Kids" => kids, "Count" => 0 });
 let catalog = doc.add(dict! { "Type" => "Catalog", "Pages" => pages });
 let font = doc.add(dict! { "Type" => "Font", "Subtype" => "Type1" });
-assert_eq!((pages, catalog, font), ((1, 0), (2, 0), (3, 0)));
+assert_eq!((pages, catalog, font), (ObjectId::new(1, 0), ObjectId::new(2, 0), ObjectId::new(3, 0)));
 doc.trailer.dict_mut().set("Root", catalog);
 
 // The catalog, and the pages its /Pages refers to.
@@ -134,18 +135,19 @@ assert_eq!(tree.as_dict().and_then(|d| d.type_name()), Some(&b"Pages"[..]));
 assert_eq!(doc.reachable(), [catalog, pages]);
 assert_eq!(doc.prune(), [font]);
 assert_eq!(doc.ids(), [pages, catalog]);
-assert_eq!(doc.new_id(), (4, 0));
+assert_eq!(doc.new_id(), ObjectId::new(4, 0));
 ```
 
 A file without `startxref` is scanned for its objects, and the trailer says so:
 
 ```rust
 use pdf_structure::{Source, bytes};
+use pdf_structure::pdf_objects::ObjectId;
 
 let file = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
 let doc = bytes::read(file);
-assert!(doc.contains((1, 0)));
-assert!(doc.get((1, 0)).is_ok());
+assert!(doc.contains(ObjectId::new(1, 0)));
+assert!(doc.get(ObjectId::new(1, 0)).is_ok());
 assert_eq!(doc.trailer.unwritten.as_deref(), Some("no startxref"));
 ```
 
@@ -160,7 +162,7 @@ A whole file is written renumbered where it's given a renumbering (`Options::ren
 An update is written renumbered too: what it's given, and the trailer it carries, is in the numbers of the file it goes after, and each object is written at the number the renumbering gives it, each reference, `/Root` and `/Info` among them, named as it names it. An object as read is passed over only where the renumbering leaves its number and every reference in it where they are; one that moves, or names one that does, is written, copied where the rules for a copy hold, and nothing else is written where one passed over is (`write::Error::WrittenTwice`). The update doesn't write the encryption dictionary again, so it encrypts by the list of what's left in the clear in its file's numbers, as its encryptor has it, the document's metadata stream at the number it's written at, and a renumbering that moves the dictionary or what it refers to, or writes another object at one's number, which the file's reader reads in the clear, is refused (`write::Error::Moved`). An update frees nothing: an object it moves stays at its old number too, and what it doesn't write still names it there, so a caller gives every object a reference in which moves.
 
 ```rust
-use pdf_structure::pdf_objects::{Object, dict};
+use pdf_structure::pdf_objects::{Object, ObjectId, dict};
 use pdf_structure::write::{self, Base, Body, Pack, ReadFrom};
 use pdf_structure::{Options, Reading, Source, XrefKind};
 
@@ -172,7 +174,7 @@ let from: &dyn ReadFrom = &reading;
 let mut doc = reading.to_document().unwrap();
 doc.catalog_mut().unwrap().set("Lang", Object::string("en"));
 let lang = |reading: &Reading<&[u8]>| {
-    let catalog = reading.get((1, 0)).unwrap().as_dict().unwrap();
+    let catalog = reading.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
     catalog.get(b"Lang").and_then(Object::as_bytes).map(<[u8]>::to_vec)
 };
 
@@ -208,7 +210,7 @@ let (len, size) = (updated.len(), written.size);
 let mut read = Base::new(len, written.start, size, XrefKind::Table, trailer);
 read.ends_line = true;
 let again = Object::from(dict! { "Type" => "Catalog", "Lang" => Object::string("fr") });
-let catalog = [((1, 0), Body::from(&again))];
+let catalog = [(ObjectId::new(1, 0), Body::from(&again))];
 write::update(&mut updated, &read, catalog, None, None, &defaults).unwrap();
 let back = Reading::open(&updated[..], &Options::DEFAULT).unwrap();
 assert_eq!(back.facts().sections, 3);
@@ -220,7 +222,7 @@ For a caller that lays the file out itself, `write` writes what a file's structu
 `packable` says whether an object may go in an object stream (§7.5.7): not a stream, an object whose generation isn't 0, a dictionary shaped as the standard security handler's encryption dictionary (a `/Filter` name, `/O` and `/U`), the linearization dictionary, or a signature dictionary, so that a signing tool finds it where it looks. The clause's list is `KeptOut`, which a reader checks what it reads by too, each with how either side tells it; `kept_out` says what of it the object alone tells, and `packable` is said through it. `container` makes an object stream of objects written direct, a header saying where each starts, deflated, refusing a member numbered 0 or past `NUMBERS` and a number given twice; none where it would have more than 65,536 members, or its data would be past what the reader decodes a stream to (`MAX_DATA`, 256 MiB, `Limits::stream`'s default). A section lists each object in it as `Entry::Compressed`, which only a stream can. Both deflate through pdf-filters, by the backend and at the level a `Deflate` says: by default (`Deflate::DEFAULT`) miniz_oxide at 6, which every build has; zlib-rs with the `zlib-rs` feature. A written file's objects are numbered below `NUMBERS`, 8,388,607, the most a file may hold (ISO 32000-1, Annex C): a section listing a number past it, or a whole file's `/Size` past it, is refused as it's written, before a row is made. What can't be written is refused, and nothing is written (`write::Error`): a value pdf-objects' writer refuses among it.
 
 ```rust
-use pdf_structure::pdf_objects::{Object, dict, serialize};
+use pdf_structure::pdf_objects::{Object, ObjectId, dict, serialize};
 use pdf_structure::write::{self, Deflate, Entry, Section};
 use pdf_structure::{Source, bytes};
 
@@ -229,29 +231,29 @@ let mut file = b"%PDF-1.7\n".to_vec();
 let mut section = Section::full(0);
 let kids: Vec<Object> = Vec::new();
 let objects = [
-    (1, Object::from(dict! { "Type" => "Catalog", "Pages" => (2, 0) })),
+    (1, Object::from(dict! { "Type" => "Catalog", "Pages" => ObjectId::new(2, 0) })),
     (2, Object::from(dict! { "Type" => "Pages", "Kids" => kids, "Count" => 0 })),
 ];
 for (num, obj) in &objects {
-    let offset = serialize::indirect(&mut file, (*num, 0), obj).unwrap();
+    let offset = serialize::indirect(&mut file, ObjectId::new(*num, 0), obj).unwrap();
     section.insert(*num, Entry::InUse { offset, generation: 0 });
 }
 // Two objects in an object stream, object 5, each listed as its place there.
 let members = [(3, b"(three)".to_vec()), (4, b"<</Four 4>>".to_vec())];
 let container = write::container(&members, Deflate::DEFAULT).unwrap().unwrap();
-let offset = serialize::indirect(&mut file, (5, 0), &Object::from(container)).unwrap();
+let offset = serialize::indirect(&mut file, ObjectId::new(5, 0), &Object::from(container)).unwrap();
 section.insert(5, Entry::InUse { offset, generation: 0 });
 for (index, (num, _)) in (0..).zip(&members) {
     section.insert(*num, Entry::Compressed { stream: 5, index });
 }
 // The section as a stream, object 6, the trailer its dictionary.
 let pos = file.len();
-section.stream(&mut file, 6, dict! { "Root" => (1, 0) }, pos, Deflate::DEFAULT).unwrap();
+section.stream(&mut file, 6, dict! { "Root" => ObjectId::new(1, 0) }, pos, Deflate::DEFAULT).unwrap();
 
 let doc = bytes::read(&file);
 assert_eq!(doc.trailer.unwritten, None, "read by its section");
 assert!(doc.warnings().is_empty());
-let four = doc.get((4, 0)).unwrap().as_dict().unwrap();
+let four = doc.get(ObjectId::new(4, 0)).unwrap().as_dict().unwrap();
 assert_eq!(four.get(b"Four").and_then(Object::as_integer), Some(4));
 ```
 

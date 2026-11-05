@@ -473,7 +473,7 @@ fn parted<'a>(
     if let Some((i, page, theirs)) = other.next() {
         let has = match theirs.map(|theirs| theirs.id) {
             None => " has no page".to_string(),
-            Some(Some((n, g))) => format!("'s is {n} {g} R"),
+            Some(Some(id)) => format!("'s is {id} R"),
             Some(None) => "'s is another, written in place".to_string(),
         };
         let said = format!(
@@ -564,7 +564,7 @@ fn no_area(Rect([a, b, c, d]): Rect) -> bool {
 /// written in place.
 fn written_as(page: &Page<'_>) -> String {
     match page.id {
-        Some((n, g)) => format!("{n} {g} R"),
+        Some(id) => format!("{id} R"),
         None => "written in place".to_string(),
     }
 }
@@ -1103,7 +1103,7 @@ mod tests {
             .map(|f| {
                 let at = f.at.map(|at| &file[at.start..at.end]).unwrap_or_default();
                 (
-                    f.object.map(|(n, _)| n),
+                    f.object.map(|id| id.number),
                     f.path.clone(),
                     format!("{}/{}", f.table, f.key),
                     f.value.clone(),
@@ -1286,7 +1286,8 @@ mod tests {
         assert_eq!(found(&damaged, &ALL), []);
         let report = checked(&damaged, &ALL, &Options::default());
         let unresolved = (report.findings.iter()).filter(|f| {
-            (f.rule, f.object, f.table.as_str()) == (Rule::Unresolved, Some((10, 0)), "Name")
+            (f.rule, f.object, f.table.as_str())
+                == (Rule::Unresolved, Some(ObjectId::new(10, 0)), "Name")
         });
         assert_eq!(unresolved.count(), 1, "{report}");
     }
@@ -1300,7 +1301,7 @@ mod tests {
             &[],
         );
         assert_eq!(found(&in_place, &ALL), [dest(1, ORDER, "(a)")]);
-        let only = |n| Hold::Only([((n, 0), Made::Built)].into());
+        let only = |n| Hold::Only([(ObjectId::new(n, 0), Made::Built)].into());
         let mut built = dest(1, ORDER, "(a)");
         built.5 = Made::Built;
         assert_eq!(found(&in_place, &only(1)), [built]);
@@ -1377,7 +1378,13 @@ mod tests {
                 (12, &leaf("(a) (b)", ["(a)", "(b)"])),
             ],
         );
-        let held = |ns: &[u32]| Hold::Only(ns.iter().map(|&n| ((n, 0), Made::Merged)).collect());
+        let held = |ns: &[u32]| {
+            Hold::Only(
+                ns.iter()
+                    .map(|&n| (ObjectId::new(n, 0), Made::Merged))
+                    .collect(),
+            )
+        };
         assert_eq!(found(&file, &held(&[12])), [dest(12, ORDER, "(a)")]);
         assert_eq!(found(&file, &held(&[1, 10, 11])), []);
     }
@@ -1447,7 +1454,7 @@ mod tests {
         assert_eq!(found(&deep, &ALL), [bad()]);
         let report = checked(&deep, &ALL, &Options::default());
         assert_eq!(unread_trees(&report), [(DEEP, 1)], "{report}");
-        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        let only = |n| Hold::Only([(ObjectId::new(n, 0), Made::Merged)].into());
         assert_eq!(found(&deep, &only(11)), [bad()]);
         let report = checked(&deep, &only(11), &Options::default());
         assert_eq!(unread_trees(&report), [], "{report}");
@@ -1870,7 +1877,7 @@ mod tests {
             let report = checked(&file, &ALL, &Options::default());
             let own = (report.findings.iter()).any(|f| {
                 (f.object, f.table.as_str(), f.key.as_str(), f.rule)
-                    == (Some((n, 0)), table, key, rule)
+                    == (Some(ObjectId::new(n, 0)), table, key, rule)
             });
             assert!(own, "{table}/{key} {rule}: {report}");
             let told: Vec<_> = (report.findings.iter())
@@ -1891,7 +1898,7 @@ mod tests {
         let told = |file: &[u8], hold: &Hold| -> Vec<(String, Rule, String)> {
             let report = checked(file, hold, &Options::default());
             (report.findings.iter())
-                .filter(|f| f.object == Some((2, 0)))
+                .filter(|f| f.object == Some(ObjectId::new(2, 0)))
                 .map(|f| (f.key.clone(), f.rule, f.value.clone()))
                 .collect()
         };
@@ -2003,7 +2010,13 @@ mod tests {
     /// twice, only what's in the node held.
     #[test]
     fn what_s_in_a_page_tree_object_not_held_isnt_found() {
-        let held = |ns: &[u32]| Hold::Only(ns.iter().map(|&n| ((n, 0), Made::Merged)).collect());
+        let held = |ns: &[u32]| {
+            Hold::Only(
+                ns.iter()
+                    .map(|&n| (ObjectId::new(n, 0), Made::Merged))
+                    .collect(),
+            )
+        };
         let wrong = paged(&[
             (2, &node("null", "4 0 R", "1")),
             (4, &node("2 0 R", "3 0 R", "1")),
@@ -2130,7 +2143,7 @@ mod tests {
         assert_eq!(page_tree_found(&deep), [again]);
         let report = checked(&deep, &ALL, &Options::default());
         assert_eq!(unread_pages(&report), [(PAGES_DEEP, 1)], "{report}");
-        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        let only = |n| Hold::Only([(ObjectId::new(n, 0), Made::Merged)].into());
         let report = checked(&deep, &only(1), &Options::default());
         assert_eq!(unread_pages(&report), [(PAGES_DEEP, 1)], "{report}");
         let report = checked(&deep, &only(2), &Options::default());
@@ -2185,7 +2198,7 @@ mod tests {
                 .filter(|f| f.table == "Target")
                 .map(|f| {
                     (
-                        f.object.map(|(n, _)| n),
+                        f.object.map(|id| id.number),
                         f.key.clone(),
                         f.rule,
                         f.value.clone(),
@@ -2547,7 +2560,7 @@ mod tests {
                 (3, broken),
             ]),
         ];
-        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        let only = |n| Hold::Only([(ObjectId::new(n, 0), Made::Merged)].into());
         for file in shapes {
             assert_eq!(viewer_found(&file, &ALL), []);
             let report = checked(&file, &ALL, &Options::default());
@@ -2564,7 +2577,13 @@ mod tests {
     /// the tree's page, not where the root alone is.
     #[test]
     fn a_viewer_finding_in_an_object_not_held_isnt_found() {
-        let held = |ns: &[u32]| Hold::Only(ns.iter().map(|&n| ((n, 0), Made::Merged)).collect());
+        let held = |ns: &[u32]| {
+            Hold::Only(
+                ns.iter()
+                    .map(|&n| (ObjectId::new(n, 0), Made::Merged))
+                    .collect(),
+            )
+        };
         let more = paged(&[(2, &node("null", "3 0 R", "3")), (3, &page("2 0 R"))]);
         let count = tree(
             2,
@@ -2690,9 +2709,9 @@ mod tests {
             .filter(|f| f.rule == Rule::Xmp)
             .map(|f| {
                 let at = f.at.expect("an XMP finding is at bytes");
-                assert_eq!(at.stream, Some((4, 0)), "{report}");
+                assert_eq!(at.stream, Some(ObjectId::new(4, 0)), "{report}");
                 (
-                    f.object.map(|(n, _)| n),
+                    f.object.map(|id| id.number),
                     f.path.clone(),
                     format!("{}/{}", f.table, f.key),
                     f.value.clone(),
@@ -2773,7 +2792,10 @@ mod tests {
             .iter()
             .find(|f| f.rule == Rule::Xmp)
             .unwrap();
-        assert_eq!(stops.at, Some(Span::new(Some((4, 0)), at, at + 1)));
+        assert_eq!(
+            stops.at,
+            Some(Span::new(Some(ObjectId::new(4, 0)), at, at + 1))
+        );
         let clean = metadata(XMP.as_bytes(), "");
         assert_eq!(xmp_found(&clean, XMP.as_bytes(), &ALL), []);
         let deflated = fixture::zlib(&misnested);
@@ -2823,7 +2845,7 @@ mod tests {
             xmp_found(&file, deep.as_bytes(), &ALL),
             [packet_finding(ATTRIBUTE, "<a b=1/>")]
         );
-        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        let only = |n| Hold::Only([(ObjectId::new(n, 0), Made::Merged)].into());
         assert_eq!(
             rows(&checked(&file, &only(4), &Options::default())).len(),
             1
@@ -2870,7 +2892,7 @@ mod tests {
                 .map(|(u, &n)| (u.column, u.table.clone(), u.key.clone(), n))
                 .collect::<Vec<_>>()
         };
-        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        let only = |n| Hold::Only([(ObjectId::new(n, 0), Made::Merged)].into());
         let claims = |attributes: &str| {
             format!(
                 "<rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" {attributes}/>"
@@ -2948,11 +2970,16 @@ mod tests {
     #[test]
     fn damage_notes_an_object_that_doesn_t_read_alone() {
         let mut damage = Damage::default();
-        damage.fault(at(Some((2, 0))), Fault::PageTreeEmpty);
+        damage.fault(at(Some(ObjectId::new(2, 0))), Fault::PageTreeEmpty);
         damage.fault(at(None), Fault::PageNoMediaBox);
         assert!(!damage.told);
-        damage.fault(at(Some((2, 0))), Fault::Damaged { id: (7, 0) });
-        damage.fault(at(Some((2, 0))), Fault::PageTreeEmpty);
+        damage.fault(
+            at(Some(ObjectId::new(2, 0))),
+            Fault::Damaged {
+                id: ObjectId::new(7, 0),
+            },
+        );
+        damage.fault(at(Some(ObjectId::new(2, 0))), Fault::PageTreeEmpty);
         assert!(damage.told);
     }
 }

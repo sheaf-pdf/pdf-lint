@@ -19,7 +19,9 @@ use crate::hint::{self, EmbeddedFiles, Extended, Generic, HintKeys, PageOffsets}
 use crate::hint::{SharedObjects, Thumbnails};
 use crate::layout::{self, Encoded, Layout, Options, Piece, Stream, StreamKind, assemble};
 use crate::plan::{Error, Group, Kind, Page, Part, Plan, Use, What, plan};
-use crate::{Graph, Id, Limits, MEMBERS};
+use pdf_objects::ObjectId;
+
+use crate::{Graph, Limits, MEMBERS};
 
 /// The most objects an input describes, past what two object streams hold.
 const OBJECTS: usize = 600;
@@ -33,7 +35,7 @@ const SMALL: usize = 128;
 /// An object as an input describes it.
 #[derive(Debug, Clone, Default)]
 struct Object {
-    refs: Vec<Id>,
+    refs: Vec<ObjectId>,
     packable: bool,
     late: bool,
 }
@@ -42,16 +44,16 @@ struct Object {
 #[derive(Debug, Clone)]
 struct Described {
     kind: Kind,
-    catalog: Id,
+    catalog: ObjectId,
     /// The objects given, in order, each given more than once as it's listed.
-    given: Vec<(Id, Object)>,
-    pages: Vec<(Id, Option<Id>)>,
+    given: Vec<(ObjectId, Object)>,
+    pages: Vec<(ObjectId, Option<ObjectId>)>,
     /// Each page's content streams.
-    contents: Vec<Vec<Id>>,
+    contents: Vec<Vec<ObjectId>>,
     first: u32,
-    tree_nodes: Vec<Id>,
-    open: Vec<Id>,
-    groups: Vec<(Group, Vec<Id>)>,
+    tree_nodes: Vec<ObjectId>,
+    open: Vec<ObjectId>,
+    groups: Vec<(Group, Vec<ObjectId>)>,
     outlines_first: bool,
 }
 
@@ -90,19 +92,19 @@ fn described(data: &[u8]) -> Described {
     let flags = bytes.byte();
     let count = 2 + bytes.below(OBJECTS - 1);
     let step = 1 + bytes.below(5) as u32;
-    let id_of = |at: usize| (1 + at as u32 * step, 0);
+    let id_of = |at: usize| ObjectId::new(1 + at as u32 * step, 0);
     let everything_packable = flags & 4 != 0;
     let kind = match flags & 1 != 0 {
         true => Kind::Stream,
         false => Kind::Table,
     };
-    let mut given: Vec<(Id, Object)> = Vec::with_capacity(count);
+    let mut given: Vec<(ObjectId, Object)> = Vec::with_capacity(count);
     for at in 0..count {
         let (mut id, mut object) = (id_of(at), Object::default());
         if bytes.chance(64) {
             // The number before it at another generation, or given again.
             id = id_of(at.saturating_sub(1));
-            id.1 = bytes.below(2) as u16;
+            id.generation = bytes.below(2) as u16;
         }
         for _ in 0..bytes.below(8) {
             // A little past the objects, for a reference to none.
@@ -143,7 +145,7 @@ fn described(data: &[u8]) -> Described {
     };
     let list = |bytes: &mut Bytes, most| {
         let count = bytes.below(most);
-        (0..count).map(|_| pick(bytes)).collect::<Vec<Id>>()
+        (0..count).map(|_| pick(bytes)).collect::<Vec<ObjectId>>()
     };
     let tree_nodes = list(&mut bytes, 8);
     let open = list(&mut bytes, 4);
@@ -201,7 +203,7 @@ impl Described {
         let mut seen = BTreeSet::new();
         for (id, _) in &self.given {
             if !seen.insert(*id) {
-                let mut ids: Vec<Id> = self.given.iter().map(|(id, _)| *id).collect();
+                let mut ids: Vec<ObjectId> = self.given.iter().map(|(id, _)| *id).collect();
                 ids.sort_unstable();
                 let twice = ids.windows(2).find(|pair| pair[0] == pair[1]);
                 return Some(Error::ObjectRepeated(twice.unwrap()[0]));
@@ -239,22 +241,22 @@ impl Described {
 /// The objects of a graph with no object given twice, and the plain walks over
 /// them.
 struct Plain<'d> {
-    objects: BTreeMap<Id, &'d Object>,
+    objects: BTreeMap<ObjectId, &'d Object>,
     /// What no walk goes into.
-    stops: BTreeSet<Id>,
+    stops: BTreeSet<ObjectId>,
     /// What a walk stops at but the page walked from.
-    pages: BTreeSet<Id>,
-    open: Vec<Id>,
+    pages: BTreeSet<ObjectId>,
+    open: Vec<ObjectId>,
 }
 
 impl<'d> Plain<'d> {
     fn of(described: &'d Described) -> Plain<'d> {
-        let objects: BTreeMap<Id, &Object> = (described.given.iter())
+        let objects: BTreeMap<ObjectId, &Object> = (described.given.iter())
             .map(|(id, object)| (*id, object))
             .collect();
-        let pages: BTreeSet<Id> = described.pages.iter().map(|&(id, _)| id).collect();
+        let pages: BTreeSet<ObjectId> = described.pages.iter().map(|&(id, _)| id).collect();
         let open = (described.open.iter()).filter(|id| !pages.contains(id));
-        let open: Vec<Id> = open.copied().collect();
+        let open: Vec<ObjectId> = open.copied().collect();
         let tree = (described.tree_nodes.iter()).filter(|id| !pages.contains(id));
         let stops = (pages.iter().chain(&open).chain(tree).copied())
             .chain([described.catalog])
@@ -268,7 +270,7 @@ impl<'d> Plain<'d> {
     }
 
     /// All `roots` reach, under the stops, `page` being a stop that's entered.
-    fn reach(&self, roots: &[Id], page: Option<Id>) -> BTreeSet<Id> {
+    fn reach(&self, roots: &[ObjectId], page: Option<ObjectId>) -> BTreeSet<ObjectId> {
         let mut seen = BTreeSet::new();
         let mut to_do = roots.to_vec();
         while let Some(id) = to_do.pop() {
@@ -284,7 +286,7 @@ impl<'d> Plain<'d> {
 }
 
 /// Where each object is, by its write, and the writes' parts, for a plan.
-fn writes_by_object(plan: &Plan) -> BTreeMap<Id, usize> {
+fn writes_by_object(plan: &Plan) -> BTreeMap<ObjectId, usize> {
     let mut by_object = BTreeMap::new();
     for (at, write) in plan.writes().iter().enumerate() {
         match write.what {
@@ -309,13 +311,13 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
     let plain = Plain::of(described);
     let by_object = writes_by_object(plan);
     let first = described.first as usize;
-    let page_ids: Vec<Id> = described.pages.iter().map(|&(id, _)| id).collect();
+    let page_ids: Vec<ObjectId> = described.pages.iter().map(|&(id, _)| id).collect();
     let first_id = page_ids[first];
 
     // Each object once, and nothing else: an id named nowhere has no number.
     assert_eq!(by_object.len(), plain.objects.len());
     assert!(plain.objects.keys().all(|id| by_object.contains_key(id)));
-    assert_eq!(plan.number((u32::MAX, 0)), None);
+    assert_eq!(plan.number(ObjectId::new(u32::MAX, 0)), None);
 
     // A bijection onto 1..size, in F.3.1's order: the second group's writes in
     // file order, its xref, its compressed members; the dictionary, the first
@@ -353,12 +355,12 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
     );
     for (id, &at) in &by_object {
         let number = plan.number(*id).unwrap();
-        assert_eq!(number.1, 0);
+        assert_eq!(number.generation, 0);
         match plan.writes()[at].what {
-            What::Object(_) => assert_eq!(number.0, plan.writes()[at].number),
+            What::Object(_) => assert_eq!(number.number, plan.writes()[at].number),
             What::Container(c) => {
                 let found = plan.containers()[c].members.iter().find(|m| m.0 == *id);
-                assert_eq!(number.0, found.unwrap().1);
+                assert_eq!(number.number, found.unwrap().1);
                 assert_eq!(plan.containers()[c].number, plan.writes()[at].number);
             }
         }
@@ -376,7 +378,10 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
     // Every page first in its section: the first's the start of part 6, the
     // others' tiling part 7 in page order, skipping the first.
     assert_eq!(plan.page_count() as usize, page_ids.len());
-    assert_eq!(plan.first_page_number(), plan.number(first_id).unwrap().0);
+    assert_eq!(
+        plan.first_page_number(),
+        plan.number(first_id).unwrap().number
+    );
     let mut next = plan.part_writes(Part::Pages).start;
     for (page, &id) in page_ids.iter().enumerate() {
         let range = plan.page_writes(page as u32);
@@ -410,7 +415,7 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
 
     // Each object's use is how many pages reach it, the walk that gave it being
     // no more than a plain walk of each.
-    let reaches: Vec<BTreeSet<Id>> = (page_ids.iter())
+    let reaches: Vec<BTreeSet<ObjectId>> = (page_ids.iter())
         .map(|&page| plain.reach(&[page], Some(page)))
         .collect();
     let walk_of = |page: usize| match page.cmp(&first) {
@@ -418,7 +423,7 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => page as u32,
     };
-    let outlines: Vec<Id> = (described.groups.iter())
+    let outlines: Vec<ObjectId> = (described.groups.iter())
         .filter(|(group, _)| *group == Group::Outlines)
         .flat_map(|(_, roots)| roots.iter().copied())
         .collect();
@@ -488,7 +493,7 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
     }
     for (group, _) in described.groups.iter().filter(|(g, _)| *g != Group::Other) {
         let range = plan.group_writes(*group).unwrap();
-        let reached: BTreeSet<Id> = (described.groups.iter())
+        let reached: BTreeSet<ObjectId> = (described.groups.iter())
             .filter(|(g, _)| g == group)
             .flat_map(|(_, roots)| plain.reach(roots, None))
             .collect();
@@ -546,7 +551,7 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
     // Each list: all it reaches that has an entry, once, in order, a member by
     // its stream. The first page's is none.
     let entry_of_write = |at: usize| plan.entries().iter().position(|e| e.contains(&at));
-    let list_of = |reach: &BTreeSet<Id>| {
+    let list_of = |reach: &BTreeSet<ObjectId>| {
         let entries = (reach.iter()).filter_map(|id| entry_of_write(by_object[id]));
         let entries: BTreeSet<u32> = entries.map(|entry| entry as u32).collect();
         entries.into_iter().collect::<Vec<u32>>()
@@ -561,7 +566,7 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
         }
     }
     for group in Group::ALL {
-        let roots: Vec<Id> = (described.groups.iter())
+        let roots: Vec<ObjectId> = (described.groups.iter())
             .filter(|(g, _)| *g == group)
             .flat_map(|(_, roots)| roots.iter().copied())
             .collect();
@@ -576,7 +581,7 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
     }
     // Each root of the embedded file group: a group of its own, the writes of
     // each what it reaches, one after another, and a list of its own.
-    let files: Vec<Id> = (described.groups.iter())
+    let files: Vec<ObjectId> = (described.groups.iter())
         .filter(|(g, _)| *g == Group::EmbeddedFile)
         .flat_map(|(_, roots)| roots.iter().copied())
         .filter(|id| plain.objects.contains_key(id))
@@ -588,7 +593,7 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
     for (at, root) in files.iter().enumerate() {
         let reach = plain.reach(&[*root], None);
         let file = &plan.files()[at];
-        assert_eq!(file.number, plan.number(*root).unwrap().0);
+        assert_eq!(file.number, plan.number(*root).unwrap().number);
         assert_eq!(next, Some(file.writes.start), "{root:?}");
         next = Some(file.writes.end);
         for write in &plan.writes()[file.writes.clone()] {
@@ -612,7 +617,7 @@ fn holds(described: &Described, graph: &Graph, plan: &Plan) {
     assert_eq!(plan.shared_entries(), count);
 
     // Thumbnails: each's writes what it reaches, what several share theirs.
-    let thumb_reach: Vec<BTreeSet<Id>> = (described.pages.iter())
+    let thumb_reach: Vec<BTreeSet<ObjectId>> = (described.pages.iter())
         .map(|&(_, thumb)| plain.reach(&Vec::from_iter(thumb), None))
         .collect();
     let in_write = |at: usize| match plan.writes()[at].what {
@@ -1154,7 +1159,7 @@ pub(crate) fn facts_of(plan: &Plan, layout: &Layout) -> Facts {
     section.rows = (dictionary..size).map(row_of).collect();
     section.size = Raw::Integer(i64::from(size));
     section.prev = int(layout.main_section());
-    section.root = Raw::Reference((plan.catalog_number(), 0));
+    section.root = Raw::Reference(ObjectId::new(plan.catalog_number(), 0));
     section.startxref = Some(0);
     section.stream = plan.first_xref_number();
     facts.first = Some(section);
@@ -1193,7 +1198,7 @@ pub(crate) fn facts_of(plan: &Plan, layout: &Layout) -> Facts {
                 true => plan.first_page_number(),
                 false => plan.writes()[plan.page_writes(page).start].number,
             };
-            let mut facts = PageFacts::new(Some((number, 0)));
+            let mut facts = PageFacts::new(Some(ObjectId::new(number, 0)));
             facts.resources = true;
             facts.media_box = true;
             facts
@@ -1307,7 +1312,7 @@ fn raw_from(bytes: &mut Bytes) -> Raw {
     match bytes.below(8) {
         0 => Raw::Absent,
         1 => Raw::Real(number_from(bytes) as f64 / 3.0),
-        2 => Raw::Reference((number_from(bytes) as u32, 0)),
+        2 => Raw::Reference(ObjectId::new(number_from(bytes) as u32, 0)),
         3 => Raw::Array,
         4 => Raw::Other,
         _ => Raw::Integer(number_from(bytes) as i64),
@@ -1431,7 +1436,7 @@ fn made_up(bytes: &mut Bytes) -> Facts {
             let id = bytes
                 .chance(8)
                 .then_some(())
-                .map_or(Some((bytes.below(64) as u32, 0)), |()| None);
+                .map_or(Some(ObjectId::new(bytes.below(64) as u32, 0)), |()| None);
             let mut page = PageFacts::new(id);
             page.resources = bytes.chance(2);
             page.media_box = bytes.chance(2);
@@ -1616,13 +1621,15 @@ fn written_back<S: pdf_structure::ByteSource>(
         }
     }
     for (id, body) in prepared.bodies() {
-        let (number, _) = planned.number(*id).expect("it was given");
-        let Ok(object) = again.get((number, 0)) else {
+        let ObjectId { number, .. } = planned.number(*id).expect("it was given");
+        let Ok(object) = again.get(ObjectId::new(number, 0)) else {
             panic!("{id:?} isn't at {number}");
         };
         same_under(body.object(), object, &planned);
         if let (Value::Stream(_), Value::Stream(_)) = (body.object().value(), object.value()) {
-            if let (Ok(before), Ok(after)) = (reading.data(*id), again.data((number, 0))) {
+            if let (Ok(before), Ok(after)) =
+                (reading.data(*id), again.data(ObjectId::new(number, 0)))
+            {
                 assert_eq!(before, after, "{id:?}'s data");
             }
         }
@@ -2108,7 +2115,7 @@ mod tests {
         let reading = Reading::open(plain, options).unwrap();
         let doc = reading.to_document().unwrap();
         let mut written = write::Options::DEFAULT;
-        written.encrypt_at = Some((100, 0));
+        written.encrypt_at = Some(ObjectId::new(100, 0));
         let mut out = Vec::new();
         write::document(&mut out, &doc, Some(&encryptor), Some(&reading), &written).unwrap();
         out

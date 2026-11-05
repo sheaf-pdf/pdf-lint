@@ -28,7 +28,7 @@ struct Pdf {
 impl Pdf {
     fn new_object_id(&mut self) -> ObjectId {
         self.last += 1;
-        (self.last, 0)
+        ObjectId::new(self.last, 0)
     }
 
     fn add_object(&mut self, object: impl Into<Object>) -> ObjectId {
@@ -819,10 +819,24 @@ fn reading_a_font_is_charged_to_its_budget() {
     let mut scope = fonts.scope();
     let mut budget = 10 * cost;
     for name in [&b"R1"[..], b"R2", b"R1", b"D1", b"D1"] {
-        let picked = scope.font(&pdf, (1, 0), Some(&resources), name, lim, &mut budget);
+        let picked = scope.font(
+            &pdf,
+            ObjectId::new(1, 0),
+            Some(&resources),
+            name,
+            lim,
+            &mut budget,
+        );
         assert!(picked.unwrap().is_some());
     }
-    let picked = scope.font(&pdf, (2, 0), Some(&resources), b"D1", lim, &mut budget);
+    let picked = scope.font(
+        &pdf,
+        ObjectId::new(2, 0),
+        Some(&resources),
+        b"D1",
+        lim,
+        &mut budget,
+    );
     assert!(picked.unwrap().is_some());
     // R1 and R2 once, and D1 once for each owner it's picked by.
     assert_eq!(budget, 7 * cost);
@@ -967,7 +981,7 @@ fn a_cmap_chain_s_loop_and_its_cap_are_told_apart() {
 
     // 512 CMaps, the last using an object the file hasn't: no longer than the
     // cap, so the file's `UseCMap`, in what it names, and no `TooManyCMaps`.
-    let nothing = (99_999, 0);
+    let nothing = ObjectId::new(99_999, 0);
     let mut next = pdf.add_object(Stream::new(dict! { "UseCMap" => nothing }, Vec::new()));
     for _ in 2..Limits::DEFAULT.cmaps {
         next = pdf.add_object(Stream::new(dict! { "UseCMap" => next }, Vec::new()));
@@ -1185,7 +1199,7 @@ fn fonts_are_read_once() {
         &by_ref,
         &get(&helvetica.into(), budget).unwrap()
     ));
-    let (page, other) = ((1, 0), (2, 0));
+    let (page, other) = (ObjectId::new(1, 0), ObjectId::new(2, 0));
     let mut pick = |scope: &mut FontScope<'_>, owner, name: &[u8]| {
         let picked = scope.font(&pdf, owner, Some(&resources), name, lim, budget);
         picked.unwrap()
@@ -1491,7 +1505,7 @@ fn fonts_and_their_scope_say_why_a_font_doesn_t_read() {
             let mut budget = 100;
             let picked = fonts.scope().font(
                 objects,
-                (1000, 0),
+                ObjectId::new(1000, 0),
                 Some(&resources),
                 b"F1",
                 lim,
@@ -2877,10 +2891,16 @@ fn faults_are_told_where_they_are() {
     assert_eq!(faults(&pdf, usecmap), [Fault::PredefinedUnknown]);
 
     // Each says what it is, the whole of it, and no source.
-    let said = Fault::Damaged { id: (7, 0) };
+    let said = Fault::Damaged {
+        id: ObjectId::new(7, 0),
+    };
     assert_eq!(said.to_string(), "object 7 0 doesn't read");
     assert!(std::error::Error::source(&said).is_none());
-    let error = Error::Unreadable(Unreadable::new((7, 0), Why::Locked, "7 0 R is locked"));
+    let error = Error::Unreadable(Unreadable::new(
+        ObjectId::new(7, 0),
+        Why::Locked,
+        "7 0 R is locked",
+    ));
     assert_eq!(error.to_string(), "7 0 R is locked");
     assert!(std::error::Error::source(&error).is_none());
 }
@@ -3029,7 +3049,7 @@ fn program_font(
         false => Fonts::for_text(),
     };
     let mut budget = BUDGET;
-    let font = Object::reference(fonts.1[name].0);
+    let font = Object::reference(fonts.1[name].number);
     read.get(&fonts.0, &font, &Limits::DEFAULT, &mut budget)
         .unwrap()
         .unwrap()
@@ -3377,7 +3397,7 @@ fn a_program_is_charged_to_the_budget() {
     assert_eq!(budget, charged - 1);
     let mut budget = 0;
     let text = Fonts::for_text();
-    let by_ref = Object::reference(f.1["PT"].0);
+    let by_ref = Object::reference(f.1["PT"].number);
     assert!(text.get(&f.0, &by_ref, lim, &mut budget).unwrap().is_some());
 
     let (mut pdf, names) = program_fonts();
@@ -3813,7 +3833,7 @@ fn for_text_reads_no_program() {
     let f = program_fonts();
     for name in ["PT", "PC", "P1", "PI", "PN", "PZ", "PS"] {
         let mut budget = 0;
-        let font = Object::reference(f.1[name].0);
+        let font = Object::reference(f.1[name].number);
         let read = Fonts::for_text()
             .get(&f.0, &font, &Limits::DEFAULT, &mut budget)
             .unwrap()
@@ -4558,7 +4578,7 @@ mod reading {
         reading: &Reading<S>,
         budget: &mut usize,
     ) -> Result<Font, Error> {
-        let font = reading.get((1, 0)).unwrap().as_dict().unwrap();
+        let font = reading.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
         Font::read(reading, font, &Limits::DEFAULT, budget, &mut ())
     }
 
@@ -4568,7 +4588,7 @@ mod reading {
     fn data_within_and_past_the_limit() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
         let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-        for id in [(2, 0), (3, 0)] {
+        for id in [ObjectId::new(2, 0), ObjectId::new(3, 0)] {
             let at = PLAIN.len();
             assert_eq!(
                 asked(&reading, id, at),
@@ -4581,8 +4601,8 @@ mod reading {
         let mut options = Options::DEFAULT;
         options.limits.stream = 4;
         let small = Reading::open(&file[..], &options).unwrap();
-        assert_eq!(asked(&small, (2, 0), 1000), Decoded::TooLarge);
-        assert_eq!(asked(&small, (3, 0), 1000), Decoded::TooLarge);
+        assert_eq!(asked(&small, ObjectId::new(2, 0), 1000), Decoded::TooLarge);
+        assert_eq!(asked(&small, ObjectId::new(3, 0), 1000), Decoded::TooLarge);
 
         // And a font over it is charged what it decoded, and fails a byte short.
         let mut budget = PLAIN.len();
@@ -4621,13 +4641,19 @@ mod reading {
         ];
         let file = fixture::file("1.7", &objects, dict! {}, Xref::Table);
         let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-        assert_eq!(asked(&reading, (1, 0), 100), Decoded::Data(b"AB".to_vec()));
-        assert_eq!(asked(&reading, (2, 0), 100), Decoded::None);
-        assert_eq!(asked(&reading, (3, 0), 100), Decoded::None);
-        assert_eq!(asked(&reading, (4, 0), 100), Decoded::None);
-        assert_eq!(asked(&reading, (99, 0), 100), Decoded::None);
-        assert_eq!(asked(&reading, (6, 0), 100), Decoded::None);
-        assert_eq!(unreadable(asked(&reading, (5, 0), 100)), Why::Limit);
+        assert_eq!(
+            asked(&reading, ObjectId::new(1, 0), 100),
+            Decoded::Data(b"AB".to_vec())
+        );
+        assert_eq!(asked(&reading, ObjectId::new(2, 0), 100), Decoded::None);
+        assert_eq!(asked(&reading, ObjectId::new(3, 0), 100), Decoded::None);
+        assert_eq!(asked(&reading, ObjectId::new(4, 0), 100), Decoded::None);
+        assert_eq!(asked(&reading, ObjectId::new(99, 0), 100), Decoded::None);
+        assert_eq!(asked(&reading, ObjectId::new(6, 0), 100), Decoded::None);
+        assert_eq!(
+            unreadable(asked(&reading, ObjectId::new(5, 0), 100)),
+            Why::Limit
+        );
     }
 
     /// An object that doesn't parse is none, as it isn't there; one past a cap the
@@ -4643,14 +4669,17 @@ mod reading {
         let file = fixture::assembled("1.7", &objects, "<< /Size 3 >>");
         let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
         assert!(matches!(
-            Resolve::try_resolve(&&reading, (1, 0)),
+            Resolve::try_resolve(&&reading, ObjectId::new(1, 0)),
             Err(Unreadable {
                 why: Why::Damaged,
                 ..
             })
         ));
-        assert_eq!(asked(&reading, (1, 0), 100), Decoded::None);
-        assert_eq!(unreadable(asked(&reading, (2, 0), 100)), Why::Limit);
+        assert_eq!(asked(&reading, ObjectId::new(1, 0), 100), Decoded::None);
+        assert_eq!(
+            unreadable(asked(&reading, ObjectId::new(2, 0), 100)),
+            Why::Limit
+        );
     }
 
     /// A locked file's stream is locked, and a font that reads it isn't made up; opened,
@@ -4671,7 +4700,10 @@ mod reading {
         ));
         let file = fixture::encrypted(&settings(b"user"), &objects, dict! {});
         let locked = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-        assert_eq!(unreadable(asked(&locked, (2, 0), 100)), Why::Locked);
+        assert_eq!(
+            unreadable(asked(&locked, ObjectId::new(2, 0), 100)),
+            Why::Locked
+        );
         let mut budget = 100;
         let font = font_of_reading(&locked, &mut budget);
         let Err(Error::Unreadable(unreadable_font)) = font else {
@@ -4679,7 +4711,7 @@ mod reading {
         };
         assert_eq!(
             (unreadable_font.id, unreadable_font.why),
-            ((2, 0), Why::Locked)
+            (ObjectId::new(2, 0), Why::Locked)
         );
         assert_eq!(budget, 100);
 
@@ -4688,19 +4720,25 @@ mod reading {
         let font = font_of_reading(&opened, &mut budget).unwrap();
         assert_eq!(font.code_text(0x41).as_deref(), Some("A"));
         assert!(matches!(
-            opened.decoded_within((4, 0), 100),
+            opened.decoded_within(ObjectId::new(4, 0), 100),
             Err(pdf_structure::Error::Decrypt(_))
         ));
-        assert_eq!(unreadable(asked(&opened, (4, 0), 100)), Why::Locked);
+        assert_eq!(
+            unreadable(asked(&opened, ObjectId::new(4, 0), 100)),
+            Why::Locked
+        );
 
         let at = file.windows(9).position(|w| w == b"/Standard").unwrap();
         let other = [&file[..at], b"/Standarx", &file[at + 9..]].concat();
         let unopened = Reading::open(&other[..], &Options::DEFAULT).unwrap();
         assert!(matches!(
-            unopened.decoded_within((2, 0), 100),
+            unopened.decoded_within(ObjectId::new(2, 0), 100),
             Err(pdf_structure::Error::Unsupported)
         ));
-        assert_eq!(unreadable(asked(&unopened, (2, 0), 100)), Why::Locked);
+        assert_eq!(
+            unreadable(asked(&unopened, ObjectId::new(2, 0), 100)),
+            Why::Locked
+        );
     }
 
     /// A stream the encryption dictionary refers to isn't handed out, as it may be
@@ -4734,12 +4772,15 @@ mod reading {
             .as_bytes(),
         );
         let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-        let got = reading.decoded_within((7, 0), 100);
+        let got = reading.decoded_within(ObjectId::new(7, 0), 100);
         assert!(
             matches!(got, Err(pdf_structure::Error::Encrypted)),
             "{got:?}"
         );
-        assert_eq!(unreadable(asked(&reading, (7, 0), 100)), Why::Locked);
+        assert_eq!(
+            unreadable(asked(&reading, ObjectId::new(7, 0), 100)),
+            Why::Locked
+        );
     }
 
     /// A file read by position, whose source fails once it's told to.
@@ -4778,8 +4819,11 @@ mod reading {
         let fail = |on: bool| source.failing.store(on, Ordering::Relaxed);
 
         fail(true);
-        assert_eq!(unreadable(asked(&reading, (2, 0), 100)), Why::Source);
-        let got = Resolve::try_resolve(&&reading, (3, 0));
+        assert_eq!(
+            unreadable(asked(&reading, ObjectId::new(2, 0), 100)),
+            Why::Source
+        );
+        let got = Resolve::try_resolve(&&reading, ObjectId::new(3, 0));
         assert!(matches!(
             got,
             Err(Unreadable {
@@ -4789,14 +4833,17 @@ mod reading {
         ));
         fail(false);
         // The object read and kept, its data's read is what fails.
-        assert!(reading.get((2, 0)).is_ok());
-        assert!(reading.get((1, 0)).is_ok());
+        assert!(reading.get(ObjectId::new(2, 0)).is_ok());
+        assert!(reading.get(ObjectId::new(1, 0)).is_ok());
         fail(true);
         assert!(matches!(
-            reading.decoded_within((2, 0), 100),
+            reading.decoded_within(ObjectId::new(2, 0), 100),
             Err(pdf_structure::Error::Io(_))
         ));
-        assert_eq!(unreadable(asked(&reading, (2, 0), 100)), Why::Source);
+        assert_eq!(
+            unreadable(asked(&reading, ObjectId::new(2, 0), 100)),
+            Why::Source
+        );
         let mut budget = 100;
         let font = font_of_reading(&reading, &mut budget);
         assert!(
@@ -4805,6 +4852,9 @@ mod reading {
         );
         assert_eq!(budget, 100);
         fail(false);
-        assert_eq!(asked(&reading, (2, 0), 100), Decoded::Data(PLAIN.to_vec()));
+        assert_eq!(
+            asked(&reading, ObjectId::new(2, 0), 100),
+            Decoded::Data(PLAIN.to_vec())
+        );
     }
 }

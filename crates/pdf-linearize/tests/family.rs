@@ -498,7 +498,7 @@ fn each_thing_a_table_names_has_its_table() {
     }
     let tables = hint::tables(done.layout.hint_data(), keys, 2, &Limits::DEFAULT).unwrap();
     let (_, doc) = read(&out);
-    let number = |mark: &str| marked(&doc, mark).0;
+    let number = |mark: &str| marked(&doc, mark).number;
     assert_eq!(tables.outlines.unwrap().first_object, number("outlines"));
     assert_eq!(
         tables.threads.unwrap().first_object,

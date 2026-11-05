@@ -290,7 +290,7 @@ fn decoded(source: &dyn Source, id: ObjectId, limit: usize, asked: &Asked) -> De
         Err(unreadable) => return Decoded::Unreadable(unreadable),
     }
     let unreadable = |why: Why, error: &bytes::Error| {
-        let message = format!("{} {} R doesn't read: {error}", id.0, id.1);
+        let message = format!("{id} R doesn't read: {error}");
         Decoded::Unreadable(Unreadable::new(id, why, message))
     };
     let Some(decoded) = source.decoded_within(id, limit) else {
@@ -821,7 +821,7 @@ mod tests {
     fn a_stream_s_data_within_its_limit_and_past_it() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
         let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
-        for id in [(2, 0), (3, 0)] {
+        for id in [ObjectId::new(2, 0), ObjectId::new(3, 0)] {
             let at = PLAIN.len();
             let data = Decoded::Data(PLAIN.to_vec());
             assert_eq!(asked(&read, id, at), (data, false), "{id:?}");
@@ -830,10 +830,16 @@ mod tests {
         }
         // Not a stream: none. Not there: none, and nothing noted, as the
         // source isn't asked for its data.
-        assert_eq!(asked(&read, (1, 0), 100), (Decoded::None, false));
-        assert_eq!(asked(read.document(), (9, 0), 100), (Decoded::None, false));
+        assert_eq!(
+            asked(&read, ObjectId::new(1, 0), 100),
+            (Decoded::None, false)
+        );
+        assert_eq!(
+            asked(read.document(), ObjectId::new(9, 0), 100),
+            (Decoded::None, false)
+        );
 
-        let font = read.get((1, 0)).unwrap().as_dict().unwrap();
+        let font = read.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
         let mut budget = PLAIN.len();
         let taken = super::read(&read, font, &mut budget).unwrap();
         assert_eq!(taken.font.unwrap().code_text(0x41).as_deref(), Some("A"));
@@ -873,11 +879,19 @@ mod tests {
         let file = fixture::file("1.7", &objects, dict! {}, Xref::Table);
         let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
         let data = Decoded::Data(b"AB".to_vec());
-        assert_eq!(asked(&read, (1, 0), 100), (data, false));
-        assert_eq!(asked(&read, (2, 0), 100), (Decoded::None, false));
-        assert_eq!(asked(&read, (3, 0), 100), (Decoded::None, false));
-        assert_eq!(why(asked(&read, (5, 0), 100)), Why::Limit);
-        let noted: Vec<bool> = [1, 2, 3, 5].map(|n| unfiltered(&read, (n, 0))).into();
+        assert_eq!(asked(&read, ObjectId::new(1, 0), 100), (data, false));
+        assert_eq!(
+            asked(&read, ObjectId::new(2, 0), 100),
+            (Decoded::None, false)
+        );
+        assert_eq!(
+            asked(&read, ObjectId::new(3, 0), 100),
+            (Decoded::None, false)
+        );
+        assert_eq!(why(asked(&read, ObjectId::new(5, 0), 100)), Why::Limit);
+        let noted: Vec<bool> = [1, 2, 3, 5]
+            .map(|n| unfiltered(&read, ObjectId::new(n, 0)))
+            .into();
         assert_eq!(noted, [false, false, true, false]);
     }
 
@@ -897,17 +911,20 @@ mod tests {
         let file = fixture::encrypted(&settings, &objects(), dict! {});
         let locked = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
         assert!(matches!(
-            locked.decoded_within((2, 0), 100),
+            locked.decoded_within(ObjectId::new(2, 0), 100),
             Some(Err(bytes::Error::Locked))
         ));
-        assert_eq!(why(asked(&locked, (2, 0), 100)), Why::Locked);
-        let font = locked.get((1, 0)).unwrap().as_dict().unwrap();
+        assert_eq!(why(asked(&locked, ObjectId::new(2, 0), 100)), Why::Locked);
+        let font = locked.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
         let mut budget = 100;
         let font_read = super::read(&locked, font, &mut budget).unwrap().font;
         let Err(Error::Unreadable(unreadable)) = font_read else {
             panic!("{font_read:?}");
         };
-        assert_eq!((unreadable.id, unreadable.why), ((2, 0), Why::Locked));
+        assert_eq!(
+            (unreadable.id, unreadable.why),
+            (ObjectId::new(2, 0), Why::Locked)
+        );
         assert_eq!(budget, 100);
     }
 
@@ -945,13 +962,13 @@ mod tests {
         let read = WithReading::new(&source, &[], &Options::DEFAULT).unwrap();
         source.failing.store(true, Ordering::Relaxed);
         assert!(matches!(
-            read.decoded_within((2, 0), 100),
+            read.decoded_within(ObjectId::new(2, 0), 100),
             Some(Err(bytes::Error::Io(_)))
         ));
-        assert_eq!(why(asked(&read, (2, 0), 100)), Why::Source);
+        assert_eq!(why(asked(&read, ObjectId::new(2, 0), 100)), Why::Source);
         source.failing.store(false, Ordering::Relaxed);
         let data = Decoded::Data(PLAIN.to_vec());
-        assert_eq!(asked(&read, (2, 0), 100), (data, false));
+        assert_eq!(asked(&read, ObjectId::new(2, 0), 100), (data, false));
     }
 
     fn r(n: u32) -> Object {
@@ -1110,7 +1127,7 @@ mod tests {
         let missing = (report.findings.iter())
             .filter(|f| f.key == "CapHeight")
             .inspect(|f| assert_eq!(f.rule, Rule::Missing, "{f}"))
-            .map(|f| (f.object.map(|(n, _)| n), f.table.clone()))
+            .map(|f| (f.object.map(|id| id.number), f.table.clone()))
             .collect();
         let unmade = (report.unchecked.iter())
             .filter(|(u, _)| u.why == "fn:FontHasLatinChars")
@@ -1440,7 +1457,7 @@ mod tests {
                     None => String::new(),
                 };
                 (
-                    f.object.map(|(n, _)| n),
+                    f.object.map(|id| id.number),
                     f.path.clone(),
                     format!("{}/{}", f.table, f.key),
                     f.value.clone(),
@@ -1476,7 +1493,7 @@ mod tests {
             .filter(|f| f.rule != Rule::Font)
             .map(|f| {
                 (
-                    f.object.map(|(n, _)| n),
+                    f.object.map(|id| id.number),
                     format!("{}/{}", f.table, f.key),
                     f.rule,
                 )
@@ -2165,7 +2182,7 @@ mod tests {
                 "/A"
             )]
         );
-        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        let only = |n| Hold::Only([(ObjectId::new(n, 0), Made::Merged)].into());
         assert_eq!(unread_fonts(&report(&locked, &only(4))).len(), 1);
         assert_eq!(unread_fonts(&report(&locked, &only(3))), []);
 
@@ -2266,7 +2283,7 @@ mod tests {
     /// where its page is.
     #[test]
     fn a_font_s_finding_is_held_where_its_object_is() {
-        let only = |n| Hold::Only([((n, 0), Made::Merged)].into());
+        let only = |n| Hold::Only([(ObjectId::new(n, 0), Made::Merged)].into());
         let short = "/FirstChar 32 /LastChar 34 /Widths [500 500]";
         let font = calibri("TrueType", short);
         let own = fonts("1.7", "/F1 4 0 R", &[(4, &font), DESCRIPTOR]);

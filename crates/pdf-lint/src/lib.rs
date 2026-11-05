@@ -279,7 +279,7 @@ pub mod extension {
 
         use super::*;
         use crate::dict;
-        use crate::object::Object;
+        use crate::object::{Object, ObjectId};
         use crate::source::Document;
         use crate::version::Version;
 
@@ -346,16 +346,16 @@ pub mod extension {
                 assert_eq!(claimed, BTreeSet::from(both.clone()));
                 assert_eq!(claimed, declared(&doc));
                 assert_eq!(claimed, quietly(&doc));
-                assert_eq!(got.stream, Some((5, 0)));
+                assert_eq!(got.stream, Some(ObjectId::new(5, 0)));
                 assert_eq!(got.len, data.len());
                 assert!(got.stopped.is_none());
                 assert_eq!(got.kept.told().len(), faults);
                 for (place, fault, count) in got.kept.told() {
                     assert_eq!(*fault, Fault::XmpAttribute);
                     assert_eq!(*count, 1);
-                    assert_eq!(place.object, Some((5, 0)));
+                    assert_eq!(place.object, Some(ObjectId::new(5, 0)));
                     let at = place.at.unwrap();
-                    assert_eq!(at.stream, Some((5, 0)));
+                    assert_eq!(at.stream, Some(ObjectId::new(5, 0)));
                     assert!(data[at.start..at.end].starts_with(b"<rdf:Description"));
                 }
             }

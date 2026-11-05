@@ -40,7 +40,7 @@
 //! let (key, value) = walk.next().unwrap().unwrap();
 //! assert_eq!((key, value.as_integer()), (&b"a"[..], Some(1)));
 //! let (key, value) = walk.next().unwrap().unwrap();
-//! assert_eq!((key, value.as_reference()), (&b"b"[..], Some((5, 0))));
+//! assert_eq!((key, value.as_reference()), (&b"b"[..], Some(ObjectId::new(5, 0))));
 //! assert!(walk.next().is_none());
 //! assert!(walk.whole());
 //! ```
@@ -441,7 +441,7 @@ impl<'o, R: Resolve<'o>, S: Sink, K: Key<'o>> Walk<'o, R, S, K> {
                 _ => return Ok(Reached::Object(at, last)),
             }
         }
-        Err(crate::too_long(last.unwrap_or((0, 0))))
+        Err(crate::too_long(last.unwrap_or(ObjectId::new(0, 0))))
     }
 
     /// The key written as `written`, its references followed; none when it

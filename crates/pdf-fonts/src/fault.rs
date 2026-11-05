@@ -161,7 +161,7 @@ pub enum Fault {
     Chained,
     /// An object a font reads doesn't read ([`Why::Damaged`](crate::Why::Damaged)).
     /// It's read as not there.
-    #[error("object {} {} doesn't read", .id.0, .id.1)]
+    #[error("object {} {} doesn't read", .id.number, .id.generation)]
     Damaged {
         /// The object.
         id: ObjectId,

@@ -100,7 +100,7 @@ impl fmt::Display for KeptOut {
 pub fn kept_out(id: ObjectId, obj: &Object) -> Option<KeptOut> {
     match obj.value() {
         Value::Stream(_) => Some(KeptOut::Stream),
-        _ if id.1 != 0 => Some(KeptOut::Generation),
+        _ if id.generation != 0 => Some(KeptOut::Generation),
         Value::Dict(d) if encryption(d) => Some(KeptOut::Encryption),
         Value::Dict(d) if d.has(b"Linearized") => Some(KeptOut::Linearization),
         _ => None,

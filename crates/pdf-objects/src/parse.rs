@@ -174,7 +174,7 @@ pub enum Fault<'a> {
     #[error("a lone CR after `stream`, where ISO 32000-2 wants CR LF or LF")]
     LoneCr,
     /// No `endobj` after an indirect object.
-    #[error("{n} {g} obj has no endobj", n = .id.0, g = .id.1)]
+    #[error("{id} obj has no endobj")]
     NoEndobj {
         /// The object.
         id: ObjectId,
@@ -352,7 +352,7 @@ pub enum Error {
         at: usize,
     },
     /// A stream with no `endstream` after its data.
-    #[error("{n} {g} obj's stream has no endstream", n = .id.0, g = .id.1)]
+    #[error("{id} obj's stream has no endstream")]
     Endstream {
         /// The object.
         id: ObjectId,
@@ -361,9 +361,7 @@ pub enum Error {
     /// data does, end before they start, run past what the parser reads,
     /// or are in other data.
     #[error(
-        "{n} {g} obj's stream can't have bytes {start}..{end} as its data: they don't start where its data does, end before they start, run past what's read, or are in other data",
-        n = .id.0,
-        g = .id.1
+        "{id} obj's stream can't have bytes {start}..{end} as its data: they don't start where its data does, end before they start, run past what's read, or are in other data"
     )]
     Extent {
         /// The object.
@@ -565,7 +563,7 @@ impl<'a> Parser<'a> {
             let obj = call.significant(t)?;
             let number = u32::try_from(integer(&n, rules.rules())?).ok()?;
             let generation = u16::try_from(integer(&g, rules.rules())?).ok()?;
-            is_keyword(Some(&obj), b"obj").then_some((number, generation))
+            is_keyword(Some(&obj), b"obj").then_some(ObjectId::new(number, generation))
         };
         let id = header(&mut t).ok_or(Error::Header {
             at: self.place(offset),
@@ -832,7 +830,7 @@ impl<'a> Parser<'a> {
                     }
                     *t = look;
                     let at = self.span(token.start, r.end());
-                    return Ok(Object::new(Value::Ref((number, generation))).at(at));
+                    return Ok(Object::new(Value::Ref(ObjectId::new(number, generation))).at(at));
                 }
                 if pdfium {
                     self.pdfium_number(&token, sink)
@@ -1597,7 +1595,7 @@ mod tests {
             |head| Span::new(None, head.start() + 1, head.start() + 2),
             |head| Span::new(None, head.start(), head.start() - 1),
             |head| Span::new(None, head.start(), head.start() + 99),
-            |head| Span::new(Some((9, 0)), head.start(), head.start() + 3),
+            |head| Span::new(Some(ObjectId::new(9, 0)), head.start(), head.start() + 3),
         ];
         let said: Vec<String> = (astray.into_iter())
             .map(|astray| indirect(input, astray).0.unwrap_err().to_string())
@@ -1630,7 +1628,7 @@ mod tests {
         assert_eq!(parser.offset(), 10_000);
         // From its start, it reads.
         let mut parser = Parser::at(data, 0);
-        assert_eq!(parser.header(), Ok((1, 0)));
+        assert_eq!(parser.header(), Ok(ObjectId::new(1, 0)));
         assert_eq!(parser.offset(), 7);
     }
 
@@ -1642,7 +1640,10 @@ mod tests {
         let mut parser = Parser::at(data, 0);
         assert_eq!(parser.header(), Err(Error::Header { at: 0 }));
         assert_eq!(parser.offset(), 0);
-        assert_eq!(*parser.value(&mut ()).unwrap().value(), Value::Ref((1, 0)));
+        assert_eq!(
+            *parser.value(&mut ()).unwrap().value(),
+            Value::Ref(ObjectId::new(1, 0))
+        );
         assert_eq!(parser.offset(), 5);
         assert_eq!(parser.value(&mut ()), Err(Error::Array { at: 6 }));
         assert_eq!(parser.offset(), 5);
@@ -1694,7 +1695,7 @@ mod tests {
     #[test]
     fn values_are_placed_in_the_file_or_an_object_streams_data() {
         let input = b"%x\n<< /A [1 (x) /N] /B 2 0 R /C << /D true >> >> 9";
-        for stream in [None, Some((12, 0))] {
+        for stream in [None, Some(ObjectId::new(12, 0))] {
             let mut parser = Parser::at(input, 3);
             if let Some(stream) = stream {
                 parser = parser.in_stream(stream);
@@ -1918,8 +1919,8 @@ mod tests {
     fn an_indirect_object_reads_after_its_header() {
         let input = b"12 3 obj\n[1 2]\nendobj";
         let mut parser = Parser::at(input, 0);
-        assert_eq!(parser.header(), Ok((12, 3)));
-        let Ok(Body::Object(o)) = parser.body((12, 3), &mut ()) else {
+        assert_eq!(parser.header(), Ok(ObjectId::new(12, 3)));
+        let Ok(Body::Object(o)) = parser.body(ObjectId::new(12, 3), &mut ()) else {
             panic!("an object");
         };
         assert_eq!(bytes(input, o.at.unwrap()), b"[1 2]");
@@ -1976,11 +1977,11 @@ mod tests {
             Span::new(None, start - 1, start + 6),
             Span::new(None, start, input.len() + 1),
             Span::new(None, start, start - 1),
-            Span::new(Some((9, 0)), start, start + 6),
+            Span::new(Some(ObjectId::new(9, 0)), start, start + 6),
         ] {
             let refused = parser.clone().stream(head.clone(), data, &mut ());
             let want = Error::Extent {
-                id: (4, 0),
+                id: ObjectId::new(4, 0),
                 start: data.start,
                 end: data.end,
             };
@@ -2185,7 +2186,7 @@ mod tests {
             [
                 Value::Integer(1),
                 Value::Name(b"A".to_vec()),
-                Value::Ref((2, 0)),
+                Value::Ref(ObjectId::new(2, 0)),
                 Value::Integer(3),
                 Value::Array(vec![Object::from(4).at(Span::new(None, 15, 16))]),
                 Value::String(Str::Bytes(b"5".to_vec()), Some(Form::Literal)),
@@ -2565,15 +2566,31 @@ mod tests {
         let keyword = "is a number by PDFium's rules and a keyword to ISO 32000-2";
         let range = "is outside the integers PDFium's rules read, and read as 0";
         for (input, id, told) in [
-            (&b"3 0 R"[..], (3, 0), vec![]),
-            (b"+3 0 R", (3, 0), vec![]),
-            (b"--3 0 R", (0, 0), vec![("--3", keyword)]),
-            (b"3 --1 R", (3, 0), vec![("--1", keyword)]),
-            (b"3 + R", (3, 0), vec![("+", keyword)]),
-            (b"--3 + R", (0, 0), vec![("--3", keyword), ("+", keyword)]),
-            (b"3 99999999999 R", (3, 0), vec![("99999999999", range)]),
-            (b"4294967299 0 R", (0, 0), vec![("4294967299", range)]),
-            (b"4294967295 65535 R", (u32::MAX, u16::MAX), vec![]),
+            (&b"3 0 R"[..], ObjectId::new(3, 0), vec![]),
+            (b"+3 0 R", ObjectId::new(3, 0), vec![]),
+            (b"--3 0 R", ObjectId::new(0, 0), vec![("--3", keyword)]),
+            (b"3 --1 R", ObjectId::new(3, 0), vec![("--1", keyword)]),
+            (b"3 + R", ObjectId::new(3, 0), vec![("+", keyword)]),
+            (
+                b"--3 + R",
+                ObjectId::new(0, 0),
+                vec![("--3", keyword), ("+", keyword)],
+            ),
+            (
+                b"3 99999999999 R",
+                ObjectId::new(3, 0),
+                vec![("99999999999", range)],
+            ),
+            (
+                b"4294967299 0 R",
+                ObjectId::new(0, 0),
+                vec![("4294967299", range)],
+            ),
+            (
+                b"4294967295 65535 R",
+                ObjectId::new(u32::MAX, u16::MAX),
+                vec![],
+            ),
         ] {
             let (value, kept) = pdfium(input);
             let value = value.unwrap();
@@ -2608,9 +2625,9 @@ mod tests {
         }
         // A header's integers are read the same way.
         let mut parser = Parser::at(b"--1 4294967296 obj 7 endobj", 0).rules(Rules::Pdfium);
-        assert_eq!(parser.header(), Ok((0, 0)));
+        assert_eq!(parser.header(), Ok(ObjectId::new(0, 0)));
         let mut parser = Parser::at(b"1\x800 obj", 0).rules(Rules::Pdfium);
-        assert_eq!(parser.header(), Ok((1, 0)));
+        assert_eq!(parser.header(), Ok(ObjectId::new(1, 0)));
         assert_eq!(
             Parser::at(b"1\x800 obj", 0).header(),
             Err(Error::Header { at: 0 })

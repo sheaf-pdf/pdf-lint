@@ -14,7 +14,7 @@ use std::io::Write as _;
 
 use pdf_filters::{Layout, Prediction};
 use pdf_objects::dict;
-use pdf_objects::object::{Dict, Object, Stream};
+use pdf_objects::object::{Dict, Object, ObjectId, Stream};
 use pdf_objects::serialize;
 
 use super::{Deflate, Error, NUMBERS, usable};
@@ -270,7 +270,7 @@ impl Section {
             );
         }
         let stream = Object::from(Stream::new(trailer, data));
-        serialize::indirect(out, (num, 0), &stream).map_err(Error::Serialize)?;
+        serialize::indirect(out, ObjectId::new(num, 0), &stream).map_err(Error::Serialize)?;
         let _ = write!(out, "startxref\n{at}\n%%EOF\n");
         Ok(())
     }

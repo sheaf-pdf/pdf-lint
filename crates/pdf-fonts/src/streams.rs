@@ -111,7 +111,7 @@ mod reading {
                 Err(unreadable) => return Decoded::Unreadable(unreadable),
             }
             let unreadable = |why: Why, error: &Error| {
-                let message = format!("{} {} R doesn't read: {error}", id.0, id.1);
+                let message = format!("{id} R doesn't read: {error}");
                 Decoded::Unreadable(Unreadable::new(id, why, message))
             };
             match self.decoded_within(id, limit) {

@@ -39,7 +39,7 @@ fn values(data: &[u8]) -> BTreeMap<ObjectId, Object> {
                 let stream = (value.as_dict())
                     .filter(|dict| dict.has(b"Length"))
                     .map(|dict| Object::stream(dict.clone()));
-                objects.insert((next, 0), stream.unwrap_or(value));
+                objects.insert(ObjectId::new(next, 0), stream.unwrap_or(value));
                 next += 1;
                 at = parser.offset();
             }
@@ -188,7 +188,7 @@ impl<'o, R: Resolve<'o>> Resolve<'o> for FailingSome<R> {
     }
 
     fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
-        if id.0 % self.every == 0 {
+        if id.number % self.every == 0 {
             return Err(Unreadable::new(id, self.why, "made to fail"));
         }
         self.objects.try_resolve(id)
@@ -415,7 +415,7 @@ pub fn over<'o, R: Resolve<'o> + Copy>(objects: R, trailer: &'o Dict) -> Vec<Cou
     let top = u32::try_from(size).unwrap_or(0).min(NUMBERS);
     let mut counted = Vec::new();
     for number in 1..top {
-        match objects.try_resolve((number, 0)) {
+        match objects.try_resolve(ObjectId::new(number, 0)) {
             Ok(Some(object)) => {
                 let holds = object.as_dict().and_then(|dict| dict.get(b"Resources"));
                 counted.push(Counted {
@@ -606,7 +606,7 @@ mod tests {
     /// such thing as it is.
     fn file_of(seed: &[u8]) -> Vec<u8> {
         let objects = values(seed);
-        let Some(trailer) = objects.get(&(1, 0)).and_then(Object::as_dict) else {
+        let Some(trailer) = objects.get(&ObjectId::new(1, 0)).and_then(Object::as_dict) else {
             return seed.to_vec();
         };
         let bodies: Vec<(u32, Body)> = (objects.iter())
@@ -616,7 +616,7 @@ mod tests {
                     Some(stream) => Body::stream(stream.dict.clone(), b""),
                     None => Body::Object(object.clone()),
                 };
-                (id.0, body)
+                (id.number, body)
             })
             .collect();
         let root = trailer.get(b"Root").cloned().unwrap_or_else(Object::null);

@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 use pdf_linearize::family::Options;
+use pdf_linearize::pdf_objects::ObjectId;
 use pdf_structure::bytes::{self, Reading};
 use pdf_structure::write::{self, Encryptor};
 use pdf_structure::{Password, XrefKind};
@@ -35,7 +36,7 @@ pub fn encrypted_as(key: &[u8], plain: &[u8]) -> Vec<u8> {
     let reading = opened(plain, "");
     let doc = reading.to_document().unwrap();
     let mut options = write::Options::DEFAULT;
-    options.encrypt_at = Some((1000, 0));
+    options.encrypt_at = Some(ObjectId::new(1000, 0));
     let mut out = Vec::new();
     write::document(&mut out, &doc, Some(&encryptor), Some(&reading), &options).unwrap();
     out

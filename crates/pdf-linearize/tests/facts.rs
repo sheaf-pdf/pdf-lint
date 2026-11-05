@@ -8,6 +8,7 @@ use pdf_linearize::check::{
     Attribute, DictKey, Extent, Facts, Finding, FirstObject, Grade, HintData, HintFacts, PageFacts,
     Raw, RowEntry, RowFacts, SectionFacts, Sink,
 };
+use pdf_linearize::pdf_objects::ObjectId;
 use pdf_linearize::{Kind, Limits, Part, check};
 
 mod cases;
@@ -82,7 +83,7 @@ fn facts_of(written: &Written) -> Facts {
     section.rows = (dictionary..plan.size()).map(row_of).collect();
     section.size = Raw::Integer(i64::from(plan.size()));
     section.prev = Raw::Integer(layout.main_section() as i64);
-    section.root = Raw::Reference((plan.catalog_number(), 0));
+    section.root = Raw::Reference(ObjectId::new(plan.catalog_number(), 0));
     section.startxref = Some(0);
     section.stream = plan.first_xref_number();
     facts.first = Some(section);
@@ -117,7 +118,7 @@ fn facts_of(written: &Written) -> Facts {
                 true => plan.first_page_number(),
                 false => plan.writes()[plan.page_writes(page).start].number,
             };
-            let mut said = PageFacts::new(Some((number, 0)));
+            let mut said = PageFacts::new(Some(ObjectId::new(number, 0)));
             said.resources = true;
             said.media_box = true;
             said

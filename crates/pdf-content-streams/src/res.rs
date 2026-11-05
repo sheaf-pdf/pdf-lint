@@ -67,12 +67,12 @@ impl ResId {
 ///
 /// ```
 /// use pdf_content_streams::Res;
-/// use pdf_content_streams::pdf_objects::dict;
+/// use pdf_content_streams::pdf_objects::{ObjectId, dict};
 ///
 /// let a = Res::dict(dict! { "Type" => "ExtGState", "ca" => 0.5 });
 /// let b = Res::dict(dict! { "ca" => 0.5, "Type" => "ExtGState" });
 /// assert_eq!(a.id, b.id);
-/// assert_ne!(a.id, Res::written((7, 0)).id);
+/// assert_ne!(a.id, Res::written(ObjectId::new(7, 0)).id);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Res {
@@ -164,7 +164,7 @@ fn feed(out: &mut Vec<u8>, object: &Object) {
             dict(out, d);
         }
         Value::Stream(s) => stream(out, s),
-        Value::Ref((number, generation)) => {
+        Value::Ref(ObjectId { number, generation }) => {
             out.push(b'R');
             out.extend(number.to_le_bytes());
             out.extend(generation.to_le_bytes());
@@ -206,7 +206,7 @@ fn stream(out: &mut Vec<u8>, stream: &Stream) {
 fn place(out: &mut Vec<u8>, at: Span) {
     match at.stream {
         None => out.push(0),
-        Some((number, generation)) => {
+        Some(ObjectId { number, generation }) => {
             out.push(1);
             out.extend(number.to_le_bytes());
             out.extend(generation.to_le_bytes());

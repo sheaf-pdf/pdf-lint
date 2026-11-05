@@ -6,6 +6,7 @@ use std::convert::Infallible;
 
 use pdf_linearize::hint::{self, Tables, located};
 use pdf_linearize::layout::{Error, Options};
+use pdf_linearize::pdf_objects::ObjectId;
 use pdf_linearize::{
     Encoded, Graph, Group, Kind, Limits, Page, Part, Stream, StreamKind, What, assemble, plan,
 };
@@ -487,8 +488,8 @@ fn two_pages_sharing_nothing() {
         let written = doc.written();
         let read = holds(&written);
         let plan = &written.plan;
-        assert_eq!(plan.number((4, 0)), Some((1, 0)));
-        assert_eq!(plan.number((6, 0)), Some((2, 0)));
+        assert_eq!(plan.number(ObjectId::new(4, 0)), Some(ObjectId::new(1, 0)));
+        assert_eq!(plan.number(ObjectId::new(6, 0)), Some(ObjectId::new(2, 0)));
         assert_eq!(read.tables.pages.pages.len(), 2);
         assert_eq!(read.tables.shared.groups.len(), 1, "the first page's run");
         assert_eq!(read.tables.shared.header.first_page_entries, 1);
@@ -511,10 +512,10 @@ fn the_shared_tables_first_object_is_never_0() {
         let read = holds(&doc.written());
         assert_eq!(read.tables.shared.header.first_object, first_object);
     }
-    let mut graph = Graph::new((1, 0), Kind::Table);
-    graph.object((1, 0), []);
-    graph.object((2, 0), []);
-    graph.page(Page::new((2, 0)));
+    let mut graph = Graph::new(ObjectId::new(1, 0), Kind::Table);
+    graph.object(ObjectId::new(1, 0), []);
+    graph.object(ObjectId::new(2, 0), []);
+    graph.page(Page::new(ObjectId::new(2, 0)));
     let plan = plan(&graph, &Limits::DEFAULT).unwrap();
     let layout = assemble(&plan, &[10, 10], &Options::new((1, 7)), |stream| {
         Ok::<_, Infallible>(plain(stream))
@@ -557,16 +558,20 @@ fn what_pages_share_is_listed_by_entry() {
             let shared = &tables.pages.pages[page].shared;
             shared.iter().map(|r| r.0).collect()
         };
-        let font8 = entry_of((8, 0)).unwrap();
-        let font7 = entry_of((7, 0)).unwrap();
+        let font8 = entry_of(ObjectId::new(8, 0)).unwrap();
+        let font7 = entry_of(ObjectId::new(7, 0)).unwrap();
         assert!(font8 < tables.shared.header.first_page_entries);
         assert!(font7 >= tables.shared.header.first_page_entries);
-        assert_eq!(entry_of((9, 0)).is_some(), packed, "9's its page's alone");
+        assert_eq!(
+            entry_of(ObjectId::new(9, 0)).is_some(),
+            packed,
+            "9's its page's alone"
+        );
         assert_eq!(ids(0), Vec::<u32>::new());
         if packed {
             // Its own and the shared font in one object stream of part 8, whose entry
             // both lists name.
-            assert_eq!(entry_of((9, 0)), Some(font7));
+            assert_eq!(entry_of(ObjectId::new(9, 0)), Some(font7));
             assert_eq!(ids(1), [font8, font7]);
         } else {
             assert_eq!(ids(1), [font8, font7]);
@@ -574,7 +579,10 @@ fn what_pages_share_is_listed_by_entry() {
         assert_eq!(ids(2), [font7]);
         // An image's last on its page.
         let section = plan.page_writes(1);
-        assert_eq!(plan.writes()[section.end - 1].what, What::Object((10, 0)));
+        assert_eq!(
+            plan.writes()[section.end - 1].what,
+            What::Object(ObjectId::new(10, 0))
+        );
     }
 }
 
@@ -598,11 +606,11 @@ fn a_pages_content_items_are_its_own_streams() {
     let position = |id: u32| {
         written
             .layout
-            .position(written.plan.number((id, 0)).unwrap().0)
+            .position(written.plan.number(ObjectId::new(id, 0)).unwrap().number)
             .unwrap()
     };
     let length = |id: u32| {
-        let number = written.plan.number((id, 0)).unwrap().0;
+        let number = written.plan.number(ObjectId::new(id, 0)).unwrap().number;
         let write = (written.plan.writes().iter())
             .position(|w| w.number == number)
             .unwrap();
@@ -632,9 +640,12 @@ fn a_first_page_other_than_0_keeps_its_place_in_the_tables() {
         let read = holds(&written);
         let plan = &written.plan;
         assert_eq!(read.value("/P"), 1);
-        assert_eq!(read.value("/O"), u64::from(plan.number((4, 0)).unwrap().0));
-        assert_eq!(plan.number((3, 0)), Some((1, 0)));
-        assert_eq!(plan.number((7, 0)), Some((3, 0)));
+        assert_eq!(
+            read.value("/O"),
+            u64::from(plan.number(ObjectId::new(4, 0)).unwrap().number)
+        );
+        assert_eq!(plan.number(ObjectId::new(3, 0)), Some(ObjectId::new(1, 0)));
+        assert_eq!(plan.number(ObjectId::new(7, 0)), Some(ObjectId::new(3, 0)));
         let length = |range: std::ops::Range<usize>| written.lengths[range].iter().sum::<u64>();
         let pages = &read.tables.pages.pages;
         assert_eq!(pages[0].length, length(plan.page_writes(0)));
@@ -663,7 +674,7 @@ fn a_forms_dictionary_is_at_open_and_its_table_says_where_its_fields_are() {
             plan.writes()[open.start + 1].what,
             match packed {
                 true => What::Container(0),
-                false => What::Object((9, 0)),
+                false => What::Object(ObjectId::new(9, 0)),
             }
         );
         let table = read.tables.form.as_ref().unwrap();
@@ -741,10 +752,16 @@ fn the_thumbnail_table_counts_pages_without_one() {
         assert_eq!(table.pages[0].gap, 0);
         assert_eq!(table.pages[1].gap, 1);
         let first = plan.thumb_writes(0);
-        assert_eq!(plan.writes()[first.start].what, What::Object((11, 0)));
+        assert_eq!(
+            plan.writes()[first.start].what,
+            What::Object(ObjectId::new(11, 0))
+        );
         assert_eq!(table.header.first_object, plan.writes()[first.start].number);
         let second = plan.thumb_writes(2);
-        assert_eq!(plan.writes()[second.start].what, What::Object((12, 0)));
+        assert_eq!(
+            plan.writes()[second.start].what,
+            What::Object(ObjectId::new(12, 0))
+        );
         assert_eq!(
             table.pages[0].length,
             written.lengths[first].iter().sum::<u64>()
@@ -855,11 +872,11 @@ fn every_table_says_where_its_group_is() {
         let first = section_at(&written.bytes, written.layout.first_section() as usize).1;
         assert_eq!(
             number_of(&first, "/Info"),
-            Some(u64::from(plan.number((11, 0)).unwrap().0))
+            Some(u64::from(plan.number(ObjectId::new(11, 0)).unwrap().number))
         );
 
         let files = read.tables.files.as_ref().unwrap();
-        let file = |id: u32| plan.number((id, 0)).unwrap().0;
+        let file = |id: u32| plan.number(ObjectId::new(id, 0)).unwrap().number;
         assert_eq!(files.header.first_object, plan.files()[0].number);
         assert_eq!(files.header.groups, 3);
         assert_eq!(files.groups[0].number, file(16));

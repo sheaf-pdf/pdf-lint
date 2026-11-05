@@ -76,7 +76,9 @@ use ::lopdf::{Dictionary, Document, Object, Stream};
 use crate::layout::{self, Encoded, Layout, Piece, assemble};
 pub use crate::plan::FirstPage;
 use crate::plan::{self, Graph, Group, Kind, Page, Plan, What, plan};
-use crate::{Id, Limits};
+use pdf_objects::ObjectId;
+
+use crate::Limits;
 
 /// The attributes a page inherits (7.7.3.4).
 const INHERITED: [&str; 4] = ["Resources", "MediaBox", "CropBox", "Rotate"];
@@ -162,10 +164,10 @@ pub enum PageTree {
     },
     /// A value the tree is read by that's a chain of references past 32, or in
     /// a loop of them, so nothing can say what it reads as.
-    #[error("{} {} R is past {HOPS} references, or in a loop of them", .id.0, .id.1)]
+    #[error("{id} R is past {HOPS} references, or in a loop of them")]
     Unread {
         /// What the last it followed names.
-        id: Id,
+        id: ObjectId,
     },
     /// More levels of nodes than 1,024, under the root.
     #[error("the page tree is too deep")]
@@ -224,30 +226,30 @@ pub enum Error {
     #[error("{0}")]
     Layout(layout::Error<Infallible>),
     /// A real that's infinite or not a number, which a file can't hold.
-    #[error("object {} {} holds a real that isn't finite", .id.0, .id.1)]
+    #[error("object {} {} holds a real that isn't finite", .id.number, .id.generation)]
     NonFinite {
         /// The object.
-        id: Id,
+        id: ObjectId,
     },
     /// A stream inside another object, which only an object of its own can be
     /// (7.3.8).
-    #[error("object {} {} holds a stream inside it", .id.0, .id.1)]
+    #[error("object {} {} holds a stream inside it", .id.number, .id.generation)]
     NestedStream {
         /// The object.
-        id: Id,
+        id: ObjectId,
     },
     /// A stream whose data lopdf didn't read, as its `/Length` didn't hold:
     /// what's held is empty, where the file's isn't.
-    #[error("object {} {} is a stream whose data wasn't read", .id.0, .id.1)]
+    #[error("object {} {} is a stream whose data wasn't read", .id.number, .id.generation)]
     UnreadStream {
         /// The object.
-        id: Id,
+        id: ObjectId,
     },
     /// An object nested past what's written.
-    #[error("object {} {} is nested past {NESTED}", .id.0, .id.1)]
+    #[error("object {} {} is nested past {NESTED}", .id.number, .id.generation)]
     TooDeep {
         /// The object.
-        id: Id,
+        id: ObjectId,
     },
 }
 
@@ -354,14 +356,20 @@ fn trailer_entries(doc: &Document, plan: &Plan) -> Result<Vec<u8>, Error> {
         name(&mut out, key);
         out.push(b' ');
         // The trailer's no object: a fault in it is said of object 0.
-        written(&mut out, value, (0, 0), plan, 0)?;
+        written(&mut out, value, ObjectId::new(0, 0), plan, 0)?;
     }
     Ok(out)
 }
 
 /// `object` as an indirect object numbered `at`, its references in `plan`'s
 /// numbers.
-fn indirect(out: &mut Vec<u8>, id: Id, at: u32, object: &Object, plan: &Plan) -> Result<(), Error> {
+fn indirect(
+    out: &mut Vec<u8>,
+    id: ObjectId,
+    at: u32,
+    object: &Object,
+    plan: &Plan,
+) -> Result<(), Error> {
     let _ = writeln!(out, "{at} 0 obj");
     match object {
         Object::Stream(stream) => {
@@ -390,7 +398,7 @@ fn unread(stream: &Stream) -> bool {
 fn written(
     out: &mut Vec<u8>,
     object: &Object,
-    id: Id,
+    id: ObjectId,
     plan: &Plan,
     depth: usize,
 ) -> Result<(), Error> {
@@ -425,9 +433,9 @@ fn written(
         }
         Object::Dictionary(dict) => dictionary(out, dict, None, id, plan, depth)?,
         Object::Stream(_) => return Err(Error::NestedStream { id }),
-        Object::Reference(to) => match plan.number(*to) {
-            Some((number, generation)) => {
-                let _ = write!(out, "{number} {generation} R");
+        Object::Reference(to) => match plan.number((*to).into()) {
+            Some(id) => {
+                let _ = write!(out, "{id} R");
             }
             None => out.extend_from_slice(b"null"),
         },
@@ -441,7 +449,7 @@ fn dictionary(
     out: &mut Vec<u8>,
     dict: &Dictionary,
     length: Option<usize>,
-    id: Id,
+    id: ObjectId,
     plan: &Plan,
     depth: usize,
 ) -> Result<(), Error> {
@@ -468,7 +476,7 @@ fn dictionary(
 
 /// `value` as a real: with a point, as without one it reads as an integer,
 /// however large (7.3.3); what's too small for a reader to hold is 0.
-fn real(out: &mut Vec<u8>, value: f32, id: Id) -> Result<(), Error> {
+fn real(out: &mut Vec<u8>, value: f32, id: ObjectId) -> Result<(), Error> {
     if !value.is_finite() {
         return Err(Error::NonFinite { id });
     }
@@ -502,30 +510,30 @@ fn name(out: &mut Vec<u8>, text: &[u8]) {
 /// A document ready to plan: the objects to write and what a [`Graph`] says of
 /// them.
 struct Prepared<'d> {
-    catalog: Id,
+    catalog: ObjectId,
     /// Each object to write, the document's own or, where something's pushed
     /// down or taken off, a copy.
     bodies: Bodies<'d>,
     pages: Vec<Page>,
-    page_ids: HashSet<Id>,
+    page_ids: HashSet<ObjectId>,
     first_page: u32,
-    tree_nodes: Vec<Id>,
-    open: Vec<Id>,
-    groups: Vec<(Group, Vec<Id>)>,
+    tree_nodes: Vec<ObjectId>,
+    open: Vec<ObjectId>,
+    groups: Vec<(Group, Vec<ObjectId>)>,
     outlines_first: bool,
     /// The outline's objects, whose links to each other aren't walked, as
     /// they're given to the plan in the order they go.
-    outline: HashSet<Id>,
+    outline: HashSet<ObjectId>,
     /// The name dictionary, of which only `/Dests` is walked, as it's given to
     /// the plan with the named destinations and the rest have groups of their
     /// own.
-    names: Option<Id>,
+    names: Option<ObjectId>,
     /// What's named as a font file.
-    font_files: HashSet<Id>,
+    font_files: HashSet<ObjectId>,
 }
 
 /// Each object to write, by id.
-type Bodies<'d> = BTreeMap<Id, Cow<'d, Object>>;
+type Bodies<'d> = BTreeMap<ObjectId, Cow<'d, Object>>;
 
 impl<'d> Prepared<'d> {
     fn of(doc: &'d Document, options: &Options) -> Result<Prepared<'d>, Error> {
@@ -546,11 +554,11 @@ impl<'d> Prepared<'d> {
         let table = &tree.pages;
         let reached = reached(doc);
         let mut bodies: Bodies<'d> = (doc.objects.iter())
-            .filter(|(id, object)| reached.contains(id) && !no_body(doc, object))
-            .map(|(id, object)| (*id, Cow::Borrowed(object)))
+            .filter(|(id, object)| reached.contains(&ObjectId::from(**id)) && !no_body(doc, object))
+            .map(|(id, object)| (ObjectId::from(*id), Cow::Borrowed(object)))
             .collect();
 
-        let page_ids: HashSet<Id> = table.iter().map(|page| page.id).collect();
+        let page_ids: HashSet<ObjectId> = table.iter().map(|page| page.id).collect();
         pushed_down(&mut bodies, table)?;
         if let Some(why) = tree.apart {
             return Err(Error::PageTree(why));
@@ -558,8 +566,8 @@ impl<'d> Prepared<'d> {
         let mut tree_nodes = nodes_taken_off(doc, catalog, &tree, &page_ids, &mut bodies);
         // A page or a node the tree doesn't list is still no object of the page
         // that names it (F.3.7).
-        let listed: HashSet<Id> = tree_nodes.iter().copied().collect();
-        let strays: Vec<Id> = (bodies.iter())
+        let listed: HashSet<ObjectId> = tree_nodes.iter().copied().collect();
+        let strays: Vec<ObjectId> = (bodies.iter())
             .filter(|(id, body)| {
                 let tree = |dict: &Dictionary| dict.has_type(b"Page") || dict.has_type(b"Pages");
                 !page_ids.contains(id) && dict_of(body).is_some_and(tree)
@@ -577,7 +585,7 @@ impl<'d> Prepared<'d> {
             .collect();
 
         let mut prepared = Prepared {
-            catalog: catalog_id,
+            catalog: catalog_id.into(),
             pages,
             page_ids,
             first_page: first_page(doc, catalog, table, options.first_page),
@@ -637,7 +645,8 @@ impl<'d> Prepared<'d> {
         let of_names = |key: &[u8]| name_dict.and_then(|names| names.get(key).ok());
         let name_tree = of_names(b"Dests");
         if catalog.has(b"Dests") || name_tree.is_some() {
-            let mut dests: Vec<Id> = catalog.get(b"Dests").into_iter().flat_map(roots).collect();
+            let mut dests: Vec<ObjectId> =
+                catalog.get(b"Dests").into_iter().flat_map(roots).collect();
             if name_tree.is_some() {
                 self.names = reference(names);
                 dests.extend(self.names);
@@ -667,7 +676,7 @@ impl<'d> Prepared<'d> {
         }
     }
 
-    fn body(&self, id: Id) -> Option<&Object> {
+    fn body(&self, id: ObjectId) -> Option<&Object> {
         self.bodies.get(&id).map(|body| &**body)
     }
 
@@ -693,7 +702,7 @@ impl<'d> Prepared<'d> {
     }
 
     /// What a walk goes into from object `id`, in the order it does.
-    fn references(&self, id: Id, object: &Object, refs: &mut Vec<Id>) {
+    fn references(&self, id: ObjectId, object: &Object, refs: &mut Vec<ObjectId>) {
         if self.page_ids.contains(&id) {
             if let Some(dict) = dict_of(object) {
                 page_references(dict, refs);
@@ -725,11 +734,11 @@ impl<'d> Prepared<'d> {
 }
 
 /// What `object` refers to, wherever in it, in the order written.
-fn references(object: &Object, refs: &mut Vec<Id>) {
+fn references(object: &Object, refs: &mut Vec<ObjectId>) {
     let mut stack = vec![object];
     while let Some(object) = stack.pop() {
         match object {
-            Object::Reference(id) => refs.push(*id),
+            Object::Reference(id) => refs.push((*id).into()),
             Object::Array(items) => stack.extend(items.iter().rev()),
             Object::Dictionary(dict) => stack.extend(dict.iter().rev().map(|(_, value)| value)),
             Object::Stream(stream) => {
@@ -742,7 +751,7 @@ fn references(object: &Object, refs: &mut Vec<Id>) {
 
 /// What a stream's dictionary refers to, but its `/Length`, which is written
 /// direct, so an object only that names is one nothing in the file names.
-fn stream_references(stream: &Stream, refs: &mut Vec<Id>) {
+fn stream_references(stream: &Stream, refs: &mut Vec<ObjectId>) {
     for (key, value) in &stream.dict {
         if key != b"Length" {
             references(value, refs);
@@ -751,7 +760,7 @@ fn stream_references(stream: &Stream, refs: &mut Vec<Id>) {
 }
 
 /// What the trailer's entries reach.
-fn reached(doc: &Document) -> HashSet<Id> {
+fn reached(doc: &Document) -> HashSet<ObjectId> {
     let mut stack = Vec::new();
     for (key, value) in &doc.trailer {
         let root = key == b"Root";
@@ -759,10 +768,10 @@ fn reached(doc: &Document) -> HashSet<Id> {
             references(value, &mut stack);
         }
     }
-    let mut seen: HashSet<Id> = stack.iter().copied().collect();
+    let mut seen: HashSet<ObjectId> = stack.iter().copied().collect();
     let mut refs = Vec::new();
     while let Some(id) = stack.pop() {
-        let Some(object) = doc.objects.get(&id) else {
+        let Some(object) = doc.objects.get(&<(u32, u16)>::from(id)) else {
             continue;
         };
         refs.clear();
@@ -823,19 +832,21 @@ fn dict_of(object: &Object) -> Option<&Dictionary> {
 }
 
 /// Object `id`'s dictionary, or its stream's, through the references it is.
-fn dict_at(doc: &Document, id: Id) -> Option<&Dictionary> {
-    let object = doc.objects.get(&id)?;
+fn dict_at(doc: &Document, id: ObjectId) -> Option<&Dictionary> {
+    let object = doc.objects.get(&<(u32, u16)>::from(id))?;
     dict_of(doc.dereference(object).ok()?.1)
 }
 
 /// `object`, where it's a reference.
-fn reference(object: Option<&Object>) -> Option<Id> {
-    object.and_then(|object| object.as_reference().ok())
+fn reference(object: Option<&Object>) -> Option<ObjectId> {
+    object
+        .and_then(|object| object.as_reference().ok())
+        .map(Into::into)
 }
 
 /// What `value` names as what a walk starts from: itself where it's a
 /// reference, and what it refers to where it's written in place.
-fn roots(value: &Object) -> Vec<Id> {
+fn roots(value: &Object) -> Vec<ObjectId> {
     let mut refs = Vec::new();
     references(value, &mut refs);
     refs
@@ -857,7 +868,7 @@ fn image(object: &Object) -> bool {
 
 /// What's named as a font file: by a font descriptor, which is an object of its
 /// own, or written in place in its font.
-fn font_files(bodies: &Bodies<'_>) -> HashSet<Id> {
+fn font_files(bodies: &Bodies<'_>) -> HashSet<ObjectId> {
     let mut files = HashSet::new();
     for body in bodies.values() {
         let Object::Dictionary(dict) = &**body else {
@@ -880,7 +891,7 @@ fn font_files(bodies: &Bodies<'_>) -> HashSet<Id> {
 #[derive(Clone, Copy)]
 struct Held<'d> {
     written: &'d Object,
-    holder: Option<Id>,
+    holder: Option<ObjectId>,
     nulled: bool,
 }
 
@@ -888,13 +899,13 @@ type Attributes<'d> = [Option<Held<'d>>; 4];
 
 /// A page of the tree.
 struct Listed<'d> {
-    id: Id,
+    id: ObjectId,
     /// What it holds itself, each of [`INHERITED`].
     own: [bool; 4],
     /// What's above it gives it, each of [`INHERITED`].
     up: Attributes<'d>,
     /// The first numbered node up its `/Parent`s.
-    parent: Option<Id>,
+    parent: Option<ObjectId>,
 }
 
 /// A node met going up from a page.
@@ -902,7 +913,7 @@ struct Above<'d> {
     /// What it gives the pages under it, each of [`INHERITED`].
     attributes: Attributes<'d>,
     /// The next numbered node up its `/Parent`s.
-    parent: Option<Id>,
+    parent: Option<ObjectId>,
     /// How many nodes its `/Parent` chain has, it among them.
     depth: usize,
 }
@@ -910,7 +921,7 @@ struct Above<'d> {
 /// A page tree as read.
 struct Tree<'d> {
     pages: Vec<Listed<'d>>,
-    above: HashMap<Id, Above<'d>>,
+    above: HashMap<ObjectId, Above<'d>>,
     /// The first page that reads otherwise going down `/Kids` than up
     /// `/Parent`.
     apart: Option<PageTree>,
@@ -923,14 +934,14 @@ struct Tree<'d> {
 fn read<'d>(
     doc: &'d Document,
     written: &'d Object,
-) -> Result<Option<(Option<Id>, &'d Object)>, PageTree> {
+) -> Result<Option<(Option<ObjectId>, &'d Object)>, PageTree> {
     let (mut last, mut at, mut followed) = (None, written, 0);
     while let Object::Reference(id) = at {
         if followed == HOPS {
-            return Err(PageTree::Unread { id: *id });
+            return Err(PageTree::Unread { id: (*id).into() });
         }
         followed += 1;
-        last = Some(*id);
+        last = Some(ObjectId::from(*id));
         match doc.objects.get(id) {
             Some(object) => at = object,
             None => return Ok(None),
@@ -960,7 +971,7 @@ fn found<'d>(
 fn through<'d>(
     doc: &'d Document,
     dict: &'d Dictionary,
-    holder: Option<Id>,
+    holder: Option<ObjectId>,
     attributes: &mut Attributes<'d>,
 ) -> Result<(), PageTree> {
     for (slot, key) in attributes.iter_mut().zip(INHERITED) {
@@ -1010,7 +1021,9 @@ fn page_tree<'d>(
             return Err(PageTree::Listed { page: 0 });
         }
     }
-    let root_id = written.and_then(|root| root.as_reference().ok());
+    let root_id = written
+        .and_then(|root| root.as_reference().ok())
+        .map(ObjectId::from);
     seen.extend(root_id);
     // What going down gives what's under each.
     let mut held = [None; 4];
@@ -1042,6 +1055,7 @@ fn page_tree<'d>(
         // PDFium's rules go by /Kids alone and through one reference, so past
         // either it finds other pages than the walk here does.
         let chain = matches!(doc.objects.get(&id), Some(Object::Reference(_)));
+        let id = ObjectId::from(id);
         let node = is_node(doc, dict)?;
         if chain || node != dict.has(b"Kids") {
             return Err(PageTree::Rules { page });
@@ -1096,7 +1110,7 @@ fn page_tree<'d>(
     // think.
     let mut lopdf = doc.page_iter();
     for (page, listed) in table.iter().enumerate() {
-        if lopdf.next() != Some(listed.id) {
+        if lopdf.next() != Some(listed.id.into()) {
             return Err(PageTree::Listed { page });
         }
     }
@@ -1175,9 +1189,9 @@ fn kids_of<'d>(doc: &'d Document, node: Option<&'d Dictionary>) -> Result<&'d [O
 fn inherited<'d>(
     doc: &'d Document,
     written: &'d Object,
-    above: &mut HashMap<Id, Above<'d>>,
+    above: &mut HashMap<ObjectId, Above<'d>>,
     page: usize,
-) -> Result<(Attributes<'d>, Option<Id>), PageTree> {
+) -> Result<(Attributes<'d>, Option<ObjectId>), PageTree> {
     let mut chain = Vec::new();
     let mut at = Some(written);
     let mut attributes = [None; 4];
@@ -1257,9 +1271,9 @@ fn nodes_taken_off(
     doc: &Document,
     catalog: &Dictionary,
     tree: &Tree<'_>,
-    page_ids: &HashSet<Id>,
+    page_ids: &HashSet<ObjectId>,
     bodies: &mut Bodies<'_>,
-) -> Vec<Id> {
+) -> Vec<ObjectId> {
     let mut nodes = Vec::new();
     let mut seen = HashSet::new();
     let mut stack: Vec<&Object> = catalog.get(b"Pages").into_iter().collect();
@@ -1267,6 +1281,7 @@ fn nodes_taken_off(
         let Ok((Some(id), object)) = doc.dereference(node) else {
             continue;
         };
+        let id = ObjectId::from(id);
         let Some(dict) = dict_of(object).filter(|dict| dict.has(b"Kids")) else {
             continue;
         };
@@ -1283,8 +1298,9 @@ fn nodes_taken_off(
     }
     // What a page says is its parent is a node only if it holds kids, or says
     // so: a broken file's /Parent can name its /Resources.
-    let node =
-        |id: Id| dict_at(doc, id).is_some_and(|dict| dict.has(b"Kids") || dict.has_type(b"Pages"));
+    let node = |id: ObjectId| {
+        dict_at(doc, id).is_some_and(|dict| dict.has(b"Kids") || dict.has_type(b"Pages"))
+    };
     // A node met by /Kids can still have one above it that only its /Parent
     // names.
     let mut climbed = HashSet::new();
@@ -1326,7 +1342,12 @@ fn nodes_taken_off(
 /// from one of `nodes`, which lose it: an annotation's `/P`, say, can still
 /// name it, and nothing else would be left to give it what it had. What it
 /// inherits from anything else it still does.
-fn strays_pushed_down(doc: &Document, strays: &[Id], nodes: &HashSet<Id>, bodies: &mut Bodies<'_>) {
+fn strays_pushed_down(
+    doc: &Document,
+    strays: &[ObjectId],
+    nodes: &HashSet<ObjectId>,
+    bodies: &mut Bodies<'_>,
+) {
     let reads = |dict: &'_ Dictionary, key: &[u8]| {
         let read = dict.get(key).map(|written| doc.dereference(written));
         matches!(read, Ok(Ok((_, object))) if !matches!(object, Object::Null))
@@ -1351,7 +1372,7 @@ fn strays_pushed_down(doc: &Document, strays: &[Id], nodes: &HashSet<Id>, bodies
                 let Some(up) = dict_of(up) else { break };
                 if reads(up, key.as_bytes()) {
                     if let (Some(true), Ok(written)) = (
-                        holder.map(|holder| nodes.contains(&holder)),
+                        holder.map(|holder| nodes.contains(&ObjectId::from(holder))),
                         up.get(key.as_bytes()),
                     ) {
                         pushed.push((key, written.clone()));
@@ -1376,7 +1397,7 @@ fn strays_pushed_down(doc: &Document, strays: &[Id], nodes: &HashSet<Id>, bodies
 
 /// What a page says of itself: its content streams and its thumbnail, what its
 /// `/Contents` names read through.
-fn page_said(doc: &Document, id: Id, dict: Option<&Dictionary>) -> Page {
+fn page_said(doc: &Document, id: ObjectId, dict: Option<&Dictionary>) -> Page {
     let mut page = Page::new(id);
     let Some(dict) = dict else {
         return page;
@@ -1387,7 +1408,7 @@ fn page_said(doc: &Document, id: Id, dict: Option<&Dictionary>) -> Page {
             Ok((_, Object::Array(streams))) => {
                 page.contents = streams.iter().filter_map(|s| reference(Some(s))).collect();
             }
-            Ok((Some(stream), _)) => page.contents.push(stream),
+            Ok((Some(stream), _)) => page.contents.push(stream.into()),
             _ => {}
         }
     }
@@ -1397,7 +1418,7 @@ fn page_said(doc: &Document, id: Id, dict: Option<&Dictionary>) -> Page {
 /// What a page refers to, in the order F.3.7 recommends: annotations, beads,
 /// resources, what else it names, its content; not its parent, nor its
 /// thumbnail, which F.3.10 has in part 9.
-fn page_references(dict: &Dictionary, refs: &mut Vec<Id>) {
+fn page_references(dict: &Dictionary, refs: &mut Vec<ObjectId>) {
     let mut of = |key: &[u8]| {
         if let Ok(value) = dict.get(key) {
             references(value, refs);
@@ -1440,7 +1461,7 @@ fn first_page(doc: &Document, catalog: &Dictionary, table: &[Listed<'_>], first:
 
 /// The page object an `/OpenAction` opens at: a destination, or a `/GoTo`
 /// action's.
-fn opens_at(doc: &Document, catalog: &Dictionary, action: &Object) -> Option<Id> {
+fn opens_at(doc: &Document, catalog: &Dictionary, action: &Object) -> Option<ObjectId> {
     let (_, action) = doc.dereference(action).ok()?;
     let destination = match dict_of(action) {
         Some(dict) => {
@@ -1455,7 +1476,11 @@ fn opens_at(doc: &Document, catalog: &Dictionary, action: &Object) -> Option<Id>
 /// The page object a destination names: an array's first element, by way of a
 /// name (the catalog's `/Dests`) or a string (the name dictionary's `/Dests`)
 /// where it's named (12.3.2).
-fn destination_page(doc: &Document, catalog: &Dictionary, destination: &Object) -> Option<Id> {
+fn destination_page(
+    doc: &Document,
+    catalog: &Dictionary,
+    destination: &Object,
+) -> Option<ObjectId> {
     let (_, destination) = doc.dereference(destination).ok()?;
     let target = match destination {
         Object::Array(array) => return reference(array.first()),
@@ -1516,7 +1541,7 @@ fn name_tree_entries<'d>(doc: &'d Document, root: &'d Object) -> Vec<(&'d [u8], 
 
 /// The document parts' nodes (14.12): the `/DPartRoot` dictionary and each node
 /// under it, so a page's `/DPart` stops there (F.3.7).
-fn document_parts(doc: &Document, catalog: &Dictionary, nodes: &mut Vec<Id>) {
+fn document_parts(doc: &Document, catalog: &Dictionary, nodes: &mut Vec<ObjectId>) {
     let Ok(root) = catalog.get(b"DPartRoot") else {
         return;
     };
@@ -1551,12 +1576,12 @@ fn document_parts(doc: &Document, catalog: &Dictionary, nodes: &mut Vec<Id>) {
 /// then what's under a closed item, each in the order it would show if all were
 /// open. What only a broken file's `/Last` or `/Prev` reaches comes after
 /// what's beside it.
-fn outline_order(doc: &Document, outlines: &Object) -> Vec<Id> {
+fn outline_order(doc: &Document, outlines: &Object) -> Vec<ObjectId> {
     let (mut shown, mut hidden) = (Vec::new(), Vec::new());
     let mut seen = HashSet::new();
     let root = reference(Some(outlines));
     let link = |dict: &Dictionary, key: &[u8]| reference(dict.get(key).ok());
-    let mut stack: Vec<(Id, bool)> = Vec::new();
+    let mut stack: Vec<(ObjectId, bool)> = Vec::new();
     stack.extend(root.map(|id| (id, false)));
     if root.is_none() {
         // Written in place, its items are the outline's objects.
@@ -1594,16 +1619,16 @@ mod tests {
 
     /// A plan of a catalog, 1 0, and a page, 2 0, that gives them numbers.
     fn small_plan() -> Plan {
-        let mut graph = Graph::new((1, 0), Kind::Table);
-        graph.object((1, 0), [(2, 0)]);
-        graph.object((2, 0), []);
-        graph.page(Page::new((2, 0)));
+        let mut graph = Graph::new(ObjectId::new(1, 0), Kind::Table);
+        graph.object(ObjectId::new(1, 0), [ObjectId::new(2, 0)]);
+        graph.object(ObjectId::new(2, 0), []);
+        graph.page(Page::new(ObjectId::new(2, 0)));
         plan(&graph, &Limits::DEFAULT).unwrap()
     }
 
     fn write(object: &Object) -> Result<String, Error> {
         let mut out = Vec::new();
-        written(&mut out, object, (9, 0), &small_plan(), 0)?;
+        written(&mut out, object, ObjectId::new(9, 0), &small_plan(), 0)?;
         Ok(String::from_utf8(out).unwrap())
     }
 
@@ -1622,8 +1647,8 @@ mod tests {
     #[test]
     fn a_reference_is_in_the_numbers_written_or_null() {
         let plan = small_plan();
-        let (number, generation) = plan.number((1, 0)).unwrap();
-        let wanted = format!("{number} {generation} R");
+        let id = plan.number(ObjectId::new(1, 0)).unwrap();
+        let wanted = format!("{id} R");
         assert_eq!(write(&Object::Reference((1, 0))).unwrap(), wanted);
         assert_eq!(write(&Object::Reference((1, 3))).unwrap(), "null");
         assert_eq!(write(&Object::Reference((5, 0))).unwrap(), "null");
@@ -1660,7 +1685,15 @@ mod tests {
         assert_eq!(real(1e-40).unwrap(), "0.0");
         assert_eq!(real(-0.0).unwrap(), "0.0");
         for bad in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
-            assert!(matches!(real(bad), Err(Error::NonFinite { id: (9, 0) })));
+            assert!(matches!(
+                real(bad),
+                Err(Error::NonFinite {
+                    id: ObjectId {
+                        number: 9,
+                        generation: 0
+                    }
+                })
+            ));
         }
     }
 
@@ -1670,7 +1703,12 @@ mod tests {
         let array = Object::Array(vec![Object::Stream(stream)]);
         assert!(matches!(
             write(&array),
-            Err(Error::NestedStream { id: (9, 0) })
+            Err(Error::NestedStream {
+                id: ObjectId {
+                    number: 9,
+                    generation: 0
+                }
+            })
         ));
     }
 
@@ -1686,14 +1724,19 @@ mod tests {
         assert!(write(&nested(NESTED)).is_ok());
         assert!(matches!(
             write(&nested(NESTED + 1)),
-            Err(Error::TooDeep { id: (9, 0) })
+            Err(Error::TooDeep {
+                id: ObjectId {
+                    number: 9,
+                    generation: 0
+                }
+            })
         ));
     }
 
     /// An object as an indirect object numbered 7.
     fn at_seven(object: &Object) -> Result<String, Error> {
         let mut out = Vec::new();
-        indirect(&mut out, (9, 0), 7, object, &small_plan())?;
+        indirect(&mut out, ObjectId::new(9, 0), 7, object, &small_plan())?;
         Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
@@ -1720,7 +1763,12 @@ mod tests {
         let unread = Stream::with_position(dict, 10);
         assert!(matches!(
             at_seven(&Object::Stream(unread)),
-            Err(Error::UnreadStream { id: (9, 0) })
+            Err(Error::UnreadStream {
+                id: ObjectId {
+                    number: 9,
+                    generation: 0
+                }
+            })
         ));
         // As it leaves one it did read, empty.
         let mut read = Stream::with_position(dictionary! {}, 10);

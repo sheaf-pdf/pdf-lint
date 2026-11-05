@@ -199,7 +199,12 @@ pub fn encrypted(
     let user = [pdf_crypt::Encoded::verbatim(settings.user)];
     let handler =
         pdf_crypt::Handler::open(&values, settings.id, &user).expect("the writer's opens");
-    let encrypt = |(n, g): ObjectId, data: &[u8], stream: bool| {
+    let encrypt = |ObjectId {
+                       number: n,
+                       generation: g,
+                   }: ObjectId,
+                   data: &[u8],
+                   stream: bool| {
         let iv = [n as u8; 16];
         match stream {
             true => writer::encrypt_stream(&handler, (n, g), data, None, iv),
@@ -232,11 +237,11 @@ pub fn created(
         pdf_crypt::Handler::create(password, encrypt_metadata, rng).expect("a password prepared");
     let mut id = [0; 16];
     rng.fill_bytes(&mut id);
-    let encrypt = |(n, g): ObjectId, data: &[u8], stream: bool| {
-        let context = format!("{n} {g} obj");
+    let encrypt = |id: ObjectId, data: &[u8], stream: bool| {
+        let context = format!("{id} obj");
         match stream {
-            true => handler.encrypt_stream((n, g), context.as_bytes(), data, None),
-            false => handler.encrypt_string((n, g), context.as_bytes(), data),
+            true => handler.encrypt_stream(id.into(), context.as_bytes(), data, None),
+            false => handler.encrypt_string(id.into(), context.as_bytes(), data),
         }
         .expect("the handler's own method")
     };
@@ -281,7 +286,7 @@ fn under(
     }
     let mut written = Vec::new();
     for (n, body) in objects {
-        let id = (*n, 0);
+        let id = ObjectId::new(*n, 0);
         let mut string = |bytes: &[u8]| encrypt(id, bytes, false);
         written.push((
             *n,
@@ -410,7 +415,7 @@ pub fn value(out: &mut Vec<u8>, o: &Object) {
         }
         Value::Dict(d) => dict(out, d),
         Value::Stream(stream) => dict(out, &stream.dict),
-        Value::Ref((n, g)) => out.extend_from_slice(format!("{n} {g} R").as_bytes()),
+        Value::Ref(id) => out.extend_from_slice(format!("{id} R").as_bytes()),
     }
 }
 

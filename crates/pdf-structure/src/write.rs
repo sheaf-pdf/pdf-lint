@@ -734,7 +734,7 @@ pub enum Error {
     /// A string or a stream's data of object `id`, in a file written
     /// encrypted, that isn't encrypted, and why: nothing is written in the
     /// clear in its place.
-    #[error("object {} {} can't be encrypted: {why}", id.0, id.1)]
+    #[error("object {} {} can't be encrypted: {why}", id.number, id.generation)]
     Encrypt {
         /// The object.
         id: ObjectId,
@@ -813,8 +813,7 @@ pub enum Error {
     /// lists free, under keys made per object (RC4, AES-128): it would be
     /// encrypted with a deleted object's key ([`Encryptor::of`]).
     #[error(
-        "object {} {} is at a number its file lists free, so its key would be a deleted object's",
-        .0.0, .0.1
+        "object {0} is at a number its file lists free, so its key would be a deleted object's"
     )]
     Free(ObjectId),
     /// A stream whose data is where it was written
@@ -825,16 +824,13 @@ pub enum Error {
     /// ([`bytes::read`](crate::bytes::read)) has dropped
     /// ([`Reading::to_document`] keeps it), or a reading of its file opened
     /// again that took the document ([`Reading::adopt`]).
-    #[error(
-        "stream {} {}'s data is where no stream of the reading given read it at that number",
-        .0.0, .0.1
-    )]
+    #[error("stream {0}'s data is where no stream of the reading given read it at that number")]
     Placed(ObjectId),
     /// A stream's data that the reading given doesn't hand out, and why:
     /// the reading's error as words, which a caller can't match on, as the
     /// reading's error isn't `Clone` or `Eq` and this one is; the reading
     /// gives it typed ([`Reading::data`]).
-    #[error("stream {} {}'s data doesn't read: {why}", id.0, id.1)]
+    #[error("stream {} {}'s data doesn't read: {why}", id.number, id.generation)]
     Data {
         /// The stream.
         id: ObjectId,
@@ -845,8 +841,7 @@ pub enum Error {
     /// given, under `/EncryptMetadata false`, which leaves the document's
     /// metadata stream in the clear: its `/Metadata` says which that is.
     #[error(
-        "object {} {}, the catalog, isn't written or read, so which stream is the metadata /EncryptMetadata false leaves in the clear isn't known",
-        .0.0, .0.1
+        "object {0}, the catalog, isn't written or read, so which stream is the metadata /EncryptMetadata false leaves in the clear isn't known"
     )]
     Catalog(ObjectId),
     /// A group of object streams' members ([`Groups`]) that names this
@@ -880,17 +875,13 @@ pub enum Error {
     /// [`Reading::to_document`], not another of the same bytes, unless that
     /// one took them as its own ([`Reading::adopt`]).
     #[error(
-        "object {} {} is given with a record of another reading than the one given, or of another object, or, renumbered, with references that aren't where its bytes have them",
-        .0.0, .0.1
+        "object {0} is given with a record of another reading than the one given, or of another object, or, renumbered, with references that aren't where its bytes have them"
     )]
     Elsewhere(ObjectId),
     /// An object given at this number and generation that the renumbering
     /// ([`Options::renumber`]) gives no number to be written at: an object
     /// given is one the caller means written.
-    #[error(
-        "object {} {} is given, and the renumbering gives it no number to be written at",
-        .0.0, .0.1
-    )]
+    #[error("object {0} is given, and the renumbering gives it no number to be written at")]
     Unnumbered(ObjectId),
     /// An update after a file written under a renumbering, whole or as an
     /// update ([`Base::renumbered`]), given an object as read
@@ -914,8 +905,7 @@ pub enum Error {
     /// reader reads what's at their numbers in the clear (ISO 32000-2,
     /// 7.6.2), which another object's strings would then be.
     #[error(
-        "object {} {} is an encryption dictionary or what one refers to, whose number a reader reads in the clear: the renumbering writes another object there, or moves it in an update, which leaves it where it is",
-        .0.0, .0.1
+        "object {0} is an encryption dictionary or what one refers to, whose number a reader reads in the clear: the renumbering writes another object there, or moves it in an update, which leaves it where it is"
     )]
     Moved(ObjectId),
 }
@@ -934,7 +924,10 @@ impl Error {
 fn changed(id: Option<ObjectId>) -> String {
     match id {
         None => "the file the reading given reads has changed since it was read".to_string(),
-        Some((n, g)) => format!(
+        Some(ObjectId {
+            number: n,
+            generation: g,
+        }) => format!(
             "object {n} {g}'s bytes aren't those it was read from: the file has changed since it was read"
         ),
     }
@@ -1100,21 +1093,21 @@ fn checked(
     // Under a renumbering, the numbers given too, each once.
     let mut given = HashSet::with_capacity(if to.0.is_some() { bodies.len() } else { 0 });
     for &(id, _) in bodies {
-        if (to.0.is_some() && !given.insert(id.0)) || held(id.0) {
-            return Err(Error::Twice(id.0));
+        if (to.0.is_some() && !given.insert(id.number)) || held(id.number) {
+            return Err(Error::Twice(id.number));
         }
         let at = to.at(id).ok_or(Error::Unnumbered(id))?;
-        usable(at.0)?;
-        if !taken.insert(at.0) || held(at.0) {
+        usable(at.number)?;
+        if !taken.insert(at.number) || held(at.number) {
             return Err(match to.0 {
-                None => Error::Twice(at.0),
-                Some(_) => Error::WrittenTwice(at.0),
+                None => Error::Twice(at.number),
+                Some(_) => Error::WrittenTwice(at.number),
             });
         }
-        if encrypt_at == Some(at.0) {
-            return Err(Error::EncryptAt(at.0));
+        if encrypt_at == Some(at.number) {
+            return Err(Error::EncryptAt(at.number));
         }
-        if encryptor.is_some_and(|e| e.free(at.0).is_some()) {
+        if encryptor.is_some_and(|e| e.free(at.number).is_some()) {
             return Err(Error::Free(at));
         }
         written.push(at);
@@ -1144,7 +1137,7 @@ fn dangling(
     let mut see = |value: &Object| match value.value() {
         Value::Ref(id) => {
             match to.at(*id) {
-                Some((n, _)) if n >= from || also.contains(&n) => {
+                Some(ObjectId { number: n, .. }) if n >= from || also.contains(&n) => {
                     named.insert(n);
                 }
                 _ => {}
@@ -1183,7 +1176,7 @@ fn dangling(
     }
     if !named.is_empty() {
         for at in bodies.iter().filter_map(|(id, _)| to.at(*id)) {
-            named.remove(&at.0);
+            named.remove(&at.number);
         }
     }
     named

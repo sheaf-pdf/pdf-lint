@@ -143,9 +143,9 @@ fn a_count_or_a_parent_past_a_cap_or_a_password_isn_t_checked() {
     ]);
     let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     for (failed, why) in [
-        ((6, 0), Why::Locked),
-        ((7, 0), Why::Limit),
-        ((6, 0), Why::Source),
+        (ObjectId::new(6, 0), Why::Locked),
+        (ObjectId::new(7, 0), Why::Limit),
+        (ObjectId::new(6, 0), Why::Source),
     ] {
         let resolver = failing(&objects, failed, why);
         let mut kept = Kept::default();
@@ -165,10 +165,13 @@ fn a_count_or_a_parent_past_a_cap_or_a_password_isn_t_checked() {
         // Neither said as a count or a parent that's wrong.
         let count = |fault: &Fault| matches!(fault, Fault::PageTreeCount { .. });
         let parent = Fault::PageTreeParent {
-            lister: Some((2, 0)),
+            lister: Some(ObjectId::new(2, 0)),
         };
         match failed {
-            (6, 0) => assert!(!faults.iter().any(count), "{faults:?}"),
+            ObjectId {
+                number: 6,
+                generation: 0,
+            } => assert!(!faults.iter().any(count), "{faults:?}"),
             _ => assert!(!faults.contains(&parent), "{faults:?}"),
         }
         let quiet = pages(resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ());
@@ -179,11 +182,11 @@ fn a_count_or_a_parent_past_a_cap_or_a_password_isn_t_checked() {
         );
     }
     // By PDFium's rules, the root's /Count is what it goes by, which fails it.
-    let resolver = failing(&objects, (6, 0), Why::Locked);
+    let resolver = failing(&objects, ObjectId::new(6, 0), Why::Locked);
     let walked = pages(resolver, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
     assert!(matches!(walked, Err(Error::Unreadable(_))), "{walked:?}");
     // A count that doesn't read is the count said.
-    let resolver = failing(&objects, (6, 0), Why::Damaged);
+    let resolver = failing(&objects, ObjectId::new(6, 0), Why::Damaged);
     let mut kept = Kept::default();
     pages(resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
     let not_a_number = Fault::PageTreeCount {
@@ -243,7 +246,7 @@ fn pdfium_s_count_is_given_where_it_loads_no_page_under_the_root() {
     let nowhere = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(9))]);
     assert_eq!(counted(resolve, &nowhere, &Limits::DEFAULT), Ok(0));
     // A cap or a password fails it as it fails the walk.
-    let resolver = failing(&objects, (3, 0), Why::Locked);
+    let resolver = failing(&objects, ObjectId::new(3, 0), Why::Locked);
     let failed = counted(resolver, &catalog, &Limits::DEFAULT);
     assert!(matches!(failed, Err(Error::Unreadable(_))), "{failed:?}");
 }
@@ -394,7 +397,10 @@ fn a_tree_too_deep_past_where_the_count_ends_the_walk_isn_t_met() {
         objects.push(object(n, &format!("<< /Kids [{} 0 R] >>", n + 1)));
     }
     objects.push(object(10_004, "<< /Kids [] >>"));
-    assert_eq!(ids(&open(&objects).unwrap()), [(Some((3, 0)), 0)]);
+    assert_eq!(
+        ids(&open(&objects).unwrap()),
+        [(Some(ObjectId::new(3, 0)), 0)]
+    );
     // So too a node listed inside itself, which the count passes.
     let objects = [
         catalog_object(),
@@ -402,7 +408,10 @@ fn a_tree_too_deep_past_where_the_count_ends_the_walk_isn_t_met() {
         object(3, "<< /Type /Page >>"),
         object(4, "<< /Kids [4 0 R] >>"),
     ];
-    assert_eq!(ids(&open(&objects).unwrap()), [(Some((3, 0)), 0)]);
+    assert_eq!(
+        ids(&open(&objects).unwrap()),
+        [(Some(ObjectId::new(3, 0)), 0)]
+    );
 }
 
 /// A resolver of `objects` that keeps what's asked of it.
@@ -566,11 +575,11 @@ fn a_page_listed_twice_is_two_pages() {
     assert_eq!(
         ids(&open(&objects).unwrap()),
         [
-            (Some((3, 0)), 0),
-            (Some((4, 0)), 0),
-            (Some((3, 0)), 1),
-            (Some((6, 0)), 0),
-            (Some((6, 0)), 1)
+            (Some(ObjectId::new(3, 0)), 0),
+            (Some(ObjectId::new(4, 0)), 0),
+            (Some(ObjectId::new(3, 0)), 1),
+            (Some(ObjectId::new(6, 0)), 0),
+            (Some(ObjectId::new(6, 0)), 1)
         ]
     );
     // A kid with /Kids is a node whatever its /Type, and any other a page.
@@ -592,11 +601,11 @@ fn a_page_listed_twice_is_two_pages() {
     assert_eq!(
         ids(&read),
         [
-            (Some((4, 0)), 0),
-            (Some((4, 0)), 1),
-            (Some((9, 0)), 0),
+            (Some(ObjectId::new(4, 0)), 0),
+            (Some(ObjectId::new(4, 0)), 1),
+            (Some(ObjectId::new(9, 0)), 0),
             (None, 0),
-            (Some((5, 0)), 0),
+            (Some(ObjectId::new(5, 0)), 0),
         ]
     );
     assert_eq!(
@@ -611,7 +620,7 @@ fn a_page_listed_twice_is_two_pages() {
         object(2, "<< /Type /Page /MediaBox [0 0 10 20] >>"),
     ];
     let read = open(&one).unwrap();
-    assert_eq!(ids(&read), [(Some((2, 0)), 0)]);
+    assert_eq!(ids(&read), [(Some(ObjectId::new(2, 0)), 0)]);
     assert_eq!(media(&read[0]), [0.0, 0.0, 10.0, 20.0]);
 }
 
@@ -676,7 +685,10 @@ fn pages_share_what_they_hold_however_often_it_s_listed() {
     assert_eq!(table.len(), 90_000);
     let first = table.get(0).unwrap();
     for (i, page) in table.iter().enumerate() {
-        assert_eq!((page.id, page.repeat), (Some((4, 0)), i as u32));
+        assert_eq!(
+            (page.id, page.repeat),
+            (Some(ObjectId::new(4, 0)), i as u32)
+        );
         assert!(std::ptr::eq(page.dict.unwrap(), first.dict.unwrap()));
         assert!(Arc::ptr_eq(
             page.parent.as_ref().unwrap(),
@@ -703,8 +715,12 @@ fn a_page_listed_again_isn_t_read_again() {
     let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
     assert_eq!(table.len(), 3);
     let asked_for = |id| asked.borrow().iter().filter(|asked| **asked == id).count();
-    assert_eq!(asked_for((9, 0)), 2, "/Resources and /MediaBox, once each");
-    assert_eq!(asked_for((3, 0)), 3, "each listing");
+    assert_eq!(
+        asked_for(ObjectId::new(9, 0)),
+        2,
+        "/Resources and /MediaBox, once each"
+    );
+    assert_eq!(asked_for(ObjectId::new(3, 0)), 3, "each listing");
 }
 
 // Pages under one node share its chain, so a /Parent chain is walked once.
@@ -728,7 +744,7 @@ fn pages_under_one_node_share_its_chain() {
     let chain = |index: usize| table.get(index).unwrap().parent.as_ref().unwrap();
     assert!(Arc::ptr_eq(chain(0), chain(1)));
     let parents: Vec<ObjectId> = table.get(0).unwrap().parents().collect();
-    assert_eq!(parents, [(3, 0), (2, 0)]);
+    assert_eq!(parents, [ObjectId::new(3, 0), ObjectId::new(2, 0)]);
 }
 
 #[test]
@@ -767,14 +783,13 @@ fn a_broken_object_every_page_names_is_read_once() {
     assert_eq!(last.media_box().origin, Origin::Default);
     // Said, each time a page names it.
     assert_eq!(kept.faults().len(), 1000);
-    assert!(
-        kept.faults()
-            .iter()
-            .all(|fault| *fault == Fault::Damaged { id: (3, 0) })
-    );
+    assert!(kept.faults().iter().all(|fault| *fault
+        == Fault::Damaged {
+            id: ObjectId::new(3, 0)
+        }));
     // And it fails as it failed the first time.
     for _ in 0..2 {
-        let unreadable = (&reading).try_resolve((3, 0)).unwrap_err();
+        let unreadable = (&reading).try_resolve(ObjectId::new(3, 0)).unwrap_err();
         assert_eq!(unreadable.why, Why::Damaged);
     }
 }
@@ -813,7 +828,10 @@ fn the_root_s_count_ends_the_table_as_it_ends_pdfium_s() {
         object(3, "<< /Type /Page /Parent 2 0 R >>"),
         object(4, "<< /Type /Pages /Parent 2 0 R /Kids [2 0 R] >>"),
     ];
-    assert_eq!(ids(&open(&objects).unwrap()), [(Some((3, 0)), 0)]);
+    assert_eq!(
+        ids(&open(&objects).unwrap()),
+        [(Some(ObjectId::new(3, 0)), 0)]
+    );
 
     // A /Count a hostile file claims doesn't take room it hasn't pages for.
     let objects = [
@@ -882,8 +900,8 @@ fn inherited_boxes_and_rotation_read_as_pdfium_reads_them() {
     ];
     let read = open(&objects).unwrap();
     assert_eq!(read.len(), 8);
-    let two = Origin::Ancestor(Some((2, 0)));
-    let three = Origin::Ancestor(Some((3, 0)));
+    let two = Origin::Ancestor(Some(ObjectId::new(2, 0)));
+    let three = Origin::Ancestor(Some(ObjectId::new(3, 0)));
 
     assert_eq!(
         read[0].media,
@@ -913,7 +931,7 @@ fn inherited_boxes_and_rotation_read_as_pdfium_reads_them() {
             origin: Origin::Default
         }
     );
-    assert_eq!(read[0].parents, [(3, 0), (2, 0)]);
+    assert_eq!(read[0].parents, [ObjectId::new(3, 0), ObjectId::new(2, 0)]);
 
     assert_eq!(
         read[1].rotate,
@@ -1011,9 +1029,12 @@ fn an_attribute_says_where_it_s_from_and_what_it_s_written_as() {
         .unwrap()
         .attribute(Inheritable::Resources)
         .unwrap();
-    assert_eq!(inherited.written.as_reference(), Some((6, 0)));
+    assert_eq!(inherited.written.as_reference(), Some(ObjectId::new(6, 0)));
     assert!(inherited.value.as_dict().unwrap().has(b"B"));
-    assert_eq!(inherited.origin, Origin::Ancestor(Some((2, 0))));
+    assert_eq!(
+        inherited.origin,
+        Origin::Ancestor(Some(ObjectId::new(2, 0)))
+    );
 
     let own = table
         .get(1)
@@ -1029,7 +1050,7 @@ fn an_attribute_says_where_it_s_from_and_what_it_s_written_as() {
             .attribute(Inheritable::Rotate)
             .unwrap()
             .origin,
-        Origin::Ancestor(Some((2, 0)))
+        Origin::Ancestor(Some(ObjectId::new(2, 0)))
     );
     assert!(
         table
@@ -1059,10 +1080,10 @@ fn by_pdfium_s_rules_a_kid_in_place_has_a_place_and_a_node_under_it_too() {
     assert_eq!(
         ids(&read),
         [
-            (Some((3, 0)), 0),
+            (Some(ObjectId::new(3, 0)), 0),
             (None, 0),
-            (Some((4, 0)), 0),
-            (Some((5, 0)), 0)
+            (Some(ObjectId::new(4, 0)), 0),
+            (Some(ObjectId::new(5, 0)), 0)
         ]
     );
     assert_eq!(media(&read[1]), [0.0, 0.0, 77.0, 77.0]);
@@ -1091,13 +1112,13 @@ fn by_pdfium_s_rules_a_kid_that_names_no_dictionary_takes_its_place() {
         let pages = counted.pages.unwrap();
         assert_eq!(pages.len(), 3, "{kid}");
         assert!(!pages[1].loads, "{kid}");
-        assert_eq!(pages[2].id, Some((5, 0)), "{kid}");
+        assert_eq!(pages[2].id, Some(ObjectId::new(5, 0)), "{kid}");
         // Counted out, it still takes a place, so 5 has no number at all.
         let uncounted = read("");
         let pages = uncounted.pages.unwrap();
         assert_eq!(uncounted.counted, 2, "{kid}");
         assert_eq!(pages.len(), 2, "{kid}");
-        assert_eq!(pages[0].id, Some((3, 0)), "{kid}");
+        assert_eq!(pages[0].id, Some(ObjectId::new(3, 0)), "{kid}");
         assert!(!pages[1].loads, "{kid}");
     }
 }
@@ -1124,7 +1145,7 @@ fn by_pdfium_s_rules_a_node_s_count_is_trusted_where_the_root_s_isn_t_there() {
             .unwrap()
             .iter()
             .filter_map(|page| page.id)
-            .map(|id| id.0)
+            .map(|id| id.number)
             .collect::<Vec<_>>();
         (pages, table.counted)
     };
@@ -1154,7 +1175,7 @@ fn by_pdfium_s_rules_type_doesn_t_tell_a_node_from_a_page() {
     for kind in ["/Page", "/Foo", "(Pages)", "null"] {
         let kid = format!("<< /Type {kind} /Kids [4 0 R] >>");
         let read = one(&kid, "/Count 1").unwrap();
-        assert_eq!(ids(&read), [(Some((4, 0)), 0)], "{kind}");
+        assert_eq!(ids(&read), [(Some(ObjectId::new(4, 0)), 0)], "{kind}");
         assert!(read[0].loads, "{kind}");
     }
     // Without, its /Type says whether it loads, under a root's /Count.
@@ -1163,7 +1184,7 @@ fn by_pdfium_s_rules_type_doesn_t_tell_a_node_from_a_page() {
     for kind in ["/Pages", "/Foo", "(Page)", "null", "88 0 R"] {
         let kid = format!("<< /Type {kind} >>");
         let read = one(&kid, "/Count 1").unwrap();
-        assert_eq!(ids(&read), [(Some((3, 0)), 0)], "{kind}");
+        assert_eq!(ids(&read), [(Some(ObjectId::new(3, 0)), 0)], "{kind}");
         assert!(!read[0].loads, "{kind}");
     }
     // But with no root /Count, what the count of the tree counts loads, and
@@ -1175,7 +1196,10 @@ fn by_pdfium_s_rules_type_doesn_t_tell_a_node_from_a_page() {
     assert_eq!(one("<< /Type /Pages >>", ""), Err(Error::NoPages));
     // /Page with /Kids counts for one however many it lists.
     let kid = "<< /Type /Page /Kids [4 0 R 4 0 R] >>";
-    assert_eq!(ids(&one(kid, "").unwrap()), [(Some((4, 0)), 0)]);
+    assert_eq!(
+        ids(&one(kid, "").unwrap()),
+        [(Some(ObjectId::new(4, 0)), 0)]
+    );
 }
 
 #[test]
@@ -1240,7 +1264,7 @@ fn by_pdfium_s_rules_a_root_of_type_page_with_kids_no_array_is_page_0_of_its_cou
             let table = root(&dict);
             assert_eq!(table.counted, counted, "{dict}");
             let read = table.pages.unwrap();
-            assert_eq!(ids(&read), [(Some((2, 0)), 0)], "{dict}");
+            assert_eq!(ids(&read), [(Some(ObjectId::new(2, 0)), 0)], "{dict}");
             assert!(read[0].loads, "{dict}");
             assert_eq!(media(&read[0]), [0.0, 0.0, 2.0, 200.0], "{dict}");
         }
@@ -1266,7 +1290,7 @@ fn by_pdfium_s_rules_a_root_of_type_page_with_kids_no_array_is_page_0_of_its_cou
     let dict = "<< /Type /Page /Kids [] /Count 2 >>";
     assert_eq!(root(dict).pages, Err(Error::NoPages));
     let table = root("<< /Type /Page /Kids [3 0 R] /Count 2 /MediaBox [0 0 2 200] >>");
-    assert_eq!(ids(&table.pages.unwrap()), [(Some((3, 0)), 0)]);
+    assert_eq!(ids(&table.pages.unwrap()), [(Some(ObjectId::new(3, 0)), 0)]);
     // In place, it's page 0 with no number, and it inherits as a page does.
     let objects = [
         object(
@@ -1280,12 +1304,15 @@ fn by_pdfium_s_rules_a_root_of_type_page_with_kids_no_array_is_page_0_of_its_cou
     let read = table.pages.unwrap();
     assert_eq!(ids(&read), [(None, 0)]);
     assert_eq!(media(&read[0]), [0.0, 0.0, 41.0, 42.0]);
-    assert_eq!(read[0].media.origin, Origin::Ancestor(Some((4, 0))));
+    assert_eq!(
+        read[0].media.origin,
+        Origin::Ancestor(Some(ObjectId::new(4, 0)))
+    );
     // A /Kids that doesn't read isn't an array, and is said once.
     let objects = parsed(&[(2, "<< /Type /Page /Kids 6 0 R /Count 3 >>")]);
     let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     let mut kept = Kept::default();
-    let resolver = failing(&objects, (6, 0), Why::Damaged);
+    let resolver = failing(&objects, ObjectId::new(6, 0), Why::Damaged);
     let table = pages(
         resolver,
         &catalog,
@@ -1295,9 +1322,14 @@ fn by_pdfium_s_rules_a_root_of_type_page_with_kids_no_array_is_page_0_of_its_cou
     )
     .unwrap();
     assert_eq!((table.len(), table.counted()), (1, 3));
-    assert_eq!(kept.faults(), [Fault::Damaged { id: (6, 0) }]);
+    assert_eq!(
+        kept.faults(),
+        [Fault::Damaged {
+            id: ObjectId::new(6, 0)
+        }]
+    );
     // One that fails the walk fails it here too.
-    let resolver = failing(&objects, (6, 0), Why::Locked);
+    let resolver = failing(&objects, ObjectId::new(6, 0), Why::Locked);
     let walked = pages(resolver, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ());
     assert!(matches!(walked, Err(Error::Unreadable(_))), "{walked:?}");
     // By ISO's rules it's a page as well, its /Kids said.
@@ -1309,7 +1341,7 @@ fn by_pdfium_s_rules_a_root_of_type_page_with_kids_no_array_is_page_0_of_its_cou
         ),
     ];
     let (list, faults) = iso(&objects);
-    assert_eq!(list, [(Some((2, 0)), 0)]);
+    assert_eq!(list, [(Some(ObjectId::new(2, 0)), 0)]);
     assert!(faults.contains(&Fault::PageTreeType), "{faults:?}");
 }
 
@@ -1327,7 +1359,10 @@ fn inheritance_goes_up_parent_not_the_path_walked() {
     for rules in [Rules::Pdfium, Rules::Iso] {
         let read = open_with(&objects, rules, &Limits::DEFAULT).pages.unwrap();
         assert_eq!(read[0].media.value, Rect([0.0, 0.0, 41.0, 42.0]));
-        assert_eq!(read[0].media.origin, Origin::Ancestor(Some((4, 0))));
+        assert_eq!(
+            read[0].media.origin,
+            Origin::Ancestor(Some(ObjectId::new(4, 0)))
+        );
     }
 }
 
@@ -1357,12 +1392,15 @@ fn a_parent_is_read_written_in_place_and_through_a_chain() {
     // And on up from there.
     let up = read("<< /Parent 2 0 R >>", vec![]);
     assert_eq!(up.media.value, Rect([0.0, 0.0, 21.0, 22.0]));
-    assert_eq!(up.media.origin, Origin::Ancestor(Some((2, 0))));
-    assert_eq!(up.parents, [(2, 0)]);
+    assert_eq!(up.media.origin, Origin::Ancestor(Some(ObjectId::new(2, 0))));
+    assert_eq!(up.parents, [ObjectId::new(2, 0)]);
     // A chain of two, as far as PDFium goes.
     let chained = read("9 0 R", vec![object(9, "2 0 R")]);
-    assert_eq!(chained.media.origin, Origin::Ancestor(Some((2, 0))));
-    assert_eq!(chained.parents, [(2, 0)]);
+    assert_eq!(
+        chained.media.origin,
+        Origin::Ancestor(Some(ObjectId::new(2, 0)))
+    );
+    assert_eq!(chained.parents, [ObjectId::new(2, 0)]);
     // Three is too many, and nothing's inherited.
     let long = read(
         "9 0 R",
@@ -1436,19 +1474,31 @@ fn a_value_by_reference_is_found_as_each_set_of_rules_finds_it() {
     // A reference to nothing isn't found, so the climb goes on, by either.
     for rules in [Rules::Pdfium, Rules::Iso] {
         let page = read("88 0 R", rules);
-        assert_eq!(page.media.origin, Origin::Ancestor(Some((2, 0))));
-        assert_eq!(page.rotate.origin, Origin::Ancestor(Some((2, 0))));
+        assert_eq!(
+            page.media.origin,
+            Origin::Ancestor(Some(ObjectId::new(2, 0)))
+        );
+        assert_eq!(
+            page.rotate.origin,
+            Origin::Ancestor(Some(ObjectId::new(2, 0)))
+        );
     }
     // Null stops it by PDFium's, and is absent by ISO's.
     let page = read("9 0 R", Rules::Pdfium);
     assert_eq!(page.media.origin, Origin::Default);
     assert_eq!(page.rotate.origin, Origin::Default);
     let page = read("9 0 R", Rules::Iso);
-    assert_eq!(page.media.origin, Origin::Ancestor(Some((2, 0))));
+    assert_eq!(
+        page.media.origin,
+        Origin::Ancestor(Some(ObjectId::new(2, 0)))
+    );
     let page = read("null", Rules::Pdfium);
     assert_eq!(page.media.origin, Origin::Default);
     let page = read("null", Rules::Iso);
-    assert_eq!(page.media.origin, Origin::Ancestor(Some((2, 0))));
+    assert_eq!(
+        page.media.origin,
+        Origin::Ancestor(Some(ObjectId::new(2, 0)))
+    );
     // A box through a chain isn't one by PDFium's, and is by ISO's.
     let page = read("10 0 R", Rules::Pdfium);
     assert_eq!(page.media.origin, Origin::Default);
@@ -1608,7 +1658,7 @@ fn parsed(objects: &[(u32, &str)]) -> BTreeMap<ObjectId, Object> {
     (objects.iter())
         .map(|(number, text)| {
             let value = Parser::at(text.as_bytes(), 0).value(&mut ()).unwrap();
-            ((*number, 0), value)
+            (ObjectId::new(*number, 0), value)
         })
         .collect()
 }
@@ -1626,7 +1676,11 @@ fn an_object_that_doesn_t_read_is_said_or_fails_the_walk_by_why() {
     ]);
     let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     for rules in [Rules::Pdfium, Rules::Iso] {
-        for failed in [(3, 0), (5, 0), (2, 0)] {
+        for failed in [
+            ObjectId::new(3, 0),
+            ObjectId::new(5, 0),
+            ObjectId::new(2, 0),
+        ] {
             for why in [Why::Limit, Why::Locked, Why::Source] {
                 let resolver = failing(&objects, failed, why);
                 let walked = pages(resolver, &catalog, rules, &Limits::DEFAULT, &mut ());
@@ -1646,7 +1700,7 @@ fn an_object_that_doesn_t_read_is_said_or_fails_the_walk_by_why() {
                 "{failed:?}: {:?}",
                 kept.faults()
             );
-            if failed == (2, 0) {
+            if failed == ObjectId::new(2, 0) {
                 assert_eq!(walked, Err(Error::NoPages));
             } else {
                 assert!(walked.is_ok(), "{failed:?}");
@@ -1654,12 +1708,12 @@ fn an_object_that_doesn_t_read_is_said_or_fails_the_walk_by_why() {
         }
     }
     // A page damaged takes its place by PDFium's, and has none by ISO's.
-    let resolver = failing(&objects, (3, 0), Why::Damaged);
+    let resolver = failing(&objects, ObjectId::new(3, 0), Why::Damaged);
     let by = |rules| pages(resolver, &catalog, rules, &Limits::DEFAULT, &mut ()).unwrap();
     assert_eq!(by(Rules::Pdfium).len(), 2);
     assert_eq!(by(Rules::Pdfium).get(0).unwrap().dict, None);
     assert_eq!(by(Rules::Iso).len(), 1);
-    assert_eq!(by(Rules::Iso).get(0).unwrap().id, Some((4, 0)));
+    assert_eq!(by(Rules::Iso).get(0).unwrap().id, Some(ObjectId::new(4, 0)));
 }
 
 #[test]
@@ -1732,7 +1786,11 @@ fn on_a_well_formed_tree_the_two_give_the_same_and_iso_s_says_nothing() {
     let pages = by_iso.pages.unwrap();
     assert_eq!(
         ids(&pages),
-        [(Some((5, 0)), 0), (Some((6, 0)), 0), (Some((4, 0)), 0)]
+        [
+            (Some(ObjectId::new(5, 0)), 0),
+            (Some(ObjectId::new(6, 0)), 0),
+            (Some(ObjectId::new(4, 0)), 0)
+        ]
     );
 }
 
@@ -1746,9 +1804,9 @@ fn iso_with(number: u32, body: &str) -> (Vec<(Option<ObjectId>, u32)>, Vec<Fault
     iso(&objects)
 }
 
-const FIVE: (Option<ObjectId>, u32) = (Some((5, 0)), 0);
-const SIX: (Option<ObjectId>, u32) = (Some((6, 0)), 0);
-const FOUR: (Option<ObjectId>, u32) = (Some((4, 0)), 0);
+const FIVE: (Option<ObjectId>, u32) = (Some(ObjectId::new(5, 0)), 0);
+const SIX: (Option<ObjectId>, u32) = (Some(ObjectId::new(6, 0)), 0);
+const FOUR: (Option<ObjectId>, u32) = (Some(ObjectId::new(4, 0)), 0);
 
 #[test]
 fn by_iso_s_rules_a_kid_that_s_no_dictionary_has_no_place_and_is_said() {
@@ -1784,7 +1842,7 @@ fn by_iso_s_rules_a_kid_in_place_is_read_and_said() {
     assert_eq!(list, [FIVE, (None, 0), SIX, FOUR]);
     assert!(faults.contains(&Fault::PageTreeKidDirect), "{faults:?}");
     // The kid in place has no /Parent, and the count of the root is off by it.
-    let lister = Some((3, 0));
+    let lister = Some(ObjectId::new(3, 0));
     assert!(faults.contains(&Fault::PageTreeParent { lister }));
     let count = Some(3);
     assert!(faults.contains(&Fault::PageTreeCount { count, under: 4 }));
@@ -1858,7 +1916,7 @@ fn by_iso_s_rules_each_departure_of_a_node_is_said() {
     // A /Parent that isn't the holder, or isn't there, of a node or a page,
     // each the holder's.
     let kids = "/Type /Pages /Kids [5 0 R 6 0 R] /Count 2";
-    let (root, node) = (Some((2, 0)), Some((3, 0)));
+    let (root, node) = (Some(ObjectId::new(2, 0)), Some(ObjectId::new(3, 0)));
     said(
         3,
         &format!("<< {kids} >>"),
@@ -1905,17 +1963,27 @@ fn by_iso_s_rules_a_node_or_a_page_listed_twice_is_said_and_listed_again() {
         3,
         "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R 6 0 R 5 0 R] /Count 3 >>",
     );
-    assert_eq!(list, [FIVE, SIX, (Some((5, 0)), 1), FOUR]);
-    assert!(faults.contains(&Fault::PageTreeRepeated { id: (5, 0) }));
+    assert_eq!(list, [FIVE, SIX, (Some(ObjectId::new(5, 0)), 1), FOUR]);
+    assert!(faults.contains(&Fault::PageTreeRepeated {
+        id: ObjectId::new(5, 0)
+    }));
     let (list, faults) = iso_with(
         2,
         "<< /Type /Pages /Kids [3 0 R 3 0 R 4 0 R] /Count 5 /MediaBox [0 0 1 1] >>",
     );
     assert_eq!(
         list,
-        [FIVE, SIX, (Some((5, 0)), 1), (Some((6, 0)), 1), FOUR]
+        [
+            FIVE,
+            SIX,
+            (Some(ObjectId::new(5, 0)), 1),
+            (Some(ObjectId::new(6, 0)), 1),
+            FOUR
+        ]
     );
-    assert!(faults.contains(&Fault::PageTreeRepeated { id: (3, 0) }));
+    assert!(faults.contains(&Fault::PageTreeRepeated {
+        id: ObjectId::new(3, 0)
+    }));
 }
 
 #[test]
@@ -1925,8 +1993,12 @@ fn by_iso_s_rules_a_cycle_is_said_and_not_walked_again() {
         "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R 3 0 R 2 0 R 6 0 R] /Count 2 >>",
     );
     assert_eq!(list, [FIVE, SIX, FOUR]);
-    assert!(faults.contains(&Fault::PageTreeCycle { id: (3, 0) }));
-    assert!(faults.contains(&Fault::PageTreeCycle { id: (2, 0) }));
+    assert!(faults.contains(&Fault::PageTreeCycle {
+        id: ObjectId::new(3, 0)
+    }));
+    assert!(faults.contains(&Fault::PageTreeCycle {
+        id: ObjectId::new(2, 0)
+    }));
 }
 
 #[test]
@@ -2042,7 +2114,7 @@ fn by_iso_s_rules_a_count_and_a_parent_say_what_the_walk_found() {
     // A /Parent that isn't the node that lists it, which has a number.
     let (_, faults) = iso_with(3, "<< /Type /Pages /Kids [5 0 R 6 0 R] /Count 2 >>");
     let numbered = Fault::PageTreeParent {
-        lister: Some((2, 0)),
+        lister: Some(ObjectId::new(2, 0)),
     };
     assert_eq!(
         faults.iter().filter(|fault| **fault == numbered).count(),
@@ -2065,7 +2137,7 @@ fn by_iso_s_rules_a_count_and_a_parent_say_what_the_walk_found() {
         object(3, "<< /Type /Page /Parent 2 0 R >>"),
     ];
     let (list, faults) = iso(&objects);
-    assert_eq!(list, [(Some((3, 0)), 0)]);
+    assert_eq!(list, [(Some(ObjectId::new(3, 0)), 0)]);
     assert!(faults.contains(&in_place), "{faults:?}");
     assert!(faults.contains(&numbered), "{faults:?}");
     let objects = [
@@ -2113,7 +2185,7 @@ fn by_iso_s_rules_a_root_s_departures_are_said() {
         object(2, "<< /Type /Page /MediaBox [0 0 1 1] >>"),
     ];
     let (list, faults) = iso(&objects);
-    assert_eq!(list, [(Some((2, 0)), 0)]);
+    assert_eq!(list, [(Some(ObjectId::new(2, 0)), 0)]);
     assert_eq!(faults, [Fault::PageTreeType]);
 }
 
@@ -2134,7 +2206,7 @@ fn by_iso_s_rules_a_chain_is_followed_and_said() {
     assert_eq!(faults, [Fault::PageTreeChain]);
     // And PDFium's has a place there with no page.
     let read = open(&objects).unwrap();
-    assert_eq!(read[0].id, Some((8, 0)));
+    assert_eq!(read[0].id, Some(ObjectId::new(8, 0)));
     assert!(!read[0].loads);
 }
 
@@ -2153,11 +2225,15 @@ fn only_a_sink_that_wants_them_has_its_checks_run() {
     };
     pages(resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ()).unwrap();
     // `()` doesn't want the /Count held to anything.
-    assert!(!asked.borrow().contains(&(8, 0)), "{:?}", asked.borrow());
+    assert!(
+        !asked.borrow().contains(&ObjectId::new(8, 0)),
+        "{:?}",
+        asked.borrow()
+    );
     asked.borrow_mut().clear();
     let mut kept = Kept::default();
     pages(resolve, &catalog, Rules::Iso, &Limits::DEFAULT, &mut kept).unwrap();
-    assert!(asked.borrow().contains(&(8, 0)));
+    assert!(asked.borrow().contains(&ObjectId::new(8, 0)));
     assert_eq!(kept.faults(), [Fault::PageNoMediaBox]);
 }
 
@@ -2175,7 +2251,7 @@ fn a_walk_reads_nothing_past_the_count_or_any_content() {
         objects.get(&id)
     };
     pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
-    assert_eq!(*asked.borrow(), [(2, 0), (3, 0)]);
+    assert_eq!(*asked.borrow(), [ObjectId::new(2, 0), ObjectId::new(3, 0)]);
 }
 
 #[test]
@@ -2194,7 +2270,7 @@ fn an_error_s_words_are_the_whole_message() {
         "the page tree lists too many pages"
     );
     assert_eq!(Error::NoPages.to_string(), "the file has no pages");
-    let unreadable = Unreadable::new((3, 0), Why::Locked, "takes a password");
+    let unreadable = Unreadable::new(ObjectId::new(3, 0), Why::Locked, "takes a password");
     let error = Error::from(unreadable);
     assert_eq!(error.to_string(), "takes a password");
     assert!(std::error::Error::source(&error).is_none());
@@ -2219,7 +2295,7 @@ fn a_fault_says_where_it_is() {
     let (place, _) = (kept.0.iter())
         .find(|(_, fault)| *fault == Fault::PageTreeKidNotDictionary)
         .unwrap();
-    assert_eq!(place.object, Some((3, 0)));
+    assert_eq!(place.object, Some(ObjectId::new(3, 0)));
     assert!(place.at.is_some());
 
     // Back at the node that lists it, the fault's in that node.
@@ -2245,7 +2321,10 @@ fn a_fault_says_where_it_is() {
         .filter(|(_, fault)| *fault == Fault::PageTreeKidNotDictionary)
         .map(|(place, _)| place.object)
         .collect();
-    assert_eq!(places, [Some((3, 0)), Some((2, 0))]);
+    assert_eq!(
+        places,
+        [Some(ObjectId::new(3, 0)), Some(ObjectId::new(2, 0))]
+    );
 
     // What's said of a kid's own dictionary is in the kid's object, and of the
     // reference to it in the node that lists it.
@@ -2276,19 +2355,19 @@ fn a_fault_says_where_it_is() {
     };
     assert_eq!(
         of(|fault| *fault == Fault::PageTreeType),
-        [Some((3, 0)), Some((4, 0))]
+        [Some(ObjectId::new(3, 0)), Some(ObjectId::new(4, 0))]
     );
     assert_eq!(
         of(|fault| *fault == Fault::PageTreeKidNotDictionary),
-        [Some((5, 0))]
+        [Some(ObjectId::new(5, 0))]
     );
     assert_eq!(
         of(|fault| matches!(fault, Fault::PageTreeRepeated { .. })),
-        [Some((2, 0))]
+        [Some(ObjectId::new(2, 0))]
     );
     assert_eq!(
         of(|fault| matches!(fault, Fault::PageTreeCycle { .. })),
-        [Some((2, 0))]
+        [Some(ObjectId::new(2, 0))]
     );
 
     // Each said of the reference to a kid is in the node that lists it, whatever
@@ -2318,11 +2397,14 @@ fn a_fault_says_where_it_is() {
     };
     assert_eq!(
         of(|fault| matches!(fault, Fault::PageTreeCycle { .. })),
-        [Some((5, 0))]
+        [Some(ObjectId::new(5, 0))]
     );
     assert_eq!(
-        of(|fault| *fault == Fault::PageTreeRepeated { id: (4, 0) }),
-        [Some((2, 0))]
+        of(|fault| *fault
+            == Fault::PageTreeRepeated {
+                id: ObjectId::new(4, 0)
+            }),
+        [Some(ObjectId::new(2, 0))]
     );
 
     // And what's said on the way up a /Parent chain, in the node that has it.
@@ -2341,7 +2423,7 @@ fn a_fault_says_where_it_is() {
     let (place, _) = (kept.0.iter())
         .find(|(_, fault)| *fault == Fault::PageTreeParentDirect)
         .unwrap();
-    assert_eq!(place.object, Some((4, 0)));
+    assert_eq!(place.object, Some(ObjectId::new(4, 0)));
 }
 
 #[test]
@@ -2366,7 +2448,7 @@ fn what_only_a_sink_reads_fails_no_walk() {
             "<< /Type /Pages /Kids [4 0 R] /Count 1 /Parent 7 0 R >>",
             Some("<< /Type /Page /MediaBox [0 0 1 1] >>"),
             Fault::PageTreeParent {
-                lister: Some((2, 0)),
+                lister: Some(ObjectId::new(2, 0)),
             },
         ),
         (
@@ -2397,7 +2479,11 @@ fn what_only_a_sink_reads_fails_no_walk() {
             // None: 7 is the loop of references it's written as.
             let resolver = failing(
                 &objects,
-                if why.is_some() { (7, 0) } else { (0, 0) },
+                if why.is_some() {
+                    ObjectId::new(7, 0)
+                } else {
+                    ObjectId::new(0, 0)
+                },
                 failed,
             );
             let quiet = pages(resolver, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ());
@@ -2411,7 +2497,10 @@ fn what_only_a_sink_reads_fails_no_walk() {
                 continue;
             }
             let why = why.unwrap_or(Why::Limit);
-            let unchecked = Fault::Unchecked { id: (7, 0), why };
+            let unchecked = Fault::Unchecked {
+                id: ObjectId::new(7, 0),
+                why,
+            };
             assert!(faults.contains(&unchecked), "{root} {kid}: {faults:?}");
             assert!(!faults.contains(&fault), "{root} {kid}: {faults:?}");
         }
@@ -2436,7 +2525,7 @@ fn kids_that_give_nothing_are_charged_to_the_walk() {
     // Four to a page: eight kids are read, and a ninth isn't. By PDFium's rules
     // the count of the tree meets it, as the walk would stop at what's counted.
     let read = open_with(&tree(7), Rules::Iso, &limits).pages.unwrap();
-    assert_eq!(ids(&read), [(Some((3, 0)), 0)]);
+    assert_eq!(ids(&read), [(Some(ObjectId::new(3, 0)), 0)]);
     assert!(open_with(&tree(7), Rules::Pdfium, &limits).pages.is_ok());
     for rules in [Rules::Iso, Rules::Pdfium] {
         assert_eq!(
@@ -2483,15 +2572,15 @@ fn a_parent_chain_raised_past_the_stack_goes_along_in_a_loop() {
         .map(|n| {
             let parent = Object::reference(n + 11);
             let node = Object::from(pdf_objects::dict! { "Parent" => parent });
-            ((n + 10, 0), node)
+            (ObjectId::new(n + 10, 0), node)
         })
         .collect();
     objects.insert(
-        (2, 0),
-        parsed(&[(2, "<< /Kids [3 0 R] /Count 1 >>")])[&(2, 0)].clone(),
+        ObjectId::new(2, 0),
+        parsed(&[(2, "<< /Kids [3 0 R] /Count 1 >>")])[&ObjectId::new(2, 0)].clone(),
     );
     objects.insert(
-        (3, 0),
+        ObjectId::new(3, 0),
         Object::from(pdf_objects::dict! { "Type" => "Page", "Parent" => Object::reference(10) }),
     );
     let resolve = |id: ObjectId| objects.get(&id);
@@ -2515,7 +2604,7 @@ fn a_parent_chain_is_compared_and_shown_by_what_it_names() {
         }
         up.unwrap()
     };
-    let (a, b) = (Some((1, 0)), Some((2, 0)));
+    let (a, b) = (Some(ObjectId::new(1, 0)), Some(ObjectId::new(2, 0)));
     assert_eq!(chain(&[a, b]), chain(&[a, b]));
     assert_eq!(chain(&[None, b]), chain(&[None, b]));
     assert_ne!(chain(&[a, b]), chain(&[a, a]));
@@ -2524,7 +2613,7 @@ fn a_parent_chain_is_compared_and_shown_by_what_it_names() {
     assert_ne!(chain(&[None]), chain(&[a]));
     assert_eq!(
         format!("{:?}", chain(&[a, None, b])),
-        "[Some((1, 0)), None, Some((2, 0))]"
+        "[Some(ObjectId { number: 1, generation: 0 }), None, Some(ObjectId { number: 2, generation: 0 })]"
     );
 }
 

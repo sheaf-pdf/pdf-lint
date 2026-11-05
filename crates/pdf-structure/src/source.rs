@@ -500,7 +500,7 @@ pub struct Update {
 #[non_exhaustive]
 pub enum Unread {
     /// The file hasn't it: no cross-reference section lists it.
-    #[error("{n} {g} R isn't in the file", n = .id.0, g = .id.1)]
+    #[error("{id} R isn't in the file")]
     Missing {
         /// The object.
         id: ObjectId,
@@ -509,13 +509,7 @@ pub enum Unread {
     #[error("{0}")]
     Parse(parse::Error),
     /// The offset its cross-references give holds another object.
-    #[error(
-        "byte {offset} holds {} {} obj, where the cross-references put {} {} R",
-        .found.0,
-        .found.1,
-        .expected.0,
-        .expected.1
-    )]
+    #[error("byte {offset} holds {found} obj, where the cross-references put {expected} R")]
     Elsewhere {
         /// The offset.
         offset: usize,
@@ -625,7 +619,7 @@ impl Unread {
         if let Unread::Missing { .. } = self {
             return None;
         }
-        let message = format!("{} {} R doesn't read: {self}", id.0, id.1);
+        let message = format!("{id} R doesn't read: {self}");
         Some(Unreadable::new(id, self.why(), message))
     }
 
@@ -772,15 +766,15 @@ impl Document {
     /// ```
     /// use std::collections::BTreeSet;
     ///
-    /// use pdf_structure::pdf_objects::{dict, object::Object, version::Version};
+    /// use pdf_structure::pdf_objects::{ObjectId, dict, object::Object, version::Version};
     /// use pdf_structure::{Document, Encryption, Source, Update};
     ///
     /// let trailer = dict! { "Root" => Object::reference(1) };
     /// let mut doc = Document::new(Version::new(1, 7), trailer);
     /// doc.insert(1, dict! { "Type" => "Catalog" });
-    /// doc.update = Some(Update::new(BTreeSet::from([(1, 0)]), 9));
+    /// doc.update = Some(Update::new(BTreeSet::from([ObjectId::new(1, 0)]), 9));
     /// doc.encryption = Encryption::opened(false);
-    /// assert!(doc.get((1, 0)).is_ok());
+    /// assert!(doc.get(ObjectId::new(1, 0)).is_ok());
     /// ```
     pub fn new(version: Version, trailer: Dict) -> Document {
         Document {
@@ -815,7 +809,7 @@ impl Document {
         trailer: Trailer,
         listed: Option<u32>,
     ) -> Document {
-        let held = objects.last_key_value().map(|(&(n, _), _)| n);
+        let held = objects.last_key_value().map(|(id, _)| id.number);
         Document {
             next: first_new(trailer.dict(), listed.max(held)),
             objects,
@@ -834,9 +828,9 @@ impl Document {
     }
 
     /// Puts object `n`, generation 0, with no record: [`Document::set`]
-    /// at `(n, 0)`.
+    /// at `ObjectId::new(n, 0)`.
     pub fn insert(&mut self, n: u32, object: impl Into<Object>) {
-        self.set((n, 0), object);
+        self.set(ObjectId::new(n, 0), object);
     }
 
     /// Whether it lists object `id`, whether it reads or not.
@@ -850,7 +844,7 @@ impl Document {
     }
 
     /// Each object that reads whose id is in `range`, by number: a
-    /// number's every generation, `n`'s, is `(n, 0)..=(n, u16::MAX)`.
+    /// number's every generation, `n`'s, is `ObjectId::new(n, 0)..=ObjectId::new(n, u16::MAX)`.
     /// Panics where [`BTreeMap::range`] does: a range that starts after it
     /// ends, or starts and ends at one id it leaves out.
     pub fn range(
@@ -911,7 +905,7 @@ impl Document {
     /// places in this document's file, and a writer would read a stream's
     /// data where its span says in the reading of this one.
     pub fn set(&mut self, id: ObjectId, object: impl Into<Object>) -> Option<Object> {
-        self.past(id.0);
+        self.past(id.number);
         let was = self.objects.insert(id, Ok((object.into(), None)));
         was?.ok().map(|(object, _)| object)
     }
@@ -921,7 +915,7 @@ impl Document {
     /// object it replaces, when one that read was there. New ids start
     /// past `id`'s number, if they didn't.
     pub fn set_unread(&mut self, id: ObjectId, why: Unread) -> Option<Object> {
-        self.past(id.0);
+        self.past(id.number);
         let was = self.objects.insert(id, Err(why));
         was?.ok().map(|(object, _)| object)
     }
@@ -981,21 +975,23 @@ impl Document {
     pub fn new_id(&mut self) -> ObjectId {
         if let Ok(n) = u32::try_from(self.next) {
             self.next += 1;
-            return (n, 0);
+            return ObjectId::new(n, 0);
         }
         let last = u32::try_from(self.next - PAST).unwrap_or(0);
         let n = (self.free_after(last))
             .or_else(|| self.free_after(0))
             .unwrap_or(1);
         self.next = PAST + u64::from(n);
-        (n, 0)
+        ObjectId::new(n, 0)
     }
 
     /// The first number above `last` that no entry holds, at any
     /// generation; none when every one to 4,294,967,295 is held.
     fn free_after(&self, last: u32) -> Option<u32> {
         let mut n = last.checked_add(1)?;
-        for &(held, _) in self.objects.range((n, 0)..).map(|(id, _)| id) {
+        for &ObjectId { number: held, .. } in
+            self.objects.range(ObjectId::new(n, 0)..).map(|(id, _)| id)
+        {
             if held > n {
                 break;
             }
@@ -1028,7 +1024,7 @@ impl Document {
     /// and not set. After 4,294,967,295, the largest, they're looked for
     /// from 1 again, as [`Document::new_id`]'s are once they've gone round.
     pub fn set_max_id(&mut self, n: u32) {
-        let held = self.objects.last_key_value().map(|(&(held, _), _)| held);
+        let held = self.objects.last_key_value().map(|(id, _)| id.number);
         self.next = u64::from(n.max(held.unwrap_or(0))) + 1;
     }
 
@@ -1218,13 +1214,21 @@ mod tests {
         let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
         doc.insert(1, dict! { "Type" => "Catalog" });
         let why = Unread::Other("it doesn't parse".to_string());
-        doc.set_unread((2, 0), why.clone());
-        assert_eq!(doc.ids(), [(1, 0), (2, 0)]);
-        assert!(doc.get((1, 0)).is_ok_and(|o| o.as_dict().is_some()));
-        assert_eq!(doc.get((2, 0)), Err(why));
-        assert_eq!(doc.get((3, 0)), Err(Unread::Missing { id: (3, 0) }));
+        doc.set_unread(ObjectId::new(2, 0), why.clone());
+        assert_eq!(doc.ids(), [ObjectId::new(1, 0), ObjectId::new(2, 0)]);
+        assert!(
+            doc.get(ObjectId::new(1, 0))
+                .is_ok_and(|o| o.as_dict().is_some())
+        );
+        assert_eq!(doc.get(ObjectId::new(2, 0)), Err(why));
         assert_eq!(
-            doc.get((3, 0)).unwrap_err().to_string(),
+            doc.get(ObjectId::new(3, 0)),
+            Err(Unread::Missing {
+                id: ObjectId::new(3, 0)
+            })
+        );
+        assert_eq!(
+            doc.get(ObjectId::new(3, 0)).unwrap_err().to_string(),
             "3 0 R isn't in the file"
         );
         assert!(doc.trailer().dict().has(b"Root"));
@@ -1238,12 +1242,12 @@ mod tests {
         let mut doc = Document::new(Version::new(1, 7), dict! { "Root" => Object::reference(1) });
         doc.insert(1, dict! { "Type" => "Catalog" });
         let why = Unread::Other("it doesn't parse".to_string());
-        doc.set_unread((2, 0), why);
+        doc.set_unread(ObjectId::new(2, 0), why);
         let resolve = &doc;
-        let catalog = resolve.resolve((1, 0)).unwrap();
-        assert!(std::ptr::eq(catalog, doc.get((1, 0)).unwrap()));
-        assert_eq!(resolve.resolve((2, 0)), None);
-        assert_eq!(resolve.resolve((3, 0)), None);
+        let catalog = resolve.resolve(ObjectId::new(1, 0)).unwrap();
+        assert!(std::ptr::eq(catalog, doc.get(ObjectId::new(1, 0)).unwrap()));
+        assert_eq!(resolve.resolve(ObjectId::new(2, 0)), None);
+        assert_eq!(resolve.resolve(ObjectId::new(3, 0)), None);
     }
 
     /// A document's objects by number, in order and in a range of ids,
@@ -1257,36 +1261,85 @@ mod tests {
         doc.insert(1, dict! { "Type" => "Catalog" });
         doc.insert(2, 2);
         doc.insert(5, 5);
-        doc.set((6, 2), "Six");
+        doc.set(ObjectId::new(6, 2), "Six");
         doc.insert(7, 7);
         let why = Unread::Other("it doesn't parse".to_string());
-        doc.set_unread((3, 0), why.clone());
+        doc.set_unread(ObjectId::new(3, 0), why.clone());
         fn ids<'o>(objects: impl Iterator<Item = (ObjectId, &'o Object)>) -> Vec<ObjectId> {
             objects.map(|(id, _)| id).collect()
         }
 
-        assert_eq!(doc.ids(), [(1, 0), (2, 0), (3, 0), (5, 0), (6, 2), (7, 0)]);
+        assert_eq!(
+            doc.ids(),
+            [
+                ObjectId::new(1, 0),
+                ObjectId::new(2, 0),
+                ObjectId::new(3, 0),
+                ObjectId::new(5, 0),
+                ObjectId::new(6, 2),
+                ObjectId::new(7, 0)
+            ]
+        );
         assert_eq!(doc.ids().len(), 6);
-        assert!(doc.contains((3, 0)) && doc.contains((6, 2)));
-        assert!(!doc.contains((4, 0)) && !doc.contains((6, 0)));
-        assert_eq!(ids(doc.objects()), [(1, 0), (2, 0), (5, 0), (6, 2), (7, 0)]);
+        assert!(doc.contains(ObjectId::new(3, 0)) && doc.contains(ObjectId::new(6, 2)));
+        assert!(!doc.contains(ObjectId::new(4, 0)) && !doc.contains(ObjectId::new(6, 0)));
+        assert_eq!(
+            ids(doc.objects()),
+            [
+                ObjectId::new(1, 0),
+                ObjectId::new(2, 0),
+                ObjectId::new(5, 0),
+                ObjectId::new(6, 2),
+                ObjectId::new(7, 0)
+            ]
+        );
         assert!(
             doc.objects()
                 .all(|(id, o)| std::ptr::eq(o, doc.get(id).unwrap()))
         );
-        assert_eq!(ids(doc.objects().rev()).first(), Some(&(7, 0)));
-        assert_eq!(doc.unread().collect::<Vec<_>>(), [((3, 0), &why)]);
-        assert_eq!(doc.get((3, 0)), Err(why));
-        assert_eq!(doc.get((4, 0)), Err(Unread::Missing { id: (4, 0) }));
+        assert_eq!(ids(doc.objects().rev()).first(), Some(&ObjectId::new(7, 0)));
+        assert_eq!(
+            doc.unread().collect::<Vec<_>>(),
+            [(ObjectId::new(3, 0), &why)]
+        );
+        assert_eq!(doc.get(ObjectId::new(3, 0)), Err(why));
+        assert_eq!(
+            doc.get(ObjectId::new(4, 0)),
+            Err(Unread::Missing {
+                id: ObjectId::new(4, 0)
+            })
+        );
 
         // Ranges as a caller asks them: between two ids, up to one, from
         // one, and a number's every generation.
-        assert_eq!(ids(doc.range((2, 0)..(6, 0))), [(2, 0), (5, 0)]);
-        assert_eq!(ids(doc.range(..(5, 0))), [(1, 0), (2, 0)]);
-        assert_eq!(ids(doc.range((5, 0)..)), [(5, 0), (6, 2), (7, 0)]);
-        assert_eq!(ids(doc.range((6, 0)..=(6, u16::MAX))), [(6, 2)]);
-        assert_eq!(ids(doc.range((3, 0)..=(4, 0))), []);
-        assert_eq!(ids(doc.range(..(5, 0)).rev()).first(), Some(&(2, 0)));
+        assert_eq!(
+            ids(doc.range(ObjectId::new(2, 0)..ObjectId::new(6, 0))),
+            [ObjectId::new(2, 0), ObjectId::new(5, 0)]
+        );
+        assert_eq!(
+            ids(doc.range(..ObjectId::new(5, 0))),
+            [ObjectId::new(1, 0), ObjectId::new(2, 0)]
+        );
+        assert_eq!(
+            ids(doc.range(ObjectId::new(5, 0)..)),
+            [
+                ObjectId::new(5, 0),
+                ObjectId::new(6, 2),
+                ObjectId::new(7, 0)
+            ]
+        );
+        assert_eq!(
+            ids(doc.range(ObjectId::new(6, 0)..=ObjectId::new(6, u16::MAX))),
+            [ObjectId::new(6, 2)]
+        );
+        assert_eq!(
+            ids(doc.range(ObjectId::new(3, 0)..=ObjectId::new(4, 0))),
+            []
+        );
+        assert_eq!(
+            ids(doc.range(..ObjectId::new(5, 0)).rev()).first(),
+            Some(&ObjectId::new(2, 0))
+        );
     }
 
     /// A record is always of the object beside it: an object put in has
@@ -1313,7 +1366,7 @@ mod tests {
         let true_to_the_file = |doc: &Document| {
             for (id, record) in doc.records() {
                 let written = &file[record.at.start..record.at.end];
-                let header = format!("{} {} obj", id.0, id.1);
+                let header = format!("{id} obj");
                 assert!(written.starts_with(header.as_bytes()), "{id:?}");
                 assert_eq!(
                     doc.get(id).unwrap().at.map(|at| at.end <= record.at.end),
@@ -1324,11 +1377,11 @@ mod tests {
         let ids = |doc: &Document| -> Vec<ObjectId> { doc.records().map(|(id, _)| id).collect() };
         assert_eq!(
             read.unread().map(|(id, _)| id).collect::<Vec<_>>(),
-            [(7, 0)]
+            [ObjectId::new(7, 0)]
         );
         let reads: Vec<ObjectId> = read.objects().map(|(id, _)| id).collect();
         assert_eq!(ids(&read), reads);
-        assert_eq!(read.record((7, 0)), None);
+        assert_eq!(read.record(ObjectId::new(7, 0)), None);
         true_to_the_file(&read);
 
         // A clone keeps every record, its reading's id too.
@@ -1338,54 +1391,67 @@ mod tests {
         assert!((doc.records().zip(read.records())).all(|((_, a), (_, b))| a.source == b.source));
 
         // Put in: no record, giving back what it replaces where that read.
-        let catalog = read.get((1, 0)).unwrap().clone();
+        let catalog = read.get(ObjectId::new(1, 0)).unwrap().clone();
         assert_eq!(
-            doc.set((1, 0), dict! { "Type" => "Catalog" }),
+            doc.set(ObjectId::new(1, 0), dict! { "Type" => "Catalog" }),
             Some(catalog)
         );
-        assert_eq!(doc.record((1, 0)), None);
-        assert_eq!(doc.set((8, 0), 8), None);
+        assert_eq!(doc.record(ObjectId::new(1, 0)), None);
+        assert_eq!(doc.set(ObjectId::new(8, 0), 8), None);
         doc.insert(9, 9);
-        assert_eq!((doc.record((8, 0)), doc.record((9, 0))), (None, None));
-        assert_eq!(doc.set((7, 0), 7), None, "an object that didn't read");
-        assert_eq!(doc.record((7, 0)), None);
+        assert_eq!(
+            (
+                doc.record(ObjectId::new(8, 0)),
+                doc.record(ObjectId::new(9, 0))
+            ),
+            (None, None)
+        );
+        assert_eq!(
+            doc.set(ObjectId::new(7, 0), 7),
+            None,
+            "an object that didn't read"
+        );
+        assert_eq!(doc.record(ObjectId::new(7, 0)), None);
 
         // Why one doesn't read: no record, giving back what read there.
         let why = Unread::Other("set aside".to_string());
-        let two = read.get((2, 0)).unwrap().clone();
-        assert_eq!(doc.set_unread((2, 0), why.clone()), Some(two));
-        assert_eq!(doc.record((2, 0)), None);
-        assert_eq!(doc.get((2, 0)), Err(why.clone()));
-        assert_eq!(doc.set_unread((10, 0), why.clone()), None);
+        let two = read.get(ObjectId::new(2, 0)).unwrap().clone();
+        assert_eq!(doc.set_unread(ObjectId::new(2, 0), why.clone()), Some(two));
+        assert_eq!(doc.record(ObjectId::new(2, 0)), None);
+        assert_eq!(doc.get(ObjectId::new(2, 0)), Err(why.clone()));
+        assert_eq!(doc.set_unread(ObjectId::new(10, 0), why.clone()), None);
 
         // Removed: the object, its record with it; one that doesn't read,
         // nothing, and it's gone too.
-        let stream = read.get((3, 0)).unwrap().clone();
-        assert_eq!(doc.remove((3, 0)), Some(stream));
-        assert!(!doc.contains((3, 0)) && doc.record((3, 0)).is_none());
-        assert_eq!(doc.remove((10, 0)), None);
-        assert!(!doc.contains((10, 0)));
-        assert_eq!(doc.remove((3, 0)), None);
+        let stream = read.get(ObjectId::new(3, 0)).unwrap().clone();
+        assert_eq!(doc.remove(ObjectId::new(3, 0)), Some(stream));
+        assert!(!doc.contains(ObjectId::new(3, 0)) && doc.record(ObjectId::new(3, 0)).is_none());
+        assert_eq!(doc.remove(ObjectId::new(10, 0)), None);
+        assert!(!doc.contains(ObjectId::new(10, 0)));
+        assert_eq!(doc.remove(ObjectId::new(3, 0)), None);
 
         // Taken to edit, the record goes though nothing changes, as a
         // `&mut` could have replaced the object whole; one that doesn't
         // read, or isn't listed, isn't given.
-        let four = read.get((4, 0)).unwrap().clone();
-        assert_eq!(doc.get_mut((4, 0)), Some(&mut four.clone()));
-        assert_eq!(doc.get((4, 0)), Ok(&four));
-        assert_eq!(doc.record((4, 0)), None);
-        assert_eq!(doc.get_mut((2, 0)), None);
-        assert_eq!(doc.get((2, 0)), Err(why));
-        assert_eq!(doc.get_mut((11, 0)), None);
-        assert!(!doc.contains((11, 0)));
+        let four = read.get(ObjectId::new(4, 0)).unwrap().clone();
+        assert_eq!(doc.get_mut(ObjectId::new(4, 0)), Some(&mut four.clone()));
+        assert_eq!(doc.get(ObjectId::new(4, 0)), Ok(&four));
+        assert_eq!(doc.record(ObjectId::new(4, 0)), None);
+        assert_eq!(doc.get_mut(ObjectId::new(2, 0)), None);
+        assert_eq!(doc.get(ObjectId::new(2, 0)), Err(why));
+        assert_eq!(doc.get_mut(ObjectId::new(11, 0)), None);
+        assert!(!doc.contains(ObjectId::new(11, 0)));
 
         // What wasn't written to keeps its record, true to the file; and
         // a document whose records went isn't the one read.
-        assert_eq!(ids(&doc), [(5, 0), (6, 0)]);
-        assert_eq!(doc.record((5, 0)), read.record((5, 0)));
+        assert_eq!(ids(&doc), [ObjectId::new(5, 0), ObjectId::new(6, 0)]);
+        assert_eq!(
+            doc.record(ObjectId::new(5, 0)),
+            read.record(ObjectId::new(5, 0))
+        );
         true_to_the_file(&doc);
         let mut edited = read.clone();
-        assert!(edited.get_mut((5, 0)).is_some());
+        assert!(edited.get_mut(ObjectId::new(5, 0)).is_some());
         assert!(edited.objects().eq(read.objects()));
         assert_ne!(edited, read);
 
@@ -1443,26 +1509,20 @@ mod tests {
     #[test]
     fn each_reason_an_object_doesnt_read_is_said_as_it_was() {
         let (stream, index, number, offset) = (4, 1, 9, 120);
-        let id = (3, 1);
+        let id = ObjectId::new(3, 1);
         let parse = parse::Error::Header { at: 7 };
         let why = Undecoded::NotAStream;
         let inner = Unread::Parse(parse.clone());
         let cases = [
-            (
-                Unread::Missing { id },
-                format!("{} {} R isn't in the file", id.0, id.1),
-            ),
+            (Unread::Missing { id }, format!("{id} R isn't in the file")),
             (Unread::Parse(parse.clone()), parse.to_string()),
             (
                 Unread::Elsewhere {
                     offset,
-                    found: (5, 0),
+                    found: ObjectId::new(5, 0),
                     expected: id,
                 },
-                format!(
-                    "byte {offset} holds {} {} obj, where the cross-references put {} {} R",
-                    5, 0, id.0, id.1
-                ),
+                format!("byte {offset} holds 5 0 obj, where the cross-references put {id} R"),
             ),
             (
                 Unread::Container {
@@ -1502,11 +1562,11 @@ mod tests {
                     stream,
                     index,
                     number,
-                    expected: id.0,
+                    expected: id.number,
                 },
                 format!(
                     "object {index} of object stream {} 0 R is {number}, not {}",
-                    stream, id.0
+                    stream, id.number
                 ),
             ),
             (
@@ -1536,7 +1596,7 @@ mod tests {
     #[test]
     fn a_document_says_why_an_object_doesnt_resolve() {
         let stream = 4;
-        let id = (9, 1);
+        let id = ObjectId::new(9, 1);
         let filters = |why| Unread::Container {
             stream,
             why: Undecoded::Filters(why),
@@ -1561,7 +1621,7 @@ mod tests {
             (
                 Unread::Elsewhere {
                     offset: 5,
-                    found: (1, 0),
+                    found: ObjectId::new(1, 0),
                     expected: id,
                 },
                 Why::Damaged,
@@ -1591,7 +1651,12 @@ mod tests {
             ),
             (boxed(parse_error(parse::Error::End)), Why::Damaged),
             // The stream isn't in the file, though the object is listed.
-            (boxed(Unread::Missing { id: (stream, 0) }), Why::Damaged),
+            (
+                boxed(Unread::Missing {
+                    id: ObjectId::new(stream, 0),
+                }),
+                Why::Damaged,
+            ),
             (Unread::ContainerMissing { stream }, Why::Damaged),
             (
                 Unread::ContainerHeader {
@@ -1606,7 +1671,7 @@ mod tests {
                     stream,
                     index: 1,
                     number: 8,
-                    expected: id.0,
+                    expected: id.number,
                 },
                 Why::Damaged,
             ),
@@ -1628,7 +1693,7 @@ mod tests {
         let resolve = &doc;
         assert_eq!(resolve.try_resolve(object), Ok(resolve.resolve(object)));
         assert!(resolve.try_resolve(object).unwrap().is_some());
-        assert_eq!(resolve.try_resolve((77, 0)), Ok(None));
+        assert_eq!(resolve.try_resolve(ObjectId::new(77, 0)), Ok(None));
         doc.set_unread(id, Unread::Missing { id });
         assert_eq!((&doc).try_resolve(id), Ok(None));
     }
@@ -1669,12 +1734,14 @@ mod tests {
             assert_eq!(why.container(), Some(stream), "{why:?}");
         }
         let unplaced = [
-            Unread::Missing { id: (3, 0) },
+            Unread::Missing {
+                id: ObjectId::new(3, 0),
+            },
             inner,
             Unread::Elsewhere {
                 offset: 120,
-                found: (5, 0),
-                expected: (3, 0),
+                found: ObjectId::new(5, 0),
+                expected: ObjectId::new(3, 0),
             },
             Unread::Other("qpdf's words".to_string()),
         ];
@@ -1733,11 +1800,11 @@ mod tests {
             }
         }
         let own = Own(Trailer::new(dict! {}.into()));
-        assert_eq!(own.record((1, 0)), None);
-        assert_eq!(own.decoded((4, 0)), None);
+        assert_eq!(own.record(ObjectId::new(1, 0)), None);
+        assert_eq!(own.decoded(ObjectId::new(4, 0)), None);
         assert!(own.revisions().is_empty());
         assert_eq!(own.facts(), None);
-        assert!(!own.in_the_clear((4, 0)));
+        assert!(!own.in_the_clear(ObjectId::new(4, 0)));
 
         // qpdf's file of object streams, read whole, where the crate has it.
         let Some(file) = fixture("qpdf-compressed") else {
@@ -1752,7 +1819,7 @@ mod tests {
         assert_eq!(source.record(id), doc.record(id));
         assert!(source.record(id).is_some());
         assert_eq!(source.decoded(stream), Some(&doc.decoded[&stream][..]));
-        assert_eq!(source.decoded((1_000_000, 0)), None);
+        assert_eq!(source.decoded(ObjectId::new(1_000_000, 0)), None);
         assert_eq!(source.revisions(), &doc.revisions[..]);
         assert_eq!(source.revisions().len(), 1);
         assert_eq!(source.facts(), Some(&doc.facts));
@@ -1785,16 +1852,26 @@ mod tests {
         // Built in memory, under a trailer with no /Size.
         let mut doc = Document::new(Version::new(1, 7), Dict::new());
         assert_eq!(doc.max_id(), 0);
-        assert_eq!((doc.new_id(), doc.new_id()), ((1, 0), (2, 0)));
+        assert_eq!(
+            (doc.new_id(), doc.new_id()),
+            (ObjectId::new(1, 0), ObjectId::new(2, 0))
+        );
         assert_eq!(doc.max_id(), 2);
-        assert_eq!(doc.add(dict! { "Type" => "Catalog" }), (3, 0));
-        assert!(doc.get_dict((3, 0)).is_some_and(|d| d.has_type(b"Catalog")));
-        assert_eq!(doc.record((3, 0)), None);
-        assert_eq!(doc.ids(), [(3, 0)], "an id handed out isn't held");
+        assert_eq!(doc.add(dict! { "Type" => "Catalog" }), ObjectId::new(3, 0));
+        assert!(
+            doc.get_dict(ObjectId::new(3, 0))
+                .is_some_and(|d| d.has_type(b"Catalog"))
+        );
+        assert_eq!(doc.record(ObjectId::new(3, 0)), None);
+        assert_eq!(
+            doc.ids(),
+            [ObjectId::new(3, 0)],
+            "an id handed out isn't held"
+        );
 
         // Past a /Size, where that's a number of objects; else from 1.
         let sized = |size: Object| Document::new(Version::new(1, 7), dict! { "Size" => size });
-        assert_eq!(sized(8.into()).new_id(), (8, 0));
+        assert_eq!(sized(8.into()).new_id(), ObjectId::new(8, 0));
         assert_eq!(sized(8.into()).max_id(), 7);
         for size in [
             0.into(),
@@ -1804,38 +1881,45 @@ mod tests {
             (1i64 << 33).into(),
             Object::reference(8),
         ] {
-            assert_eq!(sized(size.clone()).new_id(), (1, 0), "{size:?}");
+            assert_eq!(
+                sized(size.clone()).new_id(),
+                ObjectId::new(1, 0),
+                "{size:?}"
+            );
         }
 
         // Past what's put in, read or not; one put in below leaves them.
         let mut doc = sized(8.into());
-        doc.set((20, 3), "Twenty");
-        assert_eq!(doc.new_id(), (21, 0));
-        doc.set_unread((30, 0), Unread::Other("it doesn't parse".to_string()));
-        assert_eq!(doc.add(31), (31, 0));
+        doc.set(ObjectId::new(20, 3), "Twenty");
+        assert_eq!(doc.new_id(), ObjectId::new(21, 0));
+        doc.set_unread(
+            ObjectId::new(30, 0),
+            Unread::Other("it doesn't parse".to_string()),
+        );
+        assert_eq!(doc.add(31), ObjectId::new(31, 0));
         doc.insert(40, 40);
         doc.insert(5, 5);
         assert_eq!(doc.max_id(), 40);
-        assert_eq!(doc.new_id(), (41, 0));
+        assert_eq!(doc.new_id(), ObjectId::new(41, 0));
 
         // Lowered, but never below a number held, read or not.
         doc.set_max_id(9);
         assert_eq!(doc.max_id(), 40);
-        assert_eq!(doc.remove((40, 0)), Some(40.into()));
+        assert_eq!(doc.remove(ObjectId::new(40, 0)), Some(40.into()));
         assert_eq!(doc.max_id(), 40, "removing leaves where they start");
         doc.set_max_id(9);
         assert_eq!(doc.max_id(), 31);
-        doc.remove((31, 0));
-        doc.remove((30, 0));
+        doc.remove(ObjectId::new(31, 0));
+        doc.remove(ObjectId::new(30, 0));
         doc.set_max_id(9);
-        assert_eq!(doc.new_id(), (21, 0));
+        assert_eq!(doc.new_id(), ObjectId::new(21, 0));
         doc.set_max_id(100);
-        assert_eq!(doc.new_id(), (101, 0));
+        assert_eq!(doc.new_id(), ObjectId::new(101, 0));
         // Object 0, always free, is never one, even held.
         let mut doc = sized(0.into());
-        doc.set((0, 0), 0);
+        doc.set(ObjectId::new(0, 0), 0);
         doc.set_max_id(0);
-        assert_eq!((doc.max_id(), doc.new_id()), (0, (1, 0)));
+        assert_eq!((doc.max_id(), doc.new_id()), (0, ObjectId::new(1, 0)));
 
         // Read: past the trailer's /Size less one, which is past what the
         // table lists.
@@ -1846,7 +1930,7 @@ mod tests {
         );
         let mut doc = crate::bytes::read(&file);
         assert_eq!(doc.max_id(), 19);
-        assert_eq!(doc.new_id(), (20, 0));
+        assert_eq!(doc.new_id(), ObjectId::new(20, 0));
 
         // Past every number the table lists, though /Size says less: one
         // in use, and one free that nothing holds.
@@ -1856,14 +1940,14 @@ mod tests {
             "<< /Size 3 /Root 1 0 R >>",
         );
         let mut doc = crate::bytes::read(&file);
-        assert_eq!(doc.new_id(), (8, 0));
+        assert_eq!(doc.new_id(), ObjectId::new(8, 0));
         let row = format!("{:010} 00000 n", find(&file, b"7 0 obj"));
         let at = find(&file, row.as_bytes());
         file[at..at + row.len()].copy_from_slice(b"0000000000 00001 f");
         let mut doc = crate::bytes::read(&file);
-        assert!(!doc.contains((7, 0)) && doc.contains((2, 0)));
+        assert!(!doc.contains(ObjectId::new(7, 0)) && doc.contains(ObjectId::new(2, 0)));
         assert_eq!(doc.max_id(), 7);
-        assert_eq!(doc.new_id(), (8, 0));
+        assert_eq!(doc.new_id(), ObjectId::new(8, 0));
 
         // Past a cross-reference stream's number, which neither its rows
         // nor /Size reach.
@@ -1882,7 +1966,7 @@ mod tests {
             Some(4)
         );
         assert_eq!(doc.max_id(), 90);
-        assert_eq!(doc.new_id(), (91, 0));
+        assert_eq!(doc.new_id(), ObjectId::new(91, 0));
     }
 
     /// Once new ids reach 4,294,967,295, the largest number, as a file that
@@ -1897,11 +1981,14 @@ mod tests {
         let mut doc = Document::new(Version::new(1, 7), Dict::new());
         let first = doc.new_id();
         doc.set_max_id(u32::MAX - 2);
-        assert_eq!(doc.new_id(), (u32::MAX - 1, 0));
-        assert_eq!(doc.new_id(), (u32::MAX, 0));
+        assert_eq!(doc.new_id(), ObjectId::new(u32::MAX - 1, 0));
+        assert_eq!(doc.new_id(), ObjectId::new(u32::MAX, 0));
         assert_eq!(doc.max_id(), u32::MAX);
-        assert_eq!((doc.new_id(), doc.new_id()), ((1, 0), (2, 0)));
-        assert_eq!(first, (1, 0));
+        assert_eq!(
+            (doc.new_id(), doc.new_id()),
+            (ObjectId::new(1, 0), ObjectId::new(2, 0))
+        );
+        assert_eq!(first, ObjectId::new(1, 0));
         assert_eq!(doc.max_id(), u32::MAX);
 
         // An object put at the largest, read or not, takes them past every
@@ -1912,17 +1999,24 @@ mod tests {
             let mut doc = Document::new(Version::new(1, 7), Dict::new());
             let page = doc.new_id();
             if unread {
-                doc.set_unread((u32::MAX, 0), Unread::Other("copied".to_string()));
+                doc.set_unread(
+                    ObjectId::new(u32::MAX, 0),
+                    Unread::Other("copied".to_string()),
+                );
             } else {
-                doc.set((u32::MAX, 0), "Copied");
+                doc.set(ObjectId::new(u32::MAX, 0), "Copied");
             }
             assert_eq!(doc.max_id(), u32::MAX);
             let font = doc.add("Font");
-            assert_eq!((page, font), ((1, 0), (2, 0)), "{unread}");
+            assert_eq!(
+                (page, font),
+                (ObjectId::new(1, 0), ObjectId::new(2, 0)),
+                "{unread}"
+            );
             assert_eq!(doc.set(page, "Page"), None, "{unread}");
             let name = doc.get(font).ok().and_then(Object::as_name);
             assert_eq!(name, Some(&b"Font"[..]), "{unread}");
-            assert_eq!(doc.new_id(), (3, 0), "{unread}");
+            assert_eq!(doc.new_id(), ObjectId::new(3, 0), "{unread}");
         }
         let mut file = crate::fixture::assembled(
             "1.7",
@@ -1933,16 +2027,22 @@ mod tests {
         let at = find(&file, row.as_bytes());
         file[at..at + row.len()].copy_from_slice(b"0000000000 00001 f");
         let mut doc = crate::bytes::read(&file);
-        assert!(!doc.contains((2, 0)) && doc.contains((3, 0)));
-        doc.set((u32::MAX, 0), "Copied");
-        assert_eq!((doc.new_id(), doc.new_id()), ((4, 0), (5, 0)));
+        assert!(!doc.contains(ObjectId::new(2, 0)) && doc.contains(ObjectId::new(3, 0)));
+        doc.set(ObjectId::new(u32::MAX, 0), "Copied");
+        assert_eq!(
+            (doc.new_id(), doc.new_id()),
+            (ObjectId::new(4, 0), ObjectId::new(5, 0))
+        );
 
         // A /Size whose number less one is the largest is passed over, as
         // any larger: alone, it takes new ids nowhere near a free entry.
         let size = dict! { "Size" => 1i64 << 32 };
         let mut doc = Document::new(Version::new(1, 7), size);
         assert_eq!(doc.max_id(), 0);
-        assert_eq!((doc.new_id(), doc.new_id()), ((1, 0), (2, 0)));
+        assert_eq!(
+            (doc.new_id(), doc.new_id()),
+            (ObjectId::new(1, 0), ObjectId::new(2, 0))
+        );
         file = crate::fixture::assembled(
             "1.7",
             &[(1, &b"<< /Type /Catalog >>"[..]), (2, b"2"), (3, b"3")],
@@ -1953,7 +2053,10 @@ mod tests {
         file[at..at + row.len()].copy_from_slice(b"0000000000 00001 f");
         let mut doc = crate::bytes::read(&file);
         assert_eq!(doc.max_id(), 3);
-        assert_eq!((doc.new_id(), doc.new_id()), ((4, 0), (5, 0)));
+        assert_eq!(
+            (doc.new_id(), doc.new_id()),
+            (ObjectId::new(4, 0), ObjectId::new(5, 0))
+        );
 
         // A document holding the largest: numbers no entry holds, at any
         // generation, read or not, in turn from the last handed out.
@@ -1962,27 +2065,33 @@ mod tests {
         for n in [1, 2, 6] {
             doc.insert(n, n);
         }
-        doc.set((4, 2), "Four");
-        doc.set_unread((5, 0), Unread::Other("it doesn't parse".to_string()));
+        doc.set(ObjectId::new(4, 2), "Four");
+        doc.set_unread(
+            ObjectId::new(5, 0),
+            Unread::Other("it doesn't parse".to_string()),
+        );
         assert_eq!(doc.max_id(), u32::MAX);
         let (three, seven) = (doc.new_id(), doc.new_id());
-        assert_eq!((three, seven), ((3, 0), (7, 0)));
-        assert_eq!(doc.add("Eight"), (8, 0));
+        assert_eq!((three, seven), (ObjectId::new(3, 0), ObjectId::new(7, 0)));
+        assert_eq!(doc.add("Eight"), ObjectId::new(8, 0));
         doc.insert(9, 9);
-        assert_eq!(doc.new_id(), (10, 0));
+        assert_eq!(doc.new_id(), ObjectId::new(10, 0));
         assert!(!doc.contains(three) && !doc.contains(seven));
 
         // Past the last held, from 1 again, to the first no entry holds.
         doc.insert(u32::MAX - 1, "Next to last");
         doc.next = PAST + u64::from(u32::MAX - 2);
         assert_eq!(doc.free_after(u32::MAX - 2), None);
-        assert_eq!((doc.new_id(), doc.new_id()), ((3, 0), (7, 0)));
+        assert_eq!(
+            (doc.new_id(), doc.new_id()),
+            (ObjectId::new(3, 0), ObjectId::new(7, 0))
+        );
         assert_eq!(doc.free_after(u32::MAX), None);
 
         // Lowered below the largest held, they're where they were again.
         doc.set_max_id(0);
         assert_eq!(doc.max_id(), u32::MAX);
-        assert_eq!(doc.new_id(), (3, 0));
+        assert_eq!(doc.new_id(), ObjectId::new(3, 0));
     }
 
     /// A reference followed to the object its chain ends at, as many as
@@ -2009,60 +2118,90 @@ mod tests {
         );
         let read = crate::bytes::read(&file);
         let mut doc = read.clone();
-        let pages = read.get((3, 0)).unwrap();
+        let pages = read.get(ObjectId::new(3, 0)).unwrap();
         let reference = |n| Object::reference(n);
 
         // Not a reference: itself. A chain: where it ends, and its last id.
         assert_eq!(doc.dereference(&5.into()), Some((None, &5.into())));
-        assert_eq!(doc.dereference(&reference(2)), Some((Some((3, 0)), pages)));
-        assert_eq!(doc.dereference(&reference(3)), Some((Some((3, 0)), pages)));
+        assert_eq!(
+            doc.dereference(&reference(2)),
+            Some((Some(ObjectId::new(3, 0)), pages))
+        );
+        assert_eq!(
+            doc.dereference(&reference(3)),
+            Some((Some(ObjectId::new(3, 0)), pages))
+        );
         // To nothing: not there, there and not read, or round in a loop.
         for n in [9, 6, 7, 11, 8, 12] {
             assert_eq!(doc.dereference(&reference(n)), None, "{n}");
         }
         // An object a reference is, stored as written, and followed.
-        assert_eq!(doc.get((2, 0)).unwrap().as_reference(), Some((3, 0)));
-        let stored = doc.get((2, 0)).unwrap();
+        assert_eq!(
+            doc.get(ObjectId::new(2, 0)).unwrap().as_reference(),
+            Some(ObjectId::new(3, 0))
+        );
+        let stored = doc.get(ObjectId::new(2, 0)).unwrap();
         assert_eq!(doc.dereference(stored).unwrap().1, pages);
         // A dictionary's value followed.
-        let catalog = doc.get_dict((1, 0)).unwrap();
+        let catalog = doc.get_dict(ObjectId::new(1, 0)).unwrap();
         let kids = doc.dereference(catalog.get(b"Pages").unwrap()).unwrap().1;
         assert_eq!(kids, pages);
 
         // Dictionaries through references, a stream's too; none for what
         // isn't one, or doesn't read.
-        assert!(doc.get_dict((1, 0)).is_some_and(|d| d.has_type(b"Catalog")));
-        assert_eq!(doc.get_dict((2, 0)), pages.as_dict());
-        assert!(doc.get_dict((4, 0)).is_some_and(|d| d.has(b"Length")));
+        assert!(
+            doc.get_dict(ObjectId::new(1, 0))
+                .is_some_and(|d| d.has_type(b"Catalog"))
+        );
+        assert_eq!(doc.get_dict(ObjectId::new(2, 0)), pages.as_dict());
+        assert!(
+            doc.get_dict(ObjectId::new(4, 0))
+                .is_some_and(|d| d.has(b"Length"))
+        );
         for n in [5, 6, 7, 8, 9, 11] {
-            assert_eq!(doc.get_dict((n, 0)), None, "{n}");
+            assert_eq!(doc.get_dict(ObjectId::new(n, 0)), None, "{n}");
         }
-        assert_eq!(doc.catalog(), doc.get_dict((1, 0)));
+        assert_eq!(doc.catalog(), doc.get_dict(ObjectId::new(1, 0)));
 
         // To change: the object the chain ends at is edited, its record
         // and span dropped, and nothing else; nothing where none is given.
-        doc.get_dict_mut((2, 0)).unwrap().set("Count", 1);
-        assert_eq!(doc.record((3, 0)), None);
-        assert_eq!(doc.get((3, 0)).unwrap().at, None);
-        assert_eq!(doc.record((2, 0)), read.record((2, 0)));
-        assert_eq!(doc.get((2, 0)), read.get((2, 0)));
-        let count = doc.get_dict((2, 0)).and_then(|d| d.get(b"Count"));
+        doc.get_dict_mut(ObjectId::new(2, 0))
+            .unwrap()
+            .set("Count", 1);
+        assert_eq!(doc.record(ObjectId::new(3, 0)), None);
+        assert_eq!(doc.get(ObjectId::new(3, 0)).unwrap().at, None);
+        assert_eq!(
+            doc.record(ObjectId::new(2, 0)),
+            read.record(ObjectId::new(2, 0))
+        );
+        assert_eq!(doc.get(ObjectId::new(2, 0)), read.get(ObjectId::new(2, 0)));
+        let count = doc
+            .get_dict(ObjectId::new(2, 0))
+            .and_then(|d| d.get(b"Count"));
         assert_eq!(count.and_then(Object::as_integer), Some(1));
         for n in [5, 6, 7, 8] {
-            assert_eq!(doc.get_dict_mut((n, 0)), None, "{n}");
-            assert_eq!(doc.record((n, 0)), read.record((n, 0)), "{n}");
+            assert_eq!(doc.get_dict_mut(ObjectId::new(n, 0)), None, "{n}");
+            assert_eq!(
+                doc.record(ObjectId::new(n, 0)),
+                read.record(ObjectId::new(n, 0)),
+                "{n}"
+            );
         }
-        doc.get_dict_mut((4, 0))
+        doc.get_dict_mut(ObjectId::new(4, 0))
             .unwrap()
             .set("Filter", "FlateDecode");
-        let stream = doc.get((4, 0)).unwrap().as_stream().unwrap();
+        let stream = doc.get(ObjectId::new(4, 0)).unwrap().as_stream().unwrap();
         assert_eq!(
             stream.data,
-            read.get((4, 0)).unwrap().as_stream().unwrap().data
+            read.get(ObjectId::new(4, 0))
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .data
         );
         doc.catalog_mut().unwrap().set("Lang", Object::string("en"));
         assert!(doc.catalog().is_some_and(|d| d.has(b"Lang")));
-        assert_eq!(doc.record((1, 0)), None);
+        assert_eq!(doc.record(ObjectId::new(1, 0)), None);
 
         // No catalog: no /Root, or one that isn't a reference to one.
         for root in [
@@ -2087,14 +2226,14 @@ mod tests {
             doc.insert(n, reference(n + 1));
         }
         doc.insert(228, dict! { "End" => true });
-        let end = doc.get((228, 0)).unwrap();
+        let end = doc.get(ObjectId::new(228, 0)).unwrap();
         assert_eq!(
             doc.dereference(&reference(101)),
-            Some((Some((228, 0)), end))
+            Some((Some(ObjectId::new(228, 0)), end))
         );
         assert_eq!(doc.dereference(&reference(100)), None);
-        assert_eq!(doc.get_dict((100, 0)), end.as_dict());
-        assert_eq!(doc.get_dict((99, 0)), None);
+        assert_eq!(doc.get_dict(ObjectId::new(100, 0)), end.as_dict());
+        assert_eq!(doc.get_dict(ObjectId::new(99, 0)), None);
     }
 
     /// A trailer's dictionary changed where it is: the trailer's, or the
@@ -2146,7 +2285,10 @@ mod tests {
             3,
             dict! { "Kids" => vec![r(7), r(8)], "A" => r(10), "Count" => 2, "A" => r(11) },
         );
-        doc.set_unread((4, 0), Unread::Other("it doesn't parse".to_string()));
+        doc.set_unread(
+            ObjectId::new(4, 0),
+            Unread::Other("it doesn't parse".to_string()),
+        );
         let mut data = Stream::new(Dict::new(), b"13 0 R".to_vec());
         data.dict.set("Length", r(12));
         doc.insert(5, data);
@@ -2158,7 +2300,10 @@ mod tests {
         }
         doc.insert(15, dict! { "X" => r(16) });
         doc.insert(16, 16);
-        doc.set_unread((17, 0), Unread::Other("it doesn't parse".to_string()));
+        doc.set_unread(
+            ObjectId::new(17, 0),
+            Unread::Other("it doesn't parse".to_string()),
+        );
         doc
     }
 
@@ -2170,7 +2315,7 @@ mod tests {
     #[test]
     fn reachable_finds_what_the_trailer_reaches_in_order() {
         let doc = walked();
-        let reached: Vec<u32> = doc.reachable().into_iter().map(|(n, _)| n).collect();
+        let reached: Vec<u32> = doc.reachable().into_iter().map(|id| id.number).collect();
         assert_eq!(reached, [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 99, 14]);
         let mut doc = doc;
         doc.trailer = Trailer::new(Object::null());
@@ -2186,20 +2331,30 @@ mod tests {
     fn prune_removes_what_the_trailer_doesnt_reach() {
         let mut doc = walked();
         doc.insert(18, Stream::new(dict! { "Type" => "XRef" }, Vec::new()));
-        doc.trailer.stream = Some((18, 0));
+        doc.trailer.stream = Some(ObjectId::new(18, 0));
         doc.insert(19, Stream::new(dict! { "Type" => "ObjStm" }, Vec::new()));
-        doc.decoded.insert((19, 0), b"20 0".to_vec());
+        doc.decoded.insert(ObjectId::new(19, 0), b"20 0".to_vec());
         let before = doc.clone();
         assert_eq!(
             doc.prune(),
-            [(13, 0), (15, 0), (16, 0), (17, 0), (18, 0), (19, 0)]
+            [
+                ObjectId::new(13, 0),
+                ObjectId::new(15, 0),
+                ObjectId::new(16, 0),
+                ObjectId::new(17, 0),
+                ObjectId::new(18, 0),
+                ObjectId::new(19, 0)
+            ]
         );
         assert_eq!(
             doc.ids(),
-            [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 14].map(|n| (n, 0))
+            [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 14].map(|n| ObjectId::new(n, 0))
         );
         assert!(doc.objects().all(|(id, o)| before.get(id) == Ok(o)));
-        assert_eq!(doc.get((4, 0)), before.get((4, 0)));
+        assert_eq!(
+            doc.get(ObjectId::new(4, 0)),
+            before.get(ObjectId::new(4, 0))
+        );
         assert_eq!(doc.trailer, before.trailer);
         assert!(!doc.contains(doc.trailer.stream.unwrap()));
         assert_eq!(doc.decoded, before.decoded);

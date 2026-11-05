@@ -64,7 +64,7 @@ fn followed<'o, R: Resolve<'o>>(
     objects: &R,
     value: &'o Object,
 ) -> Result<Option<&'o Object>, Unreadable> {
-    let (mut at, mut last) = (value, (0, 0));
+    let (mut at, mut last) = (value, ObjectId::new(0, 0));
     for _ in 0..HOPS {
         match at.value() {
             Value::Ref(id) => {
@@ -83,10 +83,7 @@ fn followed<'o, R: Resolve<'o>>(
 
 /// The error of a chain of references that ends at `last` after too many.
 fn too_long(last: ObjectId) -> Unreadable {
-    let message = format!(
-        "{} {} R is past {HOPS} references, or in a loop of them",
-        last.0, last.1
-    );
+    let message = format!("{last} R is past {HOPS} references, or in a loop of them");
     Unreadable::new(last, Why::Limit, message)
 }
 

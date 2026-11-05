@@ -33,14 +33,15 @@ use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread, 
 /// ```
 /// use pdf_structure::Source;
 /// use pdf_structure::bytes::{Options, WithReading, read_opened};
+/// use pdf_structure::pdf_objects::ObjectId;
 ///
 /// let file = b"%PDF-1.7\n1 0 obj\n<< /Length 6 >>\nstream\nabcdef\nendstream\nendobj\n\
 ///     trailer\n<< /Size 2 >>\n%%EOF\n";
 /// let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
 /// assert_eq!(*read.document(), read_opened(file, &[]));
-/// assert_eq!(read.decoded_within((1, 0), 6).unwrap().unwrap(), b"abcdef");
+/// assert_eq!(read.decoded_within(ObjectId::new(1, 0), 6).unwrap().unwrap(), b"abcdef");
 /// // Its document alone gives none.
-/// assert!(read.document().decoded_within((1, 0), 6).is_none());
+/// assert!(read.document().decoded_within(ObjectId::new(1, 0), 6).is_none());
 /// ```
 pub struct WithReading<S> {
     reading: Reading<S>,
@@ -170,7 +171,11 @@ mod tests {
 
     fn answers(source: &dyn Source) -> Answers<'_> {
         let ids = source.ids();
-        let asked: Vec<ObjectId> = ids.iter().copied().chain([(u32::MAX, 0)]).collect();
+        let asked: Vec<ObjectId> = ids
+            .iter()
+            .copied()
+            .chain([ObjectId::new(u32::MAX, 0)])
+            .collect();
         Answers {
             objects: asked.iter().map(|&id| source.get(id)).collect(),
             trailer: source.trailer(),
@@ -211,8 +216,9 @@ mod tests {
             let ids = Source::ids(&opened);
             // And what it doesn't list: a number past them all, and one of
             // its objects at another generation.
-            let unlisted = [(u32::MAX, 0)].into_iter();
-            let others = ids.first().map(|&(n, g)| (n, g.wrapping_add(1)));
+            let unlisted = [ObjectId::new(u32::MAX, 0)].into_iter();
+            let others =
+                (ids.first()).map(|&id| ObjectId::new(id.number, id.generation.wrapping_add(1)));
             for id in ids.iter().copied().chain(unlisted).chain(others) {
                 assert!(alone.decoded_within(id, STREAM).is_none(), "{name}");
                 // Decoding a stream keeps nothing of it in the reading.

@@ -652,9 +652,9 @@ mod tests {
     fn references_are_followed_as_far_as_they_resolve() {
         let predicted = dict! { "Predictor" => Object::reference(9), "Columns" => 4 };
         let objects = BTreeMap::from([
-            ((7, 0), Object::from("FlateDecode")),
-            ((8, 0), Object::from(predicted)),
-            ((9, 0), Object::from(12)),
+            (ObjectId::new(7, 0), Object::from("FlateDecode")),
+            (ObjectId::new(8, 0), Object::from(predicted)),
+            (ObjectId::new(9, 0), Object::from(12)),
         ]);
         let resolve = |id| objects.get(&id);
         let filter: Vec<Object> = vec![Object::reference(7)];

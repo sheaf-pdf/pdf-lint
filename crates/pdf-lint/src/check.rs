@@ -342,10 +342,10 @@ impl Hold {
                     });
                 }
             };
-            if objects.insert((n, g), made).is_some() {
+            if objects.insert(ObjectId::new(n, g), made).is_some() {
                 return Err(HoldError::Again {
                     line: line_number,
-                    id: (n, g),
+                    id: ObjectId::new(n, g),
                 });
             }
         }
@@ -394,7 +394,7 @@ pub enum HoldError {
         made: String,
     },
     /// An object a line before holds.
-    #[error("line {line}: {n} {g} is held a second time", n = .id.0, g = .id.1)]
+    #[error("line {line}: {n} {g} is held a second time", n = .id.number, g = .id.generation)]
     Again {
         /// Its line.
         line: usize,
@@ -1855,7 +1855,11 @@ impl<'a> Resolve<'a> for AsOf<'a> {
 /// Whether a revision after `revision` (counted from the first as 1) lists
 /// `id`'s number, as `written` has them ([`Walk::written`]): then it wrote
 /// the object over or freed it.
-fn written_since(written: &HashMap<u32, usize>, revision: usize, (n, _): ObjectId) -> bool {
+fn written_since(
+    written: &HashMap<u32, usize>,
+    revision: usize,
+    ObjectId { number: n, .. }: ObjectId,
+) -> bool {
     written.get(&n).is_some_and(|&last| last > revision)
 }
 
@@ -2554,7 +2558,7 @@ impl<'a> Walk<'a> {
             }
             Err(gone) => {
                 if let Some(made) = made {
-                    let value = format!("{} {} R", gone.0, gone.1);
+                    let value = format!("{gone} R");
                     let table = &v.table.name;
                     self.find(v, made, Rule::Unresolved, table, &key, value, written);
                 }
@@ -3533,11 +3537,8 @@ impl<'a> Walk<'a> {
             let made = self.made(here.holder);
             // What's wrong with the node, as a tree finding unless said.
             let mut wrong = Vec::new();
-            let gone = |what: &str, (n, g): ObjectId| {
-                (
-                    Rule::Unresolved,
-                    format!("its {what} is {n} {g} R, no object"),
-                )
+            let gone = |what: &str, id: ObjectId| {
+                (Rule::Unresolved, format!("its {what} is {id} R, no object"))
             };
             if made.is_some() {
                 *self
@@ -3995,7 +3996,7 @@ impl<'a> Walk<'a> {
             };
             id = Some(to);
         }
-        Err(id.unwrap_or((0, 0)))
+        Err(id.unwrap_or(ObjectId::new(0, 0)))
     }
 
     /// Whether, in an earlier revision's trailer, `id` names an object a
@@ -4124,8 +4125,8 @@ impl<'a> Walk<'a> {
     fn packed(&mut self) {
         let source = self.source;
         let held: BTreeMap<u32, Made> = (self.containers.iter())
-            .filter(|&&(_, g)| g == 0)
-            .filter_map(|&id| Some((id.0, self.made(Some(id))?)))
+            .filter(|id| id.generation == 0)
+            .filter_map(|&id| Some((id.number, self.made(Some(id))?)))
             .collect();
         if held.is_empty() {
             return;
@@ -4157,7 +4158,7 @@ impl<'a> Walk<'a> {
             .and_then(Object::as_reference)
             .filter(|_| linearized);
         for (n, ids) in members {
-            let stream = (n, 0);
+            let stream = ObjectId::new(n, 0);
             let made = held[&n];
             let data = source.decoded(stream);
             let clear = source.in_the_clear(stream);
@@ -4176,7 +4177,11 @@ impl<'a> Walk<'a> {
                 if encryption.contains(&id) {
                     kept.push(KeptOut::Encryption.to_string());
                 }
-                for &(m, g) in lengths.get(&id).into_iter().flatten() {
+                for &ObjectId {
+                    number: m,
+                    generation: g,
+                } in lengths.get(&id).into_iter().flatten()
+                {
                     kept.push(format!("object stream {m} {g} R's /Length"));
                 }
                 if object.is_some_and(linearization) {
@@ -4189,7 +4194,7 @@ impl<'a> Walk<'a> {
                     kept.push(KeptOut::Page.to_string());
                 }
                 for what in kept {
-                    let value = format!("{} {} R, {what}", id.0, id.1);
+                    let value = format!("{id} R, {what}");
                     self.report
                         .findings
                         .push(packed_in(stream, made, value, at));
@@ -4617,8 +4622,8 @@ fn packed_in(stream: ObjectId, made: Made, value: String, at: Option<Span>) -> F
 }
 
 /// An object as a path from its number starts: `12 0 R`.
-fn object_path((n, g): ObjectId) -> String {
-    format!("{n} {g} R")
+fn object_path(id: ObjectId) -> String {
+    format!("{id} R")
 }
 
 /// Whether `path` starts from an object's number, as [`object_path`]
@@ -4853,8 +4858,8 @@ fn write_value(out: &mut String, o: &Object, depth: usize) {
             };
             let _ = write!(out, "({text})");
         }
-        Value::Ref((n, g)) => {
-            let _ = write!(out, "{n} {g} R");
+        Value::Ref(id) => {
+            let _ = write!(out, "{id} R");
         }
         Value::Array(_) | Value::Dict(_) | Value::Stream(_) if depth == 0 => out.push('…'),
         Value::Array(a) => {
@@ -5019,7 +5024,7 @@ impl fmt::Display for Rule {
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let object = match (self.object, self.revision) {
-            (Some((n, g)), _) => format!("{n} {g} R"),
+            (Some(id), _) => format!("{id} R"),
             (None, Some(revision)) => format!("trailer {revision}"),
             (None, None) => "the trailer".to_string(),
         };
@@ -5046,11 +5051,11 @@ impl fmt::Display for Finding {
                 ..
             }) => write!(f, " [bytes {start}..{end}]"),
             Some(Span {
-                stream: Some((n, g)),
+                stream: Some(stream),
                 start,
                 end,
                 ..
-            }) => write!(f, " [bytes {start}..{end} of {n} {g} R's data]"),
+            }) => write!(f, " [bytes {start}..{end} of {stream} R's data]"),
             None => Ok(()),
         }
     }
@@ -5266,7 +5271,7 @@ mod tests {
     /// saying where its bytes are, which [`placeless`] leaves out.
     fn finding(n: u32, path: &str, (table, key): (&str, &str), rule: Rule, value: &str) -> Finding {
         Finding {
-            object: Some((n, 0)),
+            object: Some(ObjectId::new(n, 0)),
             made: Made::Built,
             path: path.to_string(),
             table: table.to_string(),
@@ -5301,7 +5306,7 @@ mod tests {
     fn found(report: &Report) -> Vec<(Option<u32>, &str, &str, Rule, &str)> {
         (report.findings.iter())
             .map(|f| {
-                let object = f.object.map(|(n, _)| n);
+                let object = f.object.map(|id| id.number);
                 (
                     object,
                     f.table.as_str(),
@@ -5453,7 +5458,7 @@ mod tests {
             rules,
             [
                 (None, "FileTrailer", "-", Rule::Unresolved),
-                (Some((4, 0)), "AnnotText", "Open", Rule::Type),
+                (Some(ObjectId::new(4, 0)), "AnnotText", "Open", Rule::Type),
             ],
             "{report}"
         );
@@ -5483,13 +5488,13 @@ mod tests {
         assert_eq!(
             rules,
             [
-                (Some((4, 0)), "AnnotText", "Open", Rule::Type),
-                (Some((6, 0)), "-", "-", Rule::Reader),
+                (Some(ObjectId::new(4, 0)), "AnnotText", "Open", Rule::Type),
+                (Some(ObjectId::new(6, 0)), "-", "-", Rule::Reader),
             ],
             "{report}"
         );
         assert_eq!(report.findings[1].made, Made::Merged, "the trailer's");
-        assert_eq!(report.trailer, Some((6, 0)), "{report}");
+        assert_eq!(report.trailer, Some(ObjectId::new(6, 0)), "{report}");
         assert_eq!(report.checked.get("XRefStream"), Some(&1), "{report}");
     }
 
@@ -5722,7 +5727,7 @@ mod tests {
                         dict.push(key, v);
                     }
                 }
-                let id = (random.below(2) == 0).then_some((5, 0));
+                let id = (random.below(2) == 0).then_some(ObjectId::new(5, 0));
                 let object = match random.below(4) {
                     0 => Object::stream(dict),
                     _ => Object::from(dict),
@@ -5758,7 +5763,7 @@ mod tests {
     fn every_table_scores_a_dictionary_as_by_each_rows_key() {
         let bytes = scored_file();
         let doc = bytes::read(&bytes);
-        let catalog = doc.get((1, 0)).unwrap();
+        let catalog = doc.get(ObjectId::new(1, 0)).unwrap();
         let mut random = Random(0x9e37_79b9_7f4a_7c15);
         let made: Vec<_> = (grammar().tables())
             .map(|table| (table, dictionaries(&mut random, table, 24)))
@@ -6160,7 +6165,10 @@ mod tests {
         let all = checked_as(&bytes, &Hold::All(Made::Built));
         assert_eq!(all.findings.len(), 1, "{all}");
 
-        let annotation = BTreeMap::from([((4, 0), Made::Merged), ((5, 0), Made::Built)]);
+        let annotation = BTreeMap::from([
+            (ObjectId::new(4, 0), Made::Merged),
+            (ObjectId::new(5, 0), Made::Built),
+        ]);
         let report = checked_as(&bytes, &Hold::Only(annotation));
         assert_eq!(report.findings, [], "{report}");
         assert_eq!(
@@ -6180,12 +6188,16 @@ mod tests {
         let bytes = written("1.7", &bogus, Xref::Table);
         let report = checked_as(
             &bytes,
-            &Hold::Only(BTreeMap::from([((4, 0), Made::Merged)])),
+            &Hold::Only(BTreeMap::from([(ObjectId::new(4, 0), Made::Merged)])),
         );
         let held: Vec<_> = (report.findings.iter())
             .map(|f| (f.object, f.made, f.rule))
             .collect();
-        assert_eq!(held, [(Some((4, 0)), Made::Merged, Rule::Type)], "{report}");
+        assert_eq!(
+            held,
+            [(Some(ObjectId::new(4, 0)), Made::Merged, Rule::Type)],
+            "{report}"
+        );
     }
 
     #[test]
@@ -6203,7 +6215,7 @@ mod tests {
         let unreached = |n: u32, key: &str| (n, "-", "-", Rule::Unreached, key.to_string());
         let seen: Vec<_> = (report.findings.iter())
             .map(|f| {
-                let n = f.object.unwrap().0;
+                let n = f.object.unwrap().number;
                 (n, f.path.as_str(), f.table.as_str(), f.rule, f.key.clone())
             })
             .collect();
@@ -6674,7 +6686,10 @@ mod tests {
             format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
         );
         let doc = bytes::read(&file);
-        assert_eq!(doc.get((3, 0)).unwrap().at, doc.get((4, 0)).unwrap().at);
+        assert_eq!(
+            doc.get(ObjectId::new(3, 0)).unwrap().at,
+            doc.get(ObjectId::new(4, 0)).unwrap().at
+        );
         let report = check(&doc, &Hold::All(Made::Built), &Options::default());
         assert_eq!(report.checked.get("PageObject"), Some(&2), "{report}");
         let parents: Vec<_> = (found(&report).into_iter())
@@ -6688,7 +6703,7 @@ mod tests {
         );
         let inside = "it starts at byte 8 of object stream 10 0 R's data, \
                       inside 3 0 R, which runs from byte 8 to 80";
-        let at = doc.get((4, 0)).unwrap().at;
+        let at = doc.get(ObjectId::new(4, 0)).unwrap().at;
         let said = |hold: &Hold| {
             let report = check(&doc, hold, &Options::default());
             (report.findings.into_iter())
@@ -6699,14 +6714,14 @@ mod tests {
         let only = |id, made| Hold::Only(BTreeMap::from([(id, made)]));
         let holds = [
             (Hold::All(Made::Built), Made::Built),
-            (only((4, 0), Made::Built), Made::Built),
-            (only((4, 0), Made::Merged), Made::Merged),
+            (only(ObjectId::new(4, 0), Made::Built), Made::Built),
+            (only(ObjectId::new(4, 0), Made::Merged), Made::Merged),
         ];
         for (hold, made) in holds {
             let value = inside.to_string();
-            assert_eq!(said(&hold), [(Some((4, 0)), made, value, at)]);
+            assert_eq!(said(&hold), [(Some(ObjectId::new(4, 0)), made, value, at)]);
         }
-        assert_eq!(said(&only((3, 0), Made::Built)), []);
+        assert_eq!(said(&only(ObjectId::new(3, 0), Made::Built)), []);
     }
 
     /// An object stream [`with_object_streams`] writes: its number, the
@@ -6777,7 +6792,7 @@ mod tests {
     pub(super) fn walked(report: &Report) -> Vec<Walked<'_>> {
         (report.findings.iter())
             .map(|f| {
-                let object = f.object.map(|(n, _)| n);
+                let object = f.object.map(|id| id.number);
                 let (path, table, key) = (f.path.as_str(), f.table.as_str(), f.key.as_str());
                 (object, path, table, key, f.rule, f.value.as_str())
             })
@@ -6935,9 +6950,13 @@ mod tests {
         };
         doc.insert(5, Object::stream(container));
         doc.insert(6, vec![Object::from("FlateDecode"), Object::from("Bogus")]);
-        let hold = Hold::Only((3..=6).map(|n| ((n, 0), Made::Built)).collect());
+        let hold = Hold::Only(
+            (3..=6)
+                .map(|n| (ObjectId::new(n, 0), Made::Built))
+                .collect(),
+        );
         let report = check(&doc, &hold, &Options::default());
-        let at = |n| Some((n, 0));
+        let at = |n| Some(ObjectId::new(n, 0));
         assert_eq!(
             faults(&report),
             [
@@ -6974,10 +6993,10 @@ mod tests {
         doc.insert(3, Object::stream(container));
         let report = check(
             &doc,
-            &Hold::Only([((3, 0), Made::Built)].into()),
+            &Hold::Only([(ObjectId::new(3, 0), Made::Built)].into()),
             &Options::default(),
         );
-        let at = Some((3, 0));
+        let at = Some(ObjectId::new(3, 0));
         assert_eq!(
             faults(&report),
             [
@@ -7004,14 +7023,22 @@ mod tests {
         let mut options = write::Options::DEFAULT;
         options.kind = crate::source::XrefKind::Stream;
         options.pack = Some(write::Pack::DEFAULT);
-        let bodies = (objects.iter()).map(|(n, object)| ((*n, 0), write::Body::from(object)));
+        let bodies =
+            (objects.iter()).map(|(n, object)| (ObjectId::new(*n, 0), write::Body::from(object)));
         let mut file = Vec::new();
         let trailer = dict! { "Root" => r(1) };
         write::full(&mut file, bodies, &trailer, None, None, &options).unwrap();
         let doc = bytes::read(&file);
         let containers = doc.objects().filter(|&(_, o)| object_stream(o)).count();
         assert_eq!(containers, 1);
-        assert!(doc.get((4, 0)).unwrap().at.unwrap().stream.is_some());
+        assert!(
+            doc.get(ObjectId::new(4, 0))
+                .unwrap()
+                .at
+                .unwrap()
+                .stream
+                .is_some()
+        );
         let report = checked_as(&file, &Hold::All(Made::Built));
         assert_eq!(report.findings, [], "{report}");
         assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
@@ -7129,7 +7156,7 @@ mod tests {
             )],
         );
         let doc = bytes::read(&file);
-        let why = doc.get((2, 0)).unwrap_err().to_string();
+        let why = doc.get(ObjectId::new(2, 0)).unwrap_err().to_string();
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(report.checked.get("ObjectStream"), None, "{report}");
         let unread = "stream << /First 9 /N 2 /Type (ObjStm) >>";
@@ -7172,7 +7199,11 @@ mod tests {
             let held: Vec<_> = (report.findings.iter())
                 .map(|f| (f.object, f.made, f.key.as_str(), f.rule))
                 .collect();
-            assert_eq!(held, [(Some((10, 0)), made, "N", Rule::Value)], "{report}");
+            assert_eq!(
+                held,
+                [(Some(ObjectId::new(10, 0)), made, "N", Rule::Value)],
+                "{report}"
+            );
         }
     }
 
@@ -7439,7 +7470,7 @@ mod tests {
             assert!(report.paths.contains("trailer 1"), "{:?}", report.paths);
             assert!(found.to_string().contains("at trailer 1, in trailer 1 ("));
         }
-        let some = Hold::Only(BTreeMap::from([((2, 0), Made::Merged)]));
+        let some = Hold::Only(BTreeMap::from([(ObjectId::new(2, 0), Made::Merged)]));
         let report = check(&doc, &some, &Options::default());
         assert_eq!(walked(&report), [NO_PAGES], "{report}");
         assert_eq!(report.checked.get("FileTrailer"), Some(&1), "{report}");
@@ -7498,7 +7529,7 @@ mod tests {
             trailers.map(|(u, &n)| (u.clone(), n)).collect::<Vec<_>>()
         };
         let all = Hold::All(Made::Merged);
-        let some = Hold::Only(BTreeMap::from([((2, 0), Made::Merged)]));
+        let some = Hold::Only(BTreeMap::from([(ObjectId::new(2, 0), Made::Merged)]));
         let mut doc = bytes::read(&file.out);
         assert_eq!(doc.revisions.len(), 5);
         let report = check(&doc, &all, &Options::default());
@@ -7541,7 +7572,7 @@ mod tests {
         let second = file.table(&[2], &format!("/Size 4 /Root 1 0 R /Prev {first}"));
         file.end(second);
         let doc = bytes::read(&file.out);
-        let only = |n| Hold::Only(BTreeMap::from([((n, 0), Made::Built)]));
+        let only = |n| Hold::Only(BTreeMap::from([(ObjectId::new(n, 0), Made::Built)]));
         let id = (Some(3), "3 0 R", "XRefStream", "ID", Rule::Type, "(abc)");
         for (hold, found) in [
             (Hold::All(Made::Built), &[id, NO_PAGES][..]),
@@ -7823,7 +7854,7 @@ mod tests {
             Object::stream(dict).at(Span::new(None, at, at + 100))
         };
         let mut earlier = Trailer::new(stream(100));
-        earlier.stream = Some((7, 0));
+        earlier.stream = Some(ObjectId::new(7, 0));
         let revisions = |doc: &Document| {
             vec![
                 Revision::new(100, earlier.clone(), None),
@@ -7857,7 +7888,7 @@ mod tests {
             .filter(|f| f.rule == Rule::Unreached)
             .map(|f| f.object)
             .collect();
-        assert_eq!(unreached, [Some((7, 0))], "{report}");
+        assert_eq!(unreached, [Some(ObjectId::new(7, 0))], "{report}");
     }
 
     /// `since` carries a finding in an earlier revision's trailer from a
@@ -7872,7 +7903,7 @@ mod tests {
     #[test]
     fn since_carries_an_earlier_trailers_finding_from_any_trailer_before() {
         let id = |object: Option<u32>, path: &str, revision: Option<usize>| Finding {
-            object: object.map(|n| (n, 0)),
+            object: object.map(|n| ObjectId::new(n, 0)),
             made: Made::Merged,
             path: path.to_string(),
             table: "FileTrailer".to_string(),
@@ -7897,7 +7928,7 @@ mod tests {
         // newest, cross-reference stream 7, had mended it.
         let before = Report {
             findings: vec![id(None, "trailer 1", Some(1)), stream(None)],
-            trailer: Some((7, 0)),
+            trailer: Some(ObjectId::new(7, 0)),
             ..Report::default()
         };
         assert_eq!(updated.since(&before), [&newest]);
@@ -8009,7 +8040,11 @@ mod tests {
             .map(|f| {
                 assert_eq!((f.table.as_str(), f.key.as_str()), ("ObjectStream", "-"));
                 assert_eq!(f.revision, None);
-                (f.object.map(|(n, _)| n), f.path.as_str(), f.value.as_str())
+                (
+                    f.object.map(|id| id.number),
+                    f.path.as_str(),
+                    f.value.as_str(),
+                )
             })
             .collect()
     }
@@ -8134,7 +8169,7 @@ mod tests {
             doc.encryption,
             crate::source::Encryption::Unsupported(_)
         ));
-        assert!(doc.get((7, 0)).is_err());
+        assert!(doc.get(ObjectId::new(7, 0)).is_err());
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(
             packed_found(&report),
@@ -8170,7 +8205,7 @@ mod tests {
         let at = file.stream(13, &numbers, "/Root 1 0 R");
         file.end(at);
         let doc = bytes::read(&file.out);
-        assert!(doc.get((4, 0)).is_ok() && doc.get((15, 0)).is_ok());
+        assert!(doc.get(ObjectId::new(4, 0)).is_ok() && doc.get(ObjectId::new(15, 0)).is_ok());
         let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
         assert_eq!(
             packed_found(&report),
@@ -8375,8 +8410,15 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(unreached(&named(5)), [vec![(8, 0)], vec![(8, 0)]]);
-        let all = vec![(5, 0), (8, 0), (9, 0)];
+        assert_eq!(
+            unreached(&named(5)),
+            [vec![ObjectId::new(8, 0)], vec![ObjectId::new(8, 0)]]
+        );
+        let all = vec![
+            ObjectId::new(5, 0),
+            ObjectId::new(8, 0),
+            ObjectId::new(9, 0),
+        ];
         assert_eq!(unreached(&named(8)), [all.clone(), all]);
     }
 
@@ -8519,13 +8561,13 @@ mod tests {
         let zero = LINEARIZATION.replace("/E 400", "/E 0");
         let doc = bytes::read(&first_written(&zero, &[]));
         let table = "LinearizationParameterDict";
-        let held = Hold::Only(BTreeMap::from([((4, 0), Made::Built)]));
+        let held = Hold::Only(BTreeMap::from([(ObjectId::new(4, 0), Made::Built)]));
         let report = check(&doc, &held, &Options::default());
         let value = "0 (not one of fn:Eval((@E>0) && (@E<=@L)))";
         let found = [(Some(4), "4 0 R", table, "E", Rule::Value, value)];
         assert_eq!(walked(&report), found, "{report}");
         assert_eq!(report.checked.get(table), Some(&1), "{report}");
-        let not = Hold::Only(BTreeMap::from([((1, 0), Made::Built)]));
+        let not = Hold::Only(BTreeMap::from([(ObjectId::new(1, 0), Made::Built)]));
         let report = check(&doc, &not, &Options::default());
         assert_eq!(report.findings, [], "{report}");
         assert_eq!(report.checked.get(table), None, "{report}");
@@ -8611,7 +8653,11 @@ mod tests {
                 matches!(doc.encryption, crate::source::Encryption::Opened { .. }),
                 "{kind:?}"
             );
-            assert_eq!(doc.in_the_clear, BTreeSet::from([(10, 0)]), "{kind:?}");
+            assert_eq!(
+                doc.in_the_clear,
+                BTreeSet::from([ObjectId::new(10, 0)]),
+                "{kind:?}"
+            );
             let report = check(&doc, &Hold::All(Made::Merged), &Options::default());
             let value = format!("3 {said}");
             assert_eq!(
@@ -8660,7 +8706,12 @@ mod tests {
                 .collect();
             assert_eq!(
                 held,
-                [(Some((10, 0)), made, Rule::Packed, "3 0 R, a stream")],
+                [(
+                    Some(ObjectId::new(10, 0)),
+                    made,
+                    Rule::Packed,
+                    "3 0 R, a stream"
+                )],
                 "{report}"
             );
         }
@@ -8941,7 +8992,11 @@ mod tests {
             .filter(|f| f.rule == Rule::Unreached)
             .map(|f| (f.object, f.table.as_str(), f.key.as_str()))
             .collect();
-        assert_eq!(found, [(Some((6, 0)), "Catalog", "Lang")], "{report}");
+        assert_eq!(
+            found,
+            [(Some(ObjectId::new(6, 0)), "Catalog", "Lang")],
+            "{report}"
+        );
     }
 
     #[test]
@@ -8956,7 +9011,7 @@ mod tests {
         let unreached = |report: &Report| {
             (report.findings.iter())
                 .filter(|f| f.rule == Rule::Unreached)
-                .map(|f| f.object.unwrap().0)
+                .map(|f| f.object.unwrap().number)
                 .collect::<Vec<_>>()
         };
         let real = length_referenced(Object::from(15.0), &[]);
@@ -9591,7 +9646,7 @@ mod tests {
     #[test]
     fn beyond_leaves_out_what_a_source_has_in_merged_objects_only() {
         let at = |n: u32, made: Made, rule: Rule, value: &str| Finding {
-            object: Some((n, 0)),
+            object: Some(ObjectId::new(n, 0)),
             made,
             path: "Root/Pages/Kids[0]/Annots[0]".to_string(),
             table: "AnnotText".to_string(),
@@ -9703,7 +9758,7 @@ mod tests {
     #[test]
     fn by_path_carries_a_finding_from_its_path_or_where_the_baseline_has_none_from_anywhere() {
         let missing = |n: u32, made: Made, path: &str| Finding {
-            object: Some((n, 0)),
+            object: Some(ObjectId::new(n, 0)),
             made,
             path: path.to_string(),
             table: "PageObject".to_string(),
@@ -9830,7 +9885,7 @@ mod tests {
     #[test]
     fn since_carries_a_finding_from_the_same_object_only() {
         let missing = |n: Option<u32>, made: Made| Finding {
-            object: n.map(|n| (n, 0)),
+            object: n.map(|n| ObjectId::new(n, 0)),
             made,
             path: "Root/Pages/Kids[0]".to_string(),
             table: "PageObject".to_string(),
@@ -9855,7 +9910,7 @@ mod tests {
                 other.clone(),
                 in_stream.clone(),
             ],
-            trailer: Some((20, 0)),
+            trailer: Some(ObjectId::new(20, 0)),
             ..Report::default()
         };
         let before = Report {
@@ -9909,7 +9964,7 @@ mod tests {
     #[test]
     fn a_merged_objects_finding_is_carried_from_any_object_of_a_source() {
         let missing = |n: u32, made: Made| Finding {
-            object: Some((n, 0)),
+            object: Some(ObjectId::new(n, 0)),
             made,
             path: format!("Root/Pages/Kids[{n}]"),
             table: "PageObject".to_string(),
@@ -9934,7 +9989,7 @@ mod tests {
     fn a_source_carries_a_key_too_new_whatever_its_value_and_a_trailers_form() {
         let at =
             |object: Option<u32>, made: Made, (table, key): (&str, &str), value: &str| Finding {
-                object: object.map(|n| (n, 0)),
+                object: object.map(|n| ObjectId::new(n, 0)),
                 made,
                 path: "-".to_string(),
                 table: table.to_string(),
@@ -9970,7 +10025,7 @@ mod tests {
         );
         let written = Report {
             findings: vec![info.clone(), built.clone(), size.clone(), index.clone()],
-            trailer: Some((20, 0)),
+            trailer: Some(ObjectId::new(20, 0)),
             ..Report::default()
         };
         let page = at(
@@ -9984,7 +10039,7 @@ mod tests {
                 page.clone(),
                 at(Some(3), Made::Merged, ("XRefStream", "W"), ""),
             ],
-            trailer: Some((12, 0)),
+            trailer: Some(ObjectId::new(12, 0)),
             ..Report::default()
         };
         assert_eq!(
@@ -9994,7 +10049,7 @@ mod tests {
         );
         let stream = Report {
             findings: vec![page, at(Some(12), Made::Merged, ("XRefStream", "W"), "")],
-            trailer: Some((12, 0)),
+            trailer: Some(ObjectId::new(12, 0)),
             ..Report::default()
         };
         assert_eq!(
@@ -10120,7 +10175,10 @@ mod tests {
     #[test]
     fn a_hold_file_names_objects_and_how_each_was_made() {
         let hold = Hold::parse("# held\n4 0 merged\n\n5 0 built\n").unwrap();
-        let expected = BTreeMap::from([((4, 0), Made::Merged), ((5, 0), Made::Built)]);
+        let expected = BTreeMap::from([
+            (ObjectId::new(4, 0), Made::Merged),
+            (ObjectId::new(5, 0), Made::Built),
+        ]);
         assert_eq!(hold, Hold::Only(expected));
         for (text, why) in [
             ("4 0", "line 1: not a number"),
@@ -10351,20 +10409,24 @@ mod tests {
             read,
             [
                 (
-                    Some((4, 0)),
+                    Some(ObjectId::new(4, 0)),
                     "a lone CR after `stream`, where ISO 32000-2 wants CR LF or LF",
                     "\r"
                 ),
-                (Some((5, 0)), "no end of line after `stream`", "stream"),
                 (
-                    Some((5, 0)),
+                    Some(ObjectId::new(5, 0)),
+                    "no end of line after `stream`",
+                    "stream"
+                ),
+                (
+                    Some(ObjectId::new(5, 0)),
                     "its /Length, 3, doesn't end at endstream",
                     "3"
                 ),
             ],
             "{report}"
         );
-        let other = Hold::Only(BTreeMap::from([((3, 0), Made::Built)]));
+        let other = Hold::Only(BTreeMap::from([(ObjectId::new(3, 0), Made::Built)]));
         let report = checked_as(&bytes, &other);
         assert!(
             report.findings.iter().all(|f| f.rule != Rule::Reader),
@@ -10526,7 +10588,7 @@ mod tests {
         };
         (1..)
             .zip(objects)
-            .map(|(n, text)| ((n, 0), parsed(text)))
+            .map(|(n, text)| (ObjectId::new(n, 0), parsed(text)))
             .collect()
     }
 
@@ -10762,10 +10824,10 @@ mod tests {
         let doc = bytes::read(&file.out);
         let (own, objects) = (&doc, Objects(&doc));
         let whys = [
-            ((1, 0), None),
-            ((3, 0), Some(Why::Damaged)),
-            ((4, 0), Some(Why::Locked)),
-            ((9, 0), None),
+            (ObjectId::new(1, 0), None),
+            (ObjectId::new(3, 0), Some(Why::Damaged)),
+            (ObjectId::new(4, 0), Some(Why::Locked)),
+            (ObjectId::new(9, 0), None),
         ];
         for (id, why) in whys {
             let said = own.try_resolve(id);
@@ -10773,8 +10835,8 @@ mod tests {
             assert_eq!(objects.try_resolve(id), said, "{id:?}");
             assert_eq!(objects.resolve(id), said.ok().flatten(), "{id:?}");
         }
-        assert!(objects.try_resolve((1, 0)).unwrap().is_some());
-        assert_eq!(objects.try_resolve((9, 0)), Ok(None));
+        assert!(objects.try_resolve(ObjectId::new(1, 0)).unwrap().is_some());
+        assert_eq!(objects.try_resolve(ObjectId::new(9, 0)), Ok(None));
     }
 
     /// A tree one of whose nodes takes a password the reader wasn't given,
@@ -10812,7 +10874,7 @@ mod tests {
         );
         let counted = [(password, "PageLabels".to_string(), 1)];
         assert_eq!(unread(&report), counted, "{report}");
-        let six = Hold::Only(BTreeMap::from([((6, 0), Made::Merged)]));
+        let six = Hold::Only(BTreeMap::from([(ObjectId::new(6, 0), Made::Merged)]));
         assert_eq!(unread(&checked_as(&file.out, &six)), []);
     }
 
@@ -10988,7 +11050,7 @@ mod tests {
             ],
             "{report}"
         );
-        let only = |n| Hold::Only(BTreeMap::from([((n, 0), Made::Merged)]));
+        let only = |n| Hold::Only(BTreeMap::from([(ObjectId::new(n, 0), Made::Merged)]));
         let report = checked_as(&file.out, &only(2));
         assert_eq!(counted(&report), [], "{report}");
         let report = checked_as(&file.out, &only(1));

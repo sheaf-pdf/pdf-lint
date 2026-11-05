@@ -480,5 +480,5 @@ pub fn metadata_stream<'o, R: Resolve<'o>>(
             _ => return Ok(None),
         }
     }
-    Err(too_long(last.unwrap_or((0, 0))))
+    Err(too_long(last.unwrap_or(ObjectId::new(0, 0))))
 }

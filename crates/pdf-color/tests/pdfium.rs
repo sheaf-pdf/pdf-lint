@@ -19,6 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdf_color::{Limits, Object, Resolve, Space, Spaces, components, counted};
+use pdf_objects::ObjectId;
 use pdf_objects::parse::Parser;
 use pdf_structure::bytes::{Options, Reading};
 
@@ -86,15 +87,18 @@ fn word<'o, R: Resolve<'o> + Copy>(objects: R, spaces: Option<Spaces<'o>>, name:
 /// reader's rules, has no resources; object 5 a form, if it's one, and object 6
 /// the form drawn in that, if it's one.
 fn answer<'o, R: Resolve<'o> + Copy>(objects: R, file: &[u8]) -> String {
-    let page: Option<&'o Object> = objects.resolve((3, 0));
+    let page: Option<&'o Object> = objects.resolve(ObjectId::new(3, 0));
     let resources = page
         .and_then(Object::as_dict)
         .and_then(|d| d.get(b"Resources"));
     let page_spaces = Spaces::read(objects, resources).expect("the case's objects read");
     let form = |number| {
-        (objects.resolve((number, 0)))
-            .and_then(Object::as_stream)
-            .filter(|stream| stream.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Form"))
+        (objects.resolve(ObjectId {
+            number,
+            generation: 0,
+        }))
+        .and_then(Object::as_stream)
+        .filter(|stream| stream.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Form"))
     };
     let (outer, inner) = (form(5), form(5).and(form(6)));
     let chosen = [outer, inner]
@@ -171,7 +175,10 @@ fn named_values<'o, R: Resolve<'o> + Copy>(objects: R) -> Vec<&'o Object> {
     };
     let dict = |object: &'o Object| object.as_dict().or(object.as_stream().map(|s| &s.dict));
     let on = |number| {
-        let holder: Option<&'o Object> = objects.resolve((number, 0));
+        let holder: Option<&'o Object> = objects.resolve(ObjectId {
+            number,
+            generation: 0,
+        });
         holder.and_then(dict).and_then(|d| d.get(b"Resources"))
     };
     let mut values: Vec<&'o Object> = of(on(3)).map(|named| named.value).collect();

@@ -246,7 +246,7 @@ pub enum Error {
         span: Span,
     },
     /// Object `id`, whose data was asked for, isn't a stream.
-    #[error("{} {} R isn't a stream", .id.0, .id.1)]
+    #[error("{id} R isn't a stream")]
     NotAStream {
         /// The object.
         id: ObjectId,
@@ -284,7 +284,7 @@ pub enum Error {
     /// (another file's, or the file changed since, or a revision of it with
     /// another object there), or doesn't read here, or reads here where the
     /// document holds it unread.
-    #[error("{} {} R isn't read here as the document read it", .id.0, .id.1)]
+    #[error("{id} R isn't read here as the document read it")]
     Unlike {
         /// The object.
         id: ObjectId,
@@ -309,8 +309,8 @@ fn outside(span: &Span) -> String {
     let (start, end) = (span.start, span.end);
     match span.stream {
         None => format!("bytes {start}..{end} aren't in the file"),
-        Some((n, g)) => {
-            format!("bytes {start}..{end} aren't in object stream {n} {g} R's decoded data")
+        Some(stream) => {
+            format!("bytes {start}..{end} aren't in object stream {stream} R's decoded data")
         }
     }
 }
@@ -357,13 +357,14 @@ fn outside(span: &Span) -> String {
 ///
 /// ```
 /// use pdf_structure::bytes::{Options, Reading};
+/// use pdf_structure::pdf_objects::ObjectId;
 ///
 /// let file = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
 ///     xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
 ///     trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n45\n%%EOF\n";
 /// let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-/// assert_eq!(reading.ids().collect::<Vec<_>>(), [(1, 0)]);
-/// let catalog = reading.get((1, 0)).unwrap();
+/// assert_eq!(reading.ids().collect::<Vec<_>>(), [ObjectId::new(1, 0)]);
+/// let catalog = reading.get(ObjectId::new(1, 0)).unwrap();
 /// assert!(catalog.as_dict().is_some_and(|d| d.has(b"Type")));
 /// assert!(reading.warnings().is_empty());
 /// ```
@@ -513,8 +514,8 @@ impl<S: ByteSource> Reading<S> {
     pub fn ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
         (self.reader.entries.iter()).filter_map(|&(n, (generation, entry))| match entry {
             _ if n == 0 => None,
-            XrefEntry::InUse { .. } => Some((n, generation)),
-            XrefEntry::Compressed { .. } => Some((n, 0)),
+            XrefEntry::InUse { .. } => Some(ObjectId::new(n, generation)),
+            XrefEntry::Compressed { .. } => Some(ObjectId::new(n, 0)),
             _ => None,
         })
     }
@@ -684,6 +685,7 @@ impl<S: ByteSource> Reading<S> {
     /// ```
     /// use pdf_structure::RevisionEnd;
     /// use pdf_structure::bytes::{Options, Reading};
+    /// use pdf_structure::pdf_objects::ObjectId;
     ///
     /// let first = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
     ///     xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
@@ -698,7 +700,7 @@ impl<S: ByteSource> Reading<S> {
     /// assert_eq!(ends, [end(146, 147), end(285, 286)]);
     /// let before = reading.prefix(147, reading.limits()).unwrap();
     /// assert_eq!(before.revisions(), &reading.revisions()[..1]);
-    /// let catalog = before.get((1, 0)).unwrap().as_dict().unwrap();
+    /// let catalog = before.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
     /// assert!(!catalog.has(b"Lang"));
     /// ```
     pub fn prefix(&self, len: usize, limits: &Limits) -> Result<Reading<Prefix<&S>>, Error> {
@@ -807,7 +809,10 @@ impl<S: ByteSource> Reading<S> {
         let outside = Error::Outside { span };
         Ok(match span.stream {
             None => file.get(range)?.ok_or(outside),
-            Some((stream, 0)) => match self.reader.container(file, stream)? {
+            Some(ObjectId {
+                number: stream,
+                generation: 0,
+            }) => match self.reader.container(file, stream)? {
                 None => Err(outside),
                 Some(container) => match &container.header {
                     Err(why) => Err(Error::Unread(why.clone())),
@@ -881,12 +886,13 @@ impl<S: ByteSource> Reading<S> {
     /// ```
     /// use pdf_structure::bytes::{Error, Options, Reading};
     /// use pdf_structure::pdf_filters::Fault;
+    /// use pdf_structure::pdf_objects::ObjectId;
     ///
     /// let file = b"%PDF-1.7\n1 0 obj\n<< /Length 6 >>\nstream\nabcdef\nendstream\nendobj\n\
     ///     trailer\n<< /Size 2 >>\n%%EOF\n";
     /// let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-    /// assert_eq!(reading.decoded_within((1, 0), 6).unwrap(), b"abcdef");
-    /// let Err(Error::Decode(cut)) = reading.decoded_within((1, 0), 5) else {
+    /// assert_eq!(reading.decoded_within(ObjectId::new(1, 0), 6).unwrap(), b"abcdef");
+    /// let Err(Error::Decode(cut)) = reading.decoded_within(ObjectId::new(1, 0), 5) else {
     ///     panic!("past its limit");
     /// };
     /// assert_eq!(cut.data, b"abcde");
@@ -979,7 +985,7 @@ impl<S: ByteSource> Reading<S> {
         Ok(match crypt {
             Crypt::Written => Ok((stream, written)),
             Crypt::Decrypted(handler, method) => {
-                match handler.decrypt_stream(id, &written, method.as_ref()) {
+                match handler.decrypt_stream(id.into(), &written, method.as_ref()) {
                     Ok(plain) => Ok((stream, Cow::Owned(plain))),
                     Err(error) => Err(Error::Decrypt(error)),
                 }
@@ -1288,7 +1294,7 @@ impl<'o, S: ByteSource> Resolve<'o> for &'o Reading<S> {
                 Ok(got) => got,
                 Err(error) => {
                     reading.failed_resolves.fetch_add(1, Ordering::Relaxed);
-                    let message = format!("{} {} R doesn't read: {error}", id.0, id.1);
+                    let message = format!("{id} R doesn't read: {error}");
                     return Err(Unreadable::new(id, Why::Source, message));
                 }
             },

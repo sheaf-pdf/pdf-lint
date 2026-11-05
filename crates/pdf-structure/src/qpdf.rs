@@ -184,7 +184,12 @@ impl Qpdf {
             .map(String::from),
         );
         args.push(format!("--decode-level={}", self.level));
-        args.extend(ids.iter().map(|(n, g)| format!("--json-object={n},{g}")));
+        args.extend(ids.iter().map(
+            |ObjectId {
+                 number: n,
+                 generation: g,
+             }| format!("--json-object={n},{g}"),
+        ));
         args.push(self.file.display().to_string());
         args
     }
@@ -205,12 +210,12 @@ impl Qpdf {
                 (json.get("qpdf").and_then(|q| q.at(1)))
                     .ok_or_else(|| "qpdf's JSON has no objects".to_string())
             });
-            for &(n, g) in ids {
+            for &id in ids {
                 let object = objects.clone().and_then(|objects| {
-                    (objects.get(&format!("obj:{n} {g} R")))
-                        .ok_or_else(|| format!("qpdf gives no {n} {g} R"))
+                    (objects.get(&format!("obj:{id} R")))
+                        .ok_or_else(|| format!("qpdf gives no {id} R"))
                 });
-                each((n, g), object);
+                each(id, object);
             }
         }
     }
@@ -326,7 +331,9 @@ impl Decode for Qpdf {
             password: None,
             ..self.clone()
         };
-        let decoded = qpdf.decode(&[(3, 0)]).remove(&(3, 0));
+        let decoded = qpdf
+            .decode(&[ObjectId::new(3, 0)])
+            .remove(&ObjectId::new(3, 0));
         drop(file);
         decoded.unwrap_or_else(|| Err("qpdf gives nothing".to_string()))
     }
@@ -368,10 +375,10 @@ fn alone(stream: Written) -> Vec<u8> {
 }
 
 /// The decoded data of `object`, stream `id` in qpdf's JSON.
-fn stream_data(object: &Json, (n, g): ObjectId, decoding: bool) -> Result<Vec<u8>, String> {
+fn stream_data(object: &Json, id: ObjectId, decoding: bool) -> Result<Vec<u8>, String> {
     let stream = object
         .get("stream")
-        .ok_or_else(|| format!("{n} {g} R isn't a stream"))?;
+        .ok_or_else(|| format!("{id} R isn't a stream"))?;
     // qpdf leaves out the filters it decoded: any left, it couldn't, when
     // it was asked to.
     if let Some(filter) = stream.get("dict").and_then(|d| d.get("/Filter")) {
@@ -380,7 +387,7 @@ fn stream_data(object: &Json, (n, g): ObjectId, decoding: bool) -> Result<Vec<u8
         }
     }
     let data = (stream.get("data").and_then(Json::as_str))
-        .ok_or_else(|| format!("qpdf gives no data for {n} {g} R"))?;
+        .ok_or_else(|| format!("qpdf gives no data for {id} R"))?;
     json::base64(data)
 }
 
@@ -462,7 +469,7 @@ fn name(s: &str) -> Result<Vec<u8>, String> {
 /// A reference of qpdf's JSON, `n g R`.
 fn reference(s: &str) -> Option<ObjectId> {
     let mut words = s.split(' ');
-    let id = (words.next()?.parse().ok()?, words.next()?.parse().ok()?);
+    let id = ObjectId::new(words.next()?.parse().ok()?, words.next()?.parse().ok()?);
     (words.next() == Some("R") && words.next().is_none()).then_some(id)
 }
 
@@ -919,7 +926,11 @@ mod tests {
             ),
         ];
         let dir = scratch("crypt-filters");
-        let ids = [(3, 0), (4, 0), (6, 0)];
+        let ids = [
+            ObjectId::new(3, 0),
+            ObjectId::new(4, 0),
+            ObjectId::new(6, 0),
+        ];
         for (i, (how, ignored)) in cases.iter().enumerate() {
             let path = dir.path().join(format!("{i}.pdf"));
             let file = attached(how, &[]);
@@ -934,7 +945,7 @@ mod tests {
                     let mine = reading.data(id).unwrap();
                     assert_eq!(mine, plain, "{what}: {id:?}");
                     let theirs = theirs[&id].as_deref();
-                    if id == (4, 0) && *ignored {
+                    if id == ObjectId::new(4, 0) && *ignored {
                         let at = reading.record(id).unwrap().data.unwrap().at;
                         assert_eq!(theirs, Ok(&file[at.start..at.end]), "{what}: {id:?}");
                     } else {
@@ -1108,7 +1119,7 @@ mod tests {
     fn a_qpdf_that_cant_run_says_why_for_every_stream() {
         let decoded = Qpdf::new("x.pdf")
             .program("/nonexistent/qpdf")
-            .decode(&[(1, 0), (2, 0)]);
+            .decode(&[ObjectId::new(1, 0), ObjectId::new(2, 0)]);
         assert_eq!(decoded.len(), 2);
         for why in decoded.values() {
             assert!(
@@ -1117,7 +1128,11 @@ mod tests {
             );
         }
         let qpdf = qpdf(Path::new("/nonexistent/file.pdf"));
-        let why = qpdf.decode(&[(1, 0)]).remove(&(1, 0)).unwrap().unwrap_err();
+        let why = qpdf
+            .decode(&[ObjectId::new(1, 0)])
+            .remove(&ObjectId::new(1, 0))
+            .unwrap()
+            .unwrap_err();
         assert!(why.contains("exited with 2"), "{why}");
     }
 
@@ -1160,7 +1175,11 @@ mod tests {
         // refused (ETXTBSY) a moment.
         let (why, took) = loop {
             let start = Instant::now();
-            let why = qpdf.decode(&[(1, 0)]).remove(&(1, 0)).unwrap().unwrap_err();
+            let why = qpdf
+                .decode(&[ObjectId::new(1, 0)])
+                .remove(&ObjectId::new(1, 0))
+                .unwrap()
+                .unwrap_err();
             if !why.contains("Text file busy") {
                 break (why, start.elapsed());
             }
@@ -1200,7 +1219,10 @@ mod tests {
         assert_eq!(text, &Value::String(Str::Text("Café".to_string()), None));
         let bytes = dict.get(b"Bytes").unwrap().value();
         assert_eq!(bytes, &Value::String(Str::Bytes(vec![0, 0xFF, 0x10]), None));
-        assert_eq!(*dict.get(b"Pages").unwrap().value(), Value::Ref((2, 0)));
+        assert_eq!(
+            *dict.get(b"Pages").unwrap().value(),
+            Value::Ref(ObjectId::new(2, 0))
+        );
         let stream = indirect(&json::parse(br#"{"stream": {"dict": {"/Length": 5}}}"#).unwrap());
         let stream = stream.unwrap();
         assert!(
@@ -1237,11 +1259,11 @@ qpdf: operation succeeded with warnings\n";
             read,
             [
                 (
-                    Some((1, 0)),
+                    Some(ObjectId::new(1, 0)),
                     "dictionary has duplicated key /Dup; last occurrence overrides earlier ones (offset 19)"
                 ),
                 (
-                    Some((5, 0)),
+                    Some(ObjectId::new(5, 0)),
                     "expected dictionary key but found non-name object; inserting key /QPDFFake1 (offset 34)"
                 ),
                 (None, "file is damaged"),
@@ -1374,11 +1396,10 @@ qpdf: operation succeeded with warnings\n";
         let mut found: Vec<(String, String)> = Vec::new();
         let mut push = |kind: &str, d: String| found.push((kind.to_string(), d));
         for id in a.ids() {
-            let (n, g) = id;
             match (a.get(id), b.contains(id).then(|| b.get(id))) {
-                (_, None) => push("only the bytes list it", format!("{n} {g} R")),
+                (_, None) => push("only the bytes list it", format!("{id} R")),
                 (Ok(x), Some(Ok(y))) => {
-                    if let Some((kind, d)) = difference(x, y, &format!("{n} {g} R"), &nothing) {
+                    if let Some((kind, d)) = difference(x, y, &format!("{id} R"), &nothing) {
                         let kind = match is_xref(x) && d.contains("/ID[") {
                             true => "an older cross-reference stream's /ID, which isn't encrypted, and qpdf decrypts".to_string(),
                             false => format!("value: {kind}"),
@@ -1387,23 +1408,20 @@ qpdf: operation succeeded with warnings\n";
                     }
                 }
                 (Err(why), Some(Ok(y))) if y.is_null() => {
-                    push("only qpdf reads it, as null", format!("{n} {g} R: {why}"))
+                    push("only qpdf reads it, as null", format!("{id} R: {why}"))
                 }
-                (Err(why), Some(Ok(_))) => push("only qpdf reads it", format!("{n} {g} R: {why}")),
-                (Ok(_), Some(Err(why))) => {
-                    push("only the bytes read it", format!("{n} {g} R: {why}"))
-                }
+                (Err(why), Some(Ok(_))) => push("only qpdf reads it", format!("{id} R: {why}")),
+                (Ok(_), Some(Err(why))) => push("only the bytes read it", format!("{id} R: {why}")),
                 (Err(_), Some(Err(_))) => {}
             }
         }
         for id in b.ids().into_iter().filter(|&id| !a.contains(id)) {
-            let (n, g) = id;
             let kind = match b.get(id) {
                 Ok(y) if is_xref(y) => "only qpdf lists it: a cross-reference stream",
                 Ok(y) if y.is_null() => "only qpdf lists it, as null",
                 _ => "only qpdf lists it",
             };
-            push(kind, format!("{n} {g} R"));
+            push(kind, format!("{id} R"));
         }
         if a.trailer.stream != b.trailer.stream {
             let streams = format!("{:?} and {:?}", a.trailer.stream, b.trailer.stream);
@@ -1457,7 +1475,7 @@ qpdf: operation succeeded with warnings\n";
         );
         std::fs::write(&path, &file).unwrap();
         let alone = qpdf(&path).read().unwrap();
-        let catalog = alone.get((1, 0)).unwrap().as_dict().unwrap();
+        let catalog = alone.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
         assert!(catalog.has(b"Odd Name") && catalog.has(b"Bin\xFFx"));
         assert_eq!(
             catalog.entries().iter().filter(|e| e.key == b"Dup").count(),
@@ -1471,8 +1489,8 @@ qpdf: operation succeeded with warnings\n";
         );
         assert_eq!(catalog.get(b"Real").and_then(Object::as_number), Some(0.5));
         assert!(
-            (alone.warnings.iter())
-                .any(|w| w.object == Some((1, 0)) && w.message.contains("duplicated key /Dup")),
+            (alone.warnings.iter()).any(|w| w.object == Some(ObjectId::new(1, 0))
+                && w.message.contains("duplicated key /Dup")),
             "{:?}",
             alone.warnings
         );
@@ -1499,7 +1517,7 @@ qpdf: operation succeeded with warnings\n";
         std::fs::write(&damaged, &broken).unwrap();
         let alone = qpdf(&damaged).read().unwrap();
         assert!(alone.trailer.unwritten.is_some(), "{:?}", alone.warnings);
-        assert!(alone.contains((1, 0)));
+        assert!(alone.contains(ObjectId::new(1, 0)));
     }
 
     #[test]
@@ -1508,7 +1526,7 @@ qpdf: operation succeeded with warnings\n";
         let path = fixture("qpdf-compressed");
         let mut data = std::fs::read(&path).unwrap();
         let old = bytes::read(&data);
-        let (x, _) = old.trailer.stream.expect("a cross-reference stream");
+        let ObjectId { number: x, .. } = old.trailer.stream.expect("a cross-reference stream");
         let root = old
             .trailer
             .dict()
@@ -1537,7 +1555,7 @@ qpdf: operation succeeded with warnings\n";
         data.extend_from_slice(
             format!(
                 "xref\n0 1\n0000000000 65535 f \n{x} 1\n{offset:010} 00000 n \ntrailer\n<< /Size {size} /Root {} 0 R /Prev {prev} >>\nstartxref\n{xref}\n%%EOF\n",
-                root.0
+                root.number
             )
             .as_bytes(),
         );
@@ -1546,7 +1564,9 @@ qpdf: operation succeeded with warnings\n";
         std::fs::write(&updated, &data).unwrap();
         let qpdf = qpdf(&updated);
         assert_eq!(
-            qpdf.decode(&[(x, 0)]).remove(&(x, 0)).unwrap(),
+            qpdf.decode(&[ObjectId::new(x, 0)])
+                .remove(&ObjectId::new(x, 0))
+                .unwrap(),
             Ok(b"12345".to_vec()),
             "by its number, qpdf decodes the other stream"
         );
@@ -1631,16 +1651,17 @@ qpdf: operation succeeded with warnings\n";
         use pdf_objects::serialize;
 
         // A catalog, and the page tree qpdf needs, as object 2.
-        let catalog = || Object::from(dict! { "Type" => "Catalog", "Pages" => (2, 0) });
+        let catalog =
+            || Object::from(dict! { "Type" => "Catalog", "Pages" => ObjectId::new(2, 0) });
         let pages = || {
             Object::from(dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 })
         };
-        let root = || dict! { "Root" => (1, 0) };
+        let root = || dict! { "Root" => ObjectId::new(1, 0) };
         let deflate = Deflate::DEFAULT;
         // Objects one after another, each listed where it starts.
         let objects = |out: &mut Vec<u8>, section: &mut Section, objects: Vec<(u32, Object)>| {
             for (num, obj) in objects {
-                let pos = serialize::indirect(out, (num, 0), &obj).unwrap();
+                let pos = serialize::indirect(out, ObjectId::new(num, 0), &obj).unwrap();
                 section.insert(
                     num,
                     Entry::InUse {
@@ -1690,7 +1711,7 @@ qpdf: operation succeeded with warnings\n";
         );
         section.insert(3, Entry::Free { generation: 1 });
         let pos = freed.len();
-        let trailer = dict! { "Root" => (1, 0), "Prev" => prev as i64 };
+        let trailer = dict! { "Root" => ObjectId::new(1, 0), "Prev" => prev as i64 };
         section.table(&mut freed, trailer, pos).unwrap();
         files.push(("freed", freed, 0));
 
@@ -1724,7 +1745,7 @@ qpdf: operation succeeded with warnings\n";
             },
         );
         let pos = file.len();
-        let trailer = dict! { "Root" => (1, 0), "Prev" => prev as i64 };
+        let trailer = dict! { "Root" => ObjectId::new(1, 0), "Prev" => prev as i64 };
         section
             .stream(&mut file, 11, trailer, pos, deflate)
             .unwrap();
@@ -1814,10 +1835,10 @@ qpdf: operation succeeded with warnings\n";
         let (plain, trailer) = listed();
         let bodies = || {
             (plain.iter())
-                .map(|(n, o)| ((*n, 0), Body::from(o)))
+                .map(|(n, o)| (ObjectId::new(*n, 0), Body::from(o)))
                 .collect::<Vec<_>>()
         };
-        let past = Some(((plain.len() + 1) as u32, 0));
+        let past = Some(ObjectId::new((plain.len() + 1) as u32, 0));
         let methods = methods();
         let encryptors =
             std::iter::once(("plain", None)).chain(methods.iter().map(|m| (m.name, Some(m))));
@@ -1888,9 +1909,9 @@ qpdf: operation succeeded with warnings\n";
         };
         let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
         let base = Base::of(&reading).unwrap();
-        let mut page = reading.get((4, 0)).unwrap().clone();
+        let mut page = reading.get(ObjectId::new(4, 0)).unwrap().clone();
         page.as_dict_mut().unwrap().set("Rotate", 90);
-        let given = || [((4, 0), Body::from(&page))];
+        let given = || [(ObjectId::new(4, 0), Body::from(&page))];
         let options = write::Options::DEFAULT;
         let mut appended = file.clone();
         write::update(&mut appended, &base, given(), None, None, &options).unwrap();
@@ -1996,7 +2017,7 @@ qpdf: operation succeeded with warnings\n";
         let (plain, trailer) = listed();
         let plain_file = {
             let mut out = Vec::new();
-            let bodies = (plain.iter()).map(|(n, o)| ((*n, 0), Body::from(o)));
+            let bodies = (plain.iter()).map(|(n, o)| (ObjectId::new(*n, 0), Body::from(o)));
             let options = write::Options::DEFAULT;
             write::full(&mut out, bodies, &trailer, None, None, &options).unwrap();
             out
@@ -2041,13 +2062,22 @@ qpdf: operation succeeded with warnings\n";
             let doc = reading.to_document().unwrap();
             let own = Encryptor::of(&reading).unwrap();
             let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
-            let numbers = ids.iter().rev().map(|id| id.0);
+            let numbers = ids.iter().rev().map(|id| id.number);
             let reversed: BTreeMap<ObjectId, ObjectId> = (ids.iter().zip(numbers))
-                .map(|(&id, n)| (id, (n, id.1)))
+                .map(|(&id, n)| (id, ObjectId::new(n, id.generation)))
                 .collect();
-            let top = ids.iter().map(|id| id.0).max().unwrap_or(0) + 1;
+            let top = ids.iter().map(|id| id.number).max().unwrap_or(0) + 1;
             let halved: BTreeMap<ObjectId, ObjectId> = (ids.iter())
-                .map(|&(n, g)| ((n, g), if n % 2 == 0 { (n, g) } else { (n + top, g) }))
+                .map(|&id| {
+                    (
+                        id,
+                        if id.number % 2 == 0 {
+                            id
+                        } else {
+                            ObjectId::new(id.number + top, id.generation)
+                        },
+                    )
+                })
                 .collect();
             let mut ways = vec![];
             for (numbering, map) in [("reversed", &reversed), ("halved", &halved)] {
@@ -2064,8 +2094,8 @@ qpdf: operation succeeded with warnings\n";
             }
             for (numbering, map, way, kind, pack) in ways {
                 let to = |id| map.get(&id).copied();
-                let untyped = match to((10, 0)) {
-                    Some((n, g)) => format!("{n} {g} R/Contents: "),
+                let untyped = match to(ObjectId::new(10, 0)) {
+                    Some(id) => format!("{id} R/Contents: "),
                     None => String::new(),
                 };
                 let name = format!("{name}, {numbering}, {way}");
@@ -2131,7 +2161,7 @@ qpdf: operation succeeded with warnings\n";
                 .get(b"Root")
                 .and_then(Object::as_reference);
             let ids: Vec<ObjectId> = reading.ids().collect();
-            let past = |(n, g): ObjectId| (n + base.size, g);
+            let past = |id: ObjectId| ObjectId::new(id.number + base.size, id.generation);
             let every: BTreeMap<ObjectId, ObjectId> = (ids.iter())
                 .map(|&id| (id, if stays(id) { id } else { past(id) }))
                 .collect();
@@ -2174,9 +2204,12 @@ qpdf: operation succeeded with warnings\n";
                 assert!(back.warnings.is_empty(), "{name}: {:?}", back.warnings);
                 let found = differences(&back, &alone);
                 // The untyped signature, where it was and where it went.
-                let held: BTreeSet<ObjectId> = [(10, 0)].into_iter().chain(to((10, 0))).collect();
+                let held: BTreeSet<ObjectId> = [ObjectId::new(10, 0)]
+                    .into_iter()
+                    .chain(to(ObjectId::new(10, 0)))
+                    .collect();
                 let untyped: Vec<String> = (held.iter())
-                    .map(|(n, g)| format!("{n} {g} R/Contents: "))
+                    .map(|id| format!("{id} R/Contents: "))
                     .collect();
                 let want = if strings { held.len() } else { 0 };
                 assert_eq!(found.len(), want, "{name}: {found:?}");
@@ -2416,7 +2449,9 @@ qpdf: operation succeeded with warnings\n";
         std::fs::write(&path, fixture::file("1.7", &objects, root, Xref::Table)).unwrap();
         let data = std::fs::read(&path).unwrap();
         let doc = bytes::read(&data);
-        let ids: Vec<ObjectId> = (0..cases.len()).map(|i| (first + i as u32, 0)).collect();
+        let ids: Vec<ObjectId> = (0..cases.len())
+            .map(|i| ObjectId::new(first + i as u32, 0))
+            .collect();
         let theirs = Qpdf::new(&path).specialized().decode(&ids);
         for (i, (name, _, _, expect)) in cases.iter().enumerate() {
             let id = ids[i];
@@ -2614,7 +2649,7 @@ qpdf: operation succeeded with warnings\n";
                                 (Some(_), None) => "an object stream only the reader decodes".to_string(),
                                 (None, _) => "an object stream only qpdf decodes".to_string(),
                             };
-                            found.push((kind, format!("{} {} R", id.0, id.1)));
+                            found.push((kind, format!("{id} R")));
                         }
                         for id in ours.ids() {
                             let kind = match (ours.get(id), through.contains(id).then(|| through.get(id))) {
@@ -2624,7 +2659,7 @@ qpdf: operation succeeded with warnings\n";
                                 (Ok(_), Some(Err(_)) | None) => "an object only the reader reads",
                                 (Err(_), Some(Ok(_))) => "an object only qpdf's decoding reads",
                             };
-                            found.push((kind.to_string(), format!("{} {} R", id.0, id.1)));
+                            found.push((kind.to_string(), format!("{id} R")));
                         }
                         // Every stream with filters it decodes.
                         let resolve = |id| ours.get(id).ok();
@@ -2657,7 +2692,7 @@ qpdf: operation succeeded with warnings\n";
                             let theirs = theirs.remove(id);
                             if let Some(dir) = &dump {
                                 if !matches!(&theirs, Some(Ok(t)) if *t == mine && mine_faults.is_empty()) {
-                                    let file = |what: &str| dir.join(format!("{name}-{}-{}.{what}", id.0, id.1));
+                                    let file = |what: &str| dir.join(format!("{name}-{}-{}.{what}", id.number, id.generation));
                                     std::fs::write(file("raw"), written).unwrap();
                                     std::fs::write(file("ours"), &mine).unwrap();
                                     let qpdf = match &theirs {
@@ -2695,7 +2730,7 @@ qpdf: operation succeeded with warnings\n";
                                 true => format!("qpdf doesn't read the stream the reader does: {kind}"),
                                 false => kind,
                             };
-                            found.push((kind, format!("{} {} R", id.0, id.1)));
+                            found.push((kind, format!("{id} R")));
                         }
                         let mut tally = tally.lock().unwrap();
                         tally.files += 1;
@@ -2979,7 +3014,7 @@ qpdf: operation succeeded with warnings\n";
                                         true => Ok(written.to_vec()),
                                         false => {
                                             let method = crypt.map(|name| handler.named(&name));
-                                            handler.decrypt_stream(id, written, method.as_ref())
+                                            handler.decrypt_stream(id.into(), written, method.as_ref())
                                         }
                                     };
                                     let filters = crate::filter::filters(&stream.dict, Some(&resolve)).unwrap_or_default();
@@ -2995,7 +3030,7 @@ qpdf: operation succeeded with warnings\n";
                             let mut specialized = qpdf.clone().specialized().decode(&with_filters);
                             for (id, decrypted, filters, unnamed, by_eff) in mine {
                                 streams += 1;
-                                let example = format!("{} {} R", id.0, id.1);
+                                let example = format!("{id} R");
                                 let (plain, fault) = match decrypted {
                                     Ok(plain) => (Some(plain), String::new()),
                                     Err(e) => (e.data, format!(", the reader's fault: {:?}", e.fault)),
@@ -3009,7 +3044,7 @@ qpdf: operation succeeded with warnings\n";
                                 let theirs = raw.remove(&id);
                                 if let Some(dir) = &dump {
                                     if !matches!((&plain, &theirs), (Some(p), Some(Ok(t))) if p == t) {
-                                        let file = |what: &str| dir.join(format!("{name}-{}-{}.{what}", id.0, id.1));
+                                        let file = |what: &str| dir.join(format!("{name}-{}-{}.{what}", id.number, id.generation));
                                         std::fs::write(file("ours"), plain.as_deref().unwrap_or(b"NONE")).unwrap();
                                         let qpdf = match &theirs {
                                             Some(Ok(t)) => t.clone(),

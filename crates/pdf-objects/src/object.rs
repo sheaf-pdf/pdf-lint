@@ -4,11 +4,51 @@
 //! key written twice.
 
 use std::collections::HashSet;
+use std::fmt;
 
 use crate::text;
 
-/// An indirect object's number and generation.
-pub type ObjectId = (u32, u16);
+/// An indirect object's number and generation (ISO 32000-2, 7.3.10).
+///
+/// Ordered and hashed by number, then generation, so a set of ids
+/// iterates in the file's numbering. Eight bytes, and `Copy`. Written as
+/// a file writes the pair, `12 0`: a reference is `format!("{id} R")`,
+/// an object's header `format!("{id} obj")`. A pair `(number,
+/// generation)`, as another object model may spell it, converts both
+/// ways through `From`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ObjectId {
+    /// Its object number.
+    pub number: u32,
+    /// Its generation number.
+    pub generation: u16,
+}
+
+impl ObjectId {
+    /// Object `number`, generation `generation`.
+    pub const fn new(number: u32, generation: u16) -> ObjectId {
+        ObjectId { number, generation }
+    }
+}
+
+impl From<(u32, u16)> for ObjectId {
+    fn from((number, generation): (u32, u16)) -> ObjectId {
+        ObjectId { number, generation }
+    }
+}
+
+impl From<ObjectId> for (u32, u16) {
+    fn from(id: ObjectId) -> (u32, u16) {
+        (id.number, id.generation)
+    }
+}
+
+impl fmt::Display for ObjectId {
+    /// `12 0`: the number, a space and the generation.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.number, self.generation)
+    }
+}
 
 /// Where a value was written: a run of the file's bytes, or of a stream's
 /// decoded data.
@@ -185,7 +225,7 @@ impl Object {
 
     /// A reference to object `n`, generation 0.
     pub fn reference(n: u32) -> Object {
-        Object::new(Value::Ref((n, 0)))
+        Object::new(Value::Ref(ObjectId::new(n, 0)))
     }
 
     /// A string of `text`'s bytes, UTF-8 with no byte order mark, its form
@@ -941,6 +981,89 @@ macro_rules! dict {
 mod tests {
     use super::*;
 
+    /// An id is eight bytes, as the pair of its numbers is, and is built
+    /// in a constant.
+    #[test]
+    fn an_id_is_eight_bytes_and_const() {
+        const ID: ObjectId = ObjectId::new(12, 3);
+        assert_eq!(size_of::<ObjectId>(), 8);
+        assert_eq!(
+            ID,
+            ObjectId {
+                number: 12,
+                generation: 3
+            }
+        );
+        assert_eq!((ID.number, ID.generation), (12, 3));
+    }
+
+    /// Ids order and hash as their pairs do: by number, then generation,
+    /// so a set of them iterates as a set of pairs did.
+    #[test]
+    fn ids_order_and_hash_as_their_pairs_do() {
+        use std::collections::{BTreeSet, HashSet};
+        use std::hash::{BuildHasher, RandomState};
+        let pairs = [
+            (3, 0),
+            (1, 2),
+            (1, 0),
+            (0, 5),
+            (u32::MAX, u16::MAX),
+            (3, 1),
+            (2, 0),
+            (1, 1),
+        ];
+        let ids: Vec<ObjectId> = pairs.iter().map(|&(n, g)| ObjectId::new(n, g)).collect();
+        for (a, pa) in ids.iter().zip(pairs) {
+            for (b, pb) in ids.iter().zip(pairs) {
+                assert_eq!(a.cmp(b), pa.cmp(&pb), "{a} against {b}");
+                assert_eq!(a.partial_cmp(b), pa.partial_cmp(&pb));
+                assert_eq!(a == b, pa == pb);
+            }
+        }
+        let sorted: Vec<(u32, u16)> = ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let mut by_pair = pairs.to_vec();
+        by_pair.sort();
+        assert_eq!(sorted, by_pair);
+        let hasher = RandomState::new();
+        for (id, pair) in ids.iter().zip(pairs) {
+            assert_eq!(hasher.hash_one(id), hasher.hash_one(pair), "{id}");
+        }
+        let set: HashSet<ObjectId> = ids.iter().copied().collect();
+        assert_eq!(set.len(), pairs.len());
+        assert!(pairs.iter().all(|&p| set.contains(&ObjectId::from(p))));
+    }
+
+    /// An id writes as a file writes the pair, `12 0`, so `{id} R` is a
+    /// reference and `{id} obj` a header; its `Debug` is the derive.
+    #[test]
+    fn an_id_displays_as_its_number_and_generation() {
+        let id = ObjectId::new(12, 0);
+        assert_eq!(id.to_string(), "12 0");
+        assert_eq!(format!("{id} R"), "12 0 R");
+        assert_eq!(format!("{} obj", ObjectId::new(7, 65535)), "7 65535 obj");
+        assert_eq!(format!("{id:?}"), "ObjectId { number: 12, generation: 0 }");
+    }
+
+    /// A pair converts to an id and back, each field in its place.
+    #[test]
+    fn an_id_and_a_pair_convert_both_ways() {
+        for pair in [(0, 0), (1, 0), (12, 3), (u32::MAX, u16::MAX), (65536, 1)] {
+            let id = ObjectId::from(pair);
+            assert_eq!((id.number, id.generation), pair);
+            assert_eq!(<(u32, u16)>::from(id), pair);
+            let back: (u32, u16) = id.into();
+            assert_eq!(back, pair);
+            assert_eq!(ObjectId::new(pair.0, pair.1), id);
+        }
+    }
+
     /// A text string is literal as it is and hex as UTF-16BE, and what it
     /// must escape as a literal reads back, by either rules.
     #[test]
@@ -1054,7 +1177,10 @@ mod tests {
         assert_eq!(Object::from("Page").as_name(), Some(&b"Page"[..]));
         assert_eq!(Object::from(4.5).as_number(), Some(4.5));
         assert_eq!(Object::from(7).as_number(), Some(7.0));
-        assert_eq!(Object::reference(3).as_reference(), Some((3, 0)));
+        assert_eq!(
+            Object::reference(3).as_reference(),
+            Some(ObjectId::new(3, 0))
+        );
         let stream = Object::stream(dict! { "Length" => 0 });
         assert!(stream.as_dict().is_some_and(|d| d.has(b"Length")));
         assert!(Object::null().is_null());
@@ -1294,7 +1420,10 @@ mod tests {
         assert_eq!(integer(Object::from(i16::MIN)), Some(-32_768));
         assert_eq!(integer(Object::from(i32::MIN)), Some(-2_147_483_648));
         assert_eq!(integer(Object::from(i64::MIN)), Some(i64::MIN));
-        assert_eq!(Object::from((3, 1)).as_reference(), Some((3, 1)));
+        assert_eq!(
+            Object::from(ObjectId::new(3, 1)).as_reference(),
+            Some(ObjectId::new(3, 1))
+        );
         assert_eq!(Object::from(true).as_bool(), Some(true));
         assert_eq!(Object::from(0.25).as_number(), Some(0.25));
         // An f32 as its shortest decimal: 0.1, not 0.10000000149011612.
@@ -1333,7 +1462,10 @@ mod tests {
             Object::new(Value::Name(b"N".to_vec())).as_name(),
             Some(&b"N"[..])
         );
-        assert_eq!(Object::new(Value::Ref((5, 0))).as_reference(), Some((5, 0)));
+        assert_eq!(
+            Object::new(Value::Ref(ObjectId::new(5, 0))).as_reference(),
+            Some(ObjectId::new(5, 0))
+        );
         let array = Object::new(Value::Array(vec![Object::from(1), Object::from(2)]));
         assert_eq!(array.as_array().map(<[Object]>::len), Some(2));
         let dict = Object::new(Value::Dict(dict! { "Type" => "Page" }));
@@ -1383,7 +1515,7 @@ mod tests {
         assert_eq!(dict.get(b"Length").and_then(Object::as_integer), Some(0));
         assert_eq!(dict.type_name(), Some(&b"XObject"[..]));
         // Values compare by value and place; a value says what it is.
-        let id: ObjectId = (1, 0);
+        let id: ObjectId = ObjectId::new(1, 0);
         assert_eq!(Object::from(id), Object::reference(1));
         assert_ne!(Object::from(1), Object::from(1).at(Span::new(None, 0, 1)));
         assert_eq!(format!("{:?}", Value::Integer(1)), "Integer(1)");
@@ -1470,7 +1602,7 @@ mod tests {
         fn ids(o: &Object) -> Vec<ObjectId> {
             o.references().collect()
         }
-        assert_eq!(ids(&Object::reference(7)), [(7, 0)]);
+        assert_eq!(ids(&Object::reference(7)), [ObjectId::new(7, 0)]);
         for scalar in [
             Object::null(),
             1.into(),
@@ -1489,7 +1621,7 @@ mod tests {
             Object::reference(1),
             dict! {
                 "A" => Object::reference(2),
-                "B" => vec![Object::reference(3), dict! { "C" => (4, 1) }.into()],
+                "B" => vec![Object::reference(3), dict! { "C" => ObjectId::new(4, 1) }.into()],
                 "A" => Object::reference(5),
             }
             .into(),
@@ -1497,17 +1629,31 @@ mod tests {
             Object::reference(6),
             Object::reference(1),
         ]);
-        let order = [(1, 0), (2, 0), (3, 0), (4, 1), (5, 0), (6, 0), (1, 0)];
+        let order = [
+            ObjectId::new(1, 0),
+            ObjectId::new(2, 0),
+            ObjectId::new(3, 0),
+            ObjectId::new(4, 1),
+            ObjectId::new(5, 0),
+            ObjectId::new(6, 0),
+            ObjectId::new(1, 0),
+        ];
         assert_eq!(ids(&read(text)), order);
         assert_eq!(ids(&built), order);
 
         // A stream's dictionary, its /Length's reference among it, not its
         // data, whatever the data says.
-        let mut built = Stream::new(dict! { "Resources" => (8, 0) }, b"9 0 R".to_vec());
+        let mut built = Stream::new(
+            dict! { "Resources" => ObjectId::new(8, 0) },
+            b"9 0 R".to_vec(),
+        );
         built.dict.set("Length", Object::reference(10));
-        assert_eq!(ids(&built.into()), [(8, 0), (10, 0)]);
+        assert_eq!(
+            ids(&built.into()),
+            [ObjectId::new(8, 0), ObjectId::new(10, 0)]
+        );
         let file = b"4 0 obj\n<< /Length 5 /F 11 0 R >>\nstream\n9 0 R\nendstream\nendobj";
-        assert_eq!(ids(&stream(file)), [(11, 0)]);
+        assert_eq!(ids(&stream(file)), [ObjectId::new(11, 0)]);
     }
 
     /// A value nested far deeper than the parser reads, as one built in
@@ -1532,7 +1678,7 @@ mod tests {
             let walk = walk.spawn_scoped(scope, || value.references().collect::<Vec<_>>());
             walk.unwrap().join().unwrap()
         });
-        let order: Vec<ObjectId> = (0..=DEPTH).map(|n| (n, 0)).collect();
+        let order: Vec<ObjectId> = (0..=DEPTH).map(|n| ObjectId::new(n, 0)).collect();
         assert_eq!(walked, order);
         let mut level = Some(value);
         while let Some(object) = level.take() {
@@ -1571,10 +1717,10 @@ mod tests {
         use std::cell::RefCell;
         use std::collections::BTreeMap;
         let map = BTreeMap::from([
-            ((1, 0), Some((10, 0))),
-            ((2, 0), Some((10, 0))),
-            ((3, 0), None),
-            ((4, 1), Some((40, 2))),
+            (ObjectId::new(1, 0), Some(ObjectId::new(10, 0))),
+            (ObjectId::new(2, 0), Some(ObjectId::new(10, 0))),
+            (ObjectId::new(3, 0), None),
+            (ObjectId::new(4, 1), Some(ObjectId::new(40, 2))),
         ]);
         let asked = RefCell::new(Vec::new());
         let to = |id| {
@@ -1584,7 +1730,7 @@ mod tests {
         // A reference: named anew, null, or as it is.
         let mut one = Object::reference(1);
         assert!(one.renumber(to));
-        assert_eq!(one, Object::from((10, 0)));
+        assert_eq!(one, Object::from(ObjectId::new(10, 0)));
         let mut three = Object::reference(3);
         assert!(three.renumber(to));
         assert_eq!(three, Object::null());
@@ -1610,19 +1756,27 @@ mod tests {
         assert!(o.renumber(to));
         o.unplace();
         let renumbered = Object::from(vec![
-            Object::from((10, 0)),
+            Object::from(ObjectId::new(10, 0)),
             dict! {
-                "A" => (10, 0),
-                "B" => vec![Object::null(), dict! { "C" => (40, 2) }.into()],
-                "A" => (5, 0),
+                "A" => ObjectId::new(10, 0),
+                "B" => vec![Object::null(), dict! { "C" => ObjectId::new(40, 2) }.into()],
+                "A" => ObjectId::new(5, 0),
             }
             .into(),
             Vec::new().into(),
             Object::reference(6),
-            Object::from((10, 0)),
+            Object::from(ObjectId::new(10, 0)),
         ]);
         assert_eq!(o, renumbered);
-        let order = [(1, 0), (2, 0), (3, 0), (4, 1), (5, 0), (6, 0), (1, 0)];
+        let order = [
+            ObjectId::new(1, 0),
+            ObjectId::new(2, 0),
+            ObjectId::new(3, 0),
+            ObjectId::new(4, 1),
+            ObjectId::new(5, 0),
+            ObjectId::new(6, 0),
+            ObjectId::new(1, 0),
+        ];
         assert_eq!(*asked.borrow(), order);
 
         // A stream's dictionary, not its data, whatever the data says,
@@ -1633,19 +1787,22 @@ mod tests {
         let mut s = stream(file);
         let data = s.as_stream().unwrap().data.clone();
         assert!(s.renumber(to));
-        assert_eq!(*asked.borrow(), [(2, 0)]);
+        assert_eq!(*asked.borrow(), [ObjectId::new(2, 0)]);
         let s = s.as_stream().unwrap();
         assert_eq!(s.data, data);
-        assert_eq!(s.dict.get(b"F"), Some(&Object::from((10, 0))));
+        assert_eq!(s.dict.get(b"F"), Some(&Object::from(ObjectId::new(10, 0))));
         asked.borrow_mut().clear();
-        let mut built = Stream::new(dict! { "F" => (4, 1) }, b"1 0 R".to_vec());
+        let mut built = Stream::new(dict! { "F" => ObjectId::new(4, 1) }, b"1 0 R".to_vec());
         built.dict.set("Length", Object::reference(1));
         let mut built = Object::from(built);
         assert!(built.renumber(to));
-        assert_eq!(*asked.borrow(), [(4, 1), (1, 0)]);
+        assert_eq!(*asked.borrow(), [ObjectId::new(4, 1), ObjectId::new(1, 0)]);
         let s = built.as_stream().unwrap();
         assert_eq!(s.data.bytes(), Some(&b"1 0 R"[..]));
-        assert_eq!(s.dict, dict! { "F" => (40, 2), "Length" => (10, 0) });
+        assert_eq!(
+            s.dict,
+            dict! { "F" => ObjectId::new(40, 2), "Length" => ObjectId::new(10, 0) }
+        );
     }
 
     /// Renumbering drops the place of each reference it changes and of
@@ -1656,11 +1813,11 @@ mod tests {
     #[test]
     fn renumber_drops_the_places_on_the_path_to_a_change_and_keeps_the_rest() {
         let text = b"<< /E [5] /A [1 0 R 2 0 R] /B << /C 3 0 R >> /D 4 0 R >>";
-        let to = |(n, g): ObjectId| {
-            Some(if (2..=3).contains(&n) {
-                (n * 10, 0)
+        let to = |id: ObjectId| {
+            Some(if (2..=3).contains(&id.number) {
+                ObjectId::new(id.number * 10, 0)
             } else {
-                (n, g)
+                id
             })
         };
         let read_ = read(text);
@@ -1675,8 +1832,8 @@ mod tests {
         let thirty = b.as_dict().unwrap().get(b"C").unwrap();
         // What changed, and each value that holds it: in one array, then
         // in the dictionary after it.
-        assert_eq!(twenty, &Object::from((20, 0)));
-        assert_eq!(thirty, &Object::from((30, 0)));
+        assert_eq!(twenty, &Object::from(ObjectId::new(20, 0)));
+        assert_eq!(thirty, &Object::from(ObjectId::new(30, 0)));
         for changed in [&o, a, twenty, b, thirty] {
             assert_eq!(changed.at, None, "{changed:?}");
         }
@@ -1691,7 +1848,10 @@ mod tests {
 
         // Nothing changed: the same value, every place kept, though the map
         // gave each reference, as it is.
-        for to in [|id| Some(id), |(n, g)| Some((n, g))] {
+        for to in [
+            |id| Some(id),
+            |ObjectId { number, generation }| Some(ObjectId::new(number, generation)),
+        ] {
             let mut same = read_.clone();
             assert!(!same.renumber(to));
             assert_eq!(same, read_);
@@ -1702,7 +1862,7 @@ mod tests {
         let file = b"4 0 obj\n<< /Length 5 /F 1 0 R /G 2 0 R >>\nstream\nhello\nendstream\nendobj";
         let mut s = stream(file);
         let before = places(&s);
-        assert!(s.renumber(|(n, g)| (n != 1).then_some((n, g))));
+        assert!(s.renumber(|id: ObjectId| (id.number != 1).then_some(id)));
         assert_eq!(s.at, None);
         let stream_ = s.as_stream().unwrap();
         let data = stream_.data.at().unwrap();
@@ -1740,8 +1900,10 @@ mod tests {
         s.unplace();
         assert_eq!(places(&s), 0);
         assert_eq!(s.as_stream().unwrap().data, Data::Unplaced);
-        let refused = crate::serialize::indirect(&mut Vec::new(), (4, 0), &s);
-        let data = crate::serialize::Error::Data { id: Some((4, 0)) };
+        let refused = crate::serialize::indirect(&mut Vec::new(), ObjectId::new(4, 0), &s);
+        let data = crate::serialize::Error::Data {
+            id: Some(ObjectId::new(4, 0)),
+        };
         assert_eq!(refused, Err(data));
         // Given as its bytes first, from where it was read, they stay.
         let mut s = stream(file);
@@ -1752,7 +1914,7 @@ mod tests {
         assert_eq!(places(&s), 0);
         assert_eq!(s.as_stream().unwrap().data.bytes(), Some(&b"hello"[..]));
         let mut out = Vec::new();
-        crate::serialize::indirect(&mut out, (4, 0), &s).unwrap();
+        crate::serialize::indirect(&mut out, ObjectId::new(4, 0), &s).unwrap();
         let want = b"4 0 obj\n<</Length 5/F(f)>>\nstream\nhello\nendstream\nendobj\n";
         assert_eq!(out, want);
     }
@@ -1817,10 +1979,12 @@ mod tests {
     fn a_value_nested_ten_thousand_deep_renumbers_on_a_small_stack() {
         const DEPTH: u32 = 10_000;
         let mut value = nested(DEPTH);
-        let changed = on_a_small_stack(&mut value, |v| v.renumber(|(n, g)| Some((n + 1, g))));
+        let changed = on_a_small_stack(&mut value, |v| {
+            v.renumber(|id: ObjectId| Some(ObjectId::new(id.number + 1, id.generation)))
+        });
         assert!(changed);
         let walked = on_a_small_stack(&mut value, |v| v.references().collect::<Vec<_>>());
-        let order: Vec<ObjectId> = (1..=DEPTH + 1).map(|n| (n, 0)).collect();
+        let order: Vec<ObjectId> = (1..=DEPTH + 1).map(|n| ObjectId::new(n, 0)).collect();
         assert_eq!(walked, order);
         let mut levels = 0;
         take_apart(value, |level| {

@@ -164,7 +164,7 @@ fn values(part: &[u8], first: u32, rest: u32, objects: &mut BTreeMap<ObjectId, O
             return;
         };
         let n = if i == 0 { first } else { rest + i };
-        objects.insert((n, 0), value);
+        objects.insert(ObjectId::new(n, 0), value);
     }
 }
 
@@ -180,13 +180,13 @@ fn objects_of(data: &[u8]) -> BTreeMap<ObjectId, Object> {
     values(part(0), 1, 10, &mut objects);
     values(part(1), 2, 30, &mut objects);
     let mut stream = |n: u32, dict: Dict, part: &[u8]| {
-        objects.insert((n, 0), Stream::new(dict, part.to_vec()).into());
+        objects.insert(ObjectId::new(n, 0), Stream::new(dict, part.to_vec()).into());
     };
     stream(3, dict! {}, part(2));
     stream(4, dict! { "UseCMap" => Object::reference(6) }, part(3));
     stream(5, dict! {}, part(4));
     stream(6, dict! {}, part(5));
-    objects.insert((9, 0), Object::reference(1));
+    objects.insert(ObjectId::new(9, 0), Object::reference(1));
     objects
 }
 
@@ -547,10 +547,10 @@ where
 /// promise of a reading held ([`a_font`]). Whether it read.
 pub fn fonts(data: &[u8]) -> bool {
     let objects = objects_of(data);
-    let Some(font) = objects.get(&(1, 0)) else {
+    let Some(font) = objects.get(&ObjectId::new(1, 0)) else {
         return false;
     };
-    a_font(Map(&objects), font, objects.get(&(9, 0)), true)
+    a_font(Map(&objects), font, objects.get(&ObjectId::new(9, 0)), true)
 }
 
 /// The objects of `ids` that are dictionaries with a `/Subtype`, read over `objects`, a
@@ -843,7 +843,7 @@ mod tests {
                     }
                     None => Body::Object(object.clone()),
                 };
-                (id.0, body)
+                (id.number, body)
             })
             .collect();
         fixture::file("1.7", &bodies, dict! {}, Xref::Table)
@@ -860,13 +860,13 @@ mod tests {
         let limits = Limits::DEFAULT;
         for seed in font_fixtures() {
             let objects = objects_of(&seed);
-            let dict = objects[&(1, 0)].as_dict().unwrap();
+            let dict = objects[&ObjectId::new(1, 0)].as_dict().unwrap();
             let mut budget = BUDGET;
             let in_map = Font::read(Map(&objects), dict, &limits, &mut budget, &mut ());
 
             let file = file_of(&seed);
             let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-            let dict = reading.get((1, 0)).unwrap().as_dict().unwrap();
+            let dict = reading.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
             let mut read = BUDGET;
             let in_file = Font::read(&reading, dict, &limits, &mut read, &mut ());
             assert_eq!(said(&in_file), said(&in_map), "{}", seed.escape_ascii());

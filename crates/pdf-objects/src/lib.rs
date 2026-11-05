@@ -99,10 +99,10 @@ pub use version::Version;
 /// use pdf_objects::{Object, ObjectId, Resolve};
 ///
 /// // A closure over a file's objects.
-/// let objects = BTreeMap::from([((1, 0), Object::from(7))]);
+/// let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(7))]);
 /// let resolve = |id: ObjectId| objects.get(&id);
-/// assert_eq!(resolve.resolve((1, 0)).and_then(Object::as_integer), Some(7));
-/// assert!(resolve.resolve((2, 0)).is_none());
+/// assert_eq!(resolve.resolve(ObjectId::new(1, 0)).and_then(Object::as_integer), Some(7));
+/// assert!(resolve.resolve(ObjectId::new(2, 0)).is_none());
 ///
 /// // A type of its own, by reference.
 /// struct File(BTreeMap<ObjectId, Object>);
@@ -112,7 +112,7 @@ pub use version::Version;
 ///     }
 /// }
 /// let file = File(objects.clone());
-/// assert_eq!((&file).resolve((1, 0)), objects.get(&(1, 0)));
+/// assert_eq!((&file).resolve(ObjectId::new(1, 0)), objects.get(&ObjectId::new(1, 0)));
 /// ```
 ///
 /// [`Resolve::resolve`] doesn't say why it gives none, and
@@ -213,8 +213,10 @@ mod tests {
 
     /// Object 1 as `resolve` gives it, and whether it gives none for 2.
     fn resolves<'o, R: Resolve<'o> + ?Sized>(resolve: &R) -> (Option<i64>, bool) {
-        let one = resolve.resolve((1, 0)).and_then(Object::as_integer);
-        (one, resolve.resolve((2, 0)).is_none())
+        let one = resolve
+            .resolve(ObjectId::new(1, 0))
+            .and_then(Object::as_integer);
+        (one, resolve.resolve(ObjectId::new(2, 0)).is_none())
     }
 
     /// No object at all.
@@ -224,7 +226,7 @@ mod tests {
 
     #[test]
     fn a_closure_resolves_by_reference_as_a_dyn_fn_and_boxed() {
-        let objects = BTreeMap::from([((1, 0), Object::from(7))]);
+        let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(7))]);
         let closure = |id: ObjectId| objects.get(&id);
         assert_eq!(resolves(&closure), (Some(7), true));
         assert_eq!(resolves(&&closure), (Some(7), true));
@@ -241,14 +243,20 @@ mod tests {
     /// a `dyn Fn` and as a `dyn Resolve`.
     #[test]
     fn a_closure_can_t_say_why() {
-        let objects = BTreeMap::from([((1, 0), Object::from(7))]);
+        let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(7))]);
         let closure = |id: ObjectId| objects.get(&id);
-        assert_eq!(closure.try_resolve((1, 0)), Ok(objects.get(&(1, 0))));
-        assert_eq!(closure.try_resolve((2, 0)), Ok(None));
+        assert_eq!(
+            closure.try_resolve(ObjectId::new(1, 0)),
+            Ok(objects.get(&ObjectId::new(1, 0)))
+        );
+        assert_eq!(closure.try_resolve(ObjectId::new(2, 0)), Ok(None));
         let dynamic = &closure as &dyn Fn(_) -> _;
-        assert_eq!(dynamic.try_resolve((2, 0)), Ok(None));
+        assert_eq!(dynamic.try_resolve(ObjectId::new(2, 0)), Ok(None));
         let resolver = &closure as &dyn Resolve;
-        assert_eq!(resolver.try_resolve((1, 0)), Ok(objects.get(&(1, 0))));
+        assert_eq!(
+            resolver.try_resolve(ObjectId::new(1, 0)),
+            Ok(objects.get(&ObjectId::new(1, 0)))
+        );
     }
 
     /// One that can says so, and what it says is the whole message.
@@ -263,14 +271,14 @@ mod tests {
                 Err(Unreadable::new(id, Why::Locked, "it wants a password"))
             }
         }
-        let why = Locked.try_resolve((3, 1)).unwrap_err();
-        assert_eq!((why.id, why.why), ((3, 1), Why::Locked));
+        let why = Locked.try_resolve(ObjectId::new(3, 1)).unwrap_err();
+        assert_eq!((why.id, why.why), (ObjectId::new(3, 1), Why::Locked));
         assert_eq!(why.to_string(), "it wants a password");
         assert!(std::error::Error::source(&why).is_none());
 
         // Through a `dyn Resolve`, by value, it says so still.
         fn by_value<'o>(resolver: impl Resolve<'o>) -> Result<Option<&'o Object>, Unreadable> {
-            resolver.try_resolve((3, 1))
+            resolver.try_resolve(ObjectId::new(3, 1))
         }
         let locked = &Locked as &dyn Resolve;
         assert_eq!(by_value(locked).unwrap_err().why, Why::Locked);

@@ -49,13 +49,13 @@
 //! use pdf_semantics::{Limits, Object, ObjectId, Rules, dict};
 //!
 //! let objects = BTreeMap::from([
-//!     ((2, 0), Object::from(dict! {
+//!     (ObjectId::new(2, 0), Object::from(dict! {
 //!         "Type" => "Pages",
 //!         "Kids" => vec![Object::reference(3)],
 //!         "Count" => 1,
 //!         "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(200)],
 //!     })),
-//!     ((3, 0), Object::from(dict! { "Type" => "Page", "Parent" => Object::reference(2) })),
+//!     (ObjectId::new(3, 0), Object::from(dict! { "Type" => "Page", "Parent" => Object::reference(2) })),
 //! ]);
 //! let resolve = |id: ObjectId| objects.get(&id);
 //! let catalog = dict! { "Pages" => Object::reference(2) };
@@ -63,10 +63,10 @@
 //! let table = pages(resolve, &catalog, Rules::Pdfium, &Limits::DEFAULT, &mut ()).unwrap();
 //! assert_eq!(table.len(), 1);
 //! let page = table.get(0).unwrap();
-//! assert_eq!(page.id, Some((3, 0)));
+//! assert_eq!(page.id, Some(ObjectId::new(3, 0)));
 //! let media = page.media_box();
 //! assert_eq!(media.value, Rect([0.0, 0.0, 100.0, 200.0]));
-//! assert_eq!(media.origin, Origin::Ancestor(Some((2, 0))));
+//! assert_eq!(media.origin, Origin::Ancestor(Some(ObjectId::new(2, 0))));
 //! assert_eq!(page.rotate().origin, Origin::Default);
 //! ```
 

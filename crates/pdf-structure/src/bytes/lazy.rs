@@ -469,8 +469,8 @@ fn beside(name: &str, file: &[u8], passwords: &[Password], options: &Options) ->
                     // to, which their filters may.
                     let mut ways = BTreeSet::new();
                     for &n in reading.reader.containers.keys() {
-                        ways.insert((n, 0));
-                        if let Ok(o) = document.get((n, 0)) {
+                        ways.insert(ObjectId::new(n, 0));
+                        if let Ok(o) = document.get(ObjectId::new(n, 0)) {
                             ways.extend(o.references());
                         }
                     }
@@ -575,8 +575,8 @@ fn a_document_is_loaded_from_bytes_under_options_and_by_a_password() {
     (options.limits.stream, options.limits.budget) = (size, size + size / 2);
     let reading = Reading::open(&file[..], &options).unwrap();
     let doc = reading.to_document().unwrap();
-    assert!(doc.get((2, 0)).is_ok());
-    assert!(doc.get((3, 0)).is_err(), "cut");
+    assert!(doc.get(ObjectId::new(2, 0)).is_ok());
+    assert!(doc.get(ObjectId::new(3, 0)).is_err(), "cut");
     assert_eq!(doc, read_limited(&file, size, size + size / 2));
     assert_eq!(reading.into_document().unwrap(), doc);
 
@@ -668,12 +668,18 @@ fn each_source_in_memory_reads_alike() {
     assert_ne!(one.id(), two.id());
     // Each record holds its reading's id, and two readings' records of one
     // object are equal all the same.
-    one.get((1, 0)).unwrap();
-    two.get((1, 0)).unwrap();
-    let (first, second) = (one.record((1, 0)).unwrap(), two.record((1, 0)).unwrap());
+    one.get(ObjectId::new(1, 0)).unwrap();
+    two.get(ObjectId::new(1, 0)).unwrap();
+    let (first, second) = (
+        one.record(ObjectId::new(1, 0)).unwrap(),
+        two.record(ObjectId::new(1, 0)).unwrap(),
+    );
     assert_eq!((first.source, second.source), (one.id(), two.id()));
     assert_eq!(first, second);
-    assert_eq!(one.object_unkept((2, 0)).unwrap().1.source, one.id());
+    assert_eq!(
+        one.object_unkept(ObjectId::new(2, 0)).unwrap().1.source,
+        one.id()
+    );
     assert_eq!(one.size(), file.len());
     assert_eq!(one.header_version(), doc.header);
     assert_eq!(*one.trailer(), doc.trailer);
@@ -732,10 +738,15 @@ fn object_0_in_use_is_said_as_the_file_opens() {
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].message.contains("object 0"));
     assert!(matches!(
-        reading.get((0, 0)),
-        Err(Error::Unread(Unread::Missing { id: (0, 0) }))
+        reading.get(ObjectId::new(0, 0)),
+        Err(Error::Unread(Unread::Missing {
+            id: ObjectId {
+                number: 0,
+                generation: 0
+            }
+        }))
     ));
-    assert_eq!(reading.ids().collect::<Vec<_>>(), [(1, 0)]);
+    assert_eq!(reading.ids().collect::<Vec<_>>(), [ObjectId::new(1, 0)]);
 }
 
 /// A stream's `/Length` by reference is read again with the stream, its
@@ -745,15 +756,16 @@ fn object_0_in_use_is_said_as_the_file_opens() {
 fn a_length_by_references_faults_are_said_with_the_stream_and_its_own() {
     let file = length_by_reference();
     let reading = open(&file, &[], &Options::DEFAULT);
-    let stray = |w: &Warning| w.object == Some((4, 0)) && w.message == "4 0 obj has no endobj";
-    let Value::Stream(stream) = reading.get((3, 0)).unwrap().value() else {
+    let stray =
+        |w: &Warning| w.object == Some(ObjectId::new(4, 0)) && w.message == "4 0 obj has no endobj";
+    let Value::Stream(stream) = reading.get(ObjectId::new(3, 0)).unwrap().value() else {
         panic!("not a stream");
     };
     let at = stream.data.at().unwrap();
     assert_eq!(&file[at.start..at.end], b"abc");
     let warnings = reading.warnings();
     assert!(warnings.len() == 1 && stray(&warnings[0]), "{warnings:?}");
-    reading.get((4, 0)).unwrap();
+    reading.get(ObjectId::new(4, 0)).unwrap();
     let warnings = reading.warnings();
     assert!(
         warnings.len() == 2 && warnings.iter().all(stray),
@@ -768,9 +780,9 @@ fn a_length_by_references_faults_are_said_with_the_stream_and_its_own() {
 fn an_object_in_an_object_stream_is_read_before_the_others_in_it() {
     let (file, _) = compressed(false);
     let reading = open(&file, &[], &Options::DEFAULT);
-    let page = reading.get((3, 0)).unwrap();
-    assert_eq!(page.at.unwrap().stream, Some((4, 0)));
-    let record = reading.record((3, 0)).unwrap();
+    let page = reading.get(ObjectId::new(3, 0)).unwrap();
+    assert_eq!(page.at.unwrap().stream, Some(ObjectId::new(4, 0)));
+    let record = reading.record(ObjectId::new(3, 0)).unwrap();
     let origin = Origin::Stream {
         stream: 4,
         index: 1,
@@ -779,14 +791,20 @@ fn an_object_in_an_object_stream_is_read_before_the_others_in_it() {
     assert_eq!(Some(record.at), page.at);
     assert!(!record.endobj && record.data.is_none());
     assert!(
-        reading.record((4, 0)).is_some(),
+        reading.record(ObjectId::new(4, 0)).is_some(),
         "the object stream is kept"
     );
-    assert!(reading.record((2, 0)).is_none(), "the page tree isn't read");
-    assert!(reading.record((1, 0)).is_none(), "nor the catalog");
+    assert!(
+        reading.record(ObjectId::new(2, 0)).is_none(),
+        "the page tree isn't read"
+    );
+    assert!(
+        reading.record(ObjectId::new(1, 0)).is_none(),
+        "nor the catalog"
+    );
     let doc = read(&file);
-    let pages = reading.get((2, 0)).unwrap();
-    assert_eq!(pages, doc.get((2, 0)).unwrap());
+    let pages = reading.get(ObjectId::new(2, 0)).unwrap();
+    assert_eq!(pages, doc.get(ObjectId::new(2, 0)).unwrap());
     assert_eq!(reading.into_document().unwrap(), doc);
 }
 
@@ -807,39 +825,47 @@ fn an_object_read_unkept_keeps_nothing_but_its_object_stream() {
         "<< /Size 7 /Root 1 0 R >>",
     );
     let reading = open(&file, &[], &Options::DEFAULT);
-    let (stream, record) = reading.object_unkept((3, 0)).unwrap();
-    assert!(reading.record((3, 0)).is_none() && reading.record((4, 0)).is_none());
-    assert_eq!(&stream, reading.get((3, 0)).unwrap());
-    assert_eq!(Some(&record), reading.record((3, 0)));
+    let (stream, record) = reading.object_unkept(ObjectId::new(3, 0)).unwrap();
+    assert!(
+        reading.record(ObjectId::new(3, 0)).is_none()
+            && reading.record(ObjectId::new(4, 0)).is_none()
+    );
+    assert_eq!(&stream, reading.get(ObjectId::new(3, 0)).unwrap());
+    assert_eq!(Some(&record), reading.record(ObjectId::new(3, 0)));
     // Its warnings aren't kept, nor its failure.
-    let (_, record) = reading.object_unkept((5, 0)).unwrap();
+    let (_, record) = reading.object_unkept(ObjectId::new(5, 0)).unwrap();
     assert!(!record.endobj);
     assert!(reading.warnings().is_empty(), "{:?}", reading.warnings());
-    assert!(reading.object_unkept((6, 0)).is_err());
+    assert!(reading.object_unkept(ObjectId::new(6, 0)).is_err());
     assert!(reading.warnings().is_empty(), "{:?}", reading.warnings());
-    assert!(reading.record((6, 0)).is_none());
+    assert!(reading.record(ObjectId::new(6, 0)).is_none());
     assert!(matches!(
-        reading.object_unkept((9, 0)),
-        Err(Error::Unread(Unread::Missing { id: (9, 0) }))
+        reading.object_unkept(ObjectId::new(9, 0)),
+        Err(Error::Unread(Unread::Missing {
+            id: ObjectId {
+                number: 9,
+                generation: 0
+            }
+        }))
     ));
     // Kept, it's given as it's kept.
-    let kept = reading.get((5, 0)).unwrap().clone();
-    assert_eq!(reading.object_unkept((5, 0)).unwrap().0, kept);
+    let kept = reading.get(ObjectId::new(5, 0)).unwrap().clone();
+    assert_eq!(reading.object_unkept(ObjectId::new(5, 0)).unwrap().0, kept);
     assert_eq!(reading.warnings().len(), 1);
 
     // An object in an object stream: the stream is decoded and kept, with
     // the object stream's own object, and nothing of it.
     let (file, _) = compressed(false);
     let reading = open(&file, &[], &Options::DEFAULT);
-    let (page, record) = reading.object_unkept((3, 0)).unwrap();
-    assert!(reading.record((3, 0)).is_none());
+    let (page, record) = reading.object_unkept(ObjectId::new(3, 0)).unwrap();
+    assert!(reading.record(ObjectId::new(3, 0)).is_none());
     assert!(
-        reading.record((4, 0)).is_some(),
+        reading.record(ObjectId::new(4, 0)).is_some(),
         "the object stream is kept"
     );
     assert!(reading.reader.containers[&4].get().is_some(), "and decoded");
-    assert_eq!(&page, reading.get((3, 0)).unwrap());
-    assert_eq!(Some(&record), reading.record((3, 0)));
+    assert_eq!(&page, reading.get(ObjectId::new(3, 0)).unwrap());
+    assert_eq!(Some(&record), reading.record(ObjectId::new(3, 0)));
 }
 
 /// An object's record says whether `endobj` follows it, its extent
@@ -860,21 +886,24 @@ fn an_objects_record_says_whether_endobj_follows_it() {
     );
     let doc = read(&file);
     let extent = |n: u32| {
-        let at = doc.record((n, 0)).unwrap().at;
+        let at = doc.record(ObjectId::new(n, 0)).unwrap().at;
         &file[at.start..at.end]
     };
-    assert!(doc.record((1, 0)).unwrap().endobj);
+    assert!(doc.record(ObjectId::new(1, 0)).unwrap().endobj);
     assert_eq!(extent(1), b"1 0 obj\n<< /Type /Catalog >>\nendobj");
-    assert!(!doc.record((2, 0)).unwrap().endobj);
+    assert!(!doc.record(ObjectId::new(2, 0)).unwrap().endobj);
     assert_eq!(extent(2), b"2 0 obj\n<< /A 1 >>");
-    assert_eq!(doc.record((1, 0)).unwrap().origin, Origin::File);
-    let data = |n: u32| doc.record((n, 0)).unwrap().data.unwrap();
+    assert_eq!(
+        doc.record(ObjectId::new(1, 0)).unwrap().origin,
+        Origin::File
+    );
+    let data = |n: u32| doc.record(ObjectId::new(n, 0)).unwrap().data.unwrap();
     assert!(data(3).declared && data(3).indirect_length);
     assert_eq!(&file[data(3).at.start..data(3).at.end], b"abc");
     assert!(!data(5).declared && !data(5).indirect_length);
     assert_eq!(&file[data(5).at.start..data(5).at.end], b"abcdef\n");
     assert!(extent(5).ends_with(b"endstream\nendobj"));
-    assert_eq!(doc.record((4, 0)).unwrap().data, None);
+    assert_eq!(doc.record(ObjectId::new(4, 0)).unwrap().data, None);
 
     // Scanned, each is recovered.
     let mut scanned = file.clone();
@@ -898,11 +927,11 @@ fn the_budget_cuts_the_stream_decoded_last_whole_by_number_on_demand_as_asked() 
     let read = whole(&file, &[], &options);
     let doc = &read.document;
     assert!(read.reached);
-    assert!(doc.get((2, 0)).is_ok());
-    assert!(doc.get((3, 0)).is_err(), "cut");
+    assert!(doc.get(ObjectId::new(2, 0)).is_ok());
+    assert!(doc.get(ObjectId::new(3, 0)).is_err(), "cut");
     let reading = open(&file, &[], &options);
-    assert!(reading.get((3, 0)).is_ok());
-    assert!(reading.get((2, 0)).is_err(), "cut");
+    assert!(reading.get(ObjectId::new(3, 0)).is_ok());
+    assert!(reading.get(ObjectId::new(2, 0)).is_err(), "cut");
     let lazily = reading.whole(None);
     assert!(lazily.reached);
     assert_ne!(lazily.document, *doc);
@@ -919,16 +948,19 @@ fn the_budget_cuts_the_stream_decoded_last_whole_by_number_on_demand_as_asked() 
     assert_eq!(reading.to_document().unwrap(), *doc);
     assert!(reached(&reading));
     let reading = open(&file, &[], &options);
-    assert!(reading.get((3, 0)).is_ok());
+    assert!(reading.get(ObjectId::new(3, 0)).is_ok());
     let kept = reading.to_document().unwrap();
-    assert!(kept.get((3, 0)).is_ok() && kept.get((2, 0)).is_err(), "cut");
+    assert!(
+        kept.get(ObjectId::new(3, 0)).is_ok() && kept.get(ObjectId::new(2, 0)).is_err(),
+        "cut"
+    );
     assert!(reached(&reading));
     assert_eq!(reading.into_document().unwrap(), kept);
     // With the budget for both, neither reaches it.
     options.limits.budget = 2 * size;
     let read = whole(&file, &[], &options);
     assert!(!read.reached);
-    assert!(read.document.get((3, 0)).is_ok());
+    assert!(read.document.get(ObjectId::new(3, 0)).is_ok());
 }
 
 /// Object streams decoded on many threads at once never take the budget
@@ -947,13 +979,16 @@ fn threads_decoding_near_the_budget_never_wrap_it() {
                 let reading = &reading;
                 scope.spawn(move || {
                     for n in [2 + 2 * t, 3 + 2 * t] {
-                        let _ = reading.get((n, 0));
+                        let _ = reading.get(ObjectId::new(n, 0));
                     }
                 });
             }
         });
         assert_eq!(reading.reader.budget.load(Ordering::Relaxed), 0);
-        assert!(reading.get((18, 0)).is_err(), "nothing left to decode it");
+        assert!(
+            reading.get(ObjectId::new(18, 0)).is_err(),
+            "nothing left to decode it"
+        );
     }
 }
 
@@ -1041,9 +1076,9 @@ fn an_object_stream_bomb_is_cut_at_its_cap_quickly() {
     options.limits.stream = 1 << 20;
     let started = Instant::now();
     let reading = open(&file, &[], &options);
-    assert!(reading.get((1, 0)).is_ok());
+    assert!(reading.get(ObjectId::new(1, 0)).is_ok());
     for _ in 0..2 {
-        let why = reading.get((2, 0)).unwrap_err().to_string();
+        let why = reading.get(ObjectId::new(2, 0)).unwrap_err().to_string();
         assert_eq!(why, "its header has 0 of its 1000000000 pairs");
     }
     let warnings = reading.warnings();
@@ -1083,7 +1118,7 @@ fn a_cross_reference_stream_bomb_is_decoded_no_further_than_its_rows() {
     let started = Instant::now();
     let reading = open(&file, &[], &Options::DEFAULT);
     assert_eq!(reading.trailer().unwritten, None);
-    assert!(reading.get((1, 0)).is_ok());
+    assert!(reading.get(ObjectId::new(1, 0)).is_ok());
     assert!(reading.warnings().is_empty(), "{:?}", reading.warnings());
     assert!(started.elapsed() < QUICK, "{:?}", started.elapsed());
 }
@@ -1096,7 +1131,7 @@ fn a_file_encrypting_only_its_attachments_reads_on_demand_as_whole() {
     let file = attachments_only();
     let reading = open(&file, &[], &Options::DEFAULT);
     assert_eq!(*reading.encryption(), Encryption::Plain);
-    assert!(reading.get((3, 0)).is_ok());
+    assert!(reading.get(ObjectId::new(3, 0)).is_ok());
     assert_eq!(
         on_demand("attachments only", &file, &[], &Options::DEFAULT),
         3
@@ -1125,14 +1160,14 @@ fn an_undefined_crypt_filter_reads_on_demand_as_whole() {
 fn an_encrypted_readings_bytes_are_refused_but_its_object_streams() {
     let file = encrypted_objects(" /Filter /FlateDecode", None);
     let reading = open(&file, &[Password("user")], &Options::DEFAULT);
-    let pages = reading.get((2, 0)).unwrap().at.unwrap();
+    let pages = reading.get(ObjectId::new(2, 0)).unwrap().at.unwrap();
     let (objects, _) = objects_2_and_3();
     assert_eq!(
         reading.bytes(pages).unwrap(),
         &objects[pages.start..pages.end]
     );
     assert!(matches!(reading.bytes(span(0, 8)), Err(Error::Encrypted)));
-    let past = Span::new(Some((4, 0)), 0, objects.len() + 1);
+    let past = Span::new(Some(ObjectId::new(4, 0)), 0, objects.len() + 1);
     assert!(matches!(reading.bytes(past), Err(Error::Outside { .. })));
     let file = fixture::file("1.7", &clean(), root(), Xref::Table);
     let reading = open(&file, &[], &Options::DEFAULT);
@@ -1143,7 +1178,7 @@ fn an_encrypted_readings_bytes_are_refused_but_its_object_streams() {
         said,
         format!("bytes 0..{} aren't in the file", file.len() + 1)
     );
-    let none = Span::new(Some((9, 0)), 0, 1);
+    let none = Span::new(Some(ObjectId::new(9, 0)), 0, 1);
     assert!(matches!(reading.bytes(none), Err(Error::Outside { .. })));
 }
 
@@ -1274,15 +1309,15 @@ fn a_reading_unlocked_decodes_on_what_opening_left_and_says_what_opening_says() 
     let user = [Password("user")];
     let reading = Reading::open(&file[..], &options).unwrap();
     assert_eq!(*reading.encryption(), Encryption::Plain);
-    assert!(reading.get((2, 0)).is_ok());
+    assert!(reading.get(ObjectId::new(2, 0)).is_ok());
     assert_eq!(reading.reader.budget.load(Ordering::Relaxed), 0, "spent");
     let reading = reading.unlock(&user[0].encodings()).unwrap();
     let opened = Reading::open_with(&file[..], &user, &options).unwrap();
     assert_eq!(
-        read_by(&reading, &[(2, 0)], &[0]),
-        read_by(&opened, &[(2, 0)], &[0])
+        read_by(&reading, &[ObjectId::new(2, 0)], &[0]),
+        read_by(&opened, &[ObjectId::new(2, 0)], &[0])
     );
-    assert!(reading.get((2, 0)).is_ok(), "decoded again");
+    assert!(reading.get(ObjectId::new(2, 0)).is_ok(), "decoded again");
     assert!(!reading.reader.reached.load(Ordering::Relaxed));
 
     // /P not what /Perms holds; the file going on past its %%EOF, which is
@@ -1375,7 +1410,7 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
         ),
     ] {
         let reading = open(&file, &[], &Options::DEFAULT);
-        reading.get((1, 0)).unwrap();
+        reading.get(ObjectId::new(1, 0)).unwrap();
         let before = kept(&reading);
         let reading = reading.unlock(&Password("owner").encodings()).unwrap();
         assert_eq!(*reading.encryption(), encryption);
