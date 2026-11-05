@@ -5680,25 +5680,6 @@ mod tests {
         }
     }
 
-    /// The extensions the model names: each `fn:Extension` of a
-    /// SinceVersion cell, a type's, a value's or a link's.
-    fn the_models_extensions() -> BTreeSet<String> {
-        let mut names = BTreeSet::new();
-        for row in grammar().tables().flat_map(|table| &table.rows) {
-            if let Some(rest) = row.since_version.split("fn:Extension(").nth(1) {
-                let end = rest.find([',', ')']).unwrap_or(rest.len());
-                names.insert(rest[..end].to_string());
-            }
-            let wraps = (row.r#type.iter().flat_map(|t| &t.wraps))
-                .chain(row.possible_values.iter().flatten().flat_map(|v| &v.wraps))
-                .chain(row.link.iter().flatten().flat_map(|l| &l.wraps));
-            for wrap in wraps.filter(|w| w.func == WrapFn::Extension) {
-                names.insert(wrap.arg.clone());
-            }
-        }
-        names
-    }
-
     /// For `table`, `n` dictionaries and streams made by `random` of its
     /// rows' keys, the wildcard's, `0`, `1*` and keys of no row, some
     /// written twice: their values null, of each simple kind, one of the
@@ -5786,7 +5767,7 @@ mod tests {
             .collect();
         let made = &made;
         for version in [Version::new(1, 4), Version::new(1, 7), Version::new(2, 0)] {
-            for extensions in [BTreeSet::new(), the_models_extensions()] {
+            for extensions in [BTreeSet::new(), crate::extension::named()] {
                 let options = Options {
                     version: Some(version),
                     extensions,
