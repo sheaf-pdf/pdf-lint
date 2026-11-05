@@ -1,0 +1,58 @@
+[package]
+name = "pdf-content-streams"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "PDF content streams read as PDFium reads them, written and spliced: tokens and operations, operators typed by Annex A, q/Q balance, marked content and resource names"
+keywords = ["pdf", "content-stream", "lexer", "iso-32000", "writer"]
+categories = ["parser-implementations", "graphics"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+# An inline image's end markers searched for in its data (`EI`, ASCIIHex's
+# `>`, a JPEG's end of image), on SIMD where the target has it; its default
+# features off, as a library's, for the application to turn on.
+memchr = { version = "2.8", default-features = false }
+# The components of a color space, by which an unfiltered inline image is
+# sized: an image's own array, and what a resources dictionary names.
+pdf-color = { path = "../pdf-color", version = "0.1" }
+# Flate and LZW data in an inline image decoded to find where it ends, as
+# PDFium decodes it: Flate on zlib-rs, zlib's inflate in Rust, as PDFium's
+# end is what zlib read; miniz_oxide not compiled for it.
+pdf-filters = { path = "../pdf-filters", version = "0.1", default-features = false, features = ["zlib-rs"] }
+pdf-objects = { path = "../pdf-objects", version = "0.1" }
+pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1.1" }
+thiserror = "2"
+# An operation's operands, sixteen held inline before they spill to the heap.
+tinyvec = { version = "1.13", features = ["alloc"] }
+# A resource's name by what it is (`ResId`): XXH3-128 of its objects, fast
+# and the same on every build and platform, so equal resources are named
+# alike wherever content is written; its other hashes and `std` off.
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_128"] }
+# With `image-ends`: DCT data in an inline image decoded to find where it
+# ends, as PDFium decodes it; without its SIMD features (`x86`, `neon`),
+# which hold all its `unsafe`, so it builds with `unsafe_code` forbidden.
+zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
+# With `image-ends`: CCITTFax data in an inline image decoded to find where
+# it ends, as PDFium decodes it. It needs Rust 1.87.
+hayro-ccitt = { version = "0.3", optional = true }
+
+# The decoders that find DCT's and CCITTFax's ends as PDFium finds them, for
+# a reading that asks for them (`Limits::coded_ends`), where without them
+# they're found from the data's bytes: off by default, so a caller takes the
+# decoders only when it asks.
+[features]
+image-ends = ["dep:zune-jpeg", "dep:hayro-ccitt"]
+
+# docs.rs documents what the feature adds, beside the default.
+[package.metadata.docs.rs]
+features = ["image-ends"]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

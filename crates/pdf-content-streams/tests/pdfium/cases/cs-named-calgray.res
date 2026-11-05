@@ -1,0 +1,1 @@
+<< /ColorSpace << /X [/CalGray << /WhitePoint [0.95 1 1.08] >>] >> >>

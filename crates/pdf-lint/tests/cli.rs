@@ -1,12 +1,12 @@
 //! The command line, run as a user runs it.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
-// The crate's own reader of JSON, to read the JSON report back with.
-#[path = "../src/json.rs"]
-#[allow(dead_code)]
-mod json;
+use pdf_crypt::writer::{self, Kind, Settings};
+use pdf_crypt::{Dictionary, Encoded, Handler};
+use serde_json::{Value, json};
+use tempfile::TempDir;
 
 /// A file of these objects' bodies, with a table, written by hand.
 fn file(objects: &[&str]) -> Vec<u8> {
@@ -30,20 +30,28 @@ fn file(objects: &[&str]) -> Vec<u8> {
     out
 }
 
-/// `bytes` written to a file of the test's own, named `name`.
-fn written(name: &str, bytes: &[u8]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pdf-lint-cli-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(name);
+/// A folder of the test's own, removed when it's dropped.
+fn folder() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("pdf-lint-cli-")
+        .tempdir()
+        .unwrap()
+}
+
+/// `bytes` written to a file in the test's folder, `dir`, named `name`.
+fn written(dir: &TempDir, name: &str, bytes: &[u8]) -> PathBuf {
+    let path = dir.path().join(name);
     std::fs::write(&path, bytes).unwrap();
     path
 }
 
-fn run(args: &[&str]) -> Output {
+/// pdf-lint.
+fn pdf_lint() -> Command {
     Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
-        .args(args)
-        .output()
-        .unwrap()
+}
+
+fn run(args: &[&str]) -> Output {
+    pdf_lint().args(args).output().unwrap()
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -53,14 +61,23 @@ fn text(bytes: &[u8]) -> String {
 const CATALOG: &str = "<< /Type /Catalog /Pages 2 0 R >>";
 const PAGES: &str = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
 
+/// What clap ends each argument error with.
+const MORE: &str = "For more information, try '--help'.\n";
+
+/// What clap prints between an argument error and [`MORE`] when it gives
+/// the usage, as it does for an argument it doesn't know, a value that
+/// isn't UTF-8, and pdf-lint's own checks.
+const USAGE: &str = "Usage: pdf-lint [OPTIONS] <FILE>...\n\n";
+
 #[test]
 fn a_clean_file_exits_0() {
+    let dir = folder();
     let clean = file(&[
         CATALOG,
         PAGES,
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>",
     ]);
-    let path = written("clean.pdf", &clean);
+    let path = written(&dir, "clean.pdf", &clean);
     let out = run(&[path.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
     assert!(
@@ -72,12 +89,13 @@ fn a_clean_file_exits_0() {
 
 #[test]
 fn a_finding_is_printed_with_its_bytes_and_exits_1() {
+    let dir = folder();
     let faulty = file(&[
         CATALOG,
         PAGES,
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1] /Resources << >> >>",
     ]);
-    let path = written("faulty.pdf", &faulty);
+    let path = written(&dir, "faulty.pdf", &faulty);
     let out = run(&[path.to_str().unwrap()]);
     let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{stdout}");
@@ -86,6 +104,7 @@ fn a_finding_is_printed_with_its_bytes_and_exits_1() {
 
     // Allowed, it's left out.
     let allow = written(
+        &dir,
         "allow.tsv",
         b"# test\nPageObject\tMediaBox\ttype\t*\t*\tthe test's\n",
     );
@@ -100,22 +119,24 @@ fn a_finding_is_printed_with_its_bytes_and_exits_1() {
 
 #[test]
 fn a_hold_file_holds_only_what_it_names() {
+    let dir = folder();
     let faulty = file(&[
         CATALOG,
         PAGES,
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1] /Resources << >> >>",
     ]);
-    let path = written("held.pdf", &faulty);
-    let hold = written("hold.txt", b"# the catalog alone\n1 0 built\n");
+    let path = written(&dir, "held.pdf", &faulty);
+    let hold = written(&dir, "hold.txt", b"# the catalog alone\n1 0 built\n");
     let out = run(&["--hold", hold.to_str().unwrap(), path.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
 }
 
 #[test]
 fn exempt_keys_are_no_findings_in_a_built_object() {
+    let dir = folder();
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> \
                 /WriterPage 1 /WriterMark 2 /Contnets 3 >>";
-    let path = written("exempt.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = written(&dir, "exempt.pdf", &file(&[CATALOG, PAGES, page]));
     let path = path.to_str().unwrap();
     let unlisted = |args: &[&str]| {
         let out = run(args);
@@ -135,7 +156,7 @@ fn exempt_keys_are_no_findings_in_a_built_object() {
             "PageObject/Contnets"
         ]
     );
-    let one = written("exempt-one.txt", b"# the writer's\n/WriterPage\n");
+    let one = written(&dir, "exempt-one.txt", b"# the writer's\n/WriterPage\n");
     let one = one.to_str().unwrap();
     assert_eq!(
         unlisted(&["--built", "--exempt", one, path]),
@@ -143,13 +164,13 @@ fn exempt_keys_are_no_findings_in_a_built_object() {
     );
     // Every key a name begins; and with a hold file, or in what the last
     // update wrote, the built objects.
-    let prefix = written("exempt-prefix.txt", b"/Writer*\n");
+    let prefix = written(&dir, "exempt-prefix.txt", b"/Writer*\n");
     let prefix = prefix.to_str().unwrap();
     assert_eq!(
         unlisted(&["--built", "--exempt", prefix, path]),
         ["PageObject/Contnets"]
     );
-    let hold = written("exempt-hold.txt", b"3 0 built\n");
+    let hold = written(&dir, "exempt-hold.txt", b"3 0 built\n");
     let hold = hold.to_str().unwrap();
     assert_eq!(
         unlisted(&["--hold", hold, "--exempt", prefix, path]),
@@ -158,7 +179,7 @@ fn exempt_keys_are_no_findings_in_a_built_object() {
     let note = "<< /Type /Annot /Subtype /Text /Rect [0 0 1 1] /WriterNote 1 /Contnets 2 >>";
     let page = page.replace("/Resources", "/Annots [4 0 R] /Resources");
     let update = updated(&file(&[CATALOG, PAGES, &page]), &[(3, &page), (4, note)]);
-    let update = written("exempt-update.pdf", &update);
+    let update = written(&dir, "exempt-update.pdf", &update);
     let update = update.to_str().unwrap();
     assert_eq!(
         unlisted(&["--last-update", "--exempt", prefix, update]),
@@ -174,7 +195,7 @@ fn exempt_keys_are_no_findings_in_a_built_object() {
         "{}",
         text(&out.stderr)
     );
-    let bad = written("exempt-bad.txt", b"/Writer\nMine\n");
+    let bad = written(&dir, "exempt-bad.txt", b"/Writer\nMine\n");
     let out = run(&["--built", "--exempt", bad.to_str().unwrap(), path]);
     assert_eq!(out.status.code(), Some(2));
     assert!(
@@ -186,10 +207,12 @@ fn exempt_keys_are_no_findings_in_a_built_object() {
 
 #[test]
 fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
+    let dir = folder();
     let page = |keys: &str| {
         format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> {keys} >>")
     };
     let path = written(
+        &dir,
         "unlisted.pdf",
         &file(&[CATALOG, PAGES, &page("/Contnets 3 /WriterMark 1")]),
     );
@@ -214,7 +237,7 @@ fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
     assert_eq!(unlisted(&["--built", "--unlisted", "never", path]), none);
     assert_eq!(unlisted(&["--built", "--unlisted", "built", path]).1, both);
     // A writer's own key exempt, merged objects and all.
-    let exempt = written("unlisted-exempt.txt", b"/WriterMark\n");
+    let exempt = written(&dir, "unlisted-exempt.txt", b"/WriterMark\n");
     let exempt = exempt.to_str().unwrap();
     assert_eq!(
         unlisted(&["--unlisted", "all", "--exempt", exempt, path]).1,
@@ -224,6 +247,7 @@ fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
     // A rewrite, set against what it was written from, carries the key
     // the page had there, and finds the one the writer added.
     let rewrite = written(
+        &dir,
         "unlisted-rewrite.pdf",
         &file(&[
             CATALOG,
@@ -243,7 +267,7 @@ fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
         &file(&[CATALOG, PAGES, &page("/Contnets 3")]),
         &[(3, &page("/Contnets 3 /Rotat 9"))],
     );
-    let update = written("unlisted-update.pdf", &update);
+    let update = written(&dir, "unlisted-update.pdf", &update);
     let out = run(&[
         "--unlisted",
         "all",
@@ -257,35 +281,29 @@ fn unlisted_says_which_objects_a_key_the_model_doesnt_list_is_a_finding_in() {
 
     // The JSON says which.
     let out = run(&["--format", "json", "--unlisted", "all", path]);
-    let report = json::parse(&out.stdout).unwrap();
-    assert_eq!(
-        report.get("unlisted_in").cloned(),
-        Some(json::Json::String("all".to_string()))
-    );
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report.get("unlisted_in"), Some(&json!("all")));
 
     // Exempting keys where none is a finding is refused, and so is a
     // setting it hasn't.
-    for (args, why) in [
-        (
-            &["--unlisted", "never", "--built", "--exempt", exempt, path][..],
-            "--exempt and --unlisted never",
-        ),
-        (
-            &["--unlisted", "some", path][..],
-            "--unlisted some: built, all or never",
-        ),
-    ] {
-        let out = run(args);
-        assert_eq!(out.status.code(), Some(2));
-        assert!(text(&out.stderr).contains(why), "{}", text(&out.stderr));
-    }
+    let out = run(&["--unlisted", "never", "--built", "--exempt", exempt, path]);
+    assert_eq!(out.status.code(), Some(2));
+    let why = "--exempt and --unlisted never";
+    assert!(text(&out.stderr).contains(why), "{}", text(&out.stderr));
+    let out = run(&["--unlisted", "some", path]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        format!("error: invalid value 'some' for '--unlisted <W>': built, all or never\n\n{MORE}")
+    );
 }
 
 #[test]
 fn extensions_name_what_a_file_is_checked_under_besides_what_it_declares() {
+    let dir = folder();
     // A page's /Tabs /A, which PDF 1.7 has only under Adobe's level 3.
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Tabs /A >>";
-    let path = written("extensions.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = written(&dir, "extensions.pdf", &file(&[CATALOG, PAGES, page]));
     let path = path.to_str().unwrap();
     let out = run(&[path]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
@@ -301,10 +319,10 @@ fn extensions_name_what_a_file_is_checked_under_besides_what_it_declares() {
         "json",
         path,
     ]);
-    let report = json::parse(&out.stdout).unwrap();
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
-        report.get("extensions").cloned(),
-        Some(json::parse(br#"["ADBE_Extn3","Malforms"]"#).unwrap())
+        report.get("extensions"),
+        Some(&json!(["ADBE_Extn3", "Malforms"]))
     );
     // A name the model hasn't is refused, with those it has; and so is
     // `*`, as no file is every extension at once.
@@ -320,168 +338,690 @@ fn extensions_name_what_a_file_is_checked_under_besides_what_it_declares() {
     }
 }
 
+/// An encrypted file's first `/ID` element, which its key is made with.
+const ID: &[u8] = b"0123456789abcdef";
+
+/// What the writer encrypts `kind` with, `user` the user's password.
+fn settings(kind: Kind, user: &[u8]) -> Settings<'_> {
+    Settings {
+        kind,
+        user,
+        owner: b"owner",
+        p: -4,
+        id: ID,
+        encrypt_metadata: true,
+    }
+}
+
+/// [`in_an_object_stream`]'s file, encrypted as `kind` with `user` for the
+/// user's password and `owner` for the owner's: its object stream's data
+/// encrypted, the encryption dictionary and `/ID` in its trailer.
+fn crypted(kind: Kind, user: &[u8]) -> Vec<u8> {
+    crypted_with(kind, user, &object_stream_objects().0)
+}
+
+/// [`crypted`]'s file, its object stream holding `objects`.
+fn crypted_with(kind: Kind, user: &[u8], objects: &[u8]) -> Vec<u8> {
+    let dictionary = writer::dictionary(&settings(kind, user));
+    let handler = Handler::open(&dictionary, ID, &[Encoded::verbatim(user)]).unwrap();
+    let data = writer::encrypt_stream(&handler, (4, 0), objects, None, [4; 16]).unwrap();
+    in_an_object_stream_under("", &data, &encryption(&dictionary))
+}
+
+/// A trailer's `/Encrypt`, `dictionary`, and its `/ID`.
+fn encryption(dictionary: &Dictionary) -> String {
+    let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let d = dictionary;
+    let mut entries = format!(
+        "/Filter /Standard /V {} /R {} /P {}",
+        d.v,
+        d.r,
+        d.p.unwrap()
+    );
+    if let Some(length) = d.length {
+        entries.push_str(&format!(" /Length {length}"));
+    }
+    let strings = [
+        ("O", &d.o),
+        ("U", &d.u),
+        ("OE", &d.oe),
+        ("UE", &d.ue),
+        ("Perms", &d.perms),
+    ];
+    for (name, value) in strings {
+        if let Some(value) = value {
+            entries.push_str(&format!(" /{name} <{}>", hex(value)));
+        }
+    }
+    if let Some(encrypt_metadata) = d.encrypt_metadata {
+        entries.push_str(&format!(" /EncryptMetadata {encrypt_metadata}"));
+    }
+    if let Some(filter) = d.crypt_filters.first() {
+        let method = String::from_utf8_lossy(filter.method.as_deref().unwrap());
+        let length = if method == "AESV3" { 32 } else { 16 };
+        entries.push_str(&format!(
+            " /CF << /StdCF << /CFM /{method} /Length {length} >> >> /StmF /StdCF /StrF /StdCF"
+        ));
+    }
+    format!(" /Encrypt << {entries} >> /ID [<{0}> <{0}>]", hex(ID))
+}
+
 #[test]
-fn a_file_that_wont_open_with_the_password_given_is_unread_and_says_why() {
-    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
-    let plain = written("password-plain.pdf", &file(&[CATALOG, PAGES, page]));
-    // Encrypted by the qpdf pdf-lint decodes with (AES-128, as PDF 1.7
-    // has it), its objects in object streams, which nothing decodes without
-    // the password.
-    let qpdf = std::env::var_os("PDF_LINT_QPDF").unwrap_or_else(|| "qpdf".into());
-    let encrypted = |name: &str, user: &str| {
-        let out = plain.with_file_name(name);
-        let status = Command::new(&qpdf)
-            .args([
-                "--object-streams=generate",
-                "--encrypt",
-                user,
-                "owner",
-                "128",
-                "--use-aes=y",
-                "--",
-            ])
-            .arg(&plain)
-            .arg(&out)
-            .status()
-            .unwrap();
-        assert!(matches!(status.code(), Some(0 | 3)), "qpdf: {status}");
-        out.to_str().unwrap().to_string()
-    };
-    let locked = encrypted("password-locked.pdf", "user");
-    let open = encrypted("password-open.pdf", "");
+fn an_encrypted_file_is_read_by_the_password_it_needs_and_unread_without_it() {
+    let dir = folder();
+    let locked = written(&dir, "password-locked.pdf", &crypted(Kind::Aes256, b"user"));
+    let locked = locked.to_str().unwrap();
+    let open = written(&dir, "password-open.pdf", &crypted(Kind::Aes128, b""));
+    let open = open.to_str().unwrap();
     let said = |args: &[&str]| {
         let out = run(args);
-        (out.status.code(), text(&out.stderr))
+        (out.status.code(), text(&out.stdout), text(&out.stderr))
     };
-    let (code, err) = said(&[&locked]);
+    let (code, _, err) = said(&[locked]);
     assert_eq!(code, Some(2), "{err}");
-    assert!(
-        err.contains("it needs a password: give it with --password"),
-        "{err}"
+    assert_eq!(
+        err,
+        format!("{locked}: it needs a password: give it with --password\n")
     );
-    let (code, err) = said(&["--password", "wrong", &locked]);
+    let (code, _, err) = said(&["--password", "wrong", locked]);
     assert_eq!(code, Some(2), "{err}");
     assert!(
         err.contains("the password --password gives doesn't open it"),
         "{err}"
     );
-    // The user's or the owner's opens it, and what its object streams
-    // hold is there, nothing unresolved (though qpdf writes AES-128's /OE
-    // and /UE empty, a finding of their own); and one with no user
-    // password opens without, but not with a wrong one.
-    let opens = |args: &[&str]| {
-        let out = run(args);
-        let stdout = text(&out.stdout);
-        let read = out.status.code() != Some(2) && stdout.contains(" objects checked");
-        read && !stdout.contains("unresolved:")
-    };
+    // The user's or the owner's opens it, and what its object stream holds
+    // is there, nothing unresolved: checked, its findings on revision 6's
+    // values in a PDF 1.7 file.
     for password in ["user", "owner"] {
-        assert!(opens(&["--password", password, &locked]), "{password}");
+        let (code, out, err) = said(&["--password", password, locked]);
+        assert_eq!((code, err.as_str()), (Some(1), ""), "{password}: {out}");
+        assert!(out.contains("EncryptionStandard/R"), "{out}");
+        assert!(!out.contains("unresolved"), "{out}");
     }
-    assert!(opens(&[&open]));
-    assert_eq!(said(&["--password", "wrong", &open]).0, Some(2));
-    // A baseline that won't open is refused.
-    let (code, err) = said(&["--baseline", &locked, &open]);
+    // One with no user password opens without one, but not with a wrong
+    // one, as the empty password isn't tried once one's given.
+    let (code, out, _) = said(&[open]);
+    assert_eq!(code, Some(0), "{out}");
+    assert_eq!(said(&["--password", "wrong", open]).0, Some(2));
+    // A baseline that won't open is refused; given its password, it reads.
+    let (code, _, err) = said(&["--baseline", locked, open]);
     assert_eq!(code, Some(2), "{err}");
     assert!(
         err.contains("--baseline ") && err.contains("needs a password"),
         "{err}"
     );
+    let (code, out, _) = said(&["--password", "user", "--baseline", locked, locked]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("0 findings, 4 carried"), "{out}");
     // The JSON report says why, as for any file that isn't read.
-    let out = run(&["--format", "json", &locked]);
-    let line = json::parse(&out.stdout).unwrap();
+    let out = run(&["--format", "json", locked]);
+    let line: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
-        line.get("error").cloned(),
-        Some(json::Json::String(
-            "it needs a password: give it with --password".to_string()
-        ))
+        line.get("error"),
+        Some(&json!("it needs a password: give it with --password"))
     );
-}
-
-/// `plain` rewritten by qpdf with its objects in object streams, which
-/// only qpdf decodes, as `name`.
-fn packed(plain: &std::path::Path, name: &str) -> String {
-    let qpdf = std::env::var_os("PDF_LINT_QPDF").unwrap_or_else(|| "qpdf".into());
-    let out = plain.with_file_name(name);
-    let status = Command::new(&qpdf)
-        .arg("--object-streams=generate")
-        .arg(plain)
-        .arg(&out)
-        .status()
-        .unwrap();
-    assert!(matches!(status.code(), Some(0 | 3)), "qpdf: {status}");
-    out.to_str().unwrap().to_string()
 }
 
 #[test]
-fn a_file_that_needs_qpdf_without_one_is_unread_and_says_why() {
-    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
-    let plain = written("unready-plain.pdf", &file(&[CATALOG, PAGES, page]));
-    let packed = packed(&plain, "unready-packed.pdf");
-    let without = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
-            .args(args)
-            .env("PDF_LINT_QPDF", "/nonexistent/qpdf")
-            .output()
-            .unwrap();
-        (out.status.code(), text(&out.stdout), text(&out.stderr))
-    };
-    // A file all in plain view needs no qpdf.
-    let (code, _, err) = without(&[plain.to_str().unwrap()]);
-    assert_eq!(code, Some(0), "{err}");
-    // One whose objects are in object streams is unread, in a line that
-    // says why, rather than checked with them missing.
-    let why = "it needs qpdf to decode what's compressed or encrypted in it, and /nonexistent/qpdf isn't found: install qpdf 11.9 or later, or name one with --qpdf";
-    let (code, out, err) = without(&[&packed]);
-    assert_eq!(code, Some(2), "{out}");
-    assert_eq!(err, format!("{packed}: {why}\n"));
-    assert_eq!(out, "");
-    // As the JSON report says, and for a baseline.
-    let (_, out, _) = without(&["--format", "json", &packed]);
-    let line = json::parse(out.as_bytes()).unwrap();
+fn a_password_is_tried_as_utf_8_and_in_each_single_byte_encoding() {
+    let dir = folder();
+    // café, as each kind's writer may have set it: in PDFDocEncoding
+    // (WinAnsiEncoding's alike), in MacRomanEncoding, and in UTF-8.
+    let kinds = [
+        (Kind::Rc4By128, &b"caf\xE9"[..]),
+        (Kind::Aes128, b"caf\x8E"),
+        (Kind::Aes256, "café".as_bytes()),
+    ];
+    for (kind, user) in kinds {
+        let path = written(&dir, "password-cafe.pdf", &crypted(kind, user));
+        let out = run(&["--password", "café", path.to_str().unwrap()]);
+        assert_ne!(
+            out.status.code(),
+            Some(2),
+            "{kind:?}: {}",
+            text(&out.stderr)
+        );
+        let out = run(&["--password", "cafe", path.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(2), "{kind:?}");
+    }
+}
+
+#[test]
+fn a_password_is_tried_in_its_saslprep_form_first() {
+    let dir = folder();
+    // Ⅸ, which SASLprep makes IX: a revision 6 file whose password a writer
+    // set as the spec has it, and one whose writer skipped SASLprep and set
+    // it as typed, each open by it.
+    for user in [&b"IX"[..], "\u{2168}".as_bytes()] {
+        let path = written(&dir, "password-ix.pdf", &crypted(Kind::Aes256, user));
+        let out = run(&["--password", "\u{2168}", path.to_str().unwrap()]);
+        assert_ne!(
+            out.status.code(),
+            Some(2),
+            "{user:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    // IX is no form of the password Ⅸ as typed.
+    let path = written(
+        &dir,
+        "password-ix.pdf",
+        &crypted(Kind::Aes256, "\u{2168}".as_bytes()),
+    );
+    let path = path.to_str().unwrap();
+    let out = run(&["--password", "IX", path]);
+    assert_eq!(out.status.code(), Some(2));
     assert_eq!(
-        line.get("error").cloned(),
-        Some(json::Json::String(why.to_string()))
+        text(&out.stderr),
+        format!("{path}: the password --password gives doesn't open it\n")
     );
-    let (code, _, err) = without(&["--baseline", &packed, plain.to_str().unwrap()]);
-    assert_eq!(code, Some(2), "{err}");
+}
+
+#[test]
+fn an_encrypted_files_last_update_is_read_with_its_password() {
+    let dir = folder();
+    // The page, in the object stream, has a /Rotate that isn't a number,
+    // which the update, rewriting it as it was, carries: so the revision
+    // before it must open too.
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Rotate /B >>";
+    let base = crypted_with(Kind::Aes128, b"user", &object_stream_with(page).0);
+    let trailer = encryption(&writer::dictionary(&settings(Kind::Aes128, b"user")));
+    let update = updated_under(&base, &[(3, page)], &trailer);
+    let path = written(&dir, "updated-encrypted.pdf", &update);
+    let path = path.to_str().unwrap();
+    let out = run(&["--last-update", "--password", "user", path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 findings, 1 carried"), "{stdout}");
+    // A new finding is the update's.
+    let rotated = page.replace("/Rotate /B", "/Rotate /C /UserUnit /D");
+    let update = updated_under(&base, &[(3, rotated.as_str())], &trailer);
+    let rotated = written(&dir, "updated-encrypted-2.pdf", &update);
+    let rotated = rotated.to_str().unwrap();
+    let out = run(&["--last-update", "--password", "user", rotated]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("PageObject/UserUnit"), "{stdout}");
+    let out = run(&["--last-update", path]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("it needs a password"));
+}
+
+/// What [`in_an_object_stream`]'s object stream holds, a catalog, page
+/// tree and page after their header, and where the first object begins.
+fn object_stream_objects() -> (Vec<u8>, usize) {
+    object_stream_with("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>")
+}
+
+/// [`object_stream_objects`], the page `page`: the first object begins
+/// where it does, the page last.
+fn object_stream_with(page: &str) -> (Vec<u8>, usize) {
+    let (mut header, mut body) = (String::new(), String::new());
+    for (n, object) in [CATALOG, PAGES, page].iter().enumerate() {
+        header.push_str(&format!("{} {} ", n + 1, body.len()));
+        body.push_str(object);
+        body.push('\n');
+    }
+    let first = header.len();
+    (format!("{header}{body}").into_bytes(), first)
+}
+
+/// A file whose objects are in object stream 4, its data `data` under
+/// `filter`, with a cross-reference stream.
+fn in_an_object_stream(filter: &str, data: &[u8]) -> Vec<u8> {
+    in_an_object_stream_under(filter, data, "")
+}
+
+/// [`in_an_object_stream`]'s file, its trailer given `trailer`'s entries.
+fn in_an_object_stream_under(filter: &str, data: &[u8], trailer: &str) -> Vec<u8> {
+    let (_, first) = object_stream_objects();
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let four = out.len();
+    let dict = format!(
+        "<< /Type /ObjStm /N 3 /First {first}{filter} /Length {} >>",
+        data.len()
+    );
+    out.extend_from_slice(format!("4 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(data);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    let five = out.len();
+    let row = |kind: u8, field: usize, index: u8| {
+        let [high, low] = (field as u16).to_be_bytes();
+        [kind, high, low, index]
+    };
+    let rows = [
+        row(0, 0, 255),
+        row(2, 4, 0),
+        row(2, 4, 1),
+        row(2, 4, 2),
+        row(1, four, 0),
+        row(1, five, 0),
+    ]
+    .concat();
+    let dict = format!(
+        "<< /Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R{trailer} /Length {} >>",
+        rows.len()
+    );
+    out.extend_from_slice(format!("5 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{five}\n%%EOF\n").as_bytes());
+    out
+}
+
+#[test]
+fn a_fault_in_a_streams_data_is_a_finding() {
+    let dir = folder();
+    let (objects, _) = object_stream_objects();
+    let hex: String = objects.iter().map(|b| format!("{b:02x}")).collect();
+    // Its data clean, under `/AHx`, an inline image's abbreviation (ISO
+    // 32000-2, 8.9.7), which the reader reads as qpdf does and which the
+    // object stream's `/Filter` may not be: that alone is found.
+    let filter = "- value: ObjectStream/Filter at 4 0 R, in 4 0 R (merged): /AHx (not one of";
+    let clean = written(
+        &dir,
+        "hex-clean.pdf",
+        &in_an_object_stream(" /Filter /AHx", format!("{hex}>").as_bytes()),
+    );
+    let out = run(&[clean.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains(filter), "{stdout}");
+    assert!(stdout.contains("objects checked, 1 findings"), "{stdout}");
+    // Without its `>`, which qpdf reads without a word: everything reads,
+    // and the fault is the reader's finding, at the data.
+    let faulted = written(
+        &dir,
+        "hex-no-end.pdf",
+        &in_an_object_stream(" /Filter /AHx", hex.as_bytes()),
+    );
+    let out = run(&[faulted.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
     assert!(
-        err.contains(&format!("--baseline {packed}: {why}")),
-        "{err}"
+        stdout.contains("- reader: -/- at -, in 4 0 R (merged): its data doesn't decode cleanly through /ASCIIHexDecode: no end-of-data marker"),
+        "{stdout}"
     );
-    // --qpdf names the one that isn't found.
-    let (_, _, err) = without(&["--qpdf", "/nonexistent/other", &packed]);
-    assert!(err.contains("/nonexistent/other isn't found"), "{err}");
+    assert!(stdout.contains(filter), "{stdout}");
+    assert!(stdout.contains("objects checked, 2 findings"), "{stdout}");
+}
+
+/// An object stream is held as any object, by its number: `--last-update`
+/// holds one the update wrote, and none it didn't, and `--baseline`
+/// carries a like finding in one from the same number.
+#[test]
+fn an_object_stream_is_held_as_any_object() {
+    let dir = folder();
+    let (objects, _) = object_stream_objects();
+    let hex: String = objects.iter().map(|b| format!("{b:02x}")).collect();
+    // Object stream 4's `/AHx` is a finding.
+    let original = in_an_object_stream(" /Filter /AHx", format!("{hex}>").as_bytes());
+    let base = written(&dir, "packed.pdf", &original);
+    let base = base.to_str().unwrap();
+    let findings = |out: &Output| -> Vec<String> {
+        (text(&out.stdout).lines())
+            .filter(|l| l.starts_with("- "))
+            .map(str::to_string)
+            .collect()
+    };
+    // An update that gives the page an annotation writes no object stream.
+    let page =
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Annots [6 0 R] >>";
+    let note = "<< /Type /Annot /Subtype /Text /Rect [0 0 1 1] >>";
+    let noted = updated(&original, &[(3, page), (6, note)]);
+    let noted = written(&dir, "packed-noted.pdf", &noted);
+    let noted = noted.to_str().unwrap();
+    let out = run(&["--last-update", noted]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains(", 0 findings\n"), "{stdout}");
+    let out = run(&["--baseline", base, noted]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains(", 0 findings, 1 carried\n"), "{stdout}");
+    // One that writes an object stream, with a key the model doesn't list,
+    // answers for it: new, so built.
+    let stream = "<< /Type /ObjStm /N 0 /First 0 /Bogus 1 /Length 0 >>\nstream\n\nendstream";
+    let packed = updated(&original, &[(6, stream)]);
+    let packed = written(&dir, "packed-packed.pdf", &packed);
+    let out = run(&["--last-update", packed.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let found = findings(&out);
+    let bogus = "- unlisted: ObjectStream/Bogus at 6 0 R, in 6 0 R (built): 1 [bytes ";
+    assert!(found.len() == 1 && found[0].starts_with(bogus), "{stdout}");
+    assert!(stdout.contains("\n    | /Bogus 1\n"), "{stdout}");
+}
+
+/// A file's linearization dictionary, its first object, is held as any
+/// object is, by its number: `--last-update` holds none of it where the
+/// update doesn't write its number, and where the update does, listing it
+/// where it was, holds it, and carries a fault in it from the revision
+/// before, which had it. Its `/L` is no revision's length, which the
+/// linearization's check finds there too.
+#[test]
+fn the_last_update_holds_a_linearization_dictionary_where_it_writes_its_number() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let rotated = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Rotate 90 /Resources << >> >>";
+    // Object 4, written first, its /E of 0 a value Table F.1 doesn't allow.
+    let linearization = "<< /Linearized 1 /L 1000 /H [500 100] /O 3 /E 0 /N 1 /T 900 >>";
+    let mut original = b"%PDF-1.7\n".to_vec();
+    let mut at = [0; 5];
+    for (n, body) in [(4, linearization), (1, CATALOG), (2, PAGES), (3, page)] {
+        at[n] = original.len();
+        original.extend_from_slice(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+    }
+    let previous = original.len();
+    let mut table = String::from("xref\n0 5\n0000000000 65535 f \n");
+    for offset in &at[1..] {
+        table.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    table.push_str(&format!(
+        "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{previous}\n%%EOF\n"
+    ));
+    original.extend_from_slice(table.as_bytes());
+    let report = |args: &[&str], name: &str, bytes: &[u8]| -> Value {
+        let path = written(&dir, name, bytes);
+        let args = [args, &["--format", "json", path.to_str().unwrap()]].concat();
+        serde_json::from_slice(&run(&args).stdout).unwrap()
+    };
+    let value = "0 (not one of fn:Eval((@E>0) && (@E<=@L)))";
+
+    // An update that writes the page alone.
+    let paged = updated(&original, &[(3, rotated)]);
+    let whole = report(&[], "linearized-paged.pdf", &paged);
+    let found = &whole["findings"];
+    assert_eq!(found.as_array().unwrap().len(), 2, "{whole}");
+    assert_eq!(
+        (&found[1]["rule"], &found[1]["key"]),
+        (&json!("linearization"), &json!("L")),
+        "{whole}"
+    );
+    assert_eq!(
+        (&found[0]["table"], &found[0]["key"], &found[0]["path"]),
+        (
+            &json!("LinearizationParameterDict"),
+            &json!("E"),
+            &json!("4 0 R")
+        ),
+        "{whole}"
+    );
+    assert_eq!(found[0]["value"], json!(value), "{whole}");
+    assert_eq!(whole["tables"]["LinearizationParameterDict"], json!(1));
+    let last = report(&["--last-update"], "linearized-paged.pdf", &paged);
+    assert_eq!(last["findings"], json!([]), "{last}");
+    assert_eq!(last["carried"], json!(0), "{last}");
+    assert_eq!(
+        last["tables"].get("LinearizationParameterDict"),
+        None,
+        "{last}"
+    );
+
+    // One that lists the dictionary's number too, where it was.
+    let mut listed = original.clone();
+    let three = listed.len();
+    listed.extend_from_slice(format!("3 0 obj\n{rotated}\nendobj\n").as_bytes());
+    let xref = listed.len();
+    let four = at[4];
+    listed.extend_from_slice(
+        format!(
+            "xref\n0 1\n0000000000 65535 f \n3 2\n{three:010} 00000 n \n{four:010} 00000 n \n\
+             trailer\n<< /Size 5 /Root 1 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    let last = report(&["--last-update"], "linearized-listed.pdf", &listed);
+    assert_eq!(last["findings"], json!([]), "{last}");
+    // The `/E` and the `/L`, alike but for its digits.
+    assert_eq!(last["carried"], json!(2), "{last}");
+    let tables = &last["tables"];
+    assert_eq!(tables["LinearizationParameterDict"], json!(1), "{last}");
+    assert_eq!(tables["ArrayOf_2Integers"], json!(1), "{last}");
+}
+
+/// The page [`holding`]'s object stream holds, its resources object 6.
+const HELD_PAGE: &str = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources 6 0 R >>";
+
+/// [`holding`]'s object stream's body: the catalog, the page tree, the
+/// page and object 6, `six` as written, each on a line of its own.
+fn holding_body(six: &str) -> String {
+    let (mut header, mut data) = (String::new(), String::new());
+    for (n, object) in [(1, CATALOG), (2, PAGES), (3, HELD_PAGE), (6, six)] {
+        header.push_str(&format!("{n} {} ", data.len()));
+        data.push_str(object);
+        data.push('\n');
+    }
+    let first = header.len();
+    let length = first + data.len();
+    format!(
+        "<< /Type /ObjStm /N 4 /First {first} /Length {length} >>\nstream\n{header}{data}\nendstream"
+    )
+}
+
+/// A file whose catalog, page tree and page, and the page's resources,
+/// object 6, `six` as written, are in object stream `n`
+/// ([`holding_body`]), with a cross-reference stream numbered after every
+/// other.
+fn holding(n: u32, six: &str) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let at = out.len();
+    out.extend_from_slice(format!("{n} 0 obj\n{}\nendobj\n", holding_body(six)).as_bytes());
+    let xref = out.len();
+    let own = n.max(6) + 1;
+    let rows: Vec<u8> = (0..=own)
+        .flat_map(|m| {
+            let (kind, field, index): (u8, usize, u16) = match m {
+                0 => (0, 0, 65535),
+                1..=3 => (2, n as usize, (m - 1) as u16),
+                6 => (2, n as usize, 3),
+                _ if m == n => (1, at, 0),
+                _ if m == own => (1, xref, 0),
+                _ => (0, 0, 0),
+            };
+            [
+                &[kind][..],
+                &(field as u32).to_be_bytes(),
+                &index.to_be_bytes(),
+            ]
+            .concat()
+        })
+        .collect();
+    let dict = format!(
+        "<< /Type /XRef /Size {} /W [1 4 2] /Root 1 0 R /Length {} >>",
+        own + 1,
+        rows.len()
+    );
+    out.extend_from_slice(format!("{own} 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    out
+}
+
+/// The resources [`holding`]'s page has; and them as a stream's
+/// dictionary, which an object stream mustn't hold.
+const RESOURCES: &str = "<< /ProcSet [/PDF] >>";
+const A_STREAM: &str = "<< /ProcSet [/PDF] >>\nstream\nhi\nendstream";
+
+/// What an object stream holds that it mustn't, a stream, is a `packed`
+/// finding in the object stream, from its number, its bytes printed from
+/// the object stream's data; and so in the JSON. An allowance naming the
+/// rule allows it, and one that allows nothing is said.
+#[test]
+fn what_an_object_stream_mustnt_hold_is_a_packed_finding() {
+    let dir = folder();
+    let path = written(&dir, "packed-stream.pdf", &holding(4, A_STREAM));
+    let path = path.to_str().unwrap();
+    let out = run(&[path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let findings: Vec<_> = stdout.lines().filter(|l| l.starts_with("- ")).collect();
+    let packed = "- packed: ObjectStream/- at 4 0 R, in 4 0 R (merged): 6 0 R, a stream [bytes ";
+    assert!(
+        findings.len() == 1
+            && findings[0].starts_with(packed)
+            && findings[0].ends_with(" of 4 0 R's data]"),
+        "{stdout}"
+    );
+    let printed = format!("\n    | {RESOURCES}   (of 4 0 R's data, decoded)\n");
+    assert!(stdout.contains(&printed), "{stdout}");
+
+    let out = run(&["--format", "json", path]);
+    assert_eq!(out.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let found = &report["findings"][0];
+    let at = found["at"].clone();
+    assert_eq!(
+        found,
+        &json!({
+            "rule": "packed",
+            "table": "ObjectStream",
+            "key": "-",
+            "path": "4 0 R",
+            "object": [4, 0],
+            "made": "merged",
+            "value": "6 0 R, a stream",
+            "at": at,
+        })
+    );
+    assert_eq!(at["stream"], json!([4, 0]));
+    let (start, end) = (at["start"].as_u64().unwrap(), at["end"].as_u64().unwrap());
+    assert_eq!(end - start, RESOURCES.len() as u64);
+
+    // Allowed, it's left out; on a file without it, the allowance allowed
+    // nothing, and says so.
+    let allow = written(
+        &dir,
+        "packed.tsv",
+        b"# test\nObjectStream\t-\tpacked\t*\t*\tthe test's\n",
+    );
+    let allow = allow.to_str().unwrap();
+    let out = run(&["--allow", allow, path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 findings, 1 allowed"), "{stdout}");
+    assert_eq!(text(&out.stderr), "");
+    let clean = written(&dir, "packed-clean.pdf", &holding(4, RESOURCES));
+    let out = run(&["--allow", allow, clean.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains(", 0 findings\n"), "{stdout}");
+    assert_eq!(
+        text(&out.stderr),
+        "note: the allowance on line 2 allowed nothing\n"
+    );
+}
+
+/// What an object stream holds that it mustn't is held as the object
+/// stream is: `--last-update` finds it where the update wrote the object
+/// stream, holds no other, and carries it where the revision before had
+/// it; `--baseline` sets an update against its file object by object, and
+/// carries it from anywhere in a rewrite that renumbers the object stream.
+#[test]
+fn a_packed_finding_is_held_as_its_object_stream() {
+    let dir = folder();
+    let found = |args: &[&str]| {
+        let out = run(args);
+        let stdout = text(&out.stdout);
+        let summary = stdout.lines().next().unwrap_or_default().to_string();
+        let found: Vec<String> = (stdout.lines())
+            .filter_map(|l| l.strip_prefix("- "))
+            .map(|l| l.split(" [bytes").next().unwrap().to_string())
+            .collect();
+        (out.status.code(), summary, found)
+    };
+    let packed = "packed: ObjectStream/- at 4 0 R, in 4 0 R (merged): 6 0 R, a stream";
+    let clean = holding(4, RESOURCES);
+    let base = written(&dir, "clean.pdf", &clean);
+    let base = base.to_str().unwrap();
+
+    // An update that writes object stream 4 again, a stream in it now:
+    // the update's, against the revision before and the file it updates.
+    let packing = updated(&clean, &[(4, &holding_body(A_STREAM))]);
+    let packing = written(&dir, "packing.pdf", &packing);
+    let packing = packing.to_str().unwrap();
+    for args in [
+        &["--last-update", packing][..],
+        &["--baseline", base, packing],
+    ] {
+        let (code, summary, found) = found(args);
+        assert_eq!(code, Some(1), "{summary}");
+        assert!(summary.ends_with(", 1 findings"), "{args:?}: {summary}");
+        assert_eq!(found, [packed], "{args:?}");
+    }
+
+    // A file with it, updated: writing the page out of the object stream,
+    // which the update doesn't write, nothing; writing the object stream
+    // again, as it was, carried.
+    let with = holding(4, A_STREAM);
+    let path = written(&dir, "packed.pdf", &with);
+    let path = path.to_str().unwrap();
+    let paged = updated(&with, &[(3, HELD_PAGE)]);
+    let paged = written(&dir, "paged.pdf", &paged);
+    let (code, summary, found_paged) = found(&["--last-update", paged.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "{summary}");
+    assert!(summary.ends_with(", 0 findings"), "{summary}");
+    assert_eq!(found_paged, Vec::<String>::new());
+    let again = updated(&with, &[(4, &holding_body(A_STREAM))]);
+    let again = written(&dir, "again.pdf", &again);
+    let again = again.to_str().unwrap();
+    for args in [&["--last-update", again][..], &["--baseline", path, again]] {
+        let (code, summary, _) = found(args);
+        assert_eq!(code, Some(0), "{args:?}: {summary}");
+        assert!(
+            summary.ends_with(", 0 findings, 1 carried"),
+            "{args:?}: {summary}"
+        );
+    }
+
+    // A rewrite, the object stream renumbered: its path isn't one the file
+    // has, so a like finding anywhere carries it.
+    let rewrite = written(&dir, "rewritten.pdf", &holding(9, A_STREAM));
+    let rewrite = rewrite.to_str().unwrap();
+    let (code, summary, all) = found(&[rewrite]);
+    assert_eq!(code, Some(1), "{summary}");
+    assert_eq!(all, [packed.replace("4 0 R", "9 0 R")]);
+    let (code, summary, _) = found(&["--baseline", path, rewrite]);
+    assert_eq!(code, Some(0), "{summary}");
+    assert!(summary.ends_with(", 0 findings, 1 carried"), "{summary}");
 }
 
 #[test]
 fn a_file_of_dash_is_standard_input() {
+    let dir = folder();
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Rotate (abc) >>";
-    let plain = written("stdin-plain.pdf", &file(&[CATALOG, PAGES, page]));
+    let plain = written(&dir, "stdin-plain.pdf", &file(&[CATALOG, PAGES, page]));
     let plain = plain.to_str().unwrap();
-    let packed = packed(Path::new(plain), "stdin-packed.pdf");
+    let (objects, _) = object_stream_objects();
+    let packed = written(&dir, "stdin-packed.pdf", &in_an_object_stream("", &objects));
+    let packed = packed.to_str().unwrap().to_string();
+    let encrypted = written(&dir, "stdin-encrypted.pdf", &crypted(Kind::Aes256, b""));
+    let encrypted = encrypted.to_str().unwrap().to_string();
     let piped = |path: &str, args: &[&str]| {
-        let child = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
+        let child = pdf_lint()
             .args(args)
             .stdin(std::fs::File::open(path).unwrap())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let id = child.id();
-        let out = child.wait_with_output().unwrap();
-        // The copy qpdf reads it from is gone.
-        let spool = std::env::temp_dir().join(format!("pdf-lint-{id}-0.pdf"));
-        assert!(!spool.exists(), "{}", spool.display());
-        out
+        child.wait_with_output().unwrap()
     };
-    // In plain view, and in object streams, which qpdf decodes from a
-    // copy: each checked as by its path, and named -.
-    for path in [plain, &packed] {
-        let by_path = text(&run(&[path]).stdout);
+    // In plain view, in object streams, and encrypted: each checked as by
+    // its path, and named -.
+    for path in [plain, &packed, &encrypted] {
+        let by_path = run(&[path]);
+        assert!(text(&by_path.stdout).contains(" objects checked"), "{path}");
         let out = piped(path, &["-"]);
-        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-        assert_eq!(text(&out.stdout), by_path.replacen(path, "-", 1));
+        assert_eq!(
+            out.status.code(),
+            by_path.status.code(),
+            "{}",
+            text(&out.stderr)
+        );
+        assert_eq!(
+            text(&out.stdout),
+            text(&by_path.stdout).replacen(path, "-", 1)
+        );
     }
     // Among files, in its place.
     let out = piped(&packed, &[plain, "-", plain]);
@@ -494,48 +1034,20 @@ fn a_file_of_dash_is_standard_input() {
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(
         text(&out.stderr),
-        "pdf-lint: - more than once: standard input is read once\n"
+        format!("error: - more than once: standard input is read once\n\n{USAGE}{MORE}")
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_qpdf_older_than_11_9_is_refused_for_a_file_that_needs_it() {
-    use std::os::unix::fs::PermissionsExt;
-    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
-    let plain = written("old-plain.pdf", &file(&[CATALOG, PAGES, page]));
-    let packed = packed(&plain, "old-packed.pdf");
-    let old = plain.with_file_name("qpdf-11.8");
-    std::fs::write(&old, "#!/bin/sh\necho 'qpdf version 11.8.0'\n").unwrap();
-    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let with_old = |file: &str| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_pdf-lint"));
-        command.arg("--qpdf").arg(&old).arg(file);
-        output_when_free(&mut command)
-    };
-    let out = with_old(&packed);
-    assert_eq!(out.status.code(), Some(2));
-    let refused = format!(
-        "and {} is version 11.8.0, older than 11.9: install qpdf 11.9 or later",
-        old.display()
-    );
-    assert!(
-        text(&out.stderr).contains(&refused),
-        "{}",
-        text(&out.stderr)
-    );
-    assert_eq!(with_old(plain.to_str().unwrap()).status.code(), Some(0));
 }
 
 #[test]
 fn one_table_checks_a_field_merged_with_its_widget_as_the_widget_alone() {
+    let dir = folder();
     let catalog = "<< /Type /Catalog /Pages 2 0 R \
                    /AcroForm << /Fields [4 0 R] /DA (/Helv 0 Tf 0 g) >> >>";
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> \
                 /Annots [4 0 R] >>";
     let field = "<< /Type /Annot /Subtype /Widget /Rect [0 0 1 1] /P 3 0 R \
                  /FT /Tx /T (name) /MaxLen 5 >>";
-    let path = written("one-table.pdf", &file(&[catalog, PAGES, page, field]));
+    let path = written(&dir, "one-table.pdf", &file(&[catalog, PAGES, page, field]));
     let path = path.to_str().unwrap();
     let out = run(&["--built", path]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
@@ -553,30 +1065,28 @@ fn one_table_checks_a_field_merged_with_its_widget_as_the_widget_alone() {
     assert_eq!(out.status.code(), Some(1));
 
     for (args, one_table, two_tables) in [
-        (&["--format", "json", path][..], "false", "1"),
-        (&["--format", "json", "--one-table", path][..], "true", "0"),
+        (&["--format", "json", path][..], json!(false), json!(1)),
+        (
+            &["--format", "json", "--one-table", path][..],
+            json!(true),
+            json!(0),
+        ),
     ] {
         let out = run(args);
-        let report = json::parse(&out.stdout).unwrap();
-        let field = |key: &str| report.get(key).cloned().unwrap();
-        assert_eq!(
-            field("one_table"),
-            json::parse(one_table.as_bytes()).unwrap()
-        );
-        assert_eq!(
-            field("two_tables"),
-            json::parse(two_tables.as_bytes()).unwrap()
-        );
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report.get("one_table"), Some(&one_table));
+        assert_eq!(report.get("two_tables"), Some(&two_tables));
     }
 }
 
 #[test]
 fn pdf_version_checks_a_file_as_another_version() {
+    let dir = folder();
     // /OutputIntents came in on a page with 2.0, and /ProcSet went.
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] \
                 /Resources << /ProcSet [/PDF] >> /OutputIntents [] >>";
     let original = file(&[CATALOG, PAGES, page]);
-    let path = written("version.pdf", &original);
+    let path = written(&dir, "version.pdf", &original);
     let path = path.to_str().unwrap();
     let found = |args: &[&str]| {
         let out = run(args);
@@ -617,12 +1127,13 @@ fn pdf_version_checks_a_file_as_another_version() {
     let (summary, _) = found(&[&v2[..], &["--baseline", path, path]].concat());
     assert!(summary.ends_with("0 findings, 3 carried"), "{summary}");
     let update = updated(&original, &[(3, page)]);
-    let update = written("version-update.pdf", &update);
+    let update = written(&dir, "version-update.pdf", &update);
     let update = update.to_str().unwrap();
     let (summary, _) = found(&[&v2[..], &["--last-update", update]].concat());
     assert!(summary.ends_with("0 findings, 3 carried"), "{summary}");
     // An allowance's version is the one the file is checked as.
     let allow = written(
+        &dir,
         "version-allow.tsv",
         b"# test\nResource\tProcSet\tdeprecated\t*\t2.0\tthe test's\n",
     );
@@ -636,39 +1147,42 @@ fn pdf_version_checks_a_file_as_another_version() {
         stdout.contains(r#""version":"1.7","checked_as":"2.0","#),
         "{stdout}"
     );
-    let report = json::parse(&out.stdout).unwrap();
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report.get("deprecations"), Some(&json!(false)));
+    assert_eq!(report.get("unused_findings"), Some(&json!(false)));
     assert_eq!(
-        report.get("deprecations").cloned(),
-        Some(json::Json::Bool(false))
-    );
-    assert_eq!(
-        report.get("deprecated").cloned(),
-        Some(
-            json::parse(
-                br#"[{"table":"ArrayOfNamesForProcSet","key":"0","count":1},{"table":"Resource","key":"ProcSet","count":1}]"#
-            )
-            .unwrap()
-        )
+        report.get("deprecated"),
+        Some(&json!([
+            {"table": "ArrayOfNamesForProcSet", "key": "0", "count": 1},
+            {"table": "Resource", "key": "ProcSet", "count": 1}
+        ]))
     );
     for v in ["1.8", "2", "two"] {
         let out = run(&["--pdf-version", v, path]);
         assert_eq!(out.status.code(), Some(2));
-        let why = format!("--pdf-version {v}: not a PDF version, 1.0 to 1.7 or 2.0");
-        assert!(text(&out.stderr).contains(&why), "{}", text(&out.stderr));
+        assert_eq!(
+            text(&out.stderr),
+            format!(
+                "error: invalid value '{v}' for '--pdf-version <V>': \
+                 not a PDF version, 1.0 to 1.7 or 2.0\n\n{MORE}"
+            )
+        );
     }
 }
 
 #[test]
 fn model_checks_against_another_checkout() {
+    let dir = folder();
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> \
                 /OutputIntents [] >>";
-    let path = written("model.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = written(&dir, "model.pdf", &file(&[CATALOG, PAGES, page]));
     let path = path.to_str().unwrap();
     // A copy of the embedded model, where /OutputIntents came in on a
     // page with 1.4, not 2.0; and one without the trailer's table.
-    let embedded = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("model/tsv/latest");
+    let embedded =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../pdf-arlington/model/tsv/latest");
     let copy = |name: &str, change: &dyn Fn(&str, String) -> Option<String>| {
-        let dir = std::env::temp_dir().join(format!("pdf-lint-cli-{}-{name}", std::process::id()));
+        let dir = dir.path().join(name);
         std::fs::create_dir_all(&dir).unwrap();
         for entry in std::fs::read_dir(&embedded).unwrap() {
             let from = entry.unwrap().path();
@@ -709,13 +1223,13 @@ fn model_checks_against_another_checkout() {
     // corrected, and the earlier one's another again.
     let model = |args: &[&str], path: &str| {
         let args = [args, &["--format", "json", path]].concat();
-        let report = json::parse(text(&run(&args).stdout).trim().as_bytes()).unwrap();
+        let report: Value = serde_json::from_slice(&run(&args).stdout).unwrap();
         report.get("model").cloned().unwrap()
     };
     let upstream = copy("model-upstream", &|_, text| Some(text));
     let upstream = upstream.to_str().unwrap();
     let embedded = model(&[], path);
-    let hash = |h: &str| json::Json::String(h.to_string());
+    let hash = |h: &str| json!(h);
     assert_eq!(embedded, hash("fc22d1fadc1fd269"));
     assert_eq!(
         model(&["--model", upstream], path),
@@ -733,7 +1247,11 @@ fn model_checks_against_another_checkout() {
                 /Annots [4 0 R] >>";
     let checkbox = "<< /Type /Annot /Subtype /Widget /Rect [0 0 1 1] /P 3 0 R \
                     /FT /Btn /T (box) >>";
-    let form = written("model-form.pdf", &file(&[catalog, PAGES, page, checkbox]));
+    let form = written(
+        &dir,
+        "model-form.pdf",
+        &file(&[catalog, PAGES, page, checkbox]),
+    );
     let form = form.to_str().unwrap();
     let out = run(&[form]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
@@ -761,13 +1279,127 @@ fn model_checks_against_another_checkout() {
     );
 }
 
+/// A model that doesn't load, or that lacks a table the checker reads by
+/// name, is said word for word after `--model` and its folder.
+#[test]
+fn a_model_refused_is_said_word_for_word() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let path = written(&dir, "model-refused.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = path.to_str().unwrap();
+    let refused = |dir: &str| {
+        let out = run(&["--model", dir, path]);
+        assert_eq!(out.status.code(), Some(2), "{}", text(&out.stdout));
+        text(&out.stderr)
+    };
+    let missing = "/nonexistent/tsv";
+    let why = std::fs::read_dir(missing).unwrap_err();
+    assert_eq!(
+        refused(missing),
+        format!("pdf-lint: --model {missing}: reading {missing}: {why}\n")
+    );
+    // A folder of one table, `T.tsv`, of this row.
+    let one = |name: &str, row: &str| {
+        let dir = dir.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let header = pdf_lint::grammar::HEADER.join("\t");
+        std::fs::write(dir.join("T.tsv"), format!("{header}\n{row}\n")).unwrap();
+        dir
+    };
+    let broken = one("model-broken", "Rotate\tinteger");
+    let table = broken.join("T.tsv");
+    let broken = broken.to_str().unwrap();
+    assert_eq!(
+        refused(broken),
+        format!(
+            "pdf-lint: --model {broken}: {}: line 2: 2 fields, not 12\n",
+            table.display()
+        )
+    );
+    let row = "Rotate\tinteger\t1.0\t\tFALSE\tFALSE\tTRUE\t0\t\t\t\t";
+    let lacking = one("model-lacking", row);
+    let lacking = lacking.to_str().unwrap();
+    assert_eq!(
+        refused(lacking),
+        format!(
+            "pdf-lint: --model {lacking}: it has no FileTrailer table, which the checker reads by name\n"
+        )
+    );
+}
+
+/// A hold, exempt or allowances file that can't be read, or that has a
+/// line that doesn't read, is said word for word: what std said reading
+/// it, or the line, after its path.
+#[test]
+fn a_hold_exempt_or_allowances_file_refused_is_said_word_for_word() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let path = written(&dir, "files-refused.pdf", &file(&[CATALOG, PAGES, page]));
+    let missing = path.with_file_name("files-refused-missing.txt");
+    let why = std::fs::read_to_string(&missing).unwrap_err();
+    let missing = missing.to_str().unwrap();
+    let path = path.to_str().unwrap();
+    let refused = |args: &[&str]| {
+        let out = run(&[args, &[path]].concat());
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            text(&out.stdout)
+        );
+        text(&out.stderr)
+    };
+    assert_eq!(
+        refused(&["--hold", missing]),
+        format!("pdf-lint: reading {missing}: {why}\n")
+    );
+    assert_eq!(
+        refused(&["--built", "--exempt", missing]),
+        format!("pdf-lint: reading {missing}: {why}\n")
+    );
+    assert_eq!(
+        refused(&["--allow", missing]),
+        format!("pdf-lint: reading {missing}: {why}\n")
+    );
+
+    let hold = written(&dir, "files-refused-hold.txt", b"# held\n4 x built\n");
+    let hold = hold.to_str().unwrap();
+    let generation = "x".parse::<u16>().unwrap_err();
+    assert_eq!(
+        refused(&["--hold", hold]),
+        format!("pdf-lint: {hold}: line 2: \"x\" isn't a generation: {generation}\n")
+    );
+    let exempt = written(&dir, "files-refused-exempt.txt", b"/Writer\nMine\n");
+    let exempt = exempt.to_str().unwrap();
+    assert_eq!(
+        refused(&["--built", "--exempt", exempt]),
+        format!("pdf-lint: {exempt}: line 2: \"Mine\" isn't a name, as /MyKey, or /My*\n")
+    );
+    let allow = written(
+        &dir,
+        "files-refused-allow.tsv",
+        b"# Held.\nFieldTx\tDA\tmissing\t*\t*\t\n",
+    );
+    let allow = allow.to_str().unwrap();
+    assert_eq!(
+        refused(&["--allow", allow]),
+        format!("pdf-lint: {allow}: line 2: no reason\n")
+    );
+}
+
 #[test]
 fn a_file_that_cant_be_read_or_a_wrong_command_line_exits_2() {
     let out = run(&["/nonexistent/file.pdf"]);
     assert_eq!(out.status.code(), Some(2));
     let out = run(&["--bogus"]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(text(&out.stderr).contains("--bogus: no such option"));
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "error: unexpected argument '--bogus' found\n\n  \
+             tip: to pass '--bogus' as a value, use '-- --bogus'\n\n{USAGE}{MORE}"
+        )
+    );
     let out = run(&[]);
     assert_eq!(out.status.code(), Some(2));
     let out = run(&["--version"]);
@@ -777,16 +1409,18 @@ fn a_file_that_cant_be_read_or_a_wrong_command_line_exits_2() {
 
 #[test]
 fn files_checked_at_once_are_reported_in_order() {
+    let dir = folder();
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
     let faulty = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1] /Resources << >> >>";
     // The first file takes the longest, so it's checked last of all.
     let filler = format!("[{}]", ["1"; 50].join(" "));
     let mut big = vec![CATALOG, PAGES, page];
     big.extend(std::iter::repeat_n(filler.as_str(), 2000));
-    let mut paths = vec![written("order-big.pdf", &file(&big))];
+    let mut paths = vec![written(&dir, "order-big.pdf", &file(&big))];
     for i in 0..8 {
         let third = if i % 2 == 0 { page } else { faulty };
         paths.push(written(
+            &dir,
             &format!("order-{i}.pdf"),
             &file(&[CATALOG, PAGES, third]),
         ));
@@ -835,13 +1469,14 @@ fn files_checked_at_once_are_reported_in_order() {
 
 #[test]
 fn a_report_no_one_reads_stops_without_a_panic() {
+    let dir = folder();
     let filler = format!("[{}]", ["1"; 50].join(" "));
     let mut big = vec![CATALOG, PAGES];
     big.extend(std::iter::repeat_n(filler.as_str(), 2000));
-    let path = written("unread.pdf", &file(&big));
+    let path = written(&dir, "unread.pdf", &file(&big));
     let path = path.to_str().unwrap();
     // Far more than a pipe holds, with the pipe's reader gone.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
+    let mut child = pdf_lint()
         .args(["--jobs", "2"])
         .args([path; 20])
         .stdout(std::process::Stdio::piped())
@@ -862,11 +1497,7 @@ fn the_version_or_usage_no_one_reads_exits_0_without_a_panic() {
         // given a wrong option.
         let (reader, writer) = std::io::pipe().unwrap();
         drop(reader);
-        let out = Command::new(env!("CARGO_BIN_EXE_pdf-lint"))
-            .arg(flag)
-            .stdout(writer)
-            .output()
-            .unwrap();
+        let out = pdf_lint().arg(flag).stdout(writer).output().unwrap();
         let stderr = text(&out.stderr);
         assert!(!stderr.contains("panicked"), "{flag}: {stderr}");
         assert_eq!(out.status.code(), Some(0), "{flag}: {stderr}");
@@ -874,7 +1505,393 @@ fn the_version_or_usage_no_one_reads_exits_0_without_a_panic() {
 }
 
 #[test]
+fn an_options_value_is_the_next_word_whatever_it_begins_with() {
+    let dir = folder();
+    // A password beginning with `-`.
+    let locked = written(&dir, "dash-password.pdf", &crypted(Kind::Aes256, b"-pw"));
+    let locked = locked.to_str().unwrap();
+    let out = run(&["--password", "-pw", locked]);
+    assert!(
+        text(&out.stdout).contains(" objects checked"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = run(&["--password", "-x", locked]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{locked}: the password --password gives doesn't open it\n")
+    );
+
+    // A hold file named `-`, which is a file there, not standard input,
+    // and ones named as an option is, or as `-h` and `-V` together aren't:
+    // each holds the page as built, where its key the model doesn't list
+    // is a finding.
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Contnets 1 >>";
+    written(&dir, "held.pdf", &file(&[CATALOG, PAGES, page]));
+    for name in ["-", "--built", "-hV"] {
+        written(&dir, name, b"3 0 built\n");
+        let out = (pdf_lint().current_dir(dir.path()))
+            .args(["--hold", name, "held.pdf"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{name}: {}", text(&out.stderr));
+        assert!(
+            text(&out.stdout).contains("- unlisted: PageObject/Contnets"),
+            "{name}: {}",
+            text(&out.stdout)
+        );
+    }
+}
+
+#[test]
+fn an_option_given_twice_takes_the_last() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Contnets 1 >>";
+    let path = written(&dir, "twice.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = path.to_str().unwrap();
+    let out = run(&["--format", "json", "--format", "text", path]);
+    assert!(
+        text(&out.stdout).starts_with(&format!("{path}: PDF 1.7, ")),
+        "{}",
+        text(&out.stdout)
+    );
+    let out = run(&["--format", "text", "--format", "json", path]);
+    let report = serde_json::from_slice::<Value>(&out.stdout);
+    assert!(report.is_ok(), "{}", text(&out.stdout));
+    // The page is merged, so its unlisted key is a finding with `all` alone.
+    let out = run(&["--unlisted", "all", "--unlisted", "built", path]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    let out = run(&["--unlisted", "built", "--unlisted", "all", path]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let out = run(&["--pdf-version", "2.0", "--pdf-version", "1.4", path]);
+    assert!(
+        text(&out.stdout).contains(", checked as 1.4, "),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn files_and_options_go_in_any_order() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1] /Resources << >> >>";
+    let first = written(&dir, "order-first.pdf", &file(&[CATALOG, PAGES, page]));
+    let second = written(&dir, "order-second.pdf", &file(&[CATALOG, PAGES, page]));
+    let (first, second) = (first.to_str().unwrap(), second.to_str().unwrap());
+    let before = run(&[first, second, "--format", "json", "--jobs", "1"]);
+    let lines = text(&before.stdout);
+    assert_eq!(lines.lines().count(), 2, "{lines}");
+    assert!(lines.contains(first) && lines.contains(second), "{lines}");
+    for args in [
+        &[first, "--format", "json", second, "--jobs", "1"][..],
+        &["--format", "json", first, "--jobs", "1", second][..],
+        &["--format", "json", "--jobs", "1", first, second][..],
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), before.status.code(), "{args:?}");
+        assert_eq!(text(&out.stdout), lines, "{args:?}");
+    }
+}
+
+#[test]
+fn an_option_takes_its_value_after_an_equals_sign_too() {
+    let dir = folder();
+    let locked = written(&dir, "equals.pdf", &crypted(Kind::Aes256, b"-pw"));
+    let locked = locked.to_str().unwrap();
+    let spaced = run(&["--password", "-pw", "--format", "json", locked]);
+    let equals = run(&["--password=-pw", "--format=json", locked]);
+    assert_eq!(equals.status.code(), spaced.status.code());
+    assert_eq!(text(&equals.stdout), text(&spaced.stdout));
+    assert!(
+        serde_json::from_slice::<Value>(&equals.stdout).is_ok(),
+        "{}",
+        text(&equals.stderr)
+    );
+}
+
+#[test]
+fn a_file_beginning_with_a_dash_follows_two_dashes() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    written(&dir, "-x.pdf", &file(&[CATALOG, PAGES, page]));
+    let lint = |args: &[&str]| {
+        (pdf_lint().current_dir(dir.path()))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = lint(&["--", "-x.pdf"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "-x.pdf: PDF 1.7, 6 objects checked, 0 findings\n"
+    );
+    // Before them, it's an option there's none of.
+    let out = lint(&["-x.pdf"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).starts_with("error: unexpected argument '-x' found\n"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn the_version_is_two_lines_naming_the_model() {
+    let hash = pdf_lint::grammar().hash();
+    let n = pdf_lint::grammar::corrections().len();
+    let m = pdf_lint::grammar::additions().len();
+    let version = format!(
+        "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (xxh64 {hash:016x})\n",
+        env!("CARGO_PKG_VERSION"),
+        pdf_lint::COMMIT
+    );
+    // Where it's met, the rest unread: a file before it, and a word after
+    // it that's no option. The model is the embedded one, `--model`'s
+    // unread.
+    for args in [
+        &["--version"][..],
+        &["-V"],
+        &["a.pdf", "--version"],
+        &["--version", "--bogus"],
+        &["--model", "/nonexistent", "-V"],
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert_eq!(text(&out.stdout), version, "{args:?}");
+        assert_eq!(text(&out.stderr), "", "{args:?}");
+    }
+}
+
+#[test]
+fn an_empty_word_is_a_file_that_cant_be_read() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let path = written(&dir, "empty-word.pdf", &file(&[CATALOG, PAGES, page]));
+    let path = path.to_str().unwrap();
+    let missing = std::fs::read("").unwrap_err();
+    // As a FILE, it's said, and the others are still checked.
+    let out = run(&["", path]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stdout),
+        format!("{path}: PDF 1.7, 6 objects checked, 0 findings\n")
+    );
+    assert_eq!(text(&out.stderr), format!(": {missing}\n"));
+    // As an option's file, it's read and fails, as any file that isn't.
+    let out = run(&["--hold", "", path]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(
+        text(&out.stderr),
+        format!("pdf-lint: reading : {missing}\n")
+    );
+}
+
+#[test]
+fn each_argument_error_exits_2_as_clap_says_it() {
+    let refused = |value: &str, arg: &str, why: &str| {
+        format!("error: invalid value '{value}' for '{arg}': {why}\n\n{MORE}")
+    };
+    let missing = |arg: &str| {
+        format!("error: a value is required for '{arg}' but none was supplied\n\n{MORE}")
+    };
+    let unknown = |arg: &str| {
+        format!(
+            "error: unexpected argument '{arg}' found\n\n  \
+             tip: to pass '{arg}' as a value, use '-- {arg}'\n\n{USAGE}{MORE}"
+        )
+    };
+    let ours = |why: &str| format!("error: {why}\n\n{USAGE}{MORE}");
+    let alone = |word: &str| {
+        format!(
+            "error: unexpected argument '{word}' found: -h and -V each stand alone\n\n\
+             {USAGE}{MORE}"
+        )
+    };
+    let jobs = "not a number above 0";
+    let pdf_version = "not a PDF version, 1.0 to 1.7 or 2.0";
+    let mut cases: Vec<(Vec<&str>, String)> = vec![
+        (vec!["--bogus", "a.pdf"], unknown("--bogus")),
+        (vec!["-x", "a.pdf"], unknown("-x")),
+        (vec!["--bogus", "--version"], unknown("--bogus")),
+        // `-h` or `-V` with more after it in the same word, which clap
+        // would take for the flag, `-hold` for the help.
+        (vec!["-hold", "h", "a.pdf"], alone("-hold")),
+        (vec!["a.pdf", "-Vx"], alone("-Vx")),
+        (vec!["-hV"], alone("-hV")),
+        (vec!["-V=x", "a.pdf"], alone("-V=x")),
+        (
+            vec!["--jobs", "0", "a.pdf"],
+            refused("0", "--jobs <N>", jobs),
+        ),
+        (
+            vec!["--jobs", "x", "a.pdf"],
+            refused("x", "--jobs <N>", jobs),
+        ),
+        (
+            vec!["--jobs", "-1", "a.pdf"],
+            refused("-1", "--jobs <N>", jobs),
+        ),
+        (
+            vec!["--jobs", "0", "--help"],
+            refused("0", "--jobs <N>", jobs),
+        ),
+        (
+            vec!["--pdf-version", "1.8", "a.pdf"],
+            refused("1.8", "--pdf-version <V>", pdf_version),
+        ),
+        (
+            vec!["--unlisted", "some", "a.pdf"],
+            refused("some", "--unlisted <W>", "built, all or never"),
+        ),
+        (
+            vec!["--format", "yaml", "a.pdf"],
+            refused("yaml", "--format <F>", "text or json"),
+        ),
+        (
+            vec!["--full=x", "a.pdf"],
+            format!(
+                "error: unexpected value 'x' for '--full' found; no more were expected\n\n\
+                 Usage: pdf-lint --full <FILE>...\n\n{MORE}"
+            ),
+        ),
+        (
+            vec!["--full"],
+            format!(
+                "error: the following required arguments were not provided:\n  <FILE>...\n\n\
+                 Usage: pdf-lint --full <FILE>...\n\n{MORE}"
+            ),
+        ),
+        (
+            vec!["--hol", "h", "a.pdf"],
+            format!(
+                "error: unexpected argument '--hol' found\n\n  \
+                 tip: a similar argument exists: '--hold'\n\n\
+                 Usage: pdf-lint --hold <FILE> <FILE>...\n\n{MORE}"
+            ),
+        ),
+        (
+            vec!["-", "-"],
+            ours("- more than once: standard input is read once"),
+        ),
+        (
+            vec!["--hold", "h", "--built", "a.pdf"],
+            ours("--hold and --built: a hold file says how each object was made"),
+        ),
+        (
+            vec!["--last-update", "--hold", "h", "a.pdf"],
+            ours("--last-update holds what the update wrote, with neither --hold nor --built"),
+        ),
+        (
+            vec!["--last-update", "--built", "a.pdf"],
+            ours("--last-update holds what the update wrote, with neither --hold nor --built"),
+        ),
+        (
+            vec!["--exempt", "e", "--unlisted", "never", "--built", "a.pdf"],
+            ours("--exempt and --unlisted never: no key the model doesn't list is a finding"),
+        ),
+        (
+            vec!["--exempt", "e", "a.pdf"],
+            ours(
+                "--exempt: a key the model doesn't list is a finding only in a built object, \
+                 which takes --built, --hold or --last-update (or in any, with --unlisted all)",
+            ),
+        ),
+        (
+            vec!["--last-update", "--baseline", "b", "a.pdf"],
+            ours("--last-update and --baseline: the update's baseline is the revision before it"),
+        ),
+    ];
+    for (flag, value) in [
+        ("--hold", "FILE"),
+        ("--exempt", "FILE"),
+        ("--allow", "TSV"),
+        ("--model", "DIR"),
+        ("--baseline", "FILE"),
+        ("--password", "PW"),
+        ("--jobs", "N"),
+        ("--pdf-version", "V"),
+        ("--unlisted", "W"),
+        ("--extensions", "E"),
+        ("--format", "F"),
+    ] {
+        cases.push((vec!["a.pdf", flag], missing(&format!("{flag} <{value}>"))));
+    }
+    for (args, stderr) in &cases {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert_eq!(text(&out.stdout), "", "{args:?}");
+        assert_eq!(text(&out.stderr), *stderr, "{args:?}");
+    }
+
+    // No arguments at all: the help, on stderr.
+    let out = run(&[]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(text(&out.stderr), text(&run(&["--help"]).stdout));
+
+    // A value that isn't UTF-8, for an option that takes text, a number or
+    // a word; and a word beginning with `-` that isn't, which is no option.
+    // On Unix alone, where an argument is any bytes.
+    #[cfg(unix)]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let utf8 =
+            format!("error: invalid UTF-8 was detected in one or more arguments\n\n{USAGE}{MORE}");
+        let options = [
+            "--password",
+            "--extensions",
+            "--jobs",
+            "--pdf-version",
+            "--unlisted",
+            "--format",
+        ];
+        for flag in options {
+            let out = (pdf_lint().arg(flag))
+                .arg(OsStr::from_bytes(b"\xff"))
+                .arg("a.pdf")
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(2), "{flag}");
+            assert_eq!(text(&out.stderr), utf8, "{flag}");
+        }
+        let out = (pdf_lint().arg(OsStr::from_bytes(b"-\xff")))
+            .arg("a.pdf")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(text(&out.stderr), unknown("-\u{fffd}"));
+    }
+}
+
+/// The README's command line is what `--help` prints, and `-h`, within 80
+/// columns.
+#[test]
+fn the_readme_shows_the_help() {
+    // As checked out, whatever its line endings.
+    let readme = include_str!("../README.md").replace("\r\n", "\n");
+    let (_, after) = readme
+        .split_once("## The command line\n\n```text\n")
+        .unwrap();
+    let (help, _) = after.split_once("```\n").unwrap();
+    for flag in ["--help", "-h"] {
+        let out = run(&[flag]);
+        assert_eq!(out.status.code(), Some(0), "{flag}");
+        assert_eq!(text(&out.stdout), help, "{flag}");
+        assert_eq!(text(&out.stderr), "", "{flag}");
+    }
+    for line in help.lines() {
+        assert!(line.chars().count() <= 80, "{line}");
+    }
+}
+
+#[test]
 fn json_reports_a_line_for_each_file() {
+    let dir = folder();
     let faulty = file(&[
         CATALOG,
         PAGES,
@@ -882,7 +1899,7 @@ fn json_reports_a_line_for_each_file() {
         // A link's /Border, which readers ignore beside a /BS.
         "<< /Type /Annot /Subtype /Link /Rect [0 0 1 1] /Border [0 0 1] /BS << >> >>",
     ]);
-    let path = written("json.pdf", &faulty);
+    let path = written(&dir, "json.pdf", &faulty);
     let out = run(&[
         "--format",
         "json",
@@ -893,32 +1910,21 @@ fn json_reports_a_line_for_each_file() {
     let stdout = text(&out.stdout);
     let lines: Vec<_> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "{stdout}");
-    let report = json::parse(lines[0].as_bytes()).unwrap_or_else(|e| panic!("{e}: {}", lines[0]));
-    let field = |j: &json::Json, key: &str| j.get(key).cloned().unwrap_or_else(|| panic!("{key}"));
-    assert_eq!(
-        field(&report, "file"),
-        json::Json::String(path.display().to_string())
-    );
-    assert_eq!(
-        field(&report, "version"),
-        json::Json::String("1.7".to_string())
-    );
+    let report: Value =
+        serde_json::from_str(lines[0]).unwrap_or_else(|e| panic!("{e}: {}", lines[0]));
+    let field = |j: &Value, key: &str| j.get(key).cloned().unwrap_or_else(|| panic!("{key}"));
+    assert_eq!(field(&report, "file"), json!(path.display().to_string()));
+    assert_eq!(field(&report, "version"), json!("1.7"));
     let model = format!("{:016x}", pdf_lint::grammar().hash());
-    assert_eq!(field(&report, "model"), json::Json::String(model));
+    assert_eq!(field(&report, "model"), json!(model));
     assert_eq!(
         field(&report, "ignored"),
-        json::parse(br#"[{"table":"AnnotLink","key":"Border","count":1}]"#).unwrap()
+        json!([{"table": "AnnotLink", "key": "Border", "count": 1}])
     );
-    let finding = field(&report, "findings").at(0).cloned().unwrap();
-    assert_eq!(
-        field(&finding, "rule"),
-        json::Json::String("type".to_string())
-    );
-    assert_eq!(
-        field(&finding, "key"),
-        json::Json::String("MediaBox".to_string())
-    );
-    assert_eq!(field(&finding, "object"), json::parse(b"[3,0]").unwrap());
+    let finding = field(&report, "findings").get(0).cloned().unwrap();
+    assert_eq!(field(&finding, "rule"), json!("type"));
+    assert_eq!(field(&finding, "key"), json!("MediaBox"));
+    assert_eq!(field(&finding, "object"), json!([3, 0]));
     let value = field(&finding, "value");
     assert!(
         value
@@ -928,37 +1934,34 @@ fn json_reports_a_line_for_each_file() {
     );
     let at = field(&finding, "at");
     let number = |key: &str| match field(&at, key) {
-        json::Json::Number(n) => n.parse::<usize>().unwrap(),
+        Value::Number(n) => usize::try_from(n.as_u64().unwrap()).unwrap(),
         other => panic!("{other:?}"),
     };
-    assert_eq!(field(&at, "stream"), json::Json::Null);
+    assert_eq!(field(&at, "stream"), Value::Null);
     assert_eq!(
         &faulty[number("start")..number("end")],
         b"/MediaBox (q\"\\\\\t)"
     );
-    assert!(matches!(field(&report, "tables"), json::Json::Object(_)));
+    assert!(matches!(field(&report, "tables"), Value::Object(_)));
 
-    let unread = json::parse(lines[1].as_bytes()).unwrap();
-    assert_eq!(
-        field(&unread, "file"),
-        json::Json::String("/nonexistent/file.pdf".to_string())
-    );
+    let unread: Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(field(&unread, "file"), json!("/nonexistent/file.pdf"));
     // The extensions it was checked under: none it declares; and those of
     // a catalog that declares Adobe's level 8 and ETSI's.
-    assert_eq!(field(&report, "extensions"), json::parse(b"[]").unwrap());
+    assert_eq!(field(&report, "extensions"), json!([]));
     let catalog = "<< /Type /Catalog /Pages 2 0 R /Extensions << \
                    /ADBE << /BaseVersion /1.7 /ExtensionLevel 8 >> \
                    /ESIC << /BaseVersion /1.7 /ExtensionLevel 1 >> >> >>";
     let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
-    let declaring = written("json-extensions.pdf", &file(&[catalog, PAGES, page]));
+    let declaring = written(&dir, "json-extensions.pdf", &file(&[catalog, PAGES, page]));
     let out = run(&["--format", "json", declaring.to_str().unwrap()]);
-    let declared = json::parse(&out.stdout).unwrap();
+    let declared: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         field(&declared, "extensions"),
-        json::parse(br#"["ADBE_Extn3","ETSI_PAdES"]"#).unwrap()
+        json!(["ADBE_Extn3", "ETSI_PAdES"])
     );
     // Each line says which pdf-lint wrote it.
-    let version = json::Json::String(env!("CARGO_PKG_VERSION").to_string());
+    let version = json!(env!("CARGO_PKG_VERSION"));
     assert_eq!(field(&report, "pdf_lint"), version);
     assert_eq!(field(&unread, "pdf_lint"), version);
     assert_eq!(field(&unread, "model"), field(&report, "model"));
@@ -968,9 +1971,80 @@ fn json_reports_a_line_for_each_file() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// A file's name in the JSON report, held byte for byte as it's always been
+/// written: `"` and `\` after a backslash; tab, line feed and carriage
+/// return as `\t`, `\n` and `\r`, and every other control character as
+/// `\u00xx`, lowercase, backspace and form feed too; and the rest as it is,
+/// U+007F and beyond, a byte that isn't UTF-8 as U+FFFD, as the text report
+/// names it. On Unix alone: an argument can't hold a NUL, and a Windows
+/// name can't hold most of these.
+#[cfg(unix)]
+#[test]
+fn json_strings_are_escaped_as_they_were() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = folder();
+    let mut name: Vec<u8> = (0x01..=0x1F).collect();
+    name.extend_from_slice("\"\\\u{7f}é€🥔".as_bytes());
+    name.push(0xFF);
+    let escaped = concat!(
+        r#""file":"\u0001\u0002\u0003\u0004\u0005\u0006\u0007\u0008\t\n\u000b"#,
+        r#"\u000c\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017"#,
+        r#"\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f\"\\"#,
+        "\u{7f}é€🥔\u{fffd}",
+    );
+    let lint = |name: &[u8]| {
+        (pdf_lint().current_dir(dir.path()))
+            .args(["--format", "json"])
+            .arg(OsStr::from_bytes(name))
+            .output()
+            .unwrap()
+    };
+
+    // A file that doesn't exist: the line saying it can't be read.
+    let out = lint(&name);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let model = format!("{:016x}", pdf_lint::grammar().hash());
+    let version = env!("CARGO_PKG_VERSION");
+    let line =
+        format!("{{\"pdf_lint\":\"{version}\",\"model\":\"{model}\",{escaped}\",\"error\":\"");
+    assert!(
+        out.stdout.starts_with(line.as_bytes()) && out.stdout.ends_with(b"\"}\n"),
+        "{}",
+        text(&out.stdout)
+    );
+
+    // A file that does: its report. macOS's file systems refuse a name
+    // that isn't UTF-8.
+    if cfg!(target_os = "linux") {
+        let pdf = [&name[..], b".pdf"].concat();
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+        std::fs::write(
+            dir.path().join(OsStr::from_bytes(&pdf)),
+            file(&[CATALOG, PAGES, page]),
+        )
+        .unwrap();
+        let out = lint(&pdf);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let line = format!("{{\"pdf_lint\":\"{version}\",{escaped}.pdf\",\"version\":\"1.7\",");
+        assert!(
+            out.stdout.starts_with(line.as_bytes()) && out.stdout.ends_with(b"}\n"),
+            "{}",
+            text(&out.stdout)
+        );
+        assert_eq!(out.stdout.iter().filter(|&&b| b == b'\n').count(), 1);
+    }
+}
+
 /// `file` with an incremental update appended: these objects' bodies, by
 /// number, and a table listing them.
 fn updated(file: &[u8], objects: &[(u32, &str)]) -> Vec<u8> {
+    updated_under(file, objects, "")
+}
+
+/// [`updated`]'s file, the update's trailer given `trailer`'s entries.
+fn updated_under(file: &[u8], objects: &[(u32, &str)], trailer: &str) -> Vec<u8> {
     let text = String::from_utf8_lossy(file);
     let previous = text.rsplit("startxref").next().unwrap();
     let previous: usize = previous.split_whitespace().next().unwrap().parse().unwrap();
@@ -985,7 +2059,7 @@ fn updated(file: &[u8], objects: &[(u32, &str)]) -> Vec<u8> {
     out.extend_from_slice(rows.as_bytes());
     out.extend_from_slice(
         format!(
-            "trailer\n<< /Size {size} /Root 1 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n"
+            "trailer\n<< /Size {size} /Root 1 0 R{trailer} /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n"
         )
         .as_bytes(),
     );
@@ -994,6 +2068,7 @@ fn updated(file: &[u8], objects: &[(u32, &str)]) -> Vec<u8> {
 
 #[test]
 fn the_last_update_answers_for_what_it_wrote() {
+    let dir = folder();
     // A, in the page as first written.
     let original = file(&[
         CATALOG,
@@ -1012,7 +2087,7 @@ fn the_last_update_answers_for_what_it_wrote() {
             (4, "<< /Type /Annot /Subtype /Text /Rect (C) >>"),
         ],
     );
-    let path = written("updated.pdf", &update);
+    let path = written(&dir, "updated.pdf", &update);
     let out = run(&["--last-update", path.to_str().unwrap()]);
     let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{stdout}");
@@ -1029,7 +2104,7 @@ fn the_last_update_answers_for_what_it_wrote() {
     assert!(stdout.contains("1 carried"), "{stdout}");
 
     // A file of one revision has no update to answer for.
-    let path = written("one-revision.pdf", &original);
+    let path = written(&dir, "one-revision.pdf", &original);
     let out = run(&["--last-update", path.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2));
     assert!(
@@ -1041,8 +2116,175 @@ fn the_last_update_answers_for_what_it_wrote() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// An earlier revision's trailer is checked from `trailer K`, K its
+/// revision counted from the first, and isn't the update's: `--last-update`
+/// holds none, and a fault an update brings back, which the revision before
+/// it had mended, is the update's, though an older revision had it, as
+/// `--last-update` and `--baseline` of the revision before say.
+#[test]
+fn an_earlier_revisions_trailer_isnt_the_updates() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    // The first revision's trailer's /ID isn't an array; the second's has
+    // none; the third's isn't again.
+    let first = text(&file(&[CATALOG, PAGES, page]));
+    let first = first.replacen("/Root 1 0 R >>", "/Root 1 0 R /ID (abc) >>", 1);
+    let mended = updated(first.as_bytes(), &[(3, page)]);
+    let again = updated_under(&mended, &[(3, page)], " /ID (abc)");
+    let mended = written(&dir, "mended.pdf", &mended);
+    let mended = mended.to_str().unwrap();
+    let again = written(&dir, "again.pdf", &again);
+    let again = again.to_str().unwrap();
+    let found = |args: &[&str]| {
+        let out = run(args);
+        let stdout = text(&out.stdout);
+        let summary = stdout.lines().next().unwrap_or_default().to_string();
+        let found: Vec<String> = (stdout.lines())
+            .filter_map(|l| l.strip_prefix("- "))
+            .map(|l| l.split(" (merged)").next().unwrap().to_string())
+            .collect();
+        (summary, found)
+    };
+
+    // Checked whole, each trailer's own, the newest first.
+    let (summary, all) = found(&[again]);
+    assert!(summary.contains("2 findings"), "{summary}");
+    assert_eq!(
+        all,
+        [
+            "type: FileTrailer/ID at trailer, in the trailer",
+            "type: FileTrailer/ID at trailer 1, in trailer 1"
+        ]
+    );
+    let out = run(&["--format", "json", again]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let paths: Vec<_> = (report["findings"].as_array().unwrap().iter())
+        .map(|f| (f["path"].clone(), f["object"].clone()))
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            (json!("trailer"), Value::Null),
+            (json!("trailer 1"), Value::Null)
+        ]
+    );
+    assert_eq!(report["tables"]["FileTrailer"], json!(3));
+
+    // The update's: its trailer's fault, not carried from the first's;
+    // and no earlier trailer held.
+    let (summary, last) = found(&["--last-update", again]);
+    assert!(summary.ends_with(", 1 findings"), "{summary}");
+    assert_eq!(last, ["type: FileTrailer/ID at trailer, in the trailer"]);
+    let out = run(&["--last-update", "--format", "json", again]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["tables"]["FileTrailer"], json!(1));
+
+    // Against the revision before, the same; the first's carried.
+    let (summary, against) = found(&["--baseline", mended, again]);
+    assert!(summary.ends_with(", 1 findings, 1 carried"), "{summary}");
+    assert_eq!(against, last);
+}
+
+/// A cross-reference stream, object `n`, of `rows`, each an object's
+/// number and where it starts, and itself, at the end of `out`, under
+/// `trailer`'s entries, then `startxref` and `%%EOF`; where it starts.
+fn xref_stream(out: &mut Vec<u8>, n: u32, rows: &[(u32, usize)], trailer: &str) -> usize {
+    let at = out.len();
+    let mut listed = rows.to_vec();
+    listed.push((n, at));
+    let index: String = listed.iter().map(|(m, _)| format!("{m} 1 ")).collect();
+    let data: Vec<u8> = (listed.iter())
+        .flat_map(|&(_, offset)| [&[1][..], &(offset as u32).to_be_bytes(), &[0, 0]].concat())
+        .collect();
+    let dict = format!(
+        "<< /Type /XRef /Size 5 /W [1 4 2] /Index [{index}] /Root 1 0 R{trailer} /Length {} >>",
+        data.len()
+    );
+    out.extend_from_slice(format!("{n} 0 obj\n{dict}\nstream\n").as_bytes());
+    out.extend_from_slice(&data);
+    out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{at}\n%%EOF\n").as_bytes());
+    at
+}
+
+/// The revision an update follows is read as it was written, its bytes up
+/// to where it ends, its own length to its predicates (`fn:FileSize`): a
+/// cross-reference stream whose `/Prev` is past where its revision ends,
+/// though not past the file's end, is a `value` finding in the file
+/// checked whole, in that revision's trailer, from the stream's number;
+/// and `--last-update`, where the update writes the stream's number again
+/// and so holds it, carries it from the revision before, where it's the
+/// trailer.
+#[test]
+fn an_updates_revision_before_is_read_as_it_was_written() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let rotated = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Rotate 90 /Resources << >> >>";
+    // The first revision, its /Prev five digits, and where it ends; then a
+    // comment, and the update's page.
+    let first = |prev: usize| {
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut rows = Vec::new();
+        for (n, body) in [(1, CATALOG), (2, PAGES), (3, page)] {
+            rows.push((n, out.len()));
+            out.extend_from_slice(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+        }
+        let at = xref_stream(&mut out, 4, &rows, &format!(" /Prev {prev:05}"));
+        let end = out.len();
+        out.extend_from_slice(b"% the first revision's /Prev\n");
+        (out, at, end)
+    };
+    let (_, _, end) = first(99999);
+    // Three bytes into the comment, which no section starts at.
+    let prev = end + 3;
+    let (mut file, at, again) = first(prev);
+    assert_eq!(again, end);
+    let three = file.len();
+    file.extend_from_slice(format!("3 0 obj\n{rotated}\nendobj\n").as_bytes());
+    xref_stream(&mut file, 4, &[(3, three)], &format!(" /Prev {at}"));
+    let path = written(&dir, "prev-past.pdf", &file);
+    let path = path.to_str().unwrap();
+
+    // Whole: the first revision's /Prev, from the stream's number, and
+    // the section it gives, which doesn't read.
+    let out = run(&["--format", "json", path]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let found: Vec<_> = (report["findings"].as_array().unwrap().iter())
+        .map(|f| {
+            (
+                f["rule"].clone(),
+                f["table"].clone(),
+                f["key"].clone(),
+                f["path"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (
+                json!("value"),
+                json!("XRefStream"),
+                json!("Prev"),
+                json!("4 0 R")
+            ),
+            (json!("reader"), json!("-"), json!("-"), json!("-")),
+        ],
+        "{report}"
+    );
+    let value = format!("{prev} (not one of fn:Eval((@Prev>=0) && (@Prev<=fn:FileSize())))");
+    assert_eq!(report["findings"][0]["value"], json!(value));
+    // The update's: both carried from the revision before, read as it was
+    // written, whose own /Prev is past its end too.
+    let out = run(&["--last-update", "--format", "json", path]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["findings"], json!([]), "{report}");
+    assert_eq!(report["carried"], json!(2), "{report}");
+    assert_eq!(report["tables"]["XRefStream"], json!(2), "{report}");
+}
+
 #[test]
 fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
+    let dir = folder();
     let faulty = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1] /Resources << >> >>";
     let clean = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
     // A baseline whose first page has a fault, A, and its second none.
@@ -1052,7 +2294,7 @@ fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
         faulty,
         clean,
     ]);
-    let base = written("baseline.pdf", &baseline);
+    let base = written(&dir, "baseline.pdf", &baseline);
 
     // An incremental update of it is set against it object by object: it
     // puts the first page second, where it keeps A, and adds B; and a new
@@ -1068,7 +2310,7 @@ fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
             (5, "<< /Type /Annot /Subtype /Text /Rect (C) >>"),
         ],
     );
-    let path = written("baseline-updated.pdf", &update);
+    let path = written(&dir, "baseline-updated.pdf", &update);
     let out = run(&["--baseline", base.to_str().unwrap(), path.to_str().unwrap()]);
     let stdout = text(&out.stdout);
     let findings: Vec<_> = stdout.lines().filter(|l| l.starts_with("- ")).collect();
@@ -1088,7 +2330,7 @@ fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
         faulty,
         faulty,
     ]);
-    let path = written("baseline-rewritten.pdf", &rewrite);
+    let path = written(&dir, "baseline-rewritten.pdf", &rewrite);
     let out = run(&["--baseline", base.to_str().unwrap(), path.to_str().unwrap()]);
     let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{stdout}");
@@ -1115,50 +2357,419 @@ fn a_baseline_leaves_out_what_the_file_was_written_from_already_had() {
     assert_eq!(out.status.code(), Some(2));
 }
 
-/// `command`'s output, tried again while the program is busy: another
-/// test's process, forked while it was being written, holds it open until
-/// it runs its own program (ETXTBSY).
-#[cfg(unix)]
-fn output_when_free(command: &mut Command) -> Output {
-    loop {
-        match command.output() {
-            Err(e) if e.raw_os_error() == Some(26) => {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            }
-            other => return other.unwrap(),
-        }
-    }
+/// A page whose content leaves a `q` open: its finding is in its content
+/// stream, printed with its bytes there decoded, and `--full` says how much
+/// content was read. Checked against itself, it's carried; so it is by an
+/// update that rewrites the page and leaves its content as it was, and one
+/// that adds a stream to it tells what that stream brings.
+#[test]
+fn content_findings_are_set_against_what_came_before_as_any() {
+    let dir = folder();
+    let page =
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> /Contents 4 0 R >>";
+    let content = "<< /Length 9 >>\nstream\nq 0 0 m S\nendstream";
+    let original = file(&[CATALOG, PAGES, page, content]);
+    let path = written(&dir, "content.pdf", &original);
+    let path = path.to_str().unwrap();
+    let out = run(&[path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let open = "- balance: PageObject/Contents at Root/Pages/Kids[0]/Contents, in 4 0 R (merged): \
+                1 q left open at the end [bytes 0..1 of 4 0 R's data]\n    \
+                | q   (of 4 0 R's data, decoded)\n";
+    assert!(stdout.ends_with(open), "{stdout}");
+    assert!(stdout.contains("objects checked, 1 findings\n"), "{stdout}");
+    // The whole report: its first line as ever, and how much was read.
+    let out = run(&["--full", path]);
+    let full = text(&out.stdout);
+    let lines: Vec<_> = full.lines().collect();
+    assert!(lines[1].starts_with("  Arlington: ") && lines[1].contains("; 1 findings; "));
+    assert!(lines.contains(&"    content read: 1"), "{full}");
+    let out = run(&["--format", "json", path]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["content_read"], json!(1));
+    assert_eq!(report["findings"][0]["at"]["stream"], json!([4, 0]));
+
+    // Against itself, all carried.
+    let out = run(&["--baseline", path, path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 findings, 1 carried"), "{stdout}");
+
+    // An update that rewrites the page, its content as it was: carried.
+    let rotated = page.replace("/Resources", "/Rotate 90 /Resources");
+    let update = updated(&original, &[(3, rotated.as_str())]);
+    let rotated = written(&dir, "content-rotated.pdf", &update);
+    let out = run(&["--last-update", rotated.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 findings, 1 carried"), "{stdout}");
+
+    // One that adds a stream after it, restoring one state more than it
+    // saves: that's the update's, in its stream; the `q` is no longer open.
+    let added = page.replace("/Contents 4 0 R", "/Contents [4 0 R 5 0 R]");
+    let stream = "<< /Length 3 >>\nstream\nQ Q\nendstream";
+    let update = updated(&original, &[(3, added.as_str()), (5, stream)]);
+    let added = written(&dir, "content-added.pdf", &update);
+    let out = run(&["--last-update", added.to_str().unwrap()]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let restored = "- balance: PageObject/Contents at Root/Pages/Kids[0]/Contents[1], in 5 0 R \
+                    (merged): Q with nothing saved to restore [bytes 2..3 of 5 0 R's data]\n    \
+                    | Q   (of 5 0 R's data, decoded)\n";
+    assert!(stdout.ends_with(restored), "{stdout}");
+    assert!(stdout.contains("objects checked, 1 findings\n"), "{stdout}");
 }
 
-#[cfg(unix)]
+/// A name content uses that its resources lack is a finding, in the content
+/// stream, at the name; a resource nothing uses is counted, in `--full` and
+/// the JSON, and with `--unused` a finding too, at its key, which a
+/// baseline of the same file carries.
 #[test]
-fn the_qpdf_bundled_beside_the_binary_is_found_unless_one_is_named() {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = std::env::temp_dir().join(format!("pdf-lint-cli-{}-bundled", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let binary = dir.join("pdf-lint");
-    std::fs::copy(env!("CARGO_BIN_EXE_pdf-lint"), &binary).unwrap();
-    let qpdf = dir.join("qpdf").join("bin").join("qpdf");
-    std::fs::create_dir_all(qpdf.parent().unwrap()).unwrap();
-    std::fs::write(&qpdf, "#!/bin/sh\necho 'qpdf version 99.0.0'\n").unwrap();
-    std::fs::set_permissions(&qpdf, std::fs::Permissions::from_mode(0o755)).unwrap();
+fn resources_lacking_are_found_and_unused_ones_found_when_asked() {
+    let dir = folder();
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << /Font << /F1 6 0 R >> \
+                /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>";
+    let content = "<< /Length 24 >>\nstream\nBT /F1 9 Tf /F2 9 Tf ET\nendstream";
+    let image = "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray \
+                 /BitsPerComponent 8 /Length 1 >>\nstream\nx\nendstream";
+    let font = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+    let path = written(
+        &dir,
+        "resources.pdf",
+        &file(&[CATALOG, PAGES, page, content, image, font]),
+    );
+    let path = path.to_str().unwrap();
+    let lacking = "- resource: Resource/Font at Root/Pages/Kids[0]/Contents, in 4 0 R (merged): \
+                   /F2 (Tf) [bytes 12..15 of 4 0 R's data]\n    \
+                   | /F2   (of 4 0 R's data, decoded)\n";
+    let out = run(&[path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.ends_with(lacking), "{stdout}");
+    assert!(stdout.contains("objects checked, 1 findings\n"), "{stdout}");
+    let out = run(&["--full", path]);
+    let full = text(&out.stdout);
+    assert!(
+        full.contains("\n    unused: Resource/XObject: 1\n"),
+        "{full}"
+    );
 
-    let version = |named: Option<&str>| {
-        let mut command = Command::new(&binary);
-        command.arg("--version").env_remove("PDF_LINT_QPDF");
-        if let Some(named) = named {
-            command.env("PDF_LINT_QPDF", named);
-        }
-        text(&output_when_free(&mut command).stdout)
+    let out = run(&["--unused", path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("objects checked, 2 findings\n"), "{stdout}");
+    let unused = "- unused: Resource/XObject at Root/Pages/Kids[0]/Resources/XObject/Im, in 3 0 R \
+                  (merged): /Im [bytes ";
+    let (_, after) = stdout.split_once(lacking).unwrap();
+    assert!(after.starts_with(unused), "{stdout}");
+    assert!(after.contains("\n    | /Im\n"), "{stdout}");
+
+    let out = run(&["--unused", "--format", "json", path]);
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains(r#","content_read":1,"linearized":null,"unused":[{"table":"Resource","key":"XObject","count":1}],"departures":[],"ignored":"#),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(r#","deprecations":false,"unused_findings":true,"departure_findings":false,"extensions":"#),
+        "{stdout}"
+    );
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rules: Vec<_> = (report["findings"].as_array().unwrap().iter())
+        .map(|f| f["rule"].as_str().unwrap())
+        .collect();
+    assert_eq!(rules, ["resource", "unused"]);
+
+    // Against itself, both carried.
+    let out = run(&["--unused", "--baseline", path, path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 findings, 2 carried"), "{stdout}");
+}
+
+/// What's wrong in a file's XMP metadata is a finding in its metadata
+/// stream, printed with its bytes there, which are the stream's data, as
+/// it's unfiltered; the JSON says the stream; and against itself it's
+/// carried.
+#[test]
+fn an_xmp_finding_is_printed_with_the_packets_bytes() {
+    let dir = folder();
+    let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:Description pdfaid:part=3/></x:xmpmeta>"#;
+    let metadata = format!(
+        "<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n{xmp}\nendstream",
+        xmp.len()
+    );
+    let catalog = "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>";
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let path = written(&dir, "xmp.pdf", &file(&[catalog, PAGES, page, &metadata]));
+    let path = path.to_str().unwrap();
+    let out = run(&[path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let found = "- xmp: Metadata/- at Root/Metadata, in 4 0 R (merged): an attribute in XMP \
+                 metadata doesn't read [bytes 36..68 of 4 0 R's data]\n    \
+                 | <rdf:Description pdfaid:part=3/>   (of 4 0 R's data, decoded)\n";
+    assert!(stdout.ends_with(found), "{stdout}");
+    assert!(stdout.contains("objects checked, 1 findings\n"), "{stdout}");
+    let out = run(&["--format", "json", path]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["findings"][0]["rule"], json!("xmp"));
+    assert_eq!(report["findings"][0]["at"]["stream"], json!([4, 0]));
+
+    // Against itself, carried.
+    let out = run(&["--baseline", path, path]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 findings, 1 carried"), "{stdout}");
+}
+
+/// A file of one page linearized by pdf-linearize, its hint stream's row
+/// and object at generation 1, where Annex F has all at 0: a departure
+/// readers get past (ISO 32000-2, F.3.1), and the linearization holds.
+fn generation_1() -> (Vec<u8>, usize) {
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let plain = file(&[CATALOG, PAGES, page]);
+    let options = pdf_linearize::family::Options::DEFAULT;
+    let mut out = pdf_linearize::family::linearize_bytes(&plain, &[], &options).unwrap();
+    let find = |bytes: &[u8], what: &[u8]| (bytes.windows(what.len())).position(|w| w == what);
+    let items = find(&out, b"/H [").unwrap() + 4;
+    let at = text(&out[items..items + 12]);
+    let at: usize = at.split_whitespace().next().unwrap().parse().unwrap();
+    let row = format!("{at:010} 00000 n");
+    let row = find(&out, row.as_bytes()).unwrap() + "0000000000 0000".len();
+    out[row] = b'1';
+    let generation = at + find(&out[at..], b" 0 obj").unwrap() + 1;
+    out[generation] = b'1';
+    (out, at)
+}
+
+/// A linearized file's departure from Annex F that readers get past is
+/// counted, in `--full` and the JSON, and with `--departures` found, in its
+/// linearization dictionary, at the object it's of; the JSON says the
+/// linearization holds, and whether departures are found.
+#[test]
+fn a_linearizations_departures_are_counted_and_found_when_asked() {
+    let dir = folder();
+    let (bytes, at) = generation_1();
+    let path = written(&dir, "linearized.pdf", &bytes);
+    let path = path.to_str().unwrap();
+    let out = run(&["--full", path]);
+    let full = text(&out.stdout);
+    assert!(full.contains("\n    linearized: holds\n"), "{full}");
+    assert!(
+        full.contains("\n    departures: LinearizationParameterDict/-: 1\n"),
+        "{full}"
+    );
+    assert!(!full.contains("- linearization:"), "{full}");
+
+    let out = run(&["--departures", path]);
+    let stdout = text(&out.stdout);
+    let (_, after) = stdout.split_once("- linearization: ").expect(&stdout);
+    // The dictionary is the file's first object, 2 0 R as pdf-linearize
+    // numbers this one.
+    assert!(
+        after.starts_with("LinearizationParameterDict/- at 2 0 R, in 2 0 R (merged): "),
+        "{stdout}"
+    );
+    assert!(after.contains(&format!("[bytes {at}..")), "{stdout}");
+    assert!(
+        after.contains(" at generation 1, where all are at 0 (ISO 32000-2, F.3.1)"),
+        "{stdout}"
+    );
+
+    let json = |args: &[&str]| -> Value {
+        let out = run(args);
+        serde_json::from_slice(&out.stdout).unwrap()
     };
-    let bundled = version(None);
-    assert!(
-        bundled.contains(&format!("qpdf version 99.0.0 ({})", qpdf.display())),
-        "{bundled}"
+    let report = json(&["--format", "json", path]);
+    assert_eq!(report["departure_findings"], json!(false));
+    assert_eq!(report["linearized"], json!("holds"));
+    assert_eq!(
+        report["departures"],
+        json!([{"table": "LinearizationParameterDict", "key": "-", "count": 1}])
     );
-    let named = version(Some("/nonexistent/qpdf"));
-    assert!(
-        named.contains("no qpdf to decode with: /nonexistent/qpdf isn't found"),
-        "{named}"
+    let report = json(&["--departures", "--format", "json", path]);
+    assert_eq!(report["departure_findings"], json!(true));
+    assert_eq!(report["departures"], json!([]));
+    let rules: Vec<_> = (report["findings"].as_array().unwrap().iter())
+        .map(|f| f["rule"].as_str().unwrap())
+        .collect();
+    assert!(rules.contains(&"linearization"), "{report}");
+    // A file that isn't linearized has no verdict.
+    let plain = written(&dir, "plain.pdf", &file(&[CATALOG, PAGES]));
+    let report = json(&["--format", "json", plain.to_str().unwrap()]);
+    assert_eq!(report["linearized"], json!(null));
+}
+
+/// A file of one page linearized by pdf-linearize, its `/E` made 1 and
+/// zeros, so that it isn't where the first page ends: an error (ISO
+/// 32000-2, Table F.1); and its linearization dictionary's number and
+/// where it starts, its first object.
+fn linearized_wrongly() -> (Vec<u8>, u32, usize) {
+    let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>";
+    let plain = file(&[CATALOG, PAGES, page]);
+    let options = pdf_linearize::family::Options::DEFAULT;
+    let mut out = pdf_linearize::family::linearize_bytes(&plain, &[], &options).unwrap();
+    let find = |bytes: &[u8], what: &[u8]| (bytes.windows(what.len())).position(|w| w == what);
+    let e = find(&out, b"/E ").unwrap() + 3;
+    let digits = out[e..].iter().take_while(|b| b.is_ascii_digit()).count();
+    out[e] = b'1';
+    out[e + 1..e + digits].fill(b'0');
+    let obj = find(&out, b" 0 obj").unwrap();
+    let start = out[..obj]
+        .iter()
+        .rposition(|b| !b.is_ascii_digit())
+        .unwrap()
+        + 1;
+    let n = text(&out[start..obj]).parse().unwrap();
+    (out, n, start)
+}
+
+/// `file`, as [`linearized_wrongly`] makes it, with an incremental update
+/// after it, by hand: its catalog written again with a `/PageLayout`, and,
+/// where `listed` gives the linearization dictionary's number and where it
+/// is, that number listed there, so that `--last-update` holds it.
+fn linearized_updated(file: &[u8], listed: Option<(u32, usize)>) -> Vec<u8> {
+    use pdf_lint::Source;
+    let doc = pdf_lint::bytes::read(file);
+    let trailer = doc.trailer.dict();
+    let root = trailer.get(b"Root").and_then(|r| r.as_reference()).unwrap();
+    let pages = (doc.get(root).unwrap().as_dict().unwrap().get(b"Pages"))
+        .and_then(|p| p.as_reference())
+        .unwrap();
+    let size = trailer.get(b"Size").and_then(|s| s.as_integer()).unwrap();
+    let text = String::from_utf8_lossy(file);
+    let previous = text.rsplit("startxref").next().unwrap();
+    let previous: usize = previous.split_whitespace().next().unwrap().parse().unwrap();
+    let mut out = file.to_vec();
+    let at = out.len();
+    out.extend_from_slice(
+        format!(
+            "{} 0 obj\n<< /Type /Catalog /Pages {} 0 R /PageLayout /SinglePage >>\nendobj\n",
+            root.0, pages.0
+        )
+        .as_bytes(),
     );
+    let xref = out.len();
+    let mut rows = vec![(root.0, at)];
+    rows.extend(listed);
+    rows.sort_unstable();
+    let mut table = String::from("xref\n0 1\n0000000000 65535 f \n");
+    for (n, offset) in rows {
+        table.push_str(&format!("{n} 1\n{offset:010} 00000 n \n"));
+    }
+    out.extend_from_slice(table.as_bytes());
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {size} /Root {} 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n",
+            root.0
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// The rules, tables and keys of a JSON report's findings, in order.
+fn rules(report: &Value) -> Vec<(String, String, String)> {
+    (report["findings"].as_array().unwrap().iter())
+        .map(|f| {
+            let field = |name: &str| f[name].as_str().unwrap().to_string();
+            (field("rule"), field("table"), field("key"))
+        })
+        .collect()
+}
+
+/// A linearized file updated after: checked whole, that the update voids
+/// the linearization is found, in the trailer, and what's wrong with the
+/// linearization as first written, in its dictionary, its verdict that it's
+/// updated. `--last-update` finds the first, which the update answers for,
+/// and of an update that lists the dictionary's number where it was, so
+/// holds it, carries the second, which the revision before, the file as
+/// linearized, has.
+#[test]
+fn an_update_after_a_linearization_answers_for_voiding_it() {
+    let dir = folder();
+    let report = |args: &[&str], name: &str, bytes: &[u8]| -> Value {
+        let path = written(&dir, name, bytes);
+        let args = [args, &["--format", "json", path.to_str().unwrap()]].concat();
+        serde_json::from_slice(&run(&args).stdout).unwrap()
+    };
+    let (original, n, at) = linearized_wrongly();
+    let as_written = report(&[], "linearized.pdf", &original);
+    let wrong = |table: &str| {
+        (
+            "linearization".to_string(),
+            table.to_string(),
+            "E".to_string(),
+        )
+    };
+    let voided = (
+        "updated".to_string(),
+        "FileTrailer".to_string(),
+        "-".to_string(),
+    );
+    let lin = wrong("LinearizationParameterDict");
+    assert!(rules(&as_written).contains(&lin), "{as_written}");
+    assert_eq!(as_written["linearized"], json!("fails"));
+    let updated = linearized_updated(&original, None);
+    let whole = report(&[], "linearized-updated.pdf", &updated);
+    let found = rules(&whole);
+    assert!(found.contains(&lin) && found.contains(&voided), "{whole}");
+    assert_eq!(whole["linearized"], json!("updated"));
+    let last = report(&["--last-update"], "linearized-updated.pdf", &updated);
+    assert_eq!(rules(&last), std::slice::from_ref(&voided), "{last}");
+    assert_eq!(last["carried"], json!(0), "{last}");
+    assert_eq!(last["linearized"], json!("updated"));
+
+    let listing = linearized_updated(&original, Some((n, at)));
+    let last = report(&["--last-update"], "linearized-listing.pdf", &listing);
+    assert_eq!(rules(&last), [voided], "{last}");
+    assert_eq!(last["carried"], json!(1), "{last}");
+    let tables = &last["tables"];
+    assert_eq!(tables["LinearizationParameterDict"], json!(1), "{last}");
+}
+
+/// A linearized file's update, set against the file as linearized by
+/// `--baseline`, finds that it voids the linearization, and carries what's
+/// wrong with the linearization as first written, by number, as the
+/// baseline has it; and an allowance of `updated` leaves the first out,
+/// what's wrong with the linearization still found.
+#[test]
+fn an_update_after_a_linearization_is_set_against_its_baseline_and_allowed() {
+    let dir = folder();
+    let (original, _, _) = linearized_wrongly();
+    let base = written(&dir, "linearized.pdf", &original);
+    let updated = linearized_updated(&original, None);
+    let path = written(&dir, "linearized-updated.pdf", &updated);
+    let path = path.to_str().unwrap();
+    let json = |args: &[&str]| -> Value {
+        let out = run(&[args, &["--format", "json", path]].concat());
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let voided = (
+        "updated".to_string(),
+        "FileTrailer".to_string(),
+        "-".to_string(),
+    );
+    let lin = (
+        "linearization".to_string(),
+        "LinearizationParameterDict".to_string(),
+        "E".to_string(),
+    );
+    let whole = json(&[]);
+    let carried = rules(&whole).len() - 1;
+    let report = json(&["--baseline", base.to_str().unwrap()]);
+    assert_eq!(rules(&report), std::slice::from_ref(&voided), "{report}");
+    assert_eq!(report["carried"], json!(carried), "{report}");
+
+    let allow = written(
+        &dir,
+        "allow.tsv",
+        b"# test\nFileTrailer\t-\tupdated\t*\t*\tthe test's\n",
+    );
+    let report = json(&["--allow", allow.to_str().unwrap()]);
+    let found = rules(&report);
+    assert!(found.contains(&lin) && !found.contains(&voided), "{report}");
+    assert_eq!(report["allowed"], json!(1), "{report}");
 }

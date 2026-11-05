@@ -1,8 +1,9 @@
 //! The command line: each file read from its bytes and checked against the
-//! Arlington PDF Model, each finding printed with the bytes it's at.
+//! Arlington PDF Model, and its content against ISO 32000-2, each finding
+//! printed with the bytes it's at.
 
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::{self, Read as _, Write as _};
 use std::num::NonZero;
@@ -10,87 +11,264 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 
 use anyhow::{Context, Result, bail};
-use pdf_lint::bytes::{Decode, Written};
+use clap::builder::{OsStringValueParser, TypedValueParser};
+use clap::error::ErrorKind;
+use clap::{ArgAction, CommandFactory, Parser};
+use pdf_lint::bytes::WithReading;
+use pdf_lint::pdf_crypt::Password;
 use pdf_lint::{
-    Allowances, Class, Document, Exempt, Finding, Grammar, Hold, Made, Object, ObjectId, Options,
-    Qpdf, Report, Source, Span, Stream, UnlistedIn, Value, Version, bytes, check, file_version,
+    Allowances, Class, Document, Encryption, Exempt, Finding, Grammar, Hold, Made, ObjectId,
+    Options, Report, Source, Span, UnlistedIn, Version, bytes, check_with_reading, file_version,
     use_model,
 };
+use serde::Serialize;
+use serde_json::ser::{CharEscape, CompactFormatter, Formatter};
+use zeroize::Zeroizing;
 
-const USAGE: &str = "\
-usage: pdf-lint [OPTIONS] FILE...
+/// What `--help` says before the usage. clap wraps nothing, so this and
+/// each option's help are broken by hand, within 80 columns.
+const ABOUT: &str = "\
+Checks each FILE against the Arlington PDF Model, and its content against
+ISO 32000-2, reading it from its bytes, and prints each finding with the
+bytes it's at. It decodes object streams, cross-reference streams and
+content streams, and decrypts what's encrypted, itself.";
 
-Checks each FILE against the Arlington PDF Model, reading it from its
-bytes, and prints each finding with the bytes it's at; a FILE of - is
-standard input. What's compressed or encrypted, qpdf decodes: object
-streams, cross-reference streams and strings. Without qpdf 11.9 or
-later, a file that has any isn't checked.
-
-  --hold <FILE>   hold only the objects FILE names, a line each:
-                  `12 0 built` or `3 0 merged`
-  --built         hold every object as built, so that a key the model
-                  doesn't list is a finding (by default, as merged)
-  --exempt <FILE> keys a built object may have though the model doesn't
-                  list them, a name a line: `/MyKey`, or `/My*` for every
-                  key it begins
-  --unlisted <W>  which held objects a key the model doesn't list is a
-                  finding in: built (the default), all, or never; it's
-                  counted in any
-  --deprecations  find what the version checked at deprecates: a key, a
-                  type or a value (by default, counted only)
-  --extensions <E>
-                  check each FILE under these extensions too, besides
-                  those it declares: the model's names for them, a comma
-                  between (Malforms,AAPL)
-  --last-update   hold only the objects the newest incremental update
-                  wrote: those it rewrote as merged, new ones as built;
-                  and leave out what a rewritten object, or the trailer,
-                  already had in the revision it updates
-  --baseline <FILE>
-                  leave out the findings FILE, the file each FILE was
-                  written from, already had: an incremental update of it
-                  object by object, a rewrite of it by where each finding
-                  is, or, where FILE has nothing there, anywhere in it
-  --pdf-version <V>
-                  check each FILE as PDF V, 1.0 to 1.7 or 2.0, not as
-                  the version its header and catalog give, and what it's
-                  set against, a baseline or the revision before an
-                  update, as V too
-  --model <DIR>   check against the tables in DIR, a checkout of the
-                  Arlington model's tsv/latest, as they are, not the
-                  embedded ones, whose cells that contradict ISO 32000-2
-                  are corrected
-  --one-table     check each object as one table, as TestGrammar does:
-                  a field and its widget merged in one dictionary as
-                  one of the two (by default, as both), and a key
-                  unlisted by the first table that reaches an object
-                  though another that does lists it
-  --allow <TSV>   leave out the findings TSV allows: a # header, then
-                  table, key, rule, file, version and reason, tab apart;
-                  a version, as the file is checked as
-  --full          print the whole report: tables, checks not made, keys
-                  the model doesn't list
-  --qpdf <PATH>   the qpdf to decode with (by default PDF_LINT_QPDF,
-                  else the one bundled beside this program, in
-                  qpdf/bin, else qpdf on the PATH)
-  --password <PW> the files' password, user or owner, when it isn't empty
-  --jobs <N>      check N files at once (by default, as many as there are
-                  CPUs); the report is in the files' order all the same
-  --format <F>    text (the default), or json: a line of JSON for each
-                  file, with its findings and the whole report's counts
-  --version       print the version, the model's commit, corrections,
-                  additions and hash, and the qpdf it decodes with
-  -h, --help      print this
-
+/// What `--help` says after the options.
+const EXITS: &str = "\
 It exits 0 when every file is clean, 1 when there are findings, and 2
 when a file can't be read or the command line is wrong.";
 
 /// How many bytes of a finding's place its line shows.
 const SHOWN: usize = 96;
+
+/// The command line as clap reads it: each option takes the next word as
+/// its value, whatever it begins with, the last of one given twice wins,
+/// and files go anywhere among the options.
+#[derive(Parser)]
+#[command(
+    name = "pdf-lint",
+    bin_name = "pdf-lint",
+    version,
+    about = ABOUT,
+    after_help = EXITS,
+    disable_help_flag = true,
+    disable_version_flag = true,
+    args_override_self = true,
+    arg_required_else_help = true
+)]
+struct Cli {
+    #[arg(
+        value_name = "FILE",
+        required = true,
+        value_parser = path(),
+        help = "a file to check; - is standard input"
+    )]
+    files: Vec<PathBuf>,
+    #[arg(
+        long,
+        value_name = "FILE",
+        allow_hyphen_values = true,
+        value_parser = path(),
+        help = "hold only the objects FILE names, a line each:\n\
+                `12 0 built` or `3 0 merged`"
+    )]
+    hold: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "hold every object as built, so that a key the model\n\
+                doesn't list is a finding (by default, as merged)"
+    )]
+    built: bool,
+    #[arg(
+        long,
+        value_name = "FILE",
+        allow_hyphen_values = true,
+        value_parser = path(),
+        help = "keys a built object may have though the model doesn't\n\
+                list them, a name a line: `/MyKey`, or `/My*` for every\n\
+                key it begins"
+    )]
+    exempt: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "W",
+        allow_hyphen_values = true,
+        value_parser = unlisted,
+        help = "which held objects a key the model doesn't list is a\n\
+                finding in: built (the default), all, or never; it's\n\
+                counted in any"
+    )]
+    unlisted: Option<UnlistedIn>,
+    #[arg(
+        long,
+        help = "find what the version checked at deprecates: a key, a\n\
+                type or a value (by default, counted only)"
+    )]
+    deprecations: bool,
+    #[arg(
+        long,
+        help = "find each resource the content read never uses, as a\n\
+                font or an image its resources name for nothing (by\n\
+                default, counted only); not --unlisted's keys"
+    )]
+    unused: bool,
+    #[arg(
+        long,
+        help = "find a linearized file's departures from Annex F\n\
+                that readers get past, as its errors are (by default,\n\
+                counted only)"
+    )]
+    departures: bool,
+    #[arg(
+        long,
+        value_name = "E",
+        allow_hyphen_values = true,
+        help = "check each FILE under these extensions too, besides\n\
+                those it declares: the model's names for them, a comma\n\
+                between (Malforms,AAPL)"
+    )]
+    extensions: Option<String>,
+    #[arg(
+        long,
+        help = "hold only the objects the newest incremental update\n\
+                wrote: those it rewrote as merged, new ones as built;\n\
+                and leave out what a rewritten object, or the trailer,\n\
+                already had in the revision it updates"
+    )]
+    last_update: bool,
+    #[arg(
+        long,
+        value_name = "FILE",
+        allow_hyphen_values = true,
+        value_parser = path(),
+        help = "leave out the findings FILE, the file each FILE was\n\
+                written from, already had: an incremental update of it\n\
+                object by object, a rewrite of it by where each finding\n\
+                is, or, where FILE has nothing there, anywhere in it"
+    )]
+    baseline: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "V",
+        allow_hyphen_values = true,
+        value_parser = pdf_version,
+        help = "check each FILE as PDF V, 1.0 to 1.7 or 2.0, not as\n\
+                the version its header and catalog give, and what it's\n\
+                set against, a baseline or the revision before an\n\
+                update, as V too"
+    )]
+    pdf_version: Option<Version>,
+    #[arg(
+        long,
+        value_name = "DIR",
+        allow_hyphen_values = true,
+        value_parser = path(),
+        help = "check against the tables in DIR, a checkout of the\n\
+                Arlington model's tsv/latest, as they are, not the\n\
+                embedded ones, whose cells that contradict ISO 32000-2\n\
+                are corrected"
+    )]
+    model: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "check each object as one table, as TestGrammar does:\n\
+                a field and its widget merged in one dictionary as\n\
+                one of the two (by default, as both), and a key\n\
+                unlisted by the first table that reaches an object\n\
+                though another that does lists it"
+    )]
+    one_table: bool,
+    #[arg(
+        long,
+        value_name = "TSV",
+        allow_hyphen_values = true,
+        value_parser = path(),
+        help = "leave out the findings TSV allows: a # header, then\n\
+                table, key, rule, file, version and reason, tab apart;\n\
+                a version, as the file is checked as"
+    )]
+    allow: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "print the whole report: tables, checks not made, keys\n\
+                the model doesn't list"
+    )]
+    full: bool,
+    #[arg(
+        long,
+        value_name = "PW",
+        allow_hyphen_values = true,
+        help = "the files' password, user or owner, when it isn't\n\
+                empty: tried in its SASLprep form (RFC 4013) and as\n\
+                UTF-8, then in PDFDocEncoding, WinAnsiEncoding and\n\
+                MacRomanEncoding"
+    )]
+    password: Option<String>,
+    #[arg(
+        long,
+        value_name = "N",
+        allow_hyphen_values = true,
+        value_parser = jobs,
+        help = "check N files at once (by default, as many as there\n\
+                are CPUs); the report is in the files' order all the\n\
+                same"
+    )]
+    jobs: Option<NonZero<usize>>,
+    #[arg(
+        long,
+        value_name = "F",
+        allow_hyphen_values = true,
+        value_parser = json_format,
+        help = "text (the default), or json: a line of JSON for each\n\
+                file, with its findings and the whole report's counts"
+    )]
+    format: Option<bool>,
+    // Stops the parse where it's met; `main` prints the version.
+    #[arg(
+        short = 'V',
+        long,
+        action = ArgAction::Version,
+        help = "print the version, and the model's commit,\n\
+                corrections, additions and hash"
+    )]
+    version: (),
+    #[arg(short = 'h', long, action = ArgAction::Help, help = "print this")]
+    help: (),
+}
+
+/// A path as it's given, any bytes: an empty word too, which is then a
+/// file that can't be read, where clap's own parser of paths refuses it.
+fn path() -> impl TypedValueParser<Value = PathBuf> {
+    OsStringValueParser::new().map(PathBuf::from)
+}
+
+/// `--jobs`' number.
+fn jobs(n: &str) -> Result<NonZero<usize>, &'static str> {
+    n.parse().map_err(|_| "not a number above 0")
+}
+
+/// `--pdf-version`'s version, which reads no model.
+fn pdf_version(v: &str) -> Result<Version, &'static str> {
+    pdf_lint::grammar::version(v).ok_or("not a PDF version, 1.0 to 1.7 or 2.0")
+}
+
+/// `--unlisted`'s objects.
+fn unlisted(w: &str) -> Result<UnlistedIn, &'static str> {
+    UnlistedIn::named(w).ok_or("built, all or never")
+}
+
+/// `--format`'s: whether it's json, not text.
+fn json_format(f: &str) -> Result<bool, &'static str> {
+    match f {
+        "text" => Ok(false),
+        "json" => Ok(true),
+        _ => Err("text or json"),
+    }
+}
 
 struct Args {
     files: Vec<PathBuf>,
@@ -104,14 +282,17 @@ struct Args {
     one_table: bool,
     unlisted: UnlistedIn,
     deprecations: bool,
+    unused: bool,
+    departures: bool,
     /// `--extensions` as written: the names.
     extensions: Vec<String>,
     /// The extensions it names, checked against the model's.
     named: BTreeSet<String>,
     allow: Option<PathBuf>,
     full: bool,
-    qpdf: Option<PathBuf>,
-    password: Option<String>,
+    /// `--password`'s, taken from clap's `String` as it's parsed, and wiped
+    /// when it's dropped.
+    password: Option<Zeroizing<String>>,
     jobs: Option<NonZero<usize>>,
     json: bool,
 }
@@ -128,11 +309,11 @@ struct Setup {
     model: String,
 }
 
-/// The file `--baseline` names: its bytes, read, and its report at each
-/// version a file is checked at, as each is first asked for.
+/// The file `--baseline` names: its bytes, read beside its reading, and its
+/// report at each version a file is checked at, as each is first asked for.
 struct Baseline {
-    data: Vec<u8>,
-    doc: Document,
+    /// Its bytes are its reading's source.
+    file: WithReading<Vec<u8>>,
     /// What it's checked with, as the files are, but its version.
     options: Options,
     reports: Mutex<BTreeMap<Version, Arc<Report>>>,
@@ -144,12 +325,14 @@ impl Baseline {
     fn report(&self, version: Version) -> Arc<Report> {
         let mut reports = self.reports.lock().unwrap_or_else(PoisonError::into_inner);
         let report = reports.entry(version).or_insert_with(|| {
-            let options = Options {
-                version: Some(version),
-                paths: true,
-                ..self.options.clone()
-            };
-            Arc::new(check(&self.doc, &Hold::All(Made::Merged), &options))
+            let mut options = self.options.clone();
+            options.version = Some(version);
+            options.paths = true;
+            Arc::new(check_with_reading(
+                &self.file,
+                &Hold::All(Made::Merged),
+                &options,
+            ))
         });
         Arc::clone(report)
     }
@@ -173,7 +356,22 @@ struct Checked {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let args = match args() {
+        Ok(args) => args,
+        // clap stops where `--version` is met, and its version is printed
+        // here, with the model's.
+        Err(e) if e.kind() == ErrorKind::DisplayVersion => {
+            print(&version());
+            return ExitCode::SUCCESS;
+        }
+        // The help, on stdout, or what's wrong with the command line, on
+        // stderr; a closed pipe isn't an error either.
+        Err(e) => {
+            let _ = e.print();
+            return ExitCode::from(if e.use_stderr() { 2 } else { 0 });
+        }
+    };
+    match run(args) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("pdf-lint: {e:#}");
@@ -182,155 +380,134 @@ fn main() -> ExitCode {
     }
 }
 
-/// The command line's arguments; none when it asked only for the version
-/// or the usage, which are printed.
-fn args() -> Result<Option<Args>> {
-    let mut args = Args {
-        files: Vec::new(),
-        hold: None,
-        built: false,
-        exempt: None,
-        last_update: false,
-        baseline: None,
-        pdf_version: None,
-        model: None,
-        one_table: false,
-        unlisted: UnlistedIn::Built,
-        deprecations: false,
-        extensions: Vec::new(),
-        named: BTreeSet::new(),
-        allow: None,
-        full: false,
-        qpdf: None,
-        password: None,
-        jobs: None,
-        json: false,
+/// The command line's arguments, as clap reads them and then as only this
+/// can check them: an error is clap's, as are `--help` and `--version`,
+/// which stop the parse where they're met. But `-h` or `-V` with more after
+/// it in the same word, which clap takes for the flag, is no option.
+fn args() -> Result<Args, clap::Error> {
+    let cli = match Cli::try_parse() {
+        Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
+            return Err(match joined(&Cli::command(), std::env::args_os()) {
+                Some(word) => Cli::command().error(
+                    ErrorKind::UnknownArgument,
+                    format!(
+                        "unexpected argument '{}' found: -h and -V each stand alone",
+                        word.to_string_lossy()
+                    ),
+                ),
+                None => e,
+            });
+        }
+        parsed => parsed?,
     };
-    let mut words = std::env::args_os().skip(1);
-    while let Some(word) = words.next() {
-        let value = |words: &mut dyn Iterator<Item = std::ffi::OsString>, flag: &str| {
-            words
-                .next()
-                .map(PathBuf::from)
-                .with_context(|| format!("{flag} takes a file"))
-        };
-        match word.to_str() {
-            Some("--version" | "-V") => {
-                let hash = pdf_lint::grammar().hash();
-                let n = pdf_lint::grammar::corrections().len();
-                let m = pdf_lint::grammar::additions().len();
-                let qpdf = match bundled_unless_named() {
-                    Some(program) => Qpdf::new("").program(program),
-                    None => Qpdf::new(""),
-                };
-                let qpdf = match qpdf.ready() {
-                    Ok(version) => format!("{version} ({})", qpdf.program_path().display()),
-                    Err(why) => format!("no qpdf to decode with: {why}"),
-                };
-                print(&format!(
-                    "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (xxh64 {hash:016x})\n{qpdf}\n",
-                    env!("CARGO_PKG_VERSION"),
-                    pdf_lint::COMMIT
-                ));
-                return Ok(None);
-            }
-            Some("--help" | "-h") => {
-                print(&format!("{USAGE}\n"));
-                return Ok(None);
-            }
-            Some("--hold") => args.hold = Some(value(&mut words, "--hold")?),
-            Some("--exempt") => args.exempt = Some(value(&mut words, "--exempt")?),
-            Some("--allow") => args.allow = Some(value(&mut words, "--allow")?),
-            Some("--model") => args.model = Some(value(&mut words, "--model")?),
-            Some("--baseline") => args.baseline = Some(value(&mut words, "--baseline")?),
-            Some("--qpdf") => args.qpdf = Some(value(&mut words, "--qpdf")?),
-            Some("--password") => {
-                let password = words.next().context("--password takes a password")?;
-                let password = password
-                    .into_string()
-                    .map_err(|_| anyhow::anyhow!("--password: not UTF-8"))?;
-                args.password = Some(password);
-            }
-            Some("--jobs") => {
-                let n = words.next().context("--jobs takes a number")?;
-                let n = (n.to_str().and_then(|n| n.parse().ok()))
-                    .with_context(|| format!("--jobs {}: not a number above 0", n.display()))?;
-                args.jobs = Some(n);
-            }
-            Some("--pdf-version") => {
-                let v = words.next().context("--pdf-version takes a version")?;
-                let version =
-                    (v.to_str().and_then(pdf_lint::grammar::version)).with_context(|| {
-                        format!(
-                            "--pdf-version {}: not a PDF version, 1.0 to 1.7 or 2.0",
-                            v.display()
-                        )
-                    })?;
-                args.pdf_version = Some(version);
-            }
-            Some("--unlisted") => {
-                let w = words
-                    .next()
-                    .context("--unlisted takes built, all or never")?;
-                args.unlisted = (w.to_str().and_then(UnlistedIn::named))
-                    .with_context(|| format!("--unlisted {}: built, all or never", w.display()))?;
-            }
-            Some("--extensions") => {
-                let names = words.next().context("--extensions takes names")?;
-                let names = (names.to_str())
-                    .context("--extensions: not UTF-8")?
-                    .split(',')
-                    .map(|name| name.trim().to_string())
-                    .collect();
-                args.extensions = names;
-            }
-            Some("--format") => {
-                let format = words.next().context("--format takes text or json")?;
-                args.json = match format.to_str() {
-                    Some("text") => false,
-                    Some("json") => true,
-                    _ => bail!("--format {}: text or json", format.display()),
-                };
-            }
-            Some("--built") => args.built = true,
-            Some("--one-table") => args.one_table = true,
-            Some("--deprecations") => args.deprecations = true,
-            Some("--last-update") => args.last_update = true,
-            Some("--full") => args.full = true,
-            Some(flag) if flag.starts_with('-') && flag != "-" => {
-                bail!("{flag}: no such option\n\n{USAGE}")
-            }
-            _ => args.files.push(PathBuf::from(word)),
-        }
-    }
-    if args.files.is_empty() {
-        bail!("no file\n\n{USAGE}");
-    }
-    let stdins = (args.files.iter()).filter(|path| *path == Path::new("-"));
+    let refused = |reason: &str| Cli::command().error(ErrorKind::ArgumentConflict, reason);
+    let stdins = (cli.files.iter()).filter(|path| *path == Path::new("-"));
     if stdins.count() > 1 {
-        bail!("- more than once: standard input is read once");
+        return Err(refused("- more than once: standard input is read once"));
     }
-    if args.hold.is_some() && args.built {
-        bail!("--hold and --built: a hold file says how each object was made");
+    if cli.hold.is_some() && cli.built {
+        return Err(refused(
+            "--hold and --built: a hold file says how each object was made",
+        ));
     }
-    if args.last_update && (args.hold.is_some() || args.built) {
-        bail!("--last-update holds what the update wrote, with neither --hold nor --built");
+    if cli.last_update && (cli.hold.is_some() || cli.built) {
+        return Err(refused(
+            "--last-update holds what the update wrote, with neither --hold nor --built",
+        ));
     }
-    let built = args.hold.is_some() || args.built || args.last_update;
-    match args.unlisted {
-        _ if args.exempt.is_none() => {}
+    let built = cli.hold.is_some() || cli.built || cli.last_update;
+    let unlisted = cli.unlisted.unwrap_or(UnlistedIn::Built);
+    match unlisted {
+        _ if cli.exempt.is_none() => {}
         UnlistedIn::Never => {
-            bail!("--exempt and --unlisted never: no key the model doesn't list is a finding")
+            return Err(refused(
+                "--exempt and --unlisted never: no key the model doesn't list is a finding",
+            ));
         }
-        UnlistedIn::Built if !built => bail!(
-            "--exempt: a key the model doesn't list is a finding only in a built object, which takes --built, --hold or --last-update (or in any, with --unlisted all)"
-        ),
+        UnlistedIn::Built if !built => {
+            return Err(refused(
+                "--exempt: a key the model doesn't list is a finding only in a built object, which takes --built, --hold or --last-update (or in any, with --unlisted all)",
+            ));
+        }
         UnlistedIn::Built | UnlistedIn::All => {}
     }
-    if args.last_update && args.baseline.is_some() {
-        bail!("--last-update and --baseline: the update's baseline is the revision before it");
+    if cli.last_update && cli.baseline.is_some() {
+        return Err(refused(
+            "--last-update and --baseline: the update's baseline is the revision before it",
+        ));
     }
-    Ok(Some(args))
+    let extensions = (cli.extensions.iter())
+        .flat_map(|names| names.split(','))
+        .map(|name| name.trim().to_string())
+        .collect();
+    Ok(Args {
+        files: cli.files,
+        hold: cli.hold,
+        built: cli.built,
+        exempt: cli.exempt,
+        last_update: cli.last_update,
+        baseline: cli.baseline,
+        pdf_version: cli.pdf_version,
+        model: cli.model,
+        one_table: cli.one_table,
+        unlisted,
+        deprecations: cli.deprecations,
+        unused: cli.unused,
+        departures: cli.departures,
+        extensions,
+        named: BTreeSet::new(),
+        allow: cli.allow,
+        full: cli.full,
+        password: cli.password.map(Zeroizing::new),
+        jobs: cli.jobs,
+        json: cli.format.unwrap_or(false),
+    })
+}
+
+/// The word that stopped clap at `--help` or `--version`, when it's `-h` or
+/// `-V` with more after it, as `-hold` is: clap acts on the flag as soon as
+/// it reads it, before what follows in the same word, and so would print
+/// the help and exit 0. As `command` reads `words` (the program's name,
+/// then its arguments), it's the first word that's neither an option's
+/// value nor a file, as any other short word is an error before it.
+fn joined(command: &clap::Command, words: impl IntoIterator<Item = OsString>) -> Option<OsString> {
+    let mut words = words.into_iter().skip(1);
+    while let Some(word) = words.next() {
+        let bytes = word.as_encoded_bytes();
+        if bytes == b"--" {
+            return None;
+        }
+        if let Some(long) = bytes.strip_prefix(b"--") {
+            if long == b"help" || long == b"version" {
+                return None;
+            }
+            // Its value is the next word, whatever it begins with, but
+            // after an `=` it's this one's.
+            let valued = command.get_arguments().any(|arg| {
+                arg.get_long().is_some_and(|name| name.as_bytes() == long)
+                    && arg.get_action().takes_values()
+            });
+            if valued {
+                words.next();
+            }
+        } else if bytes.len() > 1 && bytes[0] == b'-' {
+            return (bytes.len() > 2).then_some(word);
+        }
+    }
+    None
+}
+
+/// What `--version` prints: pdf-lint's version, then the embedded model's
+/// commit, its corrections and additions, and its hash.
+fn version() -> String {
+    let hash = pdf_lint::grammar().hash();
+    let n = pdf_lint::grammar::corrections().len();
+    let m = pdf_lint::grammar::additions().len();
+    format!(
+        "pdf-lint {}\nArlington PDF Model {}, {n} cells corrected and {m} rows added (xxh64 {hash:016x})\n",
+        env!("CARGO_PKG_VERSION"),
+        pdf_lint::COMMIT
+    )
 }
 
 /// `text` on stdout, as much as is read of it: no one reading any more,
@@ -339,10 +516,7 @@ fn print(text: &str) {
     let _ = io::stdout().lock().write_all(text.as_bytes());
 }
 
-fn run() -> Result<ExitCode> {
-    let Some(mut args) = args()? else {
-        return Ok(ExitCode::SUCCESS);
-    };
+fn run(mut args: Args) -> Result<ExitCode> {
     // First, before an allowance's table, or anything else, reads it.
     if let Some(dir) = &args.model {
         let model = Grammar::load(dir).with_context(|| format!("--model {}", dir.display()))?;
@@ -383,20 +557,14 @@ fn run() -> Result<ExitCode> {
         Some(path) => {
             let data =
                 std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let qpdf = qpdf(path, &args);
-            let decoder = Decoder::new(&qpdf);
-            let doc = bytes::read_with(&data, &decoder);
-            if let Some(why) = decoder.unready() {
-                bail!("--baseline {}: {why}", path.display());
-            }
-            if let Some(why) = locked(&doc, &qpdf, args.password.is_some()) {
+            let file = with_reading(data, password(&args).as_slice(), &bytes::Options::DEFAULT);
+            if let Some(why) = locked(file.document(), args.password.is_some()) {
                 bail!("--baseline {}: {why}", path.display());
             }
             let reports = Mutex::new(BTreeMap::new());
             let options = against(&args, None);
             Some(Baseline {
-                data,
-                doc,
+                file,
                 options,
                 reports,
             })
@@ -483,154 +651,31 @@ fn checked_in_order(setup: &Setup, mut report: impl FnMut(Checked) -> bool) {
     });
 }
 
-/// qpdf for `path`, as the command line has it.
-fn qpdf(path: &Path, args: &Args) -> Qpdf {
-    let mut qpdf = Qpdf::new(path);
-    if let Some(program) = args.qpdf.clone().or_else(bundled_unless_named) {
-        qpdf = qpdf.program(program);
-    }
-    if let Some(password) = &args.password {
-        qpdf = qpdf.password(password);
-    }
-    qpdf
+/// `data` read whole beside its reading, opened by `passwords` under
+/// `options`, which in memory can't fail.
+fn with_reading<S: bytes::ByteSource>(
+    data: S,
+    passwords: &[Password],
+    options: &bytes::Options,
+) -> WithReading<S> {
+    WithReading::new(data, passwords, options).expect("a file in memory reads")
 }
 
-/// Standard input's bytes in a file of their own, for qpdf, which reads
-/// only files: removed when it's dropped.
-struct Spool(PathBuf);
-
-impl Spool {
-    fn new(data: &[u8]) -> io::Result<Spool> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        // The file's bytes, so its reader's alone.
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut n = 0;
-        loop {
-            let name = format!("pdf-lint-{}-{n}.pdf", std::process::id());
-            let path = std::env::temp_dir().join(name);
-            match options.open(&path) {
-                Ok(mut file) => {
-                    let spool = Spool(path);
-                    file.write_all(data)?;
-                    return Ok(spool);
-                }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < 100 => n += 1,
-                Err(e) => return Err(e),
-            }
-        }
-    }
+/// `--password`'s, as the reader takes it, which tries it in each of its
+/// encodings; none without it.
+fn password(args: &Args) -> Option<Password<'_>> {
+    (args.password.as_deref()).map(|password| Password(password.as_str()))
 }
 
-impl Drop for Spool {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// qpdf as a file is read with: run only when it's ready
-/// ([`Qpdf::ready`]), and noting whether the reader asked it for anything.
-struct Decoder<'a> {
-    qpdf: &'a Qpdf,
-    asked: Cell<bool>,
-}
-
-impl<'a> Decoder<'a> {
-    fn new(qpdf: &'a Qpdf) -> Decoder<'a> {
-        Decoder {
-            qpdf,
-            asked: Cell::new(false),
-        }
-    }
-
-    /// Why the file isn't checked, when the reader asked qpdf for anything
-    /// and it isn't ready: what it asked for is missing.
-    fn unready(&self) -> Option<String> {
-        if !self.asked.get() {
-            return None;
-        }
-        let why = ready(self.qpdf).as_ref().err()?;
-        Some(format!(
-            "it needs qpdf to decode what's compressed or encrypted in it, and {why}: install qpdf {} or later, or name one with --qpdf",
-            pdf_lint::qpdf::OLDEST
-        ))
-    }
-
-    /// Whether qpdf is ready, noting that it was asked for something.
-    fn ready(&self) -> Result<(), String> {
-        self.asked.set(true);
-        ready(self.qpdf).as_ref().map(drop).map_err(String::clone)
-    }
-}
-
-impl Decode for Decoder<'_> {
-    fn decode(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Vec<u8>, String>> {
-        match self.ready() {
-            Ok(()) => self.qpdf.decode(ids),
-            Err(why) => ids.iter().map(|&id| (id, Err(why.clone()))).collect(),
-        }
-    }
-
-    fn plaintext(&self, ids: &[ObjectId]) -> BTreeMap<ObjectId, Result<Object, String>> {
-        match self.ready() {
-            Ok(()) => self.qpdf.plaintext(ids),
-            Err(why) => ids.iter().map(|&id| (id, Err(why.clone()))).collect(),
-        }
-    }
-
-    fn decode_written(&self, stream: Written) -> Result<Vec<u8>, String> {
-        self.ready()?;
-        self.qpdf.decode_written(stream)
-    }
-}
-
-/// [`Qpdf::ready`] for the qpdf the command line has, which every file is
-/// decoded with: asked once, when a file first needs it.
-fn ready(qpdf: &Qpdf) -> &'static Result<String, String> {
-    static READY: OnceLock<Result<String, String>> = OnceLock::new();
-    READY.get_or_init(|| qpdf.ready())
-}
-
-/// Why `doc`, read through `qpdf`, isn't checked, when it's encrypted
-/// and won't open with the password given (`password` says whether one
-/// was): nothing in it decodes, so what's in its object streams would be
-/// missing, and its strings ciphertext.
-fn locked(doc: &Document, qpdf: &Qpdf, password: bool) -> Option<&'static str> {
-    let encrypted = match &doc.trailer().object.value {
-        Value::Dict(d) | Value::Stream(Stream { dict: d, .. }) => {
-            d.get(b"Encrypt").is_some_and(|e| !e.is_null())
-        }
-        _ => false,
-    };
-    // A qpdf that can't say is no reason not to check what reads.
-    if !encrypted || !qpdf.locked().unwrap_or(false) {
-        return None;
-    }
-    Some(match password {
+/// Why `doc` isn't checked, when it's encrypted and no password it was
+/// given opens it (`password` says whether one was), though it encrypts
+/// its strings or streams: what's in its object streams would be missing,
+/// its content unread, and its strings ciphertext.
+fn locked(doc: &Document, password: bool) -> Option<&'static str> {
+    (doc.encryption == Encryption::Locked).then_some(match password {
         false => "it needs a password: give it with --password",
         true => "the password --password gives doesn't open it",
     })
-}
-
-/// The qpdf to run when the command line names none: the one bundled
-/// beside this program, unless `PDF_LINT_QPDF` names one, which
-/// [`Qpdf::new`] takes, as it takes qpdf on the `PATH` failing both.
-fn bundled_unless_named() -> Option<PathBuf> {
-    bundled().filter(|_| std::env::var_os("PDF_LINT_QPDF").is_none())
-}
-
-/// The qpdf a release archive bundles beside this program, in `qpdf/bin`,
-/// when there's one.
-fn bundled() -> Option<PathBuf> {
-    static BUNDLED: OnceLock<Option<PathBuf>> = OnceLock::new();
-    let find = || {
-        let exe = std::env::current_exe().ok()?;
-        let qpdf = (exe.parent()?.join("qpdf").join("bin"))
-            .join(format!("qpdf{}", std::env::consts::EXE_SUFFIX));
-        qpdf.is_file().then_some(qpdf)
-    };
-    BUNDLED.get_or_init(find).clone()
 }
 
 /// One file read and checked, with what's to print about it.
@@ -656,20 +701,12 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
         Ok(data) => data,
         Err(e) => return unread(path, &e.to_string(), args.json),
     };
-    let spool = match stdin.then(|| Spool::new(&data)).transpose() {
-        Ok(spool) => spool,
-        Err(e) => {
-            let why = format!("standard input doesn't copy to a file for qpdf: {e}");
-            return unread(path, &why, args.json);
-        }
-    };
-    let qpdf = qpdf(spool.as_ref().map_or(path, |s| &s.0), args);
-    let decoder = Decoder::new(&qpdf);
-    let doc = bytes::read_with(&data, &decoder);
-    if let Some(why) = decoder.unready() {
-        return unread(path, &why, args.json);
-    }
-    if let Some(why) = locked(&doc, &qpdf, args.password.is_some()) {
+    let doc = with_reading(
+        &data[..],
+        password(args).as_slice(),
+        &bytes::Options::DEFAULT,
+    );
+    if let Some(why) = locked(doc.document(), args.password.is_some()) {
         return unread(path, why, args.json);
     }
     let version = file_version(&doc);
@@ -678,16 +715,16 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
     let checked_as = args.pdf_version.unwrap_or(version);
     // The file's own check, and what it's set against, which is held as
     // merged, so that only the file's findings take its exempt keys.
-    let options = Options {
-        exempt: exempt.clone(),
-        ..against(args, Some(checked_as))
-    };
-    let (report, against) = match (args.last_update, &doc.update) {
+    let mut options = against(args, Some(checked_as));
+    options.exempt = exempt.clone();
+    let (report, against) = match (args.last_update, &doc.document().update) {
         (false, _) => {
-            let report = check(&doc, hold, &options);
+            let report = check_with_reading(&doc, hold, &options);
             // An incremental update of the baseline begins with its bytes.
             let against = match baseline {
-                Some(b) if data.starts_with(&b.data) => Against::Number(b.report(checked_as)),
+                Some(b) if data.starts_with(b.file.reading().source()) => {
+                    Against::Number(b.report(checked_as))
+                }
                 Some(b) => Against::Path(b.report(checked_as)),
                 None => Against::Nothing,
             };
@@ -698,18 +735,29 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             return unread(path, why, args.json);
         }
         (true, Some(update)) => {
-            let previous = bytes::read_from(&data, &decoder, update.previous);
-            if let Some(why) = decoder.unready() {
-                return unread(path, &why, args.json);
-            }
-            let made = |id| match previous.objects.contains_key(id) {
+            // The revision before: its bytes up to where it ends, as it was
+            // written, else the file as of its section.
+            let password = password(args);
+            let revisions = &doc.document().revisions;
+            let end = (revisions.iter().find(|r| r.at == update.previous)).and_then(|r| r.end);
+            let previous = match end.map(|end| end.line()) {
+                Some(end) => {
+                    with_reading(&data[..end], password.as_slice(), &bytes::Options::DEFAULT)
+                }
+                None => {
+                    let mut as_of = bytes::Options::DEFAULT;
+                    as_of.section = Some(update.previous);
+                    with_reading(&data[..], password.as_slice(), &as_of)
+                }
+            };
+            let made = |id| match previous.document().contains(id) {
                 true => Made::Merged,
                 false => Made::Built,
             };
-            let hold = Hold::Only(update.objects.iter().map(|id| (*id, made(id))).collect());
+            let hold = Hold::Only(update.objects.iter().map(|&id| (id, made(id))).collect());
             let at_version = against(args, Some(checked_as));
-            let before = check(&previous, &Hold::All(Made::Merged), &at_version);
-            let report = check(&doc, &hold, &options);
+            let before = check_with_reading(&previous, &Hold::All(Made::Merged), &at_version);
+            let report = check_with_reading(&doc, &hold, &options);
             (report, Against::Number(Arc::new(before)))
         }
     };
@@ -724,23 +772,29 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
         .collect();
     let allowed = kept.len() - shown.len();
     if args.json {
-        return Checked {
-            out: json(
-                &name,
-                version,
-                checked_as,
-                args.one_table,
-                args.unlisted,
-                args.deprecations,
-                model,
-                &report,
-                &shown,
-                allowed,
-                carried,
-            ),
-            err: String::new(),
-            findings: shown.len(),
-            unread: false,
+        let line = json(
+            &name,
+            version,
+            checked_as,
+            args.one_table,
+            args.unlisted,
+            args.deprecations,
+            args.unused,
+            args.departures,
+            model,
+            &report,
+            &shown,
+            allowed,
+            carried,
+        );
+        return match line {
+            Ok(out) => Checked {
+                out,
+                err: String::new(),
+                findings: shown.len(),
+                unread: false,
+            },
+            Err(e) => unread(path, &format!("{e:#}"), true),
         };
     }
     let objects = report.objects();
@@ -764,6 +818,10 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             let _ = writeln!(out, "  {line}");
         }
     }
+    // The stream a finding before was in, content's or the metadata
+    // stream's, decoded again for its bytes: findings in one stream come
+    // together.
+    let mut content: Option<(ObjectId, Vec<u8>)> = None;
     for finding in &shown {
         let _ = writeln!(out, "- {finding}");
         match finding.at {
@@ -776,7 +834,21 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
                     ..
                 },
             ) => {
-                if let Some(decoded) = doc.decoded.get(&(n, g)) {
+                // An object stream's data, which the document holds; else a
+                // content stream's or the metadata stream's, which the
+                // reading decodes again, as content was read.
+                let decoded = match doc.document().decoded.get(&(n, g)) {
+                    Some(decoded) => Some(&decoded[..]),
+                    None => {
+                        if content.as_ref().is_none_or(|(id, _)| *id != (n, g)) {
+                            content = (doc.decoded_within((n, g), usize::MAX))
+                                .and_then(Result::ok)
+                                .map(|data| ((n, g), data));
+                        }
+                        content.as_ref().map(|(_, data)| &data[..])
+                    }
+                };
+                if let Some(decoded) = decoded {
                     let _ = writeln!(
                         out,
                         "    | {}   (of {n} {g} R's data, decoded)",
@@ -798,17 +870,19 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
 /// What a file, and what it's set against, are checked with, as the
 /// command line says, at `version`: how many tables an object is checked
 /// as, which objects a key the model doesn't list is a finding in,
-/// whether deprecations are findings, and the extensions it's checked
-/// under besides those it declares.
+/// whether deprecations, unused resources and a linearization's departures
+/// are findings, and the extensions it's checked under besides those it
+/// declares.
 fn against(args: &Args, version: Option<Version>) -> Options {
-    Options {
-        version,
-        one_table: args.one_table,
-        unlisted: args.unlisted,
-        deprecations: args.deprecations,
-        extensions: args.named.clone(),
-        ..Options::default()
-    }
+    let mut options = Options::default();
+    options.version = version;
+    options.one_table = args.one_table;
+    options.unlisted = args.unlisted;
+    options.deprecations = args.deprecations;
+    options.unused = args.unused;
+    options.departures = args.departures;
+    options.extensions = args.named.clone();
+    options
 }
 
 /// A file that couldn't be read or checked, and why: said on standard
@@ -816,32 +890,33 @@ fn against(args: &Args, version: Option<Version>) -> Options {
 /// the model's hash, as every line has them.
 fn unread(path: &Path, why: &str, json: bool) -> Checked {
     let name = path.display().to_string();
+    let mut err = format!("{name}: {why}\n");
     let out = match json {
-        true => format!(
-            "{{\"pdf_lint\":\"{}\",\"model\":\"{:016x}\",\"file\":{},\"error\":{}}}\n",
-            env!("CARGO_PKG_VERSION"),
-            pdf_lint::grammar().hash(),
-            string(&name),
-            string(why)
-        ),
+        true => {
+            let model = format!("{:016x}", pdf_lint::grammar().hash());
+            let unread = Unread {
+                pdf_lint: env!("CARGO_PKG_VERSION"),
+                model: &model,
+                file: &name,
+                error: why,
+            };
+            // It can't fail, as `line` says; if it did, that's said too.
+            line(&unread).unwrap_or_else(|e| {
+                let _ = writeln!(err, "{name}: {e:#}");
+                String::new()
+            })
+        }
         false => String::new(),
     };
     Checked {
         out,
-        err: format!("{name}: {why}\n"),
+        err,
         findings: 0,
         unread: true,
     }
 }
 
-/// One file's report as a line of JSON: the version of pdf-lint that
-/// wrote it, the file's version, the version it was
-/// checked as, whether as one table an object (`--one-table`), which held
-/// objects a key the model doesn't list is a finding in (`--unlisted`),
-/// whether deprecations are findings (`--deprecations`), the extensions
-/// it was checked under, and the model's hash, `model`; its findings, each with where its bytes are; how
-/// many were left out as carried and as allowed; and the counts `--full`
-/// prints.
+/// One file's report as a line of JSON, a [`Line`].
 #[allow(clippy::too_many_arguments)]
 fn json(
     name: &str,
@@ -850,137 +925,241 @@ fn json(
     one_table: bool,
     unlisted: UnlistedIn,
     deprecations: bool,
+    unused: bool,
+    departures: bool,
     model: &str,
     report: &Report,
     shown: &[&Finding],
     allowed: usize,
     carried: usize,
-) -> String {
-    let id = |(n, g): (u32, u16)| format!("[{n},{g}]");
-    let mut out = String::new();
-    let objects = report.objects();
-    let _ = write!(
-        out,
-        "{{\"pdf_lint\":\"{}\",\"file\":{},\"version\":\"{version}\",\"checked_as\":\"{checked_as}\",\"one_table\":{one_table},\"unlisted_in\":\"{}\",\"deprecations\":{deprecations},\"extensions\":[{}],\"model\":\"{model}\",\"objects\":{objects},\"keys\":{},\"findings\":[",
-        env!("CARGO_PKG_VERSION"),
-        string(name),
-        unlisted.name(),
-        (report.extensions.iter())
-            .map(|name| string(name))
-            .collect::<Vec<_>>()
-            .join(","),
-        report.keys
-    );
-    for (i, f) in shown.iter().enumerate() {
-        let at = match f.at {
-            Some(at) => format!(
-                "{{\"stream\":{},\"start\":{},\"end\":{}}}",
-                at.stream.map_or("null".to_string(), id),
-                at.start,
-                at.end
-            ),
-            None => "null".to_string(),
-        };
-        let _ = write!(
-            out,
-            "{}{{\"rule\":\"{}\",\"table\":{},\"key\":{},\"path\":{},\"object\":{},\"made\":\"{}\",\"value\":{},\"at\":{at}}}",
-            if i == 0 { "" } else { "," },
-            f.rule,
-            string(&f.table),
-            string(&f.key),
-            string(&f.path),
-            f.object.map_or("null".to_string(), id),
-            f.made.name(),
-            string(&f.value),
-        );
-    }
-    let _ = write!(
-        out,
-        "],\"carried\":{carried},\"allowed\":{allowed},\"tables\":{{"
-    );
-    for (i, (table, n)) in report.checked.iter().enumerate() {
-        let _ = write!(
-            out,
-            "{}{}:{n}",
-            if i == 0 { "" } else { "," },
-            string(table)
-        );
-    }
-    out.push_str("},\"not_checked\":[");
-    for (i, (u, n)) in report.unchecked.iter().enumerate() {
-        let _ = write!(
-            out,
-            "{}{{\"column\":{},\"why\":{},\"table\":{},\"key\":{},\"count\":{n}}}",
-            if i == 0 { "" } else { "," },
-            string(u.column),
-            string(&u.why),
-            string(&u.table),
-            string(&u.key),
-        );
-    }
-    out.push_str("],\"unlisted\":[");
-    for (i, (u, n)) in report.unlisted.iter().enumerate() {
-        let class = match &u.class {
-            Class::Second => "\"second\"".to_string(),
-            Class::Third => "\"third\"".to_string(),
-            Class::Other => "\"other\"".to_string(),
-            Class::Extension(name) => format!("\"extension\",\"extension\":{}", string(name)),
-        };
-        let _ = write!(
-            out,
-            "{}{{\"table\":{},\"key\":{},\"class\":{class},\"count\":{n}}}",
-            if i == 0 { "" } else { "," },
-            string(&u.table),
-            string(&u.key),
-        );
-    }
-    out.push_str("],\"deprecated\":[");
-    for (i, ((table, key), n)) in report.deprecated.iter().enumerate() {
-        let _ = write!(
-            out,
-            "{}{{\"table\":{},\"key\":{},\"count\":{n}}}",
-            if i == 0 { "" } else { "," },
-            string(table),
-            string(key),
-        );
-    }
-    out.push_str("],\"ignored\":[");
-    for (i, ((table, key), n)) in report.ignored.iter().enumerate() {
-        let _ = write!(
-            out,
-            "{}{{\"table\":{},\"key\":{},\"count\":{n}}}",
-            if i == 0 { "" } else { "," },
-            string(table),
-            string(key),
-        );
-    }
-    let _ = writeln!(
-        out,
-        "],\"no_table\":{},\"ties\":{},\"truncated\":{},\"two_contexts\":{},\"two_tables\":{}}}",
-        report.no_table, report.ties, report.truncated, report.two_contexts, report.two_tables
-    );
-    out
+) -> Result<String> {
+    line(&Line {
+        pdf_lint: env!("CARGO_PKG_VERSION"),
+        file: name,
+        version: version.to_string(),
+        checked_as: checked_as.to_string(),
+        one_table,
+        unlisted_in: unlisted.name(),
+        deprecations,
+        unused_findings: unused,
+        departure_findings: departures,
+        extensions: &report.extensions,
+        model,
+        objects: report.objects(),
+        keys: report.keys,
+        findings: (shown.iter())
+            .map(|f| Found {
+                rule: f.rule.name(),
+                table: &f.table,
+                key: &f.key,
+                path: &f.path,
+                object: f.object,
+                made: f.made.name(),
+                value: &f.value,
+                at: f.at.map(|at| At {
+                    stream: at.stream,
+                    start: at.start,
+                    end: at.end,
+                }),
+            })
+            .collect(),
+        carried,
+        allowed,
+        tables: &report.checked,
+        not_checked: (report.unchecked.iter())
+            .map(|(u, &count)| NotChecked {
+                column: u.column,
+                why: &u.why,
+                table: &u.table,
+                key: &u.key,
+                count,
+            })
+            .collect(),
+        unlisted: (report.unlisted.iter())
+            .map(|(u, &count)| {
+                let (class, extension) = match &u.class {
+                    Class::Second => ("second", None),
+                    Class::Third => ("third", None),
+                    Class::Other => ("other", None),
+                    Class::Extension(name) => ("extension", Some(name.as_str())),
+                };
+                Unlisted {
+                    table: &u.table,
+                    key: &u.key,
+                    class,
+                    extension,
+                    count,
+                }
+            })
+            .collect(),
+        deprecated: (report.deprecated.iter())
+            .map(|((table, key), &count)| Count { table, key, count })
+            .collect(),
+        content_read: report.content,
+        linearized: report.linearized.map(|l| l.name()),
+        unused: (report.unused.iter())
+            .map(|((table, key), &count)| Count { table, key, count })
+            .collect(),
+        departures: (report.departures.iter())
+            .map(|((table, key), &count)| Count { table, key, count })
+            .collect(),
+        ignored: (report.ignored.iter())
+            .map(|((table, key), &count)| Count { table, key, count })
+            .collect(),
+        no_table: report.no_table,
+        ties: report.ties,
+        truncated: report.truncated,
+        two_contexts: report.two_contexts,
+        two_tables: report.two_tables,
+    })
 }
 
-/// `s` as a JSON string.
-fn string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if u32::from(c) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", u32::from(c));
-            }
-            c => out.push(c),
+/// One file's report, as a line of JSON: the version of pdf-lint that
+/// wrote it, the file's version, the version it was checked as, whether as
+/// one table an object (`--one-table`), which held objects a key the model
+/// doesn't list is a finding in (`--unlisted`), whether deprecations are
+/// findings (`--deprecations`), whether unused resources are
+/// (`--unused`), whether a linearization's departures are
+/// (`--departures`), the extensions it was checked under, and the model's
+/// hash, `model`; its findings, each with where its bytes are;
+/// how many were left out as carried and as allowed; and the counts
+/// `--full` prints. The fields are in the order the line has them.
+#[derive(Serialize)]
+struct Line<'a> {
+    pdf_lint: &'a str,
+    /// The file as the text report names it, a byte that isn't UTF-8 as
+    /// U+FFFD; not a `Path`, which serde writes only when it's UTF-8.
+    file: &'a str,
+    version: String,
+    checked_as: String,
+    one_table: bool,
+    unlisted_in: &'a str,
+    deprecations: bool,
+    unused_findings: bool,
+    departure_findings: bool,
+    extensions: &'a BTreeSet<String>,
+    model: &'a str,
+    objects: usize,
+    keys: usize,
+    findings: Vec<Found<'a>>,
+    carried: usize,
+    allowed: usize,
+    /// How many objects were checked as each table, by its name.
+    tables: &'a BTreeMap<String, usize>,
+    not_checked: Vec<NotChecked<'a>>,
+    unlisted: Vec<Unlisted<'a>>,
+    deprecated: Vec<Count<'a>>,
+    /// How many units of content were read: a page's streams as one, a
+    /// form's, a pattern's or a glyph's alone.
+    content_read: usize,
+    /// Whether the file is linearized, and whether that holds: `holds`,
+    /// `fails`, `updated` or `not-taken`, null where it doesn't say it's
+    /// linearized.
+    linearized: Option<&'a str>,
+    /// Resources nothing in the content read uses, by table and key.
+    unused: Vec<Count<'a>>,
+    /// A linearization's departures from Annex F, by table and key.
+    departures: Vec<Count<'a>>,
+    ignored: Vec<Count<'a>>,
+    no_table: usize,
+    ties: usize,
+    truncated: usize,
+    two_contexts: usize,
+    two_tables: usize,
+}
+
+/// A finding, with where its bytes are; its object is `[n,g]`, or null
+/// for a table's trailer.
+#[derive(Serialize)]
+struct Found<'a> {
+    rule: &'a str,
+    table: &'a str,
+    key: &'a str,
+    path: &'a str,
+    object: Option<(u32, u16)>,
+    made: &'a str,
+    value: &'a str,
+    at: Option<At>,
+}
+
+/// Where a finding's bytes are: in the file, or in the decoded data of the
+/// stream `stream`, `[n,g]`, an object stream or a content stream.
+#[derive(Serialize)]
+struct At {
+    stream: Option<(u32, u16)>,
+    start: usize,
+    end: usize,
+}
+
+/// A key the model doesn't list, and how many times: `extension` names the
+/// extension when that's its class, and isn't written otherwise.
+#[derive(Serialize)]
+struct Unlisted<'a> {
+    table: &'a str,
+    key: &'a str,
+    class: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extension: Option<&'a str>,
+    count: usize,
+}
+
+/// A key, by table, and how many times: one deprecated, an unused
+/// resource's category, a linearization's departures, or one ignored.
+#[derive(Serialize)]
+struct Count<'a> {
+    table: &'a str,
+    key: &'a str,
+    count: usize,
+}
+
+/// A check not made, why, where, and how many times.
+#[derive(Serialize)]
+struct NotChecked<'a> {
+    column: &'a str,
+    why: &'a str,
+    table: &'a str,
+    key: &'a str,
+    count: usize,
+}
+
+/// The line of a file that couldn't be read or checked.
+#[derive(Serialize)]
+struct Unread<'a> {
+    pdf_lint: &'a str,
+    model: &'a str,
+    file: &'a str,
+    error: &'a str,
+}
+
+/// `value` as a line of JSON, written by [`Reports`]. Into a `Vec`, and
+/// with strings alone for keys, it can't fail.
+fn line(value: &impl Serialize) -> Result<String> {
+    let mut out = Vec::new();
+    let mut json = serde_json::Serializer::with_formatter(&mut out, Reports);
+    value.serialize(&mut json)?;
+    out.push(b'\n');
+    Ok(String::from_utf8(out)?)
+}
+
+/// How the reports are written: serde_json's compact JSON, but for
+/// backspace and form feed, which serde_json writes `\b` and `\f`. Here
+/// they're `\u0008` and `\u000c`, as every other character below U+0020
+/// is but tab, line feed and carriage return, in lowercase (RFC 8259, 7,
+/// allows either), so that a report is the bytes it's always been.
+struct Reports;
+
+impl Formatter for Reports {
+    fn write_char_escape<W: ?Sized + io::Write>(
+        &mut self,
+        writer: &mut W,
+        escape: CharEscape,
+    ) -> io::Result<()> {
+        match escape {
+            CharEscape::Backspace => writer.write_all(b"\\u0008"),
+            CharEscape::FormFeed => writer.write_all(b"\\u000c"),
+            escape => CompactFormatter.write_char_escape(writer, escape),
         }
     }
-    out.push('"');
-    out
 }
 
 /// The bytes at `at`, the first [`SHOWN`] of them, printable ASCII as it is

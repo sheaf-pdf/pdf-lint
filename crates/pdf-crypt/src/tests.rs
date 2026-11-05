@@ -1,0 +1,1506 @@
+//! The handler on files qpdf wrote, each way it encrypts, and on what the
+//! writer writes; and its faults and refusals.
+
+use chacha20::ChaCha20Rng;
+use rand_core::{CryptoRng, Rng, SeedableRng};
+
+use crate::aes::Aes;
+use crate::writer::{self, Kind, Settings};
+use crate::{
+    CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Handler, Method, Password, Refused,
+    Unusable,
+};
+
+/// A file qpdf 12.3 encrypted (`qpdf --encrypt`, the vector's name its
+/// options): its encryption dictionary and first `/ID`, its passwords, the
+/// key qpdf gives (`--show-encryption-key`), and its `/Info`'s `/Title`,
+/// `A plain title`, as written, with its object's number.
+struct Vector {
+    name: &'static str,
+    dictionary: Dictionary,
+    id: &'static [u8],
+    user: &'static [u8],
+    owner: &'static [u8],
+    key: &'static str,
+    title: (u32, &'static [u8]),
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn vectors() -> Vec<Vector> {
+    vec![
+    Vector {
+        name: "rc4_40",
+        dictionary: Dictionary {
+            filter: b"Standard".to_vec(),
+            v: 1,
+            r: 2,
+            length: Some(40),
+            o: Some(b"\x94\xe8\x09\x44\x19\x66\x2a\x77\x44\x42\xfb\x07\x2e\x3d\x9f\x19\xe9\xd1\x30\xec\x09\xa4\xd0\x06\x1e\x78\xfe\x92\x0f\x7a\xb6\x2f".to_vec()),
+            u: Some(b"\xbf\x39\x6e\x5d\x5d\xbc\x01\x24\x7e\x85\xf6\x2c\x5f\x4a\x7e\x41\x49\x2c\x45\x3e\x10\x00\xb8\x78\x51\x40\x7b\xc9\x29\xa6\x54\x76".to_vec()),
+            oe: None,
+            ue: None,
+            perms: None,
+            p: Some(-4),
+            encrypt_metadata: None,
+            crypt_filters: vec![],
+            stm_f: None,
+            str_f: None,
+        },
+        id: b"\x88\x3e\x20\xa9\x41\x92\xfc\xed\x32\xd5\x9f\x47\x41\x4e\x85\xdc",
+        user: b"\x75\x73\x65\x72",
+        owner: b"\x6f\x77\x6e\x65\x72",
+        key: "75bbd4d82e",
+        title: (2, b"\xe8\xd6\x58\xff\x70\x5c\x07\x2c\x53\xe5\x18\xfc\x52"),
+    },
+    Vector {
+        name: "rc4_128",
+        dictionary: Dictionary {
+            filter: b"Standard".to_vec(),
+            v: 2,
+            r: 3,
+            length: Some(128),
+            o: Some(b"\x0b\xa3\x83\x5f\x88\xf9\x03\x88\xe7\x4e\x54\x58\x41\x25\xce\x14\x2b\xe0\xde\x24\xc6\xb0\xd3\x77\x46\xe0\x75\xb8\x91\x75\x66\x71".to_vec()),
+            u: Some(b"\xeb\x4c\x43\x85\x72\xc4\xdb\x5d\x96\x59\x3d\x00\x6c\xe3\xb9\x5e\x00\x21\x44\x69\x90\xb9\xe4\x11\x40\x71\xa4\xd9\x10\x49\x84\xc1".to_vec()),
+            oe: None,
+            ue: None,
+            perms: None,
+            p: Some(-4),
+            encrypt_metadata: None,
+            crypt_filters: vec![],
+            stm_f: None,
+            str_f: None,
+        },
+        id: b"\x3f\xaa\x4e\x99\xd7\xa1\x35\x4d\x36\xbc\x61\x4e\x30\x56\x23\xde",
+        user: b"\x75\x73\x65\x72",
+        owner: b"\x6f\x77\x6e\x65\x72",
+        key: "955705db0e0c61345f8302d0b34f4585",
+        title: (2, b"\x28\x3d\x75\xbe\x26\x4a\x48\xce\xc6\xa3\x16\x47\x9c"),
+    },
+    Vector {
+        name: "rc4_128_v4",
+        dictionary: Dictionary {
+            filter: b"Standard".to_vec(),
+            v: 4,
+            r: 4,
+            length: Some(128),
+            o: Some(b"\x0b\xa3\x83\x5f\x88\xf9\x03\x88\xe7\x4e\x54\x58\x41\x25\xce\x14\x2b\xe0\xde\x24\xc6\xb0\xd3\x77\x46\xe0\x75\xb8\x91\x75\x66\x71".to_vec()),
+            u: Some(b"\x77\xe0\x71\xba\xf3\x19\x56\x2a\x71\x9c\x67\xed\x4d\x08\x6d\x28\x00\x21\x44\x69\x90\xb9\xe4\x11\x40\x71\xa4\xd9\x10\x49\x84\xc1".to_vec()),
+            oe: None,
+            ue: None,
+            perms: None,
+            p: Some(-4),
+            encrypt_metadata: None,
+            crypt_filters: vec![CryptFilter { name: b"StdCF".to_vec(), method: Some(b"V2".to_vec()) }],
+            stm_f: Some(b"StdCF".to_vec()),
+            str_f: Some(b"StdCF".to_vec()),
+        },
+        id: b"\xda\xd6\x9b\xf5\x32\x1a\x12\x0d\x6b\x5e\x14\x42\xc6\x45\x9d\x1c",
+        user: b"\x75\x73\x65\x72",
+        owner: b"\x6f\x77\x6e\x65\x72",
+        key: "d9ae3a6556f03bf8824b3e19090d4f7a",
+        title: (2, b"\xd9\xa5\x49\xc3\x0a\x2f\x56\x6d\xc2\x87\x0c\xce\xfb"),
+    },
+    Vector {
+        name: "aes_128",
+        dictionary: Dictionary {
+            filter: b"Standard".to_vec(),
+            v: 4,
+            r: 4,
+            length: Some(128),
+            o: Some(b"\x0b\xa3\x83\x5f\x88\xf9\x03\x88\xe7\x4e\x54\x58\x41\x25\xce\x14\x2b\xe0\xde\x24\xc6\xb0\xd3\x77\x46\xe0\x75\xb8\x91\x75\x66\x71".to_vec()),
+            u: Some(b"\xcc\x59\xe7\x65\x00\xfb\x66\xd8\x49\xe5\x23\x45\x01\x94\x7c\x29\x00\x21\x44\x69\x90\xb9\xe4\x11\x40\x71\xa4\xd9\x10\x49\x84\xc1".to_vec()),
+            oe: None,
+            ue: None,
+            perms: None,
+            p: Some(-4),
+            encrypt_metadata: None,
+            crypt_filters: vec![CryptFilter { name: b"StdCF".to_vec(), method: Some(b"AESV2".to_vec()) }],
+            stm_f: Some(b"StdCF".to_vec()),
+            str_f: Some(b"StdCF".to_vec()),
+        },
+        id: b"\x59\x97\xda\x7a\xe0\x51\xae\x9e\xc7\xf4\x3b\x3f\x16\xe9\x54\x09",
+        user: b"\x75\x73\x65\x72",
+        owner: b"\x6f\x77\x6e\x65\x72",
+        key: "57c38843adcf37899e7b913b029ad693",
+        title: (2, b"\x7e\x9e\xd2\x2e\xd6\x2b\x60\x49\x31\x8f\x21\xc5\xa9\x2f\x0b\x10\x9f\xa9\xa2\x93\x61\xd3\xae\x06\x12\x16\x0a\xd9\x67\x68\xf8\x3f"),
+    },
+    Vector {
+        name: "aes_128_cleartext_metadata",
+        dictionary: Dictionary {
+            filter: b"Standard".to_vec(),
+            v: 4,
+            r: 4,
+            length: Some(128),
+            o: Some(b"\x0b\xa3\x83\x5f\x88\xf9\x03\x88\xe7\x4e\x54\x58\x41\x25\xce\x14\x2b\xe0\xde\x24\xc6\xb0\xd3\x77\x46\xe0\x75\xb8\x91\x75\x66\x71".to_vec()),
+            u: Some(b"\xcd\xbb\x5e\xc7\x36\x73\xb9\x1d\xde\x50\x62\xcb\xaf\x86\x20\x89\x00\x21\x44\x69\x90\xb9\xe4\x11\x40\x71\xa4\xd9\x10\x49\x84\xc1".to_vec()),
+            oe: None,
+            ue: None,
+            perms: None,
+            p: Some(-4),
+            encrypt_metadata: Some(false),
+            crypt_filters: vec![CryptFilter { name: b"StdCF".to_vec(), method: Some(b"AESV2".to_vec()) }],
+            stm_f: Some(b"StdCF".to_vec()),
+            str_f: Some(b"StdCF".to_vec()),
+        },
+        id: b"\x3e\xff\x7c\xba\xce\xde\xa5\x5a\xff\x15\xd4\x79\xa4\x8b\xbb\x8e",
+        user: b"\x75\x73\x65\x72",
+        owner: b"\x6f\x77\x6e\x65\x72",
+        key: "7809443bdacf4f7c858df90e42520e8e",
+        title: (2, b"\x1e\x75\x93\xe7\xdd\x48\x96\xf1\x84\xe2\x0f\x3c\xad\x34\x85\xa6\x73\xc9\xa7\xd7\xda\x0b\xd7\xee\xe4\x64\x2b\x5a\x3a\x28\xed\x45"),
+    },
+    Vector {
+        name: "aes_256_r5",
+        dictionary: Dictionary {
+            filter: b"Standard".to_vec(),
+            v: 5,
+            r: 5,
+            length: Some(256),
+            o: Some(b"\x6b\x12\xaf\x84\x00\xd0\x17\x39\xb4\x9a\x71\x56\x37\xd3\x37\xf7\xbf\xb3\x3c\xdb\x5f\x7f\x4b\x6e\x44\x00\x3c\x23\x0c\xf7\xf0\xd4\x73\x88\x8e\xf2\xe7\x5c\x62\x5b\xe1\xd2\xff\x26\x67\xb0\xe5\x7b".to_vec()),
+            u: Some(b"\x8c\x80\x61\xf7\x83\x9f\x4b\x31\xda\x26\x3e\x72\xf7\xfc\x0e\x6b\x0c\xac\xfc\x57\x97\xdc\x8e\x67\x56\x5a\x63\x6d\x8d\xb7\xe7\xe2\xc8\x24\x43\x7c\x41\x48\xaa\xbc\x3c\xbc\x18\x96\x15\x8f\xa7\x6d".to_vec()),
+            oe: Some(b"\x52\x97\x7f\x95\xab\xe8\x32\x06\x31\x54\x24\x52\x27\x59\x9c\x9c\x8b\x44\xee\x87\x40\xcd\xe1\x8f\xb3\xa6\xfd\x12\x59\x58\xa8\x65".to_vec()),
+            ue: Some(b"\x03\x98\x51\x2c\x9b\xc1\x28\x7d\x72\x35\x13\x37\xa0\x99\x49\x59\x3e\x38\x10\xf9\xcb\x8b\x7e\xd8\x21\xd1\xa2\x9c\x23\x37\xc6\x65".to_vec()),
+            perms: Some(b"\x7d\x23\x74\x47\xac\xb4\x91\x24\xba\xeb\x3f\x83\x01\x89\xc7\x5e".to_vec()),
+            p: Some(-4),
+            encrypt_metadata: None,
+            crypt_filters: vec![CryptFilter { name: b"StdCF".to_vec(), method: Some(b"AESV3".to_vec()) }],
+            stm_f: Some(b"StdCF".to_vec()),
+            str_f: Some(b"StdCF".to_vec()),
+        },
+        id: b"\x41\x36\x6a\xd7\x05\x21\x6b\xf6\xa6\x47\x70\x64\xc7\x5d\x9a\x7d",
+        user: b"\x75\x73\x65\x72",
+        owner: b"\x6f\x77\x6e\x65\x72",
+        key: "e77cbcb621c387a474253796581ac9ad1511f81a667642c007d0afa695bc987d",
+        title: (2, b"\x06\xd0\xe9\x68\xcf\x5f\xa4\x63\x3c\x33\x94\xcc\x59\xdd\x9b\x86\x33\x40\x1e\xe6\x01\xf5\xb6\xf8\xd7\x03\x01\x8d\x44\x50\xca\xde"),
+    },
+    Vector {
+        name: "aes_256",
+        dictionary: Dictionary {
+            filter: b"Standard".to_vec(),
+            v: 5,
+            r: 6,
+            length: Some(256),
+            o: Some(b"\x32\x41\xc6\x84\xf2\x7d\xe5\xe9\xae\xee\x56\xd8\xbb\xc8\x8a\x53\x3b\x6b\xe6\x6e\xb9\x9b\xa2\x54\x4d\xef\x4e\x53\x62\xee\x0d\xf0\x81\xde\x64\xa8\x2c\x63\xa7\xfe\xd4\x10\x1c\x0c\xd8\xce\x79\x77".to_vec()),
+            u: Some(b"\x8c\x99\x99\xed\xf5\x8a\x98\x9b\xa8\x89\x34\x77\x2f\x97\x74\x8f\x38\xcf\xc6\x5f\x64\xd6\xfe\x07\xd2\x96\x89\x89\xc8\xa6\x11\x3a\x9e\xec\xc2\x83\xc2\xc2\x74\x8e\x3c\x74\x34\xa4\xff\xd9\xdd\x3d".to_vec()),
+            oe: Some(b"\xfe\x02\xf7\x97\x50\x91\x57\xbd\xea\x8c\x6c\x80\x24\xec\x5b\xe7\xe3\x7d\xfc\xb6\x91\x4b\xdf\x2b\xc3\x1f\x7f\x41\x0e\x11\x22\x73".to_vec()),
+            ue: Some(b"\x78\x19\xee\x47\x48\x00\x8e\xa0\xbc\x09\xad\x93\xe1\x7a\xf7\x8f\xea\x4d\x07\x01\xaa\xa0\xfc\x7c\xb5\xb7\xd3\xd5\x9c\xd3\xb9\x84".to_vec()),
+            perms: Some(b"\x00\x62\x7a\x5a\x17\xb0\x03\x73\xc3\x21\xc2\xbc\x06\x11\x08\x2b".to_vec()),
+            p: Some(-4),
+            encrypt_metadata: None,
+            crypt_filters: vec![CryptFilter { name: b"StdCF".to_vec(), method: Some(b"AESV3".to_vec()) }],
+            stm_f: Some(b"StdCF".to_vec()),
+            str_f: Some(b"StdCF".to_vec()),
+        },
+        id: b"\x04\xa4\xb5\x97\x18\x8e\xef\xa2\x70\x3c\x15\x51\x2f\xa7\xeb\xca",
+        user: b"\x75\x73\x65\x72",
+        owner: b"\x6f\x77\x6e\x65\x72",
+        key: "f1919acc4fe4850a97575f94188ea587c8de7b85a16d7a348315e958e0ea957f",
+        title: (2, b"\xed\xde\xb1\x65\xcd\xb2\xbc\x12\x61\xe9\xde\x12\xeb\x3f\xf1\xdc\x73\x26\x58\x79\x02\x20\x1b\xd8\xd6\xe7\xfe\xbc\x93\x73\x26\xcc"),
+    },
+    Vector {
+        name: "aes_256_cleartext_metadata",
+        dictionary: Dictionary {
+            filter: b"Standard".to_vec(),
+            v: 5,
+            r: 6,
+            length: Some(256),
+            o: Some(b"\x63\xd6\xff\x35\xfb\x83\x33\x69\xbb\x68\xdd\x47\x2d\xbb\xd4\x17\xa0\xc3\xae\x46\x99\xe0\xf1\x66\x3e\xc6\x46\x29\x36\xa3\xb2\x0a\x14\xf0\x24\xae\xa5\xcd\x67\x6d\x8a\xa9\x49\x82\xfd\xd8\x28\x89".to_vec()),
+            u: Some(b"\x7f\xfd\xc4\x41\x90\xff\xf7\xab\xb7\x91\xef\x8b\x22\xc3\x01\x00\x9b\xbc\x0f\x5e\x8c\x89\xaf\xf4\x85\xf5\xf3\x45\x73\xe1\x68\x5f\x60\x9c\xa0\xa7\x3b\x4e\x50\x55\xf7\x89\x88\xdc\xf9\x89\xf7\xf2".to_vec()),
+            oe: Some(b"\x87\x84\xa3\xc6\x62\xe4\xc2\xc7\x26\x28\xde\x45\x1a\x05\x5c\xa4\x72\xa8\x55\xba\xdf\xa2\x7a\xe1\x46\xf0\xd4\x8b\xc9\xa5\x98\xba".to_vec()),
+            ue: Some(b"\xae\x59\xb0\xad\x1c\x2e\x0f\x8b\x99\x67\x00\x6b\xed\xfe\x3e\x5b\x32\x62\xc5\x80\x83\xeb\xec\xe5\x07\x43\x5a\x17\x13\x4c\x6b\xe7".to_vec()),
+            perms: Some(b"\x4f\x56\x54\xc6\x82\x8b\x83\x5c\xa5\x5e\x5c\xeb\xe9\x2c\x9c\x6a".to_vec()),
+            p: Some(-4),
+            encrypt_metadata: Some(false),
+            crypt_filters: vec![CryptFilter { name: b"StdCF".to_vec(), method: Some(b"AESV3".to_vec()) }],
+            stm_f: Some(b"StdCF".to_vec()),
+            str_f: Some(b"StdCF".to_vec()),
+        },
+        id: b"\xed\x0c\xba\x4d\xc7\x34\xf0\x01\x62\xac\x0d\x0d\xaf\xfc\xee\x1a",
+        user: b"\x75\x73\x65\x72",
+        owner: b"\x6f\x77\x6e\x65\x72",
+        key: "2e753b9ca222d45aff6d53b49602d7ff51aeae4af4a5d925bd86525605784d17",
+        title: (2, b"\xbc\x4a\xfb\xa4\x63\x70\xd8\xc2\xe2\x1d\x5b\x92\x25\x46\x6a\x8d\xd3\x96\x81\x75\xe7\x82\x11\xe4\xfa\xae\xe3\xb6\x42\xe9\xee\x25"),
+    },
+    Vector {
+        name: "aes_256_empty_user",
+        dictionary: Dictionary {
+            filter: b"Standard".to_vec(),
+            v: 5,
+            r: 6,
+            length: Some(256),
+            o: Some(b"\xe1\x6e\xae\x6d\x54\xbd\xf4\xfe\xde\x01\xa7\x8b\xc1\x0d\x21\xd2\xba\x19\x2b\x2a\x58\x56\xc7\xe4\x41\xf7\x10\xd3\xc7\xe8\xc1\xeb\x4b\x9c\xcb\x5c\x57\x45\xed\x5a\x8e\xd1\x18\x46\x53\x91\x6f\x86".to_vec()),
+            u: Some(b"\xcd\xff\x70\x53\xdd\xc9\x8c\x59\x1d\xb9\x2f\xe9\x87\x5b\x27\x6d\x42\x4a\x0a\x43\xcd\xa0\xc2\x18\x30\x06\x70\xe7\x2d\x81\x4e\x08\x54\x68\xb4\xd8\xa5\x69\xd5\x27\x5c\xbe\x9d\x35\x06\xa8\x89\xff".to_vec()),
+            oe: Some(b"\x47\x3a\x17\xbb\xb6\x28\xb1\x05\x8e\xc0\xcc\x4a\x61\x89\xd8\x17\x0f\xf5\x19\x52\x08\x34\x69\x3f\x1f\x60\x19\xcf\x1d\x8c\xa4\x9e".to_vec()),
+            ue: Some(b"\xd5\x65\xb2\xba\x4b\xec\xbe\xee\x52\x6f\x20\xb4\x33\x7d\x7a\x18\x9a\x59\xa7\x43\x3f\x53\xc4\x3b\xa1\xb3\x46\x72\x68\x4c\x2a\xda".to_vec()),
+            perms: Some(b"\x90\xa4\x8b\x81\x98\xc4\x22\xa1\xb8\x5d\x0b\x81\xd1\x37\xa5\xf6".to_vec()),
+            p: Some(-4),
+            encrypt_metadata: None,
+            crypt_filters: vec![CryptFilter { name: b"StdCF".to_vec(), method: Some(b"AESV3".to_vec()) }],
+            stm_f: Some(b"StdCF".to_vec()),
+            str_f: Some(b"StdCF".to_vec()),
+        },
+        id: b"\x9d\x5c\x2c\xe6\x9e\xc4\x03\x09\xee\x26\x10\x60\x2b\xd1\x48\x7e",
+        user: b"",
+        owner: b"\x6f\x77\x6e\x65\x72",
+        key: "40e35a3f141103e49039410f91037f99ad4f484dfdaeca236cfa16754dac35f0",
+        title: (2, b"\x26\x67\x51\x0c\x09\x3a\xaa\xde\x88\xca\x7e\xef\x44\x23\x21\x40\xc7\x6b\x9c\x83\x91\x06\xdd\xf9\x24\x48\x5f\x55\x5b\x12\xa7\xd6"),
+    },
+    Vector {
+        name: "aes_256_non_ascii",
+        dictionary: Dictionary {
+            filter: b"Standard".to_vec(),
+            v: 5,
+            r: 6,
+            length: Some(256),
+            o: Some(b"\x3e\xbc\xca\x7b\x9f\x23\x93\xdb\xba\x17\x7a\x29\xb6\x37\xc3\xad\x80\xf7\xd0\xbe\x9a\x7f\x37\xe7\xb8\x9d\x1a\x32\x68\x9e\x33\x96\x82\x8c\xec\x03\x7f\xd9\x51\x6b\xc3\xef\x57\x62\xcd\x43\xde\x9e".to_vec()),
+            u: Some(b"\xfc\x96\xee\xe6\x60\x3e\xb9\x43\xce\xf8\x59\x84\x0b\x45\x9c\x10\x1e\x87\x9e\x68\x20\x3e\xe7\xff\x9e\x7b\x0c\x4f\x11\x8c\xb4\xdf\xda\xba\xb3\x38\xbe\x6e\x89\x7a\x73\x52\xd2\xde\x08\x84\x30\x28".to_vec()),
+            oe: Some(b"\x1a\x3f\xc6\x76\x0c\x34\x4c\xb1\xc8\xeb\x07\x6d\x87\x17\x6e\x48\xcc\x4c\xbc\xb1\x12\x52\xf9\x44\xd1\x45\x50\x3e\xbe\x64\x1e\xbf".to_vec()),
+            ue: Some(b"\x0b\xcc\x8b\x5d\xa7\x67\xfc\xc6\x8e\x56\x12\xf8\x98\x14\x88\xd5\x4f\xe0\x9a\x55\xf8\xcf\x1b\xb4\x46\x20\x7d\xf7\x85\x79\xf4\xe3".to_vec()),
+            perms: Some(b"\x77\x9b\x3f\xf1\xdc\x60\xff\x16\x1e\x81\x2d\x66\x98\x4e\x2a\x8d".to_vec()),
+            p: Some(-4),
+            encrypt_metadata: None,
+            crypt_filters: vec![CryptFilter { name: b"StdCF".to_vec(), method: Some(b"AESV3".to_vec()) }],
+            stm_f: Some(b"StdCF".to_vec()),
+            str_f: Some(b"StdCF".to_vec()),
+        },
+        id: b"\x34\x6b\xae\xa2\x16\xf0\x20\x07\x5c\x92\x0b\x36\x29\xc5\x72\xa1",
+        user: b"\x70\xc3\xa4\x73\x73\x77\xc3\xb6\x72\x64",
+        owner: b"\x6f\x77\x6e\x65\x72",
+        key: "a8a0cbc66856fb5fd05a9493dc64c461999591d8772adbbb5a1261dbc2c523bc",
+        title: (2, b"\xa1\x81\x54\x02\x0a\x0c\x67\x69\xaf\xbd\xdb\x81\xc1\x2c\xaf\x2c\x7e\x50\xf7\xc1\x6b\xf8\x5f\xd3\x0a\x29\x50\xef\xa3\x4b\x55\x66"),
+    },
+    Vector {
+        name: "aes_256_127",
+        dictionary: Dictionary {
+            filter: b"Standard".to_vec(),
+            v: 5,
+            r: 6,
+            length: Some(256),
+            o: Some(b"\x38\x85\xe5\x6a\x8e\x29\x46\x34\x53\x35\xb1\x99\xbc\x2e\x85\x47\xb1\xfa\x80\x77\x42\x0b\xb6\x29\xc7\x35\x05\xd7\x7d\xd2\xe4\xa8\xfd\x31\x3a\x53\xf2\x7d\x58\xbf\x78\x2d\x8f\x89\xb0\x53\x5a\x0b".to_vec()),
+            u: Some(b"\xe1\xe6\x8d\x25\x23\xd1\x0f\x0f\x67\x1a\xde\x4c\x40\xda\xd0\x00\xac\xbb\x09\x0d\x43\xde\x33\x8d\x67\xcd\xf3\xc2\x5a\xb6\x53\x77\x50\x54\x0f\x63\x4f\xf2\x9b\x29\x5a\x5f\xd4\x3d\x86\x55\x6e\x7e".to_vec()),
+            oe: Some(b"\x07\xb0\x59\xf5\xed\xa8\x4d\x2c\x15\x51\xcc\x45\xa4\x0e\xa4\xe2\x26\x60\xbf\x94\xfe\xc8\x03\x5c\xe8\xed\x4e\x30\xed\x54\xc4\xbc".to_vec()),
+            ue: Some(b"\xa8\x5e\xa2\xfe\x80\xf4\x29\x2f\x4d\x4d\x7f\x1c\x5f\xba\xd1\x0c\xe4\x36\xe7\x5e\x8c\x55\xf2\xe6\x16\x4d\x4a\x39\xd7\x2a\x03\x70".to_vec()),
+            perms: Some(b"\x2f\x81\x3a\x43\x7c\x63\x6e\x61\xea\xaf\x25\x4e\x21\x2f\x72\x34".to_vec()),
+            p: Some(-4),
+            encrypt_metadata: None,
+            crypt_filters: vec![CryptFilter { name: b"StdCF".to_vec(), method: Some(b"AESV3".to_vec()) }],
+            stm_f: Some(b"StdCF".to_vec()),
+            str_f: Some(b"StdCF".to_vec()),
+        },
+        id: b"\x1b\x20\xbe\xa8\x1f\x29\x27\x9b\x27\x1d\xc3\x57\x2b\x18\xfd\x7a",
+        user: b"\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70\x70",
+        owner: b"\x6f\x77\x6e\x65\x72",
+        key: "2821de0cd65ef22c3902d69e3e9a4e9c8f05d2e81e5043a68633e228bf584aa9",
+        title: (2, b"\x3f\x6a\x1d\x2a\x65\x4d\xa0\x7f\xf5\xe3\x3b\xc3\x5b\xc5\xbc\x74\x42\x1c\xe2\x08\x6e\xdf\x05\x1e\x30\xb9\x91\x5c\x5e\x07\x3b\xd7"),
+    },
+
+    ]
+}
+
+#[test]
+fn files_qpdf_encrypted_open_by_either_password_with_qpdfs_key() {
+    for v in vectors() {
+        let name = v.name;
+        let user = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)])
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(hex(user.key()), v.key, "{name}");
+        assert!(!user.owner(), "{name}");
+        assert_eq!(user.faults(), [], "{name}");
+        let (n, written) = v.title;
+        assert_eq!(
+            user.decrypt_string((n, 0), written).unwrap(),
+            b"A plain title",
+            "{name}"
+        );
+        let owner = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.owner)])
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(hex(owner.key()), v.key, "{name}");
+        assert!(owner.owner(), "{name}");
+        let wrong = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(b"wrong")]);
+        assert_eq!(wrong.unwrap_err(), Refused::Password, "{name}");
+        // The empty password, as no password is, only when it's the user's.
+        let none = Handler::open(&v.dictionary, v.id, &[]);
+        assert_eq!(none.is_ok(), v.user.is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn its_debug_leaves_the_key_out() {
+    for v in &vectors() {
+        let handler = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
+        let shown = format!("{handler:?}");
+        assert!(!shown.contains(&format!("{:?}", handler.key())), "{shown}");
+        assert!(!shown.contains("key"), "{shown}");
+        // Nor the MAC keyed by it.
+        assert!(!shown.contains("ivs") && !shown.contains("Hmac"), "{shown}");
+    }
+}
+
+#[test]
+fn the_first_password_that_opens_it_does() {
+    let v = &vectors()[6];
+    let handler = Handler::open(
+        &v.dictionary,
+        v.id,
+        &[
+            Encoded::verbatim(b"wrong"),
+            Encoded::verbatim(v.user),
+            Encoded::verbatim(v.owner),
+        ],
+    )
+    .unwrap();
+    assert!(!handler.owner());
+    assert_eq!(handler.opened_by(), Some((1, Encoding::Verbatim)));
+}
+
+/// The writer's dictionary of `kind` for the user's password `user` and
+/// the owner's `owner`.
+fn written(kind: Kind, user: &[u8], owner: &[u8]) -> Dictionary {
+    writer::dictionary(&Settings {
+        kind,
+        user,
+        owner,
+        p: -4,
+        id: b"0123456789abcdef",
+        encrypt_metadata: true,
+    })
+}
+
+/// The encodings that fit a file's revision are tried first, the rest
+/// after, each in the order given, and the handler says which opened it:
+/// its index among those given and its encoding; none for the empty
+/// password tried as none was given.
+#[test]
+fn the_encodings_that_fit_are_tried_first_and_it_says_which_opened_it() {
+    let id = b"0123456789abcdef";
+    let typed = Password("café");
+    let (utf8, pdf_doc) = ("café".as_bytes(), b"caf\xE9");
+    // Given MacRomanEncoding's, PDFDocEncoding's, then UTF-8's.
+    let reversed: Vec<Encoded> = typed.encodings().into_iter().rev().collect();
+    let encodings: Vec<Encoding> = reversed.iter().map(Encoded::encoding).collect();
+    assert_eq!(
+        encodings,
+        [Encoding::MacRoman, Encoding::PdfDoc, Encoding::Utf8]
+    );
+    // The user's password in PDFDocEncoding, the owner's in UTF-8: of
+    // revision 6, UTF-8's is tried first, and opens it as the owner's.
+    let r6 = written(Kind::Aes256, pdf_doc, utf8);
+    let handler = Handler::open(&r6, id, &reversed).unwrap();
+    assert!(handler.owner());
+    assert_eq!(handler.opened_by(), Some((2, Encoding::Utf8)));
+    // Of revision 4, each fits, so they're tried as given: PDFDocEncoding's
+    // opens it, as the user's.
+    let r4 = written(Kind::Aes128, pdf_doc, utf8);
+    let handler = Handler::open(&r4, id, &reversed).unwrap();
+    assert!(!handler.owner());
+    assert_eq!(handler.opened_by(), Some((1, Encoding::PdfDoc)));
+    // One that doesn't fit is still tried, last: the encodings in their
+    // own order open a revision 6 file by PDFDocEncoding's.
+    let r6 = written(Kind::Aes256, pdf_doc, b"owner");
+    let handler = Handler::open(&r6, id, &typed.encodings()).unwrap();
+    assert_eq!(handler.opened_by(), Some((1, Encoding::PdfDoc)));
+    // The empty password: none, tried as none was given; given, it's the
+    // one given.
+    let empty = written(Kind::Aes256, b"", b"owner");
+    assert_eq!(Handler::open(&empty, id, &[]).unwrap().opened_by(), None);
+    let given = [Encoded::verbatim(b"")];
+    let handler = Handler::open(&empty, id, &given).unwrap();
+    assert_eq!(handler.opened_by(), Some((0, Encoding::Verbatim)));
+}
+
+/// How many times opening `dictionary` by `passwords` hashes by revision 5's
+/// or 6's hash, on this thread.
+fn hashes(dictionary: &Dictionary, passwords: &[Encoded]) -> (Result<Handler, Refused>, usize) {
+    crate::handler::HASHED.with(|hashed| hashed.set(0));
+    let opened = Handler::open(dictionary, b"0123456789abcdef", passwords);
+    (opened, crate::handler::HASHED.with(|hashed| hashed.get()))
+}
+
+/// A password whose bytes revision 5 or 6 takes as it took one tried
+/// before, cut to 127 bytes, isn't tried again, as it gives the same key:
+/// it costs no hash. A wrong one costs two, the owner's and the user's.
+#[test]
+fn a_password_taken_as_one_tried_before_costs_no_hash() {
+    for kind in [Kind::Aes256R5, Kind::Aes256] {
+        let dictionary = written(kind, b"user", b"owner");
+        let wrong = Encoded::verbatim(b"wrong");
+        let (opened, alone) = hashes(&dictionary, std::slice::from_ref(&wrong));
+        assert_eq!(
+            (opened.unwrap_err(), alone),
+            (Refused::Password, 2),
+            "{kind:?}"
+        );
+        // The same bytes, as typed and as given.
+        let twice = [Password("wrong").encodings(), vec![wrong]].concat();
+        assert_eq!(hashes(&dictionary, &twice).1, 2, "{kind:?}");
+        // Bytes that differ past the 127th, and within it.
+        let long =
+            |last: &[u8], len: usize| Encoded::verbatim(&[&[b'a'; 200][..len], last].concat());
+        let past = [long(b"x", 127), long(b"y", 127)];
+        assert_eq!(hashes(&dictionary, &past).1, 2, "{kind:?}");
+        let within = [long(b"x", 126), long(b"y", 126)];
+        assert_eq!(hashes(&dictionary, &within).1, 4, "{kind:?}");
+        // The user's, after a form it takes alike: the same key, but by
+        // the first.
+        let user = [long(b"", 127), Encoded::verbatim(b"user"), long(b"z", 127)];
+        let (opened, _) = hashes(&dictionary, &user);
+        assert_eq!(opened.unwrap().opened_by(), Some((1, Encoding::Verbatim)));
+    }
+}
+
+#[test]
+fn a_perms_that_doesnt_match_is_a_fault_and_the_file_opens() {
+    let v = &vectors()[6];
+    let mut dictionary = v.dictionary.clone();
+    dictionary.p = dictionary.p.map(|p| p ^ 4);
+    // /P is in /Perms, and from revision 5 not in the key.
+    let handler = Handler::open(&dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
+    assert_eq!(handler.faults(), [Fault::Perms]);
+    assert_eq!(hex(handler.key()), v.key);
+}
+
+#[test]
+fn a_key_perms_doesnt_confirm_is_a_fault_unless_another_route_gives_one() {
+    let v = &vectors()[6];
+    let mut dictionary = v.dictionary.clone();
+    dictionary.ue.as_mut().unwrap()[0] ^= 1;
+    // The user's password, which unwraps /UE: a key /Perms doesn't
+    // confirm, and no other to take, so it opens by it, saying so.
+    let handler = Handler::open(&dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
+    assert_eq!(handler.faults(), [Fault::Unconfirmed]);
+    assert_ne!(hex(handler.key()), v.key);
+    // The owner's too: its key, which /Perms confirms, is taken.
+    let handler = Handler::open(
+        &dictionary,
+        v.id,
+        &[Encoded::verbatim(v.user), Encoded::verbatim(v.owner)],
+    )
+    .unwrap();
+    assert_eq!(handler.faults(), []);
+    assert_eq!(hex(handler.key()), v.key);
+    assert!(handler.owner());
+}
+
+/// A password's SASLprep form opens a revision 6 file set with it, tried
+/// first; and of revision 5 or 6, a form whose key `/Perms` doesn't
+/// confirm doesn't stop a later one whose key it does. Ⅸ prepares to `IX`,
+/// the user's password here; as typed, it's the owner's.
+#[test]
+fn a_form_whose_key_perms_doesnt_confirm_doesnt_stop_a_later_one_whose_key_it_does() {
+    let id = b"0123456789abcdef";
+    let typed = Password("\u{2168}");
+    let forms = typed.encodings();
+    assert_eq!(forms[0].encoding(), Encoding::Saslprep);
+    for kind in [Kind::Aes256R5, Kind::Aes256] {
+        let dictionary = written(kind, b"IX", "\u{2168}".as_bytes());
+        let handler = Handler::open(&dictionary, id, &forms).unwrap();
+        assert_eq!(
+            handler.opened_by(),
+            Some((0, Encoding::Saslprep)),
+            "{kind:?}"
+        );
+        assert!(!handler.owner(), "{kind:?}");
+        // A /UE that's wrong: SASLprep's form, the user's, unwraps a key
+        // /Perms doesn't confirm; the password as typed, the owner's, one
+        // it does, which opens it.
+        let mut wrong = dictionary.clone();
+        wrong.ue.as_mut().unwrap()[0] ^= 1;
+        let handler = Handler::open(&wrong, id, &forms).unwrap();
+        assert_eq!(handler.opened_by(), Some((1, Encoding::Utf8)), "{kind:?}");
+        assert!(handler.owner(), "{kind:?}");
+        assert_eq!(handler.faults(), [], "{kind:?}");
+        // SASLprep's form alone opens it by the key /Perms doesn't confirm,
+        // saying so.
+        let alone = Handler::open(&wrong, id, &forms[..1]).unwrap();
+        assert_eq!(alone.opened_by(), Some((0, Encoding::Saslprep)), "{kind:?}");
+        assert_eq!(alone.faults(), [Fault::Unconfirmed], "{kind:?}");
+    }
+}
+
+/// A password of invisible characters, each one SASLprep maps to nothing,
+/// is no new file's; read, its SASLprep form is empty, as the spec makes
+/// it, and opens a revision 6 file whose user password is empty, which the
+/// password as typed doesn't.
+#[test]
+fn a_password_of_invisible_characters_opens_a_file_whose_password_is_empty() {
+    let id = b"0123456789abcdef";
+    let invisible = "\u{200C}\u{200D}\u{2060}";
+    assert_eq!(
+        Password(invisible).prepared().unwrap_err(),
+        Unusable::Vanished
+    );
+    let forms = Password(invisible).encodings();
+    assert_eq!(
+        (forms[0].encoding(), forms[0].as_bytes()),
+        (Encoding::Saslprep, &b""[..])
+    );
+    let empty = written(Kind::Aes256, b"", b"owner");
+    let handler = Handler::open(&empty, id, &forms).unwrap();
+    assert_eq!(handler.opened_by(), Some((0, Encoding::Saslprep)));
+    assert!(!handler.owner());
+    let typed = [Encoded::verbatim(invisible.as_bytes())];
+    assert_eq!(
+        Handler::open(&empty, id, &typed).unwrap_err(),
+        Refused::Password
+    );
+}
+
+/// A password whose SASLprep forms by Unicode 3.2 and by a later Unicode
+/// differ opens a revision 6 file set with either, saying which: 3.2's,
+/// the conforming one, tried first; the later Unicode's, a writer's that
+/// prepared it so, next; and as typed, where that's what the later
+/// Unicode's form is. Corrigendum #4's U+2F874, 3.2's U+5F33 and the
+/// correction's U+5F53; Corrigendum #5's U+1100 U+0300 U+1161 U+0323, 3.2's
+/// U+AC00 U+0300 U+0323 and the later Unicode's, the text as typed. A
+/// password whose forms agree opens a file set with 3.2's form of another.
+#[test]
+fn a_password_opens_a_file_set_with_saslprep_by_either_unicode_saying_which() {
+    use Encoding::{Saslprep, SaslprepCurrentUnicode, Utf8};
+    let id = b"0123456789abcdef";
+    let cases = [
+        ("Password\u{2F874}!", "Password\u{5F33}!", (0, Saslprep)),
+        (
+            "Password\u{2F874}!",
+            "Password\u{5F53}!",
+            (1, SaslprepCurrentUnicode),
+        ),
+        (
+            "\u{1100}\u{300}\u{1161}\u{323}",
+            "\u{AC00}\u{300}\u{323}",
+            (0, Saslprep),
+        ),
+        (
+            "\u{1100}\u{300}\u{1161}\u{323}",
+            "\u{1100}\u{300}\u{1161}\u{323}",
+            (1, Utf8),
+        ),
+        // 3.2's form composed once, typed: by both, composed again, its
+        // marks reordered; as typed, the file set with it.
+        (
+            "\u{AC00}\u{300}\u{323}",
+            "\u{AC00}\u{323}\u{300}",
+            (0, Saslprep),
+        ),
+        (
+            "\u{AC00}\u{300}\u{323}",
+            "\u{AC00}\u{300}\u{323}",
+            (1, Utf8),
+        ),
+    ];
+    for (typed, set, by) in cases {
+        for kind in [Kind::Aes256R5, Kind::Aes256] {
+            let dictionary = written(kind, set.as_bytes(), b"owner");
+            let forms = Password(typed).encodings();
+            let handler = Handler::open(&dictionary, id, &forms).unwrap();
+            assert_eq!(handler.opened_by(), Some(by), "{typed:?} {set:?} {kind:?}");
+            assert!(!handler.owner(), "{typed:?} {set:?} {kind:?}");
+        }
+    }
+    // The form a file isn't set with doesn't open it: U+5F53's file, by
+    // 3.2's form alone; U+5F33's, by the later Unicode's.
+    let forms = Password("Password\u{2F874}!").encodings();
+    for (set, other) in [("Password\u{5F53}!", 0), ("Password\u{5F33}!", 1)] {
+        let dictionary = written(Kind::Aes256, set.as_bytes(), b"owner");
+        let opened = Handler::open(&dictionary, id, &forms[other..=other]);
+        assert_eq!(opened.unwrap_err(), Refused::Password, "{set:?}");
+    }
+}
+
+/// A new file takes 3.2's SASLprep form of a password whose forms differ
+/// only where it's a password prepared itself, as U+5F33's is; not where
+/// it prepares to another, as 3.2's form of U+1100 U+0300 U+1161 U+0323
+/// does.
+#[test]
+fn a_new_file_takes_saslprep_by_3_2_of_another_password_only_prepared() {
+    let mut rng = ChaCha20Rng::seed_from_u64(32);
+    let c4 = Password("Password\u{2F874}!").encodings();
+    assert_eq!(c4[0].as_bytes(), "Password\u{5F33}!".as_bytes());
+    let (_, dictionary) = Handler::create(&c4[0], true, &mut rng).unwrap();
+    let typed = Password("Password\u{5F33}!").encodings();
+    let handler = Handler::open(&dictionary, b"", &typed).unwrap();
+    assert_eq!(handler.opened_by(), Some((0, Encoding::Utf8)));
+    let c5 = Password("\u{1100}\u{300}\u{1161}\u{323}").encodings();
+    assert_eq!(c5[0].encoding(), Encoding::Saslprep);
+    let refused = Handler::create(&c5[0], true, &mut rng).map(|_| ());
+    assert_eq!(refused, Err(Unusable::Unprepared(Encoding::Saslprep)));
+}
+
+/// é typed as e and U+0301 opens a revision 4 file whose password is é in
+/// PDFDocEncoding, as the single-byte encodings take the text composed;
+/// and a revision 6 file whose password is é in UTF-8, by its SASLprep
+/// form. As typed, neither.
+#[test]
+fn decomposed_text_opens_a_file_whose_password_is_it_composed() {
+    let id = b"0123456789abcdef";
+    let forms = Password("e\u{301}").encodings();
+    let r4 = written(Kind::Aes128, b"\xE9", b"owner");
+    let handler = Handler::open(&r4, id, &forms).unwrap();
+    assert_eq!(handler.opened_by(), Some((2, Encoding::PdfDoc)));
+    let r6 = written(Kind::Aes256, "é".as_bytes(), b"owner");
+    let handler = Handler::open(&r6, id, &forms).unwrap();
+    assert_eq!(handler.opened_by(), Some((0, Encoding::Saslprep)));
+    let typed = [Encoded::verbatim("e\u{301}".as_bytes())];
+    for dictionary in [&r4, &r6] {
+        let opened = Handler::open(dictionary, id, &typed);
+        assert_eq!(opened.unwrap_err(), Refused::Password);
+    }
+}
+
+#[test]
+fn revision_2_compares_all_of_u() {
+    let v = &vectors()[0];
+    assert_eq!(v.dictionary.r, 2);
+    let mut dictionary = v.dictionary.clone();
+    dictionary.u.as_mut().unwrap()[31] ^= 1;
+    for password in [v.user, v.owner] {
+        let opened = Handler::open(&dictionary, v.id, &[Encoded::verbatim(password)]);
+        assert_eq!(opened.unwrap_err(), Refused::Password);
+    }
+}
+
+#[test]
+fn what_the_writer_writes_opens_and_decrypts() {
+    let kinds = [
+        Kind::Rc4By40,
+        Kind::Rc4By128,
+        Kind::Aes128,
+        Kind::Aes256R5,
+        Kind::Aes256,
+    ];
+    for kind in kinds {
+        for encrypt_metadata in [true, false] {
+            let settings = Settings {
+                kind,
+                user: b"user",
+                owner: b"owner",
+                p: -3904,
+                id: b"0123456789abcdef",
+                encrypt_metadata,
+            };
+            let dictionary = writer::dictionary(&settings);
+            let user = Handler::open(&dictionary, settings.id, &[Encoded::verbatim(b"user")])
+                .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+            assert_eq!(user.faults(), [], "{kind:?}");
+            let owner =
+                Handler::open(&dictionary, settings.id, &[Encoded::verbatim(b"owner")]).unwrap();
+            assert!(owner.owner() && !user.owner(), "{kind:?}");
+            assert_eq!(owner.key(), user.key(), "{kind:?}");
+            assert_eq!(
+                Handler::open(&dictionary, settings.id, &[Encoded::verbatim(b"wrong")])
+                    .unwrap_err(),
+                Refused::Password
+            );
+            for data in [
+                &b""[..],
+                b"x",
+                b"a string sixteen",
+                b"a string of more than sixteen bytes",
+            ] {
+                let string = writer::encrypt_string(&user, (7, 0), data, [9; 16]).unwrap();
+                assert_eq!(
+                    owner.decrypt_string((7, 0), &string).unwrap(),
+                    data,
+                    "{kind:?}"
+                );
+                let stream = writer::encrypt_stream(&user, (8, 0), data, None, [3; 16]).unwrap();
+                assert_eq!(
+                    owner.decrypt_stream((8, 0), &stream, None).unwrap(),
+                    data,
+                    "{kind:?}"
+                );
+            }
+            assert_eq!(
+                user.encrypts_metadata(),
+                encrypt_metadata || matches!(kind, Kind::Rc4By40 | Kind::Rc4By128),
+                "{kind:?}"
+            );
+        }
+    }
+}
+
+/// An AES-128 handler, and a string encrypted by it.
+fn aes() -> (Handler, Vec<u8>) {
+    let settings = Settings {
+        kind: Kind::Aes128,
+        user: b"",
+        owner: b"owner",
+        p: -4,
+        id: b"an id",
+        encrypt_metadata: true,
+    };
+    let handler = Handler::open(&writer::dictionary(&settings), settings.id, &[]).unwrap();
+    let string = writer::encrypt_string(
+        &handler,
+        (5, 0),
+        b"thirty-two bytes, two AES blocks",
+        [1; 16],
+    )
+    .unwrap();
+    (handler, string)
+}
+
+#[test]
+fn aes_ciphertext_that_isnt_says_why() {
+    let (handler, string) = aes();
+    let decrypt = |data: &[u8]| handler.decrypt_string((5, 0), data);
+    assert_eq!(
+        decrypt(&string).unwrap(),
+        b"thirty-two bytes, two AES blocks"
+    );
+    // Empty, it's empty; shorter than an IV, it stays; just an IV, it's
+    // empty, said.
+    assert_eq!(decrypt(b""), Ok(Vec::new()));
+    let short = |len, data| Error {
+        data,
+        fault: Fault::Short { len },
+    };
+    assert_eq!(decrypt(&string[..10]), Err(short(10, None)));
+    assert_eq!(decrypt(&string[..16]), Err(short(16, Some(Vec::new()))));
+    // A part block past the whole ones is said and left off, and the
+    // padding kept, as the last whole block needn't be the last.
+    let padded = [&b"thirty-two bytes, two AES blocks"[..], &[16; 16]].concat();
+    let error = decrypt(&[&string[..], b"xy"].concat()).unwrap_err();
+    assert_eq!(
+        (error.data, error.fault),
+        (Some(padded.clone()), Fault::PartBlock { extra: 2 })
+    );
+    let error = decrypt(&string[..20]).unwrap_err();
+    assert_eq!(
+        (error.data, error.fault),
+        (Some(Vec::new()), Fault::PartBlock { extra: 4 })
+    );
+    // A string's length is exact: white-space past its whole blocks is a
+    // part block.
+    let error = decrypt(&[&string[..], b"\r\n"].concat()).unwrap_err();
+    assert_eq!(error.fault, Fault::PartBlock { extra: 2 });
+    // A stream's white-space past its whole blocks, as a recovered /Length
+    // leaves, is left off, however much; white-space alone is empty.
+    let stream = |data: &[u8]| handler.decrypt_stream((5, 0), data, None);
+    let plain = b"thirty-two bytes, two AES blocks".to_vec();
+    assert_eq!(stream(&[&string[..], b"\r\n"].concat()), Ok(plain.clone()));
+    assert_eq!(stream(&[&string[..], &[b' '; 40]].concat()), Ok(plain));
+    assert_eq!(stream(b"\r\n"), Ok(Vec::new()));
+    // But not past what the whole blocks need, nor said as less than it is.
+    let error = stream(&[&string[..40], b"\n"].concat()).unwrap_err();
+    assert_eq!(error.fault, Fault::PartBlock { extra: 8 });
+    let error = stream(&[&string[..10], b"\r\n"].concat()).unwrap_err();
+    assert_eq!(error, short(12, None));
+    // A last block that isn't padded is kept whole.
+    let error = decrypt(&string[..string.len() - 16]).unwrap_err();
+    assert_eq!(error.fault, Fault::Padding);
+    assert_eq!(error.data.unwrap(), b"thirty-two bytes, two AES blocks");
+}
+
+#[test]
+fn crypt_filters_by_name_and_method() {
+    let (handler, string) = aes();
+    assert_eq!(handler.named(b"Identity"), Method::Identity);
+    assert_eq!(handler.named(b"StdCF"), Method::Aes128);
+    assert_eq!(handler.named(b"Other"), Method::Unknown(b"Other".to_vec()));
+    // A stream by its own crypt filter: /Identity, as it's written.
+    assert_eq!(
+        handler
+            .decrypt_stream((5, 0), &string, Some(&Method::Identity))
+            .unwrap(),
+        string
+    );
+    let error = handler
+        .decrypt_stream((5, 0), &string, Some(&Method::Unknown(b"X".to_vec())))
+        .unwrap_err();
+    assert_eq!(
+        error,
+        Error {
+            data: None,
+            fault: Fault::Method {
+                name: "X".to_string()
+            }
+        }
+    );
+    // AES-256 in a file of AES-128, by a stream's own crypt filter: its
+    // key is AES-128's, and AES-256 is only of /V 5.
+    let error = handler
+        .decrypt_stream((5, 0), &string, Some(&Method::Aes256))
+        .unwrap_err();
+    assert_eq!(error.fault, Fault::Key { len: 16 });
+    // AES in a file of RC4's 40 bits: neither its key nor an object's is
+    // AES's. And below /V 4, a stream's own /Crypt is as streams are.
+    let rc4 = Settings {
+        kind: Kind::Rc4By40,
+        user: b"",
+        owner: b"o",
+        p: -4,
+        id: b"id",
+        encrypt_metadata: true,
+    };
+    let forty = Handler::open(&writer::dictionary(&rc4), b"id", &[]).unwrap();
+    let error = forty
+        .decrypt_stream((5, 0), &string, Some(&Method::Aes256))
+        .unwrap_err();
+    assert_eq!(
+        error,
+        Error {
+            data: None,
+            fault: Fault::Key { len: 5 }
+        }
+    );
+    let error = forty
+        .decrypt_stream((5, 0), &string, Some(&Method::Aes128))
+        .unwrap_err();
+    assert_eq!(error.fault, Fault::Key { len: 5 });
+    assert_eq!(
+        writer::encrypt_stream(&forty, (5, 0), b"x", Some(&Method::Aes128), [0; 16]),
+        Err(Fault::Key { len: 5 })
+    );
+    assert_eq!(forty.named(b"StdCF"), Method::Rc4);
+    assert_eq!(forty.named(b"Identity"), Method::Rc4);
+    // A crypt filter's method, from /CFM: none is identity, /None as
+    // written, and one that isn't, unknown.
+    let settings = Settings {
+        kind: Kind::Aes128,
+        user: b"",
+        owner: b"o",
+        p: -4,
+        id: b"id",
+        encrypt_metadata: true,
+    };
+    let mut dictionary = writer::dictionary(&settings);
+    let filter = |name: &str, method: Option<&str>| CryptFilter {
+        name: name.as_bytes().to_vec(),
+        method: method.map(|m| m.as_bytes().to_vec()),
+    };
+    dictionary.crypt_filters.extend([
+        filter("Bare", None),
+        filter("Out", Some("None")),
+        filter("Odd", Some("ROT13")),
+    ]);
+    let handler = Handler::open(&dictionary, b"id", &[]).unwrap();
+    assert_eq!(handler.named(b"Bare"), Method::Identity);
+    assert_eq!(handler.named(b"Out"), Method::None);
+    assert_eq!(handler.named(b"Odd"), Method::Unknown(b"ROT13".to_vec()));
+    // Without /StmF and /StrF, nothing is encrypted.
+    dictionary.stm_f = None;
+    dictionary.str_f = None;
+    let handler = Handler::open(&dictionary, b"id", &[]).unwrap();
+    assert_eq!(
+        (handler.strings(), handler.streams()),
+        (&Method::Identity, &Method::Identity)
+    );
+}
+
+#[test]
+fn a_dictionary_the_standard_handler_doesnt_take_is_refused() {
+    let base = vectors()[1].dictionary.clone();
+    let refused = |change: fn(&mut Dictionary)| {
+        let mut dictionary = base.clone();
+        change(&mut dictionary);
+        match Handler::open(&dictionary, b"id", &[]) {
+            Err(Refused::Unsupported(why)) => why,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert!(
+        refused(|d| d.filter = b"Adobe.PubSec".to_vec()).contains("/Adobe.PubSec, not /Standard")
+    );
+    assert!(refused(|d| d.v = 3).contains("/V 3 /R 3"));
+    assert!(refused(|d| d.r = 7).contains("/V 2 /R 7"));
+    assert_eq!(refused(|d| d.o = None), "its /O isn't a string");
+    assert_eq!(
+        refused(|d| (d.u, d.p) = (None, None)),
+        "its /U isn't a string, /P isn't an integer"
+    );
+    assert!(refused(|d| d.u.as_mut().unwrap().extend([0; 8])).contains("over 32 bytes"));
+    // Of /V 5, /OE, /UE and /Perms too, as qpdf must have them.
+    let mut aes = vectors()[6].dictionary.clone();
+    aes.perms = None;
+    match Handler::open(&aes, b"id", &[]) {
+        Err(Refused::Unsupported(why)) => assert_eq!(why, "its /Perms isn't a string"),
+        other => panic!("{other:?}"),
+    }
+    // Short ones, empty ones too, are filled out, as qpdf fills them.
+    for len in [16, 0] {
+        let mut short = base.clone();
+        short.u.as_mut().unwrap().truncate(len);
+        assert!(Handler::open(&short, b"id", &[]).is_err_and(|e| e == Refused::Password));
+    }
+}
+
+/// Each refusal and fault says why, word for word, and an error says its
+/// fault.
+#[test]
+fn each_refusal_and_fault_says_why() {
+    let why = Refused::Unsupported("its /O isn't a string".to_string());
+    assert_eq!(why.to_string(), "its /O isn't a string");
+    assert_eq!(
+        Refused::Password.to_string(),
+        "the password doesn't open it"
+    );
+    let cases = [
+        (
+            Fault::Short { len: 10 },
+            "its AES ciphertext has no whole block past its IV",
+        ),
+        (
+            Fault::PartBlock { extra: 2 },
+            "its AES ciphertext has a part block past its whole blocks",
+        ),
+        (Fault::Padding, "its AES plaintext isn't padded"),
+        (
+            Fault::Method {
+                name: "ROT13".to_string(),
+            },
+            "its crypt filter's method or name, /ROT13, isn't one",
+        ),
+        (
+            Fault::Key { len: 5 },
+            "its crypt filter's AES isn't for the file's key of 5 bytes",
+        ),
+        (
+            Fault::Perms,
+            "its /Perms doesn't match its /P and /EncryptMetadata",
+        ),
+        (
+            Fault::Unconfirmed,
+            "its /Perms doesn't confirm the key its /OE or /UE unwraps to",
+        ),
+    ];
+    for (fault, said) in cases {
+        assert_eq!(fault.to_string(), said, "{fault:?}");
+    }
+    let error = Error {
+        data: Some(b"kept".to_vec()),
+        fault: Fault::Padding,
+    };
+    assert_eq!(error.to_string(), "its AES plaintext isn't padded");
+}
+
+/// The writer's kinds, each way of `/EncryptMetadata`, and qpdf's files:
+/// a name, and the handler opened by the user's password and by the
+/// owner's.
+fn every_kind() -> Vec<(String, Handler, Handler)> {
+    let mut handlers = Vec::new();
+    let kinds = [
+        Kind::Rc4By40,
+        Kind::Rc4By128,
+        Kind::Aes128,
+        Kind::Aes256R5,
+        Kind::Aes256,
+    ];
+    for kind in kinds {
+        for encrypt_metadata in [true, false] {
+            let settings = Settings {
+                kind,
+                user: b"user",
+                owner: b"owner",
+                p: -4,
+                id: b"0123456789abcdef",
+                encrypt_metadata,
+            };
+            let dictionary = writer::dictionary(&settings);
+            let open = |password: &[u8]| {
+                Handler::open(&dictionary, settings.id, &[Encoded::verbatim(password)])
+            };
+            let name = format!("{kind:?}, /EncryptMetadata {encrypt_metadata}");
+            handlers.push((name, open(b"user").unwrap(), open(b"owner").unwrap()));
+        }
+    }
+    for v in vectors() {
+        let open =
+            |password: &[u8]| Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(password)]);
+        handlers.push((
+            v.name.to_string(),
+            open(v.user).unwrap(),
+            open(v.owner).unwrap(),
+        ));
+    }
+    handlers
+}
+
+/// Strings and streams encrypted under the IVs the handler derives decrypt
+/// to what they were, by the other password's handler, on every revision
+/// and method: the writer's kinds and qpdf's files, and a stream by its
+/// own crypt filter, of each method; the same bytes each time. AES that
+/// the file's key isn't for is refused encrypting as it is decrypting.
+#[test]
+fn what_it_encrypts_decrypts_on_every_revision_and_method() {
+    let thousand = [0; 1000];
+    let data: [&[u8]; 5] = [
+        b"",
+        b"x",
+        b"a string sixteen",
+        b"a string of more than sixteen bytes",
+        &thousand,
+    ];
+    let methods = [
+        Method::Identity,
+        Method::None,
+        Method::Rc4,
+        Method::Aes128,
+        Method::Aes256,
+    ];
+    for (name, user, owner) in &every_kind() {
+        for data in data {
+            for context in [&b""[..], b"7 0 R", b"another context"] {
+                let len = data.len();
+                let string = user.encrypt_string((7, 0), context, data).unwrap();
+                assert_eq!(
+                    owner.decrypt_string((7, 0), &string).unwrap(),
+                    data,
+                    "{name}, {len}"
+                );
+                let again = user.encrypt_string((7, 0), context, data);
+                assert_eq!(again.unwrap(), string, "{name}, {len}");
+                let stream = user.encrypt_stream((8, 0), context, data, None).unwrap();
+                assert_eq!(
+                    owner.decrypt_stream((8, 0), &stream, None).unwrap(),
+                    data,
+                    "{name}, {len}"
+                );
+                for method in &methods {
+                    match user.encrypt_stream((8, 0), context, data, Some(method)) {
+                        Ok(stream) => assert_eq!(
+                            owner.decrypt_stream((8, 0), &stream, Some(method)),
+                            Ok(data.to_vec()),
+                            "{name}, {method:?}, {len}"
+                        ),
+                        Err(fault) => {
+                            assert!(matches!(fault, Fault::Key { .. }), "{name}, {method:?}");
+                            let refused = owner.decrypt_stream((8, 0), &[1; 32], Some(method));
+                            assert_eq!(refused.unwrap_err().fault, fault, "{name}, {method:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// An AES string's or stream's IV is the first 16 bytes of HMAC-SHA256,
+/// under the file's key, of the context's length (8 bytes, big-endian),
+/// the context and the data: as RustCrypto's `hmac` gives it called here
+/// directly, on each of qpdf's AES files; and the whole string as Python's
+/// `hmac` and OpenSSL's `enc` gave it, for qpdf's AES-128 and AES-256
+/// files.
+#[test]
+fn an_aes_iv_is_hmac_sha256_of_the_context_and_the_data() {
+    use ::hmac::{Hmac, KeyInit, Mac};
+    let apart = |key: &[u8], context: &[u8], data: &[u8]| {
+        let mut mac = Hmac::<::sha2::Sha256>::new_from_slice(key).unwrap();
+        mac.update(&(context.len() as u64).to_be_bytes());
+        mac.update(context);
+        mac.update(data);
+        hex(&mac.finalize().into_bytes()[..16])
+    };
+    let cases: [(&[u8], &[u8]); 4] = [
+        (b"", b""),
+        (b"the Info dictionary", b"A plain title"),
+        (b"a context", &[7; 300]),
+        (&[0; 200], b"a longer context than HMAC-SHA256's block"),
+    ];
+    for v in &vectors()[3..] {
+        let name = v.name;
+        let handler = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
+        assert!(matches!(handler.strings(), Method::Aes128 | Method::Aes256));
+        for (context, data) in cases {
+            let iv = apart(handler.key(), context, data);
+            let string = handler.encrypt_string((2, 0), context, data).unwrap();
+            assert_eq!(hex(&string[..16]), iv, "{name}");
+            let stream = handler.encrypt_stream((9, 0), context, data, None).unwrap();
+            assert_eq!(hex(&stream[..16]), iv, "{name}");
+        }
+    }
+    let whole = [
+        (
+            3,
+            "3daa97080345736f48ddbf3c562a8501",
+            "7c7ed19fcb44350aa3d10ed2f62b9d1a",
+        ),
+        (
+            6,
+            "7c635604806fcd83b48df659bc00b7c8",
+            "a3c89f20b55df959d0e0535ab97b328f",
+        ),
+    ];
+    for (i, iv, cipher) in whole {
+        let v = &vectors()[i];
+        let handler = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
+        let string = handler.encrypt_string((2, 0), b"the Info dictionary", b"A plain title");
+        assert_eq!(hex(&string.unwrap()), format!("{iv}{cipher}"), "{}", v.name);
+    }
+}
+
+/// What an AES string's IV is keyed by: the same for the same context and
+/// value wherever it's written, and another for another context or
+/// another value; a context and value never run together into another's
+/// (`ab` and `c`, `a` and `bc`). Under AES-256, whose key is the file's,
+/// the same context and value encrypt to the same bytes at another number,
+/// and decrypt by the number they're at.
+#[test]
+fn ivs_are_keyed_by_what_the_object_is() {
+    for kind in [Kind::Aes128, Kind::Aes256R5, Kind::Aes256] {
+        let settings = Settings {
+            kind,
+            user: b"",
+            owner: b"owner",
+            p: -4,
+            id: b"an id",
+            encrypt_metadata: true,
+        };
+        let handler = Handler::open(&writer::dictionary(&settings), settings.id, &[]).unwrap();
+        let encrypt = |id: (u32, u16), context: &str, value: &str| {
+            (handler.encrypt_string(id, context.as_bytes(), value.as_bytes())).unwrap()
+        };
+        let iv = |id, context, value| encrypt(id, context, value)[..16].to_vec();
+        let first = iv((5, 0), "the catalog", "a value");
+        assert_eq!(iv((5, 0), "the catalog", "a value"), first, "{kind:?}");
+        assert_eq!(iv((6, 0), "the catalog", "a value"), first, "{kind:?}");
+        assert_eq!(iv((5, 1), "the catalog", "a value"), first, "{kind:?}");
+        for other in [
+            iv((5, 0), "the page labels", "a value"),
+            iv((5, 0), "the catalog", "another value"),
+            iv((5, 0), "a page", "a value"),
+        ] {
+            assert_ne!(other, first, "{kind:?}");
+        }
+        assert_ne!(iv((5, 0), "ab", "c"), iv((5, 0), "a", "bc"), "{kind:?}");
+        assert_ne!(iv((5, 0), "", "abc"), iv((5, 0), "abc", ""), "{kind:?}");
+        let moved = encrypt((6, 0), "the catalog", "a value");
+        let same = moved == encrypt((5, 0), "the catalog", "a value");
+        assert_eq!(same, kind != Kind::Aes128, "{kind:?}");
+        assert_eq!(
+            handler.decrypt_string((6, 0), &moved).unwrap(),
+            b"a value",
+            "{kind:?}"
+        );
+    }
+}
+
+/// RC4 takes no IV: what it encrypts under any context is the writer's
+/// bytes under any IV, and qpdf's string, byte for byte.
+#[test]
+fn rc4_takes_no_iv() {
+    for v in &vectors()[..3] {
+        let name = v.name;
+        let handler = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
+        assert_eq!(handler.strings(), &Method::Rc4, "{name}");
+        let (n, written) = v.title;
+        for context in [&b""[..], b"one", b"another"] {
+            let string = handler.encrypt_string((n, 0), context, b"A plain title");
+            assert_eq!(string.unwrap(), written, "{name}");
+        }
+        let string = writer::encrypt_string(&handler, (n, 0), b"A plain title", [9; 16]);
+        assert_eq!(string.unwrap(), written, "{name}");
+    }
+}
+
+/// A method that isn't one encrypts nothing: it's refused, as it is
+/// decrypting, never written as plaintext, by the writer's IVs too; while
+/// `/Identity` and `/None` leave the data as it is.
+#[test]
+fn a_method_that_isnt_one_is_refused_not_written_as_plaintext() {
+    let (handler, _) = aes();
+    let odd = Method::Unknown(b"ROT13".to_vec());
+    let refused = |name: &str| {
+        Err(Fault::Method {
+            name: name.to_string(),
+        })
+    };
+    let encrypted = handler.encrypt_stream((5, 0), b"c", b"x", Some(&odd));
+    assert_eq!(encrypted, refused("ROT13"));
+    let encrypted = writer::encrypt_stream(&handler, (5, 0), b"x", Some(&odd), [0; 16]);
+    assert_eq!(encrypted, refused("ROT13"));
+    for method in [Method::Identity, Method::None] {
+        let encrypted = handler.encrypt_stream((5, 0), b"c", b"x", Some(&method));
+        assert_eq!(encrypted, Ok(b"x".to_vec()), "{method:?}");
+    }
+    // A dictionary whose /StrF names a crypt filter it hasn't, and whose
+    // /StmF names one whose method isn't one.
+    let settings = Settings {
+        kind: Kind::Aes128,
+        user: b"",
+        owner: b"o",
+        p: -4,
+        id: b"id",
+        encrypt_metadata: true,
+    };
+    let mut dictionary = writer::dictionary(&settings);
+    dictionary.crypt_filters.push(CryptFilter {
+        name: b"Odd".to_vec(),
+        method: Some(b"ROT13".to_vec()),
+    });
+    dictionary.str_f = Some(b"Missing".to_vec());
+    dictionary.stm_f = Some(b"Odd".to_vec());
+    let handler = Handler::open(&dictionary, b"id", &[]).unwrap();
+    assert_eq!(
+        handler.encrypt_string((5, 0), b"c", b"x"),
+        refused("Missing")
+    );
+    assert_eq!(
+        writer::encrypt_string(&handler, (5, 0), b"x", [0; 16]),
+        refused("Missing")
+    );
+    let encrypted = handler.encrypt_stream((5, 0), b"c", b"x", None);
+    assert_eq!(encrypted, refused("ROT13"));
+}
+
+/// A handler can be cloned and shared across threads, and its clone and
+/// each thread encrypt and decrypt as it does.
+#[test]
+fn a_handler_is_clone_send_and_sync() {
+    fn cloned<T: Clone + Send + Sync>(t: &T) -> T {
+        t.clone()
+    }
+    let (handler, string) = aes();
+    let clone = cloned(&handler);
+    let encrypted = handler.encrypt_string((5, 0), b"c", b"a value");
+    assert_eq!(clone.encrypt_string((5, 0), b"c", b"a value"), encrypted);
+    assert_eq!(
+        clone.decrypt_string((5, 0), &string),
+        handler.decrypt_string((5, 0), &string)
+    );
+    let shared = &handler;
+    let each = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..2)
+            .map(|_| scope.spawn(|| shared.encrypt_string((5, 0), b"c", b"a value")))
+            .collect();
+        (threads.into_iter())
+            .map(|t| t.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(each, [encrypted.clone(), encrypted]);
+}
+
+/// A new file's dictionary for `typed`, prepared, and its handler, from a
+/// generator seeded with `seed`.
+fn created(typed: &str, encrypt_metadata: bool, seed: u64) -> (Handler, Dictionary) {
+    let password = Password(typed).prepared().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    Handler::create(&password, encrypt_metadata, &mut rng).unwrap()
+}
+
+/// A new file's dictionary is revision 6's, AES-256, every permission
+/// granted, `/EncryptMetadata` as asked, and `/Perms` saying both; it
+/// opens by the password as typed, as the owner's, its owner's password
+/// being the user's, and by the user's route where the owner's is broken,
+/// each by the key it was created with, without a fault; its handler is
+/// the owner's, opened by none, and encrypts as the opened one does, each
+/// decrypting the other's. A password whose SASLprep form is itself
+/// (`pässwörd`) opens it as typed, in UTF-8; one whose form isn't (Ⅸ, set
+/// as `IX`) by that form, and by `IX` typed, but not by its UTF-8.
+#[test]
+fn a_new_files_dictionary_opens_by_its_password_as_the_owners_and_the_users() {
+    let cases = [
+        ("user", Encoding::Utf8),
+        ("p\u{e4}ssw\u{f6}rd", Encoding::Utf8),
+        ("\u{2168}", Encoding::Saslprep),
+    ];
+    for (typed, by) in cases {
+        for encrypt_metadata in [true, false] {
+            let what = format!("{typed}, {encrypt_metadata}");
+            let (handler, dictionary) = created(typed, encrypt_metadata, 1);
+            let lengths = [&dictionary.o, &dictionary.u, &dictionary.oe, &dictionary.ue]
+                .map(|v| v.as_ref().map(Vec::len));
+            assert_eq!(lengths, [Some(48), Some(48), Some(32), Some(32)], "{what}");
+            let stdcf = vec![CryptFilter {
+                name: b"StdCF".to_vec(),
+                method: Some(b"AESV3".to_vec()),
+            }];
+            assert_eq!(
+                dictionary,
+                Dictionary {
+                    filter: b"Standard".to_vec(),
+                    v: 5,
+                    r: 6,
+                    length: Some(256),
+                    p: Some(-4),
+                    encrypt_metadata: Some(encrypt_metadata),
+                    crypt_filters: stdcf,
+                    stm_f: Some(b"StdCF".to_vec()),
+                    str_f: Some(b"StdCF".to_vec()),
+                    ..dictionary.clone()
+                },
+                "{what}"
+            );
+            assert!(handler.owner(), "{what}");
+            assert_eq!(handler.opened_by(), None, "{what}");
+            assert_eq!(handler.faults(), [], "{what}");
+            assert_eq!(handler.encrypts_metadata(), encrypt_metadata, "{what}");
+            assert_eq!(
+                (handler.strings(), handler.streams()),
+                (&Method::Aes256, &Method::Aes256),
+                "{what}"
+            );
+            // /Perms: /P and /EncryptMetadata, then `adb`.
+            let mut perms: [u8; 16] = dictionary.perms.clone().unwrap().try_into().unwrap();
+            Aes::new(handler.key()).unwrap().decrypt(&mut perms);
+            let metadata = if encrypt_metadata { b'T' } else { b'F' };
+            assert_eq!(
+                perms[..12],
+                [
+                    0xfc, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, metadata, b'a', b'd', b'b'
+                ],
+                "{what}"
+            );
+            let opened = Handler::open(&dictionary, b"", &Password(typed).encodings()).unwrap();
+            assert_eq!(opened.opened_by(), Some((0, by)), "{what}");
+            assert!(opened.owner(), "{what}");
+            assert_eq!(opened.faults(), [], "{what}");
+            assert_eq!(opened.key(), handler.key(), "{what}");
+            assert_eq!(opened.encrypts_metadata(), encrypt_metadata, "{what}");
+            // By the user's route, where /O's hash is broken.
+            let mut user = dictionary.clone();
+            user.o.as_mut().unwrap()[0] ^= 1;
+            let opened = Handler::open(&user, b"", &Password(typed).encodings()).unwrap();
+            assert!(!opened.owner(), "{what}");
+            assert_eq!(opened.faults(), [], "{what}");
+            assert_eq!(opened.key(), handler.key(), "{what}");
+            for data in [&b""[..], b"A plain title", &[7; 100]] {
+                let string = handler.encrypt_string((2, 0), b"the Info dictionary", data);
+                let again = opened.encrypt_string((2, 0), b"the Info dictionary", data);
+                assert_eq!(again, string, "{what}");
+                let back = opened.decrypt_string((2, 0), &string.unwrap());
+                assert_eq!(back.unwrap(), data, "{what}");
+                let stream = opened
+                    .encrypt_stream((3, 0), b"a page", data, None)
+                    .unwrap();
+                let back = handler.decrypt_stream((3, 0), &stream, None);
+                assert_eq!(back.unwrap(), data, "{what}");
+            }
+            let wrong = Handler::open(&dictionary, b"", &Password("wrong").encodings());
+            assert_eq!(wrong.unwrap_err(), Refused::Password, "{what}");
+        }
+    }
+    let (_, ix) = created("\u{2168}", true, 1);
+    let by_ix = Handler::open(&ix, b"", &Password("IX").encodings()).unwrap();
+    assert_eq!(by_ix.opened_by(), Some((0, Encoding::Utf8)));
+    let utf8 = [Encoded::verbatim("\u{2168}".as_bytes())];
+    assert_eq!(
+        Handler::open(&ix, b"", &utf8).unwrap_err(),
+        Refused::Password
+    );
+}
+
+/// What a new file's dictionary is made of is drawn from its generator in
+/// one order: the file's key, the user's validation and key salts, the
+/// owner's, and `/Perms`' four random bytes, and nothing more. The same
+/// seed gives the same dictionary, byte for byte, as an implementation of
+/// Algorithms 2.B, 8, 9 and 10 over OpenSSL's AES and SHA-2 gave it for
+/// these draws, by the generator's own type or behind `dyn CryptoRng`;
+/// another seed another.
+#[test]
+fn a_new_files_dictionary_is_drawn_from_its_generator_in_order() {
+    let (handler, dictionary) = created("user", true, 1);
+    let mut draws = ChaCha20Rng::seed_from_u64(1);
+    let mut drawn = |n: usize| {
+        let mut bytes = vec![0; n];
+        draws.fill_bytes(&mut bytes);
+        bytes
+    };
+    assert_eq!(drawn(32), handler.key());
+    let (u, o) = (dictionary.u.clone().unwrap(), dictionary.o.clone().unwrap());
+    assert_eq!(drawn(8), u[32..40], "the user's validation salt");
+    assert_eq!(drawn(8), u[40..48], "the user's key salt");
+    assert_eq!(drawn(8), o[32..40], "the owner's validation salt");
+    assert_eq!(drawn(8), o[40..48], "the owner's key salt");
+    let mut perms: [u8; 16] = dictionary.perms.clone().unwrap().try_into().unwrap();
+    Aes::new(handler.key()).unwrap().decrypt(&mut perms);
+    assert_eq!(drawn(4), perms[12..], "/Perms' random bytes");
+    // Nothing more: the generator's next draw is what follows them.
+    let mut rng = ChaCha20Rng::seed_from_u64(1);
+    let password = Password("user").prepared().unwrap();
+    Handler::create(&password, true, &mut rng).unwrap();
+    assert_eq!(rng.next_u64().to_le_bytes().to_vec(), drawn(8));
+    let pinned = [
+        (
+            &dictionary.u,
+            "ab1e57df51de8a284524b0f6e8e2d4766b89155398b6a433dc35d874b3f598b6000efec87c5749ec1157912e0e171f60",
+        ),
+        (
+            &dictionary.ue,
+            "ebd1411d1c225f4064d80d9812915de20549a5a42f522bb1fe179bb1eb08fe39",
+        ),
+        (
+            &dictionary.o,
+            "91d221f45275b3a24057a6431cf164a9f7764930cc9de3635f92e21761b8b456de9e5341348819a2de99f140c59a424c",
+        ),
+        (
+            &dictionary.oe,
+            "24eed81bcf339ab5cfe332f532f091a5c88660a45d5ada01080a0a1e1362e50b",
+        ),
+        (&dictionary.perms, "c700cdbbc128f6798b0efbde215132f1"),
+    ];
+    for (value, hex_bytes) in pinned {
+        assert_eq!(hex(value.as_ref().unwrap()), hex_bytes);
+    }
+    assert_eq!(created("user", true, 1).1, dictionary, "the same seed");
+    // A generator behind `dyn CryptoRng`, as a caller choosing one at run
+    // time holds it, draws the same.
+    let mut seeded = ChaCha20Rng::seed_from_u64(1);
+    let rng: &mut dyn CryptoRng = &mut seeded;
+    let (_, by_dyn) = Handler::create(&password, true, rng).unwrap();
+    assert_eq!(by_dyn, dictionary, "by dyn CryptoRng");
+    let other = created("user", true, 2).1;
+    for (a, b) in [
+        (&other.u, &dictionary.u),
+        (&other.ue, &dictionary.ue),
+        (&other.o, &dictionary.o),
+        (&other.oe, &dictionary.oe),
+        (&other.perms, &dictionary.perms),
+    ] {
+        assert_ne!(a, b, "another seed");
+    }
+}
+
+/// A new file takes a password only in SASLprep's form, of 1 to 127
+/// bytes: one in another encoding is refused, as is SASLprep's form that
+/// a reader tries but no new file takes, empty (each character one
+/// SASLprep maps to nothing) or over 127 bytes, which a reader would cut.
+/// Refused, nothing is drawn.
+#[test]
+fn a_password_not_prepared_or_not_1_to_127_bytes_makes_no_new_file() {
+    let form = |typed: &str, encoding: Encoding| {
+        let forms = Password(typed).encodings();
+        forms
+            .into_iter()
+            .find(|e| e.encoding() == encoding)
+            .unwrap()
+    };
+    let long = "\u{2168}".repeat(64);
+    let refusals = [
+        (
+            form("user", Encoding::Utf8),
+            Unusable::Unprepared(Encoding::Utf8),
+        ),
+        (
+            form("caf\u{e9}", Encoding::PdfDoc),
+            Unusable::Unprepared(Encoding::PdfDoc),
+        ),
+        (
+            Encoded::verbatim(b"user"),
+            Unusable::Unprepared(Encoding::Verbatim),
+        ),
+        (form("\u{AD}", Encoding::Saslprep), Unusable::Empty),
+        (
+            form(&long, Encoding::Saslprep),
+            Unusable::TooLong { len: 128 },
+        ),
+    ];
+    for (password, why) in refusals {
+        let mut rng = ChaCha20Rng::seed_from_u64(1);
+        let refused = Handler::create(&password, true, &mut rng);
+        assert_eq!(refused.map(|_| ()), Err(why.clone()), "{why}");
+        let first = ChaCha20Rng::seed_from_u64(1).next_u64();
+        assert_eq!(rng.next_u64(), first, "{why}: nothing drawn");
+    }
+    // Prepared, those two are refused alike; 63 Ⅸs, 126 bytes, are taken.
+    assert_eq!(
+        Password("\u{AD}").prepared().unwrap_err(),
+        Unusable::Vanished
+    );
+    let too_long = Password(&long).prepared().unwrap_err();
+    assert_eq!(too_long, Unusable::TooLong { len: 128 });
+    let (_, dictionary) = created(&"\u{2168}".repeat(63), true, 1);
+    let opened = Handler::open(&dictionary, b"", &Password(&"IX".repeat(63)).encodings());
+    assert!(opened.unwrap().owner());
+}

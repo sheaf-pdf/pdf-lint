@@ -1,0 +1,26 @@
+[package]
+name = "pdf-color"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+description = "PDF color spaces read: families, components as ISO 32000-2 and PDFium count them, base and alternate spaces, colorants"
+keywords = ["pdf", "color", "color-space", "iso-32000"]
+categories = ["parser-implementations", "graphics"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+pdf-objects = { path = "../pdf-objects", version = "0.1" }
+thiserror = "2"
+
+[dev-dependencies]
+# The tests' resolvers: a reading in memory, a reading by position, a document.
+pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+# cargo-fuzz builds with --cfg fuzzing, which compiles the `fuzz` module.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

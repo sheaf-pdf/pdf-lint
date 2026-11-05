@@ -1,0 +1,1 @@
+<< /ColorSpace << /CS0 /DeviceGray /CS1 /DeviceRGB /Indexed /DeviceRGB >> >>

@@ -1,4 +1,5 @@
-//! What a token stands for: a name's or a string's bytes, or a number.
+//! What a token stands for: a name's or a string's bytes, or a number, as
+//! ISO 32000-2 reads them; and in [`pdfium`], as PDFium does.
 //!
 //! Decoding hides nothing. Every byte of a name or string is in exactly one
 //! [`Piece`], which says what value byte it stands for and how, so each
@@ -8,6 +9,10 @@
 
 use core::fmt;
 use core::ops::Range;
+
+use memchr::memchr2;
+
+pub mod pdfium;
 
 use crate::chars::{is_regular, is_white_space};
 use crate::token::{Kind, Token};
@@ -61,8 +66,9 @@ pub enum How {
     /// A `\` that an unclosed string ends on: no byte.
     Dangling,
     /// A byte the syntax doesn't allow there, such as a letter in a hex
-    /// string, or anything after a string's close: no byte. A token from
-    /// the tokenizer never has one.
+    /// string, or anything after a string's close: no byte. A token read by
+    /// ISO 32000-2's rules never has one; a hex string read by PDFium's may,
+    /// a byte in it that's neither a hex digit nor white-space.
     Invalid,
 }
 
@@ -311,6 +317,31 @@ fn escape(after: &[u8]) -> (usize, Option<u8>, How) {
     }
 }
 
+/// A literal string's value as written, when nothing in it needs decoding:
+/// what's inside its parentheses (the first and the one that balances it)
+/// holds no backslash and no CR, and nothing comes after the one that
+/// balances it.
+fn literal_verbatim(bytes: &[u8]) -> Option<&[u8]> {
+    if memchr2(b'\\', b'\r', bytes).is_some() {
+        return None;
+    }
+    let (start, mut depth) = match bytes.first() {
+        Some(b'(') => (1, 1usize),
+        _ => (0, 0),
+    };
+    let mut at = start;
+    while let Some(i) = bytes.get(at..).and_then(|rest| memchr2(b'(', b')', rest)) {
+        at += i;
+        match bytes[at] {
+            b'(' => depth += 1,
+            _ if depth == 1 => return (at + 1 == bytes.len()).then(|| &bytes[start..at]),
+            _ => depth = depth.saturating_sub(1),
+        }
+        at += 1;
+    }
+    bytes.get(start..)
+}
+
 /// A hex digit's value.
 fn digit(b: u8) -> u8 {
     match b {
@@ -322,42 +353,51 @@ fn digit(b: u8) -> u8 {
 }
 
 /// Why a token isn't the number asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum NumberError {
     /// It isn't written as one.
+    #[error("not a number")]
     NotANumber,
     /// It's written as one, but too large: an integer outside `i64`, or a
     /// number too large for a finite `f64`. Readers differ here: qpdf
     /// reads the whole object holding it as null.
+    #[error("a number too large to hold")]
     Overflow,
 }
-
-impl fmt::Display for NumberError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            NumberError::NotANumber => "not a number",
-            NumberError::Overflow => "a number too large to hold",
-        })
-    }
-}
-
-impl core::error::Error for NumberError {}
 
 /// The integer `bytes` are written as: digits, with an optional sign (ISO
 /// 32000-2, 7.3.3).
 pub fn integer(bytes: &[u8]) -> Result<i64, NumberError> {
-    if word(bytes) != Kind::Integer {
+    let (negative, digits) = match bytes {
+        [b'-', digits @ ..] => (true, digits),
+        [b'+', digits @ ..] => (false, digits),
+        digits => (false, digits),
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
         return Err(NumberError::NotANumber);
     }
-    let text = core::str::from_utf8(bytes).map_err(|_| NumberError::NotANumber)?;
-    // Only digits and a sign are left, so a failure is an overflow.
-    text.parse().map_err(|_| NumberError::Overflow)
+    // Toward the sign, so that `i64::MIN`, one further from 0 than
+    // `i64::MAX`, is read; past either end, an overflow.
+    let mut value: i64 = 0;
+    for &b in digits {
+        let digit = i64::from(b - b'0');
+        value = (value.checked_mul(10))
+            .and_then(|v| match negative {
+                true => v.checked_sub(digit),
+                false => v.checked_add(digit),
+            })
+            .ok_or(NumberError::Overflow)?;
+    }
+    Ok(value)
 }
 
 /// The number `bytes` are written as, an integer or a real, as an `f64`
 /// (ISO 32000-2, 7.3.3). Forms Rust reads but PDF doesn't write, such as
 /// `1e5` or `inf`, aren't numbers.
 pub fn number(bytes: &[u8]) -> Result<f64, NumberError> {
+    if let Some(value) = short_decimal(bytes) {
+        return Ok(value);
+    }
     if !matches!(word(bytes), Kind::Integer | Kind::Real) {
         return Err(NumberError::NotANumber);
     }
@@ -370,9 +410,56 @@ pub fn number(bytes: &[u8]) -> Result<f64, NumberError> {
     }
 }
 
+/// The powers of ten an `f64` holds exactly, 10^0 to 10^22.
+const TENS: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
+/// The number `bytes` are written as, where it's short enough to read
+/// exactly by one division: digits, at most one point among them and an
+/// optional sign, the digits read as an integer no more than 2^53 and at
+/// most 22 of them after the point. Both that integer and the power of ten
+/// it's divided by are then `f64`s exactly, and the quotient is rounded
+/// once, to the nearest, as a decimal's reading is: the `f64` the decimal
+/// is read as. None otherwise, for [`number`]'s whole reading; and None
+/// always on x86 without SSE2, whose x87 division rounds to a 64-bit
+/// significand and then again to an `f64`'s, so that a quotient may be
+/// rounded twice, where the whole reading sets the x87's precision for
+/// its own division.
+fn short_decimal(bytes: &[u8]) -> Option<f64> {
+    if cfg!(all(target_arch = "x86", not(target_feature = "sse2"))) {
+        return None;
+    }
+    let (negative, rest) = match bytes {
+        [b'-', rest @ ..] => (true, rest),
+        [b'+', rest @ ..] => (false, rest),
+        rest => (false, rest),
+    };
+    let (mut digits, mut value, mut point) = (0, 0u64, None);
+    for &b in rest {
+        match b {
+            b'0'..=b'9' if digits < 19 => {
+                value = value * 10 + u64::from(b - b'0');
+                digits += 1;
+            }
+            b'.' if point.is_none() => point = Some(digits),
+            _ => return None,
+        }
+    }
+    let after = digits - point.unwrap_or(digits);
+    if digits == 0 || value > 1 << 53 || after >= TENS.len() {
+        return None;
+    }
+    let value = value as f64 / TENS[after];
+    Some(if negative { -value } else { value })
+}
+
 impl<'a> Token<'a> {
     /// The pieces of a name, a literal string or a hex string, at their
-    /// offsets in the input. `None` for any other kind.
+    /// offsets in the input, as ISO 32000-2 reads them, whatever rules read
+    /// the token. `None` for any other kind. [`pdfium`] reads the same
+    /// bytes as PDFium does.
     pub fn pieces(&self) -> Option<Pieces<'a>> {
         let syntax = match self.kind {
             Kind::Name => Syntax::Name,
@@ -389,22 +476,39 @@ impl<'a> Token<'a> {
     /// empty hex string). `None` when something does, its value then being
     /// its pieces' [`bytes`](Pieces::bytes), and for any other kind.
     pub fn verbatim(&self) -> Option<&'a [u8]> {
-        let mut plain: Option<Range<usize>> = None;
-        for piece in self.pieces()? {
-            match piece.how {
-                How::Delimiter => {}
-                How::Plain => {
-                    let start = plain.map_or(piece.at.start, |run| run.start);
-                    plain = Some(start..piece.at.end);
-                }
-                _ => return None,
+        // The bytes are searched for what the pieces would say isn't plain,
+        // not walked piece by piece: the same answer, from any bytes, a
+        // token's or not.
+        let bytes = self.bytes;
+        let value = match self.kind {
+            Kind::Name => {
+                let body = bytes.strip_prefix(b"/").unwrap_or(bytes);
+                body.iter()
+                    .all(|&b| is_regular(b) && b != b'#')
+                    .then_some(body)?
             }
-        }
-        let run = plain.map_or(0..0, |run| run.start - self.start..run.end - self.start);
-        Some(self.bytes.get(run).unwrap_or_default())
+            Kind::String { .. } => literal_verbatim(bytes)?,
+            // No piece of a hex string is plain (each between its
+            // delimiters is digits, white-space or a byte it can't hold),
+            // so it's verbatim only with nothing but them.
+            Kind::HexString { .. } => match bytes {
+                [] | [b'<' | b'>'] | [b'<', b'>'] => &[],
+                _ => return None,
+            },
+            _ => return None,
+        };
+        // Empty, it's where the token starts, as the pieces would place it.
+        Some(if value.is_empty() {
+            bytes.get(..0).unwrap_or_default()
+        } else {
+            value
+        })
     }
 
-    /// The integer an [`Integer`](Kind::Integer) token is written as.
+    /// The integer an [`Integer`](Kind::Integer) token is written as, read
+    /// as ISO 32000-2 writes one: a word only PDFium's rules make an
+    /// integer, such as `--5`, isn't one here, and [`pdfium::number`] reads
+    /// it.
     pub fn integer(&self) -> Result<i64, NumberError> {
         match self.kind {
             Kind::Integer => integer(self.bytes),
@@ -413,7 +517,9 @@ impl<'a> Token<'a> {
     }
 
     /// The number an [`Integer`](Kind::Integer) or [`Real`](Kind::Real)
-    /// token is written as, as an `f64`.
+    /// token is written as, as an `f64`, read as ISO 32000-2 writes one: a
+    /// word only PDFium's rules make a number, such as `1.2.3`, isn't one
+    /// here, and [`pdfium::number`] reads it.
     pub fn number(&self) -> Result<f64, NumberError> {
         match self.kind {
             Kind::Integer | Kind::Real => number(self.bytes),
@@ -426,6 +532,8 @@ impl<'a> Token<'a> {
 mod tests {
     extern crate std;
 
+    use std::format;
+    use std::vec;
     use std::vec::Vec;
 
     use crate::decode::{self, How, NumberError, Piece, Pieces};
@@ -677,6 +785,148 @@ mod tests {
         assert_eq!(token(b"/Name").number(), Err(NumberError::NotANumber));
     }
 
+    /// [`decode::integer`] as it was: by the tokenizer's word, then Rust's
+    /// reading of the text.
+    fn integer_by_text(bytes: &[u8]) -> Result<i64, NumberError> {
+        if crate::tokenizer::word(bytes) != crate::Kind::Integer {
+            return Err(NumberError::NotANumber);
+        }
+        let text = core::str::from_utf8(bytes).map_err(|_| NumberError::NotANumber)?;
+        text.parse().map_err(|_| NumberError::Overflow)
+    }
+
+    /// [`decode::number`] as it was, every number by Rust's reading.
+    fn number_by_text(bytes: &[u8]) -> Result<f64, NumberError> {
+        if !matches!(
+            crate::tokenizer::word(bytes),
+            crate::Kind::Integer | crate::Kind::Real
+        ) {
+            return Err(NumberError::NotANumber);
+        }
+        let text = core::str::from_utf8(bytes).map_err(|_| NumberError::NotANumber)?;
+        let value: f64 = text.parse().map_err(|_| NumberError::NotANumber)?;
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(NumberError::Overflow)
+        }
+    }
+
+    /// `bytes` read both ways, the same: the integer, and the number to the
+    /// bit (so `-0` is told from `0`).
+    fn read_alike(bytes: &[u8]) {
+        assert_eq!(decode::integer(bytes), integer_by_text(bytes), "{bytes:?}");
+        let bits = |n: Result<f64, NumberError>| n.map(f64::to_bits);
+        assert_eq!(
+            bits(decode::number(bytes)),
+            bits(number_by_text(bytes)),
+            "{bytes:?}"
+        );
+    }
+
+    /// Every word of up to six bytes of digits, signs, points, `e`, a
+    /// letter and a space reads as Rust read its text; and the edges:
+    /// `i64`'s ends and past them, 2^53 and either side of it, 19 and 20
+    /// digits, 22 and 23 after the point, with each sign, long words, and
+    /// 20,000 words of up to 30 bytes made by xorshift from a seed.
+    #[test]
+    fn a_number_read_by_its_bytes_is_what_its_text_reads_as() {
+        const ALPHABET: &[u8] = b"0159.+-ex ";
+        let mut word = Vec::new();
+        let mut count = 0;
+        fn each(word: &mut Vec<u8>, left: usize, count: &mut usize) {
+            read_alike(word);
+            *count += 1;
+            if left == 0 {
+                return;
+            }
+            for &b in ALPHABET {
+                word.push(b);
+                each(word, left - 1, count);
+                word.pop();
+            }
+        }
+        each(&mut word, 6, &mut count);
+        assert_eq!(count, 1_111_111);
+        let edges = [
+            "9223372036854775807",
+            "9223372036854775808",
+            "-9223372036854775808",
+            "-9223372036854775809",
+            "00000000000000000000009",
+            "9007199254740992",
+            "9007199254740993",
+            "9007199254740991",
+            "900719925474099.2",
+            "900719925474099.3",
+            ".9007199254740993",
+            "1234567890123456789",
+            "12345678901234567890",
+            "1.234567890123456789",
+            "0.0000000000000000000001",
+            "0.00000000000000000000001",
+            ".1234567890123456789012",
+            "1.2345678901234567890123",
+            "0.1",
+            "0.3",
+            "2.675",
+            "0",
+            "-0",
+            "-0.",
+            "-.0",
+            "+0.0",
+            "1.",
+            ".",
+            "-",
+            "+.",
+            "--1",
+            "1..",
+            "1.2.3",
+        ];
+        for edge in edges {
+            for sign in ["", "-", "+"] {
+                read_alike(format!("{sign}{edge}").as_bytes());
+            }
+        }
+        for len in [300, 308, 309, 310, 400] {
+            let mut long = vec![b'9'; len];
+            read_alike(&long);
+            long[len / 2] = b'.';
+            read_alike(&long);
+        }
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..20_000 {
+            let len = (next() % 31) as usize;
+            let word: Vec<u8> = (0..len)
+                .map(|_| match next() % 16 {
+                    0 => b'.',
+                    1 => b'-',
+                    2 => b'+',
+                    3 => b'e',
+                    _ => b'0' + (next() % 10) as u8,
+                })
+                .collect();
+            read_alike(&word);
+        }
+    }
+
+    /// Each error says what the bytes aren't, word for word.
+    #[test]
+    fn each_number_error_says_what_it_is() {
+        use std::string::ToString;
+        assert_eq!(NumberError::NotANumber.to_string(), "not a number");
+        assert_eq!(
+            NumberError::Overflow.to_string(),
+            "a number too large to hold"
+        );
+    }
+
     #[test]
     fn only_names_and_strings_have_pieces() {
         assert!(token(b"obj").pieces().is_none());
@@ -716,5 +966,70 @@ mod tests {
         decoded(b"(\\))", b")");
         decoded(b"<41>", b"A");
         assert_eq!(token(b"17").verbatim(), None);
+    }
+
+    /// `verbatim` searches the bytes for what its pieces would decode: the
+    /// same answer as walking them, from the same place, for every run of
+    /// bytes of these inputs taken as a name, a literal string and a hex
+    /// string, a token's or not, and for every token of them.
+    #[test]
+    fn verbatim_by_a_search_is_verbatim_by_the_pieces() {
+        use crate::Kind;
+        let inputs: [&[u8]; 9] = [
+            b"/Type/A#20B/#/ x\x80",
+            b"(a (b) c)(a)b)()(",
+            b"(a\\) (a\r\nb) (\\(\\)) ((a)) (a)) )(",
+            b"<41 4G> <> < > <<>> >",
+            b"/A)(B(C) (D)E",
+            b"(\x80\xff/[]{}%) [<a>]",
+            b"/a#2 /a#20 /#00",
+            b"",
+            b")))(((",
+        ];
+        let kinds = [
+            Kind::Name,
+            Kind::String { closed: true },
+            Kind::HexString { closed: false },
+        ];
+        for input in inputs {
+            for start in 0..=input.len() {
+                for end in start..=input.len() {
+                    for kind in kinds {
+                        let bytes = &input[start..end];
+                        fuzz::verbatim_as_walked(&Token { kind, start, bytes });
+                    }
+                }
+            }
+            fuzz::walk(input, 0);
+        }
+        let scanned = |kind, bytes: &'static [u8]| {
+            Token {
+                kind,
+                start: 0,
+                bytes,
+            }
+            .verbatim()
+        };
+        assert_eq!(
+            scanned(Kind::Name, b"Type"),
+            Some(&b"Type"[..]),
+            "a name's `/` is a delimiter only first"
+        );
+        assert_eq!(scanned(Kind::Name, b"/A/B"), None);
+        assert_eq!(
+            scanned(Kind::String { closed: true }, b"(a)b"),
+            None,
+            "nothing after the close"
+        );
+        assert_eq!(
+            scanned(Kind::String { closed: true }, b"a)b"),
+            Some(&b"a)b"[..]),
+            "no open, no close"
+        );
+        assert_eq!(
+            scanned(Kind::HexString { closed: true }, b">"),
+            Some(&b""[..])
+        );
+        assert_eq!(scanned(Kind::HexString { closed: true }, b"<<"), None);
     }
 }

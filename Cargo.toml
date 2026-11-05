@@ -1,7 +1,82 @@
 [workspace]
 resolver = "3"
-# pdf-tokenizer inherits nothing from here, so it can move to a repository
-# of its own unchanged.
-members = ["crates/pdf-tokenizer", "crates/pdf-lint"]
+# pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure,
+# pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts, pdf-linearize and
+# pdf-arlington inherit nothing from here, so each can move to a repository of
+# its own unchanged.
+members = [
+    "crates/pdf-tokenizer",
+    "crates/pdf-filters",
+    "crates/pdf-crypt",
+    "crates/pdf-objects",
+    "crates/pdf-structure",
+    "crates/pdf-content-streams",
+    "crates/pdf-semantics",
+    "crates/pdf-color",
+    "crates/pdf-fonts",
+    "crates/pdf-linearize",
+    "crates/pdf-arlington",
+    "crates/pdf-lint",
+]
 # fuzz/ builds on nightly, with libFuzzer.
 exclude = ["fuzz"]
+
+# pdf-crypt's revision 6 hash runs thousands of AES blocks and SHA-2
+# digests for a password; it and the RustCrypto crates under it built
+# optimized in tests too, which then take a fraction of a second, not
+# seconds. A profile here changes no crate as it's published.
+[profile.dev.package.pdf-crypt]
+opt-level = 3
+
+[profile.dev.package.aes]
+opt-level = 3
+
+[profile.dev.package.cbc]
+opt-level = 3
+
+[profile.dev.package.md-5]
+opt-level = 3
+
+[profile.dev.package.rc4]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+# The writer's tests write and read back whole files of millions of
+# cross-reference rows, and an object stream's worth of one string, 256
+# MiB: pdf-filters and the Flate under it built optimized, and the
+# parser, the tokenizer and pdf-structure lightly, so that they take
+# seconds, not a minute. Debug assertions and overflow checks stay on.
+# Those two tests hold about 1.3 GB each at their peak, which sets
+# pdf-structure's test binary's, about 1.9 GB as they run beside the
+# rest, whose own peak is about 130 MB.
+[profile.dev.package.pdf-filters]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.dev.package.adler2]
+opt-level = 3
+
+[profile.dev.package.pdf-tokenizer]
+opt-level = 1
+
+[profile.dev.package.pdf-objects]
+opt-level = 1
+
+[profile.dev.package.pdf-structure]
+opt-level = 1
+
+# The searches for a byte or a marker in a string, a comment, or a stream's
+# or an inline image's data, under the tokenizer and the content streams,
+# built optimized.
+[profile.dev.package.memchr]
+opt-level = 3
+
+# The content streams' tests read operands of 8 MiB, and content of 200,000
+# inline images, each in under two seconds: built lightly optimized, they
+# take a fraction of that.
+[profile.dev.package.pdf-content-streams]
+opt-level = 1

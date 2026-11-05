@@ -1,0 +1,470 @@
+//! Writing objects as PDF syntax, for tests (this crate's, and, behind the
+//! `fixtures` feature, other crates'): whole files with a cross-reference
+//! table or an uncompressed cross-reference stream, and files assembled
+//! from objects' bytes as written by hand.
+
+use std::fmt::Write as _;
+
+use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
+
+/// The kind of cross-reference section a file is written with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Xref {
+    Table,
+    Stream,
+}
+
+/// An indirect object to write: a value, or a stream's dictionary and
+/// data.
+#[derive(Debug, Clone)]
+pub enum Body {
+    Object(Object),
+    Stream(Dict, Vec<u8>),
+}
+
+impl Body {
+    pub fn stream(dict: Dict, data: &[u8]) -> Body {
+        Body::Stream(dict, data.to_vec())
+    }
+}
+
+impl From<Object> for Body {
+    fn from(object: Object) -> Body {
+        Body::Object(object)
+    }
+}
+
+impl From<Dict> for Body {
+    fn from(dict: Dict) -> Body {
+        Body::Object(dict.into())
+    }
+}
+
+/// `objects`, each object `n` generation 0, written as a file at
+/// `version` with a section of `kind`, under `trailer`, which is given
+/// `/Size` (and for a stream, `/Type /XRef` and `/W`).
+pub fn file(version: &str, objects: &[(u32, Body)], trailer: Dict, kind: Xref) -> Vec<u8> {
+    let mut out = format!("%PDF-{version}\n").into_bytes();
+    out.extend_from_slice(b"%\xE2\xE3\xCF\xD3\n");
+    let mut offsets = Vec::new();
+    for (n, body) in objects {
+        offsets.push((*n, out.len()));
+        indirect(&mut out, *n, body);
+    }
+    let last = objects.iter().map(|(n, _)| *n).max().unwrap_or(0);
+    let at = |n: u32| offsets.iter().find(|(m, _)| *m == n).map(|(_, at)| *at);
+    let mut trailer = trailer;
+    match kind {
+        Xref::Table => {
+            let size = last + 1;
+            let xref = out.len();
+            let _ = write!(out_string(&mut out), "xref\n0 {size}\n");
+            for n in 0..size {
+                let row = match at(n) {
+                    Some(offset) if n > 0 => format!("{offset:010} 00000 n \n"),
+                    _ => format!("0000000000 {:05} f \n", if n == 0 { 65535 } else { 0 }),
+                };
+                out.extend_from_slice(row.as_bytes());
+            }
+            trailer.set("Size", i64::from(size));
+            out.extend_from_slice(b"trailer\n");
+            dict(&mut out, &trailer);
+            let _ = write!(out_string(&mut out), "\nstartxref\n{xref}\n%%EOF\n");
+        }
+        Xref::Stream => {
+            let own = last + 1;
+            let size = own + 1;
+            let xref = out.len();
+            let mut rows = Vec::new();
+            for n in 0..size {
+                let (kind, field) = match (n, at(n)) {
+                    (n, _) if n == own => (1u8, xref),
+                    (0, _) | (_, None) => (0, 0),
+                    (_, Some(offset)) => (1, offset),
+                };
+                rows.push(kind);
+                rows.extend_from_slice(&(field as u32).to_be_bytes());
+                rows.extend_from_slice(&[0, if n == 0 { 0xFF } else { 0 }]);
+            }
+            trailer.set("Type", "XRef");
+            trailer.set("Size", i64::from(size));
+            trailer.set("W", vec![Object::from(1), Object::from(4), Object::from(2)]);
+            trailer.set(
+                "Index",
+                vec![Object::from(0), Object::from(i64::from(size))],
+            );
+            indirect(&mut out, own, &Body::Stream(trailer, rows));
+            let _ = write!(out_string(&mut out), "startxref\n{xref}\n%%EOF\n");
+        }
+    }
+    out
+}
+
+/// `data` as zlib data (RFC 1950) in deflate's stored blocks, not
+/// compressed: for a `/FlateDecode` stream without a compressor.
+pub fn zlib(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    let mut blocks = data.chunks(usize::from(u16::MAX)).peekable();
+    if data.is_empty() {
+        out.extend([1, 0, 0, 0xff, 0xff]);
+    }
+    while let Some(block) = blocks.next() {
+        let len = block.len() as u16;
+        out.push(u8::from(blocks.peek().is_none()));
+        out.extend(len.to_le_bytes());
+        out.extend((!len).to_le_bytes());
+        out.extend_from_slice(block);
+    }
+    let (a, b) = (data.iter()).fold((1u32, 0u32), |(a, b), &byte| {
+        let a = (a + u32::from(byte)) % 65_521;
+        (a, (b + a) % 65_521)
+    });
+    out.extend((b << 16 | a).to_be_bytes());
+    out
+}
+
+/// `data` as ASCII85, groups of zeros as `z`.
+pub fn ascii85(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for group in data.chunks(4) {
+        let mut four = [0u8; 4];
+        four[..group.len()].copy_from_slice(group);
+        let value = u32::from_be_bytes(four);
+        if value == 0 && group.len() == 4 {
+            out.push(b'z');
+            continue;
+        }
+        let digits: Vec<u8> = (0..5)
+            .rev()
+            .map(|i| (value / 85u32.pow(i) % 85) as u8 + b'!')
+            .collect();
+        out.extend_from_slice(&digits[..group.len() + 1]);
+    }
+    out.extend_from_slice(b"~>");
+    out
+}
+
+/// `data` as LZW codes, each byte its own 9-bit code, the table
+/// cleared before it widens.
+pub fn lzw(data: &[u8]) -> Vec<u8> {
+    let mut codes = vec![256u16];
+    for (i, &byte) in data.iter().enumerate() {
+        if i > 0 && i % 250 == 0 {
+            codes.push(256);
+        }
+        codes.push(u16::from(byte));
+    }
+    codes.push(257);
+    let bits: Vec<bool> = (codes.iter())
+        .flat_map(|&code| (0..9).rev().map(move |i| code >> i & 1 == 1))
+        .collect();
+    (bits.chunks(8))
+        .map(|byte| (0..8).fold(0, |b, i| b << 1 | u8::from(byte.get(i) == Some(&true))))
+        .collect()
+}
+
+/// `data` as runs to copy, ended by 128.
+pub fn run_length(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for run in data.chunks(128) {
+        out.push((run.len() - 1) as u8);
+        out.extend_from_slice(run);
+    }
+    out.push(128);
+    out
+}
+
+/// `zlib` data decompressed, for a seed written from data compressed
+/// beforehand.
+pub fn inflated(zlib: &[u8]) -> Vec<u8> {
+    let flate = pdf_filters::Filter::Flate {
+        predictor: pdf_filters::Predictor::None,
+    };
+    let miniz = pdf_filters::Backend::MinizOxide;
+    pdf_filters::decode(zlib, &[flate], usize::MAX, miniz).unwrap_or_else(|e| e.data)
+}
+
+/// A file of these objects, as [`file`] writes it with a table, encrypted
+/// as `settings` say, by pdf-crypt's writer: each string, and each
+/// stream's data, of each object but a signature's `/Contents`, under an
+/// encryption dictionary that's the next object, with the trailer's `/ID`
+/// the settings' and `trailer`'s entries.
+pub fn encrypted(
+    settings: &pdf_crypt::writer::Settings,
+    objects: &[(u32, Body)],
+    trailer: Dict,
+) -> Vec<u8> {
+    use pdf_crypt::writer;
+    let values = writer::dictionary(settings);
+    let user = [pdf_crypt::Encoded::verbatim(settings.user)];
+    let handler =
+        pdf_crypt::Handler::open(&values, settings.id, &user).expect("the writer's opens");
+    let encrypt = |(n, g): ObjectId, data: &[u8], stream: bool| {
+        let iv = [n as u8; 16];
+        match stream {
+            true => writer::encrypt_stream(&handler, (n, g), data, None, iv),
+            false => writer::encrypt_string(&handler, (n, g), data, iv),
+        }
+        .expect("the writer's own method")
+    };
+    let dict = crate::write::encryption(&values, None);
+    under(&handler, objects, dict, trailer, settings.id, encrypt)
+}
+
+/// A new file of these objects, as [`file`] writes it with a table,
+/// encrypted under the handler and dictionary pdf-crypt creates for
+/// `password`, prepared (`Handler::create`: revision 6, AES-256), from
+/// `rng`'s draws: each string, and each stream's data, of each object but
+/// a signature's `/Contents`, AES's IVs derived from the data and the
+/// object's number (`n g obj`, the context); under an encryption
+/// dictionary that's the next object, its crypt filter with `/Length 32`
+/// (bytes, as qpdf writes it) and `/AuthEvent /DocOpen`, with the
+/// trailer's `/ID` drawn from `rng` after the dictionary, and `trailer`'s
+/// entries.
+pub fn created(
+    password: &pdf_crypt::Encoded,
+    encrypt_metadata: bool,
+    objects: &[(u32, Body)],
+    trailer: Dict,
+    rng: &mut (impl pdf_crypt::rand_core::CryptoRng + ?Sized),
+) -> Vec<u8> {
+    let (handler, values) =
+        pdf_crypt::Handler::create(password, encrypt_metadata, rng).expect("a password prepared");
+    let mut id = [0; 16];
+    rng.fill_bytes(&mut id);
+    let encrypt = |(n, g): ObjectId, data: &[u8], stream: bool| {
+        let context = format!("{n} {g} obj");
+        match stream {
+            true => handler.encrypt_stream((n, g), context.as_bytes(), data, None),
+            false => handler.encrypt_string((n, g), context.as_bytes(), data),
+        }
+        .expect("the handler's own method")
+    };
+    let dict = crate::write::encryption(&values, Some(32));
+    under(&handler, objects, dict, trailer, &id, encrypt)
+}
+
+/// `objects` encrypted by `encrypt` (an object's id, the data, and whether
+/// it's a stream's), each string, and each stream's data, but a
+/// signature's `/Contents` and, where `handler` doesn't encrypt metadata, a
+/// metadata stream's data; written as [`file`] writes them with a table,
+/// under `dict`, the encryption dictionary, the next object, with the
+/// trailer's `/ID` `file_id` twice and `trailer`'s entries.
+fn under(
+    handler: &pdf_crypt::Handler,
+    objects: &[(u32, Body)],
+    dict: Dict,
+    trailer: Dict,
+    file_id: &[u8],
+    encrypt: impl Fn(ObjectId, &[u8], bool) -> Vec<u8>,
+) -> Vec<u8> {
+    fn strings(o: &mut Object, encrypt: &mut dyn FnMut(&[u8]) -> Vec<u8>) {
+        // A dictionary's values, or a stream's dictionary's.
+        let mut entries = |d: &mut Dict| {
+            // A signature's /Contents, as the reader takes one.
+            let typed = (d.get(b"Type"))
+                .is_none_or(|t| matches!(t.as_name(), Some(b"Sig" | b"DocTimeStamp")));
+            let signature = d.has(b"ByteRange") && typed;
+            for entry in d.entries_mut() {
+                if !(signature && entry.key == b"Contents") {
+                    strings(&mut entry.value, encrypt);
+                }
+            }
+        };
+        match o.value_mut() {
+            Value::String(Str::Bytes(bytes), _) => *bytes = encrypt(bytes),
+            Value::Array(a) => a.iter_mut().for_each(|o| strings(o, encrypt)),
+            Value::Dict(d) => entries(d),
+            Value::Stream(s) => entries(&mut s.dict),
+            _ => {}
+        }
+    }
+    let mut written = Vec::new();
+    for (n, body) in objects {
+        let id = (*n, 0);
+        let mut string = |bytes: &[u8]| encrypt(id, bytes, false);
+        written.push((
+            *n,
+            match body {
+                Body::Object(object) => {
+                    let mut object = object.clone();
+                    strings(&mut object, &mut string);
+                    Body::Object(object)
+                }
+                Body::Stream(dict, data) => {
+                    // Metadata under /EncryptMetadata false isn't encrypted.
+                    let metadata = dict.get(b"Type").and_then(Object::as_name) == Some(b"Metadata");
+                    let mut dict: Object = dict.clone().into();
+                    strings(&mut dict, &mut string);
+                    let Value::Dict(dict) = dict.into_value() else {
+                        unreachable!()
+                    };
+                    let data = match metadata && !handler.encrypts_metadata() {
+                        true => data.clone(),
+                        false => encrypt(id, data, true),
+                    };
+                    Body::Stream(dict, data)
+                }
+            },
+        ));
+    }
+    let own = objects.iter().map(|(n, _)| *n).max().unwrap_or(0) + 1;
+    written.push((own, Body::Object(dict.into())));
+    let s = |bytes: &[u8]| Object::new(Value::String(Str::Bytes(bytes.to_vec()), None));
+    let mut trailer = trailer;
+    trailer.set("Encrypt", Object::reference(own));
+    trailer.set("ID", vec![s(file_id), s(file_id)]);
+    file("1.7", &written, trailer, Xref::Table)
+}
+
+/// A file of these objects, each written between its `n 0 obj` and
+/// `endobj` as given, with a table and `trailer` as written. The bodies
+/// may be anything at all.
+pub fn assembled(version: &str, objects: &[(u32, &[u8])], trailer: &str) -> Vec<u8> {
+    let mut out = format!("%PDF-{version}\n").into_bytes();
+    let mut offsets = Vec::new();
+    for (n, body) in objects {
+        offsets.push((*n, out.len()));
+        out.extend_from_slice(format!("{n} 0 obj\n").as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let size = objects.iter().map(|(n, _)| *n).max().unwrap_or(0) + 1;
+    let xref = out.len();
+    let _ = write!(out_string(&mut out), "xref\n0 {size}\n");
+    for n in 0..size {
+        let row = match offsets.iter().find(|(m, _)| *m == n) {
+            Some((_, offset)) if n > 0 => format!("{offset:010} 00000 n \n"),
+            _ => format!("0000000000 {:05} f \n", if n == 0 { 65535 } else { 0 }),
+        };
+        out.extend_from_slice(row.as_bytes());
+    }
+    let _ = write!(
+        out_string(&mut out),
+        "trailer\n{trailer}\nstartxref\n{xref}\n%%EOF\n"
+    );
+    out
+}
+
+/// `out` as a string to write into, for ASCII only.
+fn out_string(out: &mut Vec<u8>) -> Appender<'_> {
+    Appender(out)
+}
+
+struct Appender<'a>(&'a mut Vec<u8>);
+
+impl std::fmt::Write for Appender<'_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.extend_from_slice(s.as_bytes());
+        Ok(())
+    }
+}
+
+fn indirect(out: &mut Vec<u8>, n: u32, body: &Body) {
+    out.extend_from_slice(format!("{n} 0 obj\n").as_bytes());
+    match body {
+        Body::Object(object) => value(out, object),
+        Body::Stream(stream_dict, data) => {
+            let mut stream_dict = stream_dict.clone();
+            stream_dict.set("Length", data.len() as i64);
+            dict(out, &stream_dict);
+            out.extend_from_slice(b"\nstream\n");
+            out.extend_from_slice(data);
+            out.extend_from_slice(b"\nendstream");
+        }
+    }
+    out.extend_from_slice(b"\nendobj\n");
+}
+
+/// `o` as PDF syntax.
+pub fn value(out: &mut Vec<u8>, o: &Object) {
+    match o.value() {
+        Value::Null => out.extend_from_slice(b"null"),
+        Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
+        Value::Integer(i) => out.extend_from_slice(i.to_string().as_bytes()),
+        Value::Real(r) => {
+            let mut text = format!("{r}");
+            if !text.contains('.') {
+                text.push_str(".0");
+            }
+            out.extend_from_slice(text.as_bytes());
+        }
+        Value::Name(name) => self::name(out, name),
+        Value::String(Str::Bytes(bytes) | Str::Encrypted(bytes), _) => string(out, bytes),
+        Value::String(Str::Text(text), _) => {
+            let utf16: Vec<u8> = [0xFE, 0xFF]
+                .into_iter()
+                .chain(text.encode_utf16().flat_map(u16::to_be_bytes))
+                .collect();
+            string(out, &utf16);
+        }
+        Value::Array(array) => {
+            out.push(b'[');
+            for (i, element) in array.iter().enumerate() {
+                if i > 0 {
+                    out.push(b' ');
+                }
+                value(out, element);
+            }
+            out.push(b']');
+        }
+        Value::Dict(d) => dict(out, d),
+        Value::Stream(stream) => dict(out, &stream.dict),
+        Value::Ref((n, g)) => out.extend_from_slice(format!("{n} {g} R").as_bytes()),
+    }
+}
+
+fn dict(out: &mut Vec<u8>, d: &Dict) {
+    out.extend_from_slice(b"<<");
+    for entry in d.entries() {
+        out.push(b' ');
+        name(out, &entry.key);
+        out.push(b' ');
+        value(out, &entry.value);
+    }
+    out.extend_from_slice(b" >>");
+}
+
+/// A name, escaping `#` and any byte outside `!` to `~` that's regular.
+fn name(out: &mut Vec<u8>, name: &[u8]) {
+    out.push(b'/');
+    for &b in name {
+        if (0x21..=0x7E).contains(&b) && b != b'#' && pdf_tokenizer::is_regular(b) {
+            out.push(b);
+        } else {
+            out.extend_from_slice(format!("#{b:02X}").as_bytes());
+        }
+    }
+}
+
+/// A literal string, escaping `(`, `)` and `\`, and writing any byte
+/// outside printable ASCII as `\ddd`.
+fn string(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.push(b'(');
+    for &b in bytes {
+        match b {
+            b'(' | b')' | b'\\' => out.extend_from_slice(&[b'\\', b]),
+            0x20..=0x7E => out.push(b),
+            _ => out.extend_from_slice(format!("\\{b:03o}").as_bytes()),
+        }
+    }
+    out.push(b')');
+}
+
+#[cfg(test)]
+mod tests {
+    use pdf_filters::Backend;
+
+    #[test]
+    fn zlib_data_in_stored_blocks_decompresses() {
+        let flate = [pdf_filters::Filter::Flate {
+            predictor: pdf_filters::Predictor::None,
+        }];
+        for backend in [Backend::MinizOxide, Backend::ZlibRs] {
+            for data in [&b""[..], b"stored", &[7; 200_000]] {
+                let decoded = pdf_filters::decode(&super::zlib(data), &flate, 1 << 20, backend);
+                assert_eq!(decoded.as_deref(), Ok(data), "{backend:?}");
+            }
+        }
+    }
+}

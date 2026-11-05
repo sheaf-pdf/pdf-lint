@@ -1,22 +1,89 @@
 [package]
 name = "pdf-lint"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-# For let-chains and `as_chunks`.
+# For let-chains.
 rust-version = "1.88"
 # As the model it embeds and the parts adapted from TestGrammar are.
 license = "Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
-description = "Checks PDF files against the Arlington PDF Model"
+description = "Checks PDF files against the Arlington PDF Model, and their content, common structures, color spaces, fonts and linearization against ISO 32000-2"
 keywords = ["pdf", "lint", "validation", "arlington", "iso-32000"]
 categories = ["command-line-utilities", "development-tools::testing"]
-# Only what users need. The model is embedded, and `cargo install` has no
-# checkout to read it from.
-include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md", "/LICENSE-APACHE"]
+# Only what users need. The model is pdf-arlington's, and so is its
+# NOTICE.txt, whose notices src/check.rs's header carries for the parts
+# adapted from TestGrammar.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
-anyhow = "1"
+# The command line's, main.rs's alone: the library's errors are its own.
+anyhow = { version = "1", optional = true }
+# The command line's too: its arguments, their errors and the help, plain,
+# without colour and without wrapping, so nothing asks the terminal; the
+# help's lines are broken by hand. The README's help and the tests' pins of
+# the argument errors are clap's words and layout as the lock has it, so a
+# newer clap in the lock means taking them again.
+clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"], optional = true }
+pdf-arlington = { path = "../pdf-arlington", version = "0.1" }
+# Color spaces read as ISO 32000-2 has them: each the walk reaches, its
+# faults kept. pdf-content-streams depends on it too, for its own reading.
+pdf-color = { path = "../pdf-color", version = "0.1" }
+# Content streams read as their checks read them: every page's, form's,
+# pattern's and Type 3 glyph's the walk reaches. With `image-ends`, so that an
+# inline image's DCT and CCITTFax data ends where PDFium's decoders end it,
+# not where the stand-in guesses.
+pdf-content-streams = { path = "../pdf-content-streams", version = "0.1", features = ["image-ends"] }
+# Fonts read for text, each the walk reaches, its faults kept. Without its
+# features: no program is read, so neither skrifa nor the code taken from
+# FreeType is compiled in, and no predefined CMap, so nor is hayro-cmap.
+pdf-fonts = { path = "../pdf-fonts", version = "0.1", default-features = false }
+# Whether a file that says it's linearized holds, judged from its reading.
+# With its default feature alone: the adapter that reads pdf-structure's
+# readings.
+pdf-linearize = { path = "../pdf-linearize", version = "0.1" }
+pdf-objects = { path = "../pdf-objects", version = "0.1" }
+# Dates and XMP claims, read without its clock, so without chrono.
+pdf-semantics = { path = "../pdf-semantics", version = "0.1", default-features = false }
+pdf-structure = { path = "../pdf-structure", version = "0.1" }
 pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1" }
+# The command line's too: its JSON reports.
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+thiserror = "2"
+# Unicode's Script property: which scripts a font's text is in, as a
+# descriptor's /CapHeight is asked of a font with Latin characters.
+unicode-script = "0.5.8"
+# The command line's too: `--password` held so that it's wiped when it's
+# dropped.
+zeroize = { version = "1.9", optional = true }
+
+[features]
+default = ["cli"]
+# The command line, and what only it depends on: a crate that uses the
+# library alone leaves them out with `default-features = false`.
+cli = ["dep:anyhow", "dep:clap", "dep:serde", "dep:serde_json", "dep:zeroize"]
+
+[[bin]]
+name = "pdf-lint"
+path = "src/main.rs"
+required-features = ["cli"]
+
+# The tests that run the command line.
+[[test]]
+name = "cli"
+required-features = ["cli"]
+
+[[test]]
+name = "files"
+required-features = ["cli"]
+
+[dev-dependencies]
+# The tests' encrypted files.
+pdf-crypt = { path = "../pdf-crypt", features = ["writer"] }
+# The tests' file writer, and qpdf as a second reader.
+pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
+# The tests' folders of their own, removed after.
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "forbid"

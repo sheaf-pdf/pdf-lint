@@ -1,6 +1,6 @@
 [package]
 name = "pdf-tokenizer"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -9,9 +9,16 @@ description = "A lossless, zero-copy PDF tokenizer that never rejects and never 
 keywords = ["pdf", "lexer", "tokenizer", "no-std"]
 categories = ["parser-implementations", "no-std::no-alloc"]
 # Only what users need, so local tooling files can't end up in the package.
-include = ["/src", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
+# Without std, as the tokenizer needs only core: its searches for a byte or
+# a marker (comments, strings, `data_until`) on SIMD where the target has
+# it, and AVX2 detected as it runs where the application turns on memchr's
+# `std`.
+memchr = { version = "2.8", default-features = false }
+# Without std, as the tokenizer needs only core.
+thiserror = { version = "2", default-features = false }
 
 [lints.rust]
 unsafe_code = "forbid"

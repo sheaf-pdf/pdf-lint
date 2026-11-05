@@ -1,14 +1,113 @@
 # The fuzz targets, in cargo-fuzz's layout, outside the workspace: they
-# build on nightly with libFuzzer. Locally, `just fuzz tokenize` or
-# `just fuzz check`, or:
+# build on nightly with libFuzzer. Locally, `just fuzz tokenize`,
+# `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
+# `just fuzz structure`, `just fuzz write`, `just fuzz content`,
+# `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`,
+# `just fuzz linearize` or `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
 #
-# `tokenize` calls `pdf_tokenizer::fuzz::tokenize`, which a stable unit test
-# (`random_inputs_keep_every_promise`) runs too; `check` calls
-# `pdf_lint::fuzz::check_file`, the reader and the checker, which a stable
-# unit test (`mutated_files_check_within_their_bytes_the_same_twice`) runs
-# on mutated seeds.
+# `tokenize` calls `pdf_tokenizer::fuzz::tokenize`, the tokenizer and its
+# decoders under ISO 32000-2's rules and PDFium's and the two side by side,
+# and its skims, passes and searches against plain walks, which two stable
+# unit tests (`random_inputs_keep_every_promise` and
+# `random_inputs_keep_every_promise_where_the_rules_part`) run too;
+# `filters` calls `pdf_filters::fuzz::filters` on each backend, the
+# filters and the first of them on data that may run on (what it read
+# held to the input), which two stable unit tests run on random and
+# damaged inputs, and
+# `pdf_filters::fuzz::encoders`, which a third runs; `crypt` calls
+# `pdf_crypt::fuzz::handler`, on any dictionary and on new files'
+# dictionaries, and `pdf_crypt::fuzz::password`, which three stable unit
+# tests run, one on new files'; `objects` calls `pdf_objects::fuzz::parse`,
+# the parser by ISO 32000-2's rules and PDFium's and the two side by side,
+# the walk of what it read's references and the writer on what it read,
+# and `pdf_objects::fuzz::texts`, text strings decoded by each rules and
+# encoded and read back, which three stable unit tests
+# (`random_fragments_keep_every_promise`,
+# `random_fragments_keep_every_promise_where_the_rules_part` and
+# `random_text_strings_keep_every_promise`) run;
+# `structure` calls `pdf_structure::fuzz::read_file`, the reader and the
+# document it reads, which a stable unit test
+# (`mutated_files_read_within_their_bytes_the_same_twice`) runs on mutated
+# files; `write` calls `pdf_structure::fuzz::write_file`, the writer, a
+# file read written whole with copies, under a renumbering the input
+# picks, its document as the input picks read whole and taken by the
+# reading, then an update of its objects or a whole write after a byte is
+# flipped, refused as changed or read back alike, which a stable unit test
+# (`mutated_files_write_and_read_back_alike`) runs on mutated files, from
+# seeds with the third byte its input has;
+# `content` calls `pdf_content_streams::fuzz::content`, a page's content
+# read whole and as two streams, its tokens tiling it, each operand read,
+# its number as PDFium reads it and as an object, and its operations its
+# tokens grouped, and again under small caps, what finding inline images'
+# ends may cost among them, its faults the same through any sink, where an
+# object ends an inline image's dictionary and each lone `BI` told, and
+# each 0x80 and 0xFF read as white-space between tokens told, a space in
+# its place reading the same, each operation typed and stepped through the
+# states, its balance, marked content and names its steppers', its
+# searches for an inline image's end and its walks past one to `EI`,
+# remembered or not, and its skims of
+# arrays and dictionaries the same as plain ones', its DCT and CCITTFax
+# data decoded, with the `image-ends` feature, and read by the stand-in
+# too, its operations written again reading as they did, and the writer's
+# calls its bytes choose read back as written, their resources named and
+# bumped in the same places, and its marked ranges at the top taken out,
+# alone, together and by splice_each, and their lists written again
+# without a tool's keys, alone and with what's taken out, what's kept
+# reading as it did, and an array in it counted alike as an inline image's
+# color space and as one the resources name, under any caps on either,
+# which two stable unit tests (`mutated_seeds_keep_every_promise`,
+# `random_fragments_keep_every_promise`) run on mutated seeds and random
+# content;
+# `semantics` calls `pdf_semantics::fuzz::walks`, its name and number trees,
+# each walked the same whatever hears its faults, what a plain walk gives,
+# and written, read back, and its page tree by both rules,
+# `pdf_semantics::fuzz::dates`, a date read, written and read back,
+# `pdf_semantics::fuzz::xmp`, a packet read the same whatever hears its faults
+# and under smaller caps, and `pdf_semantics::fuzz::over`, a file's trees,
+# pages and metadata stream through a reading and the document it makes, which
+# three stable unit tests (`mutated_seeds_keep_every_promise`,
+# `random_bytes_keep_every_promise`,
+# `files_read_alike_through_a_reading_and_its_document`) run, the last as a
+# file, as the target does but under the default options;
+# `color` calls `pdf_color::fuzz::counts`, each of its first objects counted, the
+# count within what it could be, within every cap, the same under larger and
+# smaller caps where none was met and a failing resolver's reason kept, read as
+# a typed space, the same whatever the sink, a failing read included, counting as
+# it was counted where no fault was told and no cap met, and read as resources,
+# the same by name as in order, and `pdf_color::fuzz::over`, what a file's objects
+# count, say as typed spaces and name through a reading and the document it makes,
+# which three stable unit tests (`mutated_seeds_keep_every_promise`,
+# `random_bytes_keep_every_promise`,
+# `files_read_alike_through_a_reading_and_its_document`) run, the last as a file,
+# as the target does but under the default options;
+# `fonts` calls `pdf_fonts::fuzz::type1`, any bytes scanned as a Type 1 program,
+# holding no more than it was given, and under other caps the same or refused;
+# `pdf_fonts::fuzz::names`, an input's words read as glyphs' and fonts' names,
+# and its bytes as codes in each encoding; `fonts`, its parts read as a font, a
+# program among them; and `over`, as a file, each font in it the same; which four
+# stable unit tests (`mutated_seeds_keep_every_promise`,
+# `random_bytes_keep_every_promise`, `the_fonts_among_the_seeds_read`,
+# `files_read_alike_through_a_reading_and_a_map`) run;
+# `linearize` calls `pdf_linearize::fuzz::graphs`, any bytes as a graph, refused
+# for what it has or planned, every promise of the plan held against plain walks
+# of it, and `tables`, the same bytes as a hint stream, which a stable unit test
+# (`fuzz_bodies_run`) runs; `facts`, the same bytes as a file's facts, judged the
+# same whatever the sink, which another
+# (`any_facts_are_judged_alike_whatever_the_sink`) runs; and
+# `pdf_linearize::fuzz::over`, the same bytes as a file, laid out and read back,
+# which a third (`what_is_written_reads_back_the_same`) runs on mutated files.
+# The lopdf adapter's body, `fuzz::lopdf_document`, isn't here, its dependency not
+# being in this lock: a stable test
+# (`what_lopdf_s_adapter_writes_of_any_document_holds`) runs it;
+# `check` calls
+# `pdf_lint::fuzz::check_file`, the reader and the checker, what only the
+# reading gives (content, fonts' streams, earlier revisions' objects and the
+# linearization) read beside the document and moving nothing else a check of
+# the document alone finds, which a stable unit test
+# (`mutated_files_check_within_their_bytes_the_same_twice`) runs on mutated
+# seeds.
 [package]
 name = "pdf-tokenizer-fuzz"
 version = "0.0.0"
@@ -21,12 +120,99 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-pdf-lint = { path = "../crates/pdf-lint" }
+# With `image-ends`, so the content target can read with DCT and CCITTFax
+# data decoded to find where an inline image's ends, as it asks to.
+pdf-content-streams = { path = "../crates/pdf-content-streams", features = ["image-ends"] }
+pdf-color = { path = "../crates/pdf-color" }
+pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
+# Both Flate backends, so that the filters' target runs on each.
+pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
+# With `predefined-cmaps`, so a name that's a predefined CMap's reaches its bundle,
+# and `structure`, so a file's fonts are read over a reading of it.
+pdf-fonts = { path = "../crates/pdf-fonts", features = ["predefined-cmaps", "structure"] }
+pdf-linearize = { path = "../crates/pdf-linearize" }
+# The library alone, without the command line's crates.
+pdf-lint = { path = "../crates/pdf-lint", default-features = false }
+pdf-objects = { path = "../crates/pdf-objects" }
+# With its default features, so the semantics target fuzzes the clock's
+# reading of a count of seconds too.
+pdf-semantics = { path = "../crates/pdf-semantics" }
+pdf-structure = { path = "../crates/pdf-structure", features = ["fixtures"] }
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 
 [[bin]]
 name = "tokenize"
 path = "fuzz_targets/tokenize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "filters"
+path = "fuzz_targets/filters.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypt"
+path = "fuzz_targets/crypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "objects"
+path = "fuzz_targets/objects.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "structure"
+path = "fuzz_targets/structure.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "write"
+path = "fuzz_targets/write.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content"
+path = "fuzz_targets/content.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "semantics"
+path = "fuzz_targets/semantics.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "color"
+path = "fuzz_targets/color.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fonts"
+path = "fuzz_targets/fonts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "linearize"
+path = "fuzz_targets/linearize.rs"
 test = false
 doc = false
 bench = false

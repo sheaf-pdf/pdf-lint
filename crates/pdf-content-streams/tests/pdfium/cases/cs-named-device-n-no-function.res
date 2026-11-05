@@ -1,0 +1,1 @@
+<< /ColorSpace << /X [/DeviceN [/A /B /C] /DeviceGray] >> >>

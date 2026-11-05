@@ -1,0 +1,1243 @@
+# PDFium's answer for each case, as chromium/8125 gives it (oracle/pdfium.py record)
+base	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+real	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+true	0041 0 0 ; 0042 1 0 ; 0043 601 0
+false	0041 0 0 ; 0042 0 0 ; 0043 600 0
+string	0041 0 0 ; 0042 0 0 ; 0043 600 0
+name	0041 0 0 ; 0042 0 0 ; 0043 600 0
+null	0041 0 0 ; 0042 0 0 ; 0043 600 0
+array	0041 0 0 ; 0042 0 0 ; 0043 600 0
+dict	0041 0 0 ; 0042 0 0 ; 0043 600 0
+past-32	0041 0 0 ; 0042 0 0 ; 0043 600 0
+past-i32	0041 0 0 ; 0042 0 0 ; 0043 600 0
+past-i32-plus	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+u32-most	0041 0 0 ; 0042 0 0 ; 0043 600 0
+past-64	0041 0 0 ; 0042 0 0 ; 0043 600 0
+neg	0041 0 0 ; 0042 65036 0 ; 0043 65636 0
+neg-real	0041 0 0 ; 0042 65036 0 ; 0043 65636 0
+neg-one	0041 0 0 ; 0042 0 0 ; 0043 600 0
+bits-65535	0041 0 0 ; 0042 0 0 ; 0043 600 0
+bits-65536	0041 0 0 ; 0042 0 0 ; 0043 600 0
+bits-70000	0041 0 0 ; 0042 4464 0 ; 0043 5064 0
+bits-32768	0041 0 0 ; 0042 32768 0 ; 0043 33368 0
+plus	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+exp	0041 0 0 ; 0042 0 0 ; 0043 0 0
+huge-real	0041 0 0 ; 0042 0 0 ; 0043 600 0
+neg-huge-real	0041 0 0 ; 0042 0 0 ; 0043 600 0
+float-cut	0041 0 0 ; 0042 0 0 ; 0043 600 0
+elem-ref	0041 0 0 ; 0042 700 0 ; 0043 1300 0
+elem-chain	0041 0 0 ; 0042 0 0 ; 0043 600 0
+elem-chain3	0041 0 0 ; 0042 0 0 ; 0043 600 0
+elem-dangling	0041 0 0 ; 0042 0 0 ; 0043 600 0
+elem-ref-true	0041 0 0 ; 0042 1 0 ; 0043 601 0
+elem-ref-null	0041 0 0 ; 0042 0 0 ; 0043 600 0
+widths-ref	0041 0 0 ; 0042 710 0 ; 0043 1430 0
+widths-chain	0041 0 0 ; 0042 667 0 ; 0043 1334 0
+widths-chain3	0041 0 0 ; 0042 667 0 ; 0043 1334 0
+widths-dangling	0041 0 0 ; 0042 667 0 ; 0043 1334 0
+widths-dict	0041 0 0 ; 0042 667 0 ; 0043 1334 0
+widths-name	0041 0 0 ; 0042 667 0 ; 0043 1334 0
+widths-null	0041 0 0 ; 0042 667 0 ; 0043 1334 0
+widths-number	0041 0 0 ; 0042 667 0 ; 0043 1334 0
+first-real	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+first-true	0041 0 0 ; 0042 0 0 ; 0043 0 0
+first-300	0041 0 0 ; 0042 0 0 ; 0043 0 0
+first-255	0041 0 0 ; 0042 0 0 ; 0043 0 0
+first-256	0041 0 0 ; 0042 0 0 ; 0043 0 0
+first-neg	0041 0 0 ; 0042 0 0 ; 0043 0 0
+first-past-32	0041 0 0 ; 0042 0 0 ; 0043 0 0
+first-past-i32	0041 0 0 ; 0042 0 0 ; 0043 0 0
+first-missing	0041 0 0 ; 0042 0 0 ; 0043 0 0
+first-string	0041 0 0 ; 0042 0 0 ; 0043 0 0
+first-ref	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+first-chain	0041 0 0 ; 0042 0 0 ; 0043 0 0
+first-dangling	0041 0 0 ; 0042 0 0 ; 0043 0 0
+last-65	0041 0 0 ; 0042 500 0 ; 0043 500 0
+last-0	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+last-missing	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+last-true	0041 0 0 ; 0042 0 0 ; 0043 0 0
+last-neg	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+last-real	0041 0 0 ; 0042 500 0 ; 0043 500 0
+last-before	0041 0 0 ; 0042 0 0 ; 0043 0 0
+last-past	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+last-300	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+last-ref	0041 0 0 ; 0042 500 0 ; 0043 500 0
+last-chain	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+last-string	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+first-zero-long	0041 0 0 ; 0042 165 0 ; 0043 331 0
+missing-width	0041 0 0 ; 0042 500 0 ; 0043 1277 0
+missing-width-real	0041 0 0 ; 0042 500 0 ; 0043 1277 0
+missing-true	0041 0 0 ; 0042 500 0 ; 0043 501 0
+missing-string	0041 0 0 ; 0042 500 0 ; 0043 500 0
+missing-null	0041 0 0 ; 0042 500 0 ; 0043 500 0
+missing-ref	0041 0 0 ; 0042 500 0 ; 0043 1277 0
+missing-chain	0041 0 0 ; 0042 500 0 ; 0043 500 0
+missing-dangling	0041 0 0 ; 0042 500 0 ; 0043 500 0
+missing-neg	0041 0 0 ; 0042 500 0 ; 0043 65536 0
+missing-bits-65535	0041 0 0 ; 0042 500 0 ; 0043 500 0
+missing-bits-70000	0041 0 0 ; 0042 500 0 ; 0043 4964 0
+missing-no-widths	0041 0 0 ; 0042 667 0 ; 0043 1334 0
+missing-empty-first-zero	0041 0 0 ; 0042 0 0 ; 0043 0 0
+missing-empty-first-char	0041 0 0 ; 0042 777 0 ; 0043 1554 0
+missing-first-300	0041 0 0 ; 0042 777 0 ; 0043 1554 0
+courier-widths	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+courier-first-300	0041 0 0 ; 0042 600 0 ; 0043 1200 0
+courier-missing	0041 0 0 ; 0042 500 0 ; 0043 1277 0
+courier-truetype	0041 0 0 ; 0042 500 0 ; 0043 500 0
+courier-new	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+courier-mm	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+courier-none	0041 0 0 ; 0042 600 0 ; 0043 1200 0
+allcap	0061 0 0 ; 0041 300 0 ; 0062 600 0
+allcap-ref	0061 0 0 ; 0041 300 0 ; 0062 600 0
+allcap-chain	0061 0 0 ; 0041 332 0 ; 0062 632 0
+allcap-real	0061 0 0 ; 0041 300 0 ; 0062 600 0
+allcap-none	0061 0 0 ; 0041 332 0 ; 0062 632 0
+allcap-zero	0061 0 0 ; 0041 332 0 ; 0062 332 0
+allcap-range	00e0 0 0 ; 00c0 500 0 ; 00d7 1000 0 ; 00f7 1000 0
+allcap-no-widths	0061 0 0 ; 0041 667 0 ; 0062 1334 0
+allcap-truetype	0061 0 0 ; 0041 300 0 ; 0062 600 0
+flags-true	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+flags-symbolic	0041 0 0 ; 0042 500 0 ; 20ac 1100 0
+desc-ref	0041 0 0 ; 0042 500 0 ; 0043 1277 0
+desc-direct	0041 0 0 ; 0042 500 0 ; 0043 1277 0
+desc-chain	0041 0 0 ; 0042 500 0 ; 0043 1277 0
+desc-chain3	0041 0 0 ; 0042 500 0 ; 0043 500 0
+desc-stream	0041 0 0 ; 0042 500 0 ; 0043 1277 0
+desc-stream-chain	0041 0 0 ; 0042 500 0 ; 0043 1277 0
+desc-dangling	0041 0 0 ; 0042 500 0 ; 0043 500 0
+desc-name	0041 0 0 ; 0042 500 0 ; 0043 500 0
+winansi-a0	0020 0 0 ; 002d 0 0 ; 20ac 0 0
+standard-27	2019 0 0 ; 2018 0 0 ; 0027 0 0
+macexpert	0041 0 0 ; 0042 500 0 ; 0027 1100 0 ; 0060 1100 0 ; 20ac 1100 0
+enc-win	0027 0 0 ; 0060 0 0 ; 20ac 0 0 ; 00a9 0 0 ; 0041 0 0
+enc-mac	0027 0 0 ; 0060 0 0 ; 00c4 0 0 ; 00a9 0 0 ; 0041 0 0
+enc-pdfdoc	0027 0 0 ; 0060 0 0 ; 0080 0 0 ; 00a9 0 0 ; 0041 0 0
+enc-unknown	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+enc-ref	0027 0 0 ; 0060 0 0 ; 20ac 0 0 ; 00a9 0 0 ; 0041 0 0
+enc-chain	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+enc-dangling	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+enc-string	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+enc-number	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+enc-true	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+enc-null	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+enc-stream	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+enc-dict-ref	0027 0 0 ; 0060 0 0 ; 20ac 0 0 ; 00a9 0 0 ; 0041 0 0
+enc-dict-chain	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+base-win	0027 0 0 ; 0060 0 0 ; 20ac 0 0 ; 00a9 0 0 ; 0041 0 0
+base-mac	0027 0 0 ; 0060 0 0 ; 00c4 0 0 ; 00a9 0 0 ; 0041 0 0
+base-standard	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+base-macexpert	none
+base-pdfdoc	0027 0 0 ; 0060 0 0 ; 0080 0 0 ; 00a9 0 0 ; 0041 0 0
+base-unknown	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+base-string	0027 0 0 ; 0060 0 0 ; 20ac 0 0 ; 00a9 0 0 ; 0041 0 0
+base-ref	0027 0 0 ; 0060 0 0 ; 20ac 0 0 ; 00a9 0 0 ; 0041 0 0
+base-chain	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+base-number	2019 0 0 ; 2018 0 0 ; 0080 0 0 ; 0027 0 0 ; 0041 0 0
+symbol-win	03b1 0 0 ; 03b2 0 0 ; 03c7 0 0
+symbol-base	03b1 0 0 ; 03b2 0 0 ; 03c7 0 0
+zapf-win	2741 0 0 ; 2742 0 0 ; 2743 0 0
+zapf-diff	2701 0 0 ; 2702 0 0 ; 2743 0 0
+enc-mac-7f	007e 0 0 ; 007f 500 0 ; f8ff 1000 0 ; 0041 1500 0
+base-mac-7f	007e 0 0 ; 007f 500 0 ; f8ff 1000 0 ; 0041 1500 0
+diff-mac-7f	007e 0 0 ; 0041 500 0 ; f8ff 1000 0 ; 0041 1500 0
+win-7f-kept	007e 0 0 ; 2022 500 0 ; 00f0 1000 0 ; 0041 1500 0
+enc-mac-none-widths	0041 0 0 ; 007f 667 0 ; 0042 945 0 ; f8ff 1612 0 ; 0043 1890 0
+symbol-none	03b1 0 0 ; 03b2 631 0 ; 03c7 1180 0 ; 2200 1729 0
+symbol-tt-none	03b1 0 0 ; 03b2 376 0 ; 03c7 752 0 ; 2200 1128 0
+symbol-tt-win	0061 0 0 ; 0062 553 0 ; 0063 1137 0 ; 0022 1696 0
+symbol-tt-symbolic	03b1 0 0 ; 03b2 631 0 ; 03c7 1180 0 ; 2200 1729 0
+symbol-tt-greek	0391 0 0 ; 0392 500 0 ; 03a7 1000 0 ; 0394 1500 0 ; 03a9 2000 0 ; 03bc 2500 0
+symbol-tt-greek-win	0391 0 0 ; 0392 500 0 ; 03a7 1000 0 ; 0394 1500 0 ; 03a9 2000 0 ; 03bc 2500 0
+symbol-tt-greek-dict	0042 0 0 ; 0042 500 0 ; 0043 1000 0 ; 0044 1500 0 ; 0057 2000 0 ; 006d 2500 0
+symbol-tt-greek-latin	0391 0 0 ; 0392 500 0 ; 03a7 1000 0 ; 2206 1500 0 ; 2126 2000 0 ; 00b5 2500 0
+symbol-tt-greek-no-descriptor	0391 0 0 ; 0392 500 0 ; 03a7 1000 0 ; 0394 1500 0 ; 03a9 2000 0 ; 03bc 2500 0
+symbol-tt-greek-no-flags	0391 0 0 ; 0392 500 0 ; 03a7 1000 0 ; 0394 1500 0 ; 03a9 2000 0 ; 03bc 2500 0
+symbol-tt-greek-both	0391 0 0 ; 0392 500 0 ; 03a7 1000 0 ; 2206 1500 0 ; 2126 2000 0 ; 00b5 2500 0
+symbol-type1-greek	0391 0 0 ; 0392 500 0 ; 03a7 1000 0 ; 2206 1500 0 ; 2126 2000 0 ; 00b5 2500 0
+symbol-tagged-tt-greek	0041 0 0 ; 0042 500 0 ; 0043 1000 0 ; 0044 1500 0 ; 0057 2000 0 ; 006d 2500 0
+symbol-flags-latin	03b1 0 0 ; 03b2 631 0 ; 03c7 1180 0 ; 2200 1729 0
+symbol-flags-latin-win	0061 0 0 ; 0062 250 0 ; 0063 500 0 ; 0022 750 0
+zapf-flags-latin	0061 0 0 ; 0062 278 0 ; 0063 556 0
+helvetica-flags-symbolic	0061 0 0 ; 0062 556 0 ; 0063 1112 0 ; 0027 1612 0
+helvetica-flags-symbolic-unknown	0061 0 0 ; 0062 556 0 ; 0063 1112 0 ; 2019 1612 0
+foo-tt-none	2019 0 0 ; 0041 500 0
+foo-t1-none	2019 0 0 ; 0041 500 0
+foo-t1-symbolic	0027 0 0 ; 0041 500 0
+diff-base	0043 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-real	0043 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-true	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-false	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-string	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-null	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-array	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-dict	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-neg	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-neg-two	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-past-255	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-neg-comes-round	0041 0 0 ; 0045 500 0 ; 0043 1100 0
+diff-past-32	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-past-i32	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-twice	0044 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-run	0043 0 0 ; 0044 500 0 ; 0045 1100 0
+diff-empty-name	0041 0 0 ; 0044 500 0 ; 0043 1100 0
+diff-uni	0416 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-u	1f600 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-lig	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-variant	0061 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-dingbat	2701 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-notdef	0020 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-unknown	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-ref-code	0041 0 0 ; 0043 500 0 ; 0043 1100 0
+diff-ref-name	0043 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-chain-code	0041 0 0 ; 0043 500 0 ; 0043 1100 0
+diff-chain-name	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-chain3-code	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-dangling	0041 0 0 ; 0043 500 0 ; 0043 1100 0
+diff-ref	0043 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-whole-chain	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-whole-dict	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-chain	0043 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-neg-seen	0044 0 0 ; 0041 0 0 ; 0042 500 0
+diff-notdef-truetype	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-notdef-symbolic	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+diff-over-base	0041 0 0 ; 2022 0 0 ; 0041 0 0
+sub-none	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+sub-unknown	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+sub-number	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+sub-string-truetype	0041 0 0 ; 0042 500 0 ; 0043 500 0
+sub-ref-truetype	0041 0 0 ; 0042 500 0 ; 0043 500 0
+sub-chain-truetype	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+sub-mm	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+sub-cid	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+sub-string-type0	0041 0 0 ; 0042 510 0 ; 0043 1120 0
+sub-string-type3	0041 0 0 ; 0042 510 0 ; 0043 1120 0
+bf-name	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+bf-string	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+bf-ref	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+bf-chain	0041 0 0 ; 0042 500 0 ; 0043 500 0
+bf-dangling	0041 0 0 ; 0042 500 0 ; 0043 500 0
+bf-number	0041 0 0 ; 0042 500 0 ; 0043 500 0
+bf-subset	0041 0 0 ; 0042 500 0 ; 0043 500 0
+bf-alternate	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+bf-case	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+none-subset	0041 0 0 ; 0042 667 0 ; 0043 1334 0 ; 0069 2056 0
+none-subset-tt	0041 0 0 ; 0042 667 0 ; 0043 1334 0 ; 0069 2056 0
+none-alternate	0041 0 0 ; 0042 667 0 ; 0043 1334 0 ; 0069 2056 0
+none-alternate-tt	0041 0 0 ; 0042 667 0 ; 0043 1334 0 ; 0069 2056 0
+none-case	0041 0 0 ; 0042 667 0 ; 0043 1334 0 ; 0069 2056 0
+none-case-tt	0041 0 0 ; 0042 667 0 ; 0043 1334 0 ; 0069 2056 0
+none-comma	0041 0 0 ; 0042 722 0 ; 0043 1444 0 ; 0069 2166 0
+none-comma-tt	0041 0 0 ; 0042 722 0 ; 0043 1444 0 ; 0069 2166 0
+none-string	0041 0 0 ; 0042 667 0 ; 0043 1334 0 ; 0069 2056 0
+none-string-tt	0041 0 0 ; 0042 667 0 ; 0043 1334 0 ; 0069 2056 0
+win-7f-h	2022 0 0 ; 0041 350 0
+win-7f-t	2022 0 0 ; 0041 350 0
+win-81-h	2022 0 0 ; 0041 350 0
+win-81-t	2022 0 0 ; 0041 350 0
+win-8d-h	2022 0 0 ; 0041 350 0
+win-8d-t	2022 0 0 ; 0041 350 0
+win-8f-h	2022 0 0 ; 0041 350 0
+win-8f-t	2022 0 0 ; 0041 350 0
+win-90-h	2022 0 0 ; 0041 350 0
+win-90-t	2022 0 0 ; 0041 350 0
+win-9d-h	2022 0 0 ; 0041 350 0
+win-9d-t	2022 0 0 ; 0041 350 0
+win-a0-widths	0020 0 0 ; 0041 278 0
+win-ad-widths	002d 0 0 ; 0041 333 0
+win-none-widths	20ac 0 0 ; 0041 667 0
+std-none-widths	0001 0 0 ; 0041 278 0
+tu-ref	0416 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-chain	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-dangling	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-name	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-dict	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-lig	0066 0 0 ; 0069 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-range	0416 0 0 ; 0417 500 0 ; 0043 1100 0
+tu-over-diff	0416 0 0 ; 0042 500 0 ; 0043 1100 0
+h-base	0020 0 0 ; 0041 500 0 ; top 800 bottom -200
+h-real	0020 0 0 ; 0041 500 0 ; top 800 bottom -200
+h-true	0020 0 0 ; 0041 500 0 ; top 1 bottom 0
+h-ascent-true	0020 0 0 ; 0041 500 0 ; top 1 bottom -200
+h-descent-true	0020 0 0 ; 0041 500 0 ; top 800 bottom 0
+h-ascent-string	0020 0 0 ; 0041 500 0 ; top 1 bottom -200
+h-descent-string	0020 0 0 ; 0041 500 0 ; top 800 bottom 0
+h-ascent-ref	0020 0 0 ; 0041 500 0 ; top 800 bottom -200
+h-ascent-chain	0020 0 0 ; 0041 500 0 ; top 1 bottom -200
+h-ascent-dangling	0020 0 0 ; 0041 500 0 ; top 1 bottom -200
+h-descent-ref	0020 0 0 ; 0041 500 0 ; top 800 bottom -200
+h-descent-chain	0020 0 0 ; 0041 500 0 ; top 800 bottom 0
+h-desc-pos	0020 0 0 ; 0041 500 0 ; top 800 bottom -200
+h-desc-11	0020 0 0 ; 0041 500 0 ; top 800 bottom -11
+h-desc-10	0020 0 0 ; 0041 500 0 ; top 800 bottom 0
+h-desc-9	0020 0 0 ; 0041 500 0 ; top 800 bottom 0
+h-desc-neg	0020 0 0 ; 0041 500 0 ; top 800 bottom -10
+h-ascent-neg	0020 0 0 ; 0041 500 0 ; top 1 bottom -200
+h-ascent-only	0020 0 0 ; 0041 500 0 ; top 800 bottom 0
+h-descent-only	0020 0 0 ; 0041 500 0 ; top 1 bottom -200
+h-past-32	0020 0 0 ; 0041 500 0 ; top 1 bottom -200
+h-past-i32	0020 0 0 ; 0041 500 0 ; top 800 bottom -300
+h-clamp	0020 0 0 ; 0041 500 0 ; top 500 bottom -100
+h-clamp-top	0020 0 0 ; 0041 500 0 ; top 500 bottom -200
+h-clamp-bottom	0020 0 0 ; 0041 500 0 ; top 800 bottom -100
+h-box-flipped	0020 0 0 ; 0041 500 0 ; top 1000 bottom -500
+h-box-flat	0020 0 0 ; 0041 500 0 ; top 800 bottom -200
+h-box-short	0020 0 0 ; 0041 500 0 ; top 1 bottom -200
+h-box-long	0020 0 0 ; 0041 500 0 ; top 800 bottom -200
+h-box-real	0020 0 0 ; 0041 500 0 ; top 500 bottom -300
+h-box-true	0020 0 0 ; 0041 500 0 ; top 1 bottom -200
+h-box-string	0020 0 0 ; 0041 500 0 ; top 500 bottom 0
+h-box-ref	0020 0 0 ; 0041 500 0 ; top 500 bottom -100
+h-box-elem-ref	0020 0 0 ; 0041 500 0 ; top 500 bottom -100
+h-box-elem-chain	0020 0 0 ; 0041 500 0 ; top 1 bottom -100
+h-box-elem-dangling	0020 0 0 ; 0041 500 0 ; top 1 bottom -100
+w-base	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+w-real	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+w-range	0041 0 0 ; 0042 600 0 ; 0043 1200 0
+w-range-real	0041 0 0 ; 0042 600 0 ; 0043 1200 0
+w-true	0041 0 0 ; 0042 1 0 ; 0043 601 0
+w-first-real	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+w-range-true	0041 0 0 ; 0042 1 0 ; 0043 2 0
+w-range-last-true	0041 0 0 ; 0042 1000 0 ; 0043 2000 0
+w-range-string	0041 0 0 ; 0042 0 0 ; 0043 0 0
+w-str	0041 0 0 ; 0042 0 0 ; 0043 600 0
+w-past-32	0041 0 0 ; 0042 0 0 ; 0043 600 0
+w-past-i32	0041 0 0 ; 0042 -2.14748365e+09 0 ; 0043 -2.14748301e+09 0
+w-16-bits	0041 0 0 ; 0042 70000 0 ; 0043 70600 0
+w-neg	0041 0 0 ; 0042 -500 0 ; 0043 100 0
+w-overlap-first	0041 0 0 ; 0042 500 0 ; 0043 1000 0
+w-overlap-array	0041 0 0 ; 0042 510 0 ; 0043 1110 0
+w-neg-first	0041 0 0 ; 0042 650 0 ; 0043 1300 0
+w-neg-last	0041 0 0 ; 0042 500 0 ; 0043 1500 0
+w-array-at-last	0041 0 0 ; 0042 1000 0 ; 0043 2000 0
+w-array-first	0041 0 0 ; 0042 1000 0 ; 0043 2000 0
+w-array-at-value	0041 0 0 ; 0042 500 0 ; 0043 1000 0
+w-short-range	0041 0 0 ; 0042 1000 0 ; 0043 2000 0
+w-backward	0041 0 0 ; 0042 1000 0 ; 0043 2000 0
+w-int-most	0041 0 0 ; 0042 500 0 ; 0043 1500 0
+w-inner-ref	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+w-inner-chain	0041 0 0 ; 0042 0 0 ; 0043 600 0
+w-inner-dangling	0041 0 0 ; 0042 0 0 ; 0043 600 0
+w-outer-ref	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+w-outer-chain	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+w-outer-chain3	0041 0 0 ; 0042 1000 0 ; 0043 2000 0
+w-outer-dangling	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+w-array-ref	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+w-array-chain	0041 0 0 ; 0042 1000 0 ; 0043 2000 0
+w-ref	0041 0 0 ; 0042 810 0 ; 0043 1630 0
+w-chain	0041 0 0 ; 0042 1000 0 ; 0043 2000 0
+w-dict	0041 0 0 ; 0042 1000 0 ; 0043 2000 0
+w-first-true	0001 0 0 ; 0002 100 0 ; 0043 300 0
+w-first-string	0000 0 0 ; 0001 300 0 ; 0043 700 0
+w-neg-array	0000 0 0 ; 0001 300 0 ; 0043 700 0
+w-elem-dict	0000 0 0 ; 0001 500 0 ; 0043 1100 0
+dw	0041 0 0 ; 0042 700 0 ; 0043 1400 0
+dw-real	0041 0 0 ; 0042 700 0 ; 0043 1400 0
+dw-true	0041 0 0 ; 0042 1 0 ; 0043 2 0
+dw-string	0041 0 0 ; 0042 0 0 ; 0043 0 0
+dw-null	0041 0 0 ; 0042 0 0 ; 0043 0 0
+dw-ref	0041 0 0 ; 0042 700 0 ; 0043 1400 0
+dw-chain	0041 0 0 ; 0042 0 0 ; 0043 0 0
+dw-dangling	0041 0 0 ; 0042 0 0 ; 0043 0 0
+dw-neg	0041 0 0 ; 0042 -700 0 ; 0043 -1400 0
+dw-16-bits	0041 0 0 ; 0042 4464 0 ; 0043 8928 0
+dw-32768	0041 0 0 ; 0042 -32768 0 ; 0043 -65536 0
+dw-past-32	0041 0 0 ; 0042 0 0 ; 0043 0 0
+dw-none	0041 0 0 ; 0042 1000 0 ; 0043 2000 0
+df-ref	0041 0 0 ; 0042 510 0 ; 0043 1120 0
+df-chain	none
+df-direct	0041 0 0 ; 0042 510 0 ; 0043 1120 0
+df-elem-chain	none
+df-elem-stream	0041 0 0 ; 0042 510 0 ; 0043 1120 0
+df-elem-dangling	none
+df-elem-number	none
+df-two	none
+df-empty	none
+df-name	none
+df-none	none
+e0-ref	0041 0 0 ; 0042 510 0 ; 0043 1120 0
+e0-chain	none
+e0-dangling	none
+e0-number	none
+e0-string	none
+e0-dict	none
+e0-stream	0041 0 0 ; 0042 510 0 ; 0043 1120 0
+e0-stream-chain	none
+e0-unknown	0041 0 0 ; 0042 510 0 ; 0043 1120 0
+e0-unknown-japan1	0001 0 0 ; 0002 800 0
+e0-unknown-japan1-h	0001 0 0 ; 0002 800 0
+e0-cid-16-bits	0041 0 0 ; 0042 510 0 ; 0043 1120 0
+cmap-past-16-bits-two	0041 0 0 ; 0042 100 0
+cmap-past-16-bits-mixed	0041 0 0 ; 0042 100 0
+cmap-past-16-bits-by-end	80000005 0 0 ; 80000006 107 0 ; 80000007 215 0 ; 80000009 318 0
+cmap-past-16-bits-char	80000005 0 0 ; 80000006 103 0
+cmap-within-16-bits-last	0041 0 0 ; 0042 101 0 ; 0043 204 0
+e0-none	none
+codes-short	0041 0 0 ; 0042 510 0 ; 0000 1120 0
+cmap-cidchar	0041 0 0 ; 0042 610 0 ; 0043 1120 0
+cmap-wmode	0041 -255 -880 ; 0042 -305 -1880 ; 0043 -500 -2880
+cmap-mixed	0041 0 0 ; 8041 510 0 ; 0043 1120 0
+cmap-two	0041 0 0 ; 0042 510 0 ; 0043 1120 0
+cmap-none-mapped	0041 0 0 ; 0042 1000 0 ; 0043 2000 0
+cmap-literal	0041 0 0 ; 0042 1000 0 ; 0043 2000 0
+cmap-hex-odd	0040 0 0 ; 0041 1000 0 ; 0042 2000 0
+cmap-usecmap	4142 0 0 ; 4300 1000 0
+cmap-junk-word	0041 0 0 ; 0042 510 0 ; 0043 1020 0
+tu-literal-code	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-name-dest	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-one-byte-dest	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-array-range	0416 0 0 ; 0417 500 0 ; 0043 1100 0
+tu-overlap	0420 0 0 ; 0458 500 0 ; 0459 1100 0
+tu-overlap-first-wider	0416 0 0 ; 0420 500 0 ; 0418 1100 0
+tu-char-after-range	0416 0 0 ; 0420 500 0 ; 0418 1100 0
+tu-range-after-char	0416 0 0 ; 0417 500 0 ; 0418 1100 0
+tu-char-twice	0420 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-count-more	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-count-less	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-count-zero	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-count-word	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-count-range-more	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-count-range-less	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-count-kept-apart	0041 0 0 ; 0417 500 0 ; 0043 1100 0
+tu-word-in-block	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-word-before-mapping	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-range-code-empty	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-end-unbegun	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-code-past-16	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-code-past-16-lost	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-code-long	0416 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-code-empty	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-past-low-byte	0416 0 0 ; 0417 500 0 ; 0043 1100 0
+tu-past-low-byte-array	0416 0 0 ; 0417 500 0 ; 0043 1100 0
+tu-range-low-byte-down	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-range-low-byte-past-16	0416 0 0 ; 0417 500 0 ; 0043 1100 0
+tu-range-down	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-range-past-16	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-ffff	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-ffff-range	0041 0 0 ; 0000 500 0 ; 0001 1100 0
+tu-ffff-over	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-ffff-past	fffe 0 0 ; 0042 500 0 ; 0000 1100 0
+tu-ffff-first-many	0066 0 0 ; 0069 0 0 ; 0066 500 0 ; 0069 500 0 ; 0043 1100 0
+tu-empty	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-empty-kept	0416 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-empty-range-first	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-empty-range	0041 0 0 ; 0001 500 0 ; 0043 1100 0
+tu-name-range	0041 0 0 ; 0001 500 0 ; 0043 1100 0
+tu-name-dest-listed	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-lone-surrogate	dd00 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-lone-surrogate-range	dd00 0 0 ; dd01 500 0 ; dd02 1100 0
+tu-pair	d83d 0 0 ; de00 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-many-range	0066 0 0 ; 0069 0 0 ; 0066 500 0 ; 006a 500 0 ; 0066 1100 0 ; 006b 1100 0
+tu-pair-range	d83d 0 0 ; de00 0 0 ; d83d 500 0 ; de01 500 0 ; d83d 1100 0 ; de02 1100 0
+tu-odd-byte-dest	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-one-byte-range	0041 0 0 ; 0001 500 0 ; 0043 1100 0
+tu-array-short	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-array-long	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+tu-array-empty	0041 0 0 ; 0417 500 0 ; 0043 1100 0
+tu-array-name	0041 0 0 ; 0417 500 0 ; 0043 1100 0
+tu-no-end	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+predefined-tu-base-usecmap	0416 0 0 ; 0061 500 0 ; 0062 1100 0
+predefined-tu-base-named	0416 0 0 ; 0061 500 0 ; 0062 1100 0
+tu-stream-dict-in-dict	0416 0 0 ; 0042 500 0 ; 0043 1100 0
+t0-miss-identity	0416 0 0 ; 0042 500 0 ; 0043 1000 0
+predefined-t0-miss-gb1	0416 0 0 ; 0061 500 0 ; 0062 1000 0
+predefined-t0-miss-japan1	0416 0 0 ; 0061 500 0 ; 0062 1000 0
+predefined-t0-miss-ucs2	0416 0 0 ; 0042 500 0 ; 0416 1000 0
+predefined-t0-miss-gbk	fffd 0 0 ; 0416 500 0 ; 0042 1000 0
+t0-miss-embedded	0416 0 0 ; 0042 500 0 ; 0043 1000 0
+t0-miss-unmapped-gb1-cid0	0000 0 0 ; 0416 500 0
+t0-past-low-byte-identity	0041 0 0 ; 0100 500 0 ; 0416 1000 0
+t0-past-low-byte	0041 0 0 ; 0100 500 0 ; 0416 1000 0
+t0-past-low-byte-array	0041 0 0 ; 0100 500 0 ; 0416 1000 0
+predefined-cid-uni-jis-ascii	007c 0 0 ; 007e 701 0 ; 0041 1403 0 ; 0042 1903 0
+predefined-cid-uni-gb-a0	00a0 0 0 ; 0041 500 0 ; 0042 1000 0
+ws-simple	0041 0 0 ; 0020 500 0 ; 0042 600 0
+ws-identity	0020 0 0 ; 0041 1000 0 ; 0042 1510 0
+ws-one-byte	0020 0 0 ; 0041 1000 0 ; 0042 1510 0
+ws-cmap-one	0020 0 0 ; 0041 1100 0 ; 0042 1610 0
+ws-cmap-two	0020 0 0 ; 0041 1000 0 ; 0042 1510 0
+v-default	0041 -250 -880 ; 0042 -300 -1880 ; 0043 -500 -2880
+v-dw-odd	0041 -350 -880 ; 0042 -350 -1880 ; 0043 -350 -2880
+v-w-odd	0041 -250 -880 ; 0042 -300 -1880 ; 0043 -500 -2880
+v-w-16-bits	0041 30536 -880 ; 0042 -300 -1880 ; 0043 -500 -2880
+v-w-neg	0041 250 -880 ; 0042 -300 -1880 ; 0043 -500 -2880
+v-dw2	0041 -500 -700 ; 0042 -500 -1600 ; 0043 -500 -2500
+v-dw2-one	0041 -500 -700 ; 0042 -500 -700 ; 0043 -500 -700
+v-dw2-none	0041 -500 0 ; 0042 -500 0 ; 0043 -500 0
+v-dw2-true	0041 -500 -1 ; 0042 -500 -901 ; 0043 -500 -1801
+v-dw2-real	0041 -500 -700 ; 0042 -500 -1600 ; 0043 -500 -2500
+v-dw2-string	0041 -500 0 ; 0042 -500 -900 ; 0043 -500 -1800
+v-dw2-ref	0041 -500 -700 ; 0042 -500 -1600 ; 0043 -500 -2500
+v-dw2-chain	0041 -500 -880 ; 0042 -500 -1880 ; 0043 -500 -2880
+v-dw2-elem-ref	0041 -500 -700 ; 0042 -500 -1600 ; 0043 -500 -2500
+v-dw2-elem-chain	0041 -500 0 ; 0042 -500 -900 ; 0043 -500 -1800
+v-dw2-16-bits	0041 -500 -4464 ; 0042 -500 -8928 ; 0043 -500 -13392
+v-w2	0041 -250 -700 ; 0042 -300 -1550 ; 0043 -500 -2580
+v-w2-range	0041 -250 -700 ; 0042 -250 -1500 ; 0043 -500 -2480
+v-w2-short	0041 -250 0 ; 0042 -500 -1680 ; 0043 -500 -2680
+v-w2-range-short	0041 -500 -880 ; 0042 -500 -1880 ; 0043 -500 -2880
+v-w2-true	0041 -1 -1 ; 0042 -500 -879 ; 0043 -500 -1879
+v-w2-16-bits	0041 -4464 -25536 ; 0042 -500 -26416 ; 0043 -500 -27416
+v-w2-ref	0041 -250 -700 ; 0042 -500 -1680 ; 0043 -500 -2680
+v-w2-chain	0041 -500 -880 ; 0042 -500 -1880 ; 0043 -500 -2880
+v-w2-at-last	0041 -500 -880 ; 0042 -500 -1880 ; 0043 -500 -2880
+predefined-order	0041 0 0 ; 9edd 1000 0
+predefined-order-name	0041 0 0 ; 9edd 1000 0
+predefined-order-ref	0041 0 0 ; 9edd 1000 0
+predefined-order-chain	0022 0 0 ; 1d0e 1000 0
+predefined-info-ref	0041 0 0 ; 9edd 1000 0
+predefined-info-chain	0041 0 0 ; 9edd 1000 0
+predefined-info-chain3	0022 0 0 ; 1d0e 1000 0
+predefined-info-stream	0041 0 0 ; 9edd 1000 0
+predefined-unijis-utf16-h	0041 0 0 ; 0042 1000 0
+predefined-low-unijis-utf16-h	0001 0 0 ; 0002 1000 0 ; 1f20 2000 0 ; 4142 3000 0
+predefined-gbk-euc-h	fffd 0 0 ; 0041 1000 0 ; fffd 2000 0 ; 0042 3000 0
+predefined-low-gbk-euc-h	fffd 0 0 ; fffd 1000 0 ; fffd 2000 0 ; fffd 3000 0 ; fffd 4000 0 ; 0020 5000 0 ; 0041 6000 0 ; 0042 7000 0
+predefined-90ms-rksj-h	fffd 0 0 ; 0041 1000 0 ; fffd 2000 0 ; 0042 3000 0
+predefined-low-90ms-rksj-h	fffd 0 0 ; fffd 1000 0 ; fffd 2000 0 ; fffd 3000 0 ; fffd 4000 0 ; 0020 5000 0 ; 0041 6000 0 ; 0042 7000 0
+predefined-unigb-ucs2-h	0041 0 0 ; 0042 1000 0
+predefined-low-unigb-ucs2-h	0001 0 0 ; 0002 1000 0 ; 1f20 2000 0 ; 4142 3000 0
+predefined-kscms-uhc-h	fffd 0 0 ; 0041 1000 0 ; fffd 2000 0 ; 0042 3000 0
+predefined-low-kscms-uhc-h	fffd 0 0 ; fffd 1000 0 ; fffd 2000 0 ; fffd 3000 0 ; fffd 4000 0 ; 0020 5000 0 ; 0041 6000 0 ; 0042 7000 0
+predefined-eten-b5-h	fffd 0 0 ; 0041 1000 0 ; fffd 2000 0 ; 0042 3000 0
+predefined-low-eten-b5-h	fffd 0 0 ; fffd 1000 0 ; fffd 2000 0 ; fffd 3000 0 ; fffd 4000 0 ; 0020 5000 0 ; 0041 6000 0 ; 0042 7000 0
+predefined-h	fffd 0 0 ; fffd 1000 0
+predefined-low-h	fffd 0 0 ; fffd 1000 0 ; fffd 2000 0 ; 758e 3000 0
+predefined-gb-euc-h	fffd 0 0 ; 0041 1000 0 ; fffd 2000 0 ; 0042 3000 0
+predefined-low-gb-euc-h	fffd 0 0 ; fffd 1000 0 ; fffd 2000 0 ; fffd 3000 0 ; fffd 4000 0 ; 0020 5000 0 ; 0041 6000 0 ; 0042 7000 0
+predefined-gb-none	0041 0 0 ; 0042 500 0 ; 554a 1000 0 ; 0043 2000 0
+predefined-gb-descriptor	0041 0 0 ; 0042 500 0 ; 554a 1000 0 ; 0043 2000 0
+gb-program	0041 0 0 ; 0042 510 0 ; 0043 1120 0
+gb-type1	0041 0 0 ; 0042 510 0 ; 0043 1120 0
+t3-base	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+t3-no-widths	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-w-real	0041 0 0 ; 0042 501 0 ; 0043 1101 0
+t3-w-half	0041 0 0 ; 0042 501 0 ; 0043 1102 0
+t3-w-true	0041 0 0 ; 0042 410 0 ; 0043 1010 0
+t3-w-string	0041 0 0 ; 0042 410 0 ; 0043 1010 0
+t3-w-null	0041 0 0 ; 0042 410 0 ; 0043 1010 0
+t3-w-zero	0041 0 0 ; 0042 410 0 ; 0043 1010 0
+t3-w-neg	0041 0 0 ; 0042 -500 0 ; 0043 100 0
+t3-w-ref	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+t3-w-chain	0041 0 0 ; 0042 410 0 ; 0043 1010 0
+t3-w-dangling	0041 0 0 ; 0042 410 0 ; 0043 1010 0
+t3-w-short	0041 0 0 ; 0042 500 0 ; 0043 920 0
+t3-w-past-32	0041 0 0 ; 0042 410 0 ; 0043 1010 0
+t3-w-past-i32	0041 0 0 ; 0042 2.14748365e+09 0 ; 0043 2.14748416e+09 0
+t3-w-many-digits	0041 0 0 ; 0042 501 0 ; 0043 1101 0
+t3-widths-ref	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+t3-widths-chain	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-widths-dict	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-first-real	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+t3-first-true	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-first-string	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-first-neg	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-first-300	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-first-255	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-first-past-32	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-first-ref	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+t3-first-chain	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-first-none	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-matrix-scale	0041 0 0 ; 0042 1000 0 ; 0043 2200 0
+t3-matrix-scale-procs	0041 0 0 ; 0042 820 0 ; 0043 1660 0
+t3-matrix-rotate	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-matrix-rotate-procs	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-matrix-skew	0041 0 0 ; 0042 300 0 ; 0043 660 0
+t3-matrix-skew-procs	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-matrix-move	0041 0 0 ; 0042 500 0 ; 0043 1100 0
+t3-matrix-move-procs	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-matrix-flip	0041 0 0 ; 0042 -500 0 ; 0043 -1100 0
+t3-matrix-flip-procs	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-matrix-ref	0041 0 0 ; 0042 1000 0 ; 0043 2200 0
+t3-matrix-ref-procs	0041 0 0 ; 0042 820 0 ; 0043 1660 0
+t3-matrix-chain	0041 0 0 ; 0042 500000 0 ; 0043 1100000 0
+t3-matrix-chain-procs	0041 0 0 ; 0042 410000 0 ; 0043 830000 0
+t3-matrix-short	0041 0 0 ; 0042 500000 0 ; 0043 1100000 0
+t3-matrix-short-procs	0041 0 0 ; 0042 410000 0 ; 0043 830000 0
+t3-matrix-long	0041 0 0 ; 0042 500000 0 ; 0043 1100000 0
+t3-matrix-long-procs	0041 0 0 ; 0042 410000 0 ; 0043 830000 0
+t3-matrix-true	none
+t3-matrix-true-procs	none
+t3-matrix-string	none
+t3-matrix-string-procs	none
+t3-matrix-elem-ref	0041 0 0 ; 0042 1000 0 ; 0043 2200 0
+t3-matrix-elem-ref-procs	0041 0 0 ; 0042 820 0 ; 0043 1660 0
+t3-matrix-elem-chain	none
+t3-matrix-elem-chain-procs	none
+t3-matrix-int	0041 0 0 ; 0042 500000 0 ; 0043 1100000 0
+t3-matrix-int-procs	0041 0 0 ; 0042 410000 0 ; 0043 830000 0
+t3-matrix-none	0041 0 0 ; 0042 500000 0 ; 0043 1100000 0
+t3-h-box	0042 0 0 ; top 800 bottom -200
+t3-h-box-real	0042 0 0 ; top 800 bottom -200
+t3-h-box-short	0042 0 0 ; top 100 bottom -200
+t3-h-box-long	0042 0 0 ; top 800 bottom -200
+t3-h-box-true	0042 0 0 ; top 100 bottom -200
+t3-h-box-ref	0042 0 0 ; top 800 bottom -200
+t3-h-box-elem-ref	0042 0 0 ; top 800 bottom -200
+t3-h-box-elem-chain	0042 0 0 ; top 100 bottom -200
+t3-procs-ref	0041 0 0 ; 0042 410 0 ; 0043 410 0
+t3-procs-chain	0041 0 0 ; 0042 410 0 ; 0043 410 0
+t3-procs-chain3	none
+t3-procs-stream	0041 0 0 ; 0042 410 0 ; 0043 410 0
+t3-procs-dangling	none
+t3-proc-chain	none
+t3-proc-dangling	none
+t3-proc-number	none
+t3-proc-dict	none
+t3-d0-real	0041 0 0 ; 0042 411 0 ; 0043 831 0
+t3-d0-half	0041 0 0 ; 0042 1 0 ; 0043 421 0
+t3-d0-name	0041 0 0 ; 0042 0 0 ; 0043 420 0
+t3-d0-string	0041 0 0 ; 0042 0 0 ; 0043 420 0
+t3-d0-array	0041 0 0 ; 0042 0 0 ; 0043 420 0
+t3-d0-short	0041 0 0 ; 0042 0 0 ; 0043 420 0
+t3-d0-none	0041 0 0 ; 0042 0 0 ; 0043 420 0
+t3-d0-long	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-d0-late	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-d0-twice	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-d0-then-d1	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-d1-then-d0	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-d0-exp	0041 0 0 ; 0042 0 0 ; 0043 420 0
+t3-d0-neg	0041 0 0 ; 0042 -409 0 ; 0043 11 0
+t3-d0-past-32	0041 0 0 ; 0042 0 0 ; 0043 420 0
+t3-d1-base	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-d1-name	0041 0 0 ; 0042 0 0 ; 0043 420 0
+t3-d1-short	0041 0 0 ; 0042 0 0 ; 0043 420 0
+t3-d1-long	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-proc-empty	0041 0 0 ; 0042 0 0 ; 0043 420 0
+t3-proc-other	0041 0 0 ; 0042 0 0 ; 0043 420 0
+t3-proc-junk	0041 0 0 ; 0042 0 0 ; 0043 420 0
+t3-enc-none	none
+t3-enc-empty	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-enc-win	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-enc-ref	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-enc-chain	none
+t3-enc-other-names	0041 0 0 ; 0042 420 0 ; 0043 830 0
+t3-enc-diff-real	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-text	0041 0 0 ; 0042 410 0 ; 0043 830 0
+t3-w-rounds-otherwise	0041 0 0 ; 0042 10000001 0 ; 0043 25000002 0
+t3-h-a-g	0041 0 0 ; 007a 500 0 ; top 700 bottom -150
+t3-h-a-past-box	0041 0 0 ; 007a 500 0 ; top 900 bottom -200
+t3-h-a-only	0041 0 0 ; 007a 500 0 ; top 700 bottom -200
+t3-h-flip	0041 0 0 ; 007a 500 0 ; top 700 bottom -150
+program-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-no-box	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-tt-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-tt-nothing	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-tt-as-file	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-as-file-no-box	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-tt-as-file-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-tt-as-file-nothing	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-tt-as-file3	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-as-file3-no-box	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-tt-as-file3-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-tt-as-file3-nothing	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-tt-subtype-type1	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-subtype-type1-no-box	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-tt-subtype-type1-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-tt-subtype-type1-nothing	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-tt-subtype-mm	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-subtype-mm-no-box	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-tt-subtype-mm-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-tt-subtype-mm-nothing	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-cff	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-no-box	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-cff-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-cff-nothing	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-cff-as-file	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-as-file-no-box	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-cff-as-file-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-cff-as-file-nothing	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-cff-subtype-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-subtype-tt-no-box	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-cff-subtype-tt-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-cff-subtype-tt-nothing	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-t1	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-no-box	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-t1-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-t1-nothing	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-t1-as-file2	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-as-file2-no-box	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-t1-as-file2-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-t1-as-file2-nothing	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-t1-subtype-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-subtype-tt-no-box	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-t1-subtype-tt-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-t1-subtype-tt-nothing	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-t1-subtype-mm	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-subtype-mm-no-box	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-t1-subtype-mm-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-t1-subtype-mm-nothing	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-tt-flip	0041 0 0 box 0 0 600 750 loose 0 -300 600 900 ; 0042 500 0 box 50 0 350 300 loose 0 -300 500 900 ; 0067 1000 0 box 20 -199 480 560 loose 0 -300 500 900
+program-tt-flip-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 750 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 750 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 750
+program-tt-codes	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0044 1500 0 box 50 0 450 700 loose 0 -200 500 800 ; 0067 2000 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 3000 0 box 50 0 450 700 loose 0 -200 450 800
+program-cff-codes	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-t1-codes	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-cff-operations-within	0041 0 0 box 0 0 10 10 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 0 0 500 1 loose 0 -200 500 800
+program-cff-operations-past	0041 0 0 box 0 0 10 10 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 0 0 500 1 loose 0 -200 500 800
+program-tt-no-cmap-past	0001 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0002 500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 1000 0 box -1 -1 499 0 loose -1 -200 500 800 ; 0042 1500 0 box -1 -1 499 0 loose -1 -200 500 800
+program-tt-no-cmap-names	0041 0 0 box 50 0 450 700 loose 0 -200 500 800 ; 0042 500 0 box 50 0 450 700 loose 0 -200 500 800 ; 0020 1000 0 box 50 0 450 700 loose 0 -200 500 800 ; 0067 1500 0 box 50 0 450 700 loose 0 -200 500 800
+program-tt-loca-past-1	0041 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0020 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-loca-past-2	0041 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0020 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800
+program-tt-loca-past-3	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0020 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800
+program-tt-loca-format-2	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-loca-format-minus	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-hmetrics-0	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 300 300 loose 0 -200 500 800 ; 0067 1000 0 box 0 -199 460 560 loose 0 -200 500 800
+program-tt-hmetrics-past	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-hmetrics-far-past	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-hmetrics-1	0041 0 0 box 600 0 1200 750 loose 0 -200 1200 800 ; 0042 500 0 box 20 0 320 300 loose 0 -200 500 800 ; 0067 1000 0 box 0 -199 460 560 loose 0 -200 500 800
+program-tt-hmetrics-all	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-cmap-count	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0020 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-composite-of-empty	0043 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800
+program-tt-glyph-broken	0021 0 0 box 50 0 450 700 loose 0 -200 500 800 ; 0020 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box -1 -1 499 0 loose -1 -200 500 800 ; 0043 1500 0 box -1 -1 499 0 loose -1 -200 500 800
+program-tt-upem-2048	0041 0 0 box 0 0 293 366 loose 0 -200 500 800 ; 0042 500 0 box 24 0 171 146 loose 0 -200 500 800 ; 0067 1000 0 box 10 -97 234 273 loose 0 -200 500 800
+program-tt-upem-16	0041 0 0 box 0 0 37500 46875 loose 0 -200 37500 46875 ; 0042 500 0 box 3125 0 21875 18750 loose 0 -200 21875 18750 ; 0067 1000 0 box 1250 -12499 30000 35000 loose 0 -12499 30000 35000
+program-tt-upem-16384	0041 0 0 box 0 0 37 46 loose 0 -200 500 800 ; 0042 500 0 box 3 0 21 18 loose 0 -200 500 800 ; 0067 1000 0 box 1 -11 29 34 loose 0 -200 500 800
+program-tt-upem-15	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-tt-upem-16385	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-tt-upem-0	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-key-file-first	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-key-not-stream	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-key-chain	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-key-chain-next	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-key-dangling	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-key-number	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-key-dict	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -199 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -199 500 800
+program-bad-empty	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-empty-t1	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-empty-symbolic	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-empty-symbolic-t1	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-garbage	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-garbage-t1	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-garbage-symbolic	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-garbage-symbolic-t1	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-tt-cut	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-tt-cut-t1	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-tt-cut-symbolic	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-tt-cut-symbolic-t1	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-one	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-one-t1	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-one-symbolic	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-bad-one-symbolic-t1	0041 0 0 ; 0042 500 0 ; 0067 1000 0 ; 00e4 1500 0
+program-t1-enc-ref	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-ref-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-ref	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-ref-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-ref	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-ref-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-dict-ref	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-dict-ref-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-dict-ref	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-dict-ref-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-dict-ref	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-dict-ref-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-dict-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-dict-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-dict-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-dict-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-dict-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-dict-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-dangling	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-dangling-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-dangling	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-dangling-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-dangling	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-dangling-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-string-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-string-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-string-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-number	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-number-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-number	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-number-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-number	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-number-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-stream	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-stream-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-stream	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-stream-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-stream	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-stream-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-unknown	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-unknown-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-unknown	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-unknown-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-unknown	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-unknown-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-mac-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-mac-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-mac-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-expert	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-expert-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-expert	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-expert-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-expert	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-expert-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-pdfdoc	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-enc-pdfdoc-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-pdfdoc	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-enc-pdfdoc-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-pdfdoc	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-enc-pdfdoc-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-base-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-base-win-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-base-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-base-win-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-base-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-base-win-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-base-ref	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-t1-base-ref-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-cff-base-ref	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-cff-base-ref-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-tt-base-ref	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-tt-base-ref-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-base-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-t1-base-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-cff-base-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-cff-base-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-tt-base-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-tt-base-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-base-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-t1-base-string-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-cff-base-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-cff-base-string-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-tt-base-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-tt-base-string-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-base-number	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-t1-base-number-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-cff-base-number	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-cff-base-number-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-tt-base-number	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-tt-base-number-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-base-unknown	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-t1-base-unknown-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-cff-base-unknown	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-cff-base-unknown-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-tt-base-unknown	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 600 750 loose 0 -200 600 800
+program-tt-base-unknown-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-ref	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-ref-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-ref	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-ref-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-ref	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-ref-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-dangling	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-dangling-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-dangling	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-dangling-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-dangling	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-dangling-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-empty	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-empty-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-empty	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-empty-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-empty	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-empty-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-elem-ref	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-elem-ref-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-elem-ref	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-elem-ref-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-elem-ref	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-elem-ref-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-elem-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-elem-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-elem-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-elem-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-elem-chain	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-elem-chain-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-code-ref	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-code-ref-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-code-ref	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-code-ref-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-code-ref	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-code-ref-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-code-real	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-code-real-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-code-real	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-code-real-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-code-real	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-code-real-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-code-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-code-string-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-code-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-code-string-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-code-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-code-string-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-code-true	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-code-true-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-code-true	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-code-true-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-code-true	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-code-true-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-unknown-glyph	0041 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-unknown-glyph-symbolic	0041 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-unknown-glyph	0041 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-unknown-glyph-symbolic	0041 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-unknown-glyph	0041 0 0 box 50 0 450 700 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-unknown-glyph-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-empty-name	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-diff-empty-name-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-empty-name	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-diff-empty-name-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-empty-name	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-diff-empty-name-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-none	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-none-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-none	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-none-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-none	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-none-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-diff-empty-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0080 500 0 box 50 0 450 700 loose 0 -200 450 800
+program-diff-none-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 20ac 500 0 box 50 0 450 700 loose 0 -200 450 800
+program-subtype-type1-tt-dict	0041 0 0 box 50 0 450 700 loose 0 -200 500 800 ; 0042 500 0 box 50 0 450 700 loose 0 -200 500 800 ; 0041 1000 0 box 50 0 450 700 loose 0 -200 500 800
+program-subtype-tt-t1-dict	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-subtype-tt-cff-dict	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-own-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1500 0 box 0 0 500 1 loose 0 -200 500 800
+program-t1-own-nonsymbolic	0061 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0062 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0063 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1500 0 box 0 0 600 750 loose 0 -200 600 800
+program-t1-own-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1500 0 box 0 0 500 1 loose 0 -200 500 800
+program-t1-own-win	0061 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0062 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0063 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1500 0 box 0 0 600 750 loose 0 -200 600 800
+program-t1-own-dingbat	0041 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 25a0 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-std-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 1500 0 box 0 0 0 1 loose 0 0 0 1
+program-t1-tokens-proc-spaced	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-proc-tight	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-proc-deep	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-proc-comment	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-proc-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-proc-escape	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-ints-many	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-string-tight	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-eexec-comment	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-eexec-string	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-tokens-string-before-key	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-masters-blend	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 130 0 430 200 loose 0 -200 500 800
+program-t1-masters-build-char	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 120 0 420 200 loose 0 -200 500 800
+program-t1-masters-weights-stored	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 0 0 300 200 loose 0 -200 500 800
+program-t1-masters-build-char-past	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box -1 -1 499 0 loose -1 -200 500 800
+program-t1-masters-build-char-base	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box -1 -1 499 0 loose -1 -200 500 800
+program-t1-masters-build-char-len-only	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box -1 -1 499 0 loose -1 -200 500 800
+program-t1-name-not-utf8	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-name-utf8	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-std-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 1500 0 box 0 0 0 1 loose 0 0 0 1
+program-t1-named-symbol	0391 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 03b3 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-tt-named-symbol	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-named-symbol	0391 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 03b3 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-t1-named-symbol-nonsymbolic	0391 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 03b3 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-tt-named-symbol-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-named-symbol-nonsymbolic	0391 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 03b3 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-t1-named-tagged-symbol	0391 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 03b3 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-tt-named-tagged-symbol	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-named-tagged-symbol	0391 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 03b3 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-t1-named-tagged-symbol-nonsymbolic	0391 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 03b3 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-tt-named-tagged-symbol-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-named-tagged-symbol-nonsymbolic	0391 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 03b3 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-t1-named-dingbats	2721 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 2747 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-tt-named-dingbats	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-named-dingbats	2721 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 2747 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-t1-named-dingbats-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-named-dingbats-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-named-dingbats-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-named-tagged-dingbats	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-named-tagged-dingbats	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-named-tagged-dingbats	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-named-tagged-dingbats-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-named-tagged-dingbats-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-named-tagged-dingbats-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-named-courier	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-named-courier	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-named-courier	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-named-courier-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-named-courier-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-named-courier-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-named-tagged-courier	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-named-tagged-courier	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-named-tagged-courier	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-named-tagged-courier-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-named-tagged-courier-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cff-named-tagged-courier-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-map-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 221e 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; f8ff 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-win-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 221e 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; f8ff 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-mac-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 221e 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; f8ff 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-dict	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-dict-nonsymbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-win-diff	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-win-diff-nonsymbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-mac-diff	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-mac-diff-nonsymbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 221e 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; f8ff 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-named-symbol	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol-win-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol-mac-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 221e 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; f8ff 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol-dict	0067 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol-dict-nonsymbolic	0067 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol-win-diff	0067 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol-win-diff-nonsymbolic	0067 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol-mac-diff	0067 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol-mac-diff-nonsymbolic	0067 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 221e 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; f8ff 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-symbol-named-symbol	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni-win-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni-mac-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 221e 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; f8ff 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni-dict	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni-dict-nonsymbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni-win-diff	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni-win-diff-nonsymbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni-mac-diff	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni-mac-diff-nonsymbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 221e 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; f8ff 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-uni-named-symbol	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win-win-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win-mac-nonsymbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 221e 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; f8ff 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win-dict	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win-dict-nonsymbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win-win-diff	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win-win-diff-nonsymbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win-mac-diff	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win-mac-diff-nonsymbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 221e 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 2030 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; f8ff 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-win-named-symbol	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0043 1000 0 box 100 50 700 800 loose 0 -200 700 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 00b0 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00e4 2500 0 box 50 0 450 700 loose 0 -200 450 800 ; 00f0 2500 0 box 50 0 450 700 loose 0 -200 450 800
+program-tt-map-mac-c1	00a3 0 0 box 50 0 450 700 loose 0 -200 450 800
+program-base-expert	0041 0 0 box -1 -1 499 0 loose -1 -200 500 800 ; 0042 500 0 box -1 -1 499 0 loose -1 -200 500 800 ; f767 1000 0 box 0 0 500 1 loose 0 -200 500 800
+program-tt-to-unicode	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-t1-caps	0041 0 0 box 0 0 600 750 loose 0 -200 700 800 ; 0061 700 0 box 0 0 300 1 loose 0 -200 300 800
+program-t1-caps-notdef	0041 0 0 box 0 0 600 750 loose 0 -200 700 800 ; 0020 700 0 box 0 0 600 750 loose 0 -200 700 800
+program-t1-caps-space	0041 0 0 box 0 0 600 750 loose 0 -200 700 800 ; 0020 700 0 box 0 0 300 1 loose 0 -200 300 800
+program-tt-caps	0041 0 0 box 0 0 600 750 loose 0 -200 700 800 ; 0061 700 0 box 50 0 450 700 loose 0 -200 450 800
+program-cid-tt	0001 0 0 box 0 0 600 761 loose 0 -200 600 800 ; 0002 600 0 box 20 -199 480 568 loose 0 -200 500 800 ; 0003 1100 0 box 0 0 250 1 loose 0 -200 250 800 ; 0004 1350 0 box 50 0 350 304 loose 0 -200 450 800 ; 0005 1800 0 box 100 50 700 812 loose 0 -200 700 812
+program-cid-tt-identity	0001 0 0 box 0 0 600 761 loose 0 -200 600 800 ; 0002 600 0 box 20 -199 480 568 loose 0 -200 500 800 ; 0003 1100 0 box 0 0 250 1 loose 0 -200 250 800 ; 0004 1350 0 box 50 0 350 304 loose 0 -200 450 800 ; 0005 1800 0 box 100 50 700 812 loose 0 -200 700 812
+program-cid-tt-map	0001 0 0 box 20 -199 480 568 loose 0 -200 600 800 ; 0002 600 0 box 0 0 600 761 loose 0 -200 600 800 ; 0003 1100 0 box 0 0 250 1 loose 0 -200 250 800 ; 0004 1350 0 box 0 0 450 1 loose 0 -200 450 800 ; 0005 1800 0 box 0 0 700 1 loose 0 -200 700 800
+program-cid-tt-map-past	0003 0 0 box 0 0 250 1 loose 0 -200 250 800 ; 0001 250 0 box 20 -199 480 568 loose 0 -200 600 800
+program-cid-tt-map-chain	0001 0 0 box 0 0 600 761 loose 0 -200 600 800 ; 0002 600 0 box 20 -199 480 568 loose 0 -200 500 800 ; 0003 1100 0 box 0 0 250 1 loose 0 -200 250 800 ; 0004 1350 0 box 50 0 350 304 loose 0 -200 450 800 ; 0005 1800 0 box 100 50 700 812 loose 0 -200 700 812
+program-cid-tt-map-dict	0001 0 0 box 0 0 600 761 loose 0 -200 600 800 ; 0002 600 0 box 20 -199 480 568 loose 0 -200 500 800 ; 0003 1100 0 box 0 0 250 1 loose 0 -200 250 800 ; 0004 1350 0 box 50 0 350 304 loose 0 -200 450 800 ; 0005 1800 0 box 100 50 700 812 loose 0 -200 700 812
+program-cid-tt-past-glyphs	0001 0 0 box 0 0 600 761 loose 0 -200 600 800 ; 0009 600 0 box 0 0 1000 1 loose 0 -200 1000 800
+program-cid-tt-no-heights	0001 0 0 box 0 0 600 761 loose 0 -300 600 1000 ; 0002 600 0 box 20 -199 480 568 loose 0 -300 500 1000 ; 0003 1100 0 box 0 0 250 1 loose 0 -300 250 1000 ; 0004 1350 0 box 50 0 350 304 loose 0 -300 450 1000 ; 0005 1800 0 box 100 50 700 812 loose 0 -300 700 1000
+program-cid-tt-no-box	0001 0 0 box 0 0 600 761 loose 0 -199 600 800 ; 0002 600 0 box 20 -199 480 568 loose 0 -199 500 800 ; 0003 1100 0 box 0 0 250 1 loose 0 -199 250 800 ; 0004 1350 0 box 50 0 350 304 loose 0 -199 450 800 ; 0005 1800 0 box 100 50 700 812 loose 0 -199 700 812
+program-cid-tt-nothing	0001 0 0 box 0 0 600 761 loose 0 -199 600 800 ; 0002 600 0 box 20 -199 480 568 loose 0 -199 500 800 ; 0003 1100 0 box 0 0 250 1 loose 0 -199 250 800 ; 0004 1350 0 box 50 0 350 304 loose 0 -199 450 800 ; 0005 1800 0 box 100 50 700 812 loose 0 -199 700 812
+program-cid-cff-as-type2	0001 0 0 box 0 0 600 1 loose 0 -200 600 800 ; 0002 600 0 box 0 0 600 761 loose 0 -200 600 800
+program-cid-t1	0001 0 0 box 0 0 600 1 loose 0 -200 600 800 ; 0002 600 0 box 0 0 600 761 loose 0 -200 600 800
+program-cid-cff	0001 0 0 box 0 0 600 1 loose 0 -200 600 800 ; 0002 600 0 box 0 0 600 761 loose 0 -200 600 800
+program-cid-keyed	0005 0 0 box 0 0 600 761 loose 0 -200 700 800 ; 0007 700 0 box 0 0 600 761 loose 0 -200 1000 800 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-as-type2	0005 0 0 box 0 0 600 761 loose 0 -200 700 800 ; 0007 700 0 box 0 0 600 761 loose 0 -200 1000 800 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-matrix-top	0005 0 0 box 0 0 1200 1523 loose 0 -200 1200 1523 ; 0007 700 0 box 0 0 1200 1523 loose 0 -200 1200 1523 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-matrix-font	0005 0 0 box 0 0 1200 1523 loose 0 -200 1200 1523 ; 0007 700 0 box 0 0 1200 1523 loose 0 -200 1200 1523 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-matrix-both-one	0005 0 0 box 0 0 600 761 loose 0 -200 700 800 ; 0007 700 0 box 0 0 600 761 loose 0 -200 1000 800 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-matrix-one-both	0005 0 0 box 0 0 1000 1015 loose 0 -200 1000 1015 ; 0007 700 0 box 0 0 1000 1015 loose 0 -200 1000 1015 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-matrix-both-two	0005 0 0 box 0 0 1 1 loose 0 -200 700 800 ; 0007 700 0 box 0 0 1 1 loose 0 -200 1000 800 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-keyed-matrix-both-sheared	0005 0 0 box 0 0 1 1 loose 0 -200 700 800 ; 0007 700 0 box 0 0 1 1 loose 0 -200 1000 800 ; 0002 1700 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-composite-2048	0000 0 0 box 0 0 600 761 loose 0 -200 1000 800
+program-cid-composite-2049	0000 0 0 box 0 0 600 761 loose 0 -200 1000 800
+program-cid-keyed-map	0001 0 0 box 0 0 600 761 loose 0 -200 600 800 ; 0002 600 0 box 0 0 600 761 loose 0 -200 600 800
+program-cid-chain-past-own	0001 0 0 box 20 -199 480 568 loose 0 -200 500 800 ; 0002 500 0 box 50 0 450 710 loose 0 -200 1000 800 ; 0003 1500 0 box 50 0 450 710 loose 0 -200 1000 800
+program-cid-chain-space-below	4142 0 0 box 50 0 450 710 loose 0 -200 1000 800
+program-cid-chain-wmode-below	0001 0 0 box 20 -199 480 568 loose 0 -200 500 800 ; 0001 500 0 box 20 -199 480 568 loose 0 -200 500 800
+program-cid-chain-nothing-below	0001 0 0 box 20 -199 480 568 loose 0 -200 500 800 ; 0002 500 0 box 50 0 450 710 loose 0 -200 1000 800 ; 0003 1500 0 box 50 0 450 710 loose 0 -200 1000 800
+program-cid-chain-identity-usecmap	0001 0 0 box 20 -199 480 568 loose 0 -200 500 800 ; 0002 500 0 box 50 0 450 710 loose 0 -200 1000 800 ; 0003 1500 0 box 50 0 450 710 loose 0 -200 1000 800
+program-cid-chain-identity-name	0001 0 0 box 20 -199 480 568 loose 0 -200 500 800 ; 0002 500 0 box 50 0 450 710 loose 0 -200 1000 800 ; 0003 1500 0 box 50 0 450 710 loose 0 -200 1000 800
+program-otto	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-win-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-win-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-win-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-mac-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-mac-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-mac-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-diff-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-diff-tt	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-diff-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-post-names-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-post-names-win-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-win-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-win-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-post-names-mac-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-mac-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-mac-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-post-names-diff-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-diff-tt	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-diff-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-no-cmap	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-no-cmap-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-no-cmap-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-no-cmap-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-no-cmap-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-no-cmap-win-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-no-cmap-win-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-no-cmap-win-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-no-cmap-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-no-cmap-mac-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-no-cmap-mac-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-no-cmap-mac-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-no-cmap-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-no-cmap-diff-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-no-cmap-diff-tt	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-no-cmap-diff-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-no-cmap	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-post-names-no-cmap-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-no-cmap-tt	0041 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-no-cmap-tt-symbolic	0041 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-no-cmap-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-post-names-no-cmap-win-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-no-cmap-win-tt	0041 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-no-cmap-win-tt-symbolic	0041 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-no-cmap-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-post-names-no-cmap-mac-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-no-cmap-mac-tt	0041 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-no-cmap-mac-tt-symbolic	0041 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-no-cmap-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-post-names-no-cmap-diff-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-no-cmap-diff-tt	0067 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0041 500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-post-names-no-cmap-diff-tt-symbolic	0041 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-mac-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-mac-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-mac-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-mac-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-mac-win-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-mac-win-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-mac-win-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-mac-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-mac-mac-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-mac-mac-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-mac-mac-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-mac-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-mac-diff-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-mac-diff-tt	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-mac-diff-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-symbol	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-symbol-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-symbol-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-symbol-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-symbol-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-symbol-win-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-symbol-win-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-symbol-win-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-symbol-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-symbol-mac-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-symbol-mac-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-symbol-mac-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-symbol-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-symbol-diff-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-symbol-diff-tt	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-symbol-diff-tt-symbolic	0067 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0041 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-uni	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-uni-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-uni-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-uni-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-uni-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-uni-win-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-uni-win-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-uni-win-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-uni-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-uni-mac-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-uni-mac-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-uni-mac-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-uni-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-uni-diff-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-uni-diff-tt	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-uni-diff-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-ucs4	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-ucs4-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-ucs4-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-ucs4-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-ucs4-win	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-ucs4-win-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-ucs4-win-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-ucs4-win-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-ucs4-mac	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-ucs4-mac-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-ucs4-mac-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-ucs4-mac-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-ucs4-diff	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-map-ucs4-diff-symbolic	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-ucs4-diff-tt	0067 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0041 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-map-ucs4-diff-tt-symbolic	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-uni-name	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-otto-uni-name-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-otto-no-cmap-uni-name	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-otto-no-cmap-uni-name-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-otto-map-ucs4-uni-name	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 0 0 500 1 loose 0 -200 500 800
+program-otto-map-ucs4-uni-name-tt	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0067 500 0 box 20 -199 480 560 loose 0 -200 500 800
+program-otto-subtype	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-as-file2	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box 0 0 0 1 loose 0 0 0 1
+program-otto-as-file	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-upem-2048	0041 0 0 box 0 0 293 366 loose 0 -200 500 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1500 0 box 10 -97 234 273 loose 0 -200 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -200 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-otto-no-heights	0041 0 0 box 0 0 600 750 loose 0 -199 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -199 500 800 ; 0044 1000 0 box 0 0 500 1 loose 0 -199 500 800 ; 0067 1500 0 box 20 -199 480 560 loose 0 -199 500 800 ; 0020 2000 0 box 0 0 500 1 loose 0 -199 500 800 ; 0001 2500 0 box -1 -1 -1 0 loose -1 -1 -1 0
+program-cff-tag-1	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-cff-tag-1-symbolic	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-cff-tag-2	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-cff-tag-2-symbolic	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-cff-tag-true	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-cff-tag-true-symbolic	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-cff-tag-typ1	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-cff-tag-typ1-symbolic	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-tt-tag-otto	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-tt-tag-otto-symbolic	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-tt-tag-typ1	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-tt-tag-typ1-symbolic	0041 0 0 ; 0042 500 0 ; 0067 1000 0
+program-tt-tag-true	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-tt-tag-2	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-both-tag-1	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-both-tag-otto	0041 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0042 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-cid-otto	0001 0 0 box 0 0 600 1 loose 0 -200 600 800 ; 0002 600 0 box 0 0 600 761 loose 0 -200 600 800 ; 0003 1100 0 box 20 -199 480 568 loose 0 -200 480 800
+program-cid-otto-keyed	0001 0 0 box 0 0 600 761 loose 0 -200 600 800 ; 0002 600 0 box 20 -199 480 568 loose 0 -200 500 800 ; 0003 1100 0 box 0 0 600 761 loose 0 -200 600 800
+program-cid-otto-keyed-past	0005 0 0 box 0 0 700 1 loose 0 -200 700 800 ; 0007 700 0 box 0 0 1000 1 loose 0 -200 1000 800 ; 0009 1700 0 box 0 0 1000 1 loose 0 -200 1000 800
+program-cid-otto-keyed-as-type2	0001 0 0 box 0 0 600 761 loose 0 -200 600 800 ; 0002 600 0 box 20 -199 480 568 loose 0 -200 500 800 ; 0003 1100 0 box 0 0 600 761 loose 0 -200 600 800
+program-cid-otto-keyed-map	0001 0 0 box 0 0 600 761 loose 0 -200 600 800 ; 0002 600 0 box 20 -199 480 568 loose 0 -200 500 800
+program-otto-keyed-text-symbolic	0041 0 0 box 20 -199 480 560 loose 0 -200 500 800
+program-otto-keyed-post-names-text-symbolic	0024 0 0 box 20 -199 480 560 loose 0 -200 500 800
+program-otto-keyed	0024 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0026 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-otto-keyed-symbolic	0024 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0026 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 500 1 loose 0 -200 500 800
+program-otto-keyed-tt	0024 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0026 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-otto-keyed-post-names	0024 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0026 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0041 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-otto-keyed-post-names-symbolic	0024 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0026 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0041 1000 0 box 0 0 500 1 loose 0 -200 500 800
+program-otto-keyed-post-names-tt	0024 0 0 box 0 0 600 750 loose 0 -200 600 800 ; 0026 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0041 1000 0 box 20 -199 480 560 loose 0 -200 500 800
+program-otto-keyed-no-cmap	0024 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0026 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0041 1000 0 box 0 0 500 1 loose 0 -200 500 800
+program-otto-keyed-no-cmap-symbolic	0024 0 0 box 0 0 500 1 loose 0 -200 500 800 ; 0026 500 0 box 0 0 500 1 loose 0 -200 500 800 ; 0041 1000 0 box 0 0 500 1 loose 0 -200 500 800
+program-otto-keyed-no-cmap-tt	0024 0 0 box 20 -199 480 560 loose 0 -200 500 800 ; 0026 500 0 box 0 0 600 750 loose 0 -200 600 800 ; 0041 1000 0 box 0 0 500 1 loose 0 -200 500 800
+program-cid-vertical	0001 -300 -880 box 0 0 600 761 loose -200 -120 800 880 ; 0002 -250 -1880 box 20 -199 480 568 loose -250 -199 750 880
+program-cid-vertical-space	none
+program-cid-vertical-empty	0001 -300 -880 box 0 0 600 761 loose -200 -120 800 880 ; 0003 -125 -1880 box -1000 0 0 1 loose -1000 -120 625 880
+program-tt-ascent-under	0041 0 0 box 0 0 600 750 loose 0 -200 600 750 ; 0042 500 0 box 50 0 350 300 loose 0 -200 500 300 ; 0067 1000 0 box 20 -199 480 560 loose 0 -200 500 560
+program-tt-ascent-under-far	0041 0 0 box 0 0 600 750 loose 0 -1000 600 750 ; 0042 500 0 box 50 0 350 300 loose 0 -1000 500 300 ; 0067 1000 0 box 20 -199 480 560 loose 0 -1000 500 560

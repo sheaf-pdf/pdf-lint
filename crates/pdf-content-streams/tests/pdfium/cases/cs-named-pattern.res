@@ -1,0 +1,1 @@
+<< /ColorSpace << /X [/Pattern /DeviceRGB] >> >>
