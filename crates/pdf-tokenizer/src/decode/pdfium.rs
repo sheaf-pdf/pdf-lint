@@ -135,7 +135,10 @@ fn decimal(bytes: &[u8]) -> &str {
 }
 
 /// The bytes of a name's or a string's value as PDFium reads them, in
-/// order: from [`name`], [`literal`] or [`hex`].
+/// order: from [`name`], [`literal`] or [`hex`]. Never more than the bytes
+/// left to read, each read byte standing for one at most, which
+/// `size_hint` gives as its upper bound: a buffer of that length holds
+/// them without growing.
 #[derive(Debug, Clone)]
 pub struct Bytes<'a> {
     bytes: &'a [u8],
@@ -309,6 +312,15 @@ impl Iterator for Bytes<'_> {
             Syntax::Hex => self.hex(),
             Syntax::Done => None,
         }
+    }
+
+    /// At most one a byte left; none once a string's close has come.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = match self.syntax {
+            Syntax::Done => 0,
+            _ => self.bytes.len().saturating_sub(self.pos),
+        };
+        (0, Some(left))
     }
 }
 

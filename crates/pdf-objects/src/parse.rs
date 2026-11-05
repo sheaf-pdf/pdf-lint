@@ -1033,7 +1033,7 @@ impl<'a> Parser<'a> {
         if !word.contains(&b'#') {
             return word.get(1..).unwrap_or_default().to_vec();
         }
-        exact(pdfium::name(word))
+        reserved(pdfium::name(word))
     }
 
     /// A number token's value as PDFium's object parser reads it
@@ -1101,7 +1101,7 @@ impl<'a> Parser<'a> {
         if sink.wants() {
             self.told_string(token, bytes.clone(), sink);
         }
-        exact(bytes)
+        reserved(bytes)
     }
 
     /// Tells `sink` where ISO 32000-2 reads closed string `token`, whose
@@ -1182,9 +1182,11 @@ fn integer(token: &Token, rules: Rules) -> Option<i64> {
     }
 }
 
-/// A PDFium reading's bytes, in a buffer of their exact length.
-fn exact(bytes: pdfium::Bytes<'_>) -> Vec<u8> {
-    let mut value = Vec::with_capacity(bytes.clone().count());
+/// A PDFium reading's bytes, in a buffer reserved once for as many as the
+/// bytes left to read, which a value is never longer than, so it never
+/// grows; its capacity may exceed its length by what the escapes took.
+fn reserved(bytes: pdfium::Bytes<'_>) -> Vec<u8> {
+    let mut value = Vec::with_capacity(bytes.size_hint().1.unwrap_or(0));
     value.extend(bytes);
     value
 }
@@ -1353,8 +1355,10 @@ fn is_keyword(token: Option<&Token>, word: &[u8]) -> bool {
     token.is_some_and(|t| t.kind == Kind::Keyword && t.bytes == word)
 }
 
-/// A name's or string's value, its escapes decoded, in a buffer of its
-/// exact length; nothing for any other token.
+/// A name's or string's value, its escapes decoded, in a buffer reserved
+/// once for as many bytes as the token has, which a value is never longer
+/// than, so it never grows; its capacity may exceed its length by what the
+/// escapes took. Nothing for any other token.
 fn decoded(token: &Token) -> Vec<u8> {
     if let Some(value) = token.verbatim() {
         return value.to_vec();
@@ -1362,8 +1366,9 @@ fn decoded(token: &Token) -> Vec<u8> {
     let Some(pieces) = token.pieces() else {
         return Vec::new();
     };
-    let mut value = Vec::with_capacity(pieces.clone().bytes().count());
-    value.extend(pieces.bytes());
+    let bytes = pieces.bytes();
+    let mut value = Vec::with_capacity(bytes.size_hint().1.unwrap_or(0));
+    value.extend(bytes);
     value
 }
 

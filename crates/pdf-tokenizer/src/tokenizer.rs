@@ -1285,4 +1285,40 @@ mod tests {
         assert_eq!(chosen.offset(), 5);
         assert_eq!(chosen.next().map(|t| t.kind), Some(Kind::Space));
     }
+
+    /// `size_hint` bounds the tokens left: one at least while bytes are
+    /// left, at most one a byte; from any offset, and after each token,
+    /// `eol` and `data`. So a buffer of the upper bound holds them.
+    #[test]
+    fn size_hint_bounds_the_tokens_left() {
+        let input = b"<< /Length 5 >>\nstream\r\nBT ET\nendstream 1 (a";
+        let hint = |tokens: &Tokenizer<'_>| {
+            let left = input.len() - tokens.offset();
+            (usize::from(left > 0), Some(left))
+        };
+        for offset in 0..=input.len() + 1 {
+            let mut tokens = Tokenizer::at(input, offset);
+            let mut left = tokens.clone().count();
+            loop {
+                let (lower, upper) = tokens.size_hint();
+                assert_eq!((lower, upper), hint(&tokens));
+                assert!(lower <= left && left <= upper.unwrap());
+                let Some(token) = tokens.next() else { break };
+                left -= 1;
+                if token.bytes == b"stream" {
+                    tokens.eol();
+                    assert_eq!(tokens.size_hint(), hint(&tokens));
+                    tokens.data(5);
+                    assert_eq!(tokens.size_hint(), hint(&tokens));
+                    left = tokens.clone().count();
+                }
+            }
+            assert_eq!(tokens.size_hint(), (0, Some(0)));
+        }
+        let tokens = Tokenizer::new(input);
+        let upper = tokens.size_hint().1.unwrap();
+        let mut held = Vec::with_capacity(upper);
+        held.extend(tokens);
+        assert!(held.len() <= upper && held.capacity() == upper);
+    }
 }

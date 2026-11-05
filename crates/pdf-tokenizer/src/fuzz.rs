@@ -188,8 +188,11 @@ pub fn walk_with<R: RuleSet>(input: &[u8], offset: usize, set: R) -> usize {
     assert_eq!(tokenizer.rules(), rules);
     let mut at = offset.min(input.len());
     let mut count = 0;
+    check_size_hint(tokenizer.clone());
     while let Some(token) = tokenizer.next() {
         check_with(input, &token, at, rules);
+        let left = input.len() - token.end();
+        assert_eq!(tokenizer.size_hint(), (usize::from(left > 0), Some(left)));
         let again = Tokenizer::at(input, token.start).with_rules(set).next();
         assert_eq!(again, Some(token), "started at a token, it yields it");
         if token.kind == Kind::Space {
@@ -219,7 +222,30 @@ pub fn walk_with<R: RuleSet>(input: &[u8], offset: usize, set: R) -> usize {
         }
     }
     assert_eq!(at, input.len(), "the tokens reach the end of the input");
+    assert_eq!(tokenizer.size_hint(), (0, Some(0)));
     count
+}
+
+/// Checks that `it`'s `size_hint` bounds what it has left at every step,
+/// that its upper bound falls by one at least a step (each step costs a
+/// byte), and that it says `(0, Some(0))` once it has ended: so a buffer
+/// of the upper bound holds what's left.
+fn check_size_hint<I: Iterator + Clone>(mut it: I) {
+    let mut left = it.clone().count();
+    loop {
+        let (lower, upper) = it.size_hint();
+        assert!(
+            lower <= left && Some(left) <= upper,
+            "{lower} <= {left} <= {upper:?}"
+        );
+        if it.next().is_none() {
+            assert_eq!(lower, 0, "nothing promised where nothing came");
+            assert_eq!(it.size_hint(), (0, Some(0)));
+            return;
+        }
+        left -= 1;
+        assert!(it.size_hint().1 < upper, "a step costs a byte");
+    }
 }
 
 /// [`check_with`] under ISO 32000-2's rules.
@@ -562,11 +588,19 @@ fn check_pdfium_bytes(input: &[u8], token: &Token<'_>) {
         _ => pdfium::hex(bytes).count(),
     };
     assert!(longest < bytes.len(), "never longer than its token");
+    match token.kind {
+        Kind::Name => check_size_hint(pdfium::name(bytes)),
+        Kind::LiteralString => check_size_hint(pdfium::literal(bytes)),
+        _ => check_size_hint(pdfium::hex(bytes)),
+    }
 }
 
 fn check_pieces(input: &[u8], token: &Token<'_>, rules: Rules) {
     let pieces = token.pieces().expect("names and strings have pieces");
     let total = pieces.clone().count();
+    let len = token.bytes.len();
+    assert_eq!(pieces.size_hint(), (usize::from(len > 0), Some(len)));
+    check_size_hint(pieces.clone());
     // A string's close came; a name has none.
     let closed = matches!(token.kind, Kind::LiteralString | Kind::HexString) && token.closed;
     let octal = |b: &u8| (b'0'..=b'7').contains(b);
@@ -704,6 +738,11 @@ fn check_pieces(input: &[u8], token: &Token<'_>, rules: Rules) {
 fn check_verbatim(token: &Token<'_>) {
     let pieces = token.pieces().expect("names and strings have pieces");
     assert!(pieces.clone().bytes().count() <= token.bytes.len());
+    assert_eq!(
+        pieces.clone().bytes().size_hint(),
+        (0, Some(token.bytes.len()))
+    );
+    check_size_hint(pieces.clone().bytes());
     let plain = (pieces.clone()).all(|p| matches!(p.how, How::Delimiter | How::Plain));
     match token.verbatim() {
         Some(value) => {

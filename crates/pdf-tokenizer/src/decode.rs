@@ -8,6 +8,7 @@
 //! places, and [`How`] says which it chose.
 
 use core::fmt;
+use core::iter::FusedIterator;
 use core::ops::Range;
 
 use memchr::memchr2;
@@ -136,7 +137,10 @@ impl fmt::Debug for Quirks {
 }
 
 /// The [`Piece`]s of a name, a literal string or a hex string, in order.
-/// They join into the bytes given, with no gap and no overlap.
+/// They join into the bytes given, with no gap and no overlap. Each is a
+/// byte or more and stands for one byte at most, so there are never more
+/// pieces, or value bytes, than bytes: `size_hint` gives a piece at least
+/// while bytes are left, and at most as many as the bytes left.
 #[derive(Debug, Clone)]
 pub struct Pieces<'a> {
     bytes: &'a [u8],
@@ -202,9 +206,17 @@ impl<'a> Pieces<'a> {
         }
     }
 
-    /// The value's bytes, from the pieces left.
-    pub fn bytes(self) -> impl Iterator<Item = u8> + 'a {
+    /// The value's bytes, from the pieces left: never more than the bytes
+    /// left, which the iterator's `size_hint` gives as its upper bound, so
+    /// a buffer of that length holds them without growing. Cloning it is
+    /// cheap, as cloning the pieces is.
+    pub fn bytes(self) -> impl FusedIterator<Item = u8> + Clone + 'a {
         self.filter_map(|piece| piece.byte)
+    }
+
+    /// The bytes from the next piece on.
+    fn rest(&self) -> &'a [u8] {
+        self.bytes.get(self.pos..).unwrap_or_default()
     }
 
     /// The quirks among the pieces left.
@@ -284,8 +296,7 @@ impl Iterator for Pieces<'_> {
     type Item = Piece;
 
     fn next(&mut self) -> Option<Piece> {
-        let rest = self.bytes.get(self.pos..).unwrap_or_default();
-        let (&first, after) = rest.split_first()?;
+        let (&first, after) = self.rest().split_first()?;
         let (len, byte, how) = if self.closed {
             (1, None, How::Invalid)
         } else {
@@ -303,7 +314,17 @@ impl Iterator for Pieces<'_> {
             how,
         })
     }
+
+    /// A piece at least while bytes are left, each piece being a byte or
+    /// more; at most one a byte.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.rest().len();
+        (usize::from(left > 0), Some(left))
+    }
 }
+
+// `pos` only grows, and `next` gives nothing once it reaches the end.
+impl FusedIterator for Pieces<'_> {}
 
 /// A literal string's escape: `after` is what follows its backslash, and
 /// the length counts the backslash.
@@ -1174,6 +1195,81 @@ mod tests {
         // The offsets are the bytes', as for any bytes given.
         let at: Vec<_> = decode::literal(b"a)b").map(|p| p.at).collect();
         assert_eq!(at, [0..1, 1..2, 2..3]);
+    }
+
+    /// Every run of bytes of the verbatim test's inputs, read as a name, a
+    /// literal string and a hex string by the pieces and by PDFium's
+    /// readings, from the start and after each piece or byte.
+    fn each_decoding(mut check: impl FnMut(Pieces<'_>, decode::pdfium::Bytes<'_>)) {
+        for input in VERBATIM_INPUTS {
+            for start in 0..=input.len() {
+                for end in start..=input.len() {
+                    let bytes = &input[start..end];
+                    check(decode::name(bytes), decode::pdfium::name(bytes));
+                    check(decode::literal(bytes), decode::pdfium::literal(bytes));
+                    check(decode::hex(bytes), decode::pdfium::hex(bytes));
+                }
+            }
+        }
+    }
+
+    /// `size_hint` bounds what's left: a piece at least while bytes are
+    /// left and at most one a byte, and of a value's bytes at most one a
+    /// byte, by the pieces and by PDFium's readings, so a buffer of the
+    /// upper bound holds the value without growing; and each stays true
+    /// after each piece or byte.
+    #[test]
+    fn size_hint_bounds_the_pieces_and_the_bytes_left() {
+        /// `it` yields within its hint at every step, the hint's upper
+        /// bound falls by one at least a step, and once it has ended the
+        /// hint is (0, Some(0)).
+        fn bounded<I: Iterator + Clone>(mut it: I) {
+            loop {
+                let (lower, upper) = it.size_hint();
+                let left = it.clone().count();
+                assert!(
+                    lower <= left && left <= upper.unwrap(),
+                    "{lower} <= {left} <= {upper:?}"
+                );
+                if it.next().is_none() {
+                    assert_eq!(lower, 0, "nothing promised where nothing came");
+                    assert_eq!(it.size_hint(), (0, Some(0)));
+                    return;
+                }
+                assert!(
+                    it.size_hint().1.unwrap() < upper.unwrap(),
+                    "a step costs a byte"
+                );
+            }
+        }
+        let mut checked = 0;
+        each_decoding(|pieces, pdfium| {
+            let bytes = pieces.rest().len();
+            assert_eq!(pieces.size_hint(), (usize::from(bytes > 0), Some(bytes)));
+            assert_eq!(pieces.clone().bytes().size_hint(), (0, Some(bytes)));
+            assert_eq!(pdfium.size_hint().0, 0);
+            assert!(pdfium.size_hint().1.unwrap() <= bytes);
+            bounded(pieces.clone());
+            bounded(pieces.clone().bytes());
+            bounded(pdfium.clone());
+            // Reserved from the upper bound, a buffer never grows.
+            let value = pieces.bytes();
+            let upper = value.size_hint().1.unwrap();
+            let mut held = Vec::with_capacity(upper);
+            held.extend(value);
+            assert!(held.len() <= upper && held.capacity() == upper);
+            let upper = pdfium.size_hint().1.unwrap();
+            let mut held = Vec::with_capacity(upper);
+            held.extend(pdfium);
+            assert!(held.len() <= upper && held.capacity() == upper);
+            checked += 1;
+        });
+        assert!(checked > 1000, "{checked}");
+        // A read past a string's close has nothing left.
+        let mut read = decode::pdfium::literal(b"(a)bc");
+        assert_eq!(read.size_hint(), (0, Some(4)));
+        assert_eq!(read.by_ref().count(), 1);
+        assert_eq!(read.size_hint(), (0, Some(0)));
     }
 
     /// The inputs the verbatim and size tests take every run of bytes of.
