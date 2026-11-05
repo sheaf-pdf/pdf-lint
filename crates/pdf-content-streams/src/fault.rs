@@ -654,6 +654,8 @@ pub(crate) fn number_read(written: &[u8]) -> Option<Fault<'_>> {
                 .then_some(past),
             Err(NumberError::NotANumber) => Some(Fault::Number { written }),
             Err(NumberError::Overflow) => Some(past),
+            // Too small to hold: zero to PDFium too, so no fault.
+            Err(NumberError::Underflow) => None,
         };
     }
     match decode::integer(written) {
@@ -667,6 +669,8 @@ pub(crate) fn number_read(written: &[u8]) -> Option<Fault<'_>> {
         }
         Err(NumberError::NotANumber) => Some(Fault::Number { written }),
         Err(NumberError::Overflow) => Some(past),
+        // An integer can't underflow.
+        Err(NumberError::Underflow) => None,
     }
 }
 

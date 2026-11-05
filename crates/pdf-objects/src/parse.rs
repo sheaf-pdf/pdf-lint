@@ -855,6 +855,12 @@ impl<'a> Parser<'a> {
             Kind::Real if pdfium => self.pdfium_number(&token, sink),
             Kind::Real => match token.number() {
                 Ok(r) => Value::Real(r),
+                // Too small to hold: zero, with its sign, and no fault.
+                Err(NumberError::Underflow) => Value::Real(if token.bytes.starts_with(b"-") {
+                    -0.0
+                } else {
+                    0.0
+                }),
                 Err(_) => {
                     if sink.wants() {
                         sink.fault(at, Fault::RealOverflow);
@@ -1054,6 +1060,8 @@ impl<'a> Parser<'a> {
                 (wide(pdfium::number(written)) != Some(n)).then_some(Fault::OutOfRange { written })
             }
             Err(NumberError::Overflow) => Some(Fault::OutOfRange { written }),
+            // An integer can't underflow.
+            Err(NumberError::Underflow) => None,
             Err(NumberError::NotANumber) => {
                 matches!(decode::number(written), Err(NumberError::NotANumber))
                     .then_some(Fault::Number { written })
@@ -1460,6 +1468,19 @@ mod tests {
         );
         let (value, _) = self::value(b"-99999999999999999999");
         assert_eq!(*value.unwrap().value(), Value::Integer(i64::MIN));
+        // A real too small to hold reads as zero, with its sign, to the
+        // bit, and no fault.
+        for (sign, zero) in [("", 0.0f64), ("-", -0.0), ("+", 0.0)] {
+            let tiny = format!("{sign}0.{}1", "0".repeat(400));
+            let (value, kept) = self::value(tiny.as_bytes());
+            let value = value.unwrap();
+            let read = match value.value() {
+                Value::Real(read) => *read,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(read.to_bits(), zero.to_bits(), "{tiny}");
+            assert!(kept.faults.is_empty(), "{tiny}");
+        }
         // The name reads as written but for its well-formed escapes.
         let (value, _) = self::value(b"/A#zz#00#41");
         assert_eq!(*value.unwrap().value(), Value::Name(b"A#zz\0A".to_vec()));

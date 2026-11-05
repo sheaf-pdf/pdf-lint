@@ -152,7 +152,7 @@ Where ISO 32000-2 leaves a choice, or a reader departs from it, the decoder stil
 | `OddDigit` | `<414>`'s last digit | as if `0` followed it |
 | `Dangling` | a `\` that an unclosed string ends on | nothing |
 
-Numbers decode too. `integer()` gives an `i64`, or `Overflow` outside it, where qpdf reads the whole object holding the integer as null. `number()` gives an `f64` for an integer or a real, and `1e5` and `inf` aren't numbers.
+Numbers decode too. `integer()` gives an `i64`, or `Overflow` outside it, where qpdf reads the whole object holding the integer as null. `number()` gives an `f64` for an integer or a real, `Overflow` past the largest finite one, and `Underflow` for a real whose digits aren't all zero but reads as zero; `1e5` and `inf` aren't numbers.
 
 The pieces and numbers are ISO 32000-2's reading of a token, whatever rules read it. `decode::pdfium` reads the same bytes as PDFium does, values only: a number as PDFium holds one (an unsigned or signed 32-bit integer, 0 past it, or an `f32`: `--5` is 0, `1.2.3` is 1.2), a name's `#` before any two bytes as an escape, a literal string's unescaped CR as written, and a hex string's digits paired over any other byte.
 

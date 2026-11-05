@@ -353,6 +353,9 @@ fn digit(b: u8) -> u8 {
 }
 
 /// Why a token isn't the number asked for.
+///
+/// Exhaustive on purpose, so that a match on every error is checked by the
+/// compiler: a new variant would be a breaking release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum NumberError {
     /// It isn't written as one.
@@ -363,6 +366,11 @@ pub enum NumberError {
     /// reads the whole object holding it as null.
     #[error("a number too large to hold")]
     Overflow,
+    /// It's written as one, but too small: a real whose digits aren't all
+    /// zero, which an `f64` reads as zero (`0.` followed by 400 zeros and a
+    /// `1`). An integer can't be.
+    #[error("a number too small to hold")]
+    Underflow,
 }
 
 /// The integer `bytes` are written as: digits, with an optional sign (ISO
@@ -392,8 +400,9 @@ pub fn integer(bytes: &[u8]) -> Result<i64, NumberError> {
 }
 
 /// The number `bytes` are written as, an integer or a real, as an `f64`
-/// (ISO 32000-2, 7.3.3). Forms Rust reads but PDF doesn't write, such as
-/// `1e5` or `inf`, aren't numbers.
+/// (ISO 32000-2, 7.3.3): too large past a finite `f64`, too small when a
+/// real with a digit other than `0` reads as zero. Forms Rust reads but PDF
+/// doesn't write, such as `1e5` or `inf`, aren't numbers.
 pub fn number(bytes: &[u8]) -> Result<f64, NumberError> {
     if let Some(value) = short_decimal(bytes) {
         return Ok(value);
@@ -403,10 +412,14 @@ pub fn number(bytes: &[u8]) -> Result<f64, NumberError> {
     }
     let text = core::str::from_utf8(bytes).map_err(|_| NumberError::NotANumber)?;
     let value: f64 = text.parse().map_err(|_| NumberError::NotANumber)?;
-    if value.is_finite() {
-        Ok(value)
-    } else {
+    if !value.is_finite() {
         Err(NumberError::Overflow)
+    } else if value == 0.0 && bytes.iter().any(|b| matches!(b, b'1'..=b'9')) {
+        // Zero from a digit that isn't: a decimal below the least `f64`.
+        // The short reading above never gives one (its least is 1e-22).
+        Err(NumberError::Underflow)
+    } else {
+        Ok(value)
     }
 }
 
@@ -785,6 +798,52 @@ mod tests {
         assert_eq!(token(b"/Name").number(), Err(NumberError::NotANumber));
     }
 
+    /// A real whose digits aren't all zero but reads as zero is too small
+    /// to hold; one whose digits are all zero is zero, with its sign, to
+    /// the bit, however many digits it has.
+    #[test]
+    fn a_real_too_small_to_hold_is_an_underflow() {
+        // `0.`, 400 zeros, `1`.
+        let mut tiny = vec![b'0'; 403];
+        tiny[1] = b'.';
+        tiny[402] = b'1';
+        assert_eq!(token(&tiny).number(), Err(NumberError::Underflow));
+        let signed = |sign: &[u8]| [sign, &tiny[..]].concat();
+        assert_eq!(decode::number(&signed(b"-")), Err(NumberError::Underflow));
+        assert_eq!(decode::number(&signed(b"+")), Err(NumberError::Underflow));
+        // The least `f64`, 5e-324, is held; a digit further isn't.
+        let least = format!("0.{}5", "0".repeat(323));
+        assert_eq!(decode::number(least.as_bytes()), Ok(5e-324));
+        let below = format!("0.{}1", "0".repeat(324));
+        assert_eq!(
+            decode::number(below.as_bytes()),
+            Err(NumberError::Underflow)
+        );
+        let bits = |n: Result<f64, NumberError>| n.map(f64::to_bits);
+        for zero in [&b"0"[..], b"0.0", b"0.000", b".0", b"0."] {
+            assert_eq!(bits(decode::number(zero)), Ok(0.0f64.to_bits()), "{zero:?}");
+            let negative = [b"-", zero].concat();
+            assert_eq!(
+                bits(decode::number(&negative)),
+                Ok((-0.0f64).to_bits()),
+                "{negative:?}"
+            );
+        }
+        let zeros = format!("0.{}", "0".repeat(400));
+        assert_eq!(bits(decode::number(zeros.as_bytes())), Ok(0.0f64.to_bits()));
+        let zeros = format!("-{zeros}");
+        assert_eq!(
+            bits(decode::number(zeros.as_bytes())),
+            Ok((-0.0f64).to_bits())
+        );
+        // An integer can't underflow: zero from zeros, or at least one.
+        assert_eq!(decode::integer(b"0000"), Ok(0));
+        assert_eq!(decode::number(b"0000"), Ok(0.0));
+        let ones = format!("1{}", "0".repeat(400));
+        assert_eq!(decode::integer(ones.as_bytes()), Err(NumberError::Overflow));
+        assert_eq!(decode::number(ones.as_bytes()), Err(NumberError::Overflow));
+    }
+
     /// [`decode::integer`] as it was: by the tokenizer's word, then Rust's
     /// reading of the text.
     fn integer_by_text(bytes: &[u8]) -> Result<i64, NumberError> {
@@ -795,7 +854,8 @@ mod tests {
         text.parse().map_err(|_| NumberError::Overflow)
     }
 
-    /// [`decode::number`] as it was, every number by Rust's reading.
+    /// [`decode::number`] as it was, every number by Rust's reading, zero
+    /// from a digit that isn't an underflow.
     fn number_by_text(bytes: &[u8]) -> Result<f64, NumberError> {
         if !matches!(
             crate::tokenizer::word(bytes),
@@ -805,10 +865,12 @@ mod tests {
         }
         let text = core::str::from_utf8(bytes).map_err(|_| NumberError::NotANumber)?;
         let value: f64 = text.parse().map_err(|_| NumberError::NotANumber)?;
-        if value.is_finite() {
-            Ok(value)
-        } else {
+        if !value.is_finite() {
             Err(NumberError::Overflow)
+        } else if value == 0.0 && bytes.iter().any(|b| matches!(b, b'1'..=b'9')) {
+            Err(NumberError::Underflow)
+        } else {
+            Ok(value)
         }
     }
 
@@ -893,6 +955,12 @@ mod tests {
             read_alike(&long);
             long[len / 2] = b'.';
             read_alike(&long);
+            // Too small to hold, and zero.
+            let mut tiny = vec![b'0'; len];
+            tiny[1] = b'.';
+            read_alike(&tiny);
+            tiny[len - 1] = b'1';
+            read_alike(&tiny);
         }
         let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = || {
@@ -924,6 +992,10 @@ mod tests {
         assert_eq!(
             NumberError::Overflow.to_string(),
             "a number too large to hold"
+        );
+        assert_eq!(
+            NumberError::Underflow.to_string(),
+            "a number too small to hold"
         );
     }
 
