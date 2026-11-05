@@ -1848,7 +1848,10 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
 
+    use pdf_objects::Streams;
     use pdf_structure::fixture;
+
+    use crate::{Unreadable, Why};
 
     use pdf_content_streams::{Balance, ErrorKind, MarkedNest, Properties};
 
@@ -1860,12 +1863,22 @@ mod tests {
     use crate::version::Version;
 
     /// A source that answers as the one it wraps, and keeps each stream it's
-    /// asked the data of, and within how much; but gives none of
+    /// asked the data of, either way, and within how much; but gives none of
     /// `without`'s.
     struct Counting<'s> {
         source: &'s dyn Source,
         asked: RefCell<Vec<(ObjectId, usize)>>,
         without: Option<ObjectId>,
+    }
+
+    impl Streams for Counting<'_> {
+        fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+            self.asked.borrow_mut().push((id, limit));
+            match Some(id) == self.without {
+                true => Err(Unreadable::new(id, Why::Source, "not given")),
+                false => Streams::decoded(self.source, id, limit),
+            }
+        }
     }
 
     impl Source for Counting<'_> {
@@ -1902,7 +1915,7 @@ mod tests {
         }
 
         fn decoded(&self, stream: ObjectId) -> Option<&[u8]> {
-            self.source.decoded(stream)
+            Source::decoded(self.source, stream)
         }
 
         fn revisions(&self) -> &[Revision] {

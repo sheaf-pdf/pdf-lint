@@ -302,6 +302,7 @@ mod with_reading;
 pub use file::FileBytes;
 pub use file::Identity;
 pub use limits::{Limits, Options};
+pub(crate) use reading::missing;
 pub use reading::{ByteSource, Error, Prefix, Reading, SourceId};
 pub use sections::{FirstObject, SectionFault, SectionRow, SectionRows, Sections};
 use window::{Bytes, InMemory, Window};

@@ -6,9 +6,9 @@ use std::cell::RefCell;
 
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::{Stream, Value};
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Why};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why};
 
-use crate::{Decoded, Error, Fault, Limits, Streams};
+use crate::{Error, Fault, Limits};
 
 /// One font's reading: its objects, its caps and its sink, and the first object
 /// that didn't read for a reason that's the caller's to know.
@@ -232,7 +232,11 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> Reader<'_, O, S> {
 
     /// The content of stream `id`, its own number, decompressed within `budget`
     /// and charged to it: every stream a font reads goes through here. None where
-    /// it doesn't decode. Too large past `budget`, whatever gave it.
+    /// it doesn't decode: its data decodes to nothing, or isn't there
+    /// ([`Why::Damaged`]), or is through a filter the reader doesn't decode
+    /// ([`Why::Filter`]), what the font makes of having none being what's told.
+    /// Too large past `budget`, or past a cap of what gives it ([`Why::Limit`]),
+    /// whatever gave it.
     pub(crate) fn charged(
         &self,
         id: ObjectId,
@@ -243,20 +247,18 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> Reader<'_, O, S> {
             return Ok(None);
         }
         match self.objects.decoded(id, *budget) {
-            Decoded::Data(data) => {
+            Ok(data) => {
                 *budget = budget.checked_sub(data.len()).ok_or(Error::TooLarge)?;
-                Ok(Some(data))
+                Ok(Some(data.into_owned()))
             }
-            Decoded::TooLarge => Err(Error::TooLarge),
-            Decoded::None => Ok(None),
-            Decoded::Unreadable(unreadable) if unreadable.why == Why::Damaged => {
-                self.tell(Some(id), None, Fault::Damaged { id });
-                Ok(None)
-            }
-            Decoded::Unreadable(unreadable) => {
-                self.fail(unreadable);
-                Ok(None)
-            }
+            Err(unreadable) => match unreadable.why {
+                Why::Limit => Err(Error::TooLarge),
+                Why::Damaged | Why::Filter => Ok(None),
+                _ => {
+                    self.fail(unreadable);
+                    Ok(None)
+                }
+            },
         }
     }
 }

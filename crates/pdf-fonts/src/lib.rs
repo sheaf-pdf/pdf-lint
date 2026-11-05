@@ -1,7 +1,8 @@
 //! PDF's fonts (ISO 32000-2, 9), read.
 //!
 //! - **A file's font, as read** ([`Font`]): from its dictionary, over a [`Resolve`] for
-//!   its objects and [`Streams`] for its streams' data, the codes a string is in it,
+//!   its objects and pdf-objects' [`Streams`](pdf_objects::Streams) for its streams'
+//!   data, the codes a string is in it,
 //!   each code's CID, width, vertical metrics and text, and how high its glyphs reach,
 //!   each as PDFium reads them, what no real writer writes included. What it can't know
 //!   it guesses, and says ([`FontApprox`]); what isn't as ISO 32000-2 has it is told to
@@ -25,17 +26,19 @@
 //!   [`Fonts::for_text`], none's read: a glyph's box from one is none, its heights are
 //!   guessed, and those codes' text by its font's name.
 //!
-//! Nothing panics on what a file holds. With the `structure` feature, a pdf-structure
-//! `&Reading` gives a font its objects and streams; with `predefined-cmaps`, a Type 0
-//! font's predefined CMap is Adobe's, where without it it reads as one the build hasn't.
+//! Nothing panics on what a file holds. A pdf-structure `&Reading` gives a font its
+//! objects and streams, and so does anything else that implements pdf-objects'
+//! `Resolve` and `Streams`, or [`With`](pdf_objects::With), a resolver and a function as
+//! one; with `predefined-cmaps`, a Type 0 font's predefined CMap is Adobe's, where
+//! without it it reads as one the build hasn't.
 //!
 //! ```
-//! use pdf_fonts::{Decoded, Font, Limits, Object, ObjectId, With};
-//! use pdf_objects::dict;
+//! use pdf_fonts::{Font, Limits, Object, ObjectId, Unreadable, Why};
+//! use pdf_objects::{With, dict};
 //!
 //! // A font with no streams, over a resolver of nothing.
 //! let none = |_: ObjectId| -> Option<&Object> { None };
-//! let objects = With::new(&none, |_, _| Decoded::None);
+//! let objects = With::new(&none, |id, _| Err(Unreadable::new(id, Why::Damaged, "none")));
 //! let font = dict! {
 //!     "Subtype" => "Type1", "BaseFont" => "Arial,Bold", "Encoding" => "WinAnsiEncoding",
 //! };
@@ -69,7 +72,6 @@ pub use font::{
 pub use fonts::{FontId, FontScope, Fonts};
 pub use limits::Limits;
 pub use std14::Std14;
-pub use streams::{Decoded, Streams, With};
 
 mod afm;
 mod cmap;
@@ -89,7 +91,6 @@ mod predefined;
 mod program;
 mod reader;
 mod std14;
-mod streams;
 #[cfg(test)]
 mod tests;
 #[cfg_attr(not(feature = "programs"), allow(dead_code))]

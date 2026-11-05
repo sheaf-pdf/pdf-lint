@@ -4,8 +4,8 @@
 //! made for text are, no program read, under pdf-fonts' caps. Its objects
 //! are the file's as the predicates resolve them ([`Objects`]), and its
 //! streams' data, a `/ToUnicode`, an embedded CMap and those it uses, a
-//! Type 3 font's glyphs, comes decoded from the source
-//! ([`Source::decoded_within`]), as a font reads a reading's ([`decoded`]),
+//! Type 3 font's glyphs, comes decoded from the source as a viewer takes
+//! it ([`Streams::decoded`]), as a font reads a reading's ([`decoded`]),
 //! the file's fonts' within one budget. A source that gives no stream's
 //! data, as a document alone doesn't, leaves a font that asks one unread,
 //! as it leaves content. What the read tells is kept ([`Kept`]), each read
@@ -53,26 +53,25 @@
 //! evaluated. What's read then is the pass's after the walk, each font read
 //! once.
 //!
-//! [`Source::decoded_within`]: crate::source::Source::decoded_within
 //! [`FileCx::latin`]: crate::FileCx::latin
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::mem::{self, Discriminant};
 use std::ops::RangeInclusive;
 use std::ptr;
 
-use pdf_fonts::{Decoded, Error, Fault, Font, Limits, With};
+use pdf_fonts::{Error, Fault, Font, Limits};
 use pdf_objects::fault::{Place, Sink};
+use pdf_objects::{Streams, With};
 use unicode_script::{Script, UnicodeScript};
 
 use super::content::times;
 use super::kept::Kept;
 use super::told::{Keyed, Told, holding, written_at};
 use super::{Finding, Graphic, Made, NESTING, Objects, REFERENCES, Rule, Walk};
-use crate::bytes::{self, Unfiltered};
 use crate::object::{Dict, Object, ObjectId, Span, Value};
-use crate::pdf_filters;
 use crate::source::Source;
 use crate::{Latin, Resolve, Unreadable, Why};
 
@@ -269,61 +268,31 @@ struct Asked {
 }
 
 /// Stream `id`'s data, at most `limit` bytes of it, as `source` gives it
-/// ([`Source::decoded_within`]), said as pdf-fonts' [`Streams`] for a
-/// pdf-structure `Reading` says a reading's: a stream that decodes in part
-/// is what decoded, as PDFium takes it, unless what stopped it is the
-/// limit, which is [`Decoded::TooLarge`]; what takes a password, a source
-/// that failed and filters past the reader's cap, [`Decoded::Unreadable`],
-/// as the predicates' resolver says of an object that doesn't read
-/// ([`Objects`]); what isn't there or isn't a stream, what doesn't read,
-/// and filters the reader doesn't take, [`Decoded::None`]. A source that
-/// gives no stream's data, as a document alone doesn't, gives none, and a
-/// stream through filters the reader doesn't take none, which `asked`
-/// notes, so that what's read without them isn't taken for the file's.
-///
-/// [`Source::decoded_within`]: crate::source::Source::decoded_within
-/// [`Streams`]: pdf_fonts::Streams
-fn decoded(source: &dyn Source, id: ObjectId, limit: usize, asked: &Asked) -> Decoded {
-    match Objects(source).try_resolve(id) {
-        Ok(Some(_)) => {}
-        Ok(None) => return Decoded::None,
-        Err(unreadable) if unreadable.why == Why::Damaged => return Decoded::None,
-        Err(unreadable) => return Decoded::Unreadable(unreadable),
-    }
-    let unreadable = |why: Why, error: &bytes::Error| {
-        let message = format!("{id} R doesn't read: {error}");
-        Decoded::Unreadable(Unreadable::new(id, why, message))
-    };
-    let Some(decoded) = source.decoded_within(id, limit) else {
-        asked.ungiven.set(true);
-        return Decoded::None;
-    };
-    match decoded {
-        Ok(data) => Decoded::Data(data),
-        Err(bytes::Error::Decode(error)) => {
-            let limited = (error.faults.iter()).any(|(_, f)| *f == pdf_filters::Fault::Limit);
-            match (limited, error.data.is_empty()) {
-                (true, _) => Decoded::TooLarge,
-                (false, true) => Decoded::None,
-                (false, false) => Decoded::Data(error.data),
-            }
-        }
-        Err(error @ bytes::Error::Io(_)) => unreadable(Why::Source, &error),
-        Err(
-            error @ (bytes::Error::Locked
-            | bytes::Error::Encrypted
-            | bytes::Error::Unsupported
-            | bytes::Error::Decrypt(_)),
-        ) => unreadable(Why::Locked, &error),
-        Err(error @ bytes::Error::Filters(Unfiltered::Filters { .. })) => {
-            unreadable(Why::Limit, &error)
-        }
-        Err(bytes::Error::Filters(_)) => {
+/// as a viewer takes it ([`Streams::decoded`]): a stream that decodes in
+/// part is what decoded, as PDFium takes it, unless what stopped it is the
+/// limit; and why it gives none, which a font reads as it reads a
+/// pdf-structure `Reading`'s, as the predicates' resolver says of an object
+/// that doesn't read ([`Objects`]). A stream through filters the reader
+/// doesn't take ([`Why::Filter`]) a font reads as none, which `asked`
+/// notes, so that what's read without it isn't taken for the file's; and a
+/// source that gives no stream's data, as a document alone doesn't, or not
+/// these bytes ([`Why::Source`]), is noted too, as what a font reads then
+/// isn't the file's font.
+fn decoded(
+    source: &dyn Source,
+    id: ObjectId,
+    limit: usize,
+    asked: &Asked,
+) -> Result<Vec<u8>, Unreadable> {
+    let decoded = Streams::decoded(source, id, limit).map(Cow::into_owned);
+    match decoded.as_ref().map_err(|unreadable| unreadable.why) {
+        Err(Why::Filter) => {
             asked.unfiltered.borrow_mut().insert(id);
-            Decoded::None
         }
-        Err(_) => Decoded::None,
+        Err(Why::Source) => asked.ungiven.set(true),
+        _ => {}
     }
+    decoded
 }
 
 /// A font's read ([`read`]): what it gave, what it told, kept, and the
@@ -348,7 +317,13 @@ fn read<'a>(source: &'a dyn Source, font: &'a Dict, budget: &mut usize) -> Optio
     };
     let streams = With::new(objects, |id, limit| {
         let decoded = decoded(source, id, limit, &asked);
-        if let Decoded::Unreadable(_) = decoded {
+        // What takes a password or is past a cap, which isn't the file's
+        // fault; not what's damaged or through filters the reader doesn't
+        // take, which a font reads as none, nor what the source didn't give,
+        // after which the font isn't read.
+        if let Err(unreadable) = &decoded
+            && !matches!(unreadable.why, Why::Damaged | Why::Filter | Why::Source)
+        {
             failed.set(true);
         }
         decoded
@@ -758,7 +733,7 @@ mod tests {
     use pdf_structure::fixture::{self, Body, Xref};
 
     use super::*;
-    use crate::bytes::{ByteSource, Options, WithReading};
+    use crate::bytes::{self, ByteSource, Options, WithReading};
     use crate::check::{Hold, Made, Report, Rule, check};
     use crate::dict;
     use crate::pdf_crypt::writer::{Kind, Settings};
@@ -767,26 +742,23 @@ mod tests {
     const PLAIN: &[u8] = b"1 beginbfchar <41> <0041> endbfchar";
 
     /// What [`decoded`] gives of stream `id` of `source`, within `limit`,
-    /// and whether it noted that the source gives no stream's data.
-    fn asked(source: &dyn Source, id: ObjectId, limit: usize) -> (Decoded, bool) {
+    /// its data or why there's none, and whether it noted that the source
+    /// gives no stream's data.
+    fn asked(source: &dyn Source, id: ObjectId, limit: usize) -> (Result<Vec<u8>, Why>, bool) {
         let asked = Asked::default();
-        (decoded(source, id, limit, &asked), asked.ungiven.get())
+        let decoded = decoded(source, id, limit, &asked).map_err(|unreadable| {
+            assert_eq!(unreadable.id, id);
+            unreadable.why
+        });
+        (decoded, asked.ungiven.get())
     }
 
     /// Whether [`decoded`] noted stream `id` of `source` as through filters
     /// the reader doesn't take.
     fn unfiltered(source: &dyn Source, id: ObjectId) -> bool {
         let asked = Asked::default();
-        decoded(source, id, 100, &asked);
+        let _ = decoded(source, id, 100, &asked);
         asked.unfiltered.into_inner().contains(&id)
-    }
-
-    /// Why what [`asked`] gave doesn't read, where it's that.
-    fn why(asked: (Decoded, bool)) -> Why {
-        match asked {
-            (Decoded::Unreadable(unreadable), false) => unreadable.why,
-            other => panic!("{other:?}"),
-        }
     }
 
     /// A font, object 1, its `/ToUnicode` object 2, and its data through
@@ -816,29 +788,28 @@ mod tests {
     }
 
     /// A stream within its limit is its data, with filters or without, and
-    /// past it too large, by a byte; a document alone gives none, noted,
-    /// and a font that asks it isn't read, where a font that asks none is.
+    /// past it past a cap, by a byte; a document alone gives none, the
+    /// source's, noted, and a font that asks it isn't read, where a font
+    /// that asks none is.
     #[test]
     fn a_stream_s_data_within_its_limit_and_past_it() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
         let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
         for id in [ObjectId::new(2, 0), ObjectId::new(3, 0)] {
             let at = PLAIN.len();
-            let data = Decoded::Data(PLAIN.to_vec());
-            assert_eq!(asked(&read, id, at), (data, false), "{id:?}");
-            assert_eq!(asked(&read, id, at - 1), (Decoded::TooLarge, false));
-            assert_eq!(asked(read.document(), id, at), (Decoded::None, true));
+            assert_eq!(asked(&read, id, at), (Ok(PLAIN.to_vec()), false), "{id:?}");
+            assert_eq!(asked(&read, id, at - 1), (Err(Why::Limit), false));
+            assert_eq!(asked(read.document(), id, at), (Err(Why::Source), true));
         }
-        // Not a stream: none. Not there: none, and nothing noted, as the
-        // source isn't asked for its data.
-        assert_eq!(
-            asked(&read, ObjectId::new(1, 0), 100),
-            (Decoded::None, false)
-        );
-        assert_eq!(
-            asked(read.document(), ObjectId::new(9, 0), 100),
-            (Decoded::None, false)
-        );
+        // Not a stream, or not there, from a reading or a document alone:
+        // damaged, which a font reads as none, and nothing noted, as no
+        // stream's data is asked for.
+        for source in [&read as &dyn Source, read.document()] {
+            for n in [1, 9] {
+                let not = asked(source, ObjectId::new(n, 0), 100);
+                assert_eq!(not, (Err(Why::Damaged), false), "{n}");
+            }
+        }
 
         let font = read.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
         let mut budget = PLAIN.len();
@@ -856,9 +827,9 @@ mod tests {
         assert!(super::read(read.document(), &plain, &mut budget).is_some());
     }
 
-    /// A stream that decodes in part is what decoded; none where nothing
-    /// did, or the reader doesn't take its filters, which is noted; past
-    /// the reader's cap on filters, a cap's.
+    /// A stream that decodes in part is what decoded; damaged where nothing
+    /// did; through filters the reader doesn't take, which is noted, and
+    /// past the reader's cap on filters, a cap's, each saying so.
     #[test]
     fn a_stream_that_doesn_t_decode_whole() {
         let many: Vec<Object> = (0..26).map(|_| Object::from("ASCIIHexDecode")).collect();
@@ -879,17 +850,11 @@ mod tests {
         ];
         let file = fixture::file("1.7", &objects, dict! {}, Xref::Table);
         let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
-        let data = Decoded::Data(b"AB".to_vec());
-        assert_eq!(asked(&read, ObjectId::new(1, 0), 100), (data, false));
-        assert_eq!(
-            asked(&read, ObjectId::new(2, 0), 100),
-            (Decoded::None, false)
-        );
-        assert_eq!(
-            asked(&read, ObjectId::new(3, 0), 100),
-            (Decoded::None, false)
-        );
-        assert_eq!(why(asked(&read, ObjectId::new(5, 0), 100)), Why::Limit);
+        let data = b"AB".to_vec();
+        assert_eq!(asked(&read, ObjectId::new(1, 0), 100), (Ok(data), false));
+        let given = [2, 3, 5].map(|n| asked(&read, ObjectId::new(n, 0), 100));
+        let why = [Why::Damaged, Why::Filter, Why::Limit].map(|why| (Err(why), false));
+        assert_eq!(given, why);
         let noted: Vec<bool> = [1, 2, 3, 5]
             .map(|n| unfiltered(&read, ObjectId::new(n, 0)))
             .into();
@@ -915,7 +880,8 @@ mod tests {
             locked.decoded_within(ObjectId::new(2, 0), 100),
             Some(Err(bytes::Error::Locked))
         ));
-        assert_eq!(why(asked(&locked, ObjectId::new(2, 0), 100)), Why::Locked);
+        let given = asked(&locked, ObjectId::new(2, 0), 100);
+        assert_eq!(given, (Err(Why::Locked), false));
         let font = locked.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
         let mut budget = 100;
         let font_read = super::read(&locked, font, &mut budget).unwrap().font;
@@ -952,8 +918,9 @@ mod tests {
         }
     }
 
-    /// A source that fails to give a stream's data is the source's, and
-    /// given them again, the data's read.
+    /// A source that fails to give a stream's data is the source's, noted
+    /// as a source that gives none is, and a font that asks it isn't read;
+    /// given them again, the data's read, and so is the font.
     #[test]
     fn a_source_that_fails() {
         let source = Failing {
@@ -961,15 +928,20 @@ mod tests {
             failing: AtomicBool::new(false),
         };
         let read = WithReading::new(&source, &[], &Options::DEFAULT).unwrap();
+        let font = read.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
         source.failing.store(true, Ordering::Relaxed);
         assert!(matches!(
             read.decoded_within(ObjectId::new(2, 0), 100),
             Some(Err(bytes::Error::Io(_)))
         ));
-        assert_eq!(why(asked(&read, ObjectId::new(2, 0), 100)), Why::Source);
+        let given = asked(&read, ObjectId::new(2, 0), 100);
+        assert_eq!(given, (Err(Why::Source), true));
+        assert!(super::read(&read, font, &mut 100).is_none());
         source.failing.store(false, Ordering::Relaxed);
-        let data = Decoded::Data(PLAIN.to_vec());
-        assert_eq!(asked(&read, ObjectId::new(2, 0), 100), (data, false));
+        let given = asked(&read, ObjectId::new(2, 0), 100);
+        assert_eq!(given, (Ok(PLAIN.to_vec()), false));
+        let taken = super::read(&read, font, &mut 100).unwrap();
+        assert_eq!(taken.font.unwrap().code_text(0x41).as_deref(), Some("A"));
     }
 
     fn r(n: u32) -> Object {

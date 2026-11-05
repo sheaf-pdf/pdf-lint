@@ -1,14 +1,15 @@
 //! A source's fonts, each read once.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use pdf_objects::object::Value;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, dict};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why, dict};
 
 use crate::font::Font;
 use crate::reader::{Reader, dict_of};
-use crate::{Decoded, Error, Limits, Streams};
+use crate::{Error, Limits};
 
 /// A source's fonts, each read once: those that are objects by number, kept for
 /// every page that draws in them. Nothing is told to a
@@ -40,8 +41,12 @@ impl<'o> Resolve<'o> for NoObjects {
 }
 
 impl Streams for NoObjects {
-    fn decoded(&self, _: ObjectId, _: usize) -> Decoded {
-        Decoded::None
+    fn decoded(&self, id: ObjectId, _: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        Err(Unreadable::new(
+            id,
+            Why::Damaged,
+            format!("{id} R isn't there"),
+        ))
     }
 }
 

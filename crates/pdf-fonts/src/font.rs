@@ -44,13 +44,13 @@ use std::ops::Range;
 use pdf_content_streams::{ResCx, operations};
 use pdf_objects::fault::Sink;
 use pdf_objects::object::Value;
-use pdf_objects::{Dict, Object, ObjectId, Resolve};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams};
 
 use crate::cmap::{CMap, CidMap, Ranges, Scheme, number, two_bytes};
 use crate::predefined::{self, BfString, Collection, Split};
 use crate::program::{CidGlyphs, Face};
 use crate::reader::Reader;
-use crate::{Encoding, Error, Fault, Limits, Std14, Streams, glyph_text};
+use crate::{Encoding, Error, Fault, Limits, Std14, glyph_text};
 
 /// A rectangle, in glyph units unless it says otherwise: thousandths of text
 /// space at a font size of 1. Normalized, `x0 <= x1` and `y0 <= y1`.

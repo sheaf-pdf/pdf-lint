@@ -4,6 +4,7 @@
 //! reader records of where it read each object ([`Record`]) and of the
 //! file as written ([`Facts`]), its revisions among it ([`Revision`]).
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::RangeBounds;
 
@@ -11,12 +12,14 @@ use pdf_crypt::Encoding;
 use pdf_objects::object::{Dict, Object, ObjectId, Span, Value};
 use pdf_objects::parse;
 use pdf_objects::version::Version;
-use pdf_objects::{Resolve, Unreadable, Why};
+use pdf_objects::{Resolve, Streams, Unreadable, Why};
 
 use crate::bytes::{Error, SourceId, Undecoded, Unfiltered, Unindexed};
 
-/// A file, as a reader read it.
-pub trait Source {
+/// A file, as a reader read it: its objects, and its streams' data as a
+/// viewer takes it ([`Streams`]), which a reader without the file's bytes,
+/// as a document alone is, doesn't give ([`Why::Source`]).
+pub trait Source: Streams {
     /// Every object its cross-references list.
     fn ids(&self) -> Vec<ObjectId>;
     /// Object `id`, as written: references kept as references, strings
@@ -79,7 +82,9 @@ pub trait Source {
     /// Stream `id`'s data decoded through its filters, at most `limit`
     /// bytes, decrypted as the reader decrypts it, or why it isn't, as
     /// [`Reading::decoded_within`](crate::bytes::Reading::decoded_within)
-    /// gives it. Data past `limit` is an [`Error::Decode`] holding what
+    /// gives it: the reader's own account of the decode, every fault of
+    /// it, for a checker, where [`Streams::decoded`] gives what a viewer
+    /// takes of it. Data past `limit` is an [`Error::Decode`] holding what
     /// decoded up to it, [`Fault::Limit`](crate::pdf_filters::Fault::Limit)
     /// among its faults, never the data cut short as if it were whole; a
     /// stream the reader can't give the data of, as it has a filter the
@@ -1181,6 +1186,54 @@ impl Source for Document {
     }
 }
 
+/// A stream's data as a viewer takes it ([`Streams`]), of what a document
+/// holds: an object stream's decoded data ([`Document::decoded`]), lent,
+/// within the limit, else [`Why::Limit`]. A document alone holds no other
+/// stream's data decoded, as the file's bytes are its reading's: any other
+/// stream's is [`Why::Source`], which a document read beside its reading
+/// ([`WithReading`](crate::bytes::WithReading)) gives. What isn't a stream,
+/// isn't there or doesn't read is as its resolver says
+/// ([`Resolve::try_resolve`]), [`Why::Damaged`] where that's none.
+impl Streams for Document {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        let object = match Resolve::try_resolve(&self, id) {
+            Ok(Some(object)) => object,
+            Ok(None) => return Err(crate::bytes::missing(id)),
+            Err(unreadable) => return Err(unreadable),
+        };
+        if object.as_stream().is_none() {
+            let message = format!("{id} R doesn't read: {}", Error::NotAStream { id });
+            return Err(Unreadable::new(id, Why::Damaged, message));
+        }
+        match self.decoded.get(&id) {
+            Some(data) => lent(id, data, limit),
+            None => Err(Unreadable::new(
+                id,
+                Why::Source,
+                format!(
+                    "{id} R's data isn't held: a document alone holds the file's objects, \
+                     not its streams' data, which it's read beside its reading for"
+                ),
+            )),
+        }
+    }
+}
+
+/// `data`, stream `id`'s decoded data as a reader holds it, lent where it's
+/// within `limit`, else [`Why::Limit`] ([`Streams`]).
+pub(crate) fn lent(id: ObjectId, data: &[u8], limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+    match data.len() <= limit {
+        true => Ok(Cow::Borrowed(data)),
+        false => {
+            let message = format!(
+                "{id} R's data decodes to {} bytes, past {limit}",
+                data.len()
+            );
+            Err(Unreadable::new(id, Why::Limit, message))
+        }
+    }
+}
+
 /// Its objects, as a reference resolves them: none for one it hasn't, or
 /// one that doesn't read, without why, which [`Resolve::try_resolve`] and
 /// [`Source::get`] say.
@@ -1776,12 +1829,18 @@ mod tests {
     }
 
     /// A reader of its own, implementing `Source`'s five methods alone,
-    /// gives none of what a reader may know besides: no record, decoded
-    /// data, revisions or facts, and no object stream in the clear. A
-    /// document gives what it holds, through the trait as through itself.
+    /// and `Streams` with none of the file's bytes, gives none of what a
+    /// reader may know besides: no record, decoded data, revisions or
+    /// facts, and no object stream in the clear. A document gives what it
+    /// holds, through the trait as through itself.
     #[test]
     fn a_source_says_what_a_reader_knows_besides_where_it_knows_it() {
         struct Own(Trailer);
+        impl Streams for Own {
+            fn decoded(&self, id: ObjectId, _: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+                Err(Unreadable::new(id, Why::Source, "it has no bytes"))
+            }
+        }
         impl Source for Own {
             fn ids(&self) -> Vec<ObjectId> {
                 Vec::new()
@@ -1801,7 +1860,14 @@ mod tests {
         }
         let own = Own(Trailer::new(dict! {}.into()));
         assert_eq!(own.record(ObjectId::new(1, 0)), None);
-        assert_eq!(own.decoded(ObjectId::new(4, 0)), None);
+        assert_eq!(Source::decoded(&own, ObjectId::new(4, 0)), None);
+        assert_eq!(own.decoded_within(ObjectId::new(4, 0), 10).map(drop), None);
+        let source: &dyn Source = &own;
+        let ungiven = Streams::decoded(source, ObjectId::new(4, 0), 10).unwrap_err();
+        assert_eq!(
+            (ungiven.id, ungiven.why),
+            (ObjectId::new(4, 0), Why::Source)
+        );
         assert!(own.revisions().is_empty());
         assert_eq!(own.facts(), None);
         assert!(!own.in_the_clear(ObjectId::new(4, 0)));
@@ -1818,8 +1884,11 @@ mod tests {
         let (id, stream) = member;
         assert_eq!(source.record(id), doc.record(id));
         assert!(source.record(id).is_some());
-        assert_eq!(source.decoded(stream), Some(&doc.decoded[&stream][..]));
-        assert_eq!(source.decoded(ObjectId::new(1_000_000, 0)), None);
+        assert_eq!(
+            Source::decoded(source, stream),
+            Some(&doc.decoded[&stream][..])
+        );
+        assert_eq!(Source::decoded(source, ObjectId::new(1_000_000, 0)), None);
         assert_eq!(source.revisions(), &doc.revisions[..]);
         assert_eq!(source.revisions().len(), 1);
         assert_eq!(source.facts(), Some(&doc.facts));

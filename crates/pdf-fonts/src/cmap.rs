@@ -10,11 +10,11 @@ use std::collections::{BinaryHeap, HashSet};
 
 use pdf_content_streams::{Operand, Operation, ResCx, operations};
 use pdf_objects::fault::Sink;
-use pdf_objects::{ObjectId, Resolve};
+use pdf_objects::{ObjectId, Resolve, Streams};
 
 use crate::predefined::{self, BfString, Collection};
 use crate::reader::Reader;
-use crate::{Error, Fault, Limits, Streams, glyph_text};
+use crate::{Error, Fault, Limits, glyph_text};
 
 /// Values for ranges of codes or CIDs, kept as the ranges they're given in, so a
 /// range of 2³¹ costs what a range of one does. Where ranges overlap, the first

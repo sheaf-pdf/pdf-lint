@@ -452,7 +452,8 @@ pub struct Options {
     /// How many bytes of fonts' streams to decode in all, for the fonts the
     /// walk reaches and those read before it to tell which have Latin
     /// characters, through a source that gives streams' data
-    /// ([`Source::decoded_within`]): none for [`FONT_BUDGET`]. A font whose
+    /// ([`Streams::decoded`](pdf_objects::Streams::decoded)): none for
+    /// [`FONT_BUDGET`]. A font whose
     /// streams decode past what's left of it isn't read, and is counted as
     /// not checked ([`Rule::Font`]).
     pub font_budget: Option<usize>,
@@ -4160,7 +4161,7 @@ impl<'a> Walk<'a> {
         for (n, ids) in members {
             let stream = ObjectId::new(n, 0);
             let made = held[&n];
-            let data = source.decoded(stream);
+            let data = Source::decoded(source, stream);
             let clear = source.in_the_clear(stream);
             let (mut strings, mut first) = (0, None);
             for id in ids {

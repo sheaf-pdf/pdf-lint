@@ -1,14 +1,17 @@
 //! A file read whole with its reading kept beside it ([`WithReading`]): a
 //! document that hands out what a document doesn't hold, its streams' data.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use pdf_crypt::Password;
 use pdf_objects::object::{Object, ObjectId};
 use pdf_objects::version::Version;
+use pdf_objects::{Resolve, Streams, Unreadable};
 
+use super::reading::{lenient, missing};
 use super::{ByteSource, Error, Options, Reading};
-use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread, Warning};
+use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread, Warning, lent};
 
 /// A file read whole, with its reading kept beside it: a [`Document`]
 /// ([`WithReading::document`]) that hands out what a document doesn't hold.
@@ -88,6 +91,31 @@ impl<S: ByteSource> WithReading<S> {
     }
 }
 
+/// A stream's data as a viewer takes it ([`Streams`]), as its reading gives
+/// it ([`Reading`]'s), of the stream its document holds, so that the reading
+/// doesn't read it again: within the limit asked for or
+/// [`Limits::stream`](super::Limits::stream), whichever is less, owned. An
+/// object stream's, which the document holds decoded
+/// ([`Document::decoded`]), is lent from there. Where it gives none, it says
+/// why as a reading does, what isn't there or doesn't read as its document
+/// says.
+impl<S: ByteSource> Streams for WithReading<S> {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        match Resolve::try_resolve(&&self.document, id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(missing(id)),
+            Err(unreadable) => return Err(unreadable),
+        }
+        if let Some(data) = self.document.decoded.get(&id) {
+            return lent(id, data, limit.min(self.reading.limits().stream));
+        }
+        let object = Source::get(&self.document, id);
+        let object = Some(object.as_ref().map(|o| *o));
+        let decoded = self.reading.decoded_within_as(id, object, limit);
+        lenient(id, decoded).map(Cow::Owned)
+    }
+}
+
 /// Its document's answers, and a stream's data decoded by its reading.
 impl<S: ByteSource> Source for WithReading<S> {
     fn ids(&self) -> Vec<ObjectId> {
@@ -147,6 +175,8 @@ impl<S: ByteSource> Source for WithReading<S> {
 
 #[cfg(test)]
 mod tests {
+    use pdf_objects::Why;
+
     use super::super::lazy::{files, fixtures};
     use super::super::{STREAM, read_opened};
     use super::*;
@@ -184,7 +214,10 @@ mod tests {
             size: source.size(),
             metadata: source.metadata(),
             records: asked.iter().map(|&id| source.record(id)).collect(),
-            decoded: asked.iter().map(|&id| source.decoded(id)).collect(),
+            decoded: asked
+                .iter()
+                .map(|&id| Source::decoded(source, id))
+                .collect(),
             revisions: source.revisions(),
             facts: source.facts(),
             clear: asked.iter().map(|&id| source.in_the_clear(id)).collect(),
@@ -198,14 +231,26 @@ mod tests {
         decoded.map_err(|error| format!("{error:?}"))
     }
 
+    /// A stream's data as a viewer takes it ([`Streams`]), or the id and
+    /// why there's none.
+    fn viewed(given: Result<Cow<'_, [u8]>, Unreadable>) -> Result<Vec<u8>, (ObjectId, Why)> {
+        given
+            .map(Cow::into_owned)
+            .map_err(|unreadable| (unreadable.id, unreadable.why))
+    }
+
     /// Each test file, the fixtures qpdf wrote among them, opened: its
     /// document is the whole read, as [`read_opened`] reads it, and taken,
     /// it's the same; as a source, every answer is its document's; and each
     /// object's data decoded, at the stream's limit and cut short of it, is
-    /// what a reading of the file gives, where the document gives none.
+    /// what a reading of the file gives, where the document gives none. As
+    /// a viewer takes it ([`Streams`]), a reading, the file opened and its
+    /// document alone give the same of every object stream the document
+    /// holds decoded, and of what isn't a stream; of any other stream, the
+    /// document alone gives none, the source's, and the other two alike.
     #[test]
     fn an_opened_file_answers_as_its_document_and_decodes_as_its_reading() {
-        let mut streams = 0;
+        let (mut streams, mut held) = (0, 0);
         for (name, file, passwords) in files() {
             let opened = WithReading::new(&file[..], &passwords, &Options::DEFAULT).unwrap();
             let whole = read_opened(&file, &passwords);
@@ -223,25 +268,37 @@ mod tests {
                 assert!(alone.decoded_within(id, STREAM).is_none(), "{name}");
                 // Decoding a stream keeps nothing of it in the reading.
                 let kept = opened.reading().record(id).is_some();
+                let stream = matches!(
+                    opened.get(id).map(Object::value),
+                    Ok(pdf_objects::object::Value::Stream(_))
+                );
+                let holds = alone.decoded.contains_key(&id);
                 for limit in [STREAM, 1] {
                     let decoded = opened.decoded_within(id, limit).map(shown);
                     let read = shown(reading.decoded_within(id, limit));
                     assert_eq!(decoded, Some(read), "{name}: {id:?} within {limit}");
+                    let read = viewed(Streams::decoded(&reading, id, limit));
+                    let given = viewed(Streams::decoded(&opened, id, limit));
+                    assert_eq!(given, read, "{name}: {id:?} viewed within {limit}");
+                    let alone = viewed(Streams::decoded(alone, id, limit));
+                    match stream && !holds {
+                        true => assert_eq!(alone, Err((id, Why::Source)), "{name}: {id:?}"),
+                        false => assert_eq!(alone, read, "{name}: {id:?} alone within {limit}"),
+                    }
                 }
                 assert_eq!(
                     opened.reading().record(id).is_some(),
                     kept,
                     "{name}: {id:?}"
                 );
-                streams += usize::from(matches!(
-                    opened.get(id).map(Object::value),
-                    Ok(pdf_objects::object::Value::Stream(_))
-                ));
+                streams += usize::from(stream);
+                held += usize::from(holds);
             }
             assert_eq!(opened.into_document(), whole, "{name}");
         }
         // The writer's files, and qpdf's where they are.
         let floor = if fixtures() { 50 } else { 30 };
         assert!(streams > floor, "{streams}");
+        assert!(held > 0, "{held}");
     }
 }

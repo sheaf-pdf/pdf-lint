@@ -66,6 +66,12 @@
 //!   ([`Resolve::try_resolve`], [`Unreadable`]); and walked
 //!   ([`Object::references`]), a value's in the order written, with a stack
 //!   of the walk's own.
+//! - **A stream's data, decoded** ([`Streams`]): what gives it, decrypted
+//!   and decoded through its filters, as a viewer takes it, a reader's or
+//!   a document's, at most a limit the caller asks for, lent where the
+//!   reader holds it, and why it gives none, in the same words as a
+//!   resolver's ([`Why`]); and [`With`], a resolver and a function as one,
+//!   for what has its streams some other way.
 //! - **Faults, told with where they are** ([`fault`]): one
 //!   [`fault::Sink`] and one [`fault::Place`] for every reader of a file's
 //!   objects, each reader's faults a type of its own, so that one sink can
@@ -84,12 +90,14 @@ pub mod fuzz;
 pub mod object;
 pub mod parse;
 pub mod serialize;
+pub mod streams;
 pub mod text;
 pub mod version;
 
 pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
 pub use parse::Limits;
 pub use pdf_tokenizer::Rules;
+pub use streams::{Streams, With};
 pub use version::Version;
 
 /// What gives the indirect objects a value's references name: a file's,
@@ -142,7 +150,8 @@ pub trait Resolve<'o> {
 }
 
 /// Why a resolver gives no object for a number the file has
-/// ([`Resolve::try_resolve`]).
+/// ([`Resolve::try_resolve`]), or what gives a stream's data none of it
+/// ([`Streams::decoded`]).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 #[error("{message}")]
@@ -179,8 +188,16 @@ pub enum Why {
     /// It takes a password the reader wasn't given, or doesn't decrypt.
     Locked,
     /// The source of the file's bytes didn't give them: it may read if it's
-    /// asked again.
+    /// asked again. Or the reader has no source of bytes at all, as a
+    /// document read whole hasn't, which holds the file's objects and not
+    /// its streams' data: then it's read beside what read it.
     Source,
+    /// It's a stream through a filter the reader doesn't decode, as an
+    /// image's data may be (ISO 32000-2, 7.4.1): its data is there as
+    /// written, for a decoder that takes that filter, and nothing else of
+    /// the stream is wrong. Only what gives a stream's data says it
+    /// ([`Streams::decoded`]); a resolver never does.
+    Filter,
 }
 
 /// A closure, or a function, from an object's number to the object.

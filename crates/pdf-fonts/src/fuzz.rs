@@ -3,6 +3,7 @@
 //! included, make, on any input. It's compiled only for tests and under cargo-fuzz's
 //! `--cfg fuzzing`.
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use pdf_objects::fault::Place;
 use pdf_objects::object::Stream;
 use pdf_objects::parse::Parser;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Why, dict};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why, dict};
 
 use crate::fixture::{
     OpenType, cff_program, cid_cff_program, composite_bomb_program, composite_of_program,
@@ -21,8 +22,7 @@ use crate::fixture::{
 use crate::predefined::{Collection, scheme};
 use crate::type1::scan;
 use crate::{
-    Decoded, Encoding, Error, Fault, Font, Fonts, Limits, Std14, Streams, cp1252, glyph_text,
-    name_code_point,
+    Encoding, Error, Fault, Font, Fonts, Limits, Std14, cp1252, glyph_text, name_code_point,
 };
 
 /// How many of an input's words are read as names, as a run of the target
@@ -202,14 +202,14 @@ impl<'m> Resolve<'m> for Map<'m> {
 }
 
 impl Streams for Map<'_> {
-    fn decoded(&self, id: ObjectId, limit: usize) -> Decoded {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         let Some(stream) = self.0.get(&id).and_then(Object::as_stream) else {
-            return Decoded::None;
+            return Err(Unreadable::new(id, Why::Damaged, "no such stream"));
         };
         let data = stream.data.bytes().unwrap_or_default();
         match data.len() > limit {
-            true => Decoded::TooLarge,
-            false => Decoded::Data(data.to_vec()),
+            true => Err(Unreadable::new(id, Why::Limit, "past the limit")),
+            false => Ok(Cow::Borrowed(data)),
         }
     }
 }
@@ -235,7 +235,7 @@ impl<'o, O: Resolve<'o>> Resolve<'o> for Counting<'_, O> {
 }
 
 impl<O: Streams> Streams for Counting<'_, O> {
-    fn decoded(&self, id: ObjectId, limit: usize) -> Decoded {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         self.asked.set(self.asked.get() + 1);
         self.objects.decoded(id, limit)
     }
@@ -273,10 +273,10 @@ impl<'o, O: Resolve<'o>> Resolve<'o> for FailingFirst<'_, O> {
 }
 
 impl<O: Streams> Streams for FailingFirst<'_, O> {
-    fn decoded(&self, id: ObjectId, limit: usize) -> Decoded {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         if self.streams {
             if let Some(unreadable) = self.fails(id) {
-                return Decoded::Unreadable(unreadable);
+                return Err(unreadable);
             }
         }
         self.objects.decoded(id, limit)
@@ -301,9 +301,9 @@ impl<'o, O: Resolve<'o>> Resolve<'o> for Overgiving<'_, O> {
 }
 
 impl<O> Streams for Overgiving<'_, O> {
-    fn decoded(&self, _: ObjectId, limit: usize) -> Decoded {
+    fn decoded(&self, _: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         self.asked.set(true);
-        Decoded::Data(vec![0; limit + 1])
+        Ok(Cow::Owned(vec![0; limit + 1]))
     }
 }
 
@@ -512,32 +512,49 @@ where
         assert_eq!(budget, BUDGET);
     }
 
-    // Made to fail, each way: the first object asked, and the first stream.
-    for why in [Why::Damaged, Why::Limit, Why::Locked, Why::Source] {
-        for streams in [false, true] {
-            let failed = Cell::new(false);
-            let failing = FailingFirst {
-                objects,
-                why,
-                streams,
-                failed: &failed,
-            };
-            let mut budget = BUDGET;
-            let read = Font::read(failing, dict, &limits, &mut budget, &mut ());
-            if read.is_err() {
-                assert_eq!(budget, BUDGET);
-            }
-            if failing_is_all {
-                match read {
-                    // What fails first is the first thing that's met.
-                    Err(Error::Unreadable(unreadable)) => {
-                        assert_eq!(unreadable.why, why);
-                        assert_ne!(why, Why::Damaged);
-                        assert!(failed.get());
-                    }
-                    Err(_) => {}
-                    Ok(_) => assert!(!failed.get() || why == Why::Damaged),
+    // Made to fail, each way: the first object asked, and the first stream; a stream
+    // through a filter the reader doesn't decode too, which only a stream's data is, as a
+    // resolver never says `Why::Filter`.
+    let objects_fail = [Why::Damaged, Why::Limit, Why::Locked, Why::Source].map(|why| (why, false));
+    let streams_fail = [
+        Why::Damaged,
+        Why::Limit,
+        Why::Locked,
+        Why::Source,
+        Why::Filter,
+    ];
+    for (why, streams) in objects_fail
+        .into_iter()
+        .chain(streams_fail.map(|why| (why, true)))
+    {
+        let failed = Cell::new(false);
+        let failing = FailingFirst {
+            objects,
+            why,
+            streams,
+            failed: &failed,
+        };
+        let mut budget = BUDGET;
+        let read = Font::read(failing, dict, &limits, &mut budget, &mut ());
+        if read.is_err() {
+            assert_eq!(budget, BUDGET);
+        }
+        if failing_is_all {
+            match &read {
+                // What fails first is the first thing that's met.
+                Err(Error::Unreadable(unreadable)) => {
+                    assert_eq!(unreadable.why, why);
+                    assert!(!matches!(why, Why::Damaged | Why::Filter), "{why:?}");
+                    assert!(failed.get());
                 }
+                Err(_) => {}
+                // A stream that's damaged, or through a filter the reader doesn't
+                // decode, is read as none, and so is an object that's damaged.
+                Ok(_) => assert!(!failed.get() || matches!(why, Why::Damaged | Why::Filter)),
+            }
+            // A stream past a cap of what gives it is too large, as one past the budget.
+            if streams && why == Why::Limit && failed.get() {
+                assert_eq!(read.err(), Some(Error::TooLarge));
             }
         }
     }
@@ -852,7 +869,6 @@ mod tests {
 
     /// Each kind of font among the seeds, as a file over a reading, reads as it does in a
     /// map; and the same bytes after a mutation keep every promise.
-    #[cfg(feature = "structure")]
     #[test]
     fn files_read_alike_through_a_reading_and_a_map() {
         use pdf_structure::bytes::{Options, Reading};

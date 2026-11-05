@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use pdf_crypt::{Encoded, Handler, Password, Refused};
 use pdf_objects::object::{Object, ObjectId, Span, Stream, Value};
 use pdf_objects::version::Version;
-use pdf_objects::{Resolve, Unreadable, Why};
+use pdf_objects::{Resolve, Streams, Unreadable, Why};
 
 use super::window::{ByPosition, Bytes, InMemory};
 use super::{Crypt, Decode, Limits, Options, Reader, Stored, Unfiltered, Whole, XrefEntry};
@@ -1303,5 +1303,78 @@ impl<'o, S: ByteSource> Resolve<'o> for &'o Reading<S> {
             |why| why.unreadable(id).map_or(Ok(None), Err),
             |object| Ok(Some(object)),
         )
+    }
+}
+
+/// A stream's data as a viewer takes it ([`Streams`]), by
+/// [`Reading::decoded_within`], owned: what decoded of a stream that decodes
+/// in part, as PDFium takes it, unless what stopped it is the limit, at most
+/// `limit` bytes or [`Limits::stream`](super::Limits::stream), whichever is
+/// less. Where it gives none, it says why in a resolver's words ([`Why`]):
+/// first what its resolver says of the object ([`Resolve::try_resolve`]), so
+/// that an object that doesn't read is said as a reference to it is; then,
+/// past the limit, or through more filters than the reader takes
+/// ([`Unfiltered::Filters`]), [`Why::Limit`]; in a file no password the
+/// reader was given opens, one whose security handler it can't open, a
+/// stream the encryption dictionary refers to or one that doesn't decrypt
+/// cleanly, [`Why::Locked`]; a source that didn't give the bytes,
+/// [`Why::Source`]; through a filter the reader doesn't decode, or with
+/// parameters it doesn't take, [`Why::Filter`]; and what isn't a stream,
+/// isn't there, or decodes to nothing, [`Why::Damaged`].
+///
+/// On a `Reading` its own [`Reading::decoded`], which takes no limit, is
+/// what `decoded` names: this one is `Streams::decoded(&reading, id,
+/// limit)`, or the method through a reference or a `dyn`.
+impl<S: ByteSource> Streams for Reading<S> {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        match Resolve::try_resolve(&self, id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(missing(id)),
+            Err(unreadable) => return Err(unreadable),
+        }
+        lenient(id, self.decoded_within(id, limit)).map(Cow::Owned)
+    }
+}
+
+/// Why object `id`, which the file hasn't, gives no stream's data
+/// ([`Streams`]): it isn't there.
+pub(crate) fn missing(id: ObjectId) -> Unreadable {
+    Unreadable::new(id, Why::Damaged, Unread::Missing { id }.to_string())
+}
+
+/// What stream `id`'s data, `decoded` as [`Reading::decoded_within`] gives
+/// it, is as a viewer takes it ([`Streams`]): what decoded of a stream that
+/// decodes in part, unless what stopped it is the limit; or why there's
+/// none, as `Streams` for a [`Reading`] says, an object that doesn't read
+/// as [`Unread::unreadable`] says.
+pub(crate) fn lenient(
+    id: ObjectId,
+    decoded: Result<Vec<u8>, Error>,
+) -> Result<Vec<u8>, Unreadable> {
+    let unreadable =
+        |why: Why, error: &Error| Unreadable::new(id, why, format!("{id} R doesn't read: {error}"));
+    match decoded {
+        Ok(data) => Ok(data),
+        Err(Error::Decode(error)) => {
+            let limited = (error.faults.iter()).any(|(_, f)| *f == pdf_filters::Fault::Limit);
+            match (limited, error.data.is_empty()) {
+                (false, false) => Ok(error.data),
+                (true, _) => Err(unreadable(Why::Limit, &Error::Decode(error))),
+                (false, true) => Err(unreadable(Why::Damaged, &Error::Decode(error))),
+            }
+        }
+        Err(error @ Error::Io(_)) => Err(unreadable(Why::Source, &error)),
+        Err(
+            error @ (Error::Locked | Error::Encrypted | Error::Unsupported | Error::Decrypt(_)),
+        ) => Err(unreadable(Why::Locked, &error)),
+        Err(error @ Error::Filters(Unfiltered::Filters { .. })) => {
+            Err(unreadable(Why::Limit, &error))
+        }
+        Err(error @ Error::Filters(_)) => Err(unreadable(Why::Filter, &error)),
+        Err(Error::Unread(why)) => match why.unreadable(id) {
+            Some(unreadable) => Err(unreadable),
+            None => Err(missing(id)),
+        },
+        Err(error) => Err(unreadable(Why::Damaged, &error)),
     }
 }
