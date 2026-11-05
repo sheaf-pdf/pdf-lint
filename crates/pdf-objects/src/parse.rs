@@ -35,7 +35,7 @@ use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pdf_tokenizer::decode::pdfium::{self, Number};
-use pdf_tokenizer::decode::{self, How, NumberError};
+use pdf_tokenizer::decode::{self, How, NumberError, Pieces, Quirks};
 use pdf_tokenizer::{Iso, Kind, Pdfium, RuleSet, Rules, Token, Tokenizer};
 
 use crate::object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
@@ -1004,15 +1004,16 @@ impl<'a> Parser<'a> {
     /// Tells `sink` of name `token`'s fault, if it has one: a `#` without
     /// two hex digits after it, or `#00`.
     fn told_name(&self, token: &Token<'a>, sink: &mut (impl Sink<'a> + ?Sized)) {
-        let hows: Vec<How> = (token.pieces().into_iter().flatten())
-            .map(|piece| piece.how)
-            .filter(|how| matches!(how, How::StrayHash | How::NulEscape))
-            .collect();
-        if !hows.is_empty() {
+        let quirks = token.pieces().map_or(Quirks::default(), Pieces::quirks);
+        let (stray, nul) = (
+            quirks.contains(How::StrayHash),
+            quirks.contains(How::NulEscape),
+        );
+        if stray || nul {
             let fault = Fault::Name {
                 written: token.bytes,
-                stray: hows.contains(&How::StrayHash),
-                nul: hows.contains(&How::NulEscape),
+                stray,
+                nul,
             };
             sink.fault(self.span(token.start, token.end()), fault);
         }

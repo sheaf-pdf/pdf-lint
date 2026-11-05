@@ -9,7 +9,7 @@
 
 use core::fmt;
 use core::iter::FusedIterator;
-use core::ops::Range;
+use core::ops::{BitOr, BitOrAssign, Range};
 
 use memchr::memchr2;
 
@@ -107,9 +107,17 @@ impl How {
     }
 }
 
-/// A set of quirks: the [`How`]s out of the ordinary among some pieces.
+/// A set of quirks: the [`How`]s out of the ordinary among some pieces
+/// ([`Pieces::quirks`]), or built, by [`insert`](Self::insert), from an
+/// iterator of `How`s (`collect`, `extend`), or from two sets (`|`, `|=`).
+/// A `How` that isn't a quirk ([`How::is_quirk`]) is never in one: putting
+/// it in does nothing. [`iter`](Self::iter), or `for how in quirks`, gives
+/// the quirks in [`How::ALL`]'s order.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Quirks(u16);
+
+// A bit a `How`, by its discriminant; `How::ALL` lists them in that order.
+const _: () = assert!(How::ALL.len() <= u16::BITS as usize);
 
 impl Quirks {
     /// Whether `how` is among them.
@@ -122,19 +130,103 @@ impl Quirks {
         self.0 == 0
     }
 
-    fn insert(&mut self, how: How) {
+    /// How many there are.
+    pub const fn len(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    /// Puts `how` among them, if it's a quirk; a `How` that isn't one
+    /// ([`How::is_quirk`]) is ignored.
+    pub const fn insert(&mut self, how: How) {
         if how.is_quirk() {
             self.0 |= 1 << how as u16;
         }
+    }
+
+    /// The quirks, in [`How::ALL`]'s order.
+    pub fn iter(self) -> QuirksIter {
+        QuirksIter(self.0)
     }
 }
 
 impl fmt::Debug for Quirks {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let quirks = How::ALL.iter().copied().filter(|&how| self.contains(how));
-        f.debug_set().entries(quirks).finish()
+        f.debug_set().entries(self.iter()).finish()
     }
 }
+
+impl BitOr for Quirks {
+    type Output = Quirks;
+
+    /// The quirks in either.
+    fn bitor(self, other: Quirks) -> Quirks {
+        Quirks(self.0 | other.0)
+    }
+}
+
+impl BitOrAssign for Quirks {
+    /// Puts `other`'s quirks among them.
+    fn bitor_assign(&mut self, other: Quirks) {
+        self.0 |= other.0;
+    }
+}
+
+impl Extend<How> for Quirks {
+    /// Puts each quirk among them; a `How` that isn't one is ignored.
+    fn extend<I: IntoIterator<Item = How>>(&mut self, hows: I) {
+        for how in hows {
+            self.insert(how);
+        }
+    }
+}
+
+impl FromIterator<How> for Quirks {
+    /// The quirks among `hows`; a `How` that isn't one is ignored.
+    fn from_iter<I: IntoIterator<Item = How>>(hows: I) -> Quirks {
+        let mut quirks = Quirks::default();
+        quirks.extend(hows);
+        quirks
+    }
+}
+
+impl IntoIterator for Quirks {
+    type Item = How;
+    type IntoIter = QuirksIter;
+
+    /// The quirks, in [`How::ALL`]'s order.
+    fn into_iter(self) -> QuirksIter {
+        self.iter()
+    }
+}
+
+/// The quirks of a [`Quirks`] set, in [`How::ALL`]'s order: from
+/// [`Quirks::iter`], or `for how in quirks`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuirksIter(u16);
+
+impl Iterator for QuirksIter {
+    type Item = How;
+
+    fn next(&mut self) -> Option<How> {
+        if self.0 == 0 {
+            return None;
+        }
+        let bit = self.0.trailing_zeros() as usize;
+        self.0 &= self.0 - 1;
+        // A bit is set only by `insert`, from a `How`, whose discriminant
+        // indexes `How::ALL`.
+        Some(How::ALL[bit])
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.0.count_ones() as usize;
+        (left, Some(left))
+    }
+}
+
+impl ExactSizeIterator for QuirksIter {}
+
+impl FusedIterator for QuirksIter {}
 
 /// The [`Piece`]s of a name, a literal string or a hex string, in order.
 /// They join into the bytes given, with no gap and no overlap. Each is a
@@ -1270,6 +1362,79 @@ mod tests {
         assert_eq!(read.size_hint(), (0, Some(4)));
         assert_eq!(read.by_ref().count(), 1);
         assert_eq!(read.size_hint(), (0, Some(0)));
+    }
+
+    /// A `Quirks` set is built from `How`s, one by one or collected, or
+    /// from two sets, holds quirks alone, and iterates them in `How::ALL`'s
+    /// order, exactly as many as `len` says.
+    #[test]
+    fn quirks_are_built_from_hows_and_iterate_in_order() {
+        let quirks = token(b"(\\q\r)").pieces().unwrap().quirks();
+        assert_eq!(quirks.len(), 2);
+        let listed: Vec<How> = quirks.iter().collect();
+        assert_eq!(listed, [How::IgnoredBackslash, How::EolAsLf]);
+        let mut by_for = Vec::new();
+        for how in quirks {
+            by_for.push(how);
+        }
+        assert_eq!(by_for, listed);
+        assert_eq!(quirks.iter().len(), 2);
+        assert_eq!(quirks.iter().size_hint(), (2, Some(2)));
+        // The same set, collected from each piece's `How`, the ordinary
+        // ones ignored.
+        let collected: decode::Quirks = (token(b"(\\q\r)").pieces().unwrap())
+            .map(|p| p.how)
+            .collect();
+        assert_eq!(collected, quirks);
+        let hows = [How::EolAsLf, How::Plain, How::IgnoredBackslash, How::Escape];
+        assert_eq!(hows.into_iter().collect::<decode::Quirks>(), quirks);
+        // Built one by one: a `How` that isn't a quirk does nothing.
+        let mut built = decode::Quirks::default();
+        assert_eq!((built.is_empty(), built.len()), (true, 0));
+        for how in [
+            How::Delimiter,
+            How::Plain,
+            How::Escape,
+            How::LineContinuation,
+            How::HexSpace,
+        ] {
+            built.insert(how);
+            assert!(built.is_empty(), "{how:?} isn't a quirk");
+        }
+        built.insert(How::EolAsLf);
+        built.insert(How::EolAsLf);
+        assert_eq!((built.len(), built.contains(How::EolAsLf)), (1, true));
+        built.extend([How::Plain, How::IgnoredBackslash]);
+        assert_eq!(built, quirks);
+        // Joined.
+        let stray: decode::Quirks = [How::StrayHash].into_iter().collect();
+        let joined = stray | quirks;
+        assert_eq!(joined.len(), 3);
+        assert_eq!(
+            joined.iter().collect::<Vec<_>>(),
+            [How::StrayHash, How::IgnoredBackslash, How::EolAsLf]
+        );
+        let mut joined_in_place = quirks;
+        joined_in_place |= stray;
+        assert_eq!(joined_in_place, joined);
+        assert_eq!(quirks | decode::Quirks::default(), quirks);
+        // Every quirk at once: `How::ALL`'s quirks, in its order.
+        let all: decode::Quirks = How::ALL.iter().copied().collect();
+        let every_quirk: Vec<How> = How::ALL.iter().copied().filter(|h| h.is_quirk()).collect();
+        assert_eq!(all.iter().collect::<Vec<_>>(), every_quirk);
+        assert_eq!(all.len(), every_quirk.len());
+        assert!(every_quirk.iter().all(|&h| all.contains(h)));
+        assert_eq!(
+            format!("{all:?}"),
+            format!("{every_quirk:?}")
+                .replace('[', "{")
+                .replace(']', "}")
+        );
+        let mut rest = all.iter();
+        assert_eq!(rest.len(), every_quirk.len());
+        rest.next();
+        assert_eq!(rest.len(), every_quirk.len() - 1);
+        assert_eq!(rest.clone().count(), rest.len());
     }
 
     /// The inputs the verbatim and size tests take every run of bytes of.
