@@ -193,6 +193,8 @@ Text strings (PDFDocEncoding, and UTF-16BE or UTF-8 with a byte-order mark) are 
 - `token.pieces()`, `token.verbatim()`, `token.integer()` and `token.number()`: what a token stands for. A value's bytes are `pieces().bytes()`, never longer than the token, and `verbatim()` borrows them as written when nothing needs decoding. `decode::name`, `literal`, `hex`, `integer` and `number` decode bytes from elsewhere.
 - `decode::pdfium::number`, `real`, `name`, `literal` and `hex`: what bytes stand for as PDFium reads them.
 
+`Kind` and `NumberError` are exhaustive on purpose: a match on every kind, or every error, is checked by the compiler, so a new variant of either is a breaking release. `How` and `Rules` are `#[non_exhaustive]`: a quirk is found in files, not designed, and a set of rules is a reader's to ask for, so either may come in a minor release, and a match on them needs a wildcard.
+
 ## License
 
 Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE)) or MIT license ([LICENSE-MIT](../../LICENSE-MIT)) at your option.

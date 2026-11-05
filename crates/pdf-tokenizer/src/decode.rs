@@ -31,6 +31,10 @@ pub struct Piece {
 }
 
 /// How a [`Piece`] stands for its byte.
+///
+/// A quirk is found in files, not designed, so one may come in a minor
+/// release: a match on `How` outside this crate needs a wildcard.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum How {
     /// `/`, `(`, `)`, `<` or `>`, which delimits the value: no byte.
@@ -73,7 +77,8 @@ pub enum How {
 }
 
 impl How {
-    const ALL: [How; 13] = [
+    /// Every `How`, in order: the ordinary ones first, the quirks after.
+    pub const ALL: &[How] = &[
         How::Delimiter,
         How::Plain,
         How::Escape,
@@ -125,7 +130,7 @@ impl Quirks {
 
 impl fmt::Debug for Quirks {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let quirks = How::ALL.into_iter().filter(|&how| self.contains(how));
+        let quirks = How::ALL.iter().copied().filter(|&how| self.contains(how));
         f.debug_set().entries(quirks).finish()
     }
 }
@@ -997,6 +1002,19 @@ mod tests {
             NumberError::Underflow.to_string(),
             "a number too small to hold"
         );
+    }
+
+    /// `How::ALL` holds every `How` in the order of their discriminants,
+    /// which `Quirks` indexes its bits by, the ordinary ones first.
+    #[test]
+    fn all_lists_every_how_in_order() {
+        for (i, &how) in How::ALL.iter().enumerate() {
+            assert_eq!(how as usize, i, "{how:?}");
+        }
+        let (ordinary, quirks) = How::ALL.split_at(5);
+        assert!(ordinary.iter().all(|how| !how.is_quirk()), "{ordinary:?}");
+        assert!(quirks.iter().all(|how| how.is_quirk()), "{quirks:?}");
+        assert_eq!(How::ALL.last(), Some(&How::Invalid));
     }
 
     #[test]

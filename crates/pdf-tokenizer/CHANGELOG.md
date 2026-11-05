@@ -5,6 +5,8 @@
 A breaking release. 0.1.1 was never published: what it held is under this release too, after the breaking changes.
 
 - **Breaking: `NumberError::Underflow`.** `decode::number` and `Token::number` read a real whose digits aren't all zero but reads as zero, such as `0.` followed by 400 zeros and a `1`, as `Err(Underflow)`, "a number too small to hold", where they read `Ok(0.0)`; `0.0` and `-0.0`, and a real of zeros however long, are still `Ok`, to the bit. A match on `NumberError` without a wildcard gains an arm. `decode::integer` and `Token::integer` can't underflow. The fuzz target holds `number` to Rust's reading of its text with the new error where that reading is zero from a digit that isn't.
+- **Breaking: `How` is `#[non_exhaustive]`.** A match on it outside the crate needs a wildcard: a quirk is found in files, not designed, so one may come in a minor release. `How::ALL`, every `How` in the order of their discriminants, the ordinary ones first, is public, a slice (`&[How]`), so its length is no part of the type.
+- **Exhaustive on purpose: `Kind` and `NumberError`.** They stay exhaustive, so that a match on every kind, or every error, is checked by the compiler; a new variant of either is a breaking release. The README says so.
 
 What 0.1.1 held:
 
