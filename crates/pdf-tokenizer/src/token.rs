@@ -90,12 +90,14 @@ pub struct Token<'a> {
 
 impl Token<'_> {
     /// The offset just past its last byte.
+    #[inline]
     #[must_use]
     pub const fn end(&self) -> usize {
         self.start + self.bytes.len()
     }
 
     /// Where it is in the input.
+    #[inline]
     #[must_use]
     pub const fn range(&self) -> Range<usize> {
         self.start..self.end()
@@ -104,6 +106,7 @@ impl Token<'_> {
     /// Whether it's the keyword `word`: a [`Kind::Keyword`] whose bytes are
     /// `word`, as `obj`, `R`, `endstream` and a content stream's operators
     /// are. A token of any other kind isn't, whatever its bytes.
+    #[inline]
     #[must_use]
     pub fn is_keyword(&self, word: &[u8]) -> bool {
         self.kind == Kind::Keyword && self.bytes == word

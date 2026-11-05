@@ -40,6 +40,7 @@ pub struct Tokenizer<'a, R: RuleSet = Iso> {
 impl<'a> Tokenizer<'a> {
     /// The tokens of `bytes`, from the start, by ISO 32000-2's rules, fixed
     /// in its type.
+    #[inline]
     pub const fn new(bytes: &'a [u8]) -> Self {
         Self::at(bytes, 0)
     }
@@ -48,6 +49,7 @@ impl<'a> Tokenizer<'a> {
     /// in its type. An `offset` past the end is taken as the end: the
     /// tokenizer then yields nothing, and [`offset`](Self::offset) says
     /// `bytes.len()`. So a reader at any offset never fails.
+    #[inline]
     pub const fn at(bytes: &'a [u8], offset: usize) -> Self {
         // The clamp written out, as `Ord::min` isn't `const`.
         let pos = if offset < bytes.len() {
@@ -77,6 +79,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     }
 
     /// The rules it follows.
+    #[inline]
     #[must_use]
     pub fn rules(&self) -> Rules {
         self.rules.rules()
@@ -86,6 +89,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// input's length once every token is out, and at once for a tokenizer
     /// made at an offset past the end. (Not `position`: on a `&mut
     /// Tokenizer`, that would be [`Iterator::position`].)
+    #[inline]
     #[must_use]
     pub const fn offset(&self) -> usize {
         self.pos
@@ -93,6 +97,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
 
     /// The input, whole: the bytes it tokenizes, from their start, whatever
     /// offset it was made at or has reached.
+    #[inline]
     #[must_use]
     pub const fn input(&self) -> &'a [u8] {
         self.bytes
@@ -102,6 +107,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// ([`offset`](Self::offset)) to its end, and empty once every token is
     /// out. With [`input`](Self::input), a reader needn't carry the slice
     /// beside the tokenizer.
+    #[inline]
     #[must_use]
     pub const fn remaining(&self) -> &'a [u8] {
         // `pos` is never past the end. Were a bug to put it there, nothing
@@ -115,6 +121,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// One end of line, CR LF, LF or CR, as a [`Kind::Space`] token, if one
     /// is next: what ends the line a `stream` keyword is on. ISO 32000-2
     /// allows CR LF or LF there, and the token's bytes say which came.
+    #[inline]
     pub fn eol(&mut self) -> Option<Token<'a>> {
         let len = match self.remaining() {
             [b'\r', b'\n', ..] => 2,
@@ -127,6 +134,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// One white-space byte, as a [`Kind::Space`] token, if one is next:
     /// what separates an inline image's `ID` from its data. White-space by
     /// the tokenizer's rules, so 0x80 and 0xFF too by PDFium's.
+    #[inline]
     pub fn space_byte(&mut self) -> Option<Token<'a>> {
         match self.remaining() {
             [b, ..] if self.rules().is_white_space(*b) => Some(self.take(Kind::Space, 1)),
@@ -136,6 +144,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
 
     /// The next `len` bytes, or as many as are left, as one [`Kind::Data`]
     /// token: a stream's data, when the caller trusts its `/Length`.
+    #[inline]
     pub fn data(&mut self, len: usize) -> Token<'a> {
         let len = len.min(self.remaining().len());
         self.take(Kind::Data, len)
@@ -149,6 +158,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// The search is for the bytes alone, wherever they are. A caller that
     /// wants a marker only after white-space, or only before a delimiter,
     /// finds it itself and calls [`data`](Self::data).
+    #[inline]
     pub fn data_until(&mut self, marker: &[u8]) -> Token<'a> {
         let rest = self.remaining();
         let len = memmem::find(rest, marker).unwrap_or(rest.len());
@@ -169,6 +179,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// assert_eq!(tokens.next_significant().map(|t| t.bytes), Some(&b"/Type"[..]));
     /// assert_eq!(tokens.next_significant(), None);
     /// ```
+    #[inline]
     pub fn next_significant(&mut self) -> Option<Token<'a>> {
         let rules = self.rules();
         loop {
@@ -270,6 +281,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
 impl<'a, R: RuleSet> Iterator for Tokenizer<'a, R> {
     type Item = Token<'a>;
 
+    #[inline]
     fn next(&mut self) -> Option<Token<'a>> {
         // Each set of rules is a loop of its own. Fixed in the type, the
         // rules are settled when this is compiled; chosen as it runs, they
