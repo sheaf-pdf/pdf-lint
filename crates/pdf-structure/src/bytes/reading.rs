@@ -893,19 +893,7 @@ impl<S: ByteSource> Reading<S> {
     /// assert_eq!(cut.faults, [(0, Fault::Limit)]);
     /// ```
     pub fn decoded_within(&self, id: ObjectId, limit: usize) -> Result<Vec<u8>, Error> {
-        let limit = limit.min(self.reader.limits.stream);
-        match self.decoded_up_to(id, limit) {
-            // Only a stream with no filters comes back longer than its limit.
-            Ok(mut data) if data.len() > limit => {
-                data.truncate(limit);
-                data.shrink_to_fit();
-                Err(Error::Decode(pdf_filters::Error {
-                    data,
-                    faults: vec![(0, pdf_filters::Fault::Limit)],
-                }))
-            }
-            decoded => decoded,
-        }
+        self.decoded_within_as(id, None, limit)
     }
 
     /// [`Reading::decoded`], each filter's output up to `limit` bytes.
@@ -913,17 +901,18 @@ impl<S: ByteSource> Reading<S> {
         self.decoded_as(id, None, limit)
     }
 
-    /// [`Reading::decoded_within`], the stream `object`, where it's given:
+    /// [`Reading::decoded_within`], the stream `object` where it's given:
     /// what [`Reading::get`] gives of `id`, as a document read whole from
-    /// this reading holds it, read again otherwise and kept.
+    /// this reading holds it; where it isn't, the stream as
+    /// [`Reading::decoded`] reads it.
     pub(super) fn decoded_within_as<'f>(
         &'f self,
         id: ObjectId,
-        object: Result<&'f Object, &Unread>,
+        object: Option<Result<&'f Object, &Unread>>,
         limit: usize,
     ) -> Result<Vec<u8>, Error> {
         let limit = limit.min(self.reader.limits.stream);
-        match self.decoded_as(id, Some(object), limit) {
+        match self.decoded_as(id, object, limit) {
             // Only a stream with no filters comes back longer than its limit.
             Ok(mut data) if data.len() > limit => {
                 data.truncate(limit);

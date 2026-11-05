@@ -139,10 +139,8 @@ impl<S: ByteSource> Source for WithReading<S> {
 
     fn decoded_within(&self, id: ObjectId, limit: usize) -> Option<Result<Vec<u8>, Error>> {
         let object = Source::get(&self.document, id);
-        Some(
-            self.reading
-                .decoded_within_as(id, object.as_ref().map(|o| *o), limit),
-        )
+        let object = Some(object.as_ref().map(|o| *o));
+        Some(self.reading.decoded_within_as(id, object, limit))
     }
 }
 
