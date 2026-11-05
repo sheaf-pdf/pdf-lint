@@ -242,7 +242,7 @@ pub mod extension {
         let resolve = |id| source.get(id).ok().cloned();
         let trailer = source.trailer().dict();
         let mut packet = Packet::default();
-        let result = match source.metadata() {
+        let result = match source.metadata().as_deref() {
             Some(xml) => {
                 let catalog = pdf_semantics::catalog(Objects(source), trailer)
                     .ok()
@@ -307,7 +307,7 @@ pub mod extension {
         /// which reads it with both, as neither changes what's read.
         fn quietly(doc: &Document) -> BTreeSet<String> {
             let resolve = |id| doc.get(id).ok().cloned();
-            let read = (doc.metadata())
+            let read = (doc.metadata().as_deref())
                 .map(|xml| {
                     xmp::read(xml, None, &Limits::DEFAULT, &mut ())
                         .unwrap_or_else(|error| error.read)

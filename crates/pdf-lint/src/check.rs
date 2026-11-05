@@ -1112,7 +1112,7 @@ pub struct Finding {
     /// object nothing reaches; or an operation or a name in a content
     /// stream, or what's wrong in an XMP packet in its metadata stream, at
     /// its bytes in the stream's decoded data, which
-    /// [`Source::decoded_within`] gives (where [`Source::decoded`] gives an
+    /// [`Source::decoded_within`] gives (where [`Source::held`] gives an
     /// object stream's).
     pub at: Option<Span>,
     /// The earlier revision whose trailer it's in, a table's or a
@@ -1399,7 +1399,7 @@ fn check_in(
         walk.graphics(font_budget);
         walk.linearized();
         walk.unreached();
-        walk.read_as(source.warnings());
+        walk.read_as(&source.warnings());
         std::mem::take(&mut walk.report)
     })
 }
@@ -4161,7 +4161,7 @@ impl<'a> Walk<'a> {
         for (n, ids) in members {
             let stream = ObjectId::new(n, 0);
             let made = held[&n];
-            let data = Source::decoded(source, stream);
+            let data = source.held(stream);
             let clear = source.in_the_clear(stream);
             let (mut strings, mut first) = (0, None);
             for id in ids {

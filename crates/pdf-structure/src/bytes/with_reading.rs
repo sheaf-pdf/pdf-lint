@@ -134,7 +134,7 @@ impl<S: ByteSource> Source for WithReading<S> {
         Source::header_version(&self.document)
     }
 
-    fn warnings(&self) -> &[Warning] {
+    fn warnings(&self) -> Cow<'_, [Warning]> {
         Source::warnings(&self.document)
     }
 
@@ -142,7 +142,7 @@ impl<S: ByteSource> Source for WithReading<S> {
         Source::size(&self.document)
     }
 
-    fn metadata(&self) -> Option<&[u8]> {
+    fn metadata(&self) -> Option<Cow<'_, [u8]>> {
         Source::metadata(&self.document)
     }
 
@@ -150,8 +150,8 @@ impl<S: ByteSource> Source for WithReading<S> {
         Source::record(&self.document, id)
     }
 
-    fn decoded(&self, stream: ObjectId) -> Option<&[u8]> {
-        Source::decoded(&self.document, stream)
+    fn held(&self, stream: ObjectId) -> Option<&[u8]> {
+        Source::held(&self.document, stream)
     }
 
     fn revisions(&self) -> &[Revision] {
@@ -183,17 +183,19 @@ mod tests {
 
     /// What a source answers of each object it lists, and of one it
     /// doesn't, but a stream's data decoded, which only a reading gives.
+    /// Each object is asked for first, so that a reading has read them all
+    /// before it's asked the rest.
     #[derive(Debug, PartialEq)]
     struct Answers<'s> {
         ids: Vec<ObjectId>,
         objects: Vec<Result<&'s Object, Unread>>,
         trailer: &'s Trailer,
         header: Option<Version>,
-        warnings: &'s [Warning],
+        warnings: Cow<'s, [Warning]>,
         size: Option<usize>,
-        metadata: Option<&'s [u8]>,
+        metadata: Option<Cow<'s, [u8]>>,
         records: Vec<Option<&'s Record>>,
-        decoded: Vec<Option<&'s [u8]>>,
+        held: Vec<Option<&'s [u8]>>,
         revisions: &'s [Revision],
         facts: Option<&'s Facts>,
         clear: Vec<bool>,
@@ -214,10 +216,7 @@ mod tests {
             size: source.size(),
             metadata: source.metadata(),
             records: asked.iter().map(|&id| source.record(id)).collect(),
-            decoded: asked
-                .iter()
-                .map(|&id| Source::decoded(source, id))
-                .collect(),
+            held: asked.iter().map(|&id| source.held(id)).collect(),
             revisions: source.revisions(),
             facts: source.facts(),
             clear: asked.iter().map(|&id| source.in_the_clear(id)).collect(),
@@ -247,17 +246,42 @@ mod tests {
     /// a viewer takes it ([`Streams`]), a reading, the file opened and its
     /// document alone give the same of every object stream the document
     /// holds decoded, and of what isn't a stream; of any other stream, the
-    /// document alone gives none, the source's, and the other two alike.
+    /// document alone gives none, the source's, and the other two alike. A
+    /// reading of the file, as a source, answers as the file opened, once
+    /// it has read every object, its warnings in the same order; before, it
+    /// holds no object stream's data, and has none in the clear, until it
+    /// reads an object in it.
     #[test]
     fn an_opened_file_answers_as_its_document_and_decodes_as_its_reading() {
-        let (mut streams, mut held) = (0, 0);
+        let (mut streams, mut held, mut decoded) = (0, 0, 0);
         for (name, file, passwords) in files() {
             let opened = WithReading::new(&file[..], &passwords, &Options::DEFAULT).unwrap();
             let whole = read_opened(&file, &passwords);
             assert_eq!(*opened.document(), whole, "{name}");
             assert_eq!(answers(&opened), answers(opened.document()), "{name}");
-            let reading = Reading::open_with(&file[..], &passwords, &Options::DEFAULT).unwrap();
             let alone = opened.document();
+            let reading = Reading::open_with(&file[..], &passwords, &Options::DEFAULT).unwrap();
+            let containers: Vec<ObjectId> = (alone.decoded.keys())
+                .chain(&alone.in_the_clear)
+                .copied()
+                .collect();
+            for &stream in &containers {
+                assert_eq!(Source::held(&reading, stream), None, "{name}: {stream}");
+                assert!(!Source::in_the_clear(&reading, stream), "{name}: {stream}");
+            }
+            for (id, object) in alone.objects() {
+                let Some(stream) = object.at.and_then(|at| at.stream) else {
+                    continue;
+                };
+                let first = Source::held(&reading, stream).is_none();
+                assert!(Source::get(&reading, id).is_ok(), "{name}: {id}");
+                let data = alone.decoded.get(&stream).map(Vec::as_slice);
+                assert_eq!(Source::held(&reading, stream), data, "{name}: {id}");
+                let clear = alone.in_the_clear.contains(&stream);
+                assert_eq!(Source::in_the_clear(&reading, stream), clear, "{name}");
+                decoded += usize::from(first);
+            }
+            assert_eq!(answers(&reading), answers(&opened), "{name}");
             let ids = Source::ids(&opened);
             // And what it doesn't list: a number past them all, and one of
             // its objects at another generation.
@@ -300,5 +324,7 @@ mod tests {
         let floor = if fixtures() { 50 } else { 30 };
         assert!(streams > floor, "{streams}");
         assert!(held > 0, "{held}");
+        // Object streams a reading decoded by reading an object in each.
+        assert!(decoded > 0, "{decoded}");
     }
 }

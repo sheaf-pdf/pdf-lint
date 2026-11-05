@@ -667,8 +667,11 @@ mod tests {
     /// one the file hasn't, nothing; of one that doesn't read, the kind and
     /// its reason, which `get` gives too; and of one whose read the source
     /// fails, that, and counts it, by either way of asking, while a read by
-    /// `get` tells its caller, uncounted. Asked again it's the object, the
-    /// one `resolve` gives, and a failure kept nothing.
+    /// `get` tells its caller, uncounted. As a [`Source`], it says why as
+    /// `get` does, the source's failure as [`Unread::Source`], which a
+    /// resolver over any source says as the reading's own does; uncounted
+    /// too. Asked again it's the object, the one `resolve` gives, and a
+    /// failure kept nothing.
     #[test]
     fn a_reading_says_why_and_counts_what_the_source_failed() {
         let file = fixture::assembled(
@@ -694,6 +697,15 @@ mod tests {
         assert_eq!((three.id, three.why), (ObjectId::new(3, 0), Why::Damaged));
         let unread = in_memory.get(ObjectId::new(3, 0)).unwrap_err().to_string();
         assert_eq!(three.message, format!("3 0 R doesn't read: {unread}"));
+        let said = Source::get(&in_memory, ObjectId::new(3, 0)).unwrap_err();
+        assert_eq!(said, *doc.unread().next().unwrap().1);
+        assert_eq!(said.unreadable(ObjectId::new(3, 0)), Some(three));
+        assert_eq!(
+            Source::get(&in_memory, ObjectId::new(4, 0)),
+            Err(Unread::Missing {
+                id: ObjectId::new(4, 0)
+            })
+        );
         assert_eq!(in_memory.failed_resolves(), 0);
         let at = find(&file, b"2 0 obj").unwrap();
         for bound in [true, false] {
@@ -725,6 +737,19 @@ mod tests {
                 "{bound}"
             );
             assert_eq!(reading.failed_resolves(), 2, "{bound}");
+            source.fail_at(at);
+            let unread = Source::get(&reading, ObjectId::new(2, 0)).unwrap_err();
+            assert!(source.failed(), "{bound}: no read at {at}");
+            let message = format!("no byte {at}");
+            assert_eq!(unread, Unread::Source { message }, "{bound}");
+            assert_eq!(unread.container(), None, "{bound}");
+            assert_eq!(
+                unread.unreadable(ObjectId::new(2, 0)),
+                Some(failed),
+                "{bound}"
+            );
+            assert!(reading.record(ObjectId::new(2, 0)).is_none(), "{bound}");
+            assert_eq!(reading.failed_resolves(), 2, "{bound}");
             // What doesn't read and what isn't there aren't the source's.
             assert_eq!(
                 resolve.try_resolve(ObjectId::new(4, 0)),
@@ -738,6 +763,7 @@ mod tests {
             // And it reads, whichever asks first.
             let two = resolve.try_resolve(ObjectId::new(2, 0)).unwrap();
             assert_eq!(two, doc.get(ObjectId::new(2, 0)).ok(), "{bound}");
+            assert_eq!(Source::get(&reading, ObjectId::new(2, 0)).ok(), two);
             assert_eq!(reading.failed_resolves(), 2, "{bound}");
         }
     }
@@ -889,7 +915,8 @@ mod tests {
     }
 
     /// The catalog's metadata, whose data fails to read, isn't given, and
-    /// asked again it is; and so are the bytes at a span.
+    /// asked again it is, through [`Source`] as by the reading's own,
+    /// which says why; and so are the bytes at a span.
     #[test]
     fn metadata_and_bytes_that_fail_to_read_are_given_when_asked_again() {
         let file = fixture::assembled(
@@ -909,6 +936,11 @@ mod tests {
         source.fail_at(at);
         assert!(failed_at(reading.metadata().unwrap_err(), at));
         assert_eq!(reading.metadata().unwrap().as_deref(), Some(&b"hello"[..]));
+        source.fail_at(at);
+        assert_eq!(Source::metadata(&reading), None);
+        assert!(source.failed());
+        let metadata = Source::metadata(&reading);
+        assert_eq!(metadata.as_deref(), Some(&b"hello"[..]));
         source.fail_at(at);
         assert!(failed_at(reading.bytes(span(at, at + 5)).unwrap_err(), at));
         assert_eq!(reading.bytes(span(at, at + 5)).unwrap(), &b"hello"[..]);

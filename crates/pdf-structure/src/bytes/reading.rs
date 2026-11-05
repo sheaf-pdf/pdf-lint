@@ -20,7 +20,7 @@ use super::{Crypt, Decode, Limits, Options, Reader, Stored, Unfiltered, Whole, X
 use crate::crypt::{List, is_xref};
 use crate::filter;
 use crate::source::{
-    Document, Encryption, Facts, Record, Revision, Trailer, Unread, Update, Warning,
+    Document, Encryption, Facts, Record, Revision, Source, Trailer, Unread, Update, Warning,
 };
 use crate::write::as_written;
 
@@ -354,6 +354,17 @@ fn outside(span: &Span) -> String {
 /// sections don't read is read whole, to be scanned. Where the source
 /// fails ([`Error::Io`]), the call keeps nothing of what it was reading,
 /// but an object it read whole on the way, and asked again it reads again.
+///
+/// A reading is a [`Source`], as a document is, answering of what it has
+/// read so far, and pdf-objects' [`Streams`]. Its own methods of the
+/// traits' names say more than the traits' shapes do, and a call on a
+/// `Reading` names them first: [`Reading::ids`] is an iterator,
+/// [`Reading::get`] and [`Reading::decoded_within`] give an [`Error`],
+/// [`Reading::warnings`] a `Vec`, [`Reading::metadata`] a `Result`,
+/// [`Reading::size`] and [`Reading::facts`] no `Option`, and
+/// [`Reading::decoded`] takes no limit. The traits' answers are reached
+/// through a `&dyn Source`, or by the trait's name: `Source::get(&reading,
+/// id)`, `Streams::decoded(&reading, id, limit)`.
 ///
 /// ```
 /// use pdf_structure::bytes::{Options, Reading};
@@ -1333,6 +1344,90 @@ impl<S: ByteSource> Streams for Reading<S> {
             Err(unreadable) => return Err(unreadable),
         }
         lenient(id, self.decoded_within(id, limit)).map(Cow::Owned)
+    }
+}
+
+/// A file as it's read so far ([`Source`]): each answer its own method's
+/// ([`Reading::ids`], [`Reading::get`] and the rest), in the trait's shape,
+/// of what it has read when it's asked. So its warnings are those of what
+/// it has read, in the whole read's order, made for the call; an object
+/// stream's decoded data, and whether it leaves its objects' strings in
+/// the clear, are given of one it has decoded, whose header read, and of
+/// one it hasn't decoded yet, none and false; its metadata is read on the
+/// way, none where the source fails; and an object whose bytes the source
+/// didn't give is [`Unread::Source`], which asked again may read. Read
+/// whole, every answer is its document's ([`Reading::to_document`]).
+impl<S: ByteSource> Source for Reading<S> {
+    fn ids(&self) -> Vec<ObjectId> {
+        Reading::ids(self).collect()
+    }
+
+    fn get(&self, id: ObjectId) -> Result<&Object, Unread> {
+        Reading::get(self, id).map_err(|error| match error {
+            Error::Unread(unread) => unread,
+            Error::Io(error) => Unread::Source {
+                message: error.to_string(),
+            },
+            // None that `get` gives; said as it is, if one ever is.
+            error => Unread::Other(error.to_string()),
+        })
+    }
+
+    fn trailer(&self) -> &Trailer {
+        Reading::trailer(self)
+    }
+
+    fn header_version(&self) -> Option<Version> {
+        Reading::header_version(self)
+    }
+
+    fn warnings(&self) -> Cow<'_, [Warning]> {
+        Cow::Owned(Reading::warnings(self))
+    }
+
+    fn size(&self) -> Option<usize> {
+        Some(Reading::size(self))
+    }
+
+    fn metadata(&self) -> Option<Cow<'_, [u8]>> {
+        Reading::metadata(self).ok().flatten()
+    }
+
+    fn record(&self, id: ObjectId) -> Option<&Record> {
+        Reading::record(self, id)
+    }
+
+    fn held(&self, stream: ObjectId) -> Option<&[u8]> {
+        let container = self.container(stream)?;
+        container.header.is_ok().then_some(&container.data[..])
+    }
+
+    fn revisions(&self) -> &[Revision] {
+        Reading::revisions(self)
+    }
+
+    fn facts(&self) -> Option<&Facts> {
+        Some(Reading::facts(self))
+    }
+
+    fn in_the_clear(&self, stream: ObjectId) -> bool {
+        self.container(stream)
+            .is_some_and(|container| container.clear)
+    }
+
+    fn decoded_within(&self, id: ObjectId, limit: usize) -> Option<Result<Vec<u8>, Error>> {
+        Some(Reading::decoded_within(self, id, limit))
+    }
+}
+
+impl<S> Reading<S> {
+    /// Object stream `stream`, once it's decoded: none before, and none of
+    /// an id that isn't an object stream's, whose generation is 0.
+    fn container(&self, stream: ObjectId) -> Option<&super::Container> {
+        match stream.generation {
+            0 => (self.reader.containers.get(&stream.number)?.get()).map(Box::as_ref),
+            _ => None,
+        }
     }
 }
 

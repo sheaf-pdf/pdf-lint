@@ -18,28 +18,38 @@ use crate::bytes::{Error, SourceId, Undecoded, Unfiltered, Unindexed};
 
 /// A file, as a reader read it: its objects, and its streams' data as a
 /// viewer takes it ([`Streams`]), which a reader without the file's bytes,
-/// as a document alone is, doesn't give ([`Why::Source`]).
+/// as a document alone is, doesn't give ([`Why::Source`]). A [`Document`]
+/// is one, and so are a [`Reading`](crate::Reading), which answers of what
+/// it has read so far, and a document read beside its reading
+/// ([`WithReading`](crate::bytes::WithReading)).
 pub trait Source: Streams {
     /// Every object its cross-references list.
     fn ids(&self) -> Vec<ObjectId>;
     /// Object `id`, as written: references kept as references, strings
     /// decoded and decrypted. The error says why there's none: the file
-    /// hasn't it, or it doesn't read.
+    /// hasn't it, it doesn't read, or the source of the file's bytes didn't
+    /// give them ([`Unread::Source`]), which asked again may.
     fn get(&self, id: ObjectId) -> Result<&Object, Unread>;
     /// The trailer.
     fn trailer(&self) -> &Trailer;
     /// The version in the header.
     fn header_version(&self) -> Option<Version>;
     /// What the reader warned of while reading it: repairs, duplicate
-    /// keys, and anything else it had to choose how to read.
-    fn warnings(&self) -> &[Warning];
+    /// keys, and anything else it had to choose how to read. Lent where the
+    /// reader holds them, as a document does, or made for the call, as a
+    /// reading makes them of what it has read so far
+    /// ([`Reading::warnings`](crate::Reading::warnings)).
+    fn warnings(&self) -> Cow<'_, [Warning]>;
     /// The file's length in bytes, when the reader knows it.
     fn size(&self) -> Option<usize> {
         None
     }
     /// The data of the catalog's metadata stream (ISO 32000-2, 14.3.2), as
-    /// written, when the reader has it in plain view.
-    fn metadata(&self) -> Option<&[u8]> {
+    /// written, when the reader has it in plain view: lent where the reader
+    /// holds it, as a document does, or read for the call, as a reading
+    /// reads it ([`Reading::metadata`](crate::Reading::metadata)), none
+    /// where the source of the file's bytes fails on the way to it.
+    fn metadata(&self) -> Option<Cow<'_, [u8]>> {
         None
     }
     /// Where object `id` was read from, when the reader recorded it.
@@ -48,8 +58,12 @@ pub trait Source: Streams {
         None
     }
     /// Object stream `stream`'s decoded data, which the objects read from
-    /// it are placed in ([`Span::stream`]), when the reader keeps it.
-    fn decoded(&self, stream: ObjectId) -> Option<&[u8]> {
+    /// it are placed in ([`Span::stream`]), when the reader holds it: a
+    /// document holds each whose header reads ([`Document::decoded`]); a
+    /// reading, each it has decoded so far, as a read of an object in one
+    /// decodes it, and none of one it hasn't. A stream's data decoded for
+    /// the asking is [`Streams::decoded`]'s.
+    fn held(&self, stream: ObjectId) -> Option<&[u8]> {
         let _ = stream;
         None
     }
@@ -74,7 +88,9 @@ pub trait Source: Streams {
     /// Whether object stream `stream` leaves the strings of the objects read
     /// from it in the clear, in a file that encrypts its strings: an object
     /// in one is encrypted with the stream's data, whole, not itself, and
-    /// that isn't encrypted (ISO 32000-2, 7.5.7, 7.6.2, 7.6.6).
+    /// that isn't encrypted (ISO 32000-2, 7.5.7, 7.6.2, 7.6.6). Where the
+    /// reader knows: a reading, of one it has decoded so far, and false of
+    /// one it hasn't, as [`Source::held`] gives none of it.
     fn in_the_clear(&self, stream: ObjectId) -> bool {
         let _ = stream;
         false
@@ -92,8 +108,8 @@ pub trait Source: Streams {
     /// None where the reader doesn't give streams' data, as a document alone
     /// doesn't, its streams' data being where it was written: then none of
     /// any stream, so that a caller asking for one learns it of all. A
-    /// document read beside its reading
-    /// ([`WithReading`](crate::bytes::WithReading)) gives it.
+    /// reading gives it, and so does a document read beside its reading
+    /// ([`WithReading`](crate::bytes::WithReading)).
     fn decoded_within(&self, id: ObjectId, limit: usize) -> Option<Result<Vec<u8>, Error>> {
         let _ = (id, limit);
         None
@@ -604,6 +620,15 @@ pub enum Unread {
         /// The object stream's number.
         stream: u32,
     },
+    /// The source of the file's bytes didn't give those the read asked for
+    /// ([`Error::Io`]), in its words: a [`Reading`](crate::Reading)'s
+    /// [`Source::get`] gives it where the reading's own `get` gives that
+    /// error. Nothing of the read is kept, so asked again it may read.
+    #[error("{message}")]
+    Source {
+        /// What the source said.
+        message: String,
+    },
     /// Another reader's words: a [`Source`] outside the crate says why in
     /// its own.
     #[error("{0}")]
@@ -617,9 +642,10 @@ impl Unread {
     /// else as a [`Document`]'s and a [`Reading`](crate::Reading)'s say it,
     /// so that a resolver over any [`Source`] can. Its [`Why`] is
     /// [`Why::Damaged`], [`Why::Limit`] (past a cap the reader parses or
-    /// decodes under) or [`Why::Locked`] (in an object stream that takes a
-    /// password, or doesn't decrypt); never [`Why::Source`], which a reading
-    /// gives of its own bytes, before there's an `Unread` to say.
+    /// decodes under), [`Why::Locked`] (in an object stream that takes a
+    /// password, or doesn't decrypt), or [`Why::Source`] where the source of
+    /// the file's bytes didn't give them ([`Unread::Source`]), its message
+    /// then the one a reading's own resolver gives.
     pub fn unreadable(&self, id: ObjectId) -> Option<Unreadable> {
         if let Unread::Missing { .. } = self {
             return None;
@@ -640,6 +666,7 @@ impl Unread {
             },
             Unread::Undecodable { .. } => Why::Locked,
             Unread::ContainerUnread { why, .. } => why.why(),
+            Unread::Source { .. } => Why::Source,
             Unread::Missing { .. }
             | Unread::Parse(_)
             | Unread::Elsewhere { .. }
@@ -730,6 +757,7 @@ impl Unread {
             Unread::Missing { .. }
             | Unread::Parse(_)
             | Unread::Elsewhere { .. }
+            | Unread::Source { .. }
             | Unread::Other(_) => None,
         }
     }
@@ -1153,23 +1181,23 @@ impl Source for Document {
         self.header
     }
 
-    fn warnings(&self) -> &[Warning] {
-        &self.warnings
+    fn warnings(&self) -> Cow<'_, [Warning]> {
+        Cow::Borrowed(&self.warnings)
     }
 
     fn size(&self) -> Option<usize> {
         self.size
     }
 
-    fn metadata(&self) -> Option<&[u8]> {
-        self.metadata.as_deref()
+    fn metadata(&self) -> Option<Cow<'_, [u8]>> {
+        self.metadata.as_deref().map(Cow::Borrowed)
     }
 
     fn record(&self, id: ObjectId) -> Option<&Record> {
         Document::record(self, id)
     }
 
-    fn decoded(&self, stream: ObjectId) -> Option<&[u8]> {
+    fn held(&self, stream: ObjectId) -> Option<&[u8]> {
         self.decoded.get(&stream).map(Vec::as_slice)
     }
 
@@ -1634,6 +1662,12 @@ mod tests {
                 ),
             ),
             (
+                Unread::Source {
+                    message: "no byte 7".to_string(),
+                },
+                "no byte 7".to_string(),
+            ),
+            (
                 Unread::Other("qpdf's words".to_string()),
                 "qpdf's words".to_string(),
             ),
@@ -1730,6 +1764,12 @@ mod tests {
             ),
             (Unread::NoData { stream }, Why::Damaged),
             (Unread::Cut { stream }, Why::Damaged),
+            (
+                Unread::Source {
+                    message: "no byte 7".to_string(),
+                },
+                Why::Source,
+            ),
             (Unread::Other("words".to_string()), Why::Damaged),
         ];
         let mut doc = Document::new(Version::new(1, 7), dict! {});
@@ -1796,6 +1836,9 @@ mod tests {
                 found: ObjectId::new(5, 0),
                 expected: ObjectId::new(3, 0),
             },
+            Unread::Source {
+                message: "no byte 7".to_string(),
+            },
             Unread::Other("qpdf's words".to_string()),
         ];
         for why in &unplaced {
@@ -1830,9 +1873,9 @@ mod tests {
 
     /// A reader of its own, implementing `Source`'s five methods alone,
     /// and `Streams` with none of the file's bytes, gives none of what a
-    /// reader may know besides: no record, decoded data, revisions or
-    /// facts, and no object stream in the clear. A document gives what it
-    /// holds, through the trait as through itself.
+    /// reader may know besides: no record, metadata, object stream's data,
+    /// revisions or facts, and no object stream in the clear. A document
+    /// gives what it holds, lent, through the trait as through itself.
     #[test]
     fn a_source_says_what_a_reader_knows_besides_where_it_knows_it() {
         struct Own(Trailer);
@@ -1854,13 +1897,14 @@ mod tests {
             fn header_version(&self) -> Option<Version> {
                 None
             }
-            fn warnings(&self) -> &[Warning] {
-                &[]
+            fn warnings(&self) -> Cow<'_, [Warning]> {
+                Cow::Borrowed(&[])
             }
         }
         let own = Own(Trailer::new(dict! {}.into()));
         assert_eq!(own.record(ObjectId::new(1, 0)), None);
-        assert_eq!(Source::decoded(&own, ObjectId::new(4, 0)), None);
+        assert_eq!(own.metadata(), None);
+        assert_eq!(own.held(ObjectId::new(4, 0)), None);
         assert_eq!(own.decoded_within(ObjectId::new(4, 0), 10).map(drop), None);
         let source: &dyn Source = &own;
         let ungiven = Streams::decoded(source, ObjectId::new(4, 0), 10).unwrap_err();
@@ -1884,11 +1928,9 @@ mod tests {
         let (id, stream) = member;
         assert_eq!(source.record(id), doc.record(id));
         assert!(source.record(id).is_some());
-        assert_eq!(
-            Source::decoded(source, stream),
-            Some(&doc.decoded[&stream][..])
-        );
-        assert_eq!(Source::decoded(source, ObjectId::new(1_000_000, 0)), None);
+        assert_eq!(source.held(stream), Some(&doc.decoded[&stream][..]));
+        assert_eq!(source.held(ObjectId::new(1_000_000, 0)), None);
+        assert!(matches!(source.warnings(), Cow::Borrowed(w) if w == &doc.warnings[..]));
         assert_eq!(source.revisions(), &doc.revisions[..]);
         assert_eq!(source.revisions().len(), 1);
         assert_eq!(source.facts(), Some(&doc.facts));

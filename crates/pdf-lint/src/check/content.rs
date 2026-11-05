@@ -1898,7 +1898,7 @@ mod tests {
             self.source.header_version()
         }
 
-        fn warnings(&self) -> &[Warning] {
+        fn warnings(&self) -> Cow<'_, [Warning]> {
             self.source.warnings()
         }
 
@@ -1906,7 +1906,7 @@ mod tests {
             self.source.size()
         }
 
-        fn metadata(&self) -> Option<&[u8]> {
+        fn metadata(&self) -> Option<Cow<'_, [u8]>> {
             self.source.metadata()
         }
 
@@ -1914,8 +1914,8 @@ mod tests {
             self.source.record(id)
         }
 
-        fn decoded(&self, stream: ObjectId) -> Option<&[u8]> {
-            Source::decoded(self.source, stream)
+        fn held(&self, stream: ObjectId) -> Option<&[u8]> {
+            self.source.held(stream)
         }
 
         fn revisions(&self) -> &[Revision] {
