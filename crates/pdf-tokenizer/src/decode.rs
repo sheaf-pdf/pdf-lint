@@ -99,6 +99,7 @@ impl How {
     /// versions or a writer's intent may differ, or an error. Delimiters,
     /// plain bytes, escapes, line continuations and a hex string's
     /// white-space aren't.
+    #[must_use]
     pub const fn is_quirk(self) -> bool {
         !matches!(
             self,
@@ -121,16 +122,19 @@ const _: () = assert!(How::ALL.len() <= u16::BITS as usize);
 
 impl Quirks {
     /// Whether `how` is among them.
+    #[must_use]
     pub const fn contains(self, how: How) -> bool {
         self.0 & (1 << how as u16) != 0
     }
 
     /// Whether there are none.
+    #[must_use]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
     /// How many there are.
+    #[must_use]
     pub const fn len(self) -> usize {
         self.0.count_ones() as usize
     }
@@ -201,6 +205,7 @@ impl IntoIterator for Quirks {
 
 /// The quirks of a [`Quirks`] set, in [`How::ALL`]'s order: from
 /// [`Quirks::iter`], or `for how in quirks`.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuirksIter(u16);
 
@@ -233,6 +238,7 @@ impl FusedIterator for QuirksIter {}
 /// byte or more and stands for one byte at most, so there are never more
 /// pieces, or value bytes, than bytes: `size_hint` gives a piece at least
 /// while bytes are left, and at most as many as the bytes left.
+#[must_use = "pieces are lazy: nothing is decoded until one is asked for"]
 #[derive(Debug, Clone)]
 pub struct Pieces<'a> {
     bytes: &'a [u8],
@@ -312,6 +318,7 @@ impl<'a> Pieces<'a> {
     }
 
     /// The quirks among the pieces left.
+    #[must_use]
     pub fn quirks(self) -> Quirks {
         self.fold(Quirks::default(), |mut quirks, piece| {
             quirks.insert(piece.how);
@@ -510,6 +517,12 @@ pub enum NumberError {
 
 /// The integer `bytes` are written as: digits, with an optional sign (ISO
 /// 32000-2, 7.3.3).
+///
+/// # Errors
+///
+/// [`NotANumber`](NumberError::NotANumber) when the bytes aren't written as
+/// an integer, a real among them; [`Overflow`](NumberError::Overflow) when
+/// they are, and the integer is outside `i64`.
 pub fn integer(bytes: &[u8]) -> Result<i64, NumberError> {
     let (negative, digits) = match bytes {
         [b'-', digits @ ..] => (true, digits),
@@ -535,9 +548,15 @@ pub fn integer(bytes: &[u8]) -> Result<i64, NumberError> {
 }
 
 /// The number `bytes` are written as, an integer or a real, as an `f64`
-/// (ISO 32000-2, 7.3.3): too large past a finite `f64`, too small when a
-/// real with a digit other than `0` reads as zero. Forms Rust reads but PDF
-/// doesn't write, such as `1e5` or `inf`, aren't numbers.
+/// (ISO 32000-2, 7.3.3). Forms Rust reads but PDF doesn't write, such as
+/// `1e5` or `inf`, aren't numbers.
+///
+/// # Errors
+///
+/// [`NotANumber`](NumberError::NotANumber) when the bytes aren't written as
+/// a number; [`Overflow`](NumberError::Overflow) when the number is past
+/// the largest finite `f64`; [`Underflow`](NumberError::Underflow) when a
+/// real whose digits aren't all zero reads as zero.
 pub fn number(bytes: &[u8]) -> Result<f64, NumberError> {
     if let Some(value) = short_decimal(bytes) {
         return Ok(value);
@@ -608,6 +627,7 @@ impl<'a> Token<'a> {
     /// offsets in the input, as ISO 32000-2 reads them, whatever rules read
     /// the token. `None` for any other kind. [`pdfium`] reads the same
     /// bytes as PDFium does.
+    #[must_use]
     pub fn pieces(&self) -> Option<Pieces<'a>> {
         let syntax = match self.kind {
             Kind::Name => Syntax::Name,
@@ -623,6 +643,7 @@ impl<'a> Token<'a> {
     /// plain (a name without `#`, a literal string without `\` or CR, an
     /// empty hex string). `None` when something does, its value then being
     /// its pieces' [`bytes`](Pieces::bytes), and for any other kind.
+    #[must_use]
     pub fn verbatim(&self) -> Option<&'a [u8]> {
         // The bytes are searched for what the pieces would say isn't plain,
         // not walked piece by piece: the same answer, from any bytes, a
@@ -657,6 +678,13 @@ impl<'a> Token<'a> {
     /// as ISO 32000-2 writes one: a word only PDFium's rules make an
     /// integer, such as `--5`, isn't one here, and [`pdfium::number`] reads
     /// it.
+    ///
+    /// # Errors
+    ///
+    /// [`NotANumber`](NumberError::NotANumber) for a token of any other
+    /// kind, a [`Real`](Kind::Real) among them, and for an `Integer` by
+    /// PDFium's rules alone; [`Overflow`](NumberError::Overflow) for an
+    /// integer outside `i64`.
     pub fn integer(&self) -> Result<i64, NumberError> {
         match self.kind {
             Kind::Integer => integer(self.bytes),
@@ -668,6 +696,14 @@ impl<'a> Token<'a> {
     /// token is written as, as an `f64`, read as ISO 32000-2 writes one: a
     /// word only PDFium's rules make a number, such as `1.2.3`, isn't one
     /// here, and [`pdfium::number`] reads it.
+    ///
+    /// # Errors
+    ///
+    /// [`NotANumber`](NumberError::NotANumber) for a token of any other
+    /// kind, and for a number by PDFium's rules alone;
+    /// [`Overflow`](NumberError::Overflow) for a number past the largest
+    /// finite `f64`; [`Underflow`](NumberError::Underflow) for a real whose
+    /// digits aren't all zero but reads as zero.
     pub fn number(&self) -> Result<f64, NumberError> {
         match self.kind {
             Kind::Integer | Kind::Real => number(self.bytes),

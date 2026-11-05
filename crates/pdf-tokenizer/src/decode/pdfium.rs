@@ -48,6 +48,7 @@ pub enum Number {
 impl Number {
     /// The number as PDFium reads a number, an `f32` (`GetNumber`): an
     /// integer rounded to the nearest one.
+    #[must_use]
     pub fn float(self) -> f32 {
         match self {
             Number::Unsigned(n) => n as f32,
@@ -59,6 +60,7 @@ impl Number {
     /// The number as PDFium reads an integer (`GetInteger`): an unsigned
     /// one past `i32::MAX` wraps to a negative one, and a real is cut to
     /// its whole part, saturating at `i32`'s ends.
+    #[must_use]
     pub fn integer(self) -> i32 {
         match self {
             Number::Unsigned(n) => n as i32,
@@ -79,6 +81,7 @@ impl Number {
 /// ISO 32000-2 (7.3.3) has no reading of `--5` or `1.2.3`, and holds
 /// integers past 32 bits; PDFium reads `--5` as 0, `1.2.3` as 1.2 and
 /// `4294967296` as 0.
+#[must_use]
 pub fn number(bytes: &[u8]) -> Number {
     if bytes.contains(&b'.') {
         return Number::Real(decimal(bytes).parse().unwrap_or(0.0));
@@ -107,6 +110,7 @@ pub fn number(bytes: &[u8]) -> Number {
 /// number word: the decimal ends at the first byte that's no digit, nor
 /// its point, so an exponent isn't read (`1e5` is 1), where PDFium's own
 /// conversion of a string to a number (`StringToDouble`) reads one.
+#[must_use]
 pub fn real(bytes: &[u8]) -> f64 {
     decimal(bytes).parse().unwrap_or(0.0)
 }
@@ -139,6 +143,7 @@ fn decimal(bytes: &[u8]) -> &str {
 /// left to read, each read byte standing for one at most, which
 /// `size_hint` gives as its upper bound: a buffer of that length holds
 /// them without growing.
+#[must_use = "the bytes are lazy: nothing is decoded until one is asked for"]
 #[derive(Debug, Clone)]
 pub struct Bytes<'a> {
     bytes: &'a [u8],

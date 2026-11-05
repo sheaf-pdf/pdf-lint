@@ -8,18 +8,21 @@
 
 /// Whether `b` is white-space: NUL, tab, line feed, form feed, carriage
 /// return or space.
+#[must_use]
 pub const fn is_white_space(b: u8) -> bool {
     class(b) & SPACE != 0
 }
 
 /// Whether `b` is a delimiter: `(`, `)`, `<`, `>`, `[`, `]`, `{`, `}`, `/`
 /// or `%`.
+#[must_use]
 pub const fn is_delimiter(b: u8) -> bool {
     class(b) & DELIMITER != 0
 }
 
 /// Whether `b` is regular: neither white-space nor a delimiter. Runs of
 /// regular bytes are names' bodies, numbers and keywords.
+#[must_use]
 pub const fn is_regular(b: u8) -> bool {
     class(b) & (SPACE | DELIMITER) == 0
 }

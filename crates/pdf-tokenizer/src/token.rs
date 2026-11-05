@@ -90,18 +90,21 @@ pub struct Token<'a> {
 
 impl Token<'_> {
     /// The offset just past its last byte.
-    pub fn end(&self) -> usize {
+    #[must_use]
+    pub const fn end(&self) -> usize {
         self.start + self.bytes.len()
     }
 
     /// Where it is in the input.
-    pub fn range(&self) -> Range<usize> {
+    #[must_use]
+    pub const fn range(&self) -> Range<usize> {
         self.start..self.end()
     }
 
     /// Whether it's the keyword `word`: a [`Kind::Keyword`] whose bytes are
     /// `word`, as `obj`, `R`, `endstream` and a content stream's operators
     /// are. A token of any other kind isn't, whatever its bytes.
+    #[must_use]
     pub fn is_keyword(&self, word: &[u8]) -> bool {
         self.kind == Kind::Keyword && self.bytes == word
     }
@@ -112,6 +115,7 @@ mod tests {
     extern crate std;
 
     use core::mem::size_of;
+    use core::ops::Range;
     use std::vec::Vec;
 
     use super::{Kind, Token};
@@ -125,6 +129,20 @@ mod tests {
         assert_eq!(size_of::<Token<'_>>(), 4 * size_of::<usize>());
         assert_eq!(Kind::Space as usize, 0);
         assert_eq!(Kind::Data as usize, 15);
+    }
+
+    /// Where a token ends, and its range, are known at compile time.
+    #[test]
+    fn a_tokens_end_and_range_are_known_at_compile_time() {
+        const TOKEN: Token<'static> = Token {
+            kind: Kind::Keyword,
+            closed: true,
+            start: 2,
+            bytes: b"obj",
+        };
+        const END: usize = TOKEN.end();
+        const RANGE: Range<usize> = TOKEN.range();
+        assert_eq!((END, RANGE), (5, 2..5));
     }
 
     /// A token is the keyword `word` by its kind and its bytes together: not

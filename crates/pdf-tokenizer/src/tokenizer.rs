@@ -28,6 +28,7 @@ use crate::token::{Kind, Token};
 /// any others. To take them as data instead, take the white-space before
 /// them with [`eol`](Self::eol) or [`space_byte`](Self::space_byte), then
 /// the data with [`data`](Self::data) or [`data_until`](Self::data_until).
+#[must_use = "a tokenizer is lazy: it reads nothing until a token is asked for"]
 #[derive(Debug, Clone)]
 pub struct Tokenizer<'a, R: RuleSet = Iso> {
     bytes: &'a [u8],
@@ -39,7 +40,7 @@ pub struct Tokenizer<'a, R: RuleSet = Iso> {
 impl<'a> Tokenizer<'a> {
     /// The tokens of `bytes`, from the start, by ISO 32000-2's rules, fixed
     /// in its type.
-    pub fn new(bytes: &'a [u8]) -> Self {
+    pub const fn new(bytes: &'a [u8]) -> Self {
         Self::at(bytes, 0)
     }
 
@@ -47,10 +48,16 @@ impl<'a> Tokenizer<'a> {
     /// in its type. An `offset` past the end is taken as the end: the
     /// tokenizer then yields nothing, and [`offset`](Self::offset) says
     /// `bytes.len()`. So a reader at any offset never fails.
-    pub fn at(bytes: &'a [u8], offset: usize) -> Self {
+    pub const fn at(bytes: &'a [u8], offset: usize) -> Self {
+        // The clamp written out, as `Ord::min` isn't `const`.
+        let pos = if offset < bytes.len() {
+            offset
+        } else {
+            bytes.len()
+        };
         Tokenizer {
             bytes,
-            pos: offset.min(bytes.len()),
+            pos,
             rules: Iso,
         }
     }
@@ -70,6 +77,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     }
 
     /// The rules it follows.
+    #[must_use]
     pub fn rules(&self) -> Rules {
         self.rules.rules()
     }
@@ -78,12 +86,14 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// input's length once every token is out, and at once for a tokenizer
     /// made at an offset past the end. (Not `position`: on a `&mut
     /// Tokenizer`, that would be [`Iterator::position`].)
-    pub fn offset(&self) -> usize {
+    #[must_use]
+    pub const fn offset(&self) -> usize {
         self.pos
     }
 
     /// The input, whole: the bytes it tokenizes, from their start, whatever
     /// offset it was made at or has reached.
+    #[must_use]
     pub const fn input(&self) -> &'a [u8] {
         self.bytes
     }
@@ -92,6 +102,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// ([`offset`](Self::offset)) to its end, and empty once every token is
     /// out. With [`input`](Self::input), a reader needn't carry the slice
     /// beside the tokenizer.
+    #[must_use]
     pub const fn remaining(&self) -> &'a [u8] {
         // `pos` is never past the end. Were a bug to put it there, nothing
         // would be left, and the tokenizer would still not panic.
@@ -1344,7 +1355,8 @@ mod tests {
     /// `input` is the whole input and `remaining` what's left of it from the
     /// next token's offset: from any offset, past the end included, after
     /// each token, and after each other way of moving on; so a reader can
-    /// read what's left itself.
+    /// read what's left itself; and both at compile time, with `new`, `at`
+    /// and `offset`.
     #[test]
     fn input_and_remaining_are_the_input_and_what_is_left() {
         let input = b"1 0 obj<</L 3>>stream\r\nabc\nendstream [(a) %c\n] (";
@@ -1389,5 +1401,14 @@ mod tests {
         );
         assert_eq!(fixed.remaining(), b"");
         assert_eq!(fixed.input(), input);
+        const AT: Tokenizer<'static> = Tokenizer::at(b"ab cd", 3);
+        const REMAINING: &[u8] = AT.remaining();
+        const INPUT: &[u8] = AT.input();
+        const OFFSET: usize = AT.offset();
+        const PAST: &[u8] = Tokenizer::at(b"ab cd", 9).remaining();
+        const PAST_OFFSET: usize = Tokenizer::at(b"ab cd", 9).offset();
+        const FROM_START: usize = Tokenizer::new(b"ab cd").offset();
+        assert_eq!((REMAINING, INPUT, OFFSET), (&b"cd"[..], &b"ab cd"[..], 3));
+        assert_eq!((PAST, PAST_OFFSET, FROM_START), (&b""[..], 5, 0));
     }
 }
