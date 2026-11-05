@@ -40,8 +40,9 @@ pdfium_sets := "crates/pdf-tokenizer/tests/pdfium crates/pdf-objects/tests/pdfiu
 default:
     @just --list --unsorted
 
-# Everything CI runs.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
+# Everything CI runs, but `tokenizer-semver`, which needs cargo-semver-checks
+# installed.
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -254,6 +255,41 @@ tokenizer-no-std:
 # build shows the tokenizer needs neither std nor alloc.
 tokenizer-core-only:
     cargo +nightly build --locked -p pdf-tokenizer --target thumbv6m-none-eabi -Z build-std=core
+
+# Package the tokenizer as a publish would, in a target directory of its
+# own made fresh each time (a stale one passes or fails falsely), and check
+# what the package holds: its sources, README, CHANGELOG, manifest and
+# lock, and nothing else, no benchmark among them. The benchmarks' target
+# is declared in the manifest while `benches/` is outside `include`, so
+# cargo drops it from the packaged manifest with a warning, which is
+# expected; the check reads that manifest. The dry run asks the registry,
+# so it needs the network.
+tokenizer-package:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir=$PWD/target/tokenizer-package
+    rm -rf "$dir"
+    CARGO_TARGET_DIR="$dir" cargo publish --dry-run --locked -p pdf-tokenizer
+    CARGO_TARGET_DIR="$dir" cargo package --list --locked -p pdf-tokenizer > "$dir/files.txt"
+    if grep -v -E '^(src/.*\.rs|README\.md|CHANGELOG\.md|Cargo\.toml|Cargo\.toml\.orig|Cargo\.lock|\.cargo_vcs_info\.json)$' "$dir/files.txt"; then
+        echo "the package holds more than its sources, README, CHANGELOG, manifest and lock (above)" >&2
+        exit 1
+    fi
+    manifest=("$dir"/package/pdf-tokenizer-*/Cargo.toml)
+    if [ "${#manifest[@]}" -ne 1 ] || [ ! -f "${manifest[0]}" ]; then
+        echo "no packaged manifest under $dir/package to read" >&2
+        exit 1
+    fi
+    if grep -q '^\[\[bench\]\]' "${manifest[0]}"; then
+        echo "the packaged manifest declares a benchmark the package doesn't hold" >&2
+        exit 1
+    fi
+
+# Check the tokenizer's public API against the version published on
+# crates.io, with cargo-semver-checks, which must be installed (CI installs
+# a pinned build): a break the version doesn't allow fails.
+tokenizer-semver:
+    cargo semver-checks check-release -p pdf-tokenizer
 
 # Test the tokenizer on its oldest supported Rust, which must be installed.
 tokenizer-msrv:

@@ -24,7 +24,7 @@ pdf-color = { path = "../pdf-color", version = "0.1" }
 # end is what zlib read; miniz_oxide not compiled for it.
 pdf-filters = { path = "../pdf-filters", version = "0.1", default-features = false, features = ["zlib-rs"] }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
-pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.1.1" }
+pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.2" }
 thiserror = "2"
 # An operation's operands, sixteen held inline before they spill to the heap.
 tinyvec = { version = "1.13", features = ["alloc"] }

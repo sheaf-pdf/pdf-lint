@@ -337,10 +337,12 @@ fn reads_as(bytes: &[u8], run: Range<usize>, (n, g): ObjectId) -> bool {
     if run.start > 0 && is_regular(bytes[run.start - 1]) {
         return false;
     }
-    let mut tokens = Tokenizer::at(bytes, run.start)
-        .filter(|token| !matches!(token.kind, Kind::Space | Kind::Comment));
-    let (Some(number), Some(generation), Some(r)) = (tokens.next(), tokens.next(), tokens.next())
-    else {
+    let mut tokens = Tokenizer::at(bytes, run.start);
+    let (Some(number), Some(generation), Some(r)) = (
+        tokens.next_significant(),
+        tokens.next_significant(),
+        tokens.next_significant(),
+    ) else {
         return false;
     };
     let integer = |token: &pdf_tokenizer::Token<'_>, want: i64| {
@@ -349,7 +351,7 @@ fn reads_as(bytes: &[u8], run: Range<usize>, (n, g): ObjectId) -> bool {
     number.start == run.start
         && integer(&number, n.into())
         && integer(&generation, g.into())
-        && (r.kind, r.bytes) == (Kind::Keyword, &b"R"[..])
+        && r.is_keyword(b"R")
         && r.end() == run.end
 }
 

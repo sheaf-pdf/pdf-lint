@@ -138,8 +138,8 @@ fn answer(kind: &str, word: &[u8]) -> String {
         }
         ("number", Some((Kind::Keyword, _))) => "not-a-number".to_string(),
         ("number", Some(_)) => "0".to_string(),
-        ("hex", Some((Kind::HexString { .. }, bytes))) => text(pdfium::hex(bytes)),
-        ("literal", Some((Kind::String { .. }, bytes))) => text(pdfium::literal(bytes)),
+        ("hex", Some((Kind::HexString, bytes))) => text(pdfium::hex(bytes)),
+        ("literal", Some((Kind::LiteralString, bytes))) => text(pdfium::literal(bytes)),
         ("name", Some((Kind::Name, bytes))) if pdfium::name(bytes).eq(*b"F0") => {
             "found".to_string()
         }

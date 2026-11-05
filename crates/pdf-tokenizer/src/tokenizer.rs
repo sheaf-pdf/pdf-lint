@@ -1,6 +1,7 @@
 //! The tokenizer: a position in the input, and the rules for where each
 //! kind of token ends.
 
+use core::fmt;
 use core::iter::FusedIterator;
 
 use memchr::{memchr, memchr2, memchr3, memmem};
@@ -28,7 +29,8 @@ use crate::token::{Kind, Token};
 /// any others. To take them as data instead, take the white-space before
 /// them with [`eol`](Self::eol) or [`space_byte`](Self::space_byte), then
 /// the data with [`data`](Self::data) or [`data_until`](Self::data_until).
-#[derive(Debug, Clone)]
+#[must_use = "a tokenizer is lazy: it reads nothing until a token is asked for"]
+#[derive(Clone)]
 pub struct Tokenizer<'a, R: RuleSet = Iso> {
     bytes: &'a [u8],
     /// Never past the end of `bytes`.
@@ -39,18 +41,40 @@ pub struct Tokenizer<'a, R: RuleSet = Iso> {
 impl<'a> Tokenizer<'a> {
     /// The tokens of `bytes`, from the start, by ISO 32000-2's rules, fixed
     /// in its type.
-    pub fn new(bytes: &'a [u8]) -> Self {
+    #[inline]
+    pub const fn new(bytes: &'a [u8]) -> Self {
         Self::at(bytes, 0)
     }
 
-    /// The tokens of `bytes`, from `offset`, or none when `offset` is past
-    /// the end, by ISO 32000-2's rules, fixed in its type.
-    pub fn at(bytes: &'a [u8], offset: usize) -> Self {
+    /// The tokens of `bytes`, from `offset`, by ISO 32000-2's rules, fixed
+    /// in its type. An `offset` past the end is taken as the end: the
+    /// tokenizer then yields nothing, and [`offset`](Self::offset) says
+    /// `bytes.len()`. So a reader at any offset never fails.
+    #[inline]
+    pub const fn at(bytes: &'a [u8], offset: usize) -> Self {
+        // The clamp written out, as `Ord::min` isn't `const`.
+        let pos = if offset < bytes.len() {
+            offset
+        } else {
+            bytes.len()
+        };
         Tokenizer {
             bytes,
-            pos: offset.min(bytes.len()),
+            pos,
             rules: Iso,
         }
+    }
+}
+
+impl<R: RuleSet + fmt::Debug> fmt::Debug for Tokenizer<'_, R> {
+    /// Where it is, the input's length and its rules; not the input, which
+    /// may be a whole file.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tokenizer")
+            .field("offset", &self.pos)
+            .field("input", &format_args!("{} bytes", self.bytes.len()))
+            .field("rules", &self.rules)
+            .finish()
     }
 }
 
@@ -68,21 +92,51 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     }
 
     /// The rules it follows.
+    #[inline]
+    #[must_use]
     pub fn rules(&self) -> Rules {
         self.rules.rules()
     }
 
-    /// The offset of the next token. (Not `position`: on a `&mut
+    /// The offset of the next token: where the last one ended, or the
+    /// input's length once every token is out, and at once for a tokenizer
+    /// made at an offset past the end. (Not `position`: on a `&mut
     /// Tokenizer`, that would be [`Iterator::position`].)
-    pub fn offset(&self) -> usize {
+    #[inline]
+    #[must_use]
+    pub const fn offset(&self) -> usize {
         self.pos
+    }
+
+    /// The input, whole: the bytes it tokenizes, from their start, whatever
+    /// offset it was made at or has reached.
+    #[inline]
+    #[must_use]
+    pub const fn input(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// What's left: the input from the next token's offset
+    /// ([`offset`](Self::offset)) to its end, and empty once every token is
+    /// out. With [`input`](Self::input), a reader needn't carry the slice
+    /// beside the tokenizer.
+    #[inline]
+    #[must_use]
+    pub const fn remaining(&self) -> &'a [u8] {
+        // `pos` is never past the end. Were a bug to put it there, nothing
+        // would be left, and the tokenizer would still not panic.
+        match self.bytes.split_at_checked(self.pos) {
+            Some((_, rest)) => rest,
+            None => &[],
+        }
     }
 
     /// One end of line, CR LF, LF or CR, as a [`Kind::Space`] token, if one
     /// is next: what ends the line a `stream` keyword is on. ISO 32000-2
     /// allows CR LF or LF there, and the token's bytes say which came.
+    #[inline]
     pub fn eol(&mut self) -> Option<Token<'a>> {
-        let len = match self.rest() {
+        let len = match self.remaining() {
             [b'\r', b'\n', ..] => 2,
             [b'\n' | b'\r', ..] => 1,
             _ => return None,
@@ -93,8 +147,9 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// One white-space byte, as a [`Kind::Space`] token, if one is next:
     /// what separates an inline image's `ID` from its data. White-space by
     /// the tokenizer's rules, so 0x80 and 0xFF too by PDFium's.
+    #[inline]
     pub fn space_byte(&mut self) -> Option<Token<'a>> {
-        match self.rest() {
+        match self.remaining() {
             [b, ..] if self.rules().is_white_space(*b) => Some(self.take(Kind::Space, 1)),
             _ => None,
         }
@@ -102,8 +157,9 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
 
     /// The next `len` bytes, or as many as are left, as one [`Kind::Data`]
     /// token: a stream's data, when the caller trusts its `/Length`.
+    #[inline]
     pub fn data(&mut self, len: usize) -> Token<'a> {
-        let len = len.min(self.rest().len());
+        let len = len.min(self.remaining().len());
         self.take(Kind::Data, len)
     }
 
@@ -115,8 +171,9 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// The search is for the bytes alone, wherever they are. A caller that
     /// wants a marker only after white-space, or only before a delimiter,
     /// finds it itself and calls [`data`](Self::data).
+    #[inline]
     pub fn data_until(&mut self, marker: &[u8]) -> Token<'a> {
-        let rest = self.rest();
+        let rest = self.remaining();
         let len = memmem::find(rest, marker).unwrap_or(rest.len());
         self.take(Kind::Data, len)
     }
@@ -135,20 +192,21 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// assert_eq!(tokens.next_significant().map(|t| t.bytes), Some(&b"/Type"[..]));
     /// assert_eq!(tokens.next_significant(), None);
     /// ```
+    #[inline]
     pub fn next_significant(&mut self) -> Option<Token<'a>> {
         let rules = self.rules();
         loop {
-            let space = run(self.rest(), |b| rules.is_white_space(b));
+            let space = run(self.remaining(), |b| rules.is_white_space(b));
             self.pos += space;
-            let rest = self.rest();
+            let rest = self.remaining();
             // The token function itself, inlined here as in `next`: a call
             // a token fewer.
-            let (kind, len) = match rules {
+            let (kind, closed, len) = match rules {
                 Rules::Iso => next_token::<false>(rest)?,
                 Rules::Pdfium => next_token::<true>(rest)?,
             };
             if kind != Kind::Comment {
-                return Some(self.token(rest, kind, len));
+                return Some(self.token(rest, kind, closed, len));
             }
             self.pos += len;
         }
@@ -182,7 +240,11 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// ```
     pub fn skim(&mut self) -> Option<Token<'a>> {
         loop {
-            let Some(i) = self.rest().iter().position(|&b| class(b) & SKIMMED != 0) else {
+            let Some(i) = self
+                .remaining()
+                .iter()
+                .position(|&b| class(b) & SKIMMED != 0)
+            else {
                 self.pos = self.bytes.len();
                 return None;
             };
@@ -192,97 +254,99 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
             self.pos += i;
             let token = self.next()?;
             match token.kind {
-                Kind::ArrayOpen
-                | Kind::ArrayClose
-                | Kind::DictOpen
-                | Kind::DictClose
-                | Kind::String { closed: false }
-                | Kind::HexString { closed: false } => return Some(token),
+                Kind::ArrayOpen | Kind::ArrayClose | Kind::DictOpen | Kind::DictClose => {
+                    return Some(token);
+                }
+                Kind::LiteralString | Kind::HexString if !token.closed => return Some(token),
                 _ => {}
             }
         }
     }
 
-    fn rest(&self) -> &'a [u8] {
-        self.bytes.get(self.pos..).unwrap_or_default()
-    }
-
-    /// The next `len` bytes as a token of `kind`. `len` is never more than
-    /// what's left.
+    /// The next `len` bytes as a closed token of `kind`. `len` is never
+    /// more than what's left.
     fn take(&mut self, kind: Kind, len: usize) -> Token<'a> {
-        self.token(self.rest(), kind, len)
+        self.token(self.remaining(), kind, true, len)
     }
 
     /// The first `len` bytes of `rest`, which is what's left, as a token of
-    /// `kind`: `rest` taken once a token, by its caller. `len` is never more
-    /// than its length, as each token function measures within what it's
-    /// given (which the fuzz target checks on every token). A token function
-    /// that measured past it would be a bug: a build with debug assertions
-    /// stops at it, and one without reads the token to the input's end, so
-    /// the tokenizer still never panics and still moves on.
-    fn token(&mut self, rest: &'a [u8], kind: Kind, len: usize) -> Token<'a> {
+    /// `kind`, `closed` or not: `rest` taken once a token, by its caller.
+    /// `len` is never more than its length, as each token function measures
+    /// within what it's given (which the fuzz target checks on every
+    /// token). A token function that measured past it would be a bug: a
+    /// build with debug assertions stops at it, and one without reads the
+    /// token to the input's end, so the tokenizer still never panics and
+    /// still moves on.
+    fn token(&mut self, rest: &'a [u8], kind: Kind, closed: bool, len: usize) -> Token<'a> {
         debug_assert!(len <= rest.len(), "a token measured past what's left");
         let start = self.pos;
         let bytes = &rest[..len.min(rest.len())];
         self.pos += bytes.len();
-        Token { kind, start, bytes }
+        Token {
+            kind,
+            closed,
+            start,
+            bytes,
+        }
     }
 }
 
 impl<'a, R: RuleSet> Iterator for Tokenizer<'a, R> {
     type Item = Token<'a>;
 
+    #[inline]
     fn next(&mut self) -> Option<Token<'a>> {
         // Each set of rules is a loop of its own. Fixed in the type, the
         // rules are settled when this is compiled; chosen as it runs, they
         // cost a branch a token.
-        let rest = self.rest();
-        let (kind, len) = match self.rules() {
+        let rest = self.remaining();
+        let (kind, closed, len) = match self.rules() {
             Rules::Iso => next_token::<false>(rest)?,
             Rules::Pdfium => next_token::<true>(rest)?,
         };
-        Some(self.token(rest, kind, len))
+        Some(self.token(rest, kind, closed, len))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let left = self.rest().len();
+        let left = self.remaining().len();
         (usize::from(left > 0), Some(left))
     }
 }
 
 impl<R: RuleSet> FusedIterator for Tokenizer<'_, R> {}
 
-/// The kind and length of the token `rest` starts with, by PDFium's rules
-/// when `PDFIUM` and otherwise by ISO 32000-2's; `None` when it's empty.
+/// The kind, whether it closed, and the length of the token `rest` starts
+/// with, by PDFium's rules when `PDFIUM` and otherwise by ISO 32000-2's;
+/// `None` when it's empty. Every token but a string is closed.
 // Inlined, with `literal_string`, into `next`: so each set of rules runs
 // the instructions the tokenizer ran before there were two, where called
 // they run about a tenth more on a file whose strings are long.
 #[inline(always)]
-fn next_token<const PDFIUM: bool>(rest: &[u8]) -> Option<(Kind, usize)> {
+fn next_token<const PDFIUM: bool>(rest: &[u8]) -> Option<(Kind, bool, usize)> {
     let rules = if PDFIUM { Rules::Pdfium } else { Rules::Iso };
     let space = |b| rules.is_white_space(b);
     let regular = |b| rules.is_regular(b);
     let (&first, after) = rest.split_first()?;
     Some(match first {
-        b if space(b) => (Kind::Space, run(rest, space)),
-        b'%' => (Kind::Comment, 1 + line_end(after)),
-        b'/' => (Kind::Name, 1 + run(after, regular)),
+        b if space(b) => (Kind::Space, true, run(rest, space)),
+        b'%' => (Kind::Comment, true, 1 + line_end(after)),
+        b'/' => (Kind::Name, true, 1 + run(after, regular)),
         b'(' => literal_string(rest),
-        b'<' if after.first() == Some(&b'<') => (Kind::DictOpen, 2),
+        b'<' if after.first() == Some(&b'<') => (Kind::DictOpen, true, 2),
         b'<' if PDFIUM => pdfium_hex_string(rest),
         b'<' => hex_string(rest),
-        b'>' if after.first() == Some(&b'>') => (Kind::DictClose, 2),
-        b'>' | b')' => (Kind::Junk, 1),
-        b'[' => (Kind::ArrayOpen, 1),
-        b']' => (Kind::ArrayClose, 1),
-        b'{' => (Kind::BraceOpen, 1),
-        b'}' => (Kind::BraceClose, 1),
+        b'>' if after.first() == Some(&b'>') => (Kind::DictClose, true, 2),
+        b'>' | b')' => (Kind::Junk, true, 1),
+        b'[' => (Kind::ArrayOpen, true, 1),
+        b']' => (Kind::ArrayClose, true, 1),
+        b'{' => (Kind::BraceOpen, true, 1),
+        b'}' => (Kind::BraceClose, true, 1),
         // Every delimiter is above, so `first` is regular.
         _ => {
             let len = run(rest, regular);
             let run = rest.get(..len).unwrap_or_default();
             let kind = if PDFIUM { pdfium_word(run) } else { word(run) };
-            (kind, len)
+            (kind, true, len)
         }
     })
 }
@@ -341,10 +405,10 @@ pub(crate) fn pdfium_word(run: &[u8]) -> Kind {
 
 /// A literal string at the start of `rest`, which starts with `(`: to the
 /// `)` that balances it, past any byte a backslash escapes (ISO 32000-2,
-/// 7.3.4.2).
+/// 7.3.4.2); unclosed, to the end, when none does.
 // Inlined: see `next_token`.
 #[inline(always)]
-fn literal_string(rest: &[u8]) -> (Kind, usize) {
+fn literal_string(rest: &[u8]) -> (Kind, bool, usize) {
     // Inside the string's own `(`, which is no search's to find.
     let mut depth = 1usize;
     let mut at = 1;
@@ -363,35 +427,36 @@ fn literal_string(rest: &[u8]) -> (Kind, usize) {
                 depth -= 1;
                 at += 1;
                 if depth == 0 {
-                    return (Kind::String { closed: true }, at);
+                    return (Kind::LiteralString, true, at);
                 }
             }
         }
     }
-    (Kind::String { closed: false }, rest.len())
+    (Kind::LiteralString, false, rest.len())
 }
 
 /// A hexadecimal string at the start of `rest`, which starts with `<` and
-/// not `<<`: to its `>`, or up to the first byte it can't hold (ISO
-/// 32000-2, 7.3.4.3).
-fn hex_string(rest: &[u8]) -> (Kind, usize) {
+/// not `<<`: to its `>`, or, unclosed, up to the first byte it can't hold
+/// (ISO 32000-2, 7.3.4.3) or to the end.
+fn hex_string(rest: &[u8]) -> (Kind, bool, usize) {
     for (i, &b) in rest.iter().enumerate().skip(1) {
         if b == b'>' {
-            return (Kind::HexString { closed: true }, i + 1);
+            return (Kind::HexString, true, i + 1);
         }
         if !b.is_ascii_hexdigit() && !is_white_space(b) {
-            return (Kind::HexString { closed: false }, i);
+            return (Kind::HexString, false, i);
         }
     }
-    (Kind::HexString { closed: false }, rest.len())
+    (Kind::HexString, false, rest.len())
 }
 
 /// A hexadecimal string at the start of `rest`, which starts with `<` and
-/// not `<<`, by PDFium's rules: to its `>`, over any byte.
-fn pdfium_hex_string(rest: &[u8]) -> (Kind, usize) {
+/// not `<<`, by PDFium's rules: to its `>`, over any byte; unclosed, to the
+/// end, when none comes.
+fn pdfium_hex_string(rest: &[u8]) -> (Kind, bool, usize) {
     match memchr(b'>', rest.get(1..).unwrap_or_default()) {
-        Some(i) => (Kind::HexString { closed: true }, i + 2),
-        None => (Kind::HexString { closed: false }, rest.len()),
+        Some(i) => (Kind::HexString, true, i + 2),
+        None => (Kind::HexString, false, rest.len()),
     }
 }
 
@@ -403,13 +468,27 @@ mod tests {
 
     use crate::{Iso, Kind, Pdfium, Rules, Token, Tokenizer, fuzz};
 
-    const STRING: Kind = Kind::String { closed: true };
-    const UNCLOSED_STRING: Kind = Kind::String { closed: false };
-    const HEX: Kind = Kind::HexString { closed: true };
-    const UNCLOSED_HEX: Kind = Kind::HexString { closed: false };
+    /// `Debug` says where the tokenizer is, the input's length and its
+    /// rules, not the input: it doesn't grow with the bytes.
+    #[test]
+    fn debug_says_where_it_is_not_the_input() {
+        let input = [b'a'; 1000];
+        let mut tokens = Tokenizer::new(&input);
+        assert_eq!(
+            std::format!("{tokens:?}"),
+            "Tokenizer { offset: 0, input: 1000 bytes, rules: Iso }"
+        );
+        tokens.next();
+        let shown = std::format!("{:?}", tokens.clone().with_rules(Rules::Pdfium));
+        assert_eq!(
+            shown,
+            "Tokenizer { offset: 1000, input: 1000 bytes, rules: Pdfium }"
+        );
+    }
 
     /// `input`'s tokens, each kind and its bytes, checked by the fuzz
-    /// target's body, whole and cut at every byte.
+    /// target's body, whole and cut at every byte: so each token's `closed`
+    /// is held to its bytes too.
     fn tokens(input: &[u8]) -> Vec<(Kind, &[u8])> {
         let tokens: Vec<_> = Tokenizer::new(input).map(|t| (t.kind, t.bytes)).collect();
         fuzz::walk(input, 0);
@@ -417,6 +496,13 @@ mod tests {
             fuzz::prefix(input, 0, cut);
         }
         tokens
+    }
+
+    /// The bytes of `input`'s tokens that didn't close.
+    fn unclosed(input: &[u8]) -> Vec<&[u8]> {
+        (Tokenizer::new(input).filter(|t| !t.closed))
+            .map(|t| t.bytes)
+            .collect()
     }
 
     fn kind_of(word: &[u8]) -> Kind {
@@ -509,42 +595,117 @@ mod tests {
 
     #[test]
     fn literal_strings_balance_their_parentheses() {
-        assert_eq!(kind_of(b"(a (nested) string)"), STRING);
-        assert_eq!(kind_of(b"(an escaped \\) one)"), STRING);
-        assert_eq!(kind_of(b"(\\\\)"), STRING);
-        assert_eq!(kind_of(b"(a line \\\r\ncontinued)"), STRING);
-        assert_eq!(kind_of(b"(\xfe\xff\x00(\x00))"), STRING);
-        assert_eq!(tokens(b"(a)(b)"), [(STRING, &b"(a)"[..]), (STRING, b"(b)")]);
+        for string in [
+            &b"(a (nested) string)"[..],
+            b"(an escaped \\) one)",
+            b"(\\\\)",
+            b"(a line \\\r\ncontinued)",
+            b"(\xfe\xff\x00(\x00))",
+        ] {
+            assert_eq!(kind_of(string), Kind::LiteralString, "{string:?}");
+            assert!(unclosed(string).is_empty(), "{string:?} closed");
+        }
+        assert_eq!(
+            tokens(b"(a)(b)"),
+            [
+                (Kind::LiteralString, &b"(a)"[..]),
+                (Kind::LiteralString, b"(b)")
+            ]
+        );
     }
 
     #[test]
     fn an_unclosed_string_runs_to_the_end() {
-        assert_eq!(kind_of(b"(open (and more) "), UNCLOSED_STRING);
-        assert_eq!(kind_of(b"(ends in a backslash \\"), UNCLOSED_STRING);
-        assert_eq!(kind_of(b"(escaped close \\)"), UNCLOSED_STRING);
+        for string in [
+            &b"(open (and more) "[..],
+            b"(ends in a backslash \\",
+            b"(escaped close \\)",
+        ] {
+            assert_eq!(kind_of(string), Kind::LiteralString, "{string:?}");
+            assert_eq!(unclosed(string), [string], "{string:?} didn't close");
+        }
     }
 
     #[test]
     fn hex_strings_end_at_their_close_or_before_a_byte_they_cant_hold() {
-        assert_eq!(kind_of(b"<48 65\n6C>"), HEX);
-        assert_eq!(kind_of(b"<>"), HEX);
-        assert_eq!(kind_of(b"<4865"), UNCLOSED_HEX);
+        for hex in [&b"<48 65\n6C>"[..], b"<>"] {
+            assert_eq!(kind_of(hex), Kind::HexString, "{hex:?}");
+            assert!(unclosed(hex).is_empty(), "{hex:?} closed");
+        }
+        assert_eq!(kind_of(b"<4865"), Kind::HexString);
+        assert_eq!(unclosed(b"<4865"), [&b"<4865"[..]]);
         assert_eq!(
             tokens(b"<48(x)"),
-            [(UNCLOSED_HEX, &b"<48"[..]), (STRING, b"(x)")]
+            [
+                (Kind::HexString, &b"<48"[..]),
+                (Kind::LiteralString, b"(x)")
+            ]
         );
+        assert_eq!(unclosed(b"<48(x)"), [&b"<48"[..]], "ends before the `(`");
         assert_eq!(
             tokens(b"<<<"),
-            [(Kind::DictOpen, &b"<<"[..]), (UNCLOSED_HEX, b"<")]
+            [(Kind::DictOpen, &b"<<"[..]), (Kind::HexString, b"<")]
         );
+        assert_eq!(unclosed(b"<<<"), [&b"<"[..]]);
         assert_eq!(
             tokens(b"<g>"),
             [
-                (UNCLOSED_HEX, &b"<"[..]),
+                (Kind::HexString, &b"<"[..]),
                 (Kind::Keyword, b"g"),
                 (Kind::Junk, b">")
             ]
         );
+        assert_eq!(unclosed(b"<g>"), [&b"<"[..]]);
+    }
+
+    /// Every token is closed but a literal or a hexadecimal string whose
+    /// closing delimiter didn't come: each kind the iterator yields, the
+    /// tokens `eol`, `space_byte`, `data` and `data_until` make, and the
+    /// strings cut short, under either rules.
+    #[test]
+    fn only_a_string_cut_short_is_unclosed() {
+        let input = b" %c\n1 2.5 /N (s) <41> [ ] << >> { } obj ) >";
+        let kinds: Vec<Kind> = Tokenizer::new(input)
+            .map(|t| t.kind)
+            .filter(|&k| k != Kind::Space)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                Kind::Comment,
+                Kind::Integer,
+                Kind::Real,
+                Kind::Name,
+                Kind::LiteralString,
+                Kind::HexString,
+                Kind::ArrayOpen,
+                Kind::ArrayClose,
+                Kind::DictOpen,
+                Kind::DictClose,
+                Kind::BraceOpen,
+                Kind::BraceClose,
+                Kind::Keyword,
+                Kind::Junk,
+                Kind::Junk,
+            ],
+            "every kind the iterator yields"
+        );
+        assert!(Tokenizer::new(input).all(|t| t.closed));
+        assert!(unclosed(input).is_empty());
+        let mut tokens = Tokenizer::new(b"\r\n xyz\nendstream");
+        let made = [
+            tokens.eol().unwrap(),
+            tokens.space_byte().unwrap(),
+            tokens.data(1),
+            tokens.data_until(b"endstream"),
+        ];
+        assert!(made.iter().all(|t| t.closed), "{made:?}");
+        assert_eq!(unclosed(b"(a) <4"), [&b"<4"[..]]);
+        assert_eq!(unclosed(b"(a <4>"), [&b"(a <4>"[..]]);
+        let hex = Tokenizer::new(b"<4G>").with_rules(Pdfium).next().unwrap();
+        assert!(hex.closed, "to its `>` by PDFium's rules");
+        let hex = Tokenizer::new(b"<4G").with_rules(Pdfium).next().unwrap();
+        assert!(!hex.closed, "unclosed only at the end");
     }
 
     #[test]
@@ -585,7 +746,11 @@ mod tests {
         let zero = tokens.next().unwrap();
         assert_eq!((zero.kind, zero.start, zero.end()), (Kind::Integer, 2, 3));
         assert_eq!(tokens.offset(), 3);
-        assert_eq!(Tokenizer::at(input, 99).next(), None);
+        // Past the end is taken as the end.
+        let mut past = Tokenizer::at(input, 99);
+        assert_eq!(past.offset(), input.len());
+        assert_eq!(past.next(), None);
+        assert_eq!(past.offset(), input.len());
         assert_eq!(Tokenizer::new(b"").next(), None);
     }
 
@@ -655,16 +820,16 @@ mod tests {
     #[test]
     fn only_the_last_token_of_a_slice_can_come_out_otherwise() {
         let file = b"[123] << /A (a b) >>  % c\nstream\r\nxy endstream";
-        let cases: [(usize, Kind, &[u8]); 9] = [
-            (3, Kind::Integer, b"12"),
-            (7, UNCLOSED_HEX, b"<"),
-            (15, UNCLOSED_STRING, b"(a "),
-            (19, Kind::Junk, b">"),
-            (21, Kind::Space, b" "),
-            (24, Kind::Comment, b"% "),
-            (33, Kind::Space, b"\r"),
-            (36, Kind::Data, b"xy"),
-            (42, Kind::Data, b"xy endst"),
+        let cases: [(usize, Kind, bool, &[u8]); 9] = [
+            (3, Kind::Integer, true, b"12"),
+            (7, Kind::HexString, false, b"<"),
+            (15, Kind::LiteralString, false, b"(a "),
+            (19, Kind::Junk, true, b">"),
+            (21, Kind::Space, true, b" "),
+            (24, Kind::Comment, true, b"% "),
+            (33, Kind::Space, true, b"\r"),
+            (36, Kind::Data, true, b"xy"),
+            (42, Kind::Data, true, b"xy endst"),
         ];
         // The tokens, each stream's data taken as a reader might: an end
         // of line, then up to `endstream`.
@@ -683,11 +848,14 @@ mod tests {
             read
         };
         let whole = read(file);
-        for (cut, kind, bytes) in cases {
+        for (cut, kind, closed, bytes) in cases {
             let part = read(&file[..cut]);
             let (last, before) = part.split_last().unwrap();
             assert_eq!(before, &whole[..before.len()], "{cut}");
-            assert_eq!((last.kind, last.bytes, last.end()), (kind, bytes, cut));
+            assert_eq!(
+                (last.kind, last.closed, last.bytes, last.end()),
+                (kind, closed, bytes, cut)
+            );
             assert_ne!(whole[before.len()], *last, "{cut}");
             fuzz::prefix(file, 0, cut);
         }
@@ -746,7 +914,7 @@ mod tests {
                 (Kind::ArrayClose, &b"]"[..]),
                 (Kind::DictClose, b">>"),
                 (Kind::DictOpen, b"<<"),
-                (UNCLOSED_HEX, b"<"),
+                (Kind::HexString, b"<"),
             ]
         );
         // A hex string ISO 32000-2's rules end before a byte they can't
@@ -755,7 +923,7 @@ mod tests {
             skims(b"[<4G1>]", Rules::Iso),
             [
                 (Kind::ArrayOpen, &b"["[..]),
-                (UNCLOSED_HEX, b"<4"),
+                (Kind::HexString, b"<4"),
                 (Kind::ArrayClose, b"]"),
             ]
         );
@@ -765,8 +933,25 @@ mod tests {
                 (Kind::ArrayOpen, &b"["[..]),
                 (Kind::ArrayClose, b"]"),
                 (Kind::ArrayOpen, b"["),
-                (UNCLOSED_STRING, b"(a"),
+                (Kind::LiteralString, b"(a"),
             ]
+        );
+        // A string the skim gives is one that didn't close; a closed one
+        // is passed, as `(a])` is above.
+        let strings = |input: &'static [u8], rules| {
+            let mut tokens = Tokenizer::new(input).with_rules(rules);
+            core::iter::from_fn(move || tokens.skim())
+                .filter(|t| matches!(t.kind, Kind::LiteralString | Kind::HexString))
+                .map(|t| (t.closed, t.bytes))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            strings(b"] >>> <<<[<4G1>] (a])", Rules::Iso),
+            [(false, &b"<"[..]), (false, b"<4")]
+        );
+        assert_eq!(
+            strings(b"[<4G1>] [(a", Rules::Pdfium),
+            [(false, &b"(a"[..])]
         );
         // A comment hides what it holds to its end of line.
         assert_eq!(
@@ -848,8 +1033,8 @@ mod tests {
         let read = std::panic::catch_unwind(|| {
             let mut tokens = Tokenizer::new(b"abc");
             tokens.pos = 1;
-            let rest = tokens.rest();
-            let token = tokens.token(rest, Kind::Keyword, 5);
+            let rest = tokens.remaining();
+            let token = tokens.token(rest, Kind::Keyword, true, 5);
             (token.start, token.bytes, tokens.offset(), tokens.next())
         });
         if cfg!(debug_assertions) {
@@ -867,7 +1052,7 @@ mod tests {
 
         use std::vec::Vec;
 
-        use super::{HEX, STRING, UNCLOSED_HEX, kind_of, tokens};
+        use super::{kind_of, tokens};
         use crate::{Iso, Kind, Pdfium, Rules, Tokenizer, fuzz};
 
         /// `input`'s tokens by PDFium's rules, each kind and its bytes,
@@ -881,6 +1066,22 @@ mod tests {
                 fuzz::prefix(input, 0, cut);
             }
             tokens
+        }
+
+        /// The bytes of `input`'s tokens by PDFium's rules that didn't
+        /// close.
+        fn pdfium_unclosed(input: &[u8]) -> Vec<&[u8]> {
+            (Tokenizer::new(input).with_rules(Pdfium))
+                .filter(|t| !t.closed)
+                .map(|t| t.bytes)
+                .collect()
+        }
+
+        /// ISO 32000-2's first token of `input`: its kind and whether it
+        /// closed.
+        fn iso_first(input: &[u8]) -> (Kind, bool) {
+            let first = Tokenizer::new(input).next().unwrap();
+            (first.kind, first.closed)
         }
 
         fn pdfium_kind_of(word: &[u8]) -> Kind {
@@ -947,39 +1148,39 @@ mod tests {
                 b"<41/42>",
                 b"<41\x80%]>",
             ] {
-                assert_eq!(pdfium_kind_of(hex), HEX, "{hex:?}");
-                assert_ne!(kind_of_iso(hex), HEX, "{hex:?}");
+                assert_eq!(pdfium_kind_of(hex), Kind::HexString, "{hex:?}");
+                assert!(pdfium_unclosed(hex).is_empty(), "{hex:?} closed");
+                // Unclosed to ISO 32000-2's rules, which end it before the
+                // byte they can't hold.
+                assert_eq!(iso_first(hex), (Kind::HexString, false), "{hex:?}");
             }
             assert_eq!(
                 pdfium(b"<48(x)>)"),
-                [(HEX, &b"<48(x)>"[..]), (Kind::Junk, b")")]
+                [(Kind::HexString, &b"<48(x)>"[..]), (Kind::Junk, b")")]
             );
+            assert!(pdfium_unclosed(b"<48(x)>)").is_empty());
             assert_eq!(
                 pdfium(b"<<<>"),
-                [(Kind::DictOpen, &b"<<"[..]), (HEX, b"<>")]
+                [(Kind::DictOpen, &b"<<"[..]), (Kind::HexString, b"<>")]
             );
-            assert_eq!(pdfium(b"<41><42>"), [(HEX, &b"<41>"[..]), (HEX, b"<42>")]);
-        }
-
-        /// ISO 32000-2's first token of `input`'s kind.
-        fn kind_of_iso(input: &[u8]) -> Kind {
-            tokens(input)[0].0
+            assert_eq!(
+                pdfium(b"<41><42>"),
+                [(Kind::HexString, &b"<41>"[..]), (Kind::HexString, b"<42>")]
+            );
         }
 
         #[test]
         fn a_hex_string_is_unclosed_only_at_the_end() {
             for hex in [&b"<4865"[..], b"<48(x) Tj", b"<", b"<48 >"] {
-                let kind = if hex.ends_with(b">") {
-                    HEX
-                } else {
-                    UNCLOSED_HEX
-                };
-                assert_eq!(pdfium_kind_of(hex), kind, "{hex:?}");
+                assert_eq!(pdfium_kind_of(hex), Kind::HexString, "{hex:?}");
+                let closed = hex.ends_with(b">");
+                assert_eq!(pdfium_unclosed(hex).is_empty(), closed, "{hex:?}");
             }
             assert_eq!(
                 pdfium(b"(a)<"),
-                [(STRING, &b"(a)"[..]), (UNCLOSED_HEX, b"<")]
+                [(Kind::LiteralString, &b"(a)"[..]), (Kind::HexString, b"<")]
             );
+            assert_eq!(pdfium_unclosed(b"(a)<"), [&b"<"[..]]);
         }
 
         /// 0x80 and 0xFF are white-space to PDFium: in content, `1 2 3
@@ -1016,8 +1217,8 @@ mod tests {
                 [
                     (Kind::Comment, &b"%\x80"[..]),
                     (Kind::Space, b"\n"),
-                    (STRING, b"(\xff)"),
-                    (HEX, b"<\x80>"),
+                    (Kind::LiteralString, b"(\xff)"),
+                    (Kind::HexString, b"<\x80>"),
                 ]
             );
         }
@@ -1068,9 +1269,15 @@ mod tests {
             assert_eq!(tokens.offset(), 5);
             tokens.next();
             let hex = tokens.next().unwrap();
-            assert_eq!((hex.kind, hex.bytes), (UNCLOSED_HEX, &b"<4"[..]));
+            assert_eq!(
+                (hex.kind, hex.closed, hex.bytes),
+                (Kind::HexString, false, &b"<4"[..])
+            );
             let hex = Tokenizer::at(input, 6).with_rules(Rules::Pdfium).next();
-            assert_eq!(hex.map(|t| (t.kind, t.bytes)), Some((HEX, &b"<4G>"[..])));
+            assert_eq!(
+                hex.map(|t| (t.kind, t.closed, t.bytes)),
+                Some((Kind::HexString, true, &b"<4G>"[..]))
+            );
             assert_eq!(
                 Tokenizer::at(input, 99).with_rules(Rules::Pdfium).next(),
                 None
@@ -1085,7 +1292,7 @@ mod tests {
             let file = b"[--5.0 <4G 1>]\x80\xff x";
             let cases: [(usize, Kind, &[u8]); 4] = [
                 (4, Kind::Integer, b"--5"),
-                (11, UNCLOSED_HEX, b"<4G "),
+                (11, Kind::HexString, b"<4G "),
                 (15, Kind::Space, b"\x80"),
                 (16, Kind::Space, b"\x80\xff"),
             ];
@@ -1097,6 +1304,8 @@ mod tests {
                 assert_eq!(*last, (kind, bytes), "{cut}");
                 assert_ne!(whole[before.len()], *last, "{cut}");
             }
+            assert!(pdfium_unclosed(file).is_empty());
+            assert_eq!(pdfium_unclosed(&file[..11]), [&b"<4G "[..]]);
         }
 
         /// Side by side, the rules give the same tokens but where they part.
@@ -1111,11 +1320,138 @@ mod tests {
                 [
                     &(Kind::Integer, &b"--5"[..]),
                     &(Kind::Real, b"1.2.3"),
-                    &(HEX, b"<4G1>"),
+                    &(Kind::HexString, b"<4G1>"),
                     &(Kind::Space, b"\x80"),
                     &(Kind::Keyword, b"re"),
                 ]
             );
         }
+    }
+
+    /// A clone looks ahead: it yields the tokens the original would, from
+    /// where the original is, and moves nothing of the original.
+    #[test]
+    fn a_clone_looks_ahead_and_leaves_the_original_where_it_was() {
+        let input = b"/Kids [3 0 R] (a) % c\n<41>";
+        let mut tokens = Tokenizer::new(input);
+        assert_eq!(tokens.next().map(|t| t.bytes), Some(&b"/Kids"[..]));
+        let before = tokens.offset();
+        let mut ahead = tokens.clone();
+        // `Iterator::take`: the tokenizer has a `take` of its own.
+        let looked: Vec<Token<'_>> = Iterator::take(ahead.by_ref(), 3).collect();
+        assert_eq!(looked.len(), 3);
+        assert_eq!(ahead.offset(), looked[2].end());
+        assert_eq!(tokens.offset(), before, "the original hasn't moved");
+        assert_eq!(
+            tokens.next(),
+            Some(looked[0]),
+            "and gives what the clone saw first"
+        );
+        assert!(tokens.clone().eq(Tokenizer::at(input, tokens.offset())));
+        let rest: Vec<_> = tokens.clone().collect();
+        assert_eq!(rest.len(), tokens.count());
+        // Rules chosen as it runs, the same; and the passes look ahead too.
+        let mut chosen = Tokenizer::new(input).with_rules(Rules::Pdfium);
+        chosen.next();
+        let mut peek = chosen.clone();
+        assert_eq!(peek.next_significant().map(|t| t.bytes), Some(&b"["[..]));
+        assert_eq!(chosen.offset(), 5);
+        assert_eq!(chosen.next().map(|t| t.kind), Some(Kind::Space));
+    }
+
+    /// `size_hint` bounds the tokens left: one at least while bytes are
+    /// left, at most one a byte; from any offset, and after each token,
+    /// `eol` and `data`. So a buffer of the upper bound holds them.
+    #[test]
+    fn size_hint_bounds_the_tokens_left() {
+        let input = b"<< /Length 5 >>\nstream\r\nBT ET\nendstream 1 (a";
+        let hint = |tokens: &Tokenizer<'_>| {
+            let left = input.len() - tokens.offset();
+            (usize::from(left > 0), Some(left))
+        };
+        for offset in 0..=input.len() + 1 {
+            let mut tokens = Tokenizer::at(input, offset);
+            let mut left = tokens.clone().count();
+            loop {
+                let (lower, upper) = tokens.size_hint();
+                assert_eq!((lower, upper), hint(&tokens));
+                assert!(lower <= left && left <= upper.unwrap());
+                let Some(token) = tokens.next() else { break };
+                left -= 1;
+                if token.bytes == b"stream" {
+                    tokens.eol();
+                    assert_eq!(tokens.size_hint(), hint(&tokens));
+                    tokens.data(5);
+                    assert_eq!(tokens.size_hint(), hint(&tokens));
+                    left = tokens.clone().count();
+                }
+            }
+            assert_eq!(tokens.size_hint(), (0, Some(0)));
+        }
+        let tokens = Tokenizer::new(input);
+        let upper = tokens.size_hint().1.unwrap();
+        let mut held = Vec::with_capacity(upper);
+        held.extend(tokens);
+        assert!(held.len() <= upper && held.capacity() == upper);
+    }
+
+    /// `input` is the whole input and `remaining` what's left of it from the
+    /// next token's offset: from any offset, past the end included, after
+    /// each token, and after each other way of moving on; so a reader can
+    /// read what's left itself; and both at compile time, with `new`, `at`
+    /// and `offset`.
+    #[test]
+    fn input_and_remaining_are_the_input_and_what_is_left() {
+        let input = b"1 0 obj<</L 3>>stream\r\nabc\nendstream [(a) %c\n] (";
+        for offset in 0..=input.len() + 2 {
+            let mut tokens = Tokenizer::at(input, offset);
+            assert_eq!(tokens.input(), input);
+            assert_eq!(tokens.remaining(), &input[offset.min(input.len())..]);
+            while let Some(token) = tokens.next() {
+                assert_eq!(tokens.input(), input);
+                assert_eq!(tokens.remaining(), &input[token.end()..]);
+                assert_eq!(tokens.remaining(), &input[tokens.offset()..]);
+            }
+            assert_eq!(tokens.remaining(), b"");
+            assert_eq!(tokens.input(), input);
+        }
+        // As a reader takes a stream, then through the passes, under each
+        // set of rules.
+        let mut tokens = Tokenizer::new(input).with_rules(Rules::Pdfium);
+        assert!(tokens.any(|t| t.bytes == b"stream"));
+        assert_eq!(tokens.remaining(), &input[21..]);
+        assert_eq!(tokens.eol().map(|t| t.bytes), Some(&b"\r\n"[..]));
+        assert_eq!(tokens.remaining(), &input[23..]);
+        assert_eq!(tokens.data_until(b"endstream").bytes, b"abc\n");
+        assert_eq!(tokens.remaining(), &input[27..]);
+        assert_eq!(
+            tokens.next_significant().map(|t| t.bytes),
+            Some(&b"endstream"[..])
+        );
+        assert_eq!(tokens.remaining(), &input[36..]);
+        let mut fixed = Tokenizer::at(input, 36).with_rules(Pdfium);
+        assert_eq!(fixed.skim().map(|t| t.kind), Some(Kind::ArrayOpen));
+        assert_eq!(fixed.remaining(), &input[38..]);
+        assert_eq!(fixed.data(3).bytes, b"(a)");
+        assert_eq!(fixed.remaining(), &input[41..]);
+        assert_eq!(fixed.space_byte().map(|t| t.bytes), Some(&b" "[..]));
+        assert_eq!(fixed.remaining(), b"%c\n] (");
+        assert_eq!(fixed.skim().map(|t| t.kind), Some(Kind::ArrayClose));
+        assert_eq!(fixed.remaining(), b" (");
+        assert_eq!(
+            fixed.skim().map(|t| (t.kind, t.closed)),
+            Some((Kind::LiteralString, false))
+        );
+        assert_eq!(fixed.remaining(), b"");
+        assert_eq!(fixed.input(), input);
+        const AT: Tokenizer<'static> = Tokenizer::at(b"ab cd", 3);
+        const REMAINING: &[u8] = AT.remaining();
+        const INPUT: &[u8] = AT.input();
+        const OFFSET: usize = AT.offset();
+        const PAST: &[u8] = Tokenizer::at(b"ab cd", 9).remaining();
+        const PAST_OFFSET: usize = Tokenizer::at(b"ab cd", 9).offset();
+        const FROM_START: usize = Tokenizer::new(b"ab cd").offset();
+        assert_eq!((REMAINING, INPUT, OFFSET), (&b"cd"[..], &b"ab cd"[..], 3));
+        assert_eq!((PAST, PAST_OFFSET, FROM_START), (&b""[..], 5, 0));
     }
 }

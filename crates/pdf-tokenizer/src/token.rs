@@ -1,5 +1,5 @@
-//! A token: what kind it is, where it starts, and the bytes it was written
-//! as.
+//! A token: what kind it is, whether it closed, where it starts, and the
+//! bytes it was written as.
 
 use core::ops::Range;
 
@@ -7,12 +7,18 @@ use core::ops::Range;
 /// `stream` are all [`Kind::Keyword`], and `3 0 R` is three tokens with
 /// spaces between them.
 ///
-/// A kind is only a tag. Every token's bytes are in [`Token::bytes`],
-/// whatever its kind, [`Kind::Junk`] included.
+/// A kind is only a tag, one byte (`#[repr(u8)]`), so a table can be
+/// indexed by it (`kind as usize`). Every token's bytes are in
+/// [`Token::bytes`], whatever its kind, [`Kind::Junk`] included; whether a
+/// string closed is in [`Token::closed`].
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     /// A run of white-space bytes: by PDFium's rules, 0x80 and 0xFF among
-    /// them ([`Rules`](crate::Rules)).
+    /// them ([`Rules`](crate::Rules)). From the iterator, a maximal run: the
+    /// byte after it isn't white-space. From [`eol`](crate::Tokenizer::eol)
+    /// one end of line, and from [`space_byte`](crate::Tokenizer::space_byte)
+    /// one byte, whatever comes after.
     Space,
     /// `%` and what follows it, up to but not including an end of line.
     Comment,
@@ -28,21 +34,16 @@ pub enum Kind {
     /// alone is the empty name.
     Name,
     /// A literal string, `(` to the `)` that balances it, escapes as
-    /// written. It's unclosed when the input ends first, and then runs to
-    /// the end of the input.
-    String {
-        /// Whether its `)` came.
-        closed: bool,
-    },
-    /// A hexadecimal string, `<` to `>`. It's unclosed when a byte that is
-    /// neither a hex digit nor white-space comes before `>`, and then ends
-    /// before that byte, or when the input ends first. By PDFium's rules it
-    /// runs to its `>` over any byte, and is unclosed only when the input
-    /// ends first.
-    HexString {
-        /// Whether its `>` came.
-        closed: bool,
-    },
+    /// written (ISO 32000-2, 7.3.4.2). It's unclosed ([`Token::closed`]
+    /// false) when the input ends first, and then runs to the end of the
+    /// input.
+    LiteralString,
+    /// A hexadecimal string, `<` to `>` (ISO 32000-2, 7.3.4.3). It's
+    /// unclosed ([`Token::closed`] false) when a byte that is neither a hex
+    /// digit nor white-space comes before `>`, and then ends before that
+    /// byte, or when the input ends first. By PDFium's rules it runs to its
+    /// `>` over any byte, and is unclosed only when the input ends first.
+    HexString,
     /// `[`.
     ArrayOpen,
     /// `]`.
@@ -64,15 +65,47 @@ pub enum Kind {
     /// Bytes a caller measured as a stream's or an inline image's data, with
     /// [`Tokenizer::data`](crate::Tokenizer::data) or
     /// [`Tokenizer::data_until`](crate::Tokenizer::data_until). The iterator
-    /// never yields it.
+    /// never yields it: it's a kind so that a `Vec<Token>` can hold a whole
+    /// file, its streams' data included, and the tokens still join back
+    /// into it.
     Data,
 }
 
-/// A token: its kind, where it starts, and its bytes as written.
+impl Kind {
+    /// Every kind, in the order of their discriminants: `ALL[kind as usize]`
+    /// is `kind`. So a table with an entry a kind is `[T; Kind::ALL.len()]`,
+    /// indexed by `kind as usize`.
+    pub const ALL: &[Kind] = &[
+        Kind::Space,
+        Kind::Comment,
+        Kind::Integer,
+        Kind::Real,
+        Kind::Name,
+        Kind::LiteralString,
+        Kind::HexString,
+        Kind::ArrayOpen,
+        Kind::ArrayClose,
+        Kind::DictOpen,
+        Kind::DictClose,
+        Kind::BraceOpen,
+        Kind::BraceClose,
+        Kind::Keyword,
+        Kind::Junk,
+        Kind::Data,
+    ];
+}
+
+/// A token: its kind, whether it closed, where it starts, and its bytes as
+/// written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Token<'a> {
     /// What it is.
     pub kind: Kind,
+    /// Whether it's whole: false only for a literal or hexadecimal string
+    /// whose closing delimiter didn't come, which then runs to where its
+    /// kind says ([`Kind::LiteralString`], [`Kind::HexString`]). Every
+    /// other token is closed.
+    pub closed: bool,
     /// The offset of its first byte in the input.
     pub start: usize,
     /// Its bytes as written: a slice of the input.
@@ -81,12 +114,105 @@ pub struct Token<'a> {
 
 impl Token<'_> {
     /// The offset just past its last byte.
-    pub fn end(&self) -> usize {
+    #[inline]
+    #[must_use]
+    pub const fn end(&self) -> usize {
         self.start + self.bytes.len()
     }
 
     /// Where it is in the input.
-    pub fn range(&self) -> Range<usize> {
+    #[inline]
+    #[must_use]
+    pub const fn range(&self) -> Range<usize> {
         self.start..self.end()
+    }
+
+    /// Whether it's the keyword `word`: a [`Kind::Keyword`] whose bytes are
+    /// `word`, as `obj`, `R`, `endstream` and a content stream's operators
+    /// are. A token of any other kind isn't, whatever its bytes.
+    #[inline]
+    #[must_use]
+    pub fn is_keyword(&self, word: &[u8]) -> bool {
+        self.kind == Kind::Keyword && self.bytes == word
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use core::mem::size_of;
+    use core::ops::Range;
+    use std::vec::Vec;
+
+    use super::{Kind, Token};
+    use crate::Tokenizer;
+
+    /// A kind is one byte, so a table can be indexed by it, and a token is
+    /// four words: the kind and `closed` share the first.
+    #[test]
+    fn a_kind_is_one_byte_and_a_token_four_words() {
+        assert_eq!(size_of::<Kind>(), 1);
+        assert_eq!(size_of::<Token<'_>>(), 4 * size_of::<usize>());
+        assert_eq!(Kind::Space as usize, 0);
+        assert_eq!(Kind::Data as usize, 15);
+    }
+
+    /// Where a token ends, and its range, are known at compile time.
+    #[test]
+    fn a_tokens_end_and_range_are_known_at_compile_time() {
+        const TOKEN: Token<'static> = Token {
+            kind: Kind::Keyword,
+            closed: true,
+            start: 2,
+            bytes: b"obj",
+        };
+        const END: usize = TOKEN.end();
+        const RANGE: Range<usize> = TOKEN.range();
+        assert_eq!((END, RANGE), (5, 2..5));
+    }
+
+    /// `Kind::ALL` is every kind, each at the index of its discriminant, so
+    /// a table indexed by `kind as usize` has an entry a kind; `Data`, the
+    /// last variant, is its last.
+    #[test]
+    fn all_lists_every_kind_in_order() {
+        for (i, &kind) in Kind::ALL.iter().enumerate() {
+            assert_eq!(kind as usize, i, "{kind:?}");
+        }
+        assert_eq!(Kind::ALL.last(), Some(&Kind::Data));
+    }
+
+    /// A token is the keyword `word` by its kind and its bytes together: not
+    /// a token of any other kind with the same bytes, and not a keyword of
+    /// other bytes, a prefix or an extension of `word` included.
+    #[test]
+    fn a_keyword_is_its_kind_and_its_bytes_together() {
+        for &kind in Kind::ALL {
+            let token = Token {
+                kind,
+                closed: true,
+                start: 0,
+                bytes: b"obj",
+            };
+            assert_eq!(token.is_keyword(b"obj"), kind == Kind::Keyword, "{kind:?}");
+            assert!(!token.is_keyword(b"ob"), "{kind:?}");
+            assert!(!token.is_keyword(b"objx"), "{kind:?}");
+            assert!(!token.is_keyword(b""), "{kind:?}");
+        }
+        // From the tokenizer: the keyword among a name, a string and junk of
+        // the same bytes.
+        let input = b"1 0 obj /obj (obj) obj) objx";
+        let words: Vec<_> = Tokenizer::new(input)
+            .filter(|t| t.is_keyword(b"obj"))
+            .map(|t| t.start)
+            .collect();
+        assert_eq!(words, [4, 19]);
+        assert_eq!(
+            Tokenizer::new(b"endobj")
+                .next()
+                .map(|t| t.is_keyword(b"obj")),
+            Some(false)
+        );
     }
 }

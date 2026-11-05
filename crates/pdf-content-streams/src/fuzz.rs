@@ -9,7 +9,8 @@ use std::borrow::Cow;
 use std::ops::Range;
 
 use pdf_objects::{Dict, Object, ObjectId, Str, Value, dict};
-use pdf_tokenizer::{Kind, decode};
+use pdf_tokenizer::Kind;
+use pdf_tokenizer::decode::{self, NumberError};
 
 use crate::data::{RunLength, Searched, a85_stop, ei_scan, find};
 use crate::fault::{self, Fault, Sink};
@@ -1955,6 +1956,17 @@ fn operand(s: &[u8], operand: &Operand, limits: &Limits) {
     }
 }
 
+/// A real as ISO 32000-2 reads it, and as the parsers here take that
+/// reading: one too small to hold (`decode::number`'s `Underflow`) is 0,
+/// as PDFium reads it too; none for what isn't one or is too large.
+fn iso_real(bytes: &[u8]) -> Option<f64> {
+    match decode::number(bytes) {
+        Ok(x) => Some(x),
+        Err(NumberError::Underflow) => Some(0.0),
+        Err(_) => None,
+    }
+}
+
 /// An operand's number as PDFium reads one ([`Operand::number`]): 0 for
 /// what's no number word; and for a word of no more than the 255 bytes
 /// PDFium reads that ISO 32000-2 reads as a number too, ISO's value, an
@@ -1980,7 +1992,7 @@ fn number(operand: &Operand) {
         if let Some(i) = (decode::integer(bytes).ok()).and_then(|i| i32::try_from(i).ok()) {
             assert_eq!(n, i as f32, "{operand:?}");
         }
-    } else if let Ok(x) = decode::number(bytes) {
+    } else if let Some(x) = iso_real(bytes) {
         let x = x as f32;
         if x.is_finite() {
             assert!((n - x).abs() <= x.abs() * 1e-6 + 1e-37, "{operand:?}: {n}");
@@ -2077,7 +2089,7 @@ fn operand_reads(operand: &[u8], limits: &Limits) {
             Some(Value::Integer(n)) => assert_eq!(n as f32, as_operand.number(), "an integer"),
             Some(Value::Real(r)) => {
                 assert!(r.is_finite(), "a real {r}");
-                if let (true, Ok(iso)) = (operand.len() <= 255, decode::number(operand)) {
+                if let (true, Some(iso)) = (operand.len() <= 255, iso_real(operand)) {
                     assert_eq!(r, iso, "a real as ISO 32000-2 reads it");
                 }
             }

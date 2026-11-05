@@ -174,12 +174,10 @@ impl<'a> Operand<'a> {
         let one = limits.values > 0;
         match first.kind {
             Kind::ArrayOpen | Kind::DictOpen => {}
-            Kind::String { closed: false } | Kind::HexString { closed: false } => return None,
-            Kind::Integer
-            | Kind::Real
-            | Kind::Name
-            | Kind::String { .. }
-            | Kind::HexString { .. } => return one.then(|| leaf(first)).flatten(),
+            Kind::LiteralString | Kind::HexString if !first.closed => return None,
+            Kind::Integer | Kind::Real | Kind::Name | Kind::LiteralString | Kind::HexString => {
+                return one.then(|| leaf(first)).flatten();
+            }
             Kind::Keyword if matches!(first.bytes, b"true" | b"false" | b"null") => {
                 return one.then(|| leaf(first)).flatten();
             }
@@ -633,8 +631,8 @@ impl<'a, S: Sink<'a> + ?Sized> Reading<'a, '_, S> {
 /// or `null` ([`word`]).
 fn leaf(token: Token) -> Option<Object> {
     let value = match token.kind {
-        Kind::String { .. } => Value::String(Str::Bytes(literal(token.bytes)), Some(Form::Literal)),
-        Kind::HexString { .. } => Value::String(Str::Bytes(hex(token.bytes)), Some(Form::Hex)),
+        Kind::LiteralString => Value::String(Str::Bytes(literal(token.bytes)), Some(Form::Literal)),
+        Kind::HexString => Value::String(Str::Bytes(hex(token.bytes)), Some(Form::Hex)),
         Kind::Name => Value::Name(name(token.bytes)?.into_owned()),
         _ => word(token.bytes)?,
     };

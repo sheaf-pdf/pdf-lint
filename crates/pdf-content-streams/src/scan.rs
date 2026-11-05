@@ -93,11 +93,11 @@ fn raw(
     match token.kind {
         _ if !leaf => {}
         Kind::ArrayOpen | Kind::DictOpen => {}
-        Kind::String { closed: false } => {
+        Kind::LiteralString if !token.closed => {
             let (at, kind) = (token.start, ErrorKind::String);
             return Some(Err(Error { at, kind }));
         }
-        Kind::HexString { closed: false } => {
+        Kind::HexString if !token.closed => {
             let (at, kind) = (token.start, ErrorKind::HexString);
             return Some(Err(Error { at, kind }));
         }
@@ -105,8 +105,8 @@ fn raw(
         Kind::Integer
         | Kind::Real
         | Kind::Name
-        | Kind::String { .. }
-        | Kind::HexString { .. }
+        | Kind::LiteralString
+        | Kind::HexString
         | Kind::Keyword => return operand(true),
         _ => return operand(false),
     }
@@ -359,19 +359,15 @@ pub(crate) fn walk_from<'a>(
                     visit.visit(Event::Open(token));
                     continue;
                 }
-                Kind::String { closed: false } => {
+                Kind::LiteralString if !token.closed => {
                     let (at, kind) = (token.start, ErrorKind::String);
                     return Err(Error { at, kind });
                 }
-                Kind::HexString { closed: false } => {
+                Kind::HexString if !token.closed => {
                     let (at, kind) = (token.start, ErrorKind::HexString);
                     return Err(Error { at, kind });
                 }
-                Kind::Integer
-                | Kind::Real
-                | Kind::Name
-                | Kind::String { .. }
-                | Kind::HexString { .. } => {
+                Kind::Integer | Kind::Real | Kind::Name | Kind::LiteralString | Kind::HexString => {
                     visit.visit(Event::Leaf(token));
                     (true, token)
                 }
@@ -422,9 +418,10 @@ pub(crate) fn walk_from<'a>(
 
 /// The next word where a dictionary's key is written, past white-space and
 /// comments, as PDFium reads it: a token, but a string's `(` or a hex
-/// string's `<`, which is that byte alone, `tokens` reading on after it,
-/// the string's bytes not read, so a string that a key opens isn't read
-/// once for it and again for what's after; None at the end.
+/// string's `<`, which is that byte alone, a string token that didn't
+/// close, `tokens` reading on after it, the string's bytes not read, so a
+/// string that a key opens isn't read once for it and again for what's
+/// after; None at the end.
 fn key_word<'a>(s: &'a [u8], tokens: &mut Tokenizer<'a, Pdfium>) -> Option<Token<'a>> {
     loop {
         let at = tokens.offset();
@@ -433,14 +430,15 @@ fn key_word<'a>(s: &'a [u8], tokens: &mut Tokenizer<'a, Pdfium>) -> Option<Token
                 tokens.next();
                 continue;
             }
-            [b'(', ..] => Kind::String { closed: false },
-            [b'<', next @ ..] if next.first() != Some(&b'<') => Kind::HexString { closed: false },
+            [b'(', ..] => Kind::LiteralString,
+            [b'<', next @ ..] if next.first() != Some(&b'<') => Kind::HexString,
             _ => return tokens.next_significant(),
         };
         *tokens = tokenizer(s, at + 1);
         let bytes = &s[at..at + 1];
         return Some(Token {
             kind,
+            closed: false,
             start: at,
             bytes,
         });
@@ -503,4 +501,50 @@ pub(crate) fn is_number_token(word: &[u8]) -> bool {
 /// (7.2.3), and 0x80 and 0xFF.
 pub(crate) fn is_space(c: u8) -> bool {
     pdf_tokenizer::Rules::Pdfium.is_white_space(c)
+}
+
+#[cfg(test)]
+mod tests {
+    use pdf_tokenizer::{Kind, Token};
+
+    use super::{key_word, tokenizer};
+
+    /// Where a key belongs, a string is a token of its opening byte alone,
+    /// a string that didn't close, the tokenizer left after that byte; a
+    /// name is its token, and `<<` opens a dictionary.
+    #[test]
+    fn a_string_where_a_key_belongs_is_its_opener_alone() {
+        let s = b"<< (a) 1 /K <41> >>";
+        let mut tokens = tokenizer(s, 2);
+        assert_eq!(
+            key_word(s, &mut tokens),
+            Some(Token {
+                kind: Kind::LiteralString,
+                closed: false,
+                start: 3,
+                bytes: b"(",
+            })
+        );
+        assert_eq!(tokens.offset(), 4);
+        let mut tokens = tokenizer(s, 9);
+        let key = key_word(s, &mut tokens).unwrap();
+        assert_eq!(
+            (key.kind, key.closed, key.bytes),
+            (Kind::Name, true, &b"/K"[..])
+        );
+        let mut tokens = tokenizer(s, 11);
+        assert_eq!(
+            key_word(s, &mut tokens),
+            Some(Token {
+                kind: Kind::HexString,
+                closed: false,
+                start: 12,
+                bytes: b"<",
+            })
+        );
+        assert_eq!(tokens.offset(), 13);
+        let mut tokens = tokenizer(b"<<", 0);
+        let dict = key_word(b"<<", &mut tokens).unwrap();
+        assert_eq!((dict.kind, dict.closed), (Kind::DictOpen, true));
+    }
 }

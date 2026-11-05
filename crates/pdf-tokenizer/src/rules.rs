@@ -53,12 +53,14 @@ impl Rules {
     /// form feed, carriage return or space, as
     /// [`is_white_space`](crate::is_white_space) says, and under PDFium's
     /// 0x80 and 0xFF too.
+    #[must_use]
     pub const fn is_white_space(self, b: u8) -> bool {
         class(b) & self.space() != 0
     }
 
     /// Whether `b` is regular under these rules: neither white-space nor a
     /// delimiter. The delimiters are the same under both.
+    #[must_use]
     pub const fn is_regular(self, b: u8) -> bool {
         class(b) & (self.space() | DELIMITER) == 0
     }
@@ -86,6 +88,7 @@ impl Rules {
 /// Sealed: these three are the only ones.
 pub trait RuleSet: Copy + Debug + Send + Sync + sealed::Sealed {
     /// The rules, as a value.
+    #[must_use]
     fn rules(self) -> Rules;
 }
 

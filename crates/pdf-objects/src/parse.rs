@@ -35,7 +35,7 @@ use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pdf_tokenizer::decode::pdfium::{self, Number};
-use pdf_tokenizer::decode::{self, How, NumberError};
+use pdf_tokenizer::decode::{self, How, NumberError, Pieces, Quirks};
 use pdf_tokenizer::{Iso, Kind, Pdfium, RuleSet, Rules, Token, Tokenizer};
 
 use crate::object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
@@ -855,6 +855,12 @@ impl<'a> Parser<'a> {
             Kind::Real if pdfium => self.pdfium_number(&token, sink),
             Kind::Real => match token.number() {
                 Ok(r) => Value::Real(r),
+                // Too small to hold: zero, with its sign, and no fault.
+                Err(NumberError::Underflow) => Value::Real(if token.bytes.starts_with(b"-") {
+                    -0.0
+                } else {
+                    0.0
+                }),
                 Err(_) => {
                     if sink.wants() {
                         sink.fault(at, Fault::RealOverflow);
@@ -867,9 +873,14 @@ impl<'a> Parser<'a> {
                 }
             },
             Kind::Name => Value::Name(self.name(&token, pdfium, sink)),
-            Kind::String { closed: true } | Kind::HexString { closed: true } => {
+            Kind::LiteralString | Kind::HexString if !token.closed => {
+                return Err(Error::String {
+                    at: self.place(token.start),
+                });
+            }
+            Kind::LiteralString | Kind::HexString => {
                 let form = match token.kind {
-                    Kind::HexString { .. } => Form::Hex,
+                    Kind::HexString => Form::Hex,
                     _ => Form::Literal,
                 };
                 let bytes = match pdfium {
@@ -881,11 +892,6 @@ impl<'a> Parser<'a> {
                     false => Str::Bytes(bytes),
                 };
                 Value::String(s, Some(form))
-            }
-            Kind::String { closed: false } | Kind::HexString { closed: false } => {
-                return Err(Error::String {
-                    at: self.place(token.start),
-                });
             }
             Kind::ArrayOpen => {
                 let mut array = Vec::new();
@@ -998,15 +1004,16 @@ impl<'a> Parser<'a> {
     /// Tells `sink` of name `token`'s fault, if it has one: a `#` without
     /// two hex digits after it, or `#00`.
     fn told_name(&self, token: &Token<'a>, sink: &mut (impl Sink<'a> + ?Sized)) {
-        let hows: Vec<How> = (token.pieces().into_iter().flatten())
-            .map(|piece| piece.how)
-            .filter(|how| matches!(how, How::StrayHash | How::NulEscape))
-            .collect();
-        if !hows.is_empty() {
+        let quirks = token.pieces().map_or(Quirks::default(), Pieces::quirks);
+        let (stray, nul) = (
+            quirks.contains(How::StrayHash),
+            quirks.contains(How::NulEscape),
+        );
+        if stray || nul {
             let fault = Fault::Name {
                 written: token.bytes,
-                stray: hows.contains(&How::StrayHash),
-                nul: hows.contains(&How::NulEscape),
+                stray,
+                nul,
             };
             sink.fault(self.span(token.start, token.end()), fault);
         }
@@ -1027,7 +1034,7 @@ impl<'a> Parser<'a> {
         if !word.contains(&b'#') {
             return word.get(1..).unwrap_or_default().to_vec();
         }
-        exact(pdfium::name(word))
+        reserved(pdfium::name(word))
     }
 
     /// A number token's value as PDFium's object parser reads it
@@ -1054,6 +1061,8 @@ impl<'a> Parser<'a> {
                 (wide(pdfium::number(written)) != Some(n)).then_some(Fault::OutOfRange { written })
             }
             Err(NumberError::Overflow) => Some(Fault::OutOfRange { written }),
+            // An integer can't underflow.
+            Err(NumberError::Underflow) => None,
             Err(NumberError::NotANumber) => {
                 matches!(decode::number(written), Err(NumberError::NotANumber))
                     .then_some(Fault::Number { written })
@@ -1087,13 +1096,13 @@ impl<'a> Parser<'a> {
             return value.to_vec();
         }
         let bytes = match token.kind {
-            Kind::HexString { .. } => pdfium::hex(token.bytes),
+            Kind::HexString => pdfium::hex(token.bytes),
             _ => pdfium::literal(token.bytes),
         };
         if sink.wants() {
             self.told_string(token, bytes.clone(), sink);
         }
-        exact(bytes)
+        reserved(bytes)
     }
 
     /// Tells `sink` where ISO 32000-2 reads closed string `token`, whose
@@ -1106,7 +1115,7 @@ impl<'a> Parser<'a> {
     ) {
         let written = token.bytes;
         let fault = match token.kind {
-            Kind::HexString { .. } => {
+            Kind::HexString => {
                 // Between its `<` and its `>`.
                 let inner = written.get(1..written.len().saturating_sub(1));
                 let stray = |b: &u8| !b.is_ascii_hexdigit() && !pdf_tokenizer::is_white_space(*b);
@@ -1174,9 +1183,11 @@ fn integer(token: &Token, rules: Rules) -> Option<i64> {
     }
 }
 
-/// A PDFium reading's bytes, in a buffer of their exact length.
-fn exact(bytes: pdfium::Bytes<'_>) -> Vec<u8> {
-    let mut value = Vec::with_capacity(bytes.clone().count());
+/// A PDFium reading's bytes, in a buffer reserved once for as many as the
+/// bytes left to read, which a value is never longer than, so it never
+/// grows; its capacity may exceed its length by what the escapes took.
+fn reserved(bytes: pdfium::Bytes<'_>) -> Vec<u8> {
+    let mut value = Vec::with_capacity(bytes.size_hint().1.unwrap_or(0));
     value.extend(bytes);
     value
 }
@@ -1335,18 +1346,20 @@ impl Call {
 fn starts_value(token: &Token) -> bool {
     match token.kind {
         Kind::Integer | Kind::Real | Kind::Name | Kind::ArrayOpen | Kind::DictOpen => true,
-        Kind::String { closed } | Kind::HexString { closed } => closed,
+        Kind::LiteralString | Kind::HexString => token.closed,
         Kind::Keyword => matches!(token.bytes, b"true" | b"false" | b"null"),
         _ => false,
     }
 }
 
 fn is_keyword(token: Option<&Token>, word: &[u8]) -> bool {
-    token.is_some_and(|t| t.kind == Kind::Keyword && t.bytes == word)
+    token.is_some_and(|t| t.is_keyword(word))
 }
 
-/// A name's or string's value, its escapes decoded, in a buffer of its
-/// exact length; nothing for any other token.
+/// A name's or string's value, its escapes decoded, in a buffer reserved
+/// once for as many bytes as the token has, which a value is never longer
+/// than, so it never grows; its capacity may exceed its length by what the
+/// escapes took. Nothing for any other token.
 fn decoded(token: &Token) -> Vec<u8> {
     if let Some(value) = token.verbatim() {
         return value.to_vec();
@@ -1354,8 +1367,9 @@ fn decoded(token: &Token) -> Vec<u8> {
     let Some(pieces) = token.pieces() else {
         return Vec::new();
     };
-    let mut value = Vec::with_capacity(pieces.clone().bytes().count());
-    value.extend(pieces.bytes());
+    let bytes = pieces.bytes();
+    let mut value = Vec::with_capacity(bytes.size_hint().1.unwrap_or(0));
+    value.extend(bytes);
     value
 }
 
@@ -1460,6 +1474,19 @@ mod tests {
         );
         let (value, _) = self::value(b"-99999999999999999999");
         assert_eq!(*value.unwrap().value(), Value::Integer(i64::MIN));
+        // A real too small to hold reads as zero, with its sign, to the
+        // bit, and no fault.
+        for (sign, zero) in [("", 0.0f64), ("-", -0.0), ("+", 0.0)] {
+            let tiny = format!("{sign}0.{}1", "0".repeat(400));
+            let (value, kept) = self::value(tiny.as_bytes());
+            let value = value.unwrap();
+            let read = match value.value() {
+                Value::Real(read) => *read,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(read.to_bits(), zero.to_bits(), "{tiny}");
+            assert!(kept.faults.is_empty(), "{tiny}");
+        }
         // The name reads as written but for its well-formed escapes.
         let (value, _) = self::value(b"/A#zz#00#41");
         assert_eq!(*value.unwrap().value(), Value::Name(b"A#zz\0A".to_vec()));

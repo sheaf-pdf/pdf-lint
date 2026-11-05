@@ -532,7 +532,7 @@ impl<'a, S: Sink<'a>> Tokens<'a, '_, S> {
             };
             let piece = matches!(
                 token.kind,
-                Kind::String { .. } | Kind::HexString { .. } | Kind::Comment
+                Kind::LiteralString | Kind::HexString | Kind::Comment
             );
             let (start, end) = (token.start, token.end().min(region.end));
             let Some(join) = self.next_join().filter(|&join| piece && join < end) else {

@@ -5,9 +5,10 @@
 //!   comments included, so the tokens join back into the input.
 //! - **Total:** it never rejects and never repairs. A `)` or `>` that
 //!   closes nothing is a [`Kind::Junk`] token, a string that doesn't end is
-//!   marked unclosed, and every token moves it on.
-//! - **Zero-copy, from any offset:** a [`Token`] is a kind, an offset, and
-//!   its bytes as written, borrowed from the input.
+//!   a string token with [`Token::closed`] false, and every token moves it
+//!   on.
+//! - **Zero-copy, from any offset:** a [`Token`] is a kind, whether it
+//!   closed, an offset, and its bytes as written, borrowed from the input.
 //! - **No grammar:** `obj`, `R`, `stream`, `xref` and `trailer` are
 //!   keywords like any other. Joining `n g R` or `n g obj` is the next
 //!   layer's work. [`Tokenizer::skim`] passes an array's or a dictionary's
@@ -111,6 +112,24 @@ mod tests {
     #[test]
     fn a_small_file_keeps_every_promise() {
         assert!(fuzz::walk(SMALL_FILE, 0) > 100);
+    }
+
+    /// The README is shown on crates.io and docs.rs, where a path beside
+    /// the crate reaches nothing: its licence links are the repository's
+    /// URLs, the manifest's `repository` and the file, and no link of it
+    /// climbs out of the crate.
+    #[test]
+    fn the_readmes_licence_links_reach_the_files() {
+        let readme = include_str!("../README.md");
+        let repository = env!("CARGO_PKG_REPOSITORY");
+        for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
+            let link = std::format!("[{file}]({repository}/blob/main/{file})");
+            assert!(
+                readme.contains(&link),
+                "{file}'s link isn't the repository's URL"
+            );
+        }
+        assert!(!readme.contains("](../"), "a link climbs out of the crate");
     }
 
     /// The small file cut at every byte, read from its start and from

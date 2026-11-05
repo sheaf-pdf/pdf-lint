@@ -1051,11 +1051,11 @@ fn span(start: usize, end: usize) -> Span {
 
 /// The next token that isn't white-space or a comment.
 fn significant<'t>(t: &mut Tokenizer<'t>) -> Option<Token<'t>> {
-    t.find(|token| !matches!(token.kind, Kind::Space | Kind::Comment))
+    t.next_significant()
 }
 
 fn is_keyword(token: Option<&Token>, word: &[u8]) -> bool {
-    token.is_some_and(|t| t.kind == Kind::Keyword && t.bytes == word)
+    token.is_some_and(|t| t.is_keyword(word))
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -3872,6 +3872,20 @@ mod tests {
     use super::*;
     use crate::fixture::{self, Body, Xref};
     use crate::source::Source;
+
+    /// `significant` passes white-space and comments, and nothing else: a
+    /// `)` that closes no string is a token it gives, like any other kind;
+    /// and `is_keyword` tells the keyword from a name of the same bytes.
+    #[test]
+    fn a_significant_token_may_be_junk() {
+        let mut t = Tokenizer::new(b" % a comment\n ) startxref /startxref");
+        let junk = significant(&mut t).unwrap();
+        assert_eq!((junk.kind, junk.bytes), (Kind::Junk, &b")"[..]));
+        assert!(is_keyword(significant(&mut t).as_ref(), b"startxref"));
+        assert!(!is_keyword(significant(&mut t).as_ref(), b"startxref"));
+        assert!(!is_keyword(significant(&mut t).as_ref(), b"startxref"));
+        assert_eq!(significant(&mut t), None);
+    }
 
     /// `o` with every place it was written, and every string's form, left
     /// out.

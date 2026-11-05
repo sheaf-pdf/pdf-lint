@@ -8,7 +8,8 @@
 //! places, and [`How`] says which it chose.
 
 use core::fmt;
-use core::ops::Range;
+use core::iter::FusedIterator;
+use core::ops::{BitOr, BitOrAssign, Range};
 
 use memchr::memchr2;
 
@@ -31,6 +32,10 @@ pub struct Piece {
 }
 
 /// How a [`Piece`] stands for its byte.
+///
+/// A quirk is found in files, not designed, so one may come in a minor
+/// release: a match on `How` outside this crate needs a wildcard.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum How {
     /// `/`, `(`, `)`, `<` or `>`, which delimits the value: no byte.
@@ -73,7 +78,9 @@ pub enum How {
 }
 
 impl How {
-    const ALL: [How; 13] = [
+    /// Every `How`, in the order of their discriminants (`ALL[how as usize]`
+    /// is `how`): the ordinary ones first, the quirks after.
+    pub const ALL: &[How] = &[
         How::Delimiter,
         How::Plain,
         How::Escape,
@@ -93,6 +100,7 @@ impl How {
     /// versions or a writer's intent may differ, or an error. Delimiters,
     /// plain bytes, escapes, line continuations and a hex string's
     /// white-space aren't.
+    #[must_use]
     pub const fn is_quirk(self) -> bool {
         !matches!(
             self,
@@ -101,44 +109,151 @@ impl How {
     }
 }
 
-/// A set of quirks: the [`How`]s out of the ordinary among some pieces.
+/// A set of quirks: the [`How`]s out of the ordinary among some pieces
+/// ([`Pieces::quirks`]), or built, by [`insert`](Self::insert), from an
+/// iterator of `How`s (`collect`, `extend`), or from two sets (`|`, `|=`).
+/// A `How` that isn't a quirk ([`How::is_quirk`]) is never in one: putting
+/// it in does nothing. [`iter`](Self::iter), or `for how in quirks`, gives
+/// the quirks in [`How::ALL`]'s order. [`EMPTY`](Self::EMPTY) is the set of
+/// none, a `const`, so a set is built in a constant too.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Quirks(u16);
 
+// A bit a `How`, by its discriminant; `How::ALL` lists them in that order.
+const _: () = assert!(How::ALL.len() <= u16::BITS as usize);
+
 impl Quirks {
+    /// No quirks: what `Quirks::default()` is, as a `const`, so a set is
+    /// built in a constant by [`insert`](Self::insert).
+    pub const EMPTY: Quirks = Quirks(0);
+
     /// Whether `how` is among them.
+    #[must_use]
     pub const fn contains(self, how: How) -> bool {
         self.0 & (1 << how as u16) != 0
     }
 
     /// Whether there are none.
+    #[must_use]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
-    fn insert(&mut self, how: How) {
+    /// How many there are.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    /// Puts `how` among them, if it's a quirk; a `How` that isn't one
+    /// ([`How::is_quirk`]) is ignored.
+    pub const fn insert(&mut self, how: How) {
         if how.is_quirk() {
             self.0 |= 1 << how as u16;
         }
+    }
+
+    /// The quirks, in [`How::ALL`]'s order.
+    pub fn iter(self) -> QuirksIter {
+        QuirksIter(self.0)
     }
 }
 
 impl fmt::Debug for Quirks {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let quirks = How::ALL.into_iter().filter(|&how| self.contains(how));
-        f.debug_set().entries(quirks).finish()
+        f.debug_set().entries(self.iter()).finish()
     }
 }
 
+impl BitOr for Quirks {
+    type Output = Quirks;
+
+    /// The quirks in either.
+    fn bitor(self, other: Quirks) -> Quirks {
+        Quirks(self.0 | other.0)
+    }
+}
+
+impl BitOrAssign for Quirks {
+    /// Puts `other`'s quirks among them.
+    fn bitor_assign(&mut self, other: Quirks) {
+        self.0 |= other.0;
+    }
+}
+
+impl Extend<How> for Quirks {
+    /// Puts each quirk among them; a `How` that isn't one is ignored.
+    fn extend<I: IntoIterator<Item = How>>(&mut self, hows: I) {
+        for how in hows {
+            self.insert(how);
+        }
+    }
+}
+
+impl FromIterator<How> for Quirks {
+    /// The quirks among `hows`; a `How` that isn't one is ignored.
+    fn from_iter<I: IntoIterator<Item = How>>(hows: I) -> Quirks {
+        let mut quirks = Quirks::EMPTY;
+        quirks.extend(hows);
+        quirks
+    }
+}
+
+impl IntoIterator for Quirks {
+    type Item = How;
+    type IntoIter = QuirksIter;
+
+    /// The quirks, in [`How::ALL`]'s order.
+    fn into_iter(self) -> QuirksIter {
+        self.iter()
+    }
+}
+
+/// The quirks of a [`Quirks`] set, in [`How::ALL`]'s order: from
+/// [`Quirks::iter`], or `for how in quirks`.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuirksIter(u16);
+
+impl Iterator for QuirksIter {
+    type Item = How;
+
+    fn next(&mut self) -> Option<How> {
+        if self.0 == 0 {
+            return None;
+        }
+        let bit = self.0.trailing_zeros() as usize;
+        self.0 &= self.0 - 1;
+        // A bit is set only by `insert`, from a `How`, whose discriminant
+        // indexes `How::ALL`.
+        Some(How::ALL[bit])
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.0.count_ones() as usize;
+        (left, Some(left))
+    }
+}
+
+impl ExactSizeIterator for QuirksIter {}
+
+impl FusedIterator for QuirksIter {}
+
 /// The [`Piece`]s of a name, a literal string or a hex string, in order.
-/// They join into the bytes given, with no gap and no overlap.
-#[derive(Debug, Clone)]
+/// They join into the bytes given, with no gap and no overlap. Each is a
+/// byte or more and stands for one byte at most, so there are never more
+/// pieces, or value bytes, than bytes: `size_hint` gives a piece at least
+/// while bytes are left, and at most as many as the bytes left.
+#[must_use = "pieces are lazy: nothing is decoded until one is asked for"]
+#[derive(Clone)]
 pub struct Pieces<'a> {
     bytes: &'a [u8],
     base: usize,
     pos: usize,
     syntax: Syntax,
-    /// A literal string's parentheses still open, its first included.
+    /// A literal string's parentheses still open, its first included: one
+    /// from the start when the bytes don't begin with it, the inside of a
+    /// string already open.
     depth: usize,
     /// Whether the value's closing delimiter has come.
     closed: bool,
@@ -152,42 +267,66 @@ enum Syntax {
 }
 
 /// The pieces of a name's bytes, `/` included (ISO 32000-2, 7.3.5).
+/// Without it, they're the inside of a name: `name(b"abc")` is three plain
+/// bytes, and a `/` among them is invalid, as it is in any name's body.
 pub fn name(bytes: &[u8]) -> Pieces<'_> {
     Pieces::new(bytes, 0, Syntax::Name)
 }
 
 /// The pieces of a literal string's bytes, parentheses included (ISO
-/// 32000-2, 7.3.4.2).
+/// 32000-2, 7.3.4.2). Without the opening one, they're the inside of a
+/// string already open: a `(` among them opens a nested pair as it would
+/// inside any string, a `)` that balances no `(` closes the string, and
+/// anything after that is invalid. `literal(b"a(b)c")` is five plain
+/// bytes; `literal(b"a)b")` is `a`, a closing delimiter and an invalid
+/// `b`.
 pub fn literal(bytes: &[u8]) -> Pieces<'_> {
     Pieces::new(bytes, 0, Syntax::Literal)
 }
 
 /// The pieces of a hexadecimal string's bytes, `<` and `>` included (ISO
-/// 32000-2, 7.3.4.3).
+/// 32000-2, 7.3.4.3). Without the `<`, they're the inside of a string
+/// already open: `hex(b"4142")` is two escapes, `A` and `B`, and
+/// `hex(b">")` a closing delimiter.
 pub fn hex(bytes: &[u8]) -> Pieces<'_> {
     Pieces::new(bytes, 0, Syntax::Hex)
 }
 
 impl<'a> Pieces<'a> {
     fn new(bytes: &'a [u8], base: usize, syntax: Syntax) -> Self {
+        // Bytes without their opening parenthesis are the inside of a
+        // string that's open already.
+        let depth = match syntax {
+            Syntax::Literal if bytes.first() != Some(&b'(') => 1,
+            _ => 0,
+        };
         Pieces {
             bytes,
             base,
             pos: 0,
             syntax,
-            depth: 0,
+            depth,
             closed: false,
         }
     }
 
-    /// The value's bytes, from the pieces left.
-    pub fn bytes(self) -> impl Iterator<Item = u8> + 'a {
-        self.filter_map(|piece| piece.byte)
+    /// The value's bytes, from the pieces left: never more than the bytes
+    /// left, which the iterator's `size_hint` gives as its upper bound, so
+    /// a buffer of that length holds them without growing. Cloning it is
+    /// cheap, as cloning the pieces is.
+    pub fn bytes(self) -> Bytes<'a> {
+        Bytes(self)
+    }
+
+    /// The bytes from the next piece on.
+    fn rest(&self) -> &'a [u8] {
+        self.bytes.get(self.pos..).unwrap_or_default()
     }
 
     /// The quirks among the pieces left.
+    #[must_use]
     pub fn quirks(self) -> Quirks {
-        self.fold(Quirks::default(), |mut quirks, piece| {
+        self.fold(Quirks::EMPTY, |mut quirks, piece| {
             quirks.insert(piece.how);
             quirks
         })
@@ -262,8 +401,7 @@ impl Iterator for Pieces<'_> {
     type Item = Piece;
 
     fn next(&mut self) -> Option<Piece> {
-        let rest = self.bytes.get(self.pos..).unwrap_or_default();
-        let (&first, after) = rest.split_first()?;
+        let (&first, after) = self.rest().split_first()?;
         let (len, byte, how) = if self.closed {
             (1, None, How::Invalid)
         } else {
@@ -280,6 +418,77 @@ impl Iterator for Pieces<'_> {
             byte,
             how,
         })
+    }
+
+    /// A piece at least while bytes are left, each piece being a byte or
+    /// more; at most one a byte.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.rest().len();
+        (usize::from(left > 0), Some(left))
+    }
+}
+
+// `pos` only grows, and `next` gives nothing once it reaches the end.
+impl FusedIterator for Pieces<'_> {}
+
+impl fmt::Debug for Pieces<'_> {
+    /// The syntax, where the bytes left are, and the string's state; not
+    /// the bytes, which may be a whole file's.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let from = self.base + self.pos.min(self.bytes.len());
+        f.debug_struct("Pieces")
+            .field("syntax", &self.syntax)
+            .field("left", &(from..self.base + self.bytes.len()))
+            .field("depth", &self.depth)
+            .field("closed", &self.closed)
+            .finish()
+    }
+}
+
+/// The bytes of a name's or a string's value as ISO 32000-2 reads them,
+/// in order, from [`Pieces::bytes`]: each piece's byte, the pieces that
+/// stand for none (delimiters, line continuations, a hex string's
+/// white-space) passed over. Never more than the bytes left to decode,
+/// which `size_hint` gives as its upper bound: a buffer of that length
+/// holds them without growing. A type of its own, as
+/// [`pdfium::Bytes`] is, so a reader can hold it or name it.
+#[must_use = "the bytes are lazy: nothing is decoded until one is asked for"]
+#[derive(Clone)]
+pub struct Bytes<'a>(Pieces<'a>);
+
+// Each method is a hint to inline, as `core`'s own adapters' are
+// (`filter_map`'s, which this replaces), so that a consumer's loop over
+// the bytes is one loop over the pieces.
+impl Iterator for Bytes<'_> {
+    type Item = u8;
+
+    #[inline]
+    fn next(&mut self) -> Option<u8> {
+        self.0.find_map(|piece| piece.byte)
+    }
+
+    /// At most one a byte left.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.0.size_hint().1)
+    }
+
+    /// One pass over the pieces, as `count`, `for_each` and `last` fold.
+    #[inline]
+    fn fold<B, F: FnMut(B, u8) -> B>(self, init: B, mut f: F) -> B {
+        self.0.fold(init, |acc, piece| match piece.byte {
+            Some(byte) => f(acc, byte),
+            None => acc,
+        })
+    }
+}
+
+// The pieces are fused.
+impl FusedIterator for Bytes<'_> {}
+
+impl fmt::Debug for Bytes<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Bytes").field(&self.0).finish()
     }
 }
 
@@ -318,17 +527,17 @@ fn escape(after: &[u8]) -> (usize, Option<u8>, How) {
 }
 
 /// A literal string's value as written, when nothing in it needs decoding:
-/// what's inside its parentheses (the first and the one that balances it)
-/// holds no backslash and no CR, and nothing comes after the one that
-/// balances it.
+/// what's inside its parentheses (the first, when the bytes begin with it,
+/// and the one that balances it) holds no backslash and no CR, and nothing
+/// comes after the one that balances it. Bytes without their opening
+/// parenthesis are the inside of a string already open, as [`literal`]
+/// reads them.
 fn literal_verbatim(bytes: &[u8]) -> Option<&[u8]> {
     if memchr2(b'\\', b'\r', bytes).is_some() {
         return None;
     }
-    let (start, mut depth) = match bytes.first() {
-        Some(b'(') => (1, 1usize),
-        _ => (0, 0),
-    };
+    let start = usize::from(bytes.first() == Some(&b'('));
+    let mut depth = 1usize;
     let mut at = start;
     while let Some(i) = bytes.get(at..).and_then(|rest| memchr2(b'(', b')', rest)) {
         at += i;
@@ -353,6 +562,9 @@ fn digit(b: u8) -> u8 {
 }
 
 /// Why a token isn't the number asked for.
+///
+/// Exhaustive on purpose, so that a match on every error is checked by the
+/// compiler: a new variant would be a breaking release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum NumberError {
     /// It isn't written as one.
@@ -363,10 +575,21 @@ pub enum NumberError {
     /// reads the whole object holding it as null.
     #[error("a number too large to hold")]
     Overflow,
+    /// It's written as one, but too small: a real whose digits aren't all
+    /// zero, which an `f64` reads as zero (`0.` followed by 400 zeros and a
+    /// `1`). An integer can't be.
+    #[error("a number too small to hold")]
+    Underflow,
 }
 
 /// The integer `bytes` are written as: digits, with an optional sign (ISO
 /// 32000-2, 7.3.3).
+///
+/// # Errors
+///
+/// [`NotANumber`](NumberError::NotANumber) when the bytes aren't written as
+/// an integer, a real among them; [`Overflow`](NumberError::Overflow) when
+/// they are, and the integer is outside `i64`.
 pub fn integer(bytes: &[u8]) -> Result<i64, NumberError> {
     let (negative, digits) = match bytes {
         [b'-', digits @ ..] => (true, digits),
@@ -394,6 +617,13 @@ pub fn integer(bytes: &[u8]) -> Result<i64, NumberError> {
 /// The number `bytes` are written as, an integer or a real, as an `f64`
 /// (ISO 32000-2, 7.3.3). Forms Rust reads but PDF doesn't write, such as
 /// `1e5` or `inf`, aren't numbers.
+///
+/// # Errors
+///
+/// [`NotANumber`](NumberError::NotANumber) when the bytes aren't written as
+/// a number; [`Overflow`](NumberError::Overflow) when the number is past
+/// the largest finite `f64`; [`Underflow`](NumberError::Underflow) when a
+/// real whose digits aren't all zero reads as zero.
 pub fn number(bytes: &[u8]) -> Result<f64, NumberError> {
     if let Some(value) = short_decimal(bytes) {
         return Ok(value);
@@ -403,10 +633,14 @@ pub fn number(bytes: &[u8]) -> Result<f64, NumberError> {
     }
     let text = core::str::from_utf8(bytes).map_err(|_| NumberError::NotANumber)?;
     let value: f64 = text.parse().map_err(|_| NumberError::NotANumber)?;
-    if value.is_finite() {
-        Ok(value)
-    } else {
+    if !value.is_finite() {
         Err(NumberError::Overflow)
+    } else if value == 0.0 && bytes.iter().any(|b| matches!(b, b'1'..=b'9')) {
+        // Zero from a digit that isn't: a decimal below the least `f64`.
+        // The short reading above never gives one (its least is 1e-22).
+        Err(NumberError::Underflow)
+    } else {
+        Ok(value)
     }
 }
 
@@ -460,11 +694,12 @@ impl<'a> Token<'a> {
     /// offsets in the input, as ISO 32000-2 reads them, whatever rules read
     /// the token. `None` for any other kind. [`pdfium`] reads the same
     /// bytes as PDFium does.
+    #[must_use]
     pub fn pieces(&self) -> Option<Pieces<'a>> {
         let syntax = match self.kind {
             Kind::Name => Syntax::Name,
-            Kind::String { .. } => Syntax::Literal,
-            Kind::HexString { .. } => Syntax::Hex,
+            Kind::LiteralString => Syntax::Literal,
+            Kind::HexString => Syntax::Hex,
             _ => return None,
         };
         Some(Pieces::new(self.bytes, self.start, syntax))
@@ -475,6 +710,7 @@ impl<'a> Token<'a> {
     /// plain (a name without `#`, a literal string without `\` or CR, an
     /// empty hex string). `None` when something does, its value then being
     /// its pieces' [`bytes`](Pieces::bytes), and for any other kind.
+    #[must_use]
     pub fn verbatim(&self) -> Option<&'a [u8]> {
         // The bytes are searched for what the pieces would say isn't plain,
         // not walked piece by piece: the same answer, from any bytes, a
@@ -487,11 +723,11 @@ impl<'a> Token<'a> {
                     .all(|&b| is_regular(b) && b != b'#')
                     .then_some(body)?
             }
-            Kind::String { .. } => literal_verbatim(bytes)?,
+            Kind::LiteralString => literal_verbatim(bytes)?,
             // No piece of a hex string is plain (each between its
             // delimiters is digits, white-space or a byte it can't hold),
             // so it's verbatim only with nothing but them.
-            Kind::HexString { .. } => match bytes {
+            Kind::HexString => match bytes {
                 [] | [b'<' | b'>'] | [b'<', b'>'] => &[],
                 _ => return None,
             },
@@ -509,6 +745,13 @@ impl<'a> Token<'a> {
     /// as ISO 32000-2 writes one: a word only PDFium's rules make an
     /// integer, such as `--5`, isn't one here, and [`pdfium::number`] reads
     /// it.
+    ///
+    /// # Errors
+    ///
+    /// [`NotANumber`](NumberError::NotANumber) for a token of any other
+    /// kind, a [`Real`](Kind::Real) among them, and for an `Integer` by
+    /// PDFium's rules alone; [`Overflow`](NumberError::Overflow) for an
+    /// integer outside `i64`.
     pub fn integer(&self) -> Result<i64, NumberError> {
         match self.kind {
             Kind::Integer => integer(self.bytes),
@@ -520,6 +763,14 @@ impl<'a> Token<'a> {
     /// token is written as, as an `f64`, read as ISO 32000-2 writes one: a
     /// word only PDFium's rules make a number, such as `1.2.3`, isn't one
     /// here, and [`pdfium::number`] reads it.
+    ///
+    /// # Errors
+    ///
+    /// [`NotANumber`](NumberError::NotANumber) for a token of any other
+    /// kind, and for a number by PDFium's rules alone;
+    /// [`Overflow`](NumberError::Overflow) for a number past the largest
+    /// finite `f64`; [`Underflow`](NumberError::Underflow) for a real whose
+    /// digits aren't all zero but reads as zero.
     pub fn number(&self) -> Result<f64, NumberError> {
         match self.kind {
             Kind::Integer | Kind::Real => number(self.bytes),
@@ -532,6 +783,7 @@ impl<'a> Token<'a> {
 mod tests {
     extern crate std;
 
+    use core::iter::FusedIterator;
     use std::format;
     use std::vec;
     use std::vec::Vec;
@@ -785,6 +1037,52 @@ mod tests {
         assert_eq!(token(b"/Name").number(), Err(NumberError::NotANumber));
     }
 
+    /// A real whose digits aren't all zero but reads as zero is too small
+    /// to hold; one whose digits are all zero is zero, with its sign, to
+    /// the bit, however many digits it has.
+    #[test]
+    fn a_real_too_small_to_hold_is_an_underflow() {
+        // `0.`, 400 zeros, `1`.
+        let mut tiny = vec![b'0'; 403];
+        tiny[1] = b'.';
+        tiny[402] = b'1';
+        assert_eq!(token(&tiny).number(), Err(NumberError::Underflow));
+        let signed = |sign: &[u8]| [sign, &tiny[..]].concat();
+        assert_eq!(decode::number(&signed(b"-")), Err(NumberError::Underflow));
+        assert_eq!(decode::number(&signed(b"+")), Err(NumberError::Underflow));
+        // The least `f64`, 5e-324, is held; a digit further isn't.
+        let least = format!("0.{}5", "0".repeat(323));
+        assert_eq!(decode::number(least.as_bytes()), Ok(5e-324));
+        let below = format!("0.{}1", "0".repeat(324));
+        assert_eq!(
+            decode::number(below.as_bytes()),
+            Err(NumberError::Underflow)
+        );
+        let bits = |n: Result<f64, NumberError>| n.map(f64::to_bits);
+        for zero in [&b"0"[..], b"0.0", b"0.000", b".0", b"0."] {
+            assert_eq!(bits(decode::number(zero)), Ok(0.0f64.to_bits()), "{zero:?}");
+            let negative = [b"-", zero].concat();
+            assert_eq!(
+                bits(decode::number(&negative)),
+                Ok((-0.0f64).to_bits()),
+                "{negative:?}"
+            );
+        }
+        let zeros = format!("0.{}", "0".repeat(400));
+        assert_eq!(bits(decode::number(zeros.as_bytes())), Ok(0.0f64.to_bits()));
+        let zeros = format!("-{zeros}");
+        assert_eq!(
+            bits(decode::number(zeros.as_bytes())),
+            Ok((-0.0f64).to_bits())
+        );
+        // An integer can't underflow: zero from zeros, or at least one.
+        assert_eq!(decode::integer(b"0000"), Ok(0));
+        assert_eq!(decode::number(b"0000"), Ok(0.0));
+        let ones = format!("1{}", "0".repeat(400));
+        assert_eq!(decode::integer(ones.as_bytes()), Err(NumberError::Overflow));
+        assert_eq!(decode::number(ones.as_bytes()), Err(NumberError::Overflow));
+    }
+
     /// [`decode::integer`] as it was: by the tokenizer's word, then Rust's
     /// reading of the text.
     fn integer_by_text(bytes: &[u8]) -> Result<i64, NumberError> {
@@ -795,7 +1093,8 @@ mod tests {
         text.parse().map_err(|_| NumberError::Overflow)
     }
 
-    /// [`decode::number`] as it was, every number by Rust's reading.
+    /// [`decode::number`] as it was, every number by Rust's reading, zero
+    /// from a digit that isn't an underflow.
     fn number_by_text(bytes: &[u8]) -> Result<f64, NumberError> {
         if !matches!(
             crate::tokenizer::word(bytes),
@@ -805,10 +1104,12 @@ mod tests {
         }
         let text = core::str::from_utf8(bytes).map_err(|_| NumberError::NotANumber)?;
         let value: f64 = text.parse().map_err(|_| NumberError::NotANumber)?;
-        if value.is_finite() {
-            Ok(value)
-        } else {
+        if !value.is_finite() {
             Err(NumberError::Overflow)
+        } else if value == 0.0 && bytes.iter().any(|b| matches!(b, b'1'..=b'9')) {
+            Err(NumberError::Underflow)
+        } else {
+            Ok(value)
         }
     }
 
@@ -893,6 +1194,12 @@ mod tests {
             read_alike(&long);
             long[len / 2] = b'.';
             read_alike(&long);
+            // Too small to hold, and zero.
+            let mut tiny = vec![b'0'; len];
+            tiny[1] = b'.';
+            read_alike(&tiny);
+            tiny[len - 1] = b'1';
+            read_alike(&tiny);
         }
         let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = || {
@@ -924,6 +1231,53 @@ mod tests {
         assert_eq!(
             NumberError::Overflow.to_string(),
             "a number too large to hold"
+        );
+        assert_eq!(
+            NumberError::Underflow.to_string(),
+            "a number too small to hold"
+        );
+    }
+
+    /// `How::ALL` holds every `How` in the order of their discriminants,
+    /// which `Quirks` indexes its bits by, the ordinary ones first.
+    #[test]
+    fn all_lists_every_how_in_order() {
+        for (i, &how) in How::ALL.iter().enumerate() {
+            assert_eq!(how as usize, i, "{how:?}");
+        }
+        let (ordinary, quirks) = How::ALL.split_at(5);
+        assert!(ordinary.iter().all(|how| !how.is_quirk()), "{ordinary:?}");
+        assert!(quirks.iter().all(|how| how.is_quirk()), "{quirks:?}");
+        assert_eq!(How::ALL.last(), Some(&How::Invalid));
+    }
+
+    /// `Debug` of the pieces, and of the bytes they give, says the syntax
+    /// and where the bytes left are, not the bytes: it doesn't grow with
+    /// them. `Bytes` is a type a reader can hold: fused, and `Clone`.
+    #[test]
+    fn debug_says_where_the_pieces_are_not_the_bytes() {
+        fn held<I: FusedIterator<Item = u8> + Clone>(bytes: I) -> I {
+            bytes
+        }
+        let mut input = vec![b'('];
+        input.extend_from_slice(&[b'a'; 1000]);
+        let mut pieces = decode::literal(&input);
+        assert_eq!(
+            format!("{pieces:?}"),
+            "Pieces { syntax: Literal, left: 0..1001, depth: 0, closed: false }"
+        );
+        pieces.next();
+        let bytes = held(pieces.bytes());
+        assert_eq!(
+            format!("{bytes:?}"),
+            "Bytes(Pieces { syntax: Literal, left: 1..1001, depth: 1, closed: false })"
+        );
+        assert_eq!(bytes.size_hint(), (0, Some(1000)));
+        assert_eq!(bytes.count(), 1000);
+        let token = Tokenizer::at(b"  /Name", 2).next().unwrap();
+        assert_eq!(
+            format!("{:?}", token.pieces().unwrap()),
+            "Pieces { syntax: Name, left: 2..7, depth: 0, closed: false }"
         );
     }
 
@@ -975,28 +1329,19 @@ mod tests {
     #[test]
     fn verbatim_by_a_search_is_verbatim_by_the_pieces() {
         use crate::Kind;
-        let inputs: [&[u8]; 9] = [
-            b"/Type/A#20B/#/ x\x80",
-            b"(a (b) c)(a)b)()(",
-            b"(a\\) (a\r\nb) (\\(\\)) ((a)) (a)) )(",
-            b"<41 4G> <> < > <<>> >",
-            b"/A)(B(C) (D)E",
-            b"(\x80\xff/[]{}%) [<a>]",
-            b"/a#2 /a#20 /#00",
-            b"",
-            b")))(((",
-        ];
-        let kinds = [
-            Kind::Name,
-            Kind::String { closed: true },
-            Kind::HexString { closed: false },
-        ];
-        for input in inputs {
+        let kinds = [Kind::Name, Kind::LiteralString, Kind::HexString];
+        for input in VERBATIM_INPUTS {
             for start in 0..=input.len() {
                 for end in start..=input.len() {
                     for kind in kinds {
                         let bytes = &input[start..end];
-                        fuzz::verbatim_as_walked(&Token { kind, start, bytes });
+                        let token = Token {
+                            kind,
+                            closed: true,
+                            start,
+                            bytes,
+                        };
+                        fuzz::verbatim_as_walked(&token);
                     }
                 }
             }
@@ -1005,6 +1350,7 @@ mod tests {
         let scanned = |kind, bytes: &'static [u8]| {
             Token {
                 kind,
+                closed: true,
                 start: 0,
                 bytes,
             }
@@ -1017,19 +1363,238 @@ mod tests {
         );
         assert_eq!(scanned(Kind::Name, b"/A/B"), None);
         assert_eq!(
-            scanned(Kind::String { closed: true }, b"(a)b"),
+            scanned(Kind::LiteralString, b"(a)b"),
             None,
             "nothing after the close"
         );
         assert_eq!(
-            scanned(Kind::String { closed: true }, b"a)b"),
-            Some(&b"a)b"[..]),
-            "no open, no close"
+            scanned(Kind::LiteralString, b"a)b"),
+            None,
+            "without its `(`, a string is open already: the `)` closes it"
         );
-        assert_eq!(
-            scanned(Kind::HexString { closed: true }, b">"),
-            Some(&b""[..])
-        );
-        assert_eq!(scanned(Kind::HexString { closed: true }, b"<<"), None);
+        assert_eq!(scanned(Kind::LiteralString, b"a)"), Some(&b"a"[..]));
+        assert_eq!(scanned(Kind::LiteralString, b"a(b)c"), Some(&b"a(b)c"[..]));
+        assert_eq!(scanned(Kind::HexString, b">"), Some(&b""[..]));
+        assert_eq!(scanned(Kind::HexString, b"<<"), None);
     }
+
+    /// Bytes given to the free decoders without their opener are the inside
+    /// of a value already open: a `)` that balances no `(` closes a literal
+    /// string, and a `(` nests as inside any string.
+    #[test]
+    fn bytes_without_their_opener_are_the_inside_of_a_value() {
+        let pieces = |pieces: Pieces<'_>| pieces.map(|p| (p.byte, p.how)).collect::<Vec<_>>();
+        let plain = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|&b| (Some(b), How::Plain))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pieces(decode::literal(b"a(b)c")), plain(b"a(b)c"));
+        assert_eq!(
+            pieces(decode::literal(b"a)b")),
+            [
+                (Some(b'a'), How::Plain),
+                (None, How::Delimiter),
+                (None, How::Invalid),
+            ]
+        );
+        assert_eq!(pieces(decode::literal(b")")), [(None, How::Delimiter)]);
+        assert!(pieces(decode::literal(b"")).is_empty());
+        // With its opener, as before: the `)` that balances it closes it.
+        let mut whole = vec![(None, How::Delimiter)];
+        whole.extend(plain(b"a(b)c"));
+        whole.push((None, How::Delimiter));
+        assert_eq!(pieces(decode::literal(b"(a(b)c)")), whole);
+        assert_eq!(
+            pieces(decode::hex(b"4142")),
+            [(Some(b'A'), How::Escape), (Some(b'B'), How::Escape)]
+        );
+        assert_eq!(pieces(decode::hex(b">")), [(None, How::Delimiter)]);
+        assert_eq!(
+            pieces(decode::hex(b"41>")),
+            [(Some(b'A'), How::Escape), (None, How::Delimiter)]
+        );
+        assert!(pieces(decode::name(b"")).is_empty());
+        assert_eq!(pieces(decode::name(b"abc")), plain(b"abc"));
+        assert_eq!(pieces(decode::name(b"a/b"))[1], (None, How::Invalid));
+        // The offsets are the bytes', as for any bytes given.
+        let at: Vec<_> = decode::literal(b"a)b").map(|p| p.at).collect();
+        assert_eq!(at, [0..1, 1..2, 2..3]);
+    }
+
+    /// Every run of bytes of the verbatim test's inputs, read as a name, a
+    /// literal string and a hex string by the pieces and by PDFium's
+    /// readings, from the start and after each piece or byte.
+    fn each_decoding(mut check: impl FnMut(Pieces<'_>, decode::pdfium::Bytes<'_>)) {
+        for input in VERBATIM_INPUTS {
+            for start in 0..=input.len() {
+                for end in start..=input.len() {
+                    let bytes = &input[start..end];
+                    check(decode::name(bytes), decode::pdfium::name(bytes));
+                    check(decode::literal(bytes), decode::pdfium::literal(bytes));
+                    check(decode::hex(bytes), decode::pdfium::hex(bytes));
+                }
+            }
+        }
+    }
+
+    /// `size_hint` bounds what's left: a piece at least while bytes are
+    /// left and at most one a byte, and of a value's bytes at most one a
+    /// byte, by the pieces and by PDFium's readings, so a buffer of the
+    /// upper bound holds the value without growing; and each stays true
+    /// after each piece or byte.
+    #[test]
+    fn size_hint_bounds_the_pieces_and_the_bytes_left() {
+        /// `it` yields within its hint at every step, the hint's upper
+        /// bound falls by one at least a step, and once it has ended the
+        /// hint is (0, Some(0)).
+        fn bounded<I: Iterator + Clone>(mut it: I) {
+            loop {
+                let (lower, upper) = it.size_hint();
+                let left = it.clone().count();
+                assert!(
+                    lower <= left && left <= upper.unwrap(),
+                    "{lower} <= {left} <= {upper:?}"
+                );
+                if it.next().is_none() {
+                    assert_eq!(lower, 0, "nothing promised where nothing came");
+                    assert_eq!(it.size_hint(), (0, Some(0)));
+                    return;
+                }
+                assert!(
+                    it.size_hint().1.unwrap() < upper.unwrap(),
+                    "a step costs a byte"
+                );
+            }
+        }
+        let mut checked = 0;
+        each_decoding(|pieces, pdfium| {
+            let bytes = pieces.rest().len();
+            assert_eq!(pieces.size_hint(), (usize::from(bytes > 0), Some(bytes)));
+            assert_eq!(pieces.clone().bytes().size_hint(), (0, Some(bytes)));
+            assert_eq!(pdfium.size_hint().0, 0);
+            assert!(pdfium.size_hint().1.unwrap() <= bytes);
+            bounded(pieces.clone());
+            bounded(pieces.clone().bytes());
+            bounded(pdfium.clone());
+            // Reserved from the upper bound, a buffer never grows.
+            let value = pieces.bytes();
+            let upper = value.size_hint().1.unwrap();
+            let mut held = Vec::with_capacity(upper);
+            held.extend(value);
+            assert!(held.len() <= upper && held.capacity() == upper);
+            let upper = pdfium.size_hint().1.unwrap();
+            let mut held = Vec::with_capacity(upper);
+            held.extend(pdfium);
+            assert!(held.len() <= upper && held.capacity() == upper);
+            checked += 1;
+        });
+        assert!(checked > 1000, "{checked}");
+        // A read past a string's close has nothing left.
+        let mut read = decode::pdfium::literal(b"(a)bc");
+        assert_eq!(read.size_hint(), (0, Some(4)));
+        assert_eq!(read.by_ref().count(), 1);
+        assert_eq!(read.size_hint(), (0, Some(0)));
+    }
+
+    /// A `Quirks` set is built from `How`s, one by one or collected, or
+    /// from two sets, holds quirks alone, and iterates them in `How::ALL`'s
+    /// order, exactly as many as `len` says.
+    #[test]
+    fn quirks_are_built_from_hows_and_iterate_in_order() {
+        let quirks = token(b"(\\q\r)").pieces().unwrap().quirks();
+        assert_eq!(quirks.len(), 2);
+        let listed: Vec<How> = quirks.iter().collect();
+        assert_eq!(listed, [How::IgnoredBackslash, How::EolAsLf]);
+        let mut by_for = Vec::new();
+        for how in quirks {
+            by_for.push(how);
+        }
+        assert_eq!(by_for, listed);
+        assert_eq!(quirks.iter().len(), 2);
+        assert_eq!(quirks.iter().size_hint(), (2, Some(2)));
+        // The same set, collected from each piece's `How`, the ordinary
+        // ones ignored.
+        let collected: decode::Quirks = (token(b"(\\q\r)").pieces().unwrap())
+            .map(|p| p.how)
+            .collect();
+        assert_eq!(collected, quirks);
+        let hows = [How::EolAsLf, How::Plain, How::IgnoredBackslash, How::Escape];
+        assert_eq!(hows.into_iter().collect::<decode::Quirks>(), quirks);
+        // Built one by one: a `How` that isn't a quirk does nothing.
+        let mut built = decode::Quirks::default();
+        assert_eq!((built.is_empty(), built.len()), (true, 0));
+        for how in [
+            How::Delimiter,
+            How::Plain,
+            How::Escape,
+            How::LineContinuation,
+            How::HexSpace,
+        ] {
+            built.insert(how);
+            assert!(built.is_empty(), "{how:?} isn't a quirk");
+        }
+        built.insert(How::EolAsLf);
+        built.insert(How::EolAsLf);
+        assert_eq!((built.len(), built.contains(How::EolAsLf)), (1, true));
+        built.extend([How::Plain, How::IgnoredBackslash]);
+        assert_eq!(built, quirks);
+        // Joined.
+        let stray: decode::Quirks = [How::StrayHash].into_iter().collect();
+        let joined = stray | quirks;
+        assert_eq!(joined.len(), 3);
+        assert_eq!(
+            joined.iter().collect::<Vec<_>>(),
+            [How::StrayHash, How::IgnoredBackslash, How::EolAsLf]
+        );
+        let mut joined_in_place = quirks;
+        joined_in_place |= stray;
+        assert_eq!(joined_in_place, joined);
+        assert_eq!(quirks | decode::Quirks::default(), quirks);
+        // Built in a constant, from the empty set.
+        const NAME_FAULTS: decode::Quirks = {
+            let mut set = decode::Quirks::EMPTY;
+            set.insert(How::StrayHash);
+            set.insert(How::NulEscape);
+            set.insert(How::Plain);
+            set
+        };
+        assert_eq!(
+            NAME_FAULTS.iter().collect::<Vec<_>>(),
+            [How::StrayHash, How::NulEscape]
+        );
+        assert_eq!(decode::Quirks::EMPTY, decode::Quirks::default());
+        assert!(decode::Quirks::EMPTY.is_empty());
+        // Every quirk at once: `How::ALL`'s quirks, in its order.
+        let all: decode::Quirks = How::ALL.iter().copied().collect();
+        let every_quirk: Vec<How> = How::ALL.iter().copied().filter(|h| h.is_quirk()).collect();
+        assert_eq!(all.iter().collect::<Vec<_>>(), every_quirk);
+        assert_eq!(all.len(), every_quirk.len());
+        assert!(every_quirk.iter().all(|&h| all.contains(h)));
+        assert_eq!(
+            format!("{all:?}"),
+            format!("{every_quirk:?}")
+                .replace('[', "{")
+                .replace(']', "}")
+        );
+        let mut rest = all.iter();
+        assert_eq!(rest.len(), every_quirk.len());
+        rest.next();
+        assert_eq!(rest.len(), every_quirk.len() - 1);
+        assert_eq!(rest.clone().count(), rest.len());
+    }
+
+    /// The inputs the verbatim and size tests take every run of bytes of.
+    const VERBATIM_INPUTS: [&[u8]; 9] = [
+        b"/Type/A#20B/#/ x\x80",
+        b"(a (b) c)(a)b)()(",
+        b"(a\\) (a\r\nb) (\\(\\)) ((a)) (a)) )(",
+        b"<41 4G> <> < > <<>> >",
+        b"/A)(B(C) (D)E",
+        b"(\x80\xff/[]{}%) [<a>]",
+        b"/a#2 /a#20 /#00",
+        b"",
+        b")))(((",
+    ];
 }

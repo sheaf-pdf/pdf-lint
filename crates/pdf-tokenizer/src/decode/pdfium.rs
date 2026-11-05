@@ -24,10 +24,15 @@
 //! assert!(pdfium::hex(b"<4G1>").eq(*b"A"));
 //! ```
 
+use core::fmt;
 use core::iter::FusedIterator;
 
 /// A number as PDFium holds one (its `FX_Number`), from a number word by
 /// [`number`]: one of three, by how the word is written.
+///
+/// Exhaustive on purpose: PDFium holds a number as one of these three, so
+/// a match on all three is checked by the compiler; a fourth would be a
+/// breaking release.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Number {
     /// A word without a point that doesn't start with a sign: the digits
@@ -48,6 +53,7 @@ pub enum Number {
 impl Number {
     /// The number as PDFium reads a number, an `f32` (`GetNumber`): an
     /// integer rounded to the nearest one.
+    #[must_use]
     pub fn float(self) -> f32 {
         match self {
             Number::Unsigned(n) => n as f32,
@@ -59,6 +65,7 @@ impl Number {
     /// The number as PDFium reads an integer (`GetInteger`): an unsigned
     /// one past `i32::MAX` wraps to a negative one, and a real is cut to
     /// its whole part, saturating at `i32`'s ends.
+    #[must_use]
     pub fn integer(self) -> i32 {
         match self {
             Number::Unsigned(n) => n as i32,
@@ -79,6 +86,7 @@ impl Number {
 /// ISO 32000-2 (7.3.3) has no reading of `--5` or `1.2.3`, and holds
 /// integers past 32 bits; PDFium reads `--5` as 0, `1.2.3` as 1.2 and
 /// `4294967296` as 0.
+#[must_use]
 pub fn number(bytes: &[u8]) -> Number {
     if bytes.contains(&b'.') {
         return Number::Real(decimal(bytes).parse().unwrap_or(0.0));
@@ -107,6 +115,7 @@ pub fn number(bytes: &[u8]) -> Number {
 /// number word: the decimal ends at the first byte that's no digit, nor
 /// its point, so an exponent isn't read (`1e5` is 1), where PDFium's own
 /// conversion of a string to a number (`StringToDouble`) reads one.
+#[must_use]
 pub fn real(bytes: &[u8]) -> f64 {
     decimal(bytes).parse().unwrap_or(0.0)
 }
@@ -135,8 +144,12 @@ fn decimal(bytes: &[u8]) -> &str {
 }
 
 /// The bytes of a name's or a string's value as PDFium reads them, in
-/// order: from [`name`], [`literal`] or [`hex`].
-#[derive(Debug, Clone)]
+/// order: from [`name`], [`literal`] or [`hex`]. Never more than the bytes
+/// left to read, each read byte standing for one at most, which
+/// `size_hint` gives as its upper bound: a buffer of that length holds
+/// them without growing.
+#[must_use = "the bytes are lazy: nothing is decoded until one is asked for"]
+#[derive(Clone)]
 pub struct Bytes<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -310,9 +323,29 @@ impl Iterator for Bytes<'_> {
             Syntax::Done => None,
         }
     }
+
+    /// At most one a byte left; none once a string's close has come.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = match self.syntax {
+            Syntax::Done => 0,
+            _ => self.bytes.len().saturating_sub(self.pos),
+        };
+        (0, Some(left))
+    }
 }
 
 impl FusedIterator for Bytes<'_> {}
+
+impl fmt::Debug for Bytes<'_> {
+    /// The syntax and where the bytes left are; not the bytes, which may
+    /// be a whole file's.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Bytes")
+            .field("syntax", &self.syntax)
+            .field("left", &(self.pos.min(self.bytes.len())..self.bytes.len()))
+            .finish()
+    }
+}
 
 /// A hex digit's value, and 0 for a byte that isn't one, as PDFium reads it.
 fn digit(b: u8) -> u8 {
@@ -328,10 +361,28 @@ fn digit(b: u8) -> u8 {
 mod tests {
     extern crate std;
 
+    use std::format;
+    use std::vec;
     use std::vec::Vec;
 
     use super::{Number, hex, literal, name, number, real};
     use crate::{Rules, Tokenizer, decode, fuzz};
+
+    /// `Debug` says the syntax and where the bytes left are, not the bytes:
+    /// it doesn't grow with them.
+    #[test]
+    fn debug_says_where_the_bytes_are_not_the_bytes() {
+        let mut input = vec![b'<'];
+        input.extend_from_slice(&[b'4'; 1000]);
+        let mut bytes = hex(&input);
+        assert_eq!(format!("{bytes:?}"), "Bytes { syntax: Hex, left: 1..1001 }");
+        assert_eq!(bytes.next(), Some(0x44));
+        assert_eq!(format!("{bytes:?}"), "Bytes { syntax: Hex, left: 3..1001 }");
+        assert_eq!(
+            format!("{:?}", name(b"/a")),
+            "Bytes { syntax: Name, left: 1..2 }"
+        );
+    }
 
     /// The one token `input` is by PDFium's rules, checked as the fuzz
     /// target checks it.
