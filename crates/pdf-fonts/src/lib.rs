@@ -2,14 +2,14 @@
 //!
 //! - **A file's font, as read** ([`Font`]): from its dictionary, over a [`Resolve`] for
 //!   its objects and pdf-objects' [`Streams`](pdf_objects::Streams) for its streams'
-//!   data, the codes a string is in it,
-//!   each code's CID, width, vertical metrics and text, and how high its glyphs reach,
-//!   each as PDFium reads them, what no real writer writes included. What it can't know
-//!   it guesses, and says ([`FontApprox`]); what isn't as ISO 32000-2 has it is told to
-//!   pdf-objects' [`Sink`](pdf_objects::fault::Sink) ([`Fault`]), what's read being the
-//!   same whatever the sink. It fails only where its streams decompress past the budget
-//!   it's read within, or where what it reads doesn't read for a reason that's the
-//!   caller's ([`Error`]).
+//!   data, the codes a string is in it, each code's CID, width, vertical metrics and
+//!   text, and how high its glyphs reach, each as PDFium reads them, what no real
+//!   writer writes included. What it can't know it guesses, and says ([`FontApprox`]);
+//!   what isn't as ISO 32000-2 has it is told to pdf-objects'
+//!   [`Sink`](pdf_objects::fault::Sink) ([`Fault`]), what's read being the same
+//!   whatever the sink. It fails only where its streams decompress past the budget it's
+//!   read within, or where what it reads doesn't read for a reason that's the caller's
+//!   ([`Error`]).
 //! - **Each font read once** ([`Fonts`], [`FontScope`]): those that are objects, by
 //!   number, kept for every page that draws in them, and charged to each.
 //! - **Simple fonts' encodings and glyph names** ([`Encoding`], [`glyph_text`],
@@ -51,8 +51,10 @@
 //! ```
 //!
 //! [`Dict`], [`Object`], [`ObjectId`], [`Resolve`], [`Span`], [`Unreadable`] and
-//! [`Why`] are pdf-objects', re-exported, and pdf-content-streams, whose `Limits`
-//! are what a CMap and a CharProc are lexed under, is too.
+//! [`Why`] are pdf-objects', re-exported, and so is pdf-objects whole, so a sink or
+//! a `Streams` of one's own names the trait at the version this crate takes; and
+//! pdf-content-streams, whose `Limits` are what a CMap and a CharProc are lexed
+//! under, is too.
 //!
 //! The metrics and the glyph lists are Adobe's, each under its own terms, in the
 //! file itself. [`Std14::NOTICE`] is the metrics' notice, for a binary's list of
@@ -61,6 +63,7 @@
 //! in too.
 
 pub use pdf_content_streams;
+pub use pdf_objects;
 pub use pdf_objects::{Dict, Object, ObjectId, Resolve, Span, Unreadable, Why};
 
 pub use encoding::{Encoding, cp1252, glyph_text, name_code_point};

@@ -177,7 +177,7 @@ From source, `cargo install --locked pdf-lint` builds the binary from crates.io,
 The checker reads a file through a `Source`:
 
 ```rust,ignore
-pub trait Source {
+pub trait Source: Streams {
     /// Every object its cross-references list.
     fn ids(&self) -> Vec<ObjectId>;
     /// Object `id`, as written: references kept as references. The error
@@ -188,12 +188,12 @@ pub trait Source {
     fn trailer(&self) -> &Trailer;
     /// The version in the header.
     fn header_version(&self) -> Option<Version>;
-    /// What the reader had to choose how to read.
-    fn warnings(&self) -> &[Warning];
+    /// What the reader had to choose how to read, lent where it's held.
+    fn warnings(&self) -> Cow<'_, [Warning]>;
 }
 ```
 
-Its other methods are for what a reader may know, and default to nothing: the file's size (`fn:FileSize`); the catalog's XMP metadata, when it's in plain view (the extensions a file declares); where each object was read, an object stream's decoded data, the file's revisions, what its header and sections say of it, and whether an object stream leaves its objects' strings in the clear, which the earlier revisions' trailers and `packed` read; and a stream's data decoded (`decoded_within`), which content is read from. Why an object doesn't read is a `source::Unread`, a variant for each reason the bytes reader gives; a reader of its own says why in its own words with `Unread::Other`.
+Its other methods are for what a reader may know, and default to nothing: the file's size (`fn:FileSize`); the catalog's XMP metadata, when it's in plain view (the extensions a file declares); where each object was read, an object stream's decoded data (`held`), the file's revisions, what its header and sections say of it, and whether an object stream leaves its objects' strings in the clear, which the earlier revisions' trailers and `packed` read; and a stream's data decoded (`decoded_within`), the reader's own account of it, every fault of the decode, which content is read from. A `Source` is a `Streams` too, pdf-objects' trait, which pdf-lint re-exports at its root: a stream's data as a viewer takes it (`Streams::decoded`), which fonts are read from; a `Source` of one's own implements it beside the methods above, as `Document`, `bytes::Reading` and `bytes::WithReading` do. Why an object doesn't read is a `source::Unread`, a variant for each reason the bytes reader gives; a reader of its own says why in its own words with `Unread::Other`.
 
 The objects are the [pdf-objects](../pdf-objects) crate's types, which pdf-lint re-exports as its `object`, `text` and `version` modules and at its root: an `Object` is a `Value` and where it was written, a `Span`, when the reader knows and no edit has changed it since: an edit, through `value_mut` or an `as_*_mut` accessor, drops the span of what it changed and of what holds it. A stream's data is a `Data`, where it was written or its bytes. A `Dict` keeps its entries as written, in order and with any key written twice, and each key's `Span` too. A string is `Str::Bytes`; or `Str::Text`, text a reader decoded without saying from which encoding; or `Str::Encrypted`, ciphertext a reader didn't decrypt. Beside it, a string keeps its `Form`, literal or hex, as written, when the reader says, which `fn:IsHexString` reads. Where a reader loses something, the checker counts what depends on it as not checked. `Document` is a `Source` read whole, which readers fill, tests build, and a caller builds and edits in memory.
 

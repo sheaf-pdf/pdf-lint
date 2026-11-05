@@ -28,8 +28,10 @@
 //! so it reads as a reference to nothing. What a walk reads past is a [`Fault`],
 //! told to pdf-objects' [`Sink`](pdf_objects::fault::Sink) with its
 //! [`Place`](pdf_objects::fault::Place), or dropped by `()`; its caps are one
-//! value, [`Limits`].
+//! value, [`Limits`]. pdf-objects is re-exported whole, so a sink of one's own
+//! names the trait at the version this crate takes.
 
+pub use pdf_objects;
 pub use pdf_objects::{
     Dict, Object, ObjectId, Resolve, Rules, Span, Str, Stream, Unreadable, Value, Why, dict, text,
 };

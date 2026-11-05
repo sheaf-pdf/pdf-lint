@@ -4536,7 +4536,7 @@ mod reading {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use pdf_structure::Password;
-    use pdf_structure::bytes::{ByteSource, Options, Reading};
+    use pdf_structure::bytes::{ByteSource, Options, Reading, WithReading};
     use pdf_structure::fixture::{self, Body, Xref};
     use pdf_structure::pdf_crypt::writer::{Kind, Settings};
 
@@ -4577,7 +4577,8 @@ mod reading {
     }
 
     /// A font over a reading is charged what its streams decoded, and fails a byte
-    /// short, its budget as it was.
+    /// short, its budget as it was; and so is one over the file read whole beside its
+    /// reading, which is a resolver and a `Streams` as one.
     #[test]
     fn a_font_is_charged_what_it_decoded() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
@@ -4589,6 +4590,19 @@ mod reading {
         let mut budget = PLAIN.len() - 1;
         let font = font_of_reading(&reading, &mut budget, &mut Vec::new());
         assert_eq!(font.err(), Some(Error::TooLarge));
+        assert_eq!(budget, PLAIN.len() - 1);
+
+        let with = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
+        let dict = (&with).resolve(ObjectId::new(1, 0)).unwrap();
+        let dict = dict.as_dict().unwrap();
+        let read =
+            |budget: &mut usize| Font::read(&with, dict, &Limits::DEFAULT, budget, &mut Vec::new());
+        let mut budget = PLAIN.len();
+        let font = read(&mut budget).unwrap();
+        assert_eq!(budget, 0);
+        assert_eq!(font.code_text(0x41).as_deref(), Some("A"));
+        let mut budget = PLAIN.len() - 1;
+        assert_eq!(read(&mut budget).err(), Some(Error::TooLarge));
         assert_eq!(budget, PLAIN.len() - 1);
     }
 

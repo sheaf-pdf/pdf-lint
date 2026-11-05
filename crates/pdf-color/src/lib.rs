@@ -28,8 +28,10 @@
 //! A resolver is given by value, so `&reading`, `&document` or a closure, and a
 //! `&dyn Resolve` too. [`Dict`], [`Object`], [`ObjectId`], [`Resolve`], [`Span`],
 //! [`Str`], [`Stream`], [`Unreadable`], [`Value`], [`Why`] and [`dict!`] are
-//! pdf-objects', re-exported.
+//! pdf-objects', re-exported, and so is pdf-objects whole, so a sink of one's
+//! own names [`Sink`](pdf_objects::fault::Sink) at the version this crate takes.
 
+pub use pdf_objects;
 pub use pdf_objects::{
     Dict, Object, ObjectId, Resolve, Span, Str, Stream, Unreadable, Value, Why, dict,
 };

@@ -91,6 +91,21 @@ impl<S: ByteSource> WithReading<S> {
     }
 }
 
+/// Its document's objects, as a reference resolves them ([`Resolve`] for a
+/// `&Document`), so that what reads a file through a resolver and its
+/// streams, as a font does, reads it through a `&WithReading` alone.
+impl<'o, S: ByteSource> Resolve<'o> for &'o WithReading<S> {
+    fn resolve(&self, id: ObjectId) -> Option<&'o Object> {
+        let with: &'o WithReading<S> = self;
+        (&with.document).resolve(id)
+    }
+
+    fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
+        let with: &'o WithReading<S> = self;
+        (&with.document).try_resolve(id)
+    }
+}
+
 /// A stream's data as a viewer takes it ([`Streams`]), as its reading gives
 /// it ([`Reading`]'s), of the stream its document holds, so that the reading
 /// doesn't read it again: within the limit asked for or
