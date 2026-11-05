@@ -71,6 +71,7 @@ use super::content::times;
 use super::kept::Kept;
 use super::told::{Keyed, Told, holding, written_at};
 use super::{Finding, Graphic, Made, NESTING, Objects, REFERENCES, Rule, Walk};
+use crate::bytes::{self, Unfiltered};
 use crate::object::{Dict, Object, ObjectId, Span, Value};
 use crate::source::Source;
 use crate::{Latin, Resolve, Unreadable, Why};
@@ -146,9 +147,12 @@ const CMAPS: &str = "a font with a CMap chain longer than is read";
 /// glyph, is through filters the reader doesn't take ([`decoded`]).
 const UNFILTERED: &str = "a font with a stream through filters the reader doesn't take";
 
-/// Why a font isn't read whole, given what stopped its read.
-fn unread(error: &Error) -> &'static str {
+/// Why a font isn't read whole, given what stopped its read, and whether
+/// that was a stream past the reader's cap on its filters (`capped`,
+/// [`Asked`]), which a font reads as past its budget.
+fn unread(error: &Error, capped: bool) -> &'static str {
     match error {
+        Error::TooLarge if capped => CAPPED,
         Error::TooLarge => BUDGET,
         Error::Unreadable(unreadable) => match unreadable.why {
             Why::Locked => LOCKED,
@@ -260,11 +264,15 @@ impl Sink<Fault> for Cut<'_> {
 
 /// What a font's read asked of a source's streams that what it read
 /// rests on ([`decoded`]): whether the source gave no stream's data, and
-/// which streams it gave none of for filters the reader doesn't take.
+/// which streams it gave none of for filters the reader doesn't take; and
+/// whether the last stream past a limit was past the reader's cap on a
+/// stream's filters, not past the font's budget, the two being one
+/// [`Why::Limit`] to a font, which stops its read at either.
 #[derive(Default)]
 struct Asked {
     ungiven: Cell<bool>,
     unfiltered: RefCell<HashSet<ObjectId>>,
+    capped: Cell<bool>,
 }
 
 /// Stream `id`'s data, at most `limit` bytes of it, as `source` gives it
@@ -277,7 +285,10 @@ struct Asked {
 /// notes, so that what's read without it isn't taken for the file's; and a
 /// source that gives no stream's data, as a document alone doesn't, or not
 /// these bytes ([`Why::Source`]), is noted too, as what a font reads then
-/// isn't the file's font.
+/// isn't the file's font. Past a limit ([`Why::Limit`]), the source's own
+/// account says whether it's the reader's cap on a stream's filters
+/// ([`Source::decoded_within`], [`Unfiltered::Filters`]), which `asked`
+/// notes, so that the font is said to be past a cap, not its budget.
 fn decoded(
     source: &dyn Source,
     id: ObjectId,
@@ -290,18 +301,27 @@ fn decoded(
             asked.unfiltered.borrow_mut().insert(id);
         }
         Err(Why::Source) => asked.ungiven.set(true),
+        Err(Why::Limit) => {
+            let capped = matches!(
+                source.decoded_within(id, limit),
+                Some(Err(bytes::Error::Filters(Unfiltered::Filters { .. })))
+            );
+            asked.capped.set(capped);
+        }
         _ => {}
     }
     decoded
 }
 
-/// A font's read ([`read`]): what it gave, what it told, kept, and the
+/// A font's read ([`read`]): what it gave, what it told, kept, the
 /// streams it asked for whose filters the reader doesn't take, which it
-/// read on without.
+/// read on without, and whether a stream past a limit was past the
+/// reader's cap on its filters ([`Asked`]).
 pub(super) struct Taken {
     font: Result<Font, Error>,
     kept: Kept<Fault>,
     unfiltered: HashSet<ObjectId>,
+    capped: bool,
 }
 
 /// `font`, a font dictionary of `source`'s, read for text within what's
@@ -338,6 +358,7 @@ fn read<'a>(source: &'a dyn Source, font: &'a Dict, budget: &mut usize) -> Optio
         font: read,
         kept,
         unfiltered: asked.unfiltered.into_inner(),
+        capped: asked.capped.get(),
     })
 }
 
@@ -576,11 +597,13 @@ impl<'a> Walk<'a> {
                 font: result,
                 kept,
                 unfiltered,
+                capped,
             }) = taken
             else {
                 continue;
             };
-            let mut stops: Vec<&str> = result.err().iter().map(unread).collect();
+            let stopped = result.err().map(|error| unread(&error, capped));
+            let mut stops: Vec<&str> = stopped.into_iter().collect();
             if !unfiltered.is_empty() {
                 stops.push(UNFILTERED);
             }
@@ -2213,6 +2236,18 @@ mod tests {
         assert_eq!(found_in(&two, &checked), [past(4, "F1"), past(5, "F2")]);
         // Within the budget, both read.
         assert_eq!(unread_fonts(&report(&two, &ALL)), []);
+
+        // A /ToUnicode through more filters than the reader takes, which a
+        // font reads as past its budget: past a cap, not the budget.
+        let filters = format!("/Filter [{}]", ["/AHx"; 26].join(" "));
+        let to_unicode = stream(&filters, "41>");
+        let capped = fonts("1.7", "/F1 4 0 R", &[(4, &font(5)), (5, &to_unicode)]);
+        let checked = report(&capped, &ALL);
+        assert_eq!(
+            unread_fonts(&checked),
+            [(CAPPED, "FontType1", 1)],
+            "{checked}"
+        );
     }
 
     /// What two fonts' reads tell in one object is told once, by the first:

@@ -228,6 +228,12 @@ pub struct Document {
     /// object read from one names its bytes here, so it says where the
     /// object was read only while this is as read.
     pub decoded: BTreeMap<ObjectId, Vec<u8>>,
+    /// The object streams of `decoded` whose data is whole, as a reading
+    /// of the stream decodes it: decoded by the reader, decrypted cleanly
+    /// and nothing cut off. What the reader cut off, at a fault, the
+    /// stream's limit or the budget, or didn't decrypt cleanly, is what
+    /// the objects read from it are read from, not the stream's data.
+    pub(crate) whole: BTreeSet<ObjectId>,
     /// The file's newest incremental update, when the reader read its
     /// cross-reference sections and the newest follows one written before
     /// it.
@@ -821,6 +827,7 @@ impl Document {
             header: Some(version),
             warnings: Vec::new(),
             decoded: BTreeMap::new(),
+            whole: BTreeSet::new(),
             update: None,
             size: None,
             metadata: None,
@@ -850,6 +857,7 @@ impl Document {
             header: None,
             warnings: Vec::new(),
             decoded: BTreeMap::new(),
+            whole: BTreeSet::new(),
             update: None,
             size: None,
             metadata: None,
@@ -1216,12 +1224,15 @@ impl Source for Document {
 
 /// A stream's data as a viewer takes it ([`Streams`]), of what a document
 /// holds: an object stream's decoded data ([`Document::decoded`]), lent,
-/// within the limit, else [`Why::Limit`]. A document alone holds no other
-/// stream's data decoded, as the file's bytes are its reading's: any other
-/// stream's is [`Why::Source`], which a document read beside its reading
-/// ([`WithReading`](crate::bytes::WithReading)) gives. What isn't a stream,
-/// isn't there or doesn't read is as its resolver says
-/// ([`Resolve::try_resolve`]), [`Why::Damaged`] where that's none.
+/// within the limit, else [`Why::Limit`], where the reader decoded it
+/// whole. A document alone decodes no stream: any other stream's data is
+/// [`Why::Source`], which a document read beside its reading
+/// ([`WithReading`](crate::bytes::WithReading)) gives, and so is an object
+/// stream's that the reader cut off as it decoded it, at a fault, the
+/// stream's limit or the budget, or that didn't decrypt cleanly, as what it
+/// holds of that isn't the stream's data. What isn't a stream, isn't there
+/// or doesn't read is as its resolver says ([`Resolve::try_resolve`]),
+/// [`Why::Damaged`] where that's none.
 impl Streams for Document {
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         let object = match Resolve::try_resolve(&self, id) {
@@ -1233,14 +1244,14 @@ impl Streams for Document {
             let message = format!("{id} R doesn't read: {}", Error::NotAStream { id });
             return Err(Unreadable::new(id, Why::Damaged, message));
         }
-        match self.decoded.get(&id) {
+        match (self.decoded.get(&id)).filter(|_| self.whole.contains(&id)) {
             Some(data) => lent(id, data, limit),
             None => Err(Unreadable::new(
                 id,
                 Why::Source,
                 format!(
-                    "{id} R's data isn't held: a document alone holds the file's objects, \
-                     not its streams' data, which it's read beside its reading for"
+                    "{id} R's data isn't held decoded: a document alone decodes no stream, \
+                     and holds only the object streams its reader decoded whole"
                 ),
             )),
         }
@@ -1249,7 +1260,7 @@ impl Streams for Document {
 
 /// `data`, stream `id`'s decoded data as a reader holds it, lent where it's
 /// within `limit`, else [`Why::Limit`] ([`Streams`]).
-pub(crate) fn lent(id: ObjectId, data: &[u8], limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+fn lent(id: ObjectId, data: &[u8], limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
     match data.len() <= limit {
         true => Ok(Cow::Borrowed(data)),
         false => {

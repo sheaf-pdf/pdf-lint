@@ -11,7 +11,7 @@ use pdf_objects::{Resolve, Streams, Unreadable};
 
 use super::reading::{lenient, missing};
 use super::{ByteSource, Error, Options, Reading};
-use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread, Warning, lent};
+use crate::source::{Document, Facts, Record, Revision, Source, Trailer, Unread, Warning};
 
 /// A file read whole, with its reading kept beside it: a [`Document`]
 /// ([`WithReading::document`]) that hands out what a document doesn't hold.
@@ -95,19 +95,18 @@ impl<S: ByteSource> WithReading<S> {
 /// it ([`Reading`]'s), of the stream its document holds, so that the reading
 /// doesn't read it again: within the limit asked for or
 /// [`Limits::stream`](super::Limits::stream), whichever is less, owned. An
-/// object stream's, which the document holds decoded
-/// ([`Document::decoded`]), is lent from there. Where it gives none, it says
-/// why as a reading does, what isn't there or doesn't read as its document
-/// says.
+/// object stream's too, decoded anew: what the document holds of one
+/// ([`Document::decoded`]) is what the whole read decoded, under the
+/// reading's budget and with what didn't decrypt cleanly kept, which the
+/// objects in it are read from, not the stream's data as a reading gives it
+/// at the limit asked. Where it gives none, it says why as a reading does,
+/// what isn't there or doesn't read as its document says.
 impl<S: ByteSource> Streams for WithReading<S> {
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
         match Resolve::try_resolve(&&self.document, id) {
             Ok(Some(_)) => {}
             Ok(None) => return Err(missing(id)),
             Err(unreadable) => return Err(unreadable),
-        }
-        if let Some(data) = self.document.decoded.get(&id) {
-            return lent(id, data, limit.min(self.reading.limits().stream));
         }
         let object = Source::get(&self.document, id);
         let object = Some(object.as_ref().map(|o| *o));
@@ -243,17 +242,17 @@ mod tests {
     /// it's the same; as a source, every answer is its document's; and each
     /// object's data decoded, at the stream's limit and cut short of it, is
     /// what a reading of the file gives, where the document gives none. As
-    /// a viewer takes it ([`Streams`]), a reading, the file opened and its
-    /// document alone give the same of every object stream the document
-    /// holds decoded, and of what isn't a stream; of any other stream, the
-    /// document alone gives none, the source's, and the other two alike. A
+    /// a viewer takes it ([`Streams`]), a reading and the file opened give
+    /// the same of every object, and its document alone the same of every
+    /// object stream it holds decoded whole, and of what isn't a stream; of
+    /// any other stream, the document alone gives none, the source's. A
     /// reading of the file, as a source, answers as the file opened, once
     /// it has read every object, its warnings in the same order; before, it
     /// holds no object stream's data, and has none in the clear, until it
     /// reads an object in it.
     #[test]
     fn an_opened_file_answers_as_its_document_and_decodes_as_its_reading() {
-        let (mut streams, mut held, mut decoded) = (0, 0, 0);
+        let (mut streams, mut held, mut lent, mut decoded) = (0, 0, 0, 0);
         for (name, file, passwords) in files() {
             let opened = WithReading::new(&file[..], &passwords, &Options::DEFAULT).unwrap();
             let whole = read_opened(&file, &passwords);
@@ -297,6 +296,7 @@ mod tests {
                     Ok(pdf_objects::object::Value::Stream(_))
                 );
                 let holds = alone.decoded.contains_key(&id);
+                let lends = holds && alone.whole.contains(&id);
                 for limit in [STREAM, 1] {
                     let decoded = opened.decoded_within(id, limit).map(shown);
                     let read = shown(reading.decoded_within(id, limit));
@@ -305,7 +305,7 @@ mod tests {
                     let given = viewed(Streams::decoded(&opened, id, limit));
                     assert_eq!(given, read, "{name}: {id:?} viewed within {limit}");
                     let alone = viewed(Streams::decoded(alone, id, limit));
-                    match stream && !holds {
+                    match stream && !lends {
                         true => assert_eq!(alone, Err((id, Why::Source)), "{name}: {id:?}"),
                         false => assert_eq!(alone, read, "{name}: {id:?} alone within {limit}"),
                     }
@@ -317,6 +317,7 @@ mod tests {
                 );
                 streams += usize::from(stream);
                 held += usize::from(holds);
+                lent += usize::from(lends);
             }
             assert_eq!(opened.into_document(), whole, "{name}");
         }
@@ -324,7 +325,114 @@ mod tests {
         let floor = if fixtures() { 50 } else { 30 };
         assert!(streams > floor, "{streams}");
         assert!(held > 0, "{held}");
+        assert!(lent > 0, "{lent}");
         // Object streams a reading decoded by reading an object in each.
         assert!(decoded > 0, "{decoded}");
+    }
+
+    /// An object stream the whole read cut off as it decoded it, at the
+    /// stream's limit, at the reading's budget or where a fault stops its
+    /// filter, or whose data didn't decrypt cleanly: its document holds
+    /// what decoded, which its objects are read from, but it isn't the
+    /// stream's data. As a viewer takes it ([`Streams`]), the file opened
+    /// gives what its reading gives at every limit, the stream decoded
+    /// anew, and its document alone gives none, the source's; where the
+    /// whole read decoded it whole, the document lends it, as its reading
+    /// gives it.
+    #[test]
+    fn an_object_stream_the_whole_read_cut_off_is_given_as_its_reading_gives_it() {
+        let stream = ObjectId::new(4, 0);
+        let (mut objects, _) = super::super::tests::objects_2_and_3();
+        objects.resize(200, b' ');
+        let zlib = crate::fixture::zlib(&objects);
+        let flate = " /Filter /FlateDecode";
+        let plain = super::super::tests::filtered(false, flate, &zlib);
+        let corrupt = super::super::tests::filtered(false, flate, &zlib[..zlib.len() - 20]);
+        // Its ciphertext's whole blocks decrypt to the zlib data; a part
+        // block past them is left off, which doesn't decrypt cleanly.
+        let encrypted = super::super::lazy::encrypted_objects(flate, None);
+        let ciphertext = super::super::lazy::encrypted_container(&zlib);
+        let part = [&ciphertext[..], b"XYZ"].concat();
+        let unclean = super::super::lazy::encrypted_objects(flate, Some(&part));
+        let limited = |stream: usize, budget: usize| {
+            let mut options = Options::DEFAULT;
+            options.limits.stream = stream;
+            options.limits.budget = budget;
+            options
+        };
+        let (default, budget) = (
+            Options::DEFAULT.limits.stream,
+            Options::DEFAULT.limits.budget,
+        );
+        let (none, user) = (&[][..], &[Password("user")][..]);
+        let cases = [
+            ("whole", &plain[..], none, Options::DEFAULT, true),
+            (
+                "at the stream's limit",
+                &plain,
+                none,
+                limited(64, budget),
+                false,
+            ),
+            ("at the budget", &plain, none, limited(default, 150), false),
+            (
+                "where a fault stops its filter",
+                &corrupt,
+                none,
+                Options::DEFAULT,
+                false,
+            ),
+            ("encrypted, whole", &encrypted, user, Options::DEFAULT, true),
+            (
+                "not decrypted cleanly",
+                &unclean,
+                user,
+                Options::DEFAULT,
+                false,
+            ),
+        ];
+        for (what, file, passwords, options, whole) in cases {
+            let opened = WithReading::new(file, passwords, &options).unwrap();
+            let reading = Reading::open_with(file, passwords, &options).unwrap();
+            let alone = opened.document();
+            assert!(alone.decoded.contains_key(&stream), "{what}: held");
+            assert!(alone.get(ObjectId::new(2, 0)).is_ok(), "{what}: 2 0 R read");
+            assert_eq!(alone.whole.contains(&stream), whole, "{what}");
+            for limit in [usize::MAX, 1000, 200, 199, 64, 10] {
+                let read = viewed(Streams::decoded(&reading, stream, limit));
+                let given = viewed(Streams::decoded(&opened, stream, limit));
+                assert_eq!(given, read, "{what}: within {limit}");
+                let alone = Streams::decoded(alone, stream, limit);
+                match whole {
+                    true => {
+                        let lent = matches!(alone, Ok(Cow::Borrowed(_)) | Err(_));
+                        assert!(lent, "{what}: within {limit}");
+                        assert_eq!(viewed(alone), read, "{what}: alone within {limit}");
+                    }
+                    false => {
+                        let alone = viewed(alone);
+                        assert_eq!(alone, Err((stream, Why::Source)), "{what}: within {limit}");
+                    }
+                }
+            }
+        }
+        // What each reading gives: the stream whole but past a limit, the
+        // budget not its, what decoded of the corrupt one, and none of what
+        // didn't decrypt cleanly.
+        let given = |file: &[u8], passwords: &[Password], options: &Options| {
+            let opened = WithReading::new(file, passwords, options).unwrap();
+            viewed(Streams::decoded(&opened, stream, 1000)).map(|data| data.len())
+        };
+        assert_eq!(given(&plain, &[], &Options::DEFAULT), Ok(200));
+        assert_eq!(
+            given(&plain, &[], &limited(64, budget)),
+            Err((stream, Why::Limit))
+        );
+        assert_eq!(given(&plain, &[], &limited(default, 150)), Ok(200));
+        assert!(given(&corrupt, &[], &Options::DEFAULT).is_ok_and(|n| n > 0 && n < 200));
+        assert_eq!(
+            given(&unclean, user, &Options::DEFAULT),
+            Err((stream, Why::Locked))
+        );
     }
 }

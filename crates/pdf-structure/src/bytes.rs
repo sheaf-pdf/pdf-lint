@@ -630,6 +630,8 @@ struct Assembly {
     decrypted: Vec<Warning>,
     /// Each object stream's decoded data, where its header read.
     decoded: BTreeMap<ObjectId, Vec<u8>>,
+    /// The object streams whose decoded data is whole ([`Container`]).
+    whole: BTreeSet<ObjectId>,
     /// The object streams whose objects' strings are in the clear, where
     /// the file's aren't.
     in_the_clear: BTreeSet<ObjectId>,
@@ -660,19 +662,23 @@ impl Assembly {
     }
 
     /// Object stream `stream`, decoded: what the reader warned of as it
-    /// decoded it, and its decoded data, when its header read; and whether
-    /// its objects' strings are in the clear, where the file's aren't
-    /// (`clear`).
+    /// decoded it, and its decoded data, when its header read, and whether
+    /// that's whole (`whole`, [`Container`]); and whether its objects'
+    /// strings are in the clear, where the file's aren't (`clear`).
     fn container(
         &mut self,
         stream: u32,
         warnings: Vec<Warning>,
         data: Option<Vec<u8>>,
+        whole: bool,
         clear: bool,
     ) {
         self.containers.extend(warnings);
         if let Some(data) = data {
             self.decoded.insert(ObjectId::new(stream, 0), data);
+            if whole {
+                self.whole.insert(ObjectId::new(stream, 0));
+            }
         }
         if clear {
             self.in_the_clear.insert(ObjectId::new(stream, 0));
@@ -698,6 +704,7 @@ impl Assembly {
             members,
             decrypted,
             decoded,
+            whole,
             in_the_clear,
         } = self;
         let mut warnings = known.opened;
@@ -718,6 +725,7 @@ impl Assembly {
         document.header = known.version;
         document.warnings = warnings;
         document.decoded = decoded;
+        document.whole = whole;
         document.update = known.update;
         document.size = Some(file.len());
         document.metadata = metadata;
@@ -939,6 +947,12 @@ struct Container {
     data: Vec<u8>,
     /// Whether a fault cut its data off.
     cut: bool,
+    /// Whether its data is the stream's whole, as a reading of the stream
+    /// decodes it ([`Reading::decoded`]): decoded by the reader itself,
+    /// decrypted cleanly where it's decrypted, and nothing cut off, by a
+    /// fault, the stream's limit or the budget. Not where its header
+    /// doesn't read, nor where a decoder decoded it.
+    whole: bool,
     /// Whether its objects' strings are in the clear, where the file's
     /// aren't ([`Reader::bares_strings`]): none are, but where its header
     /// read.
@@ -1644,12 +1658,14 @@ impl Reader {
     ) -> Container {
         let id = ObjectId::new(stream, 0);
         let mut cx = Cx::default();
-        let mut cut = false;
+        let (mut cut, mut unclean) = (false, false);
         let native = self.native_containers();
         let header = match object {
             Some(Ok(object)) => {
                 let decoded = match native {
-                    true => Some(self.object_stream(&mut cx, &mut cut, id, object, data)),
+                    true => {
+                        Some(self.object_stream(&mut cx, &mut cut, &mut unclean, id, object, data))
+                    }
                     false => given,
                 };
                 let by_number = match decoded {
@@ -1684,10 +1700,12 @@ impl Reader {
         // Whether its objects' strings are in the clear: what the file
         // holds, so the same whether it decoded the data or the decoder did.
         let clear = header.is_ok() && matches!(object, Some(Ok(o)) if self.bares_strings(o));
+        let whole = header.is_ok() && native && !cut && !unclean;
         Container {
             header,
             data,
             cut,
+            whole,
             clear,
             warnings: cx.warnings,
         }
@@ -1902,11 +1920,13 @@ impl Reader {
                 let Container {
                     header,
                     data,
+                    whole,
                     clear,
                     warnings,
                     ..
                 } = *container;
-                assembly.container(stream, warnings, header.is_ok().then_some(data), clear);
+                let data = header.is_ok().then_some(data);
+                assembly.container(stream, warnings, data, whole, clear);
             }
         }
         let document = assembly.document(file, decoder, known)?;
@@ -1938,7 +1958,7 @@ impl Reader {
             if let Some(container) = lock.get() {
                 let data = (container.header.is_ok()).then(|| container.data.clone());
                 let warnings = container.warnings.clone();
-                assembly.container(stream, warnings, data, container.clear);
+                assembly.container(stream, warnings, data, container.whole, container.clear);
             }
         }
         for i in self.listing(true) {
@@ -2023,11 +2043,13 @@ impl Reader {
 
     /// Object stream `id`'s data, decoded from its own, `data`, its
     /// filters' values followed where they're references to objects in
-    /// use; `cut` set when a fault cut it off.
+    /// use; `cut` set when a fault cut it off, and `unclean` when it didn't
+    /// decrypt cleanly, what decrypted decoded.
     fn object_stream(
         &self,
         cx: &mut Cx,
         cut: &mut bool,
+        unclean: &mut bool,
         id: ObjectId,
         object: &Object,
         data: &[u8],
@@ -2067,6 +2089,7 @@ impl Reader {
                 let fault = error.fault;
                 let message = format!("its data doesn't decrypt cleanly: {fault}");
                 cx.warn(Some(id), stream.data.at(), message);
+                *unclean = true;
                 match error.data {
                     Some(plain) => (plain, false),
                     None => return Err(Undecoded::Decrypt(fault)),

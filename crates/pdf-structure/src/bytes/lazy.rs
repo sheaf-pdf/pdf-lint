@@ -42,23 +42,22 @@ pub(super) fn with_trailer(file: &[u8], entries: &str) -> Vec<u8> {
     [&file[..at], entries.as_bytes(), &file[at..]].concat()
 }
 
+/// `data` encrypted as [`encrypted_objects`] encrypts its object stream's.
+pub(super) fn encrypted_container(data: &[u8]) -> Vec<u8> {
+    let values = pdf_crypt::writer::dictionary(&settings(pdf_crypt::writer::Kind::Aes256, b"user"));
+    let handler =
+        Handler::open(&values, b"0123456789abcdef", &[Encoded::verbatim(b"user")]).unwrap();
+    pdf_crypt::writer::encrypt_stream(&handler, (4, 0), data, None, [4; 16]).unwrap()
+}
+
 /// [`filtered`]'s file, its object stream's `filter` and data `data`, in a
 /// file encrypted by AES-256 with the user's password `user`, its strings
 /// and streams by `/StdCF`; and the object stream's data, zlib, encrypted
 /// so.
 pub(super) fn encrypted_objects(filter: &str, data: Option<&[u8]>) -> Vec<u8> {
     let values = pdf_crypt::writer::dictionary(&settings(pdf_crypt::writer::Kind::Aes256, b"user"));
-    let handler =
-        Handler::open(&values, b"0123456789abcdef", &[Encoded::verbatim(b"user")]).unwrap();
     let (objects, _) = objects_2_and_3();
-    let encrypted = pdf_crypt::writer::encrypt_stream(
-        &handler,
-        (4, 0),
-        &fixture::zlib(&objects),
-        None,
-        [4; 16],
-    )
-    .unwrap();
+    let encrypted = encrypted_container(&fixture::zlib(&objects));
     let field = |b: &Option<Vec<u8>>| hex(b.as_deref().unwrap_or_default());
     let encrypt = format!(
         " /Encrypt << /Filter /Standard /V 5 /R 6 /Length 256 /P -4 /O <{}> /U <{}> /OE <{}> /UE <{}> /Perms <{}> \
