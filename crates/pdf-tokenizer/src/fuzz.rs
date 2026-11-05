@@ -101,16 +101,10 @@ pub fn walk(input: &[u8], offset: usize) -> usize {
 /// or a string that doesn't close; one that's neither white-space nor a
 /// comment), and leaves the tokenizer where that leaves it.
 pub fn skimmed<R: RuleSet>(input: &[u8], offset: usize, rules: R) {
-    let nests = |t: &Token<'_>| {
-        matches!(
-            t.kind,
-            Kind::ArrayOpen
-                | Kind::ArrayClose
-                | Kind::DictOpen
-                | Kind::DictClose
-                | Kind::String { closed: false }
-                | Kind::HexString { closed: false }
-        )
+    let nests = |t: &Token<'_>| match t.kind {
+        Kind::ArrayOpen | Kind::ArrayClose | Kind::DictOpen | Kind::DictClose => true,
+        Kind::LiteralString | Kind::HexString => !t.closed,
+        _ => false,
     };
     let tokens = Tokenizer::at(input, offset).with_rules(rules);
     let (mut skim, mut walk) = (tokens.clone(), tokens.clone());
@@ -234,7 +228,8 @@ pub fn check(input: &[u8], token: &Token<'_>, at: usize) {
 }
 
 /// Checks that `token`, read under `rules`, starts at `at`, is the input's
-/// bytes there, and keeps its kind's promises.
+/// bytes there, and keeps its kind's promises, `closed` among them: false
+/// only for a string whose closing delimiter didn't come.
 pub fn check_with(input: &[u8], token: &Token<'_>, at: usize, rules: Rules) {
     assert_eq!(token.start, at, "tokens join with no gap or overlap");
     assert_eq!(input.get(token.range()), Some(token.bytes));
@@ -242,6 +237,9 @@ pub fn check_with(input: &[u8], token: &Token<'_>, at: usize, rules: Rules) {
     let next = input.get(token.end()).copied();
     if token.kind != Kind::Data {
         assert!(!bytes.is_empty(), "only data can be empty");
+    }
+    if !matches!(token.kind, Kind::LiteralString | Kind::HexString) {
+        assert!(token.closed, "every token but a string is closed");
     }
     let regular = |b| rules.is_regular(b);
     let maximal = !next.is_some_and(regular);
@@ -266,16 +264,18 @@ pub fn check_with(input: &[u8], token: &Token<'_>, at: usize, rules: Rules) {
             };
             assert_eq!(token.kind, kind.unwrap_or(Kind::Keyword));
         }
-        Kind::String { closed } => {
+        Kind::LiteralString => {
             assert_eq!(bytes[0], b'(');
+            let closed = token.closed;
             assert_eq!(balanced_at(bytes), closed.then_some(bytes.len()));
             if !closed {
                 assert_eq!(token.end(), input.len());
             }
         }
-        Kind::HexString { closed } => {
+        Kind::HexString => {
             assert_eq!(bytes[0], b'<');
             assert_ne!(input.get(token.start + 1), Some(&b'<'));
+            let closed = token.closed;
             let inside = if closed {
                 assert_eq!(bytes.last(), Some(&b'>'));
                 &bytes[1..bytes.len() - 1]
@@ -324,7 +324,7 @@ pub fn check_decoding_with(input: &[u8], token: &Token<'_>, rules: Rules) {
         }
         Kind::Integer => check_integer(token),
         Kind::Real => check_number(token),
-        Kind::Name | Kind::String { .. } | Kind::HexString { .. } => {
+        Kind::Name | Kind::LiteralString | Kind::HexString => {
             check_pieces(input, token, rules);
             check_pdfium_bytes(input, token);
         }
@@ -334,11 +334,7 @@ pub fn check_decoding_with(input: &[u8], token: &Token<'_>, rules: Rules) {
         }
     }
     check_pdfium_number(token.bytes);
-    for kind in [
-        Kind::Name,
-        Kind::String { closed: true },
-        Kind::HexString { closed: true },
-    ] {
+    for kind in [Kind::Name, Kind::LiteralString, Kind::HexString] {
         verbatim_as_walked(&Token { kind, ..*token });
     }
 }
@@ -531,7 +527,7 @@ fn check_pdfium_bytes(input: &[u8], token: &Token<'_>) {
             });
             assert!(pdfium::name(bytes).eq(meant), "{bytes:?}");
         }
-        Kind::String { closed } => {
+        Kind::LiteralString => {
             let pieces = token.pieces().expect("strings have pieces");
             let meant = pieces.flat_map(|piece| {
                 let written = &input[piece.at.clone()];
@@ -539,7 +535,7 @@ fn check_pdfium_bytes(input: &[u8], token: &Token<'_>) {
                     && written[0] == b'\\'
                     && written[1..].iter().all(|b| (b'0'..=b'7').contains(b))
                     && written.len() > 1;
-                let dropped = !closed && piece.at.end == token.end() && short_octal;
+                let dropped = !token.closed && piece.at.end == token.end() && short_octal;
                 let (run, byte) = match piece.how {
                     How::EolAsLf => (written, None),
                     _ if dropped => (&[][..], None),
@@ -549,7 +545,7 @@ fn check_pdfium_bytes(input: &[u8], token: &Token<'_>) {
             });
             assert!(pdfium::literal(bytes).eq(meant), "{bytes:?}");
         }
-        Kind::HexString { .. } => {
+        Kind::HexString => {
             let inside = bytes[1..].split(|&b| b == b'>').next().unwrap_or_default();
             let mut digits = inside.iter().copied().filter(u8::is_ascii_hexdigit);
             let meant = core::iter::from_fn(|| {
@@ -562,7 +558,7 @@ fn check_pdfium_bytes(input: &[u8], token: &Token<'_>) {
     }
     let longest = match token.kind {
         Kind::Name => pdfium::name(bytes).count(),
-        Kind::String { .. } => pdfium::literal(bytes).count(),
+        Kind::LiteralString => pdfium::literal(bytes).count(),
         _ => pdfium::hex(bytes).count(),
     };
     assert!(longest < bytes.len(), "never longer than its token");
@@ -571,10 +567,8 @@ fn check_pdfium_bytes(input: &[u8], token: &Token<'_>) {
 fn check_pieces(input: &[u8], token: &Token<'_>, rules: Rules) {
     let pieces = token.pieces().expect("names and strings have pieces");
     let total = pieces.clone().count();
-    let closed = matches!(
-        token.kind,
-        Kind::String { closed: true } | Kind::HexString { closed: true }
-    );
+    // A string's close came; a name has none.
+    let closed = matches!(token.kind, Kind::LiteralString | Kind::HexString) && token.closed;
     let octal = |b: &u8| (b'0'..=b'7').contains(b);
     let mut at = token.start;
     for (i, piece) in pieces.enumerate() {
@@ -587,7 +581,7 @@ fn check_pieces(input: &[u8], token: &Token<'_>, rules: Rules) {
         match (token.kind, piece.how) {
             // A hex string by PDFium's rules runs over bytes ISO 32000-2's
             // can't hold.
-            (Kind::HexString { .. }, How::Invalid) if rules == Rules::Pdfium => {
+            (Kind::HexString, How::Invalid) if rules == Rules::Pdfium => {
                 assert!(written.len() == 1 && !hex_or_space(written[0]));
                 assert_ne!(written[0], b'>');
                 assert_eq!(byte, None);
@@ -607,7 +601,7 @@ fn check_pieces(input: &[u8], token: &Token<'_>, rules: Rules) {
                 assert_eq!(byte, Some(written[0]));
                 match kind {
                     Kind::Name => assert_ne!(written[0], b'#'),
-                    Kind::String { .. } => assert!(!matches!(written[0], b'\\' | b'\r')),
+                    Kind::LiteralString => assert!(!matches!(written[0], b'\\' | b'\r')),
                     _ => panic!("a hex string has no plain bytes"),
                 }
             }
@@ -622,7 +616,7 @@ fn check_pieces(input: &[u8], token: &Token<'_>, rules: Rules) {
                 let pair = after.len() >= 2 && after[..2].iter().all(u8::is_ascii_hexdigit);
                 assert!(!pair, "a # with two hex digits is an escape");
             }
-            (Kind::String { .. }, How::Escape | How::OctalOverflow | How::IgnoredBackslash) => {
+            (Kind::LiteralString, How::Escape | How::OctalOverflow | How::IgnoredBackslash) => {
                 let [b'\\', escaped @ ..] = written else {
                     panic!("an escape starts with a backslash: {written:?}");
                 };
@@ -652,26 +646,26 @@ fn check_pieces(input: &[u8], token: &Token<'_>, rules: Rules) {
                     assert!(b != b'\r' && b != b'\n');
                 }
             }
-            (Kind::String { .. }, How::LineContinuation) => {
+            (Kind::LiteralString, How::LineContinuation) => {
                 let lone_cr = written == b"\\\r" && after.first() != Some(&b'\n');
                 assert!(written == b"\\\r\n" || written == b"\\\n" || lone_cr);
                 assert_eq!(byte, None);
             }
-            (Kind::String { .. }, How::EolAsLf) => {
+            (Kind::LiteralString, How::EolAsLf) => {
                 let lone_cr = written == b"\r" && after.first() != Some(&b'\n');
                 assert!(written == b"\r\n" || lone_cr);
                 assert_eq!(byte, Some(b'\n'));
             }
-            (Kind::String { .. }, How::Dangling) => {
+            (Kind::LiteralString, How::Dangling) => {
                 assert_eq!(written, b"\\");
                 assert!(i + 1 == total && !closed);
                 assert_eq!(byte, None);
             }
-            (Kind::HexString { .. }, How::HexSpace) => {
+            (Kind::HexString, How::HexSpace) => {
                 assert!(written.len() == 1 && is_white_space(written[0]));
                 assert_eq!(byte, None);
             }
-            (Kind::HexString { .. }, How::Escape) => {
+            (Kind::HexString, How::Escape) => {
                 let (high, low) = (written[0], written[written.len() - 1]);
                 assert!(written.len() >= 2 && high.is_ascii_hexdigit() && low.is_ascii_hexdigit());
                 assert!(
@@ -682,7 +676,7 @@ fn check_pieces(input: &[u8], token: &Token<'_>, rules: Rules) {
                 let value = u8::from_str_radix(from_utf8(&[high, low]).unwrap(), 16).unwrap();
                 assert_eq!(byte, Some(value));
             }
-            (Kind::HexString { .. }, How::OddDigit) => {
+            (Kind::HexString, How::OddDigit) => {
                 assert!(written.len() == 1 && written[0].is_ascii_hexdigit());
                 let next = after.iter().find(|&&b| !is_white_space(b));
                 // By PDFium's rules, a byte ISO 32000-2's can't hold may
@@ -739,8 +733,8 @@ pub fn side_by_side(input: &[u8], offset: usize) {
         assert_eq!(iso.start, token.start);
         let after = input.get(token.end()).copied();
         match token.kind {
-            Kind::HexString { .. } if iso.bytes != token.bytes => {
-                assert_eq!(iso.kind, Kind::HexString { closed: false });
+            Kind::HexString if iso.bytes != token.bytes => {
+                assert_eq!((iso.kind, iso.closed), (Kind::HexString, false));
                 assert!(token.bytes.starts_with(iso.bytes));
                 let stop = token.bytes[iso.bytes.len()];
                 assert!(!hex_or_space(stop) && stop != b'>', "{stop:#x}");

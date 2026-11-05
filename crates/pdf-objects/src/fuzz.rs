@@ -327,8 +327,8 @@ fn read_otherwise(token: &Token) -> bool {
         }
         Kind::Real => long || decode::number(bytes).ok() != Some(pdfium::real(bytes)),
         Kind::Name => long || !pdfium::name(bytes).eq(decode::name(bytes).bytes()),
-        Kind::String { .. } => !pdfium::literal(bytes).eq(decode::literal(bytes).bytes()),
-        Kind::HexString { .. } => !pdfium::hex(bytes).eq(decode::hex(bytes).bytes()),
+        Kind::LiteralString => !pdfium::literal(bytes).eq(decode::literal(bytes).bytes()),
+        Kind::HexString => !pdfium::hex(bytes).eq(decode::hex(bytes).bytes()),
         _ => false,
     }
 }

@@ -873,9 +873,14 @@ impl<'a> Parser<'a> {
                 }
             },
             Kind::Name => Value::Name(self.name(&token, pdfium, sink)),
-            Kind::String { closed: true } | Kind::HexString { closed: true } => {
+            Kind::LiteralString | Kind::HexString if !token.closed => {
+                return Err(Error::String {
+                    at: self.place(token.start),
+                });
+            }
+            Kind::LiteralString | Kind::HexString => {
                 let form = match token.kind {
-                    Kind::HexString { .. } => Form::Hex,
+                    Kind::HexString => Form::Hex,
                     _ => Form::Literal,
                 };
                 let bytes = match pdfium {
@@ -887,11 +892,6 @@ impl<'a> Parser<'a> {
                     false => Str::Bytes(bytes),
                 };
                 Value::String(s, Some(form))
-            }
-            Kind::String { closed: false } | Kind::HexString { closed: false } => {
-                return Err(Error::String {
-                    at: self.place(token.start),
-                });
             }
             Kind::ArrayOpen => {
                 let mut array = Vec::new();
@@ -1095,7 +1095,7 @@ impl<'a> Parser<'a> {
             return value.to_vec();
         }
         let bytes = match token.kind {
-            Kind::HexString { .. } => pdfium::hex(token.bytes),
+            Kind::HexString => pdfium::hex(token.bytes),
             _ => pdfium::literal(token.bytes),
         };
         if sink.wants() {
@@ -1114,7 +1114,7 @@ impl<'a> Parser<'a> {
     ) {
         let written = token.bytes;
         let fault = match token.kind {
-            Kind::HexString { .. } => {
+            Kind::HexString => {
                 // Between its `<` and its `>`.
                 let inner = written.get(1..written.len().saturating_sub(1));
                 let stray = |b: &u8| !b.is_ascii_hexdigit() && !pdf_tokenizer::is_white_space(*b);
@@ -1343,7 +1343,7 @@ impl Call {
 fn starts_value(token: &Token) -> bool {
     match token.kind {
         Kind::Integer | Kind::Real | Kind::Name | Kind::ArrayOpen | Kind::DictOpen => true,
-        Kind::String { closed } | Kind::HexString { closed } => closed,
+        Kind::LiteralString | Kind::HexString => token.closed,
         Kind::Keyword => matches!(token.bytes, b"true" | b"false" | b"null"),
         _ => false,
     }

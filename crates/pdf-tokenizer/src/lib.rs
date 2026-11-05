@@ -5,9 +5,10 @@
 //!   comments included, so the tokens join back into the input.
 //! - **Total:** it never rejects and never repairs. A `)` or `>` that
 //!   closes nothing is a [`Kind::Junk`] token, a string that doesn't end is
-//!   marked unclosed, and every token moves it on.
-//! - **Zero-copy, from any offset:** a [`Token`] is a kind, an offset, and
-//!   its bytes as written, borrowed from the input.
+//!   a string token with [`Token::closed`] false, and every token moves it
+//!   on.
+//! - **Zero-copy, from any offset:** a [`Token`] is a kind, whether it
+//!   closed, an offset, and its bytes as written, borrowed from the input.
 //! - **No grammar:** `obj`, `R`, `stream`, `xref` and `trailer` are
 //!   keywords like any other. Joining `n g R` or `n g obj` is the next
 //!   layer's work. [`Tokenizer::skim`] passes an array's or a dictionary's

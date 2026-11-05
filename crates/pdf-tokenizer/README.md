@@ -9,8 +9,8 @@ Every promise below is checked on every token by the tests, a fuzz target, and t
 ## What it promises
 
 - **Lossless.** Every byte is in exactly one token, white-space and comments included. Join the tokens and you have the input back, byte for byte.
-- **Total.** It never rejects input, never repairs it, and never panics. A `)` with no string open, or a `>` that isn't part of `>>`, is a `Junk` token. A string that doesn't end is a string token marked unclosed. Every token moves it forward.
-- **Zero-copy.** A token is a kind, an offset, and its bytes as written, borrowed from your input. Nothing is allocated, copied or decoded.
+- **Total.** It never rejects input, never repairs it, and never panics. A `)` with no string open, or a `>` that isn't part of `>>`, is a `Junk` token. A string that doesn't end is a string token with `closed` false. Every token moves it forward.
+- **Zero-copy.** A token is a kind, whether it closed, an offset, and its bytes as written, borrowed from your input. Nothing is allocated, copied or decoded.
 - **From any offset.** Start where a cross-reference entry points, in the middle of a file, or at the start of a content stream. The tokenizer carries nothing from one token to the next, so started at any token, it yields that token.
 - **A slice of a file.** Give it as much of a file as you've read, and only the token that reaches the end of it can come out otherwise when more bytes follow: `12` may be `123`, `>` may be `>>`, a string may be cut short, white-space may go on. Every other token is settled by the bytes you gave it, so when the last one reaches the end, read more and tokenize again from where it starts.
 - **No grammar.** `obj`, `R`, `stream`, `xref`, `trailer`, `true` and `null` are keywords like any other, and `3 0 R` is three tokens with spaces between them. Joining tokens into references, objects or cross-reference sections is the next layer's work. `skim()` passes what an array or a dictionary holds without a token for each, giving only the tokens that open or close one, and a string that doesn't close, but which of them closes which, and how deep is too deep, are still the caller's to say.
@@ -41,7 +41,7 @@ assert_eq!(kinds(Rules::Iso), [
     Kind::Keyword,
     Kind::Keyword,
     Kind::Keyword,
-    Kind::HexString { closed: false },
+    Kind::HexString,
     Kind::Keyword,
     Kind::Junk,
     Kind::Keyword,
@@ -50,9 +50,19 @@ assert_eq!(kinds(Rules::Pdfium), [
     Kind::Integer,
     Kind::Real,
     Kind::Keyword,
-    Kind::HexString { closed: true },
+    Kind::HexString,
     Kind::Keyword,
 ]);
+
+// The hex string ends before the `G` to ISO 32000-2, unclosed, and runs to
+// its `>` to PDFium.
+let hex = |rules| {
+    let mut tokens = Tokenizer::new(input).with_rules(rules);
+    let hex = tokens.find(|t| t.kind == Kind::HexString).unwrap();
+    (hex.closed, hex.bytes)
+};
+assert_eq!(hex(Rules::Iso), (false, &b"<4"[..]));
+assert_eq!(hex(Rules::Pdfium), (true, &b"<4G1>"[..]));
 ```
 
 A `Rules` value, as above, chooses the rules as the tokenizer runs, for a reader that learns only then which it wants, at a branch a token. `Iso` and `Pdfium` fix them in the tokenizer's type instead, with nothing to choose at each token: `Tokenizer<'a>` is `Tokenizer<'a, Iso>`, what `new` and `at` give, and `with_rules(Pdfium)` gives a `Tokenizer<'a, Pdfium>`. The tokens are the same either way.
@@ -185,8 +195,8 @@ Text strings (PDFDocEncoding, and UTF-16BE or UTF-8 with a byte-order mark) are 
 
 - `Tokenizer::new(bytes)` and `Tokenizer::at(bytes, offset)`: an iterator of `Token`s, by ISO 32000-2's rules. Cloning one is cheap, so a clone can look ahead.
 - `with_rules(Pdfium)` or `with_rules(Rules::Pdfium)`, and `rules()`: the rules it follows from its next token on, fixed in its type (`Iso`, the default, or `Pdfium`) or chosen as it runs (`Rules`). `Rules::is_white_space` and `is_regular` say a byte's class under each.
-- `Token { kind, start, bytes }`: `bytes` is a slice of the input, and `range()` says where it is.
-- `Kind`: the lexical kinds, and `Data` for bytes the caller measured.
+- `Token { kind, closed, start, bytes }`: `bytes` is a slice of the input, `range()` says where it is, and `closed` is false only for a literal or hexadecimal string whose closing delimiter didn't come.
+- `Kind`: the lexical kinds, one byte each, and `Data` for bytes the caller measured.
 - `eol()`, `space_byte()`, `data(len)` and `data_until(marker)`: for the data after `stream` and `ID`.
 - `next_significant()`: the next token that's neither white-space nor a comment, with no token made of what it passes. `skim()`: the next that opens or closes an array or a dictionary, or a string that doesn't close, looking only at the bytes that could start one; from an opener, skimming on to the closer that balances it passes all it holds.
 - `is_white_space`, `is_delimiter` and `is_regular`: ISO 32000-2's three classes of byte.

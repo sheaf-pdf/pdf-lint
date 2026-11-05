@@ -481,8 +481,8 @@ impl<'a> Token<'a> {
     pub fn pieces(&self) -> Option<Pieces<'a>> {
         let syntax = match self.kind {
             Kind::Name => Syntax::Name,
-            Kind::String { .. } => Syntax::Literal,
-            Kind::HexString { .. } => Syntax::Hex,
+            Kind::LiteralString => Syntax::Literal,
+            Kind::HexString => Syntax::Hex,
             _ => return None,
         };
         Some(Pieces::new(self.bytes, self.start, syntax))
@@ -505,11 +505,11 @@ impl<'a> Token<'a> {
                     .all(|&b| is_regular(b) && b != b'#')
                     .then_some(body)?
             }
-            Kind::String { .. } => literal_verbatim(bytes)?,
+            Kind::LiteralString => literal_verbatim(bytes)?,
             // No piece of a hex string is plain (each between its
             // delimiters is digits, white-space or a byte it can't hold),
             // so it's verbatim only with nothing but them.
-            Kind::HexString { .. } => match bytes {
+            Kind::HexString => match bytes {
                 [] | [b'<' | b'>'] | [b'<', b'>'] => &[],
                 _ => return None,
             },
@@ -1076,17 +1076,19 @@ mod tests {
             b"",
             b")))(((",
         ];
-        let kinds = [
-            Kind::Name,
-            Kind::String { closed: true },
-            Kind::HexString { closed: false },
-        ];
+        let kinds = [Kind::Name, Kind::LiteralString, Kind::HexString];
         for input in inputs {
             for start in 0..=input.len() {
                 for end in start..=input.len() {
                     for kind in kinds {
                         let bytes = &input[start..end];
-                        fuzz::verbatim_as_walked(&Token { kind, start, bytes });
+                        let token = Token {
+                            kind,
+                            closed: true,
+                            start,
+                            bytes,
+                        };
+                        fuzz::verbatim_as_walked(&token);
                     }
                 }
             }
@@ -1095,6 +1097,7 @@ mod tests {
         let scanned = |kind, bytes: &'static [u8]| {
             Token {
                 kind,
+                closed: true,
                 start: 0,
                 bytes,
             }
@@ -1107,19 +1110,16 @@ mod tests {
         );
         assert_eq!(scanned(Kind::Name, b"/A/B"), None);
         assert_eq!(
-            scanned(Kind::String { closed: true }, b"(a)b"),
+            scanned(Kind::LiteralString, b"(a)b"),
             None,
             "nothing after the close"
         );
         assert_eq!(
-            scanned(Kind::String { closed: true }, b"a)b"),
+            scanned(Kind::LiteralString, b"a)b"),
             Some(&b"a)b"[..]),
             "no open, no close"
         );
-        assert_eq!(
-            scanned(Kind::HexString { closed: true }, b">"),
-            Some(&b""[..])
-        );
-        assert_eq!(scanned(Kind::HexString { closed: true }, b"<<"), None);
+        assert_eq!(scanned(Kind::HexString, b">"), Some(&b""[..]));
+        assert_eq!(scanned(Kind::HexString, b"<<"), None);
     }
 }
