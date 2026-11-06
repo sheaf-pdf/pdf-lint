@@ -64,7 +64,7 @@ use std::ptr;
 
 use pdf_fonts::{Error, Fault, Font, Limits};
 use pdf_objects::fault::{Place, Sink};
-use pdf_objects::{Streams, With};
+use pdf_objects::{Streams, WithStreams};
 use unicode_script::{Script, UnicodeScript};
 
 use super::content::times;
@@ -335,7 +335,7 @@ fn read<'a>(source: &'a dyn Source, font: &'a Dict, budget: &mut usize) -> Optio
         objects: Objects(source),
         failed: &failed,
     };
-    let streams = With::new(objects, |id, limit| {
+    let streams = WithStreams::new(objects, |id, limit| {
         let decoded = decoded(source, id, limit, &asked);
         // What takes a password or is past a cap, which isn't the file's
         // fault; not what's damaged or through filters the reader doesn't

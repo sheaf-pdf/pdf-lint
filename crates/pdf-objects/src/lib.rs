@@ -70,8 +70,8 @@
 //!   and decoded through its filters, as a viewer takes it, a reader's or
 //!   a document's, at most a limit the caller asks for, lent where the
 //!   reader holds it, and why it gives none, in the same words as a
-//!   resolver's ([`Why`]); and [`With`], a resolver and a function as one,
-//!   for what has its streams some other way.
+//!   resolver's ([`Why`]); and [`WithStreams`], a resolver and a function
+//!   as one, for what has its streams some other way.
 //! - **Faults, told with where they are** ([`fault`]): one
 //!   [`fault::Sink`] and one [`fault::Place`] for every reader of a file's
 //!   objects, each reader's faults a type of its own, so that one sink can
@@ -100,7 +100,7 @@ pub use parse::Limits;
 /// ([`parse::Parser::rules`]) and [`text::decode_with`] read by: named
 /// through it, they're the version this crate is built with.
 pub use pdf_tokenizer;
-pub use streams::{Streams, With};
+pub use streams::{Streams, WithStreams};
 pub use version::Version;
 
 /// What gives the indirect objects a value's references name: a file's,

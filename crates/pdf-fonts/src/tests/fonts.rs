@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::object::Stream;
-use pdf_objects::{Streams, With, dict};
+use pdf_objects::{Streams, WithStreams, dict};
 
 use super::afm;
 use crate::fuzz::digest;
@@ -997,7 +997,7 @@ fn a_to_unicode_that_doesn_t_decode_is_told() {
     let map = b"1 beginbfchar <41> <0416> endbfchar".to_vec();
     let to_unicode = pdf.add_object(Stream::new(dict! {}, map));
     let font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica", "ToUnicode" => to_unicode };
-    let undecoded = With::new(&pdf, |id, _| {
+    let undecoded = WithStreams::new(&pdf, |id, _| {
         Err(Unreadable::new(id, Why::Damaged, "it decodes to nothing"))
     });
     let mut told = Vec::new();
@@ -1556,7 +1556,7 @@ fn a_font_holds_a_streams_to_what_it_asked() {
     type Given<'g> = &'g dyn Fn(usize) -> Result<Vec<u8>, Unreadable>;
     let read = |given: Given, budget: &mut usize, told: &mut Vec<(Place, Fault)>| {
         let asked = Cell::new(None);
-        let objects = With::new(&pdf, |id, limit| {
+        let objects = WithStreams::new(&pdf, |id, limit| {
             assert_eq!(id, to_unicode);
             asked.set(Some(limit));
             given(limit)

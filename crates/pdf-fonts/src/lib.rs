@@ -28,17 +28,17 @@
 //!
 //! Nothing panics on what a file holds. A pdf-structure `&Reading` gives a font its
 //! objects and streams, and so does anything else that implements pdf-objects'
-//! `Resolve` and `Streams`, or [`With`](pdf_objects::With), a resolver and a function as
-//! one; with `predefined-cmaps`, a Type 0 font's predefined CMap is Adobe's, where
-//! without it it reads as one the build hasn't.
+//! `Resolve` and `Streams`, or [`WithStreams`](pdf_objects::WithStreams), a resolver
+//! and a function as one; with `predefined-cmaps`, a Type 0 font's predefined CMap is
+//! Adobe's, where without it it reads as one the build hasn't.
 //!
 //! ```
 //! use pdf_fonts::{Font, Limits, Object, ObjectId, Unreadable, Why};
-//! use pdf_objects::{With, dict};
+//! use pdf_objects::{WithStreams, dict};
 //!
 //! // A font with no streams, over a resolver of nothing.
 //! let none = |_: ObjectId| -> Option<&Object> { None };
-//! let objects = With::new(&none, |id, _| Err(Unreadable::new(id, Why::Damaged, "none")));
+//! let objects = WithStreams::new(&none, |id, _| Err(Unreadable::new(id, Why::Damaged, "none")));
 //! let font = dict! {
 //!     "Subtype" => "Type1", "BaseFont" => "Arial,Bold", "Encoding" => "WinAnsiEncoding",
 //! };
