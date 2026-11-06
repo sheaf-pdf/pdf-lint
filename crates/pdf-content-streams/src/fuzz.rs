@@ -146,9 +146,14 @@ pub fn content(data: &[u8]) {
                     kind => panic!("{kind} where the caps' alone could be"),
                 }
             }
-            // An image whose data is decoded past the cap before it's found
-            // not to end.
-            (Err(e), Some(Err(first))) if e.kind == ErrorKind::ImageEnds => {
+            // An image whose data is decoded past the small cap before it's
+            // found not to end; one that costs more than the default budget
+            // too (a JPEG declaring a frame of thousands of pixels a side
+            // and giving a few bytes of it) is the same error under both,
+            // which the arm below holds.
+            (Err(e), Some(Err(first)))
+                if e.kind == ErrorKind::ImageEnds && first.kind != ErrorKind::ImageEnds =>
+            {
                 assert_eq!((e.at, first.kind), (first.at, ErrorKind::InlineImage));
             }
             (token, first) => assert_eq!(Some(token), first, "the same under small caps"),
