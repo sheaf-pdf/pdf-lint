@@ -69,6 +69,7 @@ pub fn check_file(data: &[u8]) {
         _ => (0, data),
     };
     let doc = read(file, None);
+    let metadata = metadata_stream(&doc);
     let (hold, options) = setting(choice, doc.document());
     let report = check_with_reading(&doc, &hold, &options);
     assert_eq!(
@@ -81,7 +82,7 @@ pub fn check_file(data: &[u8]) {
     for finding in &report.findings {
         if let Some(at) = finding.at {
             assert!(
-                within(&doc, file, at, &mut lengths),
+                within(&doc, file, at, metadata, &mut lengths),
                 "{finding}: its bytes are out of what was read"
             );
         }
@@ -366,27 +367,49 @@ fn reading_alone(beside: &Report, alone: &Report) {
     );
 }
 
-/// Whether `at` is inside what was read: the file, or the decoded data of
-/// the stream it's in, an object stream's as `doc` holds it, else as its
-/// reading decodes it, as content is read, each stream's length kept in
-/// `lengths` once it's decoded.
+/// Whether `at` is inside what was read: the file, or the data of the
+/// stream it's in, which is read one of three ways: an object stream's as
+/// `doc` holds it; the catalog's metadata stream's, `metadata`, as
+/// [`Source::metadata`] gives it, in plain view, which the XMP check reads
+/// even in a file whose other streams are refused (one encrypted by a
+/// security handler the reader can't open, whose encryption dictionary says
+/// its metadata isn't encrypted); else as its reading decodes it, as
+/// content is read, each stream's length kept in `lengths` once it's
+/// decoded.
 fn within(
     doc: &WithReading<&[u8]>,
     file: &[u8],
     at: Span,
+    metadata: Option<ObjectId>,
     lengths: &mut BTreeMap<ObjectId, Option<usize>>,
 ) -> bool {
     let len = match at.stream {
         None => Some(file.len()),
-        Some(stream) => match doc.document().decoded.get(&stream) {
-            Some(data) => Some(data.len()),
-            None => *lengths.entry(stream).or_insert_with(|| {
-                let decoded = doc.reading().decoded_within(stream, usize::MAX);
-                decoded.ok().map(|data| data.len())
-            }),
-        },
+        Some(stream) => {
+            let held = doc.document().decoded.get(&stream).map(Vec::len);
+            let plain = (metadata == Some(stream))
+                .then(|| Source::metadata(doc).map(|data| data.len()))
+                .flatten();
+            held.or(plain).or_else(|| {
+                *lengths.entry(stream).or_insert_with(|| {
+                    let decoded = doc.reading().decoded_within(stream, usize::MAX);
+                    decoded.ok().map(|data| data.len())
+                })
+            })
+        }
     };
     len.is_some_and(|len| at.start <= at.end && at.end <= len)
+}
+
+/// The catalog's metadata stream, as the XMP check names it
+/// ([`xmp::metadata_stream`](pdf_semantics::xmp::metadata_stream)): where a
+/// finding in the packet's bytes is placed.
+fn metadata_stream(doc: &WithReading<&[u8]>) -> Option<ObjectId> {
+    let trailer = Source::trailer(doc).dict();
+    let catalog = pdf_semantics::catalog(doc, trailer).ok().flatten()?;
+    pdf_semantics::xmp::metadata_stream(doc, catalog)
+        .ok()
+        .flatten()
 }
 
 /// Files for the fuzzer to begin from, each with its name, made for it: a
@@ -406,7 +429,9 @@ fn within(
 /// object stream whose header starts two objects inside another's bytes; an
 /// incremental update, and one that writes again the information dictionary
 /// the earlier trailer names; the page linearized, its linearization
-/// holding, and then updated, which voids it; and encrypted files, one of
+/// holding, and then updated, which voids it; a file whose security
+/// handler isn't known but whose metadata is in plain view, with XML that
+/// doesn't read; and encrypted files, one of
 /// them with an object stream whose data isn't encrypted, so that its
 /// objects' strings are in the clear. Each begins with the two bytes that
 /// choose how it's checked, all clear, as the `check` and `structure`
@@ -533,6 +558,22 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         "<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>".to_string(),
         format!("<< /Type /Halftone /HalftoneType 5 /Default {screen} /All {screen} >>"),
     ];
+    // A file encrypted by a security handler the reader can't open, whose
+    // encryption dictionary says its metadata isn't encrypted: the XMP is
+    // read in plain view, its attribute that doesn't read found, where every
+    // other stream is refused.
+    let locked_metadata = [
+        "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        leaf("2 0 R"),
+        stream("/Type /Metadata /Subtype /XML", xmp),
+        "<< /Filter /NotStandard /V 4 /R 4 /Length 128 /P -4 /EncryptMetadata false \
+         /CF << /StdCF << /CFM /AESV2 /AuthEvent /DocOpen /Length 16 >> >> \
+         /StmF /StdCF /StrF /StdCF \
+         /O <0ba3835f88f90388e74e54584125ce142be0de24c6b0d37746e075b891756671> \
+         /U <c537d2828205039ff59b444fcf97f0f10021446990b9e4114071a4d9104984c1> >>"
+            .to_string(),
+    ];
     let id = "<0123456789abcdef0123456789abcdef>";
     let (linearized, linearized_updated) = linearized(&page);
     let mut seeds = vec![
@@ -557,6 +598,10 @@ pub fn seeds() -> Vec<(&'static str, Vec<u8>)> {
         (
             "encrypted",
             file(&encrypted, &format!("/Encrypt 4 0 R /ID [{id} {id}]")).0,
+        ),
+        (
+            "locked-plain-metadata",
+            file(&locked_metadata, &format!("/Encrypt 5 0 R /ID [{id} {id}]")).0,
         ),
         ("encrypted-rc4-40", opens(Kind::Rc4By40, Packing::Streams)),
         ("encrypted-rc4-128", opens(Kind::Rc4By128, Packing::Streams)),
@@ -1158,11 +1203,13 @@ mod tests {
                 doc.trailer()
             );
             // But where objects start inside another's bytes, the second
-            // page and the page tree's resources, inside the first page.
+            // page and the page tree's resources, inside the first page; and
+            // the file whose security handler isn't known warns of it once.
             let inside: &[_] = match name {
                 "object-streams-overlapping" => {
                     &[Some(ObjectId::new(6, 0)), Some(ObjectId::new(5, 0))]
                 }
+                "locked-plain-metadata" => &[None],
                 _ => &[],
             };
             let on: Vec<_> = doc.warnings.iter().map(|w| w.object).collect();
@@ -1179,7 +1226,7 @@ mod tests {
                 "page-tree" => &["page-tree"],
                 "viewer" => &["page-tree", "viewer"],
                 "name-tree" => &["tree"],
-                "xmp" => &["xmp"],
+                "xmp" | "locked-plain-metadata" => &["xmp"],
                 _ => &[],
             };
             assert_eq!(
