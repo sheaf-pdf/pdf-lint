@@ -611,7 +611,7 @@ mod tests {
                     "Type" => "Annot",
                     "Subtype" => "Text",
                     "Rect" => vec![Object::from(100), Object::from(100), Object::from(120), Object::from(120)],
-                    "Contents" => Object::string("A note"),
+                    "Contents" => Object::text("A note"),
                     "AP" => dict! { "N" => r(5) },
                 }
                 .into(),
@@ -1021,7 +1021,7 @@ mod tests {
 
         let dir = scratch("created");
         let mut objects = clean();
-        objects.push((6, dict! { "Title" => Object::string("A title") }.into()));
+        objects.push((6, dict! { "Title" => Object::text("A title") }.into()));
         let cases = [
             ("user", "user"),
             ("p\u{e4}ssw\u{f6}rd", "p\u{e4}ssw\u{f6}rd"),

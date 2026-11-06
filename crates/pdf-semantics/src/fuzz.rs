@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::parse::Parser;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Rules, Unreadable, Value, Why, serialize};
+use pdf_objects::pdf_tokenizer::Rules;
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Value, Why, serialize};
 
 use crate::date::{Date, Quirk};
 use crate::pages::{Error, Inheritable, Origin, Page, Pages, Rect, pages};
@@ -169,7 +170,7 @@ impl<'o, R: Resolve<'o> + Copy> Plain<'o, R> {
                 }
             }
         }
-        self.failed(&Unreadable::new(last, Why::Limit, ""));
+        self.failed(&Unreadable::new(last, Why::Capped, ""));
         Plainly::Failed
     }
 

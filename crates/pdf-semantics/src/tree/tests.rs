@@ -157,7 +157,7 @@ fn reads_a_number_tree_with_kids() {
         ),
         (
             5,
-            dict! { "S" => "D", "St" => 5, "P" => Object::string("Tab ") }.into(),
+            dict! { "S" => "D", "St" => 5, "P" => Object::text("Tab ") }.into(),
         ),
     ]
     .map(|(n, object): (u32, Object)| (n, Body::Object(object)));
@@ -1004,7 +1004,7 @@ fn limits_are_read_only_for_a_sink_that_wants_them() {
     assert_eq!(told.asked.get(), 3, "and /Limits");
 
     // What doesn't read is bad /Limits; past a cap or a password, unchecked.
-    for why in [Why::Damaged, Why::Limit, Why::Locked, Why::Source] {
+    for why in [Why::Damaged, Why::Capped, Why::Locked, Why::Source] {
         let saying = Saying::new(&objects, &[(3, why)]);
         let mut walk = names(&saying, &root, &Limits::DEFAULT, Kept::default());
         assert_eq!(walk.by_ref().map(Result::unwrap).count(), 1, "{why:?}");
@@ -1101,7 +1101,7 @@ fn what_doesn_t_read_is_said_or_ends_the_walk() {
             "{what}: {faults:?}"
         );
 
-        for why in [Why::Limit, Why::Locked, Why::Source] {
+        for why in [Why::Capped, Why::Locked, Why::Source] {
             let saying = Saying::new(&objects, &[(broken, why)]);
             let mut walk = names(&saying, &root, &Limits::DEFAULT, Kept::default());
             assert_eq!(walk.next().unwrap().unwrap().0, b"a", "{what}, {why:?}");
@@ -1163,7 +1163,7 @@ fn limits_that_don_t_read_past_a_cap_or_a_password_aren_t_checked() {
     let root = Object::reference(1);
     for objects in shapes {
         let objects = file(objects);
-        for why in [Why::Limit, Why::Locked, Why::Source] {
+        for why in [Why::Capped, Why::Locked, Why::Source] {
             let saying = Saying::new(&objects, &[(3, why)]);
             let mut walk = names(&saying, &root, &Limits::DEFAULT, Kept::default());
             let keys: Vec<&[u8]> = (walk.by_ref()).map(|entry| entry.unwrap().0).collect();
@@ -1215,7 +1215,7 @@ fn a_chain_of_references_too_long_ends_the_walk() {
     let past = chain(32);
     let resolve = |id: ObjectId| past.get(&id);
     let mut walk = names(resolve, &root, &Limits::DEFAULT, ());
-    assert_eq!(walk.next().unwrap().unwrap_err().why, Why::Limit);
+    assert_eq!(walk.next().unwrap().unwrap_err().why, Why::Capped);
     assert!(walk.next().is_none());
 
     // Kids likewise, where they don't loop.
@@ -1226,7 +1226,7 @@ fn a_chain_of_references_too_long_ends_the_walk() {
     let resolve = |id: ObjectId| long.get(&id);
     let mut walk = names(resolve, &root, &Limits::DEFAULT, ());
     let failed = walk.next().unwrap().unwrap_err();
-    assert_eq!(failed.why, Why::Limit);
+    assert_eq!(failed.why, Why::Capped);
     assert_eq!(
         failed.to_string(),
         format!(
@@ -1346,7 +1346,7 @@ fn follow_goes_through_references_to_a_value() {
     assert_eq!(integer(&null), Ok(None));
     assert_eq!(integer(&three), Ok(None));
     assert_eq!(integer(&four), Ok(None));
-    assert_eq!(integer(&five).unwrap_err().why, Why::Limit);
+    assert_eq!(integer(&five).unwrap_err().why, Why::Capped);
     assert_eq!(follow(resolve, &null), Ok(None), "not the null object");
     assert_eq!(follow(resolve, &three), Ok(None), "nor one it leads to");
 

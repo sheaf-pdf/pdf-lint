@@ -13,7 +13,7 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 miniz_oxide = { version = "0.9", optional = true }
-pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.2" }
+pdf-tokenizer.workspace = true
 thiserror = "2"
 # Through its own safe API, on Rust's allocator, not C's.
 zlib-rs = { version = "0.6", default-features = false, features = ["rust-allocator", "std"], optional = true }

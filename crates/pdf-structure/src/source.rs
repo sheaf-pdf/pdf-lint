@@ -18,7 +18,7 @@ use crate::bytes::{Error, SourceId, Undecoded, Unfiltered, Unindexed};
 
 /// A file, as a reader read it: its objects, and its streams' data as a
 /// viewer takes it ([`Streams`]), which a reader without the file's bytes,
-/// as a document alone is, doesn't give ([`Why::Source`]). A [`Document`]
+/// as a document alone is, doesn't give ([`Why::Detached`]). A [`Document`]
 /// is one, and so are a [`Reading`](crate::Reading), which answers of what
 /// it has read so far, and a document read beside its reading
 /// ([`WithReading`](crate::bytes::WithReading)).
@@ -647,7 +647,7 @@ impl Unread {
     /// ([`Unread::Missing`]), which `try_resolve` gives as no object, and
     /// else as a [`Document`]'s and a [`Reading`](crate::Reading)'s say it,
     /// so that a resolver over any [`Source`] can. Its [`Why`] is
-    /// [`Why::Damaged`], [`Why::Limit`] (past a cap the reader parses or
+    /// [`Why::Damaged`], [`Why::Capped`] (past a cap the reader parses or
     /// decodes under), [`Why::Locked`] (in an object stream that takes a
     /// password, or doesn't decrypt), or [`Why::Source`] where the source of
     /// the file's bytes didn't give them ([`Unread::Source`]), its message
@@ -664,9 +664,9 @@ impl Unread {
     /// that a new one is put with its like on purpose.
     fn why(&self) -> Why {
         match self {
-            Unread::Parse(parse::Error::Nested { .. } | parse::Error::Values { .. }) => Why::Limit,
+            Unread::Parse(parse::Error::Nested { .. } | parse::Error::Values { .. }) => Why::Capped,
             Unread::Container { why, .. } => match why {
-                Undecoded::Filters(Unfiltered::Filters { .. }) => Why::Limit,
+                Undecoded::Filters(Unfiltered::Filters { .. }) => Why::Capped,
                 Undecoded::Encrypted { .. } | Undecoded::Decrypt(_) => Why::Locked,
                 Undecoded::NotAStream | Undecoded::Filters(_) | Undecoded::Other(_) => Why::Damaged,
             },
@@ -1227,7 +1227,7 @@ impl Source for Document {
 /// holds: an object stream's decoded data ([`Document::decoded`]), lent,
 /// within the limit, else [`Why::Limit`], where the reader decoded it
 /// whole. A document alone decodes no stream: any other stream's data is
-/// [`Why::Source`], which a document read beside its reading
+/// [`Why::Detached`], which a document read beside its reading
 /// ([`WithReading`](crate::bytes::WithReading)) gives, and so is an object
 /// stream's that the reader cut off as it decoded it, at a fault, the
 /// stream's limit or the budget, or that didn't decrypt cleanly, as what it
@@ -1249,7 +1249,7 @@ impl Streams for Document {
             Some(data) => lent(id, data, limit),
             None => Err(Unreadable::new(
                 id,
-                Why::Source,
+                Why::Detached,
                 format!(
                     "{id} R's data isn't held decoded: a document alone decodes no stream, \
                      and holds only the object streams its reader decoded whole"
@@ -1711,11 +1711,11 @@ mod tests {
             (parse_error(parse::Error::Header { at: 7 }), Why::Damaged),
             (
                 parse_error(parse::Error::Nested { limit: 2, at: 7 }),
-                Why::Limit,
+                Why::Capped,
             ),
             (
                 parse_error(parse::Error::Values { limit: 2, at: 7 }),
-                Why::Limit,
+                Why::Capped,
             ),
             (
                 Unread::Elsewhere {
@@ -1727,7 +1727,7 @@ mod tests {
             ),
             (container(Undecoded::NotAStream), Why::Damaged),
             (filters(Unfiltered::Filter), Why::Damaged),
-            (filters(Unfiltered::Filters { count: 26 }), Why::Limit),
+            (filters(Unfiltered::Filters { count: 26 }), Why::Capped),
             (
                 container(Undecoded::Encrypted {
                     filter: b"StdCF".to_vec(),
@@ -1746,7 +1746,7 @@ mod tests {
             (boxed(Unread::Undecodable { stream }), Why::Locked),
             (
                 boxed(parse_error(parse::Error::Nested { limit: 2, at: 7 })),
-                Why::Limit,
+                Why::Capped,
             ),
             (boxed(parse_error(parse::Error::End)), Why::Damaged),
             // The stream isn't in the file, though the object is listed.
@@ -1893,7 +1893,7 @@ mod tests {
         struct Own(Trailer);
         impl Streams for Own {
             fn decoded(&self, id: ObjectId, _: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
-                Err(Unreadable::new(id, Why::Source, "it has no bytes"))
+                Err(Unreadable::new(id, Why::Detached, "it has no bytes"))
             }
         }
         impl Source for Own {
@@ -1922,7 +1922,7 @@ mod tests {
         let ungiven = Streams::decoded(source, ObjectId::new(4, 0), 10).unwrap_err();
         assert_eq!(
             (ungiven.id, ungiven.why),
-            (ObjectId::new(4, 0), Why::Source)
+            (ObjectId::new(4, 0), Why::Detached)
         );
         assert!(own.revisions().is_empty());
         assert_eq!(own.facts(), None);
@@ -2322,7 +2322,7 @@ mod tests {
                 .unwrap()
                 .data
         );
-        doc.catalog_mut().unwrap().set("Lang", Object::string("en"));
+        doc.catalog_mut().unwrap().set("Lang", Object::text("en"));
         assert!(doc.catalog().is_some_and(|d| d.has(b"Lang")));
         assert_eq!(doc.record(ObjectId::new(1, 0)), None);
 

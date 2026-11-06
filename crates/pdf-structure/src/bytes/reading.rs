@@ -917,6 +917,16 @@ impl<S: ByteSource> Reading<S> {
         self.decoded_within_as(id, None, limit)
     }
 
+    /// Whether a decode asked for within `limit` is held to the reader's own
+    /// cap on a stream's data instead
+    /// ([`Limits::stream`](super::Limits::stream)), that being the less:
+    /// past it is then [`Why::Capped`], not the caller's [`Why::Limit`]. At
+    /// equal it's the caller's, the data being past what was asked for
+    /// either way.
+    pub(super) fn capped_at(&self, limit: usize) -> bool {
+        self.reader.limits.stream < limit
+    }
+
     /// [`Reading::decoded`], each filter's output up to `limit` bytes.
     fn decoded_up_to(&self, id: ObjectId, limit: usize) -> Result<Vec<u8>, Error> {
         self.decoded_as(id, None, limit)
@@ -1328,9 +1338,10 @@ impl<'o, S: ByteSource> Resolve<'o> for &'o Reading<S> {
 /// less. Where it gives none, it says why in a resolver's words ([`Why`]):
 /// first what its resolver says of the object ([`Resolve::try_resolve`]), so
 /// that an object that doesn't read is said as a reference to it is; then,
-/// past the limit, or through more filters than the reader takes
-/// ([`Unfiltered::Filters`]), [`Why::Limit`]; in a file no password the
-/// reader was given opens, one whose security handler it can't open, a
+/// past the limit, [`Why::Limit`]; past the reader's own cap on a stream's
+/// data, where that's less than the limit, or through more filters than it
+/// takes ([`Unfiltered::Filters`]), [`Why::Capped`]; in a file no password
+/// the reader was given opens, one whose security handler it can't open, a
 /// stream the encryption dictionary refers to or one that doesn't decrypt
 /// cleanly, [`Why::Locked`]; a source that didn't give the bytes,
 /// [`Why::Source`]; through a filter the reader doesn't decode, or with a
@@ -1349,7 +1360,7 @@ impl<S: ByteSource> Streams for Reading<S> {
             Ok(None) => return Err(missing(id)),
             Err(unreadable) => return Err(unreadable),
         }
-        lenient(id, self.decoded_within(id, limit)).map(Cow::Owned)
+        lenient(id, self.decoded_within(id, limit), self.capped_at(limit)).map(Cow::Owned)
     }
 }
 
@@ -1447,10 +1458,13 @@ pub(crate) fn missing(id: ObjectId) -> Unreadable {
 /// it, is as a viewer takes it ([`Streams`]): what decoded of a stream that
 /// decodes in part, unless what stopped it is the limit; or why there's
 /// none, as `Streams` for a [`Reading`] says, an object that doesn't read
-/// as [`Unread::unreadable`] says.
+/// as [`Unread::unreadable`] says. A decode the limit stopped is past the
+/// caller's limit, or past the reader's own cap where `capped` says that
+/// was the bound ([`Reading::capped_at`]).
 pub(crate) fn lenient(
     id: ObjectId,
     decoded: Result<Vec<u8>, Error>,
+    capped: bool,
 ) -> Result<Vec<u8>, Unreadable> {
     let unreadable =
         |why: Why, error: &Error| Unreadable::new(id, why, format!("{id} R doesn't read: {error}"));
@@ -1460,7 +1474,10 @@ pub(crate) fn lenient(
             let limited = (error.faults.iter()).any(|(_, f)| *f == pdf_filters::Fault::Limit);
             match (limited, error.data.is_empty()) {
                 (false, false) => Ok(error.data),
-                (true, _) => Err(unreadable(Why::Limit, &Error::Decode(error))),
+                (true, _) => {
+                    let why = if capped { Why::Capped } else { Why::Limit };
+                    Err(unreadable(why, &Error::Decode(error)))
+                }
                 (false, true) => Err(unreadable(Why::Damaged, &Error::Decode(error))),
             }
         }
@@ -1469,7 +1486,7 @@ pub(crate) fn lenient(
             error @ (Error::Locked | Error::Encrypted | Error::Unsupported | Error::Decrypt(_)),
         ) => Err(unreadable(Why::Locked, &error)),
         Err(error @ Error::Filters(Unfiltered::Filters { .. })) => {
-            Err(unreadable(Why::Limit, &error))
+            Err(unreadable(Why::Capped, &error))
         }
         Err(error @ Error::Filters(_)) => Err(unreadable(Why::Filter, &error)),
         Err(Error::Unread(why)) => match why.unreadable(id) {

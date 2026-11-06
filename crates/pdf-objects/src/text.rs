@@ -12,8 +12,11 @@
 use pdf_tokenizer::Rules;
 
 /// A text string's text, how it was encoded, and how it departs from the
-/// spec.
+/// spec. A decoder's account, read by its fields: `#[non_exhaustive]`, as
+/// it may say more, such as the languages a PDFium reading takes out with
+/// their escapes (ISO 32000-2, 7.9.2.2.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Text {
     /// The text, U+FFFD where a character doesn't decode. By PDFium's rules
     /// ([`decode_with`]), a surrogate alone still is, but bytes that aren't
@@ -86,6 +89,7 @@ pub enum Quirk {
 }
 
 /// `bytes`, a text string, decoded.
+#[must_use]
 pub fn decode(bytes: &[u8]) -> Text {
     let mut quirks = Vec::new();
     let (text, encoding) = match bytes {
@@ -152,6 +156,7 @@ pub fn decode(bytes: &[u8]) -> Text {
 ///
 /// PDFium keeps a surrogate alone, which a [`String`] can't hold: it's U+FFFD
 /// here.
+#[must_use]
 pub fn decode_with(bytes: &[u8], rules: Rules) -> Text {
     match rules {
         Rules::Pdfium => decode_as_pdfium(bytes),
@@ -275,6 +280,7 @@ fn utf8_as_pdfium(bytes: &[u8]) -> Vec<u16> {
 /// gives it back, but it starts a language escape there (ISO 32000-2,
 /// 7.9.2.2.2), so a reader that takes those out takes it and what follows
 /// ([`decode_with`], by PDFium's rules). [`encode_as`] refuses it.
+#[must_use]
 pub fn encode(text: &str) -> Vec<u8> {
     if as_it_is(text) {
         text.as_bytes().to_vec()
@@ -300,12 +306,21 @@ fn utf16be(text: &str) -> Vec<u8> {
     bytes
 }
 
-/// `text` as a text string in `encoding`, or why it can't be one that reads
-/// back as `text` ([`Unencodable`]). PDFDocEncoding takes the characters
-/// [`pdf_doc_char`] gives, and refuses a text whose bytes would start as a
-/// mark. UTF-16BE and UTF-8 take every character but U+001B, where it would
-/// start a language escape; UTF-8 is PDF 2.0's, for a caller writing 2.0 to
-/// choose. UTF-16LE isn't PDF's, so nothing is written in it.
+/// `text` as a text string in `encoding` that reads back as `text`.
+/// PDFDocEncoding takes the characters [`pdf_doc_char`] gives; UTF-16BE and
+/// UTF-8 take every character but U+001B; UTF-8 is PDF 2.0's, for a caller
+/// writing 2.0 to choose.
+///
+/// # Errors
+///
+/// [`Unencodable`], saying why it can't be one:
+/// [`Character`](Unencodable::Character) for a character PDFDocEncoding has
+/// no byte for; [`Mark`](Unencodable::Mark) where its bytes in
+/// PDFDocEncoding would start as a byte order mark;
+/// [`Escape`](Unencodable::Escape) for U+001B in UTF-16BE or UTF-8, where
+/// it would start a language escape; and
+/// [`NoSuchEncoding`](Unencodable::NoSuchEncoding) for UTF-16LE, which isn't
+/// PDF's, so nothing is written in it.
 pub fn encode_as(text: &str, encoding: Encoding) -> Result<Vec<u8>, Unencodable> {
     if matches!(encoding, Encoding::Utf16Be | Encoding::Utf8) && text.contains('\u{1B}') {
         return Err(Unencodable::Escape);
@@ -344,6 +359,7 @@ fn pdf_doc_byte(c: char) -> Option<u8> {
 /// but for the accents at 0x18–0x1F and the punctuation, ligatures and
 /// letters at 0x80–0xA0; none for the three it leaves undefined. The table
 /// is the one PDFium and qpdf share, which differ only on 0xAD.
+#[must_use]
 pub fn pdf_doc_char(b: u8) -> Option<char> {
     const ACCENTS: [char; 8] = ['˘', 'ˇ', 'ˆ', '˙', '˝', '˛', '˚', '˜'];
     const HIGH: [char; 33] = [

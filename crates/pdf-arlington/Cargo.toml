@@ -17,7 +17,7 @@ include = ["/src", "/build.rs", "/model", "/README.md", "/CHANGELOG.md"]
 # What a colorant's name says of it, which the colorant functions read, so
 # that the family reads a colorant one way.
 pdf-color = { path = "../pdf-color", version = "0.1" }
-pdf-objects = { path = "../pdf-objects", version = "0.1" }
+pdf-objects.workspace = true
 # The hash a kept predicate is found by, rustc's: quick on short texts.
 rustc-hash = { version = "2.1", default-features = false }
 thiserror = "2"

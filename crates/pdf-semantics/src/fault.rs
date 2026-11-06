@@ -36,7 +36,7 @@ pub enum Fault {
     Unchecked {
         /// The object.
         id: ObjectId,
-        /// Why it doesn't read: [`Why::Limit`], [`Why::Locked`] or
+        /// Why it doesn't read: [`Why::Capped`], [`Why::Locked`] or
         /// [`Why::Source`].
         why: Why,
     },
@@ -227,7 +227,7 @@ fn parent_said(lister: &Option<ObjectId>, f: &mut fmt::Formatter<'_>) -> fmt::Re
 /// What [`Fault::Unchecked`] says: the object, and why it doesn't read.
 fn unchecked_said(id: &ObjectId, why: &Why, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let what = match why {
-        Why::Limit => "is past a cap it's read under",
+        Why::Capped => "is past a cap it's read under",
         Why::Locked => "takes a password",
         Why::Source => "wasn't given by the source",
         _ => "doesn't read",

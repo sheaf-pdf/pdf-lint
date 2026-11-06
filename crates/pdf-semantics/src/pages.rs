@@ -76,7 +76,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use pdf_objects::fault::{Place, Sink};
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Rules, Span, Unreadable, Value, Why};
+use pdf_objects::pdf_tokenizer::Rules;
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Span, Unreadable, Value, Why};
 
 use crate::fault::Fault;
 use crate::limits::Limits;

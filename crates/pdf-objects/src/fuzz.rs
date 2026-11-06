@@ -74,7 +74,8 @@ enum Length {
 /// file's, its strings ciphertext or not; a stream's data by a length they
 /// give, when it holds, else up to `endstream`; under the default limits,
 /// or small ones the two bytes after them give (nesting below 8, values
-/// below 64). Read twice, and through `()`, it's the same each time; every
+/// below 64). Read twice, through `()`, and through a sink that wants no
+/// faults, it's the same each time, and that sink is told none; every
 /// span and fault is inside the input and inside what holds it; strings
 /// are ciphertext exactly when asked, and each has the form its first byte
 /// writes; a value, a header or a body that fails leaves the parser where
@@ -102,8 +103,11 @@ enum Length {
 /// All of it by ISO 32000-2's rules and again by PDFium's
 /// ([`Parser::rules`]), and the two side by side ([`side_by_side`]): read
 /// alike up to the first token the two rules cut otherwise, or PDFium's
-/// reads otherwise, from where the read starts; and each fault PDFium's
-/// rules alone tell is told of a token ISO 32000-2 reads otherwise.
+/// reads otherwise, from where the read starts; each fault PDFium's
+/// rules alone tell is told of a token ISO 32000-2 reads otherwise; by
+/// ISO 32000-2's, each real too small for 64 bits reads as 0 and is told
+/// ([`underflows`]); and by PDFium's, each 0x80 and 0xFF in the
+/// white-space of what's read is told, and no other byte ([`high`]).
 /// Panics on a broken promise.
 pub fn parse(data: &[u8]) {
     let (how, input) = chosen(data);
@@ -177,6 +181,13 @@ fn promised(input: &[u8], how: How) -> (Read, Kept) {
     assert_eq!(first, read(input, how, &mut again), "the same twice");
     assert_eq!(kept, again, "said the same twice");
     assert_eq!(first, read(input, how, &mut ()), "the same through ()");
+    let mut unwanted = Unwanted::default();
+    assert_eq!(
+        first,
+        read(input, how, &mut unwanted),
+        "the same, wanting none"
+    );
+    assert_eq!(unwanted.0, [], "a sink that wants none is told none");
     if how.limits != Limits::DEFAULT {
         limited(input, how, &first);
     }
@@ -251,7 +262,11 @@ fn promised(input: &[u8], how: How) -> (Read, Kept) {
 /// by PDFium's rules,
 /// each fault they alone tell, [`Fault::Number`], [`Fault::OutOfRange`],
 /// [`Fault::HexString`], [`Fault::StringCr`] and [`Fault::Long`], is told
-/// at a token they read, which ISO 32000-2's rules cut or read otherwise.
+/// at a token they read, which ISO 32000-2's rules cut or read otherwise;
+/// and each of the two faults one rules alone tell is told by those rules
+/// as it should be, [`Fault::RealUnderflow`] by ISO 32000-2's
+/// ([`underflows`]) and [`Fault::HighByte`] by PDFium's ([`high`]), and
+/// never by the other's.
 fn side_by_side(input: &[u8], how: How, iso: &(Read, Kept), pdfium: &(Read, Kept)) {
     let from = how.offset.min(input.len());
     let at = parting(input, from);
@@ -269,6 +284,14 @@ fn side_by_side(input: &[u8], how: How, iso: &(Read, Kept), pdfium: &(Read, Kept
             "read alike before the rules part, at {at}"
         );
     }
+    underflows(input, &iso.0.0, &iso.1);
+    high(input, how, &pdfium.0.0, &pdfium.1);
+    assert_eq!(
+        told(&pdfium.1, &[Fault::RealUnderflow]),
+        [],
+        "by PDFium's rules"
+    );
+    assert_eq!(told(&iso.1, &high_bytes()), [], "by ISO 32000-2's rules");
     let mut own = Own::default();
     let pdfium = How {
         rules: Rules::Pdfium,
@@ -284,6 +307,123 @@ fn side_by_side(input: &[u8], how: How, iso: &(Read, Kept), pdfium: &(Read, Kept
             "a fault at {at:?}, which ISO 32000-2 reads alike"
         );
     }
+}
+
+/// Where each fault `kept` was told that's one of `faults` was told, in
+/// order.
+fn told(kept: &Kept, faults: &[Fault<'_>]) -> Vec<Span> {
+    let said: Vec<String> = faults.iter().map(Fault::to_string).collect();
+    (kept.faults.iter())
+        .filter(|(_, fault)| said.contains(fault))
+        .map(|&(at, _)| at)
+        .collect()
+}
+
+/// [`Fault::HighByte`] of each byte it's told of, 0x80 and 0xFF.
+fn high_bytes() -> [Fault<'static>; 2] {
+    [&[0x80u8][..], &[0xFF]].map(|written| Fault::HighByte { written })
+}
+
+/// Checks what ISO 32000-2's rules read of `input`, `read`, and told,
+/// `kept`: each [`Fault::RealUnderflow`] is told at a real whose decimal
+/// is too small for 64 bits, digits not all zero that read as zero
+/// (pdf-tokenizer's [`decode::number`] underflows); and every such real
+/// in what's read reads as 0, with its sign, and is told, once, in the
+/// order read.
+fn underflows(input: &[u8], read: &Result<Object, Error>, kept: &Kept) {
+    let tiny = |at: Span| {
+        matches!(
+            decode::number(&input[at.start..at.end]),
+            Err(NumberError::Underflow)
+        )
+    };
+    let told = told(kept, &[Fault::RealUnderflow]);
+    for &at in &told {
+        let token = Tokenizer::at(input, at.start).next();
+        let token = token.filter(|t| t.kind == Kind::Real && t.end() == at.end);
+        assert!(token.is_some() && tiny(at), "too small, at {at:?}");
+    }
+    let Ok(object) = read else {
+        return;
+    };
+    let mut found = Vec::new();
+    reals(object, &mut |at, real| {
+        if tiny(at) {
+            let zero = match input[at.start] {
+                b'-' => -0.0f64,
+                _ => 0.0,
+            };
+            assert_eq!(real.to_bits(), zero.to_bits(), "too small, read at {at:?}");
+            found.push(at);
+        }
+    });
+    assert_eq!(found, told, "each real too small told, once, in order");
+}
+
+/// Each real in `o`, nested ones too, given to `each` with where it was
+/// written, in the order read: an array's elements, a dictionary's every
+/// entry's value, a stream's dictionary's.
+fn reals(o: &Object, each: &mut impl FnMut(Span, f64)) {
+    let entries = |d: &Dict, each: &mut _| (d.entries().iter()).for_each(|e| reals(&e.value, each));
+    match o.value() {
+        Value::Real(real) => each(o.at.expect("placed"), *real),
+        Value::Array(a) => a.iter().for_each(|o| reals(o, each)),
+        Value::Dict(d) => entries(d, each),
+        Value::Stream(s) => entries(&s.dict, each),
+        _ => {}
+    }
+}
+
+/// Checks what PDFium's rules read of `input` as `how` says, `read`, and
+/// told, `kept`: each [`Fault::HighByte`] is one byte, the 0x80 or 0xFF it
+/// names, white-space by PDFium's rules and a regular character by ISO
+/// 32000-2's, no two at one place; and where an object is read, they're
+/// every such byte in the white-space of its tokens by PDFium's rules,
+/// from its first to the end of its last, a stream's data aside, in the
+/// bytes' order.
+fn high(input: &[u8], how: How, read: &Result<Object, Error>, kept: &Kept) {
+    let [x80, xff] = high_bytes().map(|fault| fault.to_string());
+    let mut told = Vec::new();
+    for (at, fault) in &kept.faults {
+        let byte = match fault {
+            said if *said == x80 => 0x80,
+            said if *said == xff => 0xFF,
+            _ => continue,
+        };
+        assert_eq!((at.end - at.start, input[at.start]), (1, byte), "{at:?}");
+        assert!(Rules::Pdfium.is_white_space(byte) && !Rules::Iso.is_white_space(byte));
+        assert!(!told.contains(at), "told twice, at {at:?}");
+        told.push(*at);
+    }
+    let Ok(object) = read else {
+        return;
+    };
+    let whole = object.at.expect("placed");
+    let mut found = Vec::new();
+    let mut spaces = |from: usize, to: usize| {
+        let mut t = Tokenizer::at(input, from).with_rules(Pdfium);
+        while t.offset() < to {
+            let Some(token) = t.next() else {
+                break;
+            };
+            if token.kind == Kind::Space {
+                let bytes = (token.start..token.end().min(to))
+                    .filter(|&at| matches!(input[at], 0x80 | 0xFF));
+                found.extend(bytes.map(|at| Span::new(how.stream, at, at + 1)));
+            }
+        }
+    };
+    match object.as_stream().and_then(|s| s.data.at()) {
+        Some(data) => {
+            spaces(whole.start, data.start);
+            spaces(data.end, whole.end);
+        }
+        None => spaces(whole.start, whole.end),
+    }
+    assert_eq!(
+        told, found,
+        "each high byte in what's read told, once, in order"
+    );
 }
 
 /// Where `input` read by ISO 32000-2's rules and by PDFium's, from
@@ -357,6 +497,21 @@ impl Sink<'_> for Own {
         ) {
             self.0.push(at);
         }
+    }
+}
+
+/// A sink that wants no faults, and keeps where it's told one all the
+/// same, which `()` can't show.
+#[derive(Default)]
+struct Unwanted(Vec<Span>);
+
+impl Sink<'_> for Unwanted {
+    fn fault(&mut self, at: Span, _: Fault<'_>) {
+        self.0.push(at);
+    }
+
+    fn wants(&self) -> bool {
+        false
     }
 }
 
@@ -1509,7 +1664,7 @@ mod tests {
     /// only PDFium's read as numbers, integers outside its 32 bits, hex
     /// strings with bytes that are no hex digits, names' `#`, literal
     /// strings' CR, its white-space, and words past its 256 bytes (and,
-    /// made as they're chosen, names).
+    /// made as they're chosen, names, and reals too small for 64 bits).
     const PARTING: &[&[u8]] = &[
         b"--5",
         b"1.2.3",
@@ -1570,12 +1725,18 @@ mod tests {
                 }
             }
             for _ in 0..random(30) + 2 {
-                match random(2 * PARTING.len() + 1) {
+                match random(2 * PARTING.len() + 2) {
                     n if n < PARTING.len() => input.extend_from_slice(PARTING[n]),
                     // A name past 256 bytes.
                     n if n == PARTING.len() => {
                         input.push(b'/');
                         input.extend_from_slice(&[b'P'; 300]);
+                    }
+                    // A real too small for 64 bits, its sign as it comes.
+                    n if n == PARTING.len() + 1 => {
+                        input.extend_from_slice(&b"-0."[random(2)..]);
+                        input.extend_from_slice(&[b'0'; 330]);
+                        input.push(b'1');
                     }
                     _ => input.extend_from_slice(FRAGMENTS[random(FRAGMENTS.len())]),
                 }
@@ -1584,6 +1745,44 @@ mod tests {
                 }
             }
             parse(&input);
+        }
+    }
+
+    /// Inputs where PDFium's rules read 0x80 or 0xFF as white-space, inside
+    /// what's read and around it, and with reals too small for 64 bits,
+    /// each after the five bytes that choose how it's read (and two that
+    /// give a window), run through the fuzz target's body: as a value, as
+    /// an indirect object, a stream's data by its `/Length`, and in a
+    /// window cut just after a 0x80, from byte 1,000,000 of a file.
+    #[test]
+    fn seeds_with_high_bytes_and_reals_too_small_keep_every_promise() {
+        // How each is read, the five bytes before it: from byte 0, as a
+        // value; as an indirect object, a stream's data by a `/Length` of
+        // 2; and as a value in a window cut at byte 3, from byte 1,000,000.
+        const VALUE: &[u8] = &[0, 0, 0, 0, 0];
+        const INDIRECT: &[u8] = &[0, 0, 4, 2, 0];
+        const WINDOW: &[u8] = &[0, 0, 0x80, 0, 0, 7, 0];
+        let tiny = [b"0.".as_slice(), &[b'0'; 400], b"1"].concat();
+        let reals = [b"[".as_slice(), &tiny, b" -", &tiny, b" 1.5]"].concat();
+        let seeds: [(&[u8], &[u8]); 9] = [
+            (VALUE, b"[1\x80 2]"),
+            (VALUE, b"5\x80"),
+            (VALUE, b"\x80 5\x80 6"),
+            (
+                VALUE,
+                b"<< /A\xFF 1 /B [(\x80) 1 0\x80R %\xFF\n/C]\x80>>\xFF",
+            ),
+            (VALUE, b"[--1\x80 2 endobj]"),
+            (
+                INDIRECT,
+                b"1 0 obj << /Length 2 >>\x80stream\nab\x80endstream\x80endobj",
+            ),
+            (INDIRECT, b"1 0 obj\x80[1 0\x80R]\xFFendobj"),
+            (WINDOW, b"[1\x80 2]"),
+            (VALUE, &reals),
+        ];
+        for (how, input) in seeds {
+            parse(&[how, input].concat());
         }
     }
 

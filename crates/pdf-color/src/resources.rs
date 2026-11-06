@@ -182,7 +182,7 @@ mod tests {
                 Object::from("Indexed"),
                 Object::from("DeviceRGB"),
                 Object::from(1),
-                Object::string("abcdef"),
+                Object::text("abcdef"),
             ],
             "N2" => vec![
                 Object::from("DeviceN"),
@@ -321,7 +321,7 @@ mod tests {
             };
             assert_eq!(Spaces::read(&damaged, Some(&resources)), Ok(None), "{text}");
             assert_eq!(asked.get(), 1);
-            for why in [Why::Limit, Why::Locked, Why::Source] {
+            for why in [Why::Capped, Why::Locked, Why::Source] {
                 let failing = Failing { why, asked: &asked };
                 let error = Spaces::read(&failing, Some(&resources)).expect_err(text);
                 assert_eq!((error.id, error.why), (ObjectId::new(5, 0), why), "{text}");

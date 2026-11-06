@@ -696,7 +696,7 @@ mod tests {
                 2,
                 dict! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 }.into(),
             ),
-            (5, dict! { "Title" => Object::string("Old") }.into()),
+            (5, dict! { "Title" => Object::text("Old") }.into()),
         ];
         let trailer = dict! { "Root" => Object::reference(1), "Info" => Object::reference(5) };
         let mut file = fixture::encrypted(&settings, &objects, trailer);

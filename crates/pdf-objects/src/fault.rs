@@ -35,6 +35,7 @@ pub trait Sink<F> {
     /// reference, runs only when they are, and a sink that doesn't want
     /// them is told none. True unless a sink says otherwise; asked as a
     /// reading goes.
+    #[must_use]
     fn wants(&self) -> bool {
         true
     }
@@ -86,6 +87,7 @@ pub struct Place {
 impl Place {
     /// A fault's place: a reading makes one for each fault it tells, and a
     /// sink is tried on one.
+    #[must_use]
     pub const fn new(object: Option<ObjectId>, at: Option<Span>) -> Place {
         Place { object, at }
     }

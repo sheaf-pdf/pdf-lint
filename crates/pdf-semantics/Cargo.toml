@@ -15,7 +15,7 @@ include = ["/src", "/README.md", "/CHANGELOG.md"]
 # The clock's: a count of seconds as a calendar's date, without its default
 # features, so without its time zones and what they pull in.
 chrono = { version = "0.4.45", default-features = false, optional = true }
-pdf-objects = { path = "../pdf-objects", version = "0.1" }
+pdf-objects.workspace = true
 # XMP's XML, with namespaces; none of its features.
 quick-xml = "0.41"
 thiserror = "2"

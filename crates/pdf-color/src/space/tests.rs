@@ -1059,7 +1059,7 @@ fn a_failing_read_in_a_check_reads_alike_under_every_sink() {
             !plain.contains(failing),
             "{text}: {failing} isn't a check's"
         );
-        for why in [Why::Limit, Why::Locked, Why::Source, Why::Damaged] {
+        for why in [Why::Capped, Why::Locked, Why::Source, Why::Damaged] {
             let asked = RefCell::new(Vec::new());
             let fails = [(*failing, why)];
             let resolver = Asked {
@@ -1088,7 +1088,7 @@ fn a_failing_read_in_a_check_reads_alike_under_every_sink() {
     // What a space holds fails the same under every sink.
     let file = file("[/CalGray 5 0 R]", &["<< /WhitePoint 6 0 R >>", "[1 1 1]"]);
     for failing in [5, 6] {
-        for why in [Why::Limit, Why::Locked, Why::Source] {
+        for why in [Why::Capped, Why::Locked, Why::Source] {
             let asked = RefCell::new(Vec::new());
             let fails = [(failing, why)];
             let resolver = Asked {

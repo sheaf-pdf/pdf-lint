@@ -41,11 +41,11 @@ pdf-fonts = { path = "../pdf-fonts", version = "0.1", default-features = false }
 # With its default feature alone: the adapter that reads pdf-structure's
 # readings.
 pdf-linearize = { path = "../pdf-linearize", version = "0.1" }
-pdf-objects = { path = "../pdf-objects", version = "0.1" }
+pdf-objects.workspace = true
 # Dates and XMP claims, read without its clock, so without chrono.
 pdf-semantics = { path = "../pdf-semantics", version = "0.1", default-features = false }
 pdf-structure = { path = "../pdf-structure", version = "0.1" }
-pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.2" }
+pdf-tokenizer.workspace = true
 # The command line's too: its JSON reports.
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }

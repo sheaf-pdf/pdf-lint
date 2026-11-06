@@ -775,8 +775,10 @@ dependencies = [
 
 [[package]]
 name = "pdf-objects"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
+ "criterion",
+ "memchr",
  "pdf-tokenizer",
  "thiserror",
 ]

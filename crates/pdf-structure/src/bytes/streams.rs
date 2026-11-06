@@ -1054,9 +1054,9 @@ mod through_streams {
         ]
     }
 
-    /// A stream within its limit is its data, owned; past it past a cap, each by a
-    /// byte, with filters and without; and past the reading's own limit, whatever's
-    /// asked.
+    /// A stream within its limit is its data, owned; past it, past the limit, each
+    /// by a byte, with filters and without; and past the reading's own cap, whatever's
+    /// asked, capped.
     #[test]
     fn data_within_and_past_the_limit() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
@@ -1072,8 +1072,8 @@ mod through_streams {
         let mut options = Options::DEFAULT;
         options.limits.stream = 4;
         let small = Reading::open(&file[..], &options).unwrap();
-        assert_eq!(asked(&small, ObjectId::new(2, 0), 1000), Err(Why::Limit));
-        assert_eq!(asked(&small, ObjectId::new(3, 0), 1000), Err(Why::Limit));
+        assert_eq!(asked(&small, ObjectId::new(2, 0), 1000), Err(Why::Capped));
+        assert_eq!(asked(&small, ObjectId::new(3, 0), 1000), Err(Why::Capped));
     }
 
     /// A stream that decodes in part is what decoded, as PDFium takes it, and one
@@ -1121,7 +1121,7 @@ mod through_streams {
         assert_eq!(asked(&reading, ObjectId::new(3, 0), 100), Err(Why::Filter));
         let said = Streams::decoded(&reading, ObjectId::new(3, 0), 100).unwrap_err();
         assert!(said.message.contains("/JBIG2Decode"), "{said}");
-        assert_eq!(asked(&reading, ObjectId::new(5, 0), 100), Err(Why::Limit));
+        assert_eq!(asked(&reading, ObjectId::new(5, 0), 100), Err(Why::Capped));
         for n in [7, 8] {
             assert_eq!(
                 asked(&reading, ObjectId::new(n, 0), 100),
@@ -1144,7 +1144,7 @@ mod through_streams {
         assert_eq!(resolved.why, Why::Damaged);
         let given = Streams::decoded(&reading, ObjectId::new(1, 0), 100);
         assert_eq!(given, Err(resolved));
-        assert_eq!(asked(&reading, ObjectId::new(2, 0), 100), Err(Why::Limit));
+        assert_eq!(asked(&reading, ObjectId::new(2, 0), 100), Err(Why::Capped));
     }
 
     /// A locked file's stream is locked; opened, it's read. A stream that doesn't

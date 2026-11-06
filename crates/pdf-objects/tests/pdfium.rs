@@ -26,7 +26,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdf_objects::parse::Parser;
-use pdf_objects::{Object, ObjectId, Rules, Value, text};
+use pdf_objects::pdf_tokenizer::Rules;
+use pdf_objects::{Object, ObjectId, Value, text};
 
 /// A case's text or data longer than this is written by its length and
 /// FNV-1a 64 hash, as the oracle writes it.

@@ -118,10 +118,10 @@ impl Sink<Fault> for Faults {
 
 // A root, its kid by reference and one listed again.
 let leaf = dict! {
-    "Limits" => vec![Object::string("a"), Object::string("b")],
+    "Limits" => vec![Object::text("a"), Object::text("b")],
     "Names" => vec![
-        Object::string("a"), Object::reference(7),
-        Object::string("b"), Object::from(2),
+        Object::text("a"), Object::reference(7),
+        Object::text("b"), Object::from(2),
     ],
 };
 let objects = BTreeMap::from([(ObjectId::new(2, 0), Object::from(leaf))]);

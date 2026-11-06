@@ -43,9 +43,9 @@
 //!   by its `/Length` and up to `endstream`, both given, for the caller to
 //!   choose its data from; and caps on how deeply values nest and how many
 //!   one call reads ([`Limits`]). It reads by ISO 32000-2's lexical rules,
-//!   or by PDFium's ([`Rules`], [`parse::Parser::rules`]), each token then
-//!   read as PDFium reads it, and a fault said where ISO 32000-2 reads it
-//!   otherwise.
+//!   or by PDFium's ([`Rules`](pdf_tokenizer::Rules),
+//!   [`parse::Parser::rules`]), each token then read as PDFium reads it, and
+//!   a fault said where ISO 32000-2 reads it otherwise.
 //! - **A writer** ([`serialize`]): a value as PDF syntax, or as an
 //!   indirect object, which the parser reads back as the same value,
 //!   under limits that take in its count of values, and a stream as an
@@ -70,8 +70,8 @@
 //!   and decoded through its filters, as a viewer takes it, a reader's or
 //!   a document's, at most a limit the caller asks for, lent where the
 //!   reader holds it, and why it gives none, in the same words as a
-//!   resolver's ([`Why`]); and [`With`], a resolver and a function as one,
-//!   for what has its streams some other way.
+//!   resolver's ([`Why`]); and [`WithStreams`], a resolver and a function
+//!   as one, for what has its streams some other way.
 //! - **Faults, told with where they are** ([`fault`]): one
 //!   [`fault::Sink`] and one [`fault::Place`] for every reader of a file's
 //!   objects, each reader's faults a type of its own, so that one sink can
@@ -96,8 +96,11 @@ pub mod version;
 
 pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
 pub use parse::Limits;
-pub use pdf_tokenizer::Rules;
-pub use streams::{Streams, With};
+/// pdf-tokenizer, whose [`Rules`](pdf_tokenizer::Rules) the parser
+/// ([`parse::Parser::rules`]) and [`text::decode_with`] read by: named
+/// through it, they're the version this crate is built with.
+pub use pdf_tokenizer;
+pub use streams::{Streams, WithStreams};
 pub use version::Version;
 
 /// What gives the indirect objects a value's references name: a file's,
@@ -139,11 +142,19 @@ pub use version::Version;
 pub trait Resolve<'o> {
     /// Object `id`; none when there's none to give: the file hasn't it, or
     /// it doesn't read.
+    #[must_use]
     fn resolve(&self, id: ObjectId) -> Option<&'o Object>;
 
     /// Object `id`; none when the file hasn't it; or why it doesn't read.
     /// By default what [`Resolve::resolve`] gives, for a resolver that can't
     /// say why.
+    ///
+    /// # Errors
+    ///
+    /// [`Unreadable`] where the file has object `id` and it doesn't read,
+    /// saying why ([`Why`]), never [`Why::Filter`] or [`Why::Detached`],
+    /// which only a stream's data is ([`Streams::decoded`]); by default,
+    /// never.
     fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
         Ok(self.resolve(id))
     }
@@ -166,6 +177,7 @@ pub struct Unreadable {
 
 impl Unreadable {
     /// Object `id` doesn't read, for `why`, as `message` says.
+    #[must_use]
     pub fn new(id: ObjectId, why: Why, message: impl Into<String>) -> Unreadable {
         Unreadable {
             id,
@@ -183,14 +195,22 @@ pub enum Why {
     /// What's written there isn't that object: it doesn't parse, or the file
     /// doesn't lead to it, or doesn't hold it as it says.
     Damaged,
-    /// It's past a cap the reader reads under.
+    /// It's past the limit the caller asked for, the `limit` of
+    /// [`Streams::decoded`]: data longer than that isn't given, whatever
+    /// the reader's own caps. Only what gives a stream's data says it; a
+    /// resolver never does. Past a cap of the reader's is [`Why::Capped`].
     Limit,
+    /// It's past a cap the reader reads under, which no caller asked for in
+    /// this call: nested deeper, or of more values, than the reader parses
+    /// an object; a stream's data longer, or through more filters, than it
+    /// decodes; a chain of references longer than it follows. A resolver
+    /// says it of an object, and what gives a stream's data says it of that.
+    /// Past what the caller asked for is [`Why::Limit`].
+    Capped,
     /// It takes a password the reader wasn't given, or doesn't decrypt.
     Locked,
     /// The source of the file's bytes didn't give them: it may read if it's
-    /// asked again. Or the reader has no source of bytes at all, as a
-    /// document read whole hasn't, which holds the file's objects and not
-    /// its streams' data: then it's read beside what read it.
+    /// asked again.
     Source,
     /// It's a stream whose filters the reader doesn't decode: through a
     /// filter it doesn't take, as an image's data may be (ISO 32000-2,
@@ -199,6 +219,14 @@ pub enum Why {
     /// written, which is the file's to fix. Only what gives a stream's data
     /// says it ([`Streams::decoded`]); a resolver never does.
     Filter,
+    /// It's a stream's data the reader doesn't hold, and it has nothing to
+    /// read it from, as a document read whole alone hasn't the file's bytes,
+    /// holding its objects and not their streams' data: asked again, it
+    /// gives the same; it's read beside what read the file. Unlike
+    /// [`Why::Source`], nothing failed, and nothing will read if asked
+    /// again. Only what gives a stream's data says it
+    /// ([`Streams::decoded`]); a resolver never does.
+    Detached,
 }
 
 /// A closure, or a function, from an object's number to the object.
@@ -309,5 +337,23 @@ mod tests {
         }
         let locked = &Locked as &dyn Resolve;
         assert_eq!(by_value(locked).unwrap_err().why, Why::Locked);
+    }
+
+    /// The README is shown on crates.io and docs.rs, where a path beside
+    /// the crate reaches nothing: its licence links are the repository's
+    /// URLs, the manifest's `repository` and the file, and no link of it
+    /// climbs out of the crate.
+    #[test]
+    fn the_readmes_licence_links_reach_the_files() {
+        let readme = include_str!("../README.md");
+        let repository = env!("CARGO_PKG_REPOSITORY");
+        for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
+            let link = format!("[{file}]({repository}/blob/main/{file})");
+            assert!(
+                readme.contains(&link),
+                "{file}'s link isn't the repository's URL"
+            );
+        }
+        assert!(!readme.contains("](../"), "a link climbs out of the crate");
     }
 }

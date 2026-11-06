@@ -1441,8 +1441,8 @@ mod tests {
                 "DescendantFonts" => vec![r(n + 1)],
             };
             let info = dict! {
-                "Registry" => Object::string("Adobe"),
-                "Ordering" => Object::string("Identity"),
+                "Registry" => Object::text("Adobe"),
+                "Ordering" => Object::text("Identity"),
                 "Supplement" => 0,
             };
             let cid_font = dict! {

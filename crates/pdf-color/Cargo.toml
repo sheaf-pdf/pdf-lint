@@ -12,7 +12,7 @@ categories = ["parser-implementations", "graphics"]
 include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
-pdf-objects = { path = "../pdf-objects", version = "0.1" }
+pdf-objects.workspace = true
 thiserror = "2"
 
 [dev-dependencies]

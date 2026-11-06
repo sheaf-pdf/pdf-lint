@@ -52,7 +52,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdf_content_streams::pdf_objects::parse::Parser;
-use pdf_content_streams::pdf_objects::{Dict, Object, ObjectId, Rules, Str, Value};
+use pdf_content_streams::pdf_objects::pdf_tokenizer::Rules;
+use pdf_content_streams::pdf_objects::{Dict, Object, ObjectId, Str, Value};
 use pdf_content_streams::{ImageStream, Limits, Operand, ResCx, operations};
 
 /// A case's text or data longer than this is written by its length and

@@ -126,7 +126,7 @@ impl<S: ByteSource> Streams for WithReading<S> {
         let object = Source::get(&self.document, id);
         let object = Some(object.as_ref().map(|o| *o));
         let decoded = self.reading.decoded_within_as(id, object, limit);
-        lenient(id, decoded).map(Cow::Owned)
+        lenient(id, decoded, self.reading.capped_at(limit)).map(Cow::Owned)
     }
 }
 
@@ -260,7 +260,7 @@ mod tests {
     /// a viewer takes it ([`Streams`]), a reading and the file opened give
     /// the same of every object, and its document alone the same of every
     /// object stream it holds decoded whole, and of what isn't a stream; of
-    /// any other stream, the document alone gives none, the source's. A
+    /// any other stream, the document alone gives none, detached. A
     /// reading of the file, as a source, answers as the file opened, once
     /// it has read every object, its warnings in the same order; before, it
     /// holds no object stream's data, and has none in the clear, until it
@@ -321,7 +321,7 @@ mod tests {
                     assert_eq!(given, read, "{name}: {id:?} viewed within {limit}");
                     let alone = viewed(Streams::decoded(alone, id, limit));
                     match stream && !lends {
-                        true => assert_eq!(alone, Err((id, Why::Source)), "{name}: {id:?}"),
+                        true => assert_eq!(alone, Err((id, Why::Detached)), "{name}: {id:?}"),
                         false => assert_eq!(alone, read, "{name}: {id:?} alone within {limit}"),
                     }
                 }
@@ -351,7 +351,7 @@ mod tests {
     /// what decoded, which its objects are read from, but it isn't the
     /// stream's data. As a viewer takes it ([`Streams`]), the file opened
     /// gives what its reading gives at every limit, the stream decoded
-    /// anew, and its document alone gives none, the source's; where the
+    /// anew, and its document alone gives none, detached; where the
     /// whole read decoded it whole, the document lends it, as its reading
     /// gives it.
     #[test]
@@ -426,12 +426,16 @@ mod tests {
                     }
                     false => {
                         let alone = viewed(alone);
-                        assert_eq!(alone, Err((stream, Why::Source)), "{what}: within {limit}");
+                        assert_eq!(
+                            alone,
+                            Err((stream, Why::Detached)),
+                            "{what}: within {limit}"
+                        );
                     }
                 }
             }
         }
-        // What each reading gives: the stream whole but past a limit, the
+        // What each reading gives: the stream whole but past the reader's cap, the
         // budget not its, what decoded of the corrupt one, and none of what
         // didn't decrypt cleanly.
         let given = |file: &[u8], passwords: &[Password], options: &Options| {
@@ -441,7 +445,7 @@ mod tests {
         assert_eq!(given(&plain, &[], &Options::DEFAULT), Ok(200));
         assert_eq!(
             given(&plain, &[], &limited(64, budget)),
-            Err((stream, Why::Limit))
+            Err((stream, Why::Capped))
         );
         assert_eq!(given(&plain, &[], &limited(default, 150)), Ok(200));
         assert!(given(&corrupt, &[], &Options::DEFAULT).is_ok_and(|n| n > 0 && n < 200));

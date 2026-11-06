@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use pdf_objects::parse::Parser;
-use pdf_objects::{Form, Object, ObjectId, Resolve, Rules, Str, Unreadable, Value, Why, dict};
+use pdf_objects::{Form, Object, ObjectId, Resolve, Str, Unreadable, Value, Why, dict};
+use pdf_tokenizer::Rules;
 
 use crate::fault::{Fault, Sink};
 use crate::fuzz::{
@@ -1070,7 +1071,7 @@ fn a_read_that_fails_is_the_err_whole() {
         "<< /ColorSpace << /Y /G /X 5 0 R >> >>",
         "<< /ColorSpace << /X [/ICCBased 5 0 R] >> >>",
     ];
-    for why in [Why::Limit, Why::Locked, Why::Source] {
+    for why in [Why::Capped, Why::Locked, Why::Source] {
         for shape in shapes {
             let e = read(why, shape).unwrap_err();
             assert_eq!((e.id, e.why), (ObjectId::new(5, 0), why), "{shape}");

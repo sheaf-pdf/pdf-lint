@@ -15,7 +15,7 @@ include = ["/src", "/assets", "/FTL.TXT", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 pdf-content-streams = { path = "../pdf-content-streams", version = "0.1" }
-pdf-objects = { path = "../pdf-objects", version = "0.1" }
+pdf-objects.workspace = true
 thiserror = "2"
 # With `predefined-cmaps`: Adobe's predefined CMaps, from its bundle alone,
 # never a file's bytes. It needs Rust 1.87.

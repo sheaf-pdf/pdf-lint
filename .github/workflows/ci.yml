@@ -211,6 +211,22 @@ jobs:
       - name: Test
         run: just objects-msrv
 
+  # pdf-objects packaged as a publish would, as the tokenizer is: in a fresh
+  # target directory, and what the package holds checked, its sources,
+  # README, CHANGELOG, manifest and lock, nothing else, no benchmark among
+  # them.
+  objects-package:
+    name: Objects packaged as a publish would
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Package, and check what the package holds
+        run: just objects-package
+
   structure-msrv:
     name: Structure on its minimum Rust
     runs-on: ubuntu-latest

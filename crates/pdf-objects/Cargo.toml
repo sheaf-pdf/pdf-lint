@@ -1,19 +1,41 @@
 [package]
 name = "pdf-objects"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-objects"
 description = "PDF's objects as written, their parser and their writer: owned values, each with where it was written, every fault said, and text strings read and written"
-keywords = ["pdf", "objects", "pdfdocencoding", "iso-32000"]
+keywords = ["pdf", "objects", "parser", "pdfdocencoding", "iso-32000"]
 categories = ["data-structures", "encoding", "parser-implementations"]
 # Only what users need, so local tooling files can't end up in the package.
 include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
-pdf-tokenizer = { path = "../pdf-tokenizer", version = "0.2" }
+# An object's 0x80 and 0xFF searched for in its bytes, by PDFium's rules,
+# on SIMD where the target has it; its default features off, as a
+# library's, for the application to turn on.
+memchr = { version = "2.8", default-features = false }
+pdf-tokenizer.workspace = true
 thiserror = "2"
+
+# `cargo bench` runs the benchmarks alone, not the unit tests' harness in
+# bench mode too, so criterion's options reach them as given.
+[lib]
+bench = false
+
+[dev-dependencies]
+# The benchmarks' harness, for `cargo bench`; without its plots and HTML
+# reports, which need more than the numbers. Never built for a user of
+# the crate.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+# The benchmarks: `cargo bench -p pdf-objects`. `benches/` is outside
+# `include`, so the package carries neither them nor this target.
+[[bench]]
+name = "objects"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"
