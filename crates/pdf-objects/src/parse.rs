@@ -32,6 +32,7 @@
 //! a dictionary, is its own under either.
 
 use std::borrow::Cow;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pdf_tokenizer::decode::pdfium::{self, Number};
@@ -403,7 +404,7 @@ fn lossy(bytes: &[u8]) -> Cow<'_, str> {
 /// it's given PDFium's ([`Parser::rules`]). A call that fails leaves the
 /// parser where it was, though it has said the faults it read past before
 /// the error.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Parser<'a> {
     data: &'a [u8],
     /// Where it reads next, in `data`: as it was given until a call reads,
@@ -423,6 +424,23 @@ pub struct Parser<'a> {
     /// them fixed in its type, so that it has nothing to choose at each
     /// token.
     rules: Rules,
+}
+
+impl fmt::Debug for Parser<'_> {
+    /// Where it is, the data's length and how it reads it; not the data,
+    /// which may be a whole file, or decrypted.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Parser")
+            .field("offset", &self.offset)
+            .field("data", &format_args!("{} bytes", self.data.len()))
+            .field("base", &self.base)
+            .field("last", &self.last)
+            .field("stream", &self.stream)
+            .field("ciphertext", &self.ciphertext)
+            .field("limits", &self.limits)
+            .field("rules", &self.rules)
+            .finish()
+    }
 }
 
 impl<'a> Parser<'a> {
@@ -1197,6 +1215,10 @@ fn reserved(bytes: pdfium::Bytes<'_>) -> Vec<u8> {
 }
 
 /// An indirect object's value, read after its header.
+///
+/// Exhaustive on purpose: an indirect object's value is a stream or it
+/// isn't (ISO 32000-2, 7.3.8 and 7.3.10), so a match on both is checked by
+/// the compiler.
 #[derive(Debug, Clone)]
 pub enum Body<'a> {
     /// A value that isn't a stream.
@@ -1211,7 +1233,6 @@ pub enum Body<'a> {
 /// It's one parse's, borrowing the data the parser reads, and it remembers
 /// when an extent ran to the end of a window ([`Parser::window`]) for
 /// [`Parser::stream`].
-#[derive(Debug)]
 pub struct StreamHead<'a> {
     id: ObjectId,
     dict: Dict,
@@ -1231,6 +1252,18 @@ pub struct StreamHead<'a> {
     /// change it: an atomic, so that a head can be shared, though nothing
     /// orders it with anything else.
     touched: AtomicBool,
+}
+
+impl fmt::Debug for StreamHead<'_> {
+    /// Its object, where its data starts and the length of what its parser
+    /// reads; not what it reads, which may be a whole file, or decrypted.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamHead")
+            .field("id", &self.id)
+            .field("start", &self.start())
+            .field("data", &format_args!("{} bytes", self.data.len()))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Clone for StreamHead<'_> {
@@ -1409,6 +1442,44 @@ mod tests {
                 }
             });
         (object, kept)
+    }
+
+    /// `Debug` of a parser, and of a stream read to where its data starts,
+    /// says where it is and how much it reads, never the data, which may be
+    /// a whole file, or decrypted.
+    #[test]
+    fn debug_says_where_it_is_not_the_data() {
+        let mut file = b"4 0 obj\n<< /Length 5 >>\nstream\nhello\nendstream\nendobj\n".to_vec();
+        file.resize(4000, b' ');
+        let mut parser = Parser::at(&file, 0);
+        let limits = Limits::DEFAULT;
+        let shown = format!(
+            "Parser {{ offset: 0, data: 4000 bytes, base: 0, last: true, stream: None, \
+             ciphertext: false, limits: {limits:?}, rules: Iso }}"
+        );
+        assert_eq!(format!("{parser:?}"), shown);
+        let id = parser.header().unwrap();
+        let Ok(Body::Stream(head)) = parser.body(id, &mut ()) else {
+            panic!("a stream");
+        };
+        let shown = "StreamHead { id: ObjectId { number: 4, generation: 0 }, start: 31, \
+                     data: 4000 bytes, .. }";
+        assert_eq!(format!("{head:?}"), shown);
+        let shown = format!("{:?}", Body::Stream(head));
+        assert!(shown.starts_with("Stream(StreamHead { id: ") && !shown.contains("hello"));
+
+        // In a window of an object stream's data, by PDFium's rules.
+        let parser = Parser::at(b"<< /A (secret) >>", 3)
+            .window(100, false)
+            .in_stream(ObjectId::new(7, 0))
+            .ciphertext(true)
+            .rules(Rules::Pdfium);
+        let shown = format!(
+            "Parser {{ offset: 3, data: 17 bytes, base: 100, last: false, \
+             stream: Some(ObjectId {{ number: 7, generation: 0 }}), ciphertext: true, \
+             limits: {limits:?}, rules: Pdfium }}"
+        );
+        assert_eq!(format!("{parser:?}"), shown);
     }
 
     /// The bytes `at` is in `input`.

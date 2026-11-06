@@ -243,8 +243,9 @@ impl Encrypt for () {
 }
 
 /// Why the writer wrote nothing, written through an encryptor: the
-/// writer's own refusal, or the encryptor's. Each grows in its own error,
-/// so this one doesn't.
+/// writer's own refusal, or the encryptor's. Exhaustive on purpose: each
+/// grows in its own error, so this one doesn't, and a match on both is
+/// checked by the compiler.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refused<E> {
     /// What the writer can't write as the value ([`Error`]).

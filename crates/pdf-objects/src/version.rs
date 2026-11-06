@@ -3,6 +3,9 @@
 use std::fmt;
 
 /// A PDF version: `1.7`, `2.0`.
+///
+/// Exhaustive on purpose: a version is its two numbers, built by a literal
+/// and taken apart by them, so a field more would be a breaking release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Version {
     /// The number before the point.

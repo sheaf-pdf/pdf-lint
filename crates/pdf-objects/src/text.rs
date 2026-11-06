@@ -12,8 +12,11 @@
 use pdf_tokenizer::Rules;
 
 /// A text string's text, how it was encoded, and how it departs from the
-/// spec.
+/// spec. A decoder's account, read by its fields: `#[non_exhaustive]`, as
+/// it may say more, such as the languages a PDFium reading takes out with
+/// their escapes (ISO 32000-2, 7.9.2.2.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Text {
     /// The text, U+FFFD where a character doesn't decode. By PDFium's rules
     /// ([`decode_with`]), a surrogate alone still is, but bytes that aren't

@@ -5,6 +5,8 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::iter::{Enumerate, FusedIterator};
+use std::slice;
 
 use crate::text;
 
@@ -16,6 +18,10 @@ use crate::text;
 /// an object's header `format!("{id} obj")`. A pair `(number,
 /// generation)`, as another object model may spell it, converts both
 /// ways through `From`.
+///
+/// Exhaustive on purpose: an id is its two fields, built by a literal and
+/// taken apart by them as the pair is, so a field more would be a breaking
+/// release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObjectId {
     /// Its object number.
@@ -104,6 +110,10 @@ pub struct Object {
 /// Two are equal when they're the same kind and what they hold is equal,
 /// places too: each value's span inside them, a string's form, and a
 /// dictionary's entries in order, with their keys' spans.
+///
+/// Exhaustive on purpose: these are ISO 32000-2's kinds of object, so a
+/// match on every kind is checked by the compiler; another would be a
+/// breaking release.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// The null object.
@@ -133,6 +143,11 @@ pub enum Value {
 }
 
 /// A string's value.
+///
+/// Exhaustive on purpose: each says what a reader can know of the
+/// string's bytes, all of them or what depends on them can't be told, so a
+/// match on all three is checked by the compiler; a fourth would be a
+/// breaking release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Str {
     /// Its bytes, its escapes decoded (and decrypted, in an encrypted
@@ -150,6 +165,9 @@ pub enum Str {
 }
 
 /// How a string was written (ISO 32000-2, 7.3.4.2 and 7.3.4.3).
+///
+/// Exhaustive on purpose: a string is written as one or the other, so a
+/// match on both is checked by the compiler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Form {
     /// A literal string, `(...)`.
@@ -169,6 +187,9 @@ pub struct Dict {
 }
 
 /// A dictionary's entry.
+///
+/// Exhaustive on purpose: an entry is its three fields, built by a literal
+/// and taken apart by them, so a field more would be a breaking release.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     /// The key's bytes, its `#xx` escapes decoded.
@@ -426,24 +447,8 @@ impl Object {
     /// dictionary, never its data. Walked with a stack of its own, so a
     /// value nested however deeply, as one built in memory may be, walks
     /// without overflowing the thread's.
-    pub fn references(&self) -> impl Iterator<Item = ObjectId> + '_ {
-        let mut stack = vec![self];
-        std::iter::from_fn(move || {
-            while let Some(object) = stack.pop() {
-                let entries = match &object.value {
-                    Value::Ref(id) => return Some(*id),
-                    Value::Array(array) => {
-                        stack.extend(array.iter().rev());
-                        continue;
-                    }
-                    Value::Dict(dict) => &dict.entries,
-                    Value::Stream(stream) => &stream.dict.entries,
-                    _ => continue,
-                };
-                stack.extend(entries.iter().rev().map(|entry| &entry.value));
-            }
-            None
-        })
+    pub fn references(&self) -> References<'_> {
+        References { stack: vec![self] }
     }
 
     /// Each reference in it, itself too, named as `to` names its object:
@@ -650,27 +655,27 @@ impl Dict {
 
     /// Each key and its value, as [`Dict::iter`] gives them, the values to
     /// change.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&[u8], &mut Object)> {
-        let shadowed = Shadowed::of(&self.entries);
-        (self.entries.iter_mut().enumerate())
-            .filter(move |(i, _)| !shadowed.contains(*i))
-            .map(|(_, entry)| (entry.key.as_slice(), &mut entry.value))
+    pub fn iter_mut(&mut self) -> IterMut<'_> {
+        IterMut {
+            shadowed: Shadowed::of(&self.entries),
+            entries: self.entries.iter_mut().enumerate(),
+        }
     }
 
     /// Each key's last entry, in order.
-    pub fn last_entries(&self) -> impl Iterator<Item = &Entry> {
-        let shadowed = Shadowed::of(&self.entries);
-        (self.entries.iter().enumerate())
-            .filter(move |(i, _)| !shadowed.contains(*i))
-            .map(|(_, entry)| entry)
+    pub fn last_entries(&self) -> LastEntries<'_> {
+        LastEntries {
+            entries: self.entries.iter().enumerate(),
+            shadowed: Shadowed::of(&self.entries),
+        }
     }
 
     /// The entries a later one with the same key overrides, in order.
-    pub fn duplicates(&self) -> impl Iterator<Item = &Entry> {
-        let shadowed = Shadowed::of(&self.entries);
-        (self.entries.iter().enumerate())
-            .filter(move |(i, _)| shadowed.contains(*i))
-            .map(|(_, entry)| entry)
+    pub fn duplicates(&self) -> Duplicates<'_> {
+        Duplicates {
+            entries: self.entries.iter().enumerate(),
+            shadowed: Shadowed::of(&self.entries),
+        }
     }
 
     /// Every entry as written, duplicates and all.
@@ -680,7 +685,7 @@ impl Dict {
 
     /// Every entry as written, to change. A key changed keeps its
     /// `key_at`, which names the key it was, until the caller clears it.
-    pub fn entries_mut(&mut self) -> impl Iterator<Item = &mut Entry> {
+    pub fn entries_mut(&mut self) -> slice::IterMut<'_, Entry> {
         self.entries.iter_mut()
     }
 
@@ -778,6 +783,9 @@ impl Shadowed {
         Shadowed::Many(shadowed)
     }
 
+    // A hint, so that a walk's loop inlined into its caller tests each
+    // entry in place.
+    #[inline]
     fn contains(&self, i: usize) -> bool {
         match self {
             Shadowed::Few(mask) => i < FEW && (mask & (1 << i)) != 0,
@@ -793,17 +801,25 @@ impl Shadowed {
     }
 }
 
+// The walks of a dictionary's entries below are types of their own, so
+// that a caller can hold one in a struct or name it in a signature. Each
+// method is a hint to inline, as `core`'s own adapters' are (`filter` and
+// `map`'s, which they replace), so that a consumer's loop over the entries
+// is one loop; and each is fused, as the entries' own iterator is.
+
 /// A dictionary's keys and their values, in order, a key written twice at
 /// its last entry: what [`Dict::iter`] gives, and a `for` over a `&Dict`.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
 #[derive(Debug, Clone)]
 pub struct Iter<'a> {
-    entries: std::iter::Enumerate<std::slice::Iter<'a, Entry>>,
+    entries: Enumerate<slice::Iter<'a, Entry>>,
     shadowed: Shadowed,
 }
 
 impl<'a> Iterator for Iter<'a> {
     type Item = (&'a [u8], &'a Object);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let shadowed = &self.shadowed;
         (self.entries.by_ref())
@@ -811,12 +827,26 @@ impl<'a> Iterator for Iter<'a> {
             .map(|(_, entry)| (entry.key.as_slice(), &entry.value))
     }
 
+    /// At most one an entry left.
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, self.entries.size_hint().1)
+    }
+
+    /// One pass over the entries, as `count`, `for_each` and `last` fold.
+    #[inline]
+    fn fold<B, F: FnMut(B, Self::Item) -> B>(self, init: B, mut f: F) -> B {
+        let shadowed = self.shadowed;
+        self.entries
+            .fold(init, |acc, (i, entry)| match shadowed.contains(i) {
+                true => acc,
+                false => f(acc, (entry.key.as_slice(), &entry.value)),
+            })
     }
 }
 
 impl DoubleEndedIterator for Iter<'_> {
+    #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         let shadowed = &self.shadowed;
         (self.entries.by_ref())
@@ -824,6 +854,195 @@ impl DoubleEndedIterator for Iter<'_> {
             .map(|(_, entry)| (entry.key.as_slice(), &entry.value))
     }
 }
+
+impl FusedIterator for Iter<'_> {}
+
+/// A dictionary's keys and their values, as [`Iter`] gives them, the
+/// values to change: what [`Dict::iter_mut`] gives.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Debug)]
+pub struct IterMut<'a> {
+    entries: Enumerate<slice::IterMut<'a, Entry>>,
+    shadowed: Shadowed,
+}
+
+impl<'a> Iterator for IterMut<'a> {
+    type Item = (&'a [u8], &'a mut Object);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let shadowed = &self.shadowed;
+        (self.entries.by_ref())
+            .find(|(i, _)| !shadowed.contains(*i))
+            .map(|(_, entry)| (entry.key.as_slice(), &mut entry.value))
+    }
+
+    /// At most one an entry left.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.entries.size_hint().1)
+    }
+
+    /// One pass over the entries, as `count`, `for_each` and `last` fold.
+    #[inline]
+    fn fold<B, F: FnMut(B, Self::Item) -> B>(self, init: B, mut f: F) -> B {
+        let shadowed = self.shadowed;
+        self.entries
+            .fold(init, |acc, (i, entry)| match shadowed.contains(i) {
+                true => acc,
+                false => f(acc, (entry.key.as_slice(), &mut entry.value)),
+            })
+    }
+}
+
+impl DoubleEndedIterator for IterMut<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let shadowed = &self.shadowed;
+        (self.entries.by_ref())
+            .rfind(|(i, _)| !shadowed.contains(*i))
+            .map(|(_, entry)| (entry.key.as_slice(), &mut entry.value))
+    }
+}
+
+impl FusedIterator for IterMut<'_> {}
+
+/// A dictionary's entries, each key's last, in order: what
+/// [`Dict::last_entries`] gives.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Debug, Clone)]
+pub struct LastEntries<'a> {
+    entries: Enumerate<slice::Iter<'a, Entry>>,
+    shadowed: Shadowed,
+}
+
+impl<'a> Iterator for LastEntries<'a> {
+    type Item = &'a Entry;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a Entry> {
+        let shadowed = &self.shadowed;
+        (self.entries.by_ref())
+            .find(|(i, _)| !shadowed.contains(*i))
+            .map(|(_, entry)| entry)
+    }
+
+    /// At most one an entry left.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.entries.size_hint().1)
+    }
+
+    /// One pass over the entries, as `count`, `for_each` and `last` fold.
+    #[inline]
+    fn fold<B, F: FnMut(B, &'a Entry) -> B>(self, init: B, mut f: F) -> B {
+        let shadowed = self.shadowed;
+        self.entries
+            .fold(init, |acc, (i, entry)| match shadowed.contains(i) {
+                true => acc,
+                false => f(acc, entry),
+            })
+    }
+}
+
+impl DoubleEndedIterator for LastEntries<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let shadowed = &self.shadowed;
+        (self.entries.by_ref())
+            .rfind(|(i, _)| !shadowed.contains(*i))
+            .map(|(_, entry)| entry)
+    }
+}
+
+impl FusedIterator for LastEntries<'_> {}
+
+/// A dictionary's entries that a later one with the same key overrides, in
+/// order: what [`Dict::duplicates`] gives.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Debug, Clone)]
+pub struct Duplicates<'a> {
+    entries: Enumerate<slice::Iter<'a, Entry>>,
+    shadowed: Shadowed,
+}
+
+impl<'a> Iterator for Duplicates<'a> {
+    type Item = &'a Entry;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a Entry> {
+        let shadowed = &self.shadowed;
+        (self.entries.by_ref())
+            .find(|(i, _)| shadowed.contains(*i))
+            .map(|(_, entry)| entry)
+    }
+
+    /// At most one an entry left.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.entries.size_hint().1)
+    }
+
+    /// One pass over the entries, as `count`, `for_each` and `last` fold.
+    #[inline]
+    fn fold<B, F: FnMut(B, &'a Entry) -> B>(self, init: B, mut f: F) -> B {
+        let shadowed = self.shadowed;
+        self.entries
+            .fold(init, |acc, (i, entry)| match shadowed.contains(i) {
+                true => f(acc, entry),
+                false => acc,
+            })
+    }
+}
+
+impl DoubleEndedIterator for Duplicates<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let shadowed = &self.shadowed;
+        (self.entries.by_ref())
+            .rfind(|(i, _)| shadowed.contains(*i))
+            .map(|(_, entry)| entry)
+    }
+}
+
+impl FusedIterator for Duplicates<'_> {}
+
+/// The ids of the objects a value's references name, nested ones too, in
+/// the order written: what [`Object::references`] gives. It walks with a
+/// stack of its own, so a value nested however deeply walks without
+/// overflowing the thread's.
+#[must_use = "an iterator is lazy: it gives nothing until asked"]
+#[derive(Debug, Clone)]
+pub struct References<'a> {
+    /// The values left to walk, the next on top.
+    stack: Vec<&'a Object>,
+}
+
+impl Iterator for References<'_> {
+    type Item = ObjectId;
+
+    #[inline]
+    fn next(&mut self) -> Option<ObjectId> {
+        while let Some(object) = self.stack.pop() {
+            let entries = match &object.value {
+                Value::Ref(id) => return Some(*id),
+                Value::Array(array) => {
+                    self.stack.extend(array.iter().rev());
+                    continue;
+                }
+                Value::Dict(dict) => &dict.entries,
+                Value::Stream(stream) => &stream.dict.entries,
+                _ => continue,
+            };
+            self.stack
+                .extend(entries.iter().rev().map(|entry| &entry.value));
+        }
+        None
+    }
+}
+
+// The stack only shrinks to empty, and stays so.
+impl FusedIterator for References<'_> {}
 
 impl<'a> IntoIterator for &'a Dict {
     type Item = (&'a [u8], &'a Object);
@@ -1391,6 +1610,127 @@ mod tests {
             assert_eq!(values[values.len() - 2..], [Some(-1), Some(2)], "{n}");
             assert_eq!(d.iter_mut().count(), n as usize - 2, "{n}");
         }
+    }
+
+    /// The keys `walk` gives, walked every way: by `next`, from the back,
+    /// folded, counted and to its last, each the same; then none, again and
+    /// again; its `size_hint` bounding what it gave.
+    fn every_way<I>(walk: I, key: impl Fn(&I::Item) -> Vec<u8>) -> Vec<Vec<u8>>
+    where
+        I: DoubleEndedIterator + FusedIterator + Clone,
+    {
+        let (low, high) = walk.size_hint();
+        let (mut forward, mut by_next) = (walk.clone(), Vec::new());
+        // A `for` over a borrow of it asks its `next`.
+        for item in forward.by_ref() {
+            by_next.push(key(&item));
+        }
+        assert!(forward.next().is_none() && forward.next().is_none());
+        assert!(low <= by_next.len() && high.is_none_or(|high| by_next.len() <= high));
+        let (mut back, mut by_back) = (walk.clone(), Vec::new());
+        while let Some(item) = back.next_back() {
+            by_back.push(key(&item));
+        }
+        by_back.reverse();
+        assert_eq!(by_back, by_next);
+        let folded = walk.clone().fold(Vec::new(), |mut keys, item| {
+            keys.push(key(&item));
+            keys
+        });
+        assert_eq!(folded, by_next);
+        assert_eq!(walk.clone().count(), by_next.len());
+        assert_eq!(walk.last().map(|item| key(&item)), by_next.last().cloned());
+        by_next
+    }
+
+    /// Each walk of a dictionary's entries is a type of its own, which a
+    /// caller can name and hold, and gives the same entries however it's
+    /// walked: each key's last, or the entries a later one overrides, and
+    /// to change, each key's last value once. With few entries and many,
+    /// a key written twice at its start and at its end.
+    #[test]
+    fn each_walk_of_a_dictionary_is_a_type_of_its_own_and_reads_alike_every_way() {
+        for n in [16, 40] {
+            let mut d: Dict = (0..n - 3).map(|i| (format!("K{i}"), i)).collect();
+            d.push("K0", -1);
+            d.push("X", 1);
+            d.push("X", 2);
+            let keys: Vec<Vec<u8>> = d.entries().iter().map(|e| e.key.clone()).collect();
+            let shadowed = |i: usize| keys[i + 1..].contains(&keys[i]);
+            let (twice, last): (Vec<usize>, Vec<usize>) =
+                (0..keys.len()).partition(|&i| shadowed(i));
+            let keyed =
+                |at: &[usize]| -> Vec<Vec<u8>> { at.iter().map(|&i| keys[i].clone()).collect() };
+            assert_eq!(keyed(&twice), [b"K0".to_vec(), b"X".to_vec()], "{n}");
+
+            let iter: Iter<'_> = d.iter();
+            assert_eq!(
+                every_way(iter, |(key, _)| key.to_vec()),
+                keyed(&last),
+                "{n}"
+            );
+            let last_entries: LastEntries<'_> = d.last_entries();
+            assert_eq!(
+                every_way(last_entries, |e| e.key.clone()),
+                keyed(&last),
+                "{n}"
+            );
+            let duplicates: Duplicates<'_> = d.duplicates();
+            assert_eq!(
+                every_way(duplicates, |e| e.key.clone()),
+                keyed(&twice),
+                "{n}"
+            );
+
+            // To change: by `next`, from the back, and by `for_each`, which
+            // folds, each key's last value once; then none, and none again.
+            let iter_mut: IterMut<'_> = d.iter_mut();
+            let by_next: Vec<Vec<u8>> = iter_mut.map(|(key, _)| key.to_vec()).collect();
+            assert_eq!(by_next, keyed(&last), "{n}");
+            let mut by_back: Vec<Vec<u8>> = d.iter_mut().rev().map(|(k, _)| k.to_vec()).collect();
+            by_back.reverse();
+            assert_eq!(by_back, keyed(&last), "{n}");
+            let values = |d: &Dict| -> Vec<i64> {
+                (d.entries().iter())
+                    .map(|e| e.value.as_integer().unwrap())
+                    .collect()
+            };
+            let was = values(&d);
+            let ten = |value: &mut Object| *value = Object::from(value.as_integer().unwrap() * 10);
+            d.iter_mut().for_each(|(_, value)| ten(value));
+            let times = |i: usize| if shadowed(i) { was[i] } else { was[i] * 10 };
+            assert_eq!(
+                values(&d),
+                (0..keys.len()).map(times).collect::<Vec<_>>(),
+                "{n}"
+            );
+            assert_eq!(d.iter_mut().count(), last.len(), "{n}");
+            let mut walk = d.iter_mut();
+            while walk.next().is_some() {}
+            assert!(walk.next().is_none() && walk.next().is_none());
+
+            // Every entry as written, to change: the slice's own iterator.
+            let entries_mut: slice::IterMut<'_, Entry> = d.entries_mut();
+            assert_eq!(entries_mut.len(), keys.len(), "{n}");
+        }
+    }
+
+    /// A walk of a value's references is a type of its own, which a caller
+    /// can name and hold: a clone walks on from where it was, and once it's
+    /// given the last, it gives none, again and again.
+    #[test]
+    fn a_walk_of_references_is_a_type_of_its_own() {
+        let value = Object::from(vec![
+            Object::reference(1),
+            dict! { "A" => Object::reference(2) }.into(),
+            Object::reference(3),
+        ]);
+        let mut walk: References<'_> = value.references();
+        assert_eq!(walk.next(), Some(ObjectId::new(1, 0)));
+        let rest: Vec<ObjectId> = walk.clone().collect();
+        assert_eq!(rest, [ObjectId::new(2, 0), ObjectId::new(3, 0)]);
+        assert_eq!(walk.by_ref().count(), 2);
+        assert_eq!((walk.next(), walk.next()), (None, None));
     }
 
     #[test]
