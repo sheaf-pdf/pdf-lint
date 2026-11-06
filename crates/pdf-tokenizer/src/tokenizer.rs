@@ -294,7 +294,15 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
 impl<'a, R: RuleSet> Iterator for Tokenizer<'a, R> {
     type Item = Token<'a>;
 
-    #[inline]
+    // `always`, not the hint the crate's other entry points carry: with
+    // the hint alone, a consumer built without link-time optimization
+    // keeps `Tokenizer<Iso>::next` and `<Pdfium>::next` out of line, a
+    // call a token that returns the token through memory, and reads at
+    // half the speed of the same loop over `Tokenizer<Rules>`, whose
+    // `next` it inlines; forced, the four sides read alike (the crate's
+    // `tokens` and `read` benchmarks, 2x), and a consumer built with
+    // link-time optimization, which inlined it already, is unchanged.
+    #[inline(always)]
     fn next(&mut self) -> Option<Token<'a>> {
         // Each set of rules is a loop of its own. Fixed in the type, the
         // rules are settled when this is compiled; chosen as it runs, they
