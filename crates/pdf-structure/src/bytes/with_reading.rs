@@ -192,7 +192,7 @@ mod tests {
     use pdf_objects::Why;
 
     use super::super::lazy::{files, fixtures};
-    use super::super::{STREAM, read_opened};
+    use super::super::{STREAM, read_opened, shown};
     use super::*;
 
     /// What a source answers of each object it lists, and of one it
@@ -236,12 +236,6 @@ mod tests {
             clear: asked.iter().map(|&id| source.in_the_clear(id)).collect(),
             ids,
         }
-    }
-
-    /// A stream's data decoded, or what's wrong, as text, as an error's
-    /// I/O kind can't be compared.
-    fn shown(decoded: Result<Vec<u8>, Error>) -> Result<Vec<u8>, String> {
-        decoded.map_err(|error| format!("{error:?}"))
     }
 
     /// A stream's data as a viewer takes it ([`Streams`]), or the id and

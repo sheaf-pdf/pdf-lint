@@ -570,6 +570,21 @@ pub(crate) fn read_opened_by(file: &[u8], passwords: &[Password]) -> (Document, 
     (whole.document, whole.handler)
 }
 
+/// A stream's data decoded, or why not as text, for the tests and fuzz
+/// bodies that set two side by side, as an I/O error can't be compared: a
+/// decode error with what decoded, byte by byte, and its faults, as its
+/// derived `Debug` wrote them, pdf-filters' `Debug` giving the data's
+/// length alone; any other by its `Debug`.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn shown(decoded: Result<Vec<u8>, Error>) -> Result<Vec<u8>, String> {
+    decoded.map_err(|error| match error {
+        Error::Decode(pdf_filters::Error { data, faults }) => {
+            format!("Decode(Error {{ data: {data:?}, faults: {faults:?} }})")
+        }
+        error => format!("{error:?}"),
+    })
+}
+
 /// A reading read whole.
 pub(crate) struct Whole {
     /// What it read.
@@ -7450,5 +7465,33 @@ mod tests {
             }
             inside(&soup, &read(&soup));
         }
+    }
+
+    /// Two decode errors whose data is a byte apart, which pdf-filters'
+    /// `Debug` writes alike, by its length, are told apart as the tests
+    /// show them, the data written byte by byte as the derived `Debug`
+    /// wrote it; any other error is its `Debug`, and data that decoded is
+    /// itself.
+    #[test]
+    fn tests_show_a_decode_error_with_what_decoded() {
+        let decode = |data: &[u8]| {
+            Err(Error::Decode(pdf_filters::Error {
+                data: data.to_vec(),
+                faults: vec![(0, Fault::Checksum)],
+            }))
+        };
+        assert_eq!(
+            format!("{:?}", decode(b"ab")),
+            format!("{:?}", decode(b"ac"))
+        );
+        assert_ne!(shown(decode(b"ab")), shown(decode(b"ac")));
+        let said = "Decode(Error { data: [97, 98], faults: [(0, Checksum)] })";
+        assert_eq!(shown(decode(b"ab")), Err(said.to_string()));
+        let other = Error::NotAStream {
+            id: ObjectId::new(1, 0),
+        };
+        let said = format!("{other:?}");
+        assert_eq!(shown(Err(other)), Err(said));
+        assert_eq!(shown(Ok(b"ab".to_vec())), Ok(b"ab".to_vec()));
     }
 }

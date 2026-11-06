@@ -87,7 +87,7 @@ let decoded = decode(&out, &[encoder.filter()], 1 << 20, Backend::MinizOxide);
 assert_eq!(decoded.unwrap(), rows);
 ```
 
-Only Flate encodes, with no predictor or PNG's: what PDF writers write for data of any kind. `Encoder`, `Prediction` and `Row` are non-exhaustive, so others can join them.
+Only Flate encodes, with no predictor or PNG's: what PDF writers write for data of any kind. `Encoder` and `Prediction` are non-exhaustive, so other encoders and predictions can join them; `Row` is too, though it's all five of PNG's filters.
 
 ## How it reads what the spec leaves open
 
