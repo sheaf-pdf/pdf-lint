@@ -56,11 +56,11 @@ pdf-arlington, of pdf-content-streams' `image-ends` feature and pdf-fonts'
 `predefined-cmaps` (1.87) and of pdf-linearize's `lopdf` feature (1.88). Its `test-pdfium` needs
 Python 3, and fetches the pinned PDFium build from GitHub unless
 `PDF_LINT_PDFIUM` names a library: [oracle/README.md](oracle/README.md)
-says how the crates are held to PDFium. Its `tokenizer-package` packages
-the tokenizer as a publish would (`cargo publish --dry-run`), which asks
-the registry over the network. `just tokenizer-semver`, which `ci` leaves
-out, checks the tokenizer's public API against the version published on
-crates.io and needs
+says how the crates are held to PDFium. Its `tokenizer-package` and
+`objects-package` package the tokenizer and pdf-objects as a publish would
+(`cargo publish --dry-run`), which asks the registry over the network.
+`just tokenizer-semver`, which `ci` leaves out, checks the tokenizer's
+public API against the version published on crates.io and needs
 [cargo-semver-checks](https://github.com/obi1kenobi/cargo-semver-checks)
 installed (CI installs 0.51.0 on a Rust pinned beside it).
 

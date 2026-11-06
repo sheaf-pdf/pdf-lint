@@ -158,7 +158,8 @@ fn a_value<'o, R: Resolve<'o> + Copy>(objects: R, value: &'o Object, most: u32) 
         nothing,
         "{value:?}"
     );
-    // Each other kind a resolver gives: `Why::Filter` only a stream's data is.
+    // Each other kind a resolver gives: `Why::Filter` and `Why::Detached` only a
+    // stream's data is.
     for why in [Why::Limit, Why::Locked, Why::Source] {
         let failing = Failing { why: Some(why) };
         let asked = Cell::new(0);
@@ -283,7 +284,8 @@ fn a_space<'o, R: Resolve<'o> + Copy>(objects: R, value: &'o Object) {
         assert_eq!(by_sink, under, "{value:?} under {small:?}");
     }
 
-    // Each kind a resolver gives: `Why::Filter` only a stream's data is.
+    // Each kind a resolver gives: `Why::Filter` and `Why::Detached` only a stream's
+    // data is.
     for why in [Why::Damaged, Why::Limit, Why::Locked, Why::Source] {
         for every in [1, 2, 3] {
             let failing = FailingSome {
