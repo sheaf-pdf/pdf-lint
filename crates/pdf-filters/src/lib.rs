@@ -289,8 +289,10 @@ pub enum Fault {
     Parameters,
     /// The filter's output over the limit the call was given: before a
     /// PNG predictor, that limit and a tag a row ([`decode`] says so). It
-    /// stopped there, with as much as the limit allows. The crate has no
-    /// cap of its own, so the limit this says is always the caller's.
+    /// stopped there, with as much as the limit allows: behind a predictor,
+    /// the whole rows that fit under it, none where a row is over it. The
+    /// crate has no cap of its own, so the limit this says is always the
+    /// caller's.
     #[error("its output is over the limit")]
     Limit,
 }
@@ -299,7 +301,10 @@ pub enum Fault {
 ///
 /// Its `Debug` gives the length of what decoded, not its bytes, which may
 /// be a whole stream's, decrypted before it was decoded:
-/// `Error { data: 23 bytes, faults: [(0, Checksum)] }`.
+/// `Error { data: 23 bytes, faults: [(0, Checksum)] }`. So two errors whose
+/// data are the same length have the same `Debug`, whatever their bytes: a
+/// test compares errors by `==`, never by their `Debug` text, and shows
+/// `data` itself where it needs the bytes.
 ///
 /// Exhaustive on purpose: what decoded and its faults, each field public,
 /// so an error is built by a literal and taken apart by its fields; a
