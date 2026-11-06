@@ -64,7 +64,8 @@ jobs:
     runs-on: ubuntu-latest
     # The environment pdf-tokenizer's job names. crates.io sets a trusted
     # publisher on a crate it has, so a crate's first version may have to be
-    # published by hand, with a token, from its tag's commit.
+    # published by hand, with a token, from its tag's commit: a version
+    # crates.io has already is said, and not published again.
     environment: release
     permissions:
       id-token: write
@@ -88,10 +89,21 @@ jobs:
           fi
       - name: Package, and check what the package holds
         run: just objects-package
+      - name: Look for the version on crates.io
+        id: there
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pdf-objects/Cargo.toml | head -n 1)
+          index=$(curl -fs https://index.crates.io/pd/f-/pdf-objects || true)
+          if grep -qF "\"vers\":\"$version\"" <<< "$index"; then
+            echo "::notice::pdf-objects $version is on crates.io already: nothing to publish"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Get a crates.io token for this run
+        if: steps.there.outputs.published != 'true'
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
       - name: Publish
+        if: steps.there.outputs.published != 'true'
         run: cargo publish --locked -p pdf-objects
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
