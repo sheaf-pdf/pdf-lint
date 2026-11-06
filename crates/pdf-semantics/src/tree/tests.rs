@@ -157,7 +157,7 @@ fn reads_a_number_tree_with_kids() {
         ),
         (
             5,
-            dict! { "S" => "D", "St" => 5, "P" => Object::string("Tab ") }.into(),
+            dict! { "S" => "D", "St" => 5, "P" => Object::text("Tab ") }.into(),
         ),
     ]
     .map(|(n, object): (u32, Object)| (n, Body::Object(object)));

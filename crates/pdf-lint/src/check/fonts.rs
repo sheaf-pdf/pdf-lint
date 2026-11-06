@@ -1096,8 +1096,8 @@ mod tests {
     /// A CIDFont of TrueType glyphs, its descriptor object `descriptor`.
     fn cid_font(descriptor: u32) -> Dict {
         let info = dict! {
-            "Registry" => Object::string("Adobe"),
-            "Ordering" => Object::string("Identity"),
+            "Registry" => Object::text("Adobe"),
+            "Ordering" => Object::text("Identity"),
             "Supplement" => 0,
         };
         dict! {

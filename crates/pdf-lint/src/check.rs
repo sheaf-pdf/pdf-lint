@@ -5181,7 +5181,7 @@ mod tests {
     }
 
     fn text(s: &str) -> Object {
-        Object::string(s)
+        Object::text(s)
     }
 
     /// Where the last `startxref` points, in `bytes`.

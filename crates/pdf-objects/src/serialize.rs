@@ -1200,9 +1200,9 @@ mod tests {
     /// as one.
     #[test]
     fn a_string_with_no_form_is_written_literal() {
-        assert_eq!(written(&Object::string("a (b")), "(a \\(b)");
+        assert_eq!(written(&Object::text("a (b")), "(a \\(b)");
         assert_eq!(written(&Object::bytes(*b"\x01")), "(\x01)");
-        let back = round_trip(&Object::string("x"));
+        let back = round_trip(&Object::text("x"));
         assert_eq!(
             *back.value(),
             Value::String(Str::Bytes(b"x".to_vec()), Some(Form::Literal))
@@ -1669,7 +1669,7 @@ mod tests {
         let toy = fuzz::Toy::default();
         let id = ObjectId::new(7, 1);
         let hex = Object::hex(b"ab");
-        let dict = dict! { "Length" => 1, "S" => Object::string("x(y"), "H" => hex, "Length" => 2 };
+        let dict = dict! { "Length" => 1, "S" => Object::text("x(y"), "H" => hex, "Length" => 2 };
         let mut out = Vec::new();
         indirect_stream_with(&mut out, id, &dict, b"data", &toy).unwrap();
         let seen = toy.seen.borrow();
@@ -1696,8 +1696,8 @@ mod tests {
         let signature = dict! {
             "Contents" => Object::hex(b"\x30\x82"),
             "ByteRange" => vec![Object::from(0), Object::from(4)],
-            "M" => Object::string("D:2026"),
-            "Contents" => vec![Object::string("in the clear")],
+            "M" => Object::text("D:2026"),
+            "Contents" => vec![Object::text("in the clear")],
         };
         let plain_of = |id, obj: &Object| {
             let mut out = Vec::new();
@@ -1706,7 +1706,7 @@ mod tests {
         };
         // The toy leaves an object whose number is a multiple of 5 as it is,
         // and a cross-reference stream.
-        let xref = dict! { "Type" => "XRef", "ID" => vec![Object::string("an /ID")] };
+        let xref = dict! { "Type" => "XRef", "ID" => vec![Object::text("an /ID")] };
         let xref_stream = Object::from(Stream::new(xref.clone(), vec![1, 0, 0]));
         for (id, obj) in [
             (ObjectId::new(10, 0), Object::from(signature.clone())),
@@ -1747,7 +1747,7 @@ mod tests {
         let id = ObjectId::new(7, 2);
         let deep = Object::from(vec![
             Object::from(1),
-            Object::from(dict! { "A" => Object::string("secret") }),
+            Object::from(dict! { "A" => Object::text("secret") }),
         ]);
         let refused = Refused::Encrypt {
             id,
@@ -1758,12 +1758,12 @@ mod tests {
             indirect_with(&mut out, id, &deep, &toy),
             Err(refused.clone())
         );
-        let stream = dict! { "S" => Object::string("not refused") };
+        let stream = dict! { "S" => Object::text("not refused") };
         assert_eq!(
             indirect_stream_with(&mut out, id, &stream, b"secret", &toy),
             Err(refused.clone())
         );
-        let nan = dict! { "S" => Object::string("x"), "N" => f64::NAN };
+        let nan = dict! { "S" => Object::text("x"), "N" => f64::NAN };
         assert_eq!(
             indirect_with(&mut out, id, &Object::from(nan), &toy),
             Err(Refused::Write(Error::NonFinite { id: Some(id) }))
@@ -1997,7 +1997,7 @@ mod tests {
             })
         };
         let page =
-            Object::from(dict! { "Self" => ObjectId::new(3, 0), "S" => Object::string("ab") });
+            Object::from(dict! { "Self" => ObjectId::new(3, 0), "S" => Object::text("ab") });
         let toy = fuzz::Toy::default();
         let mut out = Vec::new();
         indirect_renumbered(&mut out, ObjectId::new(8, 0), &page, &toy, &to).unwrap();

@@ -1313,7 +1313,7 @@ mod tests {
                 dict! {
                     "Type" => "Catalog",
                     "Pages" => Object::reference(2),
-                    "Lang" => Object::string("en"),
+                    "Lang" => Object::text("en"),
                 }
                 .into(),
             ),
@@ -1338,7 +1338,7 @@ mod tests {
                     "Type" => "Annot",
                     "Subtype" => "Text",
                     "Rect" => numbers(&[10, 10, 30, 30]),
-                    "Contents" => Object::string("A note"),
+                    "Contents" => Object::text("A note"),
                     "AP" => dict! { "N" => Object::reference(5) },
                 }
                 .into(),

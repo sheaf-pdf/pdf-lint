@@ -399,7 +399,7 @@ fn type0_text_as_pdfium_reads_it() {
     let info = |ordering: Object| {
         dict! {
             "CIDSystemInfo" => dict! {
-                "Registry" => Object::string("Other"), "Ordering" => ordering,
+                "Registry" => Object::text("Other"), "Ordering" => ordering,
             },
         }
     };
@@ -407,9 +407,9 @@ fn type0_text_as_pdfium_reads_it() {
         let font = type0(pdf, encoding, descendant);
         font_of(pdf, font).text(b"\x01\x08\x03\x4b")
     };
-    let japan1 = info(Object::string("Japan1"));
+    let japan1 = info(Object::text("Japan1"));
     let named = info("Japan1".into());
-    let identity = info(Object::string("Identity"));
+    let identity = info(Object::text("Identity"));
     let ordered = text(&mut pdf, "Identity-H".into(), japan1.clone());
     assert_eq!(ordered.as_deref(), Some("Aあ"));
     let ordered = text(&mut pdf, "Identity-V".into(), named);
@@ -589,7 +589,7 @@ fn a_code_a_to_unicode_misses_is_its_cid_s_text() {
     let mut pdf = Pdf::default();
     let info = dict! {
         "CIDSystemInfo" => dict! {
-            "Registry" => Object::string("Adobe"), "Ordering" => Object::string("Japan1"),
+            "Registry" => Object::text("Adobe"), "Ordering" => Object::text("Japan1"),
         },
     };
     let to_unicode = pdf.add_object(Stream::new(
@@ -1315,7 +1315,7 @@ fn without_the_feature_a_predefined_cmap_is_guessed() {
         [(0..2, 0x4142), (2..3, 0x43)]
     );
     let identity = dict! {
-        "CIDSystemInfo" => dict! { "Ordering" => Object::string("Japan1") },
+        "CIDSystemInfo" => dict! { "Ordering" => Object::text("Japan1") },
     };
     let identity = type0(&mut pdf, "Identity-H".into(), identity);
     assert_eq!(font_of(&pdf, identity).text(b"\x01\x08"), None);
@@ -1374,7 +1374,7 @@ fn fonts_that_reach() -> (Pdf, Vec<(Dict, Vec<ObjectId>)>) {
         ))
     };
     // Its `/Descent` no number, by reference, so that what's at fault is read too.
-    let at_fault = pdf.add_object(Object::string("a"));
+    let at_fault = pdf.add_object(Object::text("a"));
     let descriptor = pdf.add_object(dict! { "Ascent" => 700, "Descent" => at_fault });
     let widths = pdf.add_object(vec![Object::from(600)]);
     let number = pdf.add_object(Object::from(65));
@@ -1399,7 +1399,7 @@ fn fonts_that_reach() -> (Pdf, Vec<(Dict, Vec<ObjectId>)>) {
     fonts.push((type3, vec![proc, procs]));
 
     let w = pdf.add_object(vec![Object::from(1), vec![Object::from(600)].into()]);
-    let info = pdf.add_object(dict! { "Ordering" => Object::string("Identity") });
+    let info = pdf.add_object(dict! { "Ordering" => Object::text("Identity") });
     let descriptor = pdf.add_object(dict! { "Ascent" => 700 });
     let cid_font = pdf.add_object(dict! {
         "Subtype" => "CIDFontType2", "W" => w, "CIDSystemInfo" => info,
@@ -1686,7 +1686,7 @@ fn a_simple_font_s_widths_are_pdfium_s_integers_in_16_bits() {
         (Object::from(600.9), 600.0),
         (Object::from(true), 1.0),
         (Object::from(false), 0.0),
-        (Object::string("a"), 0.0),
+        (Object::text("a"), 0.0),
         (Object::null(), 0.0),
         (Object::from("Name"), 0.0),
         (Object::from(vec![Object::from(700)]), 0.0),
@@ -1726,7 +1726,7 @@ fn a_cid_font_s_widths_are_pdfium_s_integers() {
             Object::from(4294967296_i64),
             Object::from(2147483648_i64),
             Object::from(-500.7),
-            Object::string("a"),
+            Object::text("a"),
             number.into(),
             chain.into(),
         ]
@@ -1741,7 +1741,7 @@ fn a_cid_font_s_widths_are_pdfium_s_integers() {
     for (dw, width) in [
         (Object::from(700.9), 700.0),
         (Object::from(true), 1.0),
-        (Object::string("a"), 0.0),
+        (Object::text("a"), 0.0),
         (Object::null(), 0.0),
         (Object::from(70000), 4464.0),
         (Object::from(32768), -32768.0),
@@ -1848,7 +1848,7 @@ fn a_simple_font_s_range_of_widths() {
     let first = |n: Object| dict! { "FirstChar" => n };
     assert_eq!(of(&pdf, first(65.9.into()), 65), 500.0);
     assert_eq!(of(&pdf, first(true.into()), 1), 500.0);
-    assert_eq!(of(&pdf, first(Object::string("a")), 0), 500.0);
+    assert_eq!(of(&pdf, first(Object::text("a")), 0), 500.0);
     assert_eq!(of(&pdf, first((-1).into()), 0), 0.0);
     assert_eq!(of(&pdf, first(300.into()), 44), 0.0);
     assert_eq!(of(&pdf, first(4294967361_i64.into()), 65), 0.0);
@@ -1877,7 +1877,7 @@ fn a_simple_font_s_range_of_widths() {
     assert_eq!(font_of(&pdf, empty(65)).width(65), 777.0);
     for (missing, width) in [
         (Object::from(true), 1.0),
-        (Object::string("a"), 0.0),
+        (Object::text("a"), 0.0),
         (Object::from(-500), 65036.0),
         (Object::from(65535), 0.0),
     ] {
@@ -2001,7 +2001,7 @@ fn a_descriptor_s_numbers_as_pdfium_reads_them() {
     assert_eq!(heights(&mut pdf, true.into(), true.into()), (1.0, 1.0));
     assert_eq!(heights(&mut pdf, true.into(), (-200).into()), (1.0, -200.0));
     assert_eq!(
-        heights(&mut pdf, Object::string("a"), (-200).into()),
+        heights(&mut pdf, Object::text("a"), (-200).into()),
         (0.0, -200.0)
     );
     assert_eq!(
@@ -2137,13 +2137,13 @@ fn references_are_followed_as_each_accessor_follows_them() {
     let courier = pdf.add_object(Object::from("Courier"));
     let chained = refer(&mut pdf, courier);
     assert_eq!(
-        width_at_66(&pdf, by("Type1".into(), Object::string("Courier"))),
+        width_at_66(&pdf, by("Type1".into(), Object::text("Courier"))),
         600.0
     );
     assert_eq!(width_at_66(&pdf, by("Type1".into(), courier.into())), 600.0);
     assert_eq!(width_at_66(&pdf, by("Type1".into(), chained.into())), 0.0);
     assert_eq!(
-        width_at_66(&pdf, by(Object::string("TrueType"), "Courier".into())),
+        width_at_66(&pdf, by(Object::text("TrueType"), "Courier".into())),
         0.0
     );
     let true_type = pdf.add_object(Object::from("TrueType"));
@@ -2182,7 +2182,7 @@ fn differences_as_pdfium_reads_them() {
     assert_eq!(text(&pdf, vec![65.9.into(), "C".into()].into(), 65), c());
     assert_eq!(text(&pdf, vec![true.into(), "C".into()].into(), 1), c());
     for other in [
-        Object::string("s"),
+        Object::text("s"),
         Object::null(),
         vec![Object::from(1)].into(),
     ] {
@@ -2311,13 +2311,13 @@ fn base_encodings_as_pdfium_comes_to_them() {
     assert_eq!(quote(&pdf, with(name.into())), win_ansi);
     assert_eq!(quote(&pdf, with(chain.into())), standard);
     assert_eq!(
-        quote(&pdf, with(Object::string("WinAnsiEncoding"))),
+        quote(&pdf, with(Object::text("WinAnsiEncoding"))),
         standard
     );
     let base = |value: Object| with(dict! { "BaseEncoding" => value }.into());
     assert_eq!(quote(&pdf, base("WinAnsiEncoding".into())), win_ansi);
     assert_eq!(
-        quote(&pdf, base(Object::string("WinAnsiEncoding"))),
+        quote(&pdf, base(Object::text("WinAnsiEncoding"))),
         win_ansi
     );
     assert_eq!(quote(&pdf, base(name.into())), win_ansi);
@@ -2391,7 +2391,7 @@ fn type3_numbers_as_pdfium_reads_them() {
     assert_eq!(at_65(500.6.into()), 501.0);
     assert_eq!(at_65(500.5.into()), 501.0);
     assert_eq!(at_65(true.into()), 410.0);
-    assert_eq!(at_65(Object::string("a")), 410.0);
+    assert_eq!(at_65(Object::text("a")), 410.0);
     assert_eq!(at_65(number.into()), 500.0);
     assert_eq!(at_65(chain.into()), 410.0);
     assert_eq!(at_65(4294967296_i64.into()), 410.0);
@@ -2517,7 +2517,7 @@ fn a_vertical_font_s_numbers_are_16_bits() {
     assert_eq!(places(read), (0.0, 500.0, 0.0));
     let read = vertical(&mut pdf, dict! { "DW2" => ns(&[70000, -70000]) });
     assert_eq!(places(read), (-4464.0, 500.0, 4464.0));
-    let dw2: Object = vec![Object::from(true), Object::string("a")].into();
+    let dw2: Object = vec![Object::from(true), Object::text("a")].into();
     let read = vertical(&mut pdf, dict! { "DW2" => dw2 });
     assert_eq!(places(read), (0.0, 500.0, 1.0));
     // Its centre is half its width, cut, and in 16 bits.
@@ -2571,7 +2571,7 @@ fn a_font_pdfium_doesn_t_load_is_told() {
         [Fault::Chained, Fault::DescendantFonts]
     );
     assert_eq!(
-        faults(&pdf, font(good(), Object::string("Identity-H"))),
+        faults(&pdf, font(good(), Object::text("Identity-H"))),
         [Fault::CMap]
     );
     assert_eq!(faults(&pdf, font(good(), name_once.into())), [Fault::CMap]);
@@ -2771,7 +2771,7 @@ fn faults_are_told_where_they_are() {
     );
     assert_eq!(faults(&pdf, without(b"FirstChar")), [Fault::FirstChar]);
     assert_eq!(
-        faults(&pdf, with("FirstChar", Object::string("a"))),
+        faults(&pdf, with("FirstChar", Object::text("a"))),
         [Fault::NotANumber, Fault::FirstChar]
     );
     assert_eq!(
@@ -2779,7 +2779,7 @@ fn faults_are_told_where_they_are() {
             &pdf,
             with(
                 "Widths",
-                vec![Object::from(600), Object::string("a")].into()
+                vec![Object::from(600), Object::text("a")].into()
             )
         ),
         [Fault::NotANumber]
@@ -2803,7 +2803,7 @@ fn faults_are_told_where_they_are() {
         faults(&pdf, with("Encoding", past.into())),
         [Fault::Differences]
     );
-    let string = differences(vec![Object::string("a")]);
+    let string = differences(vec![Object::text("a")]);
     assert_eq!(
         faults(&pdf, with("Encoding", string.into())),
         [Fault::Differences]
@@ -2826,7 +2826,7 @@ fn faults_are_told_where_they_are() {
         [(Place::new(Some(descriptor), None), Fault::Chained)]
     );
 
-    let bad = pdf.add_object(dict! { "Ascent" => Object::string("a") });
+    let bad = pdf.add_object(dict! { "Ascent" => Object::text("a") });
     let mut font = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" };
     font.set("FontDescriptor", bad);
     assert_eq!(
@@ -3024,8 +3024,8 @@ fn program_fonts() -> (Pdf, HashMap<&'static str, ObjectId>) {
         "FontDescriptor" => cid_descriptor, "CIDToGIDMap" => "Identity",
         "W" => vec![Object::from(1), [600, 500, 250, 450, 700].map(Object::from).to_vec().into()],
         "CIDSystemInfo" => dict! {
-            "Registry" => Object::string("Adobe"),
-            "Ordering" => Object::string("Identity"), "Supplement" => 0,
+            "Registry" => Object::text("Adobe"),
+            "Ordering" => Object::text("Identity"), "Supplement" => 0,
         },
     });
     let pi = pdf.add_object(dict! {
@@ -4071,7 +4071,7 @@ fn a_name_pdfium_does_not_know_has_no_cid_s_text() {
     let mut pdf = Pdf::default();
     let japan1 = dict! {
         "CIDSystemInfo" => dict! {
-            "Registry" => Object::string("Adobe"), "Ordering" => Object::string("Japan1"),
+            "Registry" => Object::text("Adobe"), "Ordering" => Object::text("Japan1"),
         },
     };
     for name in ["Foo", "FooV"] {

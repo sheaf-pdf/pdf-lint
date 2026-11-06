@@ -182,7 +182,7 @@ mod tests {
                 Object::from("Indexed"),
                 Object::from("DeviceRGB"),
                 Object::from(1),
-                Object::string("abcdef"),
+                Object::text("abcdef"),
             ],
             "N2" => vec![
                 Object::from("DeviceN"),

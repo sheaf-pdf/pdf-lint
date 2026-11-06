@@ -3331,7 +3331,7 @@ mod tests {
             )
         };
         let pieces = || dict! { "PieceInfo" => dict! {} };
-        let dated = || dict! { "ModDate" => Object::string("D:20261024") };
+        let dated = || dict! { "ModDate" => Object::text("D:20261024") };
         for (file, version, met) in [
             (with(dated(), pieces()), "1.4", Truth::True),
             (with(dict! {}, pieces()), "1.4", Truth::False),
@@ -3734,7 +3734,7 @@ mod tests {
                 (1, dict! { "Type" => "Catalog" }.into()),
                 (3, page(Some(vec![5, 6]))),
                 (4, page(None)),
-                (5, annotation(Some(Object::string("one")))),
+                (5, annotation(Some(Object::text("one")))),
                 (6, annotation(None)),
                 (7, annotation(Some(Object::from(5)))),
                 (8, page(Some(vec![6, 7]))),
@@ -3742,7 +3742,7 @@ mod tests {
         );
         let target = |p: Object, a: Object| Object::from(dict! { "R" => "C", "P" => p, "A" => a });
         let action = Object::from(dict! { "S" => "GoToE", "T" => Object::null() });
-        let embedded = Object::from(dict! { "R" => "C", "N" => Object::string("x") });
+        let embedded = Object::from(dict! { "R" => "C", "N" => Object::text("x") });
         let item = |key: &[u8], i: usize| &row("Target", key).possible_values[i][0].item;
         let (p, a, nm) = (item(b"P", 0), item(b"A", 0), item(b"A", 1));
         assert_eq!(p, "fn:Eval((@P>=0) && (@P<fn:NumberOfPages()))");
@@ -3775,17 +3775,17 @@ mod tests {
             assert_eq!(is(&file, &target, &[&action], a), met, "{target:?}");
         }
         for (target, met) in [
-            (of(0, Object::string("one")), Truth::True),
-            (of(0, Object::string("two")), Truth::False),
-            (of(1, Object::string("one")), property.clone()),
+            (of(0, Object::text("one")), Truth::True),
+            (of(0, Object::text("two")), Truth::False),
+            (of(1, Object::text("one")), property.clone()),
             (
-                of(2, Object::string("one")),
+                of(2, Object::text("one")),
                 unknown("@A==fn:PageProperty(@P,Annots::@NM)"),
             ),
         ] {
             assert_eq!(is(&file, &target, &[&action], nm), met, "{target:?}");
         }
-        let named = target(Object::string("chapter"), 0.into());
+        let named = target(Object::text("chapter"), 0.into());
         assert_eq!(
             is(&file, &named, &[&action], a),
             property,
@@ -4179,7 +4179,7 @@ mod tests {
     /// A name tree's leaf of `keys`.
     fn leaf(keys: &[&str]) -> Object {
         let names: Vec<Object> = (keys.iter())
-            .flat_map(|k| [Object::string(k), Object::from(0)])
+            .flat_map(|k| [Object::text(k), Object::from(0)])
             .collect();
         dict! { "Names" => names }.into()
     }
@@ -4190,7 +4190,7 @@ mod tests {
         let text = format!("fn:InNameTree({tree})");
         (keys.iter())
             .map(|key| {
-                let container = Object::from(dict! { "X" => Object::string(key) });
+                let container = Object::from(dict! { "X" => Object::text(key) });
                 holds(&text, &file.at(&container, At::Key(b"X")))
             })
             .collect()
@@ -4264,7 +4264,7 @@ mod tests {
             let ((), resolved) = file.counted("1.7", |file| {
                 for (key, holds_it) in [("a", true), ("c", false), ("a", true), ("c", false)] {
                     let container =
-                        Object::from(dict! { "T" => root.clone(), "X" => Object::string(key) });
+                        Object::from(dict! { "T" => root.clone(), "X" => Object::text(key) });
                     let said = holds("fn:InNameTree(T)", &file.at(&container, At::Key(b"X")));
                     assert_eq!(said == Truth::True, holds_it, "{key}");
                 }
@@ -4337,7 +4337,7 @@ mod tests {
         // with a tree of its own written directly under the same key, and
         // a row of its own key and of the one before's.
         let file = bare();
-        let key = |i: usize| Object::string(&format!("k{i}"));
+        let key = |i: usize| Object::text(&format!("k{i}"));
         let tree = |i: usize, placed: bool| {
             let tree = Object::from(dict! { "Names" => vec![key(i), Object::from(0)] });
             match placed {
@@ -4384,7 +4384,7 @@ mod tests {
 
     #[test]
     fn a_fully_qualified_field_name_is_a_fields_in_the_form() {
-        let text = |s: &str| Object::string(s);
+        let text = |s: &str| Object::text(s);
         // `a` with a field `b`, a widget of its own, and a field without a
         // name of its own, `a`'s, with a field `d`; `c`, whose name is
         // UTF-16; and a field at the top without a name.
@@ -5294,7 +5294,7 @@ mod tests {
         objects: &BTreeMap<ObjectId, Object>,
     ) -> Vec<Truth> {
         let row = |text: &str, value: &str| {
-            let container = Object::from(dict! { "X" => Object::string(value) });
+            let container = Object::from(dict! { "X" => Object::text(value) });
             holds(text, &file.at(&container, At::Key(b"X")))
         };
         let item = |text: &str, n: u32| {
@@ -5344,8 +5344,8 @@ mod tests {
         let page = |n| Object::from(dict! { "Type" => "Page" }).at(written(n));
         let image = Object::from(dict! { "Subtype" => "Image" }).at(written(60));
         let root = dict! { "Type" => "StructTreeRoot", "K" => Object::reference(8) };
-        let a = dict! { "T" => Object::string("a"), "Kids" => vec![Object::reference(10)] };
-        let b = dict! { "T" => Object::string("b"), "Parent" => Object::reference(9) };
+        let a = dict! { "T" => Object::text("a"), "Kids" => vec![Object::reference(10)] };
+        let b = dict! { "T" => Object::text("b"), "Parent" => Object::reference(9) };
         let file = File::new(
             dict! { "Root" => Object::reference(1) },
             [

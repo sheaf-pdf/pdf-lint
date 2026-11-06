@@ -134,7 +134,7 @@ use pdf_objects::{Object, serialize};
 let file = b"<< /Type /Annot /Rect [0 0 10 10] /Contents (old) >>";
 let mut annot = Parser::at(file, 0).value(&mut ()).unwrap();
 let dict = annot.as_dict_mut().unwrap();
-dict.set("Contents", Object::string("new"));
+dict.set("Contents", Object::text("new"));
 let rect = dict.get_mut(b"Rect").and_then(Object::as_array_mut).unwrap();
 rect[2] = Object::from(20);
 

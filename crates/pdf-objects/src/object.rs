@@ -259,16 +259,6 @@ impl Object {
         Object::new(Value::Ref(ObjectId::new(n, 0)))
     }
 
-    /// A string of `text`'s bytes, UTF-8 with no byte order mark, its form
-    /// not chosen. Read as a text string (ISO 32000-2, 7.9.2.2), bytes
-    /// with no mark are PDFDocEncoding, so it reads back as `text` only
-    /// when that's ASCII, but for 0x18–0x1F and 0x7F: `é` reads back as
-    /// `Ã©`: [`Object::text`] writes a text string.
-    #[must_use]
-    pub fn string(text: &str) -> Object {
-        Object::new(Value::String(Str::Bytes(text.as_bytes().to_vec()), None))
-    }
-
     /// A text string (ISO 32000-2, 7.9.2.2) that reads back as `text`: the
     /// bytes [`text::encode`] gives, written as a literal string when
     /// they're as they are, and as a hex string when they're UTF-16BE.
@@ -1482,7 +1472,6 @@ mod tests {
         assert_eq!(Object::hex(*b"x").value, hex);
         let unchosen = Value::String(Str::Bytes(b"x".to_vec()), None);
         assert_eq!(Object::bytes(*b"x").value, unchosen);
-        assert_eq!(Object::string("x").value, unchosen);
     }
 
     /// `text`'s value, as the parser reads it: each value placed.
@@ -2015,7 +2004,7 @@ mod tests {
             Object::null(),
             1.into(),
             "Name".into(),
-            Object::string("1 0 R"),
+            Object::text("1 0 R"),
         ] {
             assert_eq!(ids(&scalar), [], "{scalar:?}");
         }
@@ -2149,7 +2138,7 @@ mod tests {
             Object::null(),
             1.into(),
             "N".into(),
-            Object::string("1 0 R"),
+            Object::text("1 0 R"),
         ] {
             let was = scalar.clone();
             assert!(!scalar.renumber(to), "{scalar:?}");

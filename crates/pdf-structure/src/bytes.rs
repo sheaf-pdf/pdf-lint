@@ -4062,7 +4062,7 @@ mod tests {
                     "Type" => "Annot",
                     "Subtype" => "Text",
                     "Rect" => numbers(&[100.0, 100.0, 120.0, 120.0]),
-                    "Contents" => Object::string("A (note) é\\"),
+                    "Contents" => Object::text("A (note) é\\"),
                     "NM" => Object::bytes(vec![0, 255, b'\r']),
                     "A#B" => true,
                     "Gone" => Object::null(),
@@ -4804,7 +4804,7 @@ mod tests {
         let objects: Vec<(u32, Body)> = vec![
             (
                 1,
-                dict! { "Type" => "Catalog", "Lang" => Object::string("en") }.into(),
+                dict! { "Type" => "Catalog", "Lang" => Object::text("en") }.into(),
             ),
             (2, dict! { "Filter" => "Standard", "V" => 2 }.into()),
         ];
@@ -5594,7 +5594,7 @@ mod tests {
             "Type" => "Annot",
             "Subtype" => "Text",
             "Rect" => vec![Object::from(0), Object::from(0), Object::from(9), Object::from(9)],
-            "Contents" => Object::string("A note"),
+            "Contents" => Object::text("A note"),
         };
         if !extra.is_empty() {
             let raw: Vec<Object> = (extra.iter())
@@ -5609,7 +5609,7 @@ mod tests {
             "Contents" => Object::new(Value::String(Str::Bytes(vec![0x30, 0x82, 0x00, 0x01]), None)),
         };
         vec![
-            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Lang" => Object::string("en") }.into()),
+            (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Lang" => Object::text("en") }.into()),
             (2, dict! { "Type" => "Pages", "Kids" => vec![Object::reference(3)], "Count" => 1 }.into()),
             (3, dict! { "Type" => "Page", "Parent" => Object::reference(2), "Annots" => vec![Object::reference(4)] }.into()),
             (4, note.into()),
@@ -6237,7 +6237,7 @@ mod tests {
         let root = || dict! { "Root" => Object::reference(1) };
         let xmp = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>";
         let metadata =
-            dict! { "Type" => "Metadata", "Subtype" => "XML", "Mine" => Object::string("about") };
+            dict! { "Type" => "Metadata", "Subtype" => "XML", "Mine" => Object::text("about") };
         let objects = [
             (1, dict! { "Type" => "Catalog", "Pages" => Object::reference(2), "Metadata" => Object::reference(3) }.into()),
             (2, dict! { "Type" => "Pages", "Kids" => vec![], "Count" => 0 }.into()),
@@ -6868,7 +6868,7 @@ mod tests {
             "Type" => "XObject",
             "Subtype" => "Form",
             "BBox" => vec![Object::from(0), Object::from(0), Object::from(9), Object::from(9)],
-            "Mine" => Object::string("on the form"),
+            "Mine" => Object::text("on the form"),
         };
         let resources = dict! { "XObject" => dict! { "Fm" => Object::reference(4) } };
         let objects = [
@@ -7280,7 +7280,7 @@ mod tests {
             "Type" => "Catalog",
             "Lang" => s("en"),
             "Dup" => s("BB"),
-            "Kids" => vec![s("K1"), Object::string("K2")],
+            "Kids" => vec![s("K1"), s("K2")],
             "Short" => vec![s("S1"), s("S2")],
         };
         let decoder = Plain(
@@ -7321,7 +7321,7 @@ mod tests {
             "only the last entry has a place in the plaintext"
         );
         let kids = plain(catalog.get(b"Kids").unwrap());
-        assert_eq!(kids, Object::from(vec![s("K1"), Object::string("K2")]));
+        assert_eq!(kids, Object::from(vec![s("K1"), s("K2")]));
         let short = plain(catalog.get(b"Short").unwrap());
         assert_eq!(
             short,

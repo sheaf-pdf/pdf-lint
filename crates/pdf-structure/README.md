@@ -173,7 +173,7 @@ let file = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
 let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
 let from: &dyn ReadFrom = &reading;
 let mut doc = reading.to_document().unwrap();
-doc.catalog_mut().unwrap().set("Lang", Object::string("en"));
+doc.catalog_mut().unwrap().set("Lang", Object::text("en"));
 let lang = |reading: &Reading<&[u8]>| {
     let catalog = reading.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
     catalog.get(b"Lang").and_then(Object::as_bytes).map(<[u8]>::to_vec)
@@ -210,7 +210,7 @@ let trailer = written.base.trailer.clone();
 let (len, size) = (updated.len(), written.size);
 let mut read = Base::new(len, written.start, size, XrefKind::Table, trailer);
 read.ends_line = true;
-let again = Object::from(dict! { "Type" => "Catalog", "Lang" => Object::string("fr") });
+let again = Object::from(dict! { "Type" => "Catalog", "Lang" => Object::text("fr") });
 let catalog = [(ObjectId::new(1, 0), Body::from(&again))];
 write::update(&mut updated, &read, catalog, None, None, &defaults).unwrap();
 let back = Reading::open(&updated[..], &Options::DEFAULT).unwrap();

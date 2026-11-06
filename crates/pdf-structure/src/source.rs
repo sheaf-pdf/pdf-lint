@@ -2322,7 +2322,7 @@ mod tests {
                 .unwrap()
                 .data
         );
-        doc.catalog_mut().unwrap().set("Lang", Object::string("en"));
+        doc.catalog_mut().unwrap().set("Lang", Object::text("en"));
         assert!(doc.catalog().is_some_and(|d| d.has(b"Lang")));
         assert_eq!(doc.record(ObjectId::new(1, 0)), None);
 
