@@ -61,12 +61,12 @@ impl<S: Streams + ?Sized> Streams for &S {
 }
 
 /// A resolver and a function from a stream's number and a limit to its data,
-/// as one: objects, with their streams' data by the function, for what reads
-/// a file and has its streams some other way. The
-/// function gives the data owned: a closure can't lend what outlives the call,
-/// so a reader that holds what it decodes, and would lend it, implements
-/// [`Streams`] on a type of its own. What the function gives is given as it
-/// is, longer than asked for or not: the caller's to refuse.
+/// as one: objects, with their streams' data by the function, for what reads a
+/// file and has its streams some other way. The function gives the data owned:
+/// a closure can't lend what outlives the call, so a reader that holds what it
+/// decodes, and would lend it, implements [`Streams`] on a type of its own.
+/// What the function gives is given as it is, longer than asked for or not:
+/// the caller's to refuse.
 ///
 /// ```
 /// use pdf_objects::{Object, ObjectId, Resolve, Streams, Unreadable, WithStreams, Why};
@@ -201,8 +201,8 @@ mod tests {
         assert!(matches!(lent, Cow::Borrowed(b"abc")));
     }
 
-    /// `WithStreams` resolves by its resolver, says why as it says, and gives its
-    /// function's data owned, or why there's none, as the function says.
+    /// `WithStreams` resolves by its resolver, says why as it says, and gives
+    /// its function's data owned, or why there's none, as the function says.
     #[test]
     fn with_resolves_by_its_resolver_and_gives_its_function_s_data_owned() {
         let map = map();
@@ -270,8 +270,8 @@ mod tests {
         );
     }
 
-    /// What a function gives past the limit, `WithStreams` gives as it is: holding
-    /// what's given to the limit is the caller's, which refuses it.
+    /// What a function gives past the limit, `WithStreams` gives as it is:
+    /// holding what's given to the limit is the caller's, which refuses it.
     #[test]
     fn data_past_the_limit_is_given_as_it_is_for_the_caller_to_refuse() {
         let none = |_: ObjectId| -> Option<&Object> { None };
@@ -285,7 +285,8 @@ mod tests {
         };
         assert_eq!(held(0), Err(Why::Limit));
         assert_eq!(held(4), Err(Why::Limit));
-        // A `WithStreams` is `Copy` where what it holds is, as a font's reading wants.
+        // A `WithStreams` is `Copy` where what it holds is, as a font's
+        // reading wants.
         let copied = over;
         assert_eq!(copied.decoded(ObjectId::new(1, 0), 0).unwrap().len(), 1);
         assert_eq!(over.decoded(ObjectId::new(1, 0), 0).unwrap().len(), 1);

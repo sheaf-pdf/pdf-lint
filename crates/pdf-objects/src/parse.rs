@@ -749,9 +749,9 @@ impl<'a> Parser<'a> {
     /// [`Error::Extent`] for data that doesn't start where the stream's
     /// does, ends before it starts, runs past what the parser reads, or is
     /// in other data; [`Error::Endstream`] where `endstream` doesn't follow
-    /// it; and [`Error::Short`] where the data, or the look for
-    /// `endstream`, reached the end of a window that isn't the file's last
-    /// ([`Parser::window`]). The parser is left where it was.
+    /// it; and [`Error::Short`] where the data, or the look for `endstream`
+    /// or for `endobj` after it, reached the end of a window that isn't the
+    /// file's last ([`Parser::window`]). The parser is left where it was.
     pub fn stream(
         &mut self,
         head: StreamHead<'a>,
@@ -3213,6 +3213,26 @@ mod tests {
         for input in indirect {
             let kept = indirect_told(input, Rules::Pdfium, 3);
             assert!(kept.faults.is_empty(), "{input:?}");
+        }
+        // A stream's data, though the white-space read after `stream` runs
+        // on into it: only the dictionary's byte is told, before byte 23,
+        // where `stream` ends, and after a lone CR's fault where there's
+        // one.
+        let texts: [(&[u8], bool); 3] = [
+            (b"1 0 obj <</A~ 1>>stream\n~ab\nendstream endobj", false),
+            (b"1 0 obj <</A~ 1>>stream\r\n~~a\nendstream endobj", false),
+            (b"1 0 obj <</A~ 1>>stream\r~ab\nendstream endobj", true),
+        ];
+        for (text, lone) in texts {
+            for space in [0x80, 0xFF] {
+                let kept = indirect_told(&with_byte(text, space), Rules::Pdfium, 3);
+                let mut told = Vec::new();
+                if lone {
+                    told.push((Span::new(None, 23, 24), Fault::LoneCr.to_string()));
+                }
+                told.extend(high_bytes(&text[..23], space, 0));
+                assert_eq!(kept.faults, told, "{text:?}");
+            }
         }
         // Calls that fail: a value, a body and a stream's rest.
         let (value, kept) = pdfium(b"[1\x80 2");

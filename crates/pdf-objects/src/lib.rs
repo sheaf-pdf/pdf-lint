@@ -43,9 +43,9 @@
 //!   by its `/Length` and up to `endstream`, both given, for the caller to
 //!   choose its data from; and caps on how deeply values nest and how many
 //!   one call reads ([`Limits`]). It reads by ISO 32000-2's lexical rules,
-//!   or by PDFium's ([`Rules`](pdf_tokenizer::Rules), [`parse::Parser::rules`]), each token then
-//!   read as PDFium reads it, and a fault said where ISO 32000-2 reads it
-//!   otherwise.
+//!   or by PDFium's ([`Rules`](pdf_tokenizer::Rules),
+//!   [`parse::Parser::rules`]), each token then read as PDFium reads it, and
+//!   a fault said where ISO 32000-2 reads it otherwise.
 //! - **A writer** ([`serialize`]): a value as PDF syntax, or as an
 //!   indirect object, which the parser reads back as the same value,
 //!   under limits that take in its count of values, and a stream as an
@@ -195,7 +195,9 @@ pub enum Why {
     /// What's written there isn't that object: it doesn't parse, or the file
     /// doesn't lead to it, or doesn't hold it as it says.
     Damaged,
-    /// It's past a cap the reader reads under.
+    /// It's past the limit the caller asked for ([`Streams::decoded`]), or
+    /// past a cap the reader reads under: the two aren't told apart, which a
+    /// later version may do.
     Limit,
     /// It takes a password the reader wasn't given, or doesn't decrypt.
     Locked,
