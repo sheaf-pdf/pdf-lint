@@ -10435,6 +10435,39 @@ mod tests {
         );
     }
 
+    /// A real too small for 64 bits, its digits not all zero, which the
+    /// parser reads as 0, is a `reader` finding at its bytes, in the
+    /// parser's words.
+    #[test]
+    fn a_real_too_small_for_64_bits_is_a_reader_finding() {
+        let tiny = format!("0.{}1", "0".repeat(400));
+        let page =
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [{tiny} 0 1 1] /Resources << >> >>");
+        let bytes = fixture::assembled(
+            "1.7",
+            &[
+                (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+                (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+                (3, page.as_bytes()),
+            ],
+            "<< /Size 4 /Root 1 0 R >>",
+        );
+        let report = checked_as(&bytes, &Hold::All(Made::Built));
+        let read: Vec<_> = (report.findings.iter())
+            .filter(|f| f.rule == Rule::Reader)
+            .map(|f| (f.object, f.value.as_str(), bytes_at(&bytes, f)))
+            .collect();
+        assert_eq!(
+            read,
+            [(
+                Some(ObjectId::new(3, 0)),
+                "a real too small for 64 bits, read as 0",
+                tiny.as_str()
+            )],
+            "{report}"
+        );
+    }
+
     /// What depends on a string's bytes, when the reader gave text or
     /// ciphertext instead, is counted as a check not made.
     #[test]

@@ -123,7 +123,12 @@ pub enum Value {
     /// An integer.
     Integer(i64),
     /// A real number; its spelling as written is in the bytes its span
-    /// names.
+    /// names. The parser holds it at 64 bits by either rules, the `f64`
+    /// nearest the decimal written, so that `0.1` is written back as
+    /// `0.1`, where PDFium holds the nearest `f32`: this as an `f32`, but
+    /// where rounding twice parts from rounding once
+    /// ([`Parser::rules`](crate::parse::Parser::rules) says where, and how
+    /// to read PDFium's own).
     Real(f64),
     /// A name's bytes, its `#xx` escapes decoded.
     Name(Vec<u8>),

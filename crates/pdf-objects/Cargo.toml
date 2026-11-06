@@ -13,6 +13,10 @@ categories = ["data-structures", "encoding", "parser-implementations"]
 include = ["/src", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
+# An object's 0x80 and 0xFF searched for in its bytes, by PDFium's rules,
+# on SIMD where the target has it; its default features off, as a
+# library's, for the application to turn on.
+memchr = { version = "2.8", default-features = false }
 pdf-tokenizer.workspace = true
 thiserror = "2"
 

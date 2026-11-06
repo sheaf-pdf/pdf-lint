@@ -33,8 +33,10 @@
 
 use std::borrow::Cow;
 use std::fmt;
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use memchr::{memchr2, memchr2_iter};
 use pdf_tokenizer::decode::pdfium::{self, Number};
 use pdf_tokenizer::decode::{self, How, NumberError, Pieces, Quirks};
 use pdf_tokenizer::{Iso, Kind, Pdfium, RuleSet, Rules, Token, Tokenizer};
@@ -142,7 +144,9 @@ impl<'a, S: Sink<'a> + ?Sized> Sink<'a> for &mut S {
 /// that's a fault: [`Number`](Fault::Number),
 /// [`OutOfRange`](Fault::OutOfRange), [`HexString`](Fault::HexString),
 /// [`StringCr`](Fault::StringCr), [`Long`](Fault::Long), and
-/// [`Name`](Fault::Name) as by ISO 32000-2's rules.
+/// [`Name`](Fault::Name) as by ISO 32000-2's rules; and a byte that's
+/// white-space to PDFium and a regular character to ISO 32000-2,
+/// [`HighByte`](Fault::HighByte).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault<'a> {
@@ -154,6 +158,15 @@ pub enum Fault<'a> {
     /// rules.
     #[error("a real too large for 64 bits, read as the largest")]
     RealOverflow,
+    /// A real too small for 64 bits, its digits not all zero, read as 0
+    /// with its sign, by ISO 32000-2's rules, which read the decimal
+    /// written (7.3.3), its range and precision left to the processor
+    /// (Annex C, which is advice). Not by PDFium's, which read a number
+    /// from its first 256 bytes ([`Long`](Fault::Long)), none of which is
+    /// too small for 64 bits: the least, `.` and 254 zeros and a `1`, is
+    /// 1e-255.
+    #[error("a real too small for 64 bits, read as 0")]
+    RealUnderflow,
     /// A name with a `#` without two hex digits after it, or with `#00`,
     /// NUL, which a name can't hold (ISO 32000-2, 7.3.5), readers reading
     /// each their own way. By ISO 32000-2's rules, read with the `#` as
@@ -247,11 +260,35 @@ pub enum Fault<'a> {
         /// The word, whole.
         written: &'a [u8],
     },
+    /// A byte 0x80 or 0xFF where an object's white-space is, by PDFium's
+    /// rules: white-space to PDFium, ending a word or a name and passed
+    /// over between tokens, where ISO 32000-2 reads it as a regular
+    /// character, part of the word or the name beside it, or a word of its
+    /// own (7.2.3). Told for each such byte in the object a call reads,
+    /// from its first token to the end of its last, once the call has read
+    /// it: a value; a stream's dictionary through its `stream` keyword and
+    /// end of line ([`Parser::body`]); and from the end of the stream's
+    /// data through `endstream` ([`Parser::stream`]). Not in a string or a
+    /// comment, where it's a byte like any other, nor in a stream's data;
+    /// nor around an object, before its first token or after its last,
+    /// which is no object's, nor by a call that fails ([`Parser::rules`]).
+    #[error("{} is white-space here and a regular character to ISO 32000-2", byte(.written))]
+    HighByte {
+        /// The byte.
+        written: &'a [u8],
+    },
 }
 
 /// A word's or a string's first 40 bytes, for a [`Fault`]'s text.
 fn first_40(written: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(&written[..written.len().min(40)])
+}
+
+/// A byte in hex, `0x80`, for [`Fault::HighByte`]'s text.
+fn byte(written: &[u8]) -> String {
+    written
+        .first()
+        .map_or_else(String::new, |b| format!("0x{b:02X}"))
 }
 
 /// What's wrong with a name, for [`Fault::Name`]'s text.
@@ -403,7 +440,8 @@ fn lossy(bytes: &[u8]) -> Cow<'_, str> {
 /// [`Limits`] ([`Parser::limits`]), by ISO 32000-2's lexical rules unless
 /// it's given PDFium's ([`Parser::rules`]). A call that fails leaves the
 /// parser where it was, though it has said the faults it read past before
-/// the error.
+/// the error, all but [`Fault::HighByte`], which only a call that reads
+/// its object tells.
 #[derive(Clone)]
 pub struct Parser<'a> {
     data: &'a [u8],
@@ -522,8 +560,32 @@ impl<'a> Parser<'a> {
     /// that's a fault ([`Fault::Number`], [`Fault::OutOfRange`],
     /// [`Fault::HexString`], [`Fault::Name`], [`Fault::StringCr`],
     /// [`Fault::Long`]), looked for only when the sink
-    /// [wants](Sink::wants) faults. A byte read as white-space by PDFium's
-    /// rules alone, 0x80 or 0xFF, isn't told.
+    /// [wants](Sink::wants) faults; and so is each 0x80 and 0xFF read as
+    /// white-space in the object a call reads ([`Fault::HighByte`]), from
+    /// its first token to the end of its last, a stream's data aside, once
+    /// the call has read it.
+    ///
+    /// White-space around an object is no object's, so a 0x80 or 0xFF
+    /// there isn't told: before a value's first token, and after its last,
+    /// which a call may read past looking for what follows (an integer's
+    /// `n g R`, or `endobj`); between an indirect object's `obj` and its
+    /// value, and before its `endobj`, or after a stream's `endstream`. Nor
+    /// is one told by a call that fails, which reads no object; read again
+    /// with more of the file ([`Error::Short`]), the call that reads the
+    /// object tells it, once. [`Parser::header`] tells nothing, by either
+    /// rules.
+    ///
+    /// A real is held at 64 bits by either rules, the `f64` nearest the
+    /// decimal it starts with, so that `0.1` is written back as `0.1`,
+    /// where PDFium holds the nearest `f32`, which widened would be written
+    /// as `0.10000000149011612`. The `f64` as an `f32` is PDFium's value
+    /// but where rounding twice parts from rounding once: where the decimal
+    /// is just off a point halfway between two `f32`s and its `f64` lands
+    /// on it, as a real just under the halfway point past the greatest
+    /// `f32` does, which PDFium holds as the greatest and the `f64` rounds
+    /// on to infinity. A caller that needs PDFium's own value reads the
+    /// word as PDFium does,
+    /// [`pdfium::number(word).float()`](pdf_tokenizer::decode::pdfium::number).
     ///
     /// What the parser makes of its tokens is its own under either: a
     /// reference is two integers and `R`, its number and generation the
@@ -559,9 +621,10 @@ impl<'a> Parser<'a> {
     ) -> Result<Object, Error> {
         let mut call = Call::of(self.data);
         let mut t = Tokenizer::at(self.data, self.offset).with_rules(rules);
-        let value = self.read(&mut t, &mut call, sink, 0);
+        let value = self.read_whole(&mut t, &mut call, sink);
         self.settled(&call)?;
-        let value = value?;
+        let (value, written) = value?;
+        self.told_high(rules, written, sink);
         self.offset = t.offset();
         Ok(value)
     }
@@ -569,6 +632,11 @@ impl<'a> Parser<'a> {
     /// An indirect object's header, `n g obj` (ISO 32000-2, 7.3.10): its
     /// number and generation. Its error names where the parser was, as it
     /// was given when it has read nothing.
+    ///
+    /// It's read by the parser's rules, and tells nothing, having no sink:
+    /// by PDFium's, its integers are read as PDFium holds them, so `--5 0
+    /// obj` is object 0, which ISO 32000-2 reads as no header, and a 0x80
+    /// or 0xFF between its words is white-space, neither said.
     pub fn header(&mut self) -> Result<ObjectId, Error> {
         match self.rules {
             Rules::Pdfium => self.header_by(Pdfium),
@@ -624,7 +692,8 @@ impl<'a> Parser<'a> {
         let mut t = Tokenizer::at(self.data, self.offset).with_rules(rules);
         let body = self.read_body(&mut t, &mut call, id, sink);
         self.settled(&call)?;
-        let body = body?;
+        let (body, written) = body?;
+        self.told_high(rules, written, sink);
         self.offset = t.offset();
         Ok(body)
     }
@@ -640,15 +709,28 @@ impl<'a> Parser<'a> {
         data: Span,
         sink: &mut (impl Sink<'a> + ?Sized),
     ) -> Result<Object, Error> {
+        match self.rules {
+            Rules::Pdfium => self.stream_by(Pdfium, head, data, sink),
+            _ => self.stream_by(Iso, head, data, sink),
+        }
+    }
+
+    /// [`Parser::stream`], by `rules`.
+    fn stream_by<R: RuleSet>(
+        &mut self,
+        rules: R,
+        head: StreamHead<'a>,
+        data: Span,
+        sink: &mut (impl Sink<'a> + ?Sized),
+    ) -> Result<Object, Error> {
         let mut call = Call::of(self.data);
         call.touched = head.touched.load(Ordering::Relaxed);
-        let stream = match self.rules {
-            Rules::Pdfium => self.read_stream(Pdfium, head, data, &mut call, sink),
-            _ => self.read_stream(Iso, head, data, &mut call, sink),
-        };
+        let stream = self.read_stream(rules, head, data, &mut call, sink);
         self.settled(&call)?;
-        let (object, offset) = stream?;
-        self.offset = offset;
+        let (object, written) = stream?;
+        let end = written.end;
+        self.told_high(rules, written, sink);
+        self.offset = end;
         Ok(object)
     }
 
@@ -674,7 +756,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// [`Parser::stream`], by `rules`, to where it leaves the parser.
+    /// [`Parser::stream`], by `rules`, and the bytes of the data it read,
+    /// from the stream's data's end through `endstream`, where it leaves
+    /// the parser.
     fn read_stream<R: RuleSet>(
         &self,
         rules: R,
@@ -682,7 +766,7 @@ impl<'a> Parser<'a> {
         data: Span,
         call: &mut Call,
         sink: &mut (impl Sink<'a> + ?Sized),
-    ) -> Result<(Object, usize), Error> {
+    ) -> Result<(Object, Range<usize>), Error> {
         let StreamHead {
             id,
             dict,
@@ -717,18 +801,20 @@ impl<'a> Parser<'a> {
         })
         .at(at);
         self.endobj(&t, call, id, &object, sink);
-        Ok((object, t.offset()))
+        Ok((object, end..t.offset()))
     }
 
-    /// [`Parser::body`], from `t`.
+    /// [`Parser::body`], from `t`, and the bytes of the data it read, from
+    /// the value's first token to the end of its last, or, for a stream,
+    /// of its end of line after `stream`.
     fn read_body<R: RuleSet>(
         &self,
         t: &mut Tokenizer<'a, R>,
         call: &mut Call,
         id: ObjectId,
         sink: &mut (impl Sink<'a> + ?Sized),
-    ) -> Result<Body<'a>, Error> {
-        let value = self.read(t, call, sink, 0)?;
+    ) -> Result<(Body<'a>, Range<usize>), Error> {
+        let (value, written) = self.read_whole(t, call, sink)?;
         let at = value.at;
         let mut after = t.clone();
         let next = call.significant(&mut after);
@@ -746,7 +832,7 @@ impl<'a> Parser<'a> {
                     }
                     Some(_) => {}
                 }
-                return Ok(Body::Stream(StreamHead {
+                let head = StreamHead {
                     id,
                     dict,
                     dict_at: at,
@@ -757,7 +843,8 @@ impl<'a> Parser<'a> {
                     stream: self.stream,
                     rules: self.rules,
                     touched: AtomicBool::new(false),
-                }));
+                };
+                return Ok((Body::Stream(head), written.start..t.offset()));
             }
             (other, _) => {
                 let mut object = Object::new(other);
@@ -766,7 +853,7 @@ impl<'a> Parser<'a> {
             }
         };
         self.endobj(t, call, id, &object, sink);
-        Ok(Body::Object(object))
+        Ok((Body::Object(object), written))
     }
 
     /// Says object `id`, `object`, has no `endobj` when `t` doesn't go on
@@ -786,6 +873,21 @@ impl<'a> Parser<'a> {
                 sink.fault(at, Fault::NoEndobj { id });
             }
         }
+    }
+
+    /// The value `t` goes on with, a call's own, in `call`, read by `t`'s
+    /// rules, and the bytes of the data it's written in, from its first
+    /// token to the end of its last.
+    fn read_whole<R: RuleSet>(
+        &self,
+        t: &mut Tokenizer<'a, R>,
+        call: &mut Call,
+        sink: &mut (impl Sink<'a> + ?Sized),
+    ) -> Result<(Object, Range<usize>), Error> {
+        let token = call.significant(t).ok_or(Error::End)?;
+        let start = token.start;
+        let value = self.read_from(token, t, call, sink, 0)?;
+        Ok((value, start..t.offset()))
     }
 
     /// The value `t` goes on with, nested `depth` deep, in `call`, read by
@@ -877,12 +979,17 @@ impl<'a> Parser<'a> {
             Kind::Real if pdfium => self.pdfium_number(&token, sink),
             Kind::Real => match token.number() {
                 Ok(r) => Value::Real(r),
-                // Too small to hold: zero, with its sign, and no fault.
-                Err(NumberError::Underflow) => Value::Real(if token.bytes.starts_with(b"-") {
-                    -0.0
-                } else {
-                    0.0
-                }),
+                // Too small to hold: zero, with its sign.
+                Err(NumberError::Underflow) => {
+                    if sink.wants() {
+                        sink.fault(at, Fault::RealUnderflow);
+                    }
+                    Value::Real(if token.bytes.starts_with(b"-") {
+                        -0.0
+                    } else {
+                        0.0
+                    })
+                }
                 Err(_) => {
                     if sink.wants() {
                         sink.fault(at, Fault::RealOverflow);
@@ -996,6 +1103,50 @@ impl<'a> Parser<'a> {
                 at: self.place(at),
             }),
             false => Ok(()),
+        }
+    }
+
+    /// Tells `sink` of each 0x80 and 0xFF in the white-space of bytes
+    /// `written` of the data, the object a call has read, by `rules`: where
+    /// they're PDFium's, which read both bytes as white-space where ISO
+    /// 32000-2 reads them as regular characters ([`Fault::HighByte`]), and
+    /// the sink wants faults. Its tokens are read again from its first only
+    /// where `written` holds either byte; a string's bytes and a comment's
+    /// are their own.
+    fn told_high<R: RuleSet>(
+        &self,
+        rules: R,
+        written: Range<usize>,
+        sink: &mut (impl Sink<'a> + ?Sized),
+    ) {
+        // Settled where the rules are fixed in `R`, as they are.
+        if rules.rules() != Rules::Pdfium || !sink.wants() {
+            return;
+        }
+        let data = self.data;
+        let end = written.end.min(data.len());
+        if data
+            .get(written.start..end)
+            .is_none_or(|bytes| memchr2(0x80, 0xFF, bytes).is_none())
+        {
+            return;
+        }
+        let mut t = Tokenizer::at(data, written.start).with_rules(rules);
+        while t.offset() < end {
+            let Some(token) = t.next() else {
+                return;
+            };
+            if token.kind != Kind::Space {
+                continue;
+            }
+            let space = &data[token.start..token.end().min(end)];
+            for i in memchr2_iter(0x80, 0xFF, space) {
+                let at = token.start + i;
+                let fault = Fault::HighByte {
+                    written: &data[at..=at],
+                };
+                sink.fault(self.span(at, at + 1), fault);
+            }
         }
     }
 
@@ -1550,7 +1701,7 @@ mod tests {
         let (value, _) = self::value(b"-99999999999999999999");
         assert_eq!(*value.unwrap().value(), Value::Integer(i64::MIN));
         // A real too small to hold reads as zero, with its sign, to the
-        // bit, and no fault.
+        // bit, and is said.
         for (sign, zero) in [("", 0.0f64), ("-", -0.0), ("+", 0.0)] {
             let tiny = format!("{sign}0.{}1", "0".repeat(400));
             let (value, kept) = self::value(tiny.as_bytes());
@@ -1560,7 +1711,14 @@ mod tests {
                 other => panic!("{other:?}"),
             };
             assert_eq!(read.to_bits(), zero.to_bits(), "{tiny}");
-            assert!(kept.faults.is_empty(), "{tiny}");
+            assert_eq!(
+                kept.faults,
+                [(
+                    Span::new(None, 0, tiny.len()),
+                    "a real too small for 64 bits, read as 0".to_string()
+                )],
+                "{tiny}"
+            );
         }
         // The name reads as written but for its well-formed escapes.
         let (value, _) = self::value(b"/A#zz#00#41");
@@ -2601,7 +2759,7 @@ mod tests {
 
     /// By PDFium's rules 0x80 and 0xFF are white-space, as PDFium's
     /// chromium/7881, 8076 and 8125 read a `/MediaBox` and an `/Info` key
-    /// (2026-10-30); nothing is told of them.
+    /// (2026-10-30), each told where it is.
     #[test]
     fn pdfiums_rules_read_0x80_and_0xff_as_white_space() {
         for space in [0x80, 0xFF] {
@@ -2611,20 +2769,22 @@ mod tests {
                 .map(|o| o.as_integer().unwrap())
                 .collect();
             assert_eq!(each, [0, 0, 100, 100]);
-            assert!(kept.faults.is_empty());
+            assert_eq!(kept.faults, high_bytes(b"[0~0 100 100]", space, 0));
             assert!(matches!(
                 self::value(&input).0,
                 Err(Error::Keyword { at: 1, .. })
             ));
             let input = [b"<< /Title".as_slice(), &[space], b"(x) >>"].concat();
-            let dict = pdfium(&input).0.unwrap();
+            let (dict, kept) = pdfium(&input);
             assert_eq!(
-                dict.as_dict()
+                dict.unwrap()
+                    .as_dict()
                     .unwrap()
                     .get(b"Title")
                     .and_then(Object::as_bytes),
                 Some(&b"x"[..])
             );
+            assert_eq!(kept.faults, high_bytes(b"<< /Title~(x) >>", space, 0));
         }
     }
 
@@ -2713,7 +2873,8 @@ mod tests {
 
     /// By PDFium's rules a stream's `endstream` after the data a `/Length`
     /// gives is found past their white-space, 0x80 among it, and the
-    /// stream read so.
+    /// stream read so: the 0x80 before `endstream` told, as the stream's,
+    /// and the one after it not, as no object's.
     #[test]
     fn pdfiums_rules_find_endstream_past_their_white_space() {
         let input = b"1 0 obj << /Length 2 >> stream\nab\x80endstream\x80endobj";
@@ -2728,8 +2889,281 @@ mod tests {
             assert_eq!(head.declared(2), declared.then_some(ab), "{rules:?}");
             let stream = parser.stream(head, ab, &mut kept);
             assert_eq!(stream.is_ok(), declared, "{rules:?}");
-            assert!(kept.faults.is_empty());
+            let told = match declared {
+                true => high_bytes(b"1 0 obj << /Length 2 >> stream\nab~endstream", 0x80, 0),
+                false => Vec::new(),
+            };
+            assert_eq!(kept.faults, told, "{rules:?}");
         }
+    }
+
+    /// `text` with each `~` in it the byte `space`.
+    fn with_byte(text: &[u8], space: u8) -> Vec<u8> {
+        (text.iter())
+            .map(|&b| if b == b'~' { space } else { b })
+            .collect()
+    }
+
+    /// What [`Fault::HighByte`] tells of each `~` in `text` as
+    /// [`with_byte`] makes it, `space` there, at its byte, in a window from
+    /// byte `base`.
+    fn high_bytes(text: &[u8], space: u8, base: usize) -> Vec<(Span, String)> {
+        let said = Fault::HighByte { written: &[space] }.to_string();
+        (text.iter().enumerate())
+            .filter(|&(_, &b)| b == b'~')
+            .map(|(at, _)| (Span::new(None, base + at, base + at + 1), said.clone()))
+            .collect()
+    }
+
+    /// How many of the faults `kept` was told are [`Fault::HighByte`].
+    fn high_told(kept: &Kept) -> usize {
+        let high = [0x80, 0xFF].map(|b| Fault::HighByte { written: &[b] }.to_string());
+        (kept.faults.iter())
+            .filter(|(_, said)| high.contains(said))
+            .count()
+    }
+
+    /// The indirect object `input` begins with, read by `rules`, its
+    /// stream's data by a `/Length` of `length` where `endstream` follows
+    /// it, else scanned: what the sink was told.
+    fn indirect_told(input: &[u8], rules: Rules, length: usize) -> Kept {
+        let mut kept = Kept::default();
+        let mut parser = Parser::at(input, 0).rules(rules);
+        let id = parser.header().unwrap();
+        match parser.body(id, &mut kept).unwrap() {
+            Body::Object(_) => {}
+            Body::Stream(head) => {
+                let data = head.declared(length).unwrap_or_else(|| head.scanned());
+                parser.stream(head, data, &mut kept).unwrap();
+            }
+        }
+        kept
+    }
+
+    /// A real too small for 64 bits, its digits not all zero, reads as 0
+    /// with its sign, to the bit, by either rules; ISO 32000-2's say so,
+    /// and PDFium's, which read it by its first 256 bytes, say only that
+    /// it's longer: no 256-byte decimal is too small, the least, `.` and
+    /// 254 zeros and a `1`, reading as 1e-255 by both.
+    #[test]
+    fn a_real_too_small_for_64_bits_is_said_by_isos_rules_alone() {
+        let long =
+            "is longer than the 256 bytes PDFium's rules read of a word, and read as its first 256";
+        for (sign, zero) in [("", 0.0f64), ("-", -0.0)] {
+            let tiny = format!("{sign}0.{}1", "0".repeat(400));
+            let whole = Span::new(None, 0, tiny.len());
+            let first = String::from_utf8_lossy(&tiny.as_bytes()[..40]);
+            for (rules, said) in [
+                (
+                    Rules::Iso,
+                    "a real too small for 64 bits, read as 0".to_string(),
+                ),
+                (Rules::Pdfium, format!("{first} {long}")),
+            ] {
+                let mut kept = Kept::default();
+                let value = Parser::at(tiny.as_bytes(), 0).rules(rules).value(&mut kept);
+                let Value::Real(read) = *value.unwrap().value() else {
+                    panic!("a real");
+                };
+                assert_eq!(read.to_bits(), zero.to_bits(), "{rules:?}");
+                assert_eq!(kept.faults, [(whole, said)], "{rules:?}");
+            }
+        }
+        let least = [b".".as_slice(), &[b'0'; 254], b"1"].concat();
+        assert_eq!(least.len(), 256);
+        for rules in [Rules::Iso, Rules::Pdfium] {
+            let mut kept = Kept::default();
+            let value = Parser::at(&least, 0).rules(rules).value(&mut kept);
+            assert_eq!(*value.unwrap().value(), Value::Real(1e-255), "{rules:?}");
+            assert!(kept.faults.is_empty(), "{rules:?}");
+        }
+        assert_eq!(
+            Fault::RealUnderflow.to_string(),
+            "a real too small for 64 bits, read as 0"
+        );
+    }
+
+    /// By PDFium's rules each 0x80 and 0xFF in the white-space of the
+    /// object a call reads is told, once, at its byte, after the call's
+    /// other faults: between a value's tokens, in an array and in a
+    /// dictionary; at a word's end inside one; past an integer that `R` was
+    /// looked for after, and inside a reference; between a stream's
+    /// dictionary and `stream`, and between its data and `endstream`. By
+    /// ISO 32000-2's rules, none: each is a regular character there.
+    #[test]
+    fn pdfiums_rules_tell_each_0x80_and_0xff_in_an_objects_white_space() {
+        let values: [&[u8]; 8] = [
+            b"[(a)~(b)]",
+            b"<< /A~1 /B [2]~>>",
+            b"[/A~]",
+            b"[1~ 2]",
+            b"[1 0~R]",
+            b"<</A [1~~2]~>>",
+            b"[1\n~\r\n2 %c\n~]",
+            b"<< /A << /B [~] >> >>",
+        ];
+        let indirect: [&[u8]; 3] = [
+            b"1 0 obj << /Length 2 >>~stream\nab\nendstream endobj",
+            b"1 0 obj << /Length 2 >> stream\nab~endstream endobj",
+            b"1 0 obj\n<< /A [1~2] >>\nendobj",
+        ];
+        for space in [0x80, 0xFF] {
+            for text in values {
+                let input = with_byte(text, space);
+                let (value, kept) = pdfium(&input);
+                assert!(value.is_ok(), "{text:?}: {value:?}");
+                assert_eq!(kept.faults, high_bytes(text, space, 0), "{text:?}");
+            }
+            for text in indirect {
+                let input = with_byte(text, space);
+                let kept = indirect_told(&input, Rules::Pdfium, 2);
+                assert_eq!(kept.faults, high_bytes(text, space, 0), "{text:?}");
+            }
+            assert_eq!(
+                Fault::HighByte { written: &[space] }.to_string(),
+                format!("0x{space:02X} is white-space here and a regular character to ISO 32000-2")
+            );
+        }
+        // Each byte as itself.
+        let input = b"[1\x80\xFF2]";
+        let (_, kept) = pdfium(input);
+        let mut told = high_bytes(b"[1~ 2]", 0x80, 0);
+        told.extend(high_bytes(b"[1 ~2]", 0xFF, 0));
+        assert_eq!(kept.faults, told);
+        // After the call's other faults, though an integer's look for `R`
+        // passed it before them, and `endobj`'s.
+        let input = b"[--1\x80 /A]";
+        let (_, kept) = pdfium(input);
+        let mut told = vec![(
+            Span::new(None, 1, 4),
+            "--1 is a number by PDFium's rules and a keyword to ISO 32000-2".to_string(),
+        )];
+        told.extend(high_bytes(b"[--1~ /A]", 0x80, 0));
+        assert_eq!(kept.faults, told);
+        let text = b"1 0 obj [1~2] stray";
+        let kept = indirect_told(&with_byte(text, 0x80), Rules::Pdfium, 0);
+        let mut told = vec![(Span::new(None, 8, 13), "1 0 obj has no endobj".to_string())];
+        told.extend(high_bytes(text, 0x80, 0));
+        assert_eq!(kept.faults, told);
+        // By ISO 32000-2's rules, part of a name, or a stream's data.
+        let iso: [&[u8]; 3] = [
+            b"[/A\x80]",
+            b"<< /A\xFF 1 >>",
+            b"1 0 obj << /Length 2 >> stream\nab\x80endstream endobj",
+        ];
+        for input in iso {
+            let kept = match input.starts_with(b"1 0 obj") {
+                true => indirect_told(input, Rules::Iso, 2),
+                false => value(input).1,
+            };
+            assert!(kept.faults.is_empty(), "{input:?}");
+        }
+    }
+
+    /// A 0x80 or 0xFF is told only where it's white-space in the object a
+    /// call reads, by PDFium's rules: not in a comment, a string or a
+    /// stream's data; not around an object, before its first token or
+    /// after its last, though the call read past it looking for `R` or
+    /// `endobj`, nor between `obj` and the value, before `endobj` or after
+    /// `endstream`; and not by a call that fails, though it tells the
+    /// faults it read past before the error. A window cut just after one
+    /// is short, and tells none; the call with more tells it, once.
+    #[test]
+    fn a_high_byte_outside_the_object_read_or_in_a_call_that_fails_is_not_told() {
+        let values: [&[u8]; 8] = [
+            b"[1 %\x80\n 2]",
+            b"[(a\x80b) (\xFF)]",
+            b"\x80 5",
+            b"5\x80",
+            b"\xFF[1]\x80",
+            b"<< /A 1 >>\x80",
+            b"1 0 R\x80",
+            b"(x)\xFF\xFF",
+        ];
+        for input in values {
+            let (value, kept) = pdfium(input);
+            assert!(value.is_ok(), "{input:?}: {value:?}");
+            assert!(kept.faults.is_empty(), "{input:?}");
+        }
+        // A hex string runs to its `>` over any byte, which it says, as a
+        // string's own: no 0x80 is told.
+        let (_, kept) = pdfium(b"<4\x801>");
+        assert_eq!(kept.faults.len(), 1);
+        assert_eq!(high_told(&kept), 0);
+        // Two values, the second read from where the first left the
+        // parser, before the 0x80 between them.
+        let input = b"5\x80 6";
+        let mut parser = Parser::at(input, 0).rules(Rules::Pdfium);
+        let mut kept = Kept::default();
+        let five = parser.value(&mut kept).unwrap();
+        assert_eq!((five.at, parser.offset()), (Some(Span::new(None, 0, 1)), 1));
+        let six = parser.value(&mut kept).unwrap();
+        assert_eq!(six.at, Some(Span::new(None, 3, 4)));
+        assert!(kept.faults.is_empty());
+        // Around an indirect object's value, and a stream's data.
+        let indirect: [&[u8]; 4] = [
+            b"1 0 obj\x805 endobj",
+            b"1 0 obj 5\x80endobj",
+            b"1 0 obj << >>stream\n\x80abc\xFF\nendstream\x80endobj",
+            b"1 0 obj << /Length 3 >> stream\r\n\x80ab\nendstream\xFFendobj",
+        ];
+        for input in indirect {
+            let kept = indirect_told(input, Rules::Pdfium, 3);
+            assert!(kept.faults.is_empty(), "{input:?}");
+        }
+        // Calls that fail: a value, a body and a stream's rest.
+        let (value, kept) = pdfium(b"[1\x80 2");
+        assert_eq!(value, Err(Error::Array { at: 0 }));
+        assert!(kept.faults.is_empty());
+        let (value, kept) = pdfium(b"[--1\x80 2 endobj]");
+        assert!(matches!(value, Err(Error::Keyword { at: 8, .. })));
+        assert_eq!(
+            kept.faults,
+            [(
+                Span::new(None, 1, 4),
+                "--1 is a number by PDFium's rules and a keyword to ISO 32000-2".to_string()
+            )]
+        );
+        let mut parser = Parser::at(b"1 0 obj [1\x80 2 endobj", 0).rules(Rules::Pdfium);
+        let id = parser.header().unwrap();
+        let mut kept = Kept::default();
+        assert!(parser.body(id, &mut kept).is_err());
+        assert!(kept.faults.is_empty());
+        let input = b"1 0 obj << >> stream\nab\x80endstreamX endobj";
+        let mut parser = Parser::at(input, 0).rules(Rules::Pdfium);
+        let id = parser.header().unwrap();
+        let mut kept = Kept::default();
+        let Ok(Body::Stream(head)) = parser.body(id, &mut kept) else {
+            panic!("a stream");
+        };
+        let stream = parser.stream(head, found(input, b"ab"), &mut kept);
+        assert_eq!(stream, Err(Error::Endstream { id }));
+        assert!(kept.faults.is_empty());
+        // A window cut just after one: short, telling none; with the rest
+        // of the file, it's told once, at its place in the file.
+        const BASE: usize = 1_000_000;
+        let file = b"[1\x80 2]";
+        let mut kept = Kept::default();
+        let mut window = (Parser::at(&file[..3], 0).window(BASE, false)).rules(Rules::Pdfium);
+        assert_eq!(window.value(&mut kept), Err(Error::Short { at: BASE + 3 }));
+        assert!(kept.faults.is_empty());
+        let mut window = (Parser::at(file, 0).window(BASE, true)).rules(Rules::Pdfium);
+        assert!(window.value(&mut kept).is_ok());
+        assert_eq!(kept.faults, high_bytes(b"[1~ 2]", 0x80, BASE));
+        // A body read whole, short where it looked for `endobj` past it:
+        // it says there's none, as a call may short, but not the 0x80.
+        let file = b"1 0 obj [1\x80 2] endobj";
+        let mut kept = Kept::default();
+        let mut window = (Parser::at(&file[..14], 0).window(BASE, false)).rules(Rules::Pdfium);
+        let id = window.header().unwrap();
+        let body = window.body(id, &mut kept);
+        assert!(matches!(body, Err(Error::Short { at }) if at == BASE + 14));
+        assert_eq!((kept.faults.len(), high_told(&kept)), (1, 0));
+        let mut window = (Parser::at(file, 0).window(BASE, true)).rules(Rules::Pdfium);
+        let id = window.header().unwrap();
+        let mut kept = Kept::default();
+        assert!(window.body(id, &mut kept).is_ok());
+        assert_eq!(kept.faults, high_bytes(b"1 0 obj [1~ 2]", 0x80, BASE));
     }
 
     /// `()` wants no fault, and a sink borrowed wants what it does; a sink
@@ -2753,13 +3187,16 @@ mod tests {
         assert!(Kept::default().wants() && wants(&mut Kept::default()));
         let sink: &mut dyn Sink = &mut Unwanted;
         assert!(!sink.wants() && !wants(&mut *sink));
-        let inputs: [&[u8]; 6] = [
+        let tiny = [b"0.".as_slice(), &[b'0'; 400], b"1"].concat();
+        let inputs: [&[u8]; 8] = [
             b"[/A#zz 99999999999999999999 -1.5e3]",
             b"1 0 obj << >>stream\rxy\nendstream\nendobj",
             b"1 0 obj << >>stream xy\nendstream",
             b"1 0 obj [--5 1.2.3 4294967296 <4G1> (a\rb) /#5Gx 3 --1 R] stray",
             b"1 0 obj << /N#00 1 >> endobj",
             &[b"1 0 obj [/".as_slice(), &[b'x'; 300], b"] endobj"].concat(),
+            &[b"1 0 obj [".as_slice(), &tiny, b" -", &tiny, b"] endobj"].concat(),
+            b"1 0 obj << /A [1\x80 2\xFF] >>\x80stream\nab\nendstream endobj",
         ];
         for rules in [Rules::Iso, Rules::Pdfium] {
             for input in inputs {
@@ -2822,10 +3259,15 @@ mod tests {
     /// short, or as the whole input reads.
     #[test]
     fn every_window_where_the_rules_part_is_short_or_reads_as_the_whole() {
-        let inputs: [(&[u8], u16); 6] = [
+        let inputs: [(&[u8], u16); 8] = [
             (
                 b"[--5 1.2.3 4294967296 <41G42> (a\rb\r\nc) /#5Gx 3 --1 R]",
                 0,
+            ),
+            (b"[(a)\x80(b) /A\xFF 1 0\x80R --1\x80 %\x80\n2]\x80", 0),
+            (
+                b"1 0 obj << /Length 2 >>\x80stream\nab\xFFendstream\x80endobj",
+                2,
             ),
             (b"<< /A\x80/B 1\xff2 >> 7", 0),
             (b"--3 0 R 4294967299 0 R", 0),
