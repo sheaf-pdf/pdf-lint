@@ -85,7 +85,7 @@ pub mod fuzz;
 pub use chars::{is_delimiter, is_regular, is_white_space};
 pub use rules::{Iso, Pdfium, RuleSet, Rules};
 pub use token::{Kind, Token};
-pub use tokenizer::Tokenizer;
+pub use tokenizer::{Significant, Skimming, Tokenizer};
 
 /// The README's examples, run as doctests.
 #[cfg(doctest)]

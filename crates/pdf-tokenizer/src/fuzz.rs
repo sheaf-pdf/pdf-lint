@@ -116,7 +116,7 @@ pub fn skimmed<R: RuleSet>(input: &[u8], offset: usize, rules: R) {
             break;
         }
     }
-    let (mut next, mut walk) = (tokens.clone(), tokens);
+    let (mut next, mut walk) = (tokens.clone(), tokens.clone());
     loop {
         let significant = next.next_significant();
         let walked = walk.find(|t| !matches!(t.kind, Kind::Space | Kind::Comment));
@@ -126,6 +126,21 @@ pub fn skimmed<R: RuleSet>(input: &[u8], offset: usize, rules: R) {
             break;
         }
     }
+    // The views are the steps repeated, and leave the tokenizer at the end.
+    let (mut viewed, mut stepped) = (tokens.clone(), tokens.clone());
+    assert!(
+        viewed
+            .significant()
+            .eq(core::iter::from_fn(|| stepped.next_significant())),
+        "significant() is next_significant() repeated"
+    );
+    assert_eq!(viewed.offset(), stepped.offset());
+    let (mut viewed, mut stepped) = (tokens.clone(), tokens);
+    assert!(
+        viewed.skimming().eq(core::iter::from_fn(|| stepped.skim())),
+        "skimming() is skim() repeated"
+    );
+    assert_eq!(viewed.offset(), stepped.offset());
 }
 
 /// Checks [`Tokenizer::data_until`] from `offset` against a look at every
