@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::parse::Parser;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Rules, Unreadable, Value, Why, serialize};
 
@@ -12,7 +13,7 @@ use crate::date::{Date, Quirk};
 use crate::pages::{Error, Inheritable, Origin, Page, Pages, Rect, pages};
 use crate::tree::{self, names, numbers};
 use crate::xmp::{self, Claims, metadata_stream};
-use crate::{Fault, HOPS, Limits, Place, Sink, catalog, follow};
+use crate::{Fault, HOPS, Limits, catalog, follow};
 
 /// How many values of an input are read as objects.
 const OBJECTS: usize = 4096;
@@ -63,7 +64,7 @@ fn walked<'o, R: Resolve<'o>>(
     root: &'o Object,
     kind: Kind,
     limits: &Limits,
-    sink: &mut dyn Sink,
+    sink: &mut dyn Sink<Fault>,
 ) -> Walked<'o> {
     let mut entries = Vec::new();
     let mut failed = None;
@@ -102,7 +103,7 @@ fn walked<'o, R: Resolve<'o>>(
 #[derive(Debug, Default)]
 struct Kept(Vec<Fault>);
 
-impl Sink for Kept {
+impl Sink<Fault> for Kept {
     fn fault(&mut self, _: Place, fault: Fault) {
         self.0.push(fault);
     }
@@ -111,7 +112,7 @@ impl Sink for Kept {
 /// Wants no faults, and fails if it's told one.
 struct Unwanted;
 
-impl Sink for Unwanted {
+impl Sink<Fault> for Unwanted {
     fn fault(&mut self, _: Place, fault: Fault) {
         panic!("{fault} told to a sink that wants none");
     }
@@ -143,7 +144,7 @@ enum Plainly<'o> {
 impl<'o, R: Resolve<'o> + Copy> Plain<'o, R> {
     fn once(&mut self, value: &'o Object) -> Plainly<'o> {
         let mut at = value;
-        let mut last = (0, 0);
+        let mut last = ObjectId::new(0, 0);
         for _ in 0..HOPS {
             let Value::Ref(id) = at.value() else {
                 return match at.value() {
@@ -414,7 +415,7 @@ fn roots<'o, R: Resolve<'o> + Copy>(objects: R, catalog: &'o Dict) -> Vec<(Kind,
 /// [`Unreadable`]'s own words may differ from one resolver to another.
 pub type Paged<'o> = Result<Pages<'o>, String>;
 
-fn paged<'o, R: Resolve<'o> + Copy, S: Sink + ?Sized>(
+fn paged<'o, R: Resolve<'o> + Copy, S: Sink<Fault> + ?Sized>(
     objects: R,
     catalog: &'o Dict,
     rules: Rules,
@@ -613,7 +614,7 @@ fn values(data: &[u8]) -> BTreeMap<ObjectId, Object> {
         let mut parser = Parser::at(data, at);
         match parser.value(&mut ()) {
             Ok(value) => {
-                objects.insert((next, 0), value);
+                objects.insert(ObjectId::new(next, 0), value);
                 next += 1;
                 at = parser.offset();
             }
@@ -634,7 +635,7 @@ fn values(data: &[u8]) -> BTreeMap<ObjectId, Object> {
 pub fn walks(data: &[u8]) {
     let objects = values(data);
     let resolve = |id: ObjectId| objects.get(&id);
-    if let Some(trailer) = objects.get(&(1, 0)).and_then(Object::as_dict) {
+    if let Some(trailer) = objects.get(&ObjectId::new(1, 0)).and_then(Object::as_dict) {
         over(resolve, trailer);
     }
     for root in objects.values().take(ROOTS) {
@@ -708,10 +709,10 @@ fn claim_values(claims: &Claims) -> [&Option<String>; 6] {
 /// - under smaller caps, each value it reads is what it reads under the
 ///   default ones, as it reads the same up to where it stops.
 pub fn xmp(data: &[u8]) {
-    const PACKET: ObjectId = (9, 0);
+    const PACKET: ObjectId = ObjectId::new(9, 0);
 
     struct Told(usize);
-    impl Sink for Told {
+    impl Sink<Fault> for Told {
         fn fault(&mut self, place: Place, _: Fault) {
             assert_eq!(place.object, Some(PACKET));
             let at = place.at.expect("a place in the packet");
@@ -955,12 +956,12 @@ mod tests {
     /// such thing as it is.
     fn file_of(seed: &[u8]) -> Vec<u8> {
         let objects = values(seed);
-        let Some(trailer) = objects.get(&(1, 0)).and_then(Object::as_dict) else {
+        let Some(trailer) = objects.get(&ObjectId::new(1, 0)).and_then(Object::as_dict) else {
             return seed.to_vec();
         };
         let bodies: Vec<(u32, fixture::Body)> = (objects.iter())
             .skip(1)
-            .map(|(id, object)| (id.0, fixture::Body::Object(object.clone())))
+            .map(|(id, object)| (id.number, fixture::Body::Object(object.clone())))
             .collect();
         let root = trailer.get(b"Root").cloned().unwrap_or_else(Object::null);
         fixture::file("1.7", &bodies, dict! { "Root" => root }, Xref::Table)

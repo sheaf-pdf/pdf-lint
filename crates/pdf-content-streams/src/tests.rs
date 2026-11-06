@@ -965,7 +965,7 @@ fn objects_from_5(extra: &[&str]) -> BTreeMap<ObjectId, Object> {
             let stream = (object.as_dict())
                 .filter(|dict| dict.has(b"Length"))
                 .map(|dict| Object::stream(dict.clone()));
-            ((n, 0), stream.unwrap_or(object))
+            (ObjectId::new(n, 0), stream.unwrap_or(object))
         })
         .collect()
 }
@@ -1073,7 +1073,7 @@ fn a_read_that_fails_is_the_err_whole() {
     for why in [Why::Limit, Why::Locked, Why::Source] {
         for shape in shapes {
             let e = read(why, shape).unwrap_err();
-            assert_eq!((e.id, e.why), ((5, 0), why), "{shape}");
+            assert_eq!((e.id, e.why), (ObjectId::new(5, 0), why), "{shape}");
         }
     }
     // What's damaged isn't there.

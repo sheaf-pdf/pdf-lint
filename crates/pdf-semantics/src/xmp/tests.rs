@@ -14,7 +14,7 @@ const VT: &str = "xmlns:pdfvtid=\"http://www.npes.org/pdfvt/ns/id/\"";
 #[derive(Default)]
 struct Kept(Vec<(Place, Fault)>);
 
-impl Sink for Kept {
+impl Sink<Fault> for Kept {
     fn fault(&mut self, at: Place, fault: Fault) {
         self.0.push((at, fault));
     }
@@ -324,11 +324,17 @@ fn an_attribute_that_doesn_t_read_is_passed_and_said() {
     // It's said where it is: in the stream's decoded data, as the stream's given.
     let mut kept = Kept::default();
     let xml = "<e/><d a=1/><e/>";
-    read(xml.as_bytes(), Some((4, 0)), &Limits::DEFAULT, &mut kept).unwrap();
+    read(
+        xml.as_bytes(),
+        Some(ObjectId::new(4, 0)),
+        &Limits::DEFAULT,
+        &mut kept,
+    )
+    .unwrap();
     let (place, _) = kept.0[0];
-    assert_eq!(place.object, Some((4, 0)));
+    assert_eq!(place.object, Some(ObjectId::new(4, 0)));
     let at = place.at.unwrap();
-    assert_eq!(at.stream, Some((4, 0)));
+    assert_eq!(at.stream, Some(ObjectId::new(4, 0)));
     assert_eq!(&xml[at.start..at.end], "<d a=1/>");
     // With none given, nothing says what its offsets would be of.
     let mut kept = Kept::default();
@@ -672,7 +678,7 @@ fn what_s_read_is_the_same_whatever_the_sink() {
     read(packets[0].as_bytes(), None, &Limits::DEFAULT, &mut kept).unwrap();
     assert_eq!(kept.faults(), [Fault::XmpAttribute, Fault::XmpValue]);
     // Through `&mut dyn` it's told the same.
-    let dynamic: &mut dyn Sink = &mut kept;
+    let dynamic: &mut dyn Sink<Fault> = &mut kept;
     read(packets[0].as_bytes(), None, &Limits::DEFAULT, dynamic).unwrap();
     assert_eq!(kept.faults().len(), 4);
 }
@@ -761,9 +767,9 @@ fn a_claim_that_doesn_t_say_what_it_s_for_is_an_error_of_its_own() {
 fn the_catalog_s_metadata_stream_is_found_or_says_why_not() {
     let stream = Object::stream(dict! { "Type" => "Metadata" });
     let chain = std::collections::BTreeMap::from([
-        ((4, 0), Object::reference(5)),
-        ((5, 0), stream),
-        ((6, 0), Object::from(dict! {})),
+        (ObjectId::new(4, 0), Object::reference(5)),
+        (ObjectId::new(5, 0), stream),
+        (ObjectId::new(6, 0), Object::from(dict! {})),
     ]);
     let resolve = |id: ObjectId| chain.get(&id);
     let of = |metadata: Option<Object>| {
@@ -774,10 +780,13 @@ fn the_catalog_s_metadata_stream_is_found_or_says_why_not() {
         metadata_stream(resolve, Box::leak(Box::new(catalog)))
     };
     assert_eq!(of(None), Ok(None));
-    assert_eq!(of(Some(Object::reference(5))), Ok(Some((5, 0))));
+    assert_eq!(
+        of(Some(Object::reference(5))),
+        Ok(Some(ObjectId::new(5, 0)))
+    );
     assert_eq!(
         of(Some(Object::reference(4))),
-        Ok(Some((5, 0))),
+        Ok(Some(ObjectId::new(5, 0))),
         "the stream it comes to"
     );
     assert_eq!(of(Some(Object::reference(6))), Ok(None), "no stream");
@@ -786,7 +795,7 @@ fn the_catalog_s_metadata_stream_is_found_or_says_why_not() {
 
     // A loop of references is a limit; the same over a reading and its
     // document, whose stream it reads by number.
-    let looped = std::collections::BTreeMap::from([((4, 0), Object::reference(4))]);
+    let looped = std::collections::BTreeMap::from([(ObjectId::new(4, 0), Object::reference(4))]);
     let resolve = |id: ObjectId| looped.get(&id);
     let catalog = dict! { "Metadata" => Object::reference(4) };
     assert_eq!(
@@ -798,7 +807,7 @@ fn the_catalog_s_metadata_stream_is_found_or_says_why_not() {
     let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
     let objects = &reading;
     let found = catalog_of(objects, reading.trailer().dict());
-    assert_eq!(found, Some((4, 0)));
+    assert_eq!(found, Some(ObjectId::new(4, 0)));
     let document: Document = reading.to_document().unwrap();
     let objects = &document;
     assert_eq!(catalog_of(objects, document.trailer.dict()), found);

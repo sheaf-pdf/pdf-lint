@@ -127,9 +127,8 @@ pdf-color = { path = "../crates/pdf-color" }
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["writer"] }
 # Both Flate backends, so that the filters' target runs on each.
 pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
-# With `predefined-cmaps`, so a name that's a predefined CMap's reaches its bundle,
-# and `structure`, so a file's fonts are read over a reading of it.
-pdf-fonts = { path = "../crates/pdf-fonts", features = ["predefined-cmaps", "structure"] }
+# With `predefined-cmaps`, so a name that's a predefined CMap's reaches its bundle.
+pdf-fonts = { path = "../crates/pdf-fonts", features = ["predefined-cmaps"] }
 pdf-linearize = { path = "../crates/pdf-linearize" }
 # The library alone, without the command line's crates.
 pdf-lint = { path = "../crates/pdf-lint", default-features = false }

@@ -1,11 +1,11 @@
 //! What [`check`](super::check) judges: the facts of a file as written, as raw
-//! as a reader can give them, no object model's type among them. Every position
-//! is from the file's first byte, as a section's rows have them. A value the
-//! file gives is given as it stands, wrong or not: what's wrong with it is for
-//! the check to say.
+//! as a reader can give them, no document model's type among them, an object by
+//! its pdf-objects [`ObjectId`]. Every position is from the file's first byte,
+//! as a section's rows have them. A value the file gives is given as it stands,
+//! wrong or not: what's wrong with it is for the check to say.
 
-use crate::Id;
 use crate::plan::{Graph, Kind};
+use pdf_objects::ObjectId;
 
 /// A value as a file writes it, for what a check wants to know of one.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -19,7 +19,7 @@ pub enum Raw {
     /// A real number.
     Real(f64),
     /// A reference, or a value with one in it.
-    Reference(Id),
+    Reference(ObjectId),
     /// An array, with no reference in it.
     Array,
     /// Anything else.
@@ -255,7 +255,7 @@ pub enum Attribute {
 #[non_exhaustive]
 pub struct PageFacts {
     /// Its object, where it has one of its own.
-    pub id: Option<Id>,
+    pub id: Option<ObjectId>,
     /// Whether it says `/Resources` itself.
     pub resources: bool,
     /// Whether it says `/MediaBox` itself.
@@ -264,7 +264,7 @@ pub struct PageFacts {
 
 impl PageFacts {
     /// The page at `id`, saying neither `/Resources` nor `/MediaBox` itself.
-    pub fn new(id: Option<Id>) -> PageFacts {
+    pub fn new(id: Option<ObjectId>) -> PageFacts {
         PageFacts {
             id,
             resources: false,

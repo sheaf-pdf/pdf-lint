@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use pdf_fonts::pdf_content_streams::{Limits as ContentLimits, ResCx, operations};
 use pdf_fonts::{Fault, Font, FontKind, Limits, Rect, Resolve};
+use pdf_objects::ObjectId;
 use pdf_structure::bytes::{Options, Reading};
 
 /// The most characters back a text page looks for the same code at the same place
@@ -191,11 +192,15 @@ fn boxes(font: &Font, code: u32) -> ([f32; 4], [f32; 4]) {
 /// The answer for the file `bytes`, of the kind `kind`, over a reading of it.
 fn ours(bytes: &[u8], kind: &str) -> String {
     let reading = Reading::open(bytes, &Options::DEFAULT).expect("a case opens");
-    let dict = (&reading).resolve((10, 0)).and_then(|o| o.as_dict());
+    let dict = (&reading)
+        .resolve(ObjectId::new(10, 0))
+        .and_then(|o| o.as_dict());
     let Some(dict) = dict else {
         return "no font".to_string();
     };
-    let content = reading.decoded((4, 0)).expect("a case has its content");
+    let content = reading
+        .decoded(ObjectId::new(4, 0))
+        .expect("a case has its content");
     let mut shown = Vec::new();
     let mut tw = 0.0;
     let none = ResCx::none();

@@ -418,7 +418,7 @@ fn chosen(data: &[u8]) -> (How, &[u8]) {
     let how = How {
         offset,
         seed,
-        stream: (flags & 1 != 0).then_some((u32::from(*c), 0)),
+        stream: (flags & 1 != 0).then_some(ObjectId::new(u32::from(*c), 0)),
         ciphertext: flags & 2 != 0,
         indirect: flags & 4 != 0,
         length: match flags & 8 {
@@ -657,7 +657,8 @@ pub fn every_window(input: &[u8], length: u16) -> usize {
         rules: Rules::Iso,
     };
     let mut read = 0;
-    let each = [Rules::Iso, Rules::Pdfium].map(|rules| [(rules, None), (rules, Some((7, 0)))]);
+    let each = [Rules::Iso, Rules::Pdfium]
+        .map(|rules| [(rules, None), (rules, Some(ObjectId::new(7, 0)))]);
     for (rules, stream) in each.concat() {
         for (indirect, length) in [
             (false, how.length),
@@ -818,10 +819,13 @@ fn rewrite(input: &[u8], how: How, object: &Object) {
 /// past the largest, the generation kept, but a number whose remainder by 7
 /// is `seed`'s, which it names none of.
 pub fn renumbering(seed: u16) -> impl Fn(ObjectId) -> Option<ObjectId> {
-    move |(n, g)| match seed {
-        0 => Some((n, g)),
-        _ if n % 7 == u32::from(seed % 7) => None,
-        _ => Some((n.wrapping_add(u32::from(seed)), g)),
+    move |id: ObjectId| match seed {
+        0 => Some(id),
+        _ if id.number % 7 == u32::from(seed % 7) => None,
+        _ => Some(ObjectId::new(
+            id.number.wrapping_add(u32::from(seed)),
+            id.generation,
+        )),
     }
 }
 
@@ -1066,7 +1070,7 @@ impl Encrypt for Toy {
 
     fn clear(&self, id: ObjectId, dict: Option<&Dict>, stream: bool) -> bool {
         let xref = |d: &Dict| d.get(b"Type").and_then(Object::as_name) == Some(b"XRef");
-        id.0 % 5 == 0 || (stream && dict.is_some_and(xref))
+        id.number % 5 == 0 || (stream && dict.is_some_and(xref))
     }
 
     fn clear_key(&self, _: ObjectId, dict: &Dict) -> Option<&'static [u8]> {
@@ -1089,19 +1093,12 @@ impl Encrypt for Toy {
 
 impl Toy {
     /// `bytes` of object `id`, as the toy writes them, kept as given.
-    fn sealed(
-        &self,
-        (n, g): ObjectId,
-        bytes: &[u8],
-        stream: bool,
-    ) -> Result<Vec<u8>, &'static str> {
-        self.seen
-            .borrow_mut()
-            .push(((n, g), bytes.to_vec(), stream));
+    fn sealed(&self, id: ObjectId, bytes: &[u8], stream: bool) -> Result<Vec<u8>, &'static str> {
+        self.seen.borrow_mut().push((id, bytes.to_vec(), stream));
         if self.refuse.as_deref() == Some(bytes) {
             return Err("the toy refuses it");
         }
-        let mut sealed = [&n.to_be_bytes()[..], &g.to_be_bytes()].concat();
+        let mut sealed = [&id.number.to_be_bytes()[..], &id.generation.to_be_bytes()].concat();
         sealed.extend(bytes.iter().rev());
         Ok(sealed)
     }
@@ -1135,7 +1132,10 @@ impl Toy {
         next: &mut usize,
     ) {
         let mut open = |sealed: &mut Vec<u8>, stream: bool| {
-            let (n, g) = id;
+            let ObjectId {
+                number: n,
+                generation: g,
+            } = id;
             let tag = [&n.to_be_bytes()[..], &g.to_be_bytes()].concat();
             let rest = sealed
                 .strip_prefix(&tag[..])

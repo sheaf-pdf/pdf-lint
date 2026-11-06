@@ -3142,7 +3142,10 @@ mod tests {
 
     impl File {
         fn new(trailer: Dict, objects: impl IntoIterator<Item = (u32, Object)>) -> File {
-            let objects = objects.into_iter().map(|(n, o)| ((n, 0), o)).collect();
+            let objects = objects
+                .into_iter()
+                .map(|(n, o)| (ObjectId::new(n, 0), o))
+                .collect();
             File {
                 trailer,
                 objects,
@@ -3179,7 +3182,7 @@ mod tests {
         ) -> T {
             let resolve = |id: ObjectId| self.objects.get(&id);
             let pages: Option<Vec<&Dict>> = (self.pages.as_ref()).map(|pages| {
-                let page = |n| self.objects[&(n, 0)].as_dict().unwrap();
+                let page = |n| self.objects[&ObjectId::new(n, 0)].as_dict().unwrap();
                 pages.iter().map(|&n| page(n)).collect()
             });
             let [alone, given] = [None, Some(Grammar::embedded())].map(|grammar| {
@@ -3829,9 +3832,9 @@ mod tests {
         // Whether object `n`'s /Extends has no cycle: given its number
         // where `id`, else known by where it was written.
         let no_cycle = |file: &File, n: u32, id: bool| {
-            let o = &file.objects[&(n, 0)];
+            let o = &file.objects[&ObjectId::new(n, 0)];
             file.eval(o, At::Key(b"Extends"), &[], "1.7", |cx| match id {
-                true => holds(cell, &cx.id((n, 0))),
+                true => holds(cell, &cx.id(ObjectId::new(n, 0))),
                 false => holds(cell, cx),
             })
         };
@@ -4216,8 +4219,8 @@ mod tests {
         });
         let (t, f) = (Truth::True, Truth::False);
         assert_eq!(said, [t.clone(), t.clone(), f.clone(), t.clone(), t, f]);
-        assert_eq!(resolved[&(3, 0)], 1, "the kid, read once");
-        assert_eq!(resolved[&(2, 0)], 12, "the root, twice a row");
+        assert_eq!(resolved[&ObjectId::new(3, 0)], 1, "the kid, read once");
+        assert_eq!(resolved[&ObjectId::new(2, 0)], 12, "the root, twice a row");
     }
 
     #[test]
@@ -4243,7 +4246,7 @@ mod tests {
             });
             let (t, f) = (Truth::True, Truth::False);
             assert_eq!(said, [t.clone(), f.clone(), t, f]);
-            resolved[&(3, 0)]
+            resolved[&ObjectId::new(3, 0)]
         };
         // Where it was written, directly or by reference.
         assert_eq!(reads(&file(root().at(written(20)), None)), 1);
@@ -4266,7 +4269,7 @@ mod tests {
                     assert_eq!(said == Truth::True, holds_it, "{key}");
                 }
             });
-            assert_eq!(resolved[&(3, 0)], reads);
+            assert_eq!(resolved[&ObjectId::new(3, 0)], reads);
         }
     }
 
@@ -4490,8 +4493,8 @@ mod tests {
             )
         };
         let asks = |file: &File, n: u32, text: &str| {
-            let container = file.objects.get(&(n, 0)).unwrap();
-            item_in(file, container, Some((n, 0)), text)
+            let container = file.objects.get(&ObjectId::new(n, 0)).unwrap();
+            item_in(file, container, Some(ObjectId::new(n, 0)), text)
         };
         let pages = "fn:PageContainsStructContentItems()";
         let file = tree(Vec::new());
@@ -4567,7 +4570,7 @@ mod tests {
             ];
             tagged(Object::reference(2), Object::reference(6), objects)
         };
-        let object = |file: &File, n| file.objects.get(&(n, 0)).unwrap().clone();
+        let object = |file: &File, n| file.objects.get(&ObjectId::new(n, 0)).unwrap().clone();
 
         // Placed: each item known by where it was written and its number.
         let placed = file(true);
@@ -4577,11 +4580,20 @@ mod tests {
         assert_eq!(item_in(&placed, &object(&placed, 6), None, images), t);
         // By its number: an equal copy built in memory, which has no span,
         // where its address said it wasn't.
-        assert_eq!(item_in(&placed, &page(), Some((2, 0)), pages), t);
-        assert_eq!(item_in(&placed, &image(), Some((6, 0)), images), t);
+        assert_eq!(
+            item_in(&placed, &page(), Some(ObjectId::new(2, 0)), pages),
+            t
+        );
+        assert_eq!(
+            item_in(&placed, &image(), Some(ObjectId::new(6, 0)), images),
+            t
+        );
         // Told apart by either: another page, as resolved or numbered.
         assert_eq!(item_in(&placed, &object(&placed, 5), None, pages), f);
-        assert_eq!(item_in(&placed, &page(), Some((5, 0)), pages), f);
+        assert_eq!(
+            item_in(&placed, &page(), Some(ObjectId::new(5, 0)), pages),
+            f
+        );
         // A page written directly, elsewhere: no item's span is its.
         assert_eq!(item_in(&placed, &page().at(written(90)), None, pages), f);
         // An equal copy without its number: nothing tells it apart.
@@ -4590,8 +4602,14 @@ mod tests {
 
         // Not placed: each item known by its number alone.
         let unplaced = file(false);
-        assert_eq!(item_in(&unplaced, &page(), Some((2, 0)), pages), t);
-        assert_eq!(item_in(&unplaced, &page(), Some((5, 0)), pages), f);
+        assert_eq!(
+            item_in(&unplaced, &page(), Some(ObjectId::new(2, 0)), pages),
+            t
+        );
+        assert_eq!(
+            item_in(&unplaced, &page(), Some(ObjectId::new(5, 0)), pages),
+            f
+        );
         // Without its number, the object resolve gives can't be told: its
         // address no longer says.
         let two = object(&unplaced, 2);
@@ -4630,9 +4648,9 @@ mod tests {
             [(2, page().at(written(20))), (6, image().at(written(60)))],
         );
         let six = object(&lost, 6);
-        assert_eq!(item_in(&lost, &six, Some((6, 0)), images), f);
+        assert_eq!(item_in(&lost, &six, Some(ObjectId::new(6, 0)), images), f);
         assert_eq!(item_in(&lost, &image(), None, images), unknown_image);
-        assert_eq!(item_in(&lost, &page(), Some((2, 0)), pages), t);
+        assert_eq!(item_in(&lost, &page(), Some(ObjectId::new(2, 0)), pages), t);
 
         // Named through a chain of references, 7 to 6: by the last, the
         // object the image is, never one followed before it.
@@ -4641,21 +4659,36 @@ mod tests {
             Object::reference(7),
             [(2, page()), (6, image()), (7, Object::reference(6))],
         );
-        assert_eq!(item_in(&chain, &image(), Some((6, 0)), images), t);
-        assert_eq!(item_in(&chain, &image(), Some((7, 0)), images), f);
+        assert_eq!(
+            item_in(&chain, &image(), Some(ObjectId::new(6, 0)), images),
+            t
+        );
+        assert_eq!(
+            item_in(&chain, &image(), Some(ObjectId::new(7, 0)), images),
+            f
+        );
 
         // Pages 3 and 4, which an object stream's header starts at one
         // offset, and the tree names 4: one span, told apart by their
         // numbers; given none, 3 is known by its span alone, 4's.
-        let at = Span::new(Some((9, 0)), 8, 80);
+        let at = Span::new(Some(ObjectId::new(9, 0)), 8, 80);
         let twins = tagged(
             Object::reference(4),
             Object::reference(6),
             [(3, page().at(at)), (4, page().at(at)), (6, image())],
         );
-        assert_eq!(item_in(&twins, &object(&twins, 4), Some((4, 0)), pages), t);
-        assert_eq!(item_in(&twins, &object(&twins, 3), Some((3, 0)), pages), f);
-        assert_eq!(item_in(&twins, &page(), Some((3, 0)), pages), f);
+        assert_eq!(
+            item_in(&twins, &object(&twins, 4), Some(ObjectId::new(4, 0)), pages),
+            t
+        );
+        assert_eq!(
+            item_in(&twins, &object(&twins, 3), Some(ObjectId::new(3, 0)), pages),
+            f
+        );
+        assert_eq!(
+            item_in(&twins, &page(), Some(ObjectId::new(3, 0)), pages),
+            f
+        );
         assert_eq!(item_in(&twins, &object(&twins, 3), None, pages), t);
 
         // The element's /Pg written directly, at bytes where an object
@@ -4667,7 +4700,12 @@ mod tests {
             [(3, page().at(at)), (6, image())],
         );
         assert_eq!(
-            item_in(&inside, &object(&inside, 3), Some((3, 0)), pages),
+            item_in(
+                &inside,
+                &object(&inside, 3),
+                Some(ObjectId::new(3, 0)),
+                pages
+            ),
             f
         );
         assert_eq!(item_in(&inside, &page().at(at), None, pages), t);
@@ -4691,13 +4729,19 @@ mod tests {
         let inline = page().at(written(80));
         let placed = file(&inline);
         assert_eq!(item_in(&placed, &inline, None, pages), Truth::True);
-        let two = placed.objects.get(&(2, 0)).unwrap();
-        assert_eq!(item_in(&placed, two, Some((2, 0)), pages), Truth::False);
+        let two = placed.objects.get(&ObjectId::new(2, 0)).unwrap();
+        assert_eq!(
+            item_in(&placed, two, Some(ObjectId::new(2, 0)), pages),
+            Truth::False
+        );
         // Not placed, it's known by neither, but written directly, it isn't
         // page 2; a page nothing identifies could be it.
         let unplaced = file(&page());
-        let two = unplaced.objects.get(&(2, 0)).unwrap();
-        assert_eq!(item_in(&unplaced, two, Some((2, 0)), pages), Truth::False);
+        let two = unplaced.objects.get(&ObjectId::new(2, 0)).unwrap();
+        assert_eq!(
+            item_in(&unplaced, two, Some(ObjectId::new(2, 0)), pages),
+            Truth::False
+        );
         assert_eq!(
             item_in(&unplaced, &page(), None, pages),
             unknown("fn:PageContainsStructContentItems")
@@ -4710,7 +4754,7 @@ mod tests {
         // data; an image written at bytes 20 to 21 of the file isn't it.
         let images = "fn:ImageIsStructContentItem()";
         let image = || Object::from(dict! { "Subtype" => "Image" });
-        let member = image().at(Span::new(Some((9, 0)), 20, 21));
+        let member = image().at(Span::new(Some(ObjectId::new(9, 0)), 20, 21));
         let page = Object::from(dict! { "Type" => "Page" }).at(written(40));
         let file = tagged(
             Object::reference(2),
@@ -5149,7 +5193,7 @@ mod tests {
         let file = bare();
         let resolve = |id: ObjectId| file.objects.get(&id);
         let given = FileCx::new(&file.trailer, v("1.7"), &resolve).grammar(&model);
-        let catalog = &file.objects[&(1, 0)];
+        let catalog = &file.objects[&ObjectId::new(1, 0)];
         let text = "fn:Eval(@Type==Catalog) && fn:IsPresent(Nonesuch)";
         assert!(!texts(&model).contains(text), "{text} is a row's");
         for n in [1, 0, 0] {
@@ -5254,8 +5298,11 @@ mod tests {
             holds(text, &file.at(&container, At::Key(b"X")))
         };
         let item = |text: &str, n: u32| {
-            let container = &objects[&(n, 0)];
-            holds(text, &file.at(container, At::Key(b"X")).id((n, 0)))
+            let container = &objects[&ObjectId::new(n, 0)];
+            holds(
+                text,
+                &file.at(container, At::Key(b"X")).id(ObjectId::new(n, 0)),
+            )
         };
         let dests = "fn:InNameTree(trailer::Catalog::Names::Dests)";
         let (images, pages) = (
@@ -5322,7 +5369,11 @@ mod tests {
             file.objects.get(&id)
         };
         let read = |counts: &HashMap<_, usize>, thread, id| counts.get(&(thread, id)).copied();
-        let kids = [(3, 0), (8, 0), (10, 0)];
+        let kids = [
+            ObjectId::new(3, 0),
+            ObjectId::new(8, 0),
+            ObjectId::new(10, 0),
+        ];
 
         // One thread alone: each tree read once.
         let alone = rows(
@@ -5995,17 +6046,20 @@ mod tests {
             Object::from(dict! {}),
         );
         let mut latin = Latin::default();
-        latin.insert(Some((5, 0)), indirect.at, true);
+        latin.insert(Some(ObjectId::new(5, 0)), indirect.at, true);
         latin.insert(None, direct.at, false);
-        latin.insert(Some((6, 0)), other.at, false);
-        latin.insert(Some((6, 0)), other.at, true);
-        latin.insert(Some((6, 0)), other.at, false);
+        latin.insert(Some(ObjectId::new(6, 0)), other.at, false);
+        latin.insert(Some(ObjectId::new(6, 0)), other.at, true);
+        latin.insert(Some(ObjectId::new(6, 0)), other.at, false);
         latin.insert(None, unplaced.at, true);
         // What's said is found again, in a copy too.
         let copy = latin.clone();
-        assert_eq!(copy.get(Some((5, 0)), None), Some(true));
+        assert_eq!(copy.get(Some(ObjectId::new(5, 0)), None), Some(true));
         assert_eq!(copy.get(None, direct.at), Some(false));
-        assert_eq!(copy.get(Some((6, 0)), descriptor(90).at), Some(true));
+        assert_eq!(
+            copy.get(Some(ObjectId::new(6, 0)), descriptor(90).at),
+            Some(true)
+        );
         assert_eq!(copy.get(None, indirect.at), None);
         assert_eq!(copy.get(None, None), None);
         let text = "fn:Eval(fn:FontHasLatinChars())";
@@ -6014,12 +6068,19 @@ mod tests {
             holds(text, &id.map_or(cx, |id| cx.id(id)))
         };
         let told = FileCx::new(&file.trailer, v("1.7"), &resolve).latin(&latin);
-        assert_eq!(has(&told, &indirect, Some((5, 0))), Truth::True);
+        assert_eq!(
+            has(&told, &indirect, Some(ObjectId::new(5, 0))),
+            Truth::True
+        );
         assert_eq!(has(&told, &direct, None), Truth::False);
-        assert_eq!(has(&told, &other, Some((6, 0))), Truth::True, "said twice");
+        assert_eq!(
+            has(&told, &other, Some(ObjectId::new(6, 0))),
+            Truth::True,
+            "said twice"
+        );
         let none = unknown("fn:FontHasLatinChars");
         assert_eq!(
-            has(&told, &direct, Some((7, 0))),
+            has(&told, &direct, Some(ObjectId::new(7, 0))),
             none,
             "by its number alone"
         );
@@ -6031,7 +6092,7 @@ mod tests {
         assert_eq!(has(&told, &unplaced, None), none, "of no number or span");
         assert_eq!(has(&told, &descriptor(70), None), none, "not told");
         let untold = FileCx::new(&file.trailer, v("1.7"), &resolve);
-        assert_eq!(has(&untold, &indirect, Some((5, 0))), none);
+        assert_eq!(has(&untold, &indirect, Some(ObjectId::new(5, 0))), none);
         assert!(format!("{told:?}").contains("latin: true"), "{told:?}");
         assert!(format!("{untold:?}").contains("latin: false"));
 
@@ -6040,8 +6101,12 @@ mod tests {
             let cx = told.at(container, At::Key(b"CapHeight")).id(id);
             super::required(cell, &cx)
         };
-        assert_eq!(required(&indirect, (5, 0)), Truth::True, "{cell}");
-        assert_eq!(required(&other, (8, 0)), none);
+        assert_eq!(
+            required(&indirect, ObjectId::new(5, 0)),
+            Truth::True,
+            "{cell}"
+        );
+        assert_eq!(required(&other, ObjectId::new(8, 0)), none);
     }
 
     #[test]

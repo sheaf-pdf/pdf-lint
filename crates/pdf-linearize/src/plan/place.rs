@@ -7,7 +7,9 @@ use super::group::{Use, group};
 use super::shared::{self, Lists};
 use super::uses;
 use super::{Container, Error, FileGroup, Graph, Group, Kind, Node, Part, Plan, What, Write};
-use crate::{Id, Limits};
+use pdf_objects::ObjectId;
+
+use crate::Limits;
 
 /// A `u32` that stands for none in a list of indices.
 pub(super) const NONE: u32 = u32::MAX;
@@ -16,7 +18,7 @@ pub(super) const NONE: u32 = u32::MAX;
 /// references as those places. A reference to no object is dropped.
 pub(super) struct Flat<'g> {
     graph: &'g Graph,
-    pub(super) ids: Vec<Id>,
+    pub(super) ids: Vec<ObjectId>,
     /// Each object's place in `graph.nodes`.
     nodes: Vec<u32>,
     starts: Vec<usize>,
@@ -26,12 +28,13 @@ pub(super) struct Flat<'g> {
 impl<'g> Flat<'g> {
     /// `graph` by index, or the object given twice.
     fn of(graph: &'g Graph) -> Result<Flat<'g>, Error> {
-        let mut sorted: Vec<(Id, u32)> = (0..).zip(&graph.nodes).map(|(i, n)| (n.id, i)).collect();
+        let mut sorted: Vec<(ObjectId, u32)> =
+            (0..).zip(&graph.nodes).map(|(i, n)| (n.id, i)).collect();
         sorted.sort_unstable();
         if let Some(pair) = sorted.windows(2).find(|pair| pair[0].0 == pair[1].0) {
             return Err(Error::ObjectRepeated(pair[0].0));
         }
-        let (ids, nodes): (Vec<Id>, Vec<u32>) = sorted.into_iter().unzip();
+        let (ids, nodes): (Vec<ObjectId>, Vec<u32>) = sorted.into_iter().unzip();
         let mut flat = Flat {
             graph,
             ids,
@@ -53,7 +56,7 @@ impl<'g> Flat<'g> {
     }
 
     /// The object `id` names.
-    fn index(&self, id: Id) -> Option<u32> {
+    fn index(&self, id: ObjectId) -> Option<u32> {
         self.ids.binary_search(&id).ok().map(|at| at as u32)
     }
 

@@ -1,4 +1,4 @@
-//! Small files written from hand-written bodies, with no object model: what both
+//! Small files written from hand-written bodies, with no document model: what both
 //! the tests of what's written and the tests against qpdf go through. Each is
 //! built from outside the crate, as a caller of any model builds one, so a way in
 //! that's missing doesn't compile.
@@ -8,6 +8,7 @@
 use std::convert::Infallible;
 
 use pdf_linearize::layout::Options;
+use pdf_linearize::pdf_objects::ObjectId;
 use pdf_linearize::{
     Encoded, Graph, Group, Kind, Layout, Limits, Page, Piece, Plan, Stream, What, assemble, plan,
 };
@@ -65,8 +66,10 @@ fn numbered(text: &str, plan: &Plan) -> String {
         let end = rest[at..].find('}').expect("closed") + at;
         out.push_str(&rest[..at]);
         let number: u32 = rest[at + 1..end].trim_start_matches('!').parse().unwrap();
-        let written = plan.number((number, 0)).expect("a reference to an object");
-        out.push_str(&format!("{} 0 R", written.0));
+        let written = plan
+            .number(ObjectId::new(number, 0))
+            .expect("a reference to an object");
+        out.push_str(&format!("{} 0 R", written.number));
         rest = &rest[end + 1..];
     }
     out.push_str(rest);
@@ -166,24 +169,30 @@ impl Doc {
 
     /// The graph it is.
     pub fn graph(&self) -> Graph {
-        let mut graph = Graph::new((self.catalog, 0), self.kind);
+        let mut graph = Graph::new(ObjectId::new(self.catalog, 0), self.kind);
         for object in &self.objects {
-            let refs = walked(&object.text).into_iter().map(|number| (number, 0));
-            let node = graph.object((object.number, 0), refs);
+            let refs = walked(&object.text)
+                .into_iter()
+                .map(|number| ObjectId::new(number, 0));
+            let node = graph.object(ObjectId::new(object.number, 0), refs);
             node.packable(self.packed && object.data.is_none());
             node.late(object.late);
         }
         for (id, contents, thumb) in &self.pages {
-            let mut page = Page::new((*id, 0));
-            page.contents = contents.iter().map(|&at| (at, 0)).collect();
-            page.thumb = thumb.map(|at| (at, 0));
+            let mut page = Page::new(ObjectId::new(*id, 0));
+            page.contents = contents.iter().map(|&at| ObjectId::new(at, 0)).collect();
+            page.thumb = thumb.map(|at| ObjectId::new(at, 0));
             graph.page(page);
         }
         graph.first_page(self.first);
-        self.tree.iter().for_each(|&at| graph.tree_node((at, 0)));
-        self.open.iter().for_each(|&at| graph.open((at, 0)));
+        self.tree
+            .iter()
+            .for_each(|&at| graph.tree_node(ObjectId::new(at, 0)));
+        self.open
+            .iter()
+            .for_each(|&at| graph.open(ObjectId::new(at, 0)));
         for (group, roots) in &self.groups {
-            graph.group(*group, roots.iter().map(|&at| (at, 0)));
+            graph.group(*group, roots.iter().map(|&at| ObjectId::new(at, 0)));
         }
         graph.outlines_first(self.outlines_first);
         graph
@@ -191,7 +200,11 @@ impl Doc {
 
     /// What's written for the write of `what`.
     fn body(&self, plan: &Plan, what: What, number: u32) -> Vec<u8> {
-        let found = |id: (u32, u16)| (self.objects.iter()).find(|o| o.number == id.0).unwrap();
+        let found = |id: ObjectId| {
+            (self.objects.iter())
+                .find(|o| o.number == id.number)
+                .unwrap()
+        };
         match what {
             What::Object(id) => {
                 let object = found(id);
@@ -252,7 +265,10 @@ impl Doc {
             .collect();
         let lengths: Vec<u64> = bodies.iter().map(|body| body.len() as u64).collect();
         let trailer = match self.info {
-            Some(info) => format!("/Info {} 0 R", plan.number((info, 0)).unwrap().0),
+            Some(info) => format!(
+                "/Info {} 0 R",
+                plan.number(ObjectId::new(info, 0)).unwrap().number
+            ),
             None => String::new(),
         };
         let mut options = Options::new((1, 7));

@@ -14,7 +14,7 @@ It's made for what reads a file's common structures to show them, check them or 
 
 Whatever walks a file's objects reads them through pdf-objects' `Resolve`, given by value, so `&reading` over pdf-structure's reading in memory or by position, `&document` over its document, or a closure alike. `catalog` finds a file's catalog from its trailer, and `follow` follows a reference. A reader says why it gives no object, and a walk acts on it: an object that's damaged is said and passed; one past a cap the reader reads under, one that takes a password, or bytes the source didn't give end the walk with an `Unreadable`, so that a failed read never looks like an empty tree.
 
-Where a file departs from the standard is a `Fault`, told to a `Sink` with its `Place`. `()` drops them and wants none, so what only a checker wants isn't looked for, and what's read is the same whatever the sink. Caps are one value, `Limits`.
+Where a file departs from the standard is a `Fault`, told to a sink with its place: pdf-objects' `fault::Sink<Fault>` and `fault::Place`, which pdf-color's and pdf-fonts' faults are told to as well, so that one sink can take all three. `()` drops them and wants none, so what only a checker wants isn't looked for, and what's read is the same whatever the sink; a `Vec<(Place, Fault)>` keeps each with its place. Caps are one value, `Limits`.
 
 ## The `clock` feature
 
@@ -52,13 +52,13 @@ use pdf_semantics::pages::{Inheritable, Origin, Rect, pages};
 use pdf_semantics::{Limits, Object, ObjectId, Rules, dict};
 
 let objects = BTreeMap::from([
-    ((2, 0), Object::from(dict! {
+    (ObjectId::new(2, 0), Object::from(dict! {
         "Type" => "Pages",
         "Kids" => vec![Object::reference(3), Object::reference(3)],
         "Count" => 2,
         "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(200)],
     })),
-    ((3, 0), Object::from(dict! { "Type" => "Page", "Parent" => Object::reference(2), "Rotate" => 90 })),
+    (ObjectId::new(3, 0), Object::from(dict! { "Type" => "Page", "Parent" => Object::reference(2), "Rotate" => 90 })),
 ]);
 let resolve = |id: ObjectId| objects.get(&id);
 let catalog = dict! { "Pages" => Object::reference(2) };
@@ -68,13 +68,13 @@ assert_eq!((table.len(), table.counted()), (2, 2));
 
 // Listed twice, it's two pages, the second saying so.
 let second = table.get(1).unwrap();
-assert_eq!((second.id, second.repeat), (Some((3, 0)), 1));
+assert_eq!((second.id, second.repeat), (Some(ObjectId::new(3, 0)), 1));
 
 // Its own, inherited, or what stands for it.
 assert_eq!(second.rotate().value, 90);
 assert_eq!(second.rotate().origin, Origin::Own);
 assert_eq!(second.media_box().value, Rect([0.0, 0.0, 100.0, 200.0]));
-assert_eq!(second.media_box().origin, Origin::Ancestor(Some((2, 0))));
+assert_eq!(second.media_box().origin, Origin::Ancestor(Some(ObjectId::new(2, 0))));
 assert_eq!(second.crop_box().origin, Origin::Default);
 assert!(second.attribute(Inheritable::Resources).is_none());
 ```
@@ -83,7 +83,7 @@ Over a file, a walk takes the reading or the document by reference, which says w
 
 ```rust
 use pdf_semantics::pages::pages;
-use pdf_semantics::{Limits, Rules, catalog, xmp};
+use pdf_semantics::{Limits, ObjectId, Rules, catalog, xmp};
 use pdf_structure::bytes::{Options, Reading};
 
 let file = b"%PDF-1.7\n\
@@ -94,7 +94,7 @@ let file = b"%PDF-1.7\n\
 let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
 let root = catalog(&reading, reading.trailer().dict()).unwrap().unwrap();
 let table = pages(&reading, root, Rules::Iso, &Limits::DEFAULT, &mut ()).unwrap();
-assert_eq!(table.get(0).unwrap().id, Some((3, 0)));
+assert_eq!(table.get(0).unwrap().id, Some(ObjectId::new(3, 0)));
 assert_eq!(xmp::metadata_stream(&reading, root), Ok(None));
 ```
 
@@ -103,13 +103,14 @@ A name tree, over a closure:
 ```rust
 use std::collections::BTreeMap;
 
+use pdf_objects::fault::{Place, Sink};
 use pdf_semantics::tree::names;
-use pdf_semantics::{Fault, Limits, Object, ObjectId, Place, Sink, dict};
+use pdf_semantics::{Fault, Limits, Object, ObjectId, dict};
 
 #[derive(Default)]
 struct Faults(Vec<Fault>);
 
-impl Sink for Faults {
+impl Sink<Fault> for Faults {
     fn fault(&mut self, _: Place, fault: Fault) {
         self.0.push(fault);
     }
@@ -123,20 +124,20 @@ let leaf = dict! {
         Object::string("b"), Object::from(2),
     ],
 };
-let objects = BTreeMap::from([((2, 0), Object::from(leaf))]);
+let objects = BTreeMap::from([(ObjectId::new(2, 0), Object::from(leaf))]);
 let resolve = |id: ObjectId| objects.get(&id);
 let root = Object::from(dict! { "Kids" => vec![Object::reference(2), Object::reference(2)] });
 
 let mut walk = names(resolve, &root, &Limits::DEFAULT, Faults::default());
 let (key, value) = walk.next().unwrap().unwrap();
-assert_eq!((key, value.as_reference()), (&b"a"[..], Some((7, 0))));
+assert_eq!((key, value.as_reference()), (&b"a"[..], Some(ObjectId::new(7, 0))));
 let (key, value) = walk.next().unwrap().unwrap();
 assert_eq!((key, value.as_integer()), (&b"b"[..], Some(2)));
 assert!(walk.next().is_none());
 
 // Read once, said, and nothing left unread.
 assert!(walk.whole());
-assert_eq!(walk.into_sink().0, [Fault::TreeRepeated { id: (2, 0) }]);
+assert_eq!(walk.into_sink().0, [Fault::TreeRepeated { id: ObjectId::new(2, 0) }]);
 ```
 
 What a file claims, from its packet, a claim elsewhere counting past an attribute that doesn't read:

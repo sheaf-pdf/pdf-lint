@@ -247,7 +247,7 @@ fn a_file_reads_back_with_its_pages_and_objects_and_holds() {
     assert_eq!(pages.len(), 2);
     let content = |page: (u32, u16)| {
         let contents = lopdf.get_page_contents(page);
-        reading.data(contents[0]).unwrap().to_vec()
+        reading.data(contents[0].into()).unwrap().to_vec()
     };
     assert_eq!(content(pages[0]), b"0 0 m");
     assert_eq!(content(pages[1]), b"1 1 m");
@@ -284,8 +284,10 @@ fn its_graph_is_what_it_plans_by() {
     .unwrap();
     let mut out = Vec::new();
     let layout = adapter::linearize(&mut out, &doc, &adapter::Options::DEFAULT).unwrap();
-    let at = layout.position(plan.number((3, 0)).unwrap().0).unwrap() as usize;
-    let number = plan.number((3, 0)).unwrap().0;
+    let at = layout
+        .position(plan.number(ObjectId::new(3, 0)).unwrap().number)
+        .unwrap() as usize;
+    let number = plan.number(ObjectId::new(3, 0)).unwrap().number;
     assert!(out[at..].starts_with(format!("{number} 0 obj").as_bytes()));
     assert_eq!(number, plan.first_page_number());
 }
@@ -331,7 +333,7 @@ fn what_a_stream_s_length_alone_names_isn_t_written_nor_a_null_nor_what_nothing_
     // Written direct, what it names gone.
     let lopdf = loaded(&out);
     let first = lopdf.page_iter().next().unwrap();
-    let contents = lopdf.get_page_contents(first)[0];
+    let contents = ObjectId::from(lopdf.get_page_contents(first)[0]);
     assert_eq!(reading.data(contents).unwrap().to_vec(), b"0 0 m");
     let length = object(&doc, contents)
         .as_stream()
@@ -1184,7 +1186,18 @@ fn a_real_past_what_a_file_can_hold_is_refused() {
     doc.catalog_mut().unwrap().set("Bad", f32::INFINITY);
     let mut out = Vec::new();
     let why = adapter::linearize(&mut out, &doc, &adapter::Options::DEFAULT).unwrap_err();
-    assert!(matches!(why, Error::NonFinite { id: (1, 0) }), "{why}");
+    assert!(
+        matches!(
+            why,
+            Error::NonFinite {
+                id: ObjectId {
+                    number: 1,
+                    generation: 0
+                }
+            }
+        ),
+        "{why}"
+    );
     assert!(out.is_empty());
 }
 
@@ -1201,7 +1214,12 @@ fn a_stream_lopdf_couldn_t_read_is_refused_not_written_empty() {
     let mut out = Vec::new();
     assert!(matches!(
         adapter::linearize(&mut out, &doc, &adapter::Options::DEFAULT),
-        Err(Error::UnreadStream { id: (5, 0) })
+        Err(Error::UnreadStream {
+            id: ObjectId {
+                number: 5,
+                generation: 0
+            }
+        })
     ));
     assert!(out.is_empty());
 }

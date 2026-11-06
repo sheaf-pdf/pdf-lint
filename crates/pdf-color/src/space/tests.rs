@@ -4,12 +4,13 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use pdf_objects::fault::Place;
 use pdf_objects::parse::Parser;
 use pdf_objects::{ObjectId, Unreadable, Why};
 use pdf_structure::bytes::{Options, Reading};
 
 use super::*;
-use crate::fault::{Fault, Place};
+use crate::fault::Fault;
 use crate::{components, counted};
 
 /// A white point, as a CIE-based dictionary has it.
@@ -44,7 +45,7 @@ fn file(text: &str, extra: &[&str]) -> File {
             let stream = (object.as_dict())
                 .filter(|dict| dict.has(b"Length"))
                 .map(|dict| Object::stream(dict.clone()));
-            ((n, 0), stream.unwrap_or(object))
+            (ObjectId::new(n, 0), stream.unwrap_or(object))
         })
         .collect();
     File {
@@ -68,8 +69,8 @@ impl Resolve<'static> for Asked<'_> {
     }
 
     fn try_resolve(&self, id: ObjectId) -> Result<Option<&'static Object>, Unreadable> {
-        self.asked.borrow_mut().push(id.0);
-        if let Some((_, why)) = self.failing.iter().find(|(n, _)| *n == id.0) {
+        self.asked.borrow_mut().push(id.number);
+        if let Some((_, why)) = self.failing.iter().find(|(n, _)| *n == id.number) {
             return Err(Unreadable::new(id, *why, "made to fail"));
         }
         Ok(self.file.objects.get(&id))
@@ -79,7 +80,7 @@ impl Resolve<'static> for Asked<'_> {
 /// A sink that wants no faults, and that's told none.
 struct Unwanted;
 
-impl Sink for Unwanted {
+impl Sink<Fault> for Unwanted {
     fn fault(&mut self, _: Place, fault: Fault) {
         panic!("told {fault:?}, wanting none");
     }
@@ -104,7 +105,7 @@ fn read_under(file: File, limits: &Limits) -> (Option<Space<'static>>, Vec<Fault
         Space::read(resolve, file.value, limits, &mut Unwanted).unwrap(),
         space
     );
-    let dynamic: &mut dyn Sink = &mut ();
+    let dynamic: &mut dyn Sink<Fault> = &mut ();
     assert_eq!(
         Space::read(resolve, file.value, limits, dynamic).unwrap(),
         space
@@ -708,7 +709,12 @@ fn damaged_is_told_as_nothing_there() {
     let space = Space::read(resolver, file.value, &Limits::DEFAULT, &mut kept).unwrap();
     assert_eq!(space, Some(Space::Pattern(None)));
     let faults: Vec<Fault> = kept.into_iter().map(|(_, fault)| fault).collect();
-    assert_eq!(faults, [Fault::Damaged { id: (5, 0) }]);
+    assert_eq!(
+        faults,
+        [Fault::Damaged {
+            id: ObjectId::new(5, 0)
+        }]
+    );
 }
 
 /// What's not a space's to hold, a name alone or an empty array, holds nothing,
@@ -888,7 +894,10 @@ fn what_a_space_holds_is_read_through_its_references() {
     let Space::Separation(separation) = &space else {
         panic!("not Separation");
     };
-    assert_eq!(separation.tint.and_then(Object::as_reference), Some((6, 0)));
+    assert_eq!(
+        separation.tint.and_then(Object::as_reference),
+        Some(ObjectId::new(6, 0))
+    );
 
     // The attributes, each through its reference.
     let (space, faults) = read(
@@ -1067,7 +1076,7 @@ fn a_failing_read_in_a_check_reads_alike_under_every_sink() {
             assert_eq!(by_none, by_unit, "{text}");
             assert_eq!(by_sink, by_unit, "{text}");
             // Said only if it's damaged, and then as damaged.
-            let id = (*failing, 0);
+            let id = ObjectId::new(*failing, 0);
             let said = kept.iter().any(|(_, f)| *f == Fault::Damaged { id });
             assert_eq!(said, why == Why::Damaged, "{text} by {why:?}: {kept:?}");
             if why != Why::Damaged {
@@ -1090,7 +1099,7 @@ fn a_failing_read_in_a_check_reads_alike_under_every_sink() {
             let limits = &Limits::DEFAULT;
             let by_unit = Space::read(resolver, file.value, limits, &mut ());
             let error = by_unit.clone().unwrap_err();
-            assert_eq!((error.id, error.why), ((failing, 0), why));
+            assert_eq!((error.id, error.why), (ObjectId::new(failing, 0), why));
             let by_none = Space::read(resolver, file.value, limits, &mut Unwanted);
             let mut kept = Vec::new();
             let by_sink = Space::read(resolver, file.value, limits, &mut kept);
@@ -1155,7 +1164,11 @@ fn a_fault_says_where_it_is() {
     Space::read(resolve, file.value, &Limits::DEFAULT, &mut kept).unwrap();
     let (place, fault) = kept[0];
     assert_eq!(fault, Fault::WhitePoint);
-    assert_eq!(place.object, Some((6, 0)), "in what it's written in");
+    assert_eq!(
+        place.object,
+        Some(ObjectId::new(6, 0)),
+        "in what it's written in"
+    );
     assert!(place.at.is_some());
 
     let direct = value("/Foo");
@@ -1217,7 +1230,7 @@ fn faults_placed(
         let object = place
             .object
             .unwrap_or_else(|| panic!("{fault:?} in none"))
-            .0;
+            .number;
         let span = place
             .at
             .unwrap_or_else(|| panic!("{fault:?} written nowhere"));
@@ -1352,13 +1365,13 @@ fn a_stream_held_can_have_its_data_asked_for() {
     let Some(Lookup::Stream { stream, id, .. }) = indexed.lookup else {
         panic!("no stream");
     };
-    assert_eq!(id, Some((9, 0)), "the object a chain ended in");
+    assert_eq!(id, Some(ObjectId::new(9, 0)), "the object a chain ended in");
     assert_eq!(reading.decoded(id.unwrap()).unwrap(), b"q");
     assert!(stream.dict.has(b"Length"));
     let Some(Space::ICCBased(icc)) = indexed.base.as_deref() else {
         panic!("no ICCBased");
     };
-    assert_eq!(icc.id, Some((8, 0)));
+    assert_eq!(icc.id, Some(ObjectId::new(8, 0)));
     assert_eq!(reading.decoded(icc.id.unwrap()).unwrap(), b"p");
 
     // A stream that has no number has none to say.
@@ -1367,7 +1380,7 @@ fn a_stream_held_can_have_its_data_asked_for() {
     let Some(Space::ICCBased(icc)) = space else {
         panic!("not ICCBased");
     };
-    assert_eq!(icc.id, Some((5, 0)));
+    assert_eq!(icc.id, Some(ObjectId::new(5, 0)));
     let built = Object::from(vec![
         Object::from("ICCBased"),
         Object::stream(pdf_objects::dict! { "N" => 1 }),

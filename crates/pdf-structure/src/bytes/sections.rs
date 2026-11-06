@@ -781,7 +781,7 @@ mod tests {
         };
         assert_eq!(section.kind, XrefKind::Stream);
         assert_eq!(section.at, 45);
-        assert_eq!(section.stream, Some((2, 0)));
+        assert_eq!(section.stream, Some(ObjectId::new(2, 0)));
         assert_eq!(section.subsections, [(0, 3)]);
         assert_eq!(section.first_row, Some((44, 45)));
         assert_eq!(section.startxref, Some(45));
@@ -1124,7 +1124,7 @@ mod tests {
         let file = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n3 1 obj\n<< /Linearized 1 >>\nendobj\nmore";
         let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
         let first = reading.first_object().unwrap().expect("it has one");
-        assert_eq!(first.id, (3, 1));
+        assert_eq!(first.id, ObjectId::new(3, 1));
         assert_eq!(first.at, 15);
         assert_eq!(
             &file[first.at..first.end],

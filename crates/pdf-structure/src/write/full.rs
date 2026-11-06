@@ -239,7 +239,7 @@ fn file(
     // refused at below.
     let past = (bodies.iter())
         .filter_map(|(id, _)| to.at(*id))
-        .map(|at| at.0.saturating_add(1))
+        .map(|at| at.number.saturating_add(1))
         .fold(1, u32::max);
     let reuse = options.pack.map_or(&[][..], |pack| pack.reuse);
     // The writer numbers objects of its own only for a stream section,
@@ -266,13 +266,13 @@ fn file(
         Some(Place::At(at)) => Some(options.encrypt_at.unwrap_or(at)),
         Some(Place::New) => {
             let at = fresh(past, |n| dangling.contains(&n));
-            Some(options.encrypt_at.unwrap_or((at, 0)))
+            Some(options.encrypt_at.unwrap_or(ObjectId::new(at, 0)))
         }
     };
     // Nothing is passed over, as an update passes over what its file holds.
-    let at = checked(bodies, to, encrypt_at.map(|at| at.0), given, &[])?;
+    let at = checked(bodies, to, encrypt_at.map(|at| at.number), given, &[])?;
     if let Some(at) = encrypt_at {
-        usable(at.0)?;
+        usable(at.number)?;
     }
     // What's copied, by the encryption as given.
     let copying = from.map(|from| Copying::new(from, given)).transpose()?;
@@ -308,16 +308,16 @@ fn file(
     for ((id, body), &at) in bodies.iter().zip(&at) {
         stopped(options.stop)?;
         let (id, obj) = (*id, body.object());
-        next = next.max(at.0 + 1);
+        next = next.max(at.number + 1);
         let dictionary = encryptor.is_some_and(|e| e.dictionary_object(at));
         if pack.is_some() && packable(at, obj) && !dictionary {
             members.push((id, at, body));
             continue;
         }
         let pos = parts.body(out, id, at, body)? - start;
-        let generation = at.1;
+        let generation = at.generation;
         section.insert(
-            at.0,
+            at.number,
             Entry::InUse {
                 offset: pos,
                 generation,
@@ -334,16 +334,16 @@ fn file(
             Some(at) => {
                 let dict = Object::from(e.dictionary().clone());
                 let pos = serialize::indirect(out, at, &dict).map_err(Error::Serialize)? - start;
-                let generation = at.1;
+                let generation = at.generation;
                 section.insert(
-                    at.0,
+                    at.number,
                     Entry::InUse {
                         offset: pos,
                         generation,
                     },
                 );
                 trailer.set("Encrypt", Object::from(at));
-                next = next.max(at.0 + 1);
+                next = next.max(at.number + 1);
             }
         }
     }
@@ -436,7 +436,7 @@ impl Packing<'_> {
         mut next: u32,
     ) -> Result<u32, Error> {
         let by_number: HashMap<u32, Packed<'_>> = (members.iter())
-            .map(|&member| (member.0.0, member))
+            .map(|&member| (member.0.number, member))
             .collect();
         let mut numbers: Vec<u32> = by_number.keys().copied().collect();
         numbers.sort_unstable();
@@ -452,13 +452,16 @@ impl Packing<'_> {
         }
         let grouped: Vec<Vec<u32>> = grouped.into_iter().filter(|g| !g.is_empty()).collect();
         // Those no group takes, on their own.
-        for &member in members.iter().filter(|(id, ..)| !placed.contains(&id.0)) {
+        for &member in members
+            .iter()
+            .filter(|(id, ..)| !placed.contains(&id.number))
+        {
             self.plain(out, section, member)?;
         }
         // The numbers the members are written at, where they aren't those
         // they're given at.
         let written: Option<HashSet<u32>> =
-            (self.parts.renumbers()).then(|| members.iter().map(|(_, at, _)| at.0).collect());
+            (self.parts.renumbers()).then(|| members.iter().map(|(_, at, _)| at.number).collect());
         let member_at = |n: u32| match &written {
             Some(written) => written.contains(&n),
             None => by_number.contains_key(&n),
@@ -506,7 +509,7 @@ impl Packing<'_> {
             );
             for (index, (_, at, _)) in (0..=u16::MAX).zip(group) {
                 let entry = Entry::Compressed { stream: *n, index };
-                section.insert(at.0, entry);
+                section.insert(at.number, entry);
             }
             next = next.max(n + 1);
         }
@@ -524,9 +527,9 @@ impl Packing<'_> {
     ) -> Result<(), Error> {
         stopped(self.options.stop)?;
         let pos = self.parts.body(out, id, at, body)? - self.start;
-        let generation = at.1;
+        let generation = at.generation;
         section.insert(
-            at.0,
+            at.number,
             Entry::InUse {
                 offset: pos,
                 generation,
@@ -642,7 +645,7 @@ fn container(
                 };
                 match copied {
                     Some(bytes) => {
-                        written.push((id.0, bytes));
+                        written.push((id.number, bytes));
                         continue;
                     }
                     None => body.object(),
@@ -659,7 +662,7 @@ fn container(
             let named = serialize::indirect(&mut Vec::new(), *id, obj).err();
             return Err(Error::Serialize(named.unwrap_or(e)));
         }
-        written.push((id.0, Cow::Owned(bytes)));
+        written.push((id.number, Cow::Owned(bytes)));
     }
     let Some(stream) = objstm(&written, deflate)? else {
         return Ok(None);
@@ -667,8 +670,10 @@ fn container(
     let stream = Object::from(stream);
     let mut out = Vec::new();
     match encrypting {
-        Some(e) => serialize::indirect_with(&mut out, (n, 0), &stream, e)?,
-        None => serialize::indirect(&mut out, (n, 0), &stream).map_err(Error::Serialize)?,
+        Some(e) => serialize::indirect_with(&mut out, ObjectId::new(n, 0), &stream, e)?,
+        None => {
+            serialize::indirect(&mut out, ObjectId::new(n, 0), &stream).map_err(Error::Serialize)?
+        }
     };
     Ok(Some(out))
 }

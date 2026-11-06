@@ -1,13 +1,15 @@
 //! PDF's fonts (ISO 32000-2, 9), read.
 //!
 //! - **A file's font, as read** ([`Font`]): from its dictionary, over a [`Resolve`] for
-//!   its objects and [`Streams`] for its streams' data, the codes a string is in it,
-//!   each code's CID, width, vertical metrics and text, and how high its glyphs reach,
-//!   each as PDFium reads them, what no real writer writes included. What it can't know
-//!   it guesses, and says ([`FontApprox`]); what isn't as ISO 32000-2 has it is told to a
-//!   [`Sink`] ([`Fault`]), what's read being the same whatever the sink. It fails only
-//!   where its streams decompress past the budget it's read within, or where what it
-//!   reads doesn't read for a reason that's the caller's ([`Error`]).
+//!   its objects and pdf-objects' [`Streams`](pdf_objects::Streams) for its streams'
+//!   data, the codes a string is in it, each code's CID, width, vertical metrics and
+//!   text, and how high its glyphs reach, each as PDFium reads them, what no real
+//!   writer writes included. What it can't know it guesses, and says ([`FontApprox`]);
+//!   what isn't as ISO 32000-2 has it is told to pdf-objects'
+//!   [`Sink`](pdf_objects::fault::Sink) ([`Fault`]), what's read being the same
+//!   whatever the sink. It fails only where its streams decompress past the budget it's
+//!   read within, or where what it reads doesn't read for a reason that's the caller's
+//!   ([`Error`]).
 //! - **Each font read once** ([`Fonts`], [`FontScope`]): those that are objects, by
 //!   number, kept for every page that draws in them, and charged to each.
 //! - **Simple fonts' encodings and glyph names** ([`Encoding`], [`glyph_text`],
@@ -24,17 +26,19 @@
 //!   [`Fonts::for_text`], none's read: a glyph's box from one is none, its heights are
 //!   guessed, and those codes' text by its font's name.
 //!
-//! Nothing panics on what a file holds. With the `structure` feature, a pdf-structure
-//! `&Reading` gives a font its objects and streams; with `predefined-cmaps`, a Type 0
-//! font's predefined CMap is Adobe's, where without it it reads as one the build hasn't.
+//! Nothing panics on what a file holds. A pdf-structure `&Reading` gives a font its
+//! objects and streams, and so does anything else that implements pdf-objects'
+//! `Resolve` and `Streams`, or [`With`](pdf_objects::With), a resolver and a function as
+//! one; with `predefined-cmaps`, a Type 0 font's predefined CMap is Adobe's, where
+//! without it it reads as one the build hasn't.
 //!
 //! ```
-//! use pdf_fonts::{Decoded, Font, Limits, Object, ObjectId, With};
-//! use pdf_objects::dict;
+//! use pdf_fonts::{Font, Limits, Object, ObjectId, Unreadable, Why};
+//! use pdf_objects::{With, dict};
 //!
 //! // A font with no streams, over a resolver of nothing.
 //! let none = |_: ObjectId| -> Option<&Object> { None };
-//! let objects = With::new(&none, |_, _| Decoded::None);
+//! let objects = With::new(&none, |id, _| Err(Unreadable::new(id, Why::Damaged, "none")));
 //! let font = dict! {
 //!     "Subtype" => "Type1", "BaseFont" => "Arial,Bold", "Encoding" => "WinAnsiEncoding",
 //! };
@@ -47,8 +51,10 @@
 //! ```
 //!
 //! [`Dict`], [`Object`], [`ObjectId`], [`Resolve`], [`Span`], [`Unreadable`] and
-//! [`Why`] are pdf-objects', re-exported, and pdf-content-streams, whose `Limits`
-//! are what a CMap and a CharProc are lexed under, is too.
+//! [`Why`] are pdf-objects', re-exported, and so is pdf-objects whole, so a sink or
+//! a `Streams` of one's own names the trait at the version this crate takes; and
+//! pdf-content-streams, whose `Limits` are what a CMap and a CharProc are lexed
+//! under, is too.
 //!
 //! The metrics and the glyph lists are Adobe's, each under its own terms, in the
 //! file itself. [`Std14::NOTICE`] is the metrics' notice, for a binary's list of
@@ -57,18 +63,18 @@
 //! in too.
 
 pub use pdf_content_streams;
+pub use pdf_objects;
 pub use pdf_objects::{Dict, Object, ObjectId, Resolve, Span, Unreadable, Why};
 
 pub use encoding::{Encoding, cp1252, glyph_text, name_code_point};
 pub use error::Error;
-pub use fault::{Fault, Place, Sink};
+pub use fault::Fault;
 pub use font::{
     Descendant, Font, FontApprox, FontKind, FontMetrics, FontProgram, Rect, VerticalMetrics,
 };
 pub use fonts::{FontId, FontScope, Fonts};
 pub use limits::Limits;
 pub use std14::Std14;
-pub use streams::{Decoded, Streams, With};
 
 mod afm;
 mod cmap;
@@ -88,7 +94,6 @@ mod predefined;
 mod program;
 mod reader;
 mod std14;
-mod streams;
 #[cfg(test)]
 mod tests;
 #[cfg_attr(not(feature = "programs"), allow(dead_code))]

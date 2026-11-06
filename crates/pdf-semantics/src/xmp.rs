@@ -21,6 +21,7 @@
 
 use std::fmt;
 
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::{Dict, ObjectId, Resolve, Span, Unreadable, Value};
 use quick_xml::NsReader;
 use quick_xml::encoding::EncodingError;
@@ -29,7 +30,7 @@ use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::name::{LocalName, Namespace, NamespaceError, ResolveResult};
 
-use crate::{Fault, HOPS, Limits, Place, Sink, too_long};
+use crate::{Fault, HOPS, Limits, too_long};
 
 #[cfg(test)]
 mod tests;
@@ -291,7 +292,7 @@ type Open = Option<(Claim, String)>;
 /// with elements still open, and an element's value counts once it closes.
 // A packet's read once a file, and its error holds what's read.
 #[allow(clippy::result_large_err)]
-pub fn read<S: Sink + ?Sized>(
+pub fn read<S: Sink<Fault> + ?Sized>(
     xml: &[u8],
     stream: Option<ObjectId>,
     limits: &Limits,
@@ -410,7 +411,7 @@ fn bound(tag: &BytesStart) -> usize {
 }
 
 /// Adds `text` to the value being read; if it doesn't read, the value's lost.
-fn push<S: Sink + ?Sized>(
+fn push<S: Sink<Fault> + ?Sized>(
     open: &mut Open,
     text: Result<std::borrow::Cow<str>, EncodingError>,
     sink: &mut S,
@@ -442,7 +443,7 @@ fn character(reference: &BytesRef) -> Option<String> {
 
 /// Tells `sink`, if it wants faults, of `fault` at bytes `start..end` of the
 /// packet, which is the decoded data of `stream`.
-fn tell<S: Sink + ?Sized>(
+fn tell<S: Sink<Fault> + ?Sized>(
     sink: &mut S,
     stream: Option<ObjectId>,
     start: usize,
@@ -451,7 +452,7 @@ fn tell<S: Sink + ?Sized>(
 ) {
     if sink.wants() {
         let at = stream.map(|id| Span::new(Some(id), start, end));
-        sink.fault(Place { object: stream, at }, fault);
+        sink.fault(Place::new(stream, at), fault);
     }
 }
 
@@ -480,5 +481,5 @@ pub fn metadata_stream<'o, R: Resolve<'o>>(
             _ => return Ok(None),
         }
     }
-    Err(too_long(last.unwrap_or((0, 0))))
+    Err(too_long(last.unwrap_or(ObjectId::new(0, 0))))
 }

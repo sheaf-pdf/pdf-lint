@@ -66,21 +66,38 @@
 //!   ([`Resolve::try_resolve`], [`Unreadable`]); and walked
 //!   ([`Object::references`]), a value's in the order written, with a stack
 //!   of the walk's own.
+//! - **A stream's data, decoded** ([`Streams`]): what gives it, decrypted
+//!   and decoded through its filters, as a viewer takes it, a reader's or
+//!   a document's, at most a limit the caller asks for, lent where the
+//!   reader holds it, and why it gives none, in the same words as a
+//!   resolver's ([`Why`]); and [`With`], a resolver and a function as one,
+//!   for what has its streams some other way.
+//! - **Faults, told with where they are** ([`fault`]): one
+//!   [`fault::Sink`] and one [`fault::Place`] for every reader of a file's
+//!   objects, each reader's faults a type of its own, so that one sink can
+//!   take several readers' and `()` drops them and wants none, so none is
+//!   looked for. Three keep a sink of their own, as what they tell isn't
+//!   placed by an object, each saying why: the parser's
+//!   ([`parse::Sink`]), a content stream's reader's, and a linearized
+//!   file's check's.
 //!
 //! [`dict!`] builds a dictionary from keys and values.
 
+pub mod fault;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
 pub mod object;
 pub mod parse;
 pub mod serialize;
+pub mod streams;
 pub mod text;
 pub mod version;
 
 pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
 pub use parse::Limits;
 pub use pdf_tokenizer::Rules;
+pub use streams::{Streams, With};
 pub use version::Version;
 
 /// What gives the indirect objects a value's references name: a file's,
@@ -99,10 +116,10 @@ pub use version::Version;
 /// use pdf_objects::{Object, ObjectId, Resolve};
 ///
 /// // A closure over a file's objects.
-/// let objects = BTreeMap::from([((1, 0), Object::from(7))]);
+/// let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(7))]);
 /// let resolve = |id: ObjectId| objects.get(&id);
-/// assert_eq!(resolve.resolve((1, 0)).and_then(Object::as_integer), Some(7));
-/// assert!(resolve.resolve((2, 0)).is_none());
+/// assert_eq!(resolve.resolve(ObjectId::new(1, 0)).and_then(Object::as_integer), Some(7));
+/// assert!(resolve.resolve(ObjectId::new(2, 0)).is_none());
 ///
 /// // A type of its own, by reference.
 /// struct File(BTreeMap<ObjectId, Object>);
@@ -112,7 +129,7 @@ pub use version::Version;
 ///     }
 /// }
 /// let file = File(objects.clone());
-/// assert_eq!((&file).resolve((1, 0)), objects.get(&(1, 0)));
+/// assert_eq!((&file).resolve(ObjectId::new(1, 0)), objects.get(&ObjectId::new(1, 0)));
 /// ```
 ///
 /// [`Resolve::resolve`] doesn't say why it gives none, and
@@ -133,7 +150,8 @@ pub trait Resolve<'o> {
 }
 
 /// Why a resolver gives no object for a number the file has
-/// ([`Resolve::try_resolve`]).
+/// ([`Resolve::try_resolve`]), or what gives a stream's data none of it
+/// ([`Streams::decoded`]).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 #[error("{message}")]
@@ -170,8 +188,17 @@ pub enum Why {
     /// It takes a password the reader wasn't given, or doesn't decrypt.
     Locked,
     /// The source of the file's bytes didn't give them: it may read if it's
-    /// asked again.
+    /// asked again. Or the reader has no source of bytes at all, as a
+    /// document read whole hasn't, which holds the file's objects and not
+    /// its streams' data: then it's read beside what read it.
     Source,
+    /// It's a stream whose filters the reader doesn't decode: through a
+    /// filter it doesn't take, as an image's data may be (ISO 32000-2,
+    /// 7.4.1), its data there as written for a decoder that takes that
+    /// filter; or with a `/Filter` or `/DecodeParms` it can't take as
+    /// written, which is the file's to fix. Only what gives a stream's data
+    /// says it ([`Streams::decoded`]); a resolver never does.
+    Filter,
 }
 
 /// A closure, or a function, from an object's number to the object.
@@ -213,8 +240,10 @@ mod tests {
 
     /// Object 1 as `resolve` gives it, and whether it gives none for 2.
     fn resolves<'o, R: Resolve<'o> + ?Sized>(resolve: &R) -> (Option<i64>, bool) {
-        let one = resolve.resolve((1, 0)).and_then(Object::as_integer);
-        (one, resolve.resolve((2, 0)).is_none())
+        let one = resolve
+            .resolve(ObjectId::new(1, 0))
+            .and_then(Object::as_integer);
+        (one, resolve.resolve(ObjectId::new(2, 0)).is_none())
     }
 
     /// No object at all.
@@ -224,7 +253,7 @@ mod tests {
 
     #[test]
     fn a_closure_resolves_by_reference_as_a_dyn_fn_and_boxed() {
-        let objects = BTreeMap::from([((1, 0), Object::from(7))]);
+        let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(7))]);
         let closure = |id: ObjectId| objects.get(&id);
         assert_eq!(resolves(&closure), (Some(7), true));
         assert_eq!(resolves(&&closure), (Some(7), true));
@@ -241,14 +270,20 @@ mod tests {
     /// a `dyn Fn` and as a `dyn Resolve`.
     #[test]
     fn a_closure_can_t_say_why() {
-        let objects = BTreeMap::from([((1, 0), Object::from(7))]);
+        let objects = BTreeMap::from([(ObjectId::new(1, 0), Object::from(7))]);
         let closure = |id: ObjectId| objects.get(&id);
-        assert_eq!(closure.try_resolve((1, 0)), Ok(objects.get(&(1, 0))));
-        assert_eq!(closure.try_resolve((2, 0)), Ok(None));
+        assert_eq!(
+            closure.try_resolve(ObjectId::new(1, 0)),
+            Ok(objects.get(&ObjectId::new(1, 0)))
+        );
+        assert_eq!(closure.try_resolve(ObjectId::new(2, 0)), Ok(None));
         let dynamic = &closure as &dyn Fn(_) -> _;
-        assert_eq!(dynamic.try_resolve((2, 0)), Ok(None));
+        assert_eq!(dynamic.try_resolve(ObjectId::new(2, 0)), Ok(None));
         let resolver = &closure as &dyn Resolve;
-        assert_eq!(resolver.try_resolve((1, 0)), Ok(objects.get(&(1, 0))));
+        assert_eq!(
+            resolver.try_resolve(ObjectId::new(1, 0)),
+            Ok(objects.get(&ObjectId::new(1, 0)))
+        );
     }
 
     /// One that can says so, and what it says is the whole message.
@@ -263,14 +298,14 @@ mod tests {
                 Err(Unreadable::new(id, Why::Locked, "it wants a password"))
             }
         }
-        let why = Locked.try_resolve((3, 1)).unwrap_err();
-        assert_eq!((why.id, why.why), ((3, 1), Why::Locked));
+        let why = Locked.try_resolve(ObjectId::new(3, 1)).unwrap_err();
+        assert_eq!((why.id, why.why), (ObjectId::new(3, 1), Why::Locked));
         assert_eq!(why.to_string(), "it wants a password");
         assert!(std::error::Error::source(&why).is_none());
 
         // Through a `dyn Resolve`, by value, it says so still.
         fn by_value<'o>(resolver: impl Resolve<'o>) -> Result<Option<&'o Object>, Unreadable> {
-            resolver.try_resolve((3, 1))
+            resolver.try_resolve(ObjectId::new(3, 1))
         }
         let locked = &Locked as &dyn Resolve;
         assert_eq!(by_value(locked).unwrap_err().why, Why::Locked);

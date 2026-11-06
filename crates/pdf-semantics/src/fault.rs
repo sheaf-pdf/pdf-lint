@@ -1,69 +1,15 @@
 //! Where a file's structures depart from ISO 32000-2. What's read goes on
-//! past each [`Fault`], told to a [`Sink`] with where it is. Nothing told
-//! changes what's read: the values given are the same whatever the sink,
-//! and a sink that doesn't want faults, `()`, has none looked for.
+//! past each [`Fault`], told to a sink, pdf-objects'
+//! [`Sink<Fault>`](pdf_objects::fault::Sink), with where it is, a
+//! [`Place`](pdf_objects::fault::Place): the numbered object it's in, none
+//! where a walk began in a value written in place and hasn't reached one
+//! yet, and where it was written. Nothing told changes what's read: the
+//! values given are the same whatever the sink, and a sink that doesn't
+//! want faults, `()`, has none looked for.
 
 use std::fmt;
 
-use pdf_objects::{ObjectId, Span, Why};
-
-/// Where faults are told: a checker keeps them; `()` drops them, and wants
-/// none, so none is looked for. A fault owns nothing, so a sink can keep it
-/// as it is. A sink borrowed, `&mut S` or `&mut dyn Sink`, is a sink too.
-pub trait Sink {
-    /// A fault at `at`.
-    fn fault(&mut self, at: Place, fault: Fault);
-
-    /// Whether faults are wanted. A check that does work of its own, such
-    /// as following a tree's `/Limits`, runs only when they are, and a sink
-    /// that doesn't want them is told none. True unless a sink says
-    /// otherwise; asked as a walk goes.
-    fn wants(&self) -> bool {
-        true
-    }
-}
-
-/// Drops every fault, and wants none, so none is looked for.
-impl Sink for () {
-    #[inline]
-    fn fault(&mut self, _: Place, _: Fault) {}
-
-    #[inline]
-    fn wants(&self) -> bool {
-        false
-    }
-}
-
-/// Tells the sink it borrows, and wants what it wants.
-impl<S: Sink + ?Sized> Sink for &mut S {
-    #[inline]
-    fn fault(&mut self, at: Place, fault: Fault) {
-        (**self).fault(at, fault);
-    }
-
-    #[inline]
-    fn wants(&self) -> bool {
-        (**self).wants()
-    }
-}
-
-/// Where a [`Fault`] is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Place {
-    /// The numbered object it's in; none where a walk began in a value
-    /// written in place and hasn't reached one yet.
-    pub object: Option<ObjectId>,
-    /// Where what's at fault was written, when the reader knows.
-    pub at: Option<Span>,
-}
-
-impl Place {
-    /// A fault's place, for a sink to be tried on: walks make their own.
-    pub const fn new(object: Option<ObjectId>, at: Option<Span>) -> Place {
-        Place { object, at }
-    }
-}
+use pdf_objects::{ObjectId, Why};
 
 /// A place where a file's structure isn't what ISO 32000-2 says it shall
 /// be. What each does to a walk is on the walk's own doc. Each names its
@@ -74,7 +20,7 @@ pub enum Fault {
     /// A reference to an object the file lists but whose bytes aren't that
     /// object, or that doesn't lead to it: read as no object, as 7.3.10 has
     /// a reference to nothing, though the file meant one.
-    #[error("{} {} R doesn't read", .id.0, .id.1)]
+    #[error("{id} R doesn't read")]
     Damaged {
         /// The object.
         id: ObjectId,
@@ -97,7 +43,7 @@ pub enum Fault {
     /// A node, or an array of one, that the tree reaches by reference for
     /// a second time, by a loop or by two parents: each node has one place
     /// in a tree (7.9.6). It isn't read again, so nothing's lost.
-    #[error("the tree reaches {} {} R again", .id.0, .id.1)]
+    #[error("the tree reaches {id} R again")]
     TreeRepeated {
         /// The object it reaches again.
         id: ObjectId,
@@ -210,14 +156,14 @@ pub enum Fault {
     /// A page or a node that the tree lists again: there's one reference to
     /// each node (7.7.3.2). A page or a node listed again is walked again,
     /// numbering its pages again.
-    #[error("the page tree lists {} {} R again", .id.0, .id.1)]
+    #[error("the page tree lists {id} R again")]
     PageTreeRepeated {
         /// The object listed again.
         id: ObjectId,
     },
     /// A node listed inside itself, which by 7.7.3.2 can't be a tree. It isn't
     /// walked again, so a walk ends.
-    #[error("the page tree lists {} {} R inside itself", .id.0, .id.1)]
+    #[error("the page tree lists {id} R inside itself")]
     PageTreeCycle {
         /// The node.
         id: ObjectId,
@@ -273,21 +219,20 @@ pub enum Fault {
 /// or that it's written in place.
 fn parent_said(lister: &Option<ObjectId>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match lister {
-        Some((n, g)) => write!(f, "a /Parent isn't {n} {g} R, the node that lists it"),
+        Some(id) => write!(f, "a /Parent isn't {id} R, the node that lists it"),
         None => f.write_str("a /Parent isn't the node that lists it, which is written in place"),
     }
 }
 
 /// What [`Fault::Unchecked`] says: the object, and why it doesn't read.
 fn unchecked_said(id: &ObjectId, why: &Why, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let (n, g) = id;
     let what = match why {
         Why::Limit => "is past a cap it's read under",
         Why::Locked => "takes a password",
         Why::Source => "wasn't given by the source",
         _ => "doesn't read",
     };
-    write!(f, "{n} {g} R {what}, so what it holds isn't checked")
+    write!(f, "{id} R {what}, so what it holds isn't checked")
 }
 
 /// What [`Fault::PageTreeCount`] says: the count as written, where it's an

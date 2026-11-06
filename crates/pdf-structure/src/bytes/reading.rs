@@ -13,14 +13,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use pdf_crypt::{Encoded, Handler, Password, Refused};
 use pdf_objects::object::{Object, ObjectId, Span, Stream, Value};
 use pdf_objects::version::Version;
-use pdf_objects::{Resolve, Unreadable, Why};
+use pdf_objects::{Resolve, Streams, Unreadable, Why};
 
 use super::window::{ByPosition, Bytes, InMemory};
 use super::{Crypt, Decode, Limits, Options, Reader, Stored, Unfiltered, Whole, XrefEntry};
 use crate::crypt::{List, is_xref};
 use crate::filter;
 use crate::source::{
-    Document, Encryption, Facts, Record, Revision, Trailer, Unread, Update, Warning,
+    Document, Encryption, Facts, Record, Revision, Source, Trailer, Unread, Update, Warning,
 };
 use crate::write::as_written;
 
@@ -246,7 +246,7 @@ pub enum Error {
         span: Span,
     },
     /// Object `id`, whose data was asked for, isn't a stream.
-    #[error("{} {} R isn't a stream", .id.0, .id.1)]
+    #[error("{id} R isn't a stream")]
     NotAStream {
         /// The object.
         id: ObjectId,
@@ -284,7 +284,7 @@ pub enum Error {
     /// (another file's, or the file changed since, or a revision of it with
     /// another object there), or doesn't read here, or reads here where the
     /// document holds it unread.
-    #[error("{} {} R isn't read here as the document read it", .id.0, .id.1)]
+    #[error("{id} R isn't read here as the document read it")]
     Unlike {
         /// The object.
         id: ObjectId,
@@ -309,8 +309,8 @@ fn outside(span: &Span) -> String {
     let (start, end) = (span.start, span.end);
     match span.stream {
         None => format!("bytes {start}..{end} aren't in the file"),
-        Some((n, g)) => {
-            format!("bytes {start}..{end} aren't in object stream {n} {g} R's decoded data")
+        Some(stream) => {
+            format!("bytes {start}..{end} aren't in object stream {stream} R's decoded data")
         }
     }
 }
@@ -355,15 +355,27 @@ fn outside(span: &Span) -> String {
 /// fails ([`Error::Io`]), the call keeps nothing of what it was reading,
 /// but an object it read whole on the way, and asked again it reads again.
 ///
+/// A reading is a [`Source`], as a document is, answering of what it has
+/// read so far, and pdf-objects' [`Streams`]. Its own methods of the
+/// traits' names say more than the traits' shapes do, and a call on a
+/// `Reading` names them first: [`Reading::ids`] is an iterator,
+/// [`Reading::get`] and [`Reading::decoded_within`] give an [`Error`],
+/// [`Reading::warnings`] a `Vec`, [`Reading::metadata`] a `Result`,
+/// [`Reading::size`] and [`Reading::facts`] no `Option`, and
+/// [`Reading::decoded`] takes no limit. The traits' answers are reached
+/// through a `&dyn Source`, or by the trait's name: `Source::get(&reading,
+/// id)`, `Streams::decoded(&reading, id, limit)`.
+///
 /// ```
 /// use pdf_structure::bytes::{Options, Reading};
+/// use pdf_structure::pdf_objects::ObjectId;
 ///
 /// let file = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
 ///     xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
 ///     trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n45\n%%EOF\n";
 /// let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-/// assert_eq!(reading.ids().collect::<Vec<_>>(), [(1, 0)]);
-/// let catalog = reading.get((1, 0)).unwrap();
+/// assert_eq!(reading.ids().collect::<Vec<_>>(), [ObjectId::new(1, 0)]);
+/// let catalog = reading.get(ObjectId::new(1, 0)).unwrap();
 /// assert!(catalog.as_dict().is_some_and(|d| d.has(b"Type")));
 /// assert!(reading.warnings().is_empty());
 /// ```
@@ -513,8 +525,8 @@ impl<S: ByteSource> Reading<S> {
     pub fn ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
         (self.reader.entries.iter()).filter_map(|&(n, (generation, entry))| match entry {
             _ if n == 0 => None,
-            XrefEntry::InUse { .. } => Some((n, generation)),
-            XrefEntry::Compressed { .. } => Some((n, 0)),
+            XrefEntry::InUse { .. } => Some(ObjectId::new(n, generation)),
+            XrefEntry::Compressed { .. } => Some(ObjectId::new(n, 0)),
             _ => None,
         })
     }
@@ -589,7 +601,11 @@ impl<S: ByteSource> Reading<S> {
     /// references through `resolve` reads such an object as null: the count
     /// is how a caller learns that something may have read so, where nothing
     /// after it would say, and it may ask again. A read by [`Reading::get`]
-    /// says so to its caller, and isn't counted. In memory, always 0.
+    /// says so to its caller, and isn't counted. A stream's data as a viewer
+    /// takes it ([`Streams::decoded`]) reads the stream's object as
+    /// `try_resolve` does, counted so, and its data as [`Reading::data`]
+    /// does, not counted, both said to its caller ([`Why::Source`]). In
+    /// memory, always 0.
     pub fn failed_resolves(&self) -> u64 {
         self.failed_resolves.load(Ordering::Relaxed)
     }
@@ -684,6 +700,7 @@ impl<S: ByteSource> Reading<S> {
     /// ```
     /// use pdf_structure::RevisionEnd;
     /// use pdf_structure::bytes::{Options, Reading};
+    /// use pdf_structure::pdf_objects::ObjectId;
     ///
     /// let first = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
     ///     xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
@@ -698,7 +715,7 @@ impl<S: ByteSource> Reading<S> {
     /// assert_eq!(ends, [end(146, 147), end(285, 286)]);
     /// let before = reading.prefix(147, reading.limits()).unwrap();
     /// assert_eq!(before.revisions(), &reading.revisions()[..1]);
-    /// let catalog = before.get((1, 0)).unwrap().as_dict().unwrap();
+    /// let catalog = before.get(ObjectId::new(1, 0)).unwrap().as_dict().unwrap();
     /// assert!(!catalog.has(b"Lang"));
     /// ```
     pub fn prefix(&self, len: usize, limits: &Limits) -> Result<Reading<Prefix<&S>>, Error> {
@@ -807,7 +824,10 @@ impl<S: ByteSource> Reading<S> {
         let outside = Error::Outside { span };
         Ok(match span.stream {
             None => file.get(range)?.ok_or(outside),
-            Some((stream, 0)) => match self.reader.container(file, stream)? {
+            Some(ObjectId {
+                number: stream,
+                generation: 0,
+            }) => match self.reader.container(file, stream)? {
                 None => Err(outside),
                 Some(container) => match &container.header {
                     Err(why) => Err(Error::Unread(why.clone())),
@@ -881,12 +901,13 @@ impl<S: ByteSource> Reading<S> {
     /// ```
     /// use pdf_structure::bytes::{Error, Options, Reading};
     /// use pdf_structure::pdf_filters::Fault;
+    /// use pdf_structure::pdf_objects::ObjectId;
     ///
     /// let file = b"%PDF-1.7\n1 0 obj\n<< /Length 6 >>\nstream\nabcdef\nendstream\nendobj\n\
     ///     trailer\n<< /Size 2 >>\n%%EOF\n";
     /// let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
-    /// assert_eq!(reading.decoded_within((1, 0), 6).unwrap(), b"abcdef");
-    /// let Err(Error::Decode(cut)) = reading.decoded_within((1, 0), 5) else {
+    /// assert_eq!(reading.decoded_within(ObjectId::new(1, 0), 6).unwrap(), b"abcdef");
+    /// let Err(Error::Decode(cut)) = reading.decoded_within(ObjectId::new(1, 0), 5) else {
     ///     panic!("past its limit");
     /// };
     /// assert_eq!(cut.data, b"abcde");
@@ -979,7 +1000,7 @@ impl<S: ByteSource> Reading<S> {
         Ok(match crypt {
             Crypt::Written => Ok((stream, written)),
             Crypt::Decrypted(handler, method) => {
-                match handler.decrypt_stream(id, &written, method.as_ref()) {
+                match handler.decrypt_stream(id.into(), &written, method.as_ref()) {
                     Ok(plain) => Ok((stream, Cow::Owned(plain))),
                     Err(error) => Err(Error::Decrypt(error)),
                 }
@@ -1288,7 +1309,7 @@ impl<'o, S: ByteSource> Resolve<'o> for &'o Reading<S> {
                 Ok(got) => got,
                 Err(error) => {
                     reading.failed_resolves.fetch_add(1, Ordering::Relaxed);
-                    let message = format!("{} {} R doesn't read: {error}", id.0, id.1);
+                    let message = format!("{id} R doesn't read: {error}");
                     return Err(Unreadable::new(id, Why::Source, message));
                 }
             },
@@ -1297,5 +1318,164 @@ impl<'o, S: ByteSource> Resolve<'o> for &'o Reading<S> {
             |why| why.unreadable(id).map_or(Ok(None), Err),
             |object| Ok(Some(object)),
         )
+    }
+}
+
+/// A stream's data as a viewer takes it ([`Streams`]), by
+/// [`Reading::decoded_within`], owned: what decoded of a stream that decodes
+/// in part, as PDFium takes it, unless what stopped it is the limit, at most
+/// `limit` bytes or [`Limits::stream`](super::Limits::stream), whichever is
+/// less. Where it gives none, it says why in a resolver's words ([`Why`]):
+/// first what its resolver says of the object ([`Resolve::try_resolve`]), so
+/// that an object that doesn't read is said as a reference to it is; then,
+/// past the limit, or through more filters than the reader takes
+/// ([`Unfiltered::Filters`]), [`Why::Limit`]; in a file no password the
+/// reader was given opens, one whose security handler it can't open, a
+/// stream the encryption dictionary refers to or one that doesn't decrypt
+/// cleanly, [`Why::Locked`]; a source that didn't give the bytes,
+/// [`Why::Source`]; through a filter the reader doesn't decode, or with a
+/// `/Filter` or `/DecodeParms` it doesn't take as written ([`Unfiltered`]'s
+/// other kinds), [`Why::Filter`]; and what isn't a stream, isn't there, or
+/// whose decode fails before it gives a byte, [`Why::Damaged`]. A stream
+/// that decodes cleanly to nothing is given, empty.
+///
+/// On a `Reading` its own [`Reading::decoded`], which takes no limit, is
+/// what `decoded` names: this one is `Streams::decoded(&reading, id,
+/// limit)`, or the method through a reference or a `dyn`.
+impl<S: ByteSource> Streams for Reading<S> {
+    fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
+        match Resolve::try_resolve(&self, id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(missing(id)),
+            Err(unreadable) => return Err(unreadable),
+        }
+        lenient(id, self.decoded_within(id, limit)).map(Cow::Owned)
+    }
+}
+
+/// A file as it's read so far ([`Source`]): each answer its own method's
+/// ([`Reading::ids`], [`Reading::get`] and the rest), in the trait's shape,
+/// of what it has read when it's asked. So its warnings are those of what
+/// it has read, in the whole read's order, made for the call; an object
+/// stream's decoded data, and whether it leaves its objects' strings in
+/// the clear, are given of one it has decoded, whose header read, and of
+/// one it hasn't decoded yet, none and false; its metadata is read on the
+/// way, none where the source fails; and an object whose bytes the source
+/// didn't give is [`Unread::Source`], which asked again may read. Read
+/// whole, every answer is its document's ([`Reading::to_document`]).
+impl<S: ByteSource> Source for Reading<S> {
+    fn ids(&self) -> Vec<ObjectId> {
+        Reading::ids(self).collect()
+    }
+
+    fn get(&self, id: ObjectId) -> Result<&Object, Unread> {
+        Reading::get(self, id).map_err(|error| match error {
+            Error::Unread(unread) => unread,
+            Error::Io(error) => Unread::Source {
+                message: error.to_string(),
+            },
+            // None that `get` gives; said as it is, if one ever is.
+            error => Unread::Other(error.to_string()),
+        })
+    }
+
+    fn trailer(&self) -> &Trailer {
+        Reading::trailer(self)
+    }
+
+    fn header_version(&self) -> Option<Version> {
+        Reading::header_version(self)
+    }
+
+    fn warnings(&self) -> Cow<'_, [Warning]> {
+        Cow::Owned(Reading::warnings(self))
+    }
+
+    fn size(&self) -> Option<usize> {
+        Some(Reading::size(self))
+    }
+
+    fn metadata(&self) -> Option<Cow<'_, [u8]>> {
+        Reading::metadata(self).ok().flatten()
+    }
+
+    fn record(&self, id: ObjectId) -> Option<&Record> {
+        Reading::record(self, id)
+    }
+
+    fn held(&self, stream: ObjectId) -> Option<&[u8]> {
+        let container = self.container(stream)?;
+        container.header.is_ok().then_some(&container.data[..])
+    }
+
+    fn revisions(&self) -> &[Revision] {
+        Reading::revisions(self)
+    }
+
+    fn facts(&self) -> Option<&Facts> {
+        Some(Reading::facts(self))
+    }
+
+    fn in_the_clear(&self, stream: ObjectId) -> bool {
+        self.container(stream)
+            .is_some_and(|container| container.clear)
+    }
+
+    fn decoded_within(&self, id: ObjectId, limit: usize) -> Option<Result<Vec<u8>, Error>> {
+        Some(Reading::decoded_within(self, id, limit))
+    }
+}
+
+impl<S> Reading<S> {
+    /// Object stream `stream`, once it's decoded: none before, and none of
+    /// an id that isn't an object stream's, whose generation is 0.
+    fn container(&self, stream: ObjectId) -> Option<&super::Container> {
+        match stream.generation {
+            0 => (self.reader.containers.get(&stream.number)?.get()).map(Box::as_ref),
+            _ => None,
+        }
+    }
+}
+
+/// Why object `id`, which the file hasn't, gives no stream's data
+/// ([`Streams`]): it isn't there.
+pub(crate) fn missing(id: ObjectId) -> Unreadable {
+    Unreadable::new(id, Why::Damaged, Unread::Missing { id }.to_string())
+}
+
+/// What stream `id`'s data, `decoded` as [`Reading::decoded_within`] gives
+/// it, is as a viewer takes it ([`Streams`]): what decoded of a stream that
+/// decodes in part, unless what stopped it is the limit; or why there's
+/// none, as `Streams` for a [`Reading`] says, an object that doesn't read
+/// as [`Unread::unreadable`] says.
+pub(crate) fn lenient(
+    id: ObjectId,
+    decoded: Result<Vec<u8>, Error>,
+) -> Result<Vec<u8>, Unreadable> {
+    let unreadable =
+        |why: Why, error: &Error| Unreadable::new(id, why, format!("{id} R doesn't read: {error}"));
+    match decoded {
+        Ok(data) => Ok(data),
+        Err(Error::Decode(error)) => {
+            let limited = (error.faults.iter()).any(|(_, f)| *f == pdf_filters::Fault::Limit);
+            match (limited, error.data.is_empty()) {
+                (false, false) => Ok(error.data),
+                (true, _) => Err(unreadable(Why::Limit, &Error::Decode(error))),
+                (false, true) => Err(unreadable(Why::Damaged, &Error::Decode(error))),
+            }
+        }
+        Err(error @ Error::Io(_)) => Err(unreadable(Why::Source, &error)),
+        Err(
+            error @ (Error::Locked | Error::Encrypted | Error::Unsupported | Error::Decrypt(_)),
+        ) => Err(unreadable(Why::Locked, &error)),
+        Err(error @ Error::Filters(Unfiltered::Filters { .. })) => {
+            Err(unreadable(Why::Limit, &error))
+        }
+        Err(error @ Error::Filters(_)) => Err(unreadable(Why::Filter, &error)),
+        Err(Error::Unread(why)) => match why.unreadable(id) {
+            Some(unreadable) => Err(unreadable),
+            None => Err(missing(id)),
+        },
+        Err(error) => Err(unreadable(Why::Damaged, &error)),
     }
 }

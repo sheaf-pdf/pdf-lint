@@ -149,7 +149,7 @@ mod tests {
                 let stream = (object.as_dict())
                     .filter(|dict| dict.has(b"Length"))
                     .map(|dict| Object::stream(dict.clone()));
-                ((n, 0), stream.unwrap_or(object))
+                (ObjectId::new(n, 0), stream.unwrap_or(object))
             })
             .collect()
     }
@@ -195,10 +195,10 @@ mod tests {
         });
         let function = value("<< /FunctionType 2 /Domain [0 1] /N 1 /C0 [0 0 0] >>");
         let objects = BTreeMap::from([
-            ((1, 0), icc),
-            ((2, 0), gray),
-            ((3, 0), spaces),
-            ((4, 0), function),
+            (ObjectId::new(1, 0), icc),
+            (ObjectId::new(2, 0), gray),
+            (ObjectId::new(3, 0), spaces),
+            (ObjectId::new(4, 0), function),
         ]);
         let resources = Object::from(dict! { "ColorSpace" => Object::reference(3) });
         let resolve = |id: ObjectId| objects.get(&id);
@@ -324,7 +324,7 @@ mod tests {
             for why in [Why::Limit, Why::Locked, Why::Source] {
                 let failing = Failing { why, asked: &asked };
                 let error = Spaces::read(&failing, Some(&resources)).expect_err(text);
-                assert_eq!((error.id, error.why), ((5, 0), why), "{text}");
+                assert_eq!((error.id, error.why), (ObjectId::new(5, 0), why), "{text}");
             }
         }
     }

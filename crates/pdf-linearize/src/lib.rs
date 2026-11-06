@@ -42,18 +42,21 @@
     doc = "  linearized file, by plain functions over its public objects."
 )]
 //!
-//! Its caps are one value, [`Limits`]. With no features there's no object model
-//! here at all.
+//! Its caps are one value, [`Limits`]. With no features there's no document model
+//! here at all: an object is its [`ObjectId`](pdf_objects::ObjectId),
+//! pdf-objects' pair of a number and a generation, and the plain data a caller
+//! gives of it.
 
 pub use check::{Facts, Finding, Grade, Sink, Verdict, check};
 pub use layout::{Encoded, Layout, Piece, Stream, StreamKind, assemble};
 pub use limits::Limits;
+pub use pdf_objects;
 pub use plan::{
     Container, FileGroup, FirstPage, Graph, Group, Kind, MEMBERS, Node, Page, Part, Plan, Use,
     What, Write, group, page_uses, plan,
 };
 #[cfg(feature = "family")]
-pub use {pdf_objects, pdf_semantics, pdf_structure};
+pub use {pdf_semantics, pdf_structure};
 
 pub mod check;
 #[cfg(feature = "family")]
@@ -67,10 +70,6 @@ mod limits;
 #[cfg(feature = "lopdf")]
 pub mod lopdf;
 pub mod plan;
-
-/// An object's number and generation, as a caller's model holds them: the same
-/// tuple pdf-objects' `ObjectId` and lopdf's are.
-pub type Id = (u32, u16);
 
 /// The README's examples, run as doctests: one of them uses `family`.
 #[cfg(all(doctest, feature = "family"))]

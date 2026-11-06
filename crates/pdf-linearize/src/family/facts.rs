@@ -42,7 +42,7 @@ fn raw(value: Option<&Object>) -> Raw {
 /// The dictionary's keys, `/H` being an array whatever's in it.
 fn first_object(read: bytes::FirstObject) -> FirstObject {
     let (at, end) = (read.at as u64, read.end as u64);
-    let mut first = FirstObject::new(at, end, read.id.0, read.id.1);
+    let mut first = FirstObject::new(at, end, read.id.number, read.id.generation);
     first.stream = matches!(read.object.value(), Value::Stream(_));
     let Some(dict) = read.object.as_dict() else {
         return first;
@@ -83,7 +83,7 @@ fn section(read: &SectionRows) -> SectionFacts {
     section.subsections = read.subsections.clone();
     section.rows = read.rows.iter().map(row).collect();
     section.first_row = (read.first_row).map(|(space, first)| (space as u64, first as u64));
-    section.stream = read.stream.map(|id| id.0);
+    section.stream = read.stream.map(|id| id.number);
     let dict = read.trailer.dict();
     section.size = raw(dict.get(b"Size"));
     section.prev = raw(dict.get(b"Prev"));
@@ -103,7 +103,7 @@ fn listed_at(sections: &[SectionRows], at: u64) -> Option<ObjectId> {
     });
     rows.into_iter().find_map(|row| match row.entry {
         Some(XrefEntry::InUse { offset, .. }) if offset as u64 == at => {
-            Some((row.number, row.generation))
+            Some(ObjectId::new(row.number, row.generation))
         }
         _ => None,
     })
@@ -136,12 +136,12 @@ fn hint<S: ByteSource>(
     };
     let Some(mut end) = end_of(reading, id)? else {
         let data = HintData::NotAStream;
-        return Ok(Some(HintFacts::new(at, at, id.0, data)));
+        return Ok(Some(HintFacts::new(at, at, id.number, data)));
     };
     let primary = reading.get(id).map_err(Error::Read)?;
     let Value::Stream(stream) = primary.value() else {
         let data = HintData::NotAStream;
-        return Ok(Some(HintFacts::new(at, end, id.0, data)));
+        return Ok(Some(HintFacts::new(at, end, id.number, data)));
     };
     // An indirect /Length follows the stream, and /H's length covers it (Table
     // F.1).
@@ -166,7 +166,7 @@ fn hint<S: ByteSource>(
             overflow = end_of(reading, id)?.map(|end| (second, end));
         }
     }
-    let mut hint = HintFacts::new(at, end, id.0, data);
+    let mut hint = HintFacts::new(at, end, id.number, data);
     hint.overflow = overflow;
     hint.keys = (stream.dict.entries().iter())
         .map(|entry| (entry.key.to_vec(), raw(Some(&entry.value))))
@@ -235,7 +235,7 @@ fn page_tree<S: ByteSource>(
                 continue;
             };
             let held = INHERITED.iter().filter(|(key, _)| dict.has(key));
-            nodes.extend(held.map(|&(_, attribute)| (parent.0, attribute)));
+            nodes.extend(held.map(|&(_, attribute)| (parent.number, attribute)));
         }
     }
     (listed, nodes)
@@ -316,7 +316,7 @@ fn first_group_end<S: ByteSource>(
     let Some((at, number, generation)) = last else {
         return Ok(Vec::new());
     };
-    let end = end_of(reading, (number, generation))?;
+    let end = end_of(reading, ObjectId::new(number, generation))?;
     Ok(end
         .map(|end| Extent::new(number, at, end))
         .into_iter()
@@ -418,7 +418,7 @@ mod tests {
                 index: 3
             }
         );
-        assert_eq!(table.root, Raw::Reference((1, 0)));
+        assert_eq!(table.root, Raw::Reference(ObjectId::new(1, 0)));
         assert_eq!(table.size, Raw::Integer(3));
         assert!(table.first_row.is_some());
         assert_eq!(table.stream, None);
@@ -473,7 +473,8 @@ mod tests {
         assert_eq!(hint.end, end);
         assert_eq!(hint.data, HintData::Decoded(b"ab".to_vec()));
         assert!(
-            (hint.keys.iter()).any(|(key, raw)| key == b"Length" && *raw == Raw::Reference((3, 0)))
+            (hint.keys.iter())
+                .any(|(key, raw)| key == b"Length" && *raw == Raw::Reference(ObjectId::new(3, 0)))
         );
     }
 
@@ -516,10 +517,10 @@ mod tests {
         let source = Failing(&file, AtomicBool::new(false));
         let reading = Reading::open(&source, &Open::DEFAULT).unwrap();
         // The stream is read and kept, and only its data is asked for after.
-        reading.get((2, 0)).unwrap();
+        reading.get(ObjectId::new(2, 0)).unwrap();
         source.1.store(true, Ordering::Relaxed);
         assert!(matches!(
-            decoded(&reading, (2, 0)),
+            decoded(&reading, ObjectId::new(2, 0)),
             Err(Error::Read(bytes::Error::Io(_)))
         ));
     }
@@ -528,7 +529,13 @@ mod tests {
     fn what_doesnt_decrypt_or_isnt_a_stream_is_said_of_the_data() {
         let (file, _, _) = indirect_length();
         let reading = Reading::open(&file[..], &Open::DEFAULT).unwrap();
-        assert_eq!(decoded(&reading, (3, 0)).unwrap(), HintData::NotAStream);
-        assert_eq!(decoded(&reading, (9, 0)).unwrap(), HintData::Undecodable);
+        assert_eq!(
+            decoded(&reading, ObjectId::new(3, 0)).unwrap(),
+            HintData::NotAStream
+        );
+        assert_eq!(
+            decoded(&reading, ObjectId::new(9, 0)).unwrap(),
+            HintData::Undecodable
+        );
     }
 }

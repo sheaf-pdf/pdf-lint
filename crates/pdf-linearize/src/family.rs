@@ -507,7 +507,9 @@ fn containers(
         .map(|container| {
             let members = container.members.iter().filter_map(|&(id, at)| {
                 // Each member is one of the bodies the graph was given.
-                prepared.body(id).map(|body| (id, (at, 0), body))
+                prepared
+                    .body(id)
+                    .map(|body| (id, ObjectId::new(at, 0), body))
             });
             (container.number, members.collect())
         })
@@ -541,12 +543,13 @@ fn bodies(
             What::Object(id) => match encryptor.filter(|_| prepared.dictionary() == Some(id)) {
                 Some(encryptor) => {
                     let dictionary = Object::from(encryptor.dictionary().clone());
-                    serialize::indirect(out, (write.number, 0), &dictionary)
+                    serialize::indirect(out, ObjectId::new(write.number, 0), &dictionary)
                         .map_err(|why| Error::Write(write::Error::Serialize(why)))?;
                 }
                 None => {
                     if let Some(body) = prepared.body(id) {
-                        (parts.body(out, id, (write.number, 0), body)).map_err(Error::Write)?;
+                        (parts.body(out, id, ObjectId::new(write.number, 0), body))
+                            .map_err(Error::Write)?;
                     }
                 }
             },
@@ -605,7 +608,7 @@ fn encoded(
         None => deflate.encode(stream.data, Prediction::None, &mut data)?,
     }
     if let (StreamKind::Hint, Some(encrypting)) = (stream.what, encrypting) {
-        let id = (stream.number, 0);
+        let id = ObjectId::new(stream.number, 0);
         let dict = pdf_objects::dict! { "Filter" => "FlateDecode" };
         data = (encrypting.stream(id, &dict, &data))
             .map_err(|why| write::Error::Encrypt { id, why })?

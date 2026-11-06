@@ -97,9 +97,9 @@ impl<'w> Spliced<'w> {
                     continue;
                 }
             };
-            serialize::decimal(out, id.0.into());
+            serialize::decimal(out, id.number.into());
             out.push(b' ');
-            serialize::decimal(out, id.1.into());
+            serialize::decimal(out, id.generation.into());
             out.extend_from_slice(word);
             from = run.end;
         }
@@ -236,14 +236,14 @@ impl<'w> Copying<'w> {
             return Ok(None);
         };
         // The place the reading's sections give its number.
-        let listed = match self.from.entry(id.0) {
+        let listed = match self.from.entry(id.number) {
             Some(XrefEntry::Compressed {
                 stream: s,
                 index: i,
             }) => (s, i) == (stream, index),
             _ => false,
         };
-        if !listed || id.1 != 0 || record.at.stream != Some((stream, 0)) {
+        if !listed || id.generation != 0 || record.at.stream != Some(ObjectId::new(stream, 0)) {
             return Err(Error::Elsewhere(id));
         }
         let bytes = self.checked(id, record)?;
@@ -332,7 +332,14 @@ fn references(
 /// reads one: three tokens of their own, the first starting the run and
 /// the last ending it, `n g R` of its number and generation, white-space
 /// or comments between them.
-fn reads_as(bytes: &[u8], run: Range<usize>, (n, g): ObjectId) -> bool {
+fn reads_as(
+    bytes: &[u8],
+    run: Range<usize>,
+    ObjectId {
+        number: n,
+        generation: g,
+    }: ObjectId,
+) -> bool {
     // A token starts the run, not a byte inside one.
     if run.start > 0 && is_regular(bytes[run.start - 1]) {
         return false;

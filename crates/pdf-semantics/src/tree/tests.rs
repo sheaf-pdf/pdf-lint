@@ -19,7 +19,7 @@ use crate::follow;
 #[derive(Default)]
 struct Kept(Vec<(Place, Fault)>);
 
-impl Sink for Kept {
+impl Sink<Fault> for Kept {
     fn fault(&mut self, at: Place, fault: Fault) {
         self.0.push((at, fault));
     }
@@ -34,7 +34,7 @@ impl Kept {
 /// A sink that wants no faults, and fails if it's told one.
 struct Unwanted;
 
-impl Sink for Unwanted {
+impl Sink<Fault> for Unwanted {
     fn fault(&mut self, _: Place, fault: Fault) {
         panic!("{fault} told to a sink that wants none");
     }
@@ -51,7 +51,7 @@ fn parsed(text: &str) -> Object {
 /// Objects 1 and on, written as `objects` have them.
 fn file(objects: &[&str]) -> BTreeMap<ObjectId, Object> {
     let numbered = (1..).zip(objects);
-    (numbered.map(|(n, text)| ((n, 0), parsed(text)))).collect()
+    (numbered.map(|(n, text)| (ObjectId::new(n, 0), parsed(text)))).collect()
 }
 
 /// A resolver for `objects`, which says what `says` has of an object too.
@@ -65,7 +65,10 @@ impl<'o> Saying<'o> {
     fn new(objects: &'o BTreeMap<ObjectId, Object>, says: &[(u32, Why)]) -> Saying<'o> {
         Saying {
             objects,
-            says: says.iter().map(|&(n, why)| ((n, 0), why)).collect(),
+            says: says
+                .iter()
+                .map(|&(n, why)| (ObjectId::new(n, 0), why))
+                .collect(),
             asked: Cell::new(0),
         }
     }
@@ -175,7 +178,7 @@ fn reads_a_number_tree_with_kids() {
         let entries = (walk.by_ref())
             .map(|entry| {
                 let (key, value) = entry.unwrap();
-                let id = value.as_reference().unwrap_or((0, 0));
+                let id = value.as_reference().unwrap_or(ObjectId::new(0, 0));
                 (key, id, value.as_dict().is_some())
             })
             .collect();
@@ -183,7 +186,10 @@ fn reads_a_number_tree_with_kids() {
         entries
     }
 
-    let expected = [(0, (0, 0), true), (2, (5, 0), false)];
+    let expected = [
+        (0, ObjectId::new(0, 0), true),
+        (2, ObjectId::new(5, 0), false),
+    ];
     let document = bytes::read(&bytes);
     assert_eq!(entries(&document, document.trailer.dict()), expected);
     let reading = Reading::open(&bytes[..], &Options::DEFAULT).unwrap();
@@ -396,7 +402,12 @@ fn a_clean_tree_says_no_fault() {
 
 #[test]
 fn a_loop_ends_said_and_each_node_is_read_once() {
-    let repeated = |n| Fault::TreeRepeated { id: (n, 0) };
+    let repeated = |n| Fault::TreeRepeated {
+        id: ObjectId {
+            number: n,
+            generation: 0,
+        },
+    };
     // A kid its parent's parent, and one its own parent.
     let (keys, whole, faults) = read(&[
         "<< /Kids [2 0 R] >>",
@@ -841,9 +852,9 @@ fn a_fault_says_where_it_is() {
     let told = walk.into_sink().0;
     let (no_limits, key) = (&told[0], &told[1]);
     assert_eq!(no_limits.1, Fault::TreeNoLimits);
-    assert_eq!(no_limits.0.object, Some((2, 0)));
+    assert_eq!(no_limits.0.object, Some(ObjectId::new(2, 0)));
     assert_eq!(key.1, Fault::TreeKeyKind);
-    assert_eq!(key.0.object, Some((2, 0)));
+    assert_eq!(key.0.object, Some(ObjectId::new(2, 0)));
     let key_at = key.0.at.unwrap();
     assert_eq!(&text[key_at.start..key_at.end], "1");
     let node_at = no_limits.0.at.unwrap();
@@ -855,7 +866,7 @@ fn a_fault_says_where_it_is() {
     let resolve = |id: ObjectId| objects.get(&id);
     let mut walk = names(resolve, &root, &Limits::DEFAULT, Kept::default());
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
-    assert_eq!(walk.into_sink().0[0].0.object, Some((2, 0)));
+    assert_eq!(walk.into_sink().0[0].0.object, Some(ObjectId::new(2, 0)));
 
     // A kid's in the array that holds it, an array by reference too, and so
     // is what's said of the kid after it.
@@ -874,9 +885,12 @@ fn a_fault_says_where_it_is() {
     };
     assert_eq!(
         of(Fault::TreeNodeNotDictionary).collect::<Vec<_>>(),
-        [Some((2, 0)); 2]
+        [Some(ObjectId::new(2, 0)); 2]
     );
-    assert_eq!(of(Fault::TreeKidDirect).collect::<Vec<_>>(), [Some((2, 0))]);
+    assert_eq!(
+        of(Fault::TreeKidDirect).collect::<Vec<_>>(),
+        [Some(ObjectId::new(2, 0))]
+    );
 
     let objects = file(&["<< /Kids [<< /Limits [(a) (a)] /Kids [] >>] >>"]);
     let resolve = |id: ObjectId| objects.get(&id);
@@ -884,7 +898,7 @@ fn a_fault_says_where_it_is() {
     walk.by_ref().for_each(|entry| assert!(entry.is_ok()));
     let told = walk.into_sink().0;
     assert_eq!(told[0], (told[0].0, Fault::TreeKidDirect));
-    assert_eq!(told[0].0.object, Some((1, 0)));
+    assert_eq!(told[0].0.object, Some(ObjectId::new(1, 0)));
 
     let in_place = parsed("<< >>");
     let mut walk = names(resolve, &in_place, &Limits::DEFAULT, Kept::default());
@@ -906,13 +920,16 @@ fn a_fault_says_where_it_is() {
     };
     assert_eq!(
         of(|fault| *fault == Fault::TreeNodeNotDictionary),
-        [Some((2, 0)), Some((3, 0))]
+        [Some(ObjectId::new(2, 0)), Some(ObjectId::new(3, 0))]
     );
     assert_eq!(
         of(|fault| matches!(fault, Fault::TreeNotArray { .. })),
-        [Some((4, 0))]
+        [Some(ObjectId::new(4, 0))]
     );
-    assert_eq!(of(|fault| *fault == Fault::TreeBothEntries), [Some((1, 0))]);
+    assert_eq!(
+        of(|fault| *fault == Fault::TreeBothEntries),
+        [Some(ObjectId::new(1, 0))]
+    );
 }
 
 #[test]
@@ -957,7 +974,7 @@ fn what_s_read_is_the_same_whatever_the_sink() {
             borrowed.by_ref().map(Result::unwrap).collect::<Vec<_>>(),
             with_kept
         );
-        let mut sink: &mut dyn Sink = &mut sink;
+        let mut sink: &mut dyn Sink<Fault> = &mut sink;
         let mut through = names(resolve, &root, &limits, &mut sink);
         assert_eq!(
             through.by_ref().map(Result::unwrap).collect::<Vec<_>>(),
@@ -994,7 +1011,10 @@ fn limits_are_read_only_for_a_sink_that_wants_them() {
         assert!(walk.whole(), "{why:?}");
         let said = match why {
             Why::Damaged => Fault::TreeBadLimits,
-            why => Fault::Unchecked { id: (3, 0), why },
+            why => Fault::Unchecked {
+                id: ObjectId::new(3, 0),
+                why,
+            },
         };
         assert_eq!(walk.into_sink().faults(), [said], "{why:?}");
     }
@@ -1075,7 +1095,9 @@ fn what_doesn_t_read_is_said_or_ends_the_walk() {
         assert!(!walk.whole(), "{what}");
         let faults = walk.into_sink().faults();
         assert!(
-            faults.contains(&Fault::Damaged { id: (broken, 0) }),
+            faults.contains(&Fault::Damaged {
+                id: ObjectId::new(broken, 0)
+            }),
             "{what}: {faults:?}"
         );
 
@@ -1085,7 +1107,11 @@ fn what_doesn_t_read_is_said_or_ends_the_walk() {
             assert_eq!(walk.next().unwrap().unwrap().0, b"a", "{what}, {why:?}");
             assert!(walk.whole(), "so far, {what}, {why:?}");
             let failed = walk.next().unwrap().unwrap_err();
-            assert_eq!((failed.id, failed.why), ((broken, 0), why), "{what}");
+            assert_eq!(
+                (failed.id, failed.why),
+                (ObjectId::new(broken, 0), why),
+                "{what}"
+            );
             assert!(!walk.whole(), "{what}, {why:?}");
             assert!(walk.next().is_none(), "{what}, {why:?}");
             assert!(walk.next().is_none(), "{what}, {why:?}");
@@ -1108,7 +1134,12 @@ fn what_doesn_t_read_is_said_or_ends_the_walk() {
     let mut walk = numbers(&saying, &root, &Limits::DEFAULT, Kept::default());
     assert!(walk.next().is_none());
     assert!(!walk.whole());
-    assert_eq!(walk.into_sink().faults(), [Fault::Damaged { id: (1, 0) }]);
+    assert_eq!(
+        walk.into_sink().faults(),
+        [Fault::Damaged {
+            id: ObjectId::new(1, 0)
+        }]
+    );
     let saying = Saying::new(&objects, &[(1, Why::Locked)]);
     let mut walk = numbers(&saying, &root, &Limits::DEFAULT, ());
     assert_eq!(walk.next().unwrap().unwrap_err().why, Why::Locked);
@@ -1138,7 +1169,10 @@ fn limits_that_don_t_read_past_a_cap_or_a_password_aren_t_checked() {
             let keys: Vec<&[u8]> = (walk.by_ref()).map(|entry| entry.unwrap().0).collect();
             assert_eq!(keys, [b"a"], "{why:?}");
             assert!(walk.whole(), "{why:?}");
-            let unchecked = Fault::Unchecked { id: (3, 0), why };
+            let unchecked = Fault::Unchecked {
+                id: ObjectId::new(3, 0),
+                why,
+            };
             // Not held to the /Limits it couldn't read, so not outside them.
             assert_eq!(walk.into_sink().faults(), [unchecked], "{why:?}");
             let quiet = names(&saying, &root, &Limits::DEFAULT, ());
@@ -1152,7 +1186,7 @@ fn limits_that_don_t_read_past_a_cap_or_a_password_aren_t_checked() {
         assert_eq!(walk.into_sink().faults(), [Fault::TreeBadLimits]);
     }
     let said = Fault::Unchecked {
-        id: (3, 0),
+        id: ObjectId::new(3, 0),
         why: Why::Locked,
     };
     assert_eq!(
@@ -1168,9 +1202,9 @@ fn a_chain_of_references_too_long_ends_the_walk() {
     let chain = |n: u32| -> BTreeMap<ObjectId, Object> {
         let mut objects = file(&["<< /Names [2 0 R 0] >>"]);
         for at in 2..n + 1 {
-            objects.insert((at, 0), Object::reference(at + 1));
+            objects.insert(ObjectId::new(at, 0), Object::reference(at + 1));
         }
-        objects.insert((n + 1, 0), Object::bytes("a"));
+        objects.insert(ObjectId::new(n + 1, 0), Object::bytes("a"));
         objects
     };
     let root = Object::reference(1);
@@ -1187,7 +1221,7 @@ fn a_chain_of_references_too_long_ends_the_walk() {
     // Kids likewise, where they don't loop.
     let mut long = file(&["<< /Kids [2 0 R] >>"]);
     for at in 2..34 {
-        long.insert((at, 0), Object::reference(at + 1));
+        long.insert(ObjectId::new(at, 0), Object::reference(at + 1));
     }
     let resolve = |id: ObjectId| long.get(&id);
     let mut walk = names(resolve, &root, &Limits::DEFAULT, ());
@@ -1197,7 +1231,7 @@ fn a_chain_of_references_too_long_ends_the_walk() {
         failed.to_string(),
         format!(
             "{} 0 R is past 32 references, or in a loop of them",
-            failed.id.0
+            failed.id.number
         )
     );
 }
@@ -1224,11 +1258,9 @@ fn over_a_reading_the_walk_knows_why() {
     let keys: Vec<i64> = (walk.by_ref()).map(|entry| entry.unwrap().0).collect();
     assert_eq!(keys, [0]);
     assert!(!walk.whole());
-    assert!(
-        walk.into_sink()
-            .faults()
-            .contains(&Fault::Damaged { id: (4, 0) })
-    );
+    assert!(walk.into_sink().faults().contains(&Fault::Damaged {
+        id: ObjectId::new(4, 0)
+    }));
 
     let source = ByPosition::new(&bytes);
     let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
@@ -1238,7 +1270,7 @@ fn over_a_reading_the_walk_knows_why() {
     source.failing.store(true, Ordering::Relaxed);
     let mut walk = numbers(objects, root, &Limits::DEFAULT, Kept::default());
     let failed = walk.next().unwrap().unwrap_err();
-    assert_eq!((failed.id, failed.why), ((2, 0), Why::Source));
+    assert_eq!((failed.id, failed.why), (ObjectId::new(2, 0), Why::Source));
     assert!(!walk.whole());
     assert!(walk.next().is_none());
 }
@@ -1276,11 +1308,16 @@ fn a_document_gives_what_its_reading_gives() {
     let reading = Reading::open(&bytes[..], &Options::DEFAULT).unwrap();
     let read = walked(&reading, reading.trailer().dict());
     assert_eq!(read.0.iter().map(|e| e.0).collect::<Vec<_>>(), [b"a", b"b"]);
-    assert_eq!(read.0[0].1.as_reference(), Some((5, 0)));
+    assert_eq!(read.0[0].1.as_reference(), Some(ObjectId::new(5, 0)));
     assert!(!read.1);
     assert_eq!(
         read.2,
-        [Fault::TreeOddKey, Fault::TreeRepeated { id: (3, 0) }]
+        [
+            Fault::TreeOddKey,
+            Fault::TreeRepeated {
+                id: ObjectId::new(3, 0)
+            }
+        ]
     );
 
     let document: Document = bytes::read(&bytes);
@@ -1315,7 +1352,10 @@ fn follow_goes_through_references_to_a_value() {
 
     let saying = Saying::new(&objects, &[(1, Why::Locked)]);
     let reached = follow(&saying, &two).unwrap_err();
-    assert_eq!((reached.id, reached.why), ((1, 0), Why::Locked));
+    assert_eq!(
+        (reached.id, reached.why),
+        (ObjectId::new(1, 0), Why::Locked)
+    );
 }
 
 #[test]

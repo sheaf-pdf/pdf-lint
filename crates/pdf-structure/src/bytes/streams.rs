@@ -221,7 +221,10 @@ fn each_kind_of_encryption_hands_out_each_streams_data_decrypted() {
             );
             let source = Counted::new(&file, 1);
             let by_position = fuzz::open(&source, &[password], &Options::DEFAULT, false).unwrap();
-            for (id, plain, decoded) in [((4, 0), CONTENT, CONTENT), ((5, 0), &compressed, TEXT)] {
+            for (id, plain, decoded) in [
+                (ObjectId::new(4, 0), CONTENT, CONTENT),
+                (ObjectId::new(5, 0), &compressed, TEXT),
+            ] {
                 let what = format!("{kind:?}, {id:?}");
                 let data = reading.data(id).unwrap();
                 assert_eq!(data, plain, "{what}");
@@ -261,16 +264,16 @@ fn a_streams_own_crypt_filter_says_how_its_data_is_handed_out() {
     for (filter, data) in cases {
         let file = encrypted_objects(filter, data);
         let reading = open(&file, &[Password("user")], &Options::DEFAULT);
-        assert_eq!(reading.data((4, 0)).unwrap(), zlib, "{filter}");
-        let decoded = reading.decoded((4, 0)).unwrap();
+        assert_eq!(reading.data(ObjectId::new(4, 0)).unwrap(), zlib, "{filter}");
+        let decoded = reading.decoded(ObjectId::new(4, 0)).unwrap();
         assert_eq!(decoded, objects, "{filter}");
         let doc = reading.into_document().unwrap();
-        assert_eq!(doc.decoded[&(4, 0)], decoded, "{filter}");
+        assert_eq!(doc.decoded[&ObjectId::new(4, 0)], decoded, "{filter}");
     }
     let undefined = " /Filter [/Crypt /FlateDecode] /DecodeParms [<< /Name /Undefined >> null]";
     let file = encrypted_objects(undefined, None);
     let reading = open(&file, &[Password("user")], &Options::DEFAULT);
-    let error = reading.data((4, 0)).unwrap_err();
+    let error = reading.data(ObjectId::new(4, 0)).unwrap_err();
     assert_eq!(
         error.to_string(),
         "its data doesn't decrypt cleanly: its crypt filter's method or name, /Undefined, isn't one"
@@ -287,24 +290,37 @@ fn a_cross_reference_streams_data_is_handed_out_as_written() {
     let file = encrypted_objects(" /Filter /FlateDecode", None);
     for passwords in [&[Password("user")][..], &[]] {
         let reading = open(&file, passwords, &Options::DEFAULT);
-        let data = reading.data((5, 0)).unwrap();
-        let at = reading.record((5, 0)).unwrap().data.unwrap().at;
+        let data = reading.data(ObjectId::new(5, 0)).unwrap();
+        let at = reading
+            .record(ObjectId::new(5, 0))
+            .unwrap()
+            .data
+            .unwrap()
+            .at;
         assert!(matches!(data, Cow::Borrowed(_)), "{passwords:?}");
         assert_eq!(data, &file[at.start..at.end], "{passwords:?}");
-        assert_eq!(reading.decoded((5, 0)).unwrap(), &file[at.start..at.end]);
-        assert!(matches!(reading.data((4, 0)), Err(Error::Locked)) == passwords.is_empty());
+        assert_eq!(
+            reading.decoded(ObjectId::new(5, 0)).unwrap(),
+            &file[at.start..at.end]
+        );
+        assert!(
+            matches!(reading.data(ObjectId::new(4, 0)), Err(Error::Locked)) == passwords.is_empty()
+        );
     }
     // Compressed, decoded to its rows.
     let (file, decoded) = super::tests::streams(false, true, b"", None);
     let reading = open(&file, &[], &Options::DEFAULT);
-    assert_eq!(reading.decoded((5, 0)).unwrap(), decoded[&(5, 0)]);
+    assert_eq!(
+        reading.decoded(ObjectId::new(5, 0)).unwrap(),
+        decoded[&ObjectId::new(5, 0)]
+    );
     // Its /Filter a reference, which isn't followed.
     let at = find(&file, b"/Type /XRef").unwrap();
     let at = at + find(&file[at..], b"/Filter /FlateDecode").unwrap();
     let mut file = file;
     file[at..at + 20].copy_from_slice(b"/Filter 1 0 R       ");
     let reading = open(&file, &[], &Options::DEFAULT);
-    let decoded = reading.decoded((5, 0));
+    let decoded = reading.decoded(ObjectId::new(5, 0));
     assert!(
         matches!(decoded, Err(Error::Filters(Unfiltered::Reference))),
         "{decoded:?}"
@@ -335,7 +351,7 @@ fn metadata_not_encrypted_is_handed_out_as_written_whether_the_file_opens_or_not
             for passwords in [&[][..], &[Password("user")][..]] {
                 let what = format!("{kind:?}, {encrypt_metadata}, {passwords:?}");
                 let reading = open(&file, passwords, &Options::DEFAULT);
-                let data = reading.data((3, 0));
+                let data = reading.data(ObjectId::new(3, 0));
                 match (encrypt_metadata, passwords.is_empty()) {
                     (false, _) => {
                         let data = data.unwrap();
@@ -391,12 +407,12 @@ fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it(
         for password in [Password("user"), Password("owner")] {
             let reading = open(&file, &[password], &Options::DEFAULT);
             assert!(matches!(reading.encryption(), Encryption::Opened { .. }));
-            let data = reading.data((3, 0)).unwrap();
+            let data = reading.data(ObjectId::new(3, 0)).unwrap();
             assert!(matches!(data, Cow::Owned(_)), "{what}: decrypted");
             assert_eq!(data, XMP, "{what}");
-            assert_eq!(reading.decoded((3, 0)).unwrap(), XMP, "{what}");
+            assert_eq!(reading.decoded(ObjectId::new(3, 0)).unwrap(), XMP, "{what}");
             assert_eq!(
-                reading.data((6, 0)).unwrap(),
+                reading.data(ObjectId::new(6, 0)).unwrap(),
                 CONTENT,
                 "{what}: as /StmF says"
             );
@@ -409,10 +425,10 @@ fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it(
         }
         let reading = open(&file, &[], &Options::DEFAULT);
         assert_eq!(*reading.encryption(), Encryption::Locked, "{what}");
-        let error = reading.data((3, 0)).unwrap_err();
+        let error = reading.data(ObjectId::new(3, 0)).unwrap_err();
         assert!(matches!(error, Error::Locked), "{what}: {error:?}");
         assert!(
-            matches!(reading.decoded((3, 0)), Err(Error::Locked)),
+            matches!(reading.decoded(ObjectId::new(3, 0)), Err(Error::Locked)),
             "{what}"
         );
         assert_eq!(reading.metadata().unwrap(), None, "{what}");
@@ -421,7 +437,7 @@ fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it(
         let reading = open(&other, &[Password("user")], &Options::DEFAULT);
         assert!(matches!(reading.encryption(), Encryption::Unsupported(_)));
         assert!(
-            matches!(reading.data((3, 0)), Err(Error::Unsupported)),
+            matches!(reading.data(ObjectId::new(3, 0)), Err(Error::Unsupported)),
             "{what}"
         );
     }
@@ -440,9 +456,15 @@ fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it(
     );
     let reading = open(&file, &[], &Options::DEFAULT);
     assert_eq!(*reading.encryption(), Encryption::Plain);
-    assert!(matches!(reading.data((3, 0)), Err(Error::Locked)));
-    assert!(matches!(reading.decoded((3, 0)), Err(Error::Locked)));
-    assert_eq!(reading.data((6, 0)).unwrap(), CONTENT);
+    assert!(matches!(
+        reading.data(ObjectId::new(3, 0)),
+        Err(Error::Locked)
+    ));
+    assert!(matches!(
+        reading.decoded(ObjectId::new(3, 0)),
+        Err(Error::Locked)
+    ));
+    assert_eq!(reading.data(ObjectId::new(6, 0)).unwrap(), CONTENT);
     // Its own crypt filter /Identity.
     let file = attached(
         &Attached {
@@ -453,10 +475,14 @@ fn metadata_not_encrypted_whose_own_crypt_filter_encrypts_it_is_decrypted_by_it(
     );
     for passwords in [&[][..], &[Password("user")][..]] {
         let reading = open(&file, passwords, &Options::DEFAULT);
-        let data = reading.data((3, 0)).unwrap();
+        let data = reading.data(ObjectId::new(3, 0)).unwrap();
         assert!(matches!(data, Cow::Borrowed(_)), "{passwords:?}");
         assert_eq!(data, XMP, "{passwords:?}");
-        assert_eq!(reading.decoded((3, 0)).unwrap(), XMP, "{passwords:?}");
+        assert_eq!(
+            reading.decoded(ObjectId::new(3, 0)).unwrap(),
+            XMP,
+            "{passwords:?}"
+        );
     }
 }
 
@@ -470,7 +496,7 @@ fn a_locked_files_streams_are_refused() {
         for passwords in [&[][..], &[Password("wrong")][..]] {
             let reading = open(&file, passwords, &Options::DEFAULT);
             assert_eq!(*reading.encryption(), Encryption::Locked, "{kind:?}");
-            for id in [(4, 0), (5, 0)] {
+            for id in [ObjectId::new(4, 0), ObjectId::new(5, 0)] {
                 assert!(matches!(reading.data(id), Err(Error::Locked)), "{kind:?}");
                 assert!(
                     matches!(reading.decoded(id), Err(Error::Locked)),
@@ -483,11 +509,11 @@ fn a_locked_files_streams_are_refused() {
     let reading = open(&file, &[], &Options::DEFAULT);
     let said = |id| reading.data(id).unwrap_err().to_string();
     assert_eq!(
-        said((4, 0)),
+        said(ObjectId::new(4, 0)),
         "the file is encrypted, and no password the reader was given opens it"
     );
-    assert_eq!(said((1, 0)), "1 0 R isn't a stream");
-    assert_eq!(said((9, 0)), "9 0 R isn't in the file");
+    assert_eq!(said(ObjectId::new(1, 0)), "1 0 R isn't a stream");
+    assert_eq!(said(ObjectId::new(9, 0)), "9 0 R isn't in the file");
 }
 
 /// In a file no password opens whose strings and streams aren't
@@ -501,21 +527,27 @@ fn a_plain_files_streams_are_handed_out_as_written_but_one_its_own_crypt_filter_
     let file = attachments_only();
     let reading = open(&file, &[], &Options::DEFAULT);
     assert_eq!(*reading.encryption(), Encryption::Plain);
-    let data = reading.data((4, 0)).unwrap();
+    let data = reading.data(ObjectId::new(4, 0)).unwrap();
     assert!(matches!(data, Cow::Borrowed(_)));
     assert_eq!(data, objects);
-    assert_eq!(reading.decoded((4, 0)).unwrap(), objects);
+    assert_eq!(reading.decoded(ObjectId::new(4, 0)).unwrap(), objects);
     let crypt = " /Filter /Crypt /DecodeParms << /Name /StdCF >>";
     let file = only_attachments_encrypted(&filtered(false, crypt, &objects));
     let reading = open(&file, &[], &Options::DEFAULT);
     assert_eq!(*reading.encryption(), Encryption::Plain);
-    assert!(matches!(reading.data((4, 0)), Err(Error::Locked)));
-    assert!(matches!(reading.decoded((4, 0)), Err(Error::Locked)));
+    assert!(matches!(
+        reading.data(ObjectId::new(4, 0)),
+        Err(Error::Locked)
+    ));
+    assert!(matches!(
+        reading.decoded(ObjectId::new(4, 0)),
+        Err(Error::Locked)
+    ));
     let identity = " /Filter /Crypt /DecodeParms << /Name /Identity >>";
     let file = only_attachments_encrypted(&filtered(false, identity, &objects));
     let reading = open(&file, &[], &Options::DEFAULT);
-    assert_eq!(reading.data((4, 0)).unwrap(), objects);
-    assert_eq!(reading.decoded((4, 0)).unwrap(), objects);
+    assert_eq!(reading.data(ObjectId::new(4, 0)).unwrap(), objects);
+    assert_eq!(reading.decoded(ObjectId::new(4, 0)).unwrap(), objects);
 }
 
 /// An embedded file's data, in a file whose encryption dictionary has an
@@ -538,12 +570,16 @@ fn an_embedded_files_data_under_eff_is_decrypted_by_it() {
         for password in [Password("user"), Password("owner")] {
             let reading = open(file, &[password], &Options::DEFAULT);
             assert!(matches!(reading.encryption(), Encryption::Opened { .. }));
-            let data = reading.data((4, 0)).unwrap();
+            let data = reading.data(ObjectId::new(4, 0)).unwrap();
             assert!(matches!(data, Cow::Owned(_)), "{what}: decrypted");
             assert_eq!(data, ATTACHED, "{what}");
-            assert_eq!(reading.decoded((4, 0)).unwrap(), ATTACHED, "{what}");
             assert_eq!(
-                reading.data((6, 0)).unwrap(),
+                reading.decoded(ObjectId::new(4, 0)).unwrap(),
+                ATTACHED,
+                "{what}"
+            );
+            assert_eq!(
+                reading.data(ObjectId::new(6, 0)).unwrap(),
                 CONTENT,
                 "{what}: as /StmF says"
             );
@@ -616,9 +652,12 @@ fn an_embedded_files_data_under_eff_is_decrypted_by_it() {
         decrypted(&file, what);
         let reading = open(&file, &[], &Options::DEFAULT);
         assert_eq!(*reading.encryption(), Encryption::Locked, "{what}");
-        assert!(matches!(reading.data((4, 0)), Err(Error::Locked)), "{what}");
         assert!(
-            matches!(reading.decoded((4, 0)), Err(Error::Locked)),
+            matches!(reading.data(ObjectId::new(4, 0)), Err(Error::Locked)),
+            "{what}"
+        );
+        assert!(
+            matches!(reading.decoded(ObjectId::new(4, 0)), Err(Error::Locked)),
             "{what}"
         );
     }
@@ -643,15 +682,18 @@ fn an_embedded_files_data_under_eff_is_decrypted_by_it() {
         };
         let file = written(&how);
         let reading = open(&file, &[Password("user")], &Options::DEFAULT);
-        let error = reading.data((4, 0)).unwrap_err();
+        let error = reading.data(ObjectId::new(4, 0)).unwrap_err();
         assert!(matches!(error, Error::Encrypted), "{eff}: {error:?}");
         assert!(
-            matches!(reading.decoded((4, 0)), Err(Error::Encrypted)),
+            matches!(reading.decoded(ObjectId::new(4, 0)), Err(Error::Encrypted)),
             "{eff}"
         );
-        assert_eq!(reading.data((6, 0)).unwrap(), CONTENT, "{eff}");
+        assert_eq!(reading.data(ObjectId::new(6, 0)).unwrap(), CONTENT, "{eff}");
         let reading = open(&file, &[], &Options::DEFAULT);
-        assert!(matches!(reading.data((4, 0)), Err(Error::Locked)), "{eff}");
+        assert!(
+            matches!(reading.data(ObjectId::new(4, 0)), Err(Error::Locked)),
+            "{eff}"
+        );
     }
     // In a file whose strings and streams aren't encrypted, refused, its
     // password needed, but where /EFF is /Identity, as written.
@@ -659,9 +701,12 @@ fn an_embedded_files_data_under_eff_is_decrypted_by_it() {
         only_attachments_encrypted(&a_stream("/Type /EmbeddedFile", b"0123456789abcdef", &[]));
     let reading = open(&file, &[], &Options::DEFAULT);
     assert_eq!(*reading.encryption(), Encryption::Plain);
-    let error = reading.data((2, 0)).unwrap_err();
+    let error = reading.data(ObjectId::new(2, 0)).unwrap_err();
     assert!(matches!(error, Error::Locked), "{error:?}");
-    assert!(matches!(reading.decoded((2, 0)), Err(Error::Locked)));
+    assert!(matches!(
+        reading.decoded(ObjectId::new(2, 0)),
+        Err(Error::Locked)
+    ));
     let plain = |eff, by| Attached {
         streams: "Identity",
         strings: "Identity",
@@ -672,12 +717,15 @@ fn an_embedded_files_data_under_eff_is_decrypted_by_it() {
         let file = written(&plain(eff, by));
         let reading = open(&file, &[], &Options::DEFAULT);
         assert_eq!(*reading.encryption(), Encryption::Plain, "{eff}");
-        assert!(matches!(reading.data((4, 0)), Err(Error::Locked)), "{eff}");
-        assert_eq!(reading.data((6, 0)).unwrap(), CONTENT, "{eff}");
+        assert!(
+            matches!(reading.data(ObjectId::new(4, 0)), Err(Error::Locked)),
+            "{eff}"
+        );
+        assert_eq!(reading.data(ObjectId::new(6, 0)).unwrap(), CONTENT, "{eff}");
     }
     let file = written(&plain("/EFF /Identity", "Identity"));
     let reading = open(&file, &[], &Options::DEFAULT);
-    let data = reading.data((4, 0)).unwrap();
+    let data = reading.data(ObjectId::new(4, 0)).unwrap();
     assert!(matches!(data, Cow::Borrowed(_)));
     assert_eq!(data, ATTACHED);
 }
@@ -692,11 +740,14 @@ fn a_stream_the_encryption_dictionary_refers_to_is_refused() {
     let file = encryption_updated(&file, "/Length 256", "/Length 8 0 R", &[(8, stream)]);
     let reading = open(&file, &[], &Options::DEFAULT);
     assert!(matches!(reading.encryption(), Encryption::Opened { .. }));
-    let error = reading.data((8, 0)).unwrap_err();
+    let error = reading.data(ObjectId::new(8, 0)).unwrap_err();
     assert!(matches!(error, Error::Encrypted), "{error:?}");
-    assert!(matches!(reading.decoded((8, 0)), Err(Error::Encrypted)));
-    assert_eq!(reading.data((4, 0)).unwrap(), CONTENT);
-    let said = reading.data((6, 0)).unwrap_err().to_string();
+    assert!(matches!(
+        reading.decoded(ObjectId::new(8, 0)),
+        Err(Error::Encrypted)
+    ));
+    assert_eq!(reading.data(ObjectId::new(4, 0)).unwrap(), CONTENT);
+    let said = reading.data(ObjectId::new(6, 0)).unwrap_err().to_string();
     assert_eq!(said, "6 0 R isn't a stream");
 }
 
@@ -710,13 +761,16 @@ fn an_unsupported_handlers_streams_are_refused() {
     let file = [&file[..at], b"/Standarx", &file[at + 9..]].concat();
     let reading = open(&file, &[], &Options::DEFAULT);
     assert!(matches!(reading.encryption(), Encryption::Unsupported(_)));
-    let error = reading.data((4, 0)).unwrap_err();
+    let error = reading.data(ObjectId::new(4, 0)).unwrap_err();
     assert!(matches!(error, Error::Unsupported));
     assert_eq!(
         error.to_string(),
         "the file is encrypted by a security handler the reader can't open"
     );
-    assert!(matches!(reading.decoded((5, 0)), Err(Error::Unsupported)));
+    assert!(matches!(
+        reading.decoded(ObjectId::new(5, 0)),
+        Err(Error::Unsupported)
+    ));
 }
 
 /// Data that doesn't decrypt cleanly is an error holding what decrypted:
@@ -739,14 +793,17 @@ fn a_streams_data_that_doesnt_decrypt_cleanly_is_an_error_holding_what_did() {
     for (junk, decrypted, fault) in cases {
         let file = encrypted_objects(" /Filter /FlateDecode", Some(junk));
         let reading = open(&file, &[Password("user")], &Options::DEFAULT);
-        let error = reading.data((4, 0)).unwrap_err();
+        let error = reading.data(ObjectId::new(4, 0)).unwrap_err();
         let said = format!("its data doesn't decrypt cleanly: {fault}");
         assert_eq!(error.to_string(), said);
         let Error::Decrypt(error) = error else {
             panic!("{error:?}")
         };
         assert_eq!(error.data.as_ref().map(Vec::len), decrypted);
-        assert!(matches!(reading.decoded((4, 0)), Err(Error::Decrypt(_))));
+        assert!(matches!(
+            reading.decoded(ObjectId::new(4, 0)),
+            Err(Error::Decrypt(_))
+        ));
     }
 }
 
@@ -782,14 +839,26 @@ fn a_streams_data_decodes_through_each_filter() {
     for (entries, data) in cases {
         let file = a_stream(entries, &data, &extra);
         let reading = open(&file, &[], &Options::DEFAULT);
-        let written = reading.data((2, 0)).unwrap();
+        let written = reading.data(ObjectId::new(2, 0)).unwrap();
         assert!(matches!(written, Cow::Borrowed(_)), "{entries}");
         assert_eq!(written, data, "{entries}");
-        assert_eq!(reading.decoded((2, 0)).unwrap(), TEXT, "{entries}");
+        assert_eq!(
+            reading.decoded(ObjectId::new(2, 0)).unwrap(),
+            TEXT,
+            "{entries}"
+        );
         let source = Counted::new(&file, 1);
         let by_position = fuzz::open(&source, &[], &Options::DEFAULT, false).unwrap();
-        assert_eq!(by_position.data((2, 0)).unwrap(), data, "{entries}");
-        assert_eq!(by_position.decoded((2, 0)).unwrap(), TEXT, "{entries}");
+        assert_eq!(
+            by_position.data(ObjectId::new(2, 0)).unwrap(),
+            data,
+            "{entries}"
+        );
+        assert_eq!(
+            by_position.decoded(ObjectId::new(2, 0)).unwrap(),
+            TEXT,
+            "{entries}"
+        );
     }
 }
 
@@ -801,7 +870,7 @@ fn a_streams_data_decodes_through_each_filter() {
 fn a_streams_data_that_doesnt_decode_cleanly_is_an_error_holding_what_did() {
     let file = a_stream("/Filter /AHx", b"48 65 6c 6c 6fZ 21>", &[]);
     let reading = open(&file, &[], &Options::DEFAULT);
-    let error = reading.decoded((2, 0)).unwrap_err();
+    let error = reading.decoded(ObjectId::new(2, 0)).unwrap_err();
     assert_eq!(
         error.to_string(),
         "its data doesn't decode cleanly: filter 0: byte 0x5a at 14 isn't one it takes"
@@ -814,7 +883,7 @@ fn a_streams_data_that_doesnt_decode_cleanly_is_an_error_holding_what_did() {
     let mut options = Options::DEFAULT;
     options.limits.stream = 100;
     let reading = open(&file, &[], &options);
-    let Err(Error::Decode(error)) = reading.decoded((2, 0)) else {
+    let Err(Error::Decode(error)) = reading.decoded(ObjectId::new(2, 0)) else {
         panic!("decoded past its limit")
     };
     assert_eq!(error.data, [b'a'; 100]);
@@ -824,8 +893,8 @@ fn a_streams_data_that_doesnt_decode_cleanly_is_an_error_holding_what_did() {
     );
     let file = a_stream("/Filter /DCTDecode", b"\xff\xd8", &[]);
     let reading = open(&file, &[], &Options::DEFAULT);
-    assert_eq!(reading.data((2, 0)).unwrap(), &b"\xff\xd8"[..]);
-    let error = reading.decoded((2, 0)).unwrap_err();
+    assert_eq!(reading.data(ObjectId::new(2, 0)).unwrap(), &b"\xff\xd8"[..]);
+    let error = reading.decoded(ObjectId::new(2, 0)).unwrap_err();
     assert!(matches!(
         error,
         Error::Filters(Unfiltered::Unsupported { .. })
@@ -843,7 +912,7 @@ fn a_streams_data_that_doesnt_decode_cleanly_is_an_error_holding_what_did() {
 fn a_streams_data_handed_out_leaves_the_reading_the_whole_read() {
     let file = fixture::encrypted(&settings(Kind::Aes128, b"user"), &content(), root());
     let reading = open(&file, &[Password("user")], &Options::DEFAULT);
-    for id in [(5, 0), (4, 0)] {
+    for id in [ObjectId::new(5, 0), ObjectId::new(4, 0)] {
         assert!(reading.decoded(id).is_ok() && reading.data(id).is_ok());
     }
     let doc = reading.into_document().unwrap();
@@ -853,9 +922,9 @@ fn a_streams_data_handed_out_leaves_the_reading_the_whole_read() {
     let mut options = Options::DEFAULT;
     options.limits.budget = objects.len();
     let reading = open(&file, &[], &options);
-    assert_eq!(reading.decoded((4, 0)).unwrap(), objects);
-    assert_eq!(reading.decoded((4, 0)).unwrap(), objects);
-    assert!(reading.get((2, 0)).is_ok());
+    assert_eq!(reading.decoded(ObjectId::new(4, 0)).unwrap(), objects);
+    assert_eq!(reading.decoded(ObjectId::new(4, 0)).unwrap(), objects);
+    assert!(reading.get(ObjectId::new(2, 0)).is_ok());
     assert_eq!(reading.reader.budget.load(Ordering::Relaxed), 0);
 }
 
@@ -889,7 +958,7 @@ fn decoded_within_holds_its_limit_for_a_stream_with_or_without_filters() {
     };
     let reading = open(&file, &[], &Options::DEFAULT);
     let positioned = Reading::open(&by_position, &Options::DEFAULT).unwrap();
-    for id in [(1, 0), (2, 0)] {
+    for id in [ObjectId::new(1, 0), ObjectId::new(2, 0)] {
         let stream = format!("{id:?}");
         assert_eq!(reading.decoded(id).unwrap(), plain, "{stream}");
         assert_eq!(reading.decoded_within(id, 10).unwrap(), plain, "{stream}");
@@ -904,13 +973,18 @@ fn decoded_within_holds_its_limit_for_a_stream_with_or_without_filters() {
         cut(reading.decoded_within(id, 0), b"", &stream);
     }
     // A stream without filters says its limit at filter 0.
-    let Err(Error::Decode(error)) = reading.decoded_within((1, 0), 9) else {
+    let Err(Error::Decode(error)) = reading.decoded_within(ObjectId::new(1, 0), 9) else {
         panic!("past its limit");
     };
     assert_eq!(error.faults, [(0, Fault::Limit)]);
     assert!(matches!(
-        reading.decoded_within((3, 0), 9),
-        Err(Error::NotAStream { id: (3, 0) })
+        reading.decoded_within(ObjectId::new(3, 0), 9),
+        Err(Error::NotAStream {
+            id: ObjectId {
+                number: 3,
+                generation: 0
+            }
+        })
     ));
 
     // The reading's own limit is the most any caller's can be, and `decoded`
@@ -918,8 +992,293 @@ fn decoded_within_holds_its_limit_for_a_stream_with_or_without_filters() {
     let mut options = Options::DEFAULT;
     options.limits.stream = 4;
     let small = open(&file, &[], &options);
-    cut(small.decoded_within((1, 0), 100), &plain[..4], "(1, 0)");
-    cut(small.decoded_within((2, 0), 100), &plain[..4], "(2, 0)");
-    assert_eq!(small.decoded((1, 0)).unwrap(), plain);
-    cut(small.decoded((2, 0)), &plain[..4], "(2, 0)");
+    cut(
+        small.decoded_within(ObjectId::new(1, 0), 100),
+        &plain[..4],
+        "(1, 0)",
+    );
+    cut(
+        small.decoded_within(ObjectId::new(2, 0), 100),
+        &plain[..4],
+        "(2, 0)",
+    );
+    assert_eq!(small.decoded(ObjectId::new(1, 0)).unwrap(), plain);
+    cut(small.decoded(ObjectId::new(2, 0)), &plain[..4], "(2, 0)");
+}
+
+/// A stream's data as a viewer takes it, through pdf-objects' `Streams`: every
+/// way it may come from a reading to what reads it, a font's `/ToUnicode` or a
+/// page's content, or why it doesn't.
+mod through_streams {
+    use std::borrow::Cow;
+    use std::io;
+    use std::ops::Range;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use pdf_crypt::Password;
+    use pdf_objects::{Resolve, Streams, Unreadable, Why};
+
+    use super::*;
+    use crate::fixture::Xref;
+
+    /// What `Streams` gives of stream `id` of `reading`, within `limit`: its
+    /// data, or why there's none, of `id`.
+    fn asked<S: ByteSource>(
+        reading: &Reading<S>,
+        id: ObjectId,
+        limit: usize,
+    ) -> Result<Vec<u8>, Why> {
+        let given = Streams::decoded(reading, id, limit);
+        given.map(Cow::into_owned).map_err(|unreadable| {
+            assert_eq!(unreadable.id, id);
+            unreadable.why
+        })
+    }
+
+    const PLAIN: &[u8] = b"1 beginbfchar <41> <0041> endbfchar";
+
+    /// The objects of a file with a font: its `/ToUnicode` object 2, and a stream of
+    /// its data through each way, object 3 Flate's.
+    fn objects() -> Vec<(u32, Body)> {
+        vec![
+            (
+                1,
+                dict! { "Subtype" => "Type1", "BaseFont" => "Foo", "ToUnicode" => Object::reference(2) }
+                    .into(),
+            ),
+            (2, Body::stream(dict! {}, PLAIN)),
+            (
+                3,
+                Body::stream(dict! { "Filter" => "FlateDecode" }, &fixture::zlib(PLAIN)),
+            ),
+        ]
+    }
+
+    /// A stream within its limit is its data, owned; past it past a cap, each by a
+    /// byte, with filters and without; and past the reading's own limit, whatever's
+    /// asked.
+    #[test]
+    fn data_within_and_past_the_limit() {
+        let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        for id in [ObjectId::new(2, 0), ObjectId::new(3, 0)] {
+            let at = PLAIN.len();
+            assert_eq!(asked(&reading, id, at), Ok(PLAIN.to_vec()), "{id:?}");
+            assert_eq!(asked(&reading, id, at - 1), Err(Why::Limit), "{id:?}");
+            assert_eq!(asked(&reading, id, 0), Err(Why::Limit), "{id:?}");
+            let given = Streams::decoded(&reading, id, at);
+            assert!(matches!(given, Ok(Cow::Owned(_))), "{id:?}");
+        }
+        let mut options = Options::DEFAULT;
+        options.limits.stream = 4;
+        let small = Reading::open(&file[..], &options).unwrap();
+        assert_eq!(asked(&small, ObjectId::new(2, 0), 1000), Err(Why::Limit));
+        assert_eq!(asked(&small, ObjectId::new(3, 0), 1000), Err(Why::Limit));
+    }
+
+    /// A stream that decodes in part is what decoded, as PDFium takes it, and one
+    /// that decodes cleanly to nothing is empty; damaged where its decode fails
+    /// before it gives a byte, or where it isn't a stream or there; through a filter
+    /// the reader can't decode, the filter's, by its name, and so with a `/Filter`
+    /// it can't take as written; and listing more filters than the reader takes,
+    /// past its cap.
+    #[test]
+    fn what_doesn_t_decode_whole() {
+        let many: Vec<Object> = (0..26).map(|_| Object::from("ASCIIHexDecode")).collect();
+        let objects = vec![
+            (
+                1,
+                Body::stream(dict! { "Filter" => "ASCIIHexDecode" }, b"4142 zz"),
+            ),
+            (
+                2,
+                Body::stream(dict! { "Filter" => "ASCIIHexDecode" }, b"zz"),
+            ),
+            (
+                3,
+                Body::stream(dict! { "Filter" => "JBIG2Decode" }, b"data"),
+            ),
+            (4, dict! { "Not" => "a stream" }.into()),
+            (5, Body::stream(dict! { "Filter" => many }, b"41>")),
+            (6, Body::Object(Object::from(2))),
+            (7, Body::stream(dict! {}, b"")),
+            (
+                8,
+                Body::stream(dict! { "Filter" => "FlateDecode" }, &fixture::zlib(b"")),
+            ),
+            (9, Body::stream(dict! { "Filter" => 5 }, b"data")),
+        ];
+        let file = fixture::file("1.7", &objects, dict! {}, Xref::Table);
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        assert_eq!(
+            asked(&reading, ObjectId::new(1, 0), 100),
+            Ok(b"AB".to_vec())
+        );
+        for n in [2, 4, 99, 6] {
+            let given = asked(&reading, ObjectId::new(n, 0), 100);
+            assert_eq!(given, Err(Why::Damaged), "{n}");
+        }
+        assert_eq!(asked(&reading, ObjectId::new(3, 0), 100), Err(Why::Filter));
+        let said = Streams::decoded(&reading, ObjectId::new(3, 0), 100).unwrap_err();
+        assert!(said.message.contains("/JBIG2Decode"), "{said}");
+        assert_eq!(asked(&reading, ObjectId::new(5, 0), 100), Err(Why::Limit));
+        for n in [7, 8] {
+            assert_eq!(
+                asked(&reading, ObjectId::new(n, 0), 100),
+                Ok(Vec::new()),
+                "{n}"
+            );
+        }
+        assert_eq!(asked(&reading, ObjectId::new(9, 0), 100), Err(Why::Filter));
+    }
+
+    /// An object that doesn't parse is damaged, as its resolver says; one past a cap
+    /// the reader reads under says so.
+    #[test]
+    fn what_the_resolver_says_of_it_first() {
+        let deep = ["[".repeat(NESTING + 8), "]".repeat(NESTING + 8)].concat();
+        let objects: [(u32, &[u8]); 2] = [(1, b"<< /Unended ("), (2, deep.as_bytes())];
+        let file = fixture::assembled("1.7", &objects, "<< /Size 3 >>");
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        let resolved = Resolve::try_resolve(&&reading, ObjectId::new(1, 0)).unwrap_err();
+        assert_eq!(resolved.why, Why::Damaged);
+        let given = Streams::decoded(&reading, ObjectId::new(1, 0), 100);
+        assert_eq!(given, Err(resolved));
+        assert_eq!(asked(&reading, ObjectId::new(2, 0), 100), Err(Why::Limit));
+    }
+
+    /// A locked file's stream is locked; opened, it's read. A stream that doesn't
+    /// decrypt, in a file that's open, and one of a handler the reader can't open say
+    /// so too.
+    #[test]
+    fn a_locked_file_s_streams() {
+        let mut objects = objects();
+        objects.push((
+            4,
+            Body::stream(
+                dict! {
+                    "Filter" => vec![Object::from("Crypt")],
+                    "DecodeParms" => vec![Object::from(dict! { "Name" => "Undefined" })],
+                },
+                b"data",
+            ),
+        ));
+        let file = fixture::encrypted(&settings(Kind::Aes256, b"user"), &objects, dict! {});
+        let locked = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        assert_eq!(asked(&locked, ObjectId::new(2, 0), 100), Err(Why::Locked));
+
+        let opened = Reading::open_with(&file[..], &[Password("user")], &Options::DEFAULT).unwrap();
+        assert_eq!(asked(&opened, ObjectId::new(2, 0), 100), Ok(PLAIN.to_vec()));
+        assert!(matches!(
+            opened.decoded_within(ObjectId::new(4, 0), 100),
+            Err(Error::Decrypt(_))
+        ));
+        assert_eq!(asked(&opened, ObjectId::new(4, 0), 100), Err(Why::Locked));
+
+        let at = file.windows(9).position(|w| w == b"/Standard").unwrap();
+        let other = [&file[..at], b"/Standarx", &file[at + 9..]].concat();
+        let unopened = Reading::open(&other[..], &Options::DEFAULT).unwrap();
+        assert!(matches!(
+            unopened.decoded_within(ObjectId::new(2, 0), 100),
+            Err(Error::Unsupported)
+        ));
+        assert_eq!(asked(&unopened, ObjectId::new(2, 0), 100), Err(Why::Locked));
+    }
+
+    /// A stream the encryption dictionary refers to isn't handed out, as it may be
+    /// ciphertext.
+    #[test]
+    fn a_stream_the_encryption_dictionary_refers_to() {
+        let mut objects = objects();
+        objects.push((7, Body::stream(dict! {}, b"abc")));
+        let mut file = fixture::encrypted(&settings(Kind::Aes256, b""), &objects, dict! {});
+        // The encryption dictionary, the next object, written again in an update so
+        // that it refers to the stream.
+        let find = |file: &[u8], what: &[u8]| {
+            let at = file.windows(what.len()).rposition(|w| w == what);
+            at.unwrap_or_else(|| panic!("{}", what.escape_ascii()))
+        };
+        let start = find(&file, b"8 0 obj\n");
+        let end = start + find(&file[start..], b"endobj");
+        let own = String::from_utf8_lossy(&file[start..end]).into_owned();
+        assert!(own.contains("/Length 256"), "{own}");
+        let own = own.replacen("/Length 256", "/Length 7 0 R", 1);
+        let prev = find(&file, b"xref\n0 ");
+        let at = file.len();
+        file.extend_from_slice(format!("{own}endobj\n").as_bytes());
+        let xref = file.len();
+        file.extend_from_slice(
+            format!(
+                "xref\n8 1\n{at:010} 00000 n \ntrailer\n<< /Size 9 /Encrypt 8 0 R \
+                 /ID [(0123456789abcdef) (0123456789abcdef)] /Prev {prev} >>\n\
+                 startxref\n{xref}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        let reading = Reading::open(&file[..], &Options::DEFAULT).unwrap();
+        let got = reading.decoded_within(ObjectId::new(7, 0), 100);
+        assert!(matches!(got, Err(Error::Encrypted)), "{got:?}");
+        assert_eq!(asked(&reading, ObjectId::new(7, 0), 100), Err(Why::Locked));
+    }
+
+    /// A file read by position, whose source fails once it's told to.
+    struct Failing {
+        bytes: Vec<u8>,
+        failing: AtomicBool,
+    }
+
+    impl ByteSource for Failing {
+        fn len(&self) -> usize {
+            self.bytes.len()
+        }
+
+        fn read_at(&self, range: Range<usize>) -> io::Result<Cow<'_, [u8]>> {
+            match self.failing.load(Ordering::Relaxed) {
+                true => Err(io::Error::other("no bytes")),
+                false => Ok(Cow::Borrowed(&self.bytes[range])),
+            }
+        }
+
+        fn first_window(&self) -> usize {
+            64
+        }
+    }
+
+    /// A source that fails is `Why::Source`, whether it fails an object's read or its
+    /// data's, and asked again once it gives them it's read.
+    #[test]
+    fn a_source_that_fails() {
+        let bytes = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
+        let source = Failing {
+            bytes,
+            failing: AtomicBool::new(false),
+        };
+        let reading = Reading::open(&source, &Options::DEFAULT).unwrap();
+        let fail = |on: bool| source.failing.store(on, Ordering::Relaxed);
+
+        fail(true);
+        assert_eq!(asked(&reading, ObjectId::new(2, 0), 100), Err(Why::Source));
+        let got = Resolve::try_resolve(&&reading, ObjectId::new(3, 0));
+        assert!(matches!(
+            got,
+            Err(Unreadable {
+                why: Why::Source,
+                ..
+            })
+        ));
+        fail(false);
+        // The object read and kept, its data's read is what fails.
+        assert!(reading.get(ObjectId::new(2, 0)).is_ok());
+        fail(true);
+        assert!(matches!(
+            reading.decoded_within(ObjectId::new(2, 0), 100),
+            Err(Error::Io(_))
+        ));
+        assert_eq!(asked(&reading, ObjectId::new(2, 0), 100), Err(Why::Source));
+        fail(false);
+        assert_eq!(
+            asked(&reading, ObjectId::new(2, 0), 100),
+            Ok(PLAIN.to_vec())
+        );
+    }
 }

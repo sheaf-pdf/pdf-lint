@@ -40,7 +40,7 @@
 //! let (key, value) = walk.next().unwrap().unwrap();
 //! assert_eq!((key, value.as_integer()), (&b"a"[..], Some(1)));
 //! let (key, value) = walk.next().unwrap().unwrap();
-//! assert_eq!((key, value.as_reference()), (&b"b"[..], Some((5, 0))));
+//! assert_eq!((key, value.as_reference()), (&b"b"[..], Some(ObjectId::new(5, 0))));
 //! assert!(walk.next().is_none());
 //! assert!(walk.whole());
 //! ```
@@ -49,9 +49,10 @@ use std::collections::HashSet;
 use std::fmt;
 use std::iter::FusedIterator;
 
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Span, Unreadable, Value, Why};
 
-use crate::fault::{Fault, Place, Sink};
+use crate::fault::Fault;
 use crate::limits::Limits;
 use crate::{HOPS, followed};
 
@@ -59,7 +60,7 @@ use crate::{HOPS, followed};
 /// each key's bytes and its value. `root` may be a reference, followed as a
 /// node's kids are; null, or a reference to nothing, is a tree with no
 /// entries.
-pub fn names<'o, R: Resolve<'o>, S: Sink>(
+pub fn names<'o, R: Resolve<'o>, S: Sink<Fault>>(
     objects: R,
     root: &'o Object,
     limits: &Limits,
@@ -70,7 +71,7 @@ pub fn names<'o, R: Resolve<'o>, S: Sink>(
 
 /// The entries of the number tree at `root`, as [`names`] gives a name
 /// tree's: each key, an integer, and its value.
-pub fn numbers<'o, R: Resolve<'o>, S: Sink>(
+pub fn numbers<'o, R: Resolve<'o>, S: Sink<Fault>>(
     objects: R,
     root: &'o Object,
     limits: &Limits,
@@ -88,7 +89,7 @@ pub struct Numbers<'o, R, S>(Walk<'o, R, S, i64>);
 /// What the two iterators have in common.
 macro_rules! walks {
     ($walk:ident, $key:ty) => {
-        impl<'o, R: Resolve<'o>, S: Sink> Iterator for $walk<'o, R, S> {
+        impl<'o, R: Resolve<'o>, S: Sink<Fault>> Iterator for $walk<'o, R, S> {
             type Item = Result<($key, &'o Object), Unreadable>;
 
             fn next(&mut self) -> Option<Self::Item> {
@@ -96,7 +97,7 @@ macro_rules! walks {
             }
         }
 
-        impl<'o, R: Resolve<'o>, S: Sink> FusedIterator for $walk<'o, R, S> {}
+        impl<'o, R: Resolve<'o>, S: Sink<Fault>> FusedIterator for $walk<'o, R, S> {}
 
         impl<'o, R, S> $walk<'o, R, S> {
             /// Whether every entry of the tree has been given, as far as the
@@ -204,7 +205,7 @@ struct Walk<'o, R, S, K> {
     done: bool,
 }
 
-impl<'o, R: Resolve<'o>, S: Sink, K: Key<'o>> Walk<'o, R, S, K> {
+impl<'o, R: Resolve<'o>, S: Sink<Fault>, K: Key<'o>> Walk<'o, R, S, K> {
     fn new(objects: R, root: &'o Object, limits: &Limits, sink: S) -> Walk<'o, R, S, K> {
         Walk {
             objects,
@@ -441,7 +442,7 @@ impl<'o, R: Resolve<'o>, S: Sink, K: Key<'o>> Walk<'o, R, S, K> {
                 _ => return Ok(Reached::Object(at, last)),
             }
         }
-        Err(crate::too_long(last.unwrap_or((0, 0))))
+        Err(crate::too_long(last.unwrap_or(ObjectId::new(0, 0))))
     }
 
     /// The key written as `written`, its references followed; none when it
@@ -491,11 +492,7 @@ impl<'o, R: Resolve<'o>, S: Sink, K: Key<'o>> Walk<'o, R, S, K> {
 
     fn say(&mut self, at: Option<Span>, fault: Fault) {
         if self.sink.wants() {
-            let place = Place {
-                object: self.object,
-                at,
-            };
-            self.sink.fault(place, fault);
+            self.sink.fault(Place::new(self.object, at), fault);
         }
     }
 }

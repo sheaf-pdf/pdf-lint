@@ -16,8 +16,6 @@ include = ["/src", "/assets", "/FTL.TXT", "/README.md", "/CHANGELOG.md"]
 [dependencies]
 pdf-content-streams = { path = "../pdf-content-streams", version = "0.1" }
 pdf-objects = { path = "../pdf-objects", version = "0.1" }
-# With `structure`: a reading of a file gives a font its streams.
-pdf-structure = { path = "../pdf-structure", version = "0.1", optional = true }
 thiserror = "2"
 # With `predefined-cmaps`: Adobe's predefined CMaps, from its bundle alone,
 # never a file's bytes. It needs Rust 1.87.
@@ -34,21 +32,14 @@ predefined-cmaps = ["dep:hayro-cmap"]
 # A font's program read, for its glyphs' boxes and its heights, and the text of what its
 # encoding leaves to it. Without it, as `Fonts::for_text` reads.
 programs = ["dep:skrifa"]
-# `Streams` for pdf-structure's `&Reading`, for who reads a file by it.
-structure = ["dep:pdf-structure"]
 
 [dev-dependencies]
-# The tests' files, and a reading of them.
+# The tests' files, and a reading of them, which is pdf-objects' `Streams` itself.
 pdf-structure = { path = "../pdf-structure", version = "0.1", features = ["fixtures"] }
 
-# Each case over a reading of its file, held to PDFium's recorded answer.
-[[test]]
-name = "pdfium"
-required-features = ["structure"]
-
-# docs.rs documents what the feature adds, beside the default.
+# docs.rs documents what `predefined-cmaps` adds, beside the default.
 [package.metadata.docs.rs]
-features = ["structure", "predefined-cmaps"]
+features = ["predefined-cmaps"]
 
 [lints.rust]
 unsafe_code = "forbid"

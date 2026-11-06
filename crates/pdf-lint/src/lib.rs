@@ -69,9 +69,9 @@ pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, V
 // The model, its tables and predicates, and the commit it's at, are
 // pdf-arlington's; which model every check reads is this crate's.
 pub use pdf_arlington::{COMMIT, predicate};
-// The objects, `dict!`, versions and what resolves a reference are
-// pdf-objects'.
-pub use pdf_objects::{Resolve, Rules, Unreadable, Why, dict, object, version};
+// The objects, `dict!`, versions, what resolves a reference and what gives
+// a stream's data are pdf-objects'.
+pub use pdf_objects::{Resolve, Rules, Streams, Unreadable, Why, dict, object, version};
 // The reader, and what it reads a file into, are pdf-structure's; the
 // error a stream's data that doesn't decode cleanly gives is pdf-filters',
 // and the passwords a reader is given and its security handler are
@@ -242,7 +242,7 @@ pub mod extension {
         let resolve = |id| source.get(id).ok().cloned();
         let trailer = source.trailer().dict();
         let mut packet = Packet::default();
-        let result = match source.metadata() {
+        let result = match source.metadata().as_deref() {
             Some(xml) => {
                 let catalog = pdf_semantics::catalog(Objects(source), trailer)
                     .ok()
@@ -279,7 +279,7 @@ pub mod extension {
 
         use super::*;
         use crate::dict;
-        use crate::object::Object;
+        use crate::object::{Object, ObjectId};
         use crate::source::Document;
         use crate::version::Version;
 
@@ -307,7 +307,7 @@ pub mod extension {
         /// which reads it with both, as neither changes what's read.
         fn quietly(doc: &Document) -> BTreeSet<String> {
             let resolve = |id| doc.get(id).ok().cloned();
-            let read = (doc.metadata())
+            let read = (doc.metadata().as_deref())
                 .map(|xml| {
                     xmp::read(xml, None, &Limits::DEFAULT, &mut ())
                         .unwrap_or_else(|error| error.read)
@@ -346,16 +346,16 @@ pub mod extension {
                 assert_eq!(claimed, BTreeSet::from(both.clone()));
                 assert_eq!(claimed, declared(&doc));
                 assert_eq!(claimed, quietly(&doc));
-                assert_eq!(got.stream, Some((5, 0)));
+                assert_eq!(got.stream, Some(ObjectId::new(5, 0)));
                 assert_eq!(got.len, data.len());
                 assert!(got.stopped.is_none());
                 assert_eq!(got.kept.told().len(), faults);
                 for (place, fault, count) in got.kept.told() {
                     assert_eq!(*fault, Fault::XmpAttribute);
                     assert_eq!(*count, 1);
-                    assert_eq!(place.object, Some((5, 0)));
+                    assert_eq!(place.object, Some(ObjectId::new(5, 0)));
                     let at = place.at.unwrap();
-                    assert_eq!(at.stream, Some((5, 0)));
+                    assert_eq!(at.stream, Some(ObjectId::new(5, 0)));
                     assert!(data[at.start..at.end].starts_with(b"<rdf:Description"));
                 }
             }

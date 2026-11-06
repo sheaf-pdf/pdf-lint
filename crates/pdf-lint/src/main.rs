@@ -830,20 +830,20 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
             }
             Some(
                 at @ Span {
-                    stream: Some((n, g)),
+                    stream: Some(stream),
                     ..
                 },
             ) => {
                 // An object stream's data, which the document holds; else a
                 // content stream's or the metadata stream's, which the
                 // reading decodes again, as content was read.
-                let decoded = match doc.document().decoded.get(&(n, g)) {
+                let decoded = match doc.document().decoded.get(&stream) {
                     Some(decoded) => Some(&decoded[..]),
                     None => {
-                        if content.as_ref().is_none_or(|(id, _)| *id != (n, g)) {
-                            content = (doc.decoded_within((n, g), usize::MAX))
+                        if content.as_ref().is_none_or(|(id, _)| *id != stream) {
+                            content = (doc.decoded_within(stream, usize::MAX))
                                 .and_then(Result::ok)
-                                .map(|data| ((n, g), data));
+                                .map(|data| (stream, data));
                         }
                         content.as_ref().map(|(_, data)| &data[..])
                     }
@@ -851,7 +851,7 @@ fn check_file(path: &Path, setup: &Setup) -> Checked {
                 if let Some(decoded) = decoded {
                     let _ = writeln!(
                         out,
-                        "    | {}   (of {n} {g} R's data, decoded)",
+                        "    | {}   (of {stream} R's data, decoded)",
                         snippet(decoded, at)
                     );
                 }
@@ -953,11 +953,11 @@ fn json(
                 table: &f.table,
                 key: &f.key,
                 path: &f.path,
-                object: f.object,
+                object: f.object.map(Into::into),
                 made: f.made.name(),
                 value: &f.value,
                 at: f.at.map(|at| At {
-                    stream: at.stream,
+                    stream: at.stream.map(Into::into),
                     start: at.start,
                     end: at.end,
                 }),

@@ -598,7 +598,7 @@ mod tests {
                 let stream = (object.as_dict())
                     .filter(|dict| dict.has(b"Length"))
                     .map(|dict| Object::stream(dict.clone()));
-                ((n, 0), stream.unwrap_or(object))
+                (ObjectId::new(n, 0), stream.unwrap_or(object))
             })
             .collect()
     }
@@ -1241,9 +1241,12 @@ mod tests {
     fn chain(n: u32) -> (Object, BTreeMap<ObjectId, Object>) {
         let mut objects = BTreeMap::new();
         for at in 0..n {
-            objects.insert((5 + at, 0), Object::from(vec![Object::reference(6 + at)]));
+            objects.insert(
+                ObjectId::new(5 + at, 0),
+                Object::from(vec![Object::reference(6 + at)]),
+            );
         }
-        objects.insert((5 + n, 0), Object::from("DeviceCMYK"));
+        objects.insert(ObjectId::new(5 + n, 0), Object::from("DeviceCMYK"));
         (Object::reference(5), objects)
     }
 
@@ -1314,9 +1317,9 @@ mod tests {
             let text = format!(
                 "<< /FunctionType 3 /Domain [0 1] /Functions [{kids}] /Bounds [{bounds}] /Encode [{encode}] >>"
             );
-            objects.insert((5 + level, 0), value(&text));
+            objects.insert(ObjectId::new(5 + level, 0), value(&text));
         }
-        objects.insert((5 + levels, 0), value(F2_1));
+        objects.insert(ObjectId::new(5 + levels, 0), value(F2_1));
         objects
     }
 
@@ -1410,10 +1413,11 @@ mod tests {
             let damaged = Failing { why: Why::Damaged };
             let read = components(damaged, &parsed, &Limits::DEFAULT);
             assert_eq!(read, Ok(want), "{text}");
+            // `Why::Filter` only a stream's data is, never a resolver's answer.
             for why in [Why::Limit, Why::Locked, Why::Source] {
                 let read = components(Failing { why }, &parsed, &Limits::DEFAULT);
                 let error = read.expect_err(text);
-                assert_eq!((error.id, error.why), ((5, 0), why), "{text}");
+                assert_eq!((error.id, error.why), (ObjectId::new(5, 0), why), "{text}");
             }
         }
     }
@@ -1446,6 +1450,6 @@ mod tests {
             components(recording, &reference, &Limits::DEFAULT),
             Ok(Some(4))
         );
-        assert_eq!(*seen.borrow(), [(5, 0), (5, 0)]);
+        assert_eq!(*seen.borrow(), [ObjectId::new(5, 0), ObjectId::new(5, 0)]);
     }
 }
