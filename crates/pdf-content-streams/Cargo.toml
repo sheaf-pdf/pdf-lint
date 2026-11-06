@@ -22,7 +22,7 @@ pdf-color = { path = "../pdf-color", version = "0.1" }
 # Flate and LZW data in an inline image decoded to find where it ends, as
 # PDFium decodes it: Flate on zlib-rs, zlib's inflate in Rust, as PDFium's
 # end is what zlib read; miniz_oxide not compiled for it.
-pdf-filters = { path = "../pdf-filters", version = "0.1", default-features = false, features = ["zlib-rs"] }
+pdf-filters = { workspace = true, features = ["zlib-rs"] }
 pdf-objects.workspace = true
 pdf-tokenizer.workspace = true
 thiserror = "2"

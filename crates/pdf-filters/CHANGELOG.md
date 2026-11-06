@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0-alpha.1 (unreleased)
 
 - **The filters.** `decode` decodes data by a list of `Filter`s, as a stream's `/Filter` lists them: `AsciiHex`, `Ascii85`, `Lzw` (with `/EarlyChange`), `Flate` (zlib, on the `Backend` the call names) and `RunLength`, each given what the one before gave, no filter's output over the caller's limit (before a PNG predictor, its tags besides).
 - **Two Flate backends, named at each call.** `Backend::MinizOxide`, with the `miniz_oxide` feature (on by default), and `Backend::ZlibRs`, with the `zlib-rs` feature (zlib-rs through its safe API, on Rust's allocator): each variant exists only with its feature, both with both, and `decode`, `decode_into` and `encode` each take the one they use, so no feature another crate turns on changes what a call gives; with neither feature the crate doesn't build, and docs.rs builds the docs with both. On clean data the two decode alike; on damaged data where each stops, how much it gave first and a `Corrupt` fault's place can differ. LZW stays this crate's own decoder, not weezl's, which says nothing of a full table and no place for a code that isn't in it.
