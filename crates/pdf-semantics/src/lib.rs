@@ -32,8 +32,9 @@
 //! names the trait at the version this crate takes.
 
 pub use pdf_objects;
+pub use pdf_objects::pdf_tokenizer::Rules;
 pub use pdf_objects::{
-    Dict, Object, ObjectId, Resolve, Rules, Span, Str, Stream, Unreadable, Value, Why, dict, text,
+    Dict, Object, ObjectId, Resolve, Span, Str, Stream, Unreadable, Value, Why, dict, text,
 };
 
 pub use fault::Fault;

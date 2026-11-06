@@ -43,7 +43,7 @@
 //!   by its `/Length` and up to `endstream`, both given, for the caller to
 //!   choose its data from; and caps on how deeply values nest and how many
 //!   one call reads ([`Limits`]). It reads by ISO 32000-2's lexical rules,
-//!   or by PDFium's ([`Rules`], [`parse::Parser::rules`]), each token then
+//!   or by PDFium's ([`Rules`](pdf_tokenizer::Rules), [`parse::Parser::rules`]), each token then
 //!   read as PDFium reads it, and a fault said where ISO 32000-2 reads it
 //!   otherwise.
 //! - **A writer** ([`serialize`]): a value as PDF syntax, or as an
@@ -96,7 +96,10 @@ pub mod version;
 
 pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, Value};
 pub use parse::Limits;
-pub use pdf_tokenizer::Rules;
+/// pdf-tokenizer, whose [`Rules`](pdf_tokenizer::Rules) the parser
+/// ([`parse::Parser::rules`]) and [`text::decode_with`] read by: named
+/// through it, they're the version this crate is built with.
+pub use pdf_tokenizer;
 pub use streams::{Streams, With};
 pub use version::Version;
 

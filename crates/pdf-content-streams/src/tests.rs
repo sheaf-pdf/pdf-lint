@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use pdf_objects::parse::Parser;
-use pdf_objects::{Form, Object, ObjectId, Resolve, Rules, Str, Unreadable, Value, Why, dict};
+use pdf_objects::{Form, Object, ObjectId, Resolve, Str, Unreadable, Value, Why, dict};
+use pdf_tokenizer::Rules;
 
 use crate::fault::{Fault, Sink};
 use crate::fuzz::{

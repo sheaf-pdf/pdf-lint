@@ -71,12 +71,15 @@ pub use object::{Data, Dict, Entry, Form, Object, ObjectId, Span, Str, Stream, V
 pub use pdf_arlington::{COMMIT, predicate};
 // The objects, `dict!`, versions, what resolves a reference and what gives
 // a stream's data are pdf-objects'.
-pub use pdf_objects::{Resolve, Rules, Streams, Unreadable, Why, dict, object, version};
+pub use pdf_objects::{Resolve, Streams, Unreadable, Why, dict, object, version};
 // The reader, and what it reads a file into, are pdf-structure's; the
 // error a stream's data that doesn't decode cleanly gives is pdf-filters',
 // and the passwords a reader is given and its security handler are
 // pdf-crypt's.
 pub use pdf_structure::{bytes, pdf_crypt, pdf_filters, source};
+// The rules a reader reads by, ISO 32000-2's or PDFium's, are
+// pdf-tokenizer's.
+pub use pdf_tokenizer::Rules;
 pub use predicate::{Cx, FileCx, Gate, Latin, Reference, Since, Truth};
 pub use source::{Document, Encryption, Revision, Source, Trailer, Update, Warning};
 pub use version::Version;

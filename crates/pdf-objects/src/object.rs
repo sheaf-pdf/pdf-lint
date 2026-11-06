@@ -1092,7 +1092,7 @@ mod tests {
         ] {
             let mut written = Vec::new();
             crate::serialize::write(&mut written, &Object::text(text)).unwrap();
-            for rules in [crate::Rules::Iso, crate::Rules::Pdfium] {
+            for rules in [pdf_tokenizer::Rules::Iso, pdf_tokenizer::Rules::Pdfium] {
                 let read = (crate::parse::Parser::at(&written, 0).rules(rules))
                     .value(&mut ())
                     .unwrap();
