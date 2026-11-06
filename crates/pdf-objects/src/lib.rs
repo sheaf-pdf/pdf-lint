@@ -146,7 +146,8 @@ pub trait Resolve<'o> {
 
     /// Object `id`; none when the file hasn't it; or why it doesn't read.
     /// By default what [`Resolve::resolve`] gives, for a resolver that can't
-    /// say why.
+    /// say why. A resolver never says [`Why::Filter`] or [`Why::Detached`],
+    /// which only a stream's data is ([`Streams::decoded`]).
     fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
         Ok(self.resolve(id))
     }
@@ -191,9 +192,7 @@ pub enum Why {
     /// It takes a password the reader wasn't given, or doesn't decrypt.
     Locked,
     /// The source of the file's bytes didn't give them: it may read if it's
-    /// asked again. Or the reader has no source of bytes at all, as a
-    /// document read whole hasn't, which holds the file's objects and not
-    /// its streams' data: then it's read beside what read it.
+    /// asked again.
     Source,
     /// It's a stream whose filters the reader doesn't decode: through a
     /// filter it doesn't take, as an image's data may be (ISO 32000-2,
@@ -202,6 +201,14 @@ pub enum Why {
     /// written, which is the file's to fix. Only what gives a stream's data
     /// says it ([`Streams::decoded`]); a resolver never does.
     Filter,
+    /// It's a stream's data the reader doesn't hold, and it has nothing to
+    /// read it from, as a document read whole alone hasn't the file's bytes,
+    /// holding its objects and not their streams' data: asked again, it
+    /// gives the same; it's read beside what read the file. Unlike
+    /// [`Why::Source`], nothing failed, and nothing will read if asked
+    /// again. Only what gives a stream's data says it
+    /// ([`Streams::decoded`]); a resolver never does.
+    Detached,
 }
 
 /// A closure, or a function, from an object's number to the object.

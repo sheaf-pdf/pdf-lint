@@ -173,7 +173,7 @@ fn unread(why: Why) -> &'static str {
     match why {
         Why::Locked => LOCKED,
         Why::Limit => CAPPED,
-        Why::Source => UNGIVEN,
+        Why::Source | Why::Detached => UNGIVEN,
         _ => UNREAD,
     }
 }
@@ -334,7 +334,7 @@ fn pages_unread(why: Why) -> Option<&'static str> {
         Why::Damaged => None,
         Why::Locked => Some(PAGES_LOCKED),
         Why::Limit => Some(PAGES_CAPPED),
-        Why::Source => Some(PAGES_UNGIVEN),
+        Why::Source | Why::Detached => Some(PAGES_UNGIVEN),
         _ => Some(PAGES_UNREAD),
     }
 }

@@ -513,8 +513,9 @@ where
     }
 
     // Made to fail, each way: the first object asked, and the first stream; a stream
-    // through a filter the reader doesn't decode too, which only a stream's data is, as a
-    // resolver never says `Why::Filter`.
+    // through a filter the reader doesn't decode too, and one a reader holds no data of and
+    // has nothing to read from, which only a stream's data is, as a resolver never says
+    // `Why::Filter` or `Why::Detached`.
     let objects_fail = [Why::Damaged, Why::Limit, Why::Locked, Why::Source].map(|why| (why, false));
     let streams_fail = [
         Why::Damaged,
@@ -522,6 +523,7 @@ where
         Why::Locked,
         Why::Source,
         Why::Filter,
+        Why::Detached,
     ];
     for (why, streams) in objects_fail
         .into_iter()

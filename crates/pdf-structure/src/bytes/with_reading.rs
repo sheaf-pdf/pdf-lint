@@ -260,7 +260,7 @@ mod tests {
     /// a viewer takes it ([`Streams`]), a reading and the file opened give
     /// the same of every object, and its document alone the same of every
     /// object stream it holds decoded whole, and of what isn't a stream; of
-    /// any other stream, the document alone gives none, the source's. A
+    /// any other stream, the document alone gives none, detached. A
     /// reading of the file, as a source, answers as the file opened, once
     /// it has read every object, its warnings in the same order; before, it
     /// holds no object stream's data, and has none in the clear, until it
@@ -321,7 +321,7 @@ mod tests {
                     assert_eq!(given, read, "{name}: {id:?} viewed within {limit}");
                     let alone = viewed(Streams::decoded(alone, id, limit));
                     match stream && !lends {
-                        true => assert_eq!(alone, Err((id, Why::Source)), "{name}: {id:?}"),
+                        true => assert_eq!(alone, Err((id, Why::Detached)), "{name}: {id:?}"),
                         false => assert_eq!(alone, read, "{name}: {id:?} alone within {limit}"),
                     }
                 }
@@ -351,7 +351,7 @@ mod tests {
     /// what decoded, which its objects are read from, but it isn't the
     /// stream's data. As a viewer takes it ([`Streams`]), the file opened
     /// gives what its reading gives at every limit, the stream decoded
-    /// anew, and its document alone gives none, the source's; where the
+    /// anew, and its document alone gives none, detached; where the
     /// whole read decoded it whole, the document lends it, as its reading
     /// gives it.
     #[test]
@@ -426,7 +426,11 @@ mod tests {
                     }
                     false => {
                         let alone = viewed(alone);
-                        assert_eq!(alone, Err((stream, Why::Source)), "{what}: within {limit}");
+                        assert_eq!(
+                            alone,
+                            Err((stream, Why::Detached)),
+                            "{what}: within {limit}"
+                        );
                     }
                 }
             }

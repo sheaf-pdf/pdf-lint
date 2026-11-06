@@ -39,10 +39,12 @@ pub trait Streams {
     /// a password the reader wasn't given, or doesn't decrypt;
     /// [`Why::Filter`](crate::Why::Filter) through a filter the reader doesn't
     /// decode, or with a `/Filter` or `/DecodeParms` it can't take as written;
-    /// [`Why::Source`](crate::Why::Source) where the source of the
-    /// file's bytes didn't give them, or the reader has none, as a document
-    /// alone hasn't. `id` is the stream's own number: a caller has followed
-    /// any reference to it.
+    /// [`Why::Source`](crate::Why::Source) where the source of the file's
+    /// bytes didn't give them, which asked again may;
+    /// [`Why::Detached`](crate::Why::Detached) where the reader holds no
+    /// stream's data and has nothing to read it from, as a document alone
+    /// hasn't, which asked again won't. `id` is the stream's own number: a
+    /// caller has followed any reference to it.
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable>;
 }
 
@@ -231,13 +233,17 @@ mod tests {
                 Err(Unreadable::new(id, Why::Locked, "it wants a password"))
             }
         }
-        let locked = WithStreams::new(Locked, |id: ObjectId, _: usize| {
-            Err::<Vec<u8>, _>(Unreadable::new(id, Why::Source, "no bytes"))
-        });
-        let why = locked.try_resolve(ObjectId::new(4, 0)).unwrap_err();
-        assert_eq!((why.id, why.why), (ObjectId::new(4, 0), Why::Locked));
-        let why = locked.decoded(ObjectId::new(4, 0), 1).unwrap_err();
-        assert_eq!((why.why, why.to_string()), (Why::Source, "no bytes".into()));
+        // And a function that gives no data, for either reason a source
+        // may have, is heard as it says.
+        for given in [Why::Source, Why::Detached] {
+            let locked = WithStreams::new(Locked, |id: ObjectId, _: usize| {
+                Err::<Vec<u8>, _>(Unreadable::new(id, given, "no bytes"))
+            });
+            let why = locked.try_resolve(ObjectId::new(4, 0)).unwrap_err();
+            assert_eq!((why.id, why.why), (ObjectId::new(4, 0), Why::Locked));
+            let why = locked.decoded(ObjectId::new(4, 0), 1).unwrap_err();
+            assert_eq!((why.why, why.to_string()), (given, "no bytes".into()));
+        }
     }
 
     /// What a function gives past the limit, `WithStreams` gives as it is: holding

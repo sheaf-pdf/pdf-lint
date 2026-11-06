@@ -157,7 +157,7 @@ fn unread(error: &Error, capped: bool) -> &'static str {
         Error::Unreadable(unreadable) => match unreadable.why {
             Why::Locked => LOCKED,
             Why::Limit => CAPPED,
-            Why::Source => UNGIVEN,
+            Why::Source | Why::Detached => UNGIVEN,
             _ => UNREAD,
         },
         _ => UNREAD,
@@ -283,12 +283,13 @@ struct Asked {
 /// that doesn't read ([`Objects`]). A stream through filters the reader
 /// doesn't take ([`Why::Filter`]) a font reads as none, which `asked`
 /// notes, so that what's read without it isn't taken for the file's; and a
-/// source that gives no stream's data, as a document alone doesn't, or not
-/// these bytes ([`Why::Source`]), is noted too, as what a font reads then
-/// isn't the file's font. Past a limit ([`Why::Limit`]), the source's own
-/// account says whether it's the reader's cap on a stream's filters
-/// ([`Source::decoded_within`], [`Unfiltered::Filters`]), which `asked`
-/// notes, so that the font is said to be past a cap, not its budget.
+/// source that gives no stream's data, as a document alone doesn't
+/// ([`Why::Detached`]), or not these bytes ([`Why::Source`]), is noted too,
+/// as what a font reads then isn't the file's font. Past a limit
+/// ([`Why::Limit`]), the source's own account says whether it's the
+/// reader's cap on a stream's filters ([`Source::decoded_within`],
+/// [`Unfiltered::Filters`]), which `asked` notes, so that the font is said
+/// to be past a cap, not its budget.
 fn decoded(
     source: &dyn Source,
     id: ObjectId,
@@ -300,7 +301,7 @@ fn decoded(
         Err(Why::Filter) => {
             asked.unfiltered.borrow_mut().insert(id);
         }
-        Err(Why::Source) => asked.ungiven.set(true),
+        Err(Why::Source | Why::Detached) => asked.ungiven.set(true),
         Err(Why::Limit) => {
             let capped = matches!(
                 source.decoded_within(id, limit),
@@ -342,7 +343,10 @@ fn read<'a>(source: &'a dyn Source, font: &'a Dict, budget: &mut usize) -> Optio
         // take, which a font reads as none, nor what the source didn't give,
         // after which the font isn't read.
         if let Err(unreadable) = &decoded
-            && !matches!(unreadable.why, Why::Damaged | Why::Filter | Why::Source)
+            && !matches!(
+                unreadable.why,
+                Why::Damaged | Why::Filter | Why::Source | Why::Detached
+            )
         {
             failed.set(true);
         }
@@ -811,9 +815,9 @@ mod tests {
     }
 
     /// A stream within its limit is its data, with filters or without, and
-    /// past it past a cap, by a byte; a document alone gives none, the
-    /// source's, noted, and a font that asks it isn't read, where a font
-    /// that asks none is.
+    /// past it past a cap, by a byte; a document alone gives none, detached,
+    /// noted, and a font that asks it isn't read, where a font that asks
+    /// none is.
     #[test]
     fn a_stream_s_data_within_its_limit_and_past_it() {
         let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
@@ -822,7 +826,7 @@ mod tests {
             let at = PLAIN.len();
             assert_eq!(asked(&read, id, at), (Ok(PLAIN.to_vec()), false), "{id:?}");
             assert_eq!(asked(&read, id, at - 1), (Err(Why::Limit), false));
-            assert_eq!(asked(read.document(), id, at), (Err(Why::Source), true));
+            assert_eq!(asked(read.document(), id, at), (Err(Why::Detached), true));
         }
         // Not a stream, or not there, from a reading or a document alone:
         // damaged, which a font reads as none, and nothing noted, as no
@@ -848,6 +852,23 @@ mod tests {
         assert!(super::read(read.document(), font, &mut budget).is_none());
         let plain = dict! { "Subtype" => "Type1", "BaseFont" => "Helvetica" };
         assert!(super::read(read.document(), &plain, &mut budget).is_some());
+    }
+
+    /// A font stopped by a stream's data not given is noted as such, the
+    /// source's, not the file's: where a document alone has nothing to read
+    /// it from, as where a source failed to give its bytes.
+    #[test]
+    fn a_font_stopped_by_data_not_given_is_ungiven() {
+        let file = fixture::file("1.7", &objects(), dict! {}, Xref::Table);
+        let read = WithReading::new(&file[..], &[], &Options::DEFAULT).unwrap();
+        let id = ObjectId::new(2, 0);
+        let alone = Streams::decoded(read.document(), id, PLAIN.len()).unwrap_err();
+        assert_eq!(alone.why, Why::Detached);
+        assert_eq!(unread(&Error::Unreadable(alone), false), UNGIVEN);
+        let failed = Unreadable::new(id, Why::Source, "no bytes");
+        assert_eq!(unread(&Error::Unreadable(failed), false), UNGIVEN);
+        let damaged = Unreadable::new(id, Why::Damaged, "damaged");
+        assert_eq!(unread(&Error::Unreadable(damaged), false), UNREAD);
     }
 
     /// A stream that decodes in part is what decoded; damaged where nothing

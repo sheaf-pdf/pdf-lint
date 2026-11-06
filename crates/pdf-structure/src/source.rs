@@ -18,7 +18,7 @@ use crate::bytes::{Error, SourceId, Undecoded, Unfiltered, Unindexed};
 
 /// A file, as a reader read it: its objects, and its streams' data as a
 /// viewer takes it ([`Streams`]), which a reader without the file's bytes,
-/// as a document alone is, doesn't give ([`Why::Source`]). A [`Document`]
+/// as a document alone is, doesn't give ([`Why::Detached`]). A [`Document`]
 /// is one, and so are a [`Reading`](crate::Reading), which answers of what
 /// it has read so far, and a document read beside its reading
 /// ([`WithReading`](crate::bytes::WithReading)).
@@ -1227,7 +1227,7 @@ impl Source for Document {
 /// holds: an object stream's decoded data ([`Document::decoded`]), lent,
 /// within the limit, else [`Why::Limit`], where the reader decoded it
 /// whole. A document alone decodes no stream: any other stream's data is
-/// [`Why::Source`], which a document read beside its reading
+/// [`Why::Detached`], which a document read beside its reading
 /// ([`WithReading`](crate::bytes::WithReading)) gives, and so is an object
 /// stream's that the reader cut off as it decoded it, at a fault, the
 /// stream's limit or the budget, or that didn't decrypt cleanly, as what it
@@ -1249,7 +1249,7 @@ impl Streams for Document {
             Some(data) => lent(id, data, limit),
             None => Err(Unreadable::new(
                 id,
-                Why::Source,
+                Why::Detached,
                 format!(
                     "{id} R's data isn't held decoded: a document alone decodes no stream, \
                      and holds only the object streams its reader decoded whole"
@@ -1893,7 +1893,7 @@ mod tests {
         struct Own(Trailer);
         impl Streams for Own {
             fn decoded(&self, id: ObjectId, _: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
-                Err(Unreadable::new(id, Why::Source, "it has no bytes"))
+                Err(Unreadable::new(id, Why::Detached, "it has no bytes"))
             }
         }
         impl Source for Own {
@@ -1922,7 +1922,7 @@ mod tests {
         let ungiven = Streams::decoded(source, ObjectId::new(4, 0), 10).unwrap_err();
         assert_eq!(
             (ungiven.id, ungiven.why),
-            (ObjectId::new(4, 0), Why::Source)
+            (ObjectId::new(4, 0), Why::Detached)
         );
         assert!(own.revisions().is_empty());
         assert_eq!(own.facts(), None);

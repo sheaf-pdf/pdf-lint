@@ -118,7 +118,7 @@ fn unread(error: &Unreadable) -> &'static str {
     match error.why {
         Why::Locked => LOCKED,
         Why::Limit => CAPPED,
-        Why::Source => UNGIVEN,
+        Why::Source | Why::Detached => UNGIVEN,
         _ => UNREAD,
     }
 }
