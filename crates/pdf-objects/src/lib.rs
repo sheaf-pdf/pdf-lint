@@ -195,10 +195,18 @@ pub enum Why {
     /// What's written there isn't that object: it doesn't parse, or the file
     /// doesn't lead to it, or doesn't hold it as it says.
     Damaged,
-    /// It's past the limit the caller asked for ([`Streams::decoded`]), or
-    /// past a cap the reader reads under: the two aren't told apart, which a
-    /// later version may do.
+    /// It's past the limit the caller asked for, the `limit` of
+    /// [`Streams::decoded`]: data longer than that isn't given, whatever
+    /// the reader's own caps. Only what gives a stream's data says it; a
+    /// resolver never does. Past a cap of the reader's is [`Why::Capped`].
     Limit,
+    /// It's past a cap the reader reads under, which no caller asked for in
+    /// this call: nested deeper, or of more values, than the reader parses
+    /// an object; a stream's data longer, or through more filters, than it
+    /// decodes; a chain of references longer than it follows. A resolver
+    /// says it of an object, and what gives a stream's data says it of that.
+    /// Past what the caller asked for is [`Why::Limit`].
+    Capped,
     /// It takes a password the reader wasn't given, or doesn't decrypt.
     Locked,
     /// The source of the file's bytes didn't give them: it may read if it's

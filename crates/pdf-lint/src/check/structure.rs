@@ -172,7 +172,7 @@ const KEY: &str = "a tree with a key whose bytes aren't known";
 fn unread(why: Why) -> &'static str {
     match why {
         Why::Locked => LOCKED,
-        Why::Limit => CAPPED,
+        Why::Limit | Why::Capped => CAPPED,
         Why::Source | Why::Detached => UNGIVEN,
         _ => UNREAD,
     }
@@ -266,7 +266,7 @@ impl Viewer {
         match stopped {
             pages::Error::Unreadable(unreadable) => Viewer::unread(match unreadable.why {
                 Why::Locked => VIEWER_LOCKED,
-                Why::Limit => VIEWER_CAPPED,
+                Why::Limit | Why::Capped => VIEWER_CAPPED,
                 _ => VIEWER_UNREAD,
             }),
             pages::Error::TooDeep | pages::Error::TooManyPages => Viewer::unread(VIEWER_CAPPED),
@@ -333,7 +333,7 @@ fn pages_unread(why: Why) -> Option<&'static str> {
     match why {
         Why::Damaged => None,
         Why::Locked => Some(PAGES_LOCKED),
-        Why::Limit => Some(PAGES_CAPPED),
+        Why::Limit | Why::Capped => Some(PAGES_CAPPED),
         Why::Source | Why::Detached => Some(PAGES_UNGIVEN),
         _ => Some(PAGES_UNREAD),
     }

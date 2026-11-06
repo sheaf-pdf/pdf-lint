@@ -144,7 +144,7 @@ fn a_count_or_a_parent_past_a_cap_or_a_password_isn_t_checked() {
     let catalog = crate::Dict::from_iter([(b"Pages".to_vec(), Object::reference(2))]);
     for (failed, why) in [
         (ObjectId::new(6, 0), Why::Locked),
-        (ObjectId::new(7, 0), Why::Limit),
+        (ObjectId::new(7, 0), Why::Capped),
         (ObjectId::new(6, 0), Why::Source),
     ] {
         let resolver = failing(&objects, failed, why);
@@ -1681,7 +1681,7 @@ fn an_object_that_doesn_t_read_is_said_or_fails_the_walk_by_why() {
             ObjectId::new(5, 0),
             ObjectId::new(2, 0),
         ] {
-            for why in [Why::Limit, Why::Locked, Why::Source] {
+            for why in [Why::Capped, Why::Locked, Why::Source] {
                 let resolver = failing(&objects, failed, why);
                 let walked = pages(resolver, &catalog, rules, &Limits::DEFAULT, &mut ());
                 match walked {
@@ -1747,7 +1747,7 @@ fn a_chain_of_references_too_long_fails_iso_s_walk() {
     objects.push(object(40, "<< /Type /Pages /Kids [] >>"));
     let walked = open_with(&objects, Rules::Iso, &Limits::DEFAULT).pages;
     match walked {
-        Err(Error::Unreadable(unreadable)) => assert_eq!(unreadable.why, Why::Limit),
+        Err(Error::Unreadable(unreadable)) => assert_eq!(unreadable.why, Why::Capped),
         other => panic!("{other:?}"),
     }
     assert_eq!(tree_error(&objects), Error::NoPages);
@@ -2470,7 +2470,7 @@ fn what_only_a_sink_reads_fails_no_walk() {
         let all = [
             None,
             Some(Why::Damaged),
-            Some(Why::Limit),
+            Some(Why::Capped),
             Some(Why::Locked),
             Some(Why::Source),
         ];
@@ -2496,7 +2496,7 @@ fn what_only_a_sink_reads_fails_no_walk() {
                 assert!(faults.contains(&fault), "{faults:?}");
                 continue;
             }
-            let why = why.unwrap_or(Why::Limit);
+            let why = why.unwrap_or(Why::Capped);
             let unchecked = Fault::Unchecked {
                 id: ObjectId::new(7, 0),
                 why,

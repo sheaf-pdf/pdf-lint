@@ -800,7 +800,7 @@ fn the_catalog_s_metadata_stream_is_found_or_says_why_not() {
     let catalog = dict! { "Metadata" => Object::reference(4) };
     assert_eq!(
         metadata_stream(resolve, &catalog).unwrap_err().why,
-        Why::Limit
+        Why::Capped
     );
 
     let file = with_xmp("<d/>", false);

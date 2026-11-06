@@ -56,7 +56,7 @@ const HOPS: usize = 32;
 /// `value` with its references followed: none for null, or for a reference
 /// to an object the file hasn't, which is null (ISO 32000-2, 7.3.10). An
 /// object that doesn't read gives the resolver's [`Unreadable`], and a chain
-/// of 32 references or more, which a loop of them is, one of [`Why::Limit`].
+/// of 32 references or more, which a loop of them is, one of [`Why::Capped`].
 pub fn follow<'o, R: Resolve<'o>>(
     objects: R,
     value: &'o Object,
@@ -89,7 +89,7 @@ fn followed<'o, R: Resolve<'o>>(
 /// The error of a chain of references that ends at `last` after too many.
 fn too_long(last: ObjectId) -> Unreadable {
     let message = format!("{last} R is past {HOPS} references, or in a loop of them");
-    Unreadable::new(last, Why::Limit, message)
+    Unreadable::new(last, Why::Capped, message)
 }
 
 /// The catalog a trailer's `/Root` leads to (ISO 32000-2, 7.5.5, 7.7.2):

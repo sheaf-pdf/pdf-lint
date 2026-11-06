@@ -1071,7 +1071,7 @@ fn a_read_that_fails_is_the_err_whole() {
         "<< /ColorSpace << /Y /G /X 5 0 R >> >>",
         "<< /ColorSpace << /X [/ICCBased 5 0 R] >> >>",
     ];
-    for why in [Why::Limit, Why::Locked, Why::Source] {
+    for why in [Why::Capped, Why::Locked, Why::Source] {
         for shape in shapes {
             let e = read(why, shape).unwrap_err();
             assert_eq!((e.id, e.why), (ObjectId::new(5, 0), why), "{shape}");

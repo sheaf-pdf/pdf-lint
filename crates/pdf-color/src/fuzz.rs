@@ -160,7 +160,7 @@ fn a_value<'o, R: Resolve<'o> + Copy>(objects: R, value: &'o Object, most: u32) 
     );
     // Each other kind a resolver gives: `Why::Filter` and `Why::Detached` only a
     // stream's data is.
-    for why in [Why::Limit, Why::Locked, Why::Source] {
+    for why in [Why::Capped, Why::Locked, Why::Source] {
         let failing = Failing { why: Some(why) };
         let asked = Cell::new(0);
         let counting = Counting {
@@ -286,7 +286,7 @@ fn a_space<'o, R: Resolve<'o> + Copy>(objects: R, value: &'o Object) {
 
     // Each kind a resolver gives: `Why::Filter` and `Why::Detached` only a stream's
     // data is.
-    for why in [Why::Damaged, Why::Limit, Why::Locked, Why::Source] {
+    for why in [Why::Damaged, Why::Capped, Why::Locked, Why::Source] {
         for every in [1, 2, 3] {
             let failing = FailingSome {
                 objects,

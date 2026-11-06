@@ -516,10 +516,12 @@ where
     // through a filter the reader doesn't decode too, and one a reader holds no data of
     // and has nothing to read from, which only a stream's data is, as a resolver never
     // says `Why::Filter` or `Why::Detached`.
-    let objects_fail = [Why::Damaged, Why::Limit, Why::Locked, Why::Source].map(|why| (why, false));
+    let objects_fail =
+        [Why::Damaged, Why::Capped, Why::Locked, Why::Source].map(|why| (why, false));
     let streams_fail = [
         Why::Damaged,
         Why::Limit,
+        Why::Capped,
         Why::Locked,
         Why::Source,
         Why::Filter,
@@ -555,7 +557,7 @@ where
                 Ok(_) => assert!(!failed.get() || matches!(why, Why::Damaged | Why::Filter)),
             }
             // A stream past a cap of what gives it is too large, as one past the budget.
-            if streams && why == Why::Limit && failed.get() {
+            if streams && matches!(why, Why::Limit | Why::Capped) && failed.get() {
                 assert_eq!(read.err(), Some(Error::TooLarge));
             }
         }

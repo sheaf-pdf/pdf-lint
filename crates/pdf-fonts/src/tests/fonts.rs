@@ -1455,7 +1455,7 @@ fn each_why_over_a_failing_resolver() {
     let (pdf, fonts) = fonts_that_reach();
     for (font, reached) in &fonts {
         for &failing in reached {
-            for why in [Why::Limit, Why::Locked, Why::Source] {
+            for why in [Why::Capped, Why::Locked, Why::Source] {
                 let objects = Failing {
                     pdf: &pdf,
                     failing,
@@ -1499,7 +1499,7 @@ fn fonts_and_their_scope_say_why_a_font_doesn_t_read() {
     let resources = Object::from(held);
     let lim = &Limits::DEFAULT;
     let by_ref = Object::from(font);
-    for why in [Why::Limit, Why::Locked, Why::Source] {
+    for why in [Why::Capped, Why::Locked, Why::Source] {
         for failing in [font, named, held] {
             let objects = Failing {
                 pdf: &pdf,
@@ -1543,7 +1543,7 @@ fn fonts_and_their_scope_say_why_a_font_doesn_t_read() {
 
 /// A font trusts no `Streams`: what's given past what was asked is too large, the
 /// budget as it was, and what's given within it is charged; past a cap of what gives
-/// it (`Why::Limit`) is too large too, as past the budget is; what takes a password or
+/// it (`Why::Capped`) is too large too, as past the budget is; what takes a password or
 /// a source that failed is the `Err`; and a stream that's damaged, or through a filter
 /// the reader doesn't decode, is none, what the font makes of none told and nothing of
 /// the stream's own.
@@ -1578,9 +1578,11 @@ fn a_font_holds_a_streams_to_what_it_asked() {
 
     let given = |why: Why| move |_: usize| Err(Unreadable::new(to_unicode, why, "no"));
     let mut budget = 100;
-    let (font, _) = read(&given(Why::Limit), &mut budget, &mut Vec::new());
-    assert_eq!(font.err(), Some(Error::TooLarge));
-    assert_eq!(budget, 100);
+    for why in [Why::Limit, Why::Capped] {
+        let (font, _) = read(&given(why), &mut budget, &mut Vec::new());
+        assert_eq!(font.err(), Some(Error::TooLarge), "{why:?}");
+        assert_eq!(budget, 100);
+    }
     for why in [Why::Locked, Why::Source] {
         let mut budget = 100;
         let (font, _) = read(&given(why), &mut budget, &mut Vec::new());
@@ -2310,16 +2312,10 @@ fn base_encodings_as_pdfium_comes_to_them() {
     assert_eq!(quote(&pdf, with("Nope".into())), standard);
     assert_eq!(quote(&pdf, with(name.into())), win_ansi);
     assert_eq!(quote(&pdf, with(chain.into())), standard);
-    assert_eq!(
-        quote(&pdf, with(Object::text("WinAnsiEncoding"))),
-        standard
-    );
+    assert_eq!(quote(&pdf, with(Object::text("WinAnsiEncoding"))), standard);
     let base = |value: Object| with(dict! { "BaseEncoding" => value }.into());
     assert_eq!(quote(&pdf, base("WinAnsiEncoding".into())), win_ansi);
-    assert_eq!(
-        quote(&pdf, base(Object::text("WinAnsiEncoding"))),
-        win_ansi
-    );
+    assert_eq!(quote(&pdf, base(Object::text("WinAnsiEncoding"))), win_ansi);
     assert_eq!(quote(&pdf, base(name.into())), win_ansi);
     assert_eq!(quote(&pdf, base(chain.into())), standard);
     assert_eq!(quote(&pdf, base("MacExpertEncoding".into())), standard);
@@ -2777,10 +2773,7 @@ fn faults_are_told_where_they_are() {
     assert_eq!(
         faults(
             &pdf,
-            with(
-                "Widths",
-                vec![Object::from(600), Object::text("a")].into()
-            )
+            with("Widths", vec![Object::from(600), Object::text("a")].into())
         ),
         [Fault::NotANumber]
     );

@@ -2134,12 +2134,7 @@ mod tests {
         let mut five = Object::reference(5);
         assert!(!five.renumber(to));
         assert_eq!(five, Object::reference(5));
-        for mut scalar in [
-            Object::null(),
-            1.into(),
-            "N".into(),
-            Object::text("1 0 R"),
-        ] {
+        for mut scalar in [Object::null(), 1.into(), "N".into(), Object::text("1 0 R")] {
             let was = scalar.clone();
             assert!(!scalar.renumber(to), "{scalar:?}");
             assert_eq!(scalar, was);

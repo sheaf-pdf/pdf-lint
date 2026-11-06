@@ -647,7 +647,7 @@ impl Unread {
     /// ([`Unread::Missing`]), which `try_resolve` gives as no object, and
     /// else as a [`Document`]'s and a [`Reading`](crate::Reading)'s say it,
     /// so that a resolver over any [`Source`] can. Its [`Why`] is
-    /// [`Why::Damaged`], [`Why::Limit`] (past a cap the reader parses or
+    /// [`Why::Damaged`], [`Why::Capped`] (past a cap the reader parses or
     /// decodes under), [`Why::Locked`] (in an object stream that takes a
     /// password, or doesn't decrypt), or [`Why::Source`] where the source of
     /// the file's bytes didn't give them ([`Unread::Source`]), its message
@@ -664,9 +664,9 @@ impl Unread {
     /// that a new one is put with its like on purpose.
     fn why(&self) -> Why {
         match self {
-            Unread::Parse(parse::Error::Nested { .. } | parse::Error::Values { .. }) => Why::Limit,
+            Unread::Parse(parse::Error::Nested { .. } | parse::Error::Values { .. }) => Why::Capped,
             Unread::Container { why, .. } => match why {
-                Undecoded::Filters(Unfiltered::Filters { .. }) => Why::Limit,
+                Undecoded::Filters(Unfiltered::Filters { .. }) => Why::Capped,
                 Undecoded::Encrypted { .. } | Undecoded::Decrypt(_) => Why::Locked,
                 Undecoded::NotAStream | Undecoded::Filters(_) | Undecoded::Other(_) => Why::Damaged,
             },
@@ -1711,11 +1711,11 @@ mod tests {
             (parse_error(parse::Error::Header { at: 7 }), Why::Damaged),
             (
                 parse_error(parse::Error::Nested { limit: 2, at: 7 }),
-                Why::Limit,
+                Why::Capped,
             ),
             (
                 parse_error(parse::Error::Values { limit: 2, at: 7 }),
-                Why::Limit,
+                Why::Capped,
             ),
             (
                 Unread::Elsewhere {
@@ -1727,7 +1727,7 @@ mod tests {
             ),
             (container(Undecoded::NotAStream), Why::Damaged),
             (filters(Unfiltered::Filter), Why::Damaged),
-            (filters(Unfiltered::Filters { count: 26 }), Why::Limit),
+            (filters(Unfiltered::Filters { count: 26 }), Why::Capped),
             (
                 container(Undecoded::Encrypted {
                     filter: b"StdCF".to_vec(),
@@ -1746,7 +1746,7 @@ mod tests {
             (boxed(Unread::Undecodable { stream }), Why::Locked),
             (
                 boxed(parse_error(parse::Error::Nested { limit: 2, at: 7 })),
-                Why::Limit,
+                Why::Capped,
             ),
             (boxed(parse_error(parse::Error::End)), Why::Damaged),
             // The stream isn't in the file, though the object is listed.

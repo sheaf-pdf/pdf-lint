@@ -39,8 +39,9 @@ pub trait Streams {
     /// [`Why::Damaged`](crate::Why::Damaged) where it isn't a stream, doesn't
     /// read, or its decode fails before it gives a byte (a stream that
     /// decodes cleanly to nothing is empty data, not this);
-    /// [`Why::Limit`](crate::Why::Limit) past `limit`, or past a cap the
-    /// reader reads under; [`Why::Locked`](crate::Why::Locked) where it takes
+    /// [`Why::Limit`](crate::Why::Limit) past `limit`;
+    /// [`Why::Capped`](crate::Why::Capped) past a cap the reader reads
+    /// under; [`Why::Locked`](crate::Why::Locked) where it takes
     /// a password the reader wasn't given, or doesn't decrypt;
     /// [`Why::Filter`](crate::Why::Filter) through a filter the reader doesn't
     /// decode, or with a `/Filter` or `/DecodeParms` it can't take as written;

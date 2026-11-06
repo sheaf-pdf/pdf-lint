@@ -1996,8 +1996,7 @@ mod tests {
                 id
             })
         };
-        let page =
-            Object::from(dict! { "Self" => ObjectId::new(3, 0), "S" => Object::text("ab") });
+        let page = Object::from(dict! { "Self" => ObjectId::new(3, 0), "S" => Object::text("ab") });
         let toy = fuzz::Toy::default();
         let mut out = Vec::new();
         indirect_renumbered(&mut out, ObjectId::new(8, 0), &page, &toy, &to).unwrap();

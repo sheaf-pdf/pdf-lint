@@ -8,9 +8,10 @@ use crate::Unreadable;
 #[non_exhaustive]
 pub enum Error {
     /// What its streams decompress to is past what's left of the budget it's
-    /// read within, or a stream is past a cap of what gives its data, as what
-    /// gives it says ([`Why::Limit`](crate::Why::Limit)): a font asks for no
-    /// more than its budget, and can't tell the two apart.
+    /// read within ([`Why::Limit`](crate::Why::Limit)), or a stream is past a
+    /// cap of what gives its data ([`Why::Capped`](crate::Why::Capped)), which
+    /// a font reads as past its budget too; a later version may make a cap
+    /// met [`Error::Unreadable`], the caller's to know.
     #[error("a font's streams decompress past what's left to decompress")]
     TooLarge,
     /// An object or a stream a font reads doesn't read, for a reason that isn't
@@ -18,7 +19,8 @@ pub enum Error {
     /// an object that isn't there or a stream whose decode fails before it gives a
     /// byte, and [`Why::Filter`](crate::Why::Filter), a stream whose filters the
     /// reader doesn't decode, each read as none; nor a stream's
-    /// [`Why::Limit`](crate::Why::Limit), which is [`Error::TooLarge`]. A
+    /// [`Why::Limit`](crate::Why::Limit) or [`Why::Capped`](crate::Why::Capped),
+    /// which are [`Error::TooLarge`]. A
     /// locked file, a source that failed or a cap met is the caller's to know,
     /// not a font with no widths.
     #[error("{0}")]

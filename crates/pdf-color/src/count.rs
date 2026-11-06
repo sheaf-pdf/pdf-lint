@@ -1414,7 +1414,7 @@ mod tests {
             let read = components(damaged, &parsed, &Limits::DEFAULT);
             assert_eq!(read, Ok(want), "{text}");
             // `Why::Filter` only a stream's data is, never a resolver's answer.
-            for why in [Why::Limit, Why::Locked, Why::Source] {
+            for why in [Why::Capped, Why::Locked, Why::Source] {
                 let read = components(Failing { why }, &parsed, &Limits::DEFAULT);
                 let error = read.expect_err(text);
                 assert_eq!((error.id, error.why), (ObjectId::new(5, 0), why), "{text}");

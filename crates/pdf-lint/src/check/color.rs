@@ -117,7 +117,7 @@ const VISITS: &str = "a color space with more looked up than is read";
 fn unread(error: &Unreadable) -> &'static str {
     match error.why {
         Why::Locked => LOCKED,
-        Why::Limit => CAPPED,
+        Why::Limit | Why::Capped => CAPPED,
         Why::Source | Why::Detached => UNGIVEN,
         _ => UNREAD,
     }

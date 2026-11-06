@@ -170,7 +170,7 @@ impl<'o, R: Resolve<'o> + Copy> Plain<'o, R> {
                 }
             }
         }
-        self.failed(&Unreadable::new(last, Why::Limit, ""));
+        self.failed(&Unreadable::new(last, Why::Capped, ""));
         Plainly::Failed
     }
 

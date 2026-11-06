@@ -126,7 +126,7 @@ impl<S: ByteSource> Streams for WithReading<S> {
         let object = Source::get(&self.document, id);
         let object = Some(object.as_ref().map(|o| *o));
         let decoded = self.reading.decoded_within_as(id, object, limit);
-        lenient(id, decoded).map(Cow::Owned)
+        lenient(id, decoded, self.reading.capped_at(limit)).map(Cow::Owned)
     }
 }
 
@@ -435,7 +435,7 @@ mod tests {
                 }
             }
         }
-        // What each reading gives: the stream whole but past a limit, the
+        // What each reading gives: the stream whole but past the reader's cap, the
         // budget not its, what decoded of the corrupt one, and none of what
         // didn't decrypt cleanly.
         let given = |file: &[u8], passwords: &[Password], options: &Options| {
@@ -445,7 +445,7 @@ mod tests {
         assert_eq!(given(&plain, &[], &Options::DEFAULT), Ok(200));
         assert_eq!(
             given(&plain, &[], &limited(64, budget)),
-            Err((stream, Why::Limit))
+            Err((stream, Why::Capped))
         );
         assert_eq!(given(&plain, &[], &limited(default, 150)), Ok(200));
         assert!(given(&corrupt, &[], &Options::DEFAULT).is_ok_and(|n| n > 0 && n < 200));
