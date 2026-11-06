@@ -789,6 +789,13 @@ fn whole(taken: usize, n: usize) -> Result<(), ()> {
     }
 }
 
+/// Whether `byte` is PDF's white-space (ISO 32000-2, 7.2.3), which
+/// `ASCIIHexDecode` and `ASCII85Decode` ignore: NUL, tab, line feed, form
+/// feed, carriage return or space. Vertical tab isn't, though it's C's.
+const fn is_white_space(byte: u8) -> bool {
+    matches!(byte, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1125,6 +1132,17 @@ mod tests {
             error(vec![(0, Fault::NoEnd), (1, Fault::Truncated)]).to_string(),
             "filter 0: no end-of-data marker; filter 1: the data ends early"
         );
+    }
+
+    /// White-space is the six bytes of ISO 32000-2's table, and no other
+    /// byte of the 256.
+    #[test]
+    fn white_space_is_the_six_bytes_and_no_other() {
+        let six = [0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x20];
+        for byte in 0..=u8::MAX {
+            let expected = six.contains(&byte);
+            assert_eq!(super::is_white_space(byte), expected, "{byte:#04x}");
+        }
     }
 }
 

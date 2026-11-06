@@ -448,7 +448,6 @@ name = "pdf-filters"
 version = "0.1.0-alpha.1"
 dependencies = [
  "miniz_oxide",
- "pdf-tokenizer",
  "thiserror",
  "zlib-rs",
 ]
