@@ -9,9 +9,10 @@
 //!   decodes as far as a reader can take it, and [`Error`] has both what
 //!   decoded and each [`Fault`], so a checker can read the data and still
 //!   report what was wrong with it. Where the spec leaves a fault's reading
-//!   open, it's read as qpdf reads it; where a fault stops a filter, what
-//!   decoded before it is kept, which qpdf, giving the data undecoded,
-//!   doesn't keep.
+//!   open, it's read as qpdf reads it, but for an LZW table that fills,
+//!   read on past as PDFium reads it ([`Fault::TableFull`]); where a fault
+//!   stops a filter, what decoded before it is kept, which qpdf, giving the
+//!   data undecoded, doesn't keep.
 //! - **A limit on what comes out** of each filter, so what a small stream
 //!   decodes into is the caller's to bound: a filter holds its input and
 //!   its output, whose buffer grows by doubling.
@@ -1235,6 +1236,24 @@ mod tests {
             let expected = six.contains(&byte);
             assert_eq!(super::is_white_space(byte), expected, "{byte:#04x}");
         }
+    }
+
+    /// The README is shown on crates.io and docs.rs, where a path beside
+    /// the crate reaches nothing: its licence links are the repository's
+    /// URLs, the manifest's `repository` and the file, and no link of it
+    /// climbs out of the crate.
+    #[test]
+    fn the_readmes_licence_links_reach_the_files() {
+        let readme = include_str!("../README.md");
+        let repository = env!("CARGO_PKG_REPOSITORY");
+        for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
+            let link = format!("[{file}]({repository}/blob/main/{file})");
+            assert!(
+                readme.contains(&link),
+                "{file}'s link isn't the repository's URL"
+            );
+        }
+        assert!(!readme.contains("](../"), "a link climbs out of the crate");
     }
 }
 

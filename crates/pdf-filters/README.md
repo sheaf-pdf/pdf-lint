@@ -87,7 +87,11 @@ let decoded = decode(&out, &[encoder.filter()], 1 << 20, Backend::MinizOxide);
 assert_eq!(decoded.unwrap(), rows);
 ```
 
-Only Flate encodes, with no predictor or PNG's: what PDF writers write for data of any kind. `Encoder` and `Prediction` are non-exhaustive, so other encoders and predictions can join them; `Row` is too, though it's all five of PNG's filters.
+Only Flate encodes, with no predictor or PNG's: what PDF writers write for data of any kind.
+
+## Exhaustive on purpose, or not
+
+`Filter`, `Predictor`, `Layout`, `Error` and `Faults` are exhaustive on purpose: `Filter` is ISO 32000-2's filters for data of any kind, each with every parameter it reads, and `Predictor` the three readings of `/Predictor`, so a match on every filter or predictor is checked by the compiler, and a layout, an error and its faults are built and taken apart by their public fields; a new variant or field of any of them is a breaking release, a new standard filter among them, as every reader that names the filters must learn it. What may say more is `#[non_exhaustive]`, so it can grow in a minor release, a match on it needing a wildcard and a struct being made by the crate: `Fault`, as faults are found in data rather than designed, and `Backend`, `Prefix`, `Encoder`, `Prediction` and `Unencodable`, so a backend, a field of what a filter read, an encoder, a prediction or a reason can join them; and `Row`, though it's all five of PNG's filters, as making it exhaustive later is a minor release, where the other way round would be a breaking one. An `Encoder` variant's fields are each public, so an encoder is built by a literal, and a field more would be a breaking release.
 
 ## How it reads what the spec leaves open
 
@@ -113,4 +117,4 @@ miniz_oxide is safe Rust throughout; zlib-rs is faster to inflate, and to deflat
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE)) or MIT license ([LICENSE-MIT](../../LICENSE-MIT)) at your option.
+Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-APACHE)) or MIT license ([LICENSE-MIT](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-MIT)) at your option.
