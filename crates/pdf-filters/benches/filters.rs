@@ -25,7 +25,8 @@
 //! builds with either backend or both; "the first backend" is miniz_oxide
 //! where it's compiled in, else zlib-rs. Throughput is in bytes of the data
 //! decoded or encoded, so a decode and an encode of the same data read
-//! alike. Each input is held to decoding to its data before it's timed.
+//! alike. Each encoded input is held to decoding to its data before it's
+//! timed, and each encoder's output to decoding back to what it encoded.
 //! Nothing is read from disk, and the inputs are the same on every run.
 
 use std::collections::HashMap;
@@ -559,10 +560,15 @@ fn prefix_group(c: &mut Criterion) {
     lzw.time(c, "lzw", LZW, first);
 }
 
-/// `data` encoded by `encoder` on `backend`, timed as `name`, in bytes of
+/// `data` encoded by `encoder` on `backend`, held to decoding back to it
+/// by the filter the encoder names, then timed as `name`, in bytes of
 /// `data`, into one buffer, as a writer encodes into its own.
 fn encoding(c: &mut Criterion, name: &str, data: &[u8], encoder: Encoder, backend: Backend) {
     let mut out = Vec::new();
+    let encoded = encode(data, &[encoder], backend, &mut out);
+    assert!(encoded.is_ok(), "{name}: {encoded:?}");
+    let decoded = decode(&out, &[encoder.filter()], LIMIT, backend);
+    assert!(decoded.as_deref() == Ok(data), "{name}: its data");
     let mut group = c.benchmark_group("encode");
     group.throughput(Throughput::Bytes(data.len() as u64));
     group.bench_function(name, |b| {

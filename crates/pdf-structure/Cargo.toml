@@ -52,7 +52,8 @@ zlib-rs = ["pdf-filters/zlib-rs"]
 features = ["zlib-rs"]
 
 [dev-dependencies]
-# Both Flate backends, so that the tests read each file on each.
+# zlib-rs beside the miniz_oxide the normal dependency names, so that the
+# tests read each file on each Flate backend.
 pdf-filters = { workspace = true, features = ["zlib-rs"] }
 # The tests' encrypted files.
 pdf-crypt = { path = "../pdf-crypt", version = "0.1", features = ["writer"] }
