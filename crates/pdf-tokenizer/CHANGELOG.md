@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-11-06)
 
 A breaking release. 0.1.1 was never published: what it held is under this release too, after the breaking changes.
 
