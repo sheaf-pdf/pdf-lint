@@ -386,8 +386,9 @@ mod tests {
     }
 
     /// Over the limit, either predictor gives the whole rows that fit
-    /// under it, never part of one: three rows of four, limited to ten
-    /// bytes, give eight; limited to three, none.
+    /// under it, never part of one, whether the filter's own output was
+    /// over it or the rows it gave are: three rows of four, or two and
+    /// part of a third, limited to ten bytes give eight; to three, none.
     #[test]
     fn over_the_limit_either_predictor_gives_whole_rows() {
         let four = layout(1, 8, 4);
@@ -399,19 +400,25 @@ mod tests {
             .collect();
         for backend in backends() {
             for (data, predictor) in [
-                (&tagged, Predictor::Png(four)),
-                (&rows, Predictor::Tiff(four)),
+                (&tagged[..], Predictor::Png(four)),
+                (&rows[..], Predictor::Tiff(four)),
             ] {
-                let compressed = zlib(data, Level::DEFAULT, backend);
                 let flate = [Filter::Flate { predictor }];
+                let compressed = zlib(data, Level::DEFAULT, backend);
                 let whole = decode(&compressed, &flate, 12, backend).unwrap();
-                for (limit, kept) in [(10, 8), (3, 0)] {
-                    let error = decode(&compressed, &flate, limit, backend).unwrap_err();
-                    assert_eq!(
-                        (error.data, error.faults),
-                        (whole[..kept].to_vec(), [(0, Fault::Limit)].to_vec()),
-                        "{predictor:?} under {limit}"
-                    );
+                // Whole, and two bytes short, which the filter gives under
+                // its limit, the predictor finding the rows over it.
+                for data in [data, &data[..data.len() - 2]] {
+                    let compressed = zlib(data, Level::DEFAULT, backend);
+                    for (limit, kept) in [(10, 8), (3, 0)] {
+                        let error = decode(&compressed, &flate, limit, backend).unwrap_err();
+                        assert_eq!(
+                            (error.data, error.faults),
+                            (whole[..kept].to_vec(), [(0, Fault::Limit)].to_vec()),
+                            "{predictor:?}, {} bytes, under {limit}",
+                            data.len()
+                        );
+                    }
                 }
             }
         }
