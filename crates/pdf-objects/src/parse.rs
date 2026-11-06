@@ -69,6 +69,16 @@ pub struct Limits {
     /// holds in memory grows with its count of values more than with its
     /// bytes (an empty array is two bytes written, and tens in memory), so
     /// this caps that. 2^25 by default.
+    ///
+    /// At worst, a call's values take 288 bytes each in memory, on a 64-bit
+    /// target, besides their names' and strings' bytes: an element is held
+    /// in its array as an [`Object`], at most 72 bytes, and a key and its
+    /// value in their dictionary as an [`Entry`], at most 128, and an
+    /// array's or a dictionary's room grows as a `Vec`'s does, to at most
+    /// twice what it holds and at least four, so an array of one value
+    /// holds four `Object`s' room. Under the default, one call may then
+    /// hold 9 GiB, read from 64 MiB of arrays of one value nested in each
+    /// other.
     pub values: usize,
 }
 
@@ -107,6 +117,7 @@ pub trait Sink<'a> {
     /// PDFium's rules take ([`Parser::rules`]), runs only when they are,
     /// and a sink that doesn't want them is told none. True unless a sink
     /// says otherwise; asked as the parser reads.
+    #[must_use]
     fn wants(&self) -> bool {
         true
     }
@@ -442,6 +453,17 @@ fn lossy(bytes: &[u8]) -> Cow<'_, str> {
 /// parser where it was, though it has said the faults it read past before
 /// the error, all but [`Fault::HighByte`], which only a call that reads
 /// its object tells.
+///
+/// A parser reads nothing until a call asks it to, so one made and
+/// dropped is a mistake, which the compiler says:
+///
+/// ```compile_fail
+/// #![deny(unused_must_use)]
+/// use pdf_objects::parse::Parser;
+///
+/// Parser::at(b"1 0 obj 5 endobj", 0);
+/// ```
+#[must_use = "a parser is lazy: it reads nothing until a value is asked for"]
 #[derive(Clone)]
 pub struct Parser<'a> {
     data: &'a [u8],
@@ -486,7 +508,7 @@ impl<'a> Parser<'a> {
     /// there's nothing to read, and the offset is kept as it's given, which
     /// [`Error::Header`] names: a cross-reference can point there. The data
     /// is read whole, as a window that starts the file and ends it.
-    pub fn at(data: &'a [u8], offset: usize) -> Parser<'a> {
+    pub const fn at(data: &'a [u8], offset: usize) -> Parser<'a> {
         Parser {
             data,
             offset,
@@ -514,13 +536,13 @@ impl<'a> Parser<'a> {
     /// ([`StreamHead::declared`], [`StreamHead::scanned`]), ran to it. Read
     /// again in a window with more, or the file's last, a call reads as it
     /// would with the whole file.
-    pub fn window(self, base: usize, last: bool) -> Parser<'a> {
+    pub const fn window(self, base: usize, last: bool) -> Parser<'a> {
         Parser { base, last, ..self }
     }
 
     /// The parser, its data being object stream `stream`'s decoded data,
     /// which its spans are then in ([`Span::stream`]).
-    pub fn in_stream(self, stream: ObjectId) -> Parser<'a> {
+    pub const fn in_stream(self, stream: ObjectId) -> Parser<'a> {
         Parser {
             stream: Some(stream),
             ..self
@@ -530,14 +552,14 @@ impl<'a> Parser<'a> {
     /// The parser, reading strings as ciphertext ([`Str::Encrypted`]) when
     /// `ciphertext`: an encrypted file's, which its reader doesn't decrypt
     /// as it reads.
-    pub fn ciphertext(self, ciphertext: bool) -> Parser<'a> {
+    pub const fn ciphertext(self, ciphertext: bool) -> Parser<'a> {
         Parser { ciphertext, ..self }
     }
 
     /// The parser, reading under `limits`: values nested deeper than its
     /// `nesting`, or more of them in one call than its `values`, are an
     /// error ([`Error::Nested`], [`Error::Values`]).
-    pub fn limits(self, limits: Limits) -> Parser<'a> {
+    pub const fn limits(self, limits: Limits) -> Parser<'a> {
         Parser { limits, ..self }
     }
 
@@ -594,18 +616,26 @@ impl<'a> Parser<'a> {
     /// and the limits are the same. PDFium's object parser reads more
     /// loosely, a reference from any two number words, say, its generation
     /// unread, which isn't followed here.
-    pub fn rules(self, rules: Rules) -> Parser<'a> {
+    pub const fn rules(self, rules: Rules) -> Parser<'a> {
         Parser { rules, ..self }
     }
 
     /// Where it reads next, counted as its spans are, from a window's base:
     /// past what it has read, or where it was made at, as given, when it
     /// has read nothing. A call that fails leaves it where it was.
-    pub fn offset(&self) -> usize {
+    #[must_use]
+    pub const fn offset(&self) -> usize {
         self.place(self.offset)
     }
 
     /// The next value.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] where no value reads from where the parser is, or one
+    /// passes its [`Limits`]; and [`Error::Short`] where more of the file
+    /// could change what it reads ([`Parser::window`]). The parser is left
+    /// where it was.
     pub fn value(&mut self, sink: &mut (impl Sink<'a> + ?Sized)) -> Result<Object, Error> {
         match self.rules {
             Rules::Pdfium => self.value_by(Pdfium, sink),
@@ -637,6 +667,12 @@ impl<'a> Parser<'a> {
     /// by PDFium's, its integers are read as PDFium holds them, so `--5 0
     /// obj` is object 0, which ISO 32000-2 reads as no header, and a 0x80
     /// or 0xFF between its words is white-space, neither said.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Header`] where there's no `n g obj`, naming where the parser
+    /// was; [`Error::Short`] where more of the file could change what it
+    /// reads ([`Parser::window`]). The parser is left where it was.
     pub fn header(&mut self) -> Result<ObjectId, Error> {
         match self.rules {
             Rules::Pdfium => self.header_by(Pdfium),
@@ -670,6 +706,12 @@ impl<'a> Parser<'a> {
     /// doesn't follow it; or a dictionary with `stream` after it, read
     /// through `stream`'s end of line, said when it isn't CR LF or LF, to
     /// where its data starts.
+    ///
+    /// # Errors
+    ///
+    /// As [`Parser::value`]'s: [`Error`] where no value reads, or one passes
+    /// its [`Limits`]; and [`Error::Short`] where more of the file could
+    /// change what it reads. The parser is left where it was.
     pub fn body(
         &mut self,
         id: ObjectId,
@@ -700,9 +742,16 @@ impl<'a> Parser<'a> {
 
     /// The stream `head` began, its data `data`, which its caller chose:
     /// one of [`StreamHead::declared`] and [`StreamHead::scanned`]; then
-    /// `endstream`, and `endobj`, said when it doesn't follow. Data that
-    /// doesn't start where the stream's does, ends before it starts, runs
-    /// past what the parser reads, or is in other data, is an error.
+    /// `endstream`, and `endobj`, said when it doesn't follow.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Extent`] for data that doesn't start where the stream's
+    /// does, ends before it starts, runs past what the parser reads, or is
+    /// in other data; [`Error::Endstream`] where `endstream` doesn't follow
+    /// it; and [`Error::Short`] where the data, or the look for
+    /// `endstream`, reached the end of a window that isn't the file's last
+    /// ([`Parser::window`]). The parser is left where it was.
     pub fn stream(
         &mut self,
         head: StreamHead<'a>,
@@ -736,7 +785,7 @@ impl<'a> Parser<'a> {
 
     /// Offset `at` of the data, counted where spans are: from the window's
     /// base, in the file.
-    fn place(&self, at: usize) -> usize {
+    const fn place(&self, at: usize) -> usize {
         self.base.saturating_add(at)
     }
 
@@ -1384,6 +1433,7 @@ pub enum Body<'a> {
 /// It's one parse's, borrowing the data the parser reads, and it remembers
 /// when an extent ran to the end of a window ([`Parser::window`]) for
 /// [`Parser::stream`].
+#[must_use = "a stream's head is read to its data: the rest is read by Parser::stream"]
 pub struct StreamHead<'a> {
     id: ObjectId,
     dict: Dict,
@@ -1436,24 +1486,28 @@ impl Clone for StreamHead<'_> {
 
 impl StreamHead<'_> {
     /// Its dictionary.
-    pub fn dict(&self) -> &Dict {
+    #[must_use]
+    pub const fn dict(&self) -> &Dict {
         &self.dict
     }
 
     /// Where its `stream` keyword was written.
-    pub fn keyword(&self) -> Span {
+    #[must_use]
+    pub const fn keyword(&self) -> Span {
         self.keyword
     }
 
     /// Where its data starts: after `stream` and its end of line, counted
     /// as its spans are.
-    pub fn start(&self) -> usize {
+    #[must_use]
+    pub const fn start(&self) -> usize {
         self.base.saturating_add(self.start)
     }
 
     /// Its data by a `/Length` of `length`: that many bytes from where it
     /// starts, when `endstream` follows them, past white-space (and
     /// comments) by its parser's rules; else none.
+    #[must_use]
     pub fn declared(&self, length: usize) -> Option<Span> {
         let end = self.start.checked_add(length)?;
         if end > self.data.len() {
@@ -1475,6 +1529,7 @@ impl StreamHead<'_> {
 
     /// Its data up to the first `endstream`, found by scanning, wherever
     /// it is; or to the end of what the parser reads, when none comes.
+    #[must_use]
     pub fn scanned(&self) -> Span {
         let data = Tokenizer::at(self.data, self.start).data_until(b"endstream");
         if data.end() == self.data.len() {
@@ -2041,6 +2096,54 @@ mod tests {
         assert_eq!(Limits::DEFAULT.values, 1 << 25);
         assert_eq!(Limits::default(), Limits::DEFAULT);
         assert_eq!(Parser::at(b"", 0).limits, Limits::DEFAULT);
+    }
+
+    /// A parser is made, and set, at compile time, and says where it is
+    /// there; what a stream's head says of itself is read by `const fn`s.
+    #[test]
+    fn a_parser_is_made_at_compile_time() {
+        const PARSER: Parser<'static> = Parser::at(b"%x\n[1 0 R]", 3)
+            .window(10, true)
+            .in_stream(ObjectId::new(4, 0))
+            .ciphertext(true)
+            .limits(Limits::DEFAULT)
+            .rules(Rules::Pdfium);
+        const OFFSET: usize = PARSER.offset();
+        assert_eq!(OFFSET, 13);
+        let mut parser = PARSER;
+        let value = parser.value(&mut ()).unwrap();
+        assert_eq!(value.at, Some(Span::new(Some(ObjectId::new(4, 0)), 13, 20)));
+        assert_eq!(parser.offset(), 20);
+
+        const fn parts<'h>(head: &'h StreamHead<'_>) -> (&'h Dict, Span, usize) {
+            (head.dict(), head.keyword(), head.start())
+        }
+        let data = b"1 0 obj << /Length 2 >> stream\nab\nendstream endobj";
+        let mut parser = Parser::at(data, 0);
+        let id = parser.header().unwrap();
+        let Ok(Body::Stream(head)) = parser.body(id, &mut ()) else {
+            panic!("a stream");
+        };
+        let (dict, keyword, start) = parts(&head);
+        assert_eq!(dict.get(b"Length").and_then(Object::as_integer), Some(2));
+        assert_eq!((keyword, start), (Span::new(None, 24, 30), 31));
+    }
+
+    /// What a call's values take in memory at worst, as `Limits::values`
+    /// says it, on a 64-bit target: an `Object` at most 72 bytes and an
+    /// `Entry`, a key and its value, at most 128, so an array of one value,
+    /// four `Object`s' room, takes the most, 288 bytes a value, and the
+    /// default lets a call hold 9 GiB. An upper bound, as the layout is the
+    /// compiler's to choose.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn a_value_holds_at_most_what_the_limits_say() {
+        assert!(size_of::<Object>() <= 72, "{}", size_of::<Object>());
+        assert!(size_of::<Entry>() <= 128, "{}", size_of::<Entry>());
+        let most = 4 * 72;
+        assert!(4 * size_of::<Object>() <= most);
+        assert!(4 * size_of::<Entry>() / 2 <= most);
+        assert_eq!(most * Limits::DEFAULT.values, 9 << 30);
     }
 
     /// A parser reads as many values in one call as its limits allow, its

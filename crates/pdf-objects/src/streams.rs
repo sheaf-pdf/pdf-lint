@@ -30,7 +30,12 @@ use crate::{Resolve, Unreadable};
 /// [`Why::Limit`](crate::Why::Limit). A caller doesn't trust what it's
 /// given: data longer than it asked for is past the limit, whatever gave it.
 pub trait Streams {
-    /// Stream `id`'s data, at most `limit` bytes of it; or why there's none:
+    /// Stream `id`'s data, at most `limit` bytes of it. `id` is the stream's
+    /// own number: a caller has followed any reference to it.
+    ///
+    /// # Errors
+    ///
+    /// [`Unreadable`], saying why there's none:
     /// [`Why::Damaged`](crate::Why::Damaged) where it isn't a stream, doesn't
     /// read, or its decode fails before it gives a byte (a stream that
     /// decodes cleanly to nothing is empty data, not this);
@@ -43,8 +48,7 @@ pub trait Streams {
     /// bytes didn't give them, which asked again may;
     /// [`Why::Detached`](crate::Why::Detached) where the reader holds no
     /// stream's data and has nothing to read it from, as a document alone
-    /// hasn't, which asked again won't. `id` is the stream's own number: a
-    /// caller has followed any reference to it.
+    /// hasn't, which asked again won't.
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable>;
 }
 
@@ -88,7 +92,8 @@ pub struct WithStreams<R, F> {
 
 impl<R, F> WithStreams<R, F> {
     /// `objects`, its streams' data by `streams`.
-    pub fn new(objects: R, streams: F) -> WithStreams<R, F> {
+    #[must_use]
+    pub const fn new(objects: R, streams: F) -> WithStreams<R, F> {
         WithStreams { objects, streams }
     }
 }
@@ -244,6 +249,25 @@ mod tests {
             let why = locked.decoded(ObjectId::new(4, 0), 1).unwrap_err();
             assert_eq!((why.why, why.to_string()), (given, "no bytes".into()));
         }
+    }
+
+    /// A `WithStreams` of functions is made at compile time.
+    #[test]
+    fn with_streams_is_made_at_compile_time() {
+        type Objects = fn(ObjectId) -> Option<&'static Object>;
+        type Streamed = fn(ObjectId, usize) -> Result<Vec<u8>, Unreadable>;
+        fn none(_: ObjectId) -> Option<&'static Object> {
+            None
+        }
+        fn empty(_: ObjectId, _: usize) -> Result<Vec<u8>, Unreadable> {
+            Ok(Vec::new())
+        }
+        const WITH: WithStreams<Objects, Streamed> = WithStreams::new(none, empty);
+        assert!(WITH.resolve(ObjectId::new(1, 0)).is_none());
+        assert_eq!(
+            WITH.decoded(ObjectId::new(1, 0), 1),
+            Ok(Cow::Borrowed(&[][..]))
+        );
     }
 
     /// What a function gives past the limit, `WithStreams` gives as it is: holding

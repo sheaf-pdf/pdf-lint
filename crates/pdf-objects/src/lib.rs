@@ -142,12 +142,19 @@ pub use version::Version;
 pub trait Resolve<'o> {
     /// Object `id`; none when there's none to give: the file hasn't it, or
     /// it doesn't read.
+    #[must_use]
     fn resolve(&self, id: ObjectId) -> Option<&'o Object>;
 
     /// Object `id`; none when the file hasn't it; or why it doesn't read.
     /// By default what [`Resolve::resolve`] gives, for a resolver that can't
-    /// say why. A resolver never says [`Why::Filter`] or [`Why::Detached`],
-    /// which only a stream's data is ([`Streams::decoded`]).
+    /// say why.
+    ///
+    /// # Errors
+    ///
+    /// [`Unreadable`] where the file has object `id` and it doesn't read,
+    /// saying why ([`Why`]), never [`Why::Filter`] or [`Why::Detached`],
+    /// which only a stream's data is ([`Streams::decoded`]); by default,
+    /// never.
     fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
         Ok(self.resolve(id))
     }
@@ -170,6 +177,7 @@ pub struct Unreadable {
 
 impl Unreadable {
     /// Object `id` doesn't read, for `why`, as `message` says.
+    #[must_use]
     pub fn new(id: ObjectId, why: Why, message: impl Into<String>) -> Unreadable {
         Unreadable {
             id,

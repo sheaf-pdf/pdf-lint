@@ -32,6 +32,7 @@ pub struct ObjectId {
 
 impl ObjectId {
     /// Object `number`, generation `generation`.
+    #[must_use]
     pub const fn new(number: u32, generation: u16) -> ObjectId {
         ObjectId { number, generation }
     }
@@ -72,6 +73,7 @@ pub struct Span {
 
 impl Span {
     /// Bytes `start..end` of the file, or of stream `stream`'s decoded data.
+    #[must_use]
     pub const fn new(stream: Option<ObjectId>, start: usize, end: usize) -> Span {
         Span { stream, start, end }
     }
@@ -240,17 +242,20 @@ pub enum Data {
 
 impl Object {
     /// `value`, not placed.
-    pub fn new(value: Value) -> Object {
+    #[must_use]
+    pub const fn new(value: Value) -> Object {
         Object { value, at: None }
     }
 
     /// The null object, not placed.
-    pub fn null() -> Object {
+    #[must_use]
+    pub const fn null() -> Object {
         Object::new(Value::Null)
     }
 
     /// A reference to object `n`, generation 0.
-    pub fn reference(n: u32) -> Object {
+    #[must_use]
+    pub const fn reference(n: u32) -> Object {
         Object::new(Value::Ref(ObjectId::new(n, 0)))
     }
 
@@ -259,6 +264,7 @@ impl Object {
     /// with no mark are PDFDocEncoding, so it reads back as `text` only
     /// when that's ASCII, but for 0x18–0x1F and 0x7F: `é` reads back as
     /// `Ã©`: [`Object::text`] writes a text string.
+    #[must_use]
     pub fn string(text: &str) -> Object {
         Object::new(Value::String(Str::Bytes(text.as_bytes().to_vec()), None))
     }
@@ -266,6 +272,7 @@ impl Object {
     /// A text string (ISO 32000-2, 7.9.2.2) that reads back as `text`: the
     /// bytes [`text::encode`] gives, written as a literal string when
     /// they're as they are, and as a hex string when they're UTF-16BE.
+    #[must_use]
     pub fn text(text: &str) -> Object {
         let form = if text::as_it_is(text) {
             Form::Literal
@@ -276,16 +283,19 @@ impl Object {
     }
 
     /// A string of `bytes`, its form not chosen.
+    #[must_use]
     pub fn bytes(bytes: impl Into<Vec<u8>>) -> Object {
         Object::new(Value::String(Str::Bytes(bytes.into()), None))
     }
 
     /// A string of `bytes`, written as a hex string.
+    #[must_use]
     pub fn hex(bytes: impl Into<Vec<u8>>) -> Object {
         Object::new(Value::String(Str::Bytes(bytes.into()), Some(Form::Hex)))
     }
 
     /// A stream of `dict`, whose data isn't placed.
+    #[must_use]
     pub fn stream(dict: Dict) -> Object {
         Object::new(Value::Stream(Box::new(Stream {
             dict,
@@ -294,19 +304,21 @@ impl Object {
     }
 
     /// The same value, written at `at`.
-    pub fn at(self, at: Span) -> Object {
-        Object {
-            at: Some(at),
-            ..self
-        }
+    #[must_use]
+    pub const fn at(mut self, at: Span) -> Object {
+        // Set in place, as a `const fn` can't drop what `..self` would leave.
+        self.at = Some(at);
+        self
     }
 
     /// Its value.
-    pub fn value(&self) -> &Value {
+    #[must_use]
+    pub const fn value(&self) -> &Value {
         &self.value
     }
 
     /// Its value, without where it was written.
+    #[must_use]
     pub fn into_value(self) -> Value {
         self.value
     }
@@ -329,7 +341,8 @@ impl Object {
     }
 
     /// A boolean's value.
-    pub fn as_bool(&self) -> Option<bool> {
+    #[must_use]
+    pub const fn as_bool(&self) -> Option<bool> {
         match self.value {
             Value::Bool(b) => Some(b),
             _ => None,
@@ -337,6 +350,7 @@ impl Object {
     }
 
     /// A name's bytes.
+    #[must_use]
     pub fn as_name(&self) -> Option<&[u8]> {
         match &self.value {
             Value::Name(name) => Some(name),
@@ -345,7 +359,8 @@ impl Object {
     }
 
     /// An integer's value.
-    pub fn as_integer(&self) -> Option<i64> {
+    #[must_use]
+    pub const fn as_integer(&self) -> Option<i64> {
         match self.value {
             Value::Integer(i) => Some(i),
             _ => None,
@@ -353,7 +368,8 @@ impl Object {
     }
 
     /// An integer's or a real's value.
-    pub fn as_number(&self) -> Option<f64> {
+    #[must_use]
+    pub const fn as_number(&self) -> Option<f64> {
         match self.value {
             Value::Integer(i) => Some(i as f64),
             Value::Real(r) => Some(r),
@@ -362,6 +378,7 @@ impl Object {
     }
 
     /// A string's bytes, when the reader gave them ([`Str::as_bytes`]).
+    #[must_use]
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match &self.value {
             Value::String(s, _) => s.as_bytes(),
@@ -370,6 +387,7 @@ impl Object {
     }
 
     /// An array's elements.
+    #[must_use]
     pub fn as_array(&self) -> Option<&[Object]> {
         match &self.value {
             Value::Array(array) => Some(array),
@@ -378,6 +396,7 @@ impl Object {
     }
 
     /// A dictionary, or a stream's dictionary.
+    #[must_use]
     pub fn as_dict(&self) -> Option<&Dict> {
         match &self.value {
             Value::Dict(dict) => Some(dict),
@@ -387,6 +406,7 @@ impl Object {
     }
 
     /// A stream.
+    #[must_use]
     pub fn as_stream(&self) -> Option<&Stream> {
         match &self.value {
             Value::Stream(stream) => Some(stream),
@@ -434,7 +454,8 @@ impl Object {
     }
 
     /// The object a reference names.
-    pub fn as_reference(&self) -> Option<ObjectId> {
+    #[must_use]
+    pub const fn as_reference(&self) -> Option<ObjectId> {
         match self.value {
             Value::Ref(id) => Some(id),
             _ => None,
@@ -442,7 +463,8 @@ impl Object {
     }
 
     /// Whether it's the null object.
-    pub fn is_null(&self) -> bool {
+    #[must_use]
+    pub const fn is_null(&self) -> bool {
         matches!(self.value, Value::Null)
     }
 
@@ -553,6 +575,7 @@ impl Object {
 impl Str {
     /// The string as text (ISO 32000-2, 7.9.2.2), however it's encoded;
     /// none for ciphertext.
+    #[must_use]
     pub fn text(&self) -> Option<String> {
         match self {
             Str::Bytes(bytes) => Some(text::decode(bytes).text),
@@ -562,6 +585,7 @@ impl Str {
     }
 
     /// Its bytes, when the reader gave them.
+    #[must_use]
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Str::Bytes(bytes) => Some(bytes),
@@ -572,7 +596,8 @@ impl Str {
 
 impl Data {
     /// Where it was written, when it's [`Data::At`].
-    pub fn at(&self) -> Option<Span> {
+    #[must_use]
+    pub const fn at(&self) -> Option<Span> {
         match self {
             Data::At(at) => Some(*at),
             _ => None,
@@ -580,6 +605,7 @@ impl Data {
     }
 
     /// Its bytes, when it's [`Data::Bytes`].
+    #[must_use]
     pub fn bytes(&self) -> Option<&[u8]> {
         match self {
             Data::Bytes(bytes) => Some(bytes),
@@ -590,6 +616,7 @@ impl Data {
 
 impl Stream {
     /// A stream of `dict` and `bytes`, its `/Length` set to their length.
+    #[must_use]
     pub fn new(dict: Dict, bytes: Vec<u8>) -> Stream {
         let mut stream = Stream {
             dict,
@@ -614,16 +641,19 @@ impl Dict {
     };
 
     /// A dictionary with no entries.
-    pub fn new() -> Dict {
-        Dict::default()
+    #[must_use]
+    pub const fn new() -> Dict {
+        Dict::EMPTY
     }
 
     /// `key`'s value: its last entry's.
+    #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<&Object> {
         self.entry(key).map(|entry| &entry.value)
     }
 
     /// `key`'s value, its last entry's, to change.
+    #[must_use]
     pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut Object> {
         (self.entries.iter_mut().rev())
             .find(|entry| entry.key == key)
@@ -631,21 +661,25 @@ impl Dict {
     }
 
     /// `key`'s last entry.
+    #[must_use]
     pub fn entry(&self, key: &[u8]) -> Option<&Entry> {
         self.entries.iter().rev().find(|entry| entry.key == key)
     }
 
     /// Whether it has `key`.
+    #[must_use]
     pub fn has(&self, key: &[u8]) -> bool {
         self.entry(key).is_some()
     }
 
     /// Its `/Type`, when that's a name.
+    #[must_use]
     pub fn type_name(&self) -> Option<&[u8]> {
         self.get(b"Type").and_then(Object::as_name)
     }
 
     /// Whether its `/Type` is the name `name`.
+    #[must_use]
     pub fn has_type(&self, name: &[u8]) -> bool {
         self.type_name() == Some(name)
     }
@@ -684,6 +718,7 @@ impl Dict {
     }
 
     /// Every entry as written, duplicates and all.
+    #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
@@ -695,11 +730,13 @@ impl Dict {
     }
 
     /// How many keys it has.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len() - Shadowed::of(&self.entries).len()
     }
 
     /// Whether it has no entries.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -1219,6 +1256,32 @@ mod tests {
             }
         );
         assert_eq!((ID.number, ID.generation), (12, 3));
+    }
+
+    /// A value that holds nothing on the heap is made at compile time,
+    /// placed or not, and so is a dictionary with no entries; a value's
+    /// readings that give a `Copy` value read it there too.
+    #[test]
+    fn values_are_made_and_read_at_compile_time() {
+        const AT: Span = Span::new(None, 3, 8);
+        const PLACED: &Object = &Object::reference(7).at(AT);
+        const REAL: &Object = &Object::new(Value::Real(5.5));
+        const NULL: &Object = &Object::null();
+        const EMPTY: &Dict = &Dict::new();
+        const VALUE: &Value = PLACED.value();
+        const READ: (Option<bool>, Option<i64>, Option<f64>) =
+            (REAL.as_bool(), REAL.as_integer(), REAL.as_number());
+        const NAMED: (Option<ObjectId>, Option<ObjectId>) =
+            (PLACED.as_reference(), REAL.as_reference());
+        const NULLS: (bool, bool) = (NULL.is_null(), PLACED.is_null());
+        const DATA: (Option<Span>, Option<Span>) = (Data::At(AT).at(), Data::Unplaced.at());
+        assert_eq!(PLACED.at, Some(AT));
+        assert_eq!(*VALUE, Value::Ref(ObjectId::new(7, 0)));
+        assert_eq!(READ, (None, None, Some(5.5)));
+        assert_eq!(NAMED, (Some(ObjectId::new(7, 0)), None));
+        assert_eq!(NULLS, (true, false));
+        assert_eq!((NULL.at, EMPTY), (None, &Dict::EMPTY));
+        assert_eq!(DATA, (Some(AT), None));
     }
 
     /// Ids order and hash as their pairs do: by number, then generation,

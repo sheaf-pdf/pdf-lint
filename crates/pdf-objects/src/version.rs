@@ -16,6 +16,7 @@ pub struct Version {
 
 impl Version {
     /// Version `major.minor`.
+    #[must_use]
     pub const fn new(major: u8, minor: u8) -> Version {
         Version { major, minor }
     }
@@ -23,6 +24,7 @@ impl Version {
     /// The version `text` writes, as a header's `%PDF-1.7` or a catalog's
     /// `/Version` does after its prefix: digits, a point, digits, with
     /// white-space around them allowed.
+    #[must_use]
     pub fn parse(text: &[u8]) -> Option<Version> {
         let text = std::str::from_utf8(text).ok()?;
         let (major, minor) = text.trim().split_once('.')?;
