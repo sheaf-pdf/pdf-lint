@@ -1,9 +1,11 @@
 [workspace]
 resolver = "3"
-# pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects, pdf-structure,
-# pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts, pdf-linearize and
-# pdf-arlington inherit nothing from here, so each can move to a repository of
-# its own unchanged.
+# The crates are published from this one repository. What a member requires
+# of another crate here on a release line is said once, in
+# [workspace.dependencies] below, and taken with `workspace = true`, so a
+# release moves every requirement on that crate in one edit. A crate joins
+# the table as its first release is made ready; until then, its dependents
+# name its path and version themselves. Nothing else is inherited from here.
 members = [
     "crates/pdf-tokenizer",
     "crates/pdf-filters",
@@ -20,6 +22,14 @@ members = [
 ]
 # fuzz/ builds on nightly, with libFuzzer.
 exclude = ["fuzz"]
+
+# Each crate by its path here and the version its dependents require once
+# published: pdf-tokenizer's by caret; pdf-objects' exactly, as an alpha
+# promises nothing of the next, and a requirement matches a pre-release only
+# where it names one.
+[workspace.dependencies]
+pdf-tokenizer = { path = "crates/pdf-tokenizer", version = "0.2" }
+pdf-objects = { path = "crates/pdf-objects", version = "=0.1.0-alpha.1" }
 
 # pdf-crypt's revision 6 hash runs thousands of AES blocks and SHA-2
 # digests for a password; it and the RustCrypto crates under it built
