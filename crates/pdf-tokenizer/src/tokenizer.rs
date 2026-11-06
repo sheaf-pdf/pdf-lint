@@ -183,7 +183,7 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// every token passed. It's the token iterating on to the first such
     /// one finds, and leaves the tokenizer where that leaves it, but it
     /// makes no token of the white-space (ISO 32000-2, 7.2.4, reads a
-    /// comment as white-space too).
+    /// comment as white-space too). One step of [`significant`](Self::significant).
     ///
     /// ```
     /// use pdf_tokenizer::Tokenizer;
@@ -224,7 +224,8 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
     /// From an array's or a dictionary's opening token, skimming on to the
     /// token that closes it passes it without reading what it holds. Which
     /// closes which, how deep they may nest, and what a string that doesn't
-    /// close means are the caller's to say: the skim judges nothing.
+    /// close means are the caller's to say: the skim judges nothing. One
+    /// step of [`skimming`](Self::skimming).
     ///
     /// ```
     /// use pdf_tokenizer::{Kind, Tokenizer};
@@ -289,7 +290,106 @@ impl<'a, R: RuleSet> Tokenizer<'a, R> {
             bytes,
         }
     }
+
+    /// The tokens that are neither white-space nor a comment, from here on,
+    /// as an iterator: [`next_significant`](Self::next_significant) repeated.
+    /// It borrows the tokenizer, and advances it: when the loop ends, the
+    /// tokenizer is where the last token asked for left it, so a reader can
+    /// go on with [`skim`](Self::skim), [`data_until`](Self::data_until) or
+    /// any other step from there. Every token has its bytes and its offset
+    /// in the input as ever; only the white-space and comments between them
+    /// make no token.
+    ///
+    /// ```
+    /// use pdf_tokenizer::{Kind, Tokenizer};
+    ///
+    /// let mut tokens = Tokenizer::new(b"<< /Length 42 >> % a comment\nstream\n");
+    /// let dict: Vec<_> = tokens.significant().take_while(|t| t.kind != Kind::DictClose).collect();
+    /// assert_eq!(dict.len(), 3);
+    /// assert!(tokens.next_significant().is_some_and(|t| t.is_keyword(b"stream")));
+    /// assert_eq!(tokens.eol().map(|t| t.bytes), Some(&b"\n"[..]));
+    /// ```
+    #[inline]
+    pub fn significant(&mut self) -> Significant<'_, 'a, R> {
+        Significant { tokens: self }
+    }
+
+    /// The tokens that open or close an array or a dictionary, and the
+    /// strings that don't close, from here on, as an iterator:
+    /// [`skim`](Self::skim) repeated. It borrows the tokenizer and advances
+    /// it, as [`significant`](Self::significant) does.
+    ///
+    /// ```
+    /// use pdf_tokenizer::{Kind, Tokenizer};
+    ///
+    /// let mut tokens = Tokenizer::new(b"[1 (a]) <</A [2]>>] 3");
+    /// let mut depth = 0usize;
+    /// for token in tokens.skimming() {
+    ///     match token.kind {
+    ///         Kind::ArrayOpen | Kind::DictOpen => depth += 1,
+    ///         _ => depth -= 1,
+    ///     }
+    ///     if depth == 0 {
+    ///         break;
+    ///     }
+    /// }
+    /// assert_eq!(tokens.next_significant().map(|t| t.bytes), Some(&b"3"[..]));
+    /// ```
+    #[inline]
+    pub fn skimming(&mut self) -> Skimming<'_, 'a, R> {
+        Skimming { tokens: self }
+    }
 }
+
+/// [`Tokenizer::significant`]: the tokens that are neither white-space nor a
+/// comment, from a tokenizer it borrows and advances.
+#[must_use = "an iterator is lazy: it reads nothing until a token is asked for"]
+#[derive(Debug)]
+pub struct Significant<'t, 'a, R: RuleSet> {
+    tokens: &'t mut Tokenizer<'a, R>,
+}
+
+impl<'a, R: RuleSet> Iterator for Significant<'_, 'a, R> {
+    type Item = Token<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Token<'a>> {
+        self.tokens.next_significant()
+    }
+
+    /// None, when what's left may be white-space and comments alone; at
+    /// most a token a byte.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.tokens.remaining().len()))
+    }
+}
+
+impl<R: RuleSet> FusedIterator for Significant<'_, '_, R> {}
+
+/// [`Tokenizer::skimming`]: the tokens that open or close an array or a
+/// dictionary, and the strings that don't close, from a tokenizer it
+/// borrows and advances.
+#[must_use = "an iterator is lazy: it reads nothing until a token is asked for"]
+#[derive(Debug)]
+pub struct Skimming<'t, 'a, R: RuleSet> {
+    tokens: &'t mut Tokenizer<'a, R>,
+}
+
+impl<'a, R: RuleSet> Iterator for Skimming<'_, 'a, R> {
+    type Item = Token<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Token<'a>> {
+        self.tokens.skim()
+    }
+
+    /// None, when nothing left opens or closes; at most a token a byte.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.tokens.remaining().len()))
+    }
+}
+
+impl<R: RuleSet> FusedIterator for Skimming<'_, '_, R> {}
 
 impl<'a, R: RuleSet> Iterator for Tokenizer<'a, R> {
     type Item = Token<'a>;
@@ -1001,6 +1101,46 @@ mod tests {
                 fuzz::skimmed(input, at, Rules::Pdfium);
             }
         }
+    }
+
+    /// The views step as the methods do, and leave the tokenizer where the
+    /// last token asked for left it: a loop over `significant()` cut short
+    /// by `take_while`, then `skim()` from there, then the rest.
+    #[test]
+    fn the_views_step_as_the_methods_do_and_leave_the_tokenizer_there() {
+        for input in INPUTS {
+            for at in 0..=input.len() {
+                let mut by_view = Tokenizer::at(input, at);
+                let mut by_step = Tokenizer::at(input, at);
+                let viewed: Vec<_> = by_view.significant().collect();
+                let stepped: Vec<_> = core::iter::from_fn(|| by_step.next_significant()).collect();
+                assert_eq!(viewed, stepped);
+                assert_eq!(by_view.offset(), by_step.offset());
+                let mut by_view = Tokenizer::at(input, at).with_rules(Rules::Pdfium);
+                let mut by_step = Tokenizer::at(input, at).with_rules(Rules::Pdfium);
+                let viewed: Vec<_> = by_view.skimming().collect();
+                let stepped: Vec<_> = core::iter::from_fn(|| by_step.skim()).collect();
+                assert_eq!(viewed, stepped);
+                assert_eq!(by_view.offset(), by_step.offset());
+            }
+        }
+        let input = b"<< /A [1 2] /B (x) >> 3 % c\n4";
+        let mut tokens = Tokenizer::new(input);
+        let keys: Vec<_> = tokens
+            .significant()
+            .take_while(|t| t.kind != Kind::DictClose)
+            .filter(|t| t.kind == Kind::Name)
+            .map(|t| t.bytes)
+            .collect();
+        assert_eq!(keys, [&b"/A"[..], b"/B"]);
+        assert_eq!(tokens.offset(), 21, "after the `>>` take_while took");
+        let rest: Vec<_> = tokens.significant().map(|t| t.bytes).collect();
+        assert_eq!(rest, [&b"3"[..], b"4"]);
+        assert_eq!(tokens.offset(), input.len());
+        let mut tokens = Tokenizer::new(input);
+        assert_eq!(tokens.skimming().size_hint(), (0, Some(input.len())));
+        assert_eq!(tokens.skimming().count(), 4, "<< [ ] >>");
+        assert_eq!(tokens.significant().size_hint(), (0, Some(0)));
     }
 
     /// `data_until` stops where a look at every window finds its marker
