@@ -341,7 +341,7 @@ impl fmt::Debug for Error {
 ///
 /// Exhaustive on purpose: the faults alone, its field public, as an
 /// [`Error`]'s are.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 pub struct Faults(pub Vec<(usize, Fault)>);
 
 impl fmt::Display for Faults {
