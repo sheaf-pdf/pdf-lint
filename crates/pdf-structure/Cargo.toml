@@ -16,7 +16,7 @@ pdf-crypt = { path = "../pdf-crypt", version = "0.1" }
 # miniz_oxide named, not taken from pdf-filters' default features: it's
 # `Options::DEFAULT`'s backend, and `write::Deflate::DEFAULT`'s, which every
 # build of this crate has.
-pdf-filters = { path = "../pdf-filters", version = "0.1", default-features = false, features = ["miniz_oxide"] }
+pdf-filters = { workspace = true, features = ["miniz_oxide"] }
 pdf-objects.workspace = true
 pdf-tokenizer.workspace = true
 # The file `fixtures` hands qpdf a stream in.
@@ -52,8 +52,9 @@ zlib-rs = ["pdf-filters/zlib-rs"]
 features = ["zlib-rs"]
 
 [dev-dependencies]
-# Both Flate backends, so that the tests read each file on each.
-pdf-filters = { path = "../pdf-filters", version = "0.1", features = ["zlib-rs"] }
+# zlib-rs beside the miniz_oxide the normal dependency names, so that the
+# tests read each file on each Flate backend.
+pdf-filters = { workspace = true, features = ["zlib-rs"] }
 # The tests' encrypted files.
 pdf-crypt = { path = "../pdf-crypt", version = "0.1", features = ["writer"] }
 # The tests' folders of their own, removed after.

@@ -9,9 +9,10 @@
 //!   decodes as far as a reader can take it, and [`Error`] has both what
 //!   decoded and each [`Fault`], so a checker can read the data and still
 //!   report what was wrong with it. Where the spec leaves a fault's reading
-//!   open, it's read as qpdf reads it; where a fault stops a filter, what
-//!   decoded before it is kept, which qpdf, giving the data undecoded,
-//!   doesn't keep.
+//!   open, it's read as qpdf reads it, but for an LZW table that fills,
+//!   read on past as PDFium reads it ([`Fault::TableFull`]); where a fault
+//!   stops a filter, what decoded before it is kept, which qpdf, giving the
+//!   data undecoded, doesn't keep.
 //! - **A limit on what comes out** of each filter, so what a small stream
 //!   decodes into is the caller's to bound: a filter holds its input and
 //!   its output, whose buffer grows by doubling.
@@ -97,7 +98,13 @@ pub enum Backend {
 }
 
 /// A standard filter for data of any kind, with what its parameters say.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Exhaustive on purpose: these are ISO 32000-2's filters for data of any
+/// kind (7.4), each with every parameter it reads, so a match on every
+/// filter is checked by the compiler, as a reader that names or decodes
+/// them wants. A new standard filter would be a breaking release, as every
+/// such reader must learn it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Filter {
     /// `ASCIIHexDecode`: hex digits, white-space between them ignored, up
     /// to `>`.
@@ -127,7 +134,11 @@ pub enum Filter {
 /// What an LZW or Flate filter's `/Predictor` says was done to the data
 /// before it was compressed, undone after it's decompressed (ISO 32000-2,
 /// 7.4.4.4).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// Exhaustive on purpose: `/Predictor` is read one of these three ways, so
+/// a match on every one is checked by the compiler; another would be a
+/// breaking release.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Predictor {
     /// `/Predictor 1`, the default: nothing.
     #[default]
@@ -142,7 +153,11 @@ pub enum Predictor {
 }
 
 /// How the data a predictor works on is laid out in rows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Exhaustive on purpose: these are the three parameters a predictor reads
+/// its rows by, each field public, so a layout is built by a literal and
+/// taken apart by its fields; a field more would be a breaking release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Layout {
     /// `/Colors`: samples a pixel, 1 or more.
     pub colors: u32,
@@ -166,7 +181,7 @@ impl Default for Layout {
 /// What's wrong with a filter's data, or its parameters. Each says
 /// whether the filter stopped there: when it didn't, what it gave is the
 /// whole of what a reader reads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
     /// A byte the filter doesn't take, at `at` in its input: in
@@ -272,14 +287,29 @@ pub enum Fault {
     /// bits a sample other than 1, 2, 4, 8 or 16. Nothing was decoded.
     #[error("its predictor's parameters aren't ones it takes")]
     Parameters,
-    /// The filter's output over the limit. It stopped there, with as much
-    /// as the limit allows.
+    /// The filter's output over the limit the call was given: before a
+    /// PNG predictor, that limit and a tag a row ([`decode`] says so). It
+    /// stopped there, with as much as the limit allows: behind a predictor,
+    /// the whole rows that fit under it, none where a row is over it. The
+    /// crate has no cap of its own, so the limit this says is always the
+    /// caller's.
     #[error("its output is over the limit")]
     Limit,
 }
 
 /// Data that didn't decode cleanly: what decoded, and why it's not clean.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+///
+/// Its `Debug` gives the length of what decoded, not its bytes, which may
+/// be a whole stream's, decrypted before it was decoded:
+/// `Error { data: 23 bytes, faults: [(0, Checksum)] }`. So two errors whose
+/// data are the same length have the same `Debug`, whatever their bytes: a
+/// test compares errors by `==`, never by their `Debug` text, and shows
+/// `data` itself where it needs the bytes.
+///
+/// Exhaustive on purpose: what decoded and its faults, each field public,
+/// so an error is built by a literal and taken apart by its fields; a
+/// field more would be a breaking release.
+#[derive(Clone, PartialEq, Eq, thiserror::Error)]
 pub struct Error {
     /// What decoded, through every filter: each given what the one before
     /// it gave, however far that went.
@@ -295,10 +325,23 @@ impl fmt::Display for Error {
     }
 }
 
+impl fmt::Debug for Error {
+    /// What decoded by its length, not its bytes, and each fault.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Error")
+            .field("data", &format_args!("{} bytes", self.data.len()))
+            .field("faults", &self.faults)
+            .finish()
+    }
+}
+
 /// Why data decoded into a caller's buffer didn't decode cleanly: each
 /// fault, with the index of its filter in the list, in the list's order,
 /// as an [`Error`] has them; what decoded is in the buffer.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+///
+/// Exhaustive on purpose: the faults alone, its field public, as an
+/// [`Error`]'s are.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 pub struct Faults(pub Vec<(usize, Fault)>);
 
 impl fmt::Display for Faults {
@@ -321,10 +364,18 @@ fn said(faults: &[(usize, Fault)], f: &mut fmt::Formatter<'_>) -> fmt::Result {
 /// `data` decoded by `filters` in their order, as a stream's `/Filter`
 /// lists them, no filter's output over `limit` bytes; an LZW or Flate
 /// filter's before its predictor is allowed a PNG predictor's tag a row
-/// besides; Flate inflated by `backend`. With no filters, it's `data`. The
-/// limit bounds what's allocated, so it should be one that can be: a short
-/// last row is read with zeros up to it. It's [`decode_into`] an empty
-/// `Vec`, which is then cut to its length.
+/// besides; Flate inflated by `backend`. With no filters, it's `data`
+/// whole, past the limit or not, as the limit bounds what filters give.
+/// The limit bounds what's allocated, so it should be one that can be: a
+/// short last row is read with zeros up to it. It's [`decode_into`] an
+/// empty `Vec`, which is then cut to its length.
+///
+/// # Errors
+///
+/// An [`Error`] when the data doesn't decode cleanly: what decoded,
+/// through every filter, however far that went, and each [`Fault`] with
+/// its filter's index, a filter's output over the limit among them
+/// ([`Fault::Limit`]).
 pub fn decode(
     data: &[u8],
     filters: &[Filter],
@@ -342,10 +393,16 @@ pub fn decode(
 
 /// `data` decoded as [`decode`] decodes it, appended to `out`: what `out`
 /// held is kept, before it, and `limit` bounds what's added, the last
-/// filter's output, not what was there. With faults, `out` has what
-/// decoded, as an [`Error`]'s `data` does. The last filter decodes
-/// straight into `out`, grown with zeros as it fills and cut to what was
-/// written; those before it each into a buffer of its own.
+/// filter's output, not what was there; with no filters, `data` is added
+/// whole, as [`decode`] gives it. With faults, `out` has what decoded, as
+/// an [`Error`]'s `data` does. The last filter decodes straight into
+/// `out`, grown with zeros as it fills and cut to what was written; those
+/// before it each into a buffer of its own.
+///
+/// # Errors
+///
+/// [`Faults`] when the data doesn't decode cleanly: each fault with its
+/// filter's index, as an [`Error`] has them, `out` having what decoded.
 pub fn decode_into(
     data: &[u8],
     filters: &[Filter],
@@ -468,6 +525,12 @@ impl Prefix {
 /// assert_eq!((out, decoded), (b"Hi".to_vec(), Ok(())));
 /// assert_eq!((prefix.read, prefix.ended), (6, true));
 /// ```
+///
+/// # Errors
+///
+/// The second of what it gives is [`Faults`] when the data doesn't decode
+/// cleanly, each fault the one filter's, at index 0, `out` having what
+/// decoded; the [`Prefix`] is given either way.
 pub fn decode_prefix_into(
     data: &[u8],
     filter: Filter,
@@ -523,7 +586,12 @@ fn one(
 
 /// What a filter does to data as a writer encodes it: the filter, and
 /// what the writer chooses that decoding doesn't need to know.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// `#[non_exhaustive]`, as other filters' encoders may join it. A
+/// variant's fields are each public, so an encoder is built by a literal,
+/// and a field more (a deflater's strategy, say) would be a breaking
+/// release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Encoder {
     /// `FlateDecode`'s zlib data (RFC 1950), its data first predicted as
@@ -541,7 +609,8 @@ impl Encoder {
     /// `/Filter` and `/DecodeParms` say, but for which of PNG's predictors
     /// `/Predictor` names, 10 to 15, any of which decodes alike, so the
     /// filter doesn't hold it: that's [`Prediction::predictor`].
-    pub fn filter(&self) -> Filter {
+    #[must_use]
+    pub const fn filter(&self) -> Filter {
         match *self {
             Encoder::Flate { predictor, .. } => Filter::Flate {
                 predictor: match predictor {
@@ -568,6 +637,7 @@ impl Level {
     pub const BEST: Level = Level(9);
 
     /// Level `level`, unless it's over 9.
+    #[must_use]
     pub const fn new(level: u8) -> Option<Level> {
         match level {
             0..=9 => Some(Level(level)),
@@ -576,6 +646,7 @@ impl Level {
     }
 
     /// Its number, 0 to 9.
+    #[must_use]
     pub const fn get(self) -> u8 {
         self.0
     }
@@ -590,7 +661,7 @@ impl Default for Level {
 
 /// What an encoder does to data before it's compressed, which its
 /// filter's [`Predictor`] undoes (ISO 32000-2, 7.4.4.4).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Prediction {
     /// Nothing, `/Predictor 1`.
@@ -606,6 +677,7 @@ impl Prediction {
     /// The `/Predictor` a writer writes for it: 1 for none, and for PNG's
     /// 10 plus its row filter's tag, so 12 for Up, as cross-reference
     /// streams are often written.
+    #[must_use]
     pub const fn predictor(self) -> u8 {
         match self {
             Prediction::None => 1,
@@ -616,6 +688,10 @@ impl Prediction {
 
 /// Which of PNG's filters predicts each row from the bytes before it in
 /// the row and the row above it, read as zeros for the first row.
+///
+/// `#[non_exhaustive]`, though these are all five of PNG's filters:
+/// making it exhaustive later is a minor release, where the other way
+/// round would be a breaking one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Row {
@@ -637,6 +713,7 @@ pub enum Row {
 
 impl Row {
     /// Its tag, the first byte of each row it predicts: 0 to 4.
+    #[must_use]
     pub const fn tag(self) -> u8 {
         match self {
             Row::None => 0,
@@ -649,7 +726,7 @@ impl Row {
 }
 
 /// Why data can't be encoded as its encoders say. Nothing was written.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unencodable {
     /// A predictor's [`Layout`] that isn't one: no colors or columns, or
@@ -679,6 +756,12 @@ pub enum Unencodable {
 /// the same backend. With flate2 1.1 on the same versions of miniz_oxide
 /// and zlib-rs, the bytes were found the same at levels 6 and 9; that's
 /// measured, not promised, as a release of either can change them.
+///
+/// # Errors
+///
+/// [`Unencodable`] when an encoder's PNG predictor has a [`Layout`] that
+/// isn't one, or the data it's given isn't whole rows of it, whichever
+/// encoder in the list that is; `out` is then as it was.
 pub fn encode(
     data: &[u8],
     encoders: &[Encoder],
@@ -789,6 +872,13 @@ fn whole(taken: usize, n: usize) -> Result<(), ()> {
     }
 }
 
+/// Whether `byte` is PDF's white-space (ISO 32000-2, 7.2.3), which
+/// `ASCIIHexDecode` and `ASCII85Decode` ignore: NUL, tab, line feed, form
+/// feed, carriage return or space. Vertical tab isn't, though it's C's.
+const fn is_white_space(byte: u8) -> bool {
+    matches!(byte, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -881,8 +971,9 @@ mod tests {
             let chain = [Filter::AsciiHex, flate];
             let chained = into(format!("{hex}>").as_bytes(), &chain, 100);
             assert_eq!(chained, (b"heldhello".to_vec(), Ok(())));
-            // No filters: the data, whole.
+            // No filters: the data, whole, past the limit, and so by decode.
             assert_eq!(into(b"plain", &[], 1), (b"heldplain".to_vec(), Ok(())));
+            assert_eq!(decode(b"plain", &[], 1, backend), Ok(b"plain".to_vec()));
             // What decode gives is what's added.
             let mut out = b"held".to_vec();
             let decoded = decode_into(&hello[..6], &[flate], 100, backend, &mut out);
@@ -1109,6 +1200,20 @@ mod tests {
         }
     }
 
+    /// An error's `Debug` gives what decoded by its length, not its bytes,
+    /// which may be a whole stream's, decrypted; and each fault.
+    #[test]
+    fn an_errors_debug_gives_its_datas_length_not_its_bytes() {
+        let error = Error {
+            data: b"a stream's decoded data".to_vec(),
+            faults: vec![(0, Fault::Checksum)],
+        };
+        assert_eq!(
+            format!("{error:?}"),
+            "Error { data: 23 bytes, faults: [(0, Checksum)] }"
+        );
+    }
+
     /// An error says each fault after its filter's index, in the list's
     /// order.
     #[test]
@@ -1125,6 +1230,35 @@ mod tests {
             error(vec![(0, Fault::NoEnd), (1, Fault::Truncated)]).to_string(),
             "filter 0: no end-of-data marker; filter 1: the data ends early"
         );
+    }
+
+    /// White-space is the six bytes of ISO 32000-2's table, and no other
+    /// byte of the 256.
+    #[test]
+    fn white_space_is_the_six_bytes_and_no_other() {
+        let six = [0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x20];
+        for byte in 0..=u8::MAX {
+            let expected = six.contains(&byte);
+            assert_eq!(super::is_white_space(byte), expected, "{byte:#04x}");
+        }
+    }
+
+    /// The README is shown on crates.io and docs.rs, where a path beside
+    /// the crate reaches nothing: its licence links are the repository's
+    /// URLs, the manifest's `repository` and the file, and no link of it
+    /// climbs out of the crate.
+    #[test]
+    fn the_readmes_licence_links_reach_the_files() {
+        let readme = include_str!("../README.md");
+        let repository = env!("CARGO_PKG_REPOSITORY");
+        for file in ["LICENSE-APACHE", "LICENSE-MIT"] {
+            let link = format!("[{file}]({repository}/blob/main/{file})");
+            assert!(
+                readme.contains(&link),
+                "{file}'s link isn't the repository's URL"
+            );
+        }
+        assert!(!readme.contains("](../"), "a link climbs out of the crate");
     }
 }
 

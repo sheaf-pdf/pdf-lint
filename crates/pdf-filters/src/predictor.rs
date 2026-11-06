@@ -385,6 +385,45 @@ mod tests {
         }
     }
 
+    /// Over the limit, either predictor gives the whole rows that fit
+    /// under it, never part of one, whether the filter's own output was
+    /// over it or the rows it gave are: three rows of four, or two and
+    /// part of a third, limited to ten bytes give eight; to three, none.
+    #[test]
+    fn over_the_limit_either_predictor_gives_whole_rows() {
+        let four = layout(1, 8, 4);
+        let rows: Vec<u8> = (1..=12).collect();
+        // PNG's rows each after its tag, None.
+        let tagged: Vec<u8> = rows
+            .chunks(4)
+            .flat_map(|row| [&[0], row].concat())
+            .collect();
+        for backend in backends() {
+            for (data, predictor) in [
+                (&tagged[..], Predictor::Png(four)),
+                (&rows[..], Predictor::Tiff(four)),
+            ] {
+                let flate = [Filter::Flate { predictor }];
+                let compressed = zlib(data, Level::DEFAULT, backend);
+                let whole = decode(&compressed, &flate, 12, backend).unwrap();
+                // Whole, and two bytes short, which the filter gives under
+                // its limit, the predictor finding the rows over it.
+                for data in [data, &data[..data.len() - 2]] {
+                    let compressed = zlib(data, Level::DEFAULT, backend);
+                    for (limit, kept) in [(10, 8), (3, 0)] {
+                        let error = decode(&compressed, &flate, limit, backend).unwrap_err();
+                        assert_eq!(
+                            (error.data, error.faults),
+                            (whole[..kept].to_vec(), [(0, Fault::Limit)].to_vec()),
+                            "{predictor:?}, {} bytes, under {limit}",
+                            data.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn tiff_adds_the_sample_a_pixel_before() {
         let tiff = Predictor::Tiff(layout(3, 8, 2));

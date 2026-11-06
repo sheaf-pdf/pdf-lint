@@ -42,7 +42,7 @@ use pdf_objects::Resolve;
 use pdf_objects::object::{Object, ObjectId, Span, Value};
 use pdf_objects::serialize;
 
-use crate::bytes::{ByteSource, Error, Options, Reading, Whole, XrefEntry};
+use crate::bytes::{ByteSource, Error, Options, Reading, Whole, XrefEntry, shown};
 use crate::source::{Document, Encryption, Origin, Source, Unread, XrefKind};
 use crate::write::{self, Base, Body, Encryptor, Pack};
 
@@ -423,8 +423,8 @@ fn streams(file: &[u8], passwords: &[Password], choice: u16) {
             format!("{read:?}"),
             "{id:?}'s data by position"
         );
-        let decoded = format!("{:?}", reading.decoded(id));
-        let read = format!("{:?}", by_position.decoded(id));
+        let decoded = shown(reading.decoded(id));
+        let read = shown(by_position.decoded(id));
         assert_eq!(decoded, read, "{id:?} decoded by position");
     }
 }

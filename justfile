@@ -42,7 +42,7 @@ default:
 
 # Everything CI runs, but `tokenizer-semver`, which needs cargo-semver-checks
 # installed.
-ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
+ci: fmt clippy test test-qpdf test-pdfium doc fuzzing dist structure-cross tokenizer-no-std tokenizer-core-only tokenizer-package objects-package filters-package tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv linearize-msrv arlington-msrv
 
 # Check formatting; `cargo fmt --all` fixes it.
 fmt:
@@ -50,15 +50,19 @@ fmt:
 
 # Lint every crate, with its tests and binaries; then the libraries and the
 # binary as they're built for use, without the features only their tests
-# turn on; then the filters with zlib-rs their only Flate backend; then the
-# content streams without `image-ends`, which pdf-lint turns on in every
-# workspace build; then pdf-semantics without its clock, as pdf-lint takes
-# it; then pdf-linearize's engine, without its adapter, and with lopdf's,
-# which nothing else turns on; then pdf-fonts with Adobe's predefined
-# CMaps, which nothing else turns on, and with no feature at all.
+# turn on; then the filters with their default alone, miniz_oxide, the
+# build a dependent that names no feature gets, which the workspace's
+# unified features hide (its other members turn zlib-rs on), and with
+# zlib-rs their only Flate backend; then the content streams without
+# `image-ends`, which pdf-lint turns on in every workspace build; then
+# pdf-semantics without its clock, as pdf-lint takes it; then
+# pdf-linearize's engine, without its adapter, and with lopdf's, which
+# nothing else turns on; then pdf-fonts with Adobe's predefined CMaps,
+# which nothing else turns on, and with no feature at all.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
+    cargo clippy --locked -p pdf-filters --all-targets -- -D warnings
     cargo clippy --locked -p pdf-filters --no-default-features --features zlib-rs --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
@@ -70,12 +74,15 @@ clippy:
 # Unit tests and doctests: the workspace's, where the filters have both
 # Flate backends, as pdf-structure's tests turn zlib-rs on, and the content
 # streams `image-ends`, as pdf-lint turns it on; then the filters' with
+# their default alone, miniz_oxide, the build a dependent that names no
+# feature gets, which the workspace's unified features hide, and with
 # zlib-rs alone; then the content streams' without `image-ends`; then
 # pdf-semantics' without its clock; then pdf-linearize's engine, without
 # its adapter, and with lopdf's; then pdf-fonts' with Adobe's predefined
 # CMaps, and with no feature at all.
 test:
     cargo test --locked --workspace
+    cargo test --locked -p pdf-filters
     cargo test --locked -p pdf-filters --no-default-features --features zlib-rs
     cargo test --locked -p pdf-content-streams
     cargo test --locked -p pdf-semantics --no-default-features
@@ -290,6 +297,9 @@ tokenizer-package: (_package "pdf-tokenizer")
 
 # Package pdf-objects as a publish would; `_package` says what's checked.
 objects-package: (_package "pdf-objects")
+
+# Package the filters as a publish would; `_package` says what's checked.
+filters-package: (_package "pdf-filters")
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs

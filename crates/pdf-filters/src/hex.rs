@@ -1,7 +1,6 @@
 //! `ASCIIHexDecode` (ISO 32000-2, 7.4.2).
 
-use crate::{Fault, Out, Prefix};
-use pdf_tokenizer::is_white_space;
+use crate::{Fault, Out, Prefix, is_white_space};
 
 /// `data`'s hex digits as bytes, up to `>`, white-space ignored; an odd
 /// last digit is as if a 0 followed it: what of `data` it read.

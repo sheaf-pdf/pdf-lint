@@ -1,14 +1,15 @@
 # pdf-filters
 
-PDF's standard filters for data of any kind, decoded, in one small Rust crate: `ASCIIHexDecode`, `ASCII85Decode`, `LZWDecode` and `FlateDecode` with their TIFF and PNG predictors, and `RunLengthDecode` (ISO 32000-2, §7.4). And `FlateDecode` encoded, with PNG's predictors, for a writer.
+PDF's standard filters for data of any kind, decoded, in one small Rust crate: `ASCIIHexDecode`, `ASCII85Decode`, `LZWDecode` and `FlateDecode` with their TIFF and PNG predictors, and `RunLengthDecode` (ISO 32000-2, §7.4). And `FlateDecode` encoded, with PNG's predictors, for a writer. It depends on its Flate backends and thiserror alone, no other PDF crate.
 
 It's made for a checker as much as a reader. Data that breaks a rule still decodes as far as a reader can take it, and every fault is said, so the data can be read and what was wrong with it reported too.
 
 ## What it promises
 
 - **Every fault said, what decoded kept.** `decode` gives the data, or an `Error` with both what decoded and each `Fault`, with the filter it's in: a byte a filter doesn't take, a missing end-of-data marker, an LZW code not in the table, corrupt or truncated deflate data, a checksum that doesn't match, a PNG row tag that isn't one, a short last row. Each fault's documentation says whether the filter stopped there, keeping what it decoded before, or read on.
-- **A limit on what comes out.** No filter's output is over the limit the caller gives (an LZW or Flate filter's before its predictor is allowed a PNG predictor's tag a row besides), so a small stream can't decode into more memory than the caller allows: a filter holds its input and its output, whose buffer grows by doubling. Data of just the limit's length decodes whole.
+- **A limit on what comes out.** No filter's output is over the limit the caller gives (an LZW or Flate filter's before its predictor is allowed a PNG predictor's tag a row besides), so a small stream can't decode into more memory than the caller allows: a filter holds its input and its output, whose buffer grows by doubling. Data of just the limit's length decodes whole. With no filters, `decode` gives the data whole, past the limit or not, as the limit bounds what filters give.
 - **Parameters, not dictionaries.** A `Filter` says what its `/DecodeParms` do. Reading them from a stream's dictionary is the caller's, so it works with any object model.
+- **Its backends alone.** It depends on its Flate backends, each compiled in by its feature (below), and on thiserror, which derives its errors' traits, and on no other PDF crate, so a reader or a writer with a parser of its own takes the filters and nothing more. PDF's white-space, which `ASCIIHexDecode` and `ASCII85Decode` ignore, is the crate's own: the six bytes §7.2.3 names (NUL, tab, line feed, form feed, carriage return and space).
 - **The same result every time,** with nothing but the input deciding it: no I/O, no global state.
 - **Either Flate backend, named at each call.** `FlateDecode` inflates and deflates through [miniz_oxide](https://crates.io/crates/miniz_oxide) (the `miniz_oxide` feature, on by default) or [zlib-rs](https://crates.io/crates/zlib-rs) (the `zlib-rs` feature), each compiled in by its feature, both if both are on. Each call that decodes or encodes names its `Backend`, which exists only with its feature, so turning a feature on, in this crate or any that depends on it, changes nothing a call gives. There's no precedence between them. Without either, the crate doesn't build.
 - **Into the caller's buffer.** `decode_into` appends what it decodes to a `Vec` the caller gives, keeping what it held (the limit counts only what's added), and `encode` appends what it encodes, so streams join in one buffer and one buffer serves many. `decode` gives a `Vec` of its own.
@@ -86,7 +87,11 @@ let decoded = decode(&out, &[encoder.filter()], 1 << 20, Backend::MinizOxide);
 assert_eq!(decoded.unwrap(), rows);
 ```
 
-Only Flate encodes, with no predictor or PNG's: what PDF writers write for data of any kind. `Encoder`, `Prediction` and `Row` are non-exhaustive, so others can join them.
+Only Flate encodes, with no predictor or PNG's: what PDF writers write for data of any kind.
+
+## Exhaustive on purpose, or not
+
+`Filter`, `Predictor`, `Layout`, `Error` and `Faults` are exhaustive on purpose: `Filter` is ISO 32000-2's filters for data of any kind, each with every parameter it reads, and `Predictor` the three readings of `/Predictor`, so a match on every filter or predictor is checked by the compiler, and a layout, an error and its faults are built and taken apart by their public fields; a new variant or field of any of them is a breaking release, a new standard filter among them, as every reader that names the filters must learn it. What may say more is `#[non_exhaustive]`, so it can grow in a minor release, a match on it needing a wildcard and a struct being made by the crate: `Fault`, as faults are found in data rather than designed, and `Backend`, `Prefix`, `Encoder`, `Prediction` and `Unencodable`, so a backend, a field of what a filter read, an encoder, a prediction or a reason can join them; and `Row`, though it's all five of PNG's filters, as making it exhaustive later is a minor release, where the other way round would be a breaking one. An `Encoder` variant's fields are each public, so an encoder is built by a literal, and a field more would be a breaking release.
 
 ## How it reads what the spec leaves open
 
@@ -112,4 +117,4 @@ miniz_oxide is safe Rust throughout; zlib-rs is faster to inflate, and to deflat
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE)) or MIT license ([LICENSE-MIT](../../LICENSE-MIT)) at your option.
+Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-APACHE)) or MIT license ([LICENSE-MIT](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-MIT)) at your option.

@@ -377,7 +377,7 @@ fn every_test_file_reads_the_same_on_either_flate_backend() {
             open(&file, &passwords, &zlib),
         );
         for id in miniz.ids().collect::<Vec<_>>() {
-            let data = |r: &Reading<&[u8]>| format!("{:?}", r.decoded(id));
+            let data = |r: &Reading<&[u8]>| shown(r.decoded(id));
             assert_eq!(data(&other), data(&miniz), "{name}, {id:?}");
             decoded += usize::from(miniz.decoded(id).is_ok());
         }
@@ -532,8 +532,8 @@ fn a_documents_stream_data_is_handed_out_by_the_reading_kept_beside_it() {
             let data = reading.data(id);
             let given = format!("{:?}", own.data(id));
             assert_eq!(format!("{data:?}"), given, "{name}: {id:?}'s data");
-            let decoded = format!("{:?}", reading.decoded(id));
-            assert_eq!(decoded, format!("{:?}", own.decoded(id)), "{name}: {id:?}");
+            let decoded = shown(reading.decoded(id));
+            assert_eq!(decoded, shown(own.decoded(id)), "{name}: {id:?}");
             if doc.encryption == Encryption::None {
                 let at = at.unwrap();
                 assert_eq!(data.unwrap(), &file[at.start..at.end], "{name}: {id:?}");

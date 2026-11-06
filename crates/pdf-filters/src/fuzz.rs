@@ -1,9 +1,9 @@
 //! What the fuzz target checks, which unit tests check too: the promises
 //! [`decode`](crate::decode), [`decode_into`](crate::decode_into),
 //! [`decode_prefix_into`](crate::decode_prefix_into) and
-//! [`encode`](crate::encode) make, on any input, any filters and any
-//! encoder, on each backend compiled in. It's compiled only for tests and
-//! under cargo-fuzz's `--cfg fuzzing`.
+//! [`encode`](crate::encode) make, on any input, any filters and one
+//! encoder or two, on each backend compiled in. It's compiled only for
+//! tests and under cargo-fuzz's `--cfg fuzzing`.
 
 use crate::{
     Backend, Encoder, Error, Fault, Faults, Filter, Layout, Level, Prediction, Predictor, Prefix,
@@ -180,10 +180,24 @@ pub fn filters(data: &[u8]) {
 /// the encoder's filter, under a limit of the input's length, gives the
 /// input; or, where it can't be encoded, the buffer as it was, for the
 /// reason the encoder gives.
+///
+/// Where the first byte's top bit is set, a second encoder is listed
+/// before that one, as a stream's `/Filter` would list it, so applied
+/// last: Flate with no predictor, at the level the next byte gives. The
+/// two then encode the input as the second alone encodes what the first
+/// gave, which decoded by their filters in the list's order, under a limit
+/// of the input's length or the first's output's, whichever is more, gives
+/// the input; or, where the first can't encode it, the buffer as it was,
+/// for the same reason.
 pub fn encoders(data: &[u8]) {
     let mut bytes = data.iter().copied();
     let mut next = || bytes.next().unwrap_or(0);
-    let level = Level::new(next() % 10).expect("0 to 9");
+    let first = next();
+    let level = Level::new(first % 10).expect("0 to 9");
+    let outer = (first & 0x80 != 0).then(|| Encoder::Flate {
+        level: Level::new(next() % 10).expect("0 to 9"),
+        predictor: Prediction::None,
+    });
     let row = [Row::None, Row::Sub, Row::Up, Row::Average, Row::Paeth][usize::from(next() % 5)];
     let (predictor, whole) = match next() {
         n if n % 3 == 0 => (Prediction::None, false),
@@ -232,19 +246,63 @@ pub fn encoders(data: &[u8]) {
             Some(_) => Ok(()),
         };
         assert_eq!(encoded, want, "{encoder:?}, {} bytes", input.len());
-        if encoded.is_err() {
-            assert_eq!(out, b"held", "the buffer as it was");
-            continue;
+        match encoded {
+            Err(_) => assert_eq!(out, b"held", "the buffer as it was"),
+            Ok(()) => {
+                assert_eq!(&out[..4], b"held", "what the buffer held, kept");
+                for decoder in backends() {
+                    let decoded = decode(&out[4..], &[encoder.filter()], input.len(), decoder);
+                    assert_eq!(
+                        decoded.as_deref(),
+                        Ok(input),
+                        "{encoder:?} on {backend:?}, by {decoder:?}"
+                    );
+                }
+            }
         }
-        assert_eq!(&out[..4], b"held", "what the buffer held, kept");
-        for decoder in backends() {
-            let decoded = decode(&out[4..], &[encoder.filter()], input.len(), decoder);
-            assert_eq!(
-                decoded.as_deref(),
-                Ok(input),
-                "{encoder:?} on {backend:?}, by {decoder:?}"
-            );
+        if let Some(outer) = outer {
+            listed_after(input, outer, encoder, backend, &out[4..], encoded);
         }
+    }
+}
+
+/// The promises [`encode`] makes of `input` encoded by `inner` listed
+/// after `outer`, Flate with no predictor, on `backend`, given what
+/// `inner` alone gave it, `alone`, and whether it could, `encoded`: the
+/// buffer as it was where `inner` can't encode it, for the same reason;
+/// otherwise `alone` encoded by `outer` alone, which decoded on each
+/// backend by their filters, in the list's order, gives the input.
+fn listed_after(
+    input: &[u8],
+    outer: Encoder,
+    inner: Encoder,
+    backend: Backend,
+    alone: &[u8],
+    encoded: Result<(), Unencodable>,
+) {
+    let mut out = b"held".to_vec();
+    let both = encode(input, &[outer, inner], backend, &mut out);
+    assert_eq!(both, encoded, "{outer:?}, {inner:?}: as {inner:?} alone");
+    if encoded.is_err() {
+        assert_eq!(out, b"held", "the buffer as it was, with two");
+        return;
+    }
+    let mut outer_alone = b"held".to_vec();
+    encode(alone, &[outer], backend, &mut outer_alone)
+        .expect("Flate without a predictor encodes anything");
+    assert_eq!(
+        out, outer_alone,
+        "{outer:?} applied last, to what {inner:?} gave, on {backend:?}"
+    );
+    let filters = [outer.filter(), inner.filter()];
+    let limit = input.len().max(alone.len());
+    for decoder in backends() {
+        let decoded = decode(&out[4..], &filters, limit, decoder);
+        assert_eq!(
+            decoded.as_deref(),
+            Ok(input),
+            "{outer:?}, {inner:?} on {backend:?}, by {decoder:?}"
+        );
     }
 }
 
@@ -347,10 +405,12 @@ mod tests {
         let mut seed = 0x6a09_e667_f3bc_c908;
         for i in 0..3_000 {
             let mut input = noise(&mut seed, (i % 400) + 1);
-            // Data that compresses, now and then: runs of a byte.
+            // Data that compresses, now and then: runs of a byte, eight
+            // long, after the bytes that choose the encoders, so that what
+            // the first gives can be shorter than the input or longer.
             if i % 3 == 0 {
-                for at in (8..input.len()).step_by(7) {
-                    input[at] = input[at - 8];
+                for at in (8..input.len()).filter(|at| at % 8 > 0) {
+                    input[at] = input[at - 1];
                 }
             }
             encoders(&input);

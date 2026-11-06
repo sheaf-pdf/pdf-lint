@@ -1,7 +1,6 @@
 //! `ASCII85Decode` (ISO 32000-2, 7.4.3).
 
-use crate::{Fault, Out, Prefix};
-use pdf_tokenizer::is_white_space;
+use crate::{Fault, Out, Prefix, is_white_space};
 
 /// `data`'s base-85 groups as bytes, up to `~>`, white-space ignored: what
 /// of `data` it read.
