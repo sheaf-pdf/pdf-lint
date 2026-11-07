@@ -240,7 +240,7 @@ pub fn encoders(data: &[u8]) {
         );
         let want = match rows {
             None => Err(Unencodable::Parameters),
-            Some(len) if input.len() % len > 0 => Err(Unencodable::PartialRow {
+            Some(len) if !input.len().is_multiple_of(len) => Err(Unencodable::PartialRow {
                 missing: len - input.len() % len,
             }),
             Some(_) => Ok(()),

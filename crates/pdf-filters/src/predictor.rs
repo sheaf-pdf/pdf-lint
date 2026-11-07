@@ -214,7 +214,7 @@ fn undo_tiff(row: &mut [u8], layout: Layout) {
                 row[byte] = row[byte] & !(mask << shift) | sum << shift;
             }
             let used = samples * bits;
-            if used % 8 != 0 {
+            if !used.is_multiple_of(8) {
                 row[used / 8] &= !(0xFF >> (used % 8));
             }
         }

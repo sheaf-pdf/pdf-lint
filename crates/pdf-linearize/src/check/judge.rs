@@ -431,13 +431,13 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
         if !matches!(first.root, Raw::Reference(_)) {
             self.say(Finding::FirstNoRoot)?;
         }
-        if let Some(row) = first.rows.first() {
-            if row.number != self.first_object.number {
-                self.say(Finding::FirstNotDictionary {
-                    number: row.number,
-                    dictionary: self.first_object.number,
-                })?;
-            }
+        if let Some(row) = first.rows.first()
+            && row.number != self.first_object.number
+        {
+            self.say(Finding::FirstNotDictionary {
+                number: row.number,
+                dictionary: self.first_object.number,
+            })?;
         }
         let Some(main) = &self.facts.main else {
             return self.say(Finding::NoMainSection);
@@ -503,10 +503,10 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             .map(|row| u64::from(row.number) + 1)
             .max()
             .unwrap_or(0);
-        if let Some(from) = first.rows.iter().map(|row| row.number).min() {
-            if u64::from(from) != next {
-                self.say(Finding::GroupsApart { first: from, next })?;
-            }
+        if let Some(from) = first.rows.iter().map(|row| row.number).min()
+            && u64::from(from) != next
+        {
+            self.say(Finding::GroupsApart { first: from, next })?;
         }
         if let Some(hint) = hint {
             // An indirect /Length follows the stream, and goes with it (Table
@@ -627,10 +627,10 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
             return self.say(Finding::NoPages);
         }
         let pages = facts.pages.len() as u64;
-        if let Raw::Integer(n) = first.n {
-            if u64::try_from(n) != Ok(pages) {
-                self.say(Finding::PageCount { n, pages })?;
-            }
+        if let Raw::Integer(n) = first.n
+            && u64::try_from(n) != Ok(pages)
+        {
+            self.say(Finding::PageCount { n, pages })?;
         }
         let page = self.first_page;
         let first_page = usize::try_from(page)
@@ -644,17 +644,17 @@ impl<S: Sink + ?Sized> Judge<'_, S> {
                     computed: id.number,
                 })?;
             }
-            if let Some(section) = &facts.first {
-                if !section.rows.iter().any(|row| row.number == id.number) {
-                    self.say(Finding::FirstPageNotFirst { number: id.number })?;
-                }
+            if let Some(section) = &facts.first
+                && !section.rows.iter().any(|row| row.number == id.number)
+            {
+                self.say(Finding::FirstPageNotFirst { number: id.number })?;
             }
         }
         for (at, page) in (0u64..).zip(&facts.pages) {
-            if let Some(ObjectId { number, .. }) = page.id {
-                if matches!(self.index.row(number), Some(RowEntry::Compressed { .. })) {
-                    self.say(Finding::PageCompressed { page: at, number })?;
-                }
+            if let Some(ObjectId { number, .. }) = page.id
+                && matches!(self.index.row(number), Some(RowEntry::Compressed { .. }))
+            {
+                self.say(Finding::PageCompressed { page: at, number })?;
             }
             let held = [
                 (page.resources, Attribute::Resources),

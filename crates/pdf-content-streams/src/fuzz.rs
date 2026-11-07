@@ -978,10 +978,10 @@ pub fn calls(data: &[u8]) {
     // One need a resource in each category, in the order first drawn.
     let mut drawn: Vec<(ResKind, ResId)> = Vec::new();
     for arg in want.iter().flat_map(|(_, args)| args) {
-        if let Arg::Res(kind, id) = arg {
-            if !drawn.contains(&(*kind, *id)) {
-                drawn.push((*kind, *id));
-            }
+        if let Arg::Res(kind, id) = arg
+            && !drawn.contains(&(*kind, *id))
+        {
+            drawn.push((*kind, *id));
         }
     }
     let given: Vec<_> = needs.0.iter().map(|n| (n.kind, n.res.id)).collect();

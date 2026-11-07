@@ -9,7 +9,7 @@ use std::convert::Infallible;
 use std::fmt;
 
 use pdf_crypt::rand_core::CryptoRng;
-use pdf_crypt::{Encoded, Fault, Handler, Method, Unusable};
+use pdf_crypt::{Fault, Handler, Method, Protection, Unusable};
 use pdf_objects::Resolve;
 use pdf_objects::object::{Dict, Object, ObjectId, Str, Value};
 use pdf_objects::serialize::{self, Encrypt, Renumber};
@@ -151,20 +151,21 @@ impl Encryptor {
         }
     }
 
-    /// A new file's encryption, of revision 6 (AES-256) for `password`,
-    /// prepared, as pdf-crypt's `Handler::create` makes it from `rng`'s
-    /// draws, the document's metadata encrypted as `encrypt_metadata` says;
-    /// its dictionary with its crypt filter's `/Length 32` (bytes, as qpdf
-    /// writes it) and `/AuthEvent /DocOpen`. Its key isn't made from the
-    /// file's `/ID` ([`Encryptor::first_id`] is none). Refused, as
-    /// `Handler::create` refuses, for a password that isn't prepared, or is
-    /// empty or too long.
+    /// A new file's encryption, of revision 6 (AES-256), protected as
+    /// `protection` says (its passwords, prepared, its permissions, and
+    /// whether the document's metadata is encrypted), as pdf-crypt's
+    /// `Handler::create` makes it from `rng`'s draws; its dictionary with
+    /// its crypt filter's `/Length 32` (bytes, as qpdf writes it) and
+    /// `/AuthEvent /DocOpen`. Its key isn't made from the file's `/ID`
+    /// ([`Encryptor::first_id`] is none). Refused, as `Handler::create`
+    /// refuses: for a password that isn't prepared, or is empty or too
+    /// long; for no password; and for permissions withheld where the
+    /// owner's password is the user's.
     pub fn create(
-        password: &Encoded,
-        encrypt_metadata: bool,
+        protection: &Protection,
         rng: &mut (impl CryptoRng + ?Sized),
     ) -> Result<Encryptor, Unusable> {
-        let (handler, values) = Handler::create(password, encrypt_metadata, rng)?;
+        let (handler, values) = Handler::create(protection, rng)?;
         let mut list = List {
             encrypts: true,
             ..List::default()

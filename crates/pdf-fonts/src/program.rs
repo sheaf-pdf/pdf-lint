@@ -734,11 +734,11 @@ fn composite_glyphs(
                     counted.insert((gid, depth), None);
                     return None;
                 };
-                if let Anchor::Point { base, component } = component.anchor {
-                    if u64::from(base) >= drawn.1 || u64::from(component) >= points {
-                        counted.insert((gid, depth), None);
-                        return None;
-                    }
+                if let Anchor::Point { base, component } = component.anchor
+                    && (u64::from(base) >= drawn.1 || u64::from(component) >= points)
+                {
+                    counted.insert((gid, depth), None);
+                    return None;
                 }
                 drawn = (
                     drawn.0.saturating_add(nodes),
@@ -1591,15 +1591,15 @@ impl<'a> Charmaps<'a> {
                 sfnt: Some(font), ..
             } => {
                 charmaps.glyphs = sfnt_glyphs;
-                if let Ok(post) = font.post() {
-                    if post.version().to_major_minor() != (3, 0) {
-                        charmaps.glyph_names = true;
-                        for gid in 0..charmaps.glyphs.min(u32::from(u16::MAX)) {
-                            if let Some(name) =
-                                post.glyph_name(skrifa::raw::types::GlyphId16::new(gid as u16))
-                            {
-                                named.push((gid, name.as_bytes().to_vec()));
-                            }
+                if let Ok(post) = font.post()
+                    && post.version().to_major_minor() != (3, 0)
+                {
+                    charmaps.glyph_names = true;
+                    for gid in 0..charmaps.glyphs.min(u32::from(u16::MAX)) {
+                        if let Some(name) =
+                            post.glyph_name(skrifa::raw::types::GlyphId16::new(gid as u16))
+                        {
+                            named.push((gid, name.as_bytes().to_vec()));
                         }
                     }
                 }
@@ -1722,10 +1722,8 @@ impl<'a> Charmaps<'a> {
         if !unicode {
             self.push_names(&named);
         }
-        if !keyed {
-            if let Some((encoding, codes)) = cff_encoding(cff) {
-                self.push_codes(encoding, codes);
-            }
+        if !keyed && let Some((encoding, codes)) = cff_encoding(cff) {
+            self.push_codes(encoding, codes);
         }
         match self.glyph_names {
             true => named,

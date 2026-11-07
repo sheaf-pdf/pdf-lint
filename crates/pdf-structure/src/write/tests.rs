@@ -11,9 +11,9 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use pdf_crypt::Fault;
 use pdf_crypt::rand_core::SeedableRng;
 use pdf_crypt::writer::{self, Kind, Settings};
+use pdf_crypt::{Fault, Protection};
 use pdf_filters::{Backend, Filter, Level, Predictor};
 use pdf_objects::dict;
 use pdf_objects::object::{Data, Dict, Form, Object, ObjectId, Span, Str, Stream, Value};
@@ -1467,7 +1467,7 @@ pub(crate) fn methods() -> Vec<Method> {
     .collect();
     let prepared = Password("user").prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(8);
-    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
     methods.push(all("AES-256 created", created));
     let mut eff = dictionary_of(Kind::Aes128, true);
     eff.set("StmF", "Identity");
@@ -2231,10 +2231,20 @@ fn what_cant_be_encrypted_is_refused_and_nothing_written() {
     assert!(encrypting.clear(at, Some(&dict! {}), true));
     let asked = encrypting.stream(at, &dict! {}, b"data");
     assert_eq!(asked, Err(Unencryptable::Dictionary));
-    // A password not prepared.
+    // A password not prepared; none; and permissions withheld under one
+    // password, which the owner's being the user's would lift.
     let mut rng = chacha20::ChaCha20Rng::seed_from_u64(8);
     let unprepared = pdf_crypt::Encoded::verbatim(b"user");
-    assert!(Encryptor::create(&unprepared, true, &mut rng).is_err());
+    let refused = Encryptor::create(&Protection::new(&unprepared), &mut rng);
+    let unprepared = pdf_crypt::Unusable::Unprepared(pdf_crypt::Encoding::Verbatim);
+    assert_eq!(refused.err(), Some(unprepared));
+    let refused = Encryptor::create(&Protection::DEFAULT, &mut rng);
+    assert_eq!(refused.err(), Some(pdf_crypt::Unusable::NoPassword));
+    let prepared = Password("user").prepared().unwrap();
+    let mut one = Protection::new(&prepared);
+    one.permissions = pdf_crypt::Permissions::NONE;
+    let refused = Encryptor::create(&one, &mut rng);
+    assert_eq!(refused.err(), Some(pdf_crypt::Unusable::Shared));
 }
 
 // Whole files and updates (`write::full`, `document`, `update`), read
@@ -3882,7 +3892,7 @@ fn a_decrypting_write_and_a_new_revision_6_read_back() {
             .and_then(Object::as_reference);
         assert_eq!(encrypt, Some(ObjectId::new(ENCRYPT, 0)), "{}", method.name);
         let mut rng = ChaCha20Rng::seed_from_u64(9);
-        let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+        let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
         for (way, encryptor) in [("decrypted", None), ("created", Some(&created))] {
             let name = format!("{}, {way}", method.name);
             let mut out = Vec::new();
@@ -4054,7 +4064,7 @@ fn a_body_at_a_number_the_file_lists_free_is_refused_where_keys_are_per_object()
     // A new encryption's key is new; a file that isn't encrypted has none.
     let mut rng = ChaCha20Rng::seed_from_u64(10);
     let prepared = Password("user").prepared().unwrap();
-    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
     let given = [
         (ObjectId::new(1, 0), write::Body::from(&catalog)),
         (ObjectId::new(2, 0), write::Body::from(&two)),
@@ -5132,7 +5142,7 @@ fn a_reference_to_no_object_names_none_of_the_writer_s_own() {
     // too.
     let mut rng = ChaCha20Rng::seed_from_u64(11);
     let prepared = Password("user").prepared().unwrap();
-    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
     let mut out = Vec::new();
     let options = write::Options::DEFAULT;
     write::full(
@@ -5366,7 +5376,7 @@ fn objects_at_offsets_are_copied_under_their_own_reading_s_encryption_alone() {
     let (plain, _) = plaintext();
     let prepared = Password("new").prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(12);
-    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
     for kind in KINDS_ENCRYPTED {
         let source = written_otherwise(kind, true);
         let reading = opened(&source, "user");
@@ -5415,7 +5425,7 @@ fn parts_copy_only_what_is_encrypted_under_the_key_it_was_read_under() {
 
     let prepared = Password("new").prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(14);
-    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
 
     // Written object by object, whether each is what it was read from.
     fn each_copied<'a, S: ByteSource + 'a>(
@@ -5556,7 +5566,7 @@ fn a_copy_is_of_its_own_number_and_object_or_refused() {
     // So too under a new encryption, which copies nothing at an offset.
     let prepared = Password("user").prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(12);
-    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
     let mut out = Vec::new();
     let refused = write::full(
         &mut out,
@@ -5889,7 +5899,7 @@ fn members_are_copied_into_object_streams_under_any_encryption() {
     let doc = reading.to_document().unwrap();
     let prepared = Password("new").prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(13);
-    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
     let pack = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
     let assert_back = |out: &[u8], password: &str, name: &str| {
         let back = opened(out, password);
@@ -6421,7 +6431,7 @@ fn a_copy_under_a_renumbering_is_its_bytes_but_its_header_and_the_references_mov
     let doc = reading.to_document().unwrap();
     let ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
     // 2, 4, 6 and 7 move ten on; 1, 3 and 5 stay; 9 is no object's.
-    let moves = |n: u32| n % 2 == 0 || n == 7;
+    let moves = |n: u32| n.is_multiple_of(2) || n == 7;
     let map: Map = (ids.iter())
         .map(|&id| {
             (
@@ -6657,7 +6667,7 @@ fn a_reference_the_renumbering_names_none_of_is_written_null() {
     let to = by(&map);
     let mut rng = ChaCha20Rng::seed_from_u64(14);
     let prepared = Password("user").prepared().unwrap();
-    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
     for (kind, pack, encryptor) in [
         (XrefKind::Table, None, None),
         (XrefKind::Stream, Some(write::Pack::DEFAULT), None),
@@ -7492,7 +7502,7 @@ fn members_are_copied_renumbered_into_object_streams_under_any_encryption() {
     let to = by(&map);
     let prepared = Password("new").prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(15);
-    let created = Encryptor::create(&prepared, true, &mut rng).unwrap();
+    let created = Encryptor::create(&Protection::new(&prepared), &mut rng).unwrap();
     let mut pack = options(XrefKind::Stream, Some(write::Pack::DEFAULT));
     pack.renumber = Some(&to);
     // Its members' bytes, renumbered `by` on, in the object streams written.

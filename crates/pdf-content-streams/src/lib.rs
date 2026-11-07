@@ -103,8 +103,7 @@
 //!   adds `CodedEnds::Decoded`, which a reading names in
 //!   [`Limits::coded_ends`] to find ends so: turned on, by this crate's
 //!   user or by any other crate built beside it, it changes nothing a
-//!   reading that doesn't name it gives. It needs Rust 1.87, where the
-//!   crate needs 1.85. zune-jpeg is built without its SIMD features
+//!   reading that doesn't name it gives. zune-jpeg is built without its SIMD features
 //!   (`x86`, `neon`), which hold all its `unsafe`, so it builds with
 //!   `unsafe_code` forbidden, as hayro-ccitt does always; a crate built
 //!   beside this one that turns those features on, as Cargo's features

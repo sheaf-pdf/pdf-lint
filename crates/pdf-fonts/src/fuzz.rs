@@ -263,10 +263,10 @@ impl<'o, O: Resolve<'o>> Resolve<'o> for FailingFirst<'_, O> {
     }
 
     fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
-        if !self.streams {
-            if let Some(unreadable) = self.fails(id) {
-                return Err(unreadable);
-            }
+        if !self.streams
+            && let Some(unreadable) = self.fails(id)
+        {
+            return Err(unreadable);
         }
         self.objects.try_resolve(id)
     }
@@ -274,10 +274,10 @@ impl<'o, O: Resolve<'o>> Resolve<'o> for FailingFirst<'_, O> {
 
 impl<O: Streams> Streams for FailingFirst<'_, O> {
     fn decoded(&self, id: ObjectId, limit: usize) -> Result<Cow<'_, [u8]>, Unreadable> {
-        if self.streams {
-            if let Some(unreadable) = self.fails(id) {
-                return Err(unreadable);
-            }
+        if self.streams
+            && let Some(unreadable) = self.fails(id)
+        {
+            return Err(unreadable);
         }
         self.objects.decoded(id, limit)
     }

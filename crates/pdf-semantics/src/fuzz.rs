@@ -371,20 +371,20 @@ fn written_back(walk: &Walked, kind: Kind) {
 
     // As bytes too, wherever the values can be written and read.
     let mut out = Vec::new();
-    if serialize::write(&mut out, &root).is_ok() {
-        if let Ok(again) = Parser::at(&out, 0).value(&mut ()) {
-            let again = walked(
-                nothing,
-                &again,
-                kind,
-                &Limits::DEFAULT,
-                &mut Kept::default(),
-            );
-            let keys = |walk: &Walked| -> Vec<Vec<u8>> {
-                walk.entries.iter().map(|(key, _)| key.clone()).collect()
-            };
-            assert_eq!(keys(&again), keys(&back), "written and read, the same keys");
-        }
+    if serialize::write(&mut out, &root).is_ok()
+        && let Ok(again) = Parser::at(&out, 0).value(&mut ())
+    {
+        let again = walked(
+            nothing,
+            &again,
+            kind,
+            &Limits::DEFAULT,
+            &mut Kept::default(),
+        );
+        let keys = |walk: &Walked| -> Vec<Vec<u8>> {
+            walk.entries.iter().map(|(key, _)| key.clone()).collect()
+        };
+        assert_eq!(keys(&again), keys(&back), "written and read, the same keys");
     }
 }
 
@@ -681,11 +681,11 @@ pub fn dates(data: &[u8]) {
         assert_eq!(back.quirks(), said, "{text}");
     }
     #[cfg(feature = "clock")]
-    if let Some(first) = data.first_chunk::<8>() {
-        if let Some(date) = Date::from_unix(i64::from_le_bytes(*first)) {
-            let written = date.write();
-            assert_eq!(Date::read(&written), Ok(date), "{written}");
-        }
+    if let Some(first) = data.first_chunk::<8>()
+        && let Some(date) = Date::from_unix(i64::from_le_bytes(*first))
+    {
+        let written = date.write();
+        assert_eq!(Date::read(&written), Ok(date), "{written}");
     }
 }
 

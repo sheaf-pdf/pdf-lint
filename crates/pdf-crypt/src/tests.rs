@@ -6,10 +6,11 @@ use chacha20::ChaCha20Rng;
 use rand_core::{CryptoRng, Rng, SeedableRng};
 
 use crate::aes::Aes;
+use crate::fuzz::permissions;
 use crate::writer::{self, Kind, Settings};
 use crate::{
-    CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Handler, Method, Password, Refused,
-    Unusable,
+    Changes, CryptFilter, Dictionary, Encoded, Encoding, Error, Fault, Handler, Method, Password,
+    Permissions, Printing, Protection, Refused, Unusable,
 };
 
 /// A file qpdf 12.3 encrypted (`qpdf --encrypt`, the vector's name its
@@ -460,6 +461,9 @@ fn a_perms_that_doesnt_match_is_a_fault_and_the_file_opens() {
     let handler = Handler::open(&dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
     assert_eq!(handler.faults(), [Fault::Perms]);
     assert_eq!(hex(handler.key()), v.key);
+    // The permissions are /P's, not /Perms' copy.
+    let permissions = Permissions::ALL.without(Permissions::PRINT);
+    assert_eq!(handler.permissions(), permissions);
 }
 
 #[test]
@@ -618,13 +622,13 @@ fn a_new_file_takes_saslprep_by_3_2_of_another_password_only_prepared() {
     let mut rng = ChaCha20Rng::seed_from_u64(32);
     let c4 = Password("Password\u{2F874}!").encodings();
     assert_eq!(c4[0].as_bytes(), "Password\u{5F33}!".as_bytes());
-    let (_, dictionary) = Handler::create(&c4[0], true, &mut rng).unwrap();
+    let (_, dictionary) = Handler::create(&Protection::new(&c4[0]), &mut rng).unwrap();
     let typed = Password("Password\u{5F33}!").encodings();
     let handler = Handler::open(&dictionary, b"", &typed).unwrap();
     assert_eq!(handler.opened_by(), Some((0, Encoding::Utf8)));
     let c5 = Password("\u{1100}\u{300}\u{1161}\u{323}").encodings();
     assert_eq!(c5[0].encoding(), Encoding::Saslprep);
-    let refused = Handler::create(&c5[0], true, &mut rng).map(|_| ());
+    let refused = Handler::create(&Protection::new(&c5[0]), &mut rng).map(|_| ());
     assert_eq!(refused, Err(Unusable::Unprepared(Encoding::Saslprep)));
 }
 
@@ -1375,7 +1379,9 @@ fn a_handler_is_clone_send_and_sync() {
 fn created(typed: &str, encrypt_metadata: bool, seed: u64) -> (Handler, Dictionary) {
     let password = Password(typed).prepared().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    Handler::create(&password, encrypt_metadata, &mut rng).unwrap()
+    let mut protection = Protection::new(&password);
+    protection.encrypt_metadata = encrypt_metadata;
+    Handler::create(&protection, &mut rng).unwrap()
 }
 
 /// A new file's dictionary is revision 6's, AES-256, every permission
@@ -1431,8 +1437,7 @@ fn a_new_files_dictionary_opens_by_its_password_as_the_owners_and_the_users() {
                 "{what}"
             );
             // /Perms: /P and /EncryptMetadata, then `adb`.
-            let mut perms: [u8; 16] = dictionary.perms.clone().unwrap().try_into().unwrap();
-            Aes::new(handler.key()).unwrap().decrypt(&mut perms);
+            let perms = perms(&handler, &dictionary);
             let metadata = if encrypt_metadata { b'T' } else { b'F' };
             assert_eq!(
                 perms[..12],
@@ -1502,13 +1507,12 @@ fn a_new_files_dictionary_is_drawn_from_its_generator_in_order() {
     assert_eq!(drawn(8), u[40..48], "the user's key salt");
     assert_eq!(drawn(8), o[32..40], "the owner's validation salt");
     assert_eq!(drawn(8), o[40..48], "the owner's key salt");
-    let mut perms: [u8; 16] = dictionary.perms.clone().unwrap().try_into().unwrap();
-    Aes::new(handler.key()).unwrap().decrypt(&mut perms);
+    let perms = perms(&handler, &dictionary);
     assert_eq!(drawn(4), perms[12..], "/Perms' random bytes");
     // Nothing more: the generator's next draw is what follows them.
     let mut rng = ChaCha20Rng::seed_from_u64(1);
     let password = Password("user").prepared().unwrap();
-    Handler::create(&password, true, &mut rng).unwrap();
+    Handler::create(&Protection::new(&password), &mut rng).unwrap();
     assert_eq!(rng.next_u64().to_le_bytes().to_vec(), drawn(8));
     let pinned = [
         (
@@ -1537,7 +1541,7 @@ fn a_new_files_dictionary_is_drawn_from_its_generator_in_order() {
     // time holds it, draws the same.
     let mut seeded = ChaCha20Rng::seed_from_u64(1);
     let rng: &mut dyn CryptoRng = &mut seeded;
-    let (_, by_dyn) = Handler::create(&password, true, rng).unwrap();
+    let (_, by_dyn) = Handler::create(&Protection::new(&password), rng).unwrap();
     assert_eq!(by_dyn, dictionary, "by dyn CryptoRng");
     let other = created("user", true, 2).1;
     for (a, b) in [
@@ -1587,7 +1591,7 @@ fn a_password_not_prepared_or_not_1_to_127_bytes_makes_no_new_file() {
     ];
     for (password, why) in refusals {
         let mut rng = ChaCha20Rng::seed_from_u64(1);
-        let refused = Handler::create(&password, true, &mut rng);
+        let refused = Handler::create(&Protection::new(&password), &mut rng);
         assert_eq!(refused.map(|_| ()), Err(why.clone()), "{why}");
         let first = ChaCha20Rng::seed_from_u64(1).next_u64();
         assert_eq!(rng.next_u64(), first, "{why}: nothing drawn");
@@ -1602,6 +1606,508 @@ fn a_password_not_prepared_or_not_1_to_127_bytes_makes_no_new_file() {
     let (_, dictionary) = created(&"\u{2168}".repeat(63), true, 1);
     let opened = Handler::open(&dictionary, b"", &Password(&"IX".repeat(63)).encodings());
     assert!(opened.unwrap().owner());
+}
+
+/// `/Perms` decrypted by `handler`'s key: `/P`'s low 32 bits, four bytes
+/// of 0xff, `T` or `F` for `/EncryptMetadata`, `adb`, then four random.
+fn perms(handler: &Handler, dictionary: &Dictionary) -> [u8; 16] {
+    let mut perms: [u8; 16] = dictionary.perms.clone().unwrap().try_into().unwrap();
+    Aes::new(handler.key()).unwrap().decrypt(&mut perms);
+    perms
+}
+
+/// A new file protected by each combination of passwords opens by each as
+/// its protection says. Both apart: the owner's as the owner's, the
+/// user's as the user's, under the permissions. The user's alone, or both
+/// the same: the one password as the owner's. The owner's alone: the
+/// owner's as the owner's, and no password, or the empty one, as the
+/// user's. The empty password opens it only where there's no user's, and a
+/// wrong one never. `/P` is the permissions with bit 10, as `/Perms` says
+/// too; each handler, made or opened, says them, and encrypts as the other
+/// decrypts.
+#[test]
+fn a_new_file_opens_by_each_of_its_passwords_as_its_protection_says() {
+    let low = Permissions::from(Printing::Low) | Permissions::from(Changes::FillForms);
+    let cases = [
+        (Some("user"), Some("owner"), low),
+        (Some("user"), Some("owner"), Permissions::ALL),
+        (Some("user"), Some("owner"), Permissions::NONE),
+        (Some("user"), None, Permissions::ALL),
+        (Some("user"), Some("user"), Permissions::ALL),
+        (None, Some("owner"), low),
+        (None, Some("owner"), Permissions::NONE),
+        (None, Some("owner"), Permissions::ALL),
+    ];
+    for (i, (user, owner, permissions)) in cases.into_iter().enumerate() {
+        let what = format!("{user:?}, {owner:?}, {permissions:?}");
+        let prepared = |typed: Option<&str>| typed.map(|t| Password(t).prepared().unwrap());
+        let (user_prepared, owner_prepared) = (prepared(user), prepared(owner));
+        let mut protection = Protection::DEFAULT;
+        protection.user = user_prepared.as_ref();
+        protection.owner = owner_prepared.as_ref();
+        protection.permissions = permissions;
+        protection.encrypt_metadata = i % 2 == 0;
+        let mut rng = ChaCha20Rng::seed_from_u64(3);
+        let (handler, dictionary) = Handler::create(&protection, &mut rng).unwrap();
+        let written = permissions | Permissions::ACCESSIBILITY;
+        assert_eq!(dictionary.p, Some(written.p()), "{what}");
+        assert_eq!((dictionary.v, dictionary.r), (5, 6), "{what}");
+        assert_eq!(handler.permissions(), written, "{what}");
+        assert!(handler.owner() && handler.opened_by().is_none(), "{what}");
+        let metadata = if protection.encrypt_metadata {
+            b'T'
+        } else {
+            b'F'
+        };
+        let p = (written.p() as u32).to_le_bytes();
+        let expected = [p[0], p[1], p[2], p[3], 0xff, 0xff, 0xff, 0xff, metadata];
+        let perms = perms(&handler, &dictionary);
+        assert_eq!(perms[..9], expected, "{what}: /Perms");
+        assert_eq!(perms[9..12], *b"adb", "{what}: /Perms");
+        let apart = owner.is_some() && owner != user;
+        let mut opens = Vec::new();
+        if let Some(owner) = owner {
+            opens.push((Password(owner).encodings(), true, Some((0, Encoding::Utf8))));
+        }
+        match user {
+            Some(user) => opens.push((
+                Password(user).encodings(),
+                !apart,
+                Some((0, Encoding::Utf8)),
+            )),
+            None => {
+                opens.push((Vec::new(), false, None));
+                let empty = vec![Encoded::verbatim(b"")];
+                opens.push((empty, false, Some((0, Encoding::Verbatim))));
+            }
+        }
+        for (passwords, owner, by) in opens {
+            let opened = Handler::open(&dictionary, b"", &passwords).unwrap();
+            assert_eq!(opened.owner(), owner, "{what}: {by:?}");
+            assert_eq!(opened.opened_by(), by, "{what}");
+            assert_eq!(opened.faults(), [], "{what}: {by:?}");
+            assert_eq!(opened.permissions(), written, "{what}: {by:?}");
+            assert_eq!(opened.key(), handler.key(), "{what}: {by:?}");
+            assert_eq!(
+                opened.encrypts_metadata(),
+                protection.encrypt_metadata,
+                "{what}"
+            );
+            let string = handler.encrypt_string((2, 0), b"the Info dictionary", b"A title");
+            let back = opened.decrypt_string((2, 0), &string.unwrap());
+            assert_eq!(back.unwrap(), b"A title", "{what}: {by:?}");
+            let stream = opened.encrypt_stream((3, 0), b"a page", b"0 0 m", None);
+            let back = handler.decrypt_stream((3, 0), &stream.unwrap(), None);
+            assert_eq!(back.unwrap(), b"0 0 m", "{what}: {by:?}");
+        }
+        let empty = Handler::open(&dictionary, b"", &[]);
+        assert_eq!(empty.is_ok(), user.is_none(), "{what}: the empty password");
+        let wrong = Handler::open(&dictionary, b"", &Password("wrong").encodings());
+        assert_eq!(wrong.unwrap_err(), Refused::Password, "{what}: a wrong one");
+    }
+}
+
+/// A new file isn't made for no password, nor for permissions withheld
+/// where its owner's password is its user's, given or not, which would
+/// bind no one who opens it: bit 10 isn't withheld, as it's put back, so
+/// every permission but it is every permission, `/P -4`. With every
+/// permission, the owner's password alone is taken. A password that isn't
+/// prepared is refused first, the user's before the owner's. Refused,
+/// nothing is drawn.
+#[test]
+fn a_new_file_needs_a_password_and_permissions_its_one_password_doesnt_lift() {
+    let user = Password("user").prepared().unwrap();
+    let again = Password("user").prepared().unwrap();
+    let owner = Password("owner").prepared().unwrap();
+    let bytes = Encoded::verbatim(b"owner");
+    let pdf_doc = (Password("caf\u{e9}").encodings().into_iter())
+        .find(|e| e.encoding() == Encoding::PdfDoc)
+        .unwrap();
+    let long = "\u{2168}".repeat(64);
+    let too_long = (Password(&long).encodings().into_iter())
+        .find(|e| e.encoding() == Encoding::Saslprep)
+        .unwrap();
+    let withheld = Permissions::ALL.without(Permissions::COPY);
+    let refusals = [
+        (None, None, Permissions::ALL, Unusable::NoPassword),
+        (None, None, Permissions::NONE, Unusable::NoPassword),
+        (Some(&user), None, withheld, Unusable::Shared),
+        (Some(&user), None, Permissions::NONE, Unusable::Shared),
+        (Some(&user), Some(&again), withheld, Unusable::Shared),
+        (
+            Some(&user),
+            Some(&bytes),
+            Permissions::ALL,
+            Unusable::Unprepared(Encoding::Verbatim),
+        ),
+        (
+            Some(&pdf_doc),
+            Some(&bytes),
+            Permissions::ALL,
+            Unusable::Unprepared(Encoding::PdfDoc),
+        ),
+        (
+            None,
+            Some(&too_long),
+            Permissions::NONE,
+            Unusable::TooLong { len: 128 },
+        ),
+        (
+            Some(&bytes),
+            None,
+            Permissions::NONE,
+            Unusable::Unprepared(Encoding::Verbatim),
+        ),
+    ];
+    for (user, owner, permissions, why) in refusals {
+        let mut protection = Protection::DEFAULT;
+        protection.user = user;
+        protection.owner = owner;
+        protection.permissions = permissions;
+        let mut rng = ChaCha20Rng::seed_from_u64(1);
+        let refused = Handler::create(&protection, &mut rng);
+        assert_eq!(refused.map(|_| ()), Err(why.clone()), "{why}");
+        let first = ChaCha20Rng::seed_from_u64(1).next_u64();
+        assert_eq!(rng.next_u64(), first, "{why}: nothing drawn");
+    }
+    // Every permission but bit 10, under one password: every permission.
+    let mut one = Protection::new(&user);
+    one.permissions = Permissions::ALL.without(Permissions::ACCESSIBILITY);
+    let (handler, dictionary) = Handler::create(&one, &mut ChaCha20Rng::seed_from_u64(1)).unwrap();
+    assert_eq!(dictionary.p, Some(-4));
+    assert_eq!(handler.permissions(), Permissions::ALL);
+    assert_eq!(
+        dictionary,
+        created("user", true, 1).1,
+        "the one password's file"
+    );
+    // The owner's alone, every permission: anyone opens it with every one.
+    let mut alone = Protection::DEFAULT;
+    alone.owner = Some(&owner);
+    let (_, dictionary) = Handler::create(&alone, &mut ChaCha20Rng::seed_from_u64(1)).unwrap();
+    assert_eq!(dictionary.p, Some(-4));
+    let opened = Handler::open(&dictionary, b"", &[]).unwrap();
+    assert!(!opened.owner());
+    assert_eq!(opened.permissions(), Permissions::ALL);
+}
+
+/// A protection's `Debug` gives each password's encoding, never its bytes;
+/// its default is [`Protection::DEFAULT`], no password with every
+/// permission and the metadata encrypted; one password's, from
+/// [`Protection::new`], is that with the user's password.
+#[test]
+fn a_protections_debug_leaves_the_passwords_out() {
+    let user = Password("secret-user").prepared().unwrap();
+    let owner = Password("secret-owner").prepared().unwrap();
+    let mut protection = Protection::new(&user);
+    protection.owner = Some(&owner);
+    protection.permissions = Permissions::PRINT;
+    let shown = format!("{protection:?}");
+    assert_eq!(
+        shown,
+        "Protection { user: Some(Encoded { encoding: Saslprep, .. }), owner: Some(Encoded { \
+         encoding: Saslprep, .. }), permissions: Permissions(PRINT), encrypt_metadata: true }"
+    );
+    assert!(!shown.contains("secret"), "{shown}");
+    let shown = format!("{:?}", Protection::default());
+    assert_eq!(
+        shown,
+        "Protection { user: None, owner: None, permissions: Permissions(PRINT | MODIFY | COPY | \
+         ANNOTATE | FILL_FORMS | ACCESSIBILITY | ASSEMBLE | PRINT_HIGH), encrypt_metadata: true }"
+    );
+    assert_eq!(shown, format!("{:?}", Protection::DEFAULT));
+    let one = Protection::new(&user);
+    assert!(one.user.is_some_and(|p| std::ptr::eq(p, &user)) && one.owner.is_none());
+    assert_eq!(
+        (one.permissions, one.encrypt_metadata),
+        (Permissions::ALL, true)
+    );
+}
+
+/// A new file's dictionary with an owner's password apart from the user's
+/// and permissions short of every one is drawn as the one password's is:
+/// the file's key, the user's validation and key salts, the owner's, and
+/// `/Perms`' four random bytes, and nothing more. So its `/U` and `/UE`
+/// are the one password's, and its `/O`, `/OE` and `/Perms` are, byte for
+/// byte, what an implementation of Algorithms 2.B, 8, 9 and 10 over
+/// OpenSSL's AES and SHA-2 gave for these draws.
+#[test]
+fn a_new_files_dictionary_with_an_owners_password_is_drawn_as_the_one_passwords() {
+    let user = Password("user").prepared().unwrap();
+    let owner = Password("owner").prepared().unwrap();
+    let mut protection = Protection::new(&user);
+    protection.owner = Some(&owner);
+    protection.permissions =
+        Permissions::from(Printing::Low) | Permissions::from(Changes::FillForms);
+    let mut rng = ChaCha20Rng::seed_from_u64(1);
+    let (handler, dictionary) = Handler::create(&protection, &mut rng).unwrap();
+    let mut draws = ChaCha20Rng::seed_from_u64(1);
+    let mut drawn = |n: usize| {
+        let mut bytes = vec![0; n];
+        draws.fill_bytes(&mut bytes);
+        bytes
+    };
+    assert_eq!(drawn(32), handler.key());
+    let (u, o) = (dictionary.u.clone().unwrap(), dictionary.o.clone().unwrap());
+    assert_eq!(drawn(8), u[32..40], "the user's validation salt");
+    assert_eq!(drawn(8), u[40..48], "the user's key salt");
+    assert_eq!(drawn(8), o[32..40], "the owner's validation salt");
+    assert_eq!(drawn(8), o[40..48], "the owner's key salt");
+    assert_eq!(
+        drawn(4),
+        perms(&handler, &dictionary)[12..],
+        "/Perms' random bytes"
+    );
+    assert_eq!(
+        rng.next_u64().to_le_bytes().to_vec(),
+        drawn(8),
+        "nothing more"
+    );
+    let one = created("user", true, 1).1;
+    assert_eq!(
+        (&dictionary.u, &dictionary.ue),
+        (&one.u, &one.ue),
+        "the user's"
+    );
+    assert_eq!(dictionary.p, Some(-2108));
+    let pinned = [
+        (
+            &dictionary.o,
+            "40c3aadcf3295d0b7759b60cf2b048040c93a4069095df68fd342f2df4e43834de9e5341348819a2de99f140c59a424c",
+        ),
+        (
+            &dictionary.oe,
+            "112033d0dcfed575a02d6b7d9028e836beb8771e947ab674b34303c659a52fb7",
+        ),
+        (&dictionary.perms, "337e5a8ad382ab35f01e92c2974c303b"),
+    ];
+    for (value, hex_bytes) in pinned {
+        assert_eq!(hex(value.as_ref().unwrap()), hex_bytes);
+    }
+}
+
+/// The eight permissions, in the order of their bits, written out here
+/// apart from the fuzz body's [`permissions`], which makes each of the 256
+/// sets from a byte, and from the type's own names: a test holds each of
+/// the three to the others, and this one to the bits' numbers.
+const EACH: [Permissions; 8] = [
+    Permissions::PRINT,
+    Permissions::MODIFY,
+    Permissions::COPY,
+    Permissions::ANNOTATE,
+    Permissions::FILL_FORMS,
+    Permissions::ACCESSIBILITY,
+    Permissions::ASSEMBLE,
+    Permissions::PRINT_HIGH,
+];
+
+/// `/P` is read by its low 32 bits, its eight permissions' bits alone: as
+/// written from revision 3, later ones too, and at revision 2, and below,
+/// with each of the four bits it hasn't following the bit that covers it
+/// there. A set written as revision 3 writes it reads back as itself;
+/// `/P`'s reserved bits are 7, 8 and 13 to 32 set, 1 and 2 clear, so it's
+/// negative.
+#[test]
+fn permissions_are_read_from_p_by_the_revisions_meaning_of_its_bits() {
+    // Every permission, however /P is written: as a 32-bit integer, its
+    // unsigned reading, with bits past 32, and with the reserved bits clear.
+    for p in [-4, 4_294_967_292, -4 + (1 << 40), 0xF3C] {
+        for r in [0, 2, 3, 4, 5, 6, 7] {
+            assert_eq!(Permissions::from_p(p, r), Permissions::ALL, "{p} at {r}");
+        }
+    }
+    // None: bits 1 and 2 and the reserved ones are ignored.
+    for p in [0, 3, -3904, i64::MIN, 1 << 32, i64::MAX & !0xF3C] {
+        for r in [0, 2, 3, 6] {
+            assert_eq!(Permissions::from_p(p, r), Permissions::NONE, "{p} at {r}");
+        }
+    }
+    let covers = [
+        (Permissions::ANNOTATE, Permissions::FILL_FORMS),
+        (Permissions::COPY, Permissions::ACCESSIBILITY),
+        (Permissions::MODIFY, Permissions::ASSEMBLE),
+        (Permissions::PRINT, Permissions::PRINT_HIGH),
+    ];
+    for n in 0..=255 {
+        let set = permissions(n);
+        let p = set.p();
+        assert!(p < 0, "{set:?}");
+        assert_eq!(
+            p as u32 & 0xFFFF_F0C3,
+            0xFFFF_F0C0,
+            "{set:?}: reserved bits"
+        );
+        for (permission, bit) in EACH.into_iter().zip([3, 4, 5, 6, 9, 10, 11, 12]) {
+            let written = p >> (bit - 1) & 1 == 1;
+            assert_eq!(written, set.contains(permission), "{set:?}: bit {bit}");
+        }
+        for r in 3..=7 {
+            assert_eq!(Permissions::from_p(p, r), set, "{set:?} at {r}");
+        }
+        assert_eq!(Permissions::from_p(p + (1 << 32), 6), set, "{set:?}");
+        // At revision 2, the four bits it has as written, each covering
+        // its later one.
+        let old = Permissions::from_p(p, 2);
+        assert_eq!(Permissions::from_p(p, 1), old, "{set:?} at 1");
+        for (by, covered) in covers {
+            assert_eq!(old.contains(by), set.contains(by), "{set:?}: {by:?}");
+            assert_eq!(
+                old.contains(covered),
+                set.contains(by),
+                "{set:?}: {covered:?}"
+            );
+        }
+    }
+    // qpdf's 40-bit file with printing alone: bits 9 to 12 set, but only
+    // printing at high resolution read from them at revision 2.
+    assert_eq!(
+        Permissions::from_p(-60, 2),
+        Permissions::PRINT | Permissions::PRINT_HIGH
+    );
+    assert_eq!(
+        Permissions::from_p(-60, 3),
+        Permissions::ALL.without(Permissions::MODIFY | Permissions::COPY | Permissions::ANNOTATE)
+    );
+    assert_eq!(Permissions::ALL.p(), -4);
+    assert_eq!(Permissions::NONE.p(), -3904);
+}
+
+/// The levels of printing and of changes a security dialog offers, with
+/// copying and accessibility, are the bits qpdf 12.4.2 sets for its own
+/// (`--encrypt user owner 256` with `--print`, `--modify` and `--extract`),
+/// bit 10 set as a revision 6 file has it: every permission -4, none
+/// -3392, printing at low resolution alone -3388, assembling and copying
+/// -2352, filling in forms with printing at low resolution and copying
+/// -2092, commenting with printing at high resolution -28. Each
+/// level of changes grants the one before it and more; each level of
+/// printing reads back from its bits.
+#[test]
+fn a_security_dialogs_levels_are_the_bits_qpdf_sets() {
+    let level = |printing: Printing, changes: Changes, copy: bool| {
+        let copy = if copy {
+            Permissions::COPY
+        } else {
+            Permissions::NONE
+        };
+        Permissions::from(printing) | Permissions::from(changes) | copy | Permissions::ACCESSIBILITY
+    };
+    let cases = [
+        ((Printing::High, Changes::Any, true), -4),
+        ((Printing::Denied, Changes::Denied, false), -3392),
+        ((Printing::Low, Changes::Denied, false), -3388),
+        ((Printing::Denied, Changes::Assemble, true), -2352),
+        ((Printing::Low, Changes::FillForms, true), -2092),
+        ((Printing::High, Changes::CommentAndFill, false), -28),
+    ];
+    for ((printing, changes, copy), p) in cases {
+        let set = level(printing, changes, copy);
+        assert_eq!(set.p(), p, "{printing:?}, {changes:?}, {copy}");
+        assert_eq!(set.printing(), printing, "{set:?}");
+    }
+    assert_eq!(level(Printing::High, Changes::Any, true), Permissions::ALL);
+    for (i, printing) in Printing::ALL.into_iter().enumerate() {
+        assert_eq!(printing as usize, i);
+        assert_eq!(Permissions::from(printing).printing(), printing);
+    }
+    // Bit 12 qualifies bit 3: alone, it doesn't print.
+    assert_eq!(Permissions::PRINT_HIGH.printing(), Printing::Denied);
+    for (i, changes) in Changes::ALL.into_iter().enumerate() {
+        assert_eq!(changes as usize, i);
+        let set = Permissions::from(changes);
+        assert_eq!(set.printing(), Printing::Denied, "{changes:?}");
+        assert!(!set.contains(Permissions::COPY), "{changes:?}");
+        if let Some(&before) = Changes::ALL.get(i.wrapping_sub(1)) {
+            let before = Permissions::from(before);
+            assert!(set.contains(before) && set != before, "{changes:?}");
+        }
+    }
+    assert_eq!(Permissions::from(Changes::Denied), Permissions::NONE);
+    let any = Permissions::from(Changes::Any);
+    let rest = Permissions::from(Printing::High) | Permissions::COPY | Permissions::ACCESSIBILITY;
+    assert_eq!(any | rest, Permissions::ALL);
+    assert_eq!(Permissions::ALL.without(rest), any);
+}
+
+/// A set's `Debug` names its bits by their constants, its `Display` in
+/// words, in the order of the bits whatever the order they were joined in;
+/// the empty set is `NONE` and `none`.
+#[test]
+fn permissions_debug_and_display_name_the_bits() {
+    let set = Permissions::COPY | Permissions::PRINT;
+    assert_eq!(format!("{set:?}"), "Permissions(PRINT | COPY)");
+    assert_eq!(set.to_string(), "print, copy");
+    assert_eq!(format!("{:?}", Permissions::NONE), "Permissions(NONE)");
+    assert_eq!(Permissions::NONE.to_string(), "none");
+    assert_eq!(
+        format!("{:?}", Permissions::ALL),
+        "Permissions(PRINT | MODIFY | COPY | ANNOTATE | FILL_FORMS | ACCESSIBILITY | ASSEMBLE | PRINT_HIGH)"
+    );
+    assert_eq!(
+        Permissions::ALL.to_string(),
+        "print, modify, copy, annotate, fill forms, accessibility, assemble, print at high resolution"
+    );
+    assert_eq!(
+        format!("{:?}", Permissions::FILL_FORMS),
+        "Permissions(FILL_FORMS)"
+    );
+    assert_eq!(
+        (Permissions::PRINT_HIGH | Permissions::ASSEMBLE).to_string(),
+        "assemble, print at high resolution"
+    );
+    for (i, permission) in EACH.into_iter().enumerate() {
+        assert_eq!(permission, permissions(1 << i));
+        assert!(Permissions::ALL.contains(permission));
+        assert!(!Permissions::NONE.contains(permission));
+        assert_eq!(
+            Permissions::ALL.without(permission).union(permission),
+            Permissions::ALL
+        );
+    }
+}
+
+/// A handler opened by either password says the permissions its `/P`
+/// grants by its revision's meaning of the bits, on every revision; the
+/// handler's `Debug` says them too.
+#[test]
+fn a_handler_says_the_permissions_its_p_grants() {
+    let id = b"0123456789abcdef";
+    let kinds = [
+        Kind::Rc4By40,
+        Kind::Rc4By128,
+        Kind::Aes128,
+        Kind::Aes256R5,
+        Kind::Aes256,
+    ];
+    for kind in kinds {
+        for p in [-4, -3904, -60, -3388, -28, 4_294_967_292, 0] {
+            let dictionary = writer::dictionary(&Settings {
+                kind,
+                user: b"user",
+                owner: b"owner",
+                p,
+                id,
+                encrypt_metadata: true,
+            });
+            let expected = Permissions::from_p(p, dictionary.r);
+            for (password, owner) in [("user", false), ("owner", true)] {
+                let what = format!("{kind:?}, {p}, {password}");
+                let opened = Handler::open(&dictionary, id, &Password(password).encodings());
+                let handler = opened.unwrap_or_else(|e| panic!("{what}: {e}"));
+                assert_eq!(handler.owner(), owner, "{what}");
+                assert_eq!(handler.faults(), [], "{what}");
+                assert_eq!(handler.permissions(), expected, "{what}");
+                let shown = format!("{handler:?}");
+                assert!(
+                    shown.contains(&format!("permissions: {expected:?}")),
+                    "{shown}"
+                );
+            }
+        }
+    }
+    for v in vectors() {
+        let handler = Handler::open(&v.dictionary, v.id, &[Encoded::verbatim(v.user)]).unwrap();
+        assert_eq!(handler.permissions(), Permissions::ALL, "{}", v.name);
+    }
 }
 
 /// The README is shown on crates.io and docs.rs, where a path beside the
@@ -1625,7 +2131,7 @@ fn the_readmes_licence_links_reach_the_files() {
 /// The crate doc's example is the README's first, line for line, so that
 /// it runs as a dependent builds the crate: the README's examples run as
 /// doctests only with the `writer` feature, which the second needs, while
-/// the crate doc's runs without it, on Rust 1.85 too.
+/// the crate doc's runs without it, on Rust 1.89 too.
 #[test]
 fn the_crate_docs_example_is_the_readmes_first() {
     let readme: Vec<&str> = (include_str!("../README.md").lines())

@@ -24,7 +24,7 @@ decrypts what's encrypted itself.
 | [pdf-lint](crates/pdf-lint) | The checker, a command line and a library. Its README has the rules, the options, the JSON format and how to install it |
 | [pdf-tokenizer](crates/pdf-tokenizer) | A lossless, zero-copy PDF tokenizer, by ISO 32000-2's rules or PDFium's, needing neither `std` nor `alloc` |
 | [pdf-filters](crates/pdf-filters) | PDF's standard filters for data of any kind, decoded, every fault said and what decoded kept; and Flate encoded, with PNG's predictors, on miniz_oxide or zlib-rs |
-| [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler on RustCrypto's primitives: decrypting, every fault said, and encrypting for a writer, a new file's key and dictionary from randomness it's given, its keys wiped |
+| [pdf-crypt](crates/pdf-crypt) | PDF's standard security handler on RustCrypto's primitives: decrypting, every fault said, and encrypting for a writer, a new file's key and dictionary from randomness it's given, under an open password, a permissions password or both, a file's permissions typed, its keys wiped |
 | [pdf-objects](crates/pdf-objects) | PDF's objects as a reader read them, their parser, by ISO 32000-2's rules or PDFium's, and their writer, which writes an encrypted file's through an encryptor: each value with where it was written, every fault said, and text strings read and written |
 | [pdf-structure](crates/pdf-structure) | PDF's file structure, read whole or each object on demand, from any thread, from memory or a file read by position: the header, cross-reference tables and streams along `/Prev`, object streams and recovery by scanning, each object through pdf-objects' parser, decrypted through pdf-crypt and decoded through pdf-filters, and so any stream's data asked for, where it was read from recorded, every choice it made said; and written, whole or as an incremental update, cross-reference sections and object streams deflated through pdf-filters, an encrypted file's objects encrypted as they're written, through pdf-crypt, by the list it decrypts by, and an object as read copied as the bytes it was read from, checked against a hash of them |
 | [pdf-content-streams](crates/pdf-content-streams) | PDF content streams read as PDFium reads them: each token with where it is, an inline image's data found by PDFium's rules, each operation with its operands, operands read as pdf-objects' values when asked, and a page's streams joined as one, every place mapped back to its stream, under caps, every error saying where, and where ISO 32000-2 reads it otherwise told to a sink; each operator typed by ISO 32000-2's Annex A, with its operands and where it may be used; a page's `q`/`Q` balance, its marked content and the resource names it uses; and content written, the same bytes for the same calls, its resources named at the end by a digest of what they are, or spliced, ranges taken out and every other byte kept, only where that can't change what's drawn after them |
@@ -47,13 +47,10 @@ just clippy   # or one at a time
 
 `just ci` also needs the `thumbv6m-none-eabi`, `x86_64-pc-windows-gnu`
 and `wasm32-unknown-unknown` targets, nightly Rust with its `rust-src`
-component, and Rust 1.85, 1.87 and 1.88 installed: for the tokenizer's no-std
+component, and Rust 1.89 installed: for the tokenizer's no-std
 build, pdf-structure's lints for Windows and a 32-bit target, the
-tokenizer's build against `core` alone, and the minimum Rust of the
-tokenizer, the filters, pdf-crypt, pdf-objects, pdf-structure,
-pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts, pdf-linearize and
-pdf-arlington, of pdf-content-streams' `image-ends` feature and pdf-fonts'
-`predefined-cmaps` (1.87) and of pdf-linearize's `lopdf` feature (1.88). Its `test-pdfium` needs
+tokenizer's build against `core` alone, and the minimum Rust of every
+crate, 1.89, with and without each one's features. Its `test-pdfium` needs
 Python 3, and fetches the pinned PDFium build from GitHub unless
 `PDF_LINT_PDFIUM` names a library: [oracle/README.md](oracle/README.md)
 says how the crates are held to PDFium. Its `tokenizer-package`,

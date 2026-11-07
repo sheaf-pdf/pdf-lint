@@ -191,7 +191,7 @@ impl<'o, R: Resolve<'o>> Resolve<'o> for FailingSome<R> {
     }
 
     fn try_resolve(&self, id: ObjectId) -> Result<Option<&'o Object>, Unreadable> {
-        if id.number % self.every == 0 {
+        if id.number.is_multiple_of(self.every) {
             return Err(Unreadable::new(id, self.why, "made to fail"));
         }
         self.objects.try_resolve(id)

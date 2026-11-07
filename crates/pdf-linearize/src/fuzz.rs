@@ -1510,9 +1510,11 @@ pub fn over(data: &[u8]) {
         return;
     };
     let own = Encryptor::of(&reading).ok().flatten();
-    let new = (data.len() % 8 == 0).then(|| {
+    let new = data.len().is_multiple_of(8).then(|| {
         let password = pdf_structure::Password(NEW).prepared().ok()?;
-        Encryptor::create(&password, data.len() % 16 == 0, &mut Drawn::over(data)).ok()
+        let mut protection = pdf_structure::pdf_crypt::Protection::new(&password);
+        protection.encrypt_metadata = data.len().is_multiple_of(16);
+        Encryptor::create(&protection, &mut Drawn::over(data)).ok()
     });
     for (kind, stream, pack) in [
         (Kind::Table, XrefKind::Table, false),
@@ -1626,12 +1628,11 @@ fn written_back<S: pdf_structure::ByteSource>(
             panic!("{id:?} isn't at {number}");
         };
         same_under(body.object(), object, &planned);
-        if let (Value::Stream(_), Value::Stream(_)) = (body.object().value(), object.value()) {
-            if let (Ok(before), Ok(after)) =
+        if let (Value::Stream(_), Value::Stream(_)) = (body.object().value(), object.value())
+            && let (Ok(before), Ok(after)) =
                 (reading.data(*id), again.data(ObjectId::new(number, 0)))
-            {
-                assert_eq!(before, after, "{id:?}'s data");
-            }
+        {
+            assert_eq!(before, after, "{id:?}'s data");
         }
     }
 }
@@ -1853,7 +1854,7 @@ pub fn lopdf_document(data: &[u8]) -> bool {
         0 => Object::Null,
         1 => Object::Integer(i64::from(byte)),
         2 | 3 => Object::Reference(id(byte)),
-        4 => Object::Name(if byte % 2 == 0 {
+        4 => Object::Name(if byte.is_multiple_of(2) {
             b"Page".to_vec()
         } else {
             b"Pages".to_vec()
@@ -1871,10 +1872,7 @@ pub fn lopdf_document(data: &[u8]) -> bool {
         _ => Object::Real(f32::from(byte)),
     };
     let mut doc = lopdf_start();
-    for edit in data.chunks_exact(4) {
-        let &[what, at, key, byte] = edit else {
-            continue;
-        };
+    for &[what, at, key, byte] in data.as_chunks::<4>().0 {
         let at = id(at);
         let key = KEYS[usize::from(key) % KEYS.len()].as_bytes();
         match what % 4 {

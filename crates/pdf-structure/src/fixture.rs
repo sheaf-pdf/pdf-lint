@@ -213,8 +213,8 @@ pub fn encrypted(
 
 /// A new file of these objects, as [`file`] writes it with a table,
 /// encrypted under the handler and dictionary pdf-crypt creates for
-/// `password`, prepared (`Handler::create`: revision 6, AES-256), from
-/// `rng`'s draws: each string, and each stream's data, of each object but
+/// `protection` (`Handler::create`: revision 6, AES-256), from `rng`'s
+/// draws: each string, and each stream's data, of each object but
 /// a signature's `/Contents`, AES's IVs derived from the data and the
 /// object's number (`n g obj`, the context); under an encryption
 /// dictionary that's the next object, its crypt filter with `/Length 32`
@@ -222,14 +222,13 @@ pub fn encrypted(
 /// trailer's `/ID` drawn from `rng` after the dictionary, and `trailer`'s
 /// entries.
 pub fn created(
-    password: &pdf_crypt::Encoded,
-    encrypt_metadata: bool,
+    protection: &pdf_crypt::Protection,
     objects: &[(u32, Body)],
     trailer: Dict,
     rng: &mut (impl pdf_crypt::rand_core::CryptoRng + ?Sized),
 ) -> Vec<u8> {
     let (handler, values) =
-        pdf_crypt::Handler::create(password, encrypt_metadata, rng).expect("a password prepared");
+        pdf_crypt::Handler::create(protection, rng).expect("a protection a file is made for");
     let mut id = [0; 16];
     rng.fill_bytes(&mut id);
     let encrypt = |id: ObjectId, data: &[u8], stream: bool| {

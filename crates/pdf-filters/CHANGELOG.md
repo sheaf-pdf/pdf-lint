@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.1.0-alpha.1 (unreleased)
+## 0.1.0-alpha.2 (unreleased)
+
+- **Rust 1.89.** The minimum Rust is 1.89, from 1.85: the family's, moved for the RustCrypto releases pdf-crypt wants (its CHANGELOG says which), nothing of this crate's own needing it. A dependent names an alpha exactly, so it takes this one by naming it.
+
+## 0.1.0-alpha.1 (2026-11-06)
 
 The first release, and an alpha: until a release says it's stable, any alpha may change the API, each saying here what changed and how code follows. A crate that depends on an alpha names it exactly, `=0.1.0-alpha.1`: cargo's default, `0.1.0-alpha.1`, takes any later alpha of 0.1.0 too.
 

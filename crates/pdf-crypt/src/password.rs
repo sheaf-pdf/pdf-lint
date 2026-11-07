@@ -251,7 +251,9 @@ pub(crate) fn is_prepared(bytes: &[u8]) -> bool {
 }
 
 /// Why a password can't be a new file's ([`Password::prepared`],
-/// [`Handler::create`](crate::Handler::create)).
+/// [`Handler::create`](crate::Handler::create)), or a new file's passwords
+/// can't protect it as asked ([`Unusable::NoPassword`],
+/// [`Unusable::Shared`]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unusable {
@@ -308,6 +310,21 @@ pub enum Unusable {
         u32::from(*.0)
     )]
     Ambiguous(char),
+    /// Neither the user's password nor the owner's, for a new file, as in
+    /// [`Protection::DEFAULT`](crate::Protection::DEFAULT) before one is
+    /// set: a protection left unset, whose file anyone would open as its
+    /// owner, the empty password being both.
+    #[error("no password is given for the new file, neither the user's nor the owner's")]
+    NoPassword,
+    /// Permissions withheld for a new file whose owner's password is its
+    /// user's, none given apart from it or the same bytes: whoever opens
+    /// the file opens it as its owner, whom the permissions don't bind
+    /// (ISO 32000-2, 7.6.4.1). An owner's password of its own binds them.
+    /// Bit 10, which revision 6 sets whatever's asked, isn't withheld.
+    #[error(
+        "the owner's password is the user's, so the permissions withheld would bind no one who opens the file"
+    )]
+    Shared,
 }
 
 /// Why SASLprep refuses `text`: the first of its characters it refuses
@@ -729,7 +746,8 @@ mod tests {
         }
     }
 
-    /// Each reason a password can't be a new file's, word for word.
+    /// Each reason a password can't be a new file's, or a new file's
+    /// passwords can't protect it as asked, word for word.
     #[test]
     fn each_reason_a_password_cant_be_a_new_files_says_why() {
         let why = |text: &str| Password(text).prepared().unwrap_err();
@@ -778,6 +796,19 @@ mod tests {
                 Unusable::Unprepared(Encoding::Utf8),
                 Unusable::Unprepared(Encoding::Utf8),
                 "the password is in Utf8, not prepared for a new file",
+            ),
+            // A new file with neither password, and its permissions
+            // under one (`create`).
+            (
+                Unusable::NoPassword,
+                Unusable::NoPassword,
+                "no password is given for the new file, neither the user's nor the owner's",
+            ),
+            (
+                Unusable::Shared,
+                Unusable::Shared,
+                "the owner's password is the user's, so the permissions withheld would bind \
+                 no one who opens the file",
             ),
             // A character 3.2 hadn't assigned, though a later Unicode
             // decomposes it (U+2090, LATIN SUBSCRIPT SMALL LETTER A, of

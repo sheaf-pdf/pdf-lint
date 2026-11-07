@@ -119,10 +119,10 @@ impl Base {
         }
         let source = reading.source();
         let io = |e: io::Error| Error::io(&e);
-        if let Some(section) = reading.as_of() {
-            if startxref(source).map_err(io)? != Some(section) {
-                return Err(Error::Earlier(section));
-            }
+        if let Some(section) = reading.as_of()
+            && startxref(source).map_err(io)? != Some(section)
+        {
+            return Err(Error::Earlier(section));
         }
         let len = source.len();
         let ends_line = match len {

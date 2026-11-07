@@ -111,10 +111,10 @@ impl Category {
         let mut i = 0;
         while i < Operator::ALL.len() {
             let op = Operator::ALL[i];
-            if let Some(category) = op.category() {
-                if category as u8 == self as u8 {
-                    set = set.with(op);
-                }
+            if let Some(category) = op.category()
+                && category as u8 == self as u8
+            {
+                set = set.with(op);
             }
             i += 1;
         }

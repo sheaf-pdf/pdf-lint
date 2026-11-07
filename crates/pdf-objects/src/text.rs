@@ -94,12 +94,12 @@ pub fn decode(bytes: &[u8]) -> Text {
     let mut quirks = Vec::new();
     let (text, encoding) = match bytes {
         [0xFE, 0xFF, rest @ ..] => {
-            let pairs = rest.chunks_exact(2);
-            if !pairs.remainder().is_empty() {
+            let (pairs, odd) = rest.as_chunks::<2>();
+            if !odd.is_empty() {
                 quirks.push(Quirk::OddByte);
             }
             let mut text = String::with_capacity(pairs.len());
-            let units = pairs.map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
+            let units = pairs.iter().map(|&pair| u16::from_be_bytes(pair));
             for unit in char::decode_utf16(units) {
                 text.push(unit.unwrap_or_else(|_| {
                     quirks.push(Quirk::LoneSurrogate);
@@ -226,11 +226,11 @@ fn decode_as_pdfium(bytes: &[u8]) -> Text {
 
 /// UTF-16's code units, an odd last byte left out.
 fn utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16, quirks: &mut Vec<Quirk>) -> Vec<u16> {
-    let pairs = bytes.chunks_exact(2);
-    if !pairs.remainder().is_empty() {
+    let (pairs, odd) = bytes.as_chunks::<2>();
+    if !odd.is_empty() {
         quirks.push(Quirk::OddByte);
     }
-    pairs.map(|pair| unit([pair[0], pair[1]])).collect()
+    pairs.iter().map(|&pair| unit(pair)).collect()
 }
 
 /// UTF-16's code units of what PDFium's rules read in `bytes`, written as

@@ -293,25 +293,25 @@ impl<'d> Prepared<'d> {
 
     /// What a walk goes into from object `id`, in the order it does.
     fn references(&self, id: ObjectId, object: &Object, refs: &mut Vec<ObjectId>) {
-        if self.page_ids.contains(&id) {
-            if let Some(dict) = dict_of(object) {
-                page_references(dict, refs);
-                return;
-            }
+        if self.page_ids.contains(&id)
+            && let Some(dict) = dict_of(object)
+        {
+            page_references(dict, refs);
+            return;
         }
-        if self.outline.contains(&id) {
-            if let Some(dict) = dict_of(object) {
-                let links: [&[u8]; 5] = [b"First", b"Last", b"Next", b"Prev", b"Parent"];
-                let others = dict.entries().iter().filter(|e| !links.contains(&&*e.key));
-                refs.extend(others.flat_map(|entry| entry.value.references()));
-                return;
-            }
+        if self.outline.contains(&id)
+            && let Some(dict) = dict_of(object)
+        {
+            let links: [&[u8]; 5] = [b"First", b"Last", b"Next", b"Prev", b"Parent"];
+            let others = dict.entries().iter().filter(|e| !links.contains(&&*e.key));
+            refs.extend(others.flat_map(|entry| entry.value.references()));
+            return;
         }
-        if self.names == Some(id) {
-            if let Some(dests) = dict_of(object).and_then(|names| names.get(b"Dests")) {
-                refs.extend(dests.references());
-                return;
-            }
+        if self.names == Some(id)
+            && let Some(dests) = dict_of(object).and_then(|names| names.get(b"Dests"))
+        {
+            refs.extend(dests.references());
+            return;
         }
         if let Value::Stream(stream) = object.value() {
             let held = stream.dict.entries().iter();
