@@ -270,7 +270,7 @@ fn real(number: &str) -> Vec<u8> {
     let mut nibbles: Vec<u8> = number.chars().map(nibble).collect();
     nibbles.push(0xf);
     nibbles.push(0xf);
-    let bytes = nibbles.chunks_exact(2).map(|n| n[0] << 4 | n[1]);
+    let bytes = nibbles.as_chunks::<2>().0.iter().map(|n| n[0] << 4 | n[1]);
     std::iter::once(30).chain(bytes).collect()
 }
 

@@ -834,10 +834,10 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Walk<'o, '_, R, S> {
                     if self.visits > self.limits.pages {
                         return Err(Error::TooManyPages);
                     }
-                    if let (Some(id), true) = (id, self.checking()) {
-                        if !self.seen_nodes.insert(id) {
-                            self.say(kid.at, Fault::PageTreeRepeated { id });
-                        }
+                    if let (Some(id), true) = (id, self.checking())
+                        && !self.seen_nodes.insert(id)
+                    {
+                        self.say(kid.at, Fault::PageTreeRepeated { id });
                     }
                     self.object = id.or(self.object);
                     self.check_parent(dict, object.at, holder);

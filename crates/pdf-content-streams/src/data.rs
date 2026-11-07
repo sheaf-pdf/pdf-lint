@@ -108,10 +108,11 @@ impl Searched {
         at: usize,
         search: impl FnOnce(usize) -> Option<usize>,
     ) -> Option<usize> {
-        if let Some((from, found)) = self.0 {
-            if at >= from && found.is_none_or(|f| f >= at) {
-                return found;
-            }
+        if let Some((from, found)) = self.0
+            && at >= from
+            && found.is_none_or(|f| f >= at)
+        {
+            return found;
         }
         let found = search(at);
         self.0 = Some((at, found));

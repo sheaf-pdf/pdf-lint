@@ -408,13 +408,13 @@ pub(super) fn written(
     copying: Option<&Copying<'_>>,
     to: Numbering<'_>,
 ) -> Result<usize, Error> {
-    if let Some(copying) = copying {
-        if let Some(spliced) = copying.at_offset(id, at, body, encrypting, to)? {
-            let pos = out.len();
-            spliced.write(out);
-            out.push(b'\n');
-            return Ok(pos);
-        }
+    if let Some(copying) = copying
+        && let Some(spliced) = copying.at_offset(id, at, body, encrypting, to)?
+    {
+        let pos = out.len();
+        spliced.write(out);
+        out.push(b'\n');
+        return Ok(pos);
     }
     super::indirect(out, id, at, body.object(), encrypting, from, to)
 }

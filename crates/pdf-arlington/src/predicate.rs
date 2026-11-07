@@ -2888,11 +2888,11 @@ fn word(predicate: &str, word: &str) -> Result<Expr, Error> {
 fn path(predicate: &str, text: &str) -> Result<Path, Error> {
     let mut keys: Vec<&str> = text.split("::").collect();
     let mut value = false;
-    if let Some(last) = keys.last_mut() {
-        if let Some(key) = last.strip_prefix('@') {
-            *last = key;
-            value = true;
-        }
+    if let Some(last) = keys.last_mut()
+        && let Some(key) = last.strip_prefix('@')
+    {
+        *last = key;
+        value = true;
     }
     let parents = keys.iter().take_while(|&&k| k == "parent").count();
     let (base, skip) = match keys[0] {

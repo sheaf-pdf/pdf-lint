@@ -1315,12 +1315,12 @@ impl Reader {
             reader.offsets = offsets.into();
         }
         reader.encryption(file, &mut cx, &trailer, passwords)?;
-        if let Some((0, (_, entry))) = reader.entries.first() {
-            if *entry != XrefEntry::Free {
-                let message =
-                    "the cross-references list object 0, which is always free (ISO 32000-2, 7.5.4)";
-                cx.warn(None, None, message.to_string());
-            }
+        if let Some((0, (_, entry))) = reader.entries.first()
+            && *entry != XrefEntry::Free
+        {
+            let message =
+                "the cross-references list object 0, which is always free (ISO 32000-2, 7.5.4)";
+            cx.warn(None, None, message.to_string());
         }
         reader.facts.linearized = match reader.facts.header_offset {
             Some(at) => holds_linearization(file, at, limits.parser)?,
@@ -1630,29 +1630,29 @@ impl Reader {
         // stream itself, what its filters' values refer to, and its data.
         let object = self.in_use(file, ObjectId::new(stream, 0))?;
         let mut data = None;
-        if let Some(Ok(object)) = object.filter(|_| self.native_containers()) {
-            if let Value::Stream(s) = object.value() {
-                let failed = Cell::new(None);
-                let resolve = |id| match self.in_use(file, id) {
-                    Ok(object) => object?.ok(),
-                    Err(error) => {
-                        failed.set(Some(error));
-                        None
-                    }
-                };
-                let _ = filter::filters(&s.dict, Some(&resolve));
-                let _ = filter::crypt_filter(&s.dict, Some(&resolve));
-                if let Some(error) = failed.into_inner() {
-                    return Err(error);
+        if let Some(Ok(object)) = object.filter(|_| self.native_containers())
+            && let Value::Stream(s) = object.value()
+        {
+            let failed = Cell::new(None);
+            let resolve = |id| match self.in_use(file, id) {
+                Ok(object) => object?.ok(),
+                Err(error) => {
+                    failed.set(Some(error));
+                    None
                 }
-                // Its data, which only an object stream's decode reads.
-                let at = (s.data.at()).filter(|at| at.stream.is_none());
-                if s.dict.get(b"Type").and_then(Object::as_name) == Some(b"ObjStm") {
-                    data = at
-                        .map(|at| file.get(at.start..at.end))
-                        .transpose()?
-                        .flatten();
-                }
+            };
+            let _ = filter::filters(&s.dict, Some(&resolve));
+            let _ = filter::crypt_filter(&s.dict, Some(&resolve));
+            if let Some(error) = failed.into_inner() {
+                return Err(error);
+            }
+            // Its data, which only an object stream's decode reads.
+            let at = (s.data.at()).filter(|at| at.stream.is_none());
+            if s.dict.get(b"Type").and_then(Object::as_name) == Some(b"ObjStm") {
+                data = at
+                    .map(|at| file.get(at.start..at.end))
+                    .transpose()?
+                    .flatten();
             }
         }
         let data = data.unwrap_or_default();
@@ -2091,12 +2091,13 @@ impl Reader {
         // password opened whose streams aren't encrypted, its own crypt
         // filter may yet encrypt it.
         let crypt = filter::crypt_filter(&stream.dict, Some(&resolve));
-        if self.handler.is_none() && self.list.encrypts {
-            if let Some(name) = crypt.as_deref().filter(|&name| name != b"Identity") {
-                return Err(Undecoded::Encrypted {
-                    filter: name.to_vec(),
-                });
-            }
+        if self.handler.is_none()
+            && self.list.encrypts
+            && let Some(name) = crypt.as_deref().filter(|&name| name != b"Identity")
+        {
+            return Err(Undecoded::Encrypted {
+                filter: name.to_vec(),
+            });
         }
         let decrypted = (self.handler.as_ref()).map(|handler| {
             let method = crypt.map(|name| handler.named(&name));
@@ -2476,10 +2477,8 @@ impl Reader {
             // Where a revision begins, at its newest section, the one after
             // it, read before it, is done.
             let begins = i == 0 || back[i] != back[i - 1];
-            if begins {
-                if let Some(last) = revisions.last_mut().filter(|_| i > 0) {
-                    last.numbers = Some(in_order(std::mem::take(&mut numbers)));
-                }
+            if begins && let Some(last) = revisions.last_mut().filter(|_| i > 0) {
+                last.numbers = Some(in_order(std::mem::take(&mut numbers)));
             }
             if back[i] != oldest && fits {
                 kept = kept.saturating_add(listed.len());
@@ -2491,14 +2490,15 @@ impl Reader {
             }
             // An update is written after the section it follows: a
             // linearized file's first section, before its other, isn't one.
-            if let [newest, previous, ..] = offsets[..] {
-                if i == 0 && newest > previous {
-                    let objects = (listed.iter())
-                        .filter(|&(&n, (_, entry))| n != 0 && *entry != XrefEntry::Free)
-                        .map(|(&n, &(generation, _))| ObjectId::new(n, generation))
-                        .collect();
-                    self.update = Some(Update { objects, previous });
-                }
+            if let [newest, previous, ..] = offsets[..]
+                && i == 0
+                && newest > previous
+            {
+                let objects = (listed.iter())
+                    .filter(|&(&n, (_, entry))| n != 0 && *entry != XrefEntry::Free)
+                    .map(|(&n, &(generation, _))| ObjectId::new(n, generation))
+                    .collect();
+                self.update = Some(Update { objects, previous });
             }
             let most = self.listable;
             let mut past = 0usize;
@@ -3026,19 +3026,19 @@ impl Reader {
             match token.kind {
                 Kind::Space | Kind::Comment => continue,
                 Kind::Keyword if token.bytes == b"obj" => {
-                    if let [Some(n), Some(g)] = before {
-                        if n.kind == Kind::Integer && g.kind == Kind::Integer {
-                            if let (Some(number), Some(generation)) = (
-                                n.integer().ok().and_then(|n| u32::try_from(n).ok()),
-                                g.integer().ok().and_then(|g| u16::try_from(g).ok()),
-                            ) {
-                                let offset = n.start;
-                                entries.insert(
-                                    number,
-                                    (generation, XrefEntry::InUse { offset, generation }),
-                                );
-                            }
-                        }
+                    if let [Some(n), Some(g)] = before
+                        && n.kind == Kind::Integer
+                        && g.kind == Kind::Integer
+                        && let (Some(number), Some(generation)) = (
+                            n.integer().ok().and_then(|n| u32::try_from(n).ok()),
+                            g.integer().ok().and_then(|g| u16::try_from(g).ok()),
+                        )
+                    {
+                        let offset = n.start;
+                        entries.insert(
+                            number,
+                            (generation, XrefEntry::InUse { offset, generation }),
+                        );
                     }
                 }
                 Kind::Keyword if token.bytes == b"stream" => {
@@ -3108,14 +3108,14 @@ impl Reader {
         offsets.sort();
         for (offset, id) in offsets.into_iter().rev() {
             let Ok(read) = self.indirect(InMemory(file), cx, offset, Some(id));
-            if let Ok((_, object, _)) = read {
-                if is_xref_stream(&object) {
-                    return Trailer {
-                        stream: Some(id),
-                        object,
-                        unwritten: Some(why),
-                    };
-                }
+            if let Ok((_, object, _)) = read
+                && is_xref_stream(&object)
+            {
+                return Trailer {
+                    stream: Some(id),
+                    object,
+                    unwritten: Some(why),
+                };
             }
         }
         Trailer {
@@ -3472,14 +3472,14 @@ impl Reader {
             Ok(id) => id,
             Err(error) => return Ok(Err(Unread::Parse(error))),
         };
-        if let Some(expected) = expected {
-            if expected != id {
-                return Ok(Err(Unread::Elsewhere {
-                    offset,
-                    found: id,
-                    expected,
-                }));
-            }
+        if let Some(expected) = expected
+            && expected != id
+        {
+            return Ok(Err(Unread::Elsewhere {
+                offset,
+                found: id,
+                expected,
+            }));
         }
         let mut parser = parser.ciphertext(self.list.encrypted(id));
         let body = w.parsed(parser.body(id, &mut cx.warned(Some(id))));

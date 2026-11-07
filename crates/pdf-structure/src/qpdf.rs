@@ -378,10 +378,10 @@ fn stream_data(object: &Json, id: ObjectId, decoding: bool) -> Result<Vec<u8>, S
         .ok_or_else(|| format!("{id} R isn't a stream"))?;
     // qpdf leaves out the filters it decoded: any left, it couldn't, when
     // it was asked to.
-    if let Some(filter) = stream.get("dict").and_then(|d| d.get("/Filter")) {
-        if decoding {
-            return Err(format!("qpdf doesn't decode its filters ({filter:?})"));
-        }
+    if let Some(filter) = stream.get("dict").and_then(|d| d.get("/Filter"))
+        && decoding
+    {
+        return Err(format!("qpdf doesn't decode its filters ({filter:?})"));
     }
     let data = (stream.get("data").and_then(Json::as_str))
         .ok_or_else(|| format!("qpdf gives no data for {id} R"))?;
@@ -2260,10 +2260,10 @@ qpdf: operation succeeded with warnings\n";
                         if let Some(why) = &bytes.trailer.unwritten {
                             found.push(("the bytes reader scanned".to_string(), why.clone()));
                         }
-                        if let Ok(a) = &alone {
-                            if let Some(why) = &a.trailer.unwritten {
-                                found.push(("qpdf reconstructed".to_string(), why.clone()));
-                            }
+                        if let Ok(a) = &alone
+                            && let Some(why) = &a.trailer.unwritten
+                        {
+                            found.push(("qpdf reconstructed".to_string(), why.clone()));
                         }
                         // Where either repaired the file, each its own way,
                         // their differences are apart.
@@ -2687,8 +2687,8 @@ qpdf: operation succeeded with warnings\n";
                                 faults = format!("{faults} (in a later filter)");
                             }
                             let theirs = theirs.remove(id);
-                            if let Some(dir) = &dump {
-                                if !matches!(&theirs, Some(Ok(t)) if *t == mine && mine_faults.is_empty()) {
+                            if let Some(dir) = &dump
+                                && !matches!(&theirs, Some(Ok(t)) if *t == mine && mine_faults.is_empty()) {
                                     let file = |what: &str| dir.join(format!("{name}-{}-{}.{what}", id.number, id.generation));
                                     std::fs::write(file("raw"), written).unwrap();
                                     std::fs::write(file("ours"), &mine).unwrap();
@@ -2699,7 +2699,6 @@ qpdf: operation succeeded with warnings\n";
                                     };
                                     std::fs::write(file("qpdf"), qpdf).unwrap();
                                 }
-                            }
                             // Whether it matters which bytes qpdf read.
                             let (kind, which) = match theirs {
                                 Some(Ok(t)) if t == mine && mine_faults.is_empty() => {
@@ -3039,8 +3038,8 @@ qpdf: operation succeeded with warnings\n";
                                 };
                                 let by = format!("{by}{refused}");
                                 let theirs = raw.remove(&id);
-                                if let Some(dir) = &dump {
-                                    if !matches!((&plain, &theirs), (Some(p), Some(Ok(t))) if p == t) {
+                                if let Some(dir) = &dump
+                                    && !matches!((&plain, &theirs), (Some(p), Some(Ok(t))) if p == t) {
                                         let file = |what: &str| dir.join(format!("{name}-{}-{}.{what}", id.number, id.generation));
                                         std::fs::write(file("ours"), plain.as_deref().unwrap_or(b"NONE")).unwrap();
                                         let qpdf = match &theirs {
@@ -3050,7 +3049,6 @@ qpdf: operation succeeded with warnings\n";
                                         };
                                         std::fs::write(file("qpdf"), qpdf).unwrap();
                                     }
-                                }
                                 match (&plain, &theirs) {
                                     (Some(p), Some(Ok(t))) if p == t && fault.is_empty() => alike += 1,
                                     (Some(p), Some(Ok(t))) if p == t => found.push((format!("decrypts alike{fault}"), example.clone())),

@@ -302,10 +302,10 @@ pub fn linearize(out: &mut Vec<u8>, doc: &Document, options: &Options) -> Result
     let mut starts = Vec::with_capacity(plan.writes().len());
     for write in plan.writes() {
         starts.push(bodies.len());
-        if let What::Object(id) = write.what {
-            if let Some(object) = prepared.body(id) {
-                indirect(&mut bodies, id, write.number, object, &plan)?;
-            }
+        if let What::Object(id) = write.what
+            && let Some(object) = prepared.body(id)
+        {
+            indirect(&mut bodies, id, write.number, object, &plan)?;
         }
     }
     let ends = starts.iter().skip(1).copied().chain([bodies.len()]);
@@ -703,28 +703,28 @@ impl<'d> Prepared<'d> {
 
     /// What a walk goes into from object `id`, in the order it does.
     fn references(&self, id: ObjectId, object: &Object, refs: &mut Vec<ObjectId>) {
-        if self.page_ids.contains(&id) {
-            if let Some(dict) = dict_of(object) {
-                page_references(dict, refs);
-                return;
-            }
+        if self.page_ids.contains(&id)
+            && let Some(dict) = dict_of(object)
+        {
+            page_references(dict, refs);
+            return;
         }
-        if self.outline.contains(&id) {
-            if let Some(dict) = dict_of(object) {
-                let links: [&[u8]; 5] = [b"First", b"Last", b"Next", b"Prev", b"Parent"];
-                for (key, value) in dict {
-                    if !links.contains(&&key[..]) {
-                        references(value, refs);
-                    }
+        if self.outline.contains(&id)
+            && let Some(dict) = dict_of(object)
+        {
+            let links: [&[u8]; 5] = [b"First", b"Last", b"Next", b"Prev", b"Parent"];
+            for (key, value) in dict {
+                if !links.contains(&&key[..]) {
+                    references(value, refs);
                 }
-                return;
             }
+            return;
         }
-        if self.names == Some(id) {
-            if let Some(dests) = dict_of(object).and_then(|names| names.get(b"Dests").ok()) {
-                references(dests, refs);
-                return;
-            }
+        if self.names == Some(id)
+            && let Some(dests) = dict_of(object).and_then(|names| names.get(b"Dests").ok())
+        {
+            references(dests, refs);
+            return;
         }
         match object {
             Object::Stream(stream) => stream_references(stream, refs),
@@ -1016,10 +1016,10 @@ fn page_tree<'d>(
     let root = root.and_then(|(_, root)| root.as_dict().ok());
     // A root that says it's a page is the one page by ISO's rules, and lopdf's
     // list goes under it for its kids, or has none.
-    if let Some(root) = root {
-        if !is_node(doc, root)? {
-            return Err(PageTree::Listed { page: 0 });
-        }
+    if let Some(root) = root
+        && !is_node(doc, root)?
+    {
+        return Err(PageTree::Listed { page: 0 });
     }
     let root_id = written
         .and_then(|root| root.as_reference().ok())
@@ -1133,11 +1133,11 @@ fn values_read(
 ) -> Result<(), PageTree> {
     found(doc, page, b"UserUnit")?;
     for held in [inherits[1], inherits[2]].into_iter().flatten() {
-        if let Some((_, Object::Array(corners))) = read(doc, held.written)? {
-            if corners.len() == 4 {
-                for corner in corners {
-                    read(doc, corner)?;
-                }
+        if let Some((_, Object::Array(corners))) = read(doc, held.written)?
+            && corners.len() == 4
+        {
+            for corner in corners {
+                read(doc, corner)?;
             }
         }
     }
@@ -1201,13 +1201,13 @@ fn inherited<'d>(
         let Some((id, object)) = read(doc, written)? else {
             break;
         };
-        if let Some(id) = id {
-            if let Some(met) = above.get(&id) {
-                attributes = met.attributes;
-                parent = Some(id);
-                depth = met.depth;
-                break;
-            }
+        if let Some(id) = id
+            && let Some(met) = above.get(&id)
+        {
+            attributes = met.attributes;
+            parent = Some(id);
+            depth = met.depth;
+            break;
         }
         if chain.len() >= DEPTH {
             return Err(PageTree::Parents { page });
@@ -1524,7 +1524,7 @@ fn name_tree_entries<'d>(doc: &'d Document, root: &'d Object) -> Vec<(&'d [u8], 
             continue;
         };
         if let Ok(names) = dict.get(b"Names") {
-            for pair in array_of(doc, names).chunks_exact(2) {
+            for pair in array_of(doc, names).as_chunks::<2>().0 {
                 let key = doc.dereference(&pair[0]).ok();
                 if let Some((_, Object::String(key, _))) = key {
                     entries.push((&key[..], &pair[1]));

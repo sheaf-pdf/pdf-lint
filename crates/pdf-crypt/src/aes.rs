@@ -150,12 +150,17 @@ mod tests {
         for (key, cipher) in examples {
             let aes = Aes::new(&bytes(key)).unwrap();
             let cipher = bytes(cipher);
-            for (p, c) in plain.chunks_exact(16).zip(cipher.chunks_exact(16)) {
-                let mut block: [u8; 16] = p.try_into().unwrap();
+            for (p, c) in plain
+                .as_chunks::<16>()
+                .0
+                .iter()
+                .zip(cipher.as_chunks::<16>().0)
+            {
+                let mut block = *p;
                 aes.encrypt(&mut block);
-                assert_eq!(&block[..], c, "{key}");
+                assert_eq!(&block, c, "{key}");
                 aes.decrypt(&mut block);
-                assert_eq!(&block[..], p, "{key}");
+                assert_eq!(&block, p, "{key}");
             }
         }
     }

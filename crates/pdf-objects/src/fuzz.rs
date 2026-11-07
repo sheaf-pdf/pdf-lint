@@ -925,10 +925,10 @@ fn shifted_error(error: Error, base: usize) -> Error {
 /// indirect object is a stream a parser reads (ISO 32000-2, 7.3.8), so a
 /// stream inside `o` is one built, whose data is its bytes already.
 pub fn unplace(o: &mut Object, data: &[u8]) {
-    if let Value::Stream(s) = o.as_written_mut() {
-        if let Some(at) = s.data.at() {
-            s.data = Data::Bytes(data[at.start..at.end].to_vec());
-        }
+    if let Value::Stream(s) = o.as_written_mut()
+        && let Some(at) = s.data.at()
+    {
+        s.data = Data::Bytes(data[at.start..at.end].to_vec());
     }
     o.unplace();
 }
@@ -1225,7 +1225,7 @@ impl Encrypt for Toy {
 
     fn clear(&self, id: ObjectId, dict: Option<&Dict>, stream: bool) -> bool {
         let xref = |d: &Dict| d.get(b"Type").and_then(Object::as_name) == Some(b"XRef");
-        id.number % 5 == 0 || (stream && dict.is_some_and(xref))
+        id.number.is_multiple_of(5) || (stream && dict.is_some_and(xref))
     }
 
     fn clear_key(&self, _: ObjectId, dict: &Dict) -> Option<&'static [u8]> {

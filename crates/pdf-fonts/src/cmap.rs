@@ -268,7 +268,7 @@ impl CidMap {
                 b"endcodespacerange" => self.codespace.extend(codespace(&operation, limits)),
                 b"endcidrange" => {
                     let args: Vec<_> = operation.operands().collect();
-                    for range in args.chunks_exact(3) {
+                    for range in args.as_chunks::<3>().0 {
                         let read = code(&range[0], limits)
                             .zip(code(&range[1], limits))
                             .zip(cid(&range[2]));
@@ -279,7 +279,7 @@ impl CidMap {
                 }
                 b"endcidchar" => {
                     let args: Vec<_> = operation.operands().collect();
-                    for pair in args.chunks_exact(2) {
+                    for pair in args.as_chunks::<2>().0 {
                         if let Some((c, to)) = code(&pair[0], limits).zip(cid(&pair[1])) {
                             ranges.push((c, c, (c, to)));
                         }
@@ -357,7 +357,7 @@ fn codespace(operation: &Operation, limits: &Limits) -> Vec<(Vec<u8>, Vec<u8>)> 
         Some(string.as_bytes()?.to_vec())
     };
     let args: Vec<_> = operation.operands().collect();
-    (args.chunks_exact(2))
+    (args.as_chunks::<2>().0.iter())
         .filter_map(|pair| {
             let (lo, hi) = (string(&pair[0])?, string(&pair[1])?);
             (lo.len() == hi.len() && (1..=4).contains(&lo.len())).then_some((lo, hi))
@@ -490,10 +490,10 @@ impl CMap {
         if count.is_none_or(|count| count.checked_mul(2) != Some(args.len())) {
             return;
         }
-        let codes: Option<Vec<u32>> = (args.chunks_exact(2))
+        let codes: Option<Vec<u32>> = (args.as_chunks::<2>().0.iter())
             .map(|pair| source_code(&pair[0], limits).filter(|&c| c <= LAST_CODE))
             .collect();
-        for (code, pair) in codes.into_iter().flatten().zip(args.chunks_exact(2)) {
+        for (code, pair) in codes.into_iter().flatten().zip(args.as_chunks::<2>().0) {
             let units = destination(&pair[1], limits);
             self.map_each(code, units.as_deref(), given);
         }
@@ -517,7 +517,7 @@ impl CMap {
             return;
         }
         let mut ranges = Vec::with_capacity(args.len() / 3);
-        for range in args.chunks_exact(3) {
+        for range in args.as_chunks::<3>().0 {
             let (Some(lo), Some(last)) = (
                 source_code(&range[0], limits),
                 source_code(&range[1], limits),
@@ -664,7 +664,9 @@ fn utf16_units(s: &[u8]) -> Vec<u16> {
     if let [b] = s {
         return vec![u16::from(*b)];
     }
-    s.chunks_exact(2)
+    s.as_chunks::<2>()
+        .0
+        .iter()
         .map(|u| u16::from_be_bytes([u[0], u[1]]))
         .collect()
 }
@@ -702,7 +704,7 @@ mod tests {
                 .map(|i| {
                     let (a, b) = (near(&mut state, base), near(&mut state, base));
                     // Some backwards, which are none; some of one value, which join.
-                    let shared = next(&mut state) % 3 == 0;
+                    let shared = next(&mut state).is_multiple_of(3);
                     (a, b, if shared { 7 } else { i as u32 })
                 })
                 .collect();

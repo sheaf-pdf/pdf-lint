@@ -869,11 +869,11 @@ fn dictionary<T: Through, N: Renumber + ?Sized>(
             }
         }
     }
-    if let Some(n) = length {
-        if !d.has(b"Length") {
-            out.extend_from_slice(b"/Length ");
-            decimal(out, n as u64);
-        }
+    if let Some(n) = length
+        && !d.has(b"Length")
+    {
+        out.extend_from_slice(b"/Length ");
+        decimal(out, n as u64);
     }
     out.extend_from_slice(b">>");
     Ok(())

@@ -145,26 +145,26 @@ fn hint<S: ByteSource>(
     };
     // An indirect /Length follows the stream, and /H's length covers it (Table
     // F.1).
-    if let Some(length) = stream.dict.get(b"Length").and_then(Object::as_reference) {
-        if let Some(after) = end_of(reading, length)? {
-            end = end.max(after);
-        }
+    if let Some(length) = stream.dict.get(b"Length").and_then(Object::as_reference)
+        && let Some(after) = end_of(reading, length)?
+    {
+        end = end.max(after);
     }
     let mut data = decoded(reading, id)?;
     let mut overflow = None;
-    if let Some(second) = offset(items.get(2)) {
-        if let Some(id) = listed_at(sections, second) {
-            let more = decoded(reading, id)?;
-            data = match (data, more) {
-                (HintData::Decoded(mut data), HintData::Decoded(more)) => {
-                    data.extend_from_slice(&more);
-                    HintData::Decoded(data)
-                }
-                (HintData::Decoded(_), more) => more,
-                (data, _) => data,
-            };
-            overflow = end_of(reading, id)?.map(|end| (second, end));
-        }
+    if let Some(second) = offset(items.get(2))
+        && let Some(id) = listed_at(sections, second)
+    {
+        let more = decoded(reading, id)?;
+        data = match (data, more) {
+            (HintData::Decoded(mut data), HintData::Decoded(more)) => {
+                data.extend_from_slice(&more);
+                HintData::Decoded(data)
+            }
+            (HintData::Decoded(_), more) => more,
+            (data, _) => data,
+        };
+        overflow = end_of(reading, id)?.map(|end| (second, end));
     }
     let mut hint = HintFacts::new(at, end, id.number, data);
     hint.overflow = overflow;
