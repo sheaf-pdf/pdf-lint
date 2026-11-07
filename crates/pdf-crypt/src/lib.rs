@@ -67,6 +67,8 @@ mod vectors;
 #[cfg(any(test, feature = "writer"))]
 pub mod writer;
 
+use std::fmt;
+
 pub use handler::{Handler, Method};
 pub use password::{Encoded, Encoding, Password, Unusable};
 pub use rand_core;
@@ -75,7 +77,7 @@ pub use rand_core;
 /// takes them (ISO 32000-2, Tables 20 and 21). Outside the crate, one is
 /// made from [`Dictionary::default`], its fields set after, so that a
 /// field it gains breaks no caller.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Dictionary {
     /// `/Filter`: the security handler's name, `Standard` for this one.
@@ -110,7 +112,7 @@ pub struct Dictionary {
 
 /// One of `/CF`'s crypt filters. Outside the crate, one is made from
 /// [`CryptFilter::default`], its fields set after.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct CryptFilter {
     /// Its name in `/CF`.
@@ -119,14 +121,39 @@ pub struct CryptFilter {
     pub method: Option<Vec<u8>>,
 }
 
-/// Why a handler doesn't open.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+/// Why a handler doesn't open. A dictionary refused for more than one
+/// reason is refused for the first: its `/Filter`, then its `/V` and `/R`,
+/// then its other values.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Refused {
+    /// The dictionary is another security handler's, by its `/Filter`:
+    /// the public-key handler's (`/Adobe.PubSec`, ISO 32000-2, 7.6.5),
+    /// say, whose files open by a certificate, not a password. Its name
+    /// is written lossily as UTF-8.
+    #[error("its security handler is /{}, not /Standard", String::from_utf8_lossy(.name))]
+    #[non_exhaustive]
+    OtherHandler {
+        /// Its `/Filter`, as written: never empty, as a dictionary with
+        /// none is one that's wrong ([`Refused::Unsupported`]).
+        name: Vec<u8>,
+    },
+    /// The dictionary's `/V` and `/R` are a pair the standard security
+    /// handler isn't, as it reads them. A consumer reads `r` to tell a
+    /// later handler's revision (7 and up: ISO/TS 32003's AES-GCM is
+    /// `/V 6 /R 7`) from a pair that's undocumented or not one (`/V` 0,
+    /// which is `/V` absent too, or 3; an `/R` below 2).
+    #[error("it's /V {v} /R {r}, which the standard security handler isn't")]
+    #[non_exhaustive]
+    Version {
+        /// `/V`, 0 when absent.
+        v: i64,
+        /// `/R`.
+        r: i64,
+    },
     /// The dictionary isn't one the standard security handler takes, and
-    /// why: another handler, a version or revision it hasn't, `/O`, `/U`
-    /// or `/P` (`/OE`, `/UE` or `/Perms` of `/V` 5) missing or not of its
-    /// type, `/O` or `/U` too long.
+    /// why: no `/Filter`; `/O`, `/U` or `/P` (`/OE`, `/UE` or `/Perms` of
+    /// `/V` 5) missing or not of its type; `/O` or `/U` too long.
     #[error("{0}")]
     Unsupported(String),
     /// None of the passwords opens it.
@@ -136,7 +163,7 @@ pub enum Refused {
 
 /// What's wrong with a string's or stream's ciphertext, or the
 /// dictionary.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Fault {
     /// AES ciphertext of `len` bytes, with no whole block past its IV:
@@ -190,13 +217,40 @@ pub enum Fault {
 
 /// Ciphertext that didn't decrypt cleanly: what decrypted, if anything,
 /// and why it's not clean.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+///
+/// Its `Debug` gives the length of what decrypted, not its bytes, which
+/// are a string's or a stream's plaintext:
+/// `Error { data: Some(23 bytes), fault: Padding }`. So two errors whose
+/// data are the same length have the same `Debug`, whatever their bytes:
+/// a test compares errors by `==`, never by their `Debug` text, and takes
+/// `data` itself where it wants the bytes.
+#[derive(Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{fault}")]
 pub struct Error {
     /// What decrypted, or none when nothing did and the ciphertext stays.
     pub data: Option<Vec<u8>>,
     /// Why.
     pub fault: Fault,
+}
+
+impl fmt::Debug for Error {
+    /// What decrypted by its length, not its bytes, and why.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Error")
+            .field("data", &self.data.as_ref().map(|data| Length(data.len())))
+            .field("fault", &self.fault)
+            .finish()
+    }
+}
+
+/// A length of bytes, written `23 bytes`, where a `Debug` leaves the bytes
+/// out.
+struct Length(usize);
+
+impl fmt::Debug for Length {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} bytes", self.0)
+    }
 }
 
 /// The README's examples, run as doctests.

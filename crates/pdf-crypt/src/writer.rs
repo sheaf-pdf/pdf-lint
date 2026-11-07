@@ -3,6 +3,8 @@
 //! and strings and streams encrypted under it. Its salts, keys and IVs are
 //! given, not random or derived, so it's no way to protect a document.
 
+use std::fmt;
+
 use zeroize::Zeroizing;
 
 use crate::handler::{File, Handler, Method, seal, xored};
@@ -11,7 +13,8 @@ use crate::sha2::sha256;
 use crate::{CryptFilter, Dictionary, Fault};
 
 /// The kind of encryption to write.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Kind {
     /// RC4 with a 40-bit key: `/V 1 /R 2`.
     Rc4By40,
@@ -27,8 +30,8 @@ pub enum Kind {
     Aes256,
 }
 
-/// What to encrypt with.
-#[derive(Clone, Copy, Debug)]
+/// What to encrypt with. Its `Debug` leaves the passwords out.
+#[derive(Clone, Copy)]
 pub struct Settings<'a> {
     /// The kind.
     pub kind: Kind,
@@ -42,6 +45,19 @@ pub struct Settings<'a> {
     pub id: &'a [u8],
     /// `/EncryptMetadata`, for `/V` 4 and 5.
     pub encrypt_metadata: bool,
+}
+
+impl fmt::Debug for Settings<'_> {
+    /// Each field but the passwords; the `/ID`, which a file's trailer
+    /// holds in the clear, among them.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Settings")
+            .field("kind", &self.kind)
+            .field("p", &self.p)
+            .field("id", &self.id)
+            .field("encrypt_metadata", &self.encrypt_metadata)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The encryption dictionary `settings` describe.

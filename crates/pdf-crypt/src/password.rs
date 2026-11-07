@@ -241,7 +241,7 @@ pub(crate) fn is_prepared(bytes: &[u8]) -> bool {
 
 /// Why a password can't be a new file's ([`Password::prepared`],
 /// [`Handler::create`](crate::Handler::create)).
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unusable {
     /// A character SASLprep doesn't allow (RFC 4013, 2.3 and 2.5): a

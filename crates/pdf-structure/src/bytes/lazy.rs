@@ -529,9 +529,9 @@ fn a_documents_stream_data_is_handed_out_by_the_reading_kept_beside_it() {
             };
             let at = stream.data.at();
             assert!(at.is_some(), "{name}: {id:?}'s data isn't placed");
-            let data = reading.data(id);
-            let given = format!("{:?}", own.data(id));
-            assert_eq!(format!("{data:?}"), given, "{name}: {id:?}'s data");
+            let data = shown(reading.data(id).map(Cow::into_owned));
+            let given = shown(own.data(id).map(Cow::into_owned));
+            assert_eq!(data, given, "{name}: {id:?}'s data");
             let decoded = shown(reading.decoded(id));
             assert_eq!(decoded, shown(own.decoded(id)), "{name}: {id:?}");
             if doc.encryption == Encryption::None {
@@ -1381,7 +1381,7 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
         &fixture::file("1.7", &clean(), root(), Xref::Table),
         " /Encrypt 7",
     );
-    for file in [other, not_one] {
+    for (file, handler) in [(other, Some(&b"Standarx"[..])), (not_one, None)] {
         let reading = open(&file, &[], &Options::DEFAULT);
         let Encryption::Unsupported(said) = reading.encryption().clone() else {
             panic!("{:?}", reading.encryption());
@@ -1390,7 +1390,12 @@ fn a_reading_unlock_doesnt_open_is_given_back_as_it_was() {
         let Err((reading, why)) = reading.unlock(&Password("user").encodings()) else {
             panic!("unlocked");
         };
-        assert_eq!(why, Refused::Unsupported(said.clone()));
+        match (&why, handler) {
+            (Refused::OtherHandler { name, .. }, Some(handler)) => assert_eq!(name, handler),
+            (Refused::Unsupported(why), None) => assert_eq!(*why, said),
+            _ => panic!("{why:?}"),
+        }
+        assert_eq!(why.to_string(), said);
         assert_eq!(*reading.encryption(), Encryption::Unsupported(said));
         assert_eq!(reading.warnings(), warnings);
     }

@@ -419,8 +419,8 @@ fn streams(file: &[u8], passwords: &[Password], choice: u16) {
         }
         let read = by_position.data(id);
         assert_eq!(
-            format!("{data:?}"),
-            format!("{read:?}"),
+            shown(data.map(Cow::into_owned)),
+            shown(read.map(Cow::into_owned)),
             "{id:?}'s data by position"
         );
         let decoded = shown(reading.decoded(id));

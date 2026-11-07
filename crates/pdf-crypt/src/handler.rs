@@ -27,7 +27,7 @@ pub(crate) const PADDING: [u8; 32] = [
 ];
 
 /// How a string or a stream is encrypted.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Method {
     /// Not at all: `/Identity`, or a crypt filter without `/CFM`.
@@ -550,26 +550,30 @@ pub(crate) struct File<'a> {
 
 impl<'a> File<'a> {
     /// `dictionary`'s values, unless they're not ones the standard
-    /// security handler takes: `/O`, `/U` and `/P` it must have, and of
-    /// `/V` 5 `/OE`, `/UE` and `/Perms`, of their types, as qpdf must. Short ones are
+    /// security handler takes, refused for the first of these: no
+    /// `/Filter` ([`Refused::Unsupported`]); another handler's
+    /// ([`Refused::OtherHandler`]); a `/V` and `/R` it isn't
+    /// ([`Refused::Version`]); values it can't take
+    /// ([`Refused::Unsupported`]): `/O`, `/U` and `/P` it must have, and of
+    /// `/V` 5 `/OE`, `/UE` and `/Perms`, of their types, as qpdf must, and
+    /// `/O` and `/U` of 32 bytes at most below `/V` 5. Short ones are
     /// filled out with zeros, as qpdf does, and `/V` 5's long ones cut
     /// short.
     pub(crate) fn of(dictionary: &Dictionary, id: &'a [u8]) -> Result<File<'a>, Refused> {
         let refuse = |why: &str| Err(Refused::Unsupported(why.to_string()));
+        if dictionary.filter.is_empty() {
+            // None, or not a name, where the caller leaves it empty: a
+            // dictionary that's wrong (Table 20), not another handler's.
+            return refuse("its security handler is /, not /Standard");
+        }
         if dictionary.filter != b"Standard" {
-            let filter = String::from_utf8_lossy(&dictionary.filter).into_owned();
-            return Err(Refused::Unsupported(format!(
-                "its security handler is /{filter}, not /Standard"
-            )));
+            let name = dictionary.filter.clone();
+            return Err(Refused::OtherHandler { name });
         }
         let (v, r) = (dictionary.v, dictionary.r);
         match (v, r) {
             (1 | 2 | 4, 2..=4) | (5, 5 | 6) => {}
-            _ => {
-                return Err(Refused::Unsupported(format!(
-                    "it's /V {v} /R {r}, which the standard security handler isn't"
-                )));
-            }
+            _ => return Err(Refused::Version { v, r }),
         }
         let mut values = vec![
             ("/O isn't a string", dictionary.o.is_some()),

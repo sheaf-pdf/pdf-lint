@@ -892,19 +892,49 @@ fn crypt_filters_by_name_and_method() {
 #[test]
 fn a_dictionary_the_standard_handler_doesnt_take_is_refused() {
     let base = vectors()[1].dictionary.clone();
-    let refused = |change: fn(&mut Dictionary)| {
+    let refusal = |change: fn(&mut Dictionary)| {
         let mut dictionary = base.clone();
         change(&mut dictionary);
-        match Handler::open(&dictionary, b"id", &[]) {
-            Err(Refused::Unsupported(why)) => why,
-            other => panic!("{other:?}"),
-        }
+        Handler::open(&dictionary, b"id", &[]).unwrap_err()
     };
-    assert!(
-        refused(|d| d.filter = b"Adobe.PubSec".to_vec()).contains("/Adobe.PubSec, not /Standard")
-    );
-    assert!(refused(|d| d.v = 3).contains("/V 3 /R 3"));
-    assert!(refused(|d| d.r = 7).contains("/V 2 /R 7"));
+    let refused = |change: fn(&mut Dictionary)| match refusal(change) {
+        Refused::Unsupported(why) => why,
+        other => panic!("{other:?}"),
+    };
+    // Another handler, by its name as written, and said lossily.
+    let other = refusal(|d| d.filter = b"Adobe.PubSec".to_vec());
+    let name = b"Adobe.PubSec".to_vec();
+    assert_eq!(other, Refused::OtherHandler { name });
+    let said = "its security handler is /Adobe.PubSec, not /Standard";
+    assert_eq!(other.to_string(), said);
+    let odd = refusal(|d| d.filter = b"Odd\xff".to_vec());
+    let name = b"Odd\xff".to_vec();
+    assert_eq!(odd, Refused::OtherHandler { name });
+    let said = "its security handler is /Odd\u{fffd}, not /Standard";
+    assert_eq!(odd.to_string(), said);
+    // None, as a caller leaves it for a /Filter missing or not a name: a
+    // dictionary that's wrong, not another handler's, in the same words.
+    let said = "its security handler is /, not /Standard";
+    assert_eq!(refused(|d| d.filter = Vec::new()), said);
+    // A version or revision it hasn't, by the pair: ISO/TS 32003's AES-GCM
+    // among them.
+    assert_eq!(refusal(|d| d.v = 3), Refused::Version { v: 3, r: 3 });
+    let later = refusal(|d| (d.v, d.r) = (6, 7));
+    assert_eq!(later, Refused::Version { v: 6, r: 7 });
+    let said = "it's /V 6 /R 7, which the standard security handler isn't";
+    assert_eq!(later.to_string(), said);
+    let said = "it's /V 2 /R 7, which the standard security handler isn't";
+    assert_eq!(refusal(|d| d.r = 7).to_string(), said);
+    let said = "it's /V 0 /R 3, which the standard security handler isn't";
+    assert_eq!(refusal(|d| d.v = 0).to_string(), said);
+    // Refused for the first reason it has: the handler, then the version,
+    // then the values.
+    let both = refusal(|d| (d.filter, d.v) = (b"Adobe.PubSec".to_vec(), 6));
+    assert!(matches!(both, Refused::OtherHandler { .. }), "{both:?}");
+    let none = refused(|d| (d.filter, d.v) = (Vec::new(), 6));
+    assert_eq!(none, "its security handler is /, not /Standard");
+    let both = refusal(|d| (d.v, d.o) = (6, None));
+    assert_eq!(both, Refused::Version { v: 6, r: 3 });
     assert_eq!(refused(|d| d.o = None), "its /O isn't a string");
     assert_eq!(
         refused(|d| (d.u, d.p) = (None, None)),
@@ -930,12 +960,26 @@ fn a_dictionary_the_standard_handler_doesnt_take_is_refused() {
 /// fault.
 #[test]
 fn each_refusal_and_fault_says_why() {
-    let why = Refused::Unsupported("its /O isn't a string".to_string());
-    assert_eq!(why.to_string(), "its /O isn't a string");
-    assert_eq!(
-        Refused::Password.to_string(),
-        "the password doesn't open it"
-    );
+    let refusals = [
+        (
+            Refused::OtherHandler {
+                name: b"Adobe.PubSec".to_vec(),
+            },
+            "its security handler is /Adobe.PubSec, not /Standard",
+        ),
+        (
+            Refused::Version { v: 6, r: 7 },
+            "it's /V 6 /R 7, which the standard security handler isn't",
+        ),
+        (
+            Refused::Unsupported("its /O isn't a string".to_string()),
+            "its /O isn't a string",
+        ),
+        (Refused::Password, "the password doesn't open it"),
+    ];
+    for (refused, said) in refusals {
+        assert_eq!(refused.to_string(), said, "{refused:?}");
+    }
     let cases = [
         (
             Fault::Short { len: 10 },
@@ -973,6 +1017,48 @@ fn each_refusal_and_fault_says_why() {
         fault: Fault::Padding,
     };
     assert_eq!(error.to_string(), "its AES plaintext isn't padded");
+}
+
+/// An error's `Debug` gives what decrypted by its length, not its bytes,
+/// which are a string's or a stream's plaintext; and its fault. Two whose
+/// data are a byte apart are told apart by `==`, not by their `Debug`.
+#[test]
+fn an_errors_debug_gives_its_datas_length_not_its_bytes() {
+    let error = |data: &[u8]| Error {
+        data: Some(data.to_vec()),
+        fault: Fault::Padding,
+    };
+    let shown = format!("{:?}", error(b"what a stream decrypted"));
+    assert_eq!(shown, "Error { data: Some(23 bytes), fault: Padding }");
+    let none = Error {
+        data: None,
+        fault: Fault::Short { len: 3 },
+    };
+    let shown = format!("{none:?}");
+    assert_eq!(shown, "Error { data: None, fault: Short { len: 3 } }");
+    let (one, other) = (error(b"ab"), error(b"ac"));
+    assert_eq!(format!("{one:?}"), format!("{other:?}"));
+    assert_ne!(one, other);
+}
+
+/// The writer's settings' `Debug` leaves both passwords out, and gives
+/// the rest, the `/ID` among it.
+#[test]
+fn the_writers_settings_debug_leaves_the_passwords_out() {
+    let settings = Settings {
+        kind: Kind::Aes128,
+        user: b"user's",
+        owner: b"owner's",
+        p: -4,
+        id: b"0123",
+        encrypt_metadata: true,
+    };
+    let shown = format!("{settings:?}");
+    let said = "Settings { kind: Aes128, p: -4, id: [48, 49, 50, 51], encrypt_metadata: true, .. }";
+    assert_eq!(shown, said);
+    for password in [settings.user, settings.owner] {
+        assert!(!shown.contains(&format!("{password:?}")), "{shown}");
+    }
 }
 
 /// The writer's kinds, each way of `/EncryptMetadata`, and qpdf's files:
